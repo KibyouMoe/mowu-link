@@ -58,7 +58,7 @@ SPEC.loader.exec_module(plugin)
 
 plugin.LOG_PATH = TMP / "selftest.log"
 plugin._ack_async = lambda *a, **k: None                  # no HTTP in tests
-assert plugin.PLUGIN_VERSION == "0.9.1", plugin.PLUGIN_VERSION
+assert plugin.PLUGIN_VERSION == "0.9.2", plugin.PLUGIN_VERSION
 
 from gateway.config import Platform                      # noqa: E402
 from gateway.session import SessionSource                 # noqa: E402
@@ -322,8 +322,11 @@ check("d. a 3-notify batch: one wake and no line while queued",
       len(adapter.handled) == 1 and adapter.sent == [],
       "handled=%d sent=%r" % (len(adapter.handled), adapter.sent))
 inject()
-check("d. one 📬 for the merged batch, naming the FIRST source",
-      adapter.sent == [(SOURCE.chat_id, NOTIFY_TEXT)],
+check("d. 0.9.2: one 📬 line per event of the merged batch",
+      adapter.sent == [(SOURCE.chat_id,
+                        "📬 收到来自 email · HR 的 Notify 消息\n"
+                        "📬 收到来自 calendar · Boss 的 Notify 消息\n"
+                        "📬 收到来自 mc_chat · Steve 的 Notify 消息")],
       "sent=%r" % (adapter.sent,))
 
 # =========================================================================== #
@@ -396,10 +399,10 @@ finally:
 
 yaml_text = (HERE / "plugin.yaml").read_text(encoding="utf-8")
 readme = (HERE / "README.md").read_text(encoding="utf-8")
-check("h. plugin.yaml is 0.9.1", "version: 0.9.1" in yaml_text, "")
+check("h. plugin.yaml is 0.9.2", "version: 0.9.2" in yaml_text, "")
 check("h. plugin.yaml states the delivery-time rule",
       "notify 的可见通知只在真正送达时发，排队不发" in yaml_text, "")
-check("h. README is titled 0.9.1", readme.startswith("# trigger-bus (0.9.1)"),
+check("h. README is titled 0.9.2", readme.startswith("# trigger-bus (0.9.2)"),
       readme.splitlines()[0] if readme else "")
 check("h. README has the 0.9.1 section and both texts",
       "## 0.9.1 — notify 通知在送达时发，排队不发" in readme

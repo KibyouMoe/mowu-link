@@ -696,8 +696,8 @@ check("k. pre_llm_call proof advances the cursor after the real method",
       state.cursor == 191 and not state.inflight,
       "cursor=%d inflight=%d" % (state.cursor, len(state.inflight)))
 
-# Two notifies while the turn runs must not overwrite each other either: 0.9.0
-# holds both plugin-side (no slot, no FIFO overflow) and the ledger keeps both.
+# Two notifies while the turn runs: since 0.9.2 the second one joins the SAME
+# busy window instead of opening a second HELD batch — one wake, one batch.
 state, adapter = new_state()
 real_gateway = RealQueueStub(adapter)
 state.gateway = real_gateway
@@ -710,11 +710,12 @@ feed(state, ev(193, "notify", text="SECOND-QUEUED"))
 plugin._dispatch(state, plugin._get_logger(), where="real-2")
 first_event = adapter._pending_messages.get(ROUTING_KEY)
 overflow = real_gateway._empty_state.conversation.queued_events
-check("k. two notifies while busy -> two held batches, no slot/overflow write",
-      len(state.inflight) == 2 and first_event is None
+check("k. two notifies while busy -> ONE held batch (0.9.2), no slot/overflow write",
+      len(state.inflight) == 1 and first_event is None
       and not overflow
       and ids_of(state.events) == [192, 193]
-      and all(d.phase == "held" for d in state.inflight.values()),
+      and all(d.phase == "held" for d in state.inflight.values())
+      and len(next(iter(state.inflight.values())).events) == 2,
       "inflight=%d slot=%s overflow=%s local=%s"
       % (len(state.inflight), first_event is not None, len(overflow),
          ids_of(state.events)))

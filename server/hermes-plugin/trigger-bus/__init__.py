@@ -250,6 +250,34 @@ Architecture: a separate long-lived service (``mowu-trigger``, loopback
     ``⚡`` at the event's wake (unchanged) and the ``📬`` when the notify batch
     is really injected.  A merged notify-only batch is still ONE ``📬``.
 
+0.9.2 — 忙时多条 notify 合并为一次唤醒 (one wake per busy window):
+
+  * the defect: every busy notify called ``handle_message`` itself, so three
+    notifies that arrived during one turn became three native admissions and
+    three turns.  The first turn's ``pre_llm_call`` drained the WHOLE local
+    queue (3 cards, cursor 0->80, one 📬), the other two woke with nothing to
+    inject — two duplicate ``📬 收到来自 … 的 Notify 消息`` lines and two empty
+    turns (field log 23:24:40 / 23:24:51).
+  * the fix: ``_BusState.notify_window``.  The FIRST notify of a busy window
+    may still open the one turn (native admission, or HELD without an
+    authority); every later notify is merged into that same delivery
+    (:func:`_merge_into_window`, journal ``notify MERGED``) and NEVER calls
+    ``handle_message``/``admit_native`` again.  The window closes in
+    :func:`_forget_delivery`, i.e. when the batch is proven delivered.
+  * the window's whole batch therefore reaches the one turn's
+    ``pre_llm_call`` together: one ``[N 条]`` card, the cursor advanced once to
+    the maximum id, exactly one ``📬`` *message*.
+  * the notice itself is now one ``📬`` line PER event of the batch (the same
+    source repeats the same line): X<=3 lines verbatim; X>3 shows the first 3
+    lines and the 3rd ends with ``…x(X-2)`` (X=100 -> ``…x98``).  The block is
+    one send and one ``(chat, text)`` dedupe key; a single notify stays one
+    plain line with no suffix, and the event's ⚡ stays one immediate line.
+  * no empty wake: a held window whose cards were already injected by another
+    turn is retired silently (:func:`_drain_held` returns ``"empty"``) rather
+    than opening a turn with nothing to inject.
+  * unchanged: the ``event`` hard-interrupt path, an idle notify's immediate
+    queue+drain, the 2 s ``(chat, text)`` dedupe and the one-line wake texts.
+
 Design rules:
   * never import Hermes internals — only the hook argument dict is used;
   * never block the model call: the hook does no network I/O (ACK is sent by
@@ -288,7 +316,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional
 
-PLUGIN_VERSION = "0.9.1"
+PLUGIN_VERSION = "0.9.2"
 MAX_QUEUE = 50
 HTTP_TIMEOUT = 5.0
 LOG_MAX_BYTES = 5 * 1024 * 1024
@@ -503,6 +531,12 @@ class _BusState:
         # the de-duplication set for "already queued or in flight".
         self.inflight: "OrderedDict[str, _Delivery]" = OrderedDict()
         self.queued_keys: "OrderedDict[str, None]" = OrderedDict()
+        # 0.9.2 busy merge window: the token of the ONE queue delivery this
+        # busy window is accumulating into.  The first notify may open a turn
+        # (native admission / HELD); every later notify is merged into this
+        # delivery instead of calling handle_message again, so the window ends
+        # with one wake and one batched injection.  _forget_delivery closes it.
+        self.notify_window: Optional[str] = None
         # Routing key for the gateway's own pending queue.  Resolved once from
         # the source captured by pre_gateway_dispatch; falls back to the
         # session_id pre_llm_call reports (logged explicitly either way).
@@ -1114,6 +1148,7 @@ ANNOUNCE_SEND_METHODS = ("send_message", "send", "_send_text",
                          "_send_plain_message")
 ANNOUNCE_DEDUPE_WINDOW = 2.0      # seconds; identical (chat, text) is a dupe
 ANNOUNCE_DEDUPE_MAX = 32          # entries kept, oldest dropped first
+ANNOUNCE_MAX_LINES = 3            # 0.9.2: at most 3 notice lines per batch
 
 # Guarded by ``_announce_lock``; the clock indirection lets the selftests pin
 # a fake clock instead of sleeping.
@@ -1142,6 +1177,29 @@ def _announce_text(event: Dict[str, Any]) -> str:
     if _level(event) == "notify":
         return _notify_announce_text(event)
     return _event_announce_text(event)
+
+
+def _announce_batch_text(events: List[Dict[str, Any]]) -> str:
+    """0.9.2: ONE ``📬`` LINE PER EVENT, at most 3 lines for a batch.
+
+    The trainer's rule (samples: X=5 -> ``…x3``, X=100 -> ``…x98``):
+
+      * X<=3 -> X lines, no suffix (X=1 is exactly one line);
+      * X>3  -> the first 3 lines, the 3rd ending in ``…x(X-2)``; no 4th
+        line is ever emitted.
+
+    Every line keeps the 0.8.5 wording, so the same source repeats the same
+    line verbatim.  The whole multi-line block is one send and one dedupe key.
+    """
+    lines = [_announce_text(event) for event in events
+             if isinstance(event, dict)]
+    if not lines:
+        return ""
+    if len(lines) <= ANNOUNCE_MAX_LINES:
+        return "\n".join(lines)
+    shown = lines[:ANNOUNCE_MAX_LINES]
+    shown[-1] = shown[-1] + "…x%d" % (len(lines) - (ANNOUNCE_MAX_LINES - 1))
+    return "\n".join(shown)
 
 
 def _announce_claim(chat_id: str, text: str,
@@ -1276,8 +1334,14 @@ def _deliver_announcement(state: "_BusState", name: str, fn: Any,
                 logger.warning("wake notice (%s) not delivered: %s",
                                name, error)
                 return "failed:%s" % error
+        if "\n" in text:
+            # 0.9.2: a merged notice is multi-line; keep the journal one line.
+            rows = text.splitlines()
+            shown = "%s …(+%d lines)" % (rows[0], len(rows) - 1)
+        else:
+            shown = text
         logger.info("wake notice handed to %s for %s: %s",
-                    name, chat_id, text)
+                    name, chat_id, shown)
         return "sent:%s" % name
     except Exception as exc:  # never let the extra line affect the wake
         _announce_release(chat_id, text, stamp)
@@ -1321,6 +1385,21 @@ def _send_wake_notice(state: "_BusState", adapter: Any,
     """
     try:
         text = _announce_text(primary)
+        return _send_notice_text(state, adapter, text, logger)
+    except Exception as exc:  # never let the extra line affect the wake
+        logger.warning("wake notice failed: %s", exc)
+        return "failed:%s" % exc
+
+
+def _send_notice_text(state: "_BusState", adapter: Any, text: str,
+                      logger: logging.Logger) -> str:
+    """Send one already-rendered notice block to the captured chat (0.9.2).
+
+    ``text`` may be several lines (a merged notify batch: one ``📬`` line per
+    event, max 3).  The whole block is ONE send and ONE ``(chat, text)``
+    dedupe key, exactly like the single-line notices of 0.8.3–0.9.1.
+    """
+    try:
         chat_id = str(getattr(getattr(state, "source", None), "chat_id", "") or "")
         if not chat_id:
             logger.info("wake notice skipped: captured source has no "
@@ -1348,7 +1427,7 @@ def _send_event_announcement(state: "_BusState", adapter: Any,
 
 def _announce_on_delivery(state: "_BusState", delivery: "_Delivery",
                           logger: logging.Logger) -> str:
-    """0.9.1: the ONE ``📬`` line, sent when the notify really reached the turn.
+    """0.9.1/0.9.2: the ``📬`` notice, sent when the notify really reached the turn.
 
     Called from :func:`_confirm_injected` / :func:`_confirm_from_message` —
     i.e. at the exact decision point that logs ``DELIVERED`` and lets the
@@ -1356,11 +1435,12 @@ def _announce_on_delivery(state: "_BusState", delivery: "_Delivery",
     QUEUED``), held (``HELD``) or in flight: at that moment the trainer has not
     received anything, so a "收到" line would be both early and untrue.
 
-    Exactly one line per batch, naming the batch's FIRST event (a merged batch
-    keeps the 0.8.5 "first origin" rule).  ``delivery.announced`` is the
-    in-process guard, so a batch confirmed by two injections still speaks once;
-    the 2 s ``(chat, text)`` dedupe of :func:`_send_wake_notice` is untouched.
-    ``event`` deliveries never come here — their ⚡ line is sent at wake time.
+    0.9.2: one ``📬`` line PER EVENT of the batch (same source repeats the same
+    line), capped at 3 lines — the 3rd carries ``…x(X-2)`` when the batch is
+    longer — and sent as ONE message / ONE dedupe key.  ``delivery.announced``
+    is the in-process guard, so a batch confirmed by two injections still
+    speaks once.  ``event`` deliveries never come here — their ⚡ line is sent
+    at wake time (single line, unchanged).
     """
     try:
         if delivery.mode != "queue" or not delivery.events:
@@ -1376,7 +1456,10 @@ def _announce_on_delivery(state: "_BusState", delivery: "_Delivery",
         if adapter is None:
             logger.info("notify notice skipped: no adapter at delivery time")
             return "skipped:no-adapter"
-        return _send_wake_notice(state, adapter, first, logger)
+        text = _announce_batch_text(delivery.events)
+        if not text:
+            return "skipped:not-notify"
+        return _send_notice_text(state, adapter, text, logger)
     except Exception as exc:  # never let the extra line affect the delivery
         logger.warning("notify notice failed: %s", exc)
         return "failed:%s" % exc
@@ -1636,6 +1719,10 @@ def _forget_delivery(state: "_BusState", token: str) -> Optional["_Delivery"]:
     """Drop a delivery from the ledger and free its de-duplication keys."""
     with state.lock:
         delivery = state.inflight.pop(token, None)
+        if state.notify_window == token:
+            # 0.9.2: the busy window is closed the moment its one batch is
+            # proven delivered (or fails and is retried from scratch).
+            state.notify_window = None
         if delivery is not None:
             for item in delivery.events:
                 key = _event_key(item)
@@ -1811,14 +1898,76 @@ def _native_queue_available(state: "_BusState") -> bool:
     return getattr(state.gateway, "session_authority", None) is not None
 
 
+def _window_delivery(state: "_BusState",
+                     session_key: str) -> Optional["_Delivery"]:
+    """0.9.2: the open merge window for this session, if any.
+
+    Only the FIRST notify of a busy window may open a turn; every later
+    notify is accumulated into that one delivery.  Three busy notifies used
+    to mean three ``handle_message`` calls and three turns: the first one
+    injected the whole local queue, the other two woke with nothing to inject
+    (the two duplicate ``📬`` lines in the field log).
+
+    The window stays open while its delivery is undelivered — including after
+    the turn flag clears, because the admitted FIFO row has not run yet.  It
+    is closed by :func:`_forget_delivery` (delivery proof, failure or retry).
+    """
+    with state.lock:
+        token = state.notify_window
+        if not token:
+            return None
+        delivery = state.inflight.get(token)
+        if delivery is None or delivery.mode != "queue":
+            state.notify_window = None
+            return None
+    if delivery.session_key and session_key and delivery.session_key != session_key:
+        # Another chat: the window belongs to a different routing key.
+        return None
+    return delivery
+
+
+def _merge_into_window(state: "_BusState", logger: logging.Logger,
+                       delivery: "_Delivery", batch: List[Dict[str, Any]],
+                       *, where: str) -> int:
+    """0.9.2: add later busy-time notifies to the window's single batch.
+
+    No wake, no ``handle_message``/``admit_native``, no notice: the cards are
+    already in the local queue and the one admitted turn injects the whole
+    window through ``pre_llm_call`` (one ``[N 条]`` card, cursor once to the
+    maximum id, one ``📬`` notice message).  Only the ledger and the dedupe
+    marks grow.
+    """
+    with state.lock:
+        known = {_event_key(e) for e in delivery.events}
+        added = [e for e in batch if _event_key(e) not in known]
+        for event in added:
+            delivery.events.append(event)
+            state.queued_keys[_event_key(event)] = None
+        while len(state.queued_keys) > QUEUED_KEYS_MAX:
+            state.queued_keys.popitem(last=False)
+        total = len(delivery.events)
+    if not added:
+        logger.debug("notify merge: ids=%s already in window %s (where=%s)",
+                     ",".join(_event_key(e) for e in batch), delivery.token, where)
+        return 0
+    ids = ", ".join(str(e.get("id")) for e in added)
+    logger.info("notify MERGED n=%d ids=%s into=%s total=%d busy=1 "
+                "woke=window(no new turn) where=%s",
+                len(added), ids or "-", delivery.token, total, where)
+    return len(added)
+
+
 def _notify_enqueue(state: "_BusState", logger: logging.Logger,
                     batch: List[Dict[str, Any]], *, where: str) -> bool:
     """``notify`` -> queue (internal=True); never interrupt, never inside a turn.
 
     Idle: the gateway's own per-session pending queue, drained in this tick.
-    Busy (0.9.0): Hermes' own busy queue via ``handle_message`` — the session
-    authority's durable FIFO runs it after the current turn finishes — with a
-    plugin-side held batch as the fallback when no authority is reachable.
+    Busy: ONE merge window (0.9.2).  The first notify opens it — Hermes' own
+    busy queue via ``handle_message`` (the session authority's durable FIFO
+    runs it after the current turn finishes), or a plugin-side HELD batch when
+    no authority is reachable.  Every later notify is merged into that same
+    delivery: no second ``handle_message``, no second turn, no empty wake at
+    the turn boundary.
 
     No timer, no self-made wake: the gateway drains this queue itself at the
     end of the running turn.  Nothing is ACKed here; the batch is only marked
@@ -1836,6 +1985,12 @@ def _notify_enqueue(state: "_BusState", logger: logging.Logger,
         return False
     session_key, how = _session_key_for(state)
     if _busy(state, logger):
+        # 0.9.2 — one wake per busy window.  A window already open means this
+        # notify only grows the batch that turn will inject.
+        window = _window_delivery(state, session_key or "")
+        if window is not None:
+            _merge_into_window(state, logger, window, fresh, where=where)
+            return True
         # 0.9.0 — "queue" means AT THE TURN BOUNDARY, not "at the next gap".
         # The gateway's pending slot is drained at ANY turn end (including one an
         # interrupt cut short) and the adapter then starts a new turn from it;
@@ -1855,6 +2010,8 @@ def _notify_enqueue(state: "_BusState", logger: logging.Logger,
                                               "queue", session_key, None)
                 delivery.phase = "in_flight"
                 delivery.native = True
+                with state.lock:
+                    state.notify_window = token
                 logger.info("notify NATIVE-QUEUED n=%d ids=%s session_key=%s "
                             "via=%s busy=1 route=handle_message->admit_native "
                             "where=%s",
@@ -1870,6 +2027,8 @@ def _notify_enqueue(state: "_BusState", logger: logging.Logger,
         delivery = _register_delivery(state, token, fresh, text, "queue",
                                       session_key, None)
         delivery.phase = "held"
+        with state.lock:
+            state.notify_window = token
         logger.info("notify HELD n=%d ids=%s session_key=%s via=%s busy=1 "
                     "phase=held reason=turn_still_running where=%s",
                     len(fresh), ",".join(str(i) for i in ids) or "-",
@@ -1965,6 +2124,19 @@ def _drain_held(state: "_BusState", logger: logging.Logger,
     """
     if _busy(state, logger):
         return "busy"
+    # 0.9.2: never open a turn with nothing to inject.  If every card of this
+    # window is already gone from the local queue, some other turn injected
+    # them (and _confirm_injected normally closed the ledger already): retire
+    # the delivery silently instead of waking an empty turn.
+    with state.lock:
+        resident = {id(event) for event in state.events}
+        pending = [e for e in delivery.events if id(e) in resident]
+        delivery.events = pending
+    if not pending:
+        logger.info("notify window %s already injected elsewhere; no empty "
+                    "wake (where=%s)", delivery.token, where)
+        _forget_delivery(state, delivery.token)
+        return "empty"
     text = delivery.text or _notify_text(delivery.events)
     token = delivery.token
     if not _wake(state, delivery.events, internal=True, text=text,

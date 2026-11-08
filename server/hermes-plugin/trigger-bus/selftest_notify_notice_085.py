@@ -63,7 +63,7 @@ SPEC.loader.exec_module(plugin)
 
 plugin.LOG_PATH = TMP / "selftest.log"
 plugin._ack_async = lambda *a, **k: None                  # no HTTP in tests
-assert plugin.PLUGIN_VERSION in ("0.8.5", "0.9.0", "0.9.1"), plugin.PLUGIN_VERSION
+assert plugin.PLUGIN_VERSION in ("0.8.5", "0.9.0", "0.9.1", "0.9.2"), plugin.PLUGIN_VERSION
 
 from gateway.config import Platform                      # noqa: E402
 from gateway.session import SessionSource                 # noqa: E402
@@ -310,10 +310,12 @@ check("b. both notifies ride ONE wake",
       and len(getattr(adapter.handled[0], "text", "")) > 0,
       "handled=%d" % len(adapter.handled))
 inject()
-check("b. the delivery sends exactly one notice for the whole batch",
+check("b. the delivery sends exactly one message for the whole batch",
       len(adapter.sent) == 1, "sent=%r" % (adapter.sent,))
-check("b. the notice names the FIRST notify origin",
-      adapter.sent == [(SOURCE.chat_id, NOTIFY_TEXT)],
+check("b. 0.9.2: one 📬 line per notify, same order as the batch",
+      adapter.sent == [(SOURCE.chat_id,
+                        "📬 收到来自 email · HR 的 Notify 消息\n"
+                        "📬 收到来自 calendar · Boss 的 Notify 消息")],
       "sent=%r" % (adapter.sent,))
 plugin._dispatch(state, plugin._get_logger(), where="poll-2")
 check("b. a duplicate dispatch adds neither a notice nor a second wake",
@@ -492,12 +494,12 @@ check("h. a second pre_llm_call injects nothing and moves no cursor",
 
 yaml_text = (HERE / "plugin.yaml").read_text(encoding="utf-8")
 readme = (HERE / "README.md").read_text(encoding="utf-8")
-check("g. plugin.yaml is 0.9.1 and documents both texts",
-      "version: 0.9.1" in yaml_text
+check("g. plugin.yaml is 0.9.2 and documents both texts",
+      "version: 0.9.2" in yaml_text
       and "收到来自 <source> · <actor> 的 Event 消息" in yaml_text
       and "收到来自 <source> · <actor> 的 Notify 消息" in yaml_text, "")
-check("g. README is titled 0.9.1 and documents both texts",
-      readme.startswith("# trigger-bus (0.9.1)")
+check("g. README is titled 0.9.2 and documents both texts",
+      readme.startswith("# trigger-bus (0.9.2)")
       and "收到来自 <source> · <actor> 的 Event 消息" in readme
       and "收到来自 <source> · <actor> 的 Notify 消息" in readme, "")
 check("g. README states the 0.9.1 rule (notify 通知在送达时发，排队不发)",

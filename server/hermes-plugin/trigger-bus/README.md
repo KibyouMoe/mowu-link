@@ -1,4 +1,4 @@
-# trigger-bus (0.9.1)
+# trigger-bus (0.9.2)
 
 Deliver events from the local **mowu-trigger** service (127.0.0.1:8791) into a
 Hermes session — including when the trainer is not talking.
@@ -119,13 +119,64 @@ adapter.send_message(chat_id, "📬 收到来自 <source> · <actor> 的 Notify 
   `⚡ 收到来自 … 的 Event 消息` immediately; a `notify` sends
   `📬 收到来自 … 的 Notify 消息` when it is really injected (0.9.1). `info` /
   `log` send nothing.
-- **one per batch**: a merged notify batch names its FIRST event's source and
-  sends one `📬`; a merged event batch names its first event and sends one `⚡`.
+- **one per batch**: a merged notify batch sends one message carrying one
+  `📬` line per event (max 3 lines; see 0.9.2 below); a merged event batch
+  names its first event and sends one `⚡`.
   A tick holding both levels speaks twice at two honest moments — `⚡` at the
   event's wake (unchanged) and `📬` when the notify batch is really injected.
 - **best-effort**: the whole extra send sits in `try/except`; any failure is
   logged and swallowed, so the wake that was already handed over still counts
   as handed over (`handle_message` was called), never as failed.
+
+## 0.9.2 — 忙时多条 notify 合并为一次唤醒
+
+0.9.0/0.9.1 admitted **every** busy notify separately, so three notifies that
+arrived during one turn became three native admissions and three turns. The
+first turn's `pre_llm_call` drained the whole local queue (3 cards, cursor
+0 → 80, one `📬`); the other two woke with **nothing to inject**:
+
+```
+23:23:47 notify NATIVE-QUEUED n=1 ids=78 busy=1
+23:23:58 notify NATIVE-QUEUED n=1 ids=79 busy=1
+23:24:08 notify NATIVE-QUEUED n=1 ids=80 busy=1
+23:24:30 injected 3 event(s) into pre_llm_call context (cursor=80)   ← the first turn
+23:24:40 conversation turn: msg='📬 收到来自 selftest 的 Notify 消息'  ← empty
+23:24:51 conversation turn: msg='📬 收到来自 selftest 的 Notify 消息'  ← empty
+```
+
+0.9.2 keeps **one merge window per busy session** (`_BusState.notify_window`):
+
+- the **first** notify may open the one turn — the native admission
+  (`handle_message` → `admit_native`), or a plugin-side `HELD` batch when no
+  session authority exists;
+- **every later notify is merged into that same delivery** — journal
+  `notify MERGED n=1 ids=79 into=q:78 total=2 busy=1 woke=window(no new turn)`
+  — and never calls `handle_message`/`admit_native` again;
+- the window closes in `_forget_delivery`, i.e. exactly when its batch is
+  proven delivered (or fails and is retried);
+- the one turn's `pre_llm_call` therefore injects the whole window together:
+  **one** `[N 条]` card and the cursor advanced **once** to the maximum id;
+- the visible notice is **one `📬` line per event** of that batch (the same
+  source repeats the same line), capped at **3 lines**: X ≤ 3 shows X lines
+  with no suffix; X > 3 shows 3 lines and the 3rd ends with `…x(X-2)`
+  (X=5 → `…x3`, X=100 → `…x98`). The block is one send and one
+  `(chat, text)` dedupe key; X=1 is one plain line;
+- **no empty wake**: a `HELD` window whose cards were already injected by
+  another turn is retired silently (`_drain_held` → `"empty"`) instead of
+  opening a turn with nothing to inject.
+
+Unchanged: the `event` hard interrupt (`internal=False`, immediate `⚡`, still
+one line), an idle notify's immediate queue + drain, the wake texts, and the
+2 s `(chat, text)` dedupe (one message per wake; the multi-line notice is
+compared as a whole). Journal of the fixed timeline:
+
+```
+23:23:47 notify NATIVE-QUEUED n=1 ids=78 busy=1
+23:23:58 notify MERGED n=1 ids=79 into=q:78 total=2 busy=1 woke=window(no new turn)
+23:24:08 notify MERGED n=1 ids=80 into=q:78 total=3 busy=1 woke=window(no new turn)
+23:24:30 injected 3 event(s) into pre_llm_call context (cursor=80)
+23:24:30 wake notice handed to send: 📬 收到来自 selftest 的 Notify 消息 …(+2 lines)
+```
 
 ## 0.9.1 — notify 通知在送达时发，排队不发
 
@@ -383,6 +434,7 @@ live gateway + session source; without it only injection works, never a wake).
 /Users/kibyou/.hermes/tools/python-3.14.9*/bin/python3 selftest_announce_083.py
 /Users/kibyou/.hermes/tools/python-3.14.9*/bin/python3 selftest_notify_notice_085.py
 /Users/kibyou/.hermes/tools/python-3.14.9*/bin/python3 selftest_notify_delivery_091.py
+/Users/kibyou/.hermes/tools/python-3.14.9*/bin/python3 selftest_notify_merge_092.py
 
 # 0.9.0: the REAL gateway classes (BasePlatformAdapter + the FIFO branch), no gateway
 /Users/kibyou/.hermes/tools/python-3.14.9*/bin/python3 probe_native_queue_entry.py
@@ -465,7 +517,19 @@ Function-level only: no gateway process, no network, no service.
   sends exactly one 📬 **after** the `DELIVERED` record and moves the cursor in
   the same step; the HELD route is silent through enqueue, repeated ticks and
   the turn-end drain; a batch confirmed twice (and `_announce_on_delivery`
-  called twice) still speaks once; a 3-notify batch sends one 📬 naming the
-  first source; an idle notify and an event are pinned (⚡ immediate, no 📬 at
+  called twice) still speaks once; a 3-notify batch sends one 📬 line per
+  event (0.9.2); an idle notify and an event are pinned (⚡ immediate, no 📬 at
   injection); the 2 s dedupe still trims deliveries; `plugin.yaml` / README are
-  0.9.1 and state 「notify 通知在送达时发，排队不发」.
+  0.9.2 and state `notify 通知在送达时发，排队不发`.
+- `selftest_notify_merge_092.py` — the 0.9.2 busy-window regression (the field
+  log above): three notifies arriving during one turn call
+  `handle_message`/`admit_native` **once** (two `notify MERGED` lines), stay
+  silent and leave the cursor at 0; the one turn's `pre_llm_call` injects all
+  three as ONE `[3 条]` card and advances the cursor 0 → 3 in one step; the
+  one notice message carries one `📬` line per event (X=4 → 3 lines ending
+  `…x2`, X=100 → 3 lines ending `…x98`, X=1 → one plain line) and the whole
+  block is one dedupe key; no further wake/admit happens after the injection
+  (`len(handled) == 1`, one `NATIVE-QUEUED`). The HELD route merges the same
+  way (one wake, three cards), a window already injected elsewhere is retired
+  without an empty wake, an idle notify still drains immediately and a busy
+  `event` still interrupts at once (`internal=False`, immediate ⚡).

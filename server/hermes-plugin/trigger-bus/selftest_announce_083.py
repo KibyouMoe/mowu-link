@@ -58,7 +58,7 @@ SPEC.loader.exec_module(plugin)
 plugin.LOG_PATH = TMP / "selftest.log"
 plugin._ack_async = lambda *a, **k: None                  # no HTTP in tests
 assert plugin.PLUGIN_VERSION in ("0.8.3", "0.8.4", "0.8.5", "0.9.0",
-                                 "0.9.1"), \
+                                 "0.9.1", "0.9.2"), \
     plugin.PLUGIN_VERSION
 
 from gateway.config import Platform                      # noqa: E402
@@ -445,13 +445,13 @@ finally:
 
 yaml_text = (HERE / "plugin.yaml").read_text(encoding="utf-8")
 readme = (HERE / "README.md").read_text(encoding="utf-8")
-check("g. plugin.yaml version is 0.9.1",
-      "version: 0.9.1" in yaml_text, "")
+check("g. plugin.yaml version is 0.9.2",
+      "version: 0.9.2" in yaml_text, "")
 check("g. plugin.yaml documents both notices",
       "收到来自 <source> · <actor> 的 Event 消息" in yaml_text
       and "收到来自 <source> · <actor> 的 Notify 消息" in yaml_text, "")
-check("g. README is titled 0.9.1 and documents both notices",
-      readme.startswith("# trigger-bus (0.9.1)")
+check("g. README is titled 0.9.2 and documents both notices",
+      readme.startswith("# trigger-bus (0.9.2)")
       and "收到来自 <source> · <actor> 的 Event 消息" in readme
       and "收到来自 <source> · <actor> 的 Notify 消息" in readme, "")
 
