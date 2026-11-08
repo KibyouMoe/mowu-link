@@ -1,4 +1,4 @@
-# trigger-bus (0.9.0)
+# trigger-bus (0.9.1)
 
 Deliver events from the local **mowu-trigger** service (127.0.0.1:8791) into a
 Hermes session — including when the trainer is not talking.
@@ -28,9 +28,10 @@ also shows one extra Chinese line that this plugin sends itself (0.8.3/0.8.4):
 
 Never start an event wake with that line: the wake text must stay
 `⚡ 来自 … 的打断`. The `notify` wake line is the 0.8.2 Chinese notice
-`📬 收到来自 <source> · <actor> 的 Notify 消息`; since 0.8.5 a notify wake also
-sends that same line through the adapter, so it becomes visible in Feishu
-instead of staying an internal, invisible turn trigger:
+`📬 收到来自 <source> · <actor> 的 Notify 消息`. Since 0.8.5 the plugin also
+sends that same line through the adapter so it becomes visible in Feishu, and
+**since 0.9.1 it sends it only when the notify is really delivered** (the
+`pre_llm_call` injection), never when it is queued:
 
 ```
 📬 收到来自 email · HR 的 Notify 消息
@@ -78,17 +79,19 @@ event  → ⚡ 收到来自 <source> · <actor> 的 Event 消息
 notify → 📬 收到来自 <source> · <actor> 的 Notify 消息
 ```
 
-**Immediate, and never twice (0.8.4).** The line is sent inline, right after
-`adapter.handle_message(ev)` for an event and right after the gateway accepted
-the queue call for a notify — no sleep and no timer; the order against the
-English ack is not engineered. What *is* guaranteed is that the same line
+**Immediate, and never twice (0.8.4).** An event's line is sent inline, right
+after `adapter.handle_message(ev)` — no sleep and no timer; the order against
+the English ack is not engineered. A notify's line is sent at the delivery
+proof instead (0.9.1, see below). What *is* guaranteed is that the same line
 cannot appear twice: besides "one per wake", an identical `(chat, text)` sent
 within **2 s** is skipped in-process.
 
-**0.8.5 定稿语义：立即发送、不发两次、无延迟、event/notify 各一条。** 发送就发生在
-唤醒路径上，没有 `sleep`、没有 `call_later`、没有 delay 开关；一次唤醒只发一条，
-同一 `chat + 完整文本` 在 2 秒内不重发（容量 32，超出丢最旧；发送失败会释放占位）。
-两种文本不同，去重 key 也就不同 —— event 与 notify 互不干扰。`info` / `log` 不发。
+**0.8.5 定稿语义：立即发送、不发两次、无延迟、event/notify 各一条。** event 的 ⚡
+发送就发生在唤醒路径上，没有 `sleep`、没有 `call_later`、没有 delay 开关；一次唤醒
+只发一条，同一 `chat + 完整文本` 在 2 秒内不重发（容量 32，超出丢最旧；发送失败会
+释放占位）。**0.9.1 起 notify 的 📬 不在入队时发，只在真正注入上下文时发**（与
+`DELIVERED` / 游标推进同一判定点）。两种文本不同，去重 key 也就不同 —— event 与
+notify 互不干扰。`info` / `log` 不发。
 
 ```python
 adapter.send_message(chat_id, "⚡ 收到来自 <source> · <actor> 的 Event 消息")
@@ -113,14 +116,49 @@ adapter.send_message(chat_id, "📬 收到来自 <source> · <actor> 的 Notify 
 - **chat id** comes from `state.source.chat_id` (the source captured by
   `pre_gateway_dispatch`).
 - **both injectable levels**: an `event` wake sends
-  `⚡ 收到来自 … 的 Event 消息`; a `notify` wake (queued `internal=True`) sends
-  `📬 收到来自 … 的 Notify 消息`. `info` / `log` send nothing.
-- **one per wake**: a merged batch names its first event's source; if one tick
-  holds both levels, the merged batch's first event picks the text (`notify`
-  first ⇒ 📬, `event` first ⇒ ⚡) and only that one line is sent.
+  `⚡ 收到来自 … 的 Event 消息` immediately; a `notify` sends
+  `📬 收到来自 … 的 Notify 消息` when it is really injected (0.9.1). `info` /
+  `log` send nothing.
+- **one per batch**: a merged notify batch names its FIRST event's source and
+  sends one `📬`; a merged event batch names its first event and sends one `⚡`.
+  A tick holding both levels speaks twice at two honest moments — `⚡` at the
+  event's wake (unchanged) and `📬` when the notify batch is really injected.
 - **best-effort**: the whole extra send sits in `try/except`; any failure is
   logged and swallowed, so the wake that was already handed over still counts
   as handed over (`handle_message` was called), never as failed.
+
+## 0.9.1 — notify 通知在送达时发，排队不发
+
+0.9.0 sent the visible `📬` at **enqueue** time, so a busy-time notify told the
+trainer "收到" long before it arrived:
+
+```
+23:06:11 notify NATIVE-QUEUED n=1 ids=73 busy=1
+23:06:12 wake notice (send) delivered      ← 📬 shown here …
+23:06:57 DELIVERED mode=queue ids=73 cursor=73   ← … but it arrived here
+```
+
+0.9.1 moves the line to the **delivery proof**:
+
+- `NATIVE-QUEUED` and `HELD` are **silent** — nothing is sent while a notify is
+  queued, held or in flight.
+- `_announce_on_delivery()` is called from `_confirm_injected()` /
+  `_confirm_from_message()` — the exact point that logs `DELIVERED` and lets
+  the cursor/ACK move — and sends exactly one
+  `📬 收到来自 <source> · <actor> 的 Notify 消息`, naming the batch's **first**
+  event. `_Delivery.announced` makes a twice-confirmed batch speak once.
+- `event` is untouched: wake-time hard interrupt + immediate
+  `⚡ 收到来自 … 的 Event 消息`.
+- The 2 s `(chat, text)` dedupe and its 32-entry cap, the notify queueing
+  routes, the batch capacity and the cursor rule are all unchanged.
+
+Journal of the fixed timeline (same scenario):
+
+```
+23:06:11 notify NATIVE-QUEUED n=1 ids=73 busy=1
+23:06:57 DELIVERED mode=queue ids=73 confirmed by context injection (cursor=73)
+23:06:57 wake notice handed to send: 📬 收到来自 selftest 的 Notify 消息
+```
 
 ## 一条 event 只走一条路 — one event, one route (0.8.2)
 
@@ -344,6 +382,7 @@ live gateway + session source; without it only injection works, never a wake).
 /Users/kibyou/.hermes/tools/python-3.14.9*/bin/python3 selftest_dedupe_082.py
 /Users/kibyou/.hermes/tools/python-3.14.9*/bin/python3 selftest_announce_083.py
 /Users/kibyou/.hermes/tools/python-3.14.9*/bin/python3 selftest_notify_notice_085.py
+/Users/kibyou/.hermes/tools/python-3.14.9*/bin/python3 selftest_notify_delivery_091.py
 
 # 0.9.0: the REAL gateway classes (BasePlatformAdapter + the FIFO branch), no gateway
 /Users/kibyou/.hermes/tools/python-3.14.9*/bin/python3 probe_native_queue_entry.py
@@ -390,14 +429,14 @@ Function-level only: no gateway process, no network, no service.
 - `selftest_announce_083.py` — the extra notice with a FakeAdapter that
   records `send_message` calls: an event wake sends **exactly once** with the
   text `⚡ 收到来自 selftest · Tester 的 Event 消息` to `oc_selftest`; a notify
-  wake sends its own `📬` line exactly once (0.8.5; it sent nothing before); a
-  merged batch names its first event; an adapter without
+  sends **nothing** at enqueue (0.9.1) and its one `📬` line when the injection
+  proves delivery; a merged batch names its first event; an adapter without
   a send method is logged and skipped; a raising `send_message` and a returned
   `SendResult(success=False)` both leave `handle_message` called and the wake
   successful, with the refusal reported as `failed:…`; an async `send` is
   scheduled on the captured loop; the 2 s `(chat, text)` guard, its 32-entry
   cap (oldest dropped) and the async-failure release are exercised with a fake
-  clock; `plugin.yaml`/README say 0.9.0.
+  clock; `plugin.yaml`/README say 0.9.1.
 - `probe_native_queue_entry.py` — not a selftest: it imports the real
   `gateway.platforms.base.BasePlatformAdapter` and proves the 0.9.0 routing.
   With `runner.session_authority`, `_handle_message_while_active` sends a busy
@@ -407,15 +446,26 @@ Function-level only: no gateway process, no network, no service.
   `handle_message`/`admit_message` seam with `internal=True`,
   `adapter._pending_messages` stays empty, the delivery is `native`, the cursor
   stays 0 (nothing is DELIVERED before the FIFO runs it).
-- `selftest_notify_notice_085.py` — the 0.8.5 contract: a notify wake sends
-  exactly one `📬 收到来自 email · HR 的 Notify 消息` to the source chat, before
-  the helper returns (no timer), while the queued `MessageEvent` stays
-  `internal=True`; a merged notify batch names its first event and a second
-  dispatch in the same mark window sends nothing; an event+notify tick sends
-  **one** line, chosen by the merged batch's first event and its level (both
-  orders); the `(chat, text)` keys of the two texts are independent inside the
-  2 s window; `info` / `log` send nothing; an idle **event** wake still takes
-  the interrupt path (`internal=False`, no queue call), sends one `⚡` line,
-  and the cursor moves exactly once when `pre_llm_call` proves the injection
-  (a second call injects nothing); the 0.8.4 dedupe and the
-  wake/queue internals are unchanged.
+- `selftest_notify_notice_085.py` — the 0.8.5 notice suite, rewritten for the
+  0.9.1 timing: a busy notify is **silent** at `NATIVE-QUEUED` (zero sends,
+  cursor untouched, card still queued), an idle notify is silent at dispatch,
+  and in both cases the one `📬 收到来自 email · HR 的 Notify 消息` is sent by
+  the `pre_llm_call` injection that proves delivery (a second call adds
+  nothing); a merged notify batch names its first event and still sends one
+  line; an event+notify tick keeps the event's immediate ⚡ (both orders) and
+  adds the notify's 📬 only at its injection; the `(chat, text)` keys of the
+  two texts are independent inside the 2 s window; a raising send neither
+  breaks the hand-over nor the delivery proof; `info` / `log` send nothing; an
+  idle **event** wake still takes the interrupt path (`internal=False`, no
+  queue call), sends one ⚡ line, and the cursor moves exactly once when
+  `pre_llm_call` proves the injection (a second call injects nothing).
+- `selftest_notify_delivery_091.py` — the 0.9.1 timeline regression (the field
+  log above): busy notify enqueued ⇒ zero send calls and no `wake notice` line,
+  three more ticks while the turn runs still send nothing, then the injection
+  sends exactly one 📬 **after** the `DELIVERED` record and moves the cursor in
+  the same step; the HELD route is silent through enqueue, repeated ticks and
+  the turn-end drain; a batch confirmed twice (and `_announce_on_delivery`
+  called twice) still speaks once; a 3-notify batch sends one 📬 naming the
+  first source; an idle notify and an event are pinned (⚡ immediate, no 📬 at
+  injection); the 2 s dedupe still trims deliveries; `plugin.yaml` / README are
+  0.9.1 and state 「notify 通知在送达时发，排队不发」.

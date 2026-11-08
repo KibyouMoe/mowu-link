@@ -57,7 +57,8 @@ SPEC.loader.exec_module(plugin)
 
 plugin.LOG_PATH = TMP / "selftest.log"
 plugin._ack_async = lambda *a, **k: None                  # no HTTP in tests
-assert plugin.PLUGIN_VERSION in ("0.8.3", "0.8.4", "0.8.5", "0.9.0"), \
+assert plugin.PLUGIN_VERSION in ("0.8.3", "0.8.4", "0.8.5", "0.9.0",
+                                 "0.9.1"), \
     plugin.PLUGIN_VERSION
 
 from gateway.config import Platform                      # noqa: E402
@@ -220,7 +221,7 @@ check("a. a duplicate dispatch sends no second message",
       "sent=%d handled=%d" % (len(adapter.sent), len(adapter.handled)))
 
 # =========================================================================== #
-# b. notify wake -> its own 📬 notice (0.8.5; it sent nothing in 0.8.3/0.8.4)
+# b. notify -> the 📬 line belongs to DELIVERY, not to the enqueue (0.9.1)
 # =========================================================================== #
 
 NOTIFY_EXPECTED = "📬 收到来自 email · HR 的 Notify 消息"
@@ -236,28 +237,34 @@ check("b. busy notify held plugin-side, no wake and no slot write",
       "held=%s handled=%d slot=%s"
       % (held is not None, len(adapter.handled),
          list(adapter._pending_messages)))
-check("b. notify wake sends exactly one 📬 notice",
-      adapter.sent == [(SOURCE.chat_id, NOTIFY_EXPECTED)],
-      "sent=%r" % (adapter.sent,))
+check("b. 0.9.1: the enqueue sends NOTHING (queued is silent)",
+      adapter.sent == [], "sent=%r" % (adapter.sent,))
 check("b. the held notify carries the 0.8.2 wake line and waits",
       held is not None and held.text == NOTIFY_EXPECTED
       and held.phase == "held",
       "text=%r phase=%r" % (getattr(held, "text", None),
                             getattr(held, "phase", None)))
+plugin._on_pre_llm_call(platform="feishu", session_id="s-083",
+                        user_message="hi")
+check("b. 0.9.1: the delivery proof sends exactly one 📬 line",
+      adapter.sent == [(SOURCE.chat_id, NOTIFY_EXPECTED)],
+      "sent=%r" % (adapter.sent,))
 
-# idle notify: queued then drained by the plugin — still exactly one notice
+# idle notify: queued then drained by the plugin — silent until it is delivered
 state, adapter = new_state()
 feed(state, ev(203, "notify", text="NOTIFY-IDLE"))
 plugin._dispatch(state, plugin._get_logger(), where="poll")
-check("b. idle notify drained via handle_message(internal=True), one send",
+check("b. idle notify drained via handle_message(internal=True), silent so far",
       len(adapter.handled) == 1
       and getattr(adapter.handled[0], "internal", None) is True
-      and len(adapter.sent) == 1,
+      and adapter.sent == [],
       "handled=%d internal=%r sent=%r"
       % (len(adapter.handled),
          getattr(adapter.handled[0], "internal", None) if adapter.handled else None,
          adapter.sent))
-check("b. idle notify notice uses the default origin",
+plugin._on_pre_llm_call(platform="feishu", session_id="s-083",
+                        user_message="hi")
+check("b. idle notify notice uses the default origin, once, at delivery",
       adapter.sent == [(SOURCE.chat_id,
                         "📬 收到来自 selftest · Tester 的 Notify 消息")],
       "sent=%r" % (adapter.sent,))
@@ -438,13 +445,13 @@ finally:
 
 yaml_text = (HERE / "plugin.yaml").read_text(encoding="utf-8")
 readme = (HERE / "README.md").read_text(encoding="utf-8")
-check("g. plugin.yaml version is 0.9.0",
-      "version: 0.9.0" in yaml_text, "")
+check("g. plugin.yaml version is 0.9.1",
+      "version: 0.9.1" in yaml_text, "")
 check("g. plugin.yaml documents both notices",
       "收到来自 <source> · <actor> 的 Event 消息" in yaml_text
       and "收到来自 <source> · <actor> 的 Notify 消息" in yaml_text, "")
-check("g. README is titled 0.9.0 and documents both notices",
-      readme.startswith("# trigger-bus (0.9.0)")
+check("g. README is titled 0.9.1 and documents both notices",
+      readme.startswith("# trigger-bus (0.9.1)")
       and "收到来自 <source> · <actor> 的 Event 消息" in readme
       and "收到来自 <source> · <actor> 的 Notify 消息" in readme, "")
 

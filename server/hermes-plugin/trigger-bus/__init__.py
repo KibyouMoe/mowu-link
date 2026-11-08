@@ -231,6 +231,25 @@ Architecture: a separate long-lived service (``mowu-trigger``, loopback
     normal TTL ledger; a native-queued batch is never re-woken (that would queue
     it twice) — the durable row owns its own execution.
 
+0.9.1 — the ``📬`` notice is sent when the notify is DELIVERED, never when queued:
+
+  * the defect: 0.9.0 sent the visible ``📬 收到来自 <src> · <actor> 的 Notify
+    消息`` at ENQUEUE time.  Field log: ``notify NATIVE-QUEUED 23:06:11`` with
+    the notice delivered 23:06:12, while the real injection — and the cursor —
+    only moved at ``DELIVERED 23:06:57``.  The trainer saw "收到" 45 s before he
+    had actually received anything.
+  * the fix: enqueue/queueing is SILENT (``NATIVE-QUEUED`` and ``HELD`` send
+    nothing).  The line is sent by :func:`_announce_on_delivery`, called from
+    :func:`_confirm_injected` — the same decision point that logs ``DELIVERED``
+    and moves the cursor/ACK.  One line per batch (the batch's FIRST event names
+    the origin), guarded by ``_Delivery.announced`` so a batch confirmed twice
+    still speaks once.
+  * ``event`` is untouched: the hard interrupt and its immediate
+    ``⚡ 收到来自 … 的 Event 消息`` stay exactly as they were.
+  * a tick that merges both levels now speaks twice at two honest moments: the
+    ``⚡`` at the event's wake (unchanged) and the ``📬`` when the notify batch
+    is really injected.  A merged notify-only batch is still ONE ``📬``.
+
 Design rules:
   * never import Hermes internals — only the hook argument dict is used;
   * never block the model call: the hook does no network I/O (ACK is sent by
@@ -269,7 +288,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional
 
-PLUGIN_VERSION = "0.9.0"
+PLUGIN_VERSION = "0.9.1"
 MAX_QUEUE = 50
 HTTP_TIMEOUT = 5.0
 LOG_MAX_BYTES = 5 * 1024 * 1024
@@ -416,7 +435,8 @@ class _Delivery:
     """
 
     __slots__ = ("token", "events", "text", "marker", "mode", "session_key",
-                 "created_at", "attempts", "phase", "event", "native")
+                 "created_at", "attempts", "phase", "event", "native",
+                 "announced")
 
     def __init__(self, token: str, events: List[Dict[str, Any]], text: str,
                  mode: str, session_key: str) -> None:
@@ -433,6 +453,8 @@ class _Delivery:
         # 0.9.0: handed to Hermes' own busy queue (session authority FIFO) instead
         # of the adapter's pending slot; the FIFO owns the turn-end timing.
         self.native = False
+        # 0.9.1: the visible 📬 line went out (only ever set at delivery proof).
+        self.announced = False
 
     def describe(self) -> str:
         ids = ",".join(str(e.get("id")) for e in self.events)
@@ -1283,13 +1305,15 @@ def _run_coroutine_here(outcome: Any, name: str,
 def _send_wake_notice(state: "_BusState", adapter: Any,
                       primary: Dict[str, Any],
                       logger: logging.Logger) -> str:
-    """One extra Chinese notice for this wake, sent at once (0.8.5).
+    """One extra Chinese notice, sent at once when the moment is right (0.8.5).
 
     The event's level picks the line (``⚡ … Event 消息`` / ``📬 … Notify
-    消息``); everything else is the 0.8.3/0.8.4 mechanism: called right after
-    the hand-over, immediate (no sleep, no ``call_later``), exactly one message
-    per wake, plus an in-process 2-second dedupe on ``(chat, text)`` so a
-    re-entrant wake or a second scheduler cannot produce the same line twice.
+    消息``).  An ``event`` calls it right after the hand-over; a ``notify``
+    calls it from :func:`_announce_on_delivery`, i.e. only once the batch is
+    really injected (0.9.1).  Everything else is the 0.8.3/0.8.4 mechanism:
+    immediate (no sleep, no ``call_later``), exactly one message per wake, plus
+    an in-process 2-second dedupe on ``(chat, text)`` so a re-entrant wake or a
+    second scheduler cannot produce the same line twice.
 
     Best-effort by contract: every failure is logged and swallowed — it can
     never undo a wake.  Returns ``sent:<method>``, ``skipped:<why>`` or
@@ -1320,6 +1344,42 @@ def _send_event_announcement(state: "_BusState", adapter: Any,
                              logger: logging.Logger) -> str:
     """0.8.3 name kept for callers/tests; 0.8.5 makes it level-aware."""
     return _send_wake_notice(state, adapter, primary, logger)
+
+
+def _announce_on_delivery(state: "_BusState", delivery: "_Delivery",
+                          logger: logging.Logger) -> str:
+    """0.9.1: the ONE ``📬`` line, sent when the notify really reached the turn.
+
+    Called from :func:`_confirm_injected` / :func:`_confirm_from_message` —
+    i.e. at the exact decision point that logs ``DELIVERED`` and lets the
+    cursor/ACK move.  Nothing is sent while the batch is queued (``NATIVE-
+    QUEUED``), held (``HELD``) or in flight: at that moment the trainer has not
+    received anything, so a "收到" line would be both early and untrue.
+
+    Exactly one line per batch, naming the batch's FIRST event (a merged batch
+    keeps the 0.8.5 "first origin" rule).  ``delivery.announced`` is the
+    in-process guard, so a batch confirmed by two injections still speaks once;
+    the 2 s ``(chat, text)`` dedupe of :func:`_send_wake_notice` is untouched.
+    ``event`` deliveries never come here — their ⚡ line is sent at wake time.
+    """
+    try:
+        if delivery.mode != "queue" or not delivery.events:
+            return "skipped:not-notify"
+        first = delivery.events[0]
+        if _level(first) != "notify":
+            return "skipped:not-notify"
+        if delivery.announced:
+            return "skipped:already-announced"
+        # Claim before sending: a re-entrant confirmation cannot speak twice.
+        delivery.announced = True
+        adapter = _adapter_for(state)
+        if adapter is None:
+            logger.info("notify notice skipped: no adapter at delivery time")
+            return "skipped:no-adapter"
+        return _send_wake_notice(state, adapter, first, logger)
+    except Exception as exc:  # never let the extra line affect the delivery
+        logger.warning("notify notice failed: %s", exc)
+        return "failed:%s" % exc
 
 
 def _build_wake_event(text: str, internal: bool, source: Any) -> Any:
@@ -1916,9 +1976,8 @@ def _drain_held(state: "_BusState", logger: logging.Logger,
     logger.info("notify DRAINED (turn finished) %s ids=%s cursor stays %d "
                 "woke=internal=true where=%s",
                 delivery.describe(), ids or "-", state.cursor, where)
-    # No notice here: the 📬 line went out when the batch was HELD (the 0.8.5
-    # "one line per wake" contract, and _dispatch owns it), so a second send at
-    # the drain would be a duplicate.
+    # No notice here: 0.9.1 sends the 📬 line only when the batch is really
+    # injected (pre_llm_call proof), never at HELD and never at this drain.
     return "drained"
 
 
@@ -2148,21 +2207,17 @@ def _dispatch(state: "_BusState", logger: logging.Logger, *, where: str) -> bool
             did = _drain_idle(state, logger, where=where) or did
     finally:
         # 0.8.5: exactly one visible notice per wake, even if a later leg of
-        # this tick raises.  The merged batch's FIRST event names it and its
-        # level picks the text (📬 notify / ⚡ event); if that event's own path
-        # did not go through, the first level that did speaks instead, so an
-        # event wake never loses its line.
+        # this tick raises.  0.9.1: only an EVENT wake still speaks here — its
+        # ⚡ line is immediate and unchanged.  A notify batch is silent while it
+        # is queued/held; its 📬 line is sent by _announce_on_delivery when the
+        # cards are really injected (the DELIVERED/cursor point).
         notice = None
         if unread:
             first = unread[0]
-            if _level(first) == "notify" and notify_queued:
-                notice = first
-            elif _level(first) == "event" and interrupted:
+            if _level(first) == "event" and interrupted:
                 notice = first
             elif interrupted and events:
                 notice = events[0]
-            elif notify_queued and notifies:
-                notice = notifies[0]
         if notice is not None:
             adapter = _adapter_for(state)
             if adapter is not None:
@@ -2215,6 +2270,8 @@ def _confirm_from_message(state: "_BusState", user_message: Any) -> int:
         _get_logger().info(
             "DELIVERED %s confirmed by pre_llm_call (ids=%s cursor=%d ACKed)",
             delivery.describe(), ids, cursor)
+        # 0.9.1: the 📬 line belongs to this moment, not to the enqueue.
+        _announce_on_delivery(state, delivery, _get_logger())
     return len(hits)
 
 
@@ -2241,6 +2298,9 @@ def _confirm_injected(state: "_BusState",
         _get_logger().info(
             "DELIVERED %s confirmed by context injection (ids=%s cursor=%d)",
             delivery.describe(), ids, state.cursor)
+        # 0.9.1: the ONE visible 📬 line, at the same decision point as
+        # DELIVERED/cursor — never at enqueue, never at HELD/NATIVE-QUEUED.
+        _announce_on_delivery(state, delivery, _get_logger())
     return len(hits)
 
 

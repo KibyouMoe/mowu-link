@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Function-level selftest for trigger-bus 0.8.5 — the notify Chinese notice.
+"""Function-level selftest for trigger-bus 0.9.1 — the notify notice timing.
 
 No gateway process, no trigger service, no network.  Every hook is called
 directly; the gateway is a FakeGateway and the adapter a FakeAdapter that
@@ -8,24 +8,27 @@ records ``handle_message``, queue calls and every send call.
     /Users/kibyou/.hermes/tools/python-3.14.9*/bin/python3 \\
         selftest_notify_notice_085.py
 
-Covers the 0.8.5 contract:
-  a. a notify wake sends exactly one
-     "📬 收到来自 <source> · <actor> 的 Notify 消息" to the source chat, and the
-     send has already happened when dispatch returns (no timer); the queued
-     MessageEvent is still internal=True and the wake text is unchanged
-  b. one notice per wake: a merged notify batch names its FIRST event, and a
-     second dispatch in the same mark window sends nothing
-  c. a tick that merges notify + event sends ONE line — the merged batch's
-     first event picks both the source and the level's text (📬 / ⚡)
+This file started as the 0.8.5 notice suite; since 0.9.1 it pins WHEN the
+``📬`` line is sent.  Covers:
+  a. a notify is SILENT at enqueue (NATIVE-QUEUED and HELD): zero send calls,
+     cursor untouched, the card still queued; the one
+     "📬 收到来自 <source> · <actor> 的 Notify 消息" is sent by the injection
+     that proves delivery (pre_llm_call), once, and a second call adds nothing
+  b. one notice per batch: a merged notify batch names its FIRST event, a
+     second dispatch in the same mark window sends nothing, and a later idle
+     drain adds no second line
+  c. a tick that merges notify + event: the event keeps its immediate ⚡ (both
+     orders) and the notify's 📬 only lands when its cards are injected
   d. the dedupe key is chat + full text: event and notify lines never suppress
      each other inside the 2 s window, the same notify is dropped, another
      chat is not, and the window still expires
   e. info / log never send anything
-  f. a failing send never affects the notify queue hand-over
-  g. plugin.yaml / README are 0.8.5 and document both texts
-  h. idle event wake: handle_message(internal=False), exactly one ⚡ line, no
-     queue call at all, and the cursor moves exactly once when pre_llm_call
-     proves the injection (a second call injects nothing)
+  f. a failing send never affects the notify queue hand-over or the delivery
+     proof
+  g. plugin.yaml / README are 0.9.1 and document both texts
+  h. idle event wake: handle_message(internal=False), exactly one ⚡ line
+     immediately, no queue call at all, and the cursor moves exactly once when
+     pre_llm_call proves the injection (a second call injects nothing)
 """
 
 from __future__ import annotations
@@ -60,7 +63,7 @@ SPEC.loader.exec_module(plugin)
 
 plugin.LOG_PATH = TMP / "selftest.log"
 plugin._ack_async = lambda *a, **k: None                  # no HTTP in tests
-assert plugin.PLUGIN_VERSION in ("0.8.5", "0.9.0"), plugin.PLUGIN_VERSION
+assert plugin.PLUGIN_VERSION in ("0.8.5", "0.9.0", "0.9.1"), plugin.PLUGIN_VERSION
 
 from gateway.config import Platform                      # noqa: E402
 from gateway.session import SessionSource                 # noqa: E402
@@ -142,7 +145,7 @@ def check(name: str, ok: bool, detail: str = "") -> None:
 
 def new_state(adapter=None, **overrides):
     # The 0.8.4 duplicate guard is process-wide by design; each case below is
-    # an independent wake, so the harness clears it first (otherwise a later
+    # an independent delivery, so the harness clears it first (otherwise a later
     # case would be suppressed by an earlier one, not by its own wake).
     plugin._announce_reset()
     for leftover in (os.environ["TRIGGER_BUS_CURSOR"],
@@ -174,12 +177,18 @@ def feed(state, *events) -> int:
     return plugin._merge_events(state, list(events))
 
 
-print("trigger-bus %s selftest — notify Chinese notice, gateway-free"
+def inject():
+    """The delivery proof: pre_llm_call hands the cards to the turn."""
+    return plugin._on_pre_llm_call(platform="feishu", session_id="s-085",
+                                   user_message="hi")
+
+
+print("trigger-bus %s selftest — notify notice timing, gateway-free"
       % plugin.PLUGIN_VERSION)
 print("tmp/log: %s\n" % plugin.LOG_PATH)
 
 # =========================================================================== #
-# a. notify wake -> exactly one 📬 notice, immediately, queue semantics intact
+# a. busy notify: SILENT at enqueue, exactly one 📬 at the delivery proof
 # =========================================================================== #
 
 state, adapter = new_state()
@@ -194,9 +203,8 @@ check("a. notify wake: one native-queue hand-over, no pending-slot write",
       "queue_calls=%d handled=%d slot=%s"
       % (len(state.gateway.queue_calls), len(adapter.handled),
          list(adapter._pending_messages)))
-check("a. the 📬 notice is already sent when dispatch returns (no timer)",
-      adapter.sent == [(SOURCE.chat_id, NOTIFY_TEXT)],
-      "sent=%r" % (adapter.sent,))
+check("a. 0.9.1: NATIVE-QUEUED sends NOTHING (no visible message)",
+      adapter.sent == [], "sent=%r" % (adapter.sent,))
 check("a. the queued wake is still internal=True",
       getattr(queued, "internal", None) is True,
       "internal=%r" % (getattr(queued, "internal", None),))
@@ -209,7 +217,23 @@ check("a. cursor untouched and the card still in the local queue",
                               [e.get("id") for e in state.events]))
 check("a. dispatch still reports a delivery attempt", ok is True, "ok=%r" % (ok,))
 
-# idle notify: queued then drained — one notice, not two
+context = inject()
+body = context.get("context", "") if isinstance(context, dict) else ""
+check("a. the delivery proof injects the card and moves the cursor once",
+      state.cursor == 301 and not state.events and "NOTIFY-ONE" in body
+      and not state.inflight,
+      "cursor=%d queue=%d inflight=%d body=%r"
+      % (state.cursor, len(state.events), len(state.inflight), body))
+check("a. 0.9.1: exactly one 📬 line, sent with that injection",
+      adapter.sent == [(SOURCE.chat_id, NOTIFY_TEXT)],
+      "sent=%r" % (adapter.sent,))
+again = inject()
+check("a. a second proof adds no second line and moves no cursor",
+      again is None and state.cursor == 301 and len(adapter.sent) == 1,
+      "again=%r cursor=%d sent=%d"
+      % (again, state.cursor, len(adapter.sent)))
+
+# idle notify: queued then drained — still silent until it is injected
 state, adapter = new_state()
 feed(state, ev(302, "notify", text="NOTIFY-IDLE"))
 ok = plugin._dispatch(state, plugin._get_logger(), where="poll")
@@ -219,7 +243,10 @@ check("a. idle notify drained via handle_message",
       "handled=%d internal=%r"
       % (len(adapter.handled),
          getattr(adapter.handled[0], "internal", None)))
-check("a. idle notify sends exactly one 📬 line",
+check("a. idle notify is silent at dispatch time (0.9.1)",
+      adapter.sent == [], "sent=%r" % (adapter.sent,))
+inject()
+check("a. idle notify sends its one 📬 only at delivery",
       adapter.sent == [(SOURCE.chat_id, NOTIFY_TEXT)],
       "sent=%r" % (adapter.sent,))
 
@@ -235,6 +262,9 @@ state.loop = loop
 try:
     feed(state, ev(303, "notify", text="ASYNC-NOTIFY"))
     plugin._dispatch(state, plugin._get_logger(), where="poll")
+    check("a. async adapter: still silent at enqueue",
+          adapter.sent == [], "sent=%r" % (adapter.sent,))
+    inject()
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline and not adapter.sent:
         time.sleep(0.02)
@@ -242,11 +272,11 @@ finally:
     loop.call_soon_threadsafe(loop.stop)
     thread.join(timeout=5)
     loop.close()
-check("a. async send() carries the 📬 text on the captured loop",
+check("a. async send() carries the 📬 text on the captured loop, at delivery",
       adapter.sent == [(SOURCE.chat_id, NOTIFY_TEXT)],
       "sent=%r" % (adapter.sent,))
 
-# a failing send never affects the queue hand-over
+# a failing send never affects the queue hand-over nor the delivery proof
 state, adapter = new_state()
 state.gateway.busy = True
 state.gateway.session_authority = object()   # 0.9.0: native busy queue reachable
@@ -257,9 +287,14 @@ check("f. a raising send leaves the notify handed over and dispatch True",
       ok is True and len(adapter.handled) == 1 and adapter.sent == [],
       "ok=%r handled=%d sent=%r"
       % (ok, len(adapter.handled), adapter.sent))
+inject()
+check("f. the delivery proof still commits when the notice send fails",
+      state.cursor == 304 and not state.inflight and adapter.sent == [],
+      "cursor=%d inflight=%d sent=%r"
+      % (state.cursor, len(state.inflight), adapter.sent))
 
 # =========================================================================== #
-# b. one notice per wake
+# b. one notice per batch
 # =========================================================================== #
 
 state, adapter = new_state()
@@ -268,21 +303,24 @@ state.gateway.session_authority = object()   # 0.9.0: native busy queue reachabl
 feed(state, ev(305, "notify", source="email", actor="HR", text="FIRST"),
      ev(306, "notify", source="calendar", actor="Boss", text="SECOND"))
 plugin._dispatch(state, plugin._get_logger(), where="poll")
-check("b. a merged 2-notify wake sends exactly one notice",
-      len(adapter.sent) == 1, "sent=%r" % (adapter.sent,))
-check("b. the notice names the FIRST notify origin",
-      adapter.sent == [(SOURCE.chat_id, NOTIFY_TEXT)],
-      "sent=%r" % (adapter.sent,))
+check("b. a merged 2-notify wake is silent while it is queued",
+      adapter.sent == [], "sent=%r" % (adapter.sent,))
 check("b. both notifies ride ONE wake",
       len(adapter.handled) == 1
       and len(getattr(adapter.handled[0], "text", "")) > 0,
       "handled=%d" % len(adapter.handled))
+inject()
+check("b. the delivery sends exactly one notice for the whole batch",
+      len(adapter.sent) == 1, "sent=%r" % (adapter.sent,))
+check("b. the notice names the FIRST notify origin",
+      adapter.sent == [(SOURCE.chat_id, NOTIFY_TEXT)],
+      "sent=%r" % (adapter.sent,))
 plugin._dispatch(state, plugin._get_logger(), where="poll-2")
 check("b. a duplicate dispatch adds neither a notice nor a second wake",
       len(adapter.sent) == 1 and len(adapter.handled) == 1,
       "sent=%d handled=%d" % (len(adapter.sent),
                               len(adapter.handled)))
-# a later idle tick drains the queued notify — the wake already had its line
+# a later idle tick has nothing left to drain
 state.gateway.busy = False
 plugin._dispatch(state, plugin._get_logger(), where="poll-3")
 check("b. a later idle drain adds no second notice",
@@ -290,10 +328,10 @@ check("b. a later idle drain adds no second notice",
       "handled=%d sent=%d" % (len(adapter.handled), len(adapter.sent)))
 
 # =========================================================================== #
-# c. notify + event in one tick -> ONE line, first event's source and level
+# c. notify + event in one tick: ⚡ immediate (event unchanged), 📬 at delivery
 # =========================================================================== #
 
-# c1: notify first -> the single line is 📬 for the notify origin
+# c1: notify first
 state, adapter = new_state()
 state.gateway.busy = True
 state.gateway.session_authority = object()   # 0.9.0: native busy queue reachable
@@ -305,13 +343,16 @@ check("c. mixed (notify first): both routes still run",
       and len(state.gateway.queue_calls) == 0,
       "handled=%d queue_calls=%d"
       % (len(adapter.handled), len(state.gateway.queue_calls)))
-check("c. mixed (notify first): exactly ONE visible line",
-      len(adapter.sent) == 1, "sent=%r" % (adapter.sent,))
-check("c. mixed (notify first): the line is 📬 for the first event's source",
-      adapter.sent == [(SOURCE.chat_id, NOTIFY_TEXT)],
+check("c. mixed (notify first): only the event's ⚡ goes out now",
+      adapter.sent == [(SOURCE.chat_id, EVENT_TEXT_MC)],
+      "sent=%r" % (adapter.sent,))
+inject()
+check("c. mixed: the notify's 📬 lands with its injection, one per level",
+      adapter.sent == [(SOURCE.chat_id, EVENT_TEXT_MC),
+                       (SOURCE.chat_id, NOTIFY_TEXT)],
       "sent=%r" % (adapter.sent,))
 
-# c2: event first -> the single line is ⚡ for the event origin
+# c2: event first
 state, adapter = new_state()
 state.gateway.busy = True
 state.gateway.session_authority = object()   # 0.9.0: native busy queue reachable
@@ -323,10 +364,13 @@ check("c. mixed (event first): both routes still run",
       and len(state.gateway.queue_calls) == 0,
       "handled=%d queue_calls=%d"
       % (len(adapter.handled), len(state.gateway.queue_calls)))
-check("c. mixed (event first): exactly ONE visible line",
-      len(adapter.sent) == 1, "sent=%r" % (adapter.sent,))
-check("c. mixed (event first): the line is ⚡ for the first event's source",
+check("c. mixed (event first): exactly the ⚡ line, immediately",
       adapter.sent == [(SOURCE.chat_id, EVENT_TEXT_MC)],
+      "sent=%r" % (adapter.sent,))
+inject()
+check("c. mixed (event first): the 📬 follows at delivery, once",
+      adapter.sent == [(SOURCE.chat_id, EVENT_TEXT_MC),
+                       (SOURCE.chat_id, NOTIFY_TEXT)],
       "sent=%r" % (adapter.sent,))
 
 # =========================================================================== #
@@ -399,8 +443,8 @@ check("e. info/log stay out of the injectable set",
                      for e in plugin._unread_locked(state)])
 
 # =========================================================================== #
-# h. idle event wake (trainer request): normal interrupt path, one ⚡ line,
-#    never the queue branch, cursor moves exactly once on delivery proof
+# h. idle event wake: normal interrupt path, one ⚡ line at once, never the
+#    queue branch, cursor moves exactly once on delivery proof
 # =========================================================================== #
 
 state, adapter = new_state()
@@ -426,8 +470,7 @@ check("h. the wake itself moves no cursor (delivery not proven yet)",
       "cursor=%d queue=%s" % (state.cursor,
                               [e.get("id") for e in state.events]))
 
-context = plugin._on_pre_llm_call(platform="feishu", session_id="s-085",
-                                  user_message="hi")
+context = inject()
 body = context.get("context", "") if isinstance(context, dict) else ""
 check("h. delivery proof injects the card and moves the cursor once",
       state.cursor == 320 and not state.events and "IDLE-EVENT" in body
@@ -438,26 +481,27 @@ check("h. still exactly one notice after the injection",
       adapter.sent == [(SOURCE.chat_id, EVENT_TEXT_MC)],
       "sent=%r" % (adapter.sent,))
 
-again = plugin._on_pre_llm_call(platform="feishu", session_id="s-085",
-                                user_message="hi")
+again = inject()
 check("h. a second pre_llm_call injects nothing and moves no cursor",
       again is None and state.cursor == 320,
       "again=%r cursor=%d" % (again, state.cursor))
 
 # =========================================================================== #
-# g. version files document both texts
+# g. version files document both texts and the 0.9.1 timing rule
 # =========================================================================== #
 
 yaml_text = (HERE / "plugin.yaml").read_text(encoding="utf-8")
 readme = (HERE / "README.md").read_text(encoding="utf-8")
-check("g. plugin.yaml is 0.9.0 and documents both texts",
-      "version: 0.9.0" in yaml_text
+check("g. plugin.yaml is 0.9.1 and documents both texts",
+      "version: 0.9.1" in yaml_text
       and "收到来自 <source> · <actor> 的 Event 消息" in yaml_text
       and "收到来自 <source> · <actor> 的 Notify 消息" in yaml_text, "")
-check("g. README is titled 0.9.0 and documents both texts",
-      readme.startswith("# trigger-bus (0.9.0)")
+check("g. README is titled 0.9.1 and documents both texts",
+      readme.startswith("# trigger-bus (0.9.1)")
       and "收到来自 <source> · <actor> 的 Event 消息" in readme
       and "收到来自 <source> · <actor> 的 Notify 消息" in readme, "")
+check("g. README states the 0.9.1 rule (notify 通知在送达时发，排队不发)",
+      "notify 通知在送达时发，排队不发" in readme, "")
 
 # --------------------------------------------------------------------------- #
 failed = [name for name, ok, _ in RESULTS if not ok]
