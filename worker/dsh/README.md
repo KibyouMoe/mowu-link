@@ -79,6 +79,9 @@ dsh --profile headless --permission-mode workspace-write --approval-policy never
 `{"type":"exit","reason":"timeout","timeout_s":900}`。
 
 断线重连：1s→2s→4s→8s→16s→30s 封顶，每次重连先重新 `/register`。
+SSE 读超时只是“这一刻没数据”（空闲时 Router 只有 `: ping`），不算断线；
+只有读到 EOF、连接重置/其他 IO 异常，或连续 `--idle-timeout`（默认 90s）
+一个字节都没收到才重连。
 SIGTERM/SIGINT：杀掉当前子进程组、把任务以 interrupted 上报（尽力）、退出 0。
 
 ## 自测
@@ -89,4 +92,4 @@ SIGTERM/SIGINT：杀掉当前子进程组、把任务以 interrupted 上报（�
 
 覆盖：注册、收任务、心跳、结果字段、4000 字截尾、失败退出码、超时、
 串行不重叠、断线重连并重新注册、SIGTERM 优雅退出、重复任务去重、配置加载、
-语法检查、纯函数。
+语法检查、纯函数、SSE 空闲/心跳不误判断线、真断才重连。

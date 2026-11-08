@@ -42,7 +42,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import ProxyHandler, Request, build_opener
 
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 DEFAULT_ROUTER = "http://127.0.0.1:8790"
 DEFAULT_NAME = "dsh"
 DEFAULT_TOKEN_FILE = "~/.hermes/secrets/router.token"
@@ -59,8 +59,9 @@ RESULT_CACHE_SIZE = 64
 PERMISSION_MODES = ("read-only", "workspace-write", "danger-full-access")
 APPROVAL_POLICIES = ("ask", "never", "")
 
-# SSE 读超时（socket 级）。设小一点，SIGTERM 才能在 1 秒内打断阻塞读；
-# 真正的“连接死掉”由 idle_timeout 判定。
+# SSE 读超时（socket 级）。设小一点，SIGTERM 才能在 1 秒内打断阻塞读。
+# 注意：超时只代表“这一刻没数据”（SSE 空闲时 Router 只有 ping），绝不算断线；
+# 真正的“连接死掉”由 idle_timeout（连续多久没有任何字节）判定。
 READ_TIMEOUT_S = 1.0
 
 _OPENER = build_opener(ProxyHandler({}))  # 本机服务，绕过系统代理
@@ -218,35 +219,92 @@ def fmt_duration(seconds: float) -> str:
     return "%.1fs" % seconds
 
 
+def _is_read_timeout(exc: BaseException) -> bool:
+    """是不是“这一刻没数据”的读超时。
+
+    ``socket.timeout`` / ``TimeoutError`` 是正常形态；Python 的 ``SocketIO`` 在
+    超时一次后会置 ``_timeout_occurred``，之后每次读都抛
+    ``OSError("cannot read from timed out object")``，那同样是超时，不是断线。
+    """
+    if isinstance(exc, (socket.timeout, TimeoutError)):
+        return True
+    return "cannot read from timed out object" in str(exc).lower()
+
+
+def clear_read_timeout(resp: Any) -> bool:
+    """清掉 SocketIO 的超时中毒标记；返回是否可以直接继续读。
+
+    标准库没有公开的重置接口，只能清私有标记（3.5–3.13 都是这个名字）。
+    找不到标记说明换了实现或没有中毒，按可继续处理。
+    """
+    fp = getattr(resp, "fp", None)
+    for obj in (fp, getattr(fp, "raw", None), getattr(fp, "buffer", None)):
+        if obj is None or not hasattr(obj, "_timeout_occurred"):
+            continue
+        try:
+            obj._timeout_occurred = False  # noqa: SLF001 - 标准库无公开复位接口
+            return True
+        except Exception:  # noqa: BLE001 - 只读属性等，退化成等待
+            return False
+    return True
+
+
 def iter_sse(resp: Any, stop_event: threading.Event,
              idle_timeout: float) -> Iterable[Tuple[str, str]]:
-    """解析 SSE 流；socket 读超时不算断线，静默超过 idle_timeout 才算。"""
+    """解析 SSE 流。
+
+    读超时 = 暂无数据，继续等；只有真 EOF、连接重置/其他 IO 异常、或连续
+    ``idle_timeout`` 秒一个字节都没收到（ping 注释也算字节），才算断线。
+    """
     event = "message"
     data: List[str] = []
     last_activity = time.time()
+
+    def idle_expired() -> bool:
+        return time.time() - last_activity > idle_timeout
+
+    def raise_idle() -> None:
+        raise RouterError("SSE 静默超过 %ss（无任何字节），按断线处理"
+                          % fmt_duration(idle_timeout))
+
     while not stop_event.is_set():
         try:
             raw = resp.readline()
         except (socket.timeout, TimeoutError):
-            if time.time() - last_activity > idle_timeout:
-                raise RouterError("SSE 静默超过 %ss，按断线处理"
-                                  % fmt_duration(idle_timeout))
+            if not clear_read_timeout(resp):
+                stop_event.wait(0.2)  # 清不掉标记，别空转
+            if idle_expired():
+                raise_idle()
             continue
-        except (ValueError, OSError, http.client.HTTPException) as exc:
+        except OSError as exc:
+            if not _is_read_timeout(exc):
+                raise RouterError("SSE 读取中断：%s" % exc)
+            if not clear_read_timeout(resp):
+                stop_event.wait(0.2)
+            if idle_expired():
+                raise_idle()
+            continue
+        except (ValueError, http.client.HTTPException) as exc:
+            if stop_event.is_set():
+                return
             raise RouterError("SSE 读取中断：%s" % exc)
         if not raw:
-            if data:
+            if data and event.lower() != "ping":
                 yield event, "\n".join(data)
+            if stop_event.is_set():
+                return
             raise RouterError("SSE 连接已被 Router 关闭")
         last_activity = time.time()
         line = raw.decode("utf-8", "replace").rstrip("\r\n")
         if not line:
-            if data:
+            if data and event.lower() != "ping":
                 yield event, "\n".join(data)
+                # 执行任务期间不读流，不能让空闲计时把连接判死。
+                last_activity = time.time()
             event, data = "message", []
             continue
         if line.startswith(":"):
-            continue  # 注释 / keepalive
+            continue  # 注释 / keepalive（: ping），刷新过 last_activity
         field, _, value = line.partition(":")
         if value.startswith(" "):
             value = value[1:]

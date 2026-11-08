@@ -4,7 +4,8 @@
     ./selftest_worker.py
 
 覆盖：注册、收任务、结果字段、心跳、4000 字截尾、失败退出码、超时、串行不重叠、
-断线重连并重新注册、SIGTERM 优雅退出、重复任务去重、配置文件加载、语法、纯函数。
+断线重连并重新注册、SIGTERM 优雅退出、重复任务去重、配置文件加载、语法、纯函数，
+以及 SSE 空闲/心跳不误判断线、真断才重连。
 目标：60 秒内跑完并退出，不留常驻进程。
 """
 
@@ -16,6 +17,7 @@ import os
 import shlex
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -97,9 +99,19 @@ def make_task(task_id: str = "t-1", goal: str = "hello-from-router",
 
 class FakeRouter:
     def __init__(self, tasks: Optional[List[Dict[str, Any]]] = None,
-                 drop_first_stream: bool = False) -> None:
+                 drop_first_stream: bool = False,
+                 stream_mode: str = "ping",
+                 ping_interval: float = 0.3,
+                 hold_s: float = 6.0) -> None:
         self.tasks = list(tasks or [])
         self.drop_first_stream = drop_first_stream
+        # ping: 建立后每 ping_interval 秒发 `: ping`（默认，老用例行为）
+        # silent: 建立后一个字节都不发
+        # slow_ping: 每 ping_interval 秒发一次，持续 hold_s 秒，然后安静
+        self.stream_mode = stream_mode
+        self.ping_interval = ping_interval
+        self.hold_s = hold_s
+        self.pings_sent = 0
         self.registrations: List[Dict[str, Any]] = []
         self.heartbeats: List[Dict[str, Any]] = []
         self.results: List[Dict[str, Any]] = []
@@ -212,10 +224,28 @@ class FakeRouter:
                 handler.wfile.write(frame)
                 handler.wfile.flush()
                 time.sleep(0.05)
+            if self.stream_mode == "silent":
+                while not self.closed:
+                    time.sleep(0.1)
+                return
+            if self.stream_mode == "slow_ping":
+                deadline = time.time() + self.hold_s
+                while not self.closed and time.time() < deadline:
+                    handler.wfile.write(b": ping\n\n")
+                    handler.wfile.flush()
+                    with self.cond:
+                        self.pings_sent += 1
+                        self.cond.notify_all()
+                    time.sleep(self.ping_interval)
+                while not self.closed:
+                    time.sleep(0.1)
+                return
             while not self.closed:
                 handler.wfile.write(b": ping\n\n")
                 handler.wfile.flush()
-                time.sleep(0.3)
+                with self.cond:
+                    self.pings_sent += 1
+                time.sleep(self.ping_interval)
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
 
@@ -336,9 +366,10 @@ class Env:
     """一套「假 Router + 沙箱 + worker」；with 退出时必定清理。"""
 
     def __init__(self, tasks: Optional[List[Dict[str, Any]]] = None,
-                 drop_first_stream: bool = False) -> None:
+                 drop_first_stream: bool = False, **router_kwargs: Any) -> None:
         self.sb = Sandbox()
-        self.router = FakeRouter(tasks=tasks, drop_first_stream=drop_first_stream)
+        self.router = FakeRouter(tasks=tasks, drop_first_stream=drop_first_stream,
+                                 **router_kwargs)
         self.harness: Optional[Harness] = None
 
     def launch(self, extra: Optional[List[str]] = None,
@@ -666,6 +697,103 @@ def test_14_pure_helpers() -> None:
             raise AssertionError("未知配置字段没有被拒绝")
     finally:
         shutil.rmtree(cfg_path.parent, ignore_errors=True)
+
+
+@test
+def test_15_idle_stream_not_disconnect() -> None:
+    """空闲：SSE 建立后 3 秒零字节 → 读超时不算断线，register 只 1 次"""
+    with Env(stream_mode="silent") as env:
+        env.launch(["--timeout", "20", "--idle-timeout", "90"])
+        need(env.router.wait_registrations(1, 10), "worker 没有注册")
+        need(env.router.wait_streams(1, 10), "没有打开 /stream")
+        time.sleep(3.2)
+        opens = len(env.router.registrations)
+        need(opens == 1, "空闲 3 秒被误判断线，register=%d 次" % opens)
+        need(env.router.stream_opens == 1,
+             "空闲 3 秒重开了 /stream：%d 次" % env.router.stream_opens)
+        need(env.harness is not None and env.harness.proc.poll() is None,
+             "worker 在空闲流上退出了")
+        need("连接中断" not in env.log_text(),
+             "空闲流被记成断线：%r" % env.log_text()[-400:])
+
+
+@test
+def test_16_ping_keepalive_not_disconnect() -> None:
+    """心跳：每隔 1 秒 `: ping` 持续 5 秒 → 仍不重连"""
+    with Env(stream_mode="slow_ping", ping_interval=1.0, hold_s=6.0) as env:
+        env.launch(["--timeout", "20", "--idle-timeout", "90"])
+        need(env.router.wait_registrations(1, 10), "worker 没有注册")
+        time.sleep(5.2)
+        need(env.router.pings_sent >= 4,
+             "假 Router 没发出 ping：%d" % env.router.pings_sent)
+        opens = len(env.router.registrations)
+        need(opens == 1, "ping 保活期间重连了，register=%d 次" % opens)
+        need(env.router.stream_opens == 1,
+             "ping 保活期间重开了 /stream：%d 次" % env.router.stream_opens)
+
+
+@test
+def test_17_true_close_reconnects() -> None:
+    """真断：Router 关闭 SSE 连接 → 必须重连并重新注册（register 2 次）"""
+    with Env(drop_first_stream=True) as env:
+        env.launch(["--timeout", "20"])
+        need(env.router.wait_registrations(2, 15), "真断开后没有重连注册")
+        need(env.router.wait_streams(2, 10), "真断开后没有重开 /stream")
+        time.sleep(0.5)
+        opens = len(env.router.registrations)
+        need(opens == 2, "重连次数异常：register=%d 次" % opens)
+
+
+@test
+def test_18_iter_sse_timeout_semantics() -> None:
+    """纯函数：读超时/中毒 OSError 当无数据，EOF 与静默超时才断线，ping 忽略"""
+    class Stub:
+        def __init__(self, script: List[Any]) -> None:
+            self.script = list(script)
+
+        def readline(self) -> bytes:
+            item = (self.script.pop(0) if self.script
+                    else socket.timeout("timed out"))
+            if isinstance(item, (socket.timeout, TimeoutError)):
+                time.sleep(0.1)  # 模拟真实读超时的一段等待
+                raise item
+            if isinstance(item, BaseException):
+                raise item
+            return item
+
+    stop = threading.Event()
+    payload = '{"task_id":"t-ok","goal":"g"}'
+    stub = Stub([socket.timeout("timed out"),
+                 OSError("cannot read from timed out object"),
+                 b": ping\n", b"\n",
+                 b"event: ping\n", b"data: {}\n", b"\n",
+                 b"event: task\n",
+                 ("data: %s\n" % payload).encode("utf-8"),
+                 b"\n", b": ping\n", b"\n", b""])
+    stream = worker.iter_sse(stub, stop, 10.0)
+    try:
+        event, data = next(stream)
+    finally:
+        stream.close()
+    need(event == "task", "超时后读到的 event 不对：%r" % event)
+    need("t-ok" in data, "任务内容不对：%r" % data)
+
+    try:
+        list(worker.iter_sse(Stub([b""]), stop, 10.0))
+    except worker.RouterError as exc:
+        need("关闭" in str(exc), "EOF 报错不对：%s" % exc)
+    else:
+        raise AssertionError("真 EOF 没有判成断线")
+
+    started = time.time()
+    try:
+        list(worker.iter_sse(Stub([socket.timeout("timed out")] * 30),
+                             stop, 0.3))
+    except worker.RouterError as exc:
+        need("静默" in str(exc), "静默报错不对：%s" % exc)
+    else:
+        raise AssertionError("静默超时没有判成断线")
+    need(time.time() - started < 2.0, "静默判定太慢")
 
 
 # --------------------------------------------------------------------------- #
