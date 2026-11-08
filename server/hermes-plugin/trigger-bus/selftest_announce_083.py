@@ -57,7 +57,7 @@ SPEC.loader.exec_module(plugin)
 
 plugin.LOG_PATH = TMP / "selftest.log"
 plugin._ack_async = lambda *a, **k: None                  # no HTTP in tests
-assert plugin.PLUGIN_VERSION in ("0.8.3", "0.8.4", "0.8.5"), \
+assert plugin.PLUGIN_VERSION in ("0.8.3", "0.8.4", "0.8.5", "0.9.0"), \
     plugin.PLUGIN_VERSION
 
 from gateway.config import Platform                      # noqa: E402
@@ -229,25 +229,34 @@ state, adapter = new_state()
 state.gateway.busy = True
 feed(state, ev(202, "notify", source="email", actor="HR", text="NOTIFY-ONLY"))
 plugin._dispatch(state, plugin._get_logger(), where="poll")
-queued = state.gateway.queue_calls[0][1] if state.gateway.queue_calls else None
-check("b. notify wake queued, no handle_message",
-      queued is not None and not adapter.handled,
-      "queued=%r handled=%d" % (getattr(queued, "text", None),
-                                len(adapter.handled)))
+held = next(iter(state.inflight.values()), None)
+check("b. busy notify held plugin-side, no wake and no slot write",
+      held is not None and not adapter.handled
+      and not state.gateway.queue_calls and not adapter._pending_messages,
+      "held=%s handled=%d slot=%s"
+      % (held is not None, len(adapter.handled),
+         list(adapter._pending_messages)))
 check("b. notify wake sends exactly one 📬 notice",
       adapter.sent == [(SOURCE.chat_id, NOTIFY_EXPECTED)],
       "sent=%r" % (adapter.sent,))
-check("b. the queued notify is still internal=True",
-      getattr(queued, "internal", None) is True,
-      "internal=%r" % (getattr(queued, "internal", None),))
+check("b. the held notify carries the 0.8.2 wake line and waits",
+      held is not None and held.text == NOTIFY_EXPECTED
+      and held.phase == "held",
+      "text=%r phase=%r" % (getattr(held, "text", None),
+                            getattr(held, "phase", None)))
 
 # idle notify: queued then drained by the plugin — still exactly one notice
 state, adapter = new_state()
 feed(state, ev(203, "notify", text="NOTIFY-IDLE"))
 plugin._dispatch(state, plugin._get_logger(), where="poll")
-check("b. idle notify drained via handle_message, one send",
-      len(adapter.handled) == 1 and len(adapter.sent) == 1,
-      "handled=%d sent=%r" % (len(adapter.handled), adapter.sent))
+check("b. idle notify drained via handle_message(internal=True), one send",
+      len(adapter.handled) == 1
+      and getattr(adapter.handled[0], "internal", None) is True
+      and len(adapter.sent) == 1,
+      "handled=%d internal=%r sent=%r"
+      % (len(adapter.handled),
+         getattr(adapter.handled[0], "internal", None) if adapter.handled else None,
+         adapter.sent))
 check("b. idle notify notice uses the default origin",
       adapter.sent == [(SOURCE.chat_id,
                         "📬 收到来自 selftest · Tester 的 Notify 消息")],
@@ -429,13 +438,13 @@ finally:
 
 yaml_text = (HERE / "plugin.yaml").read_text(encoding="utf-8")
 readme = (HERE / "README.md").read_text(encoding="utf-8")
-check("g. plugin.yaml version is 0.8.5",
-      "version: 0.8.5" in yaml_text, "")
+check("g. plugin.yaml version is 0.9.0",
+      "version: 0.9.0" in yaml_text, "")
 check("g. plugin.yaml documents both notices",
       "收到来自 <source> · <actor> 的 Event 消息" in yaml_text
       and "收到来自 <source> · <actor> 的 Notify 消息" in yaml_text, "")
-check("g. README is titled 0.8.5 and documents both notices",
-      readme.startswith("# trigger-bus (0.8.5)")
+check("g. README is titled 0.9.0 and documents both notices",
+      readme.startswith("# trigger-bus (0.9.0)")
       and "收到来自 <source> · <actor> 的 Event 消息" in readme
       and "收到来自 <source> · <actor> 的 Notify 消息" in readme, "")
 

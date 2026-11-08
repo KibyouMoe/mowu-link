@@ -51,7 +51,7 @@ SPEC.loader.exec_module(plugin)
 
 plugin.LOG_PATH = TMP / "selftest.log"
 plugin._ack_async = lambda *a, **k: None                  # no HTTP in tests
-assert plugin.PLUGIN_VERSION in ("0.8.3", "0.8.4", "0.8.5"), \
+assert plugin.PLUGIN_VERSION in ("0.8.3", "0.8.4", "0.8.5", "0.9.0"), \
     plugin.PLUGIN_VERSION
 
 from gateway.config import Platform                      # noqa: E402
@@ -344,8 +344,8 @@ check("d. ledger + claims clean after the single injection",
       % (state.cursor, len(state.inflight), len(state.woken_ids)))
 
 yaml_text = (HERE / "plugin.yaml").read_text(encoding="utf-8")
-check("d. plugin.yaml version is 0.8.5",
-      "version: 0.8.5" in yaml_text, "")
+check("d. plugin.yaml version is 0.9.0",
+      "version: 0.9.0" in yaml_text, "")
 check("d. plugin.yaml documents '一条 event 只走一条路'",
       "一条 event 只走一条路" in yaml_text, "")
 
@@ -354,7 +354,8 @@ check("d. plugin.yaml documents '一条 event 只走一条路'",
 # =========================================================================== #
 
 state, adapter = new_state()
-state.gateway.busy = True
+# 0.9.0: a busy notify is held plugin-side, so the wake text is produced by the
+# idle enqueue path (same _build_wake_event, same text).
 feed(state, ev(120, "notify", source="email", actor="HR",
                text="周报：本周进度正常", thread_key="email:a1b2",
                ts="2026-11-08T19:58:00+08:00"))
@@ -367,11 +368,12 @@ check("e. notify wake is one line, no card body / no interrupt header",
       len(ntext.splitlines()) == 1 and "#120" not in ntext
       and "\n> " not in ntext and "⚡" not in ntext and "打断" not in ntext,
       "lines=%d" % len(ntext.splitlines()))
-check("e. notify goes through the gateway queue, never handle_message",
+check("e. notify rides the gateway queue head, then that exact event is drained",
       queued is not None and getattr(queued, "internal", None) is True
-      and adapter.handled == [],
-      "internal=%s handled=%d" % (getattr(queued, "internal", None),
-                                  len(adapter.handled)))
+      and adapter.handled == [queued],
+      "internal=%s handled=%d same=%s"
+      % (getattr(queued, "internal", None), len(adapter.handled),
+         bool(adapter.handled and adapter.handled[0] is queued)))
 check("e. event wake does NOT use the '收到来自…Event 消息' shape",
       plugin._interrupt_text([ev(121, "event")])
       == "⚡ 来自 selftest · Tester 的打断"

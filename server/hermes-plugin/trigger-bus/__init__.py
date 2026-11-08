@@ -24,9 +24,12 @@ Architecture: a separate long-lived service (``mowu-trigger``, loopback
   * the level decides the mode and nothing else does (0.8.0):
         event  -> interrupt : busy => the running turn is interrupted at once;
                               idle  => starts a turn (``internal=False``);
-        notify -> queue     : busy => sits in the gateway's own pending queue
-                              and runs right after the turn; idle => queued
-                              then drained (``internal=True``, never interrupts);
+        notify -> queue     : busy => handed to Hermes' own busy queue
+                              (``handle_message(internal=True)`` -> session
+                              authority FIFO) and run after the turn really ends;
+                              0.9.0 never parks it in the adapter's pending slot,
+                              which used to open a turn inside a running one.
+                              idle => queued then drained (never interrupts);
     the wake message is one line naming the sender
     (``⚡ 来自 <source> · <actor> 的打断`` / ``📬 收到来自 <source> · <actor> 的
     Notify 消息``, 0.8.2), never in ``MessageEvent.metadata``: the gateway
@@ -186,6 +189,48 @@ Architecture: a separate long-lived service (``mowu-trigger``, loopback
   * nothing else moves: wake text, ``internal`` flags, queueing, cursor/ACK,
     cards and the delivery ledger are untouched.
 
+0.9.0 — ``notify`` is queued until the TURN ends, not until the next gap in it:
+
+  * the defect: a ``notify`` arriving while a turn was running was parked in the
+    gateway's per-session pending slot (``_queue_or_replace_pending_event``).
+    That slot is the server's "start this as the next turn" slot, so as soon as
+    ANY turn ended — a normal one, or one an interrupt cut short — the adapter
+    started a new turn from it, and starting a turn interrupts the running one
+    and kills its in-flight tool process (``[Command interrupted]``, exit 130).
+    Field log: ``notify QUEUED 22:35:32`` (busy=1) → ``DELIVERED 22:35:57``
+    while ``sleep 50`` (started 22:35:16) was still running; it died at 22:35:56.
+  * the fix reuses Hermes' OWN busy queue — the same one the WebUI uses — instead
+    of a plugin-made turn-end guess.  When a notify arrives while the session is
+    running, the plugin calls ``adapter.handle_message(event)`` exactly as the
+    idle path does: on a busy session that lands in the session authority's
+    durable FIFO and its drain runs the row only after the current turn has
+    finished.  Entry points (nothing in Hermes is modified):
+
+        gateway/platforms/base.py:4017   _handle_message_while_active
+        gateway/session_ingress_burst.py:102  dispatch_busy_burst
+        gateway/session_ingress.py:497   dispatch_shared_busy -> :39 admit_message
+        gateway/session_authority.py:522 SessionAuthority.admit_native
+        gateway/session_authority.py:1309 SessionAuthority._drain (claims the head
+                                          only while no turn is executing)
+
+    It is used only when ``runner.session_authority`` exists — the exact
+    predicate ``BasePlatformAdapter._shared_runtime_owns_input`` uses — so a
+    deployment without the authority never falls into the busy-input mode
+    (``busy_input_mode: interrupt`` stays untouched).
+  * without an authority the plugin holds the batch in its OWN queue instead:
+    no gateway slot write, no wake, no handle_message.  ``notify HELD`` is
+    logged with ``busy=1 phase=held`` and the cursor does not move; only
+    ``_drain_idle`` wakes it once ``_busy()`` is False.
+  * in both routes the wake is ``internal=True`` and the cards still ride the
+    new turn's ``pre_llm_call``, which is the delivery proof and the only place
+    the cursor/ACK move.
+  * idle-time notify is unchanged: it is queued and drained in the same tick,
+    exactly as in 0.8.0.  ``event`` is unchanged in both states (hard interrupt
+    when busy, ``internal=False`` wake when idle).
+  * a batch the FIFO never proves (turn never ends / gateway gone) keeps the
+    normal TTL ledger; a native-queued batch is never re-woken (that would queue
+    it twice) — the durable row owns its own execution.
+
 Design rules:
   * never import Hermes internals — only the hook argument dict is used;
   * never block the model call: the hook does no network I/O (ACK is sent by
@@ -224,7 +269,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional
 
-PLUGIN_VERSION = "0.8.5"
+PLUGIN_VERSION = "0.9.0"
 MAX_QUEUE = 50
 HTTP_TIMEOUT = 5.0
 LOG_MAX_BYTES = 5 * 1024 * 1024
@@ -371,7 +416,7 @@ class _Delivery:
     """
 
     __slots__ = ("token", "events", "text", "marker", "mode", "session_key",
-                 "created_at", "attempts", "phase", "event")
+                 "created_at", "attempts", "phase", "event", "native")
 
     def __init__(self, token: str, events: List[Dict[str, Any]], text: str,
                  mode: str, session_key: str) -> None:
@@ -383,8 +428,11 @@ class _Delivery:
         self.session_key = session_key
         self.created_at = time.monotonic()
         self.attempts = 1
-        self.phase = "queued"          # queued -> in_flight -> (removed)
+        self.phase = "queued"          # queued/held -> in_flight -> (removed)
         self.event: Any = None         # the MessageEvent handed to the gateway
+        # 0.9.0: handed to Hermes' own busy queue (session authority FIFO) instead
+        # of the adapter's pending slot; the FIFO owns the turn-end timing.
+        self.native = False
 
     def describe(self) -> str:
         ids = ",".join(str(e.get("id")) for e in self.events)
@@ -1576,6 +1624,11 @@ def _events_queued(state: "_BusState",
 
 def _still_in_gateway_queue(state: "_BusState", delivery: "_Delivery") -> bool:
     """Is this exact event still parked in the gateway's pending slot/FIFO?"""
+    if delivery.event is None or delivery.native:
+        # 0.9.0: a held batch never entered the gateway, and a native-queued batch
+        # lives in the session authority's durable FIFO (state.db), not in the
+        # adapter slot — ``slot.get() is None`` must not read as "still parked".
+        return False
     adapter = _adapter_for(state)
     slot = getattr(adapter, "_pending_messages", None) if adapter is not None else None
     if isinstance(slot, dict) and slot.get(delivery.session_key) is delivery.event:
@@ -1607,6 +1660,14 @@ def _retry_inflight(state: "_BusState", logger: logging.Logger) -> int:
                  if now - d.created_at >= BATCH_TTL]
     retried = 0
     for delivery in stale:
+        if delivery.native:
+            # 0.9.0: handed to the session authority's durable FIFO. Its drain
+            # runs the row when the running turn finishes; re-waking would queue
+            # the same notify twice. Only the clock is refreshed.
+            delivery.created_at = now
+            logger.debug("native-queued notify still waiting for its FIFO turn "
+                         "(%s); not retried", delivery.describe())
+            continue
         if delivery.mode == "queue" and _still_in_gateway_queue(state, delivery):
             delivery.created_at = now
             logger.debug("delivery still waiting in the gateway queue (%s); "
@@ -1666,9 +1727,38 @@ def _run_on_gateway_loop(state: "_BusState", fn: Any, *args: Any,
     return True
 
 
+def _native_queue_available(state: "_BusState") -> bool:
+    """Is Hermes' own busy queue reachable?  (The same FIFO the WebUI uses.)
+
+    That is the mechanism the trainer wants reused instead of a plugin-made
+    "drain at end of turn": with ``runner.session_authority`` present,
+    ``BasePlatformAdapter._shared_runtime_owns_input`` is true, so a
+    ``handle_message`` on a BUSY session never goes through the busy-input mode
+    (interrupt/steer); it is committed as a durable admission row and executed
+    by the authority's FIFO once the running turn has finished:
+
+        adapter.handle_message(event)                  gateway/platforms/base.py:4045
+          -> _handle_message_while_active              gateway/platforms/base.py:4017
+          -> dispatch_busy_burst                       gateway/session_ingress_burst.py:102
+          -> dispatch_shared_busy -> admit_message     gateway/session_ingress.py:497,39
+          -> SessionAuthority.admit_native             gateway/session_authority.py:522
+        and the next row is claimed only when no turn is executing:
+          SessionAuthority._drain / _claim_with_retry  gateway/session_authority.py:1309
+
+    "Turn finished" is therefore Hermes' own notion (the producer turn closes),
+    not a guess made here.
+    """
+    return getattr(state.gateway, "session_authority", None) is not None
+
+
 def _notify_enqueue(state: "_BusState", logger: logging.Logger,
                     batch: List[Dict[str, Any]], *, where: str) -> bool:
-    """``notify`` -> the gateway's own per-session pending queue (internal=True).
+    """``notify`` -> queue (internal=True); never interrupt, never inside a turn.
+
+    Idle: the gateway's own per-session pending queue, drained in this tick.
+    Busy (0.9.0): Hermes' own busy queue via ``handle_message`` — the session
+    authority's durable FIFO runs it after the current turn finishes — with a
+    plugin-side held batch as the fallback when no authority is reachable.
 
     No timer, no self-made wake: the gateway drains this queue itself at the
     end of the running turn.  Nothing is ACKed here; the batch is only marked
@@ -1684,6 +1774,47 @@ def _notify_enqueue(state: "_BusState", logger: logging.Logger,
         logger.debug("notify dedupe: ids=%s already queued or in flight "
                      "(where=%s)", ",".join(_event_key(e) for e in batch), where)
         return False
+    session_key, how = _session_key_for(state)
+    if _busy(state, logger):
+        # 0.9.0 — "queue" means AT THE TURN BOUNDARY, not "at the next gap".
+        # The gateway's pending slot is drained at ANY turn end (including one an
+        # interrupt cut short) and the adapter then starts a new turn from it;
+        # starting a turn interrupts the running one and kills its in-flight
+        # tool process.  A notify that arrives while the trainer's turn still
+        # runs therefore never goes there.
+        text = _notify_text(fresh)
+        ids = [int(e["id"]) for e in fresh if e.get("id") is not None]
+        token = "q:" + (",".join(str(i) for i in ids) or _event_key(fresh[0]))
+        if (state.source is not None and _adapter_for(state) is not None
+                and _native_queue_available(state)):
+            # Preferred: Hermes' own queue (the WebUI one).  handle_message on a
+            # busy session commits a durable admission and its FIFO runs it
+            # after this turn is over — no plugin-side turn-end guessing.
+            if _wake(state, fresh, internal=True, text=text, announce=False):
+                delivery = _register_delivery(state, token, fresh, text,
+                                              "queue", session_key, None)
+                delivery.phase = "in_flight"
+                delivery.native = True
+                logger.info("notify NATIVE-QUEUED n=%d ids=%s session_key=%s "
+                            "via=%s busy=1 route=handle_message->admit_native "
+                            "where=%s",
+                            len(fresh), ",".join(str(i) for i in ids) or "-",
+                            session_key or "-", how or "-", where)
+                return True
+            logger.warning("native queue hand-over failed; holding ids=%s "
+                           "locally for the turn boundary (where=%s)",
+                           ",".join(str(i) for i in ids) or "-", where)
+        # Fallback (no session authority / no source yet): keep it HERE.  No
+        # slot write, no wake, no handle_message.  _drain_idle() wakes it only
+        # after _busy() is False again.
+        delivery = _register_delivery(state, token, fresh, text, "queue",
+                                      session_key, None)
+        delivery.phase = "held"
+        logger.info("notify HELD n=%d ids=%s session_key=%s via=%s busy=1 "
+                    "phase=held reason=turn_still_running where=%s",
+                    len(fresh), ",".join(str(i) for i in ids) or "-",
+                    session_key or "-", how or "-", where)
+        return True
     gateway = state.gateway
     if gateway is None:
         logger.warning("notify cannot be queued: no gateway captured yet; "
@@ -1696,7 +1827,6 @@ def _notify_enqueue(state: "_BusState", logger: logging.Logger,
                        "_queue_or_replace_pending_event; %d event(s) stay "
                        "queued (where=%s)", len(fresh), where)
         return False
-    session_key, how = _session_key_for(state)
     if not session_key:
         logger.warning("notify cannot be queued: no session key yet (no "
                        "captured source and no session_id); %d event(s) stay "
@@ -1764,15 +1894,46 @@ def _after_handle_message(state: "_BusState", logger: logging.Logger,
                  "proof", delivery.describe())
 
 
+def _drain_held(state: "_BusState", logger: logging.Logger,
+                delivery: "_Delivery", *, where: str) -> str:
+    """0.9.0: wake a notify that was held back while the turn was still running.
+
+    Only reachable from :func:`_drain_idle`, i.e. with ``_busy()`` False: the
+    turn really ended.  The wake is ``internal=True`` — the exact call the idle
+    path has always made — and the cards ride that new turn's ``pre_llm_call``,
+    which is the delivery proof.  Nothing here touches the cursor.
+    """
+    if _busy(state, logger):
+        return "busy"
+    text = delivery.text or _notify_text(delivery.events)
+    token = delivery.token
+    if not _wake(state, delivery.events, internal=True, text=text,
+                 on_done=_interrupt_done(state, logger, token), announce=False):
+        # No gateway/source/loop yet: keep it queued, retry on the next tick.
+        return "blocked"
+    delivery.phase = "in_flight"
+    ids = ", ".join(str(e.get("id")) for e in delivery.events)
+    logger.info("notify DRAINED (turn finished) %s ids=%s cursor stays %d "
+                "woke=internal=true where=%s",
+                delivery.describe(), ids or "-", state.cursor, where)
+    # No notice here: the 📬 line went out when the batch was HELD (the 0.8.5
+    # "one line per wake" contract, and _dispatch owns it), so a second send at
+    # the drain would be a duplicate.
+    return "drained"
+
+
 def _drain_head(state: "_BusState", logger: logging.Logger,
                 delivery: "_Delivery", *, where: str) -> str:
     """Process the head of this session's pending queue (idle only).
 
-    Strategy, in order: a gateway drain entry found by name; else pop the head
-    with ``adapter.get_pending_message`` — only when it is *our* event — and
-    hand that same event to ``adapter.handle_message``.  The strategy is
-    logged (once per kind) so the journal always says which one ran.
+    Strategy, in order: a batch held back by 0.9.0 (never handed over) is woken
+    with ``_wake(internal=True)``; else a gateway drain entry found by name;
+    else pop the head with ``adapter.get_pending_message`` — only when it is
+    *our* event — and hand that same event to ``adapter.handle_message``.  The
+    strategy is logged (once per kind) so the journal always says which one ran.
     """
+    if delivery.event is None:
+        return _drain_held(state, logger, delivery, where=where)
     adapter = _adapter_for(state)
     if adapter is None:
         return "no-adapter"
@@ -1858,7 +2019,7 @@ def _drain_idle(state: "_BusState", logger: logging.Logger, *, where: str) -> bo
         return False
     with state.lock:
         waiting = [d for d in state.inflight.values()
-                   if d.mode == "queue" and d.phase == "queued"]
+                   if d.mode == "queue" and d.phase in ("queued", "held")]
     if not waiting:
         return False
     delivery = waiting[0]
@@ -2121,7 +2282,7 @@ def _on_post_llm_call(**kwargs: Any) -> None:
             if key in state.post_turn_marks:
                 return None
             has_work = bool(_unread_locked(state)) or any(
-                d.mode == "queue" and d.phase == "queued"
+                d.mode == "queue" and d.phase in ("queued", "held")
                 for d in state.inflight.values())
             if not has_work:
                 _get_logger().debug("post_llm_call: nothing unread; no dispatch")

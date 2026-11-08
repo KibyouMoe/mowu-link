@@ -49,7 +49,7 @@ SPEC.loader.exec_module(plugin)
 
 plugin.LOG_PATH = TMP / "selftest.log"
 plugin._ack_async = lambda *a, **k: None                  # no HTTP in tests
-assert plugin.PLUGIN_VERSION.startswith("0.8."), plugin.PLUGIN_VERSION
+assert plugin.PLUGIN_VERSION.startswith(("0.8.", "0.9.")), plugin.PLUGIN_VERSION
 
 from gateway.config import Platform                      # noqa: E402
 from gateway.session import SessionSource                 # noqa: E402
@@ -111,6 +111,16 @@ class FakeGateway:
         slot = self.adapters[Platform.FEISHU]._pending_messages
         slot[session_key] = event
         event._gateway_accepted = True
+
+
+class NativeQueueGateway(FakeGateway):
+    """FakeGateway + ``session_authority``: the predicate the adapter's
+    ``_shared_runtime_owns_input`` uses, so the plugin must take Hermes' own
+    busy queue (``handle_message`` -> ``admit_native``) instead of the slot."""
+
+    def __init__(self, adapter: FakeAdapter, **kwargs) -> None:
+        super().__init__(adapter, **kwargs)
+        self.session_authority = object()
 
 
 RESULTS = []
@@ -225,7 +235,7 @@ check("1b. no source -> session_id fallback, logged by name",
       "%s via %s" % (key, how))
 
 # =========================================================================== #
-# a. busy + notify -> one queue call, never handle_message
+# a. busy + notify -> held by the plugin, never the gateway's pending slot
 # =========================================================================== #
 
 state, adapter = new_state()
@@ -234,27 +244,30 @@ feed(state, ev(101, "notify", text="BUSY-NOTIFY"))
 offset = mark()
 did = plugin._dispatch(state, plugin._get_logger(), where="poll")
 gw = state.gateway
-check("a. busy + notify -> 1 _queue_or_replace_pending_event",
-      did is True and len(gw.queue_calls) == 1,
+check("a. busy + notify -> 0 _queue_or_replace_pending_event (0.9.0 hold)",
+      did is True and len(gw.queue_calls) == 0,
       "queue_calls=%d" % len(gw.queue_calls))
 check("a. busy + notify -> handle_message NOT called",
       not adapter.handled, "handled=%d" % len(adapter.handled))
-queued_event = gw.queue_calls[0][1] if gw.queue_calls else None
-check("a. queued MessageEvent is internal=True (queue, not interrupt)",
-      queued_event is not None and queued_event.internal is True,
-      "internal=%s" % getattr(queued_event, "internal", None))
-check("a. queue call uses the source-derived routing key",
-      gw.queue_calls[0][0] == ROUTING_KEY if gw.queue_calls else False,
-      "key=%s" % (gw.queue_calls[0][0] if gw.queue_calls else "-"))
+held = next(iter(state.inflight.values()), None)
+check("a. the batch is held with no gateway event attached",
+      held is not None and held.event is None and held.phase == "held",
+      "held=%s phase=%s" % (held is not None, getattr(held, "phase", None)))
+check("a. the hold uses the source-derived routing key",
+      held is not None and held.session_key == ROUTING_KEY,
+      "key=%s" % (getattr(held, "session_key", "-"),))
 check("a. batch waits in the local queue, cursor NOT advanced",
       ids_of(state.events) == [101] and state.cursor == 0,
       "local=%s cursor=%d" % (ids_of(state.events), state.cursor))
-check("a. the queued wake is the one-line notice (cards stay behind)",
-      queued_event is not None
-      and queued_event.text == "📬 收到来自 selftest 的 Notify 消息",
-      "text=%r" % (getattr(queued_event, "text", ""),))
-check("a. log says notify QUEUED (busy=1)",
-      "notify QUEUED n=1 ids=101" in tail(offset) and "busy=1" in tail(offset), "")
+check("a. the held wake is the one-line notice (cards stay behind)",
+      held is not None
+      and held.text == "📬 收到来自 selftest 的 Notify 消息"
+      and not adapter._pending_messages,
+      "text=%r slot=%s" % (getattr(held, "text", ""),
+                           list(adapter._pending_messages)))
+check("a. log says notify HELD (busy=1, turn still running)",
+      "notify HELD n=1 ids=101" in tail(offset) and "busy=1" in tail(offset)
+      and "reason=turn_still_running" in tail(offset), "")
 
 # =========================================================================== #
 # b. idle + notify -> enqueue then drain with handle_message
@@ -310,14 +323,35 @@ state, adapter = new_state()
 state.gateway.busy = True
 feed(state, ev(131, "notify", text="PROVE-ME"))
 plugin._dispatch(state, plugin._get_logger(), where="poll")
-wake_line = state.gateway.queue_calls[0][1].text
-check("d. queued batch: cursor still 0, delivery in flight",
-      state.cursor == 0 and len(state.inflight) == 1,
-      "cursor=%d inflight=%d" % (state.cursor, len(state.inflight)))
-check("d. the queued wake is the notice line; the card waits locally",
-      wake_line == "📬 收到来自 selftest 的 Notify 消息"
+held = next(iter(state.inflight.values()))
+check("d. held batch: cursor still 0, one delivery in the ledger",
+      state.cursor == 0 and len(state.inflight) == 1 and held.event is None,
+      "cursor=%d inflight=%d event=%s"
+      % (state.cursor, len(state.inflight), held.event))
+check("d. the held wake is the notice line; the card waits locally",
+      held.text == "📬 收到来自 selftest 的 Notify 消息"
       and ids_of(state.events) == [131],
-      "wake=%r local=%s" % (wake_line, ids_of(state.events)))
+      "wake=%r local=%s" % (held.text, ids_of(state.events)))
+
+# The turn is STILL running (a tool is in flight): more ticks deliver nothing.
+plugin._dispatch(state, plugin._get_logger(), where="poll")
+plugin._dispatch(state, plugin._get_logger(), where="poll")
+check("d. repeat ticks while the turn runs deliver nothing",
+      not adapter.handled and state.cursor == 0
+      and not state.gateway.queue_calls and len(state.inflight) == 1,
+      "handled=%d cursor=%d queue_calls=%d"
+      % (len(adapter.handled), state.cursor, len(state.gateway.queue_calls)))
+
+# Turn over: the plugin wakes the held batch itself (internal=True).
+state.gateway.busy = False
+plugin._dispatch(state, plugin._get_logger(), where="post_llm_call")
+wake_line = adapter.handled[0].text if adapter.handled else ""
+check("d. turn over -> held batch woken via handle_message(internal=True)",
+      len(adapter.handled) == 1 and adapter.handled[0].internal is True
+      and wake_line == "📬 收到来自 selftest 的 Notify 消息",
+      "handled=%d internal=%s text=%r"
+      % (len(adapter.handled), getattr(adapter.handled[0], "internal", None)
+         if adapter.handled else None, wake_line))
 
 # A normal turn is the turn the wake starts (or the next one): the cards go in
 # through the unchanged injection path, which is the delivery proof.
@@ -342,15 +376,17 @@ replay = ev(141, "notify", text="ONCE-ONLY")
 batch = list(plugin._merge_events(state, [replay]) and [replay])
 plugin._notify_enqueue(state, plugin._get_logger(), batch, where="t1")
 plugin._notify_enqueue(state, plugin._get_logger(), batch, where="t2")
-check("e. same event_id twice -> one queue call",
-      len(state.gateway.queue_calls) == 1,
-      "queue_calls=%d" % len(state.gateway.queue_calls))
+check("e. same event_id twice -> one held batch, no gateway write",
+      len(state.inflight) == 1 and not state.gateway.queue_calls,
+      "inflight=%d queue_calls=%d"
+      % (len(state.inflight), len(state.gateway.queue_calls)))
 # Re-polling the server cannot duplicate it either: the id is in the ledger.
 feed(state, ev(141, "notify", text="ONCE-ONLY"))
 plugin._dispatch(state, plugin._get_logger(), where="poll")
 check("e. a re-pulled copy is not queued again",
-      len(state.gateway.queue_calls) == 1,
-      "queue_calls=%d" % len(state.gateway.queue_calls))
+      len(state.inflight) == 1 and not state.gateway.queue_calls,
+      "inflight=%d queue_calls=%d"
+      % (len(state.inflight), len(state.gateway.queue_calls)))
 
 # =========================================================================== #
 # f. no gateway / no adapter -> stays queued, WARN, never lost
@@ -385,8 +421,9 @@ check("f. no adapter -> WARN says so",
       "no adapter" in tail(offset), "")
 
 # A gateway that refuses admission (queue cap / no drainable slot) keeps it too.
+# (0.9.0: a busy notify is held plugin-side and never reaches the gateway, so the
+# refusal path is exercised on the idle enqueue, the only place it can happen.)
 state, adapter = new_state()
-state.gateway.busy = True
 state.gateway.accept = False
 feed(state, ev(153, "notify", text="REFUSED"))
 offset = mark()
@@ -434,15 +471,15 @@ feed(state, ev(171, "notify", text="LOST-SLOT"))
 plugin._dispatch(state, plugin._get_logger(), where="poll")
 assert len(state.inflight) == 1
 delivery = next(iter(state.inflight.values()))
-adapter._pending_messages.pop(ROUTING_KEY, None)     # gateway lost it
 delivery.created_at = time.monotonic() - plugin.BATCH_TTL - 1
 offset = mark()
 plugin._dispatch(state, plugin._get_logger(), where="poll")
-check("h. unproven batch past TTL -> marks cleared, enqueued again",
-      len(state.gateway.queue_calls) == 2 and ids_of(state.events) == [171]
-      and state.cursor == 0,
-      "queue_calls=%d local=%s"
-      % (len(state.gateway.queue_calls), ids_of(state.events)))
+check("h. held batch past TTL -> marks cleared and held again, never lost",
+      len(state.inflight) == 1 and ids_of(state.events) == [171]
+      and state.cursor == 0 and not state.gateway.queue_calls,
+      "inflight=%d local=%s cursor=%d queue_calls=%d"
+      % (len(state.inflight), ids_of(state.events), state.cursor,
+         len(state.gateway.queue_calls)))
 check("h. the retry is logged",
       "delivery not PROVEN" in tail(offset), "")
 
@@ -454,11 +491,93 @@ state, adapter = new_state()
 state.gateway.busy = True
 feed(state, ev(181, "notify", text="N"), ev(182, "event", text="E"))
 plugin._dispatch(state, plugin._get_logger(), where="poll")
-queued_levels = [e.internal for _, e in state.gateway.queue_calls]
+held_levels = [d.mode for d in state.inflight.values() if d.mode == "queue"]
 handled_levels = [e.internal for e in adapter.handled]
-check("i. notify -> queue(internal=True), event -> interrupt(internal=False)",
-      queued_levels == [True] and handled_levels == [False],
-      "queued=%s handled=%s" % (queued_levels, handled_levels))
+check("i. notify -> held(queue), event -> interrupt(handle_message internal=False)",
+      held_levels == ["queue"] and handled_levels == [False]
+      and not state.gateway.queue_calls,
+      "held=%s handled=%s queue_calls=%d"
+      % (held_levels, handled_levels, len(state.gateway.queue_calls)))
+
+# =========================================================================== #
+# p. 0.9.0 — busy + notify WITH a session authority -> Hermes' own queue
+# =========================================================================== #
+
+state, adapter = new_state()
+state.gateway = NativeQueueGateway(adapter, busy=True)
+feed(state, ev(241, "notify", text="NATIVE-QUEUE"))
+offset = mark()
+did = plugin._dispatch(state, plugin._get_logger(), where="poll")
+check("p. busy + notify + session authority -> handle_message (native queue)",
+      did is True and len(adapter.handled) == 1
+      and adapter.handled[0].internal is True
+      and not state.gateway.queue_calls,
+      "handled=%d internal=%s queue_calls=%d"
+      % (len(adapter.handled),
+         getattr(adapter.handled[0], "internal", None) if adapter.handled else None,
+         len(state.gateway.queue_calls)))
+native = next(iter(state.inflight.values()), None)
+check("p. the batch is marked native-queued (not held, not slot-parked)",
+      native is not None and native.native is True
+      and native.phase == "in_flight" and not adapter._pending_messages,
+      "native=%s phase=%s slot=%s"
+      % (getattr(native, "native", None), getattr(native, "phase", None),
+         list(adapter._pending_messages)))
+check("p. log names the native admission route",
+      "notify NATIVE-QUEUED" in tail(offset)
+      and "admit_native" in tail(offset)
+      and "busy=1" in tail(offset), "")
+# Repeat ticks must not queue it twice (the durable row owns its execution).
+plugin._dispatch(state, plugin._get_logger(), where="poll")
+check("p. a second tick does not hand the same batch over again",
+      len(adapter.handled) == 1 and len(state.inflight) == 1
+      and state.cursor == 0,
+      "handled=%d inflight=%d cursor=%d"
+      % (len(adapter.handled), len(state.inflight), state.cursor))
+# The queued turn finally runs: pre_llm_call is still the only proof.
+injected = plugin._on_pre_llm_call(platform="feishu", session_id="s-p",
+                                   user_message=adapter.handled[0].text)
+body = injected.get("context", "") if isinstance(injected, dict) else ""
+check("p. the queued turn injects the card and advances the cursor once",
+      state.cursor == 241 and "#241 notify selftest 20:00" in body
+      and "> NATIVE-QUEUE" in body,
+      "cursor=%d context=%r" % (state.cursor, body[:48]))
+
+# =========================================================================== #
+# q. 0.9.0 — the reported scenario: sleep 50 in flight, notify arrives
+# =========================================================================== #
+
+state, adapter = new_state()
+state.gateway.busy = True                      # a turn is running its tool
+feed(state, ev(251, "notify", text="SLEEP-50"))
+tick = mark()
+for _ in range(5):                             # the tool keeps running
+    plugin._dispatch(state, plugin._get_logger(), where="poll")
+during = tail(tick)
+check("q. tool in flight: QUEUED/HELD, no DELIVERED, no wake at all",
+      not adapter.handled and state.cursor == 0
+      and "DELIVERED" not in during and "notify HELD" in during
+      and not state.gateway.queue_calls,
+      "handled=%d cursor=%d queue_calls=%d"
+      % (len(adapter.handled), state.cursor, len(state.gateway.queue_calls)))
+# The tool returns and the turn finishes: NOW the batch may open its own turn.
+state.gateway.busy = False
+plugin._dispatch(state, plugin._get_logger(), where="post_llm_call")
+after = tail(tick)
+check("q. turn finished -> one internal=True wake, logged as the turn boundary",
+      len(adapter.handled) == 1 and adapter.handled[0].internal is True
+      and "notify DRAINED (turn finished)" in after,
+      "handled=%d internal=%s"
+      % (len(adapter.handled),
+         getattr(adapter.handled[0], "internal", None) if adapter.handled else None))
+injected = plugin._on_pre_llm_call(platform="feishu", session_id="s-q",
+                                   user_message=adapter.handled[0].text)
+body = injected.get("context", "") if isinstance(injected, dict) else ""
+check("q. the new turn injects the card, cursor moves exactly once",
+      state.cursor == 251 and "> SLEEP-50" in body
+      and tail(tick).count("DELIVERED") == 1,
+      "cursor=%d delivered_lines=%d"
+      % (state.cursor, tail(tick).count("DELIVERED")))
 
 # =========================================================================== #
 # l. the poll loop itself drives notify (queue) and event (interrupt)
@@ -577,8 +696,8 @@ check("k. pre_llm_call proof advances the cursor after the real method",
       state.cursor == 191 and not state.inflight,
       "cursor=%d inflight=%d" % (state.cursor, len(state.inflight)))
 
-# Two queued notifies must not overwrite each other through the real method:
-# slot first, FIFO overflow after it.
+# Two notifies while the turn runs must not overwrite each other either: 0.9.0
+# holds both plugin-side (no slot, no FIFO overflow) and the ledger keeps both.
 state, adapter = new_state()
 real_gateway = RealQueueStub(adapter)
 state.gateway = real_gateway
@@ -591,11 +710,11 @@ feed(state, ev(193, "notify", text="SECOND-QUEUED"))
 plugin._dispatch(state, plugin._get_logger(), where="real-2")
 first_event = adapter._pending_messages.get(ROUTING_KEY)
 overflow = real_gateway._empty_state.conversation.queued_events
-check("k. two notifies -> slot + FIFO overflow, both kept",
-      len(state.inflight) == 2 and first_event is not None
-      and len(overflow) == 1
-      and first_event is not overflow[0]
-      and ids_of(state.events) == [192, 193],
+check("k. two notifies while busy -> two held batches, no slot/overflow write",
+      len(state.inflight) == 2 and first_event is None
+      and not overflow
+      and ids_of(state.events) == [192, 193]
+      and all(d.phase == "held" for d in state.inflight.values()),
       "inflight=%d slot=%s overflow=%s local=%s"
       % (len(state.inflight), first_event is not None, len(overflow),
          ids_of(state.events)))
@@ -643,7 +762,8 @@ while not loop_ident and time.monotonic() < deadline:
 
 state, adapter = new_state()
 state.loop = LOOP
-state.gateway.busy = True
+# Idle enqueue: the only path that still calls the gateway (0.9.0 holds a busy
+# notify plugin-side), so this still proves the loop-thread marshalling.
 feed(state, ev(221, "notify", text="ON-THE-LOOP"))
 plugin._dispatch(state, plugin._get_logger(), where="poll")
 check("n. queue call executed on the gateway loop thread",

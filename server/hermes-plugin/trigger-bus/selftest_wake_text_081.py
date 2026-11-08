@@ -53,7 +53,7 @@ SPEC.loader.exec_module(plugin)
 
 plugin.LOG_PATH = TMP / "selftest.log"
 plugin._ack_async = lambda *a, **k: None                  # no HTTP in tests
-assert plugin.PLUGIN_VERSION in ("0.8.3", "0.8.4", "0.8.5"), \
+assert plugin.PLUGIN_VERSION in ("0.8.3", "0.8.4", "0.8.5", "0.9.0"), \
     plugin.PLUGIN_VERSION
 
 from gateway.config import Platform                      # noqa: E402
@@ -187,7 +187,8 @@ check("a. the cards stay in the local queue for pre_llm_call",
 # =========================================================================== #
 
 state, adapter = new_state()
-state.gateway.busy = True
+# 0.9.0: a busy notify is held plugin-side, so the wake text is produced by the
+# idle enqueue path (same _build_wake_event, same text).
 feed(state, ev(58, "notify", source="email", actor="HR",
                text="周报：本周进度正常", thread_key="email:a1b2",
                ts="2026-11-08T19:58:00+08:00"))

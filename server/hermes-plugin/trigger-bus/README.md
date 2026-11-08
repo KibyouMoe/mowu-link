@@ -1,4 +1,4 @@
-# trigger-bus (0.8.5)
+# trigger-bus (0.9.0)
 
 Deliver events from the local **mowu-trigger** service (127.0.0.1:8791) into a
 Hermes session — including when the trainer is not talking.
@@ -153,7 +153,7 @@ card a second time.
 | level    | 忙 (a turn is running) | 闲 (nothing running) |
 |----------|------------------------|----------------------|
 | `event`  | **中断** — `handle_message(internal=False)`: the running turn is interrupted at once | **起一轮** — `handle_message(internal=False)` |
-| `notify` | **排队** — `_queue_or_replace_pending_event(session_key, event)`, `internal=True`; the gateway drains it when this turn ends, never interrupts | **入队 + drain** — same queue call, then the head is processed immediately (`handle_message`) |
+| `notify` | **排队** — `handle_message(internal=True)`: Hermes' own busy queue (`admit_native` FIFO) runs it after this turn really finishes; never the adapter pending slot, never an interrupt | **入队 + drain** — `_queue_or_replace_pending_event`, then the head is processed immediately (`handle_message`) |
 | `info`   | never injected (worker-only) | never injected |
 | `log`    | never injected (archive-only) | never injected |
 
@@ -161,14 +161,45 @@ No extra field, flag or priority influences this: the level alone does.
 
 ### 排队 (notify)
 
-`notify` is handed to the gateway's **own** per-session pending queue:
+**0.9.0 — a busy notify never touches the adapter's pending slot.** That slot is
+the server's "start this as the next turn" slot: as soon as *any* turn ended
+(including one an interrupt cut short) the adapter started a new turn from it,
+and starting a turn interrupts the running one and kills its in-flight tool
+process. Field log: `notify QUEUED 22:35:32` (busy=1) → `DELIVERED 22:35:57`
+while `sleep 50` (started 22:35:16) was still running — it died at 22:35:56.
+
+While a turn runs the plugin now calls what the idle path calls anyway:
+
+```python
+adapter.handle_message(event)        # event.internal = True, body = 📬 …
+```
+
+With `runner.session_authority` present (the predicate
+`BasePlatformAdapter._shared_runtime_owns_input` uses) this is Hermes' **own
+busy queue** — the same one the WebUI uses:
+
+```
+gateway/platforms/base.py:4017         _handle_message_while_active
+gateway/session_ingress_burst.py:102   dispatch_busy_burst
+gateway/session_ingress.py:497,39      dispatch_shared_busy -> admit_message
+gateway/session_authority.py:522       SessionAuthority.admit_native
+gateway/session_authority.py:1309      SessionAuthority._drain  (claims the head only while no turn executes)
+```
+
+"Turn finished" is therefore Hermes' own notion, not a plugin guess, and
+`busy_input_mode: interrupt` is never consulted for these internal events.
+Without an authority the plugin holds the batch in its own queue (`notify HELD
+… phase=held reason=turn_still_running`) and `_drain_idle` wakes it only once
+`_busy()` is False.
+
+Idle notify is unchanged — queued into the gateway's per-session queue:
 
 ```python
 gateway._queue_or_replace_pending_event(session_key, event)   # internal=True
 ```
 
 - the gateway drains that queue itself at the end of the running turn — this
-  plugin runs **no timer and no self-made wake** for a notify;
+  plugin runs **no timer and no self-made wake** for an idle notify;
 - the routing key comes from the session source captured by
   `pre_gateway_dispatch` (`gateway._session_key_for_source(source)`, else
   `gateway.session.build_session_key(source)`), e.g.
@@ -313,6 +344,9 @@ live gateway + session source; without it only injection works, never a wake).
 /Users/kibyou/.hermes/tools/python-3.14.9*/bin/python3 selftest_dedupe_082.py
 /Users/kibyou/.hermes/tools/python-3.14.9*/bin/python3 selftest_announce_083.py
 /Users/kibyou/.hermes/tools/python-3.14.9*/bin/python3 selftest_notify_notice_085.py
+
+# 0.9.0: the REAL gateway classes (BasePlatformAdapter + the FIFO branch), no gateway
+/Users/kibyou/.hermes/tools/python-3.14.9*/bin/python3 probe_native_queue_entry.py
 ```
 
 Function-level only: no gateway process, no network, no service.
@@ -320,13 +354,17 @@ Function-level only: no gateway process, no network, no service.
 - `selftest_format_070.py` — the card renderer (1 / 3 / 8 events, field
   completeness, `[N 条]`, `+K more`, 100-character clipping, newline collapse,
   the `⚡ 立刻处理：` mid-turn insert, the one-line wake text).
-- `selftest_queue_interrupt_080.py` — the 0.8.0 contract with a
-  `FakeGateway` that records `_queue_or_replace_pending_event` and
-  `handle_message`: busy+notify ⇒ one queue call and no `handle_message`;
-  idle+notify ⇒ queued then drained; busy+event ⇒
-  `handle_message(internal=False)`; cursor untouched while queued and advanced
-  only by the injection; the same `event_id` twice ⇒ one enqueue; no
-  gateway / no adapter ⇒ stays queued with a WARN; a raising drain ⇒ event
+- `selftest_queue_interrupt_080.py` — the queue/interrupt contract. 0.9.0
+  cases: busy+notify ⇒ **held** (`phase=held`, 0 queue calls, no
+  `handle_message`, no slot write, no DELIVERED); repeat ticks while the turn
+  runs still deliver nothing; the turn ending wakes exactly one
+  `handle_message(internal=True)`; busy+notify **with a session authority** ⇒ the
+  native route (`handle_message` → FIFO, delivery marked `native`, slot empty,
+  never re-handed); the reported scenario (`sleep 50` in flight, then the tool
+  returns) in case q. Unchanged 0.8.0 items: idle+notify ⇒ queued then drained;
+  busy+event ⇒ `handle_message(internal=False)`; cursor untouched while queued
+  and advanced only by the injection; the same `event_id` twice ⇒ one enqueue;
+  no gateway / no adapter ⇒ stays queued with a WARN; a raising drain ⇒ event
   stays queued and is retried; plus the real
   `gateway.run_busy.GatewayBusySessionMixin._queue_or_replace_pending_event`
   driven through a stub to prove the acceptance receipt.
@@ -359,7 +397,16 @@ Function-level only: no gateway process, no network, no service.
   successful, with the refusal reported as `failed:…`; an async `send` is
   scheduled on the captured loop; the 2 s `(chat, text)` guard, its 32-entry
   cap (oldest dropped) and the async-failure release are exercised with a fake
-  clock; `plugin.yaml`/README say 0.8.5.
+  clock; `plugin.yaml`/README say 0.9.0.
+- `probe_native_queue_entry.py` — not a selftest: it imports the real
+  `gateway.platforms.base.BasePlatformAdapter` and proves the 0.9.0 routing.
+  With `runner.session_authority`, `_handle_message_while_active` sends a busy
+  internal event to `dispatch_busy_burst` (durable FIFO) and never to the
+  busy-input handler; without it, the busy handler runs. Then the plugin is
+  driven on that same real adapter: the busy notify reaches the
+  `handle_message`/`admit_message` seam with `internal=True`,
+  `adapter._pending_messages` stays empty, the delivery is `native`, the cursor
+  stays 0 (nothing is DELIVERED before the FIFO runs it).
 - `selftest_notify_notice_085.py` — the 0.8.5 contract: a notify wake sends
   exactly one `📬 收到来自 email · HR 的 Notify 消息` to the source chat, before
   the helper returns (no timer), while the queued `MessageEvent` stays

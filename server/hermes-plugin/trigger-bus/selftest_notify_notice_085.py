@@ -60,7 +60,7 @@ SPEC.loader.exec_module(plugin)
 
 plugin.LOG_PATH = TMP / "selftest.log"
 plugin._ack_async = lambda *a, **k: None                  # no HTTP in tests
-assert plugin.PLUGIN_VERSION == "0.8.5", plugin.PLUGIN_VERSION
+assert plugin.PLUGIN_VERSION in ("0.8.5", "0.9.0"), plugin.PLUGIN_VERSION
 
 from gateway.config import Platform                      # noqa: E402
 from gateway.session import SessionSource                 # noqa: E402
@@ -184,13 +184,16 @@ print("tmp/log: %s\n" % plugin.LOG_PATH)
 
 state, adapter = new_state()
 state.gateway.busy = True
+state.gateway.session_authority = object()   # 0.9.0: native busy queue reachable
 feed(state, ev(301, "notify", source="email", actor="HR", text="NOTIFY-ONE"))
 ok = plugin._dispatch(state, plugin._get_logger(), where="poll")
-queued = state.gateway.queue_calls[0][1] if state.gateway.queue_calls else None
-check("a. notify wake: one queue call, no handle_message",
-      len(state.gateway.queue_calls) == 1 and not adapter.handled,
-      "queued=%d handled=%d" % (len(state.gateway.queue_calls),
-                                len(adapter.handled)))
+queued = adapter.handled[0] if adapter.handled else None
+check("a. notify wake: one native-queue hand-over, no pending-slot write",
+      len(state.gateway.queue_calls) == 0 and len(adapter.handled) == 1
+      and not adapter._pending_messages,
+      "queue_calls=%d handled=%d slot=%s"
+      % (len(state.gateway.queue_calls), len(adapter.handled),
+         list(adapter._pending_messages)))
 check("a. the 📬 notice is already sent when dispatch returns (no timer)",
       adapter.sent == [(SOURCE.chat_id, NOTIFY_TEXT)],
       "sent=%r" % (adapter.sent,))
@@ -223,6 +226,7 @@ check("a. idle notify sends exactly one 📬 line",
 # async send (Feishu's real shape) rides the captured gateway loop
 state, adapter = new_state(adapter=AsyncSendAdapter())
 state.gateway.busy = True
+state.gateway.session_authority = object()   # 0.9.0: native busy queue reachable
 loop = asyncio.new_event_loop()
 thread = threading.Thread(target=loop.run_forever, name="selftest-085-loop",
                           daemon=True)
@@ -245,13 +249,14 @@ check("a. async send() carries the 📬 text on the captured loop",
 # a failing send never affects the queue hand-over
 state, adapter = new_state()
 state.gateway.busy = True
+state.gateway.session_authority = object()   # 0.9.0: native busy queue reachable
 adapter.send_error = RuntimeError("feishu send exploded")
 feed(state, ev(304, "notify", text="SEND-RAISES"))
 ok = plugin._dispatch(state, plugin._get_logger(), where="poll")
-check("f. a raising send leaves the notify queued and dispatch True",
-      ok is True and len(state.gateway.queue_calls) == 1 and adapter.sent == [],
-      "ok=%r queued=%d sent=%r"
-      % (ok, len(state.gateway.queue_calls), adapter.sent))
+check("f. a raising send leaves the notify handed over and dispatch True",
+      ok is True and len(adapter.handled) == 1 and adapter.sent == [],
+      "ok=%r handled=%d sent=%r"
+      % (ok, len(adapter.handled), adapter.sent))
 
 # =========================================================================== #
 # b. one notice per wake
@@ -259,6 +264,7 @@ check("f. a raising send leaves the notify queued and dispatch True",
 
 state, adapter = new_state()
 state.gateway.busy = True
+state.gateway.session_authority = object()   # 0.9.0: native busy queue reachable
 feed(state, ev(305, "notify", source="email", actor="HR", text="FIRST"),
      ev(306, "notify", source="calendar", actor="Boss", text="SECOND"))
 plugin._dispatch(state, plugin._get_logger(), where="poll")
@@ -267,15 +273,15 @@ check("b. a merged 2-notify wake sends exactly one notice",
 check("b. the notice names the FIRST notify origin",
       adapter.sent == [(SOURCE.chat_id, NOTIFY_TEXT)],
       "sent=%r" % (adapter.sent,))
-check("b. both notifies ride ONE queue call",
-      len(state.gateway.queue_calls) == 1
-      and len(state.gateway.queue_calls[0][1].text) > 0,
-      "queue_calls=%d" % len(state.gateway.queue_calls))
+check("b. both notifies ride ONE wake",
+      len(adapter.handled) == 1
+      and len(getattr(adapter.handled[0], "text", "")) > 0,
+      "handled=%d" % len(adapter.handled))
 plugin._dispatch(state, plugin._get_logger(), where="poll-2")
-check("b. a duplicate dispatch adds neither a notice nor a queue call",
-      len(adapter.sent) == 1 and len(state.gateway.queue_calls) == 1,
-      "sent=%d queue_calls=%d" % (len(adapter.sent),
-                                  len(state.gateway.queue_calls)))
+check("b. a duplicate dispatch adds neither a notice nor a second wake",
+      len(adapter.sent) == 1 and len(adapter.handled) == 1,
+      "sent=%d handled=%d" % (len(adapter.sent),
+                              len(adapter.handled)))
 # a later idle tick drains the queued notify — the wake already had its line
 state.gateway.busy = False
 plugin._dispatch(state, plugin._get_logger(), where="poll-3")
@@ -290,14 +296,14 @@ check("b. a later idle drain adds no second notice",
 # c1: notify first -> the single line is 📬 for the notify origin
 state, adapter = new_state()
 state.gateway.busy = True
+state.gateway.session_authority = object()   # 0.9.0: native busy queue reachable
 feed(state, ev(307, "notify", source="email", actor="HR", text="MIX-N"),
      ev(308, "event", source="mc_chat", actor="Steve", text="MIX-E"))
 ok = plugin._dispatch(state, plugin._get_logger(), where="poll")
 check("c. mixed (notify first): both routes still run",
-      len(adapter.handled) == 1
-      and getattr(adapter.handled[0], "internal", None) is False
-      and len(state.gateway.queue_calls) == 1,
-      "handled=%d queued=%d"
+      sorted(getattr(e, "internal", None) for e in adapter.handled) == [False, True]
+      and len(state.gateway.queue_calls) == 0,
+      "handled=%d queue_calls=%d"
       % (len(adapter.handled), len(state.gateway.queue_calls)))
 check("c. mixed (notify first): exactly ONE visible line",
       len(adapter.sent) == 1, "sent=%r" % (adapter.sent,))
@@ -308,14 +314,14 @@ check("c. mixed (notify first): the line is 📬 for the first event's source",
 # c2: event first -> the single line is ⚡ for the event origin
 state, adapter = new_state()
 state.gateway.busy = True
+state.gateway.session_authority = object()   # 0.9.0: native busy queue reachable
 feed(state, ev(309, "event", source="mc_chat", actor="Steve", text="MIX-E"),
      ev(310, "notify", source="email", actor="HR", text="MIX-N"))
 ok = plugin._dispatch(state, plugin._get_logger(), where="poll")
 check("c. mixed (event first): both routes still run",
-      len(adapter.handled) == 1
-      and getattr(adapter.handled[0], "internal", None) is False
-      and len(state.gateway.queue_calls) == 1,
-      "handled=%d queued=%d"
+      sorted(getattr(e, "internal", None) for e in adapter.handled) == [False, True]
+      and len(state.gateway.queue_calls) == 0,
+      "handled=%d queue_calls=%d"
       % (len(adapter.handled), len(state.gateway.queue_calls)))
 check("c. mixed (event first): exactly ONE visible line",
       len(adapter.sent) == 1, "sent=%r" % (adapter.sent,))
@@ -444,12 +450,12 @@ check("h. a second pre_llm_call injects nothing and moves no cursor",
 
 yaml_text = (HERE / "plugin.yaml").read_text(encoding="utf-8")
 readme = (HERE / "README.md").read_text(encoding="utf-8")
-check("g. plugin.yaml is 0.8.5 and documents both texts",
-      "version: 0.8.5" in yaml_text
+check("g. plugin.yaml is 0.9.0 and documents both texts",
+      "version: 0.9.0" in yaml_text
       and "收到来自 <source> · <actor> 的 Event 消息" in yaml_text
       and "收到来自 <source> · <actor> 的 Notify 消息" in yaml_text, "")
-check("g. README is titled 0.8.5 and documents both texts",
-      readme.startswith("# trigger-bus (0.8.5)")
+check("g. README is titled 0.9.0 and documents both texts",
+      readme.startswith("# trigger-bus (0.9.0)")
       and "收到来自 <source> · <actor> 的 Event 消息" in readme
       and "收到来自 <source> · <actor> 的 Notify 消息" in readme, "")
 
