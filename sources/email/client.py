@@ -55,6 +55,14 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.error import HTTPError, URLError
 from urllib.request import ProxyHandler, Request, build_opener
 
+# Shared helpers still live with the trigger clients (mc_chat is locked to the MC mod
+# and stays there), so add that directory to sys.path instead of duplicating them.
+import sys as _sys
+from pathlib import Path as _Path
+_SHARED = _Path(__file__).resolve().parents[2] / "server" / "trigger" / "clients"
+if str(_SHARED) not in _sys.path:
+    _sys.path.insert(0, str(_SHARED))
+
 from filterwall import business_filter, log_skip, schema_problem
 from localbus import LocalBus
 
