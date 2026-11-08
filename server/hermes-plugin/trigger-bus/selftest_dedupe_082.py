@@ -51,7 +51,8 @@ SPEC.loader.exec_module(plugin)
 
 plugin.LOG_PATH = TMP / "selftest.log"
 plugin._ack_async = lambda *a, **k: None                  # no HTTP in tests
-assert plugin.PLUGIN_VERSION in ("0.8.3", "0.8.4"), plugin.PLUGIN_VERSION
+assert plugin.PLUGIN_VERSION in ("0.8.3", "0.8.4", "0.8.5"), \
+    plugin.PLUGIN_VERSION
 
 from gateway.config import Platform                      # noqa: E402
 from gateway.session import SessionSource                 # noqa: E402
@@ -343,8 +344,8 @@ check("d. ledger + claims clean after the single injection",
       % (state.cursor, len(state.inflight), len(state.woken_ids)))
 
 yaml_text = (HERE / "plugin.yaml").read_text(encoding="utf-8")
-check("d. plugin.yaml version is 0.8.4",
-      "version: 0.8.4" in yaml_text, "")
+check("d. plugin.yaml version is 0.8.5",
+      "version: 0.8.5" in yaml_text, "")
 check("d. plugin.yaml documents '一条 event 只走一条路'",
       "一条 event 只走一条路" in yaml_text, "")
 

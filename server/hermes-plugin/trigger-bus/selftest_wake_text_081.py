@@ -53,7 +53,8 @@ SPEC.loader.exec_module(plugin)
 
 plugin.LOG_PATH = TMP / "selftest.log"
 plugin._ack_async = lambda *a, **k: None                  # no HTTP in tests
-assert plugin.PLUGIN_VERSION in ("0.8.3", "0.8.4"), plugin.PLUGIN_VERSION
+assert plugin.PLUGIN_VERSION in ("0.8.3", "0.8.4", "0.8.5"), \
+    plugin.PLUGIN_VERSION
 
 from gateway.config import Platform                      # noqa: E402
 from gateway.platforms.event import MessageEvent          # noqa: E402

@@ -1,4 +1,4 @@
-# trigger-bus (0.8.4)
+# trigger-bus (0.8.5)
 
 Deliver events from the local **mowu-trigger** service (127.0.0.1:8791) into a
 Hermes session — including when the trainer is not talking.
@@ -20,16 +20,25 @@ The wake message is **exactly one line** — no card, no metadata:
 The `event` line is a **contract with the gateway**: it matches the strict
 prefix `⚡ 来自 <source> · <actor> 的打断` and must never be changed. Alongside
 the gateway's own English `⚡ Interrupting current task …` hint, the session
-also shows one extra Chinese line (0.8.3/0.8.4, sent by this plugin — see below):
+also shows one extra Chinese line that this plugin sends itself (0.8.3/0.8.4):
 
 ```
 ⚡ 收到来自 selftest · Tester 的 Event 消息
 ```
 
 Never start an event wake with that line: the wake text must stay
-`⚡ 来自 … 的打断`. The `notify` line is the 0.8.2 Chinese notice, one line:
-`📬 收到来自 <source> · <actor> 的 Notify 消息` — a notify wake sends no extra
-message.
+`⚡ 来自 … 的打断`. The `notify` wake line is the 0.8.2 Chinese notice
+`📬 收到来自 <source> · <actor> 的 Notify 消息`; since 0.8.5 a notify wake also
+sends that same line through the adapter, so it becomes visible in Feishu
+instead of staying an internal, invisible turn trigger:
+
+```
+📬 收到来自 email · HR 的 Notify 消息
+```
+
+Both notices share one mechanism (immediate inline send, one per wake, 2 s
+`(chat, text)` dedupe); the texts differ, so the two levels never suppress
+each other. `info` / `log` send nothing.
 
 The cards of that same batch are injected into the turn the wake starts, by the
 usual `pre_llm_call` path, in the unchanged two-line format:
@@ -53,27 +62,37 @@ it always was — `pre_llm_call` injecting the batch. Because the wake carries n
 cards, the injection is the only place the card can appear; the cursor still
 delivers each batch exactly once.
 
-## 额外一条中文提示 — the plugin sends its own Event notice (0.8.3/0.8.4)
+## 额外一条中文提示 — the plugin sends its own Chinese notice (0.8.3–0.8.5)
 
-An event wake produces two messages in Feishu: the gateway's own English
-`⚡ Interrupting current task …` hint, and one short Chinese line that this
-plugin sends itself. The gateway has two separate send paths for that hint and
-neither could be made to add the line, so the plugin no longer depends on
-gateway internals — it uses the adapter it already calls
-`handle_message` on.
+A wake produces two messages in Feishu: the gateway's own English
+`⚡ Interrupting current task …` hint for an event (or the queued internal
+turn for a notify), and one short Chinese line that this plugin sends itself.
+The gateway has two separate send paths for that hint and neither could be
+made to add the line, so the plugin no longer depends on gateway internals —
+it uses the adapter it already calls `handle_message` on.
+
+The line is chosen by the woken event's level (0.8.5):
+
+```
+event  → ⚡ 收到来自 <source> · <actor> 的 Event 消息
+notify → 📬 收到来自 <source> · <actor> 的 Notify 消息
+```
 
 **Immediate, and never twice (0.8.4).** The line is sent inline, right after
-`adapter.handle_message(ev)` returns — no sleep and no timer; the order against
-the English ack is not engineered. What *is* guaranteed is that the same line
+`adapter.handle_message(ev)` for an event and right after the gateway accepted
+the queue call for a notify — no sleep and no timer; the order against the
+English ack is not engineered. What *is* guaranteed is that the same line
 cannot appear twice: besides "one per wake", an identical `(chat, text)` sent
 within **2 s** is skipped in-process.
 
-**0.8.4 定稿语义：立即发送、不发两次、无延迟。** 发送就发生在唤醒路径上，
-没有 `sleep`、没有 `call_later`、没有 delay 开关；一次唤醒只发一条，同一
-`chat + 文本` 在 2 秒内不重发（容量 32，超出丢最旧；发送失败会释放占位）。
+**0.8.5 定稿语义：立即发送、不发两次、无延迟、event/notify 各一条。** 发送就发生在
+唤醒路径上，没有 `sleep`、没有 `call_later`、没有 delay 开关；一次唤醒只发一条，
+同一 `chat + 完整文本` 在 2 秒内不重发（容量 32，超出丢最旧；发送失败会释放占位）。
+两种文本不同，去重 key 也就不同 —— event 与 notify 互不干扰。`info` / `log` 不发。
 
 ```python
 adapter.send_message(chat_id, "⚡ 收到来自 <source> · <actor> 的 Event 消息")
+adapter.send_message(chat_id, "📬 收到来自 <source> · <actor> 的 Notify 消息")
 ```
 
 - **immediate**: the send happens on the wake path itself; no background
@@ -88,14 +107,17 @@ adapter.send_message(chat_id, "⚡ 收到来自 <source> · <actor> 的 Event �
   blocked.
 - **probed by name**: `send_message`, then `send`, then `_send_text`, then
   `_send_plain_message` — the first callable that exists wins; an adapter with
-  none of them is logged (`event announcement skipped: … exposes none of …`)
+  none of them is logged (`wake notice skipped: … exposes none of …`)
   and the wake continues untouched. Feishu's adapter exposes the async
   `send(chat_id, content)`, which is scheduled on the captured gateway loop.
 - **chat id** comes from `state.source.chat_id` (the source captured by
   `pre_gateway_dispatch`).
-- **event only**: `internal=False` wakes send it; a `notify` wake *is*
-  `📬 收到来自 … 的 Notify 消息` and sends nothing extra.
-- **one per wake**: a merged batch names its first event's source.
+- **both injectable levels**: an `event` wake sends
+  `⚡ 收到来自 … 的 Event 消息`; a `notify` wake (queued `internal=True`) sends
+  `📬 收到来自 … 的 Notify 消息`. `info` / `log` send nothing.
+- **one per wake**: a merged batch names its first event's source; if one tick
+  holds both levels, the merged batch's first event picks the text (`notify`
+  first ⇒ 📬, `event` first ⇒ ⚡) and only that one line is sent.
 - **best-effort**: the whole extra send sits in `try/except`; any failure is
   logged and swallowed, so the wake that was already handed over still counts
   as handed over (`handle_message` was called), never as failed.
@@ -162,6 +184,10 @@ gateway._queue_or_replace_pending_event(session_key, event)   # internal=True
   when that head *is* our event — and hands the same event to
   `adapter.handle_message`. The strategy is logged:
   `drain: no gateway drain entry (…); used adapter.get_pending_message + handle_message for session_key=…`.
+- visible notice (0.8.5): a successful queue call also sends one
+  `📬 收到来自 <source> · <actor> 的 Notify 消息` to the source chat through
+  the adapter — immediate, one per wake, deduped on `(chat, text)`; without it
+  the `internal=True` turn is invisible in Feishu.
 
 ### 中断 (event)
 
@@ -286,6 +312,7 @@ live gateway + session source; without it only injection works, never a wake).
 /Users/kibyou/.hermes/tools/python-3.14.9*/bin/python3 selftest_wake_text_081.py
 /Users/kibyou/.hermes/tools/python-3.14.9*/bin/python3 selftest_dedupe_082.py
 /Users/kibyou/.hermes/tools/python-3.14.9*/bin/python3 selftest_announce_083.py
+/Users/kibyou/.hermes/tools/python-3.14.9*/bin/python3 selftest_notify_notice_085.py
 ```
 
 Function-level only: no gateway process, no network, no service.
@@ -322,13 +349,26 @@ Function-level only: no gateway process, no network, no service.
   wake; the event wake line stays byte-for-byte
   `⚡ 来自 <source> · <actor> 的打断` and the notify line is exactly
   `📬 收到来自 email · HR 的 Notify 消息`.
-- `selftest_announce_083.py` — the 0.8.4 extra notice with a FakeAdapter that
+- `selftest_announce_083.py` — the extra notice with a FakeAdapter that
   records `send_message` calls: an event wake sends **exactly once** with the
   text `⚡ 收到来自 selftest · Tester 的 Event 消息` to `oc_selftest`; a notify
-  wake sends nothing; a merged batch names its first event; an adapter without
+  wake sends its own `📬` line exactly once (0.8.5; it sent nothing before); a
+  merged batch names its first event; an adapter without
   a send method is logged and skipped; a raising `send_message` and a returned
   `SendResult(success=False)` both leave `handle_message` called and the wake
   successful, with the refusal reported as `failed:…`; an async `send` is
   scheduled on the captured loop; the 2 s `(chat, text)` guard, its 32-entry
   cap (oldest dropped) and the async-failure release are exercised with a fake
-  clock; `plugin.yaml`/README say 0.8.4.
+  clock; `plugin.yaml`/README say 0.8.5.
+- `selftest_notify_notice_085.py` — the 0.8.5 contract: a notify wake sends
+  exactly one `📬 收到来自 email · HR 的 Notify 消息` to the source chat, before
+  the helper returns (no timer), while the queued `MessageEvent` stays
+  `internal=True`; a merged notify batch names its first event and a second
+  dispatch in the same mark window sends nothing; an event+notify tick sends
+  **one** line, chosen by the merged batch's first event and its level (both
+  orders); the `(chat, text)` keys of the two texts are independent inside the
+  2 s window; `info` / `log` send nothing; an idle **event** wake still takes
+  the interrupt path (`internal=False`, no queue call), sends one `⚡` line,
+  and the cursor moves exactly once when `pre_llm_call` proves the injection
+  (a second call injects nothing); the 0.8.4 dedupe and the
+  wake/queue internals are unchanged.

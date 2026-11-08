@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Function-level selftest for trigger-bus 0.8.4 — the extra Chinese notice.
+"""Function-level selftest for trigger-bus 0.8.4/0.8.5 — the extra Chinese notice.
 
 No gateway process, no trigger service, no network.  Every hook is called
 directly; the gateway is a FakeGateway and the adapter a FakeAdapter that
@@ -8,11 +8,12 @@ records ``handle_message`` and every send call.
     /Users/kibyou/.hermes/tools/python-3.14.9*/bin/python3 \\
         selftest_announce_083.py
 
-Covers the 0.8.4 contract:
+Covers the 0.8.4 contract (0.8.5 updates the notify case):
   a. event wake -> adapter.send_message called EXACTLY once, text exactly
      "⚡ 收到来自 selftest · Tester 的 Event 消息", chat_id = source.chat_id,
      and the send has already happened when the helper returns (no timer)
-  b. notify wake -> no send call at all (the notify line is its own notice)
+  b. notify wake -> exactly one send of "📬 收到来自 <source> · <actor> 的
+     Notify 消息" (0.8.5; before this it sent nothing)
   c. send_message raises / answers SendResult(success=False) -> the wake still
      succeeds; the result is reported as failed, never as sent
   d. one message per wake; a merged event batch names its FIRST event
@@ -56,7 +57,8 @@ SPEC.loader.exec_module(plugin)
 
 plugin.LOG_PATH = TMP / "selftest.log"
 plugin._ack_async = lambda *a, **k: None                  # no HTTP in tests
-assert plugin.PLUGIN_VERSION in ("0.8.3", "0.8.4"), plugin.PLUGIN_VERSION
+assert plugin.PLUGIN_VERSION in ("0.8.3", "0.8.4", "0.8.5"), \
+    plugin.PLUGIN_VERSION
 
 from gateway.config import Platform                      # noqa: E402
 from gateway.session import SessionSource                 # noqa: E402
@@ -218,8 +220,10 @@ check("a. a duplicate dispatch sends no second message",
       "sent=%d handled=%d" % (len(adapter.sent), len(adapter.handled)))
 
 # =========================================================================== #
-# b. notify wake -> no send at all
+# b. notify wake -> its own 📬 notice (0.8.5; it sent nothing in 0.8.3/0.8.4)
 # =========================================================================== #
+
+NOTIFY_EXPECTED = "📬 收到来自 email · HR 的 Notify 消息"
 
 state, adapter = new_state()
 state.gateway.busy = True
@@ -230,16 +234,24 @@ check("b. notify wake queued, no handle_message",
       queued is not None and not adapter.handled,
       "queued=%r handled=%d" % (getattr(queued, "text", None),
                                 len(adapter.handled)))
-check("b. notify wake sends NO extra message",
-      adapter.sent == [], "sent=%r" % (adapter.sent,))
+check("b. notify wake sends exactly one 📬 notice",
+      adapter.sent == [(SOURCE.chat_id, NOTIFY_EXPECTED)],
+      "sent=%r" % (adapter.sent,))
+check("b. the queued notify is still internal=True",
+      getattr(queued, "internal", None) is True,
+      "internal=%r" % (getattr(queued, "internal", None),))
 
-# idle notify: queued then drained by the plugin — still no extra message
+# idle notify: queued then drained by the plugin — still exactly one notice
 state, adapter = new_state()
 feed(state, ev(203, "notify", text="NOTIFY-IDLE"))
 plugin._dispatch(state, plugin._get_logger(), where="poll")
-check("b. idle notify drained via handle_message, still no send",
-      len(adapter.handled) == 1 and adapter.sent == [],
+check("b. idle notify drained via handle_message, one send",
+      len(adapter.handled) == 1 and len(adapter.sent) == 1,
       "handled=%d sent=%r" % (len(adapter.handled), adapter.sent))
+check("b. idle notify notice uses the default origin",
+      adapter.sent == [(SOURCE.chat_id,
+                        "📬 收到来自 selftest · Tester 的 Notify 消息")],
+      "sent=%r" % (adapter.sent,))
 
 # =========================================================================== #
 # c. send raises -> the wake is unaffected
@@ -417,13 +429,15 @@ finally:
 
 yaml_text = (HERE / "plugin.yaml").read_text(encoding="utf-8")
 readme = (HERE / "README.md").read_text(encoding="utf-8")
-check("g. plugin.yaml version is 0.8.4",
-      "version: 0.8.4" in yaml_text, "")
-check("g. plugin.yaml documents the Event notice",
-      "收到来自 <source> · <actor> 的 Event 消息" in yaml_text, "")
-check("g. README is titled 0.8.4 and documents the notice",
-      readme.startswith("# trigger-bus (0.8.4)")
-      and "收到来自 <source> · <actor> 的 Event 消息" in readme, "")
+check("g. plugin.yaml version is 0.8.5",
+      "version: 0.8.5" in yaml_text, "")
+check("g. plugin.yaml documents both notices",
+      "收到来自 <source> · <actor> 的 Event 消息" in yaml_text
+      and "收到来自 <source> · <actor> 的 Notify 消息" in yaml_text, "")
+check("g. README is titled 0.8.5 and documents both notices",
+      readme.startswith("# trigger-bus (0.8.5)")
+      and "收到来自 <source> · <actor> 的 Event 消息" in readme
+      and "收到来自 <source> · <actor> 的 Notify 消息" in readme, "")
 
 # --------------------------------------------------------------------------- #
 failed = [name for name, ok, _ in RESULTS if not ok]

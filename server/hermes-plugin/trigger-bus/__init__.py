@@ -171,6 +171,21 @@ Architecture: a separate long-lived service (``mowu-trigger``, loopback
     at most ``ANNOUNCE_DEDUPE_MAX`` (32) entries, oldest dropped; a failed
     send releases its entry so a retry is not blocked.
 
+0.8.5 — a notify wake also shows a Chinese notice, same mechanism:
+
+  * the visible notice is level-aware now: ``event`` keeps
+    ``⚡ 收到来自 <source> · <actor> 的 Event 消息`` byte-for-byte, ``notify``
+    adds ``📬 收到来自 <source> · <actor> 的 Notify 消息``.  Both go through
+    the same adapter probe, the same immediate inline send and the same 2 s
+    ``(chat, text)`` dedupe; ``info`` / ``log`` send nothing.
+  * the texts differ, so the ``(chat, text)`` dedupe key differs too — an
+    event and a notify from the same origin never suppress each other.
+  * still one visible notice per wake.  ``_dispatch`` owns it: when one tick
+    holds both levels, the merged batch's FIRST event names the line and its
+    level picks the text (``notify`` first -> 📬, ``event`` first -> ⚡).
+  * nothing else moves: wake text, ``internal`` flags, queueing, cursor/ACK,
+    cards and the delivery ledger are untouched.
+
 Design rules:
   * never import Hermes internals — only the hook argument dict is used;
   * never block the model call: the hook does no network I/O (ACK is sent by
@@ -209,7 +224,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional
 
-PLUGIN_VERSION = "0.8.4"
+PLUGIN_VERSION = "0.8.5"
 MAX_QUEUE = 50
 HTTP_TIMEOUT = 5.0
 LOG_MAX_BYTES = 5 * 1024 * 1024
@@ -1042,6 +1057,23 @@ def _event_announce_text(event: Dict[str, Any]) -> str:
     return "⚡ 收到来自 %s 的 Event 消息" % _interrupt_origin(event)
 
 
+def _notify_announce_text(event: Dict[str, Any]) -> str:
+    """``📬 收到来自 <source> · <actor> 的 Notify 消息`` (0.8.5)."""
+    return "📬 收到来自 %s 的 Notify 消息" % _interrupt_origin(event)
+
+
+def _announce_text(event: Dict[str, Any]) -> str:
+    """The one visible line for a wake, picked by that event's level (0.8.5).
+
+    ``notify`` gets its own Chinese notice; every other injectable level keeps
+    the 0.8.3 ``event`` wording byte-for-byte.  The two texts differ, so the
+    ``(chat, text)`` dedupe key can never collide across levels.
+    """
+    if _level(event) == "notify":
+        return _notify_announce_text(event)
+    return _event_announce_text(event)
+
+
 def _announce_claim(chat_id: str, text: str,
                     logger: logging.Logger) -> Optional[float]:
     """Reserve ``(chat, text)`` for sending; ``None`` when it is a duplicate.
@@ -1056,7 +1088,7 @@ def _announce_claim(chat_id: str, text: str,
         last = _announce_recent.get(key)
         if last is not None and 0.0 <= now - last < ANNOUNCE_DEDUPE_WINDOW:
             _announce_recent.move_to_end(key)
-            logger.info("event announcement skipped: identical text sent to "
+            logger.info("wake notice skipped: identical text sent to "
                         "%s %.2fs ago (dedupe window %.1fs)",
                         chat_id, now - last, ANNOUNCE_DEDUPE_WINDOW)
             return None
@@ -1121,21 +1153,21 @@ def _announce_done(name: str, logger: logging.Logger, chat_id: str,
             result = future.result()
         except Exception as exc:
             _announce_release(chat_id, text, stamp)
-            logger.warning("event announcement (%s) failed: %s", name, exc)
+            logger.warning("wake notice (%s) failed: %s", name, exc)
             return
         error = _send_result_error(result)
         if error:
             _announce_release(chat_id, text, stamp)
-            logger.warning("event announcement (%s) not delivered: %s",
+            logger.warning("wake notice (%s) not delivered: %s",
                            name, error)
         else:
-            logger.debug("event announcement (%s) delivered", name)
+            logger.debug("wake notice (%s) delivered", name)
     return _callback
 
 
-def _deliver_event_announcement(state: "_BusState", name: str, fn: Any,
-                                chat_id: str, text: str,
-                                logger: logging.Logger) -> str:
+def _deliver_announcement(state: "_BusState", name: str, fn: Any,
+                          chat_id: str, text: str,
+                          logger: logging.Logger) -> str:
     """The actual send, deduped and thread-safe (0.8.4).
 
     Runs on the caller's thread, immediately (no delay, no timer).  A
@@ -1158,28 +1190,28 @@ def _deliver_event_announcement(state: "_BusState", name: str, fn: Any,
                 future.add_done_callback(
                     _announce_done(name, logger, chat_id, text, stamp))
             else:
-                logger.info("event announcement (%s): no captured gateway "
+                logger.info("wake notice (%s): no captured gateway "
                             "loop; sending synchronously", name)
                 result = _run_coroutine_here(outcome, name, logger)
                 error = _send_result_error(result)
                 if error:
                     _announce_release(chat_id, text, stamp)
-                    logger.warning("event announcement (%s) not delivered: %s",
+                    logger.warning("wake notice (%s) not delivered: %s",
                                    name, error)
                     return "failed:%s" % error
         else:
             error = _send_result_error(outcome)
             if error:
                 _announce_release(chat_id, text, stamp)
-                logger.warning("event announcement (%s) not delivered: %s",
+                logger.warning("wake notice (%s) not delivered: %s",
                                name, error)
                 return "failed:%s" % error
-        logger.info("event announcement handed to %s for %s: %s",
+        logger.info("wake notice handed to %s for %s: %s",
                     name, chat_id, text)
         return "sent:%s" % name
     except Exception as exc:  # never let the extra line affect the wake
         _announce_release(chat_id, text, stamp)
-        logger.warning("event announcement failed: %s", exc)
+        logger.warning("wake notice failed: %s", exc)
         return "failed:%s" % exc
 
 
@@ -1195,43 +1227,51 @@ def _run_coroutine_here(outcome: Any, name: str,
     except RuntimeError:
         return asyncio.run(outcome)
     asyncio.ensure_future(outcome)
-    logger.info("event announcement (%s) scheduled on the caller's loop "
+    logger.info("wake notice (%s) scheduled on the caller's loop "
                 "(no gateway loop captured)", name)
     return None
 
 
-def _send_event_announcement(state: "_BusState", adapter: Any,
-                             primary: Dict[str, Any],
-                             logger: logging.Logger) -> str:
-    """0.8.4: one extra Chinese notice for an event-level wake, sent at once.
+def _send_wake_notice(state: "_BusState", adapter: Any,
+                      primary: Dict[str, Any],
+                      logger: logging.Logger) -> str:
+    """One extra Chinese notice for this wake, sent at once (0.8.5).
 
-    Called right after ``adapter.handle_message(ev)``; the send is immediate
-    (no sleep, no ``call_later``).  Exactly one message per wake, plus an
-    in-process 2-second dedupe on ``(chat, text)`` so a re-entrant wake or a
-    second scheduler cannot produce the same line twice.
+    The event's level picks the line (``⚡ … Event 消息`` / ``📬 … Notify
+    消息``); everything else is the 0.8.3/0.8.4 mechanism: called right after
+    the hand-over, immediate (no sleep, no ``call_later``), exactly one message
+    per wake, plus an in-process 2-second dedupe on ``(chat, text)`` so a
+    re-entrant wake or a second scheduler cannot produce the same line twice.
 
     Best-effort by contract: every failure is logged and swallowed — it can
     never undo a wake.  Returns ``sent:<method>``, ``skipped:<why>`` or
     ``failed:<error>`` for the log/tests.
     """
     try:
-        text = _event_announce_text(primary)
+        text = _announce_text(primary)
         chat_id = str(getattr(getattr(state, "source", None), "chat_id", "") or "")
         if not chat_id:
-            logger.info("event announcement skipped: captured source has no "
+            logger.info("wake notice skipped: captured source has no "
                         "chat_id")
             return "skipped:no-chat-id"
         name, fn = _announce_send_callable(adapter)
         if fn is None:
-            logger.info("event announcement skipped: %s exposes none of %s",
+            logger.info("wake notice skipped: %s exposes none of %s",
                         type(adapter).__name__,
                         ", ".join(ANNOUNCE_SEND_METHODS))
             return "skipped:no-send-method"
-        return _deliver_event_announcement(state, name, fn, chat_id, text,
-                                           logger)
+        return _deliver_announcement(state, name, fn, chat_id, text,
+                                     logger)
     except Exception as exc:  # never let the extra line affect the wake
-        logger.warning("event announcement failed: %s", exc)
+        logger.warning("wake notice failed: %s", exc)
         return "failed:%s" % exc
+
+
+def _send_event_announcement(state: "_BusState", adapter: Any,
+                             primary: Dict[str, Any],
+                             logger: logging.Logger) -> str:
+    """0.8.3 name kept for callers/tests; 0.8.5 makes it level-aware."""
+    return _send_wake_notice(state, adapter, primary, logger)
 
 
 def _build_wake_event(text: str, internal: bool, source: Any) -> Any:
@@ -1318,13 +1358,15 @@ def _session_key_for(state: "_BusState") -> tuple:
 
 def _wake(state: "_BusState", events: List[Dict[str, Any]], *,
           internal: bool = False, text: Optional[str] = None,
-          on_done: Any = None) -> bool:
+          on_done: Any = None, announce: bool = True) -> bool:
     """Hand a synthesized inbound message to the adapter (``handle_message``).
 
     ``event`` uses ``internal=False``: the normal inbound path, so a busy
     session is interrupted (or steered) and an idle one starts a turn.
     ``notify`` never comes here any more — it goes through the gateway's own
-    pending queue.  Returns True when the coroutine was handed to the loop.
+    pending queue.  ``announce=False`` lets :func:`_dispatch` own the single
+    visible notice of a tick that merges both levels (0.8.5).
+    Returns True when the coroutine was handed to the loop.
     """
     _resolve_gateway(state)
     _resolve_source(state)
@@ -1363,12 +1405,13 @@ def _wake(state: "_BusState", events: List[Dict[str, Any]], *,
         elif on_done is not None and isinstance(outcome, str) and outcome.strip():
             # A synchronous adapter answered with a notice: report it now.
             on_done(outcome)
-        if not internal:
+        if not internal and announce:
             # 0.8.4: sent immediately after the hand-over; the helper dedupes
             # (same chat + text within 2 s is dropped) and swallows + logs
             # every failure, so a failed notice can never turn a handed-over
-            # wake into a failed one.
-            _send_event_announcement(state, adapter, primary, _get_logger())
+            # wake into a failed one.  0.8.5: _dispatch passes announce=False
+            # when it merges both levels into one notice.
+            _send_wake_notice(state, adapter, primary, _get_logger())
         state.last_wake = time.monotonic()
         _get_logger().info(
             "woke session internal=%s origin=%r with %d event(s): %s",
@@ -1853,7 +1896,8 @@ def _interrupt_done(state: "_BusState", logger: logging.Logger, token: str) -> A
 
 
 def _interrupt_wake(state: "_BusState", logger: logging.Logger,
-                    batch: List[Dict[str, Any]], *, where: str) -> bool:
+                    batch: List[Dict[str, Any]], *, where: str,
+                    announce: bool = True) -> bool:
     """``event`` -> interrupt: the unchanged ``internal=False`` path.
 
     Busy: the running turn is interrupted at once; idle: a turn starts.  The
@@ -1892,7 +1936,8 @@ def _interrupt_wake(state: "_BusState", logger: logging.Logger,
     # _forget_delivery (hand-over failure / refusal / TTL) releases it.
     _mark_woken(state, batch)
     if not _wake(state, batch, internal=False, text=text,
-                 on_done=_interrupt_done(state, logger, token)):
+                 on_done=_interrupt_done(state, logger, token),
+                 announce=announce):
         _forget_delivery(state, token)
         logger.warning("event interrupt not handed to the gateway; %d "
                        "event(s) kept queued (where=%s)", len(batch), where)
@@ -1925,15 +1970,42 @@ def _dispatch(state: "_BusState", logger: logging.Logger, *, where: str) -> bool
     notifies = [e for e in unread if _level(e) == "notify"]
     did = False
     interrupted = False
-    if events:
-        interrupted = _interrupt_wake(state, logger, events, where=where)
-        did = interrupted or did
-    if notifies:
-        did = _notify_enqueue(state, logger, notifies, where=where) or did
-    if not interrupted:
-        # One turn at a time: do not start a queued notify in the same tick an
-        # interrupt just claimed the session (the lease would refuse it).
-        did = _drain_idle(state, logger, where=where) or did
+    notify_queued = False
+    try:
+        if events:
+            # 0.8.5: _dispatch sends the one visible notice for this tick, so a
+            # merged event+notify batch never produces two lines.
+            interrupted = _interrupt_wake(state, logger, events, where=where,
+                                          announce=False)
+            did = interrupted or did
+        if notifies:
+            notify_queued = _notify_enqueue(state, logger, notifies, where=where)
+            did = notify_queued or did
+        if not interrupted:
+            # One turn at a time: do not start a queued notify in the same tick
+            # an interrupt just claimed the session (the lease would refuse it).
+            did = _drain_idle(state, logger, where=where) or did
+    finally:
+        # 0.8.5: exactly one visible notice per wake, even if a later leg of
+        # this tick raises.  The merged batch's FIRST event names it and its
+        # level picks the text (📬 notify / ⚡ event); if that event's own path
+        # did not go through, the first level that did speaks instead, so an
+        # event wake never loses its line.
+        notice = None
+        if unread:
+            first = unread[0]
+            if _level(first) == "notify" and notify_queued:
+                notice = first
+            elif _level(first) == "event" and interrupted:
+                notice = first
+            elif interrupted and events:
+                notice = events[0]
+            elif notify_queued and notifies:
+                notice = notifies[0]
+        if notice is not None:
+            adapter = _adapter_for(state)
+            if adapter is not None:
+                _send_wake_notice(state, adapter, notice, logger)
     return did
 
 
