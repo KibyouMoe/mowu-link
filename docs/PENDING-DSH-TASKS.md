@@ -33,3 +33,22 @@ POST /tasks {
   queue_if_offline: true
 }
 ```
+
+---
+
+## B1 — DSH headless 的模型路由（阻塞项，2026-11-09 00:05）
+
+现状：`dsh --profile headless` 在 worker 里跑得起来，但模型调用失败：
+
+```
+[llm-deepseek-api-key] model listing from https://api.deepseek.com/models loaded 2 model(s)   ← key 有效
+dsh: HTTP_404: DeepSeek Messages request failed (404)                                          ← 路由不对
+```
+
+原因：DSH 的 `deepseek-official` 路由走 **Anthropic Messages** 协议（`/messages`），
+而 `api.deepseek.com` 只提供 OpenAI 兼容的 `chat/completions`。
+
+两条路：
+1. 在 DSH 的 Models 页给 headless 配一个 Messages 兼容的端点/密钥（训练员手工，一次性）；
+2. 写一个本地小代理：`/v1/messages` → 翻译成 `https://api.deepseek.com/chat/completions`，
+   再让 `DEEPSEEK_BASE_URL` 指向 `http://127.0.0.1:8795`。（推荐，全自动）
