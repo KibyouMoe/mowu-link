@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Template only — this file is deliberately NOT loaded by the repo.
+  Copy to ~/Library/LaunchAgents/ and bootstrap when the operator decides.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>ai.hermes.router</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>/Users/kibyou/projects/mowulink/server/router/server.py</string>
+    <string>--port</string>
+    <string>8790</string>
+    <string>--db</string>
+    <string>/Users/kibyou/.hermes/router.db</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/kibyou/projects/mowulink/server/router</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/kibyou/.hermes/router-launchd.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/kibyou/.hermes/router-launchd.err.log</string>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>
