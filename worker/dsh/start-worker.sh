@@ -8,6 +8,24 @@
 # 配置默认取同目录 worker.json；命令行参数覆盖配置。
 set -eu
 
+# --- 运行环境（2026-11-09 实测，别删）---------------------------------------
+# 1) dsh 的 deepseek-official 路由走 Anthropic Messages 协议；官方 OpenAI 端点
+#    (https://api.deepseek.com) 会返回 404。必须指到 /anthropic。
+# 2) dsh 不认 SOCKS 代理（ALL_PROXY=socks5 会报错），只能给 http(s) 代理。
+# 3) 密钥从 ~/.hermes/.env 取（DEEPSEEK_API_KEY）。
+if [ -f "${HOME}/.hermes/.env" ]; then
+    set -a
+    # shellcheck disable=SC1091
+    . "${HOME}/.hermes/.env"
+    set +a
+fi
+unset ALL_PROXY all_proxy 2>/dev/null || true
+export HTTP_PROXY="${DSH_HTTP_PROXY:-http://127.0.0.1:10808}"
+export HTTPS_PROXY="${DSH_HTTP_PROXY:-http://127.0.0.1:10808}"
+export http_proxy="$HTTP_PROXY" https_proxy="$HTTPS_PROXY"
+export DEEPSEEK_BASE_URL="${DSH_DEEPSEEK_BASE_URL:-https://api.deepseek.com/anthropic}"
+
+
 DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 PY=${PYTHON:-/usr/bin/python3}
 CONFIG=${WORKER_CONFIG:-"$DIR/worker.json"}
