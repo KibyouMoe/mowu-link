@@ -5,7 +5,7 @@
   "workspace": "~/projects",
   "permission_mode": "workspace-write",
   "approval_policy": "never",
-  "timeout": 900,
+  "timeout": 3600,
   "dsh_bin": "dsh",
   "dsh_profile": "headless",
   "heartbeat_interval": 20,
