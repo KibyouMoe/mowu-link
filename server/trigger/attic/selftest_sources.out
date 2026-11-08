@@ -1,0 +1,25 @@
+INFO selftest.mc_chat: source thread started
+INFO selftest.mc_chat: connected to http://127.0.0.1:8799/stream
+INFO selftest.mc_chat: status -> connected (http://127.0.0.1:8799/stream)
+INFO selftest.mc_chat: source stopped
+INFO selftest.email: source thread started
+INFO selftest.email: status -> disabled (no credentials in /nonexistent/email.env)
+INFO selftest.email: email source skipped: /nonexistent/email.env missing or lacks EMAIL_USER/EMAIL_PASSWORD
+INFO selftest.email: source stopped
+INFO selftest.email: source thread started
+INFO selftest.email: email dry-run: would poll imap.example.com:993 as test@example.com every 0s
+INFO selftest.email: email dry-run: connection to imap.example.com:993 skipped
+INFO selftest.email: status -> ok (0 new message(s))
+INFO selftest.email: email dry-run: connection to imap.example.com:993 skipped
+INFO selftest.email: source stopped
+mc health after stop: connected
+mc emitted 2 event(s):
+   {"source": "mc_chat", "kind": "chat", "priority": 4, "actor": "Notch", "text": "hello from sse", "payload": {"player": "Notch", "message": "hello from sse", "priority": 4}, "event_id": "mc_chat:sse:42"}
+   {"source": "mc_chat", "kind": "chat", "priority": 3, "actor": "", "text": "plain string frame", "payload": "plain string frame", "event_id": "mc_chat:sse:43"}
+PASS mc_chat: SSE frames parsed, mapped, deduped by SSE id
+email (missing secrets) health: disabled
+PASS email: missing secrets -> disabled, no exception
+email dry-run health: ok
+PASS email: dry-run loop runs without network
+
+RESULT: PASS  (mc_chat SSE parsing + email graceful degradation)

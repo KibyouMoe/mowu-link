@@ -1,0 +1,155 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1080" viewBox="0 0 1600 1080" font-family="PingFang SC, Hiragino Sans GB, Microsoft YaHei, sans-serif">
+  <defs>
+    <filter id="sh" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#0f172a" flood-opacity="0.10"/>
+    </filter>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#475569"/></marker>
+    <marker id="ab" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#2563eb"/></marker>
+    <marker id="ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#b45309"/></marker>
+    <marker id="ag" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#047857"/></marker>
+  </defs>
+  <rect width="1600" height="1080" fill="#f8fafc"/>
+
+  <text x="60" y="52" font-size="28" font-weight="700" fill="#0f172a">官方 Super Agent：控制面与数据面</text>
+  <text x="60" y="80" font-size="14" fill="#64748b">Router 不是数据流上的一环，它是横在上面的一层「调度器」；Thread / Ticket 在下面跑数据。虚线=控制，实线=数据。</text>
+
+  <!-- ================= 控制面 ================= -->
+  <rect x="60" y="104" width="1480" height="196" rx="14" fill="#eff6ff" stroke="#bfdbfe" stroke-width="2"/>
+  <text x="80" y="132" font-size="15" font-weight="700" fill="#1e3a8a">控制面 · Router preset（唯一做判断的角色，不碰数据）</text>
+
+  <rect x="84" y="146" width="320" height="118" rx="10" fill="#ffffff" stroke="#93c5fd" filter="url(#sh)"/>
+  <text x="102" y="172" font-size="14" font-weight="700" fill="#0f172a">① 评估候选</text>
+  <text x="102" y="196" font-size="12.5" fill="#475569">orchestrator_eval</text>
+  <text x="102" y="218" font-size="12.5" fill="#475569">只在「inferred」时才调模型</text>
+  <text x="102" y="240" font-size="12.5" fill="#94a3b8">explicit 直接走 route，零开销</text>
+
+  <rect x="436" y="146" width="340" height="118" rx="10" fill="#ffffff" stroke="#93c5fd" filter="url(#sh)"/>
+  <text x="454" y="172" font-size="14" font-weight="700" fill="#0f172a">② 下单 / 挂单</text>
+  <text x="454" y="196" font-size="12.5" fill="#475569">orchestrator_route</text>
+  <text x="454" y="218" font-size="12.5" fill="#475569">accept 新单 · attach 挂到已有单</text>
+  <text x="454" y="240" font-size="12.5" fill="#475569">ignore 忽略 · stop 停单</text>
+
+  <rect x="808" y="146" width="340" height="118" rx="10" fill="#ffffff" stroke="#fcd34d" filter="url(#sh)"/>
+  <text x="826" y="172" font-size="14" font-weight="700" fill="#78350f">③ 收报告 / 转述给人</text>
+  <text x="826" y="196" font-size="12.5" fill="#475569">orchestrator_report（工人→我）</text>
+  <text x="826" y="218" font-size="12.5" fill="#475569">progress 无问题就静默</text>
+  <text x="826" y="240" font-size="12.5" fill="#475569">ready / blocked 才转给人</text>
+
+  <rect x="1180" y="146" width="336" height="118" rx="10" fill="#f8fafc" stroke="#e2e8f0"/>
+  <text x="1198" y="172" font-size="14" font-weight="700" fill="#334155">物理约束（不是自觉）</text>
+  <text x="1198" y="196" font-size="12.5" fill="#475569">fs：write:false / edit:false</text>
+  <text x="1198" y="218" font-size="12.5" fill="#475569">无 web / 无 subagent / 无 todo</text>
+  <text x="1198" y="240" font-size="12.5" fill="#475569">禁 sleep、等超 30s 直接拒</text>
+
+  <!-- 控制面 → 数据面 -->
+  <line x1="604" y1="300" x2="700" y2="404" stroke="#1d4ed8" stroke-width="2.2" stroke-dasharray="7 5" marker-end="url(#ab)"/>
+  <text x="612" y="352" font-size="12.5" fill="#1d4ed8">route 产出 ↓</text>
+
+  <line x1="806" y1="404" x2="820" y2="300" stroke="#1d4ed8" stroke-width="2.2" stroke-dasharray="7 5" marker-end="url(#ab)"/>
+  <text x="742" y="378" font-size="12.5" fill="#1d4ed8">候选卡片 ↑</text>
+
+  <path d="M1400 440 L1400 322 L978 322 L978 270" stroke="#b45309" stroke-width="2.2" fill="none" marker-end="url(#ao)"/>
+  <text x="1290" y="312" font-size="12.5" fill="#b45309">report ↑</text>
+
+  <!-- ================= 数据面 ================= -->
+  <text x="60" y="432" font-size="15" font-weight="700" fill="#334155">数据面 · 一条消息怎么变成一份交付</text>
+
+  <rect x="60" y="452" width="200" height="120" rx="12" fill="#ffffff" stroke="#cbd5e1" filter="url(#sh)"/>
+  <text x="80" y="478" font-size="14" font-weight="700" fill="#0f172a">Sources</text>
+  <text x="80" y="502" font-size="12" fill="#475569">GitHub / 邮箱 / 群聊</text>
+  <text x="80" y="522" font-size="12" fill="#475569">全是轮询，无 webhook</text>
+  <text x="80" y="546" font-size="12" fill="#94a3b8">产出：Trigger</text>
+
+  <line x1="260" y1="512" x2="292" y2="512" stroke="#475569" stroke-width="2" marker-end="url(#a)"/>
+
+  <rect x="296" y="452" width="230" height="120" rx="12" fill="#ffffff" stroke="#cbd5e1" filter="url(#sh)"/>
+  <text x="314" y="478" font-size="14" font-weight="700" fill="#0f172a">三级过滤</text>
+  <text x="314" y="502" font-size="12" fill="#475569">L1 scope（听不听 + 用哪行）</text>
+  <text x="314" y="522" font-size="12" fill="#475569">L2 gate（含不含权、多强）</text>
+  <text x="314" y="546" font-size="12" fill="#94a3b8">L3 模型（只有 inferred 才跑）</text>
+
+  <line x1="526" y1="512" x2="558" y2="512" stroke="#475569" stroke-width="2" marker-end="url(#a)"/>
+
+  <rect x="562" y="440" width="250" height="144" rx="12" fill="#ffffff" stroke="#a7f3d0" stroke-width="2" filter="url(#sh)"/>
+  <text x="580" y="466" font-size="14" font-weight="700" fill="#065f46">Thread（话题）</text>
+  <text x="580" y="490" font-size="12" fill="#475569">subscriptions[] 谁跟着它、能干活</text>
+  <text x="580" y="510" font-size="12" fill="#475569">context[] 只听、不授权、不唤醒</text>
+  <text x="580" y="530" font-size="12" fill="#475569">correlated[] 同源关联话题</text>
+  <text x="580" y="552" font-size="12" fill="#94a3b8">pending 去抖：攒着等下一次评估</text>
+  <text x="580" y="574" font-size="12" fill="#94a3b8">作用：后续消息自动认领，不用模型再判</text>
+
+  <line x1="812" y1="512" x2="844" y2="512" stroke="#475569" stroke-width="2" marker-end="url(#a)"/>
+
+  <rect x="848" y="452" width="230" height="120" rx="12" fill="#ffffff" stroke="#a7f3d0" stroke-width="2" filter="url(#sh)"/>
+  <text x="866" y="478" font-size="14" font-weight="700" fill="#065f46">Ticket（工单）</text>
+  <text x="866" y="502" font-size="12" fill="#475569">+ Mandate：不可变授权</text>
+  <text x="866" y="522" font-size="12" fill="#475569">state / workdir / origin</text>
+  <text x="866" y="546" font-size="12" fill="#94a3b8">未结案的 job 不算完成</text>
+
+  <line x1="1078" y1="512" x2="1110" y2="512" stroke="#475569" stroke-width="2" marker-end="url(#a)"/>
+
+  <rect x="1114" y="452" width="150" height="120" rx="12" fill="#ffffff" stroke="#cbd5e1" filter="url(#sh)"/>
+  <text x="1132" y="478" font-size="14" font-weight="700" fill="#0f172a">Assignment</text>
+  <text x="1132" y="502" font-size="12" fill="#475569">派发记录</text>
+  <text x="1132" y="522" font-size="12" fill="#475569">lease 防重复</text>
+  <text x="1132" y="546" font-size="12" fill="#94a3b8">并发槽</text>
+
+  <line x1="1264" y1="512" x2="1296" y2="512" stroke="#047857" stroke-width="2" marker-end="url(#ag)"/>
+
+  <rect x="1300" y="440" width="240" height="144" rx="12" fill="#ecfdf5" stroke="#6ee7b7" stroke-width="2" filter="url(#sh)"/>
+  <text x="1318" y="466" font-size="14" font-weight="700" fill="#065f46">Worker Session</text>
+  <text x="1318" y="490" font-size="12" fill="#475569">一单一会话：worker-&lt;ticketId&gt;</text>
+  <text x="1318" y="510" font-size="12" fill="#475569">一单一个工作目录</text>
+  <text x="1318" y="530" font-size="12" fill="#475569">读写全开 + web + subagent</text>
+  <text x="1318" y="552" font-size="12" fill="#94a3b8">产出：report（progress/ready/</text>
+  <text x="1318" y="572" font-size="12" fill="#94a3b8">blocked/failed/dropped）</text>
+
+  <!-- Thread → 控制面（候选） -->
+  <line x1="700" y1="440" x2="700" y2="302" stroke="#1d4ed8" stroke-width="2.2" stroke-dasharray="7 5" marker-end="url(#ab)"/>
+  <text x="712" y="404" font-size="12.5" fill="#1d4ed8">候选卡片：原文 + 同话题已有单</text>
+
+  <!-- 控制面 → Thread/Ticket（route 结果） -->
+  <path d="M604 264 L604 380" stroke="#1d4ed8" stroke-width="2.2" stroke-dasharray="7 5" fill="none" marker-end="url(#ab)"/>
+  <text x="470" y="392" font-size="12.5" fill="#1d4ed8">accept=建单 / attach=挂到已有单</text>
+
+  <!-- Worker → 控制面 report -->
+  <path d="M1420 440 L1420 300" stroke="#b45309" stroke-width="2.4" fill="none" marker-end="url(#ao)"/>
+  <text x="1432" y="352" font-size="12.5" fill="#b45309">report 五态</text>
+  <text x="1432" y="372" font-size="12.5" fill="#b45309">（progress 静默）</text>
+
+  <!-- 人 -->
+  <rect x="560" y="620" width="480" height="74" rx="12" fill="#fffbeb" stroke="#fcd34d" filter="url(#sh)"/>
+  <text x="582" y="648" font-size="14" font-weight="700" fill="#78350f">人（训练员）</text>
+  <text x="582" y="672" font-size="12.5" fill="#92400e">只在「ready 结果」或「需要决定的问题」时被打扰（由 Router 转述）；progress 一律静默。</text>
+
+
+  <!-- 存储与驱动 -->
+  <rect x="60" y="728" width="1480" height="150" rx="14" fill="#ffffff" stroke="#cbd5e1" filter="url(#sh)"/>
+  <text x="80" y="756" font-size="15" font-weight="700" fill="#0f172a">底下垫着的东西</text>
+
+  <rect x="84" y="770" width="330" height="88" rx="10" fill="#f1f5f9" stroke="#e2e8f0"/>
+  <text x="102" y="794" font-size="13.5" font-weight="700" fill="#0f172a">orchestrator.sqlite</text>
+  <text x="102" y="816" font-size="12" fill="#475569">Trigger / Thread / Ticket / Decision</text>
+  <text x="102" y="838" font-size="12" fill="#475569">只存「授权与状态」，不存对话</text>
+
+  <rect x="430" y="770" width="330" height="88" rx="10" fill="#f1f5f9" stroke="#e2e8f0"/>
+  <text x="448" y="794" font-size="13.5" font-weight="700" fill="#0f172a">Passes（2 秒一次）</text>
+  <text x="448" y="816" font-size="12" fill="#475569">一次只跑一个，可被“来活了”提前踢</text>
+  <text x="448" y="838" font-size="12" fill="#475569">真正驱动状态机的是它，不是事件总线</text>
+
+  <rect x="776" y="770" width="330" height="88" rx="10" fill="#f1f5f9" stroke="#e2e8f0"/>
+  <text x="794" y="794" font-size="13.5" font-weight="700" fill="#0f172a">Effects（持久队列）</text>
+  <text x="794" y="816" font-size="12" fill="#475569">assessment / launch / delivery / relay</text>
+  <text x="794" y="838" font-size="12" fill="#475569">kind+key 唯一，各有退避与并发上限</text>
+
+  <rect x="1122" y="770" width="394" height="88" rx="10" fill="#f1f5f9" stroke="#e2e8f0"/>
+  <text x="1140" y="794" font-size="13.5" font-weight="700" fill="#0f172a">宿主侧（DSH）</text>
+  <text x="1140" y="816" font-size="12" fill="#475569">sessionPersistence：各 Session 对话历史</text>
+  <text x="1140" y="838" font-size="12" fill="#475569">kv：prompt 版本 / master session id</text>
+
+  <rect x="60" y="900" width="1480" height="140" rx="14" fill="#f0fdf4" stroke="#a7f3d0"/>
+  <text x="80" y="928" font-size="14" font-weight="700" fill="#065f46">为什么这张图里 Thread 和 Router 看起来“没交集”</text>
+  <text x="80" y="954" font-size="13" fill="#065f46">因为它们确实不直接连线：Thread 只负责「这条消息属于哪个话题、谁在跟着」，它把候选卡片交给 Router；</text>
+  <text x="80" y="978" font-size="13" fill="#065f46">Router 看完卡片后决定 accept / attach / ignore，再把结果写回 Thread 与 Ticket。两者靠「候选」和「决定」这两张卡衔接。</text>
+  <text x="80" y="1004" font-size="13" fill="#065f46">真正的数据流是：Sources → 过滤 → Thread → Ticket → Assignment → Worker；Router 横在上面，只做判断。</text>
+</svg>

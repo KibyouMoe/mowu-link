@@ -1,0 +1,18 @@
+{
+  "sources": {
+    "mc_chat": {
+      "enabled": true,
+      "url": "http://127.0.0.1:8765/stream",
+      "reconnect_seconds": 5
+    },
+    "email": {
+      "enabled": false,
+      "host": "",
+      "port": 993,
+      "user": "",
+      "ssl": true,
+      "folder": "INBOX",
+      "poll_seconds": 120
+    }
+  }
+}

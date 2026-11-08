@@ -1,0 +1,17 @@
+{
+  "name": "email",
+  "title": "邮箱（IMAP 拉取）",
+  "mode": "pull",
+  "schema": {
+    "text": "string",
+    "actor": "string"
+  },
+  "policy": {
+    "default_priority": 1,
+    "wake": true
+  },
+  "health": {
+    "max_silence_s": 7200
+  },
+  "dedupe": ["actor", "ts", "text"]
+}

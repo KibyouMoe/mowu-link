@@ -1,0 +1,190 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1180" viewBox="0 0 1600 1180" font-family="PingFang SC, Hiragino Sans GB, Microsoft YaHei, sans-serif">
+  <defs>
+    <filter id="sh" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#0f172a" flood-opacity="0.10"/>
+    </filter>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#475569"/>
+    </marker>
+    <marker id="arrowBlue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#2563eb"/>
+    </marker>
+    <marker id="arrowAmber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#b45309"/>
+    </marker>
+  </defs>
+
+  <rect width="1600" height="1180" fill="#f8fafc"/>
+
+  <text x="60" y="56" font-size="30" font-weight="700" fill="#0f172a">DeepSeek 官方 Super Agent 拓扑</text>
+  <text x="60" y="86" font-size="15" fill="#64748b">dsh-superagent-prototype @8c32a9dc · 源码级静态阅读整理 · 五概念主循环 + 双 preset 隔离 + 轮询式 Trigger</text>
+
+  <!-- ================= Column A : 输入与准入 ================= -->
+  <text x="70" y="140" font-size="16" font-weight="700" fill="#334155">① 输入与准入（纯确定性，零模型开销）</text>
+
+  <rect x="60" y="158" width="380" height="104" rx="12" fill="#ffffff" stroke="#cbd5e1" filter="url(#sh)"/>
+  <text x="80" y="184" font-size="15" font-weight="700" fill="#0f172a">Sources（全是轮询，无 webhook）</text>
+  <text x="80" y="208" font-size="13.5" fill="#475569">GitHub：notifications / issues / PR review / 主干 CI</text>
+  <text x="80" y="229" font-size="13.5" fill="#475569">Feishu：长连接 + 历史补收 + topic 轮询</text>
+  <text x="80" y="250" font-size="13" fill="#94a3b8">默认 60s；游标回退 5s 容忍迟到写入</text>
+
+  <line x1="250" y1="262" x2="250" y2="288" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="262" y="281" font-size="12.5" fill="#64748b">Trigger（event_id 去重）</text>
+
+  <rect x="60" y="292" width="380" height="150" rx="12" fill="#ffffff" stroke="#cbd5e1" filter="url(#sh)"/>
+  <text x="80" y="318" font-size="15" font-weight="700" fill="#0f172a">三级过滤（只有第三级调模型）</text>
+
+  <rect x="78" y="330" width="344" height="30" rx="7" fill="#eff6ff" stroke="#bfdbfe"/>
+  <text x="90" y="350" font-size="13" fill="#1e3a8a">L1 SourceScope.scope()  → 不通过：存痕迹即结束</text>
+
+  <rect x="78" y="366" width="344" height="30" rx="7" fill="#eff6ff" stroke="#bfdbfe"/>
+  <text x="90" y="386" font-size="13" fill="#1e3a8a">L2 Policy.gate()  → explicit / inferred / 不准入</text>
+
+  <rect x="78" y="402" width="344" height="30" rx="7" fill="#fef3c7" stroke="#fcd34d"/>
+  <text x="90" y="422" font-size="13" fill="#78350f">L3 模型评估（仅 inferred）→ decide / route</text>
+
+  <line x1="250" y1="442" x2="250" y2="468" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <rect x="60" y="472" width="380" height="112" rx="12" fill="#ffffff" stroke="#cbd5e1" filter="url(#sh)"/>
+  <text x="80" y="498" font-size="15" font-weight="700" fill="#0f172a">Thread（订阅挂在 Thread 上）</text>
+  <text x="80" y="521" font-size="13" fill="#475569">subscriptions　收到每条 trigger 的 ticket</text>
+  <text x="80" y="542" font-size="13" fill="#475569">context　　　　只读订阅：能收、不授权、不唤醒</text>
+  <text x="80" y="563" font-size="13" fill="#475569">correlated / pending（去抖，等下次 eval）</text>
+
+  <!-- arrows A -> B -->
+  <line x1="440" y1="528" x2="486" y2="528" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="448" y="518" font-size="12.5" fill="#64748b">准入</text>
+
+  <!-- ================= Column B : 领域状态 ================= -->
+  <text x="500" y="140" font-size="16" font-weight="700" fill="#334155">② 领域状态（orchestrator.sqlite，Engine 单一写者）</text>
+
+  <rect x="492" y="292" width="380" height="150" rx="12" fill="#ffffff" stroke="#93c5fd" stroke-width="1.5" filter="url(#sh)"/>
+  <text x="512" y="318" font-size="15" font-weight="700" fill="#0f172a">Ticket（一张工单）</text>
+  <text x="512" y="342" font-size="13.5" fill="#475569">state · title · workdir · origin(trigger_id)</text>
+  <rect x="510" y="354" width="344" height="34" rx="7" fill="#ecfdf5" stroke="#a7f3d0"/>
+  <text x="522" y="376" font-size="13" fill="#065f46">Mandate：不可变授权 scope + strength + basis</text>
+  <text x="512" y="410" font-size="13" fill="#475569">一个 ticket = 一个 worker 会话 = 一个工作目录</text>
+  <text x="512" y="430" font-size="13" fill="#94a3b8">worker 会话 id 固定 worker-&lt;ticketId&gt;（可反解）</text>
+
+  <line x1="682" y1="442" x2="682" y2="468" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <rect x="492" y="472" width="380" height="70" rx="12" fill="#ffffff" stroke="#cbd5e1" filter="url(#sh)"/>
+  <text x="512" y="498" font-size="15" font-weight="700" fill="#0f172a">Assignment（派发记录）</text>
+  <text x="512" y="523" font-size="13" fill="#475569">lease / 并发槽 / 派发时快照，防重复派工</text>
+
+  <line x1="682" y1="542" x2="682" y2="568" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <rect x="492" y="572" width="380" height="86" rx="12" fill="#ffffff" stroke="#cbd5e1" filter="url(#sh)"/>
+  <text x="512" y="598" font-size="15" font-weight="700" fill="#0f172a">Report（五态 + 单问句）</text>
+  <text x="512" y="621" font-size="13" fill="#475569">progress / ready / blocked / failed / dropped</text>
+  <text x="512" y="643" font-size="13" fill="#94a3b8">progress 无 question → 静默（attention 经济学）</text>
+
+  <!-- arrows B -> C -->
+  <line x1="926" y1="300" x2="876" y2="344" stroke="#1d4ed8" stroke-width="2.2" stroke-dasharray="6 5" marker-end="url(#arrowBlue)"/>
+  <text x="884" y="292" font-size="12.5" fill="#1d4ed8">route → 建 ticket</text>
+
+  <line x1="872" y1="507" x2="924" y2="556" stroke="#2563eb" stroke-width="2.2" marker-end="url(#arrowBlue)"/>
+  <text x="884" y="516" font-size="12.5" fill="#1d4ed8">dispatch</text>
+
+  <line x1="924" y1="676" x2="874" y2="622" stroke="#b45309" stroke-width="2.2" marker-end="url(#arrowAmber)"/>
+  <text x="878" y="672" font-size="12.5" fill="#b45309">report</text>
+
+  <!-- ================= Column C : 双 preset ================= -->
+  <text x="940" y="140" font-size="16" font-weight="700" fill="#334155">③ 执行：两个 preset = 两个 Session（靠宿主边界隔离，不靠 prompt）</text>
+
+  <!-- Router lane -->
+  <rect x="926" y="158" width="626" height="250" rx="14" fill="#ffffff" stroke="#bfdbfe" stroke-width="2" filter="url(#sh)"/>
+  <rect x="926" y="158" width="626" height="40" rx="14" fill="#eff6ff"/>
+  <text x="948" y="184" font-size="16" font-weight="700" fill="#1e3a8a">Router preset　·　无 persona，prompt is complete</text>
+
+  <text x="948" y="222" font-size="13.5" fill="#334155">模型　settings.eval.model　　　　并发　1</text>
+  <text x="948" y="245" font-size="13.5" fill="#334155">文件系统　write:false / edit:false　（Router 不读代码、不读日志）</text>
+  <text x="948" y="268" font-size="13.5" fill="#334155">无 web / 无 subagent / 无 todo；shell 等待 5s 强制转后台</text>
+  <text x="948" y="291" font-size="13.5" fill="#334155">工具　7 宿主 + 14 应用（eval / route / judge / 只读事件流）</text>
+
+  <rect x="948" y="306" width="582" height="86" rx="9" fill="#f8fafc" stroke="#e2e8f0"/>
+  <text x="962" y="328" font-size="13" fill="#475569">硬规则（prompt 反复强调）：</text>
+  <text x="962" y="349" font-size="13" fill="#475569">不改写需求（禁 paraphrase / 禁猜类别 / 禁编需求）</text>
+  <text x="962" y="370" font-size="13" fill="#475569">不跟上下文引用、不读代码、不评估技术范围；routing note ≤ 30 词</text>
+
+  <!-- Worker lane -->
+  <rect x="926" y="470" width="626" height="250" rx="14" fill="#ffffff" stroke="#a7f3d0" stroke-width="2" filter="url(#sh)"/>
+  <rect x="926" y="470" width="626" height="40" rx="14" fill="#ecfdf5"/>
+  <text x="948" y="496" font-size="16" font-weight="700" fill="#065f46">Worker preset　·　每 ticket 一个常驻 Session</text>
+
+  <text x="948" y="534" font-size="13.5" fill="#334155">会话 id　worker-&lt;ticketId&gt;　　工作目录　每 ticket 独立 workspace</text>
+  <text x="948" y="557" font-size="13.5" fill="#334155">模型　settings.executor.model　　　并发　maxWorkers=3（人消息可 +1）</text>
+  <text x="948" y="580" font-size="13.5" fill="#334155">文件系统读写全开；有 web / subagent / todo</text>
+  <text x="948" y="603" font-size="13.5" fill="#334155">persona：You are a coding agent powered by the {{model}} model.</text>
+
+  <rect x="948" y="618" width="582" height="86" rx="9" fill="#f8fafc" stroke="#e2e8f0"/>
+  <text x="962" y="640" font-size="13" fill="#475569">上下文隔离四道墙：Session 历史 · Workspace 目录 · 工具白名单</text>
+  <text x="962" y="661" font-size="13" fill="#475569">· Prompt 组装（两角色 section 列表不同）</text>
+  <text x="962" y="682" font-size="13" fill="#475569">没有共享 memory、没有共享 transcript、没有摘要传递</text>
+
+  <!-- ================= 回传链路 ================= -->
+  <text x="940" y="770" font-size="14" font-weight="700" fill="#b45309">Report 回传 5 跳（幂等键 requestId）</text>
+
+  <rect x="926" y="782" width="626" height="86" rx="12" fill="#fffbeb" stroke="#fcd34d" filter="url(#sh)"/>
+  <text x="948" y="806" font-size="13" fill="#78350f">orchestrator_report → ticket.latestReport → reportRelay（progress 无 question 则静默）</text>
+  <text x="948" y="828" font-size="13" fill="#78350f">→ Effects.enqueue('relay') → Sessions.prompt(masterId, 'steer') → AgentDelivery.send</text>
+  <text x="948" y="852" font-size="12.5" fill="#92400e">三种投递：steer（插当前 turn）· queue（等下一 turn）· inject（只塞背景不唤醒）</text>
+
+  <!-- ================= 五概念主循环（填补左下空区） ================= -->
+  <rect x="60" y="608" width="812" height="262" rx="14" fill="#ffffff" stroke="#cbd5e1" filter="url(#sh)"/>
+  <text x="84" y="638" font-size="15" font-weight="700" fill="#0f172a">五概念主循环（概念少到能背）</text>
+
+  <rect x="84" y="656" width="132" height="40" rx="9" fill="#eff6ff" stroke="#bfdbfe"/>
+  <text x="104" y="682" font-size="14" font-weight="700" fill="#1e3a8a">Trigger</text>
+  <line x1="216" y1="676" x2="244" y2="676" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <rect x="248" y="656" width="132" height="40" rx="9" fill="#eff6ff" stroke="#bfdbfe"/>
+  <text x="270" y="682" font-size="14" font-weight="700" fill="#1e3a8a">Thread</text>
+  <line x1="380" y1="676" x2="408" y2="676" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <rect x="412" y="656" width="176" height="40" rx="9" fill="#ecfdf5" stroke="#a7f3d0"/>
+  <text x="428" y="682" font-size="14" font-weight="700" fill="#065f46">Ticket + Mandate</text>
+  <line x1="588" y1="676" x2="616" y2="676" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <rect x="620" y="656" width="120" height="40" rx="9" fill="#ecfdf5" stroke="#a7f3d0"/>
+  <text x="640" y="682" font-size="14" font-weight="700" fill="#065f46">Assignment</text>
+  <line x1="740" y1="676" x2="768" y2="676" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <rect x="772" y="656" width="100" height="40" rx="9" fill="#fffbeb" stroke="#fcd34d"/>
+  <text x="792" y="682" font-size="14" font-weight="700" fill="#78350f">Report</text>
+
+  <text x="84" y="730" font-size="13" fill="#475569">· 不可变字段（mandate / origin）带来幂等、重放、审计；worker 从库里重建上下文，不靠记忆</text>
+  <text x="84" y="754" font-size="13" fill="#475569">· 订阅挂在 Thread 上：只推上下文（context:true），不授权、不唤醒，仍受 mandate 约束</text>
+  <text x="84" y="778" font-size="13" fill="#475569">· 人的消息能唤醒已结束的 ticket；bot / CI 不能；被人停掉的永不再醒</text>
+  <text x="84" y="802" font-size="13" fill="#475569">· 订阅有寿命：只轮询「活 ticket + 结束后 2 周」，过期即卸载</text>
+  <text x="84" y="832" font-size="12.5" fill="#94a3b8">读图顺序：① 输入准入 → ② 领域状态 → ③ 双 preset 执行 → ④ 驱动与存储</text>
+
+  <!-- ================= 底部：驱动与存储 ================= -->
+  <rect x="60" y="900" width="1492" height="238" rx="14" fill="#ffffff" stroke="#cbd5e1" filter="url(#sh)"/>
+  <text x="84" y="932" font-size="16" font-weight="700" fill="#0f172a">④ 驱动与存储（真正驱动状态机的是 Passes，不是事件总线）</text>
+
+  <rect x="84" y="950" width="330" height="86" rx="10" fill="#f1f5f9" stroke="#e2e8f0"/>
+  <text x="102" y="974" font-size="14" font-weight="700" fill="#0f172a">Passes（2 秒一次）</text>
+  <text x="102" y="997" font-size="12.5" fill="#475569">一次只跑一个，可被「来活了」提前踢</text>
+  <text x="102" y="1018" font-size="12.5" fill="#475569">DomainEvents 13 种，Runtime 只消费 3 种</text>
+
+  <rect x="438" y="950" width="330" height="86" rx="10" fill="#f1f5f9" stroke="#e2e8f0"/>
+  <text x="456" y="974" font-size="14" font-weight="700" fill="#0f172a">Effects（持久队列）</text>
+  <text x="456" y="997" font-size="12.5" fill="#475569">6 种 kind：assessment / launch / delivery</text>
+  <text x="456" y="1018" font-size="12.5" fill="#475569">relay / notice / reply；kind+key 唯一，各有退避</text>
+
+  <rect x="792" y="950" width="360" height="86" rx="10" fill="#f1f5f9" stroke="#e2e8f0"/>
+  <text x="810" y="974" font-size="14" font-weight="700" fill="#0f172a">orchestrator.sqlite</text>
+  <text x="810" y="997" font-size="12.5" fill="#475569">Trigger / Thread / Ticket / Decision / Assignment</text>
+  <text x="810" y="1018" font-size="12.5" fill="#475569">只持久化「授权与状态」，不存对话</text>
+
+  <rect x="1176" y="950" width="352" height="86" rx="10" fill="#f1f5f9" stroke="#e2e8f0"/>
+  <text x="1194" y="974" font-size="14" font-weight="700" fill="#0f172a">宿主侧（DSH）</text>
+  <text x="1194" y="997" font-size="12.5" fill="#475569">sessionPersistence：两个 Session 的对话历史</text>
+  <text x="1194" y="1018" font-size="12.5" fill="#475569">kv：prompt-version / session-prompts / master-id</text>
+
+  <rect x="84" y="1052" width="1444" height="66" rx="10" fill="#ecfdf5" stroke="#a7f3d0"/>
+  <text x="104" y="1076" font-size="13.5" fill="#065f46">上下文传递只有一条规则：inline 截断 + 可寻址读指针 —— 文本 ≤600 字符，超了给</text>
+  <text x="104" y="1098" font-size="13.5" font-weight="700" fill="#065f46">read: ticket/&lt;id&gt;/result　（全仓库没有 spill 文件，也没有链式召回）</text>
+
+</svg>

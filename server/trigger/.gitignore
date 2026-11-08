@@ -1,0 +1,13 @@
+# runtime logs (rotated by the clients / LaunchAgent)
+*.log
+
+# client runtime state — see clients/state/README.md
+clients/state/*.json
+!clients/state/*.example.json
+
+# python
+__pycache__/
+*.py[cod]
+
+# macOS
+.DS_Store

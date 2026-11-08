@@ -1,0 +1,17 @@
+{
+  "name": "mc_chat",
+  "title": "Minecraft 聊天栏",
+  "mode": "push",
+  "schema": {
+    "text": "string",
+    "actor": "string"
+  },
+  "policy": {
+    "default_priority": 0,
+    "wake": true
+  },
+  "health": {
+    "max_silence_s": 3600
+  },
+  "dedupe": ["actor", "ts", "text"]
+}
