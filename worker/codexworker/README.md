@@ -190,7 +190,8 @@ curl -sS 'http://127.0.0.1:8904/threads/<id>/progress'
    不要指望 `/manager/*` 的 Desktop 语义（多设备、跨窗口 steer、fork）完全一致。
 5. **流式输出**：`exec --json` 只给消息级事件（`item.completed`），没有 token 级 delta；
    `/health` 里 `tokenStreaming:false`。长回答要等整条消息完成。
-6. **未实现的控制面**：`fork`、`compact`、`stop` 返回 `501 capability_unavailable`；
+6. **控制面**：`fork`、`compact` 返回 `501 capability_unavailable`；`stop` 已实现
+   （`POST /threads/:id/stop`，空闲时 200 + `no_active_turn`）；
    `release`/`unsubscribe` 是 no-op。没有 Desktop writer 租约、上线通知、提问卡、
    公开图片输出、watchdog（飞书入站见下一节）。
 7. **会话 cwd**：resume 时使用状态文件里记录的 cwd（不存在则回退 `workspace`）；`codex exec resume`
@@ -238,10 +239,20 @@ cat ~/.hermes/secrets/codexworker.config.json
   （原子写、mode 600）。第一条消息新建会话，之后走 `codex exec resume <session-id>`；进程重启后仍续同一会话。
 - 收到文本先给训练员那条消息加「敲字中」表情回执（`addReaction`），回合结束——成功或失败——再移除
   （`removeReaction`）；两者失败都只记日志，不影响回合与卡片。回执按 `message_id` 各记各的，并发消息不互相覆盖（仅内存，不落盘）。
-- 表情回执之后才发「输出」卡，按 1.5–2s 节流用 PATCH 更新同一张卡（耗时/工具名/中间文本）；PATCH 被拒时
-  退化为连续发新的「输出」卡。回合结束发「回复」卡：正文是最终答复，底部 `会话 <threadId>`。
+- 表情回执之后才发「输出」卡。卡片是**事件驱动**的：只在回合开始、出现新的工具、收到新的一段
+  agent 文本、回合结束（成功/失败/已中断）时 PATCH，没有定时刷新；同一个工具连续调用多次只算一次
+  状态变化。限流（HTTP 429 / `code 99991400` / 频率类消息）时不丢内容：最新快照进单槽合并队列，
+  期间的新快照只覆盖队列，恢复后一次 PATCH 发出最新正文；重试是有界的（最多 2 次尝试，按
+  `retry_after` 或 3s 等待）。仍然失败时新发一条同标题「输出」的消息并把后续更新指向新 message_id，
+  旧卡加一行「（本卡已停止更新，见下条）」；明确失败才新发，超时（可能已送达）不重发，限流但已 ACK
+  的预览内容完整时直接当最终内容。连续失败到上限记 `feishu_card_delivery_failed`，不无限重试。
+  回合结束发「回复」卡：正文是最终答复，底部 `会话 <threadId>`；被 `/stop` 中断时「输出」卡标题改为
+  `-已中断`，正文标明 `⏹ 已中断`。
 - 同一 open_id 串行：上一轮没跑完时后一条排队，不会撞 `409 turn_in_progress`。飞书 ACK 与回合解耦
   （先落盘再返回，回合后台跑），长任务不会卡住入站。
+- `/stop`（也接受 `/stop@bot`）**绕过排队**立即执行：杀掉该会话正在跑的 codex 进程组
+  （SIGTERM → 2s → SIGKILL），回合标记 `cancelled`，卡片改「已中断」；没有在跑的回合时回
+  「当前没有在执行的回合（no_active_turn）」，不报错、不当作普通文本发给 Codex。
 - `GET /health` 的 `feishu` 字段报告 `connected/phase/lastError/sessions/turns/rejected`，
   `capabilities.feishuInbound` 表示通道是否已启动。
 
@@ -271,8 +282,8 @@ CLI 模式永远不会出现这个后缀：标题固定 `-输出` / `-回复`。
 1. **审批**：`codex exec` 是非交互进程，`approval_policy` 由配置固定（默认 `never`）。没有
    「批准/拒绝」卡片；需要人工批准的命令直接失败或按沙箱拒绝。
 2. **图片**：入站图片不转发，出站没有公开图片中继；`codex exec --image` 未接入 `/turn`。
-3. **斜杠命令**：`/new`、`/resume`、`/clear`、`/status` 等 Desktop 管理命令没有实现，发进来会当普通文本
-   交给 Codex。要换会话，删掉 `feishu-sessions.json` 里对应 open_id 的条目再发消息。
+3. **斜杠命令**：只有 `/stop` 实现了；`/new`、`/resume`、`/clear`、`/status` 等 Desktop 管理命令
+   没有实现，发进来会当普通文本交给 Codex。要换会话，删掉 `feishu-sessions.json` 里对应 open_id 的条目再发消息。
 4. **提问卡 / 上线通知 / 多设备 steer**：不启动；没有注册 `onCardAction`，点卡片只会得到
    「当前桥不支持此提问卡片」。
 

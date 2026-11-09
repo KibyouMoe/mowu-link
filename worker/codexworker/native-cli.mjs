@@ -110,6 +110,34 @@ export async function detectCodexVersion(bin, env = process.env) {
   });
 }
 
+// Signalling the whole tree: `codex exec` is spawned as a process-group leader
+// on POSIX, so /stop can reach codex and every shell it started. Windows has no
+// process groups here; the single child is signalled instead.
+export function signalProcessTree(child, signal = "SIGTERM") {
+  if (!child || typeof child.pid !== "number") return false;
+  if (process.platform !== "win32") {
+    try { process.kill(-child.pid, signal); return true; }
+    catch { /* group already gone: fall back to the single child */ }
+  }
+  try { return child.kill(signal); } catch { return false; }
+}
+
+// SIGTERM first, SIGKILL after the grace period. Resolves once the child exits.
+export async function terminateProcessTree(child, { graceMs = 2000 } = {}) {
+  if (!child || child.exitCode != null || child.signalCode) return { exited: true, forced: false };
+  let forced = false;
+  const exited = new Promise(resolve => {
+    if (child.exitCode != null || child.signalCode) return resolve(true);
+    child.once("exit", () => resolve(true));
+  });
+  signalProcessTree(child, "SIGTERM");
+  const timer = setTimeout(() => { forced = true; signalProcessTree(child, "SIGKILL"); }, Math.max(0, graceMs));
+  timer.unref?.();
+  await exited;
+  clearTimeout(timer);
+  return { exited: true, forced };
+}
+
 // codex rejects socks proxies, and ALL_PROXY on this host points at one. Strip
 // it for the child and let HTTPS_PROXY (or an explicit configured proxy) carry
 // the traffic. Never mutate the parent process environment.
@@ -394,9 +422,14 @@ export class CliNativeAdapter {
 
     const key = thread.id ?? "new";
     if (this.running.has(key)) throw httpError(409, "turn_in_progress", "This thread already has a running CLI turn; wait for it to finish.", true);
-    this.running.set(key, { startedAt: Date.now() });
+    // Control block shared with #runTurn and /stop: the child is stored here as
+    // soon as it exists, and `cancelled` is what turns the result into
+    // status=cancelled instead of a generic error.
+    const control = { startedAt: Date.now(), child: null, pid: null, cancelled: false };
+    control.settled = new Promise(resolve => { control.resolveSettled = resolve; });
+    this.running.set(key, control);
     try {
-      const result = await this.#runTurn({ thread, text, messageId, onEvent });
+      const result = await this.#runTurn({ thread, text, messageId, onEvent, control });
       if (!thread.id) thread.id = result.sessionId ?? `cli-${randomUUID()}`;
       thread.sessionId ??= result.sessionId ?? null;
       thread.updatedAt = nowIso();
@@ -407,7 +440,27 @@ export class CliNativeAdapter {
       this.state.threads[thread.id] = thread;
       await this.saveState();
       return { threadId: thread.id, sessionId: thread.sessionId, ...result };
-    } finally { this.running.delete(key); }
+    } finally {
+      this.running.delete(key);
+      control.resolveSettled?.();
+    }
+  }
+
+  // /stop: terminate the running turn's codex process group. An idle thread
+  // answers no_active_turn (200), not an error: stopping twice is harmless.
+  async stop(threadId = null, { graceMs = 2000 } = {}) {
+    const entry = threadId != null ? this.running.get(threadId) : null;
+    if (!entry) {
+      return { ok: true, status: "no_active_turn", threadId: threadId ?? null,
+        activeTurns: this.running.size };
+    }
+    entry.cancelled = true;
+    this.emit("turn.stopping", { threadId, payload: { reason: "stop_requested", pid: entry.pid ?? null } });
+    const termination = await terminateProcessTree(entry.child, { graceMs });
+    // Wait for the turn body to observe the exit and settle, but never hang a
+    // stop request on a broken child: the response is bounded.
+    await Promise.race([entry.settled, new Promise(resolve => { const timer = setTimeout(resolve, 5000); timer.unref?.(); })]);
+    return { ok: true, status: "cancelled", threadId, pid: entry.pid ?? null, forced: termination.forced };
   }
 
   argsFor({ resumeId }) {
@@ -435,7 +488,7 @@ export class CliNativeAdapter {
     return args;
   }
 
-  async #runTurn({ thread, text, messageId, onEvent }) {
+  async #runTurn({ thread, text, messageId, onEvent, control = null }) {
     const resumeId = thread.sessionId;
     const args = this.argsFor({ resumeId });
     const cwd = thread.cwd && existsSync(thread.cwd) ? thread.cwd : this.defaultCwd;
@@ -450,13 +503,18 @@ export class CliNativeAdapter {
     let stderr = "";
     const toolCalls = [];
 
+    // Detached on POSIX: the child leads its own process group, so /stop can
+    // signal codex and every shell it spawned with one kill(-pid).
     const child = spawn(this.codexBin, args, { cwd, env: childEnvironment(this.env, this.proxy),
-      stdio: ["pipe", "pipe", "pipe"] });
+      stdio: ["pipe", "pipe", "pipe"], detached: process.platform !== "win32" });
     this.children.add(child);
+    if (control) { control.child = child; control.pid = child.pid ?? null; }
+    // A stop can land between the running-map insert and the spawn above.
+    if (control?.cancelled) signalProcessTree(child, "SIGTERM");
     const killTimer = setTimeout(() => {
       timedOut = true;
-      child.kill("SIGTERM");
-      const force = setTimeout(() => child.kill("SIGKILL"), 2000);
+      signalProcessTree(child, "SIGTERM");
+      const force = setTimeout(() => signalProcessTree(child, "SIGKILL"), 2000);
       force.unref();
     }, this.turnTimeoutMs);
     killTimer.unref();
@@ -515,7 +573,10 @@ export class CliNativeAdapter {
     this.children.delete(child);
 
     let status = "completed";
-    if (failure) status = "error";
+    // A cancelled turn is not an error: the trainer asked for it. Checked
+    // first so a killed child's non-zero exit never masquerades as a failure.
+    if (control?.cancelled) status = "cancelled";
+    else if (failure) status = "error";
     else if (timedOut) status = "timeout";
     else if (!completed || exitCode !== 0) status = "error";
 
@@ -537,10 +598,13 @@ export class CliNativeAdapter {
 
     const result = { sessionId, turnId, status, resultText: latestText ?? "", toolCalls,
       reason: status === "completed" ? "completed"
+        : status === "cancelled" ? "cancelled_by_stop"
         : failure ?? (timedOut ? `codex exec exceeded ${this.turnTimeoutMs}ms`
         : stderr.trim().split("\n").slice(-3).join(" ").slice(0, 500) || `codex exec exited with code ${exitCode}`),
       usage, exitCode, durationMs: Date.now() - started, stderr: stderr.trim().slice(-2000) };
-    this.emit(status === "completed" ? "turn.completed" : "turn.failed",
+    const eventType = status === "completed" ? "turn.completed"
+      : status === "cancelled" ? "turn.cancelled" : "turn.failed";
+    this.emit(eventType,
       { threadId: thread.id ?? sessionId, turnId, messageId, onEvent,
         payload: { status, resultText: result.resultText, reason: result.reason,
           messageIds: messageId ? [messageId] : [], usage, durationMs: result.durationMs } });
@@ -603,7 +667,7 @@ export class CliNativeAdapter {
 
   async close() {
     this.closed = true;
-    for (const child of this.children) { try { child.kill("SIGTERM"); } catch { /* already gone */ } }
+    for (const child of this.children) signalProcessTree(child, "SIGTERM");
     this.children.clear();
   }
 }

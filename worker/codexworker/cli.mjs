@@ -297,7 +297,7 @@ if (args.command === "mcp") {
       "exec --json emits message-level events, not token deltas: no streaming text, no interactive tool-approval prompt. approval_policy is fixed by config (default never).",
       "Images cannot be attached yet (only text is passed; codex exec --image is not wired to /turn).",
       "MCP tools follow the codex CLI config; Desktop-only native tools (read_thread/send_message_to_thread/...) do not exist in this backend.",
-      "fork/compact/stop/unsubscribe are not implemented (release/unsubscribe answer ok as no-ops).",
+      "fork/compact/unsubscribe are not implemented (release/unsubscribe answer ok as no-ops); POST /threads/:id/stop kills the running codex process group.",
       "Feishu inbound (long connection) runs only when feishu.inboundEnabled; online announcements, public image output, question cards, slash commands and the Desktop writer lease are not started by the CLI.",
       "The event stream (GET /manager/events) is in-process only; transcripts are rebuilt from the bridge-owned session store (~/.codex/state/codexworker/history), not from codex rollouts."
     ];
@@ -319,7 +319,7 @@ if (args.command === "mcp") {
       feishu: feishuChannel ? feishuChannel.status()
         : { inboundEnabled: false, enabled: false, reason: config.feishu?.inboundEnabled ? "start_failed" : "disabled" },
       capabilities: { health: true, version: true, mcpStdio: true, managerHttp: true, desktopNative: false,
-        cliNative: true, turn: true, threads: true, resume: true, history: true, tokenStreaming: false,
+        cliNative: true, turn: true, threads: true, resume: true, stop: true, history: true, tokenStreaming: false,
         feishuInbound: Boolean(feishuChannel) },
       limits: limitations
     });
@@ -381,7 +381,9 @@ if (args.command === "mcp") {
         await history.appendMessage(threadId, { role: "assistant", text: result.resultText,
           messageId: result.turnId ?? null, turnId: result.turnId ?? null, source });
       }
-      await history.setMeta(threadId, { sessionId: result.sessionId ?? null, updatedAt: new Date().toISOString() });
+      await history.setMeta(threadId, { sessionId: result.sessionId ?? null,
+        updatedAt: new Date().toISOString(),
+        ...(result.status && result.status !== "completed" ? { lastStatus: result.status } : {}) });
       return { ...result, messageId };
     };
 
@@ -429,7 +431,7 @@ if (args.command === "mcp") {
         if (method === "GET" && url.pathname === "/") {
           return send(res, 200, { name: NAME, version: VERSION, mode: "cli", backend: "cli",
             endpoints: ["GET /health", "GET /version", "GET /threads", "POST /threads", "POST /turn",
-              "GET /threads/:id", "GET /threads/:id/last-turn", "POST /threads/:id/resume",
+              "GET /threads/:id", "GET /threads/:id/last-turn", "POST /threads/:id/resume", "POST /threads/:id/stop",
               "GET /manager/sessions", "POST /manager/messages", "GET /manager/events", "POST /manager/sessions/adopt"] }, method);
         }
         if (method === "GET" && url.pathname === "/health") return send(res, 200, health(), method);
@@ -534,7 +536,12 @@ if (args.command === "mcp") {
             return send(res, 200, { ok: true, status: "notSubscribed",
               detail: "The CLI backend owns child processes per turn; there is no app-server subscription." }, method);
           }
-          if (method === "POST" && ["stop", "compact", "fork"].includes(operation)) {
+          // /stop interrupts the running codex process group. An idle thread is
+          // 200 + no_active_turn so callers can stop idempotently.
+          if (method === "POST" && operation === "stop") {
+            return send(res, 200, await adapter.stop(id), method);
+          }
+          if (method === "POST" && ["compact", "fork"].includes(operation)) {
             throw httpError(501, "capability_unavailable", `The native-cli backend does not implement ${operation}.`);
           }
         }

@@ -182,14 +182,15 @@ function requestJson(base, pathname, { method = "GET", body = null } = {}) {
 
 // Boots the real cli.mjs against the fake codex binary so the config -> adapter
 // -> argv chain is exercised end to end, not just the adapter in isolation.
-async function startBridge({ reasoningEffort, sessionId }) {
+async function startBridge({ reasoningEffort, sessionId, codexScript = FAKE }) {
   const root = await mkdtemp(path.join(os.tmpdir(), "codexworker-effort-"));
   const bin = path.join(root, "fake-codex.mjs");
-  await writeFile(bin, FAKE, { mode: 0o755 });
+  await writeFile(bin, codexScript, { mode: 0o755 });
   const codexHome = path.join(root, "codex-home");
   const stateDir = path.join(root, "state");
   await mkdir(codexHome, { recursive: true });
   const argsFile = path.join(root, "argv.jsonl");
+  const pidFile = path.join(root, "pid");
   const logPath = path.join(root, "bridge.log");
   const configPath = path.join(root, "config.json");
   const codex = { bin, home: codexHome, sandbox: "read-only", model: "gpt-6.1-sol" };
@@ -198,7 +199,7 @@ async function startBridge({ reasoningEffort, sessionId }) {
     codex, feishu: { inboundEnabled: false } }, null, 2));
 
   const env = { ...process.env, CODEXWORKER_STATE_DIR: stateDir, CODEX_HOME: codexHome,
-    FAKE_ARGS_FILE: argsFile, FAKE_SESSION_ID: sessionId,
+    FAKE_ARGS_FILE: argsFile, FAKE_SESSION_ID: sessionId, FAKE_PID_FILE: pidFile,
     NO_PROXY: "127.0.0.1,localhost", no_proxy: "127.0.0.1,localhost" };
   delete env.CODEX_APP_TOOLS_PIPE_PATH;
 
@@ -232,7 +233,7 @@ async function startBridge({ reasoningEffort, sessionId }) {
     }
     await rm(root, { recursive: true, force: true });
   };
-  return { base, argsFile, logPath, stop, stderr: () => stderr };
+  return { base, root, argsFile, pidFile, logPath, stop, stderr: () => stderr };
 }
 
 async function waitForLog(file, needle) {
@@ -332,5 +333,146 @@ test("cli.mjs stays up on an invalid reasoningEffort: warn logged, no override, 
 
     const logText = await waitForLog(bridge.logPath, "reasoning_effort_invalid");
     assert.match(logText, /"level":"warn"/);
+  } finally { await bridge.stop(); }
+});
+
+// ---------------------------------------------------------------------------
+// /stop: kill the codex process group, mark the turn cancelled. An idle stop
+// is 200/no_active_turn, never 501.
+// ---------------------------------------------------------------------------
+
+const SLEEPER = `#!/usr/bin/env node
+import { writeFileSync } from "node:fs";
+if (process.argv[2] === "--version") { console.log("codex-cli 0.0.0-fake"); process.exit(0); }
+writeFileSync(process.env.FAKE_PID_FILE, String(process.pid));
+console.log(JSON.stringify({ type: "thread.started", thread_id: process.env.FAKE_SESSION_ID }));
+setInterval(() => {}, 1000);
+`;
+
+const STUBBORN = `#!/usr/bin/env node
+import { writeFileSync } from "node:fs";
+if (process.argv[2] === "--version") { console.log("codex-cli 0.0.0-fake"); process.exit(0); }
+writeFileSync(process.env.FAKE_PID_FILE, String(process.pid));
+process.on("SIGTERM", () => {});
+setInterval(() => {}, 1000);
+`;
+
+async function stopFixture(script = SLEEPER) {
+  const root = await mkdtemp(path.join(os.tmpdir(), "codexworker-stop-"));
+  const bin = path.join(root, "fake-codex.mjs");
+  await writeFile(bin, script, { mode: 0o755 });
+  const codexHome = path.join(root, "codex-home");
+  await mkdir(codexHome, { recursive: true });
+  const pidFile = path.join(root, "pid");
+  const sessionId = randomUUID();
+  const adapter = new CliNativeAdapter({ codexBin: bin, codexHome, stateDir: path.join(root, "state"),
+    defaultCwd: root, turnTimeoutMs: 60000, sandbox: "read-only",
+    env: { ...process.env, FAKE_PID_FILE: pidFile, FAKE_SESSION_ID: sessionId, CODEX_HOME: codexHome },
+    logger: () => {} });
+  await adapter.init();
+  return { root, adapter, pidFile, sessionId };
+}
+
+async function waitForPidFile(file, timeoutMs = 8000) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    try {
+      const value = Number((await readFile(file, "utf8")).trim());
+      if (Number.isInteger(value) && value > 0) return value;
+    } catch { /* not written yet */ }
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  throw new Error(`timed out waiting for ${file}`);
+}
+
+async function waitForStatus(base, threadId, expected, timeoutMs = 5000) {
+  const started = Date.now();
+  let last = null;
+  while (Date.now() - started < timeoutMs) {
+    last = await requestJson(base, `/threads/${threadId}/progress`);
+    if (last.json?.polls?.[0]?.latestTurn?.status === expected) return last;
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  throw new Error(`status never became ${expected}: ${JSON.stringify(last?.json)}`);
+}
+
+test("stop kills the sleeping codex process group and marks the turn cancelled", async t => {
+  const { root, adapter, pidFile } = await stopFixture();
+  t.after(async () => { await adapter.close(); await rm(root, { recursive: true, force: true }); });
+  const thread = await adapter.register({ cwd: root });
+  const pending = adapter.dispatch({ threadId: thread.id, text: "sleep" });
+  const pid = await waitForPidFile(pidFile);
+
+  const stopped = await adapter.stop(thread.id);
+  assert.equal(stopped.status, "cancelled");
+  assert.equal(stopped.pid, pid);
+
+  const result = await pending;
+  assert.equal(result.status, "cancelled");
+  assert.equal(result.reason, "cancelled_by_stop");
+  assert.equal(adapter.running.size, 0);
+  assert.equal(adapter.state.threads[thread.id].lastTurn.status, "cancelled");
+
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.throws(() => process.kill(pid, 0), /ESRCH/, "the codex child must be gone");
+});
+
+test("a codex that ignores SIGTERM is SIGKILLed after the grace period", async t => {
+  const { root, adapter, pidFile } = await stopFixture(STUBBORN);
+  t.after(async () => { await adapter.close(); await rm(root, { recursive: true, force: true }); });
+  const thread = await adapter.register({ cwd: root });
+  const pending = adapter.dispatch({ threadId: thread.id, text: "sleep" });
+  const pid = await waitForPidFile(pidFile);
+
+  const stopped = await adapter.stop(thread.id, { graceMs: 150 });
+  assert.equal(stopped.status, "cancelled");
+  assert.equal(stopped.forced, true, "SIGTERM was ignored, SIGKILL was required");
+  assert.equal((await pending).status, "cancelled");
+
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.throws(() => process.kill(pid, 0), /ESRCH/);
+});
+
+test("stopping an idle thread answers no_active_turn, not an error", async t => {
+  const { root, adapter } = await stopFixture();
+  t.after(async () => { await adapter.close(); await rm(root, { recursive: true, force: true }); });
+  const thread = await adapter.register({ cwd: root });
+  assert.deepEqual(await adapter.stop(thread.id),
+    { ok: true, status: "no_active_turn", threadId: thread.id, activeTurns: 0 });
+  assert.equal((await adapter.stop(null)).status, "no_active_turn");
+});
+
+test("POST /threads/:id/stop on an idle thread returns 200 no_active_turn and advertises the capability", async () => {
+  const bridge = await startBridge({ sessionId: randomUUID() });
+  try {
+    const thread = await requestJson(bridge.base, "/threads", { method: "POST", body: {} });
+    const stopped = await requestJson(bridge.base, `/threads/${thread.json.thread.id}/stop`,
+      { method: "POST", body: {} });
+    assert.equal(stopped.status, 200);
+    assert.equal(stopped.json.status, "no_active_turn");
+    assert.equal(stopped.json.threadId, thread.json.thread.id);
+    const health = await requestJson(bridge.base, "/health");
+    assert.equal(health.json.capabilities.stop, true);
+  } finally { await bridge.stop(); }
+});
+
+test("POST /threads/:id/stop kills a running turn end to end and reports cancelled", async () => {
+  const bridge = await startBridge({ sessionId: randomUUID(), codexScript: SLEEPER });
+  try {
+    const thread = await requestJson(bridge.base, "/threads", { method: "POST", body: {} });
+    const threadId = thread.json.thread.id;
+    const started = await requestJson(bridge.base, "/turn",
+      { method: "POST", body: { threadId, text: "sleep", wait: false } });
+    assert.equal(started.status, 202);
+    const pid = await waitForPidFile(bridge.pidFile);
+
+    const stopped = await requestJson(bridge.base, `/threads/${threadId}/stop`, { method: "POST", body: {} });
+    assert.equal(stopped.status, 200);
+    assert.equal(stopped.json.status, "cancelled");
+    assert.equal(stopped.json.pid, pid);
+
+    await waitForStatus(bridge.base, threadId, "cancelled");
+    await new Promise(resolve => setTimeout(resolve, 50));
+    assert.throws(() => process.kill(pid, 0), /ESRCH/);
   } finally { await bridge.stop(); }
 });
