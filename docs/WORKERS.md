@@ -13,7 +13,7 @@
 ## 一、两套名字，别混
 
 ```
-桥实例名（代码、目录、进程）   CodexWorker / DshWorker
+桥实例名（代码、目录、进程）   CodexWorker / DSHWorker
 worker 身份名（Router 认的）   OguriCap / TamamoCross
 ```
 
