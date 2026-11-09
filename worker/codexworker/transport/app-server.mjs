@@ -23,6 +23,7 @@
 // 本文件只实现 transport 接口（listTools / callTool），不碰业务语义。
 // 参考实现：./desktop-pipe.mjs；选择器：./index.mjs。
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
@@ -155,6 +156,16 @@ const TOOL_DEFINITIONS = [
     description: "Desktop-only UI navigation; app-server has no equivalent.",
     inputSchema: { type: "object", properties: { page: { type: "string" } }, required: [] },
   },
+  {
+    name: "list_projects",
+    namespace: "app-server",
+    description: "List local workspace projects derived from app-server `thread/list` (desktop-shaped payload).",
+    inputSchema: {
+      type: "object",
+      properties: { limit: { type: "integer", minimum: 1, maximum: 100 } },
+      required: [],
+    },
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -206,6 +217,12 @@ export async function callTool(toolName, args, invocation, timeoutMs = 5000) {
 
 export async function shutdown() {
   await client.shutdown();
+}
+
+// Synchronous last-resort cleanup for `process.on("exit")`: the child must not
+// outlive a CLI process that is exiting without awaiting async shutdown.
+export function killSync() {
+  client.killChild();
 }
 
 // ---------------------------------------------------------------------------
@@ -266,6 +283,10 @@ class AppServerClient {
     this.stderr = "";
     this.serverInfo = null;
     this.threads = new Map();
+    // Threads loaded in THIS app-server process. turn/start rejects a thread
+    // that exists on disk but was never started/resumed here ("thread not
+    // found"), which is exactly the state after a CLI restart.
+    this.loadedThreads = new Set();
   }
 
   async execute(toolName, args, timeoutMs) {
@@ -277,6 +298,7 @@ class AppServerClient {
       case "send_message_to_thread": return this.sendMessage(args, timeoutMs);
       case "set_thread_title": return this.setThreadTitle(args, timeoutMs);
       case "wait_threads": return this.waitThreads(args, timeoutMs);
+      case "list_projects": return this.listProjects(args, timeoutMs);
       default: throw new AppServerError(`app-server transport does not implement native tool "${toolName}"`, "app_server_unsupported_tool");
     }
   }
@@ -663,6 +685,7 @@ class AppServerClient {
     const thread = result?.thread;
     if (!thread?.id) throw new AppServerError("thread/start returned no thread id", "app_server_invalid_response");
     this.rememberThread(thread);
+    this.loadedThreads.add(thread.id);
 
     const title = stringArg(args.title) ?? stringArg(args.name);
     if (title) await this.setThreadTitle({ threadId: thread.id, title }, timeoutMs);
@@ -693,6 +716,7 @@ class AppServerClient {
     const thread = result?.thread;
     if (!thread?.id) throw new AppServerError("thread/fork returned no thread id", "app_server_invalid_response");
     this.rememberThread(thread);
+    this.loadedThreads.add(thread.id);
     return {
       threadId: thread.id,
       forkedFromId: thread.forkedFromId ?? threadId,
@@ -717,6 +741,26 @@ class AppServerClient {
       threads,
       nextCursor: result?.nextCursor ?? null,
       backwardsCursor: result?.backwardsCursor ?? null,
+    };
+  }
+
+  async listProjects(args, timeoutMs) {
+    const limit = clampInteger(args.limit, 1, 100, 100);
+    await this.ensureStarted();
+    const result = await this.request("thread/list", { limit }, this.readTimeout(timeoutMs));
+    const threads = Array.isArray(result?.data) ? result.data.map(normalizeThread) : [];
+    for (const thread of threads) this.rememberThread(thread);
+    // The caller may have created a thread after the persisted list snapshot
+    // was written; include in-memory threads too so the CLI session is present.
+    const all = [...threads];
+    for (const state of this.threads.values()) {
+      const thread = normalizeThread(state.thread);
+      if (thread && !all.some((candidate) => candidate.id === thread.id)) all.push(thread);
+    }
+    return {
+      schemaVersion: 1,
+      source: "app-server",
+      projects: projectList(all),
     };
   }
 
@@ -808,6 +852,7 @@ class AppServerClient {
     if (args.sandboxPolicy && typeof args.sandboxPolicy === "object") params.sandboxPolicy = args.sandboxPolicy;
 
     await this.ensureStarted();
+    await this.ensureThreadLoaded(threadId, args, timeoutMs);
     const result = await this.request("turn/start", params, this.controlTimeout(timeoutMs));
     const turn = result?.turn;
     if (!turn?.id) throw new AppServerError("turn/start returned no turn id", "app_server_invalid_response");
@@ -891,6 +936,19 @@ class AppServerClient {
     };
   }
 
+  async ensureThreadLoaded(threadId, args = {}, timeoutMs) {
+    if (this.loadedThreads.has(threadId)) return;
+    // Only override policy when the caller asked; otherwise keep the thread's
+    // own saved policy. turn/start cannot run against an unloaded thread.
+    const params = { threadId };
+    for (const key of ["approvalPolicy", "cwd", "model"]) {
+      if (stringArg(args[key])) params[key] = args[key];
+    }
+    const result = await this.request("thread/resume", params, this.controlTimeout(timeoutMs));
+    if (result?.thread) this.rememberThread(result.thread);
+    this.loadedThreads.add(threadId);
+  }
+
   controlTimeout(timeoutMs) {
     return Math.max(Number(timeoutMs) || 0, CONTROL_TIMEOUT_FLOOR_MS);
   }
@@ -942,6 +1000,35 @@ function appServerEnv() {
   env.NO_PROXY = [...noProxy].join(",");
   env.no_proxy = env.NO_PROXY;
   return env;
+}
+
+function projectList(threads) {
+  const byPath = new Map();
+  for (const thread of threads) {
+    if (!thread?.cwd) continue;
+    const key = path.resolve(thread.cwd);
+    let project = byPath.get(key);
+    if (!project) {
+      project = {
+        projectId: `app-server:${createHash("sha256").update(key).digest("hex").slice(0, 32)}`,
+        kind: "local",
+        hostId: "local",
+        name: path.basename(key) || key,
+        path: thread.cwd,
+        threadCount: 0,
+        lastUsedAt: null,
+      };
+      byPath.set(key, project);
+    }
+    project.threadCount += 1;
+    const usedAt = thread.updatedAt ?? thread.recencyAt ?? thread.createdAt ?? null;
+    if (usedAt && (!project.lastUsedAt || Date.parse(usedAt) > Date.parse(project.lastUsedAt))) {
+      project.lastUsedAt = usedAt;
+    }
+  }
+  return [...byPath.values()].sort((a, b) =>
+    (Date.parse(b.lastUsedAt ?? 0) || 0) - (Date.parse(a.lastUsedAt ?? 0) || 0) ||
+    a.path.localeCompare(b.path));
 }
 
 function normalizeThread(thread) {

@@ -19,6 +19,7 @@ const invocation = { threadId: "test-harness", turnId: "test-harness-turn", call
 const EXPECTED_TOOLS = [
   "create_thread",
   "fork_thread",
+  "list_projects",
   "list_threads",
   "navigate_to_codex_page",
   "read_thread",
@@ -43,12 +44,12 @@ after(async () => {
   await appServer.shutdown();
 });
 
-test("app-server transport exposes the eight desktop tools", async () => {
+test("app-server transport exposes the nine desktop tools", async () => {
   assert.equal(transport.name, "app-server");
   assert.equal(appServer.available(), true, appServer.unavailableReason());
   const tools = await transport.listTools();
   const names = tools.map((tool) => tool.name).sort();
-  assert.equal(tools.length, 8);
+  assert.equal(tools.length, 9);
   assert.deepEqual(names, [...EXPECTED_TOOLS].sort());
   for (const tool of tools) {
     assert.equal(tool.namespace, "app-server");
@@ -145,4 +146,19 @@ test("list_threads returns the created thread in desktop shape", async () => {
     assert.equal(typeof thread.id, "string");
   }
   console.log("[list_threads]", listing.threads.length, "threads");
+});
+
+test("list_projects returns the workspace in desktop shape", async () => {
+  const result = payload(await transport.callTool("list_projects", {}, invocation, 30_000));
+  assert.equal(result.schemaVersion, 1);
+  assert.equal(result.source, "app-server");
+  assert.ok(Array.isArray(result.projects));
+  assert.ok(result.projects.length >= 1, "list_projects returned no projects");
+  const project = result.projects.find((entry) => entry.path === repoRoot);
+  assert.ok(project, `no project for ${repoRoot}: ${JSON.stringify(result.projects)}`);
+  assert.equal(project.hostId, "local");
+  assert.equal(project.kind, "local");
+  assert.equal(typeof project.projectId, "string");
+  assert.ok(project.projectId.length >= 16);
+  console.log("[list_projects]", result.projects.length, "projects;", project.projectId, project.path);
 });
