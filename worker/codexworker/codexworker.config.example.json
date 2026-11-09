@@ -1,7 +1,6 @@
 {
   "host": "127.0.0.1",
   "port": 8903,
-  "bridgeName": "CodexWorker",
   "backend": "auto",
   "operatingMode": "cli-native",
   "workspace": "~/projects/mowulink",

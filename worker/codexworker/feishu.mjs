@@ -739,6 +739,17 @@ export class FeishuWebsocketClient {
     if (this._stopped) return;
     const frameMethod = frame.method ?? 0;
     const msgType = frame.headers.type || "";
+    // Frame diagnostics are opt-in: CODEXWORKER_DEBUG_FRAMES=1. A healthy
+    // long connection logs nothing by default.
+    if (process.env.CODEXWORKER_DEBUG_FRAMES === "1") {
+      if (frameMethod !== 0) {
+        let et = "";
+        try { et = JSON.parse(_decoder.decode(frame.payload))?.header?.event_type || ""; } catch { et = "<unparsed>"; }
+        console.error(`[feishu-diag] method=${frameMethod} type=${msgType} event_type=${et} bytes=${frame.payload?.length ?? 0}`);
+      } else {
+        console.error(`[feishu-diag] CONTROL type=${msgType} bytes=${frame.payload?.length ?? 0}`);
+      }
+    }
     if (frameMethod === 0) return; // CONTROL ping/pong, ignore
     if (msgType === "card" || (msgType === "event" && (() => {
       try { return JSON.parse(_decoder.decode(frame.payload))?.header?.event_type === "card.action.trigger"; } catch { return false; }

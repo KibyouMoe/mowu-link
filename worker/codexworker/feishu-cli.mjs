@@ -479,6 +479,8 @@ export class CliFeishuChannel {
       connection: this.client?.status?.() ?? null,
       lastError: this.client?.lastError || null,
       replyMode: "single-message",
+      // What Feishu cards are titled with (the instance display name).
+      displayName: this.bridgeName,
       whitelistCount: this.whitelist.size,
       bootstrapOwner: this.bootstrapOwner,
       sessions: Object.keys(this.store.state.sessions).length,

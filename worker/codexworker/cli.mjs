@@ -14,43 +14,51 @@
 // backend as not attached and points at `codexworker mcp` inside the plugin
 // host. Without the pipe the native-cli backend is used. `"backend": "cli"` in
 // the config forces native-cli even if a pipe variable leaks into the shell.
+//
+// Identity: this process is one instance of the bridge, so it must load its own
+// identity (identity.json, or --identity <path>): `name` is the internal id
+// (state directory, log file, health.name), `display` is the human-facing name
+// (Feishu card titles, log prefix, health.display). No identity -> exit 2.
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { randomUUID } from "node:crypto";
-import { appendFile, mkdir, readFile } from "node:fs/promises";
+import { appendFile, cp, mkdir, readFile, stat } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { CliNativeAdapter, detectCodexVersion, httpError, probeNativeBackend, resolveCodexBinary } from "./native-cli.mjs";
+import { IDENTITY_REQUIRED_MESSAGE, IdentityError, readIdentityFile, resolveIdentity } from "./identity.mjs";
 import { SessionStore } from "./session-store.mjs";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
-const NAME = "CodexWorker";
-process.title = NAME;
+// The CLI program name (the repository), never an instance title.
+const PROGRAM = "codexworker";
+const VERSION = JSON.parse(await readFile(path.join(ROOT, "package.json"), "utf8")).version;
 
-const pkg = JSON.parse(await readFile(path.join(ROOT, "package.json"), "utf8"));
-const VERSION = pkg.version;
 
-const HELP = `CodexWorker ${VERSION}
+const HELP = `codexworker ${VERSION}
 
 用法:
   codexworker [serve] [选项]        启动 CLI 原生 Bridge（/health /version /threads /turn /manager/*）
   codexworker mcp [选项]            透传启动原 server.mjs（MCP stdio，Desktop 插件宿主）
 
 选项:
-  --config <file.json>  读取配置（backend/workspace/codex/host/port/bridgeName/tokenFile）
+  --identity <file>     实例身份文件（默认 ./identity.json：name/display/port/configFile）
+  --config <file.json>  读取配置（backend/workspace/codex/host/port/tokenFile；
+                        不传时用 identity.configFile）
   --host <addr>         监听地址（默认 127.0.0.1）
-  --port <n>            监听端口（默认 8903；0 表示随机空闲端口）
+  --port <n>            监听端口（默认取 identity.port，其次 config.port，最后 8903；0 表示随机空闲端口）
   --backend <cli|desktop|auto>
                         原生后端（默认 auto：有 CODEX_APP_TOOLS_PIPE_PATH 走 Desktop，否则 CLI）
-  --log <file>          追加 JSONL 日志（默认写 stderr）
+  --log <file>          追加 JSONL 日志（支持 {name}/{display}/{port} 占位符；默认写 stderr）
   --stdio               mcp 的别名
   -h, --help            显示本帮助
   -v, --version         显示版本
 
 环境变量:
-  CODEXWORKER_CONFIG, CODEXWORKER_HOST, CODEXWORKER_PORT, CODEXWORKER_LOG,
-  CODEXWORKER_STATE_DIR, CODEXWORKER_CODEX_BIN, CODEX_HOME
+  CODEXWORKER_IDENTITY, CODEXWORKER_CONFIG, CODEXWORKER_HOST, CODEXWORKER_PORT,
+  CODEXWORKER_LOG, CODEXWORKER_STATE_DIR, CODEXWORKER_CODEX_BIN, CODEX_HOME,
+  CODEXWORKER_DEBUG_FRAMES（=1 时输出飞书帧诊断日志）
 
 CLI 模式示例:
   ./bin/codexworker --config ./codexworker.config.example.json --port 8904
@@ -62,9 +70,11 @@ CLI 模式示例:
 `;
 
 const logFile = { path: null, chain: Promise.resolve() };
+// Replaced by identity.display once the instance identity is loaded.
+let label = PROGRAM;
 function stamp() { return new Date().toISOString(); }
 function log(level, event, fields = {}) {
-  const line = `${stamp()} [${NAME}] ${level} ${event}` +
+  const line = `${stamp()} [${label}] ${level} ${event}` +
     (Object.keys(fields).length ? ` ${JSON.stringify(fields)}` : "");
   process.stderr.write(line + "\n");
   if (!logFile.path) return;
@@ -73,7 +83,7 @@ function log(level, event, fields = {}) {
 }
 
 function fail(message, code = 2) {
-  process.stderr.write(`${NAME}: ${message}\n`);
+  process.stderr.write(`${label}: ${message}\n`);
   process.exit(code);
 }
 
@@ -85,7 +95,7 @@ function expandHome(value) {
 }
 
 function parseArgs(argv) {
-  const out = { command: "serve", config: null, host: null, port: null, log: null, backend: null };
+  const out = { command: "serve", identity: null, config: null, host: null, port: null, log: null, backend: null };
   const take = (i, flag) => {
     const value = argv[i];
     if (value == null || value.startsWith("--")) fail(`${flag} 需要一个值`);
@@ -94,7 +104,7 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i++) {
     let arg = argv[i];
     if (arg === "-h" || arg === "--help") { process.stdout.write(HELP); process.exit(0); }
-    if (arg === "-v" || arg === "--version") { process.stdout.write(`${NAME} ${VERSION}\n`); process.exit(0); }
+    if (arg === "-v" || arg === "--version") { process.stdout.write(`${PROGRAM} ${VERSION}\n`); process.exit(0); }
     if (arg === "serve" || arg === "mcp") { out.command = arg; continue; }
     if (arg === "--stdio") { out.command = "mcp"; continue; }
     let inline = null;
@@ -102,6 +112,7 @@ function parseArgs(argv) {
     if (arg.startsWith("--") && eq > 2) { inline = arg.slice(eq + 1); arg = arg.slice(0, eq); }
     const value = inline ?? null;
     switch (arg) {
+      case "--identity": out.identity = path.resolve(expandHome(value ?? take(++i, arg))); break;
       case "--config": out.config = expandHome(value ?? take(++i, arg)); break;
       case "--host": out.host = value ?? take(++i, arg); break;
       case "--port": out.port = value ?? take(++i, arg); break;
@@ -133,29 +144,95 @@ function resolvePort(value, fallback) {
   return port;
 }
 
+// identity.json next to the code, then ./identity.json from the working
+// directory. --identity / CODEXWORKER_IDENTITY pin one file and make it
+// mandatory: a pinned path that is missing is an error, never a fallback.
+async function probeIdentity(explicit) {
+  if (explicit) {
+    const found = await readIdentityFile(explicit);
+    if (!found) throw new IdentityError(`${IDENTITY_REQUIRED_MESSAGE}（找不到 identity 文件 ${explicit}）`, { file: explicit });
+    return found;
+  }
+  for (const file of new Set([path.join(ROOT, "identity.json"), path.resolve("identity.json")])) {
+    const found = await readIdentityFile(file);
+    if (found) return found;
+  }
+  return null;
+}
+
+// State belongs to the instance: ~/.codex/state/<name>. Installs from before
+// identity files wrote ~/.codex/state/codexworker; seed the new directory from
+// it once so the Feishu chat binding and history survive the rename.
+async function defaultStateDir(name) {
+  const root = path.join(os.homedir(), ".codex", "state");
+  const dir = path.join(root, name);
+  if (name === "codexworker") return dir;
+  try { await stat(dir); return dir; } catch { /* first boot under this name */ }
+  const legacy = path.join(root, "codexworker");
+  try {
+    await stat(legacy);
+    await cp(legacy, dir, { recursive: true });
+    log("info", "state_dir_migrated", { from: legacy, to: dir, name });
+  } catch { /* no legacy state: start clean */ }
+  return dir;
+}
+
 const args = parseArgs(process.argv.slice(2));
-const config = await loadConfig(args.config ? path.resolve(args.config) : null);
+
+// Identity first: without name/display this process is not a valid instance,
+// and identity.configFile may hold the only written-down config path.
+let identityFile;
+try {
+  const explicit = args.identity ?? (process.env.CODEXWORKER_IDENTITY
+    ? path.resolve(expandHome(process.env.CODEXWORKER_IDENTITY)) : null);
+  identityFile = await probeIdentity(explicit);
+} catch (error) {
+  fail(error?.message ?? String(error), 2);
+}
+const identityConfig = identityFile?.value?.configFile ? expandHome(identityFile.value.configFile) : null;
+const configPath = args.config ? path.resolve(args.config)
+  : (process.env.CODEXWORKER_CONFIG ? path.resolve(expandHome(process.env.CODEXWORKER_CONFIG))
+    : (identityConfig ? path.resolve(identityConfig) : null));
+const config = await loadConfig(configPath);
 if (args.backend) config.backend = args.backend === "auto" ? undefined : args.backend;
 
+// identity.json -> config.bridgeName -> refuse to start (exit 2).
+let identity;
+try { identity = resolveIdentity({ identity: identityFile, config }); }
+catch (error) { fail(error?.message ?? String(error), 2); }
+label = identity.display;
+process.title = identity.name;
+
 const host = args.host ?? process.env.CODEXWORKER_HOST ?? config.host ?? "127.0.0.1";
-const port = resolvePort(args.port ?? process.env.CODEXWORKER_PORT ?? config.port, 8903);
-const stateDir = expandHome(process.env.CODEXWORKER_STATE_DIR ??
-  path.join(os.homedir(), ".codex", "state", "codexworker"));
+const port = resolvePort(args.port ?? process.env.CODEXWORKER_PORT ?? identity.port ?? config.port, 8903);
+const stateDir = expandHome(process.env.CODEXWORKER_STATE_DIR ?? await defaultStateDir(identity.name));
+
+function logPathFor(value) {
+  return value.replaceAll("{name}", identity.name).replaceAll("{display}", identity.display)
+    .replaceAll("{port}", String(port));
+}
 const resolvedLog = args.log ?? process.env.CODEXWORKER_LOG ?? null;
 if (resolvedLog) {
-  logFile.path = path.resolve(expandHome(resolvedLog));
+  logFile.path = path.resolve(expandHome(logPathFor(resolvedLog)));
   await mkdir(path.dirname(logFile.path), { recursive: true });
 }
 
 // The copied modules read these variables; set them before importing server.mjs.
-process.env.CODEXWORKER_CONFIG = args.config ? path.resolve(args.config) : (process.env.CODEXWORKER_CONFIG ?? "");
+process.env.CODEXWORKER_CONFIG = configPath ? path.resolve(configPath) : "";
 process.env.CODEXWORKER_HOST = host;
 process.env.CODEXWORKER_PORT = String(port);
 process.env.CODEXWORKER_STATE_DIR = stateDir;
 if (logFile.path) process.env.CODEXWORKER_LOG = logFile.path;
 
+log("info", "identity_loaded", { name: identity.name, display: identity.display,
+  source: identity.source, file: identity.file });
+if (identity.source === "identity.json" && typeof config.bridgeName === "string" && config.bridgeName.trim() &&
+    config.bridgeName.trim() !== identity.display) {
+  // bridgeName is the legacy carrier for the display name; identity.json wins.
+  log("info", "identity_config_bridge_ignored", { bridgeName: config.bridgeName, display: identity.display });
+}
 log("info", "start", { mode: args.command, version: VERSION, host, port, stateDir,
-  config: args.config ? path.resolve(args.config) : null });
+  name: identity.name, display: identity.display, config: configPath });
 
 function loopback(address) {
   return address === "127.0.0.1" || address === "::1" || address === "localhost";
@@ -198,7 +275,8 @@ if (args.command === "mcp") {
       "This process exposes liveness only: GET /health and GET /version. All other routes return 503/404."
     ];
     const health = () => ({
-      name: config.bridgeName ?? NAME, version: VERSION, alive: true, ready: false, mode: "cli",
+      name: identity.name, display: identity.display, bridge: identity.bridge,
+      version: VERSION, alive: true, ready: false, mode: "cli",
       backend: "desktop", operatingMode: config.operatingMode ?? "desktop-bridge", integrationMode: "cli-entry",
       host, port: server.address()?.port ?? port, pid: process.pid, startedAt,
       uptimeSec: Number(((Date.now() - startedMs) / 1000).toFixed(3)), requests,
@@ -222,8 +300,8 @@ if (args.command === "mcp") {
       try { pathname = new URL(req.url ?? "/", `http://${host}`).pathname; }
       catch { return send(res, 400, { error: "bad_request" }, method); }
       if (method === "GET" && pathname === "/health") return send(res, 200, health(), method);
-      if (method === "GET" && pathname === "/version") return send(res, 200, { name: NAME, version: VERSION, mode: "cli", backend: "desktop" }, method);
-      if (pathname === "/") return send(res, 200, { name: NAME, version: VERSION, backend: "desktop", endpoints: ["/health", "/version"] }, method);
+      if (method === "GET" && pathname === "/version") return send(res, 200, { name: identity.name, display: identity.display, version: VERSION, mode: "cli", backend: "desktop" }, method);
+      if (pathname === "/") return send(res, 200, { name: identity.name, display: identity.display, version: VERSION, backend: "desktop", endpoints: ["/health", "/version"] }, method);
       return send(res, 503, { error: "desktop_pipe_unattached", detail: probe.reason,
         hint: "Run `codexworker mcp` inside the Codex Desktop plugin host, or force the CLI backend with --backend cli.", path: pathname }, method);
     });
@@ -232,7 +310,7 @@ if (args.command === "mcp") {
       .catch(error => { log("error", "listen_failed", { code: error.code, message: error.message, host, port }); process.exit(1); });
     const actualPort = server.address().port;
     log("info", "listening", { url: `http://${host}:${actualPort}`, backend: "desktop" });
-    process.stdout.write(`${NAME} listening on http://${host}:${actualPort} (backend=desktop, liveness only)\n`);
+    process.stdout.write(`${identity.display} listening on http://${host}:${actualPort} (backend=desktop, liveness only, name=${identity.name})\n`);
     let closing = false;
     const shutdown = signal => {
       if (closing) return; closing = true;
@@ -281,7 +359,7 @@ if (args.command === "mcp") {
       try {
         const { startCliFeishuChannel } = await import("./feishu-cli.mjs");
         feishuChannel = await startCliFeishuChannel({
-          config, adapter, stateDir, bridgeName: config.bridgeName ?? NAME, sessionStore: history,
+          config, adapter, stateDir, bridgeName: identity.display, sessionStore: history,
           logger: (level, event, fields) => log(level, event, fields ?? {})
         });
         log("info", "feishu_channel_ready", feishuChannel.status().connection ? {
@@ -303,9 +381,10 @@ if (args.command === "mcp") {
     ];
 
     const health = () => ({
-      name: config.bridgeName ?? NAME, version: VERSION, alive: true,
+      name: identity.name, display: identity.display, bridge: identity.bridge,
+      version: VERSION, alive: true,
       ready: Boolean(adapter.status().available), mode: "cli", backend: "cli",
-      operatingMode: config.operatingMode ?? "cli-native", integrationMode: "cli-native", machine: config.machine ?? "codexworker",
+      operatingMode: config.operatingMode ?? "cli-native", integrationMode: "cli-native", machine: config.machine ?? identity.name,
       host, port: server.address()?.port ?? port, pid: process.pid, startedAt,
       uptimeSec: Number(((Date.now() - startedMs) / 1000).toFixed(3)), requests,
       eventSeq: adapter.state.seq,
@@ -429,14 +508,14 @@ if (args.command === "mcp") {
         const publicRoute = method === "GET" && ["/", "/health", "/version"].includes(url.pathname);
         if (!publicRoute && !authorized(req)) throw httpError(401, "unauthorized", "Valid Bearer token required.");
         if (method === "GET" && url.pathname === "/") {
-          return send(res, 200, { name: NAME, version: VERSION, mode: "cli", backend: "cli",
+          return send(res, 200, { name: identity.name, display: identity.display, version: VERSION, mode: "cli", backend: "cli",
             endpoints: ["GET /health", "GET /version", "GET /threads", "POST /threads", "POST /turn",
               "GET /threads/:id", "GET /threads/:id/last-turn", "POST /threads/:id/resume", "POST /threads/:id/stop",
               "GET /manager/sessions", "POST /manager/messages", "GET /manager/events", "POST /manager/sessions/adopt"] }, method);
         }
         if (method === "GET" && url.pathname === "/health") return send(res, 200, health(), method);
         if (method === "GET" && url.pathname === "/version") {
-          return send(res, 200, { name: NAME, version: VERSION, mode: "cli", backend: "cli", codexVersion }, method);
+          return send(res, 200, { name: identity.name, display: identity.display, version: VERSION, mode: "cli", backend: "cli", codexVersion }, method);
         }
         if (method === "GET" && url.pathname === "/threads") {
           const limit = Number(url.searchParams.get("limit") ?? 50);
@@ -562,7 +641,7 @@ if (args.command === "mcp") {
     log("info", "listening", { url: `http://${host}:${actualPort}`, backend: "cli", codexBin, codexVersion,
       model: adapter.model, reasoningEffort: adapter.reasoningEffort,
       auth: token ? "bearer" : "loopback-open" });
-    process.stdout.write(`${NAME} listening on http://${host}:${actualPort} (backend=cli, codexVersion=${codexVersion ?? "unavailable"})\n`);
+    process.stdout.write(`${identity.display} listening on http://${host}:${actualPort} (backend=cli, name=${identity.name}, codexVersion=${codexVersion ?? "unavailable"})\n`);
 
     let closing = false;
     const shutdown = signal => {

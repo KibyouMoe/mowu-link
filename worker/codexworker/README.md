@@ -28,8 +28,8 @@ CodexWorker 是 `operate-codex-bridge` 仓库 `assets/desktop-plugin`（上游�
 | 原生后端 | `desktop-manager.mjs` + app-tools pipe | 有 pipe → Desktop；无 pipe → `native-cli.mjs`（`codex exec`） |
 | HTTP 面 | 全量管理 API（含飞书/图片/事件流） | CLI 暴露 DSH 兼容子集：`/health`、`/version`、`/threads`、`/turn`、`/manager/*` |
 | 会话来源 | Desktop 聊天 | `codex exec` 写入的 `$CODEX_HOME/sessions/**/*.jsonl` |
-| 名称 | rudolf-hermes-bridge / 鲁道夫 | codexworker / CodexWorker |
-| 状态目录 | `~/.codex/state/rudolf-hermes-bridge` | `~/.codex/state/codexworker`（`CODEXWORKER_STATE_DIR` 可覆盖） |
+| 名称 | rudolf-hermes-bridge / 鲁道夫 | `identity.json` 的 `name` / `display`（如 OguriCap / 小栗帽） |
+| 状态目录 | `~/.codex/state/rudolf-hermes-bridge` | `~/.codex/state/<name>`（`CODEXWORKER_STATE_DIR` 可覆盖） |
 | 飞书 / 图片 / 提问卡 | 支持 | CLI 不启动 |
 | 业务逻辑 | — | 未重写，逐文件复制 |
 
@@ -64,7 +64,6 @@ curl -sS http://127.0.0.1:8904/version
 {
   "host": "127.0.0.1",
   "port": 8903,
-  "bridgeName": "CodexWorker",
   "backend": "auto",
   "operatingMode": "cli-native",
   "workspace": "~/projects/mowulink",
@@ -90,6 +89,32 @@ curl -sS http://127.0.0.1:8904/version
 - `tokenFile`：文件存在且 ≥24 字符时，除 `GET /health`、`GET /version` 外都要求 `Authorization: Bearer <token>`；
   文件不存在则回环地址默认不校验。监听非回环地址时**必须**配置 token，否则拒绝启动。
 - `--port 0` 由系统分配空闲端口，启动日志会打印实际端口。
+
+### 实例身份（identity.json）
+
+名字属于实例，不属于桥：同一份代码可以跑多个 Worker，每个进程必须有自己的 `identity.json`。
+`--identity <file>` 显式指定；不传时依次找 `$CODEXWORKER_IDENTITY`、代码目录的 `identity.json`、
+当前目录的 `./identity.json`。
+
+```json
+{
+  "bridge": "CodexWorker",
+  "name": "OguriCap",
+  "display": "小栗帽",
+  "port": 8905,
+  "configFile": "~/.hermes/secrets/codexworker.config.json"
+}
+```
+
+- `name`：内部标识——`/health.name`、进程标题、状态目录 `~/.codex/state/<name>`、日志文件名后缀。
+  旧部署的 `~/.codex/state/codexworker` 会在首次改名启动时复制过来（飞书会话绑定和历史随之保留）。
+- `display`：给人看的名字——飞书卡片标题 `<display>-回复`、每行日志的前缀、`/health.display`。
+- `bridge`：这段代码（桥）自己的名字。**壳名只允许出现在这里和仓库里**，不会成为用户可见标题。
+- `port` / `configFile`：默认端口和配置文件（`--config` 未传时使用；`--port`/`--config` 优先）。
+- 解析顺序：`identity.json` → 配置里的 `bridgeName` → 拒绝启动（`exit 2`，
+  `缺少实例身份：identity.json 需包含 name 与 display`）。文件存在但缺 `name`/`display` 时直接失败，
+  不会退回 `bridgeName`；两者都存在时以 identity 为准，启动日志写 `identity_loaded {name,display,source}`。
+- 新实例照抄 `identity.example.json`（DSHWorker 示例），改五个字段即可。
 
 `mcp` 透传模式（仍是原 Desktop 插件行为，需要插件宿主环境）：
 
@@ -242,12 +267,12 @@ cat ~/.hermes/secrets/codexworker.config.json
   回合结束成功就移除，失败则移除后换成 `CrossMark`（`addReaction(messageId, emoji)`；两个表情都已在真实
   API 上验证通过）。添加/移除失败只记日志，不影响回合与回复。回执按 `message_id` 各记各的，并发消息不互相覆盖（仅内存，不落盘）。
 - **一轮只发一条最终消息**：过程不发任何进度卡，也不 PATCH（Hermes 的 `edit_message` 在飞书路径同样没有调用方）。
-  最终消息是 `interactive` 卡片：标题 `<bridgeName>-回复` + markdown 正文 + 底部 `会话 <threadId>`；
+  最终消息是 `interactive` 卡片：标题 `<display>-回复` + markdown 正文 + 底部 `会话 <threadId>`；
   字段结构对齐 Hermes `_card()`（`config.wide_screen_mode`、`header.title{content,tag}`、`header.template`、
   `elements[].tag=markdown`），围栏代码块/表格原样保留。被 `/stop` 中断时正文标 `⏹ 已中断`。
 - **长回复自动分条**：单条上限 4096 字符（对齐飞书客户端约 4096 的切分点）。切分优先落在段落（空行）、
   再退到换行、空格，不切断行内代码；跨条的围栏代码块在上一段结尾补 ` ``` `，下一段以同语言围栏重开。
-  标题只跟第一条，后续条为 `<bridgeName>-回复（续 N/M）`。发送纪律仍是一套：
+  标题只跟第一条，后续条为 `<display>-回复（续 N/M）`。发送纪律仍是一套：
   限流（HTTP 429 / `code 99991400` / 频率类消息）按 `retry_after` 或 3s 重试一次（上限 30s，超了就放弃）；
   明确失败才补发一条同内容消息（每条最多补一次）；超时（可能已送达）不重发；已 ACK 的同内容不重发。
   失败到上限记 `feishu_reply_delivery_failed`，不无限重试。
