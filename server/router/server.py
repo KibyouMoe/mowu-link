@@ -59,6 +59,7 @@ DEFAULT_LOG = "~/.hermes/router.log"
 DEFAULT_TRIGGER_URL = "http://127.0.0.1:8791/trigger"
 DEFAULT_TRIGGER_TOKEN_PATH = "~/.hermes/secrets/trigger.token"
 BACKLOG_MAX = 128
+MAX_GOAL_CHARS = 2000
 MAX_BODY_BYTES = 1 * 1024 * 1024
 LOG_MAX_BYTES = 5 * 1024 * 1024
 LOG_BACKUP_COUNT = 3
@@ -1571,9 +1572,11 @@ class RouterHandler(BaseHTTPRequestHandler):
         goal = body.get("goal")
         if goal is None or not str(goal).strip():
             raise BadRequest("goal is required")
-        goal = str(goal)
-        if len(goal) > 20000:
-            raise BadRequest("goal too long (max 20000 chars)")
+        goal = str(goal).strip()
+        if len(goal) > MAX_GOAL_CHARS:
+            raise BadRequest(
+                "goal too long (max %d chars, got %d)"
+                % (MAX_GOAL_CHARS, len(goal)))
         context = body.get("context")
         if context is not None and not isinstance(context, str):
             context = json.dumps(context, ensure_ascii=False)

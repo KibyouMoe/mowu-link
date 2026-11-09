@@ -1363,10 +1363,14 @@ def test_26_stall_feishu_alert() -> None:
                 os.environ.pop("FAKE_DSH_SLEEP", None)
             else:
                 os.environ["FAKE_DSH_SLEEP"] = old_sleep
-        need(any("开始任务" in text and "t-alert" in text for text in sent),
-             "没有发任务开始私信：%r" % sent)
-        need(any("卡死" in text and "t-alert" in text for text in sent),
-             "卡死没有发飞书告警：%r" % sent)
+        need(any("来自超级溪流的指令" in ((n.get("body") or {}).get("text") or "")
+                 and "t-alert" in ((n.get("body") or {}).get("text") or "")
+                 for n in env.router.notices),
+             "没有发任务开始通知：%r" % env.router.notices)
+        need(any("卡死" in ((n.get("body") or {}).get("text") or "")
+                 and "t-alert" in ((n.get("body") or {}).get("text") or "")
+                 for n in env.router.notices),
+             "卡死没有发告警：%r" % env.router.notices)
         need(env.router.wait_results(1, 5), "卡死结果没上报")
         need(env.result()["evidence"][0].get("reason") == "stalled",
              "结果不是 stalled")

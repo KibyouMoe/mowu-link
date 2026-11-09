@@ -586,10 +586,12 @@ class Worker:
         return self._notify_router(text, "urgent")
 
     def _announce(self, text: str) -> None:
-        # 退出流程里不再发飞书，避免网络慢拖长优雅退出。
+        # 退出流程里不再发消息，避免网络慢拖长优雅退出。
+        # 出向汇报统一走 Router /notice → trigger → 溪流转达给训练员。
+        # 不直连飞书：跨 app 的 open_id 发不出去，架构上 worker 也不持有飞书出口。
         if self.stop.is_set():
             return
-        self._feishu_send(text)
+        self._notify_router(text, "normal")
 
     def _on_signal(self, signum: int, _frame: Any) -> None:
         name = signal.Signals(signum).name
@@ -844,8 +846,8 @@ class Worker:
                  task_id, workspace, fmt_duration(self.cfg.timeout), len(prompt))
         self._mark_task(task_id)
         self._send_heartbeat()  # 立即宣告 running，不等第一个间隔
-        self._announce("▶️ %s 开始任务 %s：%s"
-                       % (self.cfg.name, task_id, goal[:80]))
+        self._announce("来自超级溪流的指令（任务 %s）\n%s"
+                       % (task_id, goal[:4000]))
 
         started = time.time()
         tmpdir = tempfile.mkdtemp(prefix="dsh-worker-")
@@ -997,14 +999,8 @@ class Worker:
             log.warning("任务 %s 失败，退出码 %s", task_id, rc)
 
         self._remember(task_id, payload)
-        if not stalled:
-            if payload["status"] == "done":
-                self._announce("✅ %s 任务 %s 完成（%.1fs）"
-                               % (self.cfg.name, task_id, elapsed_ms / 1000.0))
-            else:
-                self._announce("❌ %s 任务 %s 失败：%s"
-                               % (self.cfg.name, task_id,
-                                  tail_text(payload["summary"], 180)))
+        # 完成/失败不再单独 announce：router 的 task.result notify 已经覆盖，
+        # 多发一条就是重复。
         self._report(payload)
         shutil.rmtree(tmpdir, ignore_errors=True)
 
