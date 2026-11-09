@@ -10,6 +10,18 @@
 
 ---
 
+## 一、两套名字，别混
+
+```
+桥实例名（代码、目录、进程）   CodexWorker / DshWorker
+worker 身份名（Router 认的）   OguriCap / TamamoCross
+```
+
+- 桥是壳，身份是里面那个人。一个桥可以换身份，身份也可以换桥。
+- 目录：`worker/codexworker/`（已建）、`worker/dshworker/`（待建）。
+
+---
+
 ## TamamoCross（玉藻十字）
 
 ```yaml
