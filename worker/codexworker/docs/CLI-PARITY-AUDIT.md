@@ -19,19 +19,19 @@
 | 能力 | 桌面实现位置 | CLI 状态 | 差什么 | 优先级 |
 | --- | --- | --- | --- | --- |
 | **A. 聊天主链路** | | | | |
-| 飞书 p2p 文本收单并执行一轮 | `desktop-manager.mjs:1542-1552, 1609-1654, 756-812` | 已接入 | feishu-cli.mjs:366-385, 425-553；仅 p2p 文本，与桌面一致 | P0 |
-| 收到消息立即加表情回执，回合结束移除 | `desktop-manager.mjs:1619-1628, 1656-1671` | 部分接入 | feishu-cli.mjs:389-430（`ac964a0`）。reactionId 只存内存，崩溃/重启后表情留在原消息；桌面把 reactionId 写进 feishuReceipts | P1 |
-| 「输出」进度卡：同一张卡持续更新 | `desktop-manager.mjs:1194-1204 + feishu.mjs:294-359` | 已接入 | feishu-cli.mjs:175-271（OutputCard，1800ms 节流，PATCH 失败退化新卡）。实现不同：桌面每拍发新消息，CLI PATCH 同一张卡 | P0 |
+| 飞书 p2p 文本收单并执行一轮 | `desktop-manager.mjs:1542-1552, 1609-1654, 756-812` | 已接入 | feishu-cli.mjs:372-384, 471-599；仅 p2p 文本，与桌面一致 | P0 |
+| 收到消息立即加表情回执，回合结束移除 | `desktop-manager.mjs:1619-1628, 1656-1671` | 部分接入 | feishu-cli.mjs:393-430（`ac964a0`）。reactionId 只存内存，崩溃/重启后表情留在原消息；桌面把 reactionId 写进 feishuReceipts | P1 |
+| 「输出」进度卡：同一张卡持续更新 | `desktop-manager.mjs:1194-1204 + feishu.mjs:294-359` | 已接入 | feishu-cli.mjs:177-273（OutputCard，1800ms 节流，PATCH 失败退化新卡）。实现不同：桌面每拍发新消息，CLI PATCH 同一张卡 | P0 |
 | 💭 思考摘要推送 | `feishu.mjs:313-320, 331-344` | 未接入 | `codex exec --json` 不产生 reasoning 事件，CLI 无内容可推 | P2 |
 | 文本增量流式（token/段落级） | `desktop-manager.mjs:1180-1184 + FeishuStreamBeat.feedChunk` | 未接入 | 实测 codex 只在消息完成时给整段 agent_message；CLI 无 delta 可转发，tokenStreaming=false | P0 |
-| 「回复」终稿卡（正文 + 会话号） | `desktop-manager.mjs:1190-1193` | 已接入 | feishu-cli.mjs:512-521 + markdownPayload 的 note 会话号 | P0 |
+| 「回复」终稿卡（正文 + 会话号） | `desktop-manager.mjs:1190-1193` | 已接入 | feishu-cli.mjs:565-573 + markdownPayload 的 note 会话号 | P0 |
 | 同 threadId 连续追问（resume） | `desktop-manager.mjs:868-871（send_message_to_thread 带 threadId）` | 已接入 | native-cli.mjs:358-363, 395-404；实测第二轮 argv 为 `exec resume <sessionId>` | P0 |
-| 运行中插话（steer） | `desktop-manager.mjs:793-809, 882` | 未接入 | feishu-cli.mjs:412-423 对同一 open_id 串行：后一条必须等前一轮结束，无法送进正在执行的回合 | P1 |
+| 运行中插话（steer） | `desktop-manager.mjs:793-809, 882` | 未接入 | feishu-cli.mjs:458-469 对同一 open_id 串行：后一条必须等前一轮结束，无法送进正在执行的回合 | P1 |
 | /queue 与 delivery=queue | `desktop-manager.mjs:769, 778-783, 935-951` | 部分接入 | 只有进程内 per-open_id Promise 链；无 /queue 命令、无队列位置、重启即丢 | P2 |
-| 入站消息幂等（重复投递只跑一次） | `desktop-manager.mjs:658-688, 1545-1547` | 部分接入 | feishu-cli.mjs:379-383：内存 seen Map，上限 500，重启后同一 message_id 会重跑 | P1 |
+| 入站消息幂等（重复投递只跑一次） | `desktop-manager.mjs:658-688, 1545-1547` | 部分接入 | feishu-cli.mjs:386-389：内存 seen Map，上限 500，重启后同一 message_id 会重跑 | P1 |
 | 入站持久化 inbox（崩溃不丢） | `desktop-manager.mjs:1570-1607（feishu-inbox.json）` | 未接入 | CLI 收到即进内存队列，进程退出则丢 | P1 |
 | 消息来源标签（飞书：/超级溪流：） | `desktop-manager.mjs:829-834` | 未接入 | CLI 原样投喂文本，模型无法区分来源 | P2 |
-| 发送者白名单 / owner | `desktop-manager.mjs:1544, configureIntegrations 302-312` | 已接入 | feishu-cli.mjs:307-308, 321-325, 387-410；差异：CLI 空名单自动认第一个发送者，桌面要求显式名单 | P2 |
+| 发送者白名单 / owner | `desktop-manager.mjs:1544, configureIntegrations 302-312` | 已接入 | feishu-cli.mjs:309-310, 326-330, 379-383；差异：CLI 空名单自动认第一个发送者，桌面要求显式名单 | P2 |
 | **B. 斜杠命令与会话控制** | | | | |
 | /help /start /commands | `desktop-manager.mjs:995 + feishu-commands.mjs:1-18` | 未接入 | CLI 会把 "/help" 当 prompt 发给模型 | P1 |
 | /new（原生新建会话） | `desktop-manager.mjs:1066-1070` | 部分接入 | HTTP POST /threads 只建本地占位会话（首轮才有 codex session）；飞书无命令；无 projectId 语义 | P1 |
@@ -53,12 +53,12 @@
 | adopt 已有 codex 会话 | `desktop-manager.mjs:690-704, 1791` | 已接入 | cli.mjs:493-505 + native-cli.mjs:338-349；需已知 threadId，不能像桌面那样从 list_threads 发现 | P1 |
 | 历史窗口降级/超大 turn 处理 | `native-history.mjs:16-48` | 未接入 | CLI 直接读 store，没有 native_snapshot_too_large 语义 | P2 |
 | **D. 图片** | | | | |
-| 飞书图片入站 → view_image | `feishu-images.mjs:50-74 + desktop-manager.mjs:1633` | 未接入 | feishu-cli.mjs:392-397 明确回「CLI 模式暂只支持文本」；`codex exec -i/--image` 未接 | P1 |
+| 飞书图片入站 → view_image | `feishu-images.mjs:50-74 + desktop-manager.mjs:1633` | 未接入 | feishu-cli.mjs:438-443 明确回「CLI 模式暂只支持文本」；`codex exec -i/--image` 未接 | P1 |
 | 公开展示图出站（自动推图片卡） | `public-image-relay.mjs + feishu-image-output.mjs + desktop-manager.mjs:1755` | 未接入 | CLI 无 public journal、无上传/发送链路 | P1 |
 | 图片恢复 / 50 分钟去重 | `desktop-manager.mjs:388-410 + SEND_DEDUP_WINDOW_MS` | 未接入 | 无 | P2 |
 | **E. 交互与审批** | | | | |
 | 提问卡（clarification 发布/选项/提交/过期） | `question-relay.mjs:89-231 + question-cards.mjs` | 未接入 | CLI 没有 MCP 工具面，也没有 /bridge/questions | P1 |
-| 卡片按钮回调 | `desktop-manager.mjs:306-308 + feishu.mjs:731-737` | 未接入 | feishu-cli.mjs:326-332 构造 WS client 时没传 onCardAction，点卡只会收到「当前桥不支持」 | P1 |
+| 卡片按钮回调 | `desktop-manager.mjs:306-308 + feishu.mjs:731-737` | 未接入 | feishu-cli.mjs:331-337 构造 WS client 时没传 onCardAction，点卡只会收到「当前桥不支持」 | P1 |
 | 工具审批交互 | `desktop-manager.mjs:465-480（由 Codex Desktop 原生 UI 承担）` | 未接入 | CLI 非交互：approval_policy 固定（默认 never），没有逐命令放行；exec 只有 --approve-for-me 之类的整体策略 | P1 |
 | **F. 运维与观测** | | | | |
 | 事件流 SSE | `desktop-manager.mjs:1770-1779` | 部分接入 | cli.mjs:466-477 有 SSE 和 15s 心跳；事件只在内存 500 条，seq 不落盘、无 replayFloor，重启不能续传 | P1 |
@@ -139,13 +139,13 @@ PATCH /manager/sessions/<id> {"alias":"x"} → 404
 
 ### 5. 图片输入 / 输出
 
-- 入站：`feishu-cli.mjs:392-397` 对 `message_type !== "text"` 直接拒绝，并回提示「CLI 模式暂只支持文本消息：图片不会转发给 Codex。」；`cli.mjs` / `native-cli.mjs` 全文没有 `--image` / `-i`。
+- 入站：`feishu-cli.mjs:438-443` 对 `message_type !== "text"` 直接拒绝，并回提示「CLI 模式暂只支持文本消息：图片不会转发给 Codex。」；`cli.mjs` / `native-cli.mjs` 全文没有 `--image` / `-i`。
 - 出站：`cli.mjs` 没有 `/bridge/images`，`public-image-relay.mjs`、`feishu-image-output.mjs` 从未被 CLI 引用。
 - 结论：**都未接入**，且是明确的产品性拒绝，不是漏报错。
 
 ### 6. 审批交互 / 卡片按钮
 
-- CLI 构造 `FeishuWebsocketClient` 时只传 `onMessage`、`onConnected`（`feishu-cli.mjs:326-332`），没有 `onCardAction`；`feishu.mjs:731-737` 在没有回调时返回 toast「当前桥不支持此提问卡片」。
+- CLI 构造 `FeishuWebsocketClient` 时只传 `onMessage`、`onConnected`（`feishu-cli.mjs:331-337`），没有 `onCardAction`；`feishu.mjs:731-737` 在没有回调时返回 toast「当前桥不支持此提问卡片」。
 - 审批：`approvalPolicy` 只作为 `-c approval_policy="never"` 传给 `codex exec`，非交互进程没有逐命令放行通道；CLI 没有 `--ask-for-approval` 之类的接线。
 - 结论：**提问卡、卡片回调、工具审批都未接入**。桌面这边提问卡是完整的（发布/选项/提交/过期/回调去重），审批则本来就由 Codex Desktop 原生 UI 承担，桥不代理。
 
