@@ -17,12 +17,16 @@
 // process is the sole writer, so it sets RUDOLF_BRIDGE_LIFECYCLE_CHILD=1 the
 // same way the Desktop lifetime supervisor does.
 import { appendFile, mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 import RouterClient, { setActiveRouterClient } from "./router-client.mjs";
+import { FeishuNotifier } from "./feishu.mjs";
+import { PROTOCOL } from "./desktop-manager.mjs";
+import { ROUTER_TURN_LIMIT_MS, TERMINAL_TURN, findRouterTurn, lastAssistantText,
+  routerMarker, routerMessageId, routerPrompt, taskBoardText } from "./router-tasks.mjs";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PROGRAM = "codexworker";
@@ -259,6 +263,10 @@ async function main() {
   const token = await assertTokenFile(tokenFile);
   const feishu = await resolveFeishuConfigFile(config);
   const whitelist = resolveWhitelist(config, feishu.value);
+  // 任务看板：worker 用自己的飞书身份给训练员发“开始/完成/失败”三条生命周期消息。
+  // 目标 open_id 必须在**本应用**下有效（跨应用会 open_id cross app）。
+  const taskBoardOpenId = String(config.feishu?.taskBoardOpenId ?? "").trim()
+    || whitelist.ids[0] || String(feishu.value.open_id ?? "").trim();
 
   log("info", "identity_loaded", { name: identity.name, display: identity.display,
     identityFile: identity.file, configFile });
@@ -350,6 +358,8 @@ async function main() {
       configFile: feishu.file,
       inboundEnabled: true,
       trainerOpenIdWhitelist: whitelist.ids,
+      taskBoardOpenId: taskBoardOpenId || null,
+      taskBoardEnabled: config.feishu?.taskBoardEnabled !== false,
       onlineNotificationEnabled: config.feishu?.onlineNotificationEnabled ?? false,
       streamEnabled: config.feishu?.streamEnabled ?? true,
       defaultDelivery: config.feishu?.defaultDelivery ?? "steer",
@@ -399,22 +409,106 @@ async function main() {
   log("info", "manager_started", { url: `http://${host}:${port}` });
 
   // ---- router integration --------------------------------------------------
-  // The router owns task dispatch. Each task runs in its own Codex thread; the
-  // Feishu / manager paths are not involved. Disable with CODEXWORKER_ROUTER=0
-  // or config.router.enabled=false (the settings UI and tests use that path).
+  // The router owns task dispatch. A router task is NOT a new Codex thread: it
+  // is delivered into the manager's selected session — the same conversation the
+  // Feishu chat uses — so both channels share context AND the manager's single
+  // writer serializes them. Disable with CODEXWORKER_ROUTER=0 or
+  // config.router.enabled=false (the settings UI and tests use that path).
   const routerConfig = config.router ?? {};
   const routerEnabled = process.env.CODEXWORKER_ROUTER !== "0" && routerConfig.enabled !== false;
   const routerUrl = String(process.env.CODEXWORKER_ROUTER_URL ?? routerConfig.url ?? "http://127.0.0.1:8790");
-  const ROUTER_TURN_LIMIT_MS = 20 * 60 * 1000;
-  const TERMINAL_TURN = new Set(["completed", "interrupted", "failed", "cancelled", "canceled"]);
+  const ROUTER_QUEUE_POLL_MS = 1_500;
+
+  // ---- task board: this worker's own Feishu identity ------------------------
+  // Only three lifecycle lines go to the trainer's p2p chat with THIS worker
+  // (start / done / failed). Result relaying to the requester stays on the
+  // router → trigger path and is untouched.
+  const taskBoardEnabled = config.feishu?.taskBoardEnabled !== false && Boolean(taskBoardOpenId);
+  let fallbackNotifier = null;
+  function taskBoardNotifier() {
+    if (!taskBoardEnabled) return null;
+    const managerNotifier = business.manager?.()?.notifier;
+    if (managerNotifier?.enabled) return managerNotifier;
+    fallbackNotifier ??= new FeishuNotifier({ appId: feishu.value.app_id, appSecret: feishu.value.app_secret,
+      bridgeName: identity.display });
+    return fallbackNotifier.enabled ? fallbackNotifier : null;
+  }
+  async function taskBoardNotify(taskId, phase, fields) {
+    const text = taskBoardText({ phase, taskId, ...fields });
+    // Dry run exists for isolated test instances: the payload is logged (never
+    // sent) so a test can never post into a real trainer chat.
+    if (process.env.CODEXWORKER_FEISHU_DRY_RUN === "1") {
+      log("info", "task_board_dry_run", { taskId, phase, text: text.slice(0, 200),
+        textChars: text.length, targetOpenIdSha256: createHash("sha256").update(String(taskBoardOpenId)).digest("hex").slice(0, 12) });
+      return "dry-run";
+    }
+    if (!taskBoardEnabled) { log("warn", "task_board_skipped", { taskId, phase, reason: "no_target" }); return null; }
+    const notifier = taskBoardNotifier();
+    if (!notifier) { log("warn", "task_board_skipped", { taskId, phase, reason: "feishu_disabled" }); return null; }
+    let delivery = null;
+    try {
+      const response = await notifier.sendMessage(text, { openId: taskBoardOpenId, receiveIdType: "open_id",
+        title: `${identity.display} · 任务看板`, onDelivery: (entry) => { delivery = entry; } });
+      const messageId = response?.data?.message_id ?? delivery?.messageId ?? null;
+      log(messageId ? "info" : "warn", "task_board_sent", { taskId, phase, messageId,
+        apiCode: Number.isInteger(response?.code) ? response.code : null, deliveryPhase: delivery?.phase ?? null });
+      return messageId;
+    } catch (error) {
+      log("warn", "task_board_failed", { taskId, phase, message: error?.message ?? String(error) });
+      return null;
+    }
+  }
+
+  // The manager's `queue` is not drained for a CLI self-target: the scanner takes
+  // the Desktop public-journal branch and `self_task_journal_unavailable` skips
+  // its dispatcher, so a queued entry would never run. Serialization therefore
+  // happens here — wait until the shared thread is idle — and the write itself
+  // uses the same single-writer path (and delivery mode) the Feishu chat uses.
+  async function waitForIdleThread(threadId, deadline) {
+    for (;;) {
+      const wait = await nativeCall("wait_threads", { targets: [{ threadId, hostId: "local" }], timeoutMs: 0 }, 20_000)
+        .catch((error) => { log("warn", "router_idle_check_failed", { threadId, message: error?.message ?? String(error) }); return null; });
+      const turn = wait?.polls?.[0]?.latestTurn ?? null;
+      if (!turn || TERMINAL_TURN.has(turn.status)) return true;
+      if (Date.now() >= deadline) return false;
+      await sleep(1_000);
+    }
+  }
+
+  // Poll the shared thread for our own turn (identified by the marker) and wait
+  // for it to reach a terminal status. The manager keeps the writer; this only
+  // reads native state, so it never competes for the writer.
+  async function waitForRouterTurn({ threadId, marker, messageId, manager, deadline }) {
+    let turn = null;
+    let status = null;
+    let misses = 0;
+    while (Date.now() < deadline) {
+      const rejection = manager.state.receipts?.[messageId]?.error;
+      if (rejection) throw new Error(`${rejection.error}: ${rejection.detail ?? "dispatch rejected"}`);
+      const snapshot = await nativeCall("read_thread", { threadId, turnLimit: 30, includeOutputs: false }, 60_000);
+      const found = turn ? (snapshot?.turns ?? []).find((item) => item.id === turn.id) ?? null
+        : findRouterTurn(snapshot, marker);
+      if (!turn && found) turn = found;
+      if (found) {
+        misses = 0;
+        status = found.status;
+        if (TERMINAL_TURN.has(status)) return { turn: found, status, timedOut: false };
+      } else if (turn && ++misses > 20) {
+        throw new Error(`turn ${turn.id} left the readable window before it completed`);
+      }
+      const remaining = Math.max(1_000, Math.min(180_000, deadline - Date.now()));
+      await nativeCall("wait_threads", { targets: [{ threadId, hostId: "local" }], timeoutMs: remaining }, remaining + 15_000)
+        .catch((error) => log("warn", "router_wait_threads_failed", { messageId, message: error?.message ?? String(error) }));
+      if (!found && turn) await sleep(ROUTER_QUEUE_POLL_MS);
+    }
+    return { turn, status, timedOut: true };
+  }
 
   async function routerTurnReply(threadId) {
     try {
       const snapshot = await nativeCall("read_thread", { threadId, turnLimit: 1, includeOutputs: true }, 60_000);
       const turn = Array.isArray(snapshot?.turns) ? snapshot.turns.at(-1) : null;
-      return (turn?.items ?? [])
-        .filter((item) => item?.type === "agentMessage" && typeof item.text === "string" && item.text.trim())
-        .map((item) => item.text.trim()).join("\n").trim();
+      return lastAssistantText(turn);
     } catch (error) {
       log("warn", "router_read_thread_failed", { threadId, message: error?.message ?? String(error) });
       return "";
@@ -424,48 +518,52 @@ async function main() {
   async function runRouterTask(task) {
     const taskId = typeof task?.task_id === "string" ? task.task_id.trim() : "";
     if (!taskId) { log("warn", "router_task_without_id"); return; }
-    const goal = typeof task.goal === "string" ? task.goal.trim() : "";
-    const workspace = task.workspace ? path.resolve(expandHome(String(task.workspace))) : session.cwd;
+    const goal = typeof task?.goal === "string" ? task.goal.trim() : "";
     const startedAt = Date.now();
+    const messageId = routerMessageId(taskId);
+    const marker = routerMarker(taskId);
     let threadId = null;
     let turnId = null;
     let status = "failed";
     let summary = "";
+    let failure = "task runner error";
     routerClient.setActivity({ state: "running", taskId });
-    log("info", "router_task_start", { taskId, urgency: task.urgency ?? null, workspace });
+    log("info", "router_task_start", { taskId, urgency: task.urgency ?? null, messageId });
+    await taskBoardNotify(taskId, "start", { goal });
     try {
       if (!goal) throw new Error("router task has an empty goal");
-      const context = task.context == null ? ""
-        : (typeof task.context === "string" ? task.context : JSON.stringify(task.context));
-      const prompt = context ? `${goal}\n\n[router context]\n${context}` : goal;
-      const created = await nativeCall("create_thread",
-        { cwd: workspace, title: `router ${taskId}`, prompt }, 60_000);
-      threadId = created?.threadId ?? null;
-      turnId = created?.turnId ?? null;
-      if (!threadId) throw new Error("create_thread returned no threadId");
-      log("info", "router_task_thread", { taskId, threadId, turnId });
-
-      const declaredMs = Number(task.deadline_s);
-      const budgetMs = Number.isFinite(declaredMs) && declaredMs > 0
-        ? declaredMs * 1000 : ROUTER_TURN_LIMIT_MS;
-      const deadline = startedAt + budgetMs;
-      let poll = null;
-      let timedOut = false;
-      for (;;) {
-        const remaining = Math.max(1_000, Math.min(180_000, deadline - Date.now()));
-        const wait = await nativeCall("wait_threads",
-          { targets: [{ threadId, hostId: "local" }], timeoutMs: remaining }, remaining + 15_000);
-        poll = wait?.polls?.[0] ?? null;
-        timedOut = Boolean(wait?.timedOut);
-        if (poll?.latestTurn?.id) turnId = poll.latestTurn.id;
-        const state = poll?.latestTurn?.status ?? "unknown";
-        if (!timedOut || TERMINAL_TURN.has(state) || Date.now() >= deadline) break;
+      const manager = business.manager?.();
+      if (!manager) throw new Error("manager is not active");
+      const selected = manager.state.selectedThreadId;
+      if (!selected || !manager.state.sessions[selected]) throw new Error("manager has no selected session");
+      threadId = selected;
+      const sessionCwd = manager.state.sessions[selected].cwd ?? session.cwd;
+      if (task.workspace) {
+        const requested = path.resolve(expandHome(String(task.workspace)));
+        if (path.resolve(sessionCwd) !== requested) {
+          log("warn", "router_task_workspace_ignored", { taskId, threadId,
+            requested, sessionCwd: path.resolve(sessionCwd) });
+        }
       }
+      const declaredMs = Number(task.deadline_s);
+      const budgetMs = Number.isFinite(declaredMs) && declaredMs > 0 ? declaredMs * 1000 : ROUTER_TURN_LIMIT_MS;
+      const deadline = startedAt + budgetMs;
+      if (!await waitForIdleThread(selected, deadline)) {
+        throw new Error(`shared thread stayed busy past the ${Math.round(budgetMs / 1000)}s budget`);
+      }
+      const enqueued = await manager.message({
+        protocolVersion: PROTOCOL, messageId, source: "hermes", origin: "router",
+        text: routerPrompt({ taskId, goal, context: task.context }), targetThreadId: selected, delivery: "steer",
+      });
+      log("info", "router_task_sent", { taskId, threadId: selected, messageId,
+        action: enqueued?.action ?? null, duplicate: enqueued?.duplicate === true });
 
-      const turnStatus = poll?.latestTurn?.status ?? "unknown";
-      let text = typeof poll?.latestAssistantMessage?.text === "string"
-        ? poll.latestAssistantMessage.text : "";
-      if (!text.trim()) text = await routerTurnReply(threadId);
+      const waited = await waitForRouterTurn({ threadId: selected, marker, messageId, manager, deadline });
+      const turn = waited.turn;
+      turnId = turn?.id ?? null;
+      const turnStatus = waited.status ?? "unknown";
+      let text = lastAssistantText(turn);
+      if (!text.trim() && turnId) text = await routerTurnReply(selected);
       text = text.trim();
       const durationS = Math.round((Date.now() - startedAt) / 1000);
       if (turnStatus === "completed") {
@@ -473,21 +571,25 @@ async function main() {
         summary = text || "(completed; no assistant message)";
       } else {
         status = "failed";
-        const reason = timedOut
+        const reason = waited.timedOut
           ? `turn ${turnStatus} after ${durationS}s (deadline hit)`
           : `turn ${turnStatus}`;
         summary = text ? `${reason}\n\n${text}` : reason;
+        failure = reason;
       }
       log(status === "done" ? "info" : "warn", "router_task_finished", {
-        taskId, status, turnStatus, durationS, summaryChars: summary.length,
+        taskId, status, turnStatus, threadId, turnId, durationS, summaryChars: summary.length,
       });
     } catch (error) {
       status = "failed";
-      summary = `task runner error: ${error?.message ?? String(error)}`;
-      log("error", "router_task_failed", { taskId, message: error?.message ?? String(error) });
+      failure = error?.message ?? String(error);
+      summary = `task runner error: ${failure}`;
+      log("error", "router_task_failed", { taskId, message: failure, threadId });
     } finally {
       routerClient.setActivity({ state: "idle", taskId: null });
     }
+
+    await taskBoardNotify(taskId, status === "done" ? "done" : "failed", { summary, failure });
 
     try {
       const receipt = await routerClient.result({

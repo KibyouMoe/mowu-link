@@ -816,7 +816,7 @@ export class DesktopManager {
     // untouched. Slash commands are handled before reaching this presentation.
     const label = this.config.messageSourceLabels === false ? null
       : request.source === "trainer" && this.state.feishuReceipts[request.messageId] ? "飞书"
-      : request.source === "hermes" ? "超级溪流" : null;
+      : request.source === "hermes" && request.origin !== "router" ? "超级溪流" : null;
     const prompt = label ? `${label}：${request.text}` : request.text;
     const pending = { messageId: request.messageId, inputHash: digest(prompt), dispatchedAt: Date.now(),
       sourceThreadId, kind: active ? "steer" : snapshot.deliveryContract ? "followup" : "start", expectedTurnId: active?.id ?? null,
@@ -866,7 +866,7 @@ export class DesktopManager {
     if (receipt) receipt.nativeDispatch.status = "accepted";
     if (request.source === "trainer") this.touchSession(session.threadId, request.trainerActivityAt);
     await this.emit("message.dispatched", request, { delivery: active ? "native-busy-followup" : snapshot.deliveryContract ? "native-followup-state-independent" : "native-followup", pendingTurnReadback: !acceptedWithoutHistory });
-    if (this.notifier && request.source === "hermes" && session.threadId === this.state.selectedThreadId) void this.notifier.sendMessage(request.text,
+    if (this.notifier && request.source === "hermes" && request.origin !== "router" && session.threadId === this.state.selectedThreadId) void this.notifier.sendMessage(request.text,
       { title: `${this.config.bridgeName}-任务`, threadId: session.threadId, chatId: session.feishuChatId }).catch(() => {});
     return { action: "dispatch_pending", session: clone(session) };
   }

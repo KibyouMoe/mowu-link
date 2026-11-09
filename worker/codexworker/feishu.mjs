@@ -143,11 +143,15 @@ export class FeishuNotifier {
     }
   }
 
-  async sendMessage(text, { chatId, title, threadId, uuid, validateTarget, onDelivery } = {}) {
+  // `receiveIdType` exists for the task-board channel: the trainer's p2p chat
+  // may be addressed by open_id before any inbound message has supplied a
+  // chat_id. Chat delivery stays the default so every existing call is unchanged.
+  async sendMessage(text, { chatId, openId, receiveIdType, title, threadId, uuid, validateTarget, onDelivery } = {}) {
     const record = async value => { if (onDelivery) await onDelivery({ ...value, at: new Date().toISOString() }); };
     const allowed = () => this.canSend({ threadId }) && (validateTarget == null || typeof validateTarget === "function" && validateTarget());
     if (!this.enabled || !allowed()) { await record({ phase: "not_attempted", reason: "disabled_or_binding_changed" }); return null; }
-    const target = chatId || this.chatId;
+    const idType = receiveIdType === "open_id" ? "open_id" : "chat_id";
+    const target = idType === "open_id" ? (openId || chatId || this.chatId) : (chatId || this.chatId);
     if (!target) { await record({ phase: "not_attempted", reason: "target_missing" }); return null; }
     const token = await this.getToken();
     if (!token) { await record({ phase: "not_attempted", reason: "token_unavailable" }); return null; }
@@ -163,7 +167,7 @@ export class FeishuNotifier {
         payloadSha256: createHash("sha256").update(markdownPayload(chunk, t, threadId)).digest("hex") };
       const send = async credential => {
         await record({ ...detail, phase: "dispatching" }); // Durable before the possible write.
-        const value = await this._postChunk(target, chunk, t, credential, threadId, chunkUuid);
+        const value = await this._postChunk(target, chunk, t, credential, threadId, chunkUuid, idType);
         await record({ ...detail, phase: value?.code === 0 ? "accepted" : Number.isInteger(value?.code) && value.code > 0 ? "rejected" : "unknown",
           apiCode: Number.isInteger(value?.code) ? value.code : null,
           ...(value?.code === 0 && typeof value.data?.message_id === "string" ? { messageId: value.data.message_id } : {}) });
@@ -220,10 +224,10 @@ export class FeishuNotifier {
     }
   }
 
-  async _postChunk(target, chunk, title, token, threadId, uuid) {
+  async _postChunk(target, chunk, title, token, threadId, uuid, receiveIdType = "chat_id") {
     try {
       return await postJson(
-        `${FEISHU_API_BASE}${SEND_URL}?receive_id_type=chat_id`,
+        `${FEISHU_API_BASE}${SEND_URL}?receive_id_type=${encodeURIComponent(receiveIdType)}`,
         { receive_id: target, msg_type: "interactive", content: markdownPayload(chunk, title, threadId), ...(uuid ? { uuid } : {}) },
         { token }
       );

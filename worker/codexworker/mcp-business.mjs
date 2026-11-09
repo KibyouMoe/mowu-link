@@ -837,6 +837,9 @@ function toolResult(payload, isError = false) {
 
 
 return { handleRequest,
+  // The CLI owns the manager in-process; the router task runner shares this
+  // exact instance so router work joins the Feishu queue instead of a new thread.
+  manager: () => desktopManager,
   busy: () => Boolean(startingManager || desktopManager?.requestHotHandoff?.(runtimeControl.status)),
   activate: async () => { await ensureLocalManagerServer(); return desktopManager.health(); },
   quiesce: async () => {
