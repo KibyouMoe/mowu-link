@@ -21,10 +21,10 @@
 | **A. 聊天主链路** | | | | |
 | 飞书 p2p 文本收单并执行一轮 | `desktop-manager.mjs:1542-1552, 1609-1654, 756-812` | 已接入 | feishu-cli.mjs:372-384, 471-599；仅 p2p 文本，与桌面一致 | P0 |
 | 收到消息立即加表情回执，回合结束移除 | `desktop-manager.mjs:1619-1628, 1656-1671` | 部分接入 | feishu-cli.mjs:393-430（`ac964a0`）。reactionId 只存内存，崩溃/重启后表情留在原消息；桌面把 reactionId 写进 feishuReceipts | P1 |
-| 「输出」进度卡：同一张卡持续更新 | `desktop-manager.mjs:1194-1204 + feishu.mjs:294-359` | 已接入 | feishu-cli.mjs:177-273（OutputCard，1800ms 节流，PATCH 失败退化新卡）。实现不同：桌面每拍发新消息，CLI PATCH 同一张卡 | P0 |
+| 「输出」进度卡：同一张卡持续更新 | `desktop-manager.mjs:1194-1204 + feishu.mjs:294-359` | **已移除** | 2026-11-09 起 CLI 对齐 Hermes 飞书适配器：过程只留 Typing/CrossMark 表情，一轮只发一条最终消息，不再有进度卡或 PATCH（`OutputCard`/`TurnProgress` 已删除） | — |
 | 💭 思考摘要推送 | `feishu.mjs:313-320, 331-344` | 未接入 | `codex exec --json` 不产生 reasoning 事件，CLI 无内容可推 | P2 |
 | 文本增量流式（token/段落级） | `desktop-manager.mjs:1180-1184 + FeishuStreamBeat.feedChunk` | 未接入 | 实测 codex 只在消息完成时给整段 agent_message；CLI 无 delta 可转发，tokenStreaming=false | P0 |
-| 「回复」终稿卡（正文 + 会话号） | `desktop-manager.mjs:1190-1193` | 已接入 | feishu-cli.mjs:565-573 + markdownPayload 的 note 会话号 | P0 |
+| 「回复」终稿卡（正文 + 会话号） | `desktop-manager.mjs:1190-1193` | 已接入 | `feishu-cli.mjs` 的 `FinalMessage` + `feishu.mjs` 的 `cardPayload`（对齐 Hermes `_card()`，超 4096 字符分条 `（续 N/M）`） | P0 |
 | 同 threadId 连续追问（resume） | `desktop-manager.mjs:868-871（send_message_to_thread 带 threadId）` | 已接入 | native-cli.mjs:358-363, 395-404；实测第二轮 argv 为 `exec resume <sessionId>` | P0 |
 | 运行中插话（steer） | `desktop-manager.mjs:793-809, 882` | 未接入 | feishu-cli.mjs:458-469 对同一 open_id 串行：后一条必须等前一轮结束，无法送进正在执行的回合 | P1 |
 | /queue 与 delivery=queue | `desktop-manager.mjs:769, 778-783, 935-951` | 部分接入 | 只有进程内 per-open_id Promise 链；无 /queue 命令、无队列位置、重启即丢 | P2 |
@@ -105,7 +105,7 @@ exec resume 11111111-1111-4111-8111-111111111111 --skip-git-repo-check --json -c
 5.09s turn.completed
 ```
 
-- 每个 `item.completed` 都立刻推给 SSE，`OutputCard` 按 1800ms 节流 PATCH 同一条消息；`node --test tests/feishu-cli.test.mjs` **13/13 通过**，其中含 “the 输出 card rewrites in place at most once per stream interval”。
+- 每个 `item.completed` 都推给 SSE，但飞书侧不再有任何进度卡：一轮只发一条最终消息（2026-11-09 起对齐 Hermes）。
 - **但文本不是 token 级**。用真 codex（`codex-cli 0.167.0`）跑一次真实调用并给每行打时间戳：
 
 ```

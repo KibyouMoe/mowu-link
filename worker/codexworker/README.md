@@ -211,7 +211,6 @@ cat ~/.hermes/secrets/codexworker.config.json
 #   "feishu": {
 #     "configFile": "~/.hermes/secrets/feishu-oguri.json",
 #     "inboundEnabled": true,
-#     "streamEnabled": true,
 #     "onlineNotificationEnabled": false,
 #     "trainerOpenIdWhitelist": []
 #   }
@@ -227,9 +226,11 @@ cat ~/.hermes/secrets/codexworker.config.json
 | --- | --- |
 | `feishu.configFile` | 飞书应用凭据文件（`app_id`/`app_secret`，可选 `open_id`）；启动时读取一次 |
 | `feishu.inboundEnabled` | `true` 时建立长连接并接收单聊文本 |
-| `feishu.streamEnabled` | `false` 只发「回复」卡，不推进度卡 |
 | `feishu.trainerOpenIdWhitelist` | 允许的发送者 open_id。为空时只接受**第一条**入站文本的发送者，并记入 `feishu-sessions.json`（不写配置文件；日志 `feishu_whitelist_bootstrap`） |
 | `port` | HTTP bridge 端口（默认 8903） |
+
+> `feishu.streamEnabled` 在 CLI 通道已不再读取：飞书这条路现在与 Hermes 同款，一轮只发一条最终消息，
+> 没有进度卡可关。
 
 行为：
 
@@ -237,17 +238,19 @@ cat ~/.hermes/secrets/codexworker.config.json
   不转给 Codex。
 - 每个 open_id 一个持久 Codex 会话，映射在 `~/.codex/state/codexworker/feishu-sessions.json`
   （原子写、mode 600）。第一条消息新建会话，之后走 `codex exec resume <session-id>`；进程重启后仍续同一会话。
-- 收到文本先给训练员那条消息加「敲字中」表情回执（`addReaction`），回合结束——成功或失败——再移除
-  （`removeReaction`）；两者失败都只记日志，不影响回合与卡片。回执按 `message_id` 各记各的，并发消息不互相覆盖（仅内存，不落盘）。
-- 表情回执之后才发「输出」卡。卡片是**事件驱动**的：只在回合开始、出现新的工具、收到新的一段
-  agent 文本、回合结束（成功/失败/已中断）时 PATCH，没有定时刷新；同一个工具连续调用多次只算一次
-  状态变化。限流（HTTP 429 / `code 99991400` / 频率类消息）时不丢内容：最新快照进单槽合并队列，
-  期间的新快照只覆盖队列，恢复后一次 PATCH 发出最新正文；重试是有界的（最多 2 次尝试，按
-  `retry_after` 或 3s 等待）。仍然失败时新发一条同标题「输出」的消息并把后续更新指向新 message_id，
-  旧卡加一行「（本卡已停止更新，见下条）」；明确失败才新发，超时（可能已送达）不重发，限流但已 ACK
-  的预览内容完整时直接当最终内容。连续失败到上限记 `feishu_card_delivery_failed`，不无限重试。
-  回合结束发「回复」卡：正文是最终答复，底部 `会话 <threadId>`；被 `/stop` 中断时「输出」卡标题改为
-  `-已中断`，正文标明 `⏹ 已中断`。
+- **过程反馈只有表情**（对齐 Hermes 飞书适配器）：收到文本先给训练员那条消息加 `Typing` 表情，
+  回合结束成功就移除，失败则移除后换成 `CrossMark`（`addReaction(messageId, emoji)`；两个表情都已在真实
+  API 上验证通过）。添加/移除失败只记日志，不影响回合与回复。回执按 `message_id` 各记各的，并发消息不互相覆盖（仅内存，不落盘）。
+- **一轮只发一条最终消息**：过程不发任何进度卡，也不 PATCH（Hermes 的 `edit_message` 在飞书路径同样没有调用方）。
+  最终消息是 `interactive` 卡片：标题 `<bridgeName>-回复` + markdown 正文 + 底部 `会话 <threadId>`；
+  字段结构对齐 Hermes `_card()`（`config.wide_screen_mode`、`header.title{content,tag}`、`header.template`、
+  `elements[].tag=markdown`），围栏代码块/表格原样保留。被 `/stop` 中断时正文标 `⏹ 已中断`。
+- **长回复自动分条**：单条上限 4096 字符（对齐飞书客户端约 4096 的切分点）。切分优先落在段落（空行）、
+  再退到换行、空格，不切断行内代码；跨条的围栏代码块在上一段结尾补 ` ``` `，下一段以同语言围栏重开。
+  标题只跟第一条，后续条为 `<bridgeName>-回复（续 N/M）`。发送纪律仍是一套：
+  限流（HTTP 429 / `code 99991400` / 频率类消息）按 `retry_after` 或 3s 重试一次（上限 30s，超了就放弃）；
+  明确失败才补发一条同内容消息（每条最多补一次）；超时（可能已送达）不重发；已 ACK 的同内容不重发。
+  失败到上限记 `feishu_reply_delivery_failed`，不无限重试。
 - 同一 open_id 串行：上一轮没跑完时后一条排队，不会撞 `409 turn_in_progress`。飞书 ACK 与回合解耦
   （先落盘再返回，回合后台跑），长任务不会卡住入站。
 - `/stop`（也接受 `/stop@bot`）**绕过排队**立即执行：杀掉该会话正在跑的 codex 进程组
@@ -271,11 +274,11 @@ CLI 不再把 Codex 的 rollout 当日志源。`session-store.mjs` 是唯一历�
 - 迁移：`POST /manager/sessions/adopt` 对只存在于 rollout 的旧会话做一次性导入（返回 `history.messages`），
   之后同样只读存储。
 
-**关于「（历史受限）」**：Desktop 在事件日志读不全时会把标题写成「回复（历史受限）」。
-CLI 模式永远不会出现这个后缀：标题固定 `-输出` / `-回复`。只有存储本身真的读不到
+**关于「（历史受限）」**：Desktop 在事件日志读不全时会把标题写成「回复（历史受限）」。CLI 模式永远不会出现
+这个后缀：标题固定 `-回复`（长回复的后续条为 `-回复（续 N/M）`）。只有存储本身真的读不到
 （文件缺失、空文件、超过一半行损坏、权限错误）才降级为新会话，并记
 `feishu_history_degraded` + `reason`（`session_store_missing` / `session_store_corrupt:N/M` /
-`session_store_unreadable:*`），同时在「输出」卡正文提示一次。
+`session_store_unreadable:*`），同时在最终消息正文顶部提示一次。
 
 已知限制（CLI 模式）：
 

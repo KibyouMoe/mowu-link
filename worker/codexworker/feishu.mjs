@@ -69,16 +69,25 @@ export function escapeMarkdown(text) {
   return out.join("");
 }
 
-export function markdownPayload(text, title, threadId) {
-  const elements = [{ tag: "markdown", content: escapeMarkdown(text) }];
+export const CARD_TEMPLATE = "indigo";
+
+// Hermes `_card()` field structure: wide card, colored header (title object
+// first), then one markdown element. The session-id note is this bridge's only
+// addition; fenced code blocks ride the markdown element untouched.
+export function cardPayload(text, { title, threadId = null, template = CARD_TEMPLATE } = {}) {
+  const elements = [{ tag: "markdown", content: escapeMarkdown(String(text ?? "")) }];
   if (threadId) {
     elements.push({ tag: "note", elements: [{ tag: "plain_text", content: `会话 ${threadId}` }] });
   }
   return JSON.stringify({
     config: { wide_screen_mode: true },
-    header: { template: "indigo", title: { tag: "plain_text", content: title } },
+    header: { title: { content: String(title ?? ""), tag: "plain_text" }, template },
     elements,
   });
+}
+
+export function markdownPayload(text, title, threadId) {
+  return cardPayload(text, { title, threadId });
 }
 
 export function splitChunks(text, maxChars) {
@@ -233,12 +242,15 @@ export class FeishuNotifier {
     }
   }
 
-  async addReaction(messageId) {
+  // Emoji types the bridge uses: Typing while a turn runs, CrossMark when it
+  // failed (Hermes parity). Both are verified against the live reaction API.
+  async addReaction(messageId, emojiType = "Typing") {
     if (!this.enabled || !messageId) return null;
+    const emoji = typeof emojiType === "string" && emojiType.trim() ? emojiType.trim() : "Typing";
     const token = await this.getToken();
     if (!token) return null;
     const url = `${FEISHU_API_BASE}/im/v1/messages/${encodeURIComponent(messageId)}/reactions`;
-    const body = { reaction_type: { emoji_type: "Typing" } };
+    const body = { reaction_type: { emoji_type: emoji } };
     let response = await postJson(url, body, { token });
     if (response && response.code !== 0 && isTokenError(response)) {
       console.warn(`feishu reaction token 失效（code=${response.code} msg=${response.msg}），刷新 token 重试一次`);
@@ -248,7 +260,7 @@ export class FeishuNotifier {
       response = newToken ? await postJson(url, body, { token: newToken }) : null;
     }
     if (response === null || response.code !== 0) {
-      console.warn(`feishu 添加 reaction 失败: code=${(response || {}).code} msg=${(response || {}).msg} message_id=${messageId}`);
+      console.warn(`feishu 添加 reaction 失败: emoji=${emoji} code=${(response || {}).code} msg=${(response || {}).msg} message_id=${messageId}`);
       return null;
     }
     return String((response.data || {}).reaction_id || "") || null;

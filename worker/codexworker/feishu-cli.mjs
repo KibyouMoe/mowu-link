@@ -5,21 +5,30 @@
 //
 //   inbound p2p text -> typing reaction on the trainer's own message
 //   -> one persistent Codex session per sender (open_id)
-//   -> 「输出」card (event-driven progress) -> 「回复」card (final text + session id)
-//   -> reaction removed
+//   -> exactly one final message (「回复」card: text + session id)
+//   -> reaction removed (CrossMark instead when the turn failed)
+//
+// This mirrors Hermes' own Feishu adapter: no progress card, no PATCH, no
+// timer. `edit_message` exists upstream but has no caller on the Feishu path;
+// the trainer sees a Typing badge while the turn runs and one answer at the
+// end, never the same content twice.
 //
 // It never touches the Desktop path (desktop-manager.mjs / server.mjs); a CLI
 // process has no writer lease, no Desktop relay and no question cards.
 import { createHash } from "node:crypto";
 import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { FEISHU_API_BASE, FeishuNotifier, FeishuWebsocketClient, markdownPayload } from "./feishu.mjs";
+import { FEISHU_API_BASE, FeishuNotifier, FeishuWebsocketClient, cardPayload } from "./feishu.mjs";
+import { FEISHU_MAX_MESSAGE_CHARS, splitForFeishu } from "./hermes-feishu-format.mjs";
 import { expandHome } from "./native-cli.mjs";
 
 const STATE_VERSION = 1;
 const MAX_SEEN_MESSAGES = 500;
-const MAX_CARD_CHARS = 6000;
-const MAX_ACTIVITY_LINES = 6;
+// Reactions are the only in-flight feedback (Hermes parity): Typing while the
+// turn runs, removed on success, replaced by CrossMark on failure. Both types
+// are verified against the live Feishu reaction API.
+const WORKING_REACTION = "Typing";
+const FAILURE_REACTION = "CrossMark";
 // Bounded flood retry, mirroring Hermes' stream fallback: at most two attempts
 // (initial + one retry). The retry delay honours Feishu's retry_after, or 3s
 // by default, and is abandoned when the platform asks for longer than the cap.
@@ -39,11 +48,6 @@ function defaultLogger() {}
 export function feishuMessageId(messageId) {
   const hex = createHash("sha256").update(`feishu:${messageId}`).digest("hex");
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
-}
-
-function clamp(text, max = MAX_CARD_CHARS) {
-  const value = String(text ?? "");
-  return value.length <= max ? value : `${value.slice(0, max)}\n…（已截断）`;
 }
 
 function shortError(error) {
@@ -140,9 +144,9 @@ export class FeishuSessionStore {
 // ---------------------------------------------------------------------------
 // History probe. The bridge-owned SessionStore is the only history source; the
 // codex rollout jsonl is a process stream and is never used for /threads or
-// card history. Only a genuinely unreadable store (missing/corrupt file)
-// degrades to a new session, with the reason logged and shown once — the card
-// title itself is always `-输出` / `-回复`.
+// transcripts. Only a genuinely unreadable store (missing/corrupt file)
+// degrades to a new session, with the reason logged and shown once — the
+// message title itself is always `-回复`.
 // ---------------------------------------------------------------------------
 
 export function historyProbeFor(sessionStore) {
@@ -150,22 +154,22 @@ export function historyProbeFor(sessionStore) {
 }
 
 // ---------------------------------------------------------------------------
-// 「输出」card: one message per turn, written only on state boundaries.
+// The one final message (Hermes parity).
 //
-// The card is PATCHed when the turn starts, when a *new* tool shows up (the
-// same tool repeated back-to-back is one state change), when an agent message
-// snapshot arrives, and when the turn ends. There is no timer re-PATCHing a
-// stale body: a locked phone is no longer woken every 1.8s.
+// Hermes' Feishu adapter posts no progress card at all: the trainer's message
+// gets a Typing reaction, the turn runs silently, and exactly one final message
+// carries the answer. This class is that single send, keeping the delivery
+// discipline the old progress card had:
 //
-// A PATCH that Feishu rate-limits (HTTP 429 / body code 99991400 / a
-// frequency message) is not dropped: the newest snapshot is kept in a
-// one-slot queue and retried at 1s → 2s → 4s → 8s. Newer snapshots overwrite
-// the queued one, so a burst costs one PATCH. When the whole schedule is
-// exhausted the card is rotated to a fresh message (same title, latest full
-// snapshot) and the stale card gets a best-effort 「本卡已停止更新」 note.
-// Any other error is logged once and degrades to one fresh message: never a
-// retry storm. A rotated message that also fails the schedule ends the turn
-// as a logged delivery failure instead of retrying forever.
+//   delivered — Feishu acknowledged the message
+//   preview   — the same body is already visible from an earlier ACK; no resend
+//   ambiguous — timeout: the write may have landed, so a resend could duplicate
+//   failed    — explicit rejection after the bounded retry: one fresh message
+//
+// A rate-limited send (HTTP 429 / code 99991400 / a frequency message) is
+// retried once, after `retry_after` or 3s, capped at 30s. The retry is
+// abandoned — never stacked — when the platform asks for longer than the cap.
+// There is no endless 1/2/4/8 ladder, and nothing is ever PATCHed.
 // ---------------------------------------------------------------------------
 
 export function isStopCommand(text) {
@@ -202,7 +206,7 @@ function retryAfterOf(response) {
 }
 
 // A timeout may have landed on Feishu's side even though the client saw an
-// error. Those are "ambiguous": resending would duplicate the card.
+// error. Those are "ambiguous": resending would duplicate the message.
 function isTimeoutError(error) {
   return /timeout|timed out|abort/i.test(`${error?.name ?? ""} ${error?.message ?? String(error)}`);
 }
@@ -215,216 +219,145 @@ function isAmbiguous(response) {
   return isTimeoutError({ name: "", message: `${response.code ?? ""} ${response.msg ?? response.message ?? ""}` });
 }
 
-async function patchMessageCard(token, messageId, payload) {
-  try {
-    const response = await fetch(`${FEISHU_API_BASE}/im/v1/messages/${encodeURIComponent(messageId)}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json; charset=utf-8", Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ content: payload }),
-      signal: AbortSignal.timeout(15000),
-    });
-    // Keep the HTTP status: a 429 is a rate limit even when the JSON body is
-    // unhelpful, and the caller must not mistake it for a dead card.
-    let value = null;
-    try { value = await response.json(); }
-    catch { value = { code: -1, msg: `http_${response.status}` }; }
-    return { ...value, httpStatus: response.status };
-  } catch (error) {
-    return { code: -1, msg: `network error: ${error?.message ?? String(error)}`, httpStatus: 0 };
-  }
-}
-
-export function notifierCardTransport(notifier) {
+// The only outbound call left: one interactive card per turn. The notifier
+// keeps markdown/chunk/token handling; this adapter only classifies the result.
+export function notifierTransport(notifier) {
   return {
     async send(text, { chatId, title, threadId }) {
       const response = await notifier.sendMessage(text, { chatId, title, threadId });
       return { code: response?.code === 0 ? 0 : (Number.isInteger(response?.code) ? response.code : -1),
         messageId: response?.code === 0 ? String(response?.data?.message_id ?? "") || null : null };
     },
-    async update(messageId, text, { title, threadId }) {
-      const token = await notifier.getToken();
-      if (!token) return { code: -1 };
-      return patchMessageCard(token, messageId, markdownPayload(text, title, threadId));
-    },
   };
 }
 
-export class OutputCard {
+export class FinalMessage {
   constructor({ transport, chatId, threadId = null, title,
-    now = Date.now, timers = { setTimeout, clearTimeout }, logger = defaultLogger,
+    timers = { setTimeout, clearTimeout }, logger = defaultLogger,
     floodRetryDelayMs = DEFAULT_FLOOD_RETRY_DELAY_MS,
     maxFloodRetryDelayMs = MAX_FLOOD_RETRY_DELAY_MS,
-    maxRotations = 1 }) {
+    maxResends = 1, maxChars = FEISHU_MAX_MESSAGE_CHARS, split = splitForFeishu }) {
     this.transport = transport;
     this.chatId = chatId;
     this.threadId = threadId;
     this.title = title;
-    this.now = now;
     this.timers = timers;
     this.logger = logger;
     this.floodRetryDelayMs = Math.max(0, Number(floodRetryDelayMs) || 0);
     this.maxFloodRetryDelayMs = Math.max(this.floodRetryDelayMs, Number(maxFloodRetryDelayMs) || 0);
-    this.maxRotations = Math.max(0, Number(maxRotations) || 0);
-    this.messageId = null;
+    this.maxResends = Math.max(0, Number(maxResends) || 0);
+    this.maxChars = maxChars;
+    this.split = split;
+    this.messageId = null;     // last acknowledged message id
+    this.messageIds = [];      // one per delivered chunk
+    this.chunks = 0;
+    this.text = "";
+    this.deliveredKeys = new Set(); // "title\u0000body" already ACKed (never re-sent)
     // Last delivery outcome, same vocabulary as Hermes' stream fallback:
-    //   delivered — write acknowledged by Feishu
-    //   preview   — flood limit, but the ACKed body already shows the same text
-    //   ambiguous — timeout: the write may have landed; never resend blindly
-    //   failed    — explicit rejection after the bounded retry
+    //   delivered / preview / ambiguous / failed
     this.lastOutcome = null;
     this.deliveryFailed = false;
     this.deliveryAmbiguous = false;
-    this.sealed = false;      // no new snapshots; the final write may still run
-    this.closed = false;      // nothing else will ever be written
-    this.lastText = "";
-    this.lastSentText = "";   // body Feishu acknowledged: what the trainer sees
-    this.queuedText = null;   // one-slot merge queue: only the newest snapshot
-    this.rotations = 0;       // replacement messages created after a failed PATCH
+    this.closed = false;
     this.retryTimer = null;
     this.sleepResolve = null;
-    this.busy = false;
-    this.sends = 0;
-    this.updates = 0;         // successful PATCHes
-    this.patches = 0;         // PATCH attempts, including rejected ones
-    this.retries = 0;
+    this.sends = 0;      // transport.send attempts (initial + retries + resends)
+    this.retries = 0;    // bounded flood retries
+    this.resends = 0;    // replacement messages after an explicit rejection
   }
 
-  // First write is immediate: the trainer must see an acknowledgement now.
-  async start(text) {
-    this.lastText = String(text ?? "");
-    await this.#enqueue(this.lastText);
-  }
-
-  setThreadId(threadId) {
+  // The turn is over: post the reply. A body over the per-message cap is split
+  // at paragraph/newline boundaries; the title only rides the first message and
+  // continuations are titled 「（续 N/M）」. Every chunk goes through the same
+  // bounded retry and single-resend discipline, so a flood window can never
+  // duplicate a chunk that already landed.
+  async deliver(text, { title = null, threadId = null } = {}) {
+    if (this.closed) return "failed";
+    if (typeof title === "string" && title.trim()) this.title = title.trim();
     if (typeof threadId === "string" && threadId) this.threadId = threadId;
-  }
-
-  setTitle(title) {
-    if (typeof title === "string" && title.trim()) this.title = title;
-  }
-
-  visibleText() { return this.lastSentText; }
-
-  // A state boundary happened. Only the newest snapshot matters: while a write
-  // is in flight, rate limited, or waiting for its one bounded retry, this
-  // replaces the queued snapshot instead of stacking another write.
-  push(text) {
-    if (this.closed || this.sealed) return Promise.resolve();
-    this.lastText = String(text ?? "");
-    return this.#enqueue(this.lastText);
-  }
-
-  // Turn end: seal the card and force the final body out, so the header always
-  // becomes 完成/失败/已中断 even when the body equals the last PATCH.
-  async finish(text = null, { title = null } = {}) {
-    if (text != null) this.lastText = String(text);
-    if (title) this.setTitle(title);
-    this.sealed = true;
-    await this.#enqueue(this.lastText, { force: true });
-  }
-
-  #enqueue(text, { force = false } = {}) {
-    const value = String(text ?? "");
-    if (this.closed || !value) return Promise.resolve();
-    if (!force && this.queuedText == null && value === this.lastSentText) return Promise.resolve();
-    this.queuedText = value;
-    return this.#drain();
-  }
-
-  // One writer at a time. The queue holds a single snapshot, so a burst of
-  // events (or a flood-control window) collapses into one write of the newest
-  // body instead of replaying every intermediate state. Callers that arrive
-  // while a write is in flight join that loop, so finish() really waits for
-  // the final body instead of racing the reply card.
-  #drain() {
-    if (this.closed) return Promise.resolve();
-    if (this.busy) return this.drainPromise ?? Promise.resolve();
-    if (this.retryTimer) return this.drainPromise ?? Promise.resolve();
-    this.busy = true;
-    this.drainPromise = this.#runDrain()
-      .catch(error => {
-        // A card write must never take a turn down; every transport call is
-        // already classified, so this is belt-and-braces.
-        this.logger("error", "feishu_card_drain_failed", { message: error?.message ?? String(error) });
-      })
-      .finally(() => {
-        this.busy = false;
-        this.drainPromise = null;
-      });
-    return this.drainPromise;
-  }
-
-  async #runDrain() {
-    while (!this.closed && this.queuedText != null) {
-      const text = this.queuedText;
-      const outcome = await this.#deliver(text);
-      if (outcome === "superseded") continue; // a newer snapshot took over
-      if (outcome === "delivered" || outcome === "preview") {
-        this.lastSentText = text;
-        this.lastOutcome = outcome;
-        if (this.queuedText === text) this.queuedText = null;
-        continue;
-      }
-      if (outcome === "ambiguous") {
-        // A timeout may already have landed. Sending a second copy would
-        // duplicate the card, so delivery stays suppressed and logged.
-        this.lastOutcome = "ambiguous";
-        this.deliveryAmbiguous = true;
-        this.queuedText = null;
-        this.logger("warn", "feishu_card_delivery_ambiguous", {
-          messageId: this.messageId, chars: String(text ?? "").length });
-        return;
-      }
-      // Explicit failure. Never a retry storm: one replacement message is
-      // allowed, then the turn is marked as a delivery failure.
-      this.lastOutcome = "failed";
-      if ((await this.#rotate(text)) === "failed") return;
+    const body = String(text ?? "");
+    this.text = body;
+    const chunks = this.split(body, this.maxChars);
+    this.chunks = chunks.length;
+    const pending = [];
+    for (const [index, chunk] of chunks.entries()) {
+      const chunkTitle = index === 0 ? this.title : `${this.title}（续 ${index + 1}/${chunks.length}）`;
+      if (!this.deliveredKeys.has(`${chunkTitle}\u0000${chunk}`)) pending.push({ chunk, title: chunkTitle, index });
     }
+    if (!pending.length) {
+      // The exact chunks are already on screen from an earlier ACK: resending
+      // would be the duplicate copy this refactor exists to remove.
+      this.lastOutcome = "preview";
+      return "preview";
+    }
+    let outcome = "delivered";
+    for (const item of pending) {
+      outcome = await this.#deliverChunk(item.chunk, item.title);
+      this.lastOutcome = outcome;
+      if (outcome === "ambiguous") {
+        this.deliveryAmbiguous = true;
+        this.logger("warn", "feishu_reply_delivery_ambiguous", {
+          messageId: this.messageId, chunk: item.index + 1, chunks: chunks.length, chars: item.chunk.length });
+        break;
+      }
+      if (outcome === "failed") {
+        this.deliveryFailed = true;
+        this.logger("error", "feishu_reply_delivery_failed", {
+          messageId: this.messageId, resends: this.resends, chunk: item.index + 1,
+          chunks: chunks.length, chars: item.chunk.length });
+        break;
+      }
+      this.deliveredKeys.add(`${item.title}\u0000${item.chunk}`);
+    }
+    this.lastOutcome = outcome;
+    return outcome;
   }
 
-  // One snapshot, at most two attempts (Hermes `_send_with_flood_retry`).
-  async #deliver(text) {
-    let result = await this.#attempt(text);
+  async #deliverChunk(text, title) {
+    let outcome = await this.#attemptWithRetry(text, title);
+    if (outcome === "failed" && this.resends < this.maxResends && !this.closed) {
+      // Explicit rejection: one fresh message, same title and body. A resend is
+      // never attempted after an ambiguous write (that could duplicate).
+      this.resends += 1;
+      this.messageId = null;
+      this.logger("warn", "feishu_reply_resend", { resend: this.resends, chars: text.length });
+      outcome = await this.#attemptWithRetry(text, title);
+    }
+    return outcome;
+  }
+
+  // One body, at most two attempts (Hermes `_send_with_flood_retry`).
+  async #attemptWithRetry(text, title) {
+    let result = await this.#attempt(text, title);
     if (result.status !== "rate") return result.status;
-    // Flood control, but the body already showing is exactly this snapshot:
-    // the ACKed preview IS the final content, so never resend it.
-    if (this.visibleText() === text) return "preview";
     const delay = this.#boundedDelay(result.retryAfterMs);
     if (delay == null) return "failed"; // platform asked for longer than the cap
     this.retries += 1;
-    this.logger("warn", "feishu_card_rate_limited", {
+    this.logger("warn", "feishu_reply_rate_limited", {
       messageId: this.messageId, delayMs: delay, chars: String(text ?? "").length });
     await this.#sleep(delay);
     if (this.closed) return "failed";
-    if (this.queuedText !== text) return "superseded"; // merge: newest wins
-    result = await this.#attempt(text);
-    if (result.status === "rate") return this.visibleText() === text ? "preview" : "failed";
-    return result.status;
+    result = await this.#attempt(text, title);
+    return result.status === "rate" ? "failed" : result.status;
   }
 
-  async #attempt(text) {
-    const body = clamp(text);
-    const meta = { chatId: this.chatId, title: this.title, threadId: this.threadId };
+  async #attempt(text, title) {
+    const meta = { chatId: this.chatId, title, threadId: this.threadId };
     try {
-      if (!this.messageId) {
-        const response = await this.transport.send(body, meta);
-        this.sends += 1;
-        if (response?.messageId) { this.messageId = String(response.messageId); return { status: "delivered" }; }
-        if (isRateLimited(response)) return { status: "rate", retryAfterMs: retryAfterOf(response) };
-        if (isAmbiguous(response)) return { status: "ambiguous" };
-        this.logger("warn", "feishu_card_send_failed", { code: codeOf(response), msg: messageOf(response) });
-        return { status: "failed" };
+      this.sends += 1;
+      const response = await this.transport.send(text, meta);
+      if (response?.messageId) {
+        this.messageId = String(response.messageId);
+        this.messageIds.push(this.messageId);
+        return { status: "delivered" };
       }
-      this.patches += 1;
-      const response = await this.transport.update(this.messageId, body, meta);
-      if (response?.code === 0) { this.updates += 1; return { status: "delivered" }; }
       if (isRateLimited(response)) return { status: "rate", retryAfterMs: retryAfterOf(response) };
       if (isAmbiguous(response)) return { status: "ambiguous" };
-      this.logger("warn", "feishu_card_update_failed", { code: codeOf(response), msg: messageOf(response) });
+      this.logger("warn", "feishu_reply_send_failed", { code: codeOf(response), msg: messageOf(response) });
       return { status: "failed" };
     } catch (error) {
       const ambiguous = isTimeoutError(error);
-      this.logger("warn", "feishu_card_write_failed", { message: error?.message ?? String(error), ambiguous });
+      this.logger("warn", "feishu_reply_write_failed", { message: error?.message ?? String(error), ambiguous });
       return { status: ambiguous ? "ambiguous" : "failed" };
     }
   }
@@ -433,38 +366,11 @@ export class OutputCard {
     const value = Number(requestedMs);
     const delay = Number.isFinite(value) && value >= 0 ? value : this.floodRetryDelayMs;
     if (delay > this.maxFloodRetryDelayMs) {
-      this.logger("warn", "feishu_card_retry_too_long", {
+      this.logger("warn", "feishu_reply_retry_too_long", {
         delayMs: delay, maxMs: this.maxFloodRetryDelayMs });
       return null;
     }
     return delay;
-  }
-
-  // The card is unusable (explicit rejection, or flood control survived the
-  // bounded retry): post the latest full snapshot as a new message, keep the
-  // stale card and point at the replacement. The send itself runs through the
-  // same bounded path; after maxRotations the turn is a logged delivery failure.
-  async #rotate(text) {
-    if (!this.messageId || this.rotations >= this.maxRotations) {
-      this.deliveryFailed = true;
-      this.lastOutcome = "failed";
-      this.queuedText = null;
-      this.logger("error", "feishu_card_delivery_failed", { messageId: this.messageId,
-        rotations: this.rotations, chars: String(text ?? "").length });
-      return "failed";
-    }
-    const previous = this.messageId;
-    this.rotations += 1;
-    this.messageId = null; // the next attempt creates the replacement message
-    this.logger("warn", "feishu_card_rotated", { previousMessageId: previous,
-      rotation: this.rotations, chars: String(text ?? "").length });
-    // Best-effort cleanup of the stale card, deliberately never retried.
-    const meta = { chatId: this.chatId, title: this.title, threadId: this.threadId };
-    this.patches += 1;
-    Promise.resolve()
-      .then(() => this.transport.update(previous, clamp(`${text}\n\n（本卡已停止更新，见下条）`), meta))
-      .catch(() => {});
-    return "rotated";
   }
 
   #sleep(ms) {
@@ -479,58 +385,11 @@ export class OutputCard {
     });
   }
 
-  async close() {
+  close() {
     this.closed = true;
-    this.sealed = true;
     this.timers.clearTimeout(this.retryTimer);
     this.retryTimer = null;
     if (this.sleepResolve) { const resolve = this.sleepResolve; this.sleepResolve = null; resolve(); }
-    this.queuedText = null;
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Turn progress: event-driven state, not a clock.
-//
-// A repeated tool is one state change even when codex runs it many times in a
-// row; the caller only PATCHes when noteTool/noteText return true.
-// ---------------------------------------------------------------------------
-
-export class TurnProgress {
-  constructor({ startedAt, now = Date.now, maxActivity = MAX_ACTIVITY_LINES } = {}) {
-    this.startedAt = typeof startedAt === "number" ? startedAt : now();
-    this.now = now;
-    this.maxActivity = maxActivity;
-    this.activity = [];
-    this.latestText = "";
-    this.lastTool = null;
-  }
-
-  noteTool(name, detail = "") {
-    const label = String(name ?? "tool").trim() || "tool";
-    if (label === this.lastTool) return false; // same tool back-to-back: no change
-    this.lastTool = label;
-    const suffix = detail ? `: ${String(detail).slice(0, 120)}` : "";
-    const line = `🔧 ${label}${suffix}`;
-    if (this.activity.at(-1) !== line) this.activity.push(line);
-    if (this.activity.length > this.maxActivity) this.activity.splice(0, this.activity.length - this.maxActivity);
-    return true;
-  }
-
-  noteText(text) {
-    const value = String(text ?? "");
-    if (!value || value === this.latestText) return false;
-    this.latestText = value;
-    return true;
-  }
-
-  render(status = null) {
-    const seconds = Math.max(0, Math.round((this.now() - this.startedAt) / 1000));
-    const head = { completed: "✅ 完成", error: "❌ 失败", cancelled: "⏹ 已中断", timeout: "⏱ 超时" }[status] ?? "⏳ 执行中";
-    const lines = [`${head}（${seconds}s）`];
-    for (const line of this.activity) lines.push(line);
-    if (this.latestText) lines.push("", clamp(this.latestText, MAX_CARD_CHARS - 400));
-    return lines.join("\n");
   }
 }
 
@@ -541,20 +400,19 @@ export class TurnProgress {
 export class CliFeishuChannel {
   constructor({
     adapter, credentials = null, notifier = null, feishu = {}, bridgeName = "CodexWorker",
-    sessionsPath, logger = defaultLogger, now = Date.now,
-    timers = { setTimeout, clearTimeout }, cardOptions = null,
+    sessionsPath, logger = defaultLogger,
+    timers = { setTimeout, clearTimeout }, deliveryOptions = null,
     websocketFactory, endpointResolver, transport = null, cwd = null, historyProbe = null,
     sessionStore = null,
   }) {
     this.adapter = adapter;
     this.bridgeName = bridgeName;
     this.logger = logger;
-    this.now = now;
     this.timers = timers;
-    this.cardOptions = cardOptions ?? {};
+    // deliveryOptions tune the single final message (flood retry / resend cap).
+    this.deliveryOptions = deliveryOptions ?? {};
     this.websocketFactory = websocketFactory;
     this.endpointResolver = endpointResolver;
-    this.streamEnabled = feishu?.streamEnabled !== false;
     this.cwd = cwd;
     // Bridge-owned history (SessionStore) is authoritative for sessions,
     // transcripts and card history; codex rollouts are only a process stream.
@@ -567,7 +425,7 @@ export class CliFeishuChannel {
       chatId: credentials?.chatId ?? null, bridgeName,
       canSend: () => !this.closed,
     });
-    this.transport = transport ?? notifierCardTransport(this.notifier);
+    this.transport = transport ?? notifierTransport(this.notifier);
     this.whitelist = new Set((feishu?.trainerOpenIdWhitelist ?? []).filter(value => typeof value === "string" && value));
     this.bootstrapOwner = this.whitelist.size === 0;
     this.client = null;
@@ -581,6 +439,8 @@ export class CliFeishuChannel {
     this.failures = 0;
     this.rejected = 0;
     this.stops = 0;
+    this.replies = 0;         // final messages Feishu acknowledged
+    this.sendAttempts = 0;    // transport.send calls (retries/resends included)
     this.deliveryFailures = 0;
     this.startedAt = null;
   }
@@ -605,7 +465,7 @@ export class CliFeishuChannel {
     this.startedAt = new Date().toISOString();
     this.client.start();
     this.logger("info", "feishu_channel_started", {
-      inbound: this.client.running, streamEnabled: this.streamEnabled,
+      inbound: this.client.running, replyMode: "single-message",
       whitelistCount: this.whitelist.size, bootstrapOwner: this.bootstrapOwner,
     });
     return this;
@@ -618,7 +478,7 @@ export class CliFeishuChannel {
       phase: this.client?.phase ?? "stopped",
       connection: this.client?.status?.() ?? null,
       lastError: this.client?.lastError || null,
-      streamEnabled: this.streamEnabled,
+      replyMode: "single-message",
       whitelistCount: this.whitelist.size,
       bootstrapOwner: this.bootstrapOwner,
       sessions: Object.keys(this.store.state.sessions).length,
@@ -628,6 +488,8 @@ export class CliFeishuChannel {
       failures: this.failures,
       rejected: this.rejected,
       stops: this.stops,
+      replies: this.replies,
+      sendAttempts: this.sendAttempts,
       deliveryFailures: this.deliveryFailures,
       startedAt: this.startedAt,
     };
@@ -661,13 +523,15 @@ export class CliFeishuChannel {
     }
     // Typing receipt before anything visible. It starts now (so a message that
     // arrives while the sender is still busy is acknowledged immediately) while
-    // the queue order stays synchronous, and the turn waits for it so the
-    // reaction can never land after the 「输出」card.
+    // the queue order stays synchronous; the turn waits for it so the badge
+    // always lands before the single final message.
     const acknowledged = this.#acknowledge(event);
     this.#enqueue(event.open_id, async () => {
       await acknowledged;
+      let failed = false;
       try { return await this.#turn(event, messageId); }
-      finally { await this.#clearReaction(event.message_id); }
+      catch (error) { failed = true; throw error; }
+      finally { await this.#settleReaction(event.message_id, { failed }); }
     });
     return { accepted: true, messageId };
   }
@@ -690,14 +554,18 @@ export class CliFeishuChannel {
       outcome = { status: "failed", reason: shortError(error) };
     }
     const status = outcome?.status ?? "no_active_turn";
-    const text = status === "cancelled" ? "⏹ 已中断当前回合。"
-      : status === "no_active_turn" ? "当前没有在执行的回合（no_active_turn）。"
-      : status === "unsupported" ? "当前后端不支持停止。"
-      : `停止失败：${outcome?.reason ?? status}`;
     await acknowledged;
-    await this.notifier.sendMessage(text, { chatId: event.chat_id,
-      title: `${this.bridgeName}-提示`, threadId }).catch(() => {});
-    await this.#clearReaction(event.message_id);
+    // A cancelled turn answers for itself: its one final message carries
+    // 「⏹ 已中断」, so a second notice here would be the duplicate this channel
+    // just removed. Every other outcome has no turn reply and needs a notice.
+    if (status !== "cancelled") {
+      const text = status === "no_active_turn" ? "当前没有在执行的回合（no_active_turn）。"
+        : status === "unsupported" ? "当前后端不支持停止。"
+        : `停止失败：${outcome?.reason ?? status}`;
+      await this.notifier.sendMessage(text, { chatId: event.chat_id,
+        title: `${this.bridgeName}-提示`, threadId }).catch(() => {});
+    }
+    await this.#settleReaction(event.message_id, { failed: status === "failed" });
     this.logger("info", "feishu_stop", { threadId, status });
     return { status };
   }
@@ -708,27 +576,47 @@ export class CliFeishuChannel {
   #acknowledge(event) {
     const messageId = event.message_id;
     if (typeof this.notifier?.addReaction !== "function") return Promise.resolve(null);
-    return this.notifier.addReaction(messageId).then(reactionId => {
+    return this.notifier.addReaction(messageId, WORKING_REACTION).then(reactionId => {
       const id = reactionId ? String(reactionId) : null;
       // Keyed by message id: two messages in flight never share a receipt.
       if (id) this.reactions.set(messageId, id);
       return id;
     }).catch(error => {
-      this.logger("warn", "feishu_reaction_failed", { stage: "add", messageId,
+      this.logger("warn", "feishu_reaction_failed", { stage: "add", emoji: WORKING_REACTION, messageId,
         code: error?.code ?? null, message: error?.message ?? String(error) });
       return null;
     });
   }
 
-  async #clearReaction(messageId) {
+  // Turn end: drop the Typing badge. A failed turn swaps it for CrossMark, the
+  // way Hermes' adapter does; if the Typing removal did not land, no second
+  // badge is stacked (the UI would read as both working and failed).
+  async #settleReaction(messageId, { failed = false } = {}) {
     const reactionId = this.reactions.get(messageId) ?? null;
-    this.reactions.delete(messageId);
-    if (!reactionId || typeof this.notifier?.removeReaction !== "function") return;
+    if (reactionId) {
+      if (typeof this.notifier?.removeReaction === "function") {
+        let removed = false;
+        try { removed = await this.notifier.removeReaction(messageId, reactionId); }
+        catch (error) {
+          this.logger("warn", "feishu_reaction_remove_failed", { messageId, reactionId,
+            code: error?.code ?? null, message: error?.message ?? String(error) });
+          return;
+        }
+        if (!removed) {
+          this.logger("warn", "feishu_reaction_remove_failed", { messageId, reactionId });
+          return;
+        }
+      }
+      this.reactions.delete(messageId);
+    }
+    if (!failed || typeof this.notifier?.addReaction !== "function") return;
     try {
-      const removed = await this.notifier.removeReaction(messageId, reactionId);
-      if (!removed) this.logger("warn", "feishu_reaction_remove_failed", { messageId, reactionId });
+      const id = await this.notifier.addReaction(messageId, FAILURE_REACTION);
+      // Terminal state: the badge stays on the message, so no handle is kept
+      // (nothing will remove it later, and the map would only grow).
+      if (id) this.logger("info", "feishu_reaction_marked_failed", { messageId, emoji: FAILURE_REACTION });
     } catch (error) {
-      this.logger("warn", "feishu_reaction_remove_failed", { messageId, reactionId,
+      this.logger("warn", "feishu_reaction_failed", { stage: "failure", emoji: FAILURE_REACTION, messageId,
         code: error?.code ?? null, message: error?.message ?? String(error) });
     }
   }
@@ -774,12 +662,10 @@ export class CliFeishuChannel {
   async #turn(event, messageId) {
     const record = this.store.get(event.open_id) ?? {};
     let threadId = typeof record.threadId === "string" && record.threadId ? record.threadId : null;
-    const started = this.now();
-    let card = null;
 
     // The bridge-owned store is the only history source. Only a genuinely
     // unreadable store (missing/corrupt) falls back to a fresh session; the
-    // reason is logged and shown once, never appended to a card title.
+    // reason is logged and shown once in the reply, never in the title.
     let historyNotice = "";
     if (threadId) {
       const probe = await this.historyProbe(threadId)
@@ -809,76 +695,31 @@ export class CliFeishuChannel {
         message: error?.message ?? String(error) });
     }
 
-    // Event-driven progress: render() is only pushed when noteTool/noteText
-    // report a real state change, so a repeated tool costs one PATCH, not one
-    // per invocation, and no timer ever fires on its own.
-    const progress = new TurnProgress({ startedAt: started, now: this.now });
-
-    if (this.streamEnabled) {
-      card = new OutputCard({ transport: this.transport, chatId: event.chat_id, threadId,
-        title: `${this.bridgeName}-输出`, now: this.now, timers: this.timers,
-        logger: this.logger, ...this.cardOptions });
-      await card.start(historyNotice || "⏳ 已收到，正在执行…");
-    }
-
-    const onEvent = emitted => {
-      if (!card) return;
-      try {
-        // adapter events carry the Codex session id as soon as `thread.started`
-        // has been seen; use it so even the first 输出 card names the session.
-        if (typeof emitted?.threadId === "string" && emitted.threadId) card.setThreadId(emitted.threadId);
-        if (emitted?.type === "tool.started" || emitted?.type === "tool.completed") {
-          const payload = emitted.payload ?? {};
-          const name = payload.name ?? payload.type ?? "tool";
-          const detail = payload.command ? String(payload.command) : "";
-          // Same tool back-to-back is one state change: no PATCH at all.
-          if (progress.noteTool(name, detail)) card.push(progress.render());
-        } else if (emitted?.type === "item.completed" && emitted.payload?.kind === "agent_message") {
-          if (progress.noteText(emitted.payload.snapshot)) card.push(progress.render());
-        }
-      } catch { /* progress rendering never fails a turn */ }
-    };
-
+    // No progress card, no timer, no PATCH: the badge on the trainer's own
+    // message is the only "working" signal until the answer is ready.
     this.logger("info", "feishu_turn_started", { messageId, threadId, chars: event.content.length });
     let result;
     try {
-      result = await this.adapter.dispatch({ threadId, text: event.content, cwd: this.cwd, messageId, onEvent });
+      result = await this.adapter.dispatch({ threadId, text: event.content, cwd: this.cwd, messageId });
     } catch (error) {
-      if (card) {
-        card.setTitle(`${this.bridgeName}-失败`);
-        await card.finish(progress.render("error"));
-        if (card.deliveryFailed) this.deliveryFailures += 1;
-      }
-      await this.notifier.sendMessage(`本轮失败：${shortError(error)}`, {
-        chatId: event.chat_id, title: `${this.bridgeName}-回复`, threadId,
-      }).catch(() => {});
+      // Same single message, same card shape, error summary as the body.
+      const notice = `本轮失败：${shortError(error)}`;
+      await this.#deliverFinal(historyNotice ? `${historyNotice}\n\n${notice}` : notice,
+        { chatId: event.chat_id, threadId, title: `${this.bridgeName}-回复` });
       throw error;
     }
 
-    if (card) {
-      card.setThreadId(result.threadId ?? threadId);
-      const status = result.status ?? "completed";
-      // Turn end is always a PATCH moment: the header becomes 完成/失败/已中断
-      // even when the body did not change since the last tool event.
-      await card.finish(progress.render(status),
-        status === "cancelled" ? { title: `${this.bridgeName}-已中断` } : {});
-      if (card.deliveryFailed) {
-        this.deliveryFailures += 1;
-        this.logger("error", "feishu_turn_delivery_failed", {
-          threadId: result.threadId ?? threadId, messageId: card.messageId,
-        });
-      }
-    }
+    const finalThreadId = result.threadId ?? threadId;
     const partial = String(result.resultText ?? "").trim();
-    const text = result.status === "cancelled"
+    let text = result.status === "cancelled"
       ? (partial ? `${partial}\n\n⏹ 已中断` : "⏹ 已中断（/stop）")
       : partial || "（本轮无文本输出）";
+    if (historyNotice) text = `${historyNotice}\n\n${text}`;
     // Reply first (the trainer's expectation), then persist — but both before
     // the next queued turn so history order matches what was seen.
-    const reply = await this.notifier.sendMessage(text, {
-      chatId: event.chat_id, title: `${this.bridgeName}-回复`, threadId: result.threadId ?? threadId,
-    }).catch(() => null);
-    const finalThreadId = result.threadId ?? threadId;
+    const delivery = await this.#deliverFinal(text, {
+      chatId: event.chat_id, threadId: finalThreadId, title: `${this.bridgeName}-回复`,
+    });
     try {
       // A cancelled turn has no agent text; record the interruption so the
       // transcript matches the「已中断」card instead of looking like a no-op.
@@ -908,9 +749,31 @@ export class CliFeishuChannel {
     this.logger("info", "feishu_turn_completed", {
       threadId: finalThreadId, sessionId: result.sessionId ?? null, status: result.status ?? null,
       durationMs: result.durationMs ?? null, chars: text.length,
-      delivered: reply?.code === 0,
+      // One send for a normal turn; more only when a flood retry or the single
+      // allowed resend happened. `sendAttempts` counts everything on the wire.
+      sendCount: delivery.sends, deliveryOutcome: delivery.lastOutcome,
+      delivered: delivery.lastOutcome === "delivered" || delivery.lastOutcome === "preview",
     });
     return result;
+  }
+
+  // The only outbound write of a turn, shared by the success, failure and
+  // /stop paths so none of them can invent a second message.
+  async #deliverFinal(text, { chatId, threadId, title }) {
+    const message = new FinalMessage({ transport: this.transport, chatId, threadId, title,
+      timers: this.timers, logger: this.logger, ...this.deliveryOptions });
+    const outcome = await message.deliver(text);
+    this.sendAttempts += message.sends;
+    if (message.deliveryFailed) this.deliveryFailures += 1;
+    // One per message that landed (a long reply is several, by design).
+    this.replies += message.messageIds.length;
+    this.logger("info", "feishu_reply_delivery", {
+      threadId: message.threadId, title: message.title, outcome,
+      sends: message.sends, retries: message.retries, resends: message.resends,
+      chunks: message.chunks, messageIds: message.messageIds,
+      messageId: message.messageId, chars: String(text ?? "").length,
+    });
+    return message;
   }
 
   async close() {
