@@ -259,6 +259,8 @@ if (args.command === "mcp") {
       sandbox: codex.sandbox,
       approvalPolicy: codex.approvalPolicy,
       model: codex.model ?? null,
+      // Validated inside the adapter (warn + ignore on a bad value).
+      reasoningEffort: codex.reasoningEffort ?? null,
       extraArgs: codex.extraArgs ?? [],
       proxy: codex.proxy ?? null,
       env: process.env,
@@ -551,6 +553,7 @@ if (args.command === "mcp") {
 
     const actualPort = server.address().port;
     log("info", "listening", { url: `http://${host}:${actualPort}`, backend: "cli", codexBin, codexVersion,
+      model: adapter.model, reasoningEffort: adapter.reasoningEffort,
       auth: token ? "bearer" : "loopback-open" });
     process.stdout.write(`${NAME} listening on http://${host}:${actualPort} (backend=cli, codexVersion=${codexVersion ?? "unavailable"})\n`);
 

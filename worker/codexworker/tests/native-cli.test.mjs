@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import http from "node:http";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { CliNativeAdapter, probeNativeBackend, resolveCodexBinary } from "../native-cli.mjs";
 import { publicProgress } from "../native-progress.mjs";
 import { randomUUID } from "node:crypto";
@@ -43,7 +46,7 @@ console.log(JSON.stringify({ type: "item.completed", item: { id: "item_2", type:
 console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 10, output_tokens: 2 } }));
 `;
 
-async function fixture() {
+async function fixture(options = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), "codexworker-native-cli-"));
   const bin = path.join(root, "fake-codex.mjs");
   await writeFile(bin, FAKE, { mode: 0o755 });
@@ -53,8 +56,10 @@ async function fixture() {
   const argsFile = path.join(root, "argv.jsonl");
   const sessionId = randomUUID();
   const adapter = new CliNativeAdapter({ codexBin: bin, codexHome, stateDir, defaultCwd: root,
-    turnTimeoutMs: 20000, sandbox: "read-only", env: { ...process.env, FAKE_ARGS_FILE: argsFile,
-      FAKE_SESSION_ID: sessionId, CODEX_HOME: codexHome }, logger: () => {} });
+    turnTimeoutMs: 20000, sandbox: "read-only", model: options.model ?? null,
+    reasoningEffort: options.reasoningEffort,
+    env: { ...process.env, FAKE_ARGS_FILE: argsFile,
+      FAKE_SESSION_ID: sessionId, CODEX_HOME: codexHome }, logger: options.logger ?? (() => {}) });
   await adapter.init();
   return { root, adapter, argsFile, sessionId, codexHome };
 }
@@ -143,4 +148,189 @@ test("unmanaged codex sessions appear in history and can be adopted", async () =
   assert.equal((await adapter.history({ limit: 10 })).find(thread => thread.id === id).source, "cli");
   await assert.rejects(adapter.adopt(randomUUID()), error => error.status === 404);
   await adapter.close();
+});
+
+
+// ---------------------------------------------------------------------------
+// reasoningEffort: `codex exec` has no flag for it, so it must ride as
+// `-c model_reasoning_effort="<value>"` right after `-m`, on both paths.
+// ---------------------------------------------------------------------------
+
+const CLI_ENTRY = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "cli.mjs");
+
+const hasEffortArg = argv => argv.some(arg => String(arg).includes("model_reasoning_effort"));
+
+function requestJson(base, pathname, { method = "GET", body = null } = {}) {
+  return new Promise((resolve, reject) => {
+    const payload = body == null ? null : Buffer.from(JSON.stringify(body), "utf8");
+    const req = http.request(`${base}${pathname}`, { method,
+      headers: payload ? { "content-type": "application/json", "content-length": payload.length } : {} }, res => {
+      const chunks = [];
+      res.on("data", chunk => chunks.push(chunk));
+      res.on("end", () => {
+        const text = Buffer.concat(chunks).toString("utf8");
+        let json = null;
+        try { json = text ? JSON.parse(text) : null; } catch { /* non-JSON body */ }
+        resolve({ status: res.statusCode, json, text });
+      });
+    });
+    req.on("error", reject);
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+// Boots the real cli.mjs against the fake codex binary so the config -> adapter
+// -> argv chain is exercised end to end, not just the adapter in isolation.
+async function startBridge({ reasoningEffort, sessionId }) {
+  const root = await mkdtemp(path.join(os.tmpdir(), "codexworker-effort-"));
+  const bin = path.join(root, "fake-codex.mjs");
+  await writeFile(bin, FAKE, { mode: 0o755 });
+  const codexHome = path.join(root, "codex-home");
+  const stateDir = path.join(root, "state");
+  await mkdir(codexHome, { recursive: true });
+  const argsFile = path.join(root, "argv.jsonl");
+  const logPath = path.join(root, "bridge.log");
+  const configPath = path.join(root, "config.json");
+  const codex = { bin, home: codexHome, sandbox: "read-only", model: "gpt-6.1-sol" };
+  if (reasoningEffort !== undefined) codex.reasoningEffort = reasoningEffort;
+  await writeFile(configPath, JSON.stringify({ backend: "cli", host: "127.0.0.1", port: 0, workspace: root,
+    codex, feishu: { inboundEnabled: false } }, null, 2));
+
+  const env = { ...process.env, CODEXWORKER_STATE_DIR: stateDir, CODEX_HOME: codexHome,
+    FAKE_ARGS_FILE: argsFile, FAKE_SESSION_ID: sessionId,
+    NO_PROXY: "127.0.0.1,localhost", no_proxy: "127.0.0.1,localhost" };
+  delete env.CODEX_APP_TOOLS_PIPE_PATH;
+
+  const child = spawn(process.execPath, [CLI_ENTRY, "--config", configPath, "--port", "0", "--log", logPath],
+    { cwd: root, env, stdio: ["ignore", "pipe", "pipe"] });
+  let stdout = "", stderr = "";
+  child.stdout.setEncoding("utf8"); child.stderr.setEncoding("utf8");
+  child.stdout.on("data", chunk => { stdout += chunk; });
+  child.stderr.on("data", chunk => { stderr += chunk; });
+
+  const base = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`bridge did not listen in time.\nstdout: ${stdout}\nstderr: ${stderr}`)), 20000);
+    const poll = setInterval(() => {
+      const match = stdout.match(/listening on (http:\/\/[^\s]+)/);
+      if (!match) return;
+      clearInterval(poll); clearTimeout(timer);
+      resolve(match[1]);
+    }, 25);
+    child.once("exit", code => {
+      clearInterval(poll); clearTimeout(timer);
+      reject(new Error(`bridge exited before listening (${code}).\nstdout: ${stdout}\nstderr: ${stderr}`));
+    });
+  });
+
+  const stop = async () => {
+    if (child.exitCode === null) {
+      const exited = new Promise(resolve => child.once("exit", resolve));
+      child.kill("SIGTERM");
+      await Promise.race([exited, new Promise(resolve => setTimeout(resolve, 5000))]);
+      if (child.exitCode === null) child.kill("SIGKILL");
+    }
+    await rm(root, { recursive: true, force: true });
+  };
+  return { base, argsFile, logPath, stop, stderr: () => stderr };
+}
+
+async function waitForLog(file, needle) {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    try { const text = await readFile(file, "utf8"); if (text.includes(needle)) return text; }
+    catch { /* log file not flushed yet */ }
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  throw new Error(`log ${file} never mentioned ${needle}`);
+}
+
+test("reasoningEffort=max adds -c model_reasoning_effort after -m on the new and resume paths", async () => {
+  const { adapter, argsFile } = await fixture({ model: "gpt-6.1-sol", reasoningEffort: "max" });
+  const first = await adapter.dispatch({ text: "只回复两个字母：OK" });
+  const second = await adapter.dispatch({ threadId: first.threadId, text: "再来一次" });
+  assert.equal(second.sessionId, first.sessionId);
+
+  const calls = await argvLines(argsFile);
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[0].slice(0, 2), ["exec", "--skip-git-repo-check"], "new session path");
+  assert.deepEqual(calls[1].slice(0, 3), ["exec", "resume", first.sessionId], "resume path");
+  for (const call of calls) {
+    const at = call.indexOf("-m");
+    assert.ok(at > 0, `expected -m in ${JSON.stringify(call)}`);
+    assert.deepEqual(call.slice(at, at + 4), ["-m", "gpt-6.1-sol", "-c", 'model_reasoning_effort="max"']);
+  }
+  assert.equal(adapter.status().reasoningEffort, "max");
+  await adapter.close();
+});
+
+test("no reasoningEffort (unset, null or blank) adds no model_reasoning_effort", async () => {
+  for (const reasoningEffort of [undefined, null, "", "   "]) {
+    const { adapter, argsFile } = await fixture({ model: "gpt-6.1-sol", reasoningEffort });
+    await adapter.dispatch({ text: "只回复两个字母：OK" });
+    const [call] = await argvLines(argsFile);
+    assert.equal(hasEffortArg(call), false, `unexpected override for ${JSON.stringify(reasoningEffort)}`);
+    assert.equal(adapter.status().reasoningEffort, null);
+    await adapter.close();
+  }
+});
+
+test("an unknown reasoningEffort warns once, is ignored, and never reaches argv", async () => {
+  const logs = [];
+  const { adapter, argsFile } = await fixture({ model: "gpt-6.1-sol", reasoningEffort: "turbo",
+    logger: (level, event, fields = {}) => logs.push({ level, event, ...fields }) });
+  await adapter.dispatch({ text: "只回复两个字母：OK" });
+  const [call] = await argvLines(argsFile);
+  assert.equal(hasEffortArg(call), false);
+  assert.equal(adapter.status().reasoningEffort, null);
+  const warns = logs.filter(entry => entry.event === "reasoning_effort_invalid");
+  assert.equal(warns.length, 1);
+  assert.equal(warns[0].level, "warn");
+  assert.equal(warns[0].value, "turbo");
+  await adapter.close();
+});
+
+test("cli.mjs reads codex.reasoningEffort, reports it in /health, and passes it on both real argv paths", async () => {
+  const bridge = await startBridge({ reasoningEffort: "max", sessionId: randomUUID() });
+  try {
+    const health = await requestJson(bridge.base, "/health");
+    assert.equal(health.status, 200);
+    assert.equal(health.json.ready, true);
+    assert.equal(health.json.nativeCli.model, "gpt-6.1-sol");
+    assert.equal(health.json.nativeCli.reasoningEffort, "max");
+
+    const first = await requestJson(bridge.base, "/turn", { method: "POST", body: { text: "只回复两个字母：OK" } });
+    assert.equal(first.json.status, "completed");
+    const second = await requestJson(bridge.base, "/turn", { method: "POST",
+      body: { threadId: first.json.threadId, text: "再来一次" } });
+    assert.equal(second.json.sessionId, first.json.sessionId);
+
+    const calls = await argvLines(bridge.argsFile);
+    assert.equal(calls.length, 2);
+    assert.equal(calls[0][1], "--skip-git-repo-check");
+    assert.deepEqual(calls[1].slice(0, 3), ["exec", "resume", first.json.sessionId]);
+    for (const call of calls) {
+      const at = call.indexOf("-m");
+      assert.deepEqual(call.slice(at, at + 4), ["-m", "gpt-6.1-sol", "-c", 'model_reasoning_effort="max"']);
+    }
+  } finally { await bridge.stop(); }
+});
+
+test("cli.mjs stays up on an invalid reasoningEffort: warn logged, no override, family keeps working", async () => {
+  const bridge = await startBridge({ reasoningEffort: "turbo", sessionId: randomUUID() });
+  try {
+    const health = await requestJson(bridge.base, "/health");
+    assert.equal(health.status, 200);
+    assert.equal(health.json.ready, true);
+    assert.equal(health.json.nativeCli.reasoningEffort, null);
+    assert.match(bridge.stderr(), /warn reasoning_effort_invalid/);
+    assert.match(bridge.stderr(), /"value":"turbo"/);
+
+    const turn = await requestJson(bridge.base, "/turn", { method: "POST", body: { text: "只回复两个字母：OK" } });
+    assert.equal(turn.json.status, "completed");
+    const [call] = await argvLines(bridge.argsFile);
+    assert.equal(hasEffortArg(call), false);
+
+    const logText = await waitForLog(bridge.logPath, "reasoning_effort_invalid");
+    assert.match(logText, /"level":"warn"/);
+  } finally { await bridge.stop(); }
 });

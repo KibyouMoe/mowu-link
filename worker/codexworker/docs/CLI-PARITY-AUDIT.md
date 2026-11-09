@@ -75,23 +75,23 @@
 | health / capabilities 自描述 | `desktop-manager.mjs:449-481` | 已接入 | cli.mjs:303-323，字段更明确（capabilities + limits） | P2 |
 | 多设备 hostId | `desktop-manager.mjs:1782, read/register 的 hostId` | 未接入 | CLI 只有本地 | P2 |
 | **M. 模型与执行参数** | | | | |
-| 模型选择 codex.model → `-m` | `Desktop 界面/配置选择模型` | 已接入 | cli.mjs:261 → native-cli.mjs:412；实测 argv 含 `-m gpt-6.1-sol`（首轮与 resume 都有） | P0 |
-| reasoningEffort | `Desktop 界面/配置` | 未接入 | native-cli 没有该字段；实测配置 `reasoningEffort: medium`，argv 无 `model_reasoning_effort` | P1 |
-| sandbox / approvalPolicy / 代理 / extraArgs | `Desktop 由原生会话管理` | 已接入 | native-cli.mjs:407-414, 102-111；桌面无对应配置项，属 CLI 专有能力 | P1 |
+| 模型选择 codex.model → `-m` | `Desktop 界面/配置选择模型` | 已接入 | cli.mjs:262 → native-cli.mjs:430；实测 argv 含 `-m gpt-6.1-sol`（首轮与 resume 都有） | P0 |
+| reasoningEffort | `Desktop 界面/配置` | 已接入 | cli.mjs 读 `codex.reasoningEffort` → native-cli 在 `-m` 之后追加 `-c model_reasoning_effort="<值>"`（首轮与 resume 都有）；非法值 warn 后忽略，不影响启动 | P1 |
+| sandbox / approvalPolicy / 代理 / extraArgs | `Desktop 由原生会话管理` | 已接入 | native-cli.mjs:425-435, 116-125；桌面无对应配置项，属 CLI 专有能力 | P1 |
 
 ## 二、高优先项实测记录
 
 ### 1. 模型参数：`codex.model` 是否真的进 `codex exec -m`
 
-**实测（假 codex 脚本记录 argv）**。配置 `codex.model=gpt-6.1-sol`、`codex.reasoningEffort=medium`，起一个 `--port 0` 的隔离实例（`CODEXWORKER_STATE_DIR` 指到 scratch），发两轮 `/turn`：
+**实测（假 codex 脚本记录 argv）**。配置 `codex.model=gpt-6.1-sol`、`codex.reasoningEffort=max`，起一个 `--port 0` 的隔离实例（`CODEXWORKER_STATE_DIR` 指到 scratch），发两轮 `/turn`：
 
 ```
-exec --skip-git-repo-check --json --sandbox workspace-write -c approval_policy="never" -m gpt-6.1-sol -
-exec resume 11111111-1111-4111-8111-111111111111 --skip-git-repo-check --json -c approval_policy="never" -c sandbox_mode="workspace-write" -m gpt-6.1-sol -
+exec --skip-git-repo-check --json --sandbox workspace-write -c approval_policy="never" -m gpt-6.1-sol -c model_reasoning_effort="max" -
+exec resume 11111111-1111-4111-8111-111111111111 --skip-git-repo-check --json -c approval_policy="never" -c sandbox_mode="workspace-write" -m gpt-6.1-sol -c model_reasoning_effort="max" -
 ```
 
-- `codex.model` **已接入**：首轮和 resume 都带 `-m`（`cli.mjs:261` → `native-cli.mjs:412`）。
-- `codex.reasoningEffort` **未接入**：`native-cli.mjs` 没有这个字段，argv 里没有任何 `model_reasoning_effort`；`cli.mjs:250-266` 也没有把它传进 adapter。配置里写了等于没写。
+- `codex.model` **已接入**：首轮和 resume 都带 `-m`（`cli.mjs` → `native-cli.mjs` `#sharedArgs`）。
+- `codex.reasoningEffort` **已接入**：`codex exec` 没有专用 flag，值以 `-c model_reasoning_effort="<值>"` 追加在 `-m` 之后，首轮与 resume 共用 `#sharedArgs`；空值不传，非法值 `warn reasoning_effort_invalid` 后忽略。回归用例在 `tests/native-cli.test.mjs`（max / 未配置 / 非法值 + 真实 cli.mjs 启动两条 argv 路径）。
 - 线上 `/health` 的 `nativeCli.model` 也是 `gpt-6.1-sol`，`tokenStreaming: false`。
 
 ### 2. 流式进度：是否真的 1.5–2s 更新同一张卡
@@ -190,7 +190,7 @@ PATCH /manager/sessions/<id> {"alias":"x"} → 404
 
 6. **入站持久化与幂等（P1）**。现在 `seen` 是内存 Map、队列是内存 Promise 链：进程重启会重跑同一条消息，崩溃会丢已 ACK 的消息。把桌面的 `feishu-inbox.json` + `feishuReceipts` 思路搬过来即可（JSON + 原子 rename，key 用 `feishuMessageId()` 的稳定 digest）。这一项不增加新功能，但决定“敢不敢让它跑长任务”。
 
-7. **参数级补齐：reasoningEffort / fork / compact（P1–P2）**。`reasoningEffort` 只需在 `cli.mjs` 读 `codex.reasoningEffort`、在 `#sharedArgs` 里 `-c model_reasoning_effort="..."`；`fork` 用现成的 `codex exec fork <id>`；`compact` 先确认 `codex exec` 是否有对应子命令，没有就维持诚实的 501。这三项都属“配置里写了但没生效”或“CLI 明明有能力却报 501”，补齐成本低、观感提升大。
+7. **参数级补齐：reasoningEffort / fork / compact（P1–P2）**。`reasoningEffort` 已完成（`cli.mjs` 读 `codex.reasoningEffort`，`#sharedArgs` 在 `-m` 后追加 `-c model_reasoning_effort="..."`）；`fork` 用现成的 `codex exec fork <id>`；`compact` 先确认 `codex exec` 是否有对应子命令，没有就维持诚实的 501。这三项都属“配置里写了但没生效”或“CLI 明明有能力却报 501”，补齐成本低、观感提升大。
 
 8. **运维面：上报/心跳/公告/热重载/lease/ingress（P2）**。这些是桌面为“多设备 + 长期托管”长出来的，CLI 若只作为本机单实例桥，可以最后做。优先做 `writer lease`（防两个实例写同一 stateDir）和 `xiliu` 上报/心跳（Hermes 侧的可观测性）；`/bridge/runtime` 热重载和 Hermes ingress 可以等 CLI 真的承担多设备接入时再说。
 

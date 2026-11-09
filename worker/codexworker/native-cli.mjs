@@ -23,6 +23,20 @@ const SESSION_ID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 const DEFAULT_SANDBOX = "workspace-write";
 const MAX_EVENTS = 500;
 
+// `codex exec` has no dedicated --reasoning-effort flag; the value travels as
+// a config override: `-c model_reasoning_effort="<value>"`. Anything else is a
+// config typo, so it is warned about and dropped instead of failing startup.
+export const REASONING_EFFORTS = Object.freeze(["low", "medium", "high", "xhigh", "max"]);
+
+export function normalizeReasoningEffort(value, logger = () => {}) {
+  if (value == null) return null;
+  const text = String(value).trim().toLowerCase();
+  if (!text) return null;
+  if (REASONING_EFFORTS.includes(text)) return text;
+  logger("warn", "reasoning_effort_invalid", { value: String(value), allowed: REASONING_EFFORTS.join("|") });
+  return null;
+}
+
 export function expandHome(value) {
   if (typeof value !== "string") return value;
   if (value === "~") return os.homedir();
@@ -273,10 +287,13 @@ export class CliNativeAdapter {
     this.sandbox = options.sandbox === undefined ? DEFAULT_SANDBOX : options.sandbox;
     this.approvalPolicy = options.approvalPolicy === undefined ? "never" : options.approvalPolicy;
     this.model = options.model ?? null;
+    this.logger = options.logger ?? (() => {});
+    // Validated once, at construction: an unknown effort is a config typo, so it
+    // warns and degrades to "no override" rather than failing the whole bridge.
+    this.reasoningEffort = normalizeReasoningEffort(options.reasoningEffort, this.logger);
     this.extraArgs = Array.isArray(options.extraArgs) ? options.extraArgs.map(String) : [];
     this.proxy = options.proxy ?? null;
     this.env = options.env ?? process.env;
-    this.logger = options.logger ?? (() => {});
     this.statePath = path.join(this.stateDir, "native-cli-state.json");
     this.state = { version: 1, seq: 0, threads: {} };
     this.events = [];
@@ -306,7 +323,8 @@ export class CliNativeAdapter {
     return { available: Boolean(this.available), backend: "cli", codexBin: this.codexBin ?? null,
       codexVersion: this.codexVersion ?? null, codexHome: this.codexHome,
       tracks: Object.keys(this.state.threads).length, activeTurns: this.running.size,
-      sandbox: this.sandbox, model: this.model, turnTimeoutMs: this.turnTimeoutMs,
+      sandbox: this.sandbox, model: this.model, reasoningEffort: this.reasoningEffort,
+      turnTimeoutMs: this.turnTimeoutMs,
       tokenStreaming: false };
   }
 
@@ -410,6 +428,9 @@ export class CliNativeAdapter {
     // `codex exec resume` has no --sandbox flag; use the config override.
     if (resume && this.sandbox) args.push("-c", `sandbox_mode="${this.sandbox}"`);
     if (this.model) args.push("-m", this.model);
+    // exec has no --reasoning-effort flag; the model override is the only hook.
+    // Both the fresh and the resume path build argv through #sharedArgs.
+    if (this.reasoningEffort) args.push("-c", `model_reasoning_effort="${this.reasoningEffort}"`);
     args.push(...this.extraArgs);
     return args;
   }
