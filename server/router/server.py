@@ -2,7 +2,8 @@
 """mowu-router — the worker / task / subscription registry for Hermes.
 
 Implements docs/ROUTER.md ① (workers) ② (tasks + result + notify) ③
-(subscriptions with real trigger forwarding) at 127.0.0.1:8790.
+(subscriptions with real trigger forwarding) and ⑨ (chat eavesdropping:
+store-only, never forwarded) at 127.0.0.1:8790.
 
 The router is deliberately dumb:
 
@@ -46,9 +47,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.parse import parse_qs, unquote, urlencode, urlparse
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8790
 DEFAULT_DB = "~/.hermes/router.db"
@@ -65,6 +66,7 @@ LOG_BACKUP_COUNT = 3
 TASK_STATES = ("queued", "running", "done", "failed", "cancelled")
 TERMINAL_STATES = ("done", "failed", "cancelled")
 URGENCIES = ("urgent", "normal")
+CHAT_DIRECTIONS = ("in", "out")
 PING_INTERVAL = 15.0
 
 log = logging.getLogger("router")
@@ -191,6 +193,24 @@ CREATE TABLE IF NOT EXISTS subscription_cursors (
     last_id      INTEGER DEFAULT 0,
     updated_at   REAL
 );
+
+-- 聊天旁听 (0.3.0): 只存不发。Router never forwards these rows anywhere;
+-- Hermes pulls /chat/{worker}/summary to see what was just said.
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    worker     TEXT NOT NULL,
+    direction  TEXT NOT NULL,
+    text       TEXT,
+    session_id TEXT,
+    ts         REAL,
+    message_id TEXT,
+    meta       TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_chat_worker_id ON chat_messages(worker, id);
+CREATE INDEX IF NOT EXISTS idx_chat_worker_ts ON chat_messages(worker, ts);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_dedupe
+    ON chat_messages(worker, message_id, direction)
+    WHERE message_id IS NOT NULL AND message_id <> '';
 """
 
 
@@ -677,6 +697,93 @@ class RouterStore:
                 "SELECT COUNT(*) AS c FROM subscriptions"
                 " WHERE worker=? AND active=1", (worker,)).fetchone()["c"])
 
+    # -- chat messages (store-only eavesdropping) ------------------------ #
+    @staticmethod
+    def _chat_dict(row: sqlite3.Row) -> Dict[str, Any]:
+        return {
+            "id": int(row["id"]),
+            "worker": row["worker"],
+            "direction": row["direction"],
+            "text": row["text"],
+            "session_id": row["session_id"],
+            "ts": row["ts"],
+            "message_id": row["message_id"],
+        }
+
+    def add_chat_message(self, worker: str, direction: str, text: str,
+                         session_id: Optional[str] = None,
+                         ts: Optional[float] = None,
+                         message_id: Optional[str] = None,
+                         meta: Optional[str] = None
+                         ) -> Tuple[int, bool]:
+        """Insert one row; same (worker, message_id, direction) is a no-op."""
+        stamp = time.time() if ts is None else float(ts)
+        with self._lock:
+            if message_id:
+                row = self._conn.execute(
+                    "SELECT id FROM chat_messages WHERE worker=?"
+                    " AND message_id=? AND direction=? ORDER BY id LIMIT 1",
+                    (worker, message_id, direction)).fetchone()
+                if row is not None:
+                    return int(row["id"]), True
+            cur = self._conn.execute(
+                "INSERT INTO chat_messages (worker, direction, text,"
+                " session_id, ts, message_id, meta)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (worker, direction, text, session_id, stamp, message_id, meta))
+            return int(cur.lastrowid or 0), False
+
+    def list_chat_messages(self, worker: str, since_id: Optional[int] = None,
+                           since_ts: Optional[float] = None,
+                           limit: int = 50,
+                           direction: Optional[str] = None
+                           ) -> List[Dict[str, Any]]:
+        """Oldest-first window.  Without a cursor: the newest ``limit`` rows."""
+        where = ["worker=?"]
+        params: List[Any] = [worker]
+        if since_id is not None:
+            where.append("id > ?")
+            params.append(int(since_id))
+        if since_ts is not None:
+            where.append("ts >= ?")
+            params.append(float(since_ts))
+        if direction:
+            where.append("direction=?")
+            params.append(direction)
+        clause = " AND ".join(where)
+        with self._lock:
+            if since_id is None and since_ts is None:
+                sql = ("SELECT * FROM (SELECT * FROM chat_messages"
+                       " WHERE " + clause + " ORDER BY id DESC LIMIT ?)"
+                       " ORDER BY id ASC")
+            else:
+                sql = ("SELECT * FROM chat_messages WHERE " + clause +
+                       " ORDER BY id ASC LIMIT ?")
+            rows = self._conn.execute(
+                sql, tuple(params + [int(limit)])).fetchall()
+        return [self._chat_dict(row) for row in rows]
+
+    def chat_summary(self, worker: str, minutes: int) -> Dict[str, Any]:
+        since_ts = time.time() - float(minutes) * 60.0
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS total,"
+                " COALESCE(SUM(direction='in'), 0) AS in_count,"
+                " COALESCE(SUM(direction='out'), 0) AS out_count"
+                " FROM chat_messages WHERE worker=? AND ts>=?",
+                (worker, since_ts)).fetchone()
+            last_row = self._conn.execute(
+                "SELECT * FROM chat_messages WHERE worker=? AND ts>=?"
+                " ORDER BY id DESC LIMIT 1", (worker, since_ts)).fetchone()
+        last = self._chat_dict(last_row) if last_row is not None else None
+        return {
+            "since": since_ts,
+            "count": int(row["total"] or 0),
+            "in": int(row["in_count"] or 0),
+            "out": int(row["out_count"] or 0),
+            "last": last,
+        }
+
     def close(self) -> None:
         with self._lock:
             try:
@@ -1078,6 +1185,15 @@ class RouterHandler(BaseHTTPRequestHandler):
             raise BadRequest("name too long")
         return name
 
+    @staticmethod
+    def _worker_path_param(raw: str) -> str:
+        name = unquote(raw).strip()
+        if not name:
+            raise BadRequest("worker is required")
+        if len(name) > 128:
+            raise BadRequest("worker too long")
+        return name
+
     def _int_param(self, qs: Dict[str, List[str]], name: str,
                    default: Optional[int] = None) -> Optional[int]:
         raw = qs.get(name, [None])[0]
@@ -1106,7 +1222,9 @@ class RouterHandler(BaseHTTPRequestHandler):
                     "endpoints": ["/health", "/workers", "/tasks", "/stream",
                                   "/register", "/heartbeat", "/result",
                                   "/notice", "/subscriptions",
-                                  "/subscriptions/pending"],
+                                  "/subscriptions/pending", "/chat/log",
+                                  "/chat/{worker}/messages",
+                                  "/chat/{worker}/summary"],
                 })
             if parts == ["stream"]:
                 return self._serve_stream(qs)
@@ -1121,6 +1239,12 @@ class RouterHandler(BaseHTTPRequestHandler):
                 return self._send_json(*self._subscriptions_pending(qs))
             if parts == ["subscriptions"]:
                 return self._send_json(200, self._subscriptions_list(qs))
+            if (len(parts) == 3 and parts[0] == "chat"
+                    and parts[2] in ("messages", "summary")):
+                worker = self._worker_path_param(parts[1])
+                if parts[2] == "messages":
+                    return self._send_json(200, self._chat_messages(qs, worker))
+                return self._send_json(200, self._chat_summary(qs, worker))
             self._send_json(404, {"ok": False, "error": "not found"})
         except Unauthorized:
             self._send_json(401, {"ok": False, "error": "unauthorized"})
@@ -1149,6 +1273,8 @@ class RouterHandler(BaseHTTPRequestHandler):
                 return self._send_json(*self._result(body))
             if parts == ["notice"]:
                 return self._send_json(*self._notice(body))
+            if parts == ["chat", "log"]:
+                return self._send_json(200, self._chat_log(body))
             if parts == ["tasks"]:
                 return self._send_json(*self._task_create(body))
             if len(parts) == 3 and parts[0] == "tasks" and parts[2] == "cancel":
@@ -1246,6 +1372,94 @@ class RouterHandler(BaseHTTPRequestHandler):
             "1", "true", "yes")
         subs = self.server.store.list_subscriptions(worker, active_only)
         return {"ok": True, "count": len(subs), "subscriptions": subs}
+
+    # -- chat endpoints (store only; nothing is forwarded) --------------- #
+    def _chat_log(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        worker = str(body.get("worker") or "").strip()
+        if not worker:
+            raise BadRequest("worker is required")
+        if len(worker) > 128:
+            raise BadRequest("worker too long")
+        direction = str(body.get("direction") or "").strip().lower()
+        if direction not in CHAT_DIRECTIONS:
+            raise BadRequest("direction must be in or out")
+        text = body.get("text")
+        if text is None or not str(text).strip():
+            raise BadRequest("text is required")
+        text = str(text)
+        if len(text) > 100000:
+            raise BadRequest("text too long (max 100000 chars)")
+        session_id = body.get("session_id")
+        if session_id is not None:
+            session_id = str(session_id).strip() or None
+            if session_id is not None and len(session_id) > 128:
+                raise BadRequest("session_id too long")
+        message_id = body.get("message_id")
+        if message_id is not None:
+            message_id = str(message_id).strip() or None
+            if message_id is not None and len(message_id) > 200:
+                raise BadRequest("message_id too long")
+        ts = body.get("ts")
+        if ts is not None:
+            ts = parse_epoch(ts, "ts")
+        meta = body.get("meta")
+        if meta is not None:
+            if isinstance(meta, (dict, list)):
+                meta = json.dumps(meta, ensure_ascii=False)
+            elif not isinstance(meta, str):
+                raise BadRequest("meta must be an object, list or string")
+            if len(meta) > 16000:
+                raise BadRequest("meta too large (max 16000 chars)")
+        msg_id, duplicate = self.server.store.add_chat_message(
+            worker, direction, text, session_id, ts, message_id, meta)
+        log.info("chat %s id=%d worker=%s direction=%s duplicate=%s",
+                 "duplicate" if duplicate else "logged", msg_id, worker,
+                 direction, duplicate)
+        return {"ok": True, "id": msg_id, "duplicate": duplicate}
+
+    def _chat_messages(self, qs: Dict[str, List[str]],
+                       worker: str) -> Dict[str, Any]:
+        since_raw = (qs.get("since", [""])[0] or "").strip()
+        since_id: Optional[int] = None
+        since_ts: Optional[float] = None
+        if since_raw:
+            try:
+                since_val = float(since_raw)
+            except ValueError:
+                since_ts = parse_epoch(since_raw, "since")
+            else:
+                # Small integers are message ids (cursor); ISO/epoch-looking
+                # values (>= 1e9 or a decimal point) are timestamps.
+                if "." in since_raw or since_val >= 1e9:
+                    since_ts = since_val
+                else:
+                    since_id = int(since_val)
+        limit = self._int_param(qs, "limit", 50)
+        if limit is None:
+            limit = 50
+        if limit < 1 or limit > 500:
+            raise BadRequest("limit must be between 1 and 500")
+        direction = (qs.get("direction", [""])[0] or "").strip().lower() or None
+        if direction is not None and direction not in CHAT_DIRECTIONS:
+            raise BadRequest("direction must be in or out")
+        messages = self.server.store.list_chat_messages(
+            worker, since_id=since_id, since_ts=since_ts, limit=limit,
+            direction=direction)
+        return {"ok": True, "worker": worker, "count": len(messages),
+                "messages": messages}
+
+    def _chat_summary(self, qs: Dict[str, List[str]],
+                      worker: str) -> Dict[str, Any]:
+        minutes = self._int_param(qs, "minutes", 60)
+        if minutes is None:
+            minutes = 60
+        if minutes < 1 or minutes > 525600:
+            raise BadRequest("minutes must be between 1 and 525600")
+        summary = self.server.store.chat_summary(worker, minutes)
+        return {"ok": True, "worker": worker, "minutes": minutes,
+                "since": summary["since"], "count": summary["count"],
+                "in": summary["in"], "out": summary["out"],
+                "last": summary["last"]}
 
     # -- POST endpoints -------------------------------------------------- #
     def _register(self, body: Dict[str, Any]) -> Dict[str, Any]:

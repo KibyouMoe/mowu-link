@@ -194,3 +194,41 @@ trigger
 - trigger → Router 的转发端口与鉴权（复用 trigger token / 单独一把 router token）
 - worker 注册鉴权（首次注册发 token，之后带）
 - 积压上限（暂定 128，与 trigger 一致）
+
+---
+
+## 九、聊天旁听（只存不发，0.3.0）
+
+Worker 与训练员的聊天，除了走 worker 自己的会话，再逐条抄一份给 Router。
+**Router 只存不发**：不写 trigger、不发 notify、不叫醒 Hermes，也不解释内容。
+谁想知道“刚才聊了啥”，自己来读。
+
+```sql
+chat_messages(
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  worker     TEXT,
+  direction  TEXT,                  -- in=训练员/对方说的，out=worker 说的
+  session_id TEXT,                  -- 可选：worker 自己的会话 id
+  ts         REAL,                  -- 消息时间；缺省为入库时间
+  text       TEXT,
+  message_id TEXT,                  -- 可选：来源侧消息 id，用于幂等
+  meta       TEXT                   -- 可选：JSON，原样存
+)
+```
+
+```
+POST /chat/log   {worker, direction:"in"|"out", text, session_id?, ts?, message_id?, meta?}
+                 → {ok, id, duplicate}
+GET  /chat/{worker}/messages?since=&limit=50&direction=   → 按 id 升序的列表
+GET  /chat/{worker}/summary?minutes=60                    → {in, out, count, last}
+```
+
+- 幂等键是 **(worker, message_id, direction)**：重复写入返回原 `id` 且
+  `duplicate:true`，不新增行；没有 `message_id` 就不去重。同一 `message_id`
+  换个方向算另一条。
+- `messages` 不带 `since` 时取**最近** `limit` 条（仍按 id 升序返回）；
+  带 `since` 时取 `id > since` 的**最早** `limit` 条，供游标轮询不漏消息。
+- `summary` 是 Hermes 的快速判断入口：窗口内 in/out 各几条、最后一条是什么。
+- 旁听不要求 worker 已注册，也不改 `workers` 表——记录聊天不等于“这个 worker 在线”。
+
+**一句话**：任务是活要攒，订阅是听不留，聊天是账只记。

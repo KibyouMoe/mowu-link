@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""selftest_router.py — real end-to-end test for mowu-router 0.2.0.
+"""selftest_router.py — real end-to-end test for mowu-router 0.3.0.
 
 Starts two real processes, no in-process shortcuts:
 
@@ -19,6 +19,7 @@ Then drives a fake worker over a real SSE connection and exercises:
   backlog cap 128 → 129th refused with backlog_full
   POST /notice normal/urgent → trigger notify/event, minute-hash idempotence
   subscriptions → trigger registration → pending pull → ACK → delete closes
+  chat: POST /chat/log → GET messages (dedupe/filters) → summary counts
   SSE disconnect → subscriptions purged locally and at trigger
   trigger down → POST /subscriptions 502 + rollback, /notice ok:false (no 5xx)
   single-instance flock, token file generation/permissions, auth
@@ -355,7 +356,7 @@ def run(work: Path, checker: Checker) -> None:
         checker.check(
             "GET /health (no token): ok, version, workers, tasks",
             status == 200 and health.get("ok") is True
-            and health.get("version") == "0.2.0"
+            and health.get("version") == "0.3.0"
             and health.get("workers") == 0 and health.get("tasks") == 0,
             "status=%s body=%s" % (status, health))
 
@@ -920,6 +921,179 @@ def run(work: Path, checker: Checker) -> None:
             after_reconnect.get("count") == 0,
             "subscriptions=%s" % (after_reconnect,))
         worker3.stop()
+
+        # ---------------------------------------------------------------- #
+        # 8d. chat eavesdropping: store-only log, dedupe, filters, summary
+        # ---------------------------------------------------------------- #
+        chat_worker = "旁听工"
+        chat_now = time.time()
+        base_msgs = [
+            ("in", "训练员：在吗", chat_now - 600, "s-1", "cm-1",
+             {"from": "trainer"}),
+            ("out", "worker：在", chat_now - 595, "s-1", "cm-2", None),
+            ("in", "训练员：看下日志", chat_now - 590, "s-1", "cm-3", None),
+            ("out", "worker：两小时前的旧话", chat_now - 7200, "s-0",
+             "cm-4", None),
+        ]
+        chat_ids = []
+        chat_ok = True
+        chat_detail = []
+        for direction, text, ts, session_id, message_id, meta in base_msgs:
+            payload = {"worker": chat_worker, "direction": direction,
+                       "text": text, "session_id": session_id,
+                       "ts": ts, "message_id": message_id}
+            if meta is not None:
+                payload["meta"] = meta
+            status_c, logged = http("POST", BASE + "/chat/log", payload, token)
+            chat_ids.append(logged.get("id"))
+            chat_ok = chat_ok and status_c == 200 and logged.get("ok") is True \
+                and logged.get("duplicate") is False and isinstance(
+                    logged.get("id"), int)
+            chat_detail.append((status_c, logged))
+        checker.check(
+            "POST /chat/log writes in/out rows, ids ascending, duplicate:false",
+            chat_ok and all(a < b for a, b in zip(chat_ids, chat_ids[1:])),
+            "ids=%s detail=%s" % (chat_ids, chat_detail))
+
+        status_m, listing = http(
+            "GET", BASE + "/chat/%s/messages" % quote(chat_worker), token=token)
+        msgs = listing.get("messages") or []
+        first = msgs[0] if msgs else {}
+        expected_keys = {"id", "worker", "direction", "text", "session_id",
+                         "ts", "message_id"}
+        conn = sqlite3.connect(str(router_db))
+        try:
+            meta_row = conn.execute(
+                "SELECT meta FROM chat_messages WHERE id=?",
+                (chat_ids[0],)).fetchone()
+        finally:
+            conn.close()
+        meta_ok = False
+        try:
+            meta_ok = json.loads(meta_row[0] or "{}") == {"from": "trainer"}
+        except (TypeError, ValueError):
+            meta_ok = False
+        checker.check(
+            "GET /chat/{worker}/messages: write/read consistent, exact fields",
+            status_m == 200 and listing.get("count") == 4 and len(msgs) == 4
+            and [m["id"] for m in msgs] == chat_ids
+            and set(first.keys()) == expected_keys
+            and first.get("worker") == chat_worker
+            and first.get("direction") == "in"
+            and first.get("text") == "训练员：在吗"
+            and first.get("session_id") == "s-1"
+            and abs(float(first.get("ts") or 0) - (chat_now - 600)) < 0.01
+            and first.get("message_id") == "cm-1" and meta_ok,
+            "status=%s listing=%s meta=%s" % (status_m, listing, meta_row))
+
+        status_d, dup = http("POST", BASE + "/chat/log", {
+            "worker": chat_worker, "direction": "out", "text": "worker：在",
+            "session_id": "s-1", "ts": chat_now - 595, "message_id": "cm-2",
+        }, token)
+        status_l2, listing2 = http(
+            "GET", BASE + "/chat/%s/messages" % quote(chat_worker), token=token)
+        checker.check(
+            "POST /chat/log duplicate (worker+message_id+direction): id reused, "
+            "no new row",
+            status_d == 200 and dup.get("duplicate") is True
+            and dup.get("id") == chat_ids[1]
+            and listing2.get("count") == 4
+            and [m["id"] for m in listing2.get("messages", [])] == chat_ids,
+            "status=%s dup=%s count=%s" % (status_d, dup,
+                                           listing2.get("count")))
+
+        status_x, cross = http("POST", BASE + "/chat/log", {
+            "worker": chat_worker, "direction": "in",
+            "text": "方向不同但 message_id 相同", "ts": chat_now - 300,
+            "message_id": "cm-2",
+        }, token)
+        chat_ids.append(cross.get("id"))
+        checker.check(
+            "POST /chat/log same message_id but other direction -> new row",
+            status_x == 200 and cross.get("duplicate") is False
+            and cross.get("id") not in chat_ids[:-1],
+            "status=%s body=%s ids=%s" % (status_x, cross, chat_ids))
+
+        status_lim, limited = http(
+            "GET", BASE + "/chat/%s/messages?limit=2" % quote(chat_worker),
+            token=token)
+        status_dir, only_out = http(
+            "GET", BASE + "/chat/%s/messages?direction=out"
+            % quote(chat_worker), token=token)
+        status_sin, since_two = http(
+            "GET", BASE + "/chat/%s/messages?since=%s&limit=2"
+            % (quote(chat_worker), chat_ids[0]), token=token)
+        status_sid, since_dir = http(
+            "GET", BASE + "/chat/%s/messages?since=%s&direction=out"
+            % (quote(chat_worker), chat_ids[2]), token=token)
+        dup_ids = [m["id"] for m in limited.get("messages") or []]
+        checker.check(
+            "GET messages: limit (newest N, ascending) + direction filter",
+            status_lim == 200 and dup_ids == chat_ids[3:]
+            and status_dir == 200 and only_out.get("count") == 2
+            and [m["id"] for m in only_out.get("messages", [])]
+            == [chat_ids[1], chat_ids[3]]
+            and all(m["direction"] == "out"
+                    for m in only_out.get("messages", [])),
+            "limit=%s dir=%s" % (limited, only_out))
+        checker.check(
+            "GET messages: since=<id> cursor + since & direction combined",
+            status_sin == 200 and [m["id"] for m in since_two.get("messages", [])]
+            == [chat_ids[1], chat_ids[2]]
+            and status_sid == 200
+            and [m["id"] for m in since_dir.get("messages", [])]
+            == [chat_ids[3]],
+            "since=%s since_out=%s" % (since_two, since_dir))
+
+        status_ts, ts_filtered = http(
+            "GET", BASE + "/chat/%s/messages?since=%.3f"
+            % (quote(chat_worker), chat_now - 1000), token=token)
+        checker.check(
+            "GET messages: since=<epoch ts> keeps only messages in the window",
+            status_ts == 200 and ts_filtered.get("count") == 4
+            and chat_ids[3] not in [m["id"] for m in ts_filtered["messages"]],
+            "status=%s count=%s ids=%s"
+            % (status_ts, ts_filtered.get("count"),
+               [m["id"] for m in ts_filtered.get("messages", [])]))
+
+        status_sum, summary = http(
+            "GET", BASE + "/chat/%s/summary?minutes=60" % quote(chat_worker),
+            token=token)
+        status_sum2, summary2 = http(
+            "GET", BASE + "/chat/%s/summary?minutes=180" % quote(chat_worker),
+            token=token)
+        status_none, empty_sum = http(
+            "GET", BASE + "/chat/%s/summary?minutes=60" % quote("没人"),
+            token=token)
+        checker.check(
+            "GET /chat/{worker}/summary: in/out counts + last, minutes window",
+            status_sum == 200 and summary.get("minutes") == 60
+            and summary.get("count") == 4 and summary.get("in") == 3
+            and summary.get("out") == 1
+            and (summary.get("last") or {}).get("id") == chat_ids[-1]
+            and status_sum2 == 200 and summary2.get("count") == 5
+            and summary2.get("in") == 3 and summary2.get("out") == 2,
+            "60=%s 180=%s" % (summary, summary2))
+        checker.check(
+            "GET /chat/{worker}/summary: unknown worker -> zeros, last null",
+            status_none == 200 and empty_sum.get("count") == 0
+            and empty_sum.get("in") == 0 and empty_sum.get("out") == 0
+            and empty_sum.get("last") is None,
+            "status=%s body=%s" % (status_none, empty_sum))
+
+        status_bad, bad_dir = http(
+            "GET", BASE + "/chat/%s/messages?direction=sideways"
+            % quote(chat_worker), token=token)
+        status_badlog, bad_log = http("POST", BASE + "/chat/log", {
+            "worker": chat_worker, "direction": "sideways", "text": "x",
+        }, token)
+        checker.check(
+            "chat validation: bad direction -> 400 on log and messages",
+            status_bad == 400 and "direction" in (bad_dir.get("error") or "")
+            and status_badlog == 400
+            and "direction" in (bad_log.get("error") or ""),
+            "get=%s/%s post=%s/%s"
+            % (status_bad, bad_dir, status_badlog, bad_log))
 
         # ---------------------------------------------------------------- #
         # 9. final shape / counts

@@ -1,10 +1,11 @@
-# mowu-router 0.2.0
+# mowu-router 0.3.0
 
 `docs/ROUTER.md` 的 ①②③ 落地：worker 在线表、任务派发/收回、订阅表，
-**订阅转发真的接上 trigger 了**（0.1.0 是 stub）。**④ worker SDK 不在本次范围**。
+**订阅转发真的接上 trigger 了**（0.1.0 是 stub）；0.3.0 再加**聊天旁听**
+（只存不发，不打扰 Hermes）。**④ worker SDK 不在本次范围**。
 
-一句话：Router 只搬运事实（谁在线、谁忙、每个 worker 积压几条、谁在听什么），
-不懂能力、不懂任务语义；语义判断留在 Hermes。
+一句话：Router 只搬运事实（谁在线、谁忙、每个 worker 积压几条、谁在听什么、
+刚才聊了啥），不懂能力、不懂任务语义；语义判断留在 Hermes。
 
 产物：
 
@@ -129,6 +130,44 @@ event_id = "notice:" + sha256(worker + "\n" + text + "\n" + 当前分钟)[:24]
 
 `kinds` 为空数组表示该 source 的全部 kind；支持列表或逗号分隔字符串。
 
+### 聊天旁听（0.3.0 新增，只存不发）
+
+Worker（或替它记录的进程）把双向聊天逐条抄给 Router。Router **只落库**：
+不写 trigger、不发 notify、不叫醒 Hermes；Hermes 想看时自己来读。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/chat/log` | `{worker, direction:"in"\|"out", text, session_id?, ts?, message_id?, meta?}` → `{ok, id, duplicate}` |
+| GET | `/chat/{worker}/messages?since=&limit=50&direction=` | 按 id 升序；字段 `id/worker/direction/text/session_id/ts/message_id` |
+| GET | `/chat/{worker}/summary?minutes=60` | `{ok, worker, minutes, since, count, in, out, last}` |
+
+表结构：
+
+```sql
+chat_messages(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, worker TEXT, direction TEXT,
+  text TEXT, session_id TEXT, ts REAL, message_id TEXT, meta TEXT
+)
+```
+
+语义：
+
+- **幂等**：同 `(worker, message_id, direction)` 重复写入返回原 `id` +
+  `duplicate:true`，不新增行。`message_id` 为空则不参与去重（每次都是新行）；
+  同一个 `message_id` 换个方向（in ↔ out）算另一条。
+- **`ts`** 省略时用服务端当前时间；接受 epoch 秒或 ISO-8601 字符串。
+- **`limit`** 1–500，默认 50。不带 `since` 时返回**最近** `limit` 条（仍按 id
+  升序），适合“看刚才聊了啥”；带 `since` 时返回 `id > since` 的**最早**
+  `limit` 条，适合游标轮询、不丢消息。`since` 也接受 epoch/ISO 时间
+  （≥1e9 或带小数点视为时间戳），此时语义是 `ts >= since`。
+- **`direction`** 只接受 `in`（训练员/对方说的）或 `out`（worker 说的）。
+- **`summary`** 的 `minutes` 默认 60；`in`/`out` 是窗口内条数，`last` 是窗口内
+  最后一条完整消息，没有则 `null`、计数为 0。
+- **不校验 worker 是否已注册**，也不写 `workers` 表、不改 `last_seen`：
+  记录聊天不等于“这个 worker 在线”。
+- `meta` 原样落库（对象/数组序列化为 JSON 字符串，字符串照存，≤16000 字符）；
+  `messages` 响应不返回 `meta`，需要时直接查库。
+
 ---
 
 ## 三、派活：三态与状态机
@@ -169,7 +208,7 @@ queued ──dispatch──> running ──/result done──> done
 - 取消运行中的任务会立即释放 `busy` 并尝试派下一条；worker 之后迟到的
   `/result` 会被忽略（任务已 `cancelled`，返回 `duplicate:true`）。
 - `urgency` 只记录并透传给 worker（`urgent` / `normal`），排队仍是 FIFO；
-  `deadline_s` 落库并算出 `deadline_at`，0.2.0 不做超时回收。
+  `deadline_s` 落库并算出 `deadline_at`，0.3.0 仍不做超时回收。
 
 ---
 
@@ -307,6 +346,7 @@ GET /subscriptions/pending?worker=波旁&limit=50
 | §二 积压上限 128 | 完成 | `--backlog-max`，超限 429 |
 | §五 结果回流 | 完成 | 见第五节 |
 | worker → Hermes 递话 | 0.2.0 新增 | `POST /notice` |
+| ⑨ 聊天旁听（只存不发） | 0.3.0 新增 | `chat_messages` 表 + `_chat_log` / `_chat_messages` / `_chat_summary` |
 
 ---
 
@@ -323,7 +363,7 @@ ROUTER_TEST_PORT=8799 /usr/bin/python3 server/router/selftest_router.py
 临时库/token/锁/日志都在 `tempfile.mkdtemp()` 里，不碰生产
 `~/.hermes/router.db` 和 `~/.hermes/trigger.db`。
 
-覆盖（当前 **46/46 PASS**）：
+覆盖（当前 **56/56 PASS**）：
 
 1. token 生成（64 hex，0600）、`/health` 形状、无 token → 401、单实例 flock
 2. register → SSE 上线 → 心跳注释行 → 空闲立即派活（200 dispatched）
@@ -343,6 +383,10 @@ ROUTER_TEST_PORT=8799 /usr/bin/python3 server/router/selftest_router.py
 13. trigger 挂掉：`POST /subscriptions` → 502 且表回滚；
     `POST /notice` → 200 `ok:false`（不是 5xx）
 14. 最终 `/health` 计数、trigger notify 条数、`GET /tasks?limit=500` 取回 128 条
+15. 聊天旁听：写入/读回字段一致（含 `meta` 落库）→ 同
+    `(worker, message_id, direction)` 重复 `duplicate:true` 且不新增 →
+    同 `message_id` 换方向是新行 → `limit` / `since`（id 与 epoch）/
+    `direction` 过滤 → `summary` 60/180 分钟 in/out 计数与 `last`
 
 ---
 
@@ -351,7 +395,7 @@ ROUTER_TEST_PORT=8799 /usr/bin/python3 server/router/selftest_router.py
 - **at-least-once**：断线重连会把 `running` 任务重发，worker 必须按 `task_id` 幂等；
   pending 的 ACK 失败也会重复投递。
 - **一个名字一条流**：新连接替换旧连接；不做多设备同名的负载均衡。
-- **没有 per-worker 鉴权**：0.2.0 只有一把共享 `router.token`（`ROUTER.md` §八
+- **没有 per-worker 鉴权**：0.3.0 只有一把共享 `router.token`（`ROUTER.md` §八
   的「首次注册发 token」仍待定）。
 - **urgency 不抢队**：只透传，排队 FIFO。
 - **deadline_s 不触发回收**：只记录。
@@ -363,4 +407,8 @@ ROUTER_TEST_PORT=8799 /usr/bin/python3 server/router/selftest_router.py
   `expired` 会点名）。
 - **ACK 的 receipts 成本**：trigger 的 `/ack` 会为区间内每条事件写 receipt，
   新订阅第一次 ACK 会覆盖基线之后的事件；这是 trigger 0.7.x 的既有语义。
+- **chat 只存不发**：`chat_messages` 不写 trigger、不生成 notify；Hermes 不读
+  就没有任何人被通知到。
+- **chat 没有保留策略**：0.3.0 不做 TTL/自动清理，`(worker, ts)` 索引留给后续
+  按时间窗清理。
 - **SQLite 单连接 + 进程内锁**：够 loopback 小流量用；多进程写由 flock 挡住。
