@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { publicProgress } from "../native-progress.mjs";
+import { publicProgress } from "../codex/native-progress.mjs";
 const poll = (extra = {}) => ({ thread: { id: "target", hostId: "local" }, latestTurn: { id: "turn", status: "inProgress" },
   latestAssistantMessageId: "message", latestAssistantMessage: { id: "message", turnId: "turn", phase: "commentary", text: "完整公开段落\n\n第二段" },
   latestToolMarker: { private: "never exported" }, cursor: "native-cursor", ...extra });

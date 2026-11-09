@@ -5,7 +5,7 @@ import path from "node:path";
 import os from "node:os";
 import { randomUUID } from "node:crypto";
 import { DesktopManager, PROTOCOL } from "../desktop-manager.mjs";
-import { nativeStatusInvocation } from "../native-dispatch.mjs";
+import { nativeStatusInvocation } from "../codex/native-dispatch.mjs";
 
 const id = "01a17cde-aa62-7dd2-b27d-a68088b163c2";
 const line = value => JSON.stringify(value) + "\n";

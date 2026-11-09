@@ -7,8 +7,8 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test, { after } from "node:test";
-import * as appServer from "../transport/app-server.mjs";
-import { resetNativeTransportCache, resolveNativeTransport } from "../transport/index.mjs";
+import * as appServer from "../codex/transport/app-server.mjs";
+import { resetNativeTransportCache, resolveNativeTransport } from "../codex/transport/index.mjs";
 
 process.env.CODEXWORKER_NATIVE_TRANSPORT = "app-server";
 resetNativeTransportCache();

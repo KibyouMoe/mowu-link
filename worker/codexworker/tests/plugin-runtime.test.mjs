@@ -37,7 +37,7 @@ async function fixture(t, { pollMs = 1000000 } = {}) {
   const { mkdir } = await import("node:fs/promises"); await mkdir(stateDir);
   await writeFile(path.join(source, "mcp-business.mjs"), sample);
   // Keep only a deterministic business fixture; never inherit a real pipe/config.
-  for (const name of ["desktop-manager.mjs", "feishu.mjs", "feishu-images.mjs", "feishu-image-output.mjs", "online-announcement.mjs", "question-relay.mjs", "question-cards.mjs", "native-dispatch.mjs"]) await rm(path.join(source, name));
+  for (const name of ["desktop-manager.mjs", "feishu.mjs", "feishu-images.mjs", "feishu-image-output.mjs", "online-announcement.mjs", "question-relay.mjs", "question-cards.mjs", path.join("codex", "native-dispatch.mjs")]) await rm(path.join(source, name));
   await writeFile(path.join(source, "helper.mjs"), "export const value='first';\n");
   let changes = 0;
   const runtime = new PluginRuntime({ pluginRoot: source, stateDir, pollMs,
@@ -236,7 +236,7 @@ for (const operatingMode of ["desktop-bridge", "feishu-local"]) test(`fixed load
     while (!predicate() && Date.now() < until) { await runtime.check(); await new Promise(resolve => setTimeout(resolve, 10)); }
     assert.ok(predicate(), "handoff must settle within a bounded interval under sustained polling");
   };
-  const filename = path.join(source, "native-dispatch.mjs"), original = await readFile(filename, "utf8");
+  const filename = path.join(source, "codex", "native-dispatch.mjs"), original = await readFile(filename, "utf8");
   await writeFile(filename, original + "\n// isolated hotload acceptance\n");
   await proxy.check();
   const stillOwned = await request("/health");

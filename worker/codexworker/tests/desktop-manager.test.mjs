@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { DesktopManager, PROTOCOL, publicItems } from "../desktop-manager.mjs";
-import { localHost, nativeSendSource, nativeToolInvocation, nativeToolRejection } from "../native-dispatch.mjs";
+import { localHost, nativeSendSource, nativeToolInvocation, nativeToolRejection } from "../codex/native-dispatch.mjs";
 import { escapeMarkdown, splitChunks, markdownPayload, FeishuNotifier, FeishuWebsocketClient } from "../feishu.mjs";
 import { checkContract } from "./contract-check.mjs";
 import { normalizeQuestion, questionText } from "../question-relay.mjs";

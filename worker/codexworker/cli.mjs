@@ -2,7 +2,7 @@
 // CodexWorker CLI entry.
 //
 // This is the "no Codex Desktop" launcher: it owns one `codex app-server`
-// child through transport/app-server.mjs, persists a CLI session, writes the
+// child through codex/transport/app-server.mjs, persists a CLI session, writes the
 // manager binding + local desktop config that mcp-business.mjs already reads,
 // and then starts the existing HTTP + Feishu manager unchanged.
 //
@@ -51,7 +51,7 @@ const HELP = `codexworker ${VERSION}
   CODEXWORKER_CODEX_BIN, CODEXWORKER_APP_SERVER_PROXY
 
 说明:
-  1. 本命令固定使用 transport/app-server.mjs（codex app-server JSON-RPC）。
+  1. 本命令固定使用 codex/transport/app-server.mjs（codex app-server JSON-RPC）。
   2. 主会话保存在 <stateDir>/cli-session.json，重启复用；读不到时重建。
   3. 写入 ~/.codex/state/codexworker/manager-binding.json 与
      desktop-config.local.json，再把该会话登记到 manager（飞书可直接发消息）。
@@ -266,8 +266,8 @@ async function main() {
   process.env.RUDOLF_BRIDGE_LIFECYCLE_CHILD = "1";
   process.env.RUDOLF_BRIDGE_LIFECYCLE_READY ??= "1";
 
-  const transportIndex = await import("./transport/index.mjs");
-  const appServer = await import("./transport/app-server.mjs");
+  const transportIndex = await import("./codex/transport/index.mjs");
+  const appServer = await import("./codex/transport/app-server.mjs");
   const transport = transportIndex.resolveNativeTransport();
 
   async function nativeCall(name, params = {}, timeoutMs = 30_000) {
