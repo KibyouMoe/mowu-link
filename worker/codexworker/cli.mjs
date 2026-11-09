@@ -452,7 +452,7 @@ async function main() {
     let delivery = null;
     try {
       const response = await notifier.sendMessage(text, { openId: taskBoardOpenId, receiveIdType: "open_id",
-        title: `${identity.display} · 任务看板`, onDelivery: (entry) => { delivery = entry; } });
+        title, onDelivery: (entry) => { delivery = entry; } });
       const messageId = response?.data?.message_id ?? delivery?.messageId ?? null;
       log(messageId ? "info" : "warn", "task_board_sent", { taskId, phase, messageId,
         apiCode: Number.isInteger(response?.code) ? response.code : null, deliveryPhase: delivery?.phase ?? null });
