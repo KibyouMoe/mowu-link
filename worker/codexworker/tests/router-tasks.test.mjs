@@ -56,7 +56,7 @@ test("task board speaks only for start and failure", () => {
 });
 
 test("the start line is 溪流's instruction with the task id in the title", () => {
-  assert.equal(taskBoardTitle({ phase: "start", taskId: "t-1" }), "来自超级溪流的指令（任务 t-1）");
+  assert.equal(taskBoardTitle({ phase: "start", taskId: "t-1" }), "来自超级溪流的指令\n（任务 t-1）");
   assert.equal(taskBoardTitle({ phase: "failed", taskId: "t-1" }), null);
   // Body has no "任务 t-xxx 开始" prefix; it is the goal itself.
   const text = taskBoardText({ phase: "start", taskId: "t-1", goal: "查一下天气" });

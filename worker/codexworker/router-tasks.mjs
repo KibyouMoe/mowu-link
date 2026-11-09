@@ -72,7 +72,7 @@ export function lastAssistantText(turn) {
 export const TASK_BOARD_GOAL_LIMIT = 4000;
 
 export function taskBoardTitle({ phase, taskId }) {
-  return phase === "start" ? `来自超级溪流的指令（任务 ${taskId}）` : null;
+  return phase === "start" ? `来自超级溪流的指令\n（任务 ${taskId}）` : null;
 }
 
 export function taskBoardTerminalPhase(status) {
