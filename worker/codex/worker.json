@@ -1,0 +1,13 @@
+{
+  "router": "http://127.0.0.1:8790",
+  "name": "codex",
+  "token_file": "~/.hermes/secrets/router.token",
+  "workspace": "~/projects",
+  "timeout": 1800,
+  "codex_bin": "auto",
+  "proxy": "http://127.0.0.1:10808",
+  "heartbeat_interval": 20,
+  "idle_heartbeat": 60,
+  "idle_timeout": 90,
+  "log_file": "~/.hermes/logs/codex-worker.log"
+}
