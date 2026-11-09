@@ -30,12 +30,12 @@ const NATIVE_CONTRACT_TOOLS = new Set([
   "set_thread_title",
   "wait_threads",
 ]);
-const BINDING_STATE_DIR = path.join(
+const BINDING_STATE_DIR = path.resolve(process.env.CODEXWORKER_STATE_DIR ?? path.join(
   process.env.USERPROFILE ?? process.env.HOME ?? process.cwd(),
   ".codex",
   "state",
   "codexworker",
-);
+));
 const BINDING_STATE_PATH = path.join(BINDING_STATE_DIR, "manager-binding.json");
 
 let desktopManager = null;

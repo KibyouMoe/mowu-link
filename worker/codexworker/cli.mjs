@@ -22,14 +22,13 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
+import RouterClient, { setActiveRouterClient } from "./router-client.mjs";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PROGRAM = "codexworker";
 // Keep in step with BUSINESS_VERSION in mcp-business.mjs.
 const VERSION = "0.2.38";
-const BINDING_STATE_DIR = path.join(os.homedir(), ".codex", "state", "codexworker");
-const BINDING_STATE_PATH = path.join(BINDING_STATE_DIR, "manager-binding.json");
-const DESKTOP_CONFIG_PATH = path.join(BINDING_STATE_DIR, "desktop-config.local.json");
+const DEFAULT_STATE_DIR = path.join(os.homedir(), ".codex", "state", "codexworker");
 
 const HELP = `codexworker ${VERSION}
 
@@ -48,7 +47,8 @@ const HELP = `codexworker ${VERSION}
 环境变量:
   CODEXWORKER_IDENTITY, CODEXWORKER_CONFIG, CODEXWORKER_HOST, CODEXWORKER_PORT,
   CODEXWORKER_LOG, CODEXWORKER_STATE_DIR, CODEXWORKER_TOKEN_FILE,
-  CODEXWORKER_CODEX_BIN, CODEXWORKER_APP_SERVER_PROXY
+  CODEXWORKER_CODEX_BIN, CODEXWORKER_APP_SERVER_PROXY,
+  CODEXWORKER_ROUTER (0 关闭 router 连接), CODEXWORKER_ROUTER_URL
 
 说明:
   1. 本命令固定使用 codex/transport/app-server.mjs（codex app-server JSON-RPC）。
@@ -239,7 +239,12 @@ async function main() {
   }
   const host = args.host ?? process.env.CODEXWORKER_HOST ?? config.host ?? "127.0.0.1";
   const port = resolvePort(args.port ?? process.env.CODEXWORKER_PORT ?? identity.port ?? config.port, 8903);
-  const stateDir = path.resolve(expandHome(process.env.CODEXWORKER_STATE_DIR ?? BINDING_STATE_DIR));
+  const stateDir = path.resolve(expandHome(process.env.CODEXWORKER_STATE_DIR ?? DEFAULT_STATE_DIR));
+  // mcp-business reads the binding/config/lease from this same directory; pin it
+  // so an isolated instance (test port) never touches the production writer.
+  process.env.CODEXWORKER_STATE_DIR = stateDir;
+  const bindingStatePath = path.join(stateDir, "manager-binding.json");
+  const desktopConfigPath = path.join(stateDir, "desktop-config.local.json");
   const cwd = process.cwd();
 
   const resolvedLog = args.log ?? process.env.CODEXWORKER_LOG ?? null;
@@ -324,14 +329,14 @@ async function main() {
   log("info", "projects_loaded", { count: projects.projects?.length ?? 0, projectId: project?.projectId ?? null });
 
   // ---- manager binding + local config --------------------------------------
-  await writeJsonAtomic(BINDING_STATE_PATH, {
+  await writeJsonAtomic(bindingStatePath, {
     formatVersion: 1,
     integrationMode: "desktop-native",
     managerThreadId: session.threadId,
     managerTurnId: null,
     boundAt: new Date().toISOString(),
   });
-  await writeJsonAtomic(DESKTOP_CONFIG_PATH, {
+  await writeJsonAtomic(desktopConfigPath, {
     host,
     port,
     bridgeName: identity.display,
@@ -351,7 +356,7 @@ async function main() {
       autoImageOutput: config.feishu?.autoImageOutput ?? true,
     },
   });
-  log("info", "manager_config_written", { binding: BINDING_STATE_PATH, config: DESKTOP_CONFIG_PATH,
+  log("info", "manager_config_written", { binding: bindingStatePath, config: desktopConfigPath,
     whitelistCount: whitelist.ids.length, whitelistSource: whitelist.source,
     feishuInbound: whitelist.ids.length > 0 ? "enabled" : "disabled_no_whitelist" });
 
@@ -367,11 +372,13 @@ async function main() {
       lastReloadError: "business hot reload is only available inside the Codex plugin host" }),
   };
   const business = createBusiness(runtimeControl);
+  let routerClient = null;
   let closing = false;
   const shutdown = async (signal) => {
     if (closing) return;
     closing = true;
     log("info", "shutdown", { signal });
+    await routerClient?.stop().catch(() => {});
     await business.close().catch(() => {});
     await appServer.shutdown().catch(() => {});
     await logFile.chain.catch(() => {});
@@ -390,6 +397,147 @@ async function main() {
 
   await business.activate();
   log("info", "manager_started", { url: `http://${host}:${port}` });
+
+  // ---- router integration --------------------------------------------------
+  // The router owns task dispatch. Each task runs in its own Codex thread; the
+  // Feishu / manager paths are not involved. Disable with CODEXWORKER_ROUTER=0
+  // or config.router.enabled=false (the settings UI and tests use that path).
+  const routerConfig = config.router ?? {};
+  const routerEnabled = process.env.CODEXWORKER_ROUTER !== "0" && routerConfig.enabled !== false;
+  const routerUrl = String(process.env.CODEXWORKER_ROUTER_URL ?? routerConfig.url ?? "http://127.0.0.1:8790");
+  const ROUTER_TURN_LIMIT_MS = 20 * 60 * 1000;
+  const TERMINAL_TURN = new Set(["completed", "interrupted", "failed", "cancelled", "canceled"]);
+
+  async function routerTurnReply(threadId) {
+    try {
+      const snapshot = await nativeCall("read_thread", { threadId, turnLimit: 1, includeOutputs: true }, 60_000);
+      const turn = Array.isArray(snapshot?.turns) ? snapshot.turns.at(-1) : null;
+      return (turn?.items ?? [])
+        .filter((item) => item?.type === "agentMessage" && typeof item.text === "string" && item.text.trim())
+        .map((item) => item.text.trim()).join("\n").trim();
+    } catch (error) {
+      log("warn", "router_read_thread_failed", { threadId, message: error?.message ?? String(error) });
+      return "";
+    }
+  }
+
+  async function runRouterTask(task) {
+    const taskId = typeof task?.task_id === "string" ? task.task_id.trim() : "";
+    if (!taskId) { log("warn", "router_task_without_id"); return; }
+    const goal = typeof task.goal === "string" ? task.goal.trim() : "";
+    const workspace = task.workspace ? path.resolve(expandHome(String(task.workspace))) : session.cwd;
+    const startedAt = Date.now();
+    let threadId = null;
+    let turnId = null;
+    let status = "failed";
+    let summary = "";
+    routerClient.setActivity({ state: "running", taskId });
+    log("info", "router_task_start", { taskId, urgency: task.urgency ?? null, workspace });
+    try {
+      if (!goal) throw new Error("router task has an empty goal");
+      const context = task.context == null ? ""
+        : (typeof task.context === "string" ? task.context : JSON.stringify(task.context));
+      const prompt = context ? `${goal}\n\n[router context]\n${context}` : goal;
+      const created = await nativeCall("create_thread",
+        { cwd: workspace, title: `router ${taskId}`, prompt }, 60_000);
+      threadId = created?.threadId ?? null;
+      turnId = created?.turnId ?? null;
+      if (!threadId) throw new Error("create_thread returned no threadId");
+      log("info", "router_task_thread", { taskId, threadId, turnId });
+
+      const declaredMs = Number(task.deadline_s);
+      const budgetMs = Number.isFinite(declaredMs) && declaredMs > 0
+        ? declaredMs * 1000 : ROUTER_TURN_LIMIT_MS;
+      const deadline = startedAt + budgetMs;
+      let poll = null;
+      let timedOut = false;
+      for (;;) {
+        const remaining = Math.max(1_000, Math.min(180_000, deadline - Date.now()));
+        const wait = await nativeCall("wait_threads",
+          { targets: [{ threadId, hostId: "local" }], timeoutMs: remaining }, remaining + 15_000);
+        poll = wait?.polls?.[0] ?? null;
+        timedOut = Boolean(wait?.timedOut);
+        if (poll?.latestTurn?.id) turnId = poll.latestTurn.id;
+        const state = poll?.latestTurn?.status ?? "unknown";
+        if (!timedOut || TERMINAL_TURN.has(state) || Date.now() >= deadline) break;
+      }
+
+      const turnStatus = poll?.latestTurn?.status ?? "unknown";
+      let text = typeof poll?.latestAssistantMessage?.text === "string"
+        ? poll.latestAssistantMessage.text : "";
+      if (!text.trim()) text = await routerTurnReply(threadId);
+      text = text.trim();
+      const durationS = Math.round((Date.now() - startedAt) / 1000);
+      if (turnStatus === "completed") {
+        status = "done";
+        summary = text || "(completed; no assistant message)";
+      } else {
+        status = "failed";
+        const reason = timedOut
+          ? `turn ${turnStatus} after ${durationS}s (deadline hit)`
+          : `turn ${turnStatus}`;
+        summary = text ? `${reason}\n\n${text}` : reason;
+      }
+      log(status === "done" ? "info" : "warn", "router_task_finished", {
+        taskId, status, turnStatus, durationS, summaryChars: summary.length,
+      });
+    } catch (error) {
+      status = "failed";
+      summary = `task runner error: ${error?.message ?? String(error)}`;
+      log("error", "router_task_failed", { taskId, message: error?.message ?? String(error) });
+    } finally {
+      routerClient.setActivity({ state: "idle", taskId: null });
+    }
+
+    try {
+      const receipt = await routerClient.result({
+        taskId, status, summary: summary.slice(0, 20_000),
+        artifacts: [], evidence: [{ type: "codex_thread", thread_id: threadId, turn_id: turnId }],
+      });
+      log("info", "router_result_sent", {
+        taskId, status, state: receipt?.state ?? null, duplicate: receipt?.duplicate === true,
+      });
+    } catch (error) {
+      // At-least-once: the router requeues a task whose result never arrived.
+      log("error", "router_result_failed", {
+        taskId, status, code: error?.code ?? null, message: error?.message ?? String(error),
+      });
+    }
+  }
+
+  // The router dispatches one running task per worker, but serialize here too:
+  // a duplicate delivery after a reconnect must never start two turns at once.
+  let routerChain = Promise.resolve();
+  function enqueueRouterTask(task) {
+    routerChain = routerChain
+      .then(() => runRouterTask(task))
+      .catch((error) => log("error", "router_task_chain_error", {
+        message: error?.message ?? String(error),
+      }));
+    return routerChain;
+  }
+
+  if (routerEnabled) {
+    routerClient = new RouterClient({
+      url: routerUrl,
+      token,
+      name: identity.name,
+      version: VERSION,
+      heartbeatMs: routerConfig.heartbeatMs,
+      logger: (level, event, fields = {}) => log(level, event, { component: "router", ...fields }),
+    });
+    setActiveRouterClient(routerClient);
+    routerClient.start({
+      onTask: enqueueRouterTask,
+      onConnect: ({ attempt, reconnects }) => log("info", "router_connected", { attempt, reconnects }),
+      onDisconnect: ({ reason, delayMs, reconnects }) => log("warn", "router_disconnected", {
+        reason, delayMs, reconnects,
+      }),
+    });
+    log("info", "router_client_started", { url: routerUrl, name: identity.name });
+  } else {
+    log("info", "router_client_disabled", { url: routerUrl });
+  }
 
   // Register the CLI session so trainer messages have a selected target.
   async function adoptSession() {

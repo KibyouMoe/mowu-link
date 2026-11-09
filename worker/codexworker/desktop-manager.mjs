@@ -20,6 +20,7 @@ import { publicProgress, nativeTaskState } from "./codex/native-progress.mjs";
 import { LocalPublicJournal } from "./local-public-journal.mjs";
 import { BRIDGE_HELP, goalPrompt } from "./feishu-commands.mjs";
 import { readLocalResumeCatalog } from "./local-resume-catalog.mjs";
+import { routerStatus } from "./router-client.mjs";
 import { resumePage, resumeListText } from "./resume-list.mjs";
 import { isAbandonedText, isUnconfirmedText } from "./text-receipt-review.mjs";
 
@@ -331,7 +332,8 @@ export class DesktopManager {
           historyWindow: selected.historyWindow ?? null } : null,
         inboxPending: Object.keys(this.inbox.entries).length,
         trainerWhitelistCount: this.config.feishu.trainerOpenIdWhitelist?.length ?? 0,
-        onlineNotice: this.onlineAnnouncement.status(), publicImages: this.publicImageRelay.status(), questions: this.questions.status() } };
+        onlineNotice: this.onlineAnnouncement.status(), publicImages: this.publicImageRelay.status(), questions: this.questions.status() },
+      router: routerStatus() };
   }
 
   imageTarget(threadId) {
