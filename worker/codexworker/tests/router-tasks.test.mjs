@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { FeishuNotifier } from "../feishu.mjs";
-import { clipBlock, clipOneLine, findRouterTurn, lastAssistantText, routerMarker,
-  routerMessageId, routerPrompt, taskBoardText } from "../router-tasks.mjs";
+import { clipBlock, findRouterTurn, lastAssistantText, routerMarker,
+  routerMessageId, routerPrompt, taskBoardTerminalPhase, taskBoardText,
+  taskBoardTitle } from "../router-tasks.mjs";
 
 test("router message ids are deterministic UUIDv4 values per task", () => {
   const first = routerMessageId("t-9df6613a5c");
@@ -11,10 +12,13 @@ test("router message ids are deterministic UUIDv4 values per task", () => {
   assert.notEqual(first, routerMessageId("t-9df6613a5d"));
 });
 
-test("router prompt carries the marker and optional context", () => {
-  assert.equal(routerPrompt({ taskId: "t-1", goal: " 查一下天气 " }), "[router t-1] 查一下天气");
+test("router prompt carries the marker, 溪流's origin and optional context", () => {
+  const prompt = routerPrompt({ taskId: "t-1", goal: " 查一下天气 " });
+  assert.match(prompt, /^\[router t-1\] 来自超级溪流的指令（任务 t-1）\n/);
+  assert.match(prompt, /不是训练员本人；回复时称呼「溪流」/);
+  assert.ok(prompt.endsWith("\n\n查一下天气"));
   assert.equal(routerPrompt({ taskId: "t-1", goal: "g", context: { a: 1 } }),
-    "[router t-1] g\n\n[router context]\n{\"a\":1}");
+    routerPrompt({ taskId: "t-1", goal: "g" }) + "\n\n[router context]\n{\"a\":1}");
 });
 
 test("findRouterTurn picks the newest turn whose input is this task", () => {
@@ -41,21 +45,42 @@ test("lastAssistantText prefers the announced final answer", () => {
   assert.equal(lastAssistantText(null), "");
 });
 
-test("task board messages are exactly the three lifecycle lines", () => {
-  assert.equal(taskBoardText({ phase: "start", taskId: "t-1", goal: "a\nb   c" }), "任务 t-1 开始 · a b c");
-  assert.equal(taskBoardText({ phase: "done", taskId: "t-1", summary: "全部完成" }), "完成 · t-1 · 全部完成");
+test("task board speaks only for start and failure", () => {
+  assert.equal(taskBoardText({ phase: "start", taskId: "t-1", goal: "a\nb   c" }), "a\nb   c");
   assert.equal(taskBoardText({ phase: "failed", taskId: "t-1", failure: "boom" }), "失败 · t-1 · boom");
+  // A successful task ends with the manager's reply in the same chat; a second
+  // message carrying the same body is what the trainer rejected.
+  assert.throws(() => taskBoardText({ phase: "done", taskId: "t-1", summary: "全部完成" }),
+    /unknown task board phase/);
   assert.throws(() => taskBoardText({ phase: "progress", taskId: "t-1" }), /unknown task board phase/);
 });
 
+test("the start line is 溪流's instruction with the task id in the title", () => {
+  assert.equal(taskBoardTitle({ phase: "start", taskId: "t-1" }), "来自超级溪流的指令（任务 t-1）");
+  assert.equal(taskBoardTitle({ phase: "failed", taskId: "t-1" }), null);
+  // Body has no "任务 t-xxx 开始" prefix; it is the goal itself.
+  const text = taskBoardText({ phase: "start", taskId: "t-1", goal: "查一下天气" });
+  assert.equal(text, "查一下天气");
+  assert.doesNotMatch(text, /开始|t-1/);
+  assert.equal(taskBoardText({ phase: "start", taskId: "t-1", goal: "  " }), "（无目标文本）");
+});
+
+test("a done task sends no terminal board line", () => {
+  assert.equal(taskBoardTerminalPhase("done"), null);
+  assert.equal(taskBoardTerminalPhase("failed"), "failed");
+  // Any non-done terminal state still gets the failure line.
+  assert.equal(taskBoardTerminalPhase("interrupted"), "failed");
+});
+
 test("task board clipping stays inside the agreed budgets", () => {
-  const longGoal = "目".repeat(200);
-  const start = taskBoardText({ phase: "start", taskId: "t-1", goal: longGoal });
-  assert.equal(start, `任务 t-1 开始 · ${"目".repeat(60)}…`);
+  // The goal is shown verbatim; only a pathological body hits the 4000 guard.
+  const goal = "目".repeat(3900);
+  assert.equal(taskBoardText({ phase: "start", taskId: "t-1", goal }), goal);
+  const huge = "目".repeat(4100);
+  assert.equal(taskBoardText({ phase: "start", taskId: "t-1", goal: huge }), `${"目".repeat(4000)}…（已截断）`);
   const longSummary = "结".repeat(2000);
-  const done = taskBoardText({ phase: "done", taskId: "t-1", summary: longSummary });
-  assert.equal(done, `完成 · t-1 · ${"结".repeat(800)}…`);
-  assert.equal(clipOneLine("a\n\nb", 10), "a b");
+  const failed = taskBoardText({ phase: "failed", taskId: "t-1", summary: longSummary });
+  assert.equal(failed, `失败 · t-1 · ${"结".repeat(800)}…`);
   assert.equal(clipBlock("  x  ", 10), "x");
 });
 

@@ -26,7 +26,8 @@ import RouterClient, { setActiveRouterClient } from "./router-client.mjs";
 import { FeishuNotifier } from "./feishu.mjs";
 import { PROTOCOL } from "./desktop-manager.mjs";
 import { ROUTER_TURN_LIMIT_MS, TERMINAL_TURN, findRouterTurn, lastAssistantText,
-  routerMarker, routerMessageId, routerPrompt, taskBoardText } from "./router-tasks.mjs";
+  routerMarker, routerMessageId, routerPrompt, taskBoardTerminalPhase, taskBoardText,
+  taskBoardTitle } from "./router-tasks.mjs";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PROGRAM = "codexworker";
@@ -263,7 +264,8 @@ async function main() {
   const token = await assertTokenFile(tokenFile);
   const feishu = await resolveFeishuConfigFile(config);
   const whitelist = resolveWhitelist(config, feishu.value);
-  // 任务看板：worker 用自己的飞书身份给训练员发“开始/完成/失败”三条生命周期消息。
+  // 任务看板：worker 用自己的飞书身份给训练员发「开始」与「失败」两条生命周期
+  // 消息；成功任务由 manager 的正常回复收尾，不再重复发「完成」。
   // 目标 open_id 必须在**本应用**下有效（跨应用会 open_id cross app）。
   const taskBoardOpenId = String(config.feishu?.taskBoardOpenId ?? "").trim()
     || whitelist.ids[0] || String(feishu.value.open_id ?? "").trim();
@@ -420,9 +422,10 @@ async function main() {
   const ROUTER_QUEUE_POLL_MS = 1_500;
 
   // ---- task board: this worker's own Feishu identity ------------------------
-  // Only three lifecycle lines go to the trainer's p2p chat with THIS worker
-  // (start / done / failed). Result relaying to the requester stays on the
-  // router → trigger path and is untouched.
+  // Only two lifecycle lines go to the trainer's p2p chat with THIS worker
+  // (start / failed). A successful task ends with the manager's own reply in
+  // the same chat, so a "完成" line would duplicate it. Result relaying to the
+  // requester stays on the router → trigger path and is untouched.
   const taskBoardEnabled = config.feishu?.taskBoardEnabled !== false && Boolean(taskBoardOpenId);
   let fallbackNotifier = null;
   function taskBoardNotifier() {
@@ -435,10 +438,11 @@ async function main() {
   }
   async function taskBoardNotify(taskId, phase, fields) {
     const text = taskBoardText({ phase, taskId, ...fields });
+    const title = taskBoardTitle({ phase, taskId }) ?? `${identity.display} · 任务看板`;
     // Dry run exists for isolated test instances: the payload is logged (never
     // sent) so a test can never post into a real trainer chat.
     if (process.env.CODEXWORKER_FEISHU_DRY_RUN === "1") {
-      log("info", "task_board_dry_run", { taskId, phase, text: text.slice(0, 200),
+      log("info", "task_board_dry_run", { taskId, phase, title, text: text.slice(0, 200),
         textChars: text.length, targetOpenIdSha256: createHash("sha256").update(String(taskBoardOpenId)).digest("hex").slice(0, 12) });
       return "dry-run";
     }
@@ -589,7 +593,10 @@ async function main() {
       routerClient.setActivity({ state: "idle", taskId: null });
     }
 
-    await taskBoardNotify(taskId, status === "done" ? "done" : "failed", { summary, failure });
+    // A successful task is already announced by the manager's reply in this
+    // chat; only a failure needs a board line of its own.
+    const boardPhase = taskBoardTerminalPhase(status);
+    if (boardPhase) await taskBoardNotify(taskId, boardPhase, { summary, failure });
 
     try {
       const receipt = await routerClient.result({

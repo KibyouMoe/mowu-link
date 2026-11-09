@@ -22,15 +22,16 @@ export function routerMarker(taskId) {
   return `[router ${taskId}]`;
 }
 
+// Router tasks are dispatched by 溪流 (the trainer's secretary), not by the
+// trainer themself. The prompt has to say so: without it the agent answers
+// "训练员" and the trainer sees a task that pretends to come from him.
+export const ROUTER_ORIGIN = "这条指令来自超级溪流（训练员的秘书，负责向各 worker 派活），不是训练员本人；回复时称呼「溪流」。";
+
 export function routerPrompt({ taskId, goal, context }) {
   const body = (context == null ? ""
     : typeof context === "string" ? context : JSON.stringify(context)).trim();
-  return `${routerMarker(taskId)} ${String(goal ?? "").trim()}` + (body ? `\n\n[router context]\n${body}` : "");
-}
-
-export function clipOneLine(value, limit) {
-  const text = String(value ?? "").replace(/\s+/g, " ").trim();
-  return text.length > limit ? `${text.slice(0, limit)}…` : text;
+  return `${routerMarker(taskId)} 来自超级溪流的指令（任务 ${taskId}）\n${ROUTER_ORIGIN}\n\n${String(goal ?? "").trim()}`
+    + (body ? `\n\n[router context]\n${body}` : "");
 }
 
 export function clipBlock(value, limit) {
@@ -62,11 +63,28 @@ export function lastAssistantText(turn) {
   return (final ?? messages.at(-1))?.text?.trim() ?? "";
 }
 
-// Scheme A: the trainer's p2p chat with this worker gets exactly three
-// lifecycle lines — start, done, failed — and never intermediate output.
+// Scheme A: the trainer's p2p chat with this worker gets one start line, plus a
+// failure line only when the task fails — never intermediate output, and never
+// a "完成" line (the manager's own reply in the same chat already carries that
+// body). The start line is published as 溪流's instruction: the card title is
+// `来自超级溪流的指令（任务 <taskId>）` and the body is the goal verbatim (a
+// 4000-char guard only exists to stay far away from Feishu's 30KB card limit).
+export const TASK_BOARD_GOAL_LIMIT = 4000;
+
+export function taskBoardTitle({ phase, taskId }) {
+  return phase === "start" ? `来自超级溪流的指令（任务 ${taskId}）` : null;
+}
+
+export function taskBoardTerminalPhase(status) {
+  return status === "done" ? null : "failed";
+}
+
 export function taskBoardText({ phase, taskId, goal = "", summary = "", failure = "" }) {
-  if (phase === "start") return `任务 ${taskId} 开始 · ${clipOneLine(goal, 60)}`;
-  if (phase === "done") return `完成 · ${taskId} · ${clipBlock(summary, 800)}`;
+  if (phase === "start") {
+    const text = String(goal ?? "").trim();
+    if (!text) return "（无目标文本）";
+    return text.length > TASK_BOARD_GOAL_LIMIT ? `${text.slice(0, TASK_BOARD_GOAL_LIMIT)}…（已截断）` : text;
+  }
   if (phase === "failed") return `失败 · ${taskId} · ${clipBlock(failure || summary, 800)}`;
   throw new Error(`unknown task board phase: ${phase}`);
 }
