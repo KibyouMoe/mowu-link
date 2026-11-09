@@ -48,7 +48,7 @@ POST /result     {name, task_id, status, summary, artifacts[], evidence[]}
 ### 接口（Hermes 用）
 
 ```
-GET  /workers                → [{name, online, busy, queued, last_seen}]
+GET  /workers                → [{name, online, busy, queued, last_seen, last_progress_at}]
 POST /tasks {worker, goal, context?, workspace?, urgency?, deadline_s?, queue_if_offline?} → 见下表
 POST /tasks/{id}/cancel
 GET  /tasks/{id}
@@ -116,19 +116,29 @@ subscriptions(
 POST   /subscriptions   {worker, source, kinds?}   → Router 去 trigger 注册
 DELETE /subscriptions/{id}
 GET    /subscriptions?worker=
+GET    /subscriptions/pending?worker=              → 取 trigger 队列并 ACK
 ```
 
 投递（训练员定：订阅类消息**不留存**）：
 
 ```
-trigger 有匹配消息 → 直接推给 Router（不排队、不留存）
-Router 按订阅表 → worker 连着就推；**没连着就直接丢**（不建积压）
-worker 掉线      → Router 立刻 DELETE 它在 trigger 的订阅，trigger 停止推送
+trigger 有匹配消息 → 写进该订阅者在 trigger 的队列（保留到 ACK）
+Router 被 worker 拉取（GET /subscriptions/pending）
+                   → 按订阅表的 source/kinds 过滤 → 返回 → ACK
+worker 连着      → 正常拉取
+worker 没连着    → 订阅已删除，trigger 侧也关闭，消息不投给它（不建积压）
+worker 掉线      → Router 立刻 DELETE 它在 trigger 的订阅，trigger 停止投递
 worker 重连      → worker 自己重新声明要订阅什么（它的初始化流程）
 ```
 
 理由：订阅是“实时听”，人不在听了也没用；留一堆过期消息只会污染它上线后的判断。
 对比：**任务是活，要攒；订阅是听，不留。**
+
+> **实现注记（0.2.0）**：trigger 0.7.x 没有 `POST /subscribe`，它是游标总线——
+> 订阅记录由 `GET /events?subscriber=router:<worker>&since=<当前尾部>` 惰性创建，
+> 消息用 `GET /events` 拉取、`POST /ack` 确认、`POST /renew` 续租。
+> Router 的 `POST /subscriptions` 做的就是这套调用；`trigger_id` 存的是实际订阅名。
+> closed 的订阅名不能复用，所以 worker 重连后重声明会拿到 `router:<worker>:<id>`。
 
 ---
 

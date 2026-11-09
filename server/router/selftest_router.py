@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""selftest_router.py — real end-to-end test for mowu-router 0.1.0.
+"""selftest_router.py — real end-to-end test for mowu-router 0.2.0.
 
 Starts two real processes, no in-process shortcuts:
 
@@ -17,7 +17,10 @@ Then drives a fake worker over a real SSE connection and exercises:
   cancel queued → cancelled (never delivered)
   cancel running → cancelled, late result ignored
   backlog cap 128 → 129th refused with backlog_full
-  subscriptions CRUD (table only; trigger forwarding is a stub)
+  POST /notice normal/urgent → trigger notify/event, minute-hash idempotence
+  subscriptions → trigger registration → pending pull → ACK → delete closes
+  SSE disconnect → subscriptions purged locally and at trigger
+  trigger down → POST /subscriptions 502 + rollback, /notice ok:false (no 5xx)
   single-instance flock, token file generation/permissions, auth
 
 Standard library only, Python 3.9.  Prints one PASS/FAIL line per check and
@@ -27,6 +30,7 @@ a total; exits non-zero on any failure.
 from __future__ import annotations
 
 import http.client as http_client
+import hashlib
 import json
 import os
 import queue
@@ -42,6 +46,7 @@ import traceback
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import Optional
 from urllib.parse import quote
 
 HERE = Path(__file__).resolve().parent
@@ -100,6 +105,41 @@ def http(method: str, url: str, body=None, token=None,
         return int(exc.code), payload
     except urllib.error.URLError as exc:
         return 0, {"error": "unreachable", "detail": str(exc)}
+
+
+def trigger_http(method: str, url: str, body=None, token=None,
+                 timeout: float = 5.0):
+    """JSON client for trigger (X-Trigger-Token instead of X-Router-Token)."""
+    data = None
+    if body is not None:
+        data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(url, data=data, method=method)
+    if data is not None:
+        req.add_header("Content-Type", "application/json; charset=utf-8")
+    if token:
+        req.add_header("X-Trigger-Token", token)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8")
+            return int(resp.status), (json.loads(raw) if raw else {})
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", "replace")
+        try:
+            payload = json.loads(raw)
+        except ValueError:
+            payload = {"raw": raw}
+        return int(exc.code), payload
+    except urllib.error.URLError as exc:
+        return 0, {"error": "unreachable", "detail": str(exc)}
+
+
+def notice_event_id(worker: str, text: str,
+                    minute: Optional[int] = None) -> str:
+    if minute is None:
+        minute = int(time.time() // 60)
+    digest = hashlib.sha256(
+        ("%s\n%s\n%d" % (worker, text, minute)).encode("utf-8")).hexdigest()[:24]
+    return "notice:" + digest
 
 
 def wait_http(url: str, timeout: float = 10.0) -> bool:
@@ -315,7 +355,7 @@ def run(work: Path, checker: Checker) -> None:
         checker.check(
             "GET /health (no token): ok, version, workers, tasks",
             status == 200 and health.get("ok") is True
-            and health.get("version") == "0.1.0"
+            and health.get("version") == "0.2.0"
             and health.get("workers") == 0 and health.get("tasks") == 0,
             "status=%s body=%s" % (status, health))
 
@@ -384,8 +424,10 @@ def run(work: Path, checker: Checker) -> None:
             and received.get("type") == "task",
             "received=%s" % (received,))
 
+        progress_ts = round(time.time() - 30, 3)
         status, hb = http("POST", BASE + "/heartbeat",
                           {"name": "波旁", "state": "working",
+                           "progress_at": progress_ts,
                            "task_id": task1}, token)
         row = worker_row("波旁", token)
         checker.check(
@@ -394,6 +436,12 @@ def run(work: Path, checker: Checker) -> None:
             and row is not None and row.get("state") == "working"
             and row.get("busy") is True,
             "status=%s body=%s row=%s" % (status, hb, row))
+        checker.check(
+            "GET /workers exposes last_progress_at from heartbeat.progress_at",
+            row is not None
+            and abs(float(row.get("last_progress_at") or 0) - progress_ts) < 0.01
+            and row.get("last_progress_at_iso") is not None,
+            "row=%s" % (row,))
 
         # ---------------------------------------------------------------- #
         # 2. result -> done -> trigger notify
@@ -635,34 +683,243 @@ def run(work: Path, checker: Checker) -> None:
             "row=%s register=%s" % (row, reg2))
 
         # ---------------------------------------------------------------- #
-        # 8. subscriptions CRUD (table only; forwarding is a stub)
+        # 8. subscriptions: real trigger registration + pending + ACK + delete
         # ---------------------------------------------------------------- #
+        t_token = trigger_token.read_text(encoding="utf-8").strip()
+
+        def tcall(method: str, path: str, body=None):
+            return trigger_http(method, trigger_url + path, body, t_token)
+
+        def trigger_subs():
+            code, payload = tcall("GET", "/subscriptions")
+            return payload.get("subscriptions", []) if code == 200 else []
+
         status, sub = http("POST", BASE + "/subscriptions", {
             "worker": "波旁", "source": "mc_chat",
             "kinds": ["chat", "whisper"],
         }, token)
         sub_id = sub.get("id")
+        trigger_id = sub.get("trigger_id") or ""
         status_list, subs = http(
             "GET", BASE + "/subscriptions?worker=%s" % quote("波旁"),
             token=token)
         listed = [s for s in subs.get("subscriptions", [])
                   if s.get("id") == sub_id]
+        tsub = [s for s in trigger_subs() if s.get("name") == trigger_id]
+        checker.check(
+            "subscriptions: POST 201 -> row has trigger_id -> trigger active",
+            status == 201 and sub.get("active") is True
+            and sub.get("trigger_forwarded") is True
+            and trigger_id == "router:波旁"
+            and status_list == 200 and len(listed) == 1
+            and listed[0].get("kinds") == ["chat", "whisper"]
+            and listed[0].get("trigger_id") == trigger_id
+            and len(tsub) == 1 and tsub[0].get("status") == "active",
+            "create=%s/%s list=%s trigger=%s"
+            % (status, sub, status_list, tsub))
+
+        status_ev, ev1 = tcall("POST", "/trigger", {
+            "source": "mc_chat", "kind": "chat", "level": "notify",
+            "text": "selftest chat 1", "actor": "mc", "event_id": "sub-1",
+        })
+        ev1_id = ev1.get("id")
+        status_p1, pending1 = http(
+            "GET", BASE + "/subscriptions/pending?worker=" + quote("波旁"),
+            token=token)
+        first = (pending1.get("events") or [{}])[0]
+        checker.check(
+            "pending: returns the trigger-queued event + subscription_id",
+            status_ev == 200 and status_p1 == 200
+            and pending1.get("count") == 1
+            and first.get("id") == ev1_id
+            and first.get("text") == "selftest chat 1"
+            and first.get("subscription_id") == sub_id,
+            "post=%s/%s pending=%s" % (status_ev, ev1, pending1))
+        status_p2, pending2 = http(
+            "GET", BASE + "/subscriptions/pending?worker=" + quote("波旁"),
+            token=token)
+        status_c, cursor_now = tcall(
+            "GET", "/events?subscriber=%s&since=%s"
+            % (quote(trigger_id, safe=""), ev1_id))
+        checker.check(
+            "pending: ACK empties the next poll and advances trigger cursor",
+            status_p2 == 200 and pending2.get("count") == 0
+            and status_c == 200 and cursor_now.get("events") == [],
+            "pending2=%s trigger=%s" % (pending2, cursor_now))
+
+        tcall("POST", "/trigger", {
+            "source": "mc_chat", "kind": "system", "level": "notify",
+            "text": "filtered out", "actor": "mc", "event_id": "sub-filter",
+        })
+        status_pf, pending_f = http(
+            "GET", BASE + "/subscriptions/pending?worker=" + quote("波旁"),
+            token=token)
+        tcall("POST", "/trigger", {
+            "source": "mc_chat", "kind": "chat", "level": "notify",
+            "text": "selftest chat 2", "actor": "mc", "event_id": "sub-2",
+        })
+        status_pc, pending_c = http(
+            "GET", BASE + "/subscriptions/pending?worker=" + quote("波旁"),
+            token=token)
+        checker.check(
+            "pending: kinds filter drops non-matching kinds, keeps matching",
+            status_pf == 200 and pending_f.get("count") == 0
+            and status_pc == 200 and pending_c.get("count") == 1
+            and (pending_c.get("events") or [{}])[0].get("kind") == "chat",
+            "filtered=%s matched=%s" % (pending_f.get("count"),
+                                        pending_c.get("count")))
+
         status_del, deleted = http(
             "DELETE", BASE + "/subscriptions/%s" % sub_id, None, token)
         status_active, active = http(
             "GET", BASE + "/subscriptions?worker=%s&active=1" % quote("波旁"),
             token=token)
+        tsub_after = [s for s in trigger_subs() if s.get("name") == trigger_id]
         checker.check(
-            "subscriptions: POST 201 -> GET -> DELETE active=0",
-            status == 201 and sub.get("active") is True
-            and sub.get("trigger_forwarded") is False
-            and status_list == 200 and len(listed) == 1
-            and listed[0].get("kinds") == ["chat", "whisper"]
-            and status_del == 200 and deleted.get("active") is False
+            "subscriptions: DELETE removes row + closes trigger subscription",
+            status_del == 200 and deleted.get("deleted") is True
+            and deleted.get("trigger_closed") is True
             and all(s.get("id") != sub_id
-                    for s in active.get("subscriptions", [])),
-            "create=%s/%s delete=%s list=%s"
-            % (status, sub, status_del, status_active))
+                    for s in active.get("subscriptions", []))
+            and len(tsub_after) == 1
+            and tsub_after[0].get("status") == "closed",
+            "delete=%s/%s list=%s trigger=%s"
+            % (status_del, deleted, status_active, tsub_after))
+
+        # ---------------------------------------------------------------- #
+        # 8b. notice: worker -> Hermes, normal/urgent + minute hash
+        # ---------------------------------------------------------------- #
+        notice_text = "selftest notice normal"
+        expected_id = notice_event_id("波旁", notice_text)
+        status_n, notice = http("POST", BASE + "/notice",
+                                {"worker": "波旁", "text": notice_text}, token)
+        for _attempt in range(3):
+            expected_id = notice_event_id("波旁", notice_text)
+            if notice.get("event_id") == expected_id:
+                break
+            status_n, notice = http("POST", BASE + "/notice",
+                                    {"worker": "波旁", "text": notice_text},
+                                    token)
+        conn = sqlite3.connect(str(trigger_db))
+        try:
+            nrow = conn.execute(
+                "SELECT source, kind, level, actor, text FROM events"
+                " WHERE event_id=?", (expected_id,)).fetchone()
+        finally:
+            conn.close()
+        checker.check(
+            "POST /notice normal -> ok, level notify, trigger worker.notice",
+            status_n == 200 and notice.get("ok") is True
+            and notice.get("level") == "notify"
+            and isinstance(notice.get("trigger_id"), int)
+            and notice.get("event_id") == expected_id
+            and nrow is not None and nrow[0] == "router"
+            and nrow[1] == "worker.notice" and nrow[2] == "notify"
+            and nrow[3] == "波旁" and nrow[4] == notice_text,
+            "status=%s body=%s row=%s" % (status_n, notice, nrow))
+
+        dup_ok = False
+        last = notice
+        for _attempt in range(3):
+            _sn, again = http("POST", BASE + "/notice",
+                              {"worker": "波旁", "text": notice_text}, token)
+            if again.get("event_id") == last.get("event_id"):
+                dup_ok = again.get("duplicate") is True
+                last = again
+                break
+            last = again
+        conn = sqlite3.connect(str(trigger_db))
+        try:
+            dup_count = conn.execute(
+                "SELECT COUNT(*) FROM events WHERE event_id=?",
+                (last.get("event_id"),)).fetchone()[0]
+        finally:
+            conn.close()
+        checker.check(
+            "notice: same worker+text+minute -> one trigger row, duplicate:true",
+            dup_ok and dup_count == 1,
+            "dup_ok=%s count=%s body=%s" % (dup_ok, dup_count, last))
+
+        status_u, urgent = http("POST", BASE + "/notice", {
+            "worker": "波旁", "text": "selftest notice urgent",
+            "urgency": "urgent",
+        }, token)
+        conn = sqlite3.connect(str(trigger_db))
+        try:
+            urow = conn.execute(
+                "SELECT level FROM events WHERE event_id=?",
+                (urgent.get("event_id"),)).fetchone()
+        finally:
+            conn.close()
+        checker.check(
+            "POST /notice urgency=urgent -> level event at trigger",
+            status_u == 200 and urgent.get("ok") is True
+            and urgent.get("level") == "event"
+            and urow is not None and urow[0] == "event",
+            "status=%s body=%s row=%s" % (status_u, urgent, urow))
+
+        # ---------------------------------------------------------------- #
+        # 8c. re-declare uses a fresh name; disconnect purges everything
+        # ---------------------------------------------------------------- #
+        status, sub2 = http("POST", BASE + "/subscriptions", {
+            "worker": "波旁", "source": "mc_chat", "kinds": ["chat"],
+        }, token)
+        sub2_id = sub2.get("id")
+        trigger_id2 = sub2.get("trigger_id") or ""
+        tsub2 = [s for s in trigger_subs() if s.get("name") == trigger_id2]
+        checker.check(
+            "subscriptions: re-declare after delete gets a fresh trigger name",
+            status == 201 and trigger_id2.startswith("router:波旁:")
+            and len(tsub2) == 1 and tsub2[0].get("status") == "active",
+            "create=%s trigger=%s" % (status, sub2))
+
+        tcall("POST", "/trigger", {
+            "source": "mc_chat", "kind": "chat", "level": "notify",
+            "text": "after redeclare", "actor": "mc", "event_id": "sub-3",
+        })
+        status_pn, pending_n = http(
+            "GET", BASE + "/subscriptions/pending?worker=" + quote("波旁"),
+            token=token)
+        checker.check(
+            "pending: new generation queue delivers its own events",
+            status_pn == 200 and pending_n.get("count") == 1
+            and (pending_n.get("events") or [{}])[0].get("trigger_id")
+            == trigger_id2,
+            "pending=%s" % (pending_n,))
+
+        worker2.stop()
+        deadline = time.time() + 6.0
+        router_subs = None
+        t_after = []
+        while time.time() < deadline:
+            _s, router_subs = http(
+                "GET", BASE + "/subscriptions?worker=%s" % quote("波旁"),
+                token=token)
+            t_after = [s for s in trigger_subs()
+                       if s.get("name") == trigger_id2]
+            if (router_subs.get("count") == 0 and t_after
+                    and t_after[0].get("status") == "closed"):
+                break
+            time.sleep(0.1)
+        checker.check(
+            "SSE disconnect: router purges all subscriptions, trigger closed",
+            router_subs is not None and router_subs.get("count") == 0
+            and len(t_after) == 1 and t_after[0].get("status") == "closed",
+            "router=%s trigger=%s" % (router_subs, t_after))
+
+        worker3 = FakeWorker("波旁", token)
+        workers.append(worker3)
+        worker3.start()
+        wait_online("波旁", token, True)
+        time.sleep(0.3)
+        _s, after_reconnect = http(
+            "GET", BASE + "/subscriptions?worker=%s" % quote("波旁"),
+            token=token)
+        checker.check(
+            "reconnect: subscriptions are NOT rebuilt automatically",
+            after_reconnect.get("count") == 0,
+            "subscriptions=%s" % (after_reconnect,))
+        worker3.stop()
 
         # ---------------------------------------------------------------- #
         # 9. final shape / counts
@@ -692,6 +949,64 @@ def run(work: Path, checker: Checker) -> None:
             "GET /tasks?worker= returns the 128 backlog rows",
             tasks.get("count") == 128,
             "count=%s" % tasks.get("count"))
+
+        # ---------------------------------------------------------------- #
+        # 10. trigger down: subscription 502 + rollback, notice ok:false
+        # ---------------------------------------------------------------- #
+        dead_port = free_port()
+        dead_trigger_port = free_port()
+        while dead_trigger_port == dead_port:
+            dead_trigger_port = free_port()
+        dead_base = "http://127.0.0.1:%d" % dead_port
+        dead_token = work / "dead.token"
+        dead_proc, dead_out = start_process([
+            PY, str(ROUTER),
+            "--port", str(dead_port),
+            "--db", str(work / "dead.db"),
+            "--token-file", str(dead_token),
+            "--lock", str(work / "dead.lock"),
+            "--log", str(work / "dead.log"),
+            "--trigger-url", "http://127.0.0.1:%d/trigger" % dead_trigger_port,
+            "--trigger-token-file", str(trigger_token),
+        ], work / "dead.out")
+        try:
+            if not wait_http(dead_base + "/health", timeout=8.0):
+                raise RuntimeError("dead-trigger router did not start: "
+                                   + tail(work / "dead.log"))
+            dtok = dead_token.read_text(encoding="utf-8").strip()
+            http("POST", dead_base + "/register", {"name": "断链工"}, dtok)
+            status_s, fail_sub = http(
+                "POST", dead_base + "/subscriptions",
+                {"worker": "断链工", "source": "mc_chat"}, dtok)
+            status_l, fail_list = http(
+                "GET", dead_base + "/subscriptions?worker=" + quote("断链工"),
+                token=dtok)
+            status_n, fail_notice = http(
+                "POST", dead_base + "/notice",
+                {"worker": "断链工", "text": "trigger is down"}, dtok)
+            checker.check(
+                "trigger down: POST /subscriptions -> 502, table rolled back",
+                status_s == 502 and fail_sub.get("error") == "trigger_unavailable"
+                and status_l == 200 and fail_list.get("count") == 0,
+                "status=%s/%s list=%s" % (status_s, fail_sub, fail_list))
+            checker.check(
+                "trigger down: POST /notice -> 200 ok:false (no 5xx)",
+                status_n == 200 and fail_notice.get("ok") is False
+                and fail_notice.get("error") == "trigger_unavailable",
+                "status=%s body=%s" % (status_n, fail_notice))
+        finally:
+            try:
+                dead_proc.terminate()
+                dead_proc.wait(timeout=5)
+            except Exception:
+                try:
+                    dead_proc.kill()
+                except Exception:
+                    pass
+            try:
+                dead_out.close()
+            except Exception:
+                pass
 
         for worker_obj in workers:
             worker_obj.stop()

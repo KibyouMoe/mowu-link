@@ -2,15 +2,15 @@
 """mowu-router — the worker / task / subscription registry for Hermes.
 
 Implements docs/ROUTER.md ① (workers) ② (tasks + result + notify) ③
-(subscription table, trigger forwarding stubbed) at 127.0.0.1:8790.
+(subscriptions with real trigger forwarding) at 127.0.0.1:8790.
 
 The router is deliberately dumb:
 
   * it knows *who is connected*, *who is busy* and *how many tasks each
     worker has queued*;
   * it knows nothing about capabilities, task meaning or worker internals;
-  * the only outbound thing it does is write one ``level=notify`` event to
-    trigger when a worker reports a result.
+  * the only outbound things it does are trigger events (task results and
+    ``/notice``) and trigger subscription lifecycle calls.
 
 Liveness is the SSE connection itself, never a heartbeat: ``POST /heartbeat``
 only records the worker's own state/progress.  When a stream ends the worker
@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import hmac
 import json
 import logging
@@ -45,9 +46,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import parse_qs, quote, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8790
 DEFAULT_DB = "~/.hermes/router.db"
@@ -179,9 +180,17 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     source     TEXT NOT NULL,
     kinds      TEXT,
     active     INTEGER DEFAULT 1,
-    created_at REAL
+    created_at REAL,
+    trigger_id TEXT,
+    trigger_since INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_subscriptions_worker ON subscriptions(worker);
+
+CREATE TABLE IF NOT EXISTS subscription_cursors (
+    trigger_name TEXT PRIMARY KEY,
+    last_id      INTEGER DEFAULT 0,
+    updated_at   REAL
+);
 """
 
 
@@ -217,6 +226,14 @@ class RouterStore:
                 self._conn.execute(
                     "ALTER TABLE workers ADD COLUMN %s %s" % (column, decl))
                 log.info("store migration: added workers.%s", column)
+        scols = {str(row["name"]) for row in
+                 self._conn.execute("PRAGMA table_info(subscriptions)").fetchall()}
+        for column, decl in (("trigger_id", "TEXT"),
+                             ("trigger_since", "INTEGER")):
+            if column not in scols:
+                self._conn.execute(
+                    "ALTER TABLE subscriptions ADD COLUMN %s %s" % (column, decl))
+                log.info("store migration: added subscriptions.%s", column)
 
     # -- startup -------------------------------------------------------- #
     def reset_runtime(self) -> int:
@@ -249,6 +266,9 @@ class RouterStore:
             "note": row["note"],
             "state": row["state"],
             "progress_at": row["progress_at"],
+            "last_progress_at": row["progress_at"],
+            "last_progress_at_iso": (now_iso(row["progress_at"])
+                                     if row["progress_at"] else None),
             "task_id": row["task_id"],
         }
 
@@ -502,7 +522,7 @@ class RouterStore:
             counts["total"] += int(row["c"])
         return counts
 
-    # -- subscriptions (table only; forwarding is stubbed in 0.1.0) ------ #
+    # -- subscriptions --------------------------------------------------- #
     @staticmethod
     def _subscription_dict(row: sqlite3.Row) -> Dict[str, Any]:
         try:
@@ -516,6 +536,8 @@ class RouterStore:
             "kinds": kinds if isinstance(kinds, list) else [],
             "active": bool(row["active"]),
             "created_at": row["created_at"],
+            "trigger_id": row["trigger_id"],
+            "trigger_since": row["trigger_since"],
         }
 
     def add_subscription(self, worker: str, source: str,
@@ -553,6 +575,84 @@ class RouterStore:
         log.info("subscription deactivated id=%d", int(sub_id))
         return self.get_subscription(sub_id)
 
+    def set_subscription_trigger(self, sub_id: int, trigger_id: str,
+                                 trigger_since: int) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE subscriptions SET trigger_id=?, trigger_since=?"
+                " WHERE id=?", (trigger_id, int(trigger_since), int(sub_id)))
+        log.info("subscription id=%d -> trigger=%s since=%d",
+                 int(sub_id), trigger_id, int(trigger_since))
+        return self.get_subscription(sub_id)
+
+    def delete_subscription(self, sub_id: int) -> Optional[Dict[str, Any]]:
+        """Hard delete one row (订阅不留存: no tombstones to leak)."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM subscriptions WHERE id=?", (int(sub_id),)
+            ).fetchone()
+            if row is None:
+                return None
+            sub = self._subscription_dict(row)
+            self._conn.execute(
+                "DELETE FROM subscriptions WHERE id=?", (int(sub_id),))
+        log.info("subscription deleted id=%d worker=%s",
+                 int(sub_id), sub["worker"])
+        return sub
+
+    def purge_subscriptions(self, worker: str) -> List[Dict[str, Any]]:
+        """Drop every subscription of one worker; returns the rows."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM subscriptions WHERE worker=? ORDER BY id",
+                (worker,)).fetchall()
+            subs = [self._subscription_dict(row) for row in rows]
+            self._conn.execute(
+                "DELETE FROM subscriptions WHERE worker=?", (worker,))
+            for sub in subs:
+                if sub.get("trigger_id"):
+                    self._conn.execute(
+                        "DELETE FROM subscription_cursors WHERE trigger_name=?",
+                        (sub["trigger_id"],))
+        if subs:
+            log.info("subscriptions purged worker=%s count=%d", worker, len(subs))
+        return subs
+
+    def purge_all_subscriptions(self) -> List[Dict[str, Any]]:
+        """Fresh process: nobody is connected, so nothing may stay subscribed."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM subscriptions ORDER BY id").fetchall()
+            subs = [self._subscription_dict(row) for row in rows]
+            self._conn.execute("DELETE FROM subscriptions")
+            self._conn.execute("DELETE FROM subscription_cursors")
+        if subs:
+            log.info("startup: purged %d stale subscription(s)", len(subs))
+        return subs
+
+    # -- subscription cursors (per trigger subscriber) ------------------- #
+    def get_cursor(self, trigger_name: str) -> int:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT last_id FROM subscription_cursors WHERE trigger_name=?",
+                (trigger_name,)).fetchone()
+        return int(row["last_id"]) if row else 0
+
+    def set_cursor(self, trigger_name: str, last_id: int) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO subscription_cursors (trigger_name, last_id,"
+                " updated_at) VALUES (?, ?, ?)"
+                " ON CONFLICT(trigger_name) DO UPDATE SET"
+                " last_id=excluded.last_id, updated_at=excluded.updated_at",
+                (trigger_name, int(last_id), time.time()))
+
+    def delete_cursor(self, trigger_name: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM subscription_cursors WHERE trigger_name=?",
+                (trigger_name,))
+
     def list_subscriptions(self, worker: Optional[str] = None,
                            active_only: bool = False
                            ) -> List[Dict[str, Any]]:
@@ -586,14 +686,18 @@ class RouterStore:
 
 
 # --------------------------------------------------------------------------- #
-# trigger side (result notify is real; subscription forwarding is a stub)
+# trigger side
 # --------------------------------------------------------------------------- #
 
-class TriggerNotifier:
-    """Writes exactly one ``task.result`` notify per finished task."""
+class TriggerClient:
+    """Small JSON client for trigger (stdlib urllib, 3s timeout per call)."""
 
-    def __init__(self, url: str, token_path: str):
-        self.url = url
+    def __init__(self, trigger_url: str, token_path: str):
+        self.trigger_url = trigger_url
+        base = trigger_url.rstrip("/")
+        if base.endswith("/trigger"):
+            base = base[:-len("/trigger")]
+        self.base_url = base or "http://127.0.0.1:8791"
         self.token_path = Path(os.path.expanduser(token_path))
 
     def _token(self) -> str:
@@ -602,13 +706,60 @@ class TriggerNotifier:
         except OSError:
             return ""
 
-    def notify_result(self, task: Dict[str, Any], status: str,
-                      summary: str) -> bool:
+    def request(self, method: str, path: str, body: Optional[Any] = None,
+                params: Optional[Dict[str, Any]] = None,
+                timeout: float = 3.0) -> Tuple[int, Dict[str, Any]]:
+        """Returns (status, payload); status 0 means "never reached trigger"."""
         token = self._token()
         if not token:
-            log.warning("trigger notify skipped: no token at %s",
-                        self.token_path)
-            return False
+            return 0, {"error": "no_trigger_token",
+                       "detail": "cannot read %s" % self.token_path}
+        url = self.base_url + path
+        clean = {k: v for k, v in (params or {}).items() if v is not None}
+        if clean:
+            url += "?" + urlencode(clean)
+        data = None
+        if body is not None:
+            data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(url, data=data, method=method.upper())
+        req.add_header("X-Trigger-Token", token)
+        if data is not None:
+            req.add_header("Content-Type", "application/json; charset=utf-8")
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                raw = resp.read(65536).decode("utf-8", "replace")
+                code = int(resp.status)
+        except urllib.error.HTTPError as exc:
+            raw = exc.read(65536).decode("utf-8", "replace")
+            code = int(exc.code)
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            return 0, {"error": "%s: %s" % (type(exc).__name__, exc)}
+        try:
+            payload = json.loads(raw) if raw else {}
+        except ValueError:
+            payload = {"raw": raw[:500]}
+        if not isinstance(payload, dict):
+            payload = {"data": payload}
+        return code, payload
+
+    def post_trigger(self, payload: Dict[str, Any]
+                     ) -> Tuple[bool, Dict[str, Any]]:
+        status, data = self.request("POST", "/trigger", payload)
+        if status == 200 and data.get("ok"):
+            return True, data
+        return False, {"status": status,
+                       "error": data.get("error") or "trigger_rejected",
+                       "detail": data}
+
+
+class TriggerNotifier:
+    """Writes exactly one ``task.result`` notify per finished task."""
+
+    def __init__(self, client: TriggerClient):
+        self.client = client
+
+    def notify_result(self, task: Dict[str, Any], status: str,
+                      summary: str) -> bool:
         label = "完成" if status == "done" else "失败"
         one_line = " ".join(str(summary or "").split())
         if len(one_line) > 300:
@@ -627,46 +778,100 @@ class TriggerNotifier:
                 "status": status,
             },
         }
-        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        req = urllib.request.Request(self.url, data=data, method="POST")
-        req.add_header("Content-Type", "application/json; charset=utf-8")
-        req.add_header("X-Trigger-Token", token)
-        try:
-            with urllib.request.urlopen(req, timeout=3.0) as resp:
-                code = int(resp.status)
-                resp.read(4096)
-        except Exception as exc:  # trigger down must never break /result
+        ok, data = self.client.post_trigger(payload)
+        if ok:
+            log.info("trigger notify task=%s status=%s -> id=%s",
+                     task["task_id"], status, data.get("id"))
+        else:
             log.warning("trigger notify failed task=%s status=%s: %s",
-                        task["task_id"], status, exc)
-            return False
-        log.info("trigger notify task=%s status=%s -> HTTP %d",
-                 task["task_id"], status, code)
-        return code == 200
+                        task["task_id"], status, data.get("detail") or data)
+        return ok
 
 
 class TriggerSubscriptionBridge:
-    """0.1.0 placeholder for ROUTER.md §四 trigger-side forwarding.
+    """ROUTER.md §四 forwarding, implemented against trigger 0.7.x.
 
-    The subscription rows are the source of truth here; pushing them into
-    trigger (and receiving matched messages from trigger) is the next step.
+    trigger's public shape is a *cursor* bus: a subscriber's record is created
+    lazily by ``GET /events?subscriber=<name>&since=<id>``, messages stay
+    queued until ``POST /ack {subscriber, up_to_id}``, and the lease must be
+    renewed with ``POST /renew``.  There is no ``POST /subscribe`` in 0.7.x;
+    this bridge creates the same record by polling once at the current tail,
+    so history is never replayed.
+
+    A closed subscription name cannot be reopened by trigger, so a worker's
+    first generation uses ``router:<worker>`` and a re-declaration after a
+    disconnect uses ``router:<worker>:<subscription id>``.
     """
 
-    enabled = False
+    def __init__(self, client: TriggerClient):
+        self.client = client
 
-    def register(self, worker: str, source: str, kinds: List[str]) -> bool:
-        log.info("subscription stub: would register worker=%s source=%s "
-                 "kinds=%s at trigger", worker, source, kinds or "all")
+    def last_event_id(self) -> Optional[int]:
+        status, data = self.client.request("GET", "/bus/health")
+        if status == 200 and isinstance(data.get("last_id"), int):
+            return int(data["last_id"])
+        log.warning("trigger /bus/health unusable: %.200s", data)
+        return None
+
+    def open(self, name: str, since: int) -> Tuple[bool, Dict[str, Any]]:
+        """Create (or touch) the trigger-side subscription at ``since``."""
+        status, data = self.client.request(
+            "GET", "/events",
+            params={"subscriber": name, "since": int(since), "limit": 1})
+        if status != 200:
+            return False, {"status": status,
+                           "error": data.get("error") or "trigger_error",
+                           "detail": data}
+        view = data.get("subscription") or {}
+        if view.get("status") != "active" or view.get("expired"):
+            return False, {"error": "subscription_%s" % (
+                "closed" if view.get("status") == "closed" else "expired"),
+                "subscription": view}
+        return True, view
+
+    def renew(self, name: str) -> bool:
+        status, data = self.client.request(
+            "POST", "/renew", {"name": name})
+        if status == 200:
+            log.info("trigger subscription renewed name=%s expires_in=%s",
+                     name, data.get("expires_in"))
+            return True
+        log.warning("trigger renew failed name=%s status=%s: %.200s",
+                    name, status, data)
         return False
 
-    def unregister(self, sub: Dict[str, Any]) -> bool:
-        log.info("subscription stub: would deactivate id=%s worker=%s at "
-                 "trigger", sub.get("id"), sub.get("worker"))
+    def close(self, name: str) -> bool:
+        """DELETE /subscriptions?name=, falling back to POST /unsubscribe."""
+        status, data = self.client.request(
+            "DELETE", "/subscriptions", params={"name": name})
+        if status == 200:
+            log.info("trigger subscription closed name=%s", name)
+            return True
+        status2, data2 = self.client.request(
+            "POST", "/unsubscribe", {"name": name})
+        if status2 == 200:
+            log.info("trigger subscription closed name=%s (via /unsubscribe)",
+                     name)
+            return True
+        log.warning("trigger unsubscribe failed name=%s status=%s/%s: %.200s",
+                    name, status, status2, data2 or data)
         return False
 
-    def worker_offline(self, worker: str, active: int) -> None:
-        if active:
-            log.info("subscription stub: worker=%s offline, would drop %d "
-                     "trigger subscription(s)", worker, active)
+    def fetch(self, name: str, since: int, limit: int
+              ) -> Tuple[int, Dict[str, Any]]:
+        return self.client.request(
+            "GET", "/events",
+            params={"subscriber": name, "since": int(since),
+                    "limit": max(1, min(int(limit), 200))})
+
+    def ack(self, name: str, up_to_id: int) -> bool:
+        status, data = self.client.request(
+            "POST", "/ack", {"subscriber": name, "up_to_id": int(up_to_id)})
+        if status == 200:
+            return True
+        log.warning("trigger ack failed name=%s up_to=%s status=%s: %.200s",
+                    name, up_to_id, status, data)
+        return False
 
 
 # --------------------------------------------------------------------------- #
@@ -717,6 +922,7 @@ class RouterServer(ThreadingHTTPServer):
         self.started_at = time.time()
         self.token = token or ""
         self.notifier = notifier
+        self.trigger_client = notifier.client
         self.trigger_bridge = bridge
         self.ping_interval = max(0.2, float(ping_interval))
         self.backlog_max = max(1, int(backlog_max))
@@ -755,13 +961,20 @@ class RouterServer(ThreadingHTTPServer):
             current = self.conns.get(conn.name) is conn
             if current:
                 self.conns.pop(conn.name, None)
+        purged: List[Dict[str, Any]] = []
         with self.dispatch_lock:
             if current:
                 self.store.set_offline(conn.name)
                 self.store.requeue_running(conn.name)
-                active_subs = self.store.active_subscriptions(conn.name)
-                self.trigger_bridge.worker_offline(conn.name, active_subs)
+                # 订阅不留存: a worker that is not listening keeps nothing.
+                purged = self.store.purge_subscriptions(conn.name)
             self.store.refresh_counts(conn.name)
+        for sub in purged:
+            if sub.get("trigger_id"):
+                self.trigger_bridge.close(sub["trigger_id"])
+        if purged:
+            log.info("stream detached name=%s: dropped %d subscription(s)",
+                     conn.name, len(purged))
         log.info("stream detached name=%s reason=%s current=%s queued=%d",
                  conn.name, reason, current, self.store.queued_count(conn.name))
 
@@ -892,7 +1105,8 @@ class RouterHandler(BaseHTTPRequestHandler):
                     "ok": True, "service": "mowu-router", "version": VERSION,
                     "endpoints": ["/health", "/workers", "/tasks", "/stream",
                                   "/register", "/heartbeat", "/result",
-                                  "/subscriptions"],
+                                  "/notice", "/subscriptions",
+                                  "/subscriptions/pending"],
                 })
             if parts == ["stream"]:
                 return self._serve_stream(qs)
@@ -903,6 +1117,8 @@ class RouterHandler(BaseHTTPRequestHandler):
                 return self._send_json(200, self._tasks_list(qs))
             if len(parts) == 2 and parts[0] == "tasks":
                 return self._task_get(parts[1])
+            if parts == ["subscriptions", "pending"]:
+                return self._send_json(*self._subscriptions_pending(qs))
             if parts == ["subscriptions"]:
                 return self._send_json(200, self._subscriptions_list(qs))
             self._send_json(404, {"ok": False, "error": "not found"})
@@ -931,6 +1147,8 @@ class RouterHandler(BaseHTTPRequestHandler):
                 return self._send_json(*self._heartbeat(body))
             if parts == ["result"]:
                 return self._send_json(*self._result(body))
+            if parts == ["notice"]:
+                return self._send_json(*self._notice(body))
             if parts == ["tasks"]:
                 return self._send_json(*self._task_create(body))
             if len(parts) == 3 and parts[0] == "tasks" and parts[2] == "cancel":
@@ -1278,6 +1496,132 @@ class RouterHandler(BaseHTTPRequestHandler):
                      "dispatched_next": dispatched["task_id"]
                      if dispatched else None}
 
+    def _notice(self, body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
+        """Worker → Hermes word path.  A trigger failure never becomes a 5xx."""
+        worker = str(body.get("worker") or "").strip()
+        text = body.get("text")
+        if not worker:
+            raise BadRequest("worker is required")
+        if len(worker) > 128:
+            raise BadRequest("worker too long")
+        if text is None or not str(text).strip():
+            raise BadRequest("text is required")
+        text = str(text)
+        if len(text) > 8000:
+            raise BadRequest("text too long (max 8000 chars)")
+        kind = str(body.get("kind") or "worker.notice").strip() or "worker.notice"
+        if len(kind) > 128:
+            raise BadRequest("kind too long")
+        urgency = str(body.get("urgency") or "normal").strip().lower()
+        if urgency not in URGENCIES:
+            raise BadRequest("urgency must be urgent or normal")
+        level = "event" if urgency == "urgent" else "notify"
+        minute = int(time.time() // 60)
+        digest = hashlib.sha256(
+            ("%s\n%s\n%d" % (worker, text, minute)).encode("utf-8")
+        ).hexdigest()[:24]
+        event_id = "notice:" + digest
+        payload = {
+            "source": "router",
+            "kind": kind,
+            "level": level,
+            "text": text,
+            "actor": worker,
+            "event_id": event_id,
+            "payload": {"worker": worker, "urgency": urgency,
+                        "notice": True},
+        }
+        ok, data = self.server.trigger_client.post_trigger(payload)
+        if not ok:
+            log.warning("notice failed worker=%s urgency=%s: %.300s",
+                        worker, urgency, data.get("detail") or data)
+            return 200, {
+                "ok": False, "error": "trigger_unavailable",
+                "detail": data.get("detail") or data,
+                "event_id": event_id, "level": level,
+            }
+        log.info("notice worker=%s urgency=%s event_id=%s trigger_id=%s"
+                 " duplicate=%s", worker, urgency, event_id, data.get("id"),
+                 data.get("duplicate"))
+        return 200, {
+            "ok": True,
+            "trigger_id": data.get("id"),
+            "level": level,
+            "event_id": event_id,
+            "duplicate": bool(data.get("duplicate")),
+        }
+
+    def _subscriptions_pending(self, qs: Dict[str, List[str]]
+                               ) -> Tuple[int, Dict[str, Any]]:
+        """Pull this worker's trigger queues, ACK, return the matched events."""
+        worker = (qs.get("worker", [""])[0] or "").strip()
+        if not worker:
+            raise BadRequest("worker is required")
+        if len(worker) > 128:
+            raise BadRequest("worker too long")
+        limit = self._int_param(qs, "limit", 50)
+        if limit is None:
+            limit = 50
+        if limit < 1 or limit > 200:
+            raise BadRequest("limit must be between 1 and 200")
+
+        store = self.server.store
+        bridge = self.server.trigger_bridge
+        subs = [sub for sub in store.list_subscriptions(worker, active_only=True)
+                if sub.get("trigger_id")]
+        if not subs:
+            return 200, {"ok": True, "worker": worker, "count": 0,
+                         "events": [], "acked": 0}
+
+        merged: Dict[int, Dict[str, Any]] = {}
+        acked = 0
+        expired: List[str] = []
+        errors: List[Dict[str, Any]] = []
+        for sub in subs:
+            name = str(sub["trigger_id"])
+            since = store.get_cursor(name)
+            status, data = bridge.fetch(name, since, limit)
+            if status != 200:
+                errors.append({"trigger_id": name, "status": status,
+                               "error": data.get("error") or "trigger_error"})
+                continue
+            events = data.get("events") or []
+            view = data.get("subscription") or {}
+            if view.get("expired"):
+                expired.append(name)
+            elif view.get("renew_required"):
+                bridge.renew(name)
+            wanted = set(sub.get("kinds") or [])
+            for event in events:
+                if event.get("source") != sub["source"]:
+                    continue
+                if wanted and event.get("kind") not in wanted:
+                    continue
+                event = dict(event)
+                event["subscription_id"] = sub["id"]
+                event["trigger_id"] = name
+                merged[int(event["id"])] = event
+            if events:
+                top = max(int(event["id"]) for event in events)
+                if bridge.ack(name, top):
+                    store.set_cursor(name, top)
+                    acked += len(events)
+                else:
+                    errors.append({"trigger_id": name,
+                                   "error": "ack_failed"})
+
+        out = [merged[key] for key in sorted(merged)]
+        if errors and not out:
+            return 502, {"ok": False, "error": "trigger_unavailable",
+                         "worker": worker, "detail": errors[:3]}
+        body = {"ok": True, "worker": worker, "count": len(out),
+                "events": out, "acked": acked}
+        if expired:
+            body["expired"] = expired
+        if errors:
+            body["errors"] = errors
+        return 200, body
+
     def _subscription_create(self, body: Dict[str, Any]
                              ) -> Tuple[int, Dict[str, Any]]:
         worker = str(body.get("worker") or "").strip()
@@ -1297,14 +1641,47 @@ class RouterHandler(BaseHTTPRequestHandler):
             kinds = [str(part).strip() for part in raw_kinds if str(part).strip()]
         else:
             raise BadRequest("kinds must be a list of strings")
-        sub = self.server.store.add_subscription(worker, source, kinds)
-        forwarded = self.server.trigger_bridge.register(worker, source, kinds)
+
+        store = self.server.store
+        bridge = self.server.trigger_bridge
+        sub = store.add_subscription(worker, source, kinds)
+        sub_id = int(sub["id"])
+        # First live subscription of a generation gets the plain name; later
+        # ones must not share a trigger queue, so they carry the row id.
+        only_one = store.active_subscriptions(worker) == 1
+        base_name = "router:%s" % worker
+        alt_name = "router:%s:%d" % (worker, sub_id)
+        name = base_name if only_one else alt_name
+
+        baseline = bridge.last_event_id()
+        if baseline is None:
+            store.delete_subscription(sub_id)
+            return 502, {"ok": False, "error": "trigger_unavailable",
+                         "worker": worker,
+                         "detail": "trigger /bus/health unavailable"}
+        ok, detail = bridge.open(name, baseline)
+        if not ok and name != alt_name:
+            # trigger 0.7.x cannot reopen a closed name: use a fresh one.
+            name = alt_name
+            ok, detail = bridge.open(name, baseline)
+        if not ok:
+            store.delete_subscription(sub_id)
+            log.warning("subscription create failed worker=%s source=%s: %.300s",
+                        worker, source, detail)
+            return 502, {"ok": False, "error": "trigger_unavailable",
+                         "worker": worker, "source": source,
+                         "detail": detail}
+        store.set_subscription_trigger(sub_id, name, baseline)
+        store.set_cursor(name, baseline)
+        sub = store.get_subscription(sub_id) or sub
+        log.info("subscription id=%d worker=%s source=%s kinds=%s"
+                 " trigger=%s since=%d", sub_id, worker, source,
+                 kinds or "all", name, baseline)
         return 201, {
-            "ok": True, "id": sub["id"], "worker": worker, "source": source,
+            "ok": True, "id": sub_id, "worker": worker, "source": source,
             "kinds": kinds, "active": True,
-            "trigger_forwarded": forwarded,
-            "note": "subscription stored; trigger-side forwarding is a stub "
-                    "in 0.1.0 (see server/router/README.md)",
+            "trigger_forwarded": True, "trigger_id": name,
+            "trigger_since": baseline,
         }
 
     def _subscription_delete(self, raw_id: str) -> Tuple[int, Dict[str, Any]]:
@@ -1316,10 +1693,17 @@ class RouterHandler(BaseHTTPRequestHandler):
         if sub is None:
             return 404, {"ok": False, "error": "unknown_subscription",
                          "id": sub_id}
-        self.server.trigger_bridge.unregister(sub)
-        sub = self.server.store.deactivate_subscription(sub_id)
-        return 200, {"ok": True, "id": sub_id,
-                     "active": bool(sub["active"]) if sub else False}
+        closed = False
+        if sub.get("trigger_id"):
+            closed = self.server.trigger_bridge.close(sub["trigger_id"])
+        self.server.store.delete_subscription(sub_id)
+        if sub.get("trigger_id"):
+            self.server.store.delete_cursor(sub["trigger_id"])
+        log.info("subscription deleted id=%d trigger=%s trigger_closed=%s",
+                 sub_id, sub.get("trigger_id"), closed)
+        return 200, {"ok": True, "id": sub_id, "active": False,
+                     "deleted": True, "trigger_id": sub.get("trigger_id"),
+                     "trigger_closed": closed}
 
     # -- SSE ------------------------------------------------------------ #
     def _write(self, chunk: bytes) -> None:
@@ -1500,8 +1884,13 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     store = RouterStore(args.db)
     store.reset_runtime()
-    notifier = TriggerNotifier(args.trigger_url, args.trigger_token_file)
-    bridge = TriggerSubscriptionBridge()
+    trigger_client = TriggerClient(args.trigger_url, args.trigger_token_file)
+    notifier = TriggerNotifier(trigger_client)
+    bridge = TriggerSubscriptionBridge(trigger_client)
+    stale_subs = store.purge_all_subscriptions()
+    for sub in stale_subs:
+        if sub.get("trigger_id"):
+            bridge.close(sub["trigger_id"])
     try:
         server = RouterServer((host, args.port), store, token, notifier,
                               bridge, ping_interval=args.ping_interval,
@@ -1522,7 +1911,8 @@ def main(argv: Optional[List[str]] = None) -> int:
              " (generated)" if generated else "")
     log.info("result notify -> %s (token %s)", args.trigger_url,
              args.trigger_token_file)
-    log.info("subscription forwarding to trigger is a stub in %s", VERSION)
+    log.info("subscription forwarding -> %s (cursor bus: /events + /ack)",
+             trigger_client.base_url)
     print("mowu-router %s listening on http://%s:%d  [X-Router-Token from %s]"
           % (VERSION, host, args.port, token_path), flush=True)
 
