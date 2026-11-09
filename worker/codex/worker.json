@@ -10,7 +10,7 @@
   "idle_heartbeat": 60,
   "idle_reconnect": 90,
   "stall_seconds": 300,
-  "feishu_creds": "~/.hermes/secrets/feishu-oguri.json",
+  "feishu_creds": "",
   "feishu_open_id": "",
   "subscribe": "",
   "subscribe_interval": 15,
