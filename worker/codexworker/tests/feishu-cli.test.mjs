@@ -38,30 +38,47 @@ class ManualTimers {
   }
 }
 
-function fakeNotifier() {
+function fakeNotifier({ order = [], addReaction = null } = {}) {
   const sent = [];
+  const reactions = [];
   return {
-    appId: "test-app", appSecret: "test-secret", enabled: true, sent,
+    appId: "test-app", appSecret: "test-secret", enabled: true, sent, reactions,
     async getToken() { return "test-token"; },
+    async addReaction(messageId) {
+      order.push(`addReaction:${messageId}`);
+      if (addReaction) return addReaction(messageId);
+      reactions.push(["add", messageId]);
+      return `react_${messageId}`;
+    },
+    async removeReaction(messageId, reactionId) {
+      order.push(`removeReaction:${messageId}`);
+      reactions.push(["remove", messageId, reactionId]);
+      return true;
+    },
     async sendMessage(text, options = {}) {
+      order.push(`send:${options.title}`);
       sent.push({ text, options });
       return { code: 0, data: { message_id: `om_reply_${sent.length}` } };
     },
   };
 }
 
-function fakeTransport() {
+function fakeTransport(order = []) {
   const sends = [], updates = [];
   return {
     sends, updates,
-    async send(text, meta) { sends.push({ text, meta }); return { code: 0, messageId: `om_card_${sends.length}` }; },
+    async send(text, meta) {
+      order.push(`card:${meta.title}`);
+      sends.push({ text, meta });
+      return { code: 0, messageId: `om_card_${sends.length}` };
+    },
     async update(messageId, text, meta) { updates.push({ messageId, text, meta }); return { code: 0 }; },
   };
 }
 
 // register() gives every conversation the same stable cli-<uuid> shape the
 // HTTP /threads route uses; dispatch() echoes it back like CliNativeAdapter.
-function fakeAdapter({ fail = null, threadId = SESSION } = {}) {
+function fakeAdapter({ fail = null, threadId = SESSION, order = [] } = {}) {
   const calls = [];
   let registered = 0;
   return {
@@ -72,6 +89,7 @@ function fakeAdapter({ fail = null, threadId = SESSION } = {}) {
         cwd, title, createdAt: new Date().toISOString(), turns: 0 };
     },
     async dispatch(options) {
+      order.push("dispatch");
       calls.push(options);
       if (fail) throw fail;
       const id = options.threadId;
@@ -169,6 +187,75 @@ test("a p2p text runs one turn, posts 「输出」then「回复」, and the next
   assert.equal(after.totalMessages, 4);
 });
 
+test("the trainer's message is reacted first, and the reaction is dropped after the turn", async t => {
+  const order = [];
+  const f = await fixture(t, { notifier: fakeNotifier({ order }),
+    transport: fakeTransport(order), adapter: fakeAdapter({ order }) });
+  f.socket.frame(textEvent("ou_trainer", "om_react", "你好"));
+  await waitFor(() => f.notifier.reactions.some(item => item[0] === "remove"), "reaction removed");
+
+  const at = label => order.indexOf(label);
+  const add = at("addReaction:om_react");
+  const card = at("card:CodexWorker-输出");
+  const dispatch = at("dispatch");
+  const reply = at("send:CodexWorker-回复");
+  const remove = at("removeReaction:om_react");
+  assert.ok(add >= 0, "addReaction must be called");
+  assert.ok(add < card, "reaction must precede the 输出 card");
+  assert.ok(card < dispatch && dispatch < reply, "输出 card, then the turn, then the 回复 card");
+  assert.ok(reply < remove, "reaction must be removed after the reply");
+  assert.deepEqual(f.notifier.reactions,
+    [["add", "om_react"], ["remove", "om_react", "react_om_react"]]);
+  assert.equal(f.channel.reactions.size, 0);
+});
+
+test("a failing addReaction only logs: the turn and both cards still happen", async t => {
+  const denial = Object.assign(new Error("reaction_forbidden"), { code: 230027 });
+  const f = await fixture(t, { notifier: fakeNotifier({ addReaction: async () => { throw denial; } }) });
+  f.socket.frame(textEvent("ou_trainer", "om_react_fail", "你好"));
+  await waitFor(() => f.notifier.sent.length === 1, "reply card");
+
+  assert.equal(f.adapter.calls.length, 1);
+  assert.equal(f.transport.sends.length, 1);           // 输出 card still posted
+  assert.equal(f.notifier.sent[0].options.title, "CodexWorker-回复");
+  assert.equal(f.notifier.sent[0].text, "OK");          // turn completed normally
+  assert.equal(f.channel.status().failures, 0);
+  assert.equal(f.notifier.reactions.some(item => item[0] === "remove"), false);
+  const logged = f.logs.find(entry => entry.event === "feishu_reaction_failed");
+  assert.ok(logged);
+  assert.equal(logged.fields.stage, "add");
+  assert.equal(logged.fields.code, 230027);
+});
+
+test("two concurrent turns keep their own reaction ids", async t => {
+  const order = [];
+  const notifier = fakeNotifier({ order });
+  const adapter = fakeAdapter({ order });
+  let started = 0;
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  adapter.dispatch = async options => {
+    order.push("dispatch");
+    started += 1;
+    if (started === 2) release();
+    await gate; // both turns must be in flight before either answers
+    options.onEvent?.({ type: "tool.completed", threadId: options.threadId, payload: { name: "shell" } });
+    return { threadId: options.threadId, sessionId: options.threadId, turnId: `turn-${started}`,
+      status: "completed", resultText: "OK", toolCalls: [], durationMs: 5 };
+  };
+  const f = await fixture(t, { notifier, transport: fakeTransport(order), adapter,
+    feishu: { trainerOpenIdWhitelist: ["ou_a", "ou_b"] } });
+  f.socket.frame(textEvent("ou_a", "om_a", "甲"));
+  f.socket.frame(textEvent("ou_b", "om_b", "乙"));
+  await waitFor(() => notifier.reactions.filter(item => item[0] === "remove").length === 2, "both removals");
+
+  assert.equal(started, 2); // genuinely overlapping
+  const removes = new Map(notifier.reactions.filter(item => item[0] === "remove").map(item => [item[1], item[2]]));
+  assert.equal(removes.get("om_a"), "react_om_a");
+  assert.equal(removes.get("om_b"), "react_om_b");
+  assert.deepEqual([...f.channel.reactions.keys()], []);
+});
+
 test("card titles never carry the Desktop 「（历史受限）」suffix", async t => {
   const f = await fixture(t);
   f.socket.frame(textEvent("ou_trainer", "om_title", "你好"));
@@ -204,9 +291,10 @@ test("groups, bot senders, images and duplicates never dispatch a turn", async t
     message: { message_id: "om_image", message_type: "image", chat_id: "oc_chat", chat_type: "p2p", content: "{}" } } });
   await new Promise(resolve => setTimeout(resolve, 50));
   assert.equal(f.adapter.calls.length, 0);
-  // Only the image produces a hint card — never a Codex turn.
+  // Only the image produces a hint card — never a Codex turn, never a reaction.
   assert.equal(f.notifier.sent.length, 1);
   assert.equal(f.notifier.sent[0].options.title, "CodexWorker-提示");
+  assert.deepEqual(f.notifier.reactions, []);
 
   f.socket.frame(textEvent("ou_trainer", "om_dup", "只算一次"));
   await waitFor(() => f.notifier.sent.length === 2, "first reply");
@@ -226,6 +314,10 @@ test("a failed turn still answers with a 回复 card and records the user messag
   assert.equal(f.notifier.sent[0].options.title, "CodexWorker-回复");
   assert.match(f.notifier.sent[0].text, /^本轮失败：/);
   assert.equal(f.channel.status().failures, 1);
+  // The receipt is cleared even though the turn failed.
+  await waitFor(() => f.notifier.reactions.some(item => item[0] === "remove"), "reaction removed");
+  assert.deepEqual(f.notifier.reactions.find(item => item[0] === "remove"),
+    ["remove", "om_fail", "react_om_fail"]);
   const threadId = f.channel.store.get("ou_trainer")?.threadId;
   assert.ok(threadId);
   const snapshot = await f.sessionStore.read(threadId);

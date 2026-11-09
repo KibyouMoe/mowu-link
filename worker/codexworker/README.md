@@ -236,7 +236,9 @@ cat ~/.hermes/secrets/codexworker.config.json
   不转给 Codex。
 - 每个 open_id 一个持久 Codex 会话，映射在 `~/.codex/state/codexworker/feishu-sessions.json`
   （原子写、mode 600）。第一条消息新建会话，之后走 `codex exec resume <session-id>`；进程重启后仍续同一会话。
-- 回合开始先发「输出」卡，按 1.5–2s 节流用 PATCH 更新同一张卡（耗时/工具名/中间文本）；PATCH 被拒时
+- 收到文本先给训练员那条消息加「敲字中」表情回执（`addReaction`），回合结束——成功或失败——再移除
+  （`removeReaction`）；两者失败都只记日志，不影响回合与卡片。回执按 `message_id` 各记各的，并发消息不互相覆盖（仅内存，不落盘）。
+- 表情回执之后才发「输出」卡，按 1.5–2s 节流用 PATCH 更新同一张卡（耗时/工具名/中间文本）；PATCH 被拒时
   退化为连续发新的「输出」卡。回合结束发「回复」卡：正文是最终答复，底部 `会话 <threadId>`。
 - 同一 open_id 串行：上一轮没跑完时后一条排队，不会撞 `409 turn_in_progress`。飞书 ACK 与回合解耦
   （先落盘再返回，回合后台跑），长任务不会卡住入站。

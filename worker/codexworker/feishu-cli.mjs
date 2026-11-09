@@ -3,8 +3,10 @@
 // FeishuWebsocketClient) and native-cli.mjs (CliNativeAdapter.dispatch), and
 // adds the CLI-specific pieces the Desktop manager used to own:
 //
-//   inbound p2p text -> one persistent Codex session per sender (open_id)
+//   inbound p2p text -> typing reaction on the trainer's own message
+//   -> one persistent Codex session per sender (open_id)
 //   -> 「输出」card (throttled progress) -> 「回复」card (final text + session id)
+//   -> reaction removed
 //
 // It never touches the Desktop path (desktop-manager.mjs / server.mjs); a CLI
 // process has no writer lease, no Desktop relay and no question cards.
@@ -310,6 +312,9 @@ export class CliFeishuChannel {
     this.closed = false;
     this.queues = new Map();
     this.seen = new Map();
+    // Feishu message_id -> reaction_id, memory only. Each message keeps its own
+    // id so concurrent turns never clobber each other's typing receipt.
+    this.reactions = new Map();
     this.turns = 0;
     this.failures = 0;
     this.rejected = 0;
@@ -354,6 +359,7 @@ export class CliFeishuChannel {
       bootstrapOwner: this.bootstrapOwner,
       sessions: Object.keys(this.store.state.sessions).length,
       activeTurns: this.queues.size,
+      reactions: this.reactions.size,
       turns: this.turns,
       failures: this.failures,
       rejected: this.rejected,
@@ -380,8 +386,48 @@ export class CliFeishuChannel {
     if (this.seen.has(messageId)) return { duplicate: true, messageId };
     this.seen.set(messageId, true);
     if (this.seen.size > MAX_SEEN_MESSAGES) this.seen.delete(this.seen.keys().next().value);
-    this.#enqueue(event.open_id, () => this.#turn(event, messageId));
+    // Typing receipt before anything visible. It starts now (so a message that
+    // arrives while the sender is still busy is acknowledged immediately) while
+    // the queue order stays synchronous, and the turn waits for it so the
+    // reaction can never land after the 「输出」card.
+    const acknowledged = this.#acknowledge(event);
+    this.#enqueue(event.open_id, async () => {
+      await acknowledged;
+      try { return await this.#turn(event, messageId); }
+      finally { await this.#clearReaction(event.message_id); }
+    });
     return { accepted: true, messageId };
+  }
+
+  // Desktop parity (desktop-manager.mjs handleFeishuInput): the trainer's own
+  // message gets a reaction as the receipt. A missing permission, a bad token
+  // or a network error is only logged — the turn must run regardless.
+  #acknowledge(event) {
+    const messageId = event.message_id;
+    if (typeof this.notifier?.addReaction !== "function") return Promise.resolve(null);
+    return this.notifier.addReaction(messageId).then(reactionId => {
+      const id = reactionId ? String(reactionId) : null;
+      // Keyed by message id: two messages in flight never share a receipt.
+      if (id) this.reactions.set(messageId, id);
+      return id;
+    }).catch(error => {
+      this.logger("warn", "feishu_reaction_failed", { stage: "add", messageId,
+        code: error?.code ?? null, message: error?.message ?? String(error) });
+      return null;
+    });
+  }
+
+  async #clearReaction(messageId) {
+    const reactionId = this.reactions.get(messageId) ?? null;
+    this.reactions.delete(messageId);
+    if (!reactionId || typeof this.notifier?.removeReaction !== "function") return;
+    try {
+      const removed = await this.notifier.removeReaction(messageId, reactionId);
+      if (!removed) this.logger("warn", "feishu_reaction_remove_failed", { messageId, reactionId });
+    } catch (error) {
+      this.logger("warn", "feishu_reaction_remove_failed", { messageId, reactionId,
+        code: error?.code ?? null, message: error?.message ?? String(error) });
+    }
   }
 
   #admit(event) {
