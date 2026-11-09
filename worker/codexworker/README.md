@@ -1,70 +1,95 @@
 # CodexWorker
 
 CodexWorker 是 `operate-codex-bridge` 仓库 `assets/desktop-plugin`（上游「鲁道夫 Hermes Bridge」0.2.38）
-的改名副本：把插件名、MCP server 名、状态目录、日志前缀和进程标题统一为 **CodexWorker**，
-并新增一个 CLI 启动入口 `bin/codexworker`。桌面端业务逻辑（`server.mjs`、`desktop-manager.mjs`、
-`mcp-business.mjs` 等）保持原样，没有重写。
+的改名副本，并新增了两样东西：
 
-本副本只做两件事：**改名** + **加 CLI 入口**。CLI 不注入 Codex Desktop 的原生任务管道，
-因此它提供的是进程存活入口（`GET /health`、`GET /version`），不是完整的 Bridge 管理 API。
+1. **CLI 启动入口** `bin/codexworker` → `cli.mjs`（`serve` / `mcp` 两种模式）；
+2. **native-cli 后端** `native-cli.mjs`：没有 Codex Desktop 注入管道时，用本机 `codex` CLI 提供
+   与 Desktop 同一套 `/turn`、`/threads`、`/manager/*` 能力，会话可连续、可 resume。
 
-## 与桌面版差异（只有 CLI 入口）
+桌面端业务逻辑（`server.mjs`、`desktop-manager.mjs`、`mcp-business.mjs` 等）保持原样，没有重写，
+也没有删除任何 Desktop 代码路径。两个后端由能力探测选择：
+
+| backend | 何时使用 | 原生能力来自 | 需要 |
+| --- | --- | --- | --- |
+| `desktop` | `CODEX_APP_TOOLS_PIPE_PATH` 存在，或配置 `"backend": "desktop"` | Desktop 注入的 app-tools pipe（原 `desktop-manager.mjs`） | Codex Desktop 插件宿主里的 `codexworker mcp` |
+| `cli` | 默认（没有 pipe），或配置 `"backend": "cli"` | 本机 `codex exec` / `codex exec resume` | `codex` CLI 已安装并登录 |
+
+> 独立 CLI 进程**无法**挂接 Desktop 注入的命名管道。因此 `serve` 模式下即使环境里残留
+> `CODEX_APP_TOOLS_PIPE_PATH`，也只会把 `backend` 报成 `desktop` 并保持存活接口（`ready:false`），
+> 不会偷偷换成 CLI 后端；要强制 CLI 用 `--backend cli` 或配置 `"backend": "cli"`。
+
+## 与桌面版差异
 
 | 项 | 桌面版（上游） | 本副本（CodexWorker） |
 | --- | --- | --- |
-| 运行宿主 | Codex Desktop 插件宿主，注入 `CODEX_APP_TOOLS_PIPE_PATH` | 可独立 `node` 启动 CLI；桌面模式仍需插件宿主 |
-| 入口 | `.mcp.json` → `scripts/launch_codexworker.cmd` → `server.mjs` | 新增 `bin/codexworker` → `cli.mjs`（默认 `serve`，另有 `mcp` 透传） |
-| HTTP 面 | `desktop-manager.mjs` 全量管理 API | CLI 只开 `/health`、`/version`；其他路由 404 |
+| 运行宿主 | Codex Desktop 插件宿主，注入 `CODEX_APP_TOOLS_PIPE_PATH` | 可独立 `node` 启动；桌面模式仍需插件宿主 |
+| 入口 | `.mcp.json` → `scripts/launch_codexworker.cmd` → `server.mjs` | `bin/codexworker` → `cli.mjs`（默认 `serve`，另有 `mcp` 透传） |
+| 原生后端 | `desktop-manager.mjs` + app-tools pipe | 有 pipe → Desktop；无 pipe → `native-cli.mjs`（`codex exec`） |
+| HTTP 面 | 全量管理 API（含飞书/图片/事件流） | CLI 暴露 DSH 兼容子集：`/health`、`/version`、`/threads`、`/turn`、`/manager/*` |
+| 会话来源 | Desktop 聊天 | `codex exec` 写入的 `$CODEX_HOME/sessions/**/*.jsonl` |
 | 名称 | rudolf-hermes-bridge / 鲁道夫 | codexworker / CodexWorker |
 | 状态目录 | `~/.codex/state/rudolf-hermes-bridge` | `~/.codex/state/codexworker`（`CODEXWORKER_STATE_DIR` 可覆盖） |
+| 飞书 / 图片 / 提问卡 | 支持 | CLI 不启动 |
 | 业务逻辑 | — | 未重写，逐文件复制 |
-
-参数解析、环境变量注入都集中在 `cli.mjs`；`mcp` 模式只是设好环境变量后 `import("./server.mjs")`，
-原 stdio MCP 入口不变。
 
 ## 启动
 
-依赖：Node.js ≥ 20（与上游一致），macOS / Linux / Windows 均可运行 CLI。
+依赖：Node.js ≥ 20，macOS / Linux / Windows 均可运行 CLI；CLI 后端另需 `codex` CLI。
 
 ```sh
 cd worker/codexworker
 
 # 帮助 / 版本
 ./bin/codexworker --help
-./bin/codexworker --version          # 版本读 package.json
+./bin/codexworker --version
 
-# 最小启动（默认 host=127.0.0.1, port=8903）
-./bin/codexworker
+# 启动 CLI 原生 Bridge（默认 127.0.0.1:8903）
+./bin/codexworker --config ./codexworker.config.example.json
 
-# 指定端口 / 配置 / 日志
-./bin/codexworker --host 127.0.0.1 --port 8903 \
-  --config ./codexworker.config.example.json \
+# 指定端口 / 日志
+./bin/codexworker --config ./codexworker.config.example.json --port 8904 \
   --log /tmp/codexworker.log
 
 # 验证
-curl -sS http://127.0.0.1:8903/health
-curl -sS http://127.0.0.1:8903/version
+curl -sS http://127.0.0.1:8904/health
+curl -sS http://127.0.0.1:8904/version
 
-# 前台 Ctrl-C，或
-kill -TERM <pid>
+# 前台 Ctrl-C，或 kill -TERM <pid>
 ```
 
-最小配置 `codexworker.config.example.json`：
+配置示例 `codexworker.config.example.json`：
 
 ```json
 {
   "host": "127.0.0.1",
   "port": 8903,
   "bridgeName": "CodexWorker",
-  "operatingMode": "desktop-bridge",
+  "backend": "auto",
+  "operatingMode": "cli-native",
+  "workspace": "~/projects/mowulink",
+  "turnTimeoutMs": 600000,
+  "codex": {
+    "bin": "codex",
+    "home": "~/.codex",
+    "sandbox": "workspace-write",
+    "approvalPolicy": "never",
+    "model": null,
+    "extraArgs": []
+  },
   "tokenFile": "~/.codex/secrets/codexworker.token"
 }
 ```
 
-- `port` 缺省 `8903`；`--port 0` 由系统分配空闲端口（启动日志会打印实际端口）。
-- `host` 缺省 `127.0.0.1`，CLI 不校验 Bearer；`/health` 只含进程与配置元数据，不含会话、token 或路径。
-- `tokenFile` 是**桌面 manager 路径**的配置项（要求 ≥24 字符），CLI `serve` 不读取；`mcp` 模式交给原逻辑。
-- `--log` 写 JSONL（`ts/level/event/pid/...`），未指定时日志走 stderr。
+- `backend`：`auto`（默认）| `cli` | `desktop`，也可用 `--backend` 覆盖。
+- `workspace`：新会话的默认 cwd，也是 `codex exec` 的进程 cwd（`~` 会展开）。
+- `codex.bin`：`codex` 可执行文件；不填时按 `CODEXWORKER_CODEX_BIN` → `PATH` → `~/.hermes/tools/*/bin/codex` 查找。
+- `codex.sandbox`：`workspace-write`（默认）| `read-only` | `danger-full-access`；resume 时通过
+  `-c sandbox_mode="..."` 传入（`codex exec resume` 没有 `--sandbox` 旗标）。
+- `codex.approvalPolicy`：默认 `never`，非交互进程不会弹审批。
+- `tokenFile`：文件存在且 ≥24 字符时，除 `GET /health`、`GET /version` 外都要求 `Authorization: Bearer <token>`；
+  文件不存在则回环地址默认不校验。监听非回环地址时**必须**配置 token，否则拒绝启动。
+- `--port 0` 由系统分配空闲端口，启动日志会打印实际端口。
 
 `mcp` 透传模式（仍是原 Desktop 插件行为，需要插件宿主环境）：
 
@@ -72,32 +97,129 @@ kill -TERM <pid>
 ./bin/codexworker mcp --log /tmp/codexworker-mcp.log
 ```
 
-## 当前限制
+## CLI 模式（native-cli）
 
-CLI **不能**替代 Codex Desktop 插件宿主。以下能力仍依赖 Desktop，当前不可用：
+`native-cli.mjs` 实现与 Desktop 原生层相同的四件事，底层换成 `codex` CLI：
 
-1. **原生任务调用**：`read_thread` / `send_message_to_thread` / `create_thread` / `fork_thread` /
-   `set_thread_title` / `list_threads` 需要 `CODEX_APP_TOOLS_PIPE_PATH` 指向 Desktop 注入的命名管道；
-   CLI 进程没有该管道，`/health` 固定 `ready:false`、`desktopNative.attached:false`。
-2. **manager HTTP API**：`/threads`、`/turn`、`/manager/*`、`/bridge/*` 未启动，访问返回 404；
-   完整实现仍只在 `desktop-manager.mjs`，由插件宿主内的 `mcp-business.mjs` 激活。
-3. **manager 绑定/写者租约**：依赖 `manager-binding.json`、Desktop 会话上下文和 `desktop-manager.sock`，
-   CLI 不执行 `initialize()`，因此不会成为 writer，也不会提供会话登记。
-4. **飞书中继 / 上线通知 / 公开图片输出 / 提问卡**：需要 Desktop 原生会话 + 飞书凭据，CLI 不启动。
-5. **Windows Desktop 生命周期守护**：`scripts/launch-desktop-lifetime.ps1`、watchdog 系列只在
-   Desktop 宿主里生效；CLI 不做进程守护，也不创建常驻任务。
-6. **状态目录隔离**：改名后默认 `~/.codex/state/codexworker`，不会读写原插件的
-   `~/.codex/state/rudolf-hermes-bridge`；如需复用旧状态，显式设 `CODEXWORKER_STATE_DIR`。
+| 能力 | Desktop 实现 | CLI 实现 |
+| --- | --- | --- |
+| 发任务 | `send_message_to_thread` 走 pipe | `codex exec --skip-git-repo-check --json -`（首轮） |
+| 续会话 | 同上，带 threadId | `codex exec resume <session-id> --skip-git-repo-check --json -` |
+| 读增量 | `wait_threads` / `read_thread` | 解析 `exec --json` 的 NDJSON 事件流 |
+| 列历史 | `list_threads` | `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-*.jsonl` |
+| 会话 id | Desktop threadId | `thread.started` 事件的 `thread_id`（= Codex session UUID） |
+
+提示词通过 **stdin** 传入（`-` 占位），不拼进 argv：避免长度限制和以 `-` 开头的文本被当成旗标。
+子进程 env 会删除 `ALL_PROXY`/`all_proxy`（codex 不认 socks5），保留 `HTTPS_PROXY`；需要覆盖时配置
+`codex.proxy`。
+
+### 接口
+
+```
+GET  /health
+GET  /version
+GET  /threads?limit=50
+POST /threads                     {"cwd"?, "title"?}          -> {"thread":{"id":"cli-..."}}
+POST /turn                        {"threadId"?, "text", "wait"?}
+GET  /threads/:id
+GET  /threads/:id/last-turn
+GET  /threads/:id/progress
+POST /threads/:id/resume          {"text"?}                   -> 带 text 时真正续一轮
+POST /threads/:id/release | /unsubscribe                      -> no-op ok
+GET  /manager/sessions
+GET  /manager/sessions/:id
+POST /manager/sessions/adopt      {"threadId"}
+POST /manager/messages            {"targetThreadId", "text", "wait"?}
+GET  /manager/events?after=0&limit=500[&stream=0]
+```
+
+`POST /turn` / `POST /manager/messages` 的同步响应与 Desktop `waitResult` 同形：
+
+```json
+{
+  "threadId": "...", "sessionId": "...", "turnId": "...", "messageId": "...",
+  "status": "completed", "resultText": "OK", "reason": "completed",
+  "toolCalls": [], "usage": {"input_tokens": 21704, "output_tokens": 5}, "durationMs": 6553
+}
+```
+
+`wait:false` 返回 `202 {"action":"dispatch_pending","status":"started"}`，后台继续跑，事件进
+`/manager/events`。同一 thread 同时只允许一个 turn，重复提交返回 `409 turn_in_progress`。
+
+### 会话与历史
+
+- 不传 `threadId` 调用 `POST /turn`：新开一轮，返回的 `threadId` 就是 Codex session UUID。
+- 传同一 `threadId` 再调用：走 `codex exec resume <session-id>`，上下文连续（本机实测第二轮
+  `input_tokens` 从 21704 涨到 43429，回答仍基于第一轮）。
+- `POST /threads` 先发一个 `cli-<uuid>` 临时 id；首次 `/turn` 后该 id 绑定真实 session，
+  后续继续用 `cli-...` 或 session UUID 都能 resume。
+- `GET /threads` 合并两类：`source:"cli"`（本进程/状态文件管理的会话）和
+  `source:"codex-session"`（磁盘上已有、但未登记的 Codex 会话）。同一 session 不会重复列出。
+- 历史/最后一轮直接从 rollout jsonl 重建（`userMessage` / `agentMessage`，含 `phase`），
+  服务重启后仍可读；`GET /manager/events` 的事件流只存在进程内，重启清空。
+
+### 真实调用示例
+
+```sh
+# 第一轮（新会话）
+curl -sS -X POST http://127.0.0.1:8904/turn \
+  -H 'content-type: application/json' \
+  -d '{"text":"只回复两个字母：OK"}'
+# -> {"threadId":"01a1be9d-...","sessionId":"01a1be9d-...","status":"completed","resultText":"OK",...}
+
+# 第二轮（同一会话，验证上下文）
+curl -sS -X POST http://127.0.0.1:8904/turn \
+  -H 'content-type: application/json' \
+  -d '{"threadId":"01a1be9d-...","text":"刚才我让你回什么？两个字"}'
+# -> {"status":"completed","resultText":"OK","usage":{"input_tokens":43429,...}}
+
+# 会话列表 / 最后一轮 / 进度
+curl -sS 'http://127.0.0.1:8904/threads?limit=5'
+curl -sS 'http://127.0.0.1:8904/threads/<id>/last-turn'
+curl -sS 'http://127.0.0.1:8904/threads/<id>/progress'
+```
+
+### 与 Desktop 的行为差异（已知限制）
+
+1. **工具审批**：`codex exec` 是非交互进程，`approval_policy` 由配置固定（默认 `never`）。
+   需要人工批准的命令不会弹窗等待，而是直接失败或按沙箱策略拒绝；不要在 CLI 后端上跑必须人工审批的操作。
+2. **沙箱**：默认 `workspace-write`，只允许写 cwd/工作区；要只读或完全放开用 `codex.sandbox` 显式配置。
+3. **图片**：`/turn` 目前只接受文本。`codex exec --image` 尚未接入（传图片会被忽略，不会报错）。
+   公开图片输出、飞书图片中继在 CLI 下也没有。
+4. **MCP 工具**：CLI 后端里 Codex 使用它自己的 MCP 配置；Desktop 专属的
+   `read_thread`/`send_message_to_thread`/`create_thread`/`fork_thread`/`list_threads` 在本后端不存在，
+   不要指望 `/manager/*` 的 Desktop 语义（多设备、跨窗口 steer、fork）完全一致。
+5. **流式输出**：`exec --json` 只给消息级事件（`item.completed`），没有 token 级 delta；
+   `/health` 里 `tokenStreaming:false`。长回答要等整条消息完成。
+6. **未实现的控制面**：`fork`、`compact`、`stop` 返回 `501 capability_unavailable`；
+   `release`/`unsubscribe` 是 no-op。没有 Desktop writer 租约、飞书中继、上线通知、提问卡、
+   公开图片输出、watchdog。
+7. **会话 cwd**：resume 时使用状态文件里记录的 cwd（不存在则回退 `workspace`）；`codex exec resume`
+   本身没有 `--cd`，所以不要手动改 cwd 后期待续上旧会话的工作目录。
+
+## 当前限制（Desktop 专属能力）
+
+以下能力仍只在 Codex Desktop 插件宿主内可用，CLI 后端不提供：
+
+1. **Desktop 原生任务调用**：`read_thread` / `send_message_to_thread` / `create_thread` / `fork_thread` /
+   `set_thread_title` / `list_threads` 需要 `CODEX_APP_TOOLS_PIPE_PATH`；在 `serve` 模式下即使变量存在
+   也无法挂接，`/health` 会如实报告 `backend:"desktop"`、`attached:false`、`ready:false`。
+2. **manager 绑定/写者租约**：依赖 `manager-binding.json`、Desktop 会话上下文和
+   `desktop-manager.sock`；CLI 不执行 `DesktopManager.initialize()`，不会成为 writer。
+3. **飞书中继 / 上线通知 / 公开图片输出 / 提问卡 / watchdog**：需要 Desktop 会话与飞书凭据，CLI 不启动。
+4. **状态目录隔离**：默认 `~/.codex/state/codexworker`，不读写原插件的
+   `~/.codex/state/rudolf-hermes-bridge`；native-cli 只额外写 `native-cli-state.json`。
 
 ## 目录
 
 ```
 bin/codexworker        CLI 启动器（sh，可执行）
-cli.mjs                参数解析 + serve/mcp 入口（本副本唯一新增逻辑）
-server.mjs             原 MCP stdio 入口（仅加 process.title / 状态目录覆盖）
+cli.mjs                参数解析 + serve/mcp 入口；serve 的 HTTP 路由与能力探测
+native-cli.mjs         native-cli 后端：codex exec / resume、NDJSON、历史扫描
+server.mjs             原 MCP stdio 入口（仅加 process.title / 状态目录 / backend 探测）
 desktop-manager.mjs    原 manager HTTP 实现（未改逻辑，仅改名）
 mcp-business.mjs       原业务工具实现（未改逻辑，仅改名）
-tests/ scripts/        原测试与脚本（未改逻辑，仅改名）
+tests/ scripts/        原测试与脚本 + tests/native-cli.test.mjs
 ```
 
 ---

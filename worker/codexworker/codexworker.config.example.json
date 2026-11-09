@@ -2,6 +2,17 @@
   "host": "127.0.0.1",
   "port": 8903,
   "bridgeName": "CodexWorker",
-  "operatingMode": "desktop-bridge",
+  "backend": "auto",
+  "operatingMode": "cli-native",
+  "workspace": "~/projects/mowulink",
+  "turnTimeoutMs": 600000,
+  "codex": {
+    "bin": "codex",
+    "home": "~/.codex",
+    "sandbox": "workspace-write",
+    "approvalPolicy": "never",
+    "model": null,
+    "extraArgs": []
+  },
   "tokenFile": "~/.codex/secrets/codexworker.token"
 }

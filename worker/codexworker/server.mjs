@@ -5,6 +5,13 @@ import { fileURLToPath } from "node:url";
 import { ensureDesktopSupervisor } from "./desktop-lifecycle.mjs";
 import { PluginRuntime } from "./plugin-runtime.mjs";
 
+// Backend probe: Codex Desktop injects CODEX_APP_TOOLS_PIPE_PATH into the
+// plugin host. Without it this stdio entry still speaks MCP, but native task
+// calls cannot succeed; the standalone `codexworker serve` entry uses the
+// native-cli backend (codex exec) instead. Desktop behavior is unchanged.
+process.env.CODEXWORKER_NATIVE_BACKEND ??=
+  (process.env.CODEX_APP_TOOLS_PIPE_PATH ?? "").trim() ? "desktop" : "cli";
+
 const pluginRoot = path.dirname(fileURLToPath(import.meta.url));
 // CodexWorker copy: the state directory is configurable so a CLI run never
 // shares the Desktop plugin's durable writer state by accident.
