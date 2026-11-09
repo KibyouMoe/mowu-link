@@ -785,9 +785,11 @@ class Worker:
     def _report(self, payload: Dict[str, Any]) -> bool:
         if str(payload.get("task_id") or "").startswith("sub-"):
             # 订阅事件不是 router 创建的任务，router 里没有对应记录，
-            # 上报只会拿到 unknown_task；结果已经在 announce/日志里。
-            log.info("订阅任务 %s 不上报 router（无对应 task 记录）",
-                     payload.get("task_id"))
+            # 上报只会拿到 unknown_task；结果自己发一条通知补上。
+            label = "完成" if payload.get("status") == "done" else "失败"
+            self._announce("%s %s：%s" % (
+                payload.get("task_id"), label,
+                tail_text(payload.get("summary") or "", 300) or "(无摘要)"))
             return True
         url = self._url("/result")
         for attempt in range(1, 4):
