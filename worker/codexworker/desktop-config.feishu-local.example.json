@@ -1,0 +1,24 @@
+{
+  "operatingMode": "feishu-local",
+  "host": "127.0.0.1",
+  "port": 8903,
+  "bridgeName": "<local Codex display name>",
+  "machine": "<local machine identity>",
+  "tokenFile": "<existing machine-local loopback credential file>",
+  "projectId": "<existing Codex Desktop projectId>",
+  "workspaceRoots": ["<existing allowed workspace root>"],
+  "pollMs": 1000,
+  "messageSourceLabels": true,
+  "hermesIngress": { "enabled": false },
+  "xiliu": { "enabled": false },
+  "feishu": {
+    "configFile": "<existing private Feishu configuration file>",
+    "inboundEnabled": true,
+    "onlineNotificationEnabled": true,
+    "onlineStableMs": 30000,
+    "defaultDelivery": "steer",
+    "streamEnabled": true,
+    "autoImageOutput": true,
+    "trainerOpenIdWhitelist": ["<existing authorized trainer open_id>"]
+  }
+}

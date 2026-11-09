@@ -1,0 +1,23 @@
+{
+  "name": "codexworker",
+  "version": "0.2.38",
+  "description": "CodexWorker: exposes Codex Desktop native tasks to Hermes through a local manager bridge.",
+  "author": {
+    "name": "Rudolf (original operate-codex-bridge author)"
+  },
+  "interface": {
+    "displayName": "CodexWorker",
+    "shortDescription": "CodexWorker bridge for Codex Desktop native tasks.",
+    "longDescription": "Runs inside the Codex Desktop plugin host and verifies access to native task tools before enabling the Hermes manager API. This copy only renames the plugin and adds a CLI entry point.",
+    "developerName": "Rudolf / mowulink",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Probe the CodexWorker desktop-native connection."
+    ]
+  },
+  "mcpServers": "./.mcp.json"
+}

@@ -1,0 +1,18 @@
+{
+  "name": "codexworker",
+  "version": "0.2.38",
+  "private": true,
+  "type": "module",
+  "description": "CodexWorker — CLI entry for a renamed copy of the operate-codex-bridge desktop-plugin (Codex Desktop native task bridge).",
+  "bin": {
+    "codexworker": "bin/codexworker"
+  },
+  "scripts": {
+    "start": "node cli.mjs",
+    "mcp": "node server.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}

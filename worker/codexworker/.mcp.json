@@ -1,0 +1,32 @@
+{
+  "mcpServers": {
+    "codexworker": {
+      "command": "cmd.exe",
+      "cwd": ".",
+      "args": [
+        "/d",
+        "/s",
+        "/c",
+        "call",
+        "./scripts/launch_codexworker.cmd",
+        "./server.mjs"
+      ],
+      "enabled": true,
+      "default_tools_approval_mode": "approve",
+      "env_vars": [
+        "CODEX_APP_TOOLS_PIPE_PATH",
+        "CODEX_MCP_NODE_PATH",
+        "CODEX_BROWSER_USE_NODE_PATH",
+        "CODEX_ELECTRON_RESOURCES_PATH",
+        "XDG_CACHE_HOME",
+        "HOME",
+        "USERPROFILE",
+        "LOCALAPPDATA",
+        "PATH"
+      ],
+      "startup_timeout_sec": 60,
+      "tool_timeout_sec": 180,
+      "env": {}
+    }
+  }
+}
