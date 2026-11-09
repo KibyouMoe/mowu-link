@@ -22,6 +22,7 @@ import { randomUUID } from "node:crypto";
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { CliNativeAdapter, detectCodexVersion, httpError, probeNativeBackend, resolveCodexBinary } from "./native-cli.mjs";
+import { SessionStore } from "./session-store.mjs";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const NAME = "CodexWorker";
@@ -266,14 +267,37 @@ if (args.command === "mcp") {
     await adapter.init();
     const codexVersion = adapter.codexVersion ?? await detectCodexVersion(codexBin, process.env);
 
+    // Bridge-owned history: /threads, transcripts and card history read from
+    // here. The codex rollout jsonl is only the process stream.
+    const history = await new SessionStore(path.join(stateDir, "history"), { logger: log }).init();
+
+    // Feishu long connection (CLI mode). Optional: a missing/broken credential
+    // file must never take the HTTP bridge down, so failures are logged and the
+    // channel stays disabled.
+    let feishuChannel = null;
+    if (config.feishu?.inboundEnabled) {
+      try {
+        const { startCliFeishuChannel } = await import("./feishu-cli.mjs");
+        feishuChannel = await startCliFeishuChannel({
+          config, adapter, stateDir, bridgeName: config.bridgeName ?? NAME, sessionStore: history,
+          logger: (level, event, fields) => log(level, event, fields ?? {})
+        });
+        log("info", "feishu_channel_ready", feishuChannel.status().connection ? {
+          phase: feishuChannel.status().phase, whitelistCount: feishuChannel.status().whitelistCount
+        } : {});
+      } catch (error) {
+        log("error", "feishu_channel_unavailable", { message: error?.message ?? String(error) });
+      }
+    }
+
     const limitations = [
       "Turns run `codex exec` as a child process; there is no Desktop session except the one Codex itself records under CODEX_HOME/sessions.",
       "exec --json emits message-level events, not token deltas: no streaming text, no interactive tool-approval prompt. approval_policy is fixed by config (default never).",
       "Images cannot be attached yet (only text is passed; codex exec --image is not wired to /turn).",
       "MCP tools follow the codex CLI config; Desktop-only native tools (read_thread/send_message_to_thread/...) do not exist in this backend.",
       "fork/compact/stop/unsubscribe are not implemented (release/unsubscribe answer ok as no-ops).",
-      "Feishu relay, online announcements, public image output, question cards and the Desktop writer lease are not started by the CLI.",
-      "The event stream (GET /manager/events) is in-process only; transcripts are rebuilt from rollout files after a restart."
+      "Feishu inbound (long connection) runs only when feishu.inboundEnabled; online announcements, public image output, question cards, slash commands and the Desktop writer lease are not started by the CLI.",
+      "The event stream (GET /manager/events) is in-process only; transcripts are rebuilt from the bridge-owned session store (~/.codex/state/codexworker/history), not from codex rollouts."
     ];
 
     const health = () => ({
@@ -289,8 +313,12 @@ if (args.command === "mcp") {
       desktopNative: { available: true, attached: false, backend: "cli", pipeConfigured: probe.pipeConfigured,
         reason: probe.reason },
       nativeCli: { ...adapter.status(), backend: "cli", codexBinPresent: Boolean(codexBin), codexVersion },
+      history: { root: history.root, impl: "jsonl-per-session", authoritative: true },
+      feishu: feishuChannel ? feishuChannel.status()
+        : { inboundEnabled: false, enabled: false, reason: config.feishu?.inboundEnabled ? "start_failed" : "disabled" },
       capabilities: { health: true, version: true, mcpStdio: true, managerHttp: true, desktopNative: false,
-        cliNative: true, turn: true, threads: true, resume: true, history: true, tokenStreaming: false },
+        cliNative: true, turn: true, threads: true, resume: true, history: true, tokenStreaming: false,
+        feishuInbound: Boolean(feishuChannel) },
       limits: limitations
     });
 
@@ -323,18 +351,59 @@ if (args.command === "mcp") {
       return actual.length === expected.length && actual.equals(expected);
     };
 
-    const runTurn = async (body) => {
+    // Every turn is recorded in the bridge-owned history before it is dispatched
+    // and after it replies; /threads and transcripts never read codex rollouts.
+    const runTurn = async (body, { source = "http" } = {}) => {
       const text = body.text ?? body.message ?? body.prompt;
       if (typeof text !== "string" || !text.trim()) throw httpError(400, "invalid_request", "text is required.");
       const messageId = typeof body.messageId === "string" && body.messageId ? body.messageId : randomUUID();
       if (body.threadId != null && typeof body.threadId !== "string") throw httpError(400, "invalid_request", "threadId must be a string.");
-      if (body.threadId) await adapter.adopt(body.threadId).catch(error => {
-        if (error.status !== 404) throw error;
-        // A caller-chosen id that is not a recorded session becomes a fresh
-        // conversation key; it is replaced by the real session id afterwards.
-      });
-      return { ...(await adapter.dispatch({ threadId: body.threadId ?? null, text, cwd: body.cwd ?? null,
-        messageId, onEvent: event => pushStream(event) })), messageId };
+      let threadId = body.threadId ?? null;
+      const title = text.replace(/\s+/g, " ").slice(0, 80);
+      if (threadId) {
+        await adapter.adopt(threadId).catch(error => {
+          if (error.status !== 404) throw error;
+          // A caller-chosen id that is not a recorded session becomes a fresh
+          // conversation key; it is replaced by the real session id afterwards.
+        });
+        await history.ensure({ threadId, cwd: body.cwd ?? null, source, title });
+      } else {
+        const thread = await adapter.register({ cwd: body.cwd ?? null, title });
+        threadId = thread.id;
+        await history.create({ threadId, cwd: thread.cwd ?? null, source, title: thread.title ?? title });
+      }
+      await history.appendMessage(threadId, { role: "user", text, messageId, source });
+      const result = await adapter.dispatch({ threadId, text, cwd: body.cwd ?? null,
+        messageId, onEvent: event => pushStream(event) });
+      if (result.resultText && String(result.resultText).trim()) {
+        await history.appendMessage(threadId, { role: "assistant", text: result.resultText,
+          messageId: result.turnId ?? null, turnId: result.turnId ?? null, source });
+      }
+      await history.setMeta(threadId, { sessionId: result.sessionId ?? null, updatedAt: new Date().toISOString() });
+      return { ...result, messageId };
+    };
+
+    // One-time import for sessions that only exist as codex rollouts (adopt).
+    // After this the store is authoritative; rollouts are never read again.
+    const importTranscript = async threadId => {
+      const existing = await history.read(threadId, { limit: 1 });
+      if (existing.ok && existing.totalMessages > 0) return 0;
+      let snapshot;
+      try { snapshot = await adapter.readThread(threadId, { turnLimit: 50 }); }
+      catch { return 0; }
+      const messages = [];
+      for (const turn of snapshot.turns ?? []) {
+        for (const item of turn.items ?? []) {
+          if (!item?.text) continue;
+          if (item.type === "userMessage") messages.push({ role: "user", text: item.text,
+            messageId: item.id ?? null, ts: turn.createdAt ?? null, source: "cli" });
+          else if (item.type === "agentMessage") messages.push({ role: "assistant", text: item.text,
+            messageId: item.id ?? null, turnId: turn.id ?? null,
+            ts: turn.completedAt ?? turn.createdAt ?? null, source: "cli" });
+        }
+      }
+      if (messages.length) await history.appendMessages(threadId, messages);
+      return messages.length;
     };
 
     const streams = new Set();
@@ -367,11 +436,13 @@ if (args.command === "mcp") {
         }
         if (method === "GET" && url.pathname === "/threads") {
           const limit = Number(url.searchParams.get("limit") ?? 50);
-          return send(res, 200, { threads: await adapter.history({ limit }) }, method);
+          return send(res, 200, { threads: await history.list({ limit }) }, method);
         }
         if (method === "POST" && url.pathname === "/threads") {
           body = await readBody(req);
           const thread = await adapter.register({ cwd: body.cwd ?? null, title: body.title ?? null });
+          await history.create({ threadId: thread.id, cwd: thread.cwd ?? null, source: "http",
+            title: body.title ?? null, createdAt: thread.createdAt });
           return send(res, 200, { thread: { id: thread.id, cwd: thread.cwd, createdAt: thread.createdAt } }, method);
         }
         if (method === "POST" && url.pathname === "/turn") {
@@ -405,7 +476,7 @@ if (args.command === "mcp") {
           return;
         }
         if (method === "GET" && url.pathname === "/manager/sessions") {
-          const threads = await adapter.history({ limit: Number(url.searchParams.get("limit") ?? 50) });
+          const threads = await history.list({ limit: Number(url.searchParams.get("limit") ?? 50) });
           const sessions = threads.map(thread => ({ threadId: thread.id, sessionId: thread.sessionId,
             cwd: thread.cwd, createdAt: thread.createdAt, updatedAt: thread.updatedAt,
             alias: thread.title, hostId: "local", live: thread.live, turns: thread.turns }));
@@ -425,18 +496,22 @@ if (args.command === "mcp") {
           const id = adopt[1] ? decodeURIComponent(adopt[1]) : (body.threadId ?? body.id);
           if (typeof id !== "string" || !id) throw httpError(400, "invalid_request", "threadId is required.");
           const thread = await adapter.adopt(id);
+          await history.ensure({ threadId: thread.id, cwd: thread.cwd ?? null, source: "http",
+            title: thread.title ?? null, sessionId: thread.sessionId ?? null });
+          if (thread.sessionId) await history.setMeta(thread.id, { sessionId: thread.sessionId });
+          const imported = await importTranscript(thread.id);
           return send(res, 200, { thread: { id: thread.id, cwd: thread.cwd, createdAt: thread.createdAt,
-            turns: thread.turns } }, method);
+            turns: thread.turns }, history: { messages: imported } }, method);
         }
         const match = url.pathname.match(/^\/(?:manager\/sessions|threads)\/([^/]+)(?:\/([a-z-]+))?$/);
         if (match) {
           const id = decodeURIComponent(match[1]);
           const operation = match[2];
           if (method === "GET" && !operation) {
-            return send(res, 200, await adapter.readThread(id, { turnLimit: Number(url.searchParams.get("turnLimit") ?? 10) }), method);
+            return send(res, 200, await history.readTurns(id, { turnLimit: Number(url.searchParams.get("turnLimit") ?? 10) }), method);
           }
           if (method === "GET" && operation === "last-turn") {
-            const snapshot = await adapter.readThread(id, { turnLimit: 1 });
+            const snapshot = await history.readTurns(id, { turnLimit: 1 });
             return send(res, 200, { threadId: id, turn: snapshot.turns.at(-1) ?? null,
               budget: { requestedTurns: 1, returnedTurns: snapshot.turns.length } }, method);
           }
@@ -446,8 +521,7 @@ if (args.command === "mcp") {
           if (method === "POST" && operation === "resume") {
             body = await readBody(req);
             if (typeof body.text === "string" && body.text.trim()) {
-              const result = await adapter.resume(id, { text: body.text, messageId: body.messageId ?? null,
-                onEvent: event => pushStream(event) });
+              const result = await runTurn({ ...body, threadId: id });
               return send(res, 200, { threadId: result.threadId, sessionId: result.sessionId,
                 turnId: result.turnId, status: result.status, resultText: result.resultText, reason: result.reason }, method);
             }
@@ -488,7 +562,7 @@ if (args.command === "mcp") {
       for (const stream of streams) { try { stream.end(); } catch { /* already closed */ } }
       streams.clear();
       server.closeIdleConnections?.();
-      void adapter.close().finally(() => {
+      void Promise.allSettled([feishuChannel?.close(), adapter.close()]).finally(() => {
         server.close(() => { void logFile.chain.then(() => process.exit(0)); });
         const timer = setTimeout(() => process.exit(0), 3000); timer.unref();
       });
