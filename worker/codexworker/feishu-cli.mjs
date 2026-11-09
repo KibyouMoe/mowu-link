@@ -19,8 +19,22 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { FEISHU_API_BASE, FeishuNotifier, FeishuWebsocketClient, cardPayload } from "./feishu.mjs";
+import { FeishuSdkWebsocketClient } from "./feishu-sdk-ws.mjs";
 import { FEISHU_MAX_MESSAGE_CHARS, splitForFeishu } from "./hermes-feishu-format.mjs";
 import { expandHome } from "./native-cli.mjs";
+
+// Long-connection transport. `sdk` is the official @larksuiteoapi/node-sdk
+// (fragment merging + ACK are its job); `native` is the self-written client
+// kept for rollback. Anything unrecognised falls back to sdk — the transport
+// that is actually maintained upstream.
+export const FEISHU_WS_IMPLS = Object.freeze(["sdk", "native"]);
+export function resolveFeishuWsImpl(value) {
+  const impl = String(value ?? process.env.FEISHU_WS_IMPL ?? "").trim().toLowerCase();
+  if (!impl) return "sdk";
+  if (FEISHU_WS_IMPLS.includes(impl)) return impl;
+  console.warn(`[CodexWorker] 未知 FEISHU_WS_IMPL=${impl}，回退 sdk`);
+  return "sdk";
+}
 
 const STATE_VERSION = 1;
 const MAX_SEEN_MESSAGES = 500;
@@ -403,7 +417,7 @@ export class CliFeishuChannel {
     sessionsPath, logger = defaultLogger,
     timers = { setTimeout, clearTimeout }, deliveryOptions = null,
     websocketFactory, endpointResolver, transport = null, cwd = null, historyProbe = null,
-    sessionStore = null,
+    sessionStore = null, feishuImpl = null, sdk = null,
   }) {
     this.adapter = adapter;
     this.bridgeName = bridgeName;
@@ -413,6 +427,11 @@ export class CliFeishuChannel {
     this.deliveryOptions = deliveryOptions ?? {};
     this.websocketFactory = websocketFactory;
     this.endpointResolver = endpointResolver;
+    // Transport choice: explicit option (tests) > FEISHU_WS_IMPL > "sdk".
+    // `sdk` is the official module, injectable so the unit suite never opens a
+    // real long connection.
+    this.feishuImpl = resolveFeishuWsImpl(feishuImpl);
+    this.sdk = sdk;
     this.cwd = cwd;
     // Bridge-owned history (SessionStore) is authoritative for sessions,
     // transcripts and card history; codex rollouts are only a process stream.
@@ -452,20 +471,24 @@ export class CliFeishuChannel {
       this.bootstrapOwner = false;
       this.logger("info", "feishu_whitelist_restored", { count: this.whitelist.size });
     }
-    this.client = new FeishuWebsocketClient(this.notifier, {
+    const Impl = this.feishuImpl === "native" ? FeishuWebsocketClient : FeishuSdkWebsocketClient;
+    this.client = new Impl(this.notifier, {
       onMessage: event => this.accept(event),
       onConnected: ({ connectionId }) => {
-        this.logger("info", "feishu_ws_connected", { connectionId });
+        this.logger("info", "feishu_ws_connected", { connectionId, impl: this.feishuImpl });
       },
-      ...(this.websocketFactory ? { websocketFactory: this.websocketFactory } : {}),
+      // Only the native transport understands these two seams; the SDK takes
+      // its signed endpoint and socket from the official module.
+      ...(this.feishuImpl === "native" && this.websocketFactory ? { websocketFactory: this.websocketFactory } : {}),
+      ...(this.feishuImpl === "sdk" && this.sdk ? { sdk: this.sdk } : {}),
     });
     // Test seam: the reconnect loop's signed-endpoint POST is the only call the
     // unit suite must not make to the real open.feishu.cn.
-    if (this.endpointResolver) this.client._getConnUrl = this.endpointResolver;
+    if (this.feishuImpl === "native" && this.endpointResolver) this.client._getConnUrl = this.endpointResolver;
     this.startedAt = new Date().toISOString();
     this.client.start();
     this.logger("info", "feishu_channel_started", {
-      inbound: this.client.running, replyMode: "single-message",
+      inbound: this.client.running, replyMode: "single-message", impl: this.feishuImpl,
       whitelistCount: this.whitelist.size, bootstrapOwner: this.bootstrapOwner,
     });
     return this;
@@ -474,8 +497,9 @@ export class CliFeishuChannel {
   status() {
     return {
       inboundEnabled: Boolean(this.client),
-      connected: this.client?._ws?.readyState === 1,
+      connected: this.client?.connected === true,
       phase: this.client?.phase ?? "stopped",
+      impl: this.feishuImpl,
       connection: this.client?.status?.() ?? null,
       lastError: this.client?.lastError || null,
       replyMode: "single-message",

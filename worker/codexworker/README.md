@@ -914,3 +914,14 @@ replayFloor，旧游标返回 replay_too_old 与线程恢复指引。状态/幂�
 幂等键，网络失败重试为至少一次，不能承诺 Webhook 恰好一次。
 
 来源、哈希和改动说明见 `THIRD_PARTY_NOTICES.md`。
+
+## 飞书长连接实现（2026-11-09）
+
+长连接改用官方 `@larksuiteoapi/node-sdk`（`feishu-sdk-ws.mjs`，`WSClient` + `EventDispatcher`）：
+SDK 负责事件分片合并（按 headers 的 `message_id`/`sum`/`seq` 拼帧，收齐前不 dispatch 也不 ACK）、
+ACK 与自动重连。自写实现 `FeishuWebsocketClient`（`feishu.mjs`）保留在仓库中用于回滚。
+
+- 默认 `FEISHU_WS_IMPL=sdk`；`FEISHU_WS_IMPL=native` 回退自写实现。
+- `/health` 的 `feishu.impl` 显示当前实现，`feishu.connection.policy` 为 `official-sdk-ws`（或
+  `bounded-handshake-heartbeat`）。
+- 同一应用不能同时跑两条长连接抢收消息：切换时必须先停旧进程再起新进程。

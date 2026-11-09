@@ -546,8 +546,15 @@ export class FeishuWebsocketClient {
     return this._running;
   }
 
+  // Public equivalent of `_ws.readyState === 1`, so the channel can ask either
+  // transport the same question (the SDK client has no raw socket).
+  get connected() {
+    return this._ws?.readyState === 1;
+  }
+
   status() {
     return { policy: "bounded-handshake-heartbeat", running: this.running, phase: this.phase,
+      connected: this.connected,
       attempts: this.attempts, handshakeTimeoutMs: this.handshakeTimeoutMs, pongTimeoutMs: this.pongTimeoutMs,
       pingIntervalMs: this.pingIntervalMs, retryIntervalMs: FEISHU_WS_RECONNECT_INTERVAL,
       lastError: this.lastError || null, lastDisconnectAt: this.lastDisconnectAt,

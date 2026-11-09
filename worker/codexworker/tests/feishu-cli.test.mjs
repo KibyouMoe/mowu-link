@@ -127,6 +127,9 @@ async function fixture(t, overrides = {}) {
     logger: (level, event, fields) => logs.push({ level, event, fields }),
     websocketFactory: () => socket,
     endpointResolver: async () => "wss://isolated.invalid/ws?service_id=1",
+    // This file drives the raw native wire protocol; the SDK transport has its
+    // own suite (feishu-sdk-ws.test.mjs) and its own fake-SDK channel test.
+    feishuImpl: "native",
     ...overrides.options,
   });
   t.after(async () => { await channel.close(); });
@@ -365,7 +368,8 @@ test("sessions persist atomically and a restart resumes from the stored thread",
   const reopened = await new SessionStore(path.join(f.root, "history"), { logger: () => {} }).init();
   const channel = new CliFeishuChannel({ adapter, notifier: fakeNotifier(),
     sessionStore: reopened, feishu: {}, bridgeName: "CodexWorker", sessionsPath: file, logger: () => {},
-    websocketFactory: () => new FakeSocket(), endpointResolver: async () => "wss://isolated.invalid/ws?service_id=1" });
+    websocketFactory: () => new FakeSocket(), endpointResolver: async () => "wss://isolated.invalid/ws?service_id=1",
+    feishuImpl: "native" });
   t.after(() => channel.close());
   await channel.start();
   assert.equal(channel.store.get("ou_trainer")?.threadId, threadId);

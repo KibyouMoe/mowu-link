@@ -58,7 +58,8 @@ const HELP = `codexworker ${VERSION}
 环境变量:
   CODEXWORKER_IDENTITY, CODEXWORKER_CONFIG, CODEXWORKER_HOST, CODEXWORKER_PORT,
   CODEXWORKER_LOG, CODEXWORKER_STATE_DIR, CODEXWORKER_CODEX_BIN, CODEX_HOME,
-  CODEXWORKER_DEBUG_FRAMES（=1 时输出飞书帧诊断日志）
+  CODEXWORKER_DEBUG_FRAMES（=1 时输出飞书帧诊断日志）,
+  FEISHU_WS_IMPL（飞书长连接实现：sdk（默认，官方 SDK）| native（自写实现回退））
 
 CLI 模式示例:
   ./bin/codexworker --config ./codexworker.config.example.json --port 8904
