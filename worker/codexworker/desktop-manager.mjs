@@ -816,7 +816,7 @@ export class DesktopManager {
     // untouched. Slash commands are handled before reaching this presentation.
     const label = this.config.messageSourceLabels === false ? null
       : request.source === "trainer" && this.state.feishuReceipts[request.messageId] ? "飞书"
-      : request.source === "hermes" && request.origin !== "router" ? "超级溪流" : null;
+      : request.source === "hermes" && !["router", "subscription"].includes(request.origin) ? "超级溪流" : null;
     const prompt = label ? `${label}：${request.text}` : request.text;
     const pending = { messageId: request.messageId, inputHash: digest(prompt), dispatchedAt: Date.now(),
       sourceThreadId, kind: active ? "steer" : snapshot.deliveryContract ? "followup" : "start", expectedTurnId: active?.id ?? null,

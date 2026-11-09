@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { FeishuNotifier } from "../feishu.mjs";
-import { clipBlock, findRouterTurn, lastAssistantText, routerMarker,
-  routerMessageId, routerPrompt, taskBoardTerminalPhase, taskBoardText,
-  taskBoardTitle } from "../router-tasks.mjs";
+import { clipBlock, findRouterTurn, lastAssistantText, normalizeSubscriptionConfig,
+  routerMarker, routerMessageId, routerPrompt, subscriptionMarker,
+  subscriptionMessageId, subscriptionNoticeText, taskBoardTerminalPhase,
+  taskBoardText, taskBoardTitle } from "../router-tasks.mjs";
 
 test("router message ids are deterministic UUIDv4 values per task", () => {
   const first = routerMessageId("t-9df6613a5c");
@@ -105,4 +106,41 @@ test("FeishuNotifier keeps chat_id delivery as the default", async () => {
   await notifier.sendMessage("普通消息", { title: "小栗帽" });
   assert.equal(calls[0][0], "oc_chat");
   assert.equal(calls[0][6], "chat_id");
+});
+
+test("subscription events get a deterministic message id keyed by source and id", () => {
+  const first = subscriptionMessageId({ source: "test", id: 7 });
+  assert.match(first, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-8[0-9a-f]{3}-[0-9a-f]{12}$/);
+  assert.equal(first, subscriptionMessageId({ source: "test", id: 7 }));
+  assert.notEqual(first, subscriptionMessageId({ source: "test", id: 8 }));
+  assert.notEqual(first, subscriptionMessageId({ source: "mail", id: 7 }));
+});
+
+test("the subscription marker is the exact message prefix", () => {
+  assert.equal(subscriptionMarker({ source: "test", kind: "chat", id: 12 }),
+    "[订阅事件 source=test kind=chat id=12]");
+});
+
+test("the Feishu line is one row: 订阅事件 · source · first 80 chars", () => {
+  assert.equal(subscriptionNoticeText({ source: "test", text: "  你好\n  世界  " }), "订阅事件 · test · 你好 世界");
+  const long = "字".repeat(120);
+  const line = subscriptionNoticeText({ source: "test", text: long });
+  assert.equal(line, `订阅事件 · test · ${"字".repeat(80)}…`);
+  assert.equal(subscriptionNoticeText({ source: "", text: "" }), "订阅事件 · (unknown) · ");
+});
+
+test("subscription config accepts objects, drops junk and splits string kinds", () => {
+  assert.deepEqual(normalizeSubscriptionConfig([
+    { source: " test ", kinds: [" chat ", ""] },
+    { source: "mail" },
+    { source: "  " },
+    null,
+    "nope",
+    { kinds: ["chat"] },
+  ]), [
+    { source: "test", kinds: ["chat"] },
+    { source: "mail", kinds: [] },
+  ]);
+  assert.deepEqual(normalizeSubscriptionConfig({ source: "test" }), []);
+  assert.deepEqual(normalizeSubscriptionConfig(undefined), []);
 });

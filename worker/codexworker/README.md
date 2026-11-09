@@ -465,6 +465,32 @@ writer 是否完成版本替换是两项独立检查。下次正常重载仍由�
 不发送消息。`bridge_message` 使用同一管理入口处理消息与命令。模型调用它给其他
 任务发消息前仍必须取得训练员授权；Hermes 通过已配置 Token 调用 HTTP 的权限单独管理。
 
+## 事件订阅（router）
+
+配置里加一个数组即开启；不写数组 = 不订阅，行为与旧版完全一致：
+
+```json
+{
+  "subscriptions": [{ "source": "test", "kinds": ["chat"] }],
+  "subscriptionPollMs": 5000
+}
+```
+
+- `source` 必填，`kinds` 为空/省略表示该来源全部 kind。
+- worker 连上 router 的 SSE 后自己 `POST /subscriptions` 声明；SSE 掉线后 router
+  会删订阅，重连成功时按配置重放一遍声明（先删掉本进程已知/残留的订阅，避免
+  同一事件投两次）。`stop()` 会 `DELETE` 自己的订阅。
+- 后台按 `subscriptionPollMs`（默认 5 秒）拉 `GET /subscriptions/pending`，事件
+  串行处理，不会并发写同一条会话。
+- 每条事件两个动作：投给当前选中会话的 agent，正文前缀
+  `[订阅事件 source=<source> kind=<kind> id=<id>]`；同时用本 worker 的飞书身份
+  给 `taskBoardOpenId` 发一行 `订阅事件 · <source> · <正文前 80 字>`。
+- `CODEXWORKER_FEISHU_DRY_RUN=1` 时飞书只记 `subscription_notify_dry_run`
+  日志，不真发，供隔离实例验收。
+- 日志：`subscription_declared` / `subscription_poll` / `subscription_event` /
+  `subscription_event_finished`（含 `status`、`reply` 前 200 字）/
+  `subscription_unregistered`。订阅是实时听，掉线期间的事件不补。
+
 ## 验证
 
 在插件目录执行：

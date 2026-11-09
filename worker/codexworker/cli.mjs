@@ -26,8 +26,9 @@ import RouterClient, { setActiveRouterClient } from "./router-client.mjs";
 import { FeishuNotifier } from "./feishu.mjs";
 import { PROTOCOL } from "./desktop-manager.mjs";
 import { ROUTER_TURN_LIMIT_MS, TERMINAL_TURN, findRouterTurn, lastAssistantText,
-  routerMarker, routerMessageId, routerPrompt, taskBoardTerminalPhase, taskBoardText,
-  taskBoardTitle } from "./router-tasks.mjs";
+  normalizeSubscriptionConfig, routerMarker, routerMessageId, routerPrompt,
+  subscriptionMarker, subscriptionMessageId, subscriptionNoticeText,
+  taskBoardTerminalPhase, taskBoardText, taskBoardTitle } from "./router-tasks.mjs";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PROGRAM = "codexworker";
@@ -626,6 +627,104 @@ async function main() {
     return routerChain;
   }
 
+  // ---- event subscriptions --------------------------------------------------
+  // config.subscriptions = [{source, kinds?}] (top level; absent = none).
+  // Realtime only: the router deletes the subscription when the stream drops,
+  // and the client redeclares it on the next connect. Each event becomes one
+  // manager message in the selected session, plus one Feishu line from this
+  // worker's own identity. The router client already runs handler calls
+  // strictly one at a time, so two events can never write the same thread
+  // concurrently.
+  const subscriptionConfig = normalizeSubscriptionConfig(config.subscriptions);
+  const declaredTurnLimitMs = Number(config.subscriptionTurnLimitMs);
+  const subscriptionTurnLimitMs = Number.isFinite(declaredTurnLimitMs) && declaredTurnLimitMs > 0
+    ? declaredTurnLimitMs : ROUTER_TURN_LIMIT_MS;
+
+  async function subscriptionNotify({ source, kind, id, text }) {
+    const body = subscriptionNoticeText({ source, text });
+    const title = `${identity.display} · 订阅事件`;
+    // Same dry-run switch as the task board: an isolated test instance must
+    // never post into a real trainer chat.
+    if (process.env.CODEXWORKER_FEISHU_DRY_RUN === "1") {
+      log("info", "subscription_notify_dry_run", { source, kind, id, title, text: body,
+        textChars: body.length,
+        targetOpenIdSha256: createHash("sha256").update(String(taskBoardOpenId)).digest("hex").slice(0, 12) });
+      return "dry-run";
+    }
+    if (!taskBoardEnabled) { log("warn", "subscription_notify_skipped", { source, id, reason: "no_target" }); return null; }
+    const notifier = taskBoardNotifier();
+    if (!notifier) { log("warn", "subscription_notify_skipped", { source, id, reason: "feishu_disabled" }); return null; }
+    try {
+      const response = await notifier.sendMessage(body, { openId: taskBoardOpenId, receiveIdType: "open_id", title });
+      const messageId = response?.data?.message_id ?? null;
+      log(messageId ? "info" : "warn", "subscription_notified", { source, kind, id, messageId,
+        apiCode: Number.isInteger(response?.code) ? response.code : null });
+      return messageId;
+    } catch (error) {
+      log("warn", "subscription_notify_failed", { source, id, message: error?.message ?? String(error) });
+      return null;
+    }
+  }
+
+  async function runSubscriptionEvent(event) {
+    const source = String(event?.source ?? "").trim() || "(unknown)";
+    const kind = String(event?.kind ?? "").trim() || "event";
+    const id = event?.id ?? null;
+    const body = typeof event?.text === "string" ? event.text : String(event?.text ?? "");
+    const startedAt = Date.now();
+    const marker = subscriptionMarker({ source, kind, id });
+    const messageId = subscriptionMessageId({ source, id });
+    let status = "failed";
+    let threadId = null;
+    let turnId = null;
+    let reply = "";
+    let failure = "";
+    log("info", "subscription_event_start", { source, kind, id, chars: body.length, messageId,
+      subscriptionId: event?.subscription_id ?? null });
+    await subscriptionNotify({ source, kind, id, text: body });
+    try {
+      const manager = business.manager?.();
+      if (!manager) throw new Error("manager is not active");
+      const selected = manager.state.selectedThreadId;
+      if (!selected || !manager.state.sessions[selected]) throw new Error("manager has no selected session");
+      threadId = selected;
+      if (!await waitForIdleThread(selected, startedAt + subscriptionTurnLimitMs)) {
+        throw new Error(`shared thread stayed busy past the ${Math.round(subscriptionTurnLimitMs / 1000)}s budget`);
+      }
+      const enqueued = await manager.message({
+        protocolVersion: PROTOCOL, messageId, source: "hermes", origin: "subscription",
+        text: `${marker}\n${body}`, targetThreadId: selected, delivery: "steer",
+      });
+      log("info", "subscription_message_sent", { source, kind, id, threadId: selected,
+        action: enqueued?.action ?? null, duplicate: enqueued?.duplicate === true });
+      const waited = await waitForRouterTurn({ threadId: selected, marker, messageId, manager,
+        deadline: startedAt + subscriptionTurnLimitMs });
+      turnId = waited.turn?.id ?? null;
+      status = waited.status === "completed" ? "done" : "failed";
+      reply = lastAssistantText(waited.turn);
+      if (status !== "done") failure = waited.timedOut ? "deadline hit" : `turn ${waited.status ?? "unknown"}`;
+    } catch (error) {
+      failure = error?.message ?? String(error);
+      log("error", "subscription_event_failed", { source, kind, id, message: failure });
+    }
+    log(status === "done" ? "info" : "warn", "subscription_event_finished", {
+      source, kind, id, status, threadId, turnId,
+      durationS: Math.round((Date.now() - startedAt) / 1000),
+      replyChars: reply.length, reply: reply.slice(0, 200),
+      ...(failure ? { failure } : {}),
+    });
+  }
+
+  let subscriptionChain = Promise.resolve();
+  function enqueueSubscriptionEvent(event) {
+    // Belt and braces: the client serializes handler calls, this chain keeps
+    // the ordering even if a caller invokes us directly.
+    subscriptionChain = subscriptionChain
+      .then(() => runSubscriptionEvent(event))
+      .catch((error) => log("error", "subscription_chain_error", { message: error?.message ?? String(error) }));
+    return subscriptionChain;
+  }
+
   if (routerEnabled) {
     routerClient = new RouterClient({
       url: routerUrl,
@@ -633,17 +732,21 @@ async function main() {
       name: identity.name,
       version: VERSION,
       heartbeatMs: routerConfig.heartbeatMs,
+      subscriptions: subscriptionConfig,
+      subscriptionPollMs: config.subscriptionPollMs ?? routerConfig.subscriptionPollMs,
       logger: (level, event, fields = {}) => log(level, event, { component: "router", ...fields }),
     });
     setActiveRouterClient(routerClient);
     routerClient.start({
       onTask: enqueueRouterTask,
+      onSubscriptionEvent: enqueueSubscriptionEvent,
       onConnect: ({ attempt, reconnects }) => log("info", "router_connected", { attempt, reconnects }),
       onDisconnect: ({ reason, delayMs, reconnects }) => log("warn", "router_disconnected", {
         reason, delayMs, reconnects,
       }),
     });
-    log("info", "router_client_started", { url: routerUrl, name: identity.name });
+    log("info", "router_client_started", { url: routerUrl, name: identity.name,
+      subscriptions: subscriptionConfig.map((item) => item.source) });
   } else {
     log("info", "router_client_disabled", { url: routerUrl });
   }

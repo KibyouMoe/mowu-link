@@ -16,9 +16,18 @@
 //   GET  /stream?name=<name>[&version=<v>]         -> text/event-stream
 //   There is no worker-facing /ack: the router owns task claim/requeue, and a
 //   reconnect re-delivers anything still marked running (at-least-once).
+//
+// Event subscriptions (ROUTER.md §四) are realtime-only: the router deletes
+// every subscription when the stream detaches, so this client declares its
+// configured sources after every (re)connect and polls `GET
+// /subscriptions/pending` (the router ACKs on its side). Nothing is persisted
+// here; a missed event is gone by design.
 import process from "node:process";
+import { normalizeSubscriptionConfig } from "./router-tasks.mjs";
 
 const DEFAULT_HEARTBEAT_MS = 30_000;
+const DEFAULT_SUBSCRIPTION_POLL_MS = 5_000;
+const SUBSCRIPTION_POLL_LIMIT = 20;
 const MIN_BACKOFF_MS = 1_000;
 const MAX_BACKOFF_MS = 30_000;
 const REQUEST_TIMEOUT_MS = 8_000;
@@ -65,6 +74,8 @@ export class RouterClient {
     minBackoffMs = MIN_BACKOFF_MS,
     maxBackoffMs = MAX_BACKOFF_MS,
     requestTimeoutMs = REQUEST_TIMEOUT_MS,
+    subscriptions = [],
+    subscriptionPollMs = DEFAULT_SUBSCRIPTION_POLL_MS,
     logger = null,
   } = {}) {
     if (!name || typeof name !== "string") throw new Error("router client needs a worker name");
@@ -74,6 +85,8 @@ export class RouterClient {
     this.name = name;
     this.version = version;
     this.heartbeatMs = Math.max(1000, Number(heartbeatMs) || DEFAULT_HEARTBEAT_MS);
+    this.subscriptionConfig = normalizeSubscriptionConfig(subscriptions);
+    this.subscriptionPollMs = Math.max(250, Number(subscriptionPollMs) || DEFAULT_SUBSCRIPTION_POLL_MS);
     this.minBackoffMs = Math.max(100, Number(minBackoffMs) || MIN_BACKOFF_MS);
     this.maxBackoffMs = Math.max(this.minBackoffMs, Number(maxBackoffMs) || MAX_BACKOFF_MS);
     this.requestTimeoutMs = Math.max(500, Number(requestTimeoutMs) || REQUEST_TIMEOUT_MS);
@@ -99,6 +112,12 @@ export class RouterClient {
     this.sleepTimer = null;
     this.heartbeatTimer = null;
     this.heartbeatInFlight = false;
+    this.subscriptions = [];           // declared on the router: {id, source, kinds, triggerId}
+    this.subscriptionChain = Promise.resolve();
+    this.subscriptionTimer = null;
+    this.subscriptionInFlight = false;
+    this.subscriptionDeclaring = null;
+    this.subscriptionStats = { declared: 0, polls: 0, events: 0, errors: 0 };
     this.handlers = {};
   }
 
@@ -117,6 +136,9 @@ export class RouterClient {
       lastDisconnectReason: this.lastDisconnectReason,
       lastError: this.lastError,
       activity: { ...this.activity },
+      subscriptions: this.subscriptions.map((sub) => ({ id: sub.id, source: sub.source, kinds: sub.kinds })),
+      subscriptionPollMs: this.subscriptionPollMs,
+      subscriptionStats: { ...this.subscriptionStats },
     };
   }
 
@@ -207,15 +229,189 @@ export class RouterClient {
     });
   }
 
+  // -- subscriptions ------------------------------------------------------- #
+
+  hasSubscriptions() {
+    return this.subscriptionConfig.length > 0;
+  }
+
+  /** Declare every configured source on the router. Replayed on each connect. */
+  async declareSubscriptions() {
+    if (!this.hasSubscriptions()) return [];
+    // The router purges on detach, but a detach it never saw (or a previous
+    // process) can leave rows behind; drop them so one event is not delivered
+    // twice through two trigger queues.
+    await this._dropActiveSubscriptions().catch(() => {});
+    const declared = [];
+    for (const item of this.subscriptionConfig) {
+      try {
+        const body = await this._request("POST", "/subscriptions", {
+          worker: this.name,
+          source: item.source,
+          ...(item.kinds.length ? { kinds: item.kinds } : {}),
+        });
+        const record = {
+          id: body?.id ?? null,
+          source: item.source,
+          kinds: Array.isArray(body?.kinds) ? body.kinds : item.kinds,
+          triggerId: body?.trigger_id ?? null,
+        };
+        declared.push(record);
+        this.subscriptionStats.declared += 1;
+        this.log("info", "subscription_declared", {
+          id: record.id, source: record.source, kinds: record.kinds,
+          triggerId: record.triggerId, triggerSince: body?.trigger_since ?? null,
+        });
+      } catch (error) {
+        this.subscriptionStats.errors += 1;
+        this.log("warn", "subscription_declare_failed", {
+          source: item.source, kinds: item.kinds,
+          status: error?.status ?? null, code: error?.code ?? null,
+          message: error?.message ?? String(error),
+        });
+      }
+    }
+    this.subscriptions = declared.filter((sub) => sub.id != null);
+    return this.subscriptions;
+  }
+
+  async _dropActiveSubscriptions() {
+    let ids = this.subscriptions.map((sub) => sub.id).filter((id) => Number.isInteger(id));
+    try {
+      const body = await this._request("GET", `/subscriptions?worker=${encodeURIComponent(this.name)}&active=1`);
+      for (const sub of body?.subscriptions ?? []) {
+        if (Number.isInteger(sub?.id) && !ids.includes(sub.id)) ids.push(sub.id);
+      }
+    } catch { /* list is best-effort; local ids still get dropped */ }
+    await this._deleteSubscriptions(ids);
+  }
+
+  async _deleteSubscriptions(ids) {
+    for (const id of ids) {
+      try {
+        await this._request("DELETE", `/subscriptions/${id}`);
+        this.log("info", "subscription_unregistered", { id });
+      } catch (error) {
+        if (error?.status !== 404) {
+          this.log("warn", "subscription_unregister_failed", {
+            id, status: error?.status ?? null, message: error?.message ?? String(error),
+          });
+        }
+      }
+    }
+  }
+
+  /** DELETE every subscription this client owns. Safe to call twice. */
+  async unregisterSubscriptions() {
+    const ids = this.subscriptions.map((sub) => sub.id).filter((id) => Number.isInteger(id));
+    this.subscriptions = [];
+    if (ids.length) await this._deleteSubscriptions(ids);
+  }
+
+  _clearSubscriptionTimer() {
+    if (this.subscriptionTimer) { clearTimeout(this.subscriptionTimer); this.subscriptionTimer = null; }
+  }
+
+  /** Declare, then start the poll loop. Called once per stream connection. */
+  _startSubscriptions() {
+    if (!this.hasSubscriptions() || !this.connected) return;
+    this._clearSubscriptionTimer();
+    this.subscriptionDeclaring = this.declareSubscriptions()
+      .catch((error) => {
+        this.subscriptionStats.errors += 1;
+        this.log("warn", "subscription_declare_failed", { message: error?.message ?? String(error) });
+      })
+      .finally(() => {
+        this.subscriptionDeclaring = null;
+        if (this.running && this.connected) this._armSubscriptionPoll();
+      });
+  }
+
+  _armSubscriptionPoll() {
+    this._clearSubscriptionTimer();
+    if (!this.running || !this.connected || !this.subscriptions.length) return;
+    this.subscriptionTimer = setTimeout(() => { void this._pollSubscriptions(); }, this.subscriptionPollMs);
+    this.subscriptionTimer.unref?.();
+  }
+
+  async _pollSubscriptions() {
+    this.subscriptionTimer = null;
+    if (!this.running || !this.connected || this.subscriptionInFlight) return;
+    if (!this.subscriptions.length) return;
+    this.subscriptionInFlight = true;
+    try {
+      const body = await this._request(
+        "GET",
+        `/subscriptions/pending?worker=${encodeURIComponent(this.name)}&limit=${SUBSCRIPTION_POLL_LIMIT}`,
+        null,
+        { timeoutMs: Math.max(this.requestTimeoutMs, this.subscriptionPollMs * 2) });
+      const events = Array.isArray(body?.events) ? body.events : [];
+      this.subscriptionStats.polls += 1;
+      this.log("info", "subscription_poll", {
+        count: events.length, acked: body?.acked ?? 0,
+        subscriptionIds: this.subscriptions.map((sub) => sub.id),
+      });
+      for (const event of events) {
+        this.subscriptionStats.events += 1;
+        this._dispatchSubscriptionEvent(event);
+      }
+      const expired = Array.isArray(body?.expired) ? body.expired : [];
+      if (expired.length) {
+        // The trigger lease ran out while we were not renewing; the router
+        // still lists the subscription but its queue is dead. Redeclare.
+        this.log("warn", "subscription_expired", { triggerIds: expired });
+        this._startSubscriptions();
+      }
+    } catch (error) {
+      this.subscriptionStats.errors += 1;
+      this.log("warn", "subscription_poll_failed", {
+        status: error?.status ?? null, code: error?.code ?? null,
+        message: error?.message ?? String(error),
+      });
+      if (error?.status === 404 && error?.code === "unknown_worker") {
+        // Router DB was reset under a live stream (same case as heartbeat).
+        this.registered = false;
+        try {
+          await this.register();
+          this._startSubscriptions();
+        } catch { /* the reconnect loop owns recovery */ }
+      }
+    } finally {
+      this.subscriptionInFlight = false;
+      this._armSubscriptionPoll();
+    }
+  }
+
+  /** Queue one event; the handler sees them strictly one at a time. */
+  _dispatchSubscriptionEvent(event) {
+    this.log("info", "subscription_event", {
+      id: event?.id ?? null, source: event?.source ?? null, kind: event?.kind ?? null,
+      level: event?.level ?? null, actor: event?.actor ?? null,
+      chars: typeof event?.text === "string" ? event.text.length : 0,
+      subscriptionId: event?.subscription_id ?? null,
+    });
+    this.subscriptionChain = this.subscriptionChain
+      .then(() => this.handlers.onSubscriptionEvent?.(event))
+      .catch((error) => {
+        this.subscriptionStats.errors += 1;
+        this.log("error", "subscription_event_failed", {
+          id: event?.id ?? null, source: event?.source ?? null,
+          message: error?.message ?? String(error),
+        });
+        try { this.handlers.onError?.(error, event); } catch { /* ignore */ }
+      });
+    return this.subscriptionChain;
+  }
+
   /**
    * Connect and stay connected until stop().
    * `onTask(task)` is called for each `event: task` payload; it may return a
    * promise and is never awaited by the reader, so a long turn cannot stall pings.
    */
-  start({ onTask, onConnect, onDisconnect, onEvent, onError } = {}) {
+  start({ onTask, onConnect, onDisconnect, onEvent, onError, onSubscriptionEvent } = {}) {
     if (this.running) return this;
     if (typeof onTask !== "function") throw new Error("router client start needs onTask");
-    this.handlers = { onTask, onConnect, onDisconnect, onEvent, onError };
+    this.handlers = { onTask, onConnect, onDisconnect, onEvent, onError, onSubscriptionEvent };
     this.running = true;
     this.phase = "connecting";
     this.loopPromise = this._loop().catch((error) => {
@@ -226,7 +422,11 @@ export class RouterClient {
   }
 
   async stop({ timeoutMs = 3000 } = {}) {
-    if (!this.running) return;
+    this._clearSubscriptionTimer();
+    if (!this.running) {
+      await this.unregisterSubscriptions().catch(() => {});
+      return;
+    }
     this.running = false;
     this.phase = "stopping";
     this._clearHeartbeat();
@@ -235,6 +435,10 @@ export class RouterClient {
     if (this.loopPromise) {
       await Promise.race([this.loopPromise, sleep(timeoutMs)]).catch(() => {});
     }
+    // Let the in-flight event finish its turn (bounded) before closing the
+    // subscription, so a shutdown does not cut a half-written thread.
+    await Promise.race([this.subscriptionChain, sleep(timeoutMs)]).catch(() => {});
+    await this.unregisterSubscriptions().catch(() => {});
     this.connected = false;
     this.registered = false;
     this.phase = "stopped";
@@ -271,6 +475,12 @@ export class RouterClient {
       this.registered = false;
       this.disconnectedAt = new Date().toISOString();
       this._clearHeartbeat();
+      // The router deletes this worker's subscriptions the moment the stream
+      // detaches, so stop polling and forget the ids; the next connect
+      // redeclares from config. On an explicit stop keep them — stop() still
+      // has to DELETE them.
+      this._clearSubscriptionTimer();
+      if (this.running) this.subscriptions = [];
       if (!this.running) break;
 
       const delay = streamed && Date.now() - attemptStartedAt >= this.heartbeatMs
@@ -329,6 +539,10 @@ export class RouterClient {
     catch (error) { this.log("warn", "router_on_connect_failed", { message: error?.message ?? String(error) }); }
 
     this._startHeartbeat();
+    // Declare after the stream is up: the router only accepts subscriptions
+    // for a worker it has registered, and it purges them on detach, so this
+    // runs again after every reconnect.
+    this._startSubscriptions();
 
     const reader = response.body.getReader();
     const decoder = new TextDecoder();

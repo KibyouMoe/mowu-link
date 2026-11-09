@@ -7,6 +7,7 @@
 import { createHash } from "node:crypto";
 
 export const ROUTER_TURN_LIMIT_MS = 20 * 60 * 1000;
+export const SUBSCRIPTION_NOTICE_LIMIT = 80;
 export const TERMINAL_TURN = new Set(["completed", "interrupted", "failed", "cancelled", "canceled"]);
 
 // Deterministic per taskId: a router retry (at-least-once delivery) reuses the
@@ -14,6 +15,47 @@ export const TERMINAL_TURN = new Set(["completed", "interrupted", "failed", "can
 export function routerMessageId(taskId) {
   const hex = createHash("sha256").update(`router:${taskId}`).digest("hex");
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+}
+
+function sha256Uuid(seed) {
+  const hex = createHash("sha256").update(seed).digest("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+}
+
+// One subscription event == one manager message. The trigger event id is only
+// unique per source, so the dedupe key is (source, id).
+export function subscriptionMessageId({ source, id }) {
+  return sha256Uuid(`subscription:${String(source ?? "")}:${String(id ?? "")}`);
+}
+
+// Same marker shape as the message prefix, so the runner can find its turn
+// even when the trainer types into the same thread meanwhile.
+export function subscriptionMarker({ source, kind, id }) {
+  return `[订阅事件 source=${source} kind=${kind} id=${id}]`;
+}
+
+// The Feishu line is deliberately one glanceable row: 订阅事件 · source · body.
+export function subscriptionNoticeText({ source, text, limit = SUBSCRIPTION_NOTICE_LIMIT }) {
+  const body = String(text ?? "").replace(/\s+/g, " ").trim();
+  const clipped = body.length > limit ? `${body.slice(0, limit)}…` : body;
+  return `订阅事件 · ${String(source ?? "").trim() || "(unknown)"} · ${clipped}`;
+}
+
+// Config shape: [{source, kinds?}] — anything else is ignored, never fatal.
+export function normalizeSubscriptionConfig(value) {
+  if (!Array.isArray(value)) return [];
+  const out = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    const source = typeof item.source === "string" ? item.source.trim() : "";
+    if (!source) continue;
+    const rawKinds = item.kinds;
+    const kinds = Array.isArray(rawKinds)
+      ? rawKinds.map((kind) => String(kind).trim()).filter(Boolean)
+      : typeof rawKinds === "string" ? rawKinds.split(",").map((kind) => kind.trim()).filter(Boolean) : [];
+    out.push({ source, kinds });
+  }
+  return out;
 }
 
 // Marks the enqueued turn in the shared conversation so the runner can find its
