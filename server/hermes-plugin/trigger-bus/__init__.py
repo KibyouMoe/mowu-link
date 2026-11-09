@@ -19,8 +19,9 @@ Architecture: a separate long-lived service (``mowu-trigger``, loopback
     tool output so the model sees it on the very next step.  At-most-once
     per event via a separate cursor + marked set that ``pre_llm_call`` also
     checks, so the same event is never injected twice.
-  * only ``event`` and ``notify`` are ever injected; ``info`` is worker-only
-    and ``log`` is archive-only.
+  * ``event`` / ``notify`` / ``info`` are pulled; only ``event`` and ``notify``
+    can ever wake a session.  ``info`` is injected silently into a turn that is
+    already running (0.9.3) and ``log`` is archive-only.
   * the level decides the mode and nothing else does (0.8.0):
         event  -> interrupt : busy => the running turn is interrupted at once;
                               idle  => starts a turn (``internal=False``);
@@ -278,6 +279,29 @@ Architecture: a separate long-lived service (``mowu-trigger``, loopback
   * unchanged: the ``event`` hard-interrupt path, an idle notify's immediate
     queue+drain, the 2 s ``(chat, text)`` dedupe and the one-line wake texts.
 
+0.9.3 — ``info`` 静默进上下文 (silent context, never a wake):
+
+  * the gap: ``info`` was pulled only for workers.  ``GET /events`` defaults to
+    ``event,notify`` for a ``hermes*`` subscriber, so the agent never saw a
+    single info row.  The pull now asks for ``event,notify,info``
+    (``TRIGGER_BUS_LEVELS``), one HTTP round-trip, no extra request.
+  * info is **never a wake**: it does not call ``handle_message``, does not
+    open a turn, does not enter the gateway queue, is not eligible for
+    ``_take_interrupt`` and never produces a visible message.  It lives in its
+    OWN bounded deque (``state.info_events``, ``INFO_QUEUE_MAX``), so it cannot
+    compete with event/notify for ``MAX_QUEUE`` slots either.
+  * it is injected only by ``pre_llm_call``, i.e. into a turn the trainer (or
+    any other caller) was already starting: an ``— info —`` block **after**
+    the event/notify cards, then the cursor/ACK advance (a real injection).
+    No turn is ever started for info; with no active turn it simply waits.
+  * at most ``MAX_INFO_PER_INJECT`` (10) info cards per turn; the rest stay in
+    the deque for the next turn — truncation never drops a row.  A batch adds
+    ``[N 条 info]`` on its first line; each card is the standard two-line card
+    with ``· info`` in the level slot (``#12 · info mc_chat 11:44``) and the
+    same 100-character clip.
+  * event/notify keep their exact order and text: cards first, ``— info —``
+    last, one injection; every level is still injected exactly once.
+
 Design rules:
   * never import Hermes internals — only the hook argument dict is used;
   * never block the model call: the hook does no network I/O (ACK is sent by
@@ -295,6 +319,8 @@ Environment overrides (all optional):
                              before the batch is retried)
     TRIGGER_BUS_POST_TURN_DELAY default 1 (seconds; post-turn dispatch delay)
     TRIGGER_BUS_TURN_ACTIVE_TTL default 1800 (seconds; stale busy-flag guard)
+    TRIGGER_BUS_LEVELS       default event,notify,info (levels pulled; info is
+                             injected silently and can never wake a session)
     TRIGGER_BUS_DISABLED=1   disable entirely
     TRIGGER_TOKEN_PATH       default ~/.hermes/secrets/trigger.token
 """
@@ -316,8 +342,13 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional
 
-PLUGIN_VERSION = "0.9.2"
+PLUGIN_VERSION = "0.9.3"
 MAX_QUEUE = 50
+# 0.9.3: info has its own backlog.  It is never a wake and never shares the
+# event/notify queue, so a burst of info can not push an event out of
+# MAX_QUEUE (and vice versa).  Truncation keeps the rest for the next turn.
+INFO_QUEUE_MAX = 100
+MAX_INFO_PER_INJECT = 10
 HTTP_TIMEOUT = 5.0
 LOG_MAX_BYTES = 5 * 1024 * 1024
 LOG_BACKUP_COUNT = 3
@@ -333,9 +364,17 @@ MAX_EXPANDED_EVENTS = 5
 #           mid-turn transform_tool_result insert; never both;
 #   notify  next level: turn-boundary injection plus a queued, non-interrupting
 #           wake (internal=true) when idle and right after a turn ends;
-#   info    worker-only;  log  archive-only -> neither is ever injected.
+#   info    0.9.3: pulled and injected ONLY into a turn that is already
+#           running (``pre_llm_call``), in its own ``— info —`` block after the
+#           event/notify cards.  Never a wake, never queued, never a message.
+#   log     archive-only -> never delivered (the pull never asks for it).
 INJECT_LEVELS = ("event", "notify")
 INTERRUPT_LEVELS = ("event",)
+INFO_LEVEL = "info"
+# Which levels one pull asks for.  The server defaults a hermes* subscriber to
+# event,notify, so info must be named explicitly; dropping it from this list
+# also drops info delivery without touching anything else.
+DEFAULT_PULL_LEVELS = "event,notify,info"
 LEGACY_LEVELS = {"super": "event", "super_event": "event"}
 INTERRUPT_DONE_MAX = 500                  # bounded at-most-once memory
 
@@ -495,6 +534,12 @@ class _BusState:
         self.lock = threading.Lock()          # guards events/high_water/cursor
         self.ack_lock = threading.Lock()      # serialises ACK requests
         self.events: Deque[Dict[str, Any]] = deque(maxlen=MAX_QUEUE)
+        # 0.9.3: info never enters ``events`` — its own backlog keeps the
+        # wake selectors honest and stops an info burst from evicting an event.
+        self.info_events: Deque[Dict[str, Any]] = deque(maxlen=INFO_QUEUE_MAX)
+        self.info_dropped = 0
+        self.pull_levels = (os.environ.get("TRIGGER_BUS_LEVELS")
+                            or DEFAULT_PULL_LEVELS).strip() or DEFAULT_PULL_LEVELS
         self.base_url = os.environ.get("TRIGGER_BUS_URL", DEFAULT_BASE_URL).rstrip("/")
         self.subscriber = (os.environ.get("TRIGGER_BUS_SUBSCRIBER",
                                           DEFAULT_SUBSCRIBER).strip()
@@ -509,6 +554,9 @@ class _BusState:
         # Mid-turn event injection: its own cursor + at-most-once marked set,
         # so pre_llm_call can never hand the same event out twice.
         self.interrupt_cursor = self.cursor
+        # 0.9.3: highest info id really injected (logging/telemetry only; the
+        # queue itself is the "not yet injected" record).
+        self.info_cursor = self.cursor
         self.interrupt_done: "OrderedDict[str, None]" = OrderedDict()
         # 0.8.2 wake claim: an event handed to _wake (interrupt initiated) is
         # marked here BEFORE the hand-over, so transform_tool_result can never
@@ -592,6 +640,9 @@ def _fetch_events(state: _BusState, since: int
         "subscriber": state.subscriber,
         "since": since,
         "limit": MAX_QUEUE,
+        # 0.9.3: info is pulled in the SAME round-trip.  The server defaults a
+        # hermes* subscriber to event,notify, so it must be named explicitly.
+        "levels": state.pull_levels,
     })
     url = "%s/events?%s" % (state.base_url, query)
     req = urllib.request.Request(url, headers=dict({
@@ -689,13 +740,15 @@ def _note_subscription(state: _BusState, subscription: Optional[Dict[str, Any]],
     if subscription.get("expired"):
         with state.lock:
             cleared = len(state.events)
+            info_cleared = len(state.info_events)
             state.events.clear()
+            state.info_events.clear()
         if not state.expired:
             state.expired = True
             logger.warning("subscription %s EXPIRED (status=%s): delivery "
-                           "stopped, cleared %d queued event(s); renewing "
-                           "before the next poll", state.subscriber, status,
-                           cleared)
+                           "stopped, cleared %d queued event(s) + %d info; "
+                           "renewing before the next poll", state.subscriber,
+                           status, cleared, info_cleared)
         else:
             logger.debug("subscription %s still expired (status=%s)",
                          state.subscriber, status)
@@ -748,6 +801,13 @@ def _ack_async(state: _BusState, up_to: int) -> None:
 # --------------------------------------------------------------------------- #
 
 def _merge_events(state: _BusState, events: List[Dict[str, Any]]) -> int:
+    """Route a pulled batch: info to its silent backlog, event/notify to the
+    wakeable queue.
+
+    Both queues advance the same ``high_water``, so a level is never pulled
+    twice.  ``log`` is not a deliverable level; if one slips in it is counted
+    as seen and dropped (it must never reach a session).
+    """
     added = 0
     with state.lock:
         for event in events:
@@ -757,9 +817,18 @@ def _merge_events(state: _BusState, events: List[Dict[str, Any]]) -> int:
                 continue
             if event_id <= state.high_water:
                 continue
-            if len(state.events) == state.events.maxlen:
-                state.dropped += 1
-            state.events.append(event)
+            level = _level(event)
+            if level == INFO_LEVEL:
+                if len(state.info_events) == state.info_events.maxlen:
+                    state.info_dropped += 1
+                state.info_events.append(event)
+            elif level == "log":
+                state.high_water = event_id
+                continue
+            else:
+                if len(state.events) == state.events.maxlen:
+                    state.dropped += 1
+                state.events.append(event)
             state.high_water = event_id
             added += 1
     return added
@@ -926,6 +995,37 @@ def _format_interrupt(event: Dict[str, Any]) -> str:
     return "\n\n⚡ 立刻处理：\n" + _format_event(event)
 
 
+def _format_info_event(event: Dict[str, Any]) -> str:
+    """One 0.9.3 info card: the shared two-line card, marked ``· info``.
+
+    info is context only (never a wake, never a visible message), so its level
+    slot reads ``· info`` instead of a bare ``info`` — the dot makes it read as
+    an annotation, not as another order.
+    """
+    head = "#%s · info %s %s" % (
+        event.get("id") if event.get("id") is not None else "?",
+        _event_origin(event), _short_time(event.get("ts")))
+    thread = _thread_key(event)
+    if thread:
+        head += " thr=%s" % thread
+    return "%s\n> %s" % (head, _clip_text(event.get("text")))
+
+
+def _format_info(events: List[Dict[str, Any]],
+                 limit: int = MAX_INFO_PER_INJECT) -> str:
+    """The ``— info —`` body: ``[N 条 info]`` on top when there are several."""
+    events = [e for e in events if isinstance(e, dict)]
+    if not events:
+        return ""
+    if len(events) == 1:
+        return _format_info_event(events[0])
+    blocks = [_format_info_event(e) for e in events[:limit]]
+    hidden = len(events) - len(blocks)
+    if hidden > 0:
+        blocks.append("+%d more" % hidden)
+    return "\n".join(["[%d 条 info]" % len(events)] + blocks)
+
+
 def _wake_line(events: List[Dict[str, Any]], icon: str, verb: str,
                lead: str = "来自") -> str:
     """The whole wake message, one line: ``⚡ 来自 mc_chat · Steve 的打断``.
@@ -964,8 +1064,9 @@ def _take_events(state: "_BusState",
     so the same events are never delivered twice.
 
     ``levels`` restricts what may be injected (the agent only ever takes
-    event + notify).  Anything else still sitting in the queue is discarded
-    here: info/log must never reach a session.
+    event + notify).  Since 0.9.3 ``info`` never enters this deque at all (it
+    has its own silent backlog, see :func:`_take_info`); anything else still
+    sitting here is discarded: ``log`` must never reach a session.
     """
     with state.lock:
         if not state.events:
@@ -988,6 +1089,42 @@ def _take_events(state: "_BusState",
     _save_cursor(state.cursor_path, cursor, state.subscriber)
     _ack_async(state, cursor)
     return events, cursor, dropped
+
+
+def _take_info(state: "_BusState",
+               limit: int = MAX_INFO_PER_INJECT) -> Optional[tuple]:
+    """Pop at most ``limit`` info rows for a turn that is ALREADY running.
+
+    0.9.3: info has no wake route at all — this is called only from
+    ``pre_llm_call``.  The rows are removed from the backlog only when they are
+    really handed to the model, so a truncation leaves the remainder queued for
+    the next turn (never dropped).  The cursor/ACK advance to the highest
+    injected id, which is what "injected once" means here.
+
+    Returns ``(events, cursor)`` or ``None`` when there is nothing to inject.
+    """
+    with state.lock:
+        if not state.info_events:
+            return None
+        batch: List[Dict[str, Any]] = []
+        while state.info_events and len(batch) < max(1, int(limit)):
+            batch.append(state.info_events.popleft())
+        if not batch:
+            return None
+        ids = [int(e["id"]) for e in batch if e.get("id") is not None]
+        if ids:
+            state.cursor = max(state.cursor, max(ids))
+            state.info_cursor = max(state.info_cursor, max(ids))
+        cursor = state.cursor
+        remaining = len(state.info_events)
+        dropped, state.info_dropped = state.info_dropped, 0
+    _save_cursor(state.cursor_path, cursor, state.subscriber)
+    _ack_async(state, cursor)
+    _get_logger().info("info INJECT n=%d ids=%s cursor=%d remaining=%d "
+                       "dropped=%d", len(batch),
+                       ",".join(str(e.get("id")) for e in batch),
+                       cursor, remaining, dropped)
+    return batch, cursor
 
 
 def _take_interrupt(state: "_BusState") -> Optional[Dict[str, Any]]:
@@ -2557,26 +2694,37 @@ def _on_pre_llm_call(**_kwargs: Any) -> Optional[Dict[str, str]]:
                 state.turn_active = True
                 state.turn_active_since = time.monotonic()
 
+        parts: List[str] = []
         taken = _take_events(state, levels=INJECT_LEVELS)
-        if taken is None:
-            return None
-        events, cursor, dropped = taken
+        if taken is not None:
+            events, cursor, dropped = taken
 
-        # Belt and braces: an event already inserted mid-turn by
-        # transform_tool_result must not be handed out again here.
-        events = [e for e in events
-                  if _level(e) not in INTERRUPT_LEVELS
-                  or not _interrupt_injected(state, e)]
-        if not events:
-            return None
+            # Belt and braces: an event already inserted mid-turn by
+            # transform_tool_result must not be handed out again here.
+            events = [e for e in events
+                      if _level(e) not in INTERRUPT_LEVELS
+                      or not _interrupt_injected(state, e)]
+            if events:
+                block = _format_events(events)
+                if dropped:
+                    block += ("\n（队列已满，较早的 %d 条事件被丢弃）" % dropped)
+                _confirm_injected(state, events)
+                parts.append(block)
+                _get_logger().info("injected %d event(s) into pre_llm_call "
+                                   "context (cursor=%d, chars=%d)",
+                                   len(events), cursor, len(block))
 
-        context = _format_events(events)
-        if dropped:
-            context += ("\n（队列已满，较早的 %d 条事件被丢弃）" % dropped)
-        _confirm_injected(state, events)
-        _get_logger().info("injected %d event(s) into pre_llm_call context "
-                           "(cursor=%d, chars=%d)", len(events), cursor,
-                           len(context))
+        # 0.9.3: info LAST, in its own section.  pre_llm_call only fires for a
+        # turn that is already running, so info can never start or wake one;
+        # at most MAX_INFO_PER_INJECT cards leave the backlog per turn.
+        info = _take_info(state)
+        if info is not None:
+            info_events, _info_cursor = info
+            parts.append("— info —\n" + _format_info(info_events))
+
+        if not parts:
+            return None
+        context = "\n\n".join(parts)
         return {"context": context}
     except Exception:  # noqa: BLE001 - never break the model call
         _get_logger().exception("pre_llm_call failed; no context injected")

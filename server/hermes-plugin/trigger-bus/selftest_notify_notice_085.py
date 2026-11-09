@@ -63,7 +63,7 @@ SPEC.loader.exec_module(plugin)
 
 plugin.LOG_PATH = TMP / "selftest.log"
 plugin._ack_async = lambda *a, **k: None                  # no HTTP in tests
-assert plugin.PLUGIN_VERSION in ("0.8.5", "0.9.0", "0.9.1", "0.9.2"), plugin.PLUGIN_VERSION
+assert plugin.PLUGIN_VERSION in ("0.8.5", "0.9.0", "0.9.1", "0.9.2", "0.9.3"), plugin.PLUGIN_VERSION
 
 from gateway.config import Platform                      # noqa: E402
 from gateway.session import SessionSource                 # noqa: E402
@@ -494,12 +494,12 @@ check("h. a second pre_llm_call injects nothing and moves no cursor",
 
 yaml_text = (HERE / "plugin.yaml").read_text(encoding="utf-8")
 readme = (HERE / "README.md").read_text(encoding="utf-8")
-check("g. plugin.yaml is 0.9.2 and documents both texts",
-      "version: 0.9.2" in yaml_text
+check("g. plugin.yaml carries the current version and documents both texts",
+      ("version: %s" % plugin.PLUGIN_VERSION) in yaml_text
       and "收到来自 <source> · <actor> 的 Event 消息" in yaml_text
       and "收到来自 <source> · <actor> 的 Notify 消息" in yaml_text, "")
-check("g. README is titled 0.9.2 and documents both texts",
-      readme.startswith("# trigger-bus (0.9.2)")
+check("g. README is titled with the current version and documents both texts",
+      readme.startswith("# trigger-bus (%s)" % plugin.PLUGIN_VERSION)
       and "收到来自 <source> · <actor> 的 Event 消息" in readme
       and "收到来自 <source> · <actor> 的 Notify 消息" in readme, "")
 check("g. README states the 0.9.1 rule (notify 通知在送达时发，排队不发)",

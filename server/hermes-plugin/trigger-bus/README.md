@@ -1,4 +1,4 @@
-# trigger-bus (0.9.2)
+# trigger-bus (0.9.3)
 
 Deliver events from the local **mowu-trigger** service (127.0.0.1:8791) into a
 Hermes session — including when the trainer is not talking.
@@ -128,6 +128,47 @@ adapter.send_message(chat_id, "📬 收到来自 <source> · <actor> 的 Notify 
   logged and swallowed, so the wake that was already handed over still counts
   as handed over (`handle_message` was called), never as failed.
 
+## 0.9.3 — info 静默入上下文（不唤醒）
+
+`info` used to be worker-only: the pull never asked for it, so the agent never
+saw one. 0.9.3 pulls it in the **same** `GET /events` request
+(`levels=event,notify,info`, overridable with `TRIGGER_BUS_LEVELS`) and gives it
+exactly one route — **silent context**:
+
+- **never a wake**: info does not call `handle_message`, does not open a turn,
+  does not enter the gateway queue, is not eligible for
+  `transform_tool_result`, and produces **no visible message** (no `📡`, no
+  notice, no send of any kind);
+- **only into a turn that already exists**: the injection seam is
+  `pre_llm_call`, so info rides along only when the trainer (or any other
+  caller) was going to speak anyway. With no active turn it simply waits in
+  its own bounded backlog (`INFO_QUEUE_MAX`, default 100) — the cursor stays
+  where it was;
+- **after the cards**: in a turn that also carries event/notify, their cards
+  come first and info gets its own last section titled `— info —`;
+- **at most 10 per turn** (`MAX_INFO_PER_INJECT`): 12 queued info → 10 cards
+  now, the remaining 2 on the next turn. Truncation never drops a row;
+- **format**: one card is the standard two-line card with `· info` in the
+  level slot; several cards add `[N 条 info]` on the first line; the text is
+  clipped to the same 100 characters + `…`:
+
+  ```
+  — info —
+  [3 条 info]
+  #42 · info mc_chat/Steve 11:44 thr=mc_chat:global
+  > 矿洞修好了
+  #43 · info codex 11:45
+  > build 完成
+  #44 · info dsh 11:46
+  > 排队中
+  ```
+
+- **cursor**: moved (and ACKed) only when the block is really injected, to the
+  highest injected info id — exactly the same "delivery proof" rule as
+  event/notify. A wake, a queue entry or a fetch never moves it for info.
+
+Boundary in one line: **info is read when I speak, never the reason I speak.**
+
 ## 0.9.2 — 忙时多条 notify 合并为一次唤醒
 
 0.9.0/0.9.1 admitted **every** busy notify separately, so three notifies that
@@ -243,7 +284,7 @@ card a second time.
 |----------|------------------------|----------------------|
 | `event`  | **中断** — `handle_message(internal=False)`: the running turn is interrupted at once | **起一轮** — `handle_message(internal=False)` |
 | `notify` | **排队** — `handle_message(internal=True)`: Hermes' own busy queue (`admit_native` FIFO) runs it after this turn really finishes; never the adapter pending slot, never an interrupt | **入队 + drain** — `_queue_or_replace_pending_event`, then the head is processed immediately (`handle_message`) |
-| `info`   | never injected (worker-only) | never injected |
+| `info`   | **静默入上下文** — rides the running turn's `pre_llm_call` in a trailing `— info —` block; no wake, no queue, no message | **等待** — stays in its backlog, no wake, no queue, no message (0.9.3) |
 | `log`    | never injected (archive-only) | never injected |
 
 No extra field, flag or priority influences this: the level alone does.
@@ -390,6 +431,31 @@ Rules:
 injected **and not already claimed by a wake** (0.8.2 `woken_ids`), at most
 once per event. `notify` is never eligible there — it waits in the queue.
 
+Since 0.9.3 `info` is injected by `pre_llm_call` only, as one extra section
+**after** the event/notify cards. It never wakes, never queues and sends
+nothing; at most 10 cards ride one turn and the rest stay queued:
+
+```
+[2 条]
+#20 event mc_chat/Steve 11:41
+> 快来
+#21 notify email/HR 11:42
+> 周报
+
+— info —
+[3 条 info]
+#22 · info codex 11:43
+> build 完成
+#23 · info dsh 11:43
+> 队列 2
+#24 · info mc_bridge 11:44
+> 已连接
+```
+
+A single info card has no `[N 条 info]` line; its text obeys the same 100-char
+clip and its `thr=` suffix is identical. `— info —` appears on its own line and
+the block is always last — event/notify order is never changed by info.
+
 ## Busy flag
 
 `pre_llm_call` sets it, `post_llm_call` clears it; when the gateway exposes
@@ -416,6 +482,7 @@ live gateway + session source; without it only injection works, never a wake).
 | `TRIGGER_BUS_POST_TURN_DELAY` | `1` | settle delay before the post-turn dispatch (s) |
 | `TRIGGER_BUS_TURN_ACTIVE_TTL` | `1800` | stale busy-flag guard (s) |
 | `TRIGGER_BUS_NON_TURN_PLATFORMS` | `subagent,cron,internal,worker,batch` | platforms whose turns never count as busy |
+| `TRIGGER_BUS_LEVELS` | `event,notify,info` | levels the pull asks for (info is silent context, never a wake) |
 | `TRIGGER_BUS_DISABLED` | — | `1` makes `register()` a no-op |
 | `TRIGGER_TOKEN_PATH` | `~/.hermes/secrets/trigger.token` | `X-Trigger-Token` |
 
@@ -435,6 +502,7 @@ live gateway + session source; without it only injection works, never a wake).
 /Users/kibyou/.hermes/tools/python-3.14.9*/bin/python3 selftest_notify_notice_085.py
 /Users/kibyou/.hermes/tools/python-3.14.9*/bin/python3 selftest_notify_delivery_091.py
 /Users/kibyou/.hermes/tools/python-3.14.9*/bin/python3 selftest_notify_merge_092.py
+/Users/kibyou/.hermes/tools/python-3.14.9*/bin/python3 selftest_info_inject_093.py
 
 # 0.9.0: the REAL gateway classes (BasePlatformAdapter + the FIFO branch), no gateway
 /Users/kibyou/.hermes/tools/python-3.14.9*/bin/python3 probe_native_queue_entry.py

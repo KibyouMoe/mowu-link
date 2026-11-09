@@ -65,7 +65,7 @@ SPEC.loader.exec_module(plugin)
 
 plugin.LOG_PATH = TMP / "selftest.log"
 plugin._ack_async = lambda *a, **k: None                  # no HTTP in tests
-assert plugin.PLUGIN_VERSION == "0.9.2", plugin.PLUGIN_VERSION
+assert plugin.PLUGIN_VERSION in ("0.9.2", "0.9.3"), plugin.PLUGIN_VERSION
 
 from gateway.config import Platform                      # noqa: E402
 from gateway.session import SessionSource                 # noqa: E402
@@ -460,10 +460,12 @@ finally:
 
 yaml_text = (HERE / "plugin.yaml").read_text(encoding="utf-8")
 readme = (HERE / "README.md").read_text(encoding="utf-8")
-check("h. plugin.yaml is 0.9.2", "version: 0.9.2" in yaml_text, "")
+check("h. plugin.yaml matches PLUGIN_VERSION",
+      ("version: %s" % plugin.PLUGIN_VERSION) in yaml_text, "")
 check("h. plugin.yaml states 「忙时多条 notify 合并为一次唤醒」",
       "忙时多条 notify 合并为一次唤醒" in yaml_text, "")
-check("h. README is titled 0.9.2", readme.startswith("# trigger-bus (0.9.2)"),
+check("h. README is titled with the current version",
+      readme.startswith("# trigger-bus (%s)" % plugin.PLUGIN_VERSION),
       readme.splitlines()[0] if readme else "")
 check("h. README has the 0.9.2 section and the one-window rule",
       "## 0.9.2 — 忙时多条 notify 合并为一次唤醒" in readme

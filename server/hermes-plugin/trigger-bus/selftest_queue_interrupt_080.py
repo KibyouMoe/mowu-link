@@ -192,9 +192,11 @@ feed(state, ev(1, "info", text="INFO-OK"), ev(2, "log", text="LOG-OK"),
 injected = plugin._on_pre_llm_call(platform="feishu", session_id="s-0",
                                    user_message="hi")
 body = injected.get("context", "") if isinstance(injected, dict) else ""
-check("0a. pre_llm_call injects notify+event, never info/log",
+check("0a. pre_llm_call injects notify+event, then info; never log",
       "NOTIFY-OK" in body and "EVENT-OK" in body
-      and "INFO-OK" not in body and "LOG-OK" not in body,
+      and "INFO-OK" in body and "LOG-OK" not in body
+      and body.index("INFO-OK") > body.index("EVENT-OK")
+      and "— info —" in body,
       "context=%r" % body[:60])
 check("0a. direct injection still moves the cursor", state.cursor >= 4,
       "cursor=%d" % state.cursor)
