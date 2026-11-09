@@ -1,12 +1,16 @@
-"""飞书双向桥：长连接收训练员私信 → Router /notice；主动发私信。
+"""飞书双向桥：长连接收训练员私信 → 回调；主动发/改私信。
 
 只用 lark_oapi 的长连接（WebSocket）模式，不需要公网回调地址。
 
 约定：
 - 只处理 ``im.message.receive_v1`` 里 **p2p** 且发送者 open_id 等于训练员的文本消息；
-- 入向：先交给 ``on_text``（worker 负责 POST /notice，urgency=urgent），
-  成功后再回一句确认；失败则回一句“转发失败”，不让训练员干等；
-- 出向：``send_text`` 用应用机器人身份给训练员发私信；
+- 入向有两种模式：
+  * ``on_chat``（聊天模式）：收到文本直接交给它（带 message_id/open_id），
+    确认语与进度由 ChatService 负责，这里不再发确认；
+  * ``on_text``（任务汇报模式）：交给 worker POST /notice(urgent)，
+    成功后再回一句确认；失败则回一句“转发失败”，不让训练员干等；
+- 出向：``send_text`` / ``send_text_message`` 用应用机器人身份发私信，
+  ``update_text`` 编辑已发消息（流式进度用）；
 - 断线：lark 客户端自身 auto_reconnect，外层再兜一层重启循环；
 - 日志：用调用方传进来的 logger（worker 自己的日志文件）。
 
@@ -128,7 +132,7 @@ class FeishuBridge:
         self,
         creds: FeishuCreds,
         open_id: str,
-        on_text: Callable[[str], bool],
+        on_text: Optional[Callable[[str], bool]] = None,
         confirm_text: str = DEFAULT_CONFIRM_TEXT,
         logger: Optional[logging.Logger] = None,
         api_client: Any = None,
@@ -137,10 +141,12 @@ class FeishuBridge:
         api_factory: Optional[Callable[[], Any]] = None,
         restart_delay: float = 5.0,
         max_restart_delay: float = 60.0,
+        on_chat: Optional[Callable[[str, str, str], Any]] = None,
     ) -> None:
         self.creds = creds
         self.open_id = (open_id or "").strip()
         self.on_text = on_text
+        self.on_chat = on_chat
         self.confirm_text = confirm_text or DEFAULT_CONFIRM_TEXT
         self.log = logger or log
         self._api = api_client
@@ -157,6 +163,7 @@ class FeishuBridge:
         self.connecting = 0
         self.handled = 0
         self.sent = 0
+        self.updated = 0
 
     # -- 客户端 ---------------------------------------------------------- #
 
@@ -220,8 +227,61 @@ class FeishuBridge:
             .build()
         )
 
+    def _build_update_request(self, message_id: str, text: str) -> Any:
+        from lark_oapi.api.im.v1 import UpdateMessageRequest, UpdateMessageRequestBody
+
+        body = (
+            UpdateMessageRequestBody.builder()
+            .content(json.dumps({"text": text}, ensure_ascii=False))
+            .build()
+        )
+        return (
+            UpdateMessageRequest.builder()
+            .message_id(message_id)
+            .request_body(body)
+            .build()
+        )
+
+    @staticmethod
+    def _response_ok(response: Any) -> bool:
+        try:
+            return bool(response.success())
+        except Exception:  # noqa: BLE001 - 假对象/新版 SDK 可能没有 success()
+            return getattr(response, "code", 0) == 0
+
+    @staticmethod
+    def _response_message_id(response: Any) -> str:
+        """从 create 响应里取 message_id；取不到返回空串（不影响发送成功判定）。"""
+        data = getattr(response, "data", None)
+        message_id = _get(data, "message_id", default="") if data is not None else ""
+        return str(message_id or "")
+
+    def send_text_message(self, text: str) -> str:
+        """给训练员发一条私信，成功返回 message_id；失败只记日志，不抛异常。"""
+        text = (text or "").strip()
+        if not text:
+            return ""
+        if not self.open_id:
+            self.log.warning("飞书发送跳过：没有训练员 open_id")
+            return ""
+        try:
+            request = self._build_message_request(text)
+            response = self._ensure_api().im.v1.message.create(request)
+            if not self._response_ok(response):
+                self.log.warning("飞书发送失败 code=%s msg=%s",
+                                 getattr(response, "code", "?"),
+                                 getattr(response, "msg", ""))
+                return ""
+            self.sent += 1
+            message_id = self._response_message_id(response)
+            self.log.info("飞书已发送 → %s：%s", self.open_id, text[:120])
+            return message_id
+        except Exception as exc:  # noqa: BLE001 - 网络/凭据问题不能拖垮 worker
+            self.log.warning("飞书发送异常：%s", exc)
+            return ""
+
     def send_text(self, text: str) -> bool:
-        """给训练员发一条私信；失败只记日志，不抛异常。"""
+        """发一条私信；返回是否成功（兼容旧调用方）。"""
         text = (text or "").strip()
         if not text:
             return False
@@ -231,12 +291,7 @@ class FeishuBridge:
         try:
             request = self._build_message_request(text)
             response = self._ensure_api().im.v1.message.create(request)
-            success = None
-            try:
-                success = bool(response.success())
-            except Exception:  # noqa: BLE001 - 假对象/新版 SDK 可能没有 success()
-                success = getattr(response, "code", 0) == 0
-            if not success:
+            if not self._response_ok(response):
                 self.log.warning("飞书发送失败 code=%s msg=%s",
                                  getattr(response, "code", "?"),
                                  getattr(response, "msg", ""))
@@ -246,6 +301,27 @@ class FeishuBridge:
             return True
         except Exception as exc:  # noqa: BLE001 - 网络/凭据问题不能拖垮 worker
             self.log.warning("飞书发送异常：%s", exc)
+            return False
+
+    def update_text(self, message_id: str, text: str) -> bool:
+        """编辑一条已发文本消息（流式进度用）；失败只记日志。"""
+        message_id = (message_id or "").strip()
+        text = (text or "").strip()
+        if not message_id or not text:
+            return False
+        try:
+            request = self._build_update_request(message_id, text)
+            response = self._ensure_api().im.v1.message.update(request)
+            if not self._response_ok(response):
+                self.log.warning("飞书编辑失败 id=%s code=%s msg=%s",
+                                 message_id, getattr(response, "code", "?"),
+                                 getattr(response, "msg", ""))
+                return False
+            self.updated += 1
+            self.log.debug("飞书已编辑 id=%s：%s", message_id, text[:80])
+            return True
+        except Exception as exc:  # noqa: BLE001
+            self.log.warning("飞书编辑异常 id=%s：%s", message_id, exc)
             return False
 
     # -- 入向 ------------------------------------------------------------ #
@@ -288,7 +364,17 @@ class FeishuBridge:
             return
 
         self.handled += 1
+        message_id = str(_get(message, "message_id", default="") or "")
         self.log.info("收到训练员飞书私信：%s", text[:200])
+        if self.on_chat is not None:
+            try:
+                self.on_chat(text, message_id, str(sender))
+            except Exception:  # noqa: BLE001
+                self.log.exception("飞书聊天回调失败")
+            return
+        if self.on_text is None:
+            self.log.warning("飞书入向没有回调（on_text/on_chat 均为空），忽略")
+            return
         forwarded = False
         try:
             forwarded = bool(self.on_text(text))

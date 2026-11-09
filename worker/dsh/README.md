@@ -57,6 +57,11 @@ worker 仍会启动，只是不带鉴权。鉴权头同时发 `X-Router-Token`�
 | `--feishu-creds` | `~/.hermes/secrets/feishu-tsurumaru.json` | 飞书应用凭据（app_id/app_secret） |
 | `--feishu-open-id` | 空 | 训练员 open_id；空=用凭据文件里的 `open_id` |
 | `--no-feishu` | 关 | 不连飞书（自测/排障） |
+| `--chat` / `--no-chat` | 关（`worker.json` 里 `chat_enabled: true` 开） | 飞书私信直接跟 dsh 聊天（持久 session / 流式进度 / 排队） |
+| `--chat-state` | `~/.hermes/state/dsh-chat-state.json` | open_id → session 状态文件（原子写） |
+| `--chat-timeout` | `300` | 单轮聊天超时秒数；到点杀进程组并回错误摘要 |
+| `--chat-queue` | `3` | 忙碌时聊天最多排队条数，超出回一句忙线提示 |
+| `--chat-stream-interval` | `1.6` | 流式进度节流间隔（秒），只编辑同一条消息 |
 | `--subscribe` | 空 | 启动后订阅的 source，逗号分隔（如 `mc_chat,email`） |
 | `--subscribe-interval` | `15` | `/subscriptions/pending` 轮询间隔（秒） |
 | `--subscription-feed` | `~/.hermes/logs/<name>-subscription-feed.jsonl` | 订阅消息落盘文件 |
@@ -73,6 +78,8 @@ GET  /stream?name=<name>                        → SSE
 POST /heartbeat  {name, state, progress_at, task_id?, ts, ...}
 POST /result     {name, task_id, status, summary, artifacts[], evidence[]}
 POST /notice     {worker, text, urgency}        → 飞书入向转给 Hermes
+POST /chat/log   {worker, direction, session_id, message_id, text, ts}
+                                                → 飞书聊天旁听（失败不影响聊天）
 POST /subscriptions {worker, source}            → 声明订阅
 GET  /subscriptions/pending?worker=             → 拉取订阅消息
 ```
@@ -109,7 +116,17 @@ SIGTERM/SIGINT：杀掉当前子进程组、把任务以 interrupted 上报（�
 ## 飞书 / 看门狗 / 订阅
 
 飞书长连接用 `lark_oapi` 的 WebSocket 模式（无需公网回调）。只处理训练员的
-**p2p 文本私信**：消息转 `POST /notice`（`urgency=urgent`，唤醒 Hermes），
+**p2p 文本私信**。`chat_enabled`（`--chat`）时走聊天：每条私信立即回
+“（思考中…）”，然后跑 `dsh --profile headless --json`，成功后把回复发回飞书
+（超过 1500 字分条）；运行中把公开文本/工具进度按 `--chat-stream-interval`
+节流成一条“进行中”消息（编辑同一条，不逐事件刷屏）。每个 open_id 一条持久
+session（`--chat-state` 原子写）：首轮新建，后续 `--session-id` 续聊；agent
+非零退出/超时把错误摘要发回飞书，并把 session 标 suspicious，下一轮自动重建。
+同一 worker 一次只跑一个 agent；Router 任务优先，忙碌时聊天最多排
+`--chat-queue` 条，超出回“前面还在忙，稍后回你”。每条 in/out 都旁听
+`POST /chat/log`，Router 没接上只记日志。
+
+未开聊天（或旧行为）时，消息转 `POST /notice`（`urgency=urgent`，唤醒 Hermes），
 成功后回一句“收到，已转给溪流”；群聊、他人、非文本一律忽略。任务开始/完成/
 失败/卡死会主动给训练员发私信。`open_id` 是应用维度的，默认取凭据文件里的
 `open_id`（`--feishu-open-id` 可覆盖）。
@@ -133,4 +150,6 @@ SSE 侧沿用 `--idle-reconnect`（默认 90s）无字节即重连的老逻辑�
 覆盖：注册、收任务、心跳、结果字段、4000 字截尾、失败退出码、超时、卡死看门狗
 （判定+杀进程+飞书告警）、飞书入向/出向/过滤/重连、订阅声明/落盘/限流、
 串行不重叠、断线重连并重新注册、SIGTERM 优雅退出、重复任务去重、配置加载、
-语法检查、纯函数、SSE 空闲/心跳不误判断线、真断才重连。
+语法检查、纯函数、SSE 空闲/心跳不误判断线、真断才重连，以及聊天全链路：
+首轮 session 落盘/次轮 `--session-id`、流式节流（≤2 条）、忙时排队与超额拒绝、
+`/chat/log` 字段、非零退出/超时的可疑标记与重建、1500 字分条、任务/聊天互斥。

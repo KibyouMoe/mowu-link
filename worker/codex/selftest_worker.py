@@ -6,7 +6,9 @@
 覆盖：注册、收任务、codex argv/代理环境注入、结果字段、心跳、4000 字截尾、
 失败退出码、超时、串行不重叠、断线重连并重新注册、SIGTERM（空闲/执行中）、
 重复任务去重、配置文件加载、二进制探测优先级、超长 prompt 走 stdin、语法、纯函数，
-以及 SSE 空闲/心跳不误判断线、真断才重连。
+以及 SSE 空闲/心跳不误判断线、真断才重连；聊天（假 agent + 假 Router）覆盖
+session 持久化/resume、流式节流、排队与超额拒绝、/chat/log、失败与超时重建、
+1500 字分条、任务/聊天互斥、旁听失败不影响聊天。
 目标：60 秒内跑完并退出，不留常驻进程。
 """
 
@@ -36,6 +38,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 sys.path.insert(0, str(HERE))
 import worker  # noqa: E402
+from _sdk import chat as chat_sdk  # noqa: E402
 from _sdk import feishu as feishu_sdk  # noqa: E402
 from _sdk import subscriptions as subs_sdk  # noqa: E402
 from _sdk import watchdog as watchdog_sdk  # noqa: E402
@@ -96,6 +99,49 @@ if [ -n "$trace" ]; then printf 'end %s\\n' "$(stamp)" >> "$trace"; fi
 exit $rc
 """
 
+FAKE_CHAT_CODEX = """#!/bin/sh
+# 聊天自测用的假 codex：输出与 ``codex exec --json`` 同构的 NDJSON
+PY=@PY@
+mode="${FAKE_CHAT_MODE:-ok}"
+trace="${FAKE_CHAT_TRACE:-}"
+if [ -n "$trace" ]; then printf '%s\\n' "$*" >> "$trace"; fi
+
+sid=""
+prev=""
+for a in "$@"; do
+    if [ "$prev" = "resume" ]; then sid="$a"; fi
+    prev="$a"
+done
+if [ -z "$sid" ]; then sid="${FAKE_CHAT_SID:-thread-chat-1}"; fi
+
+printf '{"type":"thread.started","thread_id":"%s"}\\n' "$sid"
+printf '{"type":"turn.started"}\\n'
+
+case "$mode" in
+  fail)
+    printf '{"type":"item.completed","item":{"id":"i0","type":"agent_message","text":"准备失败"}}\\n'
+    echo "fake-chat-codex: boom-boom" >&2
+    exit 3
+    ;;
+  slow)
+    "$PY" -c 'import os,time;time.sleep(float(os.environ.get("FAKE_CHAT_SLEEP","0.6")))'
+    ;;
+  stream)
+    i=1
+    while [ "$i" -le 6 ]; do
+      printf '{"type":"item.started","item":{"id":"c%s","type":"command_execution","command":"echo %s","status":"in_progress"}}\\n' "$i" "$i"
+      printf '{"type":"item.completed","item":{"id":"a%s","type":"agent_message","text":"第 %s 段进度"}}\\n' "$i" "$i"
+      "$PY" -c 'import time;time.sleep(0.12)'
+      i=$((i+1))
+    done
+    ;;
+esac
+
+printf '{"type":"item.completed","item":{"id":"final","type":"agent_message","text":"%s"}}\\n' "${FAKE_CHAT_REPLY:-第一轮回答}"
+printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\\n'
+exit 0
+"""
+
 
 def need(condition: Any, message: str) -> None:
     if not condition:
@@ -149,6 +195,7 @@ class FakeRouter:
         self.heartbeats: List[Dict[str, Any]] = []
         self.results: List[Dict[str, Any]] = []
         self.notices: List[Dict[str, Any]] = []
+        self.chat_logs: List[Dict[str, Any]] = []
         self.subscriptions: List[Dict[str, Any]] = []
         self.pending_messages: List[Dict[str, Any]] = list(pending_messages or [])
         self.pending_requests: List[str] = []
@@ -227,6 +274,13 @@ class FakeRouter:
                         router.notices.append(
                             {"ts": time.time(), "body": body, "auth": auth,
                              "xtoken": xtoken})
+                        router.cond.notify_all()
+                    self._json(200, {"ok": True})
+                elif path == "/chat/log":
+                    with router.cond:
+                        router.chat_logs.append(
+                            {"ts": time.time(), "path": path, "body": body,
+                             "auth": auth, "xtoken": xtoken})
                         router.cond.notify_all()
                     self._json(200, {"ok": True})
                 elif path == "/subscriptions":
@@ -329,6 +383,9 @@ class FakeRouter:
     def wait_notices(self, count: int, timeout: float = 12.0) -> bool:
         return self._wait_count("notices", count, timeout)
 
+    def wait_chat_logs(self, count: int, timeout: float = 12.0) -> bool:
+        return self._wait_count("chat_logs", count, timeout)
+
     def wait_subscriptions(self, count: int, timeout: float = 12.0) -> bool:
         return self._wait_count("subscriptions", count, timeout)
 
@@ -373,6 +430,11 @@ class Sandbox:
             FAKE_CODEX.replace("@PY@", shlex.quote(sys.executable)),
             encoding="utf-8")
         self.fake_codex.chmod(0o755)
+        self.fake_chat = self.dir / "fake-chat-codex"
+        self.fake_chat.write_text(
+            FAKE_CHAT_CODEX.replace("@PY@", shlex.quote(sys.executable)),
+            encoding="utf-8")
+        self.fake_chat.chmod(0o755)
         Sandbox._counter += 1
         self.tag = Sandbox._counter
 
@@ -518,11 +580,13 @@ class FakeFeishuApi:
 
 
 def feishu_event(text: str, open_id: str, chat_type: str = "p2p",
-                 message_type: str = "text") -> Any:
+                 message_type: str = "text",
+                 message_id: str = "") -> Any:
     return SimpleNamespace(event=SimpleNamespace(
         message=SimpleNamespace(
             chat_type=chat_type,
             message_type=message_type,
+            message_id=message_id,
             content=json.dumps({"text": text}, ensure_ascii=False)),
         sender=SimpleNamespace(sender_id=SimpleNamespace(open_id=open_id))))
 
@@ -545,6 +609,86 @@ def make_worker(env: "Env", name: str = "codex-test") -> Any:
     return worker.Worker(cfg, None, str(env.sb.fake_codex))
 
 
+class FakeChatBridge:
+    """假飞书桥：记录发出/编辑的每条消息。"""
+
+    def __init__(self) -> None:
+        self.sent: List[tuple] = []
+        self.updates: List[tuple] = []
+        self.fail_update = False
+        self._counter = 0
+
+    def send_text_message(self, text: str) -> str:
+        self._counter += 1
+        mid = "om_out_%d" % self._counter
+        self.sent.append((mid, text))
+        return mid
+
+    def update_text(self, message_id: str, text: str) -> bool:
+        if self.fail_update:
+            return False
+        self.updates.append((message_id, text))
+        return True
+
+    def send_text(self, text: str) -> bool:
+        return bool(self.send_text_message(text))
+
+    def texts(self) -> List[str]:
+        return [text for _mid, text in self.sent]
+
+
+class EnvVars:
+    """临时改 os.environ（agent 子进程会继承）。"""
+
+    def __init__(self, **values: str) -> None:
+        self.values = values
+        self.saved: Dict[str, Optional[str]] = {}
+
+    def __enter__(self) -> "EnvVars":
+        for key, value in self.values.items():
+            self.saved[key] = os.environ.get(key)
+            os.environ[key] = value
+        return self
+
+    def __exit__(self, *_exc: Any) -> None:
+        for key, old in self.saved.items():
+            if old is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = old
+
+
+def wait_until(predicate: Callable[[], bool], timeout: float = 10.0,
+               interval: float = 0.05) -> bool:
+    end = time.time() + timeout
+    while time.time() < end:
+        if predicate():
+            return True
+        time.sleep(interval)
+    return False
+
+
+def trace_lines(path: Path) -> List[str]:
+    try:
+        return [line for line in path.read_text(encoding="utf-8").splitlines()
+                if line.strip()]
+    except OSError:
+        return []
+
+
+def make_chat_service(env: "Env", bridge: FakeChatBridge,
+                      interval: float = 0.2, queue_max: int = 3) -> Any:
+    store = chat_sdk.ChatStateStore(str(env.sb.dir / "chat-state.json"))
+    return chat_sdk.ChatService(
+        "codex-test", bridge,
+        chat_sdk.CodexAgent(str(env.sb.fake_chat), workspace=str(env.sb.ws),
+                            timeout=20),
+        store,
+        post_log=lambda payload: worker.http_json(
+            env.router.base_url + "/chat/log", payload, None),
+        queue_max=queue_max, stream_interval=interval)
+
+
 # --------------------------------------------------------------------------- #
 # 用例
 # --------------------------------------------------------------------------- #
@@ -560,7 +704,6 @@ def test_01_register() -> None:
         need(reg.get("name") == "codex-test", "注册 name 不对：%r" % reg)
         need(reg.get("version") == worker.VERSION,
              "注册 version 不对：%r" % reg)
-        need(reg.get("version") == "0.1.0", "版本不是 0.1.0：%r" % reg.get("version"))
         need(env.router.wait_streams(1, 10), "没有打开 /stream")
 
 
@@ -1287,6 +1430,14 @@ def test_26_cli_and_config_flags() -> None:
          "默认飞书凭据不是小栗帽：%r" % defaults.feishu_creds)
     need(abs(defaults.stall_seconds - 300) < 0.01, "默认 stall 不是 300")
     need(abs(defaults.idle_timeout - 90) < 0.01, "默认 idle-reconnect 不是 90")
+    need(defaults.chat_enabled is False, "聊天默认应关闭（配置显式开）")
+    need(defaults.chat_state.endswith("codex-chat-state.json"),
+         "默认 chat-state 路径不对：%r" % defaults.chat_state)
+    need(worker.parse_args(["--chat"]).chat_enabled is True, "--chat 没生效")
+    need(worker.parse_args(["--chat", "--no-chat"]).chat_enabled is False,
+         "--no-chat 没生效")
+    need(worker.parse_args(["--chat-queue", "5"]).chat_queue == 5,
+         "--chat-queue 没生效")
 
     cfg_path = Path(tempfile.mkdtemp(prefix="codex-cfg2-")) / "worker.json"
     try:
@@ -1306,6 +1457,9 @@ def test_26_cli_and_config_flags() -> None:
          "worker.json 的飞书凭据不对")
     need("stall_seconds" in cfg and "idle_reconnect" in cfg,
          "worker.json 缺看门狗/重连配置")
+    need(cfg.get("chat_enabled") is True, "worker.json 没开 chat_enabled")
+    need(str(cfg.get("chat_state", "")).endswith("codex-chat-state.json"),
+         "worker.json 的 chat_state 不对：%r" % cfg.get("chat_state"))
 
 
 @test
@@ -1360,6 +1514,287 @@ def test_28_stall_feishu_alert() -> None:
         need(env.router.wait_results(1, 5), "卡死结果没上报")
         need(env.result()["evidence"][0].get("reason") == "stalled",
              "结果不是 stalled")
+
+
+@test
+def test_29_chat_sessions_and_log() -> None:
+    """聊天①：首轮从 thread.started 拿 session；次轮 exec resume；/chat/log 完整"""
+    with Env() as env:
+        bridge = FakeChatBridge()
+        service = make_chat_service(env, bridge, interval=0.2)
+        trace = env.sb.dir / "chat-trace.log"
+        stop = threading.Event()
+        with EnvVars(FAKE_CHAT_TRACE=str(trace), FAKE_CHAT_MODE="ok",
+                     FAKE_CHAT_SID="thread-chat-1",
+                     FAKE_CHAT_REPLY="第一轮回答"):
+            service.start(stop)
+            try:
+                service.handle_text("消息一", "om_in_1", "ou_trainer")
+                need(wait_until(lambda: "第一轮回答" in bridge.texts(), 10),
+                     "首轮没有回复：%r" % bridge.texts())
+                state = json.loads(
+                    (env.sb.dir / "chat-state.json").read_text(encoding="utf-8"))
+                item = state["sessions"]["ou_trainer"]
+                need(item["session_id"] == "thread-chat-1",
+                     "首轮 session 没落盘：%r" % item)
+                need(item["suspicious"] is False, "首轮就标了可疑")
+                need(item["turns"] == 1, "turns 不对：%r" % item)
+                lines = trace_lines(trace)
+                need(len(lines) == 1, "首轮 agent 调用次数不对：%r" % lines)
+                need("resume" not in lines[0],
+                     "首轮不该 resume：%r" % lines[0])
+
+                os.environ["FAKE_CHAT_REPLY"] = "第二轮回答"
+                service.handle_text("消息二", "om_in_2", "ou_trainer")
+                need(wait_until(lambda: "第二轮回答" in bridge.texts(), 10),
+                     "次轮没有回复：%r" % bridge.texts())
+                lines = trace_lines(trace)
+                need(len(lines) == 2, "次轮 agent 调用次数不对：%r" % lines)
+                need("exec resume thread-chat-1" in lines[1],
+                     "次轮没有 resume：%r" % lines[1])
+                item = json.loads(
+                    (env.sb.dir / "chat-state.json").read_text(
+                        encoding="utf-8"))["sessions"]["ou_trainer"]
+                need(item["turns"] == 2, "turns 没累加：%r" % item)
+                need(service.runs == 2, "ChatService.runs 不对：%d" % service.runs)
+
+                need(env.router.wait_chat_logs(4, 5), "/chat/log 调用不足：%d"
+                     % len(env.router.chat_logs))
+                entries = env.router.chat_logs
+                need(all(item["path"] == "/chat/log" for item in entries),
+                     "旁听路径不对")
+                logs = [item["body"] for item in entries]
+                ins = [b for b in logs if b.get("direction") == "in"]
+                outs = [b for b in logs if b.get("direction") == "out"]
+                need(len(ins) == 2, "in 日志条数不对：%r" % ins)
+                need(len(outs) == 2, "out 日志条数不对：%r" % outs)
+                for body in logs:
+                    need(body.get("worker") == "codex-test",
+                         "chat/log 缺 worker：%r" % body)
+                    need(body.get("direction") in ("in", "out"),
+                         "chat/log direction 不对：%r" % body)
+                    for key in ("session_id", "message_id", "text"):
+                        need(key in body, "chat/log 缺字段 %s：%r" % (key, body))
+                    need(body.get("message_id"), "chat/log message_id 为空：%r" % body)
+                    need(body.get("text"), "chat/log text 为空：%r" % body)
+                need(ins[0]["message_id"] == "om_in_1",
+                     "首条 in 的 message_id 不对：%r" % ins[0])
+                need(ins[1]["session_id"] == "thread-chat-1",
+                     "次条 in 没带 session：%r" % ins[1])
+                need(outs[0]["session_id"] == "thread-chat-1",
+                     "out 没带 session：%r" % outs[0])
+            finally:
+                stop.set()
+                service.stop()
+
+
+@test
+def test_30_chat_stream_throttle() -> None:
+    """聊天③：多次 NDJSON 事件按间隔节流，只编辑同一条进行中消息（发送 ≤2 条）"""
+    with Env() as env:
+        bridge = FakeChatBridge()
+        service = make_chat_service(env, bridge, interval=0.3)
+        trace = env.sb.dir / "chat-trace.log"
+        stop = threading.Event()
+        with EnvVars(FAKE_CHAT_TRACE=str(trace), FAKE_CHAT_MODE="stream",
+                     FAKE_CHAT_REPLY="流式完成"):
+            service.start(stop)
+            try:
+                service.handle_text("来个长任务", "om_stream", "ou_trainer")
+                need(wait_until(lambda: "流式完成" in bridge.texts(), 15),
+                     "流式任务没有回复：%r" % bridge.texts())
+                progress_sent = [t for t in bridge.texts() if "进行中" in t]
+                need(len(progress_sent) <= 2,
+                     "进度消息发了 %d 条（应 ≤2）：%r"
+                     % (len(progress_sent), progress_sent))
+                need(len(bridge.updates) >= 2,
+                     "进度没有按间隔编辑：%d" % len(bridge.updates))
+                targets = {mid for mid, _text in bridge.updates}
+                need(len(targets) == 1,
+                     "进度编辑了多条消息：%r" % targets)
+                last = bridge.updates[-1][1]
+                need("进行中" in last, "编辑内容不是进度：%r" % last)
+                need("echo" in last or "第 6 段" in last,
+                     "进度里没有工具/文本：%r" % last)
+            finally:
+                stop.set()
+                service.stop()
+
+
+@test
+def test_31_chat_busy_queue_and_task_block() -> None:
+    """聊天④：忙时最多排队 3 条、超额回忙线；Router 任务期间聊天不抢跑"""
+    with Env() as env:
+        bridge = FakeChatBridge()
+        service = make_chat_service(env, bridge)
+        trace = env.sb.dir / "chat-trace.log"
+        stop = threading.Event()
+        with EnvVars(FAKE_CHAT_TRACE=str(trace), FAKE_CHAT_MODE="slow",
+                     FAKE_CHAT_SLEEP="0.5", FAKE_CHAT_REPLY="慢回复"):
+            service.start(stop)
+            try:
+                service.handle_text("消息一", "om_q1", "ou_trainer")
+                need(wait_until(lambda: len(trace_lines(trace)) == 1, 10),
+                     "第一条没有开跑：%r" % trace_lines(trace))
+                for index in range(2, 6):
+                    service.handle_text("消息%d" % index, "om_q%d" % index,
+                                        "ou_trainer")
+                busy = [t for t in bridge.texts() if "前面还在忙" in t]
+                need(len(busy) == 1, "忙线提示数量不对：%r" % busy)
+                need(wait_until(lambda: len(trace_lines(trace)) == 4, 20),
+                     "排队消息没有全部跑完：%r" % trace_lines(trace))
+                need(wait_until(lambda: sum(
+                    1 for t in bridge.texts() if "慢回复" in t) == 4, 20),
+                    "排队回复数量不对：%r" % bridge.texts())
+                joined = "\n".join(trace_lines(trace))
+                need("消息五" not in joined, "被拒绝的消息仍然执行了：%r" % joined)
+
+                service.task_begin()
+                service.handle_text("任务期间的消息", "om_task", "ou_trainer")
+                time.sleep(0.6)
+                need(len(trace_lines(trace)) == 4,
+                     "Router 任务期间聊天抢跑了：%r" % trace_lines(trace))
+                service.task_end()
+                need(wait_until(lambda: len(trace_lines(trace)) == 5, 10),
+                     "任务结束后排队聊天没有继续：%r" % trace_lines(trace))
+                need("任务期间的消息" in "\n".join(trace_lines(trace)),
+                     "任务期间的消息没被接着执行")
+            finally:
+                stop.set()
+                service.stop()
+
+
+@test
+def test_32_chat_failure_marks_suspicious() -> None:
+    """聊天⑥：非零退出发错误摘要、session 标可疑；下一轮重建并恢复"""
+    with Env() as env:
+        bridge = FakeChatBridge()
+        service = make_chat_service(env, bridge)
+        service.store.update("ou_trainer", session_id="thread-bad",
+                             suspicious=False, turns=1)
+        trace = env.sb.dir / "chat-trace.log"
+        stop = threading.Event()
+        with EnvVars(FAKE_CHAT_TRACE=str(trace), FAKE_CHAT_MODE="fail",
+                     FAKE_CHAT_SID="thread-ignored", FAKE_CHAT_REPLY="不会用到"):
+            service.start(stop)
+            try:
+                service.handle_text("失败一次", "om_f1", "ou_trainer")
+                need(wait_until(lambda: any(
+                    "出错了" in t for t in bridge.texts()), 10),
+                    "失败没有回错误摘要：%r" % bridge.texts())
+                need(any("退出码 3" in t for t in bridge.texts()),
+                     "错误摘要缺退出码：%r" % bridge.texts())
+                need(any("boom-boom" in t for t in bridge.texts()),
+                     "错误摘要缺 stderr：%r" % bridge.texts())
+                item = service.store.get("ou_trainer")
+                need(item.get("session_id") == "thread-bad",
+                     "失败的 session 没保留：%r" % item)
+                need(item.get("suspicious") is True,
+                     "失败的 session 没标可疑：%r" % item)
+                lines = trace_lines(trace)
+                need(lines and "exec resume thread-bad" in lines[0],
+                     "失败轮没有 resume 旧 session：%r" % lines)
+
+                os.environ["FAKE_CHAT_MODE"] = "ok"
+                os.environ["FAKE_CHAT_SID"] = "thread-new"
+                os.environ["FAKE_CHAT_REPLY"] = "重建成功"
+                service.handle_text("重试", "om_f2", "ou_trainer")
+                need(wait_until(lambda: "重建成功" in bridge.texts(), 10),
+                     "重建轮没有成功：%r" % bridge.texts())
+                lines = trace_lines(trace)
+                need(len(lines) == 2, "重建轮调用次数不对：%r" % lines)
+                need("resume" not in lines[1],
+                     "可疑 session 没有重建：%r" % lines[1])
+                item = service.store.get("ou_trainer")
+                need(item.get("session_id") == "thread-new",
+                     "重建后的 session 没落盘：%r" % item)
+                need(item.get("suspicious") is False,
+                     "重建成功后可疑标记没清：%r" % item)
+                need(item.get("turns") == 2,
+                     "turns 应按成功轮累加（失败轮不计）：%r" % item)
+            finally:
+                stop.set()
+                service.stop()
+
+
+@test
+def test_34_chat_long_reply_split() -> None:
+    """聊天②：超过 1500 字的回复分条发送，每条不超限"""
+    with Env() as env:
+        bridge = FakeChatBridge()
+        service = make_chat_service(env, bridge, interval=0.2)
+        long_reply = "长" * 3200
+        stop = threading.Event()
+        with EnvVars(FAKE_CHAT_MODE="ok", FAKE_CHAT_SID="thread-long",
+                     FAKE_CHAT_REPLY=long_reply):
+            service.start(stop)
+            try:
+                service.handle_text("来段长的", "om_long", "ou_trainer")
+                need(wait_until(lambda: sum(
+                    1 for t in bridge.texts()
+                    if set(t) == {"长"}) >= 3, 10),
+                    "长回复没有分条：%r" % [len(t) for t in bridge.texts()])
+                chunks = [t for t in bridge.texts() if set(t) == {"长"}]
+                need(len(chunks) >= 3, "长回复条数不对：%d" % len(chunks))
+                need(all(len(t) <= chat_sdk.REPLY_CHUNK_LIMIT for t in chunks),
+                     "有超长分条：%r" % [len(t) for t in chunks])
+                need(sum(len(t) for t in chunks) == 3200,
+                     "分条丢字：%d" % sum(len(t) for t in chunks))
+            finally:
+                stop.set()
+                service.stop()
+
+
+@test
+def test_35_feishu_chat_callback_and_worker_gate() -> None:
+    """聊天⑤：飞书 p2p 文本走 on_chat（聊天模式不回旧确认）；任务与聊天互斥"""
+    api = FakeFeishuApi()
+    seen: List[tuple] = []
+    bridge = feishu_sdk.FeishuBridge(
+        fake_creds(), "ou_trainer", on_text=None, api_client=api,
+        on_chat=lambda text, mid, oid: seen.append((text, mid, oid)))
+    bridge._build_message_request = lambda text: SimpleNamespace(
+        receive_id="ou_trainer", text=text)
+    bridge.handle_event(feishu_event("聊天消息", "ou_trainer",
+                                     message_id="om_chat_1"))
+    need(seen == [("聊天消息", "om_chat_1", "ou_trainer")],
+         "on_chat 入参不对：%r" % seen)
+    need(api.sent == [], "聊天模式仍回了旧确认：%r" % api.sent)
+
+    with Env() as env:
+        instance = make_worker(env)
+        calls: List[str] = []
+
+        class Gate:
+            def task_begin(self) -> None:
+                calls.append("begin")
+
+            def task_end(self) -> None:
+                calls.append("end")
+
+        instance.chat = Gate()
+        instance.execute(make_task("t-gate"))
+        need(calls == ["begin", "end"],
+             "Router 任务没走聊天互斥门：%r" % calls)
+        need(env.router.wait_results(1, 10), "任务结果没上报")
+        need(env.result()["status"] == "done", "任务没正常完成")
+
+        cfg = worker.parse_args([
+            "--chat", "--router", env.router.base_url,
+            "--workspace", str(env.sb.ws),
+            "--codex-bin", str(env.sb.fake_chat),
+            "--log-file", str(env.sb.dir / "worker2.log"),
+            "--chat-state", str(env.sb.dir / "chat-2.json"),
+        ])
+        wired = worker.Worker(cfg, None, str(env.sb.fake_chat))
+        fake_bridge = FakeChatBridge()
+        service = worker.build_chat_service(cfg, fake_bridge, wired,
+                                            str(env.sb.fake_chat))
+        need(service is not None, "build_chat_service 没建出服务")
+        need(getattr(fake_bridge, "on_chat", None) == service.handle_text,
+             "聊天回调没挂到飞书桥")
+        need(getattr(fake_bridge, "on_text", "x") is None,
+             "聊天模式下旧 on_text 没关掉")
 
 
 # --------------------------------------------------------------------------- #

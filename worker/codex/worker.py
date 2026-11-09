@@ -17,8 +17,12 @@
 - **重连**：SSE 断线后 1s→2s→4s→8s→16s→30s 封顶；每次重连先重新 /register。
 - **看门狗**：任务期间超过 --stall-seconds 既无输出也无 CPU 变化 → 飞书告警、
   杀进程组、result 报 failed/stalled；SSE 超过 --idle-reconnect 无字节则重连。
-- **飞书**：长连接收训练员私信 → /notice(urgent) + 回确认；任务开始/完成/失败/
-  卡死主动发私信（--no-feishu 可关）。
+- **飞书**：长连接收训练员私信。``chat_enabled`` 时直接跟 agent 聊天（持久
+  session、流式进度、排队）；否则按旧行为转 /notice(urgent) + 回确认。
+  任务开始/完成/失败/卡死主动发私信（--no-feishu 可关）。
+- **聊天**：每个 open_id 一条 session（chat-state.json 原子写）；同一 worker
+  一次只跑一个 agent，Router 任务优先、聊天排队（最多 3 条）；每条 in/out
+  旁听 POST /chat/log（失败不影响聊天）。
 - **订阅**：--subscribe 声明订阅，轮询 pending 落盘 subscription-feed.jsonl，
   飞书按 60 秒窗口汇总（--subscribe 为空则完全不启动）。
 - **心跳**：独立线程按间隔上报；任务运行中 state=running 并带 task_id/progress_at。
@@ -60,12 +64,13 @@ _WORKER_ROOT = str(Path(__file__).resolve().parent.parent)
 if _WORKER_ROOT not in sys.path:
     sys.path.insert(0, _WORKER_ROOT)
 
+from _sdk import chat as chat_sdk  # noqa: E402
 from _sdk.feishu import (  # noqa: E402
     DEFAULT_TRAINER_OPEN_ID, FeishuBridge, FeishuError, load_creds)
 from _sdk.subscriptions import FeedNotifier, SubscriptionPoller  # noqa: E402
 from _sdk.watchdog import StallWatchdog, terminate_group  # noqa: E402
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 DEFAULT_ROUTER = "http://127.0.0.1:8790"
 DEFAULT_NAME = "codex"
 DEFAULT_TOKEN_FILE = "~/.hermes/secrets/router.token"
@@ -80,6 +85,10 @@ DEFAULT_IDLE_TIMEOUT_S = 90.0
 DEFAULT_FEISHU_CREDS = "~/.hermes/secrets/feishu-oguri.json"
 DEFAULT_STALL_S = 300.0
 DEFAULT_SUBSCRIBE_INTERVAL_S = 15.0
+DEFAULT_CHAT_TIMEOUT_S = 300.0
+DEFAULT_CHAT_QUEUE = 3
+DEFAULT_CHAT_STREAM_INTERVAL_S = 1.6
+DEFAULT_CHAT_STATE_FILE = "~/.hermes/state/codex-chat-state.json"
 SUMMARY_LIMIT = 4000
 RESULT_CACHE_SIZE = 64
 
@@ -454,6 +463,19 @@ def build_parser() -> argparse.ArgumentParser:
                    help="训练员 open_id；空=用凭据文件里的 open_id")
     p.add_argument("--no-feishu", action="store_true",
                    help="不连飞书（自测/排障用）")
+    p.add_argument("--chat", dest="chat_enabled",
+                   action=argparse.BooleanOptionalAction, default=False,
+                   help="飞书私信直接跟 agent 聊天（--no-chat 关闭；worker.json 用 chat_enabled）")
+    p.add_argument("--chat-state", default=DEFAULT_CHAT_STATE_FILE,
+                   help="聊天 session 状态文件（默认 %s）" % DEFAULT_CHAT_STATE_FILE)
+    p.add_argument("--chat-timeout", type=float, default=DEFAULT_CHAT_TIMEOUT_S,
+                   help="单轮聊天超时秒数（默认 %s）" % DEFAULT_CHAT_TIMEOUT_S)
+    p.add_argument("--chat-queue", type=int, default=DEFAULT_CHAT_QUEUE,
+                   help="忙碌时聊天最多排队条数（默认 %d）" % DEFAULT_CHAT_QUEUE)
+    p.add_argument("--chat-stream-interval", type=float,
+                   default=DEFAULT_CHAT_STREAM_INTERVAL_S,
+                   help="流式进度节流间隔秒数（默认 %.1f）"
+                        % DEFAULT_CHAT_STREAM_INTERVAL_S)
     p.add_argument("--subscribe", default="",
                    help="启动后订阅的 source，逗号分隔，如 mc_chat,email")
     p.add_argument("--subscribe-interval", type=float,
@@ -504,6 +526,12 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         raise SystemExit("--stall-seconds 必须 > 0")
     if args.subscribe_interval <= 0:
         raise SystemExit("--subscribe-interval 必须 > 0")
+    if args.chat_timeout <= 0:
+        raise SystemExit("--chat-timeout 必须 > 0")
+    if args.chat_queue < 1:
+        raise SystemExit("--chat-queue 必须 >= 1")
+    if args.chat_stream_interval <= 0:
+        raise SystemExit("--chat-stream-interval 必须 > 0")
     args.router = str(args.router).rstrip("/")
     args.workspace = expand_path(args.workspace)
     args.token_file = expand_path(args.token_file)
@@ -511,6 +539,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     args.codex_bin = str(args.codex_bin or DEFAULT_CODEX_BIN)
     args.proxy = normalize_proxy(args.proxy)
     args.feishu_creds = expand_path(args.feishu_creds)
+    args.chat_state = expand_path(args.chat_state)
     raw_subscribe = args.subscribe
     if isinstance(raw_subscribe, (list, tuple)):
         parts = [str(item) for item in raw_subscribe]
@@ -550,6 +579,7 @@ class Worker:
         self._hb_thread = threading.Thread(target=self._heartbeat_loop,
                                            name="heartbeat", daemon=True)
         self.feishu: Optional[FeishuBridge] = None
+        self.chat: Optional[chat_sdk.ChatService] = None
         self.subs: Optional[SubscriptionPoller] = None
         if self.cfg.subscribe_sources:
             self.subs = SubscriptionPoller(
@@ -807,6 +837,18 @@ class Worker:
         self._report(payload)
 
     def execute(self, task: Dict[str, Any]) -> None:
+        """Router 任务入口：跟飞书聊天互斥（同一 worker 一次只跑一个 agent）。"""
+        service = self.chat
+        if service is None:
+            self._execute(task)
+            return
+        service.task_begin()
+        try:
+            self._execute(task)
+        finally:
+            service.task_end()
+
+    def _execute(self, task: Dict[str, Any]) -> None:
         task_id = str(task.get("task_id") or task.get("id") or "").strip()
         if not task_id:
             log.warning("任务没有 task_id，丢弃")
@@ -1042,6 +1084,8 @@ class Worker:
     def run(self) -> int:
         for sig in (signal.SIGTERM, signal.SIGINT):
             signal.signal(sig, self._on_signal)
+        if self.chat is not None:
+            self.chat.start(self.stop)
         if self.feishu is not None:
             try:
                 self.feishu.start()
@@ -1058,6 +1102,8 @@ class Worker:
                 self.subs.stop()
             if self.feishu is not None:
                 self.feishu.stop()
+            if self.chat is not None:
+                self.chat.stop()
             self._hb_thread.join(timeout=3.0)
             log.info("codex-worker 退出（signal=%s）", self.stop_signal or "none")
         return 0
@@ -1081,6 +1127,32 @@ def build_feishu_bridge(cfg: argparse.Namespace,
     return FeishuBridge(creds, open_id, on_text, logger=log)
 
 
+def build_chat_service(cfg: argparse.Namespace, bridge: FeishuBridge,
+                       instance: "Worker",
+                       codex_bin: str) -> Optional[chat_sdk.ChatService]:
+    """按配置建聊天服务；chat_enabled=false 或缺飞书桥都返回 None。"""
+    if not getattr(cfg, "chat_enabled", False):
+        log.info("飞书聊天未启用（chat_enabled=false）")
+        return None
+    store = chat_sdk.ChatStateStore(cfg.chat_state, logger=log)
+    agent = chat_sdk.CodexAgent(
+        codex_bin, timeout=cfg.chat_timeout, workspace=cfg.workspace,
+        env=child_env(cfg.proxy), logger=log)
+    service = chat_sdk.ChatService(
+        worker_name=cfg.name, bridge=bridge, agent=agent, store=store,
+        post_log=lambda payload: http_json(
+            instance._url("/chat/log"), payload, instance.token, timeout=5.0),
+        queue_max=cfg.chat_queue, stream_interval=cfg.chat_stream_interval,
+        logger=log)
+    # 聊天模式：确认语/进度/回复都由 ChatService 负责，不再走 /notice 确认。
+    bridge.on_chat = service.handle_text
+    bridge.on_text = None
+    log.info("飞书聊天启用 state=%s timeout=%ss queue=%d interval=%.1fs",
+             cfg.chat_state, cfg.chat_timeout, cfg.chat_queue,
+             cfg.chat_stream_interval)
+    return service
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     cfg = parse_args(argv)
     setup_logging(cfg.log_file, cfg.verbose)
@@ -1100,6 +1172,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     instance = Worker(cfg, token, codex_bin)
     try:
         instance.feishu = build_feishu_bridge(cfg, instance._on_feishu_text)
+        if instance.feishu is not None:
+            instance.chat = build_chat_service(cfg, instance.feishu,
+                                               instance, codex_bin)
     except FeishuError as exc:
         log.warning("飞书同步未启用：%s", exc)
     return instance.run()
