@@ -7,11 +7,20 @@
     GET  /stream     ?name=<name>                            → SSE 下行（任务）
     POST /heartbeat  {name, state, progress_at, task_id?}
     POST /result     {name, task_id, status, summary, artifacts[], evidence[]}
+    POST /notice     {worker, text, urgency}                 → 飞书入向转给 Hermes
+    POST /subscriptions {worker, source}                     → 声明订阅
+    GET  /subscriptions/pending?worker=                      → 拉取订阅消息
 
 行为约定：
 
 - **串行**：一次只跑一个任务，跑完才读下一条（Router 按名字排队）。
 - **重连**：SSE 断线后 1s→2s→4s→8s→16s→30s 封顶；每次重连先重新 /register。
+- **看门狗**：任务期间超过 --stall-seconds 既无输出也无 CPU 变化 → 飞书告警、
+  杀进程组、result 报 failed/stalled；SSE 超过 --idle-reconnect 无字节则重连。
+- **飞书**：长连接收训练员私信 → /notice(urgent) + 回确认；任务开始/完成/失败/
+  卡死主动发私信（--no-feishu 可关）。
+- **订阅**：--subscribe 声明订阅，轮询 pending 落盘 subscription-feed.jsonl，
+  飞书按 60 秒窗口汇总（--subscribe 为空则完全不启动）。
 - **心跳**：独立线程按间隔上报；任务运行中 state=running 并带 task_id/progress_at。
 - **退出**：SIGTERM/SIGINT 停心跳、杀子进程组、把当前任务以 failed/interrupted
   上报（能报就报），然后退出 0。
@@ -24,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import http.client
+import importlib.util
 import json
 import logging
 import os
@@ -42,6 +52,16 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import ProxyHandler, Request, build_opener
 
+# 共用 SDK 在 worker/_sdk（dsh 与 codex 同构接入）。
+_WORKER_ROOT = str(Path(__file__).resolve().parent.parent)
+if _WORKER_ROOT not in sys.path:
+    sys.path.insert(0, _WORKER_ROOT)
+
+from _sdk.feishu import (  # noqa: E402
+    DEFAULT_TRAINER_OPEN_ID, FeishuBridge, FeishuError, load_creds)
+from _sdk.subscriptions import FeedNotifier, SubscriptionPoller  # noqa: E402
+from _sdk.watchdog import StallWatchdog, terminate_group  # noqa: E402
+
 VERSION = "0.1.1"
 DEFAULT_ROUTER = "http://127.0.0.1:8790"
 DEFAULT_NAME = "dsh"
@@ -54,6 +74,9 @@ DEFAULT_IDLE_HEARTBEAT_S = 60.0
 DEFAULT_IDLE_TIMEOUT_S = 90.0
 DEFAULT_DSH_PROFILE = "headless"
 DEFAULT_APPROVAL_POLICY = "never"  # 无人值守：不等人点“允许”
+DEFAULT_FEISHU_CREDS = "~/.hermes/secrets/feishu-tsurumaru.json"
+DEFAULT_STALL_S = 300.0
+DEFAULT_SUBSCRIBE_INTERVAL_S = 15.0
 SUMMARY_LIMIT = 4000
 RESULT_CACHE_SIZE = 64
 PERMISSION_MODES = ("read-only", "workspace-write", "danger-full-access")
@@ -373,8 +396,24 @@ def build_parser() -> argparse.ArgumentParser:
                    help="任务运行中心跳间隔秒数")
     p.add_argument("--idle-heartbeat", type=float, default=DEFAULT_IDLE_HEARTBEAT_S,
                    help="空闲心跳间隔秒数")
-    p.add_argument("--idle-timeout", type=float, default=DEFAULT_IDLE_TIMEOUT_S,
-                   help="SSE 静默多久判定断线")
+    p.add_argument("--idle-timeout", "--idle-reconnect", dest="idle_timeout",
+                   type=float, default=DEFAULT_IDLE_TIMEOUT_S,
+                   help="SSE 静默多久（无任何字节）判定断线并重连（默认 90）")
+    p.add_argument("--stall-seconds", type=float, default=DEFAULT_STALL_S,
+                   help="任务期间多久无 stdout 且无 CPU 变化判定卡死（默认 300）")
+    p.add_argument("--feishu-creds", default=DEFAULT_FEISHU_CREDS,
+                   help="飞书凭据 JSON（默认 玉藻十字）")
+    p.add_argument("--feishu-open-id", default="",
+                   help="训练员 open_id；空=用凭据文件里的 open_id")
+    p.add_argument("--no-feishu", action="store_true",
+                   help="不连飞书（自测/排障用）")
+    p.add_argument("--subscribe", default="",
+                   help="启动后订阅的 source，逗号分隔，如 mc_chat,email")
+    p.add_argument("--subscribe-interval", type=float,
+                   default=DEFAULT_SUBSCRIBE_INTERVAL_S,
+                   help="订阅 pending 轮询间隔秒数（默认 15）")
+    p.add_argument("--subscription-feed", default="",
+                   help="订阅消息落盘文件；空=~/.hermes/logs/<name>-subscription-feed.jsonl")
     p.add_argument("--log-file", default=DEFAULT_LOG_FILE, help="日志文件（只追加）")
     p.add_argument("--verbose", action="store_true", help="同时把日志打到 stderr")
     p.add_argument("--version", action="version", version="dsh-worker %s" % VERSION)
@@ -398,6 +437,9 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
             raise SystemExit("配置文件不是合法 JSON：%s（%s）" % (path, exc))
         if not isinstance(file_cfg, dict):
             raise SystemExit("配置文件必须是 JSON 对象：%s" % path)
+        # --idle-reconnect 是 --idle-timeout 的别名；配置文件两个键都认。
+        if "idle_reconnect" in file_cfg:
+            file_cfg["idle_timeout"] = file_cfg.pop("idle_reconnect")
     valid = {action.dest for action in parser._actions}
     unknown = sorted(set(file_cfg) - valid)
     if unknown:
@@ -411,10 +453,26 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         raise SystemExit("心跳间隔必须 > 0")
     if args.idle_timeout <= 0:
         raise SystemExit("--idle-timeout 必须 > 0")
+    if args.stall_seconds <= 0:
+        raise SystemExit("--stall-seconds 必须 > 0")
+    if args.subscribe_interval <= 0:
+        raise SystemExit("--subscribe-interval 必须 > 0")
     args.router = str(args.router).rstrip("/")
     args.workspace = expand_path(args.workspace)
     args.token_file = expand_path(args.token_file)
     args.log_file = expand_path(args.log_file)
+    args.feishu_creds = expand_path(args.feishu_creds)
+    raw_subscribe = args.subscribe
+    if isinstance(raw_subscribe, (list, tuple)):
+        parts = [str(item) for item in raw_subscribe]
+    else:
+        parts = str(raw_subscribe or "").split(",")
+    args.subscribe_sources = [part.strip() for part in parts if part.strip()]
+    if not args.subscription_feed:
+        args.subscription_feed = expand_path(
+            "~/.hermes/logs/%s-subscription-feed.jsonl" % args.name)
+    else:
+        args.subscription_feed = expand_path(args.subscription_feed)
     return args
 
 
@@ -442,11 +500,66 @@ class Worker:
         self._registered = threading.Event()
         self._hb_thread = threading.Thread(target=self._heartbeat_loop,
                                            name="heartbeat", daemon=True)
+        self.feishu: Optional[FeishuBridge] = None
+        self.subs: Optional[SubscriptionPoller] = None
+        if self.cfg.subscribe_sources:
+            self.subs = SubscriptionPoller(
+                worker=self.cfg.name,
+                sources=self.cfg.subscribe_sources,
+                post_json=lambda path, payload: http_json(
+                    self._url(path), payload, self.token, timeout=10.0),
+                get_json=lambda path: http_json(
+                    self._url(path), None, self.token, timeout=10.0),
+                feed_path=self.cfg.subscription_feed,
+                notifier=FeedNotifier(self._feishu_send, logger=log),
+                interval=self.cfg.subscribe_interval,
+                logger=log,
+            )
 
     # -- 小工具 ---------------------------------------------------------- #
 
     def _url(self, path: str) -> str:
         return self.cfg.router + path
+
+    # -- 飞书 / notice --------------------------------------------------- #
+
+    def _feishu_send(self, text: str) -> bool:
+        bridge = self.feishu
+        if bridge is None:
+            return False
+        try:
+            return bridge.send_text(text)
+        except Exception:  # noqa: BLE001 - 通知失败不能影响主流程
+            log.exception("飞书通知失败")
+            return False
+
+    def _notify_router(self, text: str, urgency: str = "urgent") -> bool:
+        """训练员的临时要求 → Router /notice（event 级，唤醒 Hermes）。"""
+        payload = {
+            "worker": self.cfg.name,
+            "text": str(text or ""),
+            "urgency": urgency,
+        }
+        try:
+            http_json(self._url("/notice"), payload, self.token, timeout=8.0)
+            log.info("已转 /notice（%s）：%s", urgency, str(text)[:160])
+            return True
+        except RouterError as exc:
+            log.warning("/notice 上报失败：%s", exc)
+            return False
+
+    def _on_feishu_text(self, text: str) -> bool:
+        """飞书入向回调：只负责转 Router，确认语由 FeishuBridge 发。"""
+        text = (text or "").strip()
+        if not text:
+            return False
+        return self._notify_router(text, "urgent")
+
+    def _announce(self, text: str) -> None:
+        # 退出流程里不再发飞书，避免网络慢拖长优雅退出。
+        if self.stop.is_set():
+            return
+        self._feishu_send(text)
 
     def _on_signal(self, signum: int, _frame: Any) -> None:
         name = signal.Signals(signum).name
@@ -537,6 +650,9 @@ class Worker:
         self._registered.set()
         log.info("注册成功 name=%s queued=%s", self.cfg.name,
                  info.get("queued", "?"))
+        # 订阅是“实时听”，不累积：每次（重）连都重新声明。
+        if self.subs is not None:
+            self.subs.subscribe_all()
         return info
 
     def _open_stream(self) -> Any:
@@ -686,6 +802,8 @@ class Worker:
                  task_id, workspace, fmt_duration(self.cfg.timeout), len(prompt))
         self._mark_task(task_id)
         self._send_heartbeat()  # 立即宣告 running，不等第一个间隔
+        self._announce("▶️ %s 开始任务 %s：%s"
+                       % (self.cfg.name, task_id, goal[:80]))
 
         started = time.time()
         tmpdir = tempfile.mkdtemp(prefix="dsh-worker-")
@@ -694,6 +812,8 @@ class Worker:
         proc: Optional[subprocess.Popen] = None
         timed_out = False
         interrupted = False
+        stalled = False
+        stall_idle = 0.0
         rc: Optional[int] = None
         try:
             with open(out_path, "wb") as out_f, open(err_path, "wb") as err_f:
@@ -708,6 +828,11 @@ class Worker:
                         proc.stdin.close()
                     except (BrokenPipeError, OSError):
                         pass
+                watchdog = StallWatchdog(
+                    proc,
+                    output_size=lambda: self._output_size(out_path),
+                    stall_seconds=self.cfg.stall_seconds,
+                    logger=log)
                 deadline = started + self.cfg.timeout
                 while proc.poll() is None:
                     if self.stop.is_set():
@@ -717,8 +842,19 @@ class Worker:
                         timed_out = True
                         break
                     self._touch(self._output_size(out_path, err_path))
+                    idle = watchdog.check()
+                    if idle is not None:
+                        stalled = True
+                        stall_idle = idle
+                        log.warning("任务 %s 卡死：%.0fs 无输出且 CPU 无变化，"
+                                    "杀进程组", task_id, idle)
+                        self._announce(
+                            "⚠️ %s 任务 %s 卡死：%.0fs 无输出且 CPU 无变化，"
+                            "已杀进程" % (self.cfg.name, task_id, idle))
+                        watchdog.kill()
+                        break
                     time.sleep(0.2)
-                if timed_out or interrupted:
+                if timed_out or interrupted or stalled:
                     self._terminate_group(proc, grace=1.0)
                 try:
                     rc = proc.wait(timeout=5)
@@ -744,7 +880,23 @@ class Worker:
         elapsed_ms = int((time.time() - started) * 1000)
         self._mark_task(None)
 
-        if timed_out:
+        if stalled:
+            note = "stalled: no output for %ds" % int(round(stall_idle))
+            summary = note
+            payload = {
+                "name": self.cfg.name,
+                "task_id": task_id,
+                "status": "failed",
+                "summary": summary,
+                "artifacts": [],
+                "evidence": [{"type": "exit", "reason": "stalled",
+                              "stall_s": self.cfg.stall_seconds,
+                              "idle_s": round(stall_idle, 1),
+                              "duration_ms": elapsed_ms}],
+            }
+            log.warning("任务 %s 判定卡死（%.0fs 无输出/无 CPU 变化）",
+                        task_id, stall_idle)
+        elif timed_out:
             note = ("超时：dsh 超过 %s 未完成（task %s），已终止进程"
                     % (fmt_duration(self.cfg.timeout), task_id))
             summary = compose_summary(note, stdout, stderr)
@@ -803,6 +955,14 @@ class Worker:
             log.warning("任务 %s 失败，退出码 %s", task_id, rc)
 
         self._remember(task_id, payload)
+        if not stalled:
+            if payload["status"] == "done":
+                self._announce("✅ %s 任务 %s 完成（%.1fs）"
+                               % (self.cfg.name, task_id, elapsed_ms / 1000.0))
+            else:
+                self._announce("❌ %s 任务 %s 失败：%s"
+                               % (self.cfg.name, task_id,
+                                  tail_text(payload["summary"], 180)))
         self._report(payload)
         shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -826,43 +986,51 @@ class Worker:
 
     @staticmethod
     def _terminate_group(proc: subprocess.Popen, grace: float) -> None:
-        """先 SIGTERM 整个进程组，grace 秒后还在就 SIGKILL。"""
-        if proc.poll() is not None:
-            return
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-        except (ProcessLookupError, PermissionError, OSError):
-            try:
-                proc.terminate()
-            except OSError:
-                pass
-        if grace > 0:
-            try:
-                proc.wait(timeout=grace)
-                return
-            except subprocess.TimeoutExpired:
-                pass
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except (ProcessLookupError, PermissionError, OSError):
-            try:
-                proc.kill()
-            except OSError:
-                pass
+        """先 SIGTERM 整个进程组，grace 秒后还在就 SIGKILL（SDK 共用实现）。"""
+        terminate_group(proc, grace)
 
     # -- 入口 ------------------------------------------------------------ #
 
     def run(self) -> int:
         for sig in (signal.SIGTERM, signal.SIGINT):
             signal.signal(sig, self._on_signal)
+        if self.feishu is not None:
+            try:
+                self.feishu.start()
+            except Exception:  # noqa: BLE001 - 飞书坏了也要能干活
+                log.exception("飞书桥启动失败（不影响任务执行）")
+        if self.subs is not None:
+            self.subs.start(self.stop)
         self._hb_thread.start()
         try:
             self._connect_loop()
         finally:
             self.stop.set()
+            if self.subs is not None:
+                self.subs.stop()
+            if self.feishu is not None:
+                self.feishu.stop()
             self._hb_thread.join(timeout=3.0)
             log.info("dsh-worker 退出（signal=%s）", self.stop_signal or "none")
         return 0
+
+
+def build_feishu_bridge(cfg: argparse.Namespace,
+                        on_text: Any) -> Optional[FeishuBridge]:
+    """按配置建飞书桥；缺凭据/显式关闭都只返回 None，不阻断 worker。"""
+    if getattr(cfg, "no_feishu", False) or not getattr(cfg, "feishu_creds", ""):
+        log.info("飞书同步未启用（--no-feishu 或未配置凭据）")
+        return None
+    if importlib.util.find_spec("lark_oapi") is None:
+        log.warning("飞书同步未启用：当前解释器没装 lark_oapi（%s）",
+                    sys.executable)
+        return None
+    creds = load_creds(cfg.feishu_creds)
+    open_id = (getattr(cfg, "feishu_open_id", "") or creds.open_id
+               or DEFAULT_TRAINER_OPEN_ID)
+    log.info("飞书同步启用 bot=%s open_id=%s",
+             creds.bot_name or creds.app_id, open_id)
+    return FeishuBridge(creds, open_id, on_text, logger=log)
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -878,7 +1046,12 @@ def main(argv: Optional[List[str]] = None) -> int:
               file=sys.stderr)
         return 2
     token = read_token(cfg.token_file)
-    return Worker(cfg, token, dsh_bin).run()
+    instance = Worker(cfg, token, dsh_bin)
+    try:
+        instance.feishu = build_feishu_bridge(cfg, instance._on_feishu_text)
+    except FeishuError as exc:
+        log.warning("飞书同步未启用：%s", exc)
+    return instance.run()
 
 
 if __name__ == "__main__":

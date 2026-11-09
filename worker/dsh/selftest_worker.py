@@ -18,6 +18,7 @@ import shlex
 import shutil
 import signal
 import socket
+import socketserver
 import subprocess
 import sys
 import tempfile
@@ -26,19 +27,29 @@ import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import urlparse
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parent))
 sys.path.insert(0, str(HERE))
 import worker  # noqa: E402
+from _sdk import feishu as feishu_sdk  # noqa: E402
+from _sdk import subscriptions as subs_sdk  # noqa: E402
+from _sdk import watchdog as watchdog_sdk  # noqa: E402
 
 worker.log.propagate = False
 worker.log.addHandler(logging.NullHandler())
+for _logger_name in ("mowu-worker.feishu", "mowu-worker.watchdog",
+                     "mowu-worker.subscriptions"):
+    _logger = logging.getLogger(_logger_name)
+    _logger.propagate = False
+    _logger.addHandler(logging.NullHandler())
 
 TESTS: List[Callable[[], None]] = []
-GLOBAL_LIMIT_S = 55.0
-PER_TEST_LIMIT_S = 25.0
+GLOBAL_LIMIT_S = 120.0
+PER_TEST_LIMIT_S = 35.0
 
 FAKE_DSH = """#!/bin/sh
 # selftest 用的假 dsh：回显参数，按 FAKE_DSH_MODE 改变行为
@@ -57,6 +68,10 @@ case "$mode" in
     echo "fake-dsh: partial output before failure"
     echo "fake-dsh: boom on stderr" >&2
     rc=3
+    ;;
+  stall)
+    sleep "${FAKE_DSH_SLEEP:-10}"
+    echo "fake-dsh: should not print before watchdog kills"
     ;;
   big)
     echo "fake-dsh: big output"
@@ -97,12 +112,23 @@ def make_task(task_id: str = "t-1", goal: str = "hello-from-router",
 # --------------------------------------------------------------------------- #
 
 
+class _QuietHTTPServer(ThreadingHTTPServer):
+    """跳过 getfqdn 的反向 DNS：macOS 上偶尔会卡 20 秒以上。"""
+
+    def server_bind(self) -> None:
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = str(host or "127.0.0.1")
+        self.server_port = port
+
+
 class FakeRouter:
     def __init__(self, tasks: Optional[List[Dict[str, Any]]] = None,
                  drop_first_stream: bool = False,
                  stream_mode: str = "ping",
                  ping_interval: float = 0.3,
-                 hold_s: float = 6.0) -> None:
+                 hold_s: float = 6.0,
+                 pending_messages: Optional[List[Dict[str, Any]]] = None) -> None:
         self.tasks = list(tasks or [])
         self.drop_first_stream = drop_first_stream
         # ping: 建立后每 ping_interval 秒发 `: ping`（默认，老用例行为）
@@ -115,12 +141,16 @@ class FakeRouter:
         self.registrations: List[Dict[str, Any]] = []
         self.heartbeats: List[Dict[str, Any]] = []
         self.results: List[Dict[str, Any]] = []
+        self.notices: List[Dict[str, Any]] = []
+        self.subscriptions: List[Dict[str, Any]] = []
+        self.pending_messages: List[Dict[str, Any]] = list(pending_messages or [])
+        self.pending_requests: List[str] = []
         self.stream_opens = 0
         self.stream_auth: List[Optional[str]] = []
         self.stream_xtoken: List[Optional[str]] = []
         self.closed = False
         self.cond = threading.Condition()
-        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), self._make_handler())
+        self.httpd = _QuietHTTPServer(("127.0.0.1", 0), self._make_handler())
         self.httpd.daemon_threads = True
         self.port = self.httpd.server_address[1]
         self.thread = threading.Thread(target=self.httpd.serve_forever,
@@ -185,11 +215,33 @@ class FakeRouter:
                              "xtoken": xtoken})
                         router.cond.notify_all()
                     self._json(200, {"ok": True})
+                elif path == "/notice":
+                    with router.cond:
+                        router.notices.append(
+                            {"ts": time.time(), "body": body, "auth": auth,
+                             "xtoken": xtoken})
+                        router.cond.notify_all()
+                    self._json(200, {"ok": True})
+                elif path == "/subscriptions":
+                    with router.cond:
+                        router.subscriptions.append(
+                            {"ts": time.time(), "body": body, "auth": auth,
+                             "xtoken": xtoken})
+                        router.cond.notify_all()
+                    self._json(200, {"ok": True, "id": len(router.subscriptions)})
                 else:
                     self._json(404, {"error": "not_found"})
 
             def do_GET(self) -> None:  # noqa: N802
                 parsed = urlparse(self.path)
+                if parsed.path == "/subscriptions/pending":
+                    with router.cond:
+                        pending = list(router.pending_messages)
+                        router.pending_messages.clear()
+                        router.pending_requests.append(self.path)
+                        router.cond.notify_all()
+                    self._json(200, {"messages": pending})
+                    return
                 if parsed.path != "/stream":
                     self._json(404, {"error": "not_found"})
                     return
@@ -267,6 +319,12 @@ class FakeRouter:
     def wait_results(self, count: int, timeout: float = 12.0) -> bool:
         return self._wait_count("results", count, timeout)
 
+    def wait_notices(self, count: int, timeout: float = 12.0) -> bool:
+        return self._wait_count("notices", count, timeout)
+
+    def wait_subscriptions(self, count: int, timeout: float = 12.0) -> bool:
+        return self._wait_count("subscriptions", count, timeout)
+
     def wait_streams(self, count: int = 1, timeout: float = 12.0) -> bool:
         end = time.time() + timeout
         with self.cond:
@@ -324,13 +382,14 @@ class Harness:
         self._err = open(self.err_path, "wb")
         args = [sys.executable, str(HERE / "worker.py")]
         if config is not None:
-            args += ["--config", str(config)]
+            args += ["--config", str(config), "--no-feishu"]
         else:
             args += ["--router", router.base_url,
                      "--name", name,
                      "--workspace", str(sandbox.ws),
                      "--log-file", str(sandbox.dir / "worker.log"),
-                     "--dsh-bin", str(sandbox.fake_dsh)]
+                     "--dsh-bin", str(sandbox.fake_dsh),
+                     "--no-feishu"]
         args += list(extra or [])
         merged = os.environ.copy()
         merged["FAKE_DSH_TRACE"] = str(sandbox.trace)
@@ -412,6 +471,56 @@ def read_trace(path: Path) -> List[tuple]:
         if len(parts) == 2:
             entries.append((parts[0], float(parts[1])))
     return entries
+
+
+class FakeFeishuApi:
+    """假 lark Client：只记录 im.v1.message.create 收到什么。"""
+
+    def __init__(self, ok: bool = True) -> None:
+        self.ok = ok
+        self.sent: List[tuple] = []
+        self.im = SimpleNamespace(v1=SimpleNamespace(
+            message=SimpleNamespace(create=self._create)))
+
+    def _create(self, request: Any) -> Any:
+        if hasattr(request, "text"):
+            receiver = getattr(request, "receive_id", "")
+            text = getattr(request, "text", "")
+        else:
+            body = request.request_body
+            receiver = body.receive_id
+            text = json.loads(body.content)["text"]
+        self.sent.append((receiver, text))
+        return SimpleNamespace(success=lambda: self.ok,
+                               code=0 if self.ok else 500, msg="ok")
+
+
+def feishu_event(text: str, open_id: str, chat_type: str = "p2p",
+                 message_type: str = "text") -> Any:
+    return SimpleNamespace(event=SimpleNamespace(
+        message=SimpleNamespace(
+            chat_type=chat_type,
+            message_type=message_type,
+            content=json.dumps({"text": text}, ensure_ascii=False)),
+        sender=SimpleNamespace(sender_id=SimpleNamespace(open_id=open_id))))
+
+
+def fake_creds(open_id: str = "ou_trainer") -> Any:
+    return feishu_sdk.FeishuCreds(app_id="cli_fake", app_secret="secret",
+                                  domain="feishu", bot_name="玉藻十字",
+                                  open_id=open_id)
+
+
+def make_worker(env: "Env", name: str = "dsh-test") -> Any:
+    cfg = worker.parse_args([
+        "--router", env.router.base_url,
+        "--name", name,
+        "--workspace", str(env.sb.ws),
+        "--dsh-bin", str(env.sb.fake_dsh),
+        "--log-file", str(env.sb.dir / "worker.log"),
+        "--no-feishu",
+    ])
+    return worker.Worker(cfg, None, str(env.sb.fake_dsh))
 
 
 # --------------------------------------------------------------------------- #
@@ -794,6 +903,317 @@ def test_18_iter_sse_timeout_semantics() -> None:
     else:
         raise AssertionError("静默超时没有判成断线")
     need(time.time() - started < 2.0, "静默判定太慢")
+
+
+@test
+def test_19_feishu_inbound_to_notice() -> None:
+    """飞书入向：p2p 私信 → /notice(urgency=urgent) → 回确认（假 API/假连接）"""
+    with Env() as env:
+        instance = make_worker(env)
+        api = FakeFeishuApi()
+        seen: List[str] = []
+
+        def on_text(text: str) -> bool:
+            seen.append(text)
+            return instance._on_feishu_text(text)
+
+        bridge = feishu_sdk.FeishuBridge(
+            fake_creds(), "ou_trainer", on_text,
+            confirm_text="收到，已转给溪流", api_client=api)
+        bridge._build_message_request = lambda text: SimpleNamespace(
+            receive_id="ou_trainer", text=text)  # 自测不依赖 lark 构建器
+        bridge.handle_event(feishu_event("先跑一遍 selftest 再动别的", "ou_trainer"))
+
+        need(seen == ["先跑一遍 selftest 再动别的"],
+             "入向文本没有交给 on_text：%r" % seen)
+        need(env.router.wait_notices(1, 5), "没有调用 /notice")
+        body = env.router.notices[0]["body"]
+        need(body.get("worker") == "dsh-test", "notice.worker 不对：%r" % body)
+        need(body.get("urgency") == "urgent", "notice.urgency 不是 urgent")
+        need(body.get("text") == "先跑一遍 selftest 再动别的",
+             "notice.text 不对：%r" % body)
+        need(api.sent == [("ou_trainer", "收到，已转给溪流")],
+             "没有回确认私信：%r" % api.sent)
+
+
+@test
+def test_20_feishu_filters_send_reconnect() -> None:
+    """飞书出向/过滤/重连：send_text 到达、群聊/他人/非文本忽略、假长连接断开重启"""
+    api = FakeFeishuApi()
+    got: List[str] = []
+
+    class FakeWs:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.closed = False
+
+        def start(self) -> None:
+            self.calls += 1
+            time.sleep(0.02)
+
+        def close(self) -> None:
+            self.closed = True
+
+    ws = FakeWs()
+    bridge = feishu_sdk.FeishuBridge(
+        fake_creds(), "ou_trainer", lambda text: got.append(text) or True,
+        api_client=api, ws_client=ws, restart_delay=0.02,
+        max_restart_delay=0.05)
+    bridge._build_message_request = lambda text: SimpleNamespace(
+        receive_id="ou_trainer", text=text)
+    bridge.start()
+    need(bridge.wait_connected(2), "假长连接没有启动")
+    deadline = time.time() + 2
+    while time.time() < deadline and ws.calls < 2:
+        time.sleep(0.02)
+    need(ws.calls >= 2, "长连接返回后没有重连：calls=%d" % ws.calls)
+    bridge.stop()
+    thread = bridge._thread
+    need(thread is not None and not thread.is_alive(), "stop 后飞书线程还在")
+
+    bridge.handle_event(feishu_event("群里的", "ou_trainer", chat_type="group"))
+    bridge.handle_event(feishu_event("别人的", "ou_other"))
+    bridge.handle_event(feishu_event("图片", "ou_trainer", message_type="image"))
+    need(got == [], "不该处理的私信被交给了 on_text：%r" % got)
+
+    need(bridge.send_text("任务完成"), "send_text 失败")
+    need(api.sent[-1] == ("ou_trainer", "任务完成"),
+         "send_text 内容/收件人不对：%r" % api.sent)
+    bad = FakeFeishuApi(ok=False)
+    bridge_bad = feishu_sdk.FeishuBridge(fake_creds(), "ou_trainer",
+                                         lambda _t: True, api_client=bad)
+    bridge_bad._build_message_request = lambda text: SimpleNamespace(
+        receive_id="ou_trainer", text=text)
+    need(bridge_bad.send_text("失败") is False, "API 报错时 send_text 没返回 False")
+
+
+@test
+def test_21_watchdog_stall_and_kill() -> None:
+    """看门狗：有输出/有 CPU 不判死；双静默超阈值判卡死并真的杀掉进程组"""
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True)
+    try:
+        size = [0]
+        watchdog = watchdog_sdk.StallWatchdog(
+            proc, lambda: size[0], stall_seconds=0.35,
+            cpu_reader=lambda _pgid: 1.0)
+        end = time.time() + 0.6
+        while time.time() < end:
+            size[0] += 1
+            need(watchdog.check() is None, "有输出时被误判卡死")
+            time.sleep(0.05)
+        stalled = None
+        end = time.time() + 2.0
+        while time.time() < end:
+            stalled = watchdog.check()
+            if stalled is not None:
+                break
+            time.sleep(0.05)
+        need(stalled is not None and stalled >= 0.35,
+             "双静默没有判卡死：%r" % stalled)
+        watchdog.kill()
+        need(proc.wait(timeout=5) is not None, "看门狗没杀掉进程")
+        need(proc.poll() is not None, "进程仍存活")
+
+        # CPU 一直在变 → 不算卡死（闷头算不打印是正常情况）
+        proc2 = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(5)"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True)
+        try:
+            ticks = [0.0]
+
+            def cpu(_pgid: int) -> float:
+                ticks[0] += 0.5
+                return ticks[0]
+
+            wd2 = watchdog_sdk.StallWatchdog(
+                proc2, lambda: 0, stall_seconds=0.3, cpu_reader=cpu)
+            end = time.time() + 0.7
+            while time.time() < end:
+                need(wd2.check() is None, "CPU 变化时被误判卡死")
+                time.sleep(0.05)
+        finally:
+            if proc2.poll() is None:
+                proc2.kill()
+                proc2.wait(timeout=3)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=3)
+
+
+@test
+def test_22_subscription_feed_and_rate_limit() -> None:
+    """订阅：POST /subscriptions、pending 落盘、60 秒窗口最多一条飞书汇总"""
+    with Env() as env:
+        now = [1000.0]
+        sent: List[str] = []
+        notifier = subs_sdk.FeedNotifier(
+            lambda text: sent.append(text) or True, window_s=60.0,
+            clock=lambda: now[0])
+        feed = env.sb.dir / "subscription-feed.jsonl"
+        poller = subs_sdk.SubscriptionPoller(
+            worker="dsh-test", sources=["mc_chat", "email"],
+            post_json=lambda path, payload: worker.http_json(
+                env.router.base_url + path, payload, None),
+            get_json=lambda path: worker.http_json(
+                env.router.base_url + path, None, None),
+            feed_path=str(feed), notifier=notifier, interval=1,
+            clock=lambda: now[0])
+        need(poller.subscribe_all() == 2, "订阅声明数量不对")
+        need(env.router.wait_subscriptions(2, 5), "Router 没收到 /subscriptions")
+        bodies = [item["body"] for item in env.router.subscriptions]
+        need(all(b.get("worker") == "dsh-test" for b in bodies),
+             "订阅 worker 不对：%r" % bodies)
+        need(sorted(b.get("source") for b in bodies) == ["email", "mc_chat"],
+             "订阅 source 不对：%r" % bodies)
+
+        env.router.pending_messages = [
+            {"id": "m1", "source": "mc_chat", "text": "小明：你好"},
+            {"id": "m2", "source": "email", "text": "邮件标题"},
+            {"id": "m3", "source": "mc_chat", "text": "小明：在吗"},
+        ]
+        need(poller.poll_once() == 3, "pending 条数不对")
+        lines = [json.loads(line) for line in
+                 feed.read_text(encoding="utf-8").splitlines() if line.strip()]
+        need([item["id"] for item in lines] == ["m1", "m2", "m3"],
+             "落盘内容不对：%r" % lines)
+        need(all(item.get("worker") == "dsh-test" for item in lines),
+             "落盘缺 worker")
+        need(len(sent) == 1, "首批没有立即汇总：%d" % len(sent))
+
+        env.router.pending_messages = [{"id": "m4", "source": "mc_chat",
+                                        "text": "窗口内第二条"}]
+        need(poller.poll_once() == 1, "窗口内消息没落盘")
+        need(len(sent) == 1, "60 秒窗口内发了多条：%d" % len(sent))
+
+        now[0] += 61
+        need(notifier.flush(), "窗口到期没有补发汇总")
+        need(len(sent) == 2, "窗口到期汇总数量不对：%d" % len(sent))
+        need("窗口内第二条" in sent[1], "补发汇总里没有窗口内消息：%r" % sent[1])
+
+        env.router.pending_messages = [{"id": "m4", "source": "mc_chat",
+                                        "text": "重复投递"}]
+        need(poller.poll_once() == 0, "重复消息没有去重")
+        need(len(feed.read_text(encoding="utf-8").splitlines()) == 4,
+             "重复消息被重复落盘")
+
+
+@test
+def test_23_subscription_worker_integration() -> None:
+    """订阅（子进程）：--subscribe 启动后声明订阅并拉取 pending 落盘"""
+    with Env(pending_messages=[{"id": "s1", "source": "mc_chat",
+                                "text": "hi-from-subscription"}]) as env:
+        feed = env.sb.dir / "sub-feed.jsonl"
+        env.launch(["--timeout", "20", "--subscribe", "mc_chat",
+                    "--subscribe-interval", "0.2",
+                    "--subscription-feed", str(feed)])
+        need(env.router.wait_subscriptions(1, 10), "worker 没声明订阅")
+        body = env.router.subscriptions[0]["body"]
+        need(body.get("worker") == "dsh-test" and body.get("source") == "mc_chat",
+             "订阅请求体不对：%r" % body)
+        deadline = time.time() + 8
+        while time.time() < deadline and not (feed.exists()
+                                              and feed.read_text().strip()):
+            time.sleep(0.1)
+        need(feed.exists(), "订阅 feed 没落盘")
+        lines = [json.loads(line) for line in
+                 feed.read_text(encoding="utf-8").splitlines() if line.strip()]
+        need(len(lines) == 1 and lines[0]["id"] == "s1",
+             "订阅 feed 内容不对：%r" % lines)
+
+
+@test
+def test_24_cli_and_config_flags() -> None:
+    """配置：--idle-reconnect/--stall-seconds/--subscribe/飞书默认凭据"""
+    args = worker.parse_args(["--no-feishu", "--idle-reconnect", "12.5",
+                              "--stall-seconds", "7", "--subscribe", "a, b"])
+    need(abs(args.idle_timeout - 12.5) < 0.01, "--idle-reconnect 没生效")
+    need(abs(args.stall_seconds - 7) < 0.01, "--stall-seconds 没生效")
+    need(args.subscribe_sources == ["a", "b"], "订阅 source 解析不对")
+    need(args.no_feishu is True, "--no-feishu 没生效")
+
+    defaults = worker.parse_args([])
+    need(defaults.feishu_creds.endswith("feishu-tsurumaru.json"),
+         "默认飞书凭据不是玉藻十字：%r" % defaults.feishu_creds)
+    need(abs(defaults.stall_seconds - 300) < 0.01, "默认 stall 不是 300")
+    need(abs(defaults.idle_timeout - 90) < 0.01, "默认 idle-reconnect 不是 90")
+
+    cfg_path = Path(tempfile.mkdtemp(prefix="dsh-cfg2-")) / "worker.json"
+    try:
+        cfg_path.write_text(json.dumps({"idle_reconnect": 42,
+                                        "subscribe": "mc_chat"}), encoding="utf-8")
+        from_file = worker.parse_args(["--config", str(cfg_path),
+                                       "--no-feishu"])
+        need(abs(from_file.idle_timeout - 42) < 0.01,
+             "配置 idle_reconnect 没生效")
+        need(from_file.subscribe_sources == ["mc_chat"],
+             "配置 subscribe 没生效")
+    finally:
+        shutil.rmtree(cfg_path.parent, ignore_errors=True)
+
+    cfg = json.loads((HERE / "worker.json").read_text(encoding="utf-8"))
+    need(str(cfg.get("feishu_creds", "")).endswith("feishu-tsurumaru.json"),
+         "worker.json 的飞书凭据不对")
+    need("stall_seconds" in cfg and "idle_reconnect" in cfg,
+         "worker.json 缺看门狗/重连配置")
+
+
+@test
+def test_25_worker_stall_integration() -> None:
+    """卡死（子进程）：dsh 静默且 CPU 不变 → 看门狗杀进程，result 报 stalled"""
+    with Env(tasks=[make_task("t-stall")]) as env:
+        env.launch(["--timeout", "20", "--stall-seconds", "1"],
+                   env={"FAKE_DSH_MODE": "stall", "FAKE_DSH_SLEEP": "10"})
+        need(env.router.wait_results(1, 15), "卡死任务没有上报结果")
+        res = env.result()
+        need(res["status"] == "failed", "卡死 status 不是 failed")
+        need(res["summary"].startswith("stalled: no output for "),
+             "summary 不是 stalled 格式：%r" % res["summary"])
+        evidence = res["evidence"][0]
+        need(evidence.get("reason") == "stalled",
+             "evidence.reason 不是 stalled：%r" % evidence)
+        need(abs(float(evidence.get("stall_s") or 0) - 1.0) < 0.01,
+             "evidence.stall_s 不对：%r" % evidence)
+        need(env.harness is not None and env.harness.proc.poll() is None,
+             "卡死处理后 worker 自己退出了")
+        need("卡死" in env.log_text(), "日志没记卡死")
+
+
+@test
+def test_26_stall_feishu_alert() -> None:
+    """卡死告警：worker 先发『开始任务』，判定卡死时发飞书告警再杀进程"""
+    with Env() as env:
+        instance = make_worker(env)
+        instance.cfg.stall_seconds = 1.0
+        sent: List[str] = []
+        instance.feishu = SimpleNamespace(
+            send_text=lambda text: sent.append(text) or True)
+        old_mode = os.environ.get("FAKE_DSH_MODE")
+        old_sleep = os.environ.get("FAKE_DSH_SLEEP")
+        os.environ["FAKE_DSH_MODE"] = "stall"
+        os.environ["FAKE_DSH_SLEEP"] = "10"
+        try:
+            instance.execute(make_task("t-alert"))
+        finally:
+            if old_mode is None:
+                os.environ.pop("FAKE_DSH_MODE", None)
+            else:
+                os.environ["FAKE_DSH_MODE"] = old_mode
+            if old_sleep is None:
+                os.environ.pop("FAKE_DSH_SLEEP", None)
+            else:
+                os.environ["FAKE_DSH_SLEEP"] = old_sleep
+        need(any("开始任务" in text and "t-alert" in text for text in sent),
+             "没有发任务开始私信：%r" % sent)
+        need(any("卡死" in text and "t-alert" in text for text in sent),
+             "卡死没有发飞书告警：%r" % sent)
+        need(env.router.wait_results(1, 5), "卡死结果没上报")
+        need(env.result()["evidence"][0].get("reason") == "stalled",
+             "结果不是 stalled")
 
 
 # --------------------------------------------------------------------------- #

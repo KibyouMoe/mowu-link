@@ -20,6 +20,9 @@ Router :8790 ──SSE /stream──▶ codex-worker ──spawn──▶ codex 
 
 # 指定二进制 / 代理
 CODEX_BIN=/path/to/codex CODEX_HTTP_PROXY=http://127.0.0.1:10808 ./start-worker.sh
+
+# 指定解释器（默认 ~/.hermes/venvs/mowu-worker/bin/python，带 lark_oapi）
+./start-worker.sh --python /path/to/python
 ```
 
 启动脚本会做三件事（`worker.py` 启动时也会再兜一次）：
@@ -32,6 +35,15 @@ CODEX_BIN=/path/to/codex CODEX_HTTP_PROXY=http://127.0.0.1:10808 ./start-worker.
 `~/.hermes/secrets/router.token`（第一行；`Bearer ` 前缀可有可无）。文件不存在时
 worker 仍会启动，只是不带鉴权；鉴权头同时发 `X-Router-Token`（mowu Router 用）
 和标准的 `Authorization` 头。
+
+飞书同步需要 `lark_oapi`。首次准备专用 venv：
+
+```sh
+/opt/homebrew/bin/python3.12 -m venv ~/.hermes/venvs/mowu-worker
+~/.hermes/venvs/mowu-worker/bin/python -m pip install lark_oapi requests
+```
+
+`start-worker.sh` 默认就用这个 venv；没装 lark 时会自动跳过飞书（任务照跑）。
 
 ## 参数
 
@@ -47,7 +59,14 @@ worker 仍会启动，只是不带鉴权；鉴权头同时发 `X-Router-Token`�
 | `--proxy` | `http://127.0.0.1:10808` | codex 用的 http 代理；`none`/空 = 直连 |
 | `--heartbeat-interval` | `20` | 任务运行中心跳间隔（秒） |
 | `--idle-heartbeat` | `60` | 空闲心跳间隔（秒） |
-| `--idle-timeout` | `90` | SSE 静默多久判定断线 |
+| `--idle-timeout` / `--idle-reconnect` | `90` | SSE 连续多久无任何字节判定断线并重连 |
+| `--stall-seconds` | `300` | 任务期间无 stdout 且进程组 CPU 无变化多久判定卡死 |
+| `--feishu-creds` | `~/.hermes/secrets/feishu-oguri.json` | 飞书应用凭据（app_id/app_secret） |
+| `--feishu-open-id` | 空 | 训练员 open_id；空=用凭据文件里的 `open_id` |
+| `--no-feishu` | 关 | 不连飞书（自测/排障） |
+| `--subscribe` | 空 | 启动后订阅的 source，逗号分隔（如 `mc_chat,email`） |
+| `--subscribe-interval` | `15` | `/subscriptions/pending` 轮询间隔（秒） |
+| `--subscription-feed` | `~/.hermes/logs/<name>-subscription-feed.jsonl` | 订阅消息落盘文件 |
 | `--log-file` | `~/.hermes/logs/codex-worker.log` | 只追加，不轮转 |
 | `--verbose` | 关 | 同时把日志打到 stderr |
 
@@ -63,6 +82,9 @@ POST /register   {name, version}                → {ok, queued}
 GET  /stream?name=<name>                        → SSE
 POST /heartbeat  {name, state, progress_at, task_id?, ts, ...}
 POST /result     {name, task_id, status, summary, artifacts[], evidence[]}
+POST /notice     {worker, text, urgency}        → 飞书入向转给 Hermes
+POST /subscriptions {worker, source}            → 声明订阅
+GET  /subscriptions/pending?worker=             → 拉取订阅消息
 ```
 
 `/stream` 的任务事件接受几种包法（宽松解析）：
@@ -101,12 +123,31 @@ SSE 读超时只是“这一刻没数据”（空闲时 Router 只有 `: ping`�
 一个字节都没收到才重连。
 SIGTERM/SIGINT：杀掉当前子进程组、把任务以 interrupted 上报（尽力）、退出 0。
 
+## 飞书 / 看门狗 / 订阅
+
+飞书长连接用 `lark_oapi` 的 WebSocket 模式（无需公网回调）。只处理训练员的
+**p2p 文本私信**：消息转 `POST /notice`（`urgency=urgent`，唤醒 Hermes），
+成功后回一句“收到，已转给溪流”；群聊、他人、非文本一律忽略。任务开始/完成/
+失败/卡死会主动给训练员发私信。`open_id` 是应用维度的，默认取凭据文件里的
+`open_id`（`--feishu-open-id` 可覆盖）。
+
+看门狗在任务期间同时盯 **stdout 字节数** 和 **进程组累计 CPU 时间**：两者连续
+`--stall-seconds`（默认 300）都没变化才判定卡死（避免把“闷头算不打印”误杀）。
+判定后先写日志、发飞书告警，再 SIGTERM→SIGKILL 整个进程组，结果上报
+`status=failed`、`summary="stalled: no output for Ns"`、`evidence.reason=stalled`。
+SSE 侧沿用 `--idle-reconnect`（默认 90s）无字节即重连的老逻辑。
+
+`--subscribe mc_chat,email` 会在每次（重）连后重新 `POST /subscriptions`，并按
+`--subscribe-interval` 轮询 `/subscriptions/pending`；消息逐条追加到
+`subscription-feed.jsonl`，飞书侧按 60 秒窗口汇总（窗口内最多一条）。
+
 ## 自测
 
 ```sh
-./selftest_worker.py        # 假 Router + 假 codex，约 25 秒，不调用真模型、不联网
+./selftest_worker.py        # 假 Router + 假 codex + 假飞书，约 40 秒，不调用真模型、不联网
 ```
 
 覆盖：注册、收任务、codex 参数与代理环境注入、心跳、4000 字截尾、失败退出码、
-超时、串行不重叠、断线重连并重新注册、SIGTERM（空闲/执行中）、重复任务去重、
+超时、卡死看门狗（判定+杀进程+飞书告警）、飞书入向/出向/过滤/重连、订阅声明/
+落盘/限流、串行不重叠、断线重连并重新注册、SIGTERM（空闲/执行中）、重复任务去重、
 配置加载、二进制探测优先级、语法检查、纯函数、SSE 空闲不误判断线。

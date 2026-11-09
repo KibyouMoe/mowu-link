@@ -14,6 +14,8 @@ set -eu
 # 2) codex 装在 ~/.hermes/tools/node-*/bin 下，把该目录塞进 PATH，
 #    worker 的 auto 探测就能直接命中。
 # 3) 登录态在 ~/.codex（教学员自己的 ChatGPT 账号），不需要 API key。
+# 4) 飞书长连接要 lark_oapi，系统 python3(3.9) 没装；默认用专用 venv，
+#    可用 --python /path/to/python 或 PYTHON=... 覆盖。
 if [ -f "${HOME}/.hermes/.env" ]; then
     set -a
     # shellcheck disable=SC1091
@@ -30,21 +32,46 @@ export PATH="${HOME}/.hermes/tools/node-26.12.1-darwin-arm64/bin:${PATH}"
 
 
 DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-PY=${PYTHON:-/usr/bin/python3}
 CONFIG=${WORKER_CONFIG:-"$DIR/worker.json"}
 LOG_DIR="${HOME}/.hermes/logs"
 CONSOLE_LOG="${LOG_DIR}/codex-worker.console.log"
 PID_DIR="${HOME}/.hermes/run"
 PID_FILE="${PID_DIR}/codex-worker.pid"
+DEFAULT_PY="${HOME}/.hermes/venvs/mowu-worker/bin/python"
 
 mkdir -p "$LOG_DIR" "$PID_DIR"
 
-# 环境里的代理/二进制覆盖配置（命令行参数在最后，优先级更高）。
+# --python（任意位置）= 覆盖解释器；-d 可出现在任意位置；其余参数留给 worker.py。
 DAEMON=0
-if [ "${1:-}" = "-d" ] || [ "${1:-}" = "--daemon" ]; then
-    DAEMON=1
-    shift
+PY_SPEC=""
+_REST=$(mktemp "${TMPDIR:-/tmp}/codex-worker-args.XXXXXX")
+trap 'rm -f "$_REST"' EXIT
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -d|--daemon) DAEMON=1; shift ;;
+        --python) PY_SPEC="${2:-}"; shift 2 ;;
+        --python=*) PY_SPEC="${1#*=}"; shift ;;
+        *) printf '%s\n' "$1" >>"$_REST"; shift ;;
+    esac
+done
+set --
+while IFS= read -r _arg; do
+    set -- "$@" "$_arg"
+done <"$_REST"
+rm -f "$_REST"
+trap - EXIT
+
+# 优先级：--python > $PYTHON > 专用 venv > 系统 python3
+PY=${PY_SPEC:-${PYTHON:-$DEFAULT_PY}}
+if [ ! -x "$PY" ]; then
+    if [ -n "$PY_SPEC" ]; then
+        echo "codex worker: --python 不可执行：$PY" >&2
+        exit 2
+    fi
+    PY=/usr/bin/python3
 fi
+
+# 环境里的代理/二进制覆盖配置（命令行参数在最后，优先级更高）。
 CODEX_BIN="${CODEX_BIN:-auto}"
 CODEX_HTTP_PROXY="${CODEX_HTTP_PROXY:-$HTTP_PROXY}"
 
@@ -53,7 +80,7 @@ if [ "$DAEMON" = "1" ]; then
         --codex-bin "$CODEX_BIN" --proxy "$CODEX_HTTP_PROXY" "$@" \
         >>"$CONSOLE_LOG" 2>&1 &
     echo $! >"$PID_FILE"
-    echo "codex worker started pid=$(cat "$PID_FILE") config=$CONFIG"
+    echo "codex worker started pid=$(cat "$PID_FILE") config=$CONFIG python=$PY"
     echo "log: $CONSOLE_LOG（worker 自身日志在 worker.json 的 log_file）"
     exit 0
 fi

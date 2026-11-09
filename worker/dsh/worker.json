@@ -10,6 +10,11 @@
   "dsh_profile": "headless",
   "heartbeat_interval": 20,
   "idle_heartbeat": 60,
-  "idle_timeout": 90,
+  "idle_reconnect": 90,
+  "stall_seconds": 300,
+  "feishu_creds": "~/.hermes/secrets/feishu-tsurumaru.json",
+  "feishu_open_id": "",
+  "subscribe": "",
+  "subscribe_interval": 15,
   "log_file": "~/.hermes/logs/dsh-worker.log"
 }
