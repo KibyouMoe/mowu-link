@@ -1333,6 +1333,8 @@ export class DesktopManager {
           title: `${this.config.bridgeName}-${final ? "回复" : "输出"}`, messageIds, status: "pending", at: new Date().toISOString() };
       }
     }
+    // 入队即触发发送。CLI 模式下没有图片中继来 kick，纯文字会永远停在 pending。
+    if (!this.closed && !this.handoffPaused) void this.drainPublicTexts();
   }
 
   async drainPublicTexts() {

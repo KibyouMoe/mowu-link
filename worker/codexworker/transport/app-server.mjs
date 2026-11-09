@@ -418,6 +418,10 @@ class AppServerClient {
   // ---- JSON-RPC -----------------------------------------------------------
 
   request(method, params, timeoutMs = CONTROL_TIMEOUT_FLOOR_MS) {
+    // CODEXWORKER_DEBUG_RPC=1 时把出站请求打到 stderr，用来核对 model / effort 到底有没有传下去。
+    if (process.env.CODEXWORKER_DEBUG_RPC === "1") {
+      try { console.error(`[app-server→] ${method} ${JSON.stringify(params)}`); } catch { /* 不影响主流程 */ }
+    }
     if (!this.child) {
       return Promise.reject(new AppServerError(`app-server is not running; cannot send ${method}`, "app_server_not_running"));
     }
@@ -678,6 +682,8 @@ class AppServerClient {
     for (const key of ["model", "baseInstructions", "developerInstructions"]) {
       if (stringArg(args[key])) params[key] = args[key];
     }
+    const defaultModel = process.env.CODEXWORKER_MODEL?.trim();
+    if (defaultModel && !params.model) params.model = defaultModel;
     if (args.config && typeof args.config === "object" && !Array.isArray(args.config)) params.config = args.config;
 
     await this.ensureStarted();
@@ -849,6 +855,9 @@ class AppServerClient {
     for (const key of ["model", "effort", "cwd", "approvalPolicy", "summary"]) {
       if (args[key] !== undefined && args[key] !== null) params[key] = args[key];
     }
+    // 上层（manager）不会传 effort；CLI 入口通过环境变量把用户的思考强度带下来。
+    const defaultEffort = process.env.CODEXWORKER_REASONING_EFFORT?.trim();
+    if (defaultEffort && params.effort === undefined) params.effort = defaultEffort;
     if (args.sandboxPolicy && typeof args.sandboxPolicy === "object") params.sandboxPolicy = args.sandboxPolicy;
 
     await this.ensureStarted();

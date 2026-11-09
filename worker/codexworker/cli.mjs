@@ -228,6 +228,15 @@ async function main() {
   process.title = identity.name;
 
   const { file: configFile, value: config } = await loadConfig(args.config, identity);
+  // 把用户配置里的模型与思考强度带给 app-server transport：
+  // thread/start 用 CODEXWORKER_MODEL，turn/start 用 CODEXWORKER_REASONING_EFFORT。
+  const codexConfig = config?.codex ?? {};
+  if (typeof codexConfig.model === "string" && codexConfig.model.trim()) {
+    process.env.CODEXWORKER_MODEL = codexConfig.model.trim();
+  }
+  if (typeof codexConfig.reasoningEffort === "string" && codexConfig.reasoningEffort.trim()) {
+    process.env.CODEXWORKER_REASONING_EFFORT = codexConfig.reasoningEffort.trim();
+  }
   const host = args.host ?? process.env.CODEXWORKER_HOST ?? config.host ?? "127.0.0.1";
   const port = resolvePort(args.port ?? process.env.CODEXWORKER_PORT ?? identity.port ?? config.port, 8903);
   const stateDir = path.resolve(expandHome(process.env.CODEXWORKER_STATE_DIR ?? BINDING_STATE_DIR));
