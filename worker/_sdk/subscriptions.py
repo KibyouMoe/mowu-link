@@ -152,6 +152,7 @@ class SubscriptionPoller:
         clock: Callable[[], float] = time.time,
         logger: Optional[logging.Logger] = None,
         dedupe_size: int = 512,
+        on_event: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
     ) -> None:
         self.worker = worker
         self.sources = [str(s).strip() for s in sources if str(s).strip()]
@@ -159,6 +160,7 @@ class SubscriptionPoller:
         self.get_json = get_json
         self.feed_path = _expand(feed_path)
         self.notifier = notifier
+        self.on_event = on_event
         self.interval = max(0.1, float(interval))
         self.clock = clock
         self.log = logger or log
@@ -221,6 +223,12 @@ class SubscriptionPoller:
         if self.notifier is not None:
             self.notifier.add(fresh)
             self.notifier.flush(now=self.clock())
+        if self.on_event is not None:
+            try:
+                self.on_event(fresh)
+            except Exception:  # noqa: BLE001 - 事件处理失败不能停掉轮询
+                self.errors += 1
+                self.log.exception("订阅事件回调失败（%d 条）", len(fresh))
         self.log.info("订阅收到 %d 条（worker=%s）", len(fresh), self.worker)
         return len(fresh)
 

@@ -1,6 +1,6 @@
 {
   "router": "http://127.0.0.1:8790",
-  "name": "dsh",
+  "name": "TamamoCross",
   "token_file": "~/.hermes/secrets/router.token",
   "workspace": "~/projects",
   "permission_mode": "workspace-write",
@@ -20,6 +20,6 @@
   "chat_queue": 3,
   "chat_stream_interval": 1.6,
   "subscribe": "",
-  "subscribe_interval": 15,
+  "subscribe_interval": 5,
   "log_file": "~/.hermes/logs/dsh-worker.log"
 }

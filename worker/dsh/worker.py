@@ -519,6 +519,8 @@ class Worker:
         self.stop = threading.Event()
         self.stop_signal: Optional[str] = None
         self._lock = threading.Lock()
+        # Router 任务、聊天、订阅事件共用这一把锁：同一时刻只有一个 agent 在跑。
+        self._exec_lock = threading.RLock()
         self._task_id: Optional[str] = None
         self._task_started = 0.0
         self._progress_at = 0.0
@@ -544,7 +546,31 @@ class Worker:
                 notifier=FeedNotifier(self._feishu_send, logger=log),
                 interval=self.cfg.subscribe_interval,
                 logger=log,
+                on_event=self._on_subscription_events,
             )
+
+    def _on_subscription_events(self,
+                                messages: List[Dict[str, Any]]) -> None:
+        """订阅事件 → 每条当一次 agent 任务执行（串行，不丢不并）。"""
+        for message in messages:
+            if self.stop.is_set():
+                log.warning("worker 正在退出，剩余订阅事件不执行")
+                break
+            source = str(message.get("source") or "unknown")
+            kind = str(message.get("kind") or "")
+            event_id = message.get("id") or message.get("event_id") or ""
+            text = str(message.get("text") or message.get("content") or "").strip()
+            if not text:
+                continue
+            task_id = "sub-%s" % (event_id or "%d" % int(time.time() * 1000))
+            goal = "[订阅事件 source=%s kind=%s id=%s]\n%s" % (
+                source, kind, event_id, text)
+            log.info("订阅事件转任务 %s：source=%s", task_id, source)
+            try:
+                self.execute({"task_id": task_id, "goal": goal,
+                              "workspace": self.cfg.workspace})
+            except Exception:  # noqa: BLE001 - 单条失败不能阻断后续事件
+                log.exception("订阅事件执行失败 id=%s", event_id)
 
     # -- 小工具 ---------------------------------------------------------- #
 
@@ -757,6 +783,12 @@ class Worker:
     # -- 执行 ------------------------------------------------------------ #
 
     def _report(self, payload: Dict[str, Any]) -> bool:
+        if str(payload.get("task_id") or "").startswith("sub-"):
+            # 订阅事件不是 router 创建的任务，router 里没有对应记录，
+            # 上报只会拿到 unknown_task；结果已经在 announce/日志里。
+            log.info("订阅任务 %s 不上报 router（无对应 task 记录）",
+                     payload.get("task_id"))
+            return True
         url = self._url("/result")
         for attempt in range(1, 4):
             try:
@@ -790,16 +822,17 @@ class Worker:
         self._report(payload)
 
     def execute(self, task: Dict[str, Any]) -> None:
-        """Router 任务入口：跟飞书聊天互斥（同一 worker 一次只跑一个 agent）。"""
-        service = self.chat
-        if service is None:
-            self._execute(task)
-            return
-        service.task_begin()
-        try:
-            self._execute(task)
-        finally:
-            service.task_end()
+        """Router 任务入口：跟飞书聊天、订阅事件互斥（同一 worker 一次只跑一个 agent）。"""
+        with self._exec_lock:
+            service = self.chat
+            if service is None:
+                self._execute(task)
+                return
+            service.task_begin()
+            try:
+                self._execute(task)
+            finally:
+                service.task_end()
 
     def _execute(self, task: Dict[str, Any]) -> None:
         task_id = str(task.get("task_id") or task.get("id") or "").strip()
