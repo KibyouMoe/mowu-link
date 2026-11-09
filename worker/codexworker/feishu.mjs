@@ -69,25 +69,16 @@ export function escapeMarkdown(text) {
   return out.join("");
 }
 
-export const CARD_TEMPLATE = "indigo";
-
-// Hermes `_card()` field structure: wide card, colored header (title object
-// first), then one markdown element. The session-id note is this bridge's only
-// addition; fenced code blocks ride the markdown element untouched.
-export function cardPayload(text, { title, threadId = null, template = CARD_TEMPLATE } = {}) {
-  const elements = [{ tag: "markdown", content: escapeMarkdown(String(text ?? "")) }];
+export function markdownPayload(text, title, threadId) {
+  const elements = [{ tag: "markdown", content: escapeMarkdown(text) }];
   if (threadId) {
     elements.push({ tag: "note", elements: [{ tag: "plain_text", content: `会话 ${threadId}` }] });
   }
   return JSON.stringify({
     config: { wide_screen_mode: true },
-    header: { title: { content: String(title ?? ""), tag: "plain_text" }, template },
+    header: { template: "indigo", title: { tag: "plain_text", content: title } },
     elements,
   });
-}
-
-export function markdownPayload(text, title, threadId) {
-  return cardPayload(text, { title, threadId });
 }
 
 export function splitChunks(text, maxChars) {
@@ -242,15 +233,12 @@ export class FeishuNotifier {
     }
   }
 
-  // Emoji types the bridge uses: Typing while a turn runs, CrossMark when it
-  // failed (Hermes parity). Both are verified against the live reaction API.
-  async addReaction(messageId, emojiType = "Typing") {
+  async addReaction(messageId) {
     if (!this.enabled || !messageId) return null;
-    const emoji = typeof emojiType === "string" && emojiType.trim() ? emojiType.trim() : "Typing";
     const token = await this.getToken();
     if (!token) return null;
     const url = `${FEISHU_API_BASE}/im/v1/messages/${encodeURIComponent(messageId)}/reactions`;
-    const body = { reaction_type: { emoji_type: emoji } };
+    const body = { reaction_type: { emoji_type: "Typing" } };
     let response = await postJson(url, body, { token });
     if (response && response.code !== 0 && isTokenError(response)) {
       console.warn(`feishu reaction token 失效（code=${response.code} msg=${response.msg}），刷新 token 重试一次`);
@@ -260,7 +248,7 @@ export class FeishuNotifier {
       response = newToken ? await postJson(url, body, { token: newToken }) : null;
     }
     if (response === null || response.code !== 0) {
-      console.warn(`feishu 添加 reaction 失败: emoji=${emoji} code=${(response || {}).code} msg=${(response || {}).msg} message_id=${messageId}`);
+      console.warn(`feishu 添加 reaction 失败: code=${(response || {}).code} msg=${(response || {}).msg} message_id=${messageId}`);
       return null;
     }
     return String((response.data || {}).reaction_id || "") || null;
@@ -546,15 +534,8 @@ export class FeishuWebsocketClient {
     return this._running;
   }
 
-  // Public equivalent of `_ws.readyState === 1`, so the channel can ask either
-  // transport the same question (the SDK client has no raw socket).
-  get connected() {
-    return this._ws?.readyState === 1;
-  }
-
   status() {
     return { policy: "bounded-handshake-heartbeat", running: this.running, phase: this.phase,
-      connected: this.connected,
       attempts: this.attempts, handshakeTimeoutMs: this.handshakeTimeoutMs, pongTimeoutMs: this.pongTimeoutMs,
       pingIntervalMs: this.pingIntervalMs, retryIntervalMs: FEISHU_WS_RECONNECT_INTERVAL,
       lastError: this.lastError || null, lastDisconnectAt: this.lastDisconnectAt,
@@ -608,7 +589,7 @@ export class FeishuWebsocketClient {
     this._runLoop(generation).catch(() => {
       if (!this.current(generation)) return;
       this.lastError = "reconnect_loop_failed"; this.setPhase("failed");
-      console.warn("[CodexWorker] Feishu reconnect loop failed; inspect connection status.");
+      console.warn("[bridge] Feishu reconnect loop failed; inspect connection status.");
       this._running = false;
     });
   }
@@ -714,10 +695,10 @@ export class FeishuWebsocketClient {
             try { this.configurePing(JSON.parse(_decoder.decode(frame.payload))); } catch { /* Invalid server config. */ }
           }
           void this._handleFrame(ws, frame, serviceId).catch(() => {
-            console.error("[CodexWorker] Feishu event was not acknowledged; inspect durable ingress state.");
+            console.error("[bridge] Feishu event was not acknowledged; inspect durable ingress state.");
           });
         } catch {
-          console.warn("[CodexWorker] Invalid Feishu frame; input was not acknowledged.");
+          console.warn("[bridge] Invalid Feishu frame; input was not acknowledged.");
         }
       };
       ws.onclose = () => finish("closed");
@@ -735,7 +716,7 @@ export class FeishuWebsocketClient {
     const response = await postJson(FEISHU_WS_BASE + FEISHU_WS_ENDPOINT_URI, { AppID: this.notifier.appId, AppSecret: this.notifier.appSecret });
     if (response.code !== 0 || !response.data || typeof response.data !== "object") {
       this.lastError = "endpoint_unavailable";
-      console.warn("[CodexWorker] Feishu endpoint unavailable; automatic retry remains active.");
+      console.warn("[bridge] Feishu endpoint unavailable; automatic retry remains active.");
       return "";
     }
     this.configurePing(response.data.ClientConfig);
@@ -746,17 +727,6 @@ export class FeishuWebsocketClient {
     if (this._stopped) return;
     const frameMethod = frame.method ?? 0;
     const msgType = frame.headers.type || "";
-    // Frame diagnostics are opt-in: CODEXWORKER_DEBUG_FRAMES=1. A healthy
-    // long connection logs nothing by default.
-    if (process.env.CODEXWORKER_DEBUG_FRAMES === "1") {
-      if (frameMethod !== 0) {
-        let et = "";
-        try { et = JSON.parse(_decoder.decode(frame.payload))?.header?.event_type || ""; } catch { et = "<unparsed>"; }
-        console.error(`[feishu-diag] method=${frameMethod} type=${msgType} event_type=${et} bytes=${frame.payload?.length ?? 0}`);
-      } else {
-        console.error(`[feishu-diag] CONTROL type=${msgType} bytes=${frame.payload?.length ?? 0}`);
-      }
-    }
     if (frameMethod === 0) return; // CONTROL ping/pong, ignore
     if (msgType === "card" || (msgType === "event" && (() => {
       try { return JSON.parse(_decoder.decode(frame.payload))?.header?.event_type === "card.action.trigger"; } catch { return false; }

@@ -204,7 +204,7 @@ const ingressHttp = async (f, route, body, auth = ingressToken, headers = {}) =>
 };
 
 async function fixture(t, overrides = {}) {
-  const root = await mkdtemp(path.join(os.tmpdir(), "rudolf-desktop-manager-"));
+  const root = await mkdtemp(path.join(os.tmpdir(), "codexworker-desktop-manager-"));
   const tasks = new Map(); const calls = []; const reports = [];
   let count = 0;
   const add = (id, turns = [], cwd = root) => tasks.set(id, { thread: { id, title: id, cwd, status: { type: "idle" } }, turns });
@@ -747,7 +747,7 @@ test("question relay publishes to both existing channels once without starting a
   const first = await f.http("/bridge/questions", q);
   assert.equal(first.status, 200); assert.equal(first.body.feishu, "sent"); assert.equal(first.body.hermes, "stored");
   assert.equal(first.body.duplicate, false); assert.ok(cards[0].text.includes("1）可见")); assert.ok(cards[0].text.includes("2）不可见"));
-  assert.equal(cards[0].options.title, "鲁道夫-提问"); assert.equal(cards[0].options.chatId, "trainer-chat");
+  assert.equal(cards[0].options.title, "CodexWorker-提问"); assert.equal(cards[0].options.chatId, "trainer-chat");
   assert.deepEqual(Object.keys(f.reports[0].body).sort(), ["content", "machine", "thread_id", "type"]);
   assert.equal(f.reports[0].body.type, "progress"); assert.ok(f.reports[0].body.content.includes(q.questions[0].title));
   const repeat = await f.http("/bridge/questions", q); assert.equal(repeat.body.duplicate, true);
@@ -1699,8 +1699,8 @@ test("online notice waits for connection, reads the current native title and ded
   await f.manager.onlineAnnouncement.connected(socket, socket.connectionId); assert.equal(cards.length, 0);
   socket._ws.readyState = 1;
   await Promise.all([f.manager.onlineAnnouncement.connected(socket, socket.connectionId), f.manager.onlineAnnouncement.connected(socket, socket.connectionId)]);
-  assert.equal(cards.length, 1); assert.match(cards[0].text, /鲁道夫已上线/); assert.match(cards[0].text, /新的原生会话标题/);
-  assert.doesNotMatch(cards[0].text, /过期 alias/); assert.equal(cards[0].options.title, "鲁道夫-上线通知");
+  assert.equal(cards.length, 1); assert.match(cards[0].text, /CodexWorker已上线/); assert.match(cards[0].text, /新的原生会话标题/);
+  assert.doesNotMatch(cards[0].text, /过期 alias/); assert.equal(cards[0].options.title, "CodexWorker-上线通知");
   assert.equal(cards[0].options.threadId, "existing"); assert.equal(cards[0].options.chatId, "selected-chat");
   assert.equal(cards[0].options.uuid, socket.connectionId);
   const read = f.calls.filter(c => c.name === "read_thread").at(-1);
@@ -1712,7 +1712,7 @@ test("online notice waits for connection, reads the current native title and ded
   assert.ok(!JSON.stringify(state.feishuOnlineNotice).includes(token));
   socket.connectionId = randomUUID();
   await f.manager.onlineAnnouncement.connected(socket, socket.connectionId); assert.equal(cards.length, 2);
-  assert.equal(cards[1].options.title, "鲁道夫-连接恢复"); assert.match(cards[1].text, /连接已恢复/);
+  assert.equal(cards[1].options.title, "CodexWorker-连接恢复"); assert.match(cards[1].text, /连接已恢复/);
   assert.doesNotMatch(cards[1].text, /已上线/);
 });
 
@@ -1763,9 +1763,9 @@ test("online/recovery classification survives restart but a new Desktop lifetime
   let socket = onlineSocket(f); await f.manager.onlineAnnouncement.connected(socket, socket.connectionId);
   assert.equal(f.manager.state.feishuLastOnlineNotice.desktopLifetimeStartedAt, "current-desktop");
   f.manager.onlineAnnouncement.reset(); socket = onlineSocket(f);
-  await f.manager.onlineAnnouncement.connected(socket, socket.connectionId); assert.equal(cards.at(-1).options.title, "鲁道夫-连接恢复");
+  await f.manager.onlineAnnouncement.connected(socket, socket.connectionId); assert.equal(cards.at(-1).options.title, "CodexWorker-连接恢复");
   f.manager.config.desktopLifetimeStartedAt = "next-desktop"; socket = onlineSocket(f);
-  await f.manager.onlineAnnouncement.connected(socket, socket.connectionId); assert.equal(cards.at(-1).options.title, "鲁道夫-上线通知");
+  await f.manager.onlineAnnouncement.connected(socket, socket.connectionId); assert.equal(cards.at(-1).options.title, "CodexWorker-上线通知");
 });
 
 test("an older hot-reload suppression record still distinguishes a later recovery in the same Desktop", async t => {
@@ -1773,7 +1773,7 @@ test("an older hot-reload suppression record still distinguishes a later recover
   f.manager.state.feishuOnlineNotice = { status: "suppressed-hot-reload", connectedAt: "2026-10-04T03:12:54.000Z" };
   const cards = []; f.manager.notifier = { sendMessage: async (text, options) => { cards.push({ text, options }); return { code: 0 }; } };
   const socket = onlineSocket(f); await f.manager.onlineAnnouncement.connected(socket, socket.connectionId);
-  assert.equal(cards[0].options.title, "鲁道夫-连接恢复"); assert.doesNotMatch(cards[0].text, /已上线/);
+  assert.equal(cards[0].options.title, "CodexWorker-连接恢复"); assert.doesNotMatch(cards[0].text, /已上线/);
 });
 
 test("online notice has no implicit recipient and handles a verified untitled thread honestly", async t => {
@@ -1830,7 +1830,7 @@ test("Feishu commentary is titled 输出 and final native reply is titled 回复
   await f.manager.message(req("标题测试", { source: "trainer" })); await f.manager.scan();
   f.tasks.get("existing").turns.at(-1).items.push({ id: "progress", type: "agentMessage", phase: "commentary", text: "中间输出" });
   await f.manager.scan(); f.finish("existing", "最终回复"); await f.manager.scan(); await f.manager.scan();
-  assert.deepEqual(cards, [{ text: "中间输出", title: "鲁道夫-输出" }, { text: "最终回复", title: "鲁道夫-回复" }]);
+  assert.deepEqual(cards, [{ text: "中间输出", title: "CodexWorker-输出" }, { text: "最终回复", title: "CodexWorker-回复" }]);
 });
 
 test("integration diagnostics are authenticated and contain no credentials", async t => {

@@ -158,7 +158,7 @@ export class PublicImageRelay {
     this.running = true;
     this.task = this.manager.track(this.drain().catch(() => {
       // Persistence failures leave the same durable UUID pending for recovery.
-      console.error("[CodexWorker] Public image relay persistence failed; check its receipts.");
+      console.error("[bridge] Public image relay persistence failed; check its receipts.");
     }).finally(() => { this.running = false; }));
     return this.task;
   }

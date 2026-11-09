@@ -10,7 +10,7 @@ if (!$bridgeJobTarget -or $bridgeJobTarget.ParentProcessId -ne $bridgeJobSelf.Pa
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
-public static class RudolfInventoryJob {
+public static class CodexWorkerInventoryJob {
     [StructLayout(LayoutKind.Sequential)] public struct BasicLimits {
         public long ProcessTime, JobTime;
         public uint Flags;
@@ -35,44 +35,44 @@ public static class RudolfInventoryJob {
     [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr handle);
 }
 '@
-$bridgeJobHandle = [RudolfInventoryJob]::CreateJobObject([IntPtr]::Zero, $null)
+$bridgeJobHandle = [CodexWorkerInventoryJob]::CreateJobObject([IntPtr]::Zero, $null)
 if ($bridgeJobHandle -eq [IntPtr]::Zero) { throw 'Could not create isolated inventory job.' }
 $bridgeInventoryHandle = [IntPtr]::Zero
 $bridgeOuterJob = [IntPtr]::Zero
 try {
-    $bridgeJobLimits = New-Object RudolfInventoryJob+ExtendedLimits
-    $bridgeJobBasic = New-Object RudolfInventoryJob+BasicLimits
+    $bridgeJobLimits = New-Object CodexWorkerInventoryJob+ExtendedLimits
+    $bridgeJobBasic = New-Object CodexWorkerInventoryJob+BasicLimits
     $bridgeJobBasic.Flags = 0x2800 # KILL_ON_JOB_CLOSE | BREAKAWAY_OK: resource ownership, not a security sandbox.
     $bridgeJobLimits.Basic = $bridgeJobBasic
-    if (![RudolfInventoryJob]::SetInformationJobObject($bridgeJobHandle, 9, [ref]$bridgeJobLimits, [Runtime.InteropServices.Marshal]::SizeOf($bridgeJobLimits))) {
+    if (![CodexWorkerInventoryJob]::SetInformationJobObject($bridgeJobHandle, 9, [ref]$bridgeJobLimits, [Runtime.InteropServices.Marshal]::SizeOf($bridgeJobLimits))) {
         throw 'Could not configure isolated inventory job.'
     }
-    $bridgeActualLimits = New-Object RudolfInventoryJob+ExtendedLimits
-    if (![RudolfInventoryJob]::QueryInformationJobObject($bridgeJobHandle, 9, [ref]$bridgeActualLimits,
+    $bridgeActualLimits = New-Object CodexWorkerInventoryJob+ExtendedLimits
+    if (![CodexWorkerInventoryJob]::QueryInformationJobObject($bridgeJobHandle, 9, [ref]$bridgeActualLimits,
         [Runtime.InteropServices.Marshal]::SizeOf($bridgeActualLimits), [IntPtr]::Zero) -or $bridgeActualLimits.Basic.Flags -ne 0x2800) {
         throw 'Isolated job limits were not applied.'
     }
-    $bridgeInventoryHandle = [RudolfInventoryJob]::OpenProcess(0x501, $false, $InventoryPid)
+    $bridgeInventoryHandle = [CodexWorkerInventoryJob]::OpenProcess(0x501, $false, $InventoryPid)
     if ($Nested) {
-        $bridgeOuterJob = [RudolfInventoryJob]::CreateJobObject([IntPtr]::Zero, $null)
-        $bridgeOuterLimits = New-Object RudolfInventoryJob+ExtendedLimits
-        $bridgeOuterBasic = New-Object RudolfInventoryJob+BasicLimits
+        $bridgeOuterJob = [CodexWorkerInventoryJob]::CreateJobObject([IntPtr]::Zero, $null)
+        $bridgeOuterLimits = New-Object CodexWorkerInventoryJob+ExtendedLimits
+        $bridgeOuterBasic = New-Object CodexWorkerInventoryJob+BasicLimits
         $bridgeOuterBasic.Flags = 0x2000 # Outer cleanup job does not allow breakaway.
         $bridgeOuterLimits.Basic = $bridgeOuterBasic
         if ($bridgeOuterJob -eq [IntPtr]::Zero -or
-            ![RudolfInventoryJob]::SetInformationJobObject($bridgeOuterJob, 9, [ref]$bridgeOuterLimits, [Runtime.InteropServices.Marshal]::SizeOf($bridgeOuterLimits)) -or
-            ![RudolfInventoryJob]::AssignProcessToJobObject($bridgeOuterJob, $bridgeInventoryHandle)) {
+            ![CodexWorkerInventoryJob]::SetInformationJobObject($bridgeOuterJob, 9, [ref]$bridgeOuterLimits, [Runtime.InteropServices.Marshal]::SizeOf($bridgeOuterLimits)) -or
+            ![CodexWorkerInventoryJob]::AssignProcessToJobObject($bridgeOuterJob, $bridgeInventoryHandle)) {
             throw 'Could not configure isolated outer inventory job.'
         }
     }
-    if ($bridgeInventoryHandle -eq [IntPtr]::Zero -or ![RudolfInventoryJob]::AssignProcessToJobObject($bridgeJobHandle, $bridgeInventoryHandle)) {
+    if ($bridgeInventoryHandle -eq [IntPtr]::Zero -or ![CodexWorkerInventoryJob]::AssignProcessToJobObject($bridgeJobHandle, $bridgeInventoryHandle)) {
         throw 'Could not assign test-owned inventory process.'
     }
     [Console]::WriteLine('{"assigned":true}')
     [Console]::Out.Flush()
     [void][Console]::ReadLine()
 } finally {
-    if ($bridgeInventoryHandle -ne [IntPtr]::Zero) { [void][RudolfInventoryJob]::CloseHandle($bridgeInventoryHandle) }
-    [void][RudolfInventoryJob]::CloseHandle($bridgeJobHandle)
-    if ($bridgeOuterJob -ne [IntPtr]::Zero) { [void][RudolfInventoryJob]::CloseHandle($bridgeOuterJob) }
+    if ($bridgeInventoryHandle -ne [IntPtr]::Zero) { [void][CodexWorkerInventoryJob]::CloseHandle($bridgeInventoryHandle) }
+    [void][CodexWorkerInventoryJob]::CloseHandle($bridgeJobHandle)
+    if ($bridgeOuterJob -ne [IntPtr]::Zero) { [void][CodexWorkerInventoryJob]::CloseHandle($bridgeOuterJob) }
 }

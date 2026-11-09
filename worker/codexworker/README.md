@@ -1,352 +1,4 @@
-# CodexWorker
-
-CodexWorker 是 `operate-codex-bridge` 仓库 `assets/desktop-plugin`（上游「鲁道夫 Hermes Bridge」0.2.38）
-的改名副本，并新增了两样东西：
-
-1. **CLI 启动入口** `bin/codexworker` → `cli.mjs`（`serve` / `mcp` 两种模式）；
-2. **native-cli 后端** `native-cli.mjs`：没有 Codex Desktop 注入管道时，用本机 `codex` CLI 提供
-   与 Desktop 同一套 `/turn`、`/threads`、`/manager/*` 能力，会话可连续、可 resume。
-
-桌面端业务逻辑（`server.mjs`、`desktop-manager.mjs`、`mcp-business.mjs` 等）保持原样，没有重写，
-也没有删除任何 Desktop 代码路径。两个后端由能力探测选择：
-
-| backend | 何时使用 | 原生能力来自 | 需要 |
-| --- | --- | --- | --- |
-| `desktop` | `CODEX_APP_TOOLS_PIPE_PATH` 存在，或配置 `"backend": "desktop"` | Desktop 注入的 app-tools pipe（原 `desktop-manager.mjs`） | Codex Desktop 插件宿主里的 `codexworker mcp` |
-| `cli` | 默认（没有 pipe），或配置 `"backend": "cli"` | 本机 `codex exec` / `codex exec resume` | `codex` CLI 已安装并登录 |
-
-> 独立 CLI 进程**无法**挂接 Desktop 注入的命名管道。因此 `serve` 模式下即使环境里残留
-> `CODEX_APP_TOOLS_PIPE_PATH`，也只会把 `backend` 报成 `desktop` 并保持存活接口（`ready:false`），
-> 不会偷偷换成 CLI 后端；要强制 CLI 用 `--backend cli` 或配置 `"backend": "cli"`。
-
-## 与桌面版差异
-
-| 项 | 桌面版（上游） | 本副本（CodexWorker） |
-| --- | --- | --- |
-| 运行宿主 | Codex Desktop 插件宿主，注入 `CODEX_APP_TOOLS_PIPE_PATH` | 可独立 `node` 启动；桌面模式仍需插件宿主 |
-| 入口 | `.mcp.json` → `scripts/launch_codexworker.cmd` → `server.mjs` | `bin/codexworker` → `cli.mjs`（默认 `serve`，另有 `mcp` 透传） |
-| 原生后端 | `desktop-manager.mjs` + app-tools pipe | 有 pipe → Desktop；无 pipe → `native-cli.mjs`（`codex exec`） |
-| HTTP 面 | 全量管理 API（含飞书/图片/事件流） | CLI 暴露 DSH 兼容子集：`/health`、`/version`、`/threads`、`/turn`、`/manager/*` |
-| 会话来源 | Desktop 聊天 | `codex exec` 写入的 `$CODEX_HOME/sessions/**/*.jsonl` |
-| 名称 | rudolf-hermes-bridge / 鲁道夫 | `identity.json` 的 `name` / `display`（如 OguriCap / 小栗帽） |
-| 状态目录 | `~/.codex/state/rudolf-hermes-bridge` | `~/.codex/state/<name>`（`CODEXWORKER_STATE_DIR` 可覆盖） |
-| 飞书 / 图片 / 提问卡 | 支持 | CLI 不启动 |
-| 业务逻辑 | — | 未重写，逐文件复制 |
-
-## 启动
-
-依赖：Node.js ≥ 20，macOS / Linux / Windows 均可运行 CLI；CLI 后端另需 `codex` CLI。
-
-```sh
-cd worker/codexworker
-
-# 帮助 / 版本
-./bin/codexworker --help
-./bin/codexworker --version
-
-# 启动 CLI 原生 Bridge（默认 127.0.0.1:8903）
-./bin/codexworker --config ./codexworker.config.example.json
-
-# 指定端口 / 日志
-./bin/codexworker --config ./codexworker.config.example.json --port 8904 \
-  --log /tmp/codexworker.log
-
-# 验证
-curl -sS http://127.0.0.1:8904/health
-curl -sS http://127.0.0.1:8904/version
-
-# 前台 Ctrl-C，或 kill -TERM <pid>
-```
-
-配置示例 `codexworker.config.example.json`：
-
-```json
-{
-  "host": "127.0.0.1",
-  "port": 8903,
-  "backend": "auto",
-  "operatingMode": "cli-native",
-  "workspace": "~/projects/mowulink",
-  "turnTimeoutMs": 600000,
-  "codex": {
-    "bin": "codex",
-    "home": "~/.codex",
-    "sandbox": "workspace-write",
-    "approvalPolicy": "never",
-    "model": null,
-    "extraArgs": []
-  },
-  "tokenFile": "~/.codex/secrets/codexworker.token"
-}
-```
-
-- `backend`：`auto`（默认）| `cli` | `desktop`，也可用 `--backend` 覆盖。
-- `workspace`：新会话的默认 cwd，也是 `codex exec` 的进程 cwd（`~` 会展开）。
-- `codex.bin`：`codex` 可执行文件；不填时按 `CODEXWORKER_CODEX_BIN` → `PATH` → `~/.hermes/tools/*/bin/codex` 查找。
-- `codex.sandbox`：`workspace-write`（默认）| `read-only` | `danger-full-access`；resume 时通过
-  `-c sandbox_mode="..."` 传入（`codex exec resume` 没有 `--sandbox` 旗标）。
-- `codex.approvalPolicy`：默认 `never`，非交互进程不会弹审批。
-- `tokenFile`：文件存在且 ≥24 字符时，除 `GET /health`、`GET /version` 外都要求 `Authorization: Bearer <token>`；
-  文件不存在则回环地址默认不校验。监听非回环地址时**必须**配置 token，否则拒绝启动。
-- `--port 0` 由系统分配空闲端口，启动日志会打印实际端口。
-
-### 实例身份（identity.json）
-
-名字属于实例，不属于桥：同一份代码可以跑多个 Worker，每个进程必须有自己的 `identity.json`。
-`--identity <file>` 显式指定；不传时依次找 `$CODEXWORKER_IDENTITY`、代码目录的 `identity.json`、
-当前目录的 `./identity.json`。
-
-```json
-{
-  "bridge": "CodexWorker",
-  "name": "OguriCap",
-  "display": "小栗帽",
-  "port": 8905,
-  "configFile": "~/.hermes/secrets/codexworker.config.json"
-}
-```
-
-- `name`：内部标识——`/health.name`、进程标题、状态目录 `~/.codex/state/<name>`、日志文件名后缀。
-  旧部署的 `~/.codex/state/codexworker` 会在首次改名启动时复制过来（飞书会话绑定和历史随之保留）。
-- `display`：给人看的名字——飞书卡片标题 `<display>-回复`、每行日志的前缀、`/health.display`。
-- `bridge`：这段代码（桥）自己的名字。**壳名只允许出现在这里和仓库里**，不会成为用户可见标题。
-- `port` / `configFile`：默认端口和配置文件（`--config` 未传时使用；`--port`/`--config` 优先）。
-- 解析顺序：`identity.json` → 配置里的 `bridgeName` → 拒绝启动（`exit 2`，
-  `缺少实例身份：identity.json 需包含 name 与 display`）。文件存在但缺 `name`/`display` 时直接失败，
-  不会退回 `bridgeName`；两者都存在时以 identity 为准，启动日志写 `identity_loaded {name,display,source}`。
-- 新实例照抄 `identity.example.json`（DSHWorker 示例），改五个字段即可。
-
-`mcp` 透传模式（仍是原 Desktop 插件行为，需要插件宿主环境）：
-
-```sh
-./bin/codexworker mcp --log /tmp/codexworker-mcp.log
-```
-
-## CLI 模式（native-cli）
-
-`native-cli.mjs` 实现与 Desktop 原生层相同的四件事，底层换成 `codex` CLI：
-
-| 能力 | Desktop 实现 | CLI 实现 |
-| --- | --- | --- |
-| 发任务 | `send_message_to_thread` 走 pipe | `codex exec --skip-git-repo-check --json -`（首轮） |
-| 续会话 | 同上，带 threadId | `codex exec resume <session-id> --skip-git-repo-check --json -` |
-| 读增量 | `wait_threads` / `read_thread` | 解析 `exec --json` 的 NDJSON 事件流 |
-| 列历史 | `list_threads` | `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-*.jsonl` |
-| 会话 id | Desktop threadId | `thread.started` 事件的 `thread_id`（= Codex session UUID） |
-
-提示词通过 **stdin** 传入（`-` 占位），不拼进 argv：避免长度限制和以 `-` 开头的文本被当成旗标。
-子进程 env 会删除 `ALL_PROXY`/`all_proxy`（codex 不认 socks5），保留 `HTTPS_PROXY`；需要覆盖时配置
-`codex.proxy`。
-
-### 接口
-
-```
-GET  /health
-GET  /version
-GET  /threads?limit=50
-POST /threads                     {"cwd"?, "title"?}          -> {"thread":{"id":"cli-..."}}
-POST /turn                        {"threadId"?, "text", "wait"?}
-GET  /threads/:id
-GET  /threads/:id/last-turn
-GET  /threads/:id/progress
-POST /threads/:id/resume          {"text"?}                   -> 带 text 时真正续一轮
-POST /threads/:id/release | /unsubscribe                      -> no-op ok
-GET  /manager/sessions
-GET  /manager/sessions/:id
-POST /manager/sessions/adopt      {"threadId"}
-POST /manager/messages            {"targetThreadId", "text", "wait"?}
-GET  /manager/events?after=0&limit=500[&stream=0]
-```
-
-`POST /turn` / `POST /manager/messages` 的同步响应与 Desktop `waitResult` 同形：
-
-```json
-{
-  "threadId": "...", "sessionId": "...", "turnId": "...", "messageId": "...",
-  "status": "completed", "resultText": "OK", "reason": "completed",
-  "toolCalls": [], "usage": {"input_tokens": 21704, "output_tokens": 5}, "durationMs": 6553
-}
-```
-
-`wait:false` 返回 `202 {"action":"dispatch_pending","status":"started"}`，后台继续跑，事件进
-`/manager/events`。同一 thread 同时只允许一个 turn，重复提交返回 `409 turn_in_progress`。
-
-### 会话与历史
-
-- 不传 `threadId` 调用 `POST /turn`：新开一轮，bridge 先 `register()` 一个 `cli-<uuid>` 会话 id，
-  首轮结束后绑定 Codex session UUID（`sessionId`）。之后带 `threadId`（cli id 或 session UUID 均可）继续。
-- 传同一 `threadId` 再调用：走 `codex exec resume <session-id>`，上下文连续（本机实测第二轮
-  `input_tokens` 从 21704 涨到 43429，回答仍基于第一轮）。
-- `GET /threads` / `GET /threads/:id` / `GET /manager/sessions` 一律读 bridge 自持存储
-  （`~/.codex/state/codexworker/history/*.jsonl`，见「会话存储」），不再从 Codex rollout 重建；
-  `GET /manager/events` 的事件流仍只存在进程内，重启清空。
-- `POST /manager/sessions/adopt` 会把只存在于 rollout 的旧会话一次性导入存储（`history.messages` 为导入条数）。
-
-### 真实调用示例
-
-```sh
-# 第一轮（新会话；threadId 是 bridge 的 cli-<uuid>，sessionId 是 Codex session UUID）
-curl -sS -X POST http://127.0.0.1:8904/turn \
-  -H 'content-type: application/json' \
-  -d '{"text":"只回复两个字母：OK"}'
-# -> {"threadId":"cli-...","sessionId":"01a1be9d-...","status":"completed","resultText":"OK",...}
-
-# 第二轮（同一会话，验证上下文；cli id 和 sessionId 都能传）
-curl -sS -X POST http://127.0.0.1:8904/turn \
-  -H 'content-type: application/json' \
-  -d '{"threadId":"cli-...","text":"刚才我让你回什么？两个字"}'
-# -> {"status":"completed","resultText":"OK","usage":{"input_tokens":43429,...}}
-
-# 会话列表 / 最后一轮 / 进度（列表与历史来自 bridge 存储，不读 rollout）
-curl -sS 'http://127.0.0.1:8904/threads?limit=5'
-curl -sS 'http://127.0.0.1:8904/threads/<id>/last-turn'
-curl -sS 'http://127.0.0.1:8904/threads/<id>/progress'
-```
-
-### 与 Desktop 的行为差异（已知限制）
-
-1. **工具审批**：`codex exec` 是非交互进程，`approval_policy` 由配置固定（默认 `never`）。
-   需要人工批准的命令不会弹窗等待，而是直接失败或按沙箱策略拒绝；不要在 CLI 后端上跑必须人工审批的操作。
-2. **沙箱**：默认 `workspace-write`，只允许写 cwd/工作区；要只读或完全放开用 `codex.sandbox` 显式配置。
-3. **图片**：`/turn` 目前只接受文本。`codex exec --image` 尚未接入（传图片会被忽略，不会报错）。
-   公开图片输出、飞书图片中继在 CLI 下也没有。
-4. **MCP 工具**：CLI 后端里 Codex 使用它自己的 MCP 配置；Desktop 专属的
-   `read_thread`/`send_message_to_thread`/`create_thread`/`fork_thread`/`list_threads` 在本后端不存在，
-   不要指望 `/manager/*` 的 Desktop 语义（多设备、跨窗口 steer、fork）完全一致。
-5. **流式输出**：`exec --json` 只给消息级事件（`item.completed`），没有 token 级 delta；
-   `/health` 里 `tokenStreaming:false`。长回答要等整条消息完成。
-6. **控制面**：`fork`、`compact` 返回 `501 capability_unavailable`；`stop` 已实现
-   （`POST /threads/:id/stop`，空闲时 200 + `no_active_turn`）；
-   `release`/`unsubscribe` 是 no-op。没有 Desktop writer 租约、上线通知、提问卡、
-   公开图片输出、watchdog（飞书入站见下一节）。
-7. **会话 cwd**：resume 时使用状态文件里记录的 cwd（不存在则回退 `workspace`）；`codex exec resume`
-   本身没有 `--cd`，所以不要手动改 cwd 后期待续上旧会话的工作目录。
-
-### 飞书通道（CLI 模式）
-
-CLI 进程本身就是飞书入站通道：同一个进程既跑 HTTP bridge，也跑飞书长连接（无需公网回调，
-也不依赖 `@larksuiteoapi/node-sdk`；帧编解码在 `feishu.mjs` 里手写）。
-
-```sh
-# 私有配置（mode 600，不入库）。凭据文件单独放，绝不写进仓库或日志。
-cat ~/.hermes/secrets/codexworker.config.json
-# {
-#   "operatingMode": "feishu-local",
-#   "port": 8905,
-#   "feishu": {
-#     "configFile": "~/.hermes/secrets/feishu-oguri.json",
-#     "inboundEnabled": true,
-#     "onlineNotificationEnabled": false,
-#     "trainerOpenIdWhitelist": []
-#   }
-# }
-
-# 启动（前台；Ctrl-C 或 SIGTERM 退出，端口随即释放）
-./bin/codexworker --config ~/.hermes/secrets/codexworker.config.json
-```
-
-配置字段：
-
-| 字段 | 作用 |
-| --- | --- |
-| `feishu.configFile` | 飞书应用凭据文件（`app_id`/`app_secret`，可选 `open_id`）；启动时读取一次 |
-| `feishu.inboundEnabled` | `true` 时建立长连接并接收单聊文本 |
-| `feishu.trainerOpenIdWhitelist` | 允许的发送者 open_id。为空时只接受**第一条**入站文本的发送者，并记入 `feishu-sessions.json`（不写配置文件；日志 `feishu_whitelist_bootstrap`） |
-| `port` | HTTP bridge 端口（默认 8903） |
-
-> `feishu.streamEnabled` 在 CLI 通道已不再读取：飞书这条路现在与 Hermes 同款，一轮只发一条最终消息，
-> 没有进度卡可关。
-
-行为：
-
-- 只处理 `p2p` + `sender_type=user` + `text`。群聊、机器人自己的消息被忽略；图片回一张「仅支持文本」提示，
-  不转给 Codex。
-- 每个 open_id 一个持久 Codex 会话，映射在 `~/.codex/state/codexworker/feishu-sessions.json`
-  （原子写、mode 600）。第一条消息新建会话，之后走 `codex exec resume <session-id>`；进程重启后仍续同一会话。
-- **过程反馈只有表情**（对齐 Hermes 飞书适配器）：收到文本先给训练员那条消息加 `Typing` 表情，
-  回合结束成功就移除，失败则移除后换成 `CrossMark`（`addReaction(messageId, emoji)`；两个表情都已在真实
-  API 上验证通过）。添加/移除失败只记日志，不影响回合与回复。回执按 `message_id` 各记各的，并发消息不互相覆盖（仅内存，不落盘）。
-- **一轮只发一条最终消息**：过程不发任何进度卡，也不 PATCH（Hermes 的 `edit_message` 在飞书路径同样没有调用方）。
-  最终消息是 `interactive` 卡片：标题 `<display>-回复` + markdown 正文 + 底部 `会话 <threadId>`；
-  字段结构对齐 Hermes `_card()`（`config.wide_screen_mode`、`header.title{content,tag}`、`header.template`、
-  `elements[].tag=markdown`），围栏代码块/表格原样保留。被 `/stop` 中断时正文标 `⏹ 已中断`。
-- **长回复自动分条**：单条上限 4096 字符（对齐飞书客户端约 4096 的切分点）。切分优先落在段落（空行）、
-  再退到换行、空格，不切断行内代码；跨条的围栏代码块在上一段结尾补 ` ``` `，下一段以同语言围栏重开。
-  标题只跟第一条，后续条为 `<display>-回复（续 N/M）`。发送纪律仍是一套：
-  限流（HTTP 429 / `code 99991400` / 频率类消息）按 `retry_after` 或 3s 重试一次（上限 30s，超了就放弃）；
-  明确失败才补发一条同内容消息（每条最多补一次）；超时（可能已送达）不重发；已 ACK 的同内容不重发。
-  失败到上限记 `feishu_reply_delivery_failed`，不无限重试。
-- 同一 open_id 串行：上一轮没跑完时后一条排队，不会撞 `409 turn_in_progress`。飞书 ACK 与回合解耦
-  （先落盘再返回，回合后台跑），长任务不会卡住入站。
-- `/stop`（也接受 `/stop@bot`）**绕过排队**立即执行：杀掉该会话正在跑的 codex 进程组
-  （SIGTERM → 2s → SIGKILL），回合标记 `cancelled`，卡片改「已中断」；没有在跑的回合时回
-  「当前没有在执行的回合（no_active_turn）」，不报错、不当作普通文本发给 Codex。
-- `GET /health` 的 `feishu` 字段报告 `connected/phase/lastError/sessions/turns/rejected`，
-  `capabilities.feishuInbound` 表示通道是否已启动。
-
-### 会话存储（bridge 自持历史）
-
-CLI 不再把 Codex 的 rollout 当日志源。`session-store.mjs` 是唯一历史源，
-`/threads`、`/threads/:id`、`/manager/sessions`、卡片历史、追问上下文都读它；
-`$CODEX_HOME/sessions/**/*.jsonl` 只作过程流（`codex exec resume` 的上下文仍由 Codex 自己维护）。
-
-- 位置：`~/.codex/state/codexworker/history/<threadId>.jsonl`，文件 mode 600，目录 700，不入库。
-- 结构：第一行 `meta`（`threadId`、`sessionId`=Codex session UUID、`cwd`、`title`、`source`、时间），
-  之后每行一条消息（`role: user|assistant`、`text`、`ts`、`messageId`、`turnId`、`source: feishu|http|cli`）。
-- 为什么用 JSONL 而不是 SQLite：本包零依赖且 `engines.node >= 20`，`node:sqlite` 在这个下限里不可用；
-  按会话一个追加文件对崩溃更稳（半行坏掉不影响前面的消息），读一个会话就是读一个文件，也不需要迁移 schema。
-- 写入顺序：入站消息先落库，再调 turn，回复后再落库；进程中途死掉也保留训练员那条消息。
-- 迁移：`POST /manager/sessions/adopt` 对只存在于 rollout 的旧会话做一次性导入（返回 `history.messages`），
-  之后同样只读存储。
-
-**关于「（历史受限）」**：Desktop 在事件日志读不全时会把标题写成「回复（历史受限）」。CLI 模式永远不会出现
-这个后缀：标题固定 `-回复`（长回复的后续条为 `-回复（续 N/M）`）。只有存储本身真的读不到
-（文件缺失、空文件、超过一半行损坏、权限错误）才降级为新会话，并记
-`feishu_history_degraded` + `reason`（`session_store_missing` / `session_store_corrupt:N/M` /
-`session_store_unreadable:*`），同时在最终消息正文顶部提示一次。
-
-已知限制（CLI 模式）：
-
-1. **审批**：`codex exec` 是非交互进程，`approval_policy` 由配置固定（默认 `never`）。没有
-   「批准/拒绝」卡片；需要人工批准的命令直接失败或按沙箱拒绝。
-2. **图片**：入站图片不转发，出站没有公开图片中继；`codex exec --image` 未接入 `/turn`。
-3. **斜杠命令**：只有 `/stop` 实现了；`/new`、`/resume`、`/clear`、`/status` 等 Desktop 管理命令
-   没有实现，发进来会当普通文本交给 Codex。要换会话，删掉 `feishu-sessions.json` 里对应 open_id 的条目再发消息。
-4. **提问卡 / 上线通知 / 多设备 steer**：不启动；没有注册 `onCardAction`，点卡片只会得到
-   「当前桥不支持此提问卡片」。
-
-## 当前限制（Desktop 专属能力）
-
-以下能力仍只在 Codex Desktop 插件宿主内可用，CLI 后端不提供：
-
-1. **Desktop 原生任务调用**：`read_thread` / `send_message_to_thread` / `create_thread` / `fork_thread` /
-   `set_thread_title` / `list_threads` 需要 `CODEX_APP_TOOLS_PIPE_PATH`；在 `serve` 模式下即使变量存在
-   也无法挂接，`/health` 会如实报告 `backend:"desktop"`、`attached:false`、`ready:false`。
-2. **manager 绑定/写者租约**：依赖 `manager-binding.json`、Desktop 会话上下文和
-   `desktop-manager.sock`；CLI 不执行 `DesktopManager.initialize()`，不会成为 writer。
-3. **上线通知 / 公开图片输出 / 提问卡 / watchdog**：需要 Desktop 会话与写者上下文，CLI 不启动；
-   CLI 只启动飞书入站长连接（见「飞书通道（CLI 模式）」）。
-4. **状态目录隔离**：默认 `~/.codex/state/codexworker`，不读写原插件的
-   `~/.codex/state/rudolf-hermes-bridge`；native-cli 只额外写 `native-cli-state.json`。
-
-## 目录
-
-```
-bin/codexworker        CLI 启动器（sh，可执行）
-cli.mjs                参数解析 + serve/mcp 入口；serve 的 HTTP 路由与能力探测
-native-cli.mjs         native-cli 后端：codex exec / resume、NDJSON、历史扫描
-server.mjs             原 MCP stdio 入口（仅加 process.title / 状态目录 / backend 探测）
-desktop-manager.mjs    原 manager HTTP 实现（未改逻辑，仅改名）
-mcp-business.mjs       原业务工具实现（未改逻辑，仅改名）
-tests/ scripts/        原测试与脚本 + tests/native-cli.test.mjs
-```
-
----
-
-# 上游 README：鲁道夫 Hermes Bridge · Codex Desktop 插件
-
-> 以下为复制来源的原始 README（0.2.38），保留作为行为参考；其中「鲁道夫」等命名属于上游，
-> 在本副本中对应 CodexWorker。
+# CodexWorker · Codex Desktop 插件
 
 0.2.38 是 DSH 接口的 **desktop-native 分阶段移植**，不是另一套 Codex 会话宿主。
 所有会话写入使用客户端注入的原生任务工具；公开输出增量读取已核验的本机 Desktop
@@ -421,10 +73,10 @@ Hermes 的 `/report`、`/heartbeat` 请求字段保持 DSH 原样，服务端无
   单轮只读查询核对真实ID、标题、host和工作区，再与顶层列表去重排序；最多补查
   12项、4并发，未读取引用会提示列表不完整。仍展示最近5个候选，查看列表不
   切换会话或投递输入，编号选择沿用原候选快照。时间戳统一秒/毫秒/ISO格式。
-  保留鲁道夫cd33e9c的双模式脚本自检修复，详见
+  保留CodexWorkercd33e9c的双模式脚本自检修复，详见
   [分组会话恢复列表验收](../../references/resume-sidebar-validation-20261025.md)。
 - 2026-10-24脚本兼容补丁：只读审计、常驻调度和每轮短检查统一解析本机
-  `rudolf-hermes-bridge`状态目录，遵从现有writer的USERPROFILE/HOME，并支持显式
+  `codexworker`状态目录，遵从现有writer的USERPROFILE/HOME，并支持显式
   stateDir进行只读审计；不再默认读取
   气槽专用目录。自动恢复同时支持既有desktop-bridge与feishu-local，必须重新
   核对本机配置中的桥名称、machine、原生通道与运行模式；不能为监控关闭Hermes
@@ -692,7 +344,7 @@ Hermes 的 `/report`、`/heartbeat` 请求字段保持 DSH 原样，服务端无
 - 训练员原生输入与公开助手输出的增量观察；原生输入只观察上报，不二次调度。
 - DSH 飞书模块移植：卡片、分块、token 刷新、WebSocket 入站、公开文字节拍。
   飞书入站必须有训练员白名单；不会给未知访客自动开放执行权限。
-- 0.2.10 曾在 Bridge 启动/飞书重连成功后发送 `鲁道夫-上线通知`（跟随 bridgeName），
+- 0.2.10 曾在 Bridge 启动/飞书重连成功后发送 `CodexWorker-上线通知`（跟随 bridgeName），
   包含上海时区上线时间及飞书当前绑定原生会话的最新标题、会话 ID。只读取元数据，
   不创建或切换任务、不发送原生提示、不读取私有历史。目标失效如实说明，不改派。
   唯一 writer 发送，每次真实连接一次，失败最多三次且复用同一 Feishu uuid/正文；
@@ -701,7 +353,7 @@ Hermes 的 `/report`、`/heartbeat` 请求字段保持 DSH 原样，服务端无
   `feishu.onlineNotificationEnabled:false` 关闭。
   0.2.13 的稳定检查、失败就绪不宣告以及“连接恢复”分类替代上述即连即报行为；
   health 另有 stabilizing 阶段，不代表正在等待原生任务完成。
-- 公开中间消息标题为 `鲁道夫-输出`，最终答复标题为 `鲁道夫-回复`，跟随 bridgeName。
+- 公开中间消息标题为 `CodexWorker-输出`，最终答复标题为 `CodexWorker-回复`，跟随 bridgeName。
   0.2.3 修复适配器最终答复漏传 title、错误退回裸桥名称的问题，保留原 DSH 语义。
 - 飞书入站添加 Typing reaction，重复消息不重复添加；0.2.6 在对应公开过程卡片被
   飞书成功接受后即可移除，不再等整轮结束。失败发送不会假装已送达，较早的过程
@@ -722,7 +374,7 @@ Hermes 的 `/report`、`/heartbeat` 请求字段保持 DSH 原样，服务端无
   command/reply 保持不变。心跳的 detail.port 指向启用的 Hermes 入口；没有增加服务器
   路由或复制私有 reasoning。默认此项关闭，原 profile 不受影响。
 - 0.2.8 增加 `bridge_publish_question` / loopback `POST /bridge/questions`：明确发布
-  完整公开提问和选项到飞书 `鲁道夫-提问` 卡片及现有 Hermes progress 上报。每个
+  完整公开提问和选项到飞书 `CodexWorker-提问` 卡片及现有 Hermes progress 上报。每个
   questionId UUIDv4 持久化，精确重试不重复已成功发送；失败给 pending/queued/unavailable，
   不假装已送达。该出口不启动原生 turn，不向 LAN 开放。外部文字回答走普通入站。
   原生历史不含 Codex 提问面板，所以这是显式提问出口，不能声称自动拦截所有旧面板。
@@ -784,7 +436,7 @@ Hermes 围栏闭合与 Unicode 分块。未知发送回执阻挡后续片段，�
 ## 本机配置与装载
 
 权威源码在本技能的 `assets/desktop-plugin/`；本机开发源目录为
-`C:/Users/keith/plugins/rudolf-hermes-bridge`。不要手改受管插件缓存或应用二进制。
+`C:/Users/keith/plugins/codexworker`。不要手改受管插件缓存或应用二进制。
 分发包的 `.mcp.json` 使用 `cwd:"."`，由客户端解析为实际安装的插件根目录，
 相对 launcher/server 路径随该安装移动，不能写死到旧开发目录。依据本机当前
 官方 `codex-app-tools` 原包及其安装缓存的实际解析结果；无需猜测根目录环境变量。
@@ -805,10 +457,10 @@ Hermes 围栏闭合与 Unicode 分块。未知发送回执阻挡后续片段，�
 writer 是否完成版本替换是两项独立检查。下次正常重载仍由已安装插件启动同一适配器，
 共用 writer 租约避免双收。不要在已有 writer 存活时重复启动；启动后读取真实连接状态。
 
-机器配置放在 `.codex/state/rudolf-hermes-bridge/desktop-config.local.json`，按
+机器配置放在 `.codex/state/codexworker/desktop-config.local.json`，按
 `desktop-config.example.json` 填写。此文件、Token、飞书密钥、事件/状态均不得进 Git。
 配置缺省时从已绑定的管理任务读取 cwd、从原生项目列表匹配 projectId，读取本机已有
-`.codex/secrets/codex-bridge-rudolf.token`。配置或 Token 不满足要求时明确报错。
+`.codex/secrets/codex-bridge-codexworker.token`。配置或 Token 不满足要求时明确报错。
 插件初始化会尝试启动 HTTP 适配器；也可调用 `bridge_start_local_manager`。
 
 0.2.9 在插件首次加载时启动隐藏的 Desktop 生命周期保活器，继承当次注入的管道，
@@ -851,8 +503,6 @@ node --test tests/public-image-relay.test.mjs
 node --test tests/plugin-runtime.test.mjs
 node --test tests/startup-handoff.test.mjs
 node --test tests/feishu-reconnect.test.mjs
-node --test tests/feishu-cli.test.mjs
-node --test tests/session-store.test.mjs
 node --test tests/question-cards.test.mjs
 node tests/server.test.mjs
 ```
@@ -914,14 +564,3 @@ replayFloor，旧游标返回 replay_too_old 与线程恢复指引。状态/幂�
 幂等键，网络失败重试为至少一次，不能承诺 Webhook 恰好一次。
 
 来源、哈希和改动说明见 `THIRD_PARTY_NOTICES.md`。
-
-## 飞书长连接实现（2026-11-09）
-
-长连接改用官方 `@larksuiteoapi/node-sdk`（`feishu-sdk-ws.mjs`，`WSClient` + `EventDispatcher`）：
-SDK 负责事件分片合并（按 headers 的 `message_id`/`sum`/`seq` 拼帧，收齐前不 dispatch 也不 ACK）、
-ACK 与自动重连。自写实现 `FeishuWebsocketClient`（`feishu.mjs`）保留在仓库中用于回滚。
-
-- 默认 `FEISHU_WS_IMPL=sdk`；`FEISHU_WS_IMPL=native` 回退自写实现。
-- `/health` 的 `feishu.impl` 显示当前实现，`feishu.connection.policy` 为 `official-sdk-ws`（或
-  `bounded-handshake-heartbeat`）。
-- 同一应用不能同时跑两条长连接抢收消息：切换时必须先停旧进程再起新进程。

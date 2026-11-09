@@ -18,14 +18,16 @@ for (const shutdown of ["EOF", "pipelined inventory EOF", "Windows inventory job
   if (process.platform !== "win32" || !desktopOwner(await processChain(process.pid))) {
     t.skip("Requires a Windows MSIX Desktop ancestor; isolated unit coverage remains portable"); return;
   }
-  const root = await mkdtemp(path.join(os.tmpdir(), "rudolf-cold-handoff-"));
+  const root = await mkdtemp(path.join(os.tmpdir(), "codexworker-cold-handoff-"));
   const stateDir = path.join(root, ".codex", "state", "codexworker");
   await mkdir(stateDir, { recursive: true });
   const token = "isolated-handoff-token-not-a-real-secret-123456", tokenFile = path.join(root, "test.token");
   await writeFile(tokenFile, token);
   const reserve = net.createServer(); reserve.listen(0, "127.0.0.1"); await once(reserve, "listening");
   const port = reserve.address().port; await new Promise(resolve => reserve.close(resolve));
-  const pipe = `\\\\.\\pipe\\rudolf-isolated-handoff-${randomUUID()}`;
+  const pipe = process.platform === "win32"
+    ? `\\\\.\\pipe\\codexworker-isolated-handoff-${randomUUID()}`
+    : path.join(os.tmpdir(), `codexworker-isolated-handoff-${randomUUID()}.sock`);
   const sockets = new Set(); let nativeWrites = 0, inventory, writer, inventoryJob;
   const names = ["read_thread", "list_projects", "send_message_to_thread", "create_thread", "fork_thread", "set_thread_title", "list_threads"];
   const native = net.createServer(socket => {
@@ -66,7 +68,7 @@ for (const shutdown of ["EOF", "pipelined inventory EOF", "Windows inventory job
   await writeFile(path.join(stateDir, "manager-binding.json"), JSON.stringify({ managerThreadId: "isolated-chat", managerTurnId: "isolated-turn" }));
   await writeFile(path.join(stateDir, "desktop-config.local.json"), JSON.stringify({ tokenFile, port, bridgeName: "handoff-test", workspaceRoots: [root], pollMs: 1000000 }));
   const env = { ...process.env, USERPROFILE: root, HOME: root, CODEX_APP_TOOLS_PIPE_PATH: pipe };
-  delete env.CODEXWORKER_LIFECYCLE_CHILD; delete env.CODEXWORKER_DESKTOP_STARTED_AT;
+  delete env.RUDOLF_BRIDGE_LIFECYCLE_CHILD; delete env.RUDOLF_BRIDGE_DESKTOP_STARTED_AT;
   let inventoryRoot = pluginRoot;
   if (shutdown === "EOF") {
     inventoryRoot = path.join(root, "disposable-plugin-cache");

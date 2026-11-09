@@ -282,7 +282,7 @@ export class DesktopManager {
     await this.questions.initialize();
     this.configureIntegrations();
     await this.businessRuntime.initialize().catch(() => {
-      console.error("[CodexWorker] Image business module unavailable; native text ingress remains active.");
+      console.error("[bridge] Image business module unavailable; native text ingress remains active.");
     });
     for (const event of Object.values(this.inbox.entries)) this.runInbox(event);
     return this;
@@ -315,7 +315,7 @@ export class DesktopManager {
 
   integrationStatus() {
     const selected = this.state.sessions[this.state.selectedThreadId];
-    return { pid: process.pid, runtimeHostPid: Number(process.env.CODEXWORKER_RUNTIME_HOST_PID) || null,
+    return { pid: process.pid, runtimeHostPid: Number(process.env.RUDOLF_BRIDGE_RUNTIME_HOST_PID) || null,
       operatingMode: this.config.operatingMode,
       selectedThreadId: this.state.selectedThreadId,
       feishu: { enabled: Boolean(this.notifier?.enabled), inboundEnabled: Boolean(this.ws),
@@ -1234,7 +1234,7 @@ export class DesktopManager {
           await this.save();
         }); } catch (error) { await this.relayFailed(id, error); }
       }
-      this.reportTask = this.flushReports().catch(() => console.error("[CodexWorker] Report outbox persistence failed."));
+      this.reportTask = this.flushReports().catch(() => console.error("[bridge] Report outbox persistence failed."));
       this.publicImageRelay.kick();
     } finally { this.pollRunning = false; }
   }
@@ -1404,7 +1404,7 @@ export class DesktopManager {
     })();
     this.publicTextTask = work;
     try { await this.track(work); }
-    catch { console.error("[CodexWorker] Public text outbox persistence failed; unknown sends are not replayed."); }
+    catch { console.error("[bridge] Public text outbox persistence failed; unknown sends are not replayed."); }
     finally { this.publicTextRunning = false; this.publicTextTask = null; }
   }
 
@@ -1588,7 +1588,7 @@ export class DesktopManager {
     if (!event || this.closed || this.handoffPaused || this.inboxRunning.has(event.message_id)) return;
     this.inboxRunning.add(event.message_id);
     const task = this.receiveFeishu(event).catch(() => {
-      console.error("[CodexWorker] Durable Feishu input rejected; inspect message terminal events.");
+      console.error("[bridge] Durable Feishu input rejected; inspect message terminal events.");
       return null;
     }).then(async result => {
       if (!result) {
@@ -1603,7 +1603,7 @@ export class DesktopManager {
         delete this.inbox.entries[event.message_id]; await this.saveInbox();
       });
     }).finally(() => this.inboxRunning.delete(event.message_id));
-    void this.track(task).catch(() => console.error("[CodexWorker] Feishu inbox completion could not be saved; its UUID must not be replaced."));
+    void this.track(task).catch(() => console.error("[bridge] Feishu inbox completion could not be saved; its UUID must not be replaced."));
   }
 
   async handleFeishuInput(event, messageId) {
@@ -1622,14 +1622,14 @@ export class DesktopManager {
           const reactionId = await notifier.addReaction(event.message_id).catch(() => null);
           await this.serial(async () => { this.state.feishuReceipts[messageId].reactionId = reactionId; await this.save(); });
           if (this.state.feishuReceipts[messageId].cleanupRequested) await this.removeFeishuReaction(messageId, notifier);
-        })().catch(() => console.error("[CodexWorker] Feishu typing reaction failed."));
+        })().catch(() => console.error("[bridge] Feishu typing reaction failed."));
         this.feishuReactionTasks.set(messageId, task);
         void task.finally(() => this.feishuReactionTasks.delete(messageId));
       }
     }
     try {
       if (imageThreadId && imageThreadId !== this.state.selectedThreadId) fail(409, "selected_target_changed", "Image ingress follows its selected chat at durable acceptance; no fallback.");
-      if (imageThreadId && !localHost(this.session(imageThreadId).hostId)) fail(422, "capability_unavailable", "飞书图片缓存位于 CodexWorker 本机，暂不能把本机路径传给其他设备的聊天。");
+      if (imageThreadId && !localHost(this.session(imageThreadId).hostId)) fail(422, "capability_unavailable", "飞书图片缓存位于CodexWorker本机，暂不能把本机路径传给其他设备的聊天。");
       const text = event.message_type === "image" ? imagePrompt(await cacheFeishuImage(this, event, messageId)) : event.content;
       const result = await this.message({ protocolVersion: PROTOCOL, messageId, source: "trainer", text,
         delivery: this.config.feishu.defaultDelivery ?? "steer",
@@ -1694,7 +1694,7 @@ export class DesktopManager {
         // local Feishu. Never bind another address or relax its peer/token gates.
       }
     }
-    this.pollTimer = setInterval(() => { void this.scan().catch(() => console.error("[CodexWorker] Native synchronization failed.")); }, this.config.pollMs);
+    this.pollTimer = setInterval(() => { void this.scan().catch(() => console.error("[bridge] Native synchronization failed.")); }, this.config.pollMs);
     this.pollTimer.unref();
     if (this.config.xiliu?.enabled) {
       this.heartbeatTimer = setInterval(() => { void this.heartbeat(); }, this.config.xiliu.heartbeatIntervalMs ?? 60000);

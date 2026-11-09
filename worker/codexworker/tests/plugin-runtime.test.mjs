@@ -31,7 +31,7 @@ export function createBusiness(control){let busy=false, owner=false; const file=
     }};
 }`;
 async function fixture(t, { pollMs = 1000000 } = {}) {
-  const root = await mkdtemp(path.join(os.tmpdir(), "rudolf-full-hotload-"));
+  const root = await mkdtemp(path.join(os.tmpdir(), "codexworker-full-hotload-"));
   const source = path.join(root, "source"), stateDir = path.join(root, "state");
   await cp(packageRoot, source, { recursive: true });
   const { mkdir } = await import("node:fs/promises"); await mkdir(stateDir);
@@ -41,7 +41,7 @@ async function fixture(t, { pollMs = 1000000 } = {}) {
   await writeFile(path.join(source, "helper.mjs"), "export const value='first';\n");
   let changes = 0;
   const runtime = new PluginRuntime({ pluginRoot: source, stateDir, pollMs,
-    env: { ...process.env, USERPROFILE: root, HOME: root, CODEX_APP_TOOLS_PIPE_PATH: "", CODEXWORKER_LIFECYCLE_CHILD: "1" },
+    env: { ...process.env, USERPROFILE: root, HOME: root, CODEX_APP_TOOLS_PIPE_PATH: "", RUDOLF_BRIDGE_LIFECYCLE_CHILD: "1" },
     onToolsChanged: () => { changes++; } });
   const runtimes = [runtime];
   t.after(async () => { for (const item of runtimes) await item.close(); assert.ok(root.startsWith(os.tmpdir())); await rm(root, { recursive: true, force: true }); });
@@ -146,14 +146,14 @@ test("bad development source at startup falls back to this installed package, no
   await writeFile(path.join(f.stateDir, "runtime-source.local.json"), JSON.stringify({ sourceRoot: development }));
   await f.runtime.close();
   const replacement = new PluginRuntime({ pluginRoot: f.source, stateDir: f.stateDir, pollMs: 1000000,
-    env: { ...process.env, USERPROFILE: f.root, HOME: f.root, CODEX_APP_TOOLS_PIPE_PATH: "", CODEXWORKER_LIFECYCLE_CHILD: "1" } });
+    env: { ...process.env, USERPROFILE: f.root, HOME: f.root, CODEX_APP_TOOLS_PIPE_PATH: "", RUDOLF_BRIDGE_LIFECYCLE_CHILD: "1" } });
   f.keep(replacement);
   assert.equal((await replacement.call("value")).value, "first");
   assert.equal(replacement.status().lastReloadError, "runtime_reload_failed");
 });
 
 for (const operatingMode of ["desktop-bridge", "feishu-local"]) test(`fixed loader drains sustained manager polls with an active native task, preserving UUID/FIFO and rollback (${operatingMode})`, async t => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "rudolf-manager-hotload-"));
+  const root = await mkdtemp(path.join(os.tmpdir(), "codexworker-manager-hotload-"));
   const source = path.join(root, "source"), stateDir = path.join(root, ".codex", "state", "codexworker");
   await cp(packageRoot, source, { recursive: true }); await mkdir(stateDir, { recursive: true });
   const token = "isolated-test-token-not-a-real-credential-123456", tokenFile = path.join(root, "test.token");
@@ -161,7 +161,7 @@ for (const operatingMode of ["desktop-bridge", "feishu-local"]) test(`fixed load
   const tcp = net.createServer(); tcp.listen(0, "127.0.0.1"); await once(tcp, "listening");
   const port = tcp.address().port; await new Promise(resolve => tcp.close(resolve));
   const toolNames = ["read_thread", "send_message_to_thread", "create_thread", "fork_thread", "set_thread_title", "list_threads", "list_projects"];
-  const pipe = process.platform === "win32" ? `\\\\.\\pipe\\rudolf-hotload-test-${randomUUID()}` : path.join(root, "test.sock");
+  const pipe = process.platform === "win32" ? `\\\\.\\pipe\\codexworker-hotload-test-${randomUUID()}` : path.join(root, "test.sock");
   let sends = 0;
   const nativePipe = net.createServer(socket => {
     let buffer = Buffer.alloc(0); socket.on("data", chunk => {
@@ -190,7 +190,7 @@ for (const operatingMode of ["desktop-bridge", "feishu-local"]) test(`fixed load
       hermesIngress: { enabled: true, tokenFile: path.join(root, "missing-hermes.token") },
       xiliu: { enabled: true, url: "http://127.0.0.1:1" } } : {}), pollMs: 1, hotHandoffRetryMs: 50, managerProxyWaitMs: 100 }));
   const runtime = new PluginRuntime({ pluginRoot: source, stateDir, pollMs: 1000000,
-    env: { ...process.env, USERPROFILE: root, HOME: root, CODEX_APP_TOOLS_PIPE_PATH: pipe, CODEXWORKER_LIFECYCLE_CHILD: "1" } });
+    env: { ...process.env, USERPROFILE: root, HOME: root, CODEX_APP_TOOLS_PIPE_PATH: pipe, RUDOLF_BRIDGE_LIFECYCLE_CHILD: "1" } });
   let proxy, failedStartupProxy;
   t.after(async () => { await failedStartupProxy?.close(); await proxy?.close(); await runtime.close(); await new Promise(resolve => nativePipe.close(resolve));
     assert.ok(root.startsWith(os.tmpdir())); await rm(root, { recursive: true, force: true }); });
@@ -201,7 +201,7 @@ for (const operatingMode of ["desktop-bridge", "feishu-local"]) test(`fixed load
   };
   const coldProxy = new PluginRuntime({ pluginRoot: source, stateDir, pollMs: 1000000,
     env: { ...process.env, USERPROFILE: root, HOME: root, CODEX_APP_TOOLS_PIPE_PATH: pipe,
-      CODEXWORKER_LIFECYCLE_CHILD: "0", CODEXWORKER_LIFECYCLE_READY: "1" } });
+      RUDOLF_BRIDGE_LIFECYCLE_CHILD: "0", RUDOLF_BRIDGE_LIFECYCLE_READY: "1" } });
   try {
     const cold = await coldProxy.call("tools/call", { name: "bridge_start_local_manager", arguments: {} });
     assert.equal(cold.isError, true);
@@ -211,7 +211,7 @@ for (const operatingMode of ["desktop-bridge", "feishu-local"]) test(`fixed load
   } finally { await coldProxy.close(); }
   failedStartupProxy = new PluginRuntime({ pluginRoot: source, stateDir, pollMs: 1000000,
     env: { ...process.env, USERPROFILE: root, HOME: root, CODEX_APP_TOOLS_PIPE_PATH: pipe,
-      CODEXWORKER_LIFECYCLE_CHILD: "0", CODEXWORKER_LIFECYCLE_READY: "0" } });
+      RUDOLF_BRIDGE_LIFECYCLE_CHILD: "0", RUDOLF_BRIDGE_LIFECYCLE_READY: "0" } });
   const failedCold = await failedStartupProxy.call("tools/call", { name: "bridge_start_local_manager", arguments: {} });
   assert.equal(failedCold.isError, true); assert.equal(failedCold.structuredContent.error, "desktop_lifetime_unavailable");
   assert.equal(failedCold.structuredContent.retryable, true);
@@ -225,7 +225,7 @@ for (const operatingMode of ["desktop-bridge", "feishu-local"]) test(`fixed load
   assert.equal((await request("/health")).capabilities.businessHotReload.generation, beforeRecoveredProxy.capabilities.businessHotReload.generation);
   proxy = new PluginRuntime({ pluginRoot: source, stateDir, pollMs: 1000000,
     env: { ...process.env, USERPROFILE: root, HOME: root, CODEX_APP_TOOLS_PIPE_PATH: pipe,
-      CODEXWORKER_LIFECYCLE_CHILD: "0", CODEXWORKER_LIFECYCLE_READY: "1" } });
+      RUDOLF_BRIDGE_LIFECYCLE_CHILD: "0", RUDOLF_BRIDGE_LIFECYCLE_READY: "1" } });
   const proxied = await proxy.call("tools/call", { name: "bridge_start_local_manager", arguments: {} });
   assert.equal(proxied.isError, false);
   const message = { protocolVersion: "1.1.1-draft", source: "hermes", messageId: randomUUID(), text: "queued-preserve", delivery: "queue" };

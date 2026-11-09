@@ -29,7 +29,7 @@ export async function launchDesktopSupervisor({ pluginRoot, stateDir, owner, env
   try { ({ stdout } = await exec(path.join(env.SystemRoot ?? "C:/Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
     ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "RemoteSigned", "-File", path.join(pluginRoot, "scripts", "launch-desktop-lifetime.ps1"),
       process.execPath, String(owner.pid), role], {
-      cwd: pluginRoot, env: { ...env, CODEXWORKER_DESKTOP_STARTED_AT: owner.startedAt },
+      cwd: pluginRoot, env: { ...env, RUDOLF_BRIDGE_DESKTOP_STARTED_AT: owner.startedAt },
       windowsHide: true, timeout: 12000, maxBuffer: 65536 })); }
   catch (error) {
     const denied = /desktop_lifetime_launch_denied:(\d{1,5})/.exec(error.stderr ?? "");
@@ -124,7 +124,7 @@ export async function ensureDesktopSupervisor({ pluginRoot, stateDir, env = proc
   platform = process.platform, readChain = processChain, launchImpl = launchDesktopSupervisor,
   ready = desktopSupervisorReady, clock = Date.now, ensureWatchdog = ensureScriptWatchdog,
   delay = ms => new Promise(resolve => setTimeout(resolve, ms)), timeoutMs = 40000 } = {}) {
-  if (platform !== "win32" || !env.CODEX_APP_TOOLS_PIPE_PATH || env.CODEXWORKER_LIFECYCLE_CHILD === "1") return false;
+  if (platform !== "win32" || !env.CODEX_APP_TOOLS_PIPE_PATH || env.RUDOLF_BRIDGE_LIFECYCLE_CHILD === "1") return false;
   // Never persist/reconstruct a pipe or register an OS-login job with old handles.
   await access(path.join(stateDir, "desktop-config.local.json"));
   await access(path.join(stateDir, "manager-binding.json"));

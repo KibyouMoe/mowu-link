@@ -9,7 +9,7 @@ import { questionCard, parseCardAction } from "../question-cards.mjs";
 import { FeishuWebsocketClient, FeishuNotifier, encodeFrame, decodeFrame } from "../feishu.mjs";
 
 async function fixture(t) {
-  const dir = await mkdtemp(path.join(os.tmpdir(), "rudolf-question-cards-"));
+  const dir = await mkdtemp(path.join(os.tmpdir(), "codexworker-question-cards-"));
   const writes = [], patches = [], sends = [];
   let snapshot = { turns: [{ id: "source", status: "inProgress", items: [] }] };
   let native = async () => ({ action: "dispatch_pending" });

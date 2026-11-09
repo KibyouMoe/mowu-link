@@ -45,7 +45,7 @@ child.once("exit", () => {
 
 try {
   const initialized = await request("initialize", { protocolVersion: "2025-06-18", capabilities: {},
-    clientInfo: { name: "rudolf-live-plugin-acceptance", version: "1.0.0" } });
+    clientInfo: { name: "codexworker-live-plugin-acceptance", version: "1.0.0" } });
   child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`);
   assert.equal(initialized.serverInfo.name, "codexworker");
   const probe = await call("bridge_verify_manager_binding");
@@ -56,7 +56,7 @@ try {
   const configPath = path.join(process.env.USERPROFILE ?? process.env.HOME, ".codex", "state", "codexworker", "desktop-config.local.json");
   let config = {};
   try { config = JSON.parse(await readFile(configPath, "utf8")); } catch (e) { if (e.code !== "ENOENT") throw e; }
-  const tokenFile = config.tokenFile ?? path.join(process.env.USERPROFILE ?? process.env.HOME, ".codex", "secrets", "codexworker.token");
+  const tokenFile = config.tokenFile ?? path.join(process.env.USERPROFILE ?? process.env.HOME, ".codex", "secrets", "codex-bridge-codexworker.token");
   const token = (await readFile(tokenFile, "utf8")).trim();
   const http = async (route, body) => {
     const response = await fetch(endpoint + route, { method: body ? "POST" : "GET",
@@ -74,7 +74,7 @@ try {
   } else assert.equal(existing.status, 200);
   let messageId = randomUUID(); let marker = `HERMES_REAL_PLUGIN_${randomUUID()}`;
   let body = { protocolVersion: "1.1.1-draft", messageId, source: "hermes", targetThreadId: threadId,
-    text: `${marker}\n这是鲁道夫插件真实管道验收。请只回复 NATIVE_MCP_HTTP_OK；不要调用工具、不要修改文件。` };
+    text: `${marker}\n这是CodexWorker插件真实管道验收。请只回复 NATIVE_MCP_HTTP_OK；不要调用工具、不要修改文件。` };
   const recoveryId = process.argv[3];
   if (recoveryId) {
     const state = JSON.parse(await readFile(path.join(path.dirname(configPath), "desktop-manager-state.json"), "utf8"));

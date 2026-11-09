@@ -10,7 +10,7 @@ import { DesktopManager, PROTOCOL } from "../desktop-manager.mjs";
 
 const [threadId, workspace, relayFile, nativeSenderThreadId] = process.argv.slice(2);
 if (!threadId || !workspace || !nativeSenderThreadId) throw new Error("Usage: live-desktop-acceptance.mjs <authorized-test-threadId> <workspace> <relayFile> <actual-native-sender-threadId>");
-const root = await mkdtemp(path.join(os.tmpdir(), "rudolf-live-acceptance-"));
+const root = await mkdtemp(path.join(os.tmpdir(), "codexworker-live-acceptance-"));
 const pending = new Map(); let sequence = 0;
 if (process.stdin.isTTY) process.stdin.setRawMode(true);
 const lines = readline.createInterface({ input: process.stdin });
@@ -37,7 +37,7 @@ try {
   await manager.register({ protocolVersion: PROTOCOL, messageId: randomUUID(), source: "trainer", threadId });
   const messageId = randomUUID(); const marker = `HERMES_DESKTOP_ADAPTER_${randomUUID()}`;
   const body = { protocolVersion: PROTOCOL, messageId, source: "hermes", targetThreadId: threadId,
-    text: `${marker}\n这是鲁道夫 Bridge 的 HTTP→Codex Desktop 原生会话验收。请只回复 DESKTOP_ADAPTER_OK；不要调用工具、不要修改文件。` };
+    text: `${marker}\n这是CodexWorker Bridge 的 HTTP→Codex Desktop 原生会话验收。请只回复 DESKTOP_ADAPTER_OK；不要调用工具、不要修改文件。` };
   const send = async () => {
     const response = await fetch(`${url}/manager/messages`, { method: "POST", headers: { authorization: `Bearer ${manager.config.token}`, "content-type": "application/json" }, body: JSON.stringify(body) });
     return { status: response.status, body: await response.json() };

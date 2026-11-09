@@ -70,7 +70,7 @@ export class FeishuOnlineAnnouncement {
   run(socket, record) {
     this.task = this.send(socket, record).catch(() => {
       // Never log native payloads, Feishu credentials or transport exceptions.
-      console.error("[CodexWorker] Online notice failed; inspect authenticated integration status.");
+      console.error("[bridge] Online notice failed; inspect authenticated integration status.");
     });
     return this.task;
   }

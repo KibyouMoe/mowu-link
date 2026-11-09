@@ -2,12 +2,12 @@
 
 ## 本副本（CodexWorker）
 
-- 改名自：`CodexSyncArea` 仓库 `codex-skills/operate-codex-bridge/assets/desktop-plugin/`
-  （源提交 `208db6d`），上游版本 0.2.38。
-- 本副本仅做两件事：**改名**（插件名 / MCP server 名 / 状态目录 / 日志前缀 / 进程标题 → CodexWorker）
-  和**新增 CLI 启动入口**（`bin/codexworker` + `cli.mjs`，以及 `package.json`）。
-- 桌面端业务逻辑（`server.mjs` 除状态目录覆盖与 `process.title` 外、`desktop-manager.mjs`、
-  `mcp-business.mjs`、`feishu*.mjs` 等）未重写。
+- 直接复制自 `CodexSyncArea` 仓库 `codex-skills/operate-codex-bridge/assets/desktop-plugin/`
+  （源提交 `208db6d`），上游版本 0.2.38，未做行为改写。
+- 改动范围：插件名 / MCP server 名 / 状态目录 / 日志前缀 → CodexWorker；
+  新增 `transport/`（Desktop 管道与 app-server 两个实现）；
+  新增 CLI 入口与跨平台启动脚本（`launch_codexworker.sh`）。
+- `plugin.json` 的 `author.name` 保留原作者署名，不冒名。
 - 下方为上游来源与许可记录，原样保留。
 
 - 仓库：`git@github.com:KibyouMoe/DSHPluginSync.git`

@@ -7,7 +7,7 @@ $ErrorActionPreference = 'Stop'
 # Create the supervisor as a child of the verified Desktop owner. Breaking out
 # of only the innermost inventory job still inherits outer cleanup jobs. No job
 # policy modification, elevation, alternate broker, or OS-login task is used.
-if (!$env:CODEX_APP_TOOLS_PIPE_PATH -or !$env:CODEXWORKER_DESKTOP_STARTED_AT) { throw 'Fresh Desktop environment is required.' }
+if (!$env:CODEX_APP_TOOLS_PIPE_PATH -or !$env:RUDOLF_BRIDGE_DESKTOP_STARTED_AT) { throw 'Fresh Desktop environment is required.' }
 $bridgeNode = (Resolve-Path -LiteralPath $NodePath).ProviderPath
 if ([IO.Path]::GetFileName($bridgeNode) -ne 'node.exe') { throw 'Expected the Desktop-injected Node runtime.' }
 $bridgeRoot = Split-Path -Parent $PSScriptRoot
@@ -16,14 +16,14 @@ if (!(Test-Path -LiteralPath $bridgeSupervisor -PathType Leaf)) { throw 'Desktop
 $bridgeOwner = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $DesktopPid)
 if (!$bridgeOwner -or $bridgeOwner.Name -ne 'ChatGPT.exe' -or
     $bridgeOwner.ExecutablePath -notmatch '[\\/]OpenAI\.Codex_[^\\/]+[\\/]app[\\/]ChatGPT\.exe$' -or
-    $bridgeOwner.CreationDate.ToUniversalTime().ToString('o') -ne $env:CODEXWORKER_DESKTOP_STARTED_AT) {
+    $bridgeOwner.CreationDate.ToUniversalTime().ToString('o') -ne $env:RUDOLF_BRIDGE_DESKTOP_STARTED_AT) {
     throw 'Desktop lifetime no longer matches.'
 }
 Add-Type -TypeDefinition @'
 using System;
 using System.Text;
 using System.Runtime.InteropServices;
-public static class RudolfLifetimeLaunch {
+public static class CodexWorkerLifetimeLaunch {
     [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] public struct StartupInfo {
         public uint Size;
         public string Reserved, Desktop, Title;
@@ -57,18 +57,18 @@ public static class RudolfLifetimeLaunch {
     [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr handle);
 }
 '@
-$bridgeStartup = New-Object RudolfLifetimeLaunch+StartupInfoEx
-$bridgeStartupBase = New-Object RudolfLifetimeLaunch+StartupInfo
+$bridgeStartup = New-Object CodexWorkerLifetimeLaunch+StartupInfoEx
+$bridgeStartupBase = New-Object CodexWorkerLifetimeLaunch+StartupInfo
 $bridgeStartupBase.Size = [Runtime.InteropServices.Marshal]::SizeOf($bridgeStartup)
 $bridgeStartupBase.Flags = 1 # STARTF_USESHOWWINDOW
 $bridgeStartupBase.ShowWindow = 0 # SW_HIDE
 $bridgeStartup.Startup = $bridgeStartupBase
-$bridgeProcessInfo = New-Object RudolfLifetimeLaunch+ProcessInfo
+$bridgeProcessInfo = New-Object CodexWorkerLifetimeLaunch+ProcessInfo
 $bridgeCommand = New-Object Text.StringBuilder
 [void]$bridgeCommand.Append('"' + $bridgeNode + '" "' + $bridgeSupervisor + '" --desktop-pid ' + $DesktopPid)
 # The native pipe remains solely in the inherited in-memory environment. It is
 # never a command argument, disk handoff, log entry, or reconstructed old handle.
-$env:CODEXWORKER_LIFETIME_LAUNCH = 'windows-desktop-parent'
+$env:RUDOLF_BRIDGE_LIFETIME_LAUNCH = 'windows-desktop-parent'
 $bridgeOwnerHandle = [IntPtr]::Zero
 $bridgeAttributes = [IntPtr]::Zero
 $bridgeParentValue = [IntPtr]::Zero
@@ -76,25 +76,25 @@ $bridgeAttributesReady = $false
 try {
     # PROCESS_CREATE_PROCESS | PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE.
     # Hold the owner handle while checking creation time/image to reject PID reuse.
-    $bridgeOwnerHandle = [RudolfLifetimeLaunch]::OpenProcess(0x101080, $false, $DesktopPid)
+    $bridgeOwnerHandle = [CodexWorkerLifetimeLaunch]::OpenProcess(0x101080, $false, $DesktopPid)
     if ($bridgeOwnerHandle -eq [IntPtr]::Zero) { throw ('desktop_lifetime_launch_denied:' + [Runtime.InteropServices.Marshal]::GetLastWin32Error()) }
     [long]$bridgeCreatedAt = 0; [long]$bridgeExitedAt = 0; [long]$bridgeKernel = 0; [long]$bridgeUser = 0
     $bridgeOwnerImage = New-Object Text.StringBuilder 32768
     [uint32]$bridgeOwnerImageSize = $bridgeOwnerImage.Capacity
-    $bridgeExpectedCreatedAt = [DateTime]::Parse($env:CODEXWORKER_DESKTOP_STARTED_AT, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()
-    if (![RudolfLifetimeLaunch]::GetProcessTimes($bridgeOwnerHandle, [ref]$bridgeCreatedAt, [ref]$bridgeExitedAt, [ref]$bridgeKernel, [ref]$bridgeUser) -or
-        ![RudolfLifetimeLaunch]::QueryFullProcessImageName($bridgeOwnerHandle, 0, $bridgeOwnerImage, [ref]$bridgeOwnerImageSize) -or
+    $bridgeExpectedCreatedAt = [DateTime]::Parse($env:RUDOLF_BRIDGE_DESKTOP_STARTED_AT, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()
+    if (![CodexWorkerLifetimeLaunch]::GetProcessTimes($bridgeOwnerHandle, [ref]$bridgeCreatedAt, [ref]$bridgeExitedAt, [ref]$bridgeKernel, [ref]$bridgeUser) -or
+        ![CodexWorkerLifetimeLaunch]::QueryFullProcessImageName($bridgeOwnerHandle, 0, $bridgeOwnerImage, [ref]$bridgeOwnerImageSize) -or
         $bridgeOwnerImage.ToString() -ne $bridgeOwner.ExecutablePath -or
-        [RudolfLifetimeLaunch]::WaitForSingleObject($bridgeOwnerHandle, 0) -ne 258) {
+        [CodexWorkerLifetimeLaunch]::WaitForSingleObject($bridgeOwnerHandle, 0) -ne 258) {
         throw 'desktop_lifetime_owner_changed'
     }
     # CIM retains microseconds; the held handle reports 100ns FILETIME ticks.
     $bridgeCreationDelta = [DateTime]::FromFileTimeUtc($bridgeCreatedAt).Ticks - $bridgeExpectedCreatedAt.Ticks
     if ($bridgeCreationDelta -lt 0 -or $bridgeCreationDelta -gt 9) { throw 'desktop_lifetime_owner_changed' }
     $bridgeAttributeSize = [IntPtr]::Zero
-    [void][RudolfLifetimeLaunch]::InitializeProcThreadAttributeList([IntPtr]::Zero, 1, 0, [ref]$bridgeAttributeSize)
+    [void][CodexWorkerLifetimeLaunch]::InitializeProcThreadAttributeList([IntPtr]::Zero, 1, 0, [ref]$bridgeAttributeSize)
     $bridgeAttributes = [Runtime.InteropServices.Marshal]::AllocHGlobal($bridgeAttributeSize)
-    if (![RudolfLifetimeLaunch]::InitializeProcThreadAttributeList($bridgeAttributes, 1, 0, [ref]$bridgeAttributeSize)) {
+    if (![CodexWorkerLifetimeLaunch]::InitializeProcThreadAttributeList($bridgeAttributes, 1, 0, [ref]$bridgeAttributeSize)) {
         throw ('desktop_lifetime_launch_denied:' + [Runtime.InteropServices.Marshal]::GetLastWin32Error())
     }
     $bridgeAttributesReady = $true
@@ -102,14 +102,14 @@ try {
     [Runtime.InteropServices.Marshal]::WriteIntPtr($bridgeParentValue, $bridgeOwnerHandle)
     # PROC_THREAD_ATTRIBUTE_PARENT_PROCESS, accepted only with OS-granted access
     # to this exact live Desktop. The supervisor inherits Desktop's own job.
-    if (![RudolfLifetimeLaunch]::UpdateProcThreadAttribute($bridgeAttributes, 0, [IntPtr]0x20000,
+    if (![CodexWorkerLifetimeLaunch]::UpdateProcThreadAttribute($bridgeAttributes, 0, [IntPtr]0x20000,
         $bridgeParentValue, [IntPtr]([IntPtr]::Size), [IntPtr]::Zero, [IntPtr]::Zero)) {
         throw ('desktop_lifetime_launch_denied:' + [Runtime.InteropServices.Marshal]::GetLastWin32Error())
     }
     $bridgeStartup.Attributes = $bridgeAttributes
     # CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT. No inventory job breakaway
     # or alternate parent fallback: an OS rejection is the final safe error.
-    if (![RudolfLifetimeLaunch]::CreateProcess($bridgeNode, $bridgeCommand, [IntPtr]::Zero,
+    if (![CodexWorkerLifetimeLaunch]::CreateProcess($bridgeNode, $bridgeCommand, [IntPtr]::Zero,
         [IntPtr]::Zero, $false, 0x08080000, [IntPtr]::Zero, $bridgeRoot, [ref]$bridgeStartup, [ref]$bridgeProcessInfo)) {
         throw ('desktop_lifetime_launch_denied:' + [Runtime.InteropServices.Marshal]::GetLastWin32Error())
     }
@@ -120,10 +120,10 @@ try {
     exit 1
 }
 finally {
-    if ($bridgeProcessInfo.Thread -ne [IntPtr]::Zero) { [void][RudolfLifetimeLaunch]::CloseHandle($bridgeProcessInfo.Thread) }
-    if ($bridgeProcessInfo.Process -ne [IntPtr]::Zero) { [void][RudolfLifetimeLaunch]::CloseHandle($bridgeProcessInfo.Process) }
-    if ($bridgeAttributesReady) { [RudolfLifetimeLaunch]::DeleteProcThreadAttributeList($bridgeAttributes) }
+    if ($bridgeProcessInfo.Thread -ne [IntPtr]::Zero) { [void][CodexWorkerLifetimeLaunch]::CloseHandle($bridgeProcessInfo.Thread) }
+    if ($bridgeProcessInfo.Process -ne [IntPtr]::Zero) { [void][CodexWorkerLifetimeLaunch]::CloseHandle($bridgeProcessInfo.Process) }
+    if ($bridgeAttributesReady) { [CodexWorkerLifetimeLaunch]::DeleteProcThreadAttributeList($bridgeAttributes) }
     if ($bridgeAttributes -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::FreeHGlobal($bridgeAttributes) }
     if ($bridgeParentValue -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::FreeHGlobal($bridgeParentValue) }
-    if ($bridgeOwnerHandle -ne [IntPtr]::Zero) { [void][RudolfLifetimeLaunch]::CloseHandle($bridgeOwnerHandle) }
+    if ($bridgeOwnerHandle -ne [IntPtr]::Zero) { [void][CodexWorkerLifetimeLaunch]::CloseHandle($bridgeOwnerHandle) }
 }

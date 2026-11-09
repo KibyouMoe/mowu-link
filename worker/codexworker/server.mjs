@@ -5,20 +5,8 @@ import { fileURLToPath } from "node:url";
 import { ensureDesktopSupervisor } from "./desktop-lifecycle.mjs";
 import { PluginRuntime } from "./plugin-runtime.mjs";
 
-// Backend probe: Codex Desktop injects CODEX_APP_TOOLS_PIPE_PATH into the
-// plugin host. Without it this stdio entry still speaks MCP, but native task
-// calls cannot succeed; the standalone `codexworker serve` entry uses the
-// native-cli backend (codex exec) instead. Desktop behavior is unchanged.
-process.env.CODEXWORKER_NATIVE_BACKEND ??=
-  (process.env.CODEX_APP_TOOLS_PIPE_PATH ?? "").trim() ? "desktop" : "cli";
-
 const pluginRoot = path.dirname(fileURLToPath(import.meta.url));
-// CodexWorker copy: the state directory is configurable so a CLI run never
-// shares the Desktop plugin's durable writer state by accident.
-const stateDir = process.env.CODEXWORKER_STATE_DIR
-  ?? path.join(process.env.USERPROFILE ?? process.env.HOME ?? process.cwd(), ".codex", "state", "codexworker");
-// Keep the OS process table attributable to this copy.
-process.title = "CodexWorker";
+const stateDir = path.join(process.env.USERPROFILE ?? process.env.HOME ?? process.cwd(), ".codex", "state", "codexworker");
 let initialized = false, ended = false, pending = 0, buffer = "", closing = false, lifecycleStartup;
 const write = message => process.stdout.write(JSON.stringify(message) + "\n");
 const runtime = new PluginRuntime({ pluginRoot, stateDir, onToolsChanged: () => {
@@ -40,12 +28,12 @@ async function dispatch(line) {
       {
         lifecycleStartup ??= ensureDesktopSupervisor({ pluginRoot, stateDir }).catch(error => {
           const detail = /^desktop_lifetime_launch_denied:\d{1,5}$/.test(error.message) ? error.message : "desktop_lifecycle_unavailable";
-          process.stderr.write("[CodexWorker] " + detail + "\n");
+          process.stderr.write("[bridge] " + detail + "\n");
           return false;
         });
         const guarded = await lifecycleStartup;
-        const ready = guarded === true || process.env.CODEXWORKER_LIFECYCLE_CHILD === "1";
-        process.env.CODEXWORKER_LIFECYCLE_READY = ready ? "1" : "0";
+        const ready = guarded === true || process.env.RUDOLF_BRIDGE_LIFECYCLE_CHILD === "1";
+        process.env.RUDOLF_BRIDGE_LIFECYCLE_READY = ready ? "1" : "0";
         request.params = { ...(request.params ?? {}), __bridgeLifecycleReady: ready };
       }
       const result = await runtime.call(request.method, request.params ?? {});

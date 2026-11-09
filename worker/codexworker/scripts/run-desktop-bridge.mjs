@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { appendFile, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import net from "node:net";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { DesktopLifecycle, desktopOwner, processChain, resolveDesktopOwner } from "../desktop-lifecycle.mjs";
@@ -14,11 +15,11 @@ if (args[0] !== "--desktop-pid" || !/^\d+$/.test(args[1] ?? "") || !process.env.
 const desktopPid = Number(args[1]);
 const owner = await resolveDesktopOwner(desktopPid);
 if (!owner || owner.pid !== desktopPid ||
-    process.env.CODEXWORKER_DESKTOP_STARTED_AT && process.env.CODEXWORKER_DESKTOP_STARTED_AT !== owner.startedAt) {
+    process.env.RUDOLF_BRIDGE_DESKTOP_STARTED_AT && process.env.RUDOLF_BRIDGE_DESKTOP_STARTED_AT !== owner.startedAt) {
   throw new Error("The native pipe must belong to the verified live Codex Desktop.");
 }
 const pluginRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const stateRoot = path.join(process.env.USERPROFILE, ".codex", "state", "codexworker");
+const stateRoot = path.join(process.env.USERPROFILE ?? process.env.HOME ?? os.homedir(), ".codex", "state", "codexworker");
 const config = JSON.parse(await readFile(path.join(stateRoot, "desktop-config.local.json"), "utf8"));
 if ((config.host ?? "127.0.0.1") !== "127.0.0.1") throw new Error("This activation only supports loopback.");
 const token = (await readFile(config.tokenFile, "utf8")).trim();
@@ -34,7 +35,7 @@ await mkdir(stateRoot, { recursive: true });
 let statusWrite = Promise.resolve();
 const log = value => {
   const status = { ...value, supervisorPid: process.pid, desktopPid, desktopStartedAt: owner.startedAt,
-    version: "0.2.23", watchdogVersion: "0.2.27", launchMode: process.env.CODEXWORKER_LIFETIME_LAUNCH ?? "legacy-node-detached", updatedAt: new Date().toISOString() };
+    version: "0.2.23", watchdogVersion: "0.2.27", launchMode: process.env.RUDOLF_BRIDGE_LIFETIME_LAUNCH ?? "legacy-node-detached", updatedAt: new Date().toISOString() };
   // Bounded metadata only; no raw stderr, pipe, credentials or request payloads.
   statusWrite = statusWrite.then(async () => {
     const target = path.join(stateRoot, "desktop-lifecycle-status.json");
@@ -72,7 +73,7 @@ const lifecycle = new DesktopLifecycle({
   },
   launch: () => {
     const child = spawn(process.execPath, [path.join(pluginRoot, "server.mjs")], {
-      cwd: pluginRoot, env: { ...process.env, CODEXWORKER_LIFECYCLE_CHILD: "1" },
+      cwd: pluginRoot, env: { ...process.env, RUDOLF_BRIDGE_LIFECYCLE_CHILD: "1" },
       stdio: ["pipe", "pipe", "ignore"], windowsHide: true });
     let output = "";
     child.stdout.setEncoding("utf8"); child.stdout.on("data", chunk => {

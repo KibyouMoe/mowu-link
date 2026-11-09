@@ -10,7 +10,7 @@ import { BusinessRuntime } from "../business-runtime.mjs";
 const png = Buffer.from("89504e470d0a1a0a0000000049454e44", "hex");
 const response = data => ({ ok: true, json: async () => ({ code: 0, data }) });
 async function fixture(t) {
-  const root = await mkdtemp(path.join(os.tmpdir(), "rudolf-images-"));
+  const root = await mkdtemp(path.join(os.tmpdir(), "codexworker-images-"));
   const workspace = path.join(root, "workspace"); await mkdir(workspace);
   const filename = path.join(workspace, "sample.png"); await writeFile(filename, png);
   const calls = []; let invalidations = 0;

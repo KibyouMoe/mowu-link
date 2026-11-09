@@ -19,7 +19,7 @@ const marker = `RUDOLF_LOOP_${randomUUID().slice(0, 8)}`;
 const messageId = randomUUID();
 const expectedReply = `RUDOLF_FEISHU_ROUNDTRIP_OK ${marker}`;
 const notifier = new FeishuNotifier({ appId: external.app_id, appSecret: external.app_secret,
-  chatId, bridgeName: "鲁道夫 · Codex" });
+  chatId, bridgeName: "CodexWorker · Codex" });
 const http = async (route, body) => {
   const response = await fetch(endpoint + route, { method: body ? "POST" : "GET",
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
@@ -50,7 +50,7 @@ try {
   while (client._ws?.readyState !== 1 && Date.now() < connectionDeadline) await sleep(250);
   assert.equal(client._ws?.readyState, 1, "Feishu native WebSocket must open before asking for a reply.");
   const prompt = await notifier.sendMessage(`训练员，飞书入站回环测试已准备好。请在这个飞书单聊中只回复下面一行：\n\n${marker}\n\n仅这条匹配消息会进入当前 Codex 聊天。接收窗口为 3 分钟；若 Codex 正在工作，会排队，随后把原生回复回传飞书与超级溪流。本次是有时限的联调，不代表完整 manager 已交付。`,
-    { title: "鲁道夫 · 飞书回环验收", threadId });
+    { title: "CodexWorker · 飞书回环验收", threadId });
   assert.equal(prompt?.code, 0, "The actual Feishu prompt must be accepted.");
   process.stdout.write(`${JSON.stringify({ stage: "awaiting_trainer_feishu_reply", marker, threadId,
     feishuMessageId: prompt.data?.message_id, windowSeconds: 180 })}\n`);
@@ -85,7 +85,7 @@ try {
     await sleep(page.hasMore ? 0 : 1000);
   }
   assert.ok(completed && reply.includes(expectedReply), "Native matching turn/reply must complete; no automatic new-message retry.");
-  const delivered = await notifier.sendMessage(reply, { title: "鲁道夫 · Codex 原生回环回复", threadId });
+  const delivered = await notifier.sendMessage(reply, { title: "CodexWorker · Codex 原生回环回复", threadId });
   assert.equal(delivered?.code, 0);
   const report = await fetch(`${hermesUrl.replace(/\/$/, "")}/report`, { method: "POST",
     headers: { "content-type": "application/json" }, body: JSON.stringify({ machine: "CodexWorker",

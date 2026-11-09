@@ -225,7 +225,7 @@ export class QuestionRelay {
   start() { this.timer = setInterval(() => this.kick(), 1000); this.timer.unref(); }
   kick() {
     if (this.running || this.manager.closed || this.manager.handoffPaused) return;
-    this.running = this.manager.track(this.process()).catch(() => { console.error("[CodexWorker] Question synchronization pending; no unknown native answer is retried."); })
+    this.running = this.manager.track(this.process()).catch(() => { console.error("[bridge] Question synchronization pending; no unknown native answer is retried."); })
       .finally(() => { this.running = null; });
   }
   async close() { clearInterval(this.timer); await this.running; await this.tail; }

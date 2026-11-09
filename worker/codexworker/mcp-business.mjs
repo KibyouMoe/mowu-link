@@ -1,12 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, rename, writeFile } from "node:fs/promises";
-import net from "node:net";
 import path from "node:path";
 import process from "node:process";
 import { DesktopManager, PROTOCOL } from "./desktop-manager.mjs";
 import { nativeToolInvocation, nativeToolRejection, nativeStatusInvocation } from "./native-dispatch.mjs";
 import { sendImage } from "./feishu-image-output.mjs";
 import { operatingConfig } from "./integration-profile.mjs";
+import { resolveNativeTransport } from "./transport/index.mjs";
 
 export const BUSINESS_API_VERSION = 1;
 export const BUSINESS_STATE_VERSION = 1;
@@ -17,7 +17,6 @@ let transition = Boolean(runtimeControl.transition);
 const SERVER_NAME = "codexworker";
 const SERVER_VERSION = "0.2.38";
 const PIPE_ENV = "CODEX_APP_TOOLS_PIPE_PATH";
-const MAX_FRAME_BYTES = 8 * 1024 * 1024;
 const CODEX_TURN_METADATA_KEY = "x-codex-turn-metadata";
 const LOCAL_MANAGER_HOST = "127.0.0.1";
 const LOCAL_MANAGER_PORT = 8903;
@@ -39,7 +38,6 @@ const BINDING_STATE_DIR = path.join(
 );
 const BINDING_STATE_PATH = path.join(BINDING_STATE_DIR, "manager-binding.json");
 
-let nextPipeRequestId = 1;
 let desktopManager = null;
 let startingManager = null;
 
@@ -50,7 +48,7 @@ async function handleRequest(method, params) {
   }
   switch (method) {
     case "initialize":
-      if (params.__bridgeLifecycleReady !== false) void ensureLocalManagerServer().catch(() => process.stderr.write("[CodexWorker] HTTP adapter awaits a valid local binding/config/token.\n"));
+      if (params.__bridgeLifecycleReady !== false) void ensureLocalManagerServer().catch(() => process.stderr.write("[codexworker] HTTP adapter awaits a valid local binding/config/token.\n"));
       return {
         protocolVersion: params.protocolVersion ?? "2025-06-18",
         capabilities: { tools: { listChanged: true } },
@@ -551,11 +549,11 @@ async function readNativeTask(threadId, invocation) {
 
 async function ensureLocalManagerServer() {
   if (desktopManager?.server?.listening || desktopManager?.proxy) return;
-  const lifecycleUnavailable = process.env.CODEXWORKER_LIFECYCLE_READY === "0";
+  const lifecycleUnavailable = process.env.RUDOLF_BRIDGE_LIFECYCLE_READY === "0";
   // A failed cold initialize is a writer-start guard, not a permanent ban on
   // reconnecting to an authenticated, already healthy machine writer later.
   // Never promote a proxy or a contradictory child/ready=0 into a new writer.
-  if (lifecycleUnavailable && process.env.CODEXWORKER_LIFECYCLE_CHILD === "1") throw new Error("desktop_lifetime_unavailable");
+  if (lifecycleUnavailable && process.env.RUDOLF_BRIDGE_LIFECYCLE_CHILD === "1") throw new Error("desktop_lifetime_unavailable");
   if (startingManager) return startingManager;
   startingManager = (async () => {
     const { readFile } = await import("node:fs/promises");
@@ -580,12 +578,12 @@ async function ensureLocalManagerServer() {
     callerSession = { threadId: binding.managerThreadId, cwd: current.thread?.cwd, hostId: "local" };
     const projects = await native("list_projects", {});
     const project = projects.projects?.find(p => p.path === current.thread?.cwd && p.hostId === "local");
-    const tokenFile = configured.tokenFile ?? path.join(process.env.USERPROFILE ?? process.env.HOME, ".codex", "secrets", "codexworker.token");
+    const tokenFile = configured.tokenFile ?? path.join(process.env.USERPROFILE ?? process.env.HOME, ".codex", "secrets", "codex-bridge-codexworker.token");
     const config = operatingConfig({ host: LOCAL_MANAGER_HOST, port: LOCAL_MANAGER_PORT,
       workspaceRoots: current.thread?.cwd ? [current.thread.cwd] : [], projectId: project?.projectId,
       ...configured, nativeSenderThreadId: binding.managerThreadId, nativeSendFromTarget: true,
       nativeBusyDeliveryVerified: true, nativeStateIndependentDeliveryVerified: true,
-      desktopLifetimeStartedAt: process.env.CODEXWORKER_DESKTOP_STARTED_AT ?? null,
+      desktopLifetimeStartedAt: process.env.RUDOLF_BRIDGE_DESKTOP_STARTED_AT ?? null,
       token: (await readFile(tokenFile, "utf8")).trim() });
     if (config.hermesIngress?.enabled) {
       // Reuse only the explicitly configured machine-local DSH credential.
@@ -602,7 +600,7 @@ async function ensureLocalManagerServer() {
     }
     // Only the supervisor-owned child may become an HTTP/Feishu writer. A
     // chat/inventory MCP can otherwise race into the lease gap during handoff.
-    if (process.env.CODEXWORKER_LIFECYCLE_CHILD !== "1") {
+    if (process.env.RUDOLF_BRIDGE_LIFECYCLE_CHILD !== "1") {
       try { desktopManager = await connectManagerProxy(config, !lifecycleUnavailable); }
       catch (error) {
         if (!lifecycleUnavailable) throw error;
@@ -727,32 +725,11 @@ function desktopPipePath() {
 }
 
 async function nativeTools() {
-  const pipePath = desktopPipePath();
-  if (!pipePath) throw new Error(`${PIPE_ENV} was not injected by Codex Desktop`);
-  const result = await pipeRequest(pipePath, "tools/list", { threadStartKind: "all" });
-  return Array.isArray(result?.tools) ? result.tools : [];
+  return await resolveNativeTransport().listTools();
 }
 
 async function callNativeTool(name, arguments_, invocation, timeoutMs = 5000) {
-  const pipePath = desktopPipePath();
-  if (!pipePath) throw new Error(`${PIPE_ENV} was not injected by Codex Desktop`);
-  const tools = await nativeTools();
-  const tool = tools.find((candidate) => candidate?.name === name);
-  if (!tool?.namespace) {
-    throw new Error(`Codex Desktop native tool is unavailable: ${name}`);
-  }
-  if (!invocation?.threadId) {
-    throw new Error("Codex Desktop native tools require a manager task binding");
-  }
-  return pipeRequest(pipePath, "tools/call", {
-    arguments: arguments_ ?? {},
-    callerSource: "codex",
-    callId: invocation.callId ?? `codexworker-${randomUUID()}`,
-    namespace: tool.namespace,
-    threadId: invocation.threadId,
-    tool: tool.name,
-    turnId: invocation.turnId ?? `codexworker-${randomUUID()}`,
-  }, timeoutMs);
+  return await resolveNativeTransport().callTool(name, arguments_, invocation, timeoutMs);
 }
 
 function nativeJsonPayload(response) {
@@ -865,63 +842,6 @@ function toolResult(payload, isError = false) {
   };
 }
 
-function pipeRequest(pipePath, method, params, timeoutMs = 5000) {
-  return new Promise((resolve, reject) => {
-    const id = nextPipeRequestId++;
-    const socket = net.createConnection(pipePath);
-    let pending = Buffer.alloc(0);
-    let settled = false;
-
-    const finish = (callback, value) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      socket.destroy();
-      callback(value);
-    };
-
-    const timeout = setTimeout(() => {
-      finish(reject, new Error("Timed out waiting for the Codex Desktop native tools pipe"));
-    }, timeoutMs);
-
-    socket.once("error", (error) => finish(reject, error));
-    socket.once("connect", () => {
-      socket.write(encodeFrame(JSON.stringify({ jsonrpc: "2.0", id, method, params })));
-    });
-    socket.on("data", (chunk) => {
-      pending = Buffer.concat([pending, chunk]);
-      if (pending.length < 4) return;
-      const length = pending.readUInt32LE(0);
-      if (length > MAX_FRAME_BYTES) {
-        finish(reject, new Error("Codex Desktop native tools response exceeded the size limit"));
-        return;
-      }
-      if (pending.length < length + 4) return;
-      try {
-        const response = JSON.parse(pending.subarray(4, length + 4).toString("utf8"));
-        if (response.error) {
-          finish(reject, nativeToolRejection(params.tool ?? method, { success: false,
-            contentItems: [{ text: response.error.message ?? "Native tools request failed" }] }));
-        } else {
-          finish(resolve, response.result);
-        }
-      } catch (error) {
-        finish(reject, error);
-      }
-    });
-  });
-}
-
-function encodeFrame(message) {
-  const payload = Buffer.from(message, "utf8");
-  if (payload.length > MAX_FRAME_BYTES) {
-    throw new Error("Native tools request exceeded the size limit");
-  }
-  const frame = Buffer.alloc(4 + payload.length);
-  frame.writeUInt32LE(payload.length, 0);
-  payload.copy(frame, 4);
-  return frame;
-}
 
 return { handleRequest,
   busy: () => Boolean(startingManager || desktopManager?.requestHotHandoff?.(runtimeControl.status)),

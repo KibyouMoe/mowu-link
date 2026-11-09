@@ -90,7 +90,7 @@ test("an old healthy process gets continuous unhealthy grace across short handof
 });
 
 test("lifetime startup uses trusted installed source even after the disposable cache entry disappears", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "rudolf-stable-lifetime-"));
+  const root = await mkdtemp(path.join(os.tmpdir(), "codexworker-stable-lifetime-"));
   try {
     const installed = path.join(root, "installed");
     await cp(new URL("..", import.meta.url), installed, { recursive: true });
@@ -108,43 +108,43 @@ test("lifetime startup uses trusted installed source even after the disposable c
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 test("bootstrap hands off the fresh pipe privately and prevents recursion or duplicate launch", async () => {
-  const stateDir = await mkdtemp(path.join(os.tmpdir(), "rudolf-lifecycle-test-"));
+  const stateDir = await mkdtemp(path.join(os.tmpdir(), "codexworker-lifecycle-test-"));
   try {
     await writeFile(path.join(stateDir, "desktop-config.local.json"), "{}");
     await writeFile(path.join(stateDir, "manager-binding.json"), "{}");
     const launches = [];
-    const options = { pluginRoot: "C:/plugins/rudolf", stateDir, platform: "win32", readChain: async () => [owner],
+    const options = { pluginRoot: "C:/plugins/codexworker", stateDir, platform: "win32", readChain: async () => [owner],
       env: { CODEX_APP_TOOLS_PIPE_PATH: "private-test-handle" }, ready: async () => launches.length > 0,
       launchImpl: async input => { launches.push(input); } };
     assert.equal(await ensureDesktopSupervisor(options), true);
     assert.equal(launches[0].env.CODEX_APP_TOOLS_PIPE_PATH, "private-test-handle");
     assert.equal(launches[0].owner.startedAt, owner.startedAt);
     assert.equal(await ensureDesktopSupervisor(options), true); assert.equal(launches.length, 1);
-    assert.equal(await ensureDesktopSupervisor({ ...options, env: { ...options.env, CODEXWORKER_LIFECYCLE_CHILD: "1" } }), false);
+    assert.equal(await ensureDesktopSupervisor({ ...options, env: { ...options.env, RUDOLF_BRIDGE_LIFECYCLE_CHILD: "1" } }), false);
     assert.equal(await ensureDesktopSupervisor({ ...options, readChain: async () => [] }), false);
     assert.equal(launches.length, 1);
   } finally { await rm(stateDir, { recursive: true, force: true }); }
 });
 test("inventory handoff does not finish until a live Desktop supervisor and writer acknowledge readiness", async () => {
-  const stateDir = await mkdtemp(path.join(os.tmpdir(), "rudolf-handoff-test-"));
+  const stateDir = await mkdtemp(path.join(os.tmpdir(), "codexworker-handoff-test-"));
   try {
     await writeFile(path.join(stateDir, "desktop-config.local.json"), "{}");
     await writeFile(path.join(stateDir, "manager-binding.json"), "{}");
     let now = 0, readyCalls = 0, finished = false;
-    const result = ensureDesktopSupervisor({ pluginRoot: "C:/plugins/rudolf", stateDir, platform: "win32",
+    const result = ensureDesktopSupervisor({ pluginRoot: "C:/plugins/codexworker", stateDir, platform: "win32",
       readChain: async () => [owner], env: { CODEX_APP_TOOLS_PIPE_PATH: "private-test-handle" },
       clock: () => now, delay: async ms => { assert.equal(finished, false); now += ms; },
       ready: async () => ++readyCalls >= 3,
       launchImpl: async () => {} }).then(value => { finished = true; return value; });
     assert.equal(await result, true); assert.equal(readyCalls, 3); assert.equal(now, 200);
-    await assert.rejects(ensureDesktopSupervisor({ pluginRoot: "C:/plugins/rudolf", stateDir, platform: "win32",
+    await assert.rejects(ensureDesktopSupervisor({ pluginRoot: "C:/plugins/codexworker", stateDir, platform: "win32",
       readChain: async () => [owner], env: { CODEX_APP_TOOLS_PIPE_PATH: "private-test-handle" },
       clock: () => now, delay: async ms => { now += ms; }, timeoutMs: 400, ready: async () => false,
       launchImpl: async () => {} }), /desktop_lifecycle_not_ready/);
   } finally { await rm(stateDir, { recursive: true, force: true }); }
 });
 test("deployment auto-reload pause resumes only after the exact new startup acknowledgement", async () => {
-  const stateDir = await mkdtemp(path.join(os.tmpdir(), "rudolf-startup-maintenance-"));
+  const stateDir = await mkdtemp(path.join(os.tmpdir(), "codexworker-startup-maintenance-"));
   try {
     await writeFile(path.join(stateDir, "desktop-config.local.json"), "{}");
     await writeFile(path.join(stateDir, "manager-binding.json"), "{}");
@@ -166,7 +166,7 @@ test("deployment auto-reload pause resumes only after the exact new startup ackn
   } finally { await rm(stateDir, { recursive: true, force: true }); }
 });
 test("supervisor readiness rejects stale/dead metadata and requires matching authenticated writer health", async () => {
-  const stateDir = await mkdtemp(path.join(os.tmpdir(), "rudolf-ready-test-"));
+  const stateDir = await mkdtemp(path.join(os.tmpdir(), "codexworker-ready-test-"));
   try {
     const tokenFile = path.join(stateDir, "test.token");
     await writeFile(tokenFile, "test-only-supervisor-token-not-secret-123456");
@@ -199,23 +199,23 @@ test("supervisor readiness rejects stale/dead metadata and requires matching aut
 });
 test("Windows lifetime launcher is hidden, uses the approved process-only policy, and keeps the native pipe out of arguments", async () => {
   let launch;
-  const result = await launchDesktopSupervisor({ pluginRoot: "C:/plugins/rudolf", owner,
+  const result = await launchDesktopSupervisor({ pluginRoot: "C:/plugins/codexworker", owner,
     env: { CODEX_APP_TOOLS_PIPE_PATH: "private-test-handle" }, exec: async (exe, args, settings) => {
       launch = { exe, args, settings }; return { stdout: '{"supervisorPid":800,"launchMode":"windows-desktop-parent"}' };
     } });
   assert.equal(result.supervisorPid, 800); assert.equal(launch.settings.windowsHide, true);
-  assert.equal(launch.settings.env.CODEXWORKER_DESKTOP_STARTED_AT, owner.startedAt);
+  assert.equal(launch.settings.env.RUDOLF_BRIDGE_DESKTOP_STARTED_AT, owner.startedAt);
   assert.equal(launch.settings.env.CODEX_APP_TOOLS_PIPE_PATH, "private-test-handle");
   assert.ok(launch.args.includes("RemoteSigned")); assert.ok(!launch.args.includes("Bypass"));
   assert.ok(!JSON.stringify(launch.args).includes("private-test-handle"));
 });
 test("a denied Windows lifetime handoff is not retried through an alternate launcher and only exposes a safe code", async () => {
   let attempts = 0;
-  await assert.rejects(launchDesktopSupervisor({ pluginRoot: "C:/plugins/rudolf", owner, env: {}, exec: async () => {
+  await assert.rejects(launchDesktopSupervisor({ pluginRoot: "C:/plugins/codexworker", owner, env: {}, exec: async () => {
     attempts++; const error = new Error("private raw exception"); error.stderr = "desktop_lifetime_launch_denied:5"; throw error;
   } }), /^Error: desktop_lifetime_launch_denied:5$/);
   assert.equal(attempts, 1);
-  await assert.rejects(launchDesktopSupervisor({ pluginRoot: "C:/plugins/rudolf", owner, env: {}, exec: async () => {
+  await assert.rejects(launchDesktopSupervisor({ pluginRoot: "C:/plugins/codexworker", owner, env: {}, exec: async () => {
     throw new Error("private raw exception");
   } }), /^Error: desktop_lifetime_launch_unavailable$/);
 });
