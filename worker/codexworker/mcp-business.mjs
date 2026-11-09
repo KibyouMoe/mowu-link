@@ -585,13 +585,6 @@ async function ensureLocalManagerServer() {
       nativeBusyDeliveryVerified: true, nativeStateIndependentDeliveryVerified: true,
       desktopLifetimeStartedAt: process.env.RUDOLF_BRIDGE_DESKTOP_STARTED_AT ?? null,
       token: (await readFile(tokenFile, "utf8")).trim() });
-    if (config.hermesIngress?.enabled) {
-      // Reuse only the explicitly configured machine-local DSH credential.
-      // Route and socket-peer restrictions apply even if historical DSH/local
-      // configuration happened to reuse the same token; no manager LAN routes.
-      const ingressToken = (await readFile(config.hermesIngress.tokenFile, "utf8")).trim();
-      config.hermesIngress = { ...config.hermesIngress, token: ingressToken };
-    }
     // Legacy Feishu config files are reusable, but never loaded from synchronized source.
     if (config.feishu?.configFile) {
       const f = JSON.parse(await readFile(config.feishu.configFile, "utf8"));

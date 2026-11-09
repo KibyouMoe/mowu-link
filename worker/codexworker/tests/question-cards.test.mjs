@@ -14,10 +14,10 @@ async function fixture(t) {
   let snapshot = { turns: [{ id: "source", status: "inProgress", items: [] }] };
   let native = async () => ({ action: "dispatch_pending" });
   const m = { stateDir: dir, closed: false, handoffPaused: false, backgroundTasks: new Set(),
-    state: { selectedThreadId: "chat", selectionEpoch: 0, sessions: { chat: { threadId: "chat" } }, publicQuestions: {}, outbox: [] },
-    config: { bridgeName: "CodexWorker", feishu: { chatId: "oc_chat", trainerOpenIdWhitelist: ["trainer"] }, xiliu: { enabled: false } },
+    state: { selectedThreadId: "chat", selectionEpoch: 0, sessions: { chat: { threadId: "chat" } }, publicQuestions: {} },
+    config: { bridgeName: "CodexWorker", feishu: { chatId: "oc_chat", trainerOpenIdWhitelist: ["trainer"] } },
     session: id => { assert.equal(id, "chat"); return m.state.sessions.chat; },
-    serial: async fn => fn(), save: async () => {}, flushReports: async () => {},
+    serial: async fn => fn(), save: async () => {},
     read: async () => { if (snapshot instanceof Error) throw snapshot; return structuredClone(snapshot); },
     track: task => { m.backgroundTasks.add(task); task.finally(() => m.backgroundTasks.delete(task)).catch(() => {}); return task; },
     message: async (request, guard) => { writes.push({ request, guard }); return native(); },
@@ -39,7 +39,7 @@ test("structured card keeps full text/options, has callback buttons and no indep
   assert.equal(f.sends[0].card.schema, "2.0"); assert.ok(JSON.stringify(f.sends[0].card).includes("保留完整题目与所选答案"));
   assert.ok(JSON.stringify(f.sends[0].card).includes('"type":"callback"'));
   const s = f.relay.state.entries[f.q.questionId]; assert.equal(s.sourceTurnId, "source"); assert.equal(s.deadline, undefined);
-  assert.equal(f.m.state.outbox.length, 0); assert.equal(f.writes.length, 0);
+  assert.equal(f.writes.length, 0);
   await f.publish(); assert.equal(f.sends.length, 1);
 });
 test("popup collapse/time passage do not expire an active original question", async t => {
@@ -167,13 +167,6 @@ test("disk failure prevents acknowledgement or native write until the intent is 
 test("business handoff pauses question processing, without cancelling or re-sending answers", async t => {
   const f = await fixture(t); await f.publish(); f.m.handoffPaused = true; await f.relay.acceptCard(f.callback()); await f.relay.process();
   assert.equal(f.writes.length, 0); f.m.handoffPaused = false; await f.relay.process(); assert.equal(f.writes.length, 1);
-});
-test("question terminal metadata goes to the original Hermes four-field outbox once", async t => {
-  const f = await fixture(t); f.m.config.xiliu = { enabled: true, url: "http://isolated-hermes" }; await f.publish();
-  f.m.state.outbox = []; f.snapshot({ turns: [{ id: "source", status: "completed" }] }); await f.relay.process(); await f.relay.process();
-  assert.equal(f.m.state.outbox.length, 1); const report = f.m.state.outbox[0];
-  assert.deepEqual(Object.keys(report).sort(), ["content", "machine", "thread_id", "type"]); assert.equal(report.type, "progress");
-  assert.ok(report.content.includes("已过期")); assert.ok(report.content.includes("保留完整问题吗")); assert.equal(f.writes.length, 0);
 });
 test("WS card response ACK echoes 64-bit IDs with base64 toast and does not await native dispatch", async t => {
   const f = await fixture(t); await f.publish();

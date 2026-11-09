@@ -50,7 +50,7 @@ export class PluginRuntime {
     let config = ""; try {
       const bytes = await readFile(path.join(this.stateDir, "desktop-config.local.json")), values = JSON.parse(bytes);
       const hashes = [hash(bytes)];
-      for (const filename of [values.tokenFile, values.feishu?.configFile, values.hermesIngress?.tokenFile]) if (filename) {
+      for (const filename of [values.tokenFile, values.feishu?.configFile]) if (filename) {
         hashes.push(hash(await readFile(filename).catch(error => { if (error.code === "ENOENT") return Buffer.from("missing"); throw error; })));
       }
       config = hash(JSON.stringify(hashes));

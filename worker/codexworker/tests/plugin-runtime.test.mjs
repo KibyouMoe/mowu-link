@@ -37,7 +37,7 @@ async function fixture(t, { pollMs = 1000000 } = {}) {
   const { mkdir } = await import("node:fs/promises"); await mkdir(stateDir);
   await writeFile(path.join(source, "mcp-business.mjs"), sample);
   // Keep only a deterministic business fixture; never inherit a real pipe/config.
-  for (const name of ["desktop-manager.mjs", "feishu.mjs", "feishu-images.mjs", "feishu-image-output.mjs", "hermes-ingress.mjs", "online-announcement.mjs", "question-relay.mjs", "question-cards.mjs", "native-dispatch.mjs"]) await rm(path.join(source, name));
+  for (const name of ["desktop-manager.mjs", "feishu.mjs", "feishu-images.mjs", "feishu-image-output.mjs", "online-announcement.mjs", "question-relay.mjs", "question-cards.mjs", "native-dispatch.mjs"]) await rm(path.join(source, name));
   await writeFile(path.join(source, "helper.mjs"), "export const value='first';\n");
   let changes = 0;
   const runtime = new PluginRuntime({ pluginRoot: source, stateDir, pollMs,
@@ -186,9 +186,7 @@ for (const operatingMode of ["desktop-bridge", "feishu-local"]) test(`fixed load
   }); nativePipe.listen(pipe); await once(nativePipe, "listening");
   await writeFile(path.join(stateDir, "manager-binding.json"), JSON.stringify({ managerThreadId: "same-chat", managerTurnId: "test-turn" }));
   await writeFile(path.join(stateDir, "desktop-config.local.json"), JSON.stringify({ tokenFile, port, workspaceRoots: [root],
-    operatingMode, ...(operatingMode === "feishu-local" ? {
-      hermesIngress: { enabled: true, tokenFile: path.join(root, "missing-hermes.token") },
-      xiliu: { enabled: true, url: "http://127.0.0.1:1" } } : {}), pollMs: 1, hotHandoffRetryMs: 50, managerProxyWaitMs: 100 }));
+    operatingMode, pollMs: 1, hotHandoffRetryMs: 50, managerProxyWaitMs: 100 }));
   const runtime = new PluginRuntime({ pluginRoot: source, stateDir, pollMs: 1000000,
     env: { ...process.env, USERPROFILE: root, HOME: root, CODEX_APP_TOOLS_PIPE_PATH: pipe, RUDOLF_BRIDGE_LIFECYCLE_CHILD: "1" } });
   let proxy, failedStartupProxy;
@@ -232,9 +230,6 @@ for (const operatingMode of ["desktop-bridge", "feishu-local"]) test(`fixed load
   await request("/manager/messages", message); const before = await request("/health");
   assert.equal(before.activeTurns, 1);
   assert.equal(before.operatingMode, operatingMode);
-  if (operatingMode === "feishu-local") {
-    assert.equal(before.integrations.hermesIngress.enabled, false); assert.equal(before.integrations.xiliu.enabled, false);
-  }
   assert.equal(before.capabilities.businessHotReload.bootstrapVersion, "0.2.23");
   const waitFor = async predicate => {
     const until = Date.now() + 5000;

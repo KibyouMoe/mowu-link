@@ -8,7 +8,6 @@ import { DesktopManager, PROTOCOL, publicItems } from "../desktop-manager.mjs";
 import { localHost, nativeSendSource, nativeToolInvocation, nativeToolRejection } from "../native-dispatch.mjs";
 import { escapeMarkdown, splitChunks, markdownPayload, FeishuNotifier, FeishuWebsocketClient } from "../feishu.mjs";
 import { checkContract } from "./contract-check.mjs";
-import { HermesIngress, HERMES_PROFILE, peerAddress } from "../hermes-ingress.mjs";
 import { normalizeQuestion, questionText } from "../question-relay.mjs";
 import { downloadFeishuImage, imageExtension, MAX_IMAGE_BYTES } from "../feishu-images.mjs";
 
@@ -136,7 +135,6 @@ test("feishu-local polls its selected chat without rereading inactive unrelated 
   const reads = []; f.manager.native = async (name, args, ctx) => { if (name === "read_thread") reads.push(args.threadId); return f.native(name, args, ctx); };
   await f.manager.scan(); assert.deepEqual(reads, ["selected"]);
 });
-const ingressToken = "test-only-distinct-Hermes-token-1234567890";
 test("Feishu ACK waits for durable handler acceptance and never acknowledges a failed handler", async () => {
   let release, ack = 0;
   const client = new FeishuWebsocketClient({ enabled: true }, { onMessage: () => new Promise(resolve => { release = resolve; }) });
@@ -194,18 +192,10 @@ test("business handoff reconnection suppresses only its first online notice, not
   socket.connectionId = "real-reconnect"; await f.manager.onlineAnnouncement.connected(socket, "real-reconnect"); assert.equal(sent.length, 1);
   f.manager.ws = null;
 });
-const ingressConfig = { enabled: true, host: "127.0.0.1", port: 0, allowedRemoteAddresses: ["127.0.0.1"], token: ingressToken };
-const ingressHttp = async (f, route, body, auth = ingressToken, headers = {}) => {
-  const base = `http://127.0.0.1:${f.manager.hermesIngress.config.port}`;
-  const response = await fetch(base + route, { method: body ? "POST" : "GET",
-    headers: { authorization: `Bearer ${auth}`, "content-type": "application/json", ...headers },
-    ...(body ? { body: JSON.stringify(body) } : {}) });
-  return { status: response.status, body: await response.json() };
-};
 
 async function fixture(t, overrides = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), "codexworker-desktop-manager-"));
-  const tasks = new Map(); const calls = []; const reports = [];
+  const tasks = new Map(); const calls = [];
   let count = 0;
   const add = (id, turns = [], cwd = root) => tasks.set(id, { thread: { id, title: id, cwd, status: { type: "idle" } }, turns });
   add("existing");
@@ -240,7 +230,7 @@ async function fixture(t, overrides = {}) {
   const config = { token, port: 0, pollMs: 1000000, projectId: "project-test", workspaceRoots: [root], nativeSenderThreadId: "manager-test", messageSourceLabels: false,
     ...overrides, feishu: { onlineStableMs: 0, ...overrides.feishu } };
   const manager = await new DesktopManager({ native, listNativeTools, stateDir: root, config,
-    fetchImpl: async (url, options) => { reports.push({ url, body: JSON.parse(options.body) }); return { ok: true }; } }).initialize();
+    fetchImpl: async () => ({ ok: true }) }).initialize();
   const url = await manager.listen();
   const http = async (route, body, method = body ? "POST" : "GET", authorization = `Bearer ${token}`) => {
     const response = await fetch(url + route, { method, headers: { authorization, "content-type": "application/json" }, ...(body ? { body: JSON.stringify(body) } : {}) });
@@ -252,7 +242,7 @@ async function fixture(t, overrides = {}) {
     const turn = tasks.get(id).turns.at(-1); turn.status = "completed";
     turn.items.push({ type: "agentMessage", phase: "final_answer", text });
   };
-  return { root, manager, tasks, calls, reports, http, url, native, listNativeTools, config, register, finish };
+  return { root, manager, tasks, calls, http, url, native, listNativeTools, config, register, finish };
 }
 
 test("handoff drains the current slow poll and prevents further sessions or intervals from starving it", async t => {
@@ -282,45 +272,17 @@ test("handoff drains the current slow poll and prevents further sessions or inte
   f.manager.resumeHotHandoff();
 });
 
-test("disabled Hermes reporting preserves persisted outbox without a network request", async t => {
-  const f = await fixture(t, { xiliu: { enabled: false, url: "http://old-hermes.test" } });
-  const pending = { machine: "bridge", thread_id: "existing", type: "progress", content: "retained report" };
-  f.manager.state.outbox.push(pending);
-  await f.manager.flushReports(); await f.manager.heartbeat();
-  assert.equal(f.reports.length, 0); assert.deepEqual(f.manager.state.outbox, [pending]);
-});
-
-test("local Feishu monitoring works with unavailable Hermes endpoints and preserves pending reports", async t => {
+test("local Feishu monitoring keeps its selected native task and public replies", async t => {
   const f = await fixture(t, { operatingMode: "feishu-local",
-    hermesIngress: { enabled: true, host: "not-a-local-address", tokenFile: "missing-hermes.token" },
-    xiliu: { enabled: true, url: "http://unavailable-hermes.test" },
     feishu: { trainerOpenIdWhitelist: ["trainer"], streamEnabled: false } });
   await f.register(); const cards = [];
   f.manager.notifier = { addReaction: async () => null, removeReaction: async () => true,
     sendMessage: async text => { cards.push(text); return { code: 0 }; } };
-  const pending = { machine: "bridge", thread_id: "existing", type: "progress", content: "old report" };
-  f.manager.state.outbox.push(pending);
   await f.manager.receiveFeishu({ chat_type: "p2p", sender_type: "user", message_type: "text",
     content: "本机监控输入", message_id: "local-monitor-input", open_id: "trainer", chat_id: "oc_test" });
-  await f.manager.scan(); f.finish("existing", "本机公开回复"); await f.manager.scan(); await f.manager.heartbeat();
+  await f.manager.scan(); f.finish("existing", "本机公开回复"); await f.manager.scan();
   assert.ok(cards.includes("本机公开回复")); assert.equal(f.calls.filter(c => c.name === "send_message_to_thread").length, 1);
-  assert.equal(f.reports.length, 0); assert.deepEqual(f.manager.state.outbox, [pending]);
   assert.equal(f.manager.health().operatingMode, "feishu-local");
-  assert.equal(f.manager.integrationStatus().hermesIngress.enabled, false);
-  assert.equal(f.manager.integrationStatus().xiliu.enabled, false); assert.equal(f.manager.heartbeatTimer, undefined);
-});
-
-test("optional Hermes socket failure cannot close the healthy local Desktop/Feishu service", async t => {
-  const { createServer } = await import("node:net");
-  const occupied = createServer(); await new Promise(resolve => occupied.listen(0, "127.0.0.1", resolve));
-  t.after(() => new Promise(resolve => occupied.close(resolve)));
-  const f = await fixture(t, { hermesIngress: { enabled: true, host: "127.0.0.1", port: occupied.address().port,
-    token: ingressToken, allowedRemoteAddresses: ["127.0.0.1"] } });
-  await f.register();
-  assert.equal((await f.http("/health")).body.ready, true); assert.equal(f.manager.server.listening, true);
-  const status = f.manager.integrationStatus().hermesIngress;
-  assert.equal(status.enabled, true); assert.equal(status.listening, false); assert.equal(status.lastError, "EADDRINUSE");
-  assert.ok(!JSON.stringify(status).includes(ingressToken));
 });
 
 test("handoff accepts and persists new Feishu inbox entries but defers dispatch with the original UUID", async t => {
@@ -390,19 +352,6 @@ test("resuming a timed-out handoff never overlaps the previous online notice ope
   await Promise.resolve(); assert.equal(runs, 0);
   release(); await resumed; assert.equal(runs, 1);
   f.manager.ws = null;
-});
-
-test("handoff finishes one started report, retaining the rest of the outbox for the next worker", async t => {
-  const f = await fixture(t, { xiliu: { enabled: true, url: "http://test.invalid" } }); await f.register();
-  await f.manager.enqueueReport("existing", "progress", "one");
-  await f.manager.enqueueReport("existing", "progress", "two");
-  let release;
-  f.manager.fetch = () => new Promise(resolve => { release = () => resolve({ ok: true }); });
-  const task = f.manager.flushReports(); assert.equal(f.manager.requestHotHandoff(), true);
-  release(); await task;
-  assert.deepEqual(f.manager.state.outbox.map(r => r.content), ["two"]);
-  assert.equal(f.manager.requestHotHandoff(), false);
-  f.manager.resumeHotHandoff();
 });
 
 async function autoImageFixture(t, overrides = {}) {
@@ -625,7 +574,7 @@ test("automatic image unknown outcome stays failed across restart after bounded 
 });
 
 test("image HTTP output is authorized, selected-only and never writes a native task", async t => {
-  const f = await fixture(t, { hermesIngress: ingressConfig }); await f.register();
+  const f = await fixture(t); await f.register();
   const imagePath = path.join(f.root, "image.png"); await writeFile(imagePath, Buffer.from("89504e470d0a1a0a0000000049454e44", "hex"));
   f.manager.notifier = { enabled: true, chatId: "oc_test", getToken: async () => "test-only-image-token", invalidateToken() {} };
   const imageCalls = [];
@@ -634,8 +583,6 @@ test("image HTTP output is authorized, selected-only and never writes a native t
   const request = { imagePath, threadId: "existing", messageId: randomUUID() };
   const before = f.calls.length; const selected = f.manager.state.selectedThreadId;
   assert.equal((await f.http("/bridge/images", request, "POST", "wrong")).status, 401);
-  assert.equal((await ingressHttp(f, "/bridge/images", request)).status, 404);
-  assert.equal((await ingressHttp(f, "/bridge/runtime")).status, 404);
   const sent = await f.http("/bridge/images", request);
   assert.equal(sent.status, 200); assert.equal(sent.body.status, "sent");
   assert.equal((await f.http("/bridge/images", request)).body.duplicate, true); assert.equal(imageCalls.length, 2);
@@ -740,51 +687,46 @@ test("a slow image download cannot spill an earlier picture into a newly selecte
   assert.equal(f.calls.filter(c => c.name === "send_message_to_thread").length, 0);
 });
 
-test("question relay publishes to both existing channels once without starting another native turn", async t => {
-  const f = await fixture(t, { xiliu: { enabled: true, url: "http://unchanged-hermes" }, feishu: { chatId: "trainer-chat" } }); await f.register();
+test("question relay publishes to the existing Feishu channel once without starting another native turn", async t => {
+  const f = await fixture(t, { feishu: { chatId: "trainer-chat" } }); await f.register();
   const cards = []; f.manager.notifier = { sendMessage: async (text, options) => { cards.push({ text, options }); return { code: 0 }; } };
   const q = { questionId: randomUUID(), threadId: "existing", questions: [{ title: "提问卡片正文可见吗？", options: ["可见", "不可见"] }] };
   const first = await f.http("/bridge/questions", q);
-  assert.equal(first.status, 200); assert.equal(first.body.feishu, "sent"); assert.equal(first.body.hermes, "stored");
+  assert.equal(first.status, 200); assert.equal(first.body.feishu, "sent");
   assert.equal(first.body.duplicate, false); assert.ok(cards[0].text.includes("1）可见")); assert.ok(cards[0].text.includes("2）不可见"));
   assert.equal(cards[0].options.title, "CodexWorker-提问"); assert.equal(cards[0].options.chatId, "trainer-chat");
-  assert.deepEqual(Object.keys(f.reports[0].body).sort(), ["content", "machine", "thread_id", "type"]);
-  assert.equal(f.reports[0].body.type, "progress"); assert.ok(f.reports[0].body.content.includes(q.questions[0].title));
   const repeat = await f.http("/bridge/questions", q); assert.equal(repeat.body.duplicate, true);
-  assert.equal(cards.length, 1); assert.equal(f.reports.length, 1); assert.equal(f.calls.filter(c => c.name === "send_message_to_thread").length, 0);
+  assert.equal(cards.length, 1); assert.equal(f.calls.filter(c => c.name === "send_message_to_thread").length, 0);
   assert.equal((await f.http("/bridge/questions", { ...q, questions: [{ title: "different" }] })).status, 409);
 });
 
-test("question relay is authenticated and does not publish to an old selected target or its LAN manager surface", async t => {
-  const f = await fixture(t, { hermesIngress: { ...ingressConfig }, feishu: { chatId: "trainer-chat" } }); await f.register();
+test("question relay is authenticated and does not publish to an old selected target", async t => {
+  const f = await fixture(t, { feishu: { chatId: "trainer-chat" } }); await f.register();
   const q = { questionId: randomUUID(), threadId: "existing", questions: [{ title: "where?" }] };
   assert.equal((await f.http("/bridge/questions", q, "POST", "wrong")).status, 401);
-  assert.equal((await ingressHttp(f, "/bridge/questions", q)).status, 404);
   f.tasks.set("other", { thread: { id: "other", cwd: f.root }, turns: [] }); await f.register("other");
-  assert.equal((await f.http("/bridge/questions", q)).status, 409); assert.equal(f.reports.length, 0);
+  assert.equal((await f.http("/bridge/questions", q)).status, 409);
 });
 
 test("question relay reports channel failure honestly and retries only an unsent question card", async t => {
-  const f = await fixture(t, { xiliu: { enabled: true, url: "http://unchanged-hermes" }, feishu: { chatId: "trainer-chat" } }); await f.register();
+  const f = await fixture(t, { feishu: { chatId: "trainer-chat" } }); await f.register();
   let sends = 0; f.manager.notifier = { sendMessage: async () => ++sends === 1 ? null : { code: 0 } };
-  f.manager.fetch = async () => { throw new Error("offline"); };
   const q = { questionId: randomUUID(), threadId: "existing", questions: [{ title: "question stays pending" }] };
   const first = await f.manager.questions.publish(q);
-  assert.equal(first.feishu, "pending"); assert.equal(first.hermes, "queued"); assert.equal(f.manager.state.outbox.length, 1);
-  f.manager.fetch = async (url, options) => { f.reports.push({ body: JSON.parse(options.body) }); return { ok: true }; };
+  assert.equal(first.feishu, "pending");
   const retry = await f.manager.questions.publish(q); assert.equal(retry.duplicate, true);
-  assert.equal(retry.feishu, "sent"); assert.equal(retry.hermes, "stored"); assert.equal(f.reports.length, 1);
+  assert.equal(retry.feishu, "sent");
   await f.manager.questions.publish(q); assert.equal(sends, 2);
 });
 
 test("question relay concurrent exact retries share one send and preserve durable receipts across reload", async t => {
-  const f = await fixture(t, { xiliu: { enabled: true, url: "http://unchanged-hermes" }, feishu: { chatId: "trainer-chat" } }); await f.register();
+  const f = await fixture(t, { feishu: { chatId: "trainer-chat" } }); await f.register();
   let sends = 0; f.manager.notifier = { sendMessage: async () => { sends++; await new Promise(r => setTimeout(r, 10)); return { code: 0 }; } };
   const q = { questionId: randomUUID(), threadId: "existing", questions: [{ title: "same question" }] };
   const results = await Promise.all([f.manager.questions.publish(q), f.manager.questions.publish(q)]);
-  assert.equal(sends, 1); assert.equal(f.reports.length, 1); assert.equal(results[1].duplicate, true);
+  assert.equal(sends, 1); assert.equal(results[1].duplicate, true);
   f.manager.state = JSON.parse(await readFile(f.manager.statePath, "utf8"));
-  assert.equal((await f.manager.questions.publish(q)).duplicate, true); assert.equal(sends, 1); assert.equal(f.reports.length, 1);
+  assert.equal((await f.manager.questions.publish(q)).duplicate, true); assert.equal(sends, 1);
 });
 
 test("an external plain-text answer still enters the selected native chat, not a hidden Codex panel", async t => {
@@ -835,103 +777,8 @@ test("all HTTP endpoints including health require Bearer auth; full manager gate
   assert.equal(health.managerReady, false); assert.equal(health.capabilities.stop, false);
 });
 
-test("Hermes ingress requires a strong credential, exact private bind and peer allowlist", async t => {
-  const f = await fixture(t);
-  for (const invalid of [{ host: "0.0.0.0" }, { host: "8.8.8.8" }, { token: "short" },
-    { allowedRemoteAddresses: [] }, { allowedRemoteAddresses: ["192.168.3.0/24"] }, { allowedRemoteAddresses: ["*"] }]) {
-    assert.throws(() => new HermesIngress(f.manager, { ...ingressConfig, ...invalid }), /explicit private IPv4/);
-  }
-  assert.equal(peerAddress("::ffff:192.168.3.105"), "192.168.3.105");
-});
-
-test("historically shared DSH credentials never open manager routes on the LAN compatibility surface", async t => {
-  const f = await fixture(t, { hermesIngress: { ...ingressConfig, token } }); await f.register();
-  assert.equal((await ingressHttp(f, "/health", null, token)).status, 200);
-  assert.equal((await ingressHttp(f, "/manager/messages", req("forbidden"), token)).status, 404);
-  assert.equal((await ingressHttp(f, "/manager/sessions", null, token)).status, 404);
-  const state = await readFile(f.manager.statePath, "utf8");
-  assert.ok(!state.includes(token)); assert.ok(!state.includes("Bearer "));
-});
-
-test("Hermes compatibility health is explicit native messaging, not an opened manager gate", async t => {
-  const f = await fixture(t, { hermesIngress: { ...ingressConfig } }); await f.register();
-  const health = (await ingressHttp(f, "/health")).body;
-  assert.equal(health.integrationMode, "desktop-native"); assert.equal(health.integrationProfile, HERMES_PROFILE);
-  assert.equal(health.messagingReady, true); assert.equal(health.selectedThreadId, "existing");
-  assert.equal(health.managerReady, false); assert.equal(health.nativeTaskReady, false);
-  assert.equal((await ingressHttp(f, "/health", null, token)).status, 401);
-  assert.equal((await ingressHttp(f, "/health", null, "wrong")).status, 401);
-  assert.equal((await f.http("/health", null, "GET", `Bearer ${ingressToken}`)).status, 401);
-  for (const route of ["/manager/events?stream=0", "/manager/sessions", "/bridge/integrations"]) {
-    assert.equal((await ingressHttp(f, route)).status, 404);
-  }
-  assert.equal((await ingressHttp(f, "/manager/messages", req("not allowed"))).status, 404);
-  assert.equal((await ingressHttp(f, "/bridge/integrations/reload", {})).status, 404);
-});
-
-test("Hermes peer allowlist uses the socket address and cannot be spoofed by forwarding headers", async t => {
-  const f = await fixture(t, { hermesIngress: { ...ingressConfig, allowedRemoteAddresses: ["192.168.3.105"] } }); await f.register();
-  const denied = await ingressHttp(f, "/health", null, ingressToken, { "x-forwarded-for": "192.168.3.105", "x-real-ip": "192.168.3.105" });
-  assert.equal(denied.status, 403); assert.equal(denied.body.error, "peer_not_allowed");
-  assert.equal(f.manager.hermesIngress.status().peerRequests, 0);
-  assert.equal(f.calls.filter(c => c.name === "send_message_to_thread").length, 0);
-});
-
-test("Hermes native input follows the selected chat, is original and idempotent, and never waits for busy readback", async t => {
-  const f = await fixture(t, { nativeBusyDeliveryVerified: true, nativeSendFromTarget: true, hermesIngress: { ...ingressConfig } }); seedBusy(f); await f.register();
-  const body = { threadId: "existing", text: "溪流任务原文", wait: false, messageId: randomUUID() };
-  const first = await ingressHttp(f, "/turn", body);
-  assert.equal(first.status, 200); assert.equal(first.body.action, "dispatch_pending");
-  assert.equal((await ingressHttp(f, "/turn", body)).body.duplicate, true);
-  const next = await ingressHttp(f, "/turn", { ...body, text: "第二次插话", messageId: randomUUID() });
-  assert.equal(next.body.action, "dispatch_pending");
-  const writes = f.calls.filter(c => c.name === "send_message_to_thread");
-  assert.deepEqual(writes.map(c => c.args), [{ threadId: "existing", prompt: body.text }, { threadId: "existing", prompt: "第二次插话" }]);
-  assert.ok(writes.every(c => c.deliveryContext.sourceThreadId === "existing"));
-  assert.equal(f.manager.state.receipts[body.messageId].request.source, "hermes");
-  await f.manager.scan();
-  assert.equal(f.manager.state.events.filter(e => e.type === "turn.steered").length, 2);
-  assert.equal(f.manager.hermesIngress.status().lastAcceptedThreadId, "existing");
-});
-
-test("Hermes does not reuse an old inactive target after Feishu selection changes", async t => {
-  const f = await fixture(t, { nativeBusyDeliveryVerified: true, nativeSendFromTarget: true, hermesIngress: { ...ingressConfig } }); await f.register();
-  const first = { threadId: "existing", text: "first", wait: false, messageId: randomUUID() }; await ingressHttp(f, "/turn", first);
-  f.tasks.set("selected-next", { thread: { id: "selected-next", cwd: f.root }, turns: [] }); await f.register("selected-next");
-  const list = await ingressHttp(f, "/threads"); assert.deepEqual(list.body.threads.map(t => t.id), ["selected-next"]);
-  assert.equal((await ingressHttp(f, "/threads/existing")).body.error, "selected_target_changed");
-  assert.equal((await ingressHttp(f, "/turn", { ...first, messageId: randomUUID() })).body.error, "selected_target_changed");
-  assert.equal((await ingressHttp(f, "/turn", { ...first, threadId: "unknown", messageId: randomUUID() })).body.error, "thread_not_found");
-  // An already accepted logical retry returns its receipt, never a new write.
-  assert.equal((await ingressHttp(f, "/turn", first)).body.duplicate, true);
-  const second = { ...first, threadId: "selected-next", messageId: randomUUID() }; await ingressHttp(f, "/turn", second);
-  assert.deepEqual(f.calls.filter(c => c.name === "send_message_to_thread").map(c => c.args.threadId), ["existing", "selected-next"]);
-  assert.equal(f.calls.findLast(c => c.name === "send_message_to_thread").deliveryContext.sourceThreadId, "selected-next");
-});
-
-test("Hermes workspace and safety overrides are rejected honestly; active stop stays unavailable", async t => {
-  const f = await fixture(t, { nativeBusyDeliveryVerified: true, nativeSendFromTarget: true, hermesIngress: { ...ingressConfig } }); seedBusy(f); await f.register();
-  const body = { threadId: "existing", text: "don't override", wait: false, messageId: randomUUID() };
-  assert.equal((await ingressHttp(f, "/turn", { ...body, cwd: path.resolve(f.root, "..") })).status, 422);
-  assert.equal((await ingressHttp(f, "/turn", { ...body, safetyMode: "workspace-write" })).status, 422);
-  assert.equal((await ingressHttp(f, "/threads", { cwd: path.resolve(f.root, "..") })).status, 422);
-  assert.equal((await ingressHttp(f, "/threads/existing/stop", {})).status, 501);
-  assert.equal(f.calls.filter(c => c.name === "send_message_to_thread" || c.name === "create_thread").length, 0);
-});
-
-test("Hermes slash selection and new-chat requests share the same registry without stopping the old task", async t => {
-  const f = await fixture(t, { nativeBusyDeliveryVerified: true, nativeSendFromTarget: true, hermesIngress: { ...ingressConfig } }); seedBusy(f); await f.register();
-  const list = await ingressHttp(f, "/turn", { threadId: "existing", text: "/resume", wait: false, messageId: randomUUID() });
-  assert.equal(list.body.action, "sessions_listed"); assert.equal(list.body.sessions[0].index, 0);
-  const messageId = randomUUID(); const created = await ingressHttp(f, "/threads", { messageId });
-  assert.equal((await ingressHttp(f, "/threads", { messageId })).body.thread.id, created.body.thread.id);
-  assert.equal(f.manager.state.selectedThreadId, created.body.thread.id);
-  assert.equal(f.tasks.get("existing").turns[0].status, "inProgress");
-  assert.equal(f.calls.filter(c => c.name === "create_thread").length, 1);
-});
-
 test("DSH wait responses pair every message in a shared active turn, not only its first messageId", async t => {
-  const f = await fixture(t, { nativeBusyDeliveryVerified: true, nativeSendFromTarget: true, hermesIngress: { ...ingressConfig } }); seedBusy(f); await f.register();
+  const f = await fixture(t, { nativeBusyDeliveryVerified: true, nativeSendFromTarget: true }); seedBusy(f); await f.register();
   const inputs = [req("first"), req("second")]; for (const input of inputs) await f.manager.message(input);
   await f.manager.scan(); f.finish(); await f.manager.scan();
   const results = await Promise.all(inputs.map(r => f.manager.waitResult(r.messageId, "existing")));
@@ -939,32 +786,16 @@ test("DSH wait responses pair every message in a shared active turn, not only it
   assert.deepEqual(results.map(r => r.messageId), inputs.map(r => r.messageId));
 });
 
-test("Hermes receives public progress through unchanged report fields and the compatibility heartbeat port", async t => {
-  const f = await fixture(t, { hermesIngress: { ...ingressConfig }, xiliu: { enabled: true, url: "http://hermes.test", includeProgress: true } }); await f.register();
-  await f.manager.message(req("task"));
-  f.tasks.get("existing").turns.at(-1).items.push({ type: "reasoning", text: "PRIVATE" }, { type: "agentMessage", phase: "commentary", text: "公开过程" });
-  await f.manager.scan(); await f.manager.reportTask;
-  f.finish(); await f.manager.scan(); await f.manager.reportTask; await f.manager.flushReports(); await f.manager.heartbeat();
-  const reports = f.reports.filter(r => r.url.endsWith("/report"));
-  assert.deepEqual(reports.map(r => r.body.type), ["command", "progress", "reply"]);
-  assert.deepEqual(Object.keys(reports[1].body).sort(), ["content", "machine", "thread_id", "type"]);
-  assert.equal(reports[1].body.content, "公开过程"); assert.ok(!JSON.stringify(f.reports).includes("PRIVATE"));
-  assert.equal(f.reports.find(r => r.url.endsWith("/heartbeat")).body.detail.port, f.manager.hermesIngress.config.port);
-  const server = f.manager.hermesIngress.server; await f.manager.close(); assert.equal(server.listening, false);
-});
-
-test("resume forwards only the selected chat's progress and final reply without stopping other chats or their Hermes reports", async t => {
-  const f = await fixture(t, { xiliu: { enabled: true, url: "http://hermes.test", includeProgress: true } }); await f.register();
+test("resume forwards only the selected chat's progress and final reply without stopping other chats", async t => {
+  const f = await fixture(t); await f.register();
   f.tasks.set("new-selected", { thread: { id: "new-selected", title: "new-selected", cwd: f.root, updatedAt: 100 }, turns: [] });
   await f.manager.message(req("/resume")); await f.manager.message(req("/resume 0"));
   const sent = []; f.manager.notifier = { sendMessage: async (text, options) => { sent.push({ text, threadId: options.threadId }); return { code: 0 }; } };
   for (const id of ["existing", "new-selected"]) f.tasks.get(id).turns.push({ id: "output-" + id, status: "completed", items: [
     { id: "progress", type: "agentMessage", phase: "commentary", text: "progress-" + id },
     { id: "final", type: "agentMessage", phase: "final_answer", text: "final-" + id } ] });
-  await f.manager.scan(); await f.manager.reportTask; await f.manager.tail;
+  await f.manager.scan(); await f.manager.tail;
   assert.deepEqual(sent, [{ text: "progress-new-selected", threadId: "new-selected" }, { text: "final-new-selected", threadId: "new-selected" }]);
-  assert.deepEqual(f.reports.filter(r => r.url.endsWith("/report")).map(r => r.body.content),
-    ["progress-existing", "final-existing", "progress-new-selected", "final-new-selected"]);
   assert.ok(f.manager.state.events.some(e => e.threadId === "existing" && e.type === "turn.completed"));
   await f.manager.message(req("/switch existing")); await f.manager.scan();
   assert.equal(sent.length, 2, "Suppressed old output must not replay on switching back");
@@ -1027,19 +858,16 @@ test("existing native task registration is idempotent and workspace constrained"
   await assert.rejects(f.register("outside"), e => e.status === 422 && e.body.detail.includes("仍未受 Bridge 管理"));
 });
 
-test("send becomes a real native followup, matching started/completed events and unchanged Hermes reports", async t => {
-  const f = await fixture(t, { xiliu: { enabled: true, url: "http://hermes.test" } }); await f.register();
+test("send becomes a real native followup with matching started and completed events", async t => {
+  const f = await fixture(t); await f.register();
   const request = req("训练员测试消息"); const accepted = await f.manager.message(request);
   assert.equal(accepted.action, "dispatch_pending");
-  await f.manager.scan(); f.finish(); await f.manager.scan(); await f.manager.flushReports();
+  await f.manager.scan(); f.finish(); await f.manager.scan();
   const events = f.manager.state.events.filter(e => e.messageId === request.messageId);
   assert.equal(events.filter(e => e.type === "turn.started").length, 1);
   assert.equal(events.filter(e => e.type === "turn.completed").length, 1);
   const last = await f.http("/threads/existing/last-turn");
   assert.equal(last.body.lastUserText, "训练员测试消息"); assert.equal(last.body.lastResult, "桌面回复");
-  assert.deepEqual(f.reports.map(r => r.body.type), ["command", "reply"]);
-  assert.deepEqual(Object.keys(f.reports[0].body).sort(), ["content", "machine", "thread_id", "type"]);
-  assert.equal(f.reports[0].url, "http://hermes.test/report");
   assert.equal((await f.manager.message(request)).duplicate, true);
   assert.equal(f.calls.filter(c => c.name === "send_message_to_thread").length, 1);
 });
@@ -1063,18 +891,17 @@ test("idempotent retries ignore JSON key order and retain legacy persisted recei
 });
 
 test("native prompt is the exact original text; identifiers stay backstage even for a fast completed turn", async t => {
-  const f = await fixture(t, { xiliu: { enabled: true, url: "http://hermes.test" } }); await f.register();
+  const f = await fixture(t); await f.register();
   const request = req("  训练员原文\n第二行：🙂 </input> 标签也保留  ", { source: "trainer" });
   await f.manager.message(request);
   const call = f.calls.findLast(c => c.name === "send_message_to_thread");
   assert.deepEqual(call.args, { threadId: "existing", prompt: request.text });
   assert.ok(!call.args.prompt.includes(request.messageId));
-  f.finish(); await f.manager.scan(); await f.manager.scan(); await f.manager.flushReports();
+  f.finish(); await f.manager.scan(); await f.manager.scan();
   const paired = f.manager.state.events.filter(e => e.messageId === request.messageId);
   assert.equal(paired.filter(e => e.type === "turn.started").length, 1);
   assert.equal(paired.filter(e => e.type === "turn.completed").length, 1);
   assert.equal(f.manager.state.events.filter(e => e.type === "message.observed").length, 0);
-  assert.deepEqual(f.reports.map(r => r.body.content), [request.text, "桌面回复"]);
 });
 
 test("identical queued messages still have independent native turns and receipts", async t => {
@@ -1247,8 +1074,8 @@ test("mixed-content burst preserves individual receipts and FIFO without waiting
   assert.deepEqual(f.manager.state.sessions.existing.pendingInputs, []);
 });
 
-test("partial identical input readback never holds a later write or duplicates the Hermes report", async t => {
-  const f = await fixture(t, { nativeBusyDeliveryVerified: true, nativeSendFromTarget: true, xiliu: { enabled: true, url: "http://hermes.test" } }); seedBusy(f); await f.register();
+test("partial identical input readback never holds a later write or duplicates the native send", async t => {
+  const f = await fixture(t, { nativeBusyDeliveryVerified: true, nativeSendFromTarget: true }); seedBusy(f); await f.register();
   const original = f.manager.native; let visible = 0;
   f.manager.native = async (name, args, context) => {
     const value = await original(name, args, context);
@@ -1261,9 +1088,8 @@ test("partial identical input readback never holds a later write or duplicates t
   assert.equal(f.manager.state.events.filter(e => e.type === "message.observed").length, 0);
   assert.equal((await f.manager.message(requests[2])).action, "dispatch_pending");
   assert.equal(f.calls.filter(c => c.name === "send_message_to_thread").length, 3);
-  visible = 3; await f.manager.scan(); await f.manager.flushReports();
+  visible = 3; await f.manager.scan();
   assert.deepEqual(f.manager.state.events.filter(e => e.type === "turn.steered").map(e => e.messageId), requests.map(r => r.messageId));
-  assert.equal(f.reports.filter(r => r.body.type === "command").length, 3);
 });
 
 test("a slow background poll does not hold the ingress writer lock", async t => {
@@ -1435,7 +1261,7 @@ test("active fork source returns source_turn_active with original messageId and 
 });
 
 test("native trainer composer input is synchronized once, without being dispatched again", async t => {
-  const f = await fixture(t, { xiliu: { enabled: true, url: "http://hermes.test" } }); await f.register();
+  const f = await fixture(t); await f.register();
   f.tasks.get("existing").turns.push({ id: "trainer-turn", status: "completed", items: [
     { type: "userMessage", content: [{ type: "text", text: "训练员原生插话" }] },
     { type: "reasoning", content: ["PRIVATE_REASONING"], summary: ["not needed"] },
@@ -1842,7 +1668,7 @@ test("integration diagnostics are authenticated and contain no credentials", asy
 });
 
 test("explicit image recovery is authenticated, binding-pinned, original-UUID only and updates the auto receipt", async t => {
-  const f = await fixture(t, { feishu: { chatId: "oc_test" }, hermesIngress: ingressConfig }); await f.register();
+  const f = await fixture(t, { feishu: { chatId: "oc_test" } }); await f.register();
   f.manager.notifier = { enabled: true, chatId: "oc_test" };
   const messageId = randomUUID(), body = { imagePath: path.join(f.root, "public.png"), threadId: "existing", messageId };
   const entry = { messageId, threadId: "existing", bindingEpoch: f.manager.state.selectionEpoch, status: "failed", error: "image_send_outcome_unknown", completedAt: 1 };
@@ -1853,7 +1679,6 @@ test("explicit image recovery is authenticated, binding-pinned, original-UUID on
     return { messageId, feishuMessageId: "om_recovered", status: "sent", duplicate: calls > 1 };
   };
   assert.equal((await f.http("/bridge/images/recover", body, "POST", "wrong")).status, 401);
-  assert.equal((await ingressHttp(f, "/bridge/images/recover", body)).status, 404);
   assert.equal((await f.http("/bridge/images/recover", { ...body, force: true })).status, 400);
   assert.equal((await f.http("/bridge/images/recover", { ...body, messageId: randomUUID() })).status, 409);
   assert.equal(calls, 0);

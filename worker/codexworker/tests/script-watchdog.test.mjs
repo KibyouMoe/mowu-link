@@ -153,7 +153,7 @@ test("desktop-bridge remedies require exact name, machine and mode and never dis
   t.after(() => rm(stateDir, { recursive: true, force: true }));
   const tokenFile = path.join(stateDir, "test.token");
   await writeFile(tokenFile, "isolated-desktop-bridge-test-token-123456789");
-  const config = { tokenFile, bridgeName: "CodexWorker", machine: "codexworker", hermesIngress: { enabled: true }, xiliu: { enabled: true } };
+  const config = { tokenFile, bridgeName: "CodexWorker", machine: "codexworker" };
   const configPath = path.join(stateDir, "desktop-config.local.json");
   await writeFile(configPath, JSON.stringify(config));
   const health = { name: "CodexWorker", machine: "codexworker", integrationMode: "desktop-native", operatingMode: "desktop-bridge" };

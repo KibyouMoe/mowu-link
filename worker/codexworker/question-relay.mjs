@@ -38,7 +38,7 @@ export function questionText(request, bridgeName) {
     lines.push("", request.questions.length > 1 ? `${index + 1}. ${q.title}` : q.title);
     q.options?.forEach((option, i) => lines.push(`${i + 1}）${option}`));
   });
-  lines.push("", "可以直接在飞书或溪流回复选项编号或答案文字，无需打开 Codex 提问面板。");
+  lines.push("", "可以直接在飞书回复选项编号或答案文字，无需打开 Codex 提问面板。");
   return lines.join("\n");
 }
 
@@ -75,7 +75,7 @@ export class QuestionRelay {
     return { questionId: id, threadId: q.threadId, questions: q.questions, status: s?.status ?? "legacy",
       sourceTurnId: s?.sourceTurnId ?? null, answers: s?.answers ?? null,
       reason: s?.reason ?? null, cardUpdated: Boolean(s?.messageId && s.patchedRevision === s.revision),
-      feishu: q.feishuSent ? "sent" : "pending", hermes: q.hermesStored ? "stored" : q.hermesQueued ? "queued" : "unavailable" };
+      feishu: q.feishuSent ? "sent" : "pending" };
   }
   status() {
     const entries = Object.values(this.state.entries);
@@ -117,13 +117,7 @@ export class QuestionRelay {
       record ??= m.state.publicQuestions[request.questionId] = { ...request, hash, createdAt: new Date().toISOString(),
         boundSourceTurnId: sourceTurnId, bindingEpoch: m.state.selectionEpoch,
         chatId: m.session(request.threadId).feishuChatId ?? m.config.feishu.chatId ?? null,
-        text: questionText(request, m.config.bridgeName), feishuSent: false, hermesQueued: false, hermesStored: false };
-      if (m.config.xiliu?.enabled && m.config.xiliu.url && !record.hermesQueued) {
-        // Keep the original four-field report contract. Queue and receipt share
-        // one durable state write; exact retries cannot enqueue a second report.
-        m.state.outbox.push({ machine: m.config.bridgeName, thread_id: request.threadId, type: "progress", content: record.text });
-        record.hermesQueued = true;
-      }
+        text: questionText(request, m.config.bridgeName), feishuSent: false };
       await m.save();
     });
     let action = this.state.entries[request.questionId];
@@ -149,11 +143,8 @@ export class QuestionRelay {
         await m.serial(async () => { record.feishuSent = true; await m.save(); });
       }
     }
-    await m.reportTask;
-    await m.flushReports();
     return { questionId: request.questionId, threadId: request.threadId, duplicate,
       feishu: record.feishuSent ? "sent" : m.notifier && record.chatId ? "pending" : "unavailable",
-      hermes: record.hermesStored ? "stored" : record.hermesQueued ? "queued" : "unavailable",
       detail: "Only explicit public question text/options were published. Channel acceptance is not a human/agent read receipt; plain-text answers arrive through the normal native message ingress." };
   }
 
@@ -312,17 +303,6 @@ export class QuestionRelay {
         const revision = s.revision;
         const result = await m.notifier.updateQuestionCard(s.messageId, questionCard(q, s, m.config.bridgeName), { threadId: q.threadId }).catch(() => null);
         await this.serial(async () => { if (result?.code === 0) { s.patchedRevision = revision; s.retryPatchAt = null; } else s.retryPatchAt = Date.now() + 10000; await this.save(); });
-      }
-      if (!m.closed && !m.handoffPaused && !["open", "answer_pending", "dispatching"].includes(s.status) && m.config.xiliu?.enabled && m.config.xiliu.url) {
-        await m.serial(async () => {
-          if (q.lifecycleReportedStatus === s.status) return;
-          const label = { answered: "已回答", expired: "已过期", canceled: "已取消", rejected: "答案未投递", answer_unknown: "投递结果待核实，不自动重发" }[s.status];
-          const content = `${m.config.bridgeName}提问 ${id.slice(0, 8)} · ${label}\n` + q.questions.map((q, i) =>
-            `${i + 1}）${q.title}${q.options ? "\n" + q.options.map((o, j) => `${j + 1}）${o}`).join("\n") : ""}${s.answers?.[i] ? "\n所选答案：" + s.answers[i] : ""}`).join("\n\n");
-          // Same durable outbox/receipt write, same existing four-field contract.
-          m.state.outbox.push({ machine: m.config.bridgeName, thread_id: q.threadId, type: "progress", content });
-          q.lifecycleReportedStatus = s.status; await m.save();
-        });
       }
     }
   }

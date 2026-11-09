@@ -2,8 +2,9 @@
 
 0.2.38 是 DSH 接口的 **desktop-native 分阶段移植**，不是另一套 Codex 会话宿主。
 所有会话写入使用客户端注入的原生任务工具；公开输出增量读取已核验的本机 Desktop
-完成事件日志。没有启动 Codex 可执行文件或第二个模型宿主的代码。
-Hermes 的 `/report`、`/heartbeat` 请求字段保持 DSH 原样，服务端无需为此修改。
+完成事件日志。没有启动 Codex 可执行文件或第二个模型宿主的代码。本版本已清空与
+Hermes/溪流通信的旧层（入站入口与 `/report`、`/heartbeat` 上报），只保留 Desktop
+原生任务与飞书。
 
 0.2.1 修复原生调用缺少 `callerSource: "codex"` 的兼容问题；依据本机官方
 `codex-app-tools 0.1.5` 包装的实际请求形状。该字段缺失时可以列出工具，但调用会被
@@ -106,11 +107,9 @@ Hermes 的 `/report`、`/heartbeat` 请求字段保持 DSH 原样，服务端无
   scripts/check-desktop-health.mjs，可供独立于Bridge进程的5分钟会话巡检调用。
   详见[主动看门狗验收](../../references/connection-watchdog-validation-20261021.md)。
 - 0.2.26新增飞书本机监控模式`operatingMode=feishu-local`：飞书使用本机Codex
-  原生适配器，Hermes局域网入口、远端上报/心跳、相关凭据和旧待发队列均不参与
-  启动或发送；待发队列保留。示例为`desktop-config.feishu-local.example.json`，
-  原配置另行本机备份，活动配置不留Hermes地址/凭据引用。默认`desktop-bridge`
-  保留旧组合方式，可选入口遇到明确地址/端口绑定错误时记录固定错误码，不关闭
-  本地服务，不改绑地址或放宽Token/peer门禁；配置错误仍拒绝。模式变更走正常
+  原生适配器，不包含 Hermes 局域网入口或远端上报/心跳。示例为
+  `desktop-config.feishu-local.example.json`，原配置另行本机备份。默认`desktop-bridge`
+  保留同一原生适配器组合方式；配置错误仍拒绝。模式变更走正常
   全业务交接，固定启动层保持0.2.23。详见
   [外出网络下的本机飞书监控验收](../../references/feishu-local-monitor-validation-20261020.md)。
 - 0.2.25修复大历史会话无法/resume切换：识别原生历史读取上限及RPC层尺寸错误，
@@ -272,8 +271,8 @@ Hermes 的 `/report`、`/heartbeat` 请求字段保持 DSH 原样，服务端无
   独立 `image-output-state.json` 保存字节/目标指纹与回执，操作租约避免并发覆盖；
   精确重试不重复发图，变更内容返回 conflict，未知结果不自动重试。结果 sent 是
   API 接受，不等于人已打开。上传后及实际发送前复核选择，不向新会话误派。
-- 0.2.12 将 0.2.11 的图片模块热加载扩为**全业务代际热加载**：飞书收发、Hermes
-  上报/入站、命令、会话调度、公开提问、图片及 MCP 业务处理都在同一可替换业务层。
+- 0.2.12 将 0.2.11 的图片模块热加载扩为**全业务代际热加载**：飞书收发、
+  命令、会话调度、公开提问、图片及 MCP 业务处理都在同一可替换业务层。
   只固定启动/生命周期、stdio 传输及热加载器；不启动另一个 Codex 或模型。
   `bridge_reload_business_modules`、鉴权 loopback
   `POST /bridge/runtime/reload`（空对象），`GET /bridge/runtime` 查实际哈希/业务版本。
@@ -308,7 +307,7 @@ Hermes 的 `/report`、`/heartbeat` 请求字段保持 DSH 原样，服务端无
   查询列表不改变绑定。
 - 2026-10-04 业务修复：飞书只转发当前选中会话的公开过程、最终回复与 Hermes
   输入回显，`/resume`、`/switch`、`/new`、`/clear` 的选择均沿用同一目标。
-  未选中会话继续执行、记录终态和按原合同上报 Hermes，但不向飞书混发；再次切回
+  未选中会话继续执行并记录终态，但不向飞书混发；再次切回
   不重放被屏蔽的旧输出。Token 等待、长正文分块和鉴权重试前也复核选择。
   切换前已开始的 HTTP 请求可能稍后到达，不能撤回它冒充严格零在途；不会继续
   开始发送旧会话的新内容。鉴权 health 的 `capabilities.feishuOutputRouting` 为
@@ -360,22 +359,10 @@ Hermes 的 `/report`、`/heartbeat` 请求字段保持 DSH 原样，服务端无
   卡片不清除较晚输入的表情；命令完成、拒绝与原生终态仍作为清理兜底。
   Reaction 添加较慢时也记住清理要求；表情 API 失败不阻止原生消息调度。
 - `/bridge/integrations` 提供鉴权后的真实连接状态；
-  `POST /bridge/integrations/reload` 只重读机器配置中的飞书/上报，不重启原生任务。
-- 0.2.7 可显式开启受限 Hermes 入站，复用 DSH 的 `/health`、`/threads`、`/turn`
-  和已有鉴权文件；这是训练员选择的 native-messaging 分阶段入口，不是 strict manager
-  降级。原生后台、选中会话和收发记录与飞书入口共用，无独立会话运行入口。
-  只绑定明确的私有 IPv4；按 socket 来源精确白名单鉴权，不相信转发头。入口不开放
-  `/manager/*`、配置重载或任意任务登记。GET /threads 只返回飞书当前选中的聊天；
-  旧 ID/未知 ID 不回落。已接受消息的幂等重试仍可取首次结果，不产生新写入。
-- Hermes 普通消息缺省 steer，支持 wait=false 的即时接受与 wait=true 的终态结果；
-  同一活动 turn 中多条消息均可关联完成结果。支持既有斜杠命令，但硬 Stop/compact
-  及逐 turn safetyMode/cwd 覆盖仍明确拒绝，不把原有 DSH 安全参数偷偷忽略。
-- `xiliu.includeProgress:true` 时公开过程也按原有四字段 `/report` 上报，type 为 progress；
-  command/reply 保持不变。心跳的 detail.port 指向启用的 Hermes 入口；没有增加服务器
-  路由或复制私有 reasoning。默认此项关闭，原 profile 不受影响。
+  `POST /bridge/integrations/reload` 只重读机器配置中的飞书，不重启原生任务。
 - 0.2.8 增加 `bridge_publish_question` / loopback `POST /bridge/questions`：明确发布
-  完整公开提问和选项到飞书 `CodexWorker-提问` 卡片及现有 Hermes progress 上报。每个
-  questionId UUIDv4 持久化，精确重试不重复已成功发送；失败给 pending/queued/unavailable，
+  完整公开提问和选项到飞书 `CodexWorker-提问` 卡片。每个
+  questionId UUIDv4 持久化，精确重试不重复已成功发送；失败给 pending/unavailable，
   不假装已送达。该出口不启动原生 turn，不向 LAN 开放。外部文字回答走普通入站。
   原生历史不含 Codex 提问面板，所以这是显式提问出口，不能声称自动拦截所有旧面板。
   插件 instructions 与技能要求外部对话先用此出口，不以 Codex-only 面板作为唯一提问。
@@ -477,19 +464,6 @@ writer 是否完成版本替换是两项独立检查。下次正常重载仍由�
 `bridge_register_current_task` 登记当前原生聊天（或明确授权的目标/hostId），不 fork，
 不发送消息。`bridge_message` 使用同一管理入口处理消息与命令。模型调用它给其他
 任务发消息前仍必须取得训练员授权；Hermes 通过已配置 Token 调用 HTTP 的权限单独管理。
-
-不要直接启用公网监听。LAN 入口绑定明确的私有地址，以 socket 来源白名单和 Bearer
-双重限制访问。当前机器已有 8902 入站允许规则；只读核对未见来源限制，不把它描述
-成受限防火墙。本轮不新增或扩展防火墙规则，不设置公网映射，不在普通聊天传 Token。
-有权限时可进一步收窄既有防火墙来源，但不能将此操作当成当前已完成的事实。
-
-Hermes 分阶段入口见 `hermesIngress` 示例配置，缺省关闭。只在训练员明确选择这一
-消息能力范围后开启；其 /health 额外给出 integrationProfile=dsh-compatible-desktop-native、
-messagingReady 与 selectedThreadId，完整 managerReady/nativeTaskReady 仍 false。
-Hermes 应显式使用这个 profile，不能修改严格 manager 客户端的门禁或自动 fallback。
-历史配置可能共用 DSH 与本机 token；入口的路由隔离不能依赖“token 一定不同”。秘密
-值只从外部文件读取，不发普通聊天，也不进状态/日志/源码。首轮先 GET /threads
-复核当前目标，不创建新收件箱。不要声称仅靠本机 HTTP 测试已完成溪流主动联调。
 
 ## 验证
 

@@ -8,14 +8,13 @@ import path from "node:path";
 import os from "node:os";
 import { FeishuNotifier, FeishuStreamBeat, FeishuWebsocketClient } from "./feishu.mjs";
 import { localHost, nativeSendSource } from "./native-dispatch.mjs";
-import { HermesIngress, HERMES_PROFILE } from "./hermes-ingress.mjs";
 import { QuestionRelay, QuestionRelayError } from "./question-relay.mjs";
 import { cacheFeishuImage, imagePrompt } from "./feishu-images.mjs";
 import { FeishuOnlineAnnouncement } from "./online-announcement.mjs";
 import { BusinessRuntime, BusinessRuntimeError } from "./business-runtime.mjs";
 import { PublicImageRelay, splitPublicMarkdown } from "./public-image-relay.mjs";
 import { hydrateNativeInputs, readNativeWindow } from "./native-history.mjs";
-import { operatingConfig, optionalIngressFailure } from "./integration-profile.mjs";
+import { operatingConfig } from "./integration-profile.mjs";
 import { resumeCandidates } from "./resume-candidates.mjs";
 import { publicProgress, nativeTaskState } from "./native-progress.mjs";
 import { LocalPublicJournal } from "./local-public-journal.mjs";
@@ -80,10 +79,10 @@ export class DesktopManager {
     this.fetch = fetchImpl;
     this.config = operatingConfig({ host: "127.0.0.1", port: 8903, bridgeName: "CodexWorker", machine: "codexworker",
       pollMs: 1000, turnTimeoutMs: 600000, workspaceRoots: [], projectId: null,
-      xiliu: { enabled: false }, feishu: {}, ...config });
+      feishu: {}, ...config });
     this.statePath = path.join(stateDir, "desktop-manager-state.json");
     this.state = { version: 1, seq: 0, replayFloor: 0, nextName: 1, selectedThreadId: null,
-      sessions: {}, receipts: {}, events: [], outbox: [], feishuReceipts: {}, selectionEpoch: 0, autoImages: {} };
+      sessions: {}, receipts: {}, events: [], feishuReceipts: {}, selectionEpoch: 0, autoImages: {} };
     this.tail = Promise.resolve(); this.clients = new Set(); this.connected = false;
     this.nativeInputCache = new Map();
     this.nativeHistoryWindows = new Map();
@@ -92,11 +91,10 @@ export class DesktopManager {
     this.taskJournal = new LocalPublicJournal(this.publicJournal.root);
     this.taskJournalTails = new Map();
     this.resumeMetadata = () => readLocalResumeCatalog(config.codexHome ?? path.dirname(path.dirname(stateDir)));
-    this.closed = false; this.reportRunning = false; this.pollRunning = false;
+    this.closed = false; this.pollRunning = false;
     this.relayStartedAt = new Date().toISOString();
-    this.reportTask = null;
     this.backgroundTasks = new Set(); this.serialPending = 0; this.nativeOperations = 0; this.httpOperations = 0;
-    this.heartbeatOperations = 0; this.handoffPaused = false;
+    this.handoffPaused = false;
     this.handoff = { phase: "running", error: null, startedAt: null };
     this.inboxPath = path.join(stateDir, "feishu-inbox.json"); this.inbox = { version: 1, entries: {} };
     this.inboxTail = Promise.resolve(); this.inboxRunning = new Set();
@@ -106,9 +104,6 @@ export class DesktopManager {
     this.onlineAnnouncement = new FeishuOnlineAnnouncement(this);
     this.businessRuntime = new BusinessRuntime({ stateDir });
     this.publicImageRelay = new PublicImageRelay(this);
-    const x = this.config.xiliu;
-    this.config.xiliu = { ...x, heartbeatIntervalMs: x.heartbeatIntervalMs ?? x.heartbeatInterval ?? 60000,
-      timeoutMs: x.timeoutMs ?? x.timeout ?? 8000 };
   }
 
   serial(fn) {
@@ -128,10 +123,10 @@ export class DesktopManager {
   }
 
   hotBlockers() {
-    return { poll: Number(this.pollRunning), reports: Number(this.reportRunning), serial: this.serialPending,
+    return { poll: Number(this.pollRunning), serial: this.serialPending,
       native: this.nativeOperations, http: this.httpOperations, images: this.imageOperations ?? 0,
       background: this.backgroundTasks.size, inputs: this.feishuInputs.size,
-      reactions: this.feishuReactionTasks.size, heartbeat: this.heartbeatOperations };
+      reactions: this.feishuReactionTasks.size };
   }
 
   hotHandoffStatus() {
@@ -244,7 +239,7 @@ export class DesktopManager {
     if (this.state?.version !== 1 || !this.state.sessions || !this.state.receipts ||
         typeof this.state.sessions !== "object" || Array.isArray(this.state.sessions) ||
         typeof this.state.receipts !== "object" || Array.isArray(this.state.receipts) ||
-        !Array.isArray(this.state.events) || !Array.isArray(this.state.outbox)) {
+        !Array.isArray(this.state.events)) {
       fail(503, "manager_state_corrupt", "Durable Bridge state failed validation; the original file is preserved.", false);
     }
     this.stateLoaded = true;
@@ -336,10 +331,7 @@ export class DesktopManager {
           historyWindow: selected.historyWindow ?? null } : null,
         inboxPending: Object.keys(this.inbox.entries).length,
         trainerWhitelistCount: this.config.feishu.trainerOpenIdWhitelist?.length ?? 0,
-        onlineNotice: this.onlineAnnouncement.status(), publicImages: this.publicImageRelay.status(), questions: this.questions.status() },
-      xiliu: { enabled: Boolean(this.config.xiliu?.enabled && this.config.xiliu.url) },
-      hermesIngress: this.hermesIngress ? { ...this.hermesIngress.status(), lastError: this.hermesIngressError ?? null }
-        : { enabled: false, listening: false } };
+        onlineNotice: this.onlineAnnouncement.status(), publicImages: this.publicImageRelay.status(), questions: this.questions.status() } };
   }
 
   imageTarget(threadId) {
@@ -420,15 +412,7 @@ export class DesktopManager {
     this.config.feishu = { appId: secret.app_id, appSecret: secret.app_secret,
       chatId: secret.chat_id ?? secret.trainer_chat_id,
       trainerOpenIdWhitelist: secret.trainer_open_id ? [secret.trainer_open_id] : [], ...f };
-    const x = configured.xiliu ?? { enabled: false };
-    this.config.xiliu = { ...x, heartbeatIntervalMs: x.heartbeatIntervalMs ?? x.heartbeatInterval ?? 60000,
-      timeoutMs: x.timeoutMs ?? x.timeout ?? 8000 };
     this.configureIntegrations();
-    clearInterval(this.heartbeatTimer);
-    if (this.config.xiliu.enabled) {
-      this.heartbeatTimer = setInterval(() => { void this.heartbeat(); }, this.config.xiliu.heartbeatIntervalMs);
-      this.heartbeatTimer.unref();
-    }
     return this.integrationStatus();
   }
 
@@ -880,7 +864,6 @@ export class DesktopManager {
     if (receipt) receipt.nativeDispatch.status = "accepted";
     if (request.source === "trainer") this.touchSession(session.threadId, request.trainerActivityAt);
     await this.emit("message.dispatched", request, { delivery: active ? "native-busy-followup" : snapshot.deliveryContract ? "native-followup-state-independent" : "native-followup", pendingTurnReadback: !acceptedWithoutHistory });
-    await this.enqueueReport(session.threadId, "command", request.text);
     if (this.notifier && request.source === "hermes" && session.threadId === this.state.selectedThreadId) void this.notifier.sendMessage(request.text,
       { title: `${this.config.bridgeName}-任务`, threadId: session.threadId, chatId: session.feishuChatId }).catch(() => {});
     return { action: "dispatch_pending", session: clone(session) };
@@ -1176,19 +1159,15 @@ export class DesktopManager {
             } else if (!boundPlain && !unconfirmedPlain && (item.kind === "trainer" || item.kind === "delegated")) {
               const messageId = randomUUID();
               await this.emit("message.observed", { targetThreadId: id, messageId, source: "trainer" }, { text: item.text, origin: "desktop-native-composer", alreadyDispatched: true }, { turnId: item.turnId });
-              await this.enqueueReport(id, "command", item.text);
             } else if (item.kind === "assistant") {
               const delta = old && item.text.startsWith(old.text) ? item.text.slice(old.text.length) : item.text;
               const ids = session.turnMessages[item.turnId] ?? [];
               await this.emit(item.final ? "item.completed" : "item.delta", { targetThreadId: id, source: "codex", messageId: ids[0] ?? null },
                 { text: delta, snapshot: item.text, phase: item.final ? "final_answer" : "commentary", messageIds: ids }, { turnId: item.turnId });
-              if (!item.final && this.config.xiliu.includeProgress) await this.enqueueReport(id, "progress", delta);
               const inlineMedia = splitPublicMarkdown(item.final ? item.text : delta).some(part => part.type === "image");
               if (inlineMedia && this.notifier && id === this.state.selectedThreadId) {
                 this.enqueuePublicText(session, item.turnId, item.key, item.final ? item.text : delta, imageBindingEpoch, item.final, [...ids]);
-                if (item.final) await this.enqueueReport(id, "reply", item.text);
               } else if (item.final) {
-                await this.enqueueReport(id, "reply", item.text);
                 if (this.notifier && id === this.state.selectedThreadId) void this.notifier.sendMessage(item.text,
                   { title: `${this.config.bridgeName}-回复`, threadId: id, chatId: session.feishuChatId }).catch(() => {});
               } else if (this.notifier && id === this.state.selectedThreadId && this.config.feishu.streamEnabled !== false) {
@@ -1234,7 +1213,6 @@ export class DesktopManager {
           await this.save();
         }); } catch (error) { await this.relayFailed(id, error); }
       }
-      this.reportTask = this.flushReports().catch(() => console.error("[bridge] Report outbox persistence failed."));
       this.publicImageRelay.kick();
     } finally { this.pollRunning = false; }
   }
@@ -1276,7 +1254,6 @@ export class DesktopManager {
         }
         await this.emit(final ? "item.completed" : "item.delta", { targetThreadId: id, source: "codex" },
           { text: delta, snapshot: item.text, phase: item.phase, readSource: "desktop-public-journal" }, { turnId });
-        if (final || this.config.xiliu.includeProgress) await this.enqueueReport(id, final ? "reply" : "progress", item.text);
       }
       session.publicJournalCheckpoint = batch.checkpoint;
       session.activeTurnId = activeTurn(observation)?.id ?? null;
@@ -1464,7 +1441,6 @@ export class DesktopManager {
         await this.emit(item.final ? "item.completed" : "item.delta", { targetThreadId: id, source: "codex", messageId: ids[0] ?? null },
           { text: delta, snapshot: item.text, phase: item.final ? "final_answer" : "commentary", messageIds: ids,
             readSource: "native-progress", historyLimited: true }, { turnId: item.turnId });
-        if (item.final || this.config.xiliu.includeProgress) await this.enqueueReport(id, item.final ? "reply" : "progress", item.text);
         session.seen[key] = { text: item.text, hash: digest(item.text) };
         if (this.notifier && (item.final || this.config.feishu.streamEnabled !== false)) {
           delivery = { key, uuid: randomUUID(), text: item.final ? item.text : delta, threadId: id, chatId: session.feishuChatId,
@@ -1499,46 +1475,6 @@ export class DesktopManager {
     });
     // Do not correlate/replay inputs, dispatch queues, mark turns completed or
     // discover images from this intentionally incomplete native snapshot.
-  }
-
-  async enqueueReport(threadId, type, content) {
-    if (!this.config.xiliu?.enabled || !this.config.xiliu.url) return;
-    // Exact existing Hermes report fields; no server changes are required.
-    this.state.outbox.push({ machine: this.config.bridgeName, thread_id: threadId, type, content });
-    await this.save();
-  }
-
-  async flushReports() {
-    if (!this.config.xiliu?.enabled || !this.config.xiliu.url || this.reportRunning || !this.state.outbox.length || this.closed || this.handoffPaused) return;
-    this.reportRunning = true;
-    try {
-      while (this.config.xiliu?.enabled && this.config.xiliu.url && this.state.outbox.length && !this.closed && !this.handoffPaused) {
-        const report = clone(this.state.outbox[0]);
-        try {
-          const response = await this.fetch(`${this.config.xiliu.url.replace(/\/$/, "")}/report`, {
-            method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(report),
-            signal: AbortSignal.timeout(this.config.xiliu.timeoutMs ?? 8000) });
-          if (!response.ok) break;
-        } catch { break; }
-        await this.serial(async () => {
-          for (const question of Object.values(this.state.publicQuestions ?? {})) {
-            if (question.threadId === report.thread_id && question.text === report.content && report.type === "progress") question.hermesStored = true;
-          }
-          this.state.outbox.shift(); await this.save();
-        });
-      }
-    } finally { this.reportRunning = false; }
-  }
-
-  async heartbeat() {
-    const x = this.config.xiliu;
-    if (!x?.enabled || !x.url || this.closed || this.handoffPaused || this.heartbeatOperations) return;
-    this.heartbeatOperations++;
-    try { await this.fetch(`${x.url.replace(/\/$/, "")}/heartbeat`, { method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ machine: this.config.bridgeName, name: this.config.bridgeName,
-        detail: { workspace: this.config.workspaceRoots[0], port: this.hermesIngress?.server?.listening ? this.hermesIngress.config.port : this.config.port, pid: process.pid } }), signal: AbortSignal.timeout(x.timeoutMs ?? 8000) }); }
-    catch { /* Side channel never changes native turn outcome. */ }
-    finally { this.heartbeatOperations--; }
   }
 
   async receiveFeishu(event) {
@@ -1685,23 +1621,8 @@ export class DesktopManager {
       this.server.once("error", reject); this.server.listen(this.config.port, this.config.host, resolve);
     });
     this.config.port = this.server.address().port;
-    if (this.config.hermesIngress?.enabled) {
-      this.hermesIngress = new HermesIngress(this, this.config.hermesIngress);
-      try { await this.hermesIngress.start(); }
-      catch (error) {
-        const code = optionalIngressFailure(error); if (!code) throw error;
-        this.hermesIngressError = code;
-        await this.hermesIngress.close();
-        // Changing Wi-Fi or an occupied optional LAN port must not take down
-        // local Feishu. Never bind another address or relax its peer/token gates.
-      }
-    }
     this.pollTimer = setInterval(() => { void this.scan().catch(() => console.error("[bridge] Native synchronization failed.")); }, this.config.pollMs);
     this.pollTimer.unref();
-    if (this.config.xiliu?.enabled) {
-      this.heartbeatTimer = setInterval(() => { void this.heartbeat(); }, this.config.xiliu.heartbeatIntervalMs ?? 60000);
-      this.heartbeatTimer.unref();
-    }
     this.questions.start();
     return `http://${this.config.host}:${this.config.port}`;
   }
@@ -1724,21 +1645,6 @@ export class DesktopManager {
         fail(503, "bridge_reloading", "Business handoff in progress; this request was not dispatched. Retry with the same messageId.", true);
       }
       if (!snapshot && !reload) { this.httpOperations++; counted = true; }
-      if (context.hermesIngress) {
-        context.hermesIngress.recordPeer(context.peerAddress);
-        const basic = ["GET /health", "GET /threads", "POST /threads", "POST /turn"].includes(`${req.method} ${url.pathname}`);
-        const nativeTask = url.pathname.match(/^\/threads\/([^/]+)(?:\/(last-turn|resume|release|unsubscribe|stop|compact))?$/);
-        const taskRoute = nativeTask && (req.method === "GET" ? [undefined, "last-turn"].includes(nativeTask[2]) :
-          req.method === "POST" && ["resume", "release", "unsubscribe", "stop", "compact"].includes(nativeTask[2]));
-        if (!basic && !taskRoute) fail(404, "not_found", "This limited ingress does not expose manager or configuration routes.");
-        if (nativeTask) {
-          const requestedId = decodeURIComponent(nativeTask[1]); this.session(requestedId);
-          if (requestedId !== this.state.selectedThreadId) fail(409, "selected_target_changed", "Refresh /threads; this ingress follows the Feishu-selected chat only.", false);
-        }
-        if (req.method === "GET" && url.pathname === "/health") return json(res, 200, { ...this.health(),
-          integrationProfile: HERMES_PROFILE, messagingReady: this.connected && Boolean(this.state.sessions[this.state.selectedThreadId]),
-          selectedThreadId: this.state.selectedThreadId });
-      }
       if (req.method === "GET" && url.pathname === "/health") return json(res, 200, this.health());
       if (req.method === "POST" && url.pathname === "/bridge/text-receipts/abandon") {
         const peer = req.socket.remoteAddress?.replace(/^::ffff:/, "");
@@ -1781,14 +1687,8 @@ export class DesktopManager {
         res.on("close", () => { clearInterval(timer); this.clients.delete(res); }); return;
       }
       if (req.method === "GET" && url.pathname === "/manager/sessions") return json(res, 200, { sessions: Object.values(this.state.sessions).map(clone), selectedThreadId: this.state.selectedThreadId });
-      if (req.method === "GET" && url.pathname === "/threads") return json(res, 200, { threads: (context.hermesIngress ? [this.session()] : Object.values(this.state.sessions)).slice(0, Math.max(1, Math.min(50, Number(url.searchParams.get("limit") ?? 50)))).map(s => ({ id: s.threadId, cwd: s.cwd, createdAt: s.createdAt, live: true, hostId: s.hostId })) });
+      if (req.method === "GET" && url.pathname === "/threads") return json(res, 200, { threads: Object.values(this.state.sessions).slice(0, Math.max(1, Math.min(50, Number(url.searchParams.get("limit") ?? 50)))).map(s => ({ id: s.threadId, cwd: s.cwd, createdAt: s.createdAt, live: true, hostId: s.hostId })) });
       if (["POST", "PATCH"].includes(req.method)) body = await readBody(req);
-      if (context.hermesIngress && body?.cwd != null) {
-        const inherited = url.pathname === "/threads" ? this.config.workspaceRoots[0] : this.session().cwd;
-        if (typeof body.cwd !== "string" || path.resolve(body.cwd).toLowerCase() !== path.resolve(inherited).toLowerCase()) {
-          fail(422, "capability_unavailable", "Native messages inherit the Desktop task workspace; this ingress cannot override cwd.");
-        }
-      }
       if (req.method === "POST" && url.pathname === "/manager/messages") return json(res, 200, await this.message(body));
       if (req.method === "POST" && url.pathname === "/manager/sessions/adopt") return json(res, 200, await this.register(body, { requireFork: body.command === "/fork" }));
       if (req.method === "POST" && url.pathname === "/threads") {
@@ -1798,10 +1698,7 @@ export class DesktopManager {
       if (req.method === "POST" && url.pathname === "/turn") {
         if (typeof body.threadId !== "string" || !body.threadId) fail(400, "invalid_request", "threadId is required.");
         this.session(body.threadId);
-        const result = await this.message(legacyRequest({ ...body, targetThreadId: body.threadId,
-          ...(context.hermesIngress ? { source: "hermes", delivery: body.delivery ?? "steer" } : {}) }),
-          { requireSelectedTarget: Boolean(context.hermesIngress) });
-        if (context.hermesIngress) context.hermesIngress.recordDelivery(result);
+        const result = await this.message(legacyRequest({ ...body, targetThreadId: body.threadId }));
         if (body.wait !== false && ["dispatch_pending", "message_queued"].includes(result.action)) {
           return json(res, 200, await this.waitResult(result.messageId, body.threadId));
         }
@@ -1834,7 +1731,7 @@ export class DesktopManager {
         }
         if (req.method === "POST" && operation === "resume") { await this.read(id, session.hostId); return json(res, 200, { thread: { id, live: true, cwd: session.cwd } }); }
         if (req.method === "POST" && operation === "stop") {
-          const result = await this.message(legacyRequest({ text: "/stop", targetThreadId: id }), { requireSelectedTarget: Boolean(context.hermesIngress) });
+          const result = await this.message(legacyRequest({ text: "/stop", targetThreadId: id }));
           return json(res, 200, { idle: result.action === "turn_already_idle" });
         }
         if (operation === "compact") fail(501, "capability_unavailable", "The Desktop native tool pipe does not expose compact; use the client's native control.");
@@ -1866,13 +1763,11 @@ export class DesktopManager {
 
   async close() {
     clearInterval(this.handoffTimer); this.handoffTimer = null;
-    this.closed = true; clearInterval(this.pollTimer); clearInterval(this.heartbeatTimer); this.ws?.stop();
+    this.closed = true; clearInterval(this.pollTimer); this.ws?.stop();
     await this.questions.close();
     this.onlineAnnouncement.reset(); await this.onlineAnnouncement.task;
     for (const client of this.clients) client.end(); this.clients.clear();
-    await this.hermesIngress?.close();
     if (this.server) await new Promise(resolve => this.server.close(resolve));
-    await this.reportTask;
     await Promise.allSettled([...this.backgroundTasks, ...this.feishuInputs.values(), ...this.feishuReactionTasks.values()]);
     await this.tail;
     await this.inboxTail;
