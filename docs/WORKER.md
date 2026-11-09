@@ -82,7 +82,22 @@ worker 自己崩溃     → LaunchAgent 拉起；重连后重新注册
 
 ---
 
-## 六、常驻方式
+## 七、路线：桥要通用化（训练员 2026-11-09 定）
+
+现在这套桥（`worker/codexworker/`，源自 Codex Desktop 插件）是**绑 Codex 的**。
+最终形态应该是：**一套桥，多个 agent 适配器**。
+
+```
+桥（共用）     会话 / 卡片 / 飞书出口 / 入站分流 / 进度节流 / 历史
+  ├─ adapter: codex   codex exec --json / resume
+  └─ adapter: dsh     dsh --profile headless --session-id
+```
+
+- 桥不认具体 agent，只认适配器接口：新建会话、续会话、读增量、列历史。
+- CodexWorker 只是「桥 + codex 适配器」的第一个实例；DSH 之后接同一个桥。
+- 所以：任何写进桥里的逻辑，都不许假定 agent 是 Codex（不许写死 `codex` 命令、Codex 的 NDJSON 字段名）。
+
+## 八、常驻方式
 
 | worker | LaunchAgent | 日志 |
 |---|---|---|
