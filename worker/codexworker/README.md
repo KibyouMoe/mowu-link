@@ -11,6 +11,16 @@ Hermes/溪流通信的旧层（入站入口与 `/report`、`/heartbeat` 上报�
 桌面端以 `Invalid app tool request` 拒绝。已通过实际 stdio 插件、注入管道和原生测试
 聊天的 HTTP→任务→事件闭环，不再仅以工具中继作为依据。
 
+## 运行方式（CLI）
+
+`bin/codexworker --port 8905` 由 `identity.json` 决定引擎：`transport: "app-server"`
+选择 `codex/transport/app-server.mjs`（`codex app-server` JSON-RPC），`stateDir` 保持
+`~/.codex/state/codexworker`。选择顺序为 `identity.transport` →
+`CODEXWORKER_NATIVE_TRANSPORT` → 拒绝启动。`cli.mjs`、`desktop-manager.mjs`、
+`mcp-business.mjs` 与 `worker/dshworker` 逐字节相同，引擎差异只经 transport 能力
+声明：app-server 未声明 `capabilities`，因此 fork / desktopJournal / callerTurn
+全部按 Desktop 兼容语义为 `true`，行为与改造前一致。
+
 ## 已实现
 
 - 0.2.38提供明确放弃旧文字的本机鉴权入口。保留原UUID和unknown结果，只增加

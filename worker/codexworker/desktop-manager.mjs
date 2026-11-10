@@ -8,6 +8,7 @@ import path from "node:path";
 import os from "node:os";
 import { FeishuNotifier, FeishuStreamBeat, FeishuWebsocketClient } from "./feishu.mjs";
 import { localHost, nativeSendSource } from "./codex/native-dispatch.mjs";
+import { resolveNativeCapabilities } from "./codex/transport/index.mjs";
 import { QuestionRelay, QuestionRelayError } from "./question-relay.mjs";
 import { cacheFeishuImage, imagePrompt } from "./feishu-images.mjs";
 import { FeishuOnlineAnnouncement } from "./online-announcement.mjs";
@@ -246,7 +247,14 @@ export class DesktopManager {
     this.stateLoaded = true;
     this.state.selectionEpoch ??= 0; this.state.autoImages ??= {};
     this.tools = await this.listNativeTools();
-    for (const name of ["read_thread", "send_message_to_thread", "create_thread", "fork_thread", "set_thread_title", "list_threads"]) {
+    // The transport declares what the engine can actually do; the manager adapts
+    // only to those gaps and keeps the Desktop contract everywhere else.
+    const capabilities = resolveNativeCapabilities();
+    this.canFork = capabilities.fork;
+    this.hasDesktopJournal = capabilities.desktopJournal;
+    const requiredTools = ["read_thread", "send_message_to_thread", "create_thread", "set_thread_title", "list_threads"];
+    if (this.canFork) requiredTools.push("fork_thread");
+    for (const name of requiredTools) {
       if (!this.tools.some(t => t.name === name)) fail(503, "desktop_integration_unavailable", `Desktop tool missing: ${name}`, true);
     }
     this.connected = true;
@@ -530,7 +538,7 @@ export class DesktopManager {
   }
 
   isSelfTarget(session) {
-    return localHost(session.hostId) && session.threadId === this.config.nativeSenderThreadId;
+    return this.hasDesktopJournal && localHost(session.hostId) && session.threadId === this.config.nativeSenderThreadId;
   }
 
   async journalDeliveryState(session) {
@@ -1054,6 +1062,7 @@ export class DesktopManager {
         prompt: "这是 Hermes Bridge 创建的 Codex 原生会话。请只回复 HERMES_READY，等待后续任务；不要调用工具或修改文件。",
         target: { type: "project", projectId: this.config.projectId, environment: { type: "local" } } });
     } else {
+      if (!this.canFork) fail(501, "capability_unavailable", "This worker transport cannot fork threads; start a new session instead.", false);
       parent = request.sourceThreadId ?? this.session(request.targetThreadId).threadId;
       hostId = this.state.sessions[parent]?.hostId ?? null;
       if (hostId && hostId !== "local") fail(501, "capability_unavailable", "The native fork tool has no remote hostId contract.");

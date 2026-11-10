@@ -1,15 +1,44 @@
-# CodexWorker · Codex Desktop 插件
+# DSHWorker · dsh 原生传输
 
-0.2.38 是 DSH 接口的 **desktop-native 分阶段移植**，不是另一套 Codex 会话宿主。
-所有会话写入使用客户端注入的原生任务工具；公开输出增量读取已核验的本机 Desktop
-完成事件日志。没有启动 Codex 可执行文件或第二个模型宿主的代码。本版本已清空与
-Hermes/溪流通信的旧层（入站入口与 `/report`、`/heartbeat` 上报），只保留 Desktop
-原生任务与飞书。
+本目录是 CodexWorker 业务层（飞书 + router + manager + HTTP）在 **DeepSeek Harness
+(dsh)** 上的实现，由 `codex/transport/dsh.mjs` 驱动 `dsh --profile headless --json`。
+`desktop-manager.mjs`、`mcp-business.mjs`、`cli.mjs` 与 `worker/codexworker` 逐字节
+相同；引擎差异只经 transport 接口表达：
 
-0.2.1 修复原生调用缺少 `callerSource: "codex"` 的兼容问题；依据本机官方
-`codex-app-tools 0.1.5` 包装的实际请求形状。该字段缺失时可以列出工具，但调用会被
-桌面端以 `Invalid app tool request` 拒绝。已通过实际 stdio 插件、注入管道和原生测试
-聊天的 HTTP→任务→事件闭环，不再仅以工具中继作为依据。
+- `codex/transport/index.mjs` 暴露 `resolveNativeCapabilities()`。`dsh.mjs` 声明
+  `{ fork: false, desktopJournal: false, callerTurn: false }`；未声明能力的 transport
+  （app-server / desktop-pipe）一律按 Desktop 兼容语义 `true`。
+- 业务层按 `fork` 决定是否要求 `fork_thread` 工具、是否禁用 `/fork`（501），
+  按 `desktopJournal` 决定本机 journal 自投递，按 `callerTurn` 决定 `wait_threads`
+  是否做调用者轮次预检。
+
+## 启动
+
+```sh
+bin/dshworker --port 8906
+```
+
+身份与传输写在 `identity.json`：
+
+| 字段 | 说明 |
+| --- | --- |
+| `name` / `display` / `port` / `configFile` | 与 codexworker 相同 |
+| `transport` | 原生传输名（本目录 `dsh`，codexworker 为 `app-server`） |
+| `stateDir` | writer 租约与状态目录（本目录 `~/.hermes/state/dshworker`） |
+
+CLI 选择顺序：`identity.transport` → `CODEXWORKER_NATIVE_TRANSPORT` → 拒绝启动。
+状态目录：`CODEXWORKER_STATE_DIR` → `identity.stateDir` → `~/.hermes/state/<目录名>`。
+
+依赖：`dsh` 在 PATH 中，或显式设置 `DSHWORKER_DSH_BIN`；代理用 `DSHWORKER_PROXY`。
+测试：`node --test tests/*.test.mjs`（目录形式会报错）。
+
+## 与 CodexWorker 的关系
+
+以下历史章节记录共享业务层（飞书桥、任务看板、图片中继、文字回执审核等）的演进，
+两份 worker 同样适用；Desktop 插件装载与 Codex app-server 细节以
+`worker/codexworker/README.md` 为准。
+
+---
 
 ## 已实现
 

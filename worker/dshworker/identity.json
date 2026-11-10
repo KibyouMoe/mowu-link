@@ -3,5 +3,7 @@
   "name": "TamamoCross",
   "display": "玉藻十字",
   "port": 8906,
-  "configFile": "~/.hermes/secrets/dshworker.config.json"
+  "configFile": "~/.hermes/secrets/dshworker.config.json",
+  "transport": "dsh",
+  "stateDir": "~/.hermes/state/dshworker"
 }

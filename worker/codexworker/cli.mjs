@@ -1,21 +1,24 @@
 #!/usr/bin/env node
-// CodexWorker CLI entry.
+// Worker CLI entry: one native transport + the shared HTTP + Feishu manager.
 //
-// This is the "no Codex Desktop" launcher: it owns one `codex app-server`
-// child through codex/transport/app-server.mjs, persists a CLI session, writes the
-// manager binding + local desktop config that mcp-business.mjs already reads,
-// and then starts the existing HTTP + Feishu manager unchanged.
+// This is the "no Desktop" launcher. It drives exactly one implementation from
+// codex/transport/ (chosen by identity.transport, then
+// CODEXWORKER_NATIVE_TRANSPORT), persists a CLI session, writes the manager
+// binding + local desktop config that mcp-business.mjs already reads, and then
+// starts the existing HTTP + Feishu manager unchanged.
 //
 // Nothing here reimplements business logic. The sequence is:
 //   identity.json → cli-session.json → manager-binding.json →
 //   desktop-config.local.json → createBusiness(...).activate()
 //
 // Identity is mandatory: name is the internal id (health.name, state), display
-// is what a human sees (Feishu titles, health.display). No identity → exit 2.
+// is what a human sees (Feishu titles, health.display), and transport names the
+// native implementation. No identity → exit 2.
 //
-// The manager's writer lease lives under ~/.codex/state/codexworker; this
-// process is the sole writer, so it sets RUDOLF_BRIDGE_LIFECYCLE_CHILD=1 the
-// same way the Desktop lifetime supervisor does.
+// The manager's writer lease lives under the state directory declared by the
+// identity (or CODEXWORKER_STATE_DIR); this process is the sole writer, so it
+// sets RUDOLF_BRIDGE_LIFECYCLE_CHILD=1 the same way the Desktop lifetime
+// supervisor does.
 import { appendFile, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import os from "node:os";
@@ -31,18 +34,20 @@ import { ROUTER_TURN_LIMIT_MS, TERMINAL_TURN, findRouterTurn, lastAssistantText,
   taskBoardTerminalPhase, taskBoardText, taskBoardTitle } from "./router-tasks.mjs";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
-const PROGRAM = "codexworker";
+const PROGRAM = path.basename(ROOT);
 // Keep in step with BUSINESS_VERSION in mcp-business.mjs.
 const VERSION = "0.2.38";
-const DEFAULT_STATE_DIR = path.join(os.homedir(), ".codex", "state", "codexworker");
+// Neutral fallback only: each identity declares its own stateDir so an existing
+// install keeps its writer lease exactly where it was.
+const DEFAULT_STATE_DIR = path.join(os.homedir(), ".hermes", "state", PROGRAM);
 
-const HELP = `codexworker ${VERSION}
+const HELP = `${PROGRAM} ${VERSION}
 
 用法:
-  codexworker [选项]                 启动 app-server 后端（HTTP + 飞书）
+  ${PROGRAM} [选项]            启动原生传输 + HTTP + 飞书 worker
 
 选项:
-  --identity <file>     实例身份文件（默认 ./identity.json：name/display/port/configFile）
+  --identity <file>     实例身份文件（默认 ./identity.json：name/display/port/configFile/transport/stateDir）
   --config <file.json>  覆盖 identity.configFile 的配置文件
   --host <addr>         监听地址（默认 127.0.0.1）
   --port <n>            监听端口（默认取 identity.port，其次 config.port，最后 8903）
@@ -53,15 +58,17 @@ const HELP = `codexworker ${VERSION}
 环境变量:
   CODEXWORKER_IDENTITY, CODEXWORKER_CONFIG, CODEXWORKER_HOST, CODEXWORKER_PORT,
   CODEXWORKER_LOG, CODEXWORKER_STATE_DIR, CODEXWORKER_TOKEN_FILE,
-  CODEXWORKER_CODEX_BIN, CODEXWORKER_APP_SERVER_PROXY,
-  CODEXWORKER_ROUTER (0 关闭 router 连接), CODEXWORKER_ROUTER_URL
+  CODEXWORKER_NATIVE_TRANSPORT（identity 未声明 transport 时使用）,
+  CODEXWORKER_ROUTER (0 关闭 router 连接), CODEXWORKER_ROUTER_URL,
+  以及各 transport 自己的变量（见 codex/transport/*.mjs）
 
 说明:
-  1. 本命令固定使用 codex/transport/app-server.mjs（codex app-server JSON-RPC）。
+  1. 原生传输由 codex/transport/index.mjs 选择：identity.json 的 transport 字段优先，
+     其次 CODEXWORKER_NATIVE_TRANSPORT，两者都没有则拒绝启动。
   2. 主会话保存在 <stateDir>/cli-session.json，重启复用；读不到时重建。
-  3. 写入 ~/.codex/state/codexworker/manager-binding.json 与
-     desktop-config.local.json，再把该会话登记到 manager（飞书可直接发消息）。
-  4. SIGINT/SIGTERM 会同时关掉 manager 与 codex app-server 子进程。
+  3. 写入 <stateDir>/manager-binding.json 与 desktop-config.local.json，
+     再把该会话登记到 manager（飞书可直接发消息）。
+  4. SIGINT/SIGTERM 会同时关掉 manager 与原生传输子进程。
 `;
 
 const logFile = { path: null, chain: Promise.resolve() };
@@ -166,7 +173,10 @@ async function loadIdentity(explicit) {
     if (!name || !display) fail(`缺少实例身份：${file} 需同时包含非空的 name 与 display`);
     if (/[\\/]/.test(name) || name === "." || name === "..") fail(`identity.name 不能包含路径分隔符: ${name}`);
     const port = value.port == null || value.port === "" ? null : resolvePort(value.port, null);
-    return { file, name, display, bridge: typeof value.bridge === "string" && value.bridge.trim() ? value.bridge.trim() : "CodexWorker",
+    const transport = typeof value.transport === "string" && value.transport.trim() ? value.transport.trim() : null;
+    const stateDir = typeof value.stateDir === "string" && value.stateDir.trim() ? expandHome(value.stateDir.trim()) : null;
+    return { file, name, display, transport, stateDir,
+      bridge: typeof value.bridge === "string" && value.bridge.trim() ? value.bridge.trim() : PROGRAM,
       port, configFile: typeof value.configFile === "string" && value.configFile.trim() ? expandHome(value.configFile.trim()) : null };
   }
   fail(`缺少实例身份：identity.json 需包含 name 与 display（默认路径 ${candidates[0]}，可用 --identity 指定）`);
@@ -245,7 +255,7 @@ async function main() {
   }
   const host = args.host ?? process.env.CODEXWORKER_HOST ?? config.host ?? "127.0.0.1";
   const port = resolvePort(args.port ?? process.env.CODEXWORKER_PORT ?? identity.port ?? config.port, 8903);
-  const stateDir = path.resolve(expandHome(process.env.CODEXWORKER_STATE_DIR ?? DEFAULT_STATE_DIR));
+  const stateDir = path.resolve(expandHome(process.env.CODEXWORKER_STATE_DIR ?? identity.stateDir ?? DEFAULT_STATE_DIR));
   // mcp-business reads the binding/config/lease from this same directory; pin it
   // so an isolated instance (test port) never touches the production writer.
   process.env.CODEXWORKER_STATE_DIR = stateDir;
@@ -273,18 +283,19 @@ async function main() {
 
   log("info", "identity_loaded", { name: identity.name, display: identity.display,
     identityFile: identity.file, configFile });
-  log("info", "start", { version: VERSION, host, port, cwd, stateDir, transport: "app-server" });
-
   // The transport selector reads this at resolution time; set it before any
-  // business import can call resolveNativeTransport().
-  process.env.CODEXWORKER_NATIVE_TRANSPORT = "app-server";
+  // business import can call resolveNativeTransport(). The identity owns the
+  // default so one CLI serves every engine; the env var is the escape hatch.
+  const transportName = identity.transport || process.env.CODEXWORKER_NATIVE_TRANSPORT?.trim();
+  if (!transportName) fail("identity 未声明 transport，且未设置 CODEXWORKER_NATIVE_TRANSPORT");
+  process.env.CODEXWORKER_NATIVE_TRANSPORT = transportName;
   // This process owns the manager lifetime; no Desktop supervisor exists.
   process.env.RUDOLF_BRIDGE_LIFECYCLE_CHILD = "1";
   process.env.RUDOLF_BRIDGE_LIFECYCLE_READY ??= "1";
 
   const transportIndex = await import("./codex/transport/index.mjs");
-  const appServer = await import("./codex/transport/app-server.mjs");
   const transport = transportIndex.resolveNativeTransport();
+  log("info", "start", { version: VERSION, host, port, cwd, stateDir, transport: transport.name });
 
   async function nativeCall(name, params = {}, timeoutMs = 30_000) {
     const response = await transport.callTool(name, params, {}, timeoutMs);
@@ -378,11 +389,11 @@ async function main() {
   const startedAt = new Date().toISOString();
   const runtimeControl = {
     transition: false,
-    status: () => ({ available: true, scope: "cli-app-server", featureVersion: null, sha256: null,
+    status: () => ({ available: true, scope: `cli-${transport.name}`, featureVersion: null, sha256: null,
       loadedAt: startedAt, loadCount: 0, activeImageSends: 0, reloadAvailable: false,
       autoReloadOnUse: false, lastReloadError: null }),
-    reload: async () => ({ available: true, scope: "cli-app-server", reloadAvailable: false,
-      lastReloadError: "business hot reload is only available inside the Codex plugin host" }),
+    reload: async () => ({ available: true, scope: `cli-${transport.name}`, reloadAvailable: false,
+      lastReloadError: "business hot reload is only available inside the plugin host" }),
   };
   const business = createBusiness(runtimeControl);
   let routerClient = null;
@@ -393,13 +404,13 @@ async function main() {
     log("info", "shutdown", { signal });
     await routerClient?.stop().catch(() => {});
     await business.close().catch(() => {});
-    await appServer.shutdown().catch(() => {});
+    await transport.shutdown().catch(() => {});
     await logFile.chain.catch(() => {});
     process.exit(0);
   };
   process.on("SIGINT", () => { void shutdown("SIGINT"); });
   process.on("SIGTERM", () => { void shutdown("SIGTERM"); });
-  process.on("exit", () => { appServer.killSync(); });
+  process.on("exit", () => { transport.killSync(); });
   process.on("uncaughtException", (error) => {
     log("error", "uncaught_exception", { message: error?.message ?? String(error) });
     void shutdown("uncaughtException");
@@ -412,7 +423,7 @@ async function main() {
   log("info", "manager_started", { url: `http://${host}:${port}` });
 
   // ---- router integration --------------------------------------------------
-  // The router owns task dispatch. A router task is NOT a new Codex thread: it
+  // The router owns task dispatch. A router task is NOT a new native thread: it
   // is delivered into the manager's selected session — the same conversation the
   // Feishu chat uses — so both channels share context AND the manager's single
   // writer serializes them. Disable with CODEXWORKER_ROUTER=0 or
@@ -800,7 +811,7 @@ async function main() {
       trainerWhitelistCount: status.trainerWhitelistCount } : null,
   });
   process.stdout.write(`${identity.display} listening on http://${host}:${port} ` +
-    `(transport=app-server, name=${identity.name}, thread=${session.threadId}, ` +
+    `(transport=${transport.name}, name=${identity.name}, thread=${session.threadId}, ` +
     `feishu=${status?.connected ? "connected" : "disconnected"})\n`);
 
   await new Promise(() => {});

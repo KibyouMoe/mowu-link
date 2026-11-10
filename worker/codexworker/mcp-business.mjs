@@ -6,7 +6,7 @@ import { DesktopManager, PROTOCOL } from "./desktop-manager.mjs";
 import { nativeToolInvocation, nativeToolRejection, nativeStatusInvocation } from "./codex/native-dispatch.mjs";
 import { sendImage } from "./feishu-image-output.mjs";
 import { operatingConfig } from "./integration-profile.mjs";
-import { resolveNativeTransport } from "./codex/transport/index.mjs";
+import { resolveNativeTransport, resolveNativeCapabilities } from "./codex/transport/index.mjs";
 
 export const BUSINESS_API_VERSION = 1;
 export const BUSINESS_STATE_VERSION = 1;
@@ -564,7 +564,9 @@ async function ensureLocalManagerServer() {
     let manager, callerSession;
     const native = async (name, args, deliveryContext) => {
       let requestInvocation;
-      if (name === "wait_threads") {
+      // Desktop scopes wait_threads to the caller's live turn. A transport that
+      // owns its own turns (dsh) has no such caller turn and says so.
+      if (name === "wait_threads" && resolveNativeCapabilities().callerTurn) {
         try { requestInvocation = await nativeStatusInvocation(binding, manager, callerSession); }
         catch (error) { error.nativeStatusPreflight = true; throw error; }
       } else requestInvocation = nativeToolInvocation(name, args, binding, deliveryContext);
