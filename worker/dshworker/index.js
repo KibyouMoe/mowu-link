@@ -675,17 +675,17 @@ function turnItems(turn, maxChars) {
     type: "userMessage", kind: "trainer", id: `${turn.id}-user`,
     text: truncateText(turn.prompt ?? "", maxChars),
   }];
-  if (turn.thinking) {
-    // 与 interface/transport/dsh.mjs 的 turnItems 保持一致：整段一次性发，
-    // 包成 Hermes 同款 💭 Reasoning + plaintext 代码框。
-    // phase=final_answer 走「完整文本」通道，commentary 会被流式拆成多条。
-    const thought = truncateText(turn.thinking, maxChars);
-    items.push({ type: "agentMessage", kind: "assistant", id: `${turn.id}-thinking`,
-      text: `💭 Reasoning:\n\n\`\`\`plaintext\n${thought}\n\`\`\``, phase: "final_answer" });
-  }
-  if (turn.text) {
+  // 一个 turn 收完之后整段发一条：思考 + 正文合成同一个 assistant item。
+  // 拆成两条会在飞书上看着像两段互不相干的播报；塞进一条才是「这一轮干了什么」。
+  if (turn.text || turn.thinking) {
+    const parts = [];
+    if (turn.thinking) {
+      const thought = truncateText(turn.thinking, maxChars);
+      parts.push(`💭 Reasoning:\n\n\`\`\`plaintext\n${thought}\n\`\`\``);
+    }
+    if (turn.text) parts.push(truncateText(turn.text, maxChars));
     items.push({ type: "agentMessage", kind: "assistant", id: `${turn.id}-agent`,
-      text: truncateText(turn.text, maxChars), phase: turn.status === "completed" ? "final_answer" : null });
+      text: parts.join("\n\n"), phase: turn.status === "completed" ? "final_answer" : null });
   }
   if (turn.error) items.push({ type: "error", id: `${turn.id}-error`, text: turn.error });
   return items;
