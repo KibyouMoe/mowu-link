@@ -881,9 +881,10 @@ function turnItems(turn, maxChars) {
     id: `${turn.id}-user`,
     text: truncateText(turn.prompt ?? "", maxChars),
   }];
-  if (turn.thinking) {
-    // 思考排在正文前面，phase=commentary → 业务层当作 assistant + final:false，
-    // 走流式输出通道发飞书，不占最终回复的那条消息。
+  if (turn.thinking && TERMINAL_TURN_STATUSES.has(turn.status)) {
+    // 思考只在 turn 收尾时一次性输出：流式发会把开头几个字符（比如 "The"）
+    // 单独甩成一条消息，飞书上看起来像被腰斩的两段。
+    // phase=commentary 让业务层走过程通道，不占最终回复那条消息。
     // 包成 Hermes 同款样式：💭 Reasoning 抬头 + plaintext 代码框。
     const thought = truncateText(turn.thinking, maxChars);
     items.push({
