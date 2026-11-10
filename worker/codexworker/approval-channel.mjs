@@ -35,7 +35,7 @@ export function approvalPollMs() {
 // 人工审批（哪怕 20 秒）就会让 kernel 超时重置。这条是 app 级 GUI 访问、riskLevel=low，
 // 所以默认自动放行；命令执行/改文件仍然照常提单问人。
 const AUTO_APPROVE_KINDS = new Set(
-  String(process.env.CODEXWORKER_AUTO_APPROVE_KINDS ?? "elicitation")
+  String(process.env.CODEXWORKER_AUTO_APPROVE_KINDS ?? "")
     .split(",").map(s => s.trim()).filter(Boolean),
 );
 
@@ -104,6 +104,15 @@ export function createApprovalChannel({
       approvalId, method: request.method, kind: request.kind ?? null,
       taskId: taskIdValue ?? null, title: (request.title ?? "").slice(0, 160),
     });
+
+    if (String(posted?.status ?? "") === "approved") {
+      stats.approved += 1;
+      log("info", "approval_granted", {
+        approvalId, method: request.method, note: posted?.note ?? null,
+        waitedMs: now() - startedAt,
+      });
+      return { decision: "approved", approvalId, note: posted?.note ?? null, reason: "approved" };
+    }
 
     let lastError = null;
     while (now() < deadline) {

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import fnmatch
 import hashlib
 import hmac
 import json
@@ -81,6 +82,58 @@ APPROVAL_MAX_TITLE = 300
 APPROVAL_MAX_DETAIL = 4000
 APPROVAL_MAX_OPTIONS = 8
 APPROVAL_MAX_TTL_S = 600.0
+
+# Router-side auto-approval. Rules live in a JSON file so the policy is one
+# place for every worker (Codex / DSH / future ones) instead of each worker
+# hard-coding its own shortcuts.
+APPROVAL_POLICY_FILE = os.environ.get(
+    "ROUTER_APPROVAL_POLICY",
+    os.path.expanduser("~/.hermes/router-approval-policy.json"))
+
+
+def load_approval_policy() -> List[Dict[str, Any]]:
+    """Read autoApprove rules. Missing/corrupt file means 'no rules'."""
+    try:
+        with open(APPROVAL_POLICY_FILE, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError) as exc:
+        log.warning("approval policy unreadable: %s", exc)
+        return []
+    rules = data.get("autoApprove") if isinstance(data, dict) else None
+    if not isinstance(rules, list):
+        return []
+    return [r for r in rules if isinstance(r, dict)]
+
+
+def _policy_rule_matches(rule: Dict[str, Any], worker: str, kind: str,
+                         title: str) -> bool:
+    want_worker = rule.get("worker")
+    if want_worker and str(want_worker) != "*":
+        if not fnmatch.fnmatchcase(str(worker), str(want_worker)):
+            return False
+    want_kind = rule.get("kind")
+    if want_kind and str(want_kind) != "*":
+        if str(kind) != str(want_kind):
+            return False
+    pattern = rule.get("titlePattern")
+    if pattern:
+        try:
+            if not re.search(str(pattern), str(title or "")):
+                return False
+        except re.error:
+            return False
+    return True
+
+
+def match_approval_policy(worker: str, kind: str,
+                          title: str) -> Optional[Dict[str, Any]]:
+    for rule in load_approval_policy():
+        if _policy_rule_matches(rule, worker, kind, title):
+            return rule
+    return None
+
 
 log = logging.getLogger("router")
 
@@ -870,6 +923,7 @@ class RouterStore:
                         detail: Optional[str] = None,
                         options: Optional[List[str]] = None,
                         ttl_s: float = APPROVAL_TTL_S,
+                        auto: Optional[bool] = None,
                         ) -> Dict[str, Any]:
         now = time.time()
         ttl = min(APPROVAL_MAX_TTL_S, max(1.0, float(ttl_s)))
@@ -891,6 +945,18 @@ class RouterStore:
                     continue
             else:  # pragma: no cover - 64 bits of entropy
                 raise RuntimeError("could not allocate an approval id")
+            if auto is not False:
+                rule = match_approval_policy(worker, kind, title)
+                if rule is not None:
+                    label = str(rule.get("desc") or rule.get("kind")
+                                or "policy")
+                    self._conn.execute(
+                        "UPDATE approvals SET status='approved',"
+                        " decision='approved', note=?, decided_at=?"
+                        " WHERE approval_id=? AND status='pending'",
+                        ("溪流代批", now, approval_id))
+                    log.info("approval auto-approved id=%s worker=%s kind=%s"
+                             " rule=%s", approval_id, worker, kind, label)
             row = self._approval_row(approval_id)
         assert row is not None
         log.info("approval created id=%s worker=%s kind=%s ttl=%.0fs",
@@ -2103,9 +2169,11 @@ class RouterHandler(BaseHTTPRequestHandler):
         if ttl_s <= 0:
             raise BadRequest("ttl_s must be > 0")
 
+        auto_raw = body.get("auto", body.get("autoApprove"))
+        auto = None if auto_raw is None else bool(auto_raw)
         approval = self.server.store.create_approval(
             worker, kind, title, task_id=task_id, detail=detail,
-            options=options, ttl_s=ttl_s)
+            options=options, ttl_s=ttl_s, auto=auto)
         notified = self._approval_notify(approval)
         if notified:
             self.server.store.mark_approval_notified(approval["approval_id"])
