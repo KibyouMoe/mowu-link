@@ -2174,10 +2174,15 @@ class RouterHandler(BaseHTTPRequestHandler):
         approval = self.server.store.create_approval(
             worker, kind, title, task_id=task_id, detail=detail,
             options=options, ttl_s=ttl_s, auto=auto)
-        notified = self._approval_notify(approval)
-        if notified:
-            self.server.store.mark_approval_notified(approval["approval_id"])
-            approval["notified"] = True
+        # 已经把结论给出去的（策略自动批准）不再推事件打扰训练员，
+        # 只有真正等人拍板的 pending 单才发通知。
+        notified = False
+        if approval["status"] == "pending":
+            notified = self._approval_notify(approval)
+            if notified:
+                self.server.store.mark_approval_notified(
+                    approval["approval_id"])
+                approval["notified"] = True
         log.info("approval requested id=%s worker=%s kind=%s notified=%s",
                  approval["approval_id"], worker, kind, notified)
         return 200, {
