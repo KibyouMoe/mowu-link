@@ -881,13 +881,14 @@ function turnItems(turn, maxChars) {
     id: `${turn.id}-user`,
     text: truncateText(turn.prompt ?? "", maxChars),
   }];
-  // 一个 turn 收完之后整段发一条：思考 + 正文合成同一个 assistant item。
-  // 只在 turn 终结时带上思考：inProgress 阶段扫到的那次只发正文，
-  // 否则同一个 turn 会在飞书上出现「输出」「回复」两条重复内容。
-  if (turn.text || turn.thinking) {
+  // 等 turn 收尾再输出 assistant item：inProgress 阶段 scanner 会先扫到一次，
+  // 那次如果把正文发出去，completed 时再整段发一遍，飞书上就是两条重复。
+  // 思考和正文必须同一条一起发——拆开的话，万一后一个 turn 就是最后一个，
+  // 前面那条「只含思考」的消息就白白重复了。
+  const done = turn.status === "completed";
+  if (done && (turn.text || turn.thinking)) {
     const parts = [];
-    const done = turn.status === "completed";
-    if (turn.thinking && done) {
+    if (turn.thinking) {
       const thought = truncateText(turn.thinking, maxChars);
       parts.push(`💭 Reasoning:\n\n\`\`\`plaintext\n${thought}\n\`\`\``);
     }
@@ -897,7 +898,7 @@ function turnItems(turn, maxChars) {
       kind: "assistant",
       id: `${turn.id}-agent`,
       text: parts.join("\n\n"),
-      phase: done ? "final_answer" : null,
+      phase: "final_answer",
     });
   }
   if (turn.error) {
