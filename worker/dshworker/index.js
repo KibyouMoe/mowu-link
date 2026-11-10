@@ -676,8 +676,12 @@ function turnItems(turn, maxChars) {
     text: truncateText(turn.prompt ?? "", maxChars),
   }];
   if (turn.thinking) {
+    // 与 interface/transport/dsh.mjs 的 turnItems 保持一致：整段一次性发，
+    // 包成 Hermes 同款 💭 Reasoning + plaintext 代码框。
+    // phase=final_answer 走「完整文本」通道，commentary 会被流式拆成多条。
+    const thought = truncateText(turn.thinking, maxChars);
     items.push({ type: "agentMessage", kind: "assistant", id: `${turn.id}-thinking`,
-      text: truncateText(turn.thinking, maxChars), phase: "commentary" });
+      text: `💭 Reasoning:\n\n\`\`\`plaintext\n${thought}\n\`\`\``, phase: "final_answer" });
   }
   if (turn.text) {
     items.push({ type: "agentMessage", kind: "assistant", id: `${turn.id}-agent`,
