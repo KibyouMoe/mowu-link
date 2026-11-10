@@ -1022,6 +1022,18 @@ async function startBusiness({ ctx, transport, identity, workerConfig, config, s
   await business.activate();
   log("info", "business_started", { url: `http://${host}:${port}`, threadId: thread.id });
 
+  // 飞书凭据是懒加载的：desktop-config 里只写 configFile，不写 appId/appSecret，
+  // 所以 activate() 时 manager 的 notifier 还是 null——思考/正文的飞书投递全被
+  // 静默跳过。reload 一次才会去读凭据、建 notifier、连 ws。
+  try {
+    const reloaded = await business.manager?.()?.reloadIntegrations?.();
+    const ok = Boolean(reloaded?.feishu?.enabled);
+    log(ok ? "info" : "warn", "business_integrations_reloaded", {
+      feishuEnabled: ok, connected: Boolean(reloaded?.feishu?.connected) });
+  } catch (error) {
+    log("warn", "business_reload_failed", { message: error?.message ?? String(error) });
+  }
+
   // 把绑定线程登记进 manager 的会话池：飞书/HTTP 才有明确的投递目标。
   // 与 cli.mjs 的 adoptSession 同一条路径（409 adopt_conflict 视为已登记）。
   try {
