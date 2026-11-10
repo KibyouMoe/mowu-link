@@ -1,7 +1,7 @@
 {
-  "bridge": "CodexWorker",
-  "name": "OguriCap",
-  "display": "小栗帽",
-  "port": 8905,
-  "configFile": "~/.hermes/secrets/codexworker.config.json"
+  "bridge": "DshWorker",
+  "name": "TamamoCross",
+  "display": "玉藻十字",
+  "port": 8906,
+  "configFile": "~/.hermes/secrets/dshworker.config.json"
 }
