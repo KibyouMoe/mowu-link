@@ -328,6 +328,7 @@ class DshTransport {
       turns: (thread.turns ?? []).map((turn) => ({
         ...turn,
         text: truncateText(turn.text, MAX_PERSISTED_TEXT),
+        thinking: truncateText(turn.thinking, MAX_PERSISTED_TEXT),
       })),
     }));
     const payload = JSON.stringify({ version: 1, source: "dsh", savedAt: new Date().toISOString(), threads }, null, 2) + "\n";
@@ -441,6 +442,7 @@ class DshTransport {
     let settled = false;
     let timedOut = false;
     const chunks = [];
+    const thoughts = [];
     let finalText = null;
     let reason = null;
 
@@ -472,6 +474,14 @@ class DshTransport {
         case "text":
           if (typeof message.text === "string" && message.text) chunks.push(message.text);
           break;
+        case "thinking":
+          // dsh 的思考过程是可见的，存成单独一条 commentary，不混进正文。
+          // 边收边写回 turn，让 read_thread 轮询能把它当流式输出推给飞书。
+          if (typeof message.text === "string" && message.text) {
+            thoughts.push(message.text);
+            turn.thinking = thoughts.join("");
+          }
+          break;
         case "final":
           if (typeof message.sessionId === "string" && message.sessionId) {
             turn.sessionId = message.sessionId;
@@ -487,7 +497,7 @@ class DshTransport {
           if (typeof message.message === "string") stderr = `${stderr}\n${message.message}`.slice(-MAX_STDERR_CHARS);
           break;
         default:
-          break; // thinking / status / 未来新增事件一律容忍。
+          break; // 其余（status 之外的未来新增事件）一律容忍。
       }
     });
 
@@ -497,19 +507,20 @@ class DshTransport {
       clearTimeout(timer);
       this.children.delete(turn.id);
       const text = finalText ?? chunks.join("");
+      const thinking = thoughts.join("");
       if (timedOut) {
-        this.finishTurn(thread, turn, { text, error: `dsh turn timed out after ${timeoutMs}ms`, reasonKind: "timeout" });
+        this.finishTurn(thread, turn, { text, thinking, error: `dsh turn timed out after ${timeoutMs}ms`, reasonKind: "timeout" });
         return;
       }
       const kind = reason?.kind ?? (exitCode === 0 ? "completed" : "failed");
       if (kind === "completed") {
-        this.finishTurn(thread, turn, { text, reasonKind: "completed" });
+        this.finishTurn(thread, turn, { text, thinking, reasonKind: "completed" });
         return;
       }
       const detail = reason?.error?.message
         ?? (exitCode === 0 ? kind : `dsh exited with code ${exitCode ?? "null"}${signal ? `, signal ${signal}` : ""}`);
       const tail = stderr.trim();
-      this.finishTurn(thread, turn, { text, reasonKind: kind,
+      this.finishTurn(thread, turn, { text, thinking, reasonKind: kind,
         error: tail ? `${detail}; stderr: ${tail.slice(-1500)}` : detail });
     };
 
@@ -523,9 +534,11 @@ class DshTransport {
     child.on("exit", (code, signal) => settle(code, signal));
   }
 
-  finishTurn(thread, turn, { text = "", error = null, reasonKind = "failed" }) {
+  finishTurn(thread, turn, { text = "", thinking = null, error = null, reasonKind = "failed" }) {
     turn.status = error ? "failed" : "completed";
     turn.text = text;
+    // 思考与正文分开存：turnItems 会把思考渲染成 commentary，正文才是最终回复。
+    if (thinking != null) turn.thinking = thinking;
     turn.error = error ?? null;
     turn.reasonKind = reasonKind;
     turn.completedAt = new Date().toISOString();
@@ -868,6 +881,17 @@ function turnItems(turn, maxChars) {
     id: `${turn.id}-user`,
     text: truncateText(turn.prompt ?? "", maxChars),
   }];
+  if (turn.thinking) {
+    // 思考排在正文前面，phase=commentary → 业务层当作 assistant + final:false，
+    // 走流式输出通道发飞书，不占最终回复的那条消息。
+    items.push({
+      type: "agentMessage",
+      kind: "assistant",
+      id: `${turn.id}-thinking`,
+      text: truncateText(turn.thinking, maxChars),
+      phase: "commentary",
+    });
+  }
   if (turn.text) {
     items.push({
       type: "agentMessage",
