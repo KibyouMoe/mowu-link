@@ -149,12 +149,18 @@ export class FeishuNotifier {
   async sendMessage(text, { chatId, openId, receiveIdType, title, threadId, uuid, validateTarget, onDelivery } = {}) {
     const record = async value => { if (onDelivery) await onDelivery({ ...value, at: new Date().toISOString() }); };
     const allowed = () => this.canSend({ threadId }) && (validateTarget == null || typeof validateTarget === "function" && validateTarget());
-    if (!this.enabled || !allowed()) { await record({ phase: "not_attempted", reason: "disabled_or_binding_changed" }); return null; }
+    const skip = async (reason, extra = {}) => {
+      console.error(`[feishu] sendMessage 未发送: ${reason} ${JSON.stringify(extra)}`);
+      await record({ phase: "not_attempted", reason });
+      return null;
+    };
+    if (!this.enabled || !allowed()) return skip("disabled_or_binding_changed",
+      { enabled: this.enabled, threadId: threadId ?? null, canSend: this.canSend({ threadId }) });
     const idType = receiveIdType === "open_id" ? "open_id" : "chat_id";
     const target = idType === "open_id" ? (openId || chatId || this.chatId) : (chatId || this.chatId);
-    if (!target) { await record({ phase: "not_attempted", reason: "target_missing" }); return null; }
+    if (!target) return skip("target_missing", { idType, chatId: chatId ?? null, defaultChatId: this.chatId ?? null });
     const token = await this.getToken();
-    if (!token) { await record({ phase: "not_attempted", reason: "token_unavailable" }); return null; }
+    if (!token) return skip("token_unavailable");
     const t = title || this.bridgeName || "Codex";
     const chunks = hermesChunks(text);
     let lastResponse = null;
