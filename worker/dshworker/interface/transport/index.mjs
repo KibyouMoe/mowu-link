@@ -8,6 +8,7 @@
 //   CODEXWORKER_NATIVE_TRANSPORT=desktop-pipe   显式指定
 //   CODEXWORKER_NATIVE_TRANSPORT=app-server     CLI 后端（codex app-server JSON-RPC）
 //   CODEXWORKER_NATIVE_TRANSPORT=dsh            DSH 后端（dsh --profile headless --json）
+//   CODEXWORKER_NATIVE_TRANSPORT=dsh-inprocess  DSH 进程内（cordis 插件 index.js 注册）
 //   未设置                                      有 CODEX_APP_TOOLS_PIPE_PATH 就用它
 import * as appServer from "./app-server.mjs";
 import * as desktopPipe from "./desktop-pipe.mjs";
@@ -20,6 +21,21 @@ const IMPLEMENTATIONS = {
 };
 
 let cached = null;
+
+// 插件形态（worker/dshworker/index.js）在 apply() 里把进程内实现注册进来：
+// 它同样只提供 listTools / callTool，业务层无需知道自己跑在哪种形态下。
+export function registerNativeTransport(transportName, implementation) {
+  if (typeof transportName !== "string" || !transportName.trim()) {
+    throw new Error("registerNativeTransport requires a non-empty name");
+  }
+  IMPLEMENTATIONS[transportName] = implementation;
+  cached = null;
+  return implementation;
+}
+
+export function listNativeTransports() {
+  return Object.keys(IMPLEMENTATIONS);
+}
 
 export function resolveNativeTransport({ refresh = false } = {}) {
   if (cached && !refresh) return cached;

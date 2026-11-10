@@ -32,6 +32,96 @@ CLI 选择顺序：`identity.transport` → `CODEXWORKER_NATIVE_TRANSPORT` → �
 依赖：`dsh` 在 PATH 中，或显式设置 `DSHWORKER_DSH_BIN`；代理用 `DSHWORKER_PROXY`。
 测试：`node --test tests/*.test.mjs`（目录形式会报错）。
 
+## 插件形态（cordis，进程内 agents）
+
+`index.js` 是本目录的 cordis 插件入口，与 `bin/dshworker → cli.mjs` 的独立进程形态**共生**：
+
+| | 插件（index.js） | CLI（cli.mjs） |
+| --- | --- | --- |
+| 宿主 | 常驻 dsh profile（本机 `web`） | 独立 node 进程 |
+| 执行一轮 | `ctx.agents.create()/followup()/whenIdle()`，进程内 | spawn `dsh --profile headless --json` |
+| 状态 | `<stateDir>/dsh-plugin-state.json` | `<stateDir>/dsh-transport-state.json` |
+| 业务层 | `config.business: true` 时才起（先探端口） | 默认起，占 8906 |
+| 用途 | 与 DSH 会话共享进程/模型/沙箱 | 生产常驻、调试 |
+
+装载：在 `~/.dsh/profiles/web/cordis.patch.yml` 里 insert（绝对路径指向本目录的 `index.js`；
+同款示例见 [`cordis.patch.example.yml`](cordis.patch.example.yml)）：
+
+```yaml
+- insert:
+    - id: dshworker
+      name: /Users/kibyou/projects/mowulink/worker/dshworker/index.js
+```
+
+插件做的事：读 `identity.json` + `~/.hermes/secrets/dshworker.config.json` → 把进程内实现注册成
+`dsh-inprocess` 原生传输（`interface/transport/index.mjs` 的 `registerNativeTransport`）→
+`ctx.provide("dshworker", …)`。工具名与返回结构与 `interface/transport/dsh.mjs` 完全一致
+（`create_thread` / `list_threads` / `read_thread` / `send_message_to_thread` /
+`set_thread_title` / `wait_threads` / `list_projects`），所以 `mcp-business.mjs` 一行都不用改。
+同一线程同一时刻只跑一轮，后续消息排队；插件重启后凭 `sessionId` 走 `agents.resume()` 续聊。
+
+配置（都可选，写在插入项的 `config:` 里）：
+
+| 字段 | 默认 | 说明 |
+| --- | --- | --- |
+| `provider` / `model` / `reasoningEffort` | `agentDefaultModel.currentSelection()` | 覆盖默认模型 |
+| `workspace` | `config.dsh.workspace` → `~/projects` | 线程默认 cwd；不存在时回退并告警 |
+| `stateDir` | `identity.stateDir` | 插件线程状态目录 |
+| `turnTimeoutMs` | 600000 | 单轮上限，超时 cancel |
+| `business` | `false` | 在本进程里起 HTTP + 飞书 + router（端口被占则跳过） |
+| `selfTest` | — | 启动后跑两轮自检，结果写 `<stateDir>/self-test.json` |
+
+`config.feishu.trainerOpenIdWhitelist` 显式写成空数组表示**明确关掉飞书入站**（不再回退到
+凭据文件里的 open_id），测试实例可以安全地只起 HTTP。
+
+暴露的服务：`ctx.dshworker.status() / listTools() / callTool() / threads() / run(prompt, {threadId}) / close()`。
+
+### 代理：进程内唯一真正的坑
+
+dsh 在**任何插件加载前**就把 HTTP 代理策略装好了（`dsh-http-proxy` 读启动环境 / `$DSH_HOME/.env`）。
+所以在本机 `~/.zprofile` 导出 `HTTPS_PROXY=http://192.168.3.102:10808` 时，进程内每轮都是：
+
+```
+fetch_error url=https://api.deepseek.com/anthropic/v1/messages
+cause=EHOSTDOWN connect EHOSTDOWN 192.168.3.102:10808
+→ 5 次重试 → turn/end reason=error "DeepSeek Messages transport failed" (code TRANSPORT)
+```
+
+这不是 provider/model 选择问题（`agent-default-model` 配好也会照样失败），插件里改 `process.env` 也来不及。
+启动 dsh 前把代理指到回环或清空即可：
+
+```sh
+env HTTPS_PROXY=http://127.0.0.1:10808 HTTP_PROXY=http://127.0.0.1:10808 \
+    https_proxy=http://127.0.0.1:10808 http_proxy=http://127.0.0.1:10808 \
+    all_proxy= ALL_PROXY= dsh --profile web --no-open --port 3102
+```
+
+插件加载时会检查这一项，非回环代理记 `proxy_not_loopback` 警告，并把同样的提示附在 TRANSPORT 失败原因后面。
+
+### 实测（2026-11-10，web profile，port 3102）
+
+```
+plugin_loaded  provider=deepseek-account model=deepseek-flash transport=dsh-inprocess business=false
+self_test_start threadId=b583703d…
+self_test_done  ok=true turn1=completed turn2=completed durationMs=1819
+   turn1 "PROFILE-OK"  ← "Reply with exactly: PROFILE-OK"
+   turn2 "PROFILE-OK"  ← "Repeat the exact token you replied with…"
+agent_resumed  sessionId=session-0b82e2e9… seq=39   （进程重启后第三轮仍答 PROFILE-OK）
+```
+
+业务层同进程实测（`business: true`，测试端口 39106，空白名单 → 不连飞书）：
+
+```
+business_started  url=http://127.0.0.1:39106 threadId=1af4ea59…
+session_adopted   action=session_adopted
+GET  /health                    → ready=true integrationMode=desktop-native
+POST /manager/messages          → accepted=true action=dispatch_pending
+线程状态                         → completed "BUSINESS-OK"
+```
+
+未实测：`business: true` 时的 router 分支（会把任务投进 manager 选中的同一会话，
+需要真实 8790 才能验），本机验收只走到 HTTP + manager。
+
 ## 与 CodexWorker 的关系
 
 以下历史章节记录共享业务层（飞书桥、任务看板、图片中继、文字回执审核等）的演进，
