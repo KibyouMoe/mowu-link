@@ -1,0 +1,13 @@
+{
+  "name": "dshworker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js"
+  },
+  "engines": {
+    "dsh": "^0.2.2-rc.1"
+  }
+}
