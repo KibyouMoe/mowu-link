@@ -16,25 +16,34 @@ const liveStatus = (id = "existing", status = "inProgress") => ({ polls: [{ thre
   latestTurn: { id: "long-turn", status }, latestAssistantMessage: { truncated: true } }] });
 const req = (text, extra = {}) => ({ protocolVersion: PROTOCOL, messageId: randomUUID(), source: "hermes", text, ...extra });
 
-test("trainer abandonment preserves unknown evidence and releases only the reviewed text barrier", async t => {
+test("an unconfirmed head yields to later pending output without replay, and trainer abandonment keeps its evidence", async t => {
   const f = await fixture(t); await f.register(); const uuid = randomUUID(), next = randomUUID(); const epoch = f.manager.state.selectionEpoch;
   f.manager.state.publicTextOutbox = { [uuid]: { uuid, threadId: "existing", bindingEpoch: epoch, status: "unknown", order: 1, text: "old uncertain body" },
     [next]: { uuid: next, threadId: "existing", bindingEpoch: epoch, status: "pending", order: 2, text: "next known-unsent reply" } };
   const sent = []; f.manager.notifier = { sendMessage: async text => { sent.push(text); return { code: 0 }; } };
-  await f.manager.drainPublicTexts(); assert.deepEqual(sent, []);
-  const review = { uuid, threadId: "existing", bindingEpoch: epoch, reason: "Trainer abandoned this old reply and requested later output." };
+  await f.manager.drainPublicTexts();
+  // The uncertain head is settled instead of stalling the queue, and never replayed.
+  assert.deepEqual(sent, ["next known-unsent reply"]);
+  assert.equal(f.manager.state.publicTextOutbox[uuid].status, "canceled"); assert.equal(f.manager.state.publicTextOutbox[uuid].text, undefined);
+  await f.manager.drainPublicTexts(); assert.deepEqual(sent, ["next known-unsent reply"]);
+  // A lone unknown keeps its exact body until the trainer decides; abandoning it never sends.
+  const lone = randomUUID();
+  f.manager.state.publicTextOutbox[lone] = { uuid: lone, threadId: "existing", bindingEpoch: epoch, status: "unknown", order: 3, text: "still uncertain body" };
+  await f.manager.drainPublicTexts(); assert.deepEqual(sent, ["next known-unsent reply"]);
+  assert.equal(f.manager.state.publicTextOutbox[lone].status, "unknown");
+  const review = { uuid: lone, threadId: "existing", bindingEpoch: epoch, reason: "Trainer abandoned this old reply and requested later output." };
   assert.equal((await f.http("/bridge/text-receipts/abandon", review, "POST", "Bearer wrong")).status, 401);
   const result = await f.http("/bridge/text-receipts/abandon", review); assert.equal(result.status, 200);
   assert.equal(result.body.originalStatus, "unknown"); assert.equal(result.body.replayed, false); assert.equal(result.body.markedDelivered, false);
-  const disk = JSON.parse(await readFile(f.manager.statePath, "utf8")); assert.equal(disk.publicTextOutbox[uuid].review.decision, "abandon");
-  assert.equal(disk.publicTextOutbox[uuid].uuid, uuid); assert.equal(disk.publicTextOutbox[uuid].status, "unknown");
+  const disk = JSON.parse(await readFile(f.manager.statePath, "utf8")); assert.equal(disk.publicTextOutbox[lone].review.decision, "abandon");
+  assert.equal(disk.publicTextOutbox[lone].uuid, lone); assert.equal(disk.publicTextOutbox[lone].status, "unknown");
   await f.manager.drainPublicTexts(); assert.deepEqual(sent, ["next known-unsent reply"]);
   assert.equal((await f.http("/bridge/text-receipts/abandon", review)).body.duplicate, true);
   assert.equal(f.manager.integrationStatus().feishu.relay.unconfirmedTexts, 0);
   assert.equal(f.manager.integrationStatus().feishu.relay.abandonedUnknownTexts, 1);
   await f.manager.close();
   const restored = await new DesktopManager({ native: f.native, listNativeTools: f.listNativeTools, stateDir: f.root, config: f.config }).initialize();
-  try { assert.equal(restored.state.publicTextOutbox[uuid].status, "unknown"); assert.equal(restored.integrationStatus().feishu.relay.unconfirmedTexts, 0); }
+  try { assert.equal(restored.state.publicTextOutbox[lone].status, "unknown"); assert.equal(restored.integrationStatus().feishu.relay.unconfirmedTexts, 0); }
   finally { await restored.close(); }
 });
 

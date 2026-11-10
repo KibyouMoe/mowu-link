@@ -1340,10 +1340,19 @@ export class DesktopManager {
           }
           const texts = Object.values(this.state.publicTextOutbox ?? {}).filter(e => e.status === "pending" || current(e) && isUnconfirmedText(e)).map(e => ({ e, image: false }));
           const images = Object.values(this.state.autoImages ?? {}).filter(e => e.status === "pending" || current(e) && e.status === "failed" && /unknown/.test(e.error ?? "")).map(e => ({ e, image: true }));
-          const next = [...texts, ...images].sort((a, b) => (a.e.order ?? -1) - (b.e.order ?? -1))[0];
+          const queue = [...texts, ...images].sort((a, b) => (a.e.order ?? -1) - (b.e.order ?? -1));
+          let next, settled = false;
+          while ((next = queue.shift())) {
+            if (next.image || next.e.status === "pending") break;
+            // An unconfirmed text is never replayed, but it must not hold later
+            // output hostage either: settle it once pending text waits behind it.
+            if (!queue.some(item => !item.image && item.e.status === "pending")) break;
+            next.e.status = "canceled"; delete next.e.text; settled = true;
+          }
           if (next?.image) imageEntry = next.e;
           else if (next?.e.status === "pending") entry = next.e;
           if (entry) { entry.status = "dispatching"; await this.save(); }
+          else if (settled) await this.save();
         });
         if (imageEntry) {
           if (imageEntry.status !== "pending") return; // Never pass an unknown send barrier.
