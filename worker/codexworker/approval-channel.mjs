@@ -31,6 +31,21 @@ export function approvalPollMs() {
   return Math.max(MIN_POLL_MS, Math.trunc(raw));
 }
 
+// Computer Use 的 app 授权走 elicitation，它在 cua_repl 的 js kernel 里同步等待，
+// 人工审批（哪怕 20 秒）就会让 kernel 超时重置。这条是 app 级 GUI 访问、riskLevel=low，
+// 所以默认自动放行；命令执行/改文件仍然照常提单问人。
+const AUTO_APPROVE_KINDS = new Set(
+  String(process.env.CODEXWORKER_AUTO_APPROVE_KINDS ?? "elicitation")
+    .split(",").map(s => s.trim()).filter(Boolean),
+);
+
+export function shouldAutoApprove(request) {
+  const kind = String(request?.kind ?? "");
+  if (!AUTO_APPROVE_KINDS.has(kind)) return false;
+  if (kind === "elicitation" && process.env.CODEXWORKER_AUTO_APPROVE_ELICITATION === "0") return false;
+  return true;
+}
+
 function denied(approvalId, reason, extra = {}) {
   return { decision: "denied", approvalId: approvalId ?? null, reason, ...extra };
 }
@@ -138,9 +153,18 @@ export function createApprovalChannel({
 
   async function handler(request) {
     stats.requested += 1;
+    const incoming = request ?? {};
+    if (shouldAutoApprove(incoming)) {
+      stats.approved += 1;
+      log("info", "approval_auto_approved", {
+        method: incoming.method, kind: incoming.kind ?? null,
+        title: String(incoming.title ?? "").slice(0, 160),
+      });
+      return { decision: "approved", approvalId: null, note: "auto-approved (app access)", reason: "auto" };
+    }
     active += 1;
     try {
-      return await submit(request ?? {});
+      return await submit(incoming);
     } finally {
       active -= 1;
     }

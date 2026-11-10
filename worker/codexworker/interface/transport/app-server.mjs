@@ -62,6 +62,22 @@ const APPROVAL_METHODS = Object.freeze({
   execCommandApproval: { kind: "command", family: "review" },
 });
 
+// Computer Use 的 app 授权不走上面四个 approval method，而是 MCP elicitation：
+//   method = "mcpServer/elicitation/request"
+//   params.message = "Allow Computer Use to use \"DeepSeek Harness\"?"
+//   params._meta.codex_approval_kind = "mcp_tool_call"
+// 以前一条 -32601 回过去，CUA 就当「用户拒绝」，于是永远 was not approved。
+const ELICITATION_METHOD = "mcpServer/elicitation/request";
+
+export function isElicitationRequest(method) {
+  return method === ELICITATION_METHOD;
+}
+
+/** MCP elicitation 的响应：form 模式空表单，accept 就是放行。 */
+export function elicitationResponse(decision) {
+  return decision === "approved" ? { action: "accept", content: {} } : { action: "decline" };
+}
+
 export function isApprovalRequest(method) {
   return typeof method === "string" && Object.hasOwn(APPROVAL_METHODS, method);
 }
@@ -83,6 +99,20 @@ function clip(text, max = 1600) {
 /** 给人看的审批摘要（飞书卡片里只放 title/detail，不放原始 JSON）。 */
 export function approvalRequestSummary(method, params = {}, item = null) {
   const spec = APPROVAL_METHODS[method] ?? { kind: "approval" };
+  if (method === ELICITATION_METHOD) {
+    const meta = params._meta && typeof params._meta === "object" ? params._meta : {};
+    const connector = stringArg(meta.connector_name) ?? stringArg(params.serverName) ?? "MCP";
+    const persist = Array.isArray(meta.persist) ? meta.persist.join("/") : null;
+    return {
+      kind: "elicitation",
+      title: stringArg(params.message) ?? `授权 ${connector}`,
+      detail: [
+        `connector: ${connector}`,
+        persist ? `persist: ${persist}` : null,
+        stringArg(meta.tool_name) ? `tool: ${meta.tool_name}` : null,
+      ].filter(Boolean).join("\n"),
+    };
+  }
   const reason = stringArg(params.reason);
   if (spec.kind === "command") {
     const command = Array.isArray(params.parsedCmd)
@@ -560,7 +590,7 @@ class AppServerClient {
     if (message.id !== undefined && message.method) {
       // 服务端主动请求。审批类请求转给注入的 handler；其余（elicitation、
       // 动态工具等）明确拒绝而不是让整轮永远挂着。
-      if (isApprovalRequest(message.method)) {
+      if (isApprovalRequest(message.method) || isElicitationRequest(message.method)) {
         this.trackServerRequest(message);
       } else {
         this.respondUnsupported(message);
@@ -591,7 +621,7 @@ class AppServerClient {
     // 打日志是为了让协议可观测：method 名决定要不要实现它。
     this.log("warn", "app_server_request_unhandled", {
       method: message.method,
-      params: JSON.stringify(message.params ?? null).slice(0, 800),
+      params: JSON.stringify(message.params ?? null).slice(0, 6000),
     });
     if (!this.child) return;
     try {
@@ -670,7 +700,10 @@ class AppServerClient {
       this.log("warn", "approval_handler_missing", { method: message.method });
     }
     const decision = outcome?.decision === "approved" ? "approved" : "denied";
-    const wrote = this.respond(message, approvalResponse(message.method, decision));
+    const payload = isElicitationRequest(message.method)
+      ? elicitationResponse(decision)
+      : approvalResponse(message.method, decision);
+    const wrote = this.respond(message, payload);
     this.log("info", "approval_resolved", {
       method: message.method, decision, wrote,
       approvalId: outcome?.approvalId ?? null,
