@@ -884,11 +884,13 @@ function turnItems(turn, maxChars) {
   if (turn.thinking) {
     // 思考排在正文前面，phase=commentary → 业务层当作 assistant + final:false，
     // 走流式输出通道发飞书，不占最终回复的那条消息。
+    // 包成 Hermes 同款样式：💭 Reasoning 抬头 + plaintext 代码框。
+    const thought = truncateText(turn.thinking, maxChars);
     items.push({
       type: "agentMessage",
       kind: "assistant",
       id: `${turn.id}-thinking`,
-      text: truncateText(turn.thinking, maxChars),
+      text: `💭 Reasoning:\n\n\`\`\`plaintext\n${thought}\n\`\`\``,
       phase: "commentary",
     });
   }
