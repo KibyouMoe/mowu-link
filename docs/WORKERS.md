@@ -5,8 +5,8 @@
 
 | 真实名称 | 口语名 | 来源 | Agent | 模型 | 擅长 |
 |---|---|---|---|---|---|
-| `TamamoCross` | 玉藻十字 | 本机 M6 / `worker/dsh` | DeepSeek Harness（headless） | `deepseek-flash` | 调研、读文档、GUI 操作、长任务 |
-| `OguriCap` | 小栗帽 | 本机 M6 / `worker/codex` | Codex CLI（`codex exec`） | OpenAI 账号默认（未指定 `-m`） | 写码、改码、跑测试、重构 |
+| `OguriCap` | 小栗帽 | 本机 M6 / `worker/codexworker` | Codex app-server（`codex app-server` stdio） | `gpt-6.1-sol` / effort `max` | 写码、改码、跑测试、重构 |
+| `TamamoCross` | 玉藻十字 | **已退役**（原 `worker/dsh`，2026-11-10 删除） | 待重建为 cordis 插件（Node） | `deepseek-flash` | 调研、读文档、GUI 操作、长任务 |
 
 ---
 
@@ -18,43 +18,14 @@ worker 身份名（Router 认的）   OguriCap / TamamoCross
 ```
 
 - 桥是壳，身份是里面那个人。一个桥可以换身份，身份也可以换桥。
-- 目录：`worker/codexworker/`（已建）、`worker/dshworker/`（待建）。
+- 目录：`worker/codexworker/`（已建、在用）、`worker/dshworker/`（待建，cordis 插件版）。
 
----
+## 二、重做原则（2026-11-10 定）
 
-## TamamoCross（玉藻十字）
-
-```yaml
-name: TamamoCross
-alias: 玉藻十字 / 玉藻
-origin:
-  host: 192.168.3.102（M6 Mac mini，溪流本机）
-  path: ~/projects/mowulink/worker/dsh/
-  launchd: ai.hermes.dsh-worker
-  log: ~/.hermes/logs/dsh-worker.log
-agent:
-  runtime: DeepSeek Harness
-  command: dsh --profile headless --session-id <id> --json "<task>"
-  model: deepseek-flash
-  env:
-    DEEPSEEK_BASE_URL: https://api.deepseek.com/anthropic   # 必须，否则 /messages 走官方根域 404
-    HTTPS_PROXY: http://127.0.0.1:10808                      # dsh 不认 socks
-strengths:
-  - 调研与长文档阅读（能自己翻仓库、读 skill、比对实现）
-  - 电脑操作（computer use 已装并验证：截图 + 点击 + 键盘）
-  - 需要「边看边判断」的长任务（超时上限 3600s）
-weaknesses:
-  - 单次任务偏慢（研究型任务十几分钟到半小时）
-  - 容易在细节上自作主张，需要验收
-personality: |
-  开朗、直率、干劲足，接到活先说「好，我来」。
-  干活时话多，会边做边报进度；遇到不确定会主动问，不会硬猜。
-  有点冒失：动作快、偶尔漏细节，所以它旁边必须有看门狗盯着。
-tasks:
-  recorded_under: TamamoCross
-  note: 改名前的历史任务记在旧名 dsh 名下；从现在起按 TamamoCross 记录
-  recent: []
-```
+- 两个 worker **同构**：都是 Node，都走 `router` 协议，都不直连飞书。
+- 汇报一律走 `router /notice` → trigger → 溪流转达；worker 不持有飞书出口。
+- 上下文合并：router 任务复用主会话（`state.selectedThreadId`），不另开 thread。
+- 任务消息形态：标题「来自超级溪流的指令（任务 t-xxx）」+ 正文，无重复终态消息。
 
 ---
 
@@ -63,31 +34,63 @@ tasks:
 ```yaml
 name: OguriCap
 alias: 小栗帽 / 小栗
+status: 在用
 origin:
   host: 192.168.3.102（M6 Mac mini，溪流本机）
-  path: ~/projects/mowulink/worker/codex/
-  launchd: ai.hermes.codex-worker
-  log: ~/.hermes/logs/codex-worker.log
+  path: ~/projects/mowulink/worker/codexworker/
+  entry: bin/codexworker
+  launchd: ai.hermes.codexworker
+  log: ~/.hermes/logs/codexworker.out.log / .err.log
 agent:
-  runtime: Codex CLI
-  command: codex exec --skip-git-repo-check "<task>"（续聊用 codex exec resume <id>）
-  model: OpenAI 账号默认（ChatGPT 登录，未指定 -m）
+  runtime: codex app-server（JSON-RPC over stdio）
+  transport: codex/transport/app-server.mjs（另一套 desktop-pipe 用于 Desktop 内）
+  model: gpt-6.1-sol
+  reasoning_effort: max
+  context: 500k 窗口，可用 475k
   env:
-    HTTPS_PROXY: http://127.0.0.1:10808   # codex 不认 socks
+    HTTPS_PROXY: http://127.0.0.1:10808   # codex 不认 socks，ALL_PROXY 必须 unset
 strengths:
   - 写代码 / 改代码 / 重构（会自己读仓库、跑测试、改完自查）
-  - 一次能跑通整条实现链，不需要我盯着每一步
+  - Router 任务与飞书对话共用同一 thread（上下文连续）
 weaknesses:
   - 话少，过程不解释，出问题只能从退出码和 stderr 看
-  - 依赖 ChatGPT 账号额度，代理必须对
 personality: |
   寡言、一本正经、不客套。问它什么，它给结果，不铺垫、不解释。
   对自己的产出有洁癖，改完会自己跑一遍再交。
   出错时不掩饰，直接把错误原文贴上来。
 tasks:
   recorded_under: OguriCap
-  note: 改名前的历史任务记在旧名 codex 名下；从现在起按 OguriCap 记录
-  recent: []
+```
+
+---
+
+## TamamoCross（玉藻十字）
+
+```yaml
+name: TamamoCross
+alias: 玉藻十字 / 玉藻
+status: 已退役（2026-11-10）—— Python 版删除，待重做为 cordis 插件
+retired_reason: |
+  飞书层三个问题反复出现：open_id 跨 app、文本消息不能编辑、ws 静默断连。
+  训练员 2026-11-10 决定走 B 方案：与 CodexWorker 同构，用 cordis 插件重写。
+origin:
+  host: 192.168.3.102（M6 Mac mini）
+  path: worker/dshworker/（待建）
+  agent_runtime: DeepSeek Harness（cordis / Node）
+  plugin_api: dsh plugin → 转发 pnpm，profile 的 package.json bundles
+  profile: ~/.dsh/profiles/headless/
+agent:
+  model: deepseek-flash
+  env:
+    DEEPSEEK_BASE_URL: https://api.deepseek.com/anthropic   # 必须，根域走 Messages 会 404
+    HTTPS_PROXY: http://127.0.0.1:10808                      # dsh 不认 socks
+personality: |
+  开朗、直率、干劲足，接到活先说「好，咱来」。
+  关西腔、急性子、嘴硬心软；干活时会边做边报，卡住直接说卡在哪。
+  对钱和成本敏感，会主动算时间与依赖。
+tasks:
+  recorded_under: TamamoCross
+  note: 旧 Python 版时期的历史任务仍记在 TamamoCross 名下
 ```
 
 ---
