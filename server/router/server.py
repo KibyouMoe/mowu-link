@@ -37,6 +37,7 @@ import secrets
 import select
 import signal
 import socket
+import subprocess
 import sqlite3
 import sys
 import threading
@@ -133,6 +134,48 @@ def match_approval_policy(worker: str, kind: str,
         if _policy_rule_matches(rule, worker, kind, title):
             return rule
     return None
+
+
+# -- host ops ------------------------------------------------------------- #
+# Router 是独立 launchd 服务，不是网关的子进程，所以它能安全地去操作别的服务。
+# 只认白名单，名字与 label 一对一，不接受任意 label 拼接。
+OPS_SERVICES = {
+    "gateway": "ai.hermes.gateway",
+    "router": "ai.hermes.router",
+    "trigger": "ai.hermes.trigger",
+    "codexworker": "ai.hermes.codexworker",
+    "dsh-web": "ai.hermes.dsh-web",
+}
+
+
+def ops_pid(label: str) -> Optional[int]:
+    """从 launchctl list 里取某个 label 的 pid；没跑就是 None。"""
+    try:
+        out = subprocess.run(["/bin/launchctl", "list"],
+                             capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for line in out.splitlines():
+        cols = line.split("\t")
+        if len(cols) >= 3 and cols[2].strip() == label:
+            try:
+                return int(cols[0])
+            except ValueError:
+                return None
+    return None
+
+
+def ops_kickstart(label: str) -> Tuple[bool, str]:
+    """launchctl kickstart -k：先停后起，返回 (成功, 错误文本)。"""
+    target = "gui/%d/%s" % (os.getuid(), label)
+    try:
+        proc = subprocess.run(["/bin/launchctl", "kickstart", "-k", target],
+                              capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, str(exc)
+    if proc.returncode != 0:
+        return False, (proc.stderr or proc.stdout or "").strip()[:400]
+    return True, ""
 
 
 log = logging.getLogger("router")
@@ -1530,11 +1573,15 @@ class RouterHandler(BaseHTTPRequestHandler):
                                   "/chat/{worker}/messages",
                                   "/chat/{worker}/summary",
                                   "/approvals", "/approvals/{id}",
-                                  "/approvals/{id}/decide"],
+                                  "/approvals/{id}/decide",
+                                  "/ops/services",
+                                  "/ops/services/{name}/restart"],
                 })
             if parts == ["stream"]:
                 return self._serve_stream(qs)
             self._require_token()
+            if parts == ["ops", "services"]:
+                return self._send_json(*self._ops_list())
             if parts == ["workers"]:
                 return self._send_json(200, self._workers())
             if parts == ["tasks"]:
@@ -1576,6 +1623,10 @@ class RouterHandler(BaseHTTPRequestHandler):
         try:
             self._require_token()
             body = self._read_json()
+            if (len(parts) == 4 and parts[0] == "ops"
+                    and parts[1] == "services" and parts[3] == "restart"):
+                return self._send_json(*self._ops_restart(
+                    unquote(parts[2]).strip()))
             if parts == ["register"]:
                 return self._send_json(200, self._register(body))
             if parts == ["heartbeat"]:
@@ -2197,6 +2248,49 @@ class RouterHandler(BaseHTTPRequestHandler):
             "remaining_s": approval["remaining_s"],
             "notified": notified,
         }
+
+    # -- ops -------------------------------------------------------------- #
+
+    def _ops_list(self) -> Tuple[int, Dict[str, Any]]:
+        self._require_token()
+        rows = []
+        for name, label in OPS_SERVICES.items():
+            pid = ops_pid(label)
+            rows.append({"service": name, "label": label,
+                         "pid": pid, "running": pid is not None})
+        return 200, {"ok": True, "services": rows}
+
+    def _ops_restart(self, name: str) -> Tuple[int, Dict[str, Any]]:
+        self._require_token()
+        label = OPS_SERVICES.get(name)
+        if not label:
+            raise NotFound()
+        before = ops_pid(label)
+        if label == OPS_SERVICES["router"]:
+            # 自己重启自己：先把 202 发出去，再动手。
+            def _later() -> None:
+                time.sleep(0.5)
+                ok, err = ops_kickstart(label)
+                log.info("ops self-restart %s ok=%s err=%s", label, ok, err)
+            threading.Thread(target=_later, daemon=True).start()
+            return 202, {"ok": True, "service": name, "label": label,
+                         "accepted": True, "before_pid": before,
+                         "note": "router 会重启自己，本连接可能在响应后断开"}
+        ok, err = ops_kickstart(label)
+        if not ok:
+            return 500, {"ok": False, "service": name, "label": label,
+                         "error": err or "kickstart failed",
+                         "before_pid": before}
+        after = None
+        for _ in range(40):
+            time.sleep(0.25)
+            after = ops_pid(label)
+            if after and after != before:
+                break
+        log.info("ops restart %s (%s) pid %s -> %s", name, label, before, after)
+        return 200, {"ok": True, "service": name, "label": label,
+                     "before_pid": before, "after_pid": after,
+                     "restarted": after is not None and after != before}
 
     @staticmethod
     def _approval_id_param(raw: str) -> str:
