@@ -45,7 +45,6 @@ export const PROTOCOL = "dsh/headless-json";
 export const VERIFIED_WITH = "dsh 0.2.2-rc.1 (2026-11-10)";
 
 const NAMESPACE = "dsh";
-const DEFAULT_PROXY = "http://127.0.0.1:10808";
 const DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com/anthropic";
 const DEFAULT_WORKSPACE = path.join(os.homedir(), "projects");
 const DEFAULT_STATE_DIR = path.join(os.homedir(), ".hermes", "state", "dshworker");
@@ -768,12 +767,19 @@ function dshEnv() {
   // 只信任回环代理：父进程可能带着局域网地址（如 http://192.168.x.x:10808），
   // 对 api.deepseek.com 会 5s 超时，整轮直接 TRANSPORT 失败。
   const loopback = /^https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?\/?$/i.test(inherited ?? "");
-  const proxy = explicit || (loopback ? inherited : DEFAULT_PROXY);
-  env.HTTPS_PROXY = proxy;
-  env.https_proxy = proxy;
-  env.HTTP_PROXY = explicit || (/^http:\/\//i.test(env.HTTP_PROXY ?? "") ? env.HTTP_PROXY : proxy);
-  env.http_proxy = env.HTTP_PROXY;
-  env.NODE_USE_ENV_PROXY = "1";
+  // 没有显式/回环代理就不注入：本机全局走 FlClash TUN（utun4），
+  // 再套一层 shell 级代理会让 dsh 的 HTTP 客户端全超时。
+  const proxy = explicit || (loopback ? inherited : null);
+  if (proxy) {
+    env.HTTPS_PROXY = proxy;
+    env.https_proxy = proxy;
+    env.HTTP_PROXY = explicit || (/^http:\/\//i.test(env.HTTP_PROXY ?? "") ? env.HTTP_PROXY : proxy);
+    env.http_proxy = env.HTTP_PROXY;
+    env.NODE_USE_ENV_PROXY = "1";
+  } else {
+    for (const key of ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"]) delete env[key];
+    delete env.NODE_USE_ENV_PROXY;
+  }
 
   // dsh 的 DeepSeek 客户端走 Anthropic 兼容端点；~/.hermes/.env 里的
   // DEEPSEEK_BASE_URL 是原生端点，必须覆盖（否则 Messages 请求 404）。

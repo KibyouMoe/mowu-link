@@ -38,7 +38,6 @@ export const PROTOCOL = "app-server/v2";
 export const VERIFIED_WITH = "codex-cli 0.167.0 (2026-11-09)";
 
 const CLIENT_INFO = { name: "codexworker", version: "1.0.0", title: "CodexWorker" };
-const DEFAULT_PROXY = "http://127.0.0.1:10808";
 const STARTUP_TIMEOUT_MS = 20_000;
 const CONTROL_TIMEOUT_FLOOR_MS = 15_000;
 const READ_TIMEOUT_FLOOR_MS = 60_000;
@@ -1004,10 +1003,17 @@ function appServerEnv() {
   delete env.all_proxy;
   const explicit = process.env.CODEXWORKER_APP_SERVER_PROXY?.trim();
   const configured = process.env.HTTPS_PROXY?.trim() || process.env.https_proxy?.trim();
-  const proxy = explicit || (configured && /^http:\/\//i.test(configured) ? configured : DEFAULT_PROXY);
-  env.HTTPS_PROXY = proxy;
-  env.https_proxy = proxy;
-  env.HTTP_PROXY = explicit || (/^http:\/\//i.test(process.env.HTTP_PROXY ?? "") ? process.env.HTTP_PROXY : proxy);
+  // 没有显式配置就不注入代理：本机全局走 FlClash TUN（utun4），
+  // 再套一层 shell 级代理会让 codex 的 responses_websocket 连不上。
+  const proxy = explicit || (configured && /^http:\/\//i.test(configured) ? configured : null);
+  if (proxy) {
+    env.HTTPS_PROXY = proxy;
+    env.https_proxy = proxy;
+    env.HTTP_PROXY = explicit || (/^http:\/\//i.test(process.env.HTTP_PROXY ?? "") ? process.env.HTTP_PROXY : proxy);
+    env.http_proxy = env.HTTP_PROXY;
+  } else {
+    for (const key of ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"]) delete env[key];
+  }
   const noProxy = new Set((env.NO_PROXY ?? env.no_proxy ?? "").split(",").map((value) => value.trim()).filter(Boolean));
   for (const value of ["127.0.0.1", "localhost", "::1"]) noProxy.add(value);
   env.NO_PROXY = [...noProxy].join(",");
