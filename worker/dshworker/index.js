@@ -35,7 +35,7 @@ import {
   registerNativeTransport,
   resetNativeTransportCache,
 } from "./interface/transport/index.mjs";
-import { normalizeSubscriptionConfig } from "./router-tasks.mjs";
+import { normalizeSubscriptionConfig, taskBoardTerminalPhase, taskBoardText, taskBoardTitle } from "./router-tasks.mjs";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 export const name = "dshworker";
@@ -969,6 +969,13 @@ async function startBusiness({ ctx, transport, identity, workerConfig, config, s
   if (!feishu.value) log("warn", "feishu_config_missing", { file: feishu.file });
   const whitelist = resolveWhitelist(workerConfig, feishu.value);
 
+  // 任务看板目标：训练员与这个 worker 的私聊。显式 taskBoardOpenId 优先，其次
+  // 入站白名单（就是训练员本人），最后才是凭据文件里的 open_id。和 cli.mjs 的
+  // 表达式保持一致，写进 desktop-config 的那份也复用这里的值。
+  const taskBoardOpenId = stringArg(workerConfig.feishu?.taskBoardOpenId) ?? whitelist.ids[0]
+    ?? stringArg(feishu.value?.open_id) ?? null;
+  const taskBoardEnabled = workerConfig.feishu?.taskBoardEnabled !== false && Boolean(taskBoardOpenId);
+
   const thread = transport.threads.values().next().value
     ?? transport.threads.get(transport.createThread({ title: `${identity.display} · DSH`, cwd: workspace }).threadId);
   const bindingPath = path.join(stateDir, "manager-binding.json");
@@ -988,8 +995,7 @@ async function startBusiness({ ctx, transport, identity, workerConfig, config, s
       configFile: feishu.file,
       inboundEnabled: true,
       trainerOpenIdWhitelist: whitelist.ids,
-      taskBoardOpenId: String(workerConfig.feishu?.taskBoardOpenId ?? "").trim() || whitelist.ids[0]
-        || stringArg(feishu.value?.open_id) || null,
+      taskBoardOpenId,
       taskBoardEnabled: workerConfig.feishu?.taskBoardEnabled !== false,
       onlineNotificationEnabled: workerConfig.feishu?.onlineNotificationEnabled ?? false,
       streamEnabled: workerConfig.feishu?.streamEnabled ?? true,
@@ -1034,6 +1040,60 @@ async function startBusiness({ ctx, transport, identity, workerConfig, config, s
     log("warn", "session_adopt_failed", { threadId: thread.id, message: error?.message ?? String(error) });
   }
 
+  // ---- 任务看板：本 worker 自己的飞书身份 -----------------------------------
+  // 只把两条生命周期消息发到训练员与这个 worker 的私聊（start / failed）：
+  // 成功后 manager 自己在这条会话里的回复已经承载了正文，再发一条「完成」只是
+  // 重复。router 的回执（router → trigger）不受影响。
+  // 优先借 manager 已经建好的 notifier（它带着绑定的 token / canSend 守卫），
+  // manager 不可用时才用凭据文件自建一个，避免插件形态下多一条长连接。
+  const taskBoardDryRun = process.env.DSHWORKER_FEISHU_DRY_RUN === "1"
+    || process.env.CODEXWORKER_FEISHU_DRY_RUN === "1";
+  let taskBoardFallback = null;
+  async function taskBoardNotifier() {
+    const managerNotifier = business.manager?.()?.notifier;
+    if (managerNotifier?.enabled) return managerNotifier;
+    if (!feishu.value) return null;
+    if (!taskBoardFallback) {
+      const { FeishuNotifier } = await import("./feishu.mjs");
+      taskBoardFallback = new FeishuNotifier({ appId: feishu.value.app_id,
+        appSecret: feishu.value.app_secret, bridgeName: identity.display });
+    }
+    return taskBoardFallback.enabled ? taskBoardFallback : null;
+  }
+  async function taskBoardNotify(taskId, phase, fields = {}) {
+    let text;
+    let title;
+    try {
+      text = taskBoardText({ phase, taskId, ...fields });
+      title = taskBoardTitle({ phase, taskId }) ?? `${identity.display} · 任务看板`;
+    } catch (error) {
+      log("warn", "task_board_failed", { taskId, phase, message: error?.message ?? String(error) });
+      return null;
+    }
+    // 干跑只打日志不发，隔离实例的测试就永远不会投到训练员私聊里。
+    if (taskBoardDryRun) {
+      log("info", "task_board_dry_run", { taskId, phase, title, text: text.slice(0, 200),
+        textChars: text.length,
+        targetOpenIdSha256: createHash("sha256").update(String(taskBoardOpenId)).digest("hex").slice(0, 12) });
+      return "dry-run";
+    }
+    if (!taskBoardEnabled) { log("warn", "task_board_skipped", { taskId, phase, reason: "no_target" }); return null; }
+    const notifier = await taskBoardNotifier().catch(() => null);
+    if (!notifier) { log("warn", "task_board_skipped", { taskId, phase, reason: "feishu_disabled" }); return null; }
+    let delivery = null;
+    try {
+      const response = await notifier.sendMessage(text, { openId: taskBoardOpenId, receiveIdType: "open_id",
+        title, onDelivery: (entry) => { delivery = entry; } });
+      const messageId = response?.data?.message_id ?? delivery?.messageId ?? null;
+      log(messageId ? "info" : "warn", "task_board_sent", { taskId, phase, messageId,
+        apiCode: Number.isInteger(response?.code) ? response.code : null, deliveryPhase: delivery?.phase ?? null });
+      return messageId;
+    } catch (error) {
+      log("warn", "task_board_failed", { taskId, phase, message: error?.message ?? String(error) });
+      return null;
+    }
+  }
+
   // router（可选）：任务进入 manager 选中的同一个会话，和飞书共享上下文。
   const routerConfig = workerConfig.router ?? {};
   const routerEnabled = config.router !== false && process.env.CODEXWORKER_ROUTER !== "0"
@@ -1058,6 +1118,10 @@ async function startBusiness({ ctx, transport, identity, workerConfig, config, s
         const messageId = routerMessageId(taskId);
         let status = "failed";
         let summary = "";
+        let failure = "task runner error";
+        log("info", "router_task_start", { taskId, messageId });
+        // 开始行：训练员私聊里要能看见「来自超级溪流的指令」+ 目标原文。
+        await taskBoardNotify(taskId, "start", { goal });
         try {
           if (!goal) throw new Error("router task has an empty goal");
           const manager = business.manager?.();
@@ -1077,11 +1141,18 @@ async function startBusiness({ ctx, transport, identity, workerConfig, config, s
           }
           status = turn?.status === "completed" ? "done" : "failed";
           summary = lastAssistantText(turn) || (turn ? "" : "task turn never appeared");
-          if (status !== "done" && turn) summary = summary || `turn ${turn.status}`;
+          if (status !== "done") {
+            failure = turn ? `turn ${turn.status}` : "task turn never appeared";
+            summary = summary || failure;
+          }
         } catch (error) {
           summary = error?.message ?? String(error);
+          failure = summary;
           log("error", "router_task_failed", { taskId, message: summary });
         }
+        // 成功不单独发：manager 在这条会话里的回复已经到训练员私聊了。
+        const boardPhase = taskBoardTerminalPhase(status);
+        if (boardPhase) await taskBoardNotify(taskId, boardPhase, { summary, failure });
         await routerClient.result({ taskId, status, summary }).catch((error) => {
           log("error", "router_result_failed", { taskId, message: error?.message ?? String(error) });
         });
