@@ -30,6 +30,10 @@ import process from "node:process";
 import readline from "node:readline";
 
 export const name = "app-server";
+// app-server 是 CLI 后端，不是 Desktop：没有 Desktop 的 public journal / task
+// journal，也没有 caller-turn 上下文。沿用它写自建的执行锁，但不能走
+// journal 观察路径，否则 scanPublicJournal 会一直失败并跳过 read()。
+export const capabilities = Object.freeze({ desktopJournal: false, callerTurn: false });
 export const PROTOCOL = "app-server/v2";
 export const VERIFIED_WITH = "codex-cli 0.167.0 (2026-11-09)";
 
