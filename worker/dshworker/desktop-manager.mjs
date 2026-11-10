@@ -1180,7 +1180,8 @@ export class DesktopManager {
                 this.enqueuePublicText(session, item.turnId, item.key, item.final ? item.text : delta, imageBindingEpoch, item.final, [...ids]);
               } else if (item.final) {
                 if (this.notifier && id === this.state.selectedThreadId) void this.notifier.sendMessage(item.text,
-                  { title: `${this.config.bridgeName}-回复`, threadId: id, chatId: session.feishuChatId }).catch(() => {});
+                  { title: `${this.config.bridgeName}-回复`, threadId: id, chatId: session.feishuChatId })
+                  .catch((error) => console.error(`[bridge] 最终回复发送失败: ${error?.message ?? String(error)}`));
               } else if (this.notifier && id === this.state.selectedThreadId && this.config.feishu.streamEnabled !== false) {
                 if (!this.feishuBeats.has(id)) this.feishuBeats.set(id, new FeishuStreamBeat(this.notifier,
                   { threadId: id, chatId: session.feishuChatId, bridgeName: this.config.bridgeName }));
