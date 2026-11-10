@@ -864,12 +864,14 @@ function normalizeTurn(turn, maxChars) {
 function turnItems(turn, maxChars) {
   const items = [{
     type: "userMessage",
+    kind: "trainer",
     id: `${turn.id}-user`,
     text: truncateText(turn.prompt ?? "", maxChars),
   }];
   if (turn.text) {
     items.push({
       type: "agentMessage",
+      kind: "assistant",
       id: `${turn.id}-agent`,
       text: truncateText(turn.text, maxChars),
       phase: turn.status === "completed" ? "final_answer" : null,

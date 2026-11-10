@@ -1065,6 +1065,7 @@ function normalizeThread(thread) {
 
 function normalizeTurn(turn, includeOutputs, maxChars) {
   const items = (turn.items ?? []).map((item) => normalizeItem(item, includeOutputs, maxChars));
+  markTerminalFinal(turn.status, items);
   return {
     id: turn.id,
     status: turn.status ?? "unknown",
@@ -1077,8 +1078,27 @@ function normalizeTurn(turn, includeOutputs, maxChars) {
   };
 }
 
+const FINAL_PHASES = ["final_answer", "final"];
+
+// app-server 0.167.0 在 agentMessage 上带 phase（commentary / final_answer），
+// 本文件照原样透传。若某个版本/模型不给 phase，已结束的 turn 里就没有 final
+// 信号，上层的流式 beat 永远收不了尾——这里给最后一条 agentMessage 补上。
+function markTerminalFinal(status, items) {
+  if (!TERMINAL_TURN_STATUSES.has(status)) return;
+  const messages = items.filter((item) => item.type === "agentMessage");
+  if (!messages.length || messages.some((item) => FINAL_PHASES.includes(item.phase))) return;
+  messages.at(-1).phase = "final_answer";
+}
+
 function normalizeItem(item, includeOutputs, maxChars) {
   const copy = { ...item };
+  // 业务层（desktop-manager 的 publicItems）沿用 Desktop 的 item 形状：类型在
+  // `kind`（assistant / trainer），原文在 `type`。app-server 的 item 只有
+  // `type`，少了 kind 这一层映射；已有 kind 的实现（desktop-pipe）不覆盖。
+  if (copy.kind === undefined) {
+    if (copy.type === "agentMessage") copy.kind = "assistant";
+    else if (copy.type === "userMessage") copy.kind = "trainer";
+  }
   const delegation = copy.type === "functionCallOutput" &&
     ["create_thread", "send_message_to_thread"].includes(copy.name);
   if (!includeOutputs && !delegation) {
