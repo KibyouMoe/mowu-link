@@ -543,6 +543,31 @@ class InProcessTransport {
 
   // ---- Agent 池 -----------------------------------------------------------
 
+  /**
+   * 构造挂载 preset 的 setup 回调。
+   * preset 只有在 Agent 的 setup 阶段 mount 才会挂上工具（bash / fs / web…）；
+   * profile 里的 preset 声明本身不作用于 agents.create 建出来的 Agent。
+   */
+  async presetSetup() {
+    const presets = this.ctx.get("agentPresets");
+    if (!presets) return null;
+    const wanted = "standard";
+    let resolvedId;
+    try {
+      resolvedId = (await presets.resolve(wanted)).id;
+    } catch (error) {
+      this.log("warn", "preset_resolve_failed", {
+        preset: wanted,
+        message: error?.message ?? String(error),
+      });
+      return null;
+    }
+    this.log("info", "preset_mount_planned", { preset: resolvedId });
+    return async (agentCtx) => {
+      await presets.mount(agentCtx, resolvedId);
+    };
+  }
+
   async ensureAgent(thread) {
     const entry = this.live.get(thread.id);
     if (entry?.agent && entry.agent.status !== "disposed") return entry.agent;
@@ -551,7 +576,12 @@ class InProcessTransport {
     const agentOptions = { ...this.selection };
     if (thread.sessionId) {
       try {
-        const handle = await agents.resume({ resumeSessionId: thread.sessionId, agentOptions });
+        const mountSetup = await this.presetSetup();
+        const handle = await agents.resume({
+          resumeSessionId: thread.sessionId,
+          agentOptions,
+          ...(mountSetup ? { setup: mountSetup } : {}),
+        });
         const agent = handle.agent;
         this.live.set(thread.id, { handle, agent });
         this.log("info", "agent_resumed", { threadId: thread.id, sessionId: thread.sessionId,
@@ -564,10 +594,14 @@ class InProcessTransport {
       }
     }
     const sessionId = `session-${randomUUID()}`;
+    // preset 只在 Agent 创建/恢复的 setup 里挂载才有工具（bash/fs/web…）。
+    // 不挂的话 agent 只有 working_directory 一个工具，即使 profile 里配了 preset。
+    const mountSetup = await this.presetSetup();
     const handle = await agents.create({
       sessionId,
       meta: { cwd: thread.cwd },
       agentOptions,
+      ...(mountSetup ? { setup: mountSetup } : {}),
     });
     const agent = handle.agent;
     thread.sessionId = typeof agent.session?.id === "string" ? agent.session.id : sessionId;
