@@ -32,9 +32,15 @@ import process from "node:process";
 import readline from "node:readline";
 
 export const name = "dsh";
-// dsh turns belong to this transport, not to a Desktop caller turn; the manager
-// must not require a bound Desktop turn before asking for wait_threads status.
-export const requiresCallerTurn = false;
+// Capabilities the business layer adapts to. Anything not declared here keeps
+// the Desktop-compatible default (true), so only genuine dsh gaps are listed.
+//   fork           – no Desktop fork primitive; /fork must fail explicitly.
+//   desktopJournal – dsh turns are owned by this transport, nothing is written
+//                    to ~/.codex/sessions, so the public-journal relay is absent.
+//   callerTurn     – a dsh turn is not a bound Desktop caller turn; wait_threads
+//                    status must not require a live caller invocation.
+export const capabilities = Object.freeze({ fork: false, desktopJournal: false, callerTurn: false });
+export const requiresCallerTurn = capabilities.callerTurn;
 export const PROTOCOL = "dsh/headless-json";
 export const VERIFIED_WITH = "dsh 0.2.2-rc.1 (2026-11-10)";
 

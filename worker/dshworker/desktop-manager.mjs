@@ -8,6 +8,7 @@ import path from "node:path";
 import os from "node:os";
 import { FeishuNotifier, FeishuStreamBeat, FeishuWebsocketClient } from "./feishu.mjs";
 import { localHost, nativeSendSource } from "./codex/native-dispatch.mjs";
+import { resolveNativeCapabilities } from "./codex/transport/index.mjs";
 import { QuestionRelay, QuestionRelayError } from "./question-relay.mjs";
 import { cacheFeishuImage, imagePrompt } from "./feishu-images.mjs";
 import { FeishuOnlineAnnouncement } from "./online-announcement.mjs";
@@ -246,16 +247,16 @@ export class DesktopManager {
     this.stateLoaded = true;
     this.state.selectionEpoch ??= 0; this.state.autoImages ??= {};
     this.tools = await this.listNativeTools();
-    // Self-target semantics (and the whole Desktop public-journal relay) only
-    // exist when the engine writes Desktop's session journal. The dsh transport
-    // owns its turns directly, so its threads must follow the native-history path.
-    this.hasDesktopJournal = !this.tools.some(t => t.namespace === "dsh");
-    // fork_thread is optional: the dsh transport has no fork equivalent, and it is
-    // only needed for the /fork command (which fails explicitly below).
-    for (const name of ["read_thread", "send_message_to_thread", "create_thread", "set_thread_title", "list_threads"]) {
-      if (!this.tools.some(t => t.name === name)) fail(503, "desktop_integration_unavailable", `Native tool missing: ${name}`, true);
+    // The transport declares what the engine can actually do; the manager adapts
+    // only to those gaps and keeps the Desktop contract everywhere else.
+    const capabilities = resolveNativeCapabilities();
+    this.canFork = capabilities.fork;
+    this.hasDesktopJournal = capabilities.desktopJournal;
+    const requiredTools = ["read_thread", "send_message_to_thread", "create_thread", "set_thread_title", "list_threads"];
+    if (this.canFork) requiredTools.push("fork_thread");
+    for (const name of requiredTools) {
+      if (!this.tools.some(t => t.name === name)) fail(503, "desktop_integration_unavailable", `Desktop tool missing: ${name}`, true);
     }
-    this.canFork = this.tools.some(t => t.name === "fork_thread");
     this.connected = true;
     for (const session of Object.values(this.state.sessions)) {
       session.pendingInputs ??= [];
@@ -936,8 +937,7 @@ export class DesktopManager {
         session.queue.unshift(request); receipt.nativeDispatch.status = "deferred";
         return; // Pre-write deferral only; unknown native writes never requeue.
       }
-      const body = error.body ?? { error: "dispatch_failed",
-        detail: `Queue dispatch failed: ${error?.message ?? String(error)}`, retryable: false };
+      const body = error.body ?? { error: "dispatch_failed", detail: "Queue dispatch failed.", retryable: false };
       if (receipt) { receipt.error = body; receipt.status = error.status ?? 502; }
       await this.emit("message.rejected", request, body);
     } finally { if (receipt) receipt.pending = false; await this.save(); }

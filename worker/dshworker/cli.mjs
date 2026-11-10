@@ -235,13 +235,14 @@ async function main() {
   process.title = identity.name;
 
   const { file: configFile, value: config } = await loadConfig(args.config, identity);
-  // 把用户配置里的模型与思考强度带下去（dsh 自己选模型，这里只做兼容透传）。
-  const dshConfig = config?.dsh ?? config?.codex ?? {};
-  if (typeof dshConfig.model === "string" && dshConfig.model.trim()) {
-    process.env.CODEXWORKER_MODEL = dshConfig.model.trim();
+  // 把用户配置里的模型与思考强度带给 app-server transport：
+  // thread/start 用 CODEXWORKER_MODEL，turn/start 用 CODEXWORKER_REASONING_EFFORT。
+  const codexConfig = config?.codex ?? {};
+  if (typeof codexConfig.model === "string" && codexConfig.model.trim()) {
+    process.env.CODEXWORKER_MODEL = codexConfig.model.trim();
   }
-  if (typeof dshConfig.reasoningEffort === "string" && dshConfig.reasoningEffort.trim()) {
-    process.env.CODEXWORKER_REASONING_EFFORT = dshConfig.reasoningEffort.trim();
+  if (typeof codexConfig.reasoningEffort === "string" && codexConfig.reasoningEffort.trim()) {
+    process.env.CODEXWORKER_REASONING_EFFORT = codexConfig.reasoningEffort.trim();
   }
   const host = args.host ?? process.env.CODEXWORKER_HOST ?? config.host ?? "127.0.0.1";
   const port = resolvePort(args.port ?? process.env.CODEXWORKER_PORT ?? identity.port ?? config.port, 8903);
