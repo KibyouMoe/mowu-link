@@ -70,6 +70,18 @@ URGENCIES = ("urgent", "normal")
 CHAT_DIRECTIONS = ("in", "out")
 PING_INTERVAL = 15.0
 
+# Approval channel (worker → Hermes): a worker asks, a human decides, the
+# worker polls.  Nothing here executes anything; the router only stores the
+# question and the verdict.
+APPROVAL_STATUSES = ("pending", "approved", "denied", "expired")
+APPROVAL_DECISIONS = ("approved", "denied")
+APPROVAL_TTL_S = 600.0          # pending older than 10 min is expired
+APPROVAL_SWEEP_S = 30.0
+APPROVAL_MAX_TITLE = 300
+APPROVAL_MAX_DETAIL = 4000
+APPROVAL_MAX_OPTIONS = 8
+APPROVAL_MAX_TTL_S = 600.0
+
 log = logging.getLogger("router")
 
 
@@ -212,6 +224,28 @@ CREATE INDEX IF NOT EXISTS idx_chat_worker_ts ON chat_messages(worker, ts);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_dedupe
     ON chat_messages(worker, message_id, direction)
     WHERE message_id IS NOT NULL AND message_id <> '';
+
+-- approval channel: a worker asks a question, a human answers, the worker
+-- polls the verdict.  `status` is the single source of truth; expiry is
+-- applied both lazily on read and by a sweeper in the server process.
+CREATE TABLE IF NOT EXISTS approvals (
+    approval_id TEXT PRIMARY KEY,
+    worker      TEXT NOT NULL,
+    task_id     TEXT,
+    kind        TEXT NOT NULL,
+    title       TEXT NOT NULL,
+    detail      TEXT,
+    options     TEXT,
+    status      TEXT NOT NULL DEFAULT 'pending',
+    decision    TEXT,
+    note        TEXT,
+    created_at  REAL NOT NULL,
+    expires_at  REAL NOT NULL,
+    decided_at  REAL,
+    notified    INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_approvals_worker ON approvals(worker, status);
+CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals(status, created_at);
 """
 
 
@@ -785,6 +819,188 @@ class RouterStore:
             "last": last,
         }
 
+    # -- approvals (worker asks, human decides) -------------------------- #
+
+    @staticmethod
+    def _approval_dict(row: sqlite3.Row, now: Optional[float] = None
+                       ) -> Dict[str, Any]:
+        stamp = time.time() if now is None else float(now)
+        status = str(row["status"])
+        expires_at = float(row["expires_at"] or 0)
+        if status == "pending" and expires_at <= stamp:
+            # Read-time truth even if the sweeper has not run yet.
+            status = "expired"
+        try:
+            options = json.loads(row["options"]) if row["options"] else None
+        except ValueError:
+            options = None
+        if not isinstance(options, list) or not options:
+            options = ["approved", "denied"]
+        decided_at = row["decided_at"]
+        return {
+            "approval_id": row["approval_id"],
+            "worker": row["worker"],
+            "task_id": row["task_id"],
+            "kind": row["kind"],
+            "title": row["title"],
+            "detail": row["detail"],
+            "options": options,
+            "status": status,
+            "decision": row["decision"] if status != "expired" else None,
+            "note": row["note"],
+            "created_at": row["created_at"],
+            "created_at_iso": (now_iso(row["created_at"])
+                               if row["created_at"] else None),
+            "expires_at": expires_at,
+            "expires_at_iso": now_iso(expires_at) if expires_at else None,
+            "decided_at": decided_at,
+            "decided_at_iso": now_iso(decided_at) if decided_at else None,
+            "remaining_s": (round(max(0.0, expires_at - stamp), 1)
+                            if status == "pending" else 0.0),
+            "notified": bool(row["notified"]),
+        }
+
+    def _approval_row(self, approval_id: str) -> Optional[sqlite3.Row]:
+        return self._conn.execute(
+            "SELECT * FROM approvals WHERE approval_id=?",
+            (approval_id,)).fetchone()
+
+    def create_approval(self, worker: str, kind: str, title: str,
+                        task_id: Optional[str] = None,
+                        detail: Optional[str] = None,
+                        options: Optional[List[str]] = None,
+                        ttl_s: float = APPROVAL_TTL_S,
+                        ) -> Dict[str, Any]:
+        now = time.time()
+        ttl = min(APPROVAL_MAX_TTL_S, max(1.0, float(ttl_s)))
+        payload = json.dumps(options or ["approved", "denied"],
+                             ensure_ascii=False)
+        with self._lock:
+            for _attempt in range(4):
+                approval_id = "ap_" + secrets.token_hex(8)
+                try:
+                    self._conn.execute(
+                        "INSERT INTO approvals (approval_id, worker, task_id,"
+                        " kind, title, detail, options, status, created_at,"
+                        " expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending',"
+                        " ?, ?)",
+                        (approval_id, worker, task_id, kind, title, detail,
+                         payload, now, now + ttl))
+                    break
+                except sqlite3.IntegrityError:
+                    continue
+            else:  # pragma: no cover - 64 bits of entropy
+                raise RuntimeError("could not allocate an approval id")
+            row = self._approval_row(approval_id)
+        assert row is not None
+        log.info("approval created id=%s worker=%s kind=%s ttl=%.0fs",
+                 approval_id, worker, kind, ttl)
+        return self._approval_dict(row, now)
+
+    def get_approval(self, approval_id: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            row = self._approval_row(approval_id)
+            if row is None:
+                return None
+            if (str(row["status"]) == "pending"
+                    and float(row["expires_at"] or 0) <= time.time()):
+                self._conn.execute(
+                    "UPDATE approvals SET status='expired'"
+                    " WHERE approval_id=? AND status='pending'",
+                    (approval_id,))
+                row = self._approval_row(approval_id)
+        return self._approval_dict(row) if row is not None else None
+
+    def list_approvals(self, worker: Optional[str] = None,
+                       status: Optional[str] = None,
+                       limit: int = 50) -> List[Dict[str, Any]]:
+        # 不做写操作：_approval_dict 会把过期的 pending 显示成 expired，
+        # 真正落库交给 decide 和清扫线程，避免每次读都触发一次 UPDATE。
+        where = []
+        params: List[Any] = []
+        if worker:
+            where.append("worker=?")
+            params.append(worker)
+        if status == "pending":
+            where.append("(status='pending' AND expires_at>?)")
+            params.append(time.time())
+        elif status == "expired":
+            # 过期是懒判定的：还没被清扫线程落库的 pending 也算 expired。
+            where.append("(status='expired' OR (status='pending' AND expires_at<=?))")
+            params.append(time.time())
+        elif status:
+            where.append("status=?")
+            params.append(status)
+        clause = (" WHERE " + " AND ".join(where)) if where else ""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM approvals" + clause +
+                " ORDER BY created_at DESC, rowid DESC LIMIT ?",
+                tuple(params + [int(limit)])).fetchall()
+        return [self._approval_dict(row) for row in rows]
+
+    def decide_approval(self, approval_id: str, decision: str,
+                        note: Optional[str] = None
+                        ) -> Tuple[str, Optional[Dict[str, Any]]]:
+        """Returns (outcome, approval).  Outcome: decided / already / expired
+        / unknown / invalid."""
+        if decision not in APPROVAL_DECISIONS:
+            return "invalid", None
+        now = time.time()
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE approvals SET status=?, decision=?, note=?,"
+                " decided_at=? WHERE approval_id=? AND status='pending'"
+                " AND expires_at>?",
+                (decision, decision, note, now, approval_id, now))
+            row = self._approval_row(approval_id)
+            if row is None:
+                return "unknown", None
+            if cur.rowcount:
+                log.info("approval decided id=%s decision=%s",
+                         approval_id, decision)
+                return "decided", self._approval_dict(row, now)
+            status = str(row["status"])
+            if status == "pending":
+                # The deadline passed between the UPDATE and this read.
+                self._conn.execute(
+                    "UPDATE approvals SET status='expired'"
+                    " WHERE approval_id=? AND status='pending'", (approval_id,))
+                row = self._approval_row(approval_id)
+                if row is None:
+                    return "unknown", None
+                status = "expired"
+            if status == "expired":
+                return "expired", self._approval_dict(row, now)
+            return "already", self._approval_dict(row, now)
+
+    def expire_approvals(self, now: Optional[float] = None) -> int:
+        stamp = time.time() if now is None else float(now)
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE approvals SET status='expired'"
+                " WHERE status='pending' AND expires_at<=?", (stamp,))
+            changed = int(cur.rowcount or 0)
+        if changed:
+            log.info("approvals expired: %d", changed)
+        return changed
+
+    def pending_approvals(self, worker: Optional[str] = None) -> int:
+        clause = " AND worker=?" if worker else ""
+        params: List[Any] = [time.time()] + ([worker] if worker else [])
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM approvals"
+                " WHERE status='pending' AND expires_at>?" + clause,
+                tuple(params)).fetchone()
+        return int(row["n"] or 0)
+
+    def mark_approval_notified(self, approval_id: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE approvals SET notified=1 WHERE approval_id=?",
+                (approval_id,))
+
     def close(self) -> None:
         with self._lock:
             try:
@@ -1127,6 +1343,27 @@ class RouterServer(ThreadingHTTPServer):
         return sent
 
 
+class ApprovalSweeper(threading.Thread):
+    """Expire stale pending approvals even when nobody polls them."""
+
+    def __init__(self, store: RouterStore,
+                 interval: float = APPROVAL_SWEEP_S) -> None:
+        super().__init__(daemon=True, name="approval-sweeper")
+        self.store = store
+        self.interval = max(1.0, float(interval))
+        self._stop = threading.Event()
+
+    def run(self) -> None:
+        while not self._stop.wait(self.interval):
+            try:
+                self.store.expire_approvals()
+            except Exception:  # noqa: BLE001
+                log.exception("approval sweep failed")
+
+    def stop(self) -> None:
+        self._stop.set()
+
+
 class RouterHandler(BaseHTTPRequestHandler):
     server_version = "mowu-router/" + VERSION
     sys_version = ""
@@ -1225,7 +1462,9 @@ class RouterHandler(BaseHTTPRequestHandler):
                                   "/notice", "/subscriptions",
                                   "/subscriptions/pending", "/chat/log",
                                   "/chat/{worker}/messages",
-                                  "/chat/{worker}/summary"],
+                                  "/chat/{worker}/summary",
+                                  "/approvals", "/approvals/{id}",
+                                  "/approvals/{id}/decide"],
                 })
             if parts == ["stream"]:
                 return self._serve_stream(qs)
@@ -1246,6 +1485,11 @@ class RouterHandler(BaseHTTPRequestHandler):
                 if parts[2] == "messages":
                     return self._send_json(200, self._chat_messages(qs, worker))
                 return self._send_json(200, self._chat_summary(qs, worker))
+            if parts == ["approvals"]:
+                return self._send_json(*self._approvals_list(qs))
+            if len(parts) == 2 and parts[0] == "approvals":
+                return self._send_json(*self._approval_get(
+                    unquote(parts[1]).strip()))
             self._send_json(404, {"ok": False, "error": "not found"})
         except Unauthorized:
             self._send_json(401, {"ok": False, "error": "unauthorized"})
@@ -1282,6 +1526,12 @@ class RouterHandler(BaseHTTPRequestHandler):
                 return self._send_json(*self._task_cancel(parts[1]))
             if parts == ["subscriptions"]:
                 return self._send_json(*self._subscription_create(body))
+            if parts == ["approvals"]:
+                return self._send_json(*self._approval_create(body))
+            if (len(parts) == 3 and parts[0] == "approvals"
+                    and parts[2] == "decide"):
+                return self._send_json(*self._approval_decide(
+                    unquote(parts[1]).strip(), body))
             self._send_json(404, {"ok": False, "error": "not found"})
         except Unauthorized:
             self._send_json(401, {"ok": False, "error": "unauthorized"})
@@ -1334,6 +1584,7 @@ class RouterHandler(BaseHTTPRequestHandler):
             "port": self.server.server_address[1],
             "db_path": self.server.store.path,
             "backlog_max": self.server.backlog_max,
+            "approvals_pending": self.server.store.pending_approvals(),
             "uptime_s": round(max(0.0, time.time() - self.server.started_at), 1),
         }
 
@@ -1768,6 +2019,188 @@ class RouterHandler(BaseHTTPRequestHandler):
             "duplicate": bool(data.get("duplicate")),
         }
 
+    # -- approval endpoints --------------------------------------------- #
+    def _approval_notify(self, approval: Dict[str, Any]) -> bool:
+        """One Feishu push per approval. Reuses the /notice trigger path."""
+        one_line = " ".join(str(approval.get("detail") or "").split())
+        if len(one_line) > 400:
+            one_line = one_line[:397] + "..."
+        text = "审批请求 [%s] %s：%s" % (
+            approval["kind"], approval["worker"], approval["title"])
+        if one_line:
+            text += "\n" + one_line
+        text += "\napproval_id: %s" % approval["approval_id"]
+        payload = {
+            "source": "router",
+            "kind": "approval.request",
+            "level": "event",
+            "text": text,
+            "actor": approval["worker"],
+            "event_id": "approval:" + approval["approval_id"],
+            "payload": {
+                "approval_id": approval["approval_id"],
+                "worker": approval["worker"],
+                "task_id": approval.get("task_id"),
+                "kind": approval["kind"],
+                "options": approval.get("options"),
+                "notice": True,
+            },
+        }
+        ok, data = self.server.trigger_client.post_trigger(payload)
+        if not ok:
+            log.warning("approval notify failed id=%s: %.300s",
+                        approval["approval_id"], data.get("detail") or data)
+            return False
+        log.info("approval notify id=%s trigger_id=%s duplicate=%s",
+                 approval["approval_id"], data.get("id"), data.get("duplicate"))
+        return True
+
+    def _approval_create(self, body: Dict[str, Any]
+                         ) -> Tuple[int, Dict[str, Any]]:
+        worker = str(body.get("worker") or "").strip()
+        if not worker:
+            raise BadRequest("worker is required")
+        if len(worker) > 128:
+            raise BadRequest("worker too long")
+        kind = str(body.get("kind") or "approval").strip() or "approval"
+        if len(kind) > 64:
+            raise BadRequest("kind too long")
+        title = body.get("title")
+        if title is None or not str(title).strip():
+            raise BadRequest("title is required")
+        title = str(title).strip()
+        if len(title) > APPROVAL_MAX_TITLE:
+            raise BadRequest("title too long (max %d chars)"
+                             % APPROVAL_MAX_TITLE)
+        detail = body.get("detail")
+        if detail is not None and not isinstance(detail, str):
+            detail = json.dumps(detail, ensure_ascii=False)
+        if detail is not None:
+            detail = str(detail)
+            if len(detail) > APPROVAL_MAX_DETAIL:
+                detail = detail[:APPROVAL_MAX_DETAIL - 3] + "..."
+        task_id = body.get("task_id", body.get("taskId"))
+        task_id = str(task_id).strip() if task_id is not None else None
+        if task_id == "":
+            task_id = None
+        options = body.get("options")
+        if options is None:
+            options = ["approved", "denied"]
+        if not isinstance(options, list) or not options:
+            raise BadRequest("options must be a non-empty array")
+        if len(options) > APPROVAL_MAX_OPTIONS:
+            raise BadRequest("options too long (max %d)"
+                             % APPROVAL_MAX_OPTIONS)
+        options = [str(item).strip() for item in options]
+        if any(not item or len(item) > 64 for item in options):
+            raise BadRequest("every option must be a non-empty string "
+                             "of at most 64 chars")
+        ttl_raw = body.get("ttl_s", body.get("ttlS", APPROVAL_TTL_S))
+        try:
+            ttl_s = float(ttl_raw)
+        except (TypeError, ValueError):
+            raise BadRequest("ttl_s must be a number")
+        if ttl_s <= 0:
+            raise BadRequest("ttl_s must be > 0")
+
+        approval = self.server.store.create_approval(
+            worker, kind, title, task_id=task_id, detail=detail,
+            options=options, ttl_s=ttl_s)
+        notified = self._approval_notify(approval)
+        if notified:
+            self.server.store.mark_approval_notified(approval["approval_id"])
+            approval["notified"] = True
+        log.info("approval requested id=%s worker=%s kind=%s notified=%s",
+                 approval["approval_id"], worker, kind, notified)
+        return 200, {
+            "ok": True,
+            "approval_id": approval["approval_id"],
+            "status": approval["status"],
+            "worker": approval["worker"],
+            "task_id": approval["task_id"],
+            "kind": approval["kind"],
+            "expires_at": approval["expires_at"],
+            "expires_at_iso": approval["expires_at_iso"],
+            "remaining_s": approval["remaining_s"],
+            "notified": notified,
+        }
+
+    @staticmethod
+    def _approval_id_param(raw: str) -> str:
+        approval_id = raw.strip()
+        if not approval_id:
+            raise BadRequest("approval id is required")
+        if len(approval_id) > 128:
+            raise BadRequest("approval id too long")
+        return approval_id
+
+    def _approval_get(self, raw_id: str) -> Tuple[int, Dict[str, Any]]:
+        approval_id = self._approval_id_param(raw_id)
+        approval = self.server.store.get_approval(approval_id)
+        if approval is None:
+            return 404, {"ok": False, "error": "unknown_approval",
+                         "approval_id": approval_id}
+        return 200, {"ok": True, "approval": approval}
+
+    def _approvals_list(self, qs: Dict[str, List[str]]
+                        ) -> Tuple[int, Dict[str, Any]]:
+        worker = (qs.get("worker", [""])[0] or "").strip() or None
+        status = (qs.get("status", [""])[0] or "").strip() or None
+        if status is not None and status not in APPROVAL_STATUSES:
+            raise BadRequest("status must be one of %s"
+                             % ", ".join(APPROVAL_STATUSES))
+        limit = self._int_param(qs, "limit", 50)
+        if limit is None:
+            limit = 50
+        if limit < 1 or limit > 200:
+            raise BadRequest("limit must be between 1 and 200")
+        approvals = self.server.store.list_approvals(worker, status, limit)
+        return 200, {"ok": True, "count": len(approvals),
+                     "approvals": approvals}
+
+    def _approval_decide(self, raw_id: str, body: Dict[str, Any]
+                         ) -> Tuple[int, Dict[str, Any]]:
+        approval_id = self._approval_id_param(raw_id)
+        decision = str(body.get("decision") or "").strip().lower()
+        # Accept the imperative spelling too; the stored value is canonical.
+        if decision in ("approve", "accept"):
+            decision = "approved"
+        elif decision in ("deny", "decline", "reject"):
+            decision = "denied"
+        if decision not in APPROVAL_DECISIONS:
+            raise BadRequest("decision must be approved or denied")
+        note = body.get("note")
+        if note is not None:
+            note = str(note)
+            if len(note) > 1000:
+                raise BadRequest("note too long (max 1000 chars)")
+        outcome, approval = self.server.store.decide_approval(
+            approval_id, decision, note)
+        if outcome == "unknown" or approval is None:
+            return 404, {"ok": False, "error": "unknown_approval",
+                         "approval_id": approval_id}
+        if outcome == "expired":
+            return 409, {"ok": False, "error": "approval_expired",
+                         "approval_id": approval_id,
+                         "status": approval["status"]}
+        if outcome == "already":
+            return 409, {"ok": False, "error": "already_decided",
+                         "approval_id": approval_id,
+                         "status": approval["status"],
+                         "decision": approval["decision"]}
+        log.info("approval decided id=%s decision=%s worker=%s",
+                 approval_id, decision, approval["worker"])
+        return 200, {
+            "ok": True,
+            "approval_id": approval_id,
+            "status": approval["status"],
+            "decision": approval["decision"],
+            "note": approval["note"],
+            "decided_at": approval["decided_at"],
+            "decided_at_iso": approval["decided_at_iso"],
+            "already": False,
+        }
+
     def _subscriptions_pending(self, qs: Dict[str, List[str]]
                                ) -> Tuple[int, Dict[str, Any]]:
         """Pull this worker's trigger queues, ACK, return the matched events."""
@@ -2130,6 +2563,8 @@ def main(argv: Optional[List[str]] = None) -> int:
              args.trigger_token_file)
     log.info("subscription forwarding -> %s (cursor bus: /events + /ack)",
              trigger_client.base_url)
+    sweeper = ApprovalSweeper(store)
+    sweeper.start()
     print("mowu-router %s listening on http://%s:%d  [X-Router-Token from %s]"
           % (VERSION, host, args.port, token_path), flush=True)
 
@@ -2145,6 +2580,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     except KeyboardInterrupt:
         log.info("interrupted; shutting down")
     finally:
+        sweeper.stop()
         server.server_close()
         store.close()
         try:

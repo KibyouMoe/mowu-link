@@ -26,6 +26,7 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 import RouterClient, { setActiveRouterClient } from "./router-client.mjs";
+import { createApprovalChannel } from "./approval-channel.mjs";
 import { FeishuNotifier } from "./feishu.mjs";
 import { PROTOCOL } from "./desktop-manager.mjs";
 import { ROUTER_TURN_LIMIT_MS, TERMINAL_TURN, findRouterTurn, lastAssistantText,
@@ -60,6 +61,8 @@ const HELP = `${PROGRAM} ${VERSION}
   CODEXWORKER_LOG, CODEXWORKER_STATE_DIR, CODEXWORKER_TOKEN_FILE,
   CODEXWORKER_NATIVE_TRANSPORT（identity 未声明 transport 时使用）,
   CODEXWORKER_ROUTER (0 关闭 router 连接), CODEXWORKER_ROUTER_URL,
+  CODEXWORKER_APPROVAL_POLICY=on-request（需 router 审批通道；默认 never）,
+  CODEXWORKER_APPROVAL_TIMEOUT_MS / CODEXWORKER_APPROVAL_POLL_MS（审批等待/轮询）,
   以及各 transport 自己的变量（见 interface/transport/*.mjs）
 
 说明:
@@ -748,6 +751,21 @@ async function main() {
       logger: (level, event, fields = {}) => log(level, event, { component: "router", ...fields }),
     });
     setActiveRouterClient(routerClient);
+    // app-server 的审批请求必须有人回答，否则 turn 会一直等。审批单走
+    // router，人（溪流）在飞书里批准/拒绝；通道接不上就明确拒绝。
+    if (typeof transport.setApprovalHandler === "function") {
+      const approvalChannel = createApprovalChannel({
+        router: routerClient,
+        taskId: () => routerClient.activity?.taskId ?? null,
+        log: (level, event, fields = {}) => log(level, event, { component: "approval", ...fields }),
+      });
+      transport.setApprovalHandler(approvalChannel.handler);
+      log("info", "approval_channel_started", {
+        timeoutMs: approvalChannel.timeoutMs, pollMs: approvalChannel.pollMs,
+      });
+    } else {
+      log("info", "approval_channel_not_applicable", { transport: transport.name ?? null });
+    }
     routerClient.start({
       onTask: enqueueRouterTask,
       onSubscriptionEvent: enqueueSubscriptionEvent,

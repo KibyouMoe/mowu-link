@@ -1206,7 +1206,7 @@ function findCodexBinary() {
 // 历史行为，不能因为接通审批通道就悄悄打开）。显式要求 on-request 时，
 // 只有审批回调真的接上了才生效；通道没接就退回 never，宁可明确拒绝，
 // 也不让 app-server 发一个永远没人回答的请求。
-function defaultApprovalPolicy() {
+export function defaultApprovalPolicy() {
   const configured = process.env.CODEXWORKER_APPROVAL_POLICY?.trim();
   if (!configured) return "never";
   const normalized = configured.toLowerCase();

@@ -168,6 +168,31 @@ chat_messages(
 - `meta` 原样落库（对象/数组序列化为 JSON 字符串，字符串照存，≤16000 字符）；
   `messages` 响应不返回 `meta`，需要时直接查库。
 
+### 审批通道（worker 提问，人回答）
+
+worker 在执行命令/改文件前需要人类点头，但子进程的 JSON-RPC 请求不能直接
+转给飞书。Router 只存一张审批单：worker 提申请 → trigger 推一条
+`approval.request` 通知（level `event`）→ 溪流批准/拒绝 → worker 轮询结果。
+
+| 方法 | 路径 | 请求 / 说明 |
+|---|---|---|
+| POST | `/approvals` | `{worker, taskId?/task_id?, kind, title, detail?, options?, ttl_s?}` → `{ok, approval_id, status:"pending", expires_at, remaining_s, notified}` |
+| GET | `/approvals/{id}` | `{ok, approval:{approval_id, worker, task_id, kind, title, detail, options, status, decision, note, created_at_iso, expires_at_iso, remaining_s, notified}}` |
+| GET | `/approvals?worker=&status=&limit=` | 列表，默认 50、最大 200；`status` ∈ `pending/approved/denied/expired` |
+| POST | `/approvals/{id}/decide` | `{decision:"approved"\|"denied", note?}` → `{ok, approval_id, status, decision, note, decided_at_iso}` |
+
+语义：
+
+- `status` 只有 `pending` / `approved` / `denied` / `expired`。`pending` 超过
+  `ttl_s`（默认 **600 秒**，硬上限也是 600）自动变 `expired`：读的时候懒判定，
+  服务端还有 30 秒一次的清扫线程，所以没人轮询也会过期。
+- 已决定/已过期的单子再 `decide` → `409 already_decided` / `409 approval_expired`；
+  未知 id → `404 unknown_approval`。
+- 提交时写一条 trigger 事件：`kind="approval.request"`、`level="event"`、
+  `event_id="approval:<approval_id>"`、`payload.approval_id`。trigger 挂掉时
+  审批单仍然创建成功（`notified:false`），**不返回 5xx**。
+- Router 不执行任何命令，也不校验 worker 是否已注册：它只是传话。
+
 ---
 
 ## 三、派活：三态与状态机

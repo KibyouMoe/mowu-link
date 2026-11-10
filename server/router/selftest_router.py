@@ -860,6 +860,124 @@ def run(work: Path, checker: Checker) -> None:
             "status=%s body=%s row=%s" % (status_u, urgent, urow))
 
         # ---------------------------------------------------------------- #
+        # 8b2. approvals: worker asks, human decides, worker polls
+        # ---------------------------------------------------------------- #
+        status_a, asked = http("POST", BASE + "/approvals", {
+            "worker": "波旁", "taskId": "t-approval-1", "kind": "command",
+            "title": "运行 rm -rf ./tmp/build",
+            "detail": "cwd=/tmp/build\n命令需要 escalated 权限",
+            "options": ["approved", "denied"],
+        }, token)
+        approval_id = asked.get("approval_id") or ""
+        status_g, fetched = http("GET", BASE + "/approvals/" + approval_id,
+                                 token=token)
+        approval_row = fetched.get("approval") or {}
+        status_l, listing = http(
+            "GET", BASE + "/approvals?status=pending&worker=%s"
+            % quote("波旁"), token=token)
+        conn = sqlite3.connect(str(trigger_db))
+        try:
+            arow = conn.execute(
+                "SELECT kind, level, actor, payload_json FROM events"
+                " WHERE event_id=?", ("approval:" + approval_id,)).fetchone()
+        finally:
+            conn.close()
+        checker.check(
+            "POST /approvals -> pending, camelCase taskId stored, "
+            "GET + list agree, trigger approval.request/event",
+            status_a == 200 and asked.get("ok") is True
+            and asked.get("status") == "pending"
+            and approval_id.startswith("ap_")
+            and asked.get("notified") is True
+            and 590 < float(asked.get("remaining_s") or 0) <= 600
+            and status_g == 200 and approval_row.get("status") == "pending"
+            and approval_row.get("task_id") == "t-approval-1"
+            and approval_row.get("worker") == "波旁" and approval_row.get("kind") == "command"
+            and approval_row.get("title") == "运行 rm -rf ./tmp/build"
+            and "escalated" in (approval_row.get("detail") or "")
+            and approval_row.get("options") == ["approved", "denied"]
+            and status_l == 200
+            and approval_id in [a.get("approval_id")
+                                for a in listing.get("approvals", [])]
+            and arow is not None and arow[0] == "approval.request"
+            and arow[1] == "event" and arow[2] == "波旁"
+            and approval_id in (arow[3] or ""),
+            "ask=%s get=%s list=%s trigger=%s"
+            % (status_a, approval_row.get("status"), status_l, arow))
+
+        status_d, denied = http(
+            "POST", BASE + "/approvals/%s/decide" % approval_id,
+            {"decision": "denied", "note": "不要在共享机上删目录"}, token)
+        status_d2, again = http(
+            "POST", BASE + "/approvals/%s/decide" % approval_id,
+            {"decision": "approved"}, token)
+        status_g2, fetched2 = http("GET", BASE + "/approvals/" + approval_id,
+                                   token=token)
+        checker.check(
+            "POST /approvals/{id}/decide -> denied + note, second decide "
+            "409 already_decided, GET reflects it",
+            status_d == 200 and denied.get("status") == "denied"
+            and denied.get("decision") == "denied"
+            and denied.get("note") == "不要在共享机上删目录"
+            and denied.get("already") is False
+            and status_d2 == 409 and again.get("error") == "already_decided"
+            and again.get("decision") == "denied"
+            and status_g2 == 200
+            and (fetched2.get("approval") or {}).get("status") == "denied",
+            "decide=%s/%s again=%s/%s"
+            % (status_d, denied.get("status"), status_d2, again.get("error")))
+
+        status_e, expiring = http("POST", BASE + "/approvals", {
+            "worker": "波旁", "kind": "fileChange",
+            "title": "写入 /etc/hosts", "ttl_s": 1,
+        }, token)
+        expiring_id = expiring.get("approval_id") or ""
+        time.sleep(1.2)
+        status_ge, expired = http("GET", BASE + "/approvals/" + expiring_id,
+                                  token=token)
+        status_de, late_decide = http(
+            "POST", BASE + "/approvals/%s/decide" % expiring_id,
+            {"decision": "approved"}, token)
+        checker.check(
+            "approval ttl_s=1 -> pending becomes expired; decide -> 409 "
+            "approval_expired",
+            status_e == 200 and status_ge == 200
+            and (expired.get("approval") or {}).get("status") == "expired"
+            and status_de == 409
+            and late_decide.get("error") == "approval_expired",
+            "get=%s decide=%s/%s"
+            % ((expired.get("approval") or {}).get("status"), status_de,
+               late_decide.get("error")))
+
+        status_ua, missing = http("GET", BASE + "/approvals/ap_nope",
+                                  token=token)
+        status_ud, missing_d = http(
+            "POST", BASE + "/approvals/ap_nope/decide",
+            {"decision": "approved"}, token)
+        status_bad_d, bad_d = http(
+            "POST", BASE + "/approvals/%s/decide" % approval_id,
+            {"decision": "maybe"}, token)
+        status_bad_a, bad_a = http("POST", BASE + "/approvals",
+                                   {"worker": "波旁"}, token)
+        status_nauth, _ = http("GET", BASE + "/approvals/ap_nope")
+        checker.check(
+            "approval validation: unknown id 404, bad decision/body 400, "
+            "missing token 401",
+            status_ua == 404 and missing.get("error") == "unknown_approval"
+            and status_ud == 404 and missing_d.get("error") == "unknown_approval"
+            and status_bad_d == 400 and "decision" in (bad_d.get("error") or "")
+            and status_bad_a == 400 and "title" in (bad_a.get("error") or "")
+            and status_nauth == 401,
+            "get=%s decide=%s bad_d=%s bad_a=%s auth=%s"
+            % (status_ua, status_ud, status_bad_d, status_bad_a, status_nauth))
+
+        status_h, health_a = http("GET", BASE + "/health")
+        checker.check(
+            "GET /health exposes approvals_pending (0 after decide/expire)",
+            status_h == 200 and health_a.get("approvals_pending") == 0,
+            "status=%s pending=%s" % (status_h, health_a.get("approvals_pending")))
+
+        # ---------------------------------------------------------------- #
         # 8c. re-declare uses a fresh name; disconnect purges everything
         # ---------------------------------------------------------------- #
         status, sub2 = http("POST", BASE + "/subscriptions", {
@@ -1158,6 +1276,10 @@ def run(work: Path, checker: Checker) -> None:
             status_n, fail_notice = http(
                 "POST", dead_base + "/notice",
                 {"worker": "断链工", "text": "trigger is down"}, dtok)
+            status_ap, fail_approval = http(
+                "POST", dead_base + "/approvals",
+                {"worker": "断链工", "kind": "command",
+                 "title": "trigger down approval"}, dtok)
             checker.check(
                 "trigger down: POST /subscriptions -> 502, table rolled back",
                 status_s == 502 and fail_sub.get("error") == "trigger_unavailable"
@@ -1168,6 +1290,12 @@ def run(work: Path, checker: Checker) -> None:
                 status_n == 200 and fail_notice.get("ok") is False
                 and fail_notice.get("error") == "trigger_unavailable",
                 "status=%s body=%s" % (status_n, fail_notice))
+            checker.check(
+                "trigger down: POST /approvals -> 200 pending, notified:false",
+                status_ap == 200 and fail_approval.get("ok") is True
+                and fail_approval.get("status") == "pending"
+                and fail_approval.get("notified") is False,
+                "status=%s body=%s" % (status_ap, fail_approval))
         finally:
             try:
                 dead_proc.terminate()
