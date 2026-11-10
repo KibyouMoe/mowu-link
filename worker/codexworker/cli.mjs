@@ -2,7 +2,7 @@
 // Worker CLI entry: one native transport + the shared HTTP + Feishu manager.
 //
 // This is the "no Desktop" launcher. It drives exactly one implementation from
-// codex/transport/ (chosen by identity.transport, then
+// interface/transport/ (chosen by identity.transport, then
 // CODEXWORKER_NATIVE_TRANSPORT), persists a CLI session, writes the manager
 // binding + local desktop config that mcp-business.mjs already reads, and then
 // starts the existing HTTP + Feishu manager unchanged.
@@ -60,10 +60,10 @@ const HELP = `${PROGRAM} ${VERSION}
   CODEXWORKER_LOG, CODEXWORKER_STATE_DIR, CODEXWORKER_TOKEN_FILE,
   CODEXWORKER_NATIVE_TRANSPORT（identity 未声明 transport 时使用）,
   CODEXWORKER_ROUTER (0 关闭 router 连接), CODEXWORKER_ROUTER_URL,
-  以及各 transport 自己的变量（见 codex/transport/*.mjs）
+  以及各 transport 自己的变量（见 interface/transport/*.mjs）
 
 说明:
-  1. 原生传输由 codex/transport/index.mjs 选择：identity.json 的 transport 字段优先，
+  1. 原生传输由 interface/transport/index.mjs 选择：identity.json 的 transport 字段优先，
      其次 CODEXWORKER_NATIVE_TRANSPORT，两者都没有则拒绝启动。
   2. 主会话保存在 <stateDir>/cli-session.json，重启复用；读不到时重建。
   3. 写入 <stateDir>/manager-binding.json 与 desktop-config.local.json，
@@ -293,7 +293,7 @@ async function main() {
   process.env.RUDOLF_BRIDGE_LIFECYCLE_CHILD = "1";
   process.env.RUDOLF_BRIDGE_LIFECYCLE_READY ??= "1";
 
-  const transportIndex = await import("./codex/transport/index.mjs");
+  const transportIndex = await import("./interface/transport/index.mjs");
   const transport = transportIndex.resolveNativeTransport();
   log("info", "start", { version: VERSION, host, port, cwd, stateDir, transport: transport.name });
 

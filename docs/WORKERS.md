@@ -43,7 +43,7 @@ origin:
   log: ~/.hermes/logs/codexworker.out.log / .err.log
 agent:
   runtime: codex app-server（JSON-RPC over stdio）
-  transport: codex/transport/app-server.mjs（另一套 desktop-pipe 用于 Desktop 内）
+  transport: interface/transport/app-server.mjs（另一套 desktop-pipe 用于 Desktop 内）
   model: gpt-6.1-sol
   reasoning_effort: max
   context: 500k 窗口，可用 475k

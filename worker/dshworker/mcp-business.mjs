@@ -3,10 +3,10 @@ import { mkdir, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import { DesktopManager, PROTOCOL } from "./desktop-manager.mjs";
-import { nativeToolInvocation, nativeToolRejection, nativeStatusInvocation } from "./codex/native-dispatch.mjs";
+import { nativeToolInvocation, nativeToolRejection, nativeStatusInvocation } from "./interface/native-dispatch.mjs";
 import { sendImage } from "./feishu-image-output.mjs";
 import { operatingConfig } from "./integration-profile.mjs";
-import { resolveNativeTransport, resolveNativeCapabilities } from "./codex/transport/index.mjs";
+import { resolveNativeTransport, resolveNativeCapabilities } from "./interface/transport/index.mjs";
 
 export const BUSINESS_API_VERSION = 1;
 export const BUSINESS_STATE_VERSION = 1;

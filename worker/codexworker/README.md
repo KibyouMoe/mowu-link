@@ -14,7 +14,7 @@ Hermes/溪流通信的旧层（入站入口与 `/report`、`/heartbeat` 上报�
 ## 运行方式（CLI）
 
 `bin/codexworker --port 8905` 由 `identity.json` 决定引擎：`transport: "app-server"`
-选择 `codex/transport/app-server.mjs`（`codex app-server` JSON-RPC），`stateDir` 保持
+选择 `interface/transport/app-server.mjs`（`codex app-server` JSON-RPC），`stateDir` 保持
 `~/.codex/state/codexworker`。选择顺序为 `identity.transport` →
 `CODEXWORKER_NATIVE_TRANSPORT` → 拒绝启动。`cli.mjs`、`desktop-manager.mjs`、
 `mcp-business.mjs` 与 `worker/dshworker` 逐字节相同，引擎差异只经 transport 能力

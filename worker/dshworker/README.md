@@ -1,11 +1,11 @@
 # DSHWorker · dsh 原生传输
 
 本目录是 CodexWorker 业务层（飞书 + router + manager + HTTP）在 **DeepSeek Harness
-(dsh)** 上的实现，由 `codex/transport/dsh.mjs` 驱动 `dsh --profile headless --json`。
+(dsh)** 上的实现，由 `interface/transport/dsh.mjs` 驱动 `dsh --profile headless --json`。
 `desktop-manager.mjs`、`mcp-business.mjs`、`cli.mjs` 与 `worker/codexworker` 逐字节
 相同；引擎差异只经 transport 接口表达：
 
-- `codex/transport/index.mjs` 暴露 `resolveNativeCapabilities()`。`dsh.mjs` 声明
+- `interface/transport/index.mjs` 暴露 `resolveNativeCapabilities()`。`dsh.mjs` 声明
   `{ fork: false, desktopJournal: false, callerTurn: false }`；未声明能力的 transport
   （app-server / desktop-pipe）一律按 Desktop 兼容语义 `true`。
 - 业务层按 `fork` 决定是否要求 `fork_thread` 工具、是否禁用 `/fork`（501），

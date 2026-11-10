@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { hydrateNativeInputs, readNativeWindow } from "../codex/native-history.mjs";
+import { hydrateNativeInputs, readNativeWindow } from "../interface/native-history.mjs";
 import { publicItems } from "../desktop-manager.mjs";
-import { nativeToolRejection } from "../codex/native-dispatch.mjs";
+import { nativeToolRejection } from "../interface/native-dispatch.mjs";
 
 const text = "飞书：第一段\n\n第二段完整保留";
 const input = (id, name = "send_message_to_thread") => ({ type: "functionCallOutput", id, name });

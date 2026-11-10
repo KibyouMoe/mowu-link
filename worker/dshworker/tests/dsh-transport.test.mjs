@@ -11,8 +11,8 @@ const stateDir = await mkdtemp(path.join(os.tmpdir(), "dshworker-transport-"));
 process.env.CODEXWORKER_STATE_DIR = stateDir;
 process.env.CODEXWORKER_NATIVE_TRANSPORT = "dsh";
 
-const dsh = await import("../codex/transport/dsh.mjs");
-const { resetNativeTransportCache, resolveNativeTransport } = await import("../codex/transport/index.mjs");
+const dsh = await import("../interface/transport/dsh.mjs");
+const { resetNativeTransportCache, resolveNativeTransport } = await import("../interface/transport/index.mjs");
 resetNativeTransportCache();
 const transport = resolveNativeTransport();
 
