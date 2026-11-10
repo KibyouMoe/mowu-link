@@ -882,10 +882,12 @@ function turnItems(turn, maxChars) {
     text: truncateText(turn.prompt ?? "", maxChars),
   }];
   // 一个 turn 收完之后整段发一条：思考 + 正文合成同一个 assistant item。
-  // 拆成两条会在飞书上看着像两段互不相干的播报；塞进一条才是「这一轮干了什么」。
+  // 只在 turn 终结时带上思考：inProgress 阶段扫到的那次只发正文，
+  // 否则同一个 turn 会在飞书上出现「输出」「回复」两条重复内容。
   if (turn.text || turn.thinking) {
     const parts = [];
-    if (turn.thinking) {
+    const done = turn.status === "completed";
+    if (turn.thinking && done) {
       const thought = truncateText(turn.thinking, maxChars);
       parts.push(`💭 Reasoning:\n\n\`\`\`plaintext\n${thought}\n\`\`\``);
     }
@@ -895,7 +897,7 @@ function turnItems(turn, maxChars) {
       kind: "assistant",
       id: `${turn.id}-agent`,
       text: parts.join("\n\n"),
-      phase: turn.status === "completed" ? "final_answer" : null,
+      phase: done ? "final_answer" : null,
     });
   }
   if (turn.error) {
