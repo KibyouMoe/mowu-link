@@ -47,6 +47,80 @@ const MAX_TURNS_PER_THREAD = 200;
 const MAX_STDERR_CHARS = 8_192;
 const TERMINAL_TURN_STATUSES = new Set(["completed", "interrupted", "failed", "cancelled", "canceled"]);
 
+// app-server 的 server→client 审批请求（实测 codex-cli 0.167.0）：
+//   codex app-server generate-json-schema → ServerRequest.json 的 oneOf 列出
+//   item/commandExecution/requestApproval、item/fileChange/requestApproval，
+//   以及旧版 applyPatchApproval / execCommandApproval。
+// 响应形状不同：
+//   v2     → { decision: "accept" | "acceptForSession" | "decline" | "cancel" }
+//   旧版    → { decision: "approved" | "approved_for_session" | "denied" | "abort" }
+// item/tool/requestUserInput、mcpServer/elicitation/* 不是审批，仍走 unsupported。
+const APPROVAL_METHODS = Object.freeze({
+  "item/commandExecution/requestApproval": { kind: "command", family: "v2" },
+  "item/fileChange/requestApproval": { kind: "fileChange", family: "v2" },
+  applyPatchApproval: { kind: "fileChange", family: "review" },
+  execCommandApproval: { kind: "command", family: "review" },
+});
+
+export function isApprovalRequest(method) {
+  return typeof method === "string" && Object.hasOwn(APPROVAL_METHODS, method);
+}
+
+/** app-server 期望的 JSON-RPC result；approved/denied 是内部统一口径。 */
+export function approvalResponse(method, decision) {
+  const spec = APPROVAL_METHODS[method];
+  if (!spec) return null;
+  const approved = decision === "approved";
+  if (spec.family === "review") return { decision: approved ? "approved" : "denied" };
+  return { decision: approved ? "accept" : "decline" };
+}
+
+function clip(text, max = 1600) {
+  const value = String(text ?? "");
+  return value.length > max ? `${value.slice(0, max - 3)}...` : value;
+}
+
+/** 给人看的审批摘要（飞书卡片里只放 title/detail，不放原始 JSON）。 */
+export function approvalRequestSummary(method, params = {}, item = null) {
+  const spec = APPROVAL_METHODS[method] ?? { kind: "approval" };
+  const reason = stringArg(params.reason);
+  if (spec.kind === "command") {
+    const command = Array.isArray(params.parsedCmd)
+      ? params.parsedCmd.join(" ")
+      : (stringArg(params.command) ?? "");
+    return {
+      kind: spec.kind,
+      title: command ? `执行命令：${clip(command, 120)}` : "执行命令（需要审批）",
+      detail: [
+        command ? `命令: ${clip(command, 800)}` : null,
+        stringArg(params.cwd) ? `cwd: ${params.cwd}` : null,
+        reason ? `原因: ${reason}` : null,
+        params.approvalId ? `approvalId: ${params.approvalId}` : null,
+      ].filter(Boolean).join("\n"),
+    };
+  }
+  const changes = item?.changes && typeof item.changes === "object" ? item.changes : null;
+  const files = changes
+    ? Object.entries(changes).map(([file, change]) => {
+      const type = change?.type ?? "update";
+      const flag = type === "add" ? "A" : type === "delete" ? "D" : "M";
+      return `${flag} ${file}`;
+    })
+    : [];
+  const label = files.length
+    ? `修改文件：${files.slice(0, 3).map((line) => line.slice(2)).join(", ")}${files.length > 3 ? ` 等 ${files.length} 个` : ""}`
+    : (stringArg(params.grantRoot) ? `申请写入权限：${params.grantRoot}` : "修改文件（需要审批）");
+  return {
+    kind: spec.kind,
+    title: label,
+    detail: [
+      files.length ? clip(files.join("\n"), 900) : null,
+      stringArg(params.grantRoot) ? `grantRoot: ${params.grantRoot}` : null,
+      reason ? `原因: ${reason}` : null,
+    ].filter(Boolean).join("\n"),
+  };
+}
+
 const TOOL_DEFINITIONS = [
   {
     name: "create_thread",
@@ -59,7 +133,7 @@ const TOOL_DEFINITIONS = [
         prompt: { type: "string", description: "Optional first user message (`turn/start`)." },
         cwd: { type: "string", description: "Working directory; defaults to the worker process cwd." },
         model: { type: "string" },
-        approvalPolicy: { type: "string", description: "Defaults to `never` for unattended CLI runs." },
+        approvalPolicy: { type: "string", description: "`never` (default) | `on-request` | `on-failure` | `untrusted`. `on-request` only takes effect when the router approval channel is wired (CODEXWORKER_APPROVAL_POLICY)." },
         sandbox: { type: "string", description: "`read-only` | `workspace-write` | `danger-full-access`." },
       },
       required: [],
@@ -290,6 +364,28 @@ class AppServerClient {
     // that exists on disk but was never started/resumed here ("thread not
     // found"), which is exactly the state after a CLI restart.
     this.loadedThreads = new Set();
+    // server→client 审批请求的注入点；由 cli.mjs 在 router client 建好后接通。
+    // 没接（或接的过程中出错）时一律显式拒绝，绝不让 turn 挂着。
+    this.approvalHandler = null;
+    this.serverRequests = new Set();
+    this.logger = defaultLogger();
+  }
+
+  setApprovalHandler(handler) {
+    this.approvalHandler = typeof handler === "function" ? handler : null;
+    return this;
+  }
+
+  hasApprovalHandler() {
+    return typeof this.approvalHandler === "function";
+  }
+
+  setLogger(logger) {
+    this.logger = typeof logger === "function" ? logger : defaultLogger();
+  }
+
+  log(level, event, fields = {}) {
+    try { this.logger(level, event, fields); } catch { /* logging never breaks the protocol */ }
   }
 
   async execute(toolName, args, timeoutMs) {
@@ -462,9 +558,13 @@ class AppServerClient {
     if (message == null || typeof message !== "object") return;
 
     if (message.id !== undefined && message.method) {
-      // 服务端主动请求（审批、elicitation、动态工具等）。本 transport
-      // 不实现这些交互，明确拒绝而不是让整轮永远挂着。
-      this.respondUnsupported(message);
+      // 服务端主动请求。审批类请求转给注入的 handler；其余（elicitation、
+      // 动态工具等）明确拒绝而不是让整轮永远挂着。
+      if (isApprovalRequest(message.method)) {
+        this.trackServerRequest(message);
+      } else {
+        this.respondUnsupported(message);
+      }
       return;
     }
     if (message.id !== undefined && this.pending.has(message.id)) {
@@ -488,6 +588,11 @@ class AppServerClient {
   }
 
   respondUnsupported(message) {
+    // 打日志是为了让协议可观测：method 名决定要不要实现它。
+    this.log("warn", "app_server_request_unhandled", {
+      method: message.method,
+      params: JSON.stringify(message.params ?? null).slice(0, 800),
+    });
     if (!this.child) return;
     try {
       this.child.stdin.write(`${JSON.stringify({
@@ -496,6 +601,90 @@ class AppServerClient {
         error: { code: -32601, message: `codexworker app-server transport does not implement server request ${message.method}` },
       })}\n`);
     } catch { /* ignore */ }
+  }
+
+  /** Write one JSON-RPC result for a server→client request. */
+  respond(message, result) {
+    if (!this.child) return false;
+    try {
+      this.child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: message.id, result })}\n`);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  trackServerRequest(message) {
+    const task = this.handleApprovalRequest(message)
+      .catch((error) => {
+        this.log("warn", "approval_request_failed", {
+          method: message.method, message: error?.message ?? String(error),
+        });
+        // 兜底：任何意外都要给出明确的拒绝，否则 app-server 会一直等。
+        this.respond(message, approvalResponse(message.method, "denied"));
+      })
+      .finally(() => { this.serverRequests.delete(task); });
+    this.serverRequests.add(task);
+    return task;
+  }
+
+  /** Tests await this; runtime never needs to. */
+  async waitForServerRequests() {
+    while (this.serverRequests.size) {
+      await Promise.allSettled([...this.serverRequests]);
+    }
+  }
+
+  async handleApprovalRequest(message) {
+    const params = message.params ?? {};
+    const threadId = stringArg(params.threadId) ?? stringArg(params.conversationId) ?? null;
+    const turnId = stringArg(params.turnId) ?? null;
+    const itemId = stringArg(params.itemId) ?? stringArg(params.callId) ?? null;
+    const item = this.findCachedItem(threadId, turnId, itemId);
+    const summary = approvalRequestSummary(message.method, params, item);
+    const request = {
+      method: message.method,
+      kind: summary.kind,
+      title: summary.title,
+      detail: summary.detail,
+      threadId,
+      turnId,
+      itemId,
+      requestId: message.id,
+      params,
+    };
+    this.log("info", "approval_request", {
+      method: message.method, kind: summary.kind, threadId, itemId,
+      title: summary.title.slice(0, 200),
+    });
+    let outcome = null;
+    if (this.hasApprovalHandler()) {
+      try {
+        outcome = await this.approvalHandler(request);
+      } catch (error) {
+        this.log("warn", "approval_handler_failed", {
+          method: message.method, message: error?.message ?? String(error),
+        });
+      }
+    } else {
+      this.log("warn", "approval_handler_missing", { method: message.method });
+    }
+    const decision = outcome?.decision === "approved" ? "approved" : "denied";
+    const wrote = this.respond(message, approvalResponse(message.method, decision));
+    this.log("info", "approval_resolved", {
+      method: message.method, decision, wrote,
+      approvalId: outcome?.approvalId ?? null,
+      note: outcome?.note ?? null,
+      reason: outcome?.reason ?? null,
+    });
+    return outcome;
+  }
+
+  findCachedItem(threadId, turnId, itemId) {
+    if (!threadId || !itemId) return null;
+    const state = this.threads.get(threadId);
+    const turn = turnId ? state?.turnMap.get(turnId) : state?.turns.at(-1);
+    return (turn?.items ?? []).find((item) => item.id === itemId) ?? null;
   }
 
   // ---- 通知与线程态 -------------------------------------------------------
@@ -679,7 +868,7 @@ class AppServerClient {
   async createThread(args, timeoutMs) {
     const params = {
       cwd: stringArg(args.cwd) ?? stringArg(args.target?.cwd) ?? process.cwd(),
-      approvalPolicy: stringArg(args.approvalPolicy) ?? "never",
+      approvalPolicy: stringArg(args.approvalPolicy) ?? defaultApprovalPolicy(),
       sandbox: stringArg(args.sandbox) ?? "workspace-write",
     };
     for (const key of ["model", "baseInstructions", "developerInstructions"]) {
@@ -716,7 +905,7 @@ class AppServerClient {
 
   async forkThread(args, timeoutMs) {
     const threadId = requireThreadId("fork_thread", args);
-    const params = { threadId, approvalPolicy: stringArg(args.approvalPolicy) ?? "never" };
+    const params = { threadId, approvalPolicy: stringArg(args.approvalPolicy) ?? defaultApprovalPolicy() };
     for (const key of ["model", "cwd", "sandbox"]) {
       if (stringArg(args[key])) params[key] = args[key];
     }
@@ -972,6 +1161,23 @@ class AppServerClient {
 
 const client = new AppServerClient();
 
+// 审批回调的注入点：cli.mjs 在 router client 建好后调用。返回 handler 的
+// 统一口径 { decision: "approved"|"denied", note?, approvalId? }。
+export function setApprovalHandler(handler) {
+  client.setApprovalHandler(handler);
+  return client;
+}
+
+export function hasApprovalHandler() {
+  return client.hasApprovalHandler();
+}
+
+export function setLogger(logger) {
+  client.setLogger(logger);
+}
+
+export { AppServerClient };
+
 // ---------------------------------------------------------------------------
 // 纯函数辅助
 // ---------------------------------------------------------------------------
@@ -994,6 +1200,35 @@ function findCodexBinary() {
     }
   }
   return null;
+}
+
+// 默认审批策略：不设 CODEXWORKER_APPROVAL_POLICY 时仍是 never（无人值守的
+// 历史行为，不能因为接通审批通道就悄悄打开）。显式要求 on-request 时，
+// 只有审批回调真的接上了才生效；通道没接就退回 never，宁可明确拒绝，
+// 也不让 app-server 发一个永远没人回答的请求。
+function defaultApprovalPolicy() {
+  const configured = process.env.CODEXWORKER_APPROVAL_POLICY?.trim();
+  if (!configured) return "never";
+  const normalized = configured.toLowerCase();
+  if (normalized === "on-request" || normalized === "on_request") {
+    if (!client.hasApprovalHandler()) {
+      client.log("warn", "approval_policy_without_channel", {
+        configured, effective: "never",
+        hint: "start the worker with the router enabled to answer approvals",
+      });
+      return "never";
+    }
+    return "on-request";
+  }
+  return configured;
+}
+
+function defaultLogger() {
+  return (level, event, fields = {}) => {
+    const line = `${new Date().toISOString()} [app-server] ${level} ${event}` +
+      (fields && Object.keys(fields).length ? ` ${JSON.stringify(fields)}` : "");
+    process.stderr.write(line + "\n");
+  };
 }
 
 function appServerEnv() {

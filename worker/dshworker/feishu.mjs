@@ -107,10 +107,15 @@ export function isTokenError(response) {
 }
 
 export class FeishuNotifier {
-  constructor({ appId, appSecret, chatId, bridgeName, canSend = () => true }) {
+  constructor({ appId, appSecret, chatId, bridgeName, openId, taskBoardOpenId, trainerOpenIdWhitelist, canSend = () => true }) {
     this.appId = appId;
     this.appSecret = appSecret;
     this.chatId = chatId;
+    // 回复默认走 chat_id，但 worker 冷启动时可能还没学到 chat_id。
+    // 这时用训练员的 open_id 兜底（任务看板本来就是这么发的）。
+    const whitelist = Array.isArray(trainerOpenIdWhitelist) ? trainerOpenIdWhitelist : [];
+    this.openId = openId || taskBoardOpenId
+      || whitelist.find(id => typeof id === "string" && id.trim()) || "";
     this.bridgeName = bridgeName;
     this.canSend = canSend;
     this._token = "";
@@ -156,8 +161,11 @@ export class FeishuNotifier {
     };
     if (!this.enabled || !allowed()) return skip("disabled_or_binding_changed",
       { enabled: this.enabled, threadId: threadId ?? null, canSend: this.canSend({ threadId }) });
-    const idType = receiveIdType === "open_id" ? "open_id" : "chat_id";
-    const target = idType === "open_id" ? (openId || chatId || this.chatId) : (chatId || this.chatId);
+    let idType = receiveIdType === "open_id" ? "open_id" : "chat_id";
+    let target = idType === "open_id" ? (openId || chatId || this.chatId || this.openId) : (chatId || this.chatId);
+    // chat_id 未知（worker 冷启动、还没收到过入站消息）时退回 open_id，
+    // 否则回复全部 target_missing 被丢弃，飞书里只剩任务指令卡。
+    if (!target && this.openId) { idType = "open_id"; target = this.openId; }
     if (!target) return skip("target_missing", { idType, chatId: chatId ?? null, defaultChatId: this.chatId ?? null });
     const token = await this.getToken();
     if (!token) return skip("token_unavailable");
