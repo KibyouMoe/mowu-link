@@ -881,18 +881,17 @@ function turnItems(turn, maxChars) {
     id: `${turn.id}-user`,
     text: truncateText(turn.prompt ?? "", maxChars),
   }];
-  if (turn.thinking && TERMINAL_TURN_STATUSES.has(turn.status)) {
-    // 思考只在 turn 收尾时一次性输出：流式发会把开头几个字符（比如 "The"）
-    // 单独甩成一条消息，飞书上看起来像被腰斩的两段。
-    // phase=commentary 让业务层走过程通道，不占最终回复那条消息。
-    // 包成 Hermes 同款样式：💭 Reasoning 抬头 + plaintext 代码框。
+  if (turn.thinking) {
+    // 思考整段一次性输出：phase=final_answer 让业务层按「完整文本」发一条，
+    // 而不是流式 delta（那样会把开头几个字符单独甩成一条，看起来像被腰斩）。
+    // 内容带 💭 Reasoning 抬头，和正文的最终回复在视觉上区分得开。
     const thought = truncateText(turn.thinking, maxChars);
     items.push({
       type: "agentMessage",
       kind: "assistant",
       id: `${turn.id}-thinking`,
       text: `💭 Reasoning:\n\n\`\`\`plaintext\n${thought}\n\`\`\``,
-      phase: "commentary",
+      phase: "final_answer",
     });
   }
   if (turn.text) {
