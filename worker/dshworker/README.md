@@ -855,3 +855,10 @@ app-server-control/app-server-control.sock。共享连接失败时不会启动�
 后台，且没有 FORCE_CLI 或自定义 CLI 命令覆盖。该项属于客户端启动选择，需正常重开
 客户端后才生效。共享后台应由同版 Codex 原生命令管理，不修改桌面程序或绕过私有管道鉴权。
 同一个 threadId 的历史和压缩仍由原生引擎管理，不分叉、不复制上下文。
+
+当前 Desktop 构建有额外启动覆盖项时会跳过原生 daemon 开关，仍启动私有 stdio。
+此时可通过客户端支持的 CODEX_CLI_PATH 指向用户自己的 desktop-shared-cli 适配入口，
+将其 JSONL 接到同一个标准 Unix WebSocket；不修改应用或私有管道信任规则。
+CLI 的版本、认证、schema 等命令仍委托真正的内置 CLI，启动 -c 项通过原生线程 config
+保留，已有请求配置优先；未知启动项明确失败，不偷偷再启私有引擎。
+机器连接描述文件只存 realCli/socket/version，权限 0600，不存聊天记忆或凭据。
