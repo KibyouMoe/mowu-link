@@ -4,6 +4,8 @@ import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import http from "node:http";
 import { MessageJournal, nativeMessageId } from "./message-journal.mjs";
+import { addToolToBubble, renderToolBubble, safeToolPreview, TOOL_EDIT_INTERVAL_MS } from "./tool-progress.mjs";
+import { projectToolActivity } from "./interface/tool-activity.mjs";
 import { ProgressWatch, noProgressTimeoutMs, taskDeadline } from "./progress-watch.mjs";
 import net from "node:net";
 import path from "node:path";
@@ -113,6 +115,83 @@ export class DesktopManager {
     this.publicImageRelay = new PublicImageRelay(this);
   }
 
+
+  get toolProgressEnabled() { return this.transcriptEnabled && this.config.feishu?.toolProgressEnabled === true; }
+
+  async observeToolActivity(activity) {
+    return this.serial(() => this.observeToolActivityNow(activity));
+  }
+
+  flushToolBubble(session) {
+    const key = session.toolBubble?.key;
+    if (key) for (const entry of Object.values(this.state.publicTextOutbox ?? {}))
+      if (entry.threadId === session.threadId && entry.key === key) entry.complete = true;
+    session.toolBubble = null;
+  }
+
+  async observeToolActivityNow(activity) {
+    if (!this.toolProgressEnabled || this.closed || !activity) return false;
+    const session = this.state.sessions[activity.threadId];
+    if (!session || typeof activity.turnId !== "string") return false;
+    if (activity.kind === "turn_end") {
+      for (const old of Object.values(session.toolSeen ?? {})) if (old.turnId === activity.turnId && old.status === "running")
+        await this.observeToolActivityNow({ ...old, status: ["interrupted", "failed", "cancelled", "canceled"].includes(activity.status) ? "interrupted" : "unknown",
+          timestamp: new Date().toISOString() });
+      if (session.toolBubble?.turnId === activity.turnId) this.flushToolBubble(session);
+      await this.save(); return true;
+    }
+    if (typeof activity.itemId !== "string" || !/^[a-zA-Z0-9_.:/-]{1,100}$/.test(activity.toolName ?? "") ||
+        !["running", "completed", "failed", "interrupted", "unknown"].includes(activity.status)) return false;
+    if (activity.timestamp && session.toolProgressStartedAt && Date.parse(activity.timestamp) < Date.parse(session.toolProgressStartedAt)) return false;
+    const key = activity.turnId + "/" + activity.itemId;
+    const old = session.toolSeen?.[key];
+    if (old && (old.status === activity.status || old.status !== "running" && activity.status === "running")) return false;
+    const safe = { threadId: session.threadId, turnId: activity.turnId, itemId: activity.itemId,
+      toolName: activity.toolName, category: activity.category, preview: safeToolPreview(activity.preview),
+      status: activity.status, exitCode: Number.isInteger(activity.exitCode) ? activity.exitCode : null,
+      durationMs: Number.isFinite(activity.durationMs) ? activity.durationMs : null };
+    const detail = safe.toolName + " · " + safe.status +
+      (safe.exitCode == null ? "" : " · exit=" + safe.exitCode) +
+      (safe.durationMs == null ? "" : " · " + safe.durationMs + "ms");
+    await this.emit("tool.activity", { targetThreadId: session.threadId, source: "tool" },
+      { text: detail, phase: "commentary", itemKey: "tool-event:" + key + ":" + safe.status,
+        complete: true, activity: safe }, { turnId: safe.turnId, timestamp: activity.timestamp ?? new Date().toISOString() });
+    // Completion-only journal observations are genuine tool calls too. Display
+    // one start-style Hermes line, while the lifecycle trace keeps the real status.
+    if (!old) {
+      const previous = session.toolBubble, counter = session.toolBubbleCounter ?? 0;
+      const bubble = addToolToBubble(previous, safe);
+      if (!previous || previous.turnId !== safe.turnId || bubble.rollover) {
+        this.flushToolBubble(session);
+        session.toolBubbleCounter = counter + 1;
+        bubble.key = "tool-progress:" + safe.turnId + ":" + session.toolBubbleCounter;
+      }
+      delete bubble.rollover;
+      session.toolBubble = bubble;
+      try {
+        await this.emit("tool.progress", { targetThreadId: session.threadId, source: "tool" },
+          { text: renderToolBubble(bubble), snapshot: renderToolBubble(bubble), phase: "commentary",
+            itemKey: bubble.key, complete: false }, { turnId: safe.turnId });
+      } catch (error) { session.toolBubble = previous; session.toolBubbleCounter = counter; throw error; }
+    }
+    (session.toolSeen ??= {})[key] = safe;
+    await this.save(); return true;
+  }
+
+  async observeSnapshotTools(session, snapshot) {
+    if (!this.toolProgressEnabled || this.toolActivitySource === "native-notifications") return;
+    const seed = !session.toolSnapshotSeeded;
+    for (const turn of snapshot.turns ?? []) for (const item of turn.items ?? []) {
+      const activity = projectToolActivity(item, { threadId: session.threadId, turnId: turn.id,
+        completed: ["completed", "failed", "interrupted"].includes(turn.status) });
+      if (!activity) continue;
+      const key = turn.id + "/" + item.id;
+      if (seed && !session.toolSeen?.[key]) (session.toolSeen ??= {})[key] = activity;
+      else await this.observeToolActivityNow(activity);
+    }
+    session.toolSnapshotSeeded = true;
+  }
+
   get transcriptEnabled() { return this.config.feishu?.transcriptEnabled === true; }
 
   transcriptEpoch(session, epoch = this.state.selectionEpoch) {
@@ -156,7 +235,7 @@ export class DesktopManager {
   async archiveConversation(event, request) {
     if (!this.transcriptEnabled) return null;
     const input = ["message.accepted", "message.observed"].includes(event.type);
-    const output = ["item.delta", "item.completed", "message.reply"].includes(event.type);
+    const output = ["item.delta", "item.completed", "message.reply", "tool.progress", "tool.activity"].includes(event.type);
     if (!input && !output) return null;
     if (output && event.payload.phase && !["commentary", "final", "final_answer"].includes(event.payload.phase)) return null;
     const text = input ? request.text ?? event.payload.text : event.payload.snapshot ?? event.payload.text;
@@ -168,10 +247,12 @@ export class DesktopManager {
     const source = received ? "feishu" : input
       ? ["router", "subscription", "cli", "desktop", "native"].includes(origin) ? origin
         : origin === "desktop-native-composer" ? "native" : request.source === "hermes" ? "hermes" : "api"
-      : "assistant";
+      : event.type.startsWith("tool.") ? "tool" : "assistant";
+    const progress = event.type === "tool.progress", toolEvent = event.type === "tool.activity";
+    if (output && !progress && !toolEvent) this.flushToolBubble(this.session(threadId));
     const itemKey = event.payload.itemKey ?? event.messageId ?? String(event.seq);
     const logicalId = input ? "input:" + event.messageId : "output:" + threadId + ":" + itemKey;
-    const mirror = input || event.type === "message.reply" || event.type === "item.completed" || this.config.feishu.streamEnabled !== false;
+    const mirror = !toolEvent && (progress || input || event.type === "message.reply" || event.type === "item.completed" || this.config.feishu.streamEnabled !== false);
     const complete = event.payload.complete ?? event.type !== "item.delta";
     const record = await this.messageJournal.record({
       seq: event.seq, logicalId, previousId: this.state.latestTranscript?.[logicalId], direction: input ? "input" : "output", source, threadId,
@@ -179,6 +260,7 @@ export class DesktopManager {
       taskId: /^\[router (t-[^\]\s]+)\]/m.exec(text)?.[1] ?? null,
       text, phase: input ? "input" : event.payload.phase ?? "final_answer", timestamp: event.timestamp,
       mirror, complete, historyLimited: event.payload.historyLimited,
+      kind: progress ? "tool_progress" : toolEvent ? "tool_event" : "text", tool: event.payload.activity,
     });
     event.transcriptId = record.id;
     const latest = this.state.latestTranscript ??= {};
@@ -190,8 +272,8 @@ export class DesktopManager {
     } else if (mirror) {
       const entries = this.enqueuePublicText(this.session(threadId), event.turnId, input ? logicalId : itemKey,
         text, this.state.selectionEpoch, input || record.phase !== "commentary", event.payload.messageIds ?? [], {
-          input, complete, transcriptId: record.id, historyLimited: record.historyLimited, deferDrain: true,
-          title: input ? this.inputMirrorTitle(source) : undefined });
+          input, complete, progress, transcriptId: record.id, historyLimited: record.historyLimited, deferDrain: true,
+          title: input ? this.inputMirrorTitle(source) : progress ? this.config.bridgeName + "-工具" : undefined });
       await this.messageJournal.plan(record.id, entries.map(e => e.uuid));
       for (const entry of entries) if (["sent", "unknown"].includes(entry.status))
         await this.messageJournal.delivered(record.id, entry.uuid, entry.status, entry.feishuMessageId, entries.length);
@@ -224,7 +306,8 @@ export class DesktopManager {
       const key = input ? record.logicalId : record.logicalId.slice(("output:" + record.threadId + ":").length);
       const entries = this.enqueuePublicText(session, record.turnId, key, record.text, this.state.selectionEpoch,
         record.phase !== "commentary", [], { input, complete: record.complete, historyLimited: record.historyLimited, deferDrain: true, transcriptId: record.id,
-          title: input ? this.inputMirrorTitle(record.source) : undefined });
+          progress: record.kind === "tool_progress",
+          title: input ? this.inputMirrorTitle(record.source) : record.kind === "tool_progress" ? this.config.bridgeName + "-工具" : undefined });
       await this.messageJournal.plan(record.id, entries.map(e => e.uuid));
       for (const entry of entries) {
         if (entry.status === "sent" && entry.feishuMessageId)
@@ -430,6 +513,8 @@ export class DesktopManager {
     if (this.transcriptEnabled) this.state.seq = Math.max(this.state.seq ?? 0, await this.messageJournal.recover());
     this.state.selectionEpoch ??= 0; this.state.autoImages ??= {};
     this.migrateTranscript();
+    if (this.toolProgressEnabled) for (const session of Object.values(this.state.sessions))
+      session.toolProgressStartedAt ??= new Date().toISOString();
     for (const entry of Object.values(this.state.publicTextOutbox ?? {})) {
       // Repeating a PATCH is safe; repeating an unconfirmed create is not.
       if (entry.stream && entry.status === "dispatching") entry.status = entry.feishuMessageId ? "pending" : "unknown";
@@ -474,6 +559,11 @@ export class DesktopManager {
     await this.questions.initialize();
     // Rebuild pending mirrors before integrations can send anything.
     if (this.transcriptEnabled) await this.recoverTranscript();
+    // A restarted observer cannot claim an old invocation is still running.
+    // Keep the same call/bubble identity; a later real completion may resolve it.
+    if (this.toolProgressEnabled) for (const session of Object.values(this.state.sessions))
+      for (const old of Object.values(session.toolSeen ?? {})) if (old.status === "running")
+        await this.observeToolActivityNow({ ...old, status: "unknown", timestamp: new Date().toISOString() });
     this.configureIntegrations();
     await this.businessRuntime.initialize().catch(() => {
       console.error("[bridge] Image business module unavailable; native text ingress remains active.");
@@ -654,6 +744,8 @@ export class DesktopManager {
         remoteViaDesktopDevices: true, feishuImageOutput: Boolean(this.businessRuntime.module && this.notifier?.enabled),
         feishuOutputRouting: this.transcriptEnabled ? "managed-thread-transcript" : "selected-thread-only",
         persistentConversationTranscript: this.transcriptEnabled,
+        toolProgress: { enabled: this.toolProgressEnabled, source: this.toolActivitySource ?? (this.hasDesktopJournal ? "journal-or-snapshot" : "snapshot"),
+          grouping: "accumulate", editIntervalMs: TOOL_EDIT_INTERVAL_MS, previewChars: 40 },
         feishuReconnectPolicy: "bounded-handshake-heartbeat",
         feishuQuestionCards: "durable-callback-source-turn",
         feishuPublicImageSync: this.config.feishu.autoImageOutput === false ? "disabled" : this.transcriptEnabled ? "managed-thread-public-images" : "selected-thread-public-images",
@@ -806,7 +898,7 @@ export class DesktopManager {
       messageId: request.messageId ?? null, source: request.source ?? "bridge", payload, ...extra };
     await this.archiveConversation(event, request);
     this.state.events.push(event);
-    if (event.threadId && /^(item\.|turn\.|message\.(accepted|queued|dispatched))/.test(type)) {
+    if (event.threadId && /^(item\.|turn\.|tool\.|message\.(accepted|queued|dispatched))/.test(type)) {
       let watch = this.taskProgress.get(event.threadId);
       if (!watch) {
         watch = new ProgressWatch({ timeoutMs: noProgressTimeoutMs(this.config) });
@@ -903,6 +995,7 @@ export class DesktopManager {
     return { threadId: thread.id, alias, cwd, hostId: hostId ?? null, bridge: this.config.bridgeName,
       machine: this.config.machine, owner: "hermes", sourceThreadId: parent, forkedFromId: parent,
       ...(this.transcriptEnabled ? { transcriptStartAt: new Date().toISOString() } : {}),
+      ...(this.toolProgressEnabled ? { toolProgressStartedAt: new Date().toISOString() } : {}),
       state: "idle", activeTurnId: null, createdAt: new Date().toISOString(), queue: [], pendingInputs: [], seen: {}, observedTurns: {}, turnMessages: {}, lastEventSeq: this.state.seq };
   }
 
@@ -1355,6 +1448,7 @@ export class DesktopManager {
           this.seedOlderHistory(session, snapshot);
           const items = publicItems(snapshot);
           this.publicImageRelay.observe(session, snapshot, imageBindingEpoch);
+          await this.observeSnapshotTools(session, snapshot);
           await this.correlatePlainInput(session, items);
           for (const [index, item] of items.entries()) {
             const messageId = session.inputMessages?.[item.key];
@@ -1462,11 +1556,12 @@ export class DesktopManager {
     if (!progress) throw new Error("public_journal_status_unavailable");
     const batch = await this.publicJournal.read(session, session.publicJournalCheckpoint,
       { turnId: progress.turnId, epoch: this.transcriptEpoch(session, epoch), startAt: session.publicJournalStartAt,
-        includeInputs: this.transcriptEnabled });
+        includeInputs: this.transcriptEnabled, includeTools: this.toolProgressEnabled });
     this.observeTaskProgress(id, { progress, checkpoint: batch.checkpoint });
     await this.serial(async () => {
       if (this.closed || this.handoffPaused || !this.relaySession(id, epoch)) return;
       for (const { turnId, item, timestamp } of batch.events) {
+        if (item.type === "toolActivity") { await this.observeToolActivityNow(item.activity); continue; }
         if (item.type === "userMessage" && this.transcriptEnabled) {
           const key = `${turnId}/${item.id}`;
           if (session.seen[key]?.hash !== digest(item.text)) {
@@ -1535,11 +1630,11 @@ export class DesktopManager {
     }
   }
 
-  enqueuePublicText(session, turnId, key, text, epoch, final, messageIds = [], { historyLimited = false, complete = final, input = false, title: customTitle, transcriptId, deferDrain = false } = {}) {
+  enqueuePublicText(session, turnId, key, text, epoch, final, messageIds = [], { historyLimited = false, complete = final, input = false, progress = false, title: customTitle, transcriptId, deferDrain = false } = {}) {
     const inlineSeen = new Set(), entries = [];
     // Keep the existing text/image layout and card identities during upgrade.
     // Inputs are plain text and never grant file upload permissions.
-    const parts = historyLimited || input ? [{ type: "text", text }] : splitPublicMarkdown(text);
+    const parts = historyLimited || input || progress ? [{ type: "text", text }] : splitPublicMarkdown(text);
     for (const [index, part] of parts.entries()) {
       if (part.type === "image") {
         const identity = /^[a-z]:[\\\\/]/i.test(part.imagePath) ? path.win32.normalize(part.imagePath).toLowerCase() : path.normalize(part.imagePath);
@@ -1562,15 +1657,15 @@ export class DesktopManager {
           if (!transcriptId) continue;
           // Re-link a journal intent after a crash between archive and outbox save.
           if (!entry) entry = outbox[uuid] = { uuid, key, part: index, page, stream: true, threadId: session.threadId,
-            mirror: this.transcriptEnabled, input, bindingEpoch: epoch, feishuMessageId: card.messageId,
+            mirror: this.transcriptEnabled, input, progress, bindingEpoch: epoch, feishuMessageId: card.messageId,
             revision, status: "sent", messageIds: [] };
         }
         if (entry && transcriptId) entry.transcriptIds = [...new Set([...(entry.transcriptIds ?? []), transcriptId])];
         if (entry && transcriptId) (entry.transcriptRevisions ??= {})[transcriptId] = revision;
-        if (entry?.revision === revision) { entries.push(entry); entry.messageIds = [...new Set([...entry.messageIds, ...messageIds])]; continue; }
+        if (entry?.revision === revision) { entry.complete ||= complete; entries.push(entry); entry.messageIds = [...new Set([...entry.messageIds, ...messageIds])]; continue; }
         if (!entry) {
           entry = outbox[uuid] = { uuid, key, part: index, page, stream: true, threadId: session.threadId,
-            bindingEpoch: epoch, mirror: this.transcriptEnabled, input, chatId: session.feishuChatId, order: this.nextPublicOutputOrder(),
+            bindingEpoch: epoch, mirror: this.transcriptEnabled, input, progress, chatId: session.feishuChatId, order: this.nextPublicOutputOrder(),
             feishuMessageId: card?.messageId ?? null, status: card?.status === "unknown" ? "unknown" : "pending" };
         }
         if (transcriptId) entry.transcriptIds = [...new Set([...(entry.transcriptIds ?? []), transcriptId])];
@@ -1633,7 +1728,7 @@ export class DesktopManager {
           if (next?.image) imageEntry = next.e;
           else if (next?.e.status === "pending") entry = next.e;
           if (entry) {
-            const interval = Math.max(250, Number(this.config.feishu.streamUpdateIntervalMs) || 1000);
+            const interval = entry.progress ? TOOL_EDIT_INTERVAL_MS : Math.max(250, Number(this.config.feishu.streamUpdateIntervalMs) || 1000);
             const delay = entry.stream && entry.feishuMessageId && !entry.complete
               ? (entry.lastAttemptMs ?? 0) + interval - Date.now() : 0;
             if (delay > 0) { this.schedulePublicTexts(delay); entry = null; return; }
@@ -1716,7 +1811,7 @@ export class DesktopManager {
             session.limitedTextDelivery = { key: entry.key, uuid: entry.uuid, status, at: current.at };
             (session.limitedTextReceipts ??= {})[entry.uuid] = session.limitedTextDelivery;
           }
-          if (status === "sent" && !entry.input) {
+          if (status === "sent" && !entry.input && !entry.progress) {
             (this.session(entry.threadId).deliveredProgress ??= {})[entry.key] = true;
             for (const id of entry.messageIds ?? []) this.finishFeishuInput(id, "public_output_delivered");
           }

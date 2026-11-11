@@ -23,6 +23,7 @@
 // 本文件只实现 transport 接口（listTools / callTool），不碰业务语义。
 // 参考实现：./desktop-pipe.mjs；选择器：./index.mjs。
 import { spawn } from "node:child_process";
+import { projectToolActivity } from "../tool-activity.mjs";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -397,8 +398,17 @@ class AppServerClient {
     // server→client 审批请求的注入点；由 cli.mjs 在 router client 建好后接通。
     // 没接（或接的过程中出错）时一律显式拒绝，绝不让 turn 挂着。
     this.approvalHandler = null;
+    this.activityHandler = null;
     this.serverRequests = new Set();
     this.logger = defaultLogger();
+  }
+
+  setActivityHandler(handler) { this.activityHandler = typeof handler === "function" ? handler : null; }
+
+  publishActivity(event) {
+    if (!event || !this.activityHandler) return;
+    try { Promise.resolve(this.activityHandler(event)).catch(() => this.log("warn", "tool_activity_observer_failed")); }
+    catch { this.log("warn", "tool_activity_observer_failed"); }
   }
 
   setApprovalHandler(handler) {
@@ -731,6 +741,10 @@ class AppServerClient {
       state.eventSequences ??= new Map();
       state.eventSequences.set(progressTurnId, (state.eventSequences.get(progressTurnId) ?? 0) + 1);
     }
+    if (["item/started", "item/completed"].includes(method))
+      this.publishActivity(projectToolActivity(params.item, { threadId, turnId: params.turnId, completed: method === "item/completed" }));
+    if (method === "turn/completed" && threadId && params.turn?.id)
+      this.publishActivity({ threadId, turnId: params.turn.id, kind: "turn_end", status: params.turn.status });
     switch (method) {
       case "thread/started":
         this.rememberThread(params.thread);
@@ -1207,6 +1221,8 @@ const client = new AppServerClient();
 
 // 审批回调的注入点：cli.mjs 在 router client 建好后调用。返回 handler 的
 // 统一口径 { decision: "approved"|"denied", note?, approvalId? }。
+export function setActivityHandler(handler) { client.setActivityHandler(handler); }
+
 export function setApprovalHandler(handler) {
   client.setApprovalHandler(handler);
   return client;

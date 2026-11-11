@@ -372,6 +372,7 @@ async function main() {
       onlineNotificationEnabled: config.feishu?.onlineNotificationEnabled ?? false,
       streamEnabled: config.feishu?.streamEnabled ?? true,
       transcriptEnabled: config.feishu?.transcriptEnabled ?? true,
+      toolProgressEnabled: config.feishu?.toolProgressEnabled ?? true,
       defaultDelivery: config.feishu?.defaultDelivery ?? "steer",
       autoImageOutput: config.feishu?.autoImageOutput ?? true,
     },
@@ -399,6 +400,7 @@ async function main() {
     closing = true;
     log("info", "shutdown", { signal });
     await routerClient?.stop().catch(() => {});
+    transport.setActivityHandler?.(null);
     await business.close().catch(() => {});
     await transport.shutdown().catch(() => {});
     await logFile.chain.catch(() => {});
@@ -415,6 +417,13 @@ async function main() {
   });
 
   await business.activate();
+  if (typeof transport.setActivityHandler === "function") {
+    const manager = business.manager?.();
+    if (manager) {
+      manager.toolActivitySource = "native-notifications";
+      transport.setActivityHandler(activity => manager.observeToolActivity(activity));
+    }
+  }
   log("info", "manager_started", { url: `http://${host}:${port}` });
 
   // ---- router integration --------------------------------------------------

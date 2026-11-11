@@ -2,6 +2,7 @@
 // No model/runtime, synthetic history, tool-output mining or native DB writes.
 import { open, readdir, realpath } from "node:fs/promises";
 import path from "node:path";
+import { projectToolActivity } from "./interface/tool-activity.mjs";
 
 const bad = code => { const e = new Error(code); e.code = code; throw e; };
 const inside = (root, file) => { const r = path.relative(root, file); return r === "" || !r.startsWith(".." + path.sep) && r !== ".." && !path.isAbsolute(r); };
@@ -52,11 +53,15 @@ export class CompactJsonLines {
   }
 }
 
-export function publicJournalItem(record, threadId, { includeInputs = false } = {}) {
+export function publicJournalItem(record, threadId, { includeInputs = false, includeTools = false } = {}) {
   if (record?.type !== "event_msg" || record.payload?.type !== "item_completed") return null;
   const p = record.payload, x = p.item;
   if (p.thread_id !== threadId || typeof p.turn_id !== "string" || !p.turn_id || typeof x?.id !== "string" || !x.id) bad("public_journal_identity_mismatch");
   let item;
+  if (includeTools) {
+    const activity = projectToolActivity(x, { threadId, turnId: p.turn_id, completed: true, timestamp: record.timestamp });
+    if (activity) return { turnId: p.turn_id, item: { type: "toolActivity", id: x.id, activity }, timestamp: record.timestamp };
+  }
   if (x.type === "AgentMessage" && ["commentary", "final", "final_answer"].includes(x.phase)) {
     if (!Array.isArray(x.content) || x.content.some(c => c.type !== "Text" || typeof c.text !== "string")) bad("public_journal_public_text_incomplete");
     item = { type: "agentMessage", id: x.id, text: x.content.map(c => c.text).join(""), phase: x.phase };
@@ -111,7 +116,7 @@ export class LocalPublicJournal {
     if (!inside(root, file)) bad("public_journal_identity_mismatch");
     return { root, file };
   }
-  async read(session, checkpoint, { turnId, epoch, startAt = null, stateOnly = false, includeInputs = false }) {
+  async read(session, checkpoint, { turnId, epoch, startAt = null, stateOnly = false, includeInputs = false, includeTools = false }) {
     const saved = checkpoint?.epoch === epoch ? checkpoint : null;
     const location = await this.locate(session.threadId, saved?.file ?? this.readers.get(session.threadId)?.file);
     const handle = await open(location.file, "r");
@@ -152,7 +157,7 @@ export class LocalPublicJournal {
             for (const c of record.payload.item.content ?? []) if (c.type === "LocalImage" && typeof c.path === "string" && !reader.inputPaths.includes(c.path)) reader.inputPaths.push(c.path);
             if (reader.inputPaths.length > 1024) bad("public_journal_input_image_limit");
           }
-          const event = publicJournalItem(record, session.threadId, { includeInputs });
+          const event = publicJournalItem(record, session.threadId, { includeInputs, includeTools });
           if (event?.turnId === reader.bootstrapTurnId) reader.bootstrapReached = true;
           if (!event || end <= reader.bootstrapEnd && reader.bootstrapTurnId && !reader.bootstrapReached || reader.startAt && !(Date.parse(event.timestamp) >= Date.parse(reader.startAt))) return;
           if (event.item.type === "imageView" && reader.inputPaths.some(p => samePath(p, event.item.path))) return;

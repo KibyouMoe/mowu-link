@@ -784,3 +784,27 @@ message_id，不保存图片缓存路径；原生附件作为文本占位，不�
 
 设 feishu.transcriptEnabled=false 可回退此前的 selected-thread-only 模式；
 本次代码部署需重启对应 worker。部署本轮只重启 Codex worker，DSH/router/gateway 不动。
+
+
+## Hermes 风格工具进度
+
+默认 feishu.toolProgressEnabled=true（依赖 transcriptEnabled），使用与 Hermes 当前
+all + accumulate 相同的展示：首次立即显示，同一条卡片后续至少间隔 1.5 秒更新，
+命令第一行截到 40 个字符，以 terminal 标题和代码块展示；连续终端调用省略重复标题，
+相邻相同条目合并为 (×N)，代码块的计数单独一行。公开正文出现后，后续工具另起一条进度卡。
+长进度超过单卡容量会分段，已创建的卡片继续 PATCH，不重复 POST 替代卡片。
+
+Codex app-server 接真实 item/started、item/completed、turn/completed；桌面日志与
+快照作为回退来源。只有开始式条目进入可见进度；完成/失败/中断、耗时、退出码以
+tool_event 留档，不额外刷一条“完成”消息。并行同名工具按调用 ID 关联，不按名字猜。
+工具进度投递不结束训练员的 typing 状态，也不会被当成模型回复或重新执行。
+
+工具内容只保留名称和经过过滤的短预览，不转发原始工具输出、参数对象或模型推理。
+工具摘要中的 Markdown 不授予上传本地文件的权限。重启恢复原调用/卡片 ID，
+旧的 running 只记为 unknown，直到收到真实结束事件，不伪装成已完成。
+首次升级不回放旧工具历史。设 feishu.toolProgressEnabled=false 关闭此展示。
+
+实现依据：Hermes gateway/run_turn_progress.py 的 EDIT_INTERVAL=1.5、
+_progress_terminal_blocks、_progress_emit / _append_progress_repeat_count。
+配置为 all/accumulate，tool_preview_length=0 在普通模式下实际回落到 40 字。
+DSH 只同步共享层；本轮不启用或重启 DSH 的专用引擎。

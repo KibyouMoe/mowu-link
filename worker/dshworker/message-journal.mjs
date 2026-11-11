@@ -46,7 +46,8 @@ export class MessageJournal {
         record = { version: 1, id, previousId, seq: input.seq, logicalId: input.logicalId,
           direction: input.direction, source: input.source, threadId: input.threadId ?? null,
           turnId: input.turnId ?? null, messageId: input.messageId ?? null, taskId: input.taskId ?? null,
-          kind: input.kind === "image" ? "image" : "text",
+          kind: ["image", "tool_progress", "tool_event"].includes(input.kind) ? input.kind : "text",
+          ...(input.tool ? { tool: { toolName: input.tool.toolName, itemId: input.tool.itemId, status: input.tool.status, exitCode: input.tool.exitCode, durationMs: input.tool.durationMs } } : {}),
           mirror: input.mirror !== false, complete: input.complete !== false, historyLimited: input.historyLimited === true,
           phase: input.phase ?? null, text: input.text, timestamp: input.timestamp ?? new Date().toISOString() };
         await atomic(file, record);

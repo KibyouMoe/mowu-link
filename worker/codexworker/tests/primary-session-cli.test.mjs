@@ -105,3 +105,44 @@ test("CLI exits safely on corrupt primary state without starting a new engine se
   const calls = await readFile(f.engineLog, "utf8").catch(() => "");
   assert.equal(calls, "");
 });
+
+test("CLI wires native tool notifications into the durable public progress journal", { timeout: 15000 }, async t => {
+  const f = await setup(t), binary = path.join(f.root, "engine.mjs");
+  const source = await readFile(binary, "utf8");
+  const injection = [
+    '  if (request.method === "turn/start") {',
+    '    const threadId = request.params.threadId, turnId = "tool-progress-turn";',
+    '    const item = { id: "tool-progress-call", type: "commandExecution", command: "echo tool-progress-cli", status: "inProgress" };',
+    '    for (const method of ["item/started", "item/completed"]) {',
+    '      const state = method === "item/completed" ? { ...item, status: "completed", exitCode: 0, durationMs: 10 } : item;',
+    '      process.stdout.write(JSON.stringify({ method, params: { threadId, turnId, item: state } }) + "\\n");',
+    '    }',
+    '    process.stdout.write(JSON.stringify({ id: request.id, result: { turn: { id: turnId, status: "completed", items: [] } } }) + "\\n");',
+    '    return;',
+    '  }',
+  ].join("\n");
+  assert.ok(source.includes("  let result = {};"));
+  await writeFile(binary, source.replace("  let result = {};", injection + "\n  let result = {};"));
+  const child = f.start(), health = await f.ready(child);
+  assert.equal(health.capabilities.toolProgress.source, "native-notifications");
+  const config = JSON.parse(await readFile(path.join(f.root, "config.json"), "utf8"));
+  const token = (await readFile(path.join(f.root, "token"), "utf8")).trim();
+  const base = "http://127.0.0.1:" + config.port;
+  const { randomUUID } = await import("node:crypto");
+  const response = await fetch(base + "/manager/messages", { method: "POST",
+    headers: { authorization: "Bearer " + token, "content-type": "application/json" },
+    body: JSON.stringify({ protocolVersion: "1.1.1-draft", messageId: randomUUID(), source: "trainer",
+      origin: "cli", text: "test tool notifications", targetThreadId: "original-thread", delivery: "steer" }) });
+  assert.equal(response.status, 200);
+  let records;
+  for (let i = 0; i < 80; i++) {
+    const page = await (await fetch(base + "/manager/transcript", { headers: { authorization: "Bearer " + token } })).json();
+    records = page.records;
+    if (records.filter(r => r.kind === "tool_event").length === 2) break;
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  assert.deepEqual(records.filter(r => r.kind === "tool_event").map(r => r.tool.status), ["running", "completed"]);
+  const progress = records.filter(r => r.kind === "tool_progress");
+  assert.equal(progress.length, 1); assert.match(progress[0].text, /echo tool-progress-cli/);
+  assert.equal(JSON.parse(await readFile(f.sessionPath, "utf8")).threadId, "original-thread");
+});
