@@ -284,6 +284,118 @@ class FakeWorker(threading.Thread):
         self.join(timeout=3.0)
 
 
+
+def control_selftest(checker, token, workers):
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    calls = []
+    response_status = [200]
+
+    class ControlHandler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
+            calls.append((self.path, self.headers.get("Authorization"), body))
+            self.send_response(response_status[0])
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"ok": response_status[0] == 200,
+                                         "task_id": body["task_id"], "cancelled": True}).encode())
+        def log_message(self, *args):
+            pass
+
+    callback = ThreadingHTTPServer(("127.0.0.1", 0), ControlHandler)
+    thread = threading.Thread(target=callback.serve_forever, daemon=True)
+    thread.start()
+    name = "control-test"
+    worker = None
+    try:
+        origin = "http://127.0.0.1:%d" % callback.server_address[1]
+        for bad in ("http://example.com:80", "http://127.0.0.1:80/path",
+                    "http://user:password@127.0.0.1:80", "file:///tmp/x"):
+            code, _ = http("POST", BASE + "/register",
+                           {"name": name, "control_url": bad}, token)
+            checker.check("control callback rejects unsafe origin " + bad, code == 400)
+        code, _ = http("POST", BASE + "/register",
+                       {"name": name, "control_url": origin}, token)
+        worker = FakeWorker(name, token)
+        workers.append(worker)
+        worker.start()
+        checker.check("control worker registers loopback callback and connects",
+                      code == 200 and wait_online(name, token, True))
+        _, active = http("POST", BASE + "/tasks", {"worker": name, "goal": "active"}, token)
+        worker.wait_task(3)
+        _, queued = http("POST", BASE + "/tasks", {"worker": name, "goal": "queued"}, token)
+        _, cancelled_q = http("POST", BASE + "/tasks/%s/cancel" % queued["task_id"], None, token)
+        checker.check("queued cancel never calls the worker",
+                      not calls and cancelled_q.get("cancel_delivery", {}).get("skipped") == "queued_task")
+        _, cancelled = http("POST", BASE + "/tasks/%s/cancel" % active["task_id"], None, token)
+        checker.check("running cancel reaches exact worker task with authenticated POST",
+                      cancelled.get("cancel_delivery", {}).get("ok") is True
+                      and calls == [("/manager/tasks/%s/cancel" % active["task_id"],
+                                     "Bearer " + token, {"task_id": active["task_id"]})])
+        _, saved = http("GET", BASE + "/tasks/" + active["task_id"], token=token)
+        checker.check("cancel forwarding receipt persists on the task",
+                      saved["task"]["result"]["cancel_delivery"]["ok"] is True)
+        _, failing = http("POST", BASE + "/tasks", {"worker": name, "goal": "fail"}, token)
+        worker.wait_task(3)
+        response_status[0] = 503
+        _, failed = http("POST", BASE + "/tasks/%s/cancel" % failing["task_id"], None, token)
+        checker.check("worker refusal is explicit rather than a silent cancel",
+                      failed.get("cancel_delivery", {}).get("ok") is False)
+        response_status[0] = 200
+        _, retry = http("POST", BASE + "/tasks/%s/cancel" % failing["task_id"], None, token)
+        checker.check("an unconfirmed cancel can be retried safely by task id",
+                      retry.get("already") is True and retry.get("cancel_delivery", {}).get("ok") is True)
+
+        # An actual running task plus a real router approval must expose public progress.
+        _, visible = http("POST", BASE + "/tasks", {"worker": name, "goal": "approval progress"}, token)
+        worker.wait_task(3)
+        _, asked = http("POST", BASE + "/approvals", {
+            "worker": name, "task_id": visible["task_id"], "kind": "approval",
+            "title": "write outside workspace", "ttl_s": 60, "auto": False}, token)
+        aid = asked["approval_id"]
+        _, snapshot = http("GET", BASE + "/tasks/" + visible["task_id"], token=token)
+        progress = snapshot["task"].get("progress") or {}
+        checker.check("task progress exposes waiting approval id and readable reason",
+                      progress.get("state") == "waiting_approval"
+                      and progress.get("approval_id") == aid
+                      and ("等待审批 " + aid) in progress.get("text", ""))
+        _, listing = http("GET", BASE + "/tasks?worker=" + name, token=token)
+        row = next(t for t in listing["tasks"] if t["task_id"] == visible["task_id"])
+        checker.check("task listing exposes the same approval progress",
+                      row.get("progress", {}).get("approval_id") == aid)
+        http("POST", BASE + "/approvals/" + aid + "/decide",
+             {"decision": "approved"}, token)
+        http("POST", BASE + "/result", {"name": name, "task_id": visible["task_id"],
+             "status": "done", "summary": "done"}, token)
+        _, finished = http("GET", BASE + "/tasks/" + visible["task_id"], token=token)
+        checker.check("finished task result retains approval id without a waiting state",
+                      finished["task"]["result"].get("approval_id") == aid
+                      and finished["task"]["progress"]["waiting_for_approval"] is False)
+        _, aborting = http("POST", BASE + "/tasks", {"worker": name, "goal": "cancel approval"}, token)
+        worker.wait_task(3)
+        _, asked = http("POST", BASE + "/approvals", {
+            "worker": name, "task_id": aborting["task_id"], "kind": "approval",
+            "title": "cancel this approval", "ttl_s": 60, "auto": False}, token)
+        http("POST", BASE + "/tasks/" + aborting["task_id"] + "/cancel", None, token)
+        _, decision = http("GET", BASE + "/approvals/" + asked["approval_id"], token=token)
+        checker.check("task cancellation closes its outstanding router approval",
+                      decision["approval"]["status"] == "denied")
+        _, late = http("POST", BASE + "/approvals", {
+            "worker": name, "task_id": aborting["task_id"], "kind": "approval",
+            "title": "late approval after cancellation"}, token)
+        checker.check("late approval submissions for cancelled tasks fail closed",
+                      late.get("status") == "denied" and late.get("notified") is False)
+
+
+    finally:
+        if worker is not None:
+            worker.stop()
+        callback.shutdown()
+        callback.server_close()
+        thread.join(2)
+
+
 def start_process(argv, log_path: Path):
     handle = open(str(log_path), "wb")
     proc = subprocess.Popen(argv, stdout=handle, stderr=subprocess.STDOUT)
@@ -1309,6 +1421,8 @@ def run(work: Path, checker: Checker) -> None:
                 dead_out.close()
             except Exception:
                 pass
+
+        control_selftest(checker, token, workers)
 
         for worker_obj in workers:
             worker_obj.stop()

@@ -229,6 +229,48 @@ export class RouterClient {
     });
   }
 
+  // -- approvals (worker asks, human decides) ------------------------------ #
+
+  async requestApproval({ taskId = null, kind = "approval", title, detail = null,
+    options = null, ttlMs = null } = {}) {
+    if (!title || !String(title).trim()) throw new Error("requestApproval needs a title");
+    return this._request("POST", "/approvals", {
+      worker: this.name,
+      ...(taskId ? { task_id: String(taskId) } : {}),
+      kind: String(kind || "approval"),
+      title: String(title),
+      ...(detail ? { detail: String(detail) } : {}),
+      ...(Array.isArray(options) && options.length ? { options } : {}),
+      ...(ttlMs ? { ttl_s: Math.max(1, Math.round(Number(ttlMs) / 1000)) } : {}),
+    });
+  }
+
+  async getApproval(approvalId) {
+    if (!approvalId) throw new Error("getApproval needs an approval id");
+    const body = await this._request("GET", `/approvals/${encodeURIComponent(approvalId)}`);
+    return body?.approval ?? null;
+  }
+
+  async decideApproval(approvalId, decision, note = null) {
+    if (!approvalId) throw new Error("decideApproval needs an approval id");
+    if (decision !== "approved" && decision !== "denied") {
+      throw new Error("decision must be approved or denied");
+    }
+    return this._request("POST", `/approvals/${encodeURIComponent(approvalId)}/decide`, {
+      decision,
+      ...(note ? { note: String(note) } : {}),
+    });
+  }
+
+  async approvals({ worker = null, status = null, limit = 50 } = {}) {
+    const query = [];
+    if (worker) query.push(`worker=${encodeURIComponent(worker)}`);
+    if (status) query.push(`status=${encodeURIComponent(status)}`);
+    if (limit) query.push(`limit=${encodeURIComponent(limit)}`);
+    const body = await this._request("GET", `/approvals${query.length ? `?${query.join("&")}` : ""}`);
+    return Array.isArray(body?.approvals) ? body.approvals : [];
+  }
+
   // -- subscriptions ------------------------------------------------------- #
 
   hasSubscriptions() {

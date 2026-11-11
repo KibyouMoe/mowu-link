@@ -372,7 +372,7 @@ class RouterStore:
         wcols = {str(row["name"]) for row in
                  self._conn.execute("PRAGMA table_info(workers)").fetchall()}
         for column, decl in (("state", "TEXT"), ("progress_at", "REAL"),
-                             ("task_id", "TEXT")):
+                             ("task_id", "TEXT"), ("control_url", "TEXT")):
             if column not in wcols:
                 self._conn.execute(
                     "ALTER TABLE workers ADD COLUMN %s %s" % (column, decl))
@@ -421,6 +421,7 @@ class RouterStore:
             "last_progress_at_iso": (now_iso(row["progress_at"])
                                      if row["progress_at"] else None),
             "task_id": row["task_id"],
+            "control_url": row["control_url"],
         }
 
     def get_worker(self, name: str) -> Optional[Dict[str, Any]]:
@@ -436,7 +437,8 @@ class RouterStore:
         return [self._worker_dict(row) for row in rows]
 
     def upsert_worker(self, name: str, version: Optional[str] = None,
-                      note: Optional[str] = None) -> Tuple[Dict[str, Any], bool]:
+                      note: Optional[str] = None,
+                      control_url: Optional[str] = None) -> Tuple[Dict[str, Any], bool]:
         now = time.time()
         with self._lock:
             row = self._conn.execute(
@@ -458,6 +460,9 @@ class RouterStore:
                     (now, version, note, name))
                 log.info("worker re-registered name=%s version=%s",
                          name, version or "-")
+            if control_url is not None:
+                self._conn.execute("UPDATE workers SET control_url=? WHERE name=?",
+                                   (control_url, name))
             self.refresh_counts(name)
         worker = self.get_worker(name)
         assert worker is not None
@@ -641,6 +646,11 @@ class RouterStore:
 
     def finish_task(self, task_id: str, status: str,
                     result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        task = self.get_task(task_id)
+        progress = self.approval_progress(task) if task else None
+        if progress:
+            result = {**result, "approval_id": progress["approval_id"],
+                      "approval_status": progress["state"]}
         with self._lock:
             self._conn.execute(
                 "UPDATE tasks SET state=?, finished_at=?, result_json=?"
@@ -653,6 +663,14 @@ class RouterStore:
         result = {"status": "cancelled", "summary": "cancelled via API",
                   "cancelled_at": time.time()}
         with self._lock:
+            self._conn.execute(
+                "UPDATE approvals SET status='denied', decision='denied', note='task cancelled', decided_at=?"
+                " WHERE task_id=? AND status='pending'", (time.time(), task_id))
+            task = self.get_task(task_id)
+            progress = self.approval_progress(task) if task else None
+            if progress:
+                result["approval_id"] = progress["approval_id"]
+                result["approval_status"] = progress["state"]
             self._conn.execute(
                 "UPDATE tasks SET state='cancelled', finished_at=?,"
                 " result_json=? WHERE task_id=?",
@@ -961,6 +979,27 @@ class RouterStore:
             "SELECT * FROM approvals WHERE approval_id=?",
             (approval_id,)).fetchone()
 
+
+    def approval_progress(self, task: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Approval is progress metadata, never a new task scheduling state."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM approvals WHERE task_id=? AND worker=? ORDER BY rowid DESC",
+                (task["task_id"], task["worker"])).fetchall()
+        approvals = [self._approval_dict(row) for row in rows]
+        if not approvals:
+            return None
+        pending = next((a for a in approvals if a["status"] == "pending"), None)
+        latest = pending or approvals[0]
+        waiting = task["state"] == "running" and pending is not None
+        return {"state": "waiting_approval" if waiting else latest["status"],
+                "waiting_for_approval": waiting,
+                "approval_id": latest["approval_id"], "reason": latest["title"],
+                "text": ("等待审批 %s（%s）" % (latest["approval_id"], latest["title"])
+                         if waiting else "审批 %s：%s" % (latest["approval_id"], latest["status"])),
+                "approvals": approvals}
+
+
     def create_approval(self, worker: str, kind: str, title: str,
                         task_id: Optional[str] = None,
                         detail: Optional[str] = None,
@@ -988,7 +1027,13 @@ class RouterStore:
                     continue
             else:  # pragma: no cover - 64 bits of entropy
                 raise RuntimeError("could not allocate an approval id")
-            if auto is not False:
+            task = self.get_task(task_id) if task_id else None
+            if task and task["worker"] == worker and task["state"] == "cancelled":
+                self._conn.execute(
+                    "UPDATE approvals SET status='denied', decision='denied',"
+                    " note='task cancelled', decided_at=? WHERE approval_id=?",
+                    (now, approval_id))
+            elif auto is not False:
                 rule = match_approval_policy(worker, kind, title)
                 if rule is not None:
                     label = str(rule.get("desc") or rule.get("kind")
@@ -1342,6 +1387,25 @@ class Connection:
 # HTTP layer
 # --------------------------------------------------------------------------- #
 
+
+def worker_control_url(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    raw = str(value).strip().rstrip("/")
+    if not raw:
+        return None
+    parsed = urlparse(raw)
+    try:
+        port = parsed.port
+    except ValueError:
+        raise BadRequest("invalid control_url port")
+    if (parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "::1"}
+            or not port or parsed.username or parsed.password
+            or parsed.path or parsed.query or parsed.fragment):
+        raise BadRequest("control_url must be a numeric loopback HTTP origin with an explicit port")
+    return raw
+
+
 class RouterServer(ThreadingHTTPServer):
     allow_reuse_address = True
     daemon_threads = True
@@ -1363,6 +1427,50 @@ class RouterServer(ThreadingHTTPServer):
         self.conn_lock = threading.Lock()
         self.dispatch_lock = threading.RLock()
         super().__init__(addr, RouterHandler)
+
+
+    def cancel_execution(self, task: Dict[str, Any]) -> Dict[str, Any]:
+        """Deliver only the exact task identity; never a selected-session stop."""
+        worker = self.store.get_worker(task["worker"]) or {}
+        base = worker.get("control_url")
+        if not base:
+            delivery = {"ok": False, "error": "worker_control_unavailable"}
+        else:
+            try:
+                class NoRedirect(urllib.request.HTTPRedirectHandler):
+                    def redirect_request(self, req, fp, code, msg, headers, newurl):
+                        return None
+                req = urllib.request.Request(
+                    base + "/manager/tasks/" + task["task_id"] + "/cancel",
+                    data=json.dumps({"task_id": task["task_id"]}).encode("utf-8"),
+                    headers={"Authorization": "Bearer " + self.token,
+                             "Content-Type": "application/json"},
+                    method="POST")
+                opener = urllib.request.build_opener(
+                    urllib.request.ProxyHandler({}), NoRedirect())
+                with opener.open(req, timeout=3.0) as response:
+                    payload = json.loads(response.read(65536).decode("utf-8"))
+                    if not 200 <= response.status < 300 or payload.get("ok") is not True:
+                        raise ValueError("worker rejected cancellation")
+                    if payload.get("task_id") != task["task_id"]:
+                        raise ValueError("worker acknowledged a different task")
+                delivery = {"ok": True, "worker": payload}
+            except Exception as exc:
+                delivery = {"ok": False, "error": type(exc).__name__,
+                            "detail": str(exc)[:300]}
+        log.log(logging.INFO if delivery["ok"] else logging.ERROR,
+                "cancel_forward_%s task=%s worker=%s delivery=%s",
+                "ok" if delivery["ok"] else "failed", task["task_id"],
+                task["worker"], delivery)
+        with self.store._lock:
+            current = self.store.get_task(task["task_id"])
+            if current and current["state"] == "cancelled":
+                result = current.get("result") or {}
+                result["cancel_delivery"] = delivery
+                self.store._conn.execute(
+                    "UPDATE tasks SET result_json=? WHERE task_id=? AND state='cancelled'",
+                    (json.dumps(result, ensure_ascii=False), task["task_id"]))
+        return delivery
 
     # -- connections ---------------------------------------------------- #
     def current_conn(self, name: str) -> Optional[Connection]:
@@ -1725,6 +1833,8 @@ class RouterHandler(BaseHTTPRequestHandler):
         if limit < 1:
             raise BadRequest("limit must be >= 1")
         tasks = self.server.store.list_tasks(worker, state, limit)
+        for task in tasks:
+            task["progress"] = self.server.store.approval_progress(task)
         return {"ok": True, "count": len(tasks), "tasks": tasks}
 
     def _task_get(self, task_id: str) -> None:
@@ -1732,6 +1842,7 @@ class RouterHandler(BaseHTTPRequestHandler):
         if task is None:
             return self._send_json(404, {"ok": False, "error": "unknown_task",
                                          "task_id": task_id})
+        task["progress"] = self.server.store.approval_progress(task)
         self._send_json(200, {"ok": True, "task_id": task_id,
                               "state": task["state"], "task": task})
 
@@ -1841,7 +1952,8 @@ class RouterHandler(BaseHTTPRequestHandler):
         version = str(version).strip() if version is not None else None
         note = body.get("note")
         note = str(note).strip() if note is not None else None
-        worker, created = self.server.store.upsert_worker(name, version, note)
+        control_url = worker_control_url(body.get("control_url"))
+        worker, created = self.server.store.upsert_worker(name, version, note, control_url)
         return {
             "ok": True,
             "name": name,
@@ -2062,24 +2174,27 @@ class RouterHandler(BaseHTTPRequestHandler):
         with self.server.dispatch_lock:
             task = self.server.store.get_task(task_id)
             if task is None:
-                return 404, {"ok": False, "error": "unknown_task",
-                             "task_id": task_id}
-            if task["state"] == "cancelled":
-                return 200, {"ok": True, "task_id": task_id,
-                             "state": "cancelled", "already": True,
-                             "dispatched_next": None}
-            if task["state"] in TERMINAL_STATES:
+                return 404, {"ok": False, "error": "unknown_task", "task_id": task_id}
+            already = task["state"] == "cancelled"
+            if not already and task["state"] in TERMINAL_STATES:
                 return 409, {"ok": False, "error": "not_cancellable",
                              "task_id": task_id, "state": task["state"]}
-            task = self.server.store.cancel_task(task_id)
-            assert task is not None
-            self.server.store.refresh_counts(task["worker"])
-            dispatched = self.server.dispatch_one(task["worker"])
-        log.info("task cancelled id=%s worker=%s", task_id, task["worker"])
+            was_running = task["state"] == "running"
+            retry_delivery = already and (task.get("result") or {}).get(
+                "cancel_delivery", {}).get("ok") is False
+            if not already:
+                task = self.server.store.cancel_task(task_id)
+                self.server.store.refresh_counts(task["worker"])
+        delivery = ((task.get("result") or {}).get("cancel_delivery")
+                    if already else {"ok": True, "skipped": "queued_task"})
+        if was_running or retry_delivery:
+            delivery = self.server.cancel_execution(task)
+        with self.server.dispatch_lock:
+            dispatched = self.server.dispatch_one(task["worker"]) if not already else None
+        log.info("task cancelled id=%s worker=%s delivery=%s", task_id, task["worker"], delivery)
         return 200, {"ok": True, "task_id": task_id, "state": "cancelled",
-                     "already": False,
-                     "dispatched_next": dispatched["task_id"]
-                     if dispatched else None}
+                     "already": already, "cancel_delivery": delivery,
+                     "dispatched_next": dispatched["task_id"] if dispatched else None}
 
     def _notice(self, body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
         """Worker → Hermes word path.  A trigger failure never becomes a 5xx."""

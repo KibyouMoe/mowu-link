@@ -122,6 +122,30 @@ POST /manager/messages          → accepted=true action=dispatch_pending
 未实测：`business: true` 时的 router 分支（会把任务投进 manager 选中的同一会话，
 需要真实 8790 才能验），本机验收只走到 HTTP + manager。
 
+## 插件审批、取消与进度
+
+插件的进程内引擎位于 `interface/inprocess.mjs`；入口 `index.js` 只负责装配。
+`interface/approval-bridge.mjs` 接管本 worker 所属 Agent 的 `approval/request`：
+以 `kind=approval` 提交 router 审批单，默认每 1.5 秒轮询、最多等待 9 分钟；
+只有批准返回 `allowed-once`，拒绝、异常、取消与超时均返回 `rejected`。
+`approval_request` / `approval_resolved` 日志关联 task、session、turn、call 和审批 ID。
+
+会话 `read_thread` / `wait_threads` 返回 `approval_id`、`waiting_for_approval`、
+`approval` 和 `progress`；等待时有独立稳定 ID 的 commentary：
+“等待审批 ap_xxx（原因）”。router 的任务查询与最终结果也保留审批信息。
+
+插件在 worker 注册时声明自己的回环 `control_url`。router 取消正在执行的任务时，
+向该 worker 的 `POST /manager/tasks/{task_id}/cancel` 转发同一任务 ID，
+使用 worker 的 Bearer token 鉴权；接口调用对应 `agent.cancel()`。
+尚未派发的取消会被记住，终态任务的迟到取消不会停止下一任务。
+`GET /manager/tasks/{task_id}` 可读取进度，使用相同鉴权。
+取消转发失败会记录 `cancel_forward_failed`，并保存在任务的
+`result.cancel_delivery`，可以按同一任务 ID 重试；排队任务无需通知执行器。
+
+部署这些改动后需要重启 router 和 `ai.hermes.dsh-web` 才能加载代码及注册控制地址。
+开发与自测不会重启生产服务；`cli.mjs`、`desktop-manager.mjs`、
+`mcp-business.mjs` 与 codexworker 保持逐字节相同。
+
 ## 与 CodexWorker 的关系
 
 以下历史章节记录共享业务层（飞书桥、任务看板、图片中继、文字回执审核等）的演进，
