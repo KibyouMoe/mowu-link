@@ -16,6 +16,7 @@ import { localHost, nativeSendSource } from "./interface/native-dispatch.mjs";
 import { resolveNativeCapabilities } from "./interface/transport/index.mjs";
 import { QuestionRelay, QuestionRelayError } from "./question-relay.mjs";
 import { cacheFeishuImage, imagePrompt } from "./feishu-images.mjs";
+import { parseFeishuPost, feishuPostPrompt } from "./feishu-post.mjs";
 import { FeishuOnlineAnnouncement } from "./online-announcement.mjs";
 import { BusinessRuntime, BusinessRuntimeError } from "./business-runtime.mjs";
 import { PublicImageRelay, splitPublicMarkdown } from "./public-image-relay.mjs";
@@ -1055,7 +1056,9 @@ export class DesktopManager {
       await this.save();
       let accepted = false;
       try {
-        const event = await this.emit("message.accepted", request, { text: request.text ?? "/adopt", delivery: request.delivery ?? "steer" });
+        // Registration is an internal operation, not a fabricated Hermes chat input.
+        const event = await this.emit(typeof request.text === "string" ? "message.accepted" : "operation.accepted",
+          request, { ...(typeof request.text === "string" ? { text: request.text } : {}), delivery: request.delivery ?? "steer" });
         accepted = true;
         const result = await operation();
         receipt.pending = false;
@@ -2030,7 +2033,7 @@ export class DesktopManager {
   }
 
   async receiveFeishu(event) {
-    if (event.chat_type !== "p2p" || event.sender_type !== "user" || !["text", "image"].includes(event.message_type) || !event.content?.trim()) return;
+    if (event.chat_type !== "p2p" || event.sender_type !== "user" || !["text", "image", "post"].includes(event.message_type) || !event.content?.trim()) return;
     if (!this.config.feishu.trainerOpenIdWhitelist?.includes(event.open_id)) return;
     // Stable UUIDv4-shaped digest makes duplicate WS delivery idempotent across restart.
     const hex = createHash("sha256").update(`feishu:${event.message_id}`).digest("hex");
@@ -2059,14 +2062,14 @@ export class DesktopManager {
 
   async enqueueFeishu(event) {
     if (this.closed) throw new Error("ingress_quiescing");
-    if (event.chat_type !== "p2p" || event.sender_type !== "user" || !["text", "image"].includes(event.message_type) ||
+    if (event.chat_type !== "p2p" || event.sender_type !== "user" || !["text", "image", "post"].includes(event.message_type) ||
         !event.message_id || !event.content?.trim() || !this.config.feishu.trainerOpenIdWhitelist?.includes(event.open_id)) return;
     // Separate from the native writer tail: a slow native send must not prevent
     // a later WS event from being durably received and acknowledged promptly.
     await this.inboxSerial(async () => {
       if (!this.inbox.entries[event.message_id]) {
         this.inbox.entries[event.message_id] = { ...structuredClone(event),
-          ...(event.message_type === "image" ? { bridgeImageThreadId: this.state.selectedThreadId } : {}) };
+          ...(["image", "post"].includes(event.message_type) ? { bridgeImageThreadId: this.state.selectedThreadId } : {}) };
       }
       // Even an in-memory duplicate may follow a failed previous disk write.
       await this.saveInbox();
@@ -2098,7 +2101,7 @@ export class DesktopManager {
   }
 
   async handleFeishuInput(event, messageId) {
-    const imageThreadId = event.message_type === "image"
+    const imageThreadId = ["image", "post"].includes(event.message_type)
       ? this.state.feishuReceipts[messageId]?.imageThreadId ?? event.bridgeImageThreadId ?? this.session().threadId : null;
     if (!this.state.feishuReceipts[messageId]) {
       await this.serial(async () => {
@@ -2120,8 +2123,11 @@ export class DesktopManager {
     }
     try {
       if (imageThreadId && imageThreadId !== this.state.selectedThreadId) fail(409, "selected_target_changed", "Image ingress follows its selected chat at durable acceptance; no fallback.");
-      if (imageThreadId && !localHost(this.session(imageThreadId).hostId)) fail(422, "capability_unavailable", "飞书图片缓存位于CodexWorker本机，暂不能把本机路径传给其他设备的聊天。");
-      const text = event.message_type === "image" ? imagePrompt(await cacheFeishuImage(this, event, messageId)) : event.content;
+      const post = event.message_type === "post" ? parseFeishuPost(event.content) : null;
+      if ((event.message_type === "image" || post?.images.length) && imageThreadId && !localHost(this.session(imageThreadId).hostId))
+        fail(422, "capability_unavailable", "飞书图片缓存位于本机，暂不能把本机路径传给其他设备的聊天。");
+      const text = post ? await feishuPostPrompt(this, event, messageId, post)
+        : event.message_type === "image" ? imagePrompt(await cacheFeishuImage(this, event, messageId)) : event.content;
       const result = await this.message({ protocolVersion: PROTOCOL, messageId, source: "trainer", text,
         delivery: this.config.feishu.defaultDelivery ?? "steer",
         ...(imageThreadId ? { targetThreadId: imageThreadId } : {}) }, { requireSelectedTarget: Boolean(imageThreadId) });

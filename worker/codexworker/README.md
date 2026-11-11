@@ -690,3 +690,11 @@ compact_thread 调用原生压缩。Codex 对应 thread/compact/start；RPC {} �
 contextTokens 取自原生 last.totalTokens（最近请求用量），lifetimeTokens 取自 total.totalTokens；
 不将累计消耗当作上下文窗口占用。原生摘要不会被公共聊天留档接口导出。
 官方接口文档：https://learn.chatgpt.com/docs/app-server
+
+## 飞书图文输入
+
+支持 text、image 和 post 图文消息。post 保留标题、文字和图片顺序；content_v2 存在时
+不再重复解析 content，也支持带语言键的正文。图片沿用消息资源鉴权、10MiB 限额和
+本机 view_image 路径；同条最多 10 张，任一下载失败不会部分投递给模型。
+图文与纯图片一样，在持久化收件时绑定目标会话，并通过原消息 ID 跨重启去重。
+内部会话注册记为 operation.accepted，不再伪造 /adopt 为溪流的聊天输入。

@@ -47,17 +47,20 @@ export async function downloadFeishuImage(messageId, imageKey, token, { fetchImp
   const bytes = Buffer.concat(chunks); imageExtension(bytes); return bytes;
 }
 
-export async function cacheFeishuImage(manager, event, messageId) {
-  let key;
-  try { key = JSON.parse(event.content).image_key; } catch { fail("image_reference_invalid", "飞书图片消息没有有效的资源字段。"); }
+export async function cacheFeishuImage(manager, event, messageId, imageKey = null) {
+  let key = imageKey;
+  if (key === null) {
+    try { key = JSON.parse(event.content).image_key; } catch { fail("image_reference_invalid", "飞书图片消息没有有效的资源字段。"); }
+  }
   if (!/^img_[A-Za-z0-9_-]+$/.test(key ?? "")) fail("image_reference_invalid", "飞书图片资源标识无效。");
   const record = manager.state.feishuReceipts[messageId];
-  if (record.imagePath) {
+  const cached = imageKey === null ? record.imagePath : record.imagePaths?.[key];
+  if (cached) {
     const expectedDir = path.resolve(manager.stateDir, "feishu-images");
-    if (path.dirname(path.resolve(record.imagePath)) !== expectedDir) fail("image_reference_invalid", "本机图片缓存路径不在允许目录。");
-    const bytes = await readFile(record.imagePath);
+    if (path.dirname(path.resolve(cached)) !== expectedDir) fail("image_reference_invalid", "本机图片缓存路径不在允许目录。");
+    const bytes = await readFile(cached);
     if (bytes.length > MAX_IMAGE_BYTES) fail("image_too_large", "本机图片缓存超过 10MiB。");
-    imageExtension(bytes); return record.imagePath;
+    imageExtension(bytes); return cached;
   }
   if (!manager.notifier?.downloadImage) fail("image_download_failed", "图片资源接收器未就绪。");
   const bytes = await manager.notifier.downloadImage(event.message_id, key);
@@ -67,7 +70,11 @@ export async function cacheFeishuImage(manager, event, messageId) {
   const dir = path.resolve(manager.stateDir, "feishu-images"); await mkdir(dir, { recursive: true });
   const filename = path.join(dir, `${name}.${extension}`); const temp = `${filename}.${randomUUID()}.tmp`;
   await writeFile(temp, bytes, { flag: "wx", mode: 0o600 }); await rename(temp, filename);
-  await manager.serial(async () => { record.imagePath = filename; record.imageBytes = bytes.length; await manager.save(); });
+  await manager.serial(async () => {
+    if (imageKey === null) { record.imagePath = filename; record.imageBytes = bytes.length; }
+    else { record.imagePaths ??= {}; record.imagePaths[key] = filename; }
+    await manager.save();
+  });
   return filename;
 }
 
