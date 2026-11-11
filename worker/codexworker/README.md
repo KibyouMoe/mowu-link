@@ -668,25 +668,18 @@ _progress_terminal_blocks、_progress_emit / _append_progress_repeat_count。
 DSH 只同步共享层；本轮不启用或重启 DSH 的专用引擎。
 
 
-## 长期会话、原生压缩与工作记忆
+## 长期会话与原生压缩
 
-原生 Codex 的自动压缩沿用模型/引擎默认阈值，不另外设置任务墙钟上限。
-新增 /context 查看最近原生用量、压缩状态和工作记忆版本；/compact 保存压缩请求，
-等当前回合结束并在写锁内重新读取真实空闲状态后，调用 compact_thread →
-thread/compact/start。RPC {} 只表示接受，只有真实 contextCompaction 完成事件才记为完成。
-当前引擎未提供 compact_thread 时明确返回 501，不以新建/替换会话冒充压缩。
+会话上下文、压缩摘要及恢复由各自 Agent 引擎管理；Worker 公共层保留公开聊天记录、
+请求回执和投递状态，不保存第二份工作记忆，也不向模型输入回注自定义摘要。
+此前版本留下的 work-memory 文件不会被读取；/memory 与 memory HTTP API 已移除。
 
-/memory 查看当前会话的独立工作记忆。认证 API：
-GET /manager/sessions/<id>/context；GET/POST /manager/sessions/<id>/memory。
-更新必须携带 expectedRevision，以及 objective/currentState/constraints/decisions/
-nextSteps/references 中的变更字段；陈旧版本返回 409。每份记忆最多 12,000 字符，
-原子保存，旧版本留档。记忆只存公开任务事实，不存模型内部推理、原始工具输出或授权凭据。
-摘要中的历史约束不构成新授权；当前消息和项目规则始终优先。
-
-工作记忆保存在 stateDir/work-memory，按 thread ID 隔离。有版本变化、原生压缩完成
-或进程恢复时，下一条实际模型输入会附上最新记忆；不新开回合、不替换原消息，
-飞书仍只抄送原输入，原生回读通过整条输入的 hash 识别，避免回环。
-相同版本不会每轮重复附加。原生摘要与独立记忆分开，完整公开消息仍在 message-journal。
+Codex 原生自动压缩沿用模型/引擎默认阈值，不另外设置任务墙钟上限。
+/context 与 GET /manager/sessions/<id>/context 只显示最近原生用量和压缩状态。
+/compact 保存显式请求，等当前回合结束并在写锁内重新确认空闲后，通过引擎接口
+compact_thread 调用原生压缩。Codex 对应 thread/compact/start；RPC {} 只表示接受，
+只有真实 contextCompaction 完成事件才记为完成。未提供该能力的引擎明确返回 501，
+不以 Worker 摘要、新建或替换会话充当压缩。公共层不会要求其他 Agent 提供记忆读写 API。
 
 长期运行时，完成的旧请求回执超过 500 条后分批移到 receipt-archive；
 重复 UUID 从磁盘读取原回执，保持去重和冲突检查。未结束、结果未知、排队或尚未回复的
@@ -694,9 +687,6 @@ nextSteps/references 中的变更字段；陈旧版本返回 409。每份记忆�
 完整公开留档不受此限制。压缩后清理观测文本，保留 hash/调用身份/卡片 ID，
 所以不重发旧消息，也不删除原生历史或文件。
 
-协议依据：官方 Codex App Server 文档，以及本机 codex-cli 0.167.0 导出的
-ThreadCompactStartParams / ThreadTokenUsageUpdatedNotification schema。
-原生自动压缩已经存在；本轮补的是控制、可见性、独立工作记忆和运行状态的增长控制。
-
-contextTokens 取自原生 last.totalTokens（最近请求用量），lifetimeTokens 取自 total.totalTokens；不将累计消耗当作上下文窗口占用。
+contextTokens 取自原生 last.totalTokens（最近请求用量），lifetimeTokens 取自 total.totalTokens；
+不将累计消耗当作上下文窗口占用。原生摘要不会被公共聊天留档接口导出。
 官方接口文档：https://learn.chatgpt.com/docs/app-server

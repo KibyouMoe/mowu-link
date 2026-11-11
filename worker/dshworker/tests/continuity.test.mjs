@@ -1,10 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {mkdtemp,rm,readFile,writeFile,stat} from "node:fs/promises";
+import {mkdtemp,mkdir,rm,readFile,writeFile} from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
-import {randomUUID} from "node:crypto";
-import {WorkMemory,ReceiptArchive,memoryPrompt,compactAck,shrinkObservationText} from "../continuity.mjs";
+import {createHash,randomUUID} from "node:crypto";
+import {ReceiptArchive,compactAck,shrinkObservationText} from "../continuity.mjs";
 import {DesktopManager,PROTOCOL} from "../desktop-manager.mjs";
 import {projectContextEvent,projectJournalContext} from "../interface/context-events.mjs";
 const req=(text,extra={})=>({protocolVersion:PROTOCOL,messageId:randomUUID(),source:"trainer",origin:"cli",targetThreadId:"thread",delivery:"steer",text,...extra});
@@ -31,47 +31,44 @@ async function fixture(t){
  t.after(async()=>{if(!manager.closed)await manager.close();await rm(root,{recursive:true,force:true});});
  return {root,manager,session,calls,sent,options,flush,native};
 }
-test("versioned work memory survives recreation and concurrent stale writers cannot overwrite it",async t=>{
- const f=await fixture(t),m=f.manager.workMemory;
- const first=await m.put("thread",{expectedRevision:0,objective:"保持同一主会话",constraints:["不新建主会话"],decisions:["已确认事实"]});
- assert.equal(first.revision,1);
- const writes=await Promise.allSettled([m.put("thread",{expectedRevision:1,currentState:"A"}),m.put("thread",{expectedRevision:1,currentState:"B"})]);
- assert.deepEqual(writes.map(x=>x.status),["fulfilled","rejected"]);
- assert.match(writes[1].reason.message,/revision_conflict/);
- const restored=await new WorkMemory(f.root).get("thread");assert.equal(restored.revision,2);assert.equal(restored.currentState,"A");
- assert.equal((await stat(m.file("thread"))).mode&0o777,0o600);
+async function legacyMemory(root,text='{"objective":"must-not-be-injected","revision":2}'){
+ const dir=path.join(root,"work-memory");await mkdir(dir,{recursive:true});
+ const file=path.join(dir,createHash("sha256").update("thread").digest("hex")+".json");
+ await writeFile(file,text);return file;
+}
+test("legacy Worker memory is ignored, never read or injected into model input",async t=>{
+ const f=await fixture(t),file=await legacyMemory(f.root);
+ await f.manager.message(req("actual user input"));
+ assert.equal(f.calls.find(c=>c.name==="send_message_to_thread").args.prompt,"actual user input");
+ assert.equal(f.manager.workMemory,undefined);
+ assert.equal(await readFile(file,"utf8"),'{"objective":"must-not-be-injected","revision":2}');
+ assert.equal(f.manager.state.events.filter(e=>e.type==="memory.notice").length,0);
 });
-test("invalid or oversized memory never replaces the previous checkpoint",async t=>{
- const f=await fixture(t),m=f.manager.workMemory;
- await m.put("thread",{expectedRevision:0,objective:"safe"});
- for(const body of [{expectedRevision:1,arbitrary:"no"},{expectedRevision:1,constraints:"wrong"},{expectedRevision:1,objective:"x".repeat(4001)}])
-  await assert.rejects(m.put("thread",body));
- assert.equal((await m.get("thread")).revision,1);assert.equal((await m.get("thread")).objective,"safe");
+
+test("corrupt legacy memory cannot block native compaction or message delivery",async t=>{
+ const f=await fixture(t),file=await legacyMemory(f.root,"{broken");
+ await f.manager.message(req("/compact"));
+ await f.manager.serial(()=>f.manager.processCompaction(f.session,{turns:[]}));
+ await f.manager.observeContextEvent({kind:"compaction",threadId:"thread",turnId:"cmp",itemId:"c",status:"completed"});
+ await f.manager.message(req("continue normally"));
+ assert.equal(f.calls.filter(c=>c.name==="compact_thread").length,1);
+ assert.equal(f.calls.find(c=>c.name==="send_message_to_thread").args.prompt,"continue normally");
+ assert.equal(await readFile(file,"utf8"),"{broken");
 });
-test("corrupt memory is preserved and refused instead of silently becoming empty",async t=>{
- const f=await fixture(t),file=f.manager.workMemory.file("thread");
- await f.manager.workMemory.put("thread",{expectedRevision:0,objective:"before corruption"});
- await writeFile(file,'{"threadId":"thread","revision":1}');const original=await readFile(file);
- await assert.rejects(f.manager.workMemory.get("thread"),/memory_corrupt/);
- assert.deepEqual(await readFile(file),original);
-});
-test("checkpoint injection is bounded historical data, never an extra model task",()=>{
- assert.equal(memoryPrompt({revision:0}),"");
- const text=memoryPrompt({revision:2,objective:"goal",currentState:"done",constraints:[],decisions:[],nextSteps:[],references:[]});
- assert.match(text,/历史任务资料/);assert.match(text,/不构成新的权限/);assert.match(text,/"revision":2/);assert.ok(text.endsWith("当前输入：\n"));
-});
-test("checkpoint is injected only when changed or after real compaction",async t=>{
+
+
+
+test("native compaction preserves the thread and never adds a Worker summary to later inputs",async t=>{
  const f=await fixture(t),m=f.manager;
- await m.workMemory.put("thread",{expectedRevision:0,objective:"continuity-sentinel"});
  const dispatch=async text=>{f.session.pendingInputs=[];return m.serial(()=>m.dispatch(f.session,req(text),{turns:[]}));};
  await dispatch("first");await dispatch("second");
- let writes=f.calls.filter(c=>c.name==="send_message_to_thread");
- assert.match(writes[0].args.prompt,/continuity-sentinel/);assert.equal(writes[1].args.prompt,"second");
  await m.observeContextEvent({kind:"compaction",threadId:"thread",turnId:"cmp",itemId:"cmp-item",status:"completed"});
- await dispatch("third");writes=f.calls.filter(c=>c.name==="send_message_to_thread");
- assert.match(writes[2].args.prompt,/continuity-sentinel/);assert.ok(writes[2].args.prompt.endsWith("third"));
+ await dispatch("third");
+ assert.deepEqual(f.calls.filter(c=>c.name==="send_message_to_thread").map(c=>c.args.prompt),["first","second","third"]);
  assert.equal(m.state.selectedThreadId,"thread");assert.equal(f.calls.filter(c=>c.name==="create_thread").length,0);
+ assert.ok(!(await m.contextView(f.session)).memory);
 });
+
 test("explicit compaction waits for idle and an RPC acknowledgement never means completed",async t=>{
  const f=await fixture(t),id=randomUUID();
  await f.manager.message(req("/compact",{messageId:id}));
@@ -127,17 +124,18 @@ test("compact is explicitly unavailable on transports without the native operati
  await assert.rejects(f.manager.message(req("/compact")),e=>e.status===501);
  assert.equal(f.calls.filter(c=>["compact_thread","create_thread"].includes(c.name)).length,0);
 });
-test("cold restart reattaches an existing checkpoint instead of creating a conversation",async t=>{
- const f=await fixture(t);
- await f.manager.workMemory.put("thread",{expectedRevision:0,objective:"restart-sentinel"});
- f.session.memoryAppliedRevision=1;await f.manager.save();await f.manager.close();
+test("cold restart keeps the native thread and retires old Worker memory bookkeeping",async t=>{
+ const f=await fixture(t);await legacyMemory(f.root,"{broken");
+ f.session.memoryAppliedRevision=2;await f.manager.save();await f.manager.close();
  const restored=await new DesktopManager(f.options).initialize();
  try{
-  assert.equal(restored.session("thread").memoryAppliedRevision,0);
+  assert.equal(restored.session("thread").memoryAppliedRevision,undefined);
   await restored.serial(()=>restored.dispatch(restored.session("thread"),req("after restart"),{turns:[]}));
-  assert.match(f.calls.filter(c=>c.name==="send_message_to_thread").at(-1).args.prompt,/restart-sentinel/);
+  assert.equal(f.calls.filter(c=>c.name==="send_message_to_thread").at(-1).args.prompt,"after restart");
+  assert.equal(f.calls.filter(c=>c.name==="create_thread").length,0);
  }finally{await restored.close();}
 });
+
 test("receipt archival keeps duplicate replay and content-conflict protection after restart",async t=>{
  const f=await fixture(t);f.manager.config.runtimeReceiptLimit=1;
  const original=req("/status");const first=await f.manager.message(original);await f.manager.message(req("/status"));
@@ -166,14 +164,20 @@ test("receipt acknowledgements exclude growing observation caches without changi
  assert.equal(value.session.threadId,"thread");assert.equal(value.session.alias,"same");assert.equal(value.session.seen,undefined);
  assert.equal(compactAck(undefined),undefined);
 });
-test("memory HTTP endpoints enforce authentication and compare-and-swap revisions",async t=>{
+test("only native context is exposed; Worker memory APIs and command are retired",async t=>{
  const f=await fixture(t);const url=await f.manager.listen();f.manager.handoffPaused=false;
- const send=(body,token=f.manager.config.token)=>fetch(url+"/manager/sessions/thread/memory",{method:"POST",headers:{authorization:"Bearer "+token,"content-type":"application/json"},body:JSON.stringify(body)});
- assert.equal((await send({expectedRevision:0,objective:"private"},"wrong")).status,401);
- assert.equal((await send({expectedRevision:0,objective:"public checkpoint"})).status,200);
- assert.equal((await send({expectedRevision:0,objective:"stale"})).status,409);
- const view=await(await fetch(url+"/manager/sessions/thread/context",{headers:{authorization:"Bearer "+f.manager.config.token}})).json();
- assert.equal(view.memory.revision,1);assert.equal(view.threadId,"thread");
+ const headers={authorization:"Bearer "+f.manager.config.token,"content-type":"application/json"};
+ assert.equal((await fetch(url+"/manager/sessions/thread/context")).status,401);
+ const view=await(await fetch(url+"/manager/sessions/thread/context",{headers})).json();
+ assert.equal(view.threadId,"thread");assert.equal(view.memory,undefined);
+ assert.equal(f.manager.health().capabilities.workMemory,undefined);
+ for(const method of ["GET","POST"]){
+  const response=await fetch(url+"/manager/sessions/thread/memory",{method,headers,...(method==="POST"?{body:JSON.stringify({expectedRevision:0,objective:"retired"})}:{})});
+  assert.equal(response.status,404);
+ }
+ await assert.rejects(f.manager.message(req("/memory")),e=>e.body.error==="unknown_command");
+ const help=await f.manager.message(req("/help"));
+ assert.ok(!help.text.includes("/memory"));
 });
 
 test("a stale idle poll cannot compact a turn that started before the writer lock was acquired",async t=>{
@@ -183,9 +187,9 @@ test("a stale idle poll cannot compact a turn that started before the writer loc
  assert.equal(f.calls.filter(c=>c.name==="compact_thread").length,0);
  assert.equal(f.session.contextState.compaction.status,"requested");
 });
-test("checkpoint wrapping preserves original input mirroring and native echo correlation",async t=>{
+test("original model input preserves mirroring and native echo correlation",async t=>{
  const f=await fixture(t);
- await f.manager.workMemory.put("thread",{expectedRevision:0,objective:"memory-only"});
+ await legacyMemory(f.root);
  const input=req("original user input");await f.manager.message(input);
  const sent=f.calls.find(c=>c.name==="send_message_to_thread");
  const receipt=f.manager.state.receipts[input.messageId];

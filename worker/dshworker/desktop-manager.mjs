@@ -4,7 +4,7 @@ import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import http from "node:http";
 import { MessageJournal, nativeMessageId } from "./message-journal.mjs";
-import { WorkMemory, ReceiptArchive, memoryPrompt, memoryText, compactAck, shrinkObservationText } from "./continuity.mjs";
+import { ReceiptArchive, compactAck, shrinkObservationText } from "./continuity.mjs";
 import { addToolToBubble, renderToolBubble, safeToolPreview, TOOL_EDIT_INTERVAL_MS } from "./tool-progress.mjs";
 import { projectToolActivity } from "./interface/tool-activity.mjs";
 import { ProgressWatch, noProgressTimeoutMs, taskDeadline } from "./progress-watch.mjs";
@@ -97,7 +97,6 @@ export class DesktopManager {
     this.nativeProgressPolls = new Map();
     this.taskProgress = new Map();
     this.messageJournal = new MessageJournal(stateDir);
-    this.workMemory = new WorkMemory(stateDir);
     this.receiptArchive = new ReceiptArchive(stateDir);
     this.publicJournal = new LocalPublicJournal(config.publicJournalRoot ?? path.join(path.dirname(path.dirname(stateDir)), "sessions"));
     this.taskJournal = new LocalPublicJournal(this.publicJournal.root);
@@ -121,21 +120,8 @@ export class DesktopManager {
 
 
   async contextView(session) {
-    const memory = await this.workMemory.get(session.threadId);
     return { threadId: session.threadId, alias: session.alias, nativeCompactionAvailable: localHost(session.hostId) && this.tools.some(t => t.name === "compact_thread"),
-      context: clone(session.contextState ?? { compactions: 0 }), memory: { revision: memory.revision, updatedAt: memory.updatedAt ?? null } };
-  }
-
-  async updateWorkMemory(threadId, body) {
-    let value;
-    try { value = await this.workMemory.put(threadId, body); }
-    catch (error) {
-      fail(error.message === "memory_revision_conflict" ? 409 : /^invalid_|too_large/.test(error.message) || error.message === "memory_too_large" ? 400 : 503,
-        error.message, "工作记忆未覆盖；请读取当前版本后再更新。");
-    }
-    await this.emit("memory.notice", { targetThreadId: threadId, source: "worker" },
-      { text: memoryText(value), phase: "final_answer", itemKey: "memory:" + value.revision }, {});
-    return value;
+      context: clone(session.contextState ?? { compactions: 0 }) };
   }
 
   async observeContextEvent(event) { return this.serial(() => this.observeContextNow(event)); }
@@ -170,10 +156,9 @@ export class DesktopManager {
     if (!preserveRequest) state.compaction = observed;
     if (event.status === "completed") {
       state.compactions = (state.compactions ?? 0) + 1;
-      session.memoryAppliedRevision = 0;
       shrinkObservationText(session);
     }
-    const text = event.status === "completed" ? "上下文压缩完成，继续原会话；工作记忆与完整消息留档保留。"
+    const text = event.status === "completed" ? "上下文压缩完成，继续原会话；原生会话与完整消息留档保留。"
       : event.status === "failed" ? "上下文压缩未完成，原会话保留；未自动新建会话。"
       : "正在压缩会话上下文；主会话保持不变。";
     await this.emit("context.notice", { targetThreadId: session.threadId, source: "worker" },
@@ -189,7 +174,6 @@ export class DesktopManager {
       fail(501, "capability_unavailable", "当前引擎没有原生压缩接口；未新建或替换会话。");
     const state = session.contextState ??= { compactions: 0 };
     if (!["requested", "dispatching", "accepted", "in_progress"].includes(state.compaction?.status)) {
-      await this.workMemory.get(session.threadId); // Validate the independent checkpoint first.
       state.compaction = { status: "requested", requestId: request.messageId, requestedAt: new Date().toISOString() };
       await this.save();
     }
@@ -214,7 +198,7 @@ export class DesktopManager {
     } catch {
       op.status = "unknown"; op.updatedAt = new Date().toISOString();
       await this.emit("context.notice", { targetThreadId: session.threadId, source: "worker" },
-        { text: "压缩请求结果尚未确认；原会话和工作记忆保留，未自动重复提交。",
+        { text: "压缩请求结果尚未确认；原生会话保留，未自动重复提交。",
           phase: "commentary", itemKey: "compact:" + op.requestId, complete: true });
     }
     await this.save(); return true;
@@ -339,7 +323,7 @@ export class DesktopManager {
   async archiveConversation(event, request) {
     if (!this.transcriptEnabled) return null;
     const input = ["message.accepted", "message.observed"].includes(event.type);
-    const output = ["item.delta", "item.completed", "message.reply", "tool.progress", "tool.activity", "context.notice", "memory.notice"].includes(event.type);
+    const output = ["item.delta", "item.completed", "message.reply", "tool.progress", "tool.activity", "context.notice"].includes(event.type);
     if (!input && !output) return null;
     if (output && event.payload.phase && !["commentary", "final", "final_answer"].includes(event.payload.phase)) return null;
     const text = input ? request.text ?? event.payload.text : event.payload.snapshot ?? event.payload.text;
@@ -351,8 +335,8 @@ export class DesktopManager {
     const source = received ? "feishu" : input
       ? ["router", "subscription", "cli", "desktop", "native"].includes(origin) ? origin
         : origin === "desktop-native-composer" ? "native" : request.source === "hermes" ? "hermes" : "api"
-      : event.type.startsWith("tool.") ? "tool" : ["context.notice", "memory.notice"].includes(event.type) ? "worker" : "assistant";
-    const progress = event.type === "tool.progress", toolEvent = event.type === "tool.activity", systemEvent = ["context.notice", "memory.notice"].includes(event.type);
+      : event.type.startsWith("tool.") ? "tool" : ["context.notice"].includes(event.type) ? "worker" : "assistant";
+    const progress = event.type === "tool.progress", toolEvent = event.type === "tool.activity", systemEvent = ["context.notice"].includes(event.type);
     if (output && !progress && !toolEvent) this.flushToolBubble(this.session(threadId));
     const itemKey = event.payload.itemKey ?? event.messageId ?? String(event.seq);
     const logicalId = input ? "input:" + event.messageId : "output:" + threadId + ":" + itemKey;
@@ -618,7 +602,7 @@ export class DesktopManager {
     this.state.selectionEpoch ??= 0; this.state.autoImages ??= {};
     this.migrateTranscript();
     for (const session of Object.values(this.state.sessions)) {
-      session.memoryAppliedRevision = 0;
+      delete session.memoryAppliedRevision; // Retire the former Worker checkpoint bookkeeping.
       if (["dispatching", "accepted", "in_progress"].includes(session.contextState?.compaction?.status))
         session.contextState.compaction.status = "unknown";
     }
@@ -854,7 +838,7 @@ export class DesktopManager {
         remoteViaDesktopDevices: true, feishuImageOutput: Boolean(this.businessRuntime.module && this.notifier?.enabled),
         feishuOutputRouting: this.transcriptEnabled ? "managed-thread-transcript" : "selected-thread-only",
         persistentConversationTranscript: this.transcriptEnabled,
-        workMemory: "revisioned-checkpoint", nativeAutoCompaction: "engine-defaults",
+        nativeAutoCompaction: "engine-defaults",
         toolProgress: { enabled: this.toolProgressEnabled, source: this.toolActivitySource ?? (this.hasDesktopJournal ? "journal-or-snapshot" : "snapshot"),
           grouping: "accumulate", editIntervalMs: TOOL_EDIT_INTERVAL_MS, previewChars: 40 },
         feishuReconnectPolicy: "bounded-handshake-heartbeat",
@@ -1246,9 +1230,9 @@ export class DesktopManager {
     const label = this.config.messageSourceLabels === false ? null
       : request.source === "trainer" && this.state.feishuReceipts[request.messageId] ? "飞书"
       : request.source === "hermes" && !["router", "subscription"].includes(request.origin) ? "超级溪流" : null;
-    const checkpoint = await this.workMemory.get(session.threadId);
-    const prefix = checkpoint.revision && session.memoryAppliedRevision !== checkpoint.revision ? memoryPrompt(checkpoint) : "";
-    const prompt = prefix + (label ? `${label}：${request.text}` : request.text);
+    // The engine owns context and compaction. Dispatch the actual input without
+    // adding Worker-maintained memory or summaries.
+    const prompt = label ? `${label}：${request.text}` : request.text;
     const pending = { messageId: request.messageId, inputHash: digest(prompt), dispatchedAt: Date.now(),
       sourceThreadId, kind: active ? "steer" : snapshot.deliveryContract ? "followup" : "start", expectedTurnId: active?.id ?? null,
       beforeItemKeys: publicItems(snapshot).map(item => item.key),
@@ -1294,7 +1278,6 @@ export class DesktopManager {
       if (receipt) receipt.nativeDispatch.status = "unknown";
       await this.save(); throw error;
     }
-    if (checkpoint.revision) session.memoryAppliedRevision = checkpoint.revision;
     session.state = "running"; pending.dispatchedAt = Date.now();
     if (receipt) {
       receipt.nativeDispatch.status = "accepted";
@@ -1419,16 +1402,15 @@ export class DesktopManager {
     const [rawCommand, ...parts] = text.split(/\s+/);
     const command = rawCommand === "/clear" ? "/new" : rawCommand;
     if (["/help", "/start", "/commands"].includes(command)) return { action: "help", text: BRIDGE_HELP };
-    if (["/new", "/fork", "/stop", "/list", "/status", "/compact", "/memory", "/context"].includes(command) && parts.length) {
+    if (["/new", "/fork", "/stop", "/list", "/status", "/compact", "/context"].includes(command) && parts.length) {
       fail(422, "command_arguments_not_supported", `${command} does not accept arguments.`);
     }
     if (command === "/compact") return this.requestCompaction(request);
-    if (command === "/memory") return { action: "work_memory", text: memoryText(await this.workMemory.get(this.session(request.targetThreadId).threadId)) };
     if (command === "/context") {
       const view = await this.contextView(this.session(request.targetThreadId)), u = view.context.usage;
       return { action: "context_status", ...view, text: "原会话：" + view.alias + "\n最近原生用量：" +
         (u?.contextTokens == null ? "等待原生用量事件" : u.contextTokens + "；模型窗口：" + (u.modelContextWindow ?? "原生默认")) +
-        "\n压缩：" + (view.context.compaction?.status ?? "原生自动管理") + "\n工作记忆版本：" + view.memory.revision };
+        "\n压缩：" + (view.context.compaction?.status ?? "原生自动管理") };
     }
     if (command === "/list") return { action: "sessions_listed", sessions: Object.values(this.state.sessions).map(clone) };
     if (command === "/resume") {
@@ -2295,14 +2277,11 @@ export class DesktopManager {
           ...(result.sessions ? { sessions: result.sessions } : {}),
           ...(result.resumeList ? { currentSession: result.currentSession, resumePage: result.resumePage, resumeQuery: result.resumeQuery } : {}) });
       }
-      const continuityRoute = url.pathname.match(/^\/manager\/sessions\/([^/]+)\/(memory|context)$/);
-      if (continuityRoute) {
-        const session = this.session(decodeURIComponent(continuityRoute[1]));
-        if (req.method === "GET") return json(res, 200, continuityRoute[2] === "memory"
-          ? await this.workMemory.get(session.threadId) : await this.contextView(session));
-        if (req.method === "POST" && continuityRoute[2] === "memory")
-          return json(res, 200, await this.serial(() => this.updateWorkMemory(session.threadId, body)));
-        fail(405, "method_not_allowed", "Use GET or POST memory.");
+      const contextRoute = url.pathname.match(/^\/manager\/sessions\/([^/]+)\/context$/);
+      if (contextRoute) {
+        const session = this.session(decodeURIComponent(contextRoute[1]));
+        if (req.method === "GET") return json(res, 200, await this.contextView(session));
+        fail(405, "method_not_allowed", "Use GET context.");
       }
       const match = url.pathname.match(/^\/(manager\/sessions|threads)\/([^/]+)(?:\/(select|last-turn|resume|release|unsubscribe|stop|compact))?$/);
       if (match) {
