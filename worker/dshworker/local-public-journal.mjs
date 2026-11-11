@@ -52,7 +52,7 @@ export class CompactJsonLines {
   }
 }
 
-export function publicJournalItem(record, threadId) {
+export function publicJournalItem(record, threadId, { includeInputs = false } = {}) {
   if (record?.type !== "event_msg" || record.payload?.type !== "item_completed") return null;
   const p = record.payload, x = p.item;
   if (p.thread_id !== threadId || typeof p.turn_id !== "string" || !p.turn_id || typeof x?.id !== "string" || !x.id) bad("public_journal_identity_mismatch");
@@ -60,6 +60,12 @@ export function publicJournalItem(record, threadId) {
   if (x.type === "AgentMessage" && ["commentary", "final", "final_answer"].includes(x.phase)) {
     if (!Array.isArray(x.content) || x.content.some(c => c.type !== "Text" || typeof c.text !== "string")) bad("public_journal_public_text_incomplete");
     item = { type: "agentMessage", id: x.id, text: x.content.map(c => c.text).join(""), phase: x.phase };
+  } else if (includeInputs && x.type === "UserMessage") {
+    if (!Array.isArray(x.content) || x.content.some(c => c.type === "Text" && typeof c.text !== "string"))
+      bad("public_journal_public_text_incomplete");
+    const text = x.content.map(c => c.type === "Text" ? c.text
+      : ["Image", "LocalImage"].includes(c.type) ? "[图片输入]" : "").join("");
+    item = { type: "userMessage", id: x.id, text };
   } else if (x.type === "ImageView" && typeof x.path === "string") item = { type: "imageView", id: x.id, path: x.path };
   else if (x.type === "Extension" && x.kind === "image_gen.generation" && x.status === "completed" && typeof x.savedPath === "string" && !x.failure) {
     item = { type: "imageGeneration", id: x.id, status: "completed", savedPath: x.savedPath };
@@ -105,7 +111,7 @@ export class LocalPublicJournal {
     if (!inside(root, file)) bad("public_journal_identity_mismatch");
     return { root, file };
   }
-  async read(session, checkpoint, { turnId, epoch, startAt = null, stateOnly = false }) {
+  async read(session, checkpoint, { turnId, epoch, startAt = null, stateOnly = false, includeInputs = false }) {
     const saved = checkpoint?.epoch === epoch ? checkpoint : null;
     const location = await this.locate(session.threadId, saved?.file ?? this.readers.get(session.threadId)?.file);
     const handle = await open(location.file, "r");
@@ -146,7 +152,7 @@ export class LocalPublicJournal {
             for (const c of record.payload.item.content ?? []) if (c.type === "LocalImage" && typeof c.path === "string" && !reader.inputPaths.includes(c.path)) reader.inputPaths.push(c.path);
             if (reader.inputPaths.length > 1024) bad("public_journal_input_image_limit");
           }
-          const event = publicJournalItem(record, session.threadId);
+          const event = publicJournalItem(record, session.threadId, { includeInputs });
           if (event?.turnId === reader.bootstrapTurnId) reader.bootstrapReached = true;
           if (!event || end <= reader.bootstrapEnd && reader.bootstrapTurnId && !reader.bootstrapReached || reader.startAt && !(Date.parse(event.timestamp) >= Date.parse(reader.startAt))) return;
           if (event.item.type === "imageView" && reader.inputPaths.some(p => samePath(p, event.item.path))) return;

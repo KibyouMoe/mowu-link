@@ -607,3 +607,38 @@ router 任务未显式提供正数 `deadline_s` 时没有墙钟上限；HTTP man
 session-recovery.json 记录 creating / recovering / retrying / ready /
 blocked / interrupted 状态、原 threadId、重试次数与下次重试时间。
 这些是启动恢复状态；完整健康接口与多入口消息留档仍由后续改造完成。
+
+
+## 持久消息留档与统一抄送
+
+CLI 启动默认启用 feishu.transcriptEnabled=true。飞书原始输入关联原 message_id，
+不重复发卡片；router、订阅、本地 CLI/API 与受管理原生会话的新输入标明来源抄送。
+公开 commentary/final 回复、控制命令回复与公开图片都有投递记录；原生输入的观察
+只写记录和抄送，绝不再次调用引擎发送接口。未纳管的独立聊天需要先 adopt，不扫描全机聊天。
+
+本地终端统一入口（复用已有主会话，不创建新会话）：
+
+```bash
+node worker/codexworker/bin/message-worker.mjs --text "继续刚才的任务"
+node worker/codexworker/bin/message-worker.mjs --text "/status"
+```
+
+可指定 --thread、--delivery queue 或 --message-id。HTTP 结果不明时保留原 UUID，
+查询原回执后再用同一个 --message-id 重试；不会自动生成新 ID 重发。
+DSH 使用对应目录中的同名脚本与自己的 identity/config，接口逻辑相同。
+
+留档在 stateDir/message-journal/：逐条不可变公开文本及独立投递回执，权限 0600，
+不受 SSE 的 1 小时/30 天保留窗口影响。带 Bearer token 的 GET /manager/transcript
+支持 after、limit（1～200）、threadId、direction=input|output；以 nextCursor 翻页。
+流式完整快照保留修订记录，合并前未单独发送的快照标为 superseded。
+reasoning、工具参数和原始工具输出不进入公开留档。图片记录只关联公开项和远端
+message_id，不保存图片缓存路径；原生附件作为文本占位，不自动上传私有输入缓存。
+
+已确认未发送/明确拒绝的投递按退避重试；已有卡片只重试 PATCH。
+首次 POST 结果未知时保留 unknown 证据，不盲目另建卡片；后续消息仍可继续投递。
+这是外部 API 确认边界，不能将 unknown 当成已经送达。重启先恢复未投递意图，
+不会重新执行原消息。选择聊天不会丢掉已纳管聊天的后续输出。
+升级继承旧卡片 UUID/读取位置，不批量回放历史输入。
+
+设 feishu.transcriptEnabled=false 可回退此前的 selected-thread-only 模式；
+本次代码部署需重启对应 worker。部署本轮只重启 Codex worker，DSH/router/gateway 不动。

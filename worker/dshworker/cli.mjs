@@ -371,6 +371,7 @@ async function main() {
       taskBoardEnabled: config.feishu?.taskBoardEnabled !== false,
       onlineNotificationEnabled: config.feishu?.onlineNotificationEnabled ?? false,
       streamEnabled: config.feishu?.streamEnabled ?? true,
+      transcriptEnabled: config.feishu?.transcriptEnabled ?? true,
       defaultDelivery: config.feishu?.defaultDelivery ?? "steer",
       autoImageOutput: config.feishu?.autoImageOutput ?? true,
     },
@@ -444,6 +445,12 @@ async function main() {
   }
   async function taskBoardNotify(taskId, phase, fields) {
     const text = taskBoardText({ phase, taskId, ...fields });
+    const manager = business.manager?.();
+    if (manager?.transcriptEnabled && phase !== "start" && process.env.CODEXWORKER_FEISHU_DRY_RUN !== "1") {
+      await manager.publicReply({ messageId: routerMessageId(taskId), source: "bridge",
+        targetThreadId: manager.state.selectedThreadId }, text, "task-" + phase);
+      return "journaled";
+    }
     const title = taskBoardTitle({ phase, taskId }) ?? `${identity.display} · 任务看板`;
     // Dry run exists for isolated test instances: the payload is logged (never
     // sent) so a test can never post into a real trainer chat.
@@ -545,7 +552,7 @@ async function main() {
     let failure = "task runner error";
     routerClient.setActivity({ state: "running", taskId });
     log("info", "router_task_start", { taskId, urgency: task.urgency ?? null, messageId });
-    await taskBoardNotify(taskId, "start", { goal });
+    if (!business.manager?.()?.transcriptEnabled || process.env.CODEXWORKER_FEISHU_DRY_RUN === "1") await taskBoardNotify(taskId, "start", { goal });
     try {
       if (!goal) throw new Error("router task has an empty goal");
       const manager = business.manager?.();
@@ -561,6 +568,8 @@ async function main() {
             requested, sessionCwd: path.resolve(sessionCwd) });
         }
       }
+      if (process.env.CODEXWORKER_FEISHU_DRY_RUN !== "1") await manager.mirrorInput({ protocolVersion: PROTOCOL, messageId, source: "hermes", origin: "router",
+        text: routerPrompt({ taskId, goal, context: task.context }), targetThreadId: selected });
       const deadline = taskDeadline(task, startedAt);
       await waitForIdleThread(selected, deadline);
       const enqueued = await manager.message({
@@ -688,13 +697,15 @@ async function main() {
     let failure = "";
     log("info", "subscription_event_start", { source, kind, id, chars: body.length, messageId,
       subscriptionId: event?.subscription_id ?? null });
-    await subscriptionNotify({ source, kind, id, text: body });
+    if (!business.manager?.()?.transcriptEnabled || process.env.CODEXWORKER_FEISHU_DRY_RUN === "1") await subscriptionNotify({ source, kind, id, text: body });
     try {
       const manager = business.manager?.();
       if (!manager) throw new Error("manager is not active");
       const selected = manager.state.selectedThreadId;
       if (!selected || !manager.state.sessions[selected]) throw new Error("manager has no selected session");
       threadId = selected;
+      if (process.env.CODEXWORKER_FEISHU_DRY_RUN !== "1") await manager.mirrorInput({ protocolVersion: PROTOCOL, messageId, source: "hermes", origin: "subscription",
+        text: marker + "\n" + body, targetThreadId: selected });
       await waitForIdleThread(selected, startedAt + subscriptionTurnLimitMs);
       const enqueued = await manager.message({
         protocolVersion: PROTOCOL, messageId, source: "hermes", origin: "subscription",
