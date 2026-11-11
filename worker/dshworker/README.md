@@ -731,3 +731,21 @@ HTTP manager、进程内 agents 和备用 DSH CLI transport 均不再默认在
 更新失败不会降级成另发新卡，首次发送结果不明时也不会盲目重发。
 图片顺序、输入 Typing 回执、会话切换隔离与旧历史基线保持原有语义。
 代码需要由 worker 重新加载后生效；不需要重启 router。
+
+
+### 主会话恢复保护
+
+主会话保存在 cli-session.json；普通重启或临时读取失败只恢复同一 threadId。
+引擎临时不可用时，按 1、2、4…秒退避重试，默认最多间隔 30 秒，
+可通过 sessionRecovery.retryInitialMs / retryMaxMs 调整；这不是任务执行时限。
+恢复期间收到停止信号会终止重试并清理本进程拥有的引擎子进程。
+
+状态文件损坏、标识/工作目录不匹配或引擎明确拒绝恢复时，停止启动并保留原文件，
+不会自动创建替代会话。首次安装才允许创建主会话；创建前写入意图回执，
+创建结果未确认时禁止再次盲目创建，保存失败则从已知 ID 恢复。
+主会话文件缺失但已有 manager 运行记录时也不会当作首次安装；
+只有同一 worker 的有效恢复回执经引擎验证后，才可恢复缺失的主会话文件。
+
+session-recovery.json 记录 creating / recovering / retrying / ready /
+blocked / interrupted 状态、原 threadId、重试次数与下次重试时间。
+这些是启动恢复状态；完整健康接口与多入口消息留档仍由后续改造完成。

@@ -34,6 +34,7 @@ import { TERMINAL_TURN, findRouterTurn, lastAssistantText,
   subscriptionMarker, subscriptionMessageId, subscriptionNoticeText,
   taskBoardTerminalPhase, taskBoardText, taskBoardTitle } from "./router-tasks.mjs";
 
+import { recoverPrimarySession } from "./primary-session.mjs";
 import { ProgressWatch, noProgressTimeoutMs, taskDeadline } from "./progress-watch.mjs";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -70,7 +71,7 @@ const HELP = `${PROGRAM} ${VERSION}
 说明:
   1. 原生传输由 interface/transport/index.mjs 选择：identity.json 的 transport 字段优先，
      其次 CODEXWORKER_NATIVE_TRANSPORT，两者都没有则拒绝启动。
-  2. 主会话保存在 <stateDir>/cli-session.json，重启复用；读不到时重建。
+  2. 主会话保存在 <stateDir>/cli-session.json；恢复失败保留原 ID 并重试，禁止自动重建。
   3. 写入 <stateDir>/manager-binding.json 与 desktop-config.local.json，
      再把该会话登记到 manager（飞书可直接发消息）。
   4. SIGINT/SIGTERM 会同时关掉 manager 与原生传输子进程。
@@ -301,51 +302,39 @@ async function main() {
   const transportIndex = await import("./interface/transport/index.mjs");
   const transport = transportIndex.resolveNativeTransport();
   log("info", "start", { version: VERSION, host, port, cwd, stateDir, transport: transport.name });
+  // Own the child even when primary-session recovery has not completed.
+  process.on("exit", () => { transport.killSync?.(); });
 
   async function nativeCall(name, params = {}, timeoutMs = 30_000) {
     const response = await transport.callTool(name, params, {}, timeoutMs);
     const text = response?.contentItems?.[0]?.text;
     if (response?.success !== true) {
-      let detail = text ?? "no detail";
-      try { const parsed = JSON.parse(text); detail = parsed.reason ?? parsed.error ?? detail; } catch { /* plain text */ }
-      throw new Error(`${name} failed: ${detail}`);
+      let detail = text ?? "no detail", code = "native_call_failed";
+      try { const parsed = JSON.parse(text); detail = parsed.reason ?? parsed.error ?? detail;
+        code = parsed.code ?? parsed.error ?? code; } catch { /* plain text */ }
+      throw Object.assign(new Error(`${name} failed: ${detail}`), { code });
     }
     return text ? JSON.parse(text) : null;
   }
 
   // ---- 主会话 ---------------------------------------------------------------
   const sessionPath = path.join(stateDir, "cli-session.json");
-  let session = null;
-  const saved = await readJsonIfExists(sessionPath).catch((error) => {
-    log("warn", "cli_session_unreadable", { file: sessionPath, message: error.message });
-    return null;
-  });
-  if (saved?.threadId && typeof saved.threadId === "string") {
-    try {
-      const snapshot = await nativeCall("read_thread",
-        { threadId: saved.threadId, turnLimit: 1, includeOutputs: false }, 30_000);
-      const found = snapshot?.thread;
-      if (found?.id === saved.threadId &&
-          path.resolve(found.cwd ?? saved.cwd ?? cwd) === path.resolve(saved.cwd ?? cwd)) {
-        session = { threadId: saved.threadId, cwd: found.cwd ?? saved.cwd ?? cwd };
-        log("info", "cli_session_reused", { threadId: session.threadId, cwd: session.cwd });
-      } else {
-        log("warn", "cli_session_stale", { threadId: saved.threadId,
-          reason: found?.id !== saved.threadId ? "thread_mismatch" : "cwd_changed" });
-      }
-    } catch (error) {
-      log("warn", "cli_session_unavailable", { threadId: saved.threadId, message: error.message });
-    }
-  }
-  if (!session) {
-    const created = await nativeCall("create_thread",
-      { cwd, title: `${identity.display} · CLI` }, 30_000);
-    if (typeof created?.threadId !== "string" || !created.threadId) {
-      throw new Error("create_thread returned no threadId");
-    }
-    session = { threadId: created.threadId, cwd: created.thread?.cwd ?? cwd };
-    await writeJsonAtomic(sessionPath, session);
-    log("info", "cli_session_created", { threadId: session.threadId, cwd: session.cwd });
+  const startupAbort = new AbortController();
+  const stopStartup = () => startupAbort.abort(new Error("primary session recovery interrupted"));
+  process.once("SIGINT", stopStartup); process.once("SIGTERM", stopStartup);
+  let session;
+  try {
+    session = await recoverPrimarySession({
+      sessionPath, cwd, display: identity.display, workerName: identity.name, nativeCall, writeJsonAtomic, log,
+      signal: startupAbort.signal,
+      retryInitialMs: config.sessionRecovery?.retryInitialMs,
+      retryMaxMs: config.sessionRecovery?.retryMaxMs,
+    });
+  } catch (error) {
+    await transport.shutdown().catch(() => {});
+    throw error;
+  } finally {
+    process.removeListener("SIGINT", stopStartup); process.removeListener("SIGTERM", stopStartup);
   }
 
   const projects = await nativeCall("list_projects", {}, 30_000).catch((error) => {
@@ -416,7 +405,6 @@ async function main() {
   };
   process.on("SIGINT", () => { void shutdown("SIGINT"); });
   process.on("SIGTERM", () => { void shutdown("SIGTERM"); });
-  process.on("exit", () => { transport.killSync(); });
   process.on("uncaughtException", (error) => {
     log("error", "uncaught_exception", { message: error?.message ?? String(error) });
     void shutdown("uncaughtException");
