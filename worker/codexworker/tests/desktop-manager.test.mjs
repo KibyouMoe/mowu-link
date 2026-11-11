@@ -1959,3 +1959,15 @@ test("restoring a persisted session without a prior notice reports reconnect rat
     assert.equal(cards[0].options.threadId, "existing");
   } finally { await restored.close(); }
 });
+
+test("resume includes the verified current binding when both listing and catalog omit it", async t => {
+  const f = await fixture(t); await f.register();
+  f.tasks.get("existing").thread.title = "小栗帽｜Worker 维修主会话";
+  f.manager.resumeMetadata = async () => ({available:true,tasks:[]});
+  f.manager.native = async (name,args,context) => name==="list_threads" ? {threads:[]} : f.native(name,args,context);
+  const listed = await f.manager.message(req("/resume"));
+  assert.equal(listed.sessions.length,1);assert.equal(listed.sessions[0].threadId,"existing");
+  assert.equal(listed.sessions[0].alias,"小栗帽｜Worker 维修主会话");
+  assert.equal(listed.currentSession.index,0);assert.equal(f.manager.state.selectedThreadId,"existing");
+  assert.equal(f.calls.filter(c=>c.name==="send_message_to_thread").length,0);
+});

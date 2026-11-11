@@ -13,7 +13,7 @@ export function resumeActivityTime(task, activity = {}) {
   return Math.max(native, resumeTimestamp(activity[task.id]?.at));
 }
 
-export async function resumeCandidates(listing, { readThread, allowed, maxResolve = 12, localTasks = [], activity = {} }) {
+export async function resumeCandidates(listing, { readThread, allowed, maxResolve = 12, localTasks = [], activity = {}, requiredThreadIds = [] }) {
   const metadata = new Map(), eligible = new Map(), references = new Set();
   for (const task of localTasks) if (localCodex(task) && allowed(task)) {
     metadata.set(task.id, task); eligible.set(task.id, task);
@@ -32,7 +32,13 @@ export async function resumeCandidates(listing, { readThread, allowed, maxResolv
     const match = /^codex:thread:local:([a-z\d_-]{1,128})$/i.exec(item);
     if (match && !metadata.has(match[1])) references.add(match[1]);
   }
-  const missing = [...references], pending = missing.slice(0, maxResolve);
+  // A bound native thread may be older than the first listing page or absent
+  // from an unavailable catalog. Verify its identity rather than inventing a
+  // candidate from the saved alias; prioritize it within the same read budget.
+  const required = new Set(requiredThreadIds.filter(id => typeof id === "string" && id.length > 0 && id.length <= 128));
+  for (const id of required) if (!metadata.has(id)) references.add(id);
+  const missing = [...references].sort((a, b) => Number(required.has(b)) - Number(required.has(a)));
+  const pending = missing.slice(0, maxResolve);
   let next = 0, resolved = 0, unavailable = 0;
   await Promise.all(Array.from({ length: Math.min(4, pending.length) }, async () => {
     while (next < pending.length) {

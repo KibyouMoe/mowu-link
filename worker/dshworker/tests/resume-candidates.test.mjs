@@ -67,3 +67,20 @@ test("large sections have bounded discovery and expose the deferred count", asyn
   } });
   assert.equal(reads, 12); assert.ok(peak <= 4); assert.equal(result.discovery.deferred, 18); assert.equal(result.discovery.partial, true);
 });
+
+test("a current native thread omitted by pagination is verified first within the bounded read budget", async () => {
+  const reads = [];
+  const listing = {threads:[task("newer",50)],sections:[{itemKeys:Array.from({length:20},(_,i)=>"codex:thread:local:extra-"+i)}]};
+  const result = await resumeCandidates(listing, {allowed,requiredThreadIds:["current"],maxResolve:2,
+    readThread:async id=>{reads.push(id);return {thread:task(id,id==="current"?1:30,{title:"verified "+id})};},
+    activity:{current:{at:100}}});
+  assert.equal(reads[0],"current");assert.equal(reads.length,2);
+  assert.equal(result.tasks[0].id,"current");assert.equal(result.tasks[0].title,"verified current");
+});
+test("missing current bindings never become fabricated candidates or bypass workspace and host checks", async () => {
+  for (const readThread of [async()=>{throw Error("unavailable");},async()=>({thread:task("different")}),
+    async()=>({thread:task("current",1,{cwd:"outside"})}),async()=>({thread:task("current",1,{hostId:"remote"})})]) {
+    const result=await resumeCandidates({}, {allowed,requiredThreadIds:["current"],readThread});
+    assert.deepEqual(result.tasks,[]);
+  }
+});

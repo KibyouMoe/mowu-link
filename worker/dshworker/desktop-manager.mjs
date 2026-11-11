@@ -1370,6 +1370,8 @@ export class DesktopManager {
     catch (error) { if (!local.available) throw error; listing = {}; }
     const result = await resumeCandidates(listing, {
       localTasks: local.tasks, activity: this.state.resumeActivity,
+      requiredThreadIds: this.state.selectedThreadId && localHost(this.state.sessions[this.state.selectedThreadId]?.hostId)
+        ? [this.state.selectedThreadId] : [],
       readThread: threadId => this.call("read_thread", { threadId, hostId: "local", turnLimit: 1,
         includeOutputs: false, maxOutputCharsPerItem: 1 }),
       allowed: task => { try { this.checkWorkspace({ thread: task }); return true; } catch { return false; } }

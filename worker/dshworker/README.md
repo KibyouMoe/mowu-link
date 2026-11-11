@@ -442,8 +442,10 @@ POST /manager/messages          → accepted=true action=dispatch_pending
 - DSH 兼容接口：`/threads`、`/turn`（wait=true/false）、任务读取、last-turn、resume、release/unsubscribe。
 - Manager 分阶段接口：messages、sessions、adopt、select、alias PATCH、events（SSE/拉取/Last-Event-ID）。
 - `/new` 自动命名，`/fork` 显式指定来源；`/list`、`/switch`、`/status`、`//` 转义。
-- `/resume` 从原生桌面候选中按更新时间列出最近最多 5 条本机允许工作区聊天；
-  `/resume 0`–`/resume 4` 按刚显示的列表选择，登记未管理聊天而不重发历史。
+- `/resume` 合并原生列表与只读本机目录，包含 Desktop、CLI 和 Worker 创建的交互会话；
+  按最近发起/继续时间排序，每页 10 条，编号绑定当前列表，翻页不重排。
+  当前绑定会话被原生分页漏掉时，会优先核验原生身份与工作区后补入；不以旧别名虚构候选。
+  `/resume 编号` 按刚显示的列表选择，登记未管理聊天而不重发历史。
   不自动刷新数字指向；无列表/越界/目标消失时明确拒绝，不回落到其他聊天。
   0.2.10 改为字面量“编号 0｜标题”，避免飞书 Markdown 自动改成 1～5；回复顶部
   显示当前接入标题，对应候选标记【当前】，当前会话不在五条候选时也单独说明。
