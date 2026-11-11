@@ -15,14 +15,15 @@
 //     （paginated 线程会附带 deprecationNotice，但实测可用）。
 //   - 读不到 turns 时用 thread/items/list 兜底（本文件已实现）。
 //
-// 代理：本机 codex 只认 http 代理。spawn 时显式设置
-//   HTTPS_PROXY=http://127.0.0.1:10808，并删除 ALL_PROXY/all_proxy（socks 会让
-//   整轮超时）。可用 CODEXWORKER_APP_SERVER_PROXY 覆盖代理地址，
-//   CODEXWORKER_CODEX_BIN 指定 codex 可执行文件。
+// 连接模式：standalone 启动私有 app-server；shared 通过官方
+// Unix WebSocket 连接同一 control socket，仅拥有客户端连接。
+// 不设置代理端口；仅沿用明确的 HTTP 代理配置。
 //
 // 本文件只实现 transport 接口（listTools / callTool），不碰业务语义。
 // 参考实现：./desktop-pipe.mjs；选择器：./index.mjs。
 import { spawn } from "node:child_process";
+import { appServerConnection } from "./app-server-connection.mjs";
+import { connectUnixWebSocket } from "./unix-websocket.mjs";
 import { projectToolActivity } from "../tool-activity.mjs";
 import { projectContextEvent } from "../context-events.mjs";
 import { createHash } from "node:crypto";
@@ -283,10 +284,11 @@ const TOOL_DEFINITIONS = [
 // ---------------------------------------------------------------------------
 
 export function available() {
-  return Boolean(findCodexBinary());
+  try { return appServerConnection().mode === "shared" || Boolean(findCodexBinary()); } catch { return false; }
 }
 
 export function unavailableReason() {
+  try { appServerConnection(); } catch (error) { return error.message; }
   return "codex executable was not found on PATH (install Codex CLI or set CODEXWORKER_CODEX_BIN)";
 }
 
@@ -323,6 +325,13 @@ export async function callTool(toolName, args, invocation, timeoutMs = 5000) {
   } catch (error) {
     throw normalizeToolError(toolName, error);
   }
+}
+
+// Subscribe through the native runtime without starting a model turn.
+export async function observeThread({ threadId }) {
+  if (typeof threadId !== "string" || !threadId) throw new AppServerError("threadId is required", "invalid_request");
+  await client.ensureStarted();
+  await client.ensureThreadLoaded(threadId);
 }
 
 export async function shutdown() {
@@ -392,6 +401,7 @@ class AppServerClient {
     this.waiters = new Set();
     this.stderr = "";
     this.serverInfo = null;
+    this.connection = null;
     this.threads = new Map();
     // Threads loaded in THIS app-server process. turn/start rejects a thread
     // that exists on disk but was never started/resumed here ("thread not
@@ -461,13 +471,16 @@ class AppServerClient {
   }
 
   async start() {
-    const binary = findCodexBinary();
-    if (!binary) throw new AppServerError(unavailableReason(), "app_server_unavailable");
-    const child = spawn(binary, ["app-server"], {
+    const connection = appServerConnection();
+    const binary = connection.mode === "standalone" ? findCodexBinary() : null;
+    if (connection.mode === "standalone" && !binary) throw new AppServerError(unavailableReason(), "app_server_unavailable");
+    const child = connection.mode === "shared" ? await connectUnixWebSocket(connection.socket) : spawn(binary, connection.args, {
       stdio: ["pipe", "pipe", "pipe"],
       env: appServerEnv(),
       windowsHide: true,
     });
+    this.connection = connection;
+    this.log("info", "app_server_connection", { mode: connection.mode, ownsRuntime: connection.ownsRuntime });
     this.child = child;
     this.ready = false;
     this.stderr = "";
@@ -525,6 +538,7 @@ class AppServerClient {
     }
   }
 
+  // In shared mode this is only a client socket. Never stop the daemon.
   killChild(child = this.child) {
     if (!child) return;
     try { child.stdin.end(); } catch { /* already closed */ }
@@ -1218,7 +1232,7 @@ class AppServerClient {
     if (this.loadedThreads.has(threadId)) return;
     // Only override policy when the caller asked; otherwise keep the thread's
     // own saved policy. turn/start cannot run against an unloaded thread.
-    const params = { threadId };
+    const params = { threadId, excludeTurns: true };
     for (const key of ["approvalPolicy", "cwd", "model"]) {
       if (stringArg(args[key])) params[key] = args[key];
     }

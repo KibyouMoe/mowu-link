@@ -337,6 +337,10 @@ async function main() {
     process.removeListener("SIGINT", stopStartup); process.removeListener("SIGTERM", stopStartup);
   }
 
+  // Optional transport observation subscribes to the existing native session;
+  // it never sends a synthetic input or starts a model turn.
+  await transport.observeThread?.({ threadId: session.threadId });
+
   const projects = await nativeCall("list_projects", {}, 30_000).catch((error) => {
     log("warn", "list_projects_failed", { message: error.message });
     return { projects: [] };

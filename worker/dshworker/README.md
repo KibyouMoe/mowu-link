@@ -842,3 +842,16 @@ contextTokens 取自原生 last.totalTokens（最近请求用量），lifetimeTo
 本机 view_image 路径；同条最多 10 张，任一下载失败不会部分投递给模型。
 图文与纯图片一样，在持久化收件时绑定目标会话，并通过原消息 ID 跨重启去重。
 内部会话注册记为 operation.accepted，不再伪造 /adopt 为溪流的聊天输入。
+
+## 桌面与 Worker 共享原生实例（Codex 接口）
+
+Codex 接口可用 CODEXWORKER_APP_SERVER_MODE=shared，通过官方协议的
+Unix WebSocket control socket 连接共享后台；未显式启用仍沿用原有模式。
+CODEXWORKER_APP_SERVER_SOCKET 可覆盖绝对路径，默认是 CODEX_HOME 下的
+app-server-control/app-server-control.sock。共享连接失败时不会启动独立引擎兜底。
+停止 Worker 只断开自己的连接，不停止共享后台。
+
+本机桌面内置版本识别 CODEX_APP_SERVER_USE_LOCAL_DAEMON=1；启动前需要已有兼容版本
+后台，且没有 FORCE_CLI 或自定义 CLI 命令覆盖。该项属于客户端启动选择，需正常重开
+客户端后才生效。共享后台应由同版 Codex 原生命令管理，不修改桌面程序或绕过私有管道鉴权。
+同一个 threadId 的历史和压缩仍由原生引擎管理，不分叉、不复制上下文。
