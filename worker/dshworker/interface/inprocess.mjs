@@ -6,6 +6,7 @@ import process from "node:process";
 import { createHash, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
+import { ProgressWatch, noProgressTimeoutMs } from "../progress-watch.mjs";
 import { createDshApprovalBridge } from "./approval-bridge.mjs";
 import { installTaskControl, taskIdOf } from "./task-control.mjs";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -18,7 +19,7 @@ const DEFAULT_WORKSPACE = path.join(os.homedir(), "projects");
 const DEFAULT_STATE_DIR = path.join(os.homedir(), ".hermes", "state", "dshworker");
 const MAX_TURNS_PER_THREAD = 200;
 const MAX_PERSISTED_TEXT = 8_000;
-const DEFAULT_TURN_TIMEOUT_MS = 600_000;
+const DEFAULT_TURN_TIMEOUT_MS = 0; // No implicit wall-clock limit.
 const DEFAULT_WAIT_MS = 30_000;
 const MAX_WAIT_MS = 180_000;
 const POLL_INTERVAL_MS = 200;
@@ -193,12 +194,13 @@ function loadConfig(identity, config, log) {
 // ---------------------------------------------------------------------------
 
 export class InProcessTransport {
-  constructor({ ctx, selection, cwd, stateDir, turnTimeoutMs, log, proxyHint = null }) {
+  constructor({ ctx, selection, cwd, stateDir, noProgressTimeoutMs: idleTimeoutMs, log, proxyHint = null }) {
     this.ctx = ctx;
     this.selection = selection;
     this.defaultCwd = cwd;
     this.stateFile = path.join(stateDir, STATE_FILE_NAME);
-    this.turnTimeoutMs = turnTimeoutMs;
+    this.noProgressTimeoutMs = noProgressTimeoutMs({ noProgressTimeoutMs: idleTimeoutMs });
+    this.taskDeadlines = new Map();
     this.log = log;
     this.proxyHint = proxyHint;
     this.threads = new Map();
@@ -209,7 +211,7 @@ export class InProcessTransport {
       log: (level, event, fields) => this.log(level, event, fields),
     });
     this.stopApproval = ctx.on("approval/request", (request, next) => {
-      const owned = [...this.live.entries()].find(([, value]) => value.agent === request.agent);
+      const owned = [...this.live.entries()].find(([, value]) => this.agentsForTurn(value.agent).includes(request.agent));
       if (!owned) return next();
       const thread = this.threads.get(owned[0]);
       const turn = thread?.turns.find((item) => !TERMINAL_TURN_STATUSES.has(item.status));
@@ -321,6 +323,7 @@ export class InProcessTransport {
       id: randomUUID(), prompt, status: "inProgress", text: "", thinking: "",
       error: null, reasonKind: null, startedAt: new Date().toISOString(), completedAt: null,
     };
+    turn.deadlineAt = this.taskDeadlines.get(taskIdOf(turn)) ?? null;
     thread.turns.push(turn);
     trimThread(thread);
     thread.updatedAt = turn.startedAt;
@@ -342,47 +345,79 @@ export class InProcessTransport {
     };
   }
 
+  // Registry ownership is exact live ancestry, independent of persisted session ids.
+  agentsForTurn(root) {
+    const registry = this.ctx.get?.("agents");
+    const candidates = registry?.list?.() ?? [];
+    const owned = new Set([root]);
+    for (const parent of owned) {
+      for (const candidate of candidates) {
+        if (!owned.has(candidate) && registry.isOwnedBy?.(candidate.id, parent)) owned.add(candidate);
+      }
+    }
+    return [...owned];
+  }
+
   async startTurn(thread, turn) {
     thread.running = true;
     thread.status = "inProgress";
-    let thinking = "";
-    let stopStream = null;
-    let timer = null;
-    let timedOut = false;
-    try {
-      const agent = await this.ensureAgent(thread);
-      if (turn.cancelRequested) {
-        this.finishTurn(thread, turn, { error: "cancelled by router", reasonKind: "cancelled" });
-        return;
-      }
-      stopStream = this.ctx.on("agent/assistant-stream", ({ agent: subject, frame }) => {
-        if (subject !== agent) return;
-        const chunk = frame?.type === "chunk" ? frame.chunk : null;
-        if (chunk?.type === "reasoning-delta" && typeof chunk.text === "string" && chunk.text) {
-          thinking += chunk.text;
-          turn.thinking = thinking;
+    let thinking = "", stopStream = null, agent = null, seenSeq = null;
+    const watch = new ProgressWatch({ timeoutMs: this.noProgressTimeoutMs,
+      deadline: turn.deadlineAt ?? Infinity });
+    let rejectExpired;
+    const expired = new Promise((_, reject) => { rejectExpired = reject; });
+    const timer = setInterval(() => {
+      if (agent) {
+        const sequence = JSON.stringify(this.agentsForTurn(agent).map(subject => [subject.id ?? subject.session.id, subject.session.seq]));
+        if (sequence !== seenSeq) {
+          seenSeq = sequence; turn.eventSeq = (turn.eventSeq ?? 0) + 1; watch.touch();
         }
-      });
-      const fromSeq = agent.session.seq;
-      timer = setTimeout(() => {
-        timedOut = true;
-        try { agent.cancel({ kind: "user" }); } catch { /* already idle */ }
-      }, this.turnTimeoutMs);
-      timer.unref?.();
-
-      agent.followup(userMessage(turn.prompt));
-      const subagents = this.ctx.get("subagents");
-      for (;;) {
-        await agent.whenIdle();
-        const idleSeq = agent.session.seq;
-        if (subagents && await subagents.waitForChildren(agent)) continue;
-        if (agent.status === "idle" && agent.session.seq === idleSeq) break;
       }
-      const outcome = summarize(agent.session, fromSeq);
-      try { await this.ctx.get("sessions")?.flush?.(agent.session); } catch { /* flush is best effort */ }
-      if (timedOut) {
-        this.finishTurn(thread, turn, { text: outcome.text, thinking,
-          error: `dsh turn timed out after ${this.turnTimeoutMs}ms`, reasonKind: "timeout" });
+      const failure = watch.failure();
+      if (!failure) return;
+      clearInterval(timer);
+      this.log("warn", failure.reason === "stuck" ? "turn_stuck" : "turn_deadline",
+        { threadId: thread.id, turnId: turn.id, message: failure.message });
+      try { agent?.cancel({ kind: "user" }); } catch { /* report the liveness failure below */ }
+      rejectExpired(Object.assign(new Error(failure.message), { reasonKind: failure.reason }));
+    }, Math.max(1, Math.min(1000, this.noProgressTimeoutMs,
+      Number.isFinite(watch.deadline) ? Math.max(1, watch.deadline - Date.now()) : 1000)));
+    timer.unref?.();
+    try {
+      const work = async () => {
+        agent = await this.ensureAgent(thread);
+        // Initialization can finish after the liveness watchdog or router cancel.
+        if (watch.failure() || turn.cancelRequested || this.closing) return null;
+        seenSeq = JSON.stringify(this.agentsForTurn(agent).map(subject => [subject.id ?? subject.session.id, subject.session.seq]));
+        stopStream = this.ctx.on("agent/assistant-stream", ({ agent: subject, frame }) => {
+          if (!this.agentsForTurn(agent).includes(subject)) return;
+          const chunk = frame?.type === "chunk" ? frame.chunk : null;
+          if (chunk && chunk.type !== "heartbeat" && Object.entries(chunk).some(([key, value]) =>
+              key !== "type" && value != null && value !== "")) {
+            watch.touch(); turn.eventSeq = (turn.eventSeq ?? 0) + 1;
+          }
+          if (subject === agent && chunk?.type === "reasoning-delta" && typeof chunk.text === "string" && chunk.text) {
+            thinking += chunk.text; turn.thinking = thinking;
+          }
+        });
+        const fromSeq = agent.session.seq;
+        agent.followup(userMessage(turn.prompt));
+        const subagents = this.ctx.get("subagents");
+        for (;;) {
+          await agent.whenIdle();
+          const idleSeq = agent.session.seq;
+          if (subagents && await subagents.waitForChildren(agent)) continue;
+          if (agent.status === "idle" && agent.session.seq === idleSeq) break;
+        }
+        const outcome = summarize(agent.session, fromSeq);
+        try { await this.ctx.get("sessions")?.flush?.(agent.session); } catch { /* best effort */ }
+        return outcome;
+      };
+      const outcome = await Promise.race([work(), expired]);
+      if (!outcome) {
+        const failure = watch.failure();
+        this.finishTurn(thread, turn, { error: failure?.message ?? "cancelled by router",
+          reasonKind: failure?.reason ?? "cancelled" });
         return;
       }
       const kind = outcome.reason?.kind ?? "completed";
@@ -396,9 +431,9 @@ export class InProcessTransport {
       const message = this.decorate(error?.message ?? String(error));
       this.log("warn", "turn_failed", { threadId: thread.id, turnId: turn.id,
         message, code: error?.code ?? null });
-      this.finishTurn(thread, turn, { thinking, error: message, reasonKind: "error" });
+      this.finishTurn(thread, turn, { thinking, error: message, reasonKind: error.reasonKind ?? "error" });
     } finally {
-      if (timer) clearTimeout(timer);
+      clearInterval(timer);
       try { stopStream?.(); } catch { /* ignore */ }
     }
   }
@@ -455,7 +490,7 @@ export class InProcessTransport {
     const latest = thread.turns.at(-1) ?? null;
     return {
       thread: { id: thread.id, hostId, title: thread.title ?? null, cwd: thread.cwd, status: thread.status },
-      latestTurn: latest ? { id: latest.id, status: latest.status, ...approvalFields(latest),
+      latestTurn: latest ? { id: latest.id, status: latest.status, eventSeq: latest.eventSeq ?? 0, ...approvalFields(latest),
         startedAt: latest.startedAt ?? null, completedAt: latest.completedAt ?? null } : null,
       latestAssistantMessage: latestAssistantMessage(latest),
       cursor: null,
@@ -713,7 +748,7 @@ function approvalFields(turn) {
 
 function normalizeTurn(turn, maxChars) {
   return {
-    id: turn.id, status: turn.status, ...approvalFields(turn), items: turnItems(turn, maxChars), itemsView: "full",
+    id: turn.id, status: turn.status, eventSeq: turn.eventSeq ?? 0, ...approvalFields(turn), items: turnItems(turn, maxChars), itemsView: "full",
     startedAt: turn.startedAt ?? null, completedAt: turn.completedAt ?? null,
     durationMs: turn.startedAt && turn.completedAt
       ? Math.max(0, Date.parse(turn.completedAt) - Date.parse(turn.startedAt)) : null,

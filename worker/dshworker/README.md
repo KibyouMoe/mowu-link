@@ -67,7 +67,7 @@ CLI 选择顺序：`identity.transport` → `CODEXWORKER_NATIVE_TRANSPORT` → �
 | `provider` / `model` / `reasoningEffort` | `agentDefaultModel.currentSelection()` | 覆盖默认模型 |
 | `workspace` | `config.dsh.workspace` → `~/projects` | 线程默认 cwd；不存在时回退并告警 |
 | `stateDir` | `identity.stateDir` | 插件线程状态目录 |
-| `turnTimeoutMs` | 600000 | 单轮上限，超时 cancel |
+| `noProgressTimeoutMs` | 1800000 | 连续无新事件的窗口；有进展就续期 |
 | `business` | `false` | 在本进程里起 HTTP + 飞书 + router（端口被占则跳过） |
 | `selfTest` | — | 启动后跑两轮自检，结果写 `<stateDir>/self-test.json` |
 
@@ -697,3 +697,23 @@ replayFloor，旧游标返回 replay_too_old 与线程恢复指引。状态/幂�
 幂等键，网络失败重试为至少一次，不能承诺 Webhook 恰好一次。
 
 来源、哈希和改动说明见 `THIRD_PARTY_NOTICES.md`。
+
+### 长任务与无进展检测
+
+未提供正数 `deadline_s` 的 router 任务没有墙钟上限；共享 CLI、
+HTTP manager、进程内 agents 和备用 DSH CLI transport 均不再默认在
+600/1200 秒处终止任务，插件 router 原先固定 30 分钟的上限也已移除。
+显式 `deadline_s` 仍按任务开始时间计算，不会因进展顺延。
+
+防卡死窗口默认 30 分钟，使用配置 `noProgressTimeoutMs`（毫秒）或环境变量
+`CODEXWORKER_NO_PROGRESS_TIMEOUT_MS` 调整；两种 worker 使用同一规则。
+进程内 agents 和 manager 配置支持该键，备用 CLI transport 使用环境变量。
+旧 `turnTimeoutMs` / `DSHWORKER_TURN_TIMEOUT_MS` 不再作为隐式执行时限。
+真实 tool/session 事件、非空流式输出和审批状态变化属于进展；
+重复读相同快照、计算出来的持续时长和轮询时间不属于进展。
+停滞报错明确包含「无进展超时」，DSH 执行器会请求取消当前执行；
+即使底层 idle 等待未返回，任务也能收尾报告失败。
+审批的 9 分钟 fail-closed 安全期限保持不变。
+
+部署后需要重启 router 与 `ai.hermes.dsh-web`，CLI 形态的 codexworker
+也需要重新启动才能加载共享等待逻辑；本次修改与测试不重启生产服务。

@@ -35,6 +35,7 @@ import {
   registerNativeTransport,
   resetNativeTransportCache,
 } from "./interface/transport/index.mjs";
+import { ProgressWatch, noProgressTimeoutMs, taskDeadline } from "./progress-watch.mjs";
 import { normalizeSubscriptionConfig, taskBoardTerminalPhase, taskBoardText, taskBoardTitle } from "./router-tasks.mjs";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -115,10 +116,10 @@ export function apply(ctx, config = {}) {
   if (workspace !== requestedWorkspace) {
     log("warn", "workspace_fallback", { requested: requestedWorkspace, using: workspace });
   }
-  const turnTimeoutMs = Number(config.turnTimeoutMs) > 0 ? Number(config.turnTimeoutMs) : DEFAULT_TURN_TIMEOUT_MS;
+  const idleTimeoutMs = noProgressTimeoutMs({ noProgressTimeoutMs: config.noProgressTimeoutMs ?? workerConfig.noProgressTimeoutMs });
 
   const transport = new InProcessTransport({
-    ctx, selection, cwd: workspace, stateDir, turnTimeoutMs,
+    ctx, selection, cwd: workspace, stateDir, noProgressTimeoutMs: idleTimeoutMs,
     proxyHint: loopbackProxy ? null : (proxyEnv.httpsProxy ?? proxyEnv.allProxy),
     log: (level, event, fields) => log(level, event, fields),
   });
@@ -157,7 +158,7 @@ export function apply(ctx, config = {}) {
     callTool: (toolName, args, timeoutMs) => transport.execute(toolName, args ?? {}, timeoutMs),
     threads: () => transport.listThreads({ limit: 100 }).threads,
     /** 便捷入口：一轮对话跑完再返回（给脚本/自检用）。 */
-    async run(prompt, { threadId = null, cwd = null, timeoutMs = turnTimeoutMs } = {}) {
+    async run(prompt, { threadId = null, cwd = null, timeoutMs = DEFAULT_TURN_TIMEOUT_MS } = {}) {
       const recent = [...transport.threads.values()]
         .sort((a, b) => (Date.parse(b.updatedAt ?? 0) || 0) - (Date.parse(a.updatedAt ?? 0) || 0))[0] ?? null;
       const thread = threadId
@@ -165,9 +166,16 @@ export function apply(ctx, config = {}) {
         : recent ?? transport.threads.get(
           transport.createThread({ title: `${identity.display} · plugin`, cwd: cwd ?? workspace }).threadId);
       const sent = transport.sendMessage({ threadId: thread.id, prompt });
-      const waited = await transport.waitThreads({ targets: [{ threadId: thread.id }], timeoutMs: Math.min(timeoutMs, MAX_WAIT_MS) }, timeoutMs);
-      const turn = thread.turns.find((candidate) => candidate.id === sent.turnId) ?? null;
-      return { threadId: thread.id, turnId: sent.turnId, timedOut: waited.timedOut,
+      const until = Number(timeoutMs) > 0 ? Date.now() + Number(timeoutMs) : Infinity;
+      let turn;
+      for (;;) {
+        turn = thread.turns.find((candidate) => candidate.id === sent.turnId) ?? null;
+        if (!turn || ["completed", "failed", "interrupted"].includes(turn.status) || Date.now() >= until) break;
+        await transport.waitThreads({ targets: [{ threadId: thread.id }],
+          timeoutMs: Math.min(MAX_WAIT_MS, until - Date.now()) });
+      }
+      return { threadId: thread.id, turnId: sent.turnId,
+        timedOut: turn?.status === "inProgress" && Date.now() >= until,
         status: turn?.status ?? null, text: turn?.text ?? "", error: turn?.error ?? null,
         thinking: turn?.thinking ?? "" };
     },
@@ -333,6 +341,7 @@ async function startBusiness({ ctx, transport, identity, workerConfig, config, s
     machine: identity.name, tokenFile, workspaceRoots: [thread.cwd],
     ...(project?.projectId ? { projectId: project.projectId } : {}),
     pollMs: 1000,
+    noProgressTimeoutMs: transport.noProgressTimeoutMs,
     feishu: {
       configFile: feishu.file,
       inboundEnabled: true,
@@ -484,21 +493,32 @@ async function startBusiness({ ctx, transport, identity, workerConfig, config, s
           if (!manager?.message) throw new Error("manager is not active");
           const selected = manager.state?.selectedThreadId && manager.state.sessions?.[manager.state.selectedThreadId]
             ? manager.state.selectedThreadId : thread.id;
+          const deadline = taskDeadline(task, startedTask);
+          transport.taskDeadlines.set(taskId, Number.isFinite(deadline) ? deadline : null);
           await manager.message({ protocolVersion: PROTOCOL, messageId, source: "hermes", origin: "router",
             text: `${marker}\n${goal}`, targetThreadId: selected, delivery: "steer" });
-          const deadline = startedTask + 30 * 60 * 1000;
+          const watch = new ProgressWatch({ deadline, timeoutMs: transport.noProgressTimeoutMs });
           let turn = null;
-          while (Date.now() < deadline) {
+          for (;;) {
+            const rejection = manager.state.receipts?.[messageId]?.error;
+            if (rejection) throw new Error(`${rejection.error}: ${rejection.detail ?? "dispatch rejected"}`);
             const snapshot = await transport.execute("read_thread", { threadId: selected, turnLimit: 30, includeOutputs: false });
-            if (!turn) { turn = findRouterTurn(snapshot, marker); }
-            const found = turn ? snapshot.turns.find((item) => item.id === turn.id) ?? null : null;
-            if (found && TERMINAL_TURN.has(found.status)) { turn = found; break; }
-            await sleep(1_000);
+            const found = turn ? snapshot.turns.find((item) => item.id === turn.id) ?? null : findRouterTurn(snapshot, marker);
+            if (found) turn = found;
+            if (found && TERMINAL_TURN.has(found.status)) break;
+            watch.observe(found ?? snapshot.turns);
+            const failure = watch.failure();
+            if (failure) {
+              await transport.control.cancelTask(taskId).catch(error =>
+                log("error", "router_task_cancel_failed", { taskId, message: error.message }));
+              throw new Error(failure.message);
+            }
+            await sleep(Math.max(1, Math.min(1_000, watch.remainingMs())));
           }
           status = turn?.status === "completed" ? "done" : "failed";
           summary = lastAssistantText(turn) || (turn ? "" : "task turn never appeared");
           if (status !== "done") {
-            failure = turn ? `turn ${turn.status}` : "task turn never appeared";
+            failure = turn?.error || (turn ? `turn ${turn.status}` : "task turn never appeared");
             summary = summary || failure;
           }
         } catch (error) {
@@ -506,6 +526,7 @@ async function startBusiness({ ctx, transport, identity, workerConfig, config, s
           failure = summary;
           log("error", "router_task_failed", { taskId, message: summary });
         }
+        transport.taskDeadlines.delete(taskId);
         // 成功不单独发：manager 在这条会话里的回复已经到训练员私聊了。
         const boardPhase = taskBoardTerminalPhase(status);
         if (boardPhase) await taskBoardNotify(taskId, boardPhase, { summary, failure });

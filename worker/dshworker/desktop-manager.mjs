@@ -3,6 +3,7 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import http from "node:http";
+import { ProgressWatch, noProgressTimeoutMs, taskDeadline } from "./progress-watch.mjs";
 import net from "node:net";
 import path from "node:path";
 import os from "node:os";
@@ -80,7 +81,7 @@ export class DesktopManager {
     this.native = native; this.listNativeTools = listNativeTools; this.stateDir = stateDir;
     this.fetch = fetchImpl;
     this.config = operatingConfig({ host: "127.0.0.1", port: 8903, bridgeName: "CodexWorker", machine: "codexworker",
-      pollMs: 1000, turnTimeoutMs: 600000, workspaceRoots: [], projectId: null,
+      pollMs: 1000, noProgressTimeoutMs: noProgressTimeoutMs(config), workspaceRoots: [], projectId: null,
       feishu: {}, ...config });
     this.statePath = path.join(stateDir, "desktop-manager-state.json");
     this.state = { version: 1, seq: 0, replayFloor: 0, nextName: 1, selectedThreadId: null,
@@ -89,6 +90,7 @@ export class DesktopManager {
     this.nativeInputCache = new Map();
     this.nativeHistoryWindows = new Map();
     this.nativeProgressPolls = new Map();
+    this.taskProgress = new Map();
     this.publicJournal = new LocalPublicJournal(config.publicJournalRoot ?? path.join(path.dirname(path.dirname(stateDir)), "sessions"));
     this.taskJournal = new LocalPublicJournal(this.publicJournal.root);
     this.taskJournalTails = new Map();
@@ -613,6 +615,14 @@ export class DesktopManager {
       threadId: request.targetThreadId ?? request.threadId ?? null,
       messageId: request.messageId ?? null, source: request.source ?? "bridge", payload, ...extra };
     this.state.events.push(event);
+    if (event.threadId && /^(item\.|turn\.|message\.(accepted|queued|dispatched))/.test(type)) {
+      let watch = this.taskProgress.get(event.threadId);
+      if (!watch) {
+        watch = new ProgressWatch({ timeoutMs: noProgressTimeoutMs(this.config) });
+        this.taskProgress.set(event.threadId, watch);
+      }
+      watch.touch();
+    }
     const now = Date.now();
     const retained = this.state.events.filter(e => now - Date.parse(e.timestamp) <= (e.type === "item.delta" ? 3600000 : 30 * 86400000));
     // A single persisted journal/registry snapshot has a hard 256MiB limit.
@@ -1130,6 +1140,7 @@ export class DesktopManager {
         }
         try { await this.serial(async () => {
           const session = this.session(id);
+          this.observeTaskProgress(id, snapshot.turns);
           this.seedOlderHistory(session, snapshot);
           const items = publicItems(snapshot);
           this.publicImageRelay.observe(session, snapshot, imageBindingEpoch);
@@ -1211,9 +1222,10 @@ export class DesktopManager {
           const active = activeTurn(snapshot);
           session.activeTurnId = active?.id ?? null; session.state = active || session.pendingInputs?.length ? "running" : "idle";
           for (const pending of [...(session.pendingInputs ?? [])]) {
-            if (Date.now() - pending.dispatchedAt <= this.config.turnTimeoutMs) continue;
+            const lastProgressAt = Math.max(pending.dispatchedAt, this.taskProgress.get(id)?.lastProgressAt ?? 0);
+            if (Date.now() - lastProgressAt < noProgressTimeoutMs(this.config)) continue;
             session.pendingInputs = session.pendingInputs.filter(p => p !== pending);
-            if (!pending.unknownOutcome) await this.emit("message.rejected", { targetThreadId: id, messageId: pending.messageId }, { error: "dispatch_outcome_unknown", detail: "Native follow-up was accepted but its turn could not be confirmed; inspect the Desktop task. No automatic retry.", retryable: false });
+            if (!pending.unknownOutcome) await this.emit("message.rejected", { targetThreadId: id, messageId: pending.messageId }, { error: "no_progress_timeout", detail: "无进展超时：已接受的输入持续没有新事件，且无法确认对应 turn；请检查原会话，不自动重发。", retryable: false });
           }
           const readySteer = session.steerQueue?.length && (!active || (this.config.nativeBusyDeliveryVerified && localHost(session.hostId)));
           if (!this.handoffPaused && readySteer) {
@@ -1247,6 +1259,7 @@ export class DesktopManager {
     if (!progress) throw new Error("public_journal_status_unavailable");
     const batch = await this.publicJournal.read(session, session.publicJournalCheckpoint,
       { turnId: progress.turnId, epoch, startAt: session.publicJournalStartAt });
+    this.observeTaskProgress(id, { progress, checkpoint: batch.checkpoint });
     await this.serial(async () => {
       if (this.closed || this.handoffPaused || id !== this.state.selectedThreadId || epoch !== this.state.selectionEpoch) return;
       for (const { turnId, item, timestamp } of batch.events) {
@@ -1446,6 +1459,7 @@ export class DesktopManager {
       this.nativeProgressPolls.set(id, { at: Date.now(), cursor: null });
       progress = await inspect(null); // Read-only reset after a stale native cursor.
     }
+    this.observeTaskProgress(id, progress);
     let delivery = null, accepted = false;
     await this.serial(async () => {
       if (this.closed || this.handoffPaused || this.state.selectedThreadId !== id || this.state.selectionEpoch !== epoch) return;
@@ -1721,7 +1735,7 @@ export class DesktopManager {
         this.session(body.threadId);
         const result = await this.message(legacyRequest({ ...body, targetThreadId: body.threadId }));
         if (body.wait !== false && ["dispatch_pending", "message_queued"].includes(result.action)) {
-          return json(res, 200, await this.waitResult(result.messageId, body.threadId));
+          return json(res, 200, await this.waitResult(result.messageId, body.threadId, body));
         }
         return json(res, 200, { threadId: result.session?.threadId ?? body.threadId, turnId: null, messageId: result.messageId,
           duplicate: result.duplicate, eventSeq: result.eventSeq, action: result.action,
@@ -1765,9 +1779,20 @@ export class DesktopManager {
     } finally { if (counted) this.httpOperations--; }
   }
 
-  async waitResult(messageId, threadId) {
-    const until = Date.now() + this.config.turnTimeoutMs;
-    while (Date.now() < until && !this.closed) {
+  observeTaskProgress(threadId, value) {
+    let watch = this.taskProgress.get(threadId);
+    if (!watch) {
+      watch = new ProgressWatch({ timeoutMs: noProgressTimeoutMs(this.config) });
+      this.taskProgress.set(threadId, watch);
+    }
+    watch.observe(value);
+    return watch;
+  }
+
+  async waitResult(messageId, threadId, { deadline_s } = {}) {
+    const watch = new ProgressWatch({ timeoutMs: noProgressTimeoutMs(this.config),
+      deadline: taskDeadline({ deadline_s }) });
+    while (!this.closed) {
       const events = this.state.events.filter(e => e.messageId === messageId ||
         (e.threadId === threadId && e.type === "turn.completed" && e.payload.messageIds?.includes(messageId)));
       const rejected = events.find(e => e.type === "message.rejected");
@@ -1777,9 +1802,14 @@ export class DesktopManager {
         const output = this.state.events.filter(e => e.threadId === threadId && e.turnId === done.turnId && e.type === "item.completed").map(e => e.payload.snapshot).join("\n");
         return { threadId, turnId: done.turnId, messageId, status: done.payload.status === "completed" ? "completed" : "error", resultText: output, reason: done.payload.status };
       }
-      await new Promise(resolve => setTimeout(resolve, 100));
+      watch.observe({ events: events.map(e => e.seq),
+        progressAt: this.taskProgress.get(threadId)?.lastProgressAt });
+      const failure = watch.failure();
+      if (failure) return { threadId, messageId, turnId: null, status: failure.reason === "stuck" ? "stuck" : "timeout",
+        resultText: "", reason: failure.message };
+      await new Promise(resolve => setTimeout(resolve, Math.min(100, watch.remainingMs())));
     }
-    return { threadId, messageId, turnId: null, status: "timeout", resultText: "", reason: "Native task is not stopped by an HTTP timeout; inspect it in Codex Desktop." };
+    return { threadId, messageId, turnId: null, status: "interrupted", resultText: "", reason: "manager closed" };
   }
 
   async close() {

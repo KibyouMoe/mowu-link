@@ -564,3 +564,14 @@ replayFloor，旧游标返回 replay_too_old 与线程恢复指引。状态/幂�
 幂等键，网络失败重试为至少一次，不能承诺 Webhook 恰好一次。
 
 来源、哈希和改动说明见 `THIRD_PARTY_NOTICES.md`。
+
+### 长任务等待
+
+router 任务未显式提供正数 `deadline_s` 时没有墙钟上限；HTTP manager
+与订阅事件的默认等待也不再使用固定的 600/1200 秒时限。
+连续没有新事件默认 30 分钟才报告「无进展超时」，
+可通过配置 `noProgressTimeoutMs` 或环境变量
+`CODEXWORKER_NO_PROGRESS_TIMEOUT_MS`（毫秒）调整。
+原生工具、推理和流式输出通知会更新内部进度计数，
+不会把轮询本身或快照中的持续时长当作进展。
+显式任务 `deadline_s` 和显式订阅 `subscriptionTurnLimitMs` 仍然有效。

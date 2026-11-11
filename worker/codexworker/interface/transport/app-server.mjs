@@ -724,6 +724,13 @@ class AppServerClient {
 
   handleNotification(method, params) {
     const threadId = typeof params.threadId === "string" ? params.threadId : null;
+    const progressTurnId = params.turnId ?? params.turn?.id;
+    if (threadId && progressTurnId && /^(item|turn)\//.test(method)
+        && (!/(?:\/delta|Delta)$/.test(method) || (typeof params.delta === "string" && params.delta))) {
+      const state = this.ensureThread(threadId);
+      state.eventSequences ??= new Map();
+      state.eventSequences.set(progressTurnId, (state.eventSequences.get(progressTurnId) ?? 0) + 1);
+    }
     switch (method) {
       case "thread/started":
         this.rememberThread(params.thread);
@@ -1037,7 +1044,10 @@ class AppServerClient {
     }
 
     const limited = turnLimit > 0 ? snapshotTurns.slice(-turnLimit) : snapshotTurns;
-    const normalizedTurns = limited.map((turn) => normalizeTurn(turn, includeOutputs, maxChars));
+    const normalizedTurns = limited.map((turn) => ({
+      ...normalizeTurn(turn, includeOutputs, maxChars),
+      ...(state?.eventSequences?.has(turn.id) ? { eventSeq: state.eventSequences.get(turn.id) } : {}),
+    }));
     return {
       thread: normalizeThread(this.threads.get(threadId)?.thread ?? thread),
       turns: normalizedTurns,
@@ -1153,6 +1163,7 @@ class AppServerClient {
         latestTurn: latest?.id ? {
           id: latest.id,
           status: latest.status,
+          ...(state?.eventSequences?.has(latest.id) ? { eventSeq: state.eventSequences.get(latest.id) } : {}),
           startedAt: latest.startedAt ?? null,
           completedAt: latest.completedAt ?? null,
         } : null,

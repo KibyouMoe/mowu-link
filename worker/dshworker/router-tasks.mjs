@@ -6,7 +6,7 @@
 // queue/format rules are unit-testable without a native transport.
 import { createHash } from "node:crypto";
 
-export const ROUTER_TURN_LIMIT_MS = 20 * 60 * 1000;
+export const ROUTER_TURN_LIMIT_MS = Infinity;
 export const SUBSCRIPTION_NOTICE_LIMIT = 80;
 export const TERMINAL_TURN = new Set(["completed", "interrupted", "failed", "cancelled", "canceled"]);
 

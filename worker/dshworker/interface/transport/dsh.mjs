@@ -23,6 +23,7 @@
 //
 // 本文件只实现 transport 接口（listTools / callTool），不碰业务语义。
 // 参考实现：./app-server.mjs；选择器：./index.mjs。
+import { ProgressWatch, noProgressTimeoutMs } from "../../progress-watch.mjs";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
@@ -54,7 +55,6 @@ const MAX_PERSISTED_TEXT = 8_000;
 const MAX_STDERR_CHARS = 8_192;
 const DEFAULT_WAIT_MS = 30_000;
 const MAX_WAIT_MS = 180_000;
-const DEFAULT_TURN_TIMEOUT_MS = 600_000;
 const POLL_INTERVAL_MS = 200;
 const TERMINAL_TURN_STATUSES = new Set(["completed", "interrupted", "failed", "cancelled", "canceled"]);
 
@@ -439,17 +439,21 @@ class DshTransport {
     this.children.set(turn.id, child);
     let stderr = "";
     let settled = false;
-    let timedOut = false;
+    let livenessFailure = null;
     const chunks = [];
     const thoughts = [];
     let finalText = null;
     let reason = null;
 
-    const timeoutMs = dshTurnTimeoutMs();
-    const timer = setTimeout(() => {
-      timedOut = true;
+    const watch = new ProgressWatch({ timeoutMs: noProgressTimeoutMs() });
+    const timer = setInterval(() => {
+      livenessFailure = watch.failure();
+      if (!livenessFailure) return;
+      clearInterval(timer);
       try { child.kill("SIGTERM"); } catch { /* already gone */ }
-    }, timeoutMs);
+      // A broken child must not keep the task promise unresolved after cancellation.
+      settle(null, "SIGTERM");
+    }, Math.max(1, Math.min(1000, watch.timeoutMs)));
     timer.unref?.();
 
     child.stderr.setEncoding("utf8");
@@ -462,6 +466,10 @@ class DshTransport {
       try { message = JSON.parse(line); }
       catch { return; } // 非 JSON 行忽略，不污染这一轮。
       if (!message || typeof message !== "object") return;
+      if (["session", "status", "text", "thinking", "final", "error"].includes(message.type)
+          && message.phase !== "heartbeat") {
+        watch.touch(); turn.eventSeq = (turn.eventSeq ?? 0) + 1;
+      }
       switch (message.type) {
         case "session":
           if (typeof message.sessionId === "string" && message.sessionId) {
@@ -503,12 +511,12 @@ class DshTransport {
     const settle = (exitCode, signal) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      clearInterval(timer);
       this.children.delete(turn.id);
       const text = finalText ?? chunks.join("");
       const thinking = thoughts.join("");
-      if (timedOut) {
-        this.finishTurn(thread, turn, { text, thinking, error: `dsh turn timed out after ${timeoutMs}ms`, reasonKind: "timeout" });
+      if (livenessFailure) {
+        this.finishTurn(thread, turn, { text, thinking, error: livenessFailure.message, reasonKind: livenessFailure.reason });
         return;
       }
       const kind = reason?.kind ?? (exitCode === 0 ? "completed" : "failed");
@@ -526,7 +534,7 @@ class DshTransport {
     child.on("error", (error) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      clearInterval(timer);
       this.children.delete(turn.id);
       this.finishTurn(thread, turn, { error: `failed to run ${binary}: ${error.message}`, reasonKind: "spawn_failed" });
     });
@@ -603,6 +611,7 @@ class DshTransport {
       latestTurn: latest ? {
         id: latest.id,
         status: latest.status,
+        eventSeq: latest.eventSeq ?? 0,
         startedAt: latest.startedAt ?? null,
         completedAt: latest.completedAt ?? null,
       } : null,
@@ -726,10 +735,6 @@ function dshProfile() {
   return process.env.DSHWORKER_DSH_PROFILE?.trim() || "headless";
 }
 
-function dshTurnTimeoutMs() {
-  const configured = Number(process.env.DSHWORKER_TURN_TIMEOUT_MS);
-  return Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_TURN_TIMEOUT_MS;
-}
 
 function findDshBinary() {
   const configured = process.env.DSHWORKER_DSH_BIN?.trim() || process.env.DSH_BIN?.trim();
@@ -868,6 +873,7 @@ function normalizeTurn(turn, maxChars) {
   return {
     id: turn.id,
     status: turn.status,
+    eventSeq: turn.eventSeq ?? 0,
     items,
     itemsView: "full",
     startedAt: turn.startedAt ?? null,

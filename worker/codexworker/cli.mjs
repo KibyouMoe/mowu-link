@@ -29,10 +29,12 @@ import RouterClient, { setActiveRouterClient } from "./router-client.mjs";
 import { createApprovalChannel } from "./approval-channel.mjs";
 import { FeishuNotifier } from "./feishu.mjs";
 import { PROTOCOL } from "./desktop-manager.mjs";
-import { ROUTER_TURN_LIMIT_MS, TERMINAL_TURN, findRouterTurn, lastAssistantText,
+import { TERMINAL_TURN, findRouterTurn, lastAssistantText,
   normalizeSubscriptionConfig, routerMarker, routerMessageId, routerPrompt,
   subscriptionMarker, subscriptionMessageId, subscriptionNoticeText,
   taskBoardTerminalPhase, taskBoardText, taskBoardTitle } from "./router-tasks.mjs";
+
+import { ProgressWatch, noProgressTimeoutMs, taskDeadline } from "./progress-watch.mjs";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PROGRAM = path.basename(ROOT);
@@ -371,6 +373,7 @@ async function main() {
     workspaceRoots: [session.cwd],
     ...(project?.projectId ? { projectId: project.projectId } : {}),
     pollMs: 1000,
+    noProgressTimeoutMs: noProgressTimeoutMs(config),
     feishu: {
       configFile: feishu.file,
       inboundEnabled: true,
@@ -484,12 +487,15 @@ async function main() {
   // happens here — wait until the shared thread is idle — and the write itself
   // uses the same single-writer path (and delivery mode) the Feishu chat uses.
   async function waitForIdleThread(threadId, deadline) {
+    const watch = new ProgressWatch({ deadline, timeoutMs: noProgressTimeoutMs(config) });
     for (;;) {
       const wait = await nativeCall("wait_threads", { targets: [{ threadId, hostId: "local" }], timeoutMs: 0 }, 20_000)
         .catch((error) => { log("warn", "router_idle_check_failed", { threadId, message: error?.message ?? String(error) }); return null; });
       const turn = wait?.polls?.[0]?.latestTurn ?? null;
       if (!turn || TERMINAL_TURN.has(turn.status)) return true;
-      if (Date.now() >= deadline) return false;
+      watch.observe(turn);
+      const failure = watch.failure();
+      if (failure) throw new Error(failure.message);
       await sleep(1_000);
     }
   }
@@ -501,7 +507,8 @@ async function main() {
     let turn = null;
     let status = null;
     let misses = 0;
-    while (Date.now() < deadline) {
+    const watch = new ProgressWatch({ deadline, timeoutMs: noProgressTimeoutMs(config) });
+    for (;;) {
       const rejection = manager.state.receipts?.[messageId]?.error;
       if (rejection) throw new Error(`${rejection.error}: ${rejection.detail ?? "dispatch rejected"}`);
       const snapshot = await nativeCall("read_thread", { threadId, turnLimit: 30, includeOutputs: false }, 60_000);
@@ -515,12 +522,14 @@ async function main() {
       } else if (turn && ++misses > 20) {
         throw new Error(`turn ${turn.id} left the readable window before it completed`);
       }
-      const remaining = Math.max(1_000, Math.min(180_000, deadline - Date.now()));
+      watch.observe(found ?? snapshot?.turns);
+      const failure = watch.failure();
+      if (failure) return { turn: found ?? turn, status, timedOut: true, ...failure };
+      const remaining = Math.max(1, Math.min(5_000, watch.remainingMs()));
       await nativeCall("wait_threads", { targets: [{ threadId, hostId: "local" }], timeoutMs: remaining }, remaining + 15_000)
         .catch((error) => log("warn", "router_wait_threads_failed", { messageId, message: error?.message ?? String(error) }));
       if (!found && turn) await sleep(ROUTER_QUEUE_POLL_MS);
     }
-    return { turn, status, timedOut: true };
   }
 
   async function routerTurnReply(threadId) {
@@ -564,12 +573,8 @@ async function main() {
             requested, sessionCwd: path.resolve(sessionCwd) });
         }
       }
-      const declaredMs = Number(task.deadline_s);
-      const budgetMs = Number.isFinite(declaredMs) && declaredMs > 0 ? declaredMs * 1000 : ROUTER_TURN_LIMIT_MS;
-      const deadline = startedAt + budgetMs;
-      if (!await waitForIdleThread(selected, deadline)) {
-        throw new Error(`shared thread stayed busy past the ${Math.round(budgetMs / 1000)}s budget`);
-      }
+      const deadline = taskDeadline(task, startedAt);
+      await waitForIdleThread(selected, deadline);
       const enqueued = await manager.message({
         protocolVersion: PROTOCOL, messageId, source: "hermes", origin: "router",
         text: routerPrompt({ taskId, goal, context: task.context }), targetThreadId: selected, delivery: "steer",
@@ -591,8 +596,8 @@ async function main() {
       } else {
         status = "failed";
         const reason = waited.timedOut
-          ? `turn ${turnStatus} after ${durationS}s (deadline hit)`
-          : `turn ${turnStatus}`;
+          ? `${waited.message} (turn ${turnStatus}, ${durationS}s)`
+          : (typeof turn?.error === "string" ? turn.error : turn?.error?.message) || `turn ${turnStatus}`;
         summary = text ? `${reason}\n\n${text}` : reason;
         failure = reason;
       }
@@ -652,7 +657,7 @@ async function main() {
   const subscriptionConfig = normalizeSubscriptionConfig(config.subscriptions);
   const declaredTurnLimitMs = Number(config.subscriptionTurnLimitMs);
   const subscriptionTurnLimitMs = Number.isFinite(declaredTurnLimitMs) && declaredTurnLimitMs > 0
-    ? declaredTurnLimitMs : ROUTER_TURN_LIMIT_MS;
+    ? declaredTurnLimitMs : Infinity;
 
   async function subscriptionNotify({ source, kind, id, text }) {
     const body = subscriptionNoticeText({ source, text });
@@ -702,9 +707,7 @@ async function main() {
       const selected = manager.state.selectedThreadId;
       if (!selected || !manager.state.sessions[selected]) throw new Error("manager has no selected session");
       threadId = selected;
-      if (!await waitForIdleThread(selected, startedAt + subscriptionTurnLimitMs)) {
-        throw new Error(`shared thread stayed busy past the ${Math.round(subscriptionTurnLimitMs / 1000)}s budget`);
-      }
+      await waitForIdleThread(selected, startedAt + subscriptionTurnLimitMs);
       const enqueued = await manager.message({
         protocolVersion: PROTOCOL, messageId, source: "hermes", origin: "subscription",
         text: `${marker}\n${body}`, targetThreadId: selected, delivery: "steer",
@@ -716,7 +719,7 @@ async function main() {
       turnId = waited.turn?.id ?? null;
       status = waited.status === "completed" ? "done" : "failed";
       reply = lastAssistantText(waited.turn);
-      if (status !== "done") failure = waited.timedOut ? "deadline hit" : `turn ${waited.status ?? "unknown"}`;
+      if (status !== "done") failure = waited.timedOut ? waited.message : `turn ${waited.status ?? "unknown"}`;
     } catch (error) {
       failure = error?.message ?? String(error);
       log("error", "subscription_event_failed", { source, kind, id, message: failure });
