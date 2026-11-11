@@ -1547,7 +1547,7 @@ test("online notice waits for connection, reads the current native title and ded
   assert.ok(!JSON.stringify(state.feishuOnlineNotice).includes(token));
   socket.connectionId = randomUUID();
   await f.manager.onlineAnnouncement.connected(socket, socket.connectionId); assert.equal(cards.length, 2);
-  assert.equal(cards[1].options.title, "CodexWorker-连接恢复"); assert.match(cards[1].text, /连接已恢复/);
+  assert.equal(cards[1].options.title, "CodexWorker-重连"); assert.match(cards[1].text, /已重连，继续原会话/);
   assert.doesNotMatch(cards[1].text, /已上线/);
 });
 
@@ -1598,7 +1598,7 @@ test("online/recovery classification survives restart but a new Desktop lifetime
   let socket = onlineSocket(f); await f.manager.onlineAnnouncement.connected(socket, socket.connectionId);
   assert.equal(f.manager.state.feishuLastOnlineNotice.desktopLifetimeStartedAt, "current-desktop");
   f.manager.onlineAnnouncement.reset(); socket = onlineSocket(f);
-  await f.manager.onlineAnnouncement.connected(socket, socket.connectionId); assert.equal(cards.at(-1).options.title, "CodexWorker-连接恢复");
+  await f.manager.onlineAnnouncement.connected(socket, socket.connectionId); assert.equal(cards.at(-1).options.title, "CodexWorker-重连");
   f.manager.config.desktopLifetimeStartedAt = "next-desktop"; socket = onlineSocket(f);
   await f.manager.onlineAnnouncement.connected(socket, socket.connectionId); assert.equal(cards.at(-1).options.title, "CodexWorker-上线通知");
 });
@@ -1608,7 +1608,7 @@ test("an older hot-reload suppression record still distinguishes a later recover
   f.manager.state.feishuOnlineNotice = { status: "suppressed-hot-reload", connectedAt: "2026-10-04T03:12:54.000Z" };
   const cards = []; f.manager.notifier = { sendMessage: async (text, options) => { cards.push({ text, options }); return { code: 0 }; } };
   const socket = onlineSocket(f); await f.manager.onlineAnnouncement.connected(socket, socket.connectionId);
-  assert.equal(cards[0].options.title, "CodexWorker-连接恢复"); assert.doesNotMatch(cards[0].text, /已上线/);
+  assert.equal(cards[0].options.title, "CodexWorker-重连"); assert.doesNotMatch(cards[0].text, /已上线/);
 });
 
 test("online notice has no implicit recipient and handles a verified untitled thread honestly", async t => {
@@ -1942,4 +1942,20 @@ test("runtime requests, responses, events, health and errors match the locked ma
   const bad = await f.http("/manager/messages", req("/unknown")); checkContract("errorResponse", bad.body);
   assert.throws(() => checkContract("eventEnvelope", { ...f.manager.state.events[0], seq: -1 }));
   assert.throws(() => checkContract("messageRequest", { ...request, messageId: "not-uuid" }));
+});
+
+test("restoring a persisted session without a prior notice reports reconnect rather than first online", async t => {
+  const f = await fixture(t, { feishu: { chatId: "trainer-chat" } }); await f.register(); await f.manager.close();
+  const restored = await new DesktopManager({ native: f.native, listNativeTools: f.listNativeTools, stateDir: f.root, config: f.config }).initialize();
+  const cards = [];
+  restored.notifier = { sendMessage: async (text, options) => { cards.push({ text, options }); return { code: 0, data: { message_id: "om_reconnect" } }; } };
+  const socket = { connectionId: randomUUID(), _ws: { readyState: 1 }, stop() {} }; restored.ws = socket;
+  try {
+    await restored.listen();
+    await restored.onlineAnnouncement.connected(socket, socket.connectionId);
+    await restored.onlineAnnouncement.connected(socket, socket.connectionId);
+    assert.equal(cards.length, 1); assert.equal(cards[0].options.title, "CodexWorker-重连");
+    assert.match(cards[0].text, /已重连，继续原会话/); assert.doesNotMatch(cards[0].text, /已上线|adopt/);
+    assert.equal(cards[0].options.threadId, "existing");
+  } finally { await restored.close(); }
 });

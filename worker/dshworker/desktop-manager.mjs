@@ -599,6 +599,7 @@ export class DesktopManager {
       fail(503, "manager_state_corrupt", "Durable Bridge state failed validation; the original file is preserved.", false);
     }
     this.stateLoaded = true;
+    this.restoredSessionIds = new Set(Object.keys(this.state.sessions));
     if (this.transcriptEnabled) this.state.seq = Math.max(this.state.seq ?? 0, await this.messageJournal.recover());
     this.state.selectionEpoch ??= 0; this.state.autoImages ??= {};
     this.migrateTranscript();
