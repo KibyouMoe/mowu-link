@@ -3,6 +3,7 @@
 import { open, readdir, realpath } from "node:fs/promises";
 import path from "node:path";
 import { projectToolActivity } from "./interface/tool-activity.mjs";
+import { projectJournalContext } from "./interface/context-events.mjs";
 
 const bad = code => { const e = new Error(code); e.code = code; throw e; };
 const inside = (root, file) => { const r = path.relative(root, file); return r === "" || !r.startsWith(".." + path.sep) && r !== ".." && !path.isAbsolute(r); };
@@ -116,7 +117,7 @@ export class LocalPublicJournal {
     if (!inside(root, file)) bad("public_journal_identity_mismatch");
     return { root, file };
   }
-  async read(session, checkpoint, { turnId, epoch, startAt = null, stateOnly = false, includeInputs = false, includeTools = false }) {
+  async read(session, checkpoint, { turnId, epoch, startAt = null, stateOnly = false, includeInputs = false, includeTools = false, includeContext = false }) {
     const saved = checkpoint?.epoch === epoch ? checkpoint : null;
     const location = await this.locate(session.threadId, saved?.file ?? this.readers.get(session.threadId)?.file);
     const handle = await open(location.file, "r");
@@ -157,7 +158,9 @@ export class LocalPublicJournal {
             for (const c of record.payload.item.content ?? []) if (c.type === "LocalImage" && typeof c.path === "string" && !reader.inputPaths.includes(c.path)) reader.inputPaths.push(c.path);
             if (reader.inputPaths.length > 1024) bad("public_journal_input_image_limit");
           }
-          const event = publicJournalItem(record, session.threadId, { includeInputs, includeTools });
+          const context = includeContext ? projectJournalContext(record, session.threadId) : null;
+          const event = context ? { turnId: context.turnId, item: { type: "contextEvent", event: context }, timestamp: context.timestamp }
+            : publicJournalItem(record, session.threadId, { includeInputs, includeTools });
           if (event?.turnId === reader.bootstrapTurnId) reader.bootstrapReached = true;
           if (!event || end <= reader.bootstrapEnd && reader.bootstrapTurnId && !reader.bootstrapReached || reader.startAt && !(Date.parse(event.timestamp) >= Date.parse(reader.startAt))) return;
           if (event.item.type === "imageView" && reader.inputPaths.some(p => samePath(p, event.item.path))) return;

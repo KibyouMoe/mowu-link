@@ -4,6 +4,9 @@ export const BRIDGE_HELP = `**会话**
 /resume next、/resume prev — 翻页（编号不变）
 /resume search 关键词 — 搜索老会话
 /status — 查看当前连接和任务状态
+/context — 查看原生上下文用量、压缩状态和记忆版本
+/compact — 当前回合结束后，在原会话压缩上下文
+/memory — 查看独立保存的工作记忆
 /new — 新建会话
 /fork — 在当前任务空闲时分叉
 

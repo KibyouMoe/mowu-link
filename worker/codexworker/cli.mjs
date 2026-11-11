@@ -401,6 +401,7 @@ async function main() {
     log("info", "shutdown", { signal });
     await routerClient?.stop().catch(() => {});
     transport.setActivityHandler?.(null);
+    transport.setContextHandler?.(null);
     await business.close().catch(() => {});
     await transport.shutdown().catch(() => {});
     await logFile.chain.catch(() => {});
@@ -424,6 +425,7 @@ async function main() {
       transport.setActivityHandler(activity => manager.observeToolActivity(activity));
     }
   }
+  transport.setContextHandler?.(event => business.manager?.()?.observeContextEvent(event));
   log("info", "manager_started", { url: `http://${host}:${port}` });
 
   // ---- router integration --------------------------------------------------

@@ -146,3 +146,40 @@ test("CLI wires native tool notifications into the durable public progress journ
   assert.equal(progress.length, 1); assert.match(progress[0].text, /echo tool-progress-cli/);
   assert.equal(JSON.parse(await readFile(f.sessionPath, "utf8")).threadId, "original-thread");
 });
+
+test("CLI native compaction and token events preserve the original thread and independent checkpoint", {timeout:15000},async t=>{
+ const f=await setup(t),binary=path.join(f.root,"engine.mjs"),source=await readFile(binary,"utf8");
+ const injection=[
+  '  if (request.method === "thread/compact/start") {',
+  '    const threadId=request.params.threadId, turnId="native-compact-turn";',
+  '    for (const method of ["item/started","item/completed"]) process.stdout.write(JSON.stringify({method,params:{threadId,turnId,item:{id:"native-compact-item",type:"contextCompaction"}}})+"\\n");',
+  '    process.stdout.write(JSON.stringify({method:"thread/tokenUsage/updated",params:{threadId,turnId,tokenUsage:{last:{inputTokens:50,totalTokens:60},total:{totalTokens:5000},modelContextWindow:10000}}})+"\\n");',
+  '    process.stdout.write(JSON.stringify({id:request.id,result:{}})+"\\n");return;',
+  '  }',
+ ].join("\n");
+ await writeFile(binary,source.replace("  let result = {};",injection+"\n  let result = {};"));
+ const child=f.start();await f.ready(child);
+ const cfg=JSON.parse(await readFile(path.join(f.root,"config.json"),"utf8"));
+ const token=(await readFile(path.join(f.root,"token"),"utf8")).trim(),headers={authorization:"Bearer "+token,"content-type":"application/json"};
+ const base="http://127.0.0.1:"+cfg.port;
+ const saved=await fetch(base+"/manager/sessions/original-thread/memory",{method:"POST",headers,body:JSON.stringify({expectedRevision:0,objective:"checkpoint-survives-compact"})});
+ assert.equal(saved.status,200);
+ const {randomUUID}=await import("node:crypto");
+ const queued=await fetch(base+"/manager/sessions/original-thread/compact",{method:"POST",headers,body:JSON.stringify({messageId:randomUUID()})});
+ assert.equal(queued.status,200);
+ let view;
+ for(let i=0;i<120;i++){
+  view=await(await fetch(base+"/manager/sessions/original-thread/context",{headers})).json();
+  if(view.context.compaction?.status==="completed"&&view.context.usage?.contextTokens===60)break;
+  await new Promise(resolve=>setTimeout(resolve,25));
+ }
+ assert.equal(view.context.compaction.status,"completed");assert.equal(view.context.compactions,1);
+ assert.equal(view.context.usage.contextTokens,60);assert.equal(view.context.usage.lifetimeTokens,5000);
+ assert.equal(view.memory.revision,1);
+ const memory=await(await fetch(base+"/manager/sessions/original-thread/memory",{headers})).json();
+ assert.equal(memory.objective,"checkpoint-survives-compact");
+ assert.equal(JSON.parse(await readFile(f.sessionPath,"utf8")).threadId,"original-thread");
+ const calls=(await readFile(f.engineLog,"utf8")).trim().split("\n").map(JSON.parse);
+ assert.equal(calls.filter(c=>c.method==="thread/compact/start").length,1);
+ assert.equal(calls.filter(c=>c.method==="thread/start").length,0);
+});

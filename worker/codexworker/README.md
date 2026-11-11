@@ -408,7 +408,7 @@ Hermes/溪流通信的旧层（入站入口与 `/report`、`/heartbeat` 上报�
 - 原生历史扫描不是逐 token 流，标称扫描周期 1 秒；工具延迟/会话数量会影响实际同步时间。
   当前读取窗口为最近 10 turns、每项最多 20000 字符，超长或窗口跳过不能称为完整无损同步。
 - 不支持逐 turn 覆盖 sandbox/safetyMode；传入非空值明确拒绝，沿用客户端任务本身策略。
-- compact 没有原生映射，返回 501。
+- Desktop tool pipe 未提供 compact 时返回 501；提供 compact_thread 的引擎可在原会话压缩。
 - 远端发消息路径已有 mock 契约测试，未向正在工作的气槽任务发测试消息。
 - 富文本 post 内图片、文件/音视频输入及超限图片的文件出站降级尚未接入。本轮独立原图输入
   和提问显示仍需真实飞书验收，不以 API 接受代替客户端显示或模型看见原图。
@@ -666,3 +666,37 @@ tool_event 留档，不额外刷一条“完成”消息。并行同名工具按
 _progress_terminal_blocks、_progress_emit / _append_progress_repeat_count。
 配置为 all/accumulate，tool_preview_length=0 在普通模式下实际回落到 40 字。
 DSH 只同步共享层；本轮不启用或重启 DSH 的专用引擎。
+
+
+## 长期会话、原生压缩与工作记忆
+
+原生 Codex 的自动压缩沿用模型/引擎默认阈值，不另外设置任务墙钟上限。
+新增 /context 查看最近原生用量、压缩状态和工作记忆版本；/compact 保存压缩请求，
+等当前回合结束并在写锁内重新读取真实空闲状态后，调用 compact_thread →
+thread/compact/start。RPC {} 只表示接受，只有真实 contextCompaction 完成事件才记为完成。
+当前引擎未提供 compact_thread 时明确返回 501，不以新建/替换会话冒充压缩。
+
+/memory 查看当前会话的独立工作记忆。认证 API：
+GET /manager/sessions/<id>/context；GET/POST /manager/sessions/<id>/memory。
+更新必须携带 expectedRevision，以及 objective/currentState/constraints/decisions/
+nextSteps/references 中的变更字段；陈旧版本返回 409。每份记忆最多 12,000 字符，
+原子保存，旧版本留档。记忆只存公开任务事实，不存模型内部推理、原始工具输出或授权凭据。
+摘要中的历史约束不构成新授权；当前消息和项目规则始终优先。
+
+工作记忆保存在 stateDir/work-memory，按 thread ID 隔离。有版本变化、原生压缩完成
+或进程恢复时，下一条实际模型输入会附上最新记忆；不新开回合、不替换原消息，
+飞书仍只抄送原输入，原生回读通过整条输入的 hash 识别，避免回环。
+相同版本不会每轮重复附加。原生摘要与独立记忆分开，完整公开消息仍在 message-journal。
+
+长期运行时，完成的旧请求回执超过 500 条后分批移到 receipt-archive；
+重复 UUID 从磁盘读取原回执，保持去重和冲突检查。未结束、结果未知、排队或尚未回复的
+请求保留在内存。回执中不再嵌入不断增长的观测缓存。SSE 重放窗口限于 5,000 项/16 MiB，
+完整公开留档不受此限制。压缩后清理观测文本，保留 hash/调用身份/卡片 ID，
+所以不重发旧消息，也不删除原生历史或文件。
+
+协议依据：官方 Codex App Server 文档，以及本机 codex-cli 0.167.0 导出的
+ThreadCompactStartParams / ThreadTokenUsageUpdatedNotification schema。
+原生自动压缩已经存在；本轮补的是控制、可见性、独立工作记忆和运行状态的增长控制。
+
+contextTokens 取自原生 last.totalTokens（最近请求用量），lifetimeTokens 取自 total.totalTokens；不将累计消耗当作上下文窗口占用。
+官方接口文档：https://learn.chatgpt.com/docs/app-server

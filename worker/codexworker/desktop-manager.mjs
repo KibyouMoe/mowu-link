@@ -4,6 +4,7 @@ import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import http from "node:http";
 import { MessageJournal, nativeMessageId } from "./message-journal.mjs";
+import { WorkMemory, ReceiptArchive, memoryPrompt, memoryText, compactAck, shrinkObservationText } from "./continuity.mjs";
 import { addToolToBubble, renderToolBubble, safeToolPreview, TOOL_EDIT_INTERVAL_MS } from "./tool-progress.mjs";
 import { projectToolActivity } from "./interface/tool-activity.mjs";
 import { ProgressWatch, noProgressTimeoutMs, taskDeadline } from "./progress-watch.mjs";
@@ -96,6 +97,8 @@ export class DesktopManager {
     this.nativeProgressPolls = new Map();
     this.taskProgress = new Map();
     this.messageJournal = new MessageJournal(stateDir);
+    this.workMemory = new WorkMemory(stateDir);
+    this.receiptArchive = new ReceiptArchive(stateDir);
     this.publicJournal = new LocalPublicJournal(config.publicJournalRoot ?? path.join(path.dirname(path.dirname(stateDir)), "sessions"));
     this.taskJournal = new LocalPublicJournal(this.publicJournal.root);
     this.taskJournalTails = new Map();
@@ -115,6 +118,107 @@ export class DesktopManager {
     this.publicImageRelay = new PublicImageRelay(this);
   }
 
+
+
+  async contextView(session) {
+    const memory = await this.workMemory.get(session.threadId);
+    return { threadId: session.threadId, alias: session.alias, nativeCompactionAvailable: localHost(session.hostId) && this.tools.some(t => t.name === "compact_thread"),
+      context: clone(session.contextState ?? { compactions: 0 }), memory: { revision: memory.revision, updatedAt: memory.updatedAt ?? null } };
+  }
+
+  async updateWorkMemory(threadId, body) {
+    let value;
+    try { value = await this.workMemory.put(threadId, body); }
+    catch (error) {
+      fail(error.message === "memory_revision_conflict" ? 409 : /^invalid_|too_large/.test(error.message) || error.message === "memory_too_large" ? 400 : 503,
+        error.message, "工作记忆未覆盖；请读取当前版本后再更新。");
+    }
+    await this.emit("memory.notice", { targetThreadId: threadId, source: "worker" },
+      { text: memoryText(value), phase: "final_answer", itemKey: "memory:" + value.revision }, {});
+    return value;
+  }
+
+  async observeContextEvent(event) { return this.serial(() => this.observeContextNow(event)); }
+
+  async observeContextNow(event) {
+    if (!event || this.closed || !this.state.sessions[event.threadId]) return false;
+    const session = this.session(event.threadId), state = session.contextState ??= { compactions: 0 };
+    if (event.kind === "usage") {
+      state.usage = Object.fromEntries(["contextTokens", "inputTokens", "lifetimeTokens", "modelContextWindow"].map(k =>
+        [k, Number.isSafeInteger(event[k]) && event[k] >= 0 ? event[k] : null]));
+      state.usage.observedAt = event.timestamp ?? new Date().toISOString();
+      await this.save(); return true;
+    }
+    if (event.kind === "turn_end") {
+      if (["failed", "interrupted"].includes(event.status) && state.compaction?.turnId === event.turnId &&
+          ["accepted", "in_progress"].includes(state.compaction.status))
+        return this.observeContextNow({ ...event, kind: "compaction", status: "failed", itemId: state.compaction.itemId ?? state.compaction.requestId });
+      return false;
+    }
+    if (event.kind !== "compaction" || !["in_progress", "completed", "failed"].includes(event.status)) return false;
+    const key = event.turnId + "/" + event.itemId, seen = state.seen ??= {};
+    if (seen[key] === event.status || seen[key] === "completed" && event.status === "in_progress") return false;
+    seen[key] = event.status;
+    const prior = state.compaction;
+    const preserveRequest = prior && (prior.status === "requested" || prior.baselineCompactions?.includes(key) ||
+      event.source === "journal" && prior.requestedAt && Date.parse(event.timestamp) < Date.parse(prior.requestedAt));
+    const id = !preserveRequest && prior && ["dispatching", "accepted", "in_progress"].includes(prior.status)
+      ? prior.requestId : event.itemId;
+    const observed = { ...(!preserveRequest ? prior : {}), requestId: id, turnId: event.turnId, itemId: event.itemId,
+      status: event.status, updatedAt: event.timestamp ?? new Date().toISOString() };
+    state.lastObservedCompaction = observed;
+    if (!preserveRequest) state.compaction = observed;
+    if (event.status === "completed") {
+      state.compactions = (state.compactions ?? 0) + 1;
+      session.memoryAppliedRevision = 0;
+      shrinkObservationText(session);
+    }
+    const text = event.status === "completed" ? "上下文压缩完成，继续原会话；工作记忆与完整消息留档保留。"
+      : event.status === "failed" ? "上下文压缩未完成，原会话保留；未自动新建会话。"
+      : "正在压缩会话上下文；主会话保持不变。";
+    await this.emit("context.notice", { targetThreadId: session.threadId, source: "worker" },
+      { text, phase: "commentary", itemKey: "compact:" + id, complete: true }, { turnId: event.turnId });
+    return true;
+  }
+
+  compacting(session) { return ["dispatching", "accepted", "in_progress"].includes(session.contextState?.compaction?.status); }
+
+  async requestCompaction(request) {
+    const session = this.session(request.targetThreadId);
+    if (!localHost(session.hostId) || !this.tools.some(t => t.name === "compact_thread"))
+      fail(501, "capability_unavailable", "当前引擎没有原生压缩接口；未新建或替换会话。");
+    const state = session.contextState ??= { compactions: 0 };
+    if (!["requested", "dispatching", "accepted", "in_progress"].includes(state.compaction?.status)) {
+      await this.workMemory.get(session.threadId); // Validate the independent checkpoint first.
+      state.compaction = { status: "requested", requestId: request.messageId, requestedAt: new Date().toISOString() };
+      await this.save();
+    }
+    return { action: "compaction_requested", threadId: session.threadId, context: clone(state),
+      text: state.compaction.status === "requested" ? "压缩请求已保存；当前回合结束后在原会话执行，待真实完成事件确认结果。" : "原生压缩已在进行；等待真实完成事件确认，未重复提交。" };
+  }
+
+  async processCompaction(session, snapshot) {
+    const op = session.contextState?.compaction;
+    if (op?.status !== "requested" || activeTurn(snapshot) || session.pendingInputs?.length) return false;
+    // The poll's snapshot may predate a newly accepted message. Re-read while
+    // holding the writer lock before requesting a native context operation.
+    const fresh = await this.call("read_thread", { threadId: session.threadId, hostId: session.hostId,
+      turnLimit: 1, includeOutputs: false, maxOutputCharsPerItem: 1 });
+    if (activeTurn(fresh)) return false;
+    op.baselineCompactions = [...new Set([ ...Object.keys(session.contextState.seen ?? {}),
+      ...(fresh.turns ?? []).flatMap(t => (t.items ?? []).filter(i => ["contextCompaction", "ContextCompaction"].includes(i.type)).map(i => t.id + "/" + i.id)) ])];
+    op.status = "dispatching"; await this.save();
+    try {
+      await this.call("compact_thread", { threadId: session.threadId });
+      op.status = "accepted";
+    } catch {
+      op.status = "unknown"; op.updatedAt = new Date().toISOString();
+      await this.emit("context.notice", { targetThreadId: session.threadId, source: "worker" },
+        { text: "压缩请求结果尚未确认；原会话和工作记忆保留，未自动重复提交。",
+          phase: "commentary", itemKey: "compact:" + op.requestId, complete: true });
+    }
+    await this.save(); return true;
+  }
 
   get toolProgressEnabled() { return this.transcriptEnabled && this.config.feishu?.toolProgressEnabled === true; }
 
@@ -235,7 +339,7 @@ export class DesktopManager {
   async archiveConversation(event, request) {
     if (!this.transcriptEnabled) return null;
     const input = ["message.accepted", "message.observed"].includes(event.type);
-    const output = ["item.delta", "item.completed", "message.reply", "tool.progress", "tool.activity"].includes(event.type);
+    const output = ["item.delta", "item.completed", "message.reply", "tool.progress", "tool.activity", "context.notice", "memory.notice"].includes(event.type);
     if (!input && !output) return null;
     if (output && event.payload.phase && !["commentary", "final", "final_answer"].includes(event.payload.phase)) return null;
     const text = input ? request.text ?? event.payload.text : event.payload.snapshot ?? event.payload.text;
@@ -247,12 +351,12 @@ export class DesktopManager {
     const source = received ? "feishu" : input
       ? ["router", "subscription", "cli", "desktop", "native"].includes(origin) ? origin
         : origin === "desktop-native-composer" ? "native" : request.source === "hermes" ? "hermes" : "api"
-      : event.type.startsWith("tool.") ? "tool" : "assistant";
-    const progress = event.type === "tool.progress", toolEvent = event.type === "tool.activity";
+      : event.type.startsWith("tool.") ? "tool" : ["context.notice", "memory.notice"].includes(event.type) ? "worker" : "assistant";
+    const progress = event.type === "tool.progress", toolEvent = event.type === "tool.activity", systemEvent = ["context.notice", "memory.notice"].includes(event.type);
     if (output && !progress && !toolEvent) this.flushToolBubble(this.session(threadId));
     const itemKey = event.payload.itemKey ?? event.messageId ?? String(event.seq);
     const logicalId = input ? "input:" + event.messageId : "output:" + threadId + ":" + itemKey;
-    const mirror = !toolEvent && (progress || input || event.type === "message.reply" || event.type === "item.completed" || this.config.feishu.streamEnabled !== false);
+    const mirror = !toolEvent && (systemEvent || progress || input || event.type === "message.reply" || event.type === "item.completed" || this.config.feishu.streamEnabled !== false);
     const complete = event.payload.complete ?? event.type !== "item.delta";
     const record = await this.messageJournal.record({
       seq: event.seq, logicalId, previousId: this.state.latestTranscript?.[logicalId], direction: input ? "input" : "output", source, threadId,
@@ -260,7 +364,7 @@ export class DesktopManager {
       taskId: /^\[router (t-[^\]\s]+)\]/m.exec(text)?.[1] ?? null,
       text, phase: input ? "input" : event.payload.phase ?? "final_answer", timestamp: event.timestamp,
       mirror, complete, historyLimited: event.payload.historyLimited,
-      kind: progress ? "tool_progress" : toolEvent ? "tool_event" : "text", tool: event.payload.activity,
+      kind: systemEvent ? "system_event" : progress ? "tool_progress" : toolEvent ? "tool_event" : "text", tool: event.payload.activity,
     });
     event.transcriptId = record.id;
     const latest = this.state.latestTranscript ??= {};
@@ -272,8 +376,8 @@ export class DesktopManager {
     } else if (mirror) {
       const entries = this.enqueuePublicText(this.session(threadId), event.turnId, input ? logicalId : itemKey,
         text, this.state.selectionEpoch, input || record.phase !== "commentary", event.payload.messageIds ?? [], {
-          input, complete, progress, transcriptId: record.id, historyLimited: record.historyLimited, deferDrain: true,
-          title: input ? this.inputMirrorTitle(source) : progress ? this.config.bridgeName + "-工具" : undefined });
+          input: input || systemEvent, complete, progress, transcriptId: record.id, historyLimited: record.historyLimited, deferDrain: true,
+          title: input ? this.inputMirrorTitle(source) : progress ? this.config.bridgeName + "-工具" : systemEvent ? this.config.bridgeName + "-会话" : undefined });
       await this.messageJournal.plan(record.id, entries.map(e => e.uuid));
       for (const entry of entries) if (["sent", "unknown"].includes(entry.status))
         await this.messageJournal.delivered(record.id, entry.uuid, entry.status, entry.feishuMessageId, entries.length);
@@ -305,9 +409,9 @@ export class DesktopManager {
       const session = this.session(record.threadId), input = record.direction === "input";
       const key = input ? record.logicalId : record.logicalId.slice(("output:" + record.threadId + ":").length);
       const entries = this.enqueuePublicText(session, record.turnId, key, record.text, this.state.selectionEpoch,
-        record.phase !== "commentary", [], { input, complete: record.complete, historyLimited: record.historyLimited, deferDrain: true, transcriptId: record.id,
+        record.phase !== "commentary", [], { input: input || record.kind === "system_event", complete: record.complete, historyLimited: record.historyLimited, deferDrain: true, transcriptId: record.id,
           progress: record.kind === "tool_progress",
-          title: input ? this.inputMirrorTitle(record.source) : record.kind === "tool_progress" ? this.config.bridgeName + "-工具" : undefined });
+          title: input ? this.inputMirrorTitle(record.source) : record.kind === "tool_progress" ? this.config.bridgeName + "-工具" : record.kind === "system_event" ? this.config.bridgeName + "-会话" : undefined });
       await this.messageJournal.plan(record.id, entries.map(e => e.uuid));
       for (const entry of entries) {
         if (entry.status === "sent" && entry.feishuMessageId)
@@ -513,6 +617,11 @@ export class DesktopManager {
     if (this.transcriptEnabled) this.state.seq = Math.max(this.state.seq ?? 0, await this.messageJournal.recover());
     this.state.selectionEpoch ??= 0; this.state.autoImages ??= {};
     this.migrateTranscript();
+    for (const session of Object.values(this.state.sessions)) {
+      session.memoryAppliedRevision = 0;
+      if (["dispatching", "accepted", "in_progress"].includes(session.contextState?.compaction?.status))
+        session.contextState.compaction.status = "unknown";
+    }
     if (this.toolProgressEnabled) for (const session of Object.values(this.state.sessions))
       session.toolProgressStartedAt ??= new Date().toISOString();
     for (const entry of Object.values(this.state.publicTextOutbox ?? {})) {
@@ -708,6 +817,7 @@ export class DesktopManager {
   }
 
   async save() {
+    await this.receiptArchive.trim(this.state, this.config.runtimeReceiptLimit ?? 500);
     const temp = `${this.statePath}.${randomUUID()}.tmp`;
     await writeFile(temp, `${JSON.stringify(this.state)}\n`, { encoding: "utf8", mode: 0o600 });
     for (let attempt = 0; ; attempt++) {
@@ -744,6 +854,7 @@ export class DesktopManager {
         remoteViaDesktopDevices: true, feishuImageOutput: Boolean(this.businessRuntime.module && this.notifier?.enabled),
         feishuOutputRouting: this.transcriptEnabled ? "managed-thread-transcript" : "selected-thread-only",
         persistentConversationTranscript: this.transcriptEnabled,
+        workMemory: "revisioned-checkpoint", nativeAutoCompaction: "engine-defaults",
         toolProgress: { enabled: this.toolProgressEnabled, source: this.toolActivitySource ?? (this.hasDesktopJournal ? "journal-or-snapshot" : "snapshot"),
           grouping: "accumulate", editIntervalMs: TOOL_EDIT_INTERVAL_MS, previewChars: 40 },
         feishuReconnectPolicy: "bounded-handshake-heartbeat",
@@ -755,7 +866,7 @@ export class DesktopManager {
           active: this.businessRuntime.status().bootstrapVersion === "0.2.23" &&
             this.businessRuntime.status().desktopLifetimeLaunchMode === "windows-desktop-parent" },
         businessHotReload: this.businessRuntime.status(),
-        stop: false, compact: false, perTurnSafetyOverride: false, tokenStreaming: false } };
+        stop: false, compact: this.tools.some(t => t.name === "compact_thread"), perTurnSafetyOverride: false, tokenStreaming: false } };
   }
 
   async call(name, args, deliveryContext) {
@@ -910,7 +1021,7 @@ export class DesktopManager {
     const retained = this.state.events.filter(e => now - Date.parse(e.timestamp) <= (e.type === "item.delta" ? 3600000 : 30 * 86400000));
     // A single persisted journal/registry snapshot has a hard 256MiB limit.
     let bytes = Buffer.byteLength(JSON.stringify(retained));
-    while (bytes > 256 * 1024 * 1024 && retained.length) bytes -= Buffer.byteLength(JSON.stringify(retained.shift())) + 1;
+    while ((bytes > 16 * 1024 * 1024 || retained.length > 5000) && retained.length) bytes -= Buffer.byteLength(JSON.stringify(retained.shift())) + 1;
     if (retained.length !== this.state.events.length) {
       const retainedSeqs = new Set(retained.map(e => e.seq));
       for (const old of this.state.events) if (!retainedSeqs.has(old.seq)) this.state.replayFloor = Math.max(this.state.replayFloor, old.seq);
@@ -947,7 +1058,7 @@ export class DesktopManager {
     this.validate(request);
     return this.serial(async () => {
       const fingerprint = requestFingerprint(request);
-      const old = this.state.receipts[request.messageId];
+      const old = this.state.receipts[request.messageId] ?? await this.receiptArchive.get(request.messageId);
       if (old) {
         // Existing receipts used insertion-order hashes; compare their saved JSON
         // semantically so retries remain valid across upgrades and key reordering.
@@ -964,7 +1075,7 @@ export class DesktopManager {
         accepted = true;
         const result = await operation();
         receipt.pending = false;
-        receipt.response = { accepted: true, duplicate: false, messageId: request.messageId, eventSeq: event.seq, ...result };
+        receipt.response = { accepted: true, duplicate: false, messageId: request.messageId, eventSeq: event.seq, ...compactAck(result) };
         await this.save(); return clone(receipt.response);
       } catch (error) {
         const mapped = error instanceof BridgeError ? error : new BridgeError(502, "codex_app_server_error", "Desktop operation failed; inspect the native task before retrying.");
@@ -1071,6 +1182,11 @@ export class DesktopManager {
       const normalized = { ...request, delivery, targetThreadId: session.threadId, text: text.startsWith("//") ? text.slice(1) : transformed ? text : request.text,
         sourceTurnGuard: requireSourceTurnId ?? null,
         ...(request.source === "trainer" ? { trainerActivityAt: new Date().toISOString() } : {}) };
+      if (this.compacting(session)) {
+        session.queue.push(normalized);
+        await this.emit("message.queued", normalized, { reason: "native_compaction", position: session.queue.length });
+        return { action: "message_queued", session: clone(session) };
+      }
       const selectedAtStart = session.threadId === this.state.selectedThreadId, epoch = this.state.selectionEpoch;
       // Queue acceptance needs no guess about idle state. Only the scanner with
       // a fresh lifecycle observation may dispatch it.
@@ -1130,7 +1246,9 @@ export class DesktopManager {
     const label = this.config.messageSourceLabels === false ? null
       : request.source === "trainer" && this.state.feishuReceipts[request.messageId] ? "飞书"
       : request.source === "hermes" && !["router", "subscription"].includes(request.origin) ? "超级溪流" : null;
-    const prompt = label ? `${label}：${request.text}` : request.text;
+    const checkpoint = await this.workMemory.get(session.threadId);
+    const prefix = checkpoint.revision && session.memoryAppliedRevision !== checkpoint.revision ? memoryPrompt(checkpoint) : "";
+    const prompt = prefix + (label ? `${label}：${request.text}` : request.text);
     const pending = { messageId: request.messageId, inputHash: digest(prompt), dispatchedAt: Date.now(),
       sourceThreadId, kind: active ? "steer" : snapshot.deliveryContract ? "followup" : "start", expectedTurnId: active?.id ?? null,
       beforeItemKeys: publicItems(snapshot).map(item => item.key),
@@ -1176,6 +1294,7 @@ export class DesktopManager {
       if (receipt) receipt.nativeDispatch.status = "unknown";
       await this.save(); throw error;
     }
+    if (checkpoint.revision) session.memoryAppliedRevision = checkpoint.revision;
     session.state = "running"; pending.dispatchedAt = Date.now();
     if (receipt) {
       receipt.nativeDispatch.status = "accepted";
@@ -1300,8 +1419,16 @@ export class DesktopManager {
     const [rawCommand, ...parts] = text.split(/\s+/);
     const command = rawCommand === "/clear" ? "/new" : rawCommand;
     if (["/help", "/start", "/commands"].includes(command)) return { action: "help", text: BRIDGE_HELP };
-    if (["/new", "/fork", "/stop", "/list", "/status"].includes(command) && parts.length) {
+    if (["/new", "/fork", "/stop", "/list", "/status", "/compact", "/memory", "/context"].includes(command) && parts.length) {
       fail(422, "command_arguments_not_supported", `${command} does not accept arguments.`);
+    }
+    if (command === "/compact") return this.requestCompaction(request);
+    if (command === "/memory") return { action: "work_memory", text: memoryText(await this.workMemory.get(this.session(request.targetThreadId).threadId)) };
+    if (command === "/context") {
+      const view = await this.contextView(this.session(request.targetThreadId)), u = view.context.usage;
+      return { action: "context_status", ...view, text: "原会话：" + view.alias + "\n最近原生用量：" +
+        (u?.contextTokens == null ? "等待原生用量事件" : u.contextTokens + "；模型窗口：" + (u.modelContextWindow ?? "原生默认")) +
+        "\n压缩：" + (view.context.compaction?.status ?? "原生自动管理") + "\n工作记忆版本：" + view.memory.revision };
     }
     if (command === "/list") return { action: "sessions_listed", sessions: Object.values(this.state.sessions).map(clone) };
     if (command === "/resume") {
@@ -1490,7 +1617,7 @@ export class DesktopManager {
                 await this.emit("message.observed", { targetThreadId: id, messageId, source: "trainer" }, { text: item.text, origin: "desktop-native-composer", alreadyDispatched: true }, { turnId: item.turnId });
               }
             } else if (item.kind === "assistant") {
-              const delta = old && item.text.startsWith(old.text) ? item.text.slice(old.text.length) : item.text;
+              const delta = typeof old?.text === "string" && item.text.startsWith(old.text) ? item.text.slice(old.text.length) : item.text;
               const ids = session.turnMessages[item.turnId] ?? [];
               const observed = await this.emit(item.final ? "item.completed" : "item.delta", { targetThreadId: id, source: "codex", messageId: ids[0] ?? null },
                 { text: delta, snapshot: item.text, itemKey: item.key, phase: item.final ? "final_answer" : "commentary", messageIds: ids }, { turnId: item.turnId });
@@ -1523,10 +1650,11 @@ export class DesktopManager {
             session.pendingInputs = session.pendingInputs.filter(p => p !== pending);
             if (!pending.unknownOutcome) await this.emit("message.rejected", { targetThreadId: id, messageId: pending.messageId }, { error: "no_progress_timeout", detail: "无进展超时：已接受的输入持续没有新事件，且无法确认对应 turn；请检查原会话，不自动重发。", retryable: false });
           }
-          const readySteer = session.steerQueue?.length && (!active || (this.config.nativeBusyDeliveryVerified && localHost(session.hostId)));
+          await this.processCompaction(session, snapshot);
+          const readySteer = !this.compacting(session) && session.steerQueue?.length && (!active || (this.config.nativeBusyDeliveryVerified && localHost(session.hostId)));
           if (!this.handoffPaused && readySteer) {
             while (session.steerQueue.length && !this.handoffPaused) await this.dispatchQueued(session, session.steerQueue.shift(), snapshot);
-          } else if (!this.handoffPaused && !active && !session.pendingInputs?.length && session.queue.length) {
+          } else if (!this.compacting(session) && !this.handoffPaused && !active && !session.pendingInputs?.length && session.queue.length) {
             await this.dispatchQueued(session, session.queue.shift(), snapshot);
           }
           session.relayStatus = { ...session.relayStatus, mode: "full-history", lastSuccessAt: new Date().toISOString(), lastError: null, failures: 0 };
@@ -1556,11 +1684,12 @@ export class DesktopManager {
     if (!progress) throw new Error("public_journal_status_unavailable");
     const batch = await this.publicJournal.read(session, session.publicJournalCheckpoint,
       { turnId: progress.turnId, epoch: this.transcriptEpoch(session, epoch), startAt: session.publicJournalStartAt,
-        includeInputs: this.transcriptEnabled, includeTools: this.toolProgressEnabled });
+        includeInputs: this.transcriptEnabled, includeTools: this.toolProgressEnabled, includeContext: true });
     this.observeTaskProgress(id, { progress, checkpoint: batch.checkpoint });
     await this.serial(async () => {
       if (this.closed || this.handoffPaused || !this.relaySession(id, epoch)) return;
       for (const { turnId, item, timestamp } of batch.events) {
+        if (item.type === "contextEvent") { await this.observeContextNow(item.event); continue; }
         if (item.type === "toolActivity") { await this.observeToolActivityNow(item.activity); continue; }
         if (item.type === "userMessage" && this.transcriptEnabled) {
           const key = `${turnId}/${item.id}`;
@@ -1578,7 +1707,7 @@ export class DesktopManager {
         const key = `${turnId}/${item.id}`, old = session.seen[key];
         const final = ["final", "final_answer"].includes(item.phase);
         if (old?.hash === digest(item.text) && (old.final == null || old.final === final)) continue;
-        const delta = old && item.text.startsWith(old.text) ? item.text.slice(old.text.length) : item.text;
+        const delta = typeof old?.text === "string" && item.text.startsWith(old.text) ? item.text.slice(old.text.length) : item.text;
         const observed = await this.emit(final ? "item.completed" : "item.delta", { targetThreadId: id, source: "codex" },
           { text: delta, snapshot: item.text, itemKey: key, phase: item.phase, readSource: "desktop-public-journal",
             complete: true, messageIds: this.typingInputsForOutput(session, timestamp) }, { turnId });
@@ -1597,9 +1726,10 @@ export class DesktopManager {
       session.relayStatus = { ...session.relayStatus, mode: "desktop-public-journal", journalError: null,
         lastSuccessAt: new Date().toISOString(), lastError: unknownText ? "feishu_text_send_unconfirmed" : unknownImage ? "feishu_public_send_unconfirmed" : null, failures: 0,
         journal: { caughtUp: batch.caughtUp, offset: batch.checkpoint.offset, pendingBytes: batch.pendingBytes, bytesRead: batch.bytesRead } };
-      const readySteer = session.steerQueue?.length && (!session.activeTurnId || this.config.nativeBusyDeliveryVerified);
+      await this.processCompaction(session, observation);
+      const readySteer = !this.compacting(session) && session.steerQueue?.length && (!session.activeTurnId || this.config.nativeBusyDeliveryVerified);
       if (readySteer && !this.handoffPaused) await this.dispatchQueued(session, session.steerQueue.shift(), observation);
-      else if (!session.activeTurnId && session.queue.length && !this.handoffPaused) await this.dispatchQueued(session, session.queue.shift(), observation);
+      else if (!this.compacting(session) && !session.activeTurnId && session.queue.length && !this.handoffPaused) await this.dispatchQueued(session, session.queue.shift(), observation);
       await this.save(); // Public cursor + UUID outbox, before any network write.
     });
     if (!this.hasPendingPublicImages()) await this.drainPublicTexts();
@@ -1889,7 +2019,7 @@ export class DesktopManager {
       const item = progress.message, key = item && `${item.turnId}/${item.id}`;
       if (item?.text.trim() && (session.seen[key]?.hash !== digest(item.text) || session.seen[key]?.final != null && session.seen[key].final !== item.final)) {
         const old = session.seen[key];
-        const delta = old && item.text.startsWith(old.text) ? item.text.slice(old.text.length) : item.text;
+        const delta = typeof old?.text === "string" && item.text.startsWith(old.text) ? item.text.slice(old.text.length) : item.text;
         const ids = session.turnMessages[item.turnId] ?? [];
         const observed = await this.emit(item.final ? "item.completed" : "item.delta", { targetThreadId: id, source: "codex", messageId: ids[0] ?? null },
           { text: delta, snapshot: item.text, itemKey: key, phase: item.final ? "final_answer" : "commentary", messageIds: ids,
@@ -1975,7 +2105,8 @@ export class DesktopManager {
         const hex = createHash("sha256").update(`feishu:${event.message_id}`).digest("hex");
         const id = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
         const persisted = JSON.parse(await readFile(this.statePath, "utf8"));
-        if (!persisted.receipts?.[id]?.error && !persisted.receipts?.[id]?.response) return;
+        const receipt = persisted.receipts?.[id] ?? await this.receiptArchive.get(id);
+        if (!receipt?.error && !receipt?.response) return;
       }
       return this.inboxSerial(async () => {
         delete this.inbox.entries[event.message_id]; await this.saveInbox();
@@ -2083,7 +2214,7 @@ export class DesktopManager {
       // admitted HTTP requests still finish and remain counted until then.
       const snapshot = req.method === "GET" && (["/health", "/bridge/runtime", "/bridge/integrations",
         "/manager/events", "/manager/transcript", "/manager/sessions", "/threads"].includes(url.pathname) ||
-        /^\/manager\/sessions\/[^/]+$/.test(url.pathname));
+        /^\/manager\/sessions\/[^/]+(?:\/(?:context|memory))?$/.test(url.pathname));
       const reload = req.method === "POST" && url.pathname === "/bridge/runtime/reload";
       if (this.handoffPaused && !snapshot && !reload) {
         fail(503, "bridge_reloading", "Business handoff in progress; this request was not dispatched. Retry with the same messageId.", true);
@@ -2164,6 +2295,15 @@ export class DesktopManager {
           ...(result.sessions ? { sessions: result.sessions } : {}),
           ...(result.resumeList ? { currentSession: result.currentSession, resumePage: result.resumePage, resumeQuery: result.resumeQuery } : {}) });
       }
+      const continuityRoute = url.pathname.match(/^\/manager\/sessions\/([^/]+)\/(memory|context)$/);
+      if (continuityRoute) {
+        const session = this.session(decodeURIComponent(continuityRoute[1]));
+        if (req.method === "GET") return json(res, 200, continuityRoute[2] === "memory"
+          ? await this.workMemory.get(session.threadId) : await this.contextView(session));
+        if (req.method === "POST" && continuityRoute[2] === "memory")
+          return json(res, 200, await this.serial(() => this.updateWorkMemory(session.threadId, body)));
+        fail(405, "method_not_allowed", "Use GET or POST memory.");
+      }
       const match = url.pathname.match(/^\/(manager\/sessions|threads)\/([^/]+)(?:\/(select|last-turn|resume|release|unsubscribe|stop|compact))?$/);
       if (match) {
         const [, surface, encoded, operation] = match; const id = decodeURIComponent(encoded); const session = this.session(id);
@@ -2190,7 +2330,7 @@ export class DesktopManager {
           const result = await this.message(legacyRequest({ text: "/stop", targetThreadId: id }));
           return json(res, 200, { idle: result.action === "turn_already_idle" });
         }
-        if (operation === "compact") fail(501, "capability_unavailable", "The Desktop native tool pipe does not expose compact; use the client's native control.");
+        if (req.method === "POST" && operation === "compact") return json(res, 200, await this.message(legacyRequest({ ...body, text: "/compact", targetThreadId: id, source: "trainer" })));
       }
       fail(404, "not_found", "Unknown route.");
     } catch (error) {

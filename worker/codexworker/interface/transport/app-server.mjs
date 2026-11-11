@@ -24,6 +24,7 @@
 // 参考实现：./desktop-pipe.mjs；选择器：./index.mjs。
 import { spawn } from "node:child_process";
 import { projectToolActivity } from "../tool-activity.mjs";
+import { projectContextEvent } from "../context-events.mjs";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -153,6 +154,7 @@ export function approvalRequestSummary(method, params = {}, item = null) {
 }
 
 const TOOL_DEFINITIONS = [
+  { name: "compact_thread", namespace: "app-server", description: "Request native context compaction on the same thread.", inputSchema: { type: "object", properties: { threadId: { type: "string" } }, required: ["threadId"] } },
   {
     name: "create_thread",
     namespace: "app-server",
@@ -399,9 +401,12 @@ class AppServerClient {
     // 没接（或接的过程中出错）时一律显式拒绝，绝不让 turn 挂着。
     this.approvalHandler = null;
     this.activityHandler = null;
+    this.contextHandler = null;
     this.serverRequests = new Set();
     this.logger = defaultLogger();
   }
+
+  setContextHandler(handler) { this.contextHandler = typeof handler === "function" ? handler : null; }
 
   setActivityHandler(handler) { this.activityHandler = typeof handler === "function" ? handler : null; }
 
@@ -430,6 +435,7 @@ class AppServerClient {
 
   async execute(toolName, args, timeoutMs) {
     switch (toolName) {
+      case "compact_thread": return this.compactThread(args, timeoutMs);
       case "create_thread": return this.createThread(args, timeoutMs);
       case "fork_thread": return this.forkThread(args, timeoutMs);
       case "list_threads": return this.listThreads(args, timeoutMs);
@@ -733,6 +739,11 @@ class AppServerClient {
   // ---- 通知与线程态 -------------------------------------------------------
 
   handleNotification(method, params) {
+    const event = projectContextEvent(method, params);
+    if (event && this.contextHandler) {
+      try { Promise.resolve(this.contextHandler(event)).catch(() => this.log("warn", "context_observer_failed")); }
+      catch { this.log("warn", "context_observer_failed"); }
+    }
     const threadId = typeof params.threadId === "string" ? params.threadId : null;
     const progressTurnId = params.turnId ?? params.turn?.id;
     if (threadId && progressTurnId && /^(item|turn)\//.test(method)
@@ -1092,6 +1103,14 @@ class AppServerClient {
     return { turns, source: "thread/items/list", nextCursor: result?.nextCursor ?? null };
   }
 
+  async compactThread(args, timeoutMs) {
+    const threadId = requireThreadId("compact_thread", args);
+    await this.ensureStarted();
+    await this.ensureThreadLoaded(threadId, args, timeoutMs);
+    await this.request("thread/compact/start", { threadId }, this.controlTimeout(timeoutMs));
+    return { threadId, accepted: true, status: "accepted" };
+  }
+
   async sendMessage(args, timeoutMs) {
     const threadId = requireThreadId("send_message_to_thread", args);
     const prompt = stringArg(args.prompt) ?? stringArg(args.text) ?? stringArg(args.message);
@@ -1222,6 +1241,7 @@ const client = new AppServerClient();
 // 审批回调的注入点：cli.mjs 在 router client 建好后调用。返回 handler 的
 // 统一口径 { decision: "approved"|"denied", note?, approvalId? }。
 export function setActivityHandler(handler) { client.setActivityHandler(handler); }
+export function setContextHandler(handler) { client.setContextHandler(handler); }
 
 export function setApprovalHandler(handler) {
   client.setApprovalHandler(handler);

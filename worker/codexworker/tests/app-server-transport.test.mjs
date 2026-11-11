@@ -17,6 +17,7 @@ const transport = resolveNativeTransport();
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const invocation = { threadId: "test-harness", turnId: "test-harness-turn", callId: "test-harness-call" };
 const EXPECTED_TOOLS = [
+  "compact_thread",
   "create_thread",
   "fork_thread",
   "list_projects",
@@ -44,12 +45,12 @@ after(async () => {
   await appServer.shutdown();
 });
 
-test("app-server transport exposes the nine desktop tools", async () => {
+test("app-server transport exposes ten native tools", async () => {
   assert.equal(transport.name, "app-server");
   assert.equal(appServer.available(), true, appServer.unavailableReason());
   const tools = await transport.listTools();
   const names = tools.map((tool) => tool.name).sort();
-  assert.equal(tools.length, 9);
+  assert.equal(tools.length, 10);
   assert.deepEqual(names, [...EXPECTED_TOOLS].sort());
   for (const tool of tools) {
     assert.equal(tool.namespace, "app-server");
