@@ -7,7 +7,7 @@ import { ProgressWatch, noProgressTimeoutMs, taskDeadline } from "./progress-wat
 import net from "node:net";
 import path from "node:path";
 import os from "node:os";
-import { FeishuNotifier, FeishuStreamBeat, FeishuWebsocketClient } from "./feishu.mjs";
+import { FeishuNotifier, FeishuWebsocketClient } from "./feishu.mjs";
 import { localHost, nativeSendSource } from "./interface/native-dispatch.mjs";
 import { resolveNativeCapabilities } from "./interface/transport/index.mjs";
 import { QuestionRelay, QuestionRelayError } from "./question-relay.mjs";
@@ -24,6 +24,7 @@ import { BRIDGE_HELP, goalPrompt } from "./feishu-commands.mjs";
 import { readLocalResumeCatalog } from "./local-resume-catalog.mjs";
 import { routerStatus } from "./router-client.mjs";
 import { resumePage, resumeListText } from "./resume-list.mjs";
+import { hermesChunks } from "./hermes-feishu-format.mjs";
 import { isAbandonedText, isUnconfirmedText } from "./text-receipt-review.mjs";
 
 export const PROTOCOL = "1.1.1-draft";
@@ -102,7 +103,7 @@ export class DesktopManager {
     this.handoff = { phase: "running", error: null, startedAt: null };
     this.inboxPath = path.join(stateDir, "feishu-inbox.json"); this.inbox = { version: 1, entries: {} };
     this.inboxTail = Promise.resolve(); this.inboxRunning = new Set();
-    this.tools = []; this.notifier = null; this.ws = null; this.feishuBeats = new Map();
+    this.tools = []; this.notifier = null; this.ws = null; this.publicTextTimer = null;
     this.feishuInputs = new Map(); this.feishuReactionTasks = new Map();
     this.questions = new QuestionRelay(this);
     this.onlineAnnouncement = new FeishuOnlineAnnouncement(this);
@@ -248,6 +249,10 @@ export class DesktopManager {
     }
     this.stateLoaded = true;
     this.state.selectionEpoch ??= 0; this.state.autoImages ??= {};
+    for (const entry of Object.values(this.state.publicTextOutbox ?? {})) {
+      // Repeating a PATCH is safe; repeating an unconfirmed create is not.
+      if (entry.stream && entry.status === "dispatching") entry.status = entry.feishuMessageId ? "pending" : "unknown";
+    }
     this.tools = await this.listNativeTools();
     // The transport declares what the engine can actually do; the manager adapts
     // only to those gaps and keeps the Desktop contract everywhere else.
@@ -301,7 +306,7 @@ export class DesktopManager {
     if (f?.appId && f?.appSecret) {
       this.notifier = new FeishuNotifier({ ...f, bridgeName: this.config.bridgeName,
         canSend: ({ threadId }) => !this.closed && (!threadId || threadId === this.state.selectedThreadId) });
-      for (const name of ["sendMessage", "sendQuestionCard", "updateQuestionCard", "downloadImage", "addReaction", "removeReaction", "warmup"]) {
+      for (const name of ["sendMessage", "updateMessage", "sendQuestionCard", "updateQuestionCard", "downloadImage", "addReaction", "removeReaction", "warmup"]) {
         const method = this.notifier[name].bind(this.notifier);
         this.notifier[name] = (...args) => this.track(method(...args));
       }
@@ -715,7 +720,7 @@ export class DesktopManager {
 
   baseline(session, snapshot) {
     this.publicImageRelay.baseline(session, snapshot);
-    session.seen = Object.fromEntries(publicItems(snapshot).map(i => [i.key, { text: i.text, hash: digest(i.text) }]));
+    session.seen = Object.fromEntries(publicItems(snapshot).map(i => [i.key, { text: i.text, hash: digest(i.text), final: i.final }]));
     session.observedTurns = Object.fromEntries((snapshot.turns ?? []).map(t => [t.id, t.status]));
     this.markHistoryBaseline(session, snapshot);
     session.historyWindow = clone(snapshot.nativeHistoryWindow ?? null);
@@ -1152,7 +1157,7 @@ export class DesktopManager {
           }
           for (const item of items) {
             const old = session.seen[item.key];
-            if (old?.hash === digest(item.text)) continue;
+            if (old?.hash === digest(item.text) && (item.kind !== "assistant" || old.final == null || old.final === item.final)) continue;
             const correlation = item.text.match(/^\[Hermes Bridge messageId=([0-9a-f-]+) source=(trainer|hermes)\]\n/i);
             const known = correlation && this.state.receipts[correlation[1]];
             const boundPlain = item.kind === "delegated" && [session.inputMessages?.[item.key]].some(messageId => {
@@ -1186,27 +1191,14 @@ export class DesktopManager {
               const ids = session.turnMessages[item.turnId] ?? [];
               await this.emit(item.final ? "item.completed" : "item.delta", { targetThreadId: id, source: "codex", messageId: ids[0] ?? null },
                 { text: delta, snapshot: item.text, phase: item.final ? "final_answer" : "commentary", messageIds: ids }, { turnId: item.turnId });
-              const inlineMedia = splitPublicMarkdown(item.final ? item.text : delta).some(part => part.type === "image");
-              if (inlineMedia && this.notifier && id === this.state.selectedThreadId) {
-                this.enqueuePublicText(session, item.turnId, item.key, item.final ? item.text : delta, imageBindingEpoch, item.final, [...ids]);
-              } else if (item.final) {
-                if (this.notifier && id === this.state.selectedThreadId) void this.notifier.sendMessage(item.text,
-                  { title: `${this.config.bridgeName}-回复`, threadId: id, chatId: session.feishuChatId })
-                  .catch((error) => console.error(`[bridge] 最终回复发送失败: ${error?.message ?? String(error)}`));
-              } else if (this.notifier && id === this.state.selectedThreadId && this.config.feishu.streamEnabled !== false) {
-                if (!this.feishuBeats.has(id)) this.feishuBeats.set(id, new FeishuStreamBeat(this.notifier,
-                  { threadId: id, chatId: session.feishuChatId, bridgeName: this.config.bridgeName }));
-                const beat = this.feishuBeats.get(id); beat.chatId = session.feishuChatId;
-                const messageIds = [...ids];
-                beat.feedChunk({ type: "text-delta", text: delta });
-                beat.flush(() => this.serial(async () => {
-                  (session.deliveredProgress ??= {})[item.key] = true;
-                  for (const messageId of messageIds) this.finishFeishuInput(messageId);
-                  await this.save();
-                }));
+              if (this.notifier && id === this.state.selectedThreadId
+                  && (item.final || this.config.feishu.streamEnabled !== false)) {
+                this.enqueuePublicText(session, item.turnId, item.key, item.text,
+                  imageBindingEpoch, item.final, [...ids], {
+                    complete: terminal((snapshot.turns ?? []).find(turn => turn.id === item.turnId)?.status) });
               }
             }
-            session.seen[item.key] = { text: item.text, hash: digest(item.text) };
+            session.seen[item.key] = { text: item.text, hash: digest(item.text), final: item.final };
           }
           for (const turn of snapshot.turns ?? []) {
             const ids = session.turnMessages[turn.id] ?? [];
@@ -1236,6 +1228,7 @@ export class DesktopManager {
           session.relayStatus = { ...session.relayStatus, mode: "full-history", lastSuccessAt: new Date().toISOString(), lastError: null, failures: 0 };
           await this.save();
         }); } catch (error) { await this.relayFailed(id, error); }
+        if (!this.hasPendingPublicImages()) await this.drainPublicTexts();
       }
       this.publicImageRelay.kick();
     } finally { this.pollRunning = false; }
@@ -1269,13 +1262,13 @@ export class DesktopManager {
           this.publicImageRelay.observe(session, { turns: [{ id: turnId, items: [item] }] }, epoch); continue;
         }
         const key = `${turnId}/${item.id}`, old = session.seen[key];
-        if (old?.hash === digest(item.text)) continue;
         const final = ["final", "final_answer"].includes(item.phase);
+        if (old?.hash === digest(item.text) && (old.final == null || old.final === final)) continue;
         const delta = old && item.text.startsWith(old.text) ? item.text.slice(old.text.length) : item.text;
-        session.seen[key] = { text: item.text, hash: digest(item.text) };
+        session.seen[key] = { text: item.text, hash: digest(item.text), final };
         if (this.notifier && (final || this.config.feishu.streamEnabled !== false)) {
-          this.enqueuePublicText(session, turnId, key, final ? item.text : delta, epoch, final,
-            this.typingInputsForOutput(session, timestamp));
+          this.enqueuePublicText(session, turnId, key, item.text, epoch, final,
+            this.typingInputsForOutput(session, timestamp), { complete: true });
         }
         await this.emit(final ? "item.completed" : "item.delta", { targetThreadId: id, source: "codex" },
           { text: delta, snapshot: item.text, phase: item.phase, readSource: "desktop-public-journal" }, { turnId });
@@ -1294,6 +1287,7 @@ export class DesktopManager {
       else if (!session.activeTurnId && session.queue.length && !this.handoffPaused) await this.dispatchQueued(session, session.queue.shift(), observation);
       await this.save(); // Public cursor + UUID outbox, before any network write.
     });
+    if (!this.hasPendingPublicImages()) await this.drainPublicTexts();
   }
 
   nextPublicOutputOrder() { return this.state.publicOutputSequence = (this.state.publicOutputSequence ?? 0) + 1; }
@@ -1321,22 +1315,56 @@ export class DesktopManager {
     }
   }
 
-  enqueuePublicText(session, turnId, key, text, epoch, final, messageIds = []) {
-    const inlineSeen = new Set();
-    for (const [index, part] of splitPublicMarkdown(text).entries()) {
+  enqueuePublicText(session, turnId, key, text, epoch, final, messageIds = [], { historyLimited = false, complete = final } = {}) {
+    const inlineSeen = new Set(), entries = [];
+    const parts = historyLimited ? [{ type: "text", text }] : splitPublicMarkdown(text);
+    for (const [index, part] of parts.entries()) {
       if (part.type === "image") {
-        const identity = /^[a-z]:[\\/]/i.test(part.imagePath) ? path.win32.normalize(part.imagePath).toLowerCase() : path.normalize(part.imagePath);
+        const identity = /^[a-z]:[\\\\/]/i.test(part.imagePath) ? path.win32.normalize(part.imagePath).toLowerCase() : path.normalize(part.imagePath);
         if (inlineSeen.has(identity)) continue; inlineSeen.add(identity);
         this.publicImageRelay.observe(session, { turns: [{ id: turnId, items: [{ type: "imageView", id: `${key}:inline:${index}`, path: part.imagePath }] }] }, epoch, { inline: true });
-      } else {
-        const uuid = randomUUID();
-        (this.state.publicTextOutbox ??= {})[uuid] = { uuid, key, part: index, threadId: session.threadId,
-          bindingEpoch: epoch, chatId: session.feishuChatId, text: part.text, order: this.nextPublicOutputOrder(),
-          title: `${this.config.bridgeName}-${final ? "回复" : "输出"}`, messageIds, status: "pending", at: new Date().toISOString() };
+        continue;
+      }
+      for (const [page, body] of hermesChunks(part.text).entries()) {
+        const uuid = digest(["public-text-card", session.threadId, epoch, key, index, page]).slice(0, 32);
+        const title = `${this.config.bridgeName}-${final ? "回复" : "输出"}${historyLimited ? "（历史受限）" : ""}`;
+        const revision = digest([body, title]);
+        const cards = session.publicTextCards ??= {};
+        const card = cards[uuid];
+        const outbox = this.state.publicTextOutbox ??= {};
+        let entry = outbox[uuid];
+        if (isAbandonedText(entry) || card?.abandoned) continue;
+        if (card?.revision === revision && (!entry || entry.status === "sent")) continue;
+        if (entry?.revision === revision) { entry.messageIds = [...new Set([...entry.messageIds, ...messageIds])]; continue; }
+        if (!entry) {
+          entry = outbox[uuid] = { uuid, key, part: index, page, stream: true, threadId: session.threadId,
+            bindingEpoch: epoch, chatId: session.feishuChatId, order: this.nextPublicOutputOrder(),
+            feishuMessageId: card?.messageId ?? null, status: card?.status === "unknown" ? "unknown" : "pending" };
+        }
+        const blockedCreate = (entry.status === "unknown" || entry.status === "canceled" || entry.status === "sent")
+          && !entry.feishuMessageId;
+        Object.assign(entry, { text: body, title, revision, final, complete, historyLimited,
+          messageIds: [...new Set([...(entry.messageIds ?? []), ...messageIds])], at: new Date().toISOString() });
+        if (entry.status !== "dispatching") entry.status = blockedCreate ? "unknown" : "pending";
+        entries.push(entry);
       }
     }
-    // 入队即触发发送。CLI 模式下没有图片中继来 kick，纯文字会永远停在 pending。
     if (!this.closed && !this.handoffPaused) void this.drainPublicTexts();
+    return entries;
+  }
+
+  hasPendingPublicImages() {
+    return this.publicImageRelay.running || Object.values(this.state.autoImages ?? {})
+      .some(entry => entry.status === "pending" || entry.status === "failed" && /unknown/.test(entry.error ?? ""));
+  }
+
+  schedulePublicTexts(delayMs) {
+    if (this.publicTextTimer || this.closed || this.handoffPaused) return;
+    this.publicTextTimer = setTimeout(() => {
+      this.publicTextTimer = null;
+      if (!this.closed && !this.handoffPaused) void this.drainPublicTexts();
+    }, Math.max(1, delayMs));
+    this.publicTextTimer.unref?.();
   }
 
   async drainPublicTexts() {
@@ -1365,8 +1393,20 @@ export class DesktopManager {
           }
           if (next?.image) imageEntry = next.e;
           else if (next?.e.status === "pending") entry = next.e;
-          if (entry) { entry.status = "dispatching"; await this.save(); }
-          else if (settled) await this.save();
+          if (entry) {
+            const interval = Math.max(250, Number(this.config.feishu.streamUpdateIntervalMs) || 1000);
+            const delay = entry.stream && entry.feishuMessageId && !entry.complete
+              ? (entry.lastAttemptMs ?? 0) + interval - Date.now() : 0;
+            if (delay > 0) { this.schedulePublicTexts(delay); entry = null; return; }
+            entry.status = "dispatching"; entry.lastAttemptMs = Date.now();
+            if (entry.historyLimited) {
+              const session = this.session(entry.threadId);
+              session.limitedTextDelivery = { key: entry.key, uuid: entry.uuid, status: "dispatching", at: entry.at };
+              (session.limitedTextReceipts ??= {})[entry.uuid] = session.limitedTextDelivery;
+            }
+            await this.save();
+            entry = { ...entry }; // Immutable revision for this network write.
+          } else if (settled) await this.save();
         });
         if (imageEntry) {
           if (imageEntry.status !== "pending") return; // Never pass an unknown send barrier.
@@ -1378,7 +1418,11 @@ export class DesktopManager {
         if (this.closed || this.handoffPaused) {
           // No send began. Preserve the same pending UUID across a handoff,
           // instead of treating a temporary pause as a binding cancellation.
-          await this.serial(async () => { entry.status = "pending"; await this.save(); });
+          await this.serial(async () => {
+            const current = this.state.publicTextOutbox?.[entry.uuid];
+            if (current) current.status = "pending";
+            await this.save();
+          });
           return;
         }
         const valid = () => !this.closed && !this.handoffPaused && this.notifier === notifier &&
@@ -1386,24 +1430,44 @@ export class DesktopManager {
         let status = "canceled", sentMessageId = null;
         if (valid()) {
           try {
-            const result = await notifier.sendMessage(entry.text, { threadId: entry.threadId, chatId: entry.chatId,
+            const options = { threadId: entry.threadId, chatId: entry.chatId,
               title: entry.title, uuid: entry.uuid, validateTarget: valid,
               onDelivery: diagnostic => this.serial(async () => {
-                (entry.deliveryEvidence ??= []).push(diagnostic);
-                if (entry.deliveryEvidence.length > 64) entry.deliveryEvidence.shift();
-                if (diagnostic.phase === "dispatching") entry.firstAttemptAt ??= diagnostic.at;
+                const current = this.state.publicTextOutbox?.[entry.uuid];
+                if (!current) return;
+                (current.deliveryEvidence ??= []).push(diagnostic);
+                if (current.deliveryEvidence.length > 64) current.deliveryEvidence.shift();
+                if (diagnostic.phase === "dispatching") current.firstAttemptAt ??= diagnostic.at;
+                if (diagnostic.phase === "accepted" && diagnostic.messageId) current.feishuMessageId = diagnostic.messageId;
                 await this.save();
-              }) });
+              }) };
+            const result = entry.feishuMessageId
+              ? await notifier.updateMessage?.(entry.feishuMessageId, entry.text, options)
+              : await notifier.sendMessage(entry.text, options);
             status = result?.code === 0 ? "sent" : "unknown";
             if (status === "sent") sentMessageId = result.data?.message_id ?? null;
           }
           catch { status = "unknown"; }
         }
         await this.serial(async () => {
-          entry.status = status; entry.at = new Date().toISOString();
-          if (status !== "unknown") delete entry.text;
-          if (sentMessageId) entry.feishuMessageId = sentMessageId;
-          this.session(entry.threadId).publicTextDelivery = { key: entry.key, uuid: entry.uuid, status, at: entry.at };
+          const current = this.state.publicTextOutbox?.[entry.uuid];
+          if (!current) return;
+          const newer = current.revision !== entry.revision;
+          current.feishuMessageId = sentMessageId ?? current.feishuMessageId ?? entry.feishuMessageId ?? null;
+          current.at = new Date().toISOString();
+          current.status = status === "sent" && newer ? "pending" : status;
+          if (current.stream) {
+            const cards = this.session(entry.threadId).publicTextCards ??= {};
+            cards[entry.uuid] = { messageId: current.feishuMessageId,
+              revision: status === "sent" ? entry.revision : cards[entry.uuid]?.revision, status };
+          }
+          if (!newer && status !== "unknown") delete current.text;
+          this.session(entry.threadId).publicTextDelivery = { key: entry.key, uuid: entry.uuid, status, at: current.at };
+          if (entry.historyLimited) {
+            const session = this.session(entry.threadId);
+            session.limitedTextDelivery = { key: entry.key, uuid: entry.uuid, status, at: current.at };
+            (session.limitedTextReceipts ??= {})[entry.uuid] = session.limitedTextDelivery;
+          }
           if (status === "sent") {
             (this.session(entry.threadId).deliveredProgress ??= {})[entry.key] = true;
             for (const id of entry.messageIds ?? []) this.finishFeishuInput(id, "public_output_delivered");
@@ -1469,21 +1533,22 @@ export class DesktopManager {
       session.activeTurnId = terminal(progress.turnStatus) ? null : progress.turnId;
       Object.assign(status, { mode: "latest-public-message", lastProgressAt: new Date().toISOString(), lastError: "native_single_turn_too_large" });
       const item = progress.message, key = item && `${item.turnId}/${item.id}`;
-      if (item?.text.trim() && session.seen[key]?.hash !== digest(item.text)) {
+      if (item?.text.trim() && (session.seen[key]?.hash !== digest(item.text) || session.seen[key]?.final != null && session.seen[key].final !== item.final)) {
         const old = session.seen[key];
         const delta = old && item.text.startsWith(old.text) ? item.text.slice(old.text.length) : item.text;
         const ids = session.turnMessages[item.turnId] ?? [];
         await this.emit(item.final ? "item.completed" : "item.delta", { targetThreadId: id, source: "codex", messageId: ids[0] ?? null },
           { text: delta, snapshot: item.text, phase: item.final ? "final_answer" : "commentary", messageIds: ids,
             readSource: "native-progress", historyLimited: true }, { turnId: item.turnId });
-        session.seen[key] = { text: item.text, hash: digest(item.text) };
+        session.seen[key] = { text: item.text, hash: digest(item.text), final: item.final };
         if (this.notifier && (item.final || this.config.feishu.streamEnabled !== false)) {
-          delivery = { key, uuid: randomUUID(), text: item.final ? item.text : delta, threadId: id, chatId: session.feishuChatId,
-            title: `${this.config.bridgeName}-${item.final ? "回复" : "输出"}（历史受限）`, notifier: this.notifier };
-          session.limitedTextDelivery = { key, uuid: delivery.uuid, status: "dispatching", at: new Date().toISOString() };
-          (session.limitedTextReceipts ??= {})[delivery.uuid] = session.limitedTextDelivery;
-          const settled = Object.values(session.limitedTextReceipts).filter(receipt => ["sent", "canceled"].includes(receipt.status));
-          for (const receipt of settled.slice(0, Math.max(0, settled.length - 128))) delete session.limitedTextReceipts[receipt.uuid];
+          const entries = this.enqueuePublicText(session, item.turnId, key, item.text, epoch, item.final, [],
+            { historyLimited: true, complete: terminal(progress.turnStatus) });
+          delivery = entries[0] ?? null;
+          if (delivery) {
+            session.limitedTextDelivery = { key, uuid: delivery.uuid, status: delivery.status, at: delivery.at };
+            (session.limitedTextReceipts ??= {})[delivery.uuid] = session.limitedTextDelivery;
+          }
         }
       }
       // Save the seen item and intent BEFORE sending. Unknown sends never replay.
@@ -1491,23 +1556,7 @@ export class DesktopManager {
     });
     if (!accepted) return;
     this.nativeProgressPolls.set(id, { at: Date.now(), cursor: progress.cursor });
-    if (!delivery) return;
-    let outcome = "canceled";
-    if (!this.closed && !this.handoffPaused && this.state.selectedThreadId === id && this.state.selectionEpoch === epoch && this.notifier === delivery.notifier) {
-      try { outcome = (await delivery.notifier.sendMessage(delivery.text, { threadId: delivery.threadId,
-        chatId: delivery.chatId, title: delivery.title, uuid: delivery.uuid,
-        validateTarget: () => !this.closed && !this.handoffPaused && this.state.selectedThreadId === id &&
-          this.state.selectionEpoch === epoch && this.notifier === delivery.notifier }))?.code === 0 ? "sent" : "unknown"; }
-      catch { outcome = "unknown"; }
-    }
-    await this.serial(async () => {
-      const session = this.session(id), receipt = session.limitedTextReceipts?.[delivery.uuid];
-      if (receipt) {
-        receipt.status = outcome; receipt.at = new Date().toISOString();
-        if (session.limitedTextDelivery?.uuid === delivery.uuid) session.limitedTextDelivery = receipt;
-        await this.save();
-      }
-    });
+    if (delivery) await this.drainPublicTexts();
     // Do not correlate/replay inputs, dispatch queues, mark turns completed or
     // discover images from this intentionally incomplete native snapshot.
   }
@@ -1815,6 +1864,7 @@ export class DesktopManager {
   async close() {
     clearInterval(this.handoffTimer); this.handoffTimer = null;
     this.closed = true; clearInterval(this.pollTimer); this.ws?.stop();
+    clearTimeout(this.publicTextTimer); this.publicTextTimer = null;
     await this.questions.close();
     this.onlineAnnouncement.reset(); await this.onlineAnnouncement.task;
     for (const client of this.clients) client.end(); this.clients.clear();

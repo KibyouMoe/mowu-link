@@ -75,7 +75,7 @@ export function markdownPayload(text, title, threadId) {
     elements.push({ tag: "note", elements: [{ tag: "plain_text", content: `会话 ${threadId}` }] });
   }
   return JSON.stringify({
-    config: { wide_screen_mode: true },
+    config: { wide_screen_mode: true, update_multi: true },
     header: { template: "indigo", title: { tag: "plain_text", content: title } },
     elements,
   });
@@ -204,6 +204,32 @@ export class FeishuNotifier {
       lastResponse = response;
     }
     return lastResponse;
+  }
+
+  // Streaming edits only PATCH a known card. An edit failure never creates a replacement.
+  async updateMessage(messageId, text, { title, threadId, validateTarget, onDelivery } = {}) {
+    const allowed = () => this.enabled && this.canSend({ threadId })
+      && (validateTarget == null || typeof validateTarget === "function" && validateTarget());
+    if (!messageId || !allowed() || hermesChunks(text).length !== 1) return null;
+    const body = { content: markdownPayload(text, title || this.bridgeName || "Codex", threadId) };
+    const record = async value => { if (onDelivery) await onDelivery({
+      ...value, operation: "update", messageId, at: new Date().toISOString() }); };
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const token = await this.getToken();
+      if (!token || !allowed()) return null;
+      await record({ phase: "dispatching" });
+      // A selection can change during durable intent recording.
+      if (!allowed()) return null;
+      const result = await postJson(
+        `${FEISHU_API_BASE}${SEND_URL}/${encodeURIComponent(messageId)}`,
+        body, { token, method: "PATCH" });
+      await record({ phase: result?.code === 0 ? "accepted" : "unknown",
+        apiCode: Number.isInteger(result?.code) ? result.code : null });
+      if (result?.code === 0) return { ...result, data: { ...result.data, message_id: messageId } };
+      if (attempt === 0 && isTokenError(result)) { this.invalidateToken(); continue; }
+      console.warn(`feishu 卡片更新未确认: code=${Number.isInteger(result?.code) ? result.code : "unknown"}`);
+      return null;
+    }
   }
 
   async downloadImage(messageId, imageKey) {
