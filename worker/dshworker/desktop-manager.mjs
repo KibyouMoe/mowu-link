@@ -14,7 +14,7 @@ import os from "node:os";
 import { FeishuNotifier, FeishuWebsocketClient } from "./feishu.mjs";
 import { localHost, nativeSendSource } from "./interface/native-dispatch.mjs";
 import { resolveNativeCapabilities } from "./interface/transport/index.mjs";
-import { QuestionRelay, QuestionRelayError } from "./question-relay.mjs";
+import { QuestionRelay, QuestionRelayError, questionSourceTurn } from "./question-relay.mjs";
 import { cacheFeishuImage, imagePrompt, fileImagePrompt } from "./feishu-images.mjs";
 import { parseFeishuPost, feishuPostPrompt } from "./feishu-post.mjs";
 import { FeishuOnlineAnnouncement } from "./online-announcement.mjs";
@@ -349,7 +349,8 @@ export class DesktopManager {
       taskId: /^\[router (t-[^\]\s]+)\]/m.exec(text)?.[1] ?? null,
       text, phase: input ? "input" : event.payload.phase ?? "final_answer", timestamp: event.timestamp,
       mirror, complete, historyLimited: event.payload.historyLimited,
-      kind: systemEvent ? "system_event" : progress ? "tool_progress" : toolEvent ? "tool_event" : "text", tool: event.payload.activity,
+      kind: event.payload.publicQuestion ? "question" : systemEvent ? "system_event" : progress ? "tool_progress" : toolEvent ? "tool_event" : "text", tool: event.payload.activity,
+      publicQuestion: event.payload.publicQuestion,
     });
     event.transcriptId = record.id;
     const latest = this.state.latestTranscript ??= {};
@@ -361,7 +362,7 @@ export class DesktopManager {
     } else if (mirror) {
       const entries = this.enqueuePublicText(this.session(threadId), event.turnId, input ? logicalId : itemKey,
         text, this.state.selectionEpoch, input || record.phase !== "commentary", event.payload.messageIds ?? [], {
-          input: input || systemEvent, complete, progress, transcriptId: record.id, historyLimited: record.historyLimited, deferDrain: true,
+          publicQuestion: event.payload.publicQuestion, input: input || systemEvent, complete, progress, transcriptId: record.id, historyLimited: record.historyLimited, deferDrain: true,
           title: input ? this.inputMirrorTitle(source) : progress ? this.config.bridgeName + "-工具" : systemEvent ? this.config.bridgeName + "-会话" : undefined });
       await this.messageJournal.plan(record.id, entries.map(e => e.uuid));
       for (const entry of entries) if (["sent", "unknown"].includes(entry.status))
@@ -394,7 +395,7 @@ export class DesktopManager {
       const session = this.session(record.threadId), input = record.direction === "input";
       const key = input ? record.logicalId : record.logicalId.slice(("output:" + record.threadId + ":").length);
       const entries = this.enqueuePublicText(session, record.turnId, key, record.text, this.state.selectionEpoch,
-        record.phase !== "commentary", [], { input: input || record.kind === "system_event", complete: record.complete, historyLimited: record.historyLimited, deferDrain: true, transcriptId: record.id,
+        record.phase !== "commentary", [], { publicQuestion: record.publicQuestion, input: input || record.kind === "system_event", complete: record.complete, historyLimited: record.historyLimited, deferDrain: true, transcriptId: record.id,
           progress: record.kind === "tool_progress",
           title: input ? this.inputMirrorTitle(record.source) : record.kind === "tool_progress" ? this.config.bridgeName + "-工具" : record.kind === "system_event" ? this.config.bridgeName + "-会话" : undefined });
       await this.messageJournal.plan(record.id, entries.map(e => e.uuid));
@@ -1142,7 +1143,7 @@ export class DesktopManager {
     for (const turn of older) { session.observedTurns[turn.id] ??= turn.status; seeded[turn.id] = true; }
   }
 
-  async message(request, { requireSelectedTarget = false, requireSelectionEpoch, requireSourceTurnId } = {}) {
+  async message(request, { requireSelectedTarget = false, requireSelectionEpoch, requireSourceTurnId, allowCompletedSourceTurn = false } = {}) {
     if (typeof request.text !== "string" || !request.text.trim()) fail(400, "invalid_request", "text is required.");
     return this.once(request, async () => {
       if ((requireSelectedTarget && request.targetThreadId !== this.state.selectedThreadId) ||
@@ -1168,7 +1169,7 @@ export class DesktopManager {
       }
       const session = this.session(request.targetThreadId);
       const normalized = { ...request, delivery, targetThreadId: session.threadId, text: text.startsWith("//") ? text.slice(1) : transformed ? text : request.text,
-        sourceTurnGuard: requireSourceTurnId ?? null,
+        sourceTurnGuard: requireSourceTurnId ?? null, sourceTurnMayBeComplete: Boolean(allowCompletedSourceTurn && requireSourceTurnId),
         ...(request.source === "trainer" ? { trainerActivityAt: new Date().toISOString() } : {}) };
       if (this.compacting(session)) {
         session.queue.push(normalized);
@@ -1191,7 +1192,7 @@ export class DesktopManager {
       const active = activeTurn(snapshot);
       // Native tools have no atomic expectedTurnId. Check immediately before
       // dispatch, reject stale questions; do not claim a native atomic guarantee.
-      if (requireSourceTurnId && active?.id !== requireSourceTurnId) fail(409, "source_turn_ended", "The original question turn is no longer active; no answer was sent.");
+      if (requireSourceTurnId && questionSourceTurn(snapshot, allowCompletedSourceTurn)?.id !== requireSourceTurnId) fail(409, "source_turn_ended", "The original question turn is no longer active; no answer was sent.");
       if (requireSelectionEpoch != null && (requireSelectionEpoch !== this.state.selectionEpoch || session.threadId !== this.state.selectedThreadId)) fail(409, "selected_target_changed", "The question binding changed during source validation; no answer was sent.");
       if (active || session.pendingInputs?.length || session.queue.length || session.steerQueue?.length) {
         if (delivery === "queue") {
@@ -1259,7 +1260,7 @@ export class DesktopManager {
         fail(409, "queue_target_busy", "The queued target is running; no native write was attempted.", true);
       }
       if (request.sourceTurnGuard) {
-        const latest = activeTurn(await this.deliveryState(session));
+        const latest = questionSourceTurn(await this.deliveryState(session), request.sourceTurnMayBeComplete);
         if (latest?.id !== request.sourceTurnGuard) fail(409, "source_turn_ended", "The question turn ended before native dispatch; no answer was sent.");
       }
       if (selectedAtStart && (dispatchEpoch !== this.state.selectionEpoch || session.threadId !== this.state.selectedThreadId)) {
@@ -1698,10 +1699,10 @@ export class DesktopManager {
         const delta = typeof old?.text === "string" && item.text.startsWith(old.text) ? item.text.slice(old.text.length) : item.text;
         const observed = await this.emit(final ? "item.completed" : "item.delta", { targetThreadId: id, source: "codex" },
           { text: delta, snapshot: item.text, itemKey: key, phase: item.phase, readSource: "desktop-public-journal",
-            complete: true, messageIds: this.typingInputsForOutput(session, timestamp) }, { turnId });
+            complete: true, publicQuestion: item.publicQuestion, messageIds: this.typingInputsForOutput(session, timestamp) }, { turnId });
         if (!this.transcriptEnabled && this.notifier && (final || this.config.feishu.streamEnabled !== false)) {
           this.enqueuePublicText(session, turnId, key, item.text, epoch, final,
-            this.typingInputsForOutput(session, timestamp), { complete: true, transcriptId: observed.transcriptId });
+            this.typingInputsForOutput(session, timestamp), { complete: true, publicQuestion: item.publicQuestion, transcriptId: observed.transcriptId });
         }
         session.seen[key] = { text: item.text, hash: digest(item.text), final };
       }
@@ -1748,11 +1749,11 @@ export class DesktopManager {
     }
   }
 
-  enqueuePublicText(session, turnId, key, text, epoch, final, messageIds = [], { historyLimited = false, complete = final, input = false, progress = false, title: customTitle, transcriptId, deferDrain = false } = {}) {
+  enqueuePublicText(session, turnId, key, text, epoch, final, messageIds = [], { historyLimited = false, complete = final, input = false, progress = false, title: customTitle, transcriptId, deferDrain = false, publicQuestion } = {}) {
     const inlineSeen = new Set(), entries = [];
     // Keep the existing text/image layout and card identities during upgrade.
     // Inputs are plain text and never grant file upload permissions.
-    const parts = historyLimited || input || progress ? [{ type: "text", text }] : splitPublicMarkdown(text);
+    const parts = publicQuestion || historyLimited || input || progress ? [{ type: "text", text }] : splitPublicMarkdown(text);
     for (const [index, part] of parts.entries()) {
       if (part.type === "image") {
         const identity = /^[a-z]:[\\\\/]/i.test(part.imagePath) ? path.win32.normalize(part.imagePath).toLowerCase() : path.normalize(part.imagePath);
@@ -1760,12 +1761,12 @@ export class DesktopManager {
         this.publicImageRelay.observe(session, { turns: [{ id: turnId, items: [{ type: "imageView", id: `${key}:inline:${index}`, path: part.imagePath }] }] }, epoch, { inline: true });
         continue;
       }
-      for (const [page, body] of hermesChunks(part.text).entries()) {
+      for (const [page, body] of (publicQuestion ? [part.text] : hermesChunks(part.text)).entries()) {
         const previous = this.transcriptEnabled && Object.values(this.state.publicTextOutbox ?? {}).find(e =>
           e.threadId === session.threadId && e.key === key && e.part === index && e.page === page && !isAbandonedText(e));
         const uuid = previous?.uuid ?? digest(["public-text-card", session.threadId, this.transcriptEpoch(session, epoch), key, index, page]).slice(0, 32);
-        const title = customTitle ?? `${this.config.bridgeName}-${final ? "回复" : "输出"}${historyLimited ? "（历史受限）" : ""}`;
-        const revision = digest([body, title]);
+        const title = publicQuestion ? this.config.bridgeName + "-提问" : customTitle ?? `${this.config.bridgeName}-${final ? "回复" : "输出"}${historyLimited ? "（历史受限）" : ""}`;
+        const revision = publicQuestion ? digest([body, title, publicQuestion]) : digest([body, title]);
         const cards = session.publicTextCards ??= {};
         const card = cards[uuid];
         const outbox = this.state.publicTextOutbox ??= {};
@@ -1791,6 +1792,7 @@ export class DesktopManager {
         const blockedCreate = (entry.status === "unknown" || entry.status === "canceled" || entry.status === "sent")
           && !entry.feishuMessageId;
         Object.assign(entry, { text: body, title, revision, final, complete, historyLimited,
+          ...(publicQuestion ? { publicQuestion: clone(publicQuestion) } : {}),
           messageIds: [...new Set([...(entry.messageIds ?? []), ...messageIds])], at: new Date().toISOString() });
         if (entry.status !== "dispatching") entry.status = blockedCreate ? "unknown" : "pending";
         entries.push(entry);
@@ -1895,7 +1897,15 @@ export class DesktopManager {
                 if (diagnostic.phase === "accepted" && diagnostic.messageId) current.feishuMessageId = diagnostic.messageId;
                 await this.save();
               }) };
-            const result = entry.feishuMessageId
+            let result;
+            if (entry.publicQuestion) {
+              // The card publisher owns nonce, callback binding and its durable
+              // creation UUID. Never PATCH it with an ordinary Markdown reply.
+              const sent = await this.questions.publish(entry.publicQuestion);
+              const action = this.questions.state.entries[entry.publicQuestion.questionId];
+              result = sent.feishu === "sent" && action?.messageId
+                ? { code: 0, data: { message_id: action.messageId } } : null;
+            } else result = entry.feishuMessageId
               ? await notifier.updateMessage?.(entry.feishuMessageId, entry.text, options)
               : await notifier.sendMessage(entry.text, options);
             status = result?.code === 0 ? "sent" : "unknown";

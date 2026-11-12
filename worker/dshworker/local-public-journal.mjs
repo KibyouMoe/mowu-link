@@ -2,6 +2,7 @@
 // No model/runtime, synthetic history, tool-output mining or native DB writes.
 import { open, readdir, realpath } from "node:fs/promises";
 import path from "node:path";
+import { projectPublicQuestion } from "./interface/public-questions.mjs";
 import { projectToolActivity } from "./interface/tool-activity.mjs";
 import { projectJournalContext } from "./interface/context-events.mjs";
 
@@ -65,7 +66,9 @@ export function publicJournalItem(record, threadId, { includeInputs = false, inc
   }
   if (x.type === "AgentMessage" && ["commentary", "final", "final_answer"].includes(x.phase)) {
     if (!Array.isArray(x.content) || x.content.some(c => c.type !== "Text" || typeof c.text !== "string")) bad("public_journal_public_text_incomplete");
-    item = { type: "agentMessage", id: x.id, text: x.content.map(c => c.text).join(""), phase: x.phase };
+    const publicQuestion = projectPublicQuestion(x, { threadId, turnId: p.turn_id });
+    item = { type: "agentMessage", id: x.id, text: x.content.map(c => c.text).join(""), phase: x.phase,
+      ...(publicQuestion ? { publicQuestion } : {}) };
   } else if (includeInputs && x.type === "UserMessage") {
     if (!Array.isArray(x.content) || x.content.some(c => c.type === "Text" && typeof c.text !== "string"))
       bad("public_journal_public_text_incomplete");

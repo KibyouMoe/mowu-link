@@ -1,6 +1,6 @@
 // Explicit public clarification UI only. Never render raw native tool arguments.
 import { escapeMarkdown } from "./feishu.mjs";
-export const QUESTION_CARD_LAYOUT_VERSION = 2;
+export const QUESTION_CARD_LAYOUT_VERSION = 3;
 
 export function questionCard(question, state, bridgeName) {
   const terminal = !["open", "answer_pending", "dispatching"].includes(state.status);
@@ -40,7 +40,7 @@ export function questionCard(question, state, bridgeName) {
   elements.push({ tag: "markdown", content: (reason ? reason + "\n\n" : "") +
     (state.status === "open" ? "点选或直接回复即可。\n\n" : "") + `提问 ${question.questionId.slice(0, 8)}` });
   return { schema: "2.0", config: { update_multi: true }, header: { template: state.status === "expired" ? "grey" : "indigo",
-    title: { tag: "plain_text", content: `${bridgeName} · ${labels[state.status] ?? "状态待核实"}` } }, body: { elements } };
+    title: { tag: "plain_text", content: `${bridgeName}-提问 · ${labels[state.status] ?? "状态待核实"}` } }, body: { elements } };
 }
 
 export function parseCardAction(payload) {

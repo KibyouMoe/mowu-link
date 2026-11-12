@@ -10,6 +10,19 @@ export class QuestionRelayError extends Error {
 }
 const reject = (status, error, detail) => { throw new QuestionRelayError(status, error, detail); };
 
+// Native async questions may be answered after their own turn completes,
+// but must not deliver into a newer task, an interrupted turn or another chat.
+export function questionSourceTurn(snapshot, allowCompleted = false) {
+  const live = snapshot?.deliveryObservation;
+  if (live) return live.turnId && (["inProgress", "in_progress", "running", "started", "pending"].includes(live.turnStatus) ||
+    allowCompleted && live.turnStatus === "completed") ? { id: live.turnId } : null;
+  const turns = snapshot?.turns ?? [];
+  const active = turns.find(t => ["inProgress", "in_progress", "running", "started"].includes(t.status));
+  if (active || !allowCompleted) return active ?? null;
+  const latest = snapshot?.page?.order === "newest_first" ? turns[0] : turns.at(-1);
+  return latest?.status === "completed" ? latest : null;
+}
+
 export function normalizeQuestion(request) {
   if (!uuid.test(request.questionId ?? "") || typeof request.threadId !== "string" || !request.threadId ||
     !Array.isArray(request.questions) || request.questions.length < 1 || request.questions.length > 3) {
@@ -27,7 +40,10 @@ export function normalizeQuestion(request) {
   if (request.sourceQuestionItemIds != null && (!Array.isArray(request.sourceQuestionItemIds) || request.sourceQuestionItemIds.length !== questions.length || request.sourceQuestionItemIds.some(id => {
     try { const parts = JSON.parse(id); return !Array.isArray(parts) || parts.length !== 3 || parts[0] !== "request_user_input_async" || typeof parts[1] !== "string" || !Number.isSafeInteger(parts[2]) || parts[2] < 0; } catch { return true; }
   }))) reject(400, "invalid_question", "Only explicit public async clarification IDs may be bound, not approval IDs.");
+  if (request.delivery != null && (request.delivery !== "async" || !request.sourceTurnId || !request.sourceQuestionItemIds))
+    reject(400, "invalid_question", "Async public questions require exact native source identities.");
   return { questionId: request.questionId, threadId: request.threadId, questions,
+    ...(request.delivery === "async" ? { delivery: "async" } : {}),
     ...(request.sourceTurnId ? { sourceTurnId: request.sourceTurnId } : {}),
     ...(request.sourceQuestionItemIds ? { sourceQuestionItemIds: request.sourceQuestionItemIds } : {}) };
 }
@@ -79,7 +95,7 @@ export class QuestionRelay {
   }
   status() {
     const entries = Object.values(this.state.entries);
-    return { policy: "source-turn-no-independent-ttl", open: entries.filter(s => s.status === "open").length,
+    return { policy: "source-turn-no-independent-ttl", cardLayoutVersion: QUESTION_CARD_LAYOUT_VERSION, open: entries.filter(s => s.status === "open").length,
       pending: entries.filter(s => ["answer_pending", "dispatching"].includes(s.status)).length,
       unknown: entries.filter(s => s.status === "answer_unknown").length,
       updatesPending: entries.filter(s => s.messageId && s.patchedRevision !== s.revision).length,
@@ -109,9 +125,7 @@ export class QuestionRelay {
       let sourceTurnId;
       if (!record) {
         const snapshot = m.deliveryState ? await m.deliveryState(m.session(request.threadId)) : await m.read(request.threadId, m.session(request.threadId).hostId);
-        sourceTurnId = snapshot.deliveryObservation
-          ? (["inProgress", "in_progress", "running", "started"].includes(snapshot.deliveryObservation.turnStatus) ? snapshot.deliveryObservation.turnId : null)
-          : snapshot.turns?.find(t => ["inProgress", "in_progress", "running", "started"].includes(t.status))?.id ?? null;
+        sourceTurnId = questionSourceTurn(snapshot, request.delivery === "async")?.id ?? null;
         if (request.sourceTurnId && request.sourceTurnId !== sourceTurnId) reject(409, "source_turn_ended", "The explicit source turn is no longer active.");
       }
       record ??= m.state.publicQuestions[request.questionId] = { ...request, hash, createdAt: new Date().toISOString(),
@@ -224,6 +238,13 @@ export class QuestionRelay {
   async sourceState(q, s) {
     if (q.threadId !== this.manager.state.selectedThreadId || s.bindingEpoch !== this.manager.state.selectionEpoch) return { expired: true, reason: "selected_target_changed" };
     let snapshot;
+    if (q.delivery === "async") {
+      try {
+        const snapshot = await this.manager.deliveryState(this.manager.session(q.threadId));
+        const source = questionSourceTurn(snapshot, true);
+        return source?.id === s.sourceTurnId ? { active: true } : { expired: true, reason: "source_turn_ended" };
+      } catch { return { unavailable: true }; }
+    }
     if (this.manager.isSelfTarget?.(this.manager.session(q.threadId))) {
       try {
         const live = (await this.manager.deliveryState(this.manager.session(q.threadId))).deliveryObservation;
@@ -287,7 +308,7 @@ export class QuestionRelay {
             try {
               await m.message({ protocolVersion: "1.1.1-draft", messageId: s.nativeMessageId, source: "trainer",
                 text: `飞书：${text}`, targetThreadId: q.threadId, delivery: "steer" },
-                { requireSelectedTarget: true, requireSelectionEpoch: s.bindingEpoch, requireSourceTurnId: s.sourceTurnId });
+                { requireSelectedTarget: true, requireSelectionEpoch: s.bindingEpoch, requireSourceTurnId: s.sourceTurnId, allowCompletedSourceTurn: q.delivery === "async" });
               await this.serial(async () => { s.status = "answered"; s.reason = null; s.revision++; await this.save(); });
             } catch (e) {
               await this.serial(async () => {
