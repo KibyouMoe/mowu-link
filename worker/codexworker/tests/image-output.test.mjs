@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm, writeFile, mkdir, symlink } from "node:fs/promis
 import path from "node:path";
 import os from "node:os";
 import { randomUUID } from "node:crypto";
-import { sendImage, MAX_IMAGE_BYTES, SEND_DEDUP_WINDOW_MS } from "../feishu-image-output.mjs";
+import { sendImage, MAX_IMAGE_BYTES, IMAGE_UPLOAD_LIMIT_BYTES, MAX_FILE_BYTES, SEND_DEDUP_WINDOW_MS } from "../feishu-image-output.mjs";
 import { BusinessRuntime } from "../business-runtime.mjs";
 
 const png = Buffer.from("89504e470d0a1a0a0000000049454e44", "hex");
@@ -58,7 +58,7 @@ test("reject relative/URL, outside-root, non-raster, empty and oversized files b
   }
   const outside = path.join(f.root, "outside.png"); await writeFile(outside, png);
   await assert.rejects(sendImage({ ...f.request, imagePath: outside }, f.context), e => e.status === 403);
-  for (const bytes of [Buffer.from("<svg/>"), Buffer.alloc(0), Buffer.alloc(MAX_IMAGE_BYTES + 1)]) {
+  for (const bytes of [Buffer.from("<svg/>"), Buffer.alloc(0), Buffer.alloc(MAX_FILE_BYTES + 1)]) {
     await writeFile(f.filename, bytes);
     await assert.rejects(sendImage(f.request, f.context), e => e.body.error === "invalid_image");
   }
@@ -72,7 +72,7 @@ test("internal exact public-file grant permits an out-of-workspace preview, not 
   assert.equal((await sendImage({ ...f.request, imagePath: outside }, displayed)).status, "sent");
   await assert.rejects(sendImage({ ...f.request, imagePath: sibling, messageId: randomUUID() }, displayed), e => e.body.error === "image_path_forbidden");
   await assert.rejects(sendImage({ ...f.request, imagePath: sibling, displayedFiles: [sibling], messageId: randomUUID() }, f.context), e => e.body.error === "image_path_forbidden");
-  for (const bytes of [Buffer.from("<svg/>"), Buffer.alloc(0), Buffer.alloc(MAX_IMAGE_BYTES + 1)]) {
+  for (const bytes of [Buffer.from("<svg/>"), Buffer.alloc(0), Buffer.alloc(MAX_FILE_BYTES + 1)]) {
     await writeFile(outside, bytes);
     await assert.rejects(sendImage({ ...f.request, imagePath: outside, messageId: randomUUID() }, displayed), e => e.body.error === "invalid_image");
   }
@@ -266,4 +266,64 @@ test("active send blocks module swap, completion releases reload without restart
   const pending = f.runtime.sendImage({}, { block: () => hold });
   await writeFile(f.file, businessCode("next")); await assert.rejects(f.runtime.reload(), e => e.body.error === "runtime_busy");
   release({ complete: true }); await pending; await f.runtime.reload(); assert.equal(f.runtime.status().featureVersion, "next");
+});
+
+test("large image originals automatically send as files with durable exact-UUID deduplication",async t=>{
+ const f=await fixture(t),bytes=Buffer.concat([png,Buffer.alloc(IMAGE_UPLOAD_LIMIT_BYTES)]);
+ await writeFile(f.filename,bytes);
+ f.context.fetchImpl=async(url,options)=>{f.calls.push({url,options});return response(url.endsWith("/files")?{file_key:"file_original"}:{message_id:"om_large_original"});};
+ const sent=await sendImage(f.request,f.context);
+ assert.equal(sent.deliveryType,"file");assert.equal(sent.imageBytes,bytes.length);
+ assert.ok(f.calls[0].url.endsWith("/im/v1/files"));
+ const form=f.calls[0].options.body;
+ assert.equal(form.get("file_type"),"stream");assert.equal(form.get("file_name"),"sample.png");
+ assert.deepEqual(Buffer.from(await form.get("file").arrayBuffer()),bytes);
+ const body=JSON.parse(f.calls[1].options.body);
+ assert.equal(body.msg_type,"file");assert.deepEqual(JSON.parse(body.content),{file_key:"file_original"});
+ assert.equal(body.uuid,f.request.messageId);
+ assert.ok((await sendImage(f.request,{...f.context})).duplicate);
+ assert.equal(f.calls.length,2);
+ const receipt=JSON.parse(await readFile(path.join(f.root,"image-output-state.json"),"utf8")).receipts[f.request.messageId];
+ assert.equal(receipt.deliveryType,"file");assert.equal(receipt.fileKey,"file_original");
+});
+
+test("explicit image-upload HTTP 413 falls back to a file before any message send",async t=>{
+ const f=await fixture(t);
+ f.context.fetchImpl=async(url,options)=>{
+  f.calls.push({url,options});
+  if(url.endsWith("/images"))return {ok:false,status:413,json:async()=>({code:1})};
+  return response(url.endsWith("/files")?{file_key:"file_fallback"}:{message_id:"om_fallback"});
+ };
+ const sent=await sendImage(f.request,f.context);
+ assert.equal(sent.deliveryType,"file");
+ assert.equal(f.calls.length,3);
+ assert.equal(JSON.parse(f.calls[2].options.body).msg_type,"file");
+ assert.equal(JSON.parse(f.calls[2].options.body).uuid,f.request.messageId);
+});
+
+test("unknown file-message outcomes never switch format, key or UUID on recovery",async t=>{
+ const f=await fixture(t);await writeFile(f.filename,Buffer.concat([png,Buffer.alloc(IMAGE_UPLOAD_LIMIT_BYTES)]));
+ f.context.fetchImpl=async(url,options)=>{
+  f.calls.push({url,options});if(url.endsWith("/files"))return response({file_key:"file_once"});throw Error("lost response");
+ };
+ await assert.rejects(sendImage(f.request,f.context),e=>e.body.error==="image_send_outcome_unknown");
+ await assert.rejects(sendImage(f.request,{...f.context}),e=>e.body.error==="image_send_outcome_unknown");
+ assert.equal(f.calls.filter(c=>c.url.endsWith("/files")).length,1);
+ const bodies=f.calls.slice(1).map(c=>c.options.body);
+ assert.equal(bodies.length,3);assert.equal(new Set(bodies).size,1);
+ assert.equal(JSON.parse(bodies[0]).uuid,f.request.messageId);assert.equal(JSON.parse(bodies[0]).msg_type,"file");
+});
+
+test("permission rejection never changes an image into a file",async t=>{
+ const f=await fixture(t);
+ f.context.fetchImpl=async(url,options)=>{f.calls.push({url,options});return {ok:false,status:403,json:async()=>({code:234009})};};
+ await assert.rejects(sendImage(f.request,f.context),e=>e.body.feishuCode===234009);
+ assert.equal(f.calls.length,1);assert.ok(f.calls[0].url.endsWith("/images"));
+});
+
+test("file fallback still refuses a destination change during upload",async t=>{
+ const f=await fixture(t);await writeFile(f.filename,Buffer.concat([png,Buffer.alloc(IMAGE_UPLOAD_LIMIT_BYTES)]));
+ f.context.fetchImpl=async()=>{f.calls.push("upload");f.switchTarget();return response({file_key:"file_valid"});};
+ await assert.rejects(sendImage(f.request,f.context),e=>e.body.error==="selected_target_changed");
+ assert.equal(f.calls.length,1);
 });
