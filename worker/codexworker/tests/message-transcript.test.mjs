@@ -361,3 +361,18 @@ test("a stream returning to earlier text records a new revision instead of reusi
   assert.equal((await f.manager.messageJournal.receipt(last.transcriptId)).state, "sent");
   assert.equal((await f.manager.messageJournal.receipt(first.transcriptId)).state, "superseded");
 });
+
+test("Feishu card answers retain their channel label and recover their pending mirror without an original text receipt",async t=>{
+ const f=await fixture(t),req=request("飞书：提问的点选答案",{origin:"feishu"});
+ await f.manager.mirrorInput(req);
+ let record=(await f.manager.messageJournal.list()).records[0];assert.equal(record.source,"feishu");
+ f.manager.state.publicTextOutbox={};await f.manager.save();
+ await f.manager.recoverTranscript();await f.flush();
+ assert.equal(f.calls.length,1);assert.ok(f.calls[0].opts.title.includes("飞书输入"));
+ await f.manager.recoverTranscript();await f.flush();assert.equal(f.calls.length,1);
+});
+test("a Feishu-looking text prefix never changes an actual local API input source",async t=>{
+ const f=await fixture(t);await f.manager.mirrorInput(request("飞书：这仍是本地 API 输入",{origin:undefined}));
+ await f.flush();const record=(await f.manager.messageJournal.list()).records[0];
+ assert.equal(record.source,"api");assert.ok(f.calls[0].opts.title.includes("本地 API 输入"));
+});

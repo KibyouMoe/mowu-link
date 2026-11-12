@@ -316,7 +316,7 @@ export class QuestionRelay {
           await this.serial(async () => { if (s.status === "answer_pending") { s.status = "dispatching"; s.revision++; await this.save(); } });
           if (s.status === "dispatching") {
             try {
-              await m.message({ protocolVersion: "1.1.1-draft", messageId: s.nativeMessageId, source: "trainer",
+              await m.message({ protocolVersion: "1.1.1-draft", messageId: s.nativeMessageId, source: "trainer", origin: "feishu",
                 text: `飞书：${text}`, targetThreadId: q.threadId, delivery: "steer" },
                 { requireSelectedTarget: true, requireSelectionEpoch: s.bindingEpoch, requireSourceTurnId: s.sourceTurnId, allowCompletedSourceTurn: q.delivery === "async" });
               await this.serial(async () => { s.status = "answered"; s.reason = null; s.revision++; await this.save(); });

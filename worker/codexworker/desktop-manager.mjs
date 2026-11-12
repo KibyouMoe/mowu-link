@@ -337,7 +337,7 @@ export class DesktopManager {
     const received = input && this.state.feishuReceipts[event.messageId]?.incomingMessageId;
     const origin = request.origin ?? event.payload.origin;
     const source = received ? "feishu" : input
-      ? ["router", "subscription", "cli", "desktop", "native"].includes(origin) ? origin
+      ? ["feishu", "router", "subscription", "cli", "desktop", "native"].includes(origin) ? origin
         : origin === "desktop-native-composer" ? "native" : request.source === "hermes" ? "hermes" : "api"
       : event.type.startsWith("tool.") ? "tool" : ["context.notice"].includes(event.type) ? "worker" : "assistant";
     const progress = event.type === "tool.progress", toolEvent = event.type === "tool.activity", systemEvent = ["context.notice"].includes(event.type);
@@ -390,8 +390,10 @@ export class DesktopManager {
       (this.state.latestTranscript ??= {})[record.logicalId] = record.id;
       if (record.source === "feishu") {
         const original = this.state.feishuReceipts?.[record.messageId]?.incomingMessageId;
-        if (original) await this.messageJournal.delivered(record.id, "original", "received", original);
-        continue;
+        if (original) {
+          await this.messageJournal.delivered(record.id, "original", "received", original);
+          continue;
+        }
       }
       if (record.kind === "image" || record.mirror === false || !["pending", "retrying"].includes(record.delivery.state) ||
           !this.state.sessions[record.threadId]) continue;
@@ -413,7 +415,7 @@ export class DesktopManager {
   }
 
   inputMirrorTitle(source) {
-    const labels = { router: "溪流派单", subscription: "订阅事件", cli: "本地 CLI 输入",
+    const labels = { feishu: "飞书输入", router: "溪流派单", subscription: "订阅事件", cli: "本地 CLI 输入",
       desktop: "桌面输入", native: "原生输入", api: "本地 API 输入", hermes: "溪流输入" };
     return this.config.bridgeName + "·" + (labels[source] ?? "输入");
   }
