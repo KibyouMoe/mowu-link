@@ -6,6 +6,7 @@ import http from "node:http";
 import { MessageJournal, nativeMessageId } from "./message-journal.mjs";
 import { ReceiptArchive, compactAck, shrinkObservationText } from "./continuity.mjs";
 import { addToolToBubble, renderToolBubble, safeToolPreview, TOOL_EDIT_INTERVAL_MS } from "./tool-progress.mjs";
+import { projectPublicQuestion } from "./interface/public-questions.mjs";
 import { projectToolActivity } from "./interface/tool-activity.mjs";
 import { ProgressWatch, noProgressTimeoutMs, taskDeadline } from "./progress-watch.mjs";
 import net from "node:net";
@@ -57,7 +58,9 @@ export function publicItems(snapshot) {
     for (const [index, item] of (turn.items ?? []).entries()) {
       const key = `${turn.id}/${item.id ?? index}`;
       if (item.type === "agentMessage" && typeof item.text === "string") {
+        const publicQuestion = projectPublicQuestion(item, { threadId: snapshot.thread?.id, turnId: turn.id });
         result.push({ key, turnId: turn.id, kind: "assistant", text: item.text,
+          ...(publicQuestion ? { publicQuestion } : {}),
           final: item.phase === "final_answer" || item.phase === "final" });
       } else if (item.type === "userMessage") {
         const text = item.text ?? (item.content ?? []).map(c => c.text ?? "").join("\n");
@@ -1573,7 +1576,9 @@ export class DesktopManager {
           }
           for (const item of items) {
             const old = session.seen[item.key];
-            if (old?.hash === digest(item.text) && (item.kind !== "assistant" || old.final == null || old.final === item.final)) continue;
+            const questionUpgrade = item.publicQuestion && old && !old.publicQuestionId &&
+              questionSourceTurn(snapshot, true)?.id === item.turnId;
+            if (old?.hash === digest(item.text) && !questionUpgrade && (item.kind !== "assistant" || old.final == null || old.final === item.final)) continue;
             const correlation = item.text.match(/^\[Hermes Bridge messageId=([0-9a-f-]+) source=(trainer|hermes)\]\n/i);
             const known = correlation && this.state.receipts[correlation[1]];
             const boundPlain = item.kind === "delegated" && [session.inputMessages?.[item.key]].some(messageId => {
@@ -1609,16 +1614,18 @@ export class DesktopManager {
               const delta = typeof old?.text === "string" && item.text.startsWith(old.text) ? item.text.slice(old.text.length) : item.text;
               const ids = session.turnMessages[item.turnId] ?? [];
               const observed = await this.emit(item.final ? "item.completed" : "item.delta", { targetThreadId: id, source: "codex", messageId: ids[0] ?? null },
-                { text: delta, snapshot: item.text, itemKey: item.key, phase: item.final ? "final_answer" : "commentary", messageIds: ids }, { turnId: item.turnId });
+                { text: delta, snapshot: item.text, itemKey: item.key, publicQuestion: item.publicQuestion,
+                  phase: item.final ? "final_answer" : "commentary", messageIds: ids }, { turnId: item.turnId });
               if (!this.transcriptEnabled && this.notifier && this.relaySession(id)
                   && (item.final || this.config.feishu.streamEnabled !== false)) {
                 this.enqueuePublicText(session, item.turnId, item.key, item.text,
                   imageBindingEpoch, item.final, [...ids], {
                     complete: terminal((snapshot.turns ?? []).find(turn => turn.id === item.turnId)?.status),
-                    transcriptId: observed.transcriptId });
+                    publicQuestion: item.publicQuestion, transcriptId: observed.transcriptId });
               }
             }
-            session.seen[item.key] = { text: item.text, hash: digest(item.text), final: item.final };
+            session.seen[item.key] = { text: item.text, hash: digest(item.text), final: item.final,
+              ...(item.publicQuestion ? { publicQuestionId: item.publicQuestion.questionId } : {}) };
           }
           for (const turn of snapshot.turns ?? []) {
             const ids = session.turnMessages[turn.id] ?? [];
@@ -1704,7 +1711,8 @@ export class DesktopManager {
           this.enqueuePublicText(session, turnId, key, item.text, epoch, final,
             this.typingInputsForOutput(session, timestamp), { complete: true, publicQuestion: item.publicQuestion, transcriptId: observed.transcriptId });
         }
-        session.seen[key] = { text: item.text, hash: digest(item.text), final };
+        session.seen[key] = { text: item.text, hash: digest(item.text), final,
+          ...(item.publicQuestion ? { publicQuestionId: item.publicQuestion.questionId } : {}) };
       }
       session.publicJournalCheckpoint = batch.checkpoint;
       session.activeTurnId = activeTurn(observation)?.id ?? null;
@@ -1901,7 +1909,8 @@ export class DesktopManager {
             if (entry.publicQuestion) {
               // The card publisher owns nonce, callback binding and its durable
               // creation UUID. Never PATCH it with an ordinary Markdown reply.
-              const sent = await this.questions.publish(entry.publicQuestion);
+              const sent = await this.questions.publish(entry.publicQuestion, { existingCard: entry.feishuMessageId
+                ? { messageId: entry.feishuMessageId, uuid: entry.uuid, threadId: entry.threadId } : null });
               const action = this.questions.state.entries[entry.publicQuestion.questionId];
               result = sent.feishu === "sent" && action?.messageId
                 ? { code: 0, data: { message_id: action.messageId } } : null;

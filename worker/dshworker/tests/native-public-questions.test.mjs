@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
-import { DesktopManager, PROTOCOL } from "../desktop-manager.mjs";
+import { createHash, randomUUID } from "node:crypto";
+import { DesktopManager, PROTOCOL, publicItems } from "../desktop-manager.mjs";
 import { publicJournalItem } from "../local-public-journal.mjs";
 import { projectPublicQuestion } from "../interface/public-questions.mjs";
 
@@ -148,4 +148,64 @@ test("native async choices cannot deliver into a newer task after their own turn
  await f.manager.questions.process();
  assert.equal(f.manager.questions.get(q.questionId).status,"expired");
  assert.equal(f.calls.filter(c=>c.name==="send_message_to_thread").length,0);
+});
+
+function fallback(f) {
+ const raw=rawQuestion();
+ const snapshot={thread:{id:"thread",cwd:f.root},turns:[{id:"native-turn",status:"inProgress",items:[{
+  type:"agentMessage",id:raw.id,text:raw.content[0].text,phase:raw.phase,delivery:raw.delivery,questions:raw.questions}]}]};
+ f.manager.read=async()=>structuredClone(snapshot);
+ f.manager.publicJournal.locate=async()=>{throw Object.assign(Error("public_journal_replaced"),{code:"public_journal_replaced"});};
+ f.manager.tools.push({name:"wait_threads"});
+ return snapshot;
+}
+test("the actual full-history wire AgentMessage retains its public async options",()=>{
+ const raw=rawQuestion(),snapshot={thread:{id:"thread"},turns:[{id:"native-turn",items:[{...raw,type:"agentMessage",text:raw.content[0].text}]}]};
+ const item=publicItems(snapshot)[0];
+ assert.deepEqual(item.publicQuestion.questions,raw.questions);
+ assert.equal(item.publicQuestion.threadId,"thread");
+});
+test("a replaced native journal falls back to full history and still sends an interactive question",async t=>{
+ const f=await fixture(t),cards=ui(f);fallback(f);
+ f.manager.handoffPaused=false;await f.manager.scan();
+ assert.equal(cards.length,1);assert.equal(buttons(cards[0].card).length,2);
+ assert.ok(cards[0].card.header.title.content.includes("-提问"));
+ assert.equal(f.notices.length,0);
+ assert.equal(f.session.relayStatus.mode,"full-history");
+ await f.manager.scan();assert.equal(cards.length,1);
+});
+test("an unanswered native question previously sent as prose upgrades the exact original card by PATCH, once",async t=>{
+ const f=await fixture(t),cards=ui(f),raw=rawQuestion(),text=raw.content[0].text,key="native-turn/"+raw.id;
+ await f.manager.serial(()=>f.manager.emit("item.completed",{targetThreadId:"thread",source:"codex"},
+  {text,snapshot:text,itemKey:key,phase:raw.phase,complete:true},{turnId:"native-turn"}));
+ f.manager.handoffPaused=false;await f.manager.drainPublicTexts();
+ assert.equal(f.notices.length,1);
+ const original=Object.values(f.manager.state.publicTextOutbox).find(e=>e.key===key).feishuMessageId;
+ f.session.seen[key]={text,hash:createHash("sha256").update(JSON.stringify(text)).digest("hex"),final:true};
+ const patches=[];f.notifier.updateQuestionCard=async(id,card)=>{patches.push({id,card});return {code:0};};
+ fallback(f);await f.manager.scan();await f.manager.scan();
+ assert.equal(cards.length,0);assert.equal(f.notices.length,1);assert.equal(patches.length,1);
+ assert.equal(patches[0].id,original);assert.equal(buttons(patches[0].card).length,2);
+ assert.ok(patches[0].card.header.title.content.includes("-提问"));
+ const records=(await f.manager.messageJournal.list()).records.filter(x=>x.direction==="output");
+ assert.equal(records.length,2);assert.equal(records[1].kind,"question");assert.equal(records[1].previousId,records[0].id);
+ const qid=Object.keys(f.manager.state.publicQuestions)[0];
+ assert.equal(f.manager.questions.state.entries[qid].messageId,original);
+ assert.equal(f.session.seen[key].publicQuestionId,qid);
+});
+test("callers cannot adopt a card outside the exact persisted public question output",async t=>{
+ const f=await fixture(t);ui(f);const q=project(rawQuestion()).item.publicQuestion;
+ await assert.rejects(f.manager.questions.publish(q,{existingCard:{threadId:"thread",uuid:"unrelated",messageId:"om_other"}}),e=>e.body.error==="question_card_conflict");
+ assert.equal(Object.keys(f.manager.state.publicQuestions??{}).length,0);
+});
+
+test("a late observed async question renders closed rather than blocking later public messages",async t=>{
+ const f=await fixture(t),cards=ui(f);
+ f.manager.deliveryState=async()=>({turns:[{id:"native-turn",status:"completed"},{id:"new-task",status:"inProgress"}]});
+ await observe(f);f.manager.handoffPaused=false;await f.manager.drainPublicTexts();
+ assert.equal(cards.length,1);assert.equal(buttons(cards[0].card).length,0);
+ assert.ok(cards[0].card.header.title.content.includes("已过期"));
+ await f.manager.serial(()=>f.manager.emit("item.completed",{targetThreadId:"thread",source:"codex"},
+  {text:"后续回复",snapshot:"后续回复",itemKey:"new-task/reply",phase:"final_answer",complete:true},{turnId:"new-task"}));
+ await f.manager.drainPublicTexts();assert.ok(f.notices.includes("后续回复"));
 });

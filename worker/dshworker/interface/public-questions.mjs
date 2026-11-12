@@ -2,7 +2,7 @@
 // from prose, reasoning, approvals, tool arguments or tool outputs.
 import { createHash } from "node:crypto";
 export function projectPublicQuestion(item, { threadId, turnId }) {
-  if (item?.type !== "AgentMessage" || item.delivery !== "async" ||
+  if (!["AgentMessage", "agentMessage"].includes(item?.type) || item.delivery !== "async" ||
       !["commentary", "final", "final_answer"].includes(item.phase) ||
       typeof item.id !== "string" || !item.id || typeof threadId !== "string" ||
       typeof turnId !== "string" || !Array.isArray(item.questions) ||

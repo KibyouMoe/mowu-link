@@ -102,20 +102,25 @@ export class QuestionRelay {
       callbacks: this.state.callbackStats ?? { received: 0, accepted: 0, rejected: 0, lastOutcome: null } };
   }
 
-  async publish(input) {
+  async publish(input, { existingCard = null } = {}) {
     const request = normalizeQuestion(input); const hash = fingerprint(request);
     const active = this.inflight.get(request.questionId);
     if (active) {
       if (active.hash !== hash) reject(409, "question_conflict", "The same questionId cannot identify different question text or targets.");
       return { ...await active.task, duplicate: true };
     }
-    const task = this.deliver(request, hash);
+    const task = this.deliver(request, hash, existingCard);
     this.inflight.set(request.questionId, { hash, task });
     try { return await task; } finally { this.inflight.delete(request.questionId); }
   }
 
-  async deliver(request, hash) {
+  async deliver(request, hash, existingCard = null) {
     const m = this.manager; let record; let duplicate;
+    if (existingCard && !Object.values(m.state.publicTextOutbox ?? {}).some(e =>
+        e.uuid === existingCard.uuid && e.feishuMessageId === existingCard.messageId &&
+        e.threadId === request.threadId && existingCard.threadId === request.threadId &&
+        e.publicQuestion?.questionId === request.questionId))
+      reject(409, "question_card_conflict", "Reuse only this exact persisted question output card.");
     await m.serial(async () => {
       m.session(request.threadId);
       if (m.state.selectedThreadId !== request.threadId) reject(409, "selected_target_changed", "Questions must target the current Feishu-selected chat; no fallback was used.");
@@ -126,7 +131,10 @@ export class QuestionRelay {
       if (!record) {
         const snapshot = m.deliveryState ? await m.deliveryState(m.session(request.threadId)) : await m.read(request.threadId, m.session(request.threadId).hostId);
         sourceTurnId = questionSourceTurn(snapshot, request.delivery === "async")?.id ?? null;
-        if (request.sourceTurnId && request.sourceTurnId !== sourceTurnId) reject(409, "source_turn_ended", "The explicit source turn is no longer active.");
+        if (request.sourceTurnId && request.sourceTurnId !== sourceTurnId) {
+          if (request.delivery === "async") sourceTurnId = null; // Historical question: render closed, never answer into a newer task.
+          else reject(409, "source_turn_ended", "The explicit source turn is no longer active.");
+        }
       }
       record ??= m.state.publicQuestions[request.questionId] = { ...request, hash, createdAt: new Date().toISOString(),
         boundSourceTurnId: sourceTurnId, bindingEpoch: m.state.selectionEpoch,
@@ -139,7 +147,7 @@ export class QuestionRelay {
       await this.serial(async () => {
         action = this.state.entries[request.questionId] ??= { status: record.boundSourceTurnId ? "open" : "expired", reason: record.boundSourceTurnId ? null : "source_turn_ended",
           sourceTurnId: record.boundSourceTurnId ?? null, bindingEpoch: record.bindingEpoch ?? m.state.selectionEpoch, nonce: randomUUID(), selected: {},
-          messageUuid: randomUUID(), revision: 1, patchedRevision: 0 };
+          messageUuid: existingCard?.uuid ?? randomUUID(), ...(existingCard ? { messageId: existingCard.messageId } : {}), revision: 1, patchedRevision: 0 };
         await this.save();
       });
     }
@@ -149,11 +157,13 @@ export class QuestionRelay {
       if (action.firstSendAt && Date.now() - action.firstSendAt > 50 * 60000) reject(409, "question_send_window_ended", "Inspect the original card; no new question message was sent.");
       await this.serial(async () => { action.firstSendAt ??= Date.now(); await this.save(); });
       const sentRevision = action.revision;
-      const sent = await (m.notifier.sendQuestionCard ? m.notifier.sendQuestionCard(questionCard(record, action, m.config.bridgeName), {
+      const sent = await (action.messageId && m.notifier.updateQuestionCard
+        ? m.notifier.updateQuestionCard(action.messageId, questionCard(record, action, m.config.bridgeName), { threadId: request.threadId })
+        : m.notifier.sendQuestionCard ? m.notifier.sendQuestionCard(questionCard(record, action, m.config.bridgeName), {
         threadId: request.threadId, chatId: record.chatId, uuid: action.messageUuid }) :
         m.notifier.sendMessage(record.text, { title: `${m.config.bridgeName}-提问`, threadId: request.threadId, chatId: record.chatId, uuid: action.messageUuid })).catch(() => null);
       if (sent?.code === 0) {
-        await this.serial(async () => { action.messageId = sent.data?.message_id ?? null; action.patchedRevision = sentRevision; action.cardLayoutVersion = QUESTION_CARD_LAYOUT_VERSION; await this.save(); });
+        await this.serial(async () => { action.messageId = sent.data?.message_id ?? action.messageId ?? null; action.patchedRevision = sentRevision; action.cardLayoutVersion = QUESTION_CARD_LAYOUT_VERSION; await this.save(); });
         await m.serial(async () => { record.feishuSent = true; await m.save(); });
       }
     }

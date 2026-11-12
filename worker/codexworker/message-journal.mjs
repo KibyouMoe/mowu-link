@@ -36,7 +36,9 @@ export class MessageJournal {
       if (previousId && !idPattern.test(previousId)) throw Error("invalid_public_previous_id");
       const previous = previousId ? await json(path.join(this.root, "records", previousId + ".json"), null) : null;
       const same = previous && previous.logicalId === input.logicalId && previous.text === input.text &&
-        previous.phase === (input.phase ?? null);
+        previous.phase === (input.phase ?? null) &&
+        previous.kind === (["image", "tool_progress", "tool_event", "system_event", "question"].includes(input.kind) ? input.kind : "text") &&
+        hash(previous.publicQuestion ?? null) === hash(input.publicQuestion ?? null);
       const id = same ? previous.id : publicRecordId(input.logicalId, input.text, input.phase ?? null, previousId);
       if (same) previousId = previous.previousId ?? null;
       const file = path.join(this.root, "records", id + ".json");
