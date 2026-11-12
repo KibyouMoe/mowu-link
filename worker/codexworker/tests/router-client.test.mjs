@@ -54,6 +54,11 @@ function startFakeRouter() {
         sendJson(found ? { ok: true, id, deleted: true } : { ok: false, error: "unknown_subscription" });
         return;
       }
+      if (req.method === "GET" && url.pathname.startsWith("/tasks/")) {
+        calls.push({ path: url.pathname, method: "GET" });
+        sendJson({ ok: true, task: { task_id: decodeURIComponent(url.pathname.slice(7)), state: "running" } });
+        return;
+      }
       if (req.method === "GET" && url.pathname === "/subscriptions") {
         calls.push({ path: "/subscriptions", method: "GET", query: url.search });
         sendJson({ ok: true, count: subscriptions.size, subscriptions: [...subscriptions.values()] });
@@ -255,4 +260,12 @@ test("takeFrame handles flush and CRLF separators", () => {
   assert.deepEqual(takeFrame("event: task\ndata: {}\n\nrest"), { text: "event: task\ndata: {}", rest: "rest" });
   assert.equal(takeFrame("no separator"), null);
   assert.deepEqual(takeFrame("a\r\n\r\nb"), { text: "a", rest: "b" });
+});
+
+test("getTask reads and unwraps the router task without creating work",async t=>{
+ const server=await startFakeRouter();t.after(()=>server.close());
+ const client=new RouterClient({url:server.url,token:"isolated-task-read-token",name:"test"});
+ const task=await client.getTask("t-existing");
+ assert.equal(task.task_id,"t-existing");assert.equal(task.state,"running");
+ assert.deepEqual(server.calls,[{path:"/tasks/t-existing",method:"GET"}]);
 });

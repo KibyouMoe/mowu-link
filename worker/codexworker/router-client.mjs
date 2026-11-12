@@ -38,6 +38,8 @@ export function setActiveRouterClient(client) {
   activeClient = client ?? null;
 }
 
+export function getActiveRouterClient() { return activeClient; }
+
 /** Snapshot for GET /health `integrations.router`. Never contains the token. */
 export function routerStatus() {
   if (activeClient) return activeClient.status();
@@ -207,6 +209,12 @@ export class RouterClient {
 
   setActivity({ state = "idle", taskId = null } = {}) {
     this.activity = { state, taskId };
+  }
+
+  async getTask(taskId) {
+    if (!taskId) throw new Error("getTask needs taskId");
+    const value = await this._request("GET", `/tasks/${encodeURIComponent(taskId)}`);
+    return value?.task ?? value;
   }
 
   async result({ taskId, status, summary, artifacts = [], evidence = [] }) {

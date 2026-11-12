@@ -754,3 +754,26 @@ Worker 才装载新版，不停止共享引擎或重建原会话。
 过期题目不会重新变成可回答状态，也不会阻塞后续消息。结构元数据变化单独产生留档修订。
 
 飞书提问按钮的答案按真实回调标记为飞书输入；本地 API/CLI 输入仍按各自来源显示，不根据正文前缀猜来源。
+
+## 提问跟随原发起方，回答更新原卡片
+
+按钮回答仍写入公开聊天留档并进入原生会话，但不再单独抄送“飞书输入”卡片；
+留档回执关联到原提问卡片的更新，所选答案和状态保留在同一张卡片内。
+
+提问对象由原生 turn 的第一条已确认派发输入决定，保留为会话路由元数据：
+训练员发起的 turn 问训练员；溪流/Router 发起的 turn 问溪流，不随之后的插话更改。
+旧 turn 可从原派发回执恢复来源，不根据普通正文里的“router”或“飞书”字样猜来源。
+
+溪流的问题通过现有 Router POST /notice（kind=worker.question，urgency=urgent）发成
+Hermes event；飞书只显示只读题目、选项和“等待溪流回复”，不要求训练员替她点选。
+事件中带 Worker 本机的完整提问读取地址和回答地址：
+GET /bridge/questions/{questionId}
+POST /bridge/questions/{questionId}/answer
+回答需要正常 Worker Bearer 认证，以及事件中的 actor=hermes、threadId、taskId、nonce、
+按题目顺序的 answers 数组。身份、任务、nonce、会话代际或原任务状态不符时拒绝。
+同样的回答重复提交只返回原状态，不重复进入模型；不要另建 Router task 来回答澄清。
+
+原 Router task 在澄清及其后续原生回复完成前保持未完成，答复直接进入同一主会话。
+等待明确输入没有默认墙钟上限，仍遵守任务显式 deadline 和取消；压缩期间排队的答复
+必须取得原生接收回执后才继续。通知结果未知时不盲目重发，也不回退让训练员回答。
+这次仅需加载新版 Worker，不需要重启 Router、gateway 或共享 Codex 后台。

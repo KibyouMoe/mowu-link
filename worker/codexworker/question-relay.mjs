@@ -1,6 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readFile, writeFile, rename } from "node:fs/promises";
 import path from "node:path";
+import { questionInitiator } from "./question-origin.mjs";
+import { getActiveRouterClient } from "./router-client.mjs";
+import { routerQuestionNotice } from "./router-question-channel.mjs";
 import { questionCard, parseCardAction, QUESTION_CARD_LAYOUT_VERSION } from "./question-cards.mjs";
 
 const fingerprint = value => createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -54,24 +57,36 @@ export function questionText(request, bridgeName) {
     lines.push("", request.questions.length > 1 ? `${index + 1}. ${q.title}` : q.title);
     q.options?.forEach((option, i) => lines.push(`${i + 1}）${option}`));
   });
-  lines.push("", "可以直接在飞书回复选项编号或答案文字，无需打开 Codex 提问面板。");
+  lines.push("", request.recipient?.kind === "hermes"
+    ? "这条提问由溪流回答，答复会更新到原卡片。"
+    : "可以直接在飞书回复选项编号或答案文字，无需打开 Codex 提问面板。");
   return lines.join("\n");
 }
 
-// The Desktop history API does not return its question panels. This is an
-// explicit public-question publisher, not a raw tool-argument/history exporter.
+// Accept only explicit public questions from a publisher or native projection.
+// Routing and card state are separate from private tool arguments and reasoning.
 export class QuestionRelay {
   constructor(manager) {
     this.manager = manager; this.inflight = new Map(); this.tail = Promise.resolve();
-    this.path = path.join(manager.stateDir, "question-actions.json");
+    this.path = path.join(manager.stateDir, "question-actions.json"); this.taskChecks = new Map();
     this.state = { version: 1, entries: {} }; this.running = null;
   }
 
   async initialize() {
     try { this.state = JSON.parse(await readFile(this.path, "utf8")); } catch (e) { if (e.code !== "ENOENT") throw e; }
     if (this.state.version !== 1 || !this.state.entries || Array.isArray(this.state.entries)) reject(503, "question_state_invalid", "Question actions were not discarded.");
-    for (const entry of Object.values(this.state.entries)) if (entry.status === "dispatching") {
-      entry.status = "answer_unknown"; entry.reason = "dispatch_outcome_unknown"; entry.revision++;
+    for (const entry of Object.values(this.state.entries)) {
+      if (entry.status === "dispatching") {
+        const receipt = this.manager.state.receipts?.[entry.nativeMessageId];
+        if (receipt?.nativeDispatch?.status === "accepted") entry.status = "answered";
+        else if (receipt?.response?.action === "message_queued" && !receipt.nativeDispatch) {
+          entry.status = "answer_pending"; entry.answerQueued = true;
+        } else { entry.status = "answer_unknown"; entry.reason = "dispatch_outcome_unknown"; }
+        entry.revision++;
+      }
+      if (entry.routerDelivery?.status === "sending") {
+        entry.routerDelivery.status = "unknown"; entry.revision++;
+      }
     }
     await this.save();
   }
@@ -90,12 +105,13 @@ export class QuestionRelay {
     if (!q) reject(404, "question_not_found", "No exact public question receipt was found.");
     return { questionId: id, threadId: q.threadId, questions: q.questions, status: s?.status ?? "legacy",
       sourceTurnId: s?.sourceTurnId ?? null, answers: s?.answers ?? null,
+      recipient: q.recipient ?? { kind: "trainer" }, routerDelivery: s?.routerDelivery?.status ?? null,
       reason: s?.reason ?? null, cardUpdated: Boolean(s?.messageId && s.patchedRevision === s.revision),
       feishu: q.feishuSent ? "sent" : "pending" };
   }
   status() {
     const entries = Object.values(this.state.entries);
-    return { policy: "source-turn-no-independent-ttl", cardLayoutVersion: QUESTION_CARD_LAYOUT_VERSION, open: entries.filter(s => s.status === "open").length,
+    return { policy: "source-turn-no-independent-ttl", routingPolicy: "turn-initiator", answerMirror: "original-question-card", cardLayoutVersion: QUESTION_CARD_LAYOUT_VERSION, open: entries.filter(s => s.status === "open").length,
       pending: entries.filter(s => ["answer_pending", "dispatching"].includes(s.status)).length,
       unknown: entries.filter(s => s.status === "answer_unknown").length,
       updatesPending: entries.filter(s => s.messageId && s.patchedRevision !== s.revision).length,
@@ -136,10 +152,12 @@ export class QuestionRelay {
           else reject(409, "source_turn_ended", "The explicit source turn is no longer active.");
         }
       }
-      record ??= m.state.publicQuestions[request.questionId] = { ...request, hash, createdAt: new Date().toISOString(),
+      const recipient = record?.recipient ?? await questionInitiator(m, request.threadId, request.sourceTurnId ?? sourceTurnId);
+      record ??= m.state.publicQuestions[request.questionId] = { ...request, recipient, hash, createdAt: new Date().toISOString(),
         boundSourceTurnId: sourceTurnId, bindingEpoch: m.state.selectionEpoch,
         chatId: m.session(request.threadId).feishuChatId ?? m.config.feishu.chatId ?? null,
-        text: questionText(request, m.config.bridgeName), feishuSent: false };
+        text: questionText({ ...request, recipient }, m.config.bridgeName), feishuSent: false };
+      record.recipient ??= recipient;
       await m.save();
     });
     let action = this.state.entries[request.questionId];
@@ -151,6 +169,7 @@ export class QuestionRelay {
         await this.save();
       });
     }
+    await this.forwardToInitiator(record, action);
     if (!record.feishuSent && m.notifier && record.chatId) {
       // No unbounded POST retries: after the first possible send the UUID's safe
       // dedup window is fixed, not extended on retries or a business restart.
@@ -190,6 +209,72 @@ export class QuestionRelay {
     this.kick(); return this.get(id);
   }
 
+  router() { return this.manager.routerClient ?? getActiveRouterClient(); }
+
+  async forwardToInitiator(question, action) {
+    if (question.recipient?.kind !== "hermes" || action.status !== "open" ||
+        ["sent", "sending", "unknown"].includes(action.routerDelivery?.status) ||
+        Date.now() < (action.routerRetryAt ?? 0)) return;
+    const client = this.router();
+    if (!client?.notice) {
+      await this.serial(async () => { action.routerDelivery = { status: "unavailable" }; action.routerRetryAt = Date.now()+5000; action.revision++; await this.save(); });
+      return;
+    }
+    if (question.recipient.taskId && client.getTask) {
+      let task;
+      try { task = await client.getTask(question.recipient.taskId); }
+      catch {
+        await this.serial(async () => { action.routerDelivery = { status: "unavailable" }; action.routerRetryAt = Date.now()+5000; action.revision++; await this.save(); });
+        return;
+      }
+      if (["cancelled","canceled","failed","done"].includes(task?.state)) {
+        await this.serial(async () => { action.status = "expired"; action.reason = "source_task_ended"; action.revision++; await this.save(); });
+        return;
+      }
+    }
+    await this.serial(async () => { action.routerDelivery = { status: "sending" }; action.revision++; await this.save(); });
+    let result, status;
+    try {
+      result = await client.notice({ kind: "worker.question", urgency: "urgent",
+        text: routerQuestionNotice(question, action, this.manager) });
+      status = result?.ok === true ? "sent" : "unavailable";
+    } catch { status = "unknown"; } // A lost response may already have reached Hermes: never blindly notify twice.
+    await this.serial(async () => {
+      action.routerDelivery = { status, ...(result?.event_id ? { eventId: result.event_id } : {}) };
+      if (status === "unavailable") action.routerRetryAt = Date.now()+5000;
+      action.revision++; await this.save();
+    });
+    console.error("[bridge] question_forwarded " + JSON.stringify({ questionId: question.questionId, recipient: "hermes", taskId: question.recipient.taskId ?? null, status }));
+  }
+
+  async acceptAgentAnswer(id, input) {
+    const q = this.manager.state.publicQuestions?.[id], s = this.state.entries[id];
+    if (!q || !s) reject(404, "question_not_found", "No exact question exists.");
+    if (q.recipient?.kind !== "hermes" || input.actor !== "hermes" || input.threadId !== q.threadId ||
+        (input.taskId ?? null) !== (q.recipient.taskId ?? null) || input.nonce !== s.nonce)
+      reject(403, "question_recipient_mismatch", "Only the bound originating agent/task may answer this question.");
+    if (["answer_pending","dispatching","answered"].includes(s.status) && JSON.stringify(s.answers)===JSON.stringify(input.answers))
+      return { ...this.get(id), duplicate: true };
+    if (q.threadId !== this.manager.state.selectedThreadId || s.bindingEpoch !== this.manager.state.selectionEpoch)
+      reject(409, "selected_target_changed", "Question binding changed; no answer was dispatched.");
+    if (q.recipient.taskId && this.router()?.getTask) {
+      const task = await this.router().getTask(q.recipient.taskId);
+      if (["cancelled","canceled","failed","done"].includes(task?.state))
+        reject(409, "source_task_ended", "Original task ended; no answer was dispatched.");
+    }
+    if (!Array.isArray(input.answers) || input.answers.length !== q.questions.length ||
+        input.answers.some(a => typeof a !== "string" || !a.trim() || a.length>8000 || a.trim()==="<填写回答>"))
+      reject(400, "invalid_question_answer", "Provide one real nonempty answer per question.");
+    return this.serial(async () => {
+      if (["answer_pending","dispatching","answered"].includes(s.status) && JSON.stringify(s.answers)===JSON.stringify(input.answers))
+        return { ...this.get(id), duplicate: true };
+      if (s.status !== "open") reject(409, "question_closed", "Question is already resolved; no answer was repeated.");
+      s.answers = [...input.answers]; s.answerActor = "hermes"; s.status = "answer_pending";
+      s.nativeMessageId = randomUUID(); s.revision++; await this.save();
+      return { ...this.get(id), duplicate: false };
+    });
+  }
+
   async acceptCard(payload) {
     const event = parseCardAction(payload); const m = this.manager;
     const toast = (content, type = "info") => ({ toast: { type, content } });
@@ -210,6 +295,7 @@ export class QuestionRelay {
         if (s.status === "open" || s.status === "answer_pending") { s.status = "expired"; s.reason = "selected_target_changed"; s.revision++; await this.save(); }
         return toast("接入会话已切换，此提问已过期。", "warning");
       }
+      if (q.recipient?.kind === "hermes") return toast("这条提问由溪流回答。", "info");
       if (s.status !== "open") return toast(s.status === "answered" ? "此提问已经回答，不会重复投递。" : "此提问已关闭或正在处理，不会重复投递。", "info");
       if (!s.sourceTurnId || !q.questions.every(q => q.options)) return toast("请直接回复完整答案。", "info");
       if (action === "select") {
@@ -219,7 +305,7 @@ export class QuestionRelay {
       const complete = q.questions.every((_, i) => Number.isInteger(s.selected[i]));
       if (action === "submit" && !complete) return toast("请先为每一道题选择答案。", "warning");
       if (complete && (q.questions.length === 1 || action === "submit")) {
-        s.answers = q.questions.map((q, i) => q.options[s.selected[i]]);
+        s.answers = q.questions.map((q, i) => q.options[s.selected[i]]); s.answerActor = "trainer";
         s.status = "answer_pending"; s.nativeMessageId = randomUUID();
       }
       s.callbackEvents = [...(s.callbackEvents ?? []), event.eventId].slice(-256);
@@ -248,6 +334,16 @@ export class QuestionRelay {
   async sourceState(q, s) {
     if (q.threadId !== this.manager.state.selectedThreadId || s.bindingEpoch !== this.manager.state.selectionEpoch) return { expired: true, reason: "selected_target_changed" };
     let snapshot;
+    if (q.recipient?.kind === "hermes" && q.recipient.taskId && this.router()?.getTask) {
+      try {
+        let cached = this.taskChecks.get(q.recipient.taskId);
+        if (!cached || s.status === "answer_pending" || Date.now()-cached.at >= 5000) {
+          cached = { task: await this.router().getTask(q.recipient.taskId), at: Date.now() };
+          this.taskChecks.set(q.recipient.taskId, cached);
+        }
+        if (["cancelled","canceled","failed","done"].includes(cached.task?.state)) return { expired: true, reason: "source_task_ended" };
+      } catch { return { unavailable: true }; }
+    }
     if (q.delivery === "async") {
       try {
         const snapshot = await this.manager.deliveryState(this.manager.session(q.threadId));
@@ -291,6 +387,18 @@ export class QuestionRelay {
     return { active: true };
   }
 
+  async linkAnswerCard(id, action) {
+    const m = this.manager;
+    if (action.answerDeliveryLinked || !action.nativeMessageId || !action.messageId ||
+        action.patchedRevision !== action.revision || !m.messageJournal) return;
+    const recordId = m.state.latestTranscript?.["input:" + action.nativeMessageId];
+    if (!recordId) return;
+    const receipt = await m.messageJournal.receipt(recordId);
+    if (receipt.plannedPages?.includes("question:" + id))
+      await m.messageJournal.delivered(recordId, "question:" + id, "sent", action.messageId);
+    await this.serial(async () => { action.answerDeliveryLinked = recordId; await this.save(); });
+  }
+
   async process() {
     const m = this.manager;
     if (this.storageFault) await this.serial(() => this.save());
@@ -310,16 +418,30 @@ export class QuestionRelay {
           if (source.answers) { s.status = "answered"; s.answers = source.answers; s.reason = null; s.revision++; await this.save(); }
           else if (source.expired) { s.status = "expired"; s.reason = source.reason; s.revision++; await this.save(); }
         });
-        if (s.status === "answer_pending" && source.active && !m.handoffPaused && !m.closed) {
+        if (s.status === "open" && source.active) await this.forwardToInitiator(q, s);
+        if (s.status === "answer_pending" && s.answerQueued) {
+          const receipt = m.state.receipts?.[s.nativeMessageId] ?? await m.receiptArchive?.get(s.nativeMessageId);
+          if (receipt?.nativeDispatch?.status === "accepted") await this.serial(async () => { s.status = "answered"; s.revision++; await this.save(); });
+          else if (receipt?.error) await this.serial(async () => { s.status = "answer_unknown"; s.reason = receipt.error.error; s.revision++; await this.save(); });
+        }
+        if (s.status === "answer_pending" && !s.answerQueued && source.active && !m.handoffPaused && !m.closed &&
+            !m.compacting?.(m.session(q.threadId))) {
           const answers = s.answers;
           const text = `提问 ${id.slice(0, 8)} 的回答：\n` + q.questions.map((q, i) => `${i + 1}）${q.title}\n答案：${answers[i]}`).join("\n\n");
           await this.serial(async () => { if (s.status === "answer_pending") { s.status = "dispatching"; s.revision++; await this.save(); } });
           if (s.status === "dispatching") {
             try {
-              await m.message({ protocolVersion: "1.1.1-draft", messageId: s.nativeMessageId, source: "trainer", origin: "feishu",
-                text: `飞书：${text}`, targetThreadId: q.threadId, delivery: "steer" },
+              const agent = s.answerActor === "hermes";
+              const accepted = await m.message({ protocolVersion: "1.1.1-draft", messageId: s.nativeMessageId,
+                source: agent ? "hermes" : "trainer", origin: agent ? "router-question" : "feishu",
+                ...(agent && q.recipient.taskId ? { taskId: q.recipient.taskId } : {}),
+                text: agent ? text : `飞书：${text}`, targetThreadId: q.threadId, delivery: "steer" },
                 { requireSelectedTarget: true, requireSelectionEpoch: s.bindingEpoch, requireSourceTurnId: s.sourceTurnId, allowCompletedSourceTurn: q.delivery === "async" });
-              await this.serial(async () => { s.status = "answered"; s.reason = null; s.revision++; await this.save(); });
+              await this.serial(async () => {
+                s.answerQueued = accepted?.action === "message_queued";
+                s.status = s.answerQueued ? "answer_pending" : "answered";
+                s.reason = null; s.revision++; await this.save();
+              });
             } catch (e) {
               await this.serial(async () => {
                 const safeReject = ["source_turn_ended", "selected_target_changed", "writer_conflict"].includes(e.body?.error);
@@ -335,6 +457,7 @@ export class QuestionRelay {
         const result = await m.notifier.updateQuestionCard(s.messageId, questionCard(q, s, m.config.bridgeName), { threadId: q.threadId }).catch(() => null);
         await this.serial(async () => { if (result?.code === 0) { s.patchedRevision = revision; s.retryPatchAt = null; } else s.retryPatchAt = Date.now() + 10000; await this.save(); });
       }
+      await this.linkAnswerCard(id, s);
     }
   }
 }

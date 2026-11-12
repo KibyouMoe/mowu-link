@@ -25,6 +25,7 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
+import { waitForTaskClarification } from "./router-question-wait.mjs";
 import RouterClient, { setActiveRouterClient } from "./router-client.mjs";
 import { createApprovalChannel } from "./approval-channel.mjs";
 import { FeishuNotifier } from "./feishu.mjs";
@@ -513,8 +514,8 @@ async function main() {
   // Poll the shared thread for our own turn (identified by the marker) and wait
   // for it to reach a terminal status. The manager keeps the writer; this only
   // reads native state, so it never competes for the writer.
-  async function waitForRouterTurn({ threadId, marker, messageId, manager, deadline }) {
-    let turn = null;
+  async function waitForRouterTurn({ threadId, marker, messageId, manager, deadline, initialTurnId = null }) {
+    let turn = initialTurnId ? { id: initialTurnId } : null;
     let status = null;
     let misses = 0;
     const watch = new ProgressWatch({ deadline, timeoutMs: noProgressTimeoutMs(config) });
@@ -522,13 +523,17 @@ async function main() {
       const rejection = manager.state.receipts?.[messageId]?.error;
       if (rejection) throw new Error(`${rejection.error}: ${rejection.detail ?? "dispatch rejected"}`);
       const snapshot = await nativeCall("read_thread", { threadId, turnLimit: 30, includeOutputs: false }, 60_000);
-      const found = turn ? (snapshot?.turns ?? []).find((item) => item.id === turn.id) ?? null
+      const expectedTurn = turn?.id ?? manager.state.receipts?.[messageId]?.nativeTurnId;
+      const found = expectedTurn ? (snapshot?.turns ?? []).find((item) => item.id === expectedTurn) ?? null
         : findRouterTurn(snapshot, marker);
       if (!turn && found) turn = found;
       if (found) {
         misses = 0;
         status = found.status;
-        if (TERMINAL_TURN.has(status)) return { turn: found, status, timedOut: false };
+        if (TERMINAL_TURN.has(status)) {
+          await manager.captureTaskQuestions(threadId, found);
+          return { turn: found, status, timedOut: false };
+        }
       } else if (turn && ++misses > 20) {
         throw new Error(`turn ${turn.id} left the readable window before it completed`);
       }
@@ -594,7 +599,16 @@ async function main() {
       log("info", "router_task_sent", { taskId, threadId: selected, messageId,
         action: enqueued?.action ?? null, duplicate: enqueued?.duplicate === true });
 
-      const waited = await waitForRouterTurn({ threadId: selected, marker, messageId, manager, deadline });
+      let waited = await waitForRouterTurn({ threadId: selected, marker, messageId, manager, deadline });
+      const consumedQuestions = new Set();
+      while (waited.status === "completed") {
+        const answer = await waitForTaskClarification({ manager, router: routerClient, taskId,
+          threadId: selected, consumed: consumedQuestions, deadline, log });
+        if (!answer) break;
+        consumedQuestions.add(answer.questionId);
+        waited = await waitForRouterTurn({ threadId: selected, marker, messageId: answer.messageId,
+          initialTurnId: answer.turnId, manager, deadline });
+      }
       const turn = waited.turn;
       turnId = turn?.id ?? null;
       const turnStatus = waited.status ?? "unknown";
@@ -768,6 +782,8 @@ async function main() {
       logger: (level, event, fields = {}) => log(level, event, { component: "router", ...fields }),
     });
     setActiveRouterClient(routerClient);
+    const questionManager = business.manager?.();
+    if (questionManager) questionManager.routerClient = routerClient;
     // app-server 的审批请求必须有人回答，否则 turn 会一直等。审批单走
     // router，人（溪流）在飞书里批准/拒绝；通道接不上就明确拒绝。
     if (typeof transport.setApprovalHandler === "function") {

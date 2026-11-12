@@ -15,6 +15,7 @@ import os from "node:os";
 import { FeishuNotifier, FeishuWebsocketClient } from "./feishu.mjs";
 import { localHost, nativeSendSource } from "./interface/native-dispatch.mjs";
 import { resolveNativeCapabilities } from "./interface/transport/index.mjs";
+import { rememberTurnInitiator } from "./question-origin.mjs";
 import { QuestionRelay, QuestionRelayError, questionSourceTurn } from "./question-relay.mjs";
 import { cacheFeishuImage, imagePrompt, fileImagePrompt } from "./feishu-images.mjs";
 import { parseFeishuPost, feishuPostPrompt } from "./feishu-post.mjs";
@@ -344,12 +345,15 @@ export class DesktopManager {
     if (output && !progress && !toolEvent) this.flushToolBubble(this.session(threadId));
     const itemKey = event.payload.itemKey ?? event.messageId ?? String(event.seq);
     const logicalId = input ? "input:" + event.messageId : "output:" + threadId + ":" + itemKey;
-    const mirror = !toolEvent && (systemEvent || progress || input || event.type === "message.reply" || event.type === "item.completed" || this.config.feishu.streamEnabled !== false);
+    const answerEntry = input && Object.entries(this.questions.state.entries).find(([id, action]) =>
+      action.nativeMessageId === event.messageId && ["dispatching", "answered", "answer_unknown"].includes(action.status) &&
+      this.state.publicQuestions?.[id]?.threadId === threadId);
+    const mirror = !answerEntry && !toolEvent && (systemEvent || progress || input || event.type === "message.reply" || event.type === "item.completed" || this.config.feishu.streamEnabled !== false);
     const complete = event.payload.complete ?? event.type !== "item.delta";
     const record = await this.messageJournal.record({
       seq: event.seq, logicalId, previousId: this.state.latestTranscript?.[logicalId], direction: input ? "input" : "output", source, threadId,
       turnId: event.turnId, messageId: event.messageId,
-      taskId: /^\[router (t-[^\]\s]+)\]/m.exec(text)?.[1] ?? null,
+      taskId: request.taskId ?? /^\[router (t-[^\]\s]+)\]/m.exec(text)?.[1] ?? null,
       text, phase: input ? "input" : event.payload.phase ?? "final_answer", timestamp: event.timestamp,
       mirror, complete, historyLimited: event.payload.historyLimited,
       kind: event.payload.publicQuestion ? "question" : systemEvent ? "system_event" : progress ? "tool_progress" : toolEvent ? "tool_event" : "text", tool: event.payload.activity,
@@ -360,7 +364,10 @@ export class DesktopManager {
     if (latest[logicalId] && latest[logicalId] !== record.id)
       await this.messageJournal.supersede(latest[logicalId], record.id);
     latest[logicalId] = record.id;
-    if (received) {
+    if (answerEntry) {
+      // The selected answer belongs on its original question card, not a second input card.
+      await this.messageJournal.plan(record.id, ["question:" + answerEntry[0]]);
+    } else if (received) {
       await this.messageJournal.delivered(record.id, "original", "received", received);
     } else if (mirror) {
       const entries = this.enqueuePublicText(this.session(threadId), event.turnId, input ? logicalId : itemKey,
@@ -458,10 +465,12 @@ export class DesktopManager {
         session.turnMessages[item.turnId] ??= [];
         if (!session.turnMessages[item.turnId].includes(receipt.request.messageId))
           session.turnMessages[item.turnId].push(receipt.request.messageId);
+        rememberTurnInitiator(session, item.turnId, receipt.request);
       }
       return receipt.request.messageId;
     }
     const messageId = nativeMessageId(session.threadId, item.key);
+    rememberTurnInitiator(session, item.turnId, { messageId, source: "trainer", origin: "native" });
     await this.emit("message.observed", { targetThreadId: session.threadId, messageId, source: "trainer", origin: "native" },
       { text: item.text, origin: "native", alreadyDispatched: true }, { turnId: item.turnId, timestamp: timestamp ?? new Date().toISOString() });
     (session.inputMessages ??= {})[item.key] = messageId;
@@ -1264,6 +1273,11 @@ export class DesktopManager {
       if (request.delivery === "queue" && activeTurn(await this.deliveryState(session))) {
         fail(409, "queue_target_busy", "The queued target is running; no native write was attempted.", true);
       }
+      if (request.origin === "router-question" && request.taskId && this.questions.router()?.getTask) {
+        const task = await this.questions.router().getTask(request.taskId);
+        if (["cancelled","canceled","failed","done"].includes(task?.state))
+          fail(409, "source_task_ended", "The original router task ended; its queued clarification was not sent.");
+      }
       if (request.sourceTurnGuard) {
         const latest = questionSourceTurn(await this.deliveryState(session), request.sourceTurnMayBeComplete);
         if (latest?.id !== request.sourceTurnGuard) fail(409, "source_turn_ended", "The question turn ended before native dispatch; no answer was sent.");
@@ -1296,11 +1310,12 @@ export class DesktopManager {
         session.turnMessages[receipt.nativeTurnId] ??= [];
         if (!session.turnMessages[receipt.nativeTurnId].includes(request.messageId))
           session.turnMessages[receipt.nativeTurnId].push(request.messageId);
+        rememberTurnInitiator(session, receipt.nativeTurnId, request);
       }
     }
     if (request.source === "trainer") this.touchSession(session.threadId, request.trainerActivityAt);
     await this.emit("message.dispatched", request, { delivery: active ? "native-busy-followup" : snapshot.deliveryContract ? "native-followup-state-independent" : "native-followup", pendingTurnReadback: !acceptedWithoutHistory });
-    if (!this.transcriptEnabled && this.notifier && request.source === "hermes" && request.origin !== "router" && session.threadId === this.state.selectedThreadId) void this.notifier.sendMessage(request.text,
+    if (!this.transcriptEnabled && this.notifier && request.source === "hermes" && !["router", "router-question"].includes(request.origin) && session.threadId === this.state.selectedThreadId) void this.notifier.sendMessage(request.text,
       { title: `${this.config.bridgeName}-任务`, threadId: session.threadId, chatId: session.feishuChatId }).catch(() => {});
     return { action: "dispatch_pending", session: clone(session) };
   }
@@ -1517,6 +1532,29 @@ export class DesktopManager {
     const type = command === "/new" ? "session.created" : "session.forked";
     await this.emit(type, { ...request, threadId: session.threadId }, { session: clone(session) });
     return { action: command === "/new" ? "session_created" : "session_forked", session: clone(session) };
+  }
+
+  async captureTaskQuestions(threadId, turn) {
+    const session = this.session(threadId);
+    const questions = publicItems({ thread: { id: threadId }, turns: [turn] }).filter(item => item.publicQuestion);
+    if (!questions.length) return;
+    await this.serial(async () => {
+      for (const item of questions) {
+        if (session.seen[item.key]?.publicQuestionId === item.publicQuestion.questionId) continue;
+        await this.emit("item.completed", { targetThreadId: threadId, source: "codex" },
+          { text: item.text, snapshot: item.text, itemKey: item.key, phase: "final_answer", complete: true,
+            publicQuestion: item.publicQuestion }, { turnId: turn.id });
+        session.seen[item.key] = { hash: digest(item.text), final: true, publicQuestionId: item.publicQuestion.questionId };
+      }
+      await this.save();
+    });
+    // Clarifications must reach their owner even if Feishu is unavailable.
+    for (const item of questions) {
+      const entry = Object.values(this.state.publicTextOutbox ?? {}).find(e => e.publicQuestion?.questionId === item.publicQuestion.questionId);
+      await this.questions.publish(item.publicQuestion, { existingCard: entry?.feishuMessageId
+        ? { uuid: entry.uuid, messageId: entry.feishuMessageId, threadId } : null });
+    }
+    await this.drainPublicTexts();
   }
 
   async scan() {
@@ -2255,12 +2293,13 @@ export class DesktopManager {
       if (req.method === "GET" && url.pathname === "/bridge/integrations") return json(res, 200, this.integrationStatus());
       if (req.method === "POST" && url.pathname === "/bridge/integrations/reload") return json(res, 200, await this.reloadIntegrations());
       if (req.method === "POST" && url.pathname === "/bridge/questions") return json(res, 200, await this.questions.publish(await readBody(req)));
-      const questionRoute = url.pathname.match(/^\/bridge\/questions\/([^/]+)(?:\/(resolve))?$/);
+      const questionRoute = url.pathname.match(/^\/bridge\/questions\/([^/]+)(?:\/(resolve|answer))?$/);
       if (questionRoute) {
         const peer = req.socket.remoteAddress?.replace(/^::ffff:/, "");
         if (!["127.0.0.1", "::1"].includes(peer)) fail(403, "loopback_required", "Question lifecycle updates are local-only.");
         const id = decodeURIComponent(questionRoute[1]);
         if (req.method === "GET" && !questionRoute[2]) return json(res, 200, this.questions.get(id));
+        if (req.method === "POST" && questionRoute[2] === "answer") return json(res, 200, await this.questions.acceptAgentAnswer(id, await readBody(req)));
         if (req.method === "POST" && questionRoute[2] === "resolve") return json(res, 200, await this.questions.resolve(id, await readBody(req)));
       }
       if (req.method === "GET" && url.pathname === "/manager/transcript") {

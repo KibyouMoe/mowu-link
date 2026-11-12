@@ -7,7 +7,7 @@ export function questionCard(question, state, bridgeName) {
   const labels = { open: "待回答", answer_pending: "答案已保存，正在投递", dispatching: "正在投递答案",
     answered: "已回答", expired: "已过期", canceled: "已取消", answer_unknown: "投递结果待核实", rejected: "答案未投递" };
   const elements = [];
-  const actionable = state.status === "open" && state.sourceTurnId && question.questions.every(q => q.options);
+  const actionable = question.recipient?.kind !== "hermes" && state.status === "open" && state.sourceTurnId && question.questions.every(q => q.options);
   question.questions.forEach((q, qi) => {
     const compactChoices = q.options?.every(option => option.length <= 16 && !option.includes("\n"));
     let text = `${question.questions.length > 1 ? `${qi + 1}. ` : ""}${q.title}`;
@@ -15,7 +15,7 @@ export function questionCard(question, state, bridgeName) {
     // the body with small numbered buttons; never truncate the actual options.
     if (!actionable || !compactChoices) q.options?.forEach((option, oi) => { text += `\n${oi + 1}）${option}`; });
     const answer = state.answers?.[qi] ?? (state.selected?.[qi] != null ? q.options?.[state.selected[qi]] : null);
-    if (answer) text += `\n\n${terminal ? "所选答案" : "当前选择"}：${answer}`;
+    if (answer) text += `\n\n${question.recipient?.kind === "hermes" ? "溪流的回答" : terminal ? "所选答案" : "当前选择"}：${answer}`;
     elements.push({ tag: "markdown", content: escapeMarkdown(text) });
     if (!actionable) return;
     for (let offset = 0; offset < q.options.length; offset += 3) {
@@ -29,16 +29,18 @@ export function questionCard(question, state, bridgeName) {
       }) });
     }
   });
-  if (state.status === "open" && state.sourceTurnId && question.questions.length > 1 && question.questions.every(q => q.options)) {
+  if (question.recipient?.kind !== "hermes" && state.status === "open" && state.sourceTurnId && question.questions.length > 1 && question.questions.every(q => q.options)) {
     elements.push({ tag: "button", text: { tag: "plain_text", content: "提交所选答案" }, type: "primary",
       behaviors: [{ type: "callback", value: { bridgeQuestion: question.questionId, nonce: state.nonce, action: "submit" } }] });
   }
-  const reason = { source_turn_ended: "原提问任务已经结束，选项不再接收答案。",
+  const reason = { source_task_ended: "原派发任务已经结束，旧问题不再接收回答。", source_turn_ended: "原提问任务已经结束，选项不再接收答案。",
     selected_target_changed: "接入会话已切换，旧卡片不再接收答案。", source_unavailable: "无法核实原提问任务，未投递答案。",
     dispatch_outcome_unknown: "原生投递结果不确定，请在 Codex 核对；不会自动重发。", writer_conflict: "此设备当前不支持忙态投递，答案未发送。",
     canceled_by_owner: "提问已由原会话取消。" }[state.reason];
   elements.push({ tag: "markdown", content: (reason ? reason + "\n\n" : "") +
-    (state.status === "open" ? "点选或直接回复即可。\n\n" : "") + `提问 ${question.questionId.slice(0, 8)}` });
+    (state.status === "open" ? question.recipient?.kind === "hermes"
+      ? (state.routerDelivery?.status === "sent" ? "已向溪流提问，等待溪流回复。" : state.routerDelivery?.status === "unknown" ? "向溪流发送的结果待核实。" : "正在连接溪流的回问通道。") + "\n\n"
+      : "点选或直接回复即可。\n\n" : "") + `提问 ${question.questionId.slice(0, 8)}` });
   return { schema: "2.0", config: { update_multi: true }, header: { template: state.status === "expired" ? "grey" : "indigo",
     title: { tag: "plain_text", content: `${bridgeName}-提问 · ${labels[state.status] ?? "状态待核实"}` } }, body: { elements } };
 }

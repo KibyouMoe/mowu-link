@@ -13,7 +13,7 @@ export function compactAck(result){
  if(!result||typeof result!=="object")return result;
  const copy=structuredClone(result);
  for(const key of ["session","currentSession"])if(copy[key])for(const k of
-  ["seen","toolSeen","seenImages","publicTextCards","turnMessages","inputMessages","observedTurns","completedMessages","publicJournalCheckpoint","toolBubble"])
+  ["seen","turnInitiators","toolSeen","seenImages","publicTextCards","turnMessages","inputMessages","observedTurns","completedMessages","publicJournalCheckpoint","toolBubble"])
   delete copy[key][k];
  return copy;
 }

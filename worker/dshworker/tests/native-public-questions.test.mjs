@@ -124,7 +124,11 @@ test("a native question card uses the existing authorized callback and persists 
  const nativeId=f.manager.questions.state.entries[q.questionId].nativeMessageId;
  const record=(await f.manager.messageJournal.list()).records.find(r=>r.direction==="input"&&r.messageId===nativeId);
  assert.equal(record.source,"feishu");
- assert.ok(Object.values(f.manager.state.publicTextOutbox).some(e=>e.key==="input:"+nativeId&&e.title.includes("飞书输入")));
+ assert.ok(!Object.values(f.manager.state.publicTextOutbox).some(e=>e.key==="input:"+nativeId));
+ assert.equal(record.mirror,false);
+ const delivery=await f.manager.messageJournal.receipt(record.id);
+ assert.equal(delivery.state,"sent");
+ assert.ok(Object.values(delivery.pages).some(p=>p.messageId==="om_real_question_card"));
 });
 
 test("native async choices remain actionable after their own turn completes and deliver to the same idle chat",async t=>{
