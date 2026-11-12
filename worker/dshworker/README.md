@@ -545,8 +545,8 @@ POST /manager/messages          → accepted=true action=dispatch_pending
 - 不支持逐 turn 覆盖 sandbox/safetyMode；传入非空值明确拒绝，沿用客户端任务本身策略。
 - Desktop tool pipe 未提供 compact 时返回 501；提供 compact_thread 的引擎可在原会话压缩。
 - 远端发消息路径已有 mock 契约测试，未向正在工作的气槽任务发测试消息。
-- 富文本 post 内图片、文件/音视频输入及超限图片的文件出站降级尚未接入。本轮独立原图输入
-  和提问显示仍需真实飞书验收，不以 API 接受代替客户端显示或模型看见原图。
+- 音视频、普通文档输入及超限图片的文件出站降级尚未接入；图片文件入站已支持。
+  图片文件输入仍需真实飞书验收，不以 API 接受代替客户端显示或模型看见原图。
 - 2026-10-02 单条飞书→当前原生聊天→回复→飞书/Hermes 接收服务回环已通过。
   持续入站已启用；普通消息及切换命令还需训练员在线上操作验收。
 
@@ -862,3 +862,12 @@ app-server-control/app-server-control.sock。共享连接失败时不会启动�
 CLI 的版本、认证、schema 等命令仍委托真正的内置 CLI，启动 -c 项通过原生线程 config
 保留，已有请求配置优先；未知启动项明确失败，不偷偷再启私有引擎。
 机器连接描述文件只存 realCli/socket/version，权限 0600，不存聊天记忆或凭据。
+
+## 飞书文件图片输入
+
+文件图片使用原消息的 file_key 下载（type=file），按真实二进制签名识别 PNG/JPEG/WebP/GIF，
+不依赖扩展名或 Content-Type；因此超过普通图片大小而以文件发送的原图也能查看。
+文件图片上限 100,000,000 字节（100MB）；普通 image/post 的 10MiB 上限保持不变。
+超限、非图片或下载失败均明确反馈，不向模型投递占位消息。原文件名仅作带引号的元数据，
+缓存仍用资源哈希命名、0600 权限，并沿用目标会话绑定和跨重启去重。
+资源接口：https://open.feishu.cn/document/server-docs/im-v1/message/get-2

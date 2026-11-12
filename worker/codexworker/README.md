@@ -412,8 +412,8 @@ Hermes/溪流通信的旧层（入站入口与 `/report`、`/heartbeat` 上报�
 - 不支持逐 turn 覆盖 sandbox/safetyMode；传入非空值明确拒绝，沿用客户端任务本身策略。
 - Desktop tool pipe 未提供 compact 时返回 501；提供 compact_thread 的引擎可在原会话压缩。
 - 远端发消息路径已有 mock 契约测试，未向正在工作的气槽任务发测试消息。
-- 富文本 post 内图片、文件/音视频输入及超限图片的文件出站降级尚未接入。本轮独立原图输入
-  和提问显示仍需真实飞书验收，不以 API 接受代替客户端显示或模型看见原图。
+- 音视频、普通文档输入及超限图片的文件出站降级尚未接入；图片文件入站已支持。
+  图片文件输入仍需真实飞书验收，不以 API 接受代替客户端显示或模型看见原图。
 - 2026-10-02 单条飞书→当前原生聊天→回复→飞书/Hermes 接收服务回环已通过。
   持续入站已启用；普通消息及切换命令还需训练员在线上操作验收。
 
@@ -695,11 +695,19 @@ contextTokens 取自原生 last.totalTokens（最近请求用量），lifetimeTo
 
 ## 飞书图文输入
 
-支持 text、image 和 post 图文消息。post 保留标题、文字和图片顺序；content_v2 存在时
+支持 text、image、post 图文消息，以及以 file 文件消息发送的图片。post 保留标题、文字和图片顺序；content_v2 存在时
 不再重复解析 content，也支持带语言键的正文。图片沿用消息资源鉴权、10MiB 限额和
 本机 view_image 路径；同条最多 10 张，任一下载失败不会部分投递给模型。
 图文与纯图片一样，在持久化收件时绑定目标会话，并通过原消息 ID 跨重启去重。
 内部会话注册记为 operation.accepted，不再伪造 /adopt 为溪流的聊天输入。
+
+文件图片使用原消息的 file_key 下载（type=file），按真实二进制签名识别 PNG/JPEG/WebP/GIF，
+不依赖扩展名或 Content-Type；因此超过普通图片大小而以文件发送的原图也能查看。
+文件图片上限 100,000,000 字节（100MB）；普通 image/post 的 10MiB 上限保持不变。
+超限、非图片或下载失败均明确反馈，不向模型投递占位消息。原文件名仅作带引号的元数据，
+缓存仍用资源哈希命名、0600 权限，并沿用目标会话绑定和跨重启去重。
+资源接口：https://open.feishu.cn/document/server-docs/im-v1/message/get-2
+
 
 ## 桌面与 Worker 共享原生实例（Codex 接口）
 

@@ -1,7 +1,7 @@
 // Feishu (Lark) outbound push — ported from the Claude bridge's FeishuNotifier /
 // FeishuStreamBeat. Same discipline: failures only log, never affect the turn.
 // Uses the global fetch (Node 18+), so the plugin carries no extra dependency.
-import { downloadFeishuImage } from "./feishu-images.mjs";
+import { downloadFeishuImage, downloadFeishuFileImage } from "./feishu-images.mjs";
 import { createHash, randomUUID } from "node:crypto";
 import { hermesChunks } from "./hermes-feishu-format.mjs";
 
@@ -234,6 +234,10 @@ export class FeishuNotifier {
 
   async downloadImage(messageId, imageKey) {
     return downloadFeishuImage(messageId, imageKey, await this.getToken());
+  }
+
+  async downloadFileImage(messageId, fileKey) {
+    return downloadFeishuFileImage(messageId, fileKey, await this.getToken());
   }
 
   async sendQuestionCard(card, { chatId, threadId, uuid } = {}) {
