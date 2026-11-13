@@ -6,7 +6,7 @@ import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { DesktopManager, PROTOCOL, publicItems } from "../desktop-manager.mjs";
 import { publicJournalItem } from "../local-public-journal.mjs";
-import { projectPublicQuestion } from "../interface/public-questions.mjs";
+import { projectPublicQuestion, nativeQuestionReply, parseNativeQuestionReply, SKIPPED_QUESTION_ANSWER } from "../interface/public-questions.mjs";
 
 const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j1WkAAAAASUVORK5CYII=", "base64");
 const content = keys => JSON.stringify({title:"图片问题",content:[...keys.map(image_key=>[{tag:"img",image_key}]),[{tag:"text",text:"这个是啥呀"}]]});
@@ -48,7 +48,12 @@ function ui(f) {
  f.notifier.updateQuestionCard=async()=>({code:0});
  return cards;
 }
-const buttons = card => card.body.elements.flatMap(e=>e.columns??[]).flatMap(e=>e.elements??[]).filter(e=>e.tag==="button");
+const nodes = value => !value || typeof value !== "object" ? [] : [value, ...Object.values(value).flatMap(nodes)];
+const buttons = card => nodes(card).filter(e=>e.tag==="button" && e.value?.action === "form_select");
+const formAction = (card, answers, action = "form_submit") => ({
+ value: nodes(card).find(e=>e.tag === "button" && e.value?.action === action).value,
+ form_value: Object.fromEntries(answers.map((answer, i) => [`answer_${i}`, answer])),
+});
 async function observe(f) {
  const item=project(rawQuestion()).item;
  await f.manager.serial(()=>f.manager.emit("item.completed",{targetThreadId:"thread",source:"codex"},
@@ -105,11 +110,12 @@ test("pending structured question survives archive-only recovery and still rende
 
 test("a native question card uses the existing authorized callback and persists the selected answer before native dispatch",async t=>{
  const f=await fixture(t),cards=ui(f),q=await observe(f);
+ f.manager.config.messageSourceLabels=true;
  f.manager.handoffPaused=false;await f.manager.drainPublicTexts();f.manager.handoffPaused=true;
  const card=cards[0].card,button=buttons(card)[1];
  const click={header:{event_type:"card.action.trigger",event_id:"test-native-question-click"},event:{
   operator:{open_id:"trainer"},context:{open_message_id:"om_real_question_card",open_chat_id:"chat"},
-  action:{value:button.behaviors[0].value}}};
+  action:formAction(card,["另一个仓库"])}};
  const reply=await f.manager.questions.acceptCard(click);
  assert.equal(reply.toast.type,"success");
  const saved=JSON.parse(await readFile(f.manager.questions.path,"utf8")).entries[q.questionId];
@@ -120,6 +126,10 @@ test("a native question card uses the existing authorized callback and persists 
  const writes=f.calls.filter(c=>c.name==="send_message_to_thread");
  assert.equal(writes.length,1);
  assert.ok(writes[0].args.prompt.includes("另一个仓库"));
+ assert.match(writes[0].args.prompt,/^<send_user_message_question_reply>\n/);
+ const nativeReplies=JSON.parse(writes[0].args.prompt.slice("<send_user_message_question_reply>".length,-"</send_user_message_question_reply>".length));
+ assert.deepEqual(nativeReplies,[{questionItemId:JSON.stringify(["request_user_input_async","call_native_question",0]),question:"选择同步目标？",answer:"另一个仓库"}]);
+
  assert.equal(f.manager.questions.get(q.questionId).status,"answered");
  const nativeId=f.manager.questions.state.entries[q.questionId].nativeMessageId;
  const record=(await f.manager.messageJournal.list()).records.find(r=>r.direction==="input"&&r.messageId===nativeId);
@@ -140,7 +150,7 @@ test("native async choices remain actionable after their own turn completes and 
  const button=buttons(cards[0].card)[0];
  await f.manager.questions.acceptCard({header:{event_type:"card.action.trigger",event_id:"completed-source-click"},event:{
   operator:{open_id:"trainer"},context:{open_message_id:"om_real_question_card",open_chat_id:"chat"},
-  action:{value:button.behaviors[0].value}}});
+  action:formAction(cards[0].card,["当前仓库"])}});
  await f.manager.questions.process();
  assert.equal(f.manager.questions.get(q.questionId).status,"answered");
  assert.equal(f.calls.filter(c=>c.name==="send_message_to_thread").length,1);
@@ -151,7 +161,7 @@ test("native async choices cannot deliver into a newer task after their own turn
  const button=buttons(cards[0].card)[0];
  await f.manager.questions.acceptCard({header:{event_type:"card.action.trigger",event_id:"new-task-click"},event:{
   operator:{open_id:"trainer"},context:{open_message_id:"om_real_question_card",open_chat_id:"chat"},
-  action:{value:button.behaviors[0].value}}});
+  action:formAction(cards[0].card,["当前仓库"])}});
  f.manager.deliveryState=async()=>({turns:[{id:"native-turn",status:"completed"},{id:"new-task",status:"inProgress"}]});
  await f.manager.questions.process();
  assert.equal(f.manager.questions.get(q.questionId).status,"expired");
@@ -216,4 +226,118 @@ test("a late observed async question renders closed rather than blocking later p
  await f.manager.serial(()=>f.manager.emit("item.completed",{targetThreadId:"thread",source:"codex"},
   {text:"后续回复",snapshot:"后续回复",itemKey:"new-task/reply",phase:"final_answer",complete:true},{turnId:"new-task"}));
  await f.manager.drainPublicTexts();assert.ok(f.notices.includes("后续回复"));
+});
+
+test("native client answer in a later turn repairs expiry and updates only the original card", async t => {
+ const f=await fixture(t),cards=ui(f),q=await observe(f),patches=[];
+ f.manager.handoffPaused=false;await f.manager.drainPublicTexts();
+ f.notifier.updateQuestionCard=async(id,card)=>{patches.push({id,card});return {code:0};};
+ const action=f.manager.questions.state.entries[q.questionId];
+ action.status="expired";action.reason="source_turn_ended";
+ const text=nativeQuestionReply(q,["另一个仓库"])+"\n";
+ await f.manager.observeNativeInput(f.session,{key:"client-reply/user",turnId:"client-reply",text});
+ await f.manager.questions.process();
+ assert.equal(action.status,"answered");assert.equal(action.answerActor,"native");
+ assert.deepEqual(action.answers,["另一个仓库"]);
+ assert.equal(f.manager.questions.get(q.questionId).answeredBy,"native");
+ assert.equal(cards.length,1);
+ assert.ok(patches.some(p=>p.id==="om_real_question_card"&&JSON.stringify(p.card).includes("客户端回答")));
+ assert.ok(!JSON.stringify(patches.at(-1).card).includes("已过期"));
+ assert.equal(f.calls.filter(c=>c.name==="send_message_to_thread").length,0);
+ const record=(await f.manager.messageJournal.list()).records.find(r=>r.direction==="input");
+ assert.equal(record.source,"native");assert.equal(record.mirror,false);
+ assert.ok(record.text.includes("答案：另一个仓库"));assert.ok(!record.text.includes("questionItemId"));
+ assert.ok(!Object.values(f.manager.state.publicTextOutbox).some(e=>e.key==="input:"+record.messageId));
+ const delivery=await f.manager.messageJournal.receipt(record.id);
+ assert.equal(delivery.state,"sent");
+ assert.equal(delivery.pages["question:"+q.questionId].messageId,"om_real_question_card");
+});
+
+test("async source checks find exact native answers in the next turn before expiring the question", async t => {
+ const f=await fixture(t);ui(f);const q=await observe(f);
+ f.manager.handoffPaused=false;await f.manager.drainPublicTexts();
+ f.manager.deliveryState=async()=>({turns:[
+  {id:"native-turn",status:"completed",items:[]},
+  {id:"client-reply",status:"inProgress",items:[{type:"userMessage",text:nativeQuestionReply(q,["当前仓库"])+"\n"}]}
+ ]});
+ await f.manager.questions.process();
+ assert.equal(f.manager.questions.get(q.questionId).status,"answered");
+ assert.deepEqual(f.manager.questions.get(q.questionId).answers,["当前仓库"]);
+ assert.equal(f.calls.filter(c=>c.name==="send_message_to_thread").length,0);
+});
+
+test("restart reconciliation uses an already archived native reply without replaying input or creating a card", async t => {
+ const f=await fixture(t),cards=ui(f),q=await observe(f);
+ f.manager.handoffPaused=false;await f.manager.drainPublicTexts();
+ const action=f.manager.questions.state.entries[q.questionId];
+ action.status="expired";action.reason="source_turn_ended";
+ const messageId=randomUUID();
+ const record=await f.manager.messageJournal.record({seq:100,logicalId:"input:"+messageId,direction:"input",
+  source:"native",threadId:"thread",turnId:"client-reply",messageId,
+  text:nativeQuestionReply(q,["另一个仓库"])+"\n",mirror:true});
+ await f.manager.recoverTranscript();await f.manager.questions.process();
+ const revision=action.revision;
+ await f.manager.recoverTranscript();await f.manager.questions.process();
+ assert.equal(action.status,"answered");assert.equal(action.revision,revision);
+ assert.equal(cards.length,1);
+ assert.ok(!Object.values(f.manager.state.publicTextOutbox).some(e=>e.key==="input:"+messageId));
+ assert.equal(f.calls.filter(c=>c.name==="send_message_to_thread").length,0);
+ const receipt=await f.manager.messageJournal.receipt(record.id);
+ assert.equal(receipt.state,"sent");assert.deepEqual(receipt.plannedPages,["question:"+q.questionId]);
+});
+
+test("unknown or canceled native replies cannot close another question or expose protocol JSON", async t => {
+ const f=await fixture(t);ui(f);const q=await observe(f);
+ f.manager.handoffPaused=false;await f.manager.drainPublicTexts();
+ const wrong={...q,sourceQuestionItemIds:[JSON.stringify(["request_user_input_async","unrelated-call",0])]};
+ await f.manager.observeNativeInput(f.session,{key:"client-reply/wrong",turnId:"client-reply",text:nativeQuestionReply(wrong,["当前仓库"])});
+ assert.equal(f.manager.questions.get(q.questionId).status,"open");
+ const record=(await f.manager.messageJournal.list()).records.find(r=>r.direction==="input");
+ assert.ok(record.text.includes("答案：当前仓库"));assert.ok(!record.text.includes("questionItemId"));
+ const action=f.manager.questions.state.entries[q.questionId];
+ action.status="canceled";action.reason="canceled_by_owner";
+ assert.deepEqual(await f.manager.questions.observeNativeReply({threadId:"thread",turnId:"reply",messageId:randomUUID(),text:nativeQuestionReply(q,["当前仓库"])}),[]);
+ assert.equal(action.status,"canceled");
+ assert.equal(parseNativeQuestionReply(JSON.stringify([{questionItemId:q.sourceQuestionItemIds[0],question:q.questions[0].title,answer:"当前仓库"}])),null);
+});
+
+test("separate native answers to a multi-question group link both observations to the same card", async t => {
+ const f=await fixture(t);ui(f);
+ const q=projectPublicQuestion({...rawQuestion(),questions:[
+  {title:"第一题",options:["甲","乙"]},{title:"第二题",options:["丙","丁"]}
+ ]},{threadId:"thread",turnId:"native-turn"});
+ await f.manager.questions.publish(q);
+ f.manager.handoffPaused=false;
+ for (const [i,answer] of ["甲","丁"].entries()) {
+  const partial={...q,questions:[q.questions[i]],sourceQuestionItemIds:[q.sourceQuestionItemIds[i]]};
+  await f.manager.observeNativeInput(f.session,{key:"reply/part-"+i,turnId:"reply",text:nativeQuestionReply(partial,[answer])+"\n"});
+  await f.manager.questions.process();
+  assert.equal(f.manager.questions.get(q.questionId).status,i===0?"open":"answered");
+ }
+ const records=(await f.manager.messageJournal.list()).records.filter(r=>r.direction==="input");
+ assert.equal(records.length,2);assert.ok(records.every(r=>r.mirror===false));
+ for (const record of records) assert.equal((await f.manager.messageJournal.receipt(record.id)).state,"sent");
+ assert.deepEqual(f.manager.questions.get(q.questionId).answers,["甲","丁"]);
+ assert.equal(f.calls.filter(c=>c.name==="send_message_to_thread").length,0);
+});
+
+test("Feishu skip synchronizes the exact native question IDs without choosing an option or creating another input card",async t=>{
+ const f=await fixture(t),cards=ui(f),q=await observe(f);
+ f.manager.config.nativeBusyDeliveryVerified=true;f.manager.handoffPaused=false;
+ await f.manager.drainPublicTexts();
+ const button=nodes(cards[0].card).find(e=>e.tag==="button"&&e.text?.content==="跳过");
+ const click={header:{event_type:"card.action.trigger",event_id:"skip-native-question"},event:{
+  operator:{open_id:"trainer"},context:{open_message_id:"om_real_question_card",open_chat_id:"chat"},
+  action:formAction(cards[0].card,[],"form_skip")}};
+ await f.manager.questions.acceptCard(click);
+ assert.equal(f.calls.filter(c=>c.name==="send_message_to_thread").length,0);
+ await f.manager.questions.process();await f.manager.questions.process();
+ const writes=f.calls.filter(c=>c.name==="send_message_to_thread");assert.equal(writes.length,1);
+ const replies=parseNativeQuestionReply(writes[0].args.prompt);
+ assert.deepEqual(replies,[{questionItemId:q.sourceQuestionItemIds[0],question:q.questions[0].title,answer:SKIPPED_QUESTION_ANSWER}]);
+ assert.ok(!q.questions[0].options.includes(replies[0].answer));
+ const state=f.manager.questions.get(q.questionId);assert.equal(state.status,"skipped");
+ assert.deepEqual(state.skippedQuestionIndexes,[0]);
+ const id=f.manager.questions.state.entries[q.questionId].nativeMessageId;
+ assert.ok(!Object.values(f.manager.state.publicTextOutbox).some(e=>e.key==="input:"+id));
 });

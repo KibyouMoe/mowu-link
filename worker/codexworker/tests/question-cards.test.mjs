@@ -9,6 +9,9 @@ import { questionCard, parseCardAction } from "../question-cards.mjs";
 import { SKIPPED_QUESTION_ANSWER } from "../interface/public-questions.mjs";
 import { FeishuWebsocketClient, FeishuNotifier, encodeFrame, decodeFrame } from "../feishu.mjs";
 
+const nodes = value => !value || typeof value !== "object" ? [] :
+  [value, ...Object.values(value).flatMap(nodes)];
+
 async function fixture(t) {
   const dir = await mkdtemp(path.join(os.tmpdir(), "codexworker-question-cards-"));
   const writes = [], patches = [], sends = [];
@@ -30,7 +33,7 @@ async function fixture(t) {
   const publish = async extra => { Object.assign(q, extra); return relay.publish(q); };
   const callback = (value = {}, extra = {}) => ({ header: { event_type: "card.action.trigger", event_id: randomUUID() }, event: {
     operator: { open_id: extra.openId ?? "trainer" }, context: { open_message_id: extra.messageId ?? "om_question", open_chat_id: extra.chatId ?? "oc_chat" },
-    action: { value: { bridgeQuestion: q.questionId, nonce: relay.state.entries[q.questionId]?.nonce, action: "select", questionIndex: 0, optionIndex: 0, ...value } } } });
+    action: { form_value: extra.formValues, value: { bridgeQuestion: q.questionId, nonce: relay.state.entries[q.questionId]?.nonce, action: "select", questionIndex: 0, optionIndex: 0, ...value } } } });
   return { dir, m, relay, q, writes, patches, sends, publish, callback,
     snapshot: value => { snapshot = value; }, native: fn => { native = fn; } };
 }
@@ -38,7 +41,8 @@ async function fixture(t) {
 test("structured card keeps full text/options, has callback buttons and no independent deadline", async t => {
   const f = await fixture(t); await f.publish();
   assert.equal(f.sends[0].card.schema, "2.0"); assert.ok(JSON.stringify(f.sends[0].card).includes("保留完整题目与所选答案"));
-  assert.ok(JSON.stringify(f.sends[0].card).includes('"type":"callback"'));
+  assert.ok(nodes(f.sends[0].card).some(n => n.tag === "input"));
+  assert.ok(nodes(f.sends[0].card).some(n => n.action_type === "form_submit"));
   const s = f.relay.state.entries[f.q.questionId]; assert.equal(s.sourceTurnId, "source"); assert.equal(s.deadline, undefined);
   assert.equal(f.writes.length, 0);
   await f.publish(); assert.equal(f.sends.length, 1);
@@ -55,11 +59,11 @@ test("compact option labels appear once, without full routing IDs or duplicate s
   assert.equal(card.body.elements.filter(e => e.tag === "markdown" && e.content.includes("待回答")).length, 0);
 });
 test("long option text remains complete in the body, using short numbered buttons", async t => {
-  const f = await fixture(t); const long = "这是一段比较长的选项文字，必须完整保留而不是省略掉后半部分";
+  const f = await fixture(t); const long = "这是一段比较长的选项文字，必须完整保留而不是省略掉后半部分，即使超过四十个字符也应该完整可见";
   await f.publish({ questions: [{ title: "选择哪项？", options: [long, "短选项"] }] });
-  const card = f.sends[0].card; assert.ok(card.body.elements[0].content.includes(long));
-  const buttons = card.body.elements.flatMap(e => e.columns ?? []).flatMap(e => e.elements);
-  assert.deepEqual(buttons.map(b => b.text.content), ["选择 1", "选择 2"]);
+  const card = f.sends[0].card; assert.ok(nodes(card).some(n => n.tag === "markdown" && n.content.includes(long)));
+  const buttons = nodes(card).filter(n => n.tag === "button" && n.value?.action === "form_select");
+  assert.deepEqual(buttons.map(b => b.text.content), ["选择 1", "2）短选项"]);
 });
 test("layout upgrade patches the exact existing current-binding card, preserving answers and nonce", async t => {
   const f = await fixture(t); await f.publish(); await f.relay.acceptCard(f.callback()); await f.relay.process();
@@ -198,8 +202,8 @@ test("question notifier uses exact POST UUID, PATCH message ID and does not send
 
 test("skip is durable before ACK, ignores injected answers and closes the original card once", async t => {
  const f=await fixture(t);await f.publish();
- const button=f.sends[0].card.body.elements.find(e=>e.tag==="button"&&e.text?.content==="跳过");
- assert.equal(button.behaviors[0].value.action,"skip");
+ const button=nodes(f.sends[0].card).find(e=>e.tag==="button"&&e.text?.content==="跳过");
+ assert.equal(button.value.action,"form_skip");
  const click=f.callback({action:"skip",answer:"forged choice"});
  assert.equal((await f.relay.acceptCard(click)).toast.type,"success");
  const entry=JSON.parse(await readFile(f.relay.path,"utf8")).entries[f.q.questionId];
@@ -226,7 +230,7 @@ test("skip preserves selected multi-question answers and skips only unanswered q
 });
 test("a free-text clarification without options still exposes a working skip button",async t=>{
  const f=await fixture(t);await f.publish({questions:[{title:"请补充说明"}]});
- assert.ok(f.sends[0].card.body.elements.some(e=>e.tag==="button"&&e.text?.content==="跳过"));
+ assert.ok(nodes(f.sends[0].card).some(e=>e.tag==="button"&&e.text?.content==="跳过"));
  await f.relay.acceptCard(f.callback({action:"skip"}));await f.relay.process();
  assert.equal(f.relay.get(f.q.questionId).status,"skipped");
  assert.deepEqual(f.relay.get(f.q.questionId).answers,[SKIPPED_QUESTION_ANSWER]);
@@ -252,4 +256,111 @@ test("a queued skip remains pending through restart and finishes only on native 
  await restored.process();await restored.process();
  assert.equal(restored.get(f.q.questionId).status,"skipped");assert.equal(f.writes.length,1);
  await restored.close();
+});
+
+test("mixed questions render numbered options and editable multiline fields with explicit submit", async t => {
+  const f = await fixture(t); await f.publish({ questions: [f.q.questions[0], { title: "补充说明" }] });
+  const all = nodes(f.sends[0].card), inputs = all.filter(n => n.tag === "input");
+  assert.deepEqual(inputs.map(n => n.name), ["answer_0", "answer_1"]);
+  assert.ok(inputs.every(n => n.input_type === "multiline_text" && n.required === false && n.max_length === 1000));
+  assert.deepEqual(all.filter(n => n.tag === "button").map(n => n.value.action), ["form_select", "form_select", "form_submit", "form_skip"]);
+});
+
+test("form selection preserves other drafts across restart and never submits an answer", async t => {
+  const f = await fixture(t); await f.publish({ questions: [f.q.questions[0], { title: "补充说明" }] });
+  const click = f.callback({ action: "form_select", optionIndex: 1, answer: "forged" },
+    { formValues: { answer_0: "旧输入", answer_1: "保留这一段\n第二行" } });
+  assert.equal((await f.relay.acceptCard(click)).toast.type, "success");
+  const restored = new QuestionRelay(f.m); await restored.initialize(); await restored.process();
+  assert.equal(f.writes.length, 0); assert.equal(restored.get(f.q.questionId).status, "open");
+  const inputs = nodes(f.patches.at(-1).card).filter(n => n.tag === "input");
+  assert.deepEqual(inputs.map(n => n.default_value), ["仅保留状态", "保留这一段\n第二行"]);
+  assert.equal(f.patches.at(-1).id, "om_question"); assert.equal(f.sends.length, 1);
+  await restored.acceptCard(click); assert.deepEqual(restored.state.entries[f.q.questionId].draftAnswers, inputs.map(n => n.default_value));
+  await restored.close();
+});
+
+test("single-question form selection still requires explicit submit", async t => {
+  const f = await fixture(t); await f.publish();
+  await f.relay.acceptCard(f.callback({ action: "form_select" }, { formValues: { answer_0: "" } }));
+  await f.relay.process(); assert.equal(f.writes.length, 0); assert.equal(f.relay.get(f.q.questionId).status, "open");
+  await f.relay.acceptCard(f.callback({ action: "form_submit" }, { formValues: { answer_0: f.q.questions[0].options[0] } }));
+  await f.relay.process(); assert.equal(f.writes.length, 1);
+});
+
+test("custom form answers bind exact native question IDs and dispatch once after durable ACK", async t => {
+  const f = await fixture(t);
+  const ids = [0, 1].map(i => JSON.stringify(["request_user_input_async", "call_form", i]));
+  f.m.deliveryState = async () => f.m.read();
+  await f.publish({ questions: [f.q.questions[0], { title: "补充说明" }], delivery: "async", sourceTurnId: "source", sourceQuestionItemIds: ids });
+  const answers = ["这是自定义答案，并非预设选项", "第一行\n第二行 🐎"];
+  const click = f.callback({ action: "form_submit", answer: "forged" },
+    { formValues: { answer_0: answers[0], answer_1: answers[1], threadId: "attacker-thread" } });
+  assert.equal((await f.relay.acceptCard(click)).toast.type, "success");
+  assert.equal(f.writes.length, 0);
+  const disk = JSON.parse(await readFile(f.relay.path, "utf8")).entries[f.q.questionId];
+  assert.deepEqual(disk.answers, answers); assert.equal(disk.status, "answer_pending");
+  await f.relay.acceptCard(click); await f.relay.process(); await f.relay.process();
+  assert.equal(f.writes.length, 1);
+  const replies = JSON.parse(f.writes[0].request.text.match(/<send_user_message_question_reply>([\s\S]*)<\/send_user_message_question_reply>/)[1]);
+  assert.deepEqual(replies.map(r => r.questionItemId), ids); assert.deepEqual(replies.map(r => r.answer), answers);
+  assert.ok(!f.writes[0].request.text.includes("attacker-thread")); assert.ok(!f.writes[0].request.text.includes("forged"));
+  assert.ok(!nodes(f.patches.at(-1).card).some(n => n.tag === "input" || n.tag === "button"));
+  await f.relay.acceptCard(f.callback({ action: "form_submit" }, { formValues: { answer_0: "changed", answer_1: "changed" } }));
+  await f.relay.process(); assert.equal(f.writes.length, 1);
+});
+
+for (const [label, formValues] of [["missing", undefined], ["array", []], ["number", { answer_0: 42 }],
+  ["oversized", { answer_0: "x".repeat(1001) }], ["nested", { answer_0: { text: "nested" } }]]) {
+  test(`malformed form is rejected before recording an answer: ${label}`, async t => {
+    const f = await fixture(t); await f.publish({ questions: [{ title: "填写回答" }] });
+    assert.equal((await f.relay.acceptCard(f.callback({ action: "form_submit" }, { formValues }))).toast.type, "error");
+    assert.equal(f.relay.get(f.q.questionId).status, "open");
+    assert.equal(f.relay.state.entries[f.q.questionId].answers, undefined);
+    await f.relay.process(); assert.equal(f.writes.length, 0);
+  });
+}
+
+test("blank submit does not commit a partial answer; explicit skip preserves only filled fields", async t => {
+  const f = await fixture(t); await f.publish({ questions: [f.q.questions[0], { title: "第二题" }] });
+  const formValues = { answer_0: "自定义补充", answer_1: "  \n " };
+  assert.equal((await f.relay.acceptCard(f.callback({ action: "form_submit" }, { formValues }))).toast.type, "warning");
+  assert.equal(f.relay.state.entries[f.q.questionId].answers, undefined); assert.equal(f.writes.length, 0);
+  assert.equal((await f.relay.acceptCard(f.callback({ action: "form_skip" }, { formValues }))).toast.type, "success");
+  await f.relay.process(); assert.deepEqual(f.relay.get(f.q.questionId).answers, ["自定义补充", SKIPPED_QUESTION_ANSWER]);
+  assert.deepEqual(f.relay.get(f.q.questionId).skippedQuestionIndexes, [1]);
+  assert.equal(f.writes.length, 1); assert.ok(JSON.stringify(f.patches.at(-1).card).includes("部分跳过"));
+});
+
+test("empty form can skip every question without inventing answers", async t => {
+  const f = await fixture(t); await f.publish({ questions: [{ title: "填写回答" }] });
+  await f.relay.acceptCard(f.callback({ action: "form_skip" }, { formValues: {} }));
+  await f.relay.process(); assert.deepEqual(f.relay.get(f.q.questionId).answers, [SKIPPED_QUESTION_ANSWER]);
+  assert.equal(f.relay.get(f.q.questionId).status, "skipped");
+});
+
+test("form submission keeps trainer/chat/message/nonce/epoch authorization", async t => {
+  const f = await fixture(t); await f.publish();
+  for (const extra of [{ openId: "stranger" }, { chatId: "other" }, { messageId: "other" }]) {
+    assert.equal((await f.relay.acceptCard(f.callback({ action: "form_submit" }, { ...extra, formValues: { answer_0: "valid" } }))).toast.type, "error");
+  }
+  assert.equal((await f.relay.acceptCard(f.callback({ action: "form_submit", nonce: "wrong" }, { formValues: { answer_0: "valid" } }))).toast.type, "error");
+  assert.equal(f.relay.state.entries[f.q.questionId].draftAnswers, undefined);
+  f.m.state.selectionEpoch++;
+  assert.equal((await f.relay.acceptCard(f.callback({ action: "form_submit" }, { formValues: { answer_0: "valid" } }))).toast.type, "warning");
+  assert.equal(f.relay.get(f.q.questionId).status, "expired"); assert.equal(f.writes.length, 0);
+});
+
+test("form fields survive the actual websocket callback envelope and ACK before native I/O", async t => {
+  const f = await fixture(t); await f.publish({ questions: [{ title: "填写回答" }] });
+  const payload = Buffer.from(JSON.stringify(f.callback({ action: "form_submit" }, { formValues: { answer_0: "来自输入框" } })));
+  assert.deepEqual(parseCardAction(payload).formValues, { answer_0: "来自输入框" });
+  const client = new FeishuWebsocketClient({ enabled: true }, { onCardAction: p => f.relay.acceptCard(p) });
+  const frame = decodeFrame(encodeFrame({ SeqID: 123n, LogID: 456n, method: 1, service: 4,
+    headers: [["type", "card"]], payload }));
+  let ack; await client._handleFrame({ send: bytes => { ack = decodeFrame(bytes); } }, frame, 4);
+  const envelope = JSON.parse(new TextDecoder().decode(ack.payload));
+  assert.equal(JSON.parse(Buffer.from(envelope.data, "base64")).toast.type, "success");
+  assert.equal(f.writes.length, 0); await f.relay.process(); assert.equal(f.writes.length, 1);
+  assert.deepEqual(f.relay.get(f.q.questionId).answers, ["来自输入框"]);
 });

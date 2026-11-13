@@ -48,7 +48,12 @@ function ui(f) {
  f.notifier.updateQuestionCard=async()=>({code:0});
  return cards;
 }
-const buttons = card => card.body.elements.flatMap(e=>e.columns??[]).flatMap(e=>e.elements??[]).filter(e=>e.tag==="button");
+const nodes = value => !value || typeof value !== "object" ? [] : [value, ...Object.values(value).flatMap(nodes)];
+const buttons = card => nodes(card).filter(e=>e.tag==="button" && e.value?.action === "form_select");
+const formAction = (card, answers, action = "form_submit") => ({
+ value: nodes(card).find(e=>e.tag === "button" && e.value?.action === action).value,
+ form_value: Object.fromEntries(answers.map((answer, i) => [`answer_${i}`, answer])),
+});
 async function observe(f) {
  const item=project(rawQuestion()).item;
  await f.manager.serial(()=>f.manager.emit("item.completed",{targetThreadId:"thread",source:"codex"},
@@ -110,7 +115,7 @@ test("a native question card uses the existing authorized callback and persists 
  const card=cards[0].card,button=buttons(card)[1];
  const click={header:{event_type:"card.action.trigger",event_id:"test-native-question-click"},event:{
   operator:{open_id:"trainer"},context:{open_message_id:"om_real_question_card",open_chat_id:"chat"},
-  action:{value:button.behaviors[0].value}}};
+  action:formAction(card,["另一个仓库"])}};
  const reply=await f.manager.questions.acceptCard(click);
  assert.equal(reply.toast.type,"success");
  const saved=JSON.parse(await readFile(f.manager.questions.path,"utf8")).entries[q.questionId];
@@ -145,7 +150,7 @@ test("native async choices remain actionable after their own turn completes and 
  const button=buttons(cards[0].card)[0];
  await f.manager.questions.acceptCard({header:{event_type:"card.action.trigger",event_id:"completed-source-click"},event:{
   operator:{open_id:"trainer"},context:{open_message_id:"om_real_question_card",open_chat_id:"chat"},
-  action:{value:button.behaviors[0].value}}});
+  action:formAction(cards[0].card,["当前仓库"])}});
  await f.manager.questions.process();
  assert.equal(f.manager.questions.get(q.questionId).status,"answered");
  assert.equal(f.calls.filter(c=>c.name==="send_message_to_thread").length,1);
@@ -156,7 +161,7 @@ test("native async choices cannot deliver into a newer task after their own turn
  const button=buttons(cards[0].card)[0];
  await f.manager.questions.acceptCard({header:{event_type:"card.action.trigger",event_id:"new-task-click"},event:{
   operator:{open_id:"trainer"},context:{open_message_id:"om_real_question_card",open_chat_id:"chat"},
-  action:{value:button.behaviors[0].value}}});
+  action:formAction(cards[0].card,["当前仓库"])}});
  f.manager.deliveryState=async()=>({turns:[{id:"native-turn",status:"completed"},{id:"new-task",status:"inProgress"}]});
  await f.manager.questions.process();
  assert.equal(f.manager.questions.get(q.questionId).status,"expired");
@@ -320,10 +325,10 @@ test("Feishu skip synchronizes the exact native question IDs without choosing an
  const f=await fixture(t),cards=ui(f),q=await observe(f);
  f.manager.config.nativeBusyDeliveryVerified=true;f.manager.handoffPaused=false;
  await f.manager.drainPublicTexts();
- const button=cards[0].card.body.elements.find(e=>e.tag==="button"&&e.text?.content==="跳过");
+ const button=nodes(cards[0].card).find(e=>e.tag==="button"&&e.text?.content==="跳过");
  const click={header:{event_type:"card.action.trigger",event_id:"skip-native-question"},event:{
   operator:{open_id:"trainer"},context:{open_message_id:"om_real_question_card",open_chat_id:"chat"},
-  action:{value:button.behaviors[0].value}}};
+  action:formAction(cards[0].card,[],"form_skip")}};
  await f.manager.questions.acceptCard(click);
  assert.equal(f.calls.filter(c=>c.name==="send_message_to_thread").length,0);
  await f.manager.questions.process();await f.manager.questions.process();

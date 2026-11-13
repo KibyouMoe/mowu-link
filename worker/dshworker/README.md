@@ -1,5 +1,21 @@
 # DSHWorker · dsh 原生传输
 
+## 飞书提问表单（布局 5）
+
+每道题都有多行回答框，包括没有预设选项的题目；每题最多 1000 字。
+点击选项会把完整选项填入回答框，仍可编辑，再统一点击「提交回答」。
+单题也需显式提交；「跳过」保留已填内容，只将空白题目标记为跳过。
+选择操作携带当前表单全部字段，其他题的草稿一并持久化，恢复后继续保留。
+答案回填原生问题 ID，原飞书卡片更新为已回答；不再另发一张输入卡。
+旧布局回调继续兼容，身份、聊天、消息、nonce 和原会话绑定校验保持不变。
+router 发起的问题仍由溪流经原回答接口作答，训练员侧只展示状态。
+
+验收覆盖表单回调、草稿恢复、空白/非法输入、重复操作、客户端答复同步和路由归属；
+接口接受卡片与真人看到、提交成功分开记录。只更新源码不会改变已运行的 CLI Worker；
+需正常重载 Worker。共享引擎的原会话保留，不需要重启 Codex 或 router。
+本次结果与待验项见[表单验收记录](../../docs/question-form-validation-20261113.md)。
+
+
 本目录是 CodexWorker 业务层（飞书 + router + manager + HTTP）在 **DeepSeek Harness
 (dsh)** 上的实现，由 `interface/transport/dsh.mjs` 驱动 `dsh --profile headless --json`。
 `desktop-manager.mjs`、`mcp-business.mjs`、`cli.mjs` 与 `worker/codexworker` 逐字节

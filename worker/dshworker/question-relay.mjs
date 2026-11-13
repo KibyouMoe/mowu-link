@@ -5,7 +5,7 @@ import path from "node:path";
 import { questionInitiator } from "./question-origin.mjs";
 import { getActiveRouterClient } from "./router-client.mjs";
 import { routerQuestionNotice } from "./router-question-channel.mjs";
-import { questionCard, parseCardAction, QUESTION_CARD_LAYOUT_VERSION } from "./question-cards.mjs";
+import { questionCard, parseCardAction, questionFormAnswers, QUESTION_ANSWER_LIMIT, QUESTION_CARD_LAYOUT_VERSION } from "./question-cards.mjs";
 
 const skippedIndexes = answers => answers.flatMap((answer, index) => answer === SKIPPED_QUESTION_ANSWER ? [index] : []);
 const answeredStatus = state => state.skippedQuestionIndexes?.length ? "skipped" : "answered";
@@ -301,7 +301,29 @@ export class QuestionRelay {
       if (q.recipient?.kind === "hermes") return toast("这条提问由溪流回答。", "info");
       if (s.status !== "open") return toast(s.status === "answered" ? "此提问已经回答，不会重复投递。" : "此提问已关闭或正在处理，不会重复投递。", "info");
       if (!s.sourceTurnId) return toast("原提问状态不可用。", "warning");
-      if (action === "skip") {
+      if (["form_select", "form_submit", "form_skip"].includes(action)) {
+        let drafts;
+        try { drafts = questionFormAnswers(q, event.formValues); }
+        catch { return toast(`回答格式无效，或单题超过 ${QUESTION_ANSWER_LIMIT} 字。`, "error"); }
+        if (action === "form_select") {
+          if (!Number.isInteger(qi) || !Number.isInteger(oi) || !q.questions[qi]?.options?.[oi]) return toast("无效选项。", "error");
+          drafts[qi] = q.questions[qi].options[oi];
+        } else if (action === "form_submit" && drafts.some(answer => !answer)) {
+          return toast("请填写每一道题；也可点跳过，保留已填答案。", "warning");
+        }
+        s.draftAnswers = drafts;
+        s.selected = {};
+        drafts.forEach((answer, index) => {
+          const option = q.questions[index].options?.indexOf(answer) ?? -1;
+          if (option >= 0) s.selected[index] = option;
+        });
+        if (action !== "form_select") {
+          s.answers = drafts.map(answer => answer || SKIPPED_QUESTION_ANSWER);
+          s.skippedQuestionIndexes = skippedIndexes(s.answers);
+          s.answerActor = "trainer";
+          s.status = "answer_pending"; s.nativeMessageId = randomUUID();
+        }
+      } else if (action === "skip") {
         s.answers = q.questions.map((question, i) =>
           (Number.isInteger(s.selected[i]) ? question.options?.[s.selected[i]] : null) ?? s.answers?.[i] ?? SKIPPED_QUESTION_ANSWER);
         s.skippedQuestionIndexes = skippedIndexes(s.answers);
@@ -323,7 +345,7 @@ export class QuestionRelay {
       }
       s.callbackEvents = [...(s.callbackEvents ?? []), event.eventId].slice(-256);
       s.revision++; await this.save();
-      return toast(s.status === "answer_pending" ? (s.skippedQuestionIndexes?.length ? "已跳过，正在同步原会话。" : "答案已保存，正在送回原会话。") : "选择已保存，请选完后提交。", "success");
+      return toast(s.status === "answer_pending" ? (s.skippedQuestionIndexes?.length ? "已跳过，正在同步原会话。" : "答案已保存，正在送回原会话。") : "已填入回答框，可修改后提交。", "success");
     });
     await this.serial(async () => {
       const stats = this.state.callbackStats ??= { received: 0, accepted: 0, rejected: 0 };
