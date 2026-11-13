@@ -49,6 +49,7 @@ import urllib.request
 import uuid
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from socketserver import TCPServer
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -1548,6 +1549,13 @@ class RouterServer(ThreadingHTTPServer):
         self.conn_lock = threading.Lock()
         self.dispatch_lock = threading.RLock()
         super().__init__(addr, RouterHandler)
+
+    def server_bind(self) -> None:
+        # HTTPServer resolves a decorative server_name with getfqdn(), which
+        # can block macOS startup on unavailable reverse DNS. Bind the configured
+        # address directly; authentication and remote-bind opt-in stay unchanged.
+        TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
 
     def cancel_execution(self, task: Dict[str, Any]) -> Dict[str, Any]:

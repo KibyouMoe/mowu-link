@@ -44,3 +44,12 @@
 
 - Windows Node22首轮另遇并发冷加载/CIM的夹具时限：CI改为2文件并发，冷加载预算与Windows MCP的60s一致；真实进程探针仅对系统杀掉的超时查询最多3次，不重试权限拒绝。全部安全/零网络/零原生写入断言保留。此为测试夹具期限，不给Worker任务设期限；定向108 pass / 0 fail / 2 skip。
 - 实际分发包补协议schema后全量694 tests / 686 pass / 0 fail / 8 skip（/tmp/desktop-only-distribution-final.tap）；技能验证Skill is valid。Mac Desktop配置已备份，暂autoStart=false阻止与旧收信进程争用；已注册本地marketplace，未关闭旧实例。
+
+## 实际安装与原生 CI 恢复点
+
+- 5192c4d 与 ace8724 的 Windows Node22/26 均实际全量成功：Codex 694 tests / 687 pass / 0 fail / 7 skip；DSH 735 / 728 / 0 / 7。
+- Mac 云端失败的真实 Python 堆栈为 socket.getfqdn → http.server.server_bind → RouterServer.__init__，不是引擎或 worker 卡死；已改直接绑定数字地址，回归禁止启动时反向 DNS。
+- Mac 正常插件安装源为 CodexSyncArea；受管缓存 ~/.codex/plugins/cache/codex-sync-area/codexworker/0.3.0，123文件已只读核对与5192c4d相同。实际.mcp清单的隔离Node22 initialize/tools/list/binding_status成功，17工具、原主会话不变；并非真实Desktop宿主验收。
+- 实际desktop-config备份 .bak-desktop-only-20261114-000832，暂autoStart=false；旧CLI PID55771 / 0.2.41仍ready，飞书与router均在线，未动生产服务。
+- launchctl CODEX_CLI_PATH仍指向 ~/.codex/state/codexworker/desktop-shared/codex；迁移需正常恢复Desktop内置入口，不能直接删除仍用的wrapper或中断当前原生回合。
+- 技能分发master仍有本轮未提交快照/文档；实际本地旧技能待候选验证后备份刷新。

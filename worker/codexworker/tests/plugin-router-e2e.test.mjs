@@ -38,7 +38,7 @@ const python = process.env.CODEXWORKER_TEST_PYTHON || (process.platform === "win
 // unconditional fcntl import needs this narrow Windows compatibility adapter;
 // no router request, database, dispatch or ACK implementation is replaced.
 const pythonBootstrap = String.raw`
-import faulthandler, json, os, runpy, sys, threading, types
+import faulthandler, json, os, runpy, socket, sys, threading, types
 from pathlib import Path
 faulthandler.dump_traceback_later(8, file=sys.stderr)
 if sys.platform == "win32":
@@ -56,8 +56,14 @@ api = runpy.run_path(source, run_name="router_e2e_server")
 store = api["RouterStore"](db)
 store.reset_runtime()
 trigger = api["TriggerClient"](trigger_url, token_file)
+original_getfqdn = socket.getfqdn
+def forbidden_reverse_dns(*args, **kwargs):
+    raise AssertionError("Router startup must not depend on reverse DNS")
+socket.getfqdn = forbidden_reverse_dns
 server = api["RouterServer"](("127.0.0.1", 0), store, Path(token_file).read_text().strip(),
     api["TriggerNotifier"](trigger), api["TriggerSubscriptionBridge"](trigger), ping_interval=0.2)
+socket.getfqdn = original_getfqdn
+assert server.server_name == "127.0.0.1" and server.server_port == server.server_address[1]
 def stop_on_eof():
     sys.stdin.buffer.read(1)
     server.shutdown()
