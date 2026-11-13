@@ -87,7 +87,7 @@ test("native question output creates a question-titled button card instead of an
  f.manager.handoffPaused=false;await f.manager.drainPublicTexts();
  assert.equal(cards.length,1);assert.ok(cards[0].card.header.title.content.includes("-提问"));
  assert.ok(!cards[0].card.header.title.content.includes("-回复"));
- assert.deepEqual(buttons(cards[0].card).map(b=>b.text.content),["1）当前仓库","2）另一个仓库"]);
+ assert.deepEqual(buttons(cards[0].card).map(b=>b.text.content),["1  当前仓库","2  另一个仓库"]);
  assert.equal(f.notices.length,0);
  await observe(f);await f.manager.drainPublicTexts();assert.equal(cards.length,1);
  const delivery=await f.manager.messageJournal.receipt(record.id);

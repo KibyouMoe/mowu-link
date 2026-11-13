@@ -63,7 +63,7 @@ test("long option text remains complete in the body, using short numbered button
   await f.publish({ questions: [{ title: "选择哪项？", options: [long, "短选项"] }] });
   const card = f.sends[0].card; assert.ok(nodes(card).some(n => n.tag === "markdown" && n.content.includes(long)));
   const buttons = nodes(card).filter(n => n.tag === "button" && n.value?.action === "form_select");
-  assert.deepEqual(buttons.map(b => b.text.content), ["选择 1", "2）短选项"]);
+  assert.deepEqual(buttons.map(b => b.text.content), ["选择 1", "2  短选项"]);
 });
 test("layout upgrade patches the exact existing current-binding card, preserving answers and nonce", async t => {
   const f = await fixture(t); await f.publish(); await f.relay.acceptCard(f.callback()); await f.relay.process();
@@ -263,7 +263,7 @@ test("mixed questions render numbered options and editable multiline fields with
   const all = nodes(f.sends[0].card), inputs = all.filter(n => n.tag === "input");
   assert.deepEqual(inputs.map(n => n.name), ["answer_0", "answer_1"]);
   assert.ok(inputs.every(n => n.input_type === "multiline_text" && n.required === false && n.max_length === 1000));
-  assert.deepEqual(all.filter(n => n.tag === "button").map(n => n.value.action), ["form_select", "form_select", "form_submit", "form_skip"]);
+  assert.deepEqual(all.filter(n => n.tag === "button").map(n => n.value.action), ["form_select", "form_select", "form_skip", "form_submit"]);
 });
 
 test("form selection preserves other drafts across restart and never submits an answer", async t => {

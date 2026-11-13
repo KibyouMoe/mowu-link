@@ -1,3 +1,26 @@
+# 截图样式对齐：布局 6
+
+根据用户提供的 Codex 原生提问截图，改用浅色标题、无边框纵排编号选项、
+「或自行撰写回复」输入提示，底部「跳过」「发送」紧凑排列并靠右。
+待答卡片移除重复状态、长操作说明与技术编号；终态和异常原因仍可见。
+本次只调整展示，表单回调、原生问题绑定和幂等逻辑保持不变。
+
+两侧 question-cards / question-routing / native-public-questions 定向回归：
+`node --test --test-reporter=tap worker/{codexworker,dshworker}/tests/{question-cards,question-routing,native-public-questions}.test.mjs`
+（Bash/Zsh 展开；Windows 使用实际文件列表。）
+
+```text
+# tests 166
+# pass 166
+# fail 0
+# cancelled 0
+# skipped 0
+```
+
+飞书结构验证返回 HTTP 200 / code=0 / card_id=7707660496032549881。
+日志：`/tmp/oguri-question-layout6.tap`。真实飞书客户端视觉效果仍需用户验收，
+不将接口接受等同于截图一致。以下是上一版功能验收记录。
+
 # 飞书提问表单验收（2026-11-13）
 
 布局版本从 4 升为 5。问题、编号选项、多行回答框、提交和跳过放在同一张卡片。

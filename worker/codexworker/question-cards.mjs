@@ -1,7 +1,7 @@
 // Explicit public clarification UI only. Never render raw native tool arguments.
 import { escapeMarkdown } from "./feishu.mjs";
 import { SKIPPED_QUESTION_ANSWER } from "./interface/public-questions.mjs";
-export const QUESTION_CARD_LAYOUT_VERSION = 5;
+export const QUESTION_CARD_LAYOUT_VERSION = 6;
 export const QUESTION_ANSWER_LIMIT = 1000;
 export const questionInputName = index => `answer_${index}`;
 
@@ -12,7 +12,7 @@ export function questionCard(question, state, bridgeName) {
   const canRespond = question.recipient?.kind !== "hermes" && state.status === "open" && state.sourceTurnId;
   const form = [];
   const button = (label, action, name, extra = {}, primary = false) => ({ tag: "button", name,
-    text: { tag: "plain_text", content: label }, type: primary ? "primary" : "default", action_type: "form_submit",
+    text: { tag: "plain_text", content: label }, type: primary ? "primary_text" : "text", size: "small", action_type: "form_submit",
     value: { bridgeQuestion: question.questionId, nonce: state.nonce, action, ...extra } });
   question.questions.forEach((q, qi) => {
     const title = `${question.questions.length > 1 ? `${qi + 1}. ` : ""}${q.title}`;
@@ -22,11 +22,11 @@ export function questionCard(question, state, bridgeName) {
       q.options?.forEach((option, oi) => {
         const short = option.length <= 40 && !option.includes("\n");
         if (!short) form.push({ tag: "markdown", content: escapeMarkdown(`${oi + 1}）${option}`) });
-        form.push(button(short ? `${oi + 1}）${option}` : `选择 ${oi + 1}`, "form_select", `select_${qi}_${oi}`,
+        form.push(button(short ? `${oi + 1}  ${option}` : `选择 ${oi + 1}`, "form_select", `select_${qi}_${oi}`,
           { questionIndex: qi, optionIndex: oi }, draft === option));
       });
-      form.push({ tag: "input", name: questionInputName(qi), input_type: "multiline_text",
-        placeholder: { tag: "plain_text", content: q.options ? "选择上方选项，或输入其他答案" : "输入你的回答" },
+      form.push({ tag: "input", name: questionInputName(qi), input_type: "multiline_text", width: "fill",
+        placeholder: { tag: "plain_text", content: "或自行撰写回复" },
         default_value: draft, max_length: QUESTION_ANSWER_LIMIT, required: false });
       if (qi < question.questions.length - 1) form.push({ tag: "hr" });
       return;
@@ -39,22 +39,24 @@ export function questionCard(question, state, bridgeName) {
     elements.push({ tag: "markdown", content: escapeMarkdown(text) });
   });
   if (canRespond) {
-    form.push({ tag: "column_set", flex_mode: "flow", columns: [
-      { tag: "column", width: "weighted", weight: 1, elements: [button("提交回答", "form_submit", "submit_answers", {}, true)] },
-      { tag: "column", width: "weighted", weight: 1, elements: [button("跳过", "form_skip", "skip_answers")] },
+    form.push({ tag: "column_set", flex_mode: "none", horizontal_align: "right", horizontal_spacing: "8px", columns: [
+      { tag: "column", width: "auto", elements: [{ ...button("跳过", "form_skip", "skip_answers"), type: "default" }] },
+      { tag: "column", width: "auto", elements: [{ ...button("发送", "form_submit", "submit_answers"), type: "primary_filled" }] },
     ] });
-    elements.push({ tag: "form", name: "question_answers", elements: form });
+    elements.push({ tag: "form", name: "question_answers", vertical_spacing: "8px", padding: "0px", elements: form });
   }
   const reason = { source_task_ended: "原派发任务已经结束，旧问题不再接收回答。", source_turn_ended: "原提问任务已经结束，选项不再接收答案。",
     selected_target_changed: "接入会话已切换，旧卡片不再接收答案。", source_unavailable: "无法核实原提问任务，未投递答案。",
     dispatch_outcome_unknown: "原生投递结果不确定，请在 Codex 核对；不会自动重发。", writer_conflict: "此设备当前不支持忙态投递，答案未发送。",
     canceled_by_owner: "提问已由原会话取消。" }[state.reason];
-  elements.push({ tag: "markdown", content: (reason ? reason + "\n\n" : "") +
-    (state.status === "open" ? question.recipient?.kind === "hermes"
-      ? (state.routerDelivery?.status === "sent" ? "已向溪流提问，等待溪流回复。" : state.routerDelivery?.status === "unknown" ? "向溪流发送的结果待核实。" : "正在连接溪流的回问通道。") + "\n\n"
-      : "选项会填入回答框，可修改后提交；跳过只略过空白题目。\n\n" : "") + `提问 ${question.questionId.slice(0, 8)}` });
-  return { schema: "2.0", config: { update_multi: true }, header: { template: state.status === "expired" ? "grey" : "indigo",
-    title: { tag: "plain_text", content: `${bridgeName}-提问 · ${labels[state.status] ?? "状态待核实"}` } }, body: { elements } };
+  if (reason) elements.push({ tag: "markdown", content: reason });
+  if (state.status === "open" && question.recipient?.kind === "hermes") {
+    elements.push({ tag: "markdown", content: state.routerDelivery?.status === "sent" ? "已向溪流提问，等待溪流回复。"
+      : state.routerDelivery?.status === "unknown" ? "向溪流发送的结果待核实。" : "正在连接溪流的回问通道。" });
+  }
+  return { schema: "2.0", config: { update_multi: true }, header: { template: "grey",
+    title: { tag: "plain_text", content: `${bridgeName}-提问${state.status === "open" ? "" : ` · ${labels[state.status] ?? "状态待核实"}`}` } },
+    body: { padding: "12px", vertical_spacing: "8px", elements } };
 }
 
 export function parseCardAction(payload) {
