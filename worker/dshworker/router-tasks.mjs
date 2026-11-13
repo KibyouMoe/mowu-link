@@ -1,3 +1,4 @@
+import { isNativeType, nativeMessageText } from "./interface/native-content.mjs";
 // Pure helpers for router tasks.
 //
 // A router task is not a new Codex thread: the CLI enqueues it into the manager's
@@ -82,17 +83,15 @@ export function clipBlock(value, limit) {
 }
 
 export function itemText(item) {
-  if (typeof item?.text === "string") return item.text;
-  if (Array.isArray(item?.content)) return item.content.map((part) => part?.text ?? "").join("\n");
-  return "";
+  return nativeMessageText(item);
 }
 
 // Newest turn whose input is this task's prompt.
 export function findRouterTurn(snapshot, marker) {
-  const turns = snapshot?.turns ?? [];
+  const turns = snapshot?.page?.order === "newest_first" ? [...(snapshot.turns ?? [])].reverse() : snapshot?.turns ?? [];
   for (let index = turns.length - 1; index >= 0; index--) {
     const turn = turns[index];
-    if ((turn.items ?? []).some((item) => item?.type === "userMessage" && itemText(item).includes(marker))) return turn;
+    if ((turn.items ?? []).some((item) => isNativeType(item?.type, "UserMessage") && itemText(item).includes(marker))) return turn;
   }
   return null;
 }
@@ -100,7 +99,9 @@ export function findRouterTurn(snapshot, marker) {
 // Prefer the announced final answer; fall back to the last assistant message.
 export function lastAssistantText(turn) {
   const messages = (turn?.items ?? [])
-    .filter((item) => item?.type === "agentMessage" && typeof item.text === "string" && item.text.trim());
+    .filter((item) => isNativeType(item?.type, "AgentMessage") &&
+      (item.phase == null || ["commentary", "final", "final_answer"].includes(item.phase)))
+    .map(item => ({ ...item, text: nativeMessageText(item) })).filter(item => item.text.trim());
   const final = [...messages].reverse().find((item) => item.phase === "final_answer" || item.phase === "final");
   return (final ?? messages.at(-1))?.text?.trim() ?? "";
 }

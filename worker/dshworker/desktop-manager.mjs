@@ -27,6 +27,7 @@ import { operatingConfig } from "./integration-profile.mjs";
 import { resumeCandidates } from "./resume-candidates.mjs";
 import { publicProgress, nativeTaskState } from "./interface/native-progress.mjs";
 import { LocalPublicJournal } from "./local-public-journal.mjs";
+import { defaultPublicJournalRoot } from "./interface/journal-paths.mjs";
 import { BRIDGE_HELP, goalPrompt } from "./feishu-commands.mjs";
 import { readLocalResumeCatalog } from "./local-resume-catalog.mjs";
 import { routerStatus } from "./router-client.mjs";
@@ -103,7 +104,7 @@ export class DesktopManager {
     this.taskProgress = new Map();
     this.messageJournal = new MessageJournal(stateDir);
     this.receiptArchive = new ReceiptArchive(stateDir);
-    this.publicJournal = new LocalPublicJournal(config.publicJournalRoot ?? path.join(path.dirname(path.dirname(stateDir)), "sessions"));
+    this.publicJournal = new LocalPublicJournal(config.publicJournalRoot ?? defaultPublicJournalRoot());
     this.taskJournal = new LocalPublicJournal(this.publicJournal.root);
     this.taskJournalTails = new Map();
     this.resumeMetadata = () => readLocalResumeCatalog(config.codexHome ?? path.dirname(path.dirname(stateDir)));

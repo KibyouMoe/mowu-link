@@ -365,6 +365,7 @@ async function main() {
     machine: identity.name,
     tokenFile,
     workspaceRoots: [session.cwd],
+    ...(config.publicJournalRoot ? { publicJournalRoot: path.resolve(expandHome(config.publicJournalRoot)) } : {}),
     ...(project?.projectId ? { projectId: project.projectId } : {}),
     pollMs: 1000,
     noProgressTimeoutMs: noProgressTimeoutMs(config),
@@ -532,10 +533,10 @@ async function main() {
     }
   }
 
-  async function routerTurnReply(threadId) {
+  async function routerTurnReply(threadId, turnId) {
     try {
-      const snapshot = await nativeCall("read_thread", { threadId, turnLimit: 1, includeOutputs: true }, 60_000);
-      const turn = Array.isArray(snapshot?.turns) ? snapshot.turns.at(-1) : null;
+      const snapshot = await nativeCall("read_thread", { threadId, turnLimit: 30, includeOutputs: false }, 60_000);
+      const turn = snapshot?.turns?.find(item => item.id === turnId) ?? null;
       return lastAssistantText(turn);
     } catch (error) {
       log("warn", "router_read_thread_failed", { threadId, message: error?.message ?? String(error) });
@@ -597,7 +598,7 @@ async function main() {
       turnId = turn?.id ?? null;
       const turnStatus = waited.status ?? "unknown";
       let text = lastAssistantText(turn);
-      if (!text.trim() && turnId) text = await routerTurnReply(selected);
+      if (!text.trim() && turnId) text = await routerTurnReply(selected, turnId);
       text = text.trim();
       const durationS = Math.round((Date.now() - startedAt) / 1000);
       if (turnStatus === "completed") {

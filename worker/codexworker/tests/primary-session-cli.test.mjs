@@ -89,6 +89,26 @@ async function setup(t) {
   };
   return { root, sessionPath, engineLog, start, stop, ready };
 }
+test("CLI preserves explicit journal root in its generated manager configuration", { timeout: 10000 }, async t => {
+  const f = await setup(t), file = path.join(f.root, "config.json");
+  const config = JSON.parse(await readFile(file, "utf8"));
+  config.publicJournalRoot = path.join(f.root, "Actual-Codex", "sessions");
+  await writeFile(file, JSON.stringify(config));
+  const child = f.start();
+  const generated = path.join(f.root, "state", "desktop-config.local.json");
+  let actual;
+  for (let i = 0; i < 150; i++) {
+    actual = await readFile(generated, "utf8").then(JSON.parse).catch(() => null);
+    if (actual) break;
+    if (child.exitCode != null) assert.fail(child.diagnostics());
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  assert.ok(actual, child.diagnostics());
+  assert.equal(actual.publicJournalRoot, config.publicJournalRoot);
+  assert.equal(JSON.parse(await readFile(f.sessionPath, "utf8")).threadId, "original-thread");
+  await f.stop(child);
+});
+
 test("CLI retries its real transport and survives a complete process restart on the original thread", { timeout: 15000 }, async t => {
   const f = await setup(t), original = await readFile(f.sessionPath);
   const first = f.start(); await f.ready(first);

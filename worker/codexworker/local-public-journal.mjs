@@ -2,8 +2,8 @@
 // No model/runtime, synthetic history, tool-output mining or native DB writes.
 import { open, readdir, realpath } from "node:fs/promises";
 import path from "node:path";
-import { projectPublicQuestion } from "./interface/public-questions.mjs";
-import { projectToolActivity } from "./interface/tool-activity.mjs";
+import { publicJournalItem, journalInputPaths } from "./interface/journal-items.mjs";
+export { publicJournalItem } from "./interface/journal-items.mjs";
 import { projectJournalContext } from "./interface/context-events.mjs";
 
 const bad = code => { const e = new Error(code); e.code = code; throw e; };
@@ -53,33 +53,6 @@ export class CompactJsonLines {
       }
     }
   }
-}
-
-export function publicJournalItem(record, threadId, { includeInputs = false, includeTools = false } = {}) {
-  if (record?.type !== "event_msg" || record.payload?.type !== "item_completed") return null;
-  const p = record.payload, x = p.item;
-  if (p.thread_id !== threadId || typeof p.turn_id !== "string" || !p.turn_id || typeof x?.id !== "string" || !x.id) bad("public_journal_identity_mismatch");
-  let item;
-  if (includeTools) {
-    const activity = projectToolActivity(x, { threadId, turnId: p.turn_id, completed: true, timestamp: record.timestamp });
-    if (activity) return { turnId: p.turn_id, item: { type: "toolActivity", id: x.id, activity }, timestamp: record.timestamp };
-  }
-  if (x.type === "AgentMessage" && ["commentary", "final", "final_answer"].includes(x.phase)) {
-    if (!Array.isArray(x.content) || x.content.some(c => c.type !== "Text" || typeof c.text !== "string")) bad("public_journal_public_text_incomplete");
-    const publicQuestion = projectPublicQuestion(x, { threadId, turnId: p.turn_id });
-    item = { type: "agentMessage", id: x.id, text: x.content.map(c => c.text).join(""), phase: x.phase,
-      ...(publicQuestion ? { publicQuestion } : {}) };
-  } else if (includeInputs && x.type === "UserMessage") {
-    if (!Array.isArray(x.content) || x.content.some(c => c.type === "Text" && typeof c.text !== "string"))
-      bad("public_journal_public_text_incomplete");
-    const text = x.content.map(c => c.type === "Text" ? c.text
-      : ["Image", "LocalImage"].includes(c.type) ? "[图片输入]" : "").join("");
-    item = { type: "userMessage", id: x.id, text };
-  } else if (x.type === "ImageView" && typeof x.path === "string") item = { type: "imageView", id: x.id, path: x.path };
-  else if (x.type === "Extension" && x.kind === "image_gen.generation" && x.status === "completed" && typeof x.savedPath === "string" && !x.failure) {
-    item = { type: "imageGeneration", id: x.id, status: "completed", savedPath: x.savedPath };
-  }
-  return item ? { turnId: p.turn_id, item, timestamp: record.timestamp } : null;
 }
 
 // Lifecycle events describe execution, unlike sidebar focus/open state. An old
@@ -156,11 +129,10 @@ export class LocalPublicJournal {
           if (stateOnly) return;
           if (record?.type === "turn_context" && record.payload?.turn_id === reader.bootstrapTurnId ||
               record?.type === "event_msg" && record.payload?.type === "task_started" && record.payload.turn_id === reader.bootstrapTurnId) reader.bootstrapReached = true;
-          if (record?.type === "event_msg" && record.payload?.type === "item_completed" && record.payload?.item?.type === "UserMessage") {
-            if (record.payload.thread_id !== session.threadId) bad("public_journal_identity_mismatch");
-            for (const c of record.payload.item.content ?? []) if (c.type === "LocalImage" && typeof c.path === "string" && !reader.inputPaths.includes(c.path)) reader.inputPaths.push(c.path);
-            if (reader.inputPaths.length > 1024) bad("public_journal_input_image_limit");
+          for (const imagePath of journalInputPaths(record, session.threadId)) {
+            if (!reader.inputPaths.includes(imagePath)) reader.inputPaths.push(imagePath);
           }
+          if (reader.inputPaths.length > 1024) bad("public_journal_input_image_limit");
           const context = includeContext ? projectJournalContext(record, session.threadId) : null;
           const event = context ? { turnId: context.turnId, item: { type: "contextEvent", event: context }, timestamp: context.timestamp }
             : publicJournalItem(record, session.threadId, { includeInputs, includeTools });
