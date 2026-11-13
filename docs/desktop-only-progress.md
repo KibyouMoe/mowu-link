@@ -72,3 +72,10 @@
 - Mac共享daemon不能只用MCP父进程查Desktop；047cd4c已增加宿主原管道的socket/同UID/lsof真实owner/ps校验，只接受Desktop自身持有者，拒绝非socket、跨UID、任意子进程、歧义或检查错误，不扫描或持久化Native端点。Windows仍祖先方式。
 - 定向85 pass /0 fail /1 skip；真实只读helper返回Desktop PID76729与正确启动时间，未调用Native IPC。Node22两侧全量1443/1427/0/16，/tmp/desktop-shared-owner-full.tap。CI43470307712的Windows22/26与Mac26成功，Mac22排队。
 - 尚需正常Desktop重开以获得真实MCP注入/工具验证；autoStart仍false，旧PID55771临时收信。核对新管道与原会话后，再正常停止/禁用旧LaunchAgent、启用新autoStart并验唯一writer。不得停止共享daemon或先删旧shim文件。
+
+## 交互验收外部依赖核对
+
+- 原生CI43470307712四组Mac/Windows × Node22/26已全部success，Mac22 job132040142536。源码/分发/安装缓存/本地技能已完成；不再重复这些通过的回归。
+- 当前Desktop PID仍76729，未观察到正常退出重开；autoStart=false，旧Worker0.2.41/PID55771仍ready。Rudolf仍offline，准备任务t-bf89fd2d53仍queued。重开提问已发，未收到答案。
+- 下一步必须获得真实Desktop环境：Mac重开后核对宿主注入和原会话，再交接旧服务；Windows须对应机器上线。不能把CI成功缩成目标完成，也不能跳过这两项。
+- 外部阻碍连续审计：上一目标轮首次提出重开并等待；本轮再次核对仍未重开/离线，同时收齐最终CI证据。若下一轮同条件无变化且无可独立推进工作，按三轮阈值标blocked；不要擅自paused或complete。
