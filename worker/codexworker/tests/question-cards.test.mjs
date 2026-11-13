@@ -63,7 +63,7 @@ test("long option text remains complete in the body, using short numbered button
   await f.publish({ questions: [{ title: "选择哪项？", options: [long, "短选项"] }] });
   const card = f.sends[0].card; assert.ok(nodes(card).some(n => n.tag === "markdown" && n.content.includes(long)));
   const buttons = nodes(card).filter(n => n.tag === "button" && n.value?.action === "form_select");
-  assert.deepEqual(buttons.map(b => b.text.content), ["选择 1", "2  短选项"]);
+  assert.deepEqual(buttons.map(b => b.text.content), ["☐ 选择 1", "☐ 2  短选项"]);
 });
 test("layout upgrade patches the exact existing current-binding card, preserving answers and nonce", async t => {
   const f = await fixture(t); await f.publish(); await f.relay.acceptCard(f.callback()); await f.relay.process();

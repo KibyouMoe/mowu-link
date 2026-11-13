@@ -1,7 +1,7 @@
 // Explicit public clarification UI only. Never render raw native tool arguments.
 import { escapeMarkdown } from "./feishu.mjs";
 import { SKIPPED_QUESTION_ANSWER } from "./interface/public-questions.mjs";
-export const QUESTION_CARD_LAYOUT_VERSION = 6;
+export const QUESTION_CARD_LAYOUT_VERSION = 7;
 export const QUESTION_ANSWER_LIMIT = 1000;
 export const questionInputName = index => `answer_${index}`;
 
@@ -12,7 +12,7 @@ export function questionCard(question, state, bridgeName) {
   const canRespond = question.recipient?.kind !== "hermes" && state.status === "open" && state.sourceTurnId;
   const form = [];
   const button = (label, action, name, extra = {}, primary = false) => ({ tag: "button", name,
-    text: { tag: "plain_text", content: label }, type: primary ? "primary_text" : "text", size: "small", action_type: "form_submit",
+    text: { tag: "plain_text", content: label }, type: primary ? "primary" : "default", size: "small", action_type: "form_submit",
     value: { bridgeQuestion: question.questionId, nonce: state.nonce, action, ...extra } });
   question.questions.forEach((q, qi) => {
     const title = `${question.questions.length > 1 ? `${qi + 1}. ` : ""}${q.title}`;
@@ -22,7 +22,7 @@ export function questionCard(question, state, bridgeName) {
       q.options?.forEach((option, oi) => {
         const short = option.length <= 40 && !option.includes("\n");
         if (!short) form.push({ tag: "markdown", content: escapeMarkdown(`${oi + 1}）${option}`) });
-        form.push(button(short ? `${oi + 1}  ${option}` : `选择 ${oi + 1}`, "form_select", `select_${qi}_${oi}`,
+        form.push(button(`${draft === option ? "☑" : "☐"} ${short ? `${oi + 1}  ${option}` : `选择 ${oi + 1}`}`, "form_select", `select_${qi}_${oi}`,
           { questionIndex: qi, optionIndex: oi }, draft === option));
       });
       form.push({ tag: "input", name: questionInputName(qi), input_type: "multiline_text", width: "fill",
@@ -54,7 +54,7 @@ export function questionCard(question, state, bridgeName) {
     elements.push({ tag: "markdown", content: state.routerDelivery?.status === "sent" ? "已向溪流提问，等待溪流回复。"
       : state.routerDelivery?.status === "unknown" ? "向溪流发送的结果待核实。" : "正在连接溪流的回问通道。" });
   }
-  return { schema: "2.0", config: { update_multi: true }, header: { template: "grey",
+  return { schema: "2.0", config: { update_multi: true }, header: { template: state.status === "expired" ? "grey" : "indigo",
     title: { tag: "plain_text", content: `${bridgeName}-提问${state.status === "open" ? "" : ` · ${labels[state.status] ?? "状态待核实"}`}` } },
     body: { padding: "12px", vertical_spacing: "8px", elements } };
 }
