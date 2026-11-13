@@ -258,3 +258,27 @@ test("old owner cleanup does not clear a newer manager/global router reference",
   assert.equal(getActiveRouterClient(), replacement);
   setActiveRouterClient(null);
 });
+
+
+test("missing router credentials keep the Feishu writer usable and permit a later retry", async t => {
+  isolateEnv(t);
+  const router = await fixture(t), manager = managerMock(router), logs = [];
+  manager.stateDir = await mkdtemp(path.join(os.tmpdir(), "router-missing-credentials-"));
+  t.after(() => rm(manager.stateDir, { recursive: true, force: true }));
+  const tokenFile = path.join(manager.stateDir, "missing-router.token");
+  manager.config.router.tokenFile = tokenFile;
+  const options = { manager, log: (level, event, fields) => logs.push({ level, event, fields }) };
+  const disabled = await startRouterRuntime(options);
+  assert.equal(disabled.client, null); assert.equal(disabled.busy(), false); await disabled.close();
+  assert.equal(manager.server.listening, true); assert.equal(manager.notifier.enabled, true);
+  await manager.notifier.sendMessage("Feishu remains available", {});
+  assert.equal(manager.boards.at(-1).text, "Feishu remains available");
+  assert.equal(router.calls.length, 0);
+  assert.ok(logs.some(entry => entry.event === "router_credentials_unavailable" && entry.fields.code === "ENOENT"));
+  assert.ok(!JSON.stringify(logs).includes(tokenFile));
+  await writeFile(tokenFile, "isolated-test-router-token");
+  const resumed = await startRouterRuntime(options);
+  t.after(() => resumed.close());
+  await until(() => resumed.client.connected, "restored router credential accepted");
+  assert.equal(manager.routerClient, resumed.client);
+});

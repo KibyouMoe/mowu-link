@@ -37,7 +37,13 @@ export async function startRouterRuntime({ manager, nativeCall, transport = {}, 
     const settings = config.router;
     if (process.env.CODEXWORKER_ROUTER === "0" || settings.enabled === false) return inactive();
     const tokenFile = process.env.CODEXWORKER_ROUTER_TOKEN_FILE ?? settings.tokenFile;
-    const token = tokenFile ? (await readFile(expandHome(String(tokenFile)), "utf8")).trim() : config.token;
+    let token;
+    try { token = tokenFile ? (await readFile(expandHome(String(tokenFile)), "utf8")).trim() : config.token; }
+    catch (error) {
+      // Optional router credentials must not close the shared Feishu writer.
+      log("warn", "router_credentials_unavailable", { code: error.code ?? "read_failed" });
+      return inactive();
+    }
     const name = identity.name ?? settings.name ?? config.machine;
     const display = identity.display ?? config.bridgeName ?? name;
     const abort = new AbortController(), signal = abort.signal;
