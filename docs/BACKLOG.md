@@ -25,6 +25,14 @@
 4. **人工对话对 router 不可见**（详见 `docs/WORKER-STATE-GAP-20261113.md`）
    - 期望：心跳带 `turn_source`，人工对话期间置占用态，router 对占用中的 worker 排队而非插播。
 
+5. **人工对话期间派活会直接失败（不只是打扰）**
+   - 现象：训练员正在 Desktop 会话里与 worker 聊天时派任务，任务失败为
+     `task runner error: Native send_message_to_thread failed; inspect the Desktop task before retrying.`（11-14 01:28，`t-97590760e6`，`qicao-codexworker`）。
+   - 说明：这不是「插播打断」，而是原生发送通道被人工会话占用后**直接报错**，任务等于白派。
+   - 期望：与第 4 条同源修复——派活前判定该 worker 是否处于人工会话中；是则排队（`queued`）并在人工会话结束后自动放行，绝不能把任务发进去然后失败。
+   - 附加：失败时不要只回内部码，要给「需等人工对话结束再重试」这种可执行说明。
+
+
 ### 自研看板（替代 Trello）
 - 训练员补充：界面就放在**我们自己的 Wiki 工作台**（studio，5174）上，不再考虑独立的 Web/CLI/飞书三选一。
 - 已在推进：派给 `qicao-codexworker`（笔记本），任务 `t-97590760e6`，v1 范围＝列+卡片+拖拽+标签+截止日+过滤+本地 SQLite，admin 读写 / guest 只读，不接 Trello API。
