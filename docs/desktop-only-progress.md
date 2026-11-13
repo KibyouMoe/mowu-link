@@ -38,3 +38,6 @@
 - 未知图文前缀保留并阻断同条后续图片/文字，独立回复仍继续；回归不降低20/4图片数量或授权断言。
 - 已加GitHub Actions：macos-latest / windows-latest × Node22/26；交互Desktop专属检查仍需对应机器真实验收。
 - 生产Mac当前仍旧CLI/共享实例；未替换运行版本；Rudolf离线，准备任务t-bf89fd2d53排队；生产router未重启。
+
+- 真正Windows Server2025 / Node26 CI已运行：发现DSH测试写死POSIX分隔符（已改path.join）；首轮矩阵另有新router0.4.0与旧版本断言冲突（已改为核对实际源VERSION）。定向22/22通过，正在重跑四组CI。
+- 技能真实包全量首次发现缺references/hermes-manager-protocol.schema.json；分发需连同此测试/协议依赖拷贝并记录哈希，不能只复制Worker目录。

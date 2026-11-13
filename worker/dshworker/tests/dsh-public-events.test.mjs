@@ -1,5 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import os from "node:os";
+import path from "node:path";
 import { DshPublicEvents } from "../interface/public-events.mjs";
 import { InProcessTransport, loadIdentity } from "../interface/inprocess.mjs";
 
@@ -114,5 +116,5 @@ test("a DSH plugin opened from Codex keeps its own identity and state directory"
   delete process.env.DSHWORKER_IDENTITY;
   const identity = loadIdentity({}, () => {});
   assert.equal(identity.name, "TamamoCross");
-  assert.ok(identity.stateDir.endsWith("/.hermes/state/dshworker"));
+  assert.equal(identity.stateDir, path.join(os.homedir(), ".hermes", "state", "dshworker"));
 });

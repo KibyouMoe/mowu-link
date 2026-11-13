@@ -27,6 +27,8 @@ const pluginRoot = fileURLToPath(new URL("..", import.meta.url));
 const repositoryRouter = fileURLToPath(new URL("../../../server/router/server.py", import.meta.url));
 const routerSource = existsSync(repositoryRouter) ? repositoryRouter
   : fileURLToPath(new URL("../../router-server.py", import.meta.url));
+const routerVersion = (await readFile(routerSource, "utf8")).match(/^VERSION = "([^"]+)"/m)?.[1];
+assert.ok(routerVersion, "The exact router source must accompany this package.");
 const toolNames = ["read_thread", "send_message_to_thread", "create_thread", "fork_thread",
   "set_thread_title", "list_threads", "list_projects", "wait_threads"];
 const python = process.env.CODEXWORKER_TEST_PYTHON || (process.platform === "win32" ? "python" : "python3");
@@ -230,7 +232,7 @@ async function fixture(t) {
     }, "real Python router readiness");
     assert.match(ready.url, /^http:\/\/127\.0\.0\.1:\d+$/);
     assert.equal(ready.pid, child.pid);
-    assert.match(ready.version, /^0\.3\./);
+    assert.equal(ready.version, routerVersion);
     router = { ...ready, stop };
     return router;
   }
