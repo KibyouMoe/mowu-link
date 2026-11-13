@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import http from "node:http";
 import net from "node:net";
@@ -23,7 +24,9 @@ import { resetNativeTransportCache } from "../interface/transport/index.mjs";
 // are real. Only Desktop tool results and the trigger notification sink are
 // fixtures: no model, Desktop process, Feishu account or installed config is used.
 const pluginRoot = fileURLToPath(new URL("..", import.meta.url));
-const routerSource = fileURLToPath(new URL("../../../server/router/server.py", import.meta.url));
+const repositoryRouter = fileURLToPath(new URL("../../../server/router/server.py", import.meta.url));
+const routerSource = existsSync(repositoryRouter) ? repositoryRouter
+  : fileURLToPath(new URL("../../router-server.py", import.meta.url));
 const toolNames = ["read_thread", "send_message_to_thread", "create_thread", "fork_thread",
   "set_thread_title", "list_threads", "list_projects", "wait_threads"];
 const python = process.env.CODEXWORKER_TEST_PYTHON || (process.platform === "win32" ? "python" : "python3");
