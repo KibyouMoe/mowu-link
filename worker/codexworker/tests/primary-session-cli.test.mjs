@@ -4,6 +4,7 @@ import test from "node:test";
 import path from "node:path";
 import os from "node:os";
 import net from "node:net";
+import http from "node:http";
 import { once } from "node:events";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
@@ -28,6 +29,7 @@ readline.createInterface({ input: process.stdin }).on("line", line => {
   if (request.method === "initialize") result = { userAgent: "isolated-session-test" };
   else if (request.method === "thread/read" || request.method === "thread/resume") result = { thread };
   else if (request.method === "thread/list") result = { data: [thread], nextCursor: null };
+  else if (request.method === "thread/turns/list") result = { data: [], nextCursor: null };
   else if (request.method === "thread/items/list") result = { data: [], nextCursor: null };
   else if (request.method === "thread/start") result = { thread: { ...thread, id: "wrong-new-thread" } };
   process.stdout.write(JSON.stringify({ id: request.id, result }) + "\\n");
@@ -61,10 +63,12 @@ async function setup(t) {
     await done; clearTimeout(force);
   };
   t.after(async () => { await Promise.all(children.map(stop)); await rm(root, { recursive: true, force: true }); });
-  const start = () => {
+  const start = (extraEnv = {}) => {
     const env = { ...process.env, CODEXWORKER_CODEX_BIN: binary, CODEXWORKER_STATE_DIR: stateDir,
       CODEXWORKER_TOKEN_FILE: tokenFile, CODEXWORKER_ROUTER: "0", CODEXWORKER_FEISHU_DRY_RUN: "1",
-      TEST_ENGINE_LOG: engineLog, TEST_ENGINE_CWD: root };
+      TEST_ENGINE_LOG: engineLog, TEST_ENGINE_CWD: root, CODEXWORKER_APP_SERVER_MODE: "standalone",
+      RUDOLF_BRIDGE_LIFECYCLE_READY: "1", ...extraEnv };
+    delete env.CODEXWORKER_APP_SERVER_SOCKET;
     delete env.CODEX_APP_TOOLS_PIPE_PATH;
     const child = spawn(process.execPath, ["--import", guard, cli, "--identity", identity], { cwd: root, env, stdio: ["ignore", "pipe", "pipe"] });
     let diagnostics = ""; child.stdout.on("data", c => { diagnostics += c; }); child.stderr.on("data", c => { diagnostics += c; });
@@ -182,4 +186,75 @@ test("CLI native compaction and token events preserve the original thread withou
  const calls=(await readFile(f.engineLog,"utf8")).trim().split("\n").map(JSON.parse);
  assert.equal(calls.filter(c=>c.method==="thread/compact/start").length,1);
  assert.equal(calls.filter(c=>c.method==="thread/start").length,0);
+});
+
+test("router task reaches the existing active trainer turn before that turn becomes idle", { timeout: 18000 }, async t => {
+  const f = await setup(t);
+  const streams = [], posted = [];
+  const router = http.createServer((req, res) => {
+    let raw = "";
+    req.on("data", b => { raw += b; });
+    req.on("end", () => {
+      if (req.url.startsWith("/stream")) {
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        res.write(": connected\n\n"); streams.push(res); return;
+      }
+      if (req.method === "POST") posted.push({ path: req.url, body: raw ? JSON.parse(raw) : {} });
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true, new: true, state: "done", queued: 0 }));
+    });
+  });
+  router.listen(0, "127.0.0.1"); await once(router, "listening");
+  t.after(async () => {
+    for (const stream of streams) stream.destroy();
+    router.closeAllConnections();
+    await new Promise(resolve => router.close(resolve));
+  });
+  const configFile = path.join(f.root, "config.json");
+  const config = JSON.parse(await readFile(configFile, "utf8"));
+  config.router = { enabled: true, url: "http://127.0.0.1:" + router.address().port };
+  await writeFile(configFile, JSON.stringify(config));
+  const source = [
+    "#!" + process.execPath,
+    'import fs from "node:fs"; import readline from "node:readline";',
+    'const cwd=process.env.TEST_ENGINE_CWD, log=process.env.TEST_ENGINE_LOG;',
+    'const turn={id:"trainer-active-turn",status:"inProgress",items:[{type:"userMessage",text:"飞书：持续聊天中"}]};',
+    'readline.createInterface({input:process.stdin}).on("line",line=>{',
+    'const r=JSON.parse(line);if(r.id==null)return;',
+    'fs.appendFileSync(log,JSON.stringify({method:r.method,params:r.params,beforeStatus:turn.status})+"\\n");',
+    'const thread={id:"original-thread",cwd,title:"test",status:turn.status==="inProgress"?"active":"idle",turns:[turn]};',
+    'let result={};',
+    'if(r.method==="initialize")result={userAgent:"isolated-busy-router-test"};',
+    'else if(r.method==="thread/read"||r.method==="thread/resume")result={thread};',
+    'else if(r.method==="thread/list")result={data:[thread],nextCursor:null};',
+    'else if(r.method==="thread/turns/list")result={data:[{...turn,items:[],itemsView:"notLoaded"}],nextCursor:null};',
+    'else if(r.method==="thread/items/list")result={data:turn.items.map(item=>({turnId:turn.id,item})),nextCursor:null};',
+    'else if(r.method==="turn/start"){turn.items.push({type:"userMessage",content:r.params.input});turn.items.push({type:"agentMessage",text:"router received while busy",phase:"final_answer"});turn.status="completed";result={turn};}',
+    'else if(r.method==="thread/start")throw Error("must never create another thread");',
+    'process.stdout.write(JSON.stringify({id:r.id,result})+"\\n");',
+    '});'
+  ].join("\n");
+  await writeFile(path.join(f.root, "engine.mjs"), source, { mode: 0o700 });
+  const child = f.start({ CODEXWORKER_ROUTER: "1" }); await f.ready(child);
+  const waitFor = async predicate => {
+    for (let i=0;i<160;i++) {
+      if (await predicate()) return;
+      if (child.exitCode != null) assert.fail(child.diagnostics());
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    assert.fail("busy router ingress timed out: " + child.diagnostics());
+  };
+  await waitFor(() => streams.length > 0);
+  const task = { type: "task", task_id: "t-busy-conversation", goal: "router task during trainer conversation" };
+  streams[0].write("event: task\ndata: " + JSON.stringify(task) + "\n\n");
+  await waitFor(async () => (await readFile(f.engineLog, "utf8")).includes('"method":"turn/start"'));
+  const calls = (await readFile(f.engineLog, "utf8")).trim().split("\n").map(JSON.parse);
+  const writes = calls.filter(c => c.method === "turn/start");
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].beforeStatus, "inProgress");
+  assert.equal(writes[0].params.threadId, "original-thread");
+  assert.match(writes[0].params.input[0].text, /\[router t-busy-conversation\]/);
+  assert.equal(calls.some(c => c.method === "thread/start"), false);
+  await waitFor(() => posted.some(p => p.path === "/result" && p.body.task_id === task.task_id));
+  assert.equal(posted.find(p => p.path === "/result").body.status, "done");
 });

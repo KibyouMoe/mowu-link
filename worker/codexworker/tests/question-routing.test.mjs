@@ -79,7 +79,7 @@ test("a router task asks Hermes by event and mirrors a read-only question card t
 
 test("trainer-initiated questions keep their buttons and never notify Hermes",async t=>{
  const f=await routing(t,{hermes:false});await f.manager.questions.publish(f.q);
- assert.equal(f.notifications.length,0);assert.equal(buttonCount(f.cards[0].card),2);
+ assert.equal(f.notifications.length,0);assert.equal(buttonCount(f.cards[0].card),3);
 });
 test("the trainer cannot accidentally answer a Hermes-owned question through card callbacks",async t=>{
  const f=await routing(t);await f.manager.questions.publish(f.q);
@@ -99,6 +99,7 @@ test("Hermes answer admission rejects another actor, task, thread, nonce or plac
 });
 test("the authenticated agent answer endpoint returns to the same native chat once, updating only the original question card",async t=>{
  const f=await routing(t);const base=await f.manager.listen();f.manager.handoffPaused=false;
+ f.manager.config.messageSourceLabels=true;
  await f.manager.questions.publish(f.q);const body=answer(f);
  const send=async(token="isolated-post-test-token",value=body)=>{
   const r=await fetch(base+"/bridge/questions/"+f.q.questionId+"/answer",{method:"POST",headers:{authorization:"Bearer "+token,"content-type":"application/json"},body:JSON.stringify(value)});
@@ -111,6 +112,10 @@ test("the authenticated agent answer endpoint returns to the same native chat on
  await f.manager.questions.process();await f.manager.questions.process();
  const writes=f.calls.filter(c=>c.name==="send_message_to_thread");assert.equal(writes.length,1);
  assert.ok(writes[0].args.prompt.includes("配置乙"));
+ assert.match(writes[0].args.prompt,/^<send_user_message_question_reply>\n/);
+ const nativeReplies=JSON.parse(writes[0].args.prompt.slice("<send_user_message_question_reply>".length,-"</send_user_message_question_reply>".length));
+ assert.deepEqual(nativeReplies,[{questionItemId:JSON.stringify(["request_user_input_async","call_router_question",0]),question:"使用哪个配置？",answer:"配置乙"}]);
+
  const a=f.manager.questions.state.entries[f.q.questionId];assert.equal(a.status,"answered");
  assert.equal(f.manager.state.receipts[a.nativeMessageId].request.source,"hermes");
  assert.equal(f.manager.state.receipts[a.nativeMessageId].request.taskId,"t-routing");
@@ -190,4 +195,29 @@ test("legacy transcript-disabled mode also updates only the original Hermes ques
  await f.manager.questions.acceptAgentAnswer(f.q.questionId,answer(f));await f.manager.questions.process();
  assert.equal(f.manager.questions.get(f.q.questionId).status,"answered");
  assert.equal(f.notices.length,0);assert.ok(f.patches.some(p=>p.id==="om_origin_question"));
+});
+
+test("a canonical client answer observation can continue a router clarification without inventing a dispatch receipt",async()=>{
+ const f=waiting("answered");delete f.manager.state.receipts.answer;
+ f.action.nativeAnswerObservation={messageId:"answer",threadId:"thread",turnId:"native-client-answer-turn"};
+ const reply=await waitForTaskClarification(f);
+ assert.equal(reply.turnId,"native-client-answer-turn");assert.equal(reply.messageId,"answer");
+ f.action.nativeAnswerObservation.threadId="different-thread";
+ await assert.rejects(waitForTaskClarification(f),/原生接收回执/);
+});
+
+test("a skipped clarification still waits for and follows its accepted native continuation",async()=>{
+ const f=waiting("skipped");
+ assert.equal((await waitForTaskClarification(f)).turnId,"continued-turn");
+ delete f.manager.state.receipts.answer.nativeDispatch;
+ await assert.rejects(waitForTaskClarification(f),/原生接收回执/);
+});
+test("a trainer cannot skip a Hermes-owned clarification",async t=>{
+ const f=await routing(t);await f.manager.questions.publish(f.q);
+ const s=f.manager.questions.state.entries[f.q.questionId];
+ const result=await f.manager.questions.acceptCard({header:{event_type:"card.action.trigger",event_id:"skip-other-actor"},event:{
+  operator:{open_id:"trainer"},context:{open_message_id:"om_origin_question",open_chat_id:"chat"},
+  action:{value:{bridgeQuestion:f.q.questionId,nonce:s.nonce,action:"skip"}}}});
+ assert.ok(result.toast.content.includes("溪流"));assert.equal(s.status,"open");
+ assert.equal(f.calls.filter(c=>c.name==="send_message_to_thread").length,0);
 });

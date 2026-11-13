@@ -6,7 +6,7 @@ import http from "node:http";
 import { MessageJournal, nativeMessageId } from "./message-journal.mjs";
 import { ReceiptArchive, compactAck, shrinkObservationText } from "./continuity.mjs";
 import { addToolToBubble, renderToolBubble, safeToolPreview, TOOL_EDIT_INTERVAL_MS } from "./tool-progress.mjs";
-import { projectPublicQuestion } from "./interface/public-questions.mjs";
+import { projectPublicQuestion, isNativeQuestionReply, parseNativeQuestionReply } from "./interface/public-questions.mjs";
 import { projectToolActivity } from "./interface/tool-activity.mjs";
 import { ProgressWatch, noProgressTimeoutMs, taskDeadline } from "./progress-watch.mjs";
 import net from "node:net";
@@ -331,7 +331,9 @@ export class DesktopManager {
     const output = ["item.delta", "item.completed", "message.reply", "tool.progress", "tool.activity", "context.notice"].includes(event.type);
     if (!input && !output) return null;
     if (output && event.payload.phase && !["commentary", "final", "final_answer"].includes(event.payload.phase)) return null;
-    const text = input ? request.text ?? event.payload.text : event.payload.snapshot ?? event.payload.text;
+    let text = input ? request.text ?? event.payload.text : event.payload.snapshot ?? event.payload.text;
+    const nativeReplies = input ? parseNativeQuestionReply(text) : null;
+    if (nativeReplies) text = nativeReplies.map(reply => reply.question + "\n答案：" + reply.answer).join("\n\n");
     if (typeof text !== "string" || !text.trim()) return null;
     const threadId = event.threadId ?? request.targetThreadId ?? this.state.selectedThreadId;
     if (!threadId || !this.state.sessions[threadId]) return null;
@@ -346,7 +348,8 @@ export class DesktopManager {
     const itemKey = event.payload.itemKey ?? event.messageId ?? String(event.seq);
     const logicalId = input ? "input:" + event.messageId : "output:" + threadId + ":" + itemKey;
     const answerEntry = input && Object.entries(this.questions.state.entries).find(([id, action]) =>
-      action.nativeMessageId === event.messageId && ["dispatching", "answered", "answer_unknown"].includes(action.status) &&
+      (action.nativeReplyMessageIds?.includes(event.messageId) ||
+       action.nativeMessageId === event.messageId && ["dispatching", "answered", "skipped", "answer_unknown"].includes(action.status)) &&
       this.state.publicQuestions?.[id]?.threadId === threadId);
     const mirror = !answerEntry && !toolEvent && (systemEvent || progress || input || event.type === "message.reply" || event.type === "item.completed" || this.config.feishu.streamEnabled !== false);
     const complete = event.payload.complete ?? event.type !== "item.delta";
@@ -395,6 +398,14 @@ export class DesktopManager {
     } while (page.hasMore);
     for (const record of latest.values()) {
       (this.state.latestTranscript ??= {})[record.logicalId] = record.id;
+      if (record.direction === "input" && record.source === "native") {
+        const matched = await this.questions.observeNativeReply({ threadId: record.threadId, text: record.text,
+          messageId: record.messageId, turnId: record.turnId });
+        if (matched.length) {
+          await this.messageJournal.plan(record.id, matched.map(id => "question:" + id));
+          continue;
+        }
+      }
       if (record.source === "feishu") {
         const original = this.state.feishuReceipts?.[record.messageId]?.incomingMessageId;
         if (original) {
@@ -470,6 +481,8 @@ export class DesktopManager {
       return receipt.request.messageId;
     }
     const messageId = nativeMessageId(session.threadId, item.key);
+    await this.questions.observeNativeReply({ threadId: session.threadId, text: item.text,
+      messageId, turnId: item.turnId, itemKey: item.key });
     rememberTurnInitiator(session, item.turnId, { messageId, source: "trainer", origin: "native" });
     await this.emit("message.observed", { targetThreadId: session.threadId, messageId, source: "trainer", origin: "native" },
       { text: item.text, origin: "native", alreadyDispatched: true }, { turnId: item.turnId, timestamp: timestamp ?? new Date().toISOString() });
@@ -835,7 +848,7 @@ export class DesktopManager {
   health() {
     // Never claim the full 1.1.1 manager contract before native interruption,
     // exact active-turn steering and the ingress/fork acceptance gates are proven.
-    return { name: this.config.bridgeName, version: "0.2.38", alive: !this.closed, ready: this.connected,
+    return { name: this.config.bridgeName, version: "0.2.41", alive: !this.closed, ready: this.connected,
       operatingMode: this.config.operatingMode,
       integrationMode: "desktop-native", machine: this.config.machine,
       managerProtocolVersion: PROTOCOL, managerMinCompatibleVersion: PROTOCOL,
@@ -845,7 +858,7 @@ export class DesktopManager {
       workspaceProjectId: this.config.projectId, eventSeq: this.state.seq,
       activeTurns: Object.values(this.state.sessions).filter(s => s.activeTurnId).length,
       poolSize: Object.keys(this.state.sessions).length, maxPool: 50,
-      desktopBuild: "Codex Desktop injected native task pipe", runtimeBuild: "codexworker 0.2.38",
+      desktopBuild: "Codex Desktop injected native task pipe", runtimeBuild: "codexworker 0.2.41",
       integrations: this.integrationStatus(),
       appServerSchemaFile: "desktop-native-tools.json", appServerSchemaSha256: digest(this.tools),
       capabilities: { existingThreadSend: this.connected, new: this.connected, fork: this.connected,
@@ -1246,7 +1259,7 @@ export class DesktopManager {
     }
     // Trainer-authorized, visible channel labels; original receipts/reports stay
     // untouched. Slash commands are handled before reaching this presentation.
-    const label = this.config.messageSourceLabels === false ? null
+    const label = this.config.messageSourceLabels === false || isNativeQuestionReply(request.text) ? null
       : request.source === "trainer" && this.state.feishuReceipts[request.messageId] ? "飞书"
       : request.source === "hermes" && !["router", "subscription"].includes(request.origin) ? "超级溪流" : null;
     // The engine owns context and compaction. Dispatch the actual input without

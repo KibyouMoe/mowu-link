@@ -1,4 +1,4 @@
-# trigger-bus (0.9.3)
+# trigger-bus (0.9.4)
 
 Deliver events from the local **mowu-trigger** service (127.0.0.1:8791) into a
 Hermes session — including when the trainer is not talking.
@@ -601,3 +601,20 @@ Function-level only: no gateway process, no network, no service.
   way (one wake, three cards), a window already injected elsewhere is retired
   without an empty wake, an idle notify still drains immediately and a busy
   `event` still interrupts at once (`internal=False`, immediate ⚡).
+
+
+## 0.9.4 聊天图片附件
+
+Worker 先以原始字节上传到 router 的鉴权 POST /attachments，再在 /notice 的
+attachments 中引用上传回执。事件只带附件 ID、文件名、MIME、大小和 SHA256，
+不带发送端本地路径。接收端从自己配置的 router 下载，校验长度和 SHA256 后，
+以 PHOTO + media_urls/media_types 进入 Hermes 原生消息；缓存文件属于接收端。
+文字上下文也列出接收端附件，供图片工具读取；下载失败不会退回发送端路径，
+不会推进本批事件游标，下一次轮询重试。
+
+跨机器部署：Worker 使用原有 router.url / CODEXWORKER_ROUTER_URL；
+Hermes 设置 TRIGGER_BUS_ROUTER_URL，凭据由 ROUTER_TOKEN_PATH 指向本机 router token。
+router 仍保持 loopback 监听，经已有认证隧道/入口访问，不为传图额外开放公网端口。
+普通消息格式与 notify/event 的语义保持不变，默认图片通知为 notify。
+目前支持 PNG/JPEG/GIF/WebP，每张最多 100MB，每条最多 10 张；原始字节不转码。
+部署需加载新版 router 与 trigger-bus 插件，不需要重启 Codex 共享后台或 DSH。

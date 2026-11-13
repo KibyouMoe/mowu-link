@@ -24,6 +24,8 @@ Standard library only.  Python 3.9.  Binds loopback only.
 
 from __future__ import annotations
 
+from attachments import AttachmentStore
+
 import argparse
 import fcntl
 import fnmatch
@@ -51,7 +53,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, unquote, urlencode, urlparse
 
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8790
 DEFAULT_DB = "~/.hermes/router.db"
@@ -1416,6 +1418,7 @@ class RouterServer(ThreadingHTTPServer):
                  ping_interval: float = PING_INTERVAL,
                  backlog_max: int = BACKLOG_MAX):
         self.store = store
+        self.attachments = AttachmentStore(store.path + ".attachments")
         self.started_at = time.time()
         self.token = token or ""
         self.notifier = notifier
@@ -1688,6 +1691,8 @@ class RouterHandler(BaseHTTPRequestHandler):
             if parts == ["stream"]:
                 return self._serve_stream(qs)
             self._require_token()
+            if len(parts) == 2 and parts[0] == "attachments":
+                return self._attachment_get(parts[1])
             if parts == ["ops", "services"]:
                 return self._send_json(*self._ops_list())
             if parts == ["workers"]:
@@ -1730,6 +1735,8 @@ class RouterHandler(BaseHTTPRequestHandler):
         parts = self._path_parts(parsed.path)
         try:
             self._require_token()
+            if parts == ["attachments"]:
+                return self._send_json(*self._attachment_put())
             body = self._read_json()
             if (len(parts) == 4 and parts[0] == "ops"
                     and parts[1] == "services" and parts[3] == "restart"):
@@ -2196,6 +2203,39 @@ class RouterHandler(BaseHTTPRequestHandler):
                      "already": already, "cancel_delivery": delivery,
                      "dispatched_next": dispatched["task_id"] if dispatched else None}
 
+    def _attachment_put(self):
+        try:
+            if self.headers.get("Transfer-Encoding"):
+                raise ValueError("use a bounded Content-Length")
+            size = int(self.headers.get("Content-Length") or 0)
+            record = self.server.attachments.put(
+                self.rfile, size, self.headers.get("X-Attachment-SHA256"))
+            return 201, {"ok": True, "attachment": record}
+        except (ValueError, OSError) as exc:
+            self.close_connection = True
+            raise BadRequest(str(exc))
+
+    def _attachment_get(self, attachment_id):
+        try:
+            record = self.server.attachments.describe(attachment_id)
+        except FileNotFoundError:
+            raise NotFound()
+        except ValueError as exc:
+            raise BadRequest(str(exc))
+        with (self.server.attachments.root / attachment_id).open("rb") as stream:
+            self.send_response(200)
+            self.send_header("Content-Type", record["media_type"])
+            self.send_header("Content-Length", str(record["size"]))
+            self.send_header("X-Attachment-SHA256", record["sha256"])
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            while True:
+                chunk = stream.read(65536)
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+
     def _notice(self, body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
         """Worker → Hermes word path.  A trigger failure never becomes a 5xx."""
         worker = str(body.get("worker") or "").strip()
@@ -2215,11 +2255,27 @@ class RouterHandler(BaseHTTPRequestHandler):
         urgency = str(body.get("urgency") or "normal").strip().lower()
         if urgency not in URGENCIES:
             raise BadRequest("urgency must be urgent or normal")
+        attachments = []
+        if "attachments" in body:
+            try:
+                attachments = self.server.attachments.resolve(body["attachments"])
+            except (ValueError, OSError) as exc:
+                raise BadRequest("invalid attachments: %s" % exc)
+        message_id = body.get("message_id")
+        if message_id is not None and (not isinstance(message_id, str)
+                or not message_id or len(message_id) > 128
+                or any(not c.isalnum() and c not in "-_" for c in message_id)):
+            raise BadRequest("invalid message_id")
         level = "event" if urgency == "urgent" else "notify"
         minute = int(time.time() // 60)
         digest = hashlib.sha256(
             ("%s\n%s\n%d" % (worker, text, minute)).encode("utf-8")
         ).hexdigest()[:24]
+        if attachments or message_id:
+            identity = json.dumps([worker, kind, text, attachments,
+                                   message_id if message_id else minute],
+                                  sort_keys=True, ensure_ascii=False)
+            digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
         event_id = "notice:" + digest
         payload = {
             "source": "router",
@@ -2231,6 +2287,8 @@ class RouterHandler(BaseHTTPRequestHandler):
             "payload": {"worker": worker, "urgency": urgency,
                         "notice": True},
         }
+        if attachments:
+            payload["payload"]["attachments"] = attachments
         ok, data = self.server.trigger_client.post_trigger(payload)
         if not ok:
             log.warning("notice failed worker=%s urgency=%s: %.300s",

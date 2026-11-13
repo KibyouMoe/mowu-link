@@ -13,7 +13,11 @@ export async function waitForTaskClarification({ manager, router, taskId, thread
     const action = manager.questions.state.entries[question.questionId];
     if (!action) throw Error("澄清状态不可用；任务未标记完成。");
     if (Number.isFinite(deadline) && now() >= deadline) throw Error("任务的显式 deadline 已到，澄清尚未完成。");
-    if (action.status === "answered") {
+    if (["answered", "skipped"].includes(action.status)) {
+      const observed = action.nativeAnswerObservation;
+      if (observed?.messageId === action.nativeMessageId && observed.threadId === threadId &&
+          typeof observed.turnId === "string" && observed.turnId)
+        return { questionId: question.questionId, messageId: observed.messageId, turnId: observed.turnId };
       const receipt = action.nativeMessageId && (manager.state.receipts?.[action.nativeMessageId] ?? await manager.receiptArchive?.get(action.nativeMessageId));
       if (receipt?.nativeDispatch?.status !== "accepted") throw Error("澄清没有可确认的原生接收回执；任务未标记完成。");
       return { questionId: question.questionId, messageId: action.nativeMessageId, turnId: receipt.nativeTurnId ?? null };

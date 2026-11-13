@@ -10,12 +10,12 @@ import { resolveNativeTransport, resolveNativeCapabilities } from "./interface/t
 
 export const BUSINESS_API_VERSION = 1;
 export const BUSINESS_STATE_VERSION = 1;
-export const BUSINESS_VERSION = "0.2.38";
+export const BUSINESS_VERSION = "0.2.41";
 export function createBusiness(runtimeControl) {
 let transition = Boolean(runtimeControl.transition);
 
 const SERVER_NAME = "codexworker";
-const SERVER_VERSION = "0.2.38";
+const SERVER_VERSION = "0.2.41";
 const PIPE_ENV = "CODEX_APP_TOOLS_PIPE_PATH";
 const CODEX_TURN_METADATA_KEY = "x-codex-turn-metadata";
 const LOCAL_MANAGER_HOST = "127.0.0.1";
@@ -53,7 +53,7 @@ async function handleRequest(method, params) {
         protocolVersion: params.protocolVersion ?? "2025-06-18",
         capabilities: { tools: { listChanged: true } },
         serverInfo: { name: SERVER_NAME, version: SERVER_VERSION },
-        instructions: "Probe and operate the CodexWorker desktop-native adapter. The trainer authorized automatic Feishu relay of public displayed output images in its selected chat; do not separately bridge_send_image those same previews. Arbitrary files still need explicit send authorization. In a Bridge-connected selected chat, publish every trainer clarification through bridge_publish_question (complete public title/options). Do not additionally open request_user_input_async or another native panel for the same clarification: external replies continue this chat but cannot fill that separate panel. Never publish private reasoning, arbitrary tool arguments or secrets.",
+        instructions: "Probe and operate the CodexWorker desktop-native adapter. The trainer authorized automatic Feishu relay of public displayed output images in its selected chat; do not separately bridge_send_image those same previews. Arbitrary files still need explicit send authorization. In a Bridge-connected selected chat, native request_user_input_async questions are automatically relayed and external answers preserve the original question IDs to synchronize Desktop. Use bridge_publish_question only for a clarification without a native panel; never create a second independent question for the same clarification. Never publish private reasoning, arbitrary tool arguments or secrets.",
       };
     case "ping":
       return {};

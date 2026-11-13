@@ -777,3 +777,24 @@ POST /bridge/questions/{questionId}/answer
 等待明确输入没有默认墙钟上限，仍遵守任务显式 deadline 和取消；压缩期间排队的答复
 必须取得原生接收回执后才继续。通知结果未知时不盲目重发，也不回退让训练员回答。
 这次仅需加载新版 Worker，不需要重启 Router、gateway 或共享 Codex 后台。
+
+## 发给溪流的聊天图片附件
+
+只需图片 ID 时：`node scripts/send-router-image.mjs --upload-only --image /path/to/image.png`。
+返回 `{"ok":true,"imageId":"<sha256>"}`，只上传，不发通知；图片字节通过
+router 的独立 `/attachments` 接口传输，聊天消息不内嵌 base64。
+
+使用与引擎无关的附件发送器，不发送发送端本地路径：
+
+~~~bash
+node scripts/send-router-image.mjs --image /path/to/image.png \
+  --message-id 8ac4a538-c0c9-4829-bda5-4843835d8592 --text '请查看这张图'
+~~~
+
+上例 UUID 是示例；每次新发送生成新 UUID，重试同一次发送必须复用原 UUID。
+发送端读取原图字节，POST router /attachments，再 POST /notice 引用附件 ID。
+默认 normal → notify（排队、不打断），明确需要立即处理时才加 --urgent。
+配置沿用 router.url / CODEXWORKER_ROUTER_URL 与本机 tokenFile，凭据不写入消息。
+不需要重启 Worker 即可使用该 CLI；接收方需 router 0.3.1 / trigger-bus 0.9.4。
+支持 PNG/JPEG/GIF/WebP，原图不转码，每张不超过 100MB。
+HTTP accepted 只证明服务器收件，不当作溪流实际看见图片的回执。

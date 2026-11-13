@@ -6,6 +6,7 @@ import path from "node:path";
 import os from "node:os";
 import { QuestionRelay, normalizeQuestion } from "../question-relay.mjs";
 import { questionCard, parseCardAction } from "../question-cards.mjs";
+import { SKIPPED_QUESTION_ANSWER } from "../interface/public-questions.mjs";
 import { FeishuWebsocketClient, FeishuNotifier, encodeFrame, decodeFrame } from "../feishu.mjs";
 
 async function fixture(t) {
@@ -193,4 +194,62 @@ test("question notifier uses exact POST UUID, PATCH message ID and does not send
   assert.equal(JSON.parse(calls[0].opts.body).uuid, "same-uuid"); selected = false;
   await n.sendQuestionCard({}, { uuid: "same-uuid", threadId: "chat" }); assert.equal(calls.length, 1);
   await n.updateQuestionCard("om_test", {}, { threadId: "chat" }); assert.equal(calls[1].opts.method, "PATCH"); assert.ok(calls[1].url.endsWith("om_test"));
+});
+
+test("skip is durable before ACK, ignores injected answers and closes the original card once", async t => {
+ const f=await fixture(t);await f.publish();
+ const button=f.sends[0].card.body.elements.find(e=>e.tag==="button"&&e.text?.content==="跳过");
+ assert.equal(button.behaviors[0].value.action,"skip");
+ const click=f.callback({action:"skip",answer:"forged choice"});
+ assert.equal((await f.relay.acceptCard(click)).toast.type,"success");
+ const entry=JSON.parse(await readFile(f.relay.path,"utf8")).entries[f.q.questionId];
+ assert.equal(entry.status,"answer_pending");assert.deepEqual(entry.skippedQuestionIndexes,[0]);
+ assert.deepEqual(entry.answers,[SKIPPED_QUESTION_ANSWER]);assert.equal(f.writes.length,0);
+ await f.relay.acceptCard(click);await f.relay.process();await f.relay.process();
+ assert.equal(f.writes.length,1);assert.equal(f.relay.get(f.q.questionId).status,"skipped");
+ assert.ok(!f.writes[0].request.text.includes("forged choice"));
+ assert.ok(JSON.stringify(f.patches.at(-1).card).includes("已跳过"));
+ assert.ok(!JSON.stringify(f.patches.at(-1).card).includes('"type":"callback"'));
+ await f.relay.acceptCard(f.callback({action:"skip"}));await f.relay.process();
+ assert.equal(f.writes.length,1);
+});
+test("skip preserves selected multi-question answers and skips only unanswered questions",async t=>{
+ const f=await fixture(t);await f.publish({questions:[f.q.questions[0],{title:"第二题",options:["甲","乙"]}]});
+ f.relay.state.entries[f.q.questionId].answers=[f.q.questions[0].options[0],null];
+ await f.relay.acceptCard(f.callback({optionIndex:1}));await f.relay.process();
+ assert.equal(f.writes.length,0);
+ await f.relay.acceptCard(f.callback({action:"skip"}));await f.relay.process();
+ assert.deepEqual(f.relay.get(f.q.questionId).answers,["仅保留状态",SKIPPED_QUESTION_ANSWER]);
+ assert.deepEqual(f.relay.get(f.q.questionId).skippedQuestionIndexes,[1]);
+ assert.equal(f.writes.length,1);assert.equal(f.relay.get(f.q.questionId).status,"skipped");
+ assert.ok(JSON.stringify(f.patches.at(-1).card).includes("部分跳过"));
+});
+test("a free-text clarification without options still exposes a working skip button",async t=>{
+ const f=await fixture(t);await f.publish({questions:[{title:"请补充说明"}]});
+ assert.ok(f.sends[0].card.body.elements.some(e=>e.tag==="button"&&e.text?.content==="跳过"));
+ await f.relay.acceptCard(f.callback({action:"skip"}));await f.relay.process();
+ assert.equal(f.relay.get(f.q.questionId).status,"skipped");
+ assert.deepEqual(f.relay.get(f.q.questionId).answers,[SKIPPED_QUESTION_ANSWER]);
+});
+test("skip retains the same user, chat, message, nonce and source-binding checks",async t=>{
+ const f=await fixture(t);await f.publish();
+ for(const extra of [{openId:"stranger"},{chatId:"other"},{messageId:"wrong"}])
+  assert.equal((await f.relay.acceptCard(f.callback({action:"skip"},extra))).toast.type,"error");
+ assert.equal((await f.relay.acceptCard(f.callback({action:"skip",nonce:"wrong"}))).toast.type,"error");
+ assert.equal(f.relay.get(f.q.questionId).status,"open");assert.equal(f.writes.length,0);
+ f.m.state.selectionEpoch++;
+ assert.equal((await f.relay.acceptCard(f.callback({action:"skip"}))).toast.type,"warning");
+ assert.equal(f.relay.get(f.q.questionId).status,"expired");assert.equal(f.writes.length,0);
+});
+test("a queued skip remains pending through restart and finishes only on native acceptance",async t=>{
+ const f=await fixture(t);await f.publish();f.native(async()=>({action:"message_queued"}));
+ await f.relay.acceptCard(f.callback({action:"skip"}));await f.relay.process();
+ assert.equal(f.relay.get(f.q.questionId).status,"answer_pending");assert.equal(f.writes.length,1);
+ const restored=new QuestionRelay(f.m);await restored.initialize();await restored.process();
+ assert.equal(restored.get(f.q.questionId).status,"answer_pending");assert.equal(f.writes.length,1);
+ const id=restored.state.entries[f.q.questionId].nativeMessageId;
+ f.m.state.receipts={[id]:{nativeDispatch:{status:"accepted"}}};
+ await restored.process();await restored.process();
+ assert.equal(restored.get(f.q.questionId).status,"skipped");assert.equal(f.writes.length,1);
+ await restored.close();
 });

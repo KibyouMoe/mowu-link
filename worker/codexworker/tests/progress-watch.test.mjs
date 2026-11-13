@@ -86,7 +86,9 @@ test("app-server reasoning/tool notifications are observable progress; status po
   const client = new AppServerClient();
   client.ensureStarted = async () => {};
   const turn = { id: "turn", status: "inProgress", items: [{ id: "input", type: "userMessage", content: [{ type: "text", text: "hi" }] }] };
-  client.request = async () => ({ thread: { id: "thread", turns: [turn] } });
+  client.request = async method => method === "thread/read" ? { thread: { id: "thread" } } :
+    method === "thread/turns/list" ? { data: [turn] } :
+    { data: turn.items.map(item => ({ turnId: turn.id, item })) };
   client.handleNotification("item/reasoning/textDelta", { threadId: "thread", turnId: "turn", delta: "thinking" });
   client.handleNotification("item/commandExecution/outputDelta", { threadId: "thread", turnId: "turn", delta: "tool output" });
   const read = () => client.readThread({ threadId: "thread", includeOutputs: false });

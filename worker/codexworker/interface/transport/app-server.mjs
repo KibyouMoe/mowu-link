@@ -11,9 +11,8 @@
 //     服务端不会进入正常工作状态。
 //   - turn/start 立即返回 inProgress；最终内容通过 item/started、
 //     item/completed、turn/completed 通知到达，turn/completed 自带摘要 items。
-//   - thread/read 默认只返回元数据；includeTurns:true 才带完整 turns
-//     （paginated 线程会附带 deprecationNotice，但实测可用）。
-//   - 读不到 turns 时用 thread/items/list 兜底（本文件已实现）。
+//   - thread/read 只读元数据，历史通过 turns/list + items/list 分页。
+//     禁止先下载全部历史再 slice：含图片的长期会话会超过传输上限。
 //
 // 连接模式：standalone 启动私有 app-server；shared 通过官方
 // Unix WebSocket 连接同一 control socket，仅拥有客户端连接。
@@ -488,7 +487,9 @@ class AppServerClient {
 
     child.on("error", (error) => {
       if (this.child !== child) return;
-      this.handleExit(child, null, null, new AppServerError(`failed to spawn ${binary}: ${error.message}`, "app_server_spawn_failed"));
+      this.handleExit(child, null, null, new AppServerError(
+        connection.mode === "shared" ? `shared app-server connection failed: ${error.message}` : `failed to spawn ${binary}: ${error.message}`,
+        connection.mode === "shared" ? "app_server_connection_failed" : "app_server_spawn_failed"));
     });
     child.stderr.on("data", (chunk) => {
       this.stderr = (this.stderr + chunk.toString("utf8")).slice(-MAX_STDERR_CHARS);
@@ -525,7 +526,7 @@ class AppServerClient {
     const detail = cause
       ? cause.message
       : `codex app-server exited (code ${code ?? "null"}${signal ? `, signal ${signal}` : ""})`;
-    const error = new AppServerError(`${detail}${this.stderrTail()}`, "app_server_exited");
+    const error = new AppServerError(`${detail}${this.stderrTail()}`, cause?.code ?? "app_server_exited");
     for (const [id, pending] of this.pending) {
       clearTimeout(pending.timer);
       this.pending.delete(id);
@@ -1049,38 +1050,36 @@ class AppServerClient {
       ? Math.max(1, Number(args.maxOutputCharsPerItem)) : null;
 
     await this.ensureStarted();
-    const result = await this.request("thread/read", { threadId, includeTurns: true }, this.readTimeout(timeoutMs));
+    const result = await this.request("thread/read", { threadId, includeTurns: false }, this.readTimeout(timeoutMs));
     const thread = result?.thread;
     if (!thread?.id) throw new AppServerError(`thread/read returned no thread for ${threadId}`, "app_server_invalid_response");
     this.rememberThread(thread);
 
-    let turns = Array.isArray(thread.turns) ? thread.turns : [];
-    let itemsSource = "thread/read";
-    for (const turn of turns) this.applyTurn(threadId, turn);
-
-    if (!turns.length) {
-      // 兜底：paginated 线程或旧记录可能不返回 turns，按 items 反推。
-      const fallback = await this.readItemsFallback(threadId, timeoutMs);
-      if (fallback.turns.length) {
-        turns = fallback.turns;
-        itemsSource = fallback.source;
-      }
+    const page = await this.request("thread/turns/list", {
+      threadId, limit: turnLimit || MAX_TURNS_PER_THREAD, sortDirection: "desc", itemsView: "notLoaded",
+      ...(stringArg(args.cursor) ? { cursor: args.cursor } : {}),
+    }, this.readTimeout(timeoutMs));
+    if (!Array.isArray(page?.data)) throw new AppServerError("thread/turns/list returned no turn page", "app_server_invalid_response");
+    const turns = [...page.data].reverse();
+    const itemsSource = "thread/turns/list+thread/items/list";
+    for (const turn of turns) {
+      const items = await this.readItemsFallback(threadId, timeoutMs, turn.id);
+      turn.items = items.turns[0]?.items ?? [];
+      turn.itemsView = "full";
+      this.applyTurn(threadId, turn);
     }
 
     // 把通知缓存与磁盘快照合并：流式 item 可能比 persisted 快照更新。
     const state = this.threads.get(threadId);
     const snapshotTurns = turns.map((turn) => mergeTurnWithCache(turn, state?.turnMap.get(turn.id)));
-    for (const cached of state?.turns ?? []) {
-      if (!snapshotTurns.some((turn) => turn.id === cached.id)) snapshotTurns.push({ ...cached, items: [...cached.items] });
+    // Only merge live turns newer than this page. Old cached turns must not
+    // leak back into a paginated history window or replace its newest turn.
+    const newest = turns.at(-1);
+    if (!args.cursor && newest?.startedAt != null) for (const cached of state?.turns ?? []) {
+      if (cached.startedAt > newest.startedAt && !snapshotTurns.some((turn) => turn.id === cached.id))
+        snapshotTurns.push({ ...cached, items: [...cached.items] });
     }
     snapshotTurns.sort((a, b) => (a.startedAt ?? Number.MAX_SAFE_INTEGER) - (b.startedAt ?? Number.MAX_SAFE_INTEGER));
-
-    // 最新一轮没有 items（itemsView notLoaded）时，用 items/list 补齐。
-    const latest = snapshotTurns.at(-1);
-    if (latest && !latest.items?.length) {
-      const fallback = await this.readItemsFallback(threadId, timeoutMs, latest.id);
-      if (fallback.turns.length) latest.items = fallback.turns[0].items;
-    }
 
     const limited = turnLimit > 0 ? snapshotTurns.slice(-turnLimit) : snapshotTurns;
     const normalizedTurns = limited.map((turn) => ({
@@ -1090,31 +1089,40 @@ class AppServerClient {
     return {
       thread: normalizeThread(this.threads.get(threadId)?.thread ?? thread),
       turns: normalizedTurns,
-      page: { order: "oldest_first", nextCursor: null, returnedTurns: normalizedTurns.length },
+      page: { order: "oldest_first", nextCursor: page.nextCursor ?? null, returnedTurns: normalizedTurns.length },
       itemsSource,
     };
   }
 
   async readItemsFallback(threadId, timeoutMs, turnId = null) {
-    const params = { threadId, limit: 200 };
+    const params = { threadId, limit: 25, sortDirection: "asc" };
     if (turnId) params.turnId = turnId;
-    const result = await this.request("thread/items/list", params, this.readTimeout(timeoutMs));
-    const entries = Array.isArray(result?.data) ? result.data : [];
     const turns = [];
     const byTurn = new Map();
-    for (const entry of entries) {
-      const item = entry?.item;
-      const entryTurnId = entry?.turnId;
-      if (!item || typeof entryTurnId !== "string") continue;
-      let turn = byTurn.get(entryTurnId);
-      if (!turn) {
-        turn = { id: entryTurnId, status: this.findTurn(threadId, entryTurnId)?.status ?? "unknown", items: [], itemsView: "full" };
-        byTurn.set(entryTurnId, turn);
-        turns.push(turn);
+    const cursors = new Set();
+    for (;;) {
+      const result = await this.request("thread/items/list", params, this.readTimeout(timeoutMs));
+      if (!Array.isArray(result?.data)) throw new AppServerError("thread/items/list returned no item page", "app_server_invalid_response");
+      for (const entry of result.data) {
+        const item = entry?.item;
+        const entryTurnId = entry?.turnId;
+        if (!item || typeof entryTurnId !== "string") continue;
+        if (turnId && entryTurnId !== turnId) throw new AppServerError("thread/items/list returned a different turn", "app_server_invalid_response");
+        let turn = byTurn.get(entryTurnId);
+        if (!turn) {
+          turn = { id: entryTurnId, status: this.findTurn(threadId, entryTurnId)?.status ?? "unknown", items: [], itemsView: "full" };
+          byTurn.set(entryTurnId, turn);
+          turns.push(turn);
+        }
+        turn.items.push(item);
       }
-      turn.items.push(item);
+      const next = result.nextCursor;
+      if (!next) break;
+      if (cursors.has(next)) throw new AppServerError("thread/items/list repeated its cursor", "app_server_invalid_response");
+      cursors.add(next);
+      params.cursor = next;
     }
-    return { turns, source: "thread/items/list", nextCursor: result?.nextCursor ?? null };
+    return { turns, source: "thread/items/list", nextCursor: null };
   }
 
   async compactThread(args, timeoutMs) {

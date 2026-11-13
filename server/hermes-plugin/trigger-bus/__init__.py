@@ -342,7 +342,9 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional
 
-PLUGIN_VERSION = "0.9.3"
+from .attachments import receive as receive_attachments
+
+PLUGIN_VERSION = "0.9.4"
 MAX_QUEUE = 50
 # 0.9.3: info has its own backlog.  It is never a wake and never shares the
 # event/notify queue, so a burst of info can not push an event out of
@@ -857,6 +859,11 @@ def _poll_loop(state: _BusState) -> None:
                 _note_subscription(state, subscription, logger)
             if subscription is not None and subscription.get("expired"):
                 events = []          # never deliver what we no longer own
+            home = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
+            events = [receive_attachments(e,
+                       base_url=os.environ.get("TRIGGER_BUS_ROUTER_URL", "http://127.0.0.1:8790"),
+                       token_path=os.environ.get("ROUTER_TOKEN_PATH", str(home / "secrets/router.token")),
+                       cache_dir=home / "attachments/router") for e in events]
             added = _merge_events(state, events)
             if added:
                 logger.info("pulled %d event(s), queue=%d", added,
@@ -968,7 +975,12 @@ def _event_head(event: Dict[str, Any]) -> str:
 
 def _format_event(event: Dict[str, Any]) -> str:
     """One event as the two-line card every delivery seam shares."""
-    return "%s\n> %s" % (_event_head(event), _clip_text(event.get("text")))
+    card = "%s\n> %s" % (_event_head(event), _clip_text(event.get("text")))
+    files = event.get("_attachment_files") or []
+    if files:
+        card += "\n聊天图片附件（已下载并校验，请用图片工具查看实际像素）："
+        card += "".join("\n- " + f["path"] for f in files)
+    return card
 
 
 def _format_events(events: List[Dict[str, Any]],
@@ -1252,14 +1264,23 @@ def _resolve_source(state: "_BusState") -> None:
 def _resolve_gateway(state: "_BusState") -> None:
     """Fall back to the gateway's process-global runner when the hook capture
     never fired (hooks are wired at startup; a hot reload cannot rewire them)."""
-    if state.gateway is not None:
-        return
     try:
-        from gateway import run_api
-        runner = getattr(run_api, "_ACTIVE_RUNNER", None)
-        if runner is not None:
-            state.gateway = runner
-            _get_logger().info("resolved gateway via gateway.run_api._ACTIVE_RUNNER")
+        if state.gateway is None:
+            from gateway import run_api
+            runner = getattr(run_api, "_ACTIVE_RUNNER", None)
+            if runner is not None:
+                state.gateway = runner
+                _get_logger().info("resolved gateway via gateway.run_api._ACTIVE_RUNNER")
+        # Startup discovery precedes the running asyncio loop. Before the first
+        # human message no dispatch hook has captured it; the live heartbeat
+        # task belongs to that exact gateway loop, unlike a new policy loop.
+        if state.gateway is not None and (state.loop is None or not state.loop.is_running()):
+            task = getattr(state.gateway, "_loop_heartbeat_task", None)
+            if task is not None:
+                loop = task.get_loop()
+                if loop.is_running() and not loop.is_closed():
+                    state.loop = loop
+                    _get_logger().info("captured gateway loop from live heartbeat task")
     except Exception as exc:
         _get_logger().debug("gateway resolve failed: %s", exc)
 
@@ -1602,7 +1623,7 @@ def _announce_on_delivery(state: "_BusState", delivery: "_Delivery",
         return "failed:%s" % exc
 
 
-def _build_wake_event(text: str, internal: bool, source: Any) -> Any:
+def _build_wake_event(text: str, internal: bool, source: Any, events=()) -> Any:
     """Build the MessageEvent exactly as the gateway expects it.
 
     ``metadata`` is deliberately left at its default empty dict: the gateway
@@ -1611,9 +1632,11 @@ def _build_wake_event(text: str, internal: bool, source: Any) -> Any:
     interrupt.  The origin is written into ``text`` instead.
     """
     from gateway.platforms.event import MessageEvent, MessageType
+    files = {f["path"]: f for event in events for f in event.get("_attachment_files", [])}
     return MessageEvent(
-        text=text, message_type=MessageType.TEXT, source=source,
-        internal=internal, inherit_channel_pin=True,
+        text=text, message_type=MessageType.PHOTO if files else MessageType.TEXT, source=source,
+        media_urls=list(files), media_types=[f["media_type"] for f in files.values()],
+        internal=internal, inherit_channel_pin=True, allow_gateway_control=False,
     )
 
 
@@ -1719,7 +1742,7 @@ def _wake(state: "_BusState", events: List[Dict[str, Any]], *,
             _get_logger().info("wake skipped: no adapter available; batch "
                                "stays queued for the next attempt")
             return False
-        ev = _build_wake_event(text, internal, state.source)
+        ev = _build_wake_event(text, internal, state.source, events)
         outcome = adapter.handle_message(ev)
         if asyncio.iscoroutine(outcome):
             if state.loop is None:
@@ -2193,7 +2216,7 @@ def _notify_enqueue(state: "_BusState", logger: logging.Logger,
                        "%d event(s) stay queued (where=%s)", len(fresh), where)
         return False
     text = _notify_text(fresh)
-    event = _build_wake_event(text, True, state.source)
+    event = _build_wake_event(text, True, state.source, fresh)
     ids = [int(e["id"]) for e in fresh if e.get("id") is not None]
     try:
         ran = _run_on_gateway_loop(state, queue_fn, session_key, event)

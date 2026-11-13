@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { nativeQuestionReply, parseNativeQuestionReply, nativeAnswersInSnapshot, SKIPPED_QUESTION_ANSWER } from "./interface/public-questions.mjs";
 import { readFile, writeFile, rename } from "node:fs/promises";
 import path from "node:path";
 import { questionInitiator } from "./question-origin.mjs";
@@ -6,6 +7,8 @@ import { getActiveRouterClient } from "./router-client.mjs";
 import { routerQuestionNotice } from "./router-question-channel.mjs";
 import { questionCard, parseCardAction, QUESTION_CARD_LAYOUT_VERSION } from "./question-cards.mjs";
 
+const skippedIndexes = answers => answers.flatMap((answer, index) => answer === SKIPPED_QUESTION_ANSWER ? [index] : []);
+const answeredStatus = state => state.skippedQuestionIndexes?.length ? "skipped" : "answered";
 const fingerprint = value => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 export class QuestionRelayError extends Error {
@@ -78,7 +81,7 @@ export class QuestionRelay {
     for (const entry of Object.values(this.state.entries)) {
       if (entry.status === "dispatching") {
         const receipt = this.manager.state.receipts?.[entry.nativeMessageId];
-        if (receipt?.nativeDispatch?.status === "accepted") entry.status = "answered";
+        if (receipt?.nativeDispatch?.status === "accepted") entry.status = answeredStatus(entry);
         else if (receipt?.response?.action === "message_queued" && !receipt.nativeDispatch) {
           entry.status = "answer_pending"; entry.answerQueued = true;
         } else { entry.status = "answer_unknown"; entry.reason = "dispatch_outcome_unknown"; }
@@ -105,6 +108,8 @@ export class QuestionRelay {
     if (!q) reject(404, "question_not_found", "No exact public question receipt was found.");
     return { questionId: id, threadId: q.threadId, questions: q.questions, status: s?.status ?? "legacy",
       sourceTurnId: s?.sourceTurnId ?? null, answers: s?.answers ?? null,
+      answeredBy: s?.answerActor ?? null,
+      skippedQuestionIndexes: s?.skippedQuestionIndexes ?? [],
       recipient: q.recipient ?? { kind: "trainer" }, routerDelivery: s?.routerDelivery?.status ?? null,
       reason: s?.reason ?? null, cardUpdated: Boolean(s?.messageId && s.patchedRevision === s.revision),
       feishu: q.feishuSent ? "sent" : "pending" };
@@ -201,7 +206,7 @@ export class QuestionRelay {
       const s = this.state.entries[id];
       if (!s) reject(409, "legacy_question", "An old text-only question has no editable card receipt.");
       if (s.status === input.status && JSON.stringify(s.answers ?? null) === JSON.stringify(answers)) return;
-      if (["dispatching", "answer_unknown", "answered", "expired", "canceled", "rejected"].includes(s.status)) reject(409, "question_closed", "Question already resolved; no answer was resent.");
+      if (["dispatching", "answer_unknown", "answered", "skipped", "expired", "canceled", "rejected"].includes(s.status)) reject(409, "question_closed", "Question already resolved; no answer was resent.");
       s.status = input.status; s.answers = answers; s.reason = input.status === "canceled" ? "canceled_by_owner" : input.status === "expired" ? "source_turn_ended" : null;
       s.revision++; await this.save();
     });
@@ -253,7 +258,7 @@ export class QuestionRelay {
     if (q.recipient?.kind !== "hermes" || input.actor !== "hermes" || input.threadId !== q.threadId ||
         (input.taskId ?? null) !== (q.recipient.taskId ?? null) || input.nonce !== s.nonce)
       reject(403, "question_recipient_mismatch", "Only the bound originating agent/task may answer this question.");
-    if (["answer_pending","dispatching","answered"].includes(s.status) && JSON.stringify(s.answers)===JSON.stringify(input.answers))
+    if (["answer_pending","dispatching","answered","skipped"].includes(s.status) && JSON.stringify(s.answers)===JSON.stringify(input.answers))
       return { ...this.get(id), duplicate: true };
     if (q.threadId !== this.manager.state.selectedThreadId || s.bindingEpoch !== this.manager.state.selectionEpoch)
       reject(409, "selected_target_changed", "Question binding changed; no answer was dispatched.");
@@ -297,20 +302,30 @@ export class QuestionRelay {
       }
       if (q.recipient?.kind === "hermes") return toast("这条提问由溪流回答。", "info");
       if (s.status !== "open") return toast(s.status === "answered" ? "此提问已经回答，不会重复投递。" : "此提问已关闭或正在处理，不会重复投递。", "info");
-      if (!s.sourceTurnId || !q.questions.every(q => q.options)) return toast("请直接回复完整答案。", "info");
-      if (action === "select") {
-        if (!Number.isInteger(qi) || !Number.isInteger(oi) || !q.questions[qi]?.options?.[oi]) return toast("无效选项。", "error");
-        s.selected[qi] = oi;
-      } else if (action !== "submit") return toast("无效操作。", "error");
-      const complete = q.questions.every((_, i) => Number.isInteger(s.selected[i]));
-      if (action === "submit" && !complete) return toast("请先为每一道题选择答案。", "warning");
-      if (complete && (q.questions.length === 1 || action === "submit")) {
-        s.answers = q.questions.map((q, i) => q.options[s.selected[i]]); s.answerActor = "trainer";
+      if (!s.sourceTurnId) return toast("原提问状态不可用。", "warning");
+      if (action === "skip") {
+        s.answers = q.questions.map((question, i) =>
+          (Number.isInteger(s.selected[i]) ? question.options?.[s.selected[i]] : null) ?? s.answers?.[i] ?? SKIPPED_QUESTION_ANSWER);
+        s.skippedQuestionIndexes = skippedIndexes(s.answers);
+        s.answerActor = "trainer";
         s.status = "answer_pending"; s.nativeMessageId = randomUUID();
+      } else {
+        if (!q.questions.every(q => q.options)) return toast("请直接回复完整答案。", "info");
+        if (action === "select") {
+          if (!Number.isInteger(qi) || !Number.isInteger(oi) || !q.questions[qi]?.options?.[oi]) return toast("无效选项。", "error");
+          s.selected[qi] = oi;
+        } else if (action !== "submit") return toast("无效操作。", "error");
+        const complete = q.questions.every((_, i) => Number.isInteger(s.selected[i]));
+        if (action === "submit" && !complete) return toast("请先为每一道题选择答案。", "warning");
+        if (complete && (q.questions.length === 1 || action === "submit")) {
+          s.answers = q.questions.map((q, i) => q.options[s.selected[i]]);
+          s.skippedQuestionIndexes = []; s.answerActor = "trainer";
+          s.status = "answer_pending"; s.nativeMessageId = randomUUID();
+        }
       }
       s.callbackEvents = [...(s.callbackEvents ?? []), event.eventId].slice(-256);
       s.revision++; await this.save();
-      return toast(s.status === "answer_pending" ? "答案已保存，正在送回原会话。" : "选择已保存，请选完后提交。", "success");
+      return toast(s.status === "answer_pending" ? (s.skippedQuestionIndexes?.length ? "已跳过，正在同步原会话。" : "答案已保存，正在送回原会话。") : "选择已保存，请选完后提交。", "success");
     });
     await this.serial(async () => {
       const stats = this.state.callbackStats ??= { received: 0, accepted: 0, rejected: 0 };
@@ -331,6 +346,50 @@ export class QuestionRelay {
   }
   async close() { clearInterval(this.timer); await this.running; await this.tail; }
 
+  // Observe already-accepted native user input; never dispatch it a second time.
+  async observeNativeReply({ threadId, text, messageId, turnId, itemKey = null }) {
+    const replies = parseNativeQuestionReply(text);
+    const m = this.manager;
+    if (!replies || !messageId || !turnId || threadId !== m.state.selectedThreadId) return [];
+    return this.serial(async () => {
+      const matched = []; let changed = false;
+      for (const [id, q] of Object.entries(m.state.publicQuestions ?? {})) {
+        const s = this.state.entries[id];
+        if (!s || q.delivery !== "async" || q.threadId !== threadId ||
+            s.bindingEpoch !== m.state.selectionEpoch || !q.sourceQuestionItemIds ||
+            !["open", "answer_pending", "answered", "skipped", "expired"].includes(s.status) ||
+            s.status === "expired" && s.reason !== "source_turn_ended") continue;
+        const known = replies.filter(reply => {
+          const i = q.sourceQuestionItemIds.indexOf(reply.questionItemId);
+          return i >= 0 && reply.question.trim() === q.questions[i].title.trim();
+        });
+        if (!known.length) continue;
+        const parts = { ...(s.nativeAnswerParts ?? {}) };
+        known.forEach(reply => { parts[reply.questionItemId] = reply.answer; });
+        const answers = q.sourceQuestionItemIds.map(key => parts[key] ?? null);
+        const complete = answers.every(a => typeof a === "string" && a.trim());
+        if (["answered", "skipped"].includes(s.status) && (!complete || JSON.stringify(s.answers) !== JSON.stringify(answers))) continue;
+        matched.push(id);
+        if (s.nativeReplyMessageIds?.includes(messageId)) continue;
+        s.nativeAnswerParts = parts;
+        s.answers = answers;
+        s.nativeReplyMessageIds = [...(s.nativeReplyMessageIds ?? []), messageId];
+        s.nativeMessageId = messageId;
+        s.nativeAnswerObservation = { messageId, threadId, turnId, itemKey };
+        s.answerActor = "native";
+        if (complete) { s.skippedQuestionIndexes = skippedIndexes(answers); s.status = answeredStatus(s); s.reason = null; }
+        else if (s.status === "answer_pending") s.status = "open";
+        for (let i = 0; i < answers.length; i++) {
+          const oi = q.questions[i].options?.indexOf(answers[i]);
+          if (oi >= 0) s.selected[i] = oi;
+        }
+        s.revision++; changed = true;
+      }
+      if (changed) await this.save();
+      return matched;
+    });
+  }
+
   async sourceState(q, s) {
     if (q.threadId !== this.manager.state.selectedThreadId || s.bindingEpoch !== this.manager.state.selectionEpoch) return { expired: true, reason: "selected_target_changed" };
     let snapshot;
@@ -347,6 +406,8 @@ export class QuestionRelay {
     if (q.delivery === "async") {
       try {
         const snapshot = await this.manager.deliveryState(this.manager.session(q.threadId));
+        const answers = nativeAnswersInSnapshot(q, snapshot);
+        if (answers) return { answers };
         const source = questionSourceTurn(snapshot, true);
         return source?.id === s.sourceTurnId ? { active: true } : { expired: true, reason: "source_turn_ended" };
       } catch { return { unavailable: true }; }
@@ -389,14 +450,20 @@ export class QuestionRelay {
 
   async linkAnswerCard(id, action) {
     const m = this.manager;
-    if (action.answerDeliveryLinked || !action.nativeMessageId || !action.messageId ||
-        action.patchedRevision !== action.revision || !m.messageJournal) return;
-    const recordId = m.state.latestTranscript?.["input:" + action.nativeMessageId];
-    if (!recordId) return;
-    const receipt = await m.messageJournal.receipt(recordId);
-    if (receipt.plannedPages?.includes("question:" + id))
-      await m.messageJournal.delivered(recordId, "question:" + id, "sent", action.messageId);
-    await this.serial(async () => { action.answerDeliveryLinked = recordId; await this.save(); });
+    if (!action.messageId || action.patchedRevision !== action.revision || !m.messageJournal) return;
+    const ids = [...new Set([action.nativeMessageId, ...(action.nativeReplyMessageIds ?? [])].filter(Boolean))];
+    for (const messageId of ids) {
+      const recordId = m.state.latestTranscript?.["input:" + messageId];
+      if (!recordId || action.answerDeliveryLinks?.[messageId] === recordId ||
+          action.answerDeliveryLinked === recordId) continue;
+      const receipt = await m.messageJournal.receipt(recordId);
+      if (receipt.plannedPages?.includes("question:" + id))
+        await m.messageJournal.delivered(recordId, "question:" + id, "sent", action.messageId);
+      await this.serial(async () => {
+        (action.answerDeliveryLinks ??= {})[messageId] = recordId;
+        await this.save();
+      });
+    }
   }
 
   async process() {
@@ -415,18 +482,19 @@ export class QuestionRelay {
         const source = await this.sourceState(q, s);
         await this.serial(async () => {
           if (!["open", "answer_pending"].includes(s.status)) return;
-          if (source.answers) { s.status = "answered"; s.answers = source.answers; s.reason = null; s.revision++; await this.save(); }
+          if (source.answers) { s.answers = source.answers; s.skippedQuestionIndexes = skippedIndexes(s.answers); s.status = answeredStatus(s); s.reason = null; s.revision++; await this.save(); }
           else if (source.expired) { s.status = "expired"; s.reason = source.reason; s.revision++; await this.save(); }
         });
         if (s.status === "open" && source.active) await this.forwardToInitiator(q, s);
         if (s.status === "answer_pending" && s.answerQueued) {
           const receipt = m.state.receipts?.[s.nativeMessageId] ?? await m.receiptArchive?.get(s.nativeMessageId);
-          if (receipt?.nativeDispatch?.status === "accepted") await this.serial(async () => { s.status = "answered"; s.revision++; await this.save(); });
+          if (receipt?.nativeDispatch?.status === "accepted") await this.serial(async () => { s.status = answeredStatus(s); s.revision++; await this.save(); });
           else if (receipt?.error) await this.serial(async () => { s.status = "answer_unknown"; s.reason = receipt.error.error; s.revision++; await this.save(); });
         }
         if (s.status === "answer_pending" && !s.answerQueued && source.active && !m.handoffPaused && !m.closed &&
             !m.compacting?.(m.session(q.threadId))) {
           const answers = s.answers;
+          const nativeReply = nativeQuestionReply(q, answers);
           const text = `提问 ${id.slice(0, 8)} 的回答：\n` + q.questions.map((q, i) => `${i + 1}）${q.title}\n答案：${answers[i]}`).join("\n\n");
           await this.serial(async () => { if (s.status === "answer_pending") { s.status = "dispatching"; s.revision++; await this.save(); } });
           if (s.status === "dispatching") {
@@ -435,11 +503,11 @@ export class QuestionRelay {
               const accepted = await m.message({ protocolVersion: "1.1.1-draft", messageId: s.nativeMessageId,
                 source: agent ? "hermes" : "trainer", origin: agent ? "router-question" : "feishu",
                 ...(agent && q.recipient.taskId ? { taskId: q.recipient.taskId } : {}),
-                text: agent ? text : `飞书：${text}`, targetThreadId: q.threadId, delivery: "steer" },
+                text: nativeReply ?? (agent ? text : `飞书：${text}`), targetThreadId: q.threadId, delivery: "steer" },
                 { requireSelectedTarget: true, requireSelectionEpoch: s.bindingEpoch, requireSourceTurnId: s.sourceTurnId, allowCompletedSourceTurn: q.delivery === "async" });
               await this.serial(async () => {
                 s.answerQueued = accepted?.action === "message_queued";
-                s.status = s.answerQueued ? "answer_pending" : "answered";
+                s.status = s.answerQueued ? "answer_pending" : answeredStatus(s);
                 s.reason = null; s.revision++; await this.save();
               });
             } catch (e) {

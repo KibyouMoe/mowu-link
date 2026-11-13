@@ -52,7 +52,7 @@ SPEC.loader.exec_module(plugin)
 
 plugin.LOG_PATH = TMP / "selftest.log"
 plugin._ack_async = lambda *a, **k: None                  # no HTTP in tests
-assert plugin.PLUGIN_VERSION == "0.9.3", plugin.PLUGIN_VERSION
+assert plugin.PLUGIN_VERSION == "0.9.4", plugin.PLUGIN_VERSION
 assert plugin.MAX_INFO_PER_INJECT == 10, plugin.MAX_INFO_PER_INJECT
 
 from gateway.config import Platform                      # noqa: E402
@@ -384,10 +384,10 @@ check("e. journal records 'info INJECT' with ids and remaining count",
 
 yaml_text = (HERE / "plugin.yaml").read_text(encoding="utf-8")
 readme = (HERE / "README.md").read_text(encoding="utf-8")
-check("f. plugin.yaml is 0.9.3", "version: 0.9.3" in yaml_text, "")
+check("f. plugin.yaml matches current version", ("version: " + plugin.PLUGIN_VERSION) in yaml_text, "")
 check("f. plugin.yaml states 「info 静默入上下文」 and the no-wake boundary",
       "info 静默入上下文" in yaml_text and "never wakes" in yaml_text.lower(), "")
-check("f. README is titled 0.9.3", readme.startswith("# trigger-bus (0.9.3)"),
+check("f. README is titled with current version", readme.startswith("# trigger-bus (" + plugin.PLUGIN_VERSION + ")"),
       readme.splitlines()[0] if readme else "")
 check("f. README has the 0.9.3 section and the boundary rules",
       "## 0.9.3 — info 静默入上下文（不唤醒）" in readme

@@ -41,7 +41,7 @@ import { ProgressWatch, noProgressTimeoutMs, taskDeadline } from "./progress-wat
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PROGRAM = path.basename(ROOT);
 // Keep in step with BUSINESS_VERSION in mcp-business.mjs.
-const VERSION = "0.2.38";
+const VERSION = "0.2.41";
 // Neutral fallback only: each identity declares its own stateDir so an existing
 // install keeps its writer lease exactly where it was.
 const DEFAULT_STATE_DIR = path.join(os.homedir(), ".hermes", "state", PROGRAM);
@@ -492,24 +492,9 @@ async function main() {
     }
   }
 
-  // The manager's `queue` is not drained for a CLI self-target: the scanner takes
-  // the Desktop public-journal branch and `self_task_journal_unavailable` skips
-  // its dispatcher, so a queued entry would never run. Serialization therefore
-  // happens here — wait until the shared thread is idle — and the write itself
-  // uses the same single-writer path (and delivery mode) the Feishu chat uses.
-  async function waitForIdleThread(threadId, deadline) {
-    const watch = new ProgressWatch({ deadline, timeoutMs: noProgressTimeoutMs(config) });
-    for (;;) {
-      const wait = await nativeCall("wait_threads", { targets: [{ threadId, hostId: "local" }], timeoutMs: 0 }, 20_000)
-        .catch((error) => { log("warn", "router_idle_check_failed", { threadId, message: error?.message ?? String(error) }); return null; });
-      const turn = wait?.polls?.[0]?.latestTurn ?? null;
-      if (!turn || TERMINAL_TURN.has(turn.status)) return true;
-      watch.observe(turn);
-      const failure = watch.failure();
-      if (failure) throw new Error(failure.message);
-      await sleep(1_000);
-    }
-  }
+  // Router inputs use the same verified busy follow-up path as Feishu.
+  // The manager serializes native writes; never wait for conversational idle
+  // before making a dispatcher's instruction visible to the running agent.
 
   // Poll the shared thread for our own turn (identified by the marker) and wait
   // for it to reach a terminal status. The manager keeps the writer; this only
@@ -591,7 +576,6 @@ async function main() {
       if (process.env.CODEXWORKER_FEISHU_DRY_RUN !== "1") await manager.mirrorInput({ protocolVersion: PROTOCOL, messageId, source: "hermes", origin: "router",
         text: routerPrompt({ taskId, goal, context: task.context }), targetThreadId: selected });
       const deadline = taskDeadline(task, startedAt);
-      await waitForIdleThread(selected, deadline);
       const enqueued = await manager.message({
         protocolVersion: PROTOCOL, messageId, source: "hermes", origin: "router",
         text: routerPrompt({ taskId, goal, context: task.context }), targetThreadId: selected, delivery: "steer",
@@ -735,7 +719,6 @@ async function main() {
       threadId = selected;
       if (process.env.CODEXWORKER_FEISHU_DRY_RUN !== "1") await manager.mirrorInput({ protocolVersion: PROTOCOL, messageId, source: "hermes", origin: "subscription",
         text: marker + "\n" + body, targetThreadId: selected });
-      await waitForIdleThread(selected, startedAt + subscriptionTurnLimitMs);
       const enqueued = await manager.message({
         protocolVersion: PROTOCOL, messageId, source: "hermes", origin: "subscription",
         text: `${marker}\n${body}`, targetThreadId: selected, delivery: "steer",
