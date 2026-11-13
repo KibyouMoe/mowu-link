@@ -24,7 +24,7 @@ import { createHash, randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { waitForTaskClarification } from "./router-question-wait.mjs";
 import RouterClient, { setActiveRouterClient } from "./router-client.mjs";
 import { createApprovalChannel } from "./approval-channel.mjs";
@@ -306,8 +306,10 @@ async function main() {
   // Own the child even when primary-session recovery has not completed.
   process.on("exit", () => { transport.killSync?.(); });
 
+  let session;
   async function nativeCall(name, params = {}, timeoutMs = 30_000) {
-    const response = await transport.callTool(name, params, {}, timeoutMs);
+    const callerThreadId = session?.threadId ?? (name === "read_thread" ? params.threadId : undefined);
+    const response = await transport.callTool(name, params, { threadId: callerThreadId }, timeoutMs);
     const text = response?.contentItems?.[0]?.text;
     if (response?.success !== true) {
       let detail = text ?? "no detail", code = "native_call_failed";
@@ -323,7 +325,6 @@ async function main() {
   const startupAbort = new AbortController();
   const stopStartup = () => startupAbort.abort(new Error("primary session recovery interrupted"));
   process.once("SIGINT", stopStartup); process.once("SIGTERM", stopStartup);
-  let session;
   try {
     session = await recoverPrimarySession({
       sessionPath, cwd, display: identity.display, workerName: identity.name, nativeCall, writeJsonAtomic, log,
@@ -852,8 +853,10 @@ async function main() {
   await new Promise(() => {});
 }
 
-main().catch((error) => {
-  log("error", "fatal", { message: error?.message ?? String(error) });
-  process.stderr.write(`${label}: ${error?.stack ?? error}\n`);
-  process.exit(1);
-});
+if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {
+  main().catch((error) => {
+    log("error", "fatal", { message: error?.message ?? String(error) });
+    process.stderr.write(`${label}: ${error?.stack ?? error}\n`);
+    process.exit(1);
+  });
+}

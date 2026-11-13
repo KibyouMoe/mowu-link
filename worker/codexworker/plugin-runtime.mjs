@@ -33,13 +33,23 @@ export class PluginRuntime {
     root = await realpath(root);
     const read = async () => {
       const files = new Map();
-      for (const name of (await readdir(root)).sort()) {
-        if (!name.endsWith(".mjs") || FIXED.has(name)) continue;
-        const actual = await realpath(path.join(root, name));
-        if (path.dirname(actual) !== root) throw new Error("runtime_source_escape");
-        const bytes = await readFile(actual); if (bytes.length > 1024 * 1024) throw new Error("runtime_source_too_large");
-        files.set(name, bytes);
-      }
+      const collect = async (relative = "") => {
+        const directory = path.join(root, relative);
+        for (const entry of (await readdir(directory, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name, "en"))) {
+          const name = relative ? relative + "/" + entry.name : entry.name;
+          if (entry.isDirectory() && (relative || name === "interface")) {
+            await collect(name);
+            continue;
+          }
+          if (!name.endsWith(".mjs") || FIXED.has(name)) continue;
+          const expected = path.join(root, name);
+          if (!entry.isFile() || await realpath(expected) !== expected) throw new Error("runtime_source_escape");
+          const bytes = await readFile(expected);
+          if (bytes.length > 1024 * 1024) throw new Error("runtime_source_too_large");
+          files.set(name, bytes);
+        }
+      };
+      await collect();
       if (!files.has("mcp-business.mjs") || files.size > 128) throw new Error("runtime_source_invalid");
       return { files, sha: hash(JSON.stringify([...files].map(([name, bytes]) => [name, hash(bytes)]))) };
     };
@@ -79,7 +89,11 @@ export class PluginRuntime {
     await mkdir(this.sessionDir, { recursive: true });
     const snapshot = path.join(this.sessionDir, randomUUID()); await mkdir(snapshot);
     try {
-      for (const [name, bytes] of source.files) await writeFile(path.join(snapshot, name), bytes, { flag: "wx", mode: 0o600 });
+      for (const [name, bytes] of source.files) {
+        const destination = path.join(snapshot, name);
+        await mkdir(path.dirname(destination), { recursive: true });
+        await writeFile(destination, bytes, { flag: "wx", mode: 0o600 });
+      }
       // This compatibility loader is immutable in a business generation.
       await writeFile(path.join(snapshot, "business-runtime.mjs"), await readFile(path.join(this.pluginRoot, "business-runtime.mjs")), { flag: "wx", mode: 0o600 });
       const child = fork(path.join(this.pluginRoot, "scripts", "business-worker.mjs"), [], {

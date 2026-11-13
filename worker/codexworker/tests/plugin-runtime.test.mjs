@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,6 +11,21 @@ import { randomUUID } from "node:crypto";
 import { PluginRuntime } from "../plugin-runtime.mjs";
 
 const packageRoot = fileURLToPath(new URL("..", import.meta.url));
+test("the distributed plugin cold loads its nested native interfaces without starting the CLI", async t => {
+  const stateDir = await mkdtemp(path.join(os.tmpdir(), "codexworker-packaged-load-"));
+  const runtime = new PluginRuntime({ pluginRoot: packageRoot, stateDir,
+    env: { ...process.env, CODEXWORKER_STATE_DIR: stateDir, CODEX_APP_TOOLS_PIPE_PATH: "" } });
+  t.after(async () => {
+    await runtime.close();
+    assert.equal(path.dirname(stateDir), path.resolve(os.tmpdir()));
+    await rm(stateDir, { recursive: true, force: true });
+  });
+  const result = await runtime.call("tools/list");
+  assert.ok(result.tools.some(tool => tool.name === "bridge_bind_manager"));
+  assert.ok(result.tools.some(tool => tool.name === "bridge_register_current_task"));
+  assert.equal(runtime.children.size, 1);
+});
+
 const sample = `import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path'; import { value } from './helper.mjs';
 export const BUSINESS_API_VERSION=1, BUSINESS_STATE_VERSION=1, BUSINESS_VERSION='test';
@@ -37,7 +52,10 @@ async function fixture(t, { pollMs = 1000000 } = {}) {
   const { mkdir } = await import("node:fs/promises"); await mkdir(stateDir);
   await writeFile(path.join(source, "mcp-business.mjs"), sample);
   // Keep only a deterministic business fixture; never inherit a real pipe/config.
-  for (const name of ["desktop-manager.mjs", "feishu.mjs", "feishu-images.mjs", "feishu-image-output.mjs", "online-announcement.mjs", "question-relay.mjs", "question-cards.mjs", path.join("codex", "native-dispatch.mjs")]) await rm(path.join(source, name));
+  const keep = new Set(["mcp-business.mjs", "business-runtime.mjs", "plugin-runtime.mjs", "server.mjs", "desktop-lifecycle.mjs"]);
+  for (const entry of await readdir(source)) {
+    if (entry.endsWith(".mjs") && !keep.has(entry)) await rm(path.join(source, entry));
+  }
   await writeFile(path.join(source, "helper.mjs"), "export const value='first';\n");
   let changes = 0;
   const runtime = new PluginRuntime({ pluginRoot: source, stateDir, pollMs,
@@ -236,7 +254,7 @@ for (const operatingMode of ["desktop-bridge", "feishu-local"]) test(`fixed load
     while (!predicate() && Date.now() < until) { await runtime.check(); await new Promise(resolve => setTimeout(resolve, 10)); }
     assert.ok(predicate(), "handoff must settle within a bounded interval under sustained polling");
   };
-  const filename = path.join(source, "codex", "native-dispatch.mjs"), original = await readFile(filename, "utf8");
+  const filename = path.join(source, "interface", "native-dispatch.mjs"), original = await readFile(filename, "utf8");
   await writeFile(filename, original + "\n// isolated hotload acceptance\n");
   await proxy.check();
   const stillOwned = await request("/health");
