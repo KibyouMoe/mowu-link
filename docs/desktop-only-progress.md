@@ -79,3 +79,10 @@
 - 当前Desktop PID仍76729，未观察到正常退出重开；autoStart=false，旧Worker0.2.41/PID55771仍ready。Rudolf仍offline，准备任务t-bf89fd2d53仍queued。重开提问已发，未收到答案。
 - 下一步必须获得真实Desktop环境：Mac重开后核对宿主注入和原会话，再交接旧服务；Windows须对应机器上线。不能把CI成功缩成目标完成，也不能跳过这两项。
 - 外部阻碍连续审计：上一目标轮首次提出重开并等待；本轮再次核对仍未重开/离线，同时收齐最终CI证据。若下一轮同条件无变化且无可独立推进工作，按三轮阈值标blocked；不要擅自paused或complete。
+
+## 真实重开发现的迁移缺口（优先处理）
+
+- 训练员已正常重开，实际Desktop新PID42377，子进程42768却启动私有app-server：附加参数 features.code_mode_host=true 与 codex_app.enabled=true 使该构建跳过官方daemon路径。前述仅凭最低版本/环境判断可直接恢复默认入口不充分，已被真实验收推翻。
+- 原会话仍由共享后台PID55381持有，所以新客户端显示会话被占用；未创建替代会话，旧receiver PID55771继续收信。
+- 已从备份正常恢复launchctl CODEX_CLI_PATH到先前已验证的Desktop共用连接器；需要再次正常重开才应用，不能热改应用或kill共享后台。此为临时恢复，目标未完成。
+- 下一步保留Desktop所需的连接适配（不等于恢复独立Worker CLI），移除对将被删除的原worker源码目录依赖，验证附加参数真实流程及Desktop-owned Worker。不能继续宣称默认native daemon入口在本机构建可直接使用。
