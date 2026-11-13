@@ -38,8 +38,9 @@ const python = process.env.CODEXWORKER_TEST_PYTHON || (process.platform === "win
 // unconditional fcntl import needs this narrow Windows compatibility adapter;
 // no router request, database, dispatch or ACK implementation is replaced.
 const pythonBootstrap = String.raw`
-import json, os, runpy, sys, threading, types
+import faulthandler, json, os, runpy, sys, threading, types
 from pathlib import Path
+faulthandler.dump_traceback_later(8, file=sys.stderr)
 if sys.platform == "win32":
     import msvcrt
     compat = types.ModuleType("fcntl")
@@ -63,6 +64,7 @@ def stop_on_eof():
 threading.Thread(target=stop_on_eof, daemon=True).start()
 print(json.dumps({"url": "http://127.0.0.1:%d" % server.server_address[1],
                   "version": api["VERSION"], "pid": os.getpid()}), flush=True)
+faulthandler.cancel_dump_traceback_later()
 try:
     server.serve_forever(poll_interval=0.05)
 finally:
@@ -226,10 +228,12 @@ async function fixture(t) {
       assert.deepEqual(result, { code: 0, signal: null }, stderr);
     };
     disposers.push(stop);
-    await until(() => {
-      if (failure || child.exitCode !== null) throw new Error(`Cannot start ${python}: ${failure?.message ?? stderr}`);
-      return ready;
-    }, "real Python router readiness");
+    try {
+      await until(() => {
+        if (failure || child.exitCode !== null) throw new Error(`Cannot start ${python}: ${failure?.message ?? stderr}`);
+        return ready;
+      }, "real Python router readiness");
+    } catch (error) { throw new Error(`${error.message}\nPython startup stderr:\n${stderr}\nstdout:\n${output}`); }
     assert.match(ready.url, /^http:\/\/127\.0\.0\.1:\d+$/);
     assert.equal(ready.pid, child.pid);
     assert.equal(ready.version, routerVersion);

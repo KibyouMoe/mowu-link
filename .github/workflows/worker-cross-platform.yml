@@ -10,6 +10,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: worker-cross-platform-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   worker:
     name: ${{ matrix.os }} / Node ${{ matrix.node }}
