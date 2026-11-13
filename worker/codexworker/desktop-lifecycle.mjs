@@ -1,7 +1,7 @@
 // HTTP stays alive across short MCP connections, not across Desktop lifetimes.
 import { once } from "node:events";
 import { execFile, spawn } from "node:child_process";
-import { access, readFile, realpath, rename, unlink, writeFile } from "node:fs/promises";
+import { access, lstat, readFile, realpath, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 
@@ -145,10 +145,35 @@ export async function processChain(pid, { exec = execFileAsync, platform = proce
   return JSON.parse(stdout.trim() || "[]");
 }
 
-export async function resolveDesktopOwner(pid, { readChain = processChain,
+export async function resolveDesktopPipeOwner(pipePath, { platform = process.platform,
+  uid = process.getuid?.(), inspect = lstat, exec = execFileAsync, readChain = processChain } = {}) {
+  if (platform !== "darwin" || typeof pipePath !== "string" || !path.isAbsolute(pipePath) || pipePath.includes("\0")) return null;
+  const info = await inspect(pipePath);
+  if (!info.isSocket() || info.uid !== uid) return null;
+  const { stdout } = await exec("/usr/sbin/lsof", ["-nP", "-a", "-U", "-Fpun", pipePath], { timeout: 8000, maxBuffer: 65536 });
+  const candidates = new Set();
+  for (const record of stdout.split(/(?=^p\d+$)/m)) {
+    const pid = Number(record.match(/^p(\d+)$/m)?.[1]), ownerUid = Number(record.match(/^u(\d+)$/m)?.[1]);
+    if (ownerUid === uid && Number.isSafeInteger(pid) && pid > 0) candidates.add(pid);
+  }
+  if (candidates.size > 32) return null;
+  const owners = [];
+  for (const pid of candidates) {
+    const owner = desktopOwner(await readChain(pid));
+    if (owner?.pid === pid) owners.push(owner); // The Desktop itself owns the supplied pipe, not an arbitrary child.
+  }
+  return owners.length === 1 ? owners[0] : null;
+}
+
+export async function resolveDesktopOwner(pid, { readChain = processChain, pipePath, readPipeOwner,
   delay = ms => new Promise(resolve => setTimeout(resolve, ms)) } = {}) {
   for (let attempt = 0; attempt < 3; attempt++) {
-    try { const owner = desktopOwner(await readChain(pid)); if (owner) return owner; }
+    try {
+      const owner = desktopOwner(await readChain(pid)); if (owner) return owner;
+      // Shared daemon MCPs have no Desktop ancestor. Use only the exact pipe
+      // supplied by the host; never scan for or reconstruct a native endpoint.
+      if (pipePath && readPipeOwner) { const pipeOwner = await readPipeOwner(pipePath); if (pipeOwner) return pipeOwner; }
+    }
     catch { /* Cold Windows process queries may fail transiently. Never guess an owner. */ }
     if (attempt < 2) await delay(200);
   }
@@ -182,7 +207,7 @@ export async function desktopSupervisorReady(stateDir, owner, { platform = proce
 
 export async function ensureDesktopSupervisor({ pluginRoot, stateDir, env = process.env,
   platform = process.platform, readChain = processChain, launchImpl = launchDesktopSupervisor,
-  ready = desktopSupervisorReady, clock = Date.now, ensureWatchdog = ensureScriptWatchdog,
+  ready = desktopSupervisorReady, clock = Date.now, ensureWatchdog = ensureScriptWatchdog, pipeOwner = resolveDesktopPipeOwner,
   delay = ms => new Promise(resolve => setTimeout(resolve, ms)), timeoutMs = 40000 } = {}) {
   if (!(await readDesktopSettings(stateDir)).autoStart) return false;
   if (!["win32", "darwin"].includes(platform) || !env.CODEX_APP_TOOLS_PIPE_PATH || env.RUDOLF_BRIDGE_LIFECYCLE_CHILD === "1") return false;
@@ -190,7 +215,9 @@ export async function ensureDesktopSupervisor({ pluginRoot, stateDir, env = proc
   await access(path.join(stateDir, "desktop-config.local.json"));
   await access(path.join(stateDir, "manager-binding.json"));
   const deadline = clock() + timeoutMs;
-  const owner = await resolveDesktopOwner(process.pid, { readChain, delay });
+  const owner = await resolveDesktopOwner(process.pid, { readChain, delay,
+    pipePath: env.CODEX_APP_TOOLS_PIPE_PATH,
+    readPipeOwner: platform === "darwin" ? value => pipeOwner(value, { platform, readChain }) : null });
   if (!owner) return false;
   // The independent audit scheduler must not depend on HTTP/startup readiness:
   // otherwise a slow startup can launch a writer but skip its watchdog forever.
