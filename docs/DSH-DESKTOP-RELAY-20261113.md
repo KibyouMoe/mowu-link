@@ -80,3 +80,65 @@ Computer Use 的 getApp 超时后，使用本机 CuaDriver CLI；首次从 Codex
 `permissions status --json` 报 `attribution=driver-daemon`、responsible_ppid=1，
 Accessibility/Screen Recording 均 true，随后窗口读取、输入和发送成功。
 未跳过权限检查，未修改 TCC 数据库，未更改 DSH/Codex/router 服务。
+
+## 补充验收：长正文、桌面图片与全量回归
+
+2026-11-13，当前提交 `fbea7b4`；以下测试未修改运行代码、未重启生产服务。
+
+### 长正文实机通过
+
+直接在 DSH 桌面发送 `STREAM-20261113-02`，要求约 2500 字、12 个段落，
+没有调用工具。原生投影轮次后缀 `-827` 完成，正文包含 STREAM-BEGIN/STREAM-END。
+采到 12 次 item.delta，累计长度依次为
+`24,362,523,671,854,1021,1205,1388,1578,1762,2192,2566`。
+
+- 同一个 outbox UUID：`b046e5aa36bfe9280181b97bfe6fd5f4`。
+- 同一张飞书卡片：`om_x100b60582b770c84b4981063f264f5b`。
+- 创建成功，12 次更新均 accepted、API code=0；最终 sent/complete=true。
+- 本地证据：`/tmp/tamamo-stream-evidence.jsonl`；桌面截图
+  `/Users/kibyou/Workspace/OguriCap/tamamo-stream-after.png`。
+
+这补齐了上面短回复验收未覆盖的长正文流式测试。
+
+### 桌面图片：识图通过，原图抄送未通过
+
+通过系统剪贴板把真实 PNG 粘贴到 DSH 输入框，确认出现缩略图后发送
+`IMAGE-20261113-03`。投影轮次后缀 `-837` 完成，模型正确描述绿色/黑方块、
+黄色/蓝圆、红色/白星三块图案，证明原生模型确实收到图片。
+
+manager seq 427 的 message.observed 只有 `[DSH 桌面图片附件]` 加文字提示；
+autoImages 仍为 0。桌面入站原图没有进入飞书图片通道，这一缺口尚未修复。
+源图 `attachment-tricolor-t-bfb7cdafbf.png`：1672×941、1129272 字节，SHA256
+`31a18f2400d54726b6d4d77a22dbe34bda5ed7605c1b88ad92f0bf9495f38fe8`。
+截图 `/Users/kibyou/Workspace/OguriCap/tamamo-image-result.png`。
+
+### 全量回归并非全绿
+
+使用 Node 26.12.1，移除宿主继承的 Worker 环境变量后运行；此前带宿主环境的
+结果存在额外失败，不作为最终统计。20 秒超时仅用于隔离测试中的挂起用例，
+没有修改生产任务超时。两个 worker 分别执行：
+
+```sh
+env -u CODEXWORKER_NATIVE_TRANSPORT -u CODEXWORKER_STATE_DIR -u CODEXWORKER_IDENTITY \
+  node --test --test-timeout=20000 --test-force-exit --test-reporter=tap \
+  worker/dshworker/tests/*.test.mjs
+# 第二次将上面的 dshworker 换成 codexworker
+ROUTER_TEST_PORT=18790 python3 server/router/selftest_router.py
+```
+
+| 版本 / 套件 | tests | pass | fail | cancelled | skipped |
+|---|---:|---:|---:|---:|---:|
+| 当前 DSH | 629 | 600 | 20 | 2 | 7 |
+| 基线 b2169a1 DSH | 617 | 588 | 20 | 2 | 7 |
+| 当前 Codex | 635 | 605 | 22 | 1 | 7 |
+| 基线 b2169a1 Codex | 635 | 605 | 22 | 1 | 7 |
+
+基线从 git archive 解到独立临时目录，使用相同环境和测试参数。
+逐项比较 not-ok 用例名称，两侧均无新增、无消失；这只证明本轮没有新增失败，
+不代表已有失败无影响。仍包括图片自动发送断言、热更新测试夹具、未确认投递
+处理的 lastError 异常，以及旧卡片竞争用例超时；需要另行定位和修复。
+
+真实完整输出：`/tmp/tamamo-full-clean.tap`、`/tmp/oguri-full-clean.tap`、
+`/tmp/dshworker-baseline-clean.tap`、`/tmp/codexworker-baseline-clean.tap`。
+router 输出 `/tmp/router-full-20261113.log` 最后一行是 `TOTAL 77/77 PASS`。
+本轮只更新验收文档，无需重启任何组件。
