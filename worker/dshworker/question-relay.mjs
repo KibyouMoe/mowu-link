@@ -317,7 +317,8 @@ export class QuestionRelay {
           const option = q.questions[index].options?.indexOf(answer) ?? -1;
           if (option >= 0) s.selected[index] = option;
         });
-        if (action !== "form_select") {
+        // A single explicit option is the answer; only free text needs Send.
+        if (action !== "form_select" || q.questions.length === 1) {
           s.answers = drafts.map(answer => answer || SKIPPED_QUESTION_ANSWER);
           s.skippedQuestionIndexes = skippedIndexes(s.answers);
           s.answerActor = "trainer";

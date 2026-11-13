@@ -1,7 +1,7 @@
 // Explicit public clarification UI only. Never render raw native tool arguments.
 import { escapeMarkdown } from "./feishu.mjs";
 import { SKIPPED_QUESTION_ANSWER } from "./interface/public-questions.mjs";
-export const QUESTION_CARD_LAYOUT_VERSION = 7;
+export const QUESTION_CARD_LAYOUT_VERSION = 8;
 export const QUESTION_ANSWER_LIMIT = 1000;
 export const questionInputName = index => `answer_${index}`;
 

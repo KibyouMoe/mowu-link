@@ -280,12 +280,21 @@ test("form selection preserves other drafts across restart and never submits an 
   await restored.close();
 });
 
-test("single-question form selection still requires explicit submit", async t => {
+test("single-question option sends immediately and repeated clicks never resend", async t => {
   const f = await fixture(t); await f.publish();
-  await f.relay.acceptCard(f.callback({ action: "form_select" }, { formValues: { answer_0: "" } }));
-  await f.relay.process(); assert.equal(f.writes.length, 0); assert.equal(f.relay.get(f.q.questionId).status, "open");
-  await f.relay.acceptCard(f.callback({ action: "form_submit" }, { formValues: { answer_0: f.q.questions[0].options[0] } }));
+  const click = f.callback({ action: "form_select", answer: "forged" }, { formValues: { answer_0: "old draft" } });
+  assert.equal((await f.relay.acceptCard(click)).toast.type, "success");
+  const saved = JSON.parse(await readFile(f.relay.path, "utf8")).entries[f.q.questionId];
+  assert.equal(saved.status, "answer_pending");
+  assert.deepEqual(saved.answers, [f.q.questions[0].options[0]]);
+  assert.equal(f.writes.length, 0);
+  await f.relay.acceptCard(click); await f.relay.process();
+  assert.equal(f.writes.length, 1); assert.equal(f.relay.get(f.q.questionId).status, "answered");
+  await f.relay.acceptCard(f.callback({ action: "form_select", optionIndex: 1 }, { formValues: {} }));
+  await f.relay.acceptCard(f.callback({ action: "form_submit" }, { formValues: { answer_0: "later text" } }));
   await f.relay.process(); assert.equal(f.writes.length, 1);
+  assert.ok(!f.writes[0].request.text.includes("forged"));
+  assert.ok(!f.writes[0].request.text.includes("old draft"));
 });
 
 test("custom form answers bind exact native question IDs and dispatch once after durable ACK", async t => {
