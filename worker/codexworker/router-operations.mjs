@@ -9,13 +9,13 @@ export function routerOperations(manager) {
     if (!manager?.routerClient) throw new RouterOperationError(503, "router_unavailable", "Enable this plugin's router integration first.");
     return manager.routerClient;
   };
-  const call = async (method, route, body) => {
+  const call = async (method, route, body, messageId = body?.message_id) => {
     try { return await client()._request(method, route, body); }
     catch (error) {
       if (error instanceof RouterOperationError) throw error;
       throw new RouterOperationError(error.status ?? 503, error.code ?? "router_request_unconfirmed",
         error.status ? "Router rejected the request." : "Router acceptance is unconfirmed; retry with the same messageId and content.",
-        body?.message_id ? { messageId: body.message_id } : {});
+        messageId ? { messageId } : {});
     }
   };
   return {
@@ -26,8 +26,15 @@ export function routerOperations(manager) {
           typeof goal !== "string" || !goal.trim() || goal.length > 20000 || typeof queueIfOffline !== "boolean" ||
           deadlineS != null && (!Number.isFinite(deadlineS) || deadlineS <= 0))
         throw new RouterOperationError(400, "invalid_work_order", "Provide a stable UUIDv4 messageId, exact worker name and project goal; ordinary chat uses worker messages.");
-      return call("POST", "/tasks", { message_id: messageId, worker, goal, execution_mode: "goal", queue_if_offline: queueIfOffline,
-        ...(context != null ? { context } : {}), ...(deadlineS != null ? { deadline_s: deadlineS } : {}) });
+      return (async () => {
+        // Old routers accept /tasks but ignore creation UUIDs. Never submit a
+        // supposedly idempotent work order to that older protocol.
+        const health = await call("GET", "/health", undefined, messageId);
+        if (health.capabilities?.workOrders !== "idempotent-goal-v1")
+          throw new RouterOperationError(503, "router_upgrade_required", "Load the router work-order protocol before creating project orders.", { messageId });
+        return call("POST", "/tasks", { message_id: messageId, worker, goal, execution_mode: "goal", queue_if_offline: queueIfOffline,
+          ...(context != null ? { context } : {}), ...(deadlineS != null ? { deadline_s: deadlineS } : {}) });
+      })();
     },
     workOrder(taskId) {
       if (!/^t-[a-zA-Z0-9_-]+$/.test(taskId ?? "")) throw new RouterOperationError(400, "invalid_task_id", "An exact task_id is required.");

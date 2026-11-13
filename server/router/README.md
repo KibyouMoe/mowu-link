@@ -20,6 +20,9 @@ Worker 在原会话检查/建立原生目标；router 不伪造引擎目标工�
 
 这些接口需正常加载此版服务后生效；只更新文件不等于正在运行的 router 已更新。
 
+`/health.capabilities` 声明 `workOrders: idempotent-goal-v1` 和 `peerMessages: durable-ack-v1`。
+新版客户端先核对工单协议，再 POST /tasks；旧版服务缺少该声明时拒绝提交，防止忽略 UUID 而重复派单。
+
 `docs/ROUTER.md` 的 ①②③ 落地：worker 在线表、任务派发/收回、订阅表，
 **订阅转发真的接上 trigger 了**（0.1.0 是 stub）；0.3.0 再加**聊天旁听**
 （只存不发，不打扰 Hermes）。**④ worker SDK 不在本次范围**。

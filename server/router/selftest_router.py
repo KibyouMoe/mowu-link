@@ -1035,6 +1035,7 @@ def run(work: Path, checker: Checker) -> None:
             "GET /health (no token): ok, version, workers, tasks",
             status == 200 and health.get("ok") is True
             and health.get("version") == "0.4.0"
+            and health.get("capabilities", {}).get("workOrders") == "idempotent-goal-v1"
             and health.get("workers") == 0 and health.get("tasks") == 0,
             "status=%s body=%s" % (status, health))
 

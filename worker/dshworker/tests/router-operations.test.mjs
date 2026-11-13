@@ -6,7 +6,7 @@ import { routerPrompt } from "../router-tasks.mjs";
 
 function fixture() {
   const calls = [], messages = [];
-  const manager = { routerClient: { _request: async (...args) => { calls.push(args); return { ok: true, task_id: "t-project" }; } },
+  const manager = { routerClient: { _request: async (...args) => { calls.push(args); return { ok: true, task_id: "t-project", capabilities: { workOrders: "idempotent-goal-v1" } }; } },
     workerMessages: { send: async request => { messages.push(request); return { status: "queued" }; }, inbox: async () => ({ messages: [] }) } };
   return { manager, calls, messages, ops: routerOperations(manager) };
 }
@@ -23,8 +23,9 @@ test("formal work order carries its stable request UUID, native goal mode and no
   const request = { messageId, worker: "Rudolf", goal: "验证插件生命周期", context: "既有项目的交付项" };
   assert.equal((await f.ops.createWorkOrder(request)).task_id, "t-project");
   await f.ops.createWorkOrder(request);
-  assert.deepEqual(f.calls[0], f.calls[1]);
-  const [method, route, body] = f.calls[0];
+  const posts = f.calls.filter(c => c[0] === "POST");
+  assert.deepEqual(posts[0], posts[1]);
+  const [method, route, body] = posts[0];
   assert.equal(method, "POST"); assert.equal(route, "/tasks");
   assert.equal(body.message_id, messageId); assert.equal(body.execution_mode, "goal");
   assert.equal(body.queue_if_offline, true); assert.equal(body.deadline_s, undefined);
@@ -33,10 +34,18 @@ test("formal work order carries its stable request UUID, native goal mode and no
 
 test("only an explicit positive deadline is sent and invalid work orders perform no I/O", async () => {
   const f = fixture(), request = { messageId: randomUUID(), worker: "Rudolf", goal: "验收", deadlineS: 60, queueIfOffline: false };
-  await f.ops.createWorkOrder(request); assert.equal(f.calls[0][2].deadline_s, 60); assert.equal(f.calls[0][2].queue_if_offline, false);
+  await f.ops.createWorkOrder(request); assert.equal(f.calls[1][2].deadline_s, 60); assert.equal(f.calls[1][2].queue_if_offline, false);
   for (const change of [{ messageId: "bad" }, { goal: " " }, { worker: " Rudolf " }, { deadlineS: 0 }, { deadlineS: NaN }, { queueIfOffline: "yes" }])
     assert.throws(() => f.ops.createWorkOrder({ ...request, ...change }), error => error.body.error === "invalid_work_order");
-  assert.equal(f.calls.length, 1);
+  assert.equal(f.calls.length, 2);
+});
+
+test("older router protocols receive no work-order POST when UUID deduplication is unavailable", async () => {
+  const f = fixture(), messageId = randomUUID();
+  f.manager.routerClient._request = async (...args) => { f.calls.push(args); return { ok: true, version: "0.3.1" }; };
+  await assert.rejects(f.ops.createWorkOrder({ messageId, worker: "Rudolf", goal: "验收" }), error =>
+    error.status === 503 && error.body.error === "router_upgrade_required" && error.body.messageId === messageId);
+  assert.deepEqual(f.calls.map(c => c.slice(0, 2)), [["GET", "/health"]]);
 });
 
 test("uncertain work-order submission retains the same message UUID in the error", async () => {

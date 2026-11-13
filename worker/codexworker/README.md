@@ -82,6 +82,10 @@ SSE 和离线轮询重放同一 ID；入站经同一会话队列，公开输入/
 不设默认任务墙钟期限，只有显式 `deadlineS/deadline_s` 生效；无进展检测默认 30 分钟，
 已知等待用户回答不算模型停滞。创建和消息重试复用原 UUID，未知结果不盲目换 ID 重发。
 
+新工单先核对 router `/health` 的 `capabilities.workOrders=idempotent-goal-v1`；
+旧服务会忽略创建 UUID，插件会明确要求升级并阻止 POST。router 尚未装载新 API 或凭据暂缺时，
+飞书普通收发仍独立保留；只有依赖 router 的工具暂不可用。
+
 ## 原会话、飞书与审批
 
 原生引擎负责上下文压缩，Worker 保存公开记录和投递回执，不回注第二份语义记忆。

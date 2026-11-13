@@ -1964,6 +1964,8 @@ class RouterHandler(BaseHTTPRequestHandler):
         return {
             "ok": True,
             "version": VERSION,
+            "capabilities": {"workOrders": "idempotent-goal-v1",
+                             "peerMessages": "durable-ack-v1"},
             "workers": len(workers),
             "online": len(online),
             "tasks": counts["total"],
