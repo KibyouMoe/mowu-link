@@ -99,3 +99,11 @@
 - 已从受管包的prepare正常生成本机私有desktop-connection/710c6ed6…/codex（四文件，sh/node语法检查通过），备份旧环境至desktop-connection-activation.backup.local.json，正常launchctl setenv将下一次Desktop入口指向它；未启动或关闭任何已有进程。旧连接器仍保留可恢复。
 - 目前仍是Desktop42377/私有app-server42768与共享后台55381，修复只在下一次正常完整退出/重开Desktop后生效。autoStart仍false，旧receiver继续临时收信，不将文件安装称为新生命周期已接管。
 - 新CI43475103068：Mac22排队，Mac26/Windows22/Windows26运行中，不能套用前一提交全绿结果。下一步先等正常Desktop重开，核对原会话/实际后台/插件工具，再交接旧receiver；目标保持active。
+
+## 后续核验与router发布准备
+
+- 续接后核对：Desktop仍42377，旧Worker0.2.41/PID55771仍ready，autoStart=false；下一次Desktop入口已指向710c6ed6…独立适配。Rudolf仍offline，实际桌面验收尚未发生。
+- 新CI43475103068实际日志：Mac26 Codex717/709/0/8、DSH742/734/0/8，router130/130；Windows22与26各Codex717/702/0/15、DSH742/735/0/7，均success。Windows新增8个skip为Mac专用Unix/权限/安装测试；Windows原生管道未被Unix适配替代。Mac22 job132056795002仍queued且无runner，不能宣称通过或启动第二个重复run。
+- 生产router只读health仍0.3.1，无新版工单能力；未重启。已在 ~/.hermes/releases/router/fc35e1ab… 准备server.py、attachments.py及保留原参数的plist草案，实际 --version=0.4.0；仅暂存，未替换现有LaunchAgent。
+- 本机备份 ~/.hermes/backups/router/20261114-014540：SQLite backup生成983040字节一致快照，138 tasks/14 workers，quick_check=ok；原plist SHA仍173fe5a8be2b27b681cddc76dabaa7be827153057df563211510388e83767e79。离线WAL快照只读验证需immutable=1，未将此参数用于在线数据库。
+- 仍需正常Mac重开/唯一writer交接、Windows真实Desktop、允许加载新版router后实际工单和peer回流；当前不修改或重启生产router/DSH/gateway，不将CI或准备包冒充外部闭环完成。
