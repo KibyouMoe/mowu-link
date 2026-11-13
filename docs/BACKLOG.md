@@ -3,7 +3,35 @@
 > 训练员口述的待做项，按记录时间倒序。**只是记录，不代表已排期。**
 > 派活前先在这里对齐，避免「事情越积越多但没人知道有哪些」。
 
+## 2026-11-14 新增
+
+### 批量修复清单（一并交小栗帽，别一件件派）
+
+训练员原话：「把问题记个账，之后一股脑给小栗帽让他修」。以下四条同属 worker/router 状态与取消链路，建议一次派完、一次验收：
+
+1. **「取消」不透传到 worker**
+   - 现象：`POST /tasks/{id}/cancel` 返回 `{"ok":true,"state":"cancelled"}`，但同一次响应里 `cancel_delivery: {"ok":false,"error":"worker_control_unavailable"}`。
+   - 后果：router 侧记 cancelled，worker 侧仍在跑/仍在报结果，两边状态分裂。
+   - 期望：cancel 必须送达到执行体（`agent.cancel()` 之类），送达失败要如实返回并保留 `cancelling` 中间态，不能直接标 cancelled。
+
+2. **墙钟 deadline 会掐死在跑的任务**
+   - 现象：`deadline_s=180` 的任务在 `turn inProgress` 状态下被判 `failed: 显式 deadline_s 已到期`（11-13 两例：`t-a87d62569a` Rudolf、`t-4a4bad8c63` qicao）。
+   - 期望：默认不设 deadline；判卡死只看「长时间无新事件/进度」。传了 deadline 也只是提示，不因它杀在跑的 turn。
+
+3. **任务完成后 `task_id` 不清、`progress_at` 陈旧**
+   - 现象：`GET /workers` 里 `task_id` 仍指向已 `done` 的任务，`progress_at` 停在几天前。
+   - 期望：完成即清 `task_id`，`progress_at` 同步到完成时刻。
+
+4. **人工对话对 router 不可见**（详见 `docs/WORKER-STATE-GAP-20261113.md`）
+   - 期望：心跳带 `turn_source`，人工对话期间置占用态，router 对占用中的 worker 排队而非插播。
+
+### 自研看板（替代 Trello）
+- 训练员补充：界面就放在**我们自己的 Wiki 工作台**（studio，5174）上，不再考虑独立的 Web/CLI/飞书三选一。
+- 已在推进：派给 `qicao-codexworker`（笔记本），任务 `t-97590760e6`，v1 范围＝列+卡片+拖拽+标签+截止日+过滤+本地 SQLite，admin 读写 / guest 只读，不接 Trello API。
+- 其余待定（同步策略、手机端）等 v1 出来再谈。
+
 ## 2026-11-13 新增
+
 
 ### 1. 自研看板（替代 Trello）
 - **背景**：目前所有日程、记录、排期都在 Trello 上；训练员希望实现「自己的 Trello」。
