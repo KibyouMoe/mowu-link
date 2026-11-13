@@ -5,6 +5,18 @@
 独立 Worker CLI、私有 app-server、headless 启动和失败后的其他入口均已移除。
 Node 是插件执行环境，不是另一个模型宿主。
 
+Mac 已有共享后台的会话，迁移前须实测 Desktop 是否接回同一后台；仅设置 daemon 环境开关不够。
+部分构建的附加启动参数会强制私有 stdio，导致原会话显示占用。此时保留 Desktop 连接适配：
+`interface/desktop-connection/entry.mjs` 只接受真实 Mac Desktop 祖先，将 JSONL 接到已有的
+官方 Unix WebSocket，保留线程启动配置；连接失败不启动引擎，也不启动 Worker CLI。
+Windows 继续原生管道，拒绝使用此 Mac 适配；两平台 Worker 仍由 Desktop 插件托管。
+
+`node interface/desktop-connection/prepare.mjs` 核对既有私有
+`<CODEX_HOME>/state/codexworker/desktop-shared-connection.json`（version=1、realCli/socket 绝对路径），
+将所需连接模块和启动器写入本机内容寻址目录，返回 launcher 路径；不启动进程或改环境。
+核对后通过正常 `CODEX_CLI_PATH` 配置指向该 launcher，下次正常重开 Desktop 生效。
+不删除旧连接器，直至实际原会话接回；新启动器不再依赖将被移除的旧源码目录。
+
 ## 安装与配置
 
 需要 macOS 或 Windows Desktop、可用的原生任务工具和 Node.js 20+。

@@ -86,3 +86,11 @@
 - 原会话仍由共享后台PID55381持有，所以新客户端显示会话被占用；未创建替代会话，旧receiver PID55771继续收信。
 - 已从备份正常恢复launchctl CODEX_CLI_PATH到先前已验证的Desktop共用连接器；需要再次正常重开才应用，不能热改应用或kill共享后台。此为临时恢复，目标未完成。
 - 下一步保留Desktop所需的连接适配（不等于恢复独立Worker CLI），移除对将被删除的原worker源码目录依赖，验证附加参数真实流程及Desktop-owned Worker。不能继续宣称默认native daemon入口在本机构建可直接使用。
+
+## Desktop连接适配修复
+
+- 新增 interface/desktop-connection/{entry,unix-websocket,prepare}.mjs：只接受真实Mac Desktop祖先，转接已有官方Unix后台；禁止独立模型/Worker命令，连接失败不启动第二个引擎，Windows拒绝Unix覆盖并继续原生管道。
+- 真实附加启动参数保持为线程config，原请求覆盖优先；原文/原thread不变。补UTF-8跨chunk、EOF只关当前连接、异步写错误和配置/端点权限检查。
+- prepare只将三个所需模块与启动器写入本机内容寻址私有目录，不启动进程或改环境；旧源码移除不再导致入口悬空。已有文件内容不符明确拒绝，不覆盖。
+- Mac Node22定向77 tests /76 pass /0 fail /1平台skip（/tmp/desktop-connection-mac-node22.tap）；Mac Node26新增16/16（/tmp/desktop-connection-mac-node26.tap）。真实只读父链探针确认当前Desktop PID42377；不等同于实际Desktop重开验收。
+- 共享后台55381和主会话保持，未重启DSH/router/gateway。下一步安装新适配并正常重开Desktop，确认接回原后台后再交接旧receiver；Windows实际Desktop仍待上线验收。
