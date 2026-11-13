@@ -64,3 +64,11 @@
 - 实际主会话仅01a1c413-6bd5-7e10-a388-665d44d2b6ec；切换前记录receipts347、feishuReceipts193、publicTextOutbox128、autoImages18（后续会增长）。旧CLI LaunchAgent ai.hermes.codexworker PID55771仍在线；autoStart暂false，生产DSH/router/gateway未重启。
 - 尚未完成目标：真正Mac Desktop插件加载/退出重开与旧实例交接、Windows Desktop原生验收、真实router唯一标记结果/互聊。Rudolf仍离线，t-bf89fd2d53仍queued。
 - 下一步先核对真实Desktop宿主的管道注入与进程归属；当前会话在shared daemon，CODEX_CLI_PATH还指向旧desktop-shared/codex。不要把模拟/隔离MCP通过当真实宿主已接管，不盲目重启客户端或后台、强抢租约或另建主会话。当前目标保持active，不标完成。
+
+## Mac真实入口准备（后续以此覆盖上方旧状态）
+
+- 官方app.asar证据：CODEX_APP_SERVER_USE_LOCAL_DAEMON=1、FORCE_CLI非1、无CODEX_CLI_PATH时走原生control socket；最低appServerVersion0.141.0。实际后台0.167.0-alpha.3.2满足；默认客户端CLI0.167.0-alpha.4.1，两次daemon version均返回同一running后台。无需另起引擎或换主会话。
+- 已备份旧环境至 ~/.codex/state/codexworker/desktop-cli-environment.backup.local.json，并正常launchctl unsetenv CODEX_CLI_PATH；仅影响下一次Desktop启动，现有CLI/后台均未停止。
+- Mac共享daemon不能只用MCP父进程查Desktop；047cd4c已增加宿主原管道的socket/同UID/lsof真实owner/ps校验，只接受Desktop自身持有者，拒绝非socket、跨UID、任意子进程、歧义或检查错误，不扫描或持久化Native端点。Windows仍祖先方式。
+- 定向85 pass /0 fail /1 skip；真实只读helper返回Desktop PID76729与正确启动时间，未调用Native IPC。Node22两侧全量1443/1427/0/16，/tmp/desktop-shared-owner-full.tap。CI43470307712的Windows22/26与Mac26成功，Mac22排队。
+- 尚需正常Desktop重开以获得真实MCP注入/工具验证；autoStart仍false，旧PID55771临时收信。核对新管道与原会话后，再正常停止/禁用旧LaunchAgent、启用新autoStart并验唯一writer。不得停止共享daemon或先删旧shim文件。
