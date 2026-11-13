@@ -56,6 +56,27 @@ DSH 空闲时备份状态到 `/tmp/tamamo-desktop-observer-backup-20261113`，�
 thread `d9fb1019-66c4-44db-9165-9c4778c53472` 和原生 session
 `session-93b7fc94-e7c9-421c-9cfa-6175b14dc7bb` 均保持不变。
 
-Computer Use 的 getApp(com.deepseek.dsh) 超时，未能直接操作原生输入框。
-已请训练员在原会话发送桌面测试消息；收到原生事件和飞书平台回执前，
-桌面独立入口的实机验收仍为待验，不声称已全链路通过。
+2026-11-13 08:01:43–08:01:48 UTC，已直接通过 DSH 桌面输入框完成实机验收。
+测试标记 `DESKTOP-20261113-01`，没有经过 router 派单或 Worker 发消息接口。
+原生轮次 `dsh-desktop-session-93b7fc94-e7c9-421c-9cfa-6175b14dc7bb-807`
+记录 `nativeDesktop=true`、`status=completed`，原 sessionId 保持不变。
+
+- manager seq 406：`message.observed`，`origin=native`、`alreadyDispatched=true`。
+- seq 407/409：terminal running/completed，真实命令 `echo TAMAMO_DESKTOP_OK`。
+- seq 408：工具进度；seq 410：最终正文；seq 411：turn.completed。
+- 飞书输入回执：`om_x100b6058704c2c80b49e90d7258cb8f`。
+- 飞书工具卡回执：`om_x100b6058707ac4bcb0edc7f165ddd15`。
+- 飞书最终回复回执：`om_x100b60587000284ccf90ccd3b14ca43`。
+- 三项 outbox 均 `status=sent`、`complete=true`、`lastError=null`。
+- 最终回复包含命令输出 `TAMAMO_DESKTOP_OK` 和“桌面抄送验收完成”。
+
+桌面截图：`/Users/kibyou/Workspace/OguriCap/tamamo-desktop-ui.png`；证据图片不入 Git。
+这条回复较短，轮次结束前的单独正文增量没有被轮询采到；不能据此声称本轮实机
+另外验证了长文本流式逐字刷新。原生独立入口、输入/工具/输出抄送已验证。
+
+Computer Use 的 getApp 超时后，使用本机 CuaDriver CLI；首次从 Codex 子进程
+启动的驱动继承调用方 TCC 身份，虽已允许 CuaDriver，实际捕获仍拒绝。
+训练员确认授权后，正常重开驱动并经 LaunchServices 独立启动，
+`permissions status --json` 报 `attribution=driver-daemon`、responsible_ppid=1，
+Accessibility/Screen Recording 均 true，随后窗口读取、输入和发送成功。
+未跳过权限检查，未修改 TCC 数据库，未更改 DSH/Codex/router 服务。
