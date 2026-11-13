@@ -44,7 +44,9 @@ jobs:
           for (const worker of ['codexworker', 'dshworker']) {
             const directory = 'worker/' + worker + '/tests/';
             const files = readdirSync(directory).filter(file => file.endsWith('.test.mjs')).sort().map(file => directory + file);
-            const result = spawnSync(process.execPath, ['--test', '--test-reporter=tap', ...files], { stdio: 'inherit' });
+            // Snapshot imports and real PowerShell probes compete for disk/CPU
+            // on hosted Windows runners; retain concurrency without starving IPC.
+            const result = spawnSync(process.execPath, ['--test', '--test-concurrency=2', '--test-reporter=tap', ...files], { stdio: 'inherit' });
             failed ||= Boolean(result.error || result.status !== 0);
           }
           process.exitCode = failed ? 1 : 0;

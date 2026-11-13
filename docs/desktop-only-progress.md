@@ -41,3 +41,6 @@
 
 - 真正Windows Server2025 / Node26 CI已运行：发现DSH测试写死POSIX分隔符（已改path.join）；首轮矩阵另有新router0.4.0与旧版本断言冲突（已改为核对实际源VERSION）。定向22/22通过，正在重跑四组CI。
 - 技能真实包全量首次发现缺references/hermes-manager-protocol.schema.json；分发需连同此测试/协议依赖拷贝并记录哈希，不能只复制Worker目录。
+
+- Windows Node22首轮另遇并发冷加载/CIM的夹具时限：CI改为2文件并发，冷加载预算与Windows MCP的60s一致；真实进程探针仅对系统杀掉的超时查询最多3次，不重试权限拒绝。全部安全/零网络/零原生写入断言保留。此为测试夹具期限，不给Worker任务设期限；定向108 pass / 0 fail / 2 skip。
+- 实际分发包补协议schema后全量694 tests / 686 pass / 0 fail / 8 skip（/tmp/desktop-only-distribution-final.tap）；技能验证Skill is valid。Mac Desktop配置已备份，暂autoStart=false阻止与旧收信进程争用；已注册本地marketplace，未关闭旧实例。

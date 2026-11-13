@@ -219,8 +219,12 @@ for (const platform of ["darwin", "win32"]) {
     }
     assert.equal(executions, 0);
   });
-  test(platform + ": native processChain inspects this test's own Node process", { skip: process.platform !== platform, timeout: 15000 }, async () => {
-    const chain = await processChain(process.pid);
+  test(platform + ": native processChain inspects this test's own Node process", { skip: process.platform !== platform, timeout: 30000 }, async () => {
+    let chain;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try { chain = await processChain(process.pid); break; }
+      catch (error) { if (!error.killed || attempt === 2) throw error; }
+    }
     assert.equal(chain[0]?.pid, process.pid); assert.equal(typeof chain[0].startedAt, "string");
     assert.ok(chain[0].startedAt.length > 0);
     assert.equal(await realpath(chain[0].executable), await realpath(process.execPath));
@@ -319,7 +323,7 @@ process.on("exit", code => {
 });
 // Bounds even a broken generation's shutdown, including an orphan after a
 // killed MCP host; no machine-wide process lookup or PID-file kill is used.
-setTimeout(() => { record("deadline"); process.exit(97); }, 12000).unref();
+setTimeout(() => { record("deadline"); process.exit(97); }, process.platform === "win32" ? 60000 : 12000).unref();
 `;
 
 async function bounded(promise, milliseconds, label) {
@@ -384,7 +388,7 @@ for (const childFlag of [undefined, "1"]) {
         { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "bridge_binding_status", arguments: {} } },
       ];
       child.stdin.end(requests.map(request => JSON.stringify(request)).join("\n") + "\n");
-      const result = await bounded(closed, 15000, "real package MCP cold boot");
+      const result = await bounded(closed, process.platform === "win32" ? 65000 : 15000, "real package MCP cold boot");
       assert.deepEqual(result, { code: 0, signal: null }, stderr);
       const responses = stdout.trim().split("\n").filter(Boolean).map(line => JSON.parse(line));
       const reply = id => { const found = responses.filter(message => message.id === id); assert.equal(found.length, 1, stdout); assert.equal(found[0].error, undefined, stdout); return found[0].result; };
