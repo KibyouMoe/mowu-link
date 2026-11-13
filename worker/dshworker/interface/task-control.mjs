@@ -1,12 +1,14 @@
-import { timingSafeEqual } from "node:crypto";
+import { timingSafeEqual, createHash } from "node:crypto";
 
-export const taskIdOf = (turn) => /^\[router (t-[^\]\s]+)\]/m.exec(turn?.prompt ?? "")?.[1] ?? null;
+export const taskIdOf = (turn) => turn?.taskId ?? /^\[router (t-[^\]\s]+)\]/m.exec(turn?.prompt ?? "")?.[1] ?? null;
 
 export function installTaskControl(transport) {
   const cancelledTasks = new Set();
+  let managerRef = null;
   function find(taskId) {
     for (const thread of transport.threads.values()) {
-      const turn = [...(thread.turns ?? [])].reverse().find(t => taskIdOf(t) === taskId);
+      const turn = [...(thread.turns ?? [])].reverse().find(t => taskIdOf(t) === taskId ||
+        t.inputs?.some(input => taskIdOf({ prompt: input.text }) === taskId));
       if (turn) return { thread, turn };
     }
     return null;
@@ -35,6 +37,8 @@ export function installTaskControl(transport) {
     cancelTask,
     isCancelled: (taskId) => cancelledTasks.has(taskId),
     bindRouter(router, controlUrl) {
+      transport.routerClient = router;
+      if (managerRef) managerRef.routerClient = router;
       transport.approvals.setRouter(router);
       const original = router._request.bind(router);
       router._request = (method, path, body, options) =>
@@ -44,6 +48,20 @@ export function installTaskControl(transport) {
     attachManager(manager) {
       if (!manager || manager.dshTaskControl) return;
       manager.dshTaskControl = true;
+      managerRef = manager;
+      if (transport.routerClient) manager.routerClient = transport.routerClient;
+      // Changing the legacy projection to public text must not resend old
+      // replies just because their formerly embedded reasoning was removed.
+      for (const thread of transport.threads.values()) {
+        const session = manager.state?.sessions?.[thread.id];
+        for (const turn of thread.turns ?? []) {
+          if (turn.publicMessages?.length || !turn.thinking || turn.status !== "completed") continue;
+          const key = `${turn.id}/${turn.id}-agent`;
+          if (session?.seen?.[key]) session.seen[key] = { text: turn.text ?? "",
+            hash: createHash("sha256").update(turn.text ?? "").digest("hex"), final: true };
+        }
+      }
+      transport.publicEvents?.attach(manager);
       const original = manager.handle.bind(manager);
       manager.handle = async (req, res, context = {}) => {
         const pathname = new URL(req.url, "http://worker.invalid").pathname;

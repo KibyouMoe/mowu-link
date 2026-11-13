@@ -85,7 +85,8 @@ test("DSH approval ownership leaves other web sessions to their existing answere
   const dir = await mkdtemp(path.join(os.tmpdir(), "dsh-approval-"));
   try {
     let handler;
-    const ctx = { on(name, callback, opts) { assert.equal(name, "approval/request");
+    const ctx = { on(name, callback, opts) { if (name !== "approval/request") return () => {};
+      assert.equal(name, "approval/request");
       assert.equal(opts.prepend, true); handler = callback; return () => {}; } };
     const transport = new InProcessTransport({ ctx, selection: {}, cwd: dir, stateDir: dir,
       turnTimeoutMs: 1000, log: () => {} });

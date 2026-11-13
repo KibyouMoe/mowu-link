@@ -941,3 +941,12 @@ node scripts/send-router-image.mjs --image /path/to/image.png \
 不需要重启 Worker 即可使用该 CLI；接收方需 router 0.3.1 / trigger-bus 0.9.4。
 支持 PNG/JPEG/GIF/WebP，原图不转码，每张不超过 100MB。
 HTTP accepted 只证明服务器收件，不当作溪流实际看见图片的回执。
+
+### 0.3.1 进程内接口对齐
+
+正文分片、工具进度、真实提问/回答、原会话恢复保护和原生 `/compact` 已接入
+共享业务层；图片仍走同一 image ID 附件通道。具体测试与实机回执见
+[2026-11-13 接口验收](../../docs/DSH-WORKER-COMPAT-20261113.md)。
+Cordis 插件的机器覆盖项用 `DSHWORKER_IDENTITY` / `DSHWORKER_CONFIG` /
+`DSHWORKER_STATE_DIR` / `DSHWORKER_TOKEN_FILE`，避免从启动它的 Codex 进程
+继承其他 Worker 的身份和状态目录；CLI 自身的配置约定保持原样。

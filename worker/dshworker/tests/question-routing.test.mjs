@@ -79,7 +79,7 @@ test("a router task asks Hermes by event and mirrors a read-only question card t
 
 test("trainer-initiated questions keep their buttons and never notify Hermes",async t=>{
  const f=await routing(t,{hermes:false});await f.manager.questions.publish(f.q);
- assert.equal(f.notifications.length,0);assert.equal(buttonCount(f.cards[0].card),2);
+ assert.equal(f.notifications.length,0);assert.equal(buttonCount(f.cards[0].card),3); // Two choices plus the public Skip action.
 });
 test("the trainer cannot accidentally answer a Hermes-owned question through card callbacks",async t=>{
  const f=await routing(t);await f.manager.questions.publish(f.q);

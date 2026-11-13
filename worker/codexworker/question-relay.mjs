@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { nativeQuestionReply, parseNativeQuestionReply, nativeAnswersInSnapshot, SKIPPED_QUESTION_ANSWER } from "./interface/public-questions.mjs";
+import { validNativeQuestionId, nativeQuestionReply, parseNativeQuestionReply, nativeAnswersInSnapshot, SKIPPED_QUESTION_ANSWER } from "./interface/public-questions.mjs";
 import { readFile, writeFile, rename } from "node:fs/promises";
 import path from "node:path";
 import { questionInitiator } from "./question-origin.mjs";
@@ -43,9 +43,7 @@ export function normalizeQuestion(request) {
     return { title: q.title.trim(), ...(q.options ? { options: q.options.map(s => s.trim()) } : {}) };
   });
   if (request.sourceTurnId != null && (typeof request.sourceTurnId !== "string" || !request.sourceTurnId || request.sourceTurnId.length > 200)) reject(400, "invalid_question", "Invalid source turn.");
-  if (request.sourceQuestionItemIds != null && (!Array.isArray(request.sourceQuestionItemIds) || request.sourceQuestionItemIds.length !== questions.length || request.sourceQuestionItemIds.some(id => {
-    try { const parts = JSON.parse(id); return !Array.isArray(parts) || parts.length !== 3 || parts[0] !== "request_user_input_async" || typeof parts[1] !== "string" || !Number.isSafeInteger(parts[2]) || parts[2] < 0; } catch { return true; }
-  }))) reject(400, "invalid_question", "Only explicit public async clarification IDs may be bound, not approval IDs.");
+  if (request.sourceQuestionItemIds != null && (!Array.isArray(request.sourceQuestionItemIds) || request.sourceQuestionItemIds.length !== questions.length || request.sourceQuestionItemIds.some(id => !validNativeQuestionId(id)))) reject(400, "invalid_question", "Only explicit public async clarification IDs may be bound, not approval IDs.");
   if (request.delivery != null && (request.delivery !== "async" || !request.sourceTurnId || !request.sourceQuestionItemIds))
     reject(400, "invalid_question", "Async public questions require exact native source identities.");
   return { questionId: request.questionId, threadId: request.threadId, questions,

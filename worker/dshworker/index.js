@@ -37,6 +37,7 @@ import {
 } from "./interface/transport/index.mjs";
 import { ProgressWatch, noProgressTimeoutMs, taskDeadline } from "./progress-watch.mjs";
 import { normalizeSubscriptionConfig, taskBoardTerminalPhase, taskBoardText, taskBoardTitle } from "./router-tasks.mjs";
+import { waitForTaskClarification } from "./router-question-wait.mjs";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 export const name = "dshworker";
@@ -73,7 +74,7 @@ export function apply(ctx, config = {}) {
   const identity = loadIdentity(config, log);
   const { file: configFile, value: workerConfig } = loadConfig(identity, config, log);
   const stateDir = path.resolve(expandHome(
-    stringArg(config.stateDir) ?? stringArg(process.env.CODEXWORKER_STATE_DIR)
+    stringArg(config.stateDir) ?? stringArg(process.env.DSHWORKER_STATE_DIR)
       ?? identity.stateDir ?? DEFAULT_STATE_DIR));
 
   // dsh 的 HTTP 代理策略由启动器在任何插件加载前就装好了（dsh-http-proxy：
@@ -309,7 +310,7 @@ async function startBusiness({ ctx, transport, identity, workerConfig, config, s
   }
 
   const tokenFile = path.resolve(expandHome(
-    process.env.CODEXWORKER_TOKEN_FILE ?? workerConfig.tokenFile
+    process.env.DSHWORKER_TOKEN_FILE ?? workerConfig.tokenFile
       ?? path.join(os.homedir(), ".hermes", "secrets", "router.token")));
   const token = (() => {
     try { return fs.readFileSync(tokenFile, "utf8").trim().replace(/^Bearer\s+/i, ""); }
@@ -328,6 +329,10 @@ async function startBusiness({ ctx, transport, identity, workerConfig, config, s
 
   const thread = transport.threads.values().next().value
     ?? transport.threads.get(transport.createThread({ title: `${identity.display} · DSH`, cwd: workspace }).threadId);
+  // Resolve the existing agent's scoped services before advertising tools. This
+  // resumes context only; it does not submit a prompt or start a model turn.
+  if (thread.sessionId) await transport.ensureAgent(thread).catch(error =>
+    log("warn", "primary_resume_pending", { threadId: thread.id, message: error.message }));
   const bindingPath = path.join(stateDir, "manager-binding.json");
   const desktopConfigPath = path.join(stateDir, "desktop-config.local.json");
   await writeJsonAtomic(bindingPath, {
@@ -341,6 +346,7 @@ async function startBusiness({ ctx, transport, identity, workerConfig, config, s
     machine: identity.name, tokenFile, workspaceRoots: [thread.cwd],
     ...(project?.projectId ? { projectId: project.projectId } : {}),
     pollMs: 1000,
+    nativeBusyDeliveryVerified: true,
     noProgressTimeoutMs: transport.noProgressTimeoutMs,
     feishu: {
       configFile: feishu.file,
@@ -350,6 +356,8 @@ async function startBusiness({ ctx, transport, identity, workerConfig, config, s
       taskBoardEnabled: workerConfig.feishu?.taskBoardEnabled !== false,
       onlineNotificationEnabled: workerConfig.feishu?.onlineNotificationEnabled ?? false,
       streamEnabled: workerConfig.feishu?.streamEnabled ?? true,
+      transcriptEnabled: workerConfig.feishu?.transcriptEnabled ?? true,
+      toolProgressEnabled: workerConfig.feishu?.toolProgressEnabled ?? true,
       defaultDelivery: workerConfig.feishu?.defaultDelivery ?? "steer",
       autoImageOutput: workerConfig.feishu?.autoImageOutput ?? true,
     },
@@ -470,7 +478,7 @@ async function startBusiness({ ctx, transport, identity, workerConfig, config, s
     } else {
       const { RouterClient } = await import("./router-client.mjs");
       const { PROTOCOL } = await import("./desktop-manager.mjs");
-      const { routerMarker, routerMessageId, lastAssistantText, findRouterTurn, TERMINAL_TURN } =
+      const { routerMarker, routerMessageId, routerPrompt, lastAssistantText, findRouterTurn, TERMINAL_TURN } =
         await import("./router-tasks.mjs");
       const routerUrl = String(process.env.CODEXWORKER_ROUTER_URL ?? routerConfig.url ?? "http://127.0.0.1:8790");
       let chain = Promise.resolve();
@@ -496,17 +504,30 @@ async function startBusiness({ ctx, transport, identity, workerConfig, config, s
           const deadline = taskDeadline(task, startedTask);
           transport.taskDeadlines.set(taskId, Number.isFinite(deadline) ? deadline : null);
           await manager.message({ protocolVersion: PROTOCOL, messageId, source: "hermes", origin: "router",
-            text: `${marker}\n${goal}`, targetThreadId: selected, delivery: "steer" });
+            text: routerPrompt({ taskId, goal, context: task.context }), targetThreadId: selected, delivery: "steer" });
           const watch = new ProgressWatch({ deadline, timeoutMs: transport.noProgressTimeoutMs });
           let turn = null;
+          const consumedQuestions = new Set();
           for (;;) {
             const rejection = manager.state.receipts?.[messageId]?.error;
             if (rejection) throw new Error(`${rejection.error}: ${rejection.detail ?? "dispatch rejected"}`);
             const snapshot = await transport.execute("read_thread", { threadId: selected, turnLimit: 30, includeOutputs: false });
             const found = turn ? snapshot.turns.find((item) => item.id === turn.id) ?? null : findRouterTurn(snapshot, marker);
             if (found) turn = found;
-            if (found && TERMINAL_TURN.has(found.status)) break;
+            if (found && TERMINAL_TURN.has(found.status)) {
+              if (found.status !== "completed") break;
+              await manager.captureTaskQuestions(selected, found);
+              const answer = await waitForTaskClarification({ manager, router: routerClient, taskId,
+                threadId: selected, consumed: consumedQuestions, deadline, log });
+              if (!answer) break;
+              consumedQuestions.add(answer.questionId);
+              if (answer.turnId && answer.turnId !== found.id) {
+                turn = { id: answer.turnId }; watch.touch(); continue;
+              }
+              break;
+            }
             watch.observe(found ?? snapshot.turns);
+            if (found?.waitingForInput) watch.touch(); // Waiting for a real answer is not a stalled engine.
             const failure = watch.failure();
             if (failure) {
               await transport.control.cancelTask(taskId).catch(error =>

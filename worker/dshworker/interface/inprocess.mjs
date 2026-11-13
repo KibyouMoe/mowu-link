@@ -9,8 +9,11 @@ import { fileURLToPath } from "node:url";
 import { ProgressWatch, noProgressTimeoutMs } from "../progress-watch.mjs";
 import { createDshApprovalBridge } from "./approval-bridge.mjs";
 import { installTaskControl, taskIdOf } from "./task-control.mjs";
+import { DshPublicEvents } from "./public-events.mjs";
+import { DshQuestions } from "./questions.mjs";
+import { parseDshQuestionReply } from "./public-questions.mjs";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const VERSION = "0.3.0";
+const VERSION = "0.3.1";
 const TRANSPORT_NAME = "dsh-inprocess";
 const NAMESPACE = "dsh";
 const STATE_FILE_NAME = "dsh-plugin-state.json";
@@ -157,10 +160,10 @@ function createLogger(file) {
 // ---------------------------------------------------------------------------
 
 function loadIdentity(config, log) {
-  const pinned = stringArg(config.identity) ?? stringArg(process.env.CODEXWORKER_IDENTITY);
+  const pinned = stringArg(config.identity) ?? stringArg(process.env.DSHWORKER_IDENTITY);
   const candidates = pinned
     ? [path.resolve(expandHome(pinned))]
-    : [path.resolve("identity.json"), path.join(ROOT, "identity.json")];
+    : [path.join(ROOT, "identity.json")];
   for (const file of candidates) {
     const value = readJsonSync(file);
     if (!value) continue;
@@ -181,7 +184,7 @@ function loadIdentity(config, log) {
 
 function loadConfig(identity, config, log) {
   const file = stringArg(config.config) ? path.resolve(expandHome(config.config))
-    : stringArg(process.env.CODEXWORKER_CONFIG) ? path.resolve(expandHome(process.env.CODEXWORKER_CONFIG))
+    : stringArg(process.env.DSHWORKER_CONFIG) ? path.resolve(expandHome(process.env.DSHWORKER_CONFIG))
       : identity.configFile;
   if (!file) return { file: null, value: {} };
   const value = readJsonSync(file);
@@ -207,6 +210,8 @@ export class InProcessTransport {
     this.live = new Map(); // threadId -> { handle, agent }
     this.closing = false;
     this.writeChain = Promise.resolve();
+    this.publicEvents = new DshPublicEvents(this);
+    this.questions = new DshQuestions(this);
     this.approvals = createDshApprovalBridge({
       log: (level, event, fields) => this.log(level, event, fields),
     });
@@ -257,7 +262,7 @@ export class InProcessTransport {
     }
   }
 
-  save() {
+  save({ required = false } = {}) {
     const threads = [...this.threads.values()].map((thread) => ({
       id: thread.id, sessionId: thread.sessionId ?? null, title: thread.title ?? null,
       cwd: thread.cwd, createdAt: thread.createdAt, updatedAt: thread.updatedAt,
@@ -268,14 +273,21 @@ export class InProcessTransport {
       })),
     }));
     const payload = { version: 1, source: "dsh-inprocess", savedAt: new Date().toISOString(), threads };
-    this.writeChain = this.writeChain.then(() => writeJsonAtomic(this.stateFile, payload)).catch(() => {});
-    return this.writeChain;
+    const write = this.writeChain.then(() => writeJsonAtomic(this.stateFile, payload));
+    this.writeChain = write.catch(error => this.log("warn", "state_save_failed", { message: error.message }));
+    return required ? write : this.writeChain;
   }
 
   // ---- transport 接口 -----------------------------------------------------
 
   async listTools() {
-    return TOOL_DEFINITIONS.map((tool) => ({ ...tool, inputSchema: structuredClone(tool.inputSchema) }));
+    const tools = TOOL_DEFINITIONS.map((tool) => ({ ...tool, inputSchema: structuredClone(tool.inputSchema) }));
+    const commands = this.ctx.get("commands");
+    if (this.ctx.get("compaction")?.compactNow || [...this.live.values()].some(e =>
+      commands?.find(e.agent, "compact") || e.agent.ctx?.get("compaction")?.compactNow)) tools.push({ name: "compact_thread", namespace: NAMESPACE,
+      description: "Compact the existing idle native session without replacing it.",
+      inputSchema: { type: "object", properties: { threadId: { type: "string" } }, required: ["threadId"] } });
+    return tools;
   }
 
   async execute(toolName, args = {}, timeoutMs = 5_000) {
@@ -287,11 +299,43 @@ export class InProcessTransport {
       case "set_thread_title": return this.setThreadTitle(args);
       case "wait_threads": return this.waitThreads(args, timeoutMs);
       case "list_projects": return this.listProjects(args);
+      case "compact_thread": return this.compactThread(args);
       default: throw new Error(`${TRANSPORT_NAME} does not implement native tool "${toolName}"`);
     }
   }
 
   // ---- 线程 ---------------------------------------------------------------
+
+  async compactThread(args) {
+    const thread = this.requireThread("compact_thread", args);
+    if (thread.running || thread.compacting) throw new Error("native_compaction_requires_idle_session");
+    thread.compacting = true;
+    const controller = new AbortController();
+    let stop;
+    try {
+      const agent = await this.ensureAgent(thread);
+      // Desktop isolates compaction inside the preset group. Its registered
+      // human command is the public scoped entry; agent.ctx cannot see the leaf.
+      const commands = this.ctx.get("commands");
+      const command = commands?.find(agent, "compact");
+      const service = agent.ctx?.get("compaction") ?? this.ctx.get("compaction");
+      if (!command && !service?.compactNow) throw new Error("native_compaction_unavailable");
+      const turn = { id: `compact-${randomUUID()}` };
+      stop = this.ctx.on("session/event", (session, event) => {
+        if (event?.type?.startsWith("compaction/")) this.publicEvents.event(thread, turn, agent, session, event);
+      }, { global: true });
+      const result = command ? await commands.execute(agent, "/compact", [], controller.signal)
+        : await service.compactNow(agent, controller.signal, turn.id);
+      if (command && result?.result?.kind !== "success") throw new Error(result?.result?.text ?? "native_compaction_failed");
+      const compacted = command ? Number.isSafeInteger(result.result.sourceEventSeq) : result != null;
+      // The shared manager waits for a real lifecycle pair after acceptance.
+      // A native no-op has no pair; reject explicitly so its input gate reopens.
+      if (!compacted) throw new Error("没有可压缩历史；原会话保持不变");
+      await this.ctx.get("sessions")?.flush?.(agent.session);
+      await this.save();
+      return { threadId: thread.id, compacted, sessionId: thread.sessionId };
+    } finally { stop?.(); thread.compacting = false; }
+  }
 
   createThread(args = {}) {
     const cwd = this.resolveWorkspace(args.cwd ?? args.target?.cwd);
@@ -316,12 +360,30 @@ export class InProcessTransport {
 
   sendMessage(args = {}) {
     const thread = this.requireThread("send_message_to_thread", args);
+    if (thread.compacting) throw new Error("native_compaction_in_progress");
     const prompt = stringArg(args.prompt) ?? stringArg(args.text) ?? stringArg(args.message)
       ?? textFromInput(args.input);
     if (!prompt) throw new Error("send_message_to_thread requires a non-empty `prompt` (or text `input`)");
+    const replies = parseDshQuestionReply(prompt);
+    const nativeReply = replies ? this.questions.prepare(thread, replies) : null;
+    if (nativeReply?.answered) {
+      const active = thread.turns.find(t => t.id === nativeReply.turnId);
+      (active.inputs ??= []).push({ id: randomUUID(), text: prompt });
+      return { threadId: thread.id, turnId: active.id, accepted: true, status: "inProgress" };
+    }
+    const active = thread.running && thread.turns.find(t => t.status === "inProgress" && !thread.queue.includes(t.id));
+    const agent = this.live.get(thread.id)?.agent;
+    if (active && agent && !nativeReply) {
+      agent.steer(userMessage(prompt));
+      (active.inputs ??= []).push({ id: randomUUID(), text: prompt });
+      active.eventSeq = (active.eventSeq ?? 0) + 1;
+      void this.save();
+      return { threadId: thread.id, turnId: active.id, accepted: true, status: active.status };
+    }
     const turn = {
       id: randomUUID(), prompt, status: "inProgress", text: "", thinking: "",
       error: null, reasonKind: null, startedAt: new Date().toISOString(), completedAt: null,
+      ...(nativeReply ? { nativeReply, taskId: nativeReply.taskId } : {}),
     };
     turn.deadlineAt = this.taskDeadlines.get(taskIdOf(turn)) ?? null;
     thread.turns.push(turn);
@@ -361,7 +423,7 @@ export class InProcessTransport {
   async startTurn(thread, turn) {
     thread.running = true;
     thread.status = "inProgress";
-    let thinking = "", stopStream = null, agent = null, seenSeq = null;
+    let thinking = "", stopStream = null, stopEvents = null, agent = null, seenSeq = null;
     const watch = new ProgressWatch({ timeoutMs: this.noProgressTimeoutMs,
       deadline: turn.deadlineAt ?? Infinity });
     let rejectExpired;
@@ -373,6 +435,9 @@ export class InProcessTransport {
           seenSeq = sequence; turn.eventSeq = (turn.eventSeq ?? 0) + 1; watch.touch();
         }
       }
+      // A live human answer waiter is not a stalled model/tool. Explicit task
+      // deadlines still apply; no independent question deadline is introduced.
+      if (turn.waitingForInput) watch.touch();
       const failure = watch.failure();
       if (!failure) return;
       clearInterval(timer);
@@ -389,8 +454,13 @@ export class InProcessTransport {
         // Initialization can finish after the liveness watchdog or router cancel.
         if (watch.failure() || turn.cancelRequested || this.closing) return null;
         seenSeq = JSON.stringify(this.agentsForTurn(agent).map(subject => [subject.id ?? subject.session.id, subject.session.seq]));
+        stopEvents = this.ctx.on("session/event", (session, event) => {
+          try { this.publicEvents.event(thread, turn, agent, session, event); }
+          catch { this.log("warn", "public_event_projection_failed", { threadId: thread.id, type: event?.type }); }
+        }, { global: true });
         stopStream = this.ctx.on("agent/assistant-stream", ({ agent: subject, frame }) => {
           if (!this.agentsForTurn(agent).includes(subject)) return;
+          if (subject === agent) this.publicEvents.stream(thread, turn, frame);
           const chunk = frame?.type === "chunk" ? frame.chunk : null;
           if (chunk && chunk.type !== "heartbeat" && Object.entries(chunk).some(([key, value]) =>
               key !== "type" && value != null && value !== "")) {
@@ -401,7 +471,8 @@ export class InProcessTransport {
           }
         });
         const fromSeq = agent.session.seq;
-        agent.followup(userMessage(turn.prompt));
+        if (turn.nativeReply) this.questions.continue(agent, turn.nativeReply);
+        else agent.followup(userMessage(turn.prompt));
         const subagents = this.ctx.get("subagents");
         for (;;) {
           await agent.whenIdle();
@@ -435,6 +506,8 @@ export class InProcessTransport {
     } finally {
       clearInterval(timer);
       try { stopStream?.(); } catch { /* ignore */ }
+      try { stopEvents?.(); } catch { /* ignore */ }
+      this.publicEvents.finish(thread, turn);
     }
   }
 
@@ -631,7 +704,8 @@ export class InProcessTransport {
       } catch (error) {
         this.log("warn", "agent_resume_failed", { threadId: thread.id, sessionId: thread.sessionId,
           message: error?.message ?? String(error) });
-        thread.sessionId = null;
+        // A failed resume must never silently replace months of native context.
+        throw Object.assign(new Error(`原会话恢复失败，已保留 ${thread.sessionId}：${error?.message ?? error}`), { code: "dsh_session_resume_failed" });
       }
     }
     const sessionId = `session-${randomUUID()}`;
@@ -648,6 +722,14 @@ export class InProcessTransport {
     thread.sessionId = typeof agent.session?.id === "string" ? agent.session.id : sessionId;
     this.live.set(thread.id, { handle, agent });
     this.log("info", "agent_created", { threadId: thread.id, sessionId: thread.sessionId, seq: agent.session.seq });
+    try {
+      await this.ctx.get("sessions")?.flush?.(agent.session);
+      await this.save({ required: true });
+    } catch (error) {
+      this.live.delete(thread.id);
+      await handle.dispose?.();
+      throw error;
+    }
     return agent;
   }
 
@@ -667,6 +749,7 @@ export class InProcessTransport {
   async close(reason = "plugin disposed") {
     this.closing = true;
     this.approvals.close();
+    this.questions.close();
     this.stopApproval?.();
     for (const thread of this.threads.values()) {
       for (const turn of thread.turns ?? []) {
@@ -748,7 +831,7 @@ function approvalFields(turn) {
 
 function normalizeTurn(turn, maxChars) {
   return {
-    id: turn.id, status: turn.status, eventSeq: turn.eventSeq ?? 0, ...approvalFields(turn), items: turnItems(turn, maxChars), itemsView: "full",
+    id: turn.id, status: turn.status, waitingForInput: turn.waitingForInput === true, eventSeq: turn.eventSeq ?? 0, ...approvalFields(turn), items: turnItems(turn, maxChars), itemsView: "full",
     startedAt: turn.startedAt ?? null, completedAt: turn.completedAt ?? null,
     durationMs: turn.startedAt && turn.completedAt
       ? Math.max(0, Date.parse(turn.completedAt) - Date.parse(turn.startedAt)) : null,
@@ -761,26 +844,28 @@ function turnItems(turn, maxChars) {
     type: "userMessage", kind: "trainer", id: `${turn.id}-user`,
     text: truncateText(turn.prompt ?? "", maxChars),
   }];
+  items.push(...(turn.nativeQuestions ?? []));
+  for (const input of turn.inputs ?? []) items.push({ type: "userMessage", kind: "trainer", id: input.id,
+    text: truncateText(input.text, maxChars), ...(parseDshQuestionReply(input.text) ? { dshQuestionAnswers: parseDshQuestionReply(input.text) } : {}) });
+  const replies = parseDshQuestionReply(turn.prompt);
+  if (replies) items[0].dshQuestionAnswers = replies;
   // Approval progress has a separate stable item id; final replies keep their old id.
   for (const progress of turn.progress ?? []) {
     items.push({ type: "agentMessage", kind: "assistant",
       id: `${turn.id}-approval-${progress.approval_id}`,
       phase: "commentary", text: truncateText(progress.text, maxChars) });
   }
-  // 等 turn 收尾再输出 assistant item：inProgress 阶段 scanner 会先扫到一次，
-  // 那次如果把正文发出去，completed 时再整段发一遍，飞书上就是两条重复。
-  // 返回里只带 user，scanner 对 trainer 类型不会往飞书发。
-  const done = turn.status === "completed";
-  if (done && (turn.text || turn.thinking)) {
-    const parts = [];
-    if (turn.thinking) {
-      const thought = truncateText(turn.thinking, maxChars);
-      parts.push(`💭 Reasoning:\n\n\`\`\`plaintext\n${thought}\n\`\`\``);
-    }
-    if (turn.text) parts.push(truncateText(turn.text, maxChars));
-    items.push({ type: "agentMessage", kind: "assistant", id: `${turn.id}-agent`,
-      text: parts.join("\n\n"), phase: "final_answer" });
+  // Stable per-attempt IDs let the common streaming relay PATCH one card.
+  if (turn.publicMessages?.length) {
+    turn.publicMessages.forEach((message, index) => items.push({ type: "agentMessage", kind: "assistant",
+      id: message.id, text: truncateText(message.text, maxChars),
+      phase: turn.status === "completed" && index === turn.publicMessages.length - 1 ? "final_answer" : "commentary" }));
+    if (turn.error) items.push({ type: "error", id: `${turn.id}-error`, text: turn.error });
+    return items;
   }
+  const done = turn.status === "completed";
+  if (done && turn.text) items.push({ type: "agentMessage", kind: "assistant", id: `${turn.id}-agent`,
+    text: truncateText(turn.text, maxChars), phase: "final_answer" });
   if (turn.error) items.push({ type: "error", id: `${turn.id}-error`, text: turn.error });
   return items;
 }

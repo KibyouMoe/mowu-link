@@ -78,3 +78,10 @@ export function nativeAnswersInSnapshot(question, snapshot) {
   const answers = question.sourceQuestionItemIds.map(id => parts.get(id));
   return answers.every(a => typeof a === "string" && a.trim()) ? answers : null;
 }
+
+// Validation belongs to the engine adapter; shared relay stores opaque identities.
+export function validNativeQuestionId(value) {
+  try { const p = JSON.parse(value); return Array.isArray(p) && p.length === 3 &&
+    p[0] === "request_user_input_async" && typeof p[1] === "string" && Number.isSafeInteger(p[2]) && p[2] >= 0;
+  } catch { return false; }
+}
