@@ -115,7 +115,7 @@ test("waiting approval is visible in read_thread, wait snapshots and terminal re
   const dir = await mkdtemp(path.join(os.tmpdir(), "dsh-progress-"));
   try {
     let handler, resolveGrant;
-    const ctx = { on(name, callback) { handler = callback; return () => {}; } };
+    const ctx = { on(name, callback) { if (name === "approval/request") handler = callback; return () => {}; } };
     const transport = new InProcessTransport({ ctx, selection: {}, cwd: dir, stateDir: dir,
       turnTimeoutMs: 1000, log: () => {} });
     transport.save = async () => {};

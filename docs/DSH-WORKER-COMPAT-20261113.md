@@ -90,3 +90,5 @@ Codex app-server 未重启。几次正常关闭/重开后仍恢复上述原生 s
 Worker 的新轮次时，全量消息抄送仍需单独接入/验收，不能据此声称 Desktop
 所有入口已经完全一致。原生 Desktop 点击答案、跳过和 continued 边界有单测，
 本轮真实作答端为 Hermes。token 用量数字尚未投影；不伪造 token 计数。
+
+后续：桌面独立轮次适配与验收状态见 [DSH-DESKTOP-RELAY-20261113.md](DSH-DESKTOP-RELAY-20261113.md)。

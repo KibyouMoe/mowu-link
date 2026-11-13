@@ -10,6 +10,7 @@ import { ProgressWatch, noProgressTimeoutMs } from "../progress-watch.mjs";
 import { createDshApprovalBridge } from "./approval-bridge.mjs";
 import { installTaskControl, taskIdOf } from "./task-control.mjs";
 import { DshPublicEvents } from "./public-events.mjs";
+import { DshDesktopObserver } from "./desktop-observer.mjs";
 import { DshQuestions } from "./questions.mjs";
 import { parseDshQuestionReply } from "./public-questions.mjs";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -238,6 +239,7 @@ export class InProcessTransport {
     }, { prepend: true });
     this.control = installTaskControl(this);
     this.load();
+    this.desktopObserver = new DshDesktopObserver(this);
   }
 
   // ---- 状态 ---------------------------------------------------------------
@@ -374,7 +376,7 @@ export class InProcessTransport {
     const active = thread.running && thread.turns.find(t => t.status === "inProgress" && !thread.queue.includes(t.id));
     const agent = this.live.get(thread.id)?.agent;
     if (active && agent && !nativeReply) {
-      agent.steer(userMessage(prompt));
+      agent.steer(this.desktopObserver.sent(userMessage(prompt), active));
       (active.inputs ??= []).push({ id: randomUUID(), text: prompt });
       active.eventSeq = (active.eventSeq ?? 0) + 1;
       void this.save();
@@ -472,7 +474,7 @@ export class InProcessTransport {
         });
         const fromSeq = agent.session.seq;
         if (turn.nativeReply) this.questions.continue(agent, turn.nativeReply);
-        else agent.followup(userMessage(turn.prompt));
+        else agent.followup(this.desktopObserver.sent(userMessage(turn.prompt), turn));
         const subagents = this.ctx.get("subagents");
         for (;;) {
           await agent.whenIdle();
@@ -508,6 +510,7 @@ export class InProcessTransport {
       try { stopStream?.(); } catch { /* ignore */ }
       try { stopEvents?.(); } catch { /* ignore */ }
       this.publicEvents.finish(thread, turn);
+      this.desktopObserver.release(turn);
     }
   }
 
@@ -698,6 +701,7 @@ export class InProcessTransport {
         });
         const agent = handle.agent;
         this.live.set(thread.id, { handle, agent });
+        this.desktopObserver?.baseline(agent);
         this.log("info", "agent_resumed", { threadId: thread.id, sessionId: thread.sessionId,
           seq: agent.session.seq });
         return agent;
@@ -721,6 +725,7 @@ export class InProcessTransport {
     const agent = handle.agent;
     thread.sessionId = typeof agent.session?.id === "string" ? agent.session.id : sessionId;
     this.live.set(thread.id, { handle, agent });
+    this.desktopObserver?.baseline(agent);
     this.log("info", "agent_created", { threadId: thread.id, sessionId: thread.sessionId, seq: agent.session.seq });
     try {
       await this.ctx.get("sessions")?.flush?.(agent.session);
@@ -748,6 +753,7 @@ export class InProcessTransport {
 
   async close(reason = "plugin disposed") {
     this.closing = true;
+    this.desktopObserver?.close();
     this.approvals.close();
     this.questions.close();
     this.stopApproval?.();
