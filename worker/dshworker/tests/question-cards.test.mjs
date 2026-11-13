@@ -258,11 +258,11 @@ test("a queued skip remains pending through restart and finishes only on native 
  await restored.close();
 });
 
-test("mixed questions render numbered options and editable multiline fields with explicit submit", async t => {
+test("mixed questions render numbered options and compact editable fields with explicit submit", async t => {
   const f = await fixture(t); await f.publish({ questions: [f.q.questions[0], { title: "补充说明" }] });
   const all = nodes(f.sends[0].card), inputs = all.filter(n => n.tag === "input");
   assert.deepEqual(inputs.map(n => n.name), ["answer_0", "answer_1"]);
-  assert.ok(inputs.every(n => n.input_type === "multiline_text" && n.required === false && n.max_length === 1000));
+  assert.ok(inputs.every(n => n.input_type === "text" && n.required === false && n.max_length === 1000));
   assert.deepEqual(all.filter(n => n.tag === "button").map(n => n.value.action), ["form_select", "form_select", "form_skip", "form_submit"]);
 });
 

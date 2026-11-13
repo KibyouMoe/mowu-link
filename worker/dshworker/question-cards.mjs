@@ -1,7 +1,7 @@
 // Explicit public clarification UI only. Never render raw native tool arguments.
 import { escapeMarkdown } from "./feishu.mjs";
 import { SKIPPED_QUESTION_ANSWER } from "./interface/public-questions.mjs";
-export const QUESTION_CARD_LAYOUT_VERSION = 8;
+export const QUESTION_CARD_LAYOUT_VERSION = 9;
 export const QUESTION_ANSWER_LIMIT = 1000;
 export const questionInputName = index => `answer_${index}`;
 
@@ -11,6 +11,7 @@ export function questionCard(question, state, bridgeName) {
   const elements = [];
   const canRespond = question.recipient?.kind !== "hermes" && state.status === "open" && state.sourceTurnId;
   const form = [];
+  let footerInput;
   const button = (label, action, name, extra = {}, primary = false) => ({ tag: "button", name,
     text: { tag: "plain_text", content: label }, type: primary ? "primary" : "default", size: "small", action_type: "form_submit",
     value: { bridgeQuestion: question.questionId, nonce: state.nonce, action, ...extra } });
@@ -25,9 +26,11 @@ export function questionCard(question, state, bridgeName) {
         form.push(button(`${draft === option ? "☑" : "☐"} ${short ? `${oi + 1}  ${option}` : `选择 ${oi + 1}`}`, "form_select", `select_${qi}_${oi}`,
           { questionIndex: qi, optionIndex: oi }, draft === option));
       });
-      form.push({ tag: "input", name: questionInputName(qi), input_type: "multiline_text", width: "fill",
+      const input = { tag: "input", name: questionInputName(qi), input_type: draft.includes("\n") ? "multiline_text" : "text", width: "fill",
         placeholder: { tag: "plain_text", content: "或自行撰写回复" },
-        default_value: draft, max_length: QUESTION_ANSWER_LIMIT, required: false });
+        default_value: draft, max_length: QUESTION_ANSWER_LIMIT, required: false };
+      if (qi === question.questions.length - 1) footerInput = input;
+      else form.push(input);
       if (qi < question.questions.length - 1) form.push({ tag: "hr" });
       return;
     }
@@ -40,8 +43,9 @@ export function questionCard(question, state, bridgeName) {
   });
   if (canRespond) {
     form.push({ tag: "column_set", flex_mode: "none", horizontal_align: "right", horizontal_spacing: "8px", columns: [
-      { tag: "column", width: "auto", elements: [{ ...button("跳过", "form_skip", "skip_answers"), type: "default" }] },
-      { tag: "column", width: "auto", elements: [{ ...button("发送", "form_submit", "submit_answers"), type: "primary_filled" }] },
+      { tag: "column", width: "weighted", weight: 1, vertical_align: "center", elements: [footerInput] },
+      { tag: "column", width: "auto", vertical_align: "center", elements: [{ ...button("跳过", "form_skip", "skip_answers"), type: "default" }] },
+      { tag: "column", width: "auto", vertical_align: "center", elements: [{ ...button("发送", "form_submit", "submit_answers"), type: "primary_filled" }] },
     ] });
     elements.push({ tag: "form", name: "question_answers", vertical_spacing: "8px", padding: "0px", elements: form });
   }
