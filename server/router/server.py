@@ -19,7 +19,7 @@ goes offline, its name and backlog stay, and its in-flight task goes back to
 ``queued`` so the next connection receives it again (at-least-once; workers
 dedupe by ``task_id``).
 
-Standard library only.  Python 3.9.  Binds loopback only.
+Standard library only.  Python 3.9.  Binds loopback unless explicitly opted in.
 """
 
 from __future__ import annotations
@@ -2819,11 +2819,13 @@ def acquire_lock(path: Path) -> Optional[int]:
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="mowu-router: worker / task / subscription registry "
-                    "for Hermes. Loopback only, stdlib only.")
+                    "for Hermes. Loopback by default, stdlib only.")
     p.add_argument("--port", type=int, default=DEFAULT_PORT,
-                   help="listen port on 127.0.0.1 (default %(default)s)")
+                   help="listen port (default %(default)s)")
     p.add_argument("--host", default=HOST,
-                   help="loopback address to bind (default %(default)s)")
+                   help="address to bind (default %(default)s)")
+    p.add_argument("--allow-remote", action="store_true",
+                   help="allow non-loopback binding; token auth remains required")
     p.add_argument("--db", default=DEFAULT_DB,
                    help="SQLite path (default %(default)s)")
     p.add_argument("--token-file", default=DEFAULT_TOKEN_PATH,
@@ -2851,8 +2853,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     setup_logging(Path(os.path.expanduser(args.log)), args.verbose)
 
     host = (args.host or HOST).strip()
-    if host not in ("127.0.0.1", "localhost"):
-        print("error: mowu-router is loopback-only; refusing to bind %r"
+    if host not in ("127.0.0.1", "localhost") and not args.allow_remote:
+        print("error: non-loopback binding requires --allow-remote; refusing to bind %r"
               % host, file=sys.stderr)
         return 2
     if args.backlog_max < 1:

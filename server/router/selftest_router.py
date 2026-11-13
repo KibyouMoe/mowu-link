@@ -427,6 +427,12 @@ def run(work: Path, checker: Checker) -> None:
     router_out = None
     workers = []
     try:
+        refused = subprocess.run([
+            PY, str(ROUTER), "--host", "0.0.0.0",
+            "--log", str(work / "bind-refused.log"),
+        ], capture_output=True, text=True, timeout=10)
+        checker.check("remote bind requires explicit opt-in",
+                      refused.returncode == 2 and "--allow-remote" in refused.stderr)
         # ---------------------------------------------------------------- #
         # 0. processes (real trigger + real router)
         # ---------------------------------------------------------------- #
@@ -444,6 +450,7 @@ def run(work: Path, checker: Checker) -> None:
 
         router_proc, router_out = start_process([
             PY, str(ROUTER),
+            "--host", "0.0.0.0", "--allow-remote",
             "--port", str(PORT),
             "--db", str(router_db),
             "--token-file", str(router_token),
