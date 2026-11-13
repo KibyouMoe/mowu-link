@@ -11,10 +11,12 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
 import { desktopOwner, processChain } from "../desktop-lifecycle.mjs";
+import { BUSINESS_VERSION } from "../mcp-business.mjs";
 
 const pluginRoot = fileURLToPath(new URL("..", import.meta.url));
-for (const shutdown of ["EOF", "pipelined inventory EOF", "Windows inventory job cleanup", "Windows nested inventory job cleanup", "Windows inventory process-tree cleanup"]) test(`cold initialization hands off before ${shutdown}; the supervisor-owned writer survives`, { timeout: 90000 }, async t => {
+for (const shutdown of ["EOF", "CLI inventory EOF", "pipelined inventory EOF", "Windows inventory job cleanup", "Windows nested inventory job cleanup", "Windows inventory process-tree cleanup"]) test(`cold initialization hands off before ${shutdown}; the supervisor-owned writer survives`, { timeout: 90000 }, async t => {
   if (process.platform !== "win32" || !desktopOwner(await processChain(process.pid))) {
     t.skip("Requires a Windows MSIX Desktop ancestor; isolated unit coverage remains portable"); return;
   }
@@ -65,12 +67,33 @@ for (const shutdown of ["EOF", "pipelined inventory EOF", "Windows inventory job
     for (const socket of sockets) socket.destroy(); await new Promise(resolve => native.close(resolve));
     assert.ok(root.startsWith(os.tmpdir())); await rm(root, { recursive: true, force: true });
   });
-  await writeFile(path.join(stateDir, "manager-binding.json"), JSON.stringify({ managerThreadId: "isolated-chat", managerTurnId: "isolated-turn" }));
-  await writeFile(path.join(stateDir, "desktop-config.local.json"), JSON.stringify({ tokenFile, port, bridgeName: "handoff-test", workspaceRoots: [root], pollMs: 1000000 }));
+  const cli = shutdown === "CLI inventory EOF";
+  const writerState = cli ? path.join(stateDir, "cli") : stateDir;
+  const binding = { managerThreadId: "isolated-chat", managerTurnId: "isolated-turn" };
+  const managerConfig = { tokenFile, port, bridgeName: "handoff-test", workspaceRoots: [root], pollMs: 1000000 };
+  const savedSession = { threadId: binding.managerThreadId, cwd: root };
+  if (cli) {
+    await mkdir(writerState);
+    const identityFile = path.join(root, "identity.json");
+    const configFile = path.join(root, "worker.json");
+    const feishuFile = path.join(root, "feishu.json");
+    await writeFile(path.join(stateDir, "desktop-cli.local.json"), JSON.stringify({ identityFile }));
+    await writeFile(path.join(writerState, "cli-session.json"), JSON.stringify(savedSession));
+    await writeFile(identityFile, JSON.stringify({ name: "handoff-test", display: managerConfig.bridgeName,
+      port, configFile, stateDir: writerState, transport: "desktop-pipe" }));
+    await writeFile(configFile, JSON.stringify({ tokenFile, router: { enabled: false },
+      feishu: { configFile: feishuFile, onlineNotificationEnabled: false } }));
+    // An empty trainer whitelist prevents the Feishu socket from starting.
+    await writeFile(feishuFile, JSON.stringify({ app_id: "isolated", app_secret: "isolated" }));
+  }
+  await writeFile(path.join(writerState, "manager-binding.json"), JSON.stringify(binding));
+  await writeFile(path.join(writerState, "desktop-config.local.json"), JSON.stringify(managerConfig));
   const env = { ...process.env, USERPROFILE: root, HOME: root, CODEX_APP_TOOLS_PIPE_PATH: pipe };
-  delete env.RUDOLF_BRIDGE_LIFECYCLE_CHILD; delete env.RUDOLF_BRIDGE_DESKTOP_STARTED_AT;
+  for (const key of ["RUDOLF_BRIDGE_LIFECYCLE_CHILD", "RUDOLF_BRIDGE_DESKTOP_STARTED_AT", "CODEXWORKER_STATE_DIR",
+    "CODEXWORKER_NATIVE_TRANSPORT", "CODEXWORKER_TOKEN_FILE", "CODEXWORKER_PORT", "CODEXWORKER_HOST"]) delete env[key];
   let inventoryRoot = pluginRoot;
-  if (shutdown === "EOF") {
+  const inventoryEndsOnInitialize = shutdown === "EOF" || cli;
+  if (inventoryEndsOnInitialize) {
     inventoryRoot = path.join(root, "disposable-plugin-cache");
     await cp(pluginRoot, inventoryRoot, { recursive: true });
     await writeFile(path.join(stateDir, "runtime-source.local.json"), JSON.stringify({ sourceRoot: path.resolve(pluginRoot), autoReload: true }));
@@ -95,7 +118,7 @@ for (const shutdown of ["EOF", "pipelined inventory EOF", "Windows inventory job
     assert.equal(JSON.parse(jobOutput.trim()).assigned, true);
   }
   const request = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }) + "\n";
-  if (shutdown === "EOF") {
+  if (inventoryEndsOnInitialize) {
     inventory.stdin.end(request);
     const [code] = await exited; assert.equal(code, 0, diagnostics);
   } else {
@@ -122,26 +145,48 @@ for (const shutdown of ["EOF", "pipelined inventory EOF", "Windows inventory job
     })]);
   }
   const responses = output.trim().split("\n").map(line => JSON.parse(line));
-  const response = responses.find(item => item.id === 1); assert.ok(!response.error); assert.equal(response.result.serverInfo.version, "0.2.38");
+  const response = responses.find(item => item.id === 1);
+  assert.ok(response && !response.error, diagnostics);
+  assert.equal(response.result.serverInfo.version, BUSINESS_VERSION);
   if (shutdown === "pipelined inventory EOF") assert.ok(responses.find(item => item.id === 2)?.result.tools.length > 0);
   writer = await health();
   assert.equal(writer.capabilities.desktopStartupHandoff.active, true);
-  assert.equal(writer.capabilities.businessHotReload.desktopWatchdogVersion, "0.2.27");
+  if (cli) {
+    assert.equal(writer.capabilities.businessHotReload.scope, "cli-desktop-pipe");
+    assert.equal(writer.integrations.selectedThreadId, savedSession.threadId);
+    assert.deepEqual(JSON.parse(await readFile(path.join(writerState, "cli-session.json"), "utf8")), savedSession);
+  } else assert.equal(writer.capabilities.businessHotReload.desktopWatchdogVersion, "0.2.27");
   assert.notEqual(writer.integrations.runtimeHostPid, inventory.pid, "Inventory must not own the persistent writer");
   const status = JSON.parse(await readFile(path.join(stateDir, "desktop-lifecycle-status.json"), "utf8"));
   assert.equal(status.stage, "desktop_lifetime_bridge_active"); assert.equal(status.writerPid, writer.integrations.pid);
   assert.equal(status.version, "0.2.23"); assert.equal(status.launchMode, "windows-desktop-parent");
   assert.equal(status.watchdogVersion, "0.2.27");
-  if (shutdown === "EOF") {
+  if (inventoryEndsOnInitialize) {
     assert.equal(path.dirname(inventoryRoot), root);
     await rm(inventoryRoot, { recursive: true, force: true });
   }
   const supervisorChain = await processChain(status.supervisorPid);
   assert.equal(supervisorChain[1]?.pid, status.desktopPid, "The supervisor must be a direct child of the verified Desktop, outside the inventory ancestry");
-  await new Promise(resolve => setTimeout(resolve, 10000));
+  if (cli) {
+    const workerChain = await processChain(status.writerPid);
+    assert.equal(workerChain[1]?.pid, status.supervisorPid, "The CLI writer must be owned by the Desktop supervisor");
+  }
+  await delay(10000);
   assert.doesNotThrow(() => process.kill(status.supervisorPid, 0), "The acknowledged supervisor must remain alive across watchdog checks");
   assert.equal((await health()).integrations.pid, writer.integrations.pid, "The same writer must remain after MCP EOF");
   assert.equal(nativeWrites, 0);
   const journal = await readFile(path.join(stateDir, "desktop-lifecycle-events.jsonl"), "utf8");
   assert.ok(journal.includes("desktop_lifetime_bridge_active")); assert.ok(!journal.includes(token)); assert.ok(!journal.includes(pipe));
+  if (cli) {
+    // End only the isolated supervisor. The CLI must stop while the real
+    // Desktop stays open. This exercises the abrupt-owner fallback.
+    process.kill(status.supervisorPid);
+    const deadline = Date.now() + 10000;
+    const writerAlive = () => {
+      try { process.kill(status.writerPid, 0); return true; }
+      catch (error) { if (error.code === "ESRCH") return false; throw error; }
+    };
+    while (writerAlive() && Date.now() < deadline) await delay(100);
+    assert.equal(writerAlive(), false, "The isolated CLI must exit after losing its supervisor");
+  }
 });

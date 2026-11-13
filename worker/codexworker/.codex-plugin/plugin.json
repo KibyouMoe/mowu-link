@@ -1,6 +1,6 @@
 {
   "name": "codexworker",
-  "version": "0.2.38+codex.20261101.integrity1",
+  "version": "0.2.41+desktop.lifecycle",
   "description": "Connects Hermes to Codex Desktop native tasks through a local manager bridge.",
   "author": {
     "name": "Rudolf"

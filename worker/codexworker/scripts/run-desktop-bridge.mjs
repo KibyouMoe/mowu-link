@@ -6,7 +6,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { DesktopLifecycle, desktopOwner, processChain, resolveDesktopOwner } from "../desktop-lifecycle.mjs";
+import { DesktopLifecycle, desktopOwner, processChain, readDesktopCliLaunch, resolveDesktopOwner } from "../desktop-lifecycle.mjs";
 
 const args = process.argv.slice(2);
 if (args[0] !== "--desktop-pid" || !/^\d+$/.test(args[1] ?? "") || !process.env.CODEX_APP_TOOLS_PIPE_PATH) {
@@ -20,7 +20,9 @@ if (!owner || owner.pid !== desktopPid ||
 }
 const pluginRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const stateRoot = path.join(process.env.USERPROFILE ?? process.env.HOME ?? os.homedir(), ".codex", "state", "codexworker");
-const config = JSON.parse(await readFile(path.join(stateRoot, "desktop-config.local.json"), "utf8"));
+const cliLaunch = await readDesktopCliLaunch(stateRoot);
+const writerState = cliLaunch?.stateDir ?? stateRoot;
+const config = JSON.parse(await readFile(path.join(writerState, "desktop-config.local.json"), "utf8"));
 if ((config.host ?? "127.0.0.1") !== "127.0.0.1") throw new Error("This activation only supports loopback.");
 const token = (await readFile(config.tokenFile, "utf8")).trim();
 if (token.length < 24) throw new Error("A configured strong machine-local credential is required.");
@@ -53,10 +55,13 @@ const log = value => {
   // lifecycle channel. Persist diagnostics without writing a retired pipe.
 };
 async function stopChild(child) {
-  if (child.exitCode !== null) return;
+  if (child.exitCode !== null || child.signalCode !== null) return;
   await new Promise(resolve => {
-    const limit = setTimeout(() => { child.kill(); resolve(); }, 5000);
-    child.once("exit", () => { clearTimeout(limit); resolve(); }); child.stdin.end();
+    const limit = setTimeout(() => child.kill(), 5000);
+    child.once("exit", () => { clearTimeout(limit); resolve(); });
+    if (cliLaunch) {
+      if (child.connected) child.disconnect();
+    } else child.stdin.end();
   });
 }
 const lifecycle = new DesktopLifecycle({
@@ -72,6 +77,12 @@ const lifecycle = new DesktopLifecycle({
     return result.name === (config.bridgeName ?? "CodexWorker") ? result : null;
   },
   launch: () => {
+    if (cliLaunch) {
+      return spawn(process.execPath, [path.join(pluginRoot, "cli.mjs"), "--identity", cliLaunch.identityFile,
+        "--log", path.join(writerState, "worker.log.jsonl")], {
+        cwd: cliLaunch.cwd, env: { ...process.env, CODEXWORKER_STATE_DIR: writerState },
+        stdio: ["ignore", "ignore", "ignore", "ipc"], windowsHide: true });
+    }
     const child = spawn(process.execPath, [path.join(pluginRoot, "server.mjs")], {
       cwd: pluginRoot, env: { ...process.env, RUDOLF_BRIDGE_LIFECYCLE_CHILD: "1" },
       stdio: ["pipe", "pipe", "ignore"], windowsHide: true });

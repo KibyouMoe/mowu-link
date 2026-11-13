@@ -1,13 +1,58 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { DesktopLifecycle, desktopOwner, desktopSupervisorReady, ensureDesktopSupervisor, launchDesktopSupervisor, processChain, resolveDesktopOwner, resolveLifecycleRoot } from "../desktop-lifecycle.mjs";
+import { DesktopLifecycle, desktopOwner, desktopSupervisorReady, ensureDesktopSupervisor, launchDesktopSupervisor, processChain, readDesktopCliLaunch, resolveDesktopOwner, resolveLifecycleRoot } from "../desktop-lifecycle.mjs";
 
 const owner = { pid: 700, name: "ChatGPT.exe", startedAt: "2026-10-03T02:42:05.0000000Z",
   executable: "C:/Program Files/WindowsApps/OpenAI.Codex_26.930.3748.0_x64__2p2nqsd0c76g0/app/ChatGPT.exe" };
+
+async function desktopCliFixture(t) {
+  const root = await mkdtemp(path.join(os.tmpdir(), "codexworker-desktop-cli-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const stateDir = path.join(root, "cli");
+  const cwd = path.join(root, "workspace");
+  const identityFile = path.join(root, "identity.local.json");
+  const sidecar = path.join(root, "desktop-cli.local.json");
+  const sessionPath = path.join(stateDir, "cli-session.json");
+  await mkdir(stateDir);
+  await mkdir(cwd);
+  const identity = { name: "Test", display: "Test", port: 8903, transport: "desktop-pipe", stateDir };
+  const session = { threadId: "1a2b3c4d-1234-4567-89ab-1234567890ab", cwd };
+  return { root, stateDir, cwd, identityFile, sidecar, sessionPath, identity, session,
+    saveIdentity: (overrides = {}) => writeFile(identityFile, JSON.stringify({ ...identity, ...overrides })),
+    saveSession: (overrides = {}) => writeFile(sessionPath, JSON.stringify({ ...session, ...overrides })) };
+}
+
+test("Desktop CLI lifecycle is opt-in and resumes the existing native workspace", async t => {
+  const f = await desktopCliFixture(t);
+  assert.equal(await readDesktopCliLaunch(f.root), null);
+  await writeFile(f.sidecar, JSON.stringify({ identityFile: f.identityFile }));
+  await f.saveIdentity();
+  await f.saveSession();
+  assert.deepEqual(await readDesktopCliLaunch(f.root), { identityFile: f.identityFile, stateDir: f.stateDir, cwd: f.cwd });
+});
+
+test("Desktop CLI lifecycle rejects unsafe configuration and a missing or invalid primary session", async t => {
+  const f = await desktopCliFixture(t);
+  await writeFile(f.sidecar, JSON.stringify({ identityFile: "identity.local.json" }));
+  await assert.rejects(readDesktopCliLaunch(f.root));
+  await writeFile(f.sidecar, JSON.stringify({ identityFile: f.identityFile }));
+  await f.saveIdentity({ transport: "app-server" });
+  await assert.rejects(readDesktopCliLaunch(f.root));
+  await f.saveIdentity({ stateDir: "cli" });
+  await assert.rejects(readDesktopCliLaunch(f.root));
+  await f.saveIdentity({ stateDir: f.root });
+  await assert.rejects(readDesktopCliLaunch(f.root));
+  await f.saveIdentity();
+  await assert.rejects(readDesktopCliLaunch(f.root));
+  await f.saveSession({ threadId: "" });
+  await assert.rejects(readDesktopCliLaunch(f.root));
+  await f.saveSession({ cwd: "workspace" });
+  await assert.rejects(readDesktopCliLaunch(f.root));
+});
 
 test("independent script watchdog starts even when Bridge readiness never arrives", async t => {
   const stateDir = await mkdtemp(path.join(os.tmpdir(), "watchdog-before-ready-"));

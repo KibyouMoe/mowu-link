@@ -95,7 +95,26 @@ export async function resolveDesktopOwner(pid, { readChain = processChain,
   return null;
 }
 
-export async function desktopSupervisorReady(stateDir, owner, { fetchImpl = fetch, alive = pid => {
+export async function readDesktopCliLaunch(stateDir) {
+  let settings;
+  try { settings = JSON.parse(await readFile(path.join(stateDir, "desktop-cli.local.json"), "utf8")); }
+  catch (error) { if (error.code === "ENOENT") return null; throw error; }
+  const identityFile = settings?.identityFile;
+  if (typeof identityFile !== "string" || !path.isAbsolute(identityFile)) throw new Error("desktop_cli_identity_invalid");
+  const identity = JSON.parse(await readFile(identityFile, "utf8"));
+  if (identity?.transport !== "desktop-pipe" || typeof identity.stateDir !== "string" || !path.isAbsolute(identity.stateDir)) {
+    throw new Error("desktop_cli_identity_invalid");
+  }
+  const cliState = await realpath(identity.stateDir);
+  if (cliState.toLowerCase() === (await realpath(stateDir)).toLowerCase()) throw new Error("desktop_cli_state_conflict");
+  const session = JSON.parse(await readFile(path.join(cliState, "cli-session.json"), "utf8"));
+  if (typeof session?.threadId !== "string" || !session.threadId.trim() || typeof session.cwd !== "string" || !path.isAbsolute(session.cwd)) {
+    throw new Error("desktop_cli_session_invalid");
+  }
+  return { identityFile, stateDir: cliState, cwd: session.cwd };
+}
+
+export async function desktopSupervisorReady(stateDir, owner, { writerState = stateDir, fetchImpl = fetch, alive = pid => {
   try { process.kill(pid, 0); return true; } catch { return false; }
 } } = {}) {
   try {
@@ -103,8 +122,9 @@ export async function desktopSupervisorReady(stateDir, owner, { fetchImpl = fetc
     if (status.desktopPid !== owner.pid || status.desktopStartedAt !== owner.startedAt ||
         status.version !== "0.2.23" || status.launchMode !== "windows-desktop-parent" ||
         !Number.isSafeInteger(status.supervisorPid) || status.supervisorPid < 1 || !alive(status.supervisorPid) ||
-        !["desktop_lifetime_bridge_active", "observing_managed_writer"].includes(status.stage)) return false;
-    const config = JSON.parse(await readFile(path.join(stateDir, "desktop-config.local.json"), "utf8"));
+        !["desktop_lifetime_bridge_active", "observing_managed_writer"].includes(status.stage) ||
+        (writerState !== stateDir && status.stage !== "desktop_lifetime_bridge_active")) return false;
+    const config = JSON.parse(await readFile(path.join(writerState, "desktop-config.local.json"), "utf8"));
     if ((config.host ?? "127.0.0.1") !== "127.0.0.1") return false;
     const token = (await readFile(config.tokenFile, "utf8")).trim();
     if (token.length < 24) return false;
@@ -121,20 +141,21 @@ export async function desktopSupervisorReady(stateDir, owner, { fetchImpl = fetc
 }
 
 export async function ensureDesktopSupervisor({ pluginRoot, stateDir, env = process.env,
+  writerState = stateDir,
   platform = process.platform, readChain = processChain, launchImpl = launchDesktopSupervisor,
   ready = desktopSupervisorReady, clock = Date.now, ensureWatchdog = ensureScriptWatchdog,
   delay = ms => new Promise(resolve => setTimeout(resolve, ms)), timeoutMs = 40000 } = {}) {
   if (platform !== "win32" || !env.CODEX_APP_TOOLS_PIPE_PATH || env.RUDOLF_BRIDGE_LIFECYCLE_CHILD === "1") return false;
   // Never persist/reconstruct a pipe or register an OS-login job with old handles.
-  await access(path.join(stateDir, "desktop-config.local.json"));
-  await access(path.join(stateDir, "manager-binding.json"));
+  await access(path.join(writerState, "desktop-config.local.json"));
+  await access(path.join(writerState, "manager-binding.json"));
   const deadline = clock() + timeoutMs;
   const owner = await resolveDesktopOwner(process.pid, { readChain, delay });
   if (!owner) return false;
   // The independent audit scheduler must not depend on HTTP/startup readiness:
   // otherwise a slow startup can launch a writer but skip its watchdog forever.
   await ensureWatchdog({ pluginRoot, stateDir, owner, env }).catch(() => {});
-  if (await ready(stateDir, owner)) {
+  if (await ready(stateDir, owner, { writerState })) {
     await resumeStartupMaintenance(stateDir);
     return true;
   }
@@ -146,7 +167,7 @@ export async function ensureDesktopSupervisor({ pluginRoot, stateDir, env = proc
   // initialize response. Finish the durable supervisor handoff BEFORE replying,
   // and before this short-lived process can become the HTTP/Feishu writer.
   while (clock() < deadline) {
-    if (await ready(stateDir, owner)) {
+    if (await ready(stateDir, owner, { writerState })) {
       await resumeStartupMaintenance(stateDir);
       return true;
     }

@@ -296,6 +296,9 @@ async function main() {
   const transportName = identity.transport || process.env.CODEXWORKER_NATIVE_TRANSPORT?.trim();
   if (!transportName) fail("identity 未声明 transport，且未设置 CODEXWORKER_NATIVE_TRANSPORT");
   process.env.CODEXWORKER_NATIVE_TRANSPORT = transportName;
+  const desktopLifetime = transportName === "desktop-pipe" && typeof process.send === "function" &&
+    process.env.RUDOLF_BRIDGE_LIFETIME_LAUNCH === "windows-desktop-parent";
+  if (desktopLifetime && !process.connected) throw new Error("Desktop supervisor disconnected during startup");
   // This process owns the manager lifetime; no Desktop supervisor exists.
   process.env.RUDOLF_BRIDGE_LIFECYCLE_CHILD = "1";
   process.env.RUDOLF_BRIDGE_LIFECYCLE_READY ??= "1";
@@ -325,6 +328,7 @@ async function main() {
   const startupAbort = new AbortController();
   const stopStartup = () => startupAbort.abort(new Error("primary session recovery interrupted"));
   process.once("SIGINT", stopStartup); process.once("SIGTERM", stopStartup);
+  if (desktopLifetime) process.once("disconnect", stopStartup);
   try {
     session = await recoverPrimarySession({
       sessionPath, cwd, display: identity.display, workerName: identity.name, nativeCall, writeJsonAtomic, log,
@@ -395,6 +399,7 @@ async function main() {
     transition: false,
     status: () => ({ available: true, scope: `cli-${transport.name}`, featureVersion: null, sha256: null,
       loadedAt: startedAt, loadCount: 0, activeImageSends: 0, reloadAvailable: false,
+      ...(desktopLifetime ? { bootstrapVersion: "0.2.23", desktopLifetimeLaunchMode: "windows-desktop-parent" } : {}),
       autoReloadOnUse: false, lastReloadError: null }),
     reload: async () => ({ available: true, scope: `cli-${transport.name}`, reloadAvailable: false,
       lastReloadError: "business hot reload is only available inside the plugin host" }),
@@ -416,6 +421,11 @@ async function main() {
   };
   process.on("SIGINT", () => { void shutdown("SIGINT"); });
   process.on("SIGTERM", () => { void shutdown("SIGTERM"); });
+  if (desktopLifetime) {
+    process.removeListener("disconnect", stopStartup);
+    process.once("disconnect", () => { void shutdown("desktop_disconnected"); });
+    startupAbort.signal.throwIfAborted();
+  }
   process.on("uncaughtException", (error) => {
     log("error", "uncaught_exception", { message: error?.message ?? String(error) });
     void shutdown("uncaughtException");

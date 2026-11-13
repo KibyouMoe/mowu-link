@@ -2,11 +2,14 @@
 // business worker; only this bootstrap and the generation loader need reinstall.
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { ensureDesktopSupervisor } from "./desktop-lifecycle.mjs";
+import { ensureDesktopSupervisor, readDesktopCliLaunch } from "./desktop-lifecycle.mjs";
 import { PluginRuntime } from "./plugin-runtime.mjs";
 
 const pluginRoot = path.dirname(fileURLToPath(import.meta.url));
 const stateDir = path.join(process.env.USERPROFILE ?? process.env.HOME ?? process.cwd(), ".codex", "state", "codexworker");
+const cliLaunch = process.platform === "win32" ? await readDesktopCliLaunch(stateDir) : null;
+const writerState = cliLaunch?.stateDir ?? stateDir;
+if (cliLaunch) process.env.CODEXWORKER_STATE_DIR = writerState;
 let initialized = false, ended = false, pending = 0, buffer = "", closing = false, lifecycleStartup;
 const write = message => process.stdout.write(JSON.stringify(message) + "\n");
 const runtime = new PluginRuntime({ pluginRoot, stateDir, onToolsChanged: () => {
@@ -26,7 +29,7 @@ async function dispatch(line) {
       // Fence every request before forking a worker so it inherits the final
       // lifecycle gate, never an undefined permission to become a cold writer.
       {
-        lifecycleStartup ??= ensureDesktopSupervisor({ pluginRoot, stateDir }).catch(error => {
+        lifecycleStartup ??= ensureDesktopSupervisor({ pluginRoot, stateDir, writerState }).catch(error => {
           const detail = /^desktop_lifetime_launch_denied:\d{1,5}$/.test(error.message) ? error.message : "desktop_lifecycle_unavailable";
           process.stderr.write("[bridge] " + detail + "\n");
           return false;
