@@ -53,3 +53,14 @@
 - 实际desktop-config备份 .bak-desktop-only-20261114-000832，暂autoStart=false；旧CLI PID55771 / 0.2.41仍ready，飞书与router均在线，未动生产服务。
 - launchctl CODEX_CLI_PATH仍指向 ~/.codex/state/codexworker/desktop-shared/codex；迁移需正常恢复Desktop内置入口，不能直接删除仍用的wrapper或中断当前原生回合。
 - 技能分发master仍有本轮未提交快照/文档；实际本地旧技能待候选验证后备份刷新。
+
+## 源码与分发已推送（下一阶段从这里恢复）
+
+- 冻结代码 d02a4d29dad8b0e3124f058a834e9cffed96782e 已推送 feat/worker-desktop-only；正式分发90929e4已推送CodexSyncArea master。原生产checkout的两个用户改动未动。
+- 本机Mac Node22完整两套：1433 tests / 1417 pass / 0 fail / 16 skip，/tmp/desktop-only-mac-node22-frozen.tap；实际分发包Mac Node26：696 / 688 / 0 / 8，/tmp/desktop-only-package-frozen.tap。
+- 当前代码原生CI https://github.com/KibyouMoe/mowu-link/actions/runs/43466713975 ：Windows22/26各自Codex696/689/0/7、DSH737/730/0/7；Mac26 Codex696/688/0/8、DSH737/729/0/8，router130/130；均成功。Mac22云端仍排队，本机22已实际通过，不能把排队称成功。
+- 缺失router凭据不再拖掉飞书writer；新工单先核对health的idempotent-goal-v1能力，生产旧router目前不支持时明确拒绝POST而非重复派单。两组定向各26/26，router130/130。
+- 新包123文件及router、schema依赖已逐字节/哈希核对；本地技能已备份到 ~/.codex/skill-backups/operate-codex-worker-20261114-002505，并刷新/验证。正常产品plugin add可在同版本下刷新缓存，已再次安装并核对当前123文件相同。
+- 实际主会话仅01a1c413-6bd5-7e10-a388-665d44d2b6ec；切换前记录receipts347、feishuReceipts193、publicTextOutbox128、autoImages18（后续会增长）。旧CLI LaunchAgent ai.hermes.codexworker PID55771仍在线；autoStart暂false，生产DSH/router/gateway未重启。
+- 尚未完成目标：真正Mac Desktop插件加载/退出重开与旧实例交接、Windows Desktop原生验收、真实router唯一标记结果/互聊。Rudolf仍离线，t-bf89fd2d53仍queued。
+- 下一步先核对真实Desktop宿主的管道注入与进程归属；当前会话在shared daemon，CODEX_CLI_PATH还指向旧desktop-shared/codex。不要把模拟/隔离MCP通过当真实宿主已接管，不盲目重启客户端或后台、强抢租约或另建主会话。当前目标保持active，不标完成。
