@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -92,13 +92,13 @@ test("an old healthy process gets continuous unhealthy grace across short handof
 test("lifetime startup uses trusted installed source even after the disposable cache entry disappears", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "codexworker-stable-lifetime-"));
   try {
-    const installed = path.join(root, "installed");
+    const installed = await realpath(root).then(value => path.join(value, "installed"));
     await cp(new URL("..", import.meta.url), installed, { recursive: true });
     await writeFile(path.join(root, "runtime-source.local.json"), JSON.stringify({ sourceRoot: installed, autoReload: false }));
     const removedCache = path.join(root, "removed-cache");
     assert.equal(await resolveLifecycleRoot(removedCache, root), installed);
     let settings;
-    await launchDesktopSupervisor({ pluginRoot: removedCache, stateDir: root, owner, env: {}, exec: async (_exe, args, options) => {
+    await launchDesktopSupervisor({ pluginRoot: removedCache, stateDir: root, owner, platform: "win32", env: {}, exec: async (_exe, args, options) => {
       settings = options; assert.ok(args.includes(path.join(installed, "scripts", "launch-desktop-lifetime.ps1")));
       return { stdout: '{"supervisorPid":800,"launchMode":"windows-desktop-parent"}' };
     } });
@@ -172,15 +172,15 @@ test("supervisor readiness rejects stale/dead metadata and requires matching aut
     await writeFile(tokenFile, "test-only-supervisor-token-not-secret-123456");
     await writeFile(path.join(stateDir, "desktop-config.local.json"), JSON.stringify({ tokenFile }));
     const status = { desktopPid: owner.pid, desktopStartedAt: owner.startedAt, supervisorPid: 800, writerPid: 900,
-      stage: "observing_managed_writer", version: "0.2.23", launchMode: "windows-desktop-parent" };
+      stage: "observing_managed_writer", version: "0.3.0", launchMode: "windows-desktop-parent" };
     const save = value => writeFile(path.join(stateDir, "desktop-lifecycle-status.json"), JSON.stringify(value));
     await save(status);
     let reads = 0;
-    const options = { alive: () => true, fetchImpl: async (_url, request) => {
+    const options = { platform: "win32", alive: () => true, fetchImpl: async (_url, request) => {
       reads++; assert.match(request.headers.authorization, /^Bearer /);
       return { ok: true, json: async () => ({ ready: true, integrationMode: "desktop-native", name: "CodexWorker", integrations: { pid: 900 },
         capabilities: { desktopStartupHandoff: { active: true }, businessHotReload: {
-          bootstrapVersion: "0.2.23", desktopLifetimeLaunchMode: "windows-desktop-parent" } } }) };
+          bootstrapVersion: "0.3.0", desktopLifetimeLaunchMode: "windows-desktop-parent" } } }) };
     } };
     assert.equal(await desktopSupervisorReady(stateDir, owner, options), true);
     assert.equal(await desktopSupervisorReady(stateDir, owner, { ...options, alive: () => false }), false);
@@ -200,7 +200,7 @@ test("supervisor readiness rejects stale/dead metadata and requires matching aut
 test("Windows lifetime launcher is hidden, uses the approved process-only policy, and keeps the native pipe out of arguments", async () => {
   let launch;
   const result = await launchDesktopSupervisor({ pluginRoot: "C:/plugins/codexworker", owner,
-    env: { CODEX_APP_TOOLS_PIPE_PATH: "private-test-handle" }, exec: async (exe, args, settings) => {
+    platform: "win32", env: { CODEX_APP_TOOLS_PIPE_PATH: "private-test-handle" }, exec: async (exe, args, settings) => {
       launch = { exe, args, settings }; return { stdout: '{"supervisorPid":800,"launchMode":"windows-desktop-parent"}' };
     } });
   assert.equal(result.supervisorPid, 800); assert.equal(launch.settings.windowsHide, true);
@@ -211,11 +211,11 @@ test("Windows lifetime launcher is hidden, uses the approved process-only policy
 });
 test("a denied Windows lifetime handoff is not retried through an alternate launcher and only exposes a safe code", async () => {
   let attempts = 0;
-  await assert.rejects(launchDesktopSupervisor({ pluginRoot: "C:/plugins/codexworker", owner, env: {}, exec: async () => {
+  await assert.rejects(launchDesktopSupervisor({ pluginRoot: "C:/plugins/codexworker", owner, platform: "win32", env: {}, exec: async () => {
     attempts++; const error = new Error("private raw exception"); error.stderr = "desktop_lifetime_launch_denied:5"; throw error;
   } }), /^Error: desktop_lifetime_launch_denied:5$/);
   assert.equal(attempts, 1);
-  await assert.rejects(launchDesktopSupervisor({ pluginRoot: "C:/plugins/codexworker", owner, env: {}, exec: async () => {
+  await assert.rejects(launchDesktopSupervisor({ pluginRoot: "C:/plugins/codexworker", owner, platform: "win32", env: {}, exec: async () => {
     throw new Error("private raw exception");
   } }), /^Error: desktop_lifetime_launch_unavailable$/);
 });

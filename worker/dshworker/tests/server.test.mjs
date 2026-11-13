@@ -42,7 +42,7 @@ try {
   // An inventory client may close stdin immediately after initialize. The
   // initialization response must still drain without a dangling startup task.
   const init = await runBridgeBindingTest({ jsonrpc: "2.0", id: 3, method: "initialize", params: {} });
-  assert.equal(init.serverInfo.version, "0.2.38");
+  assert.equal(init.serverInfo.version, "0.3.0");
 
   // Exercise the distributable package through its real launcher, not an
   // absolute server path that would conceal a hard-coded development cwd.
@@ -54,7 +54,7 @@ try {
     "the package must start from its installed root, not an old development directory");
   const manifest = JSON.parse(await readFile(path.join(relocatedRoot, ".codex-plugin", "plugin.json"), "utf8"));
   assert.equal(manifest.version.split("+")[0], init.serverInfo.version);
-  if (process.platform === "win32") {
+  {
     const relocatedInit = await runBridgeBindingTest(
       { jsonrpc: "2.0", id: 4, method: "initialize", params: {} }, { pluginRoot: relocatedRoot, mcp });
     assert.equal(relocatedInit.serverInfo.version, init.serverInfo.version);

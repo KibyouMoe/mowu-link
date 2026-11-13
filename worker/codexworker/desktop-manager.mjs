@@ -1,8 +1,9 @@
 // The transport/report contracts are adapted from @dsh/hermes-bridge (MIT).
 // The only conversation backend is the tool pipe injected by Codex Desktop.
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
-import { mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, realpath, rename, unlink, writeFile } from "node:fs/promises";
 import http from "node:http";
+import { routerOperations } from "./router-operations.mjs";
 import { MessageJournal, nativeMessageId } from "./message-journal.mjs";
 import { ReceiptArchive, compactAck, shrinkObservationText } from "./continuity.mjs";
 import { addToolToBubble, renderToolBubble, safeToolPreview, TOOL_EDIT_INTERVAL_MS } from "./tool-progress.mjs";
@@ -582,8 +583,9 @@ export class DesktopManager {
     // Windows releases a named pipe when its owner exits, even after a crash.
     // Acquire this OS lease before examining a stale diagnostic lock file so
     // simultaneous MCP restarts cannot both remove it and become writers.
-    const leaseId = digest(path.resolve(this.stateDir).toLowerCase()).slice(0, 24);
-    const leaseAddress = process.platform === "win32" ? `\\\\.\\pipe\\codexworker-manager-${leaseId}` : path.join(this.stateDir, "desktop-manager.sock");
+    const canonicalState = await realpath(this.stateDir);
+    const leaseId = digest(process.platform === "win32" ? canonicalState.toLowerCase() : canonicalState).slice(0, 24);
+    const leaseAddress = process.platform === "win32" ? `\\\\.\\pipe\\codexworker-manager-${leaseId}` : path.join(os.tmpdir(), `cw-${leaseId}.sock`);
     this.writerLease = net.createServer(socket => socket.end());
     try {
       await new Promise((resolve, reject) => { this.writerLease.once("error", reject); this.writerLease.listen(leaseAddress, resolve); });
@@ -849,7 +851,7 @@ export class DesktopManager {
   health() {
     // Never claim the full 1.1.1 manager contract before native interruption,
     // exact active-turn steering and the ingress/fork acceptance gates are proven.
-    return { name: this.config.bridgeName, version: "0.2.41", alive: !this.closed, ready: this.connected,
+    return { name: this.config.bridgeName, version: "0.3.0", alive: !this.closed, ready: this.connected,
       operatingMode: this.config.operatingMode,
       integrationMode: "desktop-native", machine: this.config.machine,
       managerProtocolVersion: PROTOCOL, managerMinCompatibleVersion: PROTOCOL,
@@ -859,7 +861,7 @@ export class DesktopManager {
       workspaceProjectId: this.config.projectId, eventSeq: this.state.seq,
       activeTurns: Object.values(this.state.sessions).filter(s => s.activeTurnId).length,
       poolSize: Object.keys(this.state.sessions).length, maxPool: 50,
-      desktopBuild: "Codex Desktop injected native task pipe", runtimeBuild: "codexworker 0.2.41",
+      desktopBuild: "Codex Desktop injected native task pipe", runtimeBuild: "codexworker 0.3.0",
       integrations: this.integrationStatus(),
       appServerSchemaFile: "desktop-native-tools.json", appServerSchemaSha256: digest(this.tools),
       capabilities: { existingThreadSend: this.connected, new: this.connected, fork: this.connected,
@@ -874,12 +876,13 @@ export class DesktopManager {
           grouping: "accumulate", editIntervalMs: TOOL_EDIT_INTERVAL_MS, previewChars: 40 },
         feishuReconnectPolicy: "bounded-handshake-heartbeat",
         feishuQuestionCards: "durable-callback-source-turn",
+        workerMessaging: Boolean(this.workerMessages), formalWorkOrders: "native-goal-directive",
         feishuPublicImageSync: this.config.feishu.autoImageOutput === false ? "disabled" : this.transcriptEnabled ? "managed-thread-public-images" : "selected-thread-public-images",
         feishuPublicImagePathPolicy: "exact-public-display",
         feishuImageRecovery: "bounded-same-uuid-50m",
-        desktopStartupHandoff: { requiredBootstrap: "0.2.23", requiredLaunchMode: "windows-desktop-parent",
-          active: this.businessRuntime.status().bootstrapVersion === "0.2.23" &&
-            this.businessRuntime.status().desktopLifetimeLaunchMode === "windows-desktop-parent" },
+        desktopStartupHandoff: { requiredBootstrap: "0.3.0", requiredLaunchMode: process.platform === "win32" ? "windows-desktop-parent" : "desktop-owned",
+          active: this.businessRuntime.status().bootstrapVersion === "0.3.0" &&
+            ["windows-desktop-parent", "desktop-owned"].includes(this.businessRuntime.status().desktopLifetimeLaunchMode) },
         businessHotReload: this.businessRuntime.status(),
         stop: false, compact: this.tools.some(t => t.name === "compact_thread"), perTurnSafetyOverride: false, tokenStreaming: false } };
   }
@@ -1262,6 +1265,7 @@ export class DesktopManager {
     // untouched. Slash commands are handled before reaching this presentation.
     const label = this.config.messageSourceLabels === false || isNativeQuestionReply(request.text) ? null
       : request.source === "trainer" && this.state.feishuReceipts[request.messageId] ? "飞书"
+      : request.origin === "worker-chat" ? request.workerName ?? "worker"
       : request.source === "hermes" && !["router", "subscription"].includes(request.origin) ? "超级溪流" : null;
     // The engine owns context and compaction. Dispatch the actual input without
     // adding Worker-maintained memory or summaries.
@@ -1820,7 +1824,7 @@ export class DesktopManager {
       if (part.type === "image") {
         const identity = /^[a-z]:[\\\\/]/i.test(part.imagePath) ? path.win32.normalize(part.imagePath).toLowerCase() : path.normalize(part.imagePath);
         if (inlineSeen.has(identity)) continue; inlineSeen.add(identity);
-        this.publicImageRelay.observe(session, { turns: [{ id: turnId, items: [{ type: "imageView", id: `${key}:inline:${index}`, path: part.imagePath }] }] }, epoch, { inline: true });
+        this.publicImageRelay.observe(session, { turns: [{ id: turnId, items: [{ type: "imageView", id: `${key}:inline:${index}`, path: part.imagePath }] }] }, epoch, { inline: true, publicTextKey: key });
         continue;
       }
       for (const [page, body] of (publicQuestion ? [part.text] : hermesChunks(part.text)).entries()) {
@@ -1892,9 +1896,18 @@ export class DesktopManager {
           for (const old of Object.values(this.state.publicTextOutbox ?? {})) {
             if (old.status === "pending" && !current(old)) { old.status = "canceled"; delete old.text; }
           }
-          const texts = Object.values(this.state.publicTextOutbox ?? {}).filter(e =>
-            e.status === "pending" || !this.transcriptEnabled && current(e) && isUnconfirmedText(e)).map(e => ({ e, image: false }));
-          const images = Object.values(this.state.autoImages ?? {}).filter(e => e.status === "pending" || !this.transcriptEnabled && current(e) && e.status === "failed" && /unknown/.test(e.error ?? "")).map(e => ({ e, image: true }));
+          const allTexts = Object.values(this.state.publicTextOutbox ?? {}), allImages = Object.values(this.state.autoImages ?? {});
+          // Keep one Markdown output in order without holding unrelated replies.
+          // A prefix with an unknown result cannot authorize its later image or prose.
+          const sameOutput = (a, b) => a.threadId === b.threadId && a.bindingEpoch === b.bindingEpoch &&
+            (b.publicTextKey ?? b.key) === a.key && (b.order ?? 0) > (a.order ?? 0);
+          const barriers = allTexts.filter(e => current(e) && e.key && isUnconfirmedText(e));
+          const held = new Set(barriers.filter(e => [...allTexts, ...allImages].some(later =>
+            later.status === "pending" && sameOutput(e, later))).map(e => e.uuid));
+          const blocked = e => barriers.some(prefix => sameOutput(prefix, e));
+          const texts = allTexts.filter(e => !held.has(e.uuid) && !blocked(e) && (
+            e.status === "pending" || !this.transcriptEnabled && current(e) && isUnconfirmedText(e))).map(e => ({ e, image: false }));
+          const images = allImages.filter(e => !blocked(e) && (e.status === "pending" || !this.transcriptEnabled && current(e) && e.status === "failed" && /unknown/.test(e.error ?? ""))).map(e => ({ e, image: true }));
           const now = Date.now();
           const waiting = texts.filter(item => (item.e.retryAt ?? 0) > now);
           if (waiting.length) this.schedulePublicTexts(Math.min(...waiting.map(item => item.e.retryAt)) - now);
@@ -2006,7 +2019,7 @@ export class DesktopManager {
             (this.session(entry.threadId).deliveredProgress ??= {})[entry.key] = true;
             for (const id of entry.messageIds ?? []) this.finishFeishuInput(id, "public_output_delivered");
           }
-          if (status === "unknown") this.session(entry.threadId).relayStatus.lastError = "feishu_text_send_unconfirmed";
+          if (status === "unknown") (this.session(entry.threadId).relayStatus ??= {}).lastError = "feishu_text_send_unconfirmed";
           for (const recordId of entry.transcriptIds ?? []) {
             const pages = Object.values(this.state.publicTextOutbox).filter(e => e.transcriptIds?.includes(recordId));
             await this.messageJournal.delivered(recordId, entry.uuid, status === "sent"
@@ -2306,6 +2319,15 @@ export class DesktopManager {
       }
       if (req.method === "GET" && url.pathname === "/bridge/integrations") return json(res, 200, this.integrationStatus());
       if (req.method === "POST" && url.pathname === "/bridge/integrations/reload") return json(res, 200, await this.reloadIntegrations());
+      if (req.method === "GET" && url.pathname === "/bridge/workers") return json(res, 200, await routerOperations(this).workers());
+      if (req.method === "GET" && url.pathname === "/bridge/worker-messages") return json(res, 200,
+        await routerOperations(this).message("inbox", { after: Number(url.searchParams.get("after") ?? 0) }));
+      if (req.method === "POST" && url.pathname === "/bridge/worker-messages") return json(res, 200,
+        await routerOperations(this).message("send", await readBody(req)));
+      if (req.method === "POST" && url.pathname === "/bridge/work-orders") return json(res, 200,
+        await routerOperations(this).createWorkOrder(await readBody(req)));
+      const workOrderRoute = url.pathname.match(/^\/bridge\/work-orders\/([^/]+)$/);
+      if (req.method === "GET" && workOrderRoute) return json(res, 200, await routerOperations(this).workOrder(decodeURIComponent(workOrderRoute[1])));
       if (req.method === "POST" && url.pathname === "/bridge/questions") return json(res, 200, await this.questions.publish(await readBody(req)));
       const questionRoute = url.pathname.match(/^\/bridge\/questions\/([^/]+)(?:\/(resolve|answer))?$/);
       if (questionRoute) {
@@ -2397,7 +2419,7 @@ export class DesktopManager {
       }
       fail(404, "not_found", "Unknown route.");
     } catch (error) {
-      const mapped = error instanceof BridgeError || error instanceof QuestionRelayError || error instanceof BusinessRuntimeError || error?.name === "ImageOutputError" ? error : new BridgeError(500, "bridge_error", "Bridge request failed; inspect local plugin diagnostics.");
+      const mapped = error instanceof BridgeError || error instanceof QuestionRelayError || error instanceof BusinessRuntimeError || ["ImageOutputError", "RouterOperationError"].includes(error?.name) ? error : new BridgeError(500, "bridge_error", "Bridge request failed; inspect local plugin diagnostics.");
       if (res.headersSent) { res.destroy(); return; }
       json(res, mapped.status, { ...mapped.body, ...(body?.messageId ? { messageId: body.messageId } : {}) });
     } finally { if (counted) this.httpOperations--; }

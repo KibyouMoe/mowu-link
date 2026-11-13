@@ -10,6 +10,12 @@ test("no implicit task deadline, including missing/invalid/zero deadlines", () =
   assert.equal(ROUTER_TURN_LIMIT_MS, Infinity);
   assert.equal(taskDeadline({ deadline_s: 4 }, 100), 4100);
 });
+test("router reconnect preserves the original absolute deadline", () => {
+  const task = { deadline_s: 180, deadline_at: 1000 };
+  assert.equal(taskDeadline(task, 900000), 1000000);
+  assert.equal(taskDeadline(task, 999999), 1000000);
+  assert.equal(taskDeadline({ deadline_at: 0, deadline_s: 4 }, 100), 4100);
+});
 test("default no-progress window is 30 minutes and can be configured", () => {
   assert.equal(DEFAULT_NO_PROGRESS_TIMEOUT_MS, 1800000);
   assert.equal(noProgressTimeoutMs({ noProgressTimeoutMs: 123 }), 123);
@@ -81,20 +87,19 @@ test("manager explicit deadline expires even while task events continue", async 
   assert.equal((await waiting).status, "timeout");
 });
 
-test("app-server reasoning/tool notifications are observable progress; status polls are not", async () => {
-  const { AppServerClient } = await import("../interface/transport/app-server.mjs");
-  const client = new AppServerClient();
-  client.ensureStarted = async () => {};
-  const turn = { id: "turn", status: "inProgress", items: [{ id: "input", type: "userMessage", content: [{ type: "text", text: "hi" }] }] };
-  client.request = async method => method === "thread/read" ? { thread: { id: "thread" } } :
-    method === "thread/turns/list" ? { data: [turn] } :
-    { data: turn.items.map(item => ({ turnId: turn.id, item })) };
-  client.handleNotification("item/reasoning/textDelta", { threadId: "thread", turnId: "turn", delta: "thinking" });
-  client.handleNotification("item/commandExecution/outputDelta", { threadId: "thread", turnId: "turn", delta: "tool output" });
-  const read = () => client.readThread({ threadId: "thread", includeOutputs: false });
-  assert.equal((await read()).turns[0].eventSeq, 2);
-  client.handleNotification("thread/status/changed", { threadId: "thread", status: "active" });
-  client.handleNotification("item/reasoning/textDelta", { threadId: "thread", turnId: "turn", delta: "" });
-  assert.equal((await read()).turns[0].eventSeq, 2);
-  assert.equal((await read()).turns[0].eventSeq, 2);
+test("native Desktop tool completion is progress, repeated status observations are not", async () => {
+  const { publicJournalItem } = await import("../local-public-journal.mjs");
+  const threadId = "01a17cde-aa62-7dd2-b27d-a68088b163c2";
+  let now = 0;
+  const watch = new ProgressWatch({ timeoutMs: 100, now: () => now });
+  watch.observe({ turnId: "turn", items: [] });
+  const completed = publicJournalItem({ type: "event_msg", timestamp: "2026-11-13T00:00:00Z", payload: {
+    type: "item_completed", thread_id: threadId, turn_id: "turn", item: {
+      type: "CommandExecution", id: "tool", command: "echo progress", status: "completed", exitCode: 0,
+    } } }, threadId, { includeTools: true });
+  assert.equal(completed.item.type, "toolActivity");
+  now = 90; watch.observe({ turnId: "turn", items: [completed], lastPolledAt: now });
+  now = 180; assert.equal(watch.failure(), null);
+  watch.observe({ turnId: "turn", items: [completed], lastPolledAt: now });
+  now = 191; assert.equal(watch.failure().reason, "stuck");
 });

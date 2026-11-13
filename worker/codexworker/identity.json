@@ -3,7 +3,7 @@
   "name": "OguriCap",
   "display": "小栗帽",
   "port": 8905,
-  "configFile": "~/.hermes/secrets/codexworker.config.json",
-  "transport": "app-server",
+  "configFile": "~/.codex/state/codexworker/desktop-config.local.json",
+  "transport": "desktop-pipe",
   "stateDir": "~/.codex/state/codexworker"
 }

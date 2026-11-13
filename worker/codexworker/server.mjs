@@ -2,11 +2,12 @@
 // business worker; only this bootstrap and the generation loader need reinstall.
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { ensureDesktopSupervisor } from "./desktop-lifecycle.mjs";
+import { ensureDesktopSupervisor, readDesktopSettings, resolveDesktopState } from "./desktop-lifecycle.mjs";
 import { PluginRuntime } from "./plugin-runtime.mjs";
 
 const pluginRoot = path.dirname(fileURLToPath(import.meta.url));
-const stateDir = path.join(process.env.USERPROFILE ?? process.env.HOME ?? process.cwd(), ".codex", "state", "codexworker");
+const stateDir = await resolveDesktopState(path.join(process.env.USERPROFILE ?? process.env.HOME ?? process.cwd(), ".codex", "state", "codexworker"));
+process.env.CODEXWORKER_STATE_DIR = stateDir;
 let initialized = false, ended = false, pending = 0, buffer = "", closing = false, lifecycleStartup;
 const write = message => process.stdout.write(JSON.stringify(message) + "\n");
 const runtime = new PluginRuntime({ pluginRoot, stateDir, onToolsChanged: () => {
@@ -26,15 +27,21 @@ async function dispatch(line) {
       // Fence every request before forking a worker so it inherits the final
       // lifecycle gate, never an undefined permission to become a cold writer.
       {
-        lifecycleStartup ??= ensureDesktopSupervisor({ pluginRoot, stateDir }).catch(error => {
-          const detail = /^desktop_lifetime_launch_denied:\d{1,5}$/.test(error.message) ? error.message : "desktop_lifecycle_unavailable";
-          process.stderr.write("[bridge] " + detail + "\n");
-          return false;
-        });
-        const guarded = await lifecycleStartup;
-        const ready = guarded === true || process.env.RUDOLF_BRIDGE_LIFECYCLE_CHILD === "1";
+        const settings = await readDesktopSettings(stateDir);
+        let guarded = false;
+        if (!settings.autoStart) lifecycleStartup = null;
+        else {
+          lifecycleStartup ??= ensureDesktopSupervisor({ pluginRoot, stateDir }).catch(error => {
+            const detail = /^desktop_lifetime_launch_denied:\d{1,5}$/.test(error.message) ? error.message : "desktop_lifecycle_unavailable";
+            process.stderr.write("[bridge] " + detail + "\n");
+            return false;
+          });
+          guarded = await lifecycleStartup;
+          if (!guarded) lifecycleStartup = null;
+        }
+        const ready = settings.autoStart && (guarded === true || process.env.RUDOLF_BRIDGE_LIFECYCLE_CHILD === "1");
         process.env.RUDOLF_BRIDGE_LIFECYCLE_READY = ready ? "1" : "0";
-        request.params = { ...(request.params ?? {}), __bridgeLifecycleReady: ready };
+        request.params = { ...(request.params ?? {}), __bridgeLifecycleReady: ready, __bridgeAutoStart: settings.autoStart };
       }
       const result = await runtime.call(request.method, request.params ?? {});
       if (request.method === "initialize") initialized = true;

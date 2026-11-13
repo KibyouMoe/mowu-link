@@ -9,6 +9,8 @@ export function noProgressTimeoutMs(config = {}) {
 }
 
 export function taskDeadline(task, startedAt = Date.now()) {
+  const absolute = Number(task?.deadline_at);
+  if (Number.isFinite(absolute) && absolute > 0) return absolute * 1000;
   const seconds = Number(task?.deadline_s);
   return Number.isFinite(seconds) && seconds > 0 ? startedAt + seconds * 1000 : Infinity;
 }

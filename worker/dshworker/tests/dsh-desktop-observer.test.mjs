@@ -126,9 +126,10 @@ test('native input images are represented without exposing binary image content'
 
 test('native Desktop events reach the real shared manager outbox once without redispatch', async t => {
   const { DesktopManager, PROTOCOL } = await import('../desktop-manager.mjs');
-  const { resetNativeTransportCache } = await import('../interface/transport/index.mjs');
+  const { registerNativeTransport, resetNativeTransportCache } = await import('../interface/transport/index.mjs');
   const previous = process.env.CODEXWORKER_NATIVE_TRANSPORT;
-  process.env.CODEXWORKER_NATIVE_TRANSPORT = 'dsh'; resetNativeTransportCache();
+  registerNativeTransport('dsh-observer-test', { capabilities: { fork: false, desktopJournal: false, callerTurn: false } });
+  process.env.CODEXWORKER_NATIVE_TRANSPORT = 'dsh-observer-test'; resetNativeTransportCache();
   t.after(() => { if (previous == null) delete process.env.CODEXWORKER_NATIVE_TRANSPORT; else process.env.CODEXWORKER_NATIVE_TRANSPORT = previous; resetNativeTransportCache(); });
   const { mkdtemp, rm } = await import('node:fs/promises');
   const { tmpdir } = await import('node:os');

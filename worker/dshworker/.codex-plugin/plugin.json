@@ -1,6 +1,6 @@
 {
   "name": "codexworker",
-  "version": "0.2.38+codex.20261101.integrity1",
+  "version": "0.3.0",
   "description": "Connects Hermes to Codex Desktop native tasks through a local manager bridge.",
   "author": {
     "name": "Rudolf"
@@ -19,6 +19,6 @@
       "Probe the CodexWorker desktop-native connection."
     ]
   },
-  "mcpServers": "./.mcp.json"
+  "mcpServers": "./.mcp.json",
+  "requires_local_executor": true
 }
-

@@ -90,7 +90,10 @@ test("file messages dispatch a real hashed local image once, preserving filename
  assert.equal(path.dirname(record.imagePath),path.join(f.root,"feishu-images"));
  assert.match(path.basename(record.imagePath),/^[a-f0-9]{64}\.png$/);
  assert.deepEqual(await readFile(record.imagePath),png);
- assert.equal((await stat(record.imagePath)).mode&0o777,0o600);
+ const mode=(await stat(record.imagePath)).mode;
+ // Windows mode represents writability, not POSIX permissions or ACLs.
+ if(process.platform==="win32")assert.equal(mode&0o200,0o200);
+ else assert.equal(mode&0o777,0o600);
  const sends=f.calls.filter(c=>c.name==="send_message_to_thread");assert.equal(sends.length,1);
  assert.ok(sends[0].args.prompt.includes("view_image"));
  assert.ok(sends[0].args.prompt.includes('原文件名："../../照片.dat"'));

@@ -1,7 +1,7 @@
 // DSHWorker · cordis 插件入口（进程内 agents）
 //
 // 与 cli.mjs 的关系：
-//   cli.mjs      独立进程入口（spawn/headless 调试用），保持不变；
+//   独立 CLI/headless 启动入口已移除；
 //   index.js     常驻 DSH profile 的插件形态，直接用 ctx.agents / ctx.sessions
 //                在**本进程内**建 agent、跑多轮，不再起 dsh 子进程。
 //
@@ -321,7 +321,7 @@ async function startBusiness({ ctx, transport, identity, workerConfig, config, s
   const whitelist = resolveWhitelist(workerConfig, feishu.value);
 
   // 任务看板目标：训练员与这个 worker 的私聊。显式 taskBoardOpenId 优先，其次
-  // 入站白名单（就是训练员本人），最后才是凭据文件里的 open_id。和 cli.mjs 的
+  // 入站白名单（就是训练员本人），最后才是凭据文件里的 open_id。和公共业务层的
   // 表达式保持一致，写进 desktop-config 的那份也复用这里的值。
   const taskBoardOpenId = stringArg(workerConfig.feishu?.taskBoardOpenId) ?? whitelist.ids[0]
     ?? stringArg(feishu.value?.open_id) ?? null;
@@ -396,7 +396,7 @@ async function startBusiness({ ctx, transport, identity, workerConfig, config, s
   transport.control.attachManager(business.manager?.());
 
   // 把绑定线程登记进 manager 的会话池：飞书/HTTP 才有明确的投递目标。
-  // 与 cli.mjs 的 adoptSession 同一条路径（409 adopt_conflict 视为已登记）。
+  // 与公共 manager.register 同一条路径（409 adopt_conflict 视为已登记）。
   try {
     const response = await fetch(`http://${host}:${port}/manager/sessions/adopt`, {
       method: "POST",

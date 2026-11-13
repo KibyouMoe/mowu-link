@@ -106,7 +106,7 @@ export function publicImages(snapshot) {
 export class PublicImageRelay {
   constructor(manager) { this.manager = manager; this.running = false; this.task = null; }
   baseline(session, snapshot) { session.seenImages = Object.fromEntries(publicImages(snapshot).map(image => [image.key, true])); }
-  observe(session, snapshot, bindingEpoch, { inline = false } = {}) {
+  observe(session, snapshot, bindingEpoch, { inline = false, publicTextKey } = {}) {
     const m = this.manager, images = publicImages(snapshot);
     // First activation on a pre-image-relay installation seeds existing history,
     // just as adoption does. No surprise backlog of historical uploads.
@@ -121,7 +121,9 @@ export class PublicImageRelay {
       if (session.seenImages[image.key] && !recover) {
         // A still-unsent preview can take its place inside the final Markdown.
         // Never move an in-flight image or resend a completed/unknown receipt.
-        if (inline && previous?.status === "pending" && previous.bindingEpoch === bindingEpoch && this.activeEntry !== previous && m.nextPublicOutputOrder) previous.order = m.nextPublicOutputOrder();
+        if (inline && previous?.status === "pending" && previous.bindingEpoch === bindingEpoch && this.activeEntry !== previous && m.nextPublicOutputOrder) {
+          previous.order = m.nextPublicOutputOrder(); previous.publicTextKey = publicTextKey;
+        }
         continue;
       }
       session.seenImages[image.key] = true;
@@ -139,7 +141,7 @@ export class PublicImageRelay {
         continue;
       }
       if (previous) continue; // Never replace a sent/unknown/canceled receipt.
-      m.state.autoImages[id] = { ...image, mirror: m.transcriptEnabled === true, threadId: session.threadId, bindingEpoch, order: m.nextPublicOutputOrder?.(),
+      m.state.autoImages[id] = { ...image, ...(inline ? { publicTextKey } : {}), mirror: m.transcriptEnabled === true, threadId: session.threadId, bindingEpoch, order: m.nextPublicOutputOrder?.(),
         chatId: session.feishuChatId ?? m.notifier.chatId, messageId: randomUUID(), status: "pending", publicDisplayPolicy: 1, observedAt: Date.now() };
     }
   }

@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import os from "node:os";
 import path from "node:path";
 import { sendRouterImage, uploadRouterImage } from "../router-attachments.mjs";
+import { resolveDesktopState } from "../desktop-lifecycle.mjs";
 
 const { values } = parseArgs({ options: {
   image: { type: "string" }, "message-id": { type: "string" },
@@ -18,14 +19,16 @@ try {
   if (values["upload-only"] && (values.urgent || values.text || values["message-id"])) throw new Error("--upload-only cannot include notification options.");
   const identity = JSON.parse(await readFile(fileURLToPath(new URL("../identity.json", import.meta.url)), "utf8"));
   const expand = value => value?.startsWith("~/") ? path.join(os.homedir(), value.slice(2)) : value;
-  const config = JSON.parse(await readFile(expand(values.config ?? identity.configFile), "utf8"));
+  const stateDir = await resolveDesktopState(path.join(process.env.USERPROFILE ?? process.env.HOME ?? os.homedir(), ".codex", "state", "codexworker"));
+  const config = JSON.parse(await readFile(expand(values.config ?? path.join(stateDir, "desktop-config.local.json")), "utf8"));
   const router = config.router ?? {};
   if (router.enabled === false) throw new Error("Router is disabled.");
-  const tokenPath = expand(process.env.CODEXWORKER_ROUTER_TOKEN_FILE ?? router.tokenFile ?? config.tokenFile ?? "~/.hermes/secrets/router.token");
+  const tokenPath = expand(process.env.CODEXWORKER_ROUTER_TOKEN_FILE ?? router.tokenFile);
+  if (!tokenPath) throw new Error("router.tokenFile is required.");
   const token = (await readFile(tokenPath, "utf8")).trim();
   const options = {
     imagePath: values.image, messageId: values["message-id"], text: values.text,
-    worker: identity.name, url: process.env.CODEXWORKER_ROUTER_URL ?? router.url ?? "http://127.0.0.1:8790",
+    worker: config.machine ?? identity.name, url: process.env.CODEXWORKER_ROUTER_URL ?? router.url ?? "http://127.0.0.1:8790",
     token, urgency: values.urgent ? "urgent" : "normal",
   };
   const receipt = values["upload-only"]

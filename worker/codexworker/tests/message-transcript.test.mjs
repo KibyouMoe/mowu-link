@@ -246,7 +246,10 @@ test("transcript HTTP is authenticated, paginated, and independent of bounded ev
   assert.equal((await get("?after=../../escape")).status, 400);
   assert.equal((await get("?limit=0")).status, 400);
   assert.equal((await get("?direction=analysis")).status, 400);
-  assert.equal((await stat(path.join(f.root, "message-journal/records", first.records[0].id + ".json"))).mode & 0o777, 0o600);
+  const mode = (await stat(path.join(f.root, "message-journal/records", first.records[0].id + ".json"))).mode;
+  // Windows mode represents writability, not POSIX permissions or ACLs.
+  if (process.platform === "win32") assert.equal(mode & 0o200, 0o200);
+  else assert.equal(mode & 0o777, 0o600);
 });
 
 test("public phases are archived; analysis and nonconversation payloads are excluded", async t => {

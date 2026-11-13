@@ -6,18 +6,12 @@
 //
 // 实现按环境选择，默认保持原行为（Desktop 注入管道）：
 //   CODEXWORKER_NATIVE_TRANSPORT=desktop-pipe   显式指定
-//   CODEXWORKER_NATIVE_TRANSPORT=app-server     CLI 后端（codex app-server JSON-RPC）
-//   CODEXWORKER_NATIVE_TRANSPORT=dsh            DSH 后端（dsh --profile headless --json）
 //   CODEXWORKER_NATIVE_TRANSPORT=dsh-inprocess  DSH 进程内（cordis 插件 index.js 注册）
 //   未设置                                      有 CODEX_APP_TOOLS_PIPE_PATH 就用它
-import * as appServer from "./app-server.mjs";
 import * as desktopPipe from "./desktop-pipe.mjs";
-import * as dsh from "./dsh.mjs";
 
 const IMPLEMENTATIONS = {
   [desktopPipe.name]: desktopPipe,
-  [appServer.name]: appServer,
-  [dsh.name]: dsh,
 };
 
 let cached = null;

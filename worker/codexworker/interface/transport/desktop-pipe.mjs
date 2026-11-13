@@ -4,7 +4,7 @@
 // 帧格式：4 字节小端长度 + UTF-8 JSON-RPC。
 //
 // 这一层只负责「把 app tools 的 list/call 送出去」，
-// 不关心业务语义。app-server 实现见 ./app-server.mjs。
+// 不关心业务语义；Desktop 拥有原生引擎和会话。
 import { randomUUID } from "node:crypto";
 import net from "node:net";
 import process from "node:process";
@@ -69,7 +69,7 @@ export async function callTool(toolName, args, invocation, timeoutMs = 5000) {
   }, budget);
   if (toolName === "wait_threads" && !invocation.turnId && args.targets?.length === 1 &&
       args.targets[0].threadId === invocation.threadId) {
-    // Desktop's native wait excludes the calling chat. The CLI polls its
+    // Desktop's native wait excludes the calling chat. The worker polls its
     // history for completion; pace that poll without submitting a self-wait.
     await delay(Math.max(0, Math.min(1500, timeoutMs, args.timeoutMs ?? 1500)));
     return { success: true, contentItems: [{ type: "text", text: '{"polls":[]}' }] };

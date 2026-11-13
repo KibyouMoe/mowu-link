@@ -1,0 +1,61 @@
+name: Worker Mac and Windows
+
+on:
+  push:
+    paths: ["worker/**", "server/router/**", ".github/workflows/worker-cross-platform.yml"]
+  pull_request:
+    paths: ["worker/**", "server/router/**", ".github/workflows/worker-cross-platform.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  worker:
+    name: ${{ matrix.os }} / Node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+        node: [22, 26]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+          package-manager-cache: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Shared business parity and both Worker suites
+        shell: bash
+        env:
+          CODEXWORKER_TEST_PYTHON: python
+        run: |
+          node --input-type=module <<'NODE'
+          import { readdirSync, readFileSync } from 'node:fs';
+          import { spawnSync } from 'node:child_process';
+          import assert from 'node:assert/strict';
+          for (const name of ['desktop-manager.mjs', 'mcp-business.mjs', 'router-runtime.mjs', 'worker-messages.mjs']) {
+            assert.deepEqual(readFileSync('worker/codexworker/' + name), readFileSync('worker/dshworker/' + name), name);
+          }
+          let failed = false;
+          for (const worker of ['codexworker', 'dshworker']) {
+            const directory = 'worker/' + worker + '/tests/';
+            const files = readdirSync(directory).filter(file => file.endsWith('.test.mjs')).sort().map(file => directory + file);
+            const result = spawnSync(process.execPath, ['--test', '--test-reporter=tap', ...files], { stdio: 'inherit' });
+            failed ||= Boolean(result.error || result.status !== 0);
+          }
+          process.exitCode = failed ? 1 : 0;
+          NODE
+      - name: Router real HTTP and SQLite selftest
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          ROUTER_TEST_PORT: "18790"
+        run: python server/router/selftest_router.py
+
+# These native OS runners cover real paths, permissions, IPC and child shutdown.
+# Tests requiring an actual interactive Desktop owner stay explicitly skipped;
+# CI is not proof of real Desktop restart or Feishu end-to-end acceptance.

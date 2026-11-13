@@ -12,6 +12,15 @@ const line = value => JSON.stringify(value) + "\n";
 const lifecycle = (type, turn = "turn-a") => ({ type: "event_msg", payload: { type, turn_id: turn } });
 const request = (text = "hello", extra = {}) => ({ protocolVersion: PROTOCOL, messageId: randomUUID(), source: "trainer", text, ...extra });
 
+async function bounded(promise, label) {
+  let timer;
+  try {
+    return await Promise.race([promise, new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`Test fixture timed out: ${label}`)), 5000);
+    })]);
+  } finally { clearTimeout(timer); }
+}
+
 async function fixture(t, { otherContext = false, verified = true, refreshCaller = false } = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), "bridge-self-target-"));
   const sessions = path.join(root, "sessions"), folder = path.join(sessions, "2026", "10", "28");
@@ -51,12 +60,23 @@ async function fixture(t, { otherContext = false, verified = true, refreshCaller
   };
   const tools = async () => ["read_thread", "wait_threads", "send_message_to_thread", "create_thread", "fork_thread", "set_thread_title", "list_threads"].map(name => ({ name }));
   const manager = new DesktopManager({ native, listNativeTools: tools, stateDir: root, config });
-  t.after(async () => { await manager.close(); await rm(root, { recursive: true, force: true }); });
+  const gates = [];
+  const gate = () => {
+    let release;
+    const promise = new Promise(resolve => { release = resolve; });
+    gates.push(release);
+    return { promise, release };
+  };
+  t.after(async () => {
+    for (const release of gates) release();
+    await bounded(manager.close(), "self-target fixture shutdown");
+    await rm(root, { recursive: true, force: true });
+  });
   await manager.initialize();
   await manager.listen();
   await manager.register({ protocolVersion: PROTOCOL, messageId: randomUUID(), source: "trainer", threadId: id });
   rejectHistory = true; calls.length = 0;
-  return { root, file, manager, calls, state,
+  return { root, file, manager, calls, state, gate,
     callerId, appendCaller: value => appendFile(callerFile, line(value)),
     append: value => appendFile(file, line(value)), writes: () => calls.filter(c => c.name === "send_message_to_thread") };
 }
@@ -250,16 +270,17 @@ for (const otherContext of [false, true]) test(`accepted ${otherContext ? "other
 });
 
 test("an in-flight older card cannot clear an input received after that card was created", async t => {
-  const f = await typingFixture(t); let release, started = false;
+  const f = await typingFixture(t), sending = f.gate(), started = f.gate();
   await f.receive("first-typing"); await f.settle();
-  f.manager.notifier.sendMessage = async () => { started = true; await new Promise(resolve => { release = resolve; }); return { code: 0 }; };
-  await f.output("first-card", "第一条回复"); await f.manager.scan();
+  f.manager.notifier.sendMessage = async () => { started.release(); await bounded(sending.promise, "older card release"); return { code: 0 }; };
+  await f.output("first-card", "第一条回复");
+  // scan() waits for public delivery; keep it pending while the second input arrives.
+  const scanning = f.manager.scan();
   try {
-    for (let i = 0; !started && i < 100; i++) await new Promise(resolve => setTimeout(resolve, 1));
-    assert.equal(started, true);
+    await bounded(started.promise, "older card send start");
     await f.receive("second-typing"); await Promise.all([...f.manager.feishuReactionTasks.values()]);
     assert.deepEqual(f.reactions.filter(([kind]) => kind === "remove"), []);
-  } finally { release?.(); }
+  } finally { sending.release(); await bounded(scanning, "older card scan completion"); }
   await f.settle();
   assert.deepEqual(f.reactions.filter(([kind]) => kind === "remove"), [["remove", "first-typing"]]);
   f.manager.notifier.sendMessage = async () => ({ code: 0 });
@@ -278,8 +299,8 @@ test("unknown card delivery keeps Typing and its original output UUID without re
 });
 
 test("late-created Typing is removed after successful output, and the wait survives persisted state", async t => {
-  const f = await typingFixture(t); let completeAdd; const removed = [];
-  f.manager.notifier.addReaction = () => new Promise(resolve => { completeAdd = resolve; });
+  const f = await typingFixture(t), adding = f.gate(); const removed = [];
+  f.manager.notifier.addReaction = () => bounded(adding.promise, "late Typing release");
   f.manager.notifier.removeReaction = async messageId => { removed.push(messageId); return true; };
   const input = await f.receive("late-typing");
   try {
@@ -289,7 +310,7 @@ test("late-created Typing is removed after successful output, and the wait survi
     await f.output("late-card", "新的公开回复"); await f.manager.scan();
     await Promise.all([...f.manager.backgroundTasks]);
     assert.equal(f.manager.state.feishuReceipts[input.messageId].cleanupRequested, true);
-  } finally { completeAdd?.("late-reaction"); }
+  } finally { adding.release("late-reaction"); }
   await f.settle(); assert.deepEqual(removed, ["late-typing"]);
 });
 
@@ -328,17 +349,17 @@ test("an interrupted observed task still cleans its Typing when no public send i
 });
 
 test("mixed Markdown sends text, waits for its image, then sends the remaining text exactly once", async t => {
-  const f = await fixture(t), sent = []; let release, started = false;
+  const f = await fixture(t), sent = [], image = f.gate(), started = f.gate();
   f.manager.notifier = { enabled: true, sendMessage: async (text, opts) => { sent.push({ kind: "text", text: text.trim(), title: opts.title, threadId: opts.threadId }); return { code: 0 }; } };
-  f.manager.sendImage = async () => { started = true; sent.push({ kind: "image" }); await new Promise(resolve => { release = resolve; }); return { feishuMessageId: "image-id" }; };
+  f.manager.sendImage = async () => { started.release(); sent.push({ kind: "image" }); await bounded(image.promise, "Markdown image release"); return { feishuMessageId: "image-id" }; };
   f.manager.enqueuePublicText(f.manager.session(), "turn-a", "mixed", `前段😀\n![示例](<${path.join(f.root, 'public.png')}>)\n后段`, f.manager.state.selectionEpoch, true);
   const sending = f.manager.drainPublicTexts();
   try {
-    for (let i = 0; !started && i < 100; i++) await new Promise(resolve => setTimeout(resolve, 1));
+    await bounded(started.promise, "Markdown image send start");
     assert.deepEqual(sent.map(x => x.kind), ["text", "image"]);
     assert.equal(sent[0].text, "前段😀"); assert.equal(sent[0].threadId, id); assert.match(sent[0].title, /回复/);
-  } finally { release?.(); }
-  await sending; await f.manager.drainPublicTexts();
+  } finally { image.release(); await bounded(sending, "Markdown send completion"); }
+  await f.manager.drainPublicTexts();
   assert.deepEqual(sent.map(x => x.kind), ["text", "image", "text"]); assert.equal(sent[2].text, "后段");
   assert.equal(sent.some(x => x.text?.includes("![")), false);
 });
@@ -375,4 +396,23 @@ test("state catchup cannot hide an unknown image send behind healthy maintenance
   f.manager.state.autoImages = { uncertain: { threadId: id, bindingEpoch: f.manager.state.selectionEpoch,
     status: "failed", error: "image_send_outcome_unknown" } };
   await f.manager.scan(); assert.equal(f.manager.session().relayStatus.lastError, "feishu_public_send_unconfirmed");
+});
+
+test("transcript retains an unknown Markdown prefix and only releases unrelated output", async t => {
+  const f = await fixture(t), sent = []; let images = 0;
+  f.manager.config.feishu.transcriptEnabled = true;
+  f.manager.notifier = { enabled: true, sendMessage: async text => {
+    sent.push(text.trim());
+    if (text.includes("前段")) throw new Error("unknown send");
+    return { code: 0, data: { message_id: "later-output" } };
+  } };
+  f.manager.sendImage = async () => { images++; return { feishuMessageId: "wrong" }; };
+  f.manager.enqueuePublicText(f.manager.session(), "turn-a", "mixed", `前段\n![示例](<${path.join(f.root, 'public.png')}>)\n后段`, f.manager.state.selectionEpoch, true);
+  await f.manager.drainPublicTexts();
+  f.manager.enqueuePublicText(f.manager.session(), "turn-a", "unrelated", "独立后续", f.manager.state.selectionEpoch, true);
+  await f.manager.drainPublicTexts(); await f.manager.drainPublicTexts();
+  assert.deepEqual(sent, ["前段", "独立后续"]); assert.equal(images, 0);
+  const entries = Object.values(f.manager.state.publicTextOutbox);
+  assert.ok(entries.some(e => e.key === "mixed" && e.status === "unknown" && e.text.includes("前段")));
+  assert.ok(entries.some(e => e.key === "mixed" && e.status === "pending" && e.text.includes("后段")));
 });

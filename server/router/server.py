@@ -10,8 +10,8 @@ The router is deliberately dumb:
   * it knows *who is connected*, *who is busy* and *how many tasks each
     worker has queued*;
   * it knows nothing about capabilities, task meaning or worker internals;
-  * the only outbound things it does are trigger events (task results and
-    ``/notice``) and trigger subscription lifecycle calls.
+  * it forwards trigger events (task results and ``/notice``), trigger
+    subscription lifecycle calls, and durable worker-to-worker messages.
 
 Liveness is the SSE connection itself, never a heartbeat: ``POST /heartbeat``
 only records the worker's own state/progress.  When a stream ends the worker
@@ -24,7 +24,7 @@ Standard library only.  Python 3.9.  Binds loopback unless explicitly opted in.
 
 from __future__ import annotations
 
-from attachments import AttachmentStore
+from attachments import AttachmentStore, MAX_ATTACHMENTS
 
 import argparse
 import fcntl
@@ -46,6 +46,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from logging.handlers import RotatingFileHandler
@@ -53,7 +54,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, unquote, urlencode, urlparse
 
-VERSION = "0.3.1"
+VERSION = "0.4.0"
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8790
 DEFAULT_DB = "~/.hermes/router.db"
@@ -65,6 +66,10 @@ DEFAULT_TRIGGER_TOKEN_PATH = "~/.hermes/secrets/trigger.token"
 BACKLOG_MAX = 128
 MAX_GOAL_CHARS = 2000
 MAX_BODY_BYTES = 1 * 1024 * 1024
+PEER_MAX_TEXT = 20000
+PEER_PAGE_LIMIT = 100
+PEER_PAGE_BYTES = 256 * 1024
+PEER_STREAM_BUFFER = 32
 LOG_MAX_BYTES = 5 * 1024 * 1024
 LOG_BACKUP_COUNT = 3
 
@@ -282,7 +287,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     started_at  REAL,
     finished_at REAL,
     result_json TEXT,
-    deadline_s  REAL
+    deadline_s  REAL,
+    request_id  TEXT,
+    request_fingerprint TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_worker_state ON tasks(worker, state);
 CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks(created_at);
@@ -322,6 +329,23 @@ CREATE INDEX IF NOT EXISTS idx_chat_worker_ts ON chat_messages(worker, ts);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_dedupe
     ON chat_messages(worker, message_id, direction)
     WHERE message_id IS NOT NULL AND message_id <> '';
+
+-- Peer chat is independent of tasks and ephemeral trigger subscriptions.
+-- Sending over SSE never consumes a message; only its recipient's ACK does.
+CREATE TABLE IF NOT EXISTS peer_messages (
+    seq              INTEGER PRIMARY KEY AUTOINCREMENT,
+    message_id       TEXT NOT NULL UNIQUE,
+    sender           TEXT NOT NULL,
+    recipient        TEXT NOT NULL,
+    text             TEXT NOT NULL,
+    reply_to         TEXT,
+    attachments_json TEXT NOT NULL,
+    payload_json     TEXT NOT NULL,
+    created_at       REAL NOT NULL,
+    acked_at         REAL
+);
+CREATE INDEX IF NOT EXISTS idx_peer_inbox
+    ON peer_messages(recipient, seq) WHERE acked_at IS NULL;
 
 -- approval channel: a worker asks a question, a human answers, the worker
 -- polls the verdict.  `status` is the single source of truth; expiry is
@@ -368,9 +392,17 @@ class RouterStore:
     def _migrate(self) -> None:
         cols = {str(row["name"]) for row in
                 self._conn.execute("PRAGMA table_info(tasks)").fetchall()}
-        if "deadline_s" not in cols:
-            self._conn.execute("ALTER TABLE tasks ADD COLUMN deadline_s REAL")
-            log.info("store migration: added tasks.deadline_s")
+        for column, decl in (("deadline_s", "REAL"), ("request_id", "TEXT"),
+                             ("request_fingerprint", "TEXT")):
+            if column not in cols:
+                self._conn.execute(
+                    "ALTER TABLE tasks ADD COLUMN %s %s" % (column, decl))
+                log.info("store migration: added tasks.%s", column)
+        # Build the index after migration so pre-idempotency databases open.
+        # SQLite permits multiple NULL keys, preserving legacy task creation.
+        self._conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_request_id"
+            " ON tasks(request_id)")
         wcols = {str(row["name"]) for row in
                  self._conn.execute("PRAGMA table_info(workers)").fetchall()}
         for column, decl in (("state", "TEXT"), ("progress_at", "REAL"),
@@ -527,6 +559,80 @@ class RouterStore:
                 "SELECT COUNT(*) AS c FROM tasks"
                 " WHERE worker=? AND state='queued'", (name,)).fetchone()["c"])
 
+    # -- durable peer chat ---------------------------------------------- #
+    @staticmethod
+    def _peer_dict(row: sqlite3.Row) -> Dict[str, Any]:
+        return {"seq": row["seq"], "message_id": row["message_id"],
+                "from": row["sender"], "to": row["recipient"],
+                "text": row["text"], "reply_to": row["reply_to"],
+                "attachments": json.loads(row["attachments_json"]),
+                "status": "queued" if row["acked_at"] is None else "accepted",
+                "created_at": row["created_at"], "acked_at": row["acked_at"]}
+
+    def get_peer_message(self, message_id: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM peer_messages WHERE message_id=?",
+                (message_id,)).fetchone()
+        return self._peer_dict(row) if row else None
+
+    def peer_payload(self, message_id: str) -> Optional[str]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT payload_json FROM peer_messages WHERE message_id=?",
+                (message_id,)).fetchone()
+        return row["payload_json"] if row else None
+
+    def add_peer_message(self, message_id: str, sender: str, recipient: str,
+                         text: str, reply_to: Optional[str],
+                         attachments: List[Dict[str, Any]],
+                         payload_json: str) -> Dict[str, Any]:
+        # The dispatch lock serializes create/dedupe, ACK and stream replay.
+        # SQLite autocommit completes before any SSE notification is queued.
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO peer_messages (message_id, sender, recipient, text,"
+                " reply_to, attachments_json, payload_json, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (message_id, sender, recipient, text, reply_to,
+                 json.dumps(attachments, ensure_ascii=True), payload_json,
+                 time.time()))
+            return self.get_peer_message(message_id)
+
+    def pending_peer_messages(self, worker: str, after: int = 0,
+                              limit: int = PEER_PAGE_LIMIT
+                              ) -> Tuple[List[Dict[str, Any]], bool]:
+        """Bound both row count and encoded bytes; never load the whole inbox."""
+        messages: List[Dict[str, Any]] = []
+        size = 0
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT seq, message_id, sender, recipient, text, reply_to,"
+                " attachments_json, created_at, acked_at FROM peer_messages"
+                " WHERE recipient=? AND acked_at IS NULL AND seq>?"
+                " ORDER BY seq LIMIT ?", (worker, after, limit + 1))
+            try:
+                for row in rows:
+                    message = self._peer_dict(row)
+                    encoded_size = len(json.dumps(
+                        message, ensure_ascii=False).encode("utf-8")) + 2
+                    if (len(messages) >= limit or
+                            (messages and size + encoded_size > PEER_PAGE_BYTES - 1024)):
+                        return messages, True
+                    messages.append(message)
+                    size += encoded_size
+            finally:
+                rows.close()
+        return messages, False
+
+    def ack_peer_message(self, message_id: str) -> Dict[str, Any]:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE peer_messages SET acked_at=?"
+                " WHERE message_id=? AND acked_at IS NULL",
+                (time.time(), message_id))
+            return self.get_peer_message(message_id)
+
     # -- tasks ---------------------------------------------------------- #
     @staticmethod
     def _task_dict(row: sqlite3.Row) -> Dict[str, Any]:
@@ -545,6 +651,7 @@ class RouterStore:
             "context": row["context"],
             "workspace": row["workspace"],
             "urgency": row["urgency"],
+            "execution_mode": "goal",
             "state": row["state"],
             "created_at": row["created_at"],
             "started_at": row["started_at"],
@@ -559,7 +666,9 @@ class RouterStore:
                     workspace: Optional[str] = None,
                     urgency: str = "normal",
                     state: str = "queued",
-                    deadline_s: Optional[float] = None) -> Dict[str, Any]:
+                    deadline_s: Optional[float] = None,
+                    request_id: Optional[str] = None,
+                    request_fingerprint: Optional[str] = None) -> Dict[str, Any]:
         task_id = "t-" + secrets.token_hex(5)
         now = time.time()
         started = now if state == "running" else None
@@ -567,16 +676,23 @@ class RouterStore:
             self._conn.execute(
                 "INSERT INTO tasks (task_id, worker, goal, context, workspace,"
                 " urgency, state, created_at, started_at, finished_at,"
-                " result_json, deadline_s)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)",
+                " result_json, deadline_s, request_id, request_fingerprint)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?)",
                 (task_id, worker, goal, context, workspace, urgency, state,
-                 now, started, deadline_s))
+                 now, started, deadline_s, request_id, request_fingerprint))
             self.refresh_counts(worker)
         log.info("task created id=%s worker=%s state=%s urgency=%s",
                  task_id, worker, state, urgency)
         task = self.get_task(task_id)
         assert task is not None
         return task
+
+    def get_task_request(self, request_id: str
+                         ) -> Optional[Tuple[Dict[str, Any], str]]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM tasks WHERE request_id=?", (request_id,)).fetchone()
+        return (self._task_dict(row), row["request_fingerprint"]) if row else None
 
     def get_task(self, task_id: str) -> Optional[Dict[str, Any]]:
         with self._lock:
@@ -1359,7 +1475,7 @@ class TriggerSubscriptionBridge:
 # --------------------------------------------------------------------------- #
 
 class Connection:
-    """One live SSE stream. Tasks are queued here for its writer thread."""
+    """One SSE writer; peer events are prefetched in bounded batches."""
 
     def __init__(self, name: str, version: Optional[str] = None):
         self.name = name
@@ -1368,6 +1484,8 @@ class Connection:
         self.closed = False
         self.reason = ""
         self.connected_at = time.time()
+        self.peer_after = 0
+        self.peer_buffered = 0
 
     def send_task(self, task: Dict[str, Any]) -> bool:
         if self.closed:
@@ -1485,28 +1603,31 @@ class RouterServer(ThreadingHTTPServer):
 
     def attach(self, name: str, version: Optional[str] = None) -> Connection:
         conn = Connection(name, version)
-        with self.conn_lock:
-            old = self.conns.get(name)
-            self.conns[name] = conn
-            if old is not None:
-                old.close("replaced")
         with self.dispatch_lock:
+            # Publish the connection and replay under the same lock as peer
+            # creation/ACK. Otherwise a live create can overtake its replay.
+            with self.conn_lock:
+                old = self.conns.get(name)
+                self.conns[name] = conn
+                if old is not None:
+                    old.close("replaced")
             self.store.set_online(name, version)
             # A reconnect is at-least-once: anything still marked running was
             # sent over the previous stream, so hand it out again.
             self.store.requeue_running(name)
             self.flush_backlog_locked(name)
+            self.flush_peer_messages_locked(conn)
         log.info("stream attached name=%s version=%s (queued=%d)",
                  name, version or "-", self.store.queued_count(name))
         return conn
 
     def detach(self, conn: Connection, reason: str = "closed") -> None:
-        with self.conn_lock:
-            current = self.conns.get(conn.name) is conn
-            if current:
-                self.conns.pop(conn.name, None)
         purged: List[Dict[str, Any]] = []
         with self.dispatch_lock:
+            with self.conn_lock:
+                current = self.conns.get(conn.name) is conn
+                if current:
+                    self.conns.pop(conn.name, None)
             if current:
                 self.store.set_offline(conn.name)
                 self.store.requeue_running(conn.name)
@@ -1523,6 +1644,25 @@ class RouterServer(ThreadingHTTPServer):
                  conn.name, reason, current, self.store.queued_count(conn.name))
 
     # -- dispatch ------------------------------------------------------- #
+    def flush_peer_messages_locked(self, conn: Connection) -> None:
+        """Caller holds dispatch_lock; no socket I/O while replaying SQLite.
+
+        peer_after is only a per-stream prefetch cursor, never a durable ACK.
+        Draining the last buffered event refills the next bounded page. A new
+        stream starts at zero, so all still-queued messages replay in order.
+        """
+        if conn.closed or self.current_conn(conn.name) is not conn:
+            return
+        available = PEER_STREAM_BUFFER - conn.peer_buffered
+        if available <= 0:
+            return
+        messages, _ = self.store.pending_peer_messages(
+            conn.name, conn.peer_after, available)
+        for message in messages:
+            conn.queue.put({"event": "worker_message", "data": message})
+            conn.peer_buffered += 1
+            conn.peer_after = message["seq"]
+
     def push(self, conn: Connection, task: Dict[str, Any]) -> bool:
         return conn.send_task(task)
 
@@ -1679,7 +1819,8 @@ class RouterHandler(BaseHTTPRequestHandler):
                     "ok": True, "service": "mowu-router", "version": VERSION,
                     "endpoints": ["/health", "/workers", "/tasks", "/stream",
                                   "/register", "/heartbeat", "/result",
-                                  "/notice", "/subscriptions",
+                                  "/notice", "/messages", "/messages/{id}",
+                                  "/messages/{id}/ack", "/subscriptions",
                                   "/subscriptions/pending", "/chat/log",
                                   "/chat/{worker}/messages",
                                   "/chat/{worker}/summary",
@@ -1701,6 +1842,10 @@ class RouterHandler(BaseHTTPRequestHandler):
                 return self._send_json(200, self._tasks_list(qs))
             if len(parts) == 2 and parts[0] == "tasks":
                 return self._task_get(parts[1])
+            if parts == ["messages"]:
+                return self._send_json(*self._peer_messages(qs))
+            if len(parts) == 2 and parts[0] == "messages":
+                return self._send_json(*self._peer_message_get(parts[1]))
             if parts == ["subscriptions", "pending"]:
                 return self._send_json(*self._subscriptions_pending(qs))
             if parts == ["subscriptions"]:
@@ -1752,6 +1897,10 @@ class RouterHandler(BaseHTTPRequestHandler):
                 return self._send_json(*self._notice(body))
             if parts == ["chat", "log"]:
                 return self._send_json(200, self._chat_log(body))
+            if parts == ["messages"]:
+                return self._send_json(*self._peer_message_create(body))
+            if len(parts) == 3 and parts[0] == "messages" and parts[2] == "ack":
+                return self._send_json(*self._peer_message_ack(parts[1], body))
             if parts == ["tasks"]:
                 return self._send_json(*self._task_create(body))
             if len(parts) == 3 and parts[0] == "tasks" and parts[2] == "cancel":
@@ -1859,6 +2008,156 @@ class RouterHandler(BaseHTTPRequestHandler):
             "1", "true", "yes")
         subs = self.server.store.list_subscriptions(worker, active_only)
         return {"ok": True, "count": len(subs), "subscriptions": subs}
+
+    # -- peer messages (never create tasks/results or implicit replies) --- #
+    # POST /messages -> 202 on create, 200 on an exact JSON payload retry,
+    # 409 if that UUID is reused with any changed field. JSON key order is
+    # immaterial; missing vs explicit optional fields remain distinct.
+    # queued means committed to SQLite, even if already emitted over SSE.
+    # Only POST /messages/<UUID>/ack {worker: <to>} changes it to accepted:
+    # accepted means recipient receipt, not a reply or completed task.
+    # GET /messages/<UUID> (or /messages?id=UUID) queries either state.
+    # GET /messages?worker=NAME[&after=SEQ&limit=1..100] pages the pending
+    # inbox in seq order, capped at 256 KiB. Follow next_after if has_more.
+    # All routes use the existing shared X-Router-Token authentication;
+    # worker identities are explicit assertions, not separate credentials.
+    @staticmethod
+    def _peer_uuid(value: Any, label: str = "message_id") -> str:
+        if isinstance(value, str) and len(value) == 36:
+            try:
+                parsed = str(uuid.UUID(value))
+                if parsed == value.lower():
+                    return parsed
+            except ValueError:
+                pass
+        raise BadRequest("%s must be a UUID" % label)
+
+    @staticmethod
+    def _peer_worker(value: Any, label: str) -> str:
+        if not isinstance(value, str) or not value.strip() or len(value) > 128:
+            raise BadRequest("%s must be a worker name (1..128 chars)" % label)
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            raise BadRequest("%s must contain valid Unicode" % label)
+        return value
+
+    @staticmethod
+    def _peer_receipt(message: Dict[str, Any], **extra) -> Dict[str, Any]:
+        return {"ok": True, "message_id": message["message_id"],
+                "status": message["status"], "message": message, **extra}
+
+    def _peer_message_get(self, raw_id: str) -> Tuple[int, Dict[str, Any]]:
+        message_id = self._peer_uuid(unquote(raw_id))
+        message = self.server.store.get_peer_message(message_id)
+        if message is None:
+            return 404, {"ok": False, "error": "unknown_message"}
+        return 200, self._peer_receipt(message)
+
+    def _peer_messages(self, qs: Dict[str, List[str]]) -> Tuple[int, Dict[str, Any]]:
+        if "id" in qs:
+            if "worker" in qs or len(qs["id"]) != 1:
+                raise BadRequest("use either id or worker")
+            return self._peer_message_get(qs["id"][0])
+        worker = self._peer_worker(qs.get("worker", [None])[0], "worker")
+        if self.server.store.get_worker(worker) is None:
+            return 404, {"ok": False, "error": "unknown_worker"}
+        after = self._int_param(qs, "after", 0)
+        limit = self._int_param(qs, "limit", PEER_PAGE_LIMIT)
+        if after is None or not 0 <= after <= 9223372036854775807:
+            raise BadRequest("after must be a nonnegative SQLite sequence")
+        if limit is None or not 1 <= limit <= PEER_PAGE_LIMIT:
+            raise BadRequest("limit must be 1..100")
+        messages, more = self.server.store.pending_peer_messages(worker, after, limit)
+        return 200, {"ok": True, "worker": worker, "count": len(messages),
+                     "messages": messages, "has_more": more,
+                     "next_after": messages[-1]["seq"] if more else None}
+
+    def _peer_message_create(self, body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
+        message_id = self._peer_uuid(body.get("message_id"))
+        payload_json = json.dumps(body, sort_keys=True, ensure_ascii=True,
+                                  separators=(",", ":"))
+        with self.server.dispatch_lock:
+            previous = self.server.store.peer_payload(message_id)
+            if previous is not None:
+                if previous != payload_json:
+                    return 409, {"ok": False, "error": "message_id_conflict",
+                                 "message_id": message_id}
+                # Do not re-resolve images or re-emit an exact retry. The
+                # original metadata and current ACK state are authoritative.
+                message = self.server.store.get_peer_message(message_id)
+                return 200, self._peer_receipt(message, duplicate=True)
+            if set(body) - {"message_id", "from", "to", "text", "reply_to", "attachments"}:
+                raise BadRequest("unsupported message fields")
+            sender = self._peer_worker(body.get("from"), "from")
+            recipient = self._peer_worker(body.get("to"), "to")
+            for worker in (sender, recipient):
+                if self.server.store.get_worker(worker) is None:
+                    return 404, {"ok": False, "error": "unknown_worker"}
+            text = body.get("text")
+            if not isinstance(text, str) or not text.strip() or len(text) > PEER_MAX_TEXT:
+                raise BadRequest("text must be nonempty (max 20000 chars)")
+            try:
+                text.encode("utf-8")
+            except UnicodeEncodeError:
+                raise BadRequest("text must contain valid Unicode")
+            reply_to = body.get("reply_to")
+            if reply_to is not None:
+                reply_to = self._peer_uuid(reply_to, "reply_to")
+                parent = self.server.store.get_peer_message(reply_to)
+                if parent is None:
+                    return 404, {"ok": False, "error": "unknown_reply_to"}
+                if {parent["from"], parent["to"]} != {sender, recipient}:
+                    raise BadRequest("reply_to must belong to the same conversation pair")
+            attachments = []
+            if "attachments" in body:
+                values = body["attachments"]
+                if not isinstance(values, list) or len(values) > MAX_ATTACHMENTS:
+                    raise BadRequest("attachments must contain at most 10 uploaded image ids")
+                refs = []
+                for value in values:
+                    if isinstance(value, str):
+                        value = {"id": value}
+                    if not isinstance(value, dict) or set(value) - {"id", "name"}:
+                        raise BadRequest("attachments accept only uploaded image ids and display names")
+                    name = value.get("name")
+                    if name is not None:
+                        if not isinstance(name, str) or len(name) > 200:
+                            raise BadRequest("attachment name must be at most 200 chars")
+                        try:
+                            name.encode("utf-8")
+                        except UnicodeEncodeError:
+                            raise BadRequest("attachment name must contain valid Unicode")
+                    refs.append(value)
+                if refs:
+                    try:
+                        attachments = self.server.attachments.resolve(refs)
+                    except (ValueError, OSError):
+                        raise BadRequest("attachments must reference existing uploaded images")
+            message = self.server.store.add_peer_message(
+                message_id, sender, recipient, text, reply_to, attachments, payload_json)
+            conn = self.server.current_conn(recipient)
+            if conn is not None:
+                self.server.flush_peer_messages_locked(conn)
+        log.info("peer queued id=%s", message_id)
+        return 202, self._peer_receipt(message, duplicate=False)
+
+    def _peer_message_ack(self, raw_id: str, body: Dict[str, Any]
+                          ) -> Tuple[int, Dict[str, Any]]:
+        message_id = self._peer_uuid(unquote(raw_id))
+        if set(body) - {"worker"}:
+            raise BadRequest("ACK accepts only worker")
+        worker = self._peer_worker(body.get("worker"), "worker")
+        with self.server.dispatch_lock:
+            message = self.server.store.get_peer_message(message_id)
+            if message is None:
+                return 404, {"ok": False, "error": "unknown_message"}
+            if worker != message["to"]:
+                return 403, {"ok": False, "error": "wrong_recipient"}
+            already = message["status"] == "accepted"
+            message = self.server.store.ack_peer_message(message_id)
+        log.info("peer accepted id=%s already=%s", message_id, already)
+        return 200, self._peer_receipt(message, already=already)
 
     # -- chat endpoints (store only; nothing is forwarded) --------------- #
     def _chat_log(self, body: Dict[str, Any]) -> Dict[str, Any]:
@@ -2053,54 +2352,83 @@ class RouterHandler(BaseHTTPRequestHandler):
         }
 
     def _task_create(self, body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
-        worker_name = str(body.get("worker") or "").strip()
-        if not worker_name:
-            raise BadRequest("worker is required")
-        goal = body.get("goal")
-        if goal is None or not str(goal).strip():
-            raise BadRequest("goal is required")
-        goal = str(goal).strip()
-        if len(goal) > MAX_GOAL_CHARS:
-            raise BadRequest(
-                "goal too long (max %d chars, got %d)"
-                % (MAX_GOAL_CHARS, len(goal)))
-        context = body.get("context")
-        if context is not None and not isinstance(context, str):
-            context = json.dumps(context, ensure_ascii=False)
-        workspace = body.get("workspace")
-        workspace = str(workspace) if workspace is not None else None
-        urgency = str(body.get("urgency") or "normal").strip().lower()
-        if urgency not in URGENCIES:
-            raise BadRequest("urgency must be urgent or normal")
-        queue_if_offline = body.get("queue_if_offline", False)
-        if not isinstance(queue_if_offline, bool):
-            raise BadRequest("queue_if_offline must be a boolean")
-        deadline_s = body.get("deadline_s")
-        if deadline_s is not None:
-            try:
-                deadline_s = float(deadline_s)
-            except (TypeError, ValueError):
-                raise BadRequest("deadline_s must be a number")
-            if deadline_s <= 0:
-                raise BadRequest("deadline_s must be > 0")
-
-        store = self.server.store
-        if store.get_worker(worker_name) is None:
-            return 400, {"ok": False, "error": "unknown_worker",
-                         "worker": worker_name}
-
+        # A UUID identifies one formal work order; ordinary chat uses /messages.
+        # Compare the submitted JSON (key order is immaterial), before live
+        # worker/backlog checks. Commit the key and fingerprint in the task's
+        # INSERT, so a lost HTTP response or process restart cannot split them.
+        request_id = (self._peer_uuid(body["message_id"])
+                      if "message_id" in body else None)
+        fingerprint = None
+        if request_id is not None:
+            payload = {key: value for key, value in body.items() if key != "message_id"}
+            fingerprint = hashlib.sha256(json.dumps(
+                payload, sort_keys=True, ensure_ascii=True,
+                separators=(",", ":")).encode("ascii")).hexdigest()
         with self.server.dispatch_lock:
+            if request_id is not None:
+                previous = self.server.store.get_task_request(request_id)
+                if previous is not None:
+                    task, saved_fingerprint = previous
+                    if saved_fingerprint != fingerprint:
+                        return 409, {"ok": False, "error": "message_id_conflict",
+                                     "message_id": request_id}
+                    return 200, {
+                        "ok": True, "task_id": task["task_id"],
+                        "worker": task["worker"], "state": task["state"],
+                        "execution_mode": "goal", "duplicate": True,
+                        "dispatched": False, "queued": task["state"] == "queued",
+                    }
+            if "execution_mode" in body and body["execution_mode"] != "goal":
+                raise BadRequest("execution_mode must be goal; use /messages for chat")
+            worker_name = str(body.get("worker") or "").strip()
+            if not worker_name:
+                raise BadRequest("worker is required")
+            goal = body.get("goal")
+            if goal is None or not str(goal).strip():
+                raise BadRequest("goal is required")
+            goal = str(goal).strip()
+            if len(goal) > MAX_GOAL_CHARS:
+                raise BadRequest(
+                    "goal too long (max %d chars, got %d)"
+                    % (MAX_GOAL_CHARS, len(goal)))
+            context = body.get("context")
+            if context is not None and not isinstance(context, str):
+                context = json.dumps(context, ensure_ascii=False)
+            workspace = body.get("workspace")
+            workspace = str(workspace) if workspace is not None else None
+            urgency = str(body.get("urgency") or "normal").strip().lower()
+            if urgency not in URGENCIES:
+                raise BadRequest("urgency must be urgent or normal")
+            queue_if_offline = body.get("queue_if_offline", False)
+            if not isinstance(queue_if_offline, bool):
+                raise BadRequest("queue_if_offline must be a boolean")
+            deadline_s = body.get("deadline_s")
+            if deadline_s is not None:
+                try:
+                    deadline_s = float(deadline_s)
+                except (TypeError, ValueError):
+                    raise BadRequest("deadline_s must be a number")
+                if deadline_s <= 0:
+                    raise BadRequest("deadline_s must be > 0")
+
+            store = self.server.store
+            if store.get_worker(worker_name) is None:
+                return 400, {"ok": False, "error": "unknown_worker",
+                             "worker": worker_name}
+
             online = self.server.online(worker_name)
             if online and store.running_count(worker_name) == 0:
                 task = store.create_task(
                     worker_name, goal, context, workspace, urgency,
-                    state="running", deadline_s=deadline_s)
+                    state="running", deadline_s=deadline_s,
+                    request_id=request_id, request_fingerprint=fingerprint)
                 self.server.store.refresh_counts(worker_name)
                 conn = self.server.current_conn(worker_name)
                 if conn is not None and self.server.push(conn, task):
                     return 200, {
                         "ok": True, "task_id": task["task_id"],
                         "worker": worker_name, "state": "running",
+                        "execution_mode": "goal",
                         "dispatched": True, "queued": False,
                         "queued_ahead": 0,
                     }
@@ -2136,6 +2464,7 @@ class RouterHandler(BaseHTTPRequestHandler):
                 return status, {
                     "ok": True, "task_id": task["task_id"],
                     "worker": worker_name, "state": state,
+                    "execution_mode": "goal",
                     "dispatched": state == "running",
                     "queued": state == "queued", "queued_ahead": ahead,
                 }
@@ -2165,7 +2494,8 @@ class RouterHandler(BaseHTTPRequestHandler):
             ahead = queued + store.running_count(worker_name)
             task = store.create_task(
                 worker_name, goal, context, workspace, urgency,
-                state="queued", deadline_s=deadline_s)
+                state="queued", deadline_s=deadline_s,
+                request_id=request_id, request_fingerprint=fingerprint)
             store.refresh_counts(worker_name)
             status = 202
             log.info("task queued id=%s worker=%s online=%s ahead=%d",
@@ -2173,6 +2503,7 @@ class RouterHandler(BaseHTTPRequestHandler):
             return status, {
                 "ok": True, "task_id": task["task_id"],
                 "worker": worker_name, "state": "queued",
+                "execution_mode": "goal",
                 "dispatched": False, "queued": True,
                 "queued_ahead": ahead,
             }
@@ -2761,6 +3092,16 @@ class RouterHandler(BaseHTTPRequestHandler):
                 if item is None:
                     reason = conn.reason or "closed"
                     break
+                if item["event"] == "worker_message":
+                    with self.server.dispatch_lock:
+                        conn.peer_buffered -= 1
+                        pending = self.server.store.get_peer_message(
+                            item["data"]["message_id"])
+                        if conn.peer_buffered == 0:
+                            self.server.flush_peer_messages_locked(conn)
+                    # An HTTP inbox consumer may have ACKed a prefetched row.
+                    if pending is None or pending["status"] != "queued":
+                        continue
                 frame = ("event: %s\ndata: %s\n\n" % (
                     item["event"],
                     json.dumps(item["data"], ensure_ascii=False))).encode("utf-8")

@@ -5,17 +5,19 @@ import process from "node:process";
 import { DesktopManager, PROTOCOL } from "./desktop-manager.mjs";
 import { nativeToolInvocation, nativeToolRejection, nativeStatusInvocation } from "./interface/native-dispatch.mjs";
 import { sendImage } from "./feishu-image-output.mjs";
+import { routerOperations } from "./router-operations.mjs";
+import { startRouterRuntime } from "./router-runtime.mjs";
 import { operatingConfig } from "./integration-profile.mjs";
 import { resolveNativeTransport, resolveNativeCapabilities } from "./interface/transport/index.mjs";
 
 export const BUSINESS_API_VERSION = 1;
 export const BUSINESS_STATE_VERSION = 1;
-export const BUSINESS_VERSION = "0.2.41";
+export const BUSINESS_VERSION = "0.3.0";
 export function createBusiness(runtimeControl) {
 let transition = Boolean(runtimeControl.transition);
 
 const SERVER_NAME = "codexworker";
-const SERVER_VERSION = "0.2.41";
+const SERVER_VERSION = "0.3.0";
 const PIPE_ENV = "CODEX_APP_TOOLS_PIPE_PATH";
 const CODEX_TURN_METADATA_KEY = "x-codex-turn-metadata";
 const LOCAL_MANAGER_HOST = "127.0.0.1";
@@ -40,6 +42,8 @@ const BINDING_STATE_PATH = path.join(BINDING_STATE_DIR, "manager-binding.json");
 
 let desktopManager = null;
 let startingManager = null;
+let routerRuntime = null;
+let ownedTransport = null;
 
 async function handleRequest(method, params) {
   if (desktopManager?.handoffPaused && method === "tools/call" &&
@@ -48,12 +52,12 @@ async function handleRequest(method, params) {
   }
   switch (method) {
     case "initialize":
-      if (params.__bridgeLifecycleReady !== false) void ensureLocalManagerServer().catch(() => process.stderr.write("[codexworker] HTTP adapter awaits a valid local binding/config/token.\n"));
+      if (params.__bridgeLifecycleReady !== false && params.__bridgeAutoStart !== false) void ensureLocalManagerServer().catch(() => process.stderr.write("[codexworker] HTTP adapter awaits a valid local binding/config/token.\n"));
       return {
         protocolVersion: params.protocolVersion ?? "2025-06-18",
         capabilities: { tools: { listChanged: true } },
         serverInfo: { name: SERVER_NAME, version: SERVER_VERSION },
-        instructions: "Probe and operate the CodexWorker desktop-native adapter. The trainer authorized automatic Feishu relay of public displayed output images in its selected chat; do not separately bridge_send_image those same previews. Arbitrary files still need explicit send authorization. In a Bridge-connected selected chat, native request_user_input_async questions are automatically relayed and external answers preserve the original question IDs to synchronize Desktop. Use bridge_publish_question only for a clarification without a native panel; never create a second independent question for the same clarification. Never publish private reasoning, arbitrary tool arguments or secrets.",
+        instructions: "Probe and operate the CodexWorker desktop-native adapter. The trainer authorized automatic Feishu relay of public displayed output images in its selected chat; do not separately bridge_send_image those same previews. Arbitrary files still need explicit send authorization. In a Bridge-connected selected chat, native request_user_input_async questions are automatically relayed and external answers preserve the original question IDs to synchronize Desktop. Use bridge_publish_question only for a clarification without a native panel; never create a second independent question for the same clarification. Use bridge_send_worker_message for ordinary worker chat; it creates no task or goal. Only explicit project execution uses bridge_create_work_order; steering stays on the original work order. Formal tasks check native goals and never overwrite an unfinished project. Never publish private reasoning, arbitrary tool arguments or secrets.",
       };
     case "ping":
       return {};
@@ -148,6 +152,19 @@ async function handleRequest(method, params) {
             description: "Request an atomic reload of all business code from trusted local source. Busy writes defer the handoff; invalid code retains the old generation. Native tasks and durable receipts/selection are preserved. Transport connections may reconnect; bootstrap/loader stay fixed. Inspect /bridge/runtime for the applied generation.",
             inputSchema: { type: "object", properties: {}, additionalProperties: false },
           },
+          { name: "bridge_list_workers", description: "List connected router workers before an authorized peer chat or project work order.",
+            inputSchema: { type: "object", properties: {}, additionalProperties: false }, annotations: { readOnlyHint: true } },
+          { name: "bridge_send_worker_message", description: "Send authorized ordinary chat to another worker through the router; does not create a task or goal. Replies use replyTo. Reuse messageId on retry; public content is mirrored to Feishu.",
+            inputSchema: { type: "object", properties: { messageId: { type: "string" }, to: { type: "string" }, text: { type: "string", minLength: 1, maxLength: 20000 },
+              replyTo: { type: "string" }, attachments: { type: "array", maxItems: 10, items: { type: "object", properties: { id: { type: "string" }, name: { type: "string" } }, required: ["id"], additionalProperties: false } } },
+              required: ["messageId", "to", "text"], additionalProperties: false } },
+          { name: "bridge_worker_inbox", description: "Read this worker's pending router chat inbox; never creates a work order or marks unread messages as answered.",
+            inputSchema: { type: "object", properties: { after: { type: "integer", minimum: 0 } }, additionalProperties: false }, annotations: { readOnlyHint: true } },
+          { name: "bridge_create_work_order", description: "Create one user-authorized project work order in native goal mode. Do not use for ordinary chat or create another order for steering of an existing project. Reuse messageId on retry. No default wall-clock deadline.",
+            inputSchema: { type: "object", properties: { messageId: { type: "string" }, worker: { type: "string" }, goal: { type: "string", minLength: 1, maxLength: 20000 },
+              context: { type: "string" }, deadlineS: { type: "number", exclusiveMinimum: 0 }, queueIfOffline: { type: "boolean" } }, required: ["messageId", "worker", "goal"], additionalProperties: false } },
+          { name: "bridge_work_order_status", description: "Read the exact formal project work order and result from the router.",
+            inputSchema: { type: "object", properties: { taskId: { type: "string" } }, required: ["taskId"], additionalProperties: false }, annotations: { readOnlyHint: true } },
           {
             name: "bridge_verify_native_write_path",
             description: "Create one visible Codex Desktop task, wait for it to become idle, send a unique follow-up through the native desktop tool, and read the task back. This is a deliberate write-path acceptance test.",
@@ -190,6 +207,11 @@ async function handleRequest(method, params) {
           return bridgeImage(params);
         case "bridge_reload_business_modules":
           return reloadBusinessModules();
+        case "bridge_list_workers": return routerTool("workers", params);
+        case "bridge_send_worker_message": return routerTool("send", params);
+        case "bridge_worker_inbox": return routerTool("inbox", params);
+        case "bridge_create_work_order": return routerTool("createWorkOrder", params);
+        case "bridge_work_order_status": return routerTool("workOrder", params);
         case "bridge_verify_native_write_path":
           return verifyNativeWritePath(params);
         default:
@@ -561,6 +583,11 @@ async function ensureLocalManagerServer() {
     let configured = {};
     try { configured = JSON.parse(await readFile(path.join(BINDING_STATE_DIR, "desktop-config.local.json"), "utf8")); }
     catch (error) { if (error.code !== "ENOENT") throw error; }
+    if (configured.autoStart === false) {
+      const error = new Error("worker_autostart_disabled");
+      error.body = { error: error.message, detail: "Worker autoStart is disabled; plugin tools and the session binding remain available.", retryable: false };
+      throw error;
+    }
     let manager, callerSession;
     const native = async (name, args, deliveryContext) => {
       let requestInvocation;
@@ -617,7 +644,18 @@ async function ensureLocalManagerServer() {
         manager.imageOperations = (manager.imageOperations ?? 0) + 1;
         try { return await sendImage(request, context); } finally { manager.imageOperations--; }
       } };
-    try { await manager.initialize(); await manager.listen(); desktopManager = manager; }
+    try {
+      await manager.initialize(); await manager.listen(); desktopManager = manager;
+      if (!manager.state.selectedThreadId) await manager.register({ protocolVersion: PROTOCOL,
+        messageId: randomUUID(), source: "trainer", threadId: binding.managerThreadId, hostId: "local" });
+      const transport = resolveNativeTransport(); ownedTransport = transport;
+      transport.setActivityHandler?.(activity => manager.observeToolActivity(activity));
+      transport.setContextHandler?.(event => manager.observeContextEvent(event));
+      if (configured.router && configured.router.managedExternally !== true) routerRuntime = await startRouterRuntime({
+        manager, nativeCall: native, transport, config: manager.config,
+        identity: { name: config.machine, display: config.bridgeName }, version: BUSINESS_VERSION,
+        log: (level, event, fields) => process.stderr.write(JSON.stringify({ ts: new Date().toISOString(), level, event, ...fields }) + "\n") });
+    }
     catch (error) {
       await manager.close();
       if (error?.body?.error !== "manager_instance_active") throw error;
@@ -662,6 +700,11 @@ async function connectManagerProxy(config, wait) {
   return { config, proxy: true, health: () => health, register: body => request("/manager/sessions/adopt", body),
     message: body => request("/manager/messages", body), sendImage: body => request("/bridge/images", body),
     businessRuntime: { reload: () => request("/bridge/runtime/reload", {}) },
+    routerOperations: { workers: () => request("/bridge/workers"),
+      message: (method, body) => method === "send" ? request("/bridge/worker-messages", body)
+        : request("/bridge/worker-messages?after=" + (body.after ?? 0)),
+      createWorkOrder: body => request("/bridge/work-orders", body),
+      workOrder: id => request("/bridge/work-orders/" + encodeURIComponent(id)) },
     questions: { publish: body => request("/bridge/questions", body) }, close: async () => {} };
 }
 
@@ -675,7 +718,20 @@ async function registerCurrentTask(params) {
     const result = await desktopManager.register({ protocolVersion: PROTOCOL, messageId: randomUUID(), source: "trainer", threadId,
       ...(args.hostId ? { hostId: args.hostId } : {}) });
     return toolResult(result);
-  } catch (error) { return toolResult(error.body ?? { error: error.message }, true); }
+  } catch (error) {
+    if (error.body?.error === "adopt_conflict") return toolResult({ action: "already_registered", threadId: error.body.threadId });
+    return toolResult(error.body ?? { error: error.message }, true);
+  }
+}
+
+async function routerTool(operation, params) {
+  try {
+    await ensureLocalManagerServer();
+    const args = params.arguments ?? {};
+    const ops = desktopManager.routerOperations ?? routerOperations(desktopManager);
+    return toolResult(await (["send", "inbox"].includes(operation)
+      ? ops.message(operation, args) : ops[operation](operation === "workOrder" ? args.taskId : args)));
+  } catch (error) { return toolResult(error.body ?? { error: error.code ?? error.message, detail: error.message }, true); }
 }
 
 async function bridgeMessage(params) {
@@ -839,19 +895,22 @@ function toolResult(payload, isError = false) {
 
 
 return { handleRequest,
-  // The CLI owns the manager in-process; the router task runner shares this
-  // exact instance so router work joins the Feishu queue instead of a new thread.
+  // The plugin generation owns the manager and router as a single writer.
   manager: () => desktopManager,
-  busy: () => Boolean(startingManager || desktopManager?.requestHotHandoff?.(runtimeControl.status)),
+  busy: () => Boolean(startingManager || routerRuntime?.busy() || desktopManager?.requestHotHandoff?.(runtimeControl.status)),
   activate: async () => { await ensureLocalManagerServer(); return desktopManager.health(); },
   quiesce: async () => {
-    if (startingManager || desktopManager?.requestHotHandoff?.(runtimeControl.status)) return { busy: true };
+    if (startingManager || routerRuntime?.busy() || desktopManager?.requestHotHandoff?.(runtimeControl.status)) return { busy: true };
     const hadManager = desktopManager instanceof DesktopManager && Boolean(desktopManager.server?.listening);
     transition = true;
     desktopManager?.commitHotHandoff?.();
+    await routerRuntime?.close(); routerRuntime = null;
     await desktopManager?.close(); desktopManager = null;
     return { busy: false, hadManager };
   },
-  close: async () => { await startingManager?.catch(() => {}); await desktopManager?.close(); desktopManager = null; }
+  close: async () => { await startingManager?.catch(() => {});
+    await routerRuntime?.close(); routerRuntime = null;
+    ownedTransport?.setActivityHandler?.(null); ownedTransport?.setContextHandler?.(null); ownedTransport = null;
+    await desktopManager?.close(); desktopManager = null; }
 };
 }

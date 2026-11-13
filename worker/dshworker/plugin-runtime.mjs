@@ -15,7 +15,8 @@ export class PluginRuntime {
     this.nextId = 1; this.sessionDir = path.join(stateDir, "business-generations", String(process.pid) + "-" + randomUUID());
   }
   status() { return { available: Boolean(this.current), scope: "all-business", featureVersion: this.version ?? null,
-    bootstrapVersion: "0.2.23", desktopWatchdogVersion: "0.2.27", desktopLifetimeLaunchMode: this.env.RUDOLF_BRIDGE_LIFETIME_LAUNCH ?? null,
+    bootstrapVersion: "0.3.0", desktopWatchdogVersion: "0.2.27", desktopLifetimeLaunchMode: this.env.RUDOLF_BRIDGE_LIFETIME_LAUNCH ?? null,
+    desktopOwner: { pid: Number(this.env.CODEXWORKER_DESKTOP_PID) || null, startedAt: this.env.RUDOLF_BRIDGE_DESKTOP_STARTED_AT ?? null },
     sha256: this.current?.sha ?? null, loadedAt: this.loadedAt ?? null, generation: this.generation,
     loadCount: this.generation, reloadAvailable: true, autoReloadOnUse: this.autoReloadEnabled !== false, automaticSourcePolling: true,
     reloadPaused: this.autoReloadEnabled === false,

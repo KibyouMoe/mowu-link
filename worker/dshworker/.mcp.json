@@ -1,14 +1,9 @@
 {
   "mcpServers": {
     "codexworker": {
-      "command": "cmd.exe",
+      "command": "node",
       "cwd": ".",
       "args": [
-        "/d",
-        "/s",
-        "/c",
-        "call",
-        "./scripts/launch_codexworker.cmd",
         "./server.mjs"
       ],
       "enabled": true,
@@ -22,7 +17,8 @@
         "HOME",
         "USERPROFILE",
         "LOCALAPPDATA",
-        "PATH"
+        "PATH",
+        "CODEXWORKER_STATE_DIR"
       ],
       "startup_timeout_sec": 60,
       "tool_timeout_sec": 180,
@@ -30,4 +26,3 @@
     }
   }
 }
-

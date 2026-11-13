@@ -70,10 +70,12 @@ export function routerMarker(taskId) {
 // "训练员" and the trainer sees a task that pretends to come from him.
 export const ROUTER_ORIGIN = "这条指令来自超级溪流（训练员的秘书，负责向各 worker 派活），不是训练员本人；回复时称呼「溪流」。";
 
+export const TASK_GOAL_INSTRUCTIONS = "[正式工单 · 目标模式]\n先核对原生目标状态（支持时调用 get_goal）；没有未完成目标才调用 create_goal 建立本工单目标，不自设 token 预算。已有目标时先关联本工单的补充或子项；若是独立冲突项目，保留原目标并说明冲突，不能擅自替换、完成或暂停。以原生工具实际返回为准，执行、验证后按真实完成状态回传。普通聊天不建立工单或目标。";
+
 export function routerPrompt({ taskId, goal, context }) {
   const body = (context == null ? ""
     : typeof context === "string" ? context : JSON.stringify(context)).trim();
-  return `${routerMarker(taskId)} 来自超级溪流的指令（任务 ${taskId}）\n${ROUTER_ORIGIN}\n\n${String(goal ?? "").trim()}`
+  return `${routerMarker(taskId)} 来自超级溪流的指令（任务 ${taskId}）\n${ROUTER_ORIGIN}\n\n${TASK_GOAL_INSTRUCTIONS}\n\n${String(goal ?? "").trim()}`
     + (body ? `\n\n[router context]\n${body}` : "");
 }
 

@@ -1,12 +1,12 @@
 // One Node transport supervisor per real Desktop lifetime, never a model host.
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { appendFile, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { DesktopLifecycle, desktopOwner, processChain, resolveDesktopOwner } from "../desktop-lifecycle.mjs";
+import { DesktopLifecycle, desktopOwner, processChain, resolveDesktopOwner, readDesktopSettings, DESKTOP_BOOTSTRAP_VERSION, desktopLaunchMode, stopOwnedChild } from "../desktop-lifecycle.mjs";
 
 const args = process.argv.slice(2);
 if (args[0] !== "--desktop-pid" || !/^\d+$/.test(args[1] ?? "") || !process.env.CODEX_APP_TOOLS_PIPE_PATH) {
@@ -19,23 +19,24 @@ if (!owner || owner.pid !== desktopPid ||
   throw new Error("The native pipe must belong to the verified live Codex Desktop.");
 }
 const pluginRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const stateRoot = path.join(process.env.USERPROFILE ?? process.env.HOME ?? os.homedir(), ".codex", "state", "codexworker");
+const stateRoot = process.env.CODEXWORKER_STATE_DIR ?? path.join(process.env.USERPROFILE ?? process.env.HOME ?? os.homedir(), ".codex", "state", "codexworker");
 const config = JSON.parse(await readFile(path.join(stateRoot, "desktop-config.local.json"), "utf8"));
 if ((config.host ?? "127.0.0.1") !== "127.0.0.1") throw new Error("This activation only supports loopback.");
 const token = (await readFile(config.tokenFile, "utf8")).trim();
 if (token.length < 24) throw new Error("A configured strong machine-local credential is required.");
 const endpoint = "http://127.0.0.1:" + (config.port ?? 8903);
-const leaseKey = createHash("sha256").update(JSON.stringify([path.resolve(stateRoot).toLowerCase(), desktopPid, owner.startedAt])).digest("hex").slice(0, 24);
+const canonicalState = await realpath(stateRoot);
+const leaseKey = createHash("sha256").update(JSON.stringify([process.platform === "win32" ? canonicalState.toLowerCase() : canonicalState, desktopPid, owner.startedAt])).digest("hex").slice(0, 24);
 const lease = net.createServer(socket => socket.end());
 try {
   await new Promise((resolve, reject) => { lease.once("error", reject);
-    lease.listen("\\\\.\\pipe\\codexworker-desktop-lifecycle-" + leaseKey, resolve); });
+    lease.listen(process.platform === "win32" ? "\\\\.\\pipe\\codexworker-desktop-lifecycle-" + leaseKey : path.join(os.tmpdir(), "cw-lc-" + leaseKey + ".sock"), resolve); });
 } catch (error) { if (error.code === "EADDRINUSE") process.exit(0); throw error; }
 await mkdir(stateRoot, { recursive: true });
 let statusWrite = Promise.resolve();
 const log = value => {
   const status = { ...value, supervisorPid: process.pid, desktopPid, desktopStartedAt: owner.startedAt,
-    version: "0.2.23", watchdogVersion: "0.2.27", launchMode: process.env.RUDOLF_BRIDGE_LIFETIME_LAUNCH ?? "legacy-node-detached", updatedAt: new Date().toISOString() };
+    version: DESKTOP_BOOTSTRAP_VERSION, watchdogVersion: "0.2.27", launchMode: process.env.RUDOLF_BRIDGE_LIFETIME_LAUNCH ?? desktopLaunchMode(process.platform), updatedAt: new Date().toISOString() };
   // Bounded metadata only; no raw stderr, pipe, credentials or request payloads.
   statusWrite = statusWrite.then(async () => {
     const target = path.join(stateRoot, "desktop-lifecycle-status.json");
@@ -52,14 +53,8 @@ const log = value => {
   // The launcher exits before this long-lived process; its stdout is not a
   // lifecycle channel. Persist diagnostics without writing a retired pipe.
 };
-async function stopChild(child) {
-  if (child.exitCode !== null) return;
-  await new Promise(resolve => {
-    const limit = setTimeout(() => { child.kill(); resolve(); }, 5000);
-    child.once("exit", () => { clearTimeout(limit); resolve(); }); child.stdin.end();
-  });
-}
 const lifecycle = new DesktopLifecycle({
+  enabled: async () => (await readDesktopSettings(stateRoot)).autoStart,
   desktopAlive: async () => {
     const now = desktopOwner(await processChain(desktopPid));
     return now?.pid === desktopPid && now.startedAt === owner.startedAt && now.executable === owner.executable;
@@ -69,11 +64,13 @@ const lifecycle = new DesktopLifecycle({
       headers: { authorization: "Bearer " + token }, signal: AbortSignal.timeout(3000) });
     if (!response.ok) return null;
     const result = await response.json();
-    return result.name === (config.bridgeName ?? "CodexWorker") ? result : null;
+    const status = result.capabilities?.businessHotReload;
+    return result.name === (config.bridgeName ?? "CodexWorker") && status?.bootstrapVersion === DESKTOP_BOOTSTRAP_VERSION &&
+      status.desktopOwner?.pid === desktopPid && status.desktopOwner?.startedAt === owner.startedAt ? result : null;
   },
   launch: () => {
     const child = spawn(process.execPath, [path.join(pluginRoot, "server.mjs")], {
-      cwd: pluginRoot, env: { ...process.env, RUDOLF_BRIDGE_LIFECYCLE_CHILD: "1" },
+      cwd: pluginRoot, env: { ...process.env, RUDOLF_BRIDGE_LIFECYCLE_CHILD: "1", CODEXWORKER_DESKTOP_PID: String(desktopPid) },
       stdio: ["pipe", "pipe", "ignore"], windowsHide: true });
     let output = "";
     child.stdout.setEncoding("utf8"); child.stdout.on("data", chunk => {
@@ -88,10 +85,10 @@ const lifecycle = new DesktopLifecycle({
     });
     child.stdin.on("error", () => child.kill());
     child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {
-      protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "desktop-bridge-lifecycle", version: "0.2.23" } } }) + "\n");
+      protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "desktop-bridge-lifecycle", version: DESKTOP_BOOTSTRAP_VERSION } } }) + "\n");
     child.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
     return child;
-  }, stopChild, log });
+  }, stopChild: stopOwnedChild, log });
 let stopping = false;
 async function shutdown() {
   if (stopping) return; stopping = true; clearInterval(watchdog);

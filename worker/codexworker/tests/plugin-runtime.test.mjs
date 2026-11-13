@@ -233,7 +233,7 @@ for (const operatingMode of ["desktop-bridge", "feishu-local"]) test(`fixed load
   assert.equal(failedCold.structuredContent.retryable, true);
   await assert.rejects(fetch(`http://127.0.0.1:${port}/health`), "failed initialize must not permit a new writer");
   const adopted = await runtime.call("tools/call", { name: "bridge_register_current_task", arguments: {}, _meta: { "openai/threadId": "same-chat" } });
-  assert.equal(adopted.isError, false);
+  assert.equal(adopted.isError, false, JSON.stringify(adopted));
   const beforeRecoveredProxy = await request("/health");
   const recovered = await failedStartupProxy.call("tools/call", { name: "bridge_start_local_manager", arguments: {} });
   assert.equal(recovered.isError, false, "a cached failed initialize may recover only by connecting to this healthy writer");
@@ -248,7 +248,7 @@ for (const operatingMode of ["desktop-bridge", "feishu-local"]) test(`fixed load
   await request("/manager/messages", message); const before = await request("/health");
   assert.equal(before.activeTurns, 1);
   assert.equal(before.operatingMode, operatingMode);
-  assert.equal(before.capabilities.businessHotReload.bootstrapVersion, "0.2.23");
+  assert.equal(before.capabilities.businessHotReload.bootstrapVersion, "0.3.0");
   const waitFor = async predicate => {
     const until = Date.now() + 5000;
     while (!predicate() && Date.now() < until) { await runtime.check(); await new Promise(resolve => setTimeout(resolve, 10)); }

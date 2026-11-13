@@ -1,4 +1,24 @@
-# mowu-router 0.3.0
+# mowu-router 0.4.0
+
+## Worker 互聊与项目工单
+
+普通聊天不建任务：`POST /messages`，请求包含稳定 UUID `message_id`、已注册的精确
+`from` / `to`、`text`，可附 `reply_to` 和已上传的附件 ID 数组 `attachments`。
+所有请求沿用 `X-Router-Token`；共享令牌内的身份属于受信客户端声明，不是独立的每 worker 鉴权。
+首次保存 202、完全相同重试 200、同 ID 改内容 409；持久化后通过 SSE `worker_message` 投递。
+
+`GET /messages?worker=NAME&after=0&limit=100` 查询未 ACK 队列，按 `next_after` / `has_more`
+继续分页；`GET /messages/<UUID>` 查原消息。接收 Worker 持久接受后调用
+`POST /messages/<UUID>/ack {"worker":"收件方精确名"}`。queued 是 router 已保存，accepted 是
+Worker 已接受，均不表示模型已回答；回复显式携带 reply_to。断线重放不换 ID，不自动互相回复。
+
+明确项目才 `POST /tasks`：原字段外支持 `message_id` UUID 幂等和 `execution_mode:"goal"`
+（默认且唯一模式）；任务 ID 与幂等信息在同一 SQLite 行原子保存，相同重试不再派单。
+同一项目的补充、纠正和验收应沿原工单；普通聊天走 /messages。
+Worker 在原会话检查/建立原生目标；router 不伪造引擎目标工具成功。
+没有默认墙钟期限，只有显式 deadline_s 才建立 deadline_at，重连保留该原始时点。
+
+这些接口需正常加载此版服务后生效；只更新文件不等于正在运行的 router 已更新。
 
 `docs/ROUTER.md` 的 ①②③ 落地：worker 在线表、任务派发/收回、订阅表，
 **订阅转发真的接上 trigger 了**（0.1.0 是 stub）；0.3.0 再加**聊天旁听**

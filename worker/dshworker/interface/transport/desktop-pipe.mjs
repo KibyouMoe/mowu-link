@@ -4,7 +4,7 @@
 // 帧格式：4 字节小端长度 + UTF-8 JSON-RPC。
 //
 // 这一层只负责「把 app tools 的 list/call 送出去」，
-// 不关心业务语义。app-server 实现见 ./app-server.mjs。
+// 不关心业务语义；Desktop 拥有原生引擎和会话。
 import { randomUUID } from "node:crypto";
 import net from "node:net";
 import process from "node:process";

@@ -6,14 +6,11 @@
 //
 // 实现按环境选择，默认保持原行为（Desktop 注入管道）：
 //   CODEXWORKER_NATIVE_TRANSPORT=desktop-pipe   显式指定
-//   CODEXWORKER_NATIVE_TRANSPORT=app-server     CLI 后端（codex app-server JSON-RPC）
 //   未设置                                      有 CODEX_APP_TOOLS_PIPE_PATH 就用它
-import * as appServer from "./app-server.mjs";
 import * as desktopPipe from "./desktop-pipe.mjs";
 
 const IMPLEMENTATIONS = {
   [desktopPipe.name]: desktopPipe,
-  [appServer.name]: appServer,
 };
 
 let cached = null;

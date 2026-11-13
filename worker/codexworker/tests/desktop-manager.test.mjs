@@ -380,7 +380,12 @@ async function autoImageFixture(t, overrides = {}) {
     turn.items.push({ type: "imageGeneration", id: randomUUID(), status: "completed", savedPath: filename });
     return turn;
   };
-  const scan = async () => { await f.manager.scan(); await f.manager.publicImageRelay.task; };
+  const scan = async () => {
+    await f.manager.scan();
+    // Markdown images share the ordered text drain; kick() need not create an image-only task.
+    await f.manager.publicTextTask;
+    await f.manager.publicImageRelay.task;
+  };
   return { ...f, outbound, notices, image, add, scan };
 }
 

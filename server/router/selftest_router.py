@@ -20,6 +20,10 @@ Then drives a fake worker over a real SSE connection and exercises:
   POST /notice normal/urgent → trigger notify/event, minute-hash idempotence
   subscriptions → trigger registration → pending pull → ACK → delete closes
   chat: POST /chat/log → GET messages (dedupe/filters) → summary counts
+  peer chat: authenticated /messages, exact retries/conflicts, recipient ACK,
+    bounded inbox/SSE replay, image references, offline queue and process restart
+  formal tasks: optional creation UUID, atomic persistence, exact retries across
+    reconnect/restart, goal-only execution and explicit deadlines, legacy clients
   SSE disconnect → subscriptions purged locally and at trigger
   trigger down → POST /subscriptions 502 + rollback, /notice ok:false (no 5xx)
   single-instance flock, token file generation/permissions, auth
@@ -31,6 +35,7 @@ a total; exits non-zero on any failure.
 from __future__ import annotations
 
 import http.client as http_client
+import base64
 import hashlib
 import json
 import os
@@ -46,6 +51,7 @@ import time
 import traceback
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
@@ -87,7 +93,9 @@ def http(method: str, url: str, body=None, token=None,
     """Small JSON client; returns (status, payload). Never raises on 4xx/5xx."""
     data = None
     if body is not None:
-        data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        # Escaped Unicode also lets validation tests send lone surrogates as
+        # legal JSON bytes; the server must reject those invalid text values.
+        data = json.dumps(body, ensure_ascii=True).encode("utf-8")
     req = urllib.request.Request(url, data=data, method=method)
     if data is not None:
         req.add_header("Content-Type", "application/json; charset=utf-8")
@@ -188,12 +196,15 @@ def free_port() -> int:
 class FakeWorker(threading.Thread):
     """A real SSE client: one HTTP GET streaming until stop()."""
 
-    def __init__(self, name: str, token: str, version: str = "fake-1") -> None:
+    def __init__(self, name: str, token: str, version: str = "fake-1",
+                 port: int = PORT) -> None:
         super().__init__(daemon=True, name="fake-worker-" + name)
         self.worker_name = name
         self.token = token
         self.version = version
+        self.port = port
         self.tasks: "queue.Queue[dict]" = queue.Queue()
+        self.messages: "queue.Queue[dict]" = queue.Queue()
         self.ping_times = []
         self.connected = threading.Event()
         self.error = None
@@ -205,7 +216,7 @@ class FakeWorker(threading.Thread):
         path = "/stream?name=%s&version=%s" % (
             quote(self.worker_name), quote(self.version))
         try:
-            conn = http_client.HTTPConnection("127.0.0.1", PORT, timeout=5.0)
+            conn = http_client.HTTPConnection("127.0.0.1", self.port, timeout=5.0)
             conn.request("GET", path, headers={
                 "X-Router-Token": self.token,
                 "Accept": "text/event-stream",
@@ -234,13 +245,14 @@ class FakeWorker(threading.Thread):
                     break
                 line = raw.decode("utf-8", "replace").rstrip("\r\n")
                 if line == "":
-                    if event == "task" and data:
+                    if event in ("task", "worker_message") and data:
                         try:
                             payload = json.loads("\n".join(data))
                         except ValueError:
                             payload = None
                         if isinstance(payload, dict):
-                            self.tasks.put(payload)
+                            target = self.tasks if event == "task" else self.messages
+                            target.put(payload)
                     event = None
                     data = []
                 elif line.startswith(":"):
@@ -271,6 +283,12 @@ class FakeWorker(threading.Thread):
         except queue.Empty:
             return None
 
+    def wait_message(self, timeout: float = 5.0):
+        try:
+            return self.messages.get(timeout=timeout)
+        except queue.Empty:
+            return None
+
     def wait_ping(self, timeout: float = 4.0) -> bool:
         deadline = time.time() + timeout
         while time.time() < deadline:
@@ -283,6 +301,547 @@ class FakeWorker(threading.Thread):
         self._stop_event.set()
         self.join(timeout=3.0)
 
+
+
+def peer_selftest(checker, work, trigger_url, trigger_token):
+    """A separate real router: crash/restart never touches the main test router."""
+    port = free_port()
+    base = "http://127.0.0.1:%d" % port
+    db = work / "peer.db"
+    token_path = work / "peer.token"
+    log_path = work / "peer.log"
+    argv = [PY, str(ROUTER), "--port", str(port), "--db", str(db),
+            "--token-file", str(token_path), "--lock", str(work / "peer.lock"),
+            "--log", str(log_path), "--trigger-url", trigger_url + "/trigger",
+            "--trigger-token-file", str(trigger_token), "--ping-interval", "0.2"]
+    proc, output = start_process(argv, work / "peer.out")
+    clients = []
+    a, b, c = "peer-发送", "peer-接收", "peer-third"
+    marker = "PEER_BODY_MUST_STAY_OUT_OF_LOGS"
+    try:
+        if not wait_http(base + "/health"):
+            raise RuntimeError("peer router did not start: " + tail(log_path))
+        token = token_path.read_text(encoding="utf-8").strip()
+
+        def call(method, route, body=None):
+            return http(method, base + route, body, token)
+
+        def payload(**changes):
+            body = {"message_id": str(uuid.uuid4()), "from": a, "to": b,
+                    "text": marker}
+            body.update(changes)
+            return body
+
+        def inbox():
+            messages = []
+            after = 0
+            while True:
+                status, page = call("GET", "/messages?worker=%s&after=%d" % (quote(b), after))
+                if status != 200:
+                    raise RuntimeError("peer inbox returned %d" % status)
+                messages.extend(page["messages"])
+                if not page["has_more"]:
+                    return messages
+                next_after = page["next_after"]
+                if not next_after or next_after <= after:
+                    raise RuntimeError("peer inbox cursor did not advance")
+                after = next_after
+
+        def online(want):
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                _, rows = call("GET", "/workers")
+                if any(w["name"] == b and w["online"] is want for w in rows.get("workers", [])):
+                    return True
+                time.sleep(0.05)
+            return False
+
+        def connect():
+            client = FakeWorker(b, token, port=port)
+            clients.append(client)
+            client.start()
+            if not client.connected.wait(5) or not online(True) or client.error:
+                raise RuntimeError("peer SSE did not connect")
+            return client
+
+        def receive(client, count):
+            return [client.wait_message(3) for _ in range(count)]
+
+        def ids(messages):
+            return [m.get("message_id") if isinstance(m, dict) else None for m in messages]
+
+        for name in (a, b, c):
+            call("POST", "/register", {"name": name})
+        first_body = payload()
+        mid = first_body["message_id"]
+        auth_routes = [("POST", "/messages", first_body),
+                       ("GET", "/messages?worker=" + quote(b), None),
+                       ("GET", "/messages/" + mid, None),
+                       ("GET", "/messages?id=" + mid, None),
+                       ("POST", "/messages/" + mid + "/ack", {"worker": b}),
+                       ("GET", "/stream?name=" + quote(b), None)]
+        checker.check("peer auth: create/inbox/id/ACK/SSE require the router token",
+                      all(http(method, base + route, body, given)[0] == 401
+                          for given in (None, "invalid-token")
+                          for method, route, body in auth_routes))
+
+        invalid = [{"message_id": "not-a-uuid"}, {"message_id": 123},
+                   {"from": []}, {"to": ""}, {"text": " \n"}, {"text": 123},
+                   {"text": "x" * 20001}, {"text": "\ud800"},
+                   {"reply_to": "not-a-uuid"}, {"deadline_s": 30}]
+        checker.check("peer validation: UUID, worker types, text/Unicode/20000 cap and no task fields",
+                      all(call("POST", "/messages", payload(**edits))[0] == 400 for edits in invalid))
+        checker.check("peer validation: sender and recipient must already be known workers",
+                      all(call("POST", "/messages", payload(**edits))[0] == 404
+                          for edits in ({"from": "unknown"}, {"to": "unknown"})))
+        checker.check("peer validation: missing/bad inbox worker, limit and cursor are rejected",
+                      all(call("GET", route)[0] == 400 for route in (
+                          "/messages", "/messages?worker=", "/messages/not-a-uuid",
+                          "/messages?worker=%s&limit=0" % quote(b),
+                          "/messages?worker=%s&limit=101" % quote(b),
+                          "/messages?worker=%s&after=-1" % quote(b),
+                          "/messages?worker=%s&after=9223372036854775808" % quote(b))))
+        checker.check("peer validation: unknown inbox/message/ACK/reply returns 404",
+                      call("GET", "/messages?worker=unknown")[0] == 404
+                      and call("GET", "/messages/" + mid)[0] == 404
+                      and call("POST", "/messages/" + mid + "/ack", {"worker": b})[0] == 404
+                      and call("POST", "/messages", payload(reply_to=mid))[0] == 404)
+
+        code, first = call("POST", "/messages", first_body)
+        first_message = first.get("message", {})
+        checker.check("peer offline create: 202 queued with explicit from/to, no deadline",
+                      code == 202 and first.get("status") == "queued"
+                      and first.get("duplicate") is False
+                      and first_message.get("from") == a and first_message.get("to") == b
+                      and first_message.get("text") == marker
+                      and first_message.get("acked_at") is None
+                      and not ({"task_id", "deadline_s", "result"} & set(first_message)))
+        code, duplicate = call("POST", "/messages", dict(reversed(list(first_body.items()))))
+        checker.check("peer exact retry: key order ignored, one durable message and stable receipt",
+                      code == 200 and duplicate.get("duplicate") is True
+                      and duplicate.get("message") == first_message and len(inbox()) == 1)
+        conflicts = [{"text": marker + " "}, {"from": c}, {"to": c},
+                     {"reply_to": None}, {"attachments": []}]
+        checker.check("peer reused UUID: changed text/from/to/optional fields -> 409, original unchanged",
+                      all(call("POST", "/messages", dict(first_body, **edits))[0] == 409
+                          for edits in conflicts)
+                      and inbox() == [first_message])
+        checker.check("peer ACK: sender or other worker cannot acknowledge the recipient's message",
+                      all(call("POST", "/messages/" + mid + "/ack", {"worker": w})[0] == 403
+                          for w in (a, c)) and inbox() == [first_message])
+
+        code, reply = call("POST", "/messages", payload(**{
+            "from": b, "to": a, "text": "explicit reply", "reply_to": mid}))
+        checker.check("peer reply_to: reverse direction of the same pair is allowed",
+                      code == 202 and reply.get("message", {}).get("reply_to") == mid)
+        call("POST", "/messages/" + reply["message_id"] + "/ack", {"worker": a})
+        checker.check("peer reply_to: third-party and self-conversation pairs are rejected",
+                      all(call("POST", "/messages", payload(**edits))[0] == 400
+                          for edits in ({"to": c, "reply_to": mid},
+                                        {"to": a, "reply_to": mid})))
+
+        image = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=")
+        sha = hashlib.sha256(image).hexdigest()
+        req = urllib.request.Request(base + "/attachments", data=image, method="POST",
+                                     headers={"X-Router-Token": token, "X-Attachment-SHA256": sha})
+        with urllib.request.urlopen(req, timeout=5) as response:
+            uploaded = json.loads(response.read())["attachment"]
+        attached_body = payload(attachments=[{"id": sha, "name": "../../peer.png"}])
+        code, attached = call("POST", "/messages", attached_body)
+        attached_message = attached.get("message", {})
+        image_meta = attached_message.get("attachments", [{}])[0]
+        bare_code, bare = call("POST", "/messages", payload(attachments=[sha]))
+        checker.check("peer attachments: uploaded ids resolve to trusted metadata, display name sanitized",
+                      code == bare_code == 202 and image_meta == dict(uploaded, name="peer.png")
+                      and image_meta.get("path") == "/attachments/" + sha
+                      and bare.get("message", {}).get("attachments") == [uploaded])
+        bad_attachments = [None, {}, ["0" * 64], ["../secret"], [{"image_path": "/tmp/no.png"}],
+                           [{"id": sha, "path": "/etc/passwd"}], [{"id": sha, "size": 1}],
+                           [{"id": sha, "name": 1}], [{"id": sha, "name": "\ud800"}],
+                           [sha] * 11]
+        checker.check("peer attachments: unknown ids, arbitrary paths, forged metadata and invalid lists rejected",
+                      all(call("POST", "/messages", payload(attachments=value))[0] == 400
+                          for value in bad_attachments))
+        checker.check("peer attachment payload changes conflict instead of mutating stored metadata",
+                      call("POST", "/messages", dict(attached_body, attachments=[sha]))[0] == 409)
+
+        # Exceed both the HTTP byte budget and the stream's 32-event buffer.
+        for _ in range(5):
+            call("POST", "/messages", payload(text="\U0001f40e" * 20000))
+        for index in range(40):
+            call("POST", "/messages", payload(text="backlog-%02d" % index))
+        all_pending = inbox()
+        _, page = call("GET", "/messages?worker=" + quote(b))
+        _, one = call("GET", "/messages?worker=%s&limit=1" % quote(b))
+        checker.check("peer inbox: Unicode boundary accepted, bounded byte/count pages lose no queued rows",
+                      len(all_pending) == 48 and len(json.dumps(page, ensure_ascii=False).encode()) <= 256 * 1024
+                      and page.get("has_more") is True and one.get("count") == 1
+                      and one.get("next_after") == first_message.get("seq")
+                      and [m["seq"] for m in all_pending] == sorted(m["seq"] for m in all_pending))
+        stream = connect()
+        received = receive(stream, len(all_pending))
+        checker.check("peer SSE attach: offline inbox replays in seq order beyond the prefetch buffer",
+                      received == all_pending and not stream.error)
+        checker.check("peer SSE delivery remains queued until explicit ACK; no automatic reply/task",
+                      inbox() == all_pending and stream.wait_task(0.2) is None
+                      and call("GET", "/tasks")[1].get("count") == 0)
+        code, _ = call("POST", "/messages", first_body)
+        checker.check("peer exact retry while connected emits no extra worker_message",
+                      code == 200 and stream.wait_message(0.3) is None)
+        live_body = payload(text="live peer message")
+        code, live = call("POST", "/messages", live_body)
+        checker.check("peer live create: worker_message carries full sender/recipient and stays queued",
+                      code == 202 and stream.wait_message(3) == live.get("message")
+                      and call("GET", "/messages/" + live["message_id"])[1].get("status") == "queued")
+
+        code, accepted = call("POST", "/messages/" + mid + "/ack", {"worker": b})
+        code2, again = call("POST", "/messages/" + mid + "/ack", {"worker": b})
+        checker.check("peer recipient ACK: accepted is idempotent with an unchanged receipt timestamp",
+                      code == code2 == 200 and accepted.get("status") == "accepted"
+                      and accepted.get("already") is False and again.get("already") is True
+                      and accepted.get("message") == again.get("message")
+                      and accepted.get("message", {}).get("acked_at") is not None
+                      and mid not in ids(inbox()))
+        checker.check("peer accepted message: wrong worker still forbidden, sender can query by path or id",
+                      call("POST", "/messages/" + mid + "/ack", {"worker": a})[0] == 403
+                      and call("GET", "/messages/" + mid)[1].get("message") == accepted["message"]
+                      and call("GET", "/messages?id=" + mid)[1].get("message") == accepted["message"])
+
+        # Replace a live stream while new creates race with attach/replay.
+        race_bodies = [payload(text="attach-race-%d" % n) for n in range(8)]
+        gate = threading.Barrier(2)
+        race_codes = []
+
+        def race_create():
+            gate.wait(timeout=5)
+            for body in race_bodies:
+                race_codes.append(call("POST", "/messages", body)[0])
+
+        writer = threading.Thread(target=race_create, daemon=True)
+        writer.start()
+        gate.wait(timeout=5)
+        replacement = connect()
+        writer.join(5)
+        stream.join(3)
+        expected = inbox()
+        replayed = receive(replacement, len(expected))
+        checker.check("peer SSE replacement/create race: complete ordered replay, no duplicates or stale detach",
+                      not writer.is_alive() and race_codes == [202] * 8
+                      and replayed == expected and not stream.is_alive() and online(True)
+                      and replacement.wait_message(0.2) is None and mid not in ids(replayed))
+        replacement.stop()
+        checker.check("peer disconnect: pending inbox persists independently of stream/subscription lifetime",
+                      online(False) and inbox() == expected
+                      and call("GET", "/subscriptions")[1].get("count") == 0)
+        offline_body = payload(text="offline before process restart")
+        code, offline = call("POST", "/messages", offline_body)
+        before_restart = inbox()
+        checker.check("peer offline enqueue is immediately durable in SQLite",
+                      code == 202 and offline.get("status") == "queued"
+                      and ids(before_restart)[-1] == offline_body["message_id"])
+        with sqlite3.connect(str(db)) as saved:
+            row = saved.execute("SELECT acked_at, attachments_json FROM peer_messages WHERE message_id=?",
+                                (attached["message_id"],)).fetchone()
+            checker.check("peer SQLite stores pending image metadata without source paths",
+                          row is not None and row[0] is None and json.loads(row[1]) == [image_meta])
+
+        # Kill only this throwaway process to prove committed rows survive a
+        # process crash, not just reconnect or an orderly store close.
+        proc.kill()
+        proc.wait(timeout=5)
+        output.close()
+        proc, output = start_process(argv, work / "peer-restarted.out")
+        if not wait_http(base + "/health"):
+            raise RuntimeError("peer router restart failed: " + tail(log_path))
+        checker.check("peer process restart: queued inbox and accepted rows survive with the same identities",
+                      inbox() == before_restart
+                      and call("GET", "/messages/" + mid)[1].get("message") == accepted["message"])
+        code, retried = call("POST", "/messages", first_body)
+        checker.check("peer idempotency survives restart and returns current accepted status",
+                      code == 200 and retried.get("duplicate") is True
+                      and retried.get("status") == "accepted"
+                      and call("POST", "/messages", dict(first_body, text="changed after restart"))[0] == 409
+                      and call("POST", "/messages", attached_body)[1].get("message") == attached_message)
+        restarted = connect()
+        checker.check("peer restart SSE replay: every unacked message once, accepted message excluded",
+                      receive(restarted, len(before_restart)) == before_restart
+                      and restarted.wait_message(0.2) is None)
+        req = urllib.request.Request(base + image_meta["path"], headers={"X-Router-Token": token})
+        with urllib.request.urlopen(req, timeout=5) as response:
+            downloaded = response.read()
+        checker.check("peer uploaded image bytes and trusted metadata survive restart",
+                      downloaded == image
+                      and call("GET", "/messages/" + attached["message_id"])[1].get("message") == attached_message)
+        ack_codes = [call("POST", "/messages/" + m["message_id"] + "/ack", {"worker": b})[0]
+                     for m in before_restart]
+        empty_stream = connect()
+        checker.check("peer ACK drains inbox durably; reconnect produces no messages or implicit task results",
+                      all(code == 200 for code in ack_codes) and inbox() == []
+                      and empty_stream.wait_message(0.3) is None and empty_stream.wait_task(0.2) is None
+                      and call("GET", "/tasks")[1].get("count") == 0
+                      and call("GET", "/subscriptions")[1].get("count") == 0)
+        logs = log_path.read_text(encoding="utf-8")
+        checker.check("peer logging: message bodies and authentication tokens never appear",
+                      marker not in logs and token not in logs
+                      and max(map(len, logs.splitlines()), default=0) < 2000)
+    finally:
+        for client in clients:
+            client.stop()
+        if proc.poll() is None:
+            proc.terminate()
+            proc.wait(timeout=5)
+        output.close()
+
+
+def workorders_selftest(checker, work, trigger_url, trigger_token):
+    """Use a legacy DB and a throwaway process; leave all other routers alone."""
+    port = free_port()
+    base = "http://127.0.0.1:%d" % port
+    db = work / "workorders.db"
+    token_path = work / "workorders.token"
+    log_path = work / "workorders.log"
+    with sqlite3.connect(str(db)) as saved:
+        saved.executescript("""
+            CREATE TABLE tasks (
+                task_id TEXT PRIMARY KEY, worker TEXT NOT NULL, goal TEXT NOT NULL,
+                context TEXT, workspace TEXT, urgency TEXT DEFAULT 'normal',
+                state TEXT DEFAULT 'queued', created_at REAL, started_at REAL,
+                finished_at REAL, result_json TEXT
+            );
+            INSERT INTO tasks (task_id, worker, goal, state, created_at)
+                VALUES ('t-legacy', 'workorders', 'legacy formal task', 'done', 1);
+        """)
+    argv = [PY, str(ROUTER), "--port", str(port), "--db", str(db),
+            "--token-file", str(token_path), "--lock", str(work / "workorders.lock"),
+            "--log", str(log_path), "--trigger-url", trigger_url + "/trigger",
+            "--trigger-token-file", str(trigger_token), "--ping-interval", "0.2",
+            "--backlog-max", "2"]
+    proc, output = start_process(argv, work / "workorders.out")
+    clients = []
+    name = "workorders"
+    try:
+        if not wait_http(base + "/health"):
+            raise RuntimeError("workorders router did not start: " + tail(log_path))
+        token = token_path.read_text(encoding="utf-8").strip()
+
+        def call(method, route, body=None):
+            return http(method, base + route, body, token)
+
+        def online(want):
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                _, rows = call("GET", "/workers")
+                if any(w["name"] == name and w["online"] is want
+                       for w in rows.get("workers", [])):
+                    return True
+                time.sleep(0.05)
+            return False
+
+        def connect():
+            client = FakeWorker(name, token, port=port)
+            clients.append(client)
+            client.start()
+            if not client.connected.wait(5) or not online(True) or client.error:
+                raise RuntimeError("workorders SSE did not connect")
+            return client
+
+        def get_task(task_id):
+            return call("GET", "/tasks/" + task_id)[1].get("task", {})
+
+        def finish(task_id):
+            return call("POST", "/result", {"name": name, "task_id": task_id,
+                        "status": "done", "summary": "formal task completed"})
+
+        def receipt(code, result, task_id):
+            return (code == 200 and result.get("ok") is True
+                    and result.get("task_id") == task_id
+                    and result.get("duplicate") is True
+                    and result.get("dispatched") is False
+                    and result.get("execution_mode") == "goal")
+
+        call("POST", "/register", {"name": name})
+        call("POST", "/register", {"name": "other-workorders"})
+        with sqlite3.connect(str(db)) as saved:
+            columns = {row[1] for row in saved.execute("PRAGMA table_info(tasks)")}
+            indexes = {row[1]: row[2] for row in saved.execute("PRAGMA index_list(tasks)")}
+        legacy = get_task("t-legacy")
+        checker.check("workorders migration: legacy task survives, nullable keys and unique index added",
+                      {"deadline_s", "request_id", "request_fingerprint"} <= columns
+                      and indexes.get("idx_tasks_request_id") == 1
+                      and legacy.get("goal") == "legacy formal task"
+                      and legacy.get("execution_mode") == "goal"
+                      and legacy.get("deadline_s") is None
+                      and legacy.get("deadline_at") is None)
+
+        plain = {"worker": name, "goal": "legacy client", "queue_if_offline": True}
+        checker.check("workorders reject chat and all non-goal execution modes (including null)",
+                      all(call("POST", "/tasks", dict(plain, execution_mode=mode))[0] == 400
+                          for mode in ("chat", "Goal", " goal ", "", None, False, 1, {}, [])))
+        checker.check("workorders optional message_id must be a UUID when present",
+                      all(call("POST", "/tasks", dict(plain, message_id=value))[0] == 400
+                          for value in (None, "", "not-a-uuid", 123, {}, [], uuid.uuid4().hex))
+                      and call("GET", "/tasks")[1].get("count") == 1)
+        old1_code, old1 = call("POST", "/tasks", plain)
+        old2_code, old2 = call("POST", "/tasks", plain)
+        with sqlite3.connect(str(db)) as saved:
+            old_keys = saved.execute(
+                "SELECT request_id, request_fingerprint FROM tasks WHERE task_id IN (?, ?)",
+                (old1.get("task_id"), old2.get("task_id"))).fetchall()
+        checker.check("workorders old clients: identical requests without UUID remain separate tasks",
+                      old1_code == old2_code == 202 and old1.get("task_id") != old2.get("task_id")
+                      and old1.get("execution_mode") == old2.get("execution_mode") == "goal"
+                      and old_keys == [(None, None), (None, None)])
+        for task in (old1, old2):
+            call("POST", "/tasks/" + task["task_id"] + "/cancel")
+
+        refused_body = {"worker": name, "goal": "online only", "message_id": str(uuid.uuid4())}
+        refused_code, refused = call("POST", "/tasks", refused_body)
+        with sqlite3.connect(str(db)) as saved:
+            reserved = saved.execute("SELECT COUNT(*) FROM tasks WHERE request_id=?",
+                                     (refused_body["message_id"],)).fetchone()[0]
+        checker.check("workorders rejected offline creation does not reserve its UUID",
+                      refused_code == 409 and refused.get("error") == "worker_offline" and reserved == 0)
+
+        body = {"worker": name, "goal": "definite project", "message_id": str(uuid.uuid4()),
+                "context": {"project": "router", "criteria": ["persist", "dispatch once"]},
+                "workspace": "/tmp/workorders", "queue_if_offline": True, "urgency": "normal"}
+        gate = threading.Barrier(8)
+        results = []
+
+        def create():
+            gate.wait(timeout=5)
+            results.append(call("POST", "/tasks", body))
+
+        writers = [threading.Thread(target=create, daemon=True) for _ in range(8)]
+        for writer in writers:
+            writer.start()
+        for writer in writers:
+            writer.join(6)
+        task_ids = {result.get("task_id") for _, result in results}
+        if not checker.check("workorders concurrent UUID retries: one create, seven duplicates, one task_id",
+                             all(not writer.is_alive() for writer in writers)
+                             and sorted(code for code, _ in results) == [200] * 7 + [202]
+                             and len(task_ids) == 1 and None not in task_ids,
+                             "results=%s" % results):
+            raise RuntimeError("workorder concurrent creation failed")
+        task_id = next(iter(task_ids))
+        reordered = dict(reversed(list(body.items())))
+        reordered["context"] = dict(reversed(list(body["context"].items())))
+        checker.check("workorders JSON key order and UUID letter case do not change identity",
+                      receipt(*call("POST", "/tasks", reordered), task_id)
+                      and receipt(*call("POST", "/tasks", dict(body, message_id=body["message_id"].upper())), task_id))
+        changes = ({"goal": "changed"}, {"worker": "other-workorders"}, {"context": {}},
+                   {"workspace": "/elsewhere"}, {"urgency": "urgent"},
+                   {"queue_if_offline": False}, {"execution_mode": "goal"},
+                   {"execution_mode": "chat"}, {"deadline_s": 30}, {"extra": True})
+        checker.check("workorders changed payload under the same UUID always conflicts (409)",
+                      all(call("POST", "/tasks", dict(body, **edits))[0] == 409 for edits in changes)
+                      and get_task(task_id).get("goal") == body["goal"])
+
+        explicit_body = {"worker": name, "goal": "explicit deadline", "message_id": str(uuid.uuid4()),
+                         "execution_mode": "goal", "deadline_s": 7.5, "queue_if_offline": True}
+        code, explicit = call("POST", "/tasks", explicit_body)
+        explicit_id = explicit.get("task_id")
+        overflow_code, overflow = call("POST", "/tasks", plain)
+        checker.check("workorders duplicate bypasses full backlog without reserving another slot",
+                      code == 202 and explicit.get("execution_mode") == "goal"
+                      and overflow_code == 429 and overflow.get("error") == "backlog_full"
+                      and receipt(*call("POST", "/tasks", body), task_id)
+                      and call("GET", "/tasks?state=queued")[1].get("count") == 2)
+        with sqlite3.connect(str(db)) as saved:
+            persisted = saved.execute(
+                "SELECT task_id, request_id, request_fingerprint, deadline_s FROM tasks"
+                " WHERE request_id IS NOT NULL ORDER BY rowid").fetchall()
+        checker.check("workorders SQLite commits UUID and fingerprint with each task row",
+                      len(persisted) == 2 and [row[0] for row in persisted] == [task_id, explicit_id]
+                      and [row[1] for row in persisted] == [body["message_id"], explicit_body["message_id"]]
+                      and all(isinstance(row[2], str) and len(row[2]) == 64 for row in persisted)
+                      and persisted[0][3] is None and persisted[1][3] == 7.5)
+        default_task, timed_task = get_task(task_id), get_task(explicit_id)
+        _, listing = call("GET", "/tasks")
+        checker.check("workorders no wall-time default; only an explicit deadline_s creates deadline_at",
+                      default_task.get("deadline_s") is None and default_task.get("deadline_at") is None
+                      and timed_task.get("deadline_s") == 7.5
+                      and timed_task.get("deadline_at") == timed_task.get("created_at") + 7.5
+                      and all(task.get("execution_mode") == "goal" for task in listing.get("tasks", [])))
+
+        stream = connect()
+        delivered = [stream.wait_task(3), stream.wait_task(3)]
+        checker.check("workorders SSE emits formal goal mode and preserves explicit/absent deadlines",
+                      [task and task.get("task_id") for task in delivered] == [task_id, explicit_id]
+                      and all(task and task.get("execution_mode") == "goal" for task in delivered)
+                      and delivered[0].get("deadline_s") is None and delivered[0].get("deadline_at") is None
+                      and delivered[1].get("deadline_s") == 7.5)
+        checker.check("workorders live retry returns original task_id without another SSE dispatch",
+                      receipt(*call("POST", "/tasks", body), task_id) and stream.wait_task(0.3) is None)
+        stream.stop()
+        checker.check("workorders offline retry after disconnect retains the same queued task",
+                      online(False) and receipt(*call("POST", "/tasks", body), task_id)
+                      and get_task(task_id).get("state") == "queued")
+        reconnected = connect()
+        replayed = [reconnected.wait_task(3), reconnected.wait_task(3)]
+        checker.check("workorders reconnect replays original IDs once; HTTP retries add no dispatch",
+                      [task and task.get("task_id") for task in replayed] == [task_id, explicit_id]
+                      and receipt(*call("POST", "/tasks", body), task_id)
+                      and receipt(*call("POST", "/tasks", explicit_body), explicit_id)
+                      and reconnected.wait_task(0.3) is None)
+        finish_code, _ = finish(task_id)
+        code, completed = call("POST", "/tasks", body)
+        checker.check("workorders retry after completion returns the same terminal task",
+                      finish_code == 200 and receipt(code, completed, task_id)
+                      and completed.get("state") == "done" and reconnected.wait_task(0.2) is None)
+
+        # Crash this test process while the second task is running. The task
+        # row and creation identity must survive together, before reconnect.
+        proc.kill()
+        proc.wait(timeout=5)
+        reconnected.stop()
+        output.close()
+        proc, output = start_process(argv, work / "workorders-restarted.out")
+        if not wait_http(base + "/health"):
+            raise RuntimeError("workorders router restart failed: " + tail(log_path))
+        checker.check("workorders process restart preserves UUIDs, fingerprints and original task IDs",
+                      receipt(*call("POST", "/tasks", body), task_id)
+                      and receipt(*call("POST", "/tasks", explicit_body), explicit_id)
+                      and get_task(task_id).get("state") == "done"
+                      and get_task(explicit_id).get("state") == "queued"
+                      and call("POST", "/tasks", dict(body, goal="changed after restart"))[0] == 409
+                      and call("GET", "/tasks")[1].get("count") == 5)
+        with sqlite3.connect(str(db)) as saved:
+            after_restart = saved.execute(
+                "SELECT task_id, request_id, request_fingerprint, deadline_s FROM tasks"
+                " WHERE request_id IS NOT NULL ORDER BY rowid").fetchall()
+        checker.check("workorders migration is repeatable and restart does not change persisted creation data",
+                      after_restart == persisted and get_task("t-legacy") == legacy)
+        restarted = connect()
+        replay = restarted.wait_task(3)
+        checker.check("workorders restart dispatches only the original unfinished task, never its completed peer",
+                      replay is not None and replay.get("task_id") == explicit_id
+                      and replay.get("execution_mode") == "goal"
+                      and receipt(*call("POST", "/tasks", explicit_body), explicit_id)
+                      and restarted.wait_task(0.3) is None)
+        finish(explicit_id)
+        code, accepted = call("POST", "/tasks", refused_body)
+        accepted_task = restarted.wait_task(3)
+        checker.check("workorders UUID from a refused request remains usable for immediate online dispatch",
+                      code == 200 and accepted.get("dispatched") is True
+                      and accepted_task is not None and accepted_task.get("task_id") == accepted.get("task_id")
+                      and accepted_task.get("execution_mode") == "goal"
+                      and accepted_task.get("deadline_s") is None and accepted_task.get("deadline_at") is None)
+        restarted.stop()
+        checker.check("workorders exact retry bypasses offline refusal even without queue_if_offline",
+                      online(False) and receipt(*call("POST", "/tasks", refused_body), accepted["task_id"])
+                      and get_task(accepted["task_id"]).get("state") == "queued")
+    finally:
+        for client in clients:
+            client.stop()
+        if proc.poll() is None:
+            proc.terminate()
+            proc.wait(timeout=5)
+        output.close()
+        if checker.failed:
+            print("\n--- workorders log (tail) ---\n" + tail(log_path), flush=True)
 
 
 def control_selftest(checker, token, workers):
@@ -475,7 +1034,7 @@ def run(work: Path, checker: Checker) -> None:
         checker.check(
             "GET /health (no token): ok, version, workers, tasks",
             status == 200 and health.get("ok") is True
-            and health.get("version") == "0.3.1"
+            and health.get("version") == "0.4.0"
             and health.get("workers") == 0 and health.get("tasks") == 0,
             "status=%s body=%s" % (status, health))
 
@@ -1430,6 +1989,8 @@ def run(work: Path, checker: Checker) -> None:
                 pass
 
         control_selftest(checker, token, workers)
+        peer_selftest(checker, work, trigger_url, trigger_token)
+        workorders_selftest(checker, work, trigger_url, trigger_token)
 
         for worker_obj in workers:
             worker_obj.stop()
