@@ -94,3 +94,8 @@
 - prepare只将三个所需模块与启动器写入本机内容寻址私有目录，不启动进程或改环境；旧源码移除不再导致入口悬空。已有文件内容不符明确拒绝，不覆盖。
 - Mac Node22定向77 tests /76 pass /0 fail /1平台skip（/tmp/desktop-connection-mac-node22.tap）；Mac Node26新增16/16（/tmp/desktop-connection-mac-node26.tap）。真实只读父链探针确认当前Desktop PID42377；不等同于实际Desktop重开验收。
 - 共享后台55381和主会话保持，未重启DSH/router/gateway。下一步安装新适配并正常重开Desktop，确认接回原后台后再交接旧receiver；Windows实际Desktop仍待上线验收。
+
+- 适配源码fc35e1a与技能分发682e947均已推送并核对远端。实际正常plugin add刷新后129文件逐字节匹配，分发包适配16/16、Skill is valid，本地技能同步。
+- 已从受管包的prepare正常生成本机私有desktop-connection/710c6ed6…/codex（四文件，sh/node语法检查通过），备份旧环境至desktop-connection-activation.backup.local.json，正常launchctl setenv将下一次Desktop入口指向它；未启动或关闭任何已有进程。旧连接器仍保留可恢复。
+- 目前仍是Desktop42377/私有app-server42768与共享后台55381，修复只在下一次正常完整退出/重开Desktop后生效。autoStart仍false，旧receiver继续临时收信，不将文件安装称为新生命周期已接管。
+- 新CI43475103068：Mac22排队，Mac26/Windows22/Windows26运行中，不能套用前一提交全绿结果。下一步先等正常Desktop重开，核对原会话/实际后台/插件工具，再交接旧receiver；目标保持active。
