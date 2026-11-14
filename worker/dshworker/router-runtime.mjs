@@ -169,8 +169,11 @@ export async function startRouterRuntime({ manager, nativeCall, transport = {}, 
         const saved = await receipt(messageId);
         const nativeProgress = manager.taskProgress?.get(threadId)?.lastProgressAt;
         if (nativeProgress > watch.lastProgressAt) watch.lastProgressAt = nativeProgress;
-        if (saved?.error && !["accepted", "unknown"].includes(saved.nativeDispatch?.status))
-          throw new Error(saved.error.detail ?? "客户端暂未接收任务，请保持客户端打开并检查连接后重试当前工单。");
+        if (saved?.error && !["accepted", "unknown"].includes(saved.nativeDispatch?.status)) {
+          log("warn", "router_task_input_rejected", { threadId, messageId,
+            code: saved.error.error, detail: saved.error.detail });
+          throw new Error("客户端暂未接收任务，请保持客户端打开并检查原会话的连接后重试当前工单。");
+        }
         const session = manager.state.sessions[threadId];
         if (session?.queue?.some(request => request.messageId === messageId)) {
           watch.touch(); await sleep(500); continue;

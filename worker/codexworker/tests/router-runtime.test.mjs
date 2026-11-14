@@ -261,6 +261,30 @@ test("task result reads tolerate unavailable old inputs after native acceptance"
   assert.equal(manager.writes.length, 1);
 });
 
+test("a queued input rejected later gives actionable guidance and keeps native diagnostics in the log", async t => {
+  const detail = "Native send_message_to_thread failed; inspect the Desktop task before retrying.";
+  const { router, manager, logs } = await setup(t, manager => {
+    manager.message = async request => {
+      manager.writes.push(request);
+      manager.state.receipts[request.messageId] = {
+        request: structuredClone(request), nativeDispatch: { status: "canceled" },
+        error: { error: "native_tool_failed", detail },
+      };
+      return { action: "message_queued" };
+    };
+  });
+  router.push({ task_id: "t-queued-rejection", goal: "wait for delivery" });
+  await until(() => router.results.length === 1);
+  assert.equal(router.results[0].status, "failed");
+  assert.match(router.results[0].summary, /客户端暂未接收任务/);
+  assert.match(router.results[0].summary, /检查原会话的连接后重试当前工单/);
+  assert.doesNotMatch(router.results[0].summary, /Native send_message_to_thread failed/);
+  assert.equal(manager.writes.length, 1);
+  assert.equal(manager.reads.length, 0);
+  assert.ok(logs.some(row => row.event === "router_task_input_rejected" &&
+    row.fields.code === "native_tool_failed" && row.fields.detail === detail));
+});
+
 test("heartbeat exposes trainer activity and clears a finished task identity", async t => {
   const { manager, runtime, router } = await setup(t);
   manager.state.sessions['thread-1'].activeTurnId = 'trainer-turn';
