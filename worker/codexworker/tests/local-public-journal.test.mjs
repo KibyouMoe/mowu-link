@@ -105,7 +105,10 @@ test("device-renumbered cursors still reject inode/creation changes and truncati
   const f = await fixture(t); await appendFile(f.file, line(text("public")));
   const { checkpoint } = await f.reader.read(f.session, null, f.ctx);
   for (const index of [1, 2]) {
-    const parts = checkpoint.identity.split(":"); parts[0] = String(Number(parts[0]) + 1); parts[index] = String(Number(parts[index]) + 1);
+    const parts = checkpoint.identity.split(":"); parts[0] = String(Number(parts[0]) + 1);
+    // Windows file IDs can exceed Number.MAX_SAFE_INTEGER. Keep the persisted
+    // inode as an exact decimal string when constructing a different identity.
+    parts[index] = index === 1 ? String(BigInt(parts[index]) + 1n) : String(Number(parts[index]) + 1);
     await assert.rejects(new LocalPublicJournal(f.root).read(f.session, { ...checkpoint, identity: parts.join(":") }, f.ctx), /replaced/);
   }
   const parts = checkpoint.identity.split(":"); parts[0] = String(Number(parts[0]) + 1);
