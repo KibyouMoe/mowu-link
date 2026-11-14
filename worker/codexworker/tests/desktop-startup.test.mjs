@@ -32,6 +32,7 @@ async function fixture(t) {
   return { stateDir, owner, env, file, installs, reopens, launcher, options,
     engineExited: () => { engineExited = true; },
     run: extra => ensureDesktopStartup({ ...options, ...extra }),
+    outcome: async () => JSON.parse(await readFile(file + ".outcome.json", "utf8")),
     record: async () => JSON.parse(await readFile(file, "utf8")) };
 }
 
@@ -94,8 +95,10 @@ test("only a current primary native controller confirms restoration after normal
   const env = { ...f.env, CODEXWORKER_NATIVE_IMAGE_INPUT: "1", CODEXWORKER_NATIVE_QUESTION_INPUT: "1",
     CODEXWORKER_NATIVE_INPUT_DESCRIPTOR: descriptor };
   const result = await f.run({ env, readChain: async pid => pid === 702 ? [{ pid: 702 }, owner] : [owner] });
-  assert.equal(result.restarting, false); assert.equal((await f.record()).status, "restored");
-  assert.equal((await f.record()).restoredDesktopPid, 701); assert.equal(f.reopens.length, 1);
+  assert.equal(result.restarting, false);
+  const observation = JSON.parse(await readFile(f.file + ".restored.json", "utf8"));
+  assert.equal(observation.status, "restored"); assert.equal(observation.desktopPid, 701);
+  assert.equal(f.reopens.length, 1);
 });
 
 test("normal reopening checks the exact owner, stops on declined quit and launches the same app with explicit environment", async t => {
@@ -104,15 +107,34 @@ test("normal reopening checks the exact owner, stops on declined quit and launch
     execute: async (command, args) => { calls.push({ command, args }); f.engineExited(); return {}; } });
   assert.deepEqual(calls[1], { command: "/usr/bin/open", args: ["-a", "/Applications/ChatGPT.app", "--env", "CODEX_CLI_PATH=" + f.launcher,
     "--env", "CODEXWORKER_STATE_DIR=" + f.stateDir] });
-  assert.equal((await f.record()).status, "opened");
+  assert.equal((await f.outcome()).status, "opened");
   const declined = await fixture(t); await declined.run(); let writes = 0;
   await assert.rejects(reopenDesktop(declined.file, { platform: "darwin", readChain: declined.options.readChain,
     execute: async () => { writes++; throw Error("normal quit declined"); } }), /declined/);
-  assert.equal(writes, 1); assert.equal((await declined.record()).status, "failed");
-  assert.equal((await declined.record()).detail, "normal quit declined");
+  assert.equal(writes, 1); assert.equal((await declined.outcome()).status, "failed");
+  assert.equal((await declined.outcome()).detail, "normal quit declined");
+  assert.equal((await declined.run()).restarting, false);
+  assert.equal((await declined.record()).status, "failed");
   const changed = await fixture(t); await changed.run();
   await assert.rejects(reopenDesktop(changed.file, { platform: "darwin", readChain: async () => [],
     execute: () => assert.fail("owner mismatch must not operate an app") }), /owner_changed/);
+});
+
+test("a late launch error cannot overwrite the new host's verified native restoration", async t => {
+  const f = await fixture(t); await f.run();
+  const owner = { ...f.owner, pid: 701, startedAt: "reopened Desktop lifetime" };
+  const descriptor = path.join(f.stateDir, "restored-input.json");
+  await writeFile(descriptor, JSON.stringify({ version: 1, desktopOwner: owner, controllerPid: 702 }), { mode: 0o600 });
+  const live = { env: { ...f.env, CODEXWORKER_NATIVE_IMAGE_INPUT: "1", CODEXWORKER_NATIVE_QUESTION_INPUT: "1",
+    CODEXWORKER_NATIVE_INPUT_DESCRIPTOR: descriptor }, readChain: async pid => pid === 702 ? [{ pid: 702 }, owner] : [owner] };
+  await assert.rejects(reopenDesktop(f.file, { platform: "darwin", readChain: f.options.readChain,
+    execute: async command => {
+      f.engineExited();
+      if (command === "/usr/bin/open") { await f.run(live); throw Error("late LaunchServices response error"); }
+    } }), /late LaunchServices/);
+  assert.equal((await f.outcome()).status, "failed");
+  assert.equal(JSON.parse(await readFile(f.file + ".restored.json", "utf8")).status, "restored");
+  assert.equal((await f.run(live)).nativeInputReady, true); assert.equal(f.reopens.length, 1);
 });
 
 test("disabling during setup or before normal reopen cancels the host operation", async t => {

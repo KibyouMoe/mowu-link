@@ -74,14 +74,25 @@ export async function ensureDesktopStartup({ stateDir, env = process.env, platfo
   let previous = await readJson(file);
   if (previous) previous = await privateRecord(file);
   if (await inputReady(env, owner, readChain)) {
-    if (previous && previous.status !== "restored") await save(file, { ...previous,
-      status: "restored", restoredDesktopPid: owner.pid, restoredAt: new Date().toISOString() });
+    // Observation belongs to the new host; the old helper owns its outcome.
+    // Separate receipts keep a late launcher result from overwriting readiness.
+    if (previous) {
+      const observedFile = file + ".restored.json", observed = await readJson(observedFile);
+      if (observed?.desktopPid !== owner.pid || observed.desktopStartedAt !== owner.startedAt)
+        await save(observedFile, { status: "restored", desktopPid: owner.pid,
+          desktopStartedAt: owner.startedAt, observedAt: new Date().toISOString() });
+    }
     return { restarting: false, nativeInputReady: true };
   }
   if (previous) {
     if (previous.desktopPid !== owner.pid || previous.desktopStartedAt !== owner.startedAt)
       return { restarting: false, error: "desktop_startup_reopen_unconfirmed" };
     if (pending.has(previous.status)) {
+      const outcome = await readJson(file + ".outcome.json");
+      if (outcome?.status === "failed") {
+        await save(file, { ...previous, status: "failed", error: outcome.error });
+        return { restarting: false, error: outcome.error };
+      }
       const pid = previous.status === "reopening" ? previous.helperPid : previous.creatorPid;
       const startedAt = previous.status === "reopening" ? previous.helperStartedAt : previous.creatorStartedAt;
       let actor;
@@ -198,10 +209,9 @@ export async function reopenDesktop(file, { platform = process.platform, readCha
       "--env", "CODEXWORKER_STATE_DIR=" + record.stateDir,
       ...(record.codexHome ? ["--env", "CODEX_HOME=" + record.codexHome] : [])],
       { timeout: 15000, maxBuffer: 65536 });
-    const latest = await privateRecord(file);
-    if (latest.status !== "restored") await save(file, { ...latest, status: "opened", openedAt: new Date().toISOString() });
+    await save(file + ".outcome.json", { status: "opened", openedAt: new Date().toISOString() });
   } catch (error) {
-    await save(file, { ...record, status: "failed", error: "desktop_normal_reopen_failed", operation,
+    await save(file + ".outcome.json", { status: "failed", error: "desktop_normal_reopen_failed", operation,
       detail: String(error.stderr || error.message || error.code).slice(0, 2000) });
     throw error;
   }
