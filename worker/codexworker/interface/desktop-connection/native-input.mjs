@@ -8,7 +8,7 @@ import path from "node:path";
 const MAX_REQUEST_BYTES = 128 * 1024;
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const digest = value => createHash("sha256").update(value).digest("hex");
-const invalid = code => { throw Object.assign(new Error(code), { code }); };
+const invalid = (code, nativeImageOutcome) => { throw Object.assign(new Error(code), { code, nativeImageOutcome }); };
 const equalToken = (left, right) => typeof left === "string" && /^[0-9a-f]{64}$/.test(left) &&
   timingSafeEqual(Buffer.from(left), Buffer.from(right));
 
@@ -47,7 +47,7 @@ export async function createNativeInput({ stateDir, owner, send, timeoutMs = 300
     if (!state.sessions?.[request.threadId] || ![undefined, null, "local"].includes(state.sessions[request.threadId].hostId) ||
         state.selectedThreadId !== request.threadId ||
         receipt?.request?.source !== "trainer" || receipt.nativeTargetThreadId !== request.threadId ||
-        receipt.nativeInputHash !== digest(request.prompt) || receipt.nativeDispatch?.status !== "dispatching" ||
+        receipt.nativeInputHash !== digest(JSON.stringify(request.prompt)) || receipt.nativeDispatch?.status !== "dispatching" ||
         !/^om_[A-Za-z0-9_-]+$/.test(feishu?.incomingMessageId ?? "") || feishu.imageThreadId !== request.threadId ||
         JSON.stringify(feishu.nativeImagePaths) !== JSON.stringify(request.images)) invalid("native_image_receipt_mismatch");
     const cache = await realpath(path.join(stateDir, "feishu-images"));
@@ -74,11 +74,13 @@ export async function createNativeInput({ stateDir, owner, send, timeoutMs = 300
     await mkdir(ledger, { recursive: true, mode: 0o700 });
     const file = path.join(ledger, request.messageId + ".json");
     let previous;
-    try { previous = JSON.parse(await readFile(file, "utf8")); } catch (error) { if (error.code !== "ENOENT") throw error; }
+    try { previous = JSON.parse(await readFile(file, "utf8")); }
+    catch (error) { if (error.code !== "ENOENT") { error.nativeImageOutcome = "unknown"; throw error; } }
     if (previous) {
       if (previous.fingerprint !== fingerprint) invalid("native_image_message_conflict");
       if (previous.status === "accepted") return previous.result;
-      invalid(previous.status === "rejected" ? "native_image_rejected" : "native_image_outcome_unknown");
+      invalid(previous.status === "rejected" ? "native_image_rejected" : "native_image_outcome_unknown",
+        previous.status === "rejected" ? "rejected" : "unknown");
     }
     await validate(request);
     if (closed || !initialized) invalid("native_input_not_ready");
@@ -104,11 +106,14 @@ export async function createNativeInput({ stateDir, owner, send, timeoutMs = 300
       return record.result;
     } catch (error) {
       record.status = error.nativeRejected ? "rejected" : "unknown";
+      error.nativeImageOutcome = record.status;
       throw error;
     } finally {
       const temporary = file + "." + randomUUID() + ".tmp";
-      await writeFile(temporary, JSON.stringify(record) + "\n", { flag: "wx", mode: 0o600 });
-      await rename(temporary, file);
+      try {
+        await writeFile(temporary, JSON.stringify(record) + "\n", { flag: "wx", mode: 0o600 });
+        await rename(temporary, file);
+      } catch (error) { error.nativeImageOutcome = "unknown"; throw error; }
     }
   }
 
@@ -145,7 +150,7 @@ export async function createNativeInput({ stateDir, owner, send, timeoutMs = 300
       void Promise.resolve().then(() => dispatch(JSON.parse(bytes.subarray(0, end).toString("utf8"))))
         .then(result => socket.end(JSON.stringify({ ok: true, result }) + "\n"),
           error => socket.end(JSON.stringify({ ok: false, error: /^native_[a-z_]+$/.test(error.code ?? "")
-            ? error.code : "native_image_dispatch_failed" }) + "\n"));
+            ? error.code : "native_image_dispatch_failed", outcome: error.nativeImageOutcome ?? "notAttempted" }) + "\n"));
     });
   });
   try {

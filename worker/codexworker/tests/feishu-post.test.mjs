@@ -143,6 +143,20 @@ test("slash-like image captions remain caption text and never run bridge command
  assert.equal(f.calls.filter(call => call.name === "create_thread").length, 0);
  assert.equal(f.manager.state.selectedThreadId, "thread");
 });
+test("known native image preflight failures preserve a canceled receipt and healthy transport", async t => {
+ const f = await fixture(t); f.manager.config.nativeImageInput = true;
+ const original = f.manager.native;
+ f.manager.native = async (name, args, context) => {
+  if (name === "send_message_to_thread") throw Object.assign(new Error("native_image_receipt_mismatch"),
+   { nativeErrorCode: "native_image_receipt_mismatch", nativeReachable: true, nativeImageOutcome: "notAttempted" });
+  return original(name, args, context);
+ };
+ await assert.rejects(f.manager.receiveFeishu(event()), error => error.body?.nativeInputOutcome === "notAttempted");
+ const id = Object.keys(f.manager.state.feishuReceipts)[0];
+ assert.equal(f.manager.state.receipts[id].nativeDispatch.status, "canceled");
+ assert.equal(f.manager.state.receipts[id].error.nativeInputOutcome, "notAttempted");
+ assert.equal(f.session.pendingInputs.length, 0); assert.equal(f.manager.connected, true);
+});
 test("internal adoption stays an operation event rather than a fabricated Hermes /adopt input",async t=>{
  const f=await fixture(t),req={protocolVersion:PROTOCOL,messageId:randomUUID(),source:"hermes",threadId:"adopted"};
  await f.manager.register(req);await f.manager.register(req);

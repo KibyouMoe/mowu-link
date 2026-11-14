@@ -905,6 +905,13 @@ export class DesktopManager {
       // otherwise the supervisor would recycle healthy Feishu/HTTP every 45s.
       this.connected = error?.nativeReachable === true;
       if (error instanceof BridgeError) throw error;
+      if (name === "send_message_to_thread" && error?.nativeImageOutcome) {
+        const outcome = error.nativeImageOutcome;
+        fail(outcome === "notAttempted" ? 422 : 502, error.nativeErrorCode ?? "native_image_input_failed",
+          outcome === "notAttempted" ? "Native image preflight failed before sending input."
+            : outcome === "rejected" ? "The native image input was explicitly rejected." : "Native image delivery could not be confirmed.",
+          false, { nativeInputOutcome: outcome });
+      }
       if (error?.nativeErrorCode === "native_snapshot_too_large") {
         fail(413, "native_snapshot_too_large", "Native history response exceeded Desktop's size limit.", false);
       }
@@ -1329,8 +1336,10 @@ export class DesktopManager {
     catch (error) {
       // A timeout may have inserted the input. Keep its correlation slot so a
       // later identical message cannot accidentally claim this uncertain write.
-      pending.unknownOutcome = true;
-      if (receipt) receipt.nativeDispatch.status = "unknown";
+      const knownRejection = ["notAttempted", "rejected"].includes(error.body?.nativeInputOutcome);
+      pending.unknownOutcome = !knownRejection;
+      if (knownRejection) session.pendingInputs = (session.pendingInputs ?? []).filter(item => item !== pending);
+      if (receipt) receipt.nativeDispatch.status = knownRejection ? "canceled" : "unknown";
       await this.save(); throw error;
     }
     session.state = "running"; pending.dispatchedAt = Date.now();

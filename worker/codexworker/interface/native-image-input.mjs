@@ -31,7 +31,12 @@ export async function sendNativeImageInput(args, { env = process.env, timeoutMs 
       const end = bytes.indexOf(10); if (end < 0) return;
       try {
         const response = JSON.parse(bytes.subarray(0, end).toString("utf8"));
-        if (response.ok !== true) { finish(new Error(response.error ?? "native_image_dispatch_failed")); return; }
+        if (response.ok !== true) {
+          const code = /^native_[a-z_]+$/.test(response.error ?? "") ? response.error : "native_image_dispatch_failed";
+          finish(Object.assign(new Error(code), { nativeErrorCode: code, nativeReachable: true,
+            nativeImageOutcome: ["notAttempted", "rejected", "unknown"].includes(response.outcome) ? response.outcome : "unknown" }));
+          return;
+        }
         finish(null, { success: true, contentItems: [{ type: "text", text: JSON.stringify(response.result) }] });
       } catch (error) { finish(error); }
     });
