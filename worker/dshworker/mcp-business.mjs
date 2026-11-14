@@ -611,6 +611,7 @@ async function ensureLocalManagerServer() {
     const config = operatingConfig({ host: LOCAL_MANAGER_HOST, port: LOCAL_MANAGER_PORT,
       workspaceRoots: current.thread?.cwd ? [current.thread.cwd] : [], projectId: project?.projectId,
       ...configured, nativeSenderThreadId: binding.managerThreadId, nativeSendFromTarget: true,
+      nativeImageInput: resolveNativeCapabilities().imageInput,
       nativeBusyDeliveryVerified: true, nativeStateIndependentDeliveryVerified: true,
       desktopLifetimeStartedAt: process.env.RUDOLF_BRIDGE_DESKTOP_STARTED_AT ?? null,
       token: (await readFile(tokenFile, "utf8")).trim() });

@@ -81,7 +81,7 @@ export async function loadDesktopConnection(env = process.env) {
 
 export async function runDesktopServer(settings, options, { stdin = process.stdin, stdout = process.stdout,
   stderr = process.stderr, connect = connectUnixWebSocket, review, terminationEvent = "exit",
-  closeChannel = channel => channel.kill() } = {}) {
+  closeChannel = channel => channel.kill(), observeClient = () => {}, observeServer = () => true } = {}) {
   const channel = await connect(settings.socket);
   stderr.write("[desktop-connection] Desktop transport connected\n");
   let buffer = "", serverBuffer = "", failed = false, closing;
@@ -91,9 +91,9 @@ export async function runDesktopServer(settings, options, { stdin = process.stdi
     send: message => channel.stdin.write(JSON.stringify(message) + "\n"),
     log: (event, fields) => stderr.write("[desktop-connection] " + event + " " + JSON.stringify(fields) + "\n") });
   const nativeInput = options.nativePassthrough && createNativeLineRelay({
-    write: bytes => channel.stdin.write(bytes), inspect: message => relay.client(message) });
+    write: bytes => channel.stdin.write(bytes), inspect: message => { observeClient(message); return relay.client(message); } });
   const nativeOutput = options.nativePassthrough && createNativeLineRelay({
-    write: bytes => stdout.write(bytes), inspect: message => relay.server(message) });
+    write: bytes => stdout.write(bytes), inspect: message => observeServer(message) === false ? false : relay.server(message) });
   return new Promise(resolve => {
     const fail = () => {
       if (failed) return;

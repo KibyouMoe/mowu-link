@@ -154,3 +154,26 @@ test("native option delegation keeps auxiliary checks and rejects independent li
     assert.throws(() => desktopServerOptions(argv, native), /unsupported_native_desktop_listener/);
   }
 });
+
+test("optional image endpoint failure preserves the real Mac Desktop startup", { skip: process.platform !== "darwin" }, async () => {
+  const child = new EventEmitter(); child.stdin = new PassThrough(); child.stdout = new PassThrough(); child.stderr = new PassThrough();
+  child.exitCode = null; child.signalCode = null; child.kill = () => assert.fail("must close native stdin first");
+  child.stdin.once("finish", () => setImmediate(() => {
+    child.exitCode = 0; child.emit("exit", 0); child.stdout.end(); child.stderr.end(); child.emit("close", 0);
+  }));
+  const input = new PassThrough(), output = new PassThrough(), errors = new PassThrough(); let diagnostics = "", checked = false;
+  errors.on("data", bytes => { diagnostics += bytes; });
+  const done = runNativeConnection(["app-server"], { stdin: input, stdout: output, stderr: errors,
+    verifyParent: async () => ({ pid: process.ppid }), load: async () => ({ realCli: "native-desktop-cli" }),
+    env: { CODEXWORKER_STATE_DIR: "/test-image-controller-no-files", CODEXWORKER_NATIVE_IMAGE_INPUT: "stale",
+      CODEXWORKER_NATIVE_INPUT_DESCRIPTOR: "stale-descriptor" },
+    createInput: async () => { checked = true; throw Error("private filesystem permission detail"); },
+    spawnImpl: (_, __, options) => {
+      assert.equal(options.env.CODEXWORKER_NATIVE_IMAGE_INPUT, undefined);
+      assert.equal(options.env.CODEXWORKER_NATIVE_INPUT_DESCRIPTOR, undefined);
+      setImmediate(() => child.emit("spawn")); return child;
+    } });
+  await tick(); await tick(); input.end();
+  assert.equal(await done, 0); assert.equal(checked, true);
+  assert.ok(diagnostics.includes("native image input unavailable")); assert.equal(diagnostics.includes("private filesystem"), false);
+});

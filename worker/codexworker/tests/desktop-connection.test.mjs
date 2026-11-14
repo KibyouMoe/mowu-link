@@ -129,7 +129,7 @@ test("prepared native connector contains its entire approval dependency tree", {
     version: 1, realCli: "/native/codex",
   }), { mode: 0o600 });
   const result = await prepareDesktopConnection({ env: { CODEX_HOME: home }, mode: "native" });
-  assert.equal(result.fileCount, 9);
+  assert.equal(result.fileCount, 10);
   assert.match(await readFile(result.launcher, "utf8"), /native-entry\.mjs/);
   const entry = await import(new URL("../interface/desktop-connection/native-entry.mjs", import.meta.url));
   const installed = await import(pathToFileURL(path.join(path.dirname(result.launcher), "interface/desktop-connection/native-entry.mjs")));

@@ -875,6 +875,7 @@ export class DesktopManager {
         pollIntervalMs: this.config.pollMs, queue: true, nativeBusyDelivery: Boolean(this.config.nativeBusyDeliveryVerified),
         localMessageOrigin: this.config.nativeSendFromTarget ? "target-task" : "bound-manager-task",
         remoteViaDesktopDevices: true, feishuImageOutput: Boolean(this.businessRuntime.module && this.notifier?.enabled),
+        feishuImageInput: this.config.nativeImageInput ? "native-local-image" : "cached-path-prompt",
         feishuOutputRouting: this.transcriptEnabled ? "managed-thread-transcript" : "selected-thread-only",
         persistentConversationTranscript: this.transcriptEnabled,
         nativeAutoCompaction: "engine-defaults",
@@ -1189,12 +1190,14 @@ export class DesktopManager {
           { threadId: request.targetThreadId, selectedThreadId: this.state.selectedThreadId });
       }
       let text = request.text.trim(), delivery = request.delivery, transformed = false;
-      if (/^\/goal(?:\s|$)/.test(text)) {
+      const nativeImages = request.source === "trainer" && this.config.nativeImageInput &&
+        this.state.feishuReceipts[request.messageId]?.nativeImagePaths?.length;
+      if (!nativeImages && /^\/goal(?:\s|$)/.test(text)) {
         transformed = true;
         text = goalPrompt(text);
         if (!text) return { action: "help", text: BRIDGE_HELP };
-      } else if (/^\/queue\s+/.test(text)) { text = text.replace(/^\/queue\s+/, ""); delivery = "queue"; transformed = true; }
-      else if (text.startsWith("/") && !text.startsWith("//")) {
+      } else if (!nativeImages && /^\/queue\s+/.test(text)) { text = text.replace(/^\/queue\s+/, ""); delivery = "queue"; transformed = true; }
+      else if (!nativeImages && text.startsWith("/") && !text.startsWith("//")) {
         const result = await this.command(request, text);
         if (this.transcriptEnabled) {
           await this.emit("message.reply", { ...request,
@@ -1205,7 +1208,7 @@ export class DesktopManager {
         return result;
       }
       const session = this.session(request.targetThreadId);
-      const normalized = { ...request, delivery, targetThreadId: session.threadId, text: text.startsWith("//") ? text.slice(1) : transformed ? text : request.text,
+      const normalized = { ...request, delivery, targetThreadId: session.threadId, text: !nativeImages && text.startsWith("//") ? text.slice(1) : transformed ? text : request.text,
         sourceTurnGuard: requireSourceTurnId ?? null, sourceTurnMayBeComplete: Boolean(allowCompletedSourceTurn && requireSourceTurnId),
         ...(request.source === "trainer" ? { trainerActivityAt: new Date().toISOString() } : {}) };
       if (this.compacting(session)) {
@@ -1315,6 +1318,10 @@ export class DesktopManager {
       await this.save(); throw error;
     }
     const args = { threadId: session.threadId, prompt };
+    if (this.config.nativeImageInput && request.source === "trainer" && feishuReceipt?.nativeImagePaths?.length) {
+      args.nativeImages = [...feishuReceipt.nativeImagePaths];
+      args.nativeMessageId = request.messageId; args.nativeDelivery = request.delivery ?? "steer";
+    }
     if (session.hostId) args.hostId = session.hostId;
     const turns = snapshot.page?.order === "newest_first" ? snapshot.turns : [...(snapshot.turns ?? [])].reverse();
     let dispatched;
@@ -2221,9 +2228,17 @@ export class DesktopManager {
       const post = event.message_type === "post" ? parseFeishuPost(event.content) : null;
       if ((["image", "file"].includes(event.message_type) || post?.images.length) && imageThreadId && !localHost(this.session(imageThreadId).hostId))
         fail(422, "capability_unavailable", "飞书图片缓存位于本机，暂不能把本机路径传给其他设备的聊天。");
-      const text = post ? await feishuPostPrompt(this, event, messageId, post)
-        : event.message_type === "image" ? imagePrompt(await cacheFeishuImage(this, event, messageId))
-        : event.message_type === "file" ? fileImagePrompt(event, await cacheFeishuImage(this, event, messageId)) : event.content;
+      const native = this.config.nativeImageInput === true;
+      const text = post ? await feishuPostPrompt(this, event, messageId, post, { native })
+        : event.message_type === "image" ? imagePrompt(await cacheFeishuImage(this, event, messageId), { native })
+        : event.message_type === "file" ? fileImagePrompt(event, await cacheFeishuImage(this, event, messageId), { native }) : event.content;
+      if (native && (["image", "file"].includes(event.message_type) || post?.images.length)) {
+        await this.serial(async () => {
+          const receipt = this.state.feishuReceipts[messageId];
+          receipt.nativeImagePaths = post ? post.images.map(key => receipt.imagePaths[key]) : [receipt.imagePath];
+          await this.save();
+        });
+      }
       const result = await this.message({ protocolVersion: PROTOCOL, messageId, source: "trainer", text,
         delivery: this.config.feishu.defaultDelivery ?? "steer",
         ...(imageThreadId ? { targetThreadId: imageThreadId } : {}) }, { requireSelectedTarget: Boolean(imageThreadId) });

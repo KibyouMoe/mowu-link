@@ -37,12 +37,16 @@ export function parseFeishuPost(content) {
   return { title, lines, images };
 }
 
-export async function feishuPostPrompt(manager, event, messageId, post = parseFeishuPost(event.content)) {
+export async function feishuPostPrompt(manager, event, messageId, post = parseFeishuPost(event.content), { native = false } = {}) {
   const paths = new Map();
   for (const key of post.images) paths.set(key, await cacheFeishuImage(manager, event, messageId, key));
+  if (native && post.images.length) return [post.title, ...post.lines.map(row =>
+    row.map(node => node.text ?? "").join(""))].filter(Boolean).join("\n") || imageCaption;
   const text = [post.title, ...post.lines.map(row =>
     row.map(n => n.imageKey ? "\n图片文件：" + paths.get(n.imageKey) + "\n" : n.text).join(""))].filter(Boolean).join("\n");
   if (!post.images.length) return text;
   return "训练员从飞书发送了图文消息：\n" + text +
     "\n请先使用 view_image 查看以上每张图片的实际内容，再回答同一条消息里的问题；不要把文件名或占位文字当作图片内容。";
 }
+
+const imageCaption = "训练员从飞书发送了一张图片。";

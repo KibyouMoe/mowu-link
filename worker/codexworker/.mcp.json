@@ -18,7 +18,9 @@
         "USERPROFILE",
         "LOCALAPPDATA",
         "PATH",
-        "CODEXWORKER_STATE_DIR"
+        "CODEXWORKER_STATE_DIR",
+        "CODEXWORKER_NATIVE_IMAGE_INPUT",
+        "CODEXWORKER_NATIVE_INPUT_DESCRIPTOR"
       ],
       "startup_timeout_sec": 60,
       "tool_timeout_sec": 180,

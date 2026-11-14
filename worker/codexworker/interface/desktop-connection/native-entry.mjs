@@ -6,8 +6,9 @@ import { lstat, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { desktopOwner, processChain, stopOwnedChild } from "../../desktop-lifecycle.mjs";
+import { desktopOwner, processChain, resolveDesktopState, stopOwnedChild } from "../../desktop-lifecycle.mjs";
 import { runDesktopConnection, runDesktopServer } from "./entry.mjs";
+import { createNativeInput } from "./native-input.mjs";
 
 export async function requireNativeDesktopParent({ platform = process.platform, readChain = processChain } = {}) {
   if (!["darwin", "win32"].includes(platform)) throw new Error("desktop_connection_platform_unsupported");
@@ -30,19 +31,44 @@ export async function loadNativeConnection(env = process.env) {
 }
 
 export async function runNativeConnection(argv, { env = process.env, spawnImpl = spawn,
-  verifyParent = requireNativeDesktopParent, load = loadNativeConnection, review,
+  verifyParent = requireNativeDesktopParent, load = loadNativeConnection, review, createInput = createNativeInput,
   stdin = process.stdin, stdout = process.stdout, stderr = process.stderr } = {}) {
-  return runDesktopConnection(argv, { env, spawnImpl, verifyParent, load, nativePassthrough: true,
+  let owner, input;
+  try {
+    return await runDesktopConnection(argv, { env, spawnImpl,
+    verifyParent: async () => { owner = await verifyParent(); return owner; }, load, nativePassthrough: true,
     serve: settings => runDesktopServer(settings, { config: {}, nativePassthrough: true }, { stdin, stdout, stderr, review,
-      terminationEvent: "close", closeChannel: stopOwnedChild,
+      terminationEvent: "close", closeChannel: async child => {
+        await input?.close().catch(() => stderr.write("[desktop-connection] image input cleanup failed\n"));
+        await stopOwnedChild(child);
+      },
+      observeClient: message => input?.client(message), observeServer: message => input?.server(message),
       connect: async () => {
         const childEnv = { ...env }; delete childEnv.CODEX_CLI_PATH;
-        const child = spawnImpl(settings.realCli, argv, { env: childEnv, stdio: ["pipe", "pipe", "pipe"] });
+        let child;
+        // Only the primary Desktop child publishes the input endpoint. Internal
+        // tool subprocesses and metadata checks retain their normal behavior.
+        if (process.platform === "darwin" && owner.pid === process.ppid) {
+          try {
+            const home = env.CODEX_HOME || path.join(os.homedir(), ".codex");
+            const stateDir = await resolveDesktopState(path.join(home, "state/codexworker"), env);
+            input = await createInput({ stateDir, owner,
+              send: message => child.stdin.write(JSON.stringify(message) + "\n") });
+            Object.assign(childEnv, input.env);
+          } catch {
+            delete childEnv.CODEXWORKER_NATIVE_IMAGE_INPUT; delete childEnv.CODEXWORKER_NATIVE_INPUT_DESCRIPTOR;
+            stderr.write("[desktop-connection] native image input unavailable\n");
+          }
+        }
+        child = spawnImpl(settings.realCli, argv, { env: childEnv, stdio: ["pipe", "pipe", "pipe"] });
         await once(child, "spawn");
         child.stderr.pipe(stderr, { end: false });
         child.once("close", () => child.stderr.unpipe(stderr));
         return child;
       } }) });
+  } finally {
+    await input?.close().catch(() => stderr.write("[desktop-connection] image input cleanup failed\n"));
+  }
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

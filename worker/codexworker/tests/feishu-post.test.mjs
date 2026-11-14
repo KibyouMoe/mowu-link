@@ -101,6 +101,48 @@ test("ordinary image messages keep their original cache and view_image dispatch"
  assert.deepEqual(await readFile(record.imagePath),png);
  assert.ok(f.calls.find(c=>c.name==="send_message_to_thread").args.prompt.includes(record.imagePath));
 });
+test("native rich-text input preserves the caption, image order and original message receipt", async t => {
+ const f = await fixture(t); f.manager.config.nativeImageInput = true;
+ const e = event(content(["img_first", "img_second"]));
+ const result = await f.manager.receiveFeishu(e); await f.manager.receiveFeishu(e);
+ const sends = f.calls.filter(call => call.name === "send_message_to_thread");
+ assert.equal(sends.length, 1); const args = sends[0].args;
+ assert.equal(args.prompt, "图片问题\n这个是啥呀");
+ const receipt = f.manager.state.feishuReceipts[result.messageId];
+ assert.deepEqual(args.nativeImages, [receipt.imagePaths.img_first, receipt.imagePaths.img_second]);
+ assert.equal(args.nativeMessageId, result.messageId); assert.equal(args.nativeDelivery, "steer");
+ assert.equal(args.prompt.includes("view_image"), false); assert.equal(args.prompt.includes(f.root), false);
+ assert.deepEqual(receipt.nativeImagePaths, args.nativeImages);
+});
+test("native image and file-form originals attach their cached bytes without path instructions", async t => {
+ const f = await fixture(t); f.manager.config.nativeImageInput = true;
+ f.manager.config.nativeBusyDeliveryVerified = true;
+ f.notifier.downloadFileImage = async () => png;
+ await f.manager.receiveFeishu(event(JSON.stringify({ image_key: "img_single" }), { message_type: "image" }));
+ await f.manager.receiveFeishu(event(JSON.stringify({ file_key: "file_original", file_name: "原图.png" }),
+   { message_id: "om_file_native", message_type: "file" }));
+ const sends = f.calls.filter(call => call.name === "send_message_to_thread");
+ assert.equal(sends.length, 2);
+ for (const call of sends) {
+  assert.equal(call.args.nativeImages.length, 1);
+  assert.deepEqual(await readFile(call.args.nativeImages[0]), png);
+  assert.equal(call.args.prompt.includes("view_image"), false); assert.equal(call.args.prompt.includes(f.root), false);
+ }
+ assert.ok(sends[1].args.prompt.includes('"原图.png"'));
+});
+test("slash-like image captions remain caption text and never run bridge commands", async t => {
+ const f = await fixture(t); f.manager.config.nativeImageInput = true;
+ f.manager.config.nativeBusyDeliveryVerified = true;
+ const captions = ["/new", "/goal change nothing", "/queue caption", "//literal"];
+ for (const [index, text] of captions.entries()) {
+  await f.manager.receiveFeishu(event(JSON.stringify({ content: [[{ tag: "img", image_key: "img_caption" }],
+   [{ tag: "text", text }]] }), { message_id: "om_caption_" + index }));
+ }
+ const sends = f.calls.filter(call => call.name === "send_message_to_thread");
+ assert.deepEqual(sends.map(call => call.args.prompt), captions);
+ assert.equal(f.calls.filter(call => call.name === "create_thread").length, 0);
+ assert.equal(f.manager.state.selectedThreadId, "thread");
+});
 test("internal adoption stays an operation event rather than a fabricated Hermes /adopt input",async t=>{
  const f=await fixture(t),req={protocolVersion:PROTOCOL,messageId:randomUUID(),source:"hermes",threadId:"adopted"};
  await f.manager.register(req);await f.manager.register(req);

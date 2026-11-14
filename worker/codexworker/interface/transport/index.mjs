@@ -37,12 +37,13 @@ export function resetNativeTransportCache() {
   cached = null;
 }
 
-// 业务层只读这里的能力开关；未声明的能力一律按 Desktop 兼容语义（true）处理。
+// 旧能力保留 Desktop 默认值；原生图片输入必须由传输层明确声明。
 export function resolveNativeCapabilities() {
   const declared = resolveNativeTransport().capabilities ?? {};
   return {
     fork: declared.fork !== false,
     desktopJournal: declared.desktopJournal !== false,
     callerTurn: declared.callerTurn !== false,
+    imageInput: declared.imageInput === true,
   };
 }
