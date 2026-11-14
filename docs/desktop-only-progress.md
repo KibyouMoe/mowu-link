@@ -126,3 +126,7 @@
 - 安装清单直接用PATH Node22，绕过了现有宿主运行时选择。正常客户端实际提供CODEX_MCP_NODE_PATH，其Node签名为OpenAI OpCo, LLC / TeamIdentifier=2DC432GLL2；内置插件的正式启动器也优先使用此值。
 - MCP入口改为interface/desktop-mcp.mjs，先选择宿主Node再加载server；Mac execve保留MCP PID和正常祖先，Windows保留MCP父进程及stdio/退出码，旧宿主缺runtime hint仍按原方式工作。隔离真实宿主Node冷启动确认PID实际映像为Desktop提供的Node、initialize成功，autoStart=false且未提供native端点。
 - 传输层新增socket close处理，客户端关闭连接时立即报告native_pipe_closed，不再等待超时。离线回归含Mac/Windows分支与真实包入口，待本轮最终输出；实际重新装载及native/飞书回流尚未通过。旧orphan监督器3778已暂停，后续必须从真实Desktop正常加载的新上下文核验，不能把隔离Node证明当应用授权成功。
+
+- 源码e50f49d / 分发fe449cd已推送。Mac Node22/26定向各12/12，实际受管缓存冷启动12/12；132文件与规范分发逐字节相同，当前清单入口interface/desktop-mcp.mjs，本地技能同步。
+- CI43544291900四组已实际success：Mac22/26各Codex729/721/0/8、DSH742/734/0/8、router130/130；Windows22/26各Codex729/713/0/16、DSH742/735/0/7。原生OS回归不替代实际Desktop授权。
+- 最新只读进程核对仍为旧MCP12327（node ./server.mjs），其cwd已被正常插件更新移入plugin-backup-csUdqh；新版固定入口未实际装载。已明确请求训练员正常退出/重开Codex，再从客户端本会话回复，届时先核验运行时签名/真实祖先及native probe，再启用autoStart和验飞书往返。autoStart当前false，8905仍无服务，原主会话已恢复Desktop访问。
