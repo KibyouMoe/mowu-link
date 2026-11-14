@@ -13,8 +13,14 @@ async function fixture(t) {
   let selected = "previous-native-cli", fail = null, metadata = true;
   const exec = async (file, args) => {
     calls.push({ file, args });
-    if (file === installed.launcher) return { stdout: JSON.stringify(metadata
-      ? { appServerVersion: "0.167", configRequirements: { requirements: null } } : {}) };
+    if (file === installed.launcher) {
+      if (args.includes("exec-server")) {
+        if (fail === "executor") throw Error("native auxiliary delegation failed");
+        return { stdout: "native exec-server help" };
+      }
+      return { stdout: JSON.stringify(metadata
+        ? { appServerVersion: "0.167", configRequirements: { requirements: null } } : {}) };
+    }
     if (file === "/usr/bin/plutil") { if (fail === "lint") throw Error("lint failed"); return { stdout: "OK" }; }
     if (args[0] === "getenv") return { stdout: selected + "\n" };
     if (args[0] === "unsetenv") selected = "";
@@ -49,12 +55,22 @@ test("one-shot login item only selects the checked Desktop launcher, with Unicod
     "--analytics-default-enabled", "--print-startup-config"]);
   assert.equal(f.calls.some(c => c.args.includes("--startup-sign-out")), false);
   assert.equal(result.startupPolicyVerified, true);
+  assert.equal(result.nativeAuxiliaryVerified, true);
+  assert.deepEqual(f.calls[1].args, ["-c", 'forced_login_method="chatgpt"', "exec-server", "--help"]);
 });
 
 test("invalid native startup metadata prevents persistent settings or environment changes", async t => {
   const f = await fixture(t); f.invalidMetadata();
   await assert.rejects(installDesktopEnvironment(f.options), /startup_policy_invalid/);
   assert.equal(f.calls.length, 1); assert.equal(f.selected(), "previous-native-cli");
+});
+
+test("failed Desktop auxiliary delegation prevents selecting an otherwise valid launcher", async t => {
+  const f = await fixture(t); f.fail("executor");
+  await assert.rejects(installDesktopEnvironment(f.options), /auxiliary delegation failed/);
+  assert.equal(f.calls.length, 2); assert.equal(f.selected(), "previous-native-cli");
+  await assert.rejects(readFile(path.join(f.home, "Library", "LaunchAgents", ENVIRONMENT_LABEL + ".plist")),
+    { code: "ENOENT" });
 });
 
 test("failed lint or uncertain environment write restores existing bytes and prior selection", async t => {

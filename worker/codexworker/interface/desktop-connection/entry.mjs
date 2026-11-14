@@ -162,8 +162,14 @@ export async function runDesktopServer(settings, options, { stdin = process.stdi
 
 function isDesktopAuxiliary(argv) {
   const appServer = argv.indexOf("app-server");
+  let command = 0;
+  while (command < argv.length) {
+    if (["-c", "--config", "--enable", "--disable"].includes(argv[command])) command += 2;
+    else if (argv[command].startsWith("--config=")) command++;
+    else break;
+  }
   return argv.length === 1 && ["--version", "-V", "--help", "-h"].includes(argv[0]) ||
-    ["exec-server", "login", "logout"].includes(argv[0]) ||
+    ["exec-server", "login", "logout"].includes(argv[command]) ||
     appServer >= 0 && (["generate-json-schema", "generate-ts"].includes(argv[appServer + 1]) ||
       argv.includes("--print-startup-config") || argv.includes("--help") || argv.includes("-h") ||
       argv.length === appServer + 3 && argv[appServer + 1] === "daemon" && argv[appServer + 2] === "version");

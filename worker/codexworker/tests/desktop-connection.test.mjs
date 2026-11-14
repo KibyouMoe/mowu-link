@@ -69,6 +69,9 @@ test("Desktop version and exec-server use its real binary without recursive over
   const startupPolicy = [...actualStartup, "--print-startup-config", "--startup-client-info",
     JSON.stringify({ name: "codex_desktop", title: "Codex Desktop", version: "26.1106.51428" })];
   for (const args of [["--version"], ["exec-server"], ["app-server", "daemon", "version"],
+    ["-c", 'forced_login_method="chatgpt"', "exec-server", "--concurrent-requests", "32",
+      "--remote", "https://native-desktop-executor.example", "--environment-id", "test-environment"],
+    ["--config=features.example=true", "--enable", "example", "--disable", "other", "exec-server", "--help"],
     startupPolicy, [...startupPolicy, "--startup-sign-out"]]) {
     const child = new EventEmitter(); child.kill = () => {};
     const result = runDesktopConnection(args, { verifyParent: async () => owner,

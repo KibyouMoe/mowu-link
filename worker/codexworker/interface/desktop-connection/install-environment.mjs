@@ -26,6 +26,10 @@ export async function installDesktopEnvironment({ platform = process.platform, h
   const metadata = JSON.parse(stdout);
   if (typeof metadata.appServerVersion !== "string" || !metadata.configRequirements ||
       !Object.hasOwn(metadata.configRequirements, "requirements")) throw new Error("desktop_startup_policy_invalid");
+  // Desktop starts this auxiliary service with global config options as well.
+  // --help checks delegation without connecting or registering an executor.
+  await exec(installed.launcher, ["-c", 'forced_login_method="chatgpt"', "exec-server", "--help"],
+    { env, timeout: 30000, maxBuffer: 4 * 1024 * 1024 });
   const file = path.join(home, "Library", "LaunchAgents", ENVIRONMENT_LABEL + ".plist");
   let previous;
   try { previous = await readFile(file); } catch (error) { if (error.code !== "ENOENT") throw error; }
@@ -61,7 +65,7 @@ export async function installDesktopEnvironment({ platform = process.platform, h
     throw error;
   }
   return { ...installed, environmentFile: file, label: ENVIRONMENT_LABEL,
-    startupPolicyVerified: true, desktopRestartRequired: true };
+    startupPolicyVerified: true, nativeAuxiliaryVerified: true, desktopRestartRequired: true };
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
