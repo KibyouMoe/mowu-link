@@ -165,10 +165,13 @@ test("the task wait follows the answer turn and has no implicit elapsed-time dea
  assert.equal(result.messageId,"answer");assert.equal(result.turnId,"continued-turn");assert.equal(time,7200000);
  assert.equal(await waitForTaskClarification({...f,consumed:new Set(["q"])}),null);
 });
-test("clarification waits respect cancellation, explicit deadlines and uncertain answer states",async()=>{
+test("clarification waits respect cancellation and uncertain answer states while estimates remain advisory",async()=>{
  const f=waiting();
  await assert.rejects(waitForTaskClarification({...f,router:{getTask:async()=>({state:"cancelled"})}}),/cancelled/);
- await assert.rejects(waitForTaskClarification({...f,deadline:1,now:()=>2}),/deadline/);
+ const afterEstimate=waiting();
+ const continued=await waitForTaskClarification({...afterEstimate,deadline:1,now:()=>2,
+   sleep:async()=>{afterEstimate.action.status="answered";}});
+ assert.equal(continued.turnId,"continued-turn");
  f.action.routerDelivery.status="unavailable";await assert.rejects(waitForTaskClarification(f),/通道不可用/);
  f.action.routerDelivery.status="sent";f.action.status="answer_unknown";await assert.rejects(waitForTaskClarification(f),/澄清未完成/);
 });

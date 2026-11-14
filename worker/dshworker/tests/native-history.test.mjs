@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { hydrateNativeInputs, readNativeWindow } from "../interface/native-history.mjs";
-import { publicItems } from "../desktop-manager.mjs";
+import { publicItems, DesktopManager } from "../desktop-manager.mjs";
 import { nativeToolRejection } from "../interface/native-dispatch.mjs";
 
 const text = "飞书：第一段\n\n第二段完整保留";
@@ -137,4 +137,16 @@ test("hydration cache is bounded and ordinary tool results are never retained as
     snapshot([{ id: "turn", items: items.map((item, i) => ({ ...item, output: i ? output("public") : { text: "private ordinary tool result", truncated: false } })) }]), cache);
   assert.equal(cache.size, 512); assert.equal(publicItems(hydrated).length, 513);
   assert.ok(!JSON.stringify(hydrated).includes("private ordinary tool result"));
+});
+
+test("an incomplete old delegated input does not hide a completed task result", async () => {
+  const partial = { ...input('old-input'), output: { ...output('partial text'), truncated: true } };
+  const value = snapshot([{ id: 'turn', status: 'completed', items: [partial,
+    { type: 'agentMessage', id: 'final', phase: 'final', text: 'actual final reply' }] }]);
+  const manager = new DesktopManager({ native: async () => structuredClone(value),
+    listNativeTools: async () => [], stateDir: '/unused-native-history-regression' });
+  await assert.rejects(manager.read('target-chat'), error => error.body.error === 'native_snapshot_incomplete');
+  const actual = await manager.read('target-chat', 'local', { requireCompleteInputs: false });
+  assert.equal(actual.nativeInputHydration.complete, false);
+  assert.deepEqual(publicItems(actual).map(item => item.text), ['actual final reply']);
 });

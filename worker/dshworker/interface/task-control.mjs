@@ -16,10 +16,10 @@ export function installTaskControl(transport) {
   async function cancelTask(taskId) {
     cancelledTasks.add(taskId);
     const found = find(taskId);
-    if (!found) return { ok: true, task_id: taskId, cancelled: false, reason: "task_not_started" };
+    if (!found) return { ok: true, task_id: taskId, state: "cancelled", cancelled: false, reason: "task_not_started" };
     const { thread, turn } = found;
     if (["completed", "failed", "interrupted", "cancelled", "canceled"].includes(turn.status))
-      return { ok: true, task_id: taskId, cancelled: false, reason: "already_terminal" };
+      return { ok: true, task_id: taskId, state: "cancelled", cancelled: false, reason: "already_terminal" };
     turn.cancelRequested = true;
     if (thread.queue.includes(turn.id)) {
       thread.queue = thread.queue.filter(id => id !== turn.id);
@@ -27,11 +27,20 @@ export function installTaskControl(transport) {
       turn.error = "cancelled by router"; turn.reasonKind = "cancelled";
       turn.completedAt = new Date().toISOString();
     } else {
-      transport.live.get(thread.id)?.agent?.cancel({ kind: "user" });
+      const agent = transport.live.get(thread.id)?.agent;
+      if (!agent) return { ok: false, task_id: taskId, state: "cancelling", error: "native_agent_unavailable" };
+      agent.cancel({ kind: "user" });
+      let timer;
+      try {
+        await Promise.race([agent.whenIdle?.() ?? Promise.resolve(),
+          new Promise(resolve => { timer = setTimeout(resolve, 1500); })]);
+      } finally { clearTimeout(timer); }
     }
     await transport.save();
     transport.log("info", "router_task_cancelled", { taskId, threadId: thread.id, turnId: turn.id });
-    return { ok: true, task_id: taskId, cancelled: true, thread_id: thread.id, turn_id: turn.id };
+    const stopped = ["completed", "failed", "interrupted", "cancelled", "canceled"].includes(turn.status);
+    return { ok: true, task_id: taskId, state: stopped ? "cancelled" : "cancelling",
+      cancelled: stopped, thread_id: thread.id, turn_id: turn.id };
   }
   return {
     cancelTask,
@@ -48,6 +57,7 @@ export function installTaskControl(transport) {
     attachManager(manager) {
       if (!manager || manager.dshTaskControl) return;
       manager.dshTaskControl = true;
+      manager.cancelRouterTask = cancelTask;
       managerRef = manager;
       if (transport.routerClient) manager.routerClient = transport.routerClient;
       // Changing the legacy projection to public text must not resend old

@@ -38,20 +38,29 @@ export async function createNativeInput({ stateDir, owner, send, timeoutMs = 300
 
   async function validate(request) {
     const question = request.operation === "questionReply";
+    const message = request.operation === "message";
     if (!uuid.test(request.messageId ?? "") || typeof request.threadId !== "string" ||
         typeof request.prompt !== "string" || !request.prompt.trim() ||
-        !["steer", "queue"].includes(request.delivery) || ![undefined, "image", "questionReply"].includes(request.operation) ||
+        !["steer", "queue"].includes(request.delivery) || ![undefined, "image", "questionReply", "message"].includes(request.operation) ||
         question && (request.delivery !== "steer" || request.images !== undefined) ||
-        !question && (!Array.isArray(request.images) || request.images.length < 1 || request.images.length > 10))
+        message && (request.delivery !== "queue" || request.images !== undefined) ||
+        !question && !message && (!Array.isArray(request.images) || request.images.length < 1 || request.images.length > 10))
       invalid("native_input_request_invalid");
     const config = JSON.parse(await readFile(path.join(stateDir, "desktop-config.local.json"), "utf8"));
     if (config.autoStart === false) invalid("native_image_autostart_disabled");
     const state = JSON.parse(await readFile(path.join(stateDir, "desktop-manager-state.json"), "utf8"));
     const receipt = state.receipts?.[request.messageId], feishu = state.feishuReceipts?.[request.messageId];
     if (!state.sessions?.[request.threadId] || ![undefined, null, "local"].includes(state.sessions[request.threadId].hostId) ||
-        state.selectedThreadId !== request.threadId ||
+        (!message && state.selectedThreadId !== request.threadId) ||
         !["trainer", "hermes"].includes(receipt?.request?.source) || receipt.nativeTargetThreadId !== request.threadId ||
         receipt.nativeInputHash !== digest(JSON.stringify(request.prompt))) invalid("native_input_receipt_mismatch");
+    if (message) {
+      if (receipt.request.source !== "hermes" || receipt.request.origin !== "router" ||
+          receipt.nativeDispatch?.status !== "dispatching" ||
+          !/^t-[A-Za-z0-9_-]+$/.test(request.taskId ?? "") ||
+          !request.prompt.startsWith(`[router ${request.taskId}]`)) invalid("native_task_receipt_mismatch");
+      return;
+    }
     if (question) {
       const actions = JSON.parse(await readFile(path.join(stateDir, "question-actions.json"), "utf8"));
       const entry = Object.entries(actions.entries ?? {}).find(([, value]) => value.nativeMessageId === request.messageId);
@@ -91,7 +100,8 @@ export async function createNativeInput({ stateDir, owner, send, timeoutMs = 300
   }
 
   async function deliver(request, fingerprint) {
-    const ledger = path.join(stateDir, request.operation === "questionReply" ? "native-question-receipts" : "native-image-receipts");
+    const ledger = path.join(stateDir, request.operation === "questionReply" ? "native-question-receipts"
+      : request.operation === "message" ? "native-message-receipts" : "native-image-receipts");
     await mkdir(ledger, { recursive: true, mode: 0o700 });
     const file = path.join(ledger, request.messageId + ".json");
     let previous;
@@ -109,6 +119,7 @@ export async function createNativeInput({ stateDir, owner, send, timeoutMs = 300
       sortDirection: "desc", itemsView: "notLoaded" });
     if (!Array.isArray(page?.data)) invalid("native_image_turn_state_invalid");
     const active = page.data.find(turn => turn.status === "inProgress");
+    if (active && request.operation === "message") invalid("native_task_busy", "notAttempted");
     if (active && typeof active.id !== "string") invalid("native_image_turn_state_invalid");
     // Recheck the durable binding after read-only preflight, immediately before
     // recording a possibly accepted write. Uncertain writes are never replayed.
@@ -142,6 +153,7 @@ export async function createNativeInput({ stateDir, owner, send, timeoutMs = 300
     if (closed || !initialized) invalid("native_input_not_ready");
     if (!equalToken(request.token, token)) invalid("native_input_unauthorized");
     if (!uuid.test(request.messageId ?? "")) invalid("native_image_request_invalid");
+    if (request.operation === "cancel") return cancel(request);
     const fingerprint = digest(JSON.stringify([request.threadId, request.messageId, request.prompt, request.images, request.delivery]));
     const current = activeMessages.get(request.messageId);
     if (current) {
@@ -156,6 +168,36 @@ export async function createNativeInput({ stateDir, owner, send, timeoutMs = 300
       if (threads.get(request.threadId) === promise) threads.delete(request.threadId);
     }).catch(() => {});
     return promise;
+  }
+
+  async function cancel(request) {
+    async function verify() {
+      if (!/^t-[A-Za-z0-9_-]+$/.test(request.taskId ?? "") ||
+          typeof request.threadId !== "string" || typeof request.turnId !== "string")
+        invalid("native_cancel_request_invalid");
+      const state = JSON.parse(await readFile(path.join(stateDir, "desktop-manager-state.json"), "utf8"));
+      const receipt = state.receipts?.[request.messageId];
+      if (receipt?.request?.source !== "hermes" || receipt.request.origin !== "router" ||
+          !receipt.request.text?.startsWith(`[router ${request.taskId}]`) ||
+          receipt.nativeTargetThreadId !== request.threadId || receipt.nativeTurnId !== request.turnId ||
+          !["accepted", "unknown"].includes(receipt.nativeDispatch?.status) ||
+          ![undefined, null, "local"].includes(state.sessions?.[request.threadId]?.hostId) ||
+          !state.sessions?.[request.threadId]) invalid("native_cancel_receipt_mismatch");
+    }
+    await verify();
+    const query = { threadId: request.threadId, limit: 1, sortDirection: "desc", itemsView: "notLoaded" };
+    const page = await rpc("thread/turns/list", query);
+    const turn = page?.data?.find(turn => turn.id === request.turnId);
+    if (!turn) invalid("native_cancel_turn_unavailable");
+    const terminal = status => ["completed", "failed", "interrupted"].includes(status);
+    if (terminal(turn.status)) return { ok: true, state: "cancelled", nativeStatus: turn.status };
+    if (turn.status !== "inProgress") invalid("native_cancel_turn_state_invalid");
+    await verify();
+    await rpc("turn/interrupt", { threadId: request.threadId, turnId: request.turnId });
+    const after = await rpc("thread/turns/list", query);
+    const stopped = after?.data?.find(turn => turn.id === request.turnId);
+    return { ok: true, state: stopped && terminal(stopped.status) ? "cancelled" : "cancelling",
+      nativeStatus: stopped?.status ?? null };
   }
 
   const server = net.createServer(socket => {

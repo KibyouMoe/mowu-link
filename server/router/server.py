@@ -74,8 +74,9 @@ PEER_STREAM_BUFFER = 32
 LOG_MAX_BYTES = 5 * 1024 * 1024
 LOG_BACKUP_COUNT = 3
 
-TASK_STATES = ("queued", "running", "done", "failed", "cancelled")
+TASK_STATES = ("queued", "running", "cancelling", "done", "failed", "cancelled")
 TERMINAL_STATES = ("done", "failed", "cancelled")
+UNSET = object()
 URGENCIES = ("urgent", "normal")
 CHAT_DIRECTIONS = ("in", "out")
 PING_INTERVAL = 15.0
@@ -394,7 +395,7 @@ class RouterStore:
         cols = {str(row["name"]) for row in
                 self._conn.execute("PRAGMA table_info(tasks)").fetchall()}
         for column, decl in (("deadline_s", "REAL"), ("request_id", "TEXT"),
-                             ("request_fingerprint", "TEXT")):
+                             ("request_fingerprint", "TEXT"), ("dispatch_attempted", "INTEGER")):
             if column not in cols:
                 self._conn.execute(
                     "ALTER TABLE tasks ADD COLUMN %s %s" % (column, decl))
@@ -407,7 +408,8 @@ class RouterStore:
         wcols = {str(row["name"]) for row in
                  self._conn.execute("PRAGMA table_info(workers)").fetchall()}
         for column, decl in (("state", "TEXT"), ("progress_at", "REAL"),
-                             ("task_id", "TEXT"), ("control_url", "TEXT")):
+                             ("task_id", "TEXT"), ("control_url", "TEXT"),
+                             ("turn_source", "TEXT"), ("control_sse", "INTEGER DEFAULT 0")):
             if column not in wcols:
                 self._conn.execute(
                     "ALTER TABLE workers ADD COLUMN %s %s" % (column, decl))
@@ -456,7 +458,9 @@ class RouterStore:
             "last_progress_at_iso": (now_iso(row["progress_at"])
                                      if row["progress_at"] else None),
             "task_id": row["task_id"],
+            "turn_source": row["turn_source"],
             "control_url": row["control_url"],
+            "control_sse": bool(row["control_sse"]),
         }
 
     def get_worker(self, name: str) -> Optional[Dict[str, Any]]:
@@ -473,7 +477,8 @@ class RouterStore:
 
     def upsert_worker(self, name: str, version: Optional[str] = None,
                       note: Optional[str] = None,
-                      control_url: Optional[str] = None) -> Tuple[Dict[str, Any], bool]:
+                      control_url: Optional[str] = None,
+                      control_sse: bool = False) -> Tuple[Dict[str, Any], bool]:
         now = time.time()
         with self._lock:
             row = self._conn.execute(
@@ -498,6 +503,8 @@ class RouterStore:
             if control_url is not None:
                 self._conn.execute("UPDATE workers SET control_url=? WHERE name=?",
                                    (control_url, name))
+            self._conn.execute("UPDATE workers SET control_sse=? WHERE name=?",
+                               (int(control_sse), name))
             self.refresh_counts(name)
         worker = self.get_worker(name)
         assert worker is not None
@@ -521,38 +528,50 @@ class RouterStore:
 
     def heartbeat(self, name: str, state: Optional[str] = None,
                   progress_at: Optional[float] = None,
-                  task_id: Optional[str] = None) -> bool:
+                  task_id: Any = UNSET, turn_source: Any = UNSET) -> bool:
         now = time.time()
         with self._lock:
             row = self._conn.execute(
                 "SELECT name FROM workers WHERE name=?", (name,)).fetchone()
             if row is None:
                 return False
-            self._conn.execute(
-                "UPDATE workers SET last_seen=?,"
-                " state=COALESCE(?, state),"
-                " progress_at=COALESCE(?, progress_at),"
-                " task_id=COALESCE(?, task_id) WHERE name=?",
-                (now, state, progress_at, task_id, name))
+            updates = ["last_seen=?", "state=COALESCE(?, state)",
+                       "progress_at=CASE WHEN ? IS NULL THEN progress_at"
+                       " ELSE MAX(COALESCE(progress_at, 0), ?) END"]
+            values = [now, state, progress_at, progress_at]
+            if task_id is not UNSET:
+                task = self.get_task(task_id) if task_id else None
+                if task and task["state"] in TERMINAL_STATES:
+                    task_id = None
+                updates.append("task_id=?")
+                values.append(task_id)
+            if turn_source is not UNSET:
+                updates.append("turn_source=?")
+                values.append(turn_source)
+            self._conn.execute("UPDATE workers SET " + ", ".join(updates) +
+                               " WHERE name=?", values + [name])
+            self.refresh_counts(name)
         return True
 
     def refresh_counts(self, name: str) -> None:
         with self._lock:
             busy = self._conn.execute(
                 "SELECT COUNT(*) AS c FROM tasks"
-                " WHERE worker=? AND state='running'", (name,)).fetchone()["c"]
+                " WHERE worker=? AND state IN ('running', 'cancelling')", (name,)).fetchone()["c"]
             queued = self._conn.execute(
                 "SELECT COUNT(*) AS c FROM tasks"
                 " WHERE worker=? AND state='queued'", (name,)).fetchone()["c"]
             self._conn.execute(
-                "UPDATE workers SET busy=?, queued=? WHERE name=?",
+                "UPDATE workers SET busy=(? OR (COALESCE(turn_source, '') IN ('trainer', 'router')"
+                " AND state IN ('running', 'inProgress', 'waiting_input'))),"
+                " queued=? WHERE name=?",
                 (int(busy), int(queued), name))
 
     def running_count(self, name: str) -> int:
         with self._lock:
             return int(self._conn.execute(
                 "SELECT COUNT(*) AS c FROM tasks"
-                " WHERE worker=? AND state='running'", (name,)).fetchone()["c"])
+                " WHERE worker=? AND state IN ('running', 'cancelling')", (name,)).fetchone()["c"])
 
     def queued_count(self, name: str) -> int:
         with self._lock:
@@ -659,6 +678,8 @@ class RouterStore:
             "finished_at": row["finished_at"],
             "deadline_s": row["deadline_s"],
             "deadline_at": deadline_at,
+            "dispatch_attempted": (None if row["dispatch_attempted"] is None
+                                   else bool(row["dispatch_attempted"])),
             "result": result,
         }
 
@@ -677,8 +698,8 @@ class RouterStore:
             self._conn.execute(
                 "INSERT INTO tasks (task_id, worker, goal, context, workspace,"
                 " urgency, state, created_at, started_at, finished_at,"
-                " result_json, deadline_s, request_id, request_fingerprint)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?)",
+                " result_json, deadline_s, request_id, request_fingerprint, dispatch_attempted)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, 0)",
                 (task_id, worker, goal, context, workspace, urgency, state,
                  now, started, deadline_s, request_id, request_fingerprint))
             self.refresh_counts(worker)
@@ -771,16 +792,26 @@ class RouterStore:
             result = {**result, "approval_id": progress["approval_id"],
                       "approval_status": progress["state"]}
         with self._lock:
+            finished_at = time.time()
             self._conn.execute(
                 "UPDATE tasks SET state=?, finished_at=?, result_json=?"
                 " WHERE task_id=?",
-                (status, time.time(),
+                (status, finished_at,
                  json.dumps(result, ensure_ascii=False), task_id))
+            if task:
+                self._conn.execute(
+                    "UPDATE workers SET task_id=NULL, progress_at=?,"
+                    " state=CASE WHEN turn_source='trainer' THEN state ELSE 'idle' END,"
+                    " turn_source=CASE WHEN turn_source='trainer' THEN turn_source ELSE NULL END"
+                    " WHERE name=? AND (task_id=? OR task_id IS NULL)",
+                    (finished_at, task["worker"], task_id))
+                self.refresh_counts(task["worker"])
         return self.get_task(task_id)
 
-    def cancel_task(self, task_id: str) -> Optional[Dict[str, Any]]:
-        result = {"status": "cancelled", "summary": "cancelled via API",
-                  "cancelled_at": time.time()}
+    def cancel_task(self, task_id: str, pending: bool = False) -> Optional[Dict[str, Any]]:
+        state = "cancelling" if pending else "cancelled"
+        result = {"status": state, "summary": "cancellation requested" if pending else "cancelled via API",
+                  "cancel_requested_at": time.time()}
         with self._lock:
             self._conn.execute(
                 "UPDATE approvals SET status='denied', decision='denied', note='task cancelled', decided_at=?"
@@ -791,14 +822,14 @@ class RouterStore:
                 result["approval_id"] = progress["approval_id"]
                 result["approval_status"] = progress["state"]
             self._conn.execute(
-                "UPDATE tasks SET state='cancelled', finished_at=?,"
+                "UPDATE tasks SET state=?, finished_at=?,"
                 " result_json=? WHERE task_id=?",
-                (time.time(), json.dumps(result, ensure_ascii=False),
+                (state, None if pending else time.time(), json.dumps(result, ensure_ascii=False),
                  task_id))
         return self.get_task(task_id)
 
     def counts(self) -> Dict[str, int]:
-        counts = {"total": 0, "queued": 0, "running": 0, "done": 0,
+        counts = {"total": 0, "queued": 0, "running": 0, "cancelling": 0, "done": 0,
                   "failed": 0, "cancelled": 0}
         with self._lock:
             rows = self._conn.execute(
@@ -1562,7 +1593,14 @@ class RouterServer(ThreadingHTTPServer):
         """Deliver only the exact task identity; never a selected-session stop."""
         worker = self.store.get_worker(task["worker"]) or {}
         base = worker.get("control_url")
-        if not base:
+        conn = self.current_conn(task["worker"])
+        if worker.get("control_sse") and conn and not conn.closed:
+            try:
+                conn.queue.put_nowait({"event": "task_cancel", "data": {"task_id": task["task_id"]}})
+                delivery = {"ok": True, "confirmed": False, "via": "sse"}
+            except queue.Full:
+                delivery = {"ok": False, "error": "worker_control_queue_full"}
+        elif not base:
             delivery = {"ok": False, "error": "worker_control_unavailable"}
         else:
             try:
@@ -1583,7 +1621,7 @@ class RouterServer(ThreadingHTTPServer):
                         raise ValueError("worker rejected cancellation")
                     if payload.get("task_id") != task["task_id"]:
                         raise ValueError("worker acknowledged a different task")
-                delivery = {"ok": True, "worker": payload}
+                delivery = {"ok": True, "confirmed": payload.get("state") == "cancelled", "worker": payload}
             except Exception as exc:
                 delivery = {"ok": False, "error": type(exc).__name__,
                             "detail": str(exc)[:300]}
@@ -1591,15 +1629,22 @@ class RouterServer(ThreadingHTTPServer):
                 "cancel_forward_%s task=%s worker=%s delivery=%s",
                 "ok" if delivery["ok"] else "failed", task["task_id"],
                 task["worker"], delivery)
-        with self.store._lock:
+        self.record_cancel_delivery(task, delivery)
+        return delivery
+
+    def record_cancel_delivery(self, task: Dict[str, Any], delivery: Dict[str, Any]) -> None:
+        with self.dispatch_lock, self.store._lock:
             current = self.store.get_task(task["task_id"])
-            if current and current["state"] == "cancelled":
+            if current and current["state"] in ("cancelling", "cancelled"):
                 result = current.get("result") or {}
                 result["cancel_delivery"] = delivery
-                self.store._conn.execute(
-                    "UPDATE tasks SET result_json=? WHERE task_id=? AND state='cancelled'",
-                    (json.dumps(result, ensure_ascii=False), task["task_id"]))
-        return delivery
+                if current["state"] == "cancelling" and delivery.get("confirmed"):
+                    result.update(status="cancelled", summary="worker confirmed execution stopped")
+                    self.store.finish_task(task["task_id"], "cancelled", result)
+                else:
+                    self.store._conn.execute(
+                        "UPDATE tasks SET result_json=? WHERE task_id=?",
+                        (json.dumps(result, ensure_ascii=False), task["task_id"]))
 
     # -- connections ---------------------------------------------------- #
     def current_conn(self, name: str) -> Optional[Connection]:
@@ -1672,6 +1717,10 @@ class RouterServer(ThreadingHTTPServer):
             conn.peer_after = message["seq"]
 
     def push(self, conn: Connection, task: Dict[str, Any]) -> bool:
+        with self.store._lock:
+            self.store._conn.execute("UPDATE tasks SET dispatch_attempted=1 WHERE task_id=?",
+                                     (task["task_id"],))
+        task["dispatch_attempted"] = True
         return conn.send_task(task)
 
     def dispatch_one(self, worker: str) -> Optional[Dict[str, Any]]:
@@ -1681,6 +1730,8 @@ class RouterServer(ThreadingHTTPServer):
             if conn is None or conn.closed:
                 return None
             if self.store.running_count(worker) > 0:
+                return None
+            if (self.store.get_worker(worker) or {}).get("busy"):
                 return None
             task = self.store.claim_next_queued(worker)
             if task is None:
@@ -1695,6 +1746,11 @@ class RouterServer(ThreadingHTTPServer):
         """Send every queued task, in creation order (caller holds lock)."""
         conn = self.current_conn(worker)
         if conn is None or conn.closed:
+            return 0
+        info = self.store.get_worker(worker) or {}
+        if info.get("turn_source") == "trainer" and info.get("busy"):
+            return 0
+        if self.store.list_tasks(worker=worker, state="cancelling", limit=1):
             return 0
         sent = 0
         while True:
@@ -1913,6 +1969,8 @@ class RouterHandler(BaseHTTPRequestHandler):
                 return self._send_json(*self._task_create(body))
             if len(parts) == 3 and parts[0] == "tasks" and parts[2] == "cancel":
                 return self._send_json(*self._task_cancel(parts[1]))
+            if len(parts) == 3 and parts[0] == "tasks" and parts[2] == "cancel-ack":
+                return self._send_json(*self._task_cancel_ack(parts[1], body))
             if parts == ["subscriptions"]:
                 return self._send_json(*self._subscription_create(body))
             if parts == ["approvals"]:
@@ -2269,7 +2327,10 @@ class RouterHandler(BaseHTTPRequestHandler):
         note = body.get("note")
         note = str(note).strip() if note is not None else None
         control_url = worker_control_url(body.get("control_url"))
-        worker, created = self.server.store.upsert_worker(name, version, note, control_url)
+        control_sse = body.get("control_sse", False)
+        if not isinstance(control_sse, bool):
+            raise BadRequest("control_sse must be a boolean")
+        worker, created = self.server.store.upsert_worker(name, version, note, control_url, control_sse)
         return {
             "ok": True,
             "name": name,
@@ -2291,10 +2352,18 @@ class RouterHandler(BaseHTTPRequestHandler):
         progress_at = body.get("progress_at")
         if progress_at is not None:
             progress_at = parse_epoch(progress_at, "progress_at")
-        task_id = body.get("task_id")
-        task_id = str(task_id).strip() if task_id is not None else None
-        if not self.server.store.heartbeat(name, state, progress_at, task_id):
-            return 404, {"ok": False, "error": "unknown_worker", "worker": name}
+        task_id = body.get("task_id", UNSET)
+        if task_id is not UNSET and task_id is not None:
+            task_id = str(task_id).strip() or None
+        turn_source = body.get("turn_source", UNSET)
+        if turn_source is not UNSET and turn_source not in (None, "trainer", "router"):
+            raise BadRequest("turn_source must be trainer, router or null")
+        with self.server.dispatch_lock:
+            if not self.server.store.heartbeat(name, state, progress_at, task_id, turn_source):
+                return 404, {"ok": False, "error": "unknown_worker", "worker": name}
+            self.server.dispatch_one(name)
+        for task in self.server.store.list_tasks(worker=name, state="cancelling", limit=1):
+            self.server.cancel_execution(task)
         worker = self.server.store.get_worker(name)
         assert worker is not None
         return 200, {
@@ -2332,6 +2401,9 @@ class RouterHandler(BaseHTTPRequestHandler):
                 return 400, {"ok": False, "error": "worker_mismatch",
                              "task_id": task_id, "worker": task["worker"],
                              "reported_by": name}
+            if task["state"] == "cancelling":
+                return 202, {"ok": True, "task_id": task_id, "state": "cancelling",
+                             "message": "等待执行体确认停止", "dispatched_next": None}
             if task["state"] in TERMINAL_STATES:
                 log.info("result ignored (already %s) task=%s worker=%s",
                          task["state"], task_id, name)
@@ -2357,6 +2429,7 @@ class RouterHandler(BaseHTTPRequestHandler):
             "ok": True,
             "task_id": task_id,
             "state": status,
+            "finished_at": task["finished_at"],
             "notified": notified,
             "dispatched_next": dispatched["task_id"] if dispatched else None,
         }
@@ -2427,7 +2500,8 @@ class RouterHandler(BaseHTTPRequestHandler):
                              "worker": worker_name}
 
             online = self.server.online(worker_name)
-            if online and store.running_count(worker_name) == 0:
+            if (online and store.running_count(worker_name) == 0 and
+                    not store.get_worker(worker_name)["busy"]):
                 task = store.create_task(
                     worker_name, goal, context, workspace, urgency,
                     state="running", deadline_s=deadline_s,
@@ -2523,26 +2597,49 @@ class RouterHandler(BaseHTTPRequestHandler):
             task = self.server.store.get_task(task_id)
             if task is None:
                 return 404, {"ok": False, "error": "unknown_task", "task_id": task_id}
-            already = task["state"] == "cancelled"
+            already = task["state"] in ("cancelled", "cancelling")
             if not already and task["state"] in TERMINAL_STATES:
                 return 409, {"ok": False, "error": "not_cancellable",
                              "task_id": task_id, "state": task["state"]}
-            was_running = task["state"] == "running"
-            retry_delivery = already and (task.get("result") or {}).get(
-                "cancel_delivery", {}).get("ok") is False
+            was_running = (task["state"] in ("running", "cancelling") or
+                           task["state"] == "queued" and task.get("dispatch_attempted") is not False)
+            retry_delivery = task["state"] == "cancelling"
             if not already:
-                task = self.server.store.cancel_task(task_id)
+                task = self.server.store.cancel_task(task_id, pending=was_running)
                 self.server.store.refresh_counts(task["worker"])
-        delivery = ((task.get("result") or {}).get("cancel_delivery")
+        delivery = ((task.get("result") or {}).get("cancel_delivery") or {"ok": True, "confirmed": True}
                     if already else {"ok": True, "skipped": "queued_task"})
         if was_running or retry_delivery:
             delivery = self.server.cancel_execution(task)
         with self.server.dispatch_lock:
-            dispatched = self.server.dispatch_one(task["worker"]) if not already else None
+            task = self.server.store.get_task(task_id)
+            dispatched = self.server.dispatch_one(task["worker"]) if task["state"] == "cancelled" else None
         log.info("task cancelled id=%s worker=%s delivery=%s", task_id, task["worker"], delivery)
-        return 200, {"ok": True, "task_id": task_id, "state": "cancelled",
+        pending = task["state"] == "cancelling"
+        return (202 if pending else 200), {"ok": bool(delivery.get("ok")), "task_id": task_id, "state": task["state"],
                      "already": already, "cancel_delivery": delivery,
+                     "message": "等待 Worker 确认执行停止" if pending else "执行已停止",
                      "dispatched_next": dispatched["task_id"] if dispatched else None}
+
+    def _task_cancel_ack(self, task_id: str, body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
+        with self.server.dispatch_lock:
+            task = self.server.store.get_task(task_id)
+            if not task:
+                return 404, {"ok": False, "error": "unknown_task"}
+            if body.get("name") != task["worker"]:
+                return 400, {"ok": False, "error": "worker_mismatch"}
+            if task["state"] not in ("cancelling", "cancelled"):
+                return 409, {"ok": False, "error": "cancellation_not_requested", "state": task["state"]}
+            outcome = body.get("outcome")
+            if not isinstance(outcome, dict) or outcome.get("task_id") != task_id:
+                raise BadRequest("exact task cancellation outcome is required")
+            delivery = {"ok": outcome.get("ok") is True,
+                        "confirmed": outcome.get("ok") is True and outcome.get("state") == "cancelled",
+                        "via": "sse", "worker": outcome}
+            self.server.record_cancel_delivery(task, delivery)
+            self.server.dispatch_one(task["worker"])
+            current = self.server.store.get_task(task_id)
+        return 200, {"ok": True, "task_id": task_id, "state": current["state"]}
 
     def _attachment_put(self):
         try:

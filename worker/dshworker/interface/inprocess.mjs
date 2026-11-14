@@ -447,8 +447,7 @@ export class InProcessTransport {
         { threadId: thread.id, turnId: turn.id, message: failure.message });
       try { agent?.cancel({ kind: "user" }); } catch { /* report the liveness failure below */ }
       rejectExpired(Object.assign(new Error(failure.message), { reasonKind: failure.reason }));
-    }, Math.max(1, Math.min(1000, this.noProgressTimeoutMs,
-      Number.isFinite(watch.deadline) ? Math.max(1, watch.deadline - Date.now()) : 1000)));
+    }, Math.max(1, Math.min(1000, this.noProgressTimeoutMs)));
     timer.unref?.();
     try {
       const work = async () => {

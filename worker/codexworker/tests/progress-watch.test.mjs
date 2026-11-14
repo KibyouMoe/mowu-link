@@ -47,12 +47,13 @@ test("tool-only and stream-only changes reset liveness without an assistant repl
   now = 180; assert.equal(watch.failure(), null);
   now = 191; assert.equal(watch.failure().reason, "stuck");
 });
-test("explicit deadlines remain absolute even with continued progress", () => {
+test("explicit deadline metadata cannot expire a progressing task or create a polling spin", () => {
   let now = 0;
   const watch = new ProgressWatch({ deadline: 100, timeoutMs: 500, now: () => now });
   watch.observe({ eventSeq: 1 });
   now = 101; watch.observe({ eventSeq: 2 });
-  assert.equal(watch.failure().reason, "deadline");
+  assert.equal(watch.failure(), null);
+  assert.equal(watch.remainingMs(), 500);
 });
 function manager() {
   return new DesktopManager({ native: async () => {}, listNativeTools: async () => [],
@@ -80,11 +81,16 @@ test("manager HTTP wait reports stuck only after no new progress", async t => {
   const result = await waiting;
   assert.equal(result.status, "stuck"); assert.match(result.reason, /无进展超时/);
 });
-test("manager explicit deadline expires even while task events continue", async t => {
+test("manager keeps waiting beyond an explicit estimate while task events continue", async t => {
   t.mock.timers.enable({ apis: ["Date", "setTimeout"] });
   const m = manager(), waiting = m.waitResult("message", "thread", { deadline_s: 0.1 });
   t.mock.timers.tick(100);
-  assert.equal((await waiting).status, "timeout");
+  await Promise.resolve();
+  m.observeTaskProgress("thread", { eventSeq: 2 });
+  m.state.events.push({ seq: 3, threadId: "thread", messageId: "message",
+    type: "turn.completed", turnId: "turn", payload: { status: "completed", messageIds: ["message"] } });
+  t.mock.timers.tick(100);
+  assert.equal((await waiting).status, "completed");
 });
 
 test("native Desktop tool completion is progress, repeated status observations are not", async () => {

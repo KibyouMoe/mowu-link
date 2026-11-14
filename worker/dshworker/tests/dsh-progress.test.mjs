@@ -56,10 +56,12 @@ test("in-process no-progress watchdog cancels and resolves even when whenIdle ne
   assert.equal(f.cancels(), 1); assert.equal(f.turn.reasonKind, "stuck");
   assert.match(f.turn.error, /无进展超时/);
 });
-test("in-process explicit task deadline wins over live events", async t => {
+test("in-process explicit deadline remains advisory while real events continue", async t => {
   const f = await fixture(t, { deadlineMs: 100 });
-  t.mock.timers.tick(100); await f.running;
-  assert.equal(f.cancels(), 1); assert.equal(f.turn.reasonKind, "deadline");
+  t.mock.timers.tick(1000);
+  assert.equal(f.cancels(), 0); assert.equal(f.turn.status, "inProgress");
+  f.complete(); await f.running;
+  assert.equal(f.turn.status, "completed");
 });
 
 test("descendant tool events and streams keep the parent task alive; unrelated agents cannot", async t => {

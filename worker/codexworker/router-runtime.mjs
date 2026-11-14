@@ -48,7 +48,8 @@ export async function startRouterRuntime({ manager, nativeCall, transport = {}, 
     const display = identity.display ?? config.bridgeName ?? name;
     const abort = new AbortController(), signal = abort.signal;
     const stopped = new Error("router_runtime_closed");
-    let closed = false, closing, pending = 0, chain = Promise.resolve(), fallbackNotifier;
+    let closed = false, closing, pending = 0, chain = Promise.resolve(), fallbackNotifier, activeTask;
+    const receivedTasks = new Set(), cancelledTasks = new Set(), cancellations = new Map();
     const check = () => { if (signal.aborted) throw stopped; };
     const sleep = ms => delay(ms, undefined, { signal });
     // Native writes cannot be canceled safely. Stop observing them on shutdown;
@@ -96,7 +97,22 @@ export async function startRouterRuntime({ manager, nativeCall, transport = {}, 
       }
     }
     const client = new LifetimeClient({ url: process.env.CODEXWORKER_ROUTER_URL ?? settings.url ?? "http://127.0.0.1:8790",
-      token, name, version, heartbeatMs: settings.heartbeatMs, subscriptions: normalizeSubscriptionConfig(config.subscriptions),
+      token, name, version, heartbeatMs: settings.heartbeatMs ?? 5000,
+      controlSse: typeof manager.cancelRouterTask === "function",
+      activityReader: () => {
+        const session = manager.state.sessions[activeTask?.threadId ?? manager.state.selectedThreadId];
+        const active = session?.activeTurnId;
+        const initiator = session?.turnInitiators?.[active];
+        const routerTurn = activeTask && (activeTask.turnId === active ||
+          session?.turnMessages?.[active]?.includes(activeTask.messageId));
+        if (active && !routerTurn) {
+          const progressAt = manager.taskProgress?.get(session.threadId)?.lastProgressAt;
+          return { state: "running", taskId: initiator?.kind === "hermes" ? initiator.taskId : null,
+            turnSource: initiator?.kind === "hermes" && initiator.taskId ? "router" : "trainer",
+            ...(progressAt != null ? { progressAt: progressAt / 1000 } : {}) };
+        }
+        return { ...client.activity, turnSource: activeTask ? "router" : null };
+      }, subscriptions: normalizeSubscriptionConfig(config.subscriptions),
       subscriptionPollMs: config.subscriptionPollMs ?? settings.subscriptionPollMs,
       logger: (level, event, fields) => log(level, event, { component: "router", ...fields }) });
     const dryRun = () => process.env.CODEXWORKER_FEISHU_DRY_RUN === "1";
@@ -140,35 +156,68 @@ export async function startRouterRuntime({ manager, nativeCall, transport = {}, 
       return { threadId, previous };
     }
     async function read(threadId) {
-      return observe(() => manager.read(threadId, manager.state.sessions[threadId]?.hostId, { turnLimit: 30 }));
+      return observe(() => manager.read(threadId, manager.state.sessions[threadId]?.hostId,
+        { turnLimit: 30, requireCompleteInputs: false }));
     }
     async function waitTurn({ threadId, messageId, marker, deadline, initialTurnId = null }) {
-      let turnId = initialTurnId, misses = 0;
+      let turnId = initialTurnId, deadlineNotified = false, lastReadError;
       const watch = new ProgressWatch({ deadline, timeoutMs: noProgressTimeoutMs(config) });
       for (;;) {
         check();
+        if (activeTask && cancelledTasks.has(activeTask.taskId)) return { status: "cancelled" };
         const saved = await receipt(messageId);
-        if (saved?.error) throw new Error(`${saved.error.error}: ${saved.error.detail ?? "dispatch rejected"}`);
-        const snapshot = await read(threadId);
+        const nativeProgress = manager.taskProgress?.get(threadId)?.lastProgressAt;
+        if (nativeProgress > watch.lastProgressAt) watch.lastProgressAt = nativeProgress;
+        if (saved?.error && !["accepted", "unknown"].includes(saved.nativeDispatch?.status))
+          throw new Error(saved.error.detail ?? "客户端暂未接收任务，请保持客户端打开并检查连接后重试当前工单。");
+        const session = manager.state.sessions[threadId];
+        if (session?.queue?.some(request => request.messageId === messageId)) {
+          watch.touch(); await sleep(500); continue;
+        }
+        let snapshot;
+        try { snapshot = await read(threadId); }
+        catch (error) {
+          if (!error.body?.retryable && !error.nativeReachable &&
+              !["EPIPE", "ECONNREFUSED", "ETIMEDOUT"].includes(error.code)) throw error;
+          const code = error.body?.error ?? error.code;
+          if (lastReadError !== code) log("warn", "router_task_read_pending", { threadId, turnId, code,
+            message: "客户端读回暂不可用，保留原任务等待连接恢复" });
+          lastReadError = code;
+          const failure = watch.failure();
+          if (failure) return { status: "unknown", timedOut: true, ...failure };
+          await sleep(Math.max(1, Math.min(1000, watch.remainingMs())));
+          continue;
+        }
+        lastReadError = null;
         const expected = turnId ?? saved?.nativeTurnId;
         const found = expected ? snapshot.turns?.find(turn => turn.id === expected) : findRouterTurn(snapshot, marker);
         if (found) {
-          turnId = found.id; misses = 0;
+          turnId = found.id;
+          if (activeTask?.messageId === messageId) activeTask.turnId = turnId;
+          if (activeTask?.messageId === messageId &&
+              (saved?.nativeTurnId !== turnId || saved?.nativeDispatch?.status !== "accepted"))
+            await observe(() => manager.confirmRouterTaskTurn?.(activeTask.taskId, threadId, found));
           if (TERMINAL_TURN.has(found.status)) {
             await observe(() => manager.captureTaskQuestions(threadId, found));
             return { turn: found, status: found.status };
           }
-        } else if (turnId && ++misses > 20) throw new Error(`turn ${turnId} left the readable window before it completed`);
+        }
         watch.observe(found ?? snapshot.turns);
         if (found?.waitingForInput) watch.touch();
+        if (!deadlineNotified && Date.now() >= deadline) {
+          deadlineNotified = true;
+          log("warn", "router_task_deadline_notice", { threadId, turnId, deadline,
+            message: "预计完成时间已到，继续等待任务进展" });
+        }
         const failure = watch.failure();
         if (failure) return { turn: found, status: found?.status, timedOut: true, ...failure };
         await sleep(Math.max(1, Math.min(500, watch.remainingMs())));
       }
     }
     async function deliver({ messageId, threadId, previous, text, origin }) {
-      const request = { protocolVersion: PROTOCOL, messageId, source: "hermes", origin,
-        text, targetThreadId: threadId, delivery: "steer" };
+      const request = previous?.request ? structuredClone(previous.request) : {
+        protocolVersion: PROTOCOL, messageId, source: "hermes", origin,
+        text, targetThreadId: threadId, delivery: origin === "router" ? "queue" : "steer" };
       if (!previous && !dryRun()) await observe(() => manager.mirrorInput(request));
       // Always let the manager resolve durable receipt semantics; never retry a
       // native write directly, including accepted/queued/unknown dispatches.
@@ -179,19 +228,32 @@ export async function startRouterRuntime({ manager, nativeCall, transport = {}, 
       if (!taskId) { log("warn", "router_task_without_id"); return; }
       const messageId = routerMessageId(taskId), marker = routerMarker(taskId);
       const goal = String(task.goal ?? "").trim(), deadline = taskDeadline(task);
-      let threadId = null, turnId = null, status = "failed", summary = "", failure = "";
+      let threadId = null, turnId = null, status = "failed", summary = "", failure = "", finishedAt;
       try {
+        if (manager.state.routerCancellations?.[taskId]) { await cancelTask(taskId); return; }
         transport.taskStarted?.(task, deadline);
         client.setActivity({ state: "running", taskId });
         try {
           if (!goal) throw new Error("router task has an empty goal");
           const destination = await target(messageId); threadId = destination.threadId;
+          activeTask = { taskId, threadId, messageId, turnId: null };
+          if (cancelledTasks.has(taskId)) return;
           if (!destination.previous && (!manager.transcriptEnabled || dryRun())) await board({ taskId, phase: "start", goal, threadId });
           const cwd = manager.state.sessions[threadId].cwd;
           if (task.workspace && cwd && path.resolve(expandHome(String(task.workspace))) !== path.resolve(cwd))
             log("warn", "router_task_workspace_ignored", { taskId, threadId, sessionCwd: cwd });
-          await deliver({ ...destination, messageId, origin: "router", text: routerPrompt({ taskId, goal, context: task.context }) });
+          try {
+            await deliver({ ...destination, messageId, origin: "router", text: routerPrompt({ taskId, goal, context: task.context }) });
+          } catch (error) {
+            const saved = await receipt(messageId);
+            if (!["accepted", "unknown"].includes(saved?.nativeDispatch?.status)) {
+              throw new Error("客户端尚未确认接收工单，请检查原会话的连接状态后重试当前工单。");
+            }
+            log("warn", "router_task_dispatch_unconfirmed", { taskId, threadId,
+              message: "原生投递结果正在核对，保留原消息回执继续等待" });
+          }
           let waited = await waitTurn({ threadId, marker, messageId, deadline });
+          if (cancelledTasks.has(taskId)) return;
           const consumed = new Set();
           while (waited.status === "completed") {
             const answer = await observe(() => waitForTaskClarification({ manager, router: client, taskId, threadId, consumed,
@@ -209,18 +271,26 @@ export async function startRouterRuntime({ manager, nativeCall, transport = {}, 
           summary = status === "done" ? text || "(completed; no assistant message)" : [failure, text].filter(Boolean).join("\n\n");
         } catch (error) {
           if (closed) return;
-          failure = error.message; summary = `task runner error: ${failure}`;
+          failure = error.message; summary = failure;
           log("error", "router_task_failed", { taskId, threadId, message: failure });
         }
         try {
           check();
           const phase = taskBoardTerminalPhase(status);
           if (phase) await board({ taskId, phase, summary, failure, threadId });
-          await observe(() => client.result({ taskId, status, summary: summary.slice(0, 20_000), artifacts: [],
+          const result = await observe(() => client.result({ taskId, status, summary: summary.slice(0, 20_000), artifacts: [],
             evidence: [{ type: "codex_thread", thread_id: threadId, turn_id: turnId }] }));
+          finishedAt = result.finished_at;
           log("info", "router_result_sent", { taskId, status, threadId, turnId });
-        } finally { client.setActivity({ state: "idle", taskId: null }); }
-      } finally { transport.taskFinished?.(taskId); }
+        } finally {
+          activeTask = null;
+          client.setActivity({ state: "idle", taskId: null, progressAt: finishedAt ?? Date.now() / 1000 });
+          await observe(() => client.heartbeat());
+        }
+      } finally {
+        if (activeTask?.taskId === taskId) activeTask = null;
+        transport.taskFinished?.(taskId);
+      }
     }
     async function runSubscription(event) {
       const source = String(event?.source ?? "").trim() || "(unknown)", kind = String(event?.kind ?? "event"), id = event?.id ?? null;
@@ -240,11 +310,32 @@ export async function startRouterRuntime({ manager, nativeCall, transport = {}, 
     // origins share one chain so task approval attribution cannot interleave.
     function enqueue(run, value) {
       if (closed) return Promise.resolve();
+      if (run === runTask) receivedTasks.add(value.task_id);
       pending++;
       chain = chain.then(() => { check(); return run(value); }).catch(error => {
         if (!closed) log("error", "router_handler_failed", { message: error.message });
       }).finally(() => { pending--; client.setActivity({ state: "idle", taskId: null }); });
       return chain;
+    }
+
+    async function cancelTask(taskId) {
+      if (!/^t-[a-zA-Z0-9_-]+$/.test(taskId ?? "")) return;
+      if (cancellations.has(taskId)) return cancellations.get(taskId);
+      cancelledTasks.add(taskId);
+      const action = (async () => {
+        let outcome;
+        try {
+          const saved = await receipt(routerMessageId(taskId));
+          outcome = await observe(() => manager.cancelRouterTask(taskId,
+            { notDispatched: !saved && receivedTasks.has(taskId) }));
+        } catch (error) {
+          outcome = { ok: false, task_id: taskId, state: "cancelling", error: error.body?.error ?? "worker_cancel_failed" };
+        }
+        log(outcome.state === "cancelled" ? "info" : "warn", "router_cancel_outcome", { taskId, ...outcome });
+        await client._request("POST", `/tasks/${encodeURIComponent(taskId)}/cancel-ack`, { name, outcome });
+      })().finally(() => cancellations.delete(taskId));
+      cancellations.set(taskId, action);
+      return action;
     }
     transport.bindRouter?.(client, `http://${config.host ?? "127.0.0.1"}:${config.port}`);
     let approvalChannel, approvalHandler;
@@ -284,7 +375,11 @@ export async function startRouterRuntime({ manager, nativeCall, transport = {}, 
     manager.routerClient = client; // QuestionRelay.router() reads this instance.
     setActiveRouterClient(client);
     client.start({ onTask: task => enqueue(runTask, task), onSubscriptionEvent: event => enqueue(runSubscription, event),
-      onEvent: (event, payload) => { if (event === "worker_message") void messages.receive(payload).catch(error => {
+      onEvent: (event, payload) => {
+        if (event === "task_cancel") void cancelTask(payload?.task_id).catch(error => {
+          if (!closed) log("warn", "router_cancel_ack_pending", { taskId: payload?.task_id, message: error.message });
+        });
+        if (event === "worker_message") void messages.receive(payload).catch(error => {
         if (!closed) log("warn", "worker_message_pending", { code: error.code ?? "pending", messageId: payload?.message_id });
       }); },
       onConnect: info => { log("info", "router_connected", info); pollMessages(); }, onDisconnect: info => log("warn", "router_disconnected", info) });

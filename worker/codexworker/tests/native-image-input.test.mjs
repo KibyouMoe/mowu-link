@@ -8,9 +8,11 @@ import { createNativeInput } from "../interface/desktop-connection/native-input.
 import { sendNativeInput } from "../interface/native-input-client.mjs";
 import { DesktopManager } from "../desktop-manager.mjs";
 import { projectPublicQuestion, nativeQuestionReply } from "../interface/public-questions.mjs";
+import { callTool } from "../interface/transport/desktop-pipe.mjs";
 
 const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j1WkAAAAASUVORK5CYII=", "base64");
-async function fixture(t, { active = false, dropWrite = false, rejectWrite = false, question = false } = {}) {
+async function fixture(t, { active = false, dropWrite = false, rejectWrite = false, question = false,
+  cancel = false, finishOnCancel = true, message = false } = {}) {
   const stateDir = await mkdtemp(path.join(os.tmpdir(), "native-image-图片-"));
   const messageId = randomUUID(), threadId = randomUUID(), owner = { pid: 700, startedAt: "test Desktop lifetime" };
   const image = path.join(stateDir, "feishu-images", "original.png");
@@ -31,18 +33,32 @@ async function fixture(t, { active = false, dropWrite = false, rejectWrite = fal
     receipt.nativeInputHash = createHash("sha256").update(JSON.stringify(request.prompt)).digest("hex");
     state.selectionEpoch = 4; state.publicQuestions = { [publicQuestion.questionId]: publicQuestion };
   }
+  if (cancel) {
+    Object.assign(request, { operation: 'cancel', taskId: 't-cancel-test', turnId: 'active-turn' });
+    receipt.request = { source: 'hermes', origin: 'router', text: '[router t-cancel-test] original task' };
+    receipt.nativeTurnId = 'active-turn'; receipt.nativeDispatch.status = 'accepted';
+    delete request.images; delete request.prompt; delete request.delivery;
+  }
+  if (message) {
+    Object.assign(request, { operation: "message", taskId: "t-message-test",
+      prompt: "[router t-message-test] real queued task", delivery: "queue" });
+    delete request.images;
+    receipt.request = { source: "hermes", origin: "router", text: request.prompt };
+    receipt.nativeInputHash = createHash("sha256").update(JSON.stringify(request.prompt)).digest("hex");
+  }
   const saveAction = () => writeFile(path.join(stateDir, "question-actions.json"),
     JSON.stringify({ entries: { [publicQuestion.questionId]: action } }));
   if (question) await saveAction();
   const save = () => writeFile(path.join(stateDir, "desktop-manager-state.json"), JSON.stringify(state));
   await writeFile(path.join(stateDir, "desktop-config.local.json"), JSON.stringify({ autoStart: true }));
-  await save(); const calls = []; let controller, wrote;
+  await save(); const calls = []; let controller, wrote, turnStatus = active ? 'inProgress' : null;
   const writeStarted = new Promise(resolve => { wrote = resolve; });
   controller = await createNativeInput({ stateDir, owner, send: message => {
     calls.push(message);
+    if (message.method === 'turn/interrupt' && finishOnCancel) turnStatus = 'interrupted';
     if (message.method !== "thread/turns/list") { wrote(); if (dropWrite) return; }
     const response = message.method === "thread/turns/list"
-      ? { result: { data: active ? [{ id: "active-turn", status: "inProgress" }] : [] } }
+      ? { result: { data: turnStatus ? [{ id: "active-turn", status: turnStatus }] : [] } }
       : rejectWrite ? { error: { code: -32000, message: "original native rejection" } }
       : { result: message.method === "turn/start" ? { turn: { id: "native-turn" } }
         : message.method === "thread/queue/add" ? { queuedSubmission: { id: messageId } } : { turnId: "active-turn" } };
@@ -51,9 +67,88 @@ async function fixture(t, { active = false, dropWrite = false, rejectWrite = fal
   const env = { ...controller.env, CODEXWORKER_DESKTOP_PID: String(owner.pid), RUDOLF_BRIDGE_DESKTOP_STARTED_AT: owner.startedAt };
   t.after(async () => { await controller.close(); await rm(stateDir, { recursive: true, force: true }); });
   return { stateDir, controller, request, env, state, save, calls, image, writeStarted, action, saveAction,
+    setTurnStatus: status => { turnStatus = status; },
     send: value => sendNativeInput(value ?? request, { env }),
     ledger: async () => JSON.parse(await readFile(path.join(stateDir, "native-image-receipts", messageId + ".json"), "utf8")) };
 }
+
+test("router text uses the existing native connection and one durable message UUID", async t => {
+  const f = await fixture(t, { message: true });
+  f.state.selectedThreadId = "another-selected-chat"; await f.save();
+  f.controller.client({ method: "initialized" });
+  const result = await f.send();
+  assert.deepEqual(await f.send(), result);
+  assert.deepEqual(f.calls.map(call => call.method), ["thread/turns/list", "turn/start"]);
+  assert.deepEqual(f.calls[1].params.input, [{ type: "text", text: f.request.prompt }]);
+  assert.equal(f.calls[1].params.clientUserMessageId, f.request.messageId);
+  const saved = JSON.parse(await readFile(path.join(f.stateDir, "native-message-receipts", f.request.messageId + ".json"), "utf8"));
+  assert.equal(saved.status, "accepted");
+  assert.equal(saved.result.turnId, "native-turn");
+});
+
+test("a busy router target defers before writing and can retry the same UUID when idle", async t => {
+  const f = await fixture(t, { message: true, active: true });
+  f.controller.client({ method: "initialized" });
+  await assert.rejects(f.send(), error => error.nativeErrorCode === "native_task_busy" && error.nativeImageOutcome === "notAttempted");
+  await assert.rejects(readFile(path.join(f.stateDir, "native-message-receipts", f.request.messageId + ".json")), { code: "ENOENT" });
+  assert.deepEqual(f.calls.map(call => call.method), ["thread/turns/list"]);
+  f.setTurnStatus("completed");
+  await f.send();
+  assert.equal(f.calls.filter(call => call.method === "turn/start").length, 1);
+  assert.equal(f.calls.some(call => call.method === "turn/steer"), false);
+});
+
+test("router native input rejects unrelated origins and mismatched tasks before RPC", async t => {
+  const f = await fixture(t, { message: true });
+  f.controller.client({ method: "initialized" });
+  await assert.rejects(f.send({ ...f.request, taskId: "t-other" }), /task_receipt_mismatch/);
+  f.state.receipts[f.request.messageId].request.origin = "worker-chat"; await f.save();
+  await assert.rejects(f.send(), /task_receipt_mismatch/);
+  assert.equal(f.calls.length, 0);
+});
+
+test("router native delivery remains available with the Desktop renderer pipe unavailable", async t => {
+  const f = await fixture(t, { message: true });
+  f.controller.client({ method: "initialized" });
+  const values = { ...f.env, CODEX_APP_TOOLS_PIPE_PATH: "renderer-pipe-is-unavailable" };
+  const previous = Object.keys(values).map(key => [key, process.env[key]]);
+  Object.assign(process.env, values);
+  t.after(() => { for (const [key, value] of previous) value === undefined ? delete process.env[key] : process.env[key] = value; });
+  const response = await callTool("send_message_to_thread", { threadId: f.request.threadId, prompt: f.request.prompt,
+    nativeTask: { taskId: f.request.taskId, messageId: f.request.messageId } }, { threadId: f.request.threadId });
+  assert.equal(JSON.parse(response.contentItems[0].text).turnId, "native-turn");
+  assert.equal(f.calls.filter(call => call.method === "turn/start").length, 1);
+});
+
+test('native task cancellation interrupts only the receipted turn and confirms its terminal state', async t => {
+  const f = await fixture(t, { cancel: true, active: true });
+  f.controller.client({ method: 'initialized' });
+  const result = JSON.parse((await f.send()).contentItems[0].text);
+  assert.equal(result.state, 'cancelled');
+  assert.deepEqual(f.calls.map(call => call.method), ['thread/turns/list', 'turn/interrupt', 'thread/turns/list']);
+  assert.deepEqual(f.calls[1].params, { threadId: f.request.threadId, turnId: 'active-turn' });
+  await f.send();
+  assert.equal(f.calls.filter(call => call.method === 'turn/interrupt').length, 1);
+});
+
+test('native cancellation remains pending until the execution is observed stopped', async t => {
+  const f = await fixture(t, { cancel: true, active: true, finishOnCancel: false });
+  f.controller.client({ method: 'initialized' });
+  assert.equal(JSON.parse((await f.send()).contentItems[0].text).state, 'cancelling');
+  f.state.receipts[f.request.messageId].nativeTurnId = 'different-turn'; await f.save();
+  const count = f.calls.length;
+  await assert.rejects(f.send(), /cancel_receipt_mismatch/);
+  assert.equal(f.calls.length, count);
+});
+
+test('native cancellation rejects another task and trainer-only receipts before any RPC', async t => {
+  const f = await fixture(t, { cancel: true, active: true });
+  f.controller.client({ method: 'initialized' });
+  await assert.rejects(f.send({ ...f.request, taskId: 't-other' }), /cancel_receipt_mismatch/);
+  f.state.receipts[f.request.messageId].request.source = 'trainer'; await f.save();
+  await assert.rejects(f.send(), /cancel_receipt_mismatch/);
+  assert.equal(f.calls.length, 0);
+});
 
 test("real saved question answers enter native user input with original question IDs and message UUID", async t => {
   for (const active of [false, true]) {

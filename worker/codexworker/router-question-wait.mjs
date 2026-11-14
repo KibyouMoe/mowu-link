@@ -1,7 +1,7 @@
 import { setTimeout as delay } from "node:timers/promises";
 
 // A known clarification wait is not a stalled model turn. Keep the task open
-// without a new wall-clock limit; still honor explicit deadlines and cancel.
+// without a wall-clock limit. Cancellation remains authoritative.
 export async function waitForTaskClarification({ manager, router, taskId, threadId, consumed = new Set(),
   deadline = Infinity, sleep = delay, now = Date.now, log = () => {} }) {
   let lastCheck = -Infinity, announced = false;
@@ -12,7 +12,6 @@ export async function waitForTaskClarification({ manager, router, taskId, thread
     const question = questions.sort((a,b)=>String(a.createdAt).localeCompare(String(b.createdAt)))[0];
     const action = manager.questions.state.entries[question.questionId];
     if (!action) throw Error("澄清状态不可用；任务未标记完成。");
-    if (Number.isFinite(deadline) && now() >= deadline) throw Error("任务的显式 deadline 已到，澄清尚未完成。");
     if (["answered", "skipped"].includes(action.status)) {
       const observed = action.nativeAnswerObservation;
       if (observed?.messageId === action.nativeMessageId && observed.threadId === threadId &&

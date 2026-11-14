@@ -43,7 +43,12 @@ export async function listTools() {
   const path = pipePath();
   if (!path) throw new Error(unavailableReason());
   const result = await pipeRequest(path, "tools/list", { threadStartKind: "all" });
-  return Array.isArray(result?.tools) ? result.tools : [];
+  const tools = Array.isArray(result?.tools) ? result.tools : [];
+  if (process.env.CODEXWORKER_NATIVE_INPUT_DESCRIPTOR && capabilities.imageInput) tools.push({
+    name: "cancel_task", namespace: "codexworker", inputSchema: { type: "object", properties: {
+      taskId: { type: "string" }, messageId: { type: "string" }, threadId: { type: "string" }, turnId: { type: "string" },
+    }, required: ["taskId", "messageId", "threadId", "turnId"] } });
+  return tools;
 }
 
 /**
@@ -53,6 +58,14 @@ export async function listTools() {
  * @param {number} timeoutMs
  */
 export async function callTool(toolName, args, invocation, timeoutMs = 5000) {
+  if (toolName === "cancel_task") return sendNativeInput({ ...args, operation: "cancel" }, { timeoutMs });
+  if (toolName === "send_message_to_thread" && args.nativeTask && capabilities.imageInput &&
+      process.env.CODEXWORKER_NATIVE_INPUT_DESCRIPTOR) {
+    if (invocation?.threadId !== args.threadId) throw new Error("Native task target must match its owning conversation");
+    return sendNativeInput({ operation: "message", threadId: args.threadId, prompt: args.prompt,
+      taskId: args.nativeTask.taskId, messageId: args.nativeTask.messageId, delivery: "queue" }, { timeoutMs });
+  }
+  if (args.nativeTask) { args = { ...args }; delete args.nativeTask; }
   const path = pipePath();
   if (!path) throw new Error(unavailableReason());
   const tools = await listTools();

@@ -10,7 +10,8 @@ function fixture() {
   const logs = [];
   let cancels = 0;
   const transport = { threads: new Map([["thread", thread]]),
-    live: new Map([["thread", { agent: { cancel: () => { cancels++; } } }]]),
+    live: new Map([["thread", { agent: { cancel: () => { cancels++; },
+      whenIdle: async () => { turn.status = "interrupted"; } } }]]),
     save: async () => {}, approvals: { setRouter() {} },
     log: (...args) => logs.push(args) };
   const control = installTaskControl(transport);
@@ -20,7 +21,15 @@ test("task cancellation targets the exact running task and invokes agent.cancel"
   const f = fixture();
   const result = await f.control.cancelTask("t-old");
   assert.equal(result.cancelled, true); assert.equal(f.cancels(), 1);
+  assert.equal(result.state, "cancelled");
   assert.equal(f.turn.cancelRequested, true); assert.equal(f.newer.cancelRequested, undefined);
+});
+test("a cancel request keeps its intermediate state while the agent is still running", async () => {
+  const f = fixture();
+  f.transport.live.get("thread").agent.whenIdle = () => new Promise(() => {});
+  const result = await f.control.cancelTask("t-old");
+  assert.equal(result.state, "cancelling"); assert.equal(result.cancelled, false);
+  assert.equal(f.turn.status, "inProgress");
 });
 test("queued cancellation removes only that turn and never cancels its parent agent", async () => {
   const f = fixture();

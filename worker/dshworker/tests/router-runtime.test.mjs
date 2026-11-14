@@ -118,7 +118,7 @@ test("SSE task uses selected conversation, provenance, board, receipts and termi
   assert.equal(manager.writes[0].messageId, routerMessageId("t-success"));
   assert.equal(manager.writes[0].origin, "router");
   assert.equal(manager.writes[0].source, "hermes");
-  assert.equal(manager.writes[0].delivery, "steer");
+  assert.equal(manager.writes[0].delivery, "queue");
   assert.match(manager.writes[0].text, /来自超级溪流/);
   assert.match(manager.writes[0].text, /router context/);
   assert.equal(manager.boards.length, 1, "no duplicate success board");
@@ -163,6 +163,9 @@ test("result retry after runtime restart uses archived receipt and original targ
   await runtime.close();
   const id = routerMessageId(task.task_id);
   manager.archive.set(id, manager.state.receipts[id]); delete manager.state.receipts[id];
+  // A pre-upgrade receipt used steer. Reuse its exact saved request even though
+  // newly created router tasks now default to queue.
+  manager.archive.get(id).request.delivery = "steer";
   manager.state.selectedThreadId = "thread-2";
   const next = await startRouterRuntime(options); t.after(() => next.close());
   await until(() => next.client.connected);
@@ -232,14 +235,82 @@ test("approval channel preserves grant and denial decisions", async t => {
   assert.equal(runtime.busy(), false);
 });
 
-test("explicit deadline produces a failed result and one failure board, without canceling native task", async t => {
-  const { router, manager } = await setup(t, manager => { manager.status = "inProgress"; });
+test("explicit deadline emits a notice and keeps the progressing turn open", async t => {
+  const { router, manager, logs } = await setup(t, manager => { manager.status = "inProgress"; });
   router.push({ task_id: "t-deadline", goal: "slow", deadline_s: 0.03 });
-  await until(() => router.results.length === 1);
-  assert.equal(router.results[0].status, "failed");
-  assert.match(router.results[0].summary, /deadline_s/);
-  assert.equal(manager.boards.length, 2);
+  await until(() => logs.some(row => row.event === "router_task_deadline_notice"));
+  assert.equal(router.results.length, 0);
   assert.equal(manager.turns[0].status, "inProgress");
+  manager.turns[0].status = "completed";
+  await until(() => router.results.length === 1);
+  assert.equal(router.results[0].status, "done");
+  assert.equal(manager.boards.length, 1);
+});
+
+test("task result reads tolerate unavailable old inputs after native acceptance", async t => {
+  const { router, manager } = await setup(t, manager => {
+    const read = manager.read.bind(manager);
+    manager.read = async (threadId, hostId, options) => {
+      assert.equal(options.requireCompleteInputs, false);
+      return read(threadId, hostId, options);
+    };
+  });
+  router.push({ task_id: "t-readback", goal: "already received" });
+  await until(() => router.results.length === 1);
+  assert.equal(router.results[0].status, "done");
+  assert.equal(manager.writes.length, 1);
+});
+
+test("heartbeat exposes trainer activity and clears a finished task identity", async t => {
+  const { manager, runtime, router } = await setup(t);
+  manager.state.sessions['thread-1'].activeTurnId = 'trainer-turn';
+  await runtime.client.heartbeat();
+  let beat = router.calls.filter(call => call.path === '/heartbeat').at(-1).body;
+  assert.equal(beat.state, 'running');
+  assert.equal(beat.turn_source, 'trainer');
+  assert.equal(beat.task_id, null);
+  delete manager.state.sessions['thread-1'].activeTurnId;
+  runtime.client.setActivity({ state: 'idle', taskId: null, progressAt: 123 });
+  await runtime.client.heartbeat();
+  beat = router.calls.filter(call => call.path === '/heartbeat').at(-1).body;
+  assert.equal(beat.task_id, null);
+  assert.equal(beat.turn_source, null);
+  assert.equal(beat.progress_at, 123);
+});
+
+test('an uncertain native send is observed by its original receipt without replaying the input', async t => {
+  const { router, manager } = await setup(t, manager => {
+    const message = manager.message.bind(manager);
+    manager.message = async request => {
+      await message(request);
+      const saved = manager.state.receipts[request.messageId];
+      saved.nativeDispatch.status = 'unknown';
+      saved.error = { error: 'codex_app_server_error', detail: 'native reply lost' };
+      throw Error('Native send_message_to_thread failed');
+    };
+  });
+  router.push({ task_id: 't-unknown', goal: 'actually received' });
+  await until(() => router.results.length === 1);
+  assert.equal(router.results[0].status, 'done'); assert.equal(manager.writes.length, 1);
+});
+
+test('SSE cancellation reaches the named execution and reports confirmation independently of its turn waiter', async t => {
+  const calls = [];
+  const { router, manager } = await setup(t, manager => {
+    manager.status = 'inProgress';
+    manager.cancelRouterTask = async taskId => {
+      calls.push(taskId); manager.turns[0].status = 'interrupted';
+      return { ok: true, task_id: taskId, state: 'cancelled' };
+    };
+  });
+  router.push({ task_id: 't-cancel', goal: 'wait for cancellation' });
+  await until(() => manager.writes.length === 1);
+  router.streams.at(-1).write('event: task_cancel\ndata: '+JSON.stringify({ task_id: 't-cancel' })+'\n\n');
+  await until(() => router.calls.some(call => call.path === '/tasks/t-cancel/cancel-ack'));
+  const ack = router.calls.find(call => call.path === '/tasks/t-cancel/cancel-ack');
+  assert.deepEqual(calls, ['t-cancel']);
+  assert.equal(ack.body.outcome.state, 'cancelled');
+  assert.equal(router.results.length, 0);
 });
 
 test("no-progress timeout does not treat unchanged reads as progress", async t => {

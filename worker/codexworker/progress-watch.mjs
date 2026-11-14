@@ -36,10 +36,9 @@ export class ProgressWatch {
     if (token !== this.token) { this.token = token; this.touch(); }
   }
   remainingMs() {
-    return Math.max(0, Math.min(this.deadline, this.lastProgressAt + this.timeoutMs) - this.now());
+    return Math.max(0, this.lastProgressAt + this.timeoutMs - this.now());
   }
   failure() {
-    if (this.now() >= this.deadline) return { reason: "deadline", message: "显式 deadline_s 已到期" };
     if (this.now() - this.lastProgressAt >= this.timeoutMs)
       return { reason: "stuck", message: `无进展超时：连续 ${this.timeoutMs / 60000} 分钟没有新事件` };
     return null;

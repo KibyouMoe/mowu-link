@@ -79,6 +79,8 @@ export class RouterClient {
     subscriptions = [],
     subscriptionPollMs = DEFAULT_SUBSCRIPTION_POLL_MS,
     logger = null,
+    activityReader = null,
+    controlSse = false,
   } = {}) {
     if (!name || typeof name !== "string") throw new Error("router client needs a worker name");
     if (!token || typeof token !== "string") throw new Error("router client needs a token");
@@ -109,6 +111,8 @@ export class RouterClient {
     this.lastError = null;
     this.lastDisconnectReason = null;
     this.activity = { state: "idle", taskId: null };
+    this.activityReader = activityReader;
+    this.controlSse = controlSse;
     this.loopPromise = null;
     this.abort = null;
     this.sleepTimer = null;
@@ -188,6 +192,7 @@ export class RouterClient {
       name: this.name,
       ...(this.version ? { version: this.version } : {}),
       note: "codexworker router client",
+      ...(this.controlSse ? { control_sse: true } : {}),
     });
     this.registered = true;
     this.log("info", "router_register_ok", {
@@ -197,18 +202,20 @@ export class RouterClient {
   }
 
   /** Send one heartbeat. `state` defaults to the activity the task runner set. */
-  async heartbeat({ state, taskId, progressAt } = {}) {
+  async heartbeat(overrides = {}) {
+    const activity = { ...this.activity, ...await this.activityReader?.(), ...overrides };
     const body = await this._request("POST", "/heartbeat", {
       name: this.name,
-      state: state ?? this.activity.state ?? "idle",
-      ...((taskId ?? this.activity.taskId) ? { task_id: taskId ?? this.activity.taskId } : {}),
-      ...(progressAt != null ? { progress_at: progressAt } : {}),
+      state: activity.state ?? "idle",
+      task_id: activity.taskId ?? null,
+      turn_source: activity.turnSource ?? null,
+      ...(activity.progressAt != null ? { progress_at: activity.progressAt } : {}),
     });
     return body;
   }
 
-  setActivity({ state = "idle", taskId = null } = {}) {
-    this.activity = { state, taskId };
+  setActivity({ state = "idle", taskId = null, progressAt = this.activity.progressAt } = {}) {
+    this.activity = { state, taskId, ...(progressAt != null ? { progressAt } : {}) };
   }
 
   async getTask(taskId) {

@@ -128,7 +128,7 @@ test("registers, parses SSE tasks, beats, reports and notifies", async () => {
     client.setActivity({ state: "running", taskId: "t-1" });
     await client.heartbeat();
     const beat = router.calls.at(-1);
-    assert.deepEqual(beat, { path: "/heartbeat", body: { name: "TestWorker", state: "running", task_id: "t-1" } });
+    assert.deepEqual(beat, { path: "/heartbeat", body: { name: "TestWorker", state: "running", task_id: "t-1", turn_source: null } });
 
     await client.result({ taskId: "t-1", status: "done", summary: "OK", evidence: [{ thread_id: "th" }] });
     assert.deepEqual(router.calls.at(-1).body, {

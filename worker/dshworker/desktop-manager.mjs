@@ -33,6 +33,7 @@ import { defaultPublicJournalRoot } from "./interface/journal-paths.mjs";
 import { BRIDGE_HELP, goalPrompt } from "./feishu-commands.mjs";
 import { readLocalResumeCatalog } from "./local-resume-catalog.mjs";
 import { routerStatus } from "./router-client.mjs";
+import { routerMessageId, routerMarker, findRouterTurn } from "./router-tasks.mjs";
 import { resumePage, resumeListText } from "./resume-list.mjs";
 import { hermesChunks } from "./hermes-feishu-format.mjs";
 import { isAbandonedText, isUnconfirmedText } from "./text-receipt-review.mjs";
@@ -70,6 +71,7 @@ export function publicItems(snapshot) {
         const text = item.text ?? (item.content ?? []).map(c => c.text ?? "").join("\n");
         result.push({ key, turnId: turn.id, kind: "trainer", text });
       } else if (item.type === "functionCallOutput" && ["create_thread", "send_message_to_thread"].includes(item.name)) {
+        if (item.output?.truncated === true) continue;
         const raw = typeof item.output === "string" ? item.output : item.output?.text;
         const start = raw?.indexOf("<input>") ?? -1;
         const end = raw?.lastIndexOf("</input>") ?? -1;
@@ -939,7 +941,7 @@ export class DesktopManager {
     return cwd;
   }
 
-  async read(threadId, hostId, { turnLimit = 10 } = {}) {
+  async read(threadId, hostId, { turnLimit = 10, requireCompleteInputs = true } = {}) {
     // Public assistant/trainer messages and imageView/imageGeneration nodes are
     // returned without raw tool outputs. Those outputs can overflow Desktop's
     // response limit in long chats and are not part of the public relay.
@@ -964,6 +966,12 @@ export class DesktopManager {
     try {
       return await hydrateNativeInputs(snapshot, pageArgs => this.call("read_thread", { ...pageArgs, ...(hostId ? { hostId } : {}) }), this.nativeInputCache);
     } catch (error) {
+      if (error.body?.error === "native_snapshot_incomplete" && !requireCompleteInputs) {
+        // Complete items and real turn status remain usable. Incomplete inputs
+        // stay unavailable for correlation and are never reconstructed/replayed.
+        snapshot.nativeInputHydration = { complete: false };
+        return snapshot;
+      }
       if (error.body?.error === "native_snapshot_incomplete") fail(503, error.body.error, error.body.detail, true);
       throw error;
     }
@@ -1094,6 +1102,10 @@ export class DesktopManager {
   async once(request, operation) {
     this.validate(request);
     return this.serial(async () => {
+      const taskId = request.source === "hermes" && request.origin === "router"
+        ? /^\[router (t-[A-Za-z0-9_-]+)\]/.exec(request.text ?? "")?.[1] : null;
+      if (taskId && this.state.routerCancellations?.[taskId])
+        return { accepted: false, messageId: request.messageId, action: "task_cancelled" };
       const fingerprint = requestFingerprint(request);
       const old = this.state.receipts[request.messageId] ?? await this.receiptArchive.get(request.messageId);
       if (old) {
@@ -1331,6 +1343,10 @@ export class DesktopManager {
       await this.save(); throw error;
     }
     const args = { threadId: session.threadId, prompt };
+    if (request.source === "hermes" && request.origin === "router") {
+      const taskId = /^\[router (t-[^\]\s]+)\]/.exec(request.text)?.[1];
+      if (taskId) args.nativeTask = { taskId, messageId: request.messageId };
+    }
     if (this.config.nativeImageInput && request.source === "trainer" && feishuReceipt?.nativeImagePaths?.length) {
       args.nativeImages = [...feishuReceipt.nativeImagePaths];
       args.nativeMessageId = request.messageId; args.nativeDelivery = request.delivery ?? "steer";
@@ -1422,8 +1438,8 @@ export class DesktopManager {
     await this.save();
     try { await this.dispatch(session, request, snapshot); }
     catch (error) {
-      if (request.delivery === "queue" && receipt?.nativeDispatch?.status === "canceled" &&
-          ["queue_target_busy", "local_task_state_pending"].includes(error.body?.error)) {
+      if ((request.delivery === "queue" || request.origin === "router") && receipt?.nativeDispatch?.status === "canceled" &&
+          ["queue_target_busy", "local_task_state_pending", "native_task_busy"].includes(error.body?.error)) {
         session.queue.unshift(request); receipt.nativeDispatch.status = "deferred";
         return; // Pre-write deferral only; unknown native writes never requeue.
       }
@@ -2338,6 +2354,13 @@ export class DesktopManager {
       }
       if (!snapshot && !reload) { this.httpOperations++; counted = true; }
       if (req.method === "GET" && url.pathname === "/health") return json(res, 200, this.health());
+      const cancelTask = /^\/manager\/tasks\/(t-[A-Za-z0-9_-]+)\/cancel$/.exec(url.pathname);
+      if (req.method === "POST" && cancelTask) {
+        body = await readBody(req);
+        if (body.task_id && body.task_id !== cancelTask[1]) fail(400, "task_id_mismatch", "Task ID must match its control URL.");
+        const outcome = await this.cancelRouterTask(cancelTask[1]);
+        return json(res, outcome.state === "cancelled" ? 200 : 202, outcome);
+      }
       if (req.method === "POST" && url.pathname === "/bridge/text-receipts/abandon") {
         const peer = req.socket.remoteAddress?.replace(/^::ffff:/, "");
         if (!["127.0.0.1", "::1"].includes(peer)) fail(403, "loopback_required", "Receipt review is local-only.");
@@ -2475,6 +2498,65 @@ export class DesktopManager {
     }
     watch.observe(value);
     return watch;
+  }
+
+  async confirmRouterTaskTurn(taskId, threadId, turn) {
+    if (findRouterTurn({ turns: [turn] }, routerMarker(taskId))?.id !== turn.id) return;
+    await this.serial(async () => {
+      const id = routerMessageId(taskId), receipt = this.state.receipts[id] ?? await this.receiptArchive.get(id);
+      if (!receipt || receipt.request.origin !== "router" || receipt.nativeTargetThreadId !== threadId ||
+          !["accepted", "unknown"].includes(receipt.nativeDispatch?.status)) return;
+      if (receipt.nativeTurnId && receipt.nativeTurnId !== turn.id) return;
+      this.state.receipts[id] = receipt;
+      receipt.nativeTurnId = turn.id;
+      receipt.nativeDispatch.status = "accepted";
+      delete receipt.error;
+      const session = this.session(threadId);
+      session.turnMessages[turn.id] ??= [];
+      if (!session.turnMessages[turn.id].includes(id)) session.turnMessages[turn.id].push(id);
+      rememberTurnInitiator(session, turn.id, receipt.request);
+      await this.save();
+    });
+  }
+
+  async cancelRouterTask(taskId, { notDispatched = false } = {}) {
+    if (!/^t-[a-zA-Z0-9_-]+$/.test(taskId)) fail(400, "invalid_task_id", "Valid router task ID required.");
+    return this.serial(async () => {
+      const cancelled = this.state.routerCancellations?.[taskId];
+      if (cancelled) return clone(cancelled);
+      const messageId = routerMessageId(taskId);
+      const receipt = this.state.receipts[messageId] ?? await this.receiptArchive.get(messageId);
+      if (!receipt && notDispatched) {
+        const outcome = { ok: true, task_id: taskId, state: "cancelled", reason: "not_dispatched" };
+        (this.state.routerCancellations ??= {})[taskId] = outcome;
+        await this.save();
+        return clone(outcome);
+      }
+      if (!receipt || receipt.request.origin !== "router")
+        return { ok: false, task_id: taskId, state: "cancelling", error: "task_receipt_unavailable" };
+      if (receipt.nativeDispatch?.status === "canceled" && receipt.nativeDispatch.reason === "router_task_cancelled")
+        return { ok: true, task_id: taskId, state: "cancelled", reason: "not_started" };
+      const threadId = receipt.request.targetThreadId;
+      const session = this.state.sessions[threadId];
+      if (!session) return { ok: false, task_id: taskId, state: "cancelling", error: "task_session_unavailable" };
+      const queued = [session.queue ?? [], session.steerQueue ?? []].find(queue => queue.some(r => r.messageId === messageId));
+      if (queued) {
+        queued.splice(queued.findIndex(r => r.messageId === messageId), 1);
+        receipt.nativeDispatch = { status: "canceled", reason: "router_task_cancelled", at: new Date().toISOString() };
+        if (receipt.response) receipt.response.action = "task_cancelled";
+        await this.save();
+        return { ok: true, task_id: taskId, state: "cancelled", reason: "not_started" };
+      }
+      if (!receipt.nativeTurnId || !this.tools.some(tool => tool.name === "cancel_task"))
+        return { ok: false, task_id: taskId, state: "cancelling", error: "native_task_cancel_unavailable" };
+      const result = await this.call("cancel_task", { taskId, messageId, threadId, turnId: receipt.nativeTurnId });
+      const outcome = { ...result, task_id: taskId, thread_id: threadId, turn_id: receipt.nativeTurnId };
+      if (outcome.ok === true && outcome.state === "cancelled") {
+        (this.state.routerCancellations ??= {})[taskId] = outcome;
+        await this.save();
+      }
+      return outcome;
+    });
   }
 
   async waitResult(messageId, threadId, { deadline_s } = {}) {

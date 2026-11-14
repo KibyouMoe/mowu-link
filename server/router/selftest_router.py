@@ -205,6 +205,7 @@ class FakeWorker(threading.Thread):
         self.port = port
         self.tasks: "queue.Queue[dict]" = queue.Queue()
         self.messages: "queue.Queue[dict]" = queue.Queue()
+        self.cancellations: "queue.Queue[dict]" = queue.Queue()
         self.ping_times = []
         self.connected = threading.Event()
         self.error = None
@@ -245,13 +246,14 @@ class FakeWorker(threading.Thread):
                     break
                 line = raw.decode("utf-8", "replace").rstrip("\r\n")
                 if line == "":
-                    if event in ("task", "worker_message") and data:
+                    if event in ("task", "worker_message", "task_cancel") and data:
                         try:
                             payload = json.loads("\n".join(data))
                         except ValueError:
                             payload = None
                         if isinstance(payload, dict):
-                            target = self.tasks if event == "task" else self.messages
+                            target = (self.tasks if event == "task" else self.cancellations
+                                      if event == "task_cancel" else self.messages)
                             target.put(payload)
                     event = None
                     data = []
@@ -858,7 +860,7 @@ def control_selftest(checker, token, workers):
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(json.dumps({"ok": response_status[0] == 200,
-                                         "task_id": body["task_id"], "cancelled": True}).encode())
+                                         "task_id": body["task_id"], "state": "cancelled", "cancelled": True}).encode())
         def log_message(self, *args):
             pass
 
@@ -953,6 +955,56 @@ def control_selftest(checker, token, workers):
         callback.shutdown()
         callback.server_close()
         thread.join(2)
+
+
+def activity_selftest(checker, token, workers):
+    name = "trainer-state-test"
+    http("POST", BASE + "/register", {"name": name, "control_sse": True}, token)
+    client = FakeWorker(name, token)
+    workers.append(client)
+    client.start()
+    checker.check("activity worker connects", wait_online(name, token, True))
+    http("POST", BASE + "/heartbeat", {"name": name, "state": "running",
+         "turn_source": "trainer", "task_id": None, "progress_at": time.time()}, token)
+    row = worker_row(name, token)
+    code, task = http("POST", BASE + "/tasks", {"worker": name, "goal": "wait for trainer"}, token)
+    checker.check("trainer turn is visible and router queues instead of dispatching",
+                  row["busy"] and row["turn_source"] == "trainer" and code == 202
+                  and task["state"] == "queued" and client.wait_task(0.2) is None)
+    http("POST", BASE + "/heartbeat", {"name": name, "state": "idle",
+         "turn_source": None, "task_id": None}, token)
+    dispatched = client.wait_task(3)
+    checker.check("trainer completion heartbeat automatically releases the queued task",
+                  dispatched and dispatched["task_id"] == task["task_id"])
+    http("POST", BASE + "/heartbeat", {"name": name, "state": "running",
+         "turn_source": "router", "task_id": task["task_id"]}, token)
+    http("POST", BASE + "/result", {"name": name, "task_id": task["task_id"],
+         "status": "done", "summary": "actual completion"}, token)
+    _, saved = http("GET", BASE + "/tasks/" + task["task_id"], token=token)
+    row = worker_row(name, token)
+    checker.check("completion clears task identity and writes the exact finish time to progress",
+                  row["task_id"] is None and row["progress_at"] == saved["task"]["finished_at"])
+    http("POST", BASE + "/heartbeat", {"name": name, "state": "idle",
+         "task_id": task["task_id"], "progress_at": 1}, token)
+    row = worker_row(name, token)
+    checker.check("a late heartbeat cannot restore a terminal task or move progress backwards",
+                  row["task_id"] is None and row["progress_at"] == saved["task"]["finished_at"])
+    _, cancel = http("POST", BASE + "/tasks", {"worker": name, "goal": "SSE cancellation"}, token)
+    client.wait_task(3)
+    code, pending = http("POST", BASE + "/tasks/" + cancel["task_id"] + "/cancel", None, token)
+    try:
+        command = client.cancellations.get(timeout=3)
+    except queue.Empty:
+        command = None
+    checker.check("remote worker cancellation uses the existing authenticated SSE channel",
+                  code == 202 and pending["state"] == "cancelling"
+                  and command == {"task_id": cancel["task_id"]})
+    bad, _ = http("POST", BASE + "/tasks/" + cancel["task_id"] + "/cancel-ack", {
+        "name": "another-worker", "outcome": {"task_id": cancel["task_id"], "ok": True, "state": "cancelled"}}, token)
+    _, acknowledged = http("POST", BASE + "/tasks/" + cancel["task_id"] + "/cancel-ack", {
+        "name": name, "outcome": {"task_id": cancel["task_id"], "ok": True, "state": "cancelled"}}, token)
+    checker.check("only the assigned execution owner can confirm cancellation",
+                  bad == 400 and acknowledged["state"] == "cancelled" and not worker_row(name, token)["busy"])
 
 
 def start_process(argv, log_path: Path):
@@ -1309,13 +1361,20 @@ def run(work: Path, checker: Checker) -> None:
         got_d = worker2.wait_task(3.0)
         status, cancel_d = http(
             "POST", BASE + "/tasks/%s/cancel" % d["task_id"], None, token)
+        pending_row = worker_row("波旁", token)
+        checker.check("undelivered cancel stays cancelling and retains worker occupancy",
+                      status == 202 and cancel_d.get("state") == "cancelling"
+                      and cancel_d.get("ok") is False
+                      and pending_row.get("busy") is True)
+        _, acknowledged = http("POST", BASE + "/tasks/%s/cancel-ack" % d["task_id"], {
+            "name": "波旁", "outcome": {"ok": True, "task_id": d["task_id"], "state": "cancelled"}}, token)
         status_late, late = http("POST", BASE + "/result", {
             "name": "波旁", "task_id": d["task_id"], "status": "done",
             "summary": "late"}, token)
         row = worker_row("波旁", token)
         checker.check(
             "cancel running -> cancelled, busy freed, late result ignored",
-            status == 200 and cancel_d.get("state") == "cancelled"
+            acknowledged.get("state") == "cancelled"
             and got_d is not None and got_d.get("task_id") == d["task_id"]
             and status_late == 200 and late.get("duplicate") is True
             and row is not None and row.get("busy") is False,
@@ -1990,6 +2049,7 @@ def run(work: Path, checker: Checker) -> None:
                 pass
 
         control_selftest(checker, token, workers)
+        activity_selftest(checker, token, workers)
         peer_selftest(checker, work, trigger_url, trigger_token)
         workorders_selftest(checker, work, trigger_url, trigger_token)
 
