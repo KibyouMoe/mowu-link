@@ -130,3 +130,12 @@
 - 源码e50f49d / 分发fe449cd已推送。Mac Node22/26定向各12/12，实际受管缓存冷启动12/12；132文件与规范分发逐字节相同，当前清单入口interface/desktop-mcp.mjs，本地技能同步。
 - CI43544291900四组已实际success：Mac22/26各Codex729/721/0/8、DSH742/734/0/8、router130/130；Windows22/26各Codex729/713/0/16、DSH742/735/0/7。原生OS回归不替代实际Desktop授权。
 - 最新只读进程核对仍为旧MCP12327（node ./server.mjs），其cwd已被正常插件更新移入plugin-backup-csUdqh；新版固定入口未实际装载。已明确请求训练员正常退出/重开Codex，再从客户端本会话回复，届时先核验运行时签名/真实祖先及native probe，再启用autoStart和验飞书往返。autoStart当前false，8905仍无服务，原主会话已恢复Desktop访问。
+
+## 2026-11-14 10:24 起本机接管成功及日志续接修复
+
+- 训练员正常重开后Desktop24147、app-server24525、MCP24644；MCP实际映像已是Desktop提供的签名Node。正常bridge_probe成功列60个工具，verify_manager_binding真实list_threads成功，原thread仍01a1c413-6bd5-7e10-a388-665d44d2b6ec。随后显式恢复autoStart=true并通过正常bridge_start_local_manager启动。
+- 实际托管监督器25534、bootstrap25539、初始writer25540，bootstrap0.3.0/desktop-owned/desktopStartupHandoff.active=true；飞书与router均connected。首条上线通知实际sent，2026-11-14T02:24:44.254Z，消息ID om_x100b604828717ca0dfdc3b6b503bd0a。
+- 随后实际发现日志游标identity仅设备号由16777233变16777230，inode3037803与birthtime1794290969573.268均未变。旧代码误报public_journal_replaced，scan将它归并为self_task_journal_unavailable，阻止公开同步。c95e5cb按inode/创建时间一致且重新核验session_meta后续读原offset；替换/截断/错会话仍拒绝。共享文件与测试两侧逐字节相同，Mac Node22/26各24/24。
+- 对真实旧游标只读验证从161074642继续到163096314，读取2031616字节，原位更新设备标识，未改在线账本。之后完整同步分发132文件，7个固定入口逐字节确认与已装包相同，写私有runtime-source.local.json指向CodexSyncArea用户安装源，走正常业务热更新，未再次替换MCP固定缓存。
+- 热更新实际生效：bootstrap仍25539，writer改29328，generation=2，business SHA d0a098ae039b5105be27b74790daa11574414331d3c1bae59c8db62ba17cf95a。飞书/路由在线，日志caughtUp=true、pendingBytes=0、lastError=null、unconfirmedTexts=0，积压公开消息已有sent回执。
+- 已请训练员从飞书发送“恢复测试”，真实入站/同轮回复仍待验；不要将网络连接和API出站回执当真实双向验收。完整默认启停仍需autoStart=true时下一次正常退出重开验证。鲁道夫依训练员最新要求暂不处理，生产router/DSH/gateway未重启。
