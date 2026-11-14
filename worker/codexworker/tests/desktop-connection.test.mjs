@@ -4,6 +4,7 @@ import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs
 import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
+import { pathToFileURL } from "node:url";
 import test from "node:test";
 import { desktopRequest, desktopServerOptions, loadDesktopConnection, requireDesktopParent,
   runDesktopConnection, runDesktopServer } from "../interface/desktop-connection/entry.mjs";
@@ -102,7 +103,7 @@ test("prepared Mac connector is relocatable, immutable and independent of delete
   }), { mode: 0o600 });
   const opts = { env: { CODEX_HOME: home }, nodePath: process.execPath };
   const result = await prepareDesktopConnection(opts);
-  assert.equal(result.fileCount, 4);
+  assert.equal(result.fileCount, 7);
   const launcher = await readFile(result.launcher, "utf8");
   assert.ok(launcher.includes("'\\''")); assert.ok(launcher.includes('"$@"'));
   assert.equal(launcher.includes("/worker/codexworker/"), false);
@@ -112,6 +113,21 @@ test("prepared Mac connector is relocatable, immutable and independent of delete
   assert.deepEqual(await prepareDesktopConnection(opts), result);
   await writeFile(path.join(root, "desktop-lifecycle.mjs"), "corrupt");
   await assert.rejects(prepareDesktopConnection(opts), /install_mismatch/);
+});
+
+test("prepared native connector contains its entire approval dependency tree", { skip: process.platform !== "darwin" }, async t => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "native approval 连接-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const state = path.join(home, "state/codexworker"); await mkdir(state, { recursive: true });
+  await writeFile(path.join(state, "desktop-native-connection.json"), JSON.stringify({
+    version: 1, realCli: "/native/codex",
+  }), { mode: 0o600 });
+  const result = await prepareDesktopConnection({ env: { CODEX_HOME: home }, mode: "native" });
+  assert.equal(result.fileCount, 8);
+  assert.match(await readFile(result.launcher, "utf8"), /native-entry\.mjs/);
+  const entry = await import(new URL("../interface/desktop-connection/native-entry.mjs", import.meta.url));
+  const installed = await import(pathToFileURL(path.join(path.dirname(result.launcher), "interface/desktop-connection/native-entry.mjs")));
+  assert.equal(typeof entry.runNativeConnection, typeof installed.runNativeConnection);
 });
 
 function streams() {

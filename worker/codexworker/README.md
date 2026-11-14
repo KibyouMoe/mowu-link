@@ -19,6 +19,19 @@ Node 是插件执行环境，不是另一个模型宿主。
 配置关闭 `autoStart` 时，该 hook 将审批交回客户端。
 停止插件或本机审批接口不可用时，也继续客户端的原生审批流程。
 
+工具内部的 MCP 应用授权还会发出 `mcpServer/elicitation/request`，当前宿主未对此调用
+PermissionRequest。`interface/desktop-connection/approval-relay.mjs` 在真实 Desktop
+连接中转发带 `codex_approval_kind=mcp_tool_call` 的空表单，同时保留原生界面。
+router 决定回写同一请求 ID，手动作答、原生 resolved 或断连会取消晚到的自动响应。
+仅本次批准，不写入 session/always 权限。普通表单、URL 与验证请求继续原生流程。
+
+原生 stdio 宿主可用 `native-entry.mjs` 包装 Desktop 本来启动的 app-server，并原样传递参数。
+它要求真实 Desktop 祖先，关闭时仅结束所属子进程，保留当前会话所有权。
+Mac 安装时先写私有 `desktop-native-connection.json`（version=1、realCli 为真实宿主二进制），
+执行 `node interface/desktop-connection/prepare.mjs --native` 生成完整不可变启动器，
+通过正常 Desktop 启动配置启用并重开验收。该脚本的 launcher 生成目前限 Mac。
+Windows 原生进程族和转发逻辑有分支回归，Windows Desktop 的原生连接激活仍需目标机实测。
+
 若当前构建在设置中刷新后仍未列出插件hook，可在用户 `hooks.json` 登记同一个已安装脚本，
 保留既有条目并完成该定义的原生审核。引用实际安装路径，更新版本后重新核对；
 客户端能加载包内定义后，移除这条兼容注册，保持一份已信任的审批hook。

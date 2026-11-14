@@ -8,6 +8,7 @@ import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
 import { desktopOwner, processChain } from "../../desktop-lifecycle.mjs";
 import { connectUnixWebSocket } from "./unix-websocket.mjs";
+import { createApprovalRelay } from "./approval-relay.mjs";
 
 export async function requireDesktopParent({ platform = process.platform, pid = process.ppid,
   readChain = processChain } = {}) {
@@ -69,12 +70,15 @@ export async function loadDesktopConnection(env = process.env) {
 }
 
 export async function runDesktopServer(settings, options, { stdin = process.stdin, stdout = process.stdout,
-  stderr = process.stderr, connect = connectUnixWebSocket } = {}) {
+  stderr = process.stderr, connect = connectUnixWebSocket, review } = {}) {
   const channel = await connect(settings.socket);
   stderr.write("[desktop-connection] connected to existing shared runtime\n");
-  let buffer = "", failed = false;
+  let buffer = "", serverBuffer = "", failed = false;
   const decoder = new StringDecoder("utf8");
-  channel.stdout.pipe(stdout, { end: false });
+  const serverDecoder = new StringDecoder("utf8");
+  const relay = createApprovalRelay({ review,
+    send: message => channel.stdin.write(JSON.stringify(message) + "\n"),
+    log: (event, fields) => stderr.write("[desktop-connection] " + event + " " + JSON.stringify(fields) + "\n") });
   return new Promise(resolve => {
     const fail = () => {
       failed = true;
@@ -89,22 +93,39 @@ export async function runDesktopServer(settings, options, { stdin = process.stdi
         while ((at = buffer.indexOf("\n")) >= 0) {
           const line = buffer.slice(0, at); buffer = buffer.slice(at + 1);
           if (!line.trim()) continue;
-          channel.stdin.write(JSON.stringify(desktopRequest(JSON.parse(line), options.config)) + "\n");
+          const message = JSON.parse(line);
+          if (relay.client(message)) channel.stdin.write(JSON.stringify(desktopRequest(message, options.config)) + "\n");
+        }
+      } catch { fail(); }
+    };
+    const output = chunk => {
+      try {
+        serverBuffer += serverDecoder.write(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        if (Buffer.byteLength(serverBuffer) > 16 * 1024 * 1024) throw new Error("shared_desktop_output_too_large");
+        let at;
+        while ((at = serverBuffer.indexOf("\n")) >= 0) {
+          const line = serverBuffer.slice(0, at); serverBuffer = serverBuffer.slice(at + 1);
+          if (!line.trim()) continue;
+          const message = JSON.parse(line);
+          stdout.write(line + "\n");
+          relay.server(message);
         }
       } catch { fail(); }
     };
     const stop = () => channel.kill();
     const end = () => { if (buffer.trim() || decoder.lastNeed) fail(); else stop(); };
     stdin.on("data", input); stdin.once("end", end); stdin.once("error", fail);
+    channel.stdout.on("data", output);
     channel.stdin.on("error", fail); stdout.on("error", fail);
     process.once("SIGTERM", stop); process.once("SIGINT", stop);
     channel.on("error", fail);
-    channel.once("exit", () => {
+    channel.once("exit", code => {
       stdin.removeListener("data", input); stdin.removeListener("end", end); stdin.removeListener("error", fail); stdin.pause();
       channel.stdin.removeListener("error", fail); stdout.removeListener("error", fail); channel.removeListener("error", fail);
-      channel.stdout.unpipe(stdout);
+      relay.close();
+      channel.stdout.removeListener("data", output);
       process.removeListener("SIGTERM", stop); process.removeListener("SIGINT", stop);
-      resolve(failed ? 1 : 0);
+      resolve(failed ? 1 : code ?? 0);
     });
   });
 }

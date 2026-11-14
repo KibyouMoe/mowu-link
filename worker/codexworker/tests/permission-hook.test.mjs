@@ -77,6 +77,14 @@ test("authenticated loopback endpoint routes the real manager through the permis
   assert.equal(response.status, 200);
   assert.equal((await response.json()).hookSpecificOutput.decision.behavior, "allow");
   assert.equal(f.requests.length, 1);
+  const rpc = { type: "desktop-server-request", request: { id: 3, method: "mcpServer/elicitation/request",
+    params: { threadId: event.session_id, turnId: event.turn_id, serverName: "cua_repl", mode: "form",
+      message: "Allow Calculator?", requestedSchema: { type: "object", properties: {} },
+      _meta: { codex_approval_kind: "mcp_tool_call" } } } };
+  const approved = await fetch(endpoint, { ...request, body: JSON.stringify(rpc),
+    headers: { ...request.headers, authorization: "Bearer " + token } });
+  assert.deepEqual((await approved.json()).nativeResponse, { action: "accept", content: {} });
+  assert.equal(f.requests.length, 2);
 });
 
 test("packaged hook CLI handles paths with spaces and returns only the host decision", async t => {
