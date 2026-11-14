@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import test from "node:test";
+import { readFile } from "node:fs/promises";
 import { launchDesktopMcp } from "../interface/desktop-mcp.mjs";
 
 test("Mac replaces the launcher with the host-provided runtime before loading business code", async () => {
@@ -17,6 +18,20 @@ test("Mac replaces the launcher with the host-provided runtime before loading bu
 });
 
 for (const platform of ["darwin", "win32"]) {
+  test(platform + ": the real manifest forwards the engine identity needed to reject a foreign state directory", async () => {
+    const manifest = JSON.parse(await readFile(new URL("../.mcp.json", import.meta.url), "utf8"));
+    const server = manifest.mcpServers.codexworker;
+    const parent = { CODEXWORKER_NATIVE_TRANSPORT: "dsh-inprocess", CODEXWORKER_STATE_DIR: "/foreign/dsh-state",
+      CODEX_APP_TOOLS_PIPE_PATH: "actual-desktop-pipe" };
+    const env = { ...Object.fromEntries(Object.entries(parent).filter(([key]) => server.env_vars.includes(key))), ...server.env };
+    await launchDesktopMcp({ platform, env, loadServer: async () => {
+      assert.equal(env.CODEXWORKER_NATIVE_TRANSPORT, undefined);
+      assert.equal(env.CODEXWORKER_STATE_DIR, undefined);
+      assert.equal(env.CODEX_APP_TOOLS_PIPE_PATH, parent.CODEX_APP_TOOLS_PIPE_PATH);
+      assert.equal(env.CODEXWORKER_NATIVE_BOOTSTRAP, "1");
+    } });
+  });
+
   test(platform + ": a Desktop opened by DSH discards the other engine's state and child permissions", async () => {
     const env = { CODEXWORKER_NATIVE_TRANSPORT: "dsh-inprocess", CODEXWORKER_STATE_DIR: "/foreign/dsh-state",
       RUDOLF_BRIDGE_LIFECYCLE_CHILD: "1", RUDOLF_BRIDGE_LIFECYCLE_READY: "1",
