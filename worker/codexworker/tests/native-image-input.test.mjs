@@ -59,7 +59,8 @@ async function fixture(t, { active = false, dropWrite = false, rejectWrite = fal
     if (message.method !== "thread/turns/list") { wrote(); if (dropWrite) return; }
     const response = respond?.(message, turnStatus) ?? (message.method === "thread/turns/list"
       ? { result: { data: turnStatus ? [{ id: "active-turn", status: turnStatus }] : [] } }
-      : ["thread/items/list", "thread/backgroundTerminals/list"].includes(message.method) ? { result: { data: [] } }
+      : message.method === "thread/items/list" ? { result: { data: [{ turnId: "active-turn", item: { id: "input", type: "userMessage" } }] } }
+      : message.method === "thread/backgroundTerminals/list" ? { result: { data: [] } }
       : rejectWrite ? { error: { code: -32000, message: "original native rejection" } }
       : { result: message.method === "turn/start" ? { turn: { id: "native-turn" } }
         : message.method === "thread/queue/add" ? { queuedSubmission: { id: messageId } } : { turnId: "active-turn" } });
@@ -127,9 +128,9 @@ test('native task cancellation interrupts only the receipted turn and confirms i
   const result = JSON.parse((await f.send()).contentItems[0].text);
   assert.equal(result.state, 'cancelled');
   assert.equal(result.executionStopped, true);
-  assert.deepEqual(f.calls.map(call => call.method), ['thread/turns/list', 'turn/interrupt', 'thread/turns/list',
-    'thread/items/list', 'thread/backgroundTerminals/list', 'thread/backgroundTerminals/list']);
-  assert.deepEqual(f.calls[1].params, { threadId: f.request.threadId, turnId: 'active-turn' });
+  assert.deepEqual(f.calls.map(call => call.method), ['thread/turns/list', 'thread/items/list', 'thread/backgroundTerminals/list', 'turn/interrupt',
+    'thread/turns/list', 'thread/items/list', 'thread/backgroundTerminals/list']);
+  assert.deepEqual(f.calls.find(call => call.method === 'turn/interrupt').params, { threadId: f.request.threadId, turnId: 'active-turn' });
   await f.send();
   assert.equal(f.calls.filter(call => call.method === 'turn/interrupt').length, 1);
 });
@@ -140,7 +141,7 @@ test('native cancellation terminates only terminals owned by the exact task turn
     if (method === 'thread/items/list') {
       assert.equal(params.turnId, 'active-turn');
       assert.deepEqual(params.deferOutput, { commandExecution: true, mcpToolCall: true });
-      return { result: { data: [{ turnId: 'active-turn', item: { id: 'owned-command', type: 'commandExecution' } }] } };
+      return { result: { data: [{ turnId: 'active-turn', item: { id: 'owned-command', type: 'commandExecution', status: running ? 'inProgress' : 'completed' } }] } };
     }
     if (method === 'thread/backgroundTerminals/list') return { result: { data: [
       { itemId: 'old-background-command', processId: 'preserve-this' },
@@ -156,14 +157,44 @@ test('native cancellation terminates only terminals owned by the exact task turn
   assert.equal(result.state, 'cancelled');
   assert.equal(result.executionStopped, true);
   assert.equal(result.pendingTerminals, 0);
+  assert.equal(result.pendingCommands, 0);
   assert.equal(f.calls.filter(call => call.method === 'thread/backgroundTerminals/terminate').length, 1);
   assert.equal(f.calls.some(call => call.method === 'thread/backgroundTerminals/clean'), false);
+  assert.ok(f.calls.findIndex(call => call.method === 'thread/backgroundTerminals/terminate') <
+    f.calls.findIndex(call => call.method === 'turn/interrupt'));
+});
+
+test('an empty terminal list cannot confirm a command that is still in progress', async t => {
+  const f = await fixture(t, { cancel: true, active: true, respond: ({ method }) => {
+    if (method === 'thread/items/list') return { result: { data: [
+      { turnId: 'active-turn', item: { id: 'unlisted-tool', type: 'commandExecution',
+        processId: 'native-session', status: 'inProgress' } }] } };
+  } });
+  f.controller.client({ method: 'initialized' });
+  const result = JSON.parse((await f.send()).contentItems[0].text);
+  assert.equal(result.nativeStatus, 'interrupted');
+  assert.equal(result.state, 'cancelling');
+  assert.equal(result.executionStopped, false);
+  assert.equal(result.pendingTerminals, 0);
+  assert.equal(result.pendingCommands, 1);
+  assert.deepEqual(result.commands, [{ itemId: 'unlisted-tool', processId: 'native-session', status: 'inProgress' }]);
+});
+
+test('unavailable native item history cannot serve as proof of stopped execution', async t => {
+  const f = await fixture(t, { cancel: true, active: true, respond: ({ method }) => {
+    if (method === 'thread/items/list') return { result: { data: [] } };
+  } });
+  f.controller.client({ method: 'initialized' });
+  const result = JSON.parse((await f.send()).contentItems[0].text);
+  assert.equal(result.ok, false);
+  assert.equal(result.state, 'cancelling');
+  assert.equal(result.error, 'native_cancel_items_unavailable');
 });
 
 test('an interrupted turn stays cancelling while its tool process is still running', async t => {
   const f = await fixture(t, { cancel: true, active: true, respond: ({ method }) => {
     if (method === 'thread/items/list') return { result: { data: [
-      { turnId: 'active-turn', item: { id: 'owned-command', type: 'commandExecution' } }] } };
+      { turnId: 'active-turn', item: { id: 'owned-command', type: 'commandExecution', status: 'inProgress' } }] } };
     if (method === 'thread/backgroundTerminals/list') return { result: { data: [
       { itemId: 'owned-command', processId: 'still-running' }] } };
     if (method === 'thread/backgroundTerminals/terminate') return { result: { terminated: true } };
@@ -196,7 +227,7 @@ test('cancellation paginates old turns, scoped command items and owned terminals
       ? { data: [{ id: 'active-turn', status }] }
       : { data: [{ id: 'newer-turn', status: 'inProgress' }], nextCursor: 'older-turns' } };
     if (method === 'thread/items/list') return { result: params.cursor
-      ? { data: [{ turnId: 'active-turn', item: { id: 'owned-command', type: 'commandExecution' } }] }
+      ? { data: [{ turnId: 'active-turn', item: { id: 'owned-command', type: 'commandExecution', status: running ? 'inProgress' : 'completed' } }] }
       : { data: [{ turnId: 'active-turn', item: { id: 'input', type: 'userMessage' } }], nextCursor: 'more-items' } };
     if (method === 'thread/backgroundTerminals/list') return { result: params.cursor
       ? { data: running ? [{ itemId: 'owned-command', processId: 'old-owned-process' }] : [] }

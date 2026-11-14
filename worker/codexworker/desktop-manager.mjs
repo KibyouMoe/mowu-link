@@ -2495,7 +2495,8 @@ export class DesktopManager {
       const cancelled = this.state.routerCancellations?.[taskId];
       // Older active-turn confirmations only observed model interruption. Retry
       // those through the native adapter to confirm tool execution also stopped.
-      if (cancelled && (!cancelled.turn_id || cancelled.executionStopped === true)) return clone(cancelled);
+      if (cancelled && (!cancelled.turn_id || cancelled.executionStopped === true && cancelled.pendingCommands === 0))
+        return clone(cancelled);
       const messageId = routerMessageId(taskId);
       const receipt = this.state.receipts[messageId] ?? await this.receiptArchive.get(messageId);
       if (!receipt && notDispatched) {

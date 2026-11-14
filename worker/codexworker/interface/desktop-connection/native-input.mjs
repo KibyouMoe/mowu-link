@@ -218,34 +218,52 @@ export async function createNativeInput({ stateDir, owner, send, timeoutMs = 300
       }
       return terminals;
     }
+    const commands = new Map();
+    let itemTypes;
+    async function readCommands() {
+      itemTypes = {};
+      for await (const entries of pages("thread/items/list", { threadId: request.threadId,
+        turnId: request.turnId, limit: 100, deferOutput: { commandExecution: true, mcpToolCall: true } })) {
+        for (const entry of entries) {
+          if (entry?.turnId !== request.turnId || typeof entry.item?.id !== "string" || typeof entry.item.type !== "string")
+            invalid("native_cancel_item_invalid");
+          const item = entry.item;
+          itemTypes[item.type] = (itemTypes[item.type] ?? 0) + 1;
+          if (item.type === "commandExecution") {
+            if (!["inProgress", "completed", "failed", "declined"].includes(item.status))
+              invalid("native_cancel_command_state_invalid");
+            commands.set(item.id, item);
+          }
+        }
+      }
+      if (Object.keys(itemTypes).length === 0) invalid("native_cancel_items_unavailable");
+    }
     let turn;
     try {
       turn = await readTurn();
+      await readCommands();
+      // Capture and terminate owned terminals before interrupting generation,
+      // which may remove their native bookkeeping while processes still run.
+      const owned = await ownedTerminals(commands);
+      for (const process of owned) {
+        await verify();
+        await rpc("thread/backgroundTerminals/terminate", { threadId: request.threadId, processId: process.processId });
+      }
       if (!terminal(turn.status)) {
         if (turn.status !== "inProgress") invalid("native_cancel_turn_state_invalid");
         await verify();
         await rpc("turn/interrupt", { threadId: request.threadId, turnId: request.turnId });
         turn = await readTurn();
       }
-      // Interrupting generation can leave unified-exec processes running. Only
-      // terminate terminals whose command item belongs to this receipted turn.
-      const commandIds = new Set();
-      for await (const entries of pages("thread/items/list", { threadId: request.threadId,
-        turnId: request.turnId, limit: 100, deferOutput: { commandExecution: true, mcpToolCall: true } })) {
-        for (const entry of entries) {
-          if (entry?.turnId !== request.turnId || typeof entry.item?.id !== "string" || typeof entry.item.type !== "string")
-            invalid("native_cancel_item_invalid");
-          if (entry.item.type === "commandExecution") commandIds.add(entry.item.id);
-        }
-      }
-      for (const process of await ownedTerminals(commandIds)) {
-        await verify();
-        await rpc("thread/backgroundTerminals/terminate", { threadId: request.threadId, processId: process.processId });
-      }
-      const remaining = await ownedTerminals(commandIds);
-      const executionStopped = terminal(turn.status) && remaining.length === 0;
+      await readCommands();
+      const remaining = await ownedTerminals(commands);
+      const pendingCommands = [...commands.values()].filter(item => item.status === "inProgress");
+      const executionStopped = terminal(turn.status) && remaining.length === 0 && pendingCommands.length === 0;
       return { ok: true, state: executionStopped ? "cancelled" : "cancelling",
-        nativeStatus: turn.status, executionStopped, pendingTerminals: remaining.length };
+        nativeStatus: turn.status, executionStopped, pendingTerminals: remaining.length,
+        pendingCommands: pendingCommands.length, commandItems: commands.size, itemTypes,
+        observedTerminals: owned.length, commands: pendingCommands.map(item => ({ itemId: item.id,
+          processId: item.processId ?? null, status: item.status })) };
     } catch (error) {
       return { ok: false, state: "cancelling", executionStopped: false,
         nativeStatus: turn?.status ?? null, error: error.code ?? "native_cancel_cleanup_failed",

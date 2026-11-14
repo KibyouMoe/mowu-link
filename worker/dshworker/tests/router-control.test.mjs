@@ -11,7 +11,7 @@ async function fixture(t) {
   t.after(() => rm(stateDir, { recursive: true, force: true }));
   const calls = [];
   const manager = new DesktopManager({ stateDir, listNativeTools: async () => [],
-    native: async (name, args) => { calls.push({ name, args }); return { ok: true, state: 'cancelled', executionStopped: true }; } });
+    native: async (name, args) => { calls.push({ name, args }); return { ok: true, state: 'cancelled', executionStopped: true, pendingCommands: 0 }; } });
   const taskId = 't-exact', messageId = routerMessageId(taskId), threadId = 'original-thread';
   const request = { source: 'hermes', origin: 'router', messageId, targetThreadId: threadId,
     delivery: 'queue', text: '[router t-exact] actual original task' };
@@ -70,7 +70,7 @@ test('unavailable native cancellation remains explicit and cannot stop a differe
 test('legacy active-turn cancellation is revalidated while confirmed cleanup stays idempotent', async t => {
   const f = await fixture(t);
   f.manager.state.receipts[f.messageId].nativeTurnId = 'real-turn';
-  f.manager.state.routerCancellations = { [f.taskId]: { ok: true, state: 'cancelled', turn_id: 'real-turn' } };
+  f.manager.state.routerCancellations = { [f.taskId]: { ok: true, state: 'cancelled', executionStopped: true, turn_id: 'real-turn' } };
   assert.equal((await f.manager.cancelRouterTask(f.taskId)).executionStopped, true);
   assert.equal(f.calls.length, 1);
   assert.equal((await f.manager.cancelRouterTask(f.taskId)).executionStopped, true);
