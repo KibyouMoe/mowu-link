@@ -2493,7 +2493,9 @@ export class DesktopManager {
     if (!/^t-[a-zA-Z0-9_-]+$/.test(taskId)) fail(400, "invalid_task_id", "Valid router task ID required.");
     return this.serial(async () => {
       const cancelled = this.state.routerCancellations?.[taskId];
-      if (cancelled) return clone(cancelled);
+      // Older active-turn confirmations only observed model interruption. Retry
+      // those through the native adapter to confirm tool execution also stopped.
+      if (cancelled && (!cancelled.turn_id || cancelled.executionStopped === true)) return clone(cancelled);
       const messageId = routerMessageId(taskId);
       const receipt = this.state.receipts[messageId] ?? await this.receiptArchive.get(messageId);
       if (!receipt && notDispatched) {

@@ -30,7 +30,7 @@ export async function createNativeInput({ stateDir, owner, send, timeoutMs = 300
       const timer = setTimeout(() => {
         pending.delete(id); reject(Object.assign(new Error("native_input_rpc_timeout"), { code: "native_input_rpc_timeout" }));
       }, timeoutMs);
-      pending.set(id, { resolve, reject, timer });
+      pending.set(id, { resolve, reject, timer, method });
       try { send({ id, method, params }); }
       catch (error) { clearTimeout(timer); pending.delete(id); reject(error); }
     });
@@ -185,19 +185,72 @@ export async function createNativeInput({ stateDir, owner, send, timeoutMs = 300
           !state.sessions?.[request.threadId]) invalid("native_cancel_receipt_mismatch");
     }
     await verify();
-    const query = { threadId: request.threadId, limit: 1, sortDirection: "desc", itemsView: "notLoaded" };
-    const page = await rpc("thread/turns/list", query);
-    const turn = page?.data?.find(turn => turn.id === request.turnId);
-    if (!turn) invalid("native_cancel_turn_unavailable");
     const terminal = status => ["completed", "failed", "interrupted"].includes(status);
-    if (terminal(turn.status)) return { ok: true, state: "cancelled", nativeStatus: turn.status };
-    if (turn.status !== "inProgress") invalid("native_cancel_turn_state_invalid");
-    await verify();
-    await rpc("turn/interrupt", { threadId: request.threadId, turnId: request.turnId });
-    const after = await rpc("thread/turns/list", query);
-    const stopped = after?.data?.find(turn => turn.id === request.turnId);
-    return { ok: true, state: stopped && terminal(stopped.status) ? "cancelled" : "cancelling",
-      nativeStatus: stopped?.status ?? null };
+    async function* pages(method, params) {
+      const seen = new Set();
+      let cursor;
+      do {
+        const page = await rpc(method, { ...params, ...(cursor ? { cursor } : {}) });
+        if (!Array.isArray(page?.data)) invalid("native_cancel_page_invalid");
+        yield page.data;
+        cursor = page.nextCursor;
+        if (cursor != null && (typeof cursor !== "string" || !cursor || seen.has(cursor)))
+          invalid("native_cancel_cursor_invalid");
+        seen.add(cursor);
+      } while (cursor != null);
+    }
+    async function readTurn() {
+      for await (const turns of pages("thread/turns/list", { threadId: request.threadId,
+        limit: 50, sortDirection: "desc", itemsView: "notLoaded" })) {
+        const turn = turns.find(turn => turn.id === request.turnId);
+        if (turn) return turn;
+      }
+      invalid("native_cancel_turn_unavailable");
+    }
+    async function ownedTerminals(commandIds) {
+      const terminals = [];
+      for await (const items of pages("thread/backgroundTerminals/list", { threadId: request.threadId, limit: 100 })) {
+        for (const item of items) {
+          if (typeof item.itemId !== "string" || typeof item.processId !== "string")
+            invalid("native_cancel_terminal_invalid");
+          if (commandIds.has(item.itemId)) terminals.push(item);
+        }
+      }
+      return terminals;
+    }
+    let turn;
+    try {
+      turn = await readTurn();
+      if (!terminal(turn.status)) {
+        if (turn.status !== "inProgress") invalid("native_cancel_turn_state_invalid");
+        await verify();
+        await rpc("turn/interrupt", { threadId: request.threadId, turnId: request.turnId });
+        turn = await readTurn();
+      }
+      // Interrupting generation can leave unified-exec processes running. Only
+      // terminate terminals whose command item belongs to this receipted turn.
+      const commandIds = new Set();
+      for await (const entries of pages("thread/items/list", { threadId: request.threadId,
+        turnId: request.turnId, limit: 100, deferOutput: { commandExecution: true, mcpToolCall: true } })) {
+        for (const entry of entries) {
+          if (entry?.turnId !== request.turnId || typeof entry.item?.id !== "string" || typeof entry.item.type !== "string")
+            invalid("native_cancel_item_invalid");
+          if (entry.item.type === "commandExecution") commandIds.add(entry.item.id);
+        }
+      }
+      for (const process of await ownedTerminals(commandIds)) {
+        await verify();
+        await rpc("thread/backgroundTerminals/terminate", { threadId: request.threadId, processId: process.processId });
+      }
+      const remaining = await ownedTerminals(commandIds);
+      const executionStopped = terminal(turn.status) && remaining.length === 0;
+      return { ok: true, state: executionStopped ? "cancelled" : "cancelling",
+        nativeStatus: turn.status, executionStopped, pendingTerminals: remaining.length };
+    } catch (error) {
+      return { ok: false, state: "cancelling", executionStopped: false,
+        nativeStatus: turn?.status ?? null, error: error.code ?? "native_cancel_cleanup_failed",
+        nativeMethod: error.nativeMethod ?? null };
+    }
   }
 
   const server = net.createServer(socket => {
@@ -239,7 +292,7 @@ export async function createNativeInput({ stateDir, owner, send, timeoutMs = 300
       const call = pending.get(message?.id); if (!call) return true;
       pending.delete(message.id); clearTimeout(call.timer);
       if (message.error) call.reject(Object.assign(new Error("native_image_rejected"),
-        { code: "native_image_rejected", nativeRejected: true }));
+        { code: "native_image_rejected", nativeRejected: true, nativeMethod: call.method }));
       else call.resolve(message.result);
       return false;
     },
