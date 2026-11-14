@@ -103,15 +103,16 @@ export async function startRouterRuntime({ manager, nativeCall, transport = {}, 
         const session = manager.state.sessions[activeTask?.threadId ?? manager.state.selectedThreadId];
         const active = session?.activeTurnId;
         const initiator = session?.turnInitiators?.[active];
+        const progressAt = manager.taskProgress?.get(session?.threadId)?.lastProgressAt;
         const routerTurn = activeTask && (activeTask.turnId === active ||
           session?.turnMessages?.[active]?.includes(activeTask.messageId));
         if (active && !routerTurn) {
-          const progressAt = manager.taskProgress?.get(session.threadId)?.lastProgressAt;
           return { state: "running", taskId: initiator?.kind === "hermes" ? initiator.taskId : null,
             turnSource: initiator?.kind === "hermes" && initiator.taskId ? "router" : "trainer",
             ...(progressAt != null ? { progressAt: progressAt / 1000 } : {}) };
         }
-        return { ...client.activity, turnSource: activeTask ? "router" : null };
+        return { ...client.activity, turnSource: activeTask ? "router" : null,
+          ...(activeTask && progressAt != null ? { progressAt: progressAt / 1000 } : {}) };
       }, subscriptions: normalizeSubscriptionConfig(config.subscriptions),
       subscriptionPollMs: config.subscriptionPollMs ?? settings.subscriptionPollMs,
       logger: (level, event, fields) => log(level, event, { component: "router", ...fields }) });

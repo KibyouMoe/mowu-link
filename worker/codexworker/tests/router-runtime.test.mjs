@@ -278,6 +278,36 @@ test("heartbeat exposes trainer activity and clears a finished task identity", a
   assert.equal(beat.progress_at, 123);
 });
 
+test("active router heartbeats follow real progress and retain the terminal timestamp after completion", async t => {
+  const { manager, runtime, router } = await setup(t, manager => {
+    manager.status = "inProgress";
+    manager.state.sessions["thread-1"].threadId = "thread-1";
+    manager.taskProgress = new Map([["thread-1", { lastProgressAt: 234567 }]]);
+  });
+  router.push({ task_id: "t-live-progress", goal: "keep making progress" });
+  await until(() => manager.reads.length > 0);
+  manager.state.sessions["thread-1"].activeTurnId = "turn-1";
+  await runtime.client.heartbeat();
+  let beat = router.calls.filter(call => call.path === "/heartbeat").at(-1).body;
+  assert.equal(beat.turn_source, "router");
+  assert.equal(beat.task_id, "t-live-progress");
+  assert.equal(beat.progress_at, 234.567);
+  manager.taskProgress.get("thread-1").lastProgressAt = 345678;
+  await runtime.client.heartbeat();
+  beat = router.calls.filter(call => call.path === "/heartbeat").at(-1).body;
+  assert.equal(beat.progress_at, 345.678);
+  delete manager.state.sessions["thread-1"].activeTurnId;
+  manager.turns[0].status = "completed";
+  await until(() => router.results.length === 1 && !runtime.busy());
+  const finishedAt = runtime.client.activity.progressAt;
+  manager.taskProgress.get("thread-1").lastProgressAt = 456789;
+  await runtime.client.heartbeat();
+  beat = router.calls.filter(call => call.path === "/heartbeat").at(-1).body;
+  assert.equal(beat.task_id, null);
+  assert.equal(beat.turn_source, null);
+  assert.equal(beat.progress_at, finishedAt);
+});
+
 test('an uncertain native send is observed by its original receipt without replaying the input', async t => {
   const { router, manager } = await setup(t, manager => {
     const message = manager.message.bind(manager);
