@@ -118,3 +118,11 @@
 
 - 一次性交接执行器已启动：PID11607 / exec session49354，实际输出waiting_for_current_turn_end；当前回合结束且idle持续12秒后才停旧Worker。句柄保存在 ~/.codex/state/codexworker/desktop-only-migration.local.json。它的15分钟仅限制维护排程，持续有对话则deferred不改服务，不限制/终止模型任务。
 - 修复源码ef50ef7、技能43e7aea已推送；Node22/26适配各17/17，正常plugin add后129文件与分发逐字节相同。本地技能已同步。尚未看到Desktop_writer_ready，下一轮先用session49354或持久日志核对实际交接，不能根据“已启动”声称迁移完成。
+
+## 接管后飞书中断与运行时入口修正
+
+- 旧Job已正常移除，维护日志实际止于2026-11-14T01:33:09Z Desktop_plugin_enabled；执行器PID11607随后不存在，旧session49354不可用。训练员确认原会话不再占用，但8905无监听、飞书未恢复。提前停旧服务而新writer尚未ready，造成了此空档。
+- 实际Desktop日志原文dynamic_app_tools_peer_rejected，reason分别为untrusted-code-signing-identity / untrusted-process-ancestry。新插件收到原生通道但被客户端拒绝；已将本机autoStart=false停止重试，配置备份desktop-config.local.json.before-native-rejection-fix。没有改客户端的校验或信任定义。
+- 安装清单直接用PATH Node22，绕过了现有宿主运行时选择。正常客户端实际提供CODEX_MCP_NODE_PATH，其Node签名为OpenAI OpCo, LLC / TeamIdentifier=2DC432GLL2；内置插件的正式启动器也优先使用此值。
+- MCP入口改为interface/desktop-mcp.mjs，先选择宿主Node再加载server；Mac execve保留MCP PID和正常祖先，Windows保留MCP父进程及stdio/退出码，旧宿主缺runtime hint仍按原方式工作。隔离真实宿主Node冷启动确认PID实际映像为Desktop提供的Node、initialize成功，autoStart=false且未提供native端点。
+- 传输层新增socket close处理，客户端关闭连接时立即报告native_pipe_closed，不再等待超时。离线回归含Mac/Windows分支与真实包入口，待本轮最终输出；实际重新装载及native/飞书回流尚未通过。旧orphan监督器3778已暂停，后续必须从真实Desktop正常加载的新上下文核验，不能把隔离Node证明当应用授权成功。

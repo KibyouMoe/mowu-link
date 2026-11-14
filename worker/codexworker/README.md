@@ -20,7 +20,9 @@ Windows 继续原生管道，拒绝使用此 Mac 适配；两平台 Worker 仍�
 ## 安装与配置
 
 需要 macOS 或 Windows Desktop、可用的原生任务工具和 Node.js 20+。
-本包 `.mcp.json` 从安装根的 `server.mjs` 启动，禁止只复制顶层 `.mjs` 而漏掉 `interface/`。
+本包 `.mcp.json` 先运行 `interface/desktop-mcp.mjs`，选择宿主提供的 `CODEX_MCP_NODE_PATH`
+再加载安装根的 `server.mjs`；Mac支持execve时保持原进程归属，Windows保留MCP父进程并转发退出。
+禁止只复制顶层 `.mjs` 而漏掉 `interface/`。
 按本地 marketplace 的正常安装流程加载完整插件；不要直接编辑客户端受管缓存。
 当前 manifest 是 `.codex-plugin/plugin.json`，声明 `requires_local_executor: true`。
 

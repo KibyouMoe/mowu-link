@@ -164,6 +164,10 @@ function pipeRequest(path, method, params, timeoutMs = 5000) {
     }, timeoutMs);
 
     socket.once("error", (error) => finish(reject, error));
+    socket.once("close", () => finish(reject, Object.assign(
+      new Error("Codex Desktop closed the native tools connection before responding"),
+      { code: "native_pipe_closed" },
+    )));
     socket.once("connect", () => {
       socket.write(encodeFrame(JSON.stringify({ jsonrpc: "2.0", id, method, params })));
     });

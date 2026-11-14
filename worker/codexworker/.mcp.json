@@ -4,7 +4,7 @@
       "command": "node",
       "cwd": ".",
       "args": [
-        "./server.mjs"
+        "./interface/desktop-mcp.mjs"
       ],
       "enabled": true,
       "default_tools_approval_mode": "approve",
