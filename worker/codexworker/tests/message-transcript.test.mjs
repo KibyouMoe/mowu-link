@@ -379,3 +379,27 @@ test("a Feishu-looking text prefix never changes an actual local API input sourc
  await f.flush();const record=(await f.manager.messageJournal.list()).records[0];
  assert.equal(record.source,"api");assert.ok(f.calls[0].opts.title.includes("本地 API 输入"));
 });
+
+test("peer input identifies its actual sender and keeps that title after transcript recovery", async t => {
+  const f = await fixture(t);
+  const req = request("这里是 TamamoCross。观察就绪。", { source: "hermes", origin: "worker-chat", workerName: "TamamoCross" });
+  await f.manager.mirrorInput(req);
+  const record = (await f.manager.messageJournal.list()).records[0];
+  assert.equal(record.source, "worker"); assert.equal(record.workerName, "TamamoCross");
+  f.manager.state.publicTextOutbox = {}; await f.manager.save();
+  await f.manager.recoverTranscript(); await f.flush();
+  assert.equal(f.calls.length, 1); assert.match(f.calls[0].opts.title, /TamamoCross私聊$/);
+  assert.equal(f.calls[0].opts.title.includes("溪流"), false);
+  assert.match(f.manager.inputMirrorTitle("worker"), /Worker私聊$/);
+});
+
+test("legacy Hermes-source peer records recover their sender from the original receipt", async t => {
+  const f = await fixture(t);
+  const req = request("legacy peer input", { source: "hermes", origin: "worker-chat", workerName: "TamamoCross" });
+  f.manager.state.receipts[req.messageId] = { request: req };
+  await f.manager.messageJournal.record({ seq: 1, logicalId: "input:" + req.messageId,
+    direction: "input", source: "hermes", threadId: "thread", messageId: req.messageId,
+    text: req.text, phase: "input" });
+  await f.manager.recoverTranscript(); await f.flush();
+  assert.equal(f.calls.length, 1); assert.match(f.calls[0].opts.title, /TamamoCross私聊$/);
+});

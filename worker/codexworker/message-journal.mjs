@@ -47,6 +47,7 @@ export class MessageJournal {
       if (!record) {
         record = { version: 1, id, previousId, seq: input.seq, logicalId: input.logicalId,
           direction: input.direction, source: input.source, threadId: input.threadId ?? null,
+          ...(input.source === "worker" && typeof input.workerName === "string" ? { workerName: input.workerName } : {}),
           turnId: input.turnId ?? null, messageId: input.messageId ?? null, taskId: input.taskId ?? null,
           kind: ["image", "tool_progress", "tool_event", "system_event", "question"].includes(input.kind) ? input.kind : "text",
           ...(input.kind === "question" && input.publicQuestion ? { publicQuestion: structuredClone(input.publicQuestion) } : {}),

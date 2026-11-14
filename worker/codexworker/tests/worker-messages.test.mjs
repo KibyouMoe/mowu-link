@@ -181,6 +181,7 @@ test("duplicate full SSE payloads queue one manager input and mirror once, inclu
   assert.equal(request.source, "hermes"); assert.equal(request.origin, "worker-chat"); assert.equal(request.workerName, peer);
   assert.equal(request.reply_to, value.reply_to);
   assert.ok(request.text.startsWith(`[worker ${peer} message ${value.message_id} reply_to ${value.reply_to}]\n`));
+  assert.ok(request.text.includes(`这里是 ${peer}。`));
   assert.match(request.text, /ordinary worker chat/); assert.match(request.text, /bridge_send_worker_message/); assert.match(request.text, /avoid automatic reply loops/);
   await dispatch(f);
   assert.deepEqual(f.nativeCalls.map(c => c.name), ["send_message_to_thread"]);

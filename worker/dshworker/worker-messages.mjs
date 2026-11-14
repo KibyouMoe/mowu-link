@@ -94,7 +94,7 @@ async function atomic(file, value) {
 }
 function marker(message, outgoing = false) {
   return `[worker ${message.from}${outgoing ? " -> " + message.to : ""} message ${message.message_id}` +
-    (message.reply_to ? " reply_to " + message.reply_to : "") + "]";
+    (message.reply_to ? " reply_to " + message.reply_to : "") + "]\n这里是 " + message.from + "。";
 }
 function routerReceipt(result, message) {
   if (result?.ok !== true || result.message_id !== message.message_id || !["queued", "accepted"].includes(result.status) ||
