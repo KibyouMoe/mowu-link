@@ -478,7 +478,7 @@ export class InProcessTransport {
         for (;;) {
           await agent.whenIdle();
           const idleSeq = agent.session.seq;
-          if (subagents && await subagents.waitForChildren(agent)) continue;
+          if (await subagents?.waitForChildren?.(agent)) continue;
           if (agent.status === "idle" && agent.session.seq === idleSeq) break;
         }
         const outcome = summarize(agent.session, fromSeq);

@@ -5,7 +5,8 @@ import { InProcessTransport } from "../interface/inprocess.mjs";
 async function fixture(t, opts = {}) {
   t.mock.timers.enable({ apis: ["Date", "setInterval"] });
   const handlers = new Map(), records = [];
-  const ctx = { on(name, fn) { handlers.set(name, fn); return () => handlers.delete(name); }, get() { return null; } };
+  const ctx = { on(name, fn) { handlers.set(name, fn); return () => handlers.delete(name); },
+    get(name) { return name === "subagents" ? opts.subagents : null; } };
   const transport = new InProcessTransport({ ctx, selection: {}, cwd: "/tmp",
     stateDir: "/tmp/nonexistent-dsh-progress-test", log: () => {}, ...opts });
   transport.save = async () => {};
@@ -62,6 +63,13 @@ test("in-process explicit deadline remains advisory while real events continue",
   assert.equal(f.cancels(), 0); assert.equal(f.turn.status, "inProgress");
   f.complete(); await f.running;
   assert.equal(f.turn.status, "completed");
+});
+
+test("Harness versions without the optional child-wait API still complete their native turn", async t => {
+  const f = await fixture(t, { subagents: {} });
+  f.complete(); await f.running;
+  assert.equal(f.turn.status, "completed");
+  assert.equal(f.turn.error, null);
 });
 
 test("descendant tool events and streams keep the parent task alive; unrelated agents cannot", async t => {

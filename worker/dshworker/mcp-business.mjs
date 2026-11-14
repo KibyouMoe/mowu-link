@@ -571,11 +571,12 @@ async function readNativeTask(threadId, invocation) {
 
 async function ensureLocalManagerServer() {
   if (desktopManager?.server?.listening || desktopManager?.proxy) return;
-  const lifecycleUnavailable = process.env.RUDOLF_BRIDGE_LIFECYCLE_READY === "0";
+  const ownsWriter = runtimeControl.ownsWriter ?? (process.env.RUDOLF_BRIDGE_LIFECYCLE_CHILD === "1");
+  const lifecycleUnavailable = runtimeControl.ownsWriter === true ? false : process.env.RUDOLF_BRIDGE_LIFECYCLE_READY === "0";
   // A failed cold initialize is a writer-start guard, not a permanent ban on
   // reconnecting to an authenticated, already healthy machine writer later.
   // Never promote a proxy or a contradictory child/ready=0 into a new writer.
-  if (lifecycleUnavailable && process.env.RUDOLF_BRIDGE_LIFECYCLE_CHILD === "1") throw new Error("desktop_lifetime_unavailable");
+  if (lifecycleUnavailable && ownsWriter) throw new Error("desktop_lifetime_unavailable");
   if (startingManager) return startingManager;
   startingManager = (async () => {
     const { readFile } = await import("node:fs/promises");
@@ -624,7 +625,7 @@ async function ensureLocalManagerServer() {
     }
     // Only the supervisor-owned child may become an HTTP/Feishu writer. A
     // chat/inventory MCP can otherwise race into the lease gap during handoff.
-    if (process.env.RUDOLF_BRIDGE_LIFECYCLE_CHILD !== "1") {
+    if (!ownsWriter) {
       try { desktopManager = await connectManagerProxy(config, !lifecycleUnavailable); }
       catch (error) {
         if (!lifecycleUnavailable) throw error;

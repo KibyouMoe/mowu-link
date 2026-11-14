@@ -372,6 +372,9 @@ async function startBusiness({ ctx, transport, identity, workerConfig, config, s
   const { createBusiness } = await import("./mcp-business.mjs");
   const startedAt = new Date().toISOString();
   const runtimeControl = {
+    // The injected Cordis host owns this in-process writer. Its lifecycle is
+    // independent of mutable environment flags inherited from other clients.
+    ownsWriter: true,
     transition: false,
     status: () => ({ available: true, scope: "plugin-inprocess", featureVersion: VERSION, sha256: null,
       loadedAt: startedAt, loadCount: 0, activeImageSends: 0, reloadAvailable: false,
