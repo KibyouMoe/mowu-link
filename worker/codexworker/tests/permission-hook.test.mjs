@@ -112,5 +112,7 @@ test("packaged hook CLI handles paths with spaces and returns only the host deci
   await writeFile(configFile, JSON.stringify({ ...config, host: "remote.example" }));
   assert.equal((await run()).hookSpecificOutput.decision.behavior, "deny"); assert.equal(calls.length, 1);
   const hooks = JSON.parse(await readFile(new URL("../hooks/hooks.json", import.meta.url), "utf8"));
+  const manifest = JSON.parse(await readFile(new URL("../.codex-plugin/plugin.json", import.meta.url), "utf8"));
+  assert.equal(manifest.hooks, "./hooks/hooks.json");
   assert.equal(hooks.hooks.PermissionRequest[0].hooks[0].command, 'node "${PLUGIN_ROOT}/scripts/review-permission-hook.mjs"');
 });

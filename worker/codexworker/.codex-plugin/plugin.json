@@ -20,5 +20,6 @@
     ]
   },
   "mcpServers": "./.mcp.json",
+  "hooks": "./hooks/hooks.json",
   "requires_local_executor": true
 }
