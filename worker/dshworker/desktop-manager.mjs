@@ -1,7 +1,7 @@
 // The transport/report contracts are adapted from @dsh/hermes-bridge (MIT).
 // The only conversation backend is the tool pipe injected by Codex Desktop.
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
-import { mkdir, open, readFile, realpath, rename, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath, rename, unlink, writeFile } from "node:fs/promises";
 import http from "node:http";
 import { routerOperations } from "./router-operations.mjs";
 import { reviewNativePermission } from "./interface/permission-hook.mjs";
@@ -11,7 +11,6 @@ import { addToolToBubble, renderToolBubble, safeToolPreview, TOOL_EDIT_INTERVAL_
 import { projectPublicQuestion, isNativeQuestionReply, parseNativeQuestionReply } from "./interface/public-questions.mjs";
 import { projectToolActivity } from "./interface/tool-activity.mjs";
 import { ProgressWatch, noProgressTimeoutMs, taskDeadline } from "./progress-watch.mjs";
-import net from "node:net";
 import path from "node:path";
 import os from "node:os";
 import { FeishuNotifier, FeishuWebsocketClient } from "./feishu.mjs";
@@ -33,6 +32,7 @@ import { defaultPublicJournalRoot } from "./interface/journal-paths.mjs";
 import { BRIDGE_HELP, goalPrompt } from "./feishu-commands.mjs";
 import { readLocalResumeCatalog } from "./local-resume-catalog.mjs";
 import { routerStatus } from "./router-client.mjs";
+import { acquireWriterLease } from "./interface/writer-lease.mjs";
 import { routerMessageId, routerMarker, findRouterTurn } from "./router-tasks.mjs";
 import { resumePage, resumeListText } from "./resume-list.mjs";
 import { hermesChunks } from "./hermes-feishu-format.mjs";
@@ -592,44 +592,14 @@ export class DesktopManager {
       fail(503, "bridge_not_ready", "Bind an allowed Codex Desktop workspace before starting the bridge.");
     }
     await mkdir(this.stateDir, { recursive: true });
-    // Windows releases a named pipe when its owner exits, even after a crash.
-    // Acquire this OS lease before examining a stale diagnostic lock file so
-    // simultaneous MCP restarts cannot both remove it and become writers.
     const canonicalState = await realpath(this.stateDir);
-    const leaseId = digest(process.platform === "win32" ? canonicalState.toLowerCase() : canonicalState).slice(0, 24);
-    const leaseAddress = process.platform === "win32" ? `\\\\.\\pipe\\codexworker-manager-${leaseId}` : path.join(os.tmpdir(), `cw-${leaseId}.sock`);
-    this.writerLease = net.createServer(socket => socket.end());
     try {
-      await new Promise((resolve, reject) => { this.writerLease.once("error", reject); this.writerLease.listen(leaseAddress, resolve); });
+      const lease = await acquireWriterLease(this.stateDir, canonicalState);
+      this.writerLease = lease.server; this.writerGuard = lease.guard;
+      this.leasePath = lease.ownerFile; this.leaseNonce = lease.nonce;
     } catch (error) {
       if (error.code === "EADDRINUSE") fail(503, "manager_instance_active", "A live plugin instance owns the machine-level Desktop manager.", true);
       throw error;
-    }
-    this.leasePath = path.join(this.stateDir, "desktop-manager.lock");
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        const handle = await open(this.leasePath, "wx", 0o600);
-        this.leaseNonce = randomUUID();
-        try { await handle.writeFile(JSON.stringify({ pid: process.pid, nonce: this.leaseNonce, startedAt: new Date().toISOString() })); }
-        finally { await handle.close(); }
-        break;
-      } catch (error) {
-        if (error.code !== "EEXIST") throw error;
-        if (process.platform === "win32" && attempt === 0) {
-          // The OS lease above is authoritative. After a reboot Windows may
-          // reuse yesterday's diagnostic PID for an unrelated live process.
-          // No other compliant writer can own this file while we hold the pipe.
-          await unlink(this.leasePath); continue;
-        }
-        let owner;
-        try { owner = JSON.parse(await readFile(this.leasePath, "utf8")); }
-        catch { fail(503, "manager_instance_active", "Another plugin instance is initializing the shared Desktop manager.", true); }
-        try { process.kill(owner.pid, 0); }
-        catch (probe) {
-          if (probe.code === "ESRCH" && attempt === 0) { await unlink(this.leasePath); continue; }
-        }
-        fail(503, "manager_instance_active", "A live plugin instance owns this machine's Desktop manager. Use its authenticated HTTP endpoint.", true);
-      }
     }
     try { this.state = JSON.parse(await readFile(this.statePath, "utf8")); }
     catch (error) {
@@ -2596,14 +2566,16 @@ export class DesktopManager {
     // initialize() may fail after acquiring the lease but before loading state.
     // Never overwrite an unreadable ledger with constructor defaults on cleanup.
     if (this.leaseNonce && this.stateLoaded) await this.save().catch(error => { if (error.code !== "ENOENT") throw error; });
-    if (this.leaseNonce) {
-      try {
-        const lease = JSON.parse(await readFile(this.leasePath, "utf8"));
-        if (lease.nonce === this.leaseNonce && lease.pid === process.pid) await unlink(this.leasePath);
-      } catch (error) { if (error.code !== "ENOENT") throw error; }
-      this.leaseNonce = null;
-    }
-    if (this.writerLease?.listening) await new Promise(resolve => this.writerLease.close(resolve));
+    try {
+      if (this.writerLease?.listening) await new Promise(resolve => this.writerLease.close(resolve));
+      if (this.leaseNonce) {
+        try {
+          const lease = JSON.parse(await readFile(this.leasePath, "utf8"));
+          if (lease.nonce === this.leaseNonce && lease.pid === process.pid) await unlink(this.leasePath);
+        } catch (error) { if (error.code !== "ENOENT") throw error; }
+        this.leaseNonce = null;
+      }
+    } finally { this.writerGuard?.close(); this.writerGuard = null; }
   }
 }
 
