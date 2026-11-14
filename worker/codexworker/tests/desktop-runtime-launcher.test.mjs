@@ -21,6 +21,7 @@ for (const platform of ["darwin", "win32"]) {
   test(platform + ": the real manifest forwards the engine identity needed to reject a foreign state directory", async () => {
     const manifest = JSON.parse(await readFile(new URL("../.mcp.json", import.meta.url), "utf8"));
     const server = manifest.mcpServers.codexworker;
+    assert.ok(server.env_vars.includes("CODEXWORKER_NATIVE_TASK_INPUT"));
     const parent = { CODEXWORKER_NATIVE_TRANSPORT: "dsh-inprocess", CODEXWORKER_STATE_DIR: "/foreign/dsh-state",
       CODEX_APP_TOOLS_PIPE_PATH: "actual-desktop-pipe" };
     const env = { ...Object.fromEntries(Object.entries(parent).filter(([key]) => server.env_vars.includes(key))), ...server.env };
