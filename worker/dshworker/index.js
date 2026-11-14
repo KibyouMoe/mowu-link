@@ -28,16 +28,15 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 import {
   registerNativeTransport,
   resetNativeTransportCache,
 } from "./interface/transport/index.mjs";
-import { ProgressWatch, noProgressTimeoutMs, taskDeadline } from "./progress-watch.mjs";
-import { normalizeSubscriptionConfig, taskBoardTerminalPhase, taskBoardText, taskBoardTitle } from "./router-tasks.mjs";
-import { waitForTaskClarification } from "./router-question-wait.mjs";
+import { noProgressTimeoutMs } from "./progress-watch.mjs";
+import { startDshRouterRuntime } from "./interface/router-runtime.mjs";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 export const name = "dshworker";
@@ -149,6 +148,7 @@ export function apply(ctx, config = {}) {
 
   let business = null;
   let routerClient = null;
+  let routerRuntime = null;
   const api = {
     version: VERSION,
     transport: TRANSPORT_NAME,
@@ -182,7 +182,8 @@ export function apply(ctx, config = {}) {
     },
     async close(reason) {
       transport.approvals.close();
-      try { await routerClient?.stop(); } catch { /* ignore */ }
+      try { await routerRuntime?.close(); } catch { /* ignore */ }
+      routerRuntime = null;
       routerClient = null;
       try { await business?.close(); } catch { /* ignore */ }
       business = null;
@@ -217,6 +218,7 @@ export function apply(ctx, config = {}) {
           workspace, log });
         business = started.business;
         routerClient = started.routerClient;
+        routerRuntime = started.routerRuntime;
       } catch (error) {
         log("error", "business_start_failed", { message: error?.message ?? String(error),
           code: error?.code ?? null });
@@ -413,162 +415,7 @@ async function startBusiness({ ctx, transport, identity, workerConfig, config, s
     log("warn", "session_adopt_failed", { threadId: thread.id, message: error?.message ?? String(error) });
   }
 
-  // ---- 任务看板：本 worker 自己的飞书身份 -----------------------------------
-  // 只把两条生命周期消息发到训练员与这个 worker 的私聊（start / failed）：
-  // 成功后 manager 自己在这条会话里的回复已经承载了正文，再发一条「完成」只是
-  // 重复。router 的回执（router → trigger）不受影响。
-  // 优先借 manager 已经建好的 notifier（它带着绑定的 token / canSend 守卫），
-  // manager 不可用时才用凭据文件自建一个，避免插件形态下多一条长连接。
-  const taskBoardDryRun = process.env.DSHWORKER_FEISHU_DRY_RUN === "1"
-    || process.env.CODEXWORKER_FEISHU_DRY_RUN === "1";
-  let taskBoardFallback = null;
-  async function taskBoardNotifier() {
-    const managerNotifier = business.manager?.()?.notifier;
-    if (managerNotifier?.enabled) return managerNotifier;
-    if (!feishu.value) return null;
-    if (!taskBoardFallback) {
-      const { FeishuNotifier } = await import("./feishu.mjs");
-      taskBoardFallback = new FeishuNotifier({ appId: feishu.value.app_id,
-        appSecret: feishu.value.app_secret, bridgeName: identity.display });
-    }
-    return taskBoardFallback.enabled ? taskBoardFallback : null;
-  }
-  async function taskBoardNotify(taskId, phase, fields = {}) {
-    let text;
-    let title;
-    try {
-      text = taskBoardText({ phase, taskId, ...fields });
-      title = taskBoardTitle({ phase, taskId }) ?? `${identity.display} · 任务看板`;
-    } catch (error) {
-      log("warn", "task_board_failed", { taskId, phase, message: error?.message ?? String(error) });
-      return null;
-    }
-    // 干跑只打日志不发，隔离实例的测试就永远不会投到训练员私聊里。
-    if (taskBoardDryRun) {
-      log("info", "task_board_dry_run", { taskId, phase, title, text: text.slice(0, 200),
-        textChars: text.length,
-        targetOpenIdSha256: createHash("sha256").update(String(taskBoardOpenId)).digest("hex").slice(0, 12) });
-      return "dry-run";
-    }
-    if (!taskBoardEnabled) { log("warn", "task_board_skipped", { taskId, phase, reason: "no_target" }); return null; }
-    const notifier = await taskBoardNotifier().catch(() => null);
-    if (!notifier) { log("warn", "task_board_skipped", { taskId, phase, reason: "feishu_disabled" }); return null; }
-    let delivery = null;
-    try {
-      const response = await notifier.sendMessage(text, { openId: taskBoardOpenId, receiveIdType: "open_id",
-        title, onDelivery: (entry) => { delivery = entry; } });
-      const messageId = response?.data?.message_id ?? delivery?.messageId ?? null;
-      log(messageId ? "info" : "warn", "task_board_sent", { taskId, phase, messageId,
-        apiCode: Number.isInteger(response?.code) ? response.code : null, deliveryPhase: delivery?.phase ?? null });
-      return messageId;
-    } catch (error) {
-      log("warn", "task_board_failed", { taskId, phase, message: error?.message ?? String(error) });
-      return null;
-    }
-  }
-
-  // router（可选）：任务进入 manager 选中的同一个会话，和飞书共享上下文。
-  const routerConfig = workerConfig.router ?? {};
-  const routerEnabled = config.router !== false && process.env.CODEXWORKER_ROUTER !== "0"
-    && routerConfig.enabled !== false;
-  let routerClient = null;
-  if (routerEnabled) {
-    if (token.length < 24) {
-      log("warn", "router_token_unavailable", { tokenFile, reason: "missing or too short" });
-    } else {
-      const { RouterClient } = await import("./router-client.mjs");
-      const { PROTOCOL } = await import("./desktop-manager.mjs");
-      const { routerMarker, routerMessageId, routerPrompt, lastAssistantText, findRouterTurn, TERMINAL_TURN } =
-        await import("./router-tasks.mjs");
-      const routerUrl = String(process.env.CODEXWORKER_ROUTER_URL ?? routerConfig.url ?? "http://127.0.0.1:8790");
-      let chain = Promise.resolve();
-      const runTask = async (task) => {
-        const taskId = stringArg(task?.task_id);
-        const goal = stringArg(task?.goal);
-        if (!taskId) return;
-        const startedTask = Date.now();
-        const marker = routerMarker(taskId);
-        const messageId = routerMessageId(taskId);
-        let status = "failed";
-        let summary = "";
-        let failure = "task runner error";
-        log("info", "router_task_start", { taskId, messageId });
-        // 开始行：训练员私聊里要能看见「来自超级溪流的指令」+ 目标原文。
-        await taskBoardNotify(taskId, "start", { goal });
-        try {
-          if (!goal) throw new Error("router task has an empty goal");
-          const manager = business.manager?.();
-          if (!manager?.message) throw new Error("manager is not active");
-          const selected = manager.state?.selectedThreadId && manager.state.sessions?.[manager.state.selectedThreadId]
-            ? manager.state.selectedThreadId : thread.id;
-          const deadline = taskDeadline(task, startedTask);
-          transport.taskDeadlines.set(taskId, Number.isFinite(deadline) ? deadline : null);
-          await manager.message({ protocolVersion: PROTOCOL, messageId, source: "hermes", origin: "router",
-            text: routerPrompt({ taskId, goal, context: task.context }), targetThreadId: selected, delivery: "steer" });
-          const watch = new ProgressWatch({ deadline, timeoutMs: transport.noProgressTimeoutMs });
-          let turn = null;
-          const consumedQuestions = new Set();
-          for (;;) {
-            const rejection = manager.state.receipts?.[messageId]?.error;
-            if (rejection) throw new Error(`${rejection.error}: ${rejection.detail ?? "dispatch rejected"}`);
-            const snapshot = await transport.execute("read_thread", { threadId: selected, turnLimit: 30, includeOutputs: false });
-            const found = turn ? snapshot.turns.find((item) => item.id === turn.id) ?? null : findRouterTurn(snapshot, marker);
-            if (found) turn = found;
-            if (found && TERMINAL_TURN.has(found.status)) {
-              if (found.status !== "completed") break;
-              await manager.captureTaskQuestions(selected, found);
-              const answer = await waitForTaskClarification({ manager, router: routerClient, taskId,
-                threadId: selected, consumed: consumedQuestions, deadline, log });
-              if (!answer) break;
-              consumedQuestions.add(answer.questionId);
-              if (answer.turnId && answer.turnId !== found.id) {
-                turn = { id: answer.turnId }; watch.touch(); continue;
-              }
-              break;
-            }
-            watch.observe(found ?? snapshot.turns);
-            if (found?.waitingForInput) watch.touch(); // Waiting for a real answer is not a stalled engine.
-            const failure = watch.failure();
-            if (failure) {
-              await transport.control.cancelTask(taskId).catch(error =>
-                log("error", "router_task_cancel_failed", { taskId, message: error.message }));
-              throw new Error(failure.message);
-            }
-            await sleep(Math.max(1, Math.min(1_000, watch.remainingMs())));
-          }
-          status = turn?.status === "completed" ? "done" : "failed";
-          summary = lastAssistantText(turn) || (turn ? "" : "task turn never appeared");
-          if (status !== "done") {
-            failure = turn?.error || (turn ? `turn ${turn.status}` : "task turn never appeared");
-            summary = summary || failure;
-          }
-        } catch (error) {
-          summary = error?.message ?? String(error);
-          failure = summary;
-          log("error", "router_task_failed", { taskId, message: summary });
-        }
-        transport.taskDeadlines.delete(taskId);
-        // 成功不单独发：manager 在这条会话里的回复已经到训练员私聊了。
-        const boardPhase = taskBoardTerminalPhase(status);
-        if (boardPhase) await taskBoardNotify(taskId, boardPhase, { summary, failure });
-        await routerClient.result({ taskId, status, summary }).catch((error) => {
-          log("error", "router_result_failed", { taskId, message: error?.message ?? String(error) });
-        });
-      };
-      routerClient = new RouterClient({
-        url: routerUrl, token, name: identity.name, version: VERSION,
-        subscriptions: normalizeSubscriptionConfig(workerConfig.subscriptions),
-        logger: (level, event, fields = {}) => log(level, event, { component: "router", ...fields }),
-      });
-      transport.control.bindRouter(routerClient, `http://${host}:${port}`);
-      routerClient.start({
-        onTask: (task) => { chain = chain.then(() => runTask(task)).catch((error) =>
-          log("error", "router_chain_error", { message: error?.message ?? String(error) })); return chain; },
-        onConnect: ({ attempt, reconnects }) => log("info", "router_connected", { attempt, reconnects }),
-        onDisconnect: ({ reason, delayMs, reconnects }) => log("warn", "router_disconnected", { reason, delayMs, reconnects }),
-      });
-      log("info", "router_client_started", { url: routerUrl, name: identity.name });
-    }
-  }
-  return { business, routerClient };
+  const routerRuntime = await startDshRouterRuntime({ manager: business.manager(), transport,
+    workerConfig, pluginConfig: config, identity, host, port, tokenFile, log, version: VERSION });
+  return { business, routerClient: routerRuntime.client, routerRuntime };
 }

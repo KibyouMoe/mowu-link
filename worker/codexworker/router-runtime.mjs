@@ -180,44 +180,47 @@ export async function startRouterRuntime({ manager, nativeCall, transport = {}, 
       const messageId = routerMessageId(taskId), marker = routerMarker(taskId);
       const goal = String(task.goal ?? "").trim(), deadline = taskDeadline(task);
       let threadId = null, turnId = null, status = "failed", summary = "", failure = "";
-      client.setActivity({ state: "running", taskId });
       try {
-        if (!goal) throw new Error("router task has an empty goal");
-        const destination = await target(messageId); threadId = destination.threadId;
-        if (!destination.previous && (!manager.transcriptEnabled || dryRun())) await board({ taskId, phase: "start", goal, threadId });
-        const cwd = manager.state.sessions[threadId].cwd;
-        if (task.workspace && cwd && path.resolve(expandHome(String(task.workspace))) !== path.resolve(cwd))
-          log("warn", "router_task_workspace_ignored", { taskId, threadId, sessionCwd: cwd });
-        await deliver({ ...destination, messageId, origin: "router", text: routerPrompt({ taskId, goal, context: task.context }) });
-        let waited = await waitTurn({ threadId, marker, messageId, deadline });
-        const consumed = new Set();
-        while (waited.status === "completed") {
-          const answer = await observe(() => waitForTaskClarification({ manager, router: client, taskId, threadId, consumed,
-            deadline, log, sleep }));
-          if (!answer) break;
-          consumed.add(answer.questionId);
-          waited = await waitTurn({ threadId, marker, messageId: answer.messageId, initialTurnId: answer.turnId, deadline });
+        transport.taskStarted?.(task, deadline);
+        client.setActivity({ state: "running", taskId });
+        try {
+          if (!goal) throw new Error("router task has an empty goal");
+          const destination = await target(messageId); threadId = destination.threadId;
+          if (!destination.previous && (!manager.transcriptEnabled || dryRun())) await board({ taskId, phase: "start", goal, threadId });
+          const cwd = manager.state.sessions[threadId].cwd;
+          if (task.workspace && cwd && path.resolve(expandHome(String(task.workspace))) !== path.resolve(cwd))
+            log("warn", "router_task_workspace_ignored", { taskId, threadId, sessionCwd: cwd });
+          await deliver({ ...destination, messageId, origin: "router", text: routerPrompt({ taskId, goal, context: task.context }) });
+          let waited = await waitTurn({ threadId, marker, messageId, deadline });
+          const consumed = new Set();
+          while (waited.status === "completed") {
+            const answer = await observe(() => waitForTaskClarification({ manager, router: client, taskId, threadId, consumed,
+              deadline, log, sleep }));
+            if (!answer) break;
+            consumed.add(answer.questionId);
+            waited = await waitTurn({ threadId, marker, messageId: answer.messageId, initialTurnId: answer.turnId, deadline });
+          }
+          turnId = waited.turn?.id ?? null;
+          let text = lastAssistantText(waited.turn);
+          if (!text && turnId) text = lastAssistantText((await read(threadId)).turns?.find(turn => turn.id === turnId));
+          status = waited.status === "completed" && !waited.timedOut ? "done" : "failed";
+          failure = waited.timedOut ? waited.message : (typeof waited.turn?.error === "string" ? waited.turn.error
+            : waited.turn?.error?.message) || `turn ${waited.status ?? "unknown"}`;
+          summary = status === "done" ? text || "(completed; no assistant message)" : [failure, text].filter(Boolean).join("\n\n");
+        } catch (error) {
+          if (closed) return;
+          failure = error.message; summary = `task runner error: ${failure}`;
+          log("error", "router_task_failed", { taskId, threadId, message: failure });
         }
-        turnId = waited.turn?.id ?? null;
-        let text = lastAssistantText(waited.turn);
-        if (!text && turnId) text = lastAssistantText((await read(threadId)).turns?.find(turn => turn.id === turnId));
-        status = waited.status === "completed" && !waited.timedOut ? "done" : "failed";
-        failure = waited.timedOut ? waited.message : (typeof waited.turn?.error === "string" ? waited.turn.error
-          : waited.turn?.error?.message) || `turn ${waited.status ?? "unknown"}`;
-        summary = status === "done" ? text || "(completed; no assistant message)" : [failure, text].filter(Boolean).join("\n\n");
-      } catch (error) {
-        if (closed) return;
-        failure = error.message; summary = `task runner error: ${failure}`;
-        log("error", "router_task_failed", { taskId, threadId, message: failure });
-      }
-      try {
-        check();
-        const phase = taskBoardTerminalPhase(status);
-        if (phase) await board({ taskId, phase, summary, failure, threadId });
-        await observe(() => client.result({ taskId, status, summary: summary.slice(0, 20_000), artifacts: [],
-          evidence: [{ type: "codex_thread", thread_id: threadId, turn_id: turnId }] }));
-        log("info", "router_result_sent", { taskId, status, threadId, turnId });
-      } finally { client.setActivity({ state: "idle", taskId: null }); }
+        try {
+          check();
+          const phase = taskBoardTerminalPhase(status);
+          if (phase) await board({ taskId, phase, summary, failure, threadId });
+          await observe(() => client.result({ taskId, status, summary: summary.slice(0, 20_000), artifacts: [],
+            evidence: [{ type: "codex_thread", thread_id: threadId, turn_id: turnId }] }));
+          log("info", "router_result_sent", { taskId, status, threadId, turnId });
+        } finally { client.setActivity({ state: "idle", taskId: null }); }
+      } finally { transport.taskFinished?.(taskId); }
     }
     async function runSubscription(event) {
       const source = String(event?.source ?? "").trim() || "(unknown)", kind = String(event?.kind ?? "event"), id = event?.id ?? null;
@@ -243,6 +246,7 @@ export async function startRouterRuntime({ manager, nativeCall, transport = {}, 
       }).finally(() => { pending--; client.setActivity({ state: "idle", taskId: null }); });
       return chain;
     }
+    transport.bindRouter?.(client, `http://${config.host ?? "127.0.0.1"}:${config.port}`);
     let approvalChannel, approvalHandler;
     if (typeof transport.setApprovalHandler === "function") {
       approvalChannel = createApprovalChannel({ router: client, taskId: () => client.activity.taskId, sleepImpl: sleep,
