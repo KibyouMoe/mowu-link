@@ -20,11 +20,12 @@ try {
   catch (error) { if (error.code !== "ENOENT") throw error; }
   if (!config || config.autoStart === false) result = {};
   else {
-    if ((config.host ?? "127.0.0.1") !== "127.0.0.1" || !Number.isInteger(config.port) ||
-        config.port < 1 || config.port > 65535) throw new Error("permission_endpoint_invalid");
+    const port = config.port ?? 8903;
+    if ((config.host ?? "127.0.0.1") !== "127.0.0.1" || !Number.isInteger(port) ||
+        port < 1 || port > 65535) throw new Error("permission_endpoint_invalid");
     const token = (await readFile(config.tokenFile, "utf8")).trim();
     if (token.length < 24) throw new Error("permission_credential_invalid");
-    const response = await fetch(`http://127.0.0.1:${config.port}/bridge/permissions/review`, {
+    const response = await fetch(`http://127.0.0.1:${port}/bridge/permissions/review`, {
       method: "POST", headers: { authorization: "Bearer " + token, "content-type": "application/json" },
       body: JSON.stringify(event), signal: AbortSignal.timeout(560000) });
     if (!response.ok) throw new Error("permission_review_unavailable");
