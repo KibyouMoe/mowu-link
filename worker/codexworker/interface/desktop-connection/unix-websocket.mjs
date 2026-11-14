@@ -2,7 +2,8 @@
 // It presents the same JSONL streams as the owned stdio transport. Closing this
 // channel only disconnects one client; it never controls the shared daemon.
 import net from "node:net";
-import {lstat} from "node:fs/promises";
+import {lstat, realpath} from "node:fs/promises";
+import path from "node:path";
 import {EventEmitter} from "node:events";
 import {PassThrough, Writable} from "node:stream";
 import {createHash, randomBytes} from "node:crypto";
@@ -84,7 +85,18 @@ class UnixChannel extends EventEmitter {
 }
 
 export async function connectUnixWebSocket(socketPath, {timeoutMs = 5000} = {}) {
-  const metadata = await lstat(socketPath);
+  let metadata = await lstat(socketPath);
+  // The official daemon publishes its stable control address as a symlink.
+  // Accept only a same-user link in a private directory, then validate and use
+  // its resolved socket. Never discover another endpoint after rejection.
+  if (metadata.isSymbolicLink()) {
+    const parent = await lstat(path.dirname(socketPath));
+    if (!parent.isDirectory() || parent.isSymbolicLink() || parent.mode & 0o077 ||
+        typeof process.getuid === "function" && (metadata.uid !== process.getuid() || parent.uid !== process.getuid()))
+      throw Error("shared_app_server_socket_not_private");
+    socketPath = await realpath(socketPath);
+    metadata = await lstat(socketPath);
+  }
   if (!metadata.isSocket() || typeof process.getuid === "function" && metadata.uid !== process.getuid() || metadata.mode & 0o022)
     throw Error("shared_app_server_socket_not_private");
   return new Promise((resolve, reject) => {

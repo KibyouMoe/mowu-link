@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import {once} from "node:events";
 import {createHash} from "node:crypto";
-import {mkdtemp,chmod,rm} from "node:fs/promises";
+import {mkdtemp,chmod,rm,symlink} from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import {connectUnixWebSocket} from "../interface/desktop-connection/unix-websocket.mjs";
@@ -71,6 +71,18 @@ unixTest("shared clients can disconnect and reconnect without ending the listene
  const f=await server(t,({socket,ok})=>{ok();clientFrames(socket,(op,body)=>{if(op===8)socket.end(packet(8,body));});});
  for(let i=0;i<2;i++){const c=await connectUnixWebSocket(f.file);const exit=once(c,"exit");c.kill();await exit;}
  assert.equal(f.count(),2);assert.equal(f.srv.listening,true);
+});
+unixTest("official stable control symlink works only in a private same-user directory",async t=>{
+ const f=await server(t,({socket,ok})=>{ok();clientFrames(socket,(op,body)=>{if(op===8)socket.end(packet(8,body));});});
+ const link=path.join(path.dirname(f.file),"control.sock");await symlink(f.file,link);
+ const c=await connectUnixWebSocket(link),done=once(c,"exit");c.kill();await done;
+ assert.equal(f.count(),1);
+ await chmod(path.dirname(link),0o777);
+ await assert.rejects(connectUnixWebSocket(link),/socket_not_private/);
+ assert.equal(f.count(),1,"insecure link parent must fail before connecting");
+ await chmod(path.dirname(link),0o700);await chmod(f.file,0o666);
+ await assert.rejects(connectUnixWebSocket(link),/socket_not_private/);
+ assert.equal(f.count(),1,"resolved target must still be a private socket");
 });
 unixTest("wrong upgrade authentication is rejected rather than falling back",async t=>{
  const f=await server(t,({socket})=>socket.end("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: invalid\r\n\r\n"));

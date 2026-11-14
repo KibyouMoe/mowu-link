@@ -107,3 +107,11 @@
 - 生产router只读health仍0.3.1，无新版工单能力；未重启。已在 ~/.hermes/releases/router/fc35e1ab… 准备server.py、attachments.py及保留原参数的plist草案，实际 --version=0.4.0；仅暂存，未替换现有LaunchAgent。
 - 本机备份 ~/.hermes/backups/router/20261114-014540：SQLite backup生成983040字节一致快照，138 tasks/14 workers，quick_check=ok；原plist SHA仍173fe5a8be2b27b681cddc76dabaa7be827153057df563211510388e83767e79。离线WAL快照只读验证需immutable=1，未将此参数用于在线数据库。
 - 仍需正常Mac重开/唯一writer交接、Windows真实Desktop、允许加载新版router后实际工单和peer回流；当前不修改或重启生产router/DSH/gateway，不将CI或准备包冒充外部闭环完成。
+
+## 整机重启后的真实启动冲突（2026-11-14 09:27）
+
+- 训练员整机重启后Desktop1260启动私有后台2135；旧LaunchAgent ai.hermes.codexworker 又启动CLI/PID2061与共享后台2494，并把CODEX_CLI_PATH恢复旧路径。Desktop早于该setenv启动，故整机重启仍出现原会话占用。CLI还重写desktop-config，移除了暂存autoStart/publicJournalRoot/router配置。
+- 当前模型在共享后台，其MCP没有原生Desktop通道；实际Desktop后台2135及其插件MCP3765已收到宿主通道，真实监督器3778已启动但被旧writer挡住。这两者不能用同一条bridge_probe的失败混为一谈。
+- 一次性迁移计划已只读核验：仅在当前回合idle持续12秒后，备份配置/绑定/账本与旧plist，正常disable/bootout旧Worker并移出LaunchAgents，清除旧启动覆盖，启用已经在运行的Desktop插件；原threadId不变，不新建/归档，不停止共享daemon或其他服务。官方thread/read不订阅，最后旧连接离开后有默认60秒空闲卸载宽限；等待真正交接结果，不再以重复重启代替。
+- 维护脚本 /tmp/oguri-desktop-cutover.mjs，--plan 输出plan_verified（旧writer2061/Desktop1260/原thread active）；尚待启动一次性执行器，本轮final后才能触发idle。日志为 ~/.codex/state/codexworker/desktop-only-cutover-events.jsonl。
+- 官方稳定control socket实际是同UID/private0700目录里的symlink，目标为同UID0600 Unix socket；连接层修正为验证私有link目录再验证resolved socket，不扫描其他端点。新增真实symlink成功/非法目录与目标拒绝测试，Mac定向17/17通过。
