@@ -53,14 +53,8 @@ export class FeishuOnlineAnnouncement {
     const previous = m.state.feishuLastOnlineNotice ??
       (["sent", "suppressed-hot-reload"].includes(m.state.feishuOnlineNotice?.status) ? m.state.feishuOnlineNotice : null);
     const lifetime = m.config.desktopLifetimeStartedAt ?? null;
-    // Older generations persisted only the current hot-reload suppression,
-    // without a separate last-success/lifetime field. Its actual connection
-    // time can establish a prior connection in this Desktop lifetime, not a
-    // claim that a human saw an earlier notification.
-    const priorInLifetime = previous && (previous.desktopLifetimeStartedAt === lifetime ||
-      (!previous.desktopLifetimeStartedAt && Date.parse(previous.connectedAt) >= Date.parse(lifetime)));
-    const recovery = Boolean(previous ? (!lifetime || priorInLifetime)
-      : m.restoredSessionIds?.has(m.state.selectedThreadId));
+    // Desktop restarts continue the worker's persisted connection history.
+    const recovery = Boolean(previous || m.restoredSessionIds?.has(m.state.selectedThreadId));
     const record = { connectionId, status: "stabilizing", attempts: 0, connectedAt: new Date(now).toISOString(),
       stableAfter: new Date(now + stableMs).toISOString(), kind: recovery ? "recovered" : "online", desktopLifetimeStartedAt: lifetime,
       threadId: null, sessionTitle: null, sentAt: null, messageId: null };

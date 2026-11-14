@@ -1597,7 +1597,7 @@ test("short first connections cannot announce success; a later stable connection
   assert.equal(notice.status().status, "sent"); assert.equal(cards[0].options.uuid, second.connectionId);
 });
 
-test("online/recovery classification survives restart but a new Desktop lifetime is a new online notice", async t => {
+test("Desktop restarts resume the existing worker and announce recovery", async t => {
   const f = await fixture(t, { desktopLifetimeStartedAt: "current-desktop", feishu: { chatId: "trainer-chat" } }); await f.register();
   const cards = []; f.manager.notifier = { sendMessage: async (text, options) => { cards.push({ text, options }); return { code: 0 }; } };
   let socket = onlineSocket(f); await f.manager.onlineAnnouncement.connected(socket, socket.connectionId);
@@ -1605,7 +1605,16 @@ test("online/recovery classification survives restart but a new Desktop lifetime
   f.manager.onlineAnnouncement.reset(); socket = onlineSocket(f);
   await f.manager.onlineAnnouncement.connected(socket, socket.connectionId); assert.equal(cards.at(-1).options.title, "CodexWorker-重连");
   f.manager.config.desktopLifetimeStartedAt = "next-desktop"; socket = onlineSocket(f);
-  await f.manager.onlineAnnouncement.connected(socket, socket.connectionId); assert.equal(cards.at(-1).options.title, "CodexWorker-上线通知");
+  await f.manager.onlineAnnouncement.connected(socket, socket.connectionId); assert.equal(cards.at(-1).options.title, "CodexWorker-重连");
+});
+
+test("legacy successful notices without a Desktop lifetime remain reconnect history", async t => {
+  const f = await fixture(t, { desktopLifetimeStartedAt: "new-desktop", feishu: { chatId: "trainer-chat" } }); await f.register();
+  f.manager.state.feishuLastOnlineNotice = { status: "sent", connectedAt: "2026-10-04T01:00:00.000Z", threadId: "existing" };
+  const cards = []; f.manager.notifier = { sendMessage: async (text, options) => { cards.push({ text, options }); return { code: 0 }; } };
+  const socket = onlineSocket(f); await f.manager.onlineAnnouncement.connected(socket, socket.connectionId);
+  assert.equal(cards.length, 1); assert.equal(cards[0].options.title, "CodexWorker-重连");
+  assert.match(cards[0].text, /已重连，继续原会话/);
 });
 
 test("an older hot-reload suppression record still distinguishes a later recovery in the same Desktop", async t => {
