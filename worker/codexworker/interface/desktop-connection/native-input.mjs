@@ -1,9 +1,10 @@
-// Typed image input on the existing Desktop-owned connection. Only a saved
-// Feishu receipt may authorize a write; this endpoint exposes no generic RPC.
+// Typed input on the existing Desktop-owned connection. Saved Feishu or
+// question-answer receipts authorize writes; this endpoint exposes no generic RPC.
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { chmod, lstat, mkdir, mkdtemp, open, readFile, realpath, rename, rm, unlink, writeFile } from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
+import { nativeQuestionReply } from "../public-questions.mjs";
 
 const MAX_REQUEST_BYTES = 128 * 1024;
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -36,18 +37,38 @@ export async function createNativeInput({ stateDir, owner, send, timeoutMs = 300
   }
 
   async function validate(request) {
+    const question = request.operation === "questionReply";
     if (!uuid.test(request.messageId ?? "") || typeof request.threadId !== "string" ||
         typeof request.prompt !== "string" || !request.prompt.trim() ||
-        !["steer", "queue"].includes(request.delivery) || !Array.isArray(request.images) ||
-        request.images.length < 1 || request.images.length > 10) invalid("native_image_request_invalid");
+        !["steer", "queue"].includes(request.delivery) || ![undefined, "image", "questionReply"].includes(request.operation) ||
+        question && (request.delivery !== "steer" || request.images !== undefined) ||
+        !question && (!Array.isArray(request.images) || request.images.length < 1 || request.images.length > 10))
+      invalid("native_input_request_invalid");
     const config = JSON.parse(await readFile(path.join(stateDir, "desktop-config.local.json"), "utf8"));
     if (config.autoStart === false) invalid("native_image_autostart_disabled");
     const state = JSON.parse(await readFile(path.join(stateDir, "desktop-manager-state.json"), "utf8"));
     const receipt = state.receipts?.[request.messageId], feishu = state.feishuReceipts?.[request.messageId];
     if (!state.sessions?.[request.threadId] || ![undefined, null, "local"].includes(state.sessions[request.threadId].hostId) ||
         state.selectedThreadId !== request.threadId ||
-        receipt?.request?.source !== "trainer" || receipt.nativeTargetThreadId !== request.threadId ||
-        receipt.nativeInputHash !== digest(JSON.stringify(request.prompt)) || receipt.nativeDispatch?.status !== "dispatching" ||
+        !["trainer", "hermes"].includes(receipt?.request?.source) || receipt.nativeTargetThreadId !== request.threadId ||
+        receipt.nativeInputHash !== digest(JSON.stringify(request.prompt))) invalid("native_input_receipt_mismatch");
+    if (question) {
+      const actions = JSON.parse(await readFile(path.join(stateDir, "question-actions.json"), "utf8"));
+      const entry = Object.entries(actions.entries ?? {}).find(([, value]) => value.nativeMessageId === request.messageId);
+      const action = entry?.[1], publicQuestion = state.publicQuestions?.[entry?.[0]];
+      const dispatch = ["dispatching", "answer_pending"].includes(action?.status) &&
+        receipt.nativeDispatch?.status === "dispatching";
+      const reconcile = ["answered", "skipped"].includes(action?.status) &&
+        action.nativePanelSync?.status === "dispatching" && receipt.nativeDispatch?.status === "accepted";
+      if (!publicQuestion || publicQuestion.threadId !== request.threadId ||
+          action.bindingEpoch !== state.selectionEpoch ||
+          !["trainer", "hermes"].includes(action?.answerActor) || !dispatch && !reconcile ||
+          publicQuestion.sourceTurnId !== action.sourceTurnId ||
+          nativeQuestionReply(publicQuestion, action.answers) !== request.prompt)
+        invalid("native_question_receipt_mismatch");
+      return;
+    }
+    if (receipt.request.source !== "trainer" || receipt.nativeDispatch?.status !== "dispatching" ||
         !/^om_[A-Za-z0-9_-]+$/.test(feishu?.incomingMessageId ?? "") || feishu.imageThreadId !== request.threadId ||
         JSON.stringify(feishu.nativeImagePaths) !== JSON.stringify(request.images)) invalid("native_image_receipt_mismatch");
     const cache = await realpath(path.join(stateDir, "feishu-images"));
@@ -70,7 +91,7 @@ export async function createNativeInput({ stateDir, owner, send, timeoutMs = 300
   }
 
   async function deliver(request, fingerprint) {
-    const ledger = path.join(stateDir, "native-image-receipts");
+    const ledger = path.join(stateDir, request.operation === "questionReply" ? "native-question-receipts" : "native-image-receipts");
     await mkdir(ledger, { recursive: true, mode: 0o700 });
     const file = path.join(ledger, request.messageId + ".json");
     let previous;
@@ -96,7 +117,7 @@ export async function createNativeInput({ stateDir, owner, send, timeoutMs = 300
     await writeFile(file, JSON.stringify(record) + "\n", { flag: "wx", mode: 0o600 });
     try {
       const params = { threadId: request.threadId, clientUserMessageId: request.messageId,
-        input: [{ type: "text", text: request.prompt }, ...request.images.map(image => ({ type: "localImage", path: image }))] };
+        input: [{ type: "text", text: request.prompt }, ...(request.images ?? []).map(image => ({ type: "localImage", path: image }))] };
       const method = active ? request.delivery === "queue" ? "thread/queue/add" : "turn/steer" : "turn/start";
       if (method === "turn/steer") params.expectedTurnId = active.id;
       const response = await rpc(method, params);
@@ -165,7 +186,8 @@ export async function createNativeInput({ stateDir, owner, send, timeoutMs = 300
   }
 
   return {
-    env: { CODEXWORKER_NATIVE_IMAGE_INPUT: "1", CODEXWORKER_NATIVE_INPUT_DESCRIPTOR: descriptorFile },
+    env: { CODEXWORKER_NATIVE_IMAGE_INPUT: "1", CODEXWORKER_NATIVE_QUESTION_INPUT: "1",
+      CODEXWORKER_NATIVE_INPUT_DESCRIPTOR: descriptorFile },
     client(message) {
       if (message?.method === "initialize") initializeId = message.id;
       if (message?.method === "initialized") initialized = true;

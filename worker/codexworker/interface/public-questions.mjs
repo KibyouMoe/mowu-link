@@ -22,8 +22,8 @@ export function projectPublicQuestion(item, { threadId, turnId }) {
     sourceQuestionItemIds: questions.map((_, i) => JSON.stringify(["request_user_input_async", item.id, i])) };
 }
 
-// Desktop derives answered-question state from this exact public reply envelope.
-// Keep the original IDs and real answers; prose alone cannot close the panel.
+// Desktop derives answered-question state from this envelope in a native user
+// input item. Keep the original IDs and answers through the input transport.
 export function nativeQuestionReply(question, answers) {
   if (question.delivery !== "async") return null;
   if (!Array.isArray(question.sourceQuestionItemIds) ||

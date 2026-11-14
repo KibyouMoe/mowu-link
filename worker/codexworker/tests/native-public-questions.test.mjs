@@ -155,6 +155,49 @@ test("native async choices remain actionable after their own turn completes and 
  assert.equal(f.manager.questions.get(q.questionId).status,"answered");
  assert.equal(f.calls.filter(c=>c.name==="send_message_to_thread").length,1);
 });
+
+test("native answer dispatch is explicit, while legacy panel reconciliation preserves the original UUID and answer",async t=>{
+ const f=await fixture(t),cards=ui(f),q=await observe(f);
+ f.manager.config.nativeQuestionInput=true;
+ f.manager.config.nativeBusyDeliveryVerified=true;
+ f.manager.handoffPaused=false;await f.manager.drainPublicTexts();
+ await f.manager.questions.acceptCard({header:{event_type:"card.action.trigger",event_id:"native-input-click"},event:{
+  operator:{open_id:"trainer"},context:{open_message_id:"om_real_question_card",open_chat_id:"chat"},
+  action:formAction(cards[0].card,["另一个仓库"])}});
+ await f.manager.questions.process();
+ const s=f.manager.questions.state.entries[q.questionId];
+ const writes=()=>f.calls.filter(c=>c.name==="send_message_to_thread");
+ assert.equal(writes().length,1);assert.equal(writes()[0].args.nativeQuestionReply,true);
+ assert.equal(writes()[0].args.nativeMessageId,s.nativeMessageId);
+ assert.equal(f.manager.questions.get(q.questionId).nativePanelSync,"accepted");
+ // Simulate a confirmed answer delivered by the older delegated transport.
+ delete s.nativePanelSync;
+ delete f.manager.state.receipts[s.nativeMessageId].nativeDispatch.nativeQuestionReply;
+ await f.manager.questions.save();
+ const before=s.nativeMessageId;
+ const result=await f.manager.questions.syncNativeAnswer(q.questionId);
+ assert.equal(result.nativeInputAccepted,true);assert.equal(writes().length,2);
+ assert.equal(writes()[1].args.nativeMessageId,before);
+ assert.equal(writes()[1].args.prompt,nativeQuestionReply(q,["另一个仓库"]));
+ assert.equal(s.nativeMessageId,before);assert.deepEqual(s.answers,["另一个仓库"]);
+ assert.equal((await f.manager.questions.syncNativeAnswer(q.questionId)).duplicate,true);
+ assert.equal(writes().length,2);
+});
+
+test("legacy question reconciliation requires native capability and never repeats an unknown write",async t=>{
+ const f=await fixture(t);ui(f);const q=await observe(f);
+ f.manager.handoffPaused=false;await f.manager.drainPublicTexts();f.manager.handoffPaused=true;
+ const s=f.manager.questions.state.entries[q.questionId];
+ s.status="answered";s.answers=["当前仓库"];s.nativeMessageId=randomUUID();
+ f.manager.state.receipts[s.nativeMessageId]={nativeDispatch:{status:"accepted"}};
+ await assert.rejects(f.manager.questions.syncNativeAnswer(q.questionId),e=>e.body.error==="native_question_sync_unavailable");
+ f.manager.config.nativeQuestionInput=true;
+ f.manager.call=async()=>{throw Error("connection lost after native write");};
+ await assert.rejects(f.manager.questions.syncNativeAnswer(q.questionId),/connection lost/);
+ assert.equal(s.nativePanelSync.status,"unknown");
+ await assert.rejects(f.manager.questions.syncNativeAnswer(q.questionId),e=>e.body.error==="native_question_sync_unknown");
+ assert.equal(f.calls.filter(c=>c.name==="send_message_to_thread").length,0);
+});
 test("native async choices cannot deliver into a newer task after their own turn completes",async t=>{
  const f=await fixture(t),cards=ui(f),q=await observe(f);
  f.manager.handoffPaused=false;await f.manager.drainPublicTexts();

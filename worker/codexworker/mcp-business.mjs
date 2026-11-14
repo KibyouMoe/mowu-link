@@ -612,6 +612,7 @@ async function ensureLocalManagerServer() {
       workspaceRoots: current.thread?.cwd ? [current.thread.cwd] : [], projectId: project?.projectId,
       ...configured, nativeSenderThreadId: binding.managerThreadId, nativeSendFromTarget: true,
       nativeImageInput: resolveNativeCapabilities().imageInput,
+      nativeQuestionInput: resolveNativeCapabilities().questionInput,
       nativeBusyDeliveryVerified: true, nativeStateIndependentDeliveryVerified: true,
       desktopLifetimeStartedAt: process.env.RUDOLF_BRIDGE_DESKTOP_STARTED_AT ?? null,
       token: (await readFile(tokenFile, "utf8")).trim() });

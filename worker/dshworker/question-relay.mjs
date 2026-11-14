@@ -101,12 +101,52 @@ export class QuestionRelay {
     try { await writeFile(this.path + ".tmp", JSON.stringify(this.state), { mode: 0o600 }); await rename(this.path + ".tmp", this.path); this.storageFault = false; }
     catch (error) { this.storageFault = true; throw error; }
   }
+  async syncNativeAnswer(id) {
+    const m = this.manager;
+    let request;
+    await this.serial(async () => {
+      const q = m.state.publicQuestions?.[id], s = this.state.entries[id];
+      if (!m.config.nativeQuestionInput) reject(501, "native_question_sync_unavailable", "The Desktop-native question input is not loaded.");
+      if (!q || !s || q.delivery !== "async" || q.threadId !== m.state.selectedThreadId ||
+          s.bindingEpoch !== m.state.selectionEpoch || !["answered", "skipped"].includes(s.status))
+        reject(409, "native_question_sync_conflict", "Only an answered question in the original current chat may be synchronized.");
+      if (s.nativePanelSync?.status === "accepted") return;
+      if (["dispatching", "unknown"].includes(s.nativePanelSync?.status))
+        reject(409, "native_question_sync_unknown", "The previous native synchronization must be inspected before another write.");
+      const receipt = m.state.receipts?.[s.nativeMessageId];
+      if (receipt?.nativeDispatch?.status !== "accepted")
+        reject(409, "native_question_sync_unknown", "The original answer has no confirmed dispatch receipt.");
+      request = { threadId: q.threadId, prompt: nativeQuestionReply(q, s.answers),
+        nativeQuestionReply: true, nativeMessageId: s.nativeMessageId, nativeDelivery: "steer" };
+      s.nativePanelSync = { status: "dispatching", messageId: s.nativeMessageId };
+      s.revision++; await this.save();
+    });
+    if (!request) return { questionId: id, nativeInputAccepted: true, duplicate: true };
+    try {
+      const result = await m.call("send_message_to_thread", request, { sourceThreadId: request.threadId });
+      await this.serial(async () => {
+        const s = this.state.entries[id];
+        s.nativePanelSync = { status: "accepted", messageId: s.nativeMessageId, turnId: result?.turnId ?? null };
+        s.revision++; await this.save();
+      });
+      return { questionId: id, nativeInputAccepted: true, duplicate: false };
+    } catch (error) {
+      await this.serial(async () => {
+        const s = this.state.entries[id];
+        s.nativePanelSync.status = ["notAttempted", "rejected"].includes(error.body?.nativeInputOutcome) ? "rejected" : "unknown";
+        s.nativePanelSync.reason = error.body?.error ?? "native_question_sync_unknown";
+        s.revision++; await this.save();
+      });
+      throw error;
+    }
+  }
   get(id) {
     const q = this.manager.state.publicQuestions?.[id]; const s = this.state.entries[id];
     if (!q) reject(404, "question_not_found", "No exact public question receipt was found.");
     return { questionId: id, threadId: q.threadId, questions: q.questions, status: s?.status ?? "legacy",
       sourceTurnId: s?.sourceTurnId ?? null, answers: s?.answers ?? null,
       answeredBy: s?.answerActor ?? null,
+      nativePanelSync: s?.nativePanelSync?.status ?? null,
       skippedQuestionIndexes: s?.skippedQuestionIndexes ?? [],
       recipient: q.recipient ?? { kind: "trainer" }, routerDelivery: s?.routerDelivery?.status ?? null,
       reason: s?.reason ?? null, cardUpdated: Boolean(s?.messageId && s.patchedRevision === s.revision),
@@ -509,7 +549,11 @@ export class QuestionRelay {
         if (s.status === "open" && source.active) await this.forwardToInitiator(q, s);
         if (s.status === "answer_pending" && s.answerQueued) {
           const receipt = m.state.receipts?.[s.nativeMessageId] ?? await m.receiptArchive?.get(s.nativeMessageId);
-          if (receipt?.nativeDispatch?.status === "accepted") await this.serial(async () => { s.status = answeredStatus(s); s.revision++; await this.save(); });
+          if (receipt?.nativeDispatch?.status === "accepted") await this.serial(async () => {
+            s.status = answeredStatus(s);
+            if (receipt.nativeDispatch.nativeQuestionReply) s.nativePanelSync = { status: "accepted", messageId: s.nativeMessageId };
+            s.revision++; await this.save();
+          });
           else if (receipt?.error) await this.serial(async () => { s.status = "answer_unknown"; s.reason = receipt.error.error; s.revision++; await this.save(); });
         }
         if (s.status === "answer_pending" && !s.answerQueued && source.active && !m.handoffPaused && !m.closed &&
@@ -529,6 +573,8 @@ export class QuestionRelay {
               await this.serial(async () => {
                 s.answerQueued = accepted?.action === "message_queued";
                 s.status = s.answerQueued ? "answer_pending" : answeredStatus(s);
+                if (!s.answerQueued && m.state.receipts?.[s.nativeMessageId]?.nativeDispatch?.nativeQuestionReply)
+                  s.nativePanelSync = { status: "accepted", messageId: s.nativeMessageId };
                 s.reason = null; s.revision++; await this.save();
               });
             } catch (e) {

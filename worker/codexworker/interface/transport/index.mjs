@@ -45,5 +45,6 @@ export function resolveNativeCapabilities() {
     desktopJournal: declared.desktopJournal !== false,
     callerTurn: declared.callerTurn !== false,
     imageInput: declared.imageInput === true,
+    questionInput: declared.questionInput === true,
   };
 }

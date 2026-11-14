@@ -877,6 +877,7 @@ export class DesktopManager {
         localMessageOrigin: this.config.nativeSendFromTarget ? "target-task" : "bound-manager-task",
         remoteViaDesktopDevices: true, feishuImageOutput: Boolean(this.businessRuntime.module && this.notifier?.enabled),
         feishuImageInput: this.config.nativeImageInput ? "native-local-image" : "cached-path-prompt",
+        questionAnswerSync: this.config.nativeQuestionInput ? "native-user-input" : "delegated-message",
         feishuOutputRouting: this.transcriptEnabled ? "managed-thread-transcript" : "selected-thread-only",
         persistentConversationTranscript: this.transcriptEnabled,
         nativeAutoCompaction: "engine-defaults",
@@ -909,8 +910,8 @@ export class DesktopManager {
       if (name === "send_message_to_thread" && error?.nativeImageOutcome) {
         const outcome = error.nativeImageOutcome;
         fail(outcome === "notAttempted" ? 422 : 502, error.nativeErrorCode ?? "native_image_input_failed",
-          outcome === "notAttempted" ? "Native image preflight failed before sending input."
-            : outcome === "rejected" ? "The native image input was explicitly rejected." : "Native image delivery could not be confirmed.",
+          outcome === "notAttempted" ? "Native input preflight failed before sending input."
+            : outcome === "rejected" ? "The native input was explicitly rejected." : "Native input delivery could not be confirmed.",
           false, { nativeInputOutcome: outcome });
       }
       if (error?.nativeErrorCode === "native_snapshot_too_large") {
@@ -1294,7 +1295,8 @@ export class DesktopManager {
     if (!acceptedWithoutHistory) (session.pendingInputs ??= []).push(pending);
     const receipt = this.state.receipts[request.messageId];
     if (receipt) { receipt.nativeSourceThreadId = sourceThreadId; receipt.nativeInputHash = digest(prompt); receipt.nativeTargetThreadId = session.threadId;
-      receipt.nativeDispatch = { status: "dispatching", at: new Date().toISOString(), threadId: session.threadId }; }
+      receipt.nativeDispatch = { status: "dispatching", at: new Date().toISOString(), threadId: session.threadId,
+        ...(this.config.nativeQuestionInput && isNativeQuestionReply(request.text) ? { nativeQuestionReply: true } : {}) }; }
     const feishuReceipt = this.state.feishuReceipts[request.messageId];
     if (acceptedWithoutHistory && feishuReceipt && !feishuReceipt.cleanupRequested) {
       // Native acceptance releases ingress, not the trainer's Typing indicator.
@@ -1329,6 +1331,9 @@ export class DesktopManager {
     if (this.config.nativeImageInput && request.source === "trainer" && feishuReceipt?.nativeImagePaths?.length) {
       args.nativeImages = [...feishuReceipt.nativeImagePaths];
       args.nativeMessageId = request.messageId; args.nativeDelivery = request.delivery ?? "steer";
+    }
+    if (this.config.nativeQuestionInput && isNativeQuestionReply(request.text)) {
+      args.nativeQuestionReply = true; args.nativeMessageId = request.messageId; args.nativeDelivery = "steer";
     }
     if (session.hostId) args.hostId = session.hostId;
     const turns = snapshot.page?.order === "newest_first" ? snapshot.turns : [...(snapshot.turns ?? [])].reverse();
@@ -2362,13 +2367,14 @@ export class DesktopManager {
       const workOrderRoute = url.pathname.match(/^\/bridge\/work-orders\/([^/]+)$/);
       if (req.method === "GET" && workOrderRoute) return json(res, 200, await routerOperations(this).workOrder(decodeURIComponent(workOrderRoute[1])));
       if (req.method === "POST" && url.pathname === "/bridge/questions") return json(res, 200, await this.questions.publish(await readBody(req)));
-      const questionRoute = url.pathname.match(/^\/bridge\/questions\/([^/]+)(?:\/(resolve|answer))?$/);
+      const questionRoute = url.pathname.match(/^\/bridge\/questions\/([^/]+)(?:\/(resolve|answer|sync-native))?$/);
       if (questionRoute) {
         const peer = req.socket.remoteAddress?.replace(/^::ffff:/, "");
         if (!["127.0.0.1", "::1"].includes(peer)) fail(403, "loopback_required", "Question lifecycle updates are local-only.");
         const id = decodeURIComponent(questionRoute[1]);
         if (req.method === "GET" && !questionRoute[2]) return json(res, 200, this.questions.get(id));
         if (req.method === "POST" && questionRoute[2] === "answer") return json(res, 200, await this.questions.acceptAgentAnswer(id, await readBody(req)));
+        if (req.method === "POST" && questionRoute[2] === "sync-native") return json(res, 200, await this.questions.syncNativeAnswer(id));
         if (req.method === "POST" && questionRoute[2] === "resolve") return json(res, 200, await this.questions.resolve(id, await readBody(req)));
       }
       if (req.method === "GET" && url.pathname === "/manager/transcript") {

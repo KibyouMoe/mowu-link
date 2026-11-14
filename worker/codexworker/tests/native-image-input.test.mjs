@@ -5,11 +5,12 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createNativeInput } from "../interface/desktop-connection/native-input.mjs";
-import { sendNativeImageInput } from "../interface/native-image-input.mjs";
+import { sendNativeInput } from "../interface/native-input-client.mjs";
 import { DesktopManager } from "../desktop-manager.mjs";
+import { projectPublicQuestion, nativeQuestionReply } from "../interface/public-questions.mjs";
 
 const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j1WkAAAAASUVORK5CYII=", "base64");
-async function fixture(t, { active = false, dropWrite = false, rejectWrite = false } = {}) {
+async function fixture(t, { active = false, dropWrite = false, rejectWrite = false, question = false } = {}) {
   const stateDir = await mkdtemp(path.join(os.tmpdir(), "native-image-图片-"));
   const messageId = randomUUID(), threadId = randomUUID(), owner = { pid: 700, startedAt: "test Desktop lifetime" };
   const image = path.join(stateDir, "feishu-images", "original.png");
@@ -19,6 +20,20 @@ async function fixture(t, { active = false, dropWrite = false, rejectWrite = fal
     nativeInputHash: createHash("sha256").update(JSON.stringify(request.prompt)).digest("hex"), nativeDispatch: { status: "dispatching" } };
   const state = { selectedThreadId: threadId, sessions: { [threadId]: {} }, receipts: { [messageId]: receipt },
     feishuReceipts: { [messageId]: { incomingMessageId: "om_actual_feishu", imageThreadId: threadId, nativeImagePaths: [image] } } };
+  let publicQuestion, action;
+  if (question) {
+    publicQuestion = projectPublicQuestion({ type: "AgentMessage", id: "call_original_question", phase: "commentary",
+      delivery: "async", questions: [{ title: "继续吗？", options: ["继续", "停止"] }] }, { threadId, turnId: "source-turn" });
+    action = { nativeMessageId: messageId, sourceTurnId: "source-turn", status: "dispatching",
+      answerActor: "trainer", answers: ["继续"], bindingEpoch: 4 };
+    Object.assign(request, { operation: "questionReply", prompt: nativeQuestionReply(publicQuestion, action.answers) });
+    delete request.images;
+    receipt.nativeInputHash = createHash("sha256").update(JSON.stringify(request.prompt)).digest("hex");
+    state.selectionEpoch = 4; state.publicQuestions = { [publicQuestion.questionId]: publicQuestion };
+  }
+  const saveAction = () => writeFile(path.join(stateDir, "question-actions.json"),
+    JSON.stringify({ entries: { [publicQuestion.questionId]: action } }));
+  if (question) await saveAction();
   const save = () => writeFile(path.join(stateDir, "desktop-manager-state.json"), JSON.stringify(state));
   await writeFile(path.join(stateDir, "desktop-config.local.json"), JSON.stringify({ autoStart: true }));
   await save(); const calls = []; let controller, wrote;
@@ -35,16 +50,56 @@ async function fixture(t, { active = false, dropWrite = false, rejectWrite = fal
   } });
   const env = { ...controller.env, CODEXWORKER_DESKTOP_PID: String(owner.pid), RUDOLF_BRIDGE_DESKTOP_STARTED_AT: owner.startedAt };
   t.after(async () => { await controller.close(); await rm(stateDir, { recursive: true, force: true }); });
-  return { stateDir, controller, request, env, state, save, calls, image, writeStarted,
-    send: value => sendNativeImageInput(value ?? request, { env }),
+  return { stateDir, controller, request, env, state, save, calls, image, writeStarted, action, saveAction,
+    send: value => sendNativeInput(value ?? request, { env }),
     ledger: async () => JSON.parse(await readFile(path.join(stateDir, "native-image-receipts", messageId + ".json"), "utf8")) };
 }
+
+test("real saved question answers enter native user input with original question IDs and message UUID", async t => {
+  for (const active of [false, true]) {
+    const f = await fixture(t, { question: true, active }); f.controller.client({ method: "initialized" });
+    const result = await f.send(); assert.deepEqual(await f.send(), result);
+    assert.equal(f.calls.length, 2);
+    const call = f.calls[1]; assert.equal(call.method, active ? "turn/steer" : "turn/start");
+    assert.equal(call.params.clientUserMessageId, f.request.messageId);
+    assert.deepEqual(call.params.input, [{ type: "text", text: f.request.prompt }]);
+    assert.ok(call.params.input[0].text.includes('call_original_question'));
+    const saved = JSON.parse(await readFile(path.join(f.stateDir, "native-question-receipts", f.request.messageId + ".json"), "utf8"));
+    assert.equal(saved.status, "accepted");
+  }
+});
+
+test("question native writes require the exact durable answer and current binding, without image authority", async t => {
+  const f = await fixture(t, { question: true }); f.controller.client({ method: "initialized" });
+  await assert.rejects(f.send({ ...f.request, images: [f.image] }), /request_invalid/);
+  f.action.answers = ["停止"]; await f.saveAction();
+  await assert.rejects(f.send(), /question_receipt_mismatch/);
+  f.action.answers = ["继续"]; f.action.bindingEpoch++; await f.saveAction();
+  await assert.rejects(f.send(), /question_receipt_mismatch/);
+  f.action.bindingEpoch--; f.action.status = "answered"; await f.saveAction();
+  await assert.rejects(f.send(), /question_receipt_mismatch/);
+  f.action.nativePanelSync = { status: "dispatching" }; await f.saveAction();
+  f.state.receipts[f.request.messageId].nativeDispatch.status = "accepted"; await f.save();
+  await f.send(); assert.equal(f.calls.length, 2);
+});
+
+test("uncertain native question input remains durable and cannot be replayed", async t => {
+  const f = await fixture(t, { question: true, dropWrite: true }); f.controller.client({ method: "initialized" });
+  const waiting = assert.rejects(f.send(), /outcome_unknown/);
+  await f.writeStarted; await f.controller.close(); await waiting;
+  const restored = await createNativeInput({ stateDir: f.stateDir, owner: { pid: 700, startedAt: "test Desktop lifetime" },
+    send: () => assert.fail("uncertain question must not be sent again") });
+  try { restored.client({ method: "initialized" }); await assert.rejects(f.send(), /outcome_unknown/); }
+  finally { await restored.close(); }
+  const saved = JSON.parse(await readFile(path.join(f.stateDir, "native-question-receipts", f.request.messageId + ".json"), "utf8"));
+  assert.equal(saved.status, "unknown");
+});
 
 test("native images require the matching initialized Desktop and a saved Feishu dispatch", async t => {
   const f = await fixture(t);
   await assert.rejects(f.send(), /not_ready/); assert.equal(f.calls.length, 0);
   f.controller.client({ method: "initialized" });
-  await assert.rejects(sendNativeImageInput(f.request, { env: { ...f.env, CODEXWORKER_DESKTOP_PID: "701" } }), /owner_mismatch/);
+  await assert.rejects(sendNativeInput(f.request, { env: { ...f.env, CODEXWORKER_DESKTOP_PID: "701" } }), /owner_mismatch/);
   f.state.receipts[f.request.messageId].request.source = "hermes"; await f.save();
   await assert.rejects(f.send(), error => error.message === "native_image_receipt_mismatch" &&
     error.nativeImageOutcome === "notAttempted" && error.nativeReachable === true);
@@ -63,7 +118,7 @@ test("actual Worker Feishu dispatch and native image validation use the same per
     native: async (name, args) => {
       if (name === "read_thread") return { thread: { id: args.threadId, cwd: root }, turns: [] };
       if (name === "send_message_to_thread") {
-        const response = await sendNativeImageInput({ threadId: args.threadId, prompt: args.prompt,
+        const response = await sendNativeInput({ threadId: args.threadId, prompt: args.prompt,
           images: args.nativeImages, messageId: args.nativeMessageId, delivery: args.nativeDelivery }, { env });
         return JSON.parse(response.contentItems[0].text);
       }
@@ -90,6 +145,59 @@ test("actual Worker Feishu dispatch and native image validation use the same per
   assert.equal(calls[1].params.input[0].text, "飞书：训练员从飞书发送了一张图片。");
   const saved = JSON.parse(await readFile(path.join(root, "native-image-receipts", result.messageId + ".json"), "utf8"));
   assert.equal(saved.status, "accepted"); assert.equal(manager.state.selectedThreadId, "original-chat");
+});
+
+test("real question callback, shared manager and native IPC persist the same answer before native user input", async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "native-question-worker-integration-"));
+  const owner = { pid: 700, startedAt: "test Desktop lifetime" }; let controller, manager;
+  const calls = [], env = { CODEXWORKER_DESKTOP_PID: "700", RUDOLF_BRIDGE_DESKTOP_STARTED_AT: owner.startedAt };
+  t.after(async () => { await controller?.close(); await manager?.close(); await rm(root, { recursive: true, force: true }); });
+  await writeFile(path.join(root, "desktop-config.local.json"), JSON.stringify({ autoStart: true }));
+  const names = ["read_thread", "send_message_to_thread", "list_threads", "create_thread", "fork_thread", "set_thread_title"];
+  manager = await new DesktopManager({ stateDir: root, listNativeTools: async () => names.map(name => ({ name })),
+    native: async (name, args) => {
+      if (name === "read_thread") return { thread: { id: args.threadId, cwd: root },
+        turns: [{ id: "source-turn", status: "inProgress", items: [] }] };
+      if (name === "send_message_to_thread") {
+        assert.equal(args.nativeQuestionReply, true);
+        const response = await sendNativeInput({ operation: "questionReply", threadId: args.threadId, prompt: args.prompt,
+          messageId: args.nativeMessageId, delivery: args.nativeDelivery }, { env });
+        return JSON.parse(response.contentItems[0].text);
+      }
+      return {};
+    }, config: { token: "isolated-native-question-integration-token", nativeQuestionInput: true,
+      nativeBusyDeliveryVerified: true, nativeSenderThreadId: "manager", workspaceRoots: [root],
+      feishu: { trainerOpenIdWhitelist: ["trainer"], transcriptEnabled: true } } }).initialize();
+  manager.handoffPaused = true;
+  const session = manager.makeSession({ id: "original-chat", cwd: root }, { alias: "main", cwd: root });
+  manager.state.sessions[session.threadId] = session; manager.state.selectedThreadId = session.threadId;
+  manager.state.selectionEpoch = 4;
+  session.feishuChatId = "chat";
+  manager.notifier = { enabled: true, chatId: "chat", updateQuestionCard: async () => ({ code: 0 }),
+    sendQuestionCard: async () => ({ code: 0, data: { message_id: "om_native_question" } }) };
+  controller = await createNativeInput({ stateDir: root, owner, send: message => {
+    calls.push(message);
+    setImmediate(() => controller.server({ id: message.id, result: message.method === "thread/turns/list"
+      ? { data: [{ id: "source-turn", status: "inProgress" }] } : { turnId: "source-turn" } }));
+  } });
+  Object.assign(env, controller.env); controller.client({ method: "initialized" });
+  const q = projectPublicQuestion({ type: "AgentMessage", id: "call_native_answer", phase: "commentary",
+    delivery: "async", questions: [{ title: "继续吗？", options: ["继续", "停止"] }] },
+    { threadId: session.threadId, turnId: "source-turn" });
+  manager.handoffPaused = false; await manager.questions.publish(q); manager.handoffPaused = true;
+  const entry = manager.questions.state.entries[q.questionId];
+  const callback = { header: { event_type: "card.action.trigger", event_id: randomUUID() }, event: {
+    operator: { open_id: "trainer" }, context: { open_message_id: "om_native_question", open_chat_id: "chat" },
+    action: { value: { bridgeQuestion: q.questionId, nonce: entry.nonce, action: "select", questionIndex: 0, optionIndex: 0 } } } };
+  const acknowledgement = await manager.questions.acceptCard(callback);
+  assert.equal(acknowledgement.toast.type, "success", acknowledgement.toast.content);
+  assert.equal(calls.length, 0);
+  manager.handoffPaused = false; await manager.questions.process();
+  assert.equal(manager.questions.get(q.questionId).status, "answered");
+  assert.equal(manager.questions.get(q.questionId).nativePanelSync, "accepted");
+  assert.deepEqual(calls[1].params.input, [{ type: "text", text: nativeQuestionReply(q, ["继续"]) }]);
+  assert.equal(calls[1].params.clientUserMessageId, entry.nativeMessageId);
+  await manager.questions.process(); assert.equal(calls.length, 2);
 });
 
 test("idle input uses typed localImage on the same native connection and replays only its receipt", async t => {

@@ -11,10 +11,13 @@ import process from "node:process";
 import { setTimeout as delay } from "node:timers/promises";
 import { nativeToolRejection } from "../native-dispatch.mjs";
 import { hydrateNativeInputs } from "../native-history.mjs";
-import { sendNativeImageInput } from "../native-image-input.mjs";
+import { sendNativeInput } from "../native-input-client.mjs";
 
 export const name = "desktop-pipe";
-export const capabilities = { get imageInput() { return process.env.CODEXWORKER_NATIVE_IMAGE_INPUT === "1"; } };
+export const capabilities = {
+  get imageInput() { return process.env.CODEXWORKER_NATIVE_IMAGE_INPUT === "1"; },
+  get questionInput() { return process.env.CODEXWORKER_NATIVE_QUESTION_INPUT === "1"; },
+};
 
 const PIPE_ENV = "CODEX_APP_TOOLS_PIPE_PATH";
 const MAX_FRAME_BYTES = 8 * 1024 * 1024;
@@ -60,8 +63,9 @@ export async function callTool(toolName, args, invocation, timeoutMs = 5000) {
   if (!invocation?.threadId) {
     throw new Error("Codex Desktop native tools require a manager task binding");
   }
-  if (toolName === "send_message_to_thread" && args.nativeImages) {
-    return sendNativeImageInput({ threadId: args.threadId, prompt: args.prompt, images: args.nativeImages,
+  if (toolName === "send_message_to_thread" && (args.nativeImages || args.nativeQuestionReply)) {
+    return sendNativeInput({ operation: args.nativeQuestionReply ? "questionReply" : "image",
+      threadId: args.threadId, prompt: args.prompt, images: args.nativeImages,
       messageId: args.nativeMessageId, delivery: args.nativeDelivery }, { timeoutMs });
   }
   const call = (request, budget) => pipeRequest(path, "tools/call", {
