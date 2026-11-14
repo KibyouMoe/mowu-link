@@ -1,7 +1,7 @@
 // Prepare an immutable user-owned Desktop connector. No process, launchd job,
 // environment, managed plugin cache, or session is changed by this command.
 import { createHash } from "node:crypto";
-import { lstat, mkdir, readFile, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -23,8 +23,10 @@ export async function prepareDesktopConnection({ platform = process.platform, en
   if (!path.isAbsolute(nodePath)) throw new Error("desktop_connection_node_not_absolute");
   const names = mode === "native" ? [...sources, "interface/desktop-connection/native-entry.mjs",
     "interface/desktop-connection/native-input.mjs", "interface/public-questions.mjs",
-    "interface/desktop-environment.mjs"] : sources;
+    "interface/desktop-environment.mjs", "interface/desktop-connection/worker-lifecycle.mjs"] : sources;
   const files = await Promise.all(names.map(async name => [name, await readFile(path.join(pluginRoot, name))]));
+  if (mode === "native") files.push(["interface/desktop-connection/worker-root.json",
+    Buffer.from(JSON.stringify({ version: 1, pluginRoot: await realpath(pluginRoot) }) + "\n")]);
   const hash = createHash("sha256");
   for (const [name, bytes] of files) hash.update(name + "\0").update(bytes);
   hash.update(nodePath).update(mode);

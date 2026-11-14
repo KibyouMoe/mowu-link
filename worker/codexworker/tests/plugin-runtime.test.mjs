@@ -206,7 +206,8 @@ for (const operatingMode of ["desktop-bridge", "feishu-local"]) test(`fixed load
   await writeFile(path.join(stateDir, "desktop-config.local.json"), JSON.stringify({ tokenFile, port, workspaceRoots: [root],
     operatingMode, pollMs: 1, hotHandoffRetryMs: 50, managerProxyWaitMs: 100 }));
   const runtime = new PluginRuntime({ pluginRoot: source, stateDir, pollMs: 1000000,
-    env: { ...process.env, USERPROFILE: root, HOME: root, CODEX_APP_TOOLS_PIPE_PATH: pipe, RUDOLF_BRIDGE_LIFECYCLE_CHILD: "1" } });
+    env: { ...process.env, USERPROFILE: root, HOME: root, CODEXWORKER_STATE_DIR: path.join(root, "foreign-state"),
+      CODEX_APP_TOOLS_PIPE_PATH: pipe, RUDOLF_BRIDGE_LIFECYCLE_CHILD: "1" } });
   let proxy, failedStartupProxy;
   t.after(async () => { await failedStartupProxy?.close(); await proxy?.close(); await runtime.close(); await new Promise(resolve => nativePipe.close(resolve));
     assert.ok(root.startsWith(os.tmpdir())); await rm(root, { recursive: true, force: true }); });

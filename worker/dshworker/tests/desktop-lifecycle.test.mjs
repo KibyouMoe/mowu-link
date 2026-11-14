@@ -9,6 +9,21 @@ import { DesktopLifecycle, desktopOwner, desktopSupervisorReady, ensureDesktopSu
 const owner = { pid: 700, name: "ChatGPT.exe", startedAt: "2026-10-03T02:42:05.0000000Z",
   executable: "C:/Program Files/WindowsApps/OpenAI.Codex_26.930.3748.0_x64__2p2nqsd0c76g0/app/ChatGPT.exe" };
 
+test("closing the native host cancels startup observation without a task timeout or another launch", async t => {
+  const stateDir = await mkdtemp(path.join(os.tmpdir(), "native-host-close-"));
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  await writeFile(path.join(stateDir, "desktop-config.local.json"), "{}");
+  await writeFile(path.join(stateDir, "manager-binding.json"), "{}");
+  const controller = new AbortController(); let launched = 0;
+  const result = await ensureDesktopSupervisor({ pluginRoot: stateDir, stateDir, platform: "win32",
+    signal: controller.signal, env: { CODEX_APP_TOOLS_PIPE_PATH: "test-only-pipe" },
+    readChain: async () => [owner], ready: async () => false,
+    launchImpl: async () => { launched++; }, delay: async () => { controller.abort(); } });
+  assert.equal(result, false); assert.equal(launched, 1);
+  assert.equal(await ensureDesktopSupervisor({ stateDir, signal: controller.signal,
+    readChain: () => assert.fail("closed host must not inspect processes") }), false);
+});
+
 test("independent script watchdog starts even when Bridge readiness never arrives", async t => {
   const stateDir = await mkdtemp(path.join(os.tmpdir(), "watchdog-before-ready-"));
   t.after(() => rm(stateDir, { recursive: true, force: true }));

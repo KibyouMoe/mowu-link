@@ -161,6 +161,37 @@ test("native option delegation keeps auxiliary checks and rejects independent li
   }
 });
 
+test("the primary Desktop connection starts its lifetime owner after initialize with no chat open", { skip: process.platform !== "darwin" }, async () => {
+  const child = new EventEmitter();
+  child.stdin = new PassThrough(); child.stdout = new PassThrough(); child.stderr = new PassThrough();
+  child.exitCode = null; child.signalCode = null;
+  child.stdin.once("finish", () => setImmediate(() => {
+    child.exitCode = 0; child.emit("exit", 0); child.stdout.end(); child.stderr.end(); child.emit("close", 0);
+  }));
+  const input = new PassThrough(), output = new PassThrough(), errors = new PassThrough();
+  let started = 0, stopped = false;
+  child.stdin.on("data", bytes => {
+    const request = JSON.parse(bytes.toString());
+    child.stdout.write(JSON.stringify({ id: request.id, result: {} }) + "\n");
+  });
+  const done = runNativeConnection(["app-server"], { stdin: input, stdout: output, stderr: errors,
+    env: { CODEXWORKER_STATE_DIR: "/original/worker-state", CODEX_APP_TOOLS_PIPE_PATH: "actual-host-pipe" },
+    verifyParent: async () => ({ pid: process.ppid }), load: async () => ({ realCli: "native-desktop-cli" }),
+    createInput: async () => ({ env: { CODEXWORKER_NATIVE_IMAGE_INPUT: "1" },
+      client() {}, server: () => true, close: async () => {} }),
+    watchWorker: options => {
+      started++;
+      assert.equal(options.stateDir, "/original/worker-state");
+      assert.equal(options.env.CODEXWORKER_STATE_DIR, options.stateDir);
+      assert.equal(options.env.CODEX_APP_TOOLS_PIPE_PATH, "actual-host-pipe");
+      return { close: async () => { stopped = true; } };
+    }, spawnImpl: () => { setImmediate(() => child.emit("spawn")); return child; } });
+  await tick(); await tick(); assert.equal(started, 0);
+  input.write(JSON.stringify({ id: 1, method: "initialize", params: {} }) + "\n");
+  await tick(); await tick(); assert.equal(started, 1);
+  input.end(); assert.equal(await done, 0); assert.equal(stopped, true);
+});
+
 test("optional image endpoint failure preserves the real Mac Desktop startup", { skip: process.platform !== "darwin" }, async () => {
   const child = new EventEmitter(); child.stdin = new PassThrough(); child.stdout = new PassThrough(); child.stderr = new PassThrough();
   child.exitCode = null; child.signalCode = null; child.kill = () => assert.fail("must close native stdin first");

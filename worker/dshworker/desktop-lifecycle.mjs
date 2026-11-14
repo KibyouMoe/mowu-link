@@ -212,7 +212,8 @@ export async function desktopSupervisorReady(stateDir, owner, { platform = proce
 export async function ensureDesktopSupervisor({ pluginRoot, stateDir, env = process.env,
   platform = process.platform, readChain = processChain, launchImpl = launchDesktopSupervisor,
   ready = desktopSupervisorReady, clock = Date.now, ensureWatchdog = ensureScriptWatchdog, pipeOwner = resolveDesktopPipeOwner,
-  delay = ms => new Promise(resolve => setTimeout(resolve, ms)), timeoutMs = 40000 } = {}) {
+  delay = ms => new Promise(resolve => setTimeout(resolve, ms)), timeoutMs = 40000, signal } = {}) {
+  if (signal?.aborted) return false;
   if (!(await readDesktopSettings(stateDir)).autoStart) return false;
   if (!["win32", "darwin"].includes(platform) || !env.CODEX_APP_TOOLS_PIPE_PATH || env.RUDOLF_BRIDGE_LIFECYCLE_CHILD === "1") return false;
   // Never persist/reconstruct a pipe or register an OS-login job with old handles.
@@ -222,28 +223,31 @@ export async function ensureDesktopSupervisor({ pluginRoot, stateDir, env = proc
   const owner = await resolveDesktopOwner(process.pid, { readChain, delay,
     pipePath: env.CODEX_APP_TOOLS_PIPE_PATH,
     readPipeOwner: platform === "darwin" ? value => pipeOwner(value, { platform, readChain }) : null });
-  if (!owner) return false;
+  if (!owner || signal?.aborted) return false;
   // The independent audit scheduler must not depend on HTTP/startup readiness:
   // otherwise a slow startup can launch a writer but skip its watchdog forever.
   if (platform === "win32") await ensureWatchdog({ pluginRoot, stateDir, owner, env }).catch(() => {});
   if (await ready(stateDir, owner, { platform })) {
+    if (signal?.aborted) return false;
     await resumeStartupMaintenance(stateDir);
     return true;
   }
   // Even an allowed breakaway can remain in an outer inventory cleanup job.
   // Create the supervisor under the verified Desktop itself, retaining its job
   // and token. OS denial has no alternate-parent or cold-MCP writer fallback.
+  if (signal?.aborted) return false;
   await launchImpl({ pluginRoot, stateDir, owner, env, platform });
   // Inventory clients may tear down the MCP process immediately after its
   // initialize response. Finish the durable supervisor handoff BEFORE replying,
   // and before this short-lived process can become the HTTP/Feishu writer.
-  while (clock() < deadline) {
+  while (clock() < deadline && !signal?.aborted) {
     if (await ready(stateDir, owner, { platform })) {
       await resumeStartupMaintenance(stateDir);
       return true;
     }
     await delay(200);
   }
+  if (signal?.aborted) return false;
   throw new Error("desktop_lifecycle_not_ready");
 }
 

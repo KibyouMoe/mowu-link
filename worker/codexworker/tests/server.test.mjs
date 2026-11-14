@@ -104,6 +104,8 @@ async function runBridgeBindingTest(input, { pluginRoot = sourcePluginRoot, mcp 
       ...process.env,
       CODEX_APP_TOOLS_PIPE_PATH: pipePath,
       CODEX_MCP_NODE_PATH: process.execPath,
+      CODEXWORKER_STATE_DIR: path.join(testRoot, ".codex", "state", "codexworker"),
+      CODEX_HOME: path.join(testRoot, ".codex"),
       RUDOLF_BRIDGE_LIFECYCLE_CHILD: "1",
       USERPROFILE: testRoot,
       HOME: testRoot,

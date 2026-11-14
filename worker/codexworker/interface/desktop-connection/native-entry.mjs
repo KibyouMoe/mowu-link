@@ -10,6 +10,7 @@ import { desktopOwner, processChain, resolveDesktopState, stopOwnedChild } from 
 import { runDesktopConnection, runDesktopServer } from "./entry.mjs";
 import { createNativeInput } from "./native-input.mjs";
 import { normalizeDesktopEnvironment } from "../desktop-environment.mjs";
+import { watchDesktopWorker } from "./worker-lifecycle.mjs";
 
 export async function requireNativeDesktopParent({ platform = process.platform, readChain = processChain } = {}) {
   if (!["darwin", "win32"].includes(platform)) throw new Error("desktop_connection_platform_unsupported");
@@ -35,18 +36,30 @@ export async function loadNativeConnection(env = process.env) {
 
 export async function runNativeConnection(argv, { env = process.env, spawnImpl = spawn,
   verifyParent = requireNativeDesktopParent, load = loadNativeConnection, review, createInput = createNativeInput,
+  watchWorker = watchDesktopWorker,
   stdin = process.stdin, stdout = process.stdout, stderr = process.stderr } = {}) {
   env = normalizeDesktopEnvironment({ ...env });
-  let owner, input;
+  let owner, input, worker, workerEnv, workerStateDir, initializeId;
   try {
     return await runDesktopConnection(argv, { env, spawnImpl,
     verifyParent: async () => { owner = await verifyParent(); return owner; }, load, nativePassthrough: true,
     serve: settings => runDesktopServer(settings, { config: {}, nativePassthrough: true }, { stdin, stdout, stderr, review,
       terminationEvent: "close", closeChannel: async child => {
+        await worker?.close();
         await input?.close().catch(() => stderr.write("[desktop-connection] image input cleanup failed\n"));
         await stopOwnedChild(child);
       },
-      observeClient: message => input?.client(message), observeServer: message => input?.server(message),
+      observeClient: message => {
+        if (message?.method === "initialize") initializeId = message.id;
+        input?.client(message);
+      },
+      observeServer: message => {
+        const visible = input?.server(message);
+        if (!worker && workerStateDir && initializeId !== undefined && message?.id === initializeId && message.result)
+          worker = watchWorker({ stateDir: workerStateDir, env: workerEnv,
+            onError: () => stderr.write("[desktop-connection] worker startup unavailable\n") });
+        return visible;
+      },
       connect: async () => {
         const childEnv = { ...env }; delete childEnv.CODEX_CLI_PATH;
         let child;
@@ -56,6 +69,7 @@ export async function runNativeConnection(argv, { env = process.env, spawnImpl =
           try {
             const home = env.CODEX_HOME || path.join(os.homedir(), ".codex");
             const stateDir = await resolveDesktopState(path.join(home, "state/codexworker"), env);
+            workerStateDir = stateDir;
             input = await createInput({ stateDir, owner,
               send: message => child.stdin.write(JSON.stringify(message) + "\n") });
             Object.assign(childEnv, input.env);
@@ -65,6 +79,7 @@ export async function runNativeConnection(argv, { env = process.env, spawnImpl =
             stderr.write("[desktop-connection] native image input unavailable\n");
           }
         }
+        workerEnv = { ...childEnv, CODEXWORKER_STATE_DIR: workerStateDir };
         child = spawnImpl(settings.realCli, argv, { env: childEnv, stdio: ["pipe", "pipe", "pipe"] });
         await once(child, "spawn");
         child.stderr.pipe(stderr, { end: false });
@@ -72,6 +87,7 @@ export async function runNativeConnection(argv, { env = process.env, spawnImpl =
         return child;
       } }) });
   } finally {
+    await worker?.close();
     await input?.close().catch(() => stderr.write("[desktop-connection] image input cleanup failed\n"));
   }
 }

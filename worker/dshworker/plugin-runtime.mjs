@@ -99,7 +99,8 @@ export class PluginRuntime {
       await writeFile(path.join(snapshot, "business-runtime.mjs"), await readFile(path.join(this.pluginRoot, "business-runtime.mjs")), { flag: "wx", mode: 0o600 });
       const child = fork(path.join(this.pluginRoot, "scripts", "business-worker.mjs"), [], {
         execPath: process.execPath, cwd: this.pluginRoot, windowsHide: true,
-        env: { ...this.env, RUDOLF_BRIDGE_RUNTIME_HOST_PID: String(process.pid) }, stdio: ["ignore", "ignore", "ignore", "ipc"] });
+        env: { ...this.env, CODEXWORKER_STATE_DIR: path.resolve(this.stateDir),
+          RUDOLF_BRIDGE_RUNTIME_HOST_PID: String(process.pid) }, stdio: ["ignore", "ignore", "ignore", "ipc"] });
       const item = { child, snapshot, sha: source.sha, config: source.config, pending: new Map() }; this.children.add(item);
       child.on("message", message => {
         if (message.op === "reload-request") {
