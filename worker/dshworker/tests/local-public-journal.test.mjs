@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile, appendFile, mkdir, rm } from "node:fs/promises";
+import { mkdtemp, writeFile, appendFile, mkdir, rm, readFile } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import { CompactJsonLines, LocalPublicJournal, publicJournalItem, journalTaskState } from "../local-public-journal.mjs";
@@ -83,6 +83,43 @@ test("wrong cwd, replaced files and ambiguous identities fail closed", async t =
   await assert.rejects(f.reader.read({ ...f.session, cwd: path.join(f.root, "other") }, null, f.ctx), /identity/);
   const batch = await f.reader.read(f.session, null, f.ctx);
   await writeFile(f.file, ""); await assert.rejects(f.reader.read(f.session, batch.checkpoint, f.ctx), /replaced/);
+});
+test("a mounted-device change preserves the verified cursor and only emits new events", async t => {
+  const f = await fixture(t);
+  await appendFile(f.file, line({ type: "event_msg", payload: { type: "task_started", turn_id: "turn-1" } }) + line(text("already delivered")));
+  const first = await f.reader.read(f.session, null, f.ctx);
+  const parts = first.checkpoint.identity.split(":"); parts[0] = String(Number(parts[0]) + 1);
+  const saved = { ...first.checkpoint, identity: parts.join(":") };
+  const appended = line(text("new public text", "message-after-reboot")) +
+    line({ type: "event_msg", payload: { type: "task_complete", turn_id: "turn-1" } });
+  await appendFile(f.file, appended);
+  const resumed = await new LocalPublicJournal(f.root).read(f.session, saved, f.ctx);
+  assert.deepEqual(resumed.events.map(event => event.item.text), ["new public text"]);
+  assert.equal(resumed.bytesRead, Buffer.byteLength(appended));
+  assert.equal(resumed.taskState.turnStatus, "completed");
+  assert.equal(resumed.checkpoint.identity, first.checkpoint.identity);
+  assert.ok(resumed.checkpoint.offset > first.checkpoint.offset);
+});
+
+test("device-renumbered cursors still reject inode/creation changes and truncation", async t => {
+  const f = await fixture(t); await appendFile(f.file, line(text("public")));
+  const { checkpoint } = await f.reader.read(f.session, null, f.ctx);
+  for (const index of [1, 2]) {
+    const parts = checkpoint.identity.split(":"); parts[0] = String(Number(parts[0]) + 1); parts[index] = String(Number(parts[index]) + 1);
+    await assert.rejects(new LocalPublicJournal(f.root).read(f.session, { ...checkpoint, identity: parts.join(":") }, f.ctx), /replaced/);
+  }
+  const parts = checkpoint.identity.split(":"); parts[0] = String(Number(parts[0]) + 1);
+  await writeFile(f.file, "");
+  await assert.rejects(new LocalPublicJournal(f.root).read(f.session, { ...checkpoint, identity: parts.join(":") }, f.ctx), /replaced/);
+});
+
+test("accepting a changed device requires session header verification even with a cached reader", async t => {
+  const f = await fixture(t); await appendFile(f.file, line(text("public")));
+  const { checkpoint } = await f.reader.read(f.session, null, f.ctx);
+  const parts = checkpoint.identity.split(":"); parts[0] = String(Number(parts[0]) + 1);
+  const contents = await readFile(f.file, "utf8");
+  await writeFile(f.file, contents.replace('"id":"' + id + '"', '"id":"' + id.replace("01a", "02a") + '"'));
+  await assert.rejects(f.reader.read(f.session, { ...checkpoint, identity: parts.join(":") }, f.ctx), /identity_mismatch/);
 });
 test("a turn starting between native status and initial file stat is not lost", async t => {
   const f = await fixture(t);

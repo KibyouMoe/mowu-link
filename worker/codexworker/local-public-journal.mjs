@@ -9,6 +9,15 @@ import { projectJournalContext } from "./interface/context-events.mjs";
 const bad = code => { const e = new Error(code); e.code = code; throw e; };
 const inside = (root, file) => { const r = path.relative(root, file); return r === "" || !r.startsWith(".." + path.sep) && r !== ".." && !path.isAbsolute(r); };
 const samePath = (a, b) => path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase();
+const sameFileIdentity = (saved, current) => {
+  if (saved === current) return true;
+  // A reboot can renumber the mounted device. Preserve the offset only when
+  // inode and creation time still match; read() revalidates session metadata.
+  const previous = typeof saved === "string" && saved.match(/^\d+:(\d+):(\d+(?:\.\d+)?)$/);
+  const actual = current.match(/^\d+:(\d+):(\d+(?:\.\d+)?)$/);
+  return Boolean(previous && actual && Number(actual[1]) > 0 && Number(actual[2]) > 0 &&
+    previous[1] === actual[1] && previous[2] === actual[2]);
+};
 
 // Skip huge string values (image base64, command output) WITHOUT allocating
 // them. Preserve JSON structure and small fields, including savedPath after a
@@ -99,9 +108,9 @@ export class LocalPublicJournal {
     const handle = await open(location.file, "r");
     try {
       const st = await handle.stat(), identity = `${st.dev}:${st.ino}:${st.birthtimeMs}`;
-      if (!st.isFile() || saved && (saved.identity !== identity || st.size < saved.offset)) bad("public_journal_replaced");
+      if (!st.isFile() || saved && (!sameFileIdentity(saved.identity, identity) || st.size < saved.offset)) bad("public_journal_replaced");
       let reader = this.readers.get(session.threadId);
-      if (!reader || reader.identity !== identity || reader.expected !== (saved?.offset ?? 0) || reader.epoch !== epoch) {
+      if (!reader || reader.identity !== identity || saved && saved.identity !== identity || reader.expected !== (saved?.offset ?? 0) || reader.epoch !== epoch) {
         const header = new CompactJsonLines(); let meta, position = 0;
         while (!meta && position < Math.min(st.size, 4 * 1024 * 1024)) {
           const buf = Buffer.alloc(Math.min(this.chunkBytes, st.size - position));
