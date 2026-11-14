@@ -36,6 +36,13 @@
 ## B. 功能需求
 
 ### B1　Wiki 自动同步（自动提交 / 自动拉取 / 冲突上报）
+- **目标仓库**（本机，同一台 Mac mini，可直接读）：
+  - workdir `/Users/kibyou/projects/HonorOfLord-Wiki`，branch `main`
+  - remote `git@github.com-honor:KibyouMoe/HonorOfLord-Wiki.git`（SSH 别名 `github.com-honor`，已在 `~/.ssh/config`）
+- **现有拉取入口**（就是今天报「拉取失败」的那个）：
+  - 后端 `studio/server.mjs:201-263`：refresh 路由执行 `git pull --ff-only`，前端按钮「拉取更新」在 `studio/app.js:200`；服务端 `.mjs` 有变动时校验语法后退出进程，由 launchd 拉起
+  - 服务 `com.kibyou.hol-studio`（`~/Library/LaunchAgents/com.kibyou.hol-studio.plist`），端口 5174
+- **今天失败的原因**：本地 ahead 2 / 远端 ahead 19，`--ff-only` 无法快进 → `fatal: Not possible to fast-forward`。已手工 rebase + push 修复（`fec68f2e`）。
 - **口径**：本仓只放文档/策划案，逻辑改动另开仓库 → 自动提交可放宽，不必逐条人工审。
 - **自动提交**：有变更 → 按目录归类提交（消息写清改了什么），普通 push，绝不 force。
 - **自动拉取**：`fetch` + `pull --rebase --autostash`，避免本地攒提交导致 `fatal: Not possible to fast-forward`（11-14 已实际踩到，网页端自动更新因此失败）。
