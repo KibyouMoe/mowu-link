@@ -20,7 +20,11 @@ export async function reviewNativePermission(manager, event, { createChannel = c
     const turn = snapshot.turns?.find(turn => turn.id === event.turn_id);
     if (!turn || !["inProgress", "in_progress", "running", "started"].includes(turn.status))
       return decision("deny", "The native permission request no longer belongs to an active turn.");
-    const kind = event.tool_name === "Bash" ? "command" : event.tool_name === "apply_patch" ? "fileChange" : "mcp_tool_call";
+    // Preserve the router kinds used by the prior native RPC transport.
+    // MCP approval forms are mcpServer/elicitation/request with the
+    // codex_approval_kind=mcp_tool_call subtype.
+    const kind = event.tool_name === "Bash" ? "command" : event.tool_name === "apply_patch" ? "fileChange"
+      : event.tool_name.startsWith("mcp__") ? "elicitation" : "approval";
     // Approval review gets the requested operation only, with no transcript,
     // environment, tool results or private reasoning.
     const command = typeof event.tool_input.command === "string" ? event.tool_input.command : "";

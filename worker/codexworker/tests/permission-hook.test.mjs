@@ -51,11 +51,13 @@ test("MCP review excludes arbitrary arguments and command review redacts credent
   const f = fixture();
   await reviewNativePermission(f.manager, { ...event, tool_name: "mcp__cua_repl__js",
     tool_input: { code: "private arguments", password: "private password" } });
-  assert.equal(f.requests[0].kind, "mcp_tool_call");
+  assert.equal(f.requests[0].kind, "elicitation");
   assert.ok(!JSON.stringify(f.requests[0]).includes("private"));
   await reviewNativePermission(f.manager, { ...event, tool_input: {
     command: 'curl -H "Authorization: Bearer test-secret-value" https://example.test' } });
   assert.ok(!f.requests[1].detail.includes("test-secret-value"));
+  await reviewNativePermission(f.manager, { ...event, tool_name: "other_tool" });
+  assert.equal(f.requests[2].kind, "approval");
 });
 test("authenticated loopback endpoint routes the real manager through the permission adapter", async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), "native-hook-manager-"));
