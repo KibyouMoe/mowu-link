@@ -10,7 +10,8 @@ import { loadNativeConnection } from "./native-entry.mjs";
 
 const sources = ["desktop-lifecycle.mjs", "interface/desktop-connection/entry.mjs",
   "interface/desktop-connection/unix-websocket.mjs", "interface/permission-client.mjs",
-  "interface/native-approval.mjs", "interface/desktop-connection/approval-relay.mjs"];
+  "interface/native-approval.mjs", "interface/desktop-connection/approval-relay.mjs",
+  "interface/desktop-connection/native-lines.mjs"];
 const shellQuote = value => "'" + value.replaceAll("'", "'\\''") + "'";
 
 export async function prepareDesktopConnection({ platform = process.platform, env = process.env,
@@ -48,7 +49,7 @@ export async function prepareDesktopConnection({ platform = process.platform, en
     if (!actual.isFile() || actual.isSymbolicLink() || !(await readFile(target)).equals(bytes))
       throw new Error("desktop_connection_install_mismatch");
   }
-  return { launcher, revision, fileCount: files.length, activationRequired: true };
+  return { launcher, revision, fileCount: files.length, stateDir: path.dirname(parent), activationRequired: true };
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

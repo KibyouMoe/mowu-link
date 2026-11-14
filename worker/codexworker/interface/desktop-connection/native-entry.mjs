@@ -6,7 +6,7 @@ import { lstat, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { desktopOwner, processChain } from "../../desktop-lifecycle.mjs";
+import { desktopOwner, processChain, stopOwnedChild } from "../../desktop-lifecycle.mjs";
 import { runDesktopConnection, runDesktopServer } from "./entry.mjs";
 
 export async function requireNativeDesktopParent({ platform = process.platform, readChain = processChain } = {}) {
@@ -32,14 +32,15 @@ export async function loadNativeConnection(env = process.env) {
 export async function runNativeConnection(argv, { env = process.env, spawnImpl = spawn,
   verifyParent = requireNativeDesktopParent, load = loadNativeConnection, review,
   stdin = process.stdin, stdout = process.stdout, stderr = process.stderr } = {}) {
-  return runDesktopConnection(argv, { env, spawnImpl, verifyParent, load,
-    serve: settings => runDesktopServer(settings, { config: {} }, { stdin, stdout, stderr, review,
+  return runDesktopConnection(argv, { env, spawnImpl, verifyParent, load, nativePassthrough: true,
+    serve: settings => runDesktopServer(settings, { config: {}, nativePassthrough: true }, { stdin, stdout, stderr, review,
+      terminationEvent: "close", closeChannel: stopOwnedChild,
       connect: async () => {
         const childEnv = { ...env }; delete childEnv.CODEX_CLI_PATH;
         const child = spawnImpl(settings.realCli, argv, { env: childEnv, stdio: ["pipe", "pipe", "pipe"] });
         await once(child, "spawn");
         child.stderr.pipe(stderr, { end: false });
-        child.once("exit", () => child.stderr.unpipe(stderr));
+        child.once("close", () => child.stderr.unpipe(stderr));
         return child;
       } }) });
 }

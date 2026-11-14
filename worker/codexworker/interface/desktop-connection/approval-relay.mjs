@@ -6,12 +6,14 @@ import { isToolApproval } from "../native-approval.mjs";
 export function createApprovalRelay({ send, review = requestPermissionReview, log = () => {} }) {
   const pending = new Map();
   const answered = new Set();
+  let closed = false;
   function resolved(id) {
     pending.get(id)?.abort();
     pending.delete(id);
   }
   return {
     server(message) {
+      if (closed) return;
       if (message?.method === "serverRequest/resolved") resolved(message.params?.requestId);
       if (!isToolApproval(message) || pending.has(message.id)) return;
       answered.delete(message.id);
@@ -42,6 +44,6 @@ export function createApprovalRelay({ send, review = requestPermissionReview, lo
       if (message?.id !== undefined && !message.method) resolved(message.id);
       return true;
     },
-    close() { for (const id of pending.keys()) resolved(id); answered.clear(); },
+    close() { closed = true; for (const id of pending.keys()) resolved(id); answered.clear(); },
   };
 }

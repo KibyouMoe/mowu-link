@@ -4,7 +4,7 @@ import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { createApprovalRelay } from "../interface/desktop-connection/approval-relay.mjs";
 import { isToolApproval } from "../interface/native-approval.mjs";
-import { runDesktopServer } from "../interface/desktop-connection/entry.mjs";
+import { desktopServerOptions, runDesktopServer } from "../interface/desktop-connection/entry.mjs";
 import { reviewNativePermission } from "../interface/permission-hook.mjs";
 import { requireNativeDesktopParent, runNativeConnection } from "../interface/desktop-connection/native-entry.mjs";
 
@@ -120,9 +120,14 @@ test("native connection supports both Desktop process families and rejects manua
 test("Desktop native wrapper preserves its exact argv, environment and owned-child lifecycle", async () => {
   const child = new EventEmitter();
   child.stdin = new PassThrough(); child.stdout = new PassThrough(); child.stderr = new PassThrough();
-  let stopped = 0; child.kill = () => { stopped++; setImmediate(() => child.emit("exit", 3)); };
+  child.exitCode = null; child.signalCode = null;
+  let stopped = 0; child.kill = () => assert.fail("native child should first receive EOF");
+  child.stdin.once("finish", () => { stopped++; setImmediate(() => {
+    child.exitCode = 3; child.emit("exit", 3); child.stdout.end(); child.stderr.end(); child.emit("close", 3);
+  }); });
   const input = new PassThrough(), output = new PassThrough(), errors = new PassThrough();
-  const argv = ["-c", "features.code_mode_host=true", "app-server", "--analytics-default-enabled"];
+  const argv = ["-c", 'model="native-model"', "app-server", "--analytics-default-enabled",
+    "--native-startup-option", "future-value", "-c", "provider=native-toml-value"];
   let received = ""; child.stdin.on("data", bytes => { received += bytes; });
   const done = runNativeConnection(argv, { stdin: input, stdout: output, stderr: errors,
     verifyParent: async () => ({}), load: async () => ({ realCli: "native-desktop-cli" }),
@@ -135,4 +140,17 @@ test("Desktop native wrapper preserves its exact argv, environment and owned-chi
   input.write(JSON.stringify({ id: 1, method: "initialize", params: { clientInfo: { name: "Codex Desktop" } } }) + "\n");
   assert.equal(JSON.parse(received).params.clientInfo.name, "Codex Desktop");
   input.end(); assert.equal(await done, 3); assert.equal(stopped, 1);
+});
+
+test("native option delegation keeps auxiliary checks and rejects independent listeners", () => {
+  const native = { nativePassthrough: true };
+  for (const argv of [["-c", "provider=native-toml-value", "app-server", "--print-startup-config"],
+    ["app-server", "generate-json-schema"], ["app-server", "daemon", "version"]]) {
+    assert.equal(desktopServerOptions(argv, native), null);
+  }
+  assert.deepEqual(desktopServerOptions(["app-server", "--listen=stdio://"], native), { config: {} });
+  for (const argv of [["app-server", "daemon", "start"], ["app-server", "--listen", "ws://localhost:9000"],
+    ["app-server", "--listen=ws://localhost:9000"]]) {
+    assert.throws(() => desktopServerOptions(argv, native), /unsupported_native_desktop_listener/);
+  }
 });

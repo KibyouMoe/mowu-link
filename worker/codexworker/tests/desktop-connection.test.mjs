@@ -106,7 +106,7 @@ test("prepared Mac connector is relocatable, immutable and independent of delete
   }), { mode: 0o600 });
   const opts = { env: { CODEX_HOME: home }, nodePath: process.execPath };
   const result = await prepareDesktopConnection(opts);
-  assert.equal(result.fileCount, 7);
+  assert.equal(result.fileCount, 8);
   const launcher = await readFile(result.launcher, "utf8");
   assert.ok(launcher.includes("'\\''")); assert.ok(launcher.includes('"$@"'));
   assert.equal(launcher.includes("/worker/codexworker/"), false);
@@ -126,7 +126,7 @@ test("prepared native connector contains its entire approval dependency tree", {
     version: 1, realCli: "/native/codex",
   }), { mode: 0o600 });
   const result = await prepareDesktopConnection({ env: { CODEX_HOME: home }, mode: "native" });
-  assert.equal(result.fileCount, 8);
+  assert.equal(result.fileCount, 9);
   assert.match(await readFile(result.launcher, "utf8"), /native-entry\.mjs/);
   const entry = await import(new URL("../interface/desktop-connection/native-entry.mjs", import.meta.url));
   const installed = await import(pathToFileURL(path.join(path.dirname(result.launcher), "interface/desktop-connection/native-entry.mjs")));
