@@ -148,3 +148,13 @@
 - e8f6e4e全量CI43548630244四组实际success。Mac Node22/26各Codex733 tests /725 pass /0 fail /8 skip，DSH746/738/0/8，router130/130。Windows Node22/26各Codex733/717/0/16、DSH746/739/0/7。已逐组读取真实job日志，原生OS测试与交互Desktop实机验收分别记录。
 - 完整132文件分发已核对e8f6e4e，正常业务热更新后bootstrap25539不变、writer42775/generation4，SHA ca0e6c67083ad13135ecbc0243ecea5cd40aea50b25fe0e3a4d62b17b7258f04。ready、飞书/router连接、原thread、日志追平、无未确认文本均通过。
 - 本机正常Desktop24147托管、autoStart=true。仍待默认启用后的再次完整退出重开验收，原生硬打断和原子expected-turn未开放，完整原生目标保持未完成。鲁道夫与生产router/DSH/gateway按当前范围保持。
+
+## 玉藻共享互聊部署与配套 router 上线
+
+- 训练员另行授权更新玉藻、更新并重启 router。0c40846令 DSH index 使用共享 router-runtime，控制地址、原生审批和显式 deadline 的挂接保留在 interface/router-runtime.mjs，关闭插件时一并结束消息轮询和 SSE。
+- CUA 应用读取耗时3030秒。router 原先缺本次记录，随后按训练员要求补提 DeepSeek Harness / com.deepseek.dsh，ap_20ca60c6fb791b69实际approved。这份 router 业务授权记录与宿主原生审批回写分别验收。
+- router 正常停服前完成 SQLite 一致性备份，138 tasks/14 workers/588 approvals，quick_check=ok。新版0.4.0实际health提供durable-ack-v1与idempotent-goal-v1；首次bootstrap退出5，确认旧服务已完全停止后通过正式执行审批重新加载成功。两个Worker重新连接。
+- 玉藻状态和profile已备份，desktop profile指向规范工作树中0c40846的入口。通过正常退出/打开Harness加载，PID63729、business0.3.0、ready、飞书/router connected、workerMessaging=true，原thread d9fb1019-66c4-44db-9165-9c4778c53472与原session-93b7fc94-e7c9-421c-9cfa-6175b14dc7bb均恢复。
+- 真实普通互聊a19bdbb2-f317-4b9d-91a5-d91cd2a1f7f4由OguriCap发给TamamoCross；玉藻回信2fcd7d38-861b-4605-ac58-fc7b558f7a29，正文「玉藻互聊已通」，reply_to准确，两个路由记录均accepted并有acked_at。
+- Mac本机DSH全量与Codex router用例合计760 tests/752 pass/0 fail/8 skip，定向34/34，实际Codex分发包13/13，router自测130/130。原生CI43554537218四组success，Mac22/26各Codex733/725/0/8、DSH747/739/0/8、router130/130；Windows22/26各Codex733/717/0/16、DSH747/740/0/7。
+- Codex业务热更新bootstrap25539保持、generation5/business65216，SHA37f41d22604fc1f493415803a28429f17a4679dd8c88439672d0360812bd0e23，飞书/router在线、公开日志追平。接下来由玉藻协助正常退出重开Codex，验收前继续保留未完成状态。
