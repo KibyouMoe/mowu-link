@@ -139,3 +139,12 @@
 - 对真实旧游标只读验证从161074642继续到163096314，读取2031616字节，原位更新设备标识，未改在线账本。之后完整同步分发132文件，7个固定入口逐字节确认与已装包相同，写私有runtime-source.local.json指向CodexSyncArea用户安装源，走正常业务热更新，未再次替换MCP固定缓存。
 - 热更新实际生效：bootstrap仍25539，writer改29328，generation=2，business SHA d0a098ae039b5105be27b74790daa11574414331d3c1bae59c8db62ba17cf95a。飞书/路由在线，日志caughtUp=true、pendingBytes=0、lastError=null、unconfirmedTexts=0，积压公开消息已有sent回执。
 - 已请训练员从飞书发送“恢复测试”，真实入站/同轮回复仍待验；不要将网络连接和API出站回执当真实双向验收。完整默认启停仍需autoStart=true时下一次正常退出重开验证。鲁道夫依训练员最新要求暂不处理，生产router/DSH/gateway未重启。
+
+## 本机飞书双向恢复与重连提示
+
+- 真实飞书入站「没有看到重连信息」已在原thread收到，消息om_x100b604fe2bcacacceb562ed16ba8ff，收件回执587f322f-32c2-4d5c-8037-ea81315ae61e。公开回复om_x100b6048e1db3ca8ddbb1bbc24cb341经GET核对同chat、未删除、正文含本轮通知说明。
+- 原通知om_x100b604828717ca0dfdc3b6b503bd0a误分类为上线，现原地PATCH成「小栗帽-重连」，远端GET确认标题与「已重连」正文。e8f6e4e修改两侧共享分类，Desktop新进程沿用持久连接历史，首次安装仍有独立用例。
+- 通知回归Mac Node22/26各30/30，实际分发包15/15；日志续接包12/12。96c258c修新测试夹具的64位inode增量精度，其原生OS CI43547560102四组success。
+- e8f6e4e全量CI43548630244四组实际success。Mac Node22/26各Codex733 tests /725 pass /0 fail /8 skip，DSH746/738/0/8，router130/130。Windows Node22/26各Codex733/717/0/16、DSH746/739/0/7。已逐组读取真实job日志，原生OS测试与交互Desktop实机验收分别记录。
+- 完整132文件分发已核对e8f6e4e，正常业务热更新后bootstrap25539不变、writer42775/generation4，SHA ca0e6c67083ad13135ecbc0243ecea5cd40aea50b25fe0e3a4d62b17b7258f04。ready、飞书/router连接、原thread、日志追平、无未确认文本均通过。
+- 本机正常Desktop24147托管、autoStart=true。仍待默认启用后的再次完整退出重开验收，原生硬打断和原子expected-turn未开放，完整原生目标保持未完成。鲁道夫与生产router/DSH/gateway按当前范围保持。
