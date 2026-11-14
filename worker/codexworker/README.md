@@ -56,7 +56,8 @@ Windows 继续原生管道，拒绝使用此 Mac 适配；两平台 Worker 仍�
 
 ## 安装与配置
 
-需要 macOS 或 Windows Desktop、可用的原生任务工具和 Node.js 20+。
+需要 macOS 或 Windows Desktop、可用的原生任务工具。
+Windows 使用 Node.js 20+；macOS 的崩溃租约恢复使用内置 SQLite，需要 Node.js 22.13+。
 本包 `.mcp.json` 先运行 `interface/desktop-mcp.mjs`，选择宿主提供的 `CODEX_MCP_NODE_PATH`
 再加载安装根的 `server.mjs`；Mac支持execve时保持原进程归属，Windows保留MCP父进程并转发退出。
 禁止只复制顶层 `.mjs` 而漏掉 `interface/`。

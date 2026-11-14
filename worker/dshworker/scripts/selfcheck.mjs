@@ -79,6 +79,14 @@ record("runtime", "platform", "info", `${process.platform} / ${process.arch}`);
 record("runtime", "node", "info", process.version);
 const major = Number(process.version.replace(/^v/, "").split(".")[0]);
 record("runtime", "node >= 20", major >= 20 ? "pass" : "fail", major >= 20 ? "ok" : "升级到 Node 20+");
+if (!isWindows) {
+  try {
+    const { DatabaseSync } = await import("node:sqlite");
+    record("runtime", "writer lease SQLite", typeof DatabaseSync === "function" ? "pass" : "fail", "Node 内置 SQLite");
+  } catch {
+    record("runtime", "writer lease SQLite", "fail", "崩溃租约恢复需要 Node 22.13+ 的内置 SQLite");
+  }
+}
 
 // 2. 通道
 record("transport", "IPC 形态", "info", isWindows ? "Windows 命名管道" : "Unix domain socket");
