@@ -131,10 +131,12 @@ export async function runDesktopServer(settings, options, { stdin = process.stdi
 }
 
 function isDesktopAuxiliary(argv) {
+  const appServer = argv.indexOf("app-server");
   return argv.length === 1 && ["--version", "-V", "--help", "-h"].includes(argv[0]) ||
     ["exec-server", "login", "logout"].includes(argv[0]) ||
-    argv[0] === "app-server" && (["generate-json-schema", "generate-ts", "--help", "-h", "--print-startup-config"].includes(argv[1]) ||
-      argv.length === 3 && argv[1] === "daemon" && argv[2] === "version");
+    appServer >= 0 && (["generate-json-schema", "generate-ts"].includes(argv[appServer + 1]) ||
+      argv.includes("--print-startup-config") || argv.includes("--help") || argv.includes("-h") ||
+      argv.length === appServer + 3 && argv[appServer + 1] === "daemon" && argv[appServer + 2] === "version");
 }
 
 export async function runDesktopConnection(argv, { verifyParent = requireDesktopParent,

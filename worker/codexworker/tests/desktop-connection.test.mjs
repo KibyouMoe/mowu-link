@@ -66,7 +66,10 @@ test("app-server only connects the existing daemon; failure cannot spawn a model
 });
 
 test("Desktop version and exec-server use its real binary without recursive override", async () => {
-  for (const args of [["--version"], ["exec-server"], ["app-server", "daemon", "version"]]) {
+  const startupPolicy = [...actualStartup, "--print-startup-config", "--startup-client-info",
+    JSON.stringify({ name: "codex_desktop", title: "Codex Desktop", version: "26.1106.51428" })];
+  for (const args of [["--version"], ["exec-server"], ["app-server", "daemon", "version"],
+    startupPolicy, [...startupPolicy, "--startup-sign-out"]]) {
     const child = new EventEmitter(); child.kill = () => {};
     const result = runDesktopConnection(args, { verifyParent: async () => owner,
       load: async () => ({ realCli: "/native/codex" }), env: { CODEX_CLI_PATH: "adapter", KEEP: "yes" },
