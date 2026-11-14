@@ -19,7 +19,7 @@ async function fixture(t, connected) {
   });
   server.listen(endpoint); await once(server, "listening");
   const keys = ['CODEX_APP_TOOLS_PIPE_PATH', 'CODEXWORKER_NATIVE_INPUT_DESCRIPTOR',
-    'CODEXWORKER_NATIVE_IMAGE_INPUT', 'CODEXWORKER_NATIVE_QUESTION_INPUT'];
+    'CODEXWORKER_NATIVE_IMAGE_INPUT', 'CODEXWORKER_NATIVE_QUESTION_INPUT', 'CODEXWORKER_NATIVE_TASK_INPUT'];
   const previous = keys.map(key => [key, process.env[key]]);
   for (const key of keys) delete process.env[key];
   process.env.CODEX_APP_TOOLS_PIPE_PATH = endpoint;

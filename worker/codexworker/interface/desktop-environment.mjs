@@ -8,6 +8,7 @@ export function normalizeDesktopEnvironment(env) {
     delete env.CODEXWORKER_STATE_DIR;
     delete env.CODEXWORKER_NATIVE_IMAGE_INPUT;
     delete env.CODEXWORKER_NATIVE_QUESTION_INPUT;
+    delete env.CODEXWORKER_NATIVE_TASK_INPUT;
     delete env.CODEXWORKER_NATIVE_INPUT_DESCRIPTOR;
   }
   for (const name of ["RUDOLF_BRIDGE_LIFECYCLE_CHILD", "RUDOLF_BRIDGE_LIFECYCLE_READY",

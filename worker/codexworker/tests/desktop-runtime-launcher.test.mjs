@@ -37,7 +37,7 @@ for (const platform of ["darwin", "win32"]) {
       RUDOLF_BRIDGE_LIFECYCLE_CHILD: "1", RUDOLF_BRIDGE_LIFECYCLE_READY: "1",
       RUDOLF_BRIDGE_DESKTOP_STARTED_AT: "foreign lifetime", RUDOLF_BRIDGE_LIFETIME_LAUNCH: "foreign",
       RUDOLF_BRIDGE_RUNTIME_HOST_PID: "123", CODEXWORKER_DESKTOP_PID: "124",
-      CODEXWORKER_NATIVE_IMAGE_INPUT: "1", CODEXWORKER_NATIVE_QUESTION_INPUT: "1",
+      CODEXWORKER_NATIVE_IMAGE_INPUT: "1", CODEXWORKER_NATIVE_QUESTION_INPUT: "1", CODEXWORKER_NATIVE_TASK_INPUT: "1",
       CODEXWORKER_NATIVE_INPUT_DESCRIPTOR: "/foreign/descriptor", CODEX_HOME: "/original/codex-home",
       CODEX_APP_TOOLS_PIPE_PATH: "actual-desktop-pipe" };
     await launchDesktopMcp({ platform, env, loadServer: async () => {

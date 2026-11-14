@@ -228,7 +228,7 @@ export async function createNativeInput({ stateDir, owner, send, timeoutMs = 300
   }
 
   return {
-    env: { CODEXWORKER_NATIVE_IMAGE_INPUT: "1", CODEXWORKER_NATIVE_QUESTION_INPUT: "1",
+    env: { CODEXWORKER_NATIVE_IMAGE_INPUT: "1", CODEXWORKER_NATIVE_QUESTION_INPUT: "1", CODEXWORKER_NATIVE_TASK_INPUT: "1",
       CODEXWORKER_NATIVE_INPUT_DESCRIPTOR: descriptorFile },
     client(message) {
       if (message?.method === "initialize") initializeId = message.id;
