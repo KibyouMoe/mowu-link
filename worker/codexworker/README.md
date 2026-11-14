@@ -27,9 +27,13 @@ router 决定回写同一请求 ID，手动作答、原生 resolved 或断连会
 
 原生 stdio 宿主可用 `native-entry.mjs` 包装 Desktop 本来启动的 app-server，并原样传递参数。
 它要求真实 Desktop 祖先，关闭时仅结束所属子进程，保留当前会话所有权。
-Mac 安装时先写私有 `desktop-native-connection.json`（version=1、realCli 为真实宿主二进制），
-执行 `node interface/desktop-connection/prepare.mjs --native` 生成完整不可变启动器，
-通过正常 Desktop 启动配置启用并重开验收。该脚本的 launcher 生成目前限 Mac。
+Mac 正式插件在已绑定、`autoStart=true` 时校验当前原生输入通道。
+缺失时由 `interface/desktop-startup.mjs` 建立私有连接配置、核验宿主启动参数，
+同次开机最多安排一次正常客户端重开，等待原后台进程退出后带上正确设置打开原应用。
+普通客户端入口可直接使用，原会话继续由 Desktop 恢复；重开记录位于本机 `native-startup/`。
+失败及已执行的记录会阻止重复重开，`autoStart=false` 可取消尚未执行的操作。
+`prepare.mjs --native` 提供低层只读预检和不可变连接生成，产物位于本机状态目录。
+插件安装目录参与 hook 校验，正式更新后按原生界面审核当前包，运行状态写到包外目录。
 Windows 原生进程族和转发逻辑有分支回归，Windows Desktop 的原生连接激活仍需目标机实测。
 
 若当前构建在设置中刷新后仍未列出插件hook，可在用户 `hooks.json` 登记同一个已安装脚本，

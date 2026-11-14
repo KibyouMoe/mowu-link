@@ -7,6 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadDesktopConnection } from "./entry.mjs";
 import { loadNativeConnection } from "./native-entry.mjs";
+import { resolveDesktopState } from "../../desktop-lifecycle.mjs";
 
 const sources = ["desktop-lifecycle.mjs", "interface/desktop-connection/entry.mjs",
   "interface/desktop-connection/unix-websocket.mjs", "interface/permission-client.mjs",
@@ -28,7 +29,8 @@ export async function prepareDesktopConnection({ platform = process.platform, en
   hash.update(nodePath).update(mode);
   const revision = hash.digest("hex");
   const home = env.CODEX_HOME || path.join(os.homedir(), ".codex");
-  const parent = path.join(home, "state/codexworker/desktop-connection");
+  const stateDir = await resolveDesktopState(path.join(home, "state/codexworker"), env);
+  const parent = path.join(stateDir, "desktop-connection");
   await mkdir(parent, { recursive: true, mode: 0o700 });
   const metadata = await lstat(parent);
   if (!metadata.isDirectory() || metadata.isSymbolicLink() || metadata.mode & 0o077 ||

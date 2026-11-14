@@ -4,12 +4,23 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ensureDesktopSupervisor, readDesktopSettings, resolveDesktopState } from "./desktop-lifecycle.mjs";
 import { PluginRuntime } from "./plugin-runtime.mjs";
+import { ensureDesktopStartup } from "./interface/desktop-startup.mjs";
 
 const pluginRoot = path.dirname(fileURLToPath(import.meta.url));
-const stateDir = await resolveDesktopState(path.join(process.env.USERPROFILE ?? process.env.HOME ?? process.cwd(), ".codex", "state", "codexworker"));
+const codexHome = path.resolve(process.env.CODEX_HOME ?? path.join(process.env.USERPROFILE ?? process.env.HOME ?? process.cwd(), ".codex"));
+const stateDir = await resolveDesktopState(path.join(codexHome, "state", "codexworker"));
 process.env.CODEXWORKER_STATE_DIR = stateDir;
 let initialized = false, ended = false, pending = 0, buffer = "", closing = false, lifecycleStartup;
 let refreshingLifecycle = false;
+let startupRepair, startupRepairError;
+async function repairingStartup() {
+  startupRepair ??= ensureDesktopStartup({ stateDir }).catch(() => ({ restarting: false, error: "desktop_startup_setup_failed" }));
+  const status = await startupRepair;
+  if (!status.nativeInputReady) startupRepair = null;
+  if (status.error && status.error !== startupRepairError) process.stderr.write("[bridge] " + status.error + "\n");
+  startupRepairError = status.error ?? null;
+  return status.restarting;
+}
 const write = message => process.stdout.write(JSON.stringify(message) + "\n");
 const runtime = new PluginRuntime({ pluginRoot, stateDir, onToolsChanged: () => {
   if (initialized && !ended) write({ jsonrpc: "2.0", method: "notifications/tools/list_changed" });
@@ -25,7 +36,7 @@ const lifecycleWatch = setInterval(() => {
       process.env.RUDOLF_BRIDGE_LIFECYCLE_CHILD === "1") return;
   refreshingLifecycle = true;
   lifecycleStartup = null;
-  lifecycleStartup = ensureDesktopSupervisor({ pluginRoot, stateDir }).catch(() => false)
+  lifecycleStartup = repairingStartup().then(repairing => repairing ? false : ensureDesktopSupervisor({ pluginRoot, stateDir })).catch(() => false)
     .finally(() => { refreshingLifecycle = false; });
 }, 5000);
 lifecycleWatch.unref();
@@ -42,7 +53,7 @@ async function dispatch(line) {
         const settings = await readDesktopSettings(stateDir);
         let guarded = false;
         if (!settings.autoStart) lifecycleStartup = null;
-        else {
+        else if (!await repairingStartup()) {
           lifecycleStartup ??= ensureDesktopSupervisor({ pluginRoot, stateDir }).catch(error => {
             const detail = /^desktop_lifetime_launch_denied:\d{1,5}$/.test(error.message) ? error.message : "desktop_lifecycle_unavailable";
             process.stderr.write("[bridge] " + detail + "\n");

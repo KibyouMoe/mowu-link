@@ -19,7 +19,8 @@ export async function requireNativeDesktopParent({ platform = process.platform, 
 
 export async function loadNativeConnection(env = process.env) {
   const home = env.CODEX_HOME || path.join(env.USERPROFILE || os.homedir(), ".codex");
-  const file = path.join(home, "state/codexworker/desktop-native-connection.json");
+  const stateDir = await resolveDesktopState(path.join(home, "state/codexworker"), env);
+  const file = path.join(stateDir, "desktop-native-connection.json");
   const stat = await lstat(file);
   if (!stat.isFile() || stat.isSymbolicLink() ||
       typeof process.getuid === "function" && (stat.uid !== process.getuid() || stat.mode & 0o077))
