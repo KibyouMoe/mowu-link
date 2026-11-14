@@ -383,6 +383,10 @@ async function startBusiness({ ctx, transport, identity, workerConfig, config, s
       lastReloadError: "business hot reload is not wired in plugin mode" }),
   };
   const business = createBusiness(runtimeControl);
+  log("info", "business_host_context", { pid: process.pid, pluginRoot: ROOT,
+    ownsWriter: runtimeControl.ownsWriter, businessOwnerContract: createBusiness.toString().includes("ownsWriter"),
+    lifecycleChild: process.env.RUDOLF_BRIDGE_LIFECYCLE_CHILD ?? null,
+    lifecycleReady: process.env.RUDOLF_BRIDGE_LIFECYCLE_READY ?? null });
   await business.activate();
   log("info", "business_started", { url: `http://${host}:${port}`, threadId: thread.id });
 
