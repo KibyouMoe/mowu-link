@@ -1,7 +1,7 @@
 // Hermes: all+accumulate, edits >=1.5s, 40-character previews, (×N) repeats.
 export const TOOL_EDIT_INTERVAL_MS=1500;
 const fence=String.fromCharCode(96).repeat(3);
-export function safeToolPreview(value) {
+export function redactToolText(value) {
  if(typeof value!=="string") return "";
  let text=value.replace(/\x1b\[[0-9;]*m/g,"").replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g,"");
  text=text.replace(/\bBearer\s+[a-z0-9._~+/-]+=*/ig,"Bearer [redacted]")
@@ -10,6 +10,10 @@ export function safeToolPreview(value) {
   .replace(/https?:\/\/[^/\s:@]+:[^@\s/]+@/ig,"https://[redacted]@")
   .replace(/\b(?:sk-|gh[pousr]_|AIza)[a-z0-9_-]{12,}\b/ig,"[redacted]");
  text=text.replace(/\b[a-zA-Z0-9_+/-]{32,}={0,2}\b/g,"[redacted]");
+ return text;
+}
+export function safeToolPreview(value) {
+ const text=redactToolText(value);
  const lines=text.trim().split(/\r?\n/),chars=Array.from(lines[0]??"");
  return chars.length>40?chars.slice(0,37).join("")+"...":chars.join("")+(lines.length>1?" ...":"");
 }

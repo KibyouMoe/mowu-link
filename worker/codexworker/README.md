@@ -1,9 +1,24 @@
 # CodexWorker 0.3 — Desktop 插件
 
 插件通过 Codex Desktop 注入的原生任务通道使用既有会话。Desktop 启动插件时交接给
-生命周期监督器，短暂的 MCP inventory 退出后收发继续；Desktop 退出时关闭所属 Worker。
+生命周期监督器。Mac 的发现连接退出时回收所属适配器，由存活的 Desktop MCP 连接重新接管；
+Windows 监督器由真实 Desktop 托管。Desktop 退出时关闭所属 Worker。
 独立 Worker CLI、私有 app-server、headless 启动和失败后的其他入口均已移除。
 Node 是插件执行环境，不是另一个模型宿主。
+
+## 原生审批转交
+
+`hooks/hooks.json` 提供官方 `PermissionRequest` 命令 hook，将已登记会话的原生审批交给
+本机鉴权接口 `/bridge/permissions/review`，再由 router 的现有策略或溪流决定。
+批准后返回原生 `allow`，拒绝、异常或失效回合返回 `deny`。未登记聊天继续客户端审批。
+命令摘要做凭据脱敏，保留原操作哈希；MCP 参数和私有上下文不进入审批详情。
+
+安装后须在 Codex 的原生 hook 审核流程中信任当前定义，客户端才执行它。
+测试须同时记录真实 hook 调用、router 审批 ID 和原工具执行结果；手动 POST 一张审批单
+只能证明 router 接受请求。MCP 工具内部额外发起的 elicitation 仍按实际宿主事件覆盖验收。
+配置关闭 `autoStart` 时，该 hook 将审批交回客户端。
+
+协议与审核流程见[官方 Hooks 文档](https://learn.chatgpt.com/docs/hooks)。
 
 Mac 已有共享后台的会话，迁移前须实测 Desktop 是否接回同一后台；仅设置 daemon 环境开关不够。
 部分构建的附加启动参数会强制私有 stdio，导致原会话显示占用。此时保留 Desktop 连接适配：

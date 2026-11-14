@@ -4,6 +4,7 @@ import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { mkdir, open, readFile, realpath, rename, unlink, writeFile } from "node:fs/promises";
 import http from "node:http";
 import { routerOperations } from "./router-operations.mjs";
+import { reviewNativePermission } from "./interface/permission-hook.mjs";
 import { MessageJournal, nativeMessageId } from "./message-journal.mjs";
 import { ReceiptArchive, compactAck, shrinkObservationText } from "./continuity.mjs";
 import { addToolToBubble, renderToolBubble, safeToolPreview, TOOL_EDIT_INTERVAL_MS } from "./tool-progress.mjs";
@@ -2304,9 +2305,11 @@ export class DesktopManager {
         if (!["127.0.0.1", "::1"].includes(peer)) fail(403, "loopback_required", "Receipt review is local-only.");
         return json(res, 200, await this.abandonTextReceipt(await readBody(req)));
       }
-      if (["/bridge/images", "/bridge/images/recover", "/bridge/runtime", "/bridge/runtime/reload"].includes(url.pathname)) {
+      if (["/bridge/images", "/bridge/images/recover", "/bridge/runtime", "/bridge/runtime/reload", "/bridge/permissions/review"].includes(url.pathname)) {
         const peer = req.socket.remoteAddress?.replace(/^::ffff:/, "");
-        if (!["127.0.0.1", "::1"].includes(peer)) fail(403, "loopback_required", "Image output and code reload are local-only.");
+        if (!["127.0.0.1", "::1"].includes(peer)) fail(403, "loopback_required", "Integration control is local-only.");
+        if (req.method === "POST" && url.pathname === "/bridge/permissions/review")
+          return json(res, 200, await reviewNativePermission(this, await readBody(req)));
         if (req.method === "GET" && url.pathname === "/bridge/runtime") return json(res, 200, this.businessRuntime.status());
         if (req.method === "POST" && url.pathname === "/bridge/runtime/reload") {
           body = await readBody(req);

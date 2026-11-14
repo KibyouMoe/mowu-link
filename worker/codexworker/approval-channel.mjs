@@ -66,6 +66,7 @@ export function createApprovalChannel({
   pollMs = approvalPollMs(),
   sleepImpl = sleep,
   now = Date.now,
+  allowLocalAutoApproval = true,
 } = {}) {
   if (!router || typeof router.requestApproval !== "function" || typeof router.getApproval !== "function") {
     throw new Error("approval channel needs a router client with requestApproval/getApproval");
@@ -163,7 +164,7 @@ export function createApprovalChannel({
   async function handler(request) {
     stats.requested += 1;
     const incoming = request ?? {};
-    if (shouldAutoApprove(incoming)) {
+    if (allowLocalAutoApproval && shouldAutoApprove(incoming)) {
       stats.approved += 1;
       log("info", "approval_auto_approved", {
         method: incoming.method, kind: incoming.kind ?? null,

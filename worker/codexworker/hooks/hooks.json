@@ -1,0 +1,17 @@
+{
+  "description": "Forward native permissions in registered Worker chats to the configured router reviewer.",
+  "hooks": {
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${PLUGIN_ROOT}/scripts/review-permission-hook.mjs\"",
+            "timeout": 570,
+            "statusMessage": "Waiting for the configured router reviewer"
+          }
+        ]
+      }
+    ]
+  }
+}
