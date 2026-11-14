@@ -16,7 +16,8 @@ const sources = ["desktop-lifecycle.mjs", "interface/desktop-connection/entry.mj
 const shellQuote = value => "'" + value.replaceAll("'", "'\\''") + "'";
 
 export async function prepareDesktopConnection({ platform = process.platform, env = process.env,
-  pluginRoot = fileURLToPath(new URL("../..", import.meta.url)), nodePath = process.execPath, mode = "shared" } = {}) {
+  pluginRoot = fileURLToPath(new URL("../..", import.meta.url)),
+  nodePath = env.CODEX_MCP_NODE_PATH?.trim() || process.execPath, mode = "shared" } = {}) {
   if (platform !== "darwin") throw new Error("desktop_connection_platform_unsupported");
   if (!["shared", "native"].includes(mode)) throw new Error("desktop_connection_mode_invalid");
   await (mode === "native" ? loadNativeConnection : loadDesktopConnection)(env);

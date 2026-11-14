@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { execFileSync } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -119,6 +120,28 @@ test("prepared Mac connector is relocatable, immutable and independent of delete
   assert.deepEqual(await prepareDesktopConnection(opts), result);
   await writeFile(path.join(root, "desktop-lifecycle.mjs"), "corrupt");
   await assert.rejects(prepareDesktopConnection(opts), /install_mismatch/);
+});
+
+test("prepared connector executes the Desktop runtime hint and preserves an explicit runtime override", { skip: process.platform !== "darwin" }, async t => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "Desktop runtime 连接-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const state = path.join(home, "state/codexworker");
+  await mkdir(state, { recursive: true });
+  await writeFile(path.join(state, "desktop-native-connection.json"), JSON.stringify({
+    version: 1, realCli: "/native/codex",
+  }), { mode: 0o600 });
+  const supplied = path.join(home, "Desktop's Node");
+  const explicit = path.join(home, "explicit Node");
+  await writeFile(supplied, "#!/bin/sh\nprintf 'desktop-runtime\\n'\n", { mode: 0o700 });
+  await writeFile(explicit, "#!/bin/sh\nprintf 'explicit-runtime\\n'\n", { mode: 0o700 });
+  const env = { CODEX_HOME: home, CODEX_MCP_NODE_PATH: supplied };
+  const prepared = await prepareDesktopConnection({ env, mode: "native" });
+  assert.equal(execFileSync(prepared.launcher, ["--version"], { encoding: "utf8", timeout: 5000 }), "desktop-runtime\n");
+  const overridden = await prepareDesktopConnection({ env, mode: "native", nodePath: explicit });
+  assert.equal(execFileSync(overridden.launcher, ["--version"], { encoding: "utf8", timeout: 5000 }), "explicit-runtime\n");
+  assert.notEqual(overridden.revision, prepared.revision);
+  await assert.rejects(prepareDesktopConnection({ env: { ...env, CODEX_MCP_NODE_PATH: "relative/node" }, mode: "native" }),
+    /node_not_absolute/);
 });
 
 test("prepared native connector contains its entire approval dependency tree", { skip: process.platform !== "darwin" }, async t => {
