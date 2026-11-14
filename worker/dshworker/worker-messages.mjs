@@ -92,8 +92,8 @@ async function atomic(file, value) {
     }
   }
 }
-function marker(message, outgoing = false) {
-  return `[worker ${message.from}${outgoing ? " -> " + message.to : ""} message ${message.message_id}` +
+function marker(message) {
+  return `[worker ${message.from} message ${message.message_id}` +
     (message.reply_to ? " reply_to " + message.reply_to : "") + "]\n这里是 " + message.from + "。";
 }
 function routerReceipt(result, message) {
@@ -218,8 +218,8 @@ export function startWorkerMessaging({ manager, client, worker, log = () => {} }
     try {
       const accepted = await observe(() => manager.publicReply({ messageId: record.payload.message_id,
         targetThreadId: record.targetThreadId, source: "bridge", origin: "worker-chat", workerName: worker,
-        peerMessageId: record.payload.message_id, reply_to: record.payload.reply_to ?? null },
-      marker(record.payload, true) + "\n" + record.payload.text +
+        peerWorkerName: record.payload.to, peerMessageId: record.payload.message_id, reply_to: record.payload.reply_to ?? null },
+      record.payload.text +
         (record.payload.attachments?.length ? "\nImages: " + record.payload.attachments.map(a => a.id).join(", ") : ""), "worker-message-sent"));
       record.mirror = accepted === true ? "accepted" : "pending";
     } catch (error) {

@@ -342,10 +342,11 @@ export class DesktopManager {
     if (!threadId || !this.state.sessions[threadId]) return null;
     const received = input && this.state.feishuReceipts[event.messageId]?.incomingMessageId;
     const origin = request.origin ?? event.payload.origin;
+    const peerWorkerName = output && origin === "worker-chat" ? request.peerWorkerName : undefined;
     const source = received ? "feishu" : input
       ? origin === "worker-chat" ? "worker" : ["feishu", "router", "subscription", "cli", "desktop", "native"].includes(origin) ? origin
         : origin === "desktop-native-composer" ? "native" : request.source === "hermes" ? "hermes" : "api"
-      : event.type.startsWith("tool.") ? "tool" : ["context.notice"].includes(event.type) ? "worker" : "assistant";
+      : event.type.startsWith("tool.") ? "tool" : ["context.notice"].includes(event.type) || peerWorkerName ? "worker" : "assistant";
     const progress = event.type === "tool.progress", toolEvent = event.type === "tool.activity", systemEvent = ["context.notice"].includes(event.type);
     if (output && !progress && !toolEvent) this.flushToolBubble(this.session(threadId));
     const itemKey = event.payload.itemKey ?? event.messageId ?? String(event.seq);
@@ -360,6 +361,7 @@ export class DesktopManager {
       seq: event.seq, logicalId, previousId: this.state.latestTranscript?.[logicalId], direction: input ? "input" : "output", source, threadId,
       turnId: event.turnId, messageId: event.messageId,
       workerName: source === "worker" ? request.workerName : undefined,
+      peerWorkerName,
       taskId: request.taskId ?? /^\[router (t-[^\]\s]+)\]/m.exec(text)?.[1] ?? null,
       text, phase: input ? "input" : event.payload.phase ?? "final_answer", timestamp: event.timestamp,
       mirror, complete, historyLimited: event.payload.historyLimited,
@@ -380,7 +382,7 @@ export class DesktopManager {
       const entries = this.enqueuePublicText(this.session(threadId), event.turnId, input ? logicalId : itemKey,
         text, this.state.selectionEpoch, input || record.phase !== "commentary", event.payload.messageIds ?? [], {
           publicQuestion: event.payload.publicQuestion, input: input || systemEvent, complete, progress, transcriptId: record.id, historyLimited: record.historyLimited, deferDrain: true,
-          title: input ? this.inputMirrorTitle(source, record.workerName ?? request.workerName) : progress ? this.config.bridgeName + "-工具" : systemEvent ? this.config.bridgeName + "-会话" : undefined });
+          title: input || peerWorkerName ? this.inputMirrorTitle(source, record.workerName ?? request.workerName, peerWorkerName) : progress ? this.config.bridgeName + "-工具" : systemEvent ? this.config.bridgeName + "-会话" : undefined });
       await this.messageJournal.plan(record.id, entries.map(e => e.uuid));
       for (const entry of entries) if (["sent", "unknown"].includes(entry.status))
         await this.messageJournal.delivered(record.id, entry.uuid, entry.status, entry.feishuMessageId, entries.length);
@@ -427,7 +429,7 @@ export class DesktopManager {
       const entries = this.enqueuePublicText(session, record.turnId, key, record.text, this.state.selectionEpoch,
         record.phase !== "commentary", [], { publicQuestion: record.publicQuestion, input: input || record.kind === "system_event", complete: record.complete, historyLimited: record.historyLimited, deferDrain: true, transcriptId: record.id,
           progress: record.kind === "tool_progress",
-          title: input ? this.inputMirrorTitle(inputSource, inputWorker) : record.kind === "tool_progress" ? this.config.bridgeName + "-工具" : record.kind === "system_event" ? this.config.bridgeName + "-会话" : undefined });
+          title: input || record.peerWorkerName ? this.inputMirrorTitle(inputSource, inputWorker, record.peerWorkerName) : record.kind === "tool_progress" ? this.config.bridgeName + "-工具" : record.kind === "system_event" ? this.config.bridgeName + "-会话" : undefined });
       await this.messageJournal.plan(record.id, entries.map(e => e.uuid));
       for (const entry of entries) {
         if (entry.status === "sent" && entry.feishuMessageId)
@@ -439,7 +441,8 @@ export class DesktopManager {
     await this.save();
   }
 
-  inputMirrorTitle(source, workerName) {
+  inputMirrorTitle(source, workerName, peerWorkerName) {
+    if (source === "worker" && peerWorkerName) return this.config.bridgeName + " → " + peerWorkerName + "·私聊";
     if (source === "worker") return this.config.bridgeName + "·" + (workerName || "Worker") + "私聊";
     const labels = { feishu: "飞书输入", router: "溪流派单", subscription: "订阅事件", cli: "本地 CLI 输入",
       desktop: "桌面输入", native: "原生输入", api: "本地 API 输入", hermes: "溪流输入" };

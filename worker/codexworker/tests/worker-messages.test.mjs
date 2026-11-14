@@ -103,7 +103,12 @@ test("send derives the authenticated sender, persists router acceptance before m
   assert.equal(f.replies.length, 1); assert.equal(f.requests.length, 0); assert.equal(f.nativeCalls.length, 0);
   const journal = await f.manager.messageJournal.list();
   assert.equal(journal.records.length, 1); assert.equal(journal.records[0].direction, "output");
-  assert.match(journal.records[0].text, /ordinary chat/);
+  assert.equal(journal.records[0].text, "ordinary chat");
+  assert.equal(journal.records[0].source, "worker");
+  assert.equal(journal.records[0].workerName, worker);
+  assert.equal(journal.records[0].peerWorkerName, peer);
+  assert.equal(journal.records[0].messageId, messageId);
+  assert.equal(Object.values(f.manager.state.publicTextOutbox)[0].title, f.manager.config.bridgeName + " → " + peer + "·私聊");
   assert.ok(Object.keys(f.manager.state.publicTextOutbox).length, "existing Feishu outbox owns the public mirror");
 });
 
@@ -117,6 +122,21 @@ test("concurrent send retries and a service restart mirror once with the origina
   assert.equal(f.replies[0][0].targetThreadId, "thread-1");
   await assert.rejects(next.send({ ...request, text: "changed" }), { code: "message_id_conflict" });
   assert.equal(f.router.calls.length, 1);
+});
+
+test("pending outgoing chat recovery retains recipient title, clean text and original archive identity", async t => {
+  const f = await fixture(t), messageId = randomUUID();
+  await f.service.send({ messageId, to: peer, text: "检查原生 hook 的审核状态。" });
+  const first = (await f.manager.messageJournal.list()).records[0];
+  f.manager.state.publicTextOutbox = {};
+  await f.manager.recoverTranscript();
+  const entries = Object.values(f.manager.state.publicTextOutbox);
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].title, f.manager.config.bridgeName + " → " + peer + "·私聊");
+  assert.ok(entries[0].transcriptIds.includes(first.id));
+  assert.equal((await f.manager.messageJournal.list()).records.find(record => record.id === first.id).messageId, messageId);
+  assert.equal(entries[0].text.includes("[worker "), false);
+  assert.equal(entries[0].text.includes("这里是 " + worker), false);
 });
 
 test("a new manager instance reads durable send/receive receipts without mirroring or dispatching twice", async t => {
