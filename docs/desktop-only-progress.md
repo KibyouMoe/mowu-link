@@ -115,3 +115,6 @@
 - 一次性迁移计划已只读核验：仅在当前回合idle持续12秒后，备份配置/绑定/账本与旧plist，正常disable/bootout旧Worker并移出LaunchAgents，清除旧启动覆盖，启用已经在运行的Desktop插件；原threadId不变，不新建/归档，不停止共享daemon或其他服务。官方thread/read不订阅，最后旧连接离开后有默认60秒空闲卸载宽限；等待真正交接结果，不再以重复重启代替。
 - 维护脚本 /tmp/oguri-desktop-cutover.mjs，--plan 输出plan_verified（旧writer2061/Desktop1260/原thread active）；尚待启动一次性执行器，本轮final后才能触发idle。日志为 ~/.codex/state/codexworker/desktop-only-cutover-events.jsonl。
 - 官方稳定control socket实际是同UID/private0700目录里的symlink，目标为同UID0600 Unix socket；连接层修正为验证私有link目录再验证resolved socket，不扫描其他端点。新增真实symlink成功/非法目录与目标拒绝测试，Mac定向17/17通过。
+
+- 一次性交接执行器已启动：PID11607 / exec session49354，实际输出waiting_for_current_turn_end；当前回合结束且idle持续12秒后才停旧Worker。句柄保存在 ~/.codex/state/codexworker/desktop-only-migration.local.json。它的15分钟仅限制维护排程，持续有对话则deferred不改服务，不限制/终止模型任务。
+- 修复源码ef50ef7、技能43e7aea已推送；Node22/26适配各17/17，正常plugin add后129文件与分发逐字节相同。本地技能已同步。尚未看到Desktop_writer_ready，下一轮先用session49354或持久日志核对实际交接，不能根据“已启动”声称迁移完成。
