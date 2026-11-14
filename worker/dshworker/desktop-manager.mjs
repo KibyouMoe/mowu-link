@@ -465,8 +465,9 @@ export class DesktopManager {
     if (timestamp && session.transcriptStartAt && Date.parse(timestamp) < Date.parse(session.transcriptStartAt)) return null;
     const bound = session.inputMessages?.[item.key];
     if (bound) return bound;
+    const inputHash = digest(item.nativeInputText ?? item.text);
     const candidates = Object.values(this.state.receipts).filter(receipt =>
-      receipt.nativeTargetThreadId === session.threadId && receipt.nativeInputHash === digest(item.text)
+      receipt.nativeTargetThreadId === session.threadId && receipt.nativeInputHash === inputHash
       && ["accepted", "unknown"].includes(receipt.nativeDispatch?.status)
       && !receipt.transcriptNativeKey && (!receipt.nativeTurnId || receipt.nativeTurnId === item.turnId));
     const exact = candidates.filter(r => r.nativeTurnId === item.turnId);

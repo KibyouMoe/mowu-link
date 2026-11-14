@@ -95,6 +95,26 @@ test("native input observation never invokes a model writer and cannot echo an a
   assert.equal((await f.manager.messageJournal.list()).records.filter(r => r.source === "native").length, 1);
 });
 
+test("native image captions bind the original Feishu receipt without echoing another input card", async t => {
+  const f = await fixture(t), req = request("看这张图", { origin: undefined });
+  f.manager.state.feishuReceipts[req.messageId] = { incomingMessageId: "om_native_image_original" };
+  await f.manager.mirrorInput(req);
+  f.manager.state.receipts[req.messageId] = { request: req, nativeTargetThreadId: "thread",
+    nativeInputHash: sha("飞书：看这张图"), nativeTurnId: "native-turn", nativeDispatch: { status: "accepted" } };
+  const record = { type: "event_msg", payload: { type: "item_completed", thread_id: "thread", turn_id: "native-turn",
+    item: { type: "UserMessage", id: "native-image-user", content: [
+      { type: "text", text: "飞书：看这张图" }, { type: "local_image", path: "C:\\Images\\原图.png" }] } } };
+  const item = publicJournalItem(record, "thread", { includeInputs: true }).item;
+  await f.manager.observeNativeInput(f.session, { ...item, key: "native-turn/native-image-user", turnId: "native-turn" });
+  await f.output("已经看到原生图片"); await f.flush();
+  assert.equal(f.manager.state.receipts[req.messageId].transcriptNativeKey, "native-turn/native-image-user");
+  assert.equal(f.session.inputMessages["native-turn/native-image-user"], req.messageId);
+  assert.deepEqual(f.calls.map(call => call.text), ["已经看到原生图片"]);
+  const inputs = (await f.manager.messageJournal.list()).records.filter(r => r.direction === "input");
+  assert.equal(inputs.length, 1); assert.equal(inputs[0].source, "feishu");
+  assert.equal(f.nativeCalls.filter(call => call.name === "send_message_to_thread").length, 0);
+});
+
 test("two identical uncertain ingress writes stay uncertain and do not produce a third echo", async t => {
   const f = await fixture(t);
   for (const id of [randomUUID(), randomUUID()]) f.manager.state.receipts[id] = {

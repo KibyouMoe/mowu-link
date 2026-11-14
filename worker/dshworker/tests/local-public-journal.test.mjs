@@ -4,6 +4,7 @@ import { mkdtemp, writeFile, appendFile, mkdir, rm, readFile } from "node:fs/pro
 import path from "node:path";
 import os from "node:os";
 import { CompactJsonLines, LocalPublicJournal, publicJournalItem, journalTaskState } from "../local-public-journal.mjs";
+import { journalInputPaths } from "../interface/journal-items.mjs";
 
 const id = "01a17e53-76b1-7e63-bd85-2161ef913ce8";
 const event = (item, turn = "turn-1", thread = id) => ({ timestamp: "2026-10-28T00:00:00.000Z", type: "event_msg", payload: { type: "item_completed", thread_id: thread, turn_id: turn, item } });
@@ -42,6 +43,22 @@ async function fixture(t, options = {}) {
   await writeFile(file, line({ type: "session_meta", payload: { id, cwd: root } }));
   return { root, file, session, reader: new LocalPublicJournal(root, options), ctx: { turnId: "turn-1", epoch: 1 } };
 }
+
+test("real snake_case image inputs preserve caption correlation and allow later public replies", async t => {
+  for (const imagePath of ["/Users/Case Sensitive/图片.png", "C:\\Users\\Case Sensitive\\图片.png"]) {
+    const f = await fixture(t);
+    const input = event({ type: "UserMessage", id: "image-user", content: [
+      { type: "text", text: "飞书：看这张图" }, { type: "local_image", path: imagePath }] });
+    await appendFile(f.file, line(input) + line(text("图片后的公开回复")));
+    const batch = await f.reader.read(f.session, null, { ...f.ctx, includeInputs: true });
+    assert.equal(batch.caughtUp, true); assert.equal(batch.events.length, 2);
+    assert.equal(batch.events[0].item.text, "飞书：看这张图[图片输入]");
+    assert.equal(batch.events[0].item.nativeInputText, "飞书：看这张图");
+    assert.deepEqual(journalInputPaths(input, id), [imagePath]);
+    assert.equal(batch.events[1].item.text, "图片后的公开回复");
+    assert.equal((await f.reader.read(f.session, batch.checkpoint, { ...f.ctx, includeInputs: true })).events.length, 0);
+  }
+});
 
 test("compact parser handles escaped quotes, UTF-8 and every single-byte boundary", () => {
   const value = { escaped: '训练员😀\\\"\n', nested: [{ text: "ok" }] }, bytes = Buffer.from(line(value)), actual = [];

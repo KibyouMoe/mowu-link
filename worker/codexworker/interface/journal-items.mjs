@@ -18,6 +18,8 @@ export function publicJournalItem(record, threadId, { includeInputs = false, inc
     item = { type: "agentMessage", id: x.id, text, phase: x.phase, ...(publicQuestion ? { publicQuestion } : {}) };
   } else if (includeInputs && isNativeType(x.type, "UserMessage")) {
     item = { type: "userMessage", id: x.id, text: nativeContentText(x.content, { input: true }) };
+    if (x.content.some(part => isNativeType(part?.type, "Image") || isNativeType(part?.type, "LocalImage")))
+      item.nativeInputText = nativeContentText(x.content, { input: true, imagePlaceholder: "" });
   } else if (isNativeType(x.type, "ImageView") && typeof x.path === "string") item = { type: "imageView", id: x.id, path: x.path };
   else if (isNativeType(x.type, "Extension") && x.kind === "image_gen.generation" && x.status === "completed" && typeof x.savedPath === "string" && !x.failure) {
     item = { type: "imageGeneration", id: x.id, status: "completed", savedPath: x.savedPath };
