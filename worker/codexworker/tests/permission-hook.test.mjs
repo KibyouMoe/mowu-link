@@ -82,13 +82,13 @@ test("packaged hook CLI handles paths with spaces and returns only the host deci
   const state = path.join(root, "worker state"); await mkdir(state);
   const tokenFile = path.join(root, "test.token"), token = "isolated-hook-token-long-enough";
   await writeFile(tokenFile, token);
-  const calls = [];
+  const calls = []; let unavailable = false;
   const server = http.createServer(async (req, res) => {
     let text = ""; for await (const chunk of req) text += chunk;
     assert.equal(req.url, "/bridge/permissions/review");
     assert.equal(req.headers.authorization, "Bearer " + token);
     calls.push(JSON.parse(text));
-    res.writeHead(200, { "content-type": "application/json" });
+    res.writeHead(unavailable ? 503 : 200, { "content-type": "application/json" });
     res.end(JSON.stringify({ hookSpecificOutput: { hookEventName: "PermissionRequest", decision: { behavior: "allow" } } }));
   });
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
@@ -107,10 +107,13 @@ test("packaged hook CLI handles paths with spaces and returns only the host deci
   }
   assert.equal((await run()).hookSpecificOutput.decision.behavior, "allow");
   assert.deepEqual(calls, [event]);
+  unavailable = true;
+  assert.deepEqual(await run(), {}); assert.equal(calls.length, 2);
+  unavailable = false;
   await writeFile(configFile, JSON.stringify({ ...config, autoStart: false }));
-  assert.deepEqual(await run(), {}); assert.equal(calls.length, 1);
+  assert.deepEqual(await run(), {}); assert.equal(calls.length, 2);
   await writeFile(configFile, JSON.stringify({ ...config, host: "remote.example" }));
-  assert.equal((await run()).hookSpecificOutput.decision.behavior, "deny"); assert.equal(calls.length, 1);
+  assert.equal((await run()).hookSpecificOutput.decision.behavior, "deny"); assert.equal(calls.length, 2);
   const hooks = JSON.parse(await readFile(new URL("../hooks/hooks.json", import.meta.url), "utf8"));
   const manifest = JSON.parse(await readFile(new URL("../.codex-plugin/plugin.json", import.meta.url), "utf8"));
   assert.equal(manifest.hooks, "./hooks/hooks.json");

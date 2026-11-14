@@ -25,11 +25,17 @@ try {
         port < 1 || port > 65535) throw new Error("permission_endpoint_invalid");
     const token = (await readFile(config.tokenFile, "utf8")).trim();
     if (token.length < 24) throw new Error("permission_credential_invalid");
-    const response = await fetch(`http://127.0.0.1:${port}/bridge/permissions/review`, {
-      method: "POST", headers: { authorization: "Bearer " + token, "content-type": "application/json" },
-      body: JSON.stringify(event), signal: AbortSignal.timeout(560000) });
-    if (!response.ok) throw new Error("permission_review_unavailable");
-    result = await response.json();
+    let response;
+    try {
+      response = await fetch(`http://127.0.0.1:${port}/bridge/permissions/review`, {
+        method: "POST", headers: { authorization: "Bearer " + token, "content-type": "application/json" },
+        body: JSON.stringify(event), signal: AbortSignal.timeout(560000) });
+    } catch { /* A stopped plugin leaves native approval enforcement in place. */ }
+    if (!response || [404, 503].includes(response.status)) result = {};
+    else {
+      if (!response.ok) throw new Error("permission_review_unavailable");
+      result = await response.json();
+    }
   }
 } catch { result = denied(); }
 process.stdout.write(JSON.stringify(result) + "\n");

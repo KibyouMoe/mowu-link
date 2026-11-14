@@ -158,3 +158,13 @@
 - 真实普通互聊a19bdbb2-f317-4b9d-91a5-d91cd2a1f7f4由OguriCap发给TamamoCross；玉藻回信2fcd7d38-861b-4605-ac58-fc7b558f7a29，正文「玉藻互聊已通」，reply_to准确，两个路由记录均accepted并有acked_at。
 - Mac本机DSH全量与Codex router用例合计760 tests/752 pass/0 fail/8 skip，定向34/34，实际Codex分发包13/13，router自测130/130。原生CI43554537218四组success，Mac22/26各Codex733/725/0/8、DSH747/739/0/8、router130/130；Windows22/26各Codex733/717/0/16、DSH747/740/0/7。
 - Codex业务热更新bootstrap25539保持、generation5/business65216，SHA37f41d22604fc1f493415803a28429f17a4679dd8c88439672d0360812bd0e23，飞书/router在线、公开日志追平。接下来由玉藻协助正常退出重开Codex，验收前继续保留未完成状态。
+
+## 冷启动实机修复与原生审批 hook
+
+- 原目标已由训练员恢复active。玉藻正常重开Codex后，第一轮新Desktop70697最初ready，随后发现MCP退出使Mac监督器变成PPID1，原生通道报untrusted-process-ancestry。d669ac1增加父进程IPC关闭、真实祖先核验与存活MCP的交接复核，保留原生校验。
+- 通过正常plugin add安装后再次完整退出重开，新Desktop76512/2026-11-14 12:25:39，发现连接所属监督器先后正常结束，实际稳定监督器77575属于MCP76992，bootstrap77585/writer77586保持。飞书/router在线，公开日志追平，无未确认文本。重连通知om_x100b604a614864a4de3d2ed83f80087实际GET确认「小栗帽-重连」、原会话标题、未删除。d669ac1原生CI43556396405四组success。
+- 真实工单t-a2082d74d3关联原目标，router最终done，summary精确为ROUTER_DESKTOP_RECOVERY_d669ac1_OK，证据包含原thread与原生turn01a1d84d-ddbc-77c1-9800-8ffee0a127d6。
+- 64f1c2a正式提供PermissionRequest命令hook。仅已登记且仍活跃的原生回合进入鉴权loopback接口，再交给router现有策略；失效、失败和拒绝返回原生deny，其他聊天及autoStart=false继续正常客户端审批。DSH仍使用自身approval/request适配。命令摘要脱敏并记录哈希，任意MCP参数不入审批详情。
+- 新增hook/真实HTTP/实际脚本6/6，含路径空格与禁用行为，合并进度用例22/22；本机两侧全量1490/1474/0/16。实际分发包6/6，完整136文件逐字节匹配安装缓存，manifest显式声明hooks。当前客户端hook审核及真实原工具放行仍待验，工具内部elicitation覆盖也需实际证明。
+- 64f1c2a原生CI43558007454四组success。玉藻只读核对设置→编码→钩子，刷新后该构建仍未列出包内hook；现已在用户hooks.json仅登记同一个已安装脚本，保留原生信任审核流程。没有写入trust hash，也未信任待审定义。待确认原生列表后请训练员审核。
+- 停用插件或本机接口404/503/不可达时，脚本交回客户端原生权限流程；活跃manager收到router拒绝或故障仍返回deny。脚本回归6/6覆盖临时503场景。
