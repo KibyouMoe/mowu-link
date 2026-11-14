@@ -61,8 +61,8 @@ export async function launchDesktopSupervisor({ pluginRoot, stateDir, owner, env
   if (platform === "darwin") {
     const child = spawnImpl(process.execPath, [path.join(pluginRoot, "scripts", role === "watchdog" ? "run-script-watchdog.mjs" : "run-desktop-bridge.mjs"), "--desktop-pid", String(owner.pid)], {
       cwd: pluginRoot, env: { ...env, RUDOLF_BRIDGE_DESKTOP_STARTED_AT: owner.startedAt,
-        RUDOLF_BRIDGE_LIFETIME_LAUNCH: desktopLaunchMode(platform) }, detached: true, stdio: "ignore" });
-    await once(child, "spawn"); child.unref();
+        RUDOLF_BRIDGE_LIFETIME_LAUNCH: desktopLaunchMode(platform) }, detached: true, stdio: ["ignore", "ignore", "ignore", "ipc"] });
+    await once(child, "spawn"); child.unref(); child.channel?.unref();
     return { supervisorPid: child.pid, launchMode: desktopLaunchMode(platform) };
   }
   if (platform !== "win32") throw new Error("desktop_platform_unsupported");
@@ -180,7 +180,7 @@ export async function resolveDesktopOwner(pid, { readChain = processChain, pipeP
   return null;
 }
 
-export async function desktopSupervisorReady(stateDir, owner, { platform = process.platform, fetchImpl = fetch, alive = pid => {
+export async function desktopSupervisorReady(stateDir, owner, { platform = process.platform, fetchImpl = fetch, readChain = processChain, alive = pid => {
   try { process.kill(pid, 0); return true; } catch { return false; }
 } } = {}) {
   try {
@@ -189,6 +189,10 @@ export async function desktopSupervisorReady(stateDir, owner, { platform = proce
         status.version !== DESKTOP_BOOTSTRAP_VERSION || status.launchMode !== desktopLaunchMode(platform) ||
         !Number.isSafeInteger(status.supervisorPid) || status.supervisorPid < 1 || !alive(status.supervisorPid) ||
         !["desktop_lifetime_bridge_active", "observing_managed_writer"].includes(status.stage)) return false;
+    if (platform === "darwin") {
+      const actual = desktopOwner(await readChain(status.supervisorPid));
+      if (actual?.pid !== owner.pid || actual.startedAt !== owner.startedAt) return false;
+    }
     const config = JSON.parse(await readFile(path.join(stateDir, "desktop-config.local.json"), "utf8"));
     if ((config.host ?? "127.0.0.1") !== "127.0.0.1") return false;
     const token = (await readFile(config.tokenFile, "utf8")).trim();
@@ -284,12 +288,14 @@ export class DesktopLifecycle {
         this.report("desktop_owner_check_pending"); return;
       }
       if (!ownerAlive) { await this.close(); return; }
+      if (this.closed) return;
       if (!await this.enabled()) {
         if (this.child) { const owned = this.child; this.child = null; await this.stopChild(owned); }
         this.report("desktop_autostart_disabled"); return;
       }
       let live = null;
       try { live = await this.health(); } catch { /* Never retry native message writes. */ }
+      if (this.closed) return;
       if (live?.ready && live.integrationMode === "desktop-native") {
         this.unhealthySince = null;
         this.backoff = 1000;

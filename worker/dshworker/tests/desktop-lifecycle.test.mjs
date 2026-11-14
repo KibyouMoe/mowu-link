@@ -197,6 +197,40 @@ test("supervisor readiness rejects stale/dead metadata and requires matching aut
       "A healthy ordinary MCP writer does not prove Desktop lifetime ownership");
   } finally { await rm(stateDir, { recursive: true, force: true }); }
 });
+test("Mac readiness requires the supervisor to remain a real Desktop descendant", async () => {
+  const stateDir = await mkdtemp(path.join(os.tmpdir(), "codexworker-mac-ancestry-"));
+  try {
+    const tokenFile = path.join(stateDir, "test.token");
+    await writeFile(tokenFile, "isolated-desktop-supervisor-token-123456");
+    await writeFile(path.join(stateDir, "desktop-config.local.json"), JSON.stringify({ tokenFile }));
+    const mac = { pid: 700, startedAt: "Sat Nov 14 12:14:32 2026", name: "ChatGPT",
+      executable: "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT" };
+    await writeFile(path.join(stateDir, "desktop-lifecycle-status.json"), JSON.stringify({
+      desktopPid: mac.pid, desktopStartedAt: mac.startedAt, supervisorPid: 800, writerPid: 900,
+      stage: "desktop_lifetime_bridge_active", version: "0.3.0", launchMode: "desktop-owned" }));
+    let nativeProbes = 0;
+    const options = { platform: "darwin", alive: () => true,
+      readChain: async () => [{ pid: 800, name: "node", executable: "/runtime/node" }, mac],
+      fetchImpl: async () => { nativeProbes++; return { ok: true, json: async () => ({
+        ready: true, integrationMode: "desktop-native", name: "CodexWorker", integrations: { pid: 900 },
+        capabilities: { desktopStartupHandoff: { active: true }, businessHotReload: {
+          bootstrapVersion: "0.3.0", desktopLifetimeLaunchMode: "desktop-owned" } } }) }; } };
+    assert.equal(await desktopSupervisorReady(stateDir, mac, options), true);
+    assert.equal(await desktopSupervisorReady(stateDir, mac, { ...options, readChain: async () => [
+      { pid: 800, name: "node", executable: "/runtime/node" }, { pid: 1, name: "launchd" }] }), false);
+    assert.equal(nativeProbes, 1, "An orphan must be rejected before any native readiness traffic");
+  } finally { await rm(stateDir, { recursive: true, force: true }); }
+});
+
+test("a retired MCP cannot launch another adapter after its owner probe finishes", async () => {
+  let release, launches = 0;
+  const lifecycle = new DesktopLifecycle({ desktopAlive: () => new Promise(resolve => { release = resolve; }),
+    health: async () => null, launch: () => { launches++; }, stopChild: async () => {} });
+  const tick = lifecycle.tick();
+  await lifecycle.close(); release(true); await tick;
+  assert.equal(launches, 0);
+});
+
 test("Windows lifetime launcher is hidden, uses the approved process-only policy, and keeps the native pipe out of arguments", async () => {
   let launch;
   const result = await launchDesktopSupervisor({ pluginRoot: "C:/plugins/codexworker", owner,

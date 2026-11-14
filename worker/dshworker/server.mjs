@@ -9,14 +9,26 @@ const pluginRoot = path.dirname(fileURLToPath(import.meta.url));
 const stateDir = await resolveDesktopState(path.join(process.env.USERPROFILE ?? process.env.HOME ?? process.cwd(), ".codex", "state", "codexworker"));
 process.env.CODEXWORKER_STATE_DIR = stateDir;
 let initialized = false, ended = false, pending = 0, buffer = "", closing = false, lifecycleStartup;
+let refreshingLifecycle = false;
 const write = message => process.stdout.write(JSON.stringify(message) + "\n");
 const runtime = new PluginRuntime({ pluginRoot, stateDir, onToolsChanged: () => {
   if (initialized && !ended) write({ jsonrpc: "2.0", method: "notifications/tools/list_changed" });
 } });
 async function finish() {
   if (!ended || pending || closing) return;
-  closing = true; await lifecycleStartup; await runtime.close(); process.exit(0);
+  closing = true; clearInterval(lifecycleWatch); await lifecycleStartup; await runtime.close(); process.exit(0);
 }
+// A discovery MCP may retire after handing off its first writer. A live MCP
+// rechecks ownership and takes over only through the normal Desktop launcher.
+const lifecycleWatch = setInterval(() => {
+  if (!initialized || ended || refreshingLifecycle || process.platform !== "darwin" ||
+      process.env.RUDOLF_BRIDGE_LIFECYCLE_CHILD === "1") return;
+  refreshingLifecycle = true;
+  lifecycleStartup = null;
+  lifecycleStartup = ensureDesktopSupervisor({ pluginRoot, stateDir }).catch(() => false)
+    .finally(() => { refreshingLifecycle = false; });
+}, 5000);
+lifecycleWatch.unref();
 async function dispatch(line) {
   pending++;
   try {

@@ -56,6 +56,10 @@ const log = value => {
 const lifecycle = new DesktopLifecycle({
   enabled: async () => (await readDesktopSettings(stateRoot)).autoStart,
   desktopAlive: async () => {
+    if (process.platform === "darwin") {
+      const ancestor = desktopOwner(await processChain(process.pid));
+      if (ancestor?.pid !== desktopPid || ancestor.startedAt !== owner.startedAt) return false;
+    }
     const now = desktopOwner(await processChain(desktopPid));
     return now?.pid === desktopPid && now.startedAt === owner.startedAt && now.executable === owner.executable;
   },
@@ -100,4 +104,7 @@ const watchdog = setInterval(() => { void lifecycle.tick().then(() => {
 }).catch(() => { log({ stage: "supervisor_tick_failed" }); }); }, 2000);
 process.on("SIGINT", () => { void shutdown(); });
 process.on("SIGTERM", () => { void shutdown(); });
+// The Mac native pipe authorizes a real Desktop descendant. Retiring an
+// inventory MCP also retires its supervisor before another caller takes over.
+process.on("disconnect", () => { void shutdown(); });
 await lifecycle.tick().catch(() => { log({ stage: "supervisor_tick_failed" }); });

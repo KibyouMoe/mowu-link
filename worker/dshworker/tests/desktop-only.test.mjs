@@ -246,7 +246,7 @@ for (const role of ["bridge", "watchdog"]) {
       } });
     assert.equal(invocation.command, process.execPath);
     assert.deepEqual(invocation.args, [path.join(pluginRoot, "scripts", role === "bridge" ? "run-desktop-bridge.mjs" : "run-script-watchdog.mjs"), "--desktop-pid", "700"]);
-    assert.equal(invocation.options.cwd, pluginRoot); assert.equal(invocation.options.detached, true); assert.equal(invocation.options.stdio, "ignore");
+    assert.equal(invocation.options.cwd, pluginRoot); assert.equal(invocation.options.detached, true); assert.deepEqual(invocation.options.stdio, ["ignore", "ignore", "ignore", "ipc"]);
     assert.deepEqual(invocation.options.env, { ...env, RUDOLF_BRIDGE_DESKTOP_STARTED_AT: owners.darwin.startedAt, RUDOLF_BRIDGE_LIFETIME_LAUNCH: "desktop-owned" });
     assert.ok(!JSON.stringify(invocation.args).includes(env.CODEX_APP_TOOLS_PIPE_PATH));
     assert.deepEqual(result, { supervisorPid: 800, launchMode: "desktop-owned" });
