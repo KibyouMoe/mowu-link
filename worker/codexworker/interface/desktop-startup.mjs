@@ -147,8 +147,8 @@ export async function ensureDesktopStartup({ stateDir, env = process.env, platfo
   }
 }
 
-// AppKit requests ordinary termination, waits for the app to finish, and never
-// force-kills a host which declines or needs the user's attention.
+// AppKit requests ordinary termination. Its cached terminated property can
+// remain false after the process exits; the helper observes the actual lifetime.
 const quitScript = `ObjC.import('AppKit');
 function run(args) {
   var pid = Number(args[0]), appPath = args[1];
@@ -156,16 +156,11 @@ function run(args) {
   if (!app || app.isNil()) return 'already-exited';
   if (ObjC.unwrap(app.bundleURL.path) !== appPath) throw Error('desktop_owner_changed');
   if (!app.terminate) throw Error('desktop_normal_quit_declined');
-  var until = Date.now() + 30000;
-  while (!app.terminated && Date.now() < until) {
-    $.NSRunLoop.currentRunLoop.runUntilDate($.NSDate.dateWithTimeIntervalSinceNow(0.1));
-  }
-  if (!app.terminated) throw Error('desktop_normal_quit_pending');
-  return 'terminated';
+  return 'requested';
 }`;
 
 export async function reopenDesktop(file, { platform = process.platform, readChain = processChain,
-  execute = exec } = {}) {
+  execute = exec, now = Date.now, delay = ms => new Promise(resolve => setTimeout(resolve, ms)) } = {}) {
   if (platform !== "darwin") throw Error("desktop_reopen_platform_unsupported");
   let record = await privateRecord(file);
   if (record.version !== 1 || record.status !== "scheduled" || !bootPattern.test(record.boot ?? "") ||
@@ -194,15 +189,23 @@ export async function reopenDesktop(file, { platform = process.platform, readCha
     operation = "normal_quit";
     await execute("/usr/bin/osascript", ["-l", "JavaScript", "-e", quitScript,
       String(record.desktopPid), record.appPath], { timeout: 35000, maxBuffer: 65536 });
+    operation = "wait_desktop_exit";
+    let deadline = now() + 30000;
+    for (;;) {
+      const desktop = (await readChain(record.desktopPid))[0];
+      if (desktop?.pid !== record.desktopPid || desktop.startedAt !== record.desktopStartedAt) break;
+      if (now() >= deadline) throw Error("desktop_normal_quit_pending");
+      await delay(200);
+    }
     // The host may exit before its native backend releases the original chat.
     // Verify that exact process lifetime has ended before reopening Desktop.
-    const deadline = Date.now() + 15000;
+    deadline = now() + 15000;
     operation = "wait_native_exit";
     for (;;) {
       const engine = (await readChain(record.enginePid))[0];
       if (engine?.pid !== record.enginePid || engine.startedAt !== record.engineStartedAt) break;
-      if (Date.now() >= deadline) throw Error("desktop_native_engine_still_exiting");
-      await new Promise(resolve => setTimeout(resolve, 200));
+      if (now() >= deadline) throw Error("desktop_native_engine_still_exiting");
+      await delay(200);
     }
     operation = "open_desktop";
     await execute("/usr/bin/open", ["-a", record.appPath, "--env", "CODEX_CLI_PATH=" + record.launcher,

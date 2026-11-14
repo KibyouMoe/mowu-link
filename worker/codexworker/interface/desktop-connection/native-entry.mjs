@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { desktopOwner, processChain, resolveDesktopState, stopOwnedChild } from "../../desktop-lifecycle.mjs";
 import { runDesktopConnection, runDesktopServer } from "./entry.mjs";
 import { createNativeInput } from "./native-input.mjs";
+import { normalizeDesktopEnvironment } from "../desktop-environment.mjs";
 
 export async function requireNativeDesktopParent({ platform = process.platform, readChain = processChain } = {}) {
   if (!["darwin", "win32"].includes(platform)) throw new Error("desktop_connection_platform_unsupported");
@@ -18,6 +19,7 @@ export async function requireNativeDesktopParent({ platform = process.platform, 
 }
 
 export async function loadNativeConnection(env = process.env) {
+  env = normalizeDesktopEnvironment({ ...env });
   const home = env.CODEX_HOME || path.join(env.USERPROFILE || os.homedir(), ".codex");
   const stateDir = await resolveDesktopState(path.join(home, "state/codexworker"), env);
   const file = path.join(stateDir, "desktop-native-connection.json");
@@ -34,6 +36,7 @@ export async function loadNativeConnection(env = process.env) {
 export async function runNativeConnection(argv, { env = process.env, spawnImpl = spawn,
   verifyParent = requireNativeDesktopParent, load = loadNativeConnection, review, createInput = createNativeInput,
   stdin = process.stdin, stdout = process.stdout, stderr = process.stderr } = {}) {
+  env = normalizeDesktopEnvironment({ ...env });
   let owner, input;
   try {
     return await runDesktopConnection(argv, { env, spawnImpl,

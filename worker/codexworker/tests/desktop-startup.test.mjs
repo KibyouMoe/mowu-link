@@ -20,7 +20,7 @@ async function fixture(t) {
   const creator = { pid: 698, startedAt: "original MCP lifetime", executable: "/native/node" };
   let engineExited = false;
   const readChain = async pid => pid === 699 ? engineExited ? [] : [engine, owner]
-    : pid === 700 ? [owner] : [creator, engine, owner];
+    : pid === 700 ? engineExited ? [] : [owner] : [creator, engine, owner];
   const env = { CODEXWORKER_NATIVE_BOOTSTRAP: "1", CODEX_APP_TOOLS_PIPE_PATH: "test-native-pipe" };
   const file = path.join(stateDir, "native-startup", boot + "-v1.json"), installs = [], reopens = [];
   const launcher = path.join(stateDir, "desktop-connection", "a".repeat(64), "codex");
@@ -137,6 +137,18 @@ test("a late launch error cannot overwrite the new host's verified native restor
   assert.equal((await f.run(live)).nativeInputReady, true); assert.equal(f.reopens.length, 1);
 });
 
+test("normal reopening observes actual process exit and stops if the host stays alive", async t => {
+  const f = await fixture(t); await f.run(); let clock = 0, quits = 0;
+  await assert.rejects(reopenDesktop(f.file, { platform: "darwin", readChain: f.options.readChain,
+    now: () => clock, delay: async ms => { clock += ms; }, execute: async command => {
+      assert.equal(command, "/usr/bin/osascript"); quits++;
+      return { stdout: "requested" };
+    } }), /desktop_normal_quit_pending/);
+  assert.equal(quits, 1);
+  const outcome = await f.outcome();
+  assert.equal(outcome.operation, "wait_desktop_exit"); assert.equal(outcome.status, "failed");
+});
+
 test("disabling during setup or before normal reopen cancels the host operation", async t => {
   const f = await fixture(t);
   const result = await f.run({ install: async () => {
@@ -158,10 +170,10 @@ test("the actual AppKit script requests normal quit and never force-terminates t
     execute: async (command, args) => { if (command === "/usr/bin/osascript") script = args[3]; f.engineExited(); } });
   let quit = 0;
   const app = { isNil: () => false, bundleURL: { path: "/Applications/ChatGPT.app" },
-    get terminate() { quit++; this.terminated = true; return true; }, terminated: false };
+    get terminate() { quit++; return true; }, terminated: false };
   const sandbox = { ObjC: Object.assign(() => {}, { import() {}, unwrap: x => x }),
     $: { NSRunningApplication: { runningApplicationWithProcessIdentifier: () => app } } };
-  assert.equal(vm.runInNewContext(script + '\nrun(["700", "/Applications/ChatGPT.app"])', sandbox), "terminated");
+  assert.equal(vm.runInNewContext(script + '\nrun(["700", "/Applications/ChatGPT.app"])', sandbox), "requested");
   assert.equal(quit, 1); assert.equal(script.includes("forceTerminate"), false);
 });
 
@@ -183,6 +195,10 @@ test("native settings follow CODEX_HOME and a relocated existing Worker state on
   await writeFile(path.join(defaultState, "worker-instance.local.json"), JSON.stringify({ stateDir: f.stateDir }));
   const settings = await loadNativeConnection({ CODEX_HOME: home });
   assert.equal(settings.version, 1); assert.equal(settings.realCli, "/original/native/codex");
+  const inherited = await loadNativeConnection({ CODEX_HOME: home,
+    CODEXWORKER_NATIVE_TRANSPORT: "dsh-inprocess", CODEXWORKER_STATE_DIR: "/foreign/dsh-state",
+    RUDOLF_BRIDGE_LIFECYCLE_CHILD: "1" });
+  assert.deepEqual(inherited, settings);
 });
 
 test("Mac immutable preparation stays in the relocated Worker state", { skip: process.platform !== "darwin" }, async t => {

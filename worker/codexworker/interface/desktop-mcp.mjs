@@ -4,12 +4,14 @@ import { spawn } from "node:child_process";
 import { realpath } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { normalizeDesktopEnvironment } from "./desktop-environment.mjs";
 
 const serverUrl = new URL("../server.mjs", import.meta.url);
 
 export async function launchDesktopMcp({ env = process.env, platform = process.platform,
   currentExecutable = process.execPath, canonical = realpath, replaceProcess = process.execve,
   spawnImpl = spawn, loadServer = () => import(serverUrl.href) } = {}) {
+  normalizeDesktopEnvironment(env);
   const supplied = env.CODEX_MCP_NODE_PATH?.trim();
   if (!supplied) {
     // Preserve older hosts and isolated diagnostics without a runtime hint.

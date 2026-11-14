@@ -17,6 +17,28 @@ test("Mac replaces the launcher with the host-provided runtime before loading bu
 });
 
 for (const platform of ["darwin", "win32"]) {
+  test(platform + ": a Desktop opened by DSH discards the other engine's state and child permissions", async () => {
+    const env = { CODEXWORKER_NATIVE_TRANSPORT: "dsh-inprocess", CODEXWORKER_STATE_DIR: "/foreign/dsh-state",
+      RUDOLF_BRIDGE_LIFECYCLE_CHILD: "1", RUDOLF_BRIDGE_LIFECYCLE_READY: "1",
+      RUDOLF_BRIDGE_DESKTOP_STARTED_AT: "foreign lifetime", RUDOLF_BRIDGE_LIFETIME_LAUNCH: "foreign",
+      RUDOLF_BRIDGE_RUNTIME_HOST_PID: "123", CODEXWORKER_DESKTOP_PID: "124",
+      CODEXWORKER_NATIVE_IMAGE_INPUT: "1", CODEXWORKER_NATIVE_QUESTION_INPUT: "1",
+      CODEXWORKER_NATIVE_INPUT_DESCRIPTOR: "/foreign/descriptor", CODEX_HOME: "/original/codex-home",
+      CODEX_APP_TOOLS_PIPE_PATH: "actual-desktop-pipe" };
+    await launchDesktopMcp({ platform, env, loadServer: async () => {
+      assert.deepEqual(env, { CODEX_HOME: "/original/codex-home", CODEX_APP_TOOLS_PIPE_PATH: "actual-desktop-pipe" });
+    } });
+  });
+
+  test(platform + ": the Desktop keeps its explicitly configured own state while resetting inherited lifecycle flags", async () => {
+    const env = { CODEXWORKER_STATE_DIR: "/custom/codex-state", CODEXWORKER_NATIVE_TRANSPORT: "desktop-pipe",
+      RUDOLF_BRIDGE_LIFECYCLE_CHILD: "1", CODEXWORKER_NATIVE_INPUT_DESCRIPTOR: "/own/descriptor" };
+    await launchDesktopMcp({ platform, env, loadServer: async () => {
+      assert.deepEqual(env, { CODEXWORKER_STATE_DIR: "/custom/codex-state", CODEXWORKER_NATIVE_TRANSPORT: "desktop-pipe",
+        CODEXWORKER_NATIVE_INPUT_DESCRIPTOR: "/own/descriptor" });
+    } });
+  });
+
   test(platform + ": a matching host runtime loads MCP exactly once", async () => {
     let loaded = 0;
     const executable = platform === "win32" ? "C:\\Program Files\\Codex\\node.exe" : "/Desktop/node";

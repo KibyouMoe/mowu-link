@@ -130,8 +130,14 @@ test("Desktop native wrapper preserves its exact argv, environment and owned-chi
     "--native-startup-option", "future-value", "-c", "provider=native-toml-value"];
   let received = ""; child.stdin.on("data", bytes => { received += bytes; });
   const done = runNativeConnection(argv, { stdin: input, stdout: output, stderr: errors,
-    verifyParent: async () => ({}), load: async () => ({ realCli: "native-desktop-cli" }),
-    env: { CODEX_CLI_PATH: "wrapper", KEEP: "same-value" }, spawnImpl: (file, args, options) => {
+    verifyParent: async () => ({}),
+    env: { CODEX_CLI_PATH: "wrapper", KEEP: "same-value", CODEXWORKER_NATIVE_TRANSPORT: "dsh-inprocess",
+      CODEXWORKER_STATE_DIR: "/foreign/dsh-state", RUDOLF_BRIDGE_LIFECYCLE_CHILD: "1",
+      RUDOLF_BRIDGE_LIFECYCLE_READY: "1", CODEXWORKER_NATIVE_INPUT_DESCRIPTOR: "/foreign/descriptor" },
+    load: async env => {
+      assert.deepEqual(env, { CODEX_CLI_PATH: "wrapper", KEEP: "same-value" });
+      return { realCli: "native-desktop-cli" };
+    }, spawnImpl: (file, args, options) => {
       assert.equal(file, "native-desktop-cli"); assert.deepEqual(args, argv);
       assert.deepEqual(options.env, { KEEP: "same-value" });
       setImmediate(() => child.emit("spawn")); return child;
