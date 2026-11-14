@@ -180,6 +180,48 @@ test('an empty terminal list cannot confirm a command that is still in progress'
   assert.deepEqual(result.commands, [{ itemId: 'unlisted-tool', processId: 'native-session', status: 'inProgress' }]);
 });
 
+test('live command start events authorize exact cleanup before command items reach history', async t => {
+  let running = true;
+  const f = await fixture(t, { cancel: true, active: true, respond: ({ method, params }) => {
+    if (method === 'thread/backgroundTerminals/list') return { result: { data: [
+      ...(running ? [{ itemId: 'live-command', processId: 'live-session' }] : []),
+      { itemId: 'another-turn-command', processId: 'untouched-session' }] } };
+    if (method === 'thread/backgroundTerminals/terminate') {
+      assert.equal(params.processId, 'live-session'); running = false;
+      f.controller.server({ method: 'item/completed', params: { threadId: f.request.threadId,
+        turnId: 'active-turn', item: { id: 'live-command', type: 'commandExecution', status: 'failed' } } });
+      return { result: { terminated: true } };
+    }
+  } });
+  f.controller.client({ method: 'initialized' });
+  for (const [turnId, id, processId] of [['active-turn', 'live-command', 'live-session'],
+    ['another-turn', 'another-turn-command', 'untouched-session']]) {
+    assert.equal(f.controller.server({ method: 'item/started', params: { threadId: f.request.threadId,
+      turnId, item: { id, type: 'commandExecution', processId } } }), true);
+  }
+  const result = JSON.parse((await f.send()).contentItems[0].text);
+  assert.equal(result.executionStopped, true);
+  assert.equal(result.commandItems, 1);
+  assert.equal(result.pendingCommands, 0);
+  assert.equal(result.observedTerminals, 1);
+  assert.deepEqual(result.itemTypes, { userMessage: 1 });
+  assert.equal(f.calls.filter(call => call.method === 'thread/backgroundTerminals/terminate').length, 1);
+});
+
+test('an interrupted turn retains live command ownership until the command completes', async t => {
+  const f = await fixture(t, { cancel: true, active: true });
+  f.controller.client({ method: 'initialized' });
+  f.controller.server({ method: 'item/started', params: { threadId: f.request.threadId,
+    turnId: 'active-turn', item: { id: 'unlisted-command', type: 'commandExecution', processId: 'running-session' } } });
+  assert.equal(JSON.parse((await f.send()).contentItems[0].text).state, 'cancelling');
+  const retry = JSON.parse((await f.send()).contentItems[0].text);
+  assert.equal(retry.state, 'cancelling');
+  assert.equal(retry.pendingCommands, 1);
+  f.controller.server({ method: 'item/completed', params: { threadId: f.request.threadId,
+    turnId: 'active-turn', item: { id: 'unlisted-command', type: 'commandExecution', status: 'completed' } } });
+  assert.equal(JSON.parse((await f.send()).contentItems[0].text).executionStopped, true);
+});
+
 test('unavailable native item history cannot serve as proof of stopped execution', async t => {
   const f = await fixture(t, { cancel: true, active: true, respond: ({ method }) => {
     if (method === 'thread/items/list') return { result: { data: [] } };

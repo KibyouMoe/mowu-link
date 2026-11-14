@@ -17,6 +17,7 @@ export async function createNativeInput({ stateDir, owner, send, timeoutMs = 300
   const token = randomBytes(32).toString("hex");
   const descriptorFile = path.join(stateDir, "desktop-native-input.local.json");
   const pending = new Map(), activeMessages = new Map(), threads = new Map(), sockets = new Set();
+  const runningCommands = new Map();
   let initialized = false, initializeId, closed = false;
   const directory = process.platform === "win32" ? null : await mkdtemp(path.join("/tmp", "cw-input-"));
   if (directory) await chmod(directory, 0o700);
@@ -219,9 +220,11 @@ export async function createNativeInput({ stateDir, owner, send, timeoutMs = 300
       return terminals;
     }
     const commands = new Map();
+    const commandKey = JSON.stringify([request.threadId, request.turnId]);
     let itemTypes;
     async function readCommands() {
       itemTypes = {};
+      for (const [id, item] of runningCommands.get(commandKey) ?? []) commands.set(id, item);
       for await (const entries of pages("thread/items/list", { threadId: request.threadId,
         turnId: request.turnId, limit: 100, deferOutput: { commandExecution: true, mcpToolCall: true } })) {
         for (const entry of entries) {
@@ -232,10 +235,13 @@ export async function createNativeInput({ stateDir, owner, send, timeoutMs = 300
           if (item.type === "commandExecution") {
             if (!["inProgress", "completed", "failed", "declined"].includes(item.status))
               invalid("native_cancel_command_state_invalid");
-            commands.set(item.id, item);
+            const observed = commands.get(item.id);
+            if (!observed) commands.set(item.id, item);
+            else if (observed.status === "inProgress") Object.assign(observed, item);
           }
         }
       }
+      for (const [id, item] of runningCommands.get(commandKey) ?? []) commands.set(id, item);
       if (Object.keys(itemTypes).length === 0) invalid("native_cancel_items_unavailable");
     }
     let turn;
@@ -306,6 +312,24 @@ export async function createNativeInput({ stateDir, owner, send, timeoutMs = 300
       if (message?.method === "initialized") initialized = true;
     },
     server(message) {
+      const params = message?.params, item = params?.item;
+      if (["item/started", "item/completed"].includes(message?.method) && item?.type === "commandExecution" &&
+          typeof params.threadId === "string" && typeof params.turnId === "string" && typeof item.id === "string") {
+        // Started command items are live notifications and may be absent from
+        // paginated history until completion. Keep only outstanding execution
+        // metadata, including after a model-turn interrupt, until its own end.
+        const key = JSON.stringify([params.threadId, params.turnId]);
+        const commands = runningCommands.get(key) ?? new Map();
+        if (message.method === "item/started") {
+          commands.set(item.id, { id: item.id, type: item.type, status: "inProgress", processId: item.processId ?? null });
+          runningCommands.set(key, commands);
+        } else {
+          const observed = commands.get(item.id);
+          if (observed) Object.assign(observed, { status: item.status });
+          commands.delete(item.id);
+          if (!commands.size) runningCommands.delete(key);
+        }
+      }
       if (initializeId !== undefined && message?.id === initializeId && message.result) initialized = true;
       const call = pending.get(message?.id); if (!call) return true;
       pending.delete(message.id); clearTimeout(call.timer);
@@ -317,7 +341,7 @@ export async function createNativeInput({ stateDir, owner, send, timeoutMs = 300
     async close() {
       if (closed) return; closed = true;
       for (const call of pending.values()) { clearTimeout(call.timer); call.reject(new Error("native_input_closed")); }
-      pending.clear(); for (const socket of sockets) socket.destroy();
+      pending.clear(); runningCommands.clear(); for (const socket of sockets) socket.destroy();
       await new Promise(resolve => server.close(resolve));
       await Promise.allSettled([...activeMessages.values()].map(value => value.promise));
       try { const value = JSON.parse(await readFile(descriptorFile, "utf8")); if (value.token === token) await unlink(descriptorFile); }
