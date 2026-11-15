@@ -16,7 +16,7 @@
 
 | # | 内容 | 备注 |
 |---|---|---|
-| 1 | P0 复验：单选项提问 + 溪流 HTTP 回答 + 弹窗是否消 | 已发现 reason=source_task_ended / recipient_mismatch |
+| 1 | **提问通道（训练员 22:37 定义四条目标）** | 见下「提问通道规格」 |
 | 2 | DSH 恢复故障：user/message 里 role=system（seq8432，7 条同型） | 写入端 + 读取端容错 + 历史对账 |
 | 3 | 入站路径收尾：Codex 侧显示验收 + 双单分别回执 | 接 197b8b1 / 82516af |
 | 4 | worker 技能 `mowulink-worker-skill` | 零上下文可用（SKILL.md 515 行，需先判是否要瘦身） |
@@ -24,6 +24,18 @@
 | 6 | Codex 权限模式随插件同步 | 装到别的 Codex 上缺权限模式 |
 | 7 | 分支待合清单 | 等训练员说"合吧"再合 main |
 | 8 | 最低优先：飞书卡片「输出/回复」两态混用 | 有空再修 |
+
+## 提问通道规格（训练员 22:37 定，四条目标）
+
+1. worker 可以**正常向溪流提问**（不再过期、不再只能自己答）
+2. 训练员在**飞书同时看到**这条提问（含题面与选项）
+3. 溪流能收到并能：**选选项 / 跳过 / 用自己的话回答**（三种都给）
+4. **DSH 也要做到同样四条**，不许只做 Codex
+
+已确认的三个现场（都在这单里修）：
+- `reason=source_task_ended`：任务一结束，它挂的提问立刻过期
+- `question_recipient_mismatch`：`Only the bound originating agent/task may answer this question` —— 溪流无资格回答
+- 客户端原生提问窗口**不消失**：答完之后弹窗还挂着
 
 ## 待办（不定时，跟队列无关）
 
