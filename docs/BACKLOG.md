@@ -106,6 +106,10 @@ router 现有接口只有读取（`/chat/log`、`/chat/{worker}/messages`、`/ch
    - 排查顺序：DSH 发图时事件里图片以什么形式流出（路径 / base64 / attachment id）→ 飞书发送那段是否把它降级成文本或丢弃
    - 验收：飞书收到独立媒体消息（单条 MEDIA），回执带 message_id，图片 SHA256 与源文件一致
    - 交付顺序：先 B（DSH→飞书）通了，再做 C（DSH→溪流）与 A（飞书→DSH）
+   - ✅ **2026-11-15 15:53 三向全部验收通过（训练员实机确认看到图）**：
+     B 生产部署后独立媒体消息 `om_x100b60a202dcf8a4cef5bf6e88e47ef`，5975 字节 / SHA256 `1ba24ed4…` 与源一致，
+     `deliveryType=image`、`duplicate=false`；C 3305 字节 `fae67cd7…` 一致；A 13:10:45 入站 seq=8283 原生 image attachment。
+     遗留：15:48 插件日志出现 `business_port_busy`（第二个连接抢占），待查但未影响投递。
 4. **查 DSH 提问时的互相抄送**：提问事件在 DSH 侧出现重复投递/抄送（同一问题被发到多处），需查清来源并收敛。
 
 5. **摸清 Worker 的模型选择机制**（训练员 10:01 追加）：确认 Worker 实际用的是哪个模型、由什么决定（是跟会话走、还是跟进程配置走），并写清以下四件事：
