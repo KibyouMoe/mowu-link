@@ -3,6 +3,7 @@ import net from "node:net";
 
 export async function sendNativeInput(args, { env = process.env, timeoutMs = 30000 } = {}) {
   const flag = args.operation === "chat" ? "CODEXWORKER_NATIVE_CHAT_INPUT"
+    : args.operation === "modelSettings" ? "CODEXWORKER_NATIVE_MODEL_SETTINGS"
     : ["message", "cancel"].includes(args.operation) ? "CODEXWORKER_NATIVE_TASK_INPUT"
     : ["questionReply", "questionClose"].includes(args.operation) ? "CODEXWORKER_NATIVE_QUESTION_INPUT" : "CODEXWORKER_NATIVE_IMAGE_INPUT";
   if (env[flag] !== "1" || !env.CODEXWORKER_NATIVE_INPUT_DESCRIPTOR)
@@ -31,7 +32,8 @@ export async function sendNativeInput(args, { env = process.env, timeoutMs = 300
     socket.once("close", () => finish(new Error("native_image_outcome_unknown")));
     socket.on("data", chunk => {
       bytes = Buffer.concat([bytes, chunk]);
-      if (bytes.length > 65536) { finish(new Error("native_image_response_invalid")); return; }
+      const maximum = args.operation === "modelSettings" ? 1024 * 1024 : 65536;
+      if (bytes.length > maximum) { finish(new Error("native_image_response_invalid")); return; }
       const end = bytes.indexOf(10); if (end < 0) return;
       try {
         const response = JSON.parse(bytes.subarray(0, end).toString("utf8"));

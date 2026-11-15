@@ -8,6 +8,10 @@ export const BRIDGE_HELP = `**会话**
 /compact — 当前回合结束后，在原会话压缩上下文
 /new — 新建会话
 /fork — 在当前任务空闲时分叉
+/model — 列出可用模型，每页10个，支持 next / prev
+/model 名称 — 同时更新当前会话与 Worker 默认模型
+/effort — 列出当前模型支持的思考力度，支持 next / prev
+/effort 力度 — 同时更新当前会话与 Worker 默认思考力度
 
 **目标模式（当前 Codex 会话）**
 /goal 具体目标 — 要求 Codex 设置原生目标并执行

@@ -22,6 +22,7 @@ for (const platform of ["darwin", "win32"]) {
     const manifest = JSON.parse(await readFile(new URL("../.mcp.json", import.meta.url), "utf8"));
     const server = manifest.mcpServers.codexworker;
     assert.ok(server.env_vars.includes("CODEXWORKER_NATIVE_TASK_INPUT"));
+    assert.ok(server.env_vars.includes("CODEXWORKER_NATIVE_MODEL_SETTINGS"));
     const parent = { CODEXWORKER_NATIVE_TRANSPORT: "dsh-inprocess", CODEXWORKER_STATE_DIR: "/foreign/dsh-state",
       CODEX_APP_TOOLS_PIPE_PATH: "actual-desktop-pipe" };
     const env = { ...Object.fromEntries(Object.entries(parent).filter(([key]) => server.env_vars.includes(key))), ...server.env };
@@ -39,6 +40,7 @@ for (const platform of ["darwin", "win32"]) {
       RUDOLF_BRIDGE_DESKTOP_STARTED_AT: "foreign lifetime", RUDOLF_BRIDGE_LIFETIME_LAUNCH: "foreign",
       RUDOLF_BRIDGE_RUNTIME_HOST_PID: "123", CODEXWORKER_DESKTOP_PID: "124",
       CODEXWORKER_NATIVE_IMAGE_INPUT: "1", CODEXWORKER_NATIVE_QUESTION_INPUT: "1", CODEXWORKER_NATIVE_TASK_INPUT: "1",
+      CODEXWORKER_NATIVE_MODEL_SETTINGS: "1",
       CODEXWORKER_NATIVE_INPUT_DESCRIPTOR: "/foreign/descriptor", CODEX_HOME: "/original/codex-home",
       CODEX_APP_TOOLS_PIPE_PATH: "actual-desktop-pipe" };
     await launchDesktopMcp({ platform, env, loadServer: async () => {

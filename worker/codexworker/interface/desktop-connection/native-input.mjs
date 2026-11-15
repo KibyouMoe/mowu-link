@@ -5,6 +5,7 @@ import { chmod, lstat, mkdir, mkdtemp, open, readFile, realpath, rename, rm, unl
 import net from "node:net";
 import path from "node:path";
 import { nativeQuestionReply, nativeQuestionClosure } from "../public-questions.mjs";
+import { modelSettings } from "./model-settings.mjs";
 
 const MAX_REQUEST_BYTES = 128 * 1024;
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -197,6 +198,7 @@ export async function createNativeInput({ stateDir, owner, send, timeoutMs = 300
     if (closed || !initialized) invalid("native_input_not_ready");
     if (!equalToken(request.token, token)) invalid("native_input_unauthorized");
     if (!uuid.test(request.messageId ?? "")) invalid("native_image_request_invalid");
+    if (request.operation === "modelSettings") return modelSettings({ rpc, stateDir, request });
     if (request.operation === "cancel") return cancel(request);
     const closure = request.operation === "questionClose";
     if (closure) {
@@ -359,7 +361,7 @@ export async function createNativeInput({ stateDir, owner, send, timeoutMs = 300
   }
 
   return {
-    env: { CODEXWORKER_NATIVE_IMAGE_INPUT: "1", CODEXWORKER_NATIVE_QUESTION_INPUT: "1", CODEXWORKER_NATIVE_TASK_INPUT: "1", CODEXWORKER_NATIVE_CHAT_INPUT: "1",
+    env: { CODEXWORKER_NATIVE_IMAGE_INPUT: "1", CODEXWORKER_NATIVE_QUESTION_INPUT: "1", CODEXWORKER_NATIVE_TASK_INPUT: "1", CODEXWORKER_NATIVE_CHAT_INPUT: "1", CODEXWORKER_NATIVE_MODEL_SETTINGS: "1",
       CODEXWORKER_NATIVE_INPUT_DESCRIPTOR: descriptorFile },
     client(message) {
       if (message?.method === "initialize") initializeId = message.id;

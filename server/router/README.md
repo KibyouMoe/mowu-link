@@ -1,5 +1,20 @@
 # mowu-router 0.4.0
 
+## 模型与思考力度命令
+
+`POST /commands` 使用 `X-Router-Token`，JSON 包含 `worker`、稳定 UUID `message_id`、
+当前 `thread_id` 与原文 `text`。router 统一解析 `/model`、`/effort`，通过既有 SSE
+`worker_command` 转发，响应由 `/commands/responses` 按 request_id、worker 和连接代次关联。
+该控制通道不创建工单。
+
+不带参数列目录，每页 10 条。`next`、`prev`、`page N` 翻页，其他参数按原生模型名或力度解析。
+列表标记 `current`、`config`、`current,config`。设置命令读回原生会话后提交 worker 默认配置，
+相同消息标识重试返回原回执。
+
+各 worker 的 `stateDir/model-settings.local.json` 保存默认模型与默认力度。仅飞书 `/new`
+使用它创建新会话。已有会话使用自己的原生设置。目录、力度与当前设置由各引擎适配层提供。
+支持情况可查 worker health 的 `capabilities.modelSettings`。
+
 ## Worker 互聊与项目工单
 
 普通聊天不建任务：`POST /messages`，请求包含稳定 UUID `message_id`、已注册的精确

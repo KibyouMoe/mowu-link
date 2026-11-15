@@ -19,6 +19,7 @@ export const capabilities = {
   get questionInput() { return process.env.CODEXWORKER_NATIVE_QUESTION_INPUT === "1"; },
   get taskInput() { return process.env.CODEXWORKER_NATIVE_TASK_INPUT === "1"; },
   get chatInput() { return process.env.CODEXWORKER_NATIVE_CHAT_INPUT === "1"; },
+  get modelSettings() { return process.env.CODEXWORKER_NATIVE_MODEL_SETTINGS === "1"; },
 };
 
 const PIPE_ENV = "CODEX_APP_TOOLS_PIPE_PATH";
@@ -46,6 +47,11 @@ export async function listTools() {
   if (!path) throw new Error(unavailableReason());
   const result = await pipeRequest(path, "tools/list", { threadStartKind: "all" });
   const tools = Array.isArray(result?.tools) ? result.tools : [];
+  if (process.env.CODEXWORKER_NATIVE_INPUT_DESCRIPTOR && capabilities.modelSettings) tools.push({
+    name: "model_settings", namespace: "codexworker", inputSchema: { type: "object", properties: {
+      threadId: { type: "string" }, action: { enum: ["read", "update"] },
+      model: { type: "string" }, effort: { type: ["string", "null"] },
+    }, required: ["threadId", "action"] } });
   if (process.env.CODEXWORKER_NATIVE_INPUT_DESCRIPTOR && capabilities.taskInput) tools.push({
     name: "cancel_task", namespace: "codexworker", inputSchema: { type: "object", properties: {
       taskId: { type: "string" }, messageId: { type: "string" }, threadId: { type: "string" }, turnId: { type: "string" },
@@ -60,6 +66,7 @@ export async function listTools() {
  * @param {number} timeoutMs
  */
 export async function callTool(toolName, args, invocation, timeoutMs = 5000) {
+  if (toolName === "model_settings") return sendNativeInput({ ...args, operation: "modelSettings", messageId: randomUUID() }, { timeoutMs: 30000 });
   // The MCP system instructions carry peer rules. Keep private correlation
   // metadata out of the visible Desktop tool prompt and its public schema.
   if (args.nativePeerMessage) { args = { ...args }; delete args.nativePeerMessage; }

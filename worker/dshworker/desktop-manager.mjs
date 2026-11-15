@@ -39,6 +39,7 @@ import { resumePage, resumeListText } from "./resume-list.mjs";
 import { hermesChunks } from "./hermes-feishu-format.mjs";
 import { isAbandonedText, isUnconfirmedText } from "./text-receipt-review.mjs";
 import { peerPresentation } from "./worker-message-format.mjs";
+import { ModelCommands } from "./model-commands.mjs";
 
 export const PROTOCOL = "1.1.1-draft";
 const digest = value => createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -123,6 +124,7 @@ export class DesktopManager {
     this.tools = []; this.notifier = null; this.ws = null; this.publicTextTimer = null;
     this.feishuInputs = new Map(); this.feishuReactionTasks = new Map();
     this.questions = new QuestionRelay(this);
+    this.modelCommands = new ModelCommands(this);
     this.onlineAnnouncement = new FeishuOnlineAnnouncement(this);
     this.businessRuntime = new BusinessRuntime({ stateDir });
     this.publicImageRelay = new PublicImageRelay(this);
@@ -533,7 +535,7 @@ export class DesktopManager {
     return { poll: Number(this.pollRunning), serial: this.serialPending,
       native: this.nativeOperations, http: this.httpOperations, images: this.imageOperations ?? 0,
       background: this.backgroundTasks.size, inputs: this.feishuInputs.size,
-      reactions: this.feishuReactionTasks.size };
+      reactions: this.feishuReactionTasks.size, modelCommands: this.modelCommands.pending };
   }
 
   hotHandoffStatus() {
@@ -874,6 +876,7 @@ export class DesktopManager {
         feishuImageInput: this.config.nativeImageInput ? "native-local-image" : "cached-path-prompt",
         externalChatInput: this.config.nativeChatInput ? "native-user-input" : "unavailable",
         questionAnswerSync: this.config.nativeQuestionInput ? "native-user-input" : "delegated-message",
+        modelSettings: this.tools.some(tool => tool.name === "model_settings"),
         feishuOutputRouting: this.transcriptEnabled ? "managed-thread-transcript" : "selected-thread-only",
         persistentConversationTranscript: this.transcriptEnabled,
         nativeAutoCompaction: "engine-defaults",
@@ -1498,6 +1501,16 @@ export class DesktopManager {
   }
 
   async command(request, text) {
+    if (/^\/(model|effort)(?:\s|$)/i.test(text)) {
+      if (!this.routerClient) fail(503, "router_unavailable", "模型命令需要 router 在线，请稍后重试。");
+      try {
+        return await this.routerClient._request("POST", "/commands", { worker: this.config.router?.name ?? this.config.machine,
+          message_id: request.messageId, thread_id: request.targetThreadId ?? this.state.selectedThreadId, text }, { timeoutMs: 35000 });
+      } catch (error) {
+        fail(error.status ?? 503, error.body?.error ?? "model_command_unconfirmed",
+          error.body?.detail ?? "模型命令结果暂未确认，请用同一请求标识核对回执。", !error.status);
+      }
+    }
     const [rawCommand, ...parts] = text.split(/\s+/);
     const command = rawCommand === "/clear" ? "/new" : rawCommand;
     if (["/help", "/start", "/commands"].includes(command)) return { action: "help", text: BRIDGE_HELP };
@@ -1580,7 +1593,10 @@ export class DesktopManager {
     let response; let parent = null; let hostId = null;
     if (command === "/new") {
       if (!this.config.projectId) fail(503, "bridge_not_ready", "A Desktop projectId is required for /new.");
+      const defaults = this.state.feishuReceipts[request.messageId]?.incomingMessageId
+        ? await this.modelCommands.defaults(this.state.selectedThreadId) : null;
       response = await this.call("create_thread", { title: alias,
+        ...(defaults ? { model: defaults.model, ...(defaults.effort == null ? {} : { thinking: defaults.effort }) } : {}),
         prompt: "这是 Hermes Bridge 创建的 Codex 原生会话。请只回复 HERMES_READY，等待后续任务；不要调用工具或修改文件。",
         target: { type: "project", projectId: this.config.projectId, environment: { type: "local" } } });
     } else {

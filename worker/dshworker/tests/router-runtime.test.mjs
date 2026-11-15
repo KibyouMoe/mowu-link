@@ -152,6 +152,22 @@ test("question SSE queries and answers stay outside the work-order queue and pre
   assert.equal(manager.writes.length, 0);assert.equal(router.results.length, 0);
 });
 
+test("parsed model commands use control SSE without creating turns or work orders", async t => {
+  const { router, manager } = await setup(t);
+  let received;
+  manager.modelCommands = { run: async input => { received = input; return { text: "model list", page: 0 }; } };
+  const command = { kind: "model", action: "list", threadId: "thread-1", messageId: "command-id" };
+  router.streams.at(-1).write(`event: worker_command\ndata: ${JSON.stringify({ request_id: "control-id", command })}\n\n`);
+  await until(() => router.calls.some(call => call.path === "/commands/responses"));
+  assert.deepEqual(received, command);
+  const response = router.calls.find(call => call.path === "/commands/responses").body;
+  assert.equal(response.request_id, "control-id");
+  assert.equal(response.status, 200);
+  assert.equal(response.body.text, "model list");
+  assert.equal(manager.writes.length, 0);
+  assert.equal(router.results.length, 0);
+});
+
 test("disabled, proxy and non-listening managers never register or attach approvals", async t => {
   isolateEnv(t);
   let installs = 0;

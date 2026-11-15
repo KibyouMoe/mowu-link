@@ -203,6 +203,29 @@ def now_iso(ts: Optional[float] = None) -> str:
         timespec="seconds")
 
 
+def parse_model_command(text: str, thread_id: str) -> Dict[str, Any]:
+    """Parse model commands once, before dispatching to an engine adapter."""
+    if not isinstance(text, str) or len(text) > 512 or not isinstance(thread_id, str) or not thread_id:
+        raise BadRequest("text and thread_id are required")
+    parts = text.strip().split(None, 1)
+    if not parts or parts[0].lower() not in ("/model", "/effort"):
+        raise BadRequest("use /model or /effort")
+    command = {"kind": parts[0][1:].lower(), "threadId": thread_id, "action": "list"}
+    if len(parts) == 1:
+        return command
+    argument = parts[1].strip()
+    if argument.lower() in ("next", "prev"):
+        command["direction"] = 1 if argument.lower() == "next" else -1
+    elif argument.lower().startswith("page "):
+        value = argument.split()
+        if len(value) != 2 or not value[1].isdigit() or int(value[1]) < 1:
+            raise BadRequest("use page with a positive page number")
+        command["page"] = int(value[1]) - 1
+    else:
+        command.update(action="set", value=argument)
+    return command
+
+
 def parse_epoch(value: Any, label: str) -> float:
     """Epoch seconds from a number or an ISO-8601 string."""
     if isinstance(value, bool):
@@ -1634,32 +1657,36 @@ class RouterServer(ThreadingHTTPServer):
 
     def question_request(self, worker: str, question_id: str, operation: str,
                          body: Optional[Dict[str, Any]] = None) -> Tuple[int, Dict[str, Any]]:
+        return self.worker_request(worker, "question_request", {
+            "question_id": question_id, "operation": operation, "input": body or {}}, "question")
+
+    def worker_request(self, worker: str, event: str, data: Dict[str, Any],
+                       kind: str) -> Tuple[int, Dict[str, Any]]:
         """Use the worker's existing authenticated stream across machine boundaries."""
         info = self.store.get_worker(worker)
         if info is None:
             return 404, {"ok": False, "error": "unknown_worker", "worker": worker}
         conn = self.current_conn(worker)
         if conn is None or conn.closed or not info.get("control_sse"):
-            return 503, {"ok": False, "error": "question_worker_unavailable", "worker": worker}
+            return 503, {"ok": False, "error": kind + "_worker_unavailable", "worker": worker}
         request_id = str(uuid.uuid4())
-        pending = {"worker": worker, "conn": conn, "ready": threading.Event(), "response": None}
+        pending = {"worker": worker, "conn": conn, "kind": kind,
+                   "ready": threading.Event(), "response": None}
         with self.question_lock:
             if len(self.question_requests) >= 128:
-                return 503, {"ok": False, "error": "question_requests_busy"}
+                return 503, {"ok": False, "error": kind + "_requests_busy"}
             self.question_requests[request_id] = pending
         try:
-            conn.queue.put({"event": "question_request", "data": {
-                "request_id": request_id, "question_id": question_id,
-                "operation": operation, "input": body or {}}})
-            if not pending["ready"].wait(5):
-                return 504, {"ok": False, "error": "question_worker_timeout", "worker": worker,
-                             "questionId": question_id, "retryable": True}
+            conn.queue.put({"event": event, "data": {"request_id": request_id, **data}})
+            if not pending["ready"].wait(5 if kind == "question" else 30):
+                return 504, {"ok": False, "error": kind + "_worker_timeout", "worker": worker,
+                             **({"questionId": data["question_id"]} if kind == "question" else {}), "retryable": True}
             return pending["response"]
         finally:
             with self.question_lock:
                 self.question_requests.pop(request_id, None)
 
-    def question_response(self, body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
+    def question_response(self, body: Dict[str, Any], kind: str = "question") -> Tuple[int, Dict[str, Any]]:
         request_id = body.get("request_id")
         if not isinstance(request_id, str):
             raise BadRequest("request_id is required")
@@ -1670,10 +1697,11 @@ class RouterServer(ThreadingHTTPServer):
         with self.question_lock:
             pending = self.question_requests.get(request_id)
             if pending is None:
-                return 404, {"ok": False, "error": "question_request_ended"}
+                return 404, {"ok": False, "error": kind + "_request_ended"}
             if (body.get("worker") != pending["worker"]
+                    or pending.get("kind", "question") != kind
                     or self.current_conn(pending["worker"]) is not pending["conn"]):
-                return 403, {"ok": False, "error": "question_worker_mismatch"}
+                return 403, {"ok": False, "error": kind + "_worker_mismatch"}
             if not pending["ready"].is_set():
                 pending["response"] = (status, body["body"])
                 pending["ready"].set()
@@ -2008,6 +2036,7 @@ class RouterHandler(BaseHTTPRequestHandler):
                                   "/approvals", "/approvals/{id}",
                                   "/approvals/{id}/decide",
                                   "/questions/{worker}/{id}", "/questions/{worker}/{id}/answer",
+                                  "/commands", "/commands/responses",
                                   "/ops/services",
                                   "/ops/services/{name}/restart"],
                 })
@@ -2068,6 +2097,13 @@ class RouterHandler(BaseHTTPRequestHandler):
             if parts == ["attachments"]:
                 return self._send_json(*self._attachment_put())
             body = self._read_json()
+            if parts == ["commands"]:
+                worker = self._worker_path_param(str(body.get("worker") or ""))
+                command = parse_model_command(body.get("text"), body.get("thread_id"))
+                command["messageId"] = self._peer_uuid(body.get("message_id"))
+                return self._send_json(*self.server.worker_request(worker, "worker_command", {"command": command}, "command"))
+            if parts == ["commands", "responses"]:
+                return self._send_json(*self.server.question_response(body, "command"))
             if parts == ["questions", "responses"]:
                 return self._send_json(*self.server.question_response(body))
             if len(parts) == 4 and parts[0] == "questions" and parts[3] == "answer":
@@ -2149,7 +2185,8 @@ class RouterHandler(BaseHTTPRequestHandler):
             "ok": True,
             "version": VERSION,
             "capabilities": {"workOrders": "idempotent-goal-v1",
-                             "peerMessages": "durable-ack-v1", "questions": "worker-sse-v1"},
+                             "peerMessages": "durable-ack-v1", "questions": "worker-sse-v1",
+                             "modelCommands": "worker-sse-v1"},
             "workers": len(workers),
             "online": len(online),
             "tasks": counts["total"],

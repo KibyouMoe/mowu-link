@@ -24,6 +24,7 @@ export async function prepareDesktopConnection({ platform = process.platform, en
   if (!path.isAbsolute(nodePath)) throw new Error("desktop_connection_node_not_absolute");
   const names = mode === "native" ? [...sources, "interface/desktop-connection/native-entry.mjs",
     "interface/desktop-connection/native-input.mjs", "interface/public-questions.mjs",
+    "interface/desktop-connection/model-settings.mjs",
     "interface/desktop-environment.mjs", "interface/desktop-connection/worker-lifecycle.mjs"] : sources;
   const files = await Promise.all(names.map(async name => [name, await readFile(path.join(pluginRoot, name))]));
   if (mode === "native") files.push(["interface/desktop-connection/worker-root.json",

@@ -16,6 +16,7 @@ import { projectDshMedia } from "./public-media.mjs";
 import { prepareDshImageMessage } from "./image-input.mjs";
 import { WORKER_CHAT_POLICY } from "../worker-message-format.mjs";
 import { installSessionRoleRecovery } from "./session-recovery.mjs";
+import { dshModelSettings, dshSelection } from "./model-settings.mjs";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const VERSION = "0.3.1";
 const TRANSPORT_NAME = "dsh-inprocess";
@@ -33,12 +34,17 @@ const POLL_INTERVAL_MS = 200;
 const TERMINAL_TURN_STATUSES = new Set(["completed", "interrupted", "failed", "cancelled", "canceled"]);
 
 const TOOL_DEFINITIONS = [
+  { name: "model_settings", namespace: NAMESPACE,
+    description: "Read or update this native session's model selection.",
+    inputSchema: { type: "object", properties: { threadId: { type: "string" },
+      action: { enum: ["read", "update"] }, model: { type: "string" }, effort: { type: ["string", "null"] } },
+      required: ["threadId", "action"] } },
   {
     name: "create_thread",
     namespace: NAMESPACE,
     description: "Create an in-process DSH thread; `prompt` starts the first turn.",
     inputSchema: { type: "object", properties: {
-      title: { type: "string" }, prompt: { type: "string" }, cwd: { type: "string" }, model: { type: "string" },
+      title: { type: "string" }, prompt: { type: "string" }, cwd: { type: "string" }, model: { type: "string" }, thinking: { type: "string" },
     }, required: [] },
   },
   {
@@ -292,6 +298,7 @@ export class InProcessTransport {
     const threads = [...this.threads.values()].map((thread) => ({
       id: thread.id, sessionId: thread.sessionId ?? null, title: thread.title ?? null,
       cwd: thread.cwd, createdAt: thread.createdAt, updatedAt: thread.updatedAt,
+      ...(thread.modelSelection ? { modelSelection: thread.modelSelection } : {}),
       turns: (thread.turns ?? []).map((turn) => ({
         ...turn,
         text: truncateText(turn.text, MAX_PERSISTED_TEXT),
@@ -318,7 +325,11 @@ export class InProcessTransport {
 
   async execute(toolName, args = {}, timeoutMs = 5_000) {
     switch (toolName) {
-      case "create_thread": return this.createThread(args);
+      case "model_settings": return dshModelSettings(this, args);
+      case "create_thread": {
+        const modelSelection = args.model ? await dshSelection(this, args.model, args.thinking) : null;
+        return this.createThread({ ...args, modelSelection });
+      }
       case "list_threads": return this.listThreads(args);
       case "read_thread": return this.readThread(args);
       case "send_message_to_thread": {
@@ -378,6 +389,7 @@ export class InProcessTransport {
       id: randomUUID(), sessionId: null, title: title ?? null, cwd,
       createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
       status: "idle", running: false, queue: [], turns: [],
+      ...(args.modelSelection ? { modelSelection: args.modelSelection } : {}),
     };
     this.threads.set(thread.id, thread);
     const payload = { threadId: thread.id, thread: normalizeThread(thread), title: thread.title };
@@ -737,7 +749,8 @@ export class InProcessTransport {
     }
     this.live.delete(thread.id);
     const agents = this.ctx.get("agents");
-    const agentOptions = { ...this.selection };
+    const agentOptions = { ...this.selection, ...thread.modelSelection };
+    if (thread.modelSelection) agentOptions.reasoningEffort = thread.modelSelection.reasoningEffort;
     if (thread.sessionId) {
       let handle, borrowed = false;
       try {
