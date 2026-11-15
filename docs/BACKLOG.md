@@ -5,6 +5,13 @@
 
 ## 2026-11-15 新增
 
+### ✅ worker 互聊在客户端可见（11-15 21:27 训练员实机验收通过）
+
+- 训练员截图确认：Codex 客户端里显示 `来自 TamamoCross：` 单独一行 + 换行正文 + 图片缩略图，附件进原会话。
+- 证据：玉藻回传 `a841a7e6-762d-435a-abbe-d253576952a8` 作为原生 userMessage（含 localImage）进入 Codex；正文 `CODEX_PEER_NATIVE_20261115 | 左珊瑚红底白方块、中浅青底深蓝圆、右紫底黄三角…`。
+- 分支：`feat/worker-collaboration-records`（2e0b2ef）、`feat/worker-inbound-steer`（197b8b1 / 82516af…）。
+- 训练员原话：「没什么问题」。
+
 ### 电视屏保支持竖版图片（训练员 16:50 提）
 
 - **来源**：后续图片放 4090 共享盘（远程挂载根 `/home/kibyou/remote/PC/Share/`），屏保按清单渲染。
