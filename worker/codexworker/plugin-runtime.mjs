@@ -25,10 +25,11 @@ export class PluginRuntime {
   async source(packaged = false) {
     let root = this.pluginRoot, autoReload = true;
     try { const value = packaged ? {} : JSON.parse(await readFile(path.join(this.stateDir, "runtime-source.local.json"), "utf8"));
-      if (packaged) { /* Startup recovery uses only this installed package. */ }
-      else {
-      if (typeof value.sourceRoot !== "string" || !path.isAbsolute(value.sourceRoot)) throw new Error(); root = value.sourceRoot;
-      autoReload = value.autoReload !== false;
+      // Startup recovery uses only this installed package.
+      if (!packaged) {
+        if (typeof value.sourceRoot !== "string" || !path.isAbsolute(value.sourceRoot)) throw new Error();
+        root = value.sourceRoot;
+        autoReload = value.autoReload !== false;
       }
     } catch (error) { if (error.code !== "ENOENT") throw new Error("runtime_source_unavailable"); }
     root = await realpath(root);

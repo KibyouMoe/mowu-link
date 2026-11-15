@@ -1,5 +1,4 @@
 import fs from "node:fs";
-import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
@@ -12,7 +11,9 @@ import { installTaskControl, taskIdOf } from "./task-control.mjs";
 import { DshPublicEvents } from "./public-events.mjs";
 import { DshDesktopObserver } from "./desktop-observer.mjs";
 import { DshQuestions } from "./questions.mjs";
-import { parseDshQuestionReply } from "./public-questions.mjs";
+import { parseDshQuestionReply, projectPublicQuestion } from "./public-questions.mjs";
+import { projectDshMedia } from "./public-media.mjs";
+import { prepareDshImageMessage } from "./image-input.mjs";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const VERSION = "0.3.1";
 const TRANSPORT_NAME = "dsh-inprocess";
@@ -62,6 +63,7 @@ const TOOL_DEFINITIONS = [
     inputSchema: { type: "object", properties: {
       threadId: { type: "string" }, prompt: { type: "string" }, text: { type: "string" },
       message: { type: "string" }, input: { type: "array" },
+      nativeImages: { type: "array", items: { type: "string" } }, nativeMessageId: { type: "string" },
     }, required: ["threadId"] },
   },
   {
@@ -249,8 +251,15 @@ export class InProcessTransport {
     for (const record of Array.isArray(parsed?.threads) ? parsed.threads : []) {
       if (!record?.id) continue;
       for (const turn of record.turns ?? []) {
+        for (const item of turn.nativeQuestions ?? []) {
+          if (!item.dshQuestion || item.dshQuestion.questionId) continue;
+          const question = projectPublicQuestion(item, { threadId: record.id, turnId: turn.id });
+          if (question) Object.assign(item.dshQuestion, { questionId: question.questionId,
+            threadId: record.id, sourceTurnId: turn.id });
+        }
         if (!TERMINAL_TURN_STATUSES.has(turn.status)) {
           turn.status = "interrupted";
+          turn.waitingForInput = false;
           turn.waiting_for_approval = false;
           if (turn.approval) turn.approval.state = "interrupted";
           turn.error ??= "dshworker plugin restarted while this turn was running";
@@ -297,7 +306,14 @@ export class InProcessTransport {
       case "create_thread": return this.createThread(args);
       case "list_threads": return this.listThreads(args);
       case "read_thread": return this.readThread(args);
-      case "send_message_to_thread": return this.sendMessage(args);
+      case "send_message_to_thread": {
+        const thread = this.requireThread(toolName, args);
+        const nativeInput = args.nativeImages?.length
+          ? await prepareDshImageMessage(this, thread, args, promptFromArgs(args)) : null;
+        if (!nativeInput && parseDshQuestionReply(promptFromArgs(args)) && !this.live.get(thread.id)?.agent)
+          await this.ensureAgent(thread);
+        return this.sendMessage(args, nativeInput);
+      }
       case "set_thread_title": return this.setThreadTitle(args);
       case "wait_threads": return this.waitThreads(args, timeoutMs);
       case "list_projects": return this.listProjects(args);
@@ -360,13 +376,12 @@ export class InProcessTransport {
     return payload;
   }
 
-  sendMessage(args = {}) {
+  sendMessage(args = {}, nativeInput = null) {
     const thread = this.requireThread("send_message_to_thread", args);
     if (thread.compacting) throw new Error("native_compaction_in_progress");
-    const prompt = stringArg(args.prompt) ?? stringArg(args.text) ?? stringArg(args.message)
-      ?? textFromInput(args.input);
+    const prompt = promptFromArgs(args);
     if (!prompt) throw new Error("send_message_to_thread requires a non-empty `prompt` (or text `input`)");
-    const replies = parseDshQuestionReply(prompt);
+    const replies = nativeInput ? null : parseDshQuestionReply(prompt);
     const nativeReply = replies ? this.questions.prepare(thread, replies) : null;
     if (nativeReply?.answered) {
       const active = thread.turns.find(t => t.id === nativeReply.turnId);
@@ -376,8 +391,10 @@ export class InProcessTransport {
     const active = thread.running && thread.turns.find(t => t.status === "inProgress" && !thread.queue.includes(t.id));
     const agent = this.live.get(thread.id)?.agent;
     if (active && agent && !nativeReply) {
-      agent.steer(this.desktopObserver.sent(userMessage(prompt), active));
-      (active.inputs ??= []).push({ id: randomUUID(), text: prompt });
+      const message = nativeInput ?? userMessage(prompt);
+      agent.steer(this.desktopObserver.sent(message, active));
+      (active.inputs ??= []).push({ id: nativeInput ? message.id : randomUUID(), text: prompt,
+        ...(nativeInput ? { content: message.content } : {}) });
       active.eventSeq = (active.eventSeq ?? 0) + 1;
       void this.save();
       return { threadId: thread.id, turnId: active.id, accepted: true, status: active.status };
@@ -386,6 +403,7 @@ export class InProcessTransport {
       id: randomUUID(), prompt, status: "inProgress", text: "", thinking: "",
       error: null, reasonKind: null, startedAt: new Date().toISOString(), completedAt: null,
       ...(nativeReply ? { nativeReply, taskId: nativeReply.taskId } : {}),
+      ...(nativeInput ? { nativeInput } : {}),
     };
     turn.deadlineAt = this.taskDeadlines.get(taskIdOf(turn)) ?? null;
     thread.turns.push(turn);
@@ -437,8 +455,7 @@ export class InProcessTransport {
           seenSeq = sequence; turn.eventSeq = (turn.eventSeq ?? 0) + 1; watch.touch();
         }
       }
-      // A live human answer waiter is not a stalled model/tool. Explicit task
-      // deadlines still apply; no independent question deadline is introduced.
+      // A live human answer waiter keeps the task's progress observation alive.
       if (turn.waitingForInput) watch.touch();
       const failure = watch.failure();
       if (!failure) return;
@@ -457,7 +474,8 @@ export class InProcessTransport {
         seenSeq = JSON.stringify(this.agentsForTurn(agent).map(subject => [subject.id ?? subject.session.id, subject.session.seq]));
         stopEvents = this.ctx.on("session/event", (session, event) => {
           try { this.publicEvents.event(thread, turn, agent, session, event); }
-          catch { this.log("warn", "public_event_projection_failed", { threadId: thread.id, type: event?.type }); }
+          catch { this.log("warn", "public_event_projection_failed", {
+            threadId: thread.id, turnId: turn.id, type: event?.type }); }
         }, { global: true });
         stopStream = this.ctx.on("agent/assistant-stream", ({ agent: subject, frame }) => {
           if (!this.agentsForTurn(agent).includes(subject)) return;
@@ -473,7 +491,7 @@ export class InProcessTransport {
         });
         const fromSeq = agent.session.seq;
         if (turn.nativeReply) this.questions.continue(agent, turn.nativeReply);
-        else agent.followup(this.desktopObserver.sent(userMessage(turn.prompt), turn));
+        else agent.followup(this.desktopObserver.sent(turn.nativeInput ?? userMessage(turn.prompt), turn));
         const subagents = this.ctx.get("subagents");
         for (;;) {
           await agent.whenIdle();
@@ -501,6 +519,7 @@ export class InProcessTransport {
       this.finishTurn(thread, turn, { text: outcome.text, thinking, error: detail, reasonKind: kind });
     } catch (error) {
       const message = this.decorate(error?.message ?? String(error));
+      turn.errorCode = error?.code ?? null;
       this.log("warn", "turn_failed", { threadId: thread.id, turnId: turn.id,
         message, code: error?.code ?? null });
       this.finishTurn(thread, turn, { thinking, error: message, reasonKind: error.reasonKind ?? "error" });
@@ -560,14 +579,16 @@ export class InProcessTransport {
     const thread = this.threads.get(threadId);
     if (!thread) {
       return { thread: { id: threadId, hostId, title: null, cwd: null, status: null },
-        latestTurn: null, latestAssistantMessage: null, cursor: null };
+        latestTurn: null, latestAssistantMessageId: null, latestAssistantMessage: null, cursor: null };
     }
     const latest = thread.turns.at(-1) ?? null;
+    const message = latestAssistantMessage(latest, thread.cwd);
     return {
       thread: { id: thread.id, hostId, title: thread.title ?? null, cwd: thread.cwd, status: thread.status },
-      latestTurn: latest ? { id: latest.id, status: latest.status, eventSeq: latest.eventSeq ?? 0, ...approvalFields(latest),
+      latestTurn: latest ? { id: latest.id, status: latest.status, waitingForInput: latest.waitingForInput === true,
+        eventSeq: latest.eventSeq ?? 0, ...approvalFields(latest),
         startedAt: latest.startedAt ?? null, completedAt: latest.completedAt ?? null } : null,
-      latestAssistantMessage: latestAssistantMessage(latest),
+      latestAssistantMessageId: message?.id ?? null, latestAssistantMessage: message,
       cursor: null,
     };
   }
@@ -579,7 +600,7 @@ export class InProcessTransport {
       ? Math.max(1, Number(args.maxOutputCharsPerItem)) : null;
     const all = thread.turns ?? [];
     const limited = turnLimit > 0 ? all.slice(-turnLimit) : all;
-    const turns = limited.map((turn) => normalizeTurn(turn, maxChars));
+    const turns = limited.map((turn) => normalizeTurn(turn, maxChars, thread.cwd));
     return {
       thread: normalizeThread(thread),
       turns,
@@ -691,20 +712,28 @@ export class InProcessTransport {
     const agents = this.ctx.get("agents");
     const agentOptions = { ...this.selection };
     if (thread.sessionId) {
+      let handle;
       try {
         const mountSetup = await this.presetSetup();
-        const handle = await agents.resume({
+        handle = await agents.resume({
           resumeSessionId: thread.sessionId,
           agentOptions,
           ...(mountSetup ? { setup: mountSetup } : {}),
         });
         const agent = handle.agent;
+        if (agent?.session?.id !== thread.sessionId) throw new Error("native session identity mismatch");
         this.live.set(thread.id, { handle, agent });
         this.desktopObserver?.baseline(agent);
+        await this.publicEvents?.refreshTools?.();
         this.log("info", "agent_resumed", { threadId: thread.id, sessionId: thread.sessionId,
           seq: agent.session.seq });
         return agent;
       } catch (error) {
+        this.live.delete(thread.id);
+        try { await handle?.dispose?.(); } catch (disposeError) {
+          this.log("warn", "agent_resume_cleanup_failed", { threadId: thread.id,
+            sessionId: thread.sessionId, message: disposeError.message });
+        }
         this.log("warn", "agent_resume_failed", { threadId: thread.id, sessionId: thread.sessionId,
           message: error?.message ?? String(error) });
         // A failed resume must never silently replace months of native context.
@@ -729,6 +758,7 @@ export class InProcessTransport {
     try {
       await this.ctx.get("sessions")?.flush?.(agent.session);
       await this.save({ required: true });
+      await this.publicEvents?.refreshTools?.();
     } catch (error) {
       this.live.delete(thread.id);
       await handle.dispose?.();
@@ -792,6 +822,10 @@ function userMessage(text) {
   return { id: randomUUID(), role: "user", content: [{ type: "text", text }], source: { kind: "user" } };
 }
 
+function promptFromArgs(args) {
+  return stringArg(args.prompt) ?? stringArg(args.text) ?? stringArg(args.message) ?? textFromInput(args.input);
+}
+
 function summarize(session, fromSeq) {
   let started = false;
   let text = "";
@@ -834,9 +868,9 @@ function approvalFields(turn) {
   };
 }
 
-function normalizeTurn(turn, maxChars) {
+function normalizeTurn(turn, maxChars, cwd) {
   return {
-    id: turn.id, status: turn.status, waitingForInput: turn.waitingForInput === true, eventSeq: turn.eventSeq ?? 0, ...approvalFields(turn), items: turnItems(turn, maxChars), itemsView: "full",
+    id: turn.id, status: turn.status, waitingForInput: turn.waitingForInput === true, eventSeq: turn.eventSeq ?? 0, ...approvalFields(turn), items: turnItems(turn, maxChars, cwd), itemsView: "full",
     startedAt: turn.startedAt ?? null, completedAt: turn.completedAt ?? null,
     durationMs: turn.startedAt && turn.completedAt
       ? Math.max(0, Date.parse(turn.completedAt) - Date.parse(turn.startedAt)) : null,
@@ -844,16 +878,22 @@ function normalizeTurn(turn, maxChars) {
   };
 }
 
-function turnItems(turn, maxChars) {
+function turnItems(turn, maxChars, cwd) {
   const items = [{
     type: "userMessage", kind: "trainer", id: `${turn.id}-user`,
     text: truncateText(turn.prompt ?? "", maxChars),
+    ...(turn.nativeInput ? { content: turn.nativeInput.content } : {}),
   }];
   items.push(...(turn.nativeQuestions ?? []));
   for (const input of turn.inputs ?? []) items.push({ type: "userMessage", kind: "trainer", id: input.id,
-    text: truncateText(input.text, maxChars), ...(parseDshQuestionReply(input.text) ? { dshQuestionAnswers: parseDshQuestionReply(input.text) } : {}) });
-  const replies = parseDshQuestionReply(turn.prompt);
+    text: truncateText(input.text, maxChars), ...(input.content ? { content: input.content } : {}),
+    ...(!input.content && parseDshQuestionReply(input.text) ? { dshQuestionAnswers: parseDshQuestionReply(input.text) } : {}) });
+  const replies = turn.nativeInput ? null : parseDshQuestionReply(turn.prompt);
   if (replies) items[0].dshQuestionAnswers = replies;
+  if (turn.errorCode === "dsh_session_resume_failed") items.push({
+    type: "agentMessage", kind: "assistant", id: `${turn.id}-resume-error`,
+    phase: "final_answer", text: truncateText(turn.error, maxChars),
+  });
   // Approval progress has a separate stable item id; final replies keep their old id.
   for (const progress of turn.progress ?? []) {
     items.push({ type: "agentMessage", kind: "assistant",
@@ -862,9 +902,7 @@ function turnItems(turn, maxChars) {
   }
   // Stable per-attempt IDs let the common streaming relay PATCH one card.
   if (turn.publicMessages?.length) {
-    turn.publicMessages.forEach((message, index) => items.push({ type: "agentMessage", kind: "assistant",
-      id: message.id, text: truncateText(message.text, maxChars),
-      phase: turn.status === "completed" && index === turn.publicMessages.length - 1 ? "final_answer" : "commentary" }));
+    items.push(...publicMessageItems(turn, maxChars, cwd));
     if (turn.error) items.push({ type: "error", id: `${turn.id}-error`, text: turn.error });
     return items;
   }
@@ -875,10 +913,36 @@ function turnItems(turn, maxChars) {
   return items;
 }
 
-function latestAssistantMessage(turn) {
-  if (!turn?.text) return null;
-  return { id: `${turn.id}-agent`, turnId: turn.id, text: turn.text,
-    phase: turn.status === "completed" ? "final_answer" : null, truncated: false };
+function publicMessageItems(turn, maxChars, cwd) {
+  const items = (turn.publicMessages ?? []).flatMap(message => {
+    const parts = message.mediaVersion === 1
+      ? projectDshMedia(message.text, { cwd, complete: message.complete || turn.status === "completed" })
+      : [{ type: "text", text: message.text }];
+    let textIndex = 0;
+    return parts.map(part => {
+      let id, text;
+      if (part.type === "image") {
+        const suffix = createHash("sha256").update(part.imagePath).digest("hex").slice(0, 16);
+        id = `${message.id}-media-${suffix}`;
+        text = `![图片](<${encodeURI(part.imagePath)}>)`;
+      } else {
+        id = textIndex === 0 ? message.id : `${message.id}-text-${textIndex}`;
+        textIndex++;
+        text = truncateText(part.text, maxChars);
+      }
+      return { type: "agentMessage", kind: "assistant", id, text };
+    });
+  });
+  return items.map((item, index) => ({ ...item,
+    phase: turn.status === "completed" && index === items.length - 1 ? "final_answer" : "commentary" }));
+}
+
+function latestAssistantMessage(turn, cwd) {
+  const message = turn?.publicMessages?.length ? publicMessageItems(turn, null, cwd).at(-1) : null;
+  const text = message?.text ?? turn?.text;
+  if (!text) return null;
+  return { id: message?.id ?? `${turn.id}-agent`, turnId: turn.id, text,
+    phase: turn.status === "completed" ? "final_answer" : "commentary", truncated: false };
 }
 
 function trimThread(thread) {

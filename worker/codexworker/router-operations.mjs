@@ -1,5 +1,5 @@
 // User-authorized work orders and peer chat are distinct router operations.
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+import { UUID_V4_PATTERN } from "./identifiers.mjs";
 export class RouterOperationError extends Error {
   constructor(status, error, detail, extra = {}) { super(detail); this.name = "RouterOperationError";
     this.status = status; this.body = { error, detail, ...extra }; }
@@ -22,7 +22,7 @@ export function routerOperations(manager) {
     workers: () => call("GET", "/workers"),
     createWorkOrder(request) {
       const { messageId, worker, goal, context, deadlineS, queueIfOffline = true } = request ?? {};
-      if (!UUID.test(messageId ?? "") || typeof worker !== "string" || !worker.trim() || worker !== worker.trim() ||
+      if (!UUID_V4_PATTERN.test(messageId ?? "") || typeof worker !== "string" || !worker.trim() || worker !== worker.trim() ||
           typeof goal !== "string" || !goal.trim() || goal.length > 20000 || typeof queueIfOffline !== "boolean" ||
           deadlineS != null && (!Number.isFinite(deadlineS) || deadlineS <= 0))
         throw new RouterOperationError(400, "invalid_work_order", "Provide a stable UUIDv4 messageId, exact worker name and project goal; ordinary chat uses worker messages.");

@@ -41,7 +41,8 @@ export async function startRouterRuntime({ manager, nativeCall, transport = {}, 
     try { token = tokenFile ? (await readFile(expandHome(String(tokenFile)), "utf8")).trim() : config.token; }
     catch (error) {
       // Optional router credentials must not close the shared Feishu writer.
-      log("warn", "router_credentials_unavailable", { code: error.code ?? "read_failed" });
+      log("warn", "router_credentials_unavailable", { worker: identity.name ?? settings.name ?? config.machine,
+        code: error.code ?? "read_failed", message: "Router credentials could not be read; check the configured token file." });
       return inactive();
     }
     const name = identity.name ?? settings.name ?? config.machine;
@@ -317,7 +318,8 @@ export async function startRouterRuntime({ manager, nativeCall, transport = {}, 
       if (run === runTask) receivedTasks.add(value.task_id);
       pending++;
       chain = chain.then(() => { check(); return run(value); }).catch(error => {
-        if (!closed) log("error", "router_handler_failed", { message: error.message });
+        if (!closed) log("error", "router_handler_failed", { worker: name, taskId: value?.task_id ?? null,
+          source: value?.source ?? null, message: error.message });
       }).finally(() => { pending--; client.setActivity({ state: "idle", taskId: null }); });
       return chain;
     }
@@ -356,7 +358,8 @@ export async function startRouterRuntime({ manager, nativeCall, transport = {}, 
     const messages = startWorkerMessaging({ manager, client, worker: name, log });
     manager.workerMessages = messages;
     const pollMessages = () => { if (!closed && client.connected) void messages.poll().catch(error => {
-      if (!closed) log("warn", "worker_message_poll_pending", { code: error.code ?? "pending" });
+      if (!closed) log("warn", "worker_message_poll_pending", { worker: name, code: error.code ?? "pending",
+        message: "Worker inbox polling is pending; check the router connection." });
     }); };
     const peerPollTimer = setInterval(pollMessages, 5000); peerPollTimer.unref();
     const service = { client, messages, busy: () => pending > 0 || messages.busy() || Boolean(approvalChannel?.active()), close() {

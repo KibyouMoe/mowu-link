@@ -11,6 +11,10 @@ const SEND_URL = "/im/v1/messages";
 const TOKEN_TTL = 7200; // tenant_access_token lives 2h
 const POST_MAX_CHARS = 20000;
 
+function logFeishu(level, event, fields = {}) {
+  console.error("[feishu] " + JSON.stringify({ level, event, ...fields }));
+}
+
 async function postJson(url, body, { token = "", timeoutMs = 15000, method = "POST" } = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -324,8 +328,8 @@ export class FeishuNotifier {
 
   async warmup() {
     if (!this.enabled) return;
-    if (await this.getToken()) console.error("feishu token 预热成功");
-    else console.warn("feishu token 预热失败：首次推送时会重试");
+    if (await this.getToken()) logFeishu("info", "feishu_token_ready");
+    else logFeishu("warn", "feishu_token_pending", { message: "首次推送时会重试获取飞书凭据。" });
   }
 }
 
@@ -361,7 +365,7 @@ export class FeishuStreamBeat {
   _flushReasoning(onDelivered) {
     const thinking = this._reasoningBuf.trim();
     if (thinking !== "") {
-      console.error(`feishu 节拍: 推送思考摘要 (${thinking.length} 字符)`);
+      logFeishu("debug", "feishu_reasoning_flush", { characters: thinking.length });
       this._push(`💭 思考\n\`\`\`\n${thinkingSummary(thinking)}\n\`\`\``, `${this.bridgeName}-思考`, onDelivered);
       this._reasoningBuf = "";
     }
@@ -370,7 +374,7 @@ export class FeishuStreamBeat {
   _flushText(onDelivered) {
     const text = this._textBuf.trim();
     if (text !== "") {
-      console.error(`feishu 节拍: 推送明文输出 (${text.length} 字符)`);
+      logFeishu("debug", "feishu_text_flush", { characters: text.length });
       this._push(text, `${this.bridgeName}-输出`, onDelivered);
       this._textBuf = "";
     }
@@ -681,7 +685,7 @@ export class FeishuWebsocketClient {
     const url = new URL(connUrl);
     const serviceId = parseInt(url.searchParams.get("service_id") || "0", 10) || 0;
     // Neither a signed endpoint URL nor a raw transport exception is diagnostic data.
-    console.error("feishu 长连接正在连接");
+    logFeishu("info", "feishu_connecting", { attempt: this.attempts });
     await new Promise((resolve) => {
       const ws = this.websocketFactory(connUrl);
       ws.binaryType = "arraybuffer";
@@ -724,11 +728,12 @@ export class FeishuWebsocketClient {
         this.lastFrameAt = null; this.lastConnectedAt = new Date(this.clock()).toISOString();
         this.timers.clearTimeout(handshakeTimer);
         this.lastError = ""; this.setPhase("connected");
-        console.error("feishu 长连接已建立");
+        logFeishu("info", "feishu_connected", { connectionId: this.connectionId });
         ping();
         const connectionId = this.connectionId;
         Promise.resolve().then(() => active() && this.onConnected?.({ connectionId })).catch(() => {
-          console.error("feishu 上线通知回调失败；请检查桥连接状态。");
+          logFeishu("warn", "feishu_online_notice_failed", {
+            connectionId, message: "飞书上线通知回调失败，请检查桥连接状态。" });
         });
       };
       ws.onmessage = (event) => {

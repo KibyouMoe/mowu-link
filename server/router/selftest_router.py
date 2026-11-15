@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""selftest_router.py — real end-to-end test for mowu-router 0.3.0.
+"""selftest_router.py — real end-to-end test for mowu-router.
 
 Starts two real processes, no in-process shortcuts:
 
@@ -1721,7 +1721,6 @@ def run(work: Path, checker: Checker) -> None:
         status, sub2 = http("POST", BASE + "/subscriptions", {
             "worker": "波旁", "source": "mc_chat", "kinds": ["chat"],
         }, token)
-        sub2_id = sub2.get("id")
         trigger_id2 = sub2.get("trigger_id") or ""
         tsub2 = [s for s in trigger_subs() if s.get("name") == trigger_id2]
         checker.check(
@@ -1846,7 +1845,7 @@ def run(work: Path, checker: Checker) -> None:
             "worker": chat_worker, "direction": "out", "text": "worker：在",
             "session_id": "s-1", "ts": chat_now - 595, "message_id": "cm-2",
         }, token)
-        status_l2, listing2 = http(
+        _, listing2 = http(
             "GET", BASE + "/chat/%s/messages" % quote(chat_worker), token=token)
         checker.check(
             "POST /chat/log duplicate (worker+message_id+direction): id reused, "

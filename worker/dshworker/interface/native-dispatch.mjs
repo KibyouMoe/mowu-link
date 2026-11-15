@@ -8,6 +8,15 @@ export function nativeToolRejection(name, response) {
   // Only a complete native tool rejection proves the transport answered. Never
   // carry its raw body (history, paths or credentials) into diagnostics.
   error.nativeReachable = response?.success === false;
+  if (name === "send_message_to_thread" && response?.success === false) for (const item of response.contentItems ?? []) {
+    try {
+      const body = JSON.parse(item.text);
+      if (body.error === "dsh_image_input_rejected" && body.nativeInputOutcome === "notAttempted") {
+        error.nativeImageOutcome = body.nativeInputOutcome;
+        error.nativeErrorCode = body.error;
+      }
+    } catch { /* Only the explicit DSH admission rejection proves no native write. */ }
+  }
   if (name === "read_thread" && response?.success === false && response.contentItems?.some(item =>
     typeof item.text === "string" && /^(?:Tool response exceeds the size limit|Thread history exceeds the read size limit)\./.test(item.text))) {
     error.nativeErrorCode = "native_snapshot_too_large";

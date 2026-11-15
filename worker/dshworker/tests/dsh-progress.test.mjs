@@ -65,6 +65,18 @@ test("in-process explicit deadline remains advisory while real events continue",
   assert.equal(f.turn.status, "completed");
 });
 
+test("native clarification waiting survives the no-progress budget and releases it after the last answer", async t => {
+  const f = await fixture(t, { turn: { waitingForInput: true } });
+  t.mock.timers.tick(31 * 60 * 1000);
+  assert.equal(f.cancels(), 0);
+  assert.equal(f.turn.status, "inProgress");
+  f.turn.waitingForInput = false;
+  t.mock.timers.tick(31 * 60 * 1000);
+  await f.running;
+  assert.equal(f.cancels(), 1);
+  assert.equal(f.turn.reasonKind, "stuck");
+});
+
 test("Harness versions without the optional child-wait API still complete their native turn", async t => {
   const f = await fixture(t, { subagents: {} });
   f.complete(); await f.running;
