@@ -17,6 +17,8 @@ test("workbench plugin registers a read-only collaboration tab and header entry"
     slots: { inject: (_slot, register) => register(), register: (definition, component) => components.push({ definition, component }) } };
   plugin.apply(ctx, { collaborationUrl: "http://127.0.0.1:8906/collaboration/#read-key" });
   assert.equal(tabs[0].title(), "协作记录");
+  assert.equal(components.find(value => value.definition.name === "sidebar.panellist").definition.label(), "协作记录");
+  assert.equal(components.find(value => value.definition.name === "main").component().type, "iframe");
   const button = components.find(value => value.definition.name === "conversation.session.header.corner").component();
   button.props.onClick();
   assert.deepEqual(opened, ["worker-collaboration"]);

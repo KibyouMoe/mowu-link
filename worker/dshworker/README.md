@@ -15,7 +15,7 @@ router/飞书模块与 CodexWorker 逐字节一致。
 插件通过 Harness 的 client-module / sidebarRight 扩展提供「协作记录」入口。
 部署时从本机鉴权接口 `GET /bridge/collaboration` 取得只读页面 URL，将其配置为本机
 Cordis 插件的 `collaborationUrl`。此 URL 含限定读取权限的凭据，留在本机配置。
-点击会话标题旁的「协作记录」打开正文、时间与附件缩略图，不向会话重放历史。
+点击左侧「协作记录」或会话标题旁的同名入口打开正文、时间与附件缩略图，不向会话重放历史。
 防回环说明与消息关联仅通过原生 `agent/pre-step` 的 system 消息供模型读取。
 
 ## 飞书提问表单（布局 9）

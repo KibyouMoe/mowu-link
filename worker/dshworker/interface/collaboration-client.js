@@ -7,10 +7,21 @@ window.__ModuleLoader__.load({
     const tabId = "dshworker/collaboration";
     const kind = "worker-collaboration";
     return {
-      inject: ["slots", "sidebarRight", "sidebarRightTabs"],
+      inject: ["slots", "layout", "sidebarRight", "sidebarRightTabs"],
       apply(ctx, config = {}) {
         const open = () => ctx.sidebarRight.openTab(kind);
         const title = () => "协作记录";
+        const view = () => {
+          if (!config.collaborationUrl) return React.createElement("p", null, "协作记录入口待配置");
+          return React.createElement("iframe", { src: config.collaborationUrl, title: "协作记录",
+            referrerPolicy: "no-referrer", sandbox: "allow-scripts allow-same-origin",
+            style: { display: "block", width: "100%", height: "100%", minHeight: "400px", border: 0 } });
+        };
+        ctx.effect(() => ctx.slots.inject("sidebar.panellist", () =>
+          ctx.slots.register({ name: "sidebar.panellist", id: tabId, label: title, order: 20 },
+            () => React.createElement(GuideArtworkBrowser))));
+        ctx.effect(() => ctx.slots.inject("main", () =>
+          ctx.slots.register({ name: "main", key: tabId }, view)));
         ctx.effect(() => ctx.sidebarRightTabs.register({
           id: tabId, kind, title,
           guide: [{ id: "collaboration", order: 40, title,
@@ -22,12 +33,7 @@ window.__ModuleLoader__.load({
         ctx.effect(() => ctx.slots.inject("sidebar.right.pane.tab.title", () =>
           ctx.slots.register({ name: "sidebar.right.pane.tab.title", key: tabId }, title)));
         ctx.effect(() => ctx.slots.inject("sidebar.right.pane.tab", () =>
-          ctx.slots.register({ name: "sidebar.right.pane.tab", key: tabId }, () => {
-            if (!config.collaborationUrl) return React.createElement("p", null, "协作记录入口待配置");
-            return React.createElement("iframe", { src: config.collaborationUrl, title: "协作记录",
-              referrerPolicy: "no-referrer", sandbox: "allow-scripts allow-same-origin",
-              style: { width: "100%", height: "100%", border: 0 } });
-          })));
+          ctx.slots.register({ name: "sidebar.right.pane.tab", key: tabId }, view)));
       },
     };
   },
