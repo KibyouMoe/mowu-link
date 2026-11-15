@@ -39,6 +39,45 @@ test("DSH Desktop answers settle the same public question", async () => {
   const q = f.question(); await pending;
   assert.deepEqual(nativeAnswersInSnapshot(q, f.transport.readThread({ threadId: "thread" })), ["只回复"]);
 });
+test("DSH preserves a single native option in its public question projection", async () => {
+  const f = fixture();
+  f.request.questions[0].options = [{ label: "已收到" }];
+  const pending = f.ask(), question = f.question();
+  assert.deepEqual(question.questions[0].options, ["已收到"]);
+  f.transport.sendMessage({ threadId: f.thread.id, prompt: nativeQuestionReply(question, ["已收到"]) });
+  assert.deepEqual((await pending).answers, [{ id: "where", selected: ["已收到"] }]);
+});
+test("an external DSH answer closes the native provider while preserving the caller signal", async () => {
+  const f = fixture(), caller = f.request.signal;
+  let providerSignal, providerClosed = false;
+  const pending = f.transport.questions.request(f.request, () => {
+    providerSignal = f.request.signal;
+    return new Promise((resolve, reject) => providerSignal.addEventListener("abort", () => {
+      providerClosed = true; reject(Object.assign(Error("native panel closed"), { code: "ASK_ABORTED" }));
+    }, { once: true }));
+  });
+  const question = f.question();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.notEqual(providerSignal, caller);
+  f.transport.sendMessage({ threadId: f.thread.id, prompt: nativeQuestionReply(question, ["只回复"]) });
+  assert.deepEqual((await pending).answers, [{ id: "where", selected: ["只回复"] }]);
+  assert.equal(providerClosed, true);
+  assert.equal(caller.aborted, false);
+  assert.equal(f.request.signal, caller);
+  assert.equal(f.transport.questions.pending.size, 0);
+});
+test("caller cancellation closes the native DSH provider and releases its waiter", async () => {
+  const f = fixture();let providerClosed = false;
+  const pending = f.transport.questions.request(f.request, () => new Promise((resolve, reject) => {
+    f.request.signal.addEventListener("abort", () => { providerClosed = true;reject(Error("provider aborted")); }, { once: true });
+  }));
+  await new Promise(resolve => setImmediate(resolve));
+  f.controller.abort(Error("caller cancelled"));
+  await assert.rejects(pending, /caller cancelled/);
+  assert.equal(providerClosed, true);
+  assert.equal(f.request.signal, f.controller.signal);
+  assert.equal(f.transport.questions.pending.size, 0);
+});
 test("DSH leaves approval intents and foreign agents with the native answerer", async () => {
   const f = fixture(); let calls = 0;
   f.request.questions[0].intent = { kind: "approval" };

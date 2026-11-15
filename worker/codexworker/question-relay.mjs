@@ -78,8 +78,6 @@ export class QuestionRelay {
     try { this.state = JSON.parse(await readFile(this.path, "utf8")); } catch (e) { if (e.code !== "ENOENT") throw e; }
     if (this.state.version !== 1 || !this.state.entries || Array.isArray(this.state.entries)) reject(503, "question_state_invalid", "Question actions were not discarded.");
     for (const entry of Object.values(this.state.entries)) {
-      if (["expired", "canceled"].includes(entry.status) && entry.nativePanelSync?.status !== "accepted")
-        entry.nativeCloseRequested = true;
       if (entry.status === "dispatching") {
         const receipt = this.manager.state.receipts?.[entry.nativeMessageId];
         if (receipt?.nativeDispatch?.status === "accepted") entry.status = answeredStatus(entry);
@@ -467,7 +465,7 @@ export class QuestionRelay {
         const s = this.state.entries[id];
         if (!s || q.delivery !== "async" || q.threadId !== threadId ||
             s.bindingEpoch !== m.state.selectionEpoch || !q.sourceQuestionItemIds ||
-            !["open", "answer_pending", "answered", "skipped", "expired"].includes(s.status) ||
+            !["open", "answer_pending", "dispatching", "answered", "skipped", "expired"].includes(s.status) ||
             s.status === "expired" && s.reason !== "source_turn_ended") continue;
         const known = replies.filter(reply => {
           const i = q.sourceQuestionItemIds.indexOf(reply.questionItemId);

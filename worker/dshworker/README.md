@@ -57,4 +57,6 @@ peer 与飞书消息使用原生用户输入，运行中通过 agent.steer 进�
 异步问题独立于原工单和原回合寿命。使用 router `GET /questions/{worker}/{questionId}`
 中的 `answerRequest`，将选项或自由文本填入 `answers` 后 POST 到同一 URL 的 `/answer`；
 全部跳过使用 `action:"skip"`。DSH 适配层以原 session/call/question ID 回填原生
-`user-questions/request`，原生 tool/result 或 continued reply 关闭客户端问题投影。
+`user-questions/request`。每次原生 Desktop 答题 provider 使用独立取消信号，外部答案完成后
+回收该 provider 的等待面板，并保留调用者/agent 的原信号；tool/result 或 continued reply
+继续更新原生问题投影。并行请求的 provider 信号分别绑定，恢复后依原 session/call/question ID 作答。

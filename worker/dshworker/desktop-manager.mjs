@@ -499,6 +499,8 @@ export class DesktopManager {
           session.turnMessages[item.turnId].push(receipt.request.messageId);
         rememberTurnInitiator(session, item.turnId, receipt.request);
       }
+      await this.questions.observeNativeReply({ threadId: session.threadId, text: item.text,
+        messageId: receipt.request.messageId, turnId: item.turnId, itemKey: item.key });
       return receipt.request.messageId;
     }
     const messageId = nativeMessageId(session.threadId, item.key);

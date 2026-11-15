@@ -281,6 +281,19 @@ test("a rejected native withdrawal waits before retrying and an unknown withdraw
  assert.equal(state.nativePanelSync.messageId,controlId);
  assert.equal(f.manager.questions.get(q.questionId).answers,null);
 });
+test("startup does not replay historical closed questions without an explicit pending withdrawal", async t => {
+ const f=await fixture(t);ui(f);const q=await observe(f);
+ f.manager.handoffPaused=false;await f.manager.drainPublicTexts();f.manager.handoffPaused=true;
+ f.manager.config.nativeQuestionInput=true;
+ const action=f.manager.questions.state.entries[q.questionId];
+ action.status="expired";action.reason="source_task_ended";
+ delete action.nativeCloseRequested;
+ await f.manager.questions.save();await f.manager.questions.initialize();
+ f.manager.handoffPaused=false;await f.manager.questions.process();
+ assert.equal(f.manager.questions.get(q.questionId).status,"expired");
+ assert.equal(f.manager.questions.state.entries[q.questionId].nativeCloseRequested,undefined);
+ assert.equal(f.calls.filter(c=>c.name==="send_message_to_thread").length,0);
+});
 
 function fallback(f) {
  const raw=rawQuestion();

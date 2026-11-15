@@ -204,6 +204,19 @@ test("router notifications retain the full central question URL inside a 100-cha
  assert.ok(text.length<=100);assert.ok(text.endsWith(`/questions/Rudolf/${f.q.questionId}`));
  assert.deepEqual(f.manager.questions.get(f.q.questionId).questions,f.q.questions);
 });
+test("a correlated native answer echo confirms panel synchronization while retaining Hermes as its author",async t=>{
+ const f=await routing(t);await f.manager.questions.publish(f.q);
+ await f.manager.questions.acceptAgentAnswer(f.q.questionId,answer(f));
+ f.manager.handoffPaused=false;await f.manager.questions.process();
+ const action=f.manager.questions.state.entries[f.q.questionId];
+ assert.equal(action.nativePanelSync,undefined);
+ const receipt=f.manager.state.receipts[action.nativeMessageId];
+ const messageId=await f.manager.observeNativeInput(f.session,{key:"real-turn/answer-echo",turnId:"real-turn",text:receipt.request.text});
+ assert.equal(messageId,action.nativeMessageId);
+ assert.equal(action.answerActor,"hermes");assert.equal(action.nativePanelSync.status,"accepted");
+ assert.equal(action.nativePanelSync.via,"native-observation");
+ assert.equal(f.calls.filter(c=>c.name==="send_message_to_thread").length,1);
+});
 test("an unknown router notification outcome is not resent and does not turn into a trainer question",async t=>{
  const f=await routing(t,{notice:async()=>{throw Error("lost response");}});
  await f.manager.questions.publish(f.q);await f.manager.questions.process();await f.manager.questions.publish(f.q);
