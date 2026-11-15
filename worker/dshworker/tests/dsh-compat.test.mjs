@@ -213,3 +213,18 @@ test("partial DSH MEDIA output stays pending until committed, then sends once wi
   assert.ok(f.calls.every(call => !call.text.includes("MEDIA:")));
   await f.finish();
 });
+
+test("native DSH present reaches the media relay before turn completion and shares its receipt with a later MEDIA line", async t => {
+  const f = await fixture(t); await f.send("present native image");
+  const filename = path.join(f.root, "native-present.png"); await writeFile(filename, png);
+  f.emit("deliverables/presented", { callId: "present-1", files: [{ path: filename }] });
+  await f.drain();
+  assert.equal(f.imageSends.length, 1);
+  assert.equal(f.imageSends[0].sha256, sha256(png));
+  assert.equal(f.transport.threads.get(f.threadId).turns[0].status, "inProgress");
+  f.stream(`MEDIA: ${filename}`);
+  f.emit("assistant/message", { message: { content: [{ type: "text", text: `MEDIA: ${filename}` }] } });
+  await f.finish(); await f.drain();
+  assert.equal(f.imageSends.length, 1);
+  assert.ok(f.calls.every(call => !call.text.includes("MEDIA:")));
+});

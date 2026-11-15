@@ -24,8 +24,14 @@ async function outbound(format) {
       : format === "absolute-media" ? `MEDIA: ${filename}`
       : format === "large-media" ? "MEDIA: evidence/probe image.png"
       : "before\nMEDIA: evidence/probe image.png\nafter";
-    f.stream(text);
-    f.emit("assistant/message", { message: { content: [{ type: "text", text }] } });
+    if (format === "native-present") {
+      const deliverable = { callId: "present-probe", files: [{ path: filename, description: "client-visible image" }] };
+      f.emit("deliverables/presented", deliverable);
+      f.emit("deliverables/presented", deliverable);
+    } else {
+      f.stream(text);
+      f.emit("assistant/message", { message: { content: [{ type: "text", text }] } });
+    }
     await f.finish(); await f.drain();
     const leaked = f.calls.filter(call => /MEDIA:|!\[probe\]/.test(call.text));
     return { direction: "dsh-to-feishu", format, mediaMessages: f.mediaMessages.length,
@@ -109,7 +115,7 @@ async function question(repeats, recipient) {
 
 export async function runProbes(report = console.log) {
   const output = [];
-  for (const format of ["absolute-markdown", "relative-markdown", "absolute-media", "mixed-media", "large-media"]) {
+  for (const format of ["absolute-markdown", "relative-markdown", "absolute-media", "mixed-media", "large-media", "native-present"]) {
     const result = await outbound(format); output.push(result); report(JSON.stringify(result));
   }
   for (const type of ["image", "file"]) {

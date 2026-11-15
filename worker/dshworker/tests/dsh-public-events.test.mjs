@@ -140,6 +140,23 @@ test("a child session's compaction does not compact the parent conversation", ()
   assert.deepEqual(f.context, []);
 });
 
+test("DSH presents explicit raster deliverables as standalone public media with stable native identities", () => {
+  const f = fixture(); f.thread.cwd = "D:\\original-chat";
+  const data = { callId: "native-present", files: [
+    { path: "images/probe.PNG", description: "client-visible image" },
+    { path: "D:\\original-chat\\note.pdf" },
+    { path: "https://example.test/remote.png" },
+  ] };
+  f.send("deliverables/presented", data); f.send("deliverables/presented", data);
+  assert.deepEqual(f.turn.publicMessages, [{ id: "dsh-presented-native-original-native-present-0",
+    text: "MEDIA: D:\\original-chat\\images\\probe.PNG", mediaVersion: 1, complete: true }]);
+  const child = { session: { id: "child" } };
+  f.events.transport.agentsForTurn = () => [f.agent, child];
+  f.send("deliverables/presented", { ...data, callId: "child-present" }, child.session);
+  f.send("tool/result", { message: { content: [{ type: "image", attachment: { attachmentId: "private-input" } }] } });
+  assert.equal(f.turn.publicMessages.length, 1);
+});
+
 test("resume refuses a handle for a different native session and preserves the original identity", async () => {
   const transport = Object.create(InProcessTransport.prototype);
   let creates = 0, disposals = 0;

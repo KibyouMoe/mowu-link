@@ -1,6 +1,7 @@
 // DSH native events -> the shared manager's public message/tool contract.
 // Only display text and allowlisted tool previews leave this boundary.
 import { projectToolActivity } from "./tool-activity.mjs";
+import { resolveDshMediaPath } from "./public-media.mjs";
 
 export class DshPublicEvents {
   constructor(transport) { this.transport = transport; this.manager = null; this.calls = new Map(); }
@@ -33,6 +34,16 @@ export class DshPublicEvents {
   event(thread, turn, agent, session, event) {
     if (!this.transport.agentsForTurn(agent).some(subject => subject.session === session)) return;
     const data = event?.data ?? {};
+    if (event?.type === "deliverables/presented" && session === agent.session) {
+      for (const [index, file] of (Array.isArray(data.files) ? data.files : []).entries()) {
+        const imagePath = resolveDshMediaPath(file?.path, thread.cwd);
+        if (!imagePath || !/\.(?:png|jpe?g|gif|webp)$/i.test(imagePath)) continue;
+        const id = `dsh-presented-${session.id}-${data.callId ?? event.seq}-${index}`;
+        turn.publicMessages ??= [];
+        if (!turn.publicMessages.some(item => item.id === id))
+          turn.publicMessages.push({ id, text: `MEDIA: ${imagePath}`, mediaVersion: 1, complete: true });
+      }
+    }
     if (event?.type === "assistant/message" && session === agent.session) {
       const text = (Array.isArray(data.message?.content) ? data.message.content : []).filter(block => block?.type === "text" && typeof block.text === "string").map(block => block.text).join("");
       if (text) {
