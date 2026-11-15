@@ -62,12 +62,174 @@ test('Worker steering a native Desktop turn has one input and preserves native t
   await f.end(); assert.equal(f.thread.turns.length, 1);
 });
 
+test('external chat uses the native host inbox before the next durable user message arrives', async t => {
+  const f = fixture(t); f.start(); f.user('desktop start');
+  const pending = [];
+  f.agent.steer = message => {
+    pending.push(message);
+    f.emit('agent/inbox/spliced', { mode: 'next-step', messages: [message] });
+  };
+  const messageId = '6c18a7d2-4cfa-4683-9c12-b2a02d035bbd';
+  const result = await f.transport.execute('send_message_to_thread', {
+    threadId: f.thread.id, prompt: '来自 Hermes：\n继续原任务',
+    nativeChatInput: true, nativeMessageId: messageId,
+  });
+  assert.equal(result.turnId, f.thread.turns[0].id);
+  assert.equal(pending.length, 1); assert.equal(pending[0].id, messageId);
+  assert.equal(pending[0].source.kind, 'user');
+  assert.deepEqual(f.thread.turns[0].inputs.map(item => item.id), [messageId]);
+  f.emit('user/message', pending[0]);
+  assert.equal(f.thread.turns[0].inputs.length, 1);
+  assert.equal(f.snapshot().turns[0].items.filter(item => item.type === 'userMessage').length, 2);
+  await f.end(); assert.equal(f.thread.turns.length, 1);
+});
+
 test('foreign sessions, runtime context, reasoning and raw tool output are not mirrored', async t => {
   const f = fixture(t);
   f.emit('turn/start', {}, { id: 'foreign', seq: 0 }); assert.equal(f.thread.turns.length, 0);
   f.start(); f.user('private context', 'context', { kind: 'runtime-context' });
   f.publish('agent/assistant-stream', { agent: f.agent, frame: { type: 'chunk', chunk: { type: 'reasoning-delta', text: 'private reasoning' } } });
   assert.doesNotMatch(JSON.stringify(f.snapshot()), /private/); await f.end();
+});
+
+test('a restored main agent is borrowed from the native controller and survives plugin unload', async t => {
+  const f = fixture(t); f.transport.live.clear();
+  const originalGet = f.transport.ctx.get;
+  let resolutions = 0;
+  f.transport.ctx.get = name => name === 'sessionController' ? {
+    resolveAgent: async sessionId => {
+      assert.equal(sessionId, f.session.id); resolutions++;
+      return { agent: f.agent };
+    },
+  } : originalGet(name);
+  assert.equal(await f.transport.ensureAgent(f.thread), f.agent);
+  assert.equal(await f.transport.ensureAgent(f.thread), f.agent);
+  assert.equal(resolutions, 1);
+  await f.transport.close(); assert.equal(f.agent.status, 'idle');
+  assert.equal(f.thread.sessionId, f.session.id);
+});
+
+test('reloading during a borrowed native turn preserves its identity and steers the same turn', async t => {
+  const f = fixture(t); f.start(); f.user('original local input'); f.stream('already displayed');
+  const original = f.thread.turns[0];
+  await f.transport.close();
+  assert.equal(f.agent.status, 'running');
+  const replacement = new InProcessTransport({ ctx: f.transport.ctx, selection: {}, cwd: '/tmp',
+    stateDir: '/tmp/dsh-desktop-observer-tests-absent', log() {} });
+  replacement.save = async () => {};
+  const thread = structuredClone(f.thread);
+  replacement.threads.set(thread.id, thread);
+  const originalGet = replacement.ctx.get;
+  replacement.ctx.get = name => name === 'sessionController'
+    ? { resolveAgent: async () => ({ agent: f.agent }) } : originalGet(name);
+  t.after(() => replacement.close());
+  await replacement.ensureAgent(thread);
+  const sent = await replacement.execute('send_message_to_thread', {
+    threadId: thread.id, prompt: '来自 Hermes：\n继续原动作', nativeChatInput: true,
+    nativeMessageId: 'reload-steer',
+  });
+  assert.equal(sent.turnId, original.id);
+  assert.equal(thread.turns.length, 1);
+  assert.equal(thread.turns[0].publicMessages[0].text, 'already displayed');
+  assert.deepEqual(thread.turns[0].inputs.map(input => input.text), ['来自 Hermes：\n继续原动作']);
+  await f.end();
+  assert.equal(thread.turns[0].status, 'completed');
+  assert.equal(thread.running, false);
+});
+
+test('attaching during an unobserved native tool call adopts only the live turn without replaying history', async t => {
+  const f = fixture(t);
+  f.transport.desktopObserver.close();
+  f.start(); f.user('private earlier input'); f.emit('tool/call', { name: 'bash', callId: 'pending' });
+  f.transport.live.clear();
+  const originalGet = f.transport.ctx.get;
+  f.transport.ctx.get = name => name === 'sessionController'
+    ? { resolveAgent: async () => ({ agent: f.agent }) } : originalGet(name);
+  const { DshDesktopObserver } = await import('../interface/desktop-observer.mjs');
+  f.transport.desktopObserver = new DshDesktopObserver(f.transport);
+  await f.transport.ensureAgent(f.thread);
+  assert.equal(f.thread.running, true);
+  assert.equal(f.thread.turns.length, 1);
+  assert.equal(f.thread.turns[0].prompt, '');
+  assert.doesNotMatch(JSON.stringify(f.snapshot()), /private earlier input/);
+  const result = f.transport.sendMessage({ threadId: f.thread.id, prompt: 'new steering input' });
+  assert.equal(result.turnId, f.thread.turns[0].id);
+  await f.end(); assert.equal(f.thread.turns[0].status, 'completed');
+});
+
+test('a borrowed Worker turn hands off its observers and cannot overwrite replacement state after completion', async t => {
+  const f = fixture(t); f.transport.live.clear();
+  const originalGet = f.transport.ctx.get;
+  f.transport.ctx.get = name => name === 'sessionController'
+    ? { resolveAgent: async () => ({ agent: f.agent }) } : originalGet(name);
+  f.agent.followup = message => { f.start(); f.emit('user/message', message); };
+  await f.transport.ensureAgent(f.thread);
+  const originalId = f.transport.sendMessage({ threadId: f.thread.id, prompt: 'worker start' }).turnId;
+  await new Promise(resolve => setImmediate(resolve)); f.stream('before handoff');
+  await f.transport.close();
+  assert.equal(f.listeners.get('session/event').size, 0);
+  assert.equal(f.listeners.get('agent/assistant-stream').size, 0);
+  assert.equal(f.transport.turnObservers.size, 0);
+  const replacement = new InProcessTransport({ ctx: f.transport.ctx, selection: {}, cwd: '/tmp',
+    stateDir: '/tmp/dsh-desktop-observer-tests-absent', log() {} });
+  replacement.save = async () => {};
+  const thread = structuredClone(f.thread); replacement.threads.set(thread.id, thread);
+  t.after(() => replacement.close());
+  await replacement.ensureAgent(thread);
+  const result = replacement.sendMessage({ threadId: thread.id, prompt: 'steer after handoff' });
+  assert.equal(result.turnId, originalId); assert.equal(thread.turns.length, 1);
+  f.stream(' after handoff'); await f.end();
+  assert.equal(thread.turns[0].status, 'completed');
+  assert.equal(thread.turns[0].publicMessages[0].text, 'before handoff after handoff');
+  assert.equal(f.thread.turns[0].status, 'interrupted');
+  assert.equal(f.agent.status, 'idle');
+});
+
+test('a detached older native turn never resumes as a later active turn', async t => {
+  const f = fixture(t); f.start(); f.user('old'); await f.end();
+  Object.assign(f.thread.turns[0], { status: 'interrupted', nativeDetached: true });
+  f.transport.desktopObserver.close(); f.start(); f.user('later');
+  const { DshDesktopObserver } = await import('../interface/desktop-observer.mjs');
+  f.transport.desktopObserver = new DshDesktopObserver(f.transport);
+  f.transport.desktopObserver.baseline(f.agent, f.thread);
+  assert.equal(f.thread.turns.length, 2);
+  assert.equal(f.thread.turns[0].status, 'interrupted');
+  assert.notEqual(f.thread.turns[0].id, f.thread.turns[1].id);
+  await f.end(); assert.equal(f.thread.turns[1].status, 'completed');
+});
+
+test('persisted active native turn is reattached before the first input after reload', async t => {
+  const { mkdtemp, writeFile, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const f = fixture(t); f.start(); f.user('original');
+  const record = structuredClone(f.thread), originalId = record.turns[0].id;
+  await f.transport.close();
+  const root = await mkdtemp(join(tmpdir(), 'dsh-active-reload-'));
+  await writeFile(join(root, 'dsh-plugin-state.json'), JSON.stringify({ threads: [record] }));
+  const replacement = new InProcessTransport({ ctx: f.transport.ctx, selection: {}, cwd: root,
+    stateDir: root, log() {} });
+  t.after(async () => { await replacement.close(); await rm(root, { recursive: true, force: true }); });
+  const thread = replacement.threads.get(record.id);
+  assert.equal(thread.running, true);
+  assert.equal(thread.turns[0].status, 'inProgress');
+  assert.equal(thread.turns[0].id, originalId);
+  assert.equal(thread.turns[0].error, null);
+  assert.equal(thread.turns[0].completedAt, null);
+  const result = replacement.sendMessage({ threadId: thread.id, prompt: 'immediate steering' });
+  assert.equal(result.turnId, originalId); assert.equal(thread.queue.length, 0);
+  await f.end(); assert.equal(thread.turns[0].status, 'completed');
+});
+
+test('native controller resume errors retain the main identity and never fall back to another agent', async t => {
+  const f = fixture(t); f.transport.live.clear();
+  const originalGet = f.transport.ctx.get;
+  f.transport.ctx.get = name => name === 'sessionController' ? {
+    resolveAgent: async () => ({ error: Error('native resume validation failed') }),
+  } : originalGet(name);
+  await assert.rejects(f.transport.ensureAgent(f.thread), { code: 'dsh_session_resume_failed' });
+  assert.equal(f.thread.sessionId, f.session.id);
+  assert.equal(f.transport.live.size, 0);
 });
 
 test('baseline and event sequence prevent history replay and duplicate native inputs', async t => {

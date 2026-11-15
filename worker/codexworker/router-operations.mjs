@@ -42,7 +42,17 @@ export function routerOperations(manager) {
     },
     async message(method, request = {}) {
       if (!manager?.workerMessages) throw new RouterOperationError(503, "worker_chat_unavailable", "Peer chat requires this plugin's active router connection.");
-      try { return await manager.workerMessages[method](request); }
+      if (method === "inbox" && ![undefined, "pending", "history"].includes(request.view))
+        throw new RouterOperationError(400, "invalid_message_view", "Use pending or history for ordinary chat messages.");
+      try {
+        if (method === "inbox" && request.view === "history") {
+          const messages = (await manager.workerMessages.history()).slice(-20)
+            .map(({ messageId, replyTo, from, to, timestamp, attachments }) =>
+              ({ messageId, replyTo, from, to, timestamp, attachments }));
+          return { ok: true, view: "history", count: messages.length, messages };
+        }
+        return await manager.workerMessages[method](request);
+      }
       catch (error) { throw new RouterOperationError(409, error.code ?? "worker_message_unconfirmed", error.message,
         { ...(error.messageId ? { messageId: error.messageId } : {}), ...(error.outcome ? { outcome: error.outcome } : {}) }); }
     },

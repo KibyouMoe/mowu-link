@@ -12,7 +12,7 @@ import { callTool } from "../interface/transport/desktop-pipe.mjs";
 
 const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j1WkAAAAASUVORK5CYII=", "base64");
 async function fixture(t, { active = false, dropWrite = false, rejectWrite = false, question = false,
-  cancel = false, finishOnCancel = true, message = false, respond } = {}) {
+  cancel = false, finishOnCancel = true, message = false, chat = null, chatImages = false, closure = false, respond } = {}) {
   const stateDir = await mkdtemp(path.join(os.tmpdir(), "native-image-图片-"));
   const messageId = randomUUID(), threadId = randomUUID(), owner = { pid: 700, startedAt: "test Desktop lifetime" };
   const image = path.join(stateDir, "feishu-images", "original.png");
@@ -23,6 +23,7 @@ async function fixture(t, { active = false, dropWrite = false, rejectWrite = fal
   const state = { selectedThreadId: threadId, sessions: { [threadId]: {} }, receipts: { [messageId]: receipt },
     feishuReceipts: { [messageId]: { incomingMessageId: "om_actual_feishu", imageThreadId: threadId, nativeImagePaths: [image] } } };
   let publicQuestion, action;
+  if (closure) question = true;
   if (question) {
     publicQuestion = projectPublicQuestion({ type: "AgentMessage", id: "call_original_question", phase: "commentary",
       delivery: "async", questions: [{ title: "继续吗？", options: ["继续", "停止"] }] }, { threadId, turnId: "source-turn" });
@@ -46,6 +47,31 @@ async function fixture(t, { active = false, dropWrite = false, rejectWrite = fal
     receipt.request = { source: "hermes", origin: "router", text: request.prompt };
     receipt.nativeInputHash = createHash("sha256").update(JSON.stringify(request.prompt)).digest("hex");
   }
+  if (chat) {
+    request.operation = "chat";
+    receipt.request = { source: "trainer", messageId, text: request.prompt };
+    if (!chatImages) { delete request.images; state.feishuReceipts[messageId].nativeImagePaths = []; }
+    if (chat === "peer") {
+      const peer = { messageId, from: "Hermes", to: "OguriCap" };
+      const folder = path.join(stateDir, "worker-messages", createHash("sha256").update(peer.to).digest("hex"));
+      receipt.request = { source: "hermes", origin: "worker-chat", messageId, targetThreadId: threadId,
+        text: request.prompt, metadata: { workerChat: peer } };
+      if (chatImages) {
+        const cached = path.join(folder, "images", "original.png");
+        await mkdir(path.dirname(cached), { recursive: true }); await writeFile(cached, png);
+        request.images = [cached]; receipt.request.attachments = [{ localPath: cached }];
+      }
+      await mkdir(path.join(folder, "received"), { recursive: true });
+      await writeFile(path.join(folder, "received", messageId + ".json"), JSON.stringify({
+        request: receipt.request, payload: { message_id: messageId, from: peer.from, to: peer.to } }));
+    }
+  }
+  if (closure) {
+    Object.assign(request, { operation: "questionClose", questionId: publicQuestion.questionId });
+    delete request.prompt; delete request.images; delete request.delivery;
+    action.status = "expired"; action.answers = null;
+    action.nativePanelSync = { kind: "closure", status: "dispatching", messageId };
+  }
   const saveAction = () => writeFile(path.join(stateDir, "question-actions.json"),
     JSON.stringify({ entries: { [publicQuestion.questionId]: action } }));
   if (question) await saveAction();
@@ -62,6 +88,7 @@ async function fixture(t, { active = false, dropWrite = false, rejectWrite = fal
       : message.method === "thread/items/list" ? { result: { data: [{ turnId: "active-turn", item: { id: "input", type: "userMessage" } }] } }
       : message.method === "thread/backgroundTerminals/list" ? { result: { data: [] } }
       : rejectWrite ? { error: { code: -32000, message: "original native rejection" } }
+      : message.method === "thread/inject_items" ? { result: {} }
       : { result: message.method === "turn/start" ? { turn: { id: "native-turn" } }
         : message.method === "thread/queue/add" ? { queuedSubmission: { id: messageId } } : { turnId: "active-turn" } });
     setImmediate(() => assert.equal(controller.server({ id: message.id, ...response }), false));
@@ -86,6 +113,66 @@ test("router text uses the existing native connection and one durable message UU
   const saved = JSON.parse(await readFile(path.join(f.stateDir, "native-message-receipts", f.request.messageId + ".json"), "utf8"));
   assert.equal(saved.status, "accepted");
   assert.equal(saved.result.turnId, "native-turn");
+});
+
+for (const chat of ["feishu", "peer"]) for (const active of [false, true]) for (const chatImages of [false, true])
+test(`${chat} native user input, busy=${active}, images=${chatImages}, uses one normal turn input`, async t => {
+  const f = await fixture(t, { chat, active, chatImages }); f.controller.client({ method: "initialized" });
+  const result = await f.send(); assert.deepEqual(await f.send(), result);
+  assert.deepEqual(f.calls.map(call => call.method), ["thread/turns/list", active ? "turn/steer" : "turn/start"]);
+  assert.equal(f.calls[1].params.expectedTurnId, active ? "active-turn" : undefined);
+  assert.equal(f.calls[1].params.clientUserMessageId, f.request.messageId);
+  assert.equal(f.calls[1].params.input[0].type, "text");
+  assert.equal(f.calls[1].params.input[0].text, f.request.prompt);
+  assert.equal(f.calls[1].params.input.length, chatImages ? 2 : 1);
+  assert.equal(f.calls.some(call => call.method === "thread/queue/add"), false);
+  const saved = JSON.parse(await readFile(path.join(f.stateDir, "native-chat-receipts", f.request.messageId + ".json"), "utf8"));
+  assert.equal(saved.status, "accepted");
+});
+
+test("ordinary chat never uses the delegated app-tool path, even while its renderer pipe is unavailable", async t => {
+  const f = await fixture(t, { chat: "feishu", active: true }); f.controller.client({ method: "initialized" });
+  const values = { ...f.env, CODEX_APP_TOOLS_PIPE_PATH: "unavailable-renderer-pipe" };
+  const previous = Object.keys(values).map(key => [key, process.env[key]]);
+  Object.assign(process.env, values);
+  t.after(() => { for (const [key, value] of previous) value === undefined ? delete process.env[key] : process.env[key] = value; });
+  const response = await callTool("send_message_to_thread", { threadId: f.request.threadId, prompt: f.request.prompt,
+    nativeChatInput: true, nativeMessageId: f.request.messageId, nativeDelivery: "steer" }, { threadId: f.request.threadId });
+  assert.equal(JSON.parse(response.contentItems[0].text).turnId, "active-turn");
+  assert.equal(f.calls[1].method, "turn/steer");
+});
+
+test("chat authority requires exact saved Feishu or peer admission and rejects task-shaped requests", async t => {
+  const f = await fixture(t, { chat: "feishu" }); f.controller.client({ method: "initialized" });
+  await assert.rejects(f.send({ ...f.request, taskId: "t-forged" }), /request_invalid/);
+  delete f.state.feishuReceipts[f.request.messageId]; await f.save();
+  await assert.rejects(f.send(), /receipt_mismatch/);
+  f.state.receipts[f.request.messageId].request.source = "hermes";
+  f.state.receipts[f.request.messageId].request.origin = "router"; await f.save();
+  await assert.rejects(f.send(), /receipt_mismatch/);
+  assert.equal(f.calls.length, 0);
+});
+
+for (const active of [false, true]) test(`closed native question withdraws its panel, active=${active}, without a new turn`, async t => {
+  const f = await fixture(t, { closure: true, active }); f.controller.client({ method: "initialized" });
+  const first = await f.send(); assert.deepEqual(await f.send(), first);
+  assert.deepEqual(f.calls.map(call => call.method), ["thread/turns/list", active ? "turn/steer" : "thread/inject_items"]);
+  const text = active ? f.calls[1].params.input[0].text : f.calls[1].params.items[0].content[0].text;
+  assert.match(text, /系统撤回，未提供答案/);
+  assert.match(text, /call_original_question/);
+  assert.equal(f.calls.some(call => call.method === "turn/start"), false);
+  assert.equal(f.action.answers, null);
+  const saved = JSON.parse(await readFile(path.join(f.stateDir, "native-question-closures", f.request.messageId + ".json"), "utf8"));
+  assert.equal(saved.status, "accepted");
+});
+
+test("native question withdrawal requires the exact closed question and saved control identity", async t => {
+  const f = await fixture(t, { closure: true }); f.controller.client({ method: "initialized" });
+  f.action.status = "open"; await f.saveAction();
+  await assert.rejects(f.send(), /closure_mismatch/);
+  f.action.status = "expired"; f.action.nativePanelSync.messageId = randomUUID(); await f.saveAction();
+  await assert.rejects(f.send(), /closure_mismatch/);
+  assert.equal(f.calls.length, 0);
 });
 
 test("a busy router target defers before writing and can retry the same UUID when idle", async t => {
@@ -407,7 +494,7 @@ test("actual Worker Feishu dispatch and native image validation use the same per
   assert.equal(manager.state.receipts[result.messageId].nativeDispatch.status, "accepted");
   assert.equal(manager.state.receipts[result.messageId].nativeTurnId, "native-original-turn");
   assert.equal(calls[1].params.input[1].type, "localImage");
-  assert.equal(calls[1].params.input[0].text, "飞书：训练员从飞书发送了一张图片。");
+  assert.equal(calls[1].params.input[0].text, "飞书：\n训练员从飞书发送了一张图片。");
   const saved = JSON.parse(await readFile(path.join(root, "native-image-receipts", result.messageId + ".json"), "utf8"));
   assert.equal(saved.status, "accepted"); assert.equal(manager.state.selectedThreadId, "original-chat");
 });

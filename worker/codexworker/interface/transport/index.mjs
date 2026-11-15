@@ -46,5 +46,6 @@ export function resolveNativeCapabilities() {
     callerTurn: declared.callerTurn !== false,
     imageInput: declared.imageInput === true,
     questionInput: declared.questionInput === true,
+    chatInput: declared.chatInput === true,
   };
 }

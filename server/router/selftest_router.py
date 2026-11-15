@@ -448,6 +448,20 @@ def peer_selftest(checker, work, trigger_url, trigger_token):
                           for edits in ({"to": c, "reply_to": mid},
                                         {"to": a, "reply_to": mid})))
 
+        code, root_message = call("POST", "/messages", payload(**{
+            "from": "Hermes", "to": c, "text": "溪流普通私聊"}))
+        root_reply_code, root_reply = call("POST", "/messages", payload(**{
+            "from": c, "to": "Hermes", "text": "普通回复", "reply_to": root_message.get("message_id")}))
+        root_history = call("GET", "/messages?worker=Hermes&view=history")[1]
+        root_inbox = call("GET", "/messages?worker=Hermes")[1]
+        checker.check("peer Hermes identity: bidirectional chat needs no worker registration or task",
+                      code == root_reply_code == 202
+                      and len(root_history.get("messages", [])) == 2
+                      and ids(root_inbox.get("messages", [])) == [root_reply.get("message_id")]
+                      and not any(row["name"] == "Hermes" for row in call("GET", "/workers")[1]["workers"]))
+        call("POST", "/messages/" + root_message["message_id"] + "/ack", {"worker": c})
+        call("POST", "/messages/" + root_reply["message_id"] + "/ack", {"worker": "Hermes"})
+
         image = base64.b64decode(
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=")
         sha = hashlib.sha256(image).hexdigest()
@@ -535,7 +549,8 @@ def peer_selftest(checker, work, trigger_url, trigger_token):
                       and [row["seq"] for row in records] == sorted((row["seq"] for row in records), reverse=True)
                       and len(ids(records)) == len(set(ids(records))))
         checker.check("peer history: worker scope, byte/count limits and attachment metadata are preserved",
-                      not history(c)["messages"] and history(b, limit=1)["count"] == 1
+                      set(ids(history(c)["messages"])) == {root_message["message_id"], root_reply["message_id"]}
+                      and history(b, limit=1)["count"] == 1
                       and len(json.dumps(history(b), ensure_ascii=False).encode()) <= 256 * 1024
                       and next(row for row in records if row["message_id"] == attached["message_id"])["attachments"] == [image_meta])
         checker.check("peer history: reads do not ACK, replay SSE, create tasks or change pending inbox",

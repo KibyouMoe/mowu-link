@@ -2,10 +2,12 @@ import { lstat, readFile } from "node:fs/promises";
 import net from "node:net";
 
 export async function sendNativeInput(args, { env = process.env, timeoutMs = 30000 } = {}) {
-  const flag = ["message", "cancel"].includes(args.operation) ? "CODEXWORKER_NATIVE_TASK_INPUT"
-    : args.operation === "questionReply" ? "CODEXWORKER_NATIVE_QUESTION_INPUT" : "CODEXWORKER_NATIVE_IMAGE_INPUT";
+  const flag = args.operation === "chat" ? "CODEXWORKER_NATIVE_CHAT_INPUT"
+    : ["message", "cancel"].includes(args.operation) ? "CODEXWORKER_NATIVE_TASK_INPUT"
+    : ["questionReply", "questionClose"].includes(args.operation) ? "CODEXWORKER_NATIVE_QUESTION_INPUT" : "CODEXWORKER_NATIVE_IMAGE_INPUT";
   if (env[flag] !== "1" || !env.CODEXWORKER_NATIVE_INPUT_DESCRIPTOR)
-    throw new Error("native_input_unavailable");
+    throw Object.assign(new Error("native_input_unavailable"), {
+      nativeErrorCode: "native_input_unavailable", nativeImageOutcome: "notAttempted" });
   const file = env.CODEXWORKER_NATIVE_INPUT_DESCRIPTOR, stat = await lstat(file);
   if (!stat.isFile() || stat.isSymbolicLink() || typeof process.getuid === "function" &&
       (stat.uid !== process.getuid() || stat.mode & 0o077)) throw new Error("native_image_descriptor_not_private");

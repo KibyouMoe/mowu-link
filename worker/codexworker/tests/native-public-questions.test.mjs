@@ -6,7 +6,7 @@ import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { DesktopManager, PROTOCOL, publicItems } from "../desktop-manager.mjs";
 import { publicJournalItem } from "../local-public-journal.mjs";
-import { projectPublicQuestion, nativeQuestionReply, parseNativeQuestionReply, SKIPPED_QUESTION_ANSWER } from "../interface/public-questions.mjs";
+import { projectPublicQuestion, nativeQuestionReply, parseNativeQuestionReply, SKIPPED_QUESTION_ANSWER, nativeQuestionClosure } from "../interface/public-questions.mjs";
 
 const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j1WkAAAAASUVORK5CYII=", "base64");
 const content = keys => JSON.stringify({title:"图片问题",content:[...keys.map(image_key=>[{tag:"img",image_key}]),[{tag:"text",text:"这个是啥呀"}]]});
@@ -237,6 +237,46 @@ test("native async choices cannot deliver into a newer task after their own turn
  await f.manager.questions.process();
  assert.equal(f.manager.questions.get(q.questionId).status,"expired");
  assert.equal(f.calls.filter(c=>c.name==="send_message_to_thread").length,0);
+});
+
+test("native question expiration withdraws the original panel without recording an answer or a second public input", async t => {
+ const f=await fixture(t);ui(f);const q=await observe(f);
+ f.manager.config.nativeQuestionInput=true;f.manager.handoffPaused=false;
+ await f.manager.drainPublicTexts();
+ f.manager.deliveryState=async()=>({turns:[{id:"new-task",status:"inProgress"}]});
+ await f.manager.questions.process();
+ const status=f.manager.questions.get(q.questionId);
+ assert.equal(status.status,"expired");assert.equal(status.answers,null);
+ const calls=f.calls.filter(c=>c.name==="send_message_to_thread");
+ assert.equal(calls.length,1);assert.equal(calls[0].args.nativeQuestionClose.questionId,q.questionId);
+ assert.equal(status.nativePanelSync,"accepted");
+ const before=(await f.manager.messageJournal.list()).records.length;
+ const id=await f.manager.observeNativeInput(f.session,{key:"new-task/native-closure",turnId:"new-task",
+   text:nativeQuestionClosure(f.manager.state.publicQuestions[q.questionId],"expired")});
+ assert.equal(id,calls[0].args.nativeQuestionClose.messageId);
+ assert.equal((await f.manager.messageJournal.list()).records.length,before);
+ assert.equal(f.manager.questions.get(q.questionId).status,"expired");
+ await f.manager.questions.process();
+ assert.equal(f.calls.filter(c=>c.name==="send_message_to_thread").length,1);
+});
+
+test("a rejected native withdrawal waits before retrying and an unknown withdrawal is never repeated", async t => {
+ const f=await fixture(t);ui(f);const q=await observe(f);
+ f.manager.config.nativeQuestionInput=true;f.manager.handoffPaused=false;
+ await f.manager.drainPublicTexts();
+ f.manager.deliveryState=async()=>({turns:[{id:"new-task",status:"inProgress"}]});
+ let writes=0;
+ f.manager.call=async()=>{writes++;throw Object.assign(Error("not connected"),{body:{nativeInputOutcome:"notAttempted"}});};
+ await f.manager.questions.process();await f.manager.questions.process();
+ const state=f.manager.questions.state.entries[q.questionId];
+ assert.equal(writes,1);assert.equal(state.nativePanelSync.status,"rejected");
+ const controlId=state.nativePanelSync.messageId;
+ state.nativePanelSync.retryAt=0;
+ f.manager.call=async()=>{writes++;throw Error("response lost after write");};
+ await f.manager.questions.process();await f.manager.questions.process();
+ assert.equal(writes,2);assert.equal(state.nativePanelSync.status,"unknown");
+ assert.equal(state.nativePanelSync.messageId,controlId);
+ assert.equal(f.manager.questions.get(q.questionId).answers,null);
 });
 
 function fallback(f) {

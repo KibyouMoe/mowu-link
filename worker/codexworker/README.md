@@ -6,13 +6,13 @@ Windows 监督器由真实 Desktop 托管。Desktop 退出时关闭所属 Worker
 独立 Worker CLI、私有 app-server、headless 启动和失败后的其他入口均已移除。
 Node 是插件执行环境，不是另一个模型宿主。
 
-## 协作记录
+## 私聊输入
 
-`bridge_collaboration_records` 返回只读页面入口及最近消息的回复关联元数据，可用 Desktop 的
-`open_in_codex` 在当前聊天侧栏打开。页面显示最近 200 条记录，每两秒更新正文、时间与附件缩略图，读取现有互聊
-回执，不回放模型输入。页面的独立只读凭据不能调用 manager 写入接口。
-飞书显示「来自 对方：正文」与时间，图片通过独立媒体消息发送。消息 UUID、回复关联与
-防回环规则保留在 metadata / MCP instructions，原 UUID 继续负责重试与去重。
+peer 与飞书消息使用原生用户输入。运行中的会话通过 steering 在当前工具结果返回后继续处理输入，
+空闲会话从该输入开始回合。客户端显示发送者、换行正文、时间与原生附件。
+消息 UUID、回复关联与防回环规则保留在 metadata / MCP instructions，原 UUID 负责重试与去重。
+需要查询已收发消息的回复关联时，调用 `bridge_worker_inbox({"view":"history"})`。
+该查询读取既有消息记录，默认 `view="pending"` 读取待接收消息。
 
 ## 原生审批转交
 

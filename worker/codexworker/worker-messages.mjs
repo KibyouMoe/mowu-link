@@ -7,7 +7,7 @@ import { PROTOCOL } from "./desktop-manager.mjs";
 import { imageType, MAX_ROUTER_IMAGE_BYTES } from "./router-attachments.mjs";
 import { localHost } from "./interface/native-dispatch.mjs";
 import { UUID_PATTERN, UUID_V4_PATTERN } from "./identifiers.mjs";
-import { WORKER_CHAT_POLICY, peerPresentation } from "./collaboration-view.mjs";
+import { WORKER_CHAT_POLICY, peerPresentation } from "./worker-message-format.mjs";
 
 const owners = new WeakMap();
 const IMAGE_ID = /^[0-9a-f]{64}$/;
@@ -117,6 +117,7 @@ export function startWorkerMessaging({ manager, client, worker, log = () => {} }
   const root = path.resolve(manager.stateDir, "worker-messages", digest(worker));
   const abort = new AbortController(), stopped = Object.assign(new Error("worker_messaging_closed"), { code: "worker_messaging_closed" });
   let closed = false, pending = 0, tail = Promise.resolve(), closing;
+  const incomingRequests = new Map();
   let historyRead, historyNextReadAt = 0, routerHistory = [];
   const check = () => { if (closed || manager.closed || manager.handoffPaused || manager.proxy) throw stopped; };
   const note = (level, event, fields) => { try { log(level, event, fields); } catch {} };
@@ -182,7 +183,7 @@ export function startWorkerMessaging({ manager, client, worker, log = () => {} }
           // Older routers ignore view=history and return the pending inbox.
           if (page?.view !== "history") return routerHistory;
           if (page.ok !== true || page.worker !== worker || !Array.isArray(page.messages) || page.messages.length > 100)
-            fail("invalid_worker_history", "Router returned an invalid collaboration history.");
+            fail("invalid_worker_history", "Router returned an invalid peer message history.");
           let last = before;
           for (const value of page.messages) {
             if (!Number.isSafeInteger(value?.seq) || value.seq < 1 || value.seq >= last)
@@ -333,7 +334,7 @@ export function startWorkerMessaging({ manager, client, worker, log = () => {} }
       for (const ref of payload.attachments) paths.push(await image(ref));
       record.request = { protocolVersion: PROTOCOL, messageId: nativeId, source: "hermes", origin: "worker-chat",
         workerName: payload.from, peerMessageId: id, reply_to: payload.reply_to,
-        targetThreadId: record.targetThreadId, delivery: "queue",
+        targetThreadId: record.targetThreadId, delivery: "steer",
         text: peerPresentation(payload, record.timestamp).displayText,
         metadata: { workerChat: { ...peerPresentation(payload, record.timestamp), messageId: id,
           replyTo: payload.reply_to, policy: WORKER_CHAT_POLICY,
@@ -380,6 +381,22 @@ export function startWorkerMessaging({ manager, client, worker, log = () => {} }
     return { ok: true, worker, count: messages.length, messages, has_more: result.has_more === true, next_after: result.next_after ?? null };
   }
 
+  async function receive(envelope) {
+    check();
+    const payload = incoming(envelope, worker), id = payload.message_id;
+    const previous = incomingRequests.get(id);
+    if (previous) {
+      if (!same(previous.payload, payload)) fail("message_id_conflict", "This pending messageId has different peer content.", id);
+      return { ...await previous.promise, duplicate: true };
+    }
+    pending++;
+    const promise = Promise.resolve().then(() => { check(); return receiveMessage(envelope); }).finally(() => {
+      incomingRequests.delete(id); pending--;
+    });
+    incomingRequests.set(id, { payload, promise });
+    return promise;
+  }
+
   const service = {
     send(request) {
       return enqueue(async () => {
@@ -413,7 +430,7 @@ export function startWorkerMessaging({ manager, client, worker, log = () => {} }
           duplicate: duplicate || record.router.duplicate, mirror: record.mirror, images: record.imageMirrors ?? {} };
       });
     },
-    receive: envelope => enqueue(() => receiveMessage(envelope)),
+    receive,
     history,
     async readImage(id) {
       const ref = (await history()).flatMap(record => record.attachments).find(ref => ref.id === id);
@@ -430,7 +447,7 @@ export function startWorkerMessaging({ manager, client, worker, log = () => {} }
         do {
           const page = await readInbox({ after });
           for (const message of page.messages) {
-            try { await receiveMessage(message); accepted++; }
+            try { await receive(message); accepted++; }
             catch (error) {
               check();
               failures.push({ messageId: message.message_id, code: error.code ?? "worker_message_receive_failed", retrySameMessageId: true });
@@ -451,7 +468,8 @@ export function startWorkerMessaging({ manager, client, worker, log = () => {} }
     close() {
       if (closing) return closing;
       closed = true; abort.abort(stopped);
-      closing = tail.finally(() => { if (owners.get(manager)?.service === service) owners.delete(manager); });
+      closing = Promise.allSettled([tail, ...[...incomingRequests.values()].map(entry => entry.promise)])
+        .finally(() => { if (owners.get(manager)?.service === service) owners.delete(manager); });
       return closing;
     },
   };

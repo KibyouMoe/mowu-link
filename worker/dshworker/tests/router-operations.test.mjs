@@ -18,6 +18,23 @@ test("ordinary peer chat and inbox never submit a work order", async () => {
   assert.equal(f.calls.length, 0);
 });
 
+test("peer history keeps reply metadata available through the ordinary inbox query", async () => {
+  const f = fixture();
+  const record = { messageId: randomUUID(), from: "TamamoCross", to: "OguriCap", replyTo: null,
+    timestamp: "2026-11-15T14:00:00Z", attachments: [] };
+  const records = [{ ...record, text: "收到" }];
+  f.manager.workerMessages.history = async () => records;
+  assert.deepEqual(await f.ops.message("inbox", { view: "history" }),
+    { ok: true, view: "history", count: 1, messages: [record] });
+  f.manager.workerMessages.history = async () => Array.from({ length: 25 }, () => ({ ...record, text: "长正文".repeat(20000) }));
+  const bounded = await f.ops.message("inbox", { view: "history" });
+  assert.equal(bounded.count, 20);
+  assert.equal(bounded.messages.length, 20);
+  assert.ok(bounded.messages.every(message => !("text" in message)));
+  await assert.rejects(f.ops.message("inbox", { view: "unknown" }), error => error.status === 400);
+  assert.equal(f.calls.length, 0);
+});
+
 test("formal work order carries its stable request UUID, native goal mode and no default deadline", async () => {
   const f = fixture(), messageId = randomUUID();
   const request = { messageId, worker: "Rudolf", goal: "验证插件生命周期", context: "既有项目的交付项" };

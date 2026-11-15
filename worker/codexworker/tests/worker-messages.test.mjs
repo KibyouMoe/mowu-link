@@ -5,7 +5,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { DesktopManager } from "../desktop-manager.mjs";
+import { DesktopManager, PROTOCOL } from "../desktop-manager.mjs";
 import RouterClient from "../router-client.mjs";
 import { startWorkerMessaging } from "../worker-messages.mjs";
 
@@ -72,7 +72,7 @@ async function fixture(t) {
     if (name === "send_message_to_thread") return { threadId: args.threadId, turnId: "turn-1" };
     assert.fail(`Peer chat must not call native tool ${name}`);
   };
-  const config = { nativeSenderThreadId: "sender", messageSourceLabels: false,
+  const config = { nativeSenderThreadId: "sender", nativeBusyDeliveryVerified: true, messageSourceLabels: false,
     workspaceRoots: [root], feishu: { transcriptEnabled: true } };
   const manager = new DesktopManager({ native, stateDir: root, config });
   for (const id of ["thread-1", "thread-2"])
@@ -92,9 +92,29 @@ async function fixture(t) {
   return { root, router, nativeCalls, mirrors, replies, requests, manager, client, options, service, nativeMessage, sentFile };
 }
 const ackCalls = router => router.calls.filter(c => c.endpoint.endsWith("/ack"));
+
+for (const text of ["legacy queued peer input", "/stop", "/queue later", "//literal"])
+test(`native peer input steers a busy turn with its original text: ${text}`, async t => {
+  const f = await fixture(t), messageId = randomUUID();
+  f.manager.config.nativeChatInput = true;
+  f.manager.deliveryState = async () => ({ turns: [{ id: "active-turn", status: "inProgress" }] });
+  const request = { protocolVersion: PROTOCOL, messageId, source: "hermes", origin: "worker-chat",
+    targetThreadId: "thread-1", delivery: "queue", text,
+    metadata: { workerChat: { from: peer, to: worker, messageId, text } } };
+  await f.nativeMessage(request);
+  const send = f.nativeCalls.find(call => call.name === "send_message_to_thread");
+  assert.ok(send);
+  assert.equal(send.args.nativeChatInput, true);
+  assert.equal(send.args.nativeDelivery, "steer");
+  assert.equal(send.args.prompt, `来自 ${peer}：\n${text}`);
+  assert.equal(f.nativeCalls.length, 1);
+  assert.equal(f.manager.state.sessions["thread-1"].queue.length, 0);
+  assert.equal(f.manager.state.events.some(event => event.type === "message.queued"), false);
+  assert.equal(f.manager.state.receipts[messageId].request.delivery, "queue");
+});
 async function dispatch(f) {
   const session = f.manager.state.sessions["thread-1"];
-  await f.manager.dispatchQueued(session, session.queue.shift(), { turns: [] });
+  if (session.queue.length) await f.manager.dispatchQueued(session, session.queue.shift(), { turns: [] });
 }
 
 test("send derives the authenticated sender, persists router acceptance before mirroring and never sends native input", async t => {
@@ -157,7 +177,8 @@ test("a new manager instance reads durable send/receive receipts without mirrori
   const next = startWorkerMessaging({ ...f.options, manager: restored }); t.after(() => next.close());
   assert.equal((await next.send(outgoing)).duplicate, true);
   assert.equal((await next.receive(value)).duplicate, true);
-  assert.equal(restored.state.sessions["thread-1"].queue.length, 1);
+  assert.equal(restored.state.sessions["thread-1"].queue.length, 0);
+  assert.equal(f.nativeCalls.length, 1);
   assert.equal(f.router.calls.filter(c => c.endpoint === "/messages").length, 1);
 });
 
@@ -194,14 +215,14 @@ test("send validation rejects bad IDs, destinations, text, reply IDs and local a
   await f.service.send({ ...request, text: "😀".repeat(20000) });
 });
 
-test("duplicate full SSE payloads queue one manager input and mirror once, including after restart and switch", async t => {
+test("duplicate full SSE payloads steer one manager input and mirror once, including after restart and switch", async t => {
   const f = await fixture(t), value = f.router.add(message({ reply_to: randomUUID(), text: "/goal this remains ordinary chat" }));
   const first = await f.service.receive(value);
-  assert.equal(first.action, "message_queued"); assert.equal(first.acked, true);
+  assert.equal(first.action, "dispatch_pending"); assert.equal(first.acked, true);
   await f.service.close(); f.manager.state.selectedThreadId = "thread-2";
   const next = startWorkerMessaging(f.options); t.after(() => next.close());
   assert.equal((await next.receive({ message: { ...value, status: "accepted", acked_at: 2 } })).duplicate, true);
-  assert.equal(f.mirrors.length, 1); assert.equal(f.manager.state.sessions["thread-1"].queue.length, 1);
+  assert.equal(f.mirrors.length, 1); assert.equal(f.manager.state.sessions["thread-1"].queue.length, 0);
   assert.equal(f.manager.state.sessions["thread-2"].queue.length, 0);
   const request = f.requests[0];
   assert.equal(request.messageId, value.message_id); assert.equal(request.peerMessageId, value.message_id);
@@ -231,7 +252,7 @@ test("foreign non-v4 UUIDs keep their original peer metadata and ACK while using
   await f.service.close(); const next = startWorkerMessaging(f.options); t.after(() => next.close());
   const repeat = await next.receive(value);
   assert.equal(repeat.nativeMessageId, first.nativeMessageId); assert.equal(repeat.duplicate, true);
-  assert.equal(f.manager.state.sessions["thread-1"].queue.length, 1); assert.equal(f.mirrors.length, 1);
+  assert.equal(f.manager.state.sessions["thread-1"].queue.length, 0); assert.equal(f.mirrors.length, 1);
   const sent = await next.send({ messageId: "6ba7b812-9dad-11d1-80b4-00c04fd430c8", to: peer, text: "foreign UUID sender", replyTo: original });
   assert.equal(sent.messageId, "6ba7b812-9dad-11d1-80b4-00c04fd430c8");
   assert.equal(f.router.calls.find(c => c.endpoint === "/messages").body.reply_to, original);
@@ -269,7 +290,7 @@ test("ACK waits for durable manager acceptance, even when the response is alread
   f.router.beforeAck = async () => {
     const disk = JSON.parse(await readFile(f.manager.statePath, "utf8"));
     assert.equal(disk.receipts[value.message_id].response.accepted, true);
-    assert.equal(disk.sessions["thread-1"].queue[0].messageId, value.message_id);
+    assert.equal(disk.receipts[value.message_id].nativeDispatch.status, "accepted");
   };
   const receiving = f.service.receive(value); assert.equal(f.service.busy(), true);
   await entered.promise; assert.equal(ackCalls(f.router).length, 0);
@@ -291,30 +312,52 @@ test("accepted-looking results without a durable receipt, failures and unknown d
   assert.equal(f.mirrors.length, 1); assert.equal(ackCalls(f.router).length, 0);
 });
 
-test("a durable native deferral stays queued and same-ID redelivery can ACK it", async t => {
+test("an ACK failure never repeats an already accepted native steering input", async t => {
   const f = await fixture(t), value = f.router.add(message());
   f.router.beforeAck = async () => { throw Error("router unavailable"); };
   await assert.rejects(f.service.receive(value), /router unavailable/);
-  f.manager.deliveryState = async () => ({ turns: [{ id: "busy-turn", status: "inProgress" }] });
-  await dispatch(f);
-  const receipt = f.manager.state.receipts[value.message_id];
-  assert.equal(receipt.nativeDispatch.status, "deferred"); assert.equal(f.manager.state.sessions["thread-1"].queue[0].messageId, value.message_id);
+  assert.equal(f.manager.state.receipts[value.message_id].nativeDispatch.status, "accepted");
   f.router.beforeAck = undefined;
   assert.equal((await f.service.receive(value)).acked, true);
-  assert.equal(f.nativeCalls.length, 0); assert.equal(f.mirrors.length, 1);
+  assert.equal(f.nativeCalls.length, 1); assert.equal(f.mirrors.length, 1);
 });
 
-test("unknown native write after an ACK failure is never sent or acknowledged again", async t => {
+test("slow outgoing image mirroring cannot hold a new incoming peer input", async t => {
+  const started = gate(), release = gate();
+  t.after(() => release.resolve());
+  const f = await fixture(t);
+  f.client.url = await listen(t, (_req, res) => {
+    res.writeHead(200, { "content-type": "image/png", "content-length": png.length, "x-attachment-sha256": sha });
+    res.end(png);
+  });
+  f.manager.notifier = {};
+  f.manager.sendImage = async () => { started.resolve(); await release.promise; return { status: "sent" }; };
+  const outgoing = f.service.send({ messageId: randomUUID(), to: peer, text: "outgoing image", attachments: [{ id: sha }] });
+  await Promise.race([started.promise, outgoing.then(() => assert.fail("outgoing image must reach the mirror"))]);
+  const value = f.router.add(message());
+  assert.equal((await f.service.receive(value)).acked, true);
+  assert.equal(f.nativeCalls.length, 1);
+  assert.equal(f.manager.session().queue.length, 0);
+  release.resolve(); await outgoing;
+});
+
+test("concurrent duplicate peer events have one native input and one acknowledgement", async t => {
   const f = await fixture(t), value = f.router.add(message());
-  f.router.beforeAck = async () => { throw Error("ACK connection failed"); };
+  const results = await Promise.all(Array.from({ length: 5 }, () => f.service.receive(value)));
+  assert.equal(results.filter(result => result.duplicate).length, 4);
+  assert.equal(f.nativeCalls.length, 1);
+  assert.equal(ackCalls(f.router).length, 1);
+  assert.equal(f.mirrors.length, 1);
+});
+
+test("an unknown native steering write is never repeated or acknowledged", async t => {
+  const f = await fixture(t), value = f.router.add(message());
+  let writes = 0;
+  f.manager.native = async () => { writes++; throw Error("lost native response"); };
   await assert.rejects(f.service.receive(value));
-  let writes = 0; f.manager.native = async () => { writes++; throw Error("lost native response"); };
-  await dispatch(f);
   assert.equal(f.manager.state.receipts[value.message_id].nativeDispatch.status, "unknown");
-  const ackCount = ackCalls(f.router).length;
-  f.router.beforeAck = undefined;
   await assert.rejects(f.service.receive(value)); await assert.rejects(f.service.receive(value));
-  assert.equal(writes, 1); assert.equal(ackCalls(f.router).length, ackCount);
+  assert.equal(writes, 1); assert.equal(ackCalls(f.router).length, 0);
 });
 
 test("inbox is read-only and bound to the current worker; poll drains pages without tasks or automatic replies", async t => {
@@ -428,10 +471,10 @@ test("unconfirmed Feishu image output preserves peer acceptance without an autom
   assert.equal(receipt.images[sha].status, "unconfirmed");
   await f.service.receive(value);
   assert.equal(sends, 1);
-  assert.equal(f.manager.state.sessions["thread-1"].queue.length, 1);
+  assert.equal(f.manager.state.sessions["thread-1"].queue.length, 0);
 });
 
-test("collaboration includes direct router sends and accepted replies without re-dispatch or ACK", async t => {
+test("peer history includes direct router sends and accepted replies without re-dispatch or ACK", async t => {
   const f = await fixture(t);
   const outgoing = f.router.add(message({ from: worker, to: peer, text: "direct router send", seq: 1 }));
   const reply = f.router.add(message({ status: "accepted", reply_to: outgoing.message_id, seq: 2 }));
@@ -475,7 +518,7 @@ test("history-only outgoing attachments download original bytes without sending 
   assert.equal(f.router.calls.every(c => c.method === "GET"), true);
 });
 
-test("concurrent collaboration reads share bounded descending pages and keep only the newest 200", async t => {
+test("concurrent peer history reads share bounded descending pages and keep only the newest 200", async t => {
   const f = await fixture(t);
   for (let seq = 1; seq <= 205; seq++)
     f.router.add(message({ from: worker, to: peer, seq, created_at: seq }));

@@ -1142,6 +1142,33 @@ test("upgrade migrates the old readback slot and drains its unsent steer backlog
   assert.equal(restored.state.events.filter(e => e.type === "turn.steered").length, 3);
 });
 
+test("upgrade steers a known-unsent legacy peer receipt while preserving its UUID, saved request and uncertain peers", async t => {
+  const f = await fixture(t, { nativeBusyDeliveryVerified: true, nativeSendFromTarget: true });
+  seedBusy(f); await f.register();
+  const legacy = req("来自 TamamoCross：继续原任务", { targetThreadId: "existing", delivery: "queue",
+    origin: "worker-chat", metadata: { workerChat: { from: "TamamoCross", to: "OguriCap", text: "继续原任务" } } });
+  const uncertain = { ...structuredClone(legacy), messageId: randomUUID() };
+  const ordinary = req("explicit queue", { targetThreadId: "existing", delivery: "queue" });
+  const session = f.manager.session();
+  session.queue = [legacy, uncertain, ordinary];
+  for (const request of session.queue) f.manager.state.receipts[request.messageId] = {
+    request, pending: false, response: { accepted: true, messageId: request.messageId, action: "message_queued" } };
+  f.manager.state.receipts[uncertain.messageId].nativeDispatch = { status: "unknown" };
+  f.manager.state.receipts[uncertain.messageId].error = { error: "dispatch_outcome_unknown" };
+  await f.manager.save(); await f.manager.close();
+  const restored = await new DesktopManager({ native: f.native, listNativeTools: f.listNativeTools,
+    stateDir: f.root, config: f.config }).initialize();
+  t.after(() => restored.close());
+  assert.deepEqual(restored.session().steerQueue, [legacy]);
+  assert.deepEqual(restored.session().queue, [uncertain, ordinary]);
+  await restored.message(req("new arrival"));
+  assert.deepEqual(f.calls.filter(call => call.name === "send_message_to_thread").map(call => call.args.prompt),
+    ["来自 TamamoCross：\n继续原任务", "new arrival"]);
+  assert.deepEqual(restored.state.receipts[legacy.messageId].request, legacy);
+  assert.equal(restored.state.receipts[legacy.messageId].nativeDispatch.status, "accepted");
+  assert.equal(restored.state.receipts[uncertain.messageId].nativeDispatch.status, "unknown");
+});
+
 test("Feishu defaults to busy delivery and every interjection's Typing reaction is cleaned at the shared terminal", async t => {
   const f = await fixture(t, { nativeBusyDeliveryVerified: true, nativeSendFromTarget: true,
     feishu: { trainerOpenIdWhitelist: ["trainer"], streamEnabled: false } }); seedBusy(f); await f.register();
@@ -1359,12 +1386,12 @@ test("visible Feishu and Hermes source labels preserve full originals, idempoten
     message_id: "om_label_multiline", open_id: "trainer", chat_id: "oc_test" };
   const accepted = await f.manager.receiveFeishu(event); await f.manager.receiveFeishu(event);
   assert.equal(f.calls.filter(c => c.name === "send_message_to_thread").length, 1);
-  assert.equal(f.calls.filter(c => c.name === "send_message_to_thread").at(-1).args.prompt, "飞书：" + original);
+  assert.equal(f.calls.filter(c => c.name === "send_message_to_thread").at(-1).args.prompt, "飞书：\n" + original);
   assert.equal(f.manager.state.receipts[accepted.messageId].request.text, original);
   await f.manager.scan(); f.finish(); await f.manager.scan();
   assert.ok(f.manager.state.events.some(e => e.messageId === accepted.messageId && e.type === "turn.completed"));
   const hermes = req(original); await f.manager.message(hermes); await f.manager.message(hermes);
-  assert.equal(f.calls.filter(c => c.name === "send_message_to_thread").at(-1).args.prompt, "超级溪流：" + original);
+  assert.equal(f.calls.filter(c => c.name === "send_message_to_thread").at(-1).args.prompt, "超级溪流：\n" + original);
   assert.equal(f.manager.state.receipts[hermes.messageId].request.text, original);
   await f.manager.scan(); f.finish(); await f.manager.scan();
   assert.ok(f.manager.state.events.some(e => e.messageId === hermes.messageId && e.type === "turn.completed"));

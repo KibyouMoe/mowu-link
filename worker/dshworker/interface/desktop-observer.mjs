@@ -18,12 +18,50 @@ export class DshDesktopObserver {
         }
       })),
     ];
+    for (const agent of transport.ctx.get?.("agents")?.list?.() ?? []) {
+      const owner = this.owner(agent.session);
+      if (owner?.agent === agent) this.baseline(agent, owner.thread);
+    }
   }
   guard(fn) {
     if (this.transport.closing) return;
     try { fn(); } catch (error) { this.transport.log("warn", "desktop_observation_failed", { message: error.message }); }
   }
-  baseline(agent) { this.cursors.set(agent.session, agent.session.seq - 1); }
+  baseline(agent, thread) {
+    const session = agent.session;
+    this.cursors.set(session, session.seq - 1);
+    if (!thread || this.active(thread) || agent.status !== "running") return;
+    // A controller-owned agent survives plugin reload. Reattach its current
+    // turn without replaying historical inputs or submitting another prompt.
+    let start;
+    for (let seq = session.seq - 1; seq >= 0; seq--) {
+      const event = session.eventAt(seq);
+      if (event?.type === "turn/end") break;
+      if (event?.type === "turn/start") { start = event; break; }
+    }
+    if (!start) return;
+    let turn = thread.turns.find(candidate => candidate.nativeDetached && candidate.status === "interrupted" &&
+      candidate.nativeStartSeq === start.seq);
+    if (turn) {
+      Object.assign(turn, { nativeDesktop: true, status: "inProgress", completedAt: null, error: null, reasonKind: null });
+      delete turn.nativeDetached;
+      delete turn.settling;
+      delete turn.nativeEnd;
+      thread.running = true; thread.status = "inProgress";
+    } else turn = this.begin(thread, session, start.seq);
+    this.transport.log("info", "desktop_turn_reattached", {
+      threadId: thread.id, sessionId: session.id, turnId: turn.id, seq: start.seq });
+    void this.transport.save();
+  }
+  begin(thread, session, seq) {
+    const turn = { id: `dsh-desktop-${session.id}-${seq}`, nativeDesktop: true, nativeStartSeq: seq,
+      prompt: "", text: "", status: "inProgress", eventSeq: 0,
+      startedAt: new Date().toISOString(), completedAt: null, error: null };
+    thread.turns.push(turn);
+    if (thread.turns.length > 200) thread.turns.splice(0, thread.turns.length - 200);
+    thread.running = true; thread.status = "inProgress"; thread.updatedAt = turn.startedAt;
+    return turn;
+  }
   sent(message, turn) { this.inputs.set(message.id, turn?.id); return message; }
   release(turn) { for (const [id, turnId] of this.inputs) if (turnId === turn.id) this.inputs.delete(id); }
   active(thread) { return thread.turns.find(t => t.status === "inProgress" && !thread.queue.includes(t.id)); }
@@ -35,7 +73,7 @@ export class DshDesktopObserver {
       if (!agent || agent.status === "disposed") {
         agent = t.ctx.get("agents")?.list?.().find(a => a.session?.id === thread.sessionId && a.status !== "disposed");
         // A Desktop-resumed agent is borrowed, not owned by the plugin.
-        if (agent) t.live.set(thread.id, { agent, handle: { dispose: async () => {} } });
+        if (agent) t.live.set(thread.id, { agent, borrowed: true, handle: { dispose: async () => {} } });
       }
       if (agent && t.agentsForTurn(agent).some(a => a.session === session)) return { thread, agent };
     }
@@ -52,16 +90,12 @@ export class DshDesktopObserver {
     const root = session === agent.session;
     let turn = this.active(thread);
     if (root && event.type === "turn/start" && !turn) {
-      turn = { id: `dsh-desktop-${session.id}-${event.seq}`, nativeDesktop: true,
-        prompt: "", text: "", status: "inProgress", eventSeq: 0,
-        startedAt: new Date().toISOString(), completedAt: null, error: null };
-      thread.turns.push(turn);
-      if (thread.turns.length > 200) thread.turns.splice(0, thread.turns.length - 200);
-      thread.running = true; thread.status = "inProgress"; thread.updatedAt = turn.startedAt;
+      turn = this.begin(thread, session, event.seq);
       t.log("info", "desktop_turn_observed", { threadId: thread.id, sessionId: session.id, turnId: turn.id });
       void t.save();
     }
     if (!turn) return;
+    if (root && event.type === "turn/start") turn.nativeStartSeq = event.seq;
     if (root && event.type === "user/message") {
       const message = event.data;
       if (this.inputs.delete(message?.id)) return;

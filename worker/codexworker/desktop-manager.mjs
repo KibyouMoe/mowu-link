@@ -38,7 +38,7 @@ import { routerMessageId, routerMarker, findRouterTurn } from "./router-tasks.mj
 import { resumePage, resumeListText } from "./resume-list.mjs";
 import { hermesChunks } from "./hermes-feishu-format.mjs";
 import { isAbandonedText, isUnconfirmedText } from "./text-receipt-review.mjs";
-import { collaborationSummary, handleCollaboration } from "./collaboration-view.mjs";
+import { peerPresentation } from "./worker-message-format.mjs";
 
 export const PROTOCOL = "1.1.1-draft";
 const digest = value => createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -475,6 +475,8 @@ export class DesktopManager {
     if (timestamp && session.transcriptStartAt && Date.parse(timestamp) < Date.parse(session.transcriptStartAt)) return null;
     const bound = session.inputMessages?.[item.key];
     if (bound) return bound;
+    const closure = await this.questions.observeNativeClosure({ threadId: session.threadId, text: item.text, itemKey: item.key });
+    if (closure) { (session.inputMessages ??= {})[item.key] = closure; return closure; }
     const inputHash = digest(item.nativeInputText ?? item.text);
     const candidates = Object.values(this.state.receipts).filter(receipt =>
       receipt.nativeTargetThreadId === session.threadId && receipt.nativeInputHash === inputHash
@@ -646,6 +648,17 @@ export class DesktopManager {
     this.connected = true;
     for (const session of Object.values(this.state.sessions)) {
       session.pendingInputs ??= [];
+      const peerBacklog = (session.queue ?? []).filter(request => {
+        const receipt = this.state.receipts[request.messageId];
+        return request.origin === "worker-chat" && request.metadata?.workerChat &&
+          receipt && !receipt.pending && !receipt.error &&
+          [undefined, "deferred", "canceled"].includes(receipt.nativeDispatch?.status);
+      });
+      session.queue = (session.queue ?? []).filter(request => !peerBacklog.includes(request));
+      for (const request of peerBacklog) {
+        session.steerQueue ??= [];
+        if (!session.steerQueue.some(item => item.messageId === request.messageId)) session.steerQueue.push(request);
+      }
       // Upgrade the old single readback slot without resending its native write.
       if (session.dispatchCorrelation && !session.pendingInputs.some(p => p.messageId === session.dispatchCorrelation.messageId)) {
         session.pendingInputs.push({ ...session.dispatchCorrelation, dispatchedAt: session.dispatchedAt ?? Date.now() });
@@ -857,6 +870,7 @@ export class DesktopManager {
         localMessageOrigin: this.config.nativeSendFromTarget ? "target-task" : "bound-manager-task",
         remoteViaDesktopDevices: true, feishuImageOutput: Boolean(this.businessRuntime.module && this.notifier?.enabled),
         feishuImageInput: this.config.nativeImageInput ? "native-local-image" : "cached-path-prompt",
+        externalChatInput: this.config.nativeChatInput ? "native-user-input" : "unavailable",
         questionAnswerSync: this.config.nativeQuestionInput ? "native-user-input" : "delegated-message",
         feishuOutputRouting: this.transcriptEnabled ? "managed-thread-transcript" : "selected-thread-only",
         persistentConversationTranscript: this.transcriptEnabled,
@@ -1188,15 +1202,16 @@ export class DesktopManager {
         fail(409, "selected_target_changed", "Refresh /threads and use the Feishu-selected native chat; no fallback was used.", false,
           { threadId: request.targetThreadId, selectedThreadId: this.state.selectedThreadId });
       }
-      let text = request.text.trim(), delivery = request.delivery, transformed = false;
+      const peerChat = request.origin === "worker-chat" && request.metadata?.workerChat;
+      let text = request.text.trim(), delivery = this.isNativeChatInput(request) ? "steer" : request.delivery, transformed = false;
       const nativeImages = request.source === "trainer" && this.config.nativeImageInput &&
         this.state.feishuReceipts[request.messageId]?.nativeImagePaths?.length;
-      if (!nativeImages && /^\/goal(?:\s|$)/.test(text)) {
+      if (!peerChat && !nativeImages && /^\/goal(?:\s|$)/.test(text)) {
         transformed = true;
         text = goalPrompt(text);
         if (!text) return { action: "help", text: BRIDGE_HELP };
-      } else if (!nativeImages && /^\/queue\s+/.test(text)) { text = text.replace(/^\/queue\s+/, ""); delivery = "queue"; transformed = true; }
-      else if (!nativeImages && text.startsWith("/") && !text.startsWith("//")) {
+      } else if (!peerChat && !nativeImages && /^\/queue\s+/.test(text)) { text = text.replace(/^\/queue\s+/, ""); delivery = "queue"; transformed = true; }
+      else if (!peerChat && !nativeImages && text.startsWith("/") && !text.startsWith("//")) {
         const result = await this.command(request, text);
         if (this.transcriptEnabled) {
           await this.emit("message.reply", { ...request,
@@ -1207,7 +1222,7 @@ export class DesktopManager {
         return result;
       }
       const session = this.session(request.targetThreadId);
-      const normalized = { ...request, delivery, targetThreadId: session.threadId, text: !nativeImages && text.startsWith("//") ? text.slice(1) : transformed ? text : request.text,
+      const normalized = { ...request, delivery, targetThreadId: session.threadId, text: !peerChat && !nativeImages && text.startsWith("//") ? text.slice(1) : transformed ? text : request.text,
         sourceTurnGuard: requireSourceTurnId ?? null, sourceTurnMayBeComplete: Boolean(allowCompletedSourceTurn && requireSourceTurnId),
         ...(request.source === "trainer" ? { trainerActivityAt: new Date().toISOString() } : {}) };
       if (this.compacting(session)) {
@@ -1254,7 +1269,14 @@ export class DesktopManager {
     });
   }
 
+  isNativeChatInput(request) {
+    return Boolean(this.config.nativeChatInput && (request.origin === "worker-chat" && request.metadata?.workerChat ||
+      request.source === "trainer" && this.state.feishuReceipts[request.messageId] && !isNativeQuestionReply(request.text)));
+  }
+
   async dispatch(session, request, beforeSnapshot) {
+    // Old peer receipts keep their exact saved request and UUID during upgrade.
+    const delivery = request.origin === "worker-chat" ? "steer" : request.delivery;
     const dispatchEpoch = this.state.selectionEpoch, selectedAtStart = session.threadId === this.state.selectedThreadId;
     const sourceThreadId = nativeSendSource(this.config, session);
     if (!sourceThreadId) fail(503, "bridge_not_ready", "The native sender task must be bound before plain-text delivery.");
@@ -1277,7 +1299,9 @@ export class DesktopManager {
       : request.source === "hermes" && !["router", "subscription"].includes(request.origin) ? "超级溪流" : null;
     // The engine owns context and compaction. Dispatch the actual input without
     // adding Worker-maintained memory or summaries.
-    const prompt = label ? `${label}：${request.text}` : request.text;
+    const peer = request.origin === "worker-chat" && request.metadata?.workerChat;
+    const prompt = peer && typeof peer.text === "string" ? peerPresentation(peer, peer.timestamp).displayText
+      : label ? `${label}：\n${request.text}` : request.text;
     const pending = { messageId: request.messageId, inputHash: digest(prompt), dispatchedAt: Date.now(),
       sourceThreadId, kind: active ? "steer" : snapshot.deliveryContract ? "followup" : "start", expectedTurnId: active?.id ?? null,
       beforeItemKeys: publicItems(snapshot).map(item => item.key),
@@ -1297,7 +1321,7 @@ export class DesktopManager {
     // Persist correlation before the write; UUID/source metadata never enters the prompt.
     await this.save();
     try {
-      if (request.delivery === "queue" && activeTurn(await this.deliveryState(session))) {
+      if (delivery === "queue" && activeTurn(await this.deliveryState(session))) {
         fail(409, "queue_target_busy", "The queued target is running; no native write was attempted.", true);
       }
       if (request.origin === "router-question" && request.taskId && this.questions.router()?.getTask) {
@@ -1321,6 +1345,13 @@ export class DesktopManager {
     if (request.origin === "worker-chat" && request.metadata?.workerChat) {
       const { messageId, replyTo, from, to, imagePaths } = request.metadata.workerChat;
       args.nativePeerMessage = { messageId, replyTo, from, to, ...(imagePaths ? { imagePaths: [...imagePaths] } : {}) };
+    }
+    if (this.isNativeChatInput(request)) {
+      args.nativeChatInput = true;
+      args.nativeMessageId = request.messageId;
+      args.nativeDelivery = delivery ?? "steer";
+      const images = request.metadata?.workerChat?.imagePaths;
+      if (this.config.nativeImageInput && images?.length) args.nativeImages = [...images];
     }
     if (request.source === "hermes" && request.origin === "router") {
       const taskId = /^\[router (t-[^\]\s]+)\]/.exec(request.text)?.[1];
@@ -2317,7 +2348,6 @@ export class DesktopManager {
   async handle(req, res, context = {}) {
     let body, counted = false;
     try {
-      if (await handleCollaboration(this, req, res)) return;
       const actual = Buffer.from(req.headers.authorization ?? "");
       const expected = Buffer.from(`Bearer ${context.token ?? this.config.token}`);
       if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) fail(401, "unauthorized", "Valid Bearer token required.");
@@ -2364,10 +2394,9 @@ export class DesktopManager {
       if (req.method === "GET" && url.pathname === "/bridge/integrations") return json(res, 200, this.integrationStatus());
       if (req.method === "POST" && url.pathname === "/bridge/integrations/reload") return json(res, 200, await this.reloadIntegrations());
       if (req.method === "GET" && url.pathname === "/bridge/workers") return json(res, 200, await routerOperations(this).workers());
-      if (req.method === "GET" && url.pathname === "/bridge/collaboration") return json(res, 200,
-        await collaborationSummary(this));
       if (req.method === "GET" && url.pathname === "/bridge/worker-messages") return json(res, 200,
-        await routerOperations(this).message("inbox", { after: Number(url.searchParams.get("after") ?? 0) }));
+        await routerOperations(this).message("inbox", { after: Number(url.searchParams.get("after") ?? 0),
+          ...(url.searchParams.has("view") ? { view: url.searchParams.get("view") } : {}) }));
       if (req.method === "POST" && url.pathname === "/bridge/worker-messages") return json(res, 200,
         await routerOperations(this).message("send", await readBody(req)));
       if (req.method === "POST" && url.pathname === "/bridge/work-orders") return json(res, 200,

@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { validNativeQuestionId, nativeQuestionReply, parseNativeQuestionReply, nativeAnswersInSnapshot, SKIPPED_QUESTION_ANSWER } from "./interface/public-questions.mjs";
+import { validNativeQuestionId, nativeQuestionReply, parseNativeQuestionReply, nativeAnswersInSnapshot, SKIPPED_QUESTION_ANSWER,
+  nativeQuestionClosure, isNativeQuestionClosure } from "./interface/public-questions.mjs";
 import { readFile, writeFile, rename } from "node:fs/promises";
 import path from "node:path";
 import { questionInitiator } from "./question-origin.mjs";
@@ -102,6 +103,7 @@ export class QuestionRelay {
     catch (error) { this.storageFault = true; throw error; }
   }
   async syncNativeAnswer(id) {
+    if (["expired", "canceled"].includes(this.state.entries[id]?.status)) return this.syncNativeClosure(id);
     const m = this.manager;
     let request;
     await this.serial(async () => {
@@ -139,6 +141,57 @@ export class QuestionRelay {
       });
       throw error;
     }
+  }
+  async syncNativeClosure(id) {
+    const m = this.manager, q = m.state.publicQuestions?.[id];
+    let messageId;
+    await this.serial(async () => {
+      const s = this.state.entries[id];
+      if (!m.config.nativeQuestionInput || q?.delivery !== "async" || !["expired", "canceled"].includes(s?.status))
+        reject(409, "native_question_sync_conflict", "Only an exact closed native question may be withdrawn.");
+      const sync = s.nativePanelSync;
+      if (sync?.kind === "closure" && sync.status === "accepted") return;
+      if (sync?.kind === "closure" && ["dispatching", "unknown"].includes(sync.status))
+        reject(409, "native_question_sync_unknown", "Inspect the previous native withdrawal before another write.");
+      messageId = sync?.kind === "closure" ? sync.messageId : randomUUID();
+      s.nativePanelSync = { kind: "closure", status: "dispatching", messageId };
+      s.revision++; await this.save();
+    });
+    if (!messageId) return { questionId: id, nativeInputAccepted: true, duplicate: true };
+    try {
+      await m.call("send_message_to_thread", { threadId: q.threadId,
+        nativeQuestionClose: { questionId: id, messageId } }, { sourceThreadId: q.threadId });
+      await this.serial(async () => {
+        const s = this.state.entries[id];
+        s.nativePanelSync = { kind: "closure", status: "accepted", messageId };
+        s.nativeCloseRequested = false; s.revision++; await this.save();
+      });
+      return { questionId: id, nativeInputAccepted: true, duplicate: false };
+    } catch (error) {
+      await this.serial(async () => {
+        const s = this.state.entries[id];
+        s.nativePanelSync.status = ["notAttempted", "rejected"].includes(error.body?.nativeInputOutcome) ? "rejected" : "unknown";
+        s.nativePanelSync.reason = error.body?.error ?? "native_question_closure_unknown";
+        s.nativePanelSync.retryAt = Date.now() + 10000;
+        s.revision++; await this.save();
+      });
+      throw error;
+    }
+  }
+
+  async observeNativeClosure({ threadId, text, itemKey }) {
+    if (!isNativeQuestionClosure(text)) return null;
+    return this.serial(async () => {
+      for (const [id, q] of Object.entries(this.manager.state.publicQuestions ?? {})) {
+        const s = this.state.entries[id];
+        if (q.threadId !== threadId || !["expired", "canceled"].includes(s?.status) ||
+            s.nativePanelSync?.kind !== "closure" || nativeQuestionClosure(q, s.status) !== text) continue;
+        s.nativePanelSync.status = "accepted"; s.nativePanelSync.itemKey = itemKey;
+        s.nativeCloseRequested = false; s.revision++; await this.save();
+        return s.nativePanelSync.messageId;
+      }
+      return null;
+    });
   }
   get(id) {
     const q = this.manager.state.publicQuestions?.[id]; const s = this.state.entries[id];
@@ -246,6 +299,7 @@ export class QuestionRelay {
       if (s.status === input.status && JSON.stringify(s.answers ?? null) === JSON.stringify(answers)) return;
       if (["dispatching", "answer_unknown", "answered", "skipped", "expired", "canceled", "rejected"].includes(s.status)) reject(409, "question_closed", "Question already resolved; no answer was resent.");
       s.status = input.status; s.answers = answers; s.reason = input.status === "canceled" ? "canceled_by_owner" : input.status === "expired" ? "source_turn_ended" : null;
+      if (["expired", "canceled"].includes(s.status)) s.nativeCloseRequested = true;
       s.revision++; await this.save();
     });
     // Metadata only: normal text/native-panel replies are NEVER sent again.
@@ -410,6 +464,7 @@ export class QuestionRelay {
 
   // Observe already-accepted native user input; never dispatch it a second time.
   async observeNativeReply({ threadId, text, messageId, turnId, itemKey = null }) {
+    if (isNativeQuestionClosure(text)) return [];
     const replies = parseNativeQuestionReply(text);
     const m = this.manager;
     if (!replies || !messageId || !turnId || threadId !== m.state.selectedThreadId) return [];
@@ -545,7 +600,7 @@ export class QuestionRelay {
         await this.serial(async () => {
           if (!["open", "answer_pending"].includes(s.status)) return;
           if (source.answers) { s.answers = source.answers; s.skippedQuestionIndexes = skippedIndexes(s.answers); s.status = answeredStatus(s); s.reason = null; s.revision++; await this.save(); }
-          else if (source.expired) { s.status = "expired"; s.reason = source.reason; s.revision++; await this.save(); }
+          else if (source.expired) { s.status = "expired"; s.reason = source.reason; s.nativeCloseRequested = true; s.revision++; await this.save(); }
         });
         if (s.status === "open" && source.active) await this.forwardToInitiator(q, s);
         if (s.status === "answer_pending" && s.answerQueued) {
@@ -588,6 +643,10 @@ export class QuestionRelay {
           }
         }
       }
+      if (s.nativeCloseRequested && m.config.nativeQuestionInput && q.delivery === "async" &&
+          Date.now() >= (s.nativePanelSync?.retryAt ?? 0) &&
+          !["accepted", "dispatching", "unknown"].includes(s.nativePanelSync?.status))
+        await this.syncNativeClosure(id).catch(() => {});
       if (!m.closed && !m.handoffPaused && s.messageId && s.patchedRevision !== s.revision && m.notifier?.updateQuestionCard && Date.now() >= (s.retryPatchAt ?? 0)) {
         const revision = s.revision;
         const result = await m.notifier.updateQuestionCard(s.messageId, questionCard(q, s, m.config.bridgeName), { threadId: q.threadId }).catch(() => null);
