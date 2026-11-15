@@ -24,7 +24,8 @@ Then drives a fake worker over a real SSE connection and exercises:
     bounded inbox/SSE replay, image references, offline queue and process restart
   formal tasks: optional creation UUID, atomic persistence, exact retries across
     reconnect/restart, goal-only execution and explicit deadlines, legacy clients
-  default zero backlog: busy trainer/router turns, running/cancelling tasks,
+  default one waiting slot with queue TTL, concurrent admission and recovery;
+  explicit zero backlog: busy trainer/router turns, running/cancelling tasks,
     immediate idle dispatch, concurrent winners, reusable refused UUIDs and recovery
   deterministic connection-race injection over HTTP checks unaccepted-row cleanup
     and FIFO admission while accepted queued work awaits recovery
@@ -1069,7 +1070,8 @@ def zero_backlog_selftest(checker, work, trigger_url, trigger_token):
     argv = [PY, str(ROUTER), "--port", str(port), "--db", str(db),
             "--token-file", str(token_path), "--lock", str(work / "zero-backlog.lock"),
             "--log", str(log_path), "--trigger-url", trigger_url + "/trigger",
-            "--trigger-token-file", str(trigger_token), "--ping-interval", "0.2"]
+            "--trigger-token-file", str(trigger_token), "--ping-interval", "0.2",
+            "--backlog-max", "0"]
     proc, output = start_process(argv, work / "zero-backlog.out")
     clients = []
     name = "zero-wait-worker"
@@ -1126,7 +1128,7 @@ def zero_backlog_selftest(checker, work, trigger_url, trigger_token):
             return call("POST", "/result", {"name": name, "task_id": task_id,
                         "status": "done", "summary": "zero-backlog completion"})
 
-        checker.check("zero backlog: omitted --backlog-max defaults to 0",
+        checker.check("zero backlog: explicit --backlog-max 0 refuses waiting work",
                       call("GET", "/health")[1].get("backlog_max") == 0)
         negative = subprocess.run([PY, str(ROUTER), "--backlog-max", "-1",
                                    "--log", str(work / "negative-backlog.log")],
@@ -1144,7 +1146,7 @@ def zero_backlog_selftest(checker, work, trigger_url, trigger_token):
 
         client = connect()
         trainer_body = payload("retry after trainer acceptance")
-        for state in ("running", "inProgress", "waiting_input"):
+        for state in ("running", "inProgress", "waiting_input", "waiting_approval"):
             heartbeat(state, "trainer")
             checker.check("zero backlog: trainer %s refuses without saving task or UUID" % state,
                           row()["busy"] and busy(trainer_body, None, "trainer")
@@ -1312,7 +1314,7 @@ def dispatch_race_selftest(checker, work):
     notifier = mock.Mock()
     notifier.notify_result.return_value = False
     server = router_module.RouterServer(("127.0.0.1", 0), store, "race-test-token",
-                                        notifier, mock.Mock())
+                                        notifier, mock.Mock(), backlog_max=0)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     base = "http://127.0.0.1:%d" % server.server_address[1]
@@ -1320,7 +1322,7 @@ def dispatch_race_selftest(checker, work):
     store.upsert_worker(name)
     conn = server.attach(name)
     try:
-        checker.check("zero backlog: RouterServer constructor defaults to capacity 0",
+        checker.check("zero backlog: RouterServer explicit capacity 0",
                       server.backlog_max == 0)
         for queue_if_offline in (False, True):
             body = {"worker": name, "goal": "push race", "message_id": str(uuid.uuid4()),
@@ -1429,6 +1431,199 @@ def dispatch_race_selftest(checker, work):
         server.server_close()
         thread.join(5)
         store._conn.close()
+
+
+def one_backlog_selftest(checker, work):
+    """Real HTTP/curl admission, TTL and heartbeat recovery for the default slot."""
+    import server as router_module
+
+    store = router_module.RouterStore(str(work / "one-backlog.db"))
+    notifier = mock.Mock()
+    notifier.notify_result.return_value = True
+    server = router_module.RouterServer(("127.0.0.1", 0), store, "one-backlog-test-token",
+                                        notifier, mock.Mock())
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = "http://127.0.0.1:%d" % server.server_address[1]
+    name = "one-wait-worker"
+    store.upsert_worker(name)
+    conn = server.attach(name)
+
+    def call(method, route, body=None):
+        return http(method, base + route, body, server.token)
+
+    def payload(goal, **extra):
+        return dict(worker=name, goal=goal, message_id=str(uuid.uuid4()), **extra)
+
+    def finish(task_id):
+        return call("POST", "/result", {"name": name, "task_id": task_id,
+                    "status": "done", "summary": "one-slot test complete"})
+
+    def curl_create(body):
+        cmd = ["curl", "--silent", "--show-error", "--max-time", "5",
+               "--request", "POST", base + "/tasks", "--header",
+               "X-Router-Token: " + server.token, "--header", "Content-Type: application/json",
+               "--data-binary", json.dumps(body), "--write-out", "\nHTTP_STATUS=%{http_code}\n"]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10, check=True)
+        print("CURL " + " ".join(cmd) + "\n" + result.stdout, flush=True)
+        raw, status = result.stdout.strip().rsplit("\nHTTP_STATUS=", 1)
+        return int(status), json.loads(raw)
+
+    try:
+        args = router_module.parse_args([])
+        health = call("GET", "/health")[1]
+        checker.check("one backlog: CLI and constructor default to one slot and six-hour queue TTL",
+                      args.backlog_max == server.backlog_max == health["backlog_max"] == 1
+                      and args.queue_ttl_s == server.queue_ttl_s == health["queue_ttl_s"] == 21600)
+        active_body = payload("running task has no queue timeout", queue_ttl_s=0.05)
+        code, active = call("POST", "/tasks", active_body)
+        active_id = active["task_id"]
+        checker.check("one backlog: idle starts one task immediately",
+                      code == 200 and active["state"] == "running"
+                      and conn.queue.get(timeout=3)["data"]["task_id"] == active_id)
+        first_body = payload("watcher occupies the only waiting slot")
+        code, first = curl_create(first_body)
+        checker.check("one backlog: real curl busy first request returns 200 queued",
+                      code == 200 and first["queued"] is True and first["state"] == "queued"
+                      and first["queued_ahead"] == 1 and store.queued_count(name) == 1
+                      and conn.queue.empty())
+        second_body = payload("second waiter is refused")
+        code, second = curl_create(second_body)
+        checker.check("one backlog: real curl second request returns 409 worker_busy with current task and retry_when",
+                      code == 409 and second["error"] == "worker_busy"
+                      and second["task_id"] == active_id
+                      and second["retry_when"] == "current_task_accepted_and_worker_idle"
+                      and store.get_task_request(second_body["message_id"]) is None
+                      and store.queued_count(name) == 1 and store.running_count(name) == 1)
+        code, duplicate = call("POST", "/tasks", first_body)
+        checker.check("one backlog: full-slot exact retry returns the same queued task",
+                      code == 200 and duplicate["duplicate"] and duplicate["task_id"] == first["task_id"])
+        finish(active_id)
+        checker.check("one backlog: completion dispatches the sole watcher exactly once",
+                      conn.queue.get(timeout=3)["data"]["task_id"] == first["task_id"]
+                      and store.running_count(name) == 1 and store.queued_count(name) == 0
+                      and conn.queue.empty())
+        finish(first["task_id"])
+
+        call("POST", "/heartbeat", {"name": name, "state": "running", "turn_source": "trainer"})
+        expiring_body = payload("unstarted watcher expires", queue_ttl_s=0.08)
+        code, expiring = call("POST", "/tasks", expiring_body)
+        time.sleep(0.12)
+        sweep = router_module.ApprovalSweeper(store, interval=1, server=server)
+        sweep.start()
+        try:
+            until = time.monotonic() + 3
+            while store.get_task(expiring["task_id"])["state"] != "failed" and time.monotonic() < until:
+                time.sleep(0.02)
+            expired = store.get_task(expiring["task_id"])["state"] == "failed"
+        finally:
+            sweep.stop()
+        task = store.get_task(expiring["task_id"])
+        checker.check("queue TTL: sweeper expires an unstarted task and frees the busy trainer's slot",
+                      code == 200 and expired and task["result"]["error"] == "queue_expired"
+                      and task["started_at"] is None and store.queued_count(name) == 0
+                      and store.get_worker(name)["busy"] and conn.queue.empty())
+        checker.check("queue TTL: expiration sends exactly one failure notification",
+                      sum(c.args[0]["task_id"] == task["task_id"] for c in notifier.notify_result.call_args_list) == 1
+                      and server.expire_queued_tasks() == 0)
+        code, duplicate = call("POST", "/tasks", expiring_body)
+        checker.check("queue TTL: retry of expired UUID returns its terminal task without replay",
+                      code == 200 and duplicate["duplicate"] and duplicate["state"] == "failed")
+        code, replacement = call("POST", "/tasks", second_body)
+        checker.check("queue TTL: earlier refused UUID can fill the freed slot",
+                      code == 200 and replacement["state"] == "queued")
+        call("POST", "/heartbeat", {"name": name, "state": "idle", "turn_source": None})
+        conn.queue.get(timeout=3)
+        finish(replacement["task_id"])
+
+        for invalid in (0, -1, True, None, "bad", "nan", "inf"):
+            code, _ = call("POST", "/tasks", payload("invalid queue TTL", queue_ttl_s=invalid))
+            checker.check("queue TTL: invalid per-task value %r is rejected" % invalid, code == 400)
+        for invalid in ("0", "-1", "nan", "inf"):
+            proc = subprocess.run([PY, str(ROUTER), "--queue-ttl-s", invalid,
+                                   "--log", str(work / "bad-ttl.log")],
+                                  capture_output=True, text=True, timeout=10)
+            checker.check("queue TTL: invalid service value %s is rejected before startup" % invalid,
+                          proc.returncode == 2 and "--queue-ttl-s must be finite and > 0" in proc.stderr)
+
+        code, active = call("POST", "/tasks", payload("long native task", queue_ttl_s=0.01))
+        active_id = active["task_id"]
+        conn.queue.get(timeout=3)
+        time.sleep(0.02)
+        server.expire_queued_tasks()
+        checker.check("queue TTL: executing task remains running after its queue TTL",
+                      store.get_task(active_id)["state"] == "running")
+        code, watcher = call("POST", "/tasks", payload("watcher survives router recovery"))
+        store.reset_runtime()
+        server.expire_queued_tasks()
+        checker.check("queue TTL: previously dispatched recovery task cannot expire",
+                      store.get_task(active_id)["state"] == "queued")
+        call("POST", "/heartbeat", {"name": name, "state": "inProgress",
+             "turn_source": "router", "task_id": active_id})
+        checker.check("one backlog: matching native heartbeat restores running task, watcher stays queued",
+                      store.get_task(active_id)["state"] == "running"
+                      and store.get_task(watcher["task_id"])["state"] == "queued"
+                      and store.running_count(name) == 1 and store.queued_count(name) == 1
+                      and conn.queue.empty())
+        call("POST", "/heartbeat", {"name": name, "state": "inProgress",
+             "turn_source": "router", "task_id": watcher["task_id"]})
+        checker.check("one backlog: heartbeat cannot promote a never-dispatched watcher",
+                      store.get_task(watcher["task_id"])["state"] == "queued")
+        call("POST", "/heartbeat", {"name": name, "state": "inProgress",
+             "turn_source": "router", "task_id": active_id})
+        call("POST", "/tasks/%s/cancel" % watcher["task_id"])
+
+        gate = threading.Barrier(8)
+        results = []
+
+        def create():
+            gate.wait(timeout=5)
+            results.append(call("POST", "/tasks", payload("concurrent waiter")))
+
+        writers = [threading.Thread(target=create, daemon=True) for _ in range(8)]
+        for writer in writers:
+            writer.start()
+        for writer in writers:
+            writer.join(6)
+        checker.check("one backlog: concurrent eight waiters have exactly one queued winner and seven 409s",
+                      len(results) == 8 and sum(code == 200 for code, _ in results) == 1
+                      and sum(code == 409 and data["error"] == "worker_busy" for code, data in results) == 7
+                      and store.queued_count(name) == 1 and conn.queue.empty())
+        winner = next(data for code, data in results if code == 200)
+        finish(active_id)
+        conn.queue.get(timeout=3)
+        finish(winner["task_id"])
+
+        call("POST", "/heartbeat", {"name": name, "state": "running", "turn_source": "trainer"})
+        code, expired = call("POST", "/tasks", payload("expires before idle dispatch", queue_ttl_s=0.01))
+        time.sleep(0.02)
+        call("POST", "/heartbeat", {"name": name, "state": "idle", "turn_source": None})
+        checker.check("queue TTL: dispatch boundary expires old waiter instead of executing it",
+                      code == 200 and store.get_task(expired["task_id"])["state"] == "failed"
+                      and conn.queue.empty() and not store.get_worker(name)["busy"])
+        call("POST", "/heartbeat", {"name": name, "state": "running", "turn_source": "trainer"})
+        legacy = store.create_task(name, "old unstarted row")
+        with store._lock:
+            store._conn.execute("UPDATE tasks SET queue_expires_at=NULL, created_at=? WHERE task_id=?",
+                                (time.time() - server.queue_ttl_s - 1, legacy["task_id"]))
+        code, admitted = call("POST", "/tasks", payload("admission sweeps old queue"))
+        checker.check("queue TTL: admission expires legacy unstarted row and admits replacement",
+                      code == 200 and admitted["state"] == "queued"
+                      and store.get_task(legacy["task_id"])["result"]["error"] == "queue_expired"
+                      and store.queued_count(name) == 1 and store.get_worker(name)["busy"])
+        # Restore a busy trainer after simulating a known, rejected SSE send.
+        with mock.patch.object(conn, "send_task", return_value=False):
+            call("POST", "/heartbeat", {"name": name, "state": "idle", "turn_source": None})
+        rejected = store.get_task(admitted["task_id"])
+        expired = store.expire_queued_tasks(server.queue_ttl_s, now=rejected["queue_expires_at"] + 1)
+        checker.check("queue TTL: known failed SSE delivery retains TTL eligibility",
+                      rejected["state"] == "queued" and rejected["dispatch_attempted"] is False
+                      and any(task["task_id"] == rejected["task_id"] for task in expired))
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(5)
+        store.close()
 
 
 def start_process(argv, log_path: Path):
@@ -2478,6 +2673,7 @@ def run(work: Path, checker: Checker) -> None:
         workorders_selftest(checker, work, trigger_url, trigger_token)
         zero_backlog_selftest(checker, work, trigger_url, trigger_token)
         dispatch_race_selftest(checker, work)
+        one_backlog_selftest(checker, work)
 
         for worker_obj in workers:
             worker_obj.stop()

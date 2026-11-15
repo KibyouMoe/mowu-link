@@ -220,34 +220,35 @@ worker 在执行命令/改文件前需要人类点头，但子进程的 JSON-RPC
 
 ## 三、派活与状态机
 
-默认 `--backlog-max 0`，新工单仅在 worker 在线且空闲时即时派发。
+默认 `--backlog-max 1`，每个 worker 同时运行一张工单，并可等待一张。
 
 ```
-worker 不存在                          → 400 unknown_worker（Router 不猜）
+worker 不存在                          → 400 unknown_worker
 worker 在线且空闲、既有队列为空          → 200 {task_id, state:"running", dispatched:true}
-worker busy=true 或有 running/cancelling/queued → 409 {error:"worker_busy", worker, busy:true, task_id, turn_source, retry_when, message}
-worker 离线（含 queue_if_offline=true）  → 409 {error:"worker_offline", worker}
+worker 忙碌、等待位为空                  → 200 {task_id, state:"queued", queued:true, queued_ahead:1}
+已有一张等待单                          → 409 {error:"worker_busy", task_id, turn_source, retry_when}
+worker 离线 + queue_if_offline=false    → 409 worker_offline
+worker 离线 + queue_if_offline=true     → 200 queued（仍限一个等待位）
 ```
 
-`worker_busy` 返回该 worker 当前运行或取消中的有效工单 `task_id` 和回合 `turn_source`。
-trainer 忙碌且无工单时，`task_id` 为 `null`，`turn_source` 保留 `trainer`。
-心跳残留或无效的任务 ID 会通过当前工单核对，活动回合无工单时返回 `null`。
-尚未收到 router 回合心跳时，从运行或取消中的工单补出任务 ID 与 `turn_source:"router"`。
-`message` 建议等当前工单验收完成，且 `GET /workers` 显示目标 worker `busy=false` 后再重试。
-`retry_when` 固定为 `current_task_accepted_and_worker_idle`，供派发方机器读取该重试条件。
-既有合法 `queued` 工单等待恢复派发时，零容量新请求返回 409 `worker_busy`，
-`task_id` 指向正在运行或取消中的单，或按原派发 FIFO 顺序最早的排队旧单。
-此时 `GET /workers busy=false` 可与待恢复旧单并存，重试需等旧单验收完成。
-正容量新请求继续按配置容量排在既有队列之后。
-忙碌和离线拒收的 UUID 可原样重试；检测到连接在派发前消失或 `push` 失败时，
-会删除尚未接受的新任务及其 UUID，再返回 409 `worker_offline`。
+`worker_busy` 的 `task_id` 优先指向运行或取消中的真实工单，其次指向最早的等待单。
+trainer 回合没有工单时为 `null`，`turn_source` 保留 `trainer`。
+`retry_when` 保留 `current_task_accepted_and_worker_idle`，等待当前单收尾验收并重新核对空闲与等待位。
+拒收的创建 UUID 不占位，可原样重试。已接受工单的同 UUID、同请求重试返回原工单
+及 `duplicate:true`，包括排队、过期失败和终态；改请求内容返回 `message_id_conflict`。
 
-已接受工单的完全相同 UUID 重试优先返回 200、`duplicate:true` 和原单，
-适用于忙碌、取消中、离线和已完成状态。同 UUID 改请求内容返回 409 `message_id_conflict`。
-既有 `queued` 工单可在重连或服务恢复后继续投递，零容量限制适用于新工单接收。
-零容量重连先检查当前回合占用，每次恢复一条既有工单，其余旧单在前单结束后继续派发。
+等待单 TTL 默认 **21600 秒（6 小时）**，服务可用 `--queue-ttl-s 21600` 调整，
+单次 `POST /tasks` 可用正数 `queue_ttl_s` 覆盖。`GET /tasks/{id}` 返回 `queue_expires_at`。
+到期且从未下发的单进入 `failed`，`result.error="queue_expired"`，释放等待位并通知结果。
+检查点包含接单、派发前与后台清扫（最多间隔 30 秒）。旧库中可确认尚未下发的行按
+`created_at + 服务 TTL` 计算；已下发或历史下发状态未知的恢复工单保留原有恢复语义。
+运行中、已下发后断线恢复的单不受排队 TTL 限制。匹配原工单的活动 router 心跳可将
+断线重排的运行单恢复为 `running`，它旁边的看守单仍只占一个等待位。
 
-显式设置正容量（例如 `--backlog-max 128`）时沿用排队协议。
+默认一格及显式 `--backlog-max 0` 的重连均按 FIFO 每次恢复一条，前单完成后自动续推。
+显式 0 保留零等待模式：忙碌时拒收新单，离线拒收，恢复已接受的单仍受占用检查。
+
+显式设置大于 1 的容量（例如 `--backlog-max 128`）时沿用排队协议。
 
 ```
 worker 在线但忙                        → 202 {task_id, state:"queued", queued:true, queued_ahead:N}
@@ -269,7 +270,7 @@ queued ──dispatch──> running ──/result done──> done
 
 - 正常派发（`POST /tasks` 且空闲、交活后续推）每次只推一条，因此同一时刻通常
   只有一条 `running`。`busy` 包含运行/取消中的工单，以及心跳确认的人工或 router 活动回合。
-- 离线积压在上线时**按创建顺序一次性推**（`flush_backlog`）；这一次可能同时
+- 显式容量大于 1 时，离线积压在上线时**按创建顺序一次性推**（`flush_backlog`）；这一次可能同时
   有多条 `running`（`ROUTER.md`「上线时按顺序一次性推」的直译），全部交回后
   才继续推后续排队任务。
 - 断线时，该 worker 的 `running` 任务回到 `queued`；重连后会再次下发。
@@ -417,7 +418,7 @@ GET /subscriptions/pending?worker=波旁&limit=50
 | ③ 断线删订阅、订阅不留存 | 完成 | `RouterServer.detach` → `purge_subscriptions` |
 | ④ worker SDK | 未做（本次范围外） | — |
 | §二 `queue_if_offline` 语义 | 完成 | 见第三节 |
-| §二 积压上限 | 完成 | `--backlog-max` 默认 0，忙碌 409；显式正容量超限 429 |
+| §二 积压上限 | 完成 | `--backlog-max` 默认 1，第一张等待单 200、第二张 409；显式大容量超限 429 |
 | §五 结果回流 | 完成 | 见第五节 |
 | worker → Hermes 递话 | 0.2.0 新增 | `POST /notice` |
 | ⑨ 聊天旁听（只存不发） | 0.3.0 新增 | `chat_messages` 表 + `_chat_log` / `_chat_messages` / `_chat_summary` |
@@ -434,7 +435,7 @@ ROUTER_TEST_PORT=18790 python3 server/router/selftest_router.py
 
 自测启动临时 trigger 和 router 进程，用真实 HTTP 和真实 SSE 跑完整链路。
 历史排队主套件显式设置 `--backlog-max 128`，工单幂等套件显式设置容量 2。
-零等待套件以省略 `--backlog-max` 的真实进程验证默认 0，再以显式 0 恢复临时服务。
+零等待套件显式设置 `--backlog-max 0`；默认一格套件用真实 HTTP/curl 验证 200/queued 与 409，覆盖 TTL 清扫、自动续推、并发和恢复。
 连接竞争检查通过 HTTP 请求与确定性故障注入，覆盖连接消失和 `push` 返回失败的分支。
 临时库/token/锁/日志都在 `tempfile.mkdtemp()` 里，不碰生产
 `~/.hermes/router.db` 和 `~/.hermes/trigger.db`。
@@ -469,7 +470,7 @@ ROUTER_TEST_PORT=18790 python3 server/router/selftest_router.py
 18. 八个不同 UUID 并发只有一个派发赢家，其余 UUID 可重试；拒收后的数据库校验
 19. `queue_if_offline=true` 在零容量离线时返回 409，已接受的旧排队任务可重连恢复
 20. 确定性模拟 `push` 失败与连接消失，清理未接受任务并释放 UUID，随后重试成功
-21. 默认值、显式 `--backlog-max 0`、负容量拒绝和构造器默认值
+21. 默认一格、显式 `--backlog-max 0`、负容量拒绝和构造器默认值
 22. 旧单恢复推送失败且连接在线、worker 空闲时，八个并发新请求均拒收，
     返回最早旧单 ID 与 `retry_when`；旧单精确重试、FIFO 恢复及拒收 UUID 后续重试
 

@@ -33,6 +33,7 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import os
 import queue
 import secrets
@@ -64,7 +65,8 @@ DEFAULT_LOCK_PATH = "~/.hermes/router.lock"
 DEFAULT_LOG = "~/.hermes/router.log"
 DEFAULT_TRIGGER_URL = "http://127.0.0.1:8791/trigger"
 DEFAULT_TRIGGER_TOKEN_PATH = "~/.hermes/secrets/trigger.token"
-BACKLOG_MAX = 0
+BACKLOG_MAX = 1
+QUEUE_TTL_S = 6 * 60 * 60
 MAX_GOAL_CHARS = 2000
 MAX_BODY_BYTES = 1 * 1024 * 1024
 PEER_MAX_TEXT = 20000
@@ -396,7 +398,8 @@ class RouterStore:
         cols = {str(row["name"]) for row in
                 self._conn.execute("PRAGMA table_info(tasks)").fetchall()}
         for column, decl in (("deadline_s", "REAL"), ("request_id", "TEXT"),
-                             ("request_fingerprint", "TEXT"), ("dispatch_attempted", "INTEGER")):
+                             ("request_fingerprint", "TEXT"), ("dispatch_attempted", "INTEGER"),
+                             ("queue_expires_at", "REAL")):
             if column not in cols:
                 self._conn.execute(
                     "ALTER TABLE tasks ADD COLUMN %s %s" % (column, decl))
@@ -551,6 +554,14 @@ class RouterStore:
                 values.append(turn_source)
             self._conn.execute("UPDATE workers SET " + ", ".join(updates) +
                                " WHERE name=?", values + [name])
+            # A reconnect may have requeued a task whose native turn is still
+            # alive. A fresh, matching router heartbeat restores its occupancy.
+            if (state in ("running", "inProgress", "waiting_input", "waiting_approval")
+                    and turn_source == "router" and task_id is not UNSET and task_id):
+                self._conn.execute(
+                    "UPDATE tasks SET state='running', started_at=COALESCE(started_at, ?)"
+                    " WHERE task_id=? AND worker=? AND state='queued' AND dispatch_attempted=1",
+                    (now, task_id, name))
             self.refresh_counts(name)
         return True
 
@@ -564,7 +575,7 @@ class RouterStore:
                 " WHERE worker=? AND state='queued'", (name,)).fetchone()["c"]
             self._conn.execute(
                 "UPDATE workers SET busy=(? OR (COALESCE(turn_source, '') IN ('trainer', 'router')"
-                " AND state IN ('running', 'inProgress', 'waiting_input'))),"
+                " AND state IN ('running', 'inProgress', 'waiting_input', 'waiting_approval'))),"
                 " queued=? WHERE name=?",
                 (int(busy), int(queued), name))
 
@@ -686,6 +697,7 @@ class RouterStore:
             "finished_at": row["finished_at"],
             "deadline_s": row["deadline_s"],
             "deadline_at": deadline_at,
+            "queue_expires_at": row["queue_expires_at"],
             "dispatch_attempted": (None if row["dispatch_attempted"] is None
                                    else bool(row["dispatch_attempted"])),
             "result": result,
@@ -698,7 +710,8 @@ class RouterStore:
                     state: str = "queued",
                     deadline_s: Optional[float] = None,
                     request_id: Optional[str] = None,
-                    request_fingerprint: Optional[str] = None) -> Dict[str, Any]:
+                    request_fingerprint: Optional[str] = None,
+                    queue_ttl_s: float = QUEUE_TTL_S) -> Dict[str, Any]:
         task_id = "t-" + secrets.token_hex(5)
         now = time.time()
         started = now if state == "running" else None
@@ -706,10 +719,10 @@ class RouterStore:
             self._conn.execute(
                 "INSERT INTO tasks (task_id, worker, goal, context, workspace,"
                 " urgency, state, created_at, started_at, finished_at,"
-                " result_json, deadline_s, request_id, request_fingerprint, dispatch_attempted)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, 0)",
+                " result_json, deadline_s, request_id, request_fingerprint, dispatch_attempted, queue_expires_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, 0, ?)",
                 (task_id, worker, goal, context, workspace, urgency, state,
-                 now, started, deadline_s, request_id, request_fingerprint))
+                 now, started, deadline_s, request_id, request_fingerprint, now + queue_ttl_s))
             self.refresh_counts(worker)
         log.info("task created id=%s worker=%s state=%s urgency=%s",
                  task_id, worker, state, urgency)
@@ -755,6 +768,23 @@ class RouterStore:
         with self._lock:
             rows = self._conn.execute(sql, tuple(params)).fetchall()
         return [self._task_dict(row) for row in rows]
+
+    def expire_queued_tasks(self, ttl_s: float, now: Optional[float] = None) -> List[Dict[str, Any]]:
+        """Expire only never-dispatched work; execution and replay have no TTL."""
+        stamp = time.time() if now is None else now
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM tasks WHERE state='queued' AND dispatch_attempted=0"
+                " AND COALESCE(queue_expires_at, created_at + ?) <= ?", (ttl_s, stamp)).fetchall()
+            result = json.dumps({"status": "failed", "error": "queue_expired",
+                                 "summary": "排队超时，工单尚未执行，请重新派发。",
+                                 "reported_at": stamp}, ensure_ascii=False)
+            for row in rows:
+                self._conn.execute(
+                    "UPDATE tasks SET state='failed', finished_at=?, result_json=? WHERE task_id=?",
+                    (stamp, result, row["task_id"]))
+                self.refresh_counts(row["worker"])
+            return [self.get_task(row["task_id"]) for row in rows]
 
     def claim_next_queued(self, worker: str) -> Optional[Dict[str, Any]]:
         """Move this worker's oldest queued task to running; return it."""
@@ -1573,7 +1603,8 @@ class RouterServer(ThreadingHTTPServer):
     def __init__(self, addr, store: RouterStore, token: str,
                  notifier: TriggerNotifier, bridge: TriggerSubscriptionBridge,
                  ping_interval: float = PING_INTERVAL,
-                 backlog_max: int = BACKLOG_MAX):
+                 backlog_max: int = BACKLOG_MAX,
+                 queue_ttl_s: float = QUEUE_TTL_S):
         self.store = store
         self.attachments = AttachmentStore(store.path + ".attachments")
         self.started_at = time.time()
@@ -1583,6 +1614,9 @@ class RouterServer(ThreadingHTTPServer):
         self.trigger_bridge = bridge
         self.ping_interval = max(0.2, float(ping_interval))
         self.backlog_max = max(0, int(backlog_max))
+        self.queue_ttl_s = float(queue_ttl_s)
+        if not math.isfinite(self.queue_ttl_s) or self.queue_ttl_s <= 0:
+            raise ValueError("queue_ttl_s must be finite and > 0")
         self.conns: Dict[str, Connection] = {}
         self.conn_lock = threading.Lock()
         self.dispatch_lock = threading.RLock()
@@ -1724,15 +1758,26 @@ class RouterServer(ThreadingHTTPServer):
             conn.peer_after = message["seq"]
 
     def push(self, conn: Connection, task: Dict[str, Any]) -> bool:
+        previous = task.get("dispatch_attempted")
         with self.store._lock:
             self.store._conn.execute("UPDATE tasks SET dispatch_attempted=1 WHERE task_id=?",
                                      (task["task_id"],))
         task["dispatch_attempted"] = True
-        return conn.send_task(task)
+        sent = conn.send_task(task)
+        if not sent:
+            # A closed connection rejected this attempt before enqueueing it.
+            # Preserve older uncertain deliveries, but do not exempt new work
+            # from its waiting TTL merely because this known attempt failed.
+            with self.store._lock:
+                self.store._conn.execute("UPDATE tasks SET dispatch_attempted=? WHERE task_id=?",
+                                         (previous, task["task_id"]))
+            task["dispatch_attempted"] = previous
+        return sent
 
     def dispatch_one(self, worker: str) -> Optional[Dict[str, Any]]:
         """Push the next queued task when the worker has nothing running."""
         with self.dispatch_lock:
+            self.expire_queued_tasks()
             conn = self.current_conn(worker)
             if conn is None or conn.closed:
                 return None
@@ -1754,8 +1799,9 @@ class RouterServer(ThreadingHTTPServer):
         conn = self.current_conn(worker)
         if conn is None or conn.closed:
             return 0
-        if self.backlog_max == 0:
+        if self.backlog_max <= 1:
             return int(self.dispatch_one(worker) is not None)
+        self.expire_queued_tasks()
         info = self.store.get_worker(worker) or {}
         if info.get("turn_source") == "trainer" and info.get("busy"):
             return 0
@@ -1775,14 +1821,25 @@ class RouterServer(ThreadingHTTPServer):
             log.info("backlog flushed name=%s tasks=%d", worker, sent)
         return sent
 
+    def expire_queued_tasks(self) -> int:
+        with self.dispatch_lock:
+            expired = self.store.expire_queued_tasks(self.queue_ttl_s)
+        for task in expired:
+            notified = self.notifier.notify_result(task, "failed", task["result"]["summary"])
+            log.warning("queue_expired task_id=%s worker=%s notified=%s",
+                        task["task_id"], task["worker"], notified)
+        return len(expired)
+
 
 class ApprovalSweeper(threading.Thread):
-    """Expire stale pending approvals even when nobody polls them."""
+    """Expire pending approvals and unstarted tasks even without polling."""
 
     def __init__(self, store: RouterStore,
-                 interval: float = APPROVAL_SWEEP_S) -> None:
+                 interval: float = APPROVAL_SWEEP_S,
+                 server: Optional[RouterServer] = None) -> None:
         super().__init__(daemon=True, name="approval-sweeper")
         self.store = store
+        self.server = server
         self.interval = max(1.0, float(interval))
         self._stop = threading.Event()
 
@@ -1790,8 +1847,10 @@ class ApprovalSweeper(threading.Thread):
         while not self._stop.wait(self.interval):
             try:
                 self.store.expire_approvals()
+                if self.server is not None:
+                    self.server.expire_queued_tasks()
             except Exception:  # noqa: BLE001
-                log.exception("approval sweep failed")
+                log.exception("approval/queue sweep failed")
 
     def stop(self) -> None:
         self._stop.set()
@@ -2042,6 +2101,7 @@ class RouterHandler(BaseHTTPRequestHandler):
             "port": self.server.server_address[1],
             "db_path": self.server.store.path,
             "backlog_max": self.server.backlog_max,
+            "queue_ttl_s": self.server.queue_ttl_s,
             "approvals_pending": self.server.store.pending_approvals(),
             "uptime_s": round(max(0.0, time.time() - self.server.started_at), 1),
         }
@@ -2471,6 +2531,7 @@ class RouterHandler(BaseHTTPRequestHandler):
                 payload, sort_keys=True, ensure_ascii=True,
                 separators=(",", ":")).encode("ascii")).hexdigest()
         with self.server.dispatch_lock:
+            self.server.expire_queued_tasks()
             if request_id is not None:
                 previous = self.server.store.get_task_request(request_id)
                 if previous is not None:
@@ -2516,6 +2577,15 @@ class RouterHandler(BaseHTTPRequestHandler):
                     raise BadRequest("deadline_s must be a number")
                 if deadline_s <= 0:
                     raise BadRequest("deadline_s must be > 0")
+            queue_ttl_s = body.get("queue_ttl_s", self.server.queue_ttl_s)
+            try:
+                if isinstance(queue_ttl_s, bool):
+                    raise ValueError()
+                queue_ttl_s = float(queue_ttl_s)
+                if not math.isfinite(queue_ttl_s) or queue_ttl_s <= 0:
+                    raise ValueError()
+            except (TypeError, ValueError):
+                raise BadRequest("queue_ttl_s must be finite and > 0")
 
             store = self.server.store
             worker = store.get_worker(worker_name)
@@ -2525,7 +2595,8 @@ class RouterHandler(BaseHTTPRequestHandler):
 
             running = store.running_count(worker_name)
             queued = store.queued_count(worker_name)
-            if self.server.backlog_max == 0 and (worker["busy"] or running or queued):
+            if ((self.server.backlog_max == 0 and (worker["busy"] or running or queued))
+                    or (self.server.backlog_max == 1 and queued >= 1)):
                 current = store.get_task(worker["task_id"]) if worker["task_id"] else None
                 if (current is None or current["worker"] != worker_name
                         or current["state"] not in ("running", "cancelling")):
@@ -2548,7 +2619,7 @@ class RouterHandler(BaseHTTPRequestHandler):
                 task = store.create_task(
                     worker_name, goal, context, workspace, urgency,
                     state="running", deadline_s=deadline_s,
-                    request_id=request_id, request_fingerprint=fingerprint)
+                    request_id=request_id, request_fingerprint=fingerprint, queue_ttl_s=queue_ttl_s)
                 self.server.store.refresh_counts(worker_name)
                 conn = self.server.current_conn(worker_name)
                 if conn is not None and self.server.push(conn, task):
@@ -2594,7 +2665,7 @@ class RouterHandler(BaseHTTPRequestHandler):
                     self.server.dispatch_one(worker_name)
                     task = store.get_task(task["task_id"]) or task
                 store.refresh_counts(worker_name)
-                status = 200 if task["state"] == "running" else 202
+                status = 200 if task["state"] == "running" or self.server.backlog_max == 1 else 202
                 state = task["state"]
                 log.info("task queued id=%s worker=%s online=%s ahead=%d",
                          task["task_id"], worker_name, online, ahead)
@@ -2633,9 +2704,9 @@ class RouterHandler(BaseHTTPRequestHandler):
             task = store.create_task(
                 worker_name, goal, context, workspace, urgency,
                 state="queued", deadline_s=deadline_s,
-                request_id=request_id, request_fingerprint=fingerprint)
+                request_id=request_id, request_fingerprint=fingerprint, queue_ttl_s=queue_ttl_s)
             store.refresh_counts(worker_name)
-            status = 202
+            status = 200 if self.server.backlog_max == 1 else 202
             log.info("task queued id=%s worker=%s online=%s ahead=%d",
                      task["task_id"], worker_name, online, ahead)
             return status, {
@@ -3344,6 +3415,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p.add_argument("--backlog-max", type=int, default=BACKLOG_MAX,
                    help="max queued/backlog tasks per worker "
                         "(0 refuses new waiting tasks; default %(default)s)")
+    p.add_argument("--queue-ttl-s", type=float, default=QUEUE_TTL_S,
+                   help="never-dispatched queue TTL in seconds (default %(default)s)")
     p.add_argument("--ping-interval", type=float, default=PING_INTERVAL,
                    help="SSE comment heartbeat seconds (default %(default)s)")
     p.add_argument("--verbose", action="store_true", help="debug logging")
@@ -3362,6 +3435,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 2
     if args.backlog_max < 0:
         print("error: --backlog-max must be >= 0", file=sys.stderr)
+        return 2
+    if not math.isfinite(args.queue_ttl_s) or args.queue_ttl_s <= 0:
+        print("error: --queue-ttl-s must be finite and > 0", file=sys.stderr)
         return 2
     if args.ping_interval <= 0:
         print("error: --ping-interval must be > 0", file=sys.stderr)
@@ -3389,7 +3465,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     try:
         server = RouterServer((host, args.port), store, token, notifier,
                               bridge, ping_interval=args.ping_interval,
-                              backlog_max=args.backlog_max)
+                              backlog_max=args.backlog_max, queue_ttl_s=args.queue_ttl_s)
     except OSError as exc:
         print("error: cannot bind %s:%d: %s" % (host, args.port, exc),
               file=sys.stderr)
@@ -3408,7 +3484,7 @@ def main(argv: Optional[List[str]] = None) -> int:
              args.trigger_token_file)
     log.info("subscription forwarding -> %s (cursor bus: /events + /ack)",
              trigger_client.base_url)
-    sweeper = ApprovalSweeper(store)
+    sweeper = ApprovalSweeper(store, server=server)
     sweeper.start()
     print("mowu-router %s listening on http://%s:%d  [X-Router-Token from %s]"
           % (VERSION, host, args.port, token_path), flush=True)
