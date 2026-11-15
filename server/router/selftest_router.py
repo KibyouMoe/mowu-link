@@ -1369,6 +1369,12 @@ def dispatch_race_selftest(checker, work):
                       and store.get_task_request(new_body["message_id"]) is None and conn.queue.empty())
 
         server.backlog_max = 0
+        for source in ("trainer", "router"):
+            store.heartbeat(name, state="running", turn_source=source)
+            checker.check("zero backlog: reconnect respects active %s turn before recovering old work" % source,
+                          server.flush_backlog_locked(name) == 0 and conn.queue.empty()
+                          and store.queued_count(name) == 2 and store.running_count(name) == 0)
+        store.heartbeat(name, state="idle", turn_source=None, task_id=None)
         before = store.list_tasks()
         contenders = [dict(new_body, message_id=str(uuid.uuid4())) for _ in range(8)]
         gate = threading.Barrier(len(contenders))
@@ -1396,11 +1402,14 @@ def dispatch_race_selftest(checker, work):
                       code == 200 and duplicate.get("duplicate") is True
                       and duplicate.get("task_id") == old_ids[0] and duplicate.get("state") == "queued"
                       and conn.queue.empty())
-        dispatched = server.dispatch_one(name)
+        recovered = server.flush_backlog_locked(name)
+        dispatched = store.get_task(old_ids[0])
         event = conn.queue.get(timeout=3)
         checker.check("queued recovery: oldest accepted task resumes before any new work",
-                      dispatched is not None and dispatched["task_id"] == old_ids[0]
-                      and event.get("data", {}).get("task_id") == old_ids[0])
+                      recovered == 1 and dispatched["state"] == "running"
+                      and store.get_task(old_ids[1])["state"] == "queued"
+                      and event.get("data", {}).get("task_id") == old_ids[0]
+                      and conn.queue.empty())
         code, result = http("POST", base + "/result", {
             "name": name, "task_id": old_ids[0], "status": "done", "summary": "oldest completed"}, server.token)
         event = conn.queue.get(timeout=3)

@@ -1750,10 +1750,12 @@ class RouterServer(ThreadingHTTPServer):
             return task
 
     def flush_backlog_locked(self, worker: str) -> int:
-        """Send every queued task, in creation order (caller holds lock)."""
+        """Recover accepted work within the configured admission policy."""
         conn = self.current_conn(worker)
         if conn is None or conn.closed:
             return 0
+        if self.backlog_max == 0:
+            return int(self.dispatch_one(worker) is not None)
         info = self.store.get_worker(worker) or {}
         if info.get("turn_source") == "trainer" and info.get("busy"):
             return 0
