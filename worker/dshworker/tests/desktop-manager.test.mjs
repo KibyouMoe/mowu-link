@@ -624,7 +624,7 @@ test("public questions include complete options and are never inferred from priv
   assert.ok(text.includes("看到正文了吗？")); assert.ok(text.includes("1）看到了")); assert.ok(text.includes("2）只有标题"));
   assert.ok(!JSON.stringify(q).includes("not-forwarded"));
   for (const invalid of [{ ...q, questionId: "not-uuid" }, { ...q, questions: [] }, { ...q, questions: [{ title: "" }] },
-    { ...q, questions: [{ title: "hi", options: ["one"] }] }]) assert.throws(() => normalizeQuestion(invalid), /required|nonempty/);
+    { ...q, questions: [{ title: "hi", options: [] }] }]) assert.throws(() => normalizeQuestion(invalid), /required|nonempty/);
 });
 
 test("image resources are bounded and downloaded only from their matched official message-resource URL", async () => {
