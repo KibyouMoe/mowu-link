@@ -128,3 +128,55 @@ test("a displayed native question is checkpointed while its answer is still pend
     await assert.rejects(pending);
   }
 });
+
+test("repeated native requests share the provider, answer and original source identity", async () => {
+  const f = fixture(); let providers = 0;
+  const ask = request => f.transport.questions.request(request, () => { providers++; return f.next(); });
+  const pending = Array.from({ length: 20 }, () => ask(f.request));
+  try {
+    const item = f.turn.nativeQuestions[0], original = f.question();
+    for (let index = 0; index < 20; index++)
+      assert.deepEqual(projectPublicQuestion(item, { threadId: f.thread.id, turnId: "wrapper-" + index }), original);
+    assert.equal(projectPublicQuestion(item, { threadId: "foreign", turnId: f.turn.id }), null);
+    assert.equal(f.turn.nativeQuestions.length, 1);
+    f.transport.sendMessage({ threadId: f.thread.id, prompt: nativeQuestionReply(original, ["文件"]) });
+    const answers = await Promise.all(pending);
+    assert.ok(answers.every(answer => JSON.stringify(answer) === JSON.stringify(answers[0])));
+    assert.equal(providers, 1); assert.equal(f.transport.questions.pending.size, 0);
+    assert.deepEqual(await ask(f.request), answers[0]);
+    assert.equal(providers, 1); assert.equal(f.turn.nativeQuestions.length, 1);
+  } finally {
+    f.controller.abort(new Error("test finished")); await Promise.allSettled(pending);
+  }
+});
+
+test("a reused native call cannot change its question, while a distinct call keeps a distinct identity", async () => {
+  const f = fixture(), pending = f.ask(), original = f.question();
+  try {
+    const changed = { ...f.request, questions: [{ ...f.request.questions[0], question: "changed" }] };
+    await assert.rejects(f.transport.questions.request(changed, f.next), /question_identity_conflict/);
+    const second = f.transport.questions.request({ ...f.request, wait: { callId: "another-call" } }, f.next);
+    second.catch(() => {});
+    const projected = projectPublicQuestion(f.turn.nativeQuestions[1], { threadId: f.thread.id, turnId: f.turn.id });
+    assert.notEqual(projected.questionId, original.questionId);
+    f.transport.sendMessage({ threadId: f.thread.id, prompt: nativeQuestionReply(original, ["文件"]) });
+    await pending;
+    await assert.rejects(f.transport.questions.request(changed, f.next), /question_identity_conflict/);
+    f.controller.abort(new Error("test finished")); await assert.rejects(second, /test finished/);
+  } finally {
+    f.controller.abort(new Error("test finished")); await Promise.allSettled([pending]);
+  }
+});
+
+test("cancelling a repeated native request rejects every waiter without another public question", async () => {
+  const f = fixture();
+  const pending = Array.from({ length: 20 }, () => f.ask());
+  const settled = Promise.allSettled(pending);
+  f.controller.abort(new Error("cancelled by router"));
+  assert.ok((await settled).every(result => result.status === "rejected" && result.reason.message === "cancelled by router"));
+  assert.equal(f.turn.nativeQuestions.length, 1);
+  assert.equal(f.transport.questions.pending.size, 0);
+  assert.equal(f.turn.waitingForInput, false);
+  await assert.rejects(f.ask(), /cancelled by router/);
+  assert.equal(f.turn.nativeQuestions.length, 1);
+});

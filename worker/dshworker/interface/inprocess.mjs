@@ -11,7 +11,8 @@ import { installTaskControl, taskIdOf } from "./task-control.mjs";
 import { DshPublicEvents } from "./public-events.mjs";
 import { DshDesktopObserver } from "./desktop-observer.mjs";
 import { DshQuestions } from "./questions.mjs";
-import { parseDshQuestionReply } from "./public-questions.mjs";
+import { parseDshQuestionReply, projectPublicQuestion } from "./public-questions.mjs";
+import { projectDshMedia } from "./public-media.mjs";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const VERSION = "0.3.1";
 const TRANSPORT_NAME = "dsh-inprocess";
@@ -248,6 +249,12 @@ export class InProcessTransport {
     for (const record of Array.isArray(parsed?.threads) ? parsed.threads : []) {
       if (!record?.id) continue;
       for (const turn of record.turns ?? []) {
+        for (const item of turn.nativeQuestions ?? []) {
+          if (!item.dshQuestion || item.dshQuestion.questionId) continue;
+          const question = projectPublicQuestion(item, { threadId: record.id, turnId: turn.id });
+          if (question) Object.assign(item.dshQuestion, { questionId: question.questionId,
+            threadId: record.id, sourceTurnId: turn.id });
+        }
         if (!TERMINAL_TURN_STATUSES.has(turn.status)) {
           turn.status = "interrupted";
           turn.waitingForInput = false;
@@ -568,7 +575,7 @@ export class InProcessTransport {
         latestTurn: null, latestAssistantMessageId: null, latestAssistantMessage: null, cursor: null };
     }
     const latest = thread.turns.at(-1) ?? null;
-    const message = latestAssistantMessage(latest);
+    const message = latestAssistantMessage(latest, thread.cwd);
     return {
       thread: { id: thread.id, hostId, title: thread.title ?? null, cwd: thread.cwd, status: thread.status },
       latestTurn: latest ? { id: latest.id, status: latest.status, waitingForInput: latest.waitingForInput === true,
@@ -586,7 +593,7 @@ export class InProcessTransport {
       ? Math.max(1, Number(args.maxOutputCharsPerItem)) : null;
     const all = thread.turns ?? [];
     const limited = turnLimit > 0 ? all.slice(-turnLimit) : all;
-    const turns = limited.map((turn) => normalizeTurn(turn, maxChars));
+    const turns = limited.map((turn) => normalizeTurn(turn, maxChars, thread.cwd));
     return {
       thread: normalizeThread(thread),
       turns,
@@ -854,9 +861,9 @@ function approvalFields(turn) {
   };
 }
 
-function normalizeTurn(turn, maxChars) {
+function normalizeTurn(turn, maxChars, cwd) {
   return {
-    id: turn.id, status: turn.status, waitingForInput: turn.waitingForInput === true, eventSeq: turn.eventSeq ?? 0, ...approvalFields(turn), items: turnItems(turn, maxChars), itemsView: "full",
+    id: turn.id, status: turn.status, waitingForInput: turn.waitingForInput === true, eventSeq: turn.eventSeq ?? 0, ...approvalFields(turn), items: turnItems(turn, maxChars, cwd), itemsView: "full",
     startedAt: turn.startedAt ?? null, completedAt: turn.completedAt ?? null,
     durationMs: turn.startedAt && turn.completedAt
       ? Math.max(0, Date.parse(turn.completedAt) - Date.parse(turn.startedAt)) : null,
@@ -864,7 +871,7 @@ function normalizeTurn(turn, maxChars) {
   };
 }
 
-function turnItems(turn, maxChars) {
+function turnItems(turn, maxChars, cwd) {
   const items = [{
     type: "userMessage", kind: "trainer", id: `${turn.id}-user`,
     text: truncateText(turn.prompt ?? "", maxChars),
@@ -886,9 +893,7 @@ function turnItems(turn, maxChars) {
   }
   // Stable per-attempt IDs let the common streaming relay PATCH one card.
   if (turn.publicMessages?.length) {
-    turn.publicMessages.forEach((message, index) => items.push({ type: "agentMessage", kind: "assistant",
-      id: message.id, text: truncateText(message.text, maxChars),
-      phase: turn.status === "completed" && index === turn.publicMessages.length - 1 ? "final_answer" : "commentary" }));
+    items.push(...publicMessageItems(turn, maxChars, cwd));
     if (turn.error) items.push({ type: "error", id: `${turn.id}-error`, text: turn.error });
     return items;
   }
@@ -899,8 +904,32 @@ function turnItems(turn, maxChars) {
   return items;
 }
 
-function latestAssistantMessage(turn) {
-  const message = turn?.publicMessages?.at(-1);
+function publicMessageItems(turn, maxChars, cwd) {
+  const items = (turn.publicMessages ?? []).flatMap(message => {
+    const parts = message.mediaVersion === 1
+      ? projectDshMedia(message.text, { cwd, complete: message.complete || turn.status === "completed" })
+      : [{ type: "text", text: message.text }];
+    let textIndex = 0;
+    return parts.map(part => {
+      let id, text;
+      if (part.type === "image") {
+        const suffix = createHash("sha256").update(part.imagePath).digest("hex").slice(0, 16);
+        id = `${message.id}-media-${suffix}`;
+        text = `![图片](<${encodeURI(part.imagePath)}>)`;
+      } else {
+        id = textIndex === 0 ? message.id : `${message.id}-text-${textIndex}`;
+        textIndex++;
+        text = truncateText(part.text, maxChars);
+      }
+      return { type: "agentMessage", kind: "assistant", id, text };
+    });
+  });
+  return items.map((item, index) => ({ ...item,
+    phase: turn.status === "completed" && index === items.length - 1 ? "final_answer" : "commentary" }));
+}
+
+function latestAssistantMessage(turn, cwd) {
+  const message = turn?.publicMessages?.length ? publicMessageItems(turn, null, cwd).at(-1) : null;
   const text = message?.text ?? turn?.text;
   if (!text) return null;
   return { id: message?.id ?? `${turn.id}-agent`, turnId: turn.id, text,

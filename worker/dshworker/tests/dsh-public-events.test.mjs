@@ -22,7 +22,7 @@ test("DSH streams public text under a stable item ID and settles without duplica
   assert.equal(f.turn.publicMessages.length, 1); const id = f.turn.publicMessages[0].id;
   assert.equal(f.turn.publicMessages[0].text, "第一句话");
   f.send("assistant/message", { message: { id: "native-message", content: [{ type: "text", text: "第一句话。" }] } });
-  assert.deepEqual(f.turn.publicMessages, [{ id, text: "第一句话。" }]);
+  assert.deepEqual(f.turn.publicMessages, [{ id, text: "第一句话。", mediaVersion: 1, complete: true }]);
   f.events.stream(f.thread, f.turn, { type: "chunk", chunk: { type: "reasoning-delta", text: "private" } });
   assert.ok(!JSON.stringify(f.turn.publicMessages).includes("private"));
 });

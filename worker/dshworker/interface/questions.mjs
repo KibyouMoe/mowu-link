@@ -1,4 +1,4 @@
-import { dshQuestionIdentity, parseDshIdentity, projectPublicQuestion, nativeQuestionReply, SKIPPED_QUESTION_ANSWER } from "./public-questions.mjs";
+import { dshQuestionId, dshQuestionIdentity, parseDshIdentity, projectPublicQuestion, nativeQuestionReply, SKIPPED_QUESTION_ANSWER } from "./public-questions.mjs";
 
 // Bind public clarification cards to exact DSH requests. Approval/plan intents
 // remain with their native handler, never the clarification answer channel.
@@ -13,6 +13,7 @@ export class DshQuestions {
     const thread = owned && t.threads.get(owned[0]);
     const turn = thread?.turns.find(x => x.status === "inProgress" && !thread.queue.includes(x.id));
     if (!turn || !request.questions?.length || request.questions.length > 3 || request.questions.some(q => q.intent)) return next();
+    if (request.signal?.aborted) throw request.signal.reason ?? new Error("question cancelled");
     const agent = request.agent, sessionId = agent.session.id;
     let callId = request.wait?.callId;
     if (!callId) for (let n = agent.session.seq - 1; n >= 0; n--) {
@@ -20,16 +21,32 @@ export class DshQuestions {
       if (event?.type === "tool/call" && event.data.name === "ask_user_question") { callId = event.data.callId; break; }
     }
     if (!callId) return next();
+    const key = `${sessionId}:${callId}`;
+    const fingerprint = JSON.stringify(request.questions.map(q =>
+      [q.id, q.question, Boolean(q.multiSelect), q.options?.map(option => option.label) ?? []]));
+    const active = this.pending.get(key);
+    if (active) {
+      if (active.fingerprint !== fingerprint) throw new Error("question_identity_conflict");
+      return active.promise;
+    }
+    const previous = thread.turns.flatMap(candidate => candidate.nativeQuestions ?? []).find(item =>
+      item.dshQuestion?.sessionId === sessionId && item.dshQuestion.callId === callId);
+    if (previous) {
+      if (previous.dshQuestion.fingerprint && previous.dshQuestion.fingerprint !== fingerprint)
+        throw new Error("question_identity_conflict");
+      if (previous.dshQuestionAnswer) return structuredClone(previous.dshQuestionAnswer);
+      return next();
+    }
     const item = { type: "agentMessage", kind: "assistant", id: `dsh-question-${sessionId}-${callId}`,
       phase: "commentary", delivery: "async", text: request.questions.map(q => q.question).join("\n"),
       questions: request.questions.map(q => ({ title: q.question,
         ...(!q.multiSelect && q.options?.length >= 2 && q.options.length <= 6 ? { options: q.options.map(o => o.label) } : {}) })),
-      dshQuestion: { sessionId, callId, ids: request.questions.map(q => q.id) } };
+      dshQuestion: { sessionId, callId, ids: request.questions.map(q => q.id),
+        questionId: dshQuestionId(sessionId, callId), threadId: thread.id, sourceTurnId: turn.id, fingerprint } };
     (turn.nativeQuestions ??= []).push(item);
-    const key = `${sessionId}:${callId}`;
     let resolve, reject;
     const answered = new Promise((yes, no) => { resolve = yes; reject = no; });
-    const entry = { request, thread, turn, resolve, reject, item };
+    const entry = { request, thread, turn, resolve, reject, item, fingerprint, promise: answered };
     this.pending.set(key, entry);
     turn.waitingForInput = true; turn.eventSeq = (turn.eventSeq ?? 0) + 1;
     void t.save();
@@ -51,6 +68,7 @@ export class DshQuestions {
         return { questionItemId: dshQuestionIdentity(sessionId, callId, q.id),
           answer: a?.custom || a?.selected?.join("、") || SKIPPED_QUESTION_ANSWER };
       });
+      item.dshQuestionAnswer = structuredClone(answer);
       if (!entry.relayAnswered) {
         const question = projectPublicQuestion(item, { threadId: thread.id, turnId: turn.id });
         (turn.inputs ??= []).push({ id: `dsh-answer-${callId}`,

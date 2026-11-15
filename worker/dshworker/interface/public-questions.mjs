@@ -3,6 +3,11 @@
 import { createHash } from "node:crypto";
 // An explicit user skip is not an option selection or a permission decision.
 export const SKIPPED_QUESTION_ANSWER = "（用户选择跳过此问题，未提供答案）";
+function questionUuid(identity) {
+  const h = createHash("sha256").update(JSON.stringify(identity)).digest("hex");
+  return h.slice(0,8)+"-"+h.slice(8,12)+"-4"+h.slice(13,16)+"-8"+h.slice(17,20)+"-"+h.slice(20,32);
+}
+export const dshQuestionId = (sessionId, callId) => questionUuid(["dsh-public-question", sessionId, callId]);
 function codexProjectPublicQuestion(item, { threadId, turnId }) {
   if (!["AgentMessage", "agentMessage"].includes(item?.type) || item.delivery !== "async" ||
       !["commentary", "final", "final_answer"].includes(item.phase) ||
@@ -16,8 +21,7 @@ function codexProjectPublicQuestion(item, { threadId, turnId }) {
         q.options.some(s => typeof s !== "string" || !s.trim() || s.length > 1000))) return null;
     questions.push({ title: q.title.trim(), ...(q.options ? { options: q.options.map(s => s.trim()) } : {}) });
   }
-  const h = createHash("sha256").update(JSON.stringify(["public-question", threadId, turnId, item.id])).digest("hex");
-  const questionId = h.slice(0,8)+"-"+h.slice(8,12)+"-4"+h.slice(13,16)+"-8"+h.slice(17,20)+"-"+h.slice(20,32);
+  const questionId = questionUuid(["public-question", threadId, turnId, item.id]);
   return { questionId, threadId, sourceTurnId: turnId, delivery: "async", questions,
     sourceQuestionItemIds: questions.map((_, i) => JSON.stringify(["request_user_input_async", item.id, i])) };
 }
@@ -94,11 +98,14 @@ export function parseDshIdentity(value) {
 export function validNativeQuestionId(id) { return !!parseDshIdentity(id) || codexValidNativeQuestionId(id); }
 export function projectPublicQuestion(item, context) {
   if (!item?.dshQuestion) return codexProjectPublicQuestion(item, context);
-  const projected = codexProjectPublicQuestion(item, context);
+  const origin = item.dshQuestion;
+  if (origin.threadId && origin.threadId !== context.threadId) return null;
+  const projected = codexProjectPublicQuestion(item, { ...context, turnId: origin.sourceTurnId ?? context.turnId });
   if (!projected) return null;
   const { sessionId, callId, ids } = item.dshQuestion;
   if (!sessionId || !callId || ids?.length !== item.questions.length) return null;
-  return { ...projected, sourceQuestionItemIds: ids.map(id => dshQuestionIdentity(sessionId, callId, id)) };
+  return { ...projected, questionId: origin.questionId ?? projected.questionId,
+    sourceQuestionItemIds: ids.map(id => dshQuestionIdentity(sessionId, callId, id)) };
 }
 const START = "<dsh_user_question_reply>", END = "</dsh_user_question_reply>";
 export function parseDshQuestionReply(text) {

@@ -27,7 +27,7 @@ export class DshPublicEvents {
     const id = `dsh-text-${frame.attemptId ?? turn.streamAttempt ?? turn.id}`;
     turn.publicMessages ??= [];
     let item = turn.publicMessages.find(item => item.id === id);
-    if (!item) { item = { id, text: "" }; turn.publicMessages.push(item); }
+    if (!item) { item = { id, text: "", mediaVersion: 1, complete: false }; turn.publicMessages.push(item); }
     item.text += frame.chunk.text;
   }
   event(thread, turn, agent, session, event) {
@@ -39,8 +39,8 @@ export class DshPublicEvents {
         turn.publicMessages ??= [];
         const id = `dsh-text-${turn.streamAttempt ?? data.message.id ?? event.seq}`;
         let item = turn.publicMessages.find(item => item.id === id);
-        if (!item) { item = { id, text }; turn.publicMessages.push(item); }
-        else item.text = text;
+        if (!item) { item = { id, text, mediaVersion: 1, complete: true }; turn.publicMessages.push(item); }
+        else { item.text = text; item.complete = true; }
       }
     }
     const context = { threadId: thread.id, turnId: turn.id };

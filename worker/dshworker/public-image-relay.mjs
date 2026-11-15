@@ -15,7 +15,8 @@ const canonical = filename => /^[a-z]:[\\/]/i.test(filename)
   ? path.win32.normalize(filename).toLowerCase() : path.normalize(filename);
 const hash = value => createHash("sha256").update(value).digest("hex");
 
-export function markdownImageSpans(text) {
+export function markdownImageSpans(text, options = {}) {
+  const resolvePath = typeof options?.resolvePath === "function" ? options.resolvePath : localImagePath;
   // Code examples must not become outbound messages. Mask inline code and
   // fenced blocks, including a fence which is still streaming/incomplete.
   let fence = null;
@@ -57,7 +58,7 @@ export function markdownImageSpans(text) {
     const suffix = angle ? text.slice(index).match(/^\s*(?:["'][^\n]*?["']\s*)?\)/) : null;
     if (angle ? !suffix : depth !== 0) continue;
     destination = destination.replace(/\s+["'][^\n]*?["']\s*$/, "");
-    const filename = localImagePath(destination);
+    const filename = resolvePath(destination);
     if (filename) result.push({ imagePath: filename, start: match.index, end: index + (suffix?.[0].length ?? 1) });
     start.lastIndex = index + (suffix?.[0].length ?? 1);
   }
