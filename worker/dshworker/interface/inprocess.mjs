@@ -728,12 +728,21 @@ export class InProcessTransport {
     if (thread.sessionId) {
       let handle;
       try {
-        const mountSetup = await this.presetSetup();
-        handle = await agents.resume({
-          resumeSessionId: thread.sessionId,
-          agentOptions,
-          ...(mountSetup ? { setup: mountSetup } : {}),
-        });
+        const controller = this.ctx.get("sessionController");
+        if (typeof controller?.resolveAgent === "function") {
+          const resolved = await controller.resolveAgent(thread.sessionId);
+          if (resolved.error) throw resolved.error;
+          // The native controller owns composition, UI capabilities and lifetime.
+          // Plugin reloads only release this borrow of the existing main agent.
+          handle = { agent: resolved.agent, dispose: async () => {} };
+        } else {
+          const mountSetup = await this.presetSetup();
+          handle = await agents.resume({
+            resumeSessionId: thread.sessionId,
+            agentOptions,
+            ...(mountSetup ? { setup: mountSetup } : {}),
+          });
+        }
         const agent = handle.agent;
         if (agent?.session?.id !== thread.sessionId) throw new Error("native session identity mismatch");
         this.live.set(thread.id, { handle, agent });

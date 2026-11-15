@@ -92,6 +92,34 @@ test('foreign sessions, runtime context, reasoning and raw tool output are not m
   assert.doesNotMatch(JSON.stringify(f.snapshot()), /private/); await f.end();
 });
 
+test('a restored main agent is borrowed from the native controller and survives plugin unload', async t => {
+  const f = fixture(t); f.transport.live.clear();
+  const originalGet = f.transport.ctx.get;
+  let resolutions = 0;
+  f.transport.ctx.get = name => name === 'sessionController' ? {
+    resolveAgent: async sessionId => {
+      assert.equal(sessionId, f.session.id); resolutions++;
+      return { agent: f.agent };
+    },
+  } : originalGet(name);
+  assert.equal(await f.transport.ensureAgent(f.thread), f.agent);
+  assert.equal(await f.transport.ensureAgent(f.thread), f.agent);
+  assert.equal(resolutions, 1);
+  await f.transport.close(); assert.equal(f.agent.status, 'idle');
+  assert.equal(f.thread.sessionId, f.session.id);
+});
+
+test('native controller resume errors retain the main identity and never fall back to another agent', async t => {
+  const f = fixture(t); f.transport.live.clear();
+  const originalGet = f.transport.ctx.get;
+  f.transport.ctx.get = name => name === 'sessionController' ? {
+    resolveAgent: async () => ({ error: Error('native resume validation failed') }),
+  } : originalGet(name);
+  await assert.rejects(f.transport.ensureAgent(f.thread), { code: 'dsh_session_resume_failed' });
+  assert.equal(f.thread.sessionId, f.session.id);
+  assert.equal(f.transport.live.size, 0);
+});
+
 test('baseline and event sequence prevent history replay and duplicate native inputs', async t => {
   const f = fixture(t); f.session.seq = 10; f.transport.desktopObserver.baseline(f.agent);
   f.publish('session/event', f.session, { seq: 9, type: 'turn/start' }); assert.equal(f.thread.turns.length, 0);
