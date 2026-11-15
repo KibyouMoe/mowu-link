@@ -350,7 +350,7 @@ python3 mwu.py router GET /attachments/实际64位附件ID --out /absolute/path/
 | `stateDir/desktop-manager-state.json` | 自动公开图片 `autoImages`、原生输入 receipts、公开问题、会话与选择信息 |
 | `stateDir/feishu-images/` | 飞书图片与图片文件入站缓存 |
 | `stateDir/worker-messages/<本工位名SHA256>/images/` | peer 图片原字节，目录哈希为 UTF-8 identity.name 的 SHA256 |
-| `stateDir/worker-messages/<本工位名SHA256>/inbox/`、`outbox/` | 普通消息的原请求、派发和媒体回执 |
+| `stateDir/worker-messages/<本工位名SHA256>/received/`、`sent/` | 普通消息的原请求、派发和媒体回执 |
 
 出现“客户端显示图片，飞书没有”时，按原生公开 item/`deliverables/presented` 或 MEDIA、`autoImages`、媒体发送账本、飞书 message_id 的顺序定位。`unknown` 状态先核对原媒体 UUID 和资源回执，保留原请求与源字节。
 
@@ -400,7 +400,9 @@ task_id 的取消标记需要落盘。较早任务的延迟取消只作用于其
 ## 9. peer 普通私聊与防回环
 
 已集成的工位优先使用 `bridge_send_worker_message`，参数为 UUID `messageId`、`to`、公开 `text`、可选 `replyTo` 和 `attachments:[{id,name}]`。
-HTTP 对应 `POST /messages`，字段如下。
+本机已运行 bridge 而当前引擎未暴露该工具时，调用 `POST /bridge/worker-messages`，使用 bridge 的 Bearer 认证和同一组 camelCase 字段。该入口登记发送端公开记录、飞书正文与独立媒体回执。
+
+新适配器的底层 router 入口为 `POST /messages`，同时实现本工位的发送记录和公开同步。router 保存消息并投递到接收方，发送端飞书同步由工位自己的发送入口负责。router 字段如下。
 
 | 字段 | 值 |
 | --- | --- |
