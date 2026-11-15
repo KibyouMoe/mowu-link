@@ -9,6 +9,7 @@ import { publicJournalItem } from "../local-public-journal.mjs";
 import { projectPublicQuestion } from "../interface/public-questions.mjs";
 import { requestInitiator, rememberTurnInitiator, questionInitiator } from "../question-origin.mjs";
 import { waitForTaskClarification } from "../router-question-wait.mjs";
+import { SKIPPED_QUESTION_ANSWER } from "../interface/public-questions.mjs";
 
 const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j1WkAAAAASUVORK5CYII=", "base64");
 const content = keys => JSON.stringify({title:"图片问题",content:[...keys.map(image_key=>[{tag:"img",image_key}]),[{tag:"text",text:"这个是啥呀"}]]});
@@ -70,8 +71,10 @@ test("a router task asks Hermes by event and mirrors a read-only question card t
  const f=await routing(t);await f.manager.questions.publish(f.q);
  assert.equal(f.notifications.length,1);
  assert.equal(f.notifications[0].kind,"worker.question");assert.equal(f.notifications[0].urgency,"urgent");
- assert.ok(f.notifications[0].text.includes("t-routing"));assert.ok(f.notifications[0].text.includes("/answer"));
- assert.ok(f.notifications[0].text.includes("配置甲"));assert.ok(f.notifications[0].text.includes("配置乙"));
+ assert.ok(f.notifications[0].text.includes(f.q.questionId));assert.ok(f.notifications[0].text.length<=100);
+ const template=f.manager.questions.get(f.q.questionId);
+ assert.deepEqual(template.questions[0].options,["配置甲","配置乙"]);assert.equal(template.answerRequest.actor,"hermes");
+ assert.equal(template.answerRequest.nonce,f.manager.questions.state.entries[f.q.questionId].nonce);
  assert.equal(buttonCount(f.cards[0].card),0);assert.ok(JSON.stringify(f.cards[0].card).includes("等待溪流回复"));
  const state=f.manager.questions.get(f.q.questionId);assert.equal(state.recipient.kind,"hermes");assert.equal(state.routerDelivery,"sent");
  await f.manager.questions.publish(f.q);assert.equal(f.notifications.length,1);assert.equal(f.cards.length,1);
@@ -84,7 +87,7 @@ test("one-option router questions reach Hermes once and accept the original nati
  await f.manager.questions.publish(f.q);
  assert.equal(f.notifications.length, 1);
  assert.equal(f.cards.length, 1);
- assert.ok(f.notifications[0].text.includes("已解锁，继续验收"));
+ assert.ok(f.cards[0].card.body.elements.some(e=>e.content?.includes("已解锁，继续验收")));
  await f.manager.questions.acceptAgentAnswer(f.q.questionId, answer(f, { answers: ["已解锁，继续验收"] }));
  f.manager.handoffPaused = false;
  await f.manager.questions.process();
@@ -108,9 +111,9 @@ test("the trainer cannot accidentally answer a Hermes-owned question through car
  assert.ok(result.toast.content.includes("溪流"));assert.equal(a.status,"open");
  assert.equal(f.calls.filter(c=>c.name==="send_message_to_thread").length,0);
 });
-test("Hermes answer admission rejects another actor, task, thread, nonce or placeholder",async t=>{
+test("Hermes answer admission rejects another actor, thread, nonce or placeholder",async t=>{
  const f=await routing(t);await f.manager.questions.publish(f.q);
- for(const extra of [{actor:"trainer"},{taskId:"t-other"},{threadId:"other"},{nonce:"wrong"}])
+ for(const extra of [{actor:"trainer"},{threadId:"other"},{nonce:"wrong"}])
   await assert.rejects(f.manager.questions.acceptAgentAnswer(f.q.questionId,answer(f,extra)),e=>e.status===403);
  await assert.rejects(f.manager.questions.acceptAgentAnswer(f.q.questionId,answer(f,{answers:["<填写回答>"]})),e=>e.status===400);
  assert.equal(f.manager.questions.get(f.q.questionId).status,"open");
@@ -127,7 +130,7 @@ test("the authenticated agent answer endpoint returns to the same native chat on
  const first=await send();assert.equal(first.status,200);assert.equal(first.body.status,"answer_pending");
  assert.equal((await send()).body.duplicate,true);
  assert.equal((await send("isolated-post-test-token",{...body,answers:["冲突答案"]})).status,409);
- await f.manager.questions.process();await f.manager.questions.process();
+ await f.manager.questions.running;await f.manager.questions.process();
  const writes=f.calls.filter(c=>c.name==="send_message_to_thread");assert.equal(writes.length,1);
  assert.ok(writes[0].args.prompt.includes("配置乙"));
  assert.match(writes[0].args.prompt,/^<send_user_message_question_reply>\n/);
@@ -145,13 +148,74 @@ test("the authenticated agent answer endpoint returns to the same native chat on
  f.manager.routerClient.getTask=async()=>({state:"done"});
  assert.equal((await f.manager.questions.acceptAgentAnswer(f.q.questionId,body)).duplicate,true);
 });
-test("cancelled tasks cannot receive a delayed agent answer",async t=>{
+test("Hermes answers an exact question after the originating task ends or is cancelled",async t=>{
  const f=await routing(t);await f.manager.questions.publish(f.q);
  f.manager.routerClient.getTask=async()=>({state:"cancelled"});
- await assert.rejects(f.manager.questions.acceptAgentAnswer(f.q.questionId,answer(f)),e=>e.body.error==="source_task_ended");
+ const result=await f.manager.questions.acceptAgentAnswer(f.q.questionId,answer(f,{actor:"Hermes",taskId:"t-new-sender"}));
+ assert.equal(result.status,"answer_pending");
  f.manager.handoffPaused=false;await f.manager.questions.process();
- assert.equal(f.manager.questions.get(f.q.questionId).status,"expired");
- assert.equal(f.calls.filter(c=>c.name==="send_message_to_thread").length,0);
+ assert.equal(f.manager.questions.get(f.q.questionId).status,"answered");
+ assert.equal(f.calls.filter(c=>c.name==="send_message_to_thread").length,1);
+});
+for(const taskState of ["done","failed","cancelled"]) test(`an async question survives a ${taskState} source task and a later native turn`,async t=>{
+ const f=await routing(t,{taskState});f.turn.status="completed";
+ await f.manager.questions.publish(f.q);
+ f.manager.deliveryState=async()=>({turns:[{id:"later-native-turn",status:"inProgress"}]});
+ f.manager.config.nativeBusyDeliveryVerified=true;
+ f.manager.handoffPaused=false;await f.manager.questions.process();
+ assert.equal(f.manager.questions.get(f.q.questionId).status,"open");
+ const request=f.manager.questions.get(f.q.questionId).answerRequest;
+ assert.equal(request.taskId,undefined);
+ await f.manager.questions.acceptAgentAnswer(f.q.questionId,{...request,actor:"Hermes",answers:["配置甲"]});
+ await f.manager.questions.running;
+ assert.equal(f.manager.questions.get(f.q.questionId).status,"answered");
+ assert.equal(f.calls.filter(c=>c.name==="send_message_to_thread").length,1);
+});
+for(const mode of ["option","skip","free-text"]) test(`Hermes ${mode} answer updates the original card and preserves its author on native echo`,async t=>{
+ const f=await routing(t);await f.manager.questions.publish(f.q);
+ const request=f.manager.questions.get(f.q.questionId).answerRequest;
+ const expected=mode==="skip"?SKIPPED_QUESTION_ANSWER:mode==="option"?"配置甲":"由溪流给出的自由文本";
+ const body=mode==="skip"?{...request,action:"skip"}:{...request,answers:[expected]};
+ await f.manager.questions.acceptAgentAnswer(f.q.questionId,body);
+ f.manager.handoffPaused=false;await f.manager.questions.process();
+ const a=f.manager.questions.state.entries[f.q.questionId];
+ assert.equal(a.status,mode==="skip"?"skipped":"answered");assert.equal(a.answerActor,"hermes");
+ assert.equal(f.manager.questions.get(f.q.questionId).answeredBy,"hermes");
+ assert.equal((await f.manager.questions.acceptAgentAnswer(f.q.questionId,body)).duplicate,true);
+ const wire=f.calls.find(c=>c.name==="send_message_to_thread").args.prompt;
+ await f.manager.questions.observeNativeReply({threadId:"thread",text:wire,messageId:randomUUID(),turnId:"native-echo"});
+ await f.manager.questions.process();
+ assert.equal(a.answerActor,"hermes");assert.equal(a.nativePanelSync.status,"accepted");
+ assert.ok(f.patches.some(p=>JSON.stringify(p.card).includes(mode==="skip"?"溪流已跳过":"溪流的回答")));
+ assert.equal(f.cards.length,1);assert.equal(f.calls.filter(c=>c.name==="send_message_to_thread").length,1);
+});
+test("two workers cannot consume each other's answer nonce even with identical question IDs",async t=>{
+ const first=await routing(t),second=await routing(t);
+ await Promise.all([first.manager.questions.publish(first.q),second.manager.questions.publish(second.q)]);
+ const body=first.manager.questions.get(first.q.questionId).answerRequest;
+ await assert.rejects(second.manager.questions.acceptAgentAnswer(second.q.questionId,{...body,answers:["配置甲"]}),e=>e.status===403);
+ assert.equal(second.manager.questions.get(second.q.questionId).status,"open");
+ assert.equal(second.calls.filter(c=>c.name==="send_message_to_thread").length,0);
+});
+test("router notifications retain the full central question URL inside a 100-character preview",async t=>{
+ const f=await routing(t);f.manager.routerClient.url="http://192.168.3.102:8790";f.manager.routerClient.name="Rudolf";
+ await f.manager.questions.publish(f.q);
+ const text=f.notifications[0].text;
+ assert.ok(text.length<=100);assert.ok(text.endsWith(`/questions/Rudolf/${f.q.questionId}`));
+ assert.deepEqual(f.manager.questions.get(f.q.questionId).questions,f.q.questions);
+});
+test("a correlated native answer echo confirms panel synchronization while retaining Hermes as its author",async t=>{
+ const f=await routing(t);await f.manager.questions.publish(f.q);
+ await f.manager.questions.acceptAgentAnswer(f.q.questionId,answer(f));
+ f.manager.handoffPaused=false;await f.manager.questions.process();
+ const action=f.manager.questions.state.entries[f.q.questionId];
+ assert.equal(action.nativePanelSync,undefined);
+ const receipt=f.manager.state.receipts[action.nativeMessageId];
+ const messageId=await f.manager.observeNativeInput(f.session,{key:"real-turn/answer-echo",turnId:"real-turn",text:receipt.request.text});
+ assert.equal(messageId,action.nativeMessageId);
+ assert.equal(action.answerActor,"hermes");assert.equal(action.nativePanelSync.status,"accepted");
+ assert.equal(action.nativePanelSync.via,"native-observation");
+ assert.equal(f.calls.filter(c=>c.name==="send_message_to_thread").length,1);
 });
 test("an unknown router notification outcome is not resent and does not turn into a trainer question",async t=>{
  const f=await routing(t,{notice:async()=>{throw Error("lost response");}});

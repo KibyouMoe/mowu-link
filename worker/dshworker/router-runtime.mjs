@@ -343,6 +343,19 @@ export async function startRouterRuntime({ manager, nativeCall, transport = {}, 
       cancellations.set(taskId, action);
       return action;
     }
+    async function questionRequest(payload) {
+      if (typeof payload?.request_id !== "string" || typeof payload.question_id !== "string") return;
+      let status = 200, body;
+      try {
+        if (payload.operation === "get") body = manager.questions.get(payload.question_id);
+        else if (payload.operation === "answer") body = await manager.questions.acceptAgentAnswer(payload.question_id, payload.input);
+        else throw Object.assign(new Error("Unknown question operation."), { status: 400, body: { error: "invalid_question_operation" } });
+      } catch (error) {
+        status = error.status ?? 503;
+        body = error.body ?? { error: "question_worker_unavailable", detail: "Question state could not be read or answered." };
+      }
+      await client._request("POST", "/questions/responses", { request_id: payload.request_id, worker: name, status, body });
+    }
     transport.bindRouter?.(client, `http://${config.host ?? "127.0.0.1"}:${config.port}`);
     let approvalChannel, approvalHandler;
     if (typeof transport.setApprovalHandler === "function") {
@@ -383,6 +396,9 @@ export async function startRouterRuntime({ manager, nativeCall, transport = {}, 
     setActiveRouterClient(client);
     client.start({ onTask: task => enqueue(runTask, task), onSubscriptionEvent: event => enqueue(runSubscription, event),
       onEvent: (event, payload) => {
+        if (event === "question_request") void questionRequest(payload).catch(error => {
+          if (!closed) log("warn", "question_response_pending", { questionId: payload?.question_id, code: error.code ?? "transport_error" });
+        });
         if (event === "task_cancel") void cancelTask(payload?.task_id).catch(error => {
           if (!closed) log("warn", "router_cancel_ack_pending", { taskId: payload?.task_id, message: error.message });
         });

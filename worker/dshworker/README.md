@@ -27,7 +27,7 @@ router/飞书模块与 CodexWorker 逐字节一致。
 有已安装 Harness 包时，设置 `DSH_NATIVE_TEST_ROOT` 为包含其 node_modules 的目录，
 同一命令会另运行真实 V4 持久化、混入 system 与未知角色的冷读回归。
 
-## 飞书提问表单（布局 9）
+## 飞书提问表单（布局 10）
 
 按提供的 Codex 截图采用靛蓝标题、纵向编号选项、底部输入和右对齐的「跳过」「发送」。
 省去待答状态的编号与操作说明，保留终态及失败原因；选项保留边框并用 ☐/☑ 标识未选/已选，选中项高亮，灰色标题仅用于过期。
@@ -50,3 +50,13 @@ router 发起的问题仍由溪流经原回答接口作答，训练员侧只展�
 peer 与飞书消息使用原生用户输入，运行中通过 agent.steer 进入当前回合。
 发送者单独一行，正文换行，时间与原生附件沿用客户端显示。
 回复关联元数据通过 `bridge_worker_inbox({"view":"history"})` 查询。
+
+## 溪流回答原生提问
+
+共用 CodexWorker 的提问寿命、Hermes 身份与 nonce 校验、卡片和 router SSE 回答实现。
+异步问题独立于原工单和原回合寿命。使用 router `GET /questions/{worker}/{questionId}`
+中的 `answerRequest`，将选项或自由文本填入 `answers` 后 POST 到同一 URL 的 `/answer`；
+全部跳过使用 `action:"skip"`。DSH 适配层以原 session/call/question ID 回填原生
+`user-questions/request`。每次原生 Desktop 答题 provider 使用独立取消信号，外部答案完成后
+回收该 provider 的等待面板，并保留调用者/agent 的原信号；tool/result 或 continued reply
+继续更新原生问题投影。并行请求的 provider 信号分别绑定，恢复后依原 session/call/question ID 作答。

@@ -5,6 +5,7 @@ import { dshQuestionId, dshQuestionIdentity, parseDshIdentity, projectPublicQues
 export class DshQuestions {
   constructor(transport) {
     this.transport = transport; this.pending = new Map();
+    this.providerSources = new WeakMap();
     this.stop = transport.ctx.on("user-questions/request", (request, next) => this.request(request, next), { prepend: true });
   }
   async request(request, next) {
@@ -13,7 +14,10 @@ export class DshQuestions {
     const thread = owned && t.threads.get(owned[0]);
     const turn = thread?.turns.find(x => x.status === "inProgress" && !thread.queue.includes(x.id));
     if (!turn || !request.questions?.length || request.questions.length > 3 || request.questions.some(q => q.intent)) return next();
-    if (request.signal?.aborted) throw request.signal.reason ?? new Error("question cancelled");
+    // Parallel/repeated calls may copy a downstream request while it is live.
+    // Their caller lifetime must remain independent of another provider's close.
+    const sourceSignal = this.providerSources.has(request.signal) ? this.providerSources.get(request.signal) : request.signal;
+    if (sourceSignal?.aborted) throw sourceSignal.reason ?? new Error("question cancelled");
     const agent = request.agent, sessionId = agent.session.id;
     let callId = request.wait?.callId;
     if (!callId) for (let n = agent.session.seq - 1; n >= 0; n--) {
@@ -37,24 +41,30 @@ export class DshQuestions {
       if (previous.dshQuestionAnswer) return structuredClone(previous.dshQuestionAnswer);
       return next();
     }
+    const provider = new AbortController();
     const item = { type: "agentMessage", kind: "assistant", id: `dsh-question-${sessionId}-${callId}`,
       phase: "commentary", delivery: "async", text: request.questions.map(q => q.question).join("\n"),
       questions: request.questions.map(q => ({ title: q.question,
-        ...(!q.multiSelect && q.options?.length >= 2 && q.options.length <= 6 ? { options: q.options.map(o => o.label) } : {}) })),
+        ...(!q.multiSelect && q.options?.length >= 1 && q.options.length <= 6 ? { options: q.options.map(o => o.label) } : {}) })),
       dshQuestion: { sessionId, callId, ids: request.questions.map(q => q.id),
         questionId: dshQuestionId(sessionId, callId), threadId: thread.id, sourceTurnId: turn.id, fingerprint } };
     (turn.nativeQuestions ??= []).push(item);
     let resolve, reject;
     const answered = new Promise((yes, no) => { resolve = yes; reject = no; });
-    const entry = { request, thread, turn, resolve, reject, item, fingerprint, promise: answered };
+    const entry = { request, sourceSignal, provider, thread, turn, resolve, reject, item, fingerprint, promise: answered };
     this.pending.set(key, entry);
     turn.waitingForInput = true; turn.eventSeq = (turn.eventSeq ?? 0) + 1;
     void t.save();
-    const abort = () => reject(request.signal.reason ?? new Error("question cancelled"));
-    request.signal?.addEventListener("abort", abort, { once: true });
-    if (request.signal?.aborted) abort();
+    const abort = () => reject(sourceSignal.reason ?? new Error("question cancelled"));
+    sourceSignal?.addEventListener("abort", abort, { once: true });
+    if (sourceSignal?.aborted) abort();
     // Keep the native Desktop answerer active too. A missing Desktop provider
     // does not cancel a question which the Feishu/router channel can answer.
+    // Cordis next() reuses the request object. Give only its downstream Desktop
+    // provider a cancellable lifetime, then restore the caller's original signal.
+    const providerSignal = sourceSignal ? AbortSignal.any([sourceSignal, provider.signal]) : provider.signal;
+    this.providerSources.set(providerSignal, sourceSignal);
+    request.signal = providerSignal;
     Promise.resolve().then(() => next()).then(answer => {
       if (entry.relayAnswered) return;
       entry.nativeChosen = true; resolve(answer);
@@ -76,7 +86,9 @@ export class DshQuestions {
       }
       return answer;
     } finally {
-      request.signal?.removeEventListener("abort", abort);
+      provider.abort(new Error("question provider settled"));
+      request.signal = sourceSignal;
+      sourceSignal?.removeEventListener("abort", abort);
       this.pending.delete(key);
       turn.waitingForInput = [...this.pending.values()].some(pending => pending.turn === turn);
       turn.eventSeq = (turn.eventSeq ?? 0) + 1;
@@ -101,7 +113,7 @@ export class DshQuestions {
         ...(text !== SKIPPED_QUESTION_ANSWER && !q.options?.some(o => o.label === text) ? { custom: text } : {}) };
     }) };
     if (entry) {
-      if (entry.request.signal?.aborted || entry.nativeChosen || entry.relayAnswered) throw new Error("question_no_longer_waiting");
+      if (entry.sourceSignal?.aborted || entry.nativeChosen || entry.relayAnswered) throw new Error("question_no_longer_waiting");
       entry.relayAnswered = true;
       entry.resolve(answer);
       return { turnId: entry.turn.id, answered: true };

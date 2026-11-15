@@ -499,6 +499,8 @@ export class DesktopManager {
           session.turnMessages[item.turnId].push(receipt.request.messageId);
         rememberTurnInitiator(session, item.turnId, receipt.request);
       }
+      await this.questions.observeNativeReply({ threadId: session.threadId, text: item.text,
+        messageId: receipt.request.messageId, turnId: item.turnId, itemKey: item.key });
       return receipt.request.messageId;
     }
     const messageId = nativeMessageId(session.threadId, item.key);
@@ -1323,11 +1325,6 @@ export class DesktopManager {
     try {
       if (delivery === "queue" && activeTurn(await this.deliveryState(session))) {
         fail(409, "queue_target_busy", "The queued target is running; no native write was attempted.", true);
-      }
-      if (request.origin === "router-question" && request.taskId && this.questions.router()?.getTask) {
-        const task = await this.questions.router().getTask(request.taskId);
-        if (["cancelled","canceled","failed","done"].includes(task?.state))
-          fail(409, "source_task_ended", "The original router task ended; its queued clarification was not sent.");
       }
       if (request.sourceTurnGuard) {
         const latest = questionSourceTurn(await this.deliveryState(session), request.sourceTurnMayBeComplete);

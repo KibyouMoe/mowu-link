@@ -187,3 +187,12 @@ Windows 的 `desktopLifetimeLaunchMode=windows-desktop-parent`，Mac 为 `deskto
 适当测试：`node --test --test-reporter=tap tests/*.test.mjs`，
 router：`ROUTER_TEST_PORT=18790 python3 server/router/selftest_router.py`（仓库根目录）。
 完整命令、真实输出和未验项记录在仓库 `docs/desktop-only-progress.md`。
+
+## 溪流回答原生提问
+
+异步原生问题保持独立寿命，原任务或回合结束后可继续回答。Hermes 用 router 的鉴权
+`GET /questions/{worker}/{questionId}` 取得完整题面和 `answerRequest`，再 POST 到同一 URL 的
+`/answer`。选项或自由文本填入 `answers`；全部跳过使用 `action:"skip"`。身份校验绑定
+Hermes、原会话和该问题独立 nonce，原 taskId 保留作关联。原飞书卡片显示回答者与
+已回答/已跳过状态，原生回答保留 questionItemId。网络结果未知时保留同一原生消息 UUID。
+本机 `/bridge/questions/{id}` 和 `/answer` 兼容，GET 同样返回可直接填的模板。
