@@ -10,21 +10,20 @@
 
 | 单号 | 内容 | 状态 |
 |---|---|---|
-| t-70db13d1b7 | 协作记录真实验收（真实双向私聊 + 客户端证据） | running（唯一在跑） |
+| t-6b882d907d' | peer 私聊插进当前 turn（steering） | 新发（唯一在跑） |
 
 ## 待发（按优先级，验收通过后逐张发）
 
 | # | 内容 | 备注 |
 |---|---|---|
-| 1 | `t-6b882d907d` peer 私聊插进当前 turn（steering） | 核心需求；训练员 22:08 纠正 |
-| 2 | `t-5e9bd891e0` P0 复验：单选项提问 + 溪流 HTTP 回答 + 弹窗是否消 | 已发现 reason=source_task_ended / recipient_mismatch |
-| 3 | `t-a1fd765968` DSH 恢复故障：user/message 里 role=system（seq8432，7 条同型） | 写入端 + 读取端容错 + 历史对账 |
-| 4 | `t-cc76db724f` 入站路径收尾：Codex 侧显示验收 + 双单分别回执 | 接 197b8b1 / 82516af |
-| 5 | `t-05da9682ff` worker 技能 `mowulink-worker-skill` | 零上下文可用（SKILL.md 515 行，需先判是否要瘦身） |
-| 6 | 电视屏保合并单（`t-fcaf798046` 已撤，内容见 BACKLOG） | 竖版模糊背景 / 顺序可配 / 根目录热切 / 随机洗牌袋 |
-| 7 | `t-e738936b31` Codex 权限模式随插件同步 | 装到别的 Codex 上缺权限模式 |
-| 8 | `t-7f51a82e4a` 验收入账 + 分支待合清单 | 等训练员说"合吧"再合 main |
-| 9 | 最低优先：飞书卡片「输出/回复」两态混用 | 有空再修 |
+| 1 | P0 复验：单选项提问 + 溪流 HTTP 回答 + 弹窗是否消 | 已发现 reason=source_task_ended / recipient_mismatch |
+| 2 | DSH 恢复故障：user/message 里 role=system（seq8432，7 条同型） | 写入端 + 读取端容错 + 历史对账 |
+| 3 | 入站路径收尾：Codex 侧显示验收 + 双单分别回执 | 接 197b8b1 / 82516af |
+| 4 | worker 技能 `mowulink-worker-skill` | 零上下文可用（SKILL.md 515 行，需先判是否要瘦身） |
+| 5 | 电视屏保合并单 | 竖版模糊背景 / 顺序可配 / 根目录热切 / 随机洗牌袋 |
+| 6 | Codex 权限模式随插件同步 | 装到别的 Codex 上缺权限模式 |
+| 7 | 分支待合清单 | 等训练员说"合吧"再合 main |
+| 8 | 最低优先：飞书卡片「输出/回复」两态混用 | 有空再修 |
 
 ## 待办（不定时，跟队列无关）
 
@@ -39,3 +38,4 @@
 - DSH 兼容 + 图片修复：已合 main `3e1aa91`
 - worker 互聊带图在客户端可见：训练员 21:27 截图确认「没什么问题」
 - 模型切换：`gpt-6.1-sol` + `ultra`（原生日志确认）
+- 真实双向 peer 验收 PASS（22:29）：OguriCap→TamamoCross `e05791cf-d9c6-4e6d-bc60-0a…`，附件 `ed13a3dd876090e4410e`
