@@ -619,18 +619,25 @@ class RouterStore:
                  time.time()))
             return self.get_peer_message(message_id)
 
-    def pending_peer_messages(self, worker: str, after: int = 0,
-                              limit: int = PEER_PAGE_LIMIT
-                              ) -> Tuple[List[Dict[str, Any]], bool]:
-        """Bound both row count and encoded bytes; never load the whole inbox."""
+    def peer_messages(self, worker: str, cursor: int = 0,
+                      limit: int = PEER_PAGE_LIMIT, *, history: bool = False
+                      ) -> Tuple[List[Dict[str, Any]], bool]:
+        """Bound both row count and encoded bytes for inbox and history reads."""
         messages: List[Dict[str, Any]] = []
         size = 0
         with self._lock:
+            if history:
+                query = (" WHERE (sender=? OR recipient=?) AND seq<?"
+                         " ORDER BY seq DESC LIMIT ?")
+                params = (worker, worker, cursor, limit + 1)
+            else:
+                query = (" WHERE recipient=? AND acked_at IS NULL AND seq>?"
+                         " ORDER BY seq LIMIT ?")
+                params = (worker, cursor, limit + 1)
             rows = self._conn.execute(
                 "SELECT seq, message_id, sender, recipient, text, reply_to,"
-                " attachments_json, created_at, acked_at FROM peer_messages"
-                " WHERE recipient=? AND acked_at IS NULL AND seq>?"
-                " ORDER BY seq LIMIT ?", (worker, after, limit + 1))
+                " attachments_json, created_at, acked_at FROM peer_messages" + query,
+                params)
             try:
                 for row in rows:
                     message = self._peer_dict(row)
@@ -1708,7 +1715,7 @@ class RouterServer(ThreadingHTTPServer):
         available = PEER_STREAM_BUFFER - conn.peer_buffered
         if available <= 0:
             return
-        messages, _ = self.store.pending_peer_messages(
+        messages, _ = self.store.peer_messages(
             conn.name, conn.peer_after, available)
         for message in messages:
             conn.queue.put({"event": "worker_message", "data": message})
@@ -2085,6 +2092,8 @@ class RouterHandler(BaseHTTPRequestHandler):
     # GET /messages/<UUID> (or /messages?id=UUID) queries either state.
     # GET /messages?worker=NAME[&after=SEQ&limit=1..100] pages the pending
     # inbox in seq order, capped at 256 KiB. Follow next_after if has_more.
+    # view=history reads both directions, including ACKed rows, newest first.
+    # Follow next_before with before=SEQ. History reads never ACK or replay.
     # All routes use the existing shared X-Router-Token authentication;
     # worker identities are explicit assertions, not separate credentials.
     @staticmethod
@@ -2128,13 +2137,24 @@ class RouterHandler(BaseHTTPRequestHandler):
         worker = self._peer_worker(qs.get("worker", [None])[0], "worker")
         if self.server.store.get_worker(worker) is None:
             return 404, {"ok": False, "error": "unknown_worker"}
-        after = self._int_param(qs, "after", 0)
         limit = self._int_param(qs, "limit", PEER_PAGE_LIMIT)
-        if after is None or not 0 <= after <= 9223372036854775807:
-            raise BadRequest("after must be a nonnegative SQLite sequence")
         if limit is None or not 1 <= limit <= PEER_PAGE_LIMIT:
             raise BadRequest("limit must be 1..100")
-        messages, more = self.server.store.pending_peer_messages(worker, after, limit)
+        view = qs.get("view", ["inbox"])[0]
+        if view == "history":
+            before = self._int_param(qs, "before", 9223372036854775807)
+            if "after" in qs or before is None or not 1 <= before <= 9223372036854775807:
+                raise BadRequest("history uses a positive SQLite before sequence")
+            messages, more = self.server.store.peer_messages(worker, before, limit, history=True)
+            return 200, {"ok": True, "worker": worker, "view": "history",
+                         "count": len(messages), "messages": messages, "has_more": more,
+                         "next_before": messages[-1]["seq"] if more else None}
+        if view != "inbox" or "before" in qs:
+            raise BadRequest("use view=inbox with after or view=history with before")
+        after = self._int_param(qs, "after", 0)
+        if after is None or not 0 <= after <= 9223372036854775807:
+            raise BadRequest("after must be a nonnegative SQLite sequence")
+        messages, more = self.server.store.peer_messages(worker, after, limit)
         return 200, {"ok": True, "worker": worker, "count": len(messages),
                      "messages": messages, "has_more": more,
                      "next_after": messages[-1]["seq"] if more else None}

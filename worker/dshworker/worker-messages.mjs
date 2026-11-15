@@ -1,12 +1,13 @@
 // Ordinary peer chat only. The router/client owner supplies SSE and polling;
 // this service never submits tasks, creates goals, or automatically replies.
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, open, readFile, rename } from "node:fs/promises";
+import { mkdir, open, readFile, readdir, rename, stat } from "node:fs/promises";
 import path from "node:path";
 import { PROTOCOL } from "./desktop-manager.mjs";
 import { imageType, MAX_ROUTER_IMAGE_BYTES } from "./router-attachments.mjs";
 import { localHost } from "./interface/native-dispatch.mjs";
 import { UUID_PATTERN, UUID_V4_PATTERN } from "./identifiers.mjs";
+import { WORKER_CHAT_POLICY, peerPresentation } from "./collaboration-view.mjs";
 
 const owners = new WeakMap();
 const IMAGE_ID = /^[0-9a-f]{64}$/;
@@ -91,10 +92,6 @@ async function atomic(file, value) {
     }
   }
 }
-function marker(message) {
-  return `[worker ${message.from} message ${message.message_id}` +
-    (message.reply_to ? " reply_to " + message.reply_to : "") + "]\n这里是 " + message.from + "。";
-}
 function routerReceipt(result, message) {
   if (result?.ok !== true || result.message_id !== message.message_id || !["queued", "accepted"].includes(result.status) ||
       !result.message || result.message.from !== message.from || result.message.to !== message.to || result.message.text !== message.text ||
@@ -120,6 +117,7 @@ export function startWorkerMessaging({ manager, client, worker, log = () => {} }
   const root = path.resolve(manager.stateDir, "worker-messages", digest(worker));
   const abort = new AbortController(), stopped = Object.assign(new Error("worker_messaging_closed"), { code: "worker_messaging_closed" });
   let closed = false, pending = 0, tail = Promise.resolve(), closing;
+  let historyRead, historyNextReadAt = 0, routerHistory = [];
   const check = () => { if (closed || manager.closed || manager.handoffPaused || manager.proxy) throw stopped; };
   const note = (level, event, fields) => { try { log(level, event, fields); } catch {} };
   // Stop observing native writes on close, never cancel or repeat their effects.
@@ -145,7 +143,93 @@ export function startWorkerMessaging({ manager, client, worker, log = () => {} }
     const old = await json(file(direction, payload.message_id));
     if (old && (old.version !== 1 || !same(old.payload, payload)))
       fail("message_id_conflict", "This messageId already belongs to different peer message content.", payload.message_id);
+    if (old && !old.timestamp) old.timestamp = (await stat(file(direction, payload.message_id))).mtime.toISOString();
     return old;
+  }
+  async function history() {
+    check();
+    const records = new Map((await readRouterHistory()).map(record => [record.messageId, record]));
+    for (const direction of ["sent", "received"]) {
+      const folder = path.join(root, direction);
+      let names;
+      try { names = await readdir(folder); }
+      catch (error) { if (error.code === "ENOENT") continue; throw error; }
+      for (const name of names.filter(name => UUID_PATTERN.test(name.slice(0, -5)) && name.endsWith(".json"))) {
+        const record = await json(path.join(folder, name));
+        if (!record?.payload || direction === "sent" && !record.router) continue;
+        const timestamp = record.timestamp ?? (await stat(path.join(folder, name))).mtime.toISOString();
+        records.set(record.payload.message_id, { messageId: record.payload.message_id, replyTo: record.payload.reply_to ?? null,
+          ...peerPresentation(record.payload, timestamp),
+          metadata: { imagePaths: record.request?.attachments?.map(ref => ref.localPath) ?? [] },
+          attachments: copy(record.media ?? record.payload.attachments ?? []) });
+      }
+    }
+    return [...records.values()].sort((a, b) => a.timestamp.localeCompare(b.timestamp) || a.messageId.localeCompare(b.messageId)).slice(-200);
+  }
+
+  async function readRouterHistory() {
+    if (historyRead) return historyRead;
+    if (Date.now() < historyNextReadAt) return routerHistory;
+    historyRead = (async () => {
+      const records = [], expires = Date.now() + 3000;
+      let before = Number.MAX_SAFE_INTEGER;
+      try {
+        while (records.length < 200) {
+          const timeoutMs = expires - Date.now();
+          if (timeoutMs <= 0) fail("worker_history_unavailable", "Router history read exceeded its request budget.");
+          const page = await observe(() => client._request("GET",
+            `/messages?worker=${encodeURIComponent(worker)}&view=history&before=${before}&limit=100`, null, { timeoutMs }));
+          // Older routers ignore view=history and return the pending inbox.
+          if (page?.view !== "history") return routerHistory;
+          if (page.ok !== true || page.worker !== worker || !Array.isArray(page.messages) || page.messages.length > 100)
+            fail("invalid_worker_history", "Router returned an invalid collaboration history.");
+          let last = before;
+          for (const value of page.messages) {
+            if (!Number.isSafeInteger(value?.seq) || value.seq < 1 || value.seq >= last)
+              fail("invalid_worker_history", "Router history sequence did not descend.");
+            last = value.seq;
+            if (value.from !== worker && value.to !== worker) continue;
+            const payload = incoming(value, value.to);
+            if (!Number.isFinite(value.created_at) || !Number.isFinite(new Date(value.created_at * 1000).getTime()))
+              fail("invalid_worker_history", "Router history has no valid message timestamp.");
+            records.push({ messageId: payload.message_id, replyTo: payload.reply_to,
+              ...peerPresentation(payload, new Date(value.created_at * 1000).toISOString()),
+              metadata: { imagePaths: [] }, attachments: payload.attachments });
+          }
+          if (!page.has_more || records.length >= 200) break;
+          if (page.next_before !== last || last >= before)
+            fail("invalid_worker_history", "Router history pagination did not advance.");
+          before = last;
+        }
+        routerHistory = records.slice(0, 200);
+      } catch (error) {
+        check();
+        note("warn", "worker_history_unavailable", { worker, code: error.code ?? "router_read_failed" });
+      }
+      return routerHistory;
+    })().finally(() => { historyRead = null; historyNextReadAt = Date.now() + 2000; });
+    return historyRead;
+  }
+
+  async function mirrorImages(record, direction) {
+    record.imageMirrors ??= {};
+    for (const ref of record.media ?? record.payload.attachments ?? []) {
+      if (record.imageMirrors[ref.id] || !manager.notifier) continue;
+      const imagePath = await image(ref);
+      // The image output ledger owns uncertain POSTs and Feishu UUID deduplication.
+      const h = digest(`${direction}:${record.payload.message_id}:${ref.id}`);
+      const messageId = h.slice(0, 8) + "-" + h.slice(8, 12) + "-4" + h.slice(13, 16) + "-8" + h.slice(17, 20) + "-" + h.slice(20, 32);
+      try {
+        record.imageMirrors[ref.id] = await observe(() => manager.sendImage({ imagePath, threadId: record.targetThreadId, messageId }));
+      } catch (error) {
+        check();
+        record.imageMirrors[ref.id] = { status: "unconfirmed", messageId,
+          error: error.body?.error ?? error.code ?? "peer_image_delivery_unconfirmed" };
+        note("warn", "worker_message_image_unconfirmed", { peerMessageId: record.payload.message_id,
+          imageId: ref.id, ...record.imageMirrors[ref.id] });
+      }
+      await save(direction, record);
+    }
   }
   async function knownReceipt(id) {
     return manager.state.receipts?.[id] ?? await observe(() => manager.receiptArchive?.get(id));
@@ -166,9 +250,10 @@ export function startWorkerMessaging({ manager, client, worker, log = () => {} }
   // downloader. Keep its format/size rules and fetch only the configured router's
   // content-addressed resource, ignoring all supplied paths. No new upload API.
   async function image(ref) {
-    const filename = path.join(root, "images", ref.id + extensions[ref.media_type]);
+    const filename = path.join(root, "images", ref.id + (extensions[ref.media_type] ?? ".image"));
     const verify = bytes => {
-      if (bytes.length !== ref.size || digest(bytes) !== ref.id || imageType(bytes) !== ref.media_type)
+      if (bytes.length > MAX_ROUTER_IMAGE_BYTES || ref.size != null && bytes.length !== ref.size || digest(bytes) !== ref.id ||
+          !Object.hasOwn(extensions, imageType(bytes)) || ref.media_type != null && imageType(bytes) !== ref.media_type)
         fail("attachment_mismatch", "Router image bytes do not match the attachment receipt.");
       return bytes;
     };
@@ -179,9 +264,12 @@ export function startWorkerMessaging({ manager, client, worker, log = () => {} }
         typeof client.headers !== "function") fail("invalid_attachment_origin", "Use the configured authenticated router origin.");
     const response = await observe(() => fetch(client.url.replace(/\/+$/, "") + "/attachments/" + ref.id,
       { headers: client.headers(), redirect: "error", signal: AbortSignal.any([abort.signal, AbortSignal.timeout(120000)]) }));
+    const declaredSize = Number(response.headers.get("content-length"));
+    const mediaType = response.headers.get("content-type")?.split(";")[0].trim();
     if (!response.ok || response.headers.get("x-attachment-sha256") !== ref.id ||
-        response.headers.get("content-type")?.split(";")[0].trim() !== ref.media_type ||
-        Number(response.headers.get("content-length")) !== ref.size || !response.body?.getReader) {
+        !Object.hasOwn(extensions, mediaType) || ref.media_type != null && mediaType !== ref.media_type ||
+        !Number.isSafeInteger(declaredSize) || declaredSize < 1 || declaredSize > MAX_ROUTER_IMAGE_BYTES ||
+        ref.size != null && declaredSize !== ref.size || !response.body?.getReader) {
       await response.body?.cancel().catch(() => {});
       fail("attachment_mismatch", "Router image download has no matching size, SHA256 or image type.");
     }
@@ -191,7 +279,7 @@ export function startWorkerMessaging({ manager, client, worker, log = () => {} }
         const { done, value } = await observe(() => reader.read());
         if (done) break;
         size += value.length;
-        if (size > ref.size || size > MAX_ROUTER_IMAGE_BYTES) fail("attachment_mismatch", "Router image exceeds its declared size.");
+        if (size > declaredSize || size > MAX_ROUTER_IMAGE_BYTES) fail("attachment_mismatch", "Router image exceeds its declared size.");
         chunks.push(Buffer.from(value));
       }
     } catch (error) { await reader.cancel().catch(() => {}); throw error; }
@@ -218,8 +306,7 @@ export function startWorkerMessaging({ manager, client, worker, log = () => {} }
       const accepted = await observe(() => manager.publicReply({ messageId: record.payload.message_id,
         targetThreadId: record.targetThreadId, source: "bridge", origin: "worker-chat", workerName: worker,
         peerWorkerName: record.payload.to, peerMessageId: record.payload.message_id, reply_to: record.payload.reply_to ?? null },
-      record.payload.text +
-        (record.payload.attachments?.length ? "\nImages: " + record.payload.attachments.map(a => a.id).join(", ") : ""), "worker-message-sent"));
+      peerPresentation(record.payload, record.timestamp).displayText + "\n\n" + record.timestamp, "worker-message-sent"));
       record.mirror = accepted === true ? "accepted" : "pending";
     } catch (error) {
       check(); record.mirror = manager.state.latestTranscript?.[key] ? "accepted" : "unknown";
@@ -234,7 +321,9 @@ export function startWorkerMessaging({ manager, client, worker, log = () => {} }
     let record = await load("received", payload);
     const previous = await knownReceipt(nativeId);
     if (!record) {
-      record = { version: 1, payload, targetThreadId: target(previous), inputMirror: previous ? "accepted" : "pending" };
+      const createdAt = (envelope.message ?? envelope).created_at;
+      record = { version: 1, payload, timestamp: Number.isFinite(createdAt) ? new Date(createdAt * 1000).toISOString() : new Date().toISOString(),
+        targetThreadId: target(previous), inputMirror: previous ? "accepted" : "pending" };
       await save("received", record);
     }
     if (!record.request) {
@@ -245,10 +334,10 @@ export function startWorkerMessaging({ manager, client, worker, log = () => {} }
       record.request = { protocolVersion: PROTOCOL, messageId: nativeId, source: "hermes", origin: "worker-chat",
         workerName: payload.from, peerMessageId: id, reply_to: payload.reply_to,
         targetThreadId: record.targetThreadId, delivery: "queue",
-        text: marker(payload) + "\nThis is ordinary worker chat. It never creates a router task or native goal. " +
-          "Reply only when needed via bridge_send_worker_message, setting reply_to to this message UUID. " +
-          "Do not automatically acknowledge or reply to a reply; avoid automatic reply loops.\n\n" + payload.text +
-          (paths.length ? "\n\nImage files on this machine (use view_image to inspect the actual bytes):\n" + paths.join("\n") : ""),
+        text: peerPresentation(payload, record.timestamp).displayText,
+        metadata: { workerChat: { ...peerPresentation(payload, record.timestamp), messageId: id,
+          replyTo: payload.reply_to, policy: WORKER_CHAT_POLICY,
+          ...(paths.length ? { imagePaths: paths } : {}) } },
         ...(paths.length ? { attachments: payload.attachments.map((ref, i) => ({ ...ref, localPath: paths[i] })) } : {}) };
       if (previous?.request && !same(previous.request, record.request))
         fail("message_id_conflict", "The original UUID belongs to a different manager request.", id);
@@ -271,11 +360,12 @@ export function startWorkerMessaging({ manager, client, worker, log = () => {} }
           !(inQueue && [undefined, "deferred", "canceled"].includes(receipt.nativeDispatch?.status))))
       fail("manager_acceptance_unconfirmed", "No durable manager acceptance; leave pending and retry this same UUID only.", id, "unknown");
     record.managerAccepted = true; await save("received", record);
+    await mirrorImages(record, "received");
     const ack = routerReceipt(await observe(() => client._request("POST", `/messages/${id}/ack`, { worker })), payload);
     if (ack.status !== "accepted") fail("worker_message_ack_unconfirmed", "Router ACK is unconfirmed; retry the same UUID only.", id, "unknown");
     record.acked = true; await save("received", record);
     return { ok: true, messageId: id, nativeMessageId: nativeId, accepted: true, acked: true,
-      duplicate: accepted.duplicate === true, action: accepted.action };
+      duplicate: accepted.duplicate === true, action: accepted.action, images: record.imageMirrors ?? {} };
   }
 
   async function readInbox({ after = 0, limit = 100 } = {}) {
@@ -303,12 +393,14 @@ export function startWorkerMessaging({ manager, client, worker, log = () => {} }
           ...(reply != null ? { reply_to: uuid(reply) } : {}), ...(refs.length ? { attachments: refs } : {}) };
         let record = await load("sent", payload);
         const duplicate = Boolean(record?.router);
-        record ??= { version: 1, payload, targetThreadId: manager.state.selectedThreadId ?? null, mirror: "pending" };
+        record ??= { version: 1, payload, timestamp: new Date().toISOString(), targetThreadId: manager.state.selectedThreadId ?? null, mirror: "pending" };
         if (!record.router) {
           record.status = "posting"; await save("sent", record);
           try {
             const result = routerReceipt(await observe(() => client._request("POST", "/messages", copy(payload))), payload);
             record.router = { status: result.status, duplicate: result.duplicate === true };
+            if (Number.isFinite(result.message.created_at)) record.timestamp = new Date(result.message.created_at * 1000).toISOString();
+            record.media = attachments(result.message.attachments ?? [], true);
             record.status = "accepted"; await save("sent", record);
           } catch (error) {
             check(); record.status = "unknown"; await save("sent", record);
@@ -316,11 +408,20 @@ export function startWorkerMessaging({ manager, client, worker, log = () => {} }
           }
         }
         await mirrorSent(record);
+        await mirrorImages(record, "sent");
         return { ok: true, messageId: id, message_id: id, status: record.router.status,
-          duplicate: duplicate || record.router.duplicate, mirror: record.mirror };
+          duplicate: duplicate || record.router.duplicate, mirror: record.mirror, images: record.imageMirrors ?? {} };
       });
     },
     receive: envelope => enqueue(() => receiveMessage(envelope)),
+    history,
+    async readImage(id) {
+      const ref = (await history()).flatMap(record => record.attachments).find(ref => ref.id === id);
+      if (!ref) return null;
+      const filename = await image(ref);
+      const bytes = await readFile(filename);
+      return { bytes, mediaType: imageType(bytes) };
+    },
     inbox: request => enqueue(() => readInbox(request)),
     poll() {
       return enqueue(async () => {

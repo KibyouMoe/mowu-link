@@ -77,6 +77,24 @@ test("a router task asks Hermes by event and mirrors a read-only question card t
  await f.manager.questions.publish(f.q);assert.equal(f.notifications.length,1);assert.equal(f.cards.length,1);
 });
 
+test("one-option router questions reach Hermes once and accept the original native reply", async t => {
+ const f = await routing(t);
+ f.q.questions[0].options = ["已解锁，继续验收"];
+ await f.manager.questions.publish(f.q);
+ await f.manager.questions.publish(f.q);
+ assert.equal(f.notifications.length, 1);
+ assert.equal(f.cards.length, 1);
+ assert.ok(f.notifications[0].text.includes("已解锁，继续验收"));
+ await f.manager.questions.acceptAgentAnswer(f.q.questionId, answer(f, { answers: ["已解锁，继续验收"] }));
+ f.manager.handoffPaused = false;
+ await f.manager.questions.process();
+ await f.manager.questions.process();
+ const writes = f.calls.filter(call => call.name === "send_message_to_thread");
+ assert.equal(writes.length, 1);
+ assert.ok(writes[0].args.prompt.includes(f.q.sourceQuestionItemIds[0].replaceAll('"', '\\"')));
+ assert.equal(f.manager.questions.get(f.q.questionId).status, "answered");
+});
+
 test("trainer-initiated questions keep their buttons and never notify Hermes",async t=>{
  const f=await routing(t,{hermes:false});await f.manager.questions.publish(f.q);
  assert.equal(f.notifications.length,0);assert.equal(buttonCount(f.cards[0].card),4);

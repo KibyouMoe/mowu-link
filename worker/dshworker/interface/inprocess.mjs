@@ -14,6 +14,7 @@ import { DshQuestions } from "./questions.mjs";
 import { parseDshQuestionReply, projectPublicQuestion } from "./public-questions.mjs";
 import { projectDshMedia } from "./public-media.mjs";
 import { prepareDshImageMessage } from "./image-input.mjs";
+import { WORKER_CHAT_POLICY } from "../collaboration-view.mjs";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const VERSION = "0.3.1";
 const TRANSPORT_NAME = "dsh-inprocess";
@@ -240,6 +241,22 @@ export class InProcessTransport {
       });
     }, { prepend: true });
     this.control = installTaskControl(this);
+    this.stopPeerPolicy = ctx.on("agent/pre-step", async ({ agent }, next) => {
+      const decision = await next();
+      const thread = [...this.live.entries()].find(([, live]) => live.agent === agent)?.[0];
+      const peer = this.threads.get(thread)?.turns.find(turn => turn.status === "inProgress")?.nativePeerMessage;
+      if (!peer || decision.kind === "reject") return decision;
+      const content = { type: "text", text: WORKER_CHAT_POLICY + "\n" + JSON.stringify(peer) };
+      const index = decision.messages.findLastIndex(message => message.role === "system");
+      const messages = [...decision.messages];
+      if (index < 0) messages.unshift({ id: randomUUID(), role: "system", content: [content], source: { kind: "system-prompt" } });
+      else if (messages[index].source?.workerChatMessageId !== peer.messageId) {
+        const original = messages[index];
+        messages[index] = { ...original, content: [...original.content, content],
+          source: { ...original.source, workerChatMessageId: peer.messageId } };
+      }
+      return { ...decision, messages };
+    }, { prepend: true });
     this.load();
     this.desktopObserver = new DshDesktopObserver(this);
   }
@@ -391,6 +408,7 @@ export class InProcessTransport {
     const active = thread.running && thread.turns.find(t => t.status === "inProgress" && !thread.queue.includes(t.id));
     const agent = this.live.get(thread.id)?.agent;
     if (active && agent && !nativeReply) {
+      if (args.nativePeerMessage) active.nativePeerMessage = structuredClone(args.nativePeerMessage);
       const message = nativeInput ?? userMessage(prompt);
       agent.steer(this.desktopObserver.sent(message, active));
       (active.inputs ??= []).push({ id: nativeInput ? message.id : randomUUID(), text: prompt,
@@ -404,6 +422,7 @@ export class InProcessTransport {
       error: null, reasonKind: null, startedAt: new Date().toISOString(), completedAt: null,
       ...(nativeReply ? { nativeReply, taskId: nativeReply.taskId } : {}),
       ...(nativeInput ? { nativeInput } : {}),
+      ...(args.nativePeerMessage ? { nativePeerMessage: structuredClone(args.nativePeerMessage) } : {}),
     };
     turn.deadlineAt = this.taskDeadlines.get(taskIdOf(turn)) ?? null;
     thread.turns.push(turn);
@@ -786,6 +805,7 @@ export class InProcessTransport {
     this.approvals.close();
     this.questions.close();
     this.stopApproval?.();
+    this.stopPeerPolicy?.();
     for (const thread of this.threads.values()) {
       for (const turn of thread.turns ?? []) {
         if (!TERMINAL_TURN_STATUSES.has(turn.status)) {

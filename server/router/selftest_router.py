@@ -378,6 +378,7 @@ def peer_selftest(checker, work, trigger_url, trigger_token):
         mid = first_body["message_id"]
         auth_routes = [("POST", "/messages", first_body),
                        ("GET", "/messages?worker=" + quote(b), None),
+                       ("GET", "/messages?worker=%s&view=history" % quote(b), None),
                        ("GET", "/messages/" + mid, None),
                        ("GET", "/messages?id=" + mid, None),
                        ("POST", "/messages/" + mid + "/ack", {"worker": b}),
@@ -402,7 +403,12 @@ def peer_selftest(checker, work, trigger_url, trigger_token):
                           "/messages?worker=%s&limit=0" % quote(b),
                           "/messages?worker=%s&limit=101" % quote(b),
                           "/messages?worker=%s&after=-1" % quote(b),
-                          "/messages?worker=%s&after=9223372036854775808" % quote(b))))
+                          "/messages?worker=%s&after=9223372036854775808" % quote(b),
+                          "/messages?worker=%s&view=invalid" % quote(b),
+                          "/messages?worker=%s&before=1" % quote(b),
+                          "/messages?worker=%s&view=history&after=1" % quote(b),
+                          "/messages?worker=%s&view=history&before=0" % quote(b),
+                          "/messages?worker=%s&view=history&before=9223372036854775808" % quote(b))))
         checker.check("peer validation: unknown inbox/message/ACK/reply returns 404",
                       call("GET", "/messages?worker=unknown")[0] == 404
                       and call("GET", "/messages/" + mid)[0] == 404
@@ -509,6 +515,32 @@ def peer_selftest(checker, work, trigger_url, trigger_token):
                       call("POST", "/messages/" + mid + "/ack", {"worker": a})[0] == 403
                       and call("GET", "/messages/" + mid)[1].get("message") == accepted["message"]
                       and call("GET", "/messages?id=" + mid)[1].get("message") == accepted["message"])
+
+        def history(name, **params):
+            query = "&".join("%s=%s" % (key, value) for key, value in params.items())
+            return call("GET", "/messages?worker=%s&view=history&%s" % (quote(name), query))[1]
+
+        records, before = [], 9223372036854775807
+        while True:
+            page = history(b, before=before, limit=7)
+            records.extend(page["messages"])
+            if not page["has_more"]:
+                break
+            if not 0 < page["next_before"] < before:
+                raise RuntimeError("peer history cursor did not descend")
+            before = page["next_before"]
+        checker.check("peer history: both directions include accepted and queued messages newest first",
+                      mid in ids(records) and reply["message_id"] in ids(records)
+                      and {row["status"] for row in records} == {"queued", "accepted"}
+                      and [row["seq"] for row in records] == sorted((row["seq"] for row in records), reverse=True)
+                      and len(ids(records)) == len(set(ids(records))))
+        checker.check("peer history: worker scope, byte/count limits and attachment metadata are preserved",
+                      not history(c)["messages"] and history(b, limit=1)["count"] == 1
+                      and len(json.dumps(history(b), ensure_ascii=False).encode()) <= 256 * 1024
+                      and next(row for row in records if row["message_id"] == attached["message_id"])["attachments"] == [image_meta])
+        checker.check("peer history: reads do not ACK, replay SSE, create tasks or change pending inbox",
+                      ids(inbox()) == [row["message_id"] for row in all_pending if row["message_id"] != mid] + [live["message_id"]]
+                      and stream.wait_message(0.2) is None and call("GET", "/tasks")[1].get("count") == 0)
 
         # Replace a live stream while new creates race with attach/replay.
         race_bodies = [payload(text="attach-race-%d" % n) for n in range(8)]

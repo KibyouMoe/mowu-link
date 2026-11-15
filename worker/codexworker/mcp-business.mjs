@@ -8,6 +8,7 @@ import { sendImage } from "./feishu-image-output.mjs";
 import { routerOperations } from "./router-operations.mjs";
 import { startRouterRuntime } from "./router-runtime.mjs";
 import { operatingConfig } from "./integration-profile.mjs";
+import { WORKER_CHAT_POLICY, collaborationSummary } from "./collaboration-view.mjs";
 import { resolveNativeTransport, resolveNativeCapabilities } from "./interface/transport/index.mjs";
 
 export const BUSINESS_API_VERSION = 1;
@@ -56,7 +57,7 @@ async function handleRequest(method, params) {
         protocolVersion: params.protocolVersion ?? "2025-06-18",
         capabilities: { tools: { listChanged: true } },
         serverInfo: { name: SERVER_NAME, version: BUSINESS_VERSION },
-        instructions: "Probe and operate the CodexWorker desktop-native adapter. The trainer authorized automatic Feishu relay of public displayed output images in its selected chat; do not separately bridge_send_image those same previews. Arbitrary files still need explicit send authorization. In a Bridge-connected selected chat, native request_user_input_async questions are automatically relayed and external answers preserve the original question IDs to synchronize Desktop. Use bridge_publish_question only for a clarification without a native panel; never create a second independent question for the same clarification. Use bridge_send_worker_message for ordinary worker chat; it creates no task or goal. Only explicit project execution uses bridge_create_work_order; steering stays on the original work order. Formal tasks check native goals and never overwrite an unfinished project. Never publish private reasoning, arbitrary tool arguments or secrets.",
+        instructions: "Probe and operate the CodexWorker desktop-native adapter. The trainer authorized automatic Feishu relay of public displayed output images in its selected chat; do not separately bridge_send_image those same previews. Arbitrary files still need explicit send authorization. In a Bridge-connected selected chat, native request_user_input_async questions are automatically relayed and external answers preserve the original question IDs to synchronize Desktop. Use bridge_publish_question only for a clarification without a native panel; never create a second independent question for the same clarification. Use bridge_send_worker_message for ordinary worker chat; it creates no task or goal. Only explicit project execution uses bridge_create_work_order; steering stays on the original work order. Formal tasks check native goals and never overwrite an unfinished project. Never publish private reasoning, arbitrary tool arguments or secrets. " + WORKER_CHAT_POLICY,
       };
     case "ping":
       return {};
@@ -133,7 +134,7 @@ async function handleRequest(method, params) {
             inputSchema: { type: "object", properties: { questionId: { type: "string" }, threadId: { type: "string" },
               sourceTurnId: { type: "string" }, sourceQuestionItemIds: { type: "array", items: { type: "string" } },
               questions: { type: "array", minItems: 1, maxItems: 3, items: { type: "object", properties: {
-                title: { type: "string", minLength: 1 }, options: { type: "array", minItems: 2, maxItems: 6, items: { type: "string" } }
+                title: { type: "string", minLength: 1 }, options: { type: "array", minItems: 1, maxItems: 6, items: { type: "string" } }
               }, required: ["title"], additionalProperties: false } } }, required: ["questions"], additionalProperties: false },
           },
           {
@@ -159,6 +160,8 @@ async function handleRequest(method, params) {
               required: ["messageId", "to", "text"], additionalProperties: false } },
           { name: "bridge_worker_inbox", description: "Read this worker's pending router chat inbox; never creates a work order or marks unread messages as answered.",
             inputSchema: { type: "object", properties: { after: { type: "integer", minimum: 0 } }, additionalProperties: false }, annotations: { readOnlyHint: true } },
+          { name: "bridge_collaboration_records", description: "Read the public collaboration journal and its read-only client panel URL. Message IDs and replyTo are metadata for deliberate peer replies. " + WORKER_CHAT_POLICY,
+            inputSchema: { type: "object", properties: {}, additionalProperties: false }, annotations: { readOnlyHint: true } },
           { name: "bridge_create_work_order", description: "Create one user-authorized project work order in native goal mode. Do not use for ordinary chat or create another order for steering of an existing project. Reuse messageId on retry. No default wall-clock deadline.",
             inputSchema: { type: "object", properties: { messageId: { type: "string" }, worker: { type: "string" }, goal: { type: "string", minLength: 1, maxLength: 20000 },
               context: { type: "string" }, deadlineS: { type: "number", exclusiveMinimum: 0 }, queueIfOffline: { type: "boolean" } }, required: ["messageId", "worker", "goal"], additionalProperties: false } },
@@ -209,6 +212,12 @@ async function handleRequest(method, params) {
         case "bridge_list_workers": return routerTool("workers", params);
         case "bridge_send_worker_message": return routerTool("send", params);
         case "bridge_worker_inbox": return routerTool("inbox", params);
+        case "bridge_collaboration_records": {
+          await ensureLocalManagerServer();
+          const manager = desktopManager;
+          return toolResult(manager.collaboration ? await manager.collaboration()
+            : await collaborationSummary(manager));
+        }
         case "bridge_create_work_order": return routerTool("createWorkOrder", params);
         case "bridge_work_order_status": return routerTool("workOrder", params);
         case "bridge_verify_native_write_path":
@@ -699,6 +708,7 @@ async function connectManagerProxy(config, wait) {
   // This is connectivity, NOT ownership. No listening-server sentinel and no
   // manager activation/lease acquisition during this MCP's business reload.
   return { config, proxy: true, health: () => health, register: body => request("/manager/sessions/adopt", body),
+    collaboration: () => request("/bridge/collaboration"),
     message: body => request("/manager/messages", body), sendImage: body => request("/bridge/images", body),
     businessRuntime: { reload: () => request("/bridge/runtime/reload", {}) },
     routerOperations: { workers: () => request("/bridge/workers"),

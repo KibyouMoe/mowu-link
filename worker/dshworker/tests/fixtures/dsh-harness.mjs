@@ -168,5 +168,5 @@ export async function dshFixture(t, { wireMedia = false, nativeImages = false } 
   });
   return { root, manager, transport, adapter, agent, threadId, session, cards, calls, imageSends,
     mediaMessages, uploads, questionPosts, downloads, records, attachments, attachmentInputs,
-    emit, publish, stream, finish: finishTurn, drain, send };
+    emit, publish, stream, listeners, finish: finishTurn, drain, send };
 }

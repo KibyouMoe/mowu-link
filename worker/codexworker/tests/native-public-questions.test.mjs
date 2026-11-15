@@ -54,8 +54,8 @@ const formAction = (card, answers, action = "form_submit") => ({
  value: nodes(card).find(e=>e.tag === "button" && e.value?.action === action).value,
  form_value: Object.fromEntries(answers.map((answer, i) => [`answer_${i}`, answer])),
 });
-async function observe(f) {
- const item=project(rawQuestion()).item;
+async function observe(f, raw = rawQuestion()) {
+ const item=project(raw).item;
  await f.manager.serial(()=>f.manager.emit("item.completed",{targetThreadId:"thread",source:"codex"},
   {text:item.text,snapshot:item.text,itemKey:"native-turn/"+item.id,phase:item.phase,complete:true,publicQuestion:item.publicQuestion},{turnId:"native-turn"}));
  return item.publicQuestion;
@@ -70,9 +70,37 @@ test("the real native async AgentMessage projects explicit options and stable na
  assert.ok(!JSON.stringify(project(x)).includes("private"));assert.ok(!JSON.stringify(project(x)).includes("not public"));
 });
 
+test("one-option native questions reach one card and return the original question ID through native user input", async t => {
+ const f = await fixture(t), cards = ui(f), raw = rawQuestion();
+ raw.questions = [{ title: "Mac 已解锁，可以继续验收吗？", options: ["已解锁，继续验收"] }];
+ const q = await observe(f, raw);
+ assert.deepEqual(q.questions, raw.questions);
+ await observe(f, raw);
+ f.manager.handoffPaused = false;
+ f.manager.config.nativeBusyDeliveryVerified = true;
+ f.manager.config.nativeQuestionInput = true;
+ await f.manager.drainPublicTexts();
+ assert.equal(cards.length, 1);
+ assert.equal(buttons(cards[0].card).length, 1);
+ await f.manager.questions.acceptCard({ header: { event_type: "card.action.trigger", event_id: "single-option-answer" }, event: {
+  operator: { open_id: "trainer" }, context: { open_message_id: "om_real_question_card", open_chat_id: "chat" },
+  action: formAction(cards[0].card, ["已解锁，继续验收"]),
+ } });
+ await f.manager.questions.process();
+ await f.manager.questions.process();
+ const writes = f.calls.filter(call => call.name === "send_message_to_thread");
+ assert.equal(writes.length, 1);
+ assert.equal(writes[0].args.nativeQuestionReply, true);
+ assert.deepEqual(parseNativeQuestionReply(writes[0].args.prompt), [{
+  questionItemId: q.sourceQuestionItemIds[0], question: raw.questions[0].title, answer: "已解锁，继续验收",
+ }]);
+ assert.equal(f.manager.questions.get(q.questionId).status, "answered");
+ assert.equal(f.manager.questions.get(q.questionId).nativePanelSync, "accepted");
+});
+
 test("prose questions, private phases, approvals and malformed options cannot manufacture interactive public questions",()=>{
  const x=rawQuestion();
- for(const item of [{...x,delivery:undefined},{...x,type:"CommandExecution"},{...x,phase:"analysis"},{...x,questions:[{title:"?",options:["only one"]}]},{...x,questions:[{title:"?",options:[{},{}]}]}])
+ for(const item of [{...x,delivery:undefined},{...x,type:"CommandExecution"},{...x,phase:"analysis"},{...x,questions:[{title:"?",options:[]}]},{...x,questions:[{title:"?",options:[{},{}]}]}])
   assert.equal(projectPublicQuestion(item,{threadId:"thread",turnId:"native-turn"}),null);
  const prose=project({...x,delivery:undefined});assert.equal(prose.item.publicQuestion,undefined);
  assert.equal(project({...x,phase:"analysis"}),null);
