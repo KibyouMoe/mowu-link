@@ -212,6 +212,7 @@ export class InProcessTransport {
     this.proxyHint = proxyHint;
     this.threads = new Map();
     this.live = new Map(); // threadId -> { handle, agent }
+    this.turnObservers = new Set();
     this.closing = false;
     this.writeChain = Promise.resolve();
     this.publicEvents = new DshPublicEvents(this);
@@ -269,6 +270,7 @@ export class InProcessTransport {
             threadId: record.id, sourceTurnId: turn.id });
         }
         if (!TERMINAL_TURN_STATUSES.has(turn.status)) {
+          if (Number.isSafeInteger(turn.nativeStartSeq)) turn.nativeDetached = true;
           turn.status = "interrupted";
           turn.waitingForInput = false;
           turn.waiting_for_approval = false;
@@ -480,6 +482,12 @@ export class InProcessTransport {
       rejectExpired(Object.assign(new Error(failure.message), { reasonKind: failure.reason }));
     }, Math.max(1, Math.min(1000, this.noProgressTimeoutMs)));
     timer.unref?.();
+    const stopObserving = () => {
+      clearInterval(timer);
+      stopStream?.(); stopEvents?.();
+      this.turnObservers.delete(stopObserving);
+    };
+    this.turnObservers.add(stopObserving);
     try {
       const work = async () => {
         agent = await this.ensureAgent(thread);
@@ -518,6 +526,7 @@ export class InProcessTransport {
         return outcome;
       };
       const outcome = await Promise.race([work(), expired]);
+      if (this.closing) return;
       if (!outcome) {
         const failure = watch.failure();
         this.finishTurn(thread, turn, { error: failure?.message ?? "cancelled by router",
@@ -532,16 +541,15 @@ export class InProcessTransport {
       const detail = this.decorate(outcome.reason?.error?.message ?? (kind === "error" ? "dsh turn failed" : kind));
       this.finishTurn(thread, turn, { text: outcome.text, thinking, error: detail, reasonKind: kind });
     } catch (error) {
+      if (this.closing) return;
       const message = this.decorate(error?.message ?? String(error));
       turn.errorCode = error?.code ?? null;
       this.log("warn", "turn_failed", { threadId: thread.id, turnId: turn.id,
         message, code: error?.code ?? null });
       this.finishTurn(thread, turn, { thinking, error: message, reasonKind: error.reasonKind ?? "error" });
     } finally {
-      clearInterval(timer);
-      try { stopStream?.(); } catch { /* ignore */ }
-      try { stopEvents?.(); } catch { /* ignore */ }
-      this.publicEvents.finish(thread, turn);
+      stopObserving();
+      if (!this.closing) this.publicEvents.finish(thread, turn);
       this.desktopObserver.release(turn);
     }
   }
@@ -721,12 +729,15 @@ export class InProcessTransport {
 
   async ensureAgent(thread) {
     const entry = this.live.get(thread.id);
-    if (entry?.agent && entry.agent.status !== "disposed") return entry.agent;
+    if (entry?.agent && entry.agent.status !== "disposed") {
+      this.desktopObserver?.baseline(entry.agent, thread);
+      return entry.agent;
+    }
     this.live.delete(thread.id);
     const agents = this.ctx.get("agents");
     const agentOptions = { ...this.selection };
     if (thread.sessionId) {
-      let handle;
+      let handle, borrowed = false;
       try {
         const controller = this.ctx.get("sessionController");
         if (typeof controller?.resolveAgent === "function") {
@@ -735,6 +746,7 @@ export class InProcessTransport {
           // The native controller owns composition, UI capabilities and lifetime.
           // Plugin reloads only release this borrow of the existing main agent.
           handle = { agent: resolved.agent, dispose: async () => {} };
+          borrowed = true;
         } else {
           const mountSetup = await this.presetSetup();
           handle = await agents.resume({
@@ -745,8 +757,8 @@ export class InProcessTransport {
         }
         const agent = handle.agent;
         if (agent?.session?.id !== thread.sessionId) throw new Error("native session identity mismatch");
-        this.live.set(thread.id, { handle, agent });
-        this.desktopObserver?.baseline(agent);
+        this.live.set(thread.id, { handle, agent, borrowed });
+        this.desktopObserver?.baseline(agent, thread);
         await this.publicEvents?.refreshTools?.();
         this.log("info", "agent_resumed", { threadId: thread.id, sessionId: thread.sessionId,
           seq: agent.session.seq });
@@ -805,6 +817,7 @@ export class InProcessTransport {
 
   async close(reason = "plugin disposed") {
     this.closing = true;
+    for (const stop of this.turnObservers) stop();
     this.desktopObserver?.close();
     this.approvals.close();
     this.questions.close();
@@ -813,6 +826,9 @@ export class InProcessTransport {
     for (const thread of this.threads.values()) {
       for (const turn of thread.turns ?? []) {
         if (!TERMINAL_TURN_STATUSES.has(turn.status)) {
+          const live = this.live.get(thread.id);
+          if ((live?.borrowed || turn.nativeDesktop) && live?.agent.status === "running" &&
+              Number.isSafeInteger(turn.nativeStartSeq)) turn.nativeDetached = true;
           turn.status = "interrupted";
           turn.error ??= reason;
           turn.completedAt ??= new Date().toISOString();
