@@ -73,7 +73,7 @@ WORKER_COMPAT_PASS
 | Mac 22、26 各组 | 834 / 0 / 8 / 842 | 807 / 0 / 8 / 815 | 每组 138/138 PASS |
 | Windows 22、26 各组 | 818 / 0 / 24 / 842 | 806 / 0 / 9 / 815 | POSIX 服务自测在 Mac 运行 |
 
-界面目测当前遇到 Mac 锁屏。Computer Use 返回 `The Mac is locked and automatic unlock could not unlock it. Ask the user to unlock the Mac manually before continuing.` 已发出手动解锁请求，B 的当前证据是原生真实事件、实际飞书媒体消息与原件下载校验。
+界面验收最初遇到 Mac 锁屏。训练员解锁后，于 13:10 授权小栗帽从本机飞书代发同一测试图，DSH 原生图片气泡和原图预览均实际显示。B 的独立证据为原生呈图事件、实际飞书媒体消息与原件下载校验。
 
 ## C 已通过
 
@@ -85,9 +85,9 @@ WORKER_COMPAT_PASS
 
 接收文件 PNG 800×450，源文件、router 内容寻址 ID、溪流落地文件的完整 SHA256 相同。
 
-## A 原生附件接入
+## A 已通过
 
-当前运行的 B 版本仍报告 `feishuImageInput=cached-path-prompt`。飞书原图入站与模型工具读图已有真实记录，原生 image attachment 正在接入适配层。
+修复版本 `f282119163c321927bd01312a5c586c66bff19f9` 已部署，健康接口报告 `feishuImageInput=native-local-image`。原生 `user/message` 保存图片 attachment 引用，DSH 客户端可点击图片气泡打开原图。
 
 实现采用 DSH 自己的 `attachments.saveImages` 批量校验、规范化和保存附件，向原 Agent followup/steer 投递 `type=image`、`attachment={attachmentId,mediaType,bytes,width,height,name}`，传输中使用原生引用。图片输入预备失败按现有 nativeImageOutcome 契约明确报告 notAttempted。公共根业务继续由传输声明的 imageInput 能力启用同一条飞书接收入口。
 
@@ -105,4 +105,66 @@ router TOTAL 138/138 PASS
 WORKER_COMPAT_PASS
 ```
 
-A 的源码与本机隔离回归已完成，待部署和新的真实飞书入站验收。
+### 原生部署
+
+DSH HMR 按 profile 和已链接包的根目录清理模块缓存。此次入口使用新的 detached worktree 路径，为绝对导入提供完整的新模块 URI，并通过原生 profile watcher 正常停用、排空和载入 Worker 插件。
+
+```text
+commit=f282119163c321927bd01312a5c586c66bff19f9
+pluginRoot=/Users/kibyou/projects/mowulink-dsh-image-native/worker/dshworker
+profile=/Users/kibyou/.dsh/profiles/desktop/cordis.patch.yml
+backup=/Users/kibyou/.hermes/state/dshworker/deployment-backups/cordis.patch.20261115-130206.yml
+DSH host PID=19902
+threadId=d9fb1019-66c4-44db-9165-9c4778c53472
+sessionId=session-93b7fc94-e7c9-421c-9cfa-6175b14dc7bb
+
+2026-11-15T05:02:33.317Z plugin_loaded
+2026-11-15T05:02:33.431Z agent_resumed seq=8261
+2026-11-15T05:02:33.441Z business_host_context pid=19902 pluginRoot=/Users/kibyou/projects/mowulink-dsh-image-native/worker/dshworker
+2026-11-15T05:02:34.876Z business_started
+2026-11-15T05:02:34.975Z router_connected
+```
+
+更新后主会话及宿主 PID 保持原值，飞书和 router 均 connected。12:46 的旧收图记录早于此次部署，新的原生验收采用下面的 13:10 入站事件。
+
+### 真实飞书入站
+
+按训练员授权，小栗帽在飞书的玉藻十字私聊中选择测试 PNG，点击发送一次。飞书界面显示独立图片消息，DSH 同一个主会话出现图片气泡。通过 Computer Use 点击该气泡，原图预览显示左绿底黑方块、右黄底蓝圆和底部红菱形。
+
+| 项目 | 真实值 |
+| --- | --- |
+| 事件时间 | 2026-11-15 13:10:45.146 UTC+8 |
+| 原生事件 | `user/message`，seq=8283，`content[].type=image` |
+| 飞书 message_id | `om_x100b60a7a3f524acb0ef1d5c68134e8` |
+| 原生 message id | `98c0968c-fb0f-45b0-84eb-9cc66244b0dd` |
+| 入站路径 | `/Users/kibyou/.hermes/state/dshworker/feishu-images/eb62a77b4fc2bbc080b2069ecf118e31aa4d42dbb69e1d841961f4f3f0a7156b.png` |
+| DSH 内容寻址对象 | `/Users/kibyou/.dsh/attachments/v1/objects/fa/fae67cd73585da2064cf3f2e61c96a024a5569b63e23cb4825fa3438e9949f0f` |
+| 字节与尺寸 | 3305 字节，800×450 |
+| SHA256 | `fae67cd73585da2064cf3f2e61c96a024a5569b63e23cb4825fa3438e9949f0f` |
+
+原生日志读取使用 `zstd -dc` 解压会话的串联帧，再筛选 seq≥8261 的 `user/message`。以下为该事件的实际附件字段。
+
+```json
+{"type":"image","attachment":{"attachmentId":"sha256:fae67cd73585da2064cf3f2e61c96a024a5569b63e23cb4825fa3438e9949f0f","mediaType":"image/png","width":800,"height":450,"bytes":3305,"name":"eb62a77b4fc2bbc080b2069ecf118e31aa4d42dbb69e1d841961f4f3f0a7156b.png"}}
+```
+
+对源图、B 飞书下载原件、A 入站缓存、DSH 内容寻址对象和 C 溪流落地文件执行 `shasum -a 256`，实际输出一致。DSH 对相同图片复用已有内容寻址对象，新入站的关联证据为 seq=8283 及相同的原生 message id、飞书收据。玉藻在原会话第 8310 条公开回复中独立确认 native attachment 引用、原始字节和实际画面。
+
+```text
+fae67cd73585da2064cf3f2e61c96a024a5569b63e23cb4825fa3438e9949f0f  /Users/kibyou/Workspace/TamamoCross/evidence/b-acceptance/media-repro-20261115-121956-32381.png
+fae67cd73585da2064cf3f2e61c96a024a5569b63e23cb4825fa3438e9949f0f  /tmp/dsh-b-feishu-original-630e315c.png
+fae67cd73585da2064cf3f2e61c96a024a5569b63e23cb4825fa3438e9949f0f  /Users/kibyou/.hermes/state/dshworker/feishu-images/eb62a77b4fc2bbc080b2069ecf118e31aa4d42dbb69e1d841961f4f3f0a7156b.png
+fae67cd73585da2064cf3f2e61c96a024a5569b63e23cb4825fa3438e9949f0f  /Users/kibyou/.dsh/attachments/v1/objects/fa/fae67cd73585da2064cf3f2e61c96a024a5569b63e23cb4825fa3438e9949f0f
+fae67cd73585da2064cf3f2e61c96a024a5569b63e23cb4825fa3438e9949f0f  /Users/kibyou/.hermes/attachments/router/fae67cd73585da2064cf3f2e61c96a024a5569b63e23cb4825fa3438e9949f0f.png
+```
+
+### 最终跨平台回归
+
+`f282119` 的 Mac／Windows Node 22、26 四组原生 CI 全部 success，公共根模块每组均为 37/37 SHA256 一致。[最终原生 CI](https://github.com/KibyouMoe/mowu-link/actions/runs/43679210385)
+
+| 平台与 Node | Codex 通过 / 失败 / 跳过 / 总数 | DSH 通过 / 失败 / 跳过 / 总数 | router |
+| --- | --- | --- | --- |
+| Mac 22、26 各组 | 834 / 0 / 8 / 842 | 816 / 0 / 8 / 824 | 每组 138/138 PASS |
+| Windows 22、26 各组 | 818 / 0 / 24 / 842 | 815 / 0 / 9 / 824 | POSIX 服务自测在 Mac 运行 |
+
+Mac 本机完成真实 DSH／飞书／router 图片验收，Windows 完成原生 CI 的路径、协议和图片投递回归。Windows 交互式 DSH／飞书客户端目测待当地机器验收。
