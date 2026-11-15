@@ -96,10 +96,19 @@ async function fixture(t) {
   };
   transport.control.attachManager(manager);
   async function drain() {
-    await manager.scan(); await manager.tail;
-    for (const entry of Object.values(manager.state.publicTextOutbox ?? {})) entry.lastAttemptMs = 0;
-    await manager.drainPublicTexts(); await manager.tail;
-    clearTimeout(manager.publicTextTimer); manager.publicTextTimer = null;
+    await manager.scan();
+    for (let pass = 0; pass < 20; pass++) {
+      await manager.publicTextTask; await manager.publicImageRelay.task; await manager.tail;
+      for (const entry of Object.values(manager.state.publicTextOutbox ?? {})) entry.lastAttemptMs = 0;
+      await manager.drainPublicTexts(); await manager.tail; await tick();
+      const pending = [...Object.values(manager.state.publicTextOutbox ?? {}), ...Object.values(manager.state.autoImages ?? {})]
+        .some(entry => ["pending", "dispatching"].includes(entry.status));
+      if (!pending && !manager.publicTextRunning && !manager.publicImageRelay.running) {
+        clearTimeout(manager.publicTextTimer); manager.publicTextTimer = null;
+        return;
+      }
+    }
+    assert.fail("DSH compatibility fixture outbound queue did not settle.");
   }
   async function send(text) {
     const messageId = randomUUID();
@@ -131,10 +140,12 @@ test("DSH business can dispatch its first message using complete snapshots of an
 test("DSH text deltas reach the shared Feishu outbox incrementally on stable cards and preserve both paragraphs", async t => {
   const f = await fixture(t); await f.send("stream test");
   f.stream("first"); await f.drain();
+  assert.ok(f.calls.some(call => call.method === "POST" && call.text === "first"));
   assert.equal(f.transport.threads.get(f.threadId).turns[0].status, "inProgress");
   f.publish("agent/assistant-stream", { agent: f.agent, frame: { type: "chunk", attemptId: "attempt-1",
     chunk: { type: "text-delta", text: " paragraph" } } });
   await f.drain();
+  assert.ok(f.calls.some(call => call.method === "PATCH" && call.text === "first paragraph"));
   f.emit("assistant/message", { message: { content: [{ type: "text", text: "first paragraph" }] } });
   f.stream("second paragraph", "attempt-2"); await f.drain();
   f.emit("assistant/message", { message: { content: [{ type: "text", text: "second paragraph" }] } });

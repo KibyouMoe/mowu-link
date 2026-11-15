@@ -49,7 +49,7 @@ router TOTAL 138/138 PASS exit=0 signal=none
 WORKER_COMPAT_PASS
 ```
 
-修复前的定向回归为 24 项中 18 通过、6 失败，修复后的五个定向测试文件共 46 项通过。自动检查的失败输出包含对应 TAP 断言块，便于独立定位跨平台失败。
+修复前的定向回归为 24 项中 18 通过、6 失败，修复后的五个定向测试文件共 46 项通过。自动检查的失败输出包含对应 TAP 断言块，便于独立定位跨平台失败。增量卡片集成夹具逐步等待出站队列收敛后再释放下一段正文，清理节流计时器前确认队列已处理完毕。
 
 DSH 事件按本机安装 SDK 的 AssistantStreamFrame、SessionEventMap、UserQuestions 和 Compaction 原生合同构造。集成测试使用真实共享 manager、卡片投影、图片出站及临时持久化文件，模型和飞书回执采用隔离替身。生产 DSH、真实飞书收发和 Windows 交互式 Desktop 验收列为部署后待验项。
 
