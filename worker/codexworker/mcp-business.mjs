@@ -133,7 +133,7 @@ async function handleRequest(method, params) {
             inputSchema: { type: "object", properties: { questionId: { type: "string" }, threadId: { type: "string" },
               sourceTurnId: { type: "string" }, sourceQuestionItemIds: { type: "array", items: { type: "string" } },
               questions: { type: "array", minItems: 1, maxItems: 3, items: { type: "object", properties: {
-                title: { type: "string", minLength: 1 }, options: { type: "array", minItems: 2, maxItems: 6, items: { type: "string" } }
+                title: { type: "string", minLength: 1 }, options: { type: "array", minItems: 1, maxItems: 6, items: { type: "string" } }
               }, required: ["title"], additionalProperties: false } } }, required: ["questions"], additionalProperties: false },
           },
           {

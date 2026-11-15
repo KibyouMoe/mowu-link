@@ -12,7 +12,7 @@ export function projectPublicQuestion(item, { threadId, turnId }) {
   const questions = [];
   for (const q of item.questions) {
     if (typeof q?.title !== "string" || !q.title.trim() || q.title.length > 8000 ||
-        q.options != null && (!Array.isArray(q.options) || q.options.length < 2 || q.options.length > 6 ||
+        q.options != null && (!Array.isArray(q.options) || q.options.length < 1 || q.options.length > 6 ||
         q.options.some(s => typeof s !== "string" || !s.trim() || s.length > 1000))) return null;
     questions.push({ title: q.title.trim(), ...(q.options ? { options: q.options.map(s => s.trim()) } : {}) });
   }

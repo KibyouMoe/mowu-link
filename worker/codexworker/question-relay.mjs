@@ -36,9 +36,9 @@ export function normalizeQuestion(request) {
   }
   const questions = request.questions.map(q => {
     if (typeof q?.title !== "string" || !q.title.trim() || q.title.length > 8000 ||
-      (q.options != null && (!Array.isArray(q.options) || q.options.length < 2 || q.options.length > 6 ||
+      (q.options != null && (!Array.isArray(q.options) || q.options.length < 1 || q.options.length > 6 ||
         q.options.some(s => typeof s !== "string" || !s.trim() || s.length > 1000)))) {
-      reject(400, "invalid_question", "Each public question needs a nonempty title and optional two to six text options.");
+      reject(400, "invalid_question", "Each public question needs a nonempty title and optional one to six text options.");
     }
     return { title: q.title.trim(), ...(q.options ? { options: q.options.map(s => s.trim()) } : {}) };
   });
