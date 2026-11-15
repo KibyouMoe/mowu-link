@@ -45,6 +45,13 @@
      安装器分别放在两个同步仓：**CodexSyncArea**（Codex 侧）与 **DSHSkillSync**（DSH 侧），两边都指向同一个真身仓库。
   4) 更新 = `git pull` + 重跑安装，两个引擎因此永远同版本。
 - **命名（训练员 22:56）**：技能名改成 `MowuLinkWorkerSkill`（与仓库同名），不再叫 `mowulink-worker-skill`。
+- **真身仓库目录结构（训练员 22:56）**：
+  ```
+  MowuLinkWorkerSkill/
+    Plugins/Codex/     ← Codex 侧插件本体
+    Plugins/DSH/       ← DSH 侧插件本体
+    （技能文档 + 安装脚本）
+  ```
 - **存放位置**：真身与两个安装器都**不进 mowulink 仓库**——真身进 `MowuLinkWorkerSkill`，两个安装器分别进 `CodexSyncArea` 与 `DSHSkillSync`；mowulink 里的 `docs/mowulink-worker-skill/` 迁移出去后删除。
 - **真身仓库（训练员 22:55 给定）**：`https://github.com/KibyouMoe/MowuLinkWorkerSkill.git`
   - 现状：**空仓库**（无任何引用）
