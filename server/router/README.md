@@ -58,7 +58,7 @@ server/router/README.md              本文件
 | 日志 | `~/.hermes/router.log`（5MB × 3 轮转，同时输出 stderr） |
 | 结果回流 | `http://127.0.0.1:8791/trigger`，token 读 `~/.hermes/secrets/trigger.token` |
 | 订阅转发 | 由 `--trigger-url` 推导 trigger 根地址（去掉结尾 `/trigger`） |
-| 积压上限 | 每 worker 128（`--backlog-max`） |
+| 积压上限 | 每 worker 0（`--backlog-max`，接受非负整数） |
 | SSE 心跳 | `: ping` 每 15s（`--ping-interval`） |
 
 验证：
@@ -218,24 +218,46 @@ worker 在执行命令/改文件前需要人类点头，但子进程的 JSON-RPC
 
 ---
 
-## 三、派活：三态与状态机
+## 三、派活与状态机
+
+默认 `--backlog-max 1`，每个 worker 同时运行一张工单，并可等待一张。
 
 ```
-worker 不存在                          → 400 unknown_worker（Router 不猜）
-worker 在线且空闲                      → 200 {task_id, state:"running", dispatched:true}
+worker 不存在                          → 400 unknown_worker
+worker 在线且空闲、既有队列为空          → 200 {task_id, state:"running", dispatched:true}
+worker 忙碌、等待位为空                  → 200 {task_id, state:"queued", queued:true, queued_ahead:1}
+已有一张等待单                          → 409 {error:"worker_busy", task_id, turn_source, retry_when}
+worker 离线 + queue_if_offline=false    → 409 worker_offline
+worker 离线 + queue_if_offline=true     → 200 queued（仍限一个等待位）
+```
+
+`worker_busy` 的 `task_id` 优先指向运行或取消中的真实工单，其次指向最早的等待单。
+trainer 回合没有工单时为 `null`，`turn_source` 保留 `trainer`。
+`retry_when` 保留 `current_task_accepted_and_worker_idle`，等待当前单收尾验收并重新核对空闲与等待位。
+拒收的创建 UUID 不占位，可原样重试。已接受工单的同 UUID、同请求重试返回原工单
+及 `duplicate:true`，包括排队、过期失败和终态；改请求内容返回 `message_id_conflict`。
+
+等待单 TTL 默认 **21600 秒（6 小时）**，服务可用 `--queue-ttl-s 21600` 调整，
+单次 `POST /tasks` 可用正数 `queue_ttl_s` 覆盖。`GET /tasks/{id}` 返回 `queue_expires_at`。
+到期且从未下发的单进入 `failed`，`result.error="queue_expired"`，释放等待位并通知结果。
+检查点包含接单、派发前与后台清扫（最多间隔 30 秒）。旧库中可确认尚未下发的行按
+`created_at + 服务 TTL` 计算；已下发或历史下发状态未知的恢复工单保留原有恢复语义。
+运行中、已下发后断线恢复的单不受排队 TTL 限制。匹配原工单的活动 router 心跳可将
+断线重排的运行单恢复为 `running`，它旁边的看守单仍只占一个等待位。
+
+默认一格及显式 `--backlog-max 0` 的重连均按 FIFO 每次恢复一条，前单完成后自动续推。
+显式 0 保留零等待模式：忙碌时拒收新单，离线拒收，恢复已接受的单仍受占用检查。
+
+显式设置大于 1 的容量（例如 `--backlog-max 128`）时沿用排队协议。
+
+```
 worker 在线但忙                        → 202 {task_id, state:"queued", queued:true, queued_ahead:N}
 worker 离线 + queue_if_offline=false   → 409 {error:"worker_offline", worker}
 worker 离线 + queue_if_offline=true    → 202 {task_id, queued:true, queued_ahead:N}
-排队/积压已达 128                      → 429 {error:"backlog_full", queued:128, limit:128}
+排队/积压已达配置容量                  → 429 {error:"backlog_full", queued, limit}
 ```
 
-三态是固定的：**200 = 现在就推下去了**，**202 = 收下但在排队**，
-**409 = 不在线且没让堆**。`ROUTER.md` 的语义表只列了「在线空闲 → 200」和
-「离线 + `queue_if_offline` → 202 / 409」；「在线但忙」原文没给状态码，这里与
-离线积压统一归入 queued 的 202，body 里再用 `dispatched` / `queued` 区分。
-`queued_ahead` 包含正在跑的那条（它也在前面）。
-
-`queue_if_offline` 缺省为 `false`，必须是 JSON 布尔；是否堆任务由 Hermes 决定。
+`queued_ahead` 包含正在跑的那条。`queue_if_offline` 缺省为 `false`，必须是 JSON 布尔。
 
 任务状态：
 
@@ -248,7 +270,7 @@ queued ──dispatch──> running ──/result done──> done
 
 - 正常派发（`POST /tasks` 且空闲、交活后续推）每次只推一条，因此同一时刻通常
   只有一条 `running`。`busy` 包含运行/取消中的工单，以及心跳确认的人工或 router 活动回合。
-- 离线积压在上线时**按创建顺序一次性推**（`flush_backlog`）；这一次可能同时
+- 显式容量大于 1 时，离线积压在上线时**按创建顺序一次性推**（`flush_backlog`）；这一次可能同时
   有多条 `running`（`ROUTER.md`「上线时按顺序一次性推」的直译），全部交回后
   才继续推后续排队任务。
 - 断线时，该 worker 的 `running` 任务回到 `queued`；重连后会再次下发。
@@ -257,7 +279,8 @@ queued ──dispatch──> running ──/result done──> done
   Worker 向 `/tasks/{id}/cancel-ack` 回传精确执行状态，确认停止后进入 `cancelled` 并派下一条。
   不支持 SSE 控制的旧 Worker 使用已登记的 `control_url`，投递失败继续保留取消中状态。
   取消期间迟到的 `/result` 保留等待停止，已取消的结果回传返回 `duplicate:true`。
-- 心跳的 `turn_source` 接受 `trainer`、`router` 或 `null`，人工回合期间的派单排队。
+- 心跳的 `turn_source` 接受 `trainer`、`router` 或 `null`，活动回合期间零容量返回
+  409 `worker_busy`，正容量接收为排队任务。
   交活时清空 `task_id`，将 `progress_at` 更新到同一完成时刻。
 - `urgency` 只记录并透传给 worker（`urgent` / `normal`），排队仍是 FIFO；
   `deadline_s` 落库并算出 `deadline_at`，0.3.0 仍不做超时回收。
@@ -395,7 +418,7 @@ GET /subscriptions/pending?worker=波旁&limit=50
 | ③ 断线删订阅、订阅不留存 | 完成 | `RouterServer.detach` → `purge_subscriptions` |
 | ④ worker SDK | 未做（本次范围外） | — |
 | §二 `queue_if_offline` 语义 | 完成 | 见第三节 |
-| §二 积压上限 128 | 完成 | `--backlog-max`，超限 429 |
+| §二 积压上限 | 完成 | `--backlog-max` 默认 1，第一张等待单 200、第二张 409；显式大容量超限 429 |
 | §五 结果回流 | 完成 | 见第五节 |
 | worker → Hermes 递话 | 0.2.0 新增 | `POST /notice` |
 | ⑨ 聊天旁听（只存不发） | 0.3.0 新增 | `chat_messages` 表 + `_chat_log` / `_chat_messages` / `_chat_summary` |
@@ -407,15 +430,17 @@ GET /subscriptions/pending?worker=波旁&limit=50
 ```bash
 /usr/bin/python3 server/router/selftest_router.py
 # 端口被占时：
-ROUTER_TEST_PORT=8799 /usr/bin/python3 server/router/selftest_router.py
+ROUTER_TEST_PORT=18790 python3 server/router/selftest_router.py
 ```
 
-它**不是单元测试**：会真的启动两个进程（一个临时 trigger 实例 + 一个
-监听 `127.0.0.1:8790` 的 router），用真实 HTTP 和真实 SSE 跑完整链路。
+自测启动临时 trigger 和 router 进程，用真实 HTTP 和真实 SSE 跑完整链路。
+历史排队主套件显式设置 `--backlog-max 128`，工单幂等套件显式设置容量 2。
+零等待套件显式设置 `--backlog-max 0`；默认一格套件用真实 HTTP/curl 验证 200/queued 与 409，覆盖 TTL 清扫、自动续推、并发和恢复。
+连接竞争检查通过 HTTP 请求与确定性故障注入，覆盖连接消失和 `push` 返回失败的分支。
 临时库/token/锁/日志都在 `tempfile.mkdtemp()` 里，不碰生产
 `~/.hermes/router.db` 和 `~/.hermes/trigger.db`。
 
-覆盖（当前 **138/138 PASS**）：
+覆盖项目如下。
 
 1. token 生成（64 hex，0600）、`/health` 形状、无 token → 401、单实例 flock
 2. register → SSE 上线 → 心跳注释行 → 空闲立即派活（200 dispatched）
@@ -439,6 +464,20 @@ ROUTER_TEST_PORT=8799 /usr/bin/python3 server/router/selftest_router.py
     `(worker, message_id, direction)` 重复 `duplicate:true` 且不新增 →
     同 `message_id` 换方向是新行 → `limit` / `since`（id 与 epoch）/
     `direction` 过滤 → `summary` 60/180 分钟 in/out 计数与 `last`
+16. 默认零等待位，trainer 活动状态、router 活动回合、运行及取消中工单返回
+    409 `worker_busy`，携带当前单与回合来源、`retry_when`、验收和 `busy=false` 重试提示
+17. 拒收 UUID 在空闲后重试成功，已接受 UUID 在忙碌、取消中、终态和离线时精确幂等
+18. 八个不同 UUID 并发只有一个派发赢家，其余 UUID 可重试；拒收后的数据库校验
+19. `queue_if_offline=true` 在零容量离线时返回 409，已接受的旧排队任务可重连恢复
+20. 确定性模拟 `push` 失败与连接消失，清理未接受任务并释放 UUID，随后重试成功
+21. 默认一格、显式 `--backlog-max 0`、负容量拒绝和构造器默认值
+22. 旧单恢复推送失败且连接在线、worker 空闲时，八个并发新请求均拒收，
+    返回最早旧单 ID 与 `retry_when`；旧单精确重试、FIFO 恢复及拒收 UUID 后续重试
+
+macOS 原生执行上述 HTTP/SSE、数据库、权限、单实例锁与进程生命周期检查。
+连接竞争和缓存 `busy=false` 的检查属于故障分支模拟。
+Windows 原生执行待验，当前 router 的 `fcntl` 单实例锁依赖 POSIX；
+Windows 路径、大小写、文件权限、IPC 与进程生命周期需在可运行的原生环境验收。
 
 ---
 
