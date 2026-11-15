@@ -1,7 +1,7 @@
 // Feishu (Lark) outbound push — ported from the Claude bridge's FeishuNotifier /
 // FeishuStreamBeat. Same discipline: failures only log, never affect the turn.
 // Uses the global fetch (Node 18+), so the plugin carries no extra dependency.
-import { downloadFeishuImage } from "./feishu-images.mjs";
+import { downloadFeishuImage, downloadFeishuFileImage } from "./feishu-images.mjs";
 import { createHash, randomUUID } from "node:crypto";
 import { hermesChunks } from "./hermes-feishu-format.mjs";
 
@@ -69,25 +69,16 @@ export function escapeMarkdown(text) {
   return out.join("");
 }
 
-export const CARD_TEMPLATE = "indigo";
-
-// Hermes `_card()` field structure: wide card, colored header (title object
-// first), then one markdown element. The session-id note is this bridge's only
-// addition; fenced code blocks ride the markdown element untouched.
-export function cardPayload(text, { title, threadId = null, template = CARD_TEMPLATE } = {}) {
-  const elements = [{ tag: "markdown", content: escapeMarkdown(String(text ?? "")) }];
+export function markdownPayload(text, title, threadId) {
+  const elements = [{ tag: "markdown", content: escapeMarkdown(text) }];
   if (threadId) {
     elements.push({ tag: "note", elements: [{ tag: "plain_text", content: `会话 ${threadId}` }] });
   }
   return JSON.stringify({
-    config: { wide_screen_mode: true },
-    header: { title: { content: String(title ?? ""), tag: "plain_text" }, template },
+    config: { wide_screen_mode: true, update_multi: true },
+    header: { template: "indigo", title: { tag: "plain_text", content: title } },
     elements,
   });
-}
-
-export function markdownPayload(text, title, threadId) {
-  return cardPayload(text, { title, threadId });
 }
 
 export function splitChunks(text, maxChars) {
@@ -116,10 +107,15 @@ export function isTokenError(response) {
 }
 
 export class FeishuNotifier {
-  constructor({ appId, appSecret, chatId, bridgeName, canSend = () => true }) {
+  constructor({ appId, appSecret, chatId, bridgeName, openId, taskBoardOpenId, trainerOpenIdWhitelist, canSend = () => true }) {
     this.appId = appId;
     this.appSecret = appSecret;
     this.chatId = chatId;
+    // 回复默认走 chat_id，但 worker 冷启动时可能还没学到 chat_id。
+    // 这时用训练员的 open_id 兜底（任务看板本来就是这么发的）。
+    const whitelist = Array.isArray(trainerOpenIdWhitelist) ? trainerOpenIdWhitelist : [];
+    this.openId = openId || taskBoardOpenId
+      || whitelist.find(id => typeof id === "string" && id.trim()) || "";
     this.bridgeName = bridgeName;
     this.canSend = canSend;
     this._token = "";
@@ -152,14 +148,27 @@ export class FeishuNotifier {
     }
   }
 
-  async sendMessage(text, { chatId, title, threadId, uuid, validateTarget, onDelivery } = {}) {
+  // `receiveIdType` exists for the task-board channel: the trainer's p2p chat
+  // may be addressed by open_id before any inbound message has supplied a
+  // chat_id. Chat delivery stays the default so every existing call is unchanged.
+  async sendMessage(text, { chatId, openId, receiveIdType, title, threadId, uuid, validateTarget, onDelivery } = {}) {
     const record = async value => { if (onDelivery) await onDelivery({ ...value, at: new Date().toISOString() }); };
     const allowed = () => this.canSend({ threadId }) && (validateTarget == null || typeof validateTarget === "function" && validateTarget());
-    if (!this.enabled || !allowed()) { await record({ phase: "not_attempted", reason: "disabled_or_binding_changed" }); return null; }
-    const target = chatId || this.chatId;
-    if (!target) { await record({ phase: "not_attempted", reason: "target_missing" }); return null; }
+    const skip = async (reason, extra = {}) => {
+      console.error(`[feishu] sendMessage 未发送: ${reason} ${JSON.stringify(extra)}`);
+      await record({ phase: "not_attempted", reason });
+      return null;
+    };
+    if (!this.enabled || !allowed()) return skip("disabled_or_binding_changed",
+      { enabled: this.enabled, threadId: threadId ?? null, canSend: this.canSend({ threadId }) });
+    let idType = receiveIdType === "open_id" ? "open_id" : "chat_id";
+    let target = idType === "open_id" ? (openId || chatId || this.chatId || this.openId) : (chatId || this.chatId);
+    // chat_id 未知（worker 冷启动、还没收到过入站消息）时退回 open_id，
+    // 否则回复全部 target_missing 被丢弃，飞书里只剩任务指令卡。
+    if (!target && this.openId) { idType = "open_id"; target = this.openId; }
+    if (!target) return skip("target_missing", { idType, chatId: chatId ?? null, defaultChatId: this.chatId ?? null });
     const token = await this.getToken();
-    if (!token) { await record({ phase: "not_attempted", reason: "token_unavailable" }); return null; }
+    if (!token) return skip("token_unavailable");
     const t = title || this.bridgeName || "Codex";
     const chunks = hermesChunks(text);
     let lastResponse = null;
@@ -172,7 +181,7 @@ export class FeishuNotifier {
         payloadSha256: createHash("sha256").update(markdownPayload(chunk, t, threadId)).digest("hex") };
       const send = async credential => {
         await record({ ...detail, phase: "dispatching" }); // Durable before the possible write.
-        const value = await this._postChunk(target, chunk, t, credential, threadId, chunkUuid);
+        const value = await this._postChunk(target, chunk, t, credential, threadId, chunkUuid, idType);
         await record({ ...detail, phase: value?.code === 0 ? "accepted" : Number.isInteger(value?.code) && value.code > 0 ? "rejected" : "unknown",
           apiCode: Number.isInteger(value?.code) ? value.code : null,
           ...(value?.code === 0 && typeof value.data?.message_id === "string" ? { messageId: value.data.message_id } : {}) });
@@ -197,8 +206,38 @@ export class FeishuNotifier {
     return lastResponse;
   }
 
+  // Streaming edits only PATCH a known card. An edit failure never creates a replacement.
+  async updateMessage(messageId, text, { title, threadId, validateTarget, onDelivery } = {}) {
+    const allowed = () => this.enabled && this.canSend({ threadId })
+      && (validateTarget == null || typeof validateTarget === "function" && validateTarget());
+    if (!messageId || !allowed() || hermesChunks(text).length !== 1) return null;
+    const body = { content: markdownPayload(text, title || this.bridgeName || "Codex", threadId) };
+    const record = async value => { if (onDelivery) await onDelivery({
+      ...value, operation: "update", messageId, at: new Date().toISOString() }); };
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const token = await this.getToken();
+      if (!token || !allowed()) return null;
+      await record({ phase: "dispatching" });
+      // A selection can change during durable intent recording.
+      if (!allowed()) return null;
+      const result = await postJson(
+        `${FEISHU_API_BASE}${SEND_URL}/${encodeURIComponent(messageId)}`,
+        body, { token, method: "PATCH" });
+      await record({ phase: result?.code === 0 ? "accepted" : "unknown",
+        apiCode: Number.isInteger(result?.code) ? result.code : null });
+      if (result?.code === 0) return { ...result, data: { ...result.data, message_id: messageId } };
+      if (attempt === 0 && isTokenError(result)) { this.invalidateToken(); continue; }
+      console.warn(`feishu 卡片更新未确认: code=${Number.isInteger(result?.code) ? result.code : "unknown"}`);
+      return null;
+    }
+  }
+
   async downloadImage(messageId, imageKey) {
     return downloadFeishuImage(messageId, imageKey, await this.getToken());
+  }
+
+  async downloadFileImage(messageId, fileKey) {
+    return downloadFeishuFileImage(messageId, fileKey, await this.getToken());
   }
 
   async sendQuestionCard(card, { chatId, threadId, uuid } = {}) {
@@ -229,10 +268,10 @@ export class FeishuNotifier {
     }
   }
 
-  async _postChunk(target, chunk, title, token, threadId, uuid) {
+  async _postChunk(target, chunk, title, token, threadId, uuid, receiveIdType = "chat_id") {
     try {
       return await postJson(
-        `${FEISHU_API_BASE}${SEND_URL}?receive_id_type=chat_id`,
+        `${FEISHU_API_BASE}${SEND_URL}?receive_id_type=${encodeURIComponent(receiveIdType)}`,
         { receive_id: target, msg_type: "interactive", content: markdownPayload(chunk, title, threadId), ...(uuid ? { uuid } : {}) },
         { token }
       );
@@ -242,15 +281,12 @@ export class FeishuNotifier {
     }
   }
 
-  // Emoji types the bridge uses: Typing while a turn runs, CrossMark when it
-  // failed (Hermes parity). Both are verified against the live reaction API.
-  async addReaction(messageId, emojiType = "Typing") {
+  async addReaction(messageId) {
     if (!this.enabled || !messageId) return null;
-    const emoji = typeof emojiType === "string" && emojiType.trim() ? emojiType.trim() : "Typing";
     const token = await this.getToken();
     if (!token) return null;
     const url = `${FEISHU_API_BASE}/im/v1/messages/${encodeURIComponent(messageId)}/reactions`;
-    const body = { reaction_type: { emoji_type: emoji } };
+    const body = { reaction_type: { emoji_type: "Typing" } };
     let response = await postJson(url, body, { token });
     if (response && response.code !== 0 && isTokenError(response)) {
       console.warn(`feishu reaction token 失效（code=${response.code} msg=${response.msg}），刷新 token 重试一次`);
@@ -260,7 +296,7 @@ export class FeishuNotifier {
       response = newToken ? await postJson(url, body, { token: newToken }) : null;
     }
     if (response === null || response.code !== 0) {
-      console.warn(`feishu 添加 reaction 失败: emoji=${emoji} code=${(response || {}).code} msg=${(response || {}).msg} message_id=${messageId}`);
+      console.warn(`feishu 添加 reaction 失败: code=${(response || {}).code} msg=${(response || {}).msg} message_id=${messageId}`);
       return null;
     }
     return String((response.data || {}).reaction_id || "") || null;
@@ -546,15 +582,8 @@ export class FeishuWebsocketClient {
     return this._running;
   }
 
-  // Public equivalent of `_ws.readyState === 1`, so the channel can ask either
-  // transport the same question (the SDK client has no raw socket).
-  get connected() {
-    return this._ws?.readyState === 1;
-  }
-
   status() {
     return { policy: "bounded-handshake-heartbeat", running: this.running, phase: this.phase,
-      connected: this.connected,
       attempts: this.attempts, handshakeTimeoutMs: this.handshakeTimeoutMs, pongTimeoutMs: this.pongTimeoutMs,
       pingIntervalMs: this.pingIntervalMs, retryIntervalMs: FEISHU_WS_RECONNECT_INTERVAL,
       lastError: this.lastError || null, lastDisconnectAt: this.lastDisconnectAt,
@@ -608,7 +637,7 @@ export class FeishuWebsocketClient {
     this._runLoop(generation).catch(() => {
       if (!this.current(generation)) return;
       this.lastError = "reconnect_loop_failed"; this.setPhase("failed");
-      console.warn("[CodexWorker] Feishu reconnect loop failed; inspect connection status.");
+      console.warn("[bridge] Feishu reconnect loop failed; inspect connection status.");
       this._running = false;
     });
   }
@@ -714,10 +743,10 @@ export class FeishuWebsocketClient {
             try { this.configurePing(JSON.parse(_decoder.decode(frame.payload))); } catch { /* Invalid server config. */ }
           }
           void this._handleFrame(ws, frame, serviceId).catch(() => {
-            console.error("[CodexWorker] Feishu event was not acknowledged; inspect durable ingress state.");
+            console.error("[bridge] Feishu event was not acknowledged; inspect durable ingress state.");
           });
         } catch {
-          console.warn("[CodexWorker] Invalid Feishu frame; input was not acknowledged.");
+          console.warn("[bridge] Invalid Feishu frame; input was not acknowledged.");
         }
       };
       ws.onclose = () => finish("closed");
@@ -735,7 +764,7 @@ export class FeishuWebsocketClient {
     const response = await postJson(FEISHU_WS_BASE + FEISHU_WS_ENDPOINT_URI, { AppID: this.notifier.appId, AppSecret: this.notifier.appSecret });
     if (response.code !== 0 || !response.data || typeof response.data !== "object") {
       this.lastError = "endpoint_unavailable";
-      console.warn("[CodexWorker] Feishu endpoint unavailable; automatic retry remains active.");
+      console.warn("[bridge] Feishu endpoint unavailable; automatic retry remains active.");
       return "";
     }
     this.configurePing(response.data.ClientConfig);
@@ -746,17 +775,6 @@ export class FeishuWebsocketClient {
     if (this._stopped) return;
     const frameMethod = frame.method ?? 0;
     const msgType = frame.headers.type || "";
-    // Frame diagnostics are opt-in: CODEXWORKER_DEBUG_FRAMES=1. A healthy
-    // long connection logs nothing by default.
-    if (process.env.CODEXWORKER_DEBUG_FRAMES === "1") {
-      if (frameMethod !== 0) {
-        let et = "";
-        try { et = JSON.parse(_decoder.decode(frame.payload))?.header?.event_type || ""; } catch { et = "<unparsed>"; }
-        console.error(`[feishu-diag] method=${frameMethod} type=${msgType} event_type=${et} bytes=${frame.payload?.length ?? 0}`);
-      } else {
-        console.error(`[feishu-diag] CONTROL type=${msgType} bytes=${frame.payload?.length ?? 0}`);
-      }
-    }
     if (frameMethod === 0) return; // CONTROL ping/pong, ignore
     if (msgType === "card" || (msgType === "event" && (() => {
       try { return JSON.parse(_decoder.decode(frame.payload))?.header?.event_type === "card.action.trigger"; } catch { return false; }

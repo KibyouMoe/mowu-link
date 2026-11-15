@@ -1,4 +1,4 @@
-// Read only Desktop's lightweight catalog; never load a turn to list a chat.
+// Read the native lightweight catalog for interactive chats from any client.
 // The database is opened read-only and no native state is updated by Bridge.
 import path from "node:path";
 
@@ -12,10 +12,10 @@ export async function readLocalResumeCatalog(codexHome) {
     const { DatabaseSync } = await import("node:sqlite");
     db = new DatabaseSync(path.join(codexHome, "state_5.sqlite"), { readOnly: true });
     const columns = new Set(db.prepare("PRAGMA table_info(threads)").all().map(r => r.name));
-    if (!["id", "cwd", "title", "source", "originator", "archived"].every(k => columns.has(k))) throw new Error("unsupported_catalog");
+    if (!["id", "cwd", "title", "source", "archived"].every(k => columns.has(k))) throw new Error("unsupported_catalog");
     const fields = ["id", "cwd", "title", "name", "created_at", "created_at_ms", "updated_at", "updated_at_ms", "recency_at", "recency_at_ms"]
       .filter(k => columns.has(k));
-    const rows = db.prepare(`SELECT ${fields.join(",")} FROM threads WHERE archived = 0 AND source = 'vscode' AND originator = 'Codex Desktop'`).all();
+    const rows = db.prepare(`SELECT ${fields.join(",")} FROM threads WHERE archived = 0 AND source IN ('vscode', 'cli', 'appServer')`).all();
     const tasks = rows.filter(r => /^[a-f\d-]{36}$/i.test(r.id) && typeof r.cwd === "string").map(r => ({
       id: r.id, kind: "codex", hostId: "local", cwd: normalizeDesktopPath(r.cwd),
       title: r.name?.trim() ? r.name : r.title,

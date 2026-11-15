@@ -1,15 +1,10 @@
 {
   "mcpServers": {
     "codexworker": {
-      "command": "cmd.exe",
+      "command": "node",
       "cwd": ".",
       "args": [
-        "/d",
-        "/s",
-        "/c",
-        "call",
-        "./scripts/launch_codexworker.cmd",
-        "./server.mjs"
+        "./interface/desktop-mcp.mjs"
       ],
       "enabled": true,
       "default_tools_approval_mode": "approve",
@@ -20,13 +15,20 @@
         "CODEX_ELECTRON_RESOURCES_PATH",
         "XDG_CACHE_HOME",
         "HOME",
+        "CODEX_HOME",
         "USERPROFILE",
         "LOCALAPPDATA",
-        "PATH"
+        "PATH",
+        "CODEXWORKER_STATE_DIR",
+        "CODEXWORKER_NATIVE_TRANSPORT",
+        "CODEXWORKER_NATIVE_IMAGE_INPUT",
+        "CODEXWORKER_NATIVE_QUESTION_INPUT",
+        "CODEXWORKER_NATIVE_TASK_INPUT",
+        "CODEXWORKER_NATIVE_INPUT_DESCRIPTOR"
       ],
       "startup_timeout_sec": 60,
       "tool_timeout_sec": 180,
-      "env": {}
+      "env": { "CODEXWORKER_NATIVE_BOOTSTRAP": "1" }
     }
   }
 }

@@ -1,10 +1,43 @@
 // HTTP stays alive across short MCP connections, not across Desktop lifetimes.
-import { execFile } from "node:child_process";
-import { access, readFile, realpath, rename, unlink, writeFile } from "node:fs/promises";
+import { once } from "node:events";
+import { execFile, spawn } from "node:child_process";
+import { access, lstat, readFile, realpath, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
+export const DESKTOP_BOOTSTRAP_VERSION = "0.3.0";
+export const desktopLaunchMode = platform => platform === "win32" ? "windows-desktop-parent" : "desktop-owned";
+
+// Only the child handle created by this supervisor is eligible for shutdown.
+// The grace period belongs to adapter shutdown, never to a model task.
+export async function stopOwnedChild(child, { graceMs = 5000 } = {}) {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  await new Promise(resolve => {
+    const limit = setTimeout(() => { child.kill("SIGKILL"); }, graceMs);
+    child.once("exit", () => { clearTimeout(limit); resolve(); });
+    child.stdin?.end();
+  });
+}
+
+export async function resolveDesktopState(defaultState, env = process.env) {
+  if (env.CODEXWORKER_STATE_DIR) return path.resolve(env.CODEXWORKER_STATE_DIR);
+  let settings;
+  try { settings = JSON.parse(await readFile(path.join(defaultState, "worker-instance.local.json"), "utf8")); }
+  catch (error) { if (error.code === "ENOENT") return defaultState; throw new Error("desktop_state_invalid"); }
+  if (typeof settings?.stateDir !== "string" || !path.isAbsolute(settings.stateDir)) throw new Error("desktop_state_invalid");
+  return realpath(settings.stateDir);
+}
+
+export async function readDesktopSettings(stateDir) {
+  let config;
+  try { config = JSON.parse(await readFile(path.join(stateDir, "desktop-config.local.json"), "utf8")); }
+  catch (error) { if (error.code === "ENOENT") return { autoStart: true }; throw new Error("desktop_settings_invalid"); }
+  if (!config || typeof config !== "object" || Array.isArray(config) ||
+      Object.hasOwn(config, "autoStart") && typeof config.autoStart !== "boolean") throw new Error("desktop_autostart_invalid");
+  return { autoStart: config.autoStart !== false };
+}
+
 export async function resolveLifecycleRoot(pluginRoot, stateDir) {
   if (!stateDir) return pluginRoot;
   let sidecar;
@@ -22,14 +55,22 @@ export async function resolveLifecycleRoot(pluginRoot, stateDir) {
   return root;
 }
 
-export async function launchDesktopSupervisor({ pluginRoot, stateDir, owner, env, role = "bridge", exec = execFileAsync }) {
+export async function launchDesktopSupervisor({ pluginRoot, stateDir, owner, env, role = "bridge", exec = execFileAsync, platform = process.platform, spawnImpl = spawn }) {
   if (!["bridge", "watchdog"].includes(role)) throw new Error("desktop_lifetime_role_invalid");
   pluginRoot = await resolveLifecycleRoot(pluginRoot, stateDir);
+  if (platform === "darwin") {
+    const child = spawnImpl(process.execPath, [path.join(pluginRoot, "scripts", role === "watchdog" ? "run-script-watchdog.mjs" : "run-desktop-bridge.mjs"), "--desktop-pid", String(owner.pid)], {
+      cwd: pluginRoot, env: { ...env, RUDOLF_BRIDGE_DESKTOP_STARTED_AT: owner.startedAt,
+        RUDOLF_BRIDGE_LIFETIME_LAUNCH: desktopLaunchMode(platform) }, detached: true, stdio: ["ignore", "ignore", "ignore", "ipc"] });
+    await once(child, "spawn"); child.unref(); child.channel?.unref();
+    return { supervisorPid: child.pid, launchMode: desktopLaunchMode(platform) };
+  }
+  if (platform !== "win32") throw new Error("desktop_platform_unsupported");
   let stdout;
   try { ({ stdout } = await exec(path.join(env.SystemRoot ?? "C:/Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
     ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "RemoteSigned", "-File", path.join(pluginRoot, "scripts", "launch-desktop-lifetime.ps1"),
       process.execPath, String(owner.pid), role], {
-      cwd: pluginRoot, env: { ...env, CODEXWORKER_DESKTOP_STARTED_AT: owner.startedAt },
+      cwd: pluginRoot, env: { ...env, RUDOLF_BRIDGE_DESKTOP_STARTED_AT: owner.startedAt },
       windowsHide: true, timeout: 12000, maxBuffer: 65536 })); }
   catch (error) {
     const denied = /desktop_lifetime_launch_denied:(\d{1,5})/.exec(error.stderr ?? "");
@@ -65,13 +106,32 @@ export async function ensureScriptWatchdog({ pluginRoot, stateDir, owner, env = 
   throw new Error("script_watchdog_startup_pending");
 }
 export function desktopOwner(chain) {
-  return [...chain].reverse().find(p => p.name?.toLowerCase() === "chatgpt.exe" &&
-    /[\\/]OpenAI\.Codex_[^\\/]+[\\/]app[\\/]ChatGPT\.exe$/i.test(p.executable ?? "") &&
-    Number.isSafeInteger(p.pid) && p.pid > 0 && typeof p.startedAt === "string") ?? null;
+  return [...chain].reverse().find(p => Number.isSafeInteger(p.pid) && p.pid > 0 && typeof p.startedAt === "string" && (
+    p.name?.toLowerCase() === "chatgpt.exe" && /[\\/]OpenAI\.Codex_[^\\/]+[\\/]app[\\/]ChatGPT\.exe$/i.test(p.executable ?? "") ||
+    /\/(Codex|ChatGPT)\.app\/Contents\/MacOS\/(Codex|ChatGPT)$/.test(p.executable ?? "")
+  )) ?? null;
 }
 
 export async function processChain(pid, { exec = execFileAsync, platform = process.platform } = {}) {
-  if (platform !== "win32" || !Number.isSafeInteger(pid) || pid < 1) return [];
+  if (!Number.isSafeInteger(pid) || pid < 1) return [];
+  if (platform === "darwin") {
+    const chain = [], seen = new Set();
+    for (let depth = 0; depth < 16 && pid > 0 && !seen.has(pid); depth++) {
+      seen.add(pid);
+      let stdout;
+      try { ({ stdout } = await exec("/bin/ps", ["-p", String(pid), "-o", "pid=,ppid=,lstart=,comm="], { timeout: 8000, maxBuffer: 65536 })); }
+      catch (error) {
+        if (error.code === 1 && !error.stdout?.trim() && !error.stderr?.trim()) break; // ps uses exit 1 for a process which has exited.
+        throw error; // A permission/inspection failure is still unknown, not proof of exit.
+      }
+      const match = stdout.trim().match(/^(\d+)\s+(\d+)\s+(.{24})\s+(.+)$/);
+      if (!match) break;
+      chain.push({ pid: Number(match[1]), startedAt: match[3], executable: match[4], name: path.basename(match[4]) });
+      pid = Number(match[2]);
+    }
+    return chain;
+  }
+  if (platform !== "win32") return [];
   // Only a validated integer enters this fixed read-only command.
   const script = "$ErrorActionPreference='Stop'; $bridgeInspectPid=" + pid + "; $bridgeSeen=@{}; $bridgeChain=@(); " +
     "for($bridgeDepth=0;$bridgeDepth -lt 16 -and $bridgeInspectPid -gt 0;$bridgeDepth++){ " +
@@ -85,25 +145,54 @@ export async function processChain(pid, { exec = execFileAsync, platform = proce
   return JSON.parse(stdout.trim() || "[]");
 }
 
-export async function resolveDesktopOwner(pid, { readChain = processChain,
+export async function resolveDesktopPipeOwner(pipePath, { platform = process.platform,
+  uid = process.getuid?.(), inspect = lstat, exec = execFileAsync, readChain = processChain } = {}) {
+  if (platform !== "darwin" || typeof pipePath !== "string" || !path.isAbsolute(pipePath) || pipePath.includes("\0")) return null;
+  const info = await inspect(pipePath);
+  if (!info.isSocket() || info.uid !== uid) return null;
+  const { stdout } = await exec("/usr/sbin/lsof", ["-nP", "-a", "-U", "-Fpun", pipePath], { timeout: 8000, maxBuffer: 65536 });
+  const candidates = new Set();
+  for (const record of stdout.split(/(?=^p\d+$)/m)) {
+    const pid = Number(record.match(/^p(\d+)$/m)?.[1]), ownerUid = Number(record.match(/^u(\d+)$/m)?.[1]);
+    if (ownerUid === uid && Number.isSafeInteger(pid) && pid > 0) candidates.add(pid);
+  }
+  if (candidates.size > 32) return null;
+  const owners = [];
+  for (const pid of candidates) {
+    const owner = desktopOwner(await readChain(pid));
+    if (owner?.pid === pid) owners.push(owner); // The Desktop itself owns the supplied pipe, not an arbitrary child.
+  }
+  return owners.length === 1 ? owners[0] : null;
+}
+
+export async function resolveDesktopOwner(pid, { readChain = processChain, pipePath, readPipeOwner,
   delay = ms => new Promise(resolve => setTimeout(resolve, ms)) } = {}) {
   for (let attempt = 0; attempt < 3; attempt++) {
-    try { const owner = desktopOwner(await readChain(pid)); if (owner) return owner; }
+    try {
+      const owner = desktopOwner(await readChain(pid)); if (owner) return owner;
+      // Shared daemon MCPs have no Desktop ancestor. Use only the exact pipe
+      // supplied by the host; never scan for or reconstruct a native endpoint.
+      if (pipePath && readPipeOwner) { const pipeOwner = await readPipeOwner(pipePath); if (pipeOwner) return pipeOwner; }
+    }
     catch { /* Cold Windows process queries may fail transiently. Never guess an owner. */ }
     if (attempt < 2) await delay(200);
   }
   return null;
 }
 
-export async function desktopSupervisorReady(stateDir, owner, { fetchImpl = fetch, alive = pid => {
+export async function desktopSupervisorReady(stateDir, owner, { platform = process.platform, fetchImpl = fetch, readChain = processChain, alive = pid => {
   try { process.kill(pid, 0); return true; } catch { return false; }
 } } = {}) {
   try {
     const status = JSON.parse(await readFile(path.join(stateDir, "desktop-lifecycle-status.json"), "utf8"));
     if (status.desktopPid !== owner.pid || status.desktopStartedAt !== owner.startedAt ||
-        status.version !== "0.2.23" || status.launchMode !== "windows-desktop-parent" ||
+        status.version !== DESKTOP_BOOTSTRAP_VERSION || status.launchMode !== desktopLaunchMode(platform) ||
         !Number.isSafeInteger(status.supervisorPid) || status.supervisorPid < 1 || !alive(status.supervisorPid) ||
         !["desktop_lifetime_bridge_active", "observing_managed_writer"].includes(status.stage)) return false;
+    if (platform === "darwin") {
+      const actual = desktopOwner(await readChain(status.supervisorPid));
+      if (actual?.pid !== owner.pid || actual.startedAt !== owner.startedAt) return false;
+    }
     const config = JSON.parse(await readFile(path.join(stateDir, "desktop-config.local.json"), "utf8"));
     if ((config.host ?? "127.0.0.1") !== "127.0.0.1") return false;
     const token = (await readFile(config.tokenFile, "utf8")).trim();
@@ -115,43 +204,50 @@ export async function desktopSupervisorReady(stateDir, owner, { fetchImpl = fetc
     return health.ready === true && health.integrationMode === "desktop-native" &&
       health.name === (config.bridgeName ?? "CodexWorker") && health.integrations?.pid === status.writerPid &&
       health.capabilities?.desktopStartupHandoff?.active === true &&
-      health.capabilities?.businessHotReload?.bootstrapVersion === "0.2.23" &&
-      health.capabilities?.businessHotReload?.desktopLifetimeLaunchMode === "windows-desktop-parent";
+      health.capabilities?.businessHotReload?.bootstrapVersion === DESKTOP_BOOTSTRAP_VERSION &&
+      health.capabilities?.businessHotReload?.desktopLifetimeLaunchMode === desktopLaunchMode(platform);
   } catch { return false; } // Stale metadata or a socket alone is never readiness.
 }
 
 export async function ensureDesktopSupervisor({ pluginRoot, stateDir, env = process.env,
   platform = process.platform, readChain = processChain, launchImpl = launchDesktopSupervisor,
-  ready = desktopSupervisorReady, clock = Date.now, ensureWatchdog = ensureScriptWatchdog,
-  delay = ms => new Promise(resolve => setTimeout(resolve, ms)), timeoutMs = 40000 } = {}) {
-  if (platform !== "win32" || !env.CODEX_APP_TOOLS_PIPE_PATH || env.CODEXWORKER_LIFECYCLE_CHILD === "1") return false;
+  ready = desktopSupervisorReady, clock = Date.now, ensureWatchdog = ensureScriptWatchdog, pipeOwner = resolveDesktopPipeOwner,
+  delay = ms => new Promise(resolve => setTimeout(resolve, ms)), timeoutMs = 40000, signal } = {}) {
+  if (signal?.aborted) return false;
+  if (!(await readDesktopSettings(stateDir)).autoStart) return false;
+  if (!["win32", "darwin"].includes(platform) || !env.CODEX_APP_TOOLS_PIPE_PATH || env.RUDOLF_BRIDGE_LIFECYCLE_CHILD === "1") return false;
   // Never persist/reconstruct a pipe or register an OS-login job with old handles.
   await access(path.join(stateDir, "desktop-config.local.json"));
   await access(path.join(stateDir, "manager-binding.json"));
   const deadline = clock() + timeoutMs;
-  const owner = await resolveDesktopOwner(process.pid, { readChain, delay });
-  if (!owner) return false;
+  const owner = await resolveDesktopOwner(process.pid, { readChain, delay,
+    pipePath: env.CODEX_APP_TOOLS_PIPE_PATH,
+    readPipeOwner: platform === "darwin" ? value => pipeOwner(value, { platform, readChain }) : null });
+  if (!owner || signal?.aborted) return false;
   // The independent audit scheduler must not depend on HTTP/startup readiness:
   // otherwise a slow startup can launch a writer but skip its watchdog forever.
-  await ensureWatchdog({ pluginRoot, stateDir, owner, env }).catch(() => {});
-  if (await ready(stateDir, owner)) {
+  if (platform === "win32") await ensureWatchdog({ pluginRoot, stateDir, owner, env }).catch(() => {});
+  if (await ready(stateDir, owner, { platform })) {
+    if (signal?.aborted) return false;
     await resumeStartupMaintenance(stateDir);
     return true;
   }
   // Even an allowed breakaway can remain in an outer inventory cleanup job.
   // Create the supervisor under the verified Desktop itself, retaining its job
   // and token. OS denial has no alternate-parent or cold-MCP writer fallback.
-  await launchImpl({ pluginRoot, stateDir, owner, env });
+  if (signal?.aborted) return false;
+  await launchImpl({ pluginRoot, stateDir, owner, env, platform });
   // Inventory clients may tear down the MCP process immediately after its
   // initialize response. Finish the durable supervisor handoff BEFORE replying,
   // and before this short-lived process can become the HTTP/Feishu writer.
-  while (clock() < deadline) {
-    if (await ready(stateDir, owner)) {
+  while (clock() < deadline && !signal?.aborted) {
+    if (await ready(stateDir, owner, { platform })) {
       await resumeStartupMaintenance(stateDir);
       return true;
     }
     await delay(200);
   }
+  if (signal?.aborted) return false;
   throw new Error("desktop_lifecycle_not_ready");
 }
 
@@ -174,8 +270,8 @@ async function resumeStartupMaintenance(stateDir) {
 }
 
 export class DesktopLifecycle {
-  constructor({ desktopAlive, health, launch, stopChild, clock = Date.now, log = () => {} }) {
-    Object.assign(this, { desktopAlive, health, launch, stopChild, clock, log });
+  constructor({ desktopAlive, health, launch, stopChild, enabled = async () => true, clock = Date.now, log = () => {} }) {
+    Object.assign(this, { desktopAlive, health, launch, stopChild, enabled, clock, log });
     this.child = null; this.closed = false; this.retryAt = 0; this.backoff = 1000;
     this.stage = null; this.tickRunning = false;
   }
@@ -196,8 +292,14 @@ export class DesktopLifecycle {
         this.report("desktop_owner_check_pending"); return;
       }
       if (!ownerAlive) { await this.close(); return; }
+      if (this.closed) return;
+      if (!await this.enabled()) {
+        if (this.child) { const owned = this.child; this.child = null; await this.stopChild(owned); }
+        this.report("desktop_autostart_disabled"); return;
+      }
       let live = null;
       try { live = await this.health(); } catch { /* Never retry native message writes. */ }
+      if (this.closed) return;
       if (live?.ready && live.integrationMode === "desktop-native") {
         this.unhealthySince = null;
         this.backoff = 1000;

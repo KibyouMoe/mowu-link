@@ -1,0 +1,289 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.invalid/hermes-manager-protocol/1.1.1-draft/schema.json",
+  "title": "Hermes Manager Protocol 1.1.1 Draft",
+  "description": "Draft contracts for the proposed Hermes-to-Codex manager API. These endpoints are not implemented by Bridge 0.7.2.",
+  "oneOf": [
+    { "$ref": "#/$defs/messageRequest" },
+    { "$ref": "#/$defs/messageAcceptedResponse" },
+    { "$ref": "#/$defs/eventEnvelope" },
+    { "$ref": "#/$defs/pullEventsResponse" },
+    { "$ref": "#/$defs/healthResponse" },
+    { "$ref": "#/$defs/aliasPatchRequest" },
+    { "$ref": "#/$defs/adoptSessionRequest" },
+    { "$ref": "#/$defs/errorResponse" }
+  ],
+  "$defs": {
+    "protocolVersion": {
+      "type": "string",
+      "const": "1.1.1-draft"
+    },
+    "messageId": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+    },
+    "threadId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "machine": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{0,63}$",
+      "examples": ["rudolf", "qicao"]
+    },
+    "messageAction": {
+      "type": "string",
+      "enum": [
+        "dispatch_pending",
+        "message_queued",
+        "turn_started",
+        "turn_steered",
+        "turn_interrupt_requested",
+        "turn_already_idle",
+        "session_created",
+        "session_forked",
+        "session_adopted",
+        "session_selected",
+        "session_renamed",
+        "sessions_listed",
+        "session_status"
+      ]
+    },
+    "session": {
+      "type": "object",
+      "required": [
+        "threadId",
+        "alias",
+        "bridge",
+        "machine",
+        "state",
+        "sourceThreadId",
+        "forkedFromId"
+      ],
+      "properties": {
+        "threadId": { "$ref": "#/$defs/threadId", "readOnly": true },
+        "alias": { "type": "string", "minLength": 1 },
+        "bridge": { "type": "string", "minLength": 1, "readOnly": true },
+        "machine": { "$ref": "#/$defs/machine" },
+        "state": {
+          "type": "string",
+          "enum": ["idle", "running", "stopping", "error"]
+        },
+        "activeTurnId": { "type": ["string", "null"] },
+        "sourceThreadId": {
+          "oneOf": [
+            { "$ref": "#/$defs/threadId" },
+            { "type": "null" }
+          ],
+          "readOnly": true
+        },
+        "forkedFromId": {
+          "oneOf": [
+            { "$ref": "#/$defs/threadId" },
+            { "type": "null" }
+          ],
+          "readOnly": true
+        },
+        "forkedAtTurnId": { "type": ["string", "null"], "readOnly": true }
+      },
+      "additionalProperties": true
+    },
+    "messageRequest": {
+      "title": "POST /manager/messages request",
+      "type": "object",
+      "required": ["protocolVersion", "messageId", "source", "text"],
+      "properties": {
+        "protocolVersion": { "$ref": "#/$defs/protocolVersion" },
+        "messageId": { "$ref": "#/$defs/messageId" },
+        "source": { "type": "string", "enum": ["trainer", "hermes"] },
+        "text": { "type": "string", "minLength": 1 },
+        "delivery": {
+          "type": "string",
+          "enum": ["steer", "queue"],
+          "default": "steer"
+        },
+        "targetThreadId": {
+          "oneOf": [
+            { "$ref": "#/$defs/threadId" },
+            { "type": "null" }
+          ]
+        },
+        "sourceThreadId": {
+          "oneOf": [
+            { "$ref": "#/$defs/threadId" },
+            { "type": "null" }
+          ]
+        },
+        "clientTimestamp": { "type": "string", "format": "date-time" },
+        "safetyMode": {
+          "type": ["string", "null"],
+          "enum": ["read-only", "workspace-write", "danger-full-access", null]
+        }
+      },
+      "additionalProperties": true
+    },
+    "messageAcceptedResponse": {
+      "title": "POST /manager/messages accepted response",
+      "type": "object",
+      "required": ["accepted", "duplicate", "messageId", "eventSeq", "action"],
+      "properties": {
+        "accepted": { "const": true },
+        "duplicate": { "type": "boolean" },
+        "messageId": { "$ref": "#/$defs/messageId" },
+        "eventSeq": { "type": "integer", "minimum": 1 },
+        "action": { "$ref": "#/$defs/messageAction" },
+        "session": { "$ref": "#/$defs/session" }
+      },
+      "additionalProperties": true
+    },
+    "eventEnvelope": {
+      "title": "Manager event envelope",
+      "type": "object",
+      "required": [
+        "protocolVersion",
+        "seq",
+        "type",
+        "bridge",
+        "machine",
+        "timestamp",
+        "payload"
+      ],
+      "properties": {
+        "protocolVersion": { "$ref": "#/$defs/protocolVersion" },
+        "seq": { "type": "integer", "minimum": 1 },
+        "type": { "type": "string", "minLength": 1 },
+        "bridge": { "type": "string", "minLength": 1 },
+        "machine": { "$ref": "#/$defs/machine" },
+        "threadId": { "type": ["string", "null"] },
+        "turnId": { "type": ["string", "null"] },
+        "source": {
+          "type": ["string", "null"],
+          "enum": ["trainer", "hermes", "bridge", "codex", null]
+        },
+        "messageId": {
+          "oneOf": [
+            { "$ref": "#/$defs/messageId" },
+            { "type": "null" }
+          ]
+        },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "payload": { "type": "object" }
+      },
+      "additionalProperties": true
+    },
+    "pullEventsResponse": {
+      "title": "GET /manager/events?stream=0 response",
+      "type": "object",
+      "required": ["events", "hasMore", "latestSeq"],
+      "properties": {
+        "events": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/eventEnvelope" }
+        },
+        "hasMore": { "type": "boolean" },
+        "latestSeq": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": true
+    },
+    "healthResponse": {
+      "title": "Manager-capable GET /health response",
+      "type": "object",
+      "required": [
+        "name",
+        "alive",
+        "ready",
+        "managerProtocolVersion",
+        "managerMinCompatibleVersion",
+        "managerReady",
+        "integrationMode",
+        "nativeTaskReady",
+        "machine",
+        "eventSeq",
+        "desktopBuild",
+        "runtimeBuild",
+        "appServerSchemaFile",
+        "appServerSchemaSha256"
+      ],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "alive": { "type": "boolean" },
+        "ready": { "type": "boolean" },
+        "managerProtocolVersion": { "$ref": "#/$defs/protocolVersion" },
+        "managerMinCompatibleVersion": { "type": "string", "minLength": 1 },
+        "managerReady": { "type": "boolean" },
+        "managerUnavailableReason": { "type": ["string", "null"] },
+        "integrationMode": { "type": "string", "const": "desktop-native" },
+        "nativeTaskReady": { "type": "boolean" },
+        "machine": { "$ref": "#/$defs/machine" },
+        "eventSeq": { "type": "integer", "minimum": 0 },
+        "desktopBuild": { "type": "string", "minLength": 1 },
+        "runtimeBuild": { "type": "string", "minLength": 1 },
+        "appServerSchemaFile": {
+          "type": "string",
+          "enum": ["codex_app_server_protocol.v2.schemas.json", "desktop-native-tools.json"]
+        },
+        "appServerSchemaSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{64}$"
+        }
+      },
+      "additionalProperties": true
+    },
+    "aliasPatchRequest": {
+      "title": "PATCH /manager/sessions/{threadId} request",
+      "type": "object",
+      "required": ["alias"],
+      "properties": {
+        "alias": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": true
+    },
+    "adoptSessionRequest": {
+      "title": "POST /manager/sessions/adopt request",
+      "type": "object",
+      "required": ["protocolVersion", "messageId", "threadId", "source"],
+      "properties": {
+        "protocolVersion": { "$ref": "#/$defs/protocolVersion" },
+        "messageId": { "$ref": "#/$defs/messageId" },
+        "threadId": { "$ref": "#/$defs/threadId" },
+        "source": { "type": "string", "enum": ["trainer"] },
+        "command": { "type": "string", "const": "/fork" }
+      },
+      "additionalProperties": true
+    },
+    "errorResponse": {
+      "title": "Manager error response",
+      "type": "object",
+      "required": ["error", "detail", "retryable"],
+      "properties": {
+        "error": {
+          "type": "string",
+          "minLength": 1,
+          "examples": [
+            "adopt_conflict",
+            "adopt_failed",
+            "thread_not_found",
+            "source_turn_active",
+            "writer_conflict",
+            "desktop_integration_unavailable"
+          ]
+        },
+        "detail": { "type": "string" },
+        "retryable": { "type": "boolean" },
+        "messageId": {
+          "oneOf": [
+            { "$ref": "#/$defs/messageId" },
+            { "type": "null" }
+          ]
+        },
+        "threadId": { "type": ["string", "null"] },
+        "activeTurnId": { "type": ["string", "null"] },
+        "latestSeq": { "type": "integer", "minimum": 0 },
+        "managerProtocolVersion": { "type": "string" },
+        "managerMinCompatibleVersion": { "type": "string" }
+      },
+      "additionalProperties": true
+    }
+  }
+}

@@ -1,0 +1,66 @@
+// NativeTransport · 选择器
+//
+// 业务层（mcp-business.mjs / desktop-manager.mjs）只认这两个方法：
+//   listTools() -> [{ name, namespace }]
+//   callTool(name, args, invocation, timeoutMs) -> { success, contentItems }
+//
+// 实现按环境选择，默认保持原行为（Desktop 注入管道）：
+//   CODEXWORKER_NATIVE_TRANSPORT=desktop-pipe   显式指定
+//   CODEXWORKER_NATIVE_TRANSPORT=dsh-inprocess  DSH 进程内（cordis 插件 index.js 注册）
+//   未设置                                      有 CODEX_APP_TOOLS_PIPE_PATH 就用它
+import * as desktopPipe from "./desktop-pipe.mjs";
+
+const IMPLEMENTATIONS = {
+  [desktopPipe.name]: desktopPipe,
+};
+
+let cached = null;
+
+// 插件形态（worker/dshworker/index.js）在 apply() 里把进程内实现注册进来：
+// 它同样只提供 listTools / callTool，业务层无需知道自己跑在哪种形态下。
+export function registerNativeTransport(transportName, implementation) {
+  if (typeof transportName !== "string" || !transportName.trim()) {
+    throw new Error("registerNativeTransport requires a non-empty name");
+  }
+  IMPLEMENTATIONS[transportName] = implementation;
+  cached = null;
+  return implementation;
+}
+
+export function listNativeTransports() {
+  return Object.keys(IMPLEMENTATIONS);
+}
+
+export function resolveNativeTransport({ refresh = false } = {}) {
+  if (cached && !refresh) return cached;
+  const requested = process.env.CODEXWORKER_NATIVE_TRANSPORT?.trim();
+  if (requested) {
+    const implementation = IMPLEMENTATIONS[requested];
+    if (!implementation) {
+      throw new Error(
+        `Unknown CODEXWORKER_NATIVE_TRANSPORT "${requested}"; available: ${Object.keys(IMPLEMENTATIONS).join(", ")}`,
+      );
+    }
+    cached = implementation;
+    return cached;
+  }
+  // 默认：沿用 Desktop 注入管道；不可用时抛错文案与改造前一致。
+  cached = desktopPipe;
+  return cached;
+}
+
+export function resetNativeTransportCache() {
+  cached = null;
+}
+
+// 旧能力保留 Desktop 默认值；原生图片输入必须由传输层明确声明。
+export function resolveNativeCapabilities() {
+  const declared = resolveNativeTransport().capabilities ?? {};
+  return {
+    fork: declared.fork !== false,
+    desktopJournal: declared.desktopJournal !== false,
+    callerTurn: declared.callerTurn !== false,
+    imageInput: declared.imageInput === true,
+    questionInput: declared.questionInput === true,
+  };
+}

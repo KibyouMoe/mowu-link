@@ -106,7 +106,7 @@ export function publicImages(snapshot) {
 export class PublicImageRelay {
   constructor(manager) { this.manager = manager; this.running = false; this.task = null; }
   baseline(session, snapshot) { session.seenImages = Object.fromEntries(publicImages(snapshot).map(image => [image.key, true])); }
-  observe(session, snapshot, bindingEpoch, { inline = false } = {}) {
+  observe(session, snapshot, bindingEpoch, { inline = false, publicTextKey } = {}) {
     const m = this.manager, images = publicImages(snapshot);
     // First activation on a pre-image-relay installation seeds existing history,
     // just as adoption does. No surprise backlog of historical uploads.
@@ -121,11 +121,13 @@ export class PublicImageRelay {
       if (session.seenImages[image.key] && !recover) {
         // A still-unsent preview can take its place inside the final Markdown.
         // Never move an in-flight image or resend a completed/unknown receipt.
-        if (inline && previous?.status === "pending" && previous.bindingEpoch === bindingEpoch && this.activeEntry !== previous && m.nextPublicOutputOrder) previous.order = m.nextPublicOutputOrder();
+        if (inline && previous?.status === "pending" && previous.bindingEpoch === bindingEpoch && this.activeEntry !== previous && m.nextPublicOutputOrder) {
+          previous.order = m.nextPublicOutputOrder(); previous.publicTextKey = publicTextKey;
+        }
         continue;
       }
       session.seenImages[image.key] = true;
-      if (session.threadId !== m.state.selectedThreadId || bindingEpoch !== m.state.selectionEpoch ||
+      if ((m.relaySession ? !m.relaySession(session.threadId, bindingEpoch) : session.threadId !== m.state.selectedThreadId || bindingEpoch !== m.state.selectionEpoch) ||
           m.config.feishu.autoImageOutput === false || !m.notifier?.enabled) continue;
       // Ingress originals are private input, even if the agent views that cache.
       const cache = path.resolve(m.stateDir, "feishu-images");
@@ -139,7 +141,7 @@ export class PublicImageRelay {
         continue;
       }
       if (previous) continue; // Never replace a sent/unknown/canceled receipt.
-      m.state.autoImages[id] = { ...image, threadId: session.threadId, bindingEpoch, order: m.nextPublicOutputOrder?.(),
+      m.state.autoImages[id] = { ...image, ...(inline ? { publicTextKey } : {}), mirror: m.transcriptEnabled === true, threadId: session.threadId, bindingEpoch, order: m.nextPublicOutputOrder?.(),
         chatId: session.feishuChatId ?? m.notifier.chatId, messageId: randomUUID(), status: "pending", publicDisplayPolicy: 1, observedAt: Date.now() };
     }
   }
@@ -158,7 +160,7 @@ export class PublicImageRelay {
     this.running = true;
     this.task = this.manager.track(this.drain().catch(() => {
       // Persistence failures leave the same durable UUID pending for recovery.
-      console.error("[CodexWorker] Public image relay persistence failed; check its receipts.");
+      console.error("[bridge] Public image relay persistence failed; check its receipts.");
     }).finally(() => { this.running = false; }));
     return this.task;
   }
@@ -169,12 +171,23 @@ export class PublicImageRelay {
       let entry;
       await m.serial(async () => {
         entry = onlyEntry ?? Object.values(m.state.autoImages ?? {}).find(e => e.status === "pending");
-        if (entry) await m.save(); // UUID/path must be durable before any upload.
+        if (entry) {
+          if (m.transcriptEnabled && !entry.transcriptId) {
+            const event = await m.emit("image.observed", { targetThreadId: entry.threadId, source: "assistant" },
+              { itemKey: entry.itemKey }, { turnId: entry.turnId });
+            const record = await m.messageJournal.record({ seq: event.seq, direction: "output", source: "assistant",
+              logicalId: "image:" + entry.threadId + ":" + entry.key, text: "[图片输出]", phase: "final_answer",
+              kind: "image", threadId: entry.threadId, turnId: entry.turnId, messageId: entry.messageId });
+            entry.transcriptId = record.id;
+            await m.messageJournal.plan(record.id, [entry.messageId]);
+          }
+          await m.save(); // Intent is durable before any upload.
+        }
       });
       if (!entry) return;
       this.activeEntry = entry;
       const validateBinding = () => {
-        if (m.closed || entry.threadId !== m.state.selectedThreadId || entry.bindingEpoch !== m.state.selectionEpoch ||
+        if (m.closed || (m.relayCurrent ? !m.relayCurrent(entry) : entry.threadId !== m.state.selectedThreadId || entry.bindingEpoch !== m.state.selectionEpoch) ||
             m.config.feishu.autoImageOutput === false || entry.chatId !== (m.session(entry.threadId).feishuChatId ?? m.notifier?.chatId)) {
           const error = new Error("Feishu-selected binding changed; old image was not sent.");
           error.body = { error: "selected_target_changed", retryable: false }; throw error;
@@ -193,6 +206,8 @@ export class PublicImageRelay {
         entry.completedAt = Date.now();
         if (result) entry.feishuMessageId = result.feishuMessageId;
         else entry.error = failure?.body?.error ?? "image_send_outcome_unknown";
+        if (entry.transcriptId) await m.messageJournal.delivered(entry.transcriptId, entry.messageId,
+          result ? "sent" : "unknown", result?.feishuMessageId);
         delete entry.imagePath; delete entry.chatId; // no permanent path history
         await m.save();
       });

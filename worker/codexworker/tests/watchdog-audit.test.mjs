@@ -127,7 +127,7 @@ test("desktop-bridge audit preserves Hermes mode and rejects another machine or 
   assert.equal((await auditBridge(f.options)).status, "healthy");
   f.health.machine = "qicao";
   assert.equal((await auditBridge(f.options)).code, "unexpected_bridge_identity");
-  f.health.machine = "rudolf"; f.health.operatingMode = "feishu-local";
+  f.health.machine = "codexworker"; f.health.operatingMode = "feishu-local";
   assert.equal((await auditBridge(f.options)).code, "operating_mode_mismatch");
 });
 

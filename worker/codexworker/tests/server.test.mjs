@@ -10,7 +10,9 @@ import { fileURLToPath } from "node:url";
 const MAX_FRAME_BYTES = 8 * 1024 * 1024;
 const sourcePluginRoot = fileURLToPath(new URL("..", import.meta.url));
 const testRoot = await mkdtemp(path.join(os.tmpdir(), "codexworker-test-"));
-const pipePath = `\\\\.\\pipe\\codexworker-test-${process.pid}-${Date.now()}`;
+const pipePath = process.platform === "win32"
+  ? `\\\\.\\pipe\\codexworker-test-${process.pid}-${Date.now()}`
+  : path.join(os.tmpdir(), `codexworker-test-${process.pid}-${Date.now()}.sock`);
 const nativePipe = net.createServer((socket) => handleNativeConnection(socket));
 nativePipe.listen(pipePath);
 await once(nativePipe, "listening");
@@ -40,19 +42,19 @@ try {
   // An inventory client may close stdin immediately after initialize. The
   // initialization response must still drain without a dangling startup task.
   const init = await runBridgeBindingTest({ jsonrpc: "2.0", id: 3, method: "initialize", params: {} });
-  assert.equal(init.serverInfo.version, "0.2.38");
+  assert.equal(init.serverInfo.version, "0.3.0");
 
   // Exercise the distributable package through its real launcher, not an
   // absolute server path that would conceal a hard-coded development cwd.
   const relocatedRoot = path.join(testRoot, "installed plugin with spaces");
   await cp(sourcePluginRoot, relocatedRoot, { recursive: true });
   const mcp = JSON.parse(await readFile(path.join(relocatedRoot, ".mcp.json"), "utf8"))
-    .mcpServers.rudolf_hermes_bridge;
+    .mcpServers.codexworker;
   assert.equal(path.resolve(relocatedRoot, mcp.cwd), relocatedRoot,
     "the package must start from its installed root, not an old development directory");
   const manifest = JSON.parse(await readFile(path.join(relocatedRoot, ".codex-plugin", "plugin.json"), "utf8"));
   assert.equal(manifest.version.split("+")[0], init.serverInfo.version);
-  if (process.platform === "win32") {
+  {
     const relocatedInit = await runBridgeBindingTest(
       { jsonrpc: "2.0", id: 4, method: "initialize", params: {} }, { pluginRoot: relocatedRoot, mcp });
     assert.equal(relocatedInit.serverInfo.version, init.serverInfo.version);
@@ -102,7 +104,9 @@ async function runBridgeBindingTest(input, { pluginRoot = sourcePluginRoot, mcp 
       ...process.env,
       CODEX_APP_TOOLS_PIPE_PATH: pipePath,
       CODEX_MCP_NODE_PATH: process.execPath,
-      CODEXWORKER_LIFECYCLE_CHILD: "1",
+      CODEXWORKER_STATE_DIR: path.join(testRoot, ".codex", "state", "codexworker"),
+      CODEX_HOME: path.join(testRoot, ".codex"),
+      RUDOLF_BRIDGE_LIFECYCLE_CHILD: "1",
       USERPROFILE: testRoot,
       HOME: testRoot,
     },

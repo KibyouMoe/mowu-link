@@ -1,4 +1,27 @@
-# mowu-router 0.3.0
+# mowu-router 0.4.0
+
+## Worker 互聊与项目工单
+
+普通聊天不建任务：`POST /messages`，请求包含稳定 UUID `message_id`、已注册的精确
+`from` / `to`、`text`，可附 `reply_to` 和已上传的附件 ID 数组 `attachments`。
+所有请求沿用 `X-Router-Token`；共享令牌内的身份属于受信客户端声明，不是独立的每 worker 鉴权。
+首次保存 202、完全相同重试 200、同 ID 改内容 409；持久化后通过 SSE `worker_message` 投递。
+
+`GET /messages?worker=NAME&after=0&limit=100` 查询未 ACK 队列，按 `next_after` / `has_more`
+继续分页；`GET /messages/<UUID>` 查原消息。接收 Worker 持久接受后调用
+`POST /messages/<UUID>/ack {"worker":"收件方精确名"}`。queued 是 router 已保存，accepted 是
+Worker 已接受，均不表示模型已回答；回复显式携带 reply_to。断线重放不换 ID，不自动互相回复。
+
+明确项目才 `POST /tasks`：原字段外支持 `message_id` UUID 幂等和 `execution_mode:"goal"`
+（默认且唯一模式）；任务 ID 与幂等信息在同一 SQLite 行原子保存，相同重试不再派单。
+同一项目的补充、纠正和验收应沿原工单；普通聊天走 /messages。
+Worker 在原会话检查/建立原生目标；router 不伪造引擎目标工具成功。
+没有默认墙钟期限，只有显式 deadline_s 才建立 deadline_at，重连保留该原始时点。
+
+这些接口需正常加载此版服务后生效；只更新文件不等于正在运行的 router 已更新。
+
+`/health.capabilities` 声明 `workOrders: idempotent-goal-v1` 和 `peerMessages: durable-ack-v1`。
+新版客户端先核对工单协议，再 POST /tasks；旧版服务缺少该声明时拒绝提交，防止忽略 UUID 而重复派单。
 
 `docs/ROUTER.md` 的 ①②③ 落地：worker 在线表、任务派发/收回、订阅表，
 **订阅转发真的接上 trigger 了**（0.1.0 是 stub）；0.3.0 再加**聊天旁听**
@@ -168,6 +191,31 @@ chat_messages(
 - `meta` 原样落库（对象/数组序列化为 JSON 字符串，字符串照存，≤16000 字符）；
   `messages` 响应不返回 `meta`，需要时直接查库。
 
+### 审批通道（worker 提问，人回答）
+
+worker 在执行命令/改文件前需要人类点头，但子进程的 JSON-RPC 请求不能直接
+转给飞书。Router 只存一张审批单：worker 提申请 → trigger 推一条
+`approval.request` 通知（level `event`）→ 溪流批准/拒绝 → worker 轮询结果。
+
+| 方法 | 路径 | 请求 / 说明 |
+|---|---|---|
+| POST | `/approvals` | `{worker, taskId?/task_id?, kind, title, detail?, options?, ttl_s?}` → `{ok, approval_id, status:"pending", expires_at, remaining_s, notified}` |
+| GET | `/approvals/{id}` | `{ok, approval:{approval_id, worker, task_id, kind, title, detail, options, status, decision, note, created_at_iso, expires_at_iso, remaining_s, notified}}` |
+| GET | `/approvals?worker=&status=&limit=` | 列表，默认 50、最大 200；`status` ∈ `pending/approved/denied/expired` |
+| POST | `/approvals/{id}/decide` | `{decision:"approved"\|"denied", note?}` → `{ok, approval_id, status, decision, note, decided_at_iso}` |
+
+语义：
+
+- `status` 只有 `pending` / `approved` / `denied` / `expired`。`pending` 超过
+  `ttl_s`（默认 **600 秒**，硬上限也是 600）自动变 `expired`：读的时候懒判定，
+  服务端还有 30 秒一次的清扫线程，所以没人轮询也会过期。
+- 已决定/已过期的单子再 `decide` → `409 already_decided` / `409 approval_expired`；
+  未知 id → `404 unknown_approval`。
+- 提交时写一条 trigger 事件：`kind="approval.request"`、`level="event"`、
+  `event_id="approval:<approval_id>"`、`payload.approval_id`。trigger 挂掉时
+  审批单仍然创建成功（`notified:false`），**不返回 5xx**。
+- Router 不执行任何命令，也不校验 worker 是否已注册：它只是传话。
+
 ---
 
 ## 三、派活：三态与状态机
@@ -194,19 +242,23 @@ worker 离线 + queue_if_offline=true    → 202 {task_id, queued:true, queued_a
 ```
 queued ──dispatch──> running ──/result done──> done
    │                    │      └─/result failed─> failed
-   │                    └──cancel──> cancelled
+   │                    └──cancel──> cancelling ──执行体确认停止──> cancelled
    └──────cancel──────> cancelled
 ```
 
 - 正常派发（`POST /tasks` 且空闲、交活后续推）每次只推一条，因此同一时刻通常
-  只有一条 `running`；`busy` 即「有 running」。
+  只有一条 `running`。`busy` 包含运行/取消中的工单，以及心跳确认的人工或 router 活动回合。
 - 离线积压在上线时**按创建顺序一次性推**（`flush_backlog`）；这一次可能同时
   有多条 `running`（`ROUTER.md`「上线时按顺序一次性推」的直译），全部交回后
   才继续推后续排队任务。
 - 断线时，该 worker 的 `running` 任务回到 `queued`；重连后会再次下发。
   语义是 **at-least-once**，worker 需按 `task_id` 幂等。
-- 取消运行中的任务会立即释放 `busy` 并尝试派下一条；worker 之后迟到的
-  `/result` 会被忽略（任务已 `cancelled`，返回 `duplicate:true`）。
+- 取消运行中的任务先进入 `cancelling`，经原鉴权 SSE 的 `task_cancel` 交给 Worker。
+  Worker 向 `/tasks/{id}/cancel-ack` 回传精确执行状态，确认停止后进入 `cancelled` 并派下一条。
+  不支持 SSE 控制的旧 Worker 使用已登记的 `control_url`，投递失败继续保留取消中状态。
+  取消期间迟到的 `/result` 保留等待停止，已取消的结果回传返回 `duplicate:true`。
+- 心跳的 `turn_source` 接受 `trainer`、`router` 或 `null`，人工回合期间的派单排队。
+  交活时清空 `task_id`，将 `progress_at` 更新到同一完成时刻。
 - `urgency` 只记录并透传给 worker（`urgent` / `normal`），排队仍是 FIFO；
   `deadline_s` 落库并算出 `deadline_at`，0.3.0 仍不做超时回收。
 
@@ -363,7 +415,7 @@ ROUTER_TEST_PORT=8799 /usr/bin/python3 server/router/selftest_router.py
 临时库/token/锁/日志都在 `tempfile.mkdtemp()` 里，不碰生产
 `~/.hermes/router.db` 和 `~/.hermes/trigger.db`。
 
-覆盖（当前 **56/56 PASS**）：
+覆盖（当前 **138/138 PASS**）：
 
 1. token 生成（64 hex，0600）、`/health` 形状、无 token → 401、单实例 flock
 2. register → SSE 上线 → 心跳注释行 → 空闲立即派活（200 dispatched）

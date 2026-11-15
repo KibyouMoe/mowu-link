@@ -9,6 +9,21 @@ import { DesktopLifecycle, desktopOwner, desktopSupervisorReady, ensureDesktopSu
 const owner = { pid: 700, name: "ChatGPT.exe", startedAt: "2026-10-03T02:42:05.0000000Z",
   executable: "C:/Program Files/WindowsApps/OpenAI.Codex_26.930.3748.0_x64__2p2nqsd0c76g0/app/ChatGPT.exe" };
 
+test("closing the native host cancels startup observation without a task timeout or another launch", async t => {
+  const stateDir = await mkdtemp(path.join(os.tmpdir(), "native-host-close-"));
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  await writeFile(path.join(stateDir, "desktop-config.local.json"), "{}");
+  await writeFile(path.join(stateDir, "manager-binding.json"), "{}");
+  const controller = new AbortController(); let launched = 0;
+  const result = await ensureDesktopSupervisor({ pluginRoot: stateDir, stateDir, platform: "win32",
+    signal: controller.signal, env: { CODEX_APP_TOOLS_PIPE_PATH: "test-only-pipe" },
+    readChain: async () => [owner], ready: async () => false,
+    launchImpl: async () => { launched++; }, delay: async () => { controller.abort(); } });
+  assert.equal(result, false); assert.equal(launched, 1);
+  assert.equal(await ensureDesktopSupervisor({ stateDir, signal: controller.signal,
+    readChain: () => assert.fail("closed host must not inspect processes") }), false);
+});
+
 test("independent script watchdog starts even when Bridge readiness never arrives", async t => {
   const stateDir = await mkdtemp(path.join(os.tmpdir(), "watchdog-before-ready-"));
   t.after(() => rm(stateDir, { recursive: true, force: true }));
@@ -90,7 +105,7 @@ test("an old healthy process gets continuous unhealthy grace across short handof
 });
 
 test("lifetime startup uses trusted installed source even after the disposable cache entry disappears", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "rudolf-stable-lifetime-"));
+  const root = await mkdtemp(path.join(os.tmpdir(), "codexworker-stable-lifetime-"));
   try {
     const installed = await realpath(root).then(value => path.join(value, "installed"));
     await cp(new URL("..", import.meta.url), installed, { recursive: true });
@@ -98,7 +113,7 @@ test("lifetime startup uses trusted installed source even after the disposable c
     const removedCache = path.join(root, "removed-cache");
     assert.equal(await resolveLifecycleRoot(removedCache, root), installed);
     let settings;
-    await launchDesktopSupervisor({ pluginRoot: removedCache, stateDir: root, owner, env: {}, exec: async (_exe, args, options) => {
+    await launchDesktopSupervisor({ pluginRoot: removedCache, stateDir: root, owner, platform: "win32", env: {}, exec: async (_exe, args, options) => {
       settings = options; assert.ok(args.includes(path.join(installed, "scripts", "launch-desktop-lifetime.ps1")));
       return { stdout: '{"supervisorPid":800,"launchMode":"windows-desktop-parent"}' };
     } });
@@ -108,43 +123,43 @@ test("lifetime startup uses trusted installed source even after the disposable c
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 test("bootstrap hands off the fresh pipe privately and prevents recursion or duplicate launch", async () => {
-  const stateDir = await mkdtemp(path.join(os.tmpdir(), "rudolf-lifecycle-test-"));
+  const stateDir = await mkdtemp(path.join(os.tmpdir(), "codexworker-lifecycle-test-"));
   try {
     await writeFile(path.join(stateDir, "desktop-config.local.json"), "{}");
     await writeFile(path.join(stateDir, "manager-binding.json"), "{}");
     const launches = [];
-    const options = { pluginRoot: "C:/plugins/rudolf", stateDir, platform: "win32", readChain: async () => [owner],
+    const options = { pluginRoot: "C:/plugins/codexworker", stateDir, platform: "win32", readChain: async () => [owner],
       env: { CODEX_APP_TOOLS_PIPE_PATH: "private-test-handle" }, ready: async () => launches.length > 0,
       launchImpl: async input => { launches.push(input); } };
     assert.equal(await ensureDesktopSupervisor(options), true);
     assert.equal(launches[0].env.CODEX_APP_TOOLS_PIPE_PATH, "private-test-handle");
     assert.equal(launches[0].owner.startedAt, owner.startedAt);
     assert.equal(await ensureDesktopSupervisor(options), true); assert.equal(launches.length, 1);
-    assert.equal(await ensureDesktopSupervisor({ ...options, env: { ...options.env, CODEXWORKER_LIFECYCLE_CHILD: "1" } }), false);
+    assert.equal(await ensureDesktopSupervisor({ ...options, env: { ...options.env, RUDOLF_BRIDGE_LIFECYCLE_CHILD: "1" } }), false);
     assert.equal(await ensureDesktopSupervisor({ ...options, readChain: async () => [] }), false);
     assert.equal(launches.length, 1);
   } finally { await rm(stateDir, { recursive: true, force: true }); }
 });
 test("inventory handoff does not finish until a live Desktop supervisor and writer acknowledge readiness", async () => {
-  const stateDir = await mkdtemp(path.join(os.tmpdir(), "rudolf-handoff-test-"));
+  const stateDir = await mkdtemp(path.join(os.tmpdir(), "codexworker-handoff-test-"));
   try {
     await writeFile(path.join(stateDir, "desktop-config.local.json"), "{}");
     await writeFile(path.join(stateDir, "manager-binding.json"), "{}");
     let now = 0, readyCalls = 0, finished = false;
-    const result = ensureDesktopSupervisor({ pluginRoot: "C:/plugins/rudolf", stateDir, platform: "win32",
+    const result = ensureDesktopSupervisor({ pluginRoot: "C:/plugins/codexworker", stateDir, platform: "win32",
       readChain: async () => [owner], env: { CODEX_APP_TOOLS_PIPE_PATH: "private-test-handle" },
       clock: () => now, delay: async ms => { assert.equal(finished, false); now += ms; },
       ready: async () => ++readyCalls >= 3,
       launchImpl: async () => {} }).then(value => { finished = true; return value; });
     assert.equal(await result, true); assert.equal(readyCalls, 3); assert.equal(now, 200);
-    await assert.rejects(ensureDesktopSupervisor({ pluginRoot: "C:/plugins/rudolf", stateDir, platform: "win32",
+    await assert.rejects(ensureDesktopSupervisor({ pluginRoot: "C:/plugins/codexworker", stateDir, platform: "win32",
       readChain: async () => [owner], env: { CODEX_APP_TOOLS_PIPE_PATH: "private-test-handle" },
       clock: () => now, delay: async ms => { now += ms; }, timeoutMs: 400, ready: async () => false,
       launchImpl: async () => {} }), /desktop_lifecycle_not_ready/);
   } finally { await rm(stateDir, { recursive: true, force: true }); }
 });
 test("deployment auto-reload pause resumes only after the exact new startup acknowledgement", async () => {
-  const stateDir = await mkdtemp(path.join(os.tmpdir(), "rudolf-startup-maintenance-"));
+  const stateDir = await mkdtemp(path.join(os.tmpdir(), "codexworker-startup-maintenance-"));
   try {
     await writeFile(path.join(stateDir, "desktop-config.local.json"), "{}");
     await writeFile(path.join(stateDir, "manager-binding.json"), "{}");
@@ -166,21 +181,21 @@ test("deployment auto-reload pause resumes only after the exact new startup ackn
   } finally { await rm(stateDir, { recursive: true, force: true }); }
 });
 test("supervisor readiness rejects stale/dead metadata and requires matching authenticated writer health", async () => {
-  const stateDir = await mkdtemp(path.join(os.tmpdir(), "rudolf-ready-test-"));
+  const stateDir = await mkdtemp(path.join(os.tmpdir(), "codexworker-ready-test-"));
   try {
     const tokenFile = path.join(stateDir, "test.token");
     await writeFile(tokenFile, "test-only-supervisor-token-not-secret-123456");
     await writeFile(path.join(stateDir, "desktop-config.local.json"), JSON.stringify({ tokenFile }));
     const status = { desktopPid: owner.pid, desktopStartedAt: owner.startedAt, supervisorPid: 800, writerPid: 900,
-      stage: "observing_managed_writer", version: "0.2.23", launchMode: "windows-desktop-parent" };
+      stage: "observing_managed_writer", version: "0.3.0", launchMode: "windows-desktop-parent" };
     const save = value => writeFile(path.join(stateDir, "desktop-lifecycle-status.json"), JSON.stringify(value));
     await save(status);
     let reads = 0;
-    const options = { alive: () => true, fetchImpl: async (_url, request) => {
+    const options = { platform: "win32", alive: () => true, fetchImpl: async (_url, request) => {
       reads++; assert.match(request.headers.authorization, /^Bearer /);
       return { ok: true, json: async () => ({ ready: true, integrationMode: "desktop-native", name: "CodexWorker", integrations: { pid: 900 },
         capabilities: { desktopStartupHandoff: { active: true }, businessHotReload: {
-          bootstrapVersion: "0.2.23", desktopLifetimeLaunchMode: "windows-desktop-parent" } } }) };
+          bootstrapVersion: "0.3.0", desktopLifetimeLaunchMode: "windows-desktop-parent" } } }) };
     } };
     assert.equal(await desktopSupervisorReady(stateDir, owner, options), true);
     assert.equal(await desktopSupervisorReady(stateDir, owner, { ...options, alive: () => false }), false);
@@ -197,25 +212,59 @@ test("supervisor readiness rejects stale/dead metadata and requires matching aut
       "A healthy ordinary MCP writer does not prove Desktop lifetime ownership");
   } finally { await rm(stateDir, { recursive: true, force: true }); }
 });
+test("Mac readiness requires the supervisor to remain a real Desktop descendant", async () => {
+  const stateDir = await mkdtemp(path.join(os.tmpdir(), "codexworker-mac-ancestry-"));
+  try {
+    const tokenFile = path.join(stateDir, "test.token");
+    await writeFile(tokenFile, "isolated-desktop-supervisor-token-123456");
+    await writeFile(path.join(stateDir, "desktop-config.local.json"), JSON.stringify({ tokenFile }));
+    const mac = { pid: 700, startedAt: "Sat Nov 14 12:14:32 2026", name: "ChatGPT",
+      executable: "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT" };
+    await writeFile(path.join(stateDir, "desktop-lifecycle-status.json"), JSON.stringify({
+      desktopPid: mac.pid, desktopStartedAt: mac.startedAt, supervisorPid: 800, writerPid: 900,
+      stage: "desktop_lifetime_bridge_active", version: "0.3.0", launchMode: "desktop-owned" }));
+    let nativeProbes = 0;
+    const options = { platform: "darwin", alive: () => true,
+      readChain: async () => [{ pid: 800, name: "node", executable: "/runtime/node" }, mac],
+      fetchImpl: async () => { nativeProbes++; return { ok: true, json: async () => ({
+        ready: true, integrationMode: "desktop-native", name: "CodexWorker", integrations: { pid: 900 },
+        capabilities: { desktopStartupHandoff: { active: true }, businessHotReload: {
+          bootstrapVersion: "0.3.0", desktopLifetimeLaunchMode: "desktop-owned" } } }) }; } };
+    assert.equal(await desktopSupervisorReady(stateDir, mac, options), true);
+    assert.equal(await desktopSupervisorReady(stateDir, mac, { ...options, readChain: async () => [
+      { pid: 800, name: "node", executable: "/runtime/node" }, { pid: 1, name: "launchd" }] }), false);
+    assert.equal(nativeProbes, 1, "An orphan must be rejected before any native readiness traffic");
+  } finally { await rm(stateDir, { recursive: true, force: true }); }
+});
+
+test("a retired MCP cannot launch another adapter after its owner probe finishes", async () => {
+  let release, launches = 0;
+  const lifecycle = new DesktopLifecycle({ desktopAlive: () => new Promise(resolve => { release = resolve; }),
+    health: async () => null, launch: () => { launches++; }, stopChild: async () => {} });
+  const tick = lifecycle.tick();
+  await lifecycle.close(); release(true); await tick;
+  assert.equal(launches, 0);
+});
+
 test("Windows lifetime launcher is hidden, uses the approved process-only policy, and keeps the native pipe out of arguments", async () => {
   let launch;
-  const result = await launchDesktopSupervisor({ pluginRoot: "C:/plugins/rudolf", owner,
-    env: { CODEX_APP_TOOLS_PIPE_PATH: "private-test-handle" }, exec: async (exe, args, settings) => {
+  const result = await launchDesktopSupervisor({ pluginRoot: "C:/plugins/codexworker", owner,
+    platform: "win32", env: { CODEX_APP_TOOLS_PIPE_PATH: "private-test-handle" }, exec: async (exe, args, settings) => {
       launch = { exe, args, settings }; return { stdout: '{"supervisorPid":800,"launchMode":"windows-desktop-parent"}' };
     } });
   assert.equal(result.supervisorPid, 800); assert.equal(launch.settings.windowsHide, true);
-  assert.equal(launch.settings.env.CODEXWORKER_DESKTOP_STARTED_AT, owner.startedAt);
+  assert.equal(launch.settings.env.RUDOLF_BRIDGE_DESKTOP_STARTED_AT, owner.startedAt);
   assert.equal(launch.settings.env.CODEX_APP_TOOLS_PIPE_PATH, "private-test-handle");
   assert.ok(launch.args.includes("RemoteSigned")); assert.ok(!launch.args.includes("Bypass"));
   assert.ok(!JSON.stringify(launch.args).includes("private-test-handle"));
 });
 test("a denied Windows lifetime handoff is not retried through an alternate launcher and only exposes a safe code", async () => {
   let attempts = 0;
-  await assert.rejects(launchDesktopSupervisor({ pluginRoot: "C:/plugins/rudolf", owner, env: {}, exec: async () => {
+  await assert.rejects(launchDesktopSupervisor({ pluginRoot: "C:/plugins/codexworker", owner, platform: "win32", env: {}, exec: async () => {
     attempts++; const error = new Error("private raw exception"); error.stderr = "desktop_lifetime_launch_denied:5"; throw error;
   } }), /^Error: desktop_lifetime_launch_denied:5$/);
   assert.equal(attempts, 1);
-  await assert.rejects(launchDesktopSupervisor({ pluginRoot: "C:/plugins/rudolf", owner, env: {}, exec: async () => {
+  await assert.rejects(launchDesktopSupervisor({ pluginRoot: "C:/plugins/codexworker", owner, platform: "win32", env: {}, exec: async () => {
     throw new Error("private raw exception");
   } }), /^Error: desktop_lifetime_launch_unavailable$/);
 });

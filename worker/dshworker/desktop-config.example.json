@@ -1,0 +1,22 @@
+{
+  "operatingMode": "desktop-bridge",
+  "host": "127.0.0.1",
+  "port": 8903,
+  "bridgeName": "CodexWorker",
+  "machine": "codexworker",
+  "tokenFile": "<machine-local .codex/secrets token file>",
+  "projectId": "<Codex Desktop projectId>",
+  "workspaceRoots": ["<allowed workspace root>"],
+  "pollMs": 1000,
+  "messageSourceLabels": true,
+  "feishu": {
+    "configFile": "<existing external Feishu JSON file>",
+    "inboundEnabled": false,
+    "onlineNotificationEnabled": true,
+    "onlineStableMs": 30000,
+    "defaultDelivery": "steer",
+    "streamEnabled": true,
+    "autoImageOutput": true,
+    "trainerOpenIdWhitelist": ["<authorized trainer open_id>"]
+  }
+}

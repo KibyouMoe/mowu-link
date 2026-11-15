@@ -15,7 +15,8 @@ export class PluginRuntime {
     this.nextId = 1; this.sessionDir = path.join(stateDir, "business-generations", String(process.pid) + "-" + randomUUID());
   }
   status() { return { available: Boolean(this.current), scope: "all-business", featureVersion: this.version ?? null,
-    bootstrapVersion: "0.2.23", desktopWatchdogVersion: "0.2.27", desktopLifetimeLaunchMode: this.env.CODEXWORKER_LIFETIME_LAUNCH ?? null,
+    bootstrapVersion: "0.3.0", desktopWatchdogVersion: "0.2.27", desktopLifetimeLaunchMode: this.env.RUDOLF_BRIDGE_LIFETIME_LAUNCH ?? null,
+    desktopOwner: { pid: Number(this.env.CODEXWORKER_DESKTOP_PID) || null, startedAt: this.env.RUDOLF_BRIDGE_DESKTOP_STARTED_AT ?? null },
     sha256: this.current?.sha ?? null, loadedAt: this.loadedAt ?? null, generation: this.generation,
     loadCount: this.generation, reloadAvailable: true, autoReloadOnUse: this.autoReloadEnabled !== false, automaticSourcePolling: true,
     reloadPaused: this.autoReloadEnabled === false,
@@ -33,13 +34,23 @@ export class PluginRuntime {
     root = await realpath(root);
     const read = async () => {
       const files = new Map();
-      for (const name of (await readdir(root)).sort()) {
-        if (!name.endsWith(".mjs") || FIXED.has(name)) continue;
-        const actual = await realpath(path.join(root, name));
-        if (path.dirname(actual) !== root) throw new Error("runtime_source_escape");
-        const bytes = await readFile(actual); if (bytes.length > 1024 * 1024) throw new Error("runtime_source_too_large");
-        files.set(name, bytes);
-      }
+      const collect = async (relative = "") => {
+        const directory = path.join(root, relative);
+        for (const entry of (await readdir(directory, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name, "en"))) {
+          const name = relative ? relative + "/" + entry.name : entry.name;
+          if (entry.isDirectory() && (relative || name === "interface")) {
+            await collect(name);
+            continue;
+          }
+          if (!name.endsWith(".mjs") || FIXED.has(name)) continue;
+          const expected = path.join(root, name);
+          if (!entry.isFile() || await realpath(expected) !== expected) throw new Error("runtime_source_escape");
+          const bytes = await readFile(expected);
+          if (bytes.length > 1024 * 1024) throw new Error("runtime_source_too_large");
+          files.set(name, bytes);
+        }
+      };
+      await collect();
       if (!files.has("mcp-business.mjs") || files.size > 128) throw new Error("runtime_source_invalid");
       return { files, sha: hash(JSON.stringify([...files].map(([name, bytes]) => [name, hash(bytes)]))) };
     };
@@ -50,7 +61,7 @@ export class PluginRuntime {
     let config = ""; try {
       const bytes = await readFile(path.join(this.stateDir, "desktop-config.local.json")), values = JSON.parse(bytes);
       const hashes = [hash(bytes)];
-      for (const filename of [values.tokenFile, values.feishu?.configFile, values.hermesIngress?.tokenFile]) if (filename) {
+      for (const filename of [values.tokenFile, values.feishu?.configFile]) if (filename) {
         hashes.push(hash(await readFile(filename).catch(error => { if (error.code === "ENOENT") return Buffer.from("missing"); throw error; })));
       }
       config = hash(JSON.stringify(hashes));
@@ -79,12 +90,17 @@ export class PluginRuntime {
     await mkdir(this.sessionDir, { recursive: true });
     const snapshot = path.join(this.sessionDir, randomUUID()); await mkdir(snapshot);
     try {
-      for (const [name, bytes] of source.files) await writeFile(path.join(snapshot, name), bytes, { flag: "wx", mode: 0o600 });
+      for (const [name, bytes] of source.files) {
+        const destination = path.join(snapshot, name);
+        await mkdir(path.dirname(destination), { recursive: true });
+        await writeFile(destination, bytes, { flag: "wx", mode: 0o600 });
+      }
       // This compatibility loader is immutable in a business generation.
       await writeFile(path.join(snapshot, "business-runtime.mjs"), await readFile(path.join(this.pluginRoot, "business-runtime.mjs")), { flag: "wx", mode: 0o600 });
       const child = fork(path.join(this.pluginRoot, "scripts", "business-worker.mjs"), [], {
         execPath: process.execPath, cwd: this.pluginRoot, windowsHide: true,
-        env: { ...this.env, CODEXWORKER_RUNTIME_HOST_PID: String(process.pid) }, stdio: ["ignore", "ignore", "ignore", "ipc"] });
+        env: { ...this.env, CODEXWORKER_STATE_DIR: path.resolve(this.stateDir),
+          RUDOLF_BRIDGE_RUNTIME_HOST_PID: String(process.pid) }, stdio: ["ignore", "ignore", "ignore", "ipc"] });
       const item = { child, snapshot, sha: source.sha, config: source.config, pending: new Map() }; this.children.add(item);
       child.on("message", message => {
         if (message.op === "reload-request") {

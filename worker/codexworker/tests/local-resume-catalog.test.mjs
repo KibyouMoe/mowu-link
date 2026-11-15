@@ -33,3 +33,19 @@ test("ten-per-page lists keep global zero-based selectors and expose later pages
   assert.match(text, /第 2\/3 页/); assert.match(text, /编号 10/); assert.match(text, /search/); assert.doesNotMatch(text, /0–4|五条/);
   assert.throws(() => resumePage(items, 3), /out_of_range/);
 });
+
+test("interactive Worker, CLI and app-server chats are visible without changing originators or loading history", async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "resume-all-clients-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const file = path.join(root, "state_5.sqlite"), db = new DatabaseSync(file);
+  db.exec("CREATE TABLE threads(id TEXT,cwd TEXT,title TEXT,name TEXT,source TEXT,originator TEXT,archived INTEGER)");
+  const add = db.prepare("INSERT INTO threads VALUES(?,?,?,?,?,?,?)");
+  for (const [i, source, originator, archived] of [[0,"vscode","codexworker",0],[1,"cli","codex_cli_rs",0],
+    [2,"appServer","other-client",0],[3,'{"subagent":{}}',"codexworker",0],[4,"vscode","codexworker",1]]) {
+    add.run("11111111-1111-4111-8111-" + String(i).padStart(12,"0"),"/work","old prompt","native name " + i,source,originator,archived);
+  }
+  db.close(); const before = await readFile(file);
+  const result = await readLocalResumeCatalog(root);
+  assert.equal(result.available,true); assert.deepEqual(result.tasks.map(x=>x.title),["native name 0","native name 1","native name 2"]);
+  assert.deepEqual(await readFile(file),before);
+});

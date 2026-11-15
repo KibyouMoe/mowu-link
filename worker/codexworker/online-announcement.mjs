@@ -53,13 +53,8 @@ export class FeishuOnlineAnnouncement {
     const previous = m.state.feishuLastOnlineNotice ??
       (["sent", "suppressed-hot-reload"].includes(m.state.feishuOnlineNotice?.status) ? m.state.feishuOnlineNotice : null);
     const lifetime = m.config.desktopLifetimeStartedAt ?? null;
-    // Older generations persisted only the current hot-reload suppression,
-    // without a separate last-success/lifetime field. Its actual connection
-    // time can establish a prior connection in this Desktop lifetime, not a
-    // claim that a human saw an earlier notification.
-    const priorInLifetime = previous && (previous.desktopLifetimeStartedAt === lifetime ||
-      (!previous.desktopLifetimeStartedAt && Date.parse(previous.connectedAt) >= Date.parse(lifetime)));
-    const recovery = Boolean(previous && (!lifetime || priorInLifetime));
+    // Desktop restarts continue the worker's persisted connection history.
+    const recovery = Boolean(previous || m.restoredSessionIds?.has(m.state.selectedThreadId));
     const record = { connectionId, status: "stabilizing", attempts: 0, connectedAt: new Date(now).toISOString(),
       stableAfter: new Date(now + stableMs).toISOString(), kind: recovery ? "recovered" : "online", desktopLifetimeStartedAt: lifetime,
       threadId: null, sessionTitle: null, sentAt: null, messageId: null };
@@ -70,7 +65,7 @@ export class FeishuOnlineAnnouncement {
   run(socket, record) {
     this.task = this.send(socket, record).catch(() => {
       // Never log native payloads, Feishu credentials or transport exceptions.
-      console.error("[CodexWorker] Online notice failed; inspect authenticated integration status.");
+      console.error("[bridge] Online notice failed; inspect authenticated integration status.");
     });
     return this.task;
   }
@@ -99,7 +94,7 @@ export class FeishuOnlineAnnouncement {
       if (threadId && !verified) return false;
       const time = new Date(this.clock()).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false });
       const headline = !threadId ? `${m.config.bridgeName}的飞书连接已建立，当前尚未接入会话。`
-        : record.kind === "recovered" ? `${m.config.bridgeName}的飞书连接已恢复，当前接入会话可读取。`
+        : record.kind === "recovered" ? `${m.config.bridgeName}已重连，继续原会话。`
         : `${m.config.bridgeName}已上线，飞书连接和当前接入会话已就绪。`;
       const lines = [headline, `就绪时间：${time}`];
       if (record.sessionTitle) {
@@ -133,7 +128,7 @@ export class FeishuOnlineAnnouncement {
       if (m.server?.listening && (record.text || await this.prepare(socket, record)) && this.current(socket, record)) {
         if (!record.chatId) record.status = "unavailable";
         else sent = await m.notifier.sendMessage(record.text, { chatId: record.chatId,
-          title: `${m.config.bridgeName}-${record.kind === "recovered" ? "连接恢复" : "上线通知"}`,
+          title: `${m.config.bridgeName}-${record.kind === "recovered" ? "重连" : "上线通知"}`,
           threadId: record.threadId ?? undefined, uuid: record.connectionId });
       }
     } catch { /* Bounded retry reuses the same UUID and exact notice body. */ }

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,6 +11,21 @@ import { randomUUID } from "node:crypto";
 import { PluginRuntime } from "../plugin-runtime.mjs";
 
 const packageRoot = fileURLToPath(new URL("..", import.meta.url));
+test("the distributed plugin cold loads its nested native interfaces without starting the CLI", async t => {
+  const stateDir = await mkdtemp(path.join(os.tmpdir(), "codexworker-packaged-load-"));
+  const runtime = new PluginRuntime({ pluginRoot: packageRoot, stateDir,
+    env: { ...process.env, CODEXWORKER_STATE_DIR: stateDir, CODEX_APP_TOOLS_PIPE_PATH: "" } });
+  t.after(async () => {
+    await runtime.close();
+    assert.equal(path.dirname(stateDir), path.resolve(os.tmpdir()));
+    await rm(stateDir, { recursive: true, force: true });
+  });
+  const result = await runtime.call("tools/list");
+  assert.ok(result.tools.some(tool => tool.name === "bridge_bind_manager"));
+  assert.ok(result.tools.some(tool => tool.name === "bridge_register_current_task"));
+  assert.equal(runtime.children.size, 1);
+});
+
 const sample = `import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path'; import { value } from './helper.mjs';
 export const BUSINESS_API_VERSION=1, BUSINESS_STATE_VERSION=1, BUSINESS_VERSION='test';
@@ -31,17 +46,20 @@ export function createBusiness(control){let busy=false, owner=false; const file=
     }};
 }`;
 async function fixture(t, { pollMs = 1000000 } = {}) {
-  const root = await mkdtemp(path.join(os.tmpdir(), "rudolf-full-hotload-"));
+  const root = await mkdtemp(path.join(os.tmpdir(), "codexworker-full-hotload-"));
   const source = path.join(root, "source"), stateDir = path.join(root, "state");
   await cp(packageRoot, source, { recursive: true });
   const { mkdir } = await import("node:fs/promises"); await mkdir(stateDir);
   await writeFile(path.join(source, "mcp-business.mjs"), sample);
   // Keep only a deterministic business fixture; never inherit a real pipe/config.
-  for (const name of ["desktop-manager.mjs", "feishu.mjs", "feishu-images.mjs", "feishu-image-output.mjs", "hermes-ingress.mjs", "online-announcement.mjs", "question-relay.mjs", "question-cards.mjs", "native-dispatch.mjs"]) await rm(path.join(source, name));
+  const keep = new Set(["mcp-business.mjs", "business-runtime.mjs", "plugin-runtime.mjs", "server.mjs", "desktop-lifecycle.mjs"]);
+  for (const entry of await readdir(source)) {
+    if (entry.endsWith(".mjs") && !keep.has(entry)) await rm(path.join(source, entry));
+  }
   await writeFile(path.join(source, "helper.mjs"), "export const value='first';\n");
   let changes = 0;
   const runtime = new PluginRuntime({ pluginRoot: source, stateDir, pollMs,
-    env: { ...process.env, USERPROFILE: root, HOME: root, CODEX_APP_TOOLS_PIPE_PATH: "", CODEXWORKER_LIFECYCLE_CHILD: "1" },
+    env: { ...process.env, USERPROFILE: root, HOME: root, CODEX_APP_TOOLS_PIPE_PATH: "", RUDOLF_BRIDGE_LIFECYCLE_CHILD: "1" },
     onToolsChanged: () => { changes++; } });
   const runtimes = [runtime];
   t.after(async () => { for (const item of runtimes) await item.close(); assert.ok(root.startsWith(os.tmpdir())); await rm(root, { recursive: true, force: true }); });
@@ -146,14 +164,14 @@ test("bad development source at startup falls back to this installed package, no
   await writeFile(path.join(f.stateDir, "runtime-source.local.json"), JSON.stringify({ sourceRoot: development }));
   await f.runtime.close();
   const replacement = new PluginRuntime({ pluginRoot: f.source, stateDir: f.stateDir, pollMs: 1000000,
-    env: { ...process.env, USERPROFILE: f.root, HOME: f.root, CODEX_APP_TOOLS_PIPE_PATH: "", CODEXWORKER_LIFECYCLE_CHILD: "1" } });
+    env: { ...process.env, USERPROFILE: f.root, HOME: f.root, CODEX_APP_TOOLS_PIPE_PATH: "", RUDOLF_BRIDGE_LIFECYCLE_CHILD: "1" } });
   f.keep(replacement);
   assert.equal((await replacement.call("value")).value, "first");
   assert.equal(replacement.status().lastReloadError, "runtime_reload_failed");
 });
 
 for (const operatingMode of ["desktop-bridge", "feishu-local"]) test(`fixed loader drains sustained manager polls with an active native task, preserving UUID/FIFO and rollback (${operatingMode})`, async t => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "rudolf-manager-hotload-"));
+  const root = await mkdtemp(path.join(os.tmpdir(), "codexworker-manager-hotload-"));
   const source = path.join(root, "source"), stateDir = path.join(root, ".codex", "state", "codexworker");
   await cp(packageRoot, source, { recursive: true }); await mkdir(stateDir, { recursive: true });
   const token = "isolated-test-token-not-a-real-credential-123456", tokenFile = path.join(root, "test.token");
@@ -161,7 +179,7 @@ for (const operatingMode of ["desktop-bridge", "feishu-local"]) test(`fixed load
   const tcp = net.createServer(); tcp.listen(0, "127.0.0.1"); await once(tcp, "listening");
   const port = tcp.address().port; await new Promise(resolve => tcp.close(resolve));
   const toolNames = ["read_thread", "send_message_to_thread", "create_thread", "fork_thread", "set_thread_title", "list_threads", "list_projects"];
-  const pipe = process.platform === "win32" ? `\\\\.\\pipe\\rudolf-hotload-test-${randomUUID()}` : path.join(root, "test.sock");
+  const pipe = process.platform === "win32" ? `\\\\.\\pipe\\codexworker-hotload-test-${randomUUID()}` : path.join(root, "test.sock");
   let sends = 0;
   const nativePipe = net.createServer(socket => {
     let buffer = Buffer.alloc(0); socket.on("data", chunk => {
@@ -186,11 +204,10 @@ for (const operatingMode of ["desktop-bridge", "feishu-local"]) test(`fixed load
   }); nativePipe.listen(pipe); await once(nativePipe, "listening");
   await writeFile(path.join(stateDir, "manager-binding.json"), JSON.stringify({ managerThreadId: "same-chat", managerTurnId: "test-turn" }));
   await writeFile(path.join(stateDir, "desktop-config.local.json"), JSON.stringify({ tokenFile, port, workspaceRoots: [root],
-    operatingMode, ...(operatingMode === "feishu-local" ? {
-      hermesIngress: { enabled: true, tokenFile: path.join(root, "missing-hermes.token") },
-      xiliu: { enabled: true, url: "http://127.0.0.1:1" } } : {}), pollMs: 1, hotHandoffRetryMs: 50, managerProxyWaitMs: 100 }));
+    operatingMode, pollMs: 1, hotHandoffRetryMs: 50, managerProxyWaitMs: 100 }));
   const runtime = new PluginRuntime({ pluginRoot: source, stateDir, pollMs: 1000000,
-    env: { ...process.env, USERPROFILE: root, HOME: root, CODEX_APP_TOOLS_PIPE_PATH: pipe, CODEXWORKER_LIFECYCLE_CHILD: "1" } });
+    env: { ...process.env, USERPROFILE: root, HOME: root, CODEXWORKER_STATE_DIR: path.join(root, "foreign-state"),
+      CODEX_APP_TOOLS_PIPE_PATH: pipe, RUDOLF_BRIDGE_LIFECYCLE_CHILD: "1" } });
   let proxy, failedStartupProxy;
   t.after(async () => { await failedStartupProxy?.close(); await proxy?.close(); await runtime.close(); await new Promise(resolve => nativePipe.close(resolve));
     assert.ok(root.startsWith(os.tmpdir())); await rm(root, { recursive: true, force: true }); });
@@ -201,7 +218,7 @@ for (const operatingMode of ["desktop-bridge", "feishu-local"]) test(`fixed load
   };
   const coldProxy = new PluginRuntime({ pluginRoot: source, stateDir, pollMs: 1000000,
     env: { ...process.env, USERPROFILE: root, HOME: root, CODEX_APP_TOOLS_PIPE_PATH: pipe,
-      CODEXWORKER_LIFECYCLE_CHILD: "0", CODEXWORKER_LIFECYCLE_READY: "1" } });
+      RUDOLF_BRIDGE_LIFECYCLE_CHILD: "0", RUDOLF_BRIDGE_LIFECYCLE_READY: "1" } });
   try {
     const cold = await coldProxy.call("tools/call", { name: "bridge_start_local_manager", arguments: {} });
     assert.equal(cold.isError, true);
@@ -211,13 +228,13 @@ for (const operatingMode of ["desktop-bridge", "feishu-local"]) test(`fixed load
   } finally { await coldProxy.close(); }
   failedStartupProxy = new PluginRuntime({ pluginRoot: source, stateDir, pollMs: 1000000,
     env: { ...process.env, USERPROFILE: root, HOME: root, CODEX_APP_TOOLS_PIPE_PATH: pipe,
-      CODEXWORKER_LIFECYCLE_CHILD: "0", CODEXWORKER_LIFECYCLE_READY: "0" } });
+      RUDOLF_BRIDGE_LIFECYCLE_CHILD: "0", RUDOLF_BRIDGE_LIFECYCLE_READY: "0" } });
   const failedCold = await failedStartupProxy.call("tools/call", { name: "bridge_start_local_manager", arguments: {} });
   assert.equal(failedCold.isError, true); assert.equal(failedCold.structuredContent.error, "desktop_lifetime_unavailable");
   assert.equal(failedCold.structuredContent.retryable, true);
   await assert.rejects(fetch(`http://127.0.0.1:${port}/health`), "failed initialize must not permit a new writer");
   const adopted = await runtime.call("tools/call", { name: "bridge_register_current_task", arguments: {}, _meta: { "openai/threadId": "same-chat" } });
-  assert.equal(adopted.isError, false);
+  assert.equal(adopted.isError, false, JSON.stringify(adopted));
   const beforeRecoveredProxy = await request("/health");
   const recovered = await failedStartupProxy.call("tools/call", { name: "bridge_start_local_manager", arguments: {} });
   assert.equal(recovered.isError, false, "a cached failed initialize may recover only by connecting to this healthy writer");
@@ -225,23 +242,20 @@ for (const operatingMode of ["desktop-bridge", "feishu-local"]) test(`fixed load
   assert.equal((await request("/health")).capabilities.businessHotReload.generation, beforeRecoveredProxy.capabilities.businessHotReload.generation);
   proxy = new PluginRuntime({ pluginRoot: source, stateDir, pollMs: 1000000,
     env: { ...process.env, USERPROFILE: root, HOME: root, CODEX_APP_TOOLS_PIPE_PATH: pipe,
-      CODEXWORKER_LIFECYCLE_CHILD: "0", CODEXWORKER_LIFECYCLE_READY: "1" } });
+      RUDOLF_BRIDGE_LIFECYCLE_CHILD: "0", RUDOLF_BRIDGE_LIFECYCLE_READY: "1" } });
   const proxied = await proxy.call("tools/call", { name: "bridge_start_local_manager", arguments: {} });
   assert.equal(proxied.isError, false);
   const message = { protocolVersion: "1.1.1-draft", source: "hermes", messageId: randomUUID(), text: "queued-preserve", delivery: "queue" };
   await request("/manager/messages", message); const before = await request("/health");
   assert.equal(before.activeTurns, 1);
   assert.equal(before.operatingMode, operatingMode);
-  if (operatingMode === "feishu-local") {
-    assert.equal(before.integrations.hermesIngress.enabled, false); assert.equal(before.integrations.xiliu.enabled, false);
-  }
-  assert.equal(before.capabilities.businessHotReload.bootstrapVersion, "0.2.23");
+  assert.equal(before.capabilities.businessHotReload.bootstrapVersion, "0.3.0");
   const waitFor = async predicate => {
     const until = Date.now() + 5000;
     while (!predicate() && Date.now() < until) { await runtime.check(); await new Promise(resolve => setTimeout(resolve, 10)); }
     assert.ok(predicate(), "handoff must settle within a bounded interval under sustained polling");
   };
-  const filename = path.join(source, "native-dispatch.mjs"), original = await readFile(filename, "utf8");
+  const filename = path.join(source, "interface", "native-dispatch.mjs"), original = await readFile(filename, "utf8");
   await writeFile(filename, original + "\n// isolated hotload acceptance\n");
   await proxy.check();
   const stillOwned = await request("/health");

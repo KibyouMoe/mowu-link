@@ -14,7 +14,7 @@ import { resolveWatchdogStateDir } from "./watchdog-context.mjs";
 const args = process.argv.slice(2), desktopPid = Number(args[1]);
 if (args[0] !== "--desktop-pid" || !Number.isSafeInteger(desktopPid) || desktopPid < 1 || !process.env.CODEX_APP_TOOLS_PIPE_PATH) throw new Error("Fresh Desktop environment required");
 const owner = await resolveDesktopOwner(desktopPid);
-if (!owner || owner.pid !== desktopPid || owner.startedAt !== process.env.CODEXWORKER_DESKTOP_STARTED_AT) throw new Error("desktop_lifetime_changed");
+if (!owner || owner.pid !== desktopPid || owner.startedAt !== process.env.RUDOLF_BRIDGE_DESKTOP_STARTED_AT) throw new Error("desktop_lifetime_changed");
 const ownProcess = (await processChain(process.pid))[0];
 if (ownProcess?.pid !== process.pid) throw new Error("script_watchdog_identity_unavailable");
 const pluginRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");

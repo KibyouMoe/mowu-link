@@ -9,20 +9,6 @@
   "workspaceRoots": ["<allowed workspace root>"],
   "pollMs": 1000,
   "messageSourceLabels": true,
-  "hermesIngress": {
-    "enabled": false,
-    "host": "<explicit private IPv4 address of this Codex machine>",
-    "port": 8902,
-    "allowedRemoteAddresses": ["<trusted Hermes IPv4>", "<local diagnostic IPv4>"],
-    "tokenFile": "<existing machine-local DSH token file>"
-  },
-  "xiliu": {
-    "enabled": false,
-    "url": "http://<existing Hermes server>:<port>",
-    "includeProgress": false,
-    "heartbeatInterval": 60000,
-    "timeout": 8000
-  },
   "feishu": {
     "configFile": "<existing external Feishu JSON file>",
     "inboundEnabled": false,

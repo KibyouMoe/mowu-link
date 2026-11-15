@@ -1,7 +1,0 @@
-{
-  "bridge": "DSHWorker",
-  "name": "TamamoCross",
-  "display": "玉藻十字",
-  "port": 8906,
-  "configFile": "~/.hermes/secrets/dshworker.config.json"
-}

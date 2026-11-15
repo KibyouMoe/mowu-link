@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { configuredBridgeIdentity, matchesBridgeIdentity, resolveWatchdogStateDir } from "../scripts/watchdog-context.mjs";
 
-test("audit and resident watchdog share the writer's Rudolf state, not an unrelated CODEX_HOME", () => {
+test("audit and resident watchdog share the writer's CodexWorker state, not an unrelated CODEX_HOME", () => {
   const user = path.join(os.tmpdir(), "watchdog-user");
   assert.equal(resolveWatchdogStateDir({ env: { USERPROFILE: user } }), path.join(user, ".codex", "state", "codexworker"));
   const codex = path.join(os.tmpdir(), "watchdog-custom-codex");

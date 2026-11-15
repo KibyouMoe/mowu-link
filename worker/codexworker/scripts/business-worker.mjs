@@ -46,5 +46,8 @@ process.on("message", async message => {
   } catch { send({ id: message.id, error: "business_operation_failed" }); }
 });
 process.on("disconnect", () => {
+  // A stopped Desktop must not leave a receiver alive behind a stalled close.
+  // Durable dispatching receipts remain unknown; no native write is replayed.
+  setTimeout(() => process.exit(0), 5000).unref();
   if (!stopping) { stopping = true; void service?.close().finally(() => process.exit(0)); }
 });

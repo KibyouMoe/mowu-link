@@ -1,0 +1,17 @@
+# 把 DSHWorker 装成 dsh profile 里的 cordis 插件（示例）。
+#
+# 复制到 ~/.dsh/profiles/<profile>/cordis.patch.yml 的末尾，把 name 换成
+# 本仓库 worker/dshworker/index.js 的绝对路径。它和已有的
+# agent-default-model 行共存：patch 层按 id 打补丁，互不影响。
+#
+# 插件默认不启业务层（8906 归 CLI 常驻进程），只注册 `dsh-inprocess` 原生传输
+# 并暴露 ctx.dshworker 服务。要让插件自己带 HTTP + 飞书 + router，加：
+#
+#   config:
+#     business: true
+#     port: 8906
+#
+# 可选配置见 README「插件形态」一节。
+- insert:
+    - id: dshworker
+      name: /ABSOLUTE/PATH/TO/mowulink/worker/dshworker/index.js

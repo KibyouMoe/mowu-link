@@ -16,7 +16,7 @@ process.on("disconnect", () => process.exit(0));
 const statePath = path.join(stateDir, "script-watchdog-state.json");
 try {
   const owner = desktopOwner(await processChain(Number(process.env.RUDOLF_SCRIPT_WATCHDOG_OWNER_PID)));
-  if (!owner || owner.startedAt !== process.env.CODEXWORKER_DESKTOP_STARTED_AT) throw new Error("desktop_lifetime_changed");
+  if (!owner || owner.startedAt !== process.env.RUDOLF_BRIDGE_DESKTOP_STARTED_AT) throw new Error("desktop_lifetime_changed");
   const config = JSON.parse(await readFile(path.join(stateDir, "script-watchdog.local.json"), "utf8"));
   if (config.enabled !== true || !/^[a-f\d-]{36}$/i.test(config.maintenanceThreadId ?? "")) throw new Error("script_watchdog_disabled");
   let state;

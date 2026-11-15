@@ -1,0 +1,352 @@
+// Typed input on the existing Desktop-owned connection. Saved Feishu or
+// question-answer receipts authorize writes; this endpoint exposes no generic RPC.
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { chmod, lstat, mkdir, mkdtemp, open, readFile, realpath, rename, rm, unlink, writeFile } from "node:fs/promises";
+import net from "node:net";
+import path from "node:path";
+import { nativeQuestionReply } from "../public-questions.mjs";
+
+const MAX_REQUEST_BYTES = 128 * 1024;
+const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const digest = value => createHash("sha256").update(value).digest("hex");
+const invalid = (code, nativeImageOutcome) => { throw Object.assign(new Error(code), { code, nativeImageOutcome }); };
+const equalToken = (left, right) => typeof left === "string" && /^[0-9a-f]{64}$/.test(left) &&
+  timingSafeEqual(Buffer.from(left), Buffer.from(right));
+
+export async function createNativeInput({ stateDir, owner, send, timeoutMs = 30000 }) {
+  const token = randomBytes(32).toString("hex");
+  const descriptorFile = path.join(stateDir, "desktop-native-input.local.json");
+  const pending = new Map(), activeMessages = new Map(), threads = new Map(), sockets = new Set();
+  const runningCommands = new Map();
+  let initialized = false, initializeId, closed = false;
+  const directory = process.platform === "win32" ? null : await mkdtemp(path.join("/tmp", "cw-input-"));
+  if (directory) await chmod(directory, 0o700);
+  const endpoint = directory ? path.join(directory, "input.sock") : "\\\\.\\pipe\\cw-input-" + randomUUID();
+  const descriptor = { version: 1, endpoint, token, controllerPid: process.pid, desktopOwner: owner };
+
+  function rpc(method, params) {
+    if (closed || !initialized) invalid("native_input_not_ready");
+    return new Promise((resolve, reject) => {
+      const id = "codexworker-input-" + randomUUID();
+      const timer = setTimeout(() => {
+        pending.delete(id); reject(Object.assign(new Error("native_input_rpc_timeout"), { code: "native_input_rpc_timeout" }));
+      }, timeoutMs);
+      pending.set(id, { resolve, reject, timer, method });
+      try { send({ id, method, params }); }
+      catch (error) { clearTimeout(timer); pending.delete(id); reject(error); }
+    });
+  }
+
+  async function validate(request) {
+    const question = request.operation === "questionReply";
+    const message = request.operation === "message";
+    if (!uuid.test(request.messageId ?? "") || typeof request.threadId !== "string" ||
+        typeof request.prompt !== "string" || !request.prompt.trim() ||
+        !["steer", "queue"].includes(request.delivery) || ![undefined, "image", "questionReply", "message"].includes(request.operation) ||
+        question && (request.delivery !== "steer" || request.images !== undefined) ||
+        message && (request.delivery !== "queue" || request.images !== undefined) ||
+        !question && !message && (!Array.isArray(request.images) || request.images.length < 1 || request.images.length > 10))
+      invalid("native_input_request_invalid");
+    const config = JSON.parse(await readFile(path.join(stateDir, "desktop-config.local.json"), "utf8"));
+    if (config.autoStart === false) invalid("native_image_autostart_disabled");
+    const state = JSON.parse(await readFile(path.join(stateDir, "desktop-manager-state.json"), "utf8"));
+    const receipt = state.receipts?.[request.messageId], feishu = state.feishuReceipts?.[request.messageId];
+    if (!state.sessions?.[request.threadId] || ![undefined, null, "local"].includes(state.sessions[request.threadId].hostId) ||
+        (!message && state.selectedThreadId !== request.threadId) ||
+        !["trainer", "hermes"].includes(receipt?.request?.source) || receipt.nativeTargetThreadId !== request.threadId ||
+        receipt.nativeInputHash !== digest(JSON.stringify(request.prompt))) invalid("native_input_receipt_mismatch");
+    if (message) {
+      if (receipt.request.source !== "hermes" || receipt.request.origin !== "router" ||
+          receipt.nativeDispatch?.status !== "dispatching" ||
+          !/^t-[A-Za-z0-9_-]+$/.test(request.taskId ?? "") ||
+          !request.prompt.startsWith(`[router ${request.taskId}]`)) invalid("native_task_receipt_mismatch");
+      return;
+    }
+    if (question) {
+      const actions = JSON.parse(await readFile(path.join(stateDir, "question-actions.json"), "utf8"));
+      const entry = Object.entries(actions.entries ?? {}).find(([, value]) => value.nativeMessageId === request.messageId);
+      const action = entry?.[1], publicQuestion = state.publicQuestions?.[entry?.[0]];
+      const dispatch = ["dispatching", "answer_pending"].includes(action?.status) &&
+        receipt.nativeDispatch?.status === "dispatching";
+      const reconcile = ["answered", "skipped"].includes(action?.status) &&
+        action.nativePanelSync?.status === "dispatching" && receipt.nativeDispatch?.status === "accepted";
+      if (!publicQuestion || publicQuestion.threadId !== request.threadId ||
+          action.bindingEpoch !== state.selectionEpoch ||
+          !["trainer", "hermes"].includes(action?.answerActor) || !dispatch && !reconcile ||
+          publicQuestion.sourceTurnId !== action.sourceTurnId ||
+          nativeQuestionReply(publicQuestion, action.answers) !== request.prompt)
+        invalid("native_question_receipt_mismatch");
+      return;
+    }
+    if (receipt.request.source !== "trainer" || receipt.nativeDispatch?.status !== "dispatching" ||
+        !/^om_[A-Za-z0-9_-]+$/.test(feishu?.incomingMessageId ?? "") || feishu.imageThreadId !== request.threadId ||
+        JSON.stringify(feishu.nativeImagePaths) !== JSON.stringify(request.images)) invalid("native_image_receipt_mismatch");
+    const cache = await realpath(path.join(stateDir, "feishu-images"));
+    for (const image of request.images) {
+      if (typeof image !== "string" || !path.isAbsolute(image) || path.dirname(await realpath(image)) !== cache)
+        invalid("native_image_path_invalid");
+      const stat = await lstat(image);
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.size < 3 || stat.size > 100_000_000)
+        invalid("native_image_file_invalid");
+      const file = await open(image, "r");
+      try {
+        const bytes = Buffer.alloc(12), { bytesRead } = await file.read(bytes, 0, 12, 0);
+        const png = bytesRead >= 8 && bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+        const jpg = bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255;
+        const gif = ["GIF87a", "GIF89a"].includes(bytes.toString("ascii", 0, 6));
+        const webp = bytesRead === 12 && bytes.toString("ascii", 0, 4) === "RIFF" && bytes.toString("ascii", 8, 12) === "WEBP";
+        if (!png && !jpg && !gif && !webp) invalid("native_image_format_invalid");
+      } finally { await file.close(); }
+    }
+  }
+
+  async function deliver(request, fingerprint) {
+    const ledger = path.join(stateDir, request.operation === "questionReply" ? "native-question-receipts"
+      : request.operation === "message" ? "native-message-receipts" : "native-image-receipts");
+    await mkdir(ledger, { recursive: true, mode: 0o700 });
+    const file = path.join(ledger, request.messageId + ".json");
+    let previous;
+    try { previous = JSON.parse(await readFile(file, "utf8")); }
+    catch (error) { if (error.code !== "ENOENT") { error.nativeImageOutcome = "unknown"; throw error; } }
+    if (previous) {
+      if (previous.fingerprint !== fingerprint) invalid("native_image_message_conflict");
+      if (previous.status === "accepted") return previous.result;
+      invalid(previous.status === "rejected" ? "native_image_rejected" : "native_image_outcome_unknown",
+        previous.status === "rejected" ? "rejected" : "unknown");
+    }
+    await validate(request);
+    if (closed || !initialized) invalid("native_input_not_ready");
+    const page = await rpc("thread/turns/list", { threadId: request.threadId, limit: 1,
+      sortDirection: "desc", itemsView: "notLoaded" });
+    if (!Array.isArray(page?.data)) invalid("native_image_turn_state_invalid");
+    const active = page.data.find(turn => turn.status === "inProgress");
+    if (active && request.operation === "message") invalid("native_task_busy", "notAttempted");
+    if (active && typeof active.id !== "string") invalid("native_image_turn_state_invalid");
+    // Recheck the durable binding after read-only preflight, immediately before
+    // recording a possibly accepted write. Uncertain writes are never replayed.
+    await validate(request);
+    const record = { fingerprint, status: "dispatching" };
+    await writeFile(file, JSON.stringify(record) + "\n", { flag: "wx", mode: 0o600 });
+    try {
+      const params = { threadId: request.threadId, clientUserMessageId: request.messageId,
+        input: [{ type: "text", text: request.prompt }, ...(request.images ?? []).map(image => ({ type: "localImage", path: image }))] };
+      const method = active ? request.delivery === "queue" ? "thread/queue/add" : "turn/steer" : "turn/start";
+      if (method === "turn/steer") params.expectedTurnId = active.id;
+      const response = await rpc(method, params);
+      record.result = { threadId: request.threadId, turnId: response?.turnId ?? response?.turn?.id ?? null,
+        queued: method === "thread/queue/add" };
+      record.status = "accepted";
+      return record.result;
+    } catch (error) {
+      record.status = error.nativeRejected ? "rejected" : "unknown";
+      error.nativeImageOutcome = record.status;
+      throw error;
+    } finally {
+      const temporary = file + "." + randomUUID() + ".tmp";
+      try {
+        await writeFile(temporary, JSON.stringify(record) + "\n", { flag: "wx", mode: 0o600 });
+        await rename(temporary, file);
+      } catch (error) { error.nativeImageOutcome = "unknown"; throw error; }
+    }
+  }
+
+  function dispatch(request) {
+    if (closed || !initialized) invalid("native_input_not_ready");
+    if (!equalToken(request.token, token)) invalid("native_input_unauthorized");
+    if (!uuid.test(request.messageId ?? "")) invalid("native_image_request_invalid");
+    if (request.operation === "cancel") return cancel(request);
+    const fingerprint = digest(JSON.stringify([request.threadId, request.messageId, request.prompt, request.images, request.delivery]));
+    const current = activeMessages.get(request.messageId);
+    if (current) {
+      if (current.fingerprint !== fingerprint) invalid("native_image_message_conflict");
+      return current.promise;
+    }
+    const before = threads.get(request.threadId) ?? Promise.resolve();
+    const promise = before.catch(() => {}).then(() => deliver(request, fingerprint));
+    activeMessages.set(request.messageId, { fingerprint, promise }); threads.set(request.threadId, promise);
+    void promise.finally(() => {
+      activeMessages.delete(request.messageId);
+      if (threads.get(request.threadId) === promise) threads.delete(request.threadId);
+    }).catch(() => {});
+    return promise;
+  }
+
+  async function cancel(request) {
+    async function verify() {
+      if (!/^t-[A-Za-z0-9_-]+$/.test(request.taskId ?? "") ||
+          typeof request.threadId !== "string" || typeof request.turnId !== "string")
+        invalid("native_cancel_request_invalid");
+      const state = JSON.parse(await readFile(path.join(stateDir, "desktop-manager-state.json"), "utf8"));
+      const receipt = state.receipts?.[request.messageId];
+      if (receipt?.request?.source !== "hermes" || receipt.request.origin !== "router" ||
+          !receipt.request.text?.startsWith(`[router ${request.taskId}]`) ||
+          receipt.nativeTargetThreadId !== request.threadId || receipt.nativeTurnId !== request.turnId ||
+          !["accepted", "unknown"].includes(receipt.nativeDispatch?.status) ||
+          ![undefined, null, "local"].includes(state.sessions?.[request.threadId]?.hostId) ||
+          !state.sessions?.[request.threadId]) invalid("native_cancel_receipt_mismatch");
+    }
+    await verify();
+    const terminal = status => ["completed", "failed", "interrupted"].includes(status);
+    async function* pages(method, params) {
+      const seen = new Set();
+      let cursor;
+      do {
+        const page = await rpc(method, { ...params, ...(cursor ? { cursor } : {}) });
+        if (!Array.isArray(page?.data)) invalid("native_cancel_page_invalid");
+        yield page.data;
+        cursor = page.nextCursor;
+        if (cursor != null && (typeof cursor !== "string" || !cursor || seen.has(cursor)))
+          invalid("native_cancel_cursor_invalid");
+        seen.add(cursor);
+      } while (cursor != null);
+    }
+    async function readTurn() {
+      for await (const turns of pages("thread/turns/list", { threadId: request.threadId,
+        limit: 50, sortDirection: "desc", itemsView: "notLoaded" })) {
+        const turn = turns.find(turn => turn.id === request.turnId);
+        if (turn) return turn;
+      }
+      invalid("native_cancel_turn_unavailable");
+    }
+    async function ownedTerminals(commandIds) {
+      const terminals = [];
+      for await (const items of pages("thread/backgroundTerminals/list", { threadId: request.threadId, limit: 100 })) {
+        for (const item of items) {
+          if (typeof item.itemId !== "string" || typeof item.processId !== "string")
+            invalid("native_cancel_terminal_invalid");
+          if (commandIds.has(item.itemId)) terminals.push(item);
+        }
+      }
+      return terminals;
+    }
+    const commands = new Map();
+    const commandKey = JSON.stringify([request.threadId, request.turnId]);
+    let itemTypes;
+    async function readCommands() {
+      itemTypes = {};
+      for (const [id, item] of runningCommands.get(commandKey) ?? []) commands.set(id, item);
+      for await (const entries of pages("thread/items/list", { threadId: request.threadId,
+        turnId: request.turnId, limit: 100, deferOutput: { commandExecution: true, mcpToolCall: true } })) {
+        for (const entry of entries) {
+          if (entry?.turnId !== request.turnId || typeof entry.item?.id !== "string" || typeof entry.item.type !== "string")
+            invalid("native_cancel_item_invalid");
+          const item = entry.item;
+          itemTypes[item.type] = (itemTypes[item.type] ?? 0) + 1;
+          if (item.type === "commandExecution") {
+            if (!["inProgress", "completed", "failed", "declined"].includes(item.status))
+              invalid("native_cancel_command_state_invalid");
+            const observed = commands.get(item.id);
+            if (!observed) commands.set(item.id, item);
+            else if (observed.status === "inProgress") Object.assign(observed, item);
+          }
+        }
+      }
+      for (const [id, item] of runningCommands.get(commandKey) ?? []) commands.set(id, item);
+      if (Object.keys(itemTypes).length === 0) invalid("native_cancel_items_unavailable");
+    }
+    let turn;
+    try {
+      turn = await readTurn();
+      await readCommands();
+      // Capture and terminate owned terminals before interrupting generation,
+      // which may remove their native bookkeeping while processes still run.
+      const owned = await ownedTerminals(commands);
+      for (const process of owned) {
+        await verify();
+        await rpc("thread/backgroundTerminals/terminate", { threadId: request.threadId, processId: process.processId });
+      }
+      if (!terminal(turn.status)) {
+        if (turn.status !== "inProgress") invalid("native_cancel_turn_state_invalid");
+        await verify();
+        await rpc("turn/interrupt", { threadId: request.threadId, turnId: request.turnId });
+        turn = await readTurn();
+      }
+      await readCommands();
+      const remaining = await ownedTerminals(commands);
+      const pendingCommands = [...commands.values()].filter(item => item.status === "inProgress");
+      const executionStopped = terminal(turn.status) && remaining.length === 0 && pendingCommands.length === 0;
+      return { ok: true, state: executionStopped ? "cancelled" : "cancelling",
+        nativeStatus: turn.status, executionStopped, pendingTerminals: remaining.length,
+        pendingCommands: pendingCommands.length, commandItems: commands.size, itemTypes,
+        observedTerminals: owned.length, commands: pendingCommands.map(item => ({ itemId: item.id,
+          processId: item.processId ?? null, status: item.status })) };
+    } catch (error) {
+      return { ok: false, state: "cancelling", executionStopped: false,
+        nativeStatus: turn?.status ?? null, error: error.code ?? "native_cancel_cleanup_failed",
+        nativeMethod: error.nativeMethod ?? null };
+    }
+  }
+
+  const server = net.createServer(socket => {
+    sockets.add(socket); socket.once("close", () => sockets.delete(socket)); socket.on("error", () => {});
+    socket.setTimeout(timeoutMs + 1000, () => socket.destroy());
+    let bytes = Buffer.alloc(0), received = false;
+    socket.on("data", chunk => {
+      if (received) return;
+      bytes = Buffer.concat([bytes, chunk]);
+      if (bytes.length > MAX_REQUEST_BYTES) { received = true; socket.destroy(); return; }
+      const end = bytes.indexOf(10); if (end < 0) return;
+      received = true;
+      void Promise.resolve().then(() => dispatch(JSON.parse(bytes.subarray(0, end).toString("utf8"))))
+        .then(result => socket.end(JSON.stringify({ ok: true, result }) + "\n"),
+          error => socket.end(JSON.stringify({ ok: false, error: /^native_[a-z_]+$/.test(error.code ?? "")
+            ? error.code : "native_image_dispatch_failed", outcome: error.nativeImageOutcome ?? "notAttempted" }) + "\n"));
+    });
+  });
+  try {
+    await new Promise((resolve, reject) => { server.once("error", reject); server.listen(endpoint, resolve); });
+    if (directory) await chmod(endpoint, 0o600);
+    await mkdir(stateDir, { recursive: true, mode: 0o700 });
+    const temporary = descriptorFile + "." + randomUUID() + ".tmp";
+    await writeFile(temporary, JSON.stringify(descriptor) + "\n", { flag: "wx", mode: 0o600 });
+    await rename(temporary, descriptorFile);
+  } catch (error) {
+    server.close(); if (directory) await rm(directory, { recursive: true, force: true }); throw error;
+  }
+
+  return {
+    env: { CODEXWORKER_NATIVE_IMAGE_INPUT: "1", CODEXWORKER_NATIVE_QUESTION_INPUT: "1", CODEXWORKER_NATIVE_TASK_INPUT: "1",
+      CODEXWORKER_NATIVE_INPUT_DESCRIPTOR: descriptorFile },
+    client(message) {
+      if (message?.method === "initialize") initializeId = message.id;
+      if (message?.method === "initialized") initialized = true;
+    },
+    server(message) {
+      const params = message?.params, item = params?.item;
+      if (["item/started", "item/completed"].includes(message?.method) && item?.type === "commandExecution" &&
+          typeof params.threadId === "string" && typeof params.turnId === "string" && typeof item.id === "string") {
+        // Started command items are live notifications and may be absent from
+        // paginated history until completion. Keep only outstanding execution
+        // metadata, including after a model-turn interrupt, until its own end.
+        const key = JSON.stringify([params.threadId, params.turnId]);
+        const commands = runningCommands.get(key) ?? new Map();
+        if (message.method === "item/started") {
+          commands.set(item.id, { id: item.id, type: item.type, status: "inProgress", processId: item.processId ?? null });
+          runningCommands.set(key, commands);
+        } else {
+          const observed = commands.get(item.id);
+          if (observed) Object.assign(observed, { status: item.status });
+          commands.delete(item.id);
+          if (!commands.size) runningCommands.delete(key);
+        }
+      }
+      if (initializeId !== undefined && message?.id === initializeId && message.result) initialized = true;
+      const call = pending.get(message?.id); if (!call) return true;
+      pending.delete(message.id); clearTimeout(call.timer);
+      if (message.error) call.reject(Object.assign(new Error("native_image_rejected"),
+        { code: "native_image_rejected", nativeRejected: true, nativeMethod: call.method }));
+      else call.resolve(message.result);
+      return false;
+    },
+    async close() {
+      if (closed) return; closed = true;
+      for (const call of pending.values()) { clearTimeout(call.timer); call.reject(new Error("native_input_closed")); }
+      pending.clear(); runningCommands.clear(); for (const socket of sockets) socket.destroy();
+      await new Promise(resolve => server.close(resolve));
+      await Promise.allSettled([...activeMessages.values()].map(value => value.promise));
+      try { const value = JSON.parse(await readFile(descriptorFile, "utf8")); if (value.token === token) await unlink(descriptorFile); }
+      catch (error) { if (error.code !== "ENOENT") throw error; }
+      if (directory) await rm(directory, { recursive: true, force: true });
+    },
+  };
+}

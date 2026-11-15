@@ -19,7 +19,9 @@ test("real script watchdog survives launcher return, repeats without native writ
   const tokenFile = path.join(root, "test.token"), token = "isolated-script-watchdog-credential-123456";
   await writeFile(tokenFile, token);
   let nativeRequests = 0, pid;
-  const sockets = new Set(), pipe = "\\\\.\\pipe\\script-watchdog-isolated-" + randomUUID();
+  const sockets = new Set(), pipe = process.platform === "win32"
+    ? "\\\\.\\pipe\\script-watchdog-isolated-" + randomUUID()
+    : path.join(os.tmpdir(), "script-watchdog-isolated-" + randomUUID() + ".sock");
   const native = net.createServer(socket => { nativeRequests++; sockets.add(socket); socket.on("close", () => sockets.delete(socket)); socket.end(); });
   await new Promise(resolve => native.listen(pipe, resolve));
   const server = http.createServer((req, res) => {

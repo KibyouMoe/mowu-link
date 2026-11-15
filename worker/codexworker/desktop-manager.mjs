@@ -1,27 +1,41 @@
 // The transport/report contracts are adapted from @dsh/hermes-bridge (MIT).
 // The only conversation backend is the tool pipe injected by Codex Desktop.
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
-import { mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath, rename, unlink, writeFile } from "node:fs/promises";
 import http from "node:http";
-import net from "node:net";
+import { routerOperations } from "./router-operations.mjs";
+import { reviewNativePermission } from "./interface/permission-hook.mjs";
+import { MessageJournal, nativeMessageId } from "./message-journal.mjs";
+import { ReceiptArchive, compactAck, shrinkObservationText } from "./continuity.mjs";
+import { addToolToBubble, renderToolBubble, safeToolPreview, TOOL_EDIT_INTERVAL_MS } from "./tool-progress.mjs";
+import { projectPublicQuestion, isNativeQuestionReply, parseNativeQuestionReply } from "./interface/public-questions.mjs";
+import { projectToolActivity } from "./interface/tool-activity.mjs";
+import { ProgressWatch, noProgressTimeoutMs, taskDeadline } from "./progress-watch.mjs";
 import path from "node:path";
 import os from "node:os";
-import { FeishuNotifier, FeishuStreamBeat, FeishuWebsocketClient } from "./feishu.mjs";
-import { localHost, nativeSendSource } from "./native-dispatch.mjs";
-import { HermesIngress, HERMES_PROFILE } from "./hermes-ingress.mjs";
-import { QuestionRelay, QuestionRelayError } from "./question-relay.mjs";
-import { cacheFeishuImage, imagePrompt } from "./feishu-images.mjs";
+import { FeishuNotifier, FeishuWebsocketClient } from "./feishu.mjs";
+import { localHost, nativeSendSource } from "./interface/native-dispatch.mjs";
+import { resolveNativeCapabilities } from "./interface/transport/index.mjs";
+import { rememberTurnInitiator } from "./question-origin.mjs";
+import { QuestionRelay, QuestionRelayError, questionSourceTurn } from "./question-relay.mjs";
+import { cacheFeishuImage, imagePrompt, fileImagePrompt } from "./feishu-images.mjs";
+import { parseFeishuPost, feishuPostPrompt } from "./feishu-post.mjs";
 import { FeishuOnlineAnnouncement } from "./online-announcement.mjs";
 import { BusinessRuntime, BusinessRuntimeError } from "./business-runtime.mjs";
 import { PublicImageRelay, splitPublicMarkdown } from "./public-image-relay.mjs";
-import { hydrateNativeInputs, readNativeWindow } from "./native-history.mjs";
-import { operatingConfig, optionalIngressFailure } from "./integration-profile.mjs";
+import { hydrateNativeInputs, readNativeWindow } from "./interface/native-history.mjs";
+import { operatingConfig } from "./integration-profile.mjs";
 import { resumeCandidates } from "./resume-candidates.mjs";
-import { publicProgress, nativeTaskState } from "./native-progress.mjs";
+import { publicProgress, nativeTaskState } from "./interface/native-progress.mjs";
 import { LocalPublicJournal } from "./local-public-journal.mjs";
+import { defaultPublicJournalRoot } from "./interface/journal-paths.mjs";
 import { BRIDGE_HELP, goalPrompt } from "./feishu-commands.mjs";
 import { readLocalResumeCatalog } from "./local-resume-catalog.mjs";
+import { routerStatus } from "./router-client.mjs";
+import { acquireWriterLease } from "./interface/writer-lease.mjs";
+import { routerMessageId, routerMarker, findRouterTurn } from "./router-tasks.mjs";
 import { resumePage, resumeListText } from "./resume-list.mjs";
+import { hermesChunks } from "./hermes-feishu-format.mjs";
 import { isAbandonedText, isUnconfirmedText } from "./text-receipt-review.mjs";
 
 export const PROTOCOL = "1.1.1-draft";
@@ -49,12 +63,15 @@ export function publicItems(snapshot) {
     for (const [index, item] of (turn.items ?? []).entries()) {
       const key = `${turn.id}/${item.id ?? index}`;
       if (item.type === "agentMessage" && typeof item.text === "string") {
+        const publicQuestion = projectPublicQuestion(item, { threadId: snapshot.thread?.id, turnId: turn.id });
         result.push({ key, turnId: turn.id, kind: "assistant", text: item.text,
+          ...(publicQuestion ? { publicQuestion } : {}),
           final: item.phase === "final_answer" || item.phase === "final" });
       } else if (item.type === "userMessage") {
         const text = item.text ?? (item.content ?? []).map(c => c.text ?? "").join("\n");
         result.push({ key, turnId: turn.id, kind: "trainer", text });
       } else if (item.type === "functionCallOutput" && ["create_thread", "send_message_to_thread"].includes(item.name)) {
+        if (item.output?.truncated === true) continue;
         const raw = typeof item.output === "string" ? item.output : item.output?.text;
         const start = raw?.indexOf("<input>") ?? -1;
         const end = raw?.lastIndexOf("</input>") ?? -1;
@@ -79,36 +96,412 @@ export class DesktopManager {
     this.native = native; this.listNativeTools = listNativeTools; this.stateDir = stateDir;
     this.fetch = fetchImpl;
     this.config = operatingConfig({ host: "127.0.0.1", port: 8903, bridgeName: "CodexWorker", machine: "codexworker",
-      pollMs: 1000, turnTimeoutMs: 600000, workspaceRoots: [], projectId: null,
-      xiliu: { enabled: false }, feishu: {}, ...config });
+      pollMs: 1000, noProgressTimeoutMs: noProgressTimeoutMs(config), workspaceRoots: [], projectId: null,
+      feishu: {}, ...config });
     this.statePath = path.join(stateDir, "desktop-manager-state.json");
     this.state = { version: 1, seq: 0, replayFloor: 0, nextName: 1, selectedThreadId: null,
-      sessions: {}, receipts: {}, events: [], outbox: [], feishuReceipts: {}, selectionEpoch: 0, autoImages: {} };
+      sessions: {}, receipts: {}, events: [], feishuReceipts: {}, selectionEpoch: 0, autoImages: {} };
     this.tail = Promise.resolve(); this.clients = new Set(); this.connected = false;
     this.nativeInputCache = new Map();
     this.nativeHistoryWindows = new Map();
     this.nativeProgressPolls = new Map();
-    this.publicJournal = new LocalPublicJournal(config.publicJournalRoot ?? path.join(path.dirname(path.dirname(stateDir)), "sessions"));
+    this.taskProgress = new Map();
+    this.messageJournal = new MessageJournal(stateDir);
+    this.receiptArchive = new ReceiptArchive(stateDir);
+    this.publicJournal = new LocalPublicJournal(config.publicJournalRoot ?? defaultPublicJournalRoot());
     this.taskJournal = new LocalPublicJournal(this.publicJournal.root);
     this.taskJournalTails = new Map();
     this.resumeMetadata = () => readLocalResumeCatalog(config.codexHome ?? path.dirname(path.dirname(stateDir)));
-    this.closed = false; this.reportRunning = false; this.pollRunning = false;
+    this.closed = false; this.pollRunning = false;
     this.relayStartedAt = new Date().toISOString();
-    this.reportTask = null;
     this.backgroundTasks = new Set(); this.serialPending = 0; this.nativeOperations = 0; this.httpOperations = 0;
-    this.heartbeatOperations = 0; this.handoffPaused = false;
+    this.handoffPaused = false;
     this.handoff = { phase: "running", error: null, startedAt: null };
     this.inboxPath = path.join(stateDir, "feishu-inbox.json"); this.inbox = { version: 1, entries: {} };
     this.inboxTail = Promise.resolve(); this.inboxRunning = new Set();
-    this.tools = []; this.notifier = null; this.ws = null; this.feishuBeats = new Map();
+    this.tools = []; this.notifier = null; this.ws = null; this.publicTextTimer = null;
     this.feishuInputs = new Map(); this.feishuReactionTasks = new Map();
     this.questions = new QuestionRelay(this);
     this.onlineAnnouncement = new FeishuOnlineAnnouncement(this);
     this.businessRuntime = new BusinessRuntime({ stateDir });
     this.publicImageRelay = new PublicImageRelay(this);
-    const x = this.config.xiliu;
-    this.config.xiliu = { ...x, heartbeatIntervalMs: x.heartbeatIntervalMs ?? x.heartbeatInterval ?? 60000,
-      timeoutMs: x.timeoutMs ?? x.timeout ?? 8000 };
+  }
+
+
+
+  async contextView(session) {
+    return { threadId: session.threadId, alias: session.alias, nativeCompactionAvailable: localHost(session.hostId) && this.tools.some(t => t.name === "compact_thread"),
+      context: clone(session.contextState ?? { compactions: 0 }) };
+  }
+
+  async observeContextEvent(event) { return this.serial(() => this.observeContextNow(event)); }
+
+  async observeContextNow(event) {
+    if (!event || this.closed || !this.state.sessions[event.threadId]) return false;
+    const session = this.session(event.threadId), state = session.contextState ??= { compactions: 0 };
+    if (event.kind === "usage") {
+      state.usage = Object.fromEntries(["contextTokens", "inputTokens", "lifetimeTokens", "modelContextWindow"].map(k =>
+        [k, Number.isSafeInteger(event[k]) && event[k] >= 0 ? event[k] : null]));
+      state.usage.observedAt = event.timestamp ?? new Date().toISOString();
+      await this.save(); return true;
+    }
+    if (event.kind === "turn_end") {
+      if (["failed", "interrupted"].includes(event.status) && state.compaction?.turnId === event.turnId &&
+          ["accepted", "in_progress"].includes(state.compaction.status))
+        return this.observeContextNow({ ...event, kind: "compaction", status: "failed", itemId: state.compaction.itemId ?? state.compaction.requestId });
+      return false;
+    }
+    if (event.kind !== "compaction" || !["in_progress", "completed", "failed"].includes(event.status)) return false;
+    const key = event.turnId + "/" + event.itemId, seen = state.seen ??= {};
+    if (seen[key] === event.status || seen[key] === "completed" && event.status === "in_progress") return false;
+    seen[key] = event.status;
+    const prior = state.compaction;
+    const preserveRequest = prior && (prior.status === "requested" || prior.baselineCompactions?.includes(key) ||
+      event.source === "journal" && prior.requestedAt && Date.parse(event.timestamp) < Date.parse(prior.requestedAt));
+    const id = !preserveRequest && prior && ["dispatching", "accepted", "in_progress"].includes(prior.status)
+      ? prior.requestId : event.itemId;
+    const observed = { ...(!preserveRequest ? prior : {}), requestId: id, turnId: event.turnId, itemId: event.itemId,
+      status: event.status, updatedAt: event.timestamp ?? new Date().toISOString() };
+    state.lastObservedCompaction = observed;
+    if (!preserveRequest) state.compaction = observed;
+    if (event.status === "completed") {
+      state.compactions = (state.compactions ?? 0) + 1;
+      shrinkObservationText(session);
+    }
+    const text = event.status === "completed" ? "上下文压缩完成，继续原会话；原生会话与完整消息留档保留。"
+      : event.status === "failed" ? "上下文压缩未完成，原会话保留；未自动新建会话。"
+      : "正在压缩会话上下文；主会话保持不变。";
+    await this.emit("context.notice", { targetThreadId: session.threadId, source: "worker" },
+      { text, phase: "commentary", itemKey: "compact:" + id, complete: true }, { turnId: event.turnId });
+    return true;
+  }
+
+  compacting(session) { return ["dispatching", "accepted", "in_progress"].includes(session.contextState?.compaction?.status); }
+
+  async requestCompaction(request) {
+    const session = this.session(request.targetThreadId);
+    if (!localHost(session.hostId) || !this.tools.some(t => t.name === "compact_thread"))
+      fail(501, "capability_unavailable", "当前引擎没有原生压缩接口；未新建或替换会话。");
+    const state = session.contextState ??= { compactions: 0 };
+    if (!["requested", "dispatching", "accepted", "in_progress"].includes(state.compaction?.status)) {
+      state.compaction = { status: "requested", requestId: request.messageId, requestedAt: new Date().toISOString() };
+      await this.save();
+    }
+    return { action: "compaction_requested", threadId: session.threadId, context: clone(state),
+      text: state.compaction.status === "requested" ? "压缩请求已保存；当前回合结束后在原会话执行，待真实完成事件确认结果。" : "原生压缩已在进行；等待真实完成事件确认，未重复提交。" };
+  }
+
+  async processCompaction(session, snapshot) {
+    const op = session.contextState?.compaction;
+    if (op?.status !== "requested" || activeTurn(snapshot) || session.pendingInputs?.length) return false;
+    // The poll's snapshot may predate a newly accepted message. Re-read while
+    // holding the writer lock before requesting a native context operation.
+    const fresh = await this.call("read_thread", { threadId: session.threadId, hostId: session.hostId,
+      turnLimit: 1, includeOutputs: false, maxOutputCharsPerItem: 1 });
+    if (activeTurn(fresh)) return false;
+    op.baselineCompactions = [...new Set([ ...Object.keys(session.contextState.seen ?? {}),
+      ...(fresh.turns ?? []).flatMap(t => (t.items ?? []).filter(i => ["contextCompaction", "ContextCompaction"].includes(i.type)).map(i => t.id + "/" + i.id)) ])];
+    op.status = "dispatching"; await this.save();
+    try {
+      await this.call("compact_thread", { threadId: session.threadId });
+      op.status = "accepted";
+    } catch {
+      op.status = "unknown"; op.updatedAt = new Date().toISOString();
+      await this.emit("context.notice", { targetThreadId: session.threadId, source: "worker" },
+        { text: "压缩请求结果尚未确认；原生会话保留，未自动重复提交。",
+          phase: "commentary", itemKey: "compact:" + op.requestId, complete: true });
+    }
+    await this.save(); return true;
+  }
+
+  get toolProgressEnabled() { return this.transcriptEnabled && this.config.feishu?.toolProgressEnabled === true; }
+
+  async observeToolActivity(activity) {
+    return this.serial(() => this.observeToolActivityNow(activity));
+  }
+
+  flushToolBubble(session) {
+    const key = session.toolBubble?.key;
+    if (key) for (const entry of Object.values(this.state.publicTextOutbox ?? {}))
+      if (entry.threadId === session.threadId && entry.key === key) entry.complete = true;
+    session.toolBubble = null;
+  }
+
+  async observeToolActivityNow(activity) {
+    if (!this.toolProgressEnabled || this.closed || !activity) return false;
+    const session = this.state.sessions[activity.threadId];
+    if (!session || typeof activity.turnId !== "string") return false;
+    if (activity.kind === "turn_end") {
+      for (const old of Object.values(session.toolSeen ?? {})) if (old.turnId === activity.turnId && old.status === "running")
+        await this.observeToolActivityNow({ ...old, status: ["interrupted", "failed", "cancelled", "canceled"].includes(activity.status) ? "interrupted" : "unknown",
+          timestamp: new Date().toISOString() });
+      if (session.toolBubble?.turnId === activity.turnId) this.flushToolBubble(session);
+      await this.save(); return true;
+    }
+    if (typeof activity.itemId !== "string" || !/^[a-zA-Z0-9_.:/-]{1,100}$/.test(activity.toolName ?? "") ||
+        !["running", "completed", "failed", "interrupted", "unknown"].includes(activity.status)) return false;
+    if (activity.timestamp && session.toolProgressStartedAt && Date.parse(activity.timestamp) < Date.parse(session.toolProgressStartedAt)) return false;
+    const key = activity.turnId + "/" + activity.itemId;
+    const old = session.toolSeen?.[key];
+    if (old && (old.status === activity.status || old.status !== "running" && activity.status === "running")) return false;
+    const safe = { threadId: session.threadId, turnId: activity.turnId, itemId: activity.itemId,
+      toolName: activity.toolName, category: activity.category, preview: safeToolPreview(activity.preview),
+      status: activity.status, exitCode: Number.isInteger(activity.exitCode) ? activity.exitCode : null,
+      durationMs: Number.isFinite(activity.durationMs) ? activity.durationMs : null };
+    const detail = safe.toolName + " · " + safe.status +
+      (safe.exitCode == null ? "" : " · exit=" + safe.exitCode) +
+      (safe.durationMs == null ? "" : " · " + safe.durationMs + "ms");
+    await this.emit("tool.activity", { targetThreadId: session.threadId, source: "tool" },
+      { text: detail, phase: "commentary", itemKey: "tool-event:" + key + ":" + safe.status,
+        complete: true, activity: safe }, { turnId: safe.turnId, timestamp: activity.timestamp ?? new Date().toISOString() });
+    // Completion-only journal observations are genuine tool calls too. Display
+    // one start-style Hermes line, while the lifecycle trace keeps the real status.
+    if (!old) {
+      const previous = session.toolBubble, counter = session.toolBubbleCounter ?? 0;
+      const bubble = addToolToBubble(previous, safe);
+      if (!previous || previous.turnId !== safe.turnId || bubble.rollover) {
+        this.flushToolBubble(session);
+        session.toolBubbleCounter = counter + 1;
+        bubble.key = "tool-progress:" + safe.turnId + ":" + session.toolBubbleCounter;
+      }
+      delete bubble.rollover;
+      session.toolBubble = bubble;
+      try {
+        await this.emit("tool.progress", { targetThreadId: session.threadId, source: "tool" },
+          { text: renderToolBubble(bubble), snapshot: renderToolBubble(bubble), phase: "commentary",
+            itemKey: bubble.key, complete: false }, { turnId: safe.turnId });
+      } catch (error) { session.toolBubble = previous; session.toolBubbleCounter = counter; throw error; }
+    }
+    (session.toolSeen ??= {})[key] = safe;
+    await this.save(); return true;
+  }
+
+  async observeSnapshotTools(session, snapshot) {
+    if (!this.toolProgressEnabled || this.toolActivitySource === "native-notifications") return;
+    const seed = !session.toolSnapshotSeeded;
+    for (const turn of snapshot.turns ?? []) for (const item of turn.items ?? []) {
+      const activity = projectToolActivity(item, { threadId: session.threadId, turnId: turn.id,
+        completed: ["completed", "failed", "interrupted"].includes(turn.status) });
+      if (!activity) continue;
+      const key = turn.id + "/" + item.id;
+      if (seed && !session.toolSeen?.[key]) (session.toolSeen ??= {})[key] = activity;
+      else await this.observeToolActivityNow(activity);
+    }
+    session.toolSnapshotSeeded = true;
+  }
+
+  get transcriptEnabled() { return this.config.feishu?.transcriptEnabled === true; }
+
+  transcriptEpoch(session, epoch = this.state.selectionEpoch) {
+    if (!this.transcriptEnabled) return epoch;
+    return session.transcriptBindingEpoch ??= session.publicJournalCheckpoint?.epoch ?? epoch;
+  }
+
+  migrateTranscript() {
+    if (!this.transcriptEnabled) return;
+    const now = new Date().toISOString();
+    for (const session of Object.values(this.state.sessions)) {
+      this.transcriptEpoch(session);
+      session.transcriptStartAt ??= now;
+    }
+    for (const receipt of Object.values(this.state.receipts)) if (receipt.nativeInputHash)
+      receipt.nativeTargetThreadId ??= receipt.nativeDispatch?.threadId ?? receipt.request?.targetThreadId ?? receipt.response?.session?.threadId;
+    // Keep old UUIDs/checkpoints; enabling mirroring must not replay cards.
+    for (const entry of Object.values(this.state.publicTextOutbox ?? {}))
+      if (this.state.sessions[entry.threadId]) entry.mirror = true;
+  }
+
+  relayCurrent(entry) {
+    if (entry?.mirror !== true)
+      return entry?.threadId === this.state.selectedThreadId && entry.bindingEpoch === this.state.selectionEpoch;
+    const session = this.state.sessions[entry.threadId];
+    return this.transcriptEnabled && Boolean(session) &&
+      (!entry.chatId || entry.chatId === (session.feishuChatId ?? this.notifier?.chatId));
+  }
+
+  relaySession(threadId, epoch = this.state.selectionEpoch) {
+    return this.transcriptEnabled ? Boolean(this.state.sessions[threadId])
+      : threadId === this.state.selectedThreadId && epoch === this.state.selectionEpoch;
+  }
+
+  async mirrorInput(request) {
+    if (!this.transcriptEnabled) return null;
+    return this.serial(() => this.emit("message.observed", request,
+      { text: request.text, origin: request.origin ?? "api", alreadyDispatched: false }));
+  }
+
+  async archiveConversation(event, request) {
+    if (!this.transcriptEnabled) return null;
+    const input = ["message.accepted", "message.observed"].includes(event.type);
+    const output = ["item.delta", "item.completed", "message.reply", "tool.progress", "tool.activity", "context.notice"].includes(event.type);
+    if (!input && !output) return null;
+    if (output && event.payload.phase && !["commentary", "final", "final_answer"].includes(event.payload.phase)) return null;
+    let text = input ? request.text ?? event.payload.text : event.payload.snapshot ?? event.payload.text;
+    const nativeReplies = input ? parseNativeQuestionReply(text) : null;
+    if (nativeReplies) text = nativeReplies.map(reply => reply.question + "\n答案：" + reply.answer).join("\n\n");
+    if (typeof text !== "string" || !text.trim()) return null;
+    const threadId = event.threadId ?? request.targetThreadId ?? this.state.selectedThreadId;
+    if (!threadId || !this.state.sessions[threadId]) return null;
+    const received = input && this.state.feishuReceipts[event.messageId]?.incomingMessageId;
+    const origin = request.origin ?? event.payload.origin;
+    const peerWorkerName = output && origin === "worker-chat" ? request.peerWorkerName : undefined;
+    const source = received ? "feishu" : input
+      ? origin === "worker-chat" ? "worker" : ["feishu", "router", "subscription", "cli", "desktop", "native"].includes(origin) ? origin
+        : origin === "desktop-native-composer" ? "native" : request.source === "hermes" ? "hermes" : "api"
+      : event.type.startsWith("tool.") ? "tool" : ["context.notice"].includes(event.type) || peerWorkerName ? "worker" : "assistant";
+    const progress = event.type === "tool.progress", toolEvent = event.type === "tool.activity", systemEvent = ["context.notice"].includes(event.type);
+    if (output && !progress && !toolEvent) this.flushToolBubble(this.session(threadId));
+    const itemKey = event.payload.itemKey ?? event.messageId ?? String(event.seq);
+    const logicalId = input ? "input:" + event.messageId : "output:" + threadId + ":" + itemKey;
+    const answerEntry = input && Object.entries(this.questions.state.entries).find(([id, action]) =>
+      (action.nativeReplyMessageIds?.includes(event.messageId) ||
+       action.nativeMessageId === event.messageId && ["dispatching", "answered", "skipped", "answer_unknown"].includes(action.status)) &&
+      this.state.publicQuestions?.[id]?.threadId === threadId);
+    const mirror = !answerEntry && !toolEvent && (systemEvent || progress || input || event.type === "message.reply" || event.type === "item.completed" || this.config.feishu.streamEnabled !== false);
+    const complete = event.payload.complete ?? event.type !== "item.delta";
+    const record = await this.messageJournal.record({
+      seq: event.seq, logicalId, previousId: this.state.latestTranscript?.[logicalId], direction: input ? "input" : "output", source, threadId,
+      turnId: event.turnId, messageId: event.messageId,
+      workerName: source === "worker" ? request.workerName : undefined,
+      peerWorkerName,
+      taskId: request.taskId ?? /^\[router (t-[^\]\s]+)\]/m.exec(text)?.[1] ?? null,
+      text, phase: input ? "input" : event.payload.phase ?? "final_answer", timestamp: event.timestamp,
+      mirror, complete, historyLimited: event.payload.historyLimited,
+      kind: event.payload.publicQuestion ? "question" : systemEvent ? "system_event" : progress ? "tool_progress" : toolEvent ? "tool_event" : "text", tool: event.payload.activity,
+      publicQuestion: event.payload.publicQuestion,
+    });
+    event.transcriptId = record.id;
+    const latest = this.state.latestTranscript ??= {};
+    if (latest[logicalId] && latest[logicalId] !== record.id)
+      await this.messageJournal.supersede(latest[logicalId], record.id);
+    latest[logicalId] = record.id;
+    if (answerEntry) {
+      // The selected answer belongs on its original question card, not a second input card.
+      await this.messageJournal.plan(record.id, ["question:" + answerEntry[0]]);
+    } else if (received) {
+      await this.messageJournal.delivered(record.id, "original", "received", received);
+    } else if (mirror) {
+      const entries = this.enqueuePublicText(this.session(threadId), event.turnId, input ? logicalId : itemKey,
+        text, this.state.selectionEpoch, input || record.phase !== "commentary", event.payload.messageIds ?? [], {
+          publicQuestion: event.payload.publicQuestion, input: input || systemEvent, complete, progress, transcriptId: record.id, historyLimited: record.historyLimited, deferDrain: true,
+          title: input || peerWorkerName ? this.inputMirrorTitle(source, record.workerName ?? request.workerName, peerWorkerName) : progress ? this.config.bridgeName + "-工具" : systemEvent ? this.config.bridgeName + "-会话" : undefined });
+      await this.messageJournal.plan(record.id, entries.map(e => e.uuid));
+      for (const entry of entries) if (["sent", "unknown"].includes(entry.status))
+        await this.messageJournal.delivered(record.id, entry.uuid, entry.status, entry.feishuMessageId, entries.length);
+    } else await this.messageJournal.plan(record.id, []);
+    return record;
+  }
+
+  async recoverTranscript() {
+    let after = "", page;
+    const latest = new Map();
+    do {
+      page = await this.messageJournal.list({ after, limit: 200 });
+      for (const record of page.records) {
+        const old = latest.get(record.logicalId);
+        if (old) await this.messageJournal.supersede(old.id, record.id);
+        latest.set(record.logicalId, record);
+      }
+      after = page.nextCursor;
+    } while (page.hasMore);
+    for (const record of latest.values()) {
+      (this.state.latestTranscript ??= {})[record.logicalId] = record.id;
+      if (record.direction === "input" && record.source === "native") {
+        const matched = await this.questions.observeNativeReply({ threadId: record.threadId, text: record.text,
+          messageId: record.messageId, turnId: record.turnId });
+        if (matched.length) {
+          await this.messageJournal.plan(record.id, matched.map(id => "question:" + id));
+          continue;
+        }
+      }
+      if (record.source === "feishu") {
+        const original = this.state.feishuReceipts?.[record.messageId]?.incomingMessageId;
+        if (original) {
+          await this.messageJournal.delivered(record.id, "original", "received", original);
+          continue;
+        }
+      }
+      if (record.kind === "image" || record.mirror === false || !["pending", "retrying"].includes(record.delivery.state) ||
+          !this.state.sessions[record.threadId]) continue;
+      const session = this.session(record.threadId), input = record.direction === "input";
+      const original = this.state.receipts[record.messageId]?.request;
+      const inputSource = original?.origin === "worker-chat" ? "worker" : record.source;
+      const inputWorker = record.workerName ?? (original?.origin === "worker-chat" ? original.workerName : undefined);
+      const key = input ? record.logicalId : record.logicalId.slice(("output:" + record.threadId + ":").length);
+      const entries = this.enqueuePublicText(session, record.turnId, key, record.text, this.state.selectionEpoch,
+        record.phase !== "commentary", [], { publicQuestion: record.publicQuestion, input: input || record.kind === "system_event", complete: record.complete, historyLimited: record.historyLimited, deferDrain: true, transcriptId: record.id,
+          progress: record.kind === "tool_progress",
+          title: input || record.peerWorkerName ? this.inputMirrorTitle(inputSource, inputWorker, record.peerWorkerName) : record.kind === "tool_progress" ? this.config.bridgeName + "-工具" : record.kind === "system_event" ? this.config.bridgeName + "-会话" : undefined });
+      await this.messageJournal.plan(record.id, entries.map(e => e.uuid));
+      for (const entry of entries) {
+        if (entry.status === "sent" && entry.feishuMessageId)
+          await this.messageJournal.delivered(record.id, entry.uuid, "sent", entry.feishuMessageId, entries.length);
+        if (entry.status === "unknown")
+          await this.messageJournal.delivered(record.id, entry.uuid, "unknown", entry.feishuMessageId, entries.length);
+      }
+    }
+    await this.save();
+  }
+
+  inputMirrorTitle(source, workerName, peerWorkerName) {
+    if (source === "worker" && peerWorkerName) return this.config.bridgeName + " → " + peerWorkerName + "·私聊";
+    if (source === "worker") return this.config.bridgeName + "·" + (workerName || "Worker") + "私聊";
+    const labels = { feishu: "飞书输入", router: "溪流派单", subscription: "订阅事件", cli: "本地 CLI 输入",
+      desktop: "桌面输入", native: "原生输入", api: "本地 API 输入", hermes: "溪流输入" };
+    return this.config.bridgeName + "·" + (labels[source] ?? "输入");
+  }
+
+  commandReplyText(result) {
+    return result.text ?? (result.resumeList ? resumeListText(result)
+      : result.action === "session_status" ? "当前会话：" + result.session.alias + "\n状态：" + result.session.state +
+        "\n同步：" + (result.session.relayStatus?.mode ?? "native-history") +
+        "\n飞书：" + (result.health.integrations.feishu.connected ? "已连接" : "未连接")
+      : result.session ? "已切换到：" + result.session.alias : "已完成：" + result.action);
+  }
+
+  async publicReply(request, text, kind = "command") {
+    if (!this.transcriptEnabled || !this.state.sessions[request.targetThreadId ?? this.state.selectedThreadId]) return false;
+    await this.serial(() => this.emit("message.reply", request,
+      { text, phase: "final_answer", itemKey: kind + ":" + request.messageId }));
+    return true;
+  }
+
+  async observeNativeInput(session, item, timestamp) {
+    if (timestamp && session.transcriptStartAt && Date.parse(timestamp) < Date.parse(session.transcriptStartAt)) return null;
+    const bound = session.inputMessages?.[item.key];
+    if (bound) return bound;
+    const inputHash = digest(item.nativeInputText ?? item.text);
+    const candidates = Object.values(this.state.receipts).filter(receipt =>
+      receipt.nativeTargetThreadId === session.threadId && receipt.nativeInputHash === inputHash
+      && ["accepted", "unknown"].includes(receipt.nativeDispatch?.status)
+      && !receipt.transcriptNativeKey && (!receipt.nativeTurnId || receipt.nativeTurnId === item.turnId));
+    const exact = candidates.filter(r => r.nativeTurnId === item.turnId);
+    const receipt = exact.length === 1 ? exact[0] : candidates.length === 1 ? candidates[0] : null;
+    if (!receipt && candidates.length) {
+      await this.emit("message.correlation_unconfirmed", { targetThreadId: session.threadId },
+        { itemKey: item.key, messageIds: candidates.map(r => r.request.messageId) }, { turnId: item.turnId });
+      return null; // Possible ingress echo: keep original records, never redispatch.
+    }
+    if (receipt) {
+      receipt.transcriptNativeKey = item.key;
+      (session.inputMessages ??= {})[item.key] = receipt.request.messageId;
+      if (receipt.nativeDispatch.status === "accepted" && receipt.nativeTurnId === item.turnId) {
+        session.pendingInputs = (session.pendingInputs ?? []).filter(p => p.messageId !== receipt.request.messageId);
+        session.turnMessages[item.turnId] ??= [];
+        if (!session.turnMessages[item.turnId].includes(receipt.request.messageId))
+          session.turnMessages[item.turnId].push(receipt.request.messageId);
+        rememberTurnInitiator(session, item.turnId, receipt.request);
+      }
+      return receipt.request.messageId;
+    }
+    const messageId = nativeMessageId(session.threadId, item.key);
+    await this.questions.observeNativeReply({ threadId: session.threadId, text: item.text,
+      messageId, turnId: item.turnId, itemKey: item.key });
+    rememberTurnInitiator(session, item.turnId, { messageId, source: "trainer", origin: "native" });
+    await this.emit("message.observed", { targetThreadId: session.threadId, messageId, source: "trainer", origin: "native" },
+      { text: item.text, origin: "native", alreadyDispatched: true }, { turnId: item.turnId, timestamp: timestamp ?? new Date().toISOString() });
+    (session.inputMessages ??= {})[item.key] = messageId;
+    return messageId;
   }
 
   serial(fn) {
@@ -128,10 +521,10 @@ export class DesktopManager {
   }
 
   hotBlockers() {
-    return { poll: Number(this.pollRunning), reports: Number(this.reportRunning), serial: this.serialPending,
+    return { poll: Number(this.pollRunning), serial: this.serialPending,
       native: this.nativeOperations, http: this.httpOperations, images: this.imageOperations ?? 0,
       background: this.backgroundTasks.size, inputs: this.feishuInputs.size,
-      reactions: this.feishuReactionTasks.size, heartbeat: this.heartbeatOperations };
+      reactions: this.feishuReactionTasks.size };
   }
 
   hotHandoffStatus() {
@@ -199,43 +592,14 @@ export class DesktopManager {
       fail(503, "bridge_not_ready", "Bind an allowed Codex Desktop workspace before starting the bridge.");
     }
     await mkdir(this.stateDir, { recursive: true });
-    // Windows releases a named pipe when its owner exits, even after a crash.
-    // Acquire this OS lease before examining a stale diagnostic lock file so
-    // simultaneous MCP restarts cannot both remove it and become writers.
-    const leaseId = digest(path.resolve(this.stateDir).toLowerCase()).slice(0, 24);
-    const leaseAddress = process.platform === "win32" ? `\\\\.\\pipe\\codexworker-manager-${leaseId}` : path.join(this.stateDir, "desktop-manager.sock");
-    this.writerLease = net.createServer(socket => socket.end());
+    const canonicalState = await realpath(this.stateDir);
     try {
-      await new Promise((resolve, reject) => { this.writerLease.once("error", reject); this.writerLease.listen(leaseAddress, resolve); });
+      const lease = await acquireWriterLease(this.stateDir, canonicalState);
+      this.writerLease = lease.server; this.writerGuard = lease.guard;
+      this.leasePath = lease.ownerFile; this.leaseNonce = lease.nonce;
     } catch (error) {
       if (error.code === "EADDRINUSE") fail(503, "manager_instance_active", "A live plugin instance owns the machine-level Desktop manager.", true);
       throw error;
-    }
-    this.leasePath = path.join(this.stateDir, "desktop-manager.lock");
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        const handle = await open(this.leasePath, "wx", 0o600);
-        this.leaseNonce = randomUUID();
-        try { await handle.writeFile(JSON.stringify({ pid: process.pid, nonce: this.leaseNonce, startedAt: new Date().toISOString() })); }
-        finally { await handle.close(); }
-        break;
-      } catch (error) {
-        if (error.code !== "EEXIST") throw error;
-        if (process.platform === "win32" && attempt === 0) {
-          // The OS lease above is authoritative. After a reboot Windows may
-          // reuse yesterday's diagnostic PID for an unrelated live process.
-          // No other compliant writer can own this file while we hold the pipe.
-          await unlink(this.leasePath); continue;
-        }
-        let owner;
-        try { owner = JSON.parse(await readFile(this.leasePath, "utf8")); }
-        catch { fail(503, "manager_instance_active", "Another plugin instance is initializing the shared Desktop manager.", true); }
-        try { process.kill(owner.pid, 0); }
-        catch (probe) {
-          if (probe.code === "ESRCH" && attempt === 0) { await unlink(this.leasePath); continue; }
-        }
-        fail(503, "manager_instance_active", "A live plugin instance owns this machine's Desktop manager. Use its authenticated HTTP endpoint.", true);
-      }
     }
     try { this.state = JSON.parse(await readFile(this.statePath, "utf8")); }
     catch (error) {
@@ -244,13 +608,34 @@ export class DesktopManager {
     if (this.state?.version !== 1 || !this.state.sessions || !this.state.receipts ||
         typeof this.state.sessions !== "object" || Array.isArray(this.state.sessions) ||
         typeof this.state.receipts !== "object" || Array.isArray(this.state.receipts) ||
-        !Array.isArray(this.state.events) || !Array.isArray(this.state.outbox)) {
+        !Array.isArray(this.state.events)) {
       fail(503, "manager_state_corrupt", "Durable Bridge state failed validation; the original file is preserved.", false);
     }
     this.stateLoaded = true;
+    this.restoredSessionIds = new Set(Object.keys(this.state.sessions));
+    if (this.transcriptEnabled) this.state.seq = Math.max(this.state.seq ?? 0, await this.messageJournal.recover());
     this.state.selectionEpoch ??= 0; this.state.autoImages ??= {};
+    this.migrateTranscript();
+    for (const session of Object.values(this.state.sessions)) {
+      delete session.memoryAppliedRevision; // Retire the former Worker checkpoint bookkeeping.
+      if (["dispatching", "accepted", "in_progress"].includes(session.contextState?.compaction?.status))
+        session.contextState.compaction.status = "unknown";
+    }
+    if (this.toolProgressEnabled) for (const session of Object.values(this.state.sessions))
+      session.toolProgressStartedAt ??= new Date().toISOString();
+    for (const entry of Object.values(this.state.publicTextOutbox ?? {})) {
+      // Repeating a PATCH is safe; repeating an unconfirmed create is not.
+      if (entry.stream && entry.status === "dispatching") entry.status = entry.feishuMessageId ? "pending" : "unknown";
+    }
     this.tools = await this.listNativeTools();
-    for (const name of ["read_thread", "send_message_to_thread", "create_thread", "fork_thread", "set_thread_title", "list_threads"]) {
+    // The transport declares what the engine can actually do; the manager adapts
+    // only to those gaps and keeps the Desktop contract everywhere else.
+    const capabilities = resolveNativeCapabilities();
+    this.canFork = capabilities.fork;
+    this.hasDesktopJournal = capabilities.desktopJournal;
+    const requiredTools = ["read_thread", "send_message_to_thread", "create_thread", "set_thread_title", "list_threads"];
+    if (this.canFork) requiredTools.push("fork_thread");
+    for (const name of requiredTools) {
       if (!this.tools.some(t => t.name === name)) fail(503, "desktop_integration_unavailable", `Desktop tool missing: ${name}`, true);
     }
     this.connected = true;
@@ -280,9 +665,16 @@ export class DesktopManager {
     catch (error) { if (error.code !== "ENOENT") throw error; }
     if (this.inbox.version !== 1 || !this.inbox.entries || typeof this.inbox.entries !== "object") fail(503, "feishu_inbox_invalid", "Durable Feishu ingress cannot be read; no entries were discarded.");
     await this.questions.initialize();
+    // Rebuild pending mirrors before integrations can send anything.
+    if (this.transcriptEnabled) await this.recoverTranscript();
+    // A restarted observer cannot claim an old invocation is still running.
+    // Keep the same call/bubble identity; a later real completion may resolve it.
+    if (this.toolProgressEnabled) for (const session of Object.values(this.state.sessions))
+      for (const old of Object.values(session.toolSeen ?? {})) if (old.status === "running")
+        await this.observeToolActivityNow({ ...old, status: "unknown", timestamp: new Date().toISOString() });
     this.configureIntegrations();
     await this.businessRuntime.initialize().catch(() => {
-      console.error("[CodexWorker] Image business module unavailable; native text ingress remains active.");
+      console.error("[bridge] Image business module unavailable; native text ingress remains active.");
     });
     for (const event of Object.values(this.inbox.entries)) this.runInbox(event);
     return this;
@@ -294,8 +686,8 @@ export class DesktopManager {
     const f = this.config.feishu;
     if (f?.appId && f?.appSecret) {
       this.notifier = new FeishuNotifier({ ...f, bridgeName: this.config.bridgeName,
-        canSend: ({ threadId }) => !this.closed && (!threadId || threadId === this.state.selectedThreadId) });
-      for (const name of ["sendMessage", "sendQuestionCard", "updateQuestionCard", "downloadImage", "addReaction", "removeReaction", "warmup"]) {
+        canSend: ({ threadId }) => !this.closed && (!threadId || this.relaySession(threadId)) });
+      for (const name of ["sendMessage", "updateMessage", "sendQuestionCard", "updateQuestionCard", "downloadImage", "downloadFileImage", "addReaction", "removeReaction", "warmup"]) {
         const method = this.notifier[name].bind(this.notifier);
         this.notifier[name] = (...args) => this.track(method(...args));
       }
@@ -315,7 +707,7 @@ export class DesktopManager {
 
   integrationStatus() {
     const selected = this.state.sessions[this.state.selectedThreadId];
-    return { pid: process.pid, runtimeHostPid: Number(process.env.CODEXWORKER_RUNTIME_HOST_PID) || null,
+    return { pid: process.pid, runtimeHostPid: Number(process.env.RUDOLF_BRIDGE_RUNTIME_HOST_PID) || null,
       operatingMode: this.config.operatingMode,
       selectedThreadId: this.state.selectedThreadId,
       feishu: { enabled: Boolean(this.notifier?.enabled), inboundEnabled: Boolean(this.ws),
@@ -330,21 +722,20 @@ export class DesktopManager {
           journal: selected.relayStatus?.journal ?? null, journalError: selected.relayStatus?.journalError ?? null,
           selfTarget: this.isSelfTarget(selected), taskStateSource: this.isSelfTarget(selected) ? "desktop-task-journal" : "native-status",
           taskJournal: selected.taskJournalStatus ?? null,
-          unconfirmedTexts: Object.values(this.state.publicTextOutbox ?? {}).filter(e => e.threadId === selected.threadId && e.bindingEpoch === this.state.selectionEpoch && isUnconfirmedText(e)).length,
+          unconfirmedTexts: Object.values(this.state.publicTextOutbox ?? {}).filter(e => e.threadId === selected.threadId && this.relayCurrent(e) && isUnconfirmedText(e)).length,
           abandonedUnknownTexts: Object.values(this.state.publicTextOutbox ?? {}).filter(e => e.threadId === selected.threadId && isAbandonedText(e)).length,
           unconfirmedImages: Object.values(this.state.autoImages ?? {}).filter(e => e.threadId === selected.threadId && e.bindingEpoch === this.state.selectionEpoch && /unknown/.test(e.error ?? "")).length,
           historyWindow: selected.historyWindow ?? null } : null,
         inboxPending: Object.keys(this.inbox.entries).length,
         trainerWhitelistCount: this.config.feishu.trainerOpenIdWhitelist?.length ?? 0,
         onlineNotice: this.onlineAnnouncement.status(), publicImages: this.publicImageRelay.status(), questions: this.questions.status() },
-      xiliu: { enabled: Boolean(this.config.xiliu?.enabled && this.config.xiliu.url) },
-      hermesIngress: this.hermesIngress ? { ...this.hermesIngress.status(), lastError: this.hermesIngressError ?? null }
-        : { enabled: false, listening: false } };
+      router: routerStatus() };
   }
 
-  imageTarget(threadId) {
+  imageTarget(threadId, publicEntry = null) {
     const session = this.session(threadId);
-    if (session.threadId !== this.state.selectedThreadId) fail(409, "selected_target_changed", "Image output follows the Feishu-selected chat only; no fallback.");
+    if (publicEntry ? !this.relayCurrent(publicEntry) : session.threadId !== this.state.selectedThreadId)
+      fail(409, "selected_target_changed", "Image output requires its authorized Feishu binding; no fallback.");
     if (!localHost(session.hostId)) fail(422, "capability_unavailable", "Image output uses local workspace files only.");
     const chatId = session.feishuChatId ?? this.notifier?.chatId;
     if (!chatId || !this.notifier?.enabled) fail(503, "feishu_unavailable", "Current chat has no configured Feishu output.");
@@ -361,14 +752,14 @@ export class DesktopManager {
   async sendImage(body, validateBinding = () => {}, publicEntry = null) {
     if (!body || typeof body !== "object" || Object.keys(body).some(key => !["imagePath", "threadId", "messageId"].includes(key))) fail(400, "invalid_request", "Only imagePath, threadId and messageId are accepted.");
     if (publicEntry && (!Object.values(this.state.autoImages ?? {}).includes(publicEntry) || publicEntry.status !== "pending" ||
-        publicEntry.threadId !== this.state.selectedThreadId || publicEntry.bindingEpoch !== this.state.selectionEpoch ||
+        !this.relayCurrent(publicEntry) ||
         publicEntry.imagePath !== body.imagePath || publicEntry.messageId !== body.messageId || publicEntry.threadId !== body.threadId)) {
       fail(403, "image_display_not_authorized", "No matching current public image queue entry; no file was uploaded.");
     }
     const bindingEpoch = this.state.selectionEpoch;
     const validate = () => {
       validateBinding();
-      if (bindingEpoch !== this.state.selectionEpoch) fail(409, "selected_target_changed", "Feishu selection changed during image output; no fallback.");
+      if (!(publicEntry?.mirror && this.transcriptEnabled) && bindingEpoch !== this.state.selectionEpoch) fail(409, "selected_target_changed", "Feishu selection changed during image output; no fallback.");
     };
     return this.businessRuntime.sendImage(body, { stateDir: this.stateDir, notifier: this.notifier,
       fetchImpl: this.fetch, allowedRoots: [...this.config.workspaceRoots, path.join(this.stateDir, "feishu-images"),
@@ -377,10 +768,10 @@ export class DesktopManager {
       // Both routes grant one exact requested/displayed file, not a directory.
       displayedFiles: [body.imagePath],
       excludedRoots: publicEntry ? [path.join(this.stateDir, "feishu-images")] : [],
-      getTarget: threadId => { validate(); return this.imageTarget(threadId); },
+      getTarget: threadId => { validate(); return this.imageTarget(threadId, publicEntry); },
       validateTarget: expected => {
         validate();
-        const current = this.imageTarget(expected.threadId);
+        const current = this.imageTarget(expected.threadId, publicEntry);
         if (current.chatId !== expected.chatId) fail(409, "selected_target_changed", "Feishu destination changed; image was not sent.");
       } });
   }
@@ -420,19 +811,12 @@ export class DesktopManager {
     this.config.feishu = { appId: secret.app_id, appSecret: secret.app_secret,
       chatId: secret.chat_id ?? secret.trainer_chat_id,
       trainerOpenIdWhitelist: secret.trainer_open_id ? [secret.trainer_open_id] : [], ...f };
-    const x = configured.xiliu ?? { enabled: false };
-    this.config.xiliu = { ...x, heartbeatIntervalMs: x.heartbeatIntervalMs ?? x.heartbeatInterval ?? 60000,
-      timeoutMs: x.timeoutMs ?? x.timeout ?? 8000 };
     this.configureIntegrations();
-    clearInterval(this.heartbeatTimer);
-    if (this.config.xiliu.enabled) {
-      this.heartbeatTimer = setInterval(() => { void this.heartbeat(); }, this.config.xiliu.heartbeatIntervalMs);
-      this.heartbeatTimer.unref();
-    }
     return this.integrationStatus();
   }
 
   async save() {
+    await this.receiptArchive.trim(this.state, this.config.runtimeReceiptLimit ?? 500);
     const temp = `${this.statePath}.${randomUUID()}.tmp`;
     await writeFile(temp, `${JSON.stringify(this.state)}\n`, { encoding: "utf8", mode: 0o600 });
     for (let attempt = 0; ; attempt++) {
@@ -449,7 +833,7 @@ export class DesktopManager {
   health() {
     // Never claim the full 1.1.1 manager contract before native interruption,
     // exact active-turn steering and the ingress/fork acceptance gates are proven.
-    return { name: this.config.bridgeName, version: "0.2.38", alive: !this.closed, ready: this.connected,
+    return { name: this.config.bridgeName, version: "0.3.0", alive: !this.closed, ready: this.connected,
       operatingMode: this.config.operatingMode,
       integrationMode: "desktop-native", machine: this.config.machine,
       managerProtocolVersion: PROTOCOL, managerMinCompatibleVersion: PROTOCOL,
@@ -459,7 +843,7 @@ export class DesktopManager {
       workspaceProjectId: this.config.projectId, eventSeq: this.state.seq,
       activeTurns: Object.values(this.state.sessions).filter(s => s.activeTurnId).length,
       poolSize: Object.keys(this.state.sessions).length, maxPool: 50,
-      desktopBuild: "Codex Desktop injected native task pipe", runtimeBuild: "codexworker 0.2.38",
+      desktopBuild: "Codex Desktop injected native task pipe", runtimeBuild: "codexworker 0.3.0",
       integrations: this.integrationStatus(),
       appServerSchemaFile: "desktop-native-tools.json", appServerSchemaSha256: digest(this.tools),
       capabilities: { existingThreadSend: this.connected, new: this.connected, fork: this.connected,
@@ -467,17 +851,24 @@ export class DesktopManager {
         pollIntervalMs: this.config.pollMs, queue: true, nativeBusyDelivery: Boolean(this.config.nativeBusyDeliveryVerified),
         localMessageOrigin: this.config.nativeSendFromTarget ? "target-task" : "bound-manager-task",
         remoteViaDesktopDevices: true, feishuImageOutput: Boolean(this.businessRuntime.module && this.notifier?.enabled),
-        feishuOutputRouting: "selected-thread-only",
+        feishuImageInput: this.config.nativeImageInput ? "native-local-image" : "cached-path-prompt",
+        questionAnswerSync: this.config.nativeQuestionInput ? "native-user-input" : "delegated-message",
+        feishuOutputRouting: this.transcriptEnabled ? "managed-thread-transcript" : "selected-thread-only",
+        persistentConversationTranscript: this.transcriptEnabled,
+        nativeAutoCompaction: "engine-defaults",
+        toolProgress: { enabled: this.toolProgressEnabled, source: this.toolActivitySource ?? (this.hasDesktopJournal ? "journal-or-snapshot" : "snapshot"),
+          grouping: "accumulate", editIntervalMs: TOOL_EDIT_INTERVAL_MS, previewChars: 40 },
         feishuReconnectPolicy: "bounded-handshake-heartbeat",
         feishuQuestionCards: "durable-callback-source-turn",
-        feishuPublicImageSync: this.config.feishu.autoImageOutput === false ? "disabled" : "selected-thread-public-images",
+        workerMessaging: Boolean(this.workerMessages), formalWorkOrders: "native-goal-directive",
+        feishuPublicImageSync: this.config.feishu.autoImageOutput === false ? "disabled" : this.transcriptEnabled ? "managed-thread-public-images" : "selected-thread-public-images",
         feishuPublicImagePathPolicy: "exact-public-display",
         feishuImageRecovery: "bounded-same-uuid-50m",
-        desktopStartupHandoff: { requiredBootstrap: "0.2.23", requiredLaunchMode: "windows-desktop-parent",
-          active: this.businessRuntime.status().bootstrapVersion === "0.2.23" &&
-            this.businessRuntime.status().desktopLifetimeLaunchMode === "windows-desktop-parent" },
+        desktopStartupHandoff: { requiredBootstrap: "0.3.0", requiredLaunchMode: process.platform === "win32" ? "windows-desktop-parent" : "desktop-owned",
+          active: this.businessRuntime.status().bootstrapVersion === "0.3.0" &&
+            ["windows-desktop-parent", "desktop-owned"].includes(this.businessRuntime.status().desktopLifetimeLaunchMode) },
         businessHotReload: this.businessRuntime.status(),
-        stop: false, compact: false, perTurnSafetyOverride: false, tokenStreaming: false } };
+        stop: false, compact: this.tools.some(t => t.name === "compact_thread"), perTurnSafetyOverride: false, tokenStreaming: false } };
   }
 
   async call(name, args, deliveryContext) {
@@ -491,6 +882,13 @@ export class DesktopManager {
       // otherwise the supervisor would recycle healthy Feishu/HTTP every 45s.
       this.connected = error?.nativeReachable === true;
       if (error instanceof BridgeError) throw error;
+      if (name === "send_message_to_thread" && error?.nativeImageOutcome) {
+        const outcome = error.nativeImageOutcome;
+        fail(outcome === "notAttempted" ? 422 : 502, error.nativeErrorCode ?? "native_image_input_failed",
+          outcome === "notAttempted" ? "Native input preflight failed before sending input."
+            : outcome === "rejected" ? "The native input was explicitly rejected." : "Native input delivery could not be confirmed.",
+          false, { nativeInputOutcome: outcome });
+      }
       if (error?.nativeErrorCode === "native_snapshot_too_large") {
         fail(413, "native_snapshot_too_large", "Native history response exceeded Desktop's size limit.", false);
       }
@@ -513,7 +911,7 @@ export class DesktopManager {
     return cwd;
   }
 
-  async read(threadId, hostId, { turnLimit = 10 } = {}) {
+  async read(threadId, hostId, { turnLimit = 10, requireCompleteInputs = true } = {}) {
     // Public assistant/trainer messages and imageView/imageGeneration nodes are
     // returned without raw tool outputs. Those outputs can overflow Desktop's
     // response limit in long chats and are not part of the public relay.
@@ -538,13 +936,19 @@ export class DesktopManager {
     try {
       return await hydrateNativeInputs(snapshot, pageArgs => this.call("read_thread", { ...pageArgs, ...(hostId ? { hostId } : {}) }), this.nativeInputCache);
     } catch (error) {
+      if (error.body?.error === "native_snapshot_incomplete" && !requireCompleteInputs) {
+        // Complete items and real turn status remain usable. Incomplete inputs
+        // stay unavailable for correlation and are never reconstructed/replayed.
+        snapshot.nativeInputHydration = { complete: false };
+        return snapshot;
+      }
       if (error.body?.error === "native_snapshot_incomplete") fail(503, error.body.error, error.body.detail, true);
       throw error;
     }
   }
 
   isSelfTarget(session) {
-    return localHost(session.hostId) && session.threadId === this.config.nativeSenderThreadId;
+    return this.hasDesktopJournal && localHost(session.hostId) && session.threadId === this.config.nativeSenderThreadId;
   }
 
   async journalDeliveryState(session) {
@@ -618,12 +1022,21 @@ export class DesktopManager {
       bridge: this.config.bridgeName, machine: this.config.machine, timestamp: new Date().toISOString(),
       threadId: request.targetThreadId ?? request.threadId ?? null,
       messageId: request.messageId ?? null, source: request.source ?? "bridge", payload, ...extra };
+    await this.archiveConversation(event, request);
     this.state.events.push(event);
+    if (event.threadId && /^(item\.|turn\.|tool\.|message\.(accepted|queued|dispatched))/.test(type)) {
+      let watch = this.taskProgress.get(event.threadId);
+      if (!watch) {
+        watch = new ProgressWatch({ timeoutMs: noProgressTimeoutMs(this.config) });
+        this.taskProgress.set(event.threadId, watch);
+      }
+      watch.touch();
+    }
     const now = Date.now();
     const retained = this.state.events.filter(e => now - Date.parse(e.timestamp) <= (e.type === "item.delta" ? 3600000 : 30 * 86400000));
     // A single persisted journal/registry snapshot has a hard 256MiB limit.
     let bytes = Buffer.byteLength(JSON.stringify(retained));
-    while (bytes > 256 * 1024 * 1024 && retained.length) bytes -= Buffer.byteLength(JSON.stringify(retained.shift())) + 1;
+    while ((bytes > 16 * 1024 * 1024 || retained.length > 5000) && retained.length) bytes -= Buffer.byteLength(JSON.stringify(retained.shift())) + 1;
     if (retained.length !== this.state.events.length) {
       const retainedSeqs = new Set(retained.map(e => e.seq));
       for (const old of this.state.events) if (!retainedSeqs.has(old.seq)) this.state.replayFloor = Math.max(this.state.replayFloor, old.seq);
@@ -635,6 +1048,7 @@ export class DesktopManager {
       if (client.writableLength > 1024 * 1024) { client.destroy(); this.clients.delete(client); continue; }
       client.write(`id: ${event.seq}\nevent: bridge\ndata: ${JSON.stringify(event)}\n\n`);
     }
+    if (event.transcriptId && !this.handoffPaused && !this.closed) void this.drainPublicTexts();
     return event;
   }
 
@@ -658,8 +1072,12 @@ export class DesktopManager {
   async once(request, operation) {
     this.validate(request);
     return this.serial(async () => {
+      const taskId = request.source === "hermes" && request.origin === "router"
+        ? /^\[router (t-[A-Za-z0-9_-]+)\]/.exec(request.text ?? "")?.[1] : null;
+      if (taskId && this.state.routerCancellations?.[taskId])
+        return { accepted: false, messageId: request.messageId, action: "task_cancelled" };
       const fingerprint = requestFingerprint(request);
-      const old = this.state.receipts[request.messageId];
+      const old = this.state.receipts[request.messageId] ?? await this.receiptArchive.get(request.messageId);
       if (old) {
         // Existing receipts used insertion-order hashes; compare their saved JSON
         // semantically so retries remain valid across upgrades and key reordering.
@@ -672,11 +1090,13 @@ export class DesktopManager {
       await this.save();
       let accepted = false;
       try {
-        const event = await this.emit("message.accepted", request, { text: request.text ?? "/adopt", delivery: request.delivery ?? "steer" });
+        // Registration is an internal operation, not a fabricated Hermes chat input.
+        const event = await this.emit(typeof request.text === "string" ? "message.accepted" : "operation.accepted",
+          request, { ...(typeof request.text === "string" ? { text: request.text } : {}), delivery: request.delivery ?? "steer" });
         accepted = true;
         const result = await operation();
         receipt.pending = false;
-        receipt.response = { accepted: true, duplicate: false, messageId: request.messageId, eventSeq: event.seq, ...result };
+        receipt.response = { accepted: true, duplicate: false, messageId: request.messageId, eventSeq: event.seq, ...compactAck(result) };
         await this.save(); return clone(receipt.response);
       } catch (error) {
         const mapped = error instanceof BridgeError ? error : new BridgeError(502, "codex_app_server_error", "Desktop operation failed; inspect the native task before retrying.");
@@ -706,12 +1126,14 @@ export class DesktopManager {
   makeSession(thread, { alias, cwd, hostId, parent = null } = {}) {
     return { threadId: thread.id, alias, cwd, hostId: hostId ?? null, bridge: this.config.bridgeName,
       machine: this.config.machine, owner: "hermes", sourceThreadId: parent, forkedFromId: parent,
+      ...(this.transcriptEnabled ? { transcriptStartAt: new Date().toISOString() } : {}),
+      ...(this.toolProgressEnabled ? { toolProgressStartedAt: new Date().toISOString() } : {}),
       state: "idle", activeTurnId: null, createdAt: new Date().toISOString(), queue: [], pendingInputs: [], seen: {}, observedTurns: {}, turnMessages: {}, lastEventSeq: this.state.seq };
   }
 
   baseline(session, snapshot) {
     this.publicImageRelay.baseline(session, snapshot);
-    session.seen = Object.fromEntries(publicItems(snapshot).map(i => [i.key, { text: i.text, hash: digest(i.text) }]));
+    session.seen = Object.fromEntries(publicItems(snapshot).map(i => [i.key, { text: i.text, hash: digest(i.text), final: i.final }]));
     session.observedTurns = Object.fromEntries((snapshot.turns ?? []).map(t => [t.id, t.status]));
     this.markHistoryBaseline(session, snapshot);
     session.historyWindow = clone(snapshot.nativeHistoryWindow ?? null);
@@ -727,7 +1149,7 @@ export class DesktopManager {
   selectSession(threadId, { touch = false } = {}) {
     if (this.state.selectedThreadId !== threadId) {
       this.state.selectionEpoch++;
-      if (this.state.sessions[threadId]) this.state.sessions[threadId].publicJournalStartAt = new Date().toISOString();
+      if (!this.transcriptEnabled && this.state.sessions[threadId]) this.state.sessions[threadId].publicJournalStartAt = new Date().toISOString();
     }
     this.state.selectedThreadId = threadId;
     if (touch) this.touchSession(threadId);
@@ -753,7 +1175,7 @@ export class DesktopManager {
     for (const turn of older) { session.observedTurns[turn.id] ??= turn.status; seeded[turn.id] = true; }
   }
 
-  async message(request, { requireSelectedTarget = false, requireSelectionEpoch, requireSourceTurnId } = {}) {
+  async message(request, { requireSelectedTarget = false, requireSelectionEpoch, requireSourceTurnId, allowCompletedSourceTurn = false } = {}) {
     if (typeof request.text !== "string" || !request.text.trim()) fail(400, "invalid_request", "text is required.");
     return this.once(request, async () => {
       if ((requireSelectedTarget && request.targetThreadId !== this.state.selectedThreadId) ||
@@ -762,16 +1184,32 @@ export class DesktopManager {
           { threadId: request.targetThreadId, selectedThreadId: this.state.selectedThreadId });
       }
       let text = request.text.trim(), delivery = request.delivery, transformed = false;
-      if (/^\/goal(?:\s|$)/.test(text)) {
+      const nativeImages = request.source === "trainer" && this.config.nativeImageInput &&
+        this.state.feishuReceipts[request.messageId]?.nativeImagePaths?.length;
+      if (!nativeImages && /^\/goal(?:\s|$)/.test(text)) {
         transformed = true;
         text = goalPrompt(text);
         if (!text) return { action: "help", text: BRIDGE_HELP };
-      } else if (/^\/queue\s+/.test(text)) { text = text.replace(/^\/queue\s+/, ""); delivery = "queue"; transformed = true; }
-      else if (text.startsWith("/") && !text.startsWith("//")) return this.command(request, text);
+      } else if (!nativeImages && /^\/queue\s+/.test(text)) { text = text.replace(/^\/queue\s+/, ""); delivery = "queue"; transformed = true; }
+      else if (!nativeImages && text.startsWith("/") && !text.startsWith("//")) {
+        const result = await this.command(request, text);
+        if (this.transcriptEnabled) {
+          await this.emit("message.reply", { ...request,
+            targetThreadId: result.session?.threadId ?? result.currentSession?.threadId ?? request.targetThreadId ?? this.state.selectedThreadId },
+            { text: this.commandReplyText(result), phase: "final_answer", itemKey: "command:" + request.messageId });
+          result.publicReplyArchived = true;
+        }
+        return result;
+      }
       const session = this.session(request.targetThreadId);
-      const normalized = { ...request, delivery, targetThreadId: session.threadId, text: text.startsWith("//") ? text.slice(1) : transformed ? text : request.text,
-        sourceTurnGuard: requireSourceTurnId ?? null,
+      const normalized = { ...request, delivery, targetThreadId: session.threadId, text: !nativeImages && text.startsWith("//") ? text.slice(1) : transformed ? text : request.text,
+        sourceTurnGuard: requireSourceTurnId ?? null, sourceTurnMayBeComplete: Boolean(allowCompletedSourceTurn && requireSourceTurnId),
         ...(request.source === "trainer" ? { trainerActivityAt: new Date().toISOString() } : {}) };
+      if (this.compacting(session)) {
+        session.queue.push(normalized);
+        await this.emit("message.queued", normalized, { reason: "native_compaction", position: session.queue.length });
+        return { action: "message_queued", session: clone(session) };
+      }
       const selectedAtStart = session.threadId === this.state.selectedThreadId, epoch = this.state.selectionEpoch;
       // Queue acceptance needs no guess about idle state. Only the scanner with
       // a fresh lifecycle observation may dispatch it.
@@ -788,7 +1226,7 @@ export class DesktopManager {
       const active = activeTurn(snapshot);
       // Native tools have no atomic expectedTurnId. Check immediately before
       // dispatch, reject stale questions; do not claim a native atomic guarantee.
-      if (requireSourceTurnId && active?.id !== requireSourceTurnId) fail(409, "source_turn_ended", "The original question turn is no longer active; no answer was sent.");
+      if (requireSourceTurnId && questionSourceTurn(snapshot, allowCompletedSourceTurn)?.id !== requireSourceTurnId) fail(409, "source_turn_ended", "The original question turn is no longer active; no answer was sent.");
       if (requireSelectionEpoch != null && (requireSelectionEpoch !== this.state.selectionEpoch || session.threadId !== this.state.selectedThreadId)) fail(409, "selected_target_changed", "The question binding changed during source validation; no answer was sent.");
       if (active || session.pendingInputs?.length || session.queue.length || session.steerQueue?.length) {
         if (delivery === "queue") {
@@ -828,9 +1266,12 @@ export class DesktopManager {
     }
     // Trainer-authorized, visible channel labels; original receipts/reports stay
     // untouched. Slash commands are handled before reaching this presentation.
-    const label = this.config.messageSourceLabels === false ? null
+    const label = this.config.messageSourceLabels === false || isNativeQuestionReply(request.text) ? null
       : request.source === "trainer" && this.state.feishuReceipts[request.messageId] ? "飞书"
-      : request.source === "hermes" ? "超级溪流" : null;
+      : request.origin === "worker-chat" ? request.workerName ?? "worker"
+      : request.source === "hermes" && !["router", "subscription"].includes(request.origin) ? "超级溪流" : null;
+    // The engine owns context and compaction. Dispatch the actual input without
+    // adding Worker-maintained memory or summaries.
     const prompt = label ? `${label}：${request.text}` : request.text;
     const pending = { messageId: request.messageId, inputHash: digest(prompt), dispatchedAt: Date.now(),
       sourceThreadId, kind: active ? "steer" : snapshot.deliveryContract ? "followup" : "start", expectedTurnId: active?.id ?? null,
@@ -838,8 +1279,9 @@ export class DesktopManager {
       beforeTurnIds: [...new Set([...Object.keys(session.observedTurns), ...(snapshot.turns ?? []).map(t => t.id)])] };
     if (!acceptedWithoutHistory) (session.pendingInputs ??= []).push(pending);
     const receipt = this.state.receipts[request.messageId];
-    if (receipt) { receipt.nativeSourceThreadId = sourceThreadId; receipt.nativeInputHash = digest(prompt);
-      receipt.nativeDispatch = { status: "dispatching", at: new Date().toISOString(), threadId: session.threadId }; }
+    if (receipt) { receipt.nativeSourceThreadId = sourceThreadId; receipt.nativeInputHash = digest(prompt); receipt.nativeTargetThreadId = session.threadId;
+      receipt.nativeDispatch = { status: "dispatching", at: new Date().toISOString(), threadId: session.threadId,
+        ...(this.config.nativeQuestionInput && isNativeQuestionReply(request.text) ? { nativeQuestionReply: true } : {}) }; }
     const feishuReceipt = this.state.feishuReceipts[request.messageId];
     if (acceptedWithoutHistory && feishuReceipt && !feishuReceipt.cleanupRequested) {
       // Native acceptance releases ingress, not the trainer's Typing indicator.
@@ -853,8 +1295,13 @@ export class DesktopManager {
       if (request.delivery === "queue" && activeTurn(await this.deliveryState(session))) {
         fail(409, "queue_target_busy", "The queued target is running; no native write was attempted.", true);
       }
+      if (request.origin === "router-question" && request.taskId && this.questions.router()?.getTask) {
+        const task = await this.questions.router().getTask(request.taskId);
+        if (["cancelled","canceled","failed","done"].includes(task?.state))
+          fail(409, "source_task_ended", "The original router task ended; its queued clarification was not sent.");
+      }
       if (request.sourceTurnGuard) {
-        const latest = activeTurn(await this.deliveryState(session));
+        const latest = questionSourceTurn(await this.deliveryState(session), request.sourceTurnMayBeComplete);
         if (latest?.id !== request.sourceTurnGuard) fail(409, "source_turn_ended", "The question turn ended before native dispatch; no answer was sent.");
       }
       if (selectedAtStart && (dispatchEpoch !== this.state.selectionEpoch || session.threadId !== this.state.selectedThreadId)) {
@@ -866,22 +1313,44 @@ export class DesktopManager {
       await this.save(); throw error;
     }
     const args = { threadId: session.threadId, prompt };
+    if (request.source === "hermes" && request.origin === "router") {
+      const taskId = /^\[router (t-[^\]\s]+)\]/.exec(request.text)?.[1];
+      if (taskId) args.nativeTask = { taskId, messageId: request.messageId };
+    }
+    if (this.config.nativeImageInput && request.source === "trainer" && feishuReceipt?.nativeImagePaths?.length) {
+      args.nativeImages = [...feishuReceipt.nativeImagePaths];
+      args.nativeMessageId = request.messageId; args.nativeDelivery = request.delivery ?? "steer";
+    }
+    if (this.config.nativeQuestionInput && isNativeQuestionReply(request.text)) {
+      args.nativeQuestionReply = true; args.nativeMessageId = request.messageId; args.nativeDelivery = "steer";
+    }
     if (session.hostId) args.hostId = session.hostId;
     const turns = snapshot.page?.order === "newest_first" ? snapshot.turns : [...(snapshot.turns ?? [])].reverse();
-    try { await this.call("send_message_to_thread", args, { sourceThreadId, turnId: active?.id ?? snapshot.deliveryObservation?.turnId ?? turns?.[0]?.id }); }
+    let dispatched;
+    try { dispatched = await this.call("send_message_to_thread", args, { sourceThreadId, turnId: active?.id ?? snapshot.deliveryObservation?.turnId ?? turns?.[0]?.id }); }
     catch (error) {
       // A timeout may have inserted the input. Keep its correlation slot so a
       // later identical message cannot accidentally claim this uncertain write.
-      pending.unknownOutcome = true;
-      if (receipt) receipt.nativeDispatch.status = "unknown";
+      const knownRejection = ["notAttempted", "rejected"].includes(error.body?.nativeInputOutcome);
+      pending.unknownOutcome = !knownRejection;
+      if (knownRejection) session.pendingInputs = (session.pendingInputs ?? []).filter(item => item !== pending);
+      if (receipt) receipt.nativeDispatch.status = knownRejection ? "canceled" : "unknown";
       await this.save(); throw error;
     }
     session.state = "running"; pending.dispatchedAt = Date.now();
-    if (receipt) receipt.nativeDispatch.status = "accepted";
+    if (receipt) {
+      receipt.nativeDispatch.status = "accepted";
+      receipt.nativeTurnId = dispatched?.turnId ?? dispatched?.turn?.id ?? null;
+      if (receipt.nativeTurnId) {
+        session.turnMessages[receipt.nativeTurnId] ??= [];
+        if (!session.turnMessages[receipt.nativeTurnId].includes(request.messageId))
+          session.turnMessages[receipt.nativeTurnId].push(request.messageId);
+        rememberTurnInitiator(session, receipt.nativeTurnId, request);
+      }
+    }
     if (request.source === "trainer") this.touchSession(session.threadId, request.trainerActivityAt);
     await this.emit("message.dispatched", request, { delivery: active ? "native-busy-followup" : snapshot.deliveryContract ? "native-followup-state-independent" : "native-followup", pendingTurnReadback: !acceptedWithoutHistory });
-    await this.enqueueReport(session.threadId, "command", request.text);
-    if (this.notifier && request.source === "hermes" && session.threadId === this.state.selectedThreadId) void this.notifier.sendMessage(request.text,
+    if (!this.transcriptEnabled && this.notifier && request.source === "hermes" && !["router", "router-question"].includes(request.origin) && session.threadId === this.state.selectedThreadId) void this.notifier.sendMessage(request.text,
       { title: `${this.config.bridgeName}-任务`, threadId: session.threadId, chatId: session.feishuChatId }).catch(() => {});
     return { action: "dispatch_pending", session: clone(session) };
   }
@@ -939,8 +1408,8 @@ export class DesktopManager {
     await this.save();
     try { await this.dispatch(session, request, snapshot); }
     catch (error) {
-      if (request.delivery === "queue" && receipt?.nativeDispatch?.status === "canceled" &&
-          ["queue_target_busy", "local_task_state_pending"].includes(error.body?.error)) {
+      if ((request.delivery === "queue" || request.origin === "router") && receipt?.nativeDispatch?.status === "canceled" &&
+          ["queue_target_busy", "local_task_state_pending", "native_task_busy"].includes(error.body?.error)) {
         session.queue.unshift(request); receipt.nativeDispatch.status = "deferred";
         return; // Pre-write deferral only; unknown native writes never requeue.
       }
@@ -957,6 +1426,8 @@ export class DesktopManager {
     catch (error) { if (!local.available) throw error; listing = {}; }
     const result = await resumeCandidates(listing, {
       localTasks: local.tasks, activity: this.state.resumeActivity,
+      requiredThreadIds: this.state.selectedThreadId && localHost(this.state.sessions[this.state.selectedThreadId]?.hostId)
+        ? [this.state.selectedThreadId] : [],
       readThread: threadId => this.call("read_thread", { threadId, hostId: "local", turnLimit: 1,
         includeOutputs: false, maxOutputCharsPerItem: 1 }),
       allowed: task => { try { this.checkWorkspace({ thread: task }); return true; } catch { return false; } }
@@ -993,8 +1464,15 @@ export class DesktopManager {
     const [rawCommand, ...parts] = text.split(/\s+/);
     const command = rawCommand === "/clear" ? "/new" : rawCommand;
     if (["/help", "/start", "/commands"].includes(command)) return { action: "help", text: BRIDGE_HELP };
-    if (["/new", "/fork", "/stop", "/list", "/status"].includes(command) && parts.length) {
+    if (["/new", "/fork", "/stop", "/list", "/status", "/compact", "/context"].includes(command) && parts.length) {
       fail(422, "command_arguments_not_supported", `${command} does not accept arguments.`);
+    }
+    if (command === "/compact") return this.requestCompaction(request);
+    if (command === "/context") {
+      const view = await this.contextView(this.session(request.targetThreadId)), u = view.context.usage;
+      return { action: "context_status", ...view, text: "原会话：" + view.alias + "\n最近原生用量：" +
+        (u?.contextTokens == null ? "等待原生用量事件" : u.contextTokens + "；模型窗口：" + (u.modelContextWindow ?? "原生默认")) +
+        "\n压缩：" + (view.context.compaction?.status ?? "原生自动管理") };
     }
     if (command === "/list") return { action: "sessions_listed", sessions: Object.values(this.state.sessions).map(clone) };
     if (command === "/resume") {
@@ -1069,6 +1547,7 @@ export class DesktopManager {
         prompt: "这是 Hermes Bridge 创建的 Codex 原生会话。请只回复 HERMES_READY，等待后续任务；不要调用工具或修改文件。",
         target: { type: "project", projectId: this.config.projectId, environment: { type: "local" } } });
     } else {
+      if (!this.canFork) fail(501, "capability_unavailable", "This worker transport cannot fork threads; start a new session instead.", false);
       parent = request.sourceThreadId ?? this.session(request.targetThreadId).threadId;
       hostId = this.state.sessions[parent]?.hostId ?? null;
       if (hostId && hostId !== "local") fail(501, "capability_unavailable", "The native fork tool has no remote hostId contract.");
@@ -1090,6 +1569,29 @@ export class DesktopManager {
     return { action: command === "/new" ? "session_created" : "session_forked", session: clone(session) };
   }
 
+  async captureTaskQuestions(threadId, turn) {
+    const session = this.session(threadId);
+    const questions = publicItems({ thread: { id: threadId }, turns: [turn] }).filter(item => item.publicQuestion);
+    if (!questions.length) return;
+    await this.serial(async () => {
+      for (const item of questions) {
+        if (session.seen[item.key]?.publicQuestionId === item.publicQuestion.questionId) continue;
+        await this.emit("item.completed", { targetThreadId: threadId, source: "codex" },
+          { text: item.text, snapshot: item.text, itemKey: item.key, phase: "final_answer", complete: true,
+            publicQuestion: item.publicQuestion }, { turnId: turn.id });
+        session.seen[item.key] = { hash: digest(item.text), final: true, publicQuestionId: item.publicQuestion.questionId };
+      }
+      await this.save();
+    });
+    // Clarifications must reach their owner even if Feishu is unavailable.
+    for (const item of questions) {
+      const entry = Object.values(this.state.publicTextOutbox ?? {}).find(e => e.publicQuestion?.questionId === item.publicQuestion.questionId);
+      await this.questions.publish(item.publicQuestion, { existingCard: entry?.feishuMessageId
+        ? { uuid: entry.uuid, messageId: entry.feishuMessageId, threadId } : null });
+    }
+    await this.drainPublicTexts();
+  }
+
   async scan() {
     if (this.pollRunning || this.closed || this.handoffPaused) return;
     this.pollRunning = true;
@@ -1099,20 +1601,20 @@ export class DesktopManager {
       for (const id of ids) {
         if (this.closed || this.handoffPaused) break;
         const registered = this.session(id);
-        if (this.config.operatingMode === "feishu-local" && id !== this.state.selectedThreadId &&
+        if (!this.transcriptEnabled && this.config.operatingMode === "feishu-local" && id !== this.state.selectedThreadId &&
             !registered.queue?.length && !registered.steerQueue?.length && !registered.pendingInputs?.length) continue;
         // A slow read-only poll must not hold the native ingress writer lock.
         const hostId = this.state.sessions[id]?.hostId;
         const imageBindingEpoch = this.state.selectionEpoch;
         let snapshot;
         (this.session(id).relayStatus ??= {}).lastAttemptAt = new Date().toISOString();
-        if (id === this.state.selectedThreadId && localHost(hostId) && (this.isSelfTarget(registered) || this.tools.some(t => t.name === "wait_threads"))) {
+        if (this.relaySession(id) && localHost(hostId) && (this.isSelfTarget(registered) || this.tools.some(t => t.name === "wait_threads"))) {
           try { await this.scanPublicJournal(id, imageBindingEpoch); continue; }
           catch (error) {
             if (this.isSelfTarget(registered)) {
               await this.serial(async () => {
                 const pending = error.body?.error === "local_task_state_pending" && registered.taskJournalStatus?.pendingBytes > 0;
-                const unconfirmed = Object.values(this.state.publicTextOutbox ?? {}).some(e => e.threadId === id && e.bindingEpoch === imageBindingEpoch && isUnconfirmedText(e));
+                const unconfirmed = Object.values(this.state.publicTextOutbox ?? {}).some(e => e.threadId === id && this.relayCurrent(e) && isUnconfirmedText(e));
                 const unconfirmedImage = Object.values(this.state.autoImages ?? {}).some(e => e.threadId === id && e.bindingEpoch === imageBindingEpoch && /unknown/.test(e.error ?? ""));
                 registered.relayStatus = { ...registered.relayStatus, mode: "desktop-public-journal",
                   lastError: unconfirmed ? "feishu_text_send_unconfirmed" : unconfirmedImage ? "feishu_public_send_unconfirmed" : pending ? null : "self_task_journal_unavailable", journalError: pending ? null : "self_task_journal_unavailable",
@@ -1136,9 +1638,11 @@ export class DesktopManager {
         }
         try { await this.serial(async () => {
           const session = this.session(id);
+          this.observeTaskProgress(id, snapshot.turns);
           this.seedOlderHistory(session, snapshot);
           const items = publicItems(snapshot);
           this.publicImageRelay.observe(session, snapshot, imageBindingEpoch);
+          await this.observeSnapshotTools(session, snapshot);
           await this.correlatePlainInput(session, items);
           for (const [index, item] of items.entries()) {
             const messageId = session.inputMessages?.[item.key];
@@ -1147,7 +1651,9 @@ export class DesktopManager {
           }
           for (const item of items) {
             const old = session.seen[item.key];
-            if (old?.hash === digest(item.text)) continue;
+            const questionUpgrade = item.publicQuestion && old && !old.publicQuestionId &&
+              questionSourceTurn(snapshot, true)?.id === item.turnId;
+            if (old?.hash === digest(item.text) && !questionUpgrade && (item.kind !== "assistant" || old.final == null || old.final === item.final)) continue;
             const correlation = item.text.match(/^\[Hermes Bridge messageId=([0-9a-f-]+) source=(trainer|hermes)\]\n/i);
             const known = correlation && this.state.receipts[correlation[1]];
             const boundPlain = item.kind === "delegated" && [session.inputMessages?.[item.key]].some(messageId => {
@@ -1174,37 +1680,27 @@ export class DesktopManager {
                 await this.emit("turn.started", { ...receipt?.request, targetThreadId: id, messageId }, {}, { turnId: item.turnId });
               }
             } else if (!boundPlain && !unconfirmedPlain && (item.kind === "trainer" || item.kind === "delegated")) {
-              const messageId = randomUUID();
-              await this.emit("message.observed", { targetThreadId: id, messageId, source: "trainer" }, { text: item.text, origin: "desktop-native-composer", alreadyDispatched: true }, { turnId: item.turnId });
-              await this.enqueueReport(id, "command", item.text);
+              if (this.transcriptEnabled) await this.observeNativeInput(session, item);
+              else {
+                const messageId = randomUUID();
+                await this.emit("message.observed", { targetThreadId: id, messageId, source: "trainer" }, { text: item.text, origin: "desktop-native-composer", alreadyDispatched: true }, { turnId: item.turnId });
+              }
             } else if (item.kind === "assistant") {
-              const delta = old && item.text.startsWith(old.text) ? item.text.slice(old.text.length) : item.text;
+              const delta = typeof old?.text === "string" && item.text.startsWith(old.text) ? item.text.slice(old.text.length) : item.text;
               const ids = session.turnMessages[item.turnId] ?? [];
-              await this.emit(item.final ? "item.completed" : "item.delta", { targetThreadId: id, source: "codex", messageId: ids[0] ?? null },
-                { text: delta, snapshot: item.text, phase: item.final ? "final_answer" : "commentary", messageIds: ids }, { turnId: item.turnId });
-              if (!item.final && this.config.xiliu.includeProgress) await this.enqueueReport(id, "progress", delta);
-              const inlineMedia = splitPublicMarkdown(item.final ? item.text : delta).some(part => part.type === "image");
-              if (inlineMedia && this.notifier && id === this.state.selectedThreadId) {
-                this.enqueuePublicText(session, item.turnId, item.key, item.final ? item.text : delta, imageBindingEpoch, item.final, [...ids]);
-                if (item.final) await this.enqueueReport(id, "reply", item.text);
-              } else if (item.final) {
-                await this.enqueueReport(id, "reply", item.text);
-                if (this.notifier && id === this.state.selectedThreadId) void this.notifier.sendMessage(item.text,
-                  { title: `${this.config.bridgeName}-回复`, threadId: id, chatId: session.feishuChatId }).catch(() => {});
-              } else if (this.notifier && id === this.state.selectedThreadId && this.config.feishu.streamEnabled !== false) {
-                if (!this.feishuBeats.has(id)) this.feishuBeats.set(id, new FeishuStreamBeat(this.notifier,
-                  { threadId: id, chatId: session.feishuChatId, bridgeName: this.config.bridgeName }));
-                const beat = this.feishuBeats.get(id); beat.chatId = session.feishuChatId;
-                const messageIds = [...ids];
-                beat.feedChunk({ type: "text-delta", text: delta });
-                beat.flush(() => this.serial(async () => {
-                  (session.deliveredProgress ??= {})[item.key] = true;
-                  for (const messageId of messageIds) this.finishFeishuInput(messageId);
-                  await this.save();
-                }));
+              const observed = await this.emit(item.final ? "item.completed" : "item.delta", { targetThreadId: id, source: "codex", messageId: ids[0] ?? null },
+                { text: delta, snapshot: item.text, itemKey: item.key, publicQuestion: item.publicQuestion,
+                  phase: item.final ? "final_answer" : "commentary", messageIds: ids }, { turnId: item.turnId });
+              if (!this.transcriptEnabled && this.notifier && this.relaySession(id)
+                  && (item.final || this.config.feishu.streamEnabled !== false)) {
+                this.enqueuePublicText(session, item.turnId, item.key, item.text,
+                  imageBindingEpoch, item.final, [...ids], {
+                    complete: terminal((snapshot.turns ?? []).find(turn => turn.id === item.turnId)?.status),
+                    publicQuestion: item.publicQuestion, transcriptId: observed.transcriptId });
               }
             }
-            session.seen[item.key] = { text: item.text, hash: digest(item.text) };
+            session.seen[item.key] = { text: item.text, hash: digest(item.text), final: item.final,
+              ...(item.publicQuestion ? { publicQuestionId: item.publicQuestion.questionId } : {}) };
           }
           for (const turn of snapshot.turns ?? []) {
             const ids = session.turnMessages[turn.id] ?? [];
@@ -1220,21 +1716,23 @@ export class DesktopManager {
           const active = activeTurn(snapshot);
           session.activeTurnId = active?.id ?? null; session.state = active || session.pendingInputs?.length ? "running" : "idle";
           for (const pending of [...(session.pendingInputs ?? [])]) {
-            if (Date.now() - pending.dispatchedAt <= this.config.turnTimeoutMs) continue;
+            const lastProgressAt = Math.max(pending.dispatchedAt, this.taskProgress.get(id)?.lastProgressAt ?? 0);
+            if (Date.now() - lastProgressAt < noProgressTimeoutMs(this.config)) continue;
             session.pendingInputs = session.pendingInputs.filter(p => p !== pending);
-            if (!pending.unknownOutcome) await this.emit("message.rejected", { targetThreadId: id, messageId: pending.messageId }, { error: "dispatch_outcome_unknown", detail: "Native follow-up was accepted but its turn could not be confirmed; inspect the Desktop task. No automatic retry.", retryable: false });
+            if (!pending.unknownOutcome) await this.emit("message.rejected", { targetThreadId: id, messageId: pending.messageId }, { error: "no_progress_timeout", detail: "无进展超时：已接受的输入持续没有新事件，且无法确认对应 turn；请检查原会话，不自动重发。", retryable: false });
           }
-          const readySteer = session.steerQueue?.length && (!active || (this.config.nativeBusyDeliveryVerified && localHost(session.hostId)));
+          await this.processCompaction(session, snapshot);
+          const readySteer = !this.compacting(session) && session.steerQueue?.length && (!active || (this.config.nativeBusyDeliveryVerified && localHost(session.hostId)));
           if (!this.handoffPaused && readySteer) {
             while (session.steerQueue.length && !this.handoffPaused) await this.dispatchQueued(session, session.steerQueue.shift(), snapshot);
-          } else if (!this.handoffPaused && !active && !session.pendingInputs?.length && session.queue.length) {
+          } else if (!this.compacting(session) && !this.handoffPaused && !active && !session.pendingInputs?.length && session.queue.length) {
             await this.dispatchQueued(session, session.queue.shift(), snapshot);
           }
           session.relayStatus = { ...session.relayStatus, mode: "full-history", lastSuccessAt: new Date().toISOString(), lastError: null, failures: 0 };
           await this.save();
         }); } catch (error) { await this.relayFailed(id, error); }
+        if (!this.hasPendingPublicImages()) await this.drainPublicTexts();
       }
-      this.reportTask = this.flushReports().catch(() => console.error("[CodexWorker] Report outbox persistence failed."));
       this.publicImageRelay.kick();
     } finally { this.pollRunning = false; }
   }
@@ -1256,27 +1754,40 @@ export class DesktopManager {
     const progress = observation.deliveryObservation;
     if (!progress) throw new Error("public_journal_status_unavailable");
     const batch = await this.publicJournal.read(session, session.publicJournalCheckpoint,
-      { turnId: progress.turnId, epoch, startAt: session.publicJournalStartAt });
+      { turnId: progress.turnId, epoch: this.transcriptEpoch(session, epoch), startAt: session.publicJournalStartAt,
+        includeInputs: this.transcriptEnabled, includeTools: this.toolProgressEnabled, includeContext: true });
+    this.observeTaskProgress(id, { progress, checkpoint: batch.checkpoint });
     await this.serial(async () => {
-      if (this.closed || this.handoffPaused || id !== this.state.selectedThreadId || epoch !== this.state.selectionEpoch) return;
+      if (this.closed || this.handoffPaused || !this.relaySession(id, epoch)) return;
       for (const { turnId, item, timestamp } of batch.events) {
+        if (item.type === "contextEvent") { await this.observeContextNow(item.event); continue; }
+        if (item.type === "toolActivity") { await this.observeToolActivityNow(item.activity); continue; }
+        if (item.type === "userMessage" && this.transcriptEnabled) {
+          const key = `${turnId}/${item.id}`;
+          if (session.seen[key]?.hash !== digest(item.text)) {
+            await this.observeNativeInput(session, { ...item, key, turnId }, timestamp);
+            session.seen[key] = { text: item.text, hash: digest(item.text) };
+          }
+          continue;
+        }
         // This projection is consumed ONLY by the public-image filter. It is
         // never used as history, input correlation, or a turn-control snapshot.
         if (item.type !== "agentMessage") {
           this.publicImageRelay.observe(session, { turns: [{ id: turnId, items: [item] }] }, epoch); continue;
         }
         const key = `${turnId}/${item.id}`, old = session.seen[key];
-        if (old?.hash === digest(item.text)) continue;
         const final = ["final", "final_answer"].includes(item.phase);
-        const delta = old && item.text.startsWith(old.text) ? item.text.slice(old.text.length) : item.text;
-        session.seen[key] = { text: item.text, hash: digest(item.text) };
-        if (this.notifier && (final || this.config.feishu.streamEnabled !== false)) {
-          this.enqueuePublicText(session, turnId, key, final ? item.text : delta, epoch, final,
-            this.typingInputsForOutput(session, timestamp));
+        if (old?.hash === digest(item.text) && (old.final == null || old.final === final)) continue;
+        const delta = typeof old?.text === "string" && item.text.startsWith(old.text) ? item.text.slice(old.text.length) : item.text;
+        const observed = await this.emit(final ? "item.completed" : "item.delta", { targetThreadId: id, source: "codex" },
+          { text: delta, snapshot: item.text, itemKey: key, phase: item.phase, readSource: "desktop-public-journal",
+            complete: true, publicQuestion: item.publicQuestion, messageIds: this.typingInputsForOutput(session, timestamp) }, { turnId });
+        if (!this.transcriptEnabled && this.notifier && (final || this.config.feishu.streamEnabled !== false)) {
+          this.enqueuePublicText(session, turnId, key, item.text, epoch, final,
+            this.typingInputsForOutput(session, timestamp), { complete: true, publicQuestion: item.publicQuestion, transcriptId: observed.transcriptId });
         }
-        await this.emit(final ? "item.completed" : "item.delta", { targetThreadId: id, source: "codex" },
-          { text: delta, snapshot: item.text, phase: item.phase, readSource: "desktop-public-journal" }, { turnId });
-        if (final || this.config.xiliu.includeProgress) await this.enqueueReport(id, final ? "reply" : "progress", item.text);
+        session.seen[key] = { text: item.text, hash: digest(item.text), final,
+          ...(item.publicQuestion ? { publicQuestionId: item.publicQuestion.questionId } : {}) };
       }
       session.publicJournalCheckpoint = batch.checkpoint;
       session.activeTurnId = activeTurn(observation)?.id ?? null;
@@ -1287,11 +1798,13 @@ export class DesktopManager {
       session.relayStatus = { ...session.relayStatus, mode: "desktop-public-journal", journalError: null,
         lastSuccessAt: new Date().toISOString(), lastError: unknownText ? "feishu_text_send_unconfirmed" : unknownImage ? "feishu_public_send_unconfirmed" : null, failures: 0,
         journal: { caughtUp: batch.caughtUp, offset: batch.checkpoint.offset, pendingBytes: batch.pendingBytes, bytesRead: batch.bytesRead } };
-      const readySteer = session.steerQueue?.length && (!session.activeTurnId || this.config.nativeBusyDeliveryVerified);
+      await this.processCompaction(session, observation);
+      const readySteer = !this.compacting(session) && session.steerQueue?.length && (!session.activeTurnId || this.config.nativeBusyDeliveryVerified);
       if (readySteer && !this.handoffPaused) await this.dispatchQueued(session, session.steerQueue.shift(), observation);
-      else if (!session.activeTurnId && session.queue.length && !this.handoffPaused) await this.dispatchQueued(session, session.queue.shift(), observation);
+      else if (!this.compacting(session) && !session.activeTurnId && session.queue.length && !this.handoffPaused) await this.dispatchQueued(session, session.queue.shift(), observation);
       await this.save(); // Public cursor + UUID outbox, before any network write.
     });
+    if (!this.hasPendingPublicImages()) await this.drainPublicTexts();
   }
 
   nextPublicOutputOrder() { return this.state.publicOutputSequence = (this.state.publicOutputSequence ?? 0) + 1; }
@@ -1319,20 +1832,71 @@ export class DesktopManager {
     }
   }
 
-  enqueuePublicText(session, turnId, key, text, epoch, final, messageIds = []) {
-    const inlineSeen = new Set();
-    for (const [index, part] of splitPublicMarkdown(text).entries()) {
+  enqueuePublicText(session, turnId, key, text, epoch, final, messageIds = [], { historyLimited = false, complete = final, input = false, progress = false, title: customTitle, transcriptId, deferDrain = false, publicQuestion } = {}) {
+    const inlineSeen = new Set(), entries = [];
+    // Keep the existing text/image layout and card identities during upgrade.
+    // Inputs are plain text and never grant file upload permissions.
+    const parts = publicQuestion || historyLimited || input || progress ? [{ type: "text", text }] : splitPublicMarkdown(text);
+    for (const [index, part] of parts.entries()) {
       if (part.type === "image") {
-        const identity = /^[a-z]:[\\/]/i.test(part.imagePath) ? path.win32.normalize(part.imagePath).toLowerCase() : path.normalize(part.imagePath);
+        const identity = /^[a-z]:[\\\\/]/i.test(part.imagePath) ? path.win32.normalize(part.imagePath).toLowerCase() : path.normalize(part.imagePath);
         if (inlineSeen.has(identity)) continue; inlineSeen.add(identity);
-        this.publicImageRelay.observe(session, { turns: [{ id: turnId, items: [{ type: "imageView", id: `${key}:inline:${index}`, path: part.imagePath }] }] }, epoch, { inline: true });
-      } else {
-        const uuid = randomUUID();
-        (this.state.publicTextOutbox ??= {})[uuid] = { uuid, key, part: index, threadId: session.threadId,
-          bindingEpoch: epoch, chatId: session.feishuChatId, text: part.text, order: this.nextPublicOutputOrder(),
-          title: `${this.config.bridgeName}-${final ? "回复" : "输出"}`, messageIds, status: "pending", at: new Date().toISOString() };
+        this.publicImageRelay.observe(session, { turns: [{ id: turnId, items: [{ type: "imageView", id: `${key}:inline:${index}`, path: part.imagePath }] }] }, epoch, { inline: true, publicTextKey: key });
+        continue;
+      }
+      for (const [page, body] of (publicQuestion ? [part.text] : hermesChunks(part.text)).entries()) {
+        const previous = this.transcriptEnabled && Object.values(this.state.publicTextOutbox ?? {}).find(e =>
+          e.threadId === session.threadId && e.key === key && e.part === index && e.page === page && !isAbandonedText(e));
+        const uuid = previous?.uuid ?? digest(["public-text-card", session.threadId, this.transcriptEpoch(session, epoch), key, index, page]).slice(0, 32);
+        const title = publicQuestion ? this.config.bridgeName + "-提问" : customTitle ?? `${this.config.bridgeName}-${final ? "回复" : "输出"}${historyLimited ? "（历史受限）" : ""}`;
+        const revision = publicQuestion ? digest([body, title, publicQuestion]) : digest([body, title]);
+        const cards = session.publicTextCards ??= {};
+        const card = cards[uuid];
+        const outbox = this.state.publicTextOutbox ??= {};
+        let entry = outbox[uuid];
+        if (isAbandonedText(entry) || card?.abandoned) continue;
+        if (card?.revision === revision && (!entry || entry.status === "sent")) {
+          if (!transcriptId) continue;
+          // Re-link a journal intent after a crash between archive and outbox save.
+          if (!entry) entry = outbox[uuid] = { uuid, key, part: index, page, stream: true, threadId: session.threadId,
+            mirror: this.transcriptEnabled, input, progress, bindingEpoch: epoch, feishuMessageId: card.messageId,
+            revision, status: "sent", messageIds: [] };
+        }
+        if (entry && transcriptId) entry.transcriptIds = [...new Set([...(entry.transcriptIds ?? []), transcriptId])];
+        if (entry && transcriptId) (entry.transcriptRevisions ??= {})[transcriptId] = revision;
+        if (entry?.revision === revision) { entry.complete ||= complete; entries.push(entry); entry.messageIds = [...new Set([...entry.messageIds, ...messageIds])]; continue; }
+        if (!entry) {
+          entry = outbox[uuid] = { uuid, key, part: index, page, stream: true, threadId: session.threadId,
+            bindingEpoch: epoch, mirror: this.transcriptEnabled, input, progress, chatId: session.feishuChatId, order: this.nextPublicOutputOrder(),
+            feishuMessageId: card?.messageId ?? null, status: card?.status === "unknown" ? "unknown" : "pending" };
+        }
+        if (transcriptId) entry.transcriptIds = [...new Set([...(entry.transcriptIds ?? []), transcriptId])];
+        if (transcriptId) (entry.transcriptRevisions ??= {})[transcriptId] = revision;
+        const blockedCreate = (entry.status === "unknown" || entry.status === "canceled" || entry.status === "sent")
+          && !entry.feishuMessageId;
+        Object.assign(entry, { text: body, title, revision, final, complete, historyLimited,
+          ...(publicQuestion ? { publicQuestion: clone(publicQuestion) } : {}),
+          messageIds: [...new Set([...(entry.messageIds ?? []), ...messageIds])], at: new Date().toISOString() });
+        if (entry.status !== "dispatching") entry.status = blockedCreate ? "unknown" : "pending";
+        entries.push(entry);
       }
     }
+    if (!deferDrain && !this.closed && !this.handoffPaused) void this.drainPublicTexts();
+    return entries;
+  }
+
+  hasPendingPublicImages() {
+    return this.publicImageRelay.running || Object.values(this.state.autoImages ?? {})
+      .some(entry => entry.status === "pending" || entry.status === "failed" && /unknown/.test(entry.error ?? ""));
+  }
+
+  schedulePublicTexts(delayMs) {
+    if (this.publicTextTimer || this.closed || this.handoffPaused) return;
+    this.publicTextTimer = setTimeout(() => {
+      this.publicTextTimer = null;
+      if (!this.closed && !this.handoffPaused) void this.drainPublicTexts();
+    }, Math.max(1, delayMs));
+    this.publicTextTimer.unref?.();
   }
 
   async drainPublicTexts() {
@@ -1340,20 +1904,56 @@ export class DesktopManager {
     if (this.closed || this.handoffPaused || !this.notifier) return;
     if (this.publicImageRelay.running) { await this.publicImageRelay.task; if (this.closed || this.handoffPaused) return; }
     this.publicTextRunning = true;
+    let persistenceFailed = false;
     const work = (async () => {
       for (let count = 0; count < 8 && !this.closed && !this.handoffPaused; count++) {
         let entry, imageEntry; const notifier = this.notifier;
         await this.serial(async () => {
-          const current = e => e.threadId === this.state.selectedThreadId && e.bindingEpoch === this.state.selectionEpoch;
+          const current = e => this.relayCurrent(e);
           for (const old of Object.values(this.state.publicTextOutbox ?? {})) {
             if (old.status === "pending" && !current(old)) { old.status = "canceled"; delete old.text; }
           }
-          const texts = Object.values(this.state.publicTextOutbox ?? {}).filter(e => e.status === "pending" || current(e) && isUnconfirmedText(e)).map(e => ({ e, image: false }));
-          const images = Object.values(this.state.autoImages ?? {}).filter(e => e.status === "pending" || current(e) && e.status === "failed" && /unknown/.test(e.error ?? "")).map(e => ({ e, image: true }));
-          const next = [...texts, ...images].sort((a, b) => (a.e.order ?? -1) - (b.e.order ?? -1))[0];
+          const allTexts = Object.values(this.state.publicTextOutbox ?? {}), allImages = Object.values(this.state.autoImages ?? {});
+          // Keep one Markdown output in order without holding unrelated replies.
+          // A prefix with an unknown result cannot authorize its later image or prose.
+          const sameOutput = (a, b) => a.threadId === b.threadId && a.bindingEpoch === b.bindingEpoch &&
+            (b.publicTextKey ?? b.key) === a.key && (b.order ?? 0) > (a.order ?? 0);
+          const barriers = allTexts.filter(e => current(e) && e.key && isUnconfirmedText(e));
+          const held = new Set(barriers.filter(e => [...allTexts, ...allImages].some(later =>
+            later.status === "pending" && sameOutput(e, later))).map(e => e.uuid));
+          const blocked = e => barriers.some(prefix => sameOutput(prefix, e));
+          const texts = allTexts.filter(e => !held.has(e.uuid) && !blocked(e) && (
+            e.status === "pending" || !this.transcriptEnabled && current(e) && isUnconfirmedText(e))).map(e => ({ e, image: false }));
+          const images = allImages.filter(e => !blocked(e) && (e.status === "pending" || !this.transcriptEnabled && current(e) && e.status === "failed" && /unknown/.test(e.error ?? ""))).map(e => ({ e, image: true }));
+          const now = Date.now();
+          const waiting = texts.filter(item => (item.e.retryAt ?? 0) > now);
+          if (waiting.length) this.schedulePublicTexts(Math.min(...waiting.map(item => item.e.retryAt)) - now);
+          const queue = [...texts.filter(item => (item.e.retryAt ?? 0) <= now), ...images].sort((a, b) => (a.e.order ?? -1) - (b.e.order ?? -1));
+          let next, settled = false;
+          while ((next = queue.shift())) {
+            if (next.image || next.e.status === "pending") break;
+            // An unconfirmed text is never replayed, but it must not hold later
+            // output hostage either: settle it once pending text waits behind it.
+            if (!queue.some(item => !item.image && item.e.status === "pending")) break;
+            next.e.status = "canceled"; delete next.e.text; settled = true;
+          }
           if (next?.image) imageEntry = next.e;
           else if (next?.e.status === "pending") entry = next.e;
-          if (entry) { entry.status = "dispatching"; await this.save(); }
+          if (entry) {
+            const interval = entry.progress ? TOOL_EDIT_INTERVAL_MS : Math.max(250, Number(this.config.feishu.streamUpdateIntervalMs) || 1000);
+            const delay = entry.stream && entry.feishuMessageId && !entry.complete
+              ? (entry.lastAttemptMs ?? 0) + interval - Date.now() : 0;
+            if (delay > 0) { this.schedulePublicTexts(delay); entry = null; return; }
+            entry.status = "dispatching"; entry.lastAttemptMs = Date.now();
+            if (entry.historyLimited) {
+              const session = this.session(entry.threadId);
+              session.limitedTextDelivery = { key: entry.key, uuid: entry.uuid, status: "dispatching", at: entry.at };
+              (session.limitedTextReceipts ??= {})[entry.uuid] = session.limitedTextDelivery;
+            }
+            await this.save();
+            entry = { ...entry, transcriptIds: [...(entry.transcriptIds ?? [])],
+              transcriptRevisions: { ...entry.transcriptRevisions } }; // Immutable network revision.
+          } else if (settled) await this.save();
         });
         if (imageEntry) {
           if (imageEntry.status !== "pending") return; // Never pass an unknown send barrier.
@@ -1365,37 +1965,85 @@ export class DesktopManager {
         if (this.closed || this.handoffPaused) {
           // No send began. Preserve the same pending UUID across a handoff,
           // instead of treating a temporary pause as a binding cancellation.
-          await this.serial(async () => { entry.status = "pending"; await this.save(); });
+          await this.serial(async () => {
+            const current = this.state.publicTextOutbox?.[entry.uuid];
+            if (current) current.status = "pending";
+            await this.save();
+          });
           return;
         }
         const valid = () => !this.closed && !this.handoffPaused && this.notifier === notifier &&
-          entry.threadId === this.state.selectedThreadId && entry.bindingEpoch === this.state.selectionEpoch;
-        let status = "canceled", sentMessageId = null;
+          this.relayCurrent(entry);
+        let status = "canceled", sentMessageId = null, evidence = null;
         if (valid()) {
           try {
-            const result = await notifier.sendMessage(entry.text, { threadId: entry.threadId, chatId: entry.chatId,
+            const options = { threadId: entry.threadId, chatId: entry.chatId,
               title: entry.title, uuid: entry.uuid, validateTarget: valid,
               onDelivery: diagnostic => this.serial(async () => {
-                (entry.deliveryEvidence ??= []).push(diagnostic);
-                if (entry.deliveryEvidence.length > 64) entry.deliveryEvidence.shift();
-                if (diagnostic.phase === "dispatching") entry.firstAttemptAt ??= diagnostic.at;
+                evidence = diagnostic;
+                const current = this.state.publicTextOutbox?.[entry.uuid];
+                if (!current) return;
+                (current.deliveryEvidence ??= []).push(diagnostic);
+                if (current.deliveryEvidence.length > 64) current.deliveryEvidence.shift();
+                if (diagnostic.phase === "dispatching") current.firstAttemptAt ??= diagnostic.at;
+                if (diagnostic.phase === "accepted" && diagnostic.messageId) current.feishuMessageId = diagnostic.messageId;
                 await this.save();
-              }) });
+              }) };
+            let result;
+            if (entry.publicQuestion) {
+              // The card publisher owns nonce, callback binding and its durable
+              // creation UUID. Never PATCH it with an ordinary Markdown reply.
+              const sent = await this.questions.publish(entry.publicQuestion, { existingCard: entry.feishuMessageId
+                ? { messageId: entry.feishuMessageId, uuid: entry.uuid, threadId: entry.threadId } : null });
+              const action = this.questions.state.entries[entry.publicQuestion.questionId];
+              result = sent.feishu === "sent" && action?.messageId
+                ? { code: 0, data: { message_id: action.messageId } } : null;
+            } else result = entry.feishuMessageId
+              ? await notifier.updateMessage?.(entry.feishuMessageId, entry.text, options)
+              : await notifier.sendMessage(entry.text, options);
             status = result?.code === 0 ? "sent" : "unknown";
             if (status === "sent") sentMessageId = result.data?.message_id ?? null;
           }
           catch { status = "unknown"; }
         }
+        if (this.transcriptEnabled && status === "unknown" &&
+            (entry.feishuMessageId || ["not_attempted", "rejected"].includes(evidence?.phase))) status = "pending";
         await this.serial(async () => {
-          entry.status = status; entry.at = new Date().toISOString();
-          if (status !== "unknown") delete entry.text;
-          if (sentMessageId) entry.feishuMessageId = sentMessageId;
-          this.session(entry.threadId).publicTextDelivery = { key: entry.key, uuid: entry.uuid, status, at: entry.at };
-          if (status === "sent") {
+          const current = this.state.publicTextOutbox?.[entry.uuid];
+          if (!current) return;
+          const newer = current.revision !== entry.revision;
+          current.feishuMessageId = sentMessageId ?? current.feishuMessageId ?? entry.feishuMessageId ?? null;
+          current.at = new Date().toISOString();
+          current.status = status === "sent" && newer ? "pending" : status;
+          if (status === "pending") {
+            current.retryCount = (current.retryCount ?? 0) + 1;
+            current.retryAt = Date.now() + Math.min(30000, 1000 * 2 ** Math.min(current.retryCount - 1, 5));
+            this.schedulePublicTexts(current.retryAt - Date.now());
+          } else { delete current.retryAt; current.retryCount = 0; }
+          if (current.stream) {
+            const cards = this.session(entry.threadId).publicTextCards ??= {};
+            cards[entry.uuid] = { messageId: current.feishuMessageId,
+              revision: status === "sent" ? entry.revision : cards[entry.uuid]?.revision, status };
+          }
+          if (!newer && !["unknown", "pending"].includes(status)) delete current.text;
+          this.session(entry.threadId).publicTextDelivery = { key: entry.key, uuid: entry.uuid, status, at: current.at };
+          if (entry.historyLimited) {
+            const session = this.session(entry.threadId);
+            session.limitedTextDelivery = { key: entry.key, uuid: entry.uuid, status, at: current.at };
+            (session.limitedTextReceipts ??= {})[entry.uuid] = session.limitedTextDelivery;
+          }
+          if (status === "sent" && !entry.input && !entry.progress) {
             (this.session(entry.threadId).deliveredProgress ??= {})[entry.key] = true;
             for (const id of entry.messageIds ?? []) this.finishFeishuInput(id, "public_output_delivered");
           }
-          if (status === "unknown") this.session(entry.threadId).relayStatus.lastError = "feishu_text_send_unconfirmed";
+          if (status === "unknown") (this.session(entry.threadId).relayStatus ??= {}).lastError = "feishu_text_send_unconfirmed";
+          for (const recordId of entry.transcriptIds ?? []) {
+            const pages = Object.values(this.state.publicTextOutbox).filter(e => e.transcriptIds?.includes(recordId));
+            await this.messageJournal.delivered(recordId, entry.uuid, status === "sent"
+                ? entry.transcriptRevisions?.[recordId] !== entry.revision ? "superseded" : "sent"
+                : status === "pending" ? "retrying" : "unknown",
+              current.feishuMessageId, pages.length);
+          }
           const settled = Object.values(this.state.publicTextOutbox).filter(e => ["sent", "canceled"].includes(e.status));
           for (const old of settled.slice(0, Math.max(0, settled.length - 128))) delete this.state.publicTextOutbox[old.uuid];
           await this.save();
@@ -1404,8 +2052,12 @@ export class DesktopManager {
     })();
     this.publicTextTask = work;
     try { await this.track(work); }
-    catch { console.error("[CodexWorker] Public text outbox persistence failed; unknown sends are not replayed."); }
-    finally { this.publicTextRunning = false; this.publicTextTask = null; }
+    catch { persistenceFailed = true; console.error("[bridge] Public text outbox persistence failed; unknown sends are not replayed."); }
+    finally {
+      this.publicTextRunning = false; this.publicTextTask = null;
+      const ready = Object.values(this.state.publicTextOutbox ?? {}).some(e => e.status === "pending" && (e.retryAt ?? 0) <= Date.now());
+      if (ready) this.schedulePublicTexts(persistenceFailed ? 30000 : 1);
+    }
   }
 
   async abandonTextReceipt(body) {
@@ -1446,31 +2098,34 @@ export class DesktopManager {
       this.nativeProgressPolls.set(id, { at: Date.now(), cursor: null });
       progress = await inspect(null); // Read-only reset after a stale native cursor.
     }
+    this.observeTaskProgress(id, progress);
     let delivery = null, accepted = false;
     await this.serial(async () => {
-      if (this.closed || this.handoffPaused || this.state.selectedThreadId !== id || this.state.selectionEpoch !== epoch) return;
+      if (this.closed || this.handoffPaused || !this.relaySession(id, epoch)) return;
       accepted = true;
       const session = this.session(id), status = session.relayStatus ??= {};
       session.state = "error"; // Full-history/input/image synchronization is still unavailable.
       session.activeTurnId = terminal(progress.turnStatus) ? null : progress.turnId;
       Object.assign(status, { mode: "latest-public-message", lastProgressAt: new Date().toISOString(), lastError: "native_single_turn_too_large" });
       const item = progress.message, key = item && `${item.turnId}/${item.id}`;
-      if (item?.text.trim() && session.seen[key]?.hash !== digest(item.text)) {
+      if (item?.text.trim() && (session.seen[key]?.hash !== digest(item.text) || session.seen[key]?.final != null && session.seen[key].final !== item.final)) {
         const old = session.seen[key];
-        const delta = old && item.text.startsWith(old.text) ? item.text.slice(old.text.length) : item.text;
+        const delta = typeof old?.text === "string" && item.text.startsWith(old.text) ? item.text.slice(old.text.length) : item.text;
         const ids = session.turnMessages[item.turnId] ?? [];
-        await this.emit(item.final ? "item.completed" : "item.delta", { targetThreadId: id, source: "codex", messageId: ids[0] ?? null },
-          { text: delta, snapshot: item.text, phase: item.final ? "final_answer" : "commentary", messageIds: ids,
-            readSource: "native-progress", historyLimited: true }, { turnId: item.turnId });
-        if (item.final || this.config.xiliu.includeProgress) await this.enqueueReport(id, item.final ? "reply" : "progress", item.text);
-        session.seen[key] = { text: item.text, hash: digest(item.text) };
+        const observed = await this.emit(item.final ? "item.completed" : "item.delta", { targetThreadId: id, source: "codex", messageId: ids[0] ?? null },
+          { text: delta, snapshot: item.text, itemKey: key, phase: item.final ? "final_answer" : "commentary", messageIds: ids,
+            readSource: "native-progress", historyLimited: true, complete: terminal(progress.turnStatus) }, { turnId: item.turnId });
+        session.seen[key] = { text: item.text, hash: digest(item.text), final: item.final };
         if (this.notifier && (item.final || this.config.feishu.streamEnabled !== false)) {
-          delivery = { key, uuid: randomUUID(), text: item.final ? item.text : delta, threadId: id, chatId: session.feishuChatId,
-            title: `${this.config.bridgeName}-${item.final ? "回复" : "输出"}（历史受限）`, notifier: this.notifier };
-          session.limitedTextDelivery = { key, uuid: delivery.uuid, status: "dispatching", at: new Date().toISOString() };
-          (session.limitedTextReceipts ??= {})[delivery.uuid] = session.limitedTextDelivery;
-          const settled = Object.values(session.limitedTextReceipts).filter(receipt => ["sent", "canceled"].includes(receipt.status));
-          for (const receipt of settled.slice(0, Math.max(0, settled.length - 128))) delete session.limitedTextReceipts[receipt.uuid];
+          const entries = this.transcriptEnabled
+            ? Object.values(this.state.publicTextOutbox ?? {}).filter(e => e.transcriptIds?.includes(observed.transcriptId))
+            : this.enqueuePublicText(session, item.turnId, key, item.text, epoch, item.final, [],
+            { historyLimited: true, complete: terminal(progress.turnStatus), transcriptId: observed.transcriptId });
+          delivery = entries[0] ?? null;
+          if (delivery) {
+            session.limitedTextDelivery = { key, uuid: delivery.uuid, status: delivery.status, at: delivery.at };
+            (session.limitedTextReceipts ??= {})[delivery.uuid] = session.limitedTextDelivery;
+          }
         }
       }
       // Save the seen item and intent BEFORE sending. Unknown sends never replay.
@@ -1478,69 +2133,13 @@ export class DesktopManager {
     });
     if (!accepted) return;
     this.nativeProgressPolls.set(id, { at: Date.now(), cursor: progress.cursor });
-    if (!delivery) return;
-    let outcome = "canceled";
-    if (!this.closed && !this.handoffPaused && this.state.selectedThreadId === id && this.state.selectionEpoch === epoch && this.notifier === delivery.notifier) {
-      try { outcome = (await delivery.notifier.sendMessage(delivery.text, { threadId: delivery.threadId,
-        chatId: delivery.chatId, title: delivery.title, uuid: delivery.uuid,
-        validateTarget: () => !this.closed && !this.handoffPaused && this.state.selectedThreadId === id &&
-          this.state.selectionEpoch === epoch && this.notifier === delivery.notifier }))?.code === 0 ? "sent" : "unknown"; }
-      catch { outcome = "unknown"; }
-    }
-    await this.serial(async () => {
-      const session = this.session(id), receipt = session.limitedTextReceipts?.[delivery.uuid];
-      if (receipt) {
-        receipt.status = outcome; receipt.at = new Date().toISOString();
-        if (session.limitedTextDelivery?.uuid === delivery.uuid) session.limitedTextDelivery = receipt;
-        await this.save();
-      }
-    });
+    if (delivery) await this.drainPublicTexts();
     // Do not correlate/replay inputs, dispatch queues, mark turns completed or
     // discover images from this intentionally incomplete native snapshot.
   }
 
-  async enqueueReport(threadId, type, content) {
-    if (!this.config.xiliu?.enabled || !this.config.xiliu.url) return;
-    // Exact existing Hermes report fields; no server changes are required.
-    this.state.outbox.push({ machine: this.config.bridgeName, thread_id: threadId, type, content });
-    await this.save();
-  }
-
-  async flushReports() {
-    if (!this.config.xiliu?.enabled || !this.config.xiliu.url || this.reportRunning || !this.state.outbox.length || this.closed || this.handoffPaused) return;
-    this.reportRunning = true;
-    try {
-      while (this.config.xiliu?.enabled && this.config.xiliu.url && this.state.outbox.length && !this.closed && !this.handoffPaused) {
-        const report = clone(this.state.outbox[0]);
-        try {
-          const response = await this.fetch(`${this.config.xiliu.url.replace(/\/$/, "")}/report`, {
-            method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(report),
-            signal: AbortSignal.timeout(this.config.xiliu.timeoutMs ?? 8000) });
-          if (!response.ok) break;
-        } catch { break; }
-        await this.serial(async () => {
-          for (const question of Object.values(this.state.publicQuestions ?? {})) {
-            if (question.threadId === report.thread_id && question.text === report.content && report.type === "progress") question.hermesStored = true;
-          }
-          this.state.outbox.shift(); await this.save();
-        });
-      }
-    } finally { this.reportRunning = false; }
-  }
-
-  async heartbeat() {
-    const x = this.config.xiliu;
-    if (!x?.enabled || !x.url || this.closed || this.handoffPaused || this.heartbeatOperations) return;
-    this.heartbeatOperations++;
-    try { await this.fetch(`${x.url.replace(/\/$/, "")}/heartbeat`, { method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ machine: this.config.bridgeName, name: this.config.bridgeName,
-        detail: { workspace: this.config.workspaceRoots[0], port: this.hermesIngress?.server?.listening ? this.hermesIngress.config.port : this.config.port, pid: process.pid } }), signal: AbortSignal.timeout(x.timeoutMs ?? 8000) }); }
-    catch { /* Side channel never changes native turn outcome. */ }
-    finally { this.heartbeatOperations--; }
-  }
-
   async receiveFeishu(event) {
-    if (event.chat_type !== "p2p" || event.sender_type !== "user" || !["text", "image"].includes(event.message_type) || !event.content?.trim()) return;
+    if (event.chat_type !== "p2p" || event.sender_type !== "user" || !["text", "image", "post", "file"].includes(event.message_type) || !event.content?.trim()) return;
     if (!this.config.feishu.trainerOpenIdWhitelist?.includes(event.open_id)) return;
     // Stable UUIDv4-shaped digest makes duplicate WS delivery idempotent across restart.
     const hex = createHash("sha256").update(`feishu:${event.message_id}`).digest("hex");
@@ -1569,14 +2168,14 @@ export class DesktopManager {
 
   async enqueueFeishu(event) {
     if (this.closed) throw new Error("ingress_quiescing");
-    if (event.chat_type !== "p2p" || event.sender_type !== "user" || !["text", "image"].includes(event.message_type) ||
+    if (event.chat_type !== "p2p" || event.sender_type !== "user" || !["text", "image", "post", "file"].includes(event.message_type) ||
         !event.message_id || !event.content?.trim() || !this.config.feishu.trainerOpenIdWhitelist?.includes(event.open_id)) return;
     // Separate from the native writer tail: a slow native send must not prevent
     // a later WS event from being durably received and acknowledged promptly.
     await this.inboxSerial(async () => {
       if (!this.inbox.entries[event.message_id]) {
         this.inbox.entries[event.message_id] = { ...structuredClone(event),
-          ...(event.message_type === "image" ? { bridgeImageThreadId: this.state.selectedThreadId } : {}) };
+          ...(["image", "post", "file"].includes(event.message_type) ? { bridgeImageThreadId: this.state.selectedThreadId } : {}) };
       }
       // Even an in-memory duplicate may follow a failed previous disk write.
       await this.saveInbox();
@@ -1588,7 +2187,7 @@ export class DesktopManager {
     if (!event || this.closed || this.handoffPaused || this.inboxRunning.has(event.message_id)) return;
     this.inboxRunning.add(event.message_id);
     const task = this.receiveFeishu(event).catch(() => {
-      console.error("[CodexWorker] Durable Feishu input rejected; inspect message terminal events.");
+      console.error("[bridge] Durable Feishu input rejected; inspect message terminal events.");
       return null;
     }).then(async result => {
       if (!result) {
@@ -1597,17 +2196,18 @@ export class DesktopManager {
         const hex = createHash("sha256").update(`feishu:${event.message_id}`).digest("hex");
         const id = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
         const persisted = JSON.parse(await readFile(this.statePath, "utf8"));
-        if (!persisted.receipts?.[id]?.error && !persisted.receipts?.[id]?.response) return;
+        const receipt = persisted.receipts?.[id] ?? await this.receiptArchive.get(id);
+        if (!receipt?.error && !receipt?.response) return;
       }
       return this.inboxSerial(async () => {
         delete this.inbox.entries[event.message_id]; await this.saveInbox();
       });
     }).finally(() => this.inboxRunning.delete(event.message_id));
-    void this.track(task).catch(() => console.error("[CodexWorker] Feishu inbox completion could not be saved; its UUID must not be replaced."));
+    void this.track(task).catch(() => console.error("[bridge] Feishu inbox completion could not be saved; its UUID must not be replaced."));
   }
 
   async handleFeishuInput(event, messageId) {
-    const imageThreadId = event.message_type === "image"
+    const imageThreadId = ["image", "post", "file"].includes(event.message_type)
       ? this.state.feishuReceipts[messageId]?.imageThreadId ?? event.bridgeImageThreadId ?? this.session().threadId : null;
     if (!this.state.feishuReceipts[messageId]) {
       await this.serial(async () => {
@@ -1622,33 +2222,49 @@ export class DesktopManager {
           const reactionId = await notifier.addReaction(event.message_id).catch(() => null);
           await this.serial(async () => { this.state.feishuReceipts[messageId].reactionId = reactionId; await this.save(); });
           if (this.state.feishuReceipts[messageId].cleanupRequested) await this.removeFeishuReaction(messageId, notifier);
-        })().catch(() => console.error("[CodexWorker] Feishu typing reaction failed."));
+        })().catch(() => console.error("[bridge] Feishu typing reaction failed."));
         this.feishuReactionTasks.set(messageId, task);
         void task.finally(() => this.feishuReactionTasks.delete(messageId));
       }
     }
     try {
       if (imageThreadId && imageThreadId !== this.state.selectedThreadId) fail(409, "selected_target_changed", "Image ingress follows its selected chat at durable acceptance; no fallback.");
-      if (imageThreadId && !localHost(this.session(imageThreadId).hostId)) fail(422, "capability_unavailable", "飞书图片缓存位于 CodexWorker 本机，暂不能把本机路径传给其他设备的聊天。");
-      const text = event.message_type === "image" ? imagePrompt(await cacheFeishuImage(this, event, messageId)) : event.content;
+      const post = event.message_type === "post" ? parseFeishuPost(event.content) : null;
+      if ((["image", "file"].includes(event.message_type) || post?.images.length) && imageThreadId && !localHost(this.session(imageThreadId).hostId))
+        fail(422, "capability_unavailable", "飞书图片缓存位于本机，暂不能把本机路径传给其他设备的聊天。");
+      const native = this.config.nativeImageInput === true;
+      const text = post ? await feishuPostPrompt(this, event, messageId, post, { native })
+        : event.message_type === "image" ? imagePrompt(await cacheFeishuImage(this, event, messageId), { native })
+        : event.message_type === "file" ? fileImagePrompt(event, await cacheFeishuImage(this, event, messageId), { native }) : event.content;
+      if (native && (["image", "file"].includes(event.message_type) || post?.images.length)) {
+        await this.serial(async () => {
+          const receipt = this.state.feishuReceipts[messageId];
+          receipt.nativeImagePaths = post ? post.images.map(key => receipt.imagePaths[key]) : [receipt.imagePath];
+          await this.save();
+        });
+      }
       const result = await this.message({ protocolVersion: PROTOCOL, messageId, source: "trainer", text,
         delivery: this.config.feishu.defaultDelivery ?? "steer",
         ...(imageThreadId ? { targetThreadId: imageThreadId } : {}) }, { requireSelectedTarget: Boolean(imageThreadId) });
       if (result.session) await this.serial(async () => { this.session(result.session.threadId).feishuChatId = event.chat_id; await this.save(); });
-      if (!result.duplicate && this.notifier && !["dispatch_pending", "message_queued"].includes(result.action)) {
+      if (!result.duplicate && !result.publicReplyArchived && this.notifier && !["dispatch_pending", "message_queued"].includes(result.action)) {
         const text = result.text ?? (result.resumeList ? resumeListText(result)
           : result.action === "session_status" ? `当前会话：${result.session.alias}\n状态：${result.session.state}\n同步：${result.session.relayStatus?.mode ?? "native-history"}\n飞书：${result.health.integrations.feishu.connected ? "已连接" : "未连接"}`
           : result.session ? `已切换到：${result.session.alias}` : `已完成：${result.action}`);
-        await this.notifier.sendMessage(text, { chatId: event.chat_id, threadId: result.session?.threadId ?? result.currentSession?.threadId });
+        const targetThreadId = result.session?.threadId ?? result.currentSession?.threadId ?? this.state.selectedThreadId;
+        if (!await this.publicReply({ messageId, targetThreadId, source: "bridge" }, text))
+          await this.notifier.sendMessage(text, { chatId: event.chat_id, threadId: targetThreadId });
       }
       if (!["dispatch_pending", "message_queued"].includes(result.action)) this.finishFeishuInput(messageId);
       return result;
     } catch (error) {
       this.finishFeishuInput(messageId);
       const unknown = this.state.receipts[messageId]?.nativeDispatch?.status === "unknown";
-      if (this.notifier) await this.notifier.sendMessage(unknown
+      const text = unknown
         ? "这条消息的原生发送结果尚未确认。请先在 Codex 查看，避免重复发送；Bridge 已保留原始回执。"
-        : `未接收这条消息：${error.body?.error ?? "bridge_error"}\n${error.body?.detail ?? "请在 Codex 检查桥状态。"}`, { chatId: event.chat_id }).catch(() => {});
+        : `未接收这条消息：${error.body?.error ?? "bridge_error"}\n${error.body?.detail ?? "请在 Codex 检查桥状态。"}`;
+      if (!await this.publicReply({ messageId, targetThreadId: imageThreadId ?? this.state.selectedThreadId, source: "bridge" }, text, "error"))
+        await this.notifier?.sendMessage(text, { chatId: event.chat_id }).catch(() => {});
       throw error;
     }
   }
@@ -1683,23 +2299,8 @@ export class DesktopManager {
       this.server.once("error", reject); this.server.listen(this.config.port, this.config.host, resolve);
     });
     this.config.port = this.server.address().port;
-    if (this.config.hermesIngress?.enabled) {
-      this.hermesIngress = new HermesIngress(this, this.config.hermesIngress);
-      try { await this.hermesIngress.start(); }
-      catch (error) {
-        const code = optionalIngressFailure(error); if (!code) throw error;
-        this.hermesIngressError = code;
-        await this.hermesIngress.close();
-        // Changing Wi-Fi or an occupied optional LAN port must not take down
-        // local Feishu. Never bind another address or relax its peer/token gates.
-      }
-    }
-    this.pollTimer = setInterval(() => { void this.scan().catch(() => console.error("[CodexWorker] Native synchronization failed.")); }, this.config.pollMs);
+    this.pollTimer = setInterval(() => { void this.scan().catch(() => console.error("[bridge] Native synchronization failed.")); }, this.config.pollMs);
     this.pollTimer.unref();
-    if (this.config.xiliu?.enabled) {
-      this.heartbeatTimer = setInterval(() => { void this.heartbeat(); }, this.config.xiliu.heartbeatIntervalMs ?? 60000);
-      this.heartbeatTimer.unref();
-    }
     this.questions.start();
     return `http://${this.config.host}:${this.config.port}`;
   }
@@ -1715,37 +2316,31 @@ export class DesktopManager {
       // rejected BEFORE any native write, so an explicit retry is safe. Already
       // admitted HTTP requests still finish and remain counted until then.
       const snapshot = req.method === "GET" && (["/health", "/bridge/runtime", "/bridge/integrations",
-        "/manager/events", "/manager/sessions", "/threads"].includes(url.pathname) ||
-        /^\/manager\/sessions\/[^/]+$/.test(url.pathname));
+        "/manager/events", "/manager/transcript", "/manager/sessions", "/threads"].includes(url.pathname) ||
+        /^\/manager\/sessions\/[^/]+(?:\/(?:context|memory))?$/.test(url.pathname));
       const reload = req.method === "POST" && url.pathname === "/bridge/runtime/reload";
       if (this.handoffPaused && !snapshot && !reload) {
         fail(503, "bridge_reloading", "Business handoff in progress; this request was not dispatched. Retry with the same messageId.", true);
       }
       if (!snapshot && !reload) { this.httpOperations++; counted = true; }
-      if (context.hermesIngress) {
-        context.hermesIngress.recordPeer(context.peerAddress);
-        const basic = ["GET /health", "GET /threads", "POST /threads", "POST /turn"].includes(`${req.method} ${url.pathname}`);
-        const nativeTask = url.pathname.match(/^\/threads\/([^/]+)(?:\/(last-turn|resume|release|unsubscribe|stop|compact))?$/);
-        const taskRoute = nativeTask && (req.method === "GET" ? [undefined, "last-turn"].includes(nativeTask[2]) :
-          req.method === "POST" && ["resume", "release", "unsubscribe", "stop", "compact"].includes(nativeTask[2]));
-        if (!basic && !taskRoute) fail(404, "not_found", "This limited ingress does not expose manager or configuration routes.");
-        if (nativeTask) {
-          const requestedId = decodeURIComponent(nativeTask[1]); this.session(requestedId);
-          if (requestedId !== this.state.selectedThreadId) fail(409, "selected_target_changed", "Refresh /threads; this ingress follows the Feishu-selected chat only.", false);
-        }
-        if (req.method === "GET" && url.pathname === "/health") return json(res, 200, { ...this.health(),
-          integrationProfile: HERMES_PROFILE, messagingReady: this.connected && Boolean(this.state.sessions[this.state.selectedThreadId]),
-          selectedThreadId: this.state.selectedThreadId });
-      }
       if (req.method === "GET" && url.pathname === "/health") return json(res, 200, this.health());
+      const cancelTask = /^\/manager\/tasks\/(t-[A-Za-z0-9_-]+)\/cancel$/.exec(url.pathname);
+      if (req.method === "POST" && cancelTask) {
+        body = await readBody(req);
+        if (body.task_id && body.task_id !== cancelTask[1]) fail(400, "task_id_mismatch", "Task ID must match its control URL.");
+        const outcome = await this.cancelRouterTask(cancelTask[1]);
+        return json(res, outcome.state === "cancelled" ? 200 : 202, outcome);
+      }
       if (req.method === "POST" && url.pathname === "/bridge/text-receipts/abandon") {
         const peer = req.socket.remoteAddress?.replace(/^::ffff:/, "");
         if (!["127.0.0.1", "::1"].includes(peer)) fail(403, "loopback_required", "Receipt review is local-only.");
         return json(res, 200, await this.abandonTextReceipt(await readBody(req)));
       }
-      if (["/bridge/images", "/bridge/images/recover", "/bridge/runtime", "/bridge/runtime/reload"].includes(url.pathname)) {
+      if (["/bridge/images", "/bridge/images/recover", "/bridge/runtime", "/bridge/runtime/reload", "/bridge/permissions/review"].includes(url.pathname)) {
         const peer = req.socket.remoteAddress?.replace(/^::ffff:/, "");
-        if (!["127.0.0.1", "::1"].includes(peer)) fail(403, "loopback_required", "Image output and code reload are local-only.");
+        if (!["127.0.0.1", "::1"].includes(peer)) fail(403, "loopback_required", "Integration control is local-only.");
+        if (req.method === "POST" && url.pathname === "/bridge/permissions/review")
+          return json(res, 200, await reviewNativePermission(this, await readBody(req)));
         if (req.method === "GET" && url.pathname === "/bridge/runtime") return json(res, 200, this.businessRuntime.status());
         if (req.method === "POST" && url.pathname === "/bridge/runtime/reload") {
           body = await readBody(req);
@@ -1758,14 +2353,37 @@ export class DesktopManager {
       }
       if (req.method === "GET" && url.pathname === "/bridge/integrations") return json(res, 200, this.integrationStatus());
       if (req.method === "POST" && url.pathname === "/bridge/integrations/reload") return json(res, 200, await this.reloadIntegrations());
+      if (req.method === "GET" && url.pathname === "/bridge/workers") return json(res, 200, await routerOperations(this).workers());
+      if (req.method === "GET" && url.pathname === "/bridge/worker-messages") return json(res, 200,
+        await routerOperations(this).message("inbox", { after: Number(url.searchParams.get("after") ?? 0) }));
+      if (req.method === "POST" && url.pathname === "/bridge/worker-messages") return json(res, 200,
+        await routerOperations(this).message("send", await readBody(req)));
+      if (req.method === "POST" && url.pathname === "/bridge/work-orders") return json(res, 200,
+        await routerOperations(this).createWorkOrder(await readBody(req)));
+      const workOrderRoute = url.pathname.match(/^\/bridge\/work-orders\/([^/]+)$/);
+      if (req.method === "GET" && workOrderRoute) return json(res, 200, await routerOperations(this).workOrder(decodeURIComponent(workOrderRoute[1])));
       if (req.method === "POST" && url.pathname === "/bridge/questions") return json(res, 200, await this.questions.publish(await readBody(req)));
-      const questionRoute = url.pathname.match(/^\/bridge\/questions\/([^/]+)(?:\/(resolve))?$/);
+      const questionRoute = url.pathname.match(/^\/bridge\/questions\/([^/]+)(?:\/(resolve|answer|sync-native))?$/);
       if (questionRoute) {
         const peer = req.socket.remoteAddress?.replace(/^::ffff:/, "");
         if (!["127.0.0.1", "::1"].includes(peer)) fail(403, "loopback_required", "Question lifecycle updates are local-only.");
         const id = decodeURIComponent(questionRoute[1]);
         if (req.method === "GET" && !questionRoute[2]) return json(res, 200, this.questions.get(id));
+        if (req.method === "POST" && questionRoute[2] === "answer") return json(res, 200, await this.questions.acceptAgentAnswer(id, await readBody(req)));
+        if (req.method === "POST" && questionRoute[2] === "sync-native") return json(res, 200, await this.questions.syncNativeAnswer(id));
         if (req.method === "POST" && questionRoute[2] === "resolve") return json(res, 200, await this.questions.resolve(id, await readBody(req)));
+      }
+      if (req.method === "GET" && url.pathname === "/manager/transcript") {
+        if (!this.transcriptEnabled) fail(503, "transcript_disabled", "Persistent conversation transcript is not enabled.");
+        try {
+          const page = await this.messageJournal.list({ after: url.searchParams.get("after") ?? "",
+            limit: Number(url.searchParams.get("limit") ?? 50), threadId: url.searchParams.get("threadId") || undefined,
+            direction: url.searchParams.get("direction") || undefined });
+          return json(res, 200, { ok: true, ...page });
+        } catch (error) {
+          if (/^invalid_transcript_/.test(error.message)) fail(400, error.message, "Invalid transcript query.");
+          throw error;
+        }
       }
       if (req.method === "GET" && url.pathname === "/manager/events") {
         const after = Number(url.searchParams.get("after") ?? req.headers["last-event-id"] ?? "0");
@@ -1779,14 +2397,8 @@ export class DesktopManager {
         res.on("close", () => { clearInterval(timer); this.clients.delete(res); }); return;
       }
       if (req.method === "GET" && url.pathname === "/manager/sessions") return json(res, 200, { sessions: Object.values(this.state.sessions).map(clone), selectedThreadId: this.state.selectedThreadId });
-      if (req.method === "GET" && url.pathname === "/threads") return json(res, 200, { threads: (context.hermesIngress ? [this.session()] : Object.values(this.state.sessions)).slice(0, Math.max(1, Math.min(50, Number(url.searchParams.get("limit") ?? 50)))).map(s => ({ id: s.threadId, cwd: s.cwd, createdAt: s.createdAt, live: true, hostId: s.hostId })) });
+      if (req.method === "GET" && url.pathname === "/threads") return json(res, 200, { threads: Object.values(this.state.sessions).slice(0, Math.max(1, Math.min(50, Number(url.searchParams.get("limit") ?? 50)))).map(s => ({ id: s.threadId, cwd: s.cwd, createdAt: s.createdAt, live: true, hostId: s.hostId })) });
       if (["POST", "PATCH"].includes(req.method)) body = await readBody(req);
-      if (context.hermesIngress && body?.cwd != null) {
-        const inherited = url.pathname === "/threads" ? this.config.workspaceRoots[0] : this.session().cwd;
-        if (typeof body.cwd !== "string" || path.resolve(body.cwd).toLowerCase() !== path.resolve(inherited).toLowerCase()) {
-          fail(422, "capability_unavailable", "Native messages inherit the Desktop task workspace; this ingress cannot override cwd.");
-        }
-      }
       if (req.method === "POST" && url.pathname === "/manager/messages") return json(res, 200, await this.message(body));
       if (req.method === "POST" && url.pathname === "/manager/sessions/adopt") return json(res, 200, await this.register(body, { requireFork: body.command === "/fork" }));
       if (req.method === "POST" && url.pathname === "/threads") {
@@ -1796,18 +2408,21 @@ export class DesktopManager {
       if (req.method === "POST" && url.pathname === "/turn") {
         if (typeof body.threadId !== "string" || !body.threadId) fail(400, "invalid_request", "threadId is required.");
         this.session(body.threadId);
-        const result = await this.message(legacyRequest({ ...body, targetThreadId: body.threadId,
-          ...(context.hermesIngress ? { source: "hermes", delivery: body.delivery ?? "steer" } : {}) }),
-          { requireSelectedTarget: Boolean(context.hermesIngress) });
-        if (context.hermesIngress) context.hermesIngress.recordDelivery(result);
+        const result = await this.message(legacyRequest({ ...body, targetThreadId: body.threadId }));
         if (body.wait !== false && ["dispatch_pending", "message_queued"].includes(result.action)) {
-          return json(res, 200, await this.waitResult(result.messageId, body.threadId));
+          return json(res, 200, await this.waitResult(result.messageId, body.threadId, body));
         }
         return json(res, 200, { threadId: result.session?.threadId ?? body.threadId, turnId: null, messageId: result.messageId,
           duplicate: result.duplicate, eventSeq: result.eventSeq, action: result.action,
           status: result.action === "dispatch_pending" ? "started" : result.action, nativeTurnPending: result.action === "dispatch_pending",
           ...(result.sessions ? { sessions: result.sessions } : {}),
           ...(result.resumeList ? { currentSession: result.currentSession, resumePage: result.resumePage, resumeQuery: result.resumeQuery } : {}) });
+      }
+      const contextRoute = url.pathname.match(/^\/manager\/sessions\/([^/]+)\/context$/);
+      if (contextRoute) {
+        const session = this.session(decodeURIComponent(contextRoute[1]));
+        if (req.method === "GET") return json(res, 200, await this.contextView(session));
+        fail(405, "method_not_allowed", "Use GET context.");
       }
       const match = url.pathname.match(/^\/(manager\/sessions|threads)\/([^/]+)(?:\/(select|last-turn|resume|release|unsubscribe|stop|compact))?$/);
       if (match) {
@@ -1832,22 +2447,95 @@ export class DesktopManager {
         }
         if (req.method === "POST" && operation === "resume") { await this.read(id, session.hostId); return json(res, 200, { thread: { id, live: true, cwd: session.cwd } }); }
         if (req.method === "POST" && operation === "stop") {
-          const result = await this.message(legacyRequest({ text: "/stop", targetThreadId: id }), { requireSelectedTarget: Boolean(context.hermesIngress) });
+          const result = await this.message(legacyRequest({ text: "/stop", targetThreadId: id }));
           return json(res, 200, { idle: result.action === "turn_already_idle" });
         }
-        if (operation === "compact") fail(501, "capability_unavailable", "The Desktop native tool pipe does not expose compact; use the client's native control.");
+        if (req.method === "POST" && operation === "compact") return json(res, 200, await this.message(legacyRequest({ ...body, text: "/compact", targetThreadId: id, source: "trainer" })));
       }
       fail(404, "not_found", "Unknown route.");
     } catch (error) {
-      const mapped = error instanceof BridgeError || error instanceof QuestionRelayError || error instanceof BusinessRuntimeError || error?.name === "ImageOutputError" ? error : new BridgeError(500, "bridge_error", "Bridge request failed; inspect local plugin diagnostics.");
+      const mapped = error instanceof BridgeError || error instanceof QuestionRelayError || error instanceof BusinessRuntimeError || ["ImageOutputError", "RouterOperationError"].includes(error?.name) ? error : new BridgeError(500, "bridge_error", "Bridge request failed; inspect local plugin diagnostics.");
       if (res.headersSent) { res.destroy(); return; }
       json(res, mapped.status, { ...mapped.body, ...(body?.messageId ? { messageId: body.messageId } : {}) });
     } finally { if (counted) this.httpOperations--; }
   }
 
-  async waitResult(messageId, threadId) {
-    const until = Date.now() + this.config.turnTimeoutMs;
-    while (Date.now() < until && !this.closed) {
+  observeTaskProgress(threadId, value) {
+    let watch = this.taskProgress.get(threadId);
+    if (!watch) {
+      watch = new ProgressWatch({ timeoutMs: noProgressTimeoutMs(this.config) });
+      this.taskProgress.set(threadId, watch);
+    }
+    watch.observe(value);
+    return watch;
+  }
+
+  async confirmRouterTaskTurn(taskId, threadId, turn) {
+    if (findRouterTurn({ turns: [turn] }, routerMarker(taskId))?.id !== turn.id) return;
+    await this.serial(async () => {
+      const id = routerMessageId(taskId), receipt = this.state.receipts[id] ?? await this.receiptArchive.get(id);
+      if (!receipt || receipt.request.origin !== "router" || receipt.nativeTargetThreadId !== threadId ||
+          !["accepted", "unknown"].includes(receipt.nativeDispatch?.status)) return;
+      if (receipt.nativeTurnId && receipt.nativeTurnId !== turn.id) return;
+      this.state.receipts[id] = receipt;
+      receipt.nativeTurnId = turn.id;
+      receipt.nativeDispatch.status = "accepted";
+      delete receipt.error;
+      const session = this.session(threadId);
+      session.turnMessages[turn.id] ??= [];
+      if (!session.turnMessages[turn.id].includes(id)) session.turnMessages[turn.id].push(id);
+      rememberTurnInitiator(session, turn.id, receipt.request);
+      await this.save();
+    });
+  }
+
+  async cancelRouterTask(taskId, { notDispatched = false } = {}) {
+    if (!/^t-[a-zA-Z0-9_-]+$/.test(taskId)) fail(400, "invalid_task_id", "Valid router task ID required.");
+    return this.serial(async () => {
+      const cancelled = this.state.routerCancellations?.[taskId];
+      // Older active-turn confirmations only observed model interruption. Retry
+      // those through the native adapter to confirm tool execution also stopped.
+      if (cancelled && (!cancelled.turn_id || cancelled.executionStopped === true && cancelled.pendingCommands === 0))
+        return clone(cancelled);
+      const messageId = routerMessageId(taskId);
+      const receipt = this.state.receipts[messageId] ?? await this.receiptArchive.get(messageId);
+      if (!receipt && notDispatched) {
+        const outcome = { ok: true, task_id: taskId, state: "cancelled", reason: "not_dispatched" };
+        (this.state.routerCancellations ??= {})[taskId] = outcome;
+        await this.save();
+        return clone(outcome);
+      }
+      if (!receipt || receipt.request.origin !== "router")
+        return { ok: false, task_id: taskId, state: "cancelling", error: "task_receipt_unavailable" };
+      if (receipt.nativeDispatch?.status === "canceled" && receipt.nativeDispatch.reason === "router_task_cancelled")
+        return { ok: true, task_id: taskId, state: "cancelled", reason: "not_started" };
+      const threadId = receipt.request.targetThreadId;
+      const session = this.state.sessions[threadId];
+      if (!session) return { ok: false, task_id: taskId, state: "cancelling", error: "task_session_unavailable" };
+      const queued = [session.queue ?? [], session.steerQueue ?? []].find(queue => queue.some(r => r.messageId === messageId));
+      if (queued) {
+        queued.splice(queued.findIndex(r => r.messageId === messageId), 1);
+        receipt.nativeDispatch = { status: "canceled", reason: "router_task_cancelled", at: new Date().toISOString() };
+        if (receipt.response) receipt.response.action = "task_cancelled";
+        await this.save();
+        return { ok: true, task_id: taskId, state: "cancelled", reason: "not_started" };
+      }
+      if (!receipt.nativeTurnId || !this.tools.some(tool => tool.name === "cancel_task"))
+        return { ok: false, task_id: taskId, state: "cancelling", error: "native_task_cancel_unavailable" };
+      const result = await this.call("cancel_task", { taskId, messageId, threadId, turnId: receipt.nativeTurnId });
+      const outcome = { ...result, task_id: taskId, thread_id: threadId, turn_id: receipt.nativeTurnId };
+      if (outcome.ok === true && outcome.state === "cancelled") {
+        (this.state.routerCancellations ??= {})[taskId] = outcome;
+        await this.save();
+      }
+      return outcome;
+    });
+  }
+
+  async waitResult(messageId, threadId, { deadline_s } = {}) {
+    const watch = new ProgressWatch({ timeoutMs: noProgressTimeoutMs(this.config),
+      deadline: taskDeadline({ deadline_s }) });
+    while (!this.closed) {
       const events = this.state.events.filter(e => e.messageId === messageId ||
         (e.threadId === threadId && e.type === "turn.completed" && e.payload.messageIds?.includes(messageId)));
       const rejected = events.find(e => e.type === "message.rejected");
@@ -1857,40 +2545,46 @@ export class DesktopManager {
         const output = this.state.events.filter(e => e.threadId === threadId && e.turnId === done.turnId && e.type === "item.completed").map(e => e.payload.snapshot).join("\n");
         return { threadId, turnId: done.turnId, messageId, status: done.payload.status === "completed" ? "completed" : "error", resultText: output, reason: done.payload.status };
       }
-      await new Promise(resolve => setTimeout(resolve, 100));
+      watch.observe({ events: events.map(e => e.seq),
+        progressAt: this.taskProgress.get(threadId)?.lastProgressAt });
+      const failure = watch.failure();
+      if (failure) return { threadId, messageId, turnId: null, status: failure.reason === "stuck" ? "stuck" : "timeout",
+        resultText: "", reason: failure.message };
+      await new Promise(resolve => setTimeout(resolve, Math.min(100, watch.remainingMs())));
     }
-    return { threadId, messageId, turnId: null, status: "timeout", resultText: "", reason: "Native task is not stopped by an HTTP timeout; inspect it in Codex Desktop." };
+    return { threadId, messageId, turnId: null, status: "interrupted", resultText: "", reason: "manager closed" };
   }
 
   async close() {
     clearInterval(this.handoffTimer); this.handoffTimer = null;
-    this.closed = true; clearInterval(this.pollTimer); clearInterval(this.heartbeatTimer); this.ws?.stop();
+    this.closed = true; clearInterval(this.pollTimer); this.ws?.stop();
+    clearTimeout(this.publicTextTimer); this.publicTextTimer = null;
     await this.questions.close();
     this.onlineAnnouncement.reset(); await this.onlineAnnouncement.task;
     for (const client of this.clients) client.end(); this.clients.clear();
-    await this.hermesIngress?.close();
     if (this.server) await new Promise(resolve => this.server.close(resolve));
-    await this.reportTask;
     await Promise.allSettled([...this.backgroundTasks, ...this.feishuInputs.values(), ...this.feishuReactionTasks.values()]);
     await this.tail;
     await this.inboxTail;
     // initialize() may fail after acquiring the lease but before loading state.
     // Never overwrite an unreadable ledger with constructor defaults on cleanup.
     if (this.leaseNonce && this.stateLoaded) await this.save().catch(error => { if (error.code !== "ENOENT") throw error; });
-    if (this.leaseNonce) {
-      try {
-        const lease = JSON.parse(await readFile(this.leasePath, "utf8"));
-        if (lease.nonce === this.leaseNonce && lease.pid === process.pid) await unlink(this.leasePath);
-      } catch (error) { if (error.code !== "ENOENT") throw error; }
-      this.leaseNonce = null;
-    }
-    if (this.writerLease?.listening) await new Promise(resolve => this.writerLease.close(resolve));
+    try {
+      if (this.writerLease?.listening) await new Promise(resolve => this.writerLease.close(resolve));
+      if (this.leaseNonce) {
+        try {
+          const lease = JSON.parse(await readFile(this.leasePath, "utf8"));
+          if (lease.nonce === this.leaseNonce && lease.pid === process.pid) await unlink(this.leasePath);
+        } catch (error) { if (error.code !== "ENOENT") throw error; }
+        this.leaseNonce = null;
+      }
+    } finally { this.writerGuard?.close(); this.writerGuard = null; }
   }
 }
 
 function legacyRequest(body) {
   return { protocolVersion: PROTOCOL, messageId: body.messageId ?? randomUUID(), source: body.source ?? "hermes",
-    text: body.text, targetThreadId: body.targetThreadId ?? null, delivery: body.delivery ?? "queue", safetyMode: body.safetyMode ?? null };
+    text: body.text, ...(typeof body.origin === "string" ? { origin: body.origin } : {}), targetThreadId: body.targetThreadId ?? null, delivery: body.delivery ?? "queue", safetyMode: body.safetyMode ?? null };
 }
 
 function transcriptTurns(snapshot) {

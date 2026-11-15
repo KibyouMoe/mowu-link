@@ -1,0 +1,17 @@
+{
+  "name": "dshworker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "CodexWorker's Feishu/router/manager business layer driven by the DeepSeek Harness (dsh) native transport.",
+  "bin": {
+    "dshworker": "bin/dshworker"
+  },
+  "scripts": {
+    "start": "node cli.mjs",
+    "test": "node --test tests/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

@@ -7,8 +7,10 @@ import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
 export const API_VERSION = 1;
-export const FEATURE_VERSION = "0.2.17";
+export const FEATURE_VERSION = "0.2.18";
 export const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+export const IMAGE_UPLOAD_LIMIT_BYTES = 10_000_000;
+export const MAX_FILE_BYTES = 30_000_000;
 // Feishu documents UUID deduplication for one hour. Keep a ten-minute margin,
 // measured from the FIRST possible message POST, never from the latest retry.
 export const SEND_DEDUP_WINDOW_MS = 50 * 60 * 1000;
@@ -56,9 +58,9 @@ async function loadImage(filename, roots, displayedFiles = [], excludedRoots = [
   const file = await open(resolved, "r");
   try {
     const stat = await file.stat();
-    if (!stat.isFile() || stat.size === 0 || stat.size > MAX_IMAGE_BYTES) fail(422, "invalid_image", "Image must be a regular file of at most 10MiB.");
+    if (!stat.isFile() || stat.size === 0 || stat.size > MAX_FILE_BYTES) fail(422, "invalid_image", "Image must be a regular file of at most 30MB.");
     const bytes = await file.readFile();
-    if (bytes.length !== stat.size || bytes.length > MAX_IMAGE_BYTES) fail(422, "invalid_image", "Image changed while reading; select a stable file.");
+    if (bytes.length !== stat.size || bytes.length > MAX_FILE_BYTES) fail(422, "invalid_image", "Image changed while reading; select a stable file.");
     return { bytes, ...imageType(bytes) };
   } finally { await file.close(); }
 }
@@ -97,7 +99,7 @@ async function apiRequest(url, body, context, target, stage, beforePost) {
     try {
       response = await context.fetchImpl(API + url, { method: "POST", redirect: "error",
         headers: { authorization: `Bearer ${token}`, ...(typeof body === "string" ? { "content-type": "application/json" } : {}) },
-        body, signal: AbortSignal.timeout(30000) });
+        body, signal: AbortSignal.timeout(url === "/im/v1/files" ? 120000 : 30000) });
       result = await response.json();
     } catch (error) {
       throw new ImageOutputError(502, "feishu_transport_failed", "Feishu returned no usable response.", true,
@@ -159,7 +161,12 @@ export async function sendImage(request, context) {
     }
     if (!context.notifier?.enabled) fail(503, "feishu_unavailable", "Feishu image output is not configured.");
     const receipt = previous ?? { fingerprint, status: "uploading", stage: "upload", recoveryVersion: 1,
-      createdAt: new Date(clock(context)).toISOString(), threadId: target.threadId, uploadAttempts: 0, sendAttempts: 0 };
+      createdAt: new Date(clock(context)).toISOString(), threadId: target.threadId, uploadAttempts: 0, sendAttempts: 0,
+      deliveryType: image.bytes.length > IMAGE_UPLOAD_LIMIT_BYTES ? "file" : "image" };
+    // An existing uncertain message must retain its original wire format/UUID.
+    receipt.deliveryType ??= receipt.fileKey ? "file" : "image";
+    if (!["image", "file"].includes(receipt.deliveryType)) fail(503, "image_state_invalid", "Unsupported attachment delivery type; no message was sent.");
+    if (receipt.deliveryType === "file") receipt.fileName ??= path.basename(request.imagePath).replace(/[\x00-\x1f\x7f]/g, "_").slice(0, 180) || `bridge-image.${image.ext}`;
     ledger.receipts[messageId] = receipt; await save();
     try {
       const checkTarget = async () => {
@@ -187,17 +194,38 @@ export async function sendImage(request, context) {
         }
         fail(409, "image_send_outcome_unknown", "Bounded retries exhausted; no further message was repeated.");
       };
-      if (!receipt.imageKey) {
+      if (!receipt.imageKey && !receipt.fileKey) {
         const uploaded = await bounded("upload", async () => {
-          const form = new FormData(); form.set("image_type", "message");
-          form.set("image", new Blob([image.bytes], { type: image.mime }), `bridge-image.${image.ext}`);
-          const result = await apiRequest("/im/v1/images", form, context, target, "upload", checkTarget);
-          if (!result?.image_key) throw new ImageOutputError(502, "feishu_invalid_response", "Feishu upload returned no image key; no message was sent.", true, { stage: "upload" });
-          return result;
+          const upload = async () => {
+            const form = new FormData(), file = receipt.deliveryType === "file";
+            if (file) {
+              form.set("file_type", "stream"); form.set("file_name", receipt.fileName);
+              form.set("file", new Blob([image.bytes], { type: image.mime }), receipt.fileName);
+            } else {
+              form.set("image_type", "message");
+              form.set("image", new Blob([image.bytes], { type: image.mime }), `bridge-image.${image.ext}`);
+            }
+            const result = await apiRequest(file ? "/im/v1/files" : "/im/v1/images", form, context, target, "upload", checkTarget);
+            if (!(file ? result?.file_key : result?.image_key))
+              throw new ImageOutputError(502, "feishu_invalid_response", "Feishu upload returned no resource key; no message was sent.", true, { stage: "upload" });
+            return result;
+          };
+          try { return await upload(); }
+          catch (error) {
+            // Only an explicit upload-size rejection can change the format.
+            // Never turn auth/network failures or an unknown MESSAGE into files.
+            if (receipt.deliveryType !== "image" || error.body?.upstreamHttpStatus !== 413 || receipt.firstSendAt) throw error;
+            receipt.deliveryType = "file"; receipt.fallbackReason = "image_upload_too_large";
+            receipt.fileName = path.basename(request.imagePath).replace(/[\x00-\x1f\x7f]/g, "_").slice(0, 180) || `bridge-image.${image.ext}`;
+            await save(); await checkTarget(); return upload();
+          }
         });
-        receipt.imageKey = uploaded.image_key; receipt.stage = "message"; receipt.status = "uploaded"; await save();
+        if (receipt.deliveryType === "file") receipt.fileKey = uploaded.file_key;
+        else receipt.imageKey = uploaded.image_key;
+        receipt.stage = "message"; receipt.status = "uploaded"; await save();
       }
-      const body = JSON.stringify({ receive_id: target.chatId, msg_type: "image", content: JSON.stringify({ image_key: receipt.imageKey }), uuid: messageId });
+      const content = receipt.deliveryType === "file" ? { file_key: receipt.fileKey } : { image_key: receipt.imageKey };
+      const body = JSON.stringify({ receive_id: target.chatId, msg_type: receipt.deliveryType, content: JSON.stringify(content), uuid: messageId });
       const sent = await bounded("message", async () => {
         const result = await apiRequest("/im/v1/messages?receive_id_type=chat_id", body, context, target, "message", checkTarget);
         if (!result?.message_id) throw new ImageOutputError(502, "feishu_invalid_response", "Feishu message response has no receipt.", true, { stage: "message" });
@@ -206,6 +234,7 @@ export async function sendImage(request, context) {
       receipt.status = "sent"; receipt.stage = "complete"; receipt.sentAt = new Date(clock(context)).toISOString();
       receipt.result = { messageId, threadId: target.threadId, status: "sent", feishuMessageId: sent.message_id,
         imageBytes: image.bytes.length, imageSha256: sha(image.bytes), duplicate,
+        deliveryType: receipt.deliveryType, ...(receipt.deliveryType === "file" ? { fileName: receipt.fileName } : {}),
         uploadAttempts: receipt.uploadAttempts, sendAttempts: receipt.sendAttempts, recovered: duplicate || receipt.uploadAttempts > 1 || receipt.sendAttempts > 1 };
       delete receipt.error;
       await save(); return receipt.result;
