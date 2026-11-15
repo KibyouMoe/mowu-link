@@ -40,9 +40,9 @@
 - **DSH 也要一份同构技能**，内容对应（连接方式/命令名按 DSH 实际改写），能力对齐。
 - **两份必须单一来源（训练员 22:51 定方案）**：
   1) worker 技能放在**独立的 git 仓库**里（一份真身，Codex/DSH 共用）。
-  2) 另做一个**空壳 skill（bootstrap）**，只干一件事：下载该仓库 → 按本机引擎（Codex / DSH）执行安装。
-  3) 空壳内容只有：**git 命令 + 说明指向哪个仓库**（不含业务逻辑、不含权限/hook 细节，那些在真身仓库里）。
-     空壳分别放在两个同步仓：**CodexSyncArea**（Codex 侧）与 **DSHSkillSync**（DSH 侧），两边都指向同一个真身仓库。
+  2) 另做一个 **worker 技能安装器 skill**（不是「空壳」）：只干一件事——下载真身仓库 → 按本机引擎（Codex / DSH）执行安装。名字建议 `mowulink-worker-installer`。
+  3) 安装器内容只有：**git 命令 + 说明指向哪个仓库**（不含业务逻辑、不含权限/hook 细节，那些在真身仓库里）。
+     安装器分别放在两个同步仓：**CodexSyncArea**（Codex 侧）与 **DSHSkillSync**（DSH 侧），两边都指向同一个真身仓库。
   4) 更新 = `git pull` + 重跑安装，两个引擎因此永远同版本。
 - 现有 `docs/mowulink-worker-skill/SKILL.md` 515 行偏大，先判是否拆成「主文件 + references/」。
 
