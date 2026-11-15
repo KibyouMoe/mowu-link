@@ -3,7 +3,7 @@
 import { createHash } from "node:crypto";
 // An explicit user skip is not an option selection or a permission decision.
 export const SKIPPED_QUESTION_ANSWER = "（用户选择跳过此问题，未提供答案）";
-function codexprojectPublicQuestion(item, { threadId, turnId }) {
+function codexProjectPublicQuestion(item, { threadId, turnId }) {
   if (!["AgentMessage", "agentMessage"].includes(item?.type) || item.delivery !== "async" ||
       !["commentary", "final", "final_answer"].includes(item.phase) ||
       typeof item.id !== "string" || !item.id || typeof threadId !== "string" ||
@@ -24,7 +24,7 @@ function codexprojectPublicQuestion(item, { threadId, turnId }) {
 
 // Desktop derives answered-question state from this exact public reply envelope.
 // Keep the original IDs and real answers; prose alone cannot close the panel.
-function codexnativeQuestionReply(question, answers) {
+function codexNativeQuestionReply(question, answers) {
   if (question.delivery !== "async") return null;
   if (!Array.isArray(question.sourceQuestionItemIds) ||
       question.sourceQuestionItemIds.length !== question.questions.length ||
@@ -39,7 +39,7 @@ function codexnativeQuestionReply(question, answers) {
   return text;
 }
 
-function codexparseNativeQuestionReply(text) {
+function codexParseNativeQuestionReply(text) {
   const start = "<send_user_message_question_reply>", end = "</send_user_message_question_reply>";
   if (typeof text !== "string") return null;
   text = text.trim();
@@ -62,7 +62,7 @@ function codexparseNativeQuestionReply(text) {
 }
 export function isNativeQuestionReply(text) { return parseNativeQuestionReply(text) !== null; }
 
-function codexnativeAnswersInSnapshot(question, snapshot) {
+function codexNativeAnswersInSnapshot(question, snapshot) {
   if (!question.sourceQuestionItemIds) return null;
   const parts = new Map();
   const turns = snapshot.page?.order === "newest_first" ? [...(snapshot.turns ?? [])].reverse() : snapshot.turns ?? [];
@@ -80,7 +80,7 @@ function codexnativeAnswersInSnapshot(question, snapshot) {
 }
 
 // Validation belongs to the engine adapter; shared relay stores opaque identities.
-function codexvalidNativeQuestionId(value) {
+function codexValidNativeQuestionId(value) {
   try { const p = JSON.parse(value); return Array.isArray(p) && p.length === 3 &&
     p[0] === "request_user_input_async" && typeof p[1] === "string" && Number.isSafeInteger(p[2]) && p[2] >= 0;
   } catch { return false; }
@@ -91,10 +91,10 @@ export function parseDshIdentity(value) {
   try { const p = JSON.parse(value); return Array.isArray(p) && p.length === 4 && p[0] === "dsh-user-question" && p.slice(1).every(x => typeof x === "string" && x) ? p : null; }
   catch { return null; }
 }
-export function validNativeQuestionId(id) { return !!parseDshIdentity(id) || codexvalidNativeQuestionId(id); }
+export function validNativeQuestionId(id) { return !!parseDshIdentity(id) || codexValidNativeQuestionId(id); }
 export function projectPublicQuestion(item, context) {
-  if (!item?.dshQuestion) return codexprojectPublicQuestion(item, context);
-  const projected = codexprojectPublicQuestion(item, context);
+  if (!item?.dshQuestion) return codexProjectPublicQuestion(item, context);
+  const projected = codexProjectPublicQuestion(item, context);
   if (!projected) return null;
   const { sessionId, callId, ids } = item.dshQuestion;
   if (!sessionId || !callId || ids?.length !== item.questions.length) return null;
@@ -115,9 +115,9 @@ export function parseDshQuestionReply(text) {
     return replies;
   } catch { return null; }
 }
-export function parseNativeQuestionReply(text) { return parseDshQuestionReply(text) ?? codexparseNativeQuestionReply(text); }
+export function parseNativeQuestionReply(text) { return parseDshQuestionReply(text) ?? codexParseNativeQuestionReply(text); }
 export function nativeQuestionReply(question, answers) {
-  if (!question.sourceQuestionItemIds?.every(id => parseDshIdentity(id))) return codexnativeQuestionReply(question, answers);
+  if (!question.sourceQuestionItemIds?.every(id => parseDshIdentity(id))) return codexNativeQuestionReply(question, answers);
   if (answers.length !== question.questions.length) throw new Error("invalid_native_question_reply");
   const text = START + "\n" + JSON.stringify(question.questions.map((q, i) => ({
     questionItemId: question.sourceQuestionItemIds[i], question: q.title, answer: answers[i],
@@ -126,7 +126,7 @@ export function nativeQuestionReply(question, answers) {
   return text;
 }
 export function nativeAnswersInSnapshot(question, snapshot) {
-  if (!question.sourceQuestionItemIds?.every(id => parseDshIdentity(id))) return codexnativeAnswersInSnapshot(question, snapshot);
+  if (!question.sourceQuestionItemIds?.every(id => parseDshIdentity(id))) return codexNativeAnswersInSnapshot(question, snapshot);
   const answers = new Map();
   for (const turn of snapshot.turns ?? []) for (const item of turn.items ?? [])
     for (const r of item.dshQuestionAnswers ?? []) answers.set(r.questionItemId, r.answer);

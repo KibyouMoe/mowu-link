@@ -1,5 +1,4 @@
 import fs from "node:fs";
-import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
@@ -437,8 +436,7 @@ export class InProcessTransport {
           seenSeq = sequence; turn.eventSeq = (turn.eventSeq ?? 0) + 1; watch.touch();
         }
       }
-      // A live human answer waiter is not a stalled model/tool. Explicit task
-      // deadlines still apply; no independent question deadline is introduced.
+      // A live human answer waiter keeps the task's progress observation alive.
       if (turn.waitingForInput) watch.touch();
       const failure = watch.failure();
       if (!failure) return;
@@ -457,7 +455,8 @@ export class InProcessTransport {
         seenSeq = JSON.stringify(this.agentsForTurn(agent).map(subject => [subject.id ?? subject.session.id, subject.session.seq]));
         stopEvents = this.ctx.on("session/event", (session, event) => {
           try { this.publicEvents.event(thread, turn, agent, session, event); }
-          catch { this.log("warn", "public_event_projection_failed", { threadId: thread.id, type: event?.type }); }
+          catch { this.log("warn", "public_event_projection_failed", {
+            threadId: thread.id, turnId: turn.id, type: event?.type }); }
         }, { global: true });
         stopStream = this.ctx.on("agent/assistant-stream", ({ agent: subject, frame }) => {
           if (!this.agentsForTurn(agent).includes(subject)) return;

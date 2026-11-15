@@ -287,7 +287,8 @@ export class QuestionRelay {
       if (status === "unavailable") action.routerRetryAt = Date.now()+5000;
       action.revision++; await this.save();
     });
-    console.error("[bridge] question_forwarded " + JSON.stringify({ questionId: question.questionId, recipient: "hermes", taskId: question.recipient.taskId ?? null, status }));
+    console.error("[bridge] question_forwarded " + JSON.stringify({ level: status === "sent" ? "info" : "warn",
+      questionId: question.questionId, recipient: "hermes", taskId: question.recipient.taskId ?? null, status }));
   }
 
   async acceptAgentAnswer(id, input) {

@@ -6,10 +6,9 @@ import path from "node:path";
 import { PROTOCOL } from "./desktop-manager.mjs";
 import { imageType, MAX_ROUTER_IMAGE_BYTES } from "./router-attachments.mjs";
 import { localHost } from "./interface/native-dispatch.mjs";
+import { UUID_PATTERN, UUID_V4_PATTERN } from "./identifiers.mjs";
 
 const owners = new WeakMap();
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const UUID4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const IMAGE_ID = /^[0-9a-f]{64}$/;
 const extensions = { "image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif", "image/webp": ".webp" };
 const digest = value => createHash("sha256").update(value).digest("hex");
@@ -21,12 +20,12 @@ function fail(code, detail, messageId, outcome) {
     ...(outcome ? { outcome } : {}) });
 }
 function uuid(value) {
-  if (typeof value !== "string" || !UUID.test(value))
+  if (typeof value !== "string" || !UUID_PATTERN.test(value))
     fail("invalid_message_id", "An explicit UUID messageId is required; reuse it for retries.");
   return value.toLowerCase();
 }
 function nativeUUID(id) {
-  if (UUID4.test(id)) return id;
+  if (UUID_V4_PATTERN.test(id)) return id;
   // The router accepts all UUID versions; DesktopManager accepts only v4.
   // Keep the original peer UUID in metadata, prompts, disk keys and router ACKs.
   // Only the manager receipt key is adapted, deterministically across restarts.

@@ -1,28 +1,11 @@
 // DSHWorker · cordis 插件入口（进程内 agents）
 //
-// 与 cli.mjs 的关系：
-//   独立 CLI/headless 启动入口已移除；
-//   index.js     常驻 DSH profile 的插件形态，直接用 ctx.agents / ctx.sessions
-//                在**本进程内**建 agent、跑多轮，不再起 dsh 子进程。
-//
-// 两种形态共用同一套业务层（desktop-manager.mjs / mcp-business.mjs /
-// router-client.mjs / feishu.mjs）：插件把自己实现的原生传输注册成
-// `dsh-inprocess`，业务层照旧通过 interface/transport/index.mjs 的
-// resolveNativeTransport() 取用，工具名与返回结构与 interface/transport/dsh.mjs
-// 逐字段一致，所以业务层一行都不用改。
-//
-// 身份仍然来自 identity.json（bridge/name/display/port/configFile/stateDir），
-// 端口/飞书名来自 ~/.hermes/secrets/dshworker.config.json。插件默认**不**启动
-// HTTP + 飞书业务层（8906 通常被 CLI 常驻进程占着），要启用就显式配置
-// `business: true`（或 DSHWORKER_BUSINESS=1）；启动前会探测端口，占用则跳过。
-//
-// 2026-11-10 实测结论（写在这里，免得下次又绕回 spawn）：
-//   进程内 agents 报 `DeepSeek Messages transport failed / TRANSPORT` 的根因
-//   不是 provider 选择，而是进程继承了 ~/.zprofile 里那台局域网代理
-//   （HTTPS_PROXY=http://192.168.3.102:10808，EHOSTDOWN）。dsh 的 HTTP 客户端
-//   在请求时读环境变量，所以整轮只会重试 5 次后 TRANSPORT 失败。用回环代理
-//   （或直接不设代理）就能正常跑通多轮。见 config.proxy：只在显式配置时才
-//   改写进程代理，避免悄悄动宿主进程的环境。
+// 注入 agents / sessions / agentDefaultModel，在宿主进程内管理多轮会话。
+// 原生传输注册为 dsh-inprocess，由 interface/transport/index.mjs 接入
+// 与 Codex 共用的 desktop-manager、mcp-business、router-client 和 feishu。
+// identity.json 指定实例身份及配置位置。HTTP / 飞书业务层通过 business、
+// DSHWORKER_BUSINESS 或 workerConfig.plugin.business 显式启用，启动前检查端口。
+// HTTP 代理策略由 DSH 启动器安装，插件读取环境并记录连接诊断。
 import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
@@ -53,7 +36,6 @@ import {
   DEFAULT_STATE_DIR,
   DEFAULT_TURN_TIMEOUT_MS,
   MAX_WAIT_MS,
-  sleep,
   expandHome,
   stringArg,
   readJsonSync,
@@ -214,7 +196,7 @@ export function apply(ctx, config = {}) {
     }
     if (businessEnabled) {
       try {
-        const started = await startBusiness({ ctx, transport, identity, workerConfig, config, stateDir,
+        const started = await startBusiness({ transport, identity, workerConfig, config, stateDir,
           workspace, log });
         business = started.business;
         routerClient = started.routerClient;
@@ -302,12 +284,12 @@ function portFree(port, host = "127.0.0.1") {
   });
 }
 
-async function startBusiness({ ctx, transport, identity, workerConfig, config, stateDir, workspace, log }) {
+async function startBusiness({ transport, identity, workerConfig, config, stateDir, workspace, log }) {
   const host = stringArg(config.host) ?? stringArg(workerConfig.host) ?? "127.0.0.1";
   const port = Number(config.port ?? identity.port ?? workerConfig.port ?? 8906);
   if (!await portFree(port, host)) {
     log("warn", "business_port_busy", { host, port,
-      reason: "another worker owns this port; 插件不抢生产进程的 8906" });
+      reason: "Business port is already in use; check the worker instance owning this address." });
     return { business: null, routerClient: null };
   }
 
@@ -323,11 +305,9 @@ async function startBusiness({ ctx, transport, identity, workerConfig, config, s
   const whitelist = resolveWhitelist(workerConfig, feishu.value);
 
   // 任务看板目标：训练员与这个 worker 的私聊。显式 taskBoardOpenId 优先，其次
-  // 入站白名单（就是训练员本人），最后才是凭据文件里的 open_id。和公共业务层的
-  // 表达式保持一致，写进 desktop-config 的那份也复用这里的值。
+  // 入站白名单（就是训练员本人），最后才是凭据文件里的 open_id。
   const taskBoardOpenId = stringArg(workerConfig.feishu?.taskBoardOpenId) ?? whitelist.ids[0]
     ?? stringArg(feishu.value?.open_id) ?? null;
-  const taskBoardEnabled = workerConfig.feishu?.taskBoardEnabled !== false && Boolean(taskBoardOpenId);
 
   const thread = transport.threads.values().next().value
     ?? transport.threads.get(transport.createThread({ title: `${identity.display} · DSH`, cwd: workspace }).threadId);

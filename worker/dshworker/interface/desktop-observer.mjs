@@ -131,7 +131,7 @@ export class DshDesktopObserver {
         t.finishTurn(thread, turn, { error: error.message, reasonKind: "error" });
         t.publicEvents.finish(thread, turn);
       }
-      t.log("warn", "desktop_turn_settle_failed", { message: error.message });
+      t.log("warn", "desktop_turn_settle_failed", { threadId: thread.id, turnId: turn.id, message: error.message });
     } finally { delete turn.settling; this.release(turn); }
   }
   close() { for (const stop of this.stops) stop?.(); this.inputs.clear(); }

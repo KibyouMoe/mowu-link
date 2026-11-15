@@ -829,8 +829,7 @@ class RouterStore:
         return self.get_task(task_id)
 
     def counts(self) -> Dict[str, int]:
-        counts = {"total": 0, "queued": 0, "running": 0, "cancelling": 0, "done": 0,
-                  "failed": 0, "cancelled": 0}
+        counts = dict.fromkeys(("total",) + TASK_STATES, 0)
         with self._lock:
             rows = self._conn.execute(
                 "SELECT state, COUNT(*) AS c FROM tasks GROUP BY state"
@@ -1381,7 +1380,7 @@ class TriggerClient:
 
 
 class TriggerNotifier:
-    """Writes exactly one ``task.result`` notify per finished task."""
+    """Delivers ``task.result`` notifications for finished tasks."""
 
     def __init__(self, client: TriggerClient):
         self.client = client
@@ -1438,7 +1437,7 @@ class TriggerSubscriptionBridge:
         status, data = self.client.request("GET", "/bus/health")
         if status == 200 and isinstance(data.get("last_id"), int):
             return int(data["last_id"])
-        log.warning("trigger /bus/health unusable: %.200s", data)
+        log.warning("trigger /bus/health unusable status=%s: %.200s", status, data)
         return None
 
     def open(self, name: str, since: int) -> Tuple[bool, Dict[str, Any]]:
@@ -2038,7 +2037,6 @@ class RouterHandler(BaseHTTPRequestHandler):
         }
 
     def _workers(self) -> Dict[str, Any]:
-        live = set()
         with self.server.conn_lock:
             live = set(self.server.conns)
         workers = self.server.store.list_workers()
@@ -2207,7 +2205,8 @@ class RouterHandler(BaseHTTPRequestHandler):
             conn = self.server.current_conn(recipient)
             if conn is not None:
                 self.server.flush_peer_messages_locked(conn)
-        log.info("peer queued id=%s", message_id)
+        log.info("peer queued id=%s from=%r to=%r seq=%s",
+                 message_id, sender, recipient, message["seq"])
         return 202, self._peer_receipt(message, duplicate=False)
 
     def _peer_message_ack(self, raw_id: str, body: Dict[str, Any]
@@ -2224,7 +2223,8 @@ class RouterHandler(BaseHTTPRequestHandler):
                 return 403, {"ok": False, "error": "wrong_recipient"}
             already = message["status"] == "accepted"
             message = self.server.store.ack_peer_message(message_id)
-        log.info("peer accepted id=%s already=%s", message_id, already)
+        log.info("peer accepted id=%s already=%s from=%r to=%r seq=%s",
+                 message_id, already, message["from"], message["to"], message["seq"])
         return 200, self._peer_receipt(message, already=already)
 
     # -- chat endpoints (store only; nothing is forwarded) --------------- #
@@ -2882,7 +2882,8 @@ class RouterHandler(BaseHTTPRequestHandler):
             def _later() -> None:
                 time.sleep(0.5)
                 ok, err = ops_kickstart(label)
-                log.info("ops self-restart %s ok=%s err=%s", label, ok, err)
+                log.log(logging.INFO if ok else logging.ERROR,
+                        "ops self-restart %s ok=%s err=%s", label, ok, err)
             threading.Thread(target=_later, daemon=True).start()
             return 202, {"ok": True, "service": name, "label": label,
                          "accepted": True, "before_pid": before,

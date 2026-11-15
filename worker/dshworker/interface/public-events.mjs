@@ -6,8 +6,10 @@ export class DshPublicEvents {
   constructor(transport) { this.transport = transport; this.manager = null; this.calls = new Map(); }
   attach(manager) { this.manager = manager; if (manager) manager.toolActivitySource = "native-notifications"; }
   publish(method, event) {
-    try { Promise.resolve(this.manager?.[method]?.(event)).catch(() => this.transport.log("warn", "public_event_delivery_failed", { method })); }
-    catch { this.transport.log("warn", "public_event_delivery_failed", { method }); }
+    const reportFailure = () => this.transport.log("warn", "public_event_delivery_failed", {
+      method, threadId: event?.threadId ?? null, turnId: event?.turnId ?? null });
+    try { Promise.resolve(this.manager?.[method]?.(event)).catch(reportFailure); }
+    catch { reportFailure(); }
   }
   stream(thread, turn, frame) {
     if (frame?.type === "start") { turn.streamAttempt = frame.attemptId; return; }

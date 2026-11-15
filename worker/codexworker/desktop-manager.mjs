@@ -4,6 +4,7 @@ import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { mkdir, readFile, realpath, rename, unlink, writeFile } from "node:fs/promises";
 import http from "node:http";
 import { routerOperations } from "./router-operations.mjs";
+import { UUID_V4_PATTERN } from "./identifiers.mjs";
 import { reviewNativePermission } from "./interface/permission-hook.mjs";
 import { MessageJournal, nativeMessageId } from "./message-journal.mjs";
 import { ReceiptArchive, compactAck, shrinkObservationText } from "./continuity.mjs";
@@ -39,7 +40,6 @@ import { hermesChunks } from "./hermes-feishu-format.mjs";
 import { isAbandonedText, isUnconfirmedText } from "./text-receipt-review.mjs";
 
 export const PROTOCOL = "1.1.1-draft";
-const UUID4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const digest = value => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const orderedJson = value => Array.isArray(value) ? value.map(orderedJson)
   : value && typeof value === "object" ? Object.fromEntries(Object.keys(value).sort().map(key => [key, orderedJson(value[key])])) : value;
@@ -1061,7 +1061,7 @@ export class DesktopManager {
   }
 
   validate(request) {
-    if (!UUID4.test(request.messageId ?? "")) fail(400, "invalid_request", "messageId must be UUIDv4.");
+    if (!UUID_V4_PATTERN.test(request.messageId ?? "")) fail(400, "invalid_request", "messageId must be UUIDv4.");
     if (request.protocolVersion !== PROTOCOL) fail(426, "protocol_version_unsupported", `Use ${PROTOCOL}.`, false,
       { managerProtocolVersion: PROTOCOL, managerMinCompatibleVersion: PROTOCOL });
     if (!["trainer", "hermes"].includes(request.source)) fail(400, "invalid_request", "source must be trainer or hermes.");
@@ -2062,7 +2062,7 @@ export class DesktopManager {
 
   async abandonTextReceipt(body) {
     if (!body || Object.keys(body).some(k => !["uuid", "threadId", "bindingEpoch", "reason"].includes(k)) ||
-        !UUID4.test(body.uuid ?? "") || !Number.isSafeInteger(body.bindingEpoch) ||
+        !UUID_V4_PATTERN.test(body.uuid ?? "") || !Number.isSafeInteger(body.bindingEpoch) ||
         typeof body.reason !== "string" || !body.reason.trim() || body.reason.length > 500) {
       fail(400, "invalid_request", "An exact original UUID, binding epoch and trainer decision reason are required.");
     }

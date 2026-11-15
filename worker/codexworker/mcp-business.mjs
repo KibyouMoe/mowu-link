@@ -17,7 +17,6 @@ export function createBusiness(runtimeControl) {
 let transition = Boolean(runtimeControl.transition);
 
 const SERVER_NAME = "codexworker";
-const SERVER_VERSION = "0.3.0";
 const PIPE_ENV = "CODEX_APP_TOOLS_PIPE_PATH";
 const CODEX_TURN_METADATA_KEY = "x-codex-turn-metadata";
 const LOCAL_MANAGER_HOST = "127.0.0.1";
@@ -56,7 +55,7 @@ async function handleRequest(method, params) {
       return {
         protocolVersion: params.protocolVersion ?? "2025-06-18",
         capabilities: { tools: { listChanged: true } },
-        serverInfo: { name: SERVER_NAME, version: SERVER_VERSION },
+        serverInfo: { name: SERVER_NAME, version: BUSINESS_VERSION },
         instructions: "Probe and operate the CodexWorker desktop-native adapter. The trainer authorized automatic Feishu relay of public displayed output images in its selected chat; do not separately bridge_send_image those same previews. Arbitrary files still need explicit send authorization. In a Bridge-connected selected chat, native request_user_input_async questions are automatically relayed and external answers preserve the original question IDs to synchronize Desktop. Use bridge_publish_question only for a clarification without a native panel; never create a second independent question for the same clarification. Use bridge_send_worker_message for ordinary worker chat; it creates no task or goal. Only explicit project execution uses bridge_create_work_order; steering stays on the original work order. Formal tasks check native goals and never overwrite an unfinished project. Never publish private reasoning, arbitrary tool arguments or secrets.",
       };
     case "ping":

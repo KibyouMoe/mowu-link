@@ -8,7 +8,7 @@
 //   node scripts/selfcheck.mjs --json     机器可读
 //
 // 不写任何文件、不启动长驻进程，可以随便跑。
-import { access, readFile, stat } from "node:fs/promises";
+import { access, stat } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
