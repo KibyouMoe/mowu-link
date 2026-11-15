@@ -140,6 +140,10 @@ python3 mwu.py router GET /workers
 - router 使用 `integrations.router.registered`、`connected`、`GET /workers` 的本人记录。
 - 原生外部输入使用 `capabilities.externalChatInput="native-user-input"`，再检查忙碌回合里的实际 user 输入和图片引用。
 
+原主会话恢复失败时，保存原 threadId/sessionId 并报告具体错误，后续恢复同一会话继续执行。
+新会话采用用户明确的新建请求。会话上下文与压缩交给原生引擎，Worker 持久化工单、
+投递回执和公开记录，沿既有会话继续积累上下文。
+
 ## 1. 身份与注册
 
 `identity.json` 的实际结构如下，示例身份供新工位按分配值填写。
