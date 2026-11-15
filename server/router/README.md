@@ -220,6 +220,19 @@ worker 在执行命令/改文件前需要人类点头，但子进程的 JSON-RPC
 
 ## 三、派活与状态机
 
+### Worker 澄清问题
+
+`GET /questions/{worker}/{questionId}` 和 `POST /questions/{worker}/{questionId}/answer`
+使用 `X-Router-Token`，经 worker 已有鉴权 SSE 通道访问其原问题状态，支持不同机器。
+GET 返回完整题面、选项、`status`、`answeredBy`、`nativePanelSync`、`cardUpdated` 和 `answerRequest`。
+将 `answerRequest.answers` 换成逐题选项原文或自由文本，再 POST 到同一 URL 的 `/answer`。
+全部跳过时使用 `action:"skip"`，保留原 `actor`、`threadId`、`nonce`。
+`actor` 使用 `hermes` 或 `Hermes`，原任务号只作关联元数据；异步原生问题在任务/回合结束后继续有效。
+每个问题按 worker、原生问题 ID、会话和独立 nonce 绑定；错用另一 worker 的 nonce 返回 403。
+离线返回 503，请求等待 worker 响应最多 5 秒，超时 504，可原样重试。
+重试答案沿用持久问题状态和原生消息 UUID，原生投递不明时保留待核实状态。
+此通道不创建工单，也不占工单等待位；worker 本机 `/bridge/questions/{id}` 保持兼容。
+
 默认 `--backlog-max 1`，每个 worker 同时运行一张工单，并可等待一张。
 
 ```

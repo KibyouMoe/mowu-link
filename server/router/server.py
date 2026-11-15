@@ -1620,6 +1620,8 @@ class RouterServer(ThreadingHTTPServer):
         self.conns: Dict[str, Connection] = {}
         self.conn_lock = threading.Lock()
         self.dispatch_lock = threading.RLock()
+        self.question_lock = threading.Lock()
+        self.question_requests: Dict[str, Dict[str, Any]] = {}
         super().__init__(addr, RouterHandler)
 
     def server_bind(self) -> None:
@@ -1629,6 +1631,53 @@ class RouterServer(ThreadingHTTPServer):
         TCPServer.server_bind(self)
         self.server_name, self.server_port = self.server_address[:2]
 
+
+    def question_request(self, worker: str, question_id: str, operation: str,
+                         body: Optional[Dict[str, Any]] = None) -> Tuple[int, Dict[str, Any]]:
+        """Use the worker's existing authenticated stream across machine boundaries."""
+        info = self.store.get_worker(worker)
+        if info is None:
+            return 404, {"ok": False, "error": "unknown_worker", "worker": worker}
+        conn = self.current_conn(worker)
+        if conn is None or conn.closed or not info.get("control_sse"):
+            return 503, {"ok": False, "error": "question_worker_unavailable", "worker": worker}
+        request_id = str(uuid.uuid4())
+        pending = {"worker": worker, "conn": conn, "ready": threading.Event(), "response": None}
+        with self.question_lock:
+            if len(self.question_requests) >= 128:
+                return 503, {"ok": False, "error": "question_requests_busy"}
+            self.question_requests[request_id] = pending
+        try:
+            conn.queue.put({"event": "question_request", "data": {
+                "request_id": request_id, "question_id": question_id,
+                "operation": operation, "input": body or {}}})
+            if not pending["ready"].wait(5):
+                return 504, {"ok": False, "error": "question_worker_timeout", "worker": worker,
+                             "questionId": question_id, "retryable": True}
+            return pending["response"]
+        finally:
+            with self.question_lock:
+                self.question_requests.pop(request_id, None)
+
+    def question_response(self, body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
+        request_id = body.get("request_id")
+        if not isinstance(request_id, str):
+            raise BadRequest("request_id is required")
+        status = body.get("status")
+        if (isinstance(status, bool) or not isinstance(status, int) or not 200 <= status <= 599
+                or not isinstance(body.get("body"), dict)):
+            raise BadRequest("question response requires status and JSON object body")
+        with self.question_lock:
+            pending = self.question_requests.get(request_id)
+            if pending is None:
+                return 404, {"ok": False, "error": "question_request_ended"}
+            if (body.get("worker") != pending["worker"]
+                    or self.current_conn(pending["worker"]) is not pending["conn"]):
+                return 403, {"ok": False, "error": "question_worker_mismatch"}
+            if not pending["ready"].is_set():
+                pending["response"] = (status, body["body"])
+                pending["ready"].set()
+        return 200, {"ok": True}
 
     def cancel_execution(self, task: Dict[str, Any]) -> Dict[str, Any]:
         """Deliver only the exact task identity; never a selected-session stop."""
@@ -1958,12 +2007,16 @@ class RouterHandler(BaseHTTPRequestHandler):
                                   "/chat/{worker}/summary",
                                   "/approvals", "/approvals/{id}",
                                   "/approvals/{id}/decide",
+                                  "/questions/{worker}/{id}", "/questions/{worker}/{id}/answer",
                                   "/ops/services",
                                   "/ops/services/{name}/restart"],
                 })
             if parts == ["stream"]:
                 return self._serve_stream(qs)
             self._require_token()
+            if len(parts) == 3 and parts[0] == "questions":
+                question_id = self._peer_uuid(parts[2])
+                return self._send_json(*self.server.question_request(self._worker_path_param(parts[1]), question_id, "get"))
             if len(parts) == 2 and parts[0] == "attachments":
                 return self._attachment_get(parts[1])
             if parts == ["ops", "services"]:
@@ -2015,6 +2068,11 @@ class RouterHandler(BaseHTTPRequestHandler):
             if parts == ["attachments"]:
                 return self._send_json(*self._attachment_put())
             body = self._read_json()
+            if parts == ["questions", "responses"]:
+                return self._send_json(*self.server.question_response(body))
+            if len(parts) == 4 and parts[0] == "questions" and parts[3] == "answer":
+                question_id = self._peer_uuid(parts[2])
+                return self._send_json(*self.server.question_request(self._worker_path_param(parts[1]), question_id, "answer", body))
             if (len(parts) == 4 and parts[0] == "ops"
                     and parts[1] == "services" and parts[3] == "restart"):
                 return self._send_json(*self._ops_restart(
@@ -2091,7 +2149,7 @@ class RouterHandler(BaseHTTPRequestHandler):
             "ok": True,
             "version": VERSION,
             "capabilities": {"workOrders": "idempotent-goal-v1",
-                             "peerMessages": "durable-ack-v1"},
+                             "peerMessages": "durable-ack-v1", "questions": "worker-sse-v1"},
             "workers": len(workers),
             "online": len(online),
             "tasks": counts["total"],

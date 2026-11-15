@@ -128,6 +128,30 @@ test("SSE task uses selected conversation, provenance, board, receipts and termi
   assert.equal(manager.routerClient, runtime.client);
 });
 
+test("question SSE queries and answers stay outside the work-order queue and preserve exact IDs", async t => {
+  const { router, manager } = await setup(t);
+  manager.questions.get = id => ({ questionId: id, status: "open", questions: [{ title: id }] });
+  manager.questions.acceptAgentAnswer = async (id, input) => {
+    if (input.nonce !== id) throw Object.assign(Error("wrong question"), { status: 403, body: { error: "question_recipient_mismatch" } });
+    return { questionId: id, status: "answer_pending", answers: input.answers };
+  };
+  const push = payload => router.streams.at(-1).write(`event: question_request\ndata: ${JSON.stringify(payload)}\n\n`);
+  push({ request_id: "get-first", question_id: "first", operation: "get" });
+  push({ request_id: "answer-second", question_id: "second", operation: "answer", input: { nonce: "second", answers: ["自由回答"] } });
+  push({ request_id: "bad-first", question_id: "first", operation: "answer", input: { nonce: "second" } });
+  push({ request_id: "bad-operation", question_id: "first", operation: "other" });
+  await until(() => router.calls.filter(c => c.path === "/questions/responses").length === 4);
+  const responses = Object.fromEntries(router.calls.filter(c => c.path === "/questions/responses")
+    .map(c => [c.body.request_id, c.body]));
+  assert.equal(responses["get-first"].body.questionId, "first");
+  assert.equal(responses["answer-second"].body.questionId, "second");
+  assert.deepEqual(responses["answer-second"].body.answers, ["自由回答"]);
+  assert.equal(responses["bad-first"].status, 403);
+  assert.equal(responses["bad-operation"].status, 400);
+  assert.ok(Object.values(responses).every(r => r.worker === "test-worker"));
+  assert.equal(manager.writes.length, 0);assert.equal(router.results.length, 0);
+});
+
 test("disabled, proxy and non-listening managers never register or attach approvals", async t => {
   isolateEnv(t);
   let installs = 0;

@@ -226,8 +226,9 @@ test("legacy question reconciliation requires native capability and never repeat
  await assert.rejects(f.manager.questions.syncNativeAnswer(q.questionId),e=>e.body.error==="native_question_sync_unknown");
  assert.equal(f.calls.filter(c=>c.name==="send_message_to_thread").length,0);
 });
-test("native async choices cannot deliver into a newer task after their own turn completes",async t=>{
+test("native async choices retain their exact identity across newer turns",async t=>{
  const f=await fixture(t),cards=ui(f),q=await observe(f);
+ f.manager.config.nativeBusyDeliveryVerified=true;
  f.manager.handoffPaused=false;await f.manager.drainPublicTexts();
  const button=buttons(cards[0].card)[0];
  await f.manager.questions.acceptCard({header:{event_type:"card.action.trigger",event_id:"new-task-click"},event:{
@@ -235,8 +236,8 @@ test("native async choices cannot deliver into a newer task after their own turn
   action:formAction(cards[0].card,["当前仓库"])}});
  f.manager.deliveryState=async()=>({turns:[{id:"native-turn",status:"completed"},{id:"new-task",status:"inProgress"}]});
  await f.manager.questions.process();
- assert.equal(f.manager.questions.get(q.questionId).status,"expired");
- assert.equal(f.calls.filter(c=>c.name==="send_message_to_thread").length,0);
+ assert.equal(f.manager.questions.get(q.questionId).status,"answered");
+ assert.equal(f.calls.filter(c=>c.name==="send_message_to_thread").length,1);
 });
 
 test("native question expiration withdraws the original panel without recording an answer or a second public input", async t => {
@@ -244,6 +245,7 @@ test("native question expiration withdraws the original panel without recording 
  f.manager.config.nativeQuestionInput=true;f.manager.handoffPaused=false;
  await f.manager.drainPublicTexts();
  f.manager.deliveryState=async()=>({turns:[{id:"new-task",status:"inProgress"}]});
+ await f.manager.questions.resolve(q.questionId,{threadId:"thread",status:"expired"});
  await f.manager.questions.process();
  const status=f.manager.questions.get(q.questionId);
  assert.equal(status.status,"expired");assert.equal(status.answers,null);
@@ -265,6 +267,7 @@ test("a rejected native withdrawal waits before retrying and an unknown withdraw
  f.manager.config.nativeQuestionInput=true;f.manager.handoffPaused=false;
  await f.manager.drainPublicTexts();
  f.manager.deliveryState=async()=>({turns:[{id:"new-task",status:"inProgress"}]});
+ await f.manager.questions.resolve(q.questionId,{threadId:"thread",status:"expired"});
  let writes=0;
  f.manager.call=async()=>{writes++;throw Object.assign(Error("not connected"),{body:{nativeInputOutcome:"notAttempted"}});};
  await f.manager.questions.process();await f.manager.questions.process();
@@ -328,12 +331,12 @@ test("callers cannot adopt a card outside the exact persisted public question ou
  assert.equal(Object.keys(f.manager.state.publicQuestions??{}).length,0);
 });
 
-test("a late observed async question renders closed rather than blocking later public messages",async t=>{
+test("a late observed async question remains answerable without blocking later public messages",async t=>{
  const f=await fixture(t),cards=ui(f);
  f.manager.deliveryState=async()=>({turns:[{id:"native-turn",status:"completed"},{id:"new-task",status:"inProgress"}]});
  await observe(f);f.manager.handoffPaused=false;await f.manager.drainPublicTexts();
- assert.equal(cards.length,1);assert.equal(buttons(cards[0].card).length,0);
- assert.ok(cards[0].card.header.title.content.includes("已过期"));
+ assert.equal(cards.length,1);assert.equal(buttons(cards[0].card).length,2);
+ assert.equal(f.manager.questions.status().open,1);
  await f.manager.serial(()=>f.manager.emit("item.completed",{targetThreadId:"thread",source:"codex"},
   {text:"后续回复",snapshot:"后续回复",itemKey:"new-task/reply",phase:"final_answer",complete:true},{turnId:"new-task"}));
  await f.manager.drainPublicTexts();assert.ok(f.notices.includes("后续回复"));

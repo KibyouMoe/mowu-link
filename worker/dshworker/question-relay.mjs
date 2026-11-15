@@ -17,8 +17,8 @@ export class QuestionRelayError extends Error {
 }
 const reject = (status, error, detail) => { throw new QuestionRelayError(status, error, detail); };
 
-// Native async questions may be answered after their own turn completes,
-// but must not deliver into a newer task, an interrupted turn or another chat.
+// Exact native async question IDs remain answerable across task/turn endings.
+// Selection epochs and per-question nonces still bind them to the original chat.
 export function questionSourceTurn(snapshot, allowCompleted = false) {
   const live = snapshot?.deliveryObservation;
   if (live) return live.turnId && (["inProgress", "in_progress", "running", "started", "pending"].includes(live.turnStatus) ||
@@ -70,7 +70,7 @@ export function questionText(request, bridgeName) {
 export class QuestionRelay {
   constructor(manager) {
     this.manager = manager; this.inflight = new Map(); this.tail = Promise.resolve();
-    this.path = path.join(manager.stateDir, "question-actions.json"); this.taskChecks = new Map();
+    this.path = path.join(manager.stateDir, "question-actions.json");
     this.state = { version: 1, entries: {} }; this.running = null;
   }
 
@@ -78,6 +78,8 @@ export class QuestionRelay {
     try { this.state = JSON.parse(await readFile(this.path, "utf8")); } catch (e) { if (e.code !== "ENOENT") throw e; }
     if (this.state.version !== 1 || !this.state.entries || Array.isArray(this.state.entries)) reject(503, "question_state_invalid", "Question actions were not discarded.");
     for (const entry of Object.values(this.state.entries)) {
+      if (["expired", "canceled"].includes(entry.status) && entry.nativePanelSync?.status !== "accepted")
+        entry.nativeCloseRequested = true;
       if (entry.status === "dispatching") {
         const receipt = this.manager.state.receipts?.[entry.nativeMessageId];
         if (receipt?.nativeDispatch?.status === "accepted") entry.status = answeredStatus(entry);
@@ -202,12 +204,16 @@ export class QuestionRelay {
       nativePanelSync: s?.nativePanelSync?.status ?? null,
       skippedQuestionIndexes: s?.skippedQuestionIndexes ?? [],
       recipient: q.recipient ?? { kind: "trainer" }, routerDelivery: s?.routerDelivery?.status ?? null,
+      ...(q.recipient?.kind === "hermes" && s ? { answerRequest: {
+        actor: "hermes", threadId: q.threadId, nonce: s.nonce,
+        answers: q.questions.map(() => "<填写回答>") },
+        answerInstructions: "POST 到此提问 URL 的 /answer；answers 按题序填写选项原文或自由文本；全部跳过时保留 actor/threadId/nonce 并使用 action=skip。" } : {}),
       reason: s?.reason ?? null, cardUpdated: Boolean(s?.messageId && s.patchedRevision === s.revision),
       feishu: q.feishuSent ? "sent" : "pending" };
   }
   status() {
     const entries = Object.values(this.state.entries);
-    return { policy: "source-turn-no-independent-ttl", routingPolicy: "turn-initiator", answerMirror: "original-question-card", cardLayoutVersion: QUESTION_CARD_LAYOUT_VERSION, open: entries.filter(s => s.status === "open").length,
+    return { policy: "explicit-question-lifetime", routingPolicy: "turn-initiator", answerMirror: "original-question-card", cardLayoutVersion: QUESTION_CARD_LAYOUT_VERSION, open: entries.filter(s => s.status === "open").length,
       pending: entries.filter(s => ["answer_pending", "dispatching"].includes(s.status)).length,
       unknown: entries.filter(s => s.status === "answer_unknown").length,
       updatesPending: entries.filter(s => s.messageId && s.patchedRevision !== s.revision).length,
@@ -243,9 +249,9 @@ export class QuestionRelay {
       if (!record) {
         const snapshot = m.deliveryState ? await m.deliveryState(m.session(request.threadId)) : await m.read(request.threadId, m.session(request.threadId).hostId);
         sourceTurnId = questionSourceTurn(snapshot, request.delivery === "async")?.id ?? null;
+        if (request.delivery === "async") sourceTurnId = request.sourceTurnId;
         if (request.sourceTurnId && request.sourceTurnId !== sourceTurnId) {
-          if (request.delivery === "async") sourceTurnId = null; // Historical question: render closed, never answer into a newer task.
-          else reject(409, "source_turn_ended", "The explicit source turn is no longer active.");
+          reject(409, "source_turn_ended", "The explicit source turn is no longer active.");
         }
       }
       const recipient = record?.recipient ?? await questionInitiator(m, request.threadId, request.sourceTurnId ?? sourceTurnId);
@@ -317,18 +323,6 @@ export class QuestionRelay {
       await this.serial(async () => { action.routerDelivery = { status: "unavailable" }; action.routerRetryAt = Date.now()+5000; action.revision++; await this.save(); });
       return;
     }
-    if (question.recipient.taskId && client.getTask) {
-      let task;
-      try { task = await client.getTask(question.recipient.taskId); }
-      catch {
-        await this.serial(async () => { action.routerDelivery = { status: "unavailable" }; action.routerRetryAt = Date.now()+5000; action.revision++; await this.save(); });
-        return;
-      }
-      if (["cancelled","canceled","failed","done"].includes(task?.state)) {
-        await this.serial(async () => { action.status = "expired"; action.reason = "source_task_ended"; action.revision++; await this.save(); });
-        return;
-      }
-    }
     await this.serial(async () => { action.routerDelivery = { status: "sending" }; action.revision++; await this.save(); });
     let result, status;
     try {
@@ -348,29 +342,28 @@ export class QuestionRelay {
   async acceptAgentAnswer(id, input) {
     const q = this.manager.state.publicQuestions?.[id], s = this.state.entries[id];
     if (!q || !s) reject(404, "question_not_found", "No exact question exists.");
-    if (q.recipient?.kind !== "hermes" || input.actor !== "hermes" || input.threadId !== q.threadId ||
-        (input.taskId ?? null) !== (q.recipient.taskId ?? null) || input.nonce !== s.nonce)
-      reject(403, "question_recipient_mismatch", "Only the bound originating agent/task may answer this question.");
-    if (["answer_pending","dispatching","answered","skipped"].includes(s.status) && JSON.stringify(s.answers)===JSON.stringify(input.answers))
+    if (q.recipient?.kind !== "hermes" || typeof input.actor !== "string" || input.actor.toLowerCase() !== "hermes" ||
+        input.threadId !== q.threadId || input.nonce !== s.nonce)
+      reject(403, "question_recipient_mismatch", "Hermes must answer using this question's original threadId and nonce.");
+    if (![undefined, "answer", "skip"].includes(input.action)) reject(400, "invalid_question_answer", "Use answer or skip.");
+    const answers = input.action === "skip" ? q.questions.map(() => SKIPPED_QUESTION_ANSWER) : input.answers;
+    if (["answer_pending","dispatching","answered","skipped"].includes(s.status) && JSON.stringify(s.answers)===JSON.stringify(answers))
       return { ...this.get(id), duplicate: true };
     if (q.threadId !== this.manager.state.selectedThreadId || s.bindingEpoch !== this.manager.state.selectionEpoch)
       reject(409, "selected_target_changed", "Question binding changed; no answer was dispatched.");
-    if (q.recipient.taskId && this.router()?.getTask) {
-      const task = await this.router().getTask(q.recipient.taskId);
-      if (["cancelled","canceled","failed","done"].includes(task?.state))
-        reject(409, "source_task_ended", "Original task ended; no answer was dispatched.");
-    }
-    if (!Array.isArray(input.answers) || input.answers.length !== q.questions.length ||
-        input.answers.some(a => typeof a !== "string" || !a.trim() || a.length>8000 || a.trim()==="<填写回答>"))
+    if (!Array.isArray(answers) || answers.length !== q.questions.length ||
+        answers.some(a => typeof a !== "string" || !a.trim() || a.length>8000 || a.trim()==="<填写回答>"))
       reject(400, "invalid_question_answer", "Provide one real nonempty answer per question.");
-    return this.serial(async () => {
-      if (["answer_pending","dispatching","answered"].includes(s.status) && JSON.stringify(s.answers)===JSON.stringify(input.answers))
+    const result = await this.serial(async () => {
+      if (["answer_pending","dispatching","answered","skipped"].includes(s.status) && JSON.stringify(s.answers)===JSON.stringify(answers))
         return { ...this.get(id), duplicate: true };
       if (s.status !== "open") reject(409, "question_closed", "Question is already resolved; no answer was repeated.");
-      s.answers = [...input.answers]; s.answerActor = "hermes"; s.status = "answer_pending";
+      s.answers = [...answers]; s.skippedQuestionIndexes = skippedIndexes(answers); s.answerActor = "hermes"; s.status = "answer_pending";
       s.nativeMessageId = randomUUID(); s.revision++; await this.save();
       return { ...this.get(id), duplicate: false };
     });
+    this.kick();
+    return result;
   }
 
   async acceptCard(payload) {
@@ -488,13 +481,19 @@ export class QuestionRelay {
         if (["answered", "skipped"].includes(s.status) && (!complete || JSON.stringify(s.answers) !== JSON.stringify(answers))) continue;
         matched.push(id);
         if (s.nativeReplyMessageIds?.includes(messageId)) continue;
+        const ownAnswer = s.answerActor && ["dispatching", "answer_pending", "answered", "skipped"].includes(s.status) &&
+          JSON.stringify(s.answers) === JSON.stringify(answers);
         s.nativeAnswerParts = parts;
         s.answers = answers;
         s.nativeReplyMessageIds = [...(s.nativeReplyMessageIds ?? []), messageId];
         s.nativeMessageId = messageId;
         s.nativeAnswerObservation = { messageId, threadId, turnId, itemKey };
-        s.answerActor = "native";
-        if (complete) { s.skippedQuestionIndexes = skippedIndexes(answers); s.status = answeredStatus(s); s.reason = null; }
+        // A native echo confirms delivery without overwriting its real author.
+        if (!ownAnswer) s.answerActor = "native";
+        if (complete) {
+          s.skippedQuestionIndexes = skippedIndexes(answers); s.status = answeredStatus(s); s.reason = null;
+          s.nativePanelSync = { status: "accepted", messageId, via: "native-observation", itemKey };
+        }
         else if (s.status === "answer_pending") s.status = "open";
         for (let i = 0; i < answers.length; i++) {
           const oi = q.questions[i].options?.indexOf(answers[i]);
@@ -510,23 +509,12 @@ export class QuestionRelay {
   async sourceState(q, s) {
     if (q.threadId !== this.manager.state.selectedThreadId || s.bindingEpoch !== this.manager.state.selectionEpoch) return { expired: true, reason: "selected_target_changed" };
     let snapshot;
-    if (q.recipient?.kind === "hermes" && q.recipient.taskId && this.router()?.getTask) {
-      try {
-        let cached = this.taskChecks.get(q.recipient.taskId);
-        if (!cached || s.status === "answer_pending" || Date.now()-cached.at >= 5000) {
-          cached = { task: await this.router().getTask(q.recipient.taskId), at: Date.now() };
-          this.taskChecks.set(q.recipient.taskId, cached);
-        }
-        if (["cancelled","canceled","failed","done"].includes(cached.task?.state)) return { expired: true, reason: "source_task_ended" };
-      } catch { return { unavailable: true }; }
-    }
     if (q.delivery === "async") {
       try {
         const snapshot = await this.manager.deliveryState(this.manager.session(q.threadId));
         const answers = nativeAnswersInSnapshot(q, snapshot);
         if (answers) return { answers };
-        const source = questionSourceTurn(snapshot, true);
-        return source?.id === s.sourceTurnId ? { active: true } : { expired: true, reason: "source_turn_ended" };
+        return { active: true };
       } catch { return { unavailable: true }; }
     }
     if (this.manager.isSelfTarget?.(this.manager.session(q.threadId))) {
@@ -625,7 +613,8 @@ export class QuestionRelay {
                 source: agent ? "hermes" : "trainer", origin: agent ? "router-question" : "feishu",
                 ...(agent && q.recipient.taskId ? { taskId: q.recipient.taskId } : {}),
                 text: nativeReply ?? (agent ? text : `飞书：${text}`), targetThreadId: q.threadId, delivery: "steer" },
-                { requireSelectedTarget: true, requireSelectionEpoch: s.bindingEpoch, requireSourceTurnId: s.sourceTurnId, allowCompletedSourceTurn: q.delivery === "async" });
+                { requireSelectedTarget: true, requireSelectionEpoch: s.bindingEpoch,
+                  ...(q.delivery !== "async" ? { requireSourceTurnId: s.sourceTurnId } : {}) });
               await this.serial(async () => {
                 s.answerQueued = accepted?.action === "message_queued";
                 s.status = s.answerQueued ? "answer_pending" : answeredStatus(s);

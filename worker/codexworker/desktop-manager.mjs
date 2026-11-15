@@ -1324,11 +1324,6 @@ export class DesktopManager {
       if (delivery === "queue" && activeTurn(await this.deliveryState(session))) {
         fail(409, "queue_target_busy", "The queued target is running; no native write was attempted.", true);
       }
-      if (request.origin === "router-question" && request.taskId && this.questions.router()?.getTask) {
-        const task = await this.questions.router().getTask(request.taskId);
-        if (["cancelled","canceled","failed","done"].includes(task?.state))
-          fail(409, "source_task_ended", "The original router task ended; its queued clarification was not sent.");
-      }
       if (request.sourceTurnGuard) {
         const latest = questionSourceTurn(await this.deliveryState(session), request.sourceTurnMayBeComplete);
         if (latest?.id !== request.sourceTurnGuard) fail(409, "source_turn_ended", "The question turn ended before native dispatch; no answer was sent.");

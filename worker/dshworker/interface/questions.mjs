@@ -40,7 +40,7 @@ export class DshQuestions {
     const item = { type: "agentMessage", kind: "assistant", id: `dsh-question-${sessionId}-${callId}`,
       phase: "commentary", delivery: "async", text: request.questions.map(q => q.question).join("\n"),
       questions: request.questions.map(q => ({ title: q.question,
-        ...(!q.multiSelect && q.options?.length >= 2 && q.options.length <= 6 ? { options: q.options.map(o => o.label) } : {}) })),
+        ...(!q.multiSelect && q.options?.length >= 1 && q.options.length <= 6 ? { options: q.options.map(o => o.label) } : {}) })),
       dshQuestion: { sessionId, callId, ids: request.questions.map(q => q.id),
         questionId: dshQuestionId(sessionId, callId), threadId: thread.id, sourceTurnId: turn.id, fingerprint } };
     (turn.nativeQuestions ??= []).push(item);

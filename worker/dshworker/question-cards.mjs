@@ -1,7 +1,7 @@
 // Explicit public clarification UI only. Never render raw native tool arguments.
 import { escapeMarkdown } from "./feishu.mjs";
 import { SKIPPED_QUESTION_ANSWER } from "./interface/public-questions.mjs";
-export const QUESTION_CARD_LAYOUT_VERSION = 9;
+export const QUESTION_CARD_LAYOUT_VERSION = 10;
 export const QUESTION_ANSWER_LIMIT = 1000;
 export const questionInputName = index => `answer_${index}`;
 
@@ -37,8 +37,9 @@ export function questionCard(question, state, bridgeName) {
     let text = title;
     q.options?.forEach((option, oi) => { text += `\n${oi + 1}）${option}`; });
     const answer = state.answers?.[qi] ?? (state.selected?.[qi] != null ? q.options?.[state.selected[qi]] : null);
-    if (answer === SKIPPED_QUESTION_ANSWER) text += "\n\n已跳过，未提供答案";
-    else if (answer) text += `\n\n${state.answerActor === "native" ? "客户端回答" : question.recipient?.kind === "hermes" ? "溪流的回答" : "回答"}：${answer}`;
+    const actor = state.answerActor === "hermes" ? "溪流" : state.answerActor === "native" ? "客户端" : "训练员";
+    if (answer === SKIPPED_QUESTION_ANSWER) text += `\n\n${actor}已跳过，未提供答案`;
+    else if (answer) text += `\n\n${state.answerActor === "native" ? "客户端回答" : actor + "的回答"}：${answer}`;
     elements.push({ tag: "markdown", content: escapeMarkdown(text) });
   });
   if (canRespond) {

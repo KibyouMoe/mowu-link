@@ -1626,6 +1626,82 @@ def one_backlog_selftest(checker, work):
         store.close()
 
 
+def question_proxy_selftest(checker, work):
+    """Cross-worker question RPC on the existing stream, with real HTTP clients."""
+    import server as router_module
+    from concurrent.futures import ThreadPoolExecutor
+
+    store = router_module.RouterStore(str(work / "question-proxy.db"))
+    server = router_module.RouterServer(("127.0.0.1", 0), store, "question-proxy-test-token",
+                                        mock.Mock(), mock.Mock())
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = "http://127.0.0.1:%d" % server.server_address[1]
+    names = ("QuestionMac", "QuestionWindows")
+    connections = {}
+    for name in names:
+        store.upsert_worker(name, control_sse=True)
+        connections[name] = server.attach(name)
+    pool = ThreadPoolExecutor(max_workers=2)
+    question_id = str(uuid.uuid4())
+
+    def call(method, route, body=None, token=server.token):
+        return http(method, base + route, body, token, timeout=8)
+
+    def respond(request, worker, status=200, body=None):
+        return call("POST", "/questions/responses", {"request_id": request["request_id"],
+                    "worker": worker, "status": status, "body": body or {"questionId": question_id, "worker": worker}})
+
+    try:
+        checker.check("question proxy: unauthenticated read is rejected",
+                      call("GET", "/questions/QuestionMac/" + question_id, token=None)[0] == 401)
+        checker.check("question proxy: unknown worker and invalid question ID are rejected",
+                      call("GET", "/questions/Missing/" + question_id)[0] == 404
+                      and call("GET", "/questions/QuestionMac/bad-id")[0] == 400)
+        reads = {name: pool.submit(call, "GET", "/questions/" + name + "/" + question_id) for name in names}
+        requests = {name: connections[name].queue.get(timeout=3) for name in names}
+        checker.check("question proxy: two workers with the same question UUID receive separate requests",
+                      all(event["event"] == "question_request" and event["data"]["question_id"] == question_id
+                          and event["data"]["operation"] == "get" for event in requests.values())
+                      and len({event["data"]["request_id"] for event in requests.values()}) == 2)
+        wrong = respond(requests[names[0]]["data"], names[1])
+        checker.check("question proxy: another worker cannot complete a pending request",
+                      wrong[0] == 403 and wrong[1]["error"] == "question_worker_mismatch"
+                      and not reads[names[0]].done())
+        for name in reversed(names):
+            respond(requests[name]["data"], name)
+        values = {name: future.result(timeout=3) for name, future in reads.items()}
+        checker.check("question proxy: out-of-order responses return to the correct worker URL",
+                      all(code == 200 and data["worker"] == name for name, (code, data) in values.items())
+                      and store.counts()["total"] == 0)
+        checker.check("question proxy: ended response IDs cannot be reused",
+                      respond(requests[names[0]]["data"], names[0])[0] == 404)
+        for action in ({"answers": ["选项甲"]}, {"action": "skip"}, {"answers": ["自由文本"]}):
+            body = {"actor": "Hermes", "threadId": "original-thread", "nonce": str(uuid.uuid4()), **action}
+            future = pool.submit(call, "POST", "/questions/QuestionMac/" + question_id + "/answer", body)
+            event = connections[names[0]].queue.get(timeout=3)
+            request = event["data"]
+            respond(request, names[0], body={"questionId": question_id, "status": "answer_pending", **action})
+            code, answer = future.result(timeout=3)
+            checker.check("question proxy: exact %s body reaches only its worker" % (action.get("action") or action["answers"][0]),
+                          event["event"] == "question_request" and request["operation"] == "answer"
+                          and request["input"] == body and code == 200 and answer["status"] == "answer_pending"
+                          and connections[names[1]].queue.empty() and store.counts()["total"] == 0)
+        server.detach(connections[names[1]])
+        checker.check("question proxy: offline worker returns a recoverable error without closing a question",
+                      call("GET", "/questions/QuestionWindows/" + question_id)[0] == 503)
+        code, body = call("GET", "/questions/QuestionMac/" + question_id)
+        checker.check("question proxy: missing worker response times out and releases the pending slot",
+                      code == 504 and body["error"] == "question_worker_timeout"
+                      and not server.question_requests and store.counts()["total"] == 0)
+    finally:
+        pool.shutdown(wait=True)
+        server.shutdown()
+        server.server_close()
+        thread.join(5)
+        store.close()
+
+
 def start_process(argv, log_path: Path):
     handle = open(str(log_path), "wb")
     proc = subprocess.Popen(argv, stdout=handle, stderr=subprocess.STDOUT)
@@ -2674,6 +2750,7 @@ def run(work: Path, checker: Checker) -> None:
         zero_backlog_selftest(checker, work, trigger_url, trigger_token)
         dispatch_race_selftest(checker, work)
         one_backlog_selftest(checker, work)
+        question_proxy_selftest(checker, work)
 
         for worker_obj in workers:
             worker_obj.stop()
