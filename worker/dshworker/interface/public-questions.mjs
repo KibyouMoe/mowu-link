@@ -140,3 +140,14 @@ export function nativeAnswersInSnapshot(question, snapshot) {
   const result = question.sourceQuestionItemIds.map(id => answers.get(id));
   return result.every(x => typeof x === "string" && x) ? result : null;
 }
+
+// Owner withdrawal closes the native panel without recording a user answer.
+export function nativeQuestionClosure(question, status) {
+  const reason = status === "canceled" ? "已取消" : "已过期";
+  return nativeQuestionReply(question, question.questions.map(() => `（提问${reason}，系统撤回，未提供答案）`));
+}
+export function isNativeQuestionClosure(text) {
+  const replies = parseNativeQuestionReply(text);
+  return Boolean(replies?.length && replies.every(reply =>
+    ["（提问已过期，系统撤回，未提供答案）", "（提问已取消，系统撤回，未提供答案）"].includes(reply.answer)));
+}

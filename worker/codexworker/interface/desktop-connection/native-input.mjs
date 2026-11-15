@@ -4,7 +4,7 @@ import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypt
 import { chmod, lstat, mkdir, mkdtemp, open, readFile, realpath, rename, rm, unlink, writeFile } from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
-import { nativeQuestionReply } from "../public-questions.mjs";
+import { nativeQuestionReply, nativeQuestionClosure } from "../public-questions.mjs";
 
 const MAX_REQUEST_BYTES = 128 * 1024;
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -40,19 +40,35 @@ export async function createNativeInput({ stateDir, owner, send, timeoutMs = 300
   async function validate(request) {
     const question = request.operation === "questionReply";
     const message = request.operation === "message";
+    const chat = request.operation === "chat";
+    const closure = request.operation === "questionClose";
     if (!uuid.test(request.messageId ?? "") || typeof request.threadId !== "string" ||
         typeof request.prompt !== "string" || !request.prompt.trim() ||
-        !["steer", "queue"].includes(request.delivery) || ![undefined, "image", "questionReply", "message"].includes(request.operation) ||
+        !["steer", "queue"].includes(request.delivery) || ![undefined, "image", "questionReply", "message", "chat", "questionClose"].includes(request.operation) ||
         question && (request.delivery !== "steer" || request.images !== undefined) ||
+        closure && (request.delivery !== "steer" || request.images !== undefined) ||
         message && (request.delivery !== "queue" || request.images !== undefined) ||
-        !question && !message && (!Array.isArray(request.images) || request.images.length < 1 || request.images.length > 10))
+        chat && (request.taskId !== undefined || request.images !== undefined && (!Array.isArray(request.images) || request.images.length > 10)) ||
+        !question && !message && !chat && !closure && (!Array.isArray(request.images) || request.images.length < 1 || request.images.length > 10))
       invalid("native_input_request_invalid");
     const config = JSON.parse(await readFile(path.join(stateDir, "desktop-config.local.json"), "utf8"));
     if (config.autoStart === false) invalid("native_image_autostart_disabled");
     const state = JSON.parse(await readFile(path.join(stateDir, "desktop-manager-state.json"), "utf8"));
+    if (closure) {
+      const question = state.publicQuestions?.[request.questionId];
+      const actions = JSON.parse(await readFile(path.join(stateDir, "question-actions.json"), "utf8"));
+      const action = actions.entries?.[request.questionId];
+      if (!question || question.threadId !== request.threadId || question.delivery !== "async" ||
+          !state.sessions?.[request.threadId] || ![undefined, null, "local"].includes(state.sessions[request.threadId].hostId) ||
+          !["expired", "canceled"].includes(action?.status) || action.nativePanelSync?.kind !== "closure" ||
+          action.nativePanelSync.status !== "dispatching" || action.nativePanelSync.messageId !== request.messageId ||
+          nativeQuestionClosure(question, action.status) !== request.prompt)
+        invalid("native_question_closure_mismatch");
+      return;
+    }
     const receipt = state.receipts?.[request.messageId], feishu = state.feishuReceipts?.[request.messageId];
     if (!state.sessions?.[request.threadId] || ![undefined, null, "local"].includes(state.sessions[request.threadId].hostId) ||
-        (!message && state.selectedThreadId !== request.threadId) ||
+        (!message && !chat && state.selectedThreadId !== request.threadId) ||
         !["trainer", "hermes"].includes(receipt?.request?.source) || receipt.nativeTargetThreadId !== request.threadId ||
         receipt.nativeInputHash !== digest(JSON.stringify(request.prompt))) invalid("native_input_receipt_mismatch");
     if (message) {
@@ -78,10 +94,32 @@ export async function createNativeInput({ stateDir, owner, send, timeoutMs = 300
         invalid("native_question_receipt_mismatch");
       return;
     }
-    if (receipt.request.source !== "trainer" || receipt.nativeDispatch?.status !== "dispatching" ||
+    let imageRoot = path.join(stateDir, "feishu-images");
+    if (chat) {
+      if (receipt.nativeDispatch?.status !== "dispatching") invalid("native_chat_receipt_mismatch");
+      if (receipt.request.source === "trainer") {
+        if (state.selectedThreadId !== request.threadId || !/^om_[A-Za-z0-9_-]+$/.test(feishu?.incomingMessageId ?? "") ||
+            JSON.stringify(feishu.nativeImagePaths ?? []) !== JSON.stringify(request.images ?? []))
+          invalid("native_chat_receipt_mismatch");
+      } else {
+        const peer = receipt.request.metadata?.workerChat;
+        if (receipt.request.origin !== "worker-chat" || !uuid.test(receipt.request.messageId ?? "") ||
+            !/^[0-9a-f-]{36}$/i.test(peer?.messageId ?? "") || typeof peer?.to !== "string")
+          invalid("native_chat_receipt_mismatch");
+        const folder = path.join(stateDir, "worker-messages", digest(peer.to));
+        const received = JSON.parse(await readFile(path.join(folder, "received", peer.messageId + ".json"), "utf8"));
+        if (received.request?.messageId !== request.messageId || received.request.targetThreadId !== request.threadId ||
+            received.payload?.message_id !== peer.messageId || received.payload.from !== peer.from || received.payload.to !== peer.to ||
+            received.request.text !== receipt.request.text ||
+            JSON.stringify(received.request.attachments?.map(ref => ref.localPath) ?? []) !== JSON.stringify(request.images ?? []))
+          invalid("native_chat_receipt_mismatch");
+        imageRoot = path.join(folder, "images");
+      }
+    } else if (receipt.request.source !== "trainer" || receipt.nativeDispatch?.status !== "dispatching" ||
         !/^om_[A-Za-z0-9_-]+$/.test(feishu?.incomingMessageId ?? "") || feishu.imageThreadId !== request.threadId ||
         JSON.stringify(feishu.nativeImagePaths) !== JSON.stringify(request.images)) invalid("native_image_receipt_mismatch");
-    const cache = await realpath(path.join(stateDir, "feishu-images"));
+    if (!request.images?.length) return;
+    const cache = await realpath(imageRoot);
     for (const image of request.images) {
       if (typeof image !== "string" || !path.isAbsolute(image) || path.dirname(await realpath(image)) !== cache)
         invalid("native_image_path_invalid");
@@ -101,7 +139,9 @@ export async function createNativeInput({ stateDir, owner, send, timeoutMs = 300
   }
 
   async function deliver(request, fingerprint) {
-    const ledger = path.join(stateDir, request.operation === "questionReply" ? "native-question-receipts"
+    const ledger = path.join(stateDir, request.operation === "questionClose" ? "native-question-closures"
+      : request.operation === "chat" ? "native-chat-receipts"
+      : request.operation === "questionReply" ? "native-question-receipts"
       : request.operation === "message" ? "native-message-receipts" : "native-image-receipts");
     await mkdir(ledger, { recursive: true, mode: 0o700 });
     const file = path.join(ledger, request.messageId + ".json");
@@ -130,9 +170,12 @@ export async function createNativeInput({ stateDir, owner, send, timeoutMs = 300
     try {
       const params = { threadId: request.threadId, clientUserMessageId: request.messageId,
         input: [{ type: "text", text: request.prompt }, ...(request.images ?? []).map(image => ({ type: "localImage", path: image }))] };
-      const method = active ? request.delivery === "queue" ? "thread/queue/add" : "turn/steer" : "turn/start";
+      const closingIdleQuestion = request.operation === "questionClose" && !active;
+      const method = closingIdleQuestion ? "thread/inject_items"
+        : active ? request.delivery === "queue" ? "thread/queue/add" : "turn/steer" : "turn/start";
       if (method === "turn/steer") params.expectedTurnId = active.id;
-      const response = await rpc(method, params);
+      const response = await rpc(method, closingIdleQuestion ? { threadId: request.threadId,
+        items: [{ type: "message", id: request.messageId, role: "user", content: [{ type: "input_text", text: request.prompt }] }] } : params);
       record.result = { threadId: request.threadId, turnId: response?.turnId ?? response?.turn?.id ?? null,
         queued: method === "thread/queue/add" };
       record.status = "accepted";
@@ -150,12 +193,23 @@ export async function createNativeInput({ stateDir, owner, send, timeoutMs = 300
     }
   }
 
-  function dispatch(request) {
+  async function dispatch(request) {
     if (closed || !initialized) invalid("native_input_not_ready");
     if (!equalToken(request.token, token)) invalid("native_input_unauthorized");
     if (!uuid.test(request.messageId ?? "")) invalid("native_image_request_invalid");
     if (request.operation === "cancel") return cancel(request);
-    const fingerprint = digest(JSON.stringify([request.threadId, request.messageId, request.prompt, request.images, request.delivery]));
+    const closure = request.operation === "questionClose";
+    if (closure) {
+      if (!uuid.test(request.questionId ?? "")) invalid("native_question_closure_mismatch");
+      const state = JSON.parse(await readFile(path.join(stateDir, "desktop-manager-state.json"), "utf8"));
+      const actions = JSON.parse(await readFile(path.join(stateDir, "question-actions.json"), "utf8"));
+      const question = state.publicQuestions?.[request.questionId], action = actions.entries?.[request.questionId];
+      if (!question || !action) invalid("native_question_closure_mismatch");
+      request = { ...request, prompt: nativeQuestionClosure(question, action.status), delivery: "steer" };
+    }
+    const fingerprint = digest(JSON.stringify(closure
+      ? ["question-close", request.threadId, request.messageId, request.questionId, request.prompt]
+      : [request.threadId, request.messageId, request.prompt, request.images, request.delivery]));
     const current = activeMessages.get(request.messageId);
     if (current) {
       if (current.fingerprint !== fingerprint) invalid("native_image_message_conflict");
@@ -305,7 +359,7 @@ export async function createNativeInput({ stateDir, owner, send, timeoutMs = 300
   }
 
   return {
-    env: { CODEXWORKER_NATIVE_IMAGE_INPUT: "1", CODEXWORKER_NATIVE_QUESTION_INPUT: "1", CODEXWORKER_NATIVE_TASK_INPUT: "1",
+    env: { CODEXWORKER_NATIVE_IMAGE_INPUT: "1", CODEXWORKER_NATIVE_QUESTION_INPUT: "1", CODEXWORKER_NATIVE_TASK_INPUT: "1", CODEXWORKER_NATIVE_CHAT_INPUT: "1",
       CODEXWORKER_NATIVE_INPUT_DESCRIPTOR: descriptorFile },
     client(message) {
       if (message?.method === "initialize") initializeId = message.id;

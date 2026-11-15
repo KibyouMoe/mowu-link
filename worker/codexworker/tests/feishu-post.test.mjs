@@ -45,6 +45,16 @@ test("localized rich text and plain text posts preserve readable content",async 
  assert.equal(result.action,"dispatch_pending");assert.equal(f.downloads.length,0);
  assert.equal(f.calls.find(c=>c.name==="send_message_to_thread").args.prompt,"标题\n你好链接 (https://example.org)");
 });
+for (const supported of [true, false]) test(`ordinary Feishu input respects native chat capability ${supported}`, async t => {
+ const f=await fixture(t);f.manager.config.nativeChatInput=supported;
+ const result=await f.manager.receiveFeishu(event("继续当前任务",{message_type:"text"}));
+ const send=f.calls.find(call=>call.name==="send_message_to_thread");
+ assert.equal(send.args.prompt,"继续当前任务");
+ assert.equal(send.args.nativeChatInput,supported?true:undefined);
+ if(supported){assert.equal(send.args.nativeMessageId,result.messageId);assert.equal(send.args.nativeDelivery,"steer");}
+ assert.equal((await f.manager.receiveFeishu(event("继续当前任务",{message_type:"text"}))).duplicate,true);
+ assert.equal(f.calls.filter(call=>call.name==="send_message_to_thread").length,1);
+});
 test("mixed post downloads every image and dispatches its caption once with stable deduplication",async t=>{
  const f=await fixture(t),e=event(content(["img_first","img_second"]));
  const first=await f.manager.receiveFeishu(e),repeat=await f.manager.receiveFeishu(e);

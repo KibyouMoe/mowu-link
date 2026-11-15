@@ -69,6 +69,7 @@ MAX_GOAL_CHARS = 2000
 MAX_BODY_BYTES = 1 * 1024 * 1024
 PEER_MAX_TEXT = 20000
 PEER_PAGE_LIMIT = 100
+ROOT_PEER_NAME = "Hermes"
 PEER_PAGE_BYTES = 256 * 1024
 PEER_STREAM_BUFFER = 32
 LOG_MAX_BYTES = 5 * 1024 * 1024
@@ -2135,7 +2136,7 @@ class RouterHandler(BaseHTTPRequestHandler):
                 raise BadRequest("use either id or worker")
             return self._peer_message_get(qs["id"][0])
         worker = self._peer_worker(qs.get("worker", [None])[0], "worker")
-        if self.server.store.get_worker(worker) is None:
+        if worker != ROOT_PEER_NAME and self.server.store.get_worker(worker) is None:
             return 404, {"ok": False, "error": "unknown_worker"}
         limit = self._int_param(qs, "limit", PEER_PAGE_LIMIT)
         if limit is None or not 1 <= limit <= PEER_PAGE_LIMIT:
@@ -2178,7 +2179,7 @@ class RouterHandler(BaseHTTPRequestHandler):
             sender = self._peer_worker(body.get("from"), "from")
             recipient = self._peer_worker(body.get("to"), "to")
             for worker in (sender, recipient):
-                if self.server.store.get_worker(worker) is None:
+                if worker != ROOT_PEER_NAME and self.server.store.get_worker(worker) is None:
                     return 404, {"ok": False, "error": "unknown_worker"}
             text = body.get("text")
             if not isinstance(text, str) or not text.strip() or len(text) > PEER_MAX_TEXT:

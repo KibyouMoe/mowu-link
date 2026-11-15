@@ -326,7 +326,8 @@ export class InProcessTransport {
       case "send_message_to_thread": {
         const thread = this.requireThread(toolName, args);
         const nativeInput = args.nativeImages?.length
-          ? await prepareDshImageMessage(this, thread, args, promptFromArgs(args)) : null;
+          ? await prepareDshImageMessage(this, thread, args, promptFromArgs(args))
+          : args.nativeChatInput ? { ...userMessage(promptFromArgs(args)), id: args.nativeMessageId } : null;
         if (!nativeInput && parseDshQuestionReply(promptFromArgs(args)) && !this.live.get(thread.id)?.agent)
           await this.ensureAgent(thread);
         return this.sendMessage(args, nativeInput);

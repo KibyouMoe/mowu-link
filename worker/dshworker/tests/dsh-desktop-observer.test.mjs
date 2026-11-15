@@ -62,6 +62,28 @@ test('Worker steering a native Desktop turn has one input and preserves native t
   await f.end(); assert.equal(f.thread.turns.length, 1);
 });
 
+test('external chat uses the native host inbox before the next durable user message arrives', async t => {
+  const f = fixture(t); f.start(); f.user('desktop start');
+  const pending = [];
+  f.agent.steer = message => {
+    pending.push(message);
+    f.emit('agent/inbox/spliced', { mode: 'next-step', messages: [message] });
+  };
+  const messageId = '6c18a7d2-4cfa-4683-9c12-b2a02d035bbd';
+  const result = await f.transport.execute('send_message_to_thread', {
+    threadId: f.thread.id, prompt: '来自 Hermes：\n继续原任务',
+    nativeChatInput: true, nativeMessageId: messageId,
+  });
+  assert.equal(result.turnId, f.thread.turns[0].id);
+  assert.equal(pending.length, 1); assert.equal(pending[0].id, messageId);
+  assert.equal(pending[0].source.kind, 'user');
+  assert.deepEqual(f.thread.turns[0].inputs.map(item => item.id), [messageId]);
+  f.emit('user/message', pending[0]);
+  assert.equal(f.thread.turns[0].inputs.length, 1);
+  assert.equal(f.snapshot().turns[0].items.filter(item => item.type === 'userMessage').length, 2);
+  await f.end(); assert.equal(f.thread.turns.length, 1);
+});
+
 test('foreign sessions, runtime context, reasoning and raw tool output are not mirrored', async t => {
   const f = fixture(t);
   f.emit('turn/start', {}, { id: 'foreign', seq: 0 }); assert.equal(f.thread.turns.length, 0);

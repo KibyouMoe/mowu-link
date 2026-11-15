@@ -4,7 +4,7 @@ import { dshImageInputAvailable } from "../image-input.mjs";
 export function createInProcessAdapter(transport) {
   return {
     name: TRANSPORT_NAME,
-    capabilities: Object.freeze({ fork: false, desktopJournal: false, callerTurn: false,
+    capabilities: Object.freeze({ fork: false, desktopJournal: false, callerTurn: false, chatInput: true,
       get imageInput() { return dshImageInputAvailable(transport); } }),
     // Business status reads use complete in-process snapshots, including empty
     // threads and native answer items. The DSH API also exposes wait_threads.

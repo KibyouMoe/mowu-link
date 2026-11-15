@@ -77,6 +77,7 @@ export async function runNativeConnection(argv, { env = process.env, spawnImpl =
             delete childEnv.CODEXWORKER_NATIVE_IMAGE_INPUT; delete childEnv.CODEXWORKER_NATIVE_INPUT_DESCRIPTOR;
             delete childEnv.CODEXWORKER_NATIVE_QUESTION_INPUT;
             delete childEnv.CODEXWORKER_NATIVE_TASK_INPUT;
+            delete childEnv.CODEXWORKER_NATIVE_CHAT_INPUT;
             stderr.write("[desktop-connection] native image input unavailable\n");
           }
         }

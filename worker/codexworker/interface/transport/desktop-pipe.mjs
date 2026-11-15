@@ -18,6 +18,7 @@ export const capabilities = {
   get imageInput() { return process.env.CODEXWORKER_NATIVE_IMAGE_INPUT === "1"; },
   get questionInput() { return process.env.CODEXWORKER_NATIVE_QUESTION_INPUT === "1"; },
   get taskInput() { return process.env.CODEXWORKER_NATIVE_TASK_INPUT === "1"; },
+  get chatInput() { return process.env.CODEXWORKER_NATIVE_CHAT_INPUT === "1"; },
 };
 
 const PIPE_ENV = "CODEX_APP_TOOLS_PIPE_PATH";
@@ -62,6 +63,17 @@ export async function callTool(toolName, args, invocation, timeoutMs = 5000) {
   // The MCP system instructions carry peer rules. Keep private correlation
   // metadata out of the visible Desktop tool prompt and its public schema.
   if (args.nativePeerMessage) { args = { ...args }; delete args.nativePeerMessage; }
+  if (toolName === "send_message_to_thread" && args.nativeQuestionClose) {
+    if (invocation?.threadId !== args.threadId) throw new Error("Native question closure must match its owning conversation");
+    return sendNativeInput({ operation: "questionClose", threadId: args.threadId,
+      questionId: args.nativeQuestionClose.questionId, messageId: args.nativeQuestionClose.messageId }, { timeoutMs });
+  }
+  if (toolName === "send_message_to_thread" && args.nativeChatInput) {
+    if (invocation?.threadId !== args.threadId) throw new Error("Native chat target must match its owning conversation");
+    return sendNativeInput({ operation: "chat", threadId: args.threadId, prompt: args.prompt,
+      messageId: args.nativeMessageId, delivery: args.nativeDelivery,
+      ...(args.nativeImages ? { images: args.nativeImages } : {}) }, { timeoutMs });
+  }
   if (toolName === "cancel_task") return sendNativeInput({ ...args, operation: "cancel" }, { timeoutMs });
   if (toolName === "send_message_to_thread" && args.nativeTask && capabilities.taskInput &&
       process.env.CODEXWORKER_NATIVE_INPUT_DESCRIPTOR) {
