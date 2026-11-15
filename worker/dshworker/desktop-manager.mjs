@@ -1592,13 +1592,20 @@ export class DesktopManager {
     await this.save();
     let response; let parent = null; let hostId = null;
     if (command === "/new") {
-      if (!this.config.projectId) fail(503, "bridge_not_ready", "A Desktop projectId is required for /new.");
+      const listed = await this.call("list_projects", {});
+      let projectId = this.config.projectId;
+      if (!listed.projects?.some(project => project.projectId === projectId)) {
+        const cwd = this.session(request.targetThreadId).cwd;
+        projectId = listed.projects?.find(project => localHost(project.hostId) &&
+          typeof project.path === "string" && path.relative(project.path, cwd) === "")?.projectId;
+      }
+      if (!projectId) fail(503, "bridge_not_ready", "当前工作目录未登记到客户端项目列表，请先在客户端添加该目录。");
       const defaults = this.state.feishuReceipts[request.messageId]?.incomingMessageId
         ? await this.modelCommands.defaults(this.state.selectedThreadId) : null;
       response = await this.call("create_thread", { title: alias,
         ...(defaults ? { model: defaults.model, ...(defaults.effort == null ? {} : { thinking: defaults.effort }) } : {}),
         prompt: "这是 Hermes Bridge 创建的 Codex 原生会话。请只回复 HERMES_READY，等待后续任务；不要调用工具或修改文件。",
-        target: { type: "project", projectId: this.config.projectId, environment: { type: "local" } } });
+        target: { type: "project", projectId, environment: { type: "local" } } });
     } else {
       if (!this.canFork) fail(501, "capability_unavailable", "This worker transport cannot fork threads; start a new session instead.", false);
       parent = request.sourceThreadId ?? this.session(request.targetThreadId).threadId;

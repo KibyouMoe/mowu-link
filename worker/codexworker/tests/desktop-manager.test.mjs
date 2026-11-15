@@ -227,6 +227,7 @@ async function fixture(t, overrides = {}) {
       else tasks.get(args.threadId).turns.push({ id: `turn-${++count}`, status: "inProgress", items: [item] });
       return { threadId: args.threadId };
     }
+    if (name === "list_projects") return { projects: [{ projectId: "project-test", path: root, hostId: "local" }] };
     if (name === "create_thread") { const id = `created-${++count}`; add(id); return { threadId: id }; }
     if (name === "fork_thread") {
       const id = `fork-${++count}`; add(id, structuredClone(tasks.get(args.threadId).turns));
@@ -235,7 +236,7 @@ async function fixture(t, overrides = {}) {
     if (name === "set_thread_title") { tasks.get(args.threadId).thread.title = args.title; return { updated: true }; }
     throw new Error(`Unexpected tool ${name}`);
   };
-  const listNativeTools = async () => ["read_thread", "send_message_to_thread", "create_thread", "fork_thread", "set_thread_title", "list_threads"].map(name => ({ name }));
+  const listNativeTools = async () => ["read_thread", "send_message_to_thread", "create_thread", "fork_thread", "set_thread_title", "list_threads", "list_projects"].map(name => ({ name }));
   const config = { token, port: 0, pollMs: 1000000, projectId: "project-test", workspaceRoots: [root], nativeSenderThreadId: "manager-test", messageSourceLabels: false,
     ...overrides, feishu: { onlineStableMs: 0, ...overrides.feishu } };
   const manager = await new DesktopManager({ native, listNativeTools, stateDir: root, config,
