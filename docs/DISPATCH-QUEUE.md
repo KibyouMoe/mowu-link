@@ -39,6 +39,12 @@
 - `question_recipient_mismatch`：`Only the bound originating agent/task may answer this question` —— 溪流无资格回答
 - 客户端原生提问窗口**不消失**：答完之后弹窗还挂着
 
+## 夜间验收规矩（训练员 22:41 授权）
+
+- 前三项（会话注入 / 入站健壮性 / 提问通道）里，凡需要「训练员在飞书输入」的步骤，**worker 自己用 computer use 驱动本机飞书客户端完成输入**，不许为验收叫醒训练员。
+- 证据要求：截图能看出是飞书会话 + 该条输入；结论里注明「输入由 worker 通过 computer use 完成」。
+- 如需开屏幕录制/辅助功能权限，由溪流处理，不要找训练员。
+
 ## 待办（不定时，跟队列无关）
 
 | 内容 | 说明 |
