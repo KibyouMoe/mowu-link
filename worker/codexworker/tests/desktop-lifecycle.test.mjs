@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -92,7 +92,7 @@ test("an old healthy process gets continuous unhealthy grace across short handof
 test("lifetime startup uses trusted installed source even after the disposable cache entry disappears", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "rudolf-stable-lifetime-"));
   try {
-    const installed = path.join(root, "installed");
+    const installed = await realpath(root).then(value => path.join(value, "installed"));
     await cp(new URL("..", import.meta.url), installed, { recursive: true });
     await writeFile(path.join(root, "runtime-source.local.json"), JSON.stringify({ sourceRoot: installed, autoReload: false }));
     const removedCache = path.join(root, "removed-cache");
