@@ -13,6 +13,7 @@ import { DshDesktopObserver } from "./desktop-observer.mjs";
 import { DshQuestions } from "./questions.mjs";
 import { parseDshQuestionReply, projectPublicQuestion } from "./public-questions.mjs";
 import { projectDshMedia } from "./public-media.mjs";
+import { prepareDshImageMessage } from "./image-input.mjs";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const VERSION = "0.3.1";
 const TRANSPORT_NAME = "dsh-inprocess";
@@ -62,6 +63,7 @@ const TOOL_DEFINITIONS = [
     inputSchema: { type: "object", properties: {
       threadId: { type: "string" }, prompt: { type: "string" }, text: { type: "string" },
       message: { type: "string" }, input: { type: "array" },
+      nativeImages: { type: "array", items: { type: "string" } }, nativeMessageId: { type: "string" },
     }, required: ["threadId"] },
   },
   {
@@ -306,9 +308,11 @@ export class InProcessTransport {
       case "read_thread": return this.readThread(args);
       case "send_message_to_thread": {
         const thread = this.requireThread(toolName, args);
-        if (parseDshQuestionReply(promptFromArgs(args)) && !this.live.get(thread.id)?.agent)
+        const nativeInput = args.nativeImages?.length
+          ? await prepareDshImageMessage(this, thread, args, promptFromArgs(args)) : null;
+        if (!nativeInput && parseDshQuestionReply(promptFromArgs(args)) && !this.live.get(thread.id)?.agent)
           await this.ensureAgent(thread);
-        return this.sendMessage(args);
+        return this.sendMessage(args, nativeInput);
       }
       case "set_thread_title": return this.setThreadTitle(args);
       case "wait_threads": return this.waitThreads(args, timeoutMs);
@@ -372,12 +376,12 @@ export class InProcessTransport {
     return payload;
   }
 
-  sendMessage(args = {}) {
+  sendMessage(args = {}, nativeInput = null) {
     const thread = this.requireThread("send_message_to_thread", args);
     if (thread.compacting) throw new Error("native_compaction_in_progress");
     const prompt = promptFromArgs(args);
     if (!prompt) throw new Error("send_message_to_thread requires a non-empty `prompt` (or text `input`)");
-    const replies = parseDshQuestionReply(prompt);
+    const replies = nativeInput ? null : parseDshQuestionReply(prompt);
     const nativeReply = replies ? this.questions.prepare(thread, replies) : null;
     if (nativeReply?.answered) {
       const active = thread.turns.find(t => t.id === nativeReply.turnId);
@@ -387,8 +391,10 @@ export class InProcessTransport {
     const active = thread.running && thread.turns.find(t => t.status === "inProgress" && !thread.queue.includes(t.id));
     const agent = this.live.get(thread.id)?.agent;
     if (active && agent && !nativeReply) {
-      agent.steer(this.desktopObserver.sent(userMessage(prompt), active));
-      (active.inputs ??= []).push({ id: randomUUID(), text: prompt });
+      const message = nativeInput ?? userMessage(prompt);
+      agent.steer(this.desktopObserver.sent(message, active));
+      (active.inputs ??= []).push({ id: nativeInput ? message.id : randomUUID(), text: prompt,
+        ...(nativeInput ? { content: message.content } : {}) });
       active.eventSeq = (active.eventSeq ?? 0) + 1;
       void this.save();
       return { threadId: thread.id, turnId: active.id, accepted: true, status: active.status };
@@ -397,6 +403,7 @@ export class InProcessTransport {
       id: randomUUID(), prompt, status: "inProgress", text: "", thinking: "",
       error: null, reasonKind: null, startedAt: new Date().toISOString(), completedAt: null,
       ...(nativeReply ? { nativeReply, taskId: nativeReply.taskId } : {}),
+      ...(nativeInput ? { nativeInput } : {}),
     };
     turn.deadlineAt = this.taskDeadlines.get(taskIdOf(turn)) ?? null;
     thread.turns.push(turn);
@@ -484,7 +491,7 @@ export class InProcessTransport {
         });
         const fromSeq = agent.session.seq;
         if (turn.nativeReply) this.questions.continue(agent, turn.nativeReply);
-        else agent.followup(this.desktopObserver.sent(userMessage(turn.prompt), turn));
+        else agent.followup(this.desktopObserver.sent(turn.nativeInput ?? userMessage(turn.prompt), turn));
         const subagents = this.ctx.get("subagents");
         for (;;) {
           await agent.whenIdle();
@@ -875,11 +882,13 @@ function turnItems(turn, maxChars, cwd) {
   const items = [{
     type: "userMessage", kind: "trainer", id: `${turn.id}-user`,
     text: truncateText(turn.prompt ?? "", maxChars),
+    ...(turn.nativeInput ? { content: turn.nativeInput.content } : {}),
   }];
   items.push(...(turn.nativeQuestions ?? []));
   for (const input of turn.inputs ?? []) items.push({ type: "userMessage", kind: "trainer", id: input.id,
-    text: truncateText(input.text, maxChars), ...(parseDshQuestionReply(input.text) ? { dshQuestionAnswers: parseDshQuestionReply(input.text) } : {}) });
-  const replies = parseDshQuestionReply(turn.prompt);
+    text: truncateText(input.text, maxChars), ...(input.content ? { content: input.content } : {}),
+    ...(!input.content && parseDshQuestionReply(input.text) ? { dshQuestionAnswers: parseDshQuestionReply(input.text) } : {}) });
+  const replies = turn.nativeInput ? null : parseDshQuestionReply(turn.prompt);
   if (replies) items[0].dshQuestionAnswers = replies;
   if (turn.errorCode === "dsh_session_resume_failed") items.push({
     type: "agentMessage", kind: "assistant", id: `${turn.id}-resume-error`,

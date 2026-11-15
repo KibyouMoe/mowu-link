@@ -13,7 +13,7 @@ import { nativeToolRejection } from "../../interface/native-dispatch.mjs";
 export const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j1WkAAAAASUVORK5CYII=", "base64");
 export const sha256 = bytes => createHash("sha256").update(bytes).digest("hex");
 const tick = () => new Promise(resolve => setImmediate(resolve));
-async function waitForNative(predicate, detail) {
+export async function waitForNative(predicate, detail) {
   for (let attempt = 0; attempt < 500; attempt++) {
     if (predicate()) return;
     await delay(10);
@@ -21,10 +21,18 @@ async function waitForNative(predicate, detail) {
   assert.fail(detail);
 }
 
-export async function dshFixture(t, { wireMedia = false } = {}) {
+export async function dshFixture(t, { wireMedia = false, nativeImages = false } = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), "dsh-business-compat-"));
   const listeners = new Map(), records = [], waiters = [], calls = [], cards = [], imageSends = [];
   const mediaMessages = [], uploads = [], questionPosts = [], downloads = [];
+  const attachmentInputs = [];
+  const attachments = { imageLimits: { maxImageBytes: 30_000_000, maxMessageImageBytes: 30_000_000, maxImagesPerMessage: 10 },
+    async saveImages(inputs) {
+      attachmentInputs.push(...inputs.map(input => ({ name: input.name, bytes: input.data.length,
+        sha256: sha256(input.data), mediaType: input.mediaType })));
+      return inputs.map(input => ({ attachmentId: "sha256:" + sha256(input.data), mediaType: input.mediaType,
+        bytes: input.data.length, width: 1, height: 1, name: input.name }));
+    } };
   const session = { id: "native-original", seq: 0, eventAt: index => records[index] };
   const questions = { continued: () => [], answer: () => false };
   const compaction = { async compactNow(subject) {
@@ -45,7 +53,8 @@ export async function dshFixture(t, { wireMedia = false } = {}) {
   const registry = { list: () => [agent], create: async () => handle,
     resume: async ({ resumeSessionId }) => { assert.equal(resumeSessionId, session.id); return handle; } };
   const ctx = {
-    get: name => ({ agents: registry, sessions: { flush: async () => {} }, userQuestions: questions })[name],
+    get: name => ({ agents: registry, sessions: { flush: async () => {} }, userQuestions: questions,
+      ...(nativeImages ? { attachments } : {}) })[name],
     on(name, listener) {
       const set = listeners.get(name) ?? new Set(); set.add(listener); listeners.set(name, set);
       return () => set.delete(listener);
@@ -72,6 +81,7 @@ export async function dshFixture(t, { wireMedia = false } = {}) {
   const manager = await new DesktopManager({ stateDir: root,
     config: { token: "isolated-dsh-compat-token", projectId: "compat", workspaceRoots: [root],
       nativeSenderThreadId: threadId, nativeBusyDeliveryVerified: true, pollMs: 1000000,
+      nativeImageInput: nativeImages,
       operatingMode: "feishu-local", bridgeName: "玉藻十字", messageSourceLabels: false,
       feishu: { transcriptEnabled: true, streamEnabled: true, streamUpdateIntervalMs: 250,
         toolProgressEnabled: true, trainerOpenIdWhitelist: ["trainer"] } },
@@ -157,6 +167,6 @@ export async function dshFixture(t, { wireMedia = false } = {}) {
     resetNativeTransportCache(); await rm(root, { recursive: true, force: true });
   });
   return { root, manager, transport, adapter, agent, threadId, session, cards, calls, imageSends,
-    mediaMessages, uploads, questionPosts, downloads, records,
+    mediaMessages, uploads, questionPosts, downloads, records, attachments, attachmentInputs,
     emit, publish, stream, finish: finishTurn, drain, send };
 }

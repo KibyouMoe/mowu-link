@@ -66,10 +66,43 @@ router TOTAL 138/138 PASS
 WORKER_COMPAT_PASS
 ```
 
-以上为本机 macOS Node v22.22.0。此次新增事件映射的 Windows 原生 CI 另随提交核对。
+以上为本机 macOS Node v22.22.0。B 提交 `ede78d9de62973c7207332968ec6dde3789ded2f` 的 Mac／Windows Node 22、26 四组原生 CI 均 success。[B 的原生 CI](https://github.com/KibyouMoe/mowu-link/actions/runs/43677573039)
+
+| 平台与 Node | Codex 通过 / 失败 / 跳过 / 总数 | DSH 通过 / 失败 / 跳过 / 总数 | router |
+| --- | --- | --- | --- |
+| Mac 22、26 各组 | 834 / 0 / 8 / 842 | 807 / 0 / 8 / 815 | 每组 138/138 PASS |
+| Windows 22、26 各组 | 818 / 0 / 24 / 842 | 806 / 0 / 9 / 815 | POSIX 服务自测在 Mac 运行 |
 
 界面目测当前遇到 Mac 锁屏。Computer Use 返回 `The Mac is locked and automatic unlock could not unlock it. Ask the user to unlock the Mac manually before continuing.` 已发出手动解锁请求，B 的当前证据是原生真实事件、实际飞书媒体消息与原件下载校验。
 
-## 后续
+## C 已通过
 
-C 将核对同一图片通过 router 附件通道交给溪流后的真实落地文件、大小与 SHA256。A 将核对飞书入站的原生 image attachment 和 DSH 客户端接收，当前生产健康接口仍报告 cached-path-prompt。
+玉藻在原会话执行现有 `scripts/send-router-image.mjs`，通过独立二进制上传与附件 ID 通知交给溪流。溪流在工单 `t-0149ea6a8c` 中确认下载文件、尺寸和画面，小栗帽另从接收路径读取原件复核。
+
+```json
+{"path":"/Users/kibyou/.hermes/attachments/router/fae67cd73585da2064cf3f2e61c96a024a5569b63e23cb4825fa3438e9949f0f.png","bytes":3305,"sha256":"fae67cd73585da2064cf3f2e61c96a024a5569b63e23cb4825fa3438e9949f0f","message_id":"2b93bfb4-d2aa-4ae2-940b-2ce6ebbd217a","event_id":"notice:255dc44ab8c57854ff61e208","trigger_id":373,"receiverConfirmationTask":"t-0149ea6a8c"}
+```
+
+接收文件 PNG 800×450，源文件、router 内容寻址 ID、溪流落地文件的完整 SHA256 相同。
+
+## A 原生附件接入
+
+当前运行的 B 版本仍报告 `feishuImageInput=cached-path-prompt`。飞书原图入站与模型工具读图已有真实记录，原生 image attachment 正在接入适配层。
+
+实现采用 DSH 自己的 `attachments.saveImages` 批量校验、规范化和保存附件，向原 Agent followup/steer 投递 `type=image`、`attachment={attachmentId,mediaType,bytes,width,height,name}`，传输中使用原生引用。图片输入预备失败按现有 nativeImageOutcome 契约明确报告 notAttempted。公共根业务继续由传输声明的 imageInput 能力启用同一条飞书接收入口。
+
+新增 9 项用例覆盖图片、文件和多图图文入站，20 次重复只写 1 次原生输入，忙碌回合 steer，存储失败、无效批次、关闭期间写入、旧引擎路径回落，以及图片标题按普通内容处理。
+
+```text
+node --test worker/dshworker/tests/dsh-image-input.test.mjs
+tests=9 pass=9 fail=0 skipped=0
+
+ROUTER_TEST_PORT=18790 node worker/check-compat.mjs
+shared_root_modules=37 matched=37 mismatched=0
+codexworker passed=834 failed=0 skipped=8 total=842
+dshworker passed=816 failed=0 skipped=8 total=824
+router TOTAL 138/138 PASS
+WORKER_COMPAT_PASS
+```
+
+A 的源码与本机隔离回归已完成，待部署和新的真实飞书入站验收。
