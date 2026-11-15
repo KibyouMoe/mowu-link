@@ -3,30 +3,50 @@ import test from "node:test";
 import { readFile } from "node:fs/promises";
 import vm from "node:vm";
 import { dshFixture } from "./fixtures/dsh-harness.mjs";
+import { registerCollaborationHost } from "../interface/collaboration-host.mjs";
 
 test("workbench plugin registers a read-only collaboration tab and header entry", async () => {
   let module;
-  const components = [], opened = [];
-  const React = { createElement: (type, props, ...children) => ({ type, props, children }) };
+  const components = [], effects = [];
+  let state;
+  const React = { createElement: (type, props, ...children) => ({ type, props, children }),
+    useState: initial => [state ?? initial, value => { state = value; }], useEffect: effect => effects.push(effect) };
   const source = await readFile(new URL("../interface/collaboration-client.js", import.meta.url), "utf8");
-  vm.runInNewContext(source, { window: { __ModuleLoader__: { load(value) { module = value; } } } });
+  vm.runInNewContext(source, { AbortController, window: { __ModuleLoader__: { load(value) { module = value; } } } });
   const plugin = module.factory(name => name === "react" ? React : {});
   const tabs = [];
-  const ctx = { effect: fn => fn(), sidebarRight: { openTab: kind => opened.push(kind) },
+  const ctx = { effect: fn => fn(),
+    connection: { rpc: { call: async (_path, endpoint) => {
+      assert.equal(endpoint, "workerCollaboration/view");
+      return { ok: true, value: { url: "http://127.0.0.1:8906/collaboration/#read-key" } };
+    } } },
     sidebarRightTabs: { register: tab => { tabs.push(tab); } },
     slots: { inject: (_slot, register) => register(), register: (definition, component) => components.push({ definition, component }) } };
-  plugin.apply(ctx, { collaborationUrl: "http://127.0.0.1:8906/collaboration/#read-key" });
+  plugin.apply(ctx);
   assert.equal(tabs[0].title(), "协作记录");
   assert.equal(components.find(value => value.definition.name === "sidebar.panellist").definition.label(), "协作记录");
-  assert.equal(components.find(value => value.definition.name === "main").component().type, "iframe");
-  const button = components.find(value => value.definition.name === "conversation.session.header.corner").component();
-  button.props.onClick();
-  assert.deepEqual(opened, ["worker-collaboration"]);
+  assert.equal(components.find(value => value.definition.name === "main").component().type, "p");
+  assert.ok(!components.some(value => value.definition.name === "conversation.session.header.corner"));
+  effects[0]();
+  await Promise.resolve();
   const frame = components.find(value => value.definition.name === "sidebar.right.pane.tab").component();
   assert.equal(frame.type, "iframe");
   assert.equal(frame.props.title, "协作记录");
   assert.equal(frame.props.referrerPolicy, "no-referrer");
   assert.equal(frame.props.src, "http://127.0.0.1:8906/collaboration/#read-key");
+});
+
+test("Harness host exposes only a zero-argument read endpoint over its normal Remote transport", async () => {
+  const declarations = [];
+  const sdk = { TypertRemoteService: class { constructor(ctx, key) { ctx[key] = this; } },
+    Remote(_method, context) { declarations.push(context.name); context.addInitializer(function () { this.marked = true; }); } };
+  const ctx = {};
+  const service = await registerCollaborationHost(ctx, () => ({ url: "read-only" }), sdk);
+  assert.equal(ctx.workerCollaboration, service);
+  assert.equal(service.marked, true);
+  assert.deepEqual(declarations, ["view"]);
+  assert.equal(service.view.length, 0);
+  assert.deepEqual(service.view(), { url: "read-only" });
 });
 
 test("DSH peer protocol is model-readable system metadata and leaves the visible native input clean", async t => {

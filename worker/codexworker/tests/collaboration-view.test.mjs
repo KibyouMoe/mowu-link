@@ -3,7 +3,7 @@ import test from "node:test";
 import http from "node:http";
 import vm from "node:vm";
 import { DesktopManager } from "../desktop-manager.mjs";
-import { collaborationToken, collaborationUrl, peerPresentation, WORKER_CHAT_POLICY } from "../collaboration-view.mjs";
+import { collaborationToken, collaborationUrl, collaborationSummary, peerPresentation, WORKER_CHAT_POLICY } from "../collaboration-view.mjs";
 import { collaborationScript } from "../collaboration-assets.mjs";
 
 test("read-only collaboration capability cannot read other manager routes or write messages", async t => {
@@ -35,6 +35,9 @@ test("read-only collaboration capability cannot read other manager routes or wri
   assert.ok(!(await page.text()).includes(manager.config.token));
   const records = await (await fetch(base + "/collaboration/records", { headers })).json();
   assert.equal(records.records[0].displayText, "来自 玉藻：<script>bad()</script>");
+  const summary = await collaborationSummary(manager);
+  assert.equal(summary.count, 1);
+  assert.ok(!JSON.stringify(summary).includes("<script>"), "opening the client view must not replay public message bodies to the model");
   const image = await fetch(base + "/collaboration/images/" + "a".repeat(64), { headers });
   assert.equal(image.headers.get("content-type"), "image/png");
   assert.deepEqual(Buffer.from(await image.arrayBuffer()), png);

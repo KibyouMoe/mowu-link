@@ -16,6 +16,13 @@ export function collaborationUrl(manager) {
   return `http://127.0.0.1:${manager.config.port}/collaboration/#${collaborationToken(manager)}`;
 }
 
+export async function collaborationSummary(manager) {
+  const records = await manager.workerMessages?.history() ?? [];
+  return { url: collaborationUrl(manager), count: records.length,
+    messages: records.slice(-20).map(({ messageId, replyTo, from, to, timestamp, attachments, metadata }) =>
+      ({ messageId, replyTo, from, to, timestamp, attachments, imagePaths: metadata?.imagePaths ?? [] })) };
+}
+
 // This capability can only read the public peer journal and its verified images.
 // It cannot authenticate manager writes or expose the router's bearer token.
 export async function handleCollaboration(manager, req, res) {

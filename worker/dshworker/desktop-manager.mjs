@@ -38,7 +38,7 @@ import { routerMessageId, routerMarker, findRouterTurn } from "./router-tasks.mj
 import { resumePage, resumeListText } from "./resume-list.mjs";
 import { hermesChunks } from "./hermes-feishu-format.mjs";
 import { isAbandonedText, isUnconfirmedText } from "./text-receipt-review.mjs";
-import { collaborationUrl, handleCollaboration } from "./collaboration-view.mjs";
+import { collaborationSummary, handleCollaboration } from "./collaboration-view.mjs";
 
 export const PROTOCOL = "1.1.1-draft";
 const digest = value => createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -2365,7 +2365,7 @@ export class DesktopManager {
       if (req.method === "POST" && url.pathname === "/bridge/integrations/reload") return json(res, 200, await this.reloadIntegrations());
       if (req.method === "GET" && url.pathname === "/bridge/workers") return json(res, 200, await routerOperations(this).workers());
       if (req.method === "GET" && url.pathname === "/bridge/collaboration") return json(res, 200,
-        { url: collaborationUrl(this), records: await this.workerMessages?.history() ?? [] });
+        await collaborationSummary(this));
       if (req.method === "GET" && url.pathname === "/bridge/worker-messages") return json(res, 200,
         await routerOperations(this).message("inbox", { after: Number(url.searchParams.get("after") ?? 0) }));
       if (req.method === "POST" && url.pathname === "/bridge/worker-messages") return json(res, 200,

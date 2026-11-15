@@ -8,7 +8,7 @@ import { sendImage } from "./feishu-image-output.mjs";
 import { routerOperations } from "./router-operations.mjs";
 import { startRouterRuntime } from "./router-runtime.mjs";
 import { operatingConfig } from "./integration-profile.mjs";
-import { WORKER_CHAT_POLICY, collaborationUrl } from "./collaboration-view.mjs";
+import { WORKER_CHAT_POLICY, collaborationSummary } from "./collaboration-view.mjs";
 import { resolveNativeTransport, resolveNativeCapabilities } from "./interface/transport/index.mjs";
 
 export const BUSINESS_API_VERSION = 1;
@@ -216,7 +216,7 @@ async function handleRequest(method, params) {
           await ensureLocalManagerServer();
           const manager = desktopManager;
           return toolResult(manager.collaboration ? await manager.collaboration()
-            : { url: collaborationUrl(manager), records: await manager.workerMessages?.history() ?? [] });
+            : await collaborationSummary(manager));
         }
         case "bridge_create_work_order": return routerTool("createWorkOrder", params);
         case "bridge_work_order_status": return routerTool("workOrder", params);

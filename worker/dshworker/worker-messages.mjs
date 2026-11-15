@@ -158,7 +158,7 @@ export function startWorkerMessaging({ manager, client, worker, log = () => {} }
         const timestamp = record.timestamp ?? (await stat(path.join(folder, name))).mtime.toISOString();
         records.push({ messageId: record.payload.message_id, replyTo: record.payload.reply_to ?? null,
           ...peerPresentation(record.payload, timestamp),
-          metadata: { policy: WORKER_CHAT_POLICY, imagePaths: record.request?.attachments?.map(ref => ref.localPath) ?? [] },
+          metadata: { imagePaths: record.request?.attachments?.map(ref => ref.localPath) ?? [] },
           attachments: copy(record.media ?? record.payload.attachments ?? []) });
       }
     }

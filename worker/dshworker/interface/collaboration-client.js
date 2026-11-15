@@ -7,13 +7,21 @@ window.__ModuleLoader__.load({
     const tabId = "dshworker/collaboration";
     const kind = "worker-collaboration";
     return {
-      inject: ["slots", "layout", "sidebarRight", "sidebarRightTabs"],
-      apply(ctx, config = {}) {
-        const open = () => ctx.sidebarRight.openTab(kind);
+      inject: ["slots", "layout", "connection", "sidebarRight", "sidebarRightTabs"],
+      apply(ctx) {
         const title = () => "协作记录";
         const view = () => {
-          if (!config.collaborationUrl) return React.createElement("p", null, "协作记录入口待配置");
-          return React.createElement("iframe", { src: config.collaborationUrl, title: "协作记录",
+          const [state, update] = React.useState({ url: null, error: false });
+          React.useEffect(() => {
+            const controller = new AbortController();
+            ctx.connection.rpc.call("/api", "workerCollaboration/view", { args: {} }, controller.signal)
+              .then(result => {
+                if (!controller.signal.aborted) update(result.ok ? { url: result.value.url, error: false } : { url: null, error: true });
+              }).catch(() => { if (!controller.signal.aborted) update({ url: null, error: true }); });
+            return () => controller.abort();
+          }, []);
+          if (!state.url) return React.createElement("p", null, state.error ? "协作记录暂未连接" : "正在读取协作记录");
+          return React.createElement("iframe", { src: state.url, title: "协作记录",
             referrerPolicy: "no-referrer", sandbox: "allow-scripts allow-same-origin",
             style: { display: "block", width: "100%", height: "100%", minHeight: "400px", border: 0 } });
         };
@@ -27,9 +35,6 @@ window.__ModuleLoader__.load({
           guide: [{ id: "collaboration", order: 40, title,
             description: () => "查看 worker 之间的消息和附件", icon: GuideArtworkBrowser }],
         }));
-        ctx.effect(() => ctx.slots.inject("conversation.session.header.corner", () =>
-          ctx.slots.register({ name: "conversation.session.header.corner", key: tabId },
-            () => React.createElement("button", { type: "button", onClick: open, title: "协作记录" }, "协作记录"))));
         ctx.effect(() => ctx.slots.inject("sidebar.right.pane.tab.title", () =>
           ctx.slots.register({ name: "sidebar.right.pane.tab.title", key: tabId }, title)));
         ctx.effect(() => ctx.slots.inject("sidebar.right.pane.tab", () =>

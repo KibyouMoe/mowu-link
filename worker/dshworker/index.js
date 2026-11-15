@@ -21,6 +21,8 @@ import {
 import { noProgressTimeoutMs } from "./progress-watch.mjs";
 import { startDshRouterRuntime } from "./interface/router-runtime.mjs";
 import { createInProcessAdapter } from "./interface/transport/inprocess.mjs";
+import { registerCollaborationHost } from "./interface/collaboration-host.mjs";
+import { collaborationUrl } from "./collaboration-view.mjs";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 export const name = "dshworker";
@@ -175,6 +177,11 @@ export function apply(ctx, config = {}) {
 
   void (async () => {
     await ctx.get("loader")?.await();
+    await registerCollaborationHost(ctx, () => {
+      const local = readJsonSync(path.join(stateDir, "desktop-config.local.json"));
+      const token = fs.readFileSync(expandHome(local.tokenFile), "utf8").trim().replace(/^Bearer\s+/i, "");
+      return { url: collaborationUrl({ config: { token, port: local.port } }) };
+    }).catch(error => log("warn", "collaboration_client_unavailable", { message: error.message }));
     if (selfTestPrompt) {
       await runSelfTest({ transport, identity, stateDir, workspace, prompt: selfTestPrompt, log })
         .catch((error) => log("error", "self_test_failed", { message: error?.message ?? String(error) }));

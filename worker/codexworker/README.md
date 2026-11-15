@@ -8,8 +8,8 @@ Node 是插件执行环境，不是另一个模型宿主。
 
 ## 协作记录
 
-`bridge_collaboration_records` 返回最近 200 条公开互聊记录与只读页面入口，可用 Desktop 的
-`open_in_codex` 在当前聊天侧栏打开。页面每两秒更新正文、时间与附件缩略图，读取现有互聊
+`bridge_collaboration_records` 返回只读页面入口及最近消息的回复关联元数据，可用 Desktop 的
+`open_in_codex` 在当前聊天侧栏打开。页面显示最近 200 条记录，每两秒更新正文、时间与附件缩略图，读取现有互聊
 回执，不回放模型输入。页面的独立只读凭据不能调用 manager 写入接口。
 飞书显示「来自 对方：正文」与时间，图片通过独立媒体消息发送。消息 UUID、回复关联与
 防回环规则保留在 metadata / MCP instructions，原 UUID 继续负责重试与去重。
