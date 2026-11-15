@@ -17,6 +17,11 @@
   与本地对话分开显示，避免污染主会话上下文
 - 不要求可在这里回复（回复仍走各自渠道），先把"看得见"做出来
 - 落地路径仍要留：客户端可见 ≠ 替代日志，两者都在
+- **英文协议说明不许出现在人眼前**（训练员 12:52）：
+  现在 private chat 正文里夹着 `This is ordinary worker chat. It never creates a router task or native goal.
+  Reply only when needed via bridge_send_worker_message…` 这类英文提示词，看着像协议泄漏。
+  要求：这类给模型看的说明**移进 metadata / system 字段**（模型仍能读到，行为不变），
+  人看到的只有「来自 OguriCap：<中文正文>」；如必须保留文字说明，用中文短句。
 
 ### 溪流 → worker 插话通道（训练员 12:44 提需求）
 
