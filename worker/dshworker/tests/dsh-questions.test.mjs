@@ -76,3 +76,55 @@ test("busy messages enter native steer and stay in the original turn transcript"
   assert.equal(sent.turnId, "turn"); assert.equal(f.thread.turns.length, 1); assert.equal(f.steers.length, 1);
   assert.ok(f.transport.readThread({ threadId: "thread" }).turns[0].items.some(i => i.text === "new instruction"));
 });
+
+test("a continued answer after plugin reload resumes its original session before native validation", async () => {
+  const f = fixture();
+  const pending = f.ask(), question = f.question();
+  f.controller.abort(new Error("ASK_TIMED_OUT"));
+  await assert.rejects(pending);
+  f.turn.status = "completed"; f.thread.running = false;
+  f.transport.live.clear();
+  f.service.continued = () => [{ callId: "call", questions: f.request.questions }];
+  let resumes = 0, continuation;
+  f.transport.ensureAgent = async thread => {
+    resumes++; assert.equal(thread.sessionId, "session-original");
+    f.transport.live.set(thread.id, { agent: f.agent });
+    return f.agent;
+  };
+  f.transport.startTurn = async (_thread, turn) => { continuation = turn.nativeReply; };
+  await f.transport.execute("send_message_to_thread", { threadId: "thread",
+    prompt: nativeQuestionReply(question, ["只回复"]) });
+  assert.equal(resumes, 1);
+  assert.equal(continuation.sessionId, "session-original");
+  assert.equal(continuation.callId, "call");
+});
+
+test("settling one of two native clarification requests keeps the other wait visible", async () => {
+  const f = fixture(), controller = new AbortController();
+  const first = f.ask(), question = f.question();
+  const second = f.transport.questions.request({ ...f.request, signal: controller.signal,
+    wait: { callId: "second-call", timed: true } }, f.next);
+  try {
+    f.transport.sendMessage({ threadId: "thread", prompt: nativeQuestionReply(question, ["文件"]) });
+    await first;
+    assert.equal(f.transport.questions.pending.size, 1);
+    assert.equal(f.turn.waitingForInput, true);
+  } finally {
+    controller.abort(new Error("test finished"));
+    await assert.rejects(second);
+  }
+  assert.equal(f.turn.waitingForInput, false);
+});
+
+test("a displayed native question is checkpointed while its answer is still pending", async () => {
+  const f = fixture(), writes = [];
+  f.transport.save = async () => { writes.push(structuredClone(f.turn)); };
+  const pending = f.ask();
+  try {
+    await new Promise(resolve => setImmediate(resolve));
+    assert.ok(writes.some(turn => turn.waitingForInput && turn.nativeQuestions?.length === 1));
+  } finally {
+    f.controller.abort(new Error("test finished"));
+    await assert.rejects(pending);
+  }
+});

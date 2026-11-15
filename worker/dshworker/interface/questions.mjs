@@ -32,6 +32,7 @@ export class DshQuestions {
     const entry = { request, thread, turn, resolve, reject, item };
     this.pending.set(key, entry);
     turn.waitingForInput = true; turn.eventSeq = (turn.eventSeq ?? 0) + 1;
+    void t.save();
     const abort = () => reject(request.signal.reason ?? new Error("question cancelled"));
     request.signal?.addEventListener("abort", abort, { once: true });
     if (request.signal?.aborted) abort();
@@ -58,7 +59,8 @@ export class DshQuestions {
       return answer;
     } finally {
       request.signal?.removeEventListener("abort", abort);
-      this.pending.delete(key); turn.waitingForInput = false;
+      this.pending.delete(key);
+      turn.waitingForInput = [...this.pending.values()].some(pending => pending.turn === turn);
       turn.eventSeq = (turn.eventSeq ?? 0) + 1;
       await t.save();
     }

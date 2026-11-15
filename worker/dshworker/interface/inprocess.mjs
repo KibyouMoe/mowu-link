@@ -250,6 +250,7 @@ export class InProcessTransport {
       for (const turn of record.turns ?? []) {
         if (!TERMINAL_TURN_STATUSES.has(turn.status)) {
           turn.status = "interrupted";
+          turn.waitingForInput = false;
           turn.waiting_for_approval = false;
           if (turn.approval) turn.approval.state = "interrupted";
           turn.error ??= "dshworker plugin restarted while this turn was running";
@@ -296,7 +297,12 @@ export class InProcessTransport {
       case "create_thread": return this.createThread(args);
       case "list_threads": return this.listThreads(args);
       case "read_thread": return this.readThread(args);
-      case "send_message_to_thread": return this.sendMessage(args);
+      case "send_message_to_thread": {
+        const thread = this.requireThread(toolName, args);
+        if (parseDshQuestionReply(promptFromArgs(args)) && !this.live.get(thread.id)?.agent)
+          await this.ensureAgent(thread);
+        return this.sendMessage(args);
+      }
       case "set_thread_title": return this.setThreadTitle(args);
       case "wait_threads": return this.waitThreads(args, timeoutMs);
       case "list_projects": return this.listProjects(args);
@@ -362,8 +368,7 @@ export class InProcessTransport {
   sendMessage(args = {}) {
     const thread = this.requireThread("send_message_to_thread", args);
     if (thread.compacting) throw new Error("native_compaction_in_progress");
-    const prompt = stringArg(args.prompt) ?? stringArg(args.text) ?? stringArg(args.message)
-      ?? textFromInput(args.input);
+    const prompt = promptFromArgs(args);
     if (!prompt) throw new Error("send_message_to_thread requires a non-empty `prompt` (or text `input`)");
     const replies = parseDshQuestionReply(prompt);
     const nativeReply = replies ? this.questions.prepare(thread, replies) : null;
@@ -500,6 +505,7 @@ export class InProcessTransport {
       this.finishTurn(thread, turn, { text: outcome.text, thinking, error: detail, reasonKind: kind });
     } catch (error) {
       const message = this.decorate(error?.message ?? String(error));
+      turn.errorCode = error?.code ?? null;
       this.log("warn", "turn_failed", { threadId: thread.id, turnId: turn.id,
         message, code: error?.code ?? null });
       this.finishTurn(thread, turn, { thinking, error: message, reasonKind: error.reasonKind ?? "error" });
@@ -559,14 +565,16 @@ export class InProcessTransport {
     const thread = this.threads.get(threadId);
     if (!thread) {
       return { thread: { id: threadId, hostId, title: null, cwd: null, status: null },
-        latestTurn: null, latestAssistantMessage: null, cursor: null };
+        latestTurn: null, latestAssistantMessageId: null, latestAssistantMessage: null, cursor: null };
     }
     const latest = thread.turns.at(-1) ?? null;
+    const message = latestAssistantMessage(latest);
     return {
       thread: { id: thread.id, hostId, title: thread.title ?? null, cwd: thread.cwd, status: thread.status },
-      latestTurn: latest ? { id: latest.id, status: latest.status, eventSeq: latest.eventSeq ?? 0, ...approvalFields(latest),
+      latestTurn: latest ? { id: latest.id, status: latest.status, waitingForInput: latest.waitingForInput === true,
+        eventSeq: latest.eventSeq ?? 0, ...approvalFields(latest),
         startedAt: latest.startedAt ?? null, completedAt: latest.completedAt ?? null } : null,
-      latestAssistantMessage: latestAssistantMessage(latest),
+      latestAssistantMessageId: message?.id ?? null, latestAssistantMessage: message,
       cursor: null,
     };
   }
@@ -690,20 +698,28 @@ export class InProcessTransport {
     const agents = this.ctx.get("agents");
     const agentOptions = { ...this.selection };
     if (thread.sessionId) {
+      let handle;
       try {
         const mountSetup = await this.presetSetup();
-        const handle = await agents.resume({
+        handle = await agents.resume({
           resumeSessionId: thread.sessionId,
           agentOptions,
           ...(mountSetup ? { setup: mountSetup } : {}),
         });
         const agent = handle.agent;
+        if (agent?.session?.id !== thread.sessionId) throw new Error("native session identity mismatch");
         this.live.set(thread.id, { handle, agent });
         this.desktopObserver?.baseline(agent);
+        await this.publicEvents?.refreshTools?.();
         this.log("info", "agent_resumed", { threadId: thread.id, sessionId: thread.sessionId,
           seq: agent.session.seq });
         return agent;
       } catch (error) {
+        this.live.delete(thread.id);
+        try { await handle?.dispose?.(); } catch (disposeError) {
+          this.log("warn", "agent_resume_cleanup_failed", { threadId: thread.id,
+            sessionId: thread.sessionId, message: disposeError.message });
+        }
         this.log("warn", "agent_resume_failed", { threadId: thread.id, sessionId: thread.sessionId,
           message: error?.message ?? String(error) });
         // A failed resume must never silently replace months of native context.
@@ -728,6 +744,7 @@ export class InProcessTransport {
     try {
       await this.ctx.get("sessions")?.flush?.(agent.session);
       await this.save({ required: true });
+      await this.publicEvents?.refreshTools?.();
     } catch (error) {
       this.live.delete(thread.id);
       await handle.dispose?.();
@@ -789,6 +806,10 @@ export class InProcessTransport {
 
 function userMessage(text) {
   return { id: randomUUID(), role: "user", content: [{ type: "text", text }], source: { kind: "user" } };
+}
+
+function promptFromArgs(args) {
+  return stringArg(args.prompt) ?? stringArg(args.text) ?? stringArg(args.message) ?? textFromInput(args.input);
 }
 
 function summarize(session, fromSeq) {
@@ -853,6 +874,10 @@ function turnItems(turn, maxChars) {
     text: truncateText(input.text, maxChars), ...(parseDshQuestionReply(input.text) ? { dshQuestionAnswers: parseDshQuestionReply(input.text) } : {}) });
   const replies = parseDshQuestionReply(turn.prompt);
   if (replies) items[0].dshQuestionAnswers = replies;
+  if (turn.errorCode === "dsh_session_resume_failed") items.push({
+    type: "agentMessage", kind: "assistant", id: `${turn.id}-resume-error`,
+    phase: "final_answer", text: truncateText(turn.error, maxChars),
+  });
   // Approval progress has a separate stable item id; final replies keep their old id.
   for (const progress of turn.progress ?? []) {
     items.push({ type: "agentMessage", kind: "assistant",
@@ -875,9 +900,11 @@ function turnItems(turn, maxChars) {
 }
 
 function latestAssistantMessage(turn) {
-  if (!turn?.text) return null;
-  return { id: `${turn.id}-agent`, turnId: turn.id, text: turn.text,
-    phase: turn.status === "completed" ? "final_answer" : null, truncated: false };
+  const message = turn?.publicMessages?.at(-1);
+  const text = message?.text ?? turn?.text;
+  if (!text) return null;
+  return { id: message?.id ?? `${turn.id}-agent`, turnId: turn.id, text,
+    phase: turn.status === "completed" ? "final_answer" : "commentary", truncated: false };
 }
 
 function trimThread(thread) {

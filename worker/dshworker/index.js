@@ -20,6 +20,7 @@ import {
 } from "./interface/transport/index.mjs";
 import { noProgressTimeoutMs } from "./progress-watch.mjs";
 import { startDshRouterRuntime } from "./interface/router-runtime.mjs";
+import { createInProcessAdapter } from "./interface/transport/inprocess.mjs";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 export const name = "dshworker";
@@ -30,7 +31,6 @@ export const inject = ["agents", "sessions", "agentDefaultModel"];
 import {
   VERSION,
   TRANSPORT_NAME,
-  NAMESPACE,
   SELF_TEST_FILE,
   DEFAULT_WORKSPACE,
   DEFAULT_STATE_DIR,
@@ -108,22 +108,7 @@ export function apply(ctx, config = {}) {
 
   // 业务层通过这个选择器取传输；注册后立刻刷新缓存，保证 mcp-business
   // 首次 import 时拿到的就是进程内实现。
-  registerNativeTransport(TRANSPORT_NAME, {
-    name: TRANSPORT_NAME,
-    capabilities: Object.freeze({ fork: false, desktopJournal: false, callerTurn: false }),
-    listTools: () => transport.listTools(),
-    callTool: async (toolName, args, _invocation, timeoutMs) => {
-      try {
-        return { success: true, tool: toolName, namespace: NAMESPACE,
-          contentItems: [{ type: "text", text: JSON.stringify(await transport.execute(toolName, args ?? {}, timeoutMs)) }] };
-      } catch (error) {
-        return { success: false, tool: toolName, namespace: NAMESPACE,
-          contentItems: [{ type: "text", text: JSON.stringify({ success: false, error: "tool_failed", tool: toolName,
-            reason: error?.message ?? String(error) }) }] };
-      }
-    },
-    shutdown: () => transport.close("transport shutdown"),
-  });
+  registerNativeTransport(TRANSPORT_NAME, createInProcessAdapter(transport));
   process.env.CODEXWORKER_NATIVE_TRANSPORT = TRANSPORT_NAME;
   process.env.CODEXWORKER_STATE_DIR = stateDir;
   resetNativeTransportCache();
@@ -148,7 +133,7 @@ export function apply(ctx, config = {}) {
         ? transport.requireThread("run", { threadId })
         : recent ?? transport.threads.get(
           transport.createThread({ title: `${identity.display} · plugin`, cwd: cwd ?? workspace }).threadId);
-      const sent = transport.sendMessage({ threadId: thread.id, prompt });
+      const sent = await transport.execute("send_message_to_thread", { threadId: thread.id, prompt });
       const until = Number(timeoutMs) > 0 ? Date.now() + Number(timeoutMs) : Infinity;
       let turn;
       for (;;) {

@@ -118,3 +118,39 @@ test("a DSH plugin opened from Codex keeps its own identity and state directory"
   assert.equal(identity.name, "TamamoCross");
   assert.equal(identity.stateDir, path.join(os.homedir(), ".hermes", "state", "dshworker"));
 });
+
+test("DSH progress exposes the current public item and its exact identity before turn completion", () => {
+  const transport = Object.create(InProcessTransport.prototype);
+  const turn = { id: "turn", status: "inProgress", waitingForInput: true,
+    publicMessages: [{ id: "dsh-text-attempt", text: "正在输出" }] };
+  transport.threads = new Map([["thread", { id: "thread", status: "inProgress", turns: [turn] }]]);
+  const poll = transport.pollThread("thread");
+  assert.equal(poll.latestAssistantMessageId, "dsh-text-attempt");
+  assert.deepEqual(poll.latestAssistantMessage, { id: "dsh-text-attempt", turnId: "turn",
+    text: "正在输出", phase: "commentary", truncated: false });
+  assert.equal(poll.latestTurn.waitingForInput, true);
+});
+
+test("a child session's compaction does not compact the parent conversation", () => {
+  const f = fixture();
+  const child = { session: { id: "child" } };
+  f.events.transport.agentsForTurn = () => [f.agent, child];
+  f.send("compaction/start", { compactionId: "child-compact" }, child.session);
+  f.send("compaction/end", { compactionId: "child-compact" }, child.session);
+  assert.deepEqual(f.context, []);
+});
+
+test("resume refuses a handle for a different native session and preserves the original identity", async () => {
+  const transport = Object.create(InProcessTransport.prototype);
+  let creates = 0, disposals = 0;
+  transport.live = new Map(); transport.selection = {}; transport.log = () => {};
+  transport.presetSetup = async () => null;
+  transport.ctx = { get: () => ({ resume: async () => ({ agent: { session: { id: "foreign" } },
+    dispose: async () => { disposals++; } }), create: async () => { creates++; } }) };
+  const thread = { id: "thread", sessionId: "original" };
+  await assert.rejects(transport.ensureAgent(thread), error => error.code === "dsh_session_resume_failed");
+  assert.equal(thread.sessionId, "original");
+  assert.equal(transport.live.size, 0);
+  assert.equal(creates, 0);
+  assert.equal(disposals, 1);
+});

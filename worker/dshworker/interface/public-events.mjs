@@ -5,6 +5,12 @@ import { projectToolActivity } from "./tool-activity.mjs";
 export class DshPublicEvents {
   constructor(transport) { this.transport = transport; this.manager = null; this.calls = new Map(); }
   attach(manager) { this.manager = manager; if (manager) manager.toolActivitySource = "native-notifications"; }
+  async refreshTools() {
+    if (!this.manager) return;
+    const compact = (await this.transport.listTools()).find(tool => tool.name === "compact_thread");
+    this.manager.tools = (this.manager.tools ?? []).filter(tool => tool.name !== "compact_thread");
+    if (compact) this.manager.tools.push(compact);
+  }
   publish(method, event) {
     const reportFailure = () => this.transport.log("warn", "public_event_delivery_failed", {
       method, threadId: event?.threadId ?? null, turnId: event?.turnId ?? null });
@@ -54,7 +60,7 @@ export class DshPublicEvents {
         this.publish("observeToolActivity", { ...prior, status: data.message?.isError ? "failed" : "completed", timestamp: new Date().toISOString() });
       }
     }
-    if (["compaction/start", "compaction/end"].includes(event?.type))
+    if (session === agent.session && ["compaction/start", "compaction/end"].includes(event?.type))
       this.publish("observeContextEvent", { ...context, kind: "compaction", itemId: `dsh-compaction-${data.compactionId ?? data.id ?? turn.id}`,
         status: event.type === "compaction/start" ? "in_progress" : data.error ? "failed" : "completed", timestamp: new Date().toISOString() });
   }
