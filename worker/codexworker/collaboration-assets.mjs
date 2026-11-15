@@ -57,18 +57,23 @@ async function refresh() {
         text.textContent = record.displayText;
         article.append(time, text);
         for (const attachment of record.attachments) {
-          let source = images.get(attachment.id);
-          if (!source) {
-            source = URL.createObjectURL(await (await get("images/" + attachment.id)).blob());
-            images.set(attachment.id, source);
-          }
           const figure = document.createElement("figure");
           const image = document.createElement("img");
-          image.src = source;
           image.alt = attachment.name || "图片附件";
           const caption = document.createElement("figcaption");
           caption.textContent = image.alt;
-          figure.append(image, caption);
+          try {
+            let source = images.get(attachment.id);
+            if (!source) {
+              source = URL.createObjectURL(await (await get("images/" + attachment.id)).blob());
+              images.set(attachment.id, source);
+            }
+            image.src = source;
+            figure.append(image);
+          } catch {
+            caption.textContent += "（暂不可用）";
+          }
+          figure.append(caption);
           article.append(figure);
         }
         fragment.append(article);

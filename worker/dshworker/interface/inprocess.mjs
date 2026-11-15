@@ -246,8 +246,16 @@ export class InProcessTransport {
       const thread = [...this.live.entries()].find(([, live]) => live.agent === agent)?.[0];
       const peer = this.threads.get(thread)?.turns.find(turn => turn.status === "inProgress")?.nativePeerMessage;
       if (!peer || decision.kind === "reject") return decision;
-      return { ...decision, messages: [...decision.messages, { id: randomUUID(), role: "system",
-        content: [{ type: "text", text: WORKER_CHAT_POLICY + "\n" + JSON.stringify(peer) }], source: { kind: "system-prompt" } }] };
+      const content = { type: "text", text: WORKER_CHAT_POLICY + "\n" + JSON.stringify(peer) };
+      const index = decision.messages.findLastIndex(message => message.role === "system");
+      const messages = [...decision.messages];
+      if (index < 0) messages.unshift({ id: randomUUID(), role: "system", content: [content], source: { kind: "system-prompt" } });
+      else if (messages[index].source?.workerChatMessageId !== peer.messageId) {
+        const original = messages[index];
+        messages[index] = { ...original, content: [...original.content, content],
+          source: { ...original.source, workerChatMessageId: peer.messageId } };
+      }
+      return { ...decision, messages };
     }, { prepend: true });
     this.load();
     this.desktopObserver = new DshDesktopObserver(this);

@@ -39,6 +39,13 @@ test("DSH peer protocol is model-readable system metadata and leaves the visible
   assert.equal(decision.messages.at(-1).role, "system");
   assert.match(decision.messages.at(-1).content[0].text, /avoid automatic reply loops/);
   assert.ok(decision.messages.at(-1).content[0].text.includes(messageId));
+  const original = { id: "original-system", role: "system", content: [{ type: "text", text: "Keep original engine instructions" }], source: { kind: "system-prompt" } };
+  const combined = await callback({ agent: f.agent }, async () => ({ kind: "request", messages: [original] }));
+  assert.equal(combined.messages.length, 1);
+  assert.equal(combined.messages[0].content[0].text, original.content[0].text);
+  assert.equal(original.content.length, 1);
+  const repeated = await callback({ agent: f.agent }, async () => combined);
+  assert.equal(repeated.messages[0].content.length, 2);
   const visible = f.records.find(event => event.type === "user/message").data;
   assert.equal(visible.content[0].text, "来自 OguriCap：系统元数据验收");
   assert.ok(!JSON.stringify(visible).includes(messageId));
