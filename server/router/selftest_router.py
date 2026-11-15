@@ -1687,6 +1687,28 @@ def question_proxy_selftest(checker, work):
                           event["event"] == "question_request" and request["operation"] == "answer"
                           and request["input"] == body and code == 200 and answer["status"] == "answer_pending"
                           and connections[names[1]].queue.empty() and store.counts()["total"] == 0)
+        for text, expected in [("/model", {"action": "list"}),
+                               ("/model next", {"action": "list", "direction": 1}),
+                               ("/model page 3", {"action": "list", "page": 2}),
+                               ("/model Native Model", {"action": "set", "value": "Native Model"}),
+                               ("/effort high", {"action": "set", "value": "high"})]:
+            body = {"worker": names[0], "message_id": str(uuid.uuid4()), "thread_id": "original", "text": text}
+            future = pool.submit(call, "POST", "/commands", body)
+            event = connections[names[0]].queue.get(timeout=3)
+            request = event["data"]
+            wrong = respond(request, names[0])
+            response = call("POST", "/commands/responses", {"worker": names[0],
+                "request_id": request["request_id"], "status": 200, "body": {"text": text}})
+            code, value = future.result(timeout=3)
+            checker.check("model command: router parses and routes %s" % text,
+                          event["event"] == "worker_command" and wrong[0] == 403
+                          and response[0] == 200 and code == 200 and value["text"] == text
+                          and all(request["command"][key] == val for key, val in expected.items())
+                          and request["command"]["messageId"] == body["message_id"]
+                          and store.counts()["total"] == 0)
+        checker.check("model command: invalid pagination and missing request identity reject",
+                      call("POST", "/commands", {"worker": names[0], "thread_id": "original", "text": "/model page 0"})[0] == 400
+                      and call("POST", "/commands", {"worker": names[0], "thread_id": "original", "text": "/effort"})[0] == 400)
         server.detach(connections[names[1]])
         checker.check("question proxy: offline worker returns a recoverable error without closing a question",
                       call("GET", "/questions/QuestionWindows/" + question_id)[0] == 503)

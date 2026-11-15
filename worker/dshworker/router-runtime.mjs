@@ -396,6 +396,13 @@ export async function startRouterRuntime({ manager, nativeCall, transport = {}, 
     setActiveRouterClient(client);
     client.start({ onTask: task => enqueue(runTask, task), onSubscriptionEvent: event => enqueue(runSubscription, event),
       onEvent: (event, payload) => {
+        if (event === "worker_command") void (async () => {
+          let status = 200, body;
+          try { body = await manager.modelCommands.run(payload.command); }
+          catch (error) { status = error.status ?? 503; body = error.body ?? { error: "worker_command_failed", detail: error.message }; }
+          await client._request("POST", "/commands/responses", { worker: name,
+            request_id: payload.request_id, status, body });
+        })().catch(error => { if (!closed) log("warn", "worker_command_response_pending", { code: error.code ?? "transport_error" }); });
         if (event === "question_request") void questionRequest(payload).catch(error => {
           if (!closed) log("warn", "question_response_pending", { questionId: payload?.question_id, code: error.code ?? "transport_error" });
         });

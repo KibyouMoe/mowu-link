@@ -1,5 +1,18 @@
 # DSHWorker — Harness 进程内插件
 
+## 模型命令
+
+飞书 `/model`、`/effort` 由 router 统一解析，原生目录按每页 10 项显示，支持 next、prev、
+page N，标记 current、config 或 current,config。带参数时同步写当前会话和 worker 默认配置的对应字段。
+
+本 worker 的 `stateDir/model-settings.local.json` 保存默认模型、默认力度与配置事务回执。
+只有飞书 `/new` 创建的会话套用默认值。恢复已有会话保留原生 modelSelection。
+模型 ID 使用 provider/model 以区分同名模型，思考力度来自原生 catalog。
+
+适配层读取 sessionController.modelCatalog() 与 agent.model.current()，修改通过
+llm.resolveCallConfig() 验证后调用 agent.model.select()，原生 model/selection 事件驱动客户端更新。
+该选项在下一原生 step 生效，包括同一 turn 的工具续接。
+
 通过 `index.js` 的 Cordis 插件注入 `agents`、`sessions`、`agentDefaultModel`，引擎适配在
 `interface/inprocess.mjs`。保留原会话，多轮运行；恢复失败不静默换新会话。
 独立 CLI/headless 入口已移除。引擎差异只能放 interface/，共享 manager、MCP 业务和

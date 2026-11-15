@@ -592,9 +592,9 @@ async function ensureLocalManagerServer() {
     let manager, callerSession;
     const native = async (name, args, deliveryContext) => {
       let requestInvocation;
-      // Desktop scopes wait_threads to the caller's live turn. A transport that
-      // owns its own turns (dsh) has no such caller turn and says so.
-      if (name === "wait_threads" && resolveNativeCapabilities().callerTurn) {
+      // Desktop status and chat creation need the caller's current lifecycle
+      // turn after a reopen. DSH owns its turns and has no external caller.
+      if (["wait_threads", "create_thread", "set_thread_title"].includes(name) && resolveNativeCapabilities().callerTurn) {
         try { requestInvocation = await nativeStatusInvocation(binding, manager, callerSession); }
         catch (error) { error.nativeStatusPreflight = true; throw error; }
       } else requestInvocation = nativeToolInvocation(name, args, binding, deliveryContext);

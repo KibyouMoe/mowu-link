@@ -1,5 +1,19 @@
 # CodexWorker 0.3 — Desktop 插件
 
+## 模型命令
+
+飞书 `/model` 与 `/effort` 通过 router 统一解析，支持每页 10 项与 `next`、`prev`、
+`page N`。列表显示 `current`、`config` 或 `current,config`。带名称时同时更新当前会话
+与 worker 默认配置的对应字段，回执显示两处完整值。
+
+默认值保存在本 worker 的 `stateDir/model-settings.local.json`，首次从引擎默认值初始化。
+只有飞书 `/new` 创建的会话应用这份默认值。配置写入前保存事务意图，异常后按原线程读回核对。
+恢复、分叉与客户端已有会话保留各自原生设置。
+
+Codex 使用 Desktop 原有连接上的 `model/list`、`thread/read`、`thread/settings/update`。
+更新原生连接后正常重开客户端，health `capabilities.modelSettings=true` 才表示控制能力已加载。
+缺少该能力时返回 `native_model_control_unavailable`。Windows 目标机原生连接接入需单独验收。
+
 插件通过 Codex Desktop 注入的原生任务通道使用既有会话。Desktop 启动插件时交接给
 生命周期监督器。Mac 的发现连接退出时回收所属适配器，由存活的 Desktop MCP 连接重新接管；
 Windows 监督器由真实 Desktop 托管。Desktop 退出时关闭所属 Worker。
