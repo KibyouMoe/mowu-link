@@ -52,6 +52,9 @@
     Plugins/DSH/       ← DSH 侧插件本体
     （技能文档 + 安装脚本）
   ```
+- **职责切分（训练员 22:57）**：**所有安装相关的提示词都放安装器技能里**——因为 Codex 与 DSH 的安装方法本来就不同（只有「管理方法」是共用的）。
+  - 安装器（CodexSyncArea / DSHSkillSync 各一份）：本引擎的 clone/pull、落盘位置、权限模式与 hook 的具体改法、生效与自检。
+  - 真身仓库：技能正文 + `Plugins/Codex`、`Plugins/DSH` 本体 + 引擎无关的管理流程。
 - **存放位置**：真身与两个安装器都**不进 mowulink 仓库**——真身进 `MowuLinkWorkerSkill`，两个安装器分别进 `CodexSyncArea` 与 `DSHSkillSync`；mowulink 里的 `docs/mowulink-worker-skill/` 迁移出去后删除。
 - **真身仓库（训练员 22:55 给定）**：`https://github.com/KibyouMoe/MowuLinkWorkerSkill.git`
   - 现状：**空仓库**（无任何引用）
