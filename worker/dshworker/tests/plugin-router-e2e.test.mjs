@@ -444,6 +444,10 @@ test("PluginRuntime MCP -> DesktopManager writer HTTP -> real Python router (iso
     assert.equal(f.notifications.length, 0);
     assert.equal(a.native.sends.length, 1); assert.equal(b.native.sends.length, 1);
     assert.deepEqual((await proxyA.call("bridge_worker_inbox")).messages, []);
+    const history = await proxyA.call("bridge_worker_inbox", { view: "history" });
+    assert.equal(history.view, "history");
+    assert.ok(history.messages.some(message => message.messageId === first.messageId));
+    assert.ok(history.messages.some(message => message.messageId === reply.messageId && message.replyTo === first.messageId));
     assert.ok(a.httpCalls.some(call => call.method === "POST" && call.route === "/bridge/worker-messages"));
     assert.ok(b.httpCalls.some(call => call.method === "POST" && call.route === "/bridge/worker-messages"));
   });

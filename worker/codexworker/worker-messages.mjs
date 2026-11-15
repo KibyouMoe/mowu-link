@@ -7,7 +7,7 @@ import { PROTOCOL } from "./desktop-manager.mjs";
 import { imageType, MAX_ROUTER_IMAGE_BYTES } from "./router-attachments.mjs";
 import { localHost } from "./interface/native-dispatch.mjs";
 import { UUID_PATTERN, UUID_V4_PATTERN } from "./identifiers.mjs";
-import { WORKER_CHAT_POLICY, peerPresentation } from "./collaboration-view.mjs";
+import { WORKER_CHAT_POLICY, peerPresentation } from "./worker-message-format.mjs";
 
 const owners = new WeakMap();
 const IMAGE_ID = /^[0-9a-f]{64}$/;
@@ -183,7 +183,7 @@ export function startWorkerMessaging({ manager, client, worker, log = () => {} }
           // Older routers ignore view=history and return the pending inbox.
           if (page?.view !== "history") return routerHistory;
           if (page.ok !== true || page.worker !== worker || !Array.isArray(page.messages) || page.messages.length > 100)
-            fail("invalid_worker_history", "Router returned an invalid collaboration history.");
+            fail("invalid_worker_history", "Router returned an invalid peer message history.");
           let last = before;
           for (const value of page.messages) {
             if (!Number.isSafeInteger(value?.seq) || value.seq < 1 || value.seq >= last)

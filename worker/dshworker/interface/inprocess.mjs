@@ -14,7 +14,7 @@ import { DshQuestions } from "./questions.mjs";
 import { parseDshQuestionReply, projectPublicQuestion } from "./public-questions.mjs";
 import { projectDshMedia } from "./public-media.mjs";
 import { prepareDshImageMessage } from "./image-input.mjs";
-import { WORKER_CHAT_POLICY } from "../collaboration-view.mjs";
+import { WORKER_CHAT_POLICY } from "../worker-message-format.mjs";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const VERSION = "0.3.1";
 const TRANSPORT_NAME = "dsh-inprocess";

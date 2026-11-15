@@ -38,7 +38,7 @@ import { routerMessageId, routerMarker, findRouterTurn } from "./router-tasks.mj
 import { resumePage, resumeListText } from "./resume-list.mjs";
 import { hermesChunks } from "./hermes-feishu-format.mjs";
 import { isAbandonedText, isUnconfirmedText } from "./text-receipt-review.mjs";
-import { collaborationSummary, handleCollaboration, peerPresentation } from "./collaboration-view.mjs";
+import { peerPresentation } from "./worker-message-format.mjs";
 
 export const PROTOCOL = "1.1.1-draft";
 const digest = value => createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -1202,15 +1202,16 @@ export class DesktopManager {
         fail(409, "selected_target_changed", "Refresh /threads and use the Feishu-selected native chat; no fallback was used.", false,
           { threadId: request.targetThreadId, selectedThreadId: this.state.selectedThreadId });
       }
-      let text = request.text.trim(), delivery = request.delivery, transformed = false;
+      const peerChat = request.origin === "worker-chat" && request.metadata?.workerChat;
+      let text = request.text.trim(), delivery = this.isNativeChatInput(request) ? "steer" : request.delivery, transformed = false;
       const nativeImages = request.source === "trainer" && this.config.nativeImageInput &&
         this.state.feishuReceipts[request.messageId]?.nativeImagePaths?.length;
-      if (!nativeImages && /^\/goal(?:\s|$)/.test(text)) {
+      if (!peerChat && !nativeImages && /^\/goal(?:\s|$)/.test(text)) {
         transformed = true;
         text = goalPrompt(text);
         if (!text) return { action: "help", text: BRIDGE_HELP };
-      } else if (!nativeImages && /^\/queue\s+/.test(text)) { text = text.replace(/^\/queue\s+/, ""); delivery = "queue"; transformed = true; }
-      else if (!nativeImages && text.startsWith("/") && !text.startsWith("//")) {
+      } else if (!peerChat && !nativeImages && /^\/queue\s+/.test(text)) { text = text.replace(/^\/queue\s+/, ""); delivery = "queue"; transformed = true; }
+      else if (!peerChat && !nativeImages && text.startsWith("/") && !text.startsWith("//")) {
         const result = await this.command(request, text);
         if (this.transcriptEnabled) {
           await this.emit("message.reply", { ...request,
@@ -1221,7 +1222,7 @@ export class DesktopManager {
         return result;
       }
       const session = this.session(request.targetThreadId);
-      const normalized = { ...request, delivery, targetThreadId: session.threadId, text: !nativeImages && text.startsWith("//") ? text.slice(1) : transformed ? text : request.text,
+      const normalized = { ...request, delivery, targetThreadId: session.threadId, text: !peerChat && !nativeImages && text.startsWith("//") ? text.slice(1) : transformed ? text : request.text,
         sourceTurnGuard: requireSourceTurnId ?? null, sourceTurnMayBeComplete: Boolean(allowCompletedSourceTurn && requireSourceTurnId),
         ...(request.source === "trainer" ? { trainerActivityAt: new Date().toISOString() } : {}) };
       if (this.compacting(session)) {
@@ -1266,6 +1267,11 @@ export class DesktopManager {
       }
       return this.dispatch(session, normalized, snapshot);
     });
+  }
+
+  isNativeChatInput(request) {
+    return Boolean(this.config.nativeChatInput && (request.origin === "worker-chat" && request.metadata?.workerChat ||
+      request.source === "trainer" && this.state.feishuReceipts[request.messageId] && !isNativeQuestionReply(request.text)));
   }
 
   async dispatch(session, request, beforeSnapshot) {
@@ -1340,8 +1346,7 @@ export class DesktopManager {
       const { messageId, replyTo, from, to, imagePaths } = request.metadata.workerChat;
       args.nativePeerMessage = { messageId, replyTo, from, to, ...(imagePaths ? { imagePaths: [...imagePaths] } : {}) };
     }
-    if (this.config.nativeChatInput && (request.origin === "worker-chat" && request.metadata?.workerChat ||
-        request.source === "trainer" && feishuReceipt && !isNativeQuestionReply(request.text))) {
+    if (this.isNativeChatInput(request)) {
       args.nativeChatInput = true;
       args.nativeMessageId = request.messageId;
       args.nativeDelivery = delivery ?? "steer";
@@ -2343,7 +2348,6 @@ export class DesktopManager {
   async handle(req, res, context = {}) {
     let body, counted = false;
     try {
-      if (await handleCollaboration(this, req, res)) return;
       const actual = Buffer.from(req.headers.authorization ?? "");
       const expected = Buffer.from(`Bearer ${context.token ?? this.config.token}`);
       if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) fail(401, "unauthorized", "Valid Bearer token required.");
@@ -2390,10 +2394,9 @@ export class DesktopManager {
       if (req.method === "GET" && url.pathname === "/bridge/integrations") return json(res, 200, this.integrationStatus());
       if (req.method === "POST" && url.pathname === "/bridge/integrations/reload") return json(res, 200, await this.reloadIntegrations());
       if (req.method === "GET" && url.pathname === "/bridge/workers") return json(res, 200, await routerOperations(this).workers());
-      if (req.method === "GET" && url.pathname === "/bridge/collaboration") return json(res, 200,
-        await collaborationSummary(this));
       if (req.method === "GET" && url.pathname === "/bridge/worker-messages") return json(res, 200,
-        await routerOperations(this).message("inbox", { after: Number(url.searchParams.get("after") ?? 0) }));
+        await routerOperations(this).message("inbox", { after: Number(url.searchParams.get("after") ?? 0),
+          ...(url.searchParams.has("view") ? { view: url.searchParams.get("view") } : {}) }));
       if (req.method === "POST" && url.pathname === "/bridge/worker-messages") return json(res, 200,
         await routerOperations(this).message("send", await readBody(req)));
       if (req.method === "POST" && url.pathname === "/bridge/work-orders") return json(res, 200,

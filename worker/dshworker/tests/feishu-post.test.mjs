@@ -69,6 +69,22 @@ test("mixed post downloads every image and dispatches its caption once with stab
  const records=(await f.manager.messageJournal.list()).records.filter(r=>r.direction==="input");
  assert.equal(records.length,1);assert.equal(records[0].source,"feishu");
 });
+
+test("ordinary native Feishu input steers when an older config defaults to queue", async t => {
+ const f=await fixture(t);
+ f.manager.config.nativeChatInput=true;
+ f.manager.config.nativeBusyDeliveryVerified=true;
+ f.manager.config.feishu.defaultDelivery="queue";
+ f.session.activeTurnId="active-turn";
+ f.session.state="running";
+ await f.manager.receiveFeishu(event("继续当前任务",{message_type:"text"}));
+ const send=f.calls.find(call=>call.name==="send_message_to_thread");
+ assert.ok(send);
+ assert.equal(send.args.nativeChatInput,true);
+ assert.equal(send.args.nativeDelivery,"steer");
+ assert.equal(f.session.queue.length,0);
+ assert.equal(f.manager.state.events.some(item=>item.type==="message.queued"),false);
+});
 test("durable rich-text inbox pins the accepted target and cannot download after a selection change",async t=>{
  const f=await fixture(t),run=f.manager.runInbox;f.manager.runInbox=()=>{};
  await f.manager.enqueueFeishu(event());

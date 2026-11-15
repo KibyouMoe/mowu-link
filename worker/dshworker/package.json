@@ -3,14 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "exports": {
-    ".": "./index.js",
-    "./client": "./interface/collaboration-client.js"
-  },
-  "dsh": {
-    "client": {
-      "platform": "web",
-      "inject": ["@deepseek-ai/dsh-client-ui-layout", "@deepseek-ai/dsh-client-ui-sidebar-right", "@deepseek-ai/dsh-client-ui-primitives"]
-    }
+    ".": "./index.js"
   },
   "type": "module",
   "description": "CodexWorker's Feishu/router/manager business layer driven by the DeepSeek Harness (dsh) native transport.",

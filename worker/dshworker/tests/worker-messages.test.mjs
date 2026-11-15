@@ -5,7 +5,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { DesktopManager } from "../desktop-manager.mjs";
+import { DesktopManager, PROTOCOL } from "../desktop-manager.mjs";
 import RouterClient from "../router-client.mjs";
 import { startWorkerMessaging } from "../worker-messages.mjs";
 
@@ -92,6 +92,26 @@ async function fixture(t) {
   return { root, router, nativeCalls, mirrors, replies, requests, manager, client, options, service, nativeMessage, sentFile };
 }
 const ackCalls = router => router.calls.filter(c => c.endpoint.endsWith("/ack"));
+
+for (const text of ["legacy queued peer input", "/stop", "/queue later", "//literal"])
+test(`native peer input steers a busy turn with its original text: ${text}`, async t => {
+  const f = await fixture(t), messageId = randomUUID();
+  f.manager.config.nativeChatInput = true;
+  f.manager.deliveryState = async () => ({ turns: [{ id: "active-turn", status: "inProgress" }] });
+  const request = { protocolVersion: PROTOCOL, messageId, source: "hermes", origin: "worker-chat",
+    targetThreadId: "thread-1", delivery: "queue", text,
+    metadata: { workerChat: { from: peer, to: worker, messageId, text } } };
+  await f.nativeMessage(request);
+  const send = f.nativeCalls.find(call => call.name === "send_message_to_thread");
+  assert.ok(send);
+  assert.equal(send.args.nativeChatInput, true);
+  assert.equal(send.args.nativeDelivery, "steer");
+  assert.equal(send.args.prompt, `来自 ${peer}：\n${text}`);
+  assert.equal(f.nativeCalls.length, 1);
+  assert.equal(f.manager.state.sessions["thread-1"].queue.length, 0);
+  assert.equal(f.manager.state.events.some(event => event.type === "message.queued"), false);
+  assert.equal(f.manager.state.receipts[messageId].request.delivery, "queue");
+});
 async function dispatch(f) {
   const session = f.manager.state.sessions["thread-1"];
   if (session.queue.length) await f.manager.dispatchQueued(session, session.queue.shift(), { turns: [] });
@@ -454,7 +474,7 @@ test("unconfirmed Feishu image output preserves peer acceptance without an autom
   assert.equal(f.manager.state.sessions["thread-1"].queue.length, 0);
 });
 
-test("collaboration includes direct router sends and accepted replies without re-dispatch or ACK", async t => {
+test("peer history includes direct router sends and accepted replies without re-dispatch or ACK", async t => {
   const f = await fixture(t);
   const outgoing = f.router.add(message({ from: worker, to: peer, text: "direct router send", seq: 1 }));
   const reply = f.router.add(message({ status: "accepted", reply_to: outgoing.message_id, seq: 2 }));
@@ -498,7 +518,7 @@ test("history-only outgoing attachments download original bytes without sending 
   assert.equal(f.router.calls.every(c => c.method === "GET"), true);
 });
 
-test("concurrent collaboration reads share bounded descending pages and keep only the newest 200", async t => {
+test("concurrent peer history reads share bounded descending pages and keep only the newest 200", async t => {
   const f = await fixture(t);
   for (let seq = 1; seq <= 205; seq++)
     f.router.add(message({ from: worker, to: peer, seq, created_at: seq }));

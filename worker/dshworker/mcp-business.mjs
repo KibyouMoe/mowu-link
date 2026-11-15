@@ -8,7 +8,7 @@ import { sendImage } from "./feishu-image-output.mjs";
 import { routerOperations } from "./router-operations.mjs";
 import { startRouterRuntime } from "./router-runtime.mjs";
 import { operatingConfig } from "./integration-profile.mjs";
-import { WORKER_CHAT_POLICY, collaborationSummary } from "./collaboration-view.mjs";
+import { WORKER_CHAT_POLICY } from "./worker-message-format.mjs";
 import { resolveNativeTransport, resolveNativeCapabilities } from "./interface/transport/index.mjs";
 
 export const BUSINESS_API_VERSION = 1;
@@ -158,10 +158,9 @@ async function handleRequest(method, params) {
             inputSchema: { type: "object", properties: { messageId: { type: "string" }, to: { type: "string" }, text: { type: "string", minLength: 1, maxLength: 20000 },
               replyTo: { type: "string" }, attachments: { type: "array", maxItems: 10, items: { type: "object", properties: { id: { type: "string" }, name: { type: "string" } }, required: ["id"], additionalProperties: false } } },
               required: ["messageId", "to", "text"], additionalProperties: false } },
-          { name: "bridge_worker_inbox", description: "Read this worker's pending router chat inbox; never creates a work order or marks unread messages as answered.",
-            inputSchema: { type: "object", properties: { after: { type: "integer", minimum: 0 } }, additionalProperties: false }, annotations: { readOnlyHint: true } },
-          { name: "bridge_collaboration_records", description: "Read the public collaboration journal and its read-only client panel URL. Message IDs and replyTo are metadata for deliberate peer replies. " + WORKER_CHAT_POLICY,
-            inputSchema: { type: "object", properties: {}, additionalProperties: false }, annotations: { readOnlyHint: true } },
+          { name: "bridge_worker_inbox", description: "Read this worker's pending chat inbox, or use view=history for original peer text and reply correlation metadata. This read-only query never dispatches an input or creates a task.",
+            inputSchema: { type: "object", properties: { after: { type: "integer", minimum: 0 },
+              view: { type: "string", enum: ["pending", "history"] } }, additionalProperties: false }, annotations: { readOnlyHint: true } },
           { name: "bridge_create_work_order", description: "Create one user-authorized project work order in native goal mode. Do not use for ordinary chat or create another order for steering of an existing project. Reuse messageId on retry. No default wall-clock deadline.",
             inputSchema: { type: "object", properties: { messageId: { type: "string" }, worker: { type: "string" }, goal: { type: "string", minLength: 1, maxLength: 20000 },
               context: { type: "string" }, deadlineS: { type: "number", exclusiveMinimum: 0 }, queueIfOffline: { type: "boolean" } }, required: ["messageId", "worker", "goal"], additionalProperties: false } },
@@ -212,12 +211,6 @@ async function handleRequest(method, params) {
         case "bridge_list_workers": return routerTool("workers", params);
         case "bridge_send_worker_message": return routerTool("send", params);
         case "bridge_worker_inbox": return routerTool("inbox", params);
-        case "bridge_collaboration_records": {
-          await ensureLocalManagerServer();
-          const manager = desktopManager;
-          return toolResult(manager.collaboration ? await manager.collaboration()
-            : await collaborationSummary(manager));
-        }
         case "bridge_create_work_order": return routerTool("createWorkOrder", params);
         case "bridge_work_order_status": return routerTool("workOrder", params);
         case "bridge_verify_native_write_path":
@@ -709,12 +702,12 @@ async function connectManagerProxy(config, wait) {
   // This is connectivity, NOT ownership. No listening-server sentinel and no
   // manager activation/lease acquisition during this MCP's business reload.
   return { config, proxy: true, health: () => health, register: body => request("/manager/sessions/adopt", body),
-    collaboration: () => request("/bridge/collaboration"),
     message: body => request("/manager/messages", body), sendImage: body => request("/bridge/images", body),
     businessRuntime: { reload: () => request("/bridge/runtime/reload", {}) },
     routerOperations: { workers: () => request("/bridge/workers"),
       message: (method, body) => method === "send" ? request("/bridge/worker-messages", body)
-        : request("/bridge/worker-messages?after=" + (body.after ?? 0)),
+        : request("/bridge/worker-messages?" + new URLSearchParams({ after: String(body.after ?? 0),
+          ...(body.view === undefined ? {} : { view: body.view }) })),
       createWorkOrder: body => request("/bridge/work-orders", body),
       workOrder: id => request("/bridge/work-orders/" + encodeURIComponent(id)) },
     questions: { publish: body => request("/bridge/questions", body) }, close: async () => {} };

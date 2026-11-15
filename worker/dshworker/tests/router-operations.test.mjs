@@ -18,6 +18,16 @@ test("ordinary peer chat and inbox never submit a work order", async () => {
   assert.equal(f.calls.length, 0);
 });
 
+test("peer history keeps reply metadata available through the ordinary inbox query", async () => {
+  const f = fixture();
+  const records = [{ messageId: randomUUID(), from: "TamamoCross", to: "OguriCap", text: "收到", replyTo: null }];
+  f.manager.workerMessages.history = async () => records;
+  assert.deepEqual(await f.ops.message("inbox", { view: "history" }),
+    { ok: true, view: "history", count: 1, messages: records });
+  await assert.rejects(f.ops.message("inbox", { view: "unknown" }), error => error.status === 400);
+  assert.equal(f.calls.length, 0);
+});
+
 test("formal work order carries its stable request UUID, native goal mode and no default deadline", async () => {
   const f = fixture(), messageId = randomUUID();
   const request = { messageId, worker: "Rudolf", goal: "验证插件生命周期", context: "既有项目的交付项" };
