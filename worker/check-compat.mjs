@@ -36,6 +36,17 @@ export function pythonCommands(platform, configured) {
   return platform === "win32" ? [["py", "-3"], ["python"], ["python3"]] : [["python3"], ["python"]];
 }
 
+export function testFailureDetails(text) {
+  const lines = text.split(/\r?\n/), failures = [];
+  for (let index = 0; index < lines.length; index++) {
+    if (!/^\s*not ok \d+/.test(lines[index])) continue;
+    let end = index + 1;
+    while (end < lines.length && end < index + 120 && !/^\s*\.\.\.$/.test(lines[end])) end++;
+    failures.push(lines.slice(Math.max(0, index - 1), end + 1).join("\n"));
+  }
+  return failures.length ? failures.join("\n") : lines.slice(-60).join("\n");
+}
+
 async function runCheck(command, args, { root, environment, logPath }) {
   const output = await open(logPath, "w");
   let result;
@@ -78,7 +89,7 @@ export async function runCompatibility({ root = repository, hashOnly = false, wo
     const total = count("tests"), success = count("pass"), failed = count("fail"), skipped = count("skipped");
     const ok = result.code === 0 && total > 0 && failed === 0 && success + skipped === total;
     report(`${worker} passed=${success} failed=${failed} skipped=${skipped} total=${total} exit=${result.code} signal=${result.signal ?? "none"}`);
-    if (!ok) { passed = false; report(result.text.split("\n").slice(-60).join("\n")); }
+    if (!ok) { passed = false; report(testFailureDetails(result.text)); }
   }
   if (workersOnly) {
     report("router=not_run scope=workers-only");

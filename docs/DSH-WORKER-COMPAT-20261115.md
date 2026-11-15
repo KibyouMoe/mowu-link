@@ -39,17 +39,17 @@ CI 的 macos-latest / windows-latest、Node 22 / 26 矩阵使用同一检查脚�
 
 ## 本机真实结果
 
-macOS，Node v22.22.0，Python 3.9.6。
+macOS，Python 3.9.6。Node v22.22.0 双侧全量与 Node v26.13.1 完整检查通过，以下为 Node 26 的完整输出。
 
 ```text
 shared_root_modules=37 matched=37 mismatched=0
 codexworker passed=834 failed=0 skipped=8 total=842 exit=0 signal=none
-dshworker passed=791 failed=0 skipped=8 total=799 exit=0 signal=none
+dshworker passed=792 failed=0 skipped=8 total=800 exit=0 signal=none
 router TOTAL 138/138 PASS exit=0 signal=none
 WORKER_COMPAT_PASS
 ```
 
-修复前的定向回归为 24 项中 18 通过、6 失败，修复后的五个定向测试文件共 45 项通过。
+修复前的定向回归为 24 项中 18 通过、6 失败，修复后的五个定向测试文件共 46 项通过。自动检查的失败输出包含对应 TAP 断言块，便于独立定位跨平台失败。
 
 DSH 事件按本机安装 SDK 的 AssistantStreamFrame、SessionEventMap、UserQuestions 和 Compaction 原生合同构造。集成测试使用真实共享 manager、卡片投影、图片出站及临时持久化文件，模型和飞书回执采用隔离替身。生产 DSH、真实飞书收发和 Windows 交互式 Desktop 验收列为部署后待验项。
 

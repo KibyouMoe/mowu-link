@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { compareSharedModules, pythonCommands, runCompatibility, testEnvironment } from "../../check-compat.mjs";
+import { compareSharedModules, pythonCommands, runCompatibility, testEnvironment, testFailureDetails } from "../../check-compat.mjs";
 
 async function fixture(t) {
   const root = await mkdtemp(path.join(os.tmpdir(), "worker-hash-check-"));
@@ -55,4 +55,14 @@ test("test isolation handles Windows environment key casing and preserves user h
     Rudolf_Bridge_Token: "live", Codex_App_Tools_Pipe_Path: "live", CODEXWORKER_TEST_PYTHON: "test-python",
     PATH: "keep", CODEX_HOME: "keep", USERPROFILE: "keep" }),
   { CODEXWORKER_TEST_PYTHON: "test-python", PATH: "keep", CODEX_HOME: "keep", USERPROFILE: "keep" });
+});
+
+test("CI diagnostics retain the failing TAP assertion even when later passing tests fill the log tail", () => {
+  const failure = ["# Subtest: native compatibility", "not ok 1 - native compatibility", "  ---",
+    "  expected: 1", "  actual: 0", "  ..."].join("\n");
+  const output = testFailureDetails(failure + "\n" + "ok 2 - later passing test\n".repeat(200));
+  assert.match(output, /not ok 1 - native compatibility/);
+  assert.match(output, /expected: 1/);
+  assert.match(output, /actual: 0/);
+  assert.ok(!output.includes("later passing test"));
 });
