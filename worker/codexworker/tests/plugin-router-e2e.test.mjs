@@ -424,7 +424,7 @@ test("PluginRuntime MCP -> DesktopManager writer HTTP -> real Python router (iso
       { from: a.name, to: b.name, text: first.text, reply_to: null });
     assert.equal(receipt.message_id, first.messageId); assert.equal(saved.request.reply_to, null);
     assert.ok(b.native.sends[0].prompt.endsWith(first.text));
-    assert.equal(b.native.sends[0].prompt, `来自 ${a.name}：${first.text}`);
+    assert.equal(b.native.sends[0].prompt, `来自 ${a.name}：\n${first.text}`);
     assert.equal(saved.request.metadata.workerChat.messageId, first.messageId);
     reply = { messageId: randomUUID(), to: a.name, text: "回复 B→A\n已收到完整内容。", replyTo: first.messageId };
     const response = await proxyB.call("bridge_send_worker_message", reply);
@@ -433,7 +433,7 @@ test("PluginRuntime MCP -> DesktopManager writer HTTP -> real Python router (iso
     assert.equal(replyReceipt.message.text, reply.text); assert.equal(replyReceipt.message.from, b.name);
     assert.equal(replyReceipt.message.to, a.name); assert.equal(replyReceipt.message.reply_to, first.messageId);
     assert.equal(replySaved.request.reply_to, first.messageId);
-    assert.equal(a.native.sends[0].prompt, `来自 ${b.name}：${reply.text}`);
+    assert.equal(a.native.sends[0].prompt, `来自 ${b.name}：\n${reply.text}`);
     assert.equal(replySaved.request.metadata.workerChat.replyTo, first.messageId);
     assert.ok(a.native.sends[0].prompt.endsWith(reply.text));
     assert.equal((await proxyA.call("bridge_send_worker_message", first)).duplicate, true);

@@ -34,7 +34,7 @@ test("read-only collaboration capability cannot read other manager routes or wri
   assert.match(page.headers.get("content-security-policy"), /connect-src 'self'/);
   assert.ok(!(await page.text()).includes(manager.config.token));
   const records = await (await fetch(base + "/collaboration/records", { headers })).json();
-  assert.equal(records.records[0].displayText, "来自 玉藻：<script>bad()</script>");
+  assert.equal(records.records[0].displayText, "来自 玉藻：\n<script>bad()</script>");
   const summary = await collaborationSummary(manager);
   assert.equal(summary.count, 1);
   assert.ok(!JSON.stringify(summary).includes("<script>"), "opening the client view must not replay public message bodies to the model");

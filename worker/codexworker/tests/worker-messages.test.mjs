@@ -38,6 +38,13 @@ function routerFixture() {
       }
       if (method === "GET" && url.pathname === "/messages") {
         const name = url.searchParams.get("worker"), after = Number(url.searchParams.get("after")), limit = Number(url.searchParams.get("limit"));
+        if (url.searchParams.get("view") === "history") {
+          const before = Number(url.searchParams.get("before"));
+          const records = [...messages.values()].filter(m => (m.to === name || m.from === name) && m.seq < before).sort((a, b) => b.seq - a.seq);
+          const page = records.slice(0, Math.min(limit, router.pageSize ?? 100)), more = page.length < records.length;
+          return { ok: true, view: "history", worker: name, messages: structuredClone(page), has_more: more,
+            next_before: more ? page.at(-1).seq : null };
+        }
         const pending = [...messages.values()].filter(m => m.to === name && m.status === "queued" && m.seq > after).sort((a, b) => a.seq - b.seq);
         const page = pending.slice(0, Math.min(limit, router.pageSize ?? 100)), more = page.length < pending.length;
         return { ok: true, worker: name, count: page.length, messages: structuredClone(page),
@@ -103,7 +110,7 @@ test("send derives the authenticated sender, persists router acceptance before m
   assert.equal(f.replies.length, 1); assert.equal(f.requests.length, 0); assert.equal(f.nativeCalls.length, 0);
   const journal = await f.manager.messageJournal.list();
   assert.equal(journal.records.length, 1); assert.equal(journal.records[0].direction, "output");
-  assert.match(journal.records[0].text, /^来自 OguriCap：ordinary chat\n\n/);
+  assert.match(journal.records[0].text, /^来自 OguriCap：\nordinary chat\n\n/);
   assert.equal(journal.records[0].source, "worker");
   assert.equal(journal.records[0].workerName, worker);
   assert.equal(journal.records[0].peerWorkerName, peer);
@@ -200,13 +207,13 @@ test("duplicate full SSE payloads queue one manager input and mirror once, inclu
   assert.equal(request.messageId, value.message_id); assert.equal(request.peerMessageId, value.message_id);
   assert.equal(request.source, "hermes"); assert.equal(request.origin, "worker-chat"); assert.equal(request.workerName, peer);
   assert.equal(request.reply_to, value.reply_to);
-  assert.equal(request.text, `来自 ${peer}：${value.text}`);
+  assert.equal(request.text, `来自 ${peer}：\n${value.text}`);
   assert.equal(request.metadata.workerChat.messageId, value.message_id);
   assert.equal(request.metadata.workerChat.replyTo, value.reply_to);
   assert.match(request.metadata.workerChat.policy, /avoid automatic reply loops/);
   await dispatch(f);
   assert.deepEqual(f.nativeCalls.map(c => c.name), ["send_message_to_thread"]);
-  assert.equal(f.nativeCalls[0].args.prompt, `来自 ${peer}：${value.text}`);
+  assert.equal(f.nativeCalls[0].args.prompt, `来自 ${peer}：\n${value.text}`);
   assert.equal(f.router.calls.filter(c => c.endpoint === "/messages").length, 0, "receive never replies automatically");
   assert.equal((await f.manager.messageJournal.list({ direction: "input" })).records.length, 1);
 });
@@ -393,7 +400,7 @@ test("repeated peer delivery produces one clean record, one standalone media sen
   assert.equal(sends.length, 1);
   assert.equal((await f.service.history()).length, 1);
   const record = (await f.service.history())[0];
-  assert.equal(record.displayText, `来自 ${peer}：一张图`);
+  assert.equal(record.displayText, `来自 ${peer}：\n一张图`);
   assert.equal(record.attachments[0].id, sha);
   assert.equal(record.replyTo, value.reply_to);
   assert.deepEqual((await f.service.readImage(sha)).bytes, png);
@@ -401,7 +408,7 @@ test("repeated peer delivery produces one clean record, one standalone media sen
   assert.equal(f.router.calls.filter(call => call.endpoint === "/messages").length, 0);
   const journal = await f.manager.messageJournal.list();
   assert.equal(journal.records.length, 1);
-  assert.match(journal.records[0].text, /^来自 SuperCreek：一张图\n\n/);
+  assert.match(journal.records[0].text, /^来自 SuperCreek：\n一张图\n\n/);
   assert.ok(!journal.records[0].text.includes(value.message_id));
   assert.ok(!journal.records[0].text.includes("ordinary worker chat"));
 });
@@ -422,6 +429,84 @@ test("unconfirmed Feishu image output preserves peer acceptance without an autom
   await f.service.receive(value);
   assert.equal(sends, 1);
   assert.equal(f.manager.state.sessions["thread-1"].queue.length, 1);
+});
+
+test("collaboration includes direct router sends and accepted replies without re-dispatch or ACK", async t => {
+  const f = await fixture(t);
+  const outgoing = f.router.add(message({ from: worker, to: peer, text: "direct router send", seq: 1 }));
+  const reply = f.router.add(message({ status: "accepted", reply_to: outgoing.message_id, seq: 2 }));
+  f.router.add(message({ from: "Other", to: "Elsewhere", seq: 3 }));
+  f.router.pageSize = 1;
+  const records = await f.service.history();
+  assert.deepEqual(new Set(records.map(r => r.messageId)), new Set([outgoing.message_id, reply.message_id]));
+  assert.equal(records.find(r => r.messageId === outgoing.message_id).displayText, "来自 OguriCap：\ndirect router send");
+  assert.equal(records.find(r => r.messageId === reply.message_id).replyTo, outgoing.message_id);
+  assert.equal(f.requests.length + f.replies.length + f.mirrors.length + f.nativeCalls.length, 0);
+  assert.equal(f.router.calls.every(c => c.method === "GET"), true);
+  assert.equal(f.router.messages.get(outgoing.message_id).status, "queued");
+  assert.equal((await f.manager.messageJournal.list()).records.length, 0);
+});
+
+test("router history and durable receipts merge by UUID and preserve verified local image paths", async t => {
+  const f = await fixture(t);
+  f.client.url = await listen(t, (_req, res) => {
+    res.writeHead(200, { "content-type": "image/png", "content-length": png.length, "x-attachment-sha256": sha });
+    res.end(png);
+  });
+  const value = f.router.add(message({ attachments: [ref] }));
+  await f.service.receive(value);
+  const records = await f.service.history();
+  assert.equal(records.length, 1);
+  assert.equal(records[0].messageId, value.message_id);
+  assert.equal(path.isAbsolute(records[0].metadata.imagePaths[0]), true);
+  assert.deepEqual(await readFile(records[0].metadata.imagePaths[0]), png);
+  assert.deepEqual((await f.service.readImage(sha)).bytes, png);
+});
+
+test("history-only outgoing attachments download original bytes without sending media or native input", async t => {
+  const f = await fixture(t);
+  f.client.url = await listen(t, (_req, res) => {
+    res.writeHead(200, { "content-type": "image/png", "content-length": png.length, "x-attachment-sha256": sha });
+    res.end(png);
+  });
+  f.router.add(message({ from: worker, to: peer, attachments: [ref] }));
+  assert.deepEqual((await f.service.readImage(sha)).bytes, png);
+  assert.equal(f.requests.length + f.replies.length + f.mirrors.length, 0);
+  assert.equal(f.router.calls.every(c => c.method === "GET"), true);
+});
+
+test("concurrent collaboration reads share bounded descending pages and keep only the newest 200", async t => {
+  const f = await fixture(t);
+  for (let seq = 1; seq <= 205; seq++)
+    f.router.add(message({ from: worker, to: peer, seq, created_at: seq }));
+  f.router.pageSize = 7;
+  const records = await Promise.all([f.service.history(), f.service.history(), f.service.history()]);
+  for (const page of records) {
+    assert.equal(page.length, 200);
+    assert.equal(page[0].timestamp, new Date(6000).toISOString());
+    assert.equal(page.at(-1).timestamp, new Date(205000).toISOString());
+  }
+  assert.equal(f.router.calls.length, 29);
+  await f.service.history();
+  assert.equal(f.router.calls.length, 29);
+});
+
+for (const mode of ["old-router", "offline", "bad-cursor", "bad-image"]) test(`history keeps local receipts when ${mode} is encountered`, async t => {
+  const f = await fixture(t);
+  const value = f.router.add(message());
+  await f.service.receive(value);
+  f.client._request = async () => {
+    if (mode === "offline") throw Error("router offline");
+    if (mode === "old-router") return { ok: true, worker, messages: [] };
+    return { ok: true, view: "history", worker, has_more: true, next_before: 1,
+      messages: [message({ seq: mode === "bad-cursor" ? 0 : 1,
+        ...(mode === "bad-image" ? { attachments: [{ ...ref, sha256: "f".repeat(64) }] } : {}) })] };
+  };
+  const records = await f.service.history();
+  assert.equal(records.length, 1);
+  assert.equal(records[0].messageId, value.message_id);
+  assert.equal(f.requests.length, 1);
+  assert.equal(f.replies.length, 0);
 });
 
 for (const mode of ["hash", "length", "type", "redirect"]) test(`invalid image ${mode} never reaches the manager or ACK`, async t => {

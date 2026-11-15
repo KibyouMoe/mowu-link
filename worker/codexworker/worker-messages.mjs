@@ -117,6 +117,7 @@ export function startWorkerMessaging({ manager, client, worker, log = () => {} }
   const root = path.resolve(manager.stateDir, "worker-messages", digest(worker));
   const abort = new AbortController(), stopped = Object.assign(new Error("worker_messaging_closed"), { code: "worker_messaging_closed" });
   let closed = false, pending = 0, tail = Promise.resolve(), closing;
+  let historyRead, historyNextReadAt = 0, routerHistory = [];
   const check = () => { if (closed || manager.closed || manager.handoffPaused || manager.proxy) throw stopped; };
   const note = (level, event, fields) => { try { log(level, event, fields); } catch {} };
   // Stop observing native writes on close, never cancel or repeat their effects.
@@ -146,7 +147,8 @@ export function startWorkerMessaging({ manager, client, worker, log = () => {} }
     return old;
   }
   async function history() {
-    const records = [];
+    check();
+    const records = new Map((await readRouterHistory()).map(record => [record.messageId, record]));
     for (const direction of ["sent", "received"]) {
       const folder = path.join(root, direction);
       let names;
@@ -156,13 +158,57 @@ export function startWorkerMessaging({ manager, client, worker, log = () => {} }
         const record = await json(path.join(folder, name));
         if (!record?.payload || direction === "sent" && !record.router) continue;
         const timestamp = record.timestamp ?? (await stat(path.join(folder, name))).mtime.toISOString();
-        records.push({ messageId: record.payload.message_id, replyTo: record.payload.reply_to ?? null,
+        records.set(record.payload.message_id, { messageId: record.payload.message_id, replyTo: record.payload.reply_to ?? null,
           ...peerPresentation(record.payload, timestamp),
           metadata: { imagePaths: record.request?.attachments?.map(ref => ref.localPath) ?? [] },
           attachments: copy(record.media ?? record.payload.attachments ?? []) });
       }
     }
-    return records.sort((a, b) => a.timestamp.localeCompare(b.timestamp) || a.messageId.localeCompare(b.messageId)).slice(-200);
+    return [...records.values()].sort((a, b) => a.timestamp.localeCompare(b.timestamp) || a.messageId.localeCompare(b.messageId)).slice(-200);
+  }
+
+  async function readRouterHistory() {
+    if (historyRead) return historyRead;
+    if (Date.now() < historyNextReadAt) return routerHistory;
+    historyRead = (async () => {
+      const records = [], expires = Date.now() + 3000;
+      let before = Number.MAX_SAFE_INTEGER;
+      try {
+        while (records.length < 200) {
+          const timeoutMs = expires - Date.now();
+          if (timeoutMs <= 0) fail("worker_history_unavailable", "Router history read exceeded its request budget.");
+          const page = await observe(() => client._request("GET",
+            `/messages?worker=${encodeURIComponent(worker)}&view=history&before=${before}&limit=100`, null, { timeoutMs }));
+          // Older routers ignore view=history and return the pending inbox.
+          if (page?.view !== "history") return routerHistory;
+          if (page.ok !== true || page.worker !== worker || !Array.isArray(page.messages) || page.messages.length > 100)
+            fail("invalid_worker_history", "Router returned an invalid collaboration history.");
+          let last = before;
+          for (const value of page.messages) {
+            if (!Number.isSafeInteger(value?.seq) || value.seq < 1 || value.seq >= last)
+              fail("invalid_worker_history", "Router history sequence did not descend.");
+            last = value.seq;
+            if (value.from !== worker && value.to !== worker) continue;
+            const payload = incoming(value, value.to);
+            if (!Number.isFinite(value.created_at) || !Number.isFinite(new Date(value.created_at * 1000).getTime()))
+              fail("invalid_worker_history", "Router history has no valid message timestamp.");
+            records.push({ messageId: payload.message_id, replyTo: payload.reply_to,
+              ...peerPresentation(payload, new Date(value.created_at * 1000).toISOString()),
+              metadata: { imagePaths: [] }, attachments: payload.attachments });
+          }
+          if (!page.has_more || records.length >= 200) break;
+          if (page.next_before !== last || last >= before)
+            fail("invalid_worker_history", "Router history pagination did not advance.");
+          before = last;
+        }
+        routerHistory = records.slice(0, 200);
+      } catch (error) {
+        check();
+        note("warn", "worker_history_unavailable", { worker, code: error.code ?? "router_read_failed" });
+      }
+      return routerHistory;
+    })().finally(() => { historyRead = null; historyNextReadAt = Date.now() + 2000; });
+    return historyRead;
   }
 
   async function mirrorImages(record, direction) {
