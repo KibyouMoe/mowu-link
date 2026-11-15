@@ -44,6 +44,10 @@
   3) 安装器内容只有：**git 命令 + 说明指向哪个仓库**（不含业务逻辑、不含权限/hook 细节，那些在真身仓库里）。
      安装器分别放在两个同步仓：**CodexSyncArea**（Codex 侧）与 **DSHSkillSync**（DSH 侧），两边都指向同一个真身仓库。
   4) 更新 = `git pull` + 重跑安装，两个引擎因此永远同版本。
+- **真身仓库（训练员 22:55 给定）**：`https://github.com/KibyouMoe/MowuLinkWorkerSkill.git`
+  - 现状：**空仓库**（无任何引用）
+  - 访问方式：本机用 SSH 别名 `git@github.com-honor:KibyouMoe/MowuLinkWorkerSkill.git`（已验证可读，`~/.ssh/id_rsa_honor`）
+  - HTTPS 走本机代理 `http://127.0.0.1:7890`（10808 当前不可用），但 HTTPS 无凭据，优先用 SSH 别名
 - 现有 `docs/mowulink-worker-skill/SKILL.md` 515 行偏大，先判是否拆成「主文件 + references/」。
 
 ## 提问通道规格（训练员 22:37 定，四条目标）
