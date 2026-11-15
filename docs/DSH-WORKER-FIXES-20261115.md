@@ -150,6 +150,8 @@ WORKER_COMPAT_PASS
 
 本机另以原生 Node v26.13.1 执行 `node worker/check-compat.mjs --workers-only`，同样得到 Codex 834 通过、0 失败、8 跳过，DSH 805 通过、0 失败、8 跳过。最终原生 Windows 结果在提交后的 CI 记录中补充。
 
+首轮 CI 的 macOS Node 26 暴露了夹具启动竞态，压缩用例读到 requested。原 send 辅助函数只等待一次 setImmediate，实际 ensureAgent 仍可能在写 checkpoint，随后测试提前发出 turn/end。用 100ms 原生创建延迟复现得到 `send-returned nativeAgentStatus=idle nativeInputs=0`，150ms 后才为 `running/1`。夹具现等待真实 user/message 或明确终态，finish 等待原生回合完成及 checkpoint，再做公开输出断言。
+
 Windows 测试包含真实路径、命名管道和进程生命周期，DSH 引擎与飞书 HTTP 使用隔离 fixture。真实 DSH 模型看图与手机端卡片外观另需生产验收。
 
 ## 生效边界

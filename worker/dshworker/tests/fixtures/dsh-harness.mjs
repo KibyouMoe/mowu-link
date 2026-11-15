@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { DesktopManager, PROTOCOL } from "../../desktop-manager.mjs";
 import { InProcessTransport } from "../../interface/inprocess.mjs";
 import { createInProcessAdapter } from "../../interface/transport/inprocess.mjs";
@@ -12,6 +13,13 @@ import { nativeToolRejection } from "../../interface/native-dispatch.mjs";
 export const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j1WkAAAAASUVORK5CYII=", "base64");
 export const sha256 = bytes => createHash("sha256").update(bytes).digest("hex");
 const tick = () => new Promise(resolve => setImmediate(resolve));
+async function waitForNative(predicate, detail) {
+  for (let attempt = 0; attempt < 500; attempt++) {
+    if (predicate()) return;
+    await delay(10);
+  }
+  assert.fail(detail);
+}
 
 export async function dshFixture(t, { wireMedia = false } = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), "dsh-business-compat-"));
@@ -127,8 +135,19 @@ export async function dshFixture(t, { wireMedia = false } = {}) {
   }
   async function send(text, extra = {}) {
     const messageId = randomUUID();
+    const firstEvent = records.length, firstTurn = transport.threads.get(threadId).turns.length;
     await manager.message({ protocolVersion: PROTOCOL, messageId, source: "trainer", targetThreadId: threadId, text, ...extra });
-    await tick(); return messageId;
+    await waitForNative(
+      () => records.slice(firstEvent).some(event => event.type === "user/message") ||
+        transport.threads.get(threadId).turns.slice(firstTurn).some(turn => turn.status !== "inProgress"),
+      "DSH fixture input did not reach its native agent or a terminal rejection.",
+    );
+    return messageId;
+  }
+  async function finishTurn() {
+    finish();
+    await waitForNative(() => !transport.threads.get(threadId).running, "DSH fixture native turn did not settle.");
+    await transport.writeChain;
   }
   t.after(async () => {
     if (agent.status !== "idle") { finish(); await tick(); }
@@ -139,5 +158,5 @@ export async function dshFixture(t, { wireMedia = false } = {}) {
   });
   return { root, manager, transport, adapter, agent, threadId, session, cards, calls, imageSends,
     mediaMessages, uploads, questionPosts, downloads, records,
-    emit, publish, stream, finish: async () => { finish(); await tick(); }, drain, send };
+    emit, publish, stream, finish: finishTurn, drain, send };
 }
