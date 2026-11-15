@@ -10,6 +10,14 @@ router/飞书模块与 CodexWorker 逐字节一致。
 共享功能、router 普通交流/正式工单、目标模式和双平台测试规则见 `../codexworker/README.md`。
 本次只同步源码，不能据此宣称正在运行的 DSH 已更新。
 
+## 工作台协作记录
+
+插件通过 Harness 的 client-module / sidebarRight 扩展提供「协作记录」入口。
+部署时从本机鉴权接口 `GET /bridge/collaboration` 取得只读页面 URL，将其配置为本机
+Cordis 插件的 `collaborationUrl`。此 URL 含限定读取权限的凭据，留在本机配置。
+点击会话标题旁的「协作记录」打开正文、时间与附件缩略图，不向会话重放历史。
+防回环说明与消息关联仅通过原生 `agent/pre-step` 的 system 消息供模型读取。
+
 ## 飞书提问表单（布局 9）
 
 按提供的 Codex 截图采用靛蓝标题、纵向编号选项、底部输入和右对齐的「跳过」「发送」。

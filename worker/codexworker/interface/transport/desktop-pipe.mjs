@@ -59,6 +59,9 @@ export async function listTools() {
  * @param {number} timeoutMs
  */
 export async function callTool(toolName, args, invocation, timeoutMs = 5000) {
+  // The MCP system instructions carry peer rules. Keep private correlation
+  // metadata out of the visible Desktop tool prompt and its public schema.
+  if (args.nativePeerMessage) { args = { ...args }; delete args.nativePeerMessage; }
   if (toolName === "cancel_task") return sendNativeInput({ ...args, operation: "cancel" }, { timeoutMs });
   if (toolName === "send_message_to_thread" && args.nativeTask && capabilities.taskInput &&
       process.env.CODEXWORKER_NATIVE_INPUT_DESCRIPTOR) {

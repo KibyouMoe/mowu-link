@@ -38,6 +38,7 @@ import { routerMessageId, routerMarker, findRouterTurn } from "./router-tasks.mj
 import { resumePage, resumeListText } from "./resume-list.mjs";
 import { hermesChunks } from "./hermes-feishu-format.mjs";
 import { isAbandonedText, isUnconfirmedText } from "./text-receipt-review.mjs";
+import { collaborationUrl, handleCollaboration } from "./collaboration-view.mjs";
 
 export const PROTOCOL = "1.1.1-draft";
 const digest = value => createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -337,6 +338,10 @@ export class DesktopManager {
     if (!input && !output) return null;
     if (output && event.payload.phase && !["commentary", "final", "final_answer"].includes(event.payload.phase)) return null;
     let text = input ? request.text ?? event.payload.text : event.payload.snapshot ?? event.payload.text;
+    if (input && request.origin === "worker-chat" && request.metadata?.workerChat) {
+      const peer = request.metadata.workerChat;
+      text = peer.displayText + "\n\n" + peer.timestamp;
+    }
     const nativeReplies = input ? parseNativeQuestionReply(text) : null;
     if (nativeReplies) text = nativeReplies.map(reply => reply.question + "\n答案：" + reply.answer).join("\n\n");
     if (typeof text !== "string" || !text.trim()) return null;
@@ -1268,7 +1273,7 @@ export class DesktopManager {
     // untouched. Slash commands are handled before reaching this presentation.
     const label = this.config.messageSourceLabels === false || isNativeQuestionReply(request.text) ? null
       : request.source === "trainer" && this.state.feishuReceipts[request.messageId] ? "飞书"
-      : request.origin === "worker-chat" ? request.workerName ?? "worker"
+      : request.origin === "worker-chat" ? null
       : request.source === "hermes" && !["router", "subscription"].includes(request.origin) ? "超级溪流" : null;
     // The engine owns context and compaction. Dispatch the actual input without
     // adding Worker-maintained memory or summaries.
@@ -1313,6 +1318,10 @@ export class DesktopManager {
       await this.save(); throw error;
     }
     const args = { threadId: session.threadId, prompt };
+    if (request.origin === "worker-chat" && request.metadata?.workerChat) {
+      const { messageId, replyTo, from, to, imagePaths } = request.metadata.workerChat;
+      args.nativePeerMessage = { messageId, replyTo, from, to, ...(imagePaths ? { imagePaths: [...imagePaths] } : {}) };
+    }
     if (request.source === "hermes" && request.origin === "router") {
       const taskId = /^\[router (t-[^\]\s]+)\]/.exec(request.text)?.[1];
       if (taskId) args.nativeTask = { taskId, messageId: request.messageId };
@@ -2308,6 +2317,7 @@ export class DesktopManager {
   async handle(req, res, context = {}) {
     let body, counted = false;
     try {
+      if (await handleCollaboration(this, req, res)) return;
       const actual = Buffer.from(req.headers.authorization ?? "");
       const expected = Buffer.from(`Bearer ${context.token ?? this.config.token}`);
       if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) fail(401, "unauthorized", "Valid Bearer token required.");
@@ -2354,6 +2364,8 @@ export class DesktopManager {
       if (req.method === "GET" && url.pathname === "/bridge/integrations") return json(res, 200, this.integrationStatus());
       if (req.method === "POST" && url.pathname === "/bridge/integrations/reload") return json(res, 200, await this.reloadIntegrations());
       if (req.method === "GET" && url.pathname === "/bridge/workers") return json(res, 200, await routerOperations(this).workers());
+      if (req.method === "GET" && url.pathname === "/bridge/collaboration") return json(res, 200,
+        { url: collaborationUrl(this), records: await this.workerMessages?.history() ?? [] });
       if (req.method === "GET" && url.pathname === "/bridge/worker-messages") return json(res, 200,
         await routerOperations(this).message("inbox", { after: Number(url.searchParams.get("after") ?? 0) }));
       if (req.method === "POST" && url.pathname === "/bridge/worker-messages") return json(res, 200,

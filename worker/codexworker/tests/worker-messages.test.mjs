@@ -103,7 +103,7 @@ test("send derives the authenticated sender, persists router acceptance before m
   assert.equal(f.replies.length, 1); assert.equal(f.requests.length, 0); assert.equal(f.nativeCalls.length, 0);
   const journal = await f.manager.messageJournal.list();
   assert.equal(journal.records.length, 1); assert.equal(journal.records[0].direction, "output");
-  assert.equal(journal.records[0].text, "ordinary chat");
+  assert.match(journal.records[0].text, /^来自 OguriCap：ordinary chat\n\n/);
   assert.equal(journal.records[0].source, "worker");
   assert.equal(journal.records[0].workerName, worker);
   assert.equal(journal.records[0].peerWorkerName, peer);
@@ -200,12 +200,13 @@ test("duplicate full SSE payloads queue one manager input and mirror once, inclu
   assert.equal(request.messageId, value.message_id); assert.equal(request.peerMessageId, value.message_id);
   assert.equal(request.source, "hermes"); assert.equal(request.origin, "worker-chat"); assert.equal(request.workerName, peer);
   assert.equal(request.reply_to, value.reply_to);
-  assert.ok(request.text.startsWith(`[worker ${peer} message ${value.message_id} reply_to ${value.reply_to}]\n`));
-  assert.ok(request.text.includes(`这里是 ${peer}。`));
-  assert.match(request.text, /ordinary worker chat/); assert.match(request.text, /bridge_send_worker_message/); assert.match(request.text, /avoid automatic reply loops/);
+  assert.equal(request.text, `来自 ${peer}：${value.text}`);
+  assert.equal(request.metadata.workerChat.messageId, value.message_id);
+  assert.equal(request.metadata.workerChat.replyTo, value.reply_to);
+  assert.match(request.metadata.workerChat.policy, /avoid automatic reply loops/);
   await dispatch(f);
   assert.deepEqual(f.nativeCalls.map(c => c.name), ["send_message_to_thread"]);
-  assert.ok(f.nativeCalls[0].args.prompt.startsWith("[worker "));
+  assert.equal(f.nativeCalls[0].args.prompt, `来自 ${peer}：${value.text}`);
   assert.equal(f.router.calls.filter(c => c.endpoint === "/messages").length, 0, "receive never replies automatically");
   assert.equal((await f.manager.messageJournal.list({ direction: "input" })).records.length, 1);
 });
@@ -217,7 +218,8 @@ test("foreign non-v4 UUIDs keep their original peer metadata and ACK while using
   assert.notEqual(first.nativeMessageId, original);
   assert.match(first.nativeMessageId, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
   assert.equal(f.requests[0].peerMessageId, original); assert.equal(f.requests[0].reply_to, value.reply_to);
-  assert.ok(f.requests[0].text.includes(`message ${original} reply_to ${value.reply_to}`));
+  assert.equal(f.requests[0].metadata.workerChat.messageId, original);
+  assert.equal(f.requests[0].metadata.workerChat.replyTo, value.reply_to);
   assert.equal(ackCalls(f.router)[0].endpoint, `/messages/${original}/ack`);
   await f.service.close(); const next = startWorkerMessaging(f.options); t.after(() => next.close());
   const repeat = await next.receive(value);
@@ -373,9 +375,35 @@ test("image attachments download verified bytes to a real local path and never e
   await f.service.receive(value); await f.service.receive(value);
   assert.deepEqual(gets, ["/attachments/" + sha]);
   const request = f.requests[0], local = request.attachments[0].localPath;
-  assert.ok(path.isAbsolute(local)); assert.deepEqual(await readFile(local), png); assert.ok(request.text.includes(local));
+  assert.ok(path.isAbsolute(local)); assert.deepEqual(await readFile(local), png); assert.ok(request.metadata.workerChat.imagePaths.includes(local));
   assert.ok(!request.text.includes("C:\\remote")); assert.ok(!JSON.stringify(request).includes("untrusted.invalid"));
   assert.equal(request.attachments[0].name, "image.png"); assert.equal(f.mirrors.length, 1);
+});
+
+test("repeated peer delivery produces one clean record, one standalone media send and no automatic reply", async t => {
+  const f = await fixture(t), sends = [];
+  f.client.url = await listen(t, (_req, res) => {
+    res.writeHead(200, { "content-type": "image/png", "content-length": png.length, "x-attachment-sha256": sha });
+    res.end(png);
+  });
+  f.manager.notifier = {};
+  f.manager.sendImage = async request => { sends.push(request); return { messageId: "om_image", sha256: sha }; };
+  const value = f.router.add(message({ text: "一张图", attachments: [ref], reply_to: randomUUID() }));
+  for (let attempt = 0; attempt < 5; attempt++) await f.service.receive(value);
+  assert.equal(sends.length, 1);
+  assert.equal((await f.service.history()).length, 1);
+  const record = (await f.service.history())[0];
+  assert.equal(record.displayText, `来自 ${peer}：一张图`);
+  assert.equal(record.attachments[0].id, sha);
+  assert.equal(record.replyTo, value.reply_to);
+  assert.deepEqual((await f.service.readImage(sha)).bytes, png);
+  assert.equal(await f.service.readImage("f".repeat(64)), null);
+  assert.equal(f.router.calls.filter(call => call.endpoint === "/messages").length, 0);
+  const journal = await f.manager.messageJournal.list();
+  assert.equal(journal.records.length, 1);
+  assert.match(journal.records[0].text, /^来自 SuperCreek：一张图\n\n/);
+  assert.ok(!journal.records[0].text.includes(value.message_id));
+  assert.ok(!journal.records[0].text.includes("ordinary worker chat"));
 });
 
 for (const mode of ["hash", "length", "type", "redirect"]) test(`invalid image ${mode} never reaches the manager or ACK`, async t => {
