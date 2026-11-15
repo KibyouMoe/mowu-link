@@ -15,6 +15,7 @@ import { parseDshQuestionReply, projectPublicQuestion } from "./public-questions
 import { projectDshMedia } from "./public-media.mjs";
 import { prepareDshImageMessage } from "./image-input.mjs";
 import { WORKER_CHAT_POLICY } from "../worker-message-format.mjs";
+import { installSessionRoleRecovery } from "./session-recovery.mjs";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const VERSION = "0.3.1";
 const TRANSPORT_NAME = "dsh-inprocess";
@@ -252,6 +253,7 @@ export class InProcessTransport {
       return { ...assembly, sections: [...assembly.sections.filter(section => section.name !== "worker-chat-policy"),
         { name: "worker-chat-policy", text: WORKER_CHAT_POLICY + "\n" + JSON.stringify(peer), interpolate: false }] };
     }, { prepend: true });
+    this.stopSessionRecovery = installSessionRoleRecovery(ctx, this.log);
     this.load();
     this.desktopObserver = new DshDesktopObserver(this);
   }
@@ -823,6 +825,7 @@ export class InProcessTransport {
     this.questions.close();
     this.stopApproval?.();
     this.stopPeerPolicy?.();
+    this.stopSessionRecovery?.();
     for (const thread of this.threads.values()) {
       for (const turn of thread.turns ?? []) {
         if (!TERMINAL_TURN_STATUSES.has(turn.status)) {

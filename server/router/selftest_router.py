@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """selftest_router.py — real end-to-end test for mowu-router.
 
-Starts two real processes, no in-process shortcuts:
+Starts real processes with throwaway state:
 
   * server/trigger/server.py on a free port with a throwaway DB, so the
     notify path is verified against the real trigger service (not a mock and
@@ -24,6 +24,10 @@ Then drives a fake worker over a real SSE connection and exercises:
     bounded inbox/SSE replay, image references, offline queue and process restart
   formal tasks: optional creation UUID, atomic persistence, exact retries across
     reconnect/restart, goal-only execution and explicit deadlines, legacy clients
+  default zero backlog: busy trainer/router turns, running/cancelling tasks,
+    immediate idle dispatch, concurrent winners, reusable refused UUIDs and recovery
+  deterministic connection-race injection over HTTP checks unaccepted-row cleanup
+    and FIFO admission while accepted queued work awaits recovery
   SSE disconnect → subscriptions purged locally and at trigger
   trigger down → POST /subscriptions 502 + rollback, /notice ok:false (no 5xx)
   single-instance flock, token file generation/permissions, auth
@@ -55,6 +59,7 @@ import uuid
 from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
@@ -1054,6 +1059,369 @@ def activity_selftest(checker, token, workers):
                   bad == 400 and acknowledged["state"] == "cancelled" and not worker_row(name, token)["busy"])
 
 
+def zero_backlog_selftest(checker, work, trigger_url, trigger_token):
+    """Exercise the default admission policy through real HTTP and SSE."""
+    port = free_port()
+    base = "http://127.0.0.1:%d" % port
+    db = work / "zero-backlog.db"
+    token_path = work / "zero-backlog.token"
+    log_path = work / "zero-backlog.log"
+    argv = [PY, str(ROUTER), "--port", str(port), "--db", str(db),
+            "--token-file", str(token_path), "--lock", str(work / "zero-backlog.lock"),
+            "--log", str(log_path), "--trigger-url", trigger_url + "/trigger",
+            "--trigger-token-file", str(trigger_token), "--ping-interval", "0.2"]
+    proc, output = start_process(argv, work / "zero-backlog.out")
+    clients = []
+    name = "zero-wait-worker"
+    try:
+        if not wait_http(base + "/health"):
+            raise RuntimeError("zero-backlog router did not start: " + tail(log_path))
+        token = token_path.read_text(encoding="utf-8").strip()
+
+        def call(method, route, body=None):
+            return http(method, base + route, body, token)
+
+        def row():
+            return next(w for w in call("GET", "/workers")[1]["workers"] if w["name"] == name)
+
+        def connect():
+            client = FakeWorker(name, token, port=port)
+            clients.append(client)
+            client.start()
+            if not client.connected.wait(5) or client.error or not row()["online"]:
+                raise RuntimeError("zero-backlog SSE did not connect")
+            return client
+
+        def payload(goal):
+            return {"worker": name, "goal": goal, "message_id": str(uuid.uuid4())}
+
+        def heartbeat(state="idle", source=None, task_id=None):
+            return call("POST", "/heartbeat", {"name": name, "state": state,
+                        "turn_source": source, "task_id": task_id})
+
+        def saved():
+            with sqlite3.connect(str(db)) as connection:
+                return connection.execute(
+                    "SELECT task_id, state, request_id FROM tasks ORDER BY rowid").fetchall()
+
+        def busy(body, task_id, source):
+            before = saved()
+            code, result = call("POST", "/tasks", body)
+            return (code == 409 and result.get("error") == "worker_busy"
+                    and result.get("busy") is True and "task_id" in result
+                    and result.get("task_id") == task_id and "turn_source" in result
+                    and result.get("turn_source") == source
+                    and result.get("retry_when") == "current_task_accepted_and_worker_idle"
+                    and "acceptance" in result.get("message", "")
+                    and "GET /workers" in result.get("message", "")
+                    and "busy=false" in result.get("message", "") and saved() == before)
+
+        def duplicate(body, task_id, state):
+            code, result = call("POST", "/tasks", body)
+            return (code == 200 and result.get("duplicate") is True
+                    and result.get("task_id") == task_id and result.get("state") == state
+                    and result.get("dispatched") is False)
+
+        def finish(task_id):
+            return call("POST", "/result", {"name": name, "task_id": task_id,
+                        "status": "done", "summary": "zero-backlog completion"})
+
+        checker.check("zero backlog: omitted --backlog-max defaults to 0",
+                      call("GET", "/health")[1].get("backlog_max") == 0)
+        negative = subprocess.run([PY, str(ROUTER), "--backlog-max", "-1",
+                                   "--log", str(work / "negative-backlog.log")],
+                                  capture_output=True, text=True, timeout=10)
+        checker.check("zero backlog: negative capacity rejected before startup",
+                      negative.returncode == 2 and "must be >= 0" in negative.stderr)
+        call("POST", "/register", {"name": name, "control_sse": True})
+        offline_bodies = [dict(payload("offline-%s" % value), queue_if_offline=value)
+                          for value in (False, True)]
+        refusals = [call("POST", "/tasks", body) for body in offline_bodies]
+        checker.check("zero backlog: offline refuses even queue_if_offline=true; no task or UUID saved",
+                      all(code == 409 and result.get("error") == "worker_offline"
+                          for code, result in refusals) and saved() == []
+                      and row()["queued"] == 0)
+
+        client = connect()
+        trainer_body = payload("retry after trainer acceptance")
+        for state in ("running", "inProgress", "waiting_input"):
+            heartbeat(state, "trainer")
+            checker.check("zero backlog: trainer %s refuses without saving task or UUID" % state,
+                          row()["busy"] and busy(trainer_body, None, "trainer")
+                          and client.wait_task(0.1) is None)
+        heartbeat("running", "trainer", "t-missing")
+        checker.check("zero backlog: trainer without a work order returns null task_id despite stale metadata",
+                      busy(trainer_body, None, "trainer") and saved() == [])
+        heartbeat("running", "router", "t-missing")
+        checker.check("zero backlog: router heartbeat without a work order preserves source and null task_id",
+                      busy(payload("router turn busy"), None, "router")
+                      and saved() == [] and client.wait_task(0.1) is None)
+        heartbeat()
+        idle = row()
+        code, accepted = call("POST", "/tasks", trainer_body)
+        task_id = accepted.get("task_id")
+        delivered = client.wait_task(3)
+        checker.check("zero backlog: idle admits a previously refused UUID and dispatches immediately",
+                      not idle["busy"] and code == 200 and accepted.get("dispatched") is True
+                      and delivered is not None and delivered.get("task_id") == task_id
+                      and len(saved()) == 1 and saved()[0][2] == trainer_body["message_id"])
+        next_body = dict(payload("retry after cancellation"), queue_if_offline=True)
+        checker.check("zero backlog: running task refuses before any router heartbeat",
+                      busy(next_body, task_id, "router") and client.wait_task(0.1) is None)
+        heartbeat("running", "router", "t-missing")
+        checker.check("zero backlog: stale heartbeat task_id falls back to the actual running work order",
+                      busy(next_body, task_id, "router"))
+        with sqlite3.connect(str(db)) as connection:
+            connection.execute("UPDATE workers SET busy=0 WHERE name=?", (name,))
+        checker.check("zero backlog: running row independently refuses when cached busy=false",
+                      not row()["busy"] and busy(next_body, task_id, "router"))
+        heartbeat("running", "router", task_id)
+        checker.check("zero backlog: accepted exact retry bypasses busy and changed payload conflicts",
+                      duplicate(trainer_body, task_id, "running")
+                      and call("POST", "/tasks", dict(trainer_body, goal="changed"))[1].get("error")
+                      == "message_id_conflict" and client.wait_task(0.1) is None)
+
+        code, pending = call("POST", "/tasks/" + task_id + "/cancel")
+        command = client.cancellations.get(timeout=3)
+        checker.check("zero backlog: cancellation remains occupied and refuses new requests",
+                      code == 202 and pending.get("state") == "cancelling"
+                      and command == {"task_id": task_id} and busy(next_body, task_id, "router")
+                      and duplicate(trainer_body, task_id, "cancelling")
+                      and finish(task_id)[1].get("state") == "cancelling"
+                      and client.wait_task(0.1) is None)
+        with sqlite3.connect(str(db)) as connection:
+            connection.execute("UPDATE workers SET busy=0 WHERE name=?", (name,))
+        checker.check("zero backlog: cancelling row independently refuses when cached busy=false",
+                      not row()["busy"] and busy(next_body, task_id, "router"))
+        _, cancelled = call("POST", "/tasks/" + task_id + "/cancel-ack", {
+            "name": name, "outcome": {"task_id": task_id, "ok": True, "state": "cancelled"}})
+        idle = row()
+        code, next_task = call("POST", "/tasks", next_body)
+        delivered = client.wait_task(3)
+        checker.check("zero backlog: cancellation ACK releases worker; refused UUID can be accepted",
+                      cancelled.get("state") == "cancelled" and not idle["busy"]
+                      and code == 200 and next_task.get("dispatched") is True
+                      and delivered is not None and delivered.get("task_id") == next_task.get("task_id")
+                      and len(saved()) == 2)
+        finish(next_task["task_id"])
+        heartbeat("waiting_input", "trainer")
+        checker.check("zero backlog: terminal exact retry remains idempotent during a trainer turn",
+                      duplicate(next_body, next_task["task_id"], "done")
+                      and duplicate(trainer_body, task_id, "cancelled")
+                      and client.wait_task(0.1) is None)
+        heartbeat()
+        code, offline_retry = call("POST", "/tasks", offline_bodies[1])
+        delivered = client.wait_task(3)
+        checker.check("zero backlog: offline-refused UUID remains reusable when worker is idle",
+                      code == 200 and delivered is not None
+                      and delivered.get("task_id") == offline_retry.get("task_id"))
+        finish(offline_retry["task_id"])
+
+        bodies = [payload("concurrent-%d" % index) for index in range(8)]
+        gate = threading.Barrier(len(bodies))
+        results = []
+
+        def create(body):
+            gate.wait(timeout=5)
+            results.append((body, *call("POST", "/tasks", body)))
+
+        writers = [threading.Thread(target=create, args=(body,), daemon=True) for body in bodies]
+        before_count = len(saved())
+        for writer in writers:
+            writer.start()
+        for writer in writers:
+            writer.join(6)
+        winners = [(body, result) for body, code, result in results if code == 200]
+        delivered = client.wait_task(3)
+        if not checker.check("zero backlog: eight distinct concurrent UUIDs have one dispatch winner",
+                             all(not writer.is_alive() for writer in writers) and len(results) == 8
+                             and len(winners) == 1 and len(saved()) == before_count + 1
+                             and all(code == 200 or (code == 409 and result.get("error") == "worker_busy"
+                                     and result.get("task_id") == winners[0][1].get("task_id")
+                                     and result.get("turn_source") == "router"
+                                     and result.get("retry_when") == "current_task_accepted_and_worker_idle")
+                                     for _, code, result in results)
+                             and delivered is not None
+                             and delivered.get("task_id") == winners[0][1].get("task_id")
+                             and client.wait_task(0.2) is None,
+                             "statuses=%s" % [code for _, code, _ in results]):
+            raise RuntimeError("zero-backlog concurrent admission failed")
+        keys = {key for _, _, key in saved()}
+        losers = [body for body, code, _ in results if code == 409]
+        checker.check("zero backlog: all concurrent losers leave UUIDs free and queued count at zero",
+                      all(body["message_id"] not in keys for body in losers)
+                      and row()["queued"] == 0
+                      and call("GET", "/tasks?state=queued")[1].get("count") == 0)
+        winner_body, winner = winners[0]
+        checker.check("zero backlog: concurrent winner exact retry returns original without redispatch",
+                      duplicate(winner_body, winner["task_id"], "running")
+                      and client.wait_task(0.1) is None)
+        finish(winner["task_id"])
+        code, reused = call("POST", "/tasks", losers[0])
+        delivered = client.wait_task(3)
+        checker.check("zero backlog: concurrent loser UUID succeeds after current task completes",
+                      code == 200 and delivered is not None
+                      and delivered.get("task_id") == reused.get("task_id"))
+        client.stop()
+        deadline = time.time() + 5
+        while row()["online"] and time.time() < deadline:
+            time.sleep(0.05)
+        checker.check("zero backlog: disconnect retains accepted queued task and exact retry identity",
+                      not row()["online"] and duplicate(losers[0], reused["task_id"], "queued")
+                      and row()["queued"] == 1)
+        before = saved()
+        fresh = dict(payload("offline with recovered backlog"), queue_if_offline=True)
+        checker.check("zero backlog: offline recovered backlog refuses with original task_id and retry_when",
+                      busy(fresh, reused["task_id"], "router") and saved() == before)
+
+        proc.terminate()
+        proc.wait(timeout=5)
+        output.close()
+        proc, output = start_process(argv + ["--backlog-max", "0"], work / "zero-backlog-restarted.out")
+        if not wait_http(base + "/health"):
+            raise RuntimeError("explicit-zero router did not start: " + tail(log_path))
+        checker.check("zero backlog: explicit --backlog-max 0 starts and preserves accepted queued identity",
+                      call("GET", "/health")[1].get("backlog_max") == 0
+                      and duplicate(losers[0], reused["task_id"], "queued") and saved() == before)
+        recovered = connect()
+        replay = recovered.wait_task(3)
+        checker.check("zero backlog: reconnect delivers only previously accepted task; no refused task appears",
+                      replay is not None and replay.get("task_id") == reused["task_id"]
+                      and recovered.wait_task(0.2) is None and saved()[-1][0] == reused["task_id"]
+                      and all(key != fresh["message_id"] for _, _, key in saved()))
+        finish(reused["task_id"])
+        checker.check("zero backlog: final worker is idle with no queued/running/cancelling tasks",
+                      not row()["busy"] and row()["queued"] == 0
+                      and all(state in ("done", "cancelled") for _, state, _ in saved()))
+    finally:
+        for client in clients:
+            client.stop()
+        if proc.poll() is None:
+            proc.terminate()
+            proc.wait(timeout=5)
+        output.close()
+        if checker.failed:
+            print("\n--- zero-backlog log (tail) ---\n" + tail(log_path), flush=True)
+
+
+def dispatch_race_selftest(checker, work):
+    """Inject connection loss deterministically into the real HTTP handler."""
+    import server as router_module
+
+    store = router_module.RouterStore(str(work / "dispatch-race.db"))
+    notifier = mock.Mock()
+    notifier.notify_result.return_value = False
+    server = router_module.RouterServer(("127.0.0.1", 0), store, "race-test-token",
+                                        notifier, mock.Mock())
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = "http://127.0.0.1:%d" % server.server_address[1]
+    name = "dispatch-race"
+    store.upsert_worker(name)
+    conn = server.attach(name)
+    try:
+        checker.check("zero backlog: RouterServer constructor defaults to capacity 0",
+                      server.backlog_max == 0)
+        for queue_if_offline in (False, True):
+            body = {"worker": name, "goal": "push race", "message_id": str(uuid.uuid4()),
+                    "queue_if_offline": queue_if_offline}
+            with mock.patch.object(conn, "send_task", return_value=False):
+                code, result = http("POST", base + "/tasks", body, server.token)
+            checker.check("zero backlog: failed push (queue_if_offline=%s) deletes task and UUID" % queue_if_offline,
+                          code == 409 and result.get("error") == "worker_offline"
+                          and store.list_tasks() == [] and store.get_task_request(body["message_id"]) is None
+                          and not store.get_worker(name)["busy"] and store.queued_count(name) == 0)
+        with mock.patch.object(server, "current_conn", side_effect=[conn, None]):
+            code, result = http("POST", base + "/tasks", body, server.token)
+        checker.check("zero backlog: vanished connection before push also leaves no task or UUID",
+                      code == 409 and result.get("error") == "worker_offline"
+                      and store.list_tasks() == [] and store.get_task_request(body["message_id"]) is None)
+        code, accepted = http("POST", base + "/tasks", body, server.token)
+        event = conn.queue.get(timeout=3)
+        checker.check("zero backlog: UUID refused by push race can be accepted on retry",
+                      code == 200 and accepted.get("dispatched") is True
+                      and event.get("data", {}).get("task_id") == accepted.get("task_id")
+                      and len(store.list_tasks()) == 1 and store.queued_count(name) == 0)
+
+        http("POST", base + "/result", {"name": name, "task_id": accepted["task_id"],
+             "status": "done", "summary": "prepare queued recovery race"}, server.token)
+        server.backlog_max = 2
+        store.heartbeat(name, state="running", turn_source="trainer")
+        old_bodies = [{"worker": name, "goal": "accepted queued work %d" % index,
+                       "message_id": str(uuid.uuid4())} for index in range(2)]
+        old_results = [http("POST", base + "/tasks", old_body, server.token)
+                       for old_body in old_bodies]
+        old_ids = [task.get("task_id") for _, task in old_results]
+        checker.check("queued recovery: explicit positive capacity accepts two legitimate old tasks",
+                      all(code == 202 for code, _ in old_results)
+                      and None not in old_ids and store.queued_count(name) == 2 and conn.queue.empty())
+        store.heartbeat(name, state="idle", turn_source=None, task_id=old_ids[1])
+        with mock.patch.object(conn, "send_task", return_value=False):
+            dispatched = server.dispatch_one(name)
+        checker.check("queued recovery: failed recovery push leaves old work queued on an idle live connection",
+                      dispatched is None and server.online(name) and not store.get_worker(name)["busy"]
+                      and store.queued_count(name) == 2 and store.running_count(name) == 0)
+        new_body = {"worker": name, "goal": "new work must follow accepted work",
+                    "message_id": str(uuid.uuid4())}
+        code, full = http("POST", base + "/tasks", new_body, server.token)
+        checker.check("queued recovery: positive full capacity also prevents immediate FIFO bypass",
+                      code == 429 and full.get("error") == "backlog_full"
+                      and store.get_task_request(new_body["message_id"]) is None and conn.queue.empty())
+
+        server.backlog_max = 0
+        before = store.list_tasks()
+        contenders = [dict(new_body, message_id=str(uuid.uuid4())) for _ in range(8)]
+        gate = threading.Barrier(len(contenders))
+        results = []
+
+        def create(request):
+            gate.wait(timeout=5)
+            results.append(http("POST", base + "/tasks", request, server.token))
+
+        writers = [threading.Thread(target=create, args=(request,), daemon=True) for request in contenders]
+        for writer in writers:
+            writer.start()
+        for writer in writers:
+            writer.join(6)
+        checker.check("queued recovery: concurrent new requests refuse with oldest accepted task_id and retry_when",
+                      all(not writer.is_alive() for writer in writers) and len(results) == len(contenders)
+                      and all(code == 409 and result.get("error") == "worker_busy"
+                              and result.get("task_id") == old_ids[0] and result.get("turn_source") == "router"
+                              and result.get("retry_when") == "current_task_accepted_and_worker_idle"
+                              for code, result in results)
+                      and store.list_tasks() == before and conn.queue.empty()
+                      and all(store.get_task_request(request["message_id"]) is None for request in contenders))
+        code, duplicate = http("POST", base + "/tasks", old_bodies[0], server.token)
+        checker.check("queued recovery: exact accepted UUID retry bypasses admission refusal without dispatch",
+                      code == 200 and duplicate.get("duplicate") is True
+                      and duplicate.get("task_id") == old_ids[0] and duplicate.get("state") == "queued"
+                      and conn.queue.empty())
+        dispatched = server.dispatch_one(name)
+        event = conn.queue.get(timeout=3)
+        checker.check("queued recovery: oldest accepted task resumes before any new work",
+                      dispatched is not None and dispatched["task_id"] == old_ids[0]
+                      and event.get("data", {}).get("task_id") == old_ids[0])
+        code, result = http("POST", base + "/result", {
+            "name": name, "task_id": old_ids[0], "status": "done", "summary": "oldest completed"}, server.token)
+        event = conn.queue.get(timeout=3)
+        checker.check("queued recovery: completing oldest task automatically dispatches the next accepted task",
+                      code == 200 and result.get("dispatched_next") == old_ids[1]
+                      and event.get("data", {}).get("task_id") == old_ids[1])
+        http("POST", base + "/result", {"name": name, "task_id": old_ids[1],
+             "status": "done", "summary": "old queue drained"}, server.token)
+        code, admitted = http("POST", base + "/tasks", contenders[0], server.token)
+        event = conn.queue.get(timeout=3)
+        checker.check("queued recovery: refused UUID succeeds once accepted old work completes",
+                      code == 200 and admitted.get("dispatched") is True
+                      and event.get("data", {}).get("task_id") == admitted.get("task_id")
+                      and store.queued_count(name) == 0)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(5)
+        store._conn.close()
+
+
 def start_process(argv, log_path: Path):
     handle = open(str(log_path), "wb")
     proc = subprocess.Popen(argv, stdout=handle, stderr=subprocess.STDOUT)
@@ -1117,6 +1485,7 @@ def run(work: Path, checker: Checker) -> None:
             "--trigger-url", trigger_url + "/trigger",
             "--trigger-token-file", str(trigger_token),
             "--ping-interval", "1",
+            "--backlog-max", "128",
         ], work / "router.out")
         if not wait_http(BASE + "/health", timeout=10.0):
             raise RuntimeError("router did not start: " + tail(router_log))
@@ -2098,6 +2467,8 @@ def run(work: Path, checker: Checker) -> None:
         activity_selftest(checker, token, workers)
         peer_selftest(checker, work, trigger_url, trigger_token)
         workorders_selftest(checker, work, trigger_url, trigger_token)
+        zero_backlog_selftest(checker, work, trigger_url, trigger_token)
+        dispatch_race_selftest(checker, work)
 
         for worker_obj in workers:
             worker_obj.stop()

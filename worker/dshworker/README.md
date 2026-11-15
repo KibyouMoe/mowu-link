@@ -10,12 +10,22 @@ router/飞书模块与 CodexWorker 逐字节一致。
 共享功能、router 普通交流/正式工单、目标模式和双平台测试规则见 `../codexworker/README.md`。
 本次只同步源码，不能据此宣称正在运行的 DSH 已更新。
 
-## 工作台协作记录
+## 原生上下文与会话恢复
 
-插件通过 Harness 的 client-module / sidebarRight 扩展提供「协作记录」入口。
-客户端通过 Harness 原有鉴权 Connection 向 `workerCollaboration/view` 请求只读页面入口。
-点击左侧「协作记录」或右侧标签页的同名入口打开正文、时间与附件缩略图，不向会话重放历史。
-防回环说明与消息关联仅通过原生 `agent/pre-step` 的 system 消息供模型读取。
+防回环说明与消息关联通过 `system-prompt/assemble` 的 `worker-chat-policy` section 提供。
+原生 prompt registry 生成 system 消息，普通私聊使用下述原生用户输入流程。
+
+`interface/session-recovery.mjs` 在当前 V4 Zstd 持久化解码完成、角色校验之前，
+将错位或未知消息角色转换为可忽略的恢复记录，并写 `session_role_skipped` 告警。
+告警包含会话 ID、seq、事件类型、期望与实际角色。seq、时间、物理截断位置保持，
+原始文件由原生持久化服务保管，坏消息正文通过可忽略记录跳过。
+物理解码阶段提前拒绝的角色在完整 Zstd 流的内存副本中隔离，再交回原生校验。
+`sessions.prepare` 同时覆盖直接 seed 恢复。插件卸载恢复原方法，重组期间按实例计数。
+此持久化接入点依赖当前 Harness V4 Zstd 后端的 `readZstdPrefix`，后端升级时需重新核验。
+
+公共回归执行 `node --test worker/dshworker/tests/dsh-session-recovery.test.mjs`。
+有已安装 Harness 包时，设置 `DSH_NATIVE_TEST_ROOT` 为包含其 node_modules 的目录，
+同一命令会另运行真实 V4 持久化、混入 system 与未知角色的冷读回归。
 
 ## 飞书提问表单（布局 9）
 

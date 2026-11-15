@@ -64,7 +64,7 @@ DEFAULT_LOCK_PATH = "~/.hermes/router.lock"
 DEFAULT_LOG = "~/.hermes/router.log"
 DEFAULT_TRIGGER_URL = "http://127.0.0.1:8791/trigger"
 DEFAULT_TRIGGER_TOKEN_PATH = "~/.hermes/secrets/trigger.token"
-BACKLOG_MAX = 128
+BACKLOG_MAX = 0
 MAX_GOAL_CHARS = 2000
 MAX_BODY_BYTES = 1 * 1024 * 1024
 PEER_MAX_TEXT = 20000
@@ -738,7 +738,7 @@ class RouterStore:
 
     def list_tasks(self, worker: Optional[str] = None,
                    state: Optional[str] = None,
-                   limit: int = 100) -> List[Dict[str, Any]]:
+                   limit: int = 100, *, oldest_first: bool = False) -> List[Dict[str, Any]]:
         sql = "SELECT * FROM tasks"
         where: List[str] = []
         params: List[Any] = []
@@ -750,7 +750,7 @@ class RouterStore:
             params.append(state)
         if where:
             sql += " WHERE " + " AND ".join(where)
-        sql += " ORDER BY rowid DESC LIMIT ?"
+        sql += " ORDER BY rowid " + ("ASC" if oldest_first else "DESC") + " LIMIT ?"
         params.append(max(1, min(int(limit), 500)))
         with self._lock:
             rows = self._conn.execute(sql, tuple(params)).fetchall()
@@ -1582,7 +1582,7 @@ class RouterServer(ThreadingHTTPServer):
         self.trigger_client = notifier.client
         self.trigger_bridge = bridge
         self.ping_interval = max(0.2, float(ping_interval))
-        self.backlog_max = max(1, int(backlog_max))
+        self.backlog_max = max(0, int(backlog_max))
         self.conns: Dict[str, Connection] = {}
         self.conn_lock = threading.Lock()
         self.dispatch_lock = threading.RLock()
@@ -2516,13 +2516,33 @@ class RouterHandler(BaseHTTPRequestHandler):
                     raise BadRequest("deadline_s must be > 0")
 
             store = self.server.store
-            if store.get_worker(worker_name) is None:
+            worker = store.get_worker(worker_name)
+            if worker is None:
                 return 400, {"ok": False, "error": "unknown_worker",
                              "worker": worker_name}
 
+            running = store.running_count(worker_name)
+            queued = store.queued_count(worker_name)
+            if self.server.backlog_max == 0 and (worker["busy"] or running or queued):
+                current = store.get_task(worker["task_id"]) if worker["task_id"] else None
+                if (current is None or current["worker"] != worker_name
+                        or current["state"] not in ("running", "cancelling")):
+                    active = (store.list_tasks(worker=worker_name, state="running", limit=1)
+                              or store.list_tasks(worker=worker_name, state="cancelling", limit=1)
+                              or store.list_tasks(worker=worker_name, state="queued", limit=1,
+                                                  oldest_first=True))
+                    current = active[0] if active else None
+                return 409, {
+                    "ok": False, "error": "worker_busy", "worker": worker_name,
+                    "busy": True, "task_id": current["task_id"] if current else None,
+                    "turn_source": worker["turn_source"] or ("router" if current else None),
+                    "retry_when": "current_task_accepted_and_worker_idle",
+                    "message": "wait for the current task to complete acceptance and "
+                               "GET /workers to report busy=false, then retry",
+                }
+
             online = self.server.online(worker_name)
-            if (online and store.running_count(worker_name) == 0 and
-                    not store.get_worker(worker_name)["busy"]):
+            if online and running == 0 and queued == 0 and not worker["busy"]:
                 task = store.create_task(
                     worker_name, goal, context, workspace, urgency,
                     state="running", deadline_s=deadline_s,
@@ -2538,6 +2558,16 @@ class RouterHandler(BaseHTTPRequestHandler):
                         "queued_ahead": 0,
                     }
                 # Stream vanished between the check and the push.
+                if self.server.backlog_max == 0:
+                    store.delete_task(task["task_id"])
+                    store.refresh_counts(worker_name)
+                    return 409, {
+                        "ok": False, "error": "worker_offline",
+                        "worker": worker_name, "online": False,
+                        "queue_if_offline": queue_if_offline,
+                        "message": "worker connection unavailable; wait for an online "
+                                   "worker with GET /workers busy=false, then retry",
+                    }
                 store.requeue_task(task["task_id"])
                 store.refresh_counts(worker_name)
                 online = self.server.online(worker_name)
@@ -2574,17 +2604,18 @@ class RouterHandler(BaseHTTPRequestHandler):
                     "queued": state == "queued", "queued_ahead": ahead,
                 }
 
-            if not online and not queue_if_offline:
+            if not online and (self.server.backlog_max == 0 or not queue_if_offline):
                 log.info("refused task for offline worker=%s", worker_name)
                 return 409, {
                     "ok": False, "error": "worker_offline",
                     "worker": worker_name, "online": False,
-                    "queue_if_offline": False,
-                    "message": "worker is offline; retry with "
-                               "queue_if_offline=true to queue it",
+                    "queue_if_offline": queue_if_offline,
+                    "message": ("worker is offline; wait for an online worker with "
+                                "GET /workers busy=false, then retry"
+                                if self.server.backlog_max == 0 else
+                                "worker is offline; retry with queue_if_offline=true to queue it"),
                 }
 
-            queued = store.queued_count(worker_name)
             if queued >= self.server.backlog_max:
                 log.warning("backlog full worker=%s queued=%d limit=%d",
                             worker_name, queued, self.server.backlog_max)
@@ -3310,7 +3341,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                    help="trigger token file (default %(default)s)")
     p.add_argument("--backlog-max", type=int, default=BACKLOG_MAX,
                    help="max queued/backlog tasks per worker "
-                        "(default %(default)s)")
+                        "(0 refuses new waiting tasks; default %(default)s)")
     p.add_argument("--ping-interval", type=float, default=PING_INTERVAL,
                    help="SSE comment heartbeat seconds (default %(default)s)")
     p.add_argument("--verbose", action="store_true", help="debug logging")
@@ -3327,8 +3358,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("error: non-loopback binding requires --allow-remote; refusing to bind %r"
               % host, file=sys.stderr)
         return 2
-    if args.backlog_max < 1:
-        print("error: --backlog-max must be >= 1", file=sys.stderr)
+    if args.backlog_max < 0:
+        print("error: --backlog-max must be >= 0", file=sys.stderr)
         return 2
     if args.ping_interval <= 0:
         print("error: --ping-interval must be > 0", file=sys.stderr)
