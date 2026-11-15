@@ -120,6 +120,7 @@
 | 内容 | 说明 |
 |---|---|
 | 看板存储改成 git 里的文档（训练员 23:58，**派气槽**） | 不要 sqlite：看板数据量小（现在 11MB、几千行），存成仓库内的 JSON/Markdown 文档，跟 wiki 一起进 git、可 diff、可回溯。要点：①按看板拆文件 ②卡片一条一行便于 diff ③写入即提交（走现有自动同步）④提供 sqlite → 文档 的一次性迁移 + 反向恢复 ⑤现有 API/前端行为不变。 |
+| **状态回写不一致 bug（02:57）** | worker 已报 done（t-d0b38c853b，02:40），router 里仍 `running`、`finished_at=null`；同时出现 `busy=true + state=idle + task_id=null`，导致下一单卡在 queued。要复盘重放/回写两条链路，并加一致性自检。 |
 | **通知丢失 bug（00:07）** | `t-a4bc5c0a3b` 已是 done、result 在库，但训练员和溪流都没收到完成推送；要查 `/notice` 发送端回执 + Hermes 侧接收链路，并在丢失时有补偿（轮询 `state=done` 兜底）。 |
 | worker 等待位归零 | `busy=true` 时拒收而非排队；返回 409 `worker_busy` + 当前 task_id |
 | 尾注 @ 的静默窗口做成真配置（23:33） | gateway/发送层读 `~/.hermes/at-mention.json` 的 `quiet_windows`，窗口内不追加「以上@训练员」；现在是靠溪流自觉遵守，不是系统读配置。低优先。 |
