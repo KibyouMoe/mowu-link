@@ -173,8 +173,15 @@ export function startWorkerMessaging({ manager, client, worker, log = () => {} }
       // The image output ledger owns uncertain POSTs and Feishu UUID deduplication.
       const h = digest(`${direction}:${record.payload.message_id}:${ref.id}`);
       const messageId = h.slice(0, 8) + "-" + h.slice(8, 12) + "-4" + h.slice(13, 16) + "-8" + h.slice(17, 20) + "-" + h.slice(20, 32);
-      const receipt = await observe(() => manager.sendImage({ imagePath, threadId: record.targetThreadId, messageId }));
-      record.imageMirrors[ref.id] = receipt;
+      try {
+        record.imageMirrors[ref.id] = await observe(() => manager.sendImage({ imagePath, threadId: record.targetThreadId, messageId }));
+      } catch (error) {
+        check();
+        record.imageMirrors[ref.id] = { status: "unconfirmed", messageId,
+          error: error.body?.error ?? error.code ?? "peer_image_delivery_unconfirmed" };
+        note("warn", "worker_message_image_unconfirmed", { peerMessageId: record.payload.message_id,
+          imageId: ref.id, ...record.imageMirrors[ref.id] });
+      }
       await save(direction, record);
     }
   }
@@ -312,7 +319,7 @@ export function startWorkerMessaging({ manager, client, worker, log = () => {} }
     if (ack.status !== "accepted") fail("worker_message_ack_unconfirmed", "Router ACK is unconfirmed; retry the same UUID only.", id, "unknown");
     record.acked = true; await save("received", record);
     return { ok: true, messageId: id, nativeMessageId: nativeId, accepted: true, acked: true,
-      duplicate: accepted.duplicate === true, action: accepted.action };
+      duplicate: accepted.duplicate === true, action: accepted.action, images: record.imageMirrors ?? {} };
   }
 
   async function readInbox({ after = 0, limit = 100 } = {}) {
@@ -357,7 +364,7 @@ export function startWorkerMessaging({ manager, client, worker, log = () => {} }
         await mirrorSent(record);
         await mirrorImages(record, "sent");
         return { ok: true, messageId: id, message_id: id, status: record.router.status,
-          duplicate: duplicate || record.router.duplicate, mirror: record.mirror };
+          duplicate: duplicate || record.router.duplicate, mirror: record.mirror, images: record.imageMirrors ?? {} };
       });
     },
     receive: envelope => enqueue(() => receiveMessage(envelope)),

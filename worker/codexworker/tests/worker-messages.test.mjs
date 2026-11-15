@@ -406,6 +406,24 @@ test("repeated peer delivery produces one clean record, one standalone media sen
   assert.ok(!journal.records[0].text.includes("ordinary worker chat"));
 });
 
+test("unconfirmed Feishu image output preserves peer acceptance without an automatic resend loop", async t => {
+  const f = await fixture(t);
+  f.client.url = await listen(t, (_req, res) => {
+    res.writeHead(200, { "content-type": "image/png", "content-length": png.length, "x-attachment-sha256": sha });
+    res.end(png);
+  });
+  f.manager.notifier = {};
+  let sends = 0;
+  f.manager.sendImage = async () => { sends++; throw Object.assign(Error("unconfirmed"), { code: "image_send_unknown" }); };
+  const value = f.router.add(message({ attachments: [ref] }));
+  const receipt = await f.service.receive(value);
+  assert.equal(receipt.acked, true);
+  assert.equal(receipt.images[sha].status, "unconfirmed");
+  await f.service.receive(value);
+  assert.equal(sends, 1);
+  assert.equal(f.manager.state.sessions["thread-1"].queue.length, 1);
+});
+
 for (const mode of ["hash", "length", "type", "redirect"]) test(`invalid image ${mode} never reaches the manager or ACK`, async t => {
   const f = await fixture(t);
   f.client.url = await listen(t, (_req, res) => {
