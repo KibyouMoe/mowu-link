@@ -1622,8 +1622,10 @@ export class DesktopManager {
     const session = this.makeSession(snapshot.thread, { alias, cwd, parent, hostId: response.hostId });
     this.baseline(session, snapshot);
     this.state.sessions[session.threadId] = session; this.selectSession(session.threadId, { touch: true });
-    try { await this.call("set_thread_title", { threadId: session.threadId, title: alias }); }
-    catch { session.state = "error"; session.titlePending = true; }
+    if (snapshot.thread.title !== alias) {
+      try { await this.call("set_thread_title", { threadId: session.threadId, title: alias }); }
+      catch { session.state = "error"; session.titlePending = true; }
+    }
     const type = command === "/new" ? "session.created" : "session.forked";
     await this.emit(type, { ...request, threadId: session.threadId }, { session: clone(session) });
     return { action: command === "/new" ? "session_created" : "session_forked", session: clone(session) };

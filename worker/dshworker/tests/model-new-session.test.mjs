@@ -9,7 +9,8 @@ for (const projectId of ["project", "stale-project"]) for (const feishu of [fals
   manager.modelCommands.defaults = async () => { defaultsRead++; return { model: "selected-model", effort: "high" }; };
   manager.save = async () => {};
   manager.emit = async () => {};
-  manager.read = async () => ({ thread: { id: "new-chat", cwd: "/test" }, turns: [] });
+  manager.read = async () => ({ thread: { id: "new-chat", cwd: "/test",
+    title: calls.find(call => call.name === "create_thread").args.title }, turns: [] });
   manager.call = async (name, args) => {
     calls.push({ name, args });
     return name === "list_projects"
@@ -25,6 +26,8 @@ for (const projectId of ["project", "stale-project"]) for (const feishu of [fals
   assert.equal(created.model, feishu ? "selected-model" : undefined);
   assert.equal(created.thinking, feishu ? "high" : undefined);
   assert.equal(manager.state.sessions.main.threadId, "main");
+  assert.equal(calls.some(call => call.name === "set_thread_title"), false);
+  assert.equal(manager.state.sessions["new-chat"].titlePending, undefined);
 });
 
 test("Feishu model commands pass raw text and identity to the router parser", async () => {
