@@ -148,9 +148,20 @@ router TOTAL 138/138 PASS exit=0 signal=none
 WORKER_COMPAT_PASS
 ```
 
-本机另以原生 Node v26.13.1 执行 `node worker/check-compat.mjs --workers-only`，同样得到 Codex 834 通过、0 失败、8 跳过，DSH 805 通过、0 失败、8 跳过。最终原生 Windows 结果在提交后的 CI 记录中补充。
+本机另以原生 Node v26.13.1 执行 `node worker/check-compat.mjs --workers-only`，同样得到 Codex 834 通过、0 失败、8 跳过，DSH 805 通过、0 失败、8 跳过。
 
 首轮 CI 的 macOS Node 26 暴露了夹具启动竞态，压缩用例读到 requested。原 send 辅助函数只等待一次 setImmediate，实际 ensureAgent 仍可能在写 checkpoint，随后测试提前发出 turn/end。用 100ms 原生创建延迟复现得到 `send-returned nativeAgentStatus=idle nativeInputs=0`，150ms 后才为 `running/1`。夹具现等待真实 user/message 或明确终态，finish 等待原生回合完成及 checkpoint，再做公开输出断言。
+
+修复后的 CI 提交为 `3d7dda7caf0af3cc961f946b061a47a0421a823e`，包含功能提交 `bf898fbfdb8a70a776045ccdb8364a93100a83a8`。四项 job 均 success。[完整原生 CI](https://github.com/KibyouMoe/mowu-link/actions/runs/43675621137)
+
+| 原生平台与 Node | Codex 通过 / 失败 / 跳过 / 总数 | DSH 通过 / 失败 / 跳过 / 总数 | router 自测 |
+| --- | --- | --- | --- |
+| macOS v22.23.4 | 834 / 0 / 8 / 842 | 805 / 0 / 8 / 813 | 138/138 PASS |
+| macOS v26.13.1 | 834 / 0 / 8 / 842 | 805 / 0 / 8 / 813 | 138/138 PASS |
+| Windows v22.23.4 | 818 / 0 / 24 / 842 | 804 / 0 / 9 / 813 | POSIX 服务自测在 Mac 执行 |
+| Windows v26.13.1 | 818 / 0 / 24 / 842 | 804 / 0 / 9 / 813 | POSIX 服务自测在 Mac 执行 |
+
+四项 job 均执行 `node worker/check-compat.mjs --workers-only`，输出 `shared_root_modules=37 matched=37 mismatched=0` 与 `WORKER_SUITES_PASS`。两项 Mac job 随后执行 `ROUTER_TEST_PORT=18790 python server/router/selftest_router.py`，各输出 `TOTAL 138/138 PASS`。全量测试的跳过数沿用平台条件。
 
 Windows 测试包含真实路径、命名管道和进程生命周期，DSH 引擎与飞书 HTTP 使用隔离 fixture。真实 DSH 模型看图与手机端卡片外观另需生产验收。
 
