@@ -158,7 +158,7 @@ async function handleRequest(method, params) {
             inputSchema: { type: "object", properties: { messageId: { type: "string" }, to: { type: "string" }, text: { type: "string", minLength: 1, maxLength: 20000 },
               replyTo: { type: "string" }, attachments: { type: "array", maxItems: 10, items: { type: "object", properties: { id: { type: "string" }, name: { type: "string" } }, required: ["id"], additionalProperties: false } } },
               required: ["messageId", "to", "text"], additionalProperties: false } },
-          { name: "bridge_worker_inbox", description: "Read this worker's pending chat inbox, or use view=history for original peer text and reply correlation metadata. This read-only query never dispatches an input or creates a task.",
+          { name: "bridge_worker_inbox", description: "Read this worker's pending chat inbox, or use view=history for the latest twenty peer reply metadata records. This read-only query never dispatches an input or creates a task.",
             inputSchema: { type: "object", properties: { after: { type: "integer", minimum: 0 },
               view: { type: "string", enum: ["pending", "history"] } }, additionalProperties: false }, annotations: { readOnlyHint: true } },
           { name: "bridge_create_work_order", description: "Create one user-authorized project work order in native goal mode. Do not use for ordinary chat or create another order for steering of an existing project. Reuse messageId on retry. No default wall-clock deadline.",

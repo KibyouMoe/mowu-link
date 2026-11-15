@@ -46,7 +46,9 @@ export function routerOperations(manager) {
         throw new RouterOperationError(400, "invalid_message_view", "Use pending or history for ordinary chat messages.");
       try {
         if (method === "inbox" && request.view === "history") {
-          const messages = await manager.workerMessages.history();
+          const messages = (await manager.workerMessages.history()).slice(-20)
+            .map(({ messageId, replyTo, from, to, timestamp, attachments }) =>
+              ({ messageId, replyTo, from, to, timestamp, attachments }));
           return { ok: true, view: "history", count: messages.length, messages };
         }
         return await manager.workerMessages[method](request);

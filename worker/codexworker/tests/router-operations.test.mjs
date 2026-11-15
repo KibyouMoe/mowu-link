@@ -20,10 +20,17 @@ test("ordinary peer chat and inbox never submit a work order", async () => {
 
 test("peer history keeps reply metadata available through the ordinary inbox query", async () => {
   const f = fixture();
-  const records = [{ messageId: randomUUID(), from: "TamamoCross", to: "OguriCap", text: "收到", replyTo: null }];
+  const record = { messageId: randomUUID(), from: "TamamoCross", to: "OguriCap", replyTo: null,
+    timestamp: "2026-11-15T14:00:00Z", attachments: [] };
+  const records = [{ ...record, text: "收到" }];
   f.manager.workerMessages.history = async () => records;
   assert.deepEqual(await f.ops.message("inbox", { view: "history" }),
-    { ok: true, view: "history", count: 1, messages: records });
+    { ok: true, view: "history", count: 1, messages: [record] });
+  f.manager.workerMessages.history = async () => Array.from({ length: 25 }, () => ({ ...record, text: "长正文".repeat(20000) }));
+  const bounded = await f.ops.message("inbox", { view: "history" });
+  assert.equal(bounded.count, 20);
+  assert.equal(bounded.messages.length, 20);
+  assert.ok(bounded.messages.every(message => !("text" in message)));
   await assert.rejects(f.ops.message("inbox", { view: "unknown" }), error => error.status === 400);
   assert.equal(f.calls.length, 0);
 });
