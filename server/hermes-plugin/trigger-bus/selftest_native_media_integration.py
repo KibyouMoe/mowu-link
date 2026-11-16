@@ -2,11 +2,13 @@
 import asyncio
 import hashlib
 import importlib.util
+import os
 import sys
 import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -61,6 +63,7 @@ class Integration(unittest.TestCase):
         self.loop.close()
         plugin._native_media_receipt = self.old_receipt
 
+    @patch.dict(os.environ, {"TRIGGER_BUS_MEDIA_RELAY": "1"})
     def test_receipt_proves_text_and_independent_native_image(self):
         data = b"gateway-image"
         sha = hashlib.sha256(data).hexdigest()
@@ -93,6 +96,20 @@ class Integration(unittest.TestCase):
         self.assertIn("客户端原生图片输入", rendered)
         self.assertNotIn("C:/", rendered)
         self.assertNotIn("# Files", rendered)
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_disabled_default_keeps_local_attachment_without_media_dispatch(self):
+        event = {"id": 2, "event_id": "local-only", "source": "router",
+                 "kind": "worker.input.image", "text": "# Files mentioned by the user:\nC:/Users/private.png",
+                 "_attachment_files": [{"path": "/local/verified-image.png"}]}
+        plugin._relay_native_images(self.state, [event], self.home)
+        self.assertIsNone(self.state.native_media_relay)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.state.native_media_pending, {})
+        rendered = plugin._format_event(event)
+        self.assertIn("/local/verified-image.png", rendered)
+        self.assertNotIn("自动投递", rendered)
+        self.assertNotIn("C:/", rendered)
 
 
 if __name__ == "__main__":

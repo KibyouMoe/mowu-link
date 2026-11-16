@@ -618,7 +618,11 @@ router 仍保持 loopback 监听，经已有认证隧道/入口访问，不为�
 目前支持 PNG/JPEG/GIF/WebP，每张最多 100MB，每条最多 10 张；原始字节不转码。
 部署需加载新版 router 与 trigger-bus 插件，不需要重启 Codex 共享后台或 DSH。
 
-## 0.9.5 飞书原生图片自动投递
+## 0.9.5 原生图片本机接收与可选媒体发送
+
+TRIGGER_BUS_MEDIA_RELAY 默认0。当前生产按训练员2026-11-16 13:08的决定关闭自动媒体发送，Worker图片下载到本机attachments/router，事件卡保留已校验的本地路径，供溪流按需识图、决定转发。关闭时不创建媒体发送器，不写入native-media.sqlite的新事件或媒体记录。图片通知使用「客户端原生图片输入」题头。
+
+仅当网关进程显式设置TRIGGER_BUS_MEDIA_RELAY=1并重启时，下述可选发送器生效。
 
 下载后的附件由网关后台发送器接管，先发送标题为「客户端原生图片输入」的文字卡片，再逐图调用实际飞书 adapter 的 `send_image_file`，caption 为空。成功回执同时要求 success=true、platform=feishu 和真实 message_id。图片失败时更新原文字卡片，追加「图片发送失败」与原因。
 
