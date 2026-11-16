@@ -478,6 +478,8 @@ def peer_selftest(checker, work, trigger_url, trigger_token, trigger_db):
         root_peer = root_reply["message"]
         checker.check("peer Hermes wake: one router.peer notify and a durable delivery ACK",
                       root_reply["status"] == "accepted" and root_peer["acked_at"] is not None
+                      and root_peer["status"] == "delivered"
+                      and call("GET", "/messages/" + root_peer["message_id"])[1]["status"] == "delivered"
                       and wake_rows(root_peer) == [{
                           "source": "router.peer", "kind": "peer.message", "level": "notify", "actor": c,
                           "text": "溪流，%s 给你发了消息（seq %s）：普通回复" % (c, root_peer["seq"]),

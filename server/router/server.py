@@ -622,11 +622,13 @@ class RouterStore:
     # -- durable peer chat ---------------------------------------------- #
     @staticmethod
     def _peer_dict(row: sqlite3.Row) -> Dict[str, Any]:
+        status = "queued" if row["acked_at"] is None else (
+            "delivered" if peer_identity(row["recipient"]) == ROOT_PEER_NAME else "accepted")
         return {"seq": row["seq"], "message_id": row["message_id"],
                 "from": row["sender"], "to": row["recipient"],
                 "text": row["text"], "reply_to": row["reply_to"],
                 "attachments": json.loads(row["attachments_json"]),
-                "status": "queued" if row["acked_at"] is None else "accepted",
+                "status": status,
                 "created_at": row["created_at"], "acked_at": row["acked_at"]}
 
     def get_peer_message(self, message_id: str) -> Optional[Dict[str, Any]]:
@@ -2357,7 +2359,10 @@ class RouterHandler(BaseHTTPRequestHandler):
             else:
                 log.warning("peer wake failed id=%s seq=%s error=%.200s",
                             message["message_id"], message["seq"], data.get("error"))
-        return 200, self._peer_receipt(message, duplicate=receipt["duplicate"])
+        # Existing Worker senders accept queued/accepted transport receipts.
+        # The stored message and GET response expose the delivered state.
+        return 200, self._peer_receipt(message, duplicate=receipt["duplicate"],
+                                      status="accepted" if message["acked_at"] is not None else "queued")
 
     def _peer_message_store(self, body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
         message_id = self._peer_uuid(body.get("message_id"))
@@ -2442,7 +2447,7 @@ class RouterHandler(BaseHTTPRequestHandler):
                 return 404, {"ok": False, "error": "unknown_message"}
             if peer_identity(worker) != peer_identity(message["to"]):
                 return 403, {"ok": False, "error": "wrong_recipient"}
-            already = message["status"] == "accepted"
+            already = message["status"] in ("accepted", "delivered")
             message = self.server.store.ack_peer_message(message_id)
         log.info("peer accepted id=%s already=%s from=%r to=%r seq=%s",
                  message_id, already, message["from"], message["to"], message["seq"])

@@ -30,8 +30,9 @@ Worker 已接受，均不表示模型已回答；回复显式携带 reply_to。�
 收件人为 `Hermes`（大小写不敏感）或 `溪流` 时，消息先持久化，再向 trigger 提交
 `source=router.peer`、`kind=peer.message`、`level=notify`，`event_id=peer:<seq>`。
 唤醒正文包含发送者、seq 和前 200 个字符。别名共享历史查询，消息保留原始 from/to。
-此路径返回 HTTP 200。trigger 接受后写入 `acked_at`，沿用 `status=accepted` 表示已交给
-溪流的 notify 通道。正常 Worker 的 202/queued 和自主 ACK 流程照原协议执行。
+此路径返回 HTTP 200。trigger 接受后写入 `acked_at`，消息及 GET 查询的 `status=delivered`
+表示已交给溪流的 notify 通道。POST 的顶层发送回执沿用 `status=accepted`，嵌套 message
+显示 delivered，以兼容现有 Worker。普通 Worker 的 202/queued 和自主 ACK 流程照原协议执行。
 trigger 不可用时返回 200/queued 并记 WARNING。使用相同 UUID、相同正文重试可补投唤醒，
 trigger 依据 `peer:<seq>` 去重。已写 delivery ACK 的重试直接读回原记录。
 
