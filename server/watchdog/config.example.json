@@ -1,0 +1,25 @@
+{
+  "threshold_s": 900,
+  "max_threshold_s": 3600,
+  "backoff_after": 2,
+  "backoff_factor": 2,
+  "backoff_window_s": 3600,
+  "quiet_night": true,
+  "workers": {
+    "OguriCap": {
+      "state_files": [
+        "~/.codex/state/codexworker/model-settings.local.json",
+        "~/.codex/state/codexworker/question-actions.json"
+      ],
+      "workspaces": ["/absolute/path/to/task-workspace"]
+    },
+    "TamamoCross": {
+      "state_files": [
+        "~/.hermes/state/dshworker/dsh-plugin-state.json",
+        "~/.hermes/state/dshworker/model-settings.local.json",
+        "~/.hermes/state/dshworker/question-actions.json"
+      ],
+      "workspaces": ["/absolute/path/to/task-workspace"]
+    }
+  }
+}
