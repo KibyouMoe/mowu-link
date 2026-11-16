@@ -311,7 +311,7 @@ class FakeWorker(threading.Thread):
 
 
 
-def peer_selftest(checker, work, trigger_url, trigger_token):
+def peer_selftest(checker, work, trigger_url, trigger_token, trigger_db):
     """A separate real router: crash/restart never touches the main test router."""
     port = free_port()
     base = "http://127.0.0.1:%d" % port
@@ -339,6 +339,13 @@ def peer_selftest(checker, work, trigger_url, trigger_token):
                     "text": marker}
             body.update(changes)
             return body
+
+        def wake_rows(message):
+            with sqlite3.connect(str(trigger_db)) as saved:
+                saved.row_factory = sqlite3.Row
+                return [dict(row) for row in saved.execute(
+                    "SELECT source, kind, level, actor, text, event_id FROM events WHERE event_id=?",
+                    ("peer:%s" % message["seq"],))]
 
         def inbox():
             messages = []
@@ -430,6 +437,8 @@ def peer_selftest(checker, work, trigger_url, trigger_token):
                       and first_message.get("text") == marker
                       and first_message.get("acked_at") is None
                       and not ({"task_id", "deadline_s", "result"} & set(first_message)))
+        checker.check("peer worker recipients stay queued without a trigger wake",
+                      wake_rows(first_message) == [])
         code, duplicate = call("POST", "/messages", dict(reversed(list(first_body.items()))))
         checker.check("peer exact retry: key order ignored, one durable message and stable receipt",
                       code == 200 and duplicate.get("duplicate") is True
@@ -456,15 +465,76 @@ def peer_selftest(checker, work, trigger_url, trigger_token):
 
         code, root_message = call("POST", "/messages", payload(**{
             "from": "Hermes", "to": c, "text": "溪流普通私聊"}))
-        root_reply_code, root_reply = call("POST", "/messages", payload(**{
-            "from": c, "to": "Hermes", "text": "普通回复", "reply_to": root_message.get("message_id")}))
+        root_reply_body = payload(**{
+            "from": c, "to": "Hermes", "text": "普通回复", "reply_to": root_message.get("message_id")})
+        root_reply_code, root_reply = call("POST", "/messages", root_reply_body)
         root_history = call("GET", "/messages?worker=Hermes&view=history")[1]
         root_inbox = call("GET", "/messages?worker=Hermes")[1]
         checker.check("peer Hermes identity: bidirectional chat needs no worker registration or task",
-                      code == root_reply_code == 202
+                      code == 202 and root_reply_code == 200
                       and len(root_history.get("messages", [])) == 2
-                      and ids(root_inbox.get("messages", [])) == [root_reply.get("message_id")]
+                      and root_inbox.get("messages") == []
                       and not any(row["name"] == "Hermes" for row in call("GET", "/workers")[1]["workers"]))
+        root_peer = root_reply["message"]
+        checker.check("peer Hermes wake: one router.peer notify and a durable delivery ACK",
+                      root_reply["status"] == "accepted" and root_peer["acked_at"] is not None
+                      and wake_rows(root_peer) == [{
+                          "source": "router.peer", "kind": "peer.message", "level": "notify", "actor": c,
+                          "text": "溪流，%s 给你发了消息（seq %s）：普通回复" % (c, root_peer["seq"]),
+                          "event_id": "peer:%s" % root_peer["seq"]}])
+        retry_code, root_retry = call("POST", "/messages", root_reply_body)
+        checker.check("peer Hermes exact retry keeps one notify and the original delivery timestamp",
+                      retry_code == 200 and root_retry.get("duplicate") is True
+                      and root_retry["message"] == root_peer and len(wake_rows(root_peer)) == 1)
+
+        aliases = []
+        for alias in ("溪流", "hermes", "HeRmEs"):
+            alias_code, sent = call("POST", "/messages", payload(to=alias))
+            aliases.append(sent["message"])
+            checker.check("peer root alias %s wakes without worker registration" % alias,
+                          alias_code == 200 and sent["status"] == "accepted"
+                          and len(wake_rows(sent["message"])) == 1)
+        root_alias_history = call("GET", "/messages?worker=%s&view=history" % quote("溪流"))[1]
+        checker.check("peer root aliases share history while retaining the original sender and recipient",
+                      set(ids(root_alias_history["messages"])) ==
+                      {root_message["message_id"], root_peer["message_id"], *ids(aliases)})
+
+        concurrent_body = payload(to="溪流", text="甲🟦" * 150)
+        concurrent = []
+        writers = [threading.Thread(target=lambda: concurrent.append(
+            call("POST", "/messages", concurrent_body))) for _ in range(6)]
+        for writer in writers:
+            writer.start()
+        for writer in writers:
+            writer.join(10)
+        concurrent_peer = call("GET", "/messages/" + concurrent_body["message_id"])[1]["message"]
+        checker.check("peer concurrent retries emit one notify with a 200-character Unicode preview",
+                      len(concurrent) == 6 and all(code == 200 for code, _ in concurrent)
+                      and concurrent_peer["acked_at"] is not None
+                      and len(wake_rows(concurrent_peer)) == 1
+                      and wake_rows(concurrent_peer)[0]["text"] ==
+                      "溪流，%s 给你发了消息（seq %s）：%s" %
+                      (a, concurrent_peer["seq"], concurrent_body["text"][:200]))
+
+        unavailable_body = payload(to="Hermes", text="recover wake with the same UUID")
+        original_token = trigger_token.read_bytes()
+        try:
+            trigger_token.write_bytes(b"")
+            unavailable_code, unavailable = call("POST", "/messages", unavailable_body)
+        finally:
+            trigger_token.write_bytes(original_token)
+        checker.check("peer unavailable trigger preserves HTTP 200 and the queued durable message",
+                      unavailable_code == 200 and unavailable["ok"] is True
+                      and unavailable["status"] == "queued"
+                      and unavailable["message"]["acked_at"] is None
+                      and wake_rows(unavailable["message"]) == [])
+        recovered_code, recovered = call("POST", "/messages", unavailable_body)
+        checker.check("peer exact retry repairs a failed wake without creating another message",
+                      recovered_code == 200 and recovered["duplicate"] is True
+                      and recovered["message"]["seq"] == unavailable["message"]["seq"]
+                      and recovered["status"] == "accepted"
+                      and recovered["message"]["acked_at"] is not None
+                      and len(wake_rows(recovered["message"])) == 1)
         call("POST", "/messages/" + root_message["message_id"] + "/ack", {"worker": c})
         call("POST", "/messages/" + root_reply["message_id"] + "/ack", {"worker": "Hermes"})
 
@@ -618,6 +688,9 @@ def peer_selftest(checker, work, trigger_url, trigger_token):
                       and retried.get("status") == "accepted"
                       and call("POST", "/messages", dict(first_body, text="changed after restart"))[0] == 409
                       and call("POST", "/messages", attached_body)[1].get("message") == attached_message)
+        _, restarted_root = call("POST", "/messages", root_reply_body)
+        checker.check("peer root delivery survives router restart without another wake",
+                      restarted_root.get("message") == root_peer and len(wake_rows(root_peer)) == 1)
         restarted = connect()
         checker.check("peer restart SSE replay: every unacked message once, accepted message excluded",
                       receive(restarted, len(before_restart)) == before_restart
@@ -2745,6 +2818,14 @@ def run(work: Path, checker: Checker) -> None:
                 status_n == 200 and fail_notice.get("ok") is False
                 and fail_notice.get("error") == "trigger_unavailable",
                 "status=%s body=%s" % (status_n, fail_notice))
+            status_peer, fail_peer = http("POST", dead_base + "/messages", {
+                "message_id": str(uuid.uuid4()), "from": "断链工", "to": "溪流",
+                "text": "peer trigger unavailable"}, dtok)
+            checker.check("trigger down: root peer stays queued with HTTP 200 and a warning",
+                          status_peer == 200 and fail_peer.get("ok") is True
+                          and fail_peer.get("status") == "queued"
+                          and fail_peer.get("message", {}).get("acked_at") is None
+                          and "peer wake failed" in (work / "dead.log").read_text())
             checker.check(
                 "trigger down: POST /approvals -> 200 pending, notified:false",
                 status_ap == 200 and fail_approval.get("ok") is True
@@ -2767,7 +2848,7 @@ def run(work: Path, checker: Checker) -> None:
 
         control_selftest(checker, token, workers)
         activity_selftest(checker, token, workers)
-        peer_selftest(checker, work, trigger_url, trigger_token)
+        peer_selftest(checker, work, trigger_url, trigger_token, trigger_db)
         workorders_selftest(checker, work, trigger_url, trigger_token)
         zero_backlog_selftest(checker, work, trigger_url, trigger_token)
         dispatch_race_selftest(checker, work)

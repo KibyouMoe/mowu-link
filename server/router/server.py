@@ -72,6 +72,7 @@ MAX_BODY_BYTES = 1 * 1024 * 1024
 PEER_MAX_TEXT = 20000
 PEER_PAGE_LIMIT = 100
 ROOT_PEER_NAME = "Hermes"
+ROOT_PEER_ALIASES = frozenset(("hermes", "溪流"))
 PEER_PAGE_BYTES = 256 * 1024
 PEER_STREAM_BUFFER = 32
 LOG_MAX_BYTES = 5 * 1024 * 1024
@@ -102,6 +103,10 @@ APPROVAL_MAX_TTL_S = 600.0
 APPROVAL_POLICY_FILE = os.environ.get(
     "ROUTER_APPROVAL_POLICY",
     os.path.expanduser("~/.hermes/router-approval-policy.json"))
+
+
+def peer_identity(name: str) -> str:
+    return ROOT_PEER_NAME if name.casefold() in ROOT_PEER_ALIASES else name
 
 
 def load_approval_policy() -> List[Dict[str, Any]]:
@@ -669,6 +674,15 @@ class RouterStore:
                 query = (" WHERE recipient=? AND acked_at IS NULL AND seq>?"
                          " ORDER BY seq LIMIT ?")
                 params = (worker, cursor, limit + 1)
+            if peer_identity(worker) == ROOT_PEER_NAME:
+                if history:
+                    query = (" WHERE (lower(sender) IN ('hermes', '溪流')"
+                             " OR lower(recipient) IN ('hermes', '溪流')) AND seq<?"
+                             " ORDER BY seq DESC LIMIT ?")
+                else:
+                    query = (" WHERE lower(recipient) IN ('hermes', '溪流')"
+                             " AND acked_at IS NULL AND seq>? ORDER BY seq LIMIT ?")
+                params = (cursor, limit + 1)
             rows = self._conn.execute(
                 "SELECT seq, message_id, sender, recipient, text, reply_to,"
                 " attachments_json, created_at, acked_at FROM peer_messages" + query,
@@ -2293,7 +2307,7 @@ class RouterHandler(BaseHTTPRequestHandler):
                 raise BadRequest("use either id or worker")
             return self._peer_message_get(qs["id"][0])
         worker = self._peer_worker(qs.get("worker", [None])[0], "worker")
-        if worker != ROOT_PEER_NAME and self.server.store.get_worker(worker) is None:
+        if peer_identity(worker) != ROOT_PEER_NAME and self.server.store.get_worker(worker) is None:
             return 404, {"ok": False, "error": "unknown_worker"}
         limit = self._int_param(qs, "limit", PEER_PAGE_LIMIT)
         if limit is None or not 1 <= limit <= PEER_PAGE_LIMIT:
@@ -2318,6 +2332,34 @@ class RouterHandler(BaseHTTPRequestHandler):
                      "next_after": messages[-1]["seq"] if more else None}
 
     def _peer_message_create(self, body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
+        status, receipt = self._peer_message_store(body)
+        message = receipt.get("message")
+        if not message or peer_identity(message["to"]) != ROOT_PEER_NAME:
+            return status, receipt
+        # Network I/O follows the committed insert, outside the dispatch lock.
+        # Exact retries repair a failed wake using the same durable event ID.
+        if message["acked_at"] is None:
+            payload = {
+                "source": "router.peer", "kind": "peer.message", "level": "notify",
+                "actor": message["from"], "event_id": "peer:%s" % message["seq"],
+                "text": "溪流，%s 给你发了消息（seq %s）：%s"
+                        % (message["from"], message["seq"], message["text"][:200]),
+                "payload": {key: message[key] for key in ("seq", "message_id", "from", "to")},
+            }
+            try:
+                ok, data = self.server.trigger_client.post_trigger(payload)
+            except Exception as exc:
+                ok, data = False, {"error": type(exc).__name__}
+            if ok:
+                message = self.server.store.ack_peer_message(message["message_id"])
+                log.info("peer delivered id=%s seq=%s event_id=%s trigger_id=%s",
+                         message["message_id"], message["seq"], payload["event_id"], data.get("id"))
+            else:
+                log.warning("peer wake failed id=%s seq=%s error=%.200s",
+                            message["message_id"], message["seq"], data.get("error"))
+        return 200, self._peer_receipt(message, duplicate=receipt["duplicate"])
+
+    def _peer_message_store(self, body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
         message_id = self._peer_uuid(body.get("message_id"))
         payload_json = json.dumps(body, sort_keys=True, ensure_ascii=True,
                                   separators=(",", ":"))
@@ -2336,7 +2378,7 @@ class RouterHandler(BaseHTTPRequestHandler):
             sender = self._peer_worker(body.get("from"), "from")
             recipient = self._peer_worker(body.get("to"), "to")
             for worker in (sender, recipient):
-                if worker != ROOT_PEER_NAME and self.server.store.get_worker(worker) is None:
+                if peer_identity(worker) != ROOT_PEER_NAME and self.server.store.get_worker(worker) is None:
                     return 404, {"ok": False, "error": "unknown_worker"}
             text = body.get("text")
             if not isinstance(text, str) or not text.strip() or len(text) > PEER_MAX_TEXT:
@@ -2351,7 +2393,8 @@ class RouterHandler(BaseHTTPRequestHandler):
                 parent = self.server.store.get_peer_message(reply_to)
                 if parent is None:
                     return 404, {"ok": False, "error": "unknown_reply_to"}
-                if {parent["from"], parent["to"]} != {sender, recipient}:
+                if {peer_identity(parent["from"]), peer_identity(parent["to"])} != {
+                        peer_identity(sender), peer_identity(recipient)}:
                     raise BadRequest("reply_to must belong to the same conversation pair")
             attachments = []
             if "attachments" in body:
@@ -2397,7 +2440,7 @@ class RouterHandler(BaseHTTPRequestHandler):
             message = self.server.store.get_peer_message(message_id)
             if message is None:
                 return 404, {"ok": False, "error": "unknown_message"}
-            if worker != message["to"]:
+            if peer_identity(worker) != peer_identity(message["to"]):
                 return 403, {"ok": False, "error": "wrong_recipient"}
             already = message["status"] == "accepted"
             message = self.server.store.ack_peer_message(message_id)

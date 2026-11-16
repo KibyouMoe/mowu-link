@@ -27,6 +27,18 @@
 `POST /messages/<UUID>/ack {"worker":"收件方精确名"}`。queued 是 router 已保存，accepted 是
 Worker 已接受，均不表示模型已回答；回复显式携带 reply_to。断线重放不换 ID，不自动互相回复。
 
+收件人为 `Hermes`（大小写不敏感）或 `溪流` 时，消息先持久化，再向 trigger 提交
+`source=router.peer`、`kind=peer.message`、`level=notify`，`event_id=peer:<seq>`。
+唤醒正文包含发送者、seq 和前 200 个字符。别名共享历史查询，消息保留原始 from/to。
+此路径返回 HTTP 200。trigger 接受后写入 `acked_at`，沿用 `status=accepted` 表示已交给
+溪流的 notify 通道。正常 Worker 的 202/queued 和自主 ACK 流程照原协议执行。
+trigger 不可用时返回 200/queued 并记 WARNING。使用相同 UUID、相同正文重试可补投唤醒，
+trigger 依据 `peer:<seq>` 去重。已写 delivery ACK 的重试直接读回原记录。
+
+自检运行 `ROUTER_TEST_PORT=<空闲端口> python3 server/router/selftest_router.py`。
+`peer Hermes wake`、`peer concurrent retries`、`peer exact retry repairs a failed wake` 与
+`peer root delivery survives router restart` 应为 PASS，最终 TOTAL 全通过。
+
 明确项目才 `POST /tasks`：原字段外支持 `message_id` UUID 幂等和 `execution_mode:"goal"`
 （默认且唯一模式）；任务 ID 与幂等信息在同一 SQLite 行原子保存，相同重试不再派单。
 同一项目的补充、纠正和验收应沿原工单；普通聊天走 /messages。
