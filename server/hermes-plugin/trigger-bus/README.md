@@ -1,4 +1,4 @@
-# trigger-bus (0.9.4)
+# trigger-bus (0.9.5)
 
 Deliver events from the local **mowu-trigger** service (127.0.0.1:8791) into a
 Hermes session — including when the trainer is not talking.
@@ -609,8 +609,7 @@ Worker 先以原始字节上传到 router 的鉴权 POST /attachments，再在 /
 attachments 中引用上传回执。事件只带附件 ID、文件名、MIME、大小和 SHA256，
 不带发送端本地路径。接收端从自己配置的 router 下载，校验长度和 SHA256 后，
 以 PHOTO + media_urls/media_types 进入 Hermes 原生消息；缓存文件属于接收端。
-文字上下文也列出接收端附件，供图片工具读取；下载失败不会退回发送端路径，
-不会推进本批事件游标，下一次轮询重试。
+文字上下文也列出接收端附件，供图片工具读取。下载失败进入文字错误回执。
 
 跨机器部署：Worker 使用原有 router.url / CODEXWORKER_ROUTER_URL；
 Hermes 设置 TRIGGER_BUS_ROUTER_URL，凭据由 ROUTER_TOKEN_PATH 指向本机 router token。
@@ -618,3 +617,13 @@ router 仍保持 loopback 监听，经已有认证隧道/入口访问，不为�
 普通消息格式与 notify/event 的语义保持不变，默认图片通知为 notify。
 目前支持 PNG/JPEG/GIF/WebP，每张最多 100MB，每条最多 10 张；原始字节不转码。
 部署需加载新版 router 与 trigger-bus 插件，不需要重启 Codex 共享后台或 DSH。
+
+## 0.9.5 飞书原生图片自动投递
+
+下载后的附件由网关后台发送器接管，先发送标题为「客户端原生图片输入」的文字卡片，再逐图调用实际飞书 adapter 的 `send_image_file`，caption 为空。成功回执同时要求 success=true、platform=feishu 和真实 message_id。图片失败时更新原文字卡片，追加「图片发送失败」与原因。
+
+`~/.hermes/state/trigger-bus/native-media.sqlite` 持久保存事件、媒体和回执。每个飞书聊天按 SHA256 去重600秒，重开后继续使用该记录。未知投递保留原记录。源图片最多10000000字节，读取接收缓存后再次核对大小和 SHA256。
+
+发送结果通过 router 普通 peer 通道返回原 Worker，消息ID由原事件ID稳定生成。回执包括文字与媒体各自的 message_id、附件 SHA256、字节数和去重标记。此发送器独立于模型回合运行，配置使用既有 TRIGGER_BUS_ROUTER_URL、ROUTER_TOKEN_PATH 和已捕获的飞书聊天。
+
+安装时同步 `__init__.py`、`attachments.py`、`media_relay.py`、`plugin.yaml`。由 `/ops/services/gateway/restart` 加载新版，时点由溪流协调。

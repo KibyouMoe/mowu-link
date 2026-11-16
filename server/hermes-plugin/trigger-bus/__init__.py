@@ -343,8 +343,9 @@ from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional
 
 from .attachments import receive as receive_attachments
+from .media_relay import NativeImageRelay
 
-PLUGIN_VERSION = "0.9.4"
+PLUGIN_VERSION = "0.9.5"
 MAX_QUEUE = 50
 # 0.9.3: info has its own backlog.  It is never a wake and never shares the
 # event/notify queue, so a burst of info can not push an event out of
@@ -606,6 +607,8 @@ class _BusState:
         self.turn_active = False
         self.turn_active_since = 0.0
         self.post_turn_marks: "OrderedDict[str, None]" = OrderedDict()
+        self.native_media_pending: Dict[str, Any] = {}
+        self.native_media_relay: Any = None
 
 
 # --------------------------------------------------------------------------- #
@@ -839,6 +842,7 @@ def _merge_events(state: _BusState, events: List[Dict[str, Any]]) -> int:
 def _poll_loop(state: _BusState) -> None:
     logger = _get_logger()
     interval = _env_float("TRIGGER_BUS_POLL_INTERVAL", 2.0)
+    home = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
     logger.info("poll thread started: subscriber=%s base=%s cursor=%d "
                 "interval=%.1fs", state.subscriber, state.base_url,
                 state.cursor, interval)
@@ -860,10 +864,17 @@ def _poll_loop(state: _BusState) -> None:
             if subscription is not None and subscription.get("expired"):
                 events = []          # never deliver what we no longer own
             home = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
-            events = [receive_attachments(e,
-                       base_url=os.environ.get("TRIGGER_BUS_ROUTER_URL", "http://127.0.0.1:8790"),
-                       token_path=os.environ.get("ROUTER_TOKEN_PATH", str(home / "secrets/router.token")),
-                       cache_dir=home / "attachments/router") for e in events]
+            received = []
+            for event in events:
+                try:
+                    received.append(receive_attachments(event,
+                        base_url=os.environ.get("TRIGGER_BUS_ROUTER_URL", "http://127.0.0.1:8790"),
+                        token_path=os.environ.get("ROUTER_TOKEN_PATH", str(home / "secrets/router.token")),
+                        cache_dir=home / "attachments/router"))
+                except Exception:
+                    received.append(dict(event, _attachment_error="图片下载或校验失败"))
+            events = received
+            _relay_native_images(state, events, home)
             added = _merge_events(state, events)
             if added:
                 logger.info("pulled %d event(s), queue=%d", added,
@@ -883,6 +894,7 @@ def _poll_loop(state: _BusState) -> None:
         # deferred by the minimum interval is retried the moment the window
         # opens, never waiting for the trainer to speak first.
         try:
+            _relay_native_images(state, [], home)
             _proactive_wake(state, logger, where="poll")
         except Exception:  # noqa: BLE001 - a wake bug must not stop polling
             logger.exception("proactive wake failed; events stay queued")
@@ -975,6 +987,8 @@ def _event_head(event: Dict[str, Any]) -> str:
 
 def _format_event(event: Dict[str, Any]) -> str:
     """One event as the two-line card every delivery seam shares."""
+    if event.get("kind") == "worker.input.image":
+        return "%s\n> 客户端原生图片输入（媒体由网关自动投递，按回执记录）" % _event_head(event)
     card = "%s\n> %s" % (_event_head(event), _clip_text(event.get("text")))
     files = event.get("_attachment_files") or []
     if files:
@@ -1666,6 +1680,69 @@ def _adapter_for(state: "_BusState", source: Any = None) -> Any:
         return next(iter(adapters.values()), None)
     except Exception:
         return None
+
+
+def _native_media_receipt(payload: Dict[str, Any], result: Dict[str, Any]) -> bool:
+    """Return the real platform receipt through durable peer messaging."""
+    import hashlib
+    import uuid
+    home = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
+    token_file = Path(os.environ.get("ROUTER_TOKEN_PATH", str(home / "secrets/router.token")))
+    message_id = str(uuid.UUID(hashlib.sha256((payload["event_id"] + ":native-media-receipt").encode()).hexdigest()[:32], version=4))
+    text = "原生图片转投回执\n" + json.dumps(result, ensure_ascii=False, sort_keys=True)
+    body = json.dumps({"message_id": message_id, "from": "Hermes", "to": payload["worker"], "text": text}, ensure_ascii=False).encode()
+    base = os.environ.get("TRIGGER_BUS_ROUTER_URL", "http://127.0.0.1:8790").rstrip("/")
+    request = urllib.request.Request(base + "/messages", data=body, method="POST", headers={
+        "X-Router-Token": token_file.read_text(encoding="utf-8").strip(), "Content-Type": "application/json"})
+    with _OPENER.open(request, timeout=5) as response:
+        return bool(json.load(response).get("ok"))
+
+
+def _native_media_deliver(state: "_BusState", kind: str, chat: str,
+                          value: str, message_id: Optional[str] = None) -> Dict[str, Any]:
+    from gateway.config import Platform
+    adapter = (getattr(state.gateway, "adapters", None) or {}).get(Platform.FEISHU)
+    if adapter is None or state.loop is None or not state.loop.is_running():
+        raise RuntimeError("Feishu gateway is unavailable")
+    if kind == "image":
+        operation = adapter.send_image_file(chat_id=chat, image_path=value, caption=None)
+    elif kind == "edit":
+        operation = adapter.edit_message(chat_id=chat, message_id=message_id, content=value)
+    else:
+        operation = adapter.send(chat_id=chat, content=value)
+    if asyncio.iscoroutine(operation):
+        result = asyncio.run_coroutine_threadsafe(operation, state.loop).result(timeout=45)
+    else:
+        result = operation
+    return {"success": getattr(result, "success", False), "platform": "feishu",
+            "message_id": getattr(result, "message_id", None)}
+
+
+def _relay_native_images(state: "_BusState", events: List[Dict[str, Any]], home: Path) -> None:
+    for event in events:
+        if event.get("_attachment_files") or event.get("_attachment_error") or event.get("kind") == "worker.input.image":
+            state.native_media_pending[_event_key(event)] = event
+    if not state.native_media_pending:
+        return
+    _resolve_gateway(state)
+    _resolve_source(state)
+    source = state.source
+    platform = getattr(getattr(source, "platform", None), "value", getattr(source, "platform", None))
+    chat = str(getattr(source, "chat_id", "") or "")
+    if platform != "feishu" or not chat or _adapter_for(state) is None or state.loop is None:
+        return
+    if state.native_media_relay is None:
+        state.native_media_relay = NativeImageRelay(home / "state/trigger-bus/native-media.sqlite",
+            home / "attachments/router", lambda *args: _native_media_deliver(state, *args),
+            _native_media_receipt, stop=state.stop)
+    for key, original in list(state.native_media_pending.items()):
+        event = original
+        if not event.get("_attachment_files") and not event.get("_attachment_error"):
+            reason = next((text for text in ["图片过大未转发", "图片上传失败未转发", "图片文件无法读取未转发", "图片格式不支持未转发"]
+                           if text in str(event.get("text", ""))), "源图片未能上传")
+            event = dict(event, _attachment_error=reason)
+        state.native_media_relay.submit(event, chat)
+        del state.native_media_pending[key]
 
 
 def _session_key_for(state: "_BusState") -> tuple:
