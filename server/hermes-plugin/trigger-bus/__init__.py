@@ -993,9 +993,10 @@ def _native_media_enabled() -> bool:
 def _format_event(event: Dict[str, Any]) -> str:
     """One event as the two-line card every delivery seam shares."""
     native_image = event.get("kind") == "worker.input.image"
-    if native_image:
+    if native_image and _native_media_enabled():
         return "%s\n> 客户端原生图片输入（媒体由网关自动投递，按回执记录）" % _event_head(event)
-    card = "%s\n> %s" % (_event_head(event), _clip_text(event.get("text")))
+    text = "客户端原生图片输入" if native_image else _clip_text(event.get("text"))
+    card = "%s\n> %s" % (_event_head(event), text)
     files = event.get("_attachment_files") or []
     if files:
         card += "\n聊天图片附件（已下载并校验，请用图片工具查看实际像素）："
@@ -1725,12 +1726,11 @@ def _native_media_deliver(state: "_BusState", kind: str, chat: str,
 
 
 def _relay_native_images(state: "_BusState", events: List[Dict[str, Any]], home: Path) -> None:
-    # Mirror trainer input independently of the switch for worker-origin images.
+    # Native worker images stay local unless the gateway explicitly enables relay.
+    if not _native_media_enabled():
+        return
     for event in events:
-        native_input = event.get("kind") == "worker.input.image"
-        if not native_input and not _native_media_enabled():
-            continue
-        if event.get("_attachment_files") or event.get("_attachment_error") or native_input:
+        if event.get("_attachment_files") or event.get("_attachment_error") or event.get("kind") == "worker.input.image":
             state.native_media_pending[_event_key(event)] = event
     if not state.native_media_pending:
         return
