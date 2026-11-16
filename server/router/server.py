@@ -73,6 +73,8 @@ PEER_MAX_TEXT = 20000
 PEER_PAGE_LIMIT = 100
 ROOT_PEER_NAME = "Hermes"
 ROOT_PEER_ALIASES = frozenset(("hermes", "溪流"))
+WORKER_NAMES_FILE = os.path.expanduser(os.environ.get(
+    "ROUTER_WORKER_NAMES_FILE", "~/.hermes/router-worker-names.json"))
 PEER_PAGE_BYTES = 256 * 1024
 PEER_STREAM_BUFFER = 32
 LOG_MAX_BYTES = 5 * 1024 * 1024
@@ -105,8 +107,31 @@ APPROVAL_POLICY_FILE = os.environ.get(
     os.path.expanduser("~/.hermes/router-approval-policy.json"))
 
 
+def load_worker_names() -> Dict[str, str]:
+    try:
+        with open(WORKER_NAMES_FILE, encoding="utf-8-sig") as stream:
+            names = json.load(stream)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(names, dict):
+        return {}
+    return {key: value.strip() for key, value in names.items()
+            if isinstance(key, str) and key and isinstance(value, str)
+            and value.strip()}
+
+
+def worker_display_name(name: str) -> str:
+    return load_worker_names().get(name, name)
+
+
 def peer_identity(name: str) -> str:
-    return ROOT_PEER_NAME if name.casefold() in ROOT_PEER_ALIASES else name
+    if name.casefold() in ROOT_PEER_ALIASES:
+        return ROOT_PEER_NAME
+    names = load_worker_names()
+    if name in names:
+        return name
+    matches = [worker for worker, display in names.items() if display == name]
+    return matches[0] if len(matches) == 1 else name
 
 
 def load_approval_policy() -> List[Dict[str, Any]]:
@@ -1468,13 +1493,14 @@ class TriggerNotifier:
         one_line = " ".join(str(summary or "").split())
         if len(one_line) > 300:
             one_line = one_line[:297] + "..."
-        text = "%s %s：%s" % (task["task_id"], label, one_line or "(无摘要)")
+        display = worker_display_name(task["worker"])
+        text = "%s %s %s：%s" % (display, label, task["task_id"], one_line or "(无摘要)")
         payload = {
             "source": "router",
             "kind": "task.result",
             "level": "notify",
             "text": text,
-            "actor": task["worker"],
+            "actor": display,
             "event_id": "%s:%s" % (task["task_id"], status),
             "payload": {
                 "task_id": task["task_id"],
@@ -2221,8 +2247,10 @@ class RouterHandler(BaseHTTPRequestHandler):
         with self.server.conn_lock:
             live = set(self.server.conns)
         workers = self.server.store.list_workers()
+        names = load_worker_names()
         for worker in workers:
             worker["online"] = worker["name"] in live
+            worker["display_name"] = names.get(worker["name"], worker["name"])
         return {"ok": True, "count": len(workers), "workers": workers}
 
     def _tasks_list(self, qs: Dict[str, List[str]]) -> Dict[str, Any]:
@@ -2308,7 +2336,7 @@ class RouterHandler(BaseHTTPRequestHandler):
             if "worker" in qs or len(qs["id"]) != 1:
                 raise BadRequest("use either id or worker")
             return self._peer_message_get(qs["id"][0])
-        worker = self._peer_worker(qs.get("worker", [None])[0], "worker")
+        worker = peer_identity(self._peer_worker(qs.get("worker", [None])[0], "worker"))
         if peer_identity(worker) != ROOT_PEER_NAME and self.server.store.get_worker(worker) is None:
             return 404, {"ok": False, "error": "unknown_worker"}
         limit = self._int_param(qs, "limit", PEER_PAGE_LIMIT)
@@ -2336,16 +2364,18 @@ class RouterHandler(BaseHTTPRequestHandler):
     def _peer_message_create(self, body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
         status, receipt = self._peer_message_store(body)
         message = receipt.get("message")
-        if not message or peer_identity(message["to"]) != ROOT_PEER_NAME:
+        if not message:
             return status, receipt
         # Network I/O follows the committed insert, outside the dispatch lock.
         # Exact retries repair a failed wake using the same durable event ID.
-        if message["acked_at"] is None:
+        root_recipient = peer_identity(message["to"]) == ROOT_PEER_NAME
+        if root_recipient and message["acked_at"] is None:
+            display = worker_display_name(message["from"])
             payload = {
-                "source": "router.peer", "kind": "peer.message", "level": "notify",
-                "actor": message["from"], "event_id": "peer:%s" % message["seq"],
+                "source": "私聊", "kind": "peer.message", "level": "notify",
+                "actor": display, "event_id": "peer:%s" % message["seq"],
                 "text": "溪流，%s 给你发了消息（seq %s）：%s"
-                        % (message["from"], message["seq"], message["text"][:200]),
+                        % (display, message["seq"], message["text"][:200]),
                 "payload": {key: message[key] for key in ("seq", "message_id", "from", "to")},
             }
             try:
@@ -2360,9 +2390,18 @@ class RouterHandler(BaseHTTPRequestHandler):
                 log.warning("peer wake failed id=%s seq=%s error=%.200s",
                             message["message_id"], message["seq"], data.get("error"))
         # Existing Worker senders accept queued/accepted transport receipts.
-        # The stored message and GET response expose the delivered state.
-        return 200, self._peer_receipt(message, duplicate=receipt["duplicate"],
-                                      status="accepted" if message["acked_at"] is not None else "queued")
+        # Echo request spellings for alias-aware senders; GET and SSE use IDs.
+        response_message = dict(message)
+        for key, field in (("from", "sender_id"), ("to", "recipient_id")):
+            if body[key] != message[key]:
+                response_message[field] = message[key]
+                response_message[key] = body[key]
+        transport_status = message["status"]
+        if root_recipient:
+            status = 200
+            transport_status = "accepted" if message["acked_at"] is not None else "queued"
+        return status, self._peer_receipt(response_message, duplicate=receipt["duplicate"],
+                                          status=transport_status)
 
     def _peer_message_store(self, body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
         message_id = self._peer_uuid(body.get("message_id"))
@@ -2380,8 +2419,8 @@ class RouterHandler(BaseHTTPRequestHandler):
                 return 200, self._peer_receipt(message, duplicate=True)
             if set(body) - {"message_id", "from", "to", "text", "reply_to", "attachments"}:
                 raise BadRequest("unsupported message fields")
-            sender = self._peer_worker(body.get("from"), "from")
-            recipient = self._peer_worker(body.get("to"), "to")
+            sender = peer_identity(self._peer_worker(body.get("from"), "from"))
+            recipient = peer_identity(self._peer_worker(body.get("to"), "to"))
             for worker in (sender, recipient):
                 if peer_identity(worker) != ROOT_PEER_NAME and self.server.store.get_worker(worker) is None:
                     return 404, {"ok": False, "error": "unknown_worker"}
@@ -2988,7 +3027,7 @@ class RouterHandler(BaseHTTPRequestHandler):
             "kind": kind,
             "level": level,
             "text": text,
-            "actor": worker,
+            "actor": worker_display_name(worker),
             "event_id": event_id,
             "payload": {"worker": worker, "urgency": urgency,
                         "notice": True},
@@ -3022,7 +3061,7 @@ class RouterHandler(BaseHTTPRequestHandler):
         if len(one_line) > 400:
             one_line = one_line[:397] + "..."
         text = "审批请求 [%s] %s：%s" % (
-            approval["kind"], approval["worker"], approval["title"])
+            approval["kind"], worker_display_name(approval["worker"]), approval["title"])
         if one_line:
             text += "\n" + one_line
         text += "\napproval_id: %s" % approval["approval_id"]
@@ -3031,7 +3070,7 @@ class RouterHandler(BaseHTTPRequestHandler):
             "kind": "approval.request",
             "level": "event",
             "text": text,
-            "actor": approval["worker"],
+            "actor": worker_display_name(approval["worker"]),
             "event_id": "approval:" + approval["approval_id"],
             "payload": {
                 "approval_id": approval["approval_id"],

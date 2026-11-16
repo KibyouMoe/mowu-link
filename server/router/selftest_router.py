@@ -476,12 +476,12 @@ def peer_selftest(checker, work, trigger_url, trigger_token, trigger_db):
                       and root_inbox.get("messages") == []
                       and not any(row["name"] == "Hermes" for row in call("GET", "/workers")[1]["workers"]))
         root_peer = root_reply["message"]
-        checker.check("peer Hermes wake: one router.peer notify and a durable delivery ACK",
+        checker.check("peer secretary wake: one 私聊 notify and a durable delivery ACK",
                       root_reply["status"] == "accepted" and root_peer["acked_at"] is not None
                       and root_peer["status"] == "delivered"
                       and call("GET", "/messages/" + root_peer["message_id"])[1]["status"] == "delivered"
                       and wake_rows(root_peer) == [{
-                          "source": "router.peer", "kind": "peer.message", "level": "notify", "actor": c,
+                          "source": "私聊", "kind": "peer.message", "level": "notify", "actor": c,
                           "text": "溪流，%s 给你发了消息（seq %s）：普通回复" % (c, root_peer["seq"]),
                           "event_id": "peer:%s" % root_peer["seq"]}])
         retry_code, root_retry = call("POST", "/messages", root_reply_body)
@@ -718,6 +718,115 @@ def peer_selftest(checker, work, trigger_url, trigger_token, trigger_db):
     finally:
         for client in clients:
             client.stop()
+        if proc.poll() is None:
+            proc.terminate()
+            proc.wait(timeout=5)
+        output.close()
+
+
+def worker_names_selftest(checker, work, trigger_url, trigger_token, trigger_db):
+    """Real HTTP checks with an isolated, live-read display-name configuration."""
+    port = free_port()
+    base = "http://127.0.0.1:%d" % port
+    names_file = work / "worker-names.json"
+    token_file = work / "names.token"
+    env = {**os.environ, "ROUTER_WORKER_NAMES_FILE": str(names_file)}
+    proc, output = start_process([
+        PY, str(ROUTER), "--port", str(port), "--db", str(work / "names.db"),
+        "--token-file", str(token_file), "--lock", str(work / "names.lock"),
+        "--log", str(work / "names.log"), "--trigger-url", trigger_url + "/trigger",
+        "--trigger-token-file", str(trigger_token)], work / "names.out", env=env)
+    worker = None
+    try:
+        if not wait_http(base + "/health"):
+            raise RuntimeError("worker-name router did not start")
+        token = token_file.read_text().strip()
+
+        def call(method, route, body=None):
+            return http(method, base + route, body, token)
+
+        def workers():
+            return {row["name"]: row for row in call("GET", "/workers")[1]["workers"]}
+
+        def event(event_id):
+            with sqlite3.connect(str(trigger_db)) as saved:
+                saved.row_factory = sqlite3.Row
+                return dict(saved.execute("SELECT * FROM events WHERE event_id=?", (event_id,)).fetchone())
+
+        names = {"OguriCap": "小栗帽", "TamamoCross": "玉藻十字",
+                 "qicao-codexworker": "气槽", "Rudolf": "鲁道夫象征", "Hermes": "溪流"}
+        for name in names:
+            if name != "Hermes":
+                call("POST", "/register", {"name": name})
+        checker.check("worker names: missing configuration falls back to unchanged English IDs",
+                      all(row["display_name"] == name for name, row in workers().items()))
+        names_file.write_text(json.dumps(names, ensure_ascii=False), encoding="utf-8")
+        checker.check("worker names: workers expose configured Chinese display_name and stable name",
+                      all(workers()[name]["display_name"] == display
+                          for name, display in names.items() if name != "Hermes"))
+
+        body = {"message_id": str(uuid.uuid4()), "from": "小栗帽", "to": "玉藻十字", "text": "中文互聊"}
+        code, sent = call("POST", "/messages", body)
+        stored = call("GET", "/messages/" + body["message_id"])[1]["message"]
+        with sqlite3.connect(str(work / "names.db")) as saved:
+            identities = saved.execute("SELECT sender, recipient FROM peer_messages WHERE message_id=?",
+                                       (body["message_id"],)).fetchone()
+        checker.check("worker names: Chinese peers persist English IDs and echo sender receipt spellings",
+                      code == 202 and sent["message"]["from"] == "小栗帽"
+                      and sent["message"]["to"] == "玉藻十字"
+                      and sent["message"]["sender_id"] == "OguriCap"
+                      and sent["message"]["recipient_id"] == "TamamoCross"
+                      and identities == ("OguriCap", "TamamoCross")
+                      and stored["from"] == "OguriCap" and stored["to"] == "TamamoCross")
+        chinese_inbox = call("GET", "/messages?worker=" + quote("玉藻十字"))[1]
+        english_inbox = call("GET", "/messages?worker=TamamoCross")[1]
+        _, duplicate = call("POST", "/messages", body)
+        checker.check("worker names: Chinese and English inboxes, ACK and retries address the same record",
+                      chinese_inbox == english_inbox and duplicate["duplicate"] is True
+                      and call("POST", "/messages/" + body["message_id"] + "/ack", {"worker": "玉藻十字"})[0] == 200)
+
+        _, peer = call("POST", "/messages", {"message_id": str(uuid.uuid4()), "from": "OguriCap",
+                                               "to": "溪流", "text": "显示名真实协议"})
+        wake = event("peer:%s" % peer["message"]["seq"])
+        checker.check("worker names: secretary notify reads 来自 私聊 · 小栗帽 with stable peer.message kind",
+                      wake["source"] == "私聊" and wake["actor"] == "小栗帽"
+                      and wake["kind"] == "peer.message" and wake["level"] == "notify"
+                      and wake["text"].startswith("溪流，小栗帽 给你发了消息")
+                      and json.loads(wake["payload_json"])["from"] == "OguriCap"
+                      and peer["message"]["status"] == "delivered")
+
+        worker = FakeWorker("OguriCap", token, port=port)
+        worker.start()
+        if not worker.connected.wait(5):
+            raise RuntimeError("worker-name task fixture did not connect")
+        _, task = call("POST", "/tasks", {"worker": "OguriCap", "goal": "显示名结果"})
+        if worker.wait_task(5) is None:
+            raise RuntimeError("worker-name task fixture did not receive task")
+        call("POST", "/result", {"name": "OguriCap", "task_id": task["task_id"],
+                                   "status": "done", "summary": "完成测试"})
+        result_event = event(task["task_id"] + ":done")
+        checker.check("worker names: task result uses Chinese actor/text and English routing metadata",
+                      result_event["actor"] == "小栗帽"
+                      and result_event["text"].startswith("小栗帽 完成 " + task["task_id"])
+                      and json.loads(result_event["payload_json"])["worker"] == "OguriCap")
+        _, approval = call("POST", "/approvals", {"worker": "OguriCap", "kind": "command", "title": "测试审批"})
+        approval_event = event("approval:" + approval["approval_id"])
+        checker.check("worker names: approval uses Chinese actor/title and English worker ID",
+                      approval_event["actor"] == "小栗帽" and "小栗帽：测试审批" in approval_event["text"]
+                      and json.loads(approval_event["payload_json"])["worker"] == "OguriCap")
+        _, notice = call("POST", "/notice", {"worker": "OguriCap", "text": "显示名通知"})
+        checker.check("worker names: ordinary notice uses the configured display actor",
+                      event(notice["event_id"])["actor"] == "小栗帽")
+
+        names_file.write_text(json.dumps({"OguriCap": "小栗帽"}), encoding="utf-8")
+        checker.check("worker names: missing key falls back to its unchanged English ID",
+                      workers()["TamamoCross"]["display_name"] == "TamamoCross")
+        names_file.write_text("{broken", encoding="utf-8")
+        checker.check("worker names: invalid configuration remains available with English fallbacks",
+                      all(row["display_name"] == name for name, row in workers().items()))
+    finally:
+        if worker is not None:
+            worker.stop()
         if proc.poll() is None:
             proc.terminate()
             proc.wait(timeout=5)
@@ -1799,9 +1908,9 @@ def question_proxy_selftest(checker, work):
         store.close()
 
 
-def start_process(argv, log_path: Path):
+def start_process(argv, log_path: Path, env=None):
     handle = open(str(log_path), "wb")
-    proc = subprocess.Popen(argv, stdout=handle, stderr=subprocess.STDOUT)
+    proc = subprocess.Popen(argv, stdout=handle, stderr=subprocess.STDOUT, env=env)
     return proc, handle
 
 
@@ -2851,6 +2960,7 @@ def run(work: Path, checker: Checker) -> None:
         control_selftest(checker, token, workers)
         activity_selftest(checker, token, workers)
         peer_selftest(checker, work, trigger_url, trigger_token, trigger_db)
+        worker_names_selftest(checker, work, trigger_url, trigger_token, trigger_db)
         workorders_selftest(checker, work, trigger_url, trigger_token)
         zero_backlog_selftest(checker, work, trigger_url, trigger_token)
         dispatch_race_selftest(checker, work)
@@ -2912,6 +3022,7 @@ def main() -> int:
         probe.close()
 
     work = Path(tempfile.mkdtemp(prefix="router-selftest-"))
+    os.environ.setdefault("ROUTER_WORKER_NAMES_FILE", str(work / "missing-worker-names.json"))
     print("workdir: %s" % work, flush=True)
     checker = Checker()
     try:

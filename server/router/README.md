@@ -28,8 +28,8 @@
 Worker 已接受，均不表示模型已回答；回复显式携带 reply_to。断线重放不换 ID，不自动互相回复。
 
 收件人为 `Hermes`（大小写不敏感）或 `溪流` 时，消息先持久化，再向 trigger 提交
-`source=router.peer`、`kind=peer.message`、`level=notify`，`event_id=peer:<seq>`。
-唤醒正文包含发送者、seq 和前 200 个字符。别名共享历史查询，消息保留原始 from/to。
+`source=私聊`、`kind=peer.message`、`level=notify`，`event_id=peer:<seq>`。
+唤醒正文包含发送者显示名、seq 和前 200 个字符。别名共享历史查询。
 此路径返回 HTTP 200。trigger 接受后写入 `acked_at`，消息及 GET 查询的 `status=delivered`
 表示已交给溪流的 notify 通道。POST 的顶层发送回执沿用 `status=accepted`，嵌套 message
 显示 delivered，以兼容现有 Worker。普通 Worker 的 202/queued 和自主 ACK 流程照原协议执行。
@@ -37,8 +37,24 @@ trigger 不可用时返回 200/queued 并记 WARNING。使用相同 UUID、相�
 trigger 依据 `peer:<seq>` 去重。已写 delivery ACK 的重试直接读回原记录。
 
 自检运行 `ROUTER_TEST_PORT=<空闲端口> python3 server/router/selftest_router.py`。
-`peer Hermes wake`、`peer concurrent retries`、`peer exact retry repairs a failed wake` 与
+`peer secretary wake`、`peer concurrent retries`、`peer exact retry repairs a failed wake` 与
 `peer root delivery survives router restart` 应为 PASS，最终 TOTAL 全通过。
+
+### Worker 显示名
+
+在服务机器的 `~/.hermes/router-worker-names.json` 配置名称，Router 每次读取使用当前文件。
+测试环境可通过 `ROUTER_WORKER_NAMES_FILE` 指定隔离配置。文件缺失、无效或没有对应键时，
+显示名回退到原 ID。
+
+```json
+{"OguriCap":"小栗帽","TamamoCross":"玉藻十字","qicao-codexworker":"气槽","Rudolf":"鲁道夫象征","Hermes":"溪流"}
+```
+
+`GET /workers` 的 `name` 保留英文 ID，新增 `display_name`。peer、任务结果、审批与通知的
+可见 actor/正文使用显示名，结构化路由 payload 保留英文 ID。
+peer 的 `from`、`to`、inbox 与 ACK 接受配置中的唯一中文名。内部存储与 GET/SSE 统一为英文 ID。
+POST 发送回执回显请求中的 from/to，别名发生转换时附 sender_id/recipient_id，兼容现有发送方校验。
+同一 UUID 重试仍须使用原请求正文。重名显示名无法唯一解析时，调用方使用英文 ID。
 
 明确项目才 `POST /tasks`：原字段外支持 `message_id` UUID 幂等和 `execution_mode:"goal"`
 （默认且唯一模式）；任务 ID 与幂等信息在同一 SQLite 行原子保存，相同重试不再派单。
