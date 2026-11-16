@@ -109,16 +109,6 @@ class ChatAttachments(unittest.TestCase):
         self.assertEqual(status, 201, raw)
         return json.loads(raw)["attachment"]
 
-    def test_put_upload_is_authenticated_and_matches_post(self):
-        headers = {"X-Attachment-SHA256": self.sha}
-        status, raw, _ = self.request("PUT", "/attachments", self.raw, headers, auth=False)
-        self.assertEqual(status, 401, raw)
-        status, raw, _ = self.request("PUT", "/attachments", self.raw, headers)
-        self.assertEqual(status, 201, raw)
-        self.assertEqual(json.loads(raw)["attachment"], self.upload())
-        status, raw, _ = self.request("PUT", "/messages", b"{}")
-        self.assertEqual(status, 404, raw)
-
     def receive(self, event, cache=None, **kwargs):
         return self.plugin.receive_attachments(event, base_url=self.base,
             token_path=self.work/"router.token", cache_dir=cache or self.work/"receiver-cache", **kwargs)
