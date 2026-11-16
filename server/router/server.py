@@ -2089,6 +2089,11 @@ class RouterHandler(BaseHTTPRequestHandler):
             self._send_json(500, {"ok": False, "error": "%s: %s"
                                   % (type(exc).__name__, exc)})
 
+    def do_PUT(self):
+        if self._path_parts(urlparse(self.path).path) != ["attachments"]:
+            return self._send_json(404, {"ok": False, "error": "not found"})
+        return self.do_POST()
+
     def do_POST(self):
         parsed = urlparse(self.path)
         parts = self._path_parts(parsed.path)
