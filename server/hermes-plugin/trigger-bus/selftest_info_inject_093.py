@@ -52,7 +52,7 @@ SPEC.loader.exec_module(plugin)
 
 plugin.LOG_PATH = TMP / "selftest.log"
 plugin._ack_async = lambda *a, **k: None                  # no HTTP in tests
-assert plugin.PLUGIN_VERSION == "0.9.5", plugin.PLUGIN_VERSION
+assert plugin.PLUGIN_VERSION == "0.9.4", plugin.PLUGIN_VERSION
 assert plugin.MAX_INFO_PER_INJECT == 10, plugin.MAX_INFO_PER_INJECT
 
 from gateway.config import Platform                      # noqa: E402
