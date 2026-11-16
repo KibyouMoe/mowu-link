@@ -138,7 +138,7 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.hermes.router.plist
 | GET | `/stream?name=&version=` | SSE 长连接 | 见第四节 |
 | POST | `/heartbeat` | `{name, state?, progress_at?, task_id?}` | `{ok, name, online, busy, queued, last_seen}` |
 | POST | `/result` | `{name, task_id, status, summary, artifacts?, evidence?}` | `{ok, task_id, state, notified, dispatched_next}` |
-| POST | `/notice` | `{worker, text, kind?, urgency?}` | `{ok, trigger_id, level}` 或 `{ok:false, error}` |
+| POST | `/notice` | `{worker, text, kind?, urgency?, task_id?, status?}` | `{ok, trigger_id, level, duplicate}` 或 `{ok:false, error}` |
 | GET | `/subscriptions/pending?worker=&limit=` | — | `{ok, worker, count, events[], acked}` |
 
 - `status` 只接受 `done` / `failed`。
@@ -170,6 +170,35 @@ event_id = "notice:" + sha256(worker + "\n" + text + "\n" + 当前分钟)[:24]
 成功：`200 {ok:true, trigger_id:<int>, level:"event"|"notify", event_id, duplicate}`
 失败（trigger 挂了/没 token）：`200 {ok:false, error:"trigger_unavailable", detail}`，
 **不抛 5xx 给 worker**，消息由 worker 自行决定是否重试。
+
+#### 任务终态通知
+
+worker 交活时携带 `kind="task.result"`、`task_id` 和 `status`。
+
+```json
+{"worker":"OguriCap","kind":"task.result","task_id":"t-example","status":"done","text":"已完成并验证"}
+```
+
+| 归一化终态 | trigger source |
+|---|---|
+| `done` | `任务完成` |
+| `failed` | `任务失败` |
+| `cancelled` | `任务取消` |
+
+状态去除首尾空白并转小写，`canceled` 归一为 `cancelled`。
+省略 `status` 时读取该工单的已存终态，尚在运行的工单应显式传入本次终态。
+显式非终态、缺少 `task_id` 或无法取得终态的旧请求继续按普通通知处理。
+
+`POST /notice` 与内部 `notify_result()` 共用 SQLite `task_notice_dedup`，
+键为 `(task_id, 归一化终态)`，trigger `event_id` 固定为 `<task_id>:<终态>`。
+首个被 trigger 接受的通知保留原文及级别，后续重复返回原 `trigger_id` 与
+`duplicate:true`，记录 `notice dedup task=… state=…`。
+同一工单的不同终态分别投递。任务终态键与文本内容无关。
+
+回执仅在 trigger 接受后写入，trigger 不可用时返回 `ok:false` 并允许重试。
+稳定 `event_id` 也让 trigger 已接受、响应丢失的重试命中原事件。
+Router 重启保留去重记录，每次读写清理满 24 小时的记录，并在写入后只保留
+最近 500 条。普通通知沿用上述分钟去重，私聊沿用 `source="私聊"`。
 
 ### Hermes 侧
 
@@ -381,7 +410,7 @@ data: {"type":"task","task_id":"t-1a2b3c4d5e","worker":"波旁","goal":"...",
 Worker → Router : POST /result {name, task_id, status, summary, artifacts, evidence}
 Router → trigger: POST /trigger
   {
-    "source": "router",
+    "source": "任务完成",
     "kind": "task.result",
     "level": "notify",
     "text": "t-88 完成：…",
@@ -392,8 +421,8 @@ Router → trigger: POST /trigger
   Header: X-Trigger-Token: <~/.hermes/secrets/trigger.token>
 ```
 
-Router 不直接跟 Hermes 说话，只写一条 notify。`event_id = <task_id>:<status>`，
-trigger 侧按 `event_id` 去重，重试安全。
+Router 写入 trigger notify，按终态选择上表的来源名。
+内部结果与 worker 的任务终态通知共用去重记录和 `event_id`，先到者保留。
 
 ---
 
@@ -502,7 +531,7 @@ ROUTER_TEST_PORT=18790 python3 server/router/selftest_router.py
 1. token 生成（64 hex，0600）、`/health` 形状、无 token → 401、单实例 flock
 2. register → SSE 上线 → 心跳注释行 → 空闲立即派活（200 dispatched）
 3. `last_progress_at` 来自 heartbeat 的 `progress_at`
-4. 交活 → `done` → trigger 库出现 `source=router kind=task.result level=notify`
+4. 交活 → `done` → trigger 库出现 `source=任务完成 kind=task.result level=notify`
 5. 断线 → offline（名字保留）→ 409 → `queue_if_offline` 202 →
    重连按顺序补推两条积压 → 交活
 6. 忙时第二条排队（不提前推）→ 第一条交活后第二条自动下发
@@ -512,6 +541,8 @@ ROUTER_TEST_PORT=18790 python3 server/router/selftest_router.py
    第二次 pending 为空（ACK 生效）→ kinds 过滤 → DELETE 后 trigger closed
 10. `POST /notice`：normal → `level=notify`；urgent → `level=event`；
     同分钟重复 → 同一个 `event_id`、`duplicate:true`、trigger 只有一行
+    任务终态覆盖两入口的两种顺序、并发、异文重复、不同工单及不同终态、
+    trigger 失败后重试、重建实例后的持久化去重、500 条及 24 小时边界
 11. 删除后重声明 → 新 trigger 名（`router:<worker>:<id>`）→ 新队列可投递
 12. SSE 断开 → 本地订阅清空 + trigger 订阅 closed；重连不自动重建
 13. trigger 挂掉：`POST /subscriptions` → 502 且表回滚；

@@ -82,6 +82,13 @@ LOG_BACKUP_COUNT = 3
 
 TASK_STATES = ("queued", "running", "cancelling", "done", "failed", "cancelled")
 TERMINAL_STATES = ("done", "failed", "cancelled")
+TASK_NOTICE_NAMES = {
+    "done": ("任务完成", "完成"),
+    "failed": ("任务失败", "失败"),
+    "cancelled": ("任务取消", "取消"),
+}
+TASK_NOTICE_MAX = 500
+TASK_NOTICE_TTL_S = 24 * 60 * 60
 UNSET = object()
 URGENCIES = ("urgent", "normal")
 CHAT_DIRECTIONS = ("in", "out")
@@ -233,6 +240,13 @@ def now_iso(ts: Optional[float] = None) -> str:
         timespec="seconds")
 
 
+def terminal_notice_state(value: Any) -> str:
+    state = str(value or "").strip().lower()
+    if state == "canceled":
+        state = "cancelled"
+    return state if state in TASK_NOTICE_NAMES else ""
+
+
 def parse_model_command(text: str, thread_id: str) -> Dict[str, Any]:
     """Parse model commands once, before dispatching to an engine adapter."""
     if not isinstance(text, str) or len(text) > 512 or not isinstance(thread_id, str) or not thread_id:
@@ -351,6 +365,14 @@ CREATE TABLE IF NOT EXISTS tasks (
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_worker_state ON tasks(worker, state);
 CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks(created_at);
+
+CREATE TABLE IF NOT EXISTS task_notice_dedup (
+    task_id       TEXT NOT NULL,
+    state         TEXT NOT NULL,
+    delivered_at  REAL NOT NULL,
+    receipt_json  TEXT NOT NULL,
+    PRIMARY KEY (task_id, state)
+);
 
 CREATE TABLE IF NOT EXISTS subscriptions (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1413,6 +1435,38 @@ class RouterStore:
             except Exception:
                 pass
 
+    def task_notice_receipt(self, task_id: str, state: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM task_notice_dedup WHERE delivered_at<=?",
+                (time.time() - TASK_NOTICE_TTL_S,))
+            row = self._conn.execute(
+                "SELECT receipt_json FROM task_notice_dedup WHERE task_id=? AND state=?",
+                (task_id, state)).fetchone()
+        return json.loads(row["receipt_json"]) if row else None
+
+    def remember_task_notice(self, task_id: str, state: str,
+                             receipt: Dict[str, Any]) -> None:
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                self._conn.execute(
+                    "DELETE FROM task_notice_dedup WHERE delivered_at<=?",
+                    (time.time() - TASK_NOTICE_TTL_S,))
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO task_notice_dedup"
+                    " (task_id,state,delivered_at,receipt_json) VALUES (?,?,?,?)",
+                    (task_id, state, time.time(), json.dumps(receipt, ensure_ascii=False)))
+                self._conn.execute(
+                    "DELETE FROM task_notice_dedup WHERE rowid IN"
+                    " (SELECT rowid FROM task_notice_dedup"
+                    " ORDER BY delivered_at DESC, rowid DESC LIMIT -1 OFFSET ?)",
+                    (TASK_NOTICE_MAX,))
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
+
 
 # --------------------------------------------------------------------------- #
 # trigger side
@@ -1484,19 +1538,40 @@ class TriggerClient:
 class TriggerNotifier:
     """Delivers ``task.result`` notifications for finished tasks."""
 
-    def __init__(self, client: TriggerClient):
+    def __init__(self, client: TriggerClient, store: RouterStore):
         self.client = client
+        self.store = store
+        self._notice_lock = threading.Lock()
+
+    def post_task_notice(self, task_id: str, state: str,
+                         payload: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
+        # Serialize both entry points through trigger acceptance and durable ACK.
+        # A stable event ID also covers an accepted request whose response was lost.
+        with self._notice_lock:
+            previous = self.store.task_notice_receipt(task_id, state)
+            if previous is not None:
+                log.info("notice dedup task=%s state=%s", task_id, state)
+                return True, {**previous, "duplicate": True}
+            ok, data = self.client.post_trigger(payload)
+            if ok:
+                data = {**data, "level": data.get("level", payload["level"]),
+                        "event_id": payload["event_id"]}
+                self.store.remember_task_notice(task_id, state, data)
+            return ok, data
 
     def notify_result(self, task: Dict[str, Any], status: str,
                       summary: str) -> bool:
-        label = "完成" if status == "done" else "失败"
+        status = terminal_notice_state(status)
+        if not status:
+            return False
+        source, label = TASK_NOTICE_NAMES[status]
         one_line = " ".join(str(summary or "").split())
         if len(one_line) > 300:
             one_line = one_line[:297] + "..."
         display = worker_display_name(task["worker"])
         text = "%s %s %s：%s" % (display, label, task["task_id"], one_line or "(无摘要)")
         payload = {
-            "source": "router",
+            "source": source,
             "kind": "task.result",
             "level": "notify",
             "text": text,
@@ -1508,7 +1583,7 @@ class TriggerNotifier:
                 "status": status,
             },
         }
-        ok, data = self.client.post_trigger(payload)
+        ok, data = self.post_task_notice(task["task_id"], status, payload)
         if ok:
             log.info("trigger notify task=%s status=%s -> id=%s",
                      task["task_id"], status, data.get("id"))
@@ -2997,6 +3072,15 @@ class RouterHandler(BaseHTTPRequestHandler):
         kind = str(body.get("kind") or "worker.notice").strip() or "worker.notice"
         if len(kind) > 128:
             raise BadRequest("kind too long")
+        task_id = str(body.get("task_id") or "").strip()
+        if len(task_id) > 128:
+            raise BadRequest("task_id too long")
+        state = ""
+        if kind == "task.result":
+            state = terminal_notice_state(body.get("status"))
+            if "status" not in body and task_id:
+                task = self.server.store.get_task(task_id)
+                state = terminal_notice_state(task["state"] if task else None)
         urgency = str(body.get("urgency") or "normal").strip().lower()
         if urgency not in URGENCIES:
             raise BadRequest("urgency must be urgent or normal")
@@ -3012,18 +3096,22 @@ class RouterHandler(BaseHTTPRequestHandler):
                 or any(not c.isalnum() and c not in "-_" for c in message_id)):
             raise BadRequest("invalid message_id")
         level = "event" if urgency == "urgent" else "notify"
-        minute = int(time.time() // 60)
-        digest = hashlib.sha256(
-            ("%s\n%s\n%d" % (worker, text, minute)).encode("utf-8")
-        ).hexdigest()[:24]
-        if attachments or message_id:
-            identity = json.dumps([worker, kind, text, attachments,
-                                   message_id if message_id else minute],
-                                  sort_keys=True, ensure_ascii=False)
-            digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
-        event_id = "notice:" + digest
+        task_result = bool(kind == "task.result" and task_id and state)
+        if task_result:
+            event_id = task_id + ":" + state
+        else:
+            minute = int(time.time() // 60)
+            digest = hashlib.sha256(
+                ("%s\n%s\n%d" % (worker, text, minute)).encode("utf-8")
+            ).hexdigest()[:24]
+            if attachments or message_id:
+                identity = json.dumps([worker, kind, text, attachments,
+                                       message_id if message_id else minute],
+                                      sort_keys=True, ensure_ascii=False)
+                digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
+            event_id = "notice:" + digest
         payload = {
-            "source": "router",
+            "source": TASK_NOTICE_NAMES[state][0] if task_result else "router",
             "kind": kind,
             "level": level,
             "text": text,
@@ -3034,7 +3122,14 @@ class RouterHandler(BaseHTTPRequestHandler):
         }
         if attachments:
             payload["payload"]["attachments"] = attachments
-        ok, data = self.server.trigger_client.post_trigger(payload)
+        if task_id:
+            payload["payload"]["task_id"] = task_id
+        if state:
+            payload["payload"]["status"] = state
+        if task_result:
+            ok, data = self.server.notifier.post_task_notice(task_id, state, payload)
+        else:
+            ok, data = self.server.trigger_client.post_trigger(payload)
         if not ok:
             log.warning("notice failed worker=%s urgency=%s: %.300s",
                         worker, urgency, data.get("detail") or data)
@@ -3049,7 +3144,7 @@ class RouterHandler(BaseHTTPRequestHandler):
         return 200, {
             "ok": True,
             "trigger_id": data.get("id"),
-            "level": level,
+            "level": data.get("level", level),
             "event_id": event_id,
             "duplicate": bool(data.get("duplicate")),
         }
@@ -3638,7 +3733,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     store = RouterStore(args.db)
     store.reset_runtime()
     trigger_client = TriggerClient(args.trigger_url, args.trigger_token_file)
-    notifier = TriggerNotifier(trigger_client)
+    notifier = TriggerNotifier(trigger_client, store)
     bridge = TriggerSubscriptionBridge(trigger_client)
     stale_subs = store.purge_all_subscriptions()
     for sub in stale_subs:

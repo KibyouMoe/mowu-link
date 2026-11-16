@@ -833,6 +833,154 @@ def worker_names_selftest(checker, work, trigger_url, trigger_token, trigger_db)
         output.close()
 
 
+def task_notice_selftest(checker, work, trigger_url, trigger_token, trigger_db):
+    """Exercise both real HTTP entry points against a real trigger and durable store."""
+    import server as router_module
+    from concurrent.futures import ThreadPoolExecutor
+
+    db_path = str(work / "task-notices.db")
+    store = router_module.RouterStore(db_path)
+    client = router_module.TriggerClient(trigger_url + "/trigger", str(trigger_token))
+    notifier = router_module.TriggerNotifier(client, store)
+    server = router_module.RouterServer(("127.0.0.1", 0), store, "notice-test-token",
+                                        notifier, mock.Mock())
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = "http://127.0.0.1:%d" % server.server_address[1]
+    worker = "notice-test-worker"
+    store.upsert_worker(worker)
+    server.attach(worker)
+
+    def call(route, body):
+        return http("POST", base + route, body, server.token)
+
+    def new_task():
+        code, result = call("/tasks", {"worker": worker, "goal": "task notice fixture"})
+        if code != 200:
+            raise RuntimeError("notice fixture task failed: %s" % result)
+        return result["task_id"]
+
+    def finish(task_id):
+        return call("/result", {"name": worker, "task_id": task_id,
+                                "status": "done", "summary": "internal result first"})
+
+    def notice(task_id, state="done", text="worker result", **extra):
+        return call("/notice", {"worker": worker, "kind": "task.result",
+                                "task_id": task_id, "status": state, "text": text, **extra})
+
+    def events(task_id):
+        with sqlite3.connect(str(trigger_db)) as saved:
+            saved.row_factory = sqlite3.Row
+            return [dict(row) for row in saved.execute(
+                "SELECT * FROM events WHERE event_id LIKE ? ORDER BY id", (task_id + ":%",))]
+
+    try:
+        with mock.patch.object(client, "post_trigger", wraps=client.post_trigger) as sent:
+            first = new_task()
+            finish(first)
+            code, duplicate = notice(first, " DONE ", "different wording", urgency="urgent")
+            first_events = events(first)
+            checker.check("task notice: internal result then differently worded worker notice posts once",
+                          code == 200 and duplicate["duplicate"] is True and sent.call_count == 1
+                          and duplicate["level"] == "notify" and len(first_events) == 1
+                          and first_events[0]["source"] == "任务完成"
+                          and first_events[0]["text"].endswith("internal result first"))
+
+            second = new_task()
+            _, original = notice(second, text="worker result first")
+            finish(second)
+            checker.check("task notice: worker notice then internal result preserves first arrival",
+                          sent.call_count == 2 and original["duplicate"] is False
+                          and events(second)[0]["text"] == "worker result first"
+                          and store.get_task(second)["state"] == "done")
+
+            third = new_task()
+            notice(third, text="worker result first")
+            finish(third)
+            checker.check("task notice: identical text on a different task is delivered separately",
+                          sent.call_count == 3 and len(events(third)) == 1
+                          and events(third)[0]["id"] != events(second)[0]["id"])
+
+            notice(first, "failed", "later failure")
+            _, cancelled = notice(first, " CANCELED ", "later cancellation")
+            _, cancel_again = notice(first, "cancelled", "changed cancellation wording")
+            checker.check("task notice: failed after done survives and cancellation aliases normalize",
+                          sent.call_count == 5 and len(events(first)) == 3
+                          and [row["source"] for row in events(first)]
+                          == ["任务完成", "任务失败", "任务取消"]
+                          and cancelled["event_id"] == first + ":cancelled"
+                          and cancel_again["duplicate"] is True)
+
+            _, inferred = call("/notice", {"worker": worker, "kind": "task.result",
+                                           "task_id": first, "text": "legacy terminal notice"})
+            checker.check("task notice: omitted status reads a terminal task and uses the same key",
+                          inferred["duplicate"] is True and sent.call_count == 5)
+            _, progress = notice(first, "unverified", "explicit progress remains ordinary")
+            with sqlite3.connect(str(trigger_db)) as saved:
+                progress_source = saved.execute("SELECT source FROM events WHERE event_id=?",
+                                                (progress["event_id"],)).fetchone()[0]
+            checker.check("task notice: explicit nonterminal progress keeps its ordinary source",
+                          progress_source == "router" and progress["event_id"].startswith("notice:"))
+
+            concurrent = new_task()
+            before = sent.call_count
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                futures = [pool.submit(finish, concurrent)]
+                futures.extend(pool.submit(notice, concurrent, "done", "race %d" % index)
+                               for index in range(7))
+                responses = [future.result() for future in futures]
+            checker.check("task notice: concurrent result and worker notices send exactly one trigger request",
+                          all(code == 200 and body.get("ok") for code, body in responses)
+                          and sent.call_count == before + 1 and len(events(concurrent)) == 1)
+
+            retry_task = "notice-retry-" + uuid.uuid4().hex
+            with mock.patch.object(client, "post_trigger", return_value=(False, {"detail": "offline"})):
+                code, failed = notice(retry_task)
+            checker.check("task notice: trigger failure returns HTTP 200 and does not consume the key",
+                          code == 200 and failed["error"] == "trigger_unavailable"
+                          and store.task_notice_receipt(retry_task, "done") is None)
+            _, retried = notice(retry_task)
+            checker.check("task notice: same key is retryable after trigger recovery",
+                          retried["ok"] is True and retried["duplicate"] is False
+                          and len(events(retry_task)) == 1)
+
+        server.shutdown()
+        thread.join(2)
+        store.close()
+        store = router_module.RouterStore(db_path)
+        restarted = router_module.TriggerNotifier(client, store)
+        with mock.patch.object(client, "post_trigger") as sent, \
+                mock.patch.object(router_module.log, "info") as logged:
+            accepted = restarted.notify_result({"task_id": first, "worker": worker}, "done", "restart retry")
+        checker.check("task notice: persisted receipt survives a new store/notifier and logs the dedup key",
+                      accepted and sent.call_count == 0
+                      and mock.call("notice dedup task=%s state=%s", first, "done") in logged.call_args_list)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(2)
+        store.close()
+
+    bounded = router_module.RouterStore(str(work / "notice-bounds.db"))
+    try:
+        for index in range(501):
+            bounded.remember_task_notice("bounded-%d" % index, "done", {"id": index})
+        count = bounded._conn.execute("SELECT COUNT(*) FROM task_notice_dedup").fetchone()[0]
+        checker.check("task notice: receipt table holds at most 500 and evicts its oldest entry",
+                      count == 500 and bounded.task_notice_receipt("bounded-0", "done") is None
+                      and bounded.task_notice_receipt("bounded-500", "done") == {"id": 500})
+        stamp = time.time()
+        bounded._conn.execute("UPDATE task_notice_dedup SET delivered_at=? WHERE task_id='bounded-1'",
+                              (stamp - router_module.TASK_NOTICE_TTL_S,))
+        with mock.patch.object(router_module.time, "time", return_value=stamp):
+            expired = bounded.task_notice_receipt("bounded-1", "done")
+        checker.check("task notice: 24-hour boundary expires without removing a fresh receipt",
+                      expired is None and bounded.task_notice_receipt("bounded-500", "done") == {"id": 500}
+                      and bounded._conn.execute("SELECT COUNT(*) FROM task_notice_dedup").fetchone()[0] == 499)
+    finally:
+        bounded.close()
+
+
 def workorders_selftest(checker, work, trigger_url, trigger_token):
     """Use a legacy DB and a throwaway process; leave all other routers alone."""
     port = free_port()
@@ -2130,9 +2278,9 @@ def run(work: Path, checker: Checker) -> None:
             except ValueError:
                 payload_ok = False
         checker.check(
-            "trigger received notify: source=router kind=task.result "
+            "trigger received notify: source=任务完成 kind=task.result "
             "level=notify actor=波旁 event_id=<id>:done",
-            event_row is not None and event_row[1] == "router"
+            event_row is not None and event_row[1] == "任务完成"
             and event_row[2] == "task.result" and event_row[3] == "notify"
             and event_row[4] == "波旁" and "完成" in (event_row[5] or "")
             and payload_ok,
@@ -2866,7 +3014,7 @@ def run(work: Path, checker: Checker) -> None:
         conn = sqlite3.connect(str(trigger_db))
         try:
             notify_count = conn.execute(
-                "SELECT COUNT(*) FROM events WHERE source='router'"
+                "SELECT COUNT(*) FROM events WHERE source IN ('任务完成','任务失败','任务取消')"
                 " AND kind='task.result' AND level='notify'").fetchone()[0]
         finally:
             conn.close()
@@ -2961,6 +3109,7 @@ def run(work: Path, checker: Checker) -> None:
         activity_selftest(checker, token, workers)
         peer_selftest(checker, work, trigger_url, trigger_token, trigger_db)
         worker_names_selftest(checker, work, trigger_url, trigger_token, trigger_db)
+        task_notice_selftest(checker, work, trigger_url, trigger_token, trigger_db)
         workorders_selftest(checker, work, trigger_url, trigger_token)
         zero_backlog_selftest(checker, work, trigger_url, trigger_token)
         dispatch_race_selftest(checker, work)
