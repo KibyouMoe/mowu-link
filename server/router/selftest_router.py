@@ -199,6 +199,27 @@ def free_port() -> int:
         sock.close()
 
 
+def completion_proof(worker, task_id, generation, candidate):
+    return {"ready": True, "cleanup_complete": True, "followups_pending": False,
+            "task_id": task_id, "generation": generation, "thread_id": "fixture-thread",
+            "turn_id": "fixture-turn", "turn_ids": ["fixture-turn"],
+            "native_status": "completed", "result": candidate}
+
+
+def install_completion_observer(server):
+    """Other admission tests use an already-finished observer fixture.
+    The dedicated completion tests exercise the authenticated SSE handshake."""
+    original = server.worker_request
+
+    def request(worker, event, data, kind, timeout=None):
+        if kind != "completion":
+            return original(worker, event, data, kind, timeout=timeout)
+        conn = server.current_conn(worker)
+        return 200, completion_proof(worker, data["task_id"], conn.generation, data["candidate"])
+
+    server.worker_request = request
+
+
 class FakeWorker(threading.Thread):
     """A real SSE client: one HTTP GET streaming until stop()."""
 
@@ -252,6 +273,13 @@ class FakeWorker(threading.Thread):
                     break
                 line = raw.decode("utf-8", "replace").rstrip("\r\n")
                 if line == "":
+                    if event == "task_result_check" and data:
+                        payload = json.loads("\n".join(data))
+                        proof = completion_proof(self.worker_name, payload["task_id"],
+                                                 payload["generation"], payload["candidate"])
+                        http("POST", "http://127.0.0.1:%d/result/responses" % self.port,
+                             {"worker": self.worker_name, "request_id": payload["request_id"],
+                              "status": 200, "body": proof}, self.token)
                     if event in ("task", "worker_message", "task_cancel") and data:
                         try:
                             payload = json.loads("\n".join(data))
@@ -844,6 +872,7 @@ def task_notice_selftest(checker, work, trigger_url, trigger_token, trigger_db):
     notifier = router_module.TriggerNotifier(client, store)
     server = router_module.RouterServer(("127.0.0.1", 0), store, "notice-test-token",
                                         notifier, mock.Mock())
+    install_completion_observer(server)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     base = "http://127.0.0.1:%d" % server.server_address[1]
@@ -931,7 +960,7 @@ def task_notice_selftest(checker, work, trigger_url, trigger_token, trigger_db):
             _, original = notice(second, text="worker result first")
             finish(second)
             checker.check("task notice: worker notice then internal result preserves first arrival",
-                          sent.call_count == 2 and original["duplicate"] is False
+                          sent.call_count == 2 and not original.get("duplicate", False)
                           and events(second)[0]["text"].endswith("worker result first")
                           and store.get_task(second)["state"] == "done")
 
@@ -974,7 +1003,7 @@ def task_notice_selftest(checker, work, trigger_url, trigger_token, trigger_db):
                           all(code == 200 and body.get("ok") for code, body in responses)
                           and sent.call_count == before + 1 and len(events(concurrent)) == 1)
 
-            retry_task = "notice-retry-" + uuid.uuid4().hex
+            retry_task = new_task()
             with mock.patch.object(client, "post_trigger", return_value=(False, {"detail": "offline"})):
                 code, failed = notice(retry_task)
             checker.check("task notice: trigger failure returns HTTP 200 and does not consume the key",
@@ -1688,6 +1717,7 @@ def dispatch_race_selftest(checker, work):
     notifier.notify_result.return_value = False
     server = router_module.RouterServer(("127.0.0.1", 0), store, "race-test-token",
                                         notifier, mock.Mock(), backlog_max=0)
+    install_completion_observer(server)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     base = "http://127.0.0.1:%d" % server.server_address[1]
@@ -1815,6 +1845,7 @@ def one_backlog_selftest(checker, work):
     notifier.notify_result.return_value = True
     server = router_module.RouterServer(("127.0.0.1", 0), store, "one-backlog-test-token",
                                         notifier, mock.Mock())
+    install_completion_observer(server)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     base = "http://127.0.0.1:%d" % server.server_address[1]

@@ -137,15 +137,27 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.hermes.router.plist
 | POST | `/register` | `{name, version?, note?}` | `{ok, name, queued, online, new}` |
 | GET | `/stream?name=&version=` | SSE 长连接 | 见第四节 |
 | POST | `/heartbeat` | `{name, state?, progress_at?, task_id?}` | `{ok, name, online, busy, queued, last_seen}` |
-| POST | `/result` | `{name, task_id, status, summary, artifacts?, evidence?}` | `{ok, task_id, state, notified, dispatched_next}` |
+| POST | `/result` | `{name, task_id, status, summary, summary_short?, artifacts?, evidence?, outcome?, error_code?}` | 200 终态或 202 `{ok, task_id, state, candidate:true, reason, notified:false}` |
+| POST | `/result/responses` | `{request_id, worker, status, body}` | 当前 SSE 连接的观察器核验回执 |
 | POST | `/notice` | `{worker, text, kind?, urgency?, task_id?, status?}` | `{ok, trigger_id, level, duplicate}` 或 `{ok:false, error}` |
 | GET | `/subscriptions/pending?worker=&limit=` | — | `{ok, worker, count, events[], acked}` |
 
 - `status` 只接受 `done` / `failed`。
 - 同一任务重复上报是幂等的：已终态的任务返回 `duplicate:true`，不重复 notify。
 - `name` 必须与任务归属一致，否则 400 `worker_mismatch`。
-- `/result` 会先落库、再尝试给 trigger 写一条 notify（3s 超时）。
-  trigger 不可用时**不影响交活**，响应里 `notified:false`，日志留 WARNING；不重试。
+- `summary` 超过 300 个字符时返回 400，要求压缩到 300 字内或附 `summary_short(≤300)`。
+  提供合法短摘要后保留完整正文，通知采用短摘要。
+- `/result` 先在 `<router.db>.result-candidates/` 原子保存候选，任务保持原状态。
+  Router 经当前 SSE 连接发出 `task_result_check`，观察器通过 `/result/responses` 回执。
+  核对绑定的原生 turn 与续接均结束、`cleanup_complete=true`、`followups_pending=false`
+  且连接代际和候选 revision 一致后，才写终态并尝试通知 trigger。
+  `outcome=needs_inspection` 保持候选，后续由观察器重新核实原生状态。
+- 原生状态尚未确认时返回 202。`GET /tasks/{task_id}` 附 `result_candidate`，
+  worker 的持久结果补投在重启后重新读取原回执和原生状态。旧连接的回执失效。
+  取消继续等待原取消确认。已终态任务返回 `duplicate:true`。
+- 此闸门需要 worker 支持 `task_result_check`。旧 worker 无法提供观察器回执时，
+  Router 保留候选并返回 202，待配套 worker 更新后继续核验。
+- trigger 不可用时响应 `notified:false`，已确认的终态保留，显式完成通知可沿同键补投。
 
 ### `POST /notice`：worker 往 Hermes 递话
 
@@ -186,8 +198,9 @@ worker 交活时携带 `kind="task.result"`、`task_id` 和 `status`。
 | `cancelled` | `任务取消` |
 
 状态去除首尾空白并转小写，`canceled` 归一为 `cancelled`。
-省略 `status` 时读取该工单的已存终态，尚在运行的工单应显式传入本次终态。
-显式非终态、缺少 `task_id` 或无法取得终态的旧请求继续按普通通知处理。
+省略 `status` 时采用该工单的已存终态，运行中的工单默认提交 done 候选。
+完成通知要求真实 `task_id` 与归属 worker；运行中的 done/failed 进入同一收口闸门。
+显式非终态通知继续按普通通知处理。cancelled 候选等待原取消确认。
 
 `POST /notice` 与内部 `notify_result()` 共用 SQLite `task_notice_dedup`，
 键为 `(task_id, 归一化终态)`，trigger `event_id` 固定为 `<task_id>:<终态>`。
@@ -408,6 +421,11 @@ data: {"type":"task","task_id":"t-1a2b3c4d5e","worker":"波旁","goal":"...",
 
 ```
 Worker → Router : POST /result {name, task_id, status, summary, artifacts, evidence}
+Router → worker : SSE task_result_check {request_id, generation, task_id, revision, candidate}
+worker → Router : POST /result/responses {request_id, worker, status:200, body:
+  {ready:true, task_id, generation, thread_id, turn_id, turn_ids,
+   native_status:"completed", cleanup_complete:true, followups_pending:false, result:{...}}}
+Router           : 核验当前连接与候选 revision，写终态
 Router → trigger: POST /trigger
   {
     "source": "任务完成",

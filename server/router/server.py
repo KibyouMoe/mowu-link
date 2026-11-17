@@ -25,6 +25,7 @@ Standard library only.  Python 3.9.  Binds loopback unless explicitly opted in.
 from __future__ import annotations
 
 from attachments import AttachmentStore, MAX_ATTACHMENTS
+from result_candidates import ResultCandidates
 
 import argparse
 import fcntl
@@ -1562,6 +1563,30 @@ def task_result_payload(task: Dict[str, Any], status: str, summary: str,
     }
 
 
+def completion_ready(observed: Dict[str, Any], worker: str, task_id: str, generation: str) -> bool:
+    """Validate a stream-bound observer response, never caller-supplied readiness."""
+    if (observed.get("ready") is not True or observed.get("cleanup_complete") is not True
+            or observed.get("followups_pending") is not False
+            or observed.get("task_id") != task_id or observed.get("generation") != generation):
+        return False
+    result = observed.get("result")
+    if not isinstance(result, dict) or result.get("name") != worker or result.get("task_id") != task_id:
+        return False
+    if result.get("status") not in ("done", "failed") or result.get("outcome") == "needs_inspection":
+        return False
+    native_status = observed.get("native_status")
+    if native_status == "not_started":
+        return result["status"] == "failed" and observed.get("unstarted") is True
+    turn_ids = observed.get("turn_ids")
+    if (not isinstance(observed.get("thread_id"), str) or not observed["thread_id"]
+            or not isinstance(turn_ids, list) or not turn_ids
+            or not all(isinstance(turn, str) and turn for turn in turn_ids)
+            or observed.get("turn_id") not in turn_ids):
+        return False
+    return native_status == "completed" or (result["status"] == "failed"
+        and native_status in ("failed", "interrupted", "cancelled", "canceled"))
+
+
 class TriggerNotifier:
     """Delivers ``task.result`` notifications for finished tasks."""
 
@@ -1702,6 +1727,7 @@ class Connection:
         self.closed = False
         self.reason = ""
         self.connected_at = time.time()
+        self.generation = uuid.uuid4().hex
         self.peer_after = 0
         self.peer_buffered = 0
 
@@ -1756,6 +1782,7 @@ class RouterServer(ThreadingHTTPServer):
                  queue_ttl_s: float = QUEUE_TTL_S):
         self.store = store
         self.attachments = AttachmentStore(store.path + ".attachments")
+        self.result_candidates = ResultCandidates(store.path)
         self.started_at = time.time()
         self.token = token or ""
         self.notifier = notifier
@@ -1787,13 +1814,13 @@ class RouterServer(ThreadingHTTPServer):
             "question_id": question_id, "operation": operation, "input": body or {}}, "question")
 
     def worker_request(self, worker: str, event: str, data: Dict[str, Any],
-                       kind: str) -> Tuple[int, Dict[str, Any]]:
+                       kind: str, timeout: Optional[float] = None) -> Tuple[int, Dict[str, Any]]:
         """Use the worker's existing authenticated stream across machine boundaries."""
         info = self.store.get_worker(worker)
         if info is None:
             return 404, {"ok": False, "error": "unknown_worker", "worker": worker}
         conn = self.current_conn(worker)
-        if conn is None or conn.closed or not info.get("control_sse"):
+        if conn is None or conn.closed or (kind != "completion" and not info.get("control_sse")):
             return 503, {"ok": False, "error": kind + "_worker_unavailable", "worker": worker}
         request_id = str(uuid.uuid4())
         pending = {"worker": worker, "conn": conn, "kind": kind,
@@ -1803,8 +1830,9 @@ class RouterServer(ThreadingHTTPServer):
                 return 503, {"ok": False, "error": kind + "_requests_busy"}
             self.question_requests[request_id] = pending
         try:
-            conn.queue.put({"event": event, "data": {"request_id": request_id, **data}})
-            if not pending["ready"].wait(5 if kind == "question" else 30):
+            conn.queue.put({"event": event, "data": {"request_id": request_id,
+                                                     "generation": conn.generation, **data}})
+            if not pending["ready"].wait(timeout if timeout is not None else 5 if kind == "question" else 30):
                 return 504, {"ok": False, "error": kind + "_worker_timeout", "worker": worker,
                              **({"questionId": data["question_id"]} if kind == "question" else {}), "retryable": True}
             return pending["response"]
@@ -1832,6 +1860,91 @@ class RouterServer(ThreadingHTTPServer):
                 pending["response"] = (status, body["body"])
                 pending["ready"].set()
         return 200, {"ok": True}
+
+    def discard_result_candidate(self, task_id: str) -> None:
+        try:
+            self.result_candidates.remove(task_id)
+        except OSError as exc:
+            log.warning("result candidate cleanup pending task=%s error=%s", task_id, type(exc).__name__)
+
+    def submit_result(self, body: Dict[str, Any], attachments=None) -> Tuple[int, Dict[str, Any]]:
+        """A caller supplies a candidate; the current stream's observer authorizes settlement."""
+        name, task_id = str(body.get("name") or "").strip(), str(body.get("task_id") or "").strip()
+        if not name or not task_id:
+            raise BadRequest("name and task_id are required")
+        status = str(body.get("status") or "").strip().lower()
+        if status not in ("done", "failed"):
+            raise BadRequest("status must be done or failed")
+        summary = str(body.get("summary") or "")
+        result_notice_summary(summary, body.get("summary_short", UNSET))
+        if not isinstance(body.get("artifacts") or [], list) or not isinstance(body.get("evidence") or [], list):
+            raise BadRequest("artifacts and evidence must be lists")
+        candidate = {key: body[key] for key in ("name", "task_id", "status", "summary", "summary_short",
+                                               "artifacts", "evidence", "outcome", "error_code") if key in body}
+        candidate.update(name=name, task_id=task_id, status=status, summary=summary)
+        with self.dispatch_lock:
+            task = self.store.get_task(task_id)
+            if task is None:
+                return 404, {"ok": False, "error": "unknown_task", "task_id": task_id}
+            if task["worker"] != name:
+                return 400, {"ok": False, "error": "worker_mismatch", "task_id": task_id,
+                             "worker": task["worker"], "reported_by": name}
+            if task["state"] in TERMINAL_STATES:
+                self.discard_result_candidate(task_id)
+                return 200, {"ok": True, "task_id": task_id, "state": task["state"],
+                             "duplicate": True, "notified": False, "dispatched_next": None}
+            if task["state"] == "cancelling":
+                return 202, {"ok": True, "task_id": task_id, "state": "cancelling",
+                             "candidate": True, "reason": "cancellation_ack_required", "notified": False,
+                             "message": "等待执行体确认停止", "dispatched_next": None}
+            conn = self.current_conn(name)
+            saved = self.result_candidates.put(task_id, {"candidate": candidate, "attachments": attachments or [],
+                                                        "generation": conn.generation if conn else None})
+        # The observer uses the same stream to reply. Holding dispatch_lock here
+        # would block reconnect/cancel and could deadlock the proof's readback.
+        code, observed = self.worker_request(name, "task_result_check", {
+            "task_id": task_id, "candidate": candidate, "revision": saved["revision"]}, "completion", timeout=2.0)
+        with self.dispatch_lock:
+            task = self.store.get_task(task_id)
+            if task is None:
+                return 404, {"ok": False, "error": "unknown_task", "task_id": task_id}
+            if task["state"] in TERMINAL_STATES:
+                self.discard_result_candidate(task_id)
+                return 200, {"ok": True, "task_id": task_id, "state": task["state"],
+                             "duplicate": True, "notified": False, "dispatched_next": None}
+            current = self.result_candidates.get(task_id)
+            final = observed.get("result", {})
+            ready = (code == 200 and conn is not None and not conn.closed
+                     and self.current_conn(name) is conn and current is not None
+                     and current["revision"] == saved["revision"] and task["state"] != "cancelling"
+                     and completion_ready(observed, name, task_id, conn.generation))
+            if not ready:
+                reason = "cancelling" if task["state"] == "cancelling" else observed.get("reason", observed.get("error", "native_completion_pending"))
+                log.info("result candidate pending task=%s generation=%s reason=%s", task_id,
+                         conn.generation if conn else None, reason)
+                return 202, {"ok": True, "task_id": task_id, "state": task["state"], "candidate": True,
+                             "revision": saved["revision"], "reason": reason, "notified": False, "dispatched_next": None}
+            final_summary = str(final.get("summary") or "")
+            short = result_notice_summary(final_summary, final.get("summary_short", UNSET))
+            result = {key: final[key] for key in ("status", "summary", "summary_short", "artifacts", "evidence",
+                                                 "outcome", "error_code") if key in final}
+            result.update(artifacts=final.get("artifacts") or [], evidence=final.get("evidence") or [])
+            result.update(reported_at=time.time(), completion={key: observed.get(key) for key in (
+                "generation", "thread_id", "turn_id", "turn_ids", "native_status", "cleanup_complete", "unstarted")})
+            task = self.store.finish_task(task_id, final["status"], result)
+            self.discard_result_candidate(task_id)
+            self.store.refresh_counts(name)
+            dispatched = self.dispatch_one(name)
+        notice = task_result_payload(task, final["status"], short)
+        if current["result"]["attachments"]:
+            notice["payload"]["attachments"] = current["result"]["attachments"]
+        if current["result"]["attachments"]:
+            notified, _receipt = self.notifier.post_task_notice(task_id, final["status"], notice)
+        else:
+            notified = self.notifier.notify_result(task, final["status"], short)
+        log.info("task finished id=%s worker=%s status=%s notified=%s", task_id, name, final["status"], notified)
+        return 200, {"ok": True, "task_id": task_id, "state": final["status"], "finished_at": task["finished_at"],
+                     "notified": notified, "dispatched_next": dispatched["task_id"] if dispatched else None}
 
     def cancel_execution(self, task: Dict[str, Any]) -> Dict[str, Any]:
         """Deliver only the exact task identity; never a selected-session stop."""
@@ -1885,6 +1998,7 @@ class RouterServer(ThreadingHTTPServer):
                 if current["state"] == "cancelling" and delivery.get("confirmed"):
                     result.update(status="cancelled", summary="worker confirmed execution stopped")
                     self.store.finish_task(task["task_id"], "cancelled", result)
+                    self.discard_result_candidate(task["task_id"])
                 else:
                     self.store._conn.execute(
                         "UPDATE tasks SET result_json=? WHERE task_id=?",
@@ -2232,6 +2346,8 @@ class RouterHandler(BaseHTTPRequestHandler):
                 return self._send_json(*self.server.question_response(body, "command"))
             if parts == ["questions", "responses"]:
                 return self._send_json(*self.server.question_response(body))
+            if parts == ["result", "responses"]:
+                return self._send_json(*self.server.question_response(body, "completion"))
             if len(parts) == 4 and parts[0] == "questions" and parts[3] == "answer":
                 question_id = self._peer_uuid(parts[2])
                 return self._send_json(*self.server.question_request(self._worker_path_param(parts[1]), question_id, "answer", body))
@@ -2358,8 +2474,11 @@ class RouterHandler(BaseHTTPRequestHandler):
             return self._send_json(404, {"ok": False, "error": "unknown_task",
                                          "task_id": task_id})
         task["progress"] = self.server.store.approval_progress(task)
+        with self.server.dispatch_lock:
+            candidate = self.server.result_candidates.get(task_id)
         self._send_json(200, {"ok": True, "task_id": task_id,
-                              "state": task["state"], "task": task})
+                              "state": task["state"], "task": task,
+                              **({"result_candidate": candidate} if candidate else {})})
 
     def _subscriptions_list(self, qs: Dict[str, List[str]]) -> Dict[str, Any]:
         worker = (qs.get("worker", [""])[0] or "").strip() or None
@@ -2724,66 +2843,7 @@ class RouterHandler(BaseHTTPRequestHandler):
         }
 
     def _result(self, body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
-        name = str(body.get("name") or "").strip()
-        task_id = str(body.get("task_id") or "").strip()
-        if not name:
-            raise BadRequest("name is required")
-        if not task_id:
-            raise BadRequest("task_id is required")
-        status = str(body.get("status") or "").strip().lower()
-        if status not in ("done", "failed"):
-            raise BadRequest("status must be done or failed")
-        summary = str(body.get("summary") or "")
-        notice_summary = result_notice_summary(summary, body.get("summary_short", UNSET))
-        artifacts = body.get("artifacts") or []
-        evidence = body.get("evidence") or []
-        if not isinstance(artifacts, list):
-            raise BadRequest("artifacts must be a list")
-        if not isinstance(evidence, list):
-            raise BadRequest("evidence must be a list")
-
-        with self.server.dispatch_lock:
-            task = self.server.store.get_task(task_id)
-            if task is None:
-                return 404, {"ok": False, "error": "unknown_task",
-                             "task_id": task_id}
-            if task["worker"] != name:
-                return 400, {"ok": False, "error": "worker_mismatch",
-                             "task_id": task_id, "worker": task["worker"],
-                             "reported_by": name}
-            if task["state"] == "cancelling":
-                return 202, {"ok": True, "task_id": task_id, "state": "cancelling",
-                             "message": "等待执行体确认停止", "dispatched_next": None}
-            if task["state"] in TERMINAL_STATES:
-                log.info("result ignored (already %s) task=%s worker=%s",
-                         task["state"], task_id, name)
-                return 200, {"ok": True, "task_id": task_id,
-                             "state": task["state"], "duplicate": True,
-                             "notified": False, "dispatched_next": None}
-            result = {
-                "status": status,
-                "summary": summary,
-                **({"summary_short": body["summary_short"]} if "summary_short" in body else {}),
-                "artifacts": artifacts,
-                "evidence": evidence,
-                "reported_at": time.time(),
-            }
-            task = self.server.store.finish_task(task_id, status, result)
-            assert task is not None
-            self.server.store.refresh_counts(name)
-            dispatched = self.server.dispatch_one(name)
-
-        notified = self.server.notifier.notify_result(task, status, notice_summary)
-        log.info("task finished id=%s worker=%s status=%s notified=%s",
-                 task_id, name, status, notified)
-        return 200, {
-            "ok": True,
-            "task_id": task_id,
-            "state": status,
-            "finished_at": task["finished_at"],
-            "notified": notified,
-            "dispatched_next": dispatched["task_id"] if dispatched else None,
-        }
+        return self.server.submit_result(body)
 
     def _task_create(self, body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
         # A UUID identifies one formal work order; ordinary chat uses /messages.
@@ -3006,6 +3066,8 @@ class RouterHandler(BaseHTTPRequestHandler):
             delivery = self.server.cancel_execution(task)
         with self.server.dispatch_lock:
             task = self.server.store.get_task(task_id)
+            if task["state"] == "cancelled":
+                self.server.discard_result_candidate(task_id)
             dispatched = self.server.dispatch_one(task["worker"]) if task["state"] == "cancelled" else None
         log.info("task cancelled id=%s worker=%s delivery=%s", task_id, task["worker"], delivery)
         pending = task["state"] == "cancelling"
@@ -3032,6 +3094,8 @@ class RouterHandler(BaseHTTPRequestHandler):
             self.server.record_cancel_delivery(task, delivery)
             self.server.dispatch_one(task["worker"])
             current = self.server.store.get_task(task_id)
+            if current["state"] == "cancelled":
+                self.server.discard_result_candidate(task_id)
         return 200, {"ok": True, "task_id": task_id, "state": current["state"]}
 
     def _attachment_put(self):
@@ -3091,7 +3155,9 @@ class RouterHandler(BaseHTTPRequestHandler):
             state = terminal_notice_state(body.get("status"))
             if "status" not in body and task_id:
                 task = self.server.store.get_task(task_id)
-                state = terminal_notice_state(task["state"] if task else None)
+                state = terminal_notice_state(task["state"] if task else None) or "done"
+            if state and not task_id:
+                raise BadRequest("task.result requires task_id")
         urgency = str(body.get("urgency") or "normal").strip().lower()
         if urgency not in URGENCIES:
             raise BadRequest("urgency must be urgent or normal")
@@ -3108,6 +3174,30 @@ class RouterHandler(BaseHTTPRequestHandler):
             raise BadRequest("invalid message_id")
         level = "event" if urgency == "urgent" else "notify"
         task_result = bool(kind == "task.result" and task_id and state)
+        if task_result:
+            task = self.server.store.get_task(task_id)
+            if task is None:
+                return 404, {"ok": False, "error": "unknown_task", "task_id": task_id}
+            if task["worker"] != worker:
+                return 400, {"ok": False, "error": "worker_mismatch", "task_id": task_id}
+            if task["state"] not in TERMINAL_STATES:
+                if state == "cancelled":
+                    with self.server.dispatch_lock:
+                        task = self.server.store.get_task(task_id)
+                        if task["state"] not in TERMINAL_STATES:
+                            self.server.result_candidates.put(task_id, {"candidate": {
+                                "name": worker, "task_id": task_id, "status": state, "summary": text}, "attachments": attachments})
+                            return 202, {"ok": True, "task_id": task_id, "state": task["state"],
+                                         "candidate": True, "reason": "cancellation_ack_required", "notified": False}
+                else:
+                    candidate = {"name": worker, "task_id": task_id, "status": state, "summary": text,
+                                 **{key: body[key] for key in ("outcome", "error_code") if key in body},
+                                 **({"summary_short": body["summary_short"]} if "summary_short" in body else {})}
+                    status_code, result = self.server.submit_result(candidate, attachments)
+                    receipt = self.server.store.task_notice_receipt(task_id, result.get("state", ""))
+                    return status_code, {**result, "trigger_id": receipt.get("id") if receipt else None,
+                                         **({"error": "trigger_unavailable"} if status_code == 200 and not receipt else {}),
+                                         "event_id": task_id + ":" + result.get("state", state), "level": "notify"}
         if task_result:
             event_id = task_id + ":" + state
         else:
