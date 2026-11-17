@@ -138,7 +138,7 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.hermes.router.plist
 | GET | `/stream?name=&version=` | SSE 长连接 | 见第四节 |
 | POST | `/heartbeat` | `{name, state?, progress_at?, task_id?}` | `{ok, name, online, busy, queued, last_seen}` |
 | POST | `/result` | `{name, task_id, status, summary, summary_short?, artifacts?, evidence?, outcome?, error_code?}` | 200 终态或 202 `{ok, task_id, state, candidate:true, reason, notified:false}` |
-| POST | `/result/responses` | `{request_id, worker, status, body}` | 当前 SSE 连接的观察器核验回执 |
+| POST | `/result/responses` | `{request_id, worker, status, body}` | 旧在途观察器请求的兼容回执 |
 | POST | `/notice` | `{worker, text, kind?, urgency?, task_id?, status?}` | `{ok, trigger_id, level, duplicate}` 或 `{ok:false, error}` |
 | GET | `/subscriptions/pending?worker=&limit=` | — | `{ok, worker, count, events[], acked}` |
 
@@ -147,16 +147,23 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.hermes.router.plist
 - `name` 必须与任务归属一致，否则 400 `worker_mismatch`。
 - `summary` 超过 300 个字符时返回 400，要求压缩到 300 字内或附 `summary_short(≤300)`。
   提供合法短摘要后保留完整正文，通知采用短摘要。
-- `/result` 先在 `<router.db>.result-candidates/` 原子保存候选，任务保持原状态。
-  Router 经当前 SSE 连接发出 `task_result_check`，观察器通过 `/result/responses` 回执。
-  核对绑定的原生 turn 与续接均结束、`cleanup_complete=true`、`followups_pending=false`
-  且连接代际和候选 revision 一致后，才写终态并尝试通知 trigger。
-  `outcome=needs_inspection` 保持候选，后续由观察器重新核实原生状态。
-- 原生状态尚未确认时返回 202。`GET /tasks/{task_id}` 附 `result_candidate`，
-  worker 的持久结果补投在重启后重新读取原回执和原生状态。旧连接的回执失效。
-  取消继续等待原取消确认。已终态任务返回 `duplicate:true`。
-- 此闸门需要 worker 支持 `task_result_check`。旧 worker 无法提供观察器回执时，
-  Router 保留候选并返回 202，待配套 worker 更新后继续核验。
+- `/result` 先在 `<router.db>.result-candidates/` 原子保存 status、完整摘要、附件和 outcome。
+  收到同一 Worker 的 `state=idle` 心跳后结算它的 running 任务。忙碌期间返回 202 候选。
+- idle 时有候选就采用候选的 done/failed；缺候选就 failed，
+  `result.error_code=worker_idle_without_result`。取消中的任务在 idle 时进入 cancelled。
+- 绑定在本任务上的未答 question 是豁免。Router 从既有 `worker.question` 通知的提问 URL
+  或 `/questions/{worker}/{id}` 查询/回答回执登记关联，`task_questions` 表仅存标识和状态。
+  idle 时经既有鉴权 SSE 查询提问状态，覆盖飞书/原生端回答；确认回答后，下一条 idle 心跳结算。
+  URL 仅解析标识，实际查询沿既有 SSE，外部地址不会被请求。
+- busy→idle 的时间只适用于当时已开始的任务。连续 idle 重用同一时间，避免结算刚派发的下一单。
+  重连后接受新连接的首次 idle。进程重启后由新心跳重新建立 idle 信号，候选与提问索引持久保留。
+- `/result` 与 idle 结算共用 dispatch 锁。先落终态者生效，后到结果返回 `duplicate:true`。
+  `/heartbeat` 增加 `settlements` 数组及 `dispatched_next`，包含本次结算的任务/状态/错误码/通知回执。
+- `outcome=needs_inspection` 结算为 done，保留 outcome、error_code、完整摘要；通知 payload 同样携带它们。
+  `summary_short` 用于短通知。缺失原生 binding 或代际不匹配仅记一致性元数据，阻止不了 idle 结算。
+- `GET /tasks/{task_id}` 在结算前继续附 `result_candidate`，结算后清除候选。
+  `/result/responses` 保留兼容旧在途请求，完成判定不再发起 `task_result_check` 或等待原生收口证明。
+  旧 Worker 无需候选/原生观察器能力，仍按提交结果与 idle 心跳结算。
 - trigger 不可用时响应 `notified:false`，已确认的终态保留，显式完成通知可沿同键补投。
 
 ### `POST /notice`：worker 往 Hermes 递话

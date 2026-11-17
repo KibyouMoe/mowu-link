@@ -37,6 +37,7 @@ import logging
 import math
 import os
 import queue
+import re
 import secrets
 import select
 import signal
@@ -374,6 +375,16 @@ CREATE TABLE IF NOT EXISTS task_notice_dedup (
     receipt_json  TEXT NOT NULL,
     PRIMARY KEY (task_id, state)
 );
+
+CREATE TABLE IF NOT EXISTS task_questions (
+    worker       TEXT NOT NULL,
+    question_id  TEXT NOT NULL,
+    task_id      TEXT,
+    status       TEXT NOT NULL,
+    updated_at   REAL NOT NULL,
+    PRIMARY KEY (worker, question_id)
+);
+CREATE INDEX IF NOT EXISTS idx_task_questions ON task_questions(worker, task_id);
 
 CREATE TABLE IF NOT EXISTS subscriptions (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -908,6 +919,35 @@ class RouterStore:
         if changed:
             log.info("worker=%s: %d running task(s) requeued", worker, changed)
         return changed
+
+    def remember_question(self, worker: str, question_id: str,
+                          view: Optional[Dict[str, Any]] = None) -> None:
+        """Keep only identities and answer state from the authenticated worker."""
+        with self._lock:
+            old = self._conn.execute(
+                "SELECT task_id, status FROM task_questions WHERE worker=? AND question_id=?",
+                (worker, question_id)).fetchone()
+            recipient = (view or {}).get("recipient")
+            task_id = recipient.get("taskId") if isinstance(recipient, dict) else None
+            task = self.get_task(task_id) if isinstance(task_id, str) else None
+            if not task or task["worker"] != worker:
+                task_id = old["task_id"] if old else None
+            status = str((view or {}).get("status") or (old["status"] if old else "open"))
+            if old and old["status"] in ("answered", "skipped", "expired", "cancelled", "withdrawn"):
+                status = old["status"]  # A delayed open read cannot undo a confirmed answer.
+            self._conn.execute(
+                "INSERT INTO task_questions(worker, question_id, task_id, status, updated_at) VALUES(?,?,?,?,?)"
+                " ON CONFLICT(worker, question_id) DO UPDATE SET task_id=excluded.task_id,"
+                " status=excluded.status, updated_at=excluded.updated_at",
+                (worker, question_id, task_id, status, time.time()))
+
+    def pending_questions(self, worker: str) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT question_id, task_id, status FROM task_questions WHERE worker=?"
+                " AND status NOT IN ('answered','skipped','expired','cancelled','withdrawn')",
+                (worker,)).fetchall()
+        return [dict(row) for row in rows]
 
     def finish_task(self, task_id: str, status: str,
                     result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -1559,32 +1599,10 @@ def task_result_payload(task: Dict[str, Any], status: str, summary: str,
         "source": source, "kind": "task.result", "level": "notify",
         "text": "%s %s %s：%s" % (display, label, task["task_id"], one_line or "(无摘要)"),
         "actor": display, "event_id": "%s:%s" % (task["task_id"], status),
-        "payload": {"task_id": task["task_id"], "worker": task["worker"], "status": status},
+        "payload": {"task_id": task["task_id"], "worker": task["worker"], "status": status,
+                    **{key: task["result"][key] for key in ("outcome", "error_code")
+                       if key in (task.get("result") or {})}},
     }
-
-
-def completion_ready(observed: Dict[str, Any], worker: str, task_id: str, generation: str) -> bool:
-    """Validate a stream-bound observer response, never caller-supplied readiness."""
-    if (observed.get("ready") is not True or observed.get("cleanup_complete") is not True
-            or observed.get("followups_pending") is not False
-            or observed.get("task_id") != task_id or observed.get("generation") != generation):
-        return False
-    result = observed.get("result")
-    if not isinstance(result, dict) or result.get("name") != worker or result.get("task_id") != task_id:
-        return False
-    if result.get("status") not in ("done", "failed") or result.get("outcome") == "needs_inspection":
-        return False
-    native_status = observed.get("native_status")
-    if native_status == "not_started":
-        return result["status"] == "failed" and observed.get("unstarted") is True
-    turn_ids = observed.get("turn_ids")
-    if (not isinstance(observed.get("thread_id"), str) or not observed["thread_id"]
-            or not isinstance(turn_ids, list) or not turn_ids
-            or not all(isinstance(turn, str) and turn for turn in turn_ids)
-            or observed.get("turn_id") not in turn_ids):
-        return False
-    return native_status == "completed" or (result["status"] == "failed"
-        and native_status in ("failed", "interrupted", "cancelled", "canceled"))
 
 
 class TriggerNotifier:
@@ -1796,6 +1814,7 @@ class RouterServer(ThreadingHTTPServer):
         self.conns: Dict[str, Connection] = {}
         self.conn_lock = threading.Lock()
         self.dispatch_lock = threading.RLock()
+        self.idle_observations: Dict[str, float] = {}
         self.question_lock = threading.Lock()
         self.question_requests: Dict[str, Dict[str, Any]] = {}
         super().__init__(addr, RouterHandler)
@@ -1810,8 +1829,22 @@ class RouterServer(ThreadingHTTPServer):
 
     def question_request(self, worker: str, question_id: str, operation: str,
                          body: Optional[Dict[str, Any]] = None) -> Tuple[int, Dict[str, Any]]:
-        return self.worker_request(worker, "question_request", {
+        code, response = self.worker_request(worker, "question_request", {
             "question_id": question_id, "operation": operation, "input": body or {}}, "question")
+        if code == 200:
+            self.store.remember_question(worker, question_id, response)
+        return code, response
+
+    def observe_question_notice(self, worker: str, text: str) -> None:
+        # Existing workers publish the exact question URL. Resolve it through
+        # the existing SSE RPC, never by fetching a caller-supplied URL.
+        for word in text.split():
+            parts = urlparse(word).path.strip("/").split("/")
+            if (len(parts) >= 3 and parts[-3] == "questions" and unquote(parts[-2]) == worker
+                    and re.fullmatch(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", parts[-1])):
+                self.store.remember_question(worker, parts[-1])
+                self.question_request(worker, parts[-1], "get")
+                return
 
     def worker_request(self, worker: str, event: str, data: Dict[str, Any],
                        kind: str, timeout: Optional[float] = None) -> Tuple[int, Dict[str, Any]]:
@@ -1867,8 +1900,75 @@ class RouterServer(ThreadingHTTPServer):
         except OSError as exc:
             log.warning("result candidate cleanup pending task=%s error=%s", task_id, type(exc).__name__)
 
+    def settle_idle(self, name: str) -> List[Dict[str, Any]]:
+        """A fresh idle pulse owns settlement; native proofs are audit metadata."""
+        completed = []
+        with self.dispatch_lock:
+            worker = self.store.get_worker(name)
+            idle_at = self.idle_observations.get(name)
+            if not worker or worker.get("state") != "idle" or idle_at is None:
+                return []
+            tasks = [task for task in self.store.list_tasks(worker=name, limit=500)
+                     if task["state"] in ("running", "cancelling")
+                     and idle_at >= (task.get("started_at") or task["created_at"])]
+            if not tasks:
+                return []
+            for question in self.store.pending_questions(name):
+                # Refresh answers made in the native UI or Feishu as well as
+                # answers through Router. This RPC reads only public question state.
+                self.question_request(name, question["question_id"], "get")
+            pending = {question["task_id"] for question in self.store.pending_questions(name)}
+            for task in tasks:
+                task_id = task["task_id"]
+                if task["state"] != "cancelling" and task_id in pending:
+                    log.info("idle settlement pending task=%s reason=unanswered_question", task_id)
+                    continue
+                saved = self.result_candidates.get(task_id)
+                record = (saved or {}).get("result", {})
+                candidate = record.get("candidate", {})
+                if task["state"] == "cancelling":
+                    result = {**(task.get("result") or {}), "status": "cancelled",
+                              "summary": "Worker 已空闲，取消完成。"}
+                elif candidate.get("status") in ("done", "failed"):
+                    result = {key: candidate[key] for key in ("status", "summary", "summary_short",
+                              "artifacts", "evidence", "outcome", "error_code") if key in candidate}
+                else:
+                    result = {"status": "failed", "error_code": "worker_idle_without_result",
+                              "summary": "Worker 已空闲，但未提交任务结果。"}
+                if result.get("outcome") == "needs_inspection":
+                    result["status"] = "done"
+                result.setdefault("artifacts", [])
+                result.setdefault("evidence", [])
+                connection = self.current_conn(name)
+                result.update(reported_at=time.time(), completion={
+                    "signal": "worker_idle", "idle_at": idle_at,
+                    "reported_generation": record.get("generation"),
+                    "current_generation": connection.generation if connection else None,
+                    "generation_matches": bool(connection and record.get("generation") == connection.generation)})
+                attachments = record.get("attachments") or []
+                if attachments:
+                    result["attachments"] = attachments
+                finished = self.store.finish_task(task_id, result["status"], result)
+                self.discard_result_candidate(task_id)
+                completed.append(finished)
+                log.info("idle settlement task=%s state=%s code=%s generation_matches=%s",
+                         task_id, result["status"], result.get("error_code", "-"),
+                         result["completion"]["generation_matches"])
+        settlements = []
+        for task in completed:
+            result = task["result"]
+            notice = task_result_payload(task, task["state"], str(result.get("summary") or ""),
+                                         result.get("summary_short", UNSET))
+            if result.get("attachments"):
+                notice["payload"]["attachments"] = result["attachments"]
+            notified, _receipt = self.notifier.post_task_notice(task["task_id"], task["state"], notice)
+            settlements.append({"task_id": task["task_id"], "state": task["state"],
+                                "finished_at": task["finished_at"], "notified": notified,
+                                **{key: result[key] for key in ("outcome", "error_code") if key in result}})
+        return settlements
+
     def submit_result(self, body: Dict[str, Any], attachments=None) -> Tuple[int, Dict[str, Any]]:
-        """A caller supplies a candidate; the current stream's observer authorizes settlement."""
+        """Save the business result and settle only after an observed idle pulse."""
         name, task_id = str(body.get("name") or "").strip(), str(body.get("task_id") or "").strip()
         if not name or not task_id:
             raise BadRequest("name and task_id are required")
@@ -1893,58 +1993,24 @@ class RouterServer(ThreadingHTTPServer):
                 self.discard_result_candidate(task_id)
                 return 200, {"ok": True, "task_id": task_id, "state": task["state"],
                              "duplicate": True, "notified": False, "dispatched_next": None}
-            if task["state"] == "cancelling":
-                return 202, {"ok": True, "task_id": task_id, "state": "cancelling",
-                             "candidate": True, "reason": "cancellation_ack_required", "notified": False,
-                             "message": "等待执行体确认停止", "dispatched_next": None}
-            conn = self.current_conn(name)
+            connection = self.current_conn(name)
             saved = self.result_candidates.put(task_id, {"candidate": candidate, "attachments": attachments or [],
-                                                        "generation": conn.generation if conn else None})
-        # The observer uses the same stream to reply. Holding dispatch_lock here
-        # would block reconnect/cancel and could deadlock the proof's readback.
-        code, observed = self.worker_request(name, "task_result_check", {
-            "task_id": task_id, "candidate": candidate, "revision": saved["revision"]}, "completion", timeout=2.0)
+                                                        "generation": connection.generation if connection else None})
+        settlements = self.settle_idle(name)
         with self.dispatch_lock:
             task = self.store.get_task(task_id)
-            if task is None:
-                return 404, {"ok": False, "error": "unknown_task", "task_id": task_id}
             if task["state"] in TERMINAL_STATES:
-                self.discard_result_candidate(task_id)
+                own = next((item for item in settlements if item["task_id"] == task_id), None)
+                dispatched = self.dispatch_one(name)
                 return 200, {"ok": True, "task_id": task_id, "state": task["state"],
-                             "duplicate": True, "notified": False, "dispatched_next": None}
-            current = self.result_candidates.get(task_id)
-            final = observed.get("result", {})
-            ready = (code == 200 and conn is not None and not conn.closed
-                     and self.current_conn(name) is conn and current is not None
-                     and current["revision"] == saved["revision"] and task["state"] != "cancelling"
-                     and completion_ready(observed, name, task_id, conn.generation))
-            if not ready:
-                reason = "cancelling" if task["state"] == "cancelling" else observed.get("reason", observed.get("error", "native_completion_pending"))
-                log.info("result candidate pending task=%s generation=%s reason=%s", task_id,
-                         conn.generation if conn else None, reason)
-                return 202, {"ok": True, "task_id": task_id, "state": task["state"], "candidate": True,
-                             "revision": saved["revision"], "reason": reason, "notified": False, "dispatched_next": None}
-            final_summary = str(final.get("summary") or "")
-            short = result_notice_summary(final_summary, final.get("summary_short", UNSET))
-            result = {key: final[key] for key in ("status", "summary", "summary_short", "artifacts", "evidence",
-                                                 "outcome", "error_code") if key in final}
-            result.update(artifacts=final.get("artifacts") or [], evidence=final.get("evidence") or [])
-            result.update(reported_at=time.time(), completion={key: observed.get(key) for key in (
-                "generation", "thread_id", "turn_id", "turn_ids", "native_status", "cleanup_complete", "unstarted")})
-            task = self.store.finish_task(task_id, final["status"], result)
-            self.discard_result_candidate(task_id)
-            self.store.refresh_counts(name)
-            dispatched = self.dispatch_one(name)
-        notice = task_result_payload(task, final["status"], short)
-        if current["result"]["attachments"]:
-            notice["payload"]["attachments"] = current["result"]["attachments"]
-        if current["result"]["attachments"]:
-            notified, _receipt = self.notifier.post_task_notice(task_id, final["status"], notice)
-        else:
-            notified = self.notifier.notify_result(task, final["status"], short)
-        log.info("task finished id=%s worker=%s status=%s notified=%s", task_id, name, final["status"], notified)
-        return 200, {"ok": True, "task_id": task_id, "state": final["status"], "finished_at": task["finished_at"],
-                     "notified": notified, "dispatched_next": dispatched["task_id"] if dispatched else None}
+                             "finished_at": task["finished_at"], "duplicate": own is None,
+                             "notified": bool(own and own["notified"]),
+                             "dispatched_next": dispatched["task_id"] if dispatched else None}
+            reason = "unanswered_question" if any(q["task_id"] == task_id for q in self.store.pending_questions(name)) else "worker_idle_pending"
+            if task["state"] == "cancelling":
+                reason = "cancellation_idle_pending"
+            return 202, {"ok": True, "task_id": task_id, "state": task["state"], "candidate": True,
+                         "revision": saved["revision"], "reason": reason, "notified": False, "dispatched_next": None}
 
     def cancel_execution(self, task: Dict[str, Any]) -> Dict[str, Any]:
         """Deliver only the exact task identity; never a selected-session stop."""
@@ -2022,6 +2088,7 @@ class RouterServer(ThreadingHTTPServer):
                 self.conns[name] = conn
                 if old is not None:
                     old.close("replaced")
+            self.idle_observations.pop(name, None)
             self.store.set_online(name, version)
             # A reconnect is at-least-once: anything still marked running was
             # sent over the previous stream, so hand it out again.
@@ -2040,6 +2107,7 @@ class RouterServer(ThreadingHTTPServer):
                 if current:
                     self.conns.pop(conn.name, None)
             if current:
+                self.idle_observations.pop(conn.name, None)
                 self.store.set_offline(conn.name)
                 self.store.requeue_running(conn.name)
                 # 订阅不留存: a worker that is not listening keeps nothing.
@@ -2827,9 +2895,19 @@ class RouterHandler(BaseHTTPRequestHandler):
         if turn_source is not UNSET and turn_source not in (None, "trainer", "router"):
             raise BadRequest("turn_source must be trainer, router or null")
         with self.server.dispatch_lock:
+            previous = self.server.store.get_worker(name)
             if not self.server.store.heartbeat(name, state, progress_at, task_id, turn_source):
                 return 404, {"ok": False, "error": "unknown_worker", "worker": name}
-            self.server.dispatch_one(name)
+            if state == "idle":
+                # Repeated idle heartbeats retain the original pulse, so a
+                # queued task dispatched afterward cannot inherit its idle.
+                if previous.get("state") != "idle" or name not in self.server.idle_observations:
+                    self.server.idle_observations[name] = time.time()
+            elif state is not None:
+                self.server.idle_observations.pop(name, None)
+        settlements = self.server.settle_idle(name) if state == "idle" else []
+        with self.server.dispatch_lock:
+            dispatched = self.server.dispatch_one(name)
         for task in self.server.store.list_tasks(worker=name, state="cancelling", limit=1):
             self.server.cancel_execution(task)
         worker = self.server.store.get_worker(name)
@@ -2840,6 +2918,8 @@ class RouterHandler(BaseHTTPRequestHandler):
             "busy": worker["busy"],
             "queued": worker["queued"],
             "last_seen": worker["last_seen"],
+            "settlements": settlements,
+            "dispatched_next": dispatched["task_id"] if dispatched else None,
         }
 
     def _result(self, body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
@@ -3174,12 +3254,19 @@ class RouterHandler(BaseHTTPRequestHandler):
             raise BadRequest("invalid message_id")
         level = "event" if urgency == "urgent" else "notify"
         task_result = bool(kind == "task.result" and task_id and state)
+        if kind == "worker.question":
+            self.server.observe_question_notice(worker, text)
         if task_result:
             task = self.server.store.get_task(task_id)
             if task is None:
                 return 404, {"ok": False, "error": "unknown_task", "task_id": task_id}
             if task["worker"] != worker:
                 return 400, {"ok": False, "error": "worker_mismatch", "task_id": task_id}
+            if task["state"] in TERMINAL_STATES:
+                state = task["state"]
+                actual = task.get("result") or {}
+                text = str(actual.get("summary") or text)
+                body = {**body, **({"summary_short": actual["summary_short"]} if "summary_short" in actual else {})}
             if task["state"] not in TERMINAL_STATES:
                 if state == "cancelled":
                     with self.server.dispatch_lock:

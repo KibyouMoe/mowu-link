@@ -11,7 +11,7 @@ Starts real processes with throwaway state:
 
 Then drives a fake worker over a real SSE connection and exercises:
 
-  register → online → immediate dispatch → result → done → trigger notify
+  register → online → immediate dispatch → result → idle → done → trigger notify
   offline 409 → queue_if_offline 202 → reconnect → ordered backlog flush
   busy → queued → first result → second auto-dispatched
   cancel queued → cancelled (never delivered)
@@ -199,25 +199,35 @@ def free_port() -> int:
         sock.close()
 
 
-def completion_proof(worker, task_id, generation, candidate):
-    return {"ready": True, "cleanup_complete": True, "followups_pending": False,
-            "task_id": task_id, "generation": generation, "thread_id": "fixture-thread",
-            "turn_id": "fixture-turn", "turn_ids": ["fixture-turn"],
-            "native_status": "completed", "result": candidate}
+def worker_http(method, url, body=None, token=None, timeout=5.0):
+    """Admission fixtures finish a fake turn using result + real idle heartbeats.
 
-
-def install_completion_observer(server):
-    """Other admission tests use an already-finished observer fixture.
-    The dedicated completion tests exercise the authenticated SSE handshake."""
-    original = server.worker_request
-
-    def request(worker, event, data, kind, timeout=None):
-        if kind != "completion":
-            return original(worker, event, data, kind, timeout=timeout)
-        conn = server.current_conn(worker)
-        return 200, completion_proof(worker, data["task_id"], conn.generation, data["candidate"])
-
-    server.worker_request = request
+    Return the terminal exchange receipt. Completion-specific tests import the
+    raw http() client instead and assert the individual 202/heartbeat responses.
+    """
+    code, response = http(method, url, body, token, timeout)
+    report = isinstance(body, dict) and (url.endswith("/result") or
+        url.endswith("/notice") and body.get("kind") == "task.result")
+    if method != "POST" or not report or code != 202 or not response.get("candidate"):
+        return code, response
+    worker = body.get("name", body.get("worker"))
+    origin = url.rsplit("/", 1)[0]
+    http("POST", origin + "/heartbeat", {"name": worker, "state": "running",
+        "turn_source": "router", "task_id": body["task_id"]}, token)
+    _, idle = http("POST", origin + "/heartbeat", {"name": worker, "state": "idle",
+        "turn_source": None, "task_id": body["task_id"]}, token)
+    settled = next((item for item in idle.get("settlements", []) if item["task_id"] == body["task_id"]), None)
+    if settled is None:
+        _, view = http("GET", origin + "/tasks/" + body["task_id"], token=token)
+        if view.get("state") not in ("done", "failed", "cancelled"):
+            return code, response
+        settled = {"task_id": body["task_id"], "state": view["state"], "notified": False, "duplicate": True}
+    else:
+        settled["duplicate"] = False
+    return 200, {"ok": True, **settled,
+                 "dispatched_next": idle.get("dispatched_next"),
+                 **({"error": "trigger_unavailable"} if url.endswith("/notice")
+                    and not settled["notified"] and not settled["duplicate"] else {})}
 
 
 class FakeWorker(threading.Thread):
@@ -273,13 +283,6 @@ class FakeWorker(threading.Thread):
                     break
                 line = raw.decode("utf-8", "replace").rstrip("\r\n")
                 if line == "":
-                    if event == "task_result_check" and data:
-                        payload = json.loads("\n".join(data))
-                        proof = completion_proof(self.worker_name, payload["task_id"],
-                                                 payload["generation"], payload["candidate"])
-                        http("POST", "http://127.0.0.1:%d/result/responses" % self.port,
-                             {"worker": self.worker_name, "request_id": payload["request_id"],
-                              "status": 200, "body": proof}, self.token)
                     if event in ("task", "worker_message", "task_cancel") and data:
                         try:
                             payload = json.loads("\n".join(data))
@@ -360,7 +363,7 @@ def peer_selftest(checker, work, trigger_url, trigger_token, trigger_db):
         token = token_path.read_text(encoding="utf-8").strip()
 
         def call(method, route, body=None):
-            return http(method, base + route, body, token)
+            return worker_http(method, base + route, body, token)
 
         def payload(**changes):
             body = {"message_id": str(uuid.uuid4()), "from": a, "to": b,
@@ -425,7 +428,7 @@ def peer_selftest(checker, work, trigger_url, trigger_token, trigger_db):
                        ("POST", "/messages/" + mid + "/ack", {"worker": b}),
                        ("GET", "/stream?name=" + quote(b), None)]
         checker.check("peer auth: create/inbox/id/ACK/SSE require the router token",
-                      all(http(method, base + route, body, given)[0] == 401
+                      all(worker_http(method, base + route, body, given)[0] == 401
                           for given in (None, "invalid-token")
                           for method, route, body in auth_routes))
 
@@ -771,7 +774,7 @@ def worker_names_selftest(checker, work, trigger_url, trigger_token, trigger_db)
         token = token_file.read_text().strip()
 
         def call(method, route, body=None):
-            return http(method, base + route, body, token)
+            return worker_http(method, base + route, body, token)
 
         def workers():
             return {row["name"]: row for row in call("GET", "/workers")[1]["workers"]}
@@ -872,7 +875,6 @@ def task_notice_selftest(checker, work, trigger_url, trigger_token, trigger_db):
     notifier = router_module.TriggerNotifier(client, store)
     server = router_module.RouterServer(("127.0.0.1", 0), store, "notice-test-token",
                                         notifier, mock.Mock())
-    install_completion_observer(server)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     base = "http://127.0.0.1:%d" % server.server_address[1]
@@ -881,7 +883,7 @@ def task_notice_selftest(checker, work, trigger_url, trigger_token, trigger_db):
     server.attach(worker)
 
     def call(route, body):
-        return http("POST", base + route, body, server.token)
+        return worker_http("POST", base + route, body, server.token)
 
     def new_task():
         code, result = call("/tasks", {"worker": worker, "goal": "task notice fixture"})
@@ -974,17 +976,18 @@ def task_notice_selftest(checker, work, trigger_url, trigger_token, trigger_db):
             notice(first, "failed", "later failure")
             _, cancelled = notice(first, " CANCELED ", "later cancellation")
             _, cancel_again = notice(first, "cancelled", "changed cancellation wording")
-            checker.check("task notice: failed after done survives and cancellation aliases normalize",
-                          sent.call_count == 5 and len(events(first)) == 3
+            checker.check("task notice: late failure or cancellation preserves the first terminal result",
+                          sent.call_count == 3 and len(events(first)) == 1
                           and [row["source"] for row in events(first)]
-                          == ["任务完成", "任务失败", "任务取消"]
-                          and cancelled["event_id"] == first + ":cancelled"
+                          == ["任务完成"]
+                          and router_module.terminal_notice_state(" CANCELED ") == "cancelled"
+                          and cancelled["event_id"] == first + ":done"
                           and cancel_again["duplicate"] is True)
 
             _, inferred = call("/notice", {"worker": worker, "kind": "task.result",
                                            "task_id": first, "text": "legacy terminal notice"})
             checker.check("task notice: omitted status reads a terminal task and uses the same key",
-                          inferred["duplicate"] is True and sent.call_count == 5)
+                          inferred["duplicate"] is True and sent.call_count == 3)
             _, progress = notice(first, "unverified", "explicit progress remains ordinary")
             with sqlite3.connect(str(trigger_db)) as saved:
                 progress_source = saved.execute("SELECT source FROM events WHERE event_id=?",
@@ -1083,7 +1086,7 @@ def workorders_selftest(checker, work, trigger_url, trigger_token):
         token = token_path.read_text(encoding="utf-8").strip()
 
         def call(method, route, body=None):
-            return http(method, base + route, body, token)
+            return worker_http(method, base + route, body, token)
 
         def online(want):
             deadline = time.time() + 5
@@ -1243,11 +1246,12 @@ def workorders_selftest(checker, work, trigger_url, trigger_token):
                       and receipt(*call("POST", "/tasks", body), task_id)
                       and receipt(*call("POST", "/tasks", explicit_body), explicit_id)
                       and reconnected.wait_task(0.3) is None)
-        finish_code, _ = finish(task_id)
+        finish_code, _ = http("POST", base + "/result", {"name": name, "task_id": task_id,
+                              "status": "done", "summary": "first task business result"}, token)
         code, completed = call("POST", "/tasks", body)
-        checker.check("workorders retry after completion returns the same terminal task",
-                      finish_code == 200 and receipt(code, completed, task_id)
-                      and completed.get("state") == "done" and reconnected.wait_task(0.2) is None)
+        checker.check("workorders retry after a candidate preserves the same running task until idle",
+                      finish_code == 202 and receipt(code, completed, task_id)
+                      and completed.get("state") == "running" and reconnected.wait_task(0.2) is None)
 
         # Crash this test process while the second task is running. The task
         # row and creation identity must survive together, before reconnect.
@@ -1261,7 +1265,7 @@ def workorders_selftest(checker, work, trigger_url, trigger_token):
         checker.check("workorders process restart preserves UUIDs, fingerprints and original task IDs",
                       receipt(*call("POST", "/tasks", body), task_id)
                       and receipt(*call("POST", "/tasks", explicit_body), explicit_id)
-                      and get_task(task_id).get("state") == "done"
+                      and get_task(task_id).get("state") == "queued"
                       and get_task(explicit_id).get("state") == "queued"
                       and call("POST", "/tasks", dict(body, goal="changed after restart"))[0] == 409
                       and call("GET", "/tasks")[1].get("count") == 5)
@@ -1272,10 +1276,10 @@ def workorders_selftest(checker, work, trigger_url, trigger_token):
         checker.check("workorders migration is repeatable and restart does not change persisted creation data",
                       after_restart == persisted and get_task("t-legacy") == legacy)
         restarted = connect()
-        replay = restarted.wait_task(3)
-        checker.check("workorders restart dispatches only the original unfinished task, never its completed peer",
-                      replay is not None and replay.get("task_id") == explicit_id
-                      and replay.get("execution_mode") == "goal"
+        replay = [restarted.wait_task(3), restarted.wait_task(3)]
+        checker.check("workorders restart replays the two unsettled original IDs, retaining the candidate",
+                      [task and task.get("task_id") for task in replay] == [task_id, explicit_id]
+                      and all(task.get("execution_mode") == "goal" for task in replay)
                       and receipt(*call("POST", "/tasks", explicit_body), explicit_id)
                       and restarted.wait_task(0.3) is None)
         finish(explicit_id)
@@ -1328,76 +1332,76 @@ def control_selftest(checker, token, workers):
         origin = "http://127.0.0.1:%d" % callback.server_address[1]
         for bad in ("http://example.com:80", "http://127.0.0.1:80/path",
                     "http://user:password@127.0.0.1:80", "file:///tmp/x"):
-            code, _ = http("POST", BASE + "/register",
+            code, _ = worker_http("POST", BASE + "/register",
                            {"name": name, "control_url": bad}, token)
             checker.check("control callback rejects unsafe origin " + bad, code == 400)
-        code, _ = http("POST", BASE + "/register",
+        code, _ = worker_http("POST", BASE + "/register",
                        {"name": name, "control_url": origin}, token)
         worker = FakeWorker(name, token)
         workers.append(worker)
         worker.start()
         checker.check("control worker registers loopback callback and connects",
                       code == 200 and wait_online(name, token, True))
-        _, active = http("POST", BASE + "/tasks", {"worker": name, "goal": "active"}, token)
+        _, active = worker_http("POST", BASE + "/tasks", {"worker": name, "goal": "active"}, token)
         worker.wait_task(3)
-        _, queued = http("POST", BASE + "/tasks", {"worker": name, "goal": "queued"}, token)
-        _, cancelled_q = http("POST", BASE + "/tasks/%s/cancel" % queued["task_id"], None, token)
+        _, queued = worker_http("POST", BASE + "/tasks", {"worker": name, "goal": "queued"}, token)
+        _, cancelled_q = worker_http("POST", BASE + "/tasks/%s/cancel" % queued["task_id"], None, token)
         checker.check("queued cancel never calls the worker",
                       not calls and cancelled_q.get("cancel_delivery", {}).get("skipped") == "queued_task")
-        _, cancelled = http("POST", BASE + "/tasks/%s/cancel" % active["task_id"], None, token)
+        _, cancelled = worker_http("POST", BASE + "/tasks/%s/cancel" % active["task_id"], None, token)
         checker.check("running cancel reaches exact worker task with authenticated POST",
                       cancelled.get("cancel_delivery", {}).get("ok") is True
                       and calls == [("/manager/tasks/%s/cancel" % active["task_id"],
                                      "Bearer " + token, {"task_id": active["task_id"]})])
-        _, saved = http("GET", BASE + "/tasks/" + active["task_id"], token=token)
+        _, saved = worker_http("GET", BASE + "/tasks/" + active["task_id"], token=token)
         checker.check("cancel forwarding receipt persists on the task",
                       saved["task"]["result"]["cancel_delivery"]["ok"] is True)
-        _, failing = http("POST", BASE + "/tasks", {"worker": name, "goal": "fail"}, token)
+        _, failing = worker_http("POST", BASE + "/tasks", {"worker": name, "goal": "fail"}, token)
         worker.wait_task(3)
         response_status[0] = 503
-        _, failed = http("POST", BASE + "/tasks/%s/cancel" % failing["task_id"], None, token)
+        _, failed = worker_http("POST", BASE + "/tasks/%s/cancel" % failing["task_id"], None, token)
         checker.check("worker refusal is explicit rather than a silent cancel",
                       failed.get("cancel_delivery", {}).get("ok") is False)
         response_status[0] = 200
-        _, retry = http("POST", BASE + "/tasks/%s/cancel" % failing["task_id"], None, token)
+        _, retry = worker_http("POST", BASE + "/tasks/%s/cancel" % failing["task_id"], None, token)
         checker.check("an unconfirmed cancel can be retried safely by task id",
                       retry.get("already") is True and retry.get("cancel_delivery", {}).get("ok") is True)
 
         # An actual running task plus a real router approval must expose public progress.
-        _, visible = http("POST", BASE + "/tasks", {"worker": name, "goal": "approval progress"}, token)
+        _, visible = worker_http("POST", BASE + "/tasks", {"worker": name, "goal": "approval progress"}, token)
         worker.wait_task(3)
-        _, asked = http("POST", BASE + "/approvals", {
+        _, asked = worker_http("POST", BASE + "/approvals", {
             "worker": name, "task_id": visible["task_id"], "kind": "approval",
             "title": "write outside workspace", "ttl_s": 60, "auto": False}, token)
         aid = asked["approval_id"]
-        _, snapshot = http("GET", BASE + "/tasks/" + visible["task_id"], token=token)
+        _, snapshot = worker_http("GET", BASE + "/tasks/" + visible["task_id"], token=token)
         progress = snapshot["task"].get("progress") or {}
         checker.check("task progress exposes waiting approval id and readable reason",
                       progress.get("state") == "waiting_approval"
                       and progress.get("approval_id") == aid
                       and ("等待审批 " + aid) in progress.get("text", ""))
-        _, listing = http("GET", BASE + "/tasks?worker=" + name, token=token)
+        _, listing = worker_http("GET", BASE + "/tasks?worker=" + name, token=token)
         row = next(t for t in listing["tasks"] if t["task_id"] == visible["task_id"])
         checker.check("task listing exposes the same approval progress",
                       row.get("progress", {}).get("approval_id") == aid)
-        http("POST", BASE + "/approvals/" + aid + "/decide",
+        worker_http("POST", BASE + "/approvals/" + aid + "/decide",
              {"decision": "approved"}, token)
-        http("POST", BASE + "/result", {"name": name, "task_id": visible["task_id"],
+        worker_http("POST", BASE + "/result", {"name": name, "task_id": visible["task_id"],
              "status": "done", "summary": "done"}, token)
-        _, finished = http("GET", BASE + "/tasks/" + visible["task_id"], token=token)
+        _, finished = worker_http("GET", BASE + "/tasks/" + visible["task_id"], token=token)
         checker.check("finished task result retains approval id without a waiting state",
                       finished["task"]["result"].get("approval_id") == aid
                       and finished["task"]["progress"]["waiting_for_approval"] is False)
-        _, aborting = http("POST", BASE + "/tasks", {"worker": name, "goal": "cancel approval"}, token)
+        _, aborting = worker_http("POST", BASE + "/tasks", {"worker": name, "goal": "cancel approval"}, token)
         worker.wait_task(3)
-        _, asked = http("POST", BASE + "/approvals", {
+        _, asked = worker_http("POST", BASE + "/approvals", {
             "worker": name, "task_id": aborting["task_id"], "kind": "approval",
             "title": "cancel this approval", "ttl_s": 60, "auto": False}, token)
-        http("POST", BASE + "/tasks/" + aborting["task_id"] + "/cancel", None, token)
-        _, decision = http("GET", BASE + "/approvals/" + asked["approval_id"], token=token)
+        worker_http("POST", BASE + "/tasks/" + aborting["task_id"] + "/cancel", None, token)
+        _, decision = worker_http("GET", BASE + "/approvals/" + asked["approval_id"], token=token)
         checker.check("task cancellation closes its outstanding router approval",
                       decision["approval"]["status"] == "denied")
-        _, late = http("POST", BASE + "/approvals", {
+        _, late = worker_http("POST", BASE + "/approvals", {
             "worker": name, "task_id": aborting["task_id"], "kind": "approval",
             "title": "late approval after cancellation"}, token)
         checker.check("late approval submissions for cancelled tasks fail closed",
@@ -1414,39 +1418,39 @@ def control_selftest(checker, token, workers):
 
 def activity_selftest(checker, token, workers):
     name = "trainer-state-test"
-    http("POST", BASE + "/register", {"name": name, "control_sse": True}, token)
+    worker_http("POST", BASE + "/register", {"name": name, "control_sse": True}, token)
     client = FakeWorker(name, token)
     workers.append(client)
     client.start()
     checker.check("activity worker connects", wait_online(name, token, True))
-    http("POST", BASE + "/heartbeat", {"name": name, "state": "running",
+    worker_http("POST", BASE + "/heartbeat", {"name": name, "state": "running",
          "turn_source": "trainer", "task_id": None, "progress_at": time.time()}, token)
     row = worker_row(name, token)
-    code, task = http("POST", BASE + "/tasks", {"worker": name, "goal": "wait for trainer"}, token)
+    code, task = worker_http("POST", BASE + "/tasks", {"worker": name, "goal": "wait for trainer"}, token)
     checker.check("trainer turn is visible and router queues instead of dispatching",
                   row["busy"] and row["turn_source"] == "trainer" and code == 202
                   and task["state"] == "queued" and client.wait_task(0.2) is None)
-    http("POST", BASE + "/heartbeat", {"name": name, "state": "idle",
+    worker_http("POST", BASE + "/heartbeat", {"name": name, "state": "idle",
          "turn_source": None, "task_id": None}, token)
     dispatched = client.wait_task(3)
     checker.check("trainer completion heartbeat automatically releases the queued task",
                   dispatched and dispatched["task_id"] == task["task_id"])
-    http("POST", BASE + "/heartbeat", {"name": name, "state": "running",
+    worker_http("POST", BASE + "/heartbeat", {"name": name, "state": "running",
          "turn_source": "router", "task_id": task["task_id"]}, token)
-    http("POST", BASE + "/result", {"name": name, "task_id": task["task_id"],
+    worker_http("POST", BASE + "/result", {"name": name, "task_id": task["task_id"],
          "status": "done", "summary": "actual completion"}, token)
-    _, saved = http("GET", BASE + "/tasks/" + task["task_id"], token=token)
+    _, saved = worker_http("GET", BASE + "/tasks/" + task["task_id"], token=token)
     row = worker_row(name, token)
     checker.check("completion clears task identity and writes the exact finish time to progress",
                   row["task_id"] is None and row["progress_at"] == saved["task"]["finished_at"])
-    http("POST", BASE + "/heartbeat", {"name": name, "state": "idle",
+    worker_http("POST", BASE + "/heartbeat", {"name": name, "state": "idle",
          "task_id": task["task_id"], "progress_at": 1}, token)
     row = worker_row(name, token)
     checker.check("a late heartbeat cannot restore a terminal task or move progress backwards",
                   row["task_id"] is None and row["progress_at"] == saved["task"]["finished_at"])
-    _, cancel = http("POST", BASE + "/tasks", {"worker": name, "goal": "SSE cancellation"}, token)
+    _, cancel = worker_http("POST", BASE + "/tasks", {"worker": name, "goal": "SSE cancellation"}, token)
     client.wait_task(3)
-    code, pending = http("POST", BASE + "/tasks/" + cancel["task_id"] + "/cancel", None, token)
+    code, pending = worker_http("POST", BASE + "/tasks/" + cancel["task_id"] + "/cancel", None, token)
     try:
         command = client.cancellations.get(timeout=3)
     except queue.Empty:
@@ -1454,9 +1458,9 @@ def activity_selftest(checker, token, workers):
     checker.check("remote worker cancellation uses the existing authenticated SSE channel",
                   code == 202 and pending["state"] == "cancelling"
                   and command == {"task_id": cancel["task_id"]})
-    bad, _ = http("POST", BASE + "/tasks/" + cancel["task_id"] + "/cancel-ack", {
+    bad, _ = worker_http("POST", BASE + "/tasks/" + cancel["task_id"] + "/cancel-ack", {
         "name": "another-worker", "outcome": {"task_id": cancel["task_id"], "ok": True, "state": "cancelled"}}, token)
-    _, acknowledged = http("POST", BASE + "/tasks/" + cancel["task_id"] + "/cancel-ack", {
+    _, acknowledged = worker_http("POST", BASE + "/tasks/" + cancel["task_id"] + "/cancel-ack", {
         "name": name, "outcome": {"task_id": cancel["task_id"], "ok": True, "state": "cancelled"}}, token)
     checker.check("only the assigned execution owner can confirm cancellation",
                   bad == 400 and acknowledged["state"] == "cancelled" and not worker_row(name, token)["busy"])
@@ -1483,7 +1487,7 @@ def zero_backlog_selftest(checker, work, trigger_url, trigger_token):
         token = token_path.read_text(encoding="utf-8").strip()
 
         def call(method, route, body=None):
-            return http(method, base + route, body, token)
+            return worker_http(method, base + route, body, token)
 
         def row():
             return next(w for w in call("GET", "/workers")[1]["workers"] if w["name"] == name)
@@ -1591,7 +1595,8 @@ def zero_backlog_selftest(checker, work, trigger_url, trigger_token):
                       code == 202 and pending.get("state") == "cancelling"
                       and command == {"task_id": task_id} and busy(next_body, task_id, "router")
                       and duplicate(trainer_body, task_id, "cancelling")
-                      and finish(task_id)[1].get("state") == "cancelling"
+                      and http("POST", base + "/result", {"name": name, "task_id": task_id,
+                              "status": "done", "summary": "candidate during cancellation"}, token)[1].get("state") == "cancelling"
                       and client.wait_task(0.1) is None)
         with sqlite3.connect(str(db)) as connection:
             connection.execute("UPDATE workers SET busy=0 WHERE name=?", (name,))
@@ -1715,9 +1720,9 @@ def dispatch_race_selftest(checker, work):
     store = router_module.RouterStore(str(work / "dispatch-race.db"))
     notifier = mock.Mock()
     notifier.notify_result.return_value = False
+    notifier.post_task_notice.return_value = (False, {})
     server = router_module.RouterServer(("127.0.0.1", 0), store, "race-test-token",
                                         notifier, mock.Mock(), backlog_max=0)
-    install_completion_observer(server)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     base = "http://127.0.0.1:%d" % server.server_address[1]
@@ -1731,30 +1736,30 @@ def dispatch_race_selftest(checker, work):
             body = {"worker": name, "goal": "push race", "message_id": str(uuid.uuid4()),
                     "queue_if_offline": queue_if_offline}
             with mock.patch.object(conn, "send_task", return_value=False):
-                code, result = http("POST", base + "/tasks", body, server.token)
+                code, result = worker_http("POST", base + "/tasks", body, server.token)
             checker.check("zero backlog: failed push (queue_if_offline=%s) deletes task and UUID" % queue_if_offline,
                           code == 409 and result.get("error") == "worker_offline"
                           and store.list_tasks() == [] and store.get_task_request(body["message_id"]) is None
                           and not store.get_worker(name)["busy"] and store.queued_count(name) == 0)
         with mock.patch.object(server, "current_conn", side_effect=[conn, None]):
-            code, result = http("POST", base + "/tasks", body, server.token)
+            code, result = worker_http("POST", base + "/tasks", body, server.token)
         checker.check("zero backlog: vanished connection before push also leaves no task or UUID",
                       code == 409 and result.get("error") == "worker_offline"
                       and store.list_tasks() == [] and store.get_task_request(body["message_id"]) is None)
-        code, accepted = http("POST", base + "/tasks", body, server.token)
+        code, accepted = worker_http("POST", base + "/tasks", body, server.token)
         event = conn.queue.get(timeout=3)
         checker.check("zero backlog: UUID refused by push race can be accepted on retry",
                       code == 200 and accepted.get("dispatched") is True
                       and event.get("data", {}).get("task_id") == accepted.get("task_id")
                       and len(store.list_tasks()) == 1 and store.queued_count(name) == 0)
 
-        http("POST", base + "/result", {"name": name, "task_id": accepted["task_id"],
+        worker_http("POST", base + "/result", {"name": name, "task_id": accepted["task_id"],
              "status": "done", "summary": "prepare queued recovery race"}, server.token)
         server.backlog_max = 2
         store.heartbeat(name, state="running", turn_source="trainer")
         old_bodies = [{"worker": name, "goal": "accepted queued work %d" % index,
                        "message_id": str(uuid.uuid4())} for index in range(2)]
-        old_results = [http("POST", base + "/tasks", old_body, server.token)
+        old_results = [worker_http("POST", base + "/tasks", old_body, server.token)
                        for old_body in old_bodies]
         old_ids = [task.get("task_id") for _, task in old_results]
         checker.check("queued recovery: explicit positive capacity accepts two legitimate old tasks",
@@ -1768,7 +1773,7 @@ def dispatch_race_selftest(checker, work):
                       and store.queued_count(name) == 2 and store.running_count(name) == 0)
         new_body = {"worker": name, "goal": "new work must follow accepted work",
                     "message_id": str(uuid.uuid4())}
-        code, full = http("POST", base + "/tasks", new_body, server.token)
+        code, full = worker_http("POST", base + "/tasks", new_body, server.token)
         checker.check("queued recovery: positive full capacity also prevents immediate FIFO bypass",
                       code == 429 and full.get("error") == "backlog_full"
                       and store.get_task_request(new_body["message_id"]) is None and conn.queue.empty())
@@ -1787,7 +1792,7 @@ def dispatch_race_selftest(checker, work):
 
         def create(request):
             gate.wait(timeout=5)
-            results.append(http("POST", base + "/tasks", request, server.token))
+            results.append(worker_http("POST", base + "/tasks", request, server.token))
 
         writers = [threading.Thread(target=create, args=(request,), daemon=True) for request in contenders]
         for writer in writers:
@@ -1802,7 +1807,7 @@ def dispatch_race_selftest(checker, work):
                               for code, result in results)
                       and store.list_tasks() == before and conn.queue.empty()
                       and all(store.get_task_request(request["message_id"]) is None for request in contenders))
-        code, duplicate = http("POST", base + "/tasks", old_bodies[0], server.token)
+        code, duplicate = worker_http("POST", base + "/tasks", old_bodies[0], server.token)
         checker.check("queued recovery: exact accepted UUID retry bypasses admission refusal without dispatch",
                       code == 200 and duplicate.get("duplicate") is True
                       and duplicate.get("task_id") == old_ids[0] and duplicate.get("state") == "queued"
@@ -1815,15 +1820,15 @@ def dispatch_race_selftest(checker, work):
                       and store.get_task(old_ids[1])["state"] == "queued"
                       and event.get("data", {}).get("task_id") == old_ids[0]
                       and conn.queue.empty())
-        code, result = http("POST", base + "/result", {
+        code, result = worker_http("POST", base + "/result", {
             "name": name, "task_id": old_ids[0], "status": "done", "summary": "oldest completed"}, server.token)
         event = conn.queue.get(timeout=3)
         checker.check("queued recovery: completing oldest task automatically dispatches the next accepted task",
                       code == 200 and result.get("dispatched_next") == old_ids[1]
                       and event.get("data", {}).get("task_id") == old_ids[1])
-        http("POST", base + "/result", {"name": name, "task_id": old_ids[1],
+        worker_http("POST", base + "/result", {"name": name, "task_id": old_ids[1],
              "status": "done", "summary": "old queue drained"}, server.token)
-        code, admitted = http("POST", base + "/tasks", contenders[0], server.token)
+        code, admitted = worker_http("POST", base + "/tasks", contenders[0], server.token)
         event = conn.queue.get(timeout=3)
         checker.check("queued recovery: refused UUID succeeds once accepted old work completes",
                       code == 200 and admitted.get("dispatched") is True
@@ -1843,9 +1848,9 @@ def one_backlog_selftest(checker, work):
     store = router_module.RouterStore(str(work / "one-backlog.db"))
     notifier = mock.Mock()
     notifier.notify_result.return_value = True
+    notifier.post_task_notice.return_value = (True, {"id": "isolated-notice"})
     server = router_module.RouterServer(("127.0.0.1", 0), store, "one-backlog-test-token",
                                         notifier, mock.Mock())
-    install_completion_observer(server)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     base = "http://127.0.0.1:%d" % server.server_address[1]
@@ -1854,7 +1859,7 @@ def one_backlog_selftest(checker, work):
     conn = server.attach(name)
 
     def call(method, route, body=None):
-        return http(method, base + route, body, server.token)
+        return worker_http(method, base + route, body, server.token)
 
     def payload(goal, **extra):
         return dict(worker=name, goal=goal, message_id=str(uuid.uuid4()), **extra)
@@ -2050,7 +2055,7 @@ def question_proxy_selftest(checker, work):
     question_id = str(uuid.uuid4())
 
     def call(method, route, body=None, token=server.token):
-        return http(method, base + route, body, token, timeout=8)
+        return worker_http(method, base + route, body, token, timeout=8)
 
     def respond(request, worker, status=200, body=None):
         return call("POST", "/questions/responses", {"request_id": request["request_id"],
@@ -2204,7 +2209,7 @@ def run(work: Path, checker: Checker) -> None:
             "len=%d mode=%o" % (len(token),
                                 os.stat(str(router_token)).st_mode & 0o777))
 
-        status, health = http("GET", BASE + "/health")
+        status, health = worker_http("GET", BASE + "/health")
         checker.check(
             "GET /health (no token): ok, version, workers, tasks",
             status == 200 and health.get("ok") is True
@@ -2213,7 +2218,7 @@ def run(work: Path, checker: Checker) -> None:
             and health.get("workers") == 0 and health.get("tasks") == 0,
             "status=%s body=%s" % (status, health))
 
-        status, payload = http("GET", BASE + "/workers")
+        status, payload = worker_http("GET", BASE + "/workers")
         checker.check("auth: GET /workers without token -> 401",
                       status == 401 and payload.get("error") == "unauthorized",
                       "status=%s" % status)
@@ -2235,7 +2240,7 @@ def run(work: Path, checker: Checker) -> None:
         # ---------------------------------------------------------------- #
         # 1. register + stream + immediate dispatch
         # ---------------------------------------------------------------- #
-        status, reg = http("POST", BASE + "/register",
+        status, reg = worker_http("POST", BASE + "/register",
                            {"name": "波旁", "version": "fake-1"}, token)
         checker.check(
             "POST /register {name} -> ok, queued=0, new=true",
@@ -2243,7 +2248,7 @@ def run(work: Path, checker: Checker) -> None:
             and reg.get("queued") == 0 and reg.get("new") is True,
             "status=%s body=%s" % (status, reg))
 
-        status, payload = http("POST", BASE + "/tasks",
+        status, payload = worker_http("POST", BASE + "/tasks",
                                {"worker": "不存在", "goal": "x"}, token)
         checker.check("POST /tasks unknown worker -> 400 unknown_worker",
                       status == 400 and payload.get("error") == "unknown_worker",
@@ -2260,7 +2265,7 @@ def run(work: Path, checker: Checker) -> None:
         checker.check("SSE heartbeat comment line (: ping) received",
                       pingged, "pings=%d" % len(worker.ping_times))
 
-        status, created = http("POST", BASE + "/tasks",
+        status, created = worker_http("POST", BASE + "/tasks",
                                {"worker": "波旁", "goal": "打印 hello",
                                 "context": "selftest", "urgency": "urgent",
                                 "workspace": "/tmp", "deadline_s": 60}, token)
@@ -2279,7 +2284,7 @@ def run(work: Path, checker: Checker) -> None:
             "received=%s" % (received,))
 
         progress_ts = round(time.time() - 30, 3)
-        status, hb = http("POST", BASE + "/heartbeat",
+        status, hb = worker_http("POST", BASE + "/heartbeat",
                           {"name": "波旁", "state": "working",
                            "progress_at": progress_ts,
                            "task_id": task1}, token)
@@ -2300,18 +2305,18 @@ def run(work: Path, checker: Checker) -> None:
         # ---------------------------------------------------------------- #
         # 2. result -> done -> trigger notify
         # ---------------------------------------------------------------- #
-        status, result = http("POST", BASE + "/result", {
+        status, result = worker_http("POST", BASE + "/result", {
             "name": "波旁", "task_id": task1, "status": "done",
             "summary": "hello printed", "artifacts": ["/tmp/hello.txt"],
             "evidence": ["exit=0"],
         }, token)
         checker.check(
-            "POST /result done -> 200, notified=true",
+            "worker result + idle -> done, notified=true",
             status == 200 and result.get("state") == "done"
             and result.get("notified") is True,
             "status=%s body=%s" % (status, result))
 
-        status, got = http("GET", BASE + "/tasks/" + task1, token=token)
+        status, got = worker_http("GET", BASE + "/tasks/" + task1, token=token)
         checker.check(
             "GET /tasks/{id} -> state done + summary",
             status == 200 and got.get("state") == "done"
@@ -2319,7 +2324,7 @@ def run(work: Path, checker: Checker) -> None:
             == "hello printed",
             "status=%s body=%s" % (status, got))
 
-        status, listing = http(
+        status, listing = worker_http(
             "GET", BASE + "/tasks?worker=%s&state=done" % quote("波旁"),
             token=token)
         checker.check(
@@ -2366,17 +2371,17 @@ def run(work: Path, checker: Checker) -> None:
                       wait_online("波旁", token, False)
                       and worker_row("波旁", token) is not None)
 
-        status, refused = http("POST", BASE + "/tasks",
+        status, refused = worker_http("POST", BASE + "/tasks",
                                {"worker": "波旁", "goal": "offline-1"}, token)
         checker.check(
             "offline + queue_if_offline=false -> 409 worker_offline",
             status == 409 and refused.get("error") == "worker_offline",
             "status=%s body=%s" % (status, refused))
 
-        status1, off1 = http("POST", BASE + "/tasks", {
+        status1, off1 = worker_http("POST", BASE + "/tasks", {
             "worker": "波旁", "goal": "offline-1", "queue_if_offline": True,
         }, token)
-        status2, off2 = http("POST", BASE + "/tasks", {
+        status2, off2 = worker_http("POST", BASE + "/tasks", {
             "worker": "波旁", "goal": "offline-2", "queue_if_offline": True,
         }, token)
         checker.check(
@@ -2386,7 +2391,7 @@ def run(work: Path, checker: Checker) -> None:
             and status2 == 202 and off2.get("queued_ahead") == 1,
             "first=%s/%s second=%s/%s" % (status1, off1, status2, off2))
 
-        status, pending = http("GET", BASE + "/tasks?worker=%s&state=queued"
+        status, pending = worker_http("GET", BASE + "/tasks?worker=%s&state=queued"
                                % quote("波旁"), token=token)
         checker.check(
             "backlog is visible via GET /tasks?state=queued",
@@ -2410,10 +2415,10 @@ def run(work: Path, checker: Checker) -> None:
             "first=%s second=%s" % (first and first.get("goal"),
                                     second and second.get("goal")))
 
-        status, _ = http("POST", BASE + "/result", {
+        status, _ = worker_http("POST", BASE + "/result", {
             "name": "波旁", "task_id": off1["task_id"], "status": "done",
             "summary": "offline-1 done"}, token)
-        status2, _ = http("POST", BASE + "/result", {
+        status2, _ = worker_http("POST", BASE + "/result", {
             "name": "波旁", "task_id": off2["task_id"], "status": "done",
             "summary": "offline-2 done"}, token)
         checker.check("backlog tasks report done", status == 200
@@ -2422,9 +2427,9 @@ def run(work: Path, checker: Checker) -> None:
         # ---------------------------------------------------------------- #
         # 4. busy -> queued -> auto-dispatch after the first result
         # ---------------------------------------------------------------- #
-        _, a = http("POST", BASE + "/tasks",
+        _, a = worker_http("POST", BASE + "/tasks",
                     {"worker": "波旁", "goal": "busy-A"}, token)
-        status_b, b = http("POST", BASE + "/tasks",
+        status_b, b = worker_http("POST", BASE + "/tasks",
                            {"worker": "波旁", "goal": "busy-B"}, token)
         got_a = worker2.wait_task(3.0)
         noise_b = worker2.wait_task(1.2)
@@ -2439,7 +2444,7 @@ def run(work: Path, checker: Checker) -> None:
             % (a.get("state"), b.get("state"),
                got_a and got_a.get("goal"), noise_b and noise_b.get("goal")))
 
-        body_b = http("POST", BASE + "/result", {
+        body_b = worker_http("POST", BASE + "/result", {
             "name": "波旁", "task_id": a["task_id"], "status": "done",
             "summary": "A done"}, token)[1]
         dispatched_b = worker2.wait_task(5.0)
@@ -2454,12 +2459,12 @@ def run(work: Path, checker: Checker) -> None:
         # ---------------------------------------------------------------- #
         # 5. cancel a queued task: cancelled and never delivered
         # ---------------------------------------------------------------- #
-        _, c = http("POST", BASE + "/tasks",
+        _, c = worker_http("POST", BASE + "/tasks",
                     {"worker": "波旁", "goal": "cancel-C"}, token)
-        status, cancelled = http(
+        status, cancelled = worker_http(
             "POST", BASE + "/tasks/%s/cancel" % c["task_id"], None, token)
         stray = worker2.wait_task(0.8)
-        status_get, got_c = http("GET", BASE + "/tasks/" + c["task_id"],
+        status_get, got_c = worker_http("GET", BASE + "/tasks/" + c["task_id"],
                                  token=token)
         checker.check(
             "cancel queued -> cancelled, never delivered",
@@ -2470,7 +2475,7 @@ def run(work: Path, checker: Checker) -> None:
                                            got_c.get("state")))
 
         # Finish B so the worker is idle for the running-cancel case.
-        http("POST", BASE + "/result", {
+        worker_http("POST", BASE + "/result", {
             "name": "波旁", "task_id": b["task_id"], "status": "done",
             "summary": "B done"}, token)
         time.sleep(0.2)
@@ -2478,19 +2483,19 @@ def run(work: Path, checker: Checker) -> None:
         # ---------------------------------------------------------------- #
         # 6. cancel a running task; a late result is ignored
         # ---------------------------------------------------------------- #
-        _, d = http("POST", BASE + "/tasks",
+        _, d = worker_http("POST", BASE + "/tasks",
                     {"worker": "波旁", "goal": "cancel-D"}, token)
         got_d = worker2.wait_task(3.0)
-        status, cancel_d = http(
+        status, cancel_d = worker_http(
             "POST", BASE + "/tasks/%s/cancel" % d["task_id"], None, token)
         pending_row = worker_row("波旁", token)
         checker.check("undelivered cancel stays cancelling and retains worker occupancy",
                       status == 202 and cancel_d.get("state") == "cancelling"
                       and cancel_d.get("ok") is False
                       and pending_row.get("busy") is True)
-        _, acknowledged = http("POST", BASE + "/tasks/%s/cancel-ack" % d["task_id"], {
+        _, acknowledged = worker_http("POST", BASE + "/tasks/%s/cancel-ack" % d["task_id"], {
             "name": "波旁", "outcome": {"ok": True, "task_id": d["task_id"], "state": "cancelled"}}, token)
-        status_late, late = http("POST", BASE + "/result", {
+        status_late, late = worker_http("POST", BASE + "/result", {
             "name": "波旁", "task_id": d["task_id"], "status": "done",
             "summary": "late"}, token)
         row = worker_row("波旁", token)
@@ -2505,12 +2510,12 @@ def run(work: Path, checker: Checker) -> None:
         # ---------------------------------------------------------------- #
         # 7. backlog cap 128 for an offline worker
         # ---------------------------------------------------------------- #
-        status, _ = http("POST", BASE + "/register", {"name": "积压工"}, token)
+        status, _ = worker_http("POST", BASE + "/register", {"name": "积压工"}, token)
         accepted = 0
         last_ahead = None
         first_bad = None
         for index in range(128):
-            code, body = http("POST", BASE + "/tasks", {
+            code, body = worker_http("POST", BASE + "/tasks", {
                 "worker": "积压工", "goal": "backlog-%03d" % index,
                 "queue_if_offline": True,
             }, token)
@@ -2520,7 +2525,7 @@ def run(work: Path, checker: Checker) -> None:
             else:
                 first_bad = (code, body)
                 break
-        code, overflow = http("POST", BASE + "/tasks", {
+        code, overflow = worker_http("POST", BASE + "/tasks", {
             "worker": "积压工", "goal": "backlog-overflow",
             "queue_if_offline": True,
         }, token)
@@ -2534,7 +2539,7 @@ def run(work: Path, checker: Checker) -> None:
             "register=%s accepted=%d last_ahead=%s overflow=%s/%s"
             % (status, accepted, last_ahead, code, overflow))
 
-        status, reg2 = http("POST", BASE + "/register",
+        status, reg2 = worker_http("POST", BASE + "/register",
                             {"name": "积压工"}, token)
         checker.check(
             "backlog survives disconnect: name kept, queued=128 reported",
@@ -2555,13 +2560,13 @@ def run(work: Path, checker: Checker) -> None:
             code, payload = tcall("GET", "/subscriptions")
             return payload.get("subscriptions", []) if code == 200 else []
 
-        status, sub = http("POST", BASE + "/subscriptions", {
+        status, sub = worker_http("POST", BASE + "/subscriptions", {
             "worker": "波旁", "source": "mc_chat",
             "kinds": ["chat", "whisper"],
         }, token)
         sub_id = sub.get("id")
         trigger_id = sub.get("trigger_id") or ""
-        status_list, subs = http(
+        status_list, subs = worker_http(
             "GET", BASE + "/subscriptions?worker=%s" % quote("波旁"),
             token=token)
         listed = [s for s in subs.get("subscriptions", [])
@@ -2584,7 +2589,7 @@ def run(work: Path, checker: Checker) -> None:
             "text": "selftest chat 1", "actor": "mc", "event_id": "sub-1",
         })
         ev1_id = ev1.get("id")
-        status_p1, pending1 = http(
+        status_p1, pending1 = worker_http(
             "GET", BASE + "/subscriptions/pending?worker=" + quote("波旁"),
             token=token)
         first = (pending1.get("events") or [{}])[0]
@@ -2596,7 +2601,7 @@ def run(work: Path, checker: Checker) -> None:
             and first.get("text") == "selftest chat 1"
             and first.get("subscription_id") == sub_id,
             "post=%s/%s pending=%s" % (status_ev, ev1, pending1))
-        status_p2, pending2 = http(
+        status_p2, pending2 = worker_http(
             "GET", BASE + "/subscriptions/pending?worker=" + quote("波旁"),
             token=token)
         status_c, cursor_now = tcall(
@@ -2612,14 +2617,14 @@ def run(work: Path, checker: Checker) -> None:
             "source": "mc_chat", "kind": "system", "level": "notify",
             "text": "filtered out", "actor": "mc", "event_id": "sub-filter",
         })
-        status_pf, pending_f = http(
+        status_pf, pending_f = worker_http(
             "GET", BASE + "/subscriptions/pending?worker=" + quote("波旁"),
             token=token)
         tcall("POST", "/trigger", {
             "source": "mc_chat", "kind": "chat", "level": "notify",
             "text": "selftest chat 2", "actor": "mc", "event_id": "sub-2",
         })
-        status_pc, pending_c = http(
+        status_pc, pending_c = worker_http(
             "GET", BASE + "/subscriptions/pending?worker=" + quote("波旁"),
             token=token)
         checker.check(
@@ -2630,9 +2635,9 @@ def run(work: Path, checker: Checker) -> None:
             "filtered=%s matched=%s" % (pending_f.get("count"),
                                         pending_c.get("count")))
 
-        status_del, deleted = http(
+        status_del, deleted = worker_http(
             "DELETE", BASE + "/subscriptions/%s" % sub_id, None, token)
-        status_active, active = http(
+        status_active, active = worker_http(
             "GET", BASE + "/subscriptions?worker=%s&active=1" % quote("波旁"),
             token=token)
         tsub_after = [s for s in trigger_subs() if s.get("name") == trigger_id]
@@ -2652,13 +2657,13 @@ def run(work: Path, checker: Checker) -> None:
         # ---------------------------------------------------------------- #
         notice_text = "selftest notice normal"
         expected_id = notice_event_id("波旁", notice_text)
-        status_n, notice = http("POST", BASE + "/notice",
+        status_n, notice = worker_http("POST", BASE + "/notice",
                                 {"worker": "波旁", "text": notice_text}, token)
         for _attempt in range(3):
             expected_id = notice_event_id("波旁", notice_text)
             if notice.get("event_id") == expected_id:
                 break
-            status_n, notice = http("POST", BASE + "/notice",
+            status_n, notice = worker_http("POST", BASE + "/notice",
                                     {"worker": "波旁", "text": notice_text},
                                     token)
         conn = sqlite3.connect(str(trigger_db))
@@ -2682,7 +2687,7 @@ def run(work: Path, checker: Checker) -> None:
         dup_ok = False
         last = notice
         for _attempt in range(3):
-            _sn, again = http("POST", BASE + "/notice",
+            _sn, again = worker_http("POST", BASE + "/notice",
                               {"worker": "波旁", "text": notice_text}, token)
             if again.get("event_id") == last.get("event_id"):
                 dup_ok = again.get("duplicate") is True
@@ -2701,7 +2706,7 @@ def run(work: Path, checker: Checker) -> None:
             dup_ok and dup_count == 1,
             "dup_ok=%s count=%s body=%s" % (dup_ok, dup_count, last))
 
-        status_u, urgent = http("POST", BASE + "/notice", {
+        status_u, urgent = worker_http("POST", BASE + "/notice", {
             "worker": "波旁", "text": "selftest notice urgent",
             "urgency": "urgent",
         }, token)
@@ -2722,17 +2727,17 @@ def run(work: Path, checker: Checker) -> None:
         # ---------------------------------------------------------------- #
         # 8b2. approvals: worker asks, human decides, worker polls
         # ---------------------------------------------------------------- #
-        status_a, asked = http("POST", BASE + "/approvals", {
+        status_a, asked = worker_http("POST", BASE + "/approvals", {
             "worker": "波旁", "taskId": "t-approval-1", "kind": "command",
             "title": "运行 rm -rf ./tmp/build",
             "detail": "cwd=/tmp/build\n命令需要 escalated 权限",
             "options": ["approved", "denied"],
         }, token)
         approval_id = asked.get("approval_id") or ""
-        status_g, fetched = http("GET", BASE + "/approvals/" + approval_id,
+        status_g, fetched = worker_http("GET", BASE + "/approvals/" + approval_id,
                                  token=token)
         approval_row = fetched.get("approval") or {}
-        status_l, listing = http(
+        status_l, listing = worker_http(
             "GET", BASE + "/approvals?status=pending&worker=%s"
             % quote("波旁"), token=token)
         conn = sqlite3.connect(str(trigger_db))
@@ -2765,13 +2770,13 @@ def run(work: Path, checker: Checker) -> None:
             "ask=%s get=%s list=%s trigger=%s"
             % (status_a, approval_row.get("status"), status_l, arow))
 
-        status_d, denied = http(
+        status_d, denied = worker_http(
             "POST", BASE + "/approvals/%s/decide" % approval_id,
             {"decision": "denied", "note": "不要在共享机上删目录"}, token)
-        status_d2, again = http(
+        status_d2, again = worker_http(
             "POST", BASE + "/approvals/%s/decide" % approval_id,
             {"decision": "approved"}, token)
-        status_g2, fetched2 = http("GET", BASE + "/approvals/" + approval_id,
+        status_g2, fetched2 = worker_http("GET", BASE + "/approvals/" + approval_id,
                                    token=token)
         checker.check(
             "POST /approvals/{id}/decide -> denied + note, second decide "
@@ -2787,15 +2792,15 @@ def run(work: Path, checker: Checker) -> None:
             "decide=%s/%s again=%s/%s"
             % (status_d, denied.get("status"), status_d2, again.get("error")))
 
-        status_e, expiring = http("POST", BASE + "/approvals", {
+        status_e, expiring = worker_http("POST", BASE + "/approvals", {
             "worker": "波旁", "kind": "fileChange",
             "title": "写入 /etc/hosts", "ttl_s": 1,
         }, token)
         expiring_id = expiring.get("approval_id") or ""
         time.sleep(1.2)
-        status_ge, expired = http("GET", BASE + "/approvals/" + expiring_id,
+        status_ge, expired = worker_http("GET", BASE + "/approvals/" + expiring_id,
                                   token=token)
-        status_de, late_decide = http(
+        status_de, late_decide = worker_http(
             "POST", BASE + "/approvals/%s/decide" % expiring_id,
             {"decision": "approved"}, token)
         checker.check(
@@ -2809,17 +2814,17 @@ def run(work: Path, checker: Checker) -> None:
             % ((expired.get("approval") or {}).get("status"), status_de,
                late_decide.get("error")))
 
-        status_ua, missing = http("GET", BASE + "/approvals/ap_nope",
+        status_ua, missing = worker_http("GET", BASE + "/approvals/ap_nope",
                                   token=token)
-        status_ud, missing_d = http(
+        status_ud, missing_d = worker_http(
             "POST", BASE + "/approvals/ap_nope/decide",
             {"decision": "approved"}, token)
-        status_bad_d, bad_d = http(
+        status_bad_d, bad_d = worker_http(
             "POST", BASE + "/approvals/%s/decide" % approval_id,
             {"decision": "maybe"}, token)
-        status_bad_a, bad_a = http("POST", BASE + "/approvals",
+        status_bad_a, bad_a = worker_http("POST", BASE + "/approvals",
                                    {"worker": "波旁"}, token)
-        status_nauth, _ = http("GET", BASE + "/approvals/ap_nope")
+        status_nauth, _ = worker_http("GET", BASE + "/approvals/ap_nope")
         checker.check(
             "approval validation: unknown id 404, bad decision/body 400, "
             "missing token 401",
@@ -2831,7 +2836,7 @@ def run(work: Path, checker: Checker) -> None:
             "get=%s decide=%s bad_d=%s bad_a=%s auth=%s"
             % (status_ua, status_ud, status_bad_d, status_bad_a, status_nauth))
 
-        status_h, health_a = http("GET", BASE + "/health")
+        status_h, health_a = worker_http("GET", BASE + "/health")
         checker.check(
             "GET /health exposes approvals_pending (0 after decide/expire)",
             status_h == 200 and health_a.get("approvals_pending") == 0,
@@ -2840,7 +2845,7 @@ def run(work: Path, checker: Checker) -> None:
         # ---------------------------------------------------------------- #
         # 8c. re-declare uses a fresh name; disconnect purges everything
         # ---------------------------------------------------------------- #
-        status, sub2 = http("POST", BASE + "/subscriptions", {
+        status, sub2 = worker_http("POST", BASE + "/subscriptions", {
             "worker": "波旁", "source": "mc_chat", "kinds": ["chat"],
         }, token)
         trigger_id2 = sub2.get("trigger_id") or ""
@@ -2855,7 +2860,7 @@ def run(work: Path, checker: Checker) -> None:
             "source": "mc_chat", "kind": "chat", "level": "notify",
             "text": "after redeclare", "actor": "mc", "event_id": "sub-3",
         })
-        status_pn, pending_n = http(
+        status_pn, pending_n = worker_http(
             "GET", BASE + "/subscriptions/pending?worker=" + quote("波旁"),
             token=token)
         checker.check(
@@ -2870,7 +2875,7 @@ def run(work: Path, checker: Checker) -> None:
         router_subs = None
         t_after = []
         while time.time() < deadline:
-            _s, router_subs = http(
+            _s, router_subs = worker_http(
                 "GET", BASE + "/subscriptions?worker=%s" % quote("波旁"),
                 token=token)
             t_after = [s for s in trigger_subs()
@@ -2890,7 +2895,7 @@ def run(work: Path, checker: Checker) -> None:
         worker3.start()
         wait_online("波旁", token, True)
         time.sleep(0.3)
-        _s, after_reconnect = http(
+        _s, after_reconnect = worker_http(
             "GET", BASE + "/subscriptions?worker=%s" % quote("波旁"),
             token=token)
         checker.check(
@@ -2921,7 +2926,7 @@ def run(work: Path, checker: Checker) -> None:
                        "ts": ts, "message_id": message_id}
             if meta is not None:
                 payload["meta"] = meta
-            status_c, logged = http("POST", BASE + "/chat/log", payload, token)
+            status_c, logged = worker_http("POST", BASE + "/chat/log", payload, token)
             chat_ids.append(logged.get("id"))
             chat_ok = chat_ok and status_c == 200 and logged.get("ok") is True \
                 and logged.get("duplicate") is False and isinstance(
@@ -2932,7 +2937,7 @@ def run(work: Path, checker: Checker) -> None:
             chat_ok and all(a < b for a, b in zip(chat_ids, chat_ids[1:])),
             "ids=%s detail=%s" % (chat_ids, chat_detail))
 
-        status_m, listing = http(
+        status_m, listing = worker_http(
             "GET", BASE + "/chat/%s/messages" % quote(chat_worker), token=token)
         msgs = listing.get("messages") or []
         first = msgs[0] if msgs else {}
@@ -2963,11 +2968,11 @@ def run(work: Path, checker: Checker) -> None:
             and first.get("message_id") == "cm-1" and meta_ok,
             "status=%s listing=%s meta=%s" % (status_m, listing, meta_row))
 
-        status_d, dup = http("POST", BASE + "/chat/log", {
+        status_d, dup = worker_http("POST", BASE + "/chat/log", {
             "worker": chat_worker, "direction": "out", "text": "worker：在",
             "session_id": "s-1", "ts": chat_now - 595, "message_id": "cm-2",
         }, token)
-        _, listing2 = http(
+        _, listing2 = worker_http(
             "GET", BASE + "/chat/%s/messages" % quote(chat_worker), token=token)
         checker.check(
             "POST /chat/log duplicate (worker+message_id+direction): id reused, "
@@ -2979,7 +2984,7 @@ def run(work: Path, checker: Checker) -> None:
             "status=%s dup=%s count=%s" % (status_d, dup,
                                            listing2.get("count")))
 
-        status_x, cross = http("POST", BASE + "/chat/log", {
+        status_x, cross = worker_http("POST", BASE + "/chat/log", {
             "worker": chat_worker, "direction": "in",
             "text": "方向不同但 message_id 相同", "ts": chat_now - 300,
             "message_id": "cm-2",
@@ -2991,16 +2996,16 @@ def run(work: Path, checker: Checker) -> None:
             and cross.get("id") not in chat_ids[:-1],
             "status=%s body=%s ids=%s" % (status_x, cross, chat_ids))
 
-        status_lim, limited = http(
+        status_lim, limited = worker_http(
             "GET", BASE + "/chat/%s/messages?limit=2" % quote(chat_worker),
             token=token)
-        status_dir, only_out = http(
+        status_dir, only_out = worker_http(
             "GET", BASE + "/chat/%s/messages?direction=out"
             % quote(chat_worker), token=token)
-        status_sin, since_two = http(
+        status_sin, since_two = worker_http(
             "GET", BASE + "/chat/%s/messages?since=%s&limit=2"
             % (quote(chat_worker), chat_ids[0]), token=token)
-        status_sid, since_dir = http(
+        status_sid, since_dir = worker_http(
             "GET", BASE + "/chat/%s/messages?since=%s&direction=out"
             % (quote(chat_worker), chat_ids[2]), token=token)
         dup_ids = [m["id"] for m in limited.get("messages") or []]
@@ -3022,7 +3027,7 @@ def run(work: Path, checker: Checker) -> None:
             == [chat_ids[3]],
             "since=%s since_out=%s" % (since_two, since_dir))
 
-        status_ts, ts_filtered = http(
+        status_ts, ts_filtered = worker_http(
             "GET", BASE + "/chat/%s/messages?since=%.3f"
             % (quote(chat_worker), chat_now - 1000), token=token)
         checker.check(
@@ -3033,13 +3038,13 @@ def run(work: Path, checker: Checker) -> None:
             % (status_ts, ts_filtered.get("count"),
                [m["id"] for m in ts_filtered.get("messages", [])]))
 
-        status_sum, summary = http(
+        status_sum, summary = worker_http(
             "GET", BASE + "/chat/%s/summary?minutes=60" % quote(chat_worker),
             token=token)
-        status_sum2, summary2 = http(
+        status_sum2, summary2 = worker_http(
             "GET", BASE + "/chat/%s/summary?minutes=180" % quote(chat_worker),
             token=token)
-        status_none, empty_sum = http(
+        status_none, empty_sum = worker_http(
             "GET", BASE + "/chat/%s/summary?minutes=60" % quote("没人"),
             token=token)
         checker.check(
@@ -3058,10 +3063,10 @@ def run(work: Path, checker: Checker) -> None:
             and empty_sum.get("last") is None,
             "status=%s body=%s" % (status_none, empty_sum))
 
-        status_bad, bad_dir = http(
+        status_bad, bad_dir = worker_http(
             "GET", BASE + "/chat/%s/messages?direction=sideways"
             % quote(chat_worker), token=token)
-        status_badlog, bad_log = http("POST", BASE + "/chat/log", {
+        status_badlog, bad_log = worker_http("POST", BASE + "/chat/log", {
             "worker": chat_worker, "direction": "sideways", "text": "x",
         }, token)
         checker.check(
@@ -3075,7 +3080,7 @@ def run(work: Path, checker: Checker) -> None:
         # ---------------------------------------------------------------- #
         # 9. final shape / counts
         # ---------------------------------------------------------------- #
-        status, health = http("GET", BASE + "/health")
+        status, health = worker_http("GET", BASE + "/health")
         checker.check(
             "GET /health final: workers=2, tasks=135 (queued 128)",
             status == 200 and health.get("workers") == 2
@@ -3094,7 +3099,7 @@ def run(work: Path, checker: Checker) -> None:
             "trigger has exactly 5 task.result notify rows",
             notify_count == 5, "count=%s" % notify_count)
 
-        _, tasks = http("GET", BASE + "/tasks?worker=%s&limit=500"
+        _, tasks = worker_http("GET", BASE + "/tasks?worker=%s&limit=500"
                         % quote("积压工"), token=token)
         checker.check(
             "GET /tasks?worker= returns the 128 backlog rows",
@@ -3125,17 +3130,17 @@ def run(work: Path, checker: Checker) -> None:
                 raise RuntimeError("dead-trigger router did not start: "
                                    + tail(work / "dead.log"))
             dtok = dead_token.read_text(encoding="utf-8").strip()
-            http("POST", dead_base + "/register", {"name": "断链工"}, dtok)
-            status_s, fail_sub = http(
+            worker_http("POST", dead_base + "/register", {"name": "断链工"}, dtok)
+            status_s, fail_sub = worker_http(
                 "POST", dead_base + "/subscriptions",
                 {"worker": "断链工", "source": "mc_chat"}, dtok)
-            status_l, fail_list = http(
+            status_l, fail_list = worker_http(
                 "GET", dead_base + "/subscriptions?worker=" + quote("断链工"),
                 token=dtok)
-            status_n, fail_notice = http(
+            status_n, fail_notice = worker_http(
                 "POST", dead_base + "/notice",
                 {"worker": "断链工", "text": "trigger is down"}, dtok)
-            status_ap, fail_approval = http(
+            status_ap, fail_approval = worker_http(
                 "POST", dead_base + "/approvals",
                 {"worker": "断链工", "kind": "command",
                  "title": "trigger down approval"}, dtok)
@@ -3149,7 +3154,7 @@ def run(work: Path, checker: Checker) -> None:
                 status_n == 200 and fail_notice.get("ok") is False
                 and fail_notice.get("error") == "trigger_unavailable",
                 "status=%s body=%s" % (status_n, fail_notice))
-            status_peer, fail_peer = http("POST", dead_base + "/messages", {
+            status_peer, fail_peer = worker_http("POST", dead_base + "/messages", {
                 "message_id": str(uuid.uuid4()), "from": "断链工", "to": "溪流",
                 "text": "peer trigger unavailable"}, dtok)
             checker.check("trigger down: root peer stays queued with HTTP 200 and a warning",
@@ -3244,6 +3249,7 @@ def main() -> int:
 
     work = Path(tempfile.mkdtemp(prefix="router-selftest-"))
     os.environ.setdefault("ROUTER_WORKER_NAMES_FILE", str(work / "missing-worker-names.json"))
+    os.environ.setdefault("ROUTER_APPROVAL_POLICY", str(work / "missing-approval-policy.json"))
     print("workdir: %s" % work, flush=True)
     checker = Checker()
     try:
