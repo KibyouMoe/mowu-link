@@ -1535,6 +1535,33 @@ class TriggerClient:
                        "detail": data}
 
 
+def result_notice_summary(summary: str, summary_short: Any = UNSET) -> str:
+    """Reject oversized input before task mutation; callers choose their short summary."""
+    if summary_short is not UNSET:
+        if not isinstance(summary_short, str) or len(summary_short) > 300:
+            raise BadRequest("summary_short 必须是300字内的字符串；请重新组织摘要")
+        notice_summary = summary_short
+    else:
+        if len(summary) > 300:
+            raise BadRequest("summary 超过300字，请压缩到300字内或附 summary_short(≤300)")
+        notice_summary = summary
+    return " ".join(notice_summary.split())
+
+
+def task_result_payload(task: Dict[str, Any], status: str, summary: str,
+                        summary_short: Any = UNSET) -> Dict[str, Any]:
+    """One terminal notice envelope for explicit notices and automatic results."""
+    one_line = result_notice_summary(summary, summary_short)
+    source, label = TASK_NOTICE_NAMES[status]
+    display = worker_display_name(task["worker"])
+    return {
+        "source": source, "kind": "task.result", "level": "notify",
+        "text": "%s %s %s：%s" % (display, label, task["task_id"], one_line or "(无摘要)"),
+        "actor": display, "event_id": "%s:%s" % (task["task_id"], status),
+        "payload": {"task_id": task["task_id"], "worker": task["worker"], "status": status},
+    }
+
+
 class TriggerNotifier:
     """Delivers ``task.result`` notifications for finished tasks."""
 
@@ -1564,25 +1591,7 @@ class TriggerNotifier:
         status = terminal_notice_state(status)
         if not status:
             return False
-        source, label = TASK_NOTICE_NAMES[status]
-        one_line = " ".join(str(summary or "").split())
-        if len(one_line) > 300:
-            one_line = one_line[:297] + "..."
-        display = worker_display_name(task["worker"])
-        text = "%s %s %s：%s" % (display, label, task["task_id"], one_line or "(无摘要)")
-        payload = {
-            "source": source,
-            "kind": "task.result",
-            "level": "notify",
-            "text": text,
-            "actor": display,
-            "event_id": "%s:%s" % (task["task_id"], status),
-            "payload": {
-                "task_id": task["task_id"],
-                "worker": task["worker"],
-                "status": status,
-            },
-        }
+        payload = task_result_payload(task, status, str(summary or ""))
         ok, data = self.post_task_notice(task["task_id"], status, payload)
         if ok:
             log.info("trigger notify task=%s status=%s -> id=%s",
@@ -2725,6 +2734,7 @@ class RouterHandler(BaseHTTPRequestHandler):
         if status not in ("done", "failed"):
             raise BadRequest("status must be done or failed")
         summary = str(body.get("summary") or "")
+        notice_summary = result_notice_summary(summary, body.get("summary_short", UNSET))
         artifacts = body.get("artifacts") or []
         evidence = body.get("evidence") or []
         if not isinstance(artifacts, list):
@@ -2753,6 +2763,7 @@ class RouterHandler(BaseHTTPRequestHandler):
             result = {
                 "status": status,
                 "summary": summary,
+                **({"summary_short": body["summary_short"]} if "summary_short" in body else {}),
                 "artifacts": artifacts,
                 "evidence": evidence,
                 "reported_at": time.time(),
@@ -2762,7 +2773,7 @@ class RouterHandler(BaseHTTPRequestHandler):
             self.server.store.refresh_counts(name)
             dispatched = self.server.dispatch_one(name)
 
-        notified = self.server.notifier.notify_result(task, status, summary)
+        notified = self.server.notifier.notify_result(task, status, notice_summary)
         log.info("task finished id=%s worker=%s status=%s notified=%s",
                  task_id, name, status, notified)
         return 200, {
@@ -3127,6 +3138,10 @@ class RouterHandler(BaseHTTPRequestHandler):
         if state:
             payload["payload"]["status"] = state
         if task_result:
+            terminal_payload = task_result_payload({"worker": worker, "task_id": task_id}, state,
+                                                   text, body.get("summary_short", UNSET))
+            payload.update({key: value for key, value in terminal_payload.items() if key != "payload"})
+            payload["payload"].update(terminal_payload["payload"])
             ok, data = self.server.notifier.post_task_notice(task_id, state, payload)
         else:
             ok, data = self.server.trigger_client.post_trigger(payload)

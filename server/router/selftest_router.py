@@ -875,6 +875,47 @@ def task_notice_selftest(checker, work, trigger_url, trigger_token, trigger_db):
                 "SELECT * FROM events WHERE event_id LIKE ? ORDER BY id", (task_id + ":%",))]
 
     try:
+        oversized = new_task()
+        full_summary = "完整正文😀" * 5000
+        code, rejected = call("/result", {"name": worker, "task_id": oversized,
+                                          "status": "done", "summary": full_summary})
+        checker.check("result summary: oversized legacy input is rejected before terminal state or notify",
+                      code == 400 and "300" in rejected.get("error", "")
+                      and "summary_short" in rejected.get("error", "")
+                      and store.get_task(oversized)["state"] == "running" and not events(oversized))
+        for invalid in ["长" * 301, 123, None]:
+            code, rejected = call("/result", {"name": worker, "task_id": oversized,
+                                              "status": "done", "summary": full_summary,
+                                              "summary_short": invalid})
+            checker.check("result summary: invalid summary_short is rejected without finishing (%r)" % type(invalid).__name__,
+                          code == 400 and "summary_short" in rejected.get("error", "")
+                          and store.get_task(oversized)["state"] == "running" and not events(oversized))
+        short = "短" * 299 + "😀"
+        code, accepted = call("/result", {"name": worker, "task_id": oversized,
+                                         "status": "done", "summary": full_summary, "summary_short": short})
+        stored = store.get_task(oversized)
+        checker.check("result summary: 300 Unicode characters notify intact while the full body remains readable",
+                      code == 200 and accepted["state"] == "done"
+                      and stored["result"]["summary"] == full_summary
+                      and stored["result"]["summary_short"] == short
+                      and events(oversized)[0]["text"].endswith(short))
+        boundary = new_task()
+        code, _ = call("/result", {"name": worker, "task_id": boundary,
+                                   "status": "done", "summary": "字" * 300})
+        checker.check("result summary: a 300-character legacy summary is accepted without truncation",
+                      code == 200 and events(boundary)[0]["text"].endswith("字" * 300))
+        explicit = new_task()
+        code, rejected = notice(explicit, text="长" * 301)
+        checker.check("task notice: explicit completion uses the same summary validation",
+                      code == 400 and not events(explicit))
+        code, _ = notice(explicit, text=full_summary[:5000], summary_short="完整交付见任务结果")
+        code_result, _ = call("/result", {"name": worker, "task_id": explicit,
+                                          "status": "done", "summary": full_summary,
+                                          "summary_short": "完整交付见任务结果"})
+        checker.check("task notice: explicit and automatic completion share one normalized result envelope",
+                      code == 200 and code_result == 200 and len(events(explicit)) == 1
+                      and events(explicit)[0]["text"].endswith("完整交付见任务结果"))
+
         with mock.patch.object(client, "post_trigger", wraps=client.post_trigger) as sent:
             first = new_task()
             finish(first)
@@ -891,7 +932,7 @@ def task_notice_selftest(checker, work, trigger_url, trigger_token, trigger_db):
             finish(second)
             checker.check("task notice: worker notice then internal result preserves first arrival",
                           sent.call_count == 2 and original["duplicate"] is False
-                          and events(second)[0]["text"] == "worker result first"
+                          and events(second)[0]["text"].endswith("worker result first")
                           and store.get_task(second)["state"] == "done")
 
             third = new_task()
