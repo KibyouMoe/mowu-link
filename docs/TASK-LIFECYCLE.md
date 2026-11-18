@@ -8,8 +8,9 @@ WorkerStatus     bBusy / TaskID
 ```
 
 - 没有 `bRunning`、没有 `reviewing / done / failed / cancelled` 这类状态字段。
-- 任务是否在跑，看 `TaskOwner` 是否为执行人；取消后 `TaskOwner` 置空。
+- 任务是否在跑，看它是否还在“正在运行任务”数组里；取消 = 归档，移出该数组。
 - Router 只观察 worker 的 `bBusy` 与 `TaskID`，观察止步于此。
+- **`TaskOwner` 一旦生成就不再改**：任务固定属于派出去的那个执行人；要换人做，就重新生成一个新任务（新 TaskID）。
 
 ## 派单
 
@@ -47,19 +48,29 @@ goal 模式由 worker 自己决定，Router 不管。
 
 ```
 ① 连接正常
-   Router 通知 worker「这单要取消」
+   Router 打招呼「这单要取消」
    → worker 回「好，我自己取消」
    → worker 自己发 cancel 命令
-   → Router 收到，TaskOwner 置空
+   → Router 收到 → TaskInfo 归档
 
 ② 已失联
-   Router 直接 TaskOwner 置空（不等待、不设中间态）
+   Router 直接 TaskInfo 归档（不等待、不设中间态）
    → 该 worker 下次注册时带着手上的 TaskID 来问「这单还在吗」
-   → Router 回「已取消」→ 自动下发取消提示词
+   → Router 回「已取消」→ 自动下发取消提示
    → worker 回「好，我取消」，自己清掉本地 TaskID
+
+### 打招呼后的等待（与总结索取同一套参数）
+
+```
+第 1 次   打招呼后等到它下一次 idle 满 idle_task_end_minutes
+第 2 次   再等同样时长
+第 3 次   再等同样时长（summary_request_max_attempts=3，含第 1 次）
+三次都没等到它的取消回复 → 视为已失联：
+- **直接并到②处理：TaskInfo 归档**
+- **同时通知溪流**（这单是被判定失联后归档的，不是它自己确认取消的）
 ```
 
-取消一律先打招呼；只有失联才单方面置空 owner，并靠重注册自检补一致性。
+取消的结果一律是 **TaskInfo 归档**（移出运行中数组），不是改某个状态字段。
 不存在 `cancelling` / `paused` 这类中间态。
 
 ## 通知
