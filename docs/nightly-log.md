@@ -13,3 +13,5 @@
 - 02:49 判：3519fdb 未解决根因（Windows 不接受 native 注入），t-0ead4d642b 判 failed
 - 03:03 开分析单 t-fbb6b6073d：为什么被拒 + 非 native 通道方案（只分析）
 - 结论汇总：第1关玉藻通过；第2关气槽未通过（两次不同阶段被拒）；铃鹿/小栗帽未动
+- 03:06 取到铁证：probe_error nativeReason=thread_unavailable (rpcCode -32600)，thread=01a17e53…（已失效会话）
+- 03:10 分析单收口；实施单 t-a9d7391269 开工（已有成果→直报；需补写→换专用会话；禁同线程重试；日志细分三类）
