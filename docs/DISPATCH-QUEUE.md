@@ -136,3 +136,26 @@
 - worker 互聊带图在客户端可见：训练员 21:27 截图确认「没什么问题」
 - 模型切换：`gpt-6.1-sol` + `ultra`（原生日志确认）
 - 真实双向 peer 验收 PASS（22:29）：OguriCap→TamamoCross `e05791cf-d9c6-4e6d-bc60-0a…`，附件 `ed13a3dd876090e4410e`
+
+- [ ] 2026-11-17 待派（排在小栗帽 t-7cde0de4f6 之后）：救玉藻十字——【训练员原话照转】「玉藻十字现在 worker 挂了」。派单时原话原样放进任务书第一行，不要改写成别的原因。申报人：训练员。
+
+## 2026-11-18 处置记录（画勾 = 本子上结清，不改它库里的状态）
+
+规矩：worker 卡住却坚称已完成时，正确做法是**取消任务 + 在这里画勾**，不是手工改它的终态；只有真出 bug（心跳在、回合不动、或回执通道断）才允许，不能当省事手段用。
+
+| 对勾 | task_id | 实际结论 | 证据 |
+|---|---|---|---|
+| ✅ 已取消 | t-ef25dae59b | 「封死后门」单作废，改为保留逃生门的 `feat/settlement-guardrails`（t-404a5da2fd） | cancel 回执 `worker confirmed execution stopped`（21:28） |
+| ✅ 已验收 | t-90aeffaabc | 玉藻 DSH 升 01b87f5 | HEAD 01b87f5 / 8906 pid 72023 / online+idle |
+| ✅ 已验收 | t-5f082385e7 | 玉藻 DSH 升 109d26a | HEAD 109d26a / 8906 pid 23175 |
+| ✅ 已验收 | t-c7e1b3c0a7 | 小栗帽升 883346d | 8905 pid 63917 / online+idle |
+| ✅ 已验收 | t-1d1fba6f42 | 玉藻 DSH 升 883346d | HEAD 883346d / 8906 pid 67809 |
+| ✅ 已验收 | t-f4624a3539 | 铃鹿只读核对（供补装依据） | 铃鹿 109d26a 缺 deliverable-tool；气槽 883346d |
+
+## 进行中
+
+| task_id | 内容 | 备注 |
+|---|---|---|
+| t-404a5da2fd | 结算护栏：cancel/verdict/force-close + 审计 | 小栗帽，分支 feat/settlement-guardrails |
+| t-e6fdc9fea5 | 气槽把同机铃鹿升到 883346d | 只动 DSH，不动 Codex |
+| （待批） | 渲染改造 49b74b5 合入 main | 合并冲突在 router-runtime.mjs，溪流手动解 |
