@@ -159,3 +159,14 @@
 | t-404a5da2fd | 结算护栏：cancel/verdict/force-close + 审计 | 小栗帽，分支 feat/settlement-guardrails |
 | t-e6fdc9fea5 | 气槽把同机铃鹿升到 883346d | 只动 DSH，不动 Codex |
 | （待批） | 渲染改造 49b74b5 合入 main | 合并冲突在 router-runtime.mjs，溪流手动解 |
+
+### 21:41 追加
+
+| 对勾 | task_id | 实际结论 | 证据 |
+|---|---|---|---|
+| ✅ 已取消 | t-e6fdc9fea5 | 气槽升级铃鹿（无回执占位）→ 取消；目的已达成 | 铃鹿只读回执 HEAD=883346d + deliverable-tool.mjs 存在 |
+| ✅ 已验收 | t-5245e7de55 | 铃鹿只读核对 | HEAD 883346d / 工具文件存在 |
+| ✅ 已验收 | t-5b9b6bb9dc | 小栗帽升 178a518 | 8905 pid 88353 / deliverable received |
+
+**当前版本分布**：小栗帽 178a518（含卡片渲染 + 成果工具）｜玉藻 883346d｜铃鹿 883346d｜气槽 883346d
+**待办**：等小栗帽 idle → 小栗帽重启玉藻到 178a518；再按同模式处理 Windows 两台。
