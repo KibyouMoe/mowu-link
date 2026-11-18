@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import logging
 import queue
 import threading
 import time
@@ -118,7 +119,15 @@ class SummaryRequests:
         )
         try:
             conn.queue.put_nowait({"event": "deliverable_request", "data": payload})
+            logging.getLogger("router").info(
+                "probe_queued task=%s request=%s attempt=%s via=sse purpose=%s",
+                tid, request_id, attempt, purpose,
+            )
         except queue.Full:
+            logging.getLogger("router").warning(
+                "probe_error task=%s request=%s attempt=%s via=sse reason=queue_full",
+                tid, request_id, attempt,
+            )
             self.orders.add(tid, "stream_full", "full:" + request_id, request_id=request_id)
         sample = self.samples.get(conn.name)
         if sample and sample[0] == tid:

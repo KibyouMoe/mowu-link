@@ -119,7 +119,12 @@ class ProbeTests(unittest.TestCase):
         )
 
     def test_summary_and_cancel_attempts(self):
-        self.first()
+        with self.assertLogs("router", level="INFO") as log:
+            first = self.first()
+        self.assertIn(
+            f"probe_queued task={self.task} request={first['request_id']} attempt=1 via=sse purpose=summary",
+            log.output[-1],
+        )
         for attempt in (2, 3):
             self.advance(60)
             self.assertEqual(self.take()["attempt"], attempt)
