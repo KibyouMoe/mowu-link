@@ -199,12 +199,32 @@ def free_port() -> int:
         sock.close()
 
 
-def worker_http(method, url, body=None, token=None, timeout=5.0):
-    """Admission fixtures finish a fake turn using result + real idle heartbeats.
+# Each simulated worker learns its generation from its own stream.
+fixture_generations = {}
 
-    Return the terminal exchange receipt. Completion-specific tests import the
-    raw http() client instead and assert the individual 202/heartbeat responses.
-    """
+
+def fixture_attach(server, name):
+    conn = server.attach(name)
+    fixture_generations[(server.server_port, name)] = conn.generation
+    return conn
+
+
+def fixture_binding(task):
+    return {"thread_id": "fixture-thread", "turn_id": "turn-" + task["task_id"],
+            "execution_epoch": task["execution_epoch"]}
+
+
+def fixture_end(binding):
+    return {**binding, "native_status": "completed", "cleanup_complete": True}
+
+
+def worker_http(method, url, body=None, token=None, timeout=5.0):
+    """Drive the task owner in admission/notification tests. Gate tests use raw http()."""
+    if url.endswith("/cancel-ack") and isinstance(body, dict):
+        task = http("GET", url.rsplit("/", 1)[0], token=token)[1].get("task", {})
+        body = {**body, "outcome": {**body["outcome"], "reason": "not_dispatched",
+                "execution_epoch": task.get("execution_epoch"),
+                "connection_generation": ((task.get("result") or {}).get("cancel_delivery") or {}).get("connection_generation")}}
     code, response = http(method, url, body, token, timeout)
     report = isinstance(body, dict) and (url.endswith("/result") or
         url.endswith("/notice") and body.get("kind") == "task.result")
@@ -212,22 +232,26 @@ def worker_http(method, url, body=None, token=None, timeout=5.0):
         return code, response
     worker = body.get("name", body.get("worker"))
     origin = url.rsplit("/", 1)[0]
-    http("POST", origin + "/heartbeat", {"name": worker, "state": "running",
-        "turn_source": "router", "task_id": body["task_id"]}, token)
-    _, idle = http("POST", origin + "/heartbeat", {"name": worker, "state": "idle",
-        "turn_source": None, "task_id": body["task_id"]}, token)
-    settled = next((item for item in idle.get("settlements", []) if item["task_id"] == body["task_id"]), None)
-    if settled is None:
-        _, view = http("GET", origin + "/tasks/" + body["task_id"], token=token)
-        if view.get("state") not in ("done", "failed", "cancelled"):
-            return code, response
-        settled = {"task_id": body["task_id"], "state": view["state"], "notified": False, "duplicate": True}
+    path = origin + "/tasks/" + body["task_id"]
+    _, view = http("GET", path, token=token)
+    if view.get("state") in ("done", "failed", "cancelled"):
+        return 200, {"ok": True, "duplicate": True, "state": view["state"], "notified": False}
+    if view.get("state") != "running":
+        return code, response
+    binding = fixture_binding(view["task"])
+    generation = fixture_generations.get((int(origin.rsplit(":", 1)[1]), worker))
+    http("POST", path + "/turn-binding", {"name": worker, "connection_generation": generation, **binding}, token)
+    if url.endswith("/result"):
+        final = body
     else:
-        settled["duplicate"] = False
-    return 200, {"ok": True, **settled,
-                 "dispatched_next": idle.get("dispatched_next"),
-                 **({"error": "trigger_unavailable"} if url.endswith("/notice")
-                    and not settled["notified"] and not settled["duplicate"] else {})}
+        final = {"name": worker, "task_id": body["task_id"], "status": body.get("status", "done").strip().lower(),
+                 "summary": body["text"], **{k: body[k] for k in ("summary_short", "outcome", "error_code") if k in body}}
+    code, result = http("POST", origin + "/result", {**final, "connection_generation": generation, "native_completion": fixture_end(binding)}, token)
+    if url.endswith("/notice") and code == 200:
+        if not result["notified"] and not result["duplicate"]:
+            result["error"] = "trigger_unavailable"
+        result.update({k: response[k] for k in ("level", "event_id") if k in response})
+    return code, result
 
 
 class FakeWorker(threading.Thread):
@@ -265,6 +289,7 @@ class FakeWorker(threading.Thread):
                 raw = resp.read(500).decode("utf-8", "replace")
                 self.error = "HTTP %d: %s" % (resp.status, raw)
                 return
+            fixture_generations[(self.port, self.worker_name)] = resp.getheader("X-Router-Generation")
             self.connected.set()
             if conn.sock is not None:
                 conn.sock.settimeout(1.0)
@@ -880,7 +905,7 @@ def task_notice_selftest(checker, work, trigger_url, trigger_token, trigger_db):
     base = "http://127.0.0.1:%d" % server.server_address[1]
     worker = "notice-test-worker"
     store.upsert_worker(worker)
-    server.attach(worker)
+    fixture_attach(server, worker)
 
     def call(route, body):
         return worker_http("POST", base + route, body, server.token)
@@ -1363,7 +1388,7 @@ def control_selftest(checker, token, workers):
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(json.dumps({"ok": response_status[0] == 200,
-                                         "task_id": body["task_id"], "state": "cancelled", "cancelled": True}).encode())
+                                         **body, "state": "cancelled", "reason": "not_dispatched"}).encode())
         def log_message(self, *args):
             pass
 
@@ -1396,8 +1421,9 @@ def control_selftest(checker, token, workers):
         _, cancelled = worker_http("POST", BASE + "/tasks/%s/cancel" % active["task_id"], None, token)
         checker.check("running cancel reaches exact worker task with authenticated POST",
                       cancelled.get("cancel_delivery", {}).get("ok") is True
-                      and calls == [("/manager/tasks/%s/cancel" % active["task_id"],
-                                     "Bearer " + token, {"task_id": active["task_id"]})])
+                      and len(calls) == 1 and calls[0][:2] == ("/manager/tasks/%s/cancel" % active["task_id"], "Bearer " + token)
+                      and calls[0][2]["task_id"] == active["task_id"] and calls[0][2]["execution_epoch"]
+                      and calls[0][2]["connection_generation"])
         _, saved = worker_http("GET", BASE + "/tasks/" + active["task_id"], token=token)
         checker.check("cancel forwarding receipt persists on the task",
                       saved["task"]["result"]["cancel_delivery"]["ok"] is True)
@@ -1500,7 +1526,8 @@ def activity_selftest(checker, token, workers):
         command = None
     checker.check("remote worker cancellation uses the existing authenticated SSE channel",
                   code == 202 and pending["state"] == "cancelling"
-                  and command == {"task_id": cancel["task_id"]})
+                  and command and command["task_id"] == cancel["task_id"]
+                  and command["execution_epoch"] and command["connection_generation"])
     bad, _ = worker_http("POST", BASE + "/tasks/" + cancel["task_id"] + "/cancel-ack", {
         "name": "another-worker", "outcome": {"task_id": cancel["task_id"], "ok": True, "state": "cancelled"}}, token)
     _, acknowledged = worker_http("POST", BASE + "/tasks/" + cancel["task_id"] + "/cancel-ack", {
@@ -1631,7 +1658,8 @@ def zero_backlog_selftest(checker, work, trigger_url, trigger_token):
         command = client.cancellations.get(timeout=3)
         checker.check("zero backlog: cancellation remains occupied and refuses new requests",
                       code == 202 and pending.get("state") == "cancelling"
-                      and command == {"task_id": task_id} and busy(next_body, task_id, "router")
+                      and command and command["task_id"] == task_id and command["execution_epoch"]
+                      and command["connection_generation"] and busy(next_body, task_id, "router")
                       and duplicate(trainer_body, task_id, "cancelling")
                       and http("POST", base + "/result", {"name": name, "task_id": task_id,
                               "status": "done", "summary": "candidate during cancellation"}, token)[1].get("state") == "cancelling"
@@ -1766,7 +1794,7 @@ def dispatch_race_selftest(checker, work):
     base = "http://127.0.0.1:%d" % server.server_address[1]
     name = "dispatch-race"
     store.upsert_worker(name)
-    conn = server.attach(name)
+    conn = fixture_attach(server, name)
     try:
         checker.check("zero backlog: RouterServer explicit capacity 0",
                       server.backlog_max == 0)
@@ -1804,7 +1832,7 @@ def dispatch_race_selftest(checker, work):
                       all(code == 202 for code, _ in old_results)
                       and None not in old_ids and store.queued_count(name) == 2)
         with mock.patch.object(server, "push", return_value=False):
-            conn = server.attach(name)
+            conn = fixture_attach(server, name)
         store.heartbeat(name, state="idle", turn_source=None, task_id=old_ids[1])
         with mock.patch.object(conn, "send_task", return_value=False):
             dispatched = server.dispatch_one(name)
@@ -1891,7 +1919,7 @@ def one_backlog_selftest(checker, work):
     base = "http://127.0.0.1:%d" % server.server_address[1]
     name = "one-wait-worker"
     store.upsert_worker(name)
-    conn = server.attach(name)
+    conn = fixture_attach(server, name)
 
     def call(method, route, body=None):
         return worker_http(method, base + route, body, server.token)
@@ -1943,7 +1971,7 @@ def one_backlog_selftest(checker, work):
         code, duplicate = call("POST", "/tasks", first_body)
         checker.check("one backlog: full-slot exact retry returns the same queued task",
                       code == 200 and duplicate["duplicate"] and duplicate["task_id"] == first["task_id"])
-        conn = server.attach(name)
+        conn = fixture_attach(server, name)
         checker.check("one backlog: reconnect dispatches the sole watcher exactly once",
                       conn.queue.get(timeout=3)["data"]["task_id"] == first["task_id"]
                       and store.get_task(first["task_id"])["state"] == "running" and store.queued_count(name) == 0
@@ -1978,7 +2006,7 @@ def one_backlog_selftest(checker, work):
         code, replacement = call("POST", "/tasks", second_body)
         checker.check("queue TTL: earlier refused UUID can fill the freed slot",
                       code == 200 and replacement["state"] == "queued")
-        conn = server.attach(name)
+        conn = fixture_attach(server, name)
         conn.queue.get(timeout=3)
         finish(replacement["task_id"])
 
@@ -2038,7 +2066,7 @@ def one_backlog_selftest(checker, work):
                       and sum(code == 409 and data["error"] == "worker_busy" for code, data in results) == 7
                       and store.queued_count(name) == 1)
         winner = next(data for code, data in results if code == 200)
-        conn = server.attach(name)
+        conn = fixture_attach(server, name)
         conn.queue.get(timeout=3)
         finish(winner["task_id"])
 
@@ -2085,7 +2113,7 @@ def question_proxy_selftest(checker, work):
     connections = {}
     for name in names:
         store.upsert_worker(name, control_sse=True)
-        connections[name] = server.attach(name)
+        connections[name] = fixture_attach(server, name)
     pool = ThreadPoolExecutor(max_workers=2)
     question_id = str(uuid.uuid4())
 
@@ -3139,8 +3167,8 @@ def run(work: Path, checker: Checker) -> None:
         finally:
             conn.close()
         checker.check(
-            "trigger has exactly 5 task.result rows at the expected levels",
-            terminal_count == 5, "count=%s" % terminal_count)
+            "trigger has exactly 6 terminal events including the acknowledged cancellation",
+            terminal_count == 6, "count=%s" % terminal_count)
 
         _, tasks = worker_http("GET", BASE + "/tasks?worker=%s&limit=500"
                         % quote("积压工"), token=token)

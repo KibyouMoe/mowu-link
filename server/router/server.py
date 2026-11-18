@@ -392,7 +392,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     request_id  TEXT,
     request_fingerprint TEXT,
     execution_epoch TEXT DEFAULT NULL,
-    pause_reason TEXT DEFAULT NULL
+    pause_reason TEXT DEFAULT NULL,
+    turn_binding_json TEXT,
+    legacy_dispatch INTEGER DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_worker_state ON tasks(worker, state);
 CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks(created_at);
@@ -516,7 +518,8 @@ class RouterStore:
         for column, decl in (("deadline_s", "REAL"), ("request_id", "TEXT"),
                              ("request_fingerprint", "TEXT"), ("dispatch_attempted", "INTEGER"),
                              ("queue_expires_at", "REAL"), ("execution_epoch", "TEXT"),
-                             ("pause_reason", "TEXT")):
+                             ("pause_reason", "TEXT"), ("turn_binding_json", "TEXT"),
+                             ("legacy_dispatch", "INTEGER DEFAULT 0")):
             if column not in cols:
                 self._conn.execute(
                     "ALTER TABLE tasks ADD COLUMN %s %s" % (column, decl))
@@ -553,7 +556,7 @@ class RouterStore:
                 "UPDATE workers SET online=0, busy=0, queued=0")
             cur = self._conn.execute(
                 "UPDATE tasks SET state='queued', started_at=NULL"
-                " WHERE state='running' AND execution_epoch IS NULL")
+                " WHERE state='running' AND (execution_epoch IS NULL OR legacy_dispatch=1)")
             changed = int(cur.rowcount or 0)
             for row in self._conn.execute("SELECT name FROM workers").fetchall():
                 self.refresh_counts(str(row["name"]))
@@ -837,8 +840,13 @@ class RouterStore:
                                    else bool(row["dispatch_attempted"])),
             "execution_epoch": row["execution_epoch"],
             "pause_reason": row["pause_reason"],
+            "turn_binding": json.loads(row["turn_binding_json"]) if row["turn_binding_json"] else None,
             "result": result,
         }
+
+    def bind_turn(self, task_id, binding):
+        with self._lock:
+            self._conn.execute("UPDATE tasks SET turn_binding_json=? WHERE task_id=?", (json.dumps(binding), task_id))
 
     def create_task(self, worker: str, goal: str,
                     context: Optional[str] = None,
@@ -948,12 +956,12 @@ class RouterStore:
                 "UPDATE tasks SET state='queued', started_at=NULL"
                 " WHERE task_id=? AND state='running'", (task_id,))
 
-    def requeue_running(self, worker: str, *, legacy_stream: bool = False) -> int:
+    def requeue_running(self, worker: str) -> int:
         with self._lock:
             cur = self._conn.execute(
                 "UPDATE tasks SET state='queued', started_at=NULL"
-                " WHERE worker=? AND state='running' AND (execution_epoch IS NULL OR ?)",
-                (worker, legacy_stream))
+                " WHERE worker=? AND state='running' AND (execution_epoch IS NULL OR legacy_dispatch=1)",
+                (worker,))
             changed = int(cur.rowcount or 0)
             self.refresh_counts(worker)
         if changed:
@@ -999,7 +1007,7 @@ class RouterStore:
         with self._lock:
             finished_at = time.time()
             self._conn.execute(
-                "UPDATE tasks SET state=?, finished_at=?, result_json=?"
+                "UPDATE tasks SET state=?, finished_at=?, pause_reason=NULL, result_json=?"
                 " WHERE task_id=?",
                 (status, finished_at,
                  json.dumps(result, ensure_ascii=False), task_id))
@@ -1028,8 +1036,8 @@ class RouterStore:
                 result["approval_status"] = progress["state"]
             self._conn.execute(
                 "UPDATE tasks SET state=?, finished_at=?,"
-                " result_json=? WHERE task_id=?",
-                (state, None if pending else time.time(), json.dumps(result, ensure_ascii=False),
+                " result_json=?, execution_epoch=COALESCE(execution_epoch, ?) WHERE task_id=?",
+                (state, None if pending else time.time(), json.dumps(result, ensure_ascii=False), uuid.uuid4().hex if pending else None,
                  task_id))
         return self.get_task(task_id)
 
@@ -1787,6 +1795,10 @@ class Connection:
         self.connected_at = time.time()
         self.generation = uuid.uuid4().hex
         self.state_layers = state_layers
+        self.native_settlement = False
+        self.assigned_execution = None
+        self.legacy_active = None
+        self.legacy_finished = None
         self.recovering_task = None
         self.turn_view_seq = -1
         self.peer_after = 0
@@ -1857,7 +1869,6 @@ class RouterServer(ThreadingHTTPServer):
         self.conns: Dict[str, Connection] = {}
         self.conn_lock = threading.Lock()
         self.dispatch_lock = threading.RLock()
-        self.idle_observations: Dict[str, Tuple[float, Optional[str]]] = {}
         self.cancellations_changed = threading.Event()
         self.question_lock = threading.Lock()
         self.question_requests: Dict[str, Dict[str, Any]] = {}
@@ -1944,83 +1955,37 @@ class RouterServer(ThreadingHTTPServer):
         except OSError as exc:
             log.warning("result candidate cleanup pending task=%s error=%s", task_id, type(exc).__name__)
 
-    def settle_idle(self, name: str) -> List[Dict[str, Any]]:
-        """A fresh idle pulse owns settlement; native proofs are audit metadata."""
-        completed = []
-        with self.dispatch_lock:
-            worker = self.store.get_worker(name)
-            pulse = self.idle_observations.get(name)
-            if not worker or worker.get("state") != "idle" or pulse is None:
-                return []
-            idle_at, finished_epoch = pulse
-            live = self.current_conn(name)
-            tasks = [task for task in self.store.list_tasks(worker=name, limit=500)
-                     if task["state"] in ("running", "cancelling")
-                     and idle_at >= (task.get("started_at") or task["created_at"])
-                     and (task["state"] == "cancelling" or task["execution_epoch"] is None or
-                          (live is not None and live.recovering_task != task["task_id"]
-                           and task["execution_epoch"] == finished_epoch))]
-            if not tasks:
-                return []
-            for question in self.store.pending_questions(name):
-                # Refresh answers made in the native UI or Feishu as well as
-                # answers through Router. This RPC reads only public question state.
-                self.question_request(name, question["question_id"], "get")
-            pending = {question["task_id"] for question in self.store.pending_questions(name)}
-            for task in tasks:
-                task_id = task["task_id"]
-                if task["state"] != "cancelling" and task_id in pending:
-                    log.info("idle settlement pending task=%s reason=unanswered_question", task_id)
-                    continue
-                saved = self.result_candidates.get(task_id)
-                record = (saved or {}).get("result", {})
-                candidate = record.get("candidate", {})
-                if task["state"] == "running" and task["execution_epoch"] is not None and not candidate:
-                    # The worker can deliver its durable result after this pulse.
-                    continue
-                if task["state"] == "cancelling":
-                    result = {**(task.get("result") or {}), "status": "cancelled",
-                              "summary": "Worker 已空闲，取消完成。"}
-                elif candidate.get("status") in ("done", "failed"):
-                    result = {key: candidate[key] for key in ("status", "summary", "summary_short",
-                              "artifacts", "evidence", "outcome", "error_code") if key in candidate}
-                else:
-                    result = {"status": "failed", "error_code": "worker_idle_without_result",
-                              "summary": "Worker 已空闲，但未提交任务结果。"}
-                if result.get("outcome") == "needs_inspection":
-                    result["status"] = "done"
-                result.setdefault("artifacts", [])
-                result.setdefault("evidence", [])
-                connection = self.current_conn(name)
-                result.update(reported_at=time.time(), completion={
-                    "signal": "worker_idle", "idle_at": idle_at,
-                    "reported_generation": record.get("generation"),
-                    "current_generation": connection.generation if connection else None,
-                    "generation_matches": bool(connection and record.get("generation") == connection.generation)})
-                attachments = record.get("attachments") or []
-                if attachments:
-                    result["attachments"] = attachments
-                finished = self.store.finish_task(task_id, result["status"], result)
-                self.discard_result_candidate(task_id)
-                completed.append(finished)
-                log.info("idle settlement task=%s state=%s code=%s generation_matches=%s",
-                         task_id, result["status"], result.get("error_code", "-"),
-                         result["completion"]["generation_matches"])
-        settlements = []
-        for task in completed:
-            result = task["result"]
-            notice = task_result_payload(task, task["state"], str(result.get("summary") or ""),
-                                         result.get("summary_short", UNSET))
-            if result.get("attachments"):
-                notice["payload"]["attachments"] = result["attachments"]
-            notified, _receipt = self.notifier.post_task_notice(task["task_id"], task["state"], notice)
-            settlements.append({"task_id": task["task_id"], "state": task["state"],
-                                "finished_at": task["finished_at"], "notified": notified,
-                                **{key: result[key] for key in ("outcome", "error_code") if key in result}})
-        return settlements
+    def mark_unconfirmed(self, name: str) -> None:
+        # A heartbeat describes the worker. It cannot identify which native
+        # turn ended, even if it arrives immediately after a task dispatch.
+        task = self.store.blocking_task(name)
+        if task and task["state"] == "running" and not task["result"]:
+            with self.store._lock:
+                self.store._conn.execute(
+                    "UPDATE tasks SET result_json=? WHERE task_id=? AND state='running' AND result_json IS NULL",
+                    (json.dumps({"outcome": "needs_inspection", "reason": "task_turn_unconfirmed"}), task["task_id"]))
 
-    def submit_result(self, body: Dict[str, Any], attachments=None) -> Tuple[int, Dict[str, Any]]:
-        """Save the business result and settle only after an observed idle pulse."""
+    def turn_binding(self, task_id: str, body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
+        binding = {key: body.get(key) for key in ("thread_id", "turn_id", "execution_epoch")}
+        if any(not isinstance(value, str) or not 0 < len(value.strip()) <= 128 for value in binding.values()):
+            raise BadRequest("exact thread_id, turn_id and execution_epoch required")
+        with self.dispatch_lock, self.store._lock:
+            task = self.store.get_task(task_id)
+            if not task:
+                return 404, {"ok": False, "error": "unknown_task"}
+            conn = self.current_conn(task["worker"])
+            if (task["worker"] != body.get("name") or task["state"] != "running" or not conn or conn.closed
+                    or conn.recovering_task == task_id or body.get("connection_generation") != conn.generation
+                    or task["execution_epoch"] != binding["execution_epoch"]):
+                return 409, {"ok": False, "error": "stale_task_execution"}
+            if task["turn_binding"] and task["turn_binding"] != binding:
+                return 409, {"ok": False, "error": "native_turn_binding_conflict"}
+            if not task["turn_binding"]:
+                self.store.bind_turn(task_id, binding)
+            return 200, {"ok": True, "binding": binding}
+
+    def submit_result(self, body: Dict[str, Any], attachments=None, *, legacy_check=None, idle_check=None) -> Tuple[int, Dict[str, Any]]:
+        """A business report remains a candidate until its registered native turn ends."""
         name, task_id = str(body.get("name") or "").strip(), str(body.get("task_id") or "").strip()
         if not name or not task_id:
             raise BadRequest("name and task_id are required")
@@ -2034,6 +1999,12 @@ class RouterServer(ThreadingHTTPServer):
         candidate = {key: body[key] for key in ("name", "task_id", "status", "summary", "summary_short",
                                                "artifacts", "evidence", "outcome", "error_code") if key in body}
         candidate.update(name=name, task_id=task_id, status=status, summary=summary)
+        current = self.store.get_task(task_id)
+        if (current and current["worker"] == name
+                and current["state"] == "running"):
+            for question in self.store.pending_questions(name):
+                if question["task_id"] == task_id:
+                    self.question_request(name, question["question_id"], "get")
         with self.dispatch_lock:
             task = self.store.get_task(task_id)
             if task is None:
@@ -2045,33 +2016,124 @@ class RouterServer(ThreadingHTTPServer):
                 self.discard_result_candidate(task_id)
                 return 200, {"ok": True, "task_id": task_id, "state": task["state"],
                              "duplicate": True, "notified": False, "dispatched_next": None}
-            connection = self.current_conn(name)
-            saved = self.result_candidates.put(task_id, {"candidate": candidate, "attachments": attachments or [],
-                                                        "generation": connection.generation if connection else None})
-        settlements = self.settle_idle(name)
-        with self.dispatch_lock:
-            task = self.store.get_task(task_id)
-            if task["state"] in TERMINAL_STATES:
-                own = next((item for item in settlements if item["task_id"] == task_id), None)
+            conn = self.current_conn(name)
+            proof = body.get("native_completion")
+            binding = task["turn_binding"]
+            # An older client can attest its bound root via the existing completion RPC.
+            # Fence the round trip with the saved revision, dispatch epoch and stream.
+            if legacy_check:
+                origin, revision, epoch, observed = legacy_check
+                saved = self.result_candidates.get(task_id)
+                if (conn is origin and not conn.closed and not conn.native_settlement and
+                        task["state"] == "running" and epoch == task["execution_epoch"] and
+                        saved and saved["revision"] == revision):
+                    binding = {"thread_id": observed["thread_id"], "turn_id": observed["turn_ids"][0],
+                               "execution_epoch": epoch}
+                    if task["turn_binding"] and task["turn_binding"] != binding:
+                        return 409, {"ok": False, "error": "native_turn_binding_conflict"}
+                    self.store.bind_turn(task_id, binding)
+                    proof = {**binding, "native_status": observed["native_status"], "cleanup_complete": True}
+                    body = {**body, "connection_generation": conn.generation}
+                else:
+                    return 202, {"ok": True, "candidate": True, "state": task["state"], "reason": "stale_observer"}
+            verified = (task["state"] == "running" and conn and not conn.closed and conn.recovering_task != task_id
+                        and body.get("connection_generation") == conn.generation
+                        and binding and binding["execution_epoch"] == task["execution_epoch"]
+                        and isinstance(proof, dict) and all(proof.get(k) == v for k, v in binding.items())
+                        and proof.get("native_status") in ("completed", "failed", "interrupted", "cancelled", "canceled")
+                        and proof.get("cleanup_complete") is True)
+            pending = any(q["task_id"] == task_id for q in self.store.pending_questions(name))
+            identity = (task_id, task["execution_epoch"])
+            old_protocol = (conn and not conn.closed and not conn.native_settlement and conn.assigned_execution == identity and
+                            not (self.store.get_worker(name) or {}).get("control_sse") and
+                            task["state"] == "running" and proof is None and "connection_generation" not in body)
+            if idle_check:
+                saved = self.result_candidates.get(task_id)
+                if (not old_protocol or idle_check != (conn.generation, identity[1], (saved or {}).get("revision"))):
+                    return 202, {"ok": True, "state": task["state"], "candidate": True, "reason": "stale_idle"}
+            legacy_idle = False
+            if old_protocol and identity in (conn.legacy_active, conn.legacy_finished):
+                # Older business workers already emit this typed native receipt in /result.
+                # Pair it with their task-scoped running/idle edge and the stored dispatch epoch.
+                turns = {(e["thread_id"], e["turn_id"]) for e in (candidate.get("evidence") or [])
+                         if isinstance(e, dict) and e.get("type") == "codex_thread" and
+                         all(isinstance(e.get(k), str) and 0 < len(e[k]) <= 128 for k in ("thread_id", "turn_id"))}
+                if len(turns) == 1:
+                    thread, turn = turns.pop()
+                    anchor = {"thread_id": thread, "turn_id": turn, "execution_epoch": identity[1]}
+                    if binding and binding != anchor:
+                        return 409, {"ok": False, "error": "native_turn_binding_conflict"}
+                    if not binding:
+                        self.store.bind_turn(task_id, anchor)
+                    binding = anchor
+                    legacy_idle = conn.legacy_finished == identity
+            can_finish = (verified or legacy_idle) and not pending
+            if not can_finish:
+                # A stale observer must not replace the real business candidate.
+                if not verified and task["state"] == "running":
+                    self.mark_unconfirmed(name)
+                if proof is not None and not verified:
+                    return 409, {"ok": False, "error": "native_turn_mismatch", "state": task["state"]}
+                saved = self.result_candidates.put(task_id, {"candidate": candidate, "attachments": attachments or [],
+                                                            "generation": conn.generation if conn else None,
+                                                            "execution_epoch": task["execution_epoch"]})
+                reason = "unanswered_question" if pending else "task_turn_unconfirmed"
+                waiting = {"ok": True, "task_id": task_id, "state": task["state"], "candidate": True,
+                           "revision": saved["revision"], "reason": reason, "notified": False, "dispatched_next": None}
+                if (pending or task["state"] != "running" or not conn or conn.closed or conn.native_settlement
+                        or conn.assigned_execution != identity or legacy_check or "connection_generation" in body or
+                        not (self.store.get_worker(name) or {}).get("control_sse")):
+                    return 202, waiting
+            else:
+                result = {k: v for k, v in candidate.items() if k not in ("name", "task_id")}
+                result.setdefault("evidence", [])
+                result.setdefault("artifacts", [])
+                if result.get("outcome") == "needs_inspection":
+                    result["status"] = "done"
+                saved = self.result_candidates.get(task_id)
+                earlier = (saved or {}).get("result", {})
+                if not attachments and earlier.get("execution_epoch") == task["execution_epoch"]:
+                    attachments = earlier.get("attachments")
+                if attachments:
+                    result["attachments"] = attachments
+                completion = ({"signal": "legacy_task_idle", **binding} if legacy_idle
+                              else {"signal": "native_turn_ended", "native_status": proof["native_status"], **binding})
+                result.update(reported_at=time.time(), completion=completion)
+                task = self.store.finish_task(task_id, result["status"], result)
+                self.discard_result_candidate(task_id)
                 dispatched = self.dispatch_one(name)
-                return 200, {"ok": True, "task_id": task_id, "state": task["state"],
-                             "finished_at": task["finished_at"], "duplicate": own is None,
-                             "notified": bool(own and own["notified"]),
-                             "dispatched_next": dispatched["task_id"] if dispatched else None}
-            reason = "unanswered_question" if any(q["task_id"] == task_id for q in self.store.pending_questions(name)) else "worker_idle_pending"
-            if task["state"] == "cancelling":
-                reason = "cancellation_idle_pending"
-            return 202, {"ok": True, "task_id": task_id, "state": task["state"], "candidate": True,
-                         "revision": saved["revision"], "reason": reason, "notified": False, "dispatched_next": None}
+        if not can_finish:
+            code, observed = self.worker_request(name, "task_result_check", {
+                "task_id": task_id, "candidate": candidate, "revision": saved["revision"]}, "completion", timeout=2)
+            ids = observed.get("turn_ids")
+            final = observed.get("result")
+            if (code == 200 and observed.get("task_id") == task_id and observed.get("generation") == conn.generation
+                    and observed.get("ready") is True and observed.get("cleanup_complete") is True
+                    and observed.get("followups_pending") is False and isinstance(ids, list) and ids
+                    and all(isinstance(v, str) and 0 < len(v) <= 128 for v in ids)
+                    and observed.get("turn_id") in ids and isinstance(observed.get("thread_id"), str)
+                    and 0 < len(observed["thread_id"]) <= 128 and observed.get("native_status") in
+                    ("completed", "failed", "interrupted", "cancelled", "canceled")
+                    and isinstance(final, dict) and final.get("task_id") == task_id and final.get("name") == name):
+                return self.submit_result(final, attachments, legacy_check=(conn, saved["revision"], task["execution_epoch"], observed))
+            return 202, waiting
+        notice = task_result_payload(task, task["state"], summary, result.get("summary_short", UNSET))
+        if attachments:
+            notice["payload"]["attachments"] = attachments
+        notified, _ = self.notifier.post_task_notice(task_id, task["state"], notice)
+        return 200, {"ok": True, "task_id": task_id, "state": task["state"], "finished_at": task["finished_at"],
+                     "duplicate": False, "notified": notified, "dispatched_next": dispatched["task_id"] if dispatched else None}
 
     def cancel_execution(self, task: Dict[str, Any]) -> Dict[str, Any]:
         """Deliver only the exact task identity; never a selected-session stop."""
         worker = self.store.get_worker(task["worker"]) or {}
         base = worker.get("control_url")
         conn = self.current_conn(task["worker"])
+        command = {"task_id": task["task_id"], "execution_epoch": task["execution_epoch"],
+                   "connection_generation": conn.generation if conn else None}
         if worker.get("control_sse") and conn and not conn.closed:
             try:
-                conn.queue.put_nowait({"event": "task_cancel", "data": {"task_id": task["task_id"]}})
+                conn.queue.put_nowait({"event": "task_cancel", "data": command})
                 delivery = {"ok": True, "confirmed": False, "via": "sse"}
             except queue.Full:
                 delivery = {"ok": False, "error": "worker_control_queue_full"}
@@ -2084,7 +2146,7 @@ class RouterServer(ThreadingHTTPServer):
                         return None
                 req = urllib.request.Request(
                     base + "/manager/tasks/" + task["task_id"] + "/cancel",
-                    data=json.dumps({"task_id": task["task_id"]}).encode("utf-8"),
+                    data=json.dumps(command).encode("utf-8"),
                     headers={"Authorization": "Bearer " + self.token,
                              "Content-Type": "application/json"},
                     method="POST")
@@ -2104,23 +2166,41 @@ class RouterServer(ThreadingHTTPServer):
                 "cancel_forward_%s task=%s worker=%s delivery=%s",
                 "ok" if delivery["ok"] else "failed", task["task_id"],
                 task["worker"], delivery)
-        self.record_cancel_delivery(task, delivery)
+        delivery["connection_generation"] = command["connection_generation"]
+        finished = self.record_cancel_delivery(task, delivery)
+        if finished:
+            self.notifier.notify_result(finished, "cancelled", finished["result"]["summary"])
         return delivery
 
-    def record_cancel_delivery(self, task: Dict[str, Any], delivery: Dict[str, Any]) -> None:
+    def record_cancel_delivery(self, task: Dict[str, Any], delivery: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         with self.dispatch_lock, self.store._lock:
             current = self.store.get_task(task["task_id"])
-            if current and current["state"] in ("cancelling", "cancelled"):
-                result = current.get("result") or {}
-                result["cancel_delivery"] = delivery
-                if current["state"] == "cancelling" and delivery.get("confirmed"):
-                    result.update(status="cancelled", summary="worker confirmed execution stopped")
-                    self.store.finish_task(task["task_id"], "cancelled", result)
-                    self.discard_result_candidate(task["task_id"])
-                else:
-                    self.store._conn.execute(
-                        "UPDATE tasks SET result_json=? WHERE task_id=?",
-                        (json.dumps(result, ensure_ascii=False), task["task_id"]))
+            if not current or not self.awaiting_stop(current):
+                return
+            outcome = delivery.get("worker") or {}
+            conn = self.current_conn(current["worker"])
+            same_execution = (conn and not conn.closed and outcome.get("connection_generation") == conn.generation
+                              and current["execution_epoch"] and outcome.get("execution_epoch") == current["execution_epoch"])
+            binding = current["turn_binding"]
+            never_started = not binding and outcome.get("reason") in ("not_dispatched", "not_started")
+            stopped = (outcome.get("executionStopped") is True and outcome.get("pendingCommands") == 0
+                       and outcome.get("thread_id") and outcome.get("turn_id")
+                       and (not binding or all(binding[k] == outcome[k] for k in ("thread_id", "turn_id"))))
+            delivery["confirmed"] = bool(delivery.get("confirmed") and same_execution and (stopped or never_started))
+            result = {**(current["result"] or {}), "cancel_delivery": delivery}
+            if delivery["confirmed"]:
+                result.update(status="cancelled", cancel_confirmed=True, summary="worker confirmed execution stopped")
+                result.pop("error_code", None)
+                finished = self.store.finish_task(task["task_id"], "cancelled", result)
+                self.discard_result_candidate(task["task_id"])
+                return finished
+            else:
+                self.store._conn.execute("UPDATE tasks SET result_json=? WHERE task_id=?",
+                                         (json.dumps(result, ensure_ascii=False), task["task_id"]))
+
+    @staticmethod
+    def awaiting_stop(task):
+        return task["state"] == "cancelling" or (task["state"] == "paused" and task["pause_reason"] == "cancel_unconfirmed")
 
     # -- connections ---------------------------------------------------- #
     def current_conn(self, name: str) -> Optional[Connection]:
@@ -2130,8 +2210,9 @@ class RouterServer(ThreadingHTTPServer):
     def online(self, name: str) -> bool:
         return self.current_conn(name) is not None
 
-    def attach(self, name: str, version: Optional[str] = None, state_layers: bool = False) -> Connection:
+    def attach(self, name: str, version: Optional[str] = None, state_layers: bool = False, native_settlement: bool = False) -> Connection:
         conn = Connection(name, version, state_layers)
+        conn.native_settlement = native_settlement
         with self.dispatch_lock:
             # Publish the connection and replay under the same lock as peer
             # creation/ACK. Otherwise a live create can overtake its replay.
@@ -2140,13 +2221,12 @@ class RouterServer(ThreadingHTTPServer):
                 self.conns[name] = conn
                 if old is not None:
                     old.close("replaced")
-            self.idle_observations.pop(name, None)
             self.store.set_online(name, version)
             # Replay legacy work. A versioned execution instead requires a
             # recovery report before this connection can settle its result.
-            self.store.requeue_running(name, legacy_stream=not state_layers)
+            self.store.requeue_running(name)
             occupied = self.store.blocking_task(name) if state_layers else None
-            if occupied and occupied["execution_epoch"] and occupied["state"] in ("running", "paused"):
+            if occupied and occupied["execution_epoch"] and occupied["state"] in ("running", "paused") and occupied["pause_reason"] != "cancel_unconfirmed":
                 conn.recovering_task = occupied["task_id"]
                 conn.queue.put({"event": "task_recovery", "data": occupied})
             self.dispatch_one(name)
@@ -2163,7 +2243,6 @@ class RouterServer(ThreadingHTTPServer):
                 if current:
                     self.conns.pop(conn.name, None)
             if current:
-                self.idle_observations.pop(conn.name, None)
                 self.store.set_offline(conn.name)
                 self.store.requeue_running(conn.name)
                 # 订阅不留存: a worker that is not listening keeps nothing.
@@ -2199,30 +2278,23 @@ class RouterServer(ThreadingHTTPServer):
             conn.peer_after = message["seq"]
 
     def push(self, conn: Connection, task: Dict[str, Any]) -> bool:
-        previous = task.get("dispatch_attempted")
-        previous_epoch = task.get("execution_epoch")
-        epoch = uuid.uuid4().hex if conn.state_layers else None
+        # The SSE writer and GET /tasks see the same dispatch. A closed stream
+        # that rejects the frame leaves the previous epoch and binding intact.
         with self.store._lock:
-            self.store._conn.execute("UPDATE tasks SET dispatch_attempted=1, execution_epoch=? WHERE task_id=?",
-                                     (epoch, task["task_id"]))
-        task["dispatch_attempted"] = True
-        task["execution_epoch"] = epoch
-        if conn.state_layers and previous is not False and not conn.closed:
-            conn.recovering_task = task["task_id"]
-            conn.queue.put({"event": "task_recovery", "data": dict(task)})
-            sent = True
-        else:
-            sent = conn.send_task(task)
-        if not sent:
-            # A closed connection rejected this attempt before enqueueing it.
-            # Preserve older uncertain deliveries, but do not exempt new work
-            # from its waiting TTL merely because this known attempt failed.
-            with self.store._lock:
-                self.store._conn.execute("UPDATE tasks SET dispatch_attempted=?, execution_epoch=? WHERE task_id=?",
-                                         (previous, previous_epoch, task["task_id"]))
-            task["dispatch_attempted"] = previous
-            task["execution_epoch"] = previous_epoch
-        return sent
+            payload = {**task, "dispatch_attempted": True, "execution_epoch": uuid.uuid4().hex, "turn_binding": None}
+            if conn.closed:
+                return False
+            if conn.state_layers and task.get("dispatch_attempted") is not False:
+                conn.recovering_task = task["task_id"]
+                conn.queue.put({"event": "task_recovery", "data": payload})
+            elif not conn.send_task(payload):
+                return False
+            self.store._conn.execute(
+                "UPDATE tasks SET dispatch_attempted=1, execution_epoch=?, legacy_dispatch=?, turn_binding_json=NULL"
+                " WHERE task_id=?", (payload["execution_epoch"], int(not conn.state_layers), task["task_id"]))
+            task.update(payload)
+            conn.assigned_execution = (task["task_id"], task["execution_epoch"])
+            return True
 
     def dispatch_one(self, worker: str) -> Optional[Dict[str, Any]]:
         """Push the next queued task when the worker has nothing running."""
@@ -2243,8 +2315,7 @@ class RouterServer(ThreadingHTTPServer):
             return task
 
     def sweep_cancellations(self) -> Optional[float]:
-        """Release overdue cancellations and return the next persisted deadline."""
-        expired = []
+        """Retain overdue cancellations until the worker confirms stop or an operator releases them."""
         next_deadline = None
         with self.dispatch_lock:
             now = time.time()
@@ -2257,17 +2328,14 @@ class RouterServer(ThreadingHTTPServer):
                 if deadline > now:
                     next_deadline = deadline if next_deadline is None else min(next_deadline, deadline)
                     continue
-                result = {**result, "status": "cancelled", "error_code": "worker_cancel_timeout",
-                          "cancel_confirmed": False,
-                          "summary": "取消确认超时，Router 已释放任务占用，原生执行停止未确认。"}
-                expired.append(self.store.finish_task(task["task_id"], "cancelled", result))
-                self.discard_result_candidate(task["task_id"])
-            for worker in {task["worker"] for task in expired}:
-                self.dispatch_one(worker)
-        for task in expired:
-            notified = self.notifier.notify_result(task, "cancelled", task["result"]["summary"])
-            log.warning("cancel_timeout task_id=%s worker=%s notified=%s",
-                        task["task_id"], task["worker"], notified)
+                result.update(status="paused", error_code="cancel_unconfirmed", cancel_confirmed=False,
+                              summary="取消等待超时，执行停止待确认，保留任务占位。")
+                with self.store._lock:
+                    self.store._conn.execute(
+                        "UPDATE tasks SET state='paused', pause_reason='cancel_unconfirmed', result_json=? WHERE task_id=?",
+                        (json.dumps(result, ensure_ascii=False), task["task_id"]))
+                    self.store.refresh_counts(task["worker"])
+                log.warning("cancel_timeout task_id=%s worker=%s state=paused", task["task_id"], task["worker"])
         return next_deadline
 
     def expire_queued_tasks(self) -> int:
@@ -2521,6 +2589,10 @@ class RouterHandler(BaseHTTPRequestHandler):
                 return self._send_json(*self._task_cancel(parts[1]))
             if len(parts) == 3 and parts[0] == "tasks" and parts[2] == "cancel-ack":
                 return self._send_json(*self._task_cancel_ack(parts[1], body))
+            if len(parts) == 3 and parts[0] == "tasks" and parts[2] == "turn-binding":
+                return self._send_json(*self.server.turn_binding(parts[1], body))
+            if len(parts) == 3 and parts[0] == "tasks" and parts[2] == "cancel-release":
+                return self._send_json(*self._cancel_release(parts[1], body))
             if len(parts) == 3 and parts[0] == "tasks" and parts[2] == "execution":
                 return self._send_json(*self._task_execution(parts[1], body))
             if parts == ["subscriptions"]:
@@ -2955,6 +3027,7 @@ class RouterHandler(BaseHTTPRequestHandler):
             "new": created,
             "version": worker["version"],
             "state_layers": 2,
+            "native_settlement": True,
         }
 
     def _heartbeat(self, body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
@@ -2977,7 +3050,6 @@ class RouterHandler(BaseHTTPRequestHandler):
             raise BadRequest("turn_source must be trainer, router or null")
         with self.server.dispatch_lock:
             generation = body.get("connection_generation")
-            finished_epoch = body.get("finished_execution_epoch") if generation is not None else None
             if generation is not None:
                 conn = self.server.current_conn(name)
                 if not conn or conn.closed or not conn.state_layers or conn.generation != generation:
@@ -2993,20 +3065,32 @@ class RouterHandler(BaseHTTPRequestHandler):
                     turn_views = None
                 else:
                     conn.turn_view_seq = sequence
-            previous = self.server.store.get_worker(name)
             if not self.server.store.heartbeat(name, state, progress_at, task_id, turn_source, turn_views):
                 return 404, {"ok": False, "error": "unknown_worker", "worker": name}
+            conn = self.server.current_conn(name)
+            legacy_candidate = None
+            if conn and not conn.native_settlement and not (self.server.store.get_worker(name) or {}).get("control_sse"):
+                task = self.server.store.blocking_task(name)
+                identity = (task["task_id"], task["execution_epoch"]) if task and task["state"] == "running" else None
+                if state == "running":
+                    conn.legacy_active = identity if identity and task_id == identity[0] and turn_source == "router" else None
+                    conn.legacy_finished = None
+                elif state == "idle" and identity and conn.legacy_active == identity:
+                    conn.legacy_active = None
+                    conn.legacy_finished = identity
+                    saved = self.server.result_candidates.get(identity[0])
+                    if saved and saved["result"].get("generation") == conn.generation and saved["result"].get("execution_epoch") == identity[1]:
+                        legacy_candidate = saved
             if state == "idle":
-                # Repeated idle heartbeats retain the original pulse, so a
-                # queued task dispatched afterward cannot inherit its idle.
-                pulse = self.server.idle_observations.get(name)
-                if previous.get("state") != "idle" or pulse is None or pulse[1] != finished_epoch:
-                    self.server.idle_observations[name] = (time.time(), finished_epoch)
-            elif state is not None:
-                self.server.idle_observations.pop(name, None)
-        settlements = self.server.settle_idle(name) if state == "idle" else []
-        with self.server.dispatch_lock:
+                self.server.mark_unconfirmed(name)
             dispatched = self.server.dispatch_one(name)
+        settlements = []
+        if legacy_candidate:
+            record = legacy_candidate["result"]
+            code, result = self.server.submit_result(record["candidate"], record.get("attachments"),
+                idle_check=(record["generation"], record["execution_epoch"], legacy_candidate["revision"]))
+            if code == 200 and not result.get("duplicate"):
+                settlements.append(result)
         for task in self.server.store.list_tasks(worker=name, state="cancelling", limit=1):
             self.server.cancel_execution(task)
         worker = self.server.store.get_worker(name)
@@ -3227,7 +3311,7 @@ class RouterHandler(BaseHTTPRequestHandler):
             task = self.server.store.get_task(task_id)
             if task is None:
                 return 404, {"ok": False, "error": "unknown_task", "task_id": task_id}
-            already = task["state"] in ("cancelled", "cancelling")
+            already = task["state"] == "cancelled" or self.server.awaiting_stop(task)
             if not already and task["state"] in TERMINAL_STATES:
                 return 409, {"ok": False, "error": "not_cancellable",
                              "task_id": task_id, "state": task["state"]}
@@ -3249,7 +3333,7 @@ class RouterHandler(BaseHTTPRequestHandler):
                 self.server.discard_result_candidate(task_id)
             dispatched = self.server.dispatch_one(task["worker"]) if task["state"] == "cancelled" else None
         log.info("task cancelled id=%s worker=%s delivery=%s", task_id, task["worker"], delivery)
-        pending = task["state"] == "cancelling"
+        pending = self.server.awaiting_stop(task)
         message = "等待 Worker 确认执行停止" if pending else "执行已停止"
         if (task.get("result") or {}).get("cancel_confirmed") is False:
             message = task["result"]["summary"]
@@ -3265,7 +3349,7 @@ class RouterHandler(BaseHTTPRequestHandler):
                 return 404, {"ok": False, "error": "unknown_task"}
             if body.get("name") != task["worker"]:
                 return 400, {"ok": False, "error": "worker_mismatch"}
-            if task["state"] not in ("cancelling", "cancelled"):
+            if task["state"] != "cancelled" and not self.server.awaiting_stop(task):
                 return 409, {"ok": False, "error": "cancellation_not_requested", "state": task["state"]}
             outcome = body.get("outcome")
             if not isinstance(outcome, dict) or outcome.get("task_id") != task_id:
@@ -3273,12 +3357,33 @@ class RouterHandler(BaseHTTPRequestHandler):
             delivery = {"ok": outcome.get("ok") is True,
                         "confirmed": outcome.get("ok") is True and outcome.get("state") == "cancelled",
                         "via": "sse", "worker": outcome}
-            self.server.record_cancel_delivery(task, delivery)
+            finished = self.server.record_cancel_delivery(task, delivery)
             self.server.dispatch_one(task["worker"])
             current = self.server.store.get_task(task_id)
             if current["state"] == "cancelled":
                 self.server.discard_result_candidate(task_id)
+        if finished:
+            self.server.notifier.notify_result(finished, "cancelled", finished["result"]["summary"])
         return 200, {"ok": True, "task_id": task_id, "state": current["state"]}
+
+    def _cancel_release(self, task_id: str, body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
+        reason = body.get("reason")
+        if body.get("confirm") is not True or not isinstance(reason, str) or not 0 < len(reason.strip()) <= 300:
+            raise BadRequest("explicit confirmation and operator reason (1-300 characters) required")
+        with self.server.dispatch_lock:
+            task = self.server.store.get_task(task_id)
+            if not task:
+                return 404, {"ok": False, "error": "unknown_task"}
+            if task["state"] != "paused" or task["pause_reason"] != "cancel_unconfirmed" or (
+                    not task["execution_epoch"] or task["execution_epoch"] != body.get("execution_epoch")):
+                return 409, {"ok": False, "error": "cancel_release_mismatch"}
+            result = {**task["result"], "status": "cancelled", "manual_release": True,
+                      "summary": reason.strip(), "released_at": time.time(), "cancel_confirmed": False}
+            self.server.store.finish_task(task_id, "cancelled", result)
+            self.server.discard_result_candidate(task_id)
+            self.server.dispatch_one(task["worker"])
+        self.server.notifier.notify_result(self.server.store.get_task(task_id), "cancelled", result["summary"])
+        return 200, {"ok": True, "task_id": task_id, "state": "cancelled", "manual_release": True}
 
     def _task_execution(self, task_id: str, body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
         state = body.get("state")
@@ -3312,15 +3417,25 @@ class RouterHandler(BaseHTTPRequestHandler):
                 return 409, {"ok": False, "error": "task_execution_connection_required"}
             if body.get("connection_generation") != conn.generation:
                 return 409, {"ok": False, "error": "stale_connection_generation"}
+            if self.server.awaiting_stop(task):
+                return 409, {"ok": False, "error": "cancellation_pending"}
+            if state == "running" and task["turn_binding"] and any(
+                    evidence[k] != task["turn_binding"][k] for k in ("thread_id", "turn_id")):
+                return 409, {"ok": False, "error": "native_turn_binding_conflict"}
             duplicate = (task["state"], task["execution_epoch"], task["pause_reason"]) == (state, epoch, reason)
             if not duplicate:
-                if (conn.recovering_task != task_id or task["execution_epoch"] != expected
+                if (task["execution_epoch"] != expected
                         or task["state"] not in ("running", "paused")):
                     return 409, {"ok": False, "error": "stale_task_execution", "state": task["state"]}
-                store._conn.execute("UPDATE tasks SET state=?, execution_epoch=?, pause_reason=? WHERE task_id=?",
-                                    (state, epoch, reason, task_id))
+                binding = task["turn_binding"]
+                if state == "running":
+                    if task["state"] != "paused" and conn.recovering_task != task_id:
+                        return 409, {"ok": False, "error": "recovery_not_pending"}
+                    binding = {k: evidence[k] for k in ("thread_id", "turn_id")}
+                    binding["execution_epoch"] = epoch
+                store._conn.execute("UPDATE tasks SET state=?, execution_epoch=?, pause_reason=?, turn_binding_json=? WHERE task_id=?",
+                                    (state, epoch, reason, json.dumps(binding) if binding else None, task_id))
                 store.refresh_counts(worker)
-                self.server.idle_observations.pop(worker, None)
                 if state == "running":
                     conn.recovering_task = None
                 log.info("task recovery task=%s worker=%s state=%s reason=%s epoch=%s",
@@ -3911,14 +4026,13 @@ class RouterHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"ok": False, "error": str(exc)})
             return
 
-        conn = self.server.attach(name, version, qs.get("state_layers") == ["2"])
+        conn = self.server.attach(name, version, qs.get("state_layers") == ["2"], qs.get("native_settlement") == ["1"])
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "close")
         self.send_header("X-Accel-Buffering", "no")
-        if conn.state_layers:
-            self.send_header("X-Router-Generation", conn.generation)
+        self.send_header("X-Router-Generation", conn.generation)
         self.end_headers()
         self.close_connection = True
         try:

@@ -13,7 +13,7 @@ from pathlib import Path
 from unittest import mock
 
 import server as router
-from selftest_router import FakeWorker, http, worker_http
+from selftest_router import FakeWorker, fixture_binding, fixture_end, http
 
 
 class TwoLayerStateTests(unittest.TestCase):
@@ -74,7 +74,7 @@ class TwoLayerStateTests(unittest.TestCase):
             return self.store._conn.execute("SELECT turn_views_json FROM workers WHERE name=?",
                                             (self.name,)).fetchone()[0]
 
-    def test_01_cancel_timeout_releases_occupancy(self):
+    def test_01_cancel_timeout_pauses_and_retains_occupancy(self):
         real_timeout = os.environ.get("ROUTER_TEST_REAL_CANCEL_TIMEOUT") == "1"
         timeout = router.CANCEL_TIMEOUT_S if real_timeout else 0.25
         with mock.patch.object(router, "CANCEL_TIMEOUT_S", timeout):
@@ -93,22 +93,27 @@ class TwoLayerStateTests(unittest.TestCase):
                     time.sleep(0.02)
                 elapsed = time.monotonic() - start
                 saved = self.call("/tasks/" + task_id, method="GET")[1]["task"]
-                self.assertEqual((saved["state"], saved["result"]["error_code"],
-                                  saved["result"]["cancel_confirmed"]), ("cancelled", "worker_cancel_timeout", False))
-                self.assertGreaterEqual(saved["finished_at"] - saved["result"]["cancel_requested_at"], timeout)
+                self.assertEqual((saved["state"], saved["pause_reason"], saved["result"]["cancel_confirmed"]),
+                                 ("paused", "cancel_unconfirmed", False))
+                self.assertIsNone(saved["finished_at"])
+                self.assertGreaterEqual(elapsed, timeout)
                 self.assertLess(elapsed, timeout + 2)
-                self.assertFalse(self.worker()["busy"])
-                code, next_task = self.create("accepted after timeout")
-                self.assertEqual((code, next_task.get("dispatched")), (200, True), next_task)
-                self.assertEqual(self.client.wait_task(3)["task_id"], next_task["task_id"])
-                late_code, late = self.call("/result", {"name": self.name, "task_id": task_id,
-                                                      "status": "done", "summary": "late"})
-                self.assertEqual((late_code, late["state"], late["duplicate"]), (200, "cancelled", True))
-                sweep.stop()
-                sweep.join(3)
-                self.assertEqual([(n["event_id"], n["level"]) for n in self.sent], [(task_id + ":cancelled", "notify")])
-                print("cancel timeout %.3fs -> cancelled, confirmed=false, next dispatch HTTP %d"
-                      % (saved["finished_at"] - saved["result"]["cancel_requested_at"], code), flush=True)
+                self.assertTrue(self.worker()["busy"])
+                code, refused = self.create("must not overlap unknown execution")
+                self.assertEqual((code, refused["error"]), (409, "worker_paused"))
+                self.assertEqual(self.sent, [])
+                self.assertEqual(self.call("/result", {"name": self.name, "task_id": task_id,
+                                      "status": "done", "summary": "late"})[0], 202)
+                release = {"confirm": True, "reason": "operator independently verified stop",
+                           "execution_epoch": saved["execution_epoch"]}
+                path = "/tasks/" + task_id + "/cancel-release"
+                self.assertEqual(self.call(path, {**release, "execution_epoch": "old"})[0], 409)
+                self.assertEqual(self.call(path, release)[1]["state"], "cancelled")
+                self.assertTrue(self.store.get_task(task_id)["result"]["manual_release"])
+                self.assertFalse(self.store.get_task(task_id)["result"]["cancel_confirmed"])
+                self.assertEqual(self.create("next after manual release")[0], 200)
+                print("cancel timeout %.3fs -> paused/cancel_unconfirmed; next HTTP %d %s; manual release HTTP 200"
+                      % (elapsed, code, refused["error"]), flush=True)
             finally:
                 sweep.stop()
                 sweep.join(3)
@@ -130,18 +135,43 @@ class TwoLayerStateTests(unittest.TestCase):
         self.assertIsNone(self.client.wait_task(0.1))
         print("running + backlog capacity 128 -> HTTP 409 worker_busy, second SSE frame absent", flush=True)
 
-    def test_04_legacy_worker_migrates_and_completes_without_turn_samples(self):
-        self.assertIsNone(self.stored_views())
-        code, task = self.create("legacy flow")
-        self.assertEqual(code, 200)
+    def test_04_legacy_ordinary_turn_ending_cannot_settle_the_new_order(self):
+        self.call("/heartbeat", {"name": self.name, "state": "running", "turn_source": "trainer"})
+        _, task = self.create("new task waiting behind an ordinary turn")
         task_id = task["task_id"]
         self.assertEqual(self.client.wait_task(3)["task_id"], task_id)
-        code, terminal = worker_http("POST", self.base + "/result", {
-            "name": self.name, "task_id": task_id, "status": "done", "summary": "legacy done"}, self.server.token)
-        self.assertEqual((code, terminal["state"], len(self.sent)), (200, "done", 1))
+        _, idle = self.call("/heartbeat", {"name": self.name, "state": "idle", "task_id": None})
+        saved = self.store.get_task(task_id)
+        self.assertEqual((saved["state"], saved["finished_at"], saved["result"]["outcome"]),
+                         ("running", None, "needs_inspection"))
+        code, candidate = self.call("/result", {"name": self.name, "task_id": task_id,
+                                                "status": "done", "summary": "late actual result"})
+        self.assertEqual((code, candidate["candidate"], idle["settlements"], len(self.sent)), (202, True, [], 0))
         self.assertIsNone(self.stored_views())
-        self.assertFalse(self.worker()["busy"])
-        print("legacy register -> SSE dispatch -> HTTP 200 done, one notice, turn_views_json=NULL", flush=True)
+        print("legacy trainer idle -> running/needs_inspection; late result HTTP 202; notifications=0", flush=True)
+
+    def test_matching_stop_releases_paused_slot_and_rejects_old_ack(self):
+        _, task = self.create("stop on the original turn")
+        task_id = task["task_id"]
+        native = fixture_binding(self.client.wait_task(3))
+        self.call("/tasks/" + task_id + "/turn-binding", {"name": self.name, "connection_generation": self.server.current_conn(self.name).generation, **native})
+        self.call("/tasks/" + task_id + "/cancel")
+        with mock.patch.object(router, "CANCEL_TIMEOUT_S", 0):
+            self.server.sweep_cancellations()
+        conn = self.server.current_conn(self.name)
+        outcome = {"task_id": task_id, "state": "cancelled", "ok": True, "executionStopped": True,
+                   "pendingCommands": 0, "connection_generation": conn.generation, **native}
+        def ack(**changes):
+            return self.call("/tasks/" + task_id + "/cancel-ack", {"name": self.name, "outcome": {**outcome, **changes}})[1]
+        self.assertEqual(ack(connection_generation="old")["state"], "paused")
+        self.assertEqual(ack(execution_epoch="old")["state"], "paused")
+        self.assertEqual(ack(turn_id="other")["state"], "paused")
+        self.assertEqual(ack(executionStopped=False)["state"], "paused")
+        self.assertEqual(ack()["state"], "cancelled")
+        self.assertTrue(self.store.get_task(task_id)["result"]["cancel_confirmed"])
+        self.assertEqual(ack()["state"], "cancelled")
+        self.assertEqual(self.create("next after verified stop")[0], 200)
+        print("stale or unconfirmed ACK -> paused; matching stop -> cancelled, cancel_confirmed=true, next HTTP 200", flush=True)
 
     def test_paused_task_blocks_and_turn_view_is_write_only(self):
         paused = self.store.create_task(self.name, "paused fixture", state="paused")
@@ -234,9 +264,40 @@ class TwoLayerStateTests(unittest.TestCase):
         self.call("/heartbeat", {**idle, "finished_execution_epoch": epoch})
         self.assertEqual(self.sent, [])
         self.call("/heartbeat", {**idle, "finished_execution_epoch": running["execution_epoch"]})
+        self.assertEqual(self.store.get_task(task_id)["state"], "running")
+        native = self.store.get_task(task_id)["turn_binding"]
+        code, _ = self.call("/result", {"name": self.name, "task_id": task_id, "status": "done",
+                                       "connection_generation": generation, "native_completion": fixture_end(native), "summary": "original result"})
+        self.assertEqual(code, 200)
         self.assertEqual(self.store.get_task(task_id)["state"], "done")
         self.assertEqual(len(self.sent), 1)
         print("versioned SSE task -> task_recovery -> paused HTTP 200 -> worker_paused HTTP 409 -> running new epoch -> done, one notice", flush=True)
+
+    def test_pause_and_resume_on_same_connection_preserve_native_binding(self):
+        self.close_worker()
+        stream, generation = self.versioned_stream()
+        _, task = self.create("same-connection pause")
+        _, dispatch = self.stream_event(stream)
+        task_id = task["task_id"]
+        path = "/tasks/" + task_id
+        identity = fixture_binding(dispatch)
+        sender = {"name": self.name, "connection_generation": generation}
+        self.assertEqual(self.call(path + "/turn-binding", {**identity, **sender})[0], 200)
+        pause = {**sender, "state": "paused", "pause_reason": "resume_unconfirmed",
+                 "expected_epoch": dispatch["execution_epoch"]}
+        self.assertEqual(self.call(path + "/execution", pause)[1]["state"], "paused")
+        self.assertEqual(self.create("blocked")[1]["error"], "worker_paused")
+        evidence = {"thread_id": identity["thread_id"], "turn_id": identity["turn_id"], "message_id": "receipt"}
+        resume = {**pause, "state": "running", "evidence": evidence, "execution_epoch": "a" * 32}
+        self.assertEqual(self.call(path + "/execution", {**resume, "evidence": {**evidence, "turn_id": "other"}})[0], 409)
+        self.assertEqual(self.call(path + "/execution", resume)[1]["state"], "running")
+        self.call(path + "/cancel")
+        with mock.patch.object(router, "CANCEL_TIMEOUT_S", 0):
+            self.server.sweep_cancellations()
+        stale_resume = {**resume, "expected_epoch": resume["execution_epoch"], "execution_epoch": "b" * 32}
+        self.assertEqual(self.call(path + "/execution", stale_resume)[1]["error"], "cancellation_pending")
+        self.assertEqual(self.store.get_task(task_id)["pause_reason"], "cancel_unconfirmed")
+        print("pause -> HTTP 409 worker_paused; exact binding resumes; unconfirmed stop blocks resume", flush=True)
 
     def test_versioned_samples_reject_old_connection_and_ignore_reordered_sequence(self):
         self.close_worker()

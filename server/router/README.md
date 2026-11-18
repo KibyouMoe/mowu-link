@@ -147,23 +147,16 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.hermes.router.plist
 - `name` 必须与任务归属一致，否则 400 `worker_mismatch`。
 - `summary` 超过 300 个字符时返回 400，要求压缩到 300 字内或附 `summary_short(≤300)`。
   提供合法短摘要后保留完整正文，通知采用短摘要。
-- `/result` 先在 `<router.db>.result-candidates/` 原子保存 status、完整摘要、附件和 outcome。
-  收到同一 Worker 的 `state=idle` 心跳后结算它的 running 任务。忙碌期间返回 202 候选。
-- idle 时有候选就采用候选的 done/failed；缺候选就 failed，
-  `result.error_code=worker_idle_without_result`。取消中的任务在 idle 时进入 cancelled。
-- 绑定在本任务上的未答 question 是豁免。Router 从既有 `worker.question` 通知的提问 URL
-  或 `/questions/{worker}/{id}` 查询/回答回执登记关联，`task_questions` 表仅存标识和状态。
-  idle 时经既有鉴权 SSE 查询提问状态，覆盖飞书/原生端回答；确认回答后，下一条 idle 心跳结算。
-  URL 仅解析标识，实际查询沿既有 SSE，外部地址不会被请求。
-- busy→idle 的时间只适用于当时已开始的任务。连续 idle 重用同一时间，避免结算刚派发的下一单。
-  重连后接受新连接的首次 idle。进程重启后由新心跳重新建立 idle 信号，候选与提问索引持久保留。
-- `/result` 与 idle 结算共用 dispatch 锁。先落终态者生效，后到结果返回 `duplicate:true`。
-  `/heartbeat` 增加 `settlements` 数组及 `dispatched_next`，包含本次结算的任务/状态/错误码/通知回执。
-- `outcome=needs_inspection` 结算为 done，保留 outcome、error_code、完整摘要；通知 payload 同样携带它们。
-  `summary_short` 用于短通知。缺失原生 binding 或代际不匹配仅记一致性元数据，阻止不了 idle 结算。
-- `GET /tasks/{task_id}` 在结算前继续附 `result_candidate`，结算后清除候选。
-  `/result/responses` 保留兼容旧在途请求，完成判定不再发起 `task_result_check` 或等待原生收口证明。
-  旧 Worker 无需候选/原生观察器能力，仍按提交结果与 idle 心跳结算。
+- 每次派发生成独立的 `execution_epoch`。Worker 核对原生投递回执后向 `POST /tasks/{id}/turn-binding`
+  登记 `{name, connection_generation, thread_id, turn_id, execution_epoch}`。相同绑定可重试，冲突返回 HTTP 409。
+- 提前到达的 `/result` 与显式结果通知均保存为候选，返回 HTTP 202。Worker 核对根回合与续接回合已结束、
+  执行收尾完成后，向 `/result` 附当前 `connection_generation` 与 `native_completion`，含上述三个绑定字段、`native_status`、`cleanup_complete:true`。
+  Router 在派单锁内比对当前执行与绑定，核对本任务的问题均已回答，再写终态并发送一次通知。
+- 普通 idle 保留占位，任务读回可见 `result.outcome=needs_inspection`。`GET /tasks/{id}` 返回候选及绑定。
+- 新 Worker 根据注册响应的 `native_settlement:true` 在当前 SSE 连接协商绑定协议。旧 Router 继续使用原结果格式。
+  旧 Worker 可用原有 `task_result_check` 确认原生根回合及收尾，Router 按同一派发代际和候选版本核对。
+  更早的无观察器 Worker 需要原结果中的 `codex_thread` 回执，以及同连接、同任务的 running→idle。
+  缺少回合证据就保留候选。普通 idle 单独到达时结算列表为空。
 - trigger 不可用时响应 `notified:false`，已确认的终态保留，显式完成通知可沿同键补投。
 
 ### `POST /notice`：worker 往 Hermes 递话
@@ -250,9 +243,8 @@ Router 重启保留去重记录，每次读写清理满 24 小时的记录，并
   `session_unavailable`、`goal_conflict`、`resume_unconfirmed`、`recovery_expired`。
   确认恢复后用 `running`、新 `execution_epoch` 和 `evidence`（线程、回合、投递 ID）。
   重复回执幂等，旧代际、已取消或终态拒绝变更。新派单遇到暂停返回 409 和原因。
-- 已启用协议的任务用完成后的 `finished_execution_epoch` 心跳和同任务结果结算。
-  暂停、恢复待核查期间不结算。结果暂未上传时保留待送，补到后沿用已收到的同代际完成信号。
-  未协商 v2 的连接保持旧协议。
+- `finished_execution_epoch` 心跳仅记录活动。结算需要原生回合结束证据，见上文 `/result`。
+  旧 Worker 的结果仍可保存为候选；升级后经同任务恢复及原生核对可继续处理。
 
 ### 订阅
 
@@ -388,22 +380,22 @@ worker 离线 + queue_if_offline=true    → 202 {task_id, queued:true, queued_a
 ```
 queued ──dispatch──> running ──/result done──> done
    │                    │      └─/result failed─> failed
-   │                    └──cancel──> cancelling ──确认／60 秒超时──> cancelled
+   │                    └──cancel──> cancelling ──停工确认──> cancelled
+   │                                  └──60 秒无确认──> paused (cancel_unconfirmed)
    └──────cancel──────> cancelled
 ```
 
 - `workers.busy` 只投影 `queued/running/paused`。原生对话活动由既有 `state/turn_source` 表达。
   仅有 `cancelling` 时，`busy=false`，派单仍会在取消收尾期间返回真正的工单占用。
   已接受的等待任务按 FIFO 单次推一条。
-- Router 读取已有的 `paused` 状态并拒绝新派单。本阶段没有新增暂停或恢复入口。
-- 断线时，该 worker 的 `running` 任务回到 `queued`；重连后会再次下发。
-  语义是 **at-least-once**，worker 需按 `task_id` 幂等。
-- 取消运行中的任务先进入 `cancelling`，经原鉴权 SSE 的 `task_cancel` 交给 Worker。
-  Worker 向 `/tasks/{id}/cancel-ack` 回传精确执行状态，确认停止后进入 `cancelled` 并派下一条。
-  不支持 SSE 控制的旧 Worker 使用已登记的 `control_url`。
-  无确认时后台按首次取消时间的 60 秒期限写入 `cancelled`，释放占用并按终态发一条通知。
-  结果 `error_code=worker_cancel_timeout`、`cancel_confirmed=false` 表示原生停工未确认。
-  取消期间迟到的 `/result` 保留等待停止，已取消的结果回传返回 `duplicate:true`。
+- `POST /tasks/{id}/execution` 接受当前连接、原执行代际及暂停原因。恢复需要相同原生身份的证据与新代际。
+  旧协议重连按任务 ID 重投，支持分层状态的连接先核对在途执行。
+- 取消请求经 SSE 或已登记的回环控制地址传递。停工 ACK 携带任务 ID、当前连接代际、执行代际、
+  已停止的原生回合及剩余命令数，或能核对的未下发回执。无确认满 60 秒进入 `paused/cancel_unconfirmed`，
+  后续派单返回 HTTP 409 `worker_paused`。重新发起同任务取消可重查停工。普通恢复请求不能解除取消占位。
+- 经人工核实需要放行时，调用鉴权 `POST /tasks/{id}/cancel-release`，提交
+  `{confirm:true, execution_epoch, reason}`。终态记录 `manual_release:true`、人工说明和时间，
+  `cancel_confirmed:false` 明确保留原生确认缺失。迟到的普通结果只能收到已有终态。
 - 心跳的 `turn_source` 接受 `trainer`、`router` 或 `null`。
   可选的 `turn_views` 按 thread ID 组织，条目为 `{phase,turnId,observedAt,seq,generation,fresh}`，
   `phase` 可为 `thinking/outputting/idle`。写入 `workers.turn_views_json`，缺省为 SQL NULL。
