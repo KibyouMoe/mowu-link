@@ -1,5 +1,6 @@
-"""Isolated Router HTTP and SSE acceptance for state separation phase 1."""
+"""Isolated Router HTTP and SSE acceptance for the two state layers."""
 
+from http import client as http_client
 import json
 import os
 import sqlite3
@@ -157,6 +158,101 @@ class TwoLayerStateTests(unittest.TestCase):
         invalid = {"thread": {**view["thread"], "seq": True}}
         self.assertEqual(self.call("/heartbeat", {"name": self.name, "turn_views": invalid})[0], 400)
         self.assertEqual(json.loads(self.stored_views()), view)
+
+    def versioned_stream(self):
+        port = self.server.server_address[1]
+        connection = http_client.HTTPConnection("127.0.0.1", port, timeout=3)
+        connection.request("GET", "/stream?name=%s&state_layers=2" % self.name,
+                           headers={"X-Router-Token": self.server.token})
+        response = connection.getresponse()
+        self.assertEqual(response.status, 200)
+        self.addCleanup(connection.close)
+        self.addCleanup(response.close)
+        return response, response.getheader("X-Router-Generation")
+
+    def stream_event(self, response):
+        while True:
+            raw = response.readline()
+            self.assertTrue(raw, "SSE closed before the expected event")
+            line = raw.decode("utf-8").strip()
+            if line.startswith("event:"):
+                event = line.partition(":")[2].strip()
+                data = response.readline().decode("utf-8").partition(":")[2]
+                return event, json.loads(data)
+
+    def test_versioned_reconnect_pauses_then_resumes_with_current_execution_epoch(self):
+        self.close_worker()
+        _, registration = self.call("/register", {"name": self.name})
+        self.assertEqual(registration["state_layers"], 2)
+        initial, old_generation = self.versioned_stream()
+        _, task = self.create("hold work across reconnect")
+        task_id = task["task_id"]
+        event, payload = self.stream_event(initial)
+        self.assertEqual(event, "task")
+        epoch = payload["execution_epoch"]
+        self.assertRegex(epoch, r"^[a-f0-9]{32}$")
+        route = "/tasks/" + task_id
+        idle_before_result = {"name": self.name, "state": "idle", "connection_generation": old_generation}
+        self.call("/heartbeat", idle_before_result)
+        self.call("/heartbeat", {**idle_before_result, "finished_execution_epoch": epoch})
+        self.assertEqual(self.store.get_task(task_id)["state"], "running")
+        self.assertEqual(self.sent, [])
+        self.server.current_conn(self.name).close("test Worker exited")
+        self.assertEqual(initial.read(), b"\n")
+        deadline = time.monotonic() + 2
+        while self.server.online(self.name) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertFalse(self.server.online(self.name))
+        self.store.reset_runtime()
+        self.assertEqual(self.store.get_task(task_id)["state"], "running")
+
+        recovered, generation = self.versioned_stream()
+        event, payload = self.stream_event(recovered)
+        self.assertEqual((event, payload["task_id"], payload["execution_epoch"]), ("task_recovery", task_id, epoch))
+        paused = {"name": self.name, "state": "paused", "pause_reason": "session_unavailable",
+                  "expected_epoch": epoch, "connection_generation": generation}
+        code, old = self.call(route + "/execution", {**paused, "connection_generation": old_generation})
+        self.assertEqual((code, old["error"]), (409, "stale_connection_generation"))
+        code, state = self.call(route + "/execution", paused)
+        self.assertEqual((code, state["state"], state["pause_reason"]), (200, "paused", "session_unavailable"))
+        self.assertTrue(self.call(route + "/execution", paused)[1]["duplicate"])
+        code, refused = self.create("cannot run while paused")
+        self.assertEqual((code, refused["error"], refused["pause_reason"]), (409, "worker_paused", "session_unavailable"))
+        idle = {"name": self.name, "state": "idle", "connection_generation": generation}
+        self.call("/heartbeat", {**idle, "finished_execution_epoch": epoch})
+        self.assertEqual(self.call("/result", {"name": self.name, "task_id": task_id,
+                         "status": "done", "summary": "original result"})[0], 202)
+        self.assertEqual(self.sent, [])
+
+        resumed = {**paused, "state": "running", "execution_epoch": "b" * 32,
+                   "evidence": {"thread_id": "old-thread", "turn_id": "old-turn", "message_id": "original-receipt"}}
+        code, running = self.call(route + "/execution", resumed)
+        self.assertEqual((code, running["state"], running["execution_epoch"], running["pause_reason"]),
+                         (200, "running", "b" * 32, None))
+        self.assertTrue(self.call(route + "/execution", resumed)[1]["duplicate"])
+        self.assertEqual(self.call(route + "/execution", paused)[0], 409)
+        self.call("/heartbeat", {**idle, "finished_execution_epoch": epoch})
+        self.assertEqual(self.sent, [])
+        self.call("/heartbeat", {**idle, "finished_execution_epoch": running["execution_epoch"]})
+        self.assertEqual(self.store.get_task(task_id)["state"], "done")
+        self.assertEqual(len(self.sent), 1)
+        print("versioned SSE task -> task_recovery -> paused HTTP 200 -> worker_paused HTTP 409 -> running new epoch -> done, one notice", flush=True)
+
+    def test_versioned_samples_reject_old_connection_and_ignore_reordered_sequence(self):
+        self.close_worker()
+        _, generation = self.versioned_stream()
+        base = {"name": self.name, "connection_generation": generation, "state": "idle"}
+        for phase, sequence, expected in (("thinking", 1, 1), ("outputting", 2, 2),
+                                          ("idle", 3, 3), ("thinking", 2, 3)):
+            view = {"phase": phase, "turnId": None if phase == "idle" else "observed",
+                    "observedAt": 1700000000, "seq": sequence, "generation": generation, "fresh": True}
+            self.assertEqual(self.call("/heartbeat", {**base, "turn_views": {"thread": view}})[0], 200)
+            saved = json.loads(self.stored_views())["thread"]
+            self.assertEqual(saved["seq"], expected)
+        self.assertEqual(saved["phase"], "idle")
+        status, error = self.call("/heartbeat", {**base, "connection_generation": "stale"})
+        self.assertEqual((status, error["error"]), (409, "stale_connection_generation"))
+        print("turn_views thinking -> outputting -> idle, stale generation HTTP 409, reordered sample ignored", flush=True)
 
 
 if __name__ == "__main__":

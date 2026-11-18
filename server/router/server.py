@@ -85,6 +85,7 @@ LOG_BACKUP_COUNT = 3
 TASK_STATES = ("queued", "running", "paused", "cancelling", "done", "failed", "cancelled")
 TERMINAL_STATES = ("done", "failed", "cancelled")
 CANCEL_TIMEOUT_S = 60.0
+RECOVERY_REASONS = {"session_unavailable", "goal_conflict", "resume_unconfirmed", "recovery_expired"}
 TASK_NOTICE_NAMES = {
     "done": ("任务完成", "完成"),
     "failed": ("任务失败", "失败"),
@@ -389,7 +390,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     result_json TEXT,
     deadline_s  REAL,
     request_id  TEXT,
-    request_fingerprint TEXT
+    request_fingerprint TEXT,
+    execution_epoch TEXT DEFAULT NULL,
+    pause_reason TEXT DEFAULT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_worker_state ON tasks(worker, state);
 CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks(created_at);
@@ -512,7 +515,8 @@ class RouterStore:
                 self._conn.execute("PRAGMA table_info(tasks)").fetchall()}
         for column, decl in (("deadline_s", "REAL"), ("request_id", "TEXT"),
                              ("request_fingerprint", "TEXT"), ("dispatch_attempted", "INTEGER"),
-                             ("queue_expires_at", "REAL")):
+                             ("queue_expires_at", "REAL"), ("execution_epoch", "TEXT"),
+                             ("pause_reason", "TEXT")):
             if column not in cols:
                 self._conn.execute(
                     "ALTER TABLE tasks ADD COLUMN %s %s" % (column, decl))
@@ -549,7 +553,7 @@ class RouterStore:
                 "UPDATE workers SET online=0, busy=0, queued=0")
             cur = self._conn.execute(
                 "UPDATE tasks SET state='queued', started_at=NULL"
-                " WHERE state='running'")
+                " WHERE state='running' AND execution_epoch IS NULL")
             changed = int(cur.rowcount or 0)
             for row in self._conn.execute("SELECT name FROM workers").fetchall():
                 self.refresh_counts(str(row["name"]))
@@ -831,6 +835,8 @@ class RouterStore:
             "queue_expires_at": row["queue_expires_at"],
             "dispatch_attempted": (None if row["dispatch_attempted"] is None
                                    else bool(row["dispatch_attempted"])),
+            "execution_epoch": row["execution_epoch"],
+            "pause_reason": row["pause_reason"],
             "result": result,
         }
 
@@ -942,11 +948,12 @@ class RouterStore:
                 "UPDATE tasks SET state='queued', started_at=NULL"
                 " WHERE task_id=? AND state='running'", (task_id,))
 
-    def requeue_running(self, worker: str) -> int:
+    def requeue_running(self, worker: str, *, legacy_stream: bool = False) -> int:
         with self._lock:
             cur = self._conn.execute(
                 "UPDATE tasks SET state='queued', started_at=NULL"
-                " WHERE worker=? AND state='running'", (worker,))
+                " WHERE worker=? AND state='running' AND (execution_epoch IS NULL OR ?)",
+                (worker, legacy_stream))
             changed = int(cur.rowcount or 0)
             self.refresh_counts(worker)
         if changed:
@@ -1771,7 +1778,7 @@ class TriggerSubscriptionBridge:
 class Connection:
     """One SSE writer; peer events are prefetched in bounded batches."""
 
-    def __init__(self, name: str, version: Optional[str] = None):
+    def __init__(self, name: str, version: Optional[str] = None, state_layers: bool = False):
         self.name = name
         self.version = version
         self.queue: "queue.Queue[Optional[Dict[str, Any]]]" = queue.Queue()
@@ -1779,6 +1786,9 @@ class Connection:
         self.reason = ""
         self.connected_at = time.time()
         self.generation = uuid.uuid4().hex
+        self.state_layers = state_layers
+        self.recovering_task = None
+        self.turn_view_seq = -1
         self.peer_after = 0
         self.peer_buffered = 0
 
@@ -1847,7 +1857,7 @@ class RouterServer(ThreadingHTTPServer):
         self.conns: Dict[str, Connection] = {}
         self.conn_lock = threading.Lock()
         self.dispatch_lock = threading.RLock()
-        self.idle_observations: Dict[str, float] = {}
+        self.idle_observations: Dict[str, Tuple[float, Optional[str]]] = {}
         self.cancellations_changed = threading.Event()
         self.question_lock = threading.Lock()
         self.question_requests: Dict[str, Dict[str, Any]] = {}
@@ -1939,12 +1949,17 @@ class RouterServer(ThreadingHTTPServer):
         completed = []
         with self.dispatch_lock:
             worker = self.store.get_worker(name)
-            idle_at = self.idle_observations.get(name)
-            if not worker or worker.get("state") != "idle" or idle_at is None:
+            pulse = self.idle_observations.get(name)
+            if not worker or worker.get("state") != "idle" or pulse is None:
                 return []
+            idle_at, finished_epoch = pulse
+            live = self.current_conn(name)
             tasks = [task for task in self.store.list_tasks(worker=name, limit=500)
                      if task["state"] in ("running", "cancelling")
-                     and idle_at >= (task.get("started_at") or task["created_at"])]
+                     and idle_at >= (task.get("started_at") or task["created_at"])
+                     and (task["state"] == "cancelling" or task["execution_epoch"] is None or
+                          (live is not None and live.recovering_task != task["task_id"]
+                           and task["execution_epoch"] == finished_epoch))]
             if not tasks:
                 return []
             for question in self.store.pending_questions(name):
@@ -1960,6 +1975,9 @@ class RouterServer(ThreadingHTTPServer):
                 saved = self.result_candidates.get(task_id)
                 record = (saved or {}).get("result", {})
                 candidate = record.get("candidate", {})
+                if task["state"] == "running" and task["execution_epoch"] is not None and not candidate:
+                    # The worker can deliver its durable result after this pulse.
+                    continue
                 if task["state"] == "cancelling":
                     result = {**(task.get("result") or {}), "status": "cancelled",
                               "summary": "Worker 已空闲，取消完成。"}
@@ -2112,8 +2130,8 @@ class RouterServer(ThreadingHTTPServer):
     def online(self, name: str) -> bool:
         return self.current_conn(name) is not None
 
-    def attach(self, name: str, version: Optional[str] = None) -> Connection:
-        conn = Connection(name, version)
+    def attach(self, name: str, version: Optional[str] = None, state_layers: bool = False) -> Connection:
+        conn = Connection(name, version, state_layers)
         with self.dispatch_lock:
             # Publish the connection and replay under the same lock as peer
             # creation/ACK. Otherwise a live create can overtake its replay.
@@ -2124,9 +2142,13 @@ class RouterServer(ThreadingHTTPServer):
                     old.close("replaced")
             self.idle_observations.pop(name, None)
             self.store.set_online(name, version)
-            # A reconnect is at-least-once: anything still marked running was
-            # sent over the previous stream, so hand it out again.
-            self.store.requeue_running(name)
+            # Replay legacy work. A versioned execution instead requires a
+            # recovery report before this connection can settle its result.
+            self.store.requeue_running(name, legacy_stream=not state_layers)
+            occupied = self.store.blocking_task(name) if state_layers else None
+            if occupied and occupied["execution_epoch"] and occupied["state"] in ("running", "paused"):
+                conn.recovering_task = occupied["task_id"]
+                conn.queue.put({"event": "task_recovery", "data": occupied})
             self.dispatch_one(name)
             self.flush_peer_messages_locked(conn)
         log.info("stream attached name=%s version=%s (queued=%d)",
@@ -2178,19 +2200,28 @@ class RouterServer(ThreadingHTTPServer):
 
     def push(self, conn: Connection, task: Dict[str, Any]) -> bool:
         previous = task.get("dispatch_attempted")
+        previous_epoch = task.get("execution_epoch")
+        epoch = uuid.uuid4().hex if conn.state_layers else None
         with self.store._lock:
-            self.store._conn.execute("UPDATE tasks SET dispatch_attempted=1 WHERE task_id=?",
-                                     (task["task_id"],))
+            self.store._conn.execute("UPDATE tasks SET dispatch_attempted=1, execution_epoch=? WHERE task_id=?",
+                                     (epoch, task["task_id"]))
         task["dispatch_attempted"] = True
-        sent = conn.send_task(task)
+        task["execution_epoch"] = epoch
+        if conn.state_layers and previous is not False and not conn.closed:
+            conn.recovering_task = task["task_id"]
+            conn.queue.put({"event": "task_recovery", "data": dict(task)})
+            sent = True
+        else:
+            sent = conn.send_task(task)
         if not sent:
             # A closed connection rejected this attempt before enqueueing it.
             # Preserve older uncertain deliveries, but do not exempt new work
             # from its waiting TTL merely because this known attempt failed.
             with self.store._lock:
-                self.store._conn.execute("UPDATE tasks SET dispatch_attempted=? WHERE task_id=?",
-                                         (previous, task["task_id"]))
+                self.store._conn.execute("UPDATE tasks SET dispatch_attempted=?, execution_epoch=? WHERE task_id=?",
+                                         (previous, previous_epoch, task["task_id"]))
             task["dispatch_attempted"] = previous
+            task["execution_epoch"] = previous_epoch
         return sent
 
     def dispatch_one(self, worker: str) -> Optional[Dict[str, Any]]:
@@ -2490,6 +2521,8 @@ class RouterHandler(BaseHTTPRequestHandler):
                 return self._send_json(*self._task_cancel(parts[1]))
             if len(parts) == 3 and parts[0] == "tasks" and parts[2] == "cancel-ack":
                 return self._send_json(*self._task_cancel_ack(parts[1], body))
+            if len(parts) == 3 and parts[0] == "tasks" and parts[2] == "execution":
+                return self._send_json(*self._task_execution(parts[1], body))
             if parts == ["subscriptions"]:
                 return self._send_json(*self._subscription_create(body))
             if parts == ["approvals"]:
@@ -2921,6 +2954,7 @@ class RouterHandler(BaseHTTPRequestHandler):
             "online": self.server.online(name),
             "new": created,
             "version": worker["version"],
+            "state_layers": 2,
         }
 
     def _heartbeat(self, body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
@@ -2941,16 +2975,33 @@ class RouterHandler(BaseHTTPRequestHandler):
         turn_source = body.get("turn_source", UNSET)
         if turn_source is not UNSET and turn_source not in (None, "trainer", "router"):
             raise BadRequest("turn_source must be trainer, router or null")
-        turn_views = parse_turn_views(body["turn_views"]) if "turn_views" in body else None
         with self.server.dispatch_lock:
+            generation = body.get("connection_generation")
+            finished_epoch = body.get("finished_execution_epoch") if generation is not None else None
+            if generation is not None:
+                conn = self.server.current_conn(name)
+                if not conn or conn.closed or not conn.state_layers or conn.generation != generation:
+                    return 409, {"ok": False, "error": "stale_connection_generation"}
+            turn_views = parse_turn_views(body["turn_views"]) if "turn_views" in body else None
+            if generation is not None and any(view["generation"] != generation
+                                              for view in body.get("turn_views", {}).values()):
+                raise BadRequest("turn_views generation must match the current connection")
+            if generation is not None and turn_views is not None:
+                views = body["turn_views"]
+                sequence = max((view["seq"] for view in views.values()), default=-1)
+                if sequence <= conn.turn_view_seq:
+                    turn_views = None
+                else:
+                    conn.turn_view_seq = sequence
             previous = self.server.store.get_worker(name)
             if not self.server.store.heartbeat(name, state, progress_at, task_id, turn_source, turn_views):
                 return 404, {"ok": False, "error": "unknown_worker", "worker": name}
             if state == "idle":
                 # Repeated idle heartbeats retain the original pulse, so a
                 # queued task dispatched afterward cannot inherit its idle.
-                if previous.get("state") != "idle" or name not in self.server.idle_observations:
-                    self.server.idle_observations[name] = time.time()
+                pulse = self.server.idle_observations.get(name)
+                if previous.get("state") != "idle" or pulse is None or pulse[1] != finished_epoch:
+                    self.server.idle_observations[name] = (time.time(), finished_epoch)
             elif state is not None:
                 self.server.idle_observations.pop(name, None)
         settlements = self.server.settle_idle(name) if state == "idle" else []
@@ -3055,6 +3106,7 @@ class RouterHandler(BaseHTTPRequestHandler):
                 return 409, {
                     "ok": False, "error": "worker_paused", "worker": worker_name,
                     "busy": True, "task_id": blocking["task_id"],
+                    **({"pause_reason": blocking["pause_reason"]} if blocking["pause_reason"] else {}),
                     "message": "resume or cancel the paused task before dispatching new work",
                 }
             if blocking is not None or (self.server.backlog_max <= 1 and queued):
@@ -3227,6 +3279,54 @@ class RouterHandler(BaseHTTPRequestHandler):
             if current["state"] == "cancelled":
                 self.server.discard_result_candidate(task_id)
         return 200, {"ok": True, "task_id": task_id, "state": current["state"]}
+
+    def _task_execution(self, task_id: str, body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
+        state = body.get("state")
+        reason = body.get("pause_reason")
+        expected = body.get("expected_epoch")
+        epoch = body.get("execution_epoch") if state == "running" else expected
+        if state not in ("paused", "running") or any(
+                not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{32}", value)
+                for value in (expected, epoch)):
+            raise BadRequest("state and execution epoch are required")
+        if state == "paused":
+            if not isinstance(reason, str) or reason not in RECOVERY_REASONS:
+                raise BadRequest("invalid pause_reason")
+        else:
+            evidence = body.get("evidence")
+            if not isinstance(evidence, dict) or any(
+                    not isinstance(evidence.get(key), str) or not 0 < len(evidence[key]) <= 128
+                    for key in ("thread_id", "turn_id", "message_id")):
+                raise BadRequest("recovery requires native turn evidence")
+            if epoch == expected:
+                raise BadRequest("recovery requires a new execution_epoch")
+            reason = None
+        with self.server.dispatch_lock, self.server.store._lock:
+            store = self.server.store
+            task = store.get_task(task_id)
+            if not task:
+                return 404, {"ok": False, "error": "unknown_task"}
+            worker = task["worker"]
+            conn = self.server.current_conn(worker)
+            if body.get("name") != worker or not conn or conn.closed or not conn.state_layers:
+                return 409, {"ok": False, "error": "task_execution_connection_required"}
+            if body.get("connection_generation") != conn.generation:
+                return 409, {"ok": False, "error": "stale_connection_generation"}
+            duplicate = (task["state"], task["execution_epoch"], task["pause_reason"]) == (state, epoch, reason)
+            if not duplicate:
+                if (conn.recovering_task != task_id or task["execution_epoch"] != expected
+                        or task["state"] not in ("running", "paused")):
+                    return 409, {"ok": False, "error": "stale_task_execution", "state": task["state"]}
+                store._conn.execute("UPDATE tasks SET state=?, execution_epoch=?, pause_reason=? WHERE task_id=?",
+                                    (state, epoch, reason, task_id))
+                store.refresh_counts(worker)
+                self.server.idle_observations.pop(worker, None)
+                if state == "running":
+                    conn.recovering_task = None
+                log.info("task recovery task=%s worker=%s state=%s reason=%s epoch=%s",
+                         task_id, worker, state, reason, epoch)
+            return 200, {"ok": True, "task_id": task_id, "state": state, "execution_epoch": epoch,
+                         "pause_reason": reason, "duplicate": duplicate}
 
     def _attachment_put(self):
         try:
@@ -3811,12 +3911,14 @@ class RouterHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"ok": False, "error": str(exc)})
             return
 
-        conn = self.server.attach(name, version)
+        conn = self.server.attach(name, version, qs.get("state_layers") == ["2"])
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "close")
         self.send_header("X-Accel-Buffering", "no")
+        if conn.state_layers:
+            self.send_header("X-Router-Generation", conn.generation)
         self.end_headers()
         self.close_connection = True
         try:

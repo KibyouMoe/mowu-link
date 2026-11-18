@@ -229,7 +229,7 @@ Router 重启保留去重记录，每次读写清理满 24 小时的记录，并
 |---|---|---|
 | GET | `/workers` | `{ok, count, workers:[{name, online, busy, queued, last_seen, last_progress_at, last_progress_at_iso, version, state, task_id, ...}]}` |
 | POST | `/tasks` | `{worker, goal, context?, workspace?, urgency?, deadline_s?, queue_if_offline?}` |
-| POST | `/tasks/{id}/cancel` | 取消排队中或运行中的任务 |
+| POST | `/tasks/{id}/cancel` | 取消排队、运行或暂停中的任务 |
 | GET | `/tasks/{id}` | `{ok, task_id, state, task}` |
 | GET | `/tasks?worker=&state=&limit=` | 默认 100，最大 500 |
 | GET | `/health` | `{ok, version, workers, tasks, tasks_by_state, online, subscriptions, ...}` |
@@ -237,6 +237,22 @@ Router 重启保留去重记录，每次读写清理满 24 小时的记录，并
 `last_progress_at` 来自最近一次 `POST /heartbeat` 的 `progress_at`（epoch 秒），
 看门狗用它判断 worker 是否卡死；`last_seen` 是任意请求/心跳的到达时间，
 两者语义不同，不要混用。
+
+### 两层状态协议 v2
+
+- `/register` 回 `state_layers: 2`。支持的 Worker 用 `/stream?state_layers=2` 接收
+  `X-Router-Generation`，在心跳同时上报 `connection_generation` 和 `turn_views`。
+  Router 拒绝旧连接，对同一连接保留最新采样序号。投递与结算由任务层决定。
+- 新派单带 `execution_epoch`。断开后保留该工单，重连用 `task_recovery` 请求核查原回合。
+  切换到 v2 时，已投递但仍排在队首的旧工单也先核查。首次派发仍用 `task`。
+- Worker 调用 `POST /tasks/{id}/execution`，传 `name`、`connection_generation`、
+  `expected_epoch` 和 `state`。暂停附 `pause_reason`，可取
+  `session_unavailable`、`goal_conflict`、`resume_unconfirmed`、`recovery_expired`。
+  确认恢复后用 `running`、新 `execution_epoch` 和 `evidence`（线程、回合、投递 ID）。
+  重复回执幂等，旧代际、已取消或终态拒绝变更。新派单遇到暂停返回 409 和原因。
+- 已启用协议的任务用完成后的 `finished_execution_epoch` 心跳和同任务结果结算。
+  暂停、恢复待核查期间不结算。结果暂未上传时保留待送，补到后沿用已收到的同代际完成信号。
+  未协商 v2 的连接保持旧协议。
 
 ### 订阅
 
