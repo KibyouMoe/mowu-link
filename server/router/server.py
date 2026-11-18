@@ -74,7 +74,6 @@ QUEUE_TTL_S = 6 * 60 * 60
 MAX_GOAL_CHARS = 2000
 MAX_BODY_BYTES = 1 * 1024 * 1024
 PEER_CHUNK_BYTES = 64 * 1024
-IDLE_FRESH_S = 30
 PEER_PAGE_LIMIT = 100
 ROOT_PEER_NAME = "Hermes"
 ROOT_PEER_ALIASES = frozenset(("hermes", "溪流"))
@@ -398,6 +397,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     pause_reason TEXT DEFAULT NULL,
     turn_binding_json TEXT,
     workflow_json TEXT,
+    deliverable_candidate_json TEXT,
     workflow_due REAL,
     legacy_dispatch INTEGER DEFAULT 0
 );
@@ -528,12 +528,14 @@ class RouterStore:
                              ("request_fingerprint", "TEXT"), ("dispatch_attempted", "INTEGER"),
                              ("queue_expires_at", "REAL"), ("execution_epoch", "TEXT"),
                              ("pause_reason", "TEXT"), ("turn_binding_json", "TEXT"),
-                             ("workflow_json", "TEXT"), ("workflow_due", "REAL"),
+                             ("workflow_json", "TEXT"), ("workflow_due", "REAL"), ("deliverable_candidate_json", "TEXT"),
                              ("legacy_dispatch", "INTEGER DEFAULT 0")):
             if column not in cols:
                 self._conn.execute(
                     "ALTER TABLE tasks ADD COLUMN %s %s" % (column, decl))
                 log.info("store migration: added tasks.%s", column)
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_task_awaiting_idle ON tasks(worker) "
+                           "WHERE json_extract(workflow_json, '$.delivery_state')='awaiting_idle'")
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_task_workflow_due ON tasks(workflow_due) WHERE workflow_due IS NOT NULL")
         peer_columns = {r["name"] for r in self._conn.execute("PRAGMA table_info(peer_messages)")}
         if "task_id" not in peer_columns:
@@ -874,6 +876,7 @@ class RouterStore:
             "review_state": workflow.get("review_state"), "verdict": workflow.get("verdict"),
             "deliverable_state": workflow.get("delivery_state"),
             "deliverable": workflow.get("deliverable"),
+            "deliverable_candidate": json.loads(row["deliverable_candidate_json"] or "null"),
             "state": row["state"],
             "created_at": row["created_at"],
             "started_at": row["started_at"],
@@ -1842,11 +1845,7 @@ class Connection:
         self.generation = uuid.uuid4().hex
         self.state_layers = state_layers
         self.native_settlement = False
-        self.assigned_execution = None
-        self.legacy_active = None
-        self.legacy_finished = None
         self.recovering_task = None
-        self.idle_at = None
         self.turn_view_seq = -1
         self.peer_after = 0
         self.peer_buffered = 0
@@ -2005,16 +2004,6 @@ class RouterServer(ThreadingHTTPServer):
         except OSError as exc:
             log.warning("result candidate cleanup pending task=%s error=%s", task_id, type(exc).__name__)
 
-    def mark_unconfirmed(self, name: str) -> None:
-        # A heartbeat describes the worker. It cannot identify which native
-        # turn ended, even if it arrives immediately after a task dispatch.
-        task = self.store.blocking_task(name)
-        if task and task["state"] == "running" and not task["result"]:
-            with self.store._lock:
-                self.store._conn.execute(
-                    "UPDATE tasks SET result_json=? WHERE task_id=? AND state='running' AND result_json IS NULL",
-                    (json.dumps({"outcome": "needs_inspection", "reason": "task_turn_unconfirmed"}), task["task_id"]))
-
     def turn_binding(self, task_id: str, body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
         binding = {key: body.get(key) for key in ("thread_id", "turn_id", "execution_epoch")}
         if any(not isinstance(value, str) or not 0 < len(value.strip()) <= 128 for value in binding.values()):
@@ -2034,8 +2023,8 @@ class RouterServer(ThreadingHTTPServer):
                 self.store.bind_turn(task_id, binding)
             return 200, {"ok": True, "binding": binding}
 
-    def submit_result(self, body: Dict[str, Any], attachments=None, *, legacy_check=None, idle_check=None, candidate_revision=None) -> Tuple[int, Dict[str, Any]]:
-        """A business report remains a candidate until its registered native turn ends."""
+    def submit_result(self, body: Dict[str, Any], attachments=None) -> Tuple[int, Dict[str, Any]]:
+        """Keep legacy reports as evidence separate from execution and human review."""
         name, task_id = str(body.get("name") or "").strip(), str(body.get("task_id") or "").strip()
         if not name or not task_id:
             raise BadRequest("name and task_id are required")
@@ -2049,150 +2038,41 @@ class RouterServer(ThreadingHTTPServer):
         candidate = {key: body[key] for key in ("name", "task_id", "status", "summary", "summary_short",
                                                "artifacts", "evidence", "outcome", "error_code") if key in body}
         candidate.update(name=name, task_id=task_id, status=status, summary=summary)
-        current = self.store.get_task(task_id)
-        if (current and current["worker"] == name
-                and current["state"] == "running" and status != "failed"):
-            for question in self.store.pending_questions(name):
-                if question["task_id"] == task_id:
-                    self.question_request(name, question["question_id"], "get")
-        with self.dispatch_lock:
+        if attachments:
+            candidate["attachments"] = attachments
+        with self.dispatch_lock, self.store._lock:
             task = self.store.get_task(task_id)
             if task is None:
                 return 404, {"ok": False, "error": "unknown_task", "task_id": task_id}
             if task["worker"] != name:
-                return 400, {"ok": False, "error": "worker_mismatch", "task_id": task_id,
-                             "worker": task["worker"], "reported_by": name}
-            if task["state"] in TERMINAL_STATES:
-                self.discard_result_candidate(task_id)
-                return 200, {"ok": True, "task_id": task_id, "state": task["state"],
-                             "duplicate": True, "notified": False, "dispatched_next": None}
-            if candidate_revision and (self.result_candidates.get(task_id) or {}).get("revision") != candidate_revision:
-                return 202, {"ok": True, "candidate": True, "reason": "stale_candidate"}
-            conn = self.current_conn(name)
-            proof = body.get("native_completion")
-            binding = task["turn_binding"]
-            # An older client can attest its bound root via the existing completion RPC.
-            # Fence the round trip with the saved revision, dispatch epoch and stream.
-            if legacy_check:
-                origin, revision, epoch, observed = legacy_check
-                saved = self.result_candidates.get(task_id)
-                if (conn is origin and not conn.closed and not conn.native_settlement and
-                        task["state"] == "running" and epoch == task["execution_epoch"] and
-                        saved and saved["revision"] == revision):
-                    binding = {"thread_id": observed["thread_id"], "turn_id": observed["turn_ids"][0],
-                               "execution_epoch": epoch}
-                    if task["turn_binding"] and task["turn_binding"] != binding:
-                        return 409, {"ok": False, "error": "native_turn_binding_conflict"}
-                    self.store.bind_turn(task_id, binding)
-                    proof = {**binding, "native_status": observed["native_status"], "cleanup_complete": True}
-                    body = {**body, "connection_generation": conn.generation}
-                else:
-                    return 202, {"ok": True, "candidate": True, "state": task["state"], "reason": "stale_observer"}
-            verified = (task["state"] == "running" and conn and not conn.closed and conn.recovering_task != task_id
-                        and body.get("connection_generation") == conn.generation
-                        and binding and binding["execution_epoch"] == task["execution_epoch"]
-                        and isinstance(proof, dict) and all(proof.get(k) == v for k, v in binding.items())
-                        and proof.get("native_status") in ("completed", "failed", "interrupted", "cancelled", "canceled")
-                        and proof.get("cleanup_complete") is True)
-            pending = any(q["task_id"] == task_id for q in self.store.pending_questions(name))
-            identity = (task_id, task["execution_epoch"])
-            old_protocol = (conn and not conn.closed and not conn.native_settlement and conn.assigned_execution == identity and
-                            not (self.store.get_worker(name) or {}).get("control_sse") and
-                            task["state"] == "running" and proof is None and "connection_generation" not in body)
-            if idle_check:
-                saved = self.result_candidates.get(task_id)
-                if (not old_protocol or idle_check != (conn.generation, identity[1], (saved or {}).get("revision"))):
-                    return 202, {"ok": True, "state": task["state"], "candidate": True, "reason": "stale_idle"}
-            legacy_idle = False
-            if old_protocol and identity in (conn.legacy_active, conn.legacy_finished):
-                # Older business workers already emit this typed native receipt in /result.
-                # Pair it with their task-scoped running/idle edge and the stored dispatch epoch.
-                turns = {(e["thread_id"], e["turn_id"]) for e in (candidate.get("evidence") or [])
-                         if isinstance(e, dict) and e.get("type") == "codex_thread" and
-                         all(isinstance(e.get(k), str) and 0 < len(e[k]) <= 128 for k in ("thread_id", "turn_id"))}
-                if len(turns) == 1:
-                    thread, turn = turns.pop()
-                    anchor = {"thread_id": thread, "turn_id": turn, "execution_epoch": identity[1]}
-                    if binding and binding != anchor:
-                        return 409, {"ok": False, "error": "native_turn_binding_conflict"}
-                    if not binding:
-                        self.store.bind_turn(task_id, anchor)
-                    binding = anchor
-                    legacy_idle = conn.legacy_finished == identity
-            idle = bool(conn and not conn.closed and conn.idle_at is not None
-                        and time.monotonic() - conn.idle_at <= IDLE_FRESH_S)
-            failure = (status == "failed" and candidate.get("outcome") != "needs_inspection"
-                       and task["state"] == "running")
-            if failure and body.get("execution_epoch") is not None and body["execution_epoch"] != task["execution_epoch"]:
-                return 409, {"ok": False, "error": "stale_task_execution"}
-            if failure and body.get("connection_generation") is not None and (
-                    not conn or conn.closed or body["connection_generation"] != conn.generation
-                    or conn.recovering_task == task_id or proof is not None and not verified):
-                return 409, {"ok": False, "error": "stale_task_execution"}
-            can_finish = failure or (verified or legacy_idle) and idle and not pending
-            if not can_finish:
-                # A stale observer must not replace the real business candidate.
-                if not verified and task["state"] == "running":
-                    self.mark_unconfirmed(name)
-                if proof is not None and not verified and conn and not conn.closed and task["state"] == "running":
-                    return 409, {"ok": False, "error": "native_turn_mismatch", "state": task["state"]}
-                prior = self.result_candidates.get(task_id)
-                prior_data = (prior or {}).get("result", {})
-                same_execution = conn and prior_data.get("generation") == conn.generation and prior_data.get("execution_epoch") == task["execution_epoch"]
-                saved_proof = proof if verified else prior_data.get("proof") if same_execution else None
-                saved = self.result_candidates.put(task_id, {"candidate": candidate,
-                    "attachments": attachments or (prior_data.get("attachments", []) if same_execution else []),
-                    "generation": conn.generation if conn else None, "proof": saved_proof,
-                    "execution_epoch": task["execution_epoch"]})
-                reason = "unanswered_question" if pending else "worker_idle_unconfirmed" if verified else "task_turn_unconfirmed"
-                waiting = {"ok": True, "task_id": task_id, "state": task["state"], "candidate": True,
-                           "revision": saved["revision"], "reason": reason, "notified": False, "dispatched_next": None}
-                if (pending or task["state"] != "running" or not conn or conn.closed or conn.native_settlement
-                        or conn.assigned_execution != identity or legacy_check or "connection_generation" in body or
-                        not (self.store.get_worker(name) or {}).get("control_sse")):
-                    return 202, waiting
-            else:
-                result = {k: v for k, v in candidate.items() if k not in ("name", "task_id")}
-                result.setdefault("evidence", [])
-                result.setdefault("artifacts", [])
-                result["status"] = "failed" if failure else "done"
-                saved = self.result_candidates.get(task_id)
-                earlier = (saved or {}).get("result", {})
-                if not attachments and earlier.get("execution_epoch") == task["execution_epoch"]:
-                    attachments = earlier.get("attachments")
-                if attachments:
-                    result["attachments"] = attachments
-                completion = ({"signal": "legacy_task_idle", **binding} if legacy_idle
-                              else {"signal": "native_turn_ended", "native_status": proof["native_status"], **binding}
-                              if verified else {"signal": "worker_reported_failure"})
-                result.update(reported_at=time.time(), completion=completion)
-                workflow = None if failure else initial_review(time.time())
-                task = self.store.finish_task(task_id, result["status"], result, workflow)
-                if workflow:
-                    self.reviews.tick(task_id)
-                self.discard_result_candidate(task_id)
-                dispatched = self.dispatch_one(name)
-        if not can_finish:
-            code, observed = self.worker_request(name, "task_result_check", {
-                "task_id": task_id, "candidate": candidate, "revision": saved["revision"]}, "completion", timeout=2)
-            ids = observed.get("turn_ids")
-            final = observed.get("result")
-            if (code == 200 and observed.get("task_id") == task_id and observed.get("generation") == conn.generation
-                    and observed.get("ready") is True and observed.get("cleanup_complete") is True
-                    and observed.get("followups_pending") is False and isinstance(ids, list) and ids
-                    and all(isinstance(v, str) and 0 < len(v) <= 128 for v in ids)
-                    and observed.get("turn_id") in ids and isinstance(observed.get("thread_id"), str)
-                    and 0 < len(observed["thread_id"]) <= 128 and observed.get("native_status") in
-                    ("completed", "failed", "interrupted", "cancelled", "canceled")
-                    and isinstance(final, dict) and final.get("task_id") == task_id and final.get("name") == name):
-                return self.submit_result(final, attachments, legacy_check=(conn, saved["revision"], task["execution_epoch"], observed))
-            return 202, waiting
-        notice = task_result_payload(task, task["state"], summary, result.get("summary_short", UNSET))
-        if attachments:
-            notice["payload"]["attachments"] = attachments
-        notified, _ = self.notifier.post_task_notice(task_id, task["state"], notice)
-        return 200, {"ok": True, "task_id": task_id, "state": task["state"], "finished_at": task["finished_at"],
-                     "duplicate": False, "notified": notified, "dispatched_next": dispatched["task_id"] if dispatched else None}
+                return 400, {"ok": False, "error": "worker_mismatch", "task_id": task_id}
+            duplicate = task["deliverable_candidate"] == candidate
+            if not duplicate:
+                self.store._conn.execute("UPDATE tasks SET deliverable_candidate_json=? WHERE task_id=?",
+                                         (json.dumps(candidate, ensure_ascii=False), task_id))
+            return 200, {"ok": True, "deprecated": True, "ignored_as_reference": True, "state": task["state"],
+                         "task_id": task_id, "duplicate": duplicate, "notified": False}
+
+    def settle_idle(self, conn, body):
+        # Called under the dispatch lock on a fresh pulse from the attached worker.
+        task = self.store.blocking_task(conn.name)
+        if not task or task["state"] != "running":
+            return None
+        epoch = body.get("finished_execution_epoch")
+        if epoch and epoch != task["execution_epoch"]:
+            return None  # replay of the preceding assignment's final heartbeat
+        native_status = body.get("native_status")
+        status = "failed" if native_status in ("failed", "interrupted") else "done"
+        completion = {"signal": "worker_online_idle"}
+        if native_status in ("completed", "failed", "interrupted"):
+            completion["native_status"] = native_status
+        summary = "Worker 在线且已空闲。" if status == "done" else "原生回合" + native_status + "，Worker 已空闲。"
+        task = self.store.finish_task(task["task_id"], status, {"status": status, "summary": summary,
+                                      "completion": completion}, initial_review(time.time()))
+        if conn.recovering_task == task["task_id"]:
+            conn.recovering_task = None
+        self.discard_result_candidate(task["task_id"])
+        return task
 
     def cancel_execution(self, task: Dict[str, Any]) -> Dict[str, Any]:
         """Deliver only the exact task identity; never a selected-session stop."""
@@ -2405,8 +2285,6 @@ class RouterServer(ThreadingHTTPServer):
                 "UPDATE tasks SET dispatch_attempted=1, execution_epoch=?, legacy_dispatch=?, turn_binding_json=NULL"
                 " WHERE task_id=?", (payload["execution_epoch"], int(not conn.state_layers), task["task_id"]))
             task.update(payload)
-            conn.idle_at = None
-            conn.assigned_execution = (task["task_id"], task["execution_epoch"])
             return True
 
     def dispatch_one(self, worker: str) -> Optional[Dict[str, Any]]:
@@ -3175,7 +3053,7 @@ class RouterHandler(BaseHTTPRequestHandler):
             "new": created,
             "version": worker["version"],
             "state_layers": 2,
-            "native_settlement": True, "review_settlement": True,
+            "native_settlement": True, "review_settlement": True, "idle_settlement": True,
         }
 
     def _heartbeat(self, body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
@@ -3216,46 +3094,26 @@ class RouterHandler(BaseHTTPRequestHandler):
             if not self.server.store.heartbeat(name, state, progress_at, task_id, turn_source, turn_views):
                 return 404, {"ok": False, "error": "unknown_worker", "worker": name}
             conn = self.server.current_conn(name)
+            settled = None
+            released = []
             if conn and not conn.closed and (not conn.state_layers or generation == conn.generation):
-                if state != "idle" or any(v["phase"] != "idle" for v in (body.get("turn_views") or {}).values() if v["fresh"]):
-                    conn.idle_at = None
-                elif not body.get("turn_views") or turn_views is not None:
-                    conn.idle_at = time.monotonic()
-            legacy_candidate = None
-            if conn and not conn.native_settlement and not (self.server.store.get_worker(name) or {}).get("control_sse"):
-                task = self.server.store.blocking_task(name)
-                identity = (task["task_id"], task["execution_epoch"]) if task and task["state"] == "running" else None
-                if state == "running":
-                    conn.legacy_active = identity if identity and task_id == identity[0] and turn_source == "router" else None
-                    conn.legacy_finished = None
-                elif state == "idle" and identity and conn.legacy_active == identity:
-                    conn.legacy_active = None
-                    conn.legacy_finished = identity
-                    saved = self.server.result_candidates.get(identity[0])
-                    if saved and saved["result"].get("generation") == conn.generation and saved["result"].get("execution_epoch") == identity[1]:
-                        legacy_candidate = saved
-            if state == "idle":
-                self.server.mark_unconfirmed(name)
-                active = self.server.store.blocking_task(name)
-                if conn and conn.idle_at is not None and active and active["state"] == "running":
-                    saved = self.server.result_candidates.get(active["task_id"])
-                    record = (saved or {}).get("result", {})
-                    if (record.get("proof") and record.get("generation") == conn.generation
-                            and record.get("execution_epoch") == active["execution_epoch"]):
-                        legacy_candidate = saved
+                views = body.get("turn_views") or {}
+                fresh = not views or turn_views is not None
+                if fresh and state == "idle" and all(v["phase"] == "idle" for v in views.values() if v["fresh"]):
+                    released = self.server.reviews.release_idle(name)
+                    settled = self.server.settle_idle(conn, body)
+                    if settled:
+                        self.server.reviews.tick(settled["task_id"])
             dispatched = self.server.dispatch_one(name)
         settlements = []
-        if legacy_candidate:
-            record = legacy_candidate["result"]
-            if record.get("proof"):
-                code, result = self.server.submit_result({**record["candidate"], "connection_generation": record["generation"],
-                    "native_completion": record["proof"]}, record.get("attachments"),
-                    candidate_revision=legacy_candidate["revision"])
-            else:
-                code, result = self.server.submit_result(record["candidate"], record.get("attachments"),
-                    idle_check=(record["generation"], record["execution_epoch"], legacy_candidate["revision"]))
-            if code == 200 and not result.get("duplicate"):
-                settlements.append(result)
+        for released_id in released:
+            self.server.reviews.tick(released_id)
+        if settled:
+            tid, status = settled["task_id"], settled["state"]
+            notice = task_result_payload(settled, status, settled["result"]["summary"])
+            notified, _ = self.server.notifier.post_task_notice(tid, status, notice)
+            settlements.append({"task_id": tid, "state": status, "finished_at": settled["finished_at"],
+                                "duplicate": False, "notified": notified})
         for task in self.server.store.list_tasks(worker=name, state="cancelling", limit=1):
             self.server.cancel_execution(task)
         worker = self.server.store.get_worker(name)
@@ -3708,13 +3566,7 @@ class RouterHandler(BaseHTTPRequestHandler):
                                  **{key: body[key] for key in ("outcome", "error_code") if key in body},
                                  **({"summary_short": body["summary_short"]} if "summary_short" in body else {})}
                     status_code, result = self.server.submit_result(candidate, attachments)
-                    terminal = terminal_notice_state(result.get("state"))
-                    receipt = self.server.store.task_notice_receipt(task_id, terminal) or {}
-                    notice_state = terminal or state
-                    return status_code, {**result, "trigger_id": receipt.get("id"),
-                                         **({"error": "trigger_unavailable"} if status_code == 200 and not receipt else {}),
-                                         "event_id": task_id + ":" + notice_state,
-                                         "level": receipt.get("level", terminal_notice_level(notice_state))}
+                    return status_code, result
             state = task["state"]
             actual = task.get("result") or {}
             text = str(actual.get("summary") or text)

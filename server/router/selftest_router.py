@@ -200,13 +200,8 @@ def free_port() -> int:
 
 
 # Each simulated worker learns its generation from its own stream.
-fixture_generations = {}
-
-
 def fixture_attach(server, name):
-    conn = server.attach(name)
-    fixture_generations[(server.server_port, name)] = conn.generation
-    return conn
+    return server.attach(name)
 
 
 def fixture_binding(task):
@@ -228,31 +223,22 @@ def worker_http(method, url, body=None, token=None, timeout=5.0):
     code, response = http(method, url, body, token, timeout)
     report = isinstance(body, dict) and (url.endswith("/result") or
         url.endswith("/notice") and body.get("kind") == "task.result")
-    if method != "POST" or not report or code != 202 or not response.get("candidate"):
+    if method != "POST" or not report or not response.get("ignored_as_reference") or response.get("state") != "running":
         return code, response
-    worker = body.get("name", body.get("worker"))
+    # These integration fixtures also drive the fake worker to a terminal native
+    # outcome. Raw http() exercises reference-only requests without this pulse.
     origin = url.rsplit("/", 1)[0]
-    path = origin + "/tasks/" + body["task_id"]
-    _, view = http("GET", path, token=token)
-    if view.get("state") in ("done", "failed", "cancelled"):
-        return 200, {"ok": True, "duplicate": True, "state": view["state"], "notified": False}
-    if view.get("state") != "running":
-        return code, response
-    binding = fixture_binding(view["task"])
-    generation = fixture_generations.get((int(origin.rsplit(":", 1)[1]), worker))
-    http("POST", path + "/turn-binding", {"name": worker, "connection_generation": generation, **binding}, token)
-    if url.endswith("/result"):
-        final = body
-    else:
-        final = {"name": worker, "task_id": body["task_id"], "status": body.get("status", "done").strip().lower(),
-                 "summary": body["text"], **{k: body[k] for k in ("summary_short", "outcome", "error_code") if k in body}}
-    http("POST", origin + "/heartbeat", {"name": worker, "state": "idle"}, token)
-    code, result = http("POST", origin + "/result", {**final, "connection_generation": generation, "native_completion": fixture_end(binding)}, token)
-    if url.endswith("/notice") and code == 200:
-        if not result["notified"] and not result["duplicate"]:
-            result["error"] = "trigger_unavailable"
-        result.update({k: response[k] for k in ("level", "event_id") if k in response})
-    return code, result
+    worker = body.get("name", body.get("worker"))
+    _, view = http("GET", origin + "/tasks/" + body["task_id"], token=token)
+    pulse = {"name": worker, "state":"idle", "finished_execution_epoch": view["task"]["execution_epoch"],
+             "native_status": "failed" if body.get("status") == "failed" else "completed"}
+    pulse_code, beat = http("POST", origin + "/heartbeat", pulse, token)
+    if pulse_code != 200:
+        return pulse_code, beat
+    settlement = next((item for item in beat["settlements"] if item["task_id"] == body["task_id"]), None)
+    if settlement:
+        return 200, {**response, **settlement, "dispatched_next": beat["dispatched_next"]}
+    return code, response
 
 
 class FakeWorker(threading.Thread):
@@ -290,7 +276,6 @@ class FakeWorker(threading.Thread):
                 raw = resp.read(500).decode("utf-8", "replace")
                 self.error = "HTTP %d: %s" % (resp.status, raw)
                 return
-            fixture_generations[(self.port, self.worker_name)] = resp.getheader("X-Router-Generation")
             self.connected.set()
             if conn.sock is not None:
                 conn.sock.settimeout(1.0)
@@ -962,12 +947,8 @@ def task_notice_selftest(checker, work, trigger_url, trigger_token, trigger_db):
                 pending_code, pending = http("POST", base + "/notice", {
                     "worker": worker, "kind": "task.result", "task_id": task_id,
                     "status": state, "text": "pending result", "urgency": urgency}, server.token)
-                if state == "failed":
-                    checker.check("explicit worker failure delivers immediately",
-                                  pending_code == 200 and pending["level"] == expected and len(events(task_id)) == 1)
-                else:
-                    checker.check("turn completion candidate waits without delivery",
-                                  pending_code == 202 and pending["level"] == expected and not events(task_id))
+                checker.check(state + " reference has no terminal effect before idle",
+                              pending_code == 200 and pending["ignored_as_reference"] and not events(task_id))
                 code, settled = call("/result", {"name": worker, "task_id": task_id,
                                                   "status": state, "summary": "settled result"})
             _, receipt = notice(task_id, state, urgency=urgency)
@@ -1004,16 +985,16 @@ def task_notice_selftest(checker, work, trigger_url, trigger_token, trigger_db):
         code, accepted = call("/result", {"name": worker, "task_id": oversized,
                                          "status": "done", "summary": full_summary, "summary_short": short})
         stored = store.get_task(oversized)
-        checker.check("result summary: 300 Unicode characters notify intact while the full body remains readable",
+        checker.check("result summary: 300 Unicode characters and the full legacy body remain readable as reference",
                       code == 200 and accepted["state"] == "done"
-                      and stored["result"]["summary"] == full_summary
-                      and stored["result"]["summary_short"] == short
-                      and events(oversized)[0]["text"].endswith(short))
+                      and stored["deliverable_candidate"]["summary"] == full_summary
+                      and stored["deliverable_candidate"]["summary_short"] == short
+                      and len(events(oversized)) == 1 and short not in events(oversized)[0]["text"])
         boundary = new_task()
         code, _ = call("/result", {"name": worker, "task_id": boundary,
                                    "status": "done", "summary": "字" * 300})
         checker.check("result summary: a 300-character legacy summary is accepted without truncation",
-                      code == 200 and events(boundary)[0]["text"].endswith("字" * 300))
+                      code == 200 and store.get_task(boundary)["deliverable_candidate"]["summary"] == "字" * 300)
         explicit = new_task()
         code, rejected = notice(explicit, text="长" * 301)
         checker.check("task notice: explicit completion uses the same summary validation",
@@ -1024,7 +1005,7 @@ def task_notice_selftest(checker, work, trigger_url, trigger_token, trigger_db):
                                           "summary_short": "完整交付见任务结果"})
         checker.check("task notice: explicit and automatic completion share one normalized result envelope",
                       code == 200 and code_result == 200 and len(events(explicit)) == 1
-                      and events(explicit)[0]["text"].endswith("完整交付见任务结果"))
+                      and store.get_task(explicit)["deliverable_candidate"]["summary_short"] == "完整交付见任务结果")
 
         with mock.patch.object(client, "post_trigger", wraps=client.post_trigger) as sent:
             first = new_task()
@@ -1037,15 +1018,15 @@ def task_notice_selftest(checker, work, trigger_url, trigger_token, trigger_db):
                           and code == 200 and duplicate["duplicate"] is True and sent.call_count == 1
                           and duplicate["level"] == "event" and len(first_events) == 1
                           and first_events[0]["source"] == "任务完成"
-                          and first_events[0]["text"].endswith("internal result first"),
+                          and first_events[0]["text"].endswith(store.get_task(first)["result"]["summary"]),
                           "trigger_posts=%d trigger_rows=%d" % (sent.call_count, len(first_events)))
 
             second = new_task()
             _, original = notice(second, text="worker result first")
             finish(second)
-            checker.check("task notice: worker notice then internal result preserves first arrival",
+            checker.check("task notice: reference updates cannot change the mechanical notification",
                           sent.call_count == 2 and not original.get("duplicate", False)
-                          and events(second)[0]["text"].endswith("worker result first")
+                          and events(second)[0]["text"].endswith(store.get_task(second)["result"]["summary"])
                           and store.get_task(second)["state"] == "done")
 
             third = new_task()
@@ -1334,7 +1315,7 @@ def workorders_selftest(checker, work, trigger_url, trigger_token):
                               "status": "done", "summary": "first task business result"}, token)
         code, completed = call("POST", "/tasks", body)
         checker.check("workorders retry after a candidate preserves the same running task until idle",
-                      finish_code == 202 and receipt(code, completed, task_id)
+                      finish_code == 200 and receipt(code, completed, task_id)
                       and completed.get("state") == "running" and reconnected.wait_task(0.2) is None)
 
         # Crash this test process with a running candidate and a waiting task.
@@ -2404,7 +2385,7 @@ def run(work: Path, checker: Checker) -> None:
         checker.check(
             "GET /tasks/{id} -> state done + summary",
             status == 200 and got.get("state") == "done"
-            and (got.get("task") or {}).get("result", {}).get("summary")
+            and (got.get("task") or {}).get("deliverable_candidate", {}).get("summary")
             == "hello printed",
             "status=%s body=%s" % (status, got))
 
@@ -2594,7 +2575,7 @@ def run(work: Path, checker: Checker) -> None:
             "cancel running -> cancelled, busy freed, late result ignored",
             acknowledged.get("state") == "cancelled"
             and got_d is not None and got_d.get("task_id") == d["task_id"]
-            and status_late == 200 and late.get("duplicate") is True
+            and status_late == 200 and late.get("ignored_as_reference") is True
             and row is not None and row.get("busy") is False,
             "cancel=%s late=%s busy=%s" % (status, late, row and row.get("busy")))
 

@@ -80,14 +80,14 @@ class ReviewTests(unittest.TestCase):
     def test_busy_then_fresh_idle_settles_and_requests_delivery(self):
         self.begin()
         self.call("/heartbeat", {**self.sender, "state": "running"})
-        self.assertEqual(self.end()[0], 202)
+        self.assertTrue(self.end()[1]["ignored_as_reference"])
         self.assertEqual(self.saved()["state"], "running")
         self.call("/heartbeat", {**self.sender, "state": "idle", "turn_views": {}})
         saved = self.saved()
         self.assertEqual((saved["state"], saved["review_state"], saved["verdict"]), ("done","reviewing",None))
         kind, q = self.stream_event(self.stream)
         self.assertEqual((kind,q["attempt"],q["task_id"]), ("deliverable_request",1,self.task_id))
-        print("① busy=202 -> idle: state=done review_state=reviewing verdict=null; ⑦ SSE deliverable_request attempt=1")
+        print("① busy=running -> idle: state=done review_state=reviewing verdict=null; ⑦ SSE deliverable_request attempt=1")
 
     def test_human_verdict_and_goal_independence(self):
         for goal in ("active", "paused", None):
@@ -102,14 +102,32 @@ class ReviewTests(unittest.TestCase):
                 self.assertEqual(self.saved()["verdict"], verdict)
         print("② verdict(done)=200/done; ③ verdict(failed)=200/failed; ④ active/paused/absent × 2 verdicts: 6/6")
 
-    def test_legacy_reason_and_immediate_failure(self):
+    def test_legacy_reason_and_native_failure(self):
         self.ready(wire="done")
-        self.assertEqual((self.saved()["review_state"],self.saved()["result"]["summary"]), ("reviewing","worker 原文"))
+        self.assertEqual(self.saved()["deliverable_candidate"]["summary"], "worker 原文")
         self.begin()
-        self.assertEqual(self.call("/result", {**self.sender,"execution_epoch":self.binding["execution_epoch"],
-                         "task_id":self.task_id,"status":"failed","summary":"explicit failure"})[1]["state"], "failed")
-        self.assertIsNone(self.saved()["review_state"])
-        print("⑤ legacy done -> reviewing, summary=worker 原文; explicit failure -> failed")
+        self.assertEqual(self.end("failed")[1]["state"], "running")
+        self.call("/heartbeat", {**self.sender, "state":"idle","native_status":"failed"})
+        self.assertEqual(self.saved()["state"], "failed")
+        print("⑤ legacy reference retained; native failed + online idle -> failed")
+
+    def test_receipt_during_inquiry_is_durable_until_next_idle(self):
+        q = self.ready()
+        self.call("/heartbeat", {**self.sender,"state":"running"})
+        code, pending = self.report(q, "成果")
+        self.assertEqual((code,pending["deliverable_state"]), (202,"awaiting_idle"))
+        self.assertTrue(self.report(q, "成果")[1]["duplicate"])
+        self.assertEqual(self.report(q, "冲突")[0], 409)
+        self.assertIsNone(self.saved()["deliverable"])
+        self.assertEqual(self.saved()["state"], "done")
+        self.assertFalse(any(n["kind"]=="task.deliverable" for n in self.sent))
+        self.server.reviews.sweep()
+        self.assertEqual(self.saved()["deliverable_state"], "awaiting_idle")
+        for _ in range(2):
+            self.call("/heartbeat", {**self.sender, "state":"idle"})
+        self.assertEqual(self.saved()["deliverable"]["summary"], "成果")
+        self.assertEqual(sum(n["kind"]=="task.deliverable" for n in self.sent), 1)
+        print("成果先到 HTTP 202 awaiting_idle；再次空闲：received，成果通知 1 条")
 
     def test_rewrite_reports_and_card_link(self):
         q = self.ready()
@@ -122,7 +140,8 @@ class ReviewTests(unittest.TestCase):
         event, rewrite = self.stream_event(self.stream)
         self.assertEqual((event,rewrite["rewrite"]), ("deliverable_request",1))
         self.assertNotEqual(rewrite["request_id"], q["request_id"])
-        self.assertEqual(self.report(rewrite, "🐴"*200)[0], 200)
+        self.assertEqual(self.report(rewrite, "🐴"*200)[0], 202)
+        self.call("/heartbeat", {**self.sender, "state":"idle"})
         self.assertTrue(self.report(rewrite, "🐴"*200)[1]["duplicate"])
         self.assertEqual(self.saved()["deliverable"]["summary"], "🐴"*200)
         notices = [x for x in self.sent if x["kind"] == "task.deliverable"]
@@ -132,7 +151,7 @@ class ReviewTests(unittest.TestCase):
         for key,value in self.context.items():
             self.assertEqual((notices[0]["payload"][key], listed[key]),(value,value))
         print("⑧ deliverable=received notices=1 card_id=card-甲 board_id=board-乙; ⑩ HTTP 400",reply,
-              "; ⑪ rewrite 200 codepoints -> HTTP 200")
+              "; ⑪ rewrite 200 codepoints -> HTTP 202 -> idle -> received")
 
     def test_rewrite_exhaustion_preserves_originals(self):
         q = self.ready()

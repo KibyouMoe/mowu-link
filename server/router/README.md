@@ -44,9 +44,9 @@ trigger 不可用时返回 200/queued 并记 WARNING。使用相同 UUID、相�
 
 ### 任务结束、成果与验收
 
-注册回执中的 `review_settlement=true` 表示支持本协议。Worker 上报 `status=turn_ended` 或明确失败。Router 核对任务绑定的 thread、turn、execution_epoch、当前连接及新鲜 idle 心跳；goal 仅作参考。执行结束时记 `state=done`、`review_state=reviewing`，旧 Worker 的 done 及理由按相同规则处理。明确失败立即可见。
+注册回执 `idle_settlement=true`。在线 Worker 的新鲜空闲心跳结束当前 running 任务，默认 done，原生 failed/interrupted 则 failed。回合次数、goal 和绑定均不参与判定。已暂停或正取消的任务保留其原流程。业务验收单独记录于 `review_state/verdict`。
 
-结束后 Router 通过 Worker SSE 发送固定 `deliverable_request`。Worker 在原线程回答，由 `POST /tasks/{id}/deliverable` 报送 `name, request_id, deliverable`。成果包括摘要、产物、证据、风险四项。摘要最多 200 个 Unicode 字符，其他三项为字符串数组。首次发出后间隔 30、60、120 秒重试，第三次重试再等 240 秒。无回执标记 `deliverable_missing` 并提醒溪流。重启后沿用同一请求 ID 和已保存的进度。
+结束后 Router 通过 Worker SSE 发送固定 `deliverable_request`。Worker 在原线程回答，由 `POST /tasks/{id}/deliverable` 报送 `name, request_id, deliverable`。合法成果先持久保存为 awaiting_idle（HTTP 202），收到后续在线空闲心跳再确认并推送一次。成果包括摘要、产物、证据、风险四项。摘要最多 200 个 Unicode 字符，其他三项为字符串数组。首次发出后间隔 30、60、120 秒重试，第三次重试再等 240 秒。无回执标记 `deliverable_missing` 并提醒溪流。重启后沿用同一请求 ID 和已保存的进度。
 
 超长返回 HTTP 400 `deliverable_summary_too_long`；Worker 收到新 request_id 后重写。三次重写仍超限，标记 `summary_oversized` 并提醒溪流。溪流在任务详情带验收凭据可读 `deliverable.raw`；看板通知只使用通过校验的摘要。派单 context 可选 `card_id/board_id`，任务列表和成果通知原样回传。
 
@@ -149,27 +149,14 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.hermes.router.plist
 | POST | `/register` | `{name, version?, note?}` | `{ok, name, queued, online, new}` |
 | GET | `/stream?name=&version=` | SSE 长连接 | 见第四节 |
 | POST | `/heartbeat` | `{name, state?, progress_at?, task_id?, turn_views?}` | `{ok, name, online, busy, queued, last_seen}` |
-| POST | `/result` | `{name, task_id, status, summary, summary_short?, artifacts?, evidence?, outcome?, error_code?}` | 200 终态或 202 `{ok, task_id, state, candidate:true, reason, notified:false}` |
+| POST | `/result` | `{name, task_id, status, summary, summary_short?, artifacts?, evidence?, outcome?, error_code?}` | 200 `{deprecated:true, ignored_as_reference:true, task_id, state}` |
 | POST | `/result/responses` | `{request_id, worker, status, body}` | 旧在途观察器请求的兼容回执 |
 | POST | `/notice` | `{worker, text, kind?, urgency?, task_id?, status?}` | `{ok, trigger_id, level, duplicate}` 或 `{ok:false, error}` |
 | GET | `/subscriptions/pending?worker=&limit=` | — | `{ok, worker, count, events[], acked}` |
 
-- `status` 只接受 `done` / `failed`。
-- 同一任务重复上报是幂等的：已终态的任务返回 `duplicate:true`，不重复 notify。
-- `name` 必须与任务归属一致，否则 400 `worker_mismatch`。
-- `summary` 超过 300 个字符时返回 400，要求压缩到 300 字内或附 `summary_short(≤300)`。
-  提供合法短摘要后保留完整正文，通知采用短摘要。
-- 每次派发生成独立的 `execution_epoch`。Worker 核对原生投递回执后向 `POST /tasks/{id}/turn-binding`
-  登记 `{name, connection_generation, thread_id, turn_id, execution_epoch}`。相同绑定可重试，冲突返回 HTTP 409。
-- 提前到达的 `/result` 与显式结果通知均保存为候选，返回 HTTP 202。Worker 核对根回合与续接回合已结束、
-  执行收尾完成后，向 `/result` 附当前 `connection_generation` 与 `native_completion`，含上述三个绑定字段、`native_status`、`cleanup_complete:true`。
-  Router 在派单锁内比对当前执行与绑定，核对本任务的问题均已回答，再写终态并发送一次通知。
-- 普通 idle 保留占位，任务读回可见 `result.outcome=needs_inspection`。`GET /tasks/{id}` 返回候选及绑定。
-- 新 Worker 根据注册响应的 `native_settlement:true` 在当前 SSE 连接协商绑定协议。旧 Router 继续使用原结果格式。
-  旧 Worker 可用原有 `task_result_check` 确认原生根回合及收尾，Router 按同一派发代际和候选版本核对。
-  更早的无观察器 Worker 需要原结果中的 `codex_thread` 回执，以及同连接、同任务的 running→idle。
-  缺少回合证据就保留候选。普通 idle 单独到达时结算列表为空。
-- trigger 不可用时响应 `notified:false`，已确认的终态保留，显式完成通知可沿同键补投。
+- 兼容的 `/result` 接受 done、failed、turn_ended，按工单归属校验并保存到 `task.deliverable_candidate`。重复提交相同内容返回 duplicate。超 300 字附 summary_short。该接口只保存参考资料。
+- 新 Worker 使用心跳与独立成果接口；连接到未声明 idle_settlement 的旧 Router 时使用原协议。
+- 任务终态通知以 `task_id + 终态` 去重。成果通知使用独立的任务成果键。
 
 ### `POST /notice`：worker 往 Hermes 递话
 
@@ -197,7 +184,7 @@ event_id = "notice:" + sha256(worker + "\n" + text + "\n" + 当前分钟)[:24]
 
 #### 任务终态通知
 
-worker 交活时携带 `kind="task.result"`、`task_id` 和 `status`。
+兼容旧 worker 的参考回执可携带 `kind="task.result"`、`task_id` 和 `status`。
 
 ```json
 {"worker":"OguriCap","kind":"task.result","task_id":"t-example","status":"done","text":"已完成并验证"}
@@ -213,15 +200,15 @@ worker 交活时携带 `kind="task.result"`、`task_id` 和 `status`。
 重试回执记录首次实际投递级别。
 
 状态去除首尾空白并转小写，`canceled` 归一为 `cancelled`。
-省略 `status` 时采用该工单的已存终态，运行中的工单默认提交 done 候选。
-完成通知要求真实 `task_id` 与归属 worker；运行中的 done/failed 进入同一收口闸门。
+省略 `status` 时采用该工单的已存终态，运行中的工单默认保存 done 参考。
+完成通知要求真实 `task_id` 与归属 worker；运行中的 done/failed 只保存为成果参考。
 显式非终态通知继续按普通通知处理。cancelled 候选等待原取消确认。
 
 `POST /notice` 与内部 `notify_result()` 共用 SQLite `task_notice_dedup`，
 键为 `(task_id, 归一化终态)`，trigger `event_id` 固定为 `<task_id>:<终态>`。
 首个被 trigger 接受的通知保留原文及级别，后续重复返回原 `trigger_id` 与
 `duplicate:true`，记录 `notice dedup task=… state=…`。
-同一工单的不同终态分别投递。任务终态键与文本内容无关。
+已终结工单按实际终态去重。任务终态键与文本内容无关。
 
 回执仅在 trigger 接受后写入，trigger 不可用时返回 `ok:false` 并允许重试。
 稳定 `event_id` 也让 trigger 已接受、响应丢失的重试命中原事件。
@@ -255,8 +242,7 @@ Router 重启保留去重记录，每次读写清理满 24 小时的记录，并
   `session_unavailable`、`goal_conflict`、`resume_unconfirmed`、`recovery_expired`。
   确认恢复后用 `running`、新 `execution_epoch` 和 `evidence`（线程、回合、投递 ID）。
   重复回执幂等，旧代际、已取消或终态拒绝变更。新派单遇到暂停返回 409 和原因。
-- `finished_execution_epoch` 心跳仅记录活动。结算需要原生回合结束证据，见上文 `/result`。
-  旧 Worker 的结果仍可保存为候选；升级后经同任务恢复及原生核对可继续处理。
+- 心跳可附 `finished_execution_epoch` 过滤上一次派发的重复采样，缺省仍可按在线空闲结算。
 
 ### 订阅
 
@@ -390,8 +376,8 @@ worker 离线 + queue_if_offline=true    → 202 {task_id, queued:true, queued_a
 任务状态：
 
 ```
-queued ──dispatch──> running ──/result done──> done
-   │                    │      └─/result failed─> failed
+queued ──dispatch──> running ──online + idle──> done
+   │                    │      └─idle, native failed─> failed
    │                    └──cancel──> cancelling ──停工确认──> cancelled
    │                                  └──60 秒无确认──> paused (cancel_unconfirmed)
    └──────cancel──────> cancelled
@@ -451,12 +437,11 @@ data: {"type":"task","task_id":"t-1a2b3c4d5e","worker":"波旁","goal":"...",
 ## 五、结果回流
 
 ```
-Worker → Router : POST /result {name, task_id, status, summary, artifacts, evidence}
-Router → worker : SSE task_result_check {request_id, generation, task_id, revision, candidate}
-worker → Router : POST /result/responses {request_id, worker, status:200, body:
-  {ready:true, task_id, generation, thread_id, turn_id, turn_ids,
-   native_status:"completed", cleanup_complete:true, followups_pending:false, result:{...}}}
-Router           : 核验当前连接与候选 revision，写终态
+Worker → Router : POST /heartbeat {name, state:"idle"}
+Router           : 同一连接在线，保存执行终态与成果询问
+Router → Worker : SSE deliverable_request
+Worker → Router : POST /tasks/{id}/deliverable
+Router           : 收到询问后的空闲心跳即可确认并推送成果
 Router → trigger: POST /trigger
   {
     "source": "任务完成",
@@ -546,7 +531,7 @@ GET /subscriptions/pending?worker=波旁&limit=50
 | ① workers：register / heartbeat / GET /workers | 完成 | `RouterStore` workers 段 + `_register` / `_heartbeat` / `_workers` |
 | ① 连接不落库，SSE 即在线 | 完成 | `RouterServer.conns`（内存）+ `attach` / `detach` |
 | ② tasks：派活 / 队列 / 三态 | 完成 | `_task_create` + `claim_next_queued` + `flush_backlog` |
-| ② result → 状态迁移 → notify | 完成 | `_result` + `TriggerNotifier.notify_result` |
+| ② 在线空闲 → 执行终态 → notify | 完成 | `settle_idle` + `TriggerNotifier.post_task_notice` |
 | ② cancel / get / list | 完成 | `_task_cancel` / `_task_get` / `_tasks_list` |
 | ③ subscriptions 表 + CRUD | 完成 | `subscriptions` 表 + handler |
 | ③ trigger 注册 / 删除 / 拉取 / ACK | 完成 | `TriggerSubscriptionBridge` + `subscription_cursors` |

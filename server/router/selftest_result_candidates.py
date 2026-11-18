@@ -1,7 +1,6 @@
 """Real isolated HTTP tests for idle settlement; production state stays untouched."""
 
 import json
-import os
 import queue
 import tempfile
 import threading
@@ -90,16 +89,6 @@ class IdleSettlementTests(unittest.TestCase):
         return self.call("/result", {"name": self.worker, "task_id": task, "status": "done",
                                      "summary": "reported business success", "connection_generation": self.conn.generation, **fields})
 
-    def finish(self, task, **fields):
-        self.heartbeat()
-        binding = fixture_binding(self.store.get_task(task))
-        code, _ = self.call("/tasks/" + task + "/turn-binding", {"name": self.worker, "connection_generation": self.conn.generation, **binding})
-        self.assertEqual(code, 200)
-        saved = self.server.result_candidates.get(task)
-        candidate = dict(saved["result"]["candidate"]) if saved else {}
-        candidate.update(fields)
-        return self.report(task, **{**candidate, "native_completion": fixture_end(binding)})
-
     def notices(self):
         return [item for item in self.sent if item["kind"] == "task.result"]
 
@@ -112,236 +101,164 @@ class IdleSettlementTests(unittest.TestCase):
         self.assertEqual(code, 200)
         return question_id
 
-    def test_01_bound_native_turn_finishes_after_early_report(self):
+    def test_idle_without_result_or_native_binding_finishes(self):
         task = self.task()
-        self.assertEqual(self.report(task)[0], 202)
-        self.assertEqual(self.heartbeat()[1]["settlements"], [])
+        self.assertIsNone(self.store.get_task(task)["turn_binding"])
+        _, beat = self.heartbeat()
+        self.assertEqual(beat["settlements"][0]["state"], "done")
+        saved = self.store.get_task(task)
+        self.assertIsNone(saved["deliverable_candidate"])
+        self.assertEqual((saved["review_state"],saved["deliverable_state"]), ("reviewing","pending"))
+        self.assertEqual(len(self.notices()), 1)
+        print("⑭ POST /result calls=0; idle -> done; deliverable=pending; terminal notices=1")
+
+    def test_legacy_success_and_failure_are_only_references(self):
+        self.conn.native_settlement = False
+        task = self.task()
+        for status in ("done","failed","turn_ended"):
+            code, ack = self.report(task, status=status, evidence=["ref"], summary="参考")
+            self.assertEqual((code,ack["ignored_as_reference"],ack["deprecated"],ack["state"]), (200,True,True,"running"))
+            self.assertEqual(self.store.get_task(task)["deliverable_candidate"]["evidence"], ["ref"])
+            self.assertIsNone(self.store.get_task(task)["result"])
+            self.assertTrue(self.report(task,status=status,evidence=["ref"],summary="参考")[1]["duplicate"])
+        self.assertEqual((len(self.notices()),len(self.requests)), (0,0))
+        print("⑮ legacy done/failed -> HTTP 200 ignored_as_reference=true; state=running; notices=0")
+
+    def test_references_with_stale_or_missing_proof_cannot_settle(self):
+        task = self.task()
         anchor = fixture_binding(self.store.get_task(task))
-        path = "/tasks/" + task + "/turn-binding"
-        self.assertEqual(self.call(path, {"name": self.worker, "connection_generation": self.conn.generation, **anchor})[0], 200)
-        self.assertEqual(self.call(path, {"name": self.worker, "connection_generation": self.conn.generation, **anchor, "turn_id": "unrelated"})[0], 409)
-        for key in anchor:
-            wrong = fixture_end({**anchor, key: "unrelated"})
-            self.assertEqual(self.report(task, native_completion=wrong)[0], 409)
-        for wrong in (anchor, {**fixture_end(anchor), "native_status": "inProgress"},
-                      {**fixture_end(anchor), "cleanup_complete": False}):
-            self.assertEqual(self.report(task, native_completion=wrong)[0], 409)
-        self.assertEqual(self.notices(), [])
-        code, outcome = self.finish(task)
-        self.assertEqual((code, outcome["state"], len(self.notices())), (200, "done", 1))
-        print("bound thread+turn+epoch, native ended -> HTTP 200 done; notifications=1", flush=True)
+        for proof in (None, fixture_end(anchor), fixture_end({**anchor,"execution_epoch":"stale"})):
+            self.assertTrue(self.report(task,native_completion=proof)[1]["ignored_as_reference"])
+        self.assertEqual(self.store.get_task(task)["state"],"running")
+        self.assertIsNone(self.store.get_task(task)["turn_binding"])
 
-    def test_02_idle_without_result_keeps_a_nonterminal_inspection(self):
+    def test_wrong_owner_cannot_record_a_reference(self):
+        task = self.task()
+        self.assertEqual(self.report(task,name="other")[0],400)
+        self.assertIsNone(self.store.get_task(task)["deliverable_candidate"])
+        self.assertEqual(self.report("t-missing")[0],404)
+
+    def test_repeated_idle_and_late_reference_do_not_repeat_notice(self):
         task = self.task()
         self.heartbeat()
-        self.assertEqual(self.store.get_task(task)["result"]["outcome"], "needs_inspection")
-        self.assertEqual(self.store.get_task(task)["state"], "running")
-        self.assertEqual(self.notices(), [])
-
-    def test_03_unanswered_question_defers_until_answer_and_next_idle(self):
-        task = self.task()
-        question = self.question(task)
-        self.report(task)
-        _, beat = self.heartbeat(task_id=task)
-        self.assertEqual(beat["settlements"], [])
-        self.assertEqual(self.finish(task)[0], 202)
-        self.assertEqual(self.store.get_task(task)["state"], "running")
-        self.assertEqual(self.notices(), [])
-        code, _ = self.call("/questions/%s/%s/answer" % (self.worker, question), {"actor": "hermes", "answers": ["yes"]})
-        self.assertEqual(code, 200)
-        self.assertEqual(self.store.get_task(task)["state"], "running")
-        self.heartbeat()
-        self.assertEqual(self.store.get_task(task)["state"], "done")
-        self.assertEqual(len(self.notices()), 1)
-
-    def test_04_repeated_idle_does_not_repeat_settlement_or_notification(self):
-        task = self.task()
-        self.report(task)
-        self.heartbeat(task_id=task)
-        self.finish(task)
-        finished_at = self.store.get_task(task)["finished_at"]
+        stamp = self.store.get_task(task)["finished_at"]
+        self.assertTrue(self.report(task,status="failed")[1]["ignored_as_reference"])
         for _ in range(3):
-            _, beat = self.heartbeat(task_id=task)
-            self.assertEqual(beat["settlements"], [])
-        self.assertEqual(self.store.get_task(task)["finished_at"], finished_at)
-        self.assertEqual(len(self.notices()), 1)
-        code, duplicate = self.report(task, status="failed")
-        self.assertEqual((code, duplicate["state"], duplicate["duplicate"]), (200, "done", True))
+            self.assertEqual(self.heartbeat()[1]["settlements"],[])
+        self.assertEqual(self.store.get_task(task)["state"],"done")
+        self.assertEqual(self.store.get_task(task)["finished_at"],stamp)
+        self.assertEqual(len(self.notices()),1)
 
-    def test_05_cancelling_idle_keeps_the_slot_with_or_without_open_question(self):
+    def test_cancelling_retains_occupancy_despite_reference_and_idle(self):
         task = self.task()
         self.question(task)
-        self.store.cancel_task(task, pending=True)
-        self.heartbeat(task_id=task)
-        self.assertEqual(self.store.get_task(task)["state"], "cancelling")
-        self.assertEqual(self.notices(), [])
+        self.store.cancel_task(task,pending=True)
+        self.heartbeat()
+        self.assertEqual(self.report(task,status="failed")[1]["state"],"cancelling")
+        self.assertEqual(self.notices(),[])
 
-    def test_06_old_worker_result_is_saved_without_observer(self):
+    def test_pending_question_does_not_classify_turns(self):
         task = self.task()
-        self.call("/register", {"name": self.worker, "control_sse": False, "version": "legacy"})
-        self.assertEqual(self.report(task)[0], 202)
-        self.heartbeat(task_id=task)
-        self.assertEqual(self.store.get_task(task)["state"], "running")
-        self.assertEqual(self.requests, [])
+        self.question(task)
+        self.assertEqual(self.heartbeat("running", task)[1]["settlements"],[])
+        self.assertEqual(self.heartbeat()[1]["settlements"][0]["state"],"done")
 
-    def test_legacy_task_scoped_idle_and_explicit_result_both_orders(self):
-        self.conn.native_settlement = False
-        self.call("/register", {"name": self.worker, "control_sse": False})
-        for idle_first in (False, True):
+    def test_offline_pulse_does_not_settle(self):
+        task = self.task()
+        self.conn.close("test")
+        self.heartbeat()
+        self.assertEqual(self.store.get_task(task)["state"],"running")
+        self.conn = self.server.attach(self.worker)
+        self.assertEqual(self.heartbeat()[1]["settlements"][0]["state"],"done")
+
+    def test_native_failed_and_interrupted_are_visible_without_result(self):
+        for native in ("failed","interrupted"):
             task = self.task()
-            if idle_first:
-                self.heartbeat()
-            code, _ = self.call("/result", {"name": self.worker, "task_id": task,
-                                             "summary": "legacy business report", "status": "done",
-                                             "evidence": [{"type": "codex_thread", "thread_id": "legacy", "turn_id": task}]})
-            self.assertEqual(code, 200 if idle_first else 202)
-            self.heartbeat()
-            result = self.store.get_task(task)
-            self.assertEqual(result["state"], "done")
-            self.assertEqual(result["result"]["completion"]["signal"], "legacy_task_idle")
-        self.assertEqual(len(self.notices()), 2)
+            self.call("/heartbeat", {"name":self.worker,"state":"running","native_status":native})
+            self.assertEqual(self.store.get_task(task)["state"],"running")
+            self.call("/heartbeat", {"name":self.worker,"state":"idle","native_status":native})
+            view = self.store.get_task(task)
+            self.assertEqual((view["state"],view["result"]["completion"]["native_status"]), ("failed",native))
+            self.assertEqual(view["deliverable_state"],"pending")
 
-    def test_legacy_idle_without_native_receipt_stays_pending(self):
-        self.conn.native_settlement = False
-        self.call("/register", {"name": self.worker, "control_sse": False})
+    def test_new_worker_rejects_old_connection_sample(self):
         task = self.task()
-        self.heartbeat()
-        code, _ = self.call("/result", {"name": self.worker, "task_id": task, "status": "done", "summary": "early"})
-        self.assertEqual((code, self.store.get_task(task)["state"], self.notices()), (202, "running", []))
+        self.conn = self.server.attach(self.worker,state_layers=True)
+        self.assertEqual(self.call("/heartbeat", {"name":self.worker,"state":"idle","connection_generation":"stale"})[0],409)
+        self.assertEqual(self.store.get_task(task)["state"],"running")
 
-    def test_legacy_observer_confirms_task_on_original_stream(self):
-        self.conn.native_settlement = False
+    def test_reference_and_question_survive_restart(self):
         task = self.task()
-        def legacy_answer(worker, event, data, kind, timeout):
-            self.assertEqual((event, kind, data["task_id"]), ("task_result_check", "completion", task))
-            return 200, {"ready": True, "generation": self.conn.generation, "task_id": task,
-                         "cleanup_complete": True, "followups_pending": False, "thread_id": "legacy-thread",
-                         "turn_id": "tail", "turn_ids": ["root", "tail"], "native_status": "completed",
-                         "result": data["candidate"]}
-        self.heartbeat()
-        with mock.patch.object(self.server, "worker_request", side_effect=legacy_answer):
-            code, result = self.call("/result", {"name": self.worker, "task_id": task, "summary": "legacy", "status": "done"})
-        self.assertEqual((code, result["state"], len(self.notices())), (200, "done", 1))
-        view = self.store.get_task(task)
-        self.assertEqual(view["turn_binding"], {"thread_id": "legacy-thread", "turn_id": "root",
-                                                "execution_epoch": view["execution_epoch"]})
-
-    def test_reported_failure_is_preserved(self):
-        task = self.task()
-        self.assertEqual(self.report(task, status="failed", error_code="fixture_error")[0], 200)
-        self.assertEqual(self.store.get_task(task)["result"]["error_code"], "fixture_error")
-        self.assertEqual(self.store.get_task(task)["state"], "failed")
-
-    def test_needs_inspection_is_done_with_outcome_and_full_summary(self):
-        task = self.task()
-        full = "完整报告" * 100
-        self.report(task, status="failed", outcome="needs_inspection", error_code="native_state_unconfirmed",
-                    summary=full, summary_short="未确认，请核对客户端")
-        self.heartbeat(task_id=task)
-        self.finish(task)
-        view = self.store.get_task(task)
-        self.assertEqual(view["state"], "done")
-        self.assertEqual(view["result"]["outcome"], "needs_inspection")
-        self.assertEqual(view["result"]["summary"], full)
-        self.assertTrue(self.notices()[0]["text"].endswith("未确认，请核对客户端"))
-        self.assertEqual(self.notices()[0]["payload"]["outcome"], "needs_inspection")
-
-    def test_old_generation_and_missing_binding_cannot_finish_task(self):
-        task = self.task()
-        self.server.result_candidates.put(task, {"candidate": {"status": "done", "summary": "old revision"},
-                                                  "generation": "old", "attachments": []})
-        self.heartbeat(task_id=task)
-        self.assertEqual(self.store.get_task(task)["state"], "running")
-        self.assertEqual(len(self.notices()), 0)
-
-    def test_reconnect_accepts_a_fresh_idle_pulse_after_a_question_was_answered(self):
-        task = self.task()
-        question = self.question(task)
-        self.report(task)
-        self.heartbeat(task_id=task)
-        self.assertEqual(self.store.get_task(task)["state"], "running")
-        self.questions[question]["status"] = "answered"
-        self.conn = self.server.attach(self.worker, native_settlement=True)
-        self.finish(task)
-        self.assertEqual(self.store.get_task(task)["state"], "done")
-        self.assertEqual(len(self.notices()), 1)
-
-    def test_a_question_bound_to_another_task_does_not_exempt_this_one(self):
-        older = self.store.create_task(self.worker, "older", state="failed")["task_id"]
-        self.question(older)
-        task = self.task()
-        self.heartbeat(task_id=task)
-        self.assertEqual(self.finish(task)[1]["state"], "done")
-
-    def test_candidate_and_question_survive_router_restart(self):
-        task = self.task()
-        question = self.question(task)
-        self.report(task)
+        self.question(task)
+        self.report(task, summary="durable")
         self.close()
         self.open()
-        self.heartbeat("running", task)
-        self.heartbeat(task_id=task)
-        self.assertEqual(self.store.get_task(task)["state"], "running")
-        self.questions[question]["status"] = "answered"  # Native/Feishu answer, outside Router's answer endpoint.
-        self.finish(task)
-        self.assertEqual(self.store.get_task(task)["state"], "done")
-        self.assertIsNone(self.server.result_candidates.get(task))
+        self.assertEqual(self.store.get_task(task)["deliverable_candidate"]["summary"],"durable")
+        self.assertEqual(self.store.pending_questions(self.worker)[0]["task_id"],task)
+        self.heartbeat()
+        self.assertEqual(self.store.get_task(task)["state"],"done")
 
-    def test_idle_before_report_preserves_late_business_result(self):
+    def test_staged_deliverable_survives_restart_and_needs_fresh_online_idle(self):
         task = self.task()
-        self.heartbeat(task_id=task)
-        self.assertEqual(self.report(task)[0], 202)
-        self.assertEqual(self.finish(task)[1]["state"], "done")
+        self.heartbeat()
+        request_id = self.server.reviews.load(task)["request_id"]
+        report = {"summary":"重启前已保存","artifacts":[],"evidence":[],"risks":[]}
+        code, _ = self.call("/tasks/" + task + "/deliverable",
+                            {"name": self.worker, "request_id": request_id, "deliverable": report})
+        self.assertEqual(code, 202)
+        self.close()
+        self.open()
+        self.heartbeat("running")
+        self.assertIsNone(self.store.get_task(task)["deliverable"])
+        self.heartbeat()
+        self.assertEqual(self.store.get_task(task)["deliverable"], report)
+        self.assertEqual(sum(item["kind"] == "task.deliverable" for item in self.sent), 1)
+
+    def test_full_legacy_summary_and_outcome_remain_reference_only(self):
+        task = self.task()
+        full = "正文" * 230
+        self.report(task,summary=full,summary_short="未确认",outcome="needs_inspection")
+        self.heartbeat()
+        view = self.store.get_task(task)
+        self.assertEqual(view["deliverable_candidate"]["summary"],full)
+        self.assertEqual(view["deliverable_candidate"]["outcome"],"needs_inspection")
+        self.assertNotIn("outcome",view["result"])
+        self.assertIsNone(view["deliverable"])
+
+    def test_reference_and_concurrent_idle_have_one_terminal_winner(self):
+        task = self.task()
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            jobs = [pool.submit(self.report,task),pool.submit(self.heartbeat),pool.submit(self.heartbeat)]
+            replies = [j.result(timeout=5) for j in jobs]
+        self.assertTrue(replies[0][1]["ignored_as_reference"])
+        self.assertEqual(sum(len(r[1]["settlements"]) for r in replies[1:]),1)
+        self.assertEqual(len(self.notices()),1)
         self.assertTrue(self.report(task)[1]["duplicate"])
-        self.assertEqual(len(self.notices()), 1)
 
-    def test_result_and_idle_race_share_one_terminal_winner(self):
+    def test_replayed_finished_epoch_cannot_finish_next_task(self):
         task = self.task()
-        barrier = threading.Barrier(2)
-        def result():
-            barrier.wait()
-            return self.finish(task)
-        def idle():
-            barrier.wait()
-            return self.heartbeat(task_id=task)
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            first = pool.submit(result)
-            second = pool.submit(idle)
-            first.result(timeout=5)
-            second.result(timeout=5)
-        self.assertEqual(self.store.get_task(task)["state"], "done")
-        self.assertEqual(len(self.notices()), 1)
-        self.assertTrue(self.report(task)[1]["duplicate"])
+        epoch = self.store.get_task(task)["execution_epoch"]
+        queued = self.store.create_task(self.worker,"next")["task_id"]
+        pulse = {"name":self.worker,"state":"idle","finished_execution_epoch":epoch}
+        self.call("/heartbeat",pulse)
+        self.assertEqual(self.store.get_task(queued)["state"],"running")
+        self.assertEqual(self.call("/heartbeat",pulse)[1]["settlements"],[])
+        self.assertEqual(self.heartbeat()[1]["settlements"][0]["task_id"],queued)
 
-    def test_repeated_idle_pulse_cannot_finish_the_next_queued_task(self):
-        task = self.task()
-        queued = self.store.create_task(self.worker, "previously accepted next task")
-        self.report(task)
-        self.finish(task)
-        self.heartbeat(task_id=task)
-        self.assertEqual(self.store.get_task(queued["task_id"])["state"], "running")
-        self.heartbeat(task_id=task)
-        self.assertEqual(self.store.get_task(queued["task_id"])["state"], "running")
-        self.heartbeat("running", queued["task_id"])
-        self.heartbeat(task_id=queued["task_id"])
-        self.assertEqual(self.store.get_task(queued["task_id"])["state"], "running")
-
-    def test_invalid_large_summary_does_not_create_candidate(self):
+    def test_invalid_large_summary_does_not_create_reference(self):
         task = self.task()
         code, error = self.report(task, summary="x" * 301)
-        self.assertEqual(code, 400)
-        self.assertIn("summary_short", error["error"])
-        self.assertIsNone(self.server.result_candidates.get(task))
+        self.assertEqual(code,400)
+        self.assertIn("summary_short",error["error"])
+        self.assertIsNone(self.store.get_task(task)["deliverable_candidate"])
 
-    def test_explicit_notice_and_automatic_result_use_one_exit(self):
+    def test_explicit_notice_and_reference_do_not_announce_completion(self):
         task = self.task()
-        code, _ = self.call("/notice", {"worker": self.worker, "kind": "task.result", "task_id": task,
-                                       "status": "done", "text": "explicit outcome"})
-        self.assertEqual(code, 202)
+        code, ack = self.call("/notice", {"worker":self.worker,"kind":"task.result","task_id":task,"text":"参考","status":"done"})
+        self.assertEqual((code,ack["ignored_as_reference"],len(self.notices())),(200,True,0))
         self.report(task)
-        self.finish(task)
-        self.assertEqual(len(self.notices()), 1)
-        self.assertEqual(self.store.get_task(task)["state"], "done")
+        self.heartbeat()
+        self.assertEqual(len(self.notices()),1)
 
 
 if __name__ == "__main__":

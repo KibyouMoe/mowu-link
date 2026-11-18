@@ -13,7 +13,7 @@ from pathlib import Path
 from unittest import mock
 
 import server as router
-from selftest_router import FakeWorker, fixture_binding, fixture_end, http
+from selftest_router import FakeWorker, fixture_binding, http
 
 
 class TwoLayerStateTests(unittest.TestCase):
@@ -103,7 +103,7 @@ class TwoLayerStateTests(unittest.TestCase):
                 self.assertEqual((code, refused["error"]), (409, "worker_paused"))
                 self.assertEqual(self.sent, [])
                 self.assertEqual(self.call("/result", {"name": self.name, "task_id": task_id,
-                                      "status": "done", "summary": "late"})[0], 202)
+                                      "status": "done", "summary": "late"})[0], 200)
                 release = {"confirm": True, "reason": "operator independently verified stop",
                            "execution_epoch": saved["execution_epoch"]}
                 path = "/tasks/" + task_id + "/cancel-release"
@@ -135,20 +135,13 @@ class TwoLayerStateTests(unittest.TestCase):
         self.assertIsNone(self.client.wait_task(0.1))
         print("running + backlog capacity 128 -> HTTP 409 worker_busy, second SSE frame absent", flush=True)
 
-    def test_04_legacy_ordinary_turn_ending_cannot_settle_the_new_order(self):
+    def test_04_legacy_online_idle_finishes_without_turn_views(self):
         self.call("/heartbeat", {"name": self.name, "state": "running", "turn_source": "trainer"})
-        _, task = self.create("new task waiting behind an ordinary turn")
-        task_id = task["task_id"]
-        self.assertEqual(self.client.wait_task(3)["task_id"], task_id)
-        _, idle = self.call("/heartbeat", {"name": self.name, "state": "idle", "task_id": None})
-        saved = self.store.get_task(task_id)
-        self.assertEqual((saved["state"], saved["finished_at"], saved["result"]["outcome"]),
-                         ("running", None, "needs_inspection"))
-        code, candidate = self.call("/result", {"name": self.name, "task_id": task_id,
-                                                "status": "done", "summary": "late actual result"})
-        self.assertEqual((code, candidate["candidate"], idle["settlements"], len(self.sent)), (202, True, [], 0))
+        _, task = self.create("legacy worker")
+        self.assertEqual(self.client.wait_task(3)["task_id"],task["task_id"])
+        _, idle = self.call("/heartbeat", {"name":self.name,"state":"idle"})
+        self.assertEqual(idle["settlements"][0]["state"],"done")
         self.assertIsNone(self.stored_views())
-        print("legacy trainer idle -> running/needs_inspection; late result HTTP 202; notifications=0", flush=True)
 
     def test_matching_stop_releases_paused_slot_and_rejects_old_ack(self):
         _, task = self.create("stop on the original turn")
@@ -223,8 +216,7 @@ class TwoLayerStateTests(unittest.TestCase):
         self.assertRegex(epoch, r"^[a-f0-9]{32}$")
         route = "/tasks/" + task_id
         idle_before_result = {"name": self.name, "state": "idle", "connection_generation": old_generation}
-        self.call("/heartbeat", idle_before_result)
-        self.call("/heartbeat", {**idle_before_result, "finished_execution_epoch": epoch})
+        self.call("/heartbeat", {**idle_before_result, "state":"running"})
         self.assertEqual(self.store.get_task(task_id)["state"], "running")
         self.assertEqual(self.sent, [])
         self.server.current_conn(self.name).close("test Worker exited")
@@ -251,7 +243,7 @@ class TwoLayerStateTests(unittest.TestCase):
         idle = {"name": self.name, "state": "idle", "connection_generation": generation}
         self.call("/heartbeat", {**idle, "finished_execution_epoch": epoch})
         self.assertEqual(self.call("/result", {"name": self.name, "task_id": task_id,
-                         "status": "done", "summary": "original result"})[0], 202)
+                         "status": "done", "summary": "original result"})[0], 200)
         self.assertEqual(self.sent, [])
 
         resumed = {**paused, "state": "running", "execution_epoch": "b" * 32,
@@ -264,14 +256,8 @@ class TwoLayerStateTests(unittest.TestCase):
         self.call("/heartbeat", {**idle, "finished_execution_epoch": epoch})
         self.assertEqual(self.sent, [])
         self.call("/heartbeat", {**idle, "finished_execution_epoch": running["execution_epoch"]})
-        self.assertEqual(self.store.get_task(task_id)["state"], "running")
-        native = self.store.get_task(task_id)["turn_binding"]
-        code, _ = self.call("/result", {"name": self.name, "task_id": task_id, "status": "done",
-                                       "connection_generation": generation, "native_completion": fixture_end(native), "summary": "original result"})
-        self.assertEqual(code, 200)
         self.assertEqual(self.store.get_task(task_id)["state"], "done")
         self.assertEqual(len(self.sent), 1)
-        print("versioned SSE task -> task_recovery -> paused HTTP 200 -> worker_paused HTTP 409 -> running new epoch -> done, one notice", flush=True)
 
     def test_pause_and_resume_on_same_connection_preserve_native_binding(self):
         self.close_worker()

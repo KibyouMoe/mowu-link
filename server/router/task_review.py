@@ -101,6 +101,19 @@ class TaskReview:
         for row in ids:
             self.tick(row[0])
 
+    def release_idle(self, worker):
+        """Publish each staged report once on the next live idle pulse, under dispatch_lock."""
+        with self.store._lock:
+            rows = self.store._conn.execute(
+                "SELECT task_id, workflow_json FROM tasks WHERE worker=? AND "
+                "json_extract(workflow_json, '$.delivery_state')='awaiting_idle'", (worker,)).fetchall()
+            for task_id, encoded in rows:
+                flow = json.loads(encoded)
+                flow.update(delivery_state="received", deliverable=flow.pop("staged_report"))
+                flow["pending_notices"]["deliverable"] = time.time()
+                self.save(task_id, flow)
+        return [row[0] for row in rows]
+
     def receive(self, task_id, body):
         with self.server.dispatch_lock:
             flow = self.load(task_id)
@@ -128,6 +141,10 @@ class TaskReview:
             if flow["delivery_state"] == "received":
                 return ((200, {"ok": True, "duplicate": True}) if report == flow["deliverable"]
                         else (409, {"error": "deliverable_conflict"}))
+            if flow["delivery_state"] == "awaiting_idle":
+                if report != flow["staged_report"]:
+                    return 409, {"error": "deliverable_conflict"}
+                return 202, {"ok": True, "duplicate": True, "deliverable_state": "awaiting_idle"}
             now = time.time()
             if len(summary) > 200:
                 error = {"error": "deliverable_summary_too_long",
@@ -140,9 +157,11 @@ class TaskReview:
                     flow.update(request_id=str(uuid.uuid4()), attempts=0, delivery_state="pending", delivery_due=now)
                 response = 400, error
             else:
-                flow.update(deliverable=report, delivery_state="received", delivery_due=None)
-                flow["pending_notices"]["deliverable"] = now
-                response = 200, {"ok": True, "task_id": task_id, "deliverable_state": "received"}
+                # A cached idle sample may predate this inquiry. Persist the answer
+                # before acknowledging it; only a subsequent idle pulse can publish it.
+                flow.update(staged_report=report, delivery_state="awaiting_idle", delivery_due=None)
+                flow["pending_notices"].pop("deliverable_missing", None)
+                response = 202, {"ok": True, "task_id": task_id, "deliverable_state": "awaiting_idle"}
             self.save(task_id, flow)
         self.tick(task_id)
         return response
