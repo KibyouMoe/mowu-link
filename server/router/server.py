@@ -249,6 +249,10 @@ def terminal_notice_state(value: Any) -> str:
     return state if state in TASK_NOTICE_NAMES else ""
 
 
+def terminal_notice_level(state: str) -> str:
+    return "event" if state in ("done", "failed") else "notify"
+
+
 def parse_model_command(text: str, thread_id: str) -> Dict[str, Any]:
     """Parse model commands once, before dispatching to an engine adapter."""
     if not isinstance(text, str) or len(text) > 512 or not isinstance(thread_id, str) or not thread_id:
@@ -1596,7 +1600,7 @@ def task_result_payload(task: Dict[str, Any], status: str, summary: str,
     source, label = TASK_NOTICE_NAMES[status]
     display = worker_display_name(task["worker"])
     return {
-        "source": source, "kind": "task.result", "level": "notify",
+        "source": source, "kind": "task.result", "level": terminal_notice_level(status),
         "text": "%s %s %s：%s" % (display, label, task["task_id"], one_line or "(无摘要)"),
         "actor": display, "event_id": "%s:%s" % (task["task_id"], status),
         "payload": {"task_id": task["task_id"], "worker": task["worker"], "status": status,
@@ -3252,7 +3256,6 @@ class RouterHandler(BaseHTTPRequestHandler):
                 or not message_id or len(message_id) > 128
                 or any(not c.isalnum() and c not in "-_" for c in message_id)):
             raise BadRequest("invalid message_id")
-        level = "event" if urgency == "urgent" else "notify"
         task_result = bool(kind == "task.result" and task_id and state)
         if kind == "worker.question":
             self.server.observe_question_notice(worker, text)
@@ -3262,11 +3265,6 @@ class RouterHandler(BaseHTTPRequestHandler):
                 return 404, {"ok": False, "error": "unknown_task", "task_id": task_id}
             if task["worker"] != worker:
                 return 400, {"ok": False, "error": "worker_mismatch", "task_id": task_id}
-            if task["state"] in TERMINAL_STATES:
-                state = task["state"]
-                actual = task.get("result") or {}
-                text = str(actual.get("summary") or text)
-                body = {**body, **({"summary_short": actual["summary_short"]} if "summary_short" in actual else {})}
             if task["state"] not in TERMINAL_STATES:
                 if state == "cancelled":
                     with self.server.dispatch_lock:
@@ -3281,10 +3279,18 @@ class RouterHandler(BaseHTTPRequestHandler):
                                  **{key: body[key] for key in ("outcome", "error_code") if key in body},
                                  **({"summary_short": body["summary_short"]} if "summary_short" in body else {})}
                     status_code, result = self.server.submit_result(candidate, attachments)
-                    receipt = self.server.store.task_notice_receipt(task_id, result.get("state", ""))
-                    return status_code, {**result, "trigger_id": receipt.get("id") if receipt else None,
+                    terminal = terminal_notice_state(result.get("state"))
+                    receipt = self.server.store.task_notice_receipt(task_id, terminal) or {}
+                    notice_state = terminal or state
+                    return status_code, {**result, "trigger_id": receipt.get("id"),
                                          **({"error": "trigger_unavailable"} if status_code == 200 and not receipt else {}),
-                                         "event_id": task_id + ":" + result.get("state", state), "level": "notify"}
+                                         "event_id": task_id + ":" + notice_state,
+                                         "level": receipt.get("level", terminal_notice_level(notice_state))}
+            state = task["state"]
+            actual = task.get("result") or {}
+            text = str(actual.get("summary") or text)
+            body = {**body, **({"summary_short": actual["summary_short"]} if "summary_short" in actual else {})}
+        level = terminal_notice_level(state) if task_result else ("event" if urgency == "urgent" else "notify")
         if task_result:
             event_id = task_id + ":" + state
         else:

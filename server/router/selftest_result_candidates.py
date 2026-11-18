@@ -168,6 +168,7 @@ class IdleSettlementTests(unittest.TestCase):
         self.assertEqual(self.store.get_task(task)["state"], "cancelled")
         self.assertEqual(len(self.notices()), 1)
         self.assertEqual(self.notices()[0]["source"], "任务取消")
+        self.assertEqual(self.notices()[0]["level"], "notify")
 
     def test_06_old_worker_needs_no_observer_or_candidate_capability(self):
         task = self.task()

@@ -198,11 +198,14 @@ worker 交活时携带 `kind="task.result"`、`task_id` 和 `status`。
 {"worker":"OguriCap","kind":"task.result","task_id":"t-example","status":"done","text":"已完成并验证"}
 ```
 
-| 归一化终态 | trigger source |
-|---|---|
-| `done` | `任务完成` |
-| `failed` | `任务失败` |
-| `cancelled` | `任务取消` |
+| 归一化终态 | trigger source | level |
+|---|---|---|
+| `done` | `任务完成` | `event` |
+| `failed` | `任务失败` | `event` |
+| `cancelled` | `任务取消` | `notify` |
+
+终态级别与 `urgency` 无关。`event` 沿用 trigger 的打断路径；
+重试回执记录首次实际投递级别。
 
 状态去除首尾空白并转小写，`canceled` 归一为 `cancelled`。
 省略 `status` 时采用该工单的已存终态，运行中的工单默认提交 done 候选。
@@ -437,7 +440,7 @@ Router → trigger: POST /trigger
   {
     "source": "任务完成",
     "kind": "task.result",
-    "level": "notify",
+    "level": "event",
     "text": "t-88 完成：…",
     "actor": "波旁",
     "event_id": "t-88:done",
@@ -446,7 +449,7 @@ Router → trigger: POST /trigger
   Header: X-Trigger-Token: <~/.hermes/secrets/trigger.token>
 ```
 
-Router 写入 trigger notify，按终态选择上表的来源名。
+Router 按终态选择上表的 trigger 来源名与级别。
 内部结果与 worker 的任务终态通知共用去重记录和 `event_id`，先到者保留。
 
 ---
@@ -556,7 +559,7 @@ ROUTER_TEST_PORT=18790 python3 server/router/selftest_router.py
 1. token 生成（64 hex，0600）、`/health` 形状、无 token → 401、单实例 flock
 2. register → SSE 上线 → 心跳注释行 → 空闲立即派活（200 dispatched）
 3. `last_progress_at` 来自 heartbeat 的 `progress_at`
-4. 交活 → `done` → trigger 库出现 `source=任务完成 kind=task.result level=notify`
+4. 交活 → `done` → trigger 库出现 `source=任务完成 kind=task.result level=event`
 5. 断线 → offline（名字保留）→ 409 → `queue_if_offline` 202 →
    重连按顺序补推两条积压 → 交活
 6. 忙时第二条排队（不提前推）→ 第一条交活后第二条自动下发

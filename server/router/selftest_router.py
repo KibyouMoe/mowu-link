@@ -11,7 +11,7 @@ Starts real processes with throwaway state:
 
 Then drives a fake worker over a real SSE connection and exercises:
 
-  register → online → immediate dispatch → result → idle → done → trigger notify
+  register → online → immediate dispatch → result → idle → done → trigger event
   offline 409 → queue_if_offline 202 → reconnect → ordered backlog flush
   busy → queued → first result → second auto-dispatched
   cancel queued → cancelled (never delivered)
@@ -906,6 +906,43 @@ def task_notice_selftest(checker, work, trigger_url, trigger_token, trigger_db):
                 "SELECT * FROM events WHERE event_id LIKE ? ORDER BY id", (task_id + ":%",))]
 
     try:
+        # Subscribe before creating the fixtures so this checks delivery as well as storage.
+        _, bus = client.request("GET", "/bus/health")
+        since = bus["last_id"]
+        for state, expected, urgency in (("done", "event", "normal"),
+                                         ("failed", "event", "normal"),
+                                         ("cancelled", "notify", "urgent")):
+            task_id = new_task()
+            if state == "cancelled":
+                call("/tasks/" + task_id + "/cancel", None)
+                code, settled = call("/tasks/" + task_id + "/cancel-ack", {
+                    "name": worker, "outcome": {"ok": True, "task_id": task_id, "state": state}})
+            else:
+                # Check a candidate receipt before any event is delivered.
+                pending_code, pending = http("POST", base + "/notice", {
+                    "worker": worker, "kind": "task.result", "task_id": task_id,
+                    "status": state, "text": "pending result", "urgency": urgency}, server.token)
+                checker.check("task terminal level: %s candidate reports event without delivery" % state,
+                              pending_code == 202 and pending.get("level") == expected
+                              and pending.get("event_id") == task_id + ":" + state
+                              and pending.get("notified") is False and not events(task_id))
+                code, settled = call("/result", {"name": worker, "task_id": task_id,
+                                                  "status": state, "summary": "settled result"})
+            _, receipt = notice(task_id, state, urgency=urgency)
+            trigger_status, fetched = client.request("GET", "/events", params={
+                "subscriber": "hermes-terminal-level-test", "since": since, "levels": "event,notify"})
+            event_id = task_id + ":" + state
+            deliveries = [event for event in fetched.get("events", []) if event["event_id"] == event_id]
+            observed = [event["level"] for event in deliveries]
+            checker.check("task terminal level: %s -> %s" % (state, expected),
+                          code == 200 and settled.get("state") == state
+                          and receipt.get("ok") is True and receipt.get("level") == expected
+                          and receipt.get("event_id") == event_id
+                          and trigger_status == 200 and observed == [expected]
+                          and deliveries[0]["kind"] == "task.result"
+                          and deliveries[0]["payload"]["status"] == state,
+                          "urgency=%s receipt=%s trigger=%s" % (urgency, receipt.get("level"), observed))
+
         oversized = new_task()
         full_summary = "完整正文😀" * 5000
         code, rejected = call("/result", {"name": worker, "task_id": oversized,
@@ -950,13 +987,16 @@ def task_notice_selftest(checker, work, trigger_url, trigger_token, trigger_db):
         with mock.patch.object(client, "post_trigger", wraps=client.post_trigger) as sent:
             first = new_task()
             finish(first)
+            result_code, result_retry = finish(first)
             code, duplicate = notice(first, " DONE ", "different wording", urgency="urgent")
             first_events = events(first)
-            checker.check("task notice: internal result then differently worded worker notice posts once",
-                          code == 200 and duplicate["duplicate"] is True and sent.call_count == 1
-                          and duplicate["level"] == "notify" and len(first_events) == 1
+            checker.check("task terminal dedup: repeated result and worker notice send one event",
+                          result_code == 200 and result_retry.get("duplicate") is True
+                          and code == 200 and duplicate["duplicate"] is True and sent.call_count == 1
+                          and duplicate["level"] == "event" and len(first_events) == 1
                           and first_events[0]["source"] == "任务完成"
-                          and first_events[0]["text"].endswith("internal result first"))
+                          and first_events[0]["text"].endswith("internal result first"),
+                          "trigger_posts=%d trigger_rows=%d" % (sent.call_count, len(first_events)))
 
             second = new_task()
             _, original = notice(second, text="worker result first")
@@ -1008,9 +1048,11 @@ def task_notice_selftest(checker, work, trigger_url, trigger_token, trigger_db):
 
             retry_task = new_task()
             with mock.patch.object(client, "post_trigger", return_value=(False, {"detail": "offline"})):
+                finish(retry_task)
                 code, failed = notice(retry_task)
             checker.check("task notice: trigger failure returns HTTP 200 and does not consume the key",
                           code == 200 and failed["error"] == "trigger_unavailable"
+                          and failed.get("level") == "event"
                           and store.task_notice_receipt(retry_task, "done") is None)
             _, retried = notice(retry_task)
             checker.check("task notice: same key is retryable after trigger recovery",
@@ -2355,10 +2397,10 @@ def run(work: Path, checker: Checker) -> None:
             except ValueError:
                 payload_ok = False
         checker.check(
-            "trigger received notify: source=任务完成 kind=task.result "
-            "level=notify actor=波旁 event_id=<id>:done",
+            "SSE-dispatched task result reached trigger: source=任务完成 kind=task.result "
+            "level=event actor=波旁 event_id=<id>:done",
             event_row is not None and event_row[1] == "任务完成"
-            and event_row[2] == "task.result" and event_row[3] == "notify"
+            and event_row[2] == "task.result" and event_row[3] == "event"
             and event_row[4] == "波旁" and "完成" in (event_row[5] or "")
             and payload_ok,
             "row=%s" % (event_row,))
@@ -3090,14 +3132,15 @@ def run(work: Path, checker: Checker) -> None:
 
         conn = sqlite3.connect(str(trigger_db))
         try:
-            notify_count = conn.execute(
+            terminal_count = conn.execute(
                 "SELECT COUNT(*) FROM events WHERE source IN ('任务完成','任务失败','任务取消')"
-                " AND kind='task.result' AND level='notify'").fetchone()[0]
+                " AND kind='task.result' AND level=CASE WHEN source='任务取消'"
+                " THEN 'notify' ELSE 'event' END").fetchone()[0]
         finally:
             conn.close()
         checker.check(
-            "trigger has exactly 5 task.result notify rows",
-            notify_count == 5, "count=%s" % notify_count)
+            "trigger has exactly 5 task.result rows at the expected levels",
+            terminal_count == 5, "count=%s" % terminal_count)
 
         _, tasks = worker_http("GET", BASE + "/tasks?worker=%s&limit=500"
                         % quote("积压工"), token=token)

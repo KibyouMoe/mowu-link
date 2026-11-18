@@ -302,11 +302,13 @@ check("b. no gateway drain entry exists on today's runner",
 
 state, adapter = new_state()
 state.gateway.busy = True
-feed(state, ev(121, "event", text="BUSY-EVENT"))
+feed(state, ev(121, "event", text="小栗帽 完成 t-busy：已验证", kind="task.result",
+               source="任务完成", event_id="t-busy:done",
+               payload={"task_id": "t-busy", "worker": "OguriCap", "status": "done"}))
 offset = mark()
 did = plugin._dispatch(state, plugin._get_logger(), where="poll")
 interrupt_event = adapter.handled[0] if adapter.handled else None
-check("c. busy + event -> handle_message(internal=False)",
+check("c. busy + task.result event -> handle_message(internal=False)",
       did is True and len(adapter.handled) == 1
       and interrupt_event is not None
       and interrupt_event.internal is False,
