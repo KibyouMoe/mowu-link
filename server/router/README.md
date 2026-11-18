@@ -42,19 +42,18 @@ trigger 不可用时返回 200/queued 并记 WARNING。使用相同 UUID、相�
 `peer secretary wake`、`peer concurrent retries`、`peer exact retry repairs a failed wake` 与
 `peer root delivery survives router restart` 应为 PASS，最终 TOTAL 全通过。
 
-### 任务结束、成果与验收
+### 任务生命周期
 
-注册回执的 `idle_probe=true` 表示启用收工探测。Router 默认每 60 秒检查各 Worker，连接变化、状态翻转和任务派发也会触发检查。当前连接上的新鲜心跳显示连续空闲 120 秒，且 Worker 仍有 running 任务时，Router 发出一次成果询问。断线、换连接、心跳间隔超过 90 秒或重新变忙会中断连续空闲计时。`GET /workers` 的 `watchdog` 给出连接、活动、任务、检查时间、检查次数和询问次数。
+任务有固定的执行人。正在执行的清单、等待派发的 FIFO 和归档可分别核对。
+Worker 每五秒报告完整的 `bBusy` 与 `TaskID`。回合结束后继续持有原编号。
+Router 在连续空闲满配置时间后通过 SSE 请求总结。Worker 调用原有的
+`submit_deliverable` 工具。Router 原子保存总结、清除占用和归档，并持久记录待发送的
+TaskInfo 与总结包。触发器恢复后会补送同一事件。溪流在 Router 之外验收。
 
-Router 通过 SSE 发送 `deliverable_request {request_id, task_id, template, issued_at}`。一个任务只有一个待答 UUID。首次发问后 300 秒仍无回执，标记 `deliverable_missing` 并给溪流一条 Event。断线期间保留请求；任务仍在执行态时可以晚交。每个请求的 `issued_at` 是首次发问的 Unix 秒时间戳。
-
-Worker 在原线程回答，通过 `POST /tasks/{task_id}/deliverable` 平铺提交 `request_id, worker, summary, artifacts, evidence, risks`，另可带 `summary_short`。两个摘要各限 200 个 Unicode 字符，后三项为字符串数组。超长 HTTP 400 会给出实际长度，需沿用原 UUID 重写。请求 ID 错误返回 409，Worker 归属错误返回 400。同一 UUID 首次接收时持久化成果并转 `reviewing`，向溪流推送一次；后续提交返回 `duplicate=true`。私信可带 task_id 关联补充材料。questions 继续处理互动提问。
-
-私信等 ACK 期间，Router 在第 30、60、90 秒按同一 UUID 重投；120 秒仍无确认时，从待投递队列移除，在历史保留 `abandoned` 和日志 `peer_ack_abandoned`。重启沿用原始发送时间。
-
-溪流在任务详情带验收凭据可查看超长原稿。派单 context 可带 `card_id/board_id`，任务列表和成果通知原样回传。
-
-溪流通过 `POST /tasks/{id}/verdict` 提交 `status=done|failed, reason, evidence[]`，除 Router 令牌外须提供 `X-Review-Token`（与服务令牌相邻的 `.review` 文件，仅交给验收方）。决定记入 `review_state/verdict`。30 分钟未验收提醒一次，报送成果与超时均不代替验收。
+通过 `--lifecycle-config <path>` 或 `ROUTER_LIFECYCLE_CONFIG` 指定 JSON 配置。
+默认值为 `{"idle_task_end_minutes":1,"summary_request_max_attempts":3}`。
+第一次请求计入总数。每次重试都需要重新观察到完整的连续空闲时段。
+取消确认复用同一请求通道。详见[定稿规格](../../docs/TASK-LIFECYCLE.md)。
 
 ### Worker 显示名
 
@@ -73,7 +72,7 @@ POST 发送回执回显请求中的 from/to，别名发生转换时附 sender_id
 同一 UUID 重试仍须使用原请求正文。重名显示名无法唯一解析时，调用方使用英文 ID。
 
 明确项目才 `POST /tasks`：原字段外支持 `message_id` UUID 幂等和 `execution_mode:"goal"`
-（默认且唯一模式）；任务 ID 与幂等信息在同一 SQLite 行原子保存，相同重试不再派单。
+（由 Worker 解释）；任务 ID 与幂等信息在同一 SQLite 行原子保存，相同重试不再派单。
 同一项目的补充、纠正和验收应沿原工单；普通聊天走 /messages。
 Worker 在原会话检查/建立原生目标；router 不伪造引擎目标工具成功。
 没有默认墙钟期限，只有显式 deadline_s 才建立 deadline_at，重连保留该原始时点。
@@ -118,7 +117,7 @@ server/router/README.md              本文件
 | 日志 | `~/.hermes/router.log`（5MB × 3 轮转，同时输出 stderr） |
 | 结果回流 | `http://127.0.0.1:8791/trigger`，token 读 `~/.hermes/secrets/trigger.token` |
 | 订阅转发 | 由 `--trigger-url` 推导 trigger 根地址（去掉结尾 `/trigger`） |
-| 积压上限 | 每 worker 0（`--backlog-max`，接受非负整数） |
+| 等待派发 | 每个 Worker 一个持久 FIFO |
 | SSE 心跳 | `: ping` 每 15s（`--ping-interval`） |
 
 验证：
@@ -152,16 +151,11 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.hermes.router.plist
 |---|---|---|---|
 | POST | `/register` | `{name, version?, note?}` | `{ok, name, queued, online, new}` |
 | GET | `/stream?name=&version=` | SSE 长连接 | 见第四节 |
-| POST | `/heartbeat` | `{name, state?, progress_at?, task_id?, turn_views?}` | `{ok, name, online, busy, queued, last_seen}` |
-| POST | `/tasks/{id}/deliverable` | `{request_id,worker,summary,summary_short?,artifacts,evidence,risks}` | 200 reviewing 或 duplicate，400 字段错误，409 请求不匹配 |
+| POST | `/heartbeat` | `{name,bBusy,TaskID,seq,stream}` | `{ok,name,online,busy}` |
+| POST | `/tasks/{id}/deliverable` | `{request_id,worker,summary,summary_short?,artifacts,evidence,risks}` | 200 archived 或 duplicate，400 字段错误，409 请求不匹配 |
 | POST | `/result` | `{name, task_id, status, summary, summary_short?, artifacts?, evidence?, outcome?, error_code?}` | 旧接口；返回 409 及专用报送路径 |
-| POST | `/result/responses` | `{request_id, worker, status, body}` | 旧在途观察器请求的兼容回执 |
 | POST | `/notice` | `{worker, text, kind?, urgency?, task_id?, status?}` | `{ok, trigger_id, level, duplicate}` 或 `{ok:false, error}` |
 | GET | `/subscriptions/pending?worker=&limit=` | — | `{ok, worker, count, events[], acked}` |
-
-- 验收接口 `/tasks/{id}/verdict` 的 status 接受 `done` 或 `failed`。重复提交已接收的成果返回 `duplicate:true`。
-- 任务的运行、暂停、取消仍由执行协议管理。成果回执和验收分别走 `/deliverable` 与 `/verdict`，详情见“任务结束、成果与验收”。
-- 已持久化的历史成果流程可继续使用原格式完成报送。
 
 ### `POST /notice`：worker 往 Hermes 递话
 
@@ -187,38 +181,8 @@ event_id = "notice:" + sha256(worker + "\n" + text + "\n" + 当前分钟)[:24]
 失败（trigger 挂了/没 token）：`200 {ok:false, error:"trigger_unavailable", detail}`，
 **不抛 5xx 给 worker**，消息由 worker 自行决定是否重试。
 
-#### 任务终态通知
+旧 `task.result` 通知返回 409；任务总结仅通过成果工具发送一次。
 
-worker 交活时携带 `kind="task.result"`、`task_id` 和 `status`。
-
-```json
-{"worker":"OguriCap","kind":"task.result","task_id":"t-example","status":"done","text":"已完成并验证"}
-```
-
-| 归一化终态 | trigger source | level |
-|---|---|---|
-| `done` | `任务完成` | `event` |
-| `failed` | `任务失败` | `event` |
-| `cancelled` | `任务取消` | `notify` |
-
-终态级别与 `urgency` 无关。`event` 沿用 trigger 的打断路径；
-重试回执记录首次实际投递级别。
-
-状态去除首尾空白并转小写，`canceled` 归一为 `cancelled`。
-省略 `status` 时采用该工单的已存终态，运行中的工单默认提交 done 候选。
-完成通知要求真实 `task_id` 与归属 worker；运行中的 done/failed 进入同一收口闸门。
-显式非终态通知继续按普通通知处理。cancelled 候选等待原取消确认。
-
-`POST /notice` 与内部 `notify_result()` 共用 SQLite `task_notice_dedup`，
-键为 `(task_id, 归一化终态)`，trigger `event_id` 固定为 `<task_id>:<终态>`。
-首个被 trigger 接受的通知保留原文及级别，后续重复返回原 `trigger_id` 与
-`duplicate:true`，记录 `notice dedup task=… state=…`。
-同一工单的不同终态分别投递。任务终态键与文本内容无关。
-
-回执仅在 trigger 接受后写入，trigger 不可用时返回 `ok:false` 并允许重试。
-稳定 `event_id` 也让 trigger 已接受、响应丢失的重试命中原事件。
-Router 重启保留去重记录，每次读写清理满 24 小时的记录，并在写入后只保留
-最近 500 条。普通通知沿用上述分钟去重，私聊沿用 `source="私聊"`。
 
 ### Hermes 侧
 
@@ -226,29 +190,20 @@ Router 重启保留去重记录，每次读写清理满 24 小时的记录，并
 |---|---|---|
 | GET | `/workers` | `{ok, count, workers:[{name, online, busy, queued, last_seen, last_progress_at, last_progress_at_iso, version, state, task_id, ...}]}` |
 | POST | `/tasks` | `{worker, goal, context?, workspace?, urgency?, deadline_s?, queue_if_offline?}` |
-| POST | `/tasks/{id}/cancel` | 取消排队、运行或暂停中的任务 |
-| GET | `/tasks/{id}` | `{ok, task_id, state, task}` |
-| GET | `/tasks?worker=&state=&limit=` | 默认 100，最大 500 |
-| GET | `/health` | `{ok, version, workers, tasks, tasks_by_state, online, subscriptions, ...}` |
+| POST | `/tasks/{id}/cancel` | 撤回队列中的单，或向在办单的执行人请求取消 |
+| GET | `/tasks/{id}` | `{ok, task_id, task}` |
+| GET | `/tasks?worker=&active=&limit=` | 默认 100，最大 500 |
+| GET | `/health` | `{ok, version, workers, tasks, active_tasks, online, subscriptions, ...}` |
 
 `last_progress_at` 来自最近一次 `POST /heartbeat` 的 `progress_at`（epoch 秒），
 看门狗用它判断 worker 是否卡死；`last_seen` 是任意请求/心跳的到达时间，
 两者语义不同，不要混用。
 
-### 两层状态协议 v2
+### WorkerStatus v2
 
-- `/register` 回 `state_layers: 2`。支持的 Worker 用 `/stream?state_layers=2` 接收
-  `X-Router-Generation`，在心跳同时上报 `connection_generation` 和 `turn_views`。
-  Router 拒绝旧连接，对同一连接保留最新采样序号。投递与结算由任务层决定。
-- 新派单带 `execution_epoch`。断开后保留该工单，重连用 `task_recovery` 请求核查原回合。
-  切换到 v2 时，已投递但仍排在队首的旧工单也先核查。首次派发仍用 `task`。
-- Worker 调用 `POST /tasks/{id}/execution`，传 `name`、`connection_generation`、
-  `expected_epoch` 和 `state`。暂停附 `pause_reason`，可取
-  `session_unavailable`、`goal_conflict`、`resume_unconfirmed`、`recovery_expired`。
-  确认恢复后用 `running`、新 `execution_epoch` 和 `evidence`（线程、回合、投递 ID）。
-  重复回执幂等，旧代际、已取消或终态拒绝变更。新派单遇到暂停返回 409 和原因。
-- `finished_execution_epoch` 心跳仅记录活动。收工探测使用连续空闲时长。
-  旧 Worker 的结果仍可保存为候选；升级后经同任务恢复及原生核对可继续处理。
+注册返回 `task_lifecycle_v2=true`。流响应的 `X-Router-Generation` 标识当前连接。
+每条心跳携带完整状态、连接标识和递增序号。Router 在序号断档时主动索取整段采样，
+拒收过期连接的数据。同一段 `bBusy=true, TaskID=0` 只发一条异常通知。
 
 ### 订阅
 
@@ -326,7 +281,7 @@ worker 在执行命令/改文件前需要人类点头，但子进程的 JSON-RPC
 
 ---
 
-## 三、派活与状态机
+## 三、派活与取消
 
 ### Worker 澄清问题
 
@@ -341,72 +296,13 @@ GET 返回完整题面、选项、`status`、`answeredBy`、`nativePanelSync`、
 重试答案沿用持久问题状态和原生消息 UUID，原生投递不明时保留待核实状态。
 此通道不创建工单，也不占工单等待位；worker 本机 `/bridge/questions/{id}` 保持兼容。
 
-默认 `--backlog-max 1`，每个 worker 同时投递一张工单。该配置控制等待容量。
+待派发任务按接受顺序保存在 SQLite。执行人手上的 TaskID 为零时投递队首，
+非零时接受后续单并排队。同一时刻只交付一个编号，等待 Worker 对前一编号的清除确认。
+忙闲用于空闲观察及异常告警。重复派单使用原 `message_id` 去重。
 
-```
-worker 不存在                          → 400 unknown_worker
-worker 在线、任务位空闲、既有队列为空    → 200 {task_id, state:"running", dispatched:true}
-已有 running 或未到期的 cancelling      → 409 {error:"worker_busy", task_id, turn_source, retry_when}
-已有 paused                             → 409 {error:"worker_paused", task_id}
-已有一张等待单                          → 409 {error:"worker_busy", task_id, turn_source, retry_when}
-worker 离线 + queue_if_offline=false    → 409 worker_offline
-worker 离线 + queue_if_offline=true     → 200 queued（仍限一个等待位）
-```
-
-`worker_busy` 的 `task_id` 优先指向运行或取消中的真实工单，其次指向最早的等待单。
-`retry_when` 保留旧值 `current_task_accepted_and_worker_idle`，实际重试条件由任务占用决定。
-拒收的创建 UUID 不占位，可原样重试。已接受工单的同 UUID、同请求重试返回原工单
-及 `duplicate:true`，包括排队、过期失败和终态；改请求内容返回 `message_id_conflict`。
-
-等待单 TTL 默认 **21600 秒（6 小时）**，服务可用 `--queue-ttl-s 21600` 调整，
-单次 `POST /tasks` 可用正数 `queue_ttl_s` 覆盖。`GET /tasks/{id}` 返回 `queue_expires_at`。
-到期且从未下发的单进入 `failed`，`result.error="queue_expired"`，释放等待位并通知结果。
-检查点包含接单、派发前与后台清扫（最多间隔 30 秒）。旧库中可确认尚未下发的行按
-`created_at + 服务 TTL` 计算；已下发或历史下发状态未知的恢复工单保留原有恢复语义。
-运行中、已下发后断线恢复的单不受排队 TTL 限制。匹配原工单的活动 router 心跳可将
-断线重排的运行单恢复为 `running`，它旁边的看守单仍只占一个等待位。
-
-各等待容量的重连均按 FIFO 每次恢复一条，前单完成后自动续推。
-显式 0 保留零等待模式：忙碌时拒收新单，离线拒收，恢复已接受的单仍受占用检查。
-
-显式设置大于 1 的容量（例如 `--backlog-max 128`）时沿用排队协议。
-
-```
-worker 离线 + queue_if_offline=false   → 409 {error:"worker_offline", worker}
-worker 离线 + queue_if_offline=true    → 202 {task_id, queued:true, queued_ahead:N}
-排队/积压已达配置容量                  → 429 {error:"backlog_full", queued, limit}
-```
-
-`queued_ahead` 是前面的等待任务数。`queue_if_offline` 缺省为 `false`，必须是 JSON 布尔。
-
-任务状态：
-
-```
-queued ──dispatch──> running ──成果回执──> reviewing ──verdict──> done / failed
-   │                    └──cancel──> cancelling ──停工确认──> cancelled
-   │                                  └──60 秒无确认──> paused (cancel_unconfirmed)
-   └──────cancel──────> cancelled
-```
-
-- 支持 busy 心跳的 Worker 用 `state` 表示回合活动，`busy` 表示实际占用（含有期限的握手），`task_id` 单独取当前执行占位。活动的成果询问也占用至答复或 300 秒期限。旧 Worker 保留原来的任务占位投影。
-  仅有 `cancelling` 时，`busy=false`，派单仍会在取消收尾期间返回真正的工单占用。
-  已接受的等待任务按 FIFO 单次推一条。
-- `POST /tasks/{id}/execution` 接受当前连接、原执行代际及暂停原因。恢复需要相同原生身份的证据与新代际。
-  旧协议重连按任务 ID 重投，支持分层状态的连接先核对在途执行。
-- 取消请求经 SSE 或已登记的回环控制地址传递。停工 ACK 携带任务 ID、当前连接代际、执行代际、
-  已停止的原生回合及剩余命令数，或能核对的未下发回执。无确认满 60 秒进入 `paused/cancel_unconfirmed`，
-  后续派单返回 HTTP 409 `worker_paused`。重新发起同任务取消可重查停工。普通恢复请求不能解除取消占位。
-- 经人工核实需要放行时，调用鉴权 `POST /tasks/{id}/cancel-release`，提交
-  `{confirm:true, execution_epoch, reason}`。终态记录 `manual_release:true`、人工说明和时间，
-  `cancel_confirmed:false` 明确保留原生确认缺失。迟到的普通结果只能收到已有终态。
-- 心跳的 `turn_source` 接受 `trainer`、`router` 或 `null`。
-  可选的 `turn_views` 按 thread ID 组织，条目为 `{phase,turnId,observedAt,seq,generation,fresh}`，
-  `phase` 可为 `thinking/outputting/idle`。写入 `workers.turn_views_json`，缺省为 SQL NULL。
-  调度和看板继续使用既有数据源，省略采样的心跳不更新该列。
-- `urgency` 只记录并透传给 worker（`urgent` / `normal`），排队仍是 FIFO；
-  `deadline_s` 落库并算出 `deadline_at`，0.3.0 仍不做超时回收。
-
----
+连接正常时 Router 发起取消问候，Worker 停工并通过工具应答后归档。离线取消直接归档。
+重注册携带旧 TaskID 时，Router 返回清除原因与取消提示。三次问候均无回应时
+归档记录保留这一事实，并通知溪流。
 
 ## 四、SSE 协议
 
@@ -424,9 +320,7 @@ X-Router-Token: ...
 
 event: task
 data: {"type":"task","task_id":"t-1a2b3c4d5e","worker":"波旁","goal":"...",
-       "context":null,"workspace":null,"urgency":"normal","state":"running",
-       "created_at":1789...,"started_at":...,"deadline_s":null,"deadline_at":null,
-       "result":null}
+       "task_info":{"TaskID":"t-1a2b3c4d5e","TaskName":"示例","TaskDesc":"...","TaskOwner":"波旁"}}
 ```
 
 - **连接本身就是在线的唯一依据**：不靠 heartbeat 判断存活。
@@ -439,30 +333,15 @@ data: {"type":"task","task_id":"t-1a2b3c4d5e","worker":"波旁","goal":"...",
 
 ---
 
-## 五、结果回流
+## 五、成果与采样接口
 
-```
-Router → Worker : SSE deliverable_request {request_id, task_id, template, issued_at}
-Worker → Router : POST /tasks/{id}/deliverable {request_id, worker, summary, artifacts, evidence, risks}
-Router → 溪流   : task.deliverable，任务进入 reviewing
-溪流 → Router   : POST /tasks/{id}/verdict {status, reason, evidence}
-Router → trigger: POST /trigger
-  {
-    "source": "任务完成",
-    "kind": "task.result",
-    "level": "event",
-    "text": "t-88 完成：…",
-    "actor": "波旁",
-    "event_id": "t-88:done",
-    "payload": {"task_id": "t-88", "worker": "波旁", "status": "done"}
-  }
-  Header: X-Trigger-Token: <~/.hermes/secrets/trigger.token>
-```
-
-Router 按终态选择上表的 trigger 来源名与级别。
-内部结果与 worker 的任务终态通知共用去重记录和 `event_id`，先到者保留。
-
----
+| 调用 | 作用 |
+|---|---|
+| SSE `deliverable_request` | 带 task_id、request_id、purpose、attempt、issued_at 与固定提示。purpose 为 summary 或 cancel |
+| POST `/tasks/{id}/deliverable` | 原线程工具确认，成功后归档。摘要 ≤200 字。重复应答幂等，迟到应答留痕 |
+| POST `/workers/{name}/request-status` | 立即通过当前连接索取状态序列 |
+| POST `/workers/{name}/status-history` | 主动索取可从本连接第 1 个采样开始分批读回整串；断序补取自确认点继续，核对连接代际与连续序号。断档会重置空闲计时 |
+| GET `/tasks?active=true` | 当前运行清单，移除 active 过滤可同时查看排队与归档 |
 
 ## 六、订阅转发：真的接上了 trigger
 
@@ -528,90 +407,15 @@ GET /subscriptions/pending?worker=波旁&limit=50
 
 ---
 
-## 七、与 `docs/ROUTER.md` 对应关系
+## 七、自测
 
-| ROUTER.md | 状态 | 实现位置 |
-|---|---|---|
-| ① workers：register / heartbeat / GET /workers | 完成 | `RouterStore` workers 段 + `_register` / `_heartbeat` / `_workers` |
-| ① 连接不落库，SSE 即在线 | 完成 | `RouterServer.conns`（内存）+ `attach` / `detach` |
-| ② tasks：派活 / 队列 / 三态 | 完成 | `_task_create` + `claim_next_queued` + `flush_backlog` |
-| ② result → 状态迁移 → notify | 完成 | `_result` + `TriggerNotifier.notify_result` |
-| ② cancel / get / list | 完成 | `_task_cancel` / `_task_get` / `_tasks_list` |
-| ③ subscriptions 表 + CRUD | 完成 | `subscriptions` 表 + handler |
-| ③ trigger 注册 / 删除 / 拉取 / ACK | 完成 | `TriggerSubscriptionBridge` + `subscription_cursors` |
-| ③ 断线删订阅、订阅不留存 | 完成 | `RouterServer.detach` → `purge_subscriptions` |
-| ④ worker SDK | 未做（本次范围外） | — |
-| §二 `queue_if_offline` 语义 | 完成 | 见第三节 |
-| §二 积压上限 | 完成 | `--backlog-max` 默认 1，离线第一张等待单 200、第二张 409；显式大容量超限 429 |
-| §五 结果回流 | 完成 | 见第五节 |
-| worker → Hermes 递话 | 0.2.0 新增 | `POST /notice` |
-| ⑨ 聊天旁听（只存不发） | 0.3.0 新增 | `chat_messages` 表 + `_chat_log` / `_chat_messages` / `_chat_summary` |
+在独立端口运行 `ROUTER_TEST_PORT=<空闲端口> python3 server/router/selftest_router.py`。
+在 `server/router` 下用 Hermes 的 Python 执行 `python -m unittest discover -p 'selftest_*.py' -v`，
+覆盖生命周期、并发回执、取消、状态序列、长私信与附件流转。
 
----
+## 八、已知边界 / 设计选择
 
-## 八、自测
-
-```bash
-/usr/bin/python3 server/router/selftest_router.py
-# 端口被占时：
-ROUTER_TEST_PORT=18790 python3 server/router/selftest_router.py
-# 真等取消期限，使用隔离 Router：
-ROUTER_TEST_REAL_CANCEL_TIMEOUT=1 python3 server/router/selftest_two_layer_state.py -v
-```
-
-自测启动临时 trigger 和 router 进程，用真实 HTTP 和真实 SSE 跑完整链路。
-历史排队主套件显式设置 `--backlog-max 128`，工单幂等套件显式设置容量 2。
-零等待套件显式设置 `--backlog-max 0`；默认一格套件用真实 HTTP/curl 验证 200/queued 与 409，覆盖 TTL 清扫、自动续推、并发和恢复。
-连接竞争检查通过 HTTP 请求与确定性故障注入，覆盖连接消失和 `push` 返回失败的分支。
-临时库/token/锁/日志都在 `tempfile.mkdtemp()` 里，不碰生产
-`~/.hermes/router.db` 和 `~/.hermes/trigger.db`。
-
-覆盖项目如下。
-
-1. token 生成（64 hex，0600）、`/health` 形状、无 token → 401、单实例 flock
-2. register → SSE 上线 → 心跳注释行 → 空闲立即派活（200 dispatched）
-3. `last_progress_at` 来自 heartbeat 的 `progress_at`
-4. 交活 → `done` → trigger 库出现 `source=任务完成 kind=task.result level=event`
-5. 断线 → offline（名字保留）→ 409 → `queue_if_offline` 202 →
-   重连按顺序补推两条积压 → 交活
-6. 已接受的积压按 FIFO 续投：第一条交活后第二条自动下发
-7. 取消排队 / 运行中任务；迟到 result 被忽略
-8. 离线积压 128 条全部 202，第 129 条 429 `backlog_full`
-9. 订阅：201 → `trigger_id` → trigger 侧 active → pending 拉到事件 →
-   第二次 pending 为空（ACK 生效）→ kinds 过滤 → DELETE 后 trigger closed
-10. `POST /notice`：normal → `level=notify`；urgent → `level=event`；
-    同分钟重复 → 同一个 `event_id`、`duplicate:true`、trigger 只有一行
-    任务终态覆盖两入口的两种顺序、并发、异文重复、不同工单及不同终态、
-    trigger 失败后重试、重建实例后的持久化去重、500 条及 24 小时边界
-11. 删除后重声明 → 新 trigger 名（`router:<worker>:<id>`）→ 新队列可投递
-12. SSE 断开 → 本地订阅清空 + trigger 订阅 closed；重连不自动重建
-13. trigger 挂掉：`POST /subscriptions` → 502 且表回滚；
-    `POST /notice` → 200 `ok:false`（不是 5xx）
-14. 最终 `/health` 计数、trigger notify 条数、`GET /tasks?limit=500` 取回 128 条
-15. 聊天旁听：写入/读回字段一致（含 `meta` 落库）→ 同
-    `(worker, message_id, direction)` 重复 `duplicate:true` 且不新增 →
-    同 `message_id` 换方向是新行 → `limit` / `since`（id 与 epoch）/
-    `direction` 过滤 → `summary` 60/180 分钟 in/out 计数与 `last`
-16. 零等待位及正容量均按实存工单占用拒绝并发派单，返回 `worker_busy` 和原工单 ID。
-    trainer 活动回合继续可读，对话活动不占任务位。
-17. 拒收 UUID 在空闲后重试成功，已接受 UUID 在忙碌、取消中、终态和离线时精确幂等
-18. 八个不同 UUID 并发只有一个派发赢家，其余 UUID 可重试；拒收后的数据库校验
-19. `queue_if_offline=true` 在零容量离线时返回 409，已接受的旧排队任务可重连恢复
-20. 确定性模拟 `push` 失败与连接消失，清理未接受任务并释放 UUID，随后重试成功
-21. 默认一格、显式 `--backlog-max 0`、负容量拒绝和构造器默认值
-22. 旧单恢复推送失败且连接在线、worker 空闲时，八个并发新请求均拒收，
-    返回最早旧单 ID 与 `retry_when`；旧单精确重试、FIFO 恢复及拒收 UUID 后续重试
-
-macOS 原生执行上述 HTTP/SSE、数据库、权限、单实例锁与进程生命周期检查。
-连接竞争和缓存 `busy=false` 的检查属于故障分支模拟。
-Windows 原生执行待验，当前 router 的 `fcntl` 单实例锁依赖 POSIX；
-Windows 路径、大小写、文件权限、IPC 与进程生命周期需在可运行的原生环境验收。
-
----
-
-## 九、已知边界 / 设计选择
-
-- **at-least-once**：断线重连会把 `running` 任务重发，worker 必须按 `task_id` 幂等；
+- **at-least-once**：断线重连可重放正在执行的任务，worker 必须按 `task_id` 幂等；
   pending 的 ACK 失败也会重复投递。
 - **一个名字一条流**：新连接替换旧连接；不做多设备同名的负载均衡。
 - **没有 per-worker 鉴权**：0.3.0 只有一把共享 `router.token`（`ROUTER.md` §八

@@ -247,7 +247,7 @@ def run_once(config, now=None):
         for task in tasks:
             tid, worker = task["task_id"], task["worker"]
             previous = state["tasks"].get(tid, {})
-            if task.get("state") not in ("running", "dispatched") and not previous.get("alert_at"):
+            if not task.get("in_running_tasks") and not previous.get("alert_at"):
                 continue
             saved = state["tasks"].setdefault(tid, {})
             if worker not in peer_cache:
@@ -292,10 +292,10 @@ def run_once(config, now=None):
             decision = "active" if idle < threshold else "alert"
             if saved.get("alerted"):
                 decision = "dedup"
-            elif task.get("state") not in ("running", "dispatched") or not birth:
+            elif not task.get("in_running_tasks") or not birth:
                 decision = "terminal"
             if decision == "alert":
-                text = "看门狗：任务 %s 已 %d 分钟无进展（state=%s，worker=%s）" % (tid, idle // 60, task["state"], worker)
+                text = "看门狗：任务 %s 已 %d 分钟无进展（worker=%s）" % (tid, idle // 60, worker)
                 try:
                     response = request("POST", config["trigger_url"], config["trigger_token_file"], {
                         "source": "hermes_watchdog", "kind": "watchdog", "level": "notify",
@@ -310,7 +310,7 @@ def run_once(config, now=None):
             LOG.info("watchdog judge task=%s silent=%ds signals=notice:%d,peer:%d,fs:%d,head:%d,progress:%d idle=%ds threshold=%ds decision=%s",
                      tid, report["silent"], counts["notice"], counts["peer"], counts["fs"], counts["head"], counts["progress"], idle, threshold, decision)
             reports.append(report)
-        live = {task["task_id"] for task in tasks if task.get("state") in ("running", "dispatched")}
+        live = {task["task_id"] for task in tasks if task.get("in_running_tasks")}
         state["tasks"] = {tid: value for tid, value in state["tasks"].items() if tid in live or value.get("alerted")}
         save_state(path, state)
         return reports

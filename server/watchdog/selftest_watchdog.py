@@ -25,7 +25,7 @@ class WatchdogTest(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
         self.now = datetime(2026, 11, 16, 12, 0).timestamp()
-        self.tasks = [{"task_id": "t-files", "worker": "worker", "state": "running",
+        self.tasks = [{"task_id": "t-files", "worker": "worker", "in_running_tasks": True,
                        "created_at": self.now - 1000, "started_at": self.now - 1000}]
         self.workers = [{"name": "worker", "task_id": "t-files", "last_progress_at": None}]
         self.peers = []
@@ -198,7 +198,7 @@ class WatchdogTest(unittest.TestCase):
         self.assertEqual(self.run_watchdog()[0]["decision"], "alert")
 
     def test_each_task_uses_its_own_creation_timestamp(self):
-        self.tasks.append({"task_id": "t-missing-time", "worker": "worker", "state": "running"})
+        self.tasks.append({"task_id": "t-missing-time", "worker": "worker", "in_running_tasks": True})
         reports = self.run_watchdog()
         self.assertEqual(reports[0]["decision"], "alert")
         self.assertEqual(reports[1]["decision"], "terminal")
@@ -239,7 +239,7 @@ class WatchdogTest(unittest.TestCase):
         self.assertEqual(self.run_watchdog()[0]["decision"], "dedup")
         self.tasks = []
         self.run_watchdog(1)
-        self.tasks = [{"task_id": "t-files", "worker": "worker", "state": "running", "created_at": self.now - 2000}]
+        self.tasks = [{"task_id": "t-files", "worker": "worker", "in_running_tasks": True, "created_at": self.now - 2000}]
         self.assertEqual(self.run_watchdog(2)[0]["decision"], "dedup")
         self.assertFalse(self.sent)
 
