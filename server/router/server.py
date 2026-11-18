@@ -538,6 +538,13 @@ class RouterStore:
                 log.info("store migration: added tasks.%s", column)
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_task_workflow_due ON tasks(workflow_due) WHERE workflow_due IS NOT NULL")
         peer_columns = {r["name"] for r in self._conn.execute("PRAGMA table_info(peer_messages)")}
+        for column, decl in (("ack_retries", "INTEGER NOT NULL DEFAULT 0"), ("abandoned_at", "REAL")):
+            if column not in peer_columns:
+                self._conn.execute(f"ALTER TABLE peer_messages ADD COLUMN {column} {decl}")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_pending_peer_age ON peer_messages(created_at) "
+                           "WHERE acked_at IS NULL AND abandoned_at IS NULL")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_pending_peer_sender ON peer_messages(sender,created_at) "
+                           "WHERE acked_at IS NULL AND abandoned_at IS NULL")
         if "task_id" not in peer_columns:
             self._conn.execute("ALTER TABLE peer_messages ADD COLUMN task_id TEXT")
         if "wake_parts" not in peer_columns:
@@ -553,7 +560,7 @@ class RouterStore:
         for column, decl in (("state", "TEXT"), ("progress_at", "REAL"),
                              ("task_id", "TEXT"), ("control_url", "TEXT"),
                              ("turn_source", "TEXT"), ("control_sse", "INTEGER DEFAULT 0"),
-                             ("turn_views_json", "TEXT DEFAULT NULL"), ("watchdog_json", "TEXT")):
+                             ("turn_views_json", "TEXT DEFAULT NULL"), ("watchdog_json", "TEXT"), ("reported_busy", "INTEGER")):
             if column not in wcols:
                 self._conn.execute(
                     "ALTER TABLE workers ADD COLUMN %s %s" % (column, decl))
@@ -572,7 +579,7 @@ class RouterStore:
         """Fresh process: nobody is online; in-flight tasks go back to queue."""
         with self._lock:
             self._conn.execute(
-                "UPDATE workers SET online=0, busy=0, queued=0")
+                "UPDATE workers SET online=0, busy=0, queued=0, reported_busy=NULL")
             cur = self._conn.execute(
                 "UPDATE tasks SET state='queued', started_at=NULL"
                 " WHERE state='running' AND (execution_epoch IS NULL OR legacy_dispatch=1)"
@@ -585,12 +592,21 @@ class RouterStore:
         return changed
 
     # -- workers -------------------------------------------------------- #
-    @staticmethod
-    def _worker_dict(row: sqlite3.Row) -> Dict[str, Any]:
+    def _worker_dict(self, row: sqlite3.Row) -> Dict[str, Any]:
+        # Older workers do not publish their own occupancy. Preserve their legacy projection.
+        reported = row["reported_busy"]
+        task_id = row["task_id"]
+        busy = bool(row["busy"])
+        if reported is not None:
+            busy = bool(reported) or self.pending_peer_ack(row["name"])
+            task = self.blocking_task(row["name"])
+            task_id = task["task_id"] if task else None
+            if task and task["deliverable_state"] == "probe_pending":
+                busy = True
         return {
             "name": row["name"],
             "online": bool(row["online"]),
-            "busy": bool(row["busy"]),
+            "busy": busy,
             "queued": int(row["queued"] or 0),
             "last_seen": row["last_seen"],
             "last_seen_iso": now_iso(row["last_seen"]) if row["last_seen"] else None,
@@ -602,7 +618,7 @@ class RouterStore:
             "last_progress_at": row["progress_at"],
             "last_progress_at_iso": (now_iso(row["progress_at"])
                                      if row["progress_at"] else None),
-            "task_id": row["task_id"],
+            "task_id": task_id,
             "turn_source": row["turn_source"],
             "watchdog": json.loads(row["watchdog_json"] or "null"),
             "control_url": row["control_url"],
@@ -660,7 +676,7 @@ class RouterStore:
         now = time.time()
         with self._lock:
             self._conn.execute(
-                "UPDATE workers SET online=1, last_seen=?, connected_at=?,"
+                "UPDATE workers SET online=1, reported_busy=NULL, last_seen=?, connected_at=?,"
                 " version=COALESCE(?, version) WHERE name=?",
                 (now, now, version, name))
         log.info("worker online name=%s version=%s", name, version or "-")
@@ -668,7 +684,7 @@ class RouterStore:
     def set_offline(self, name: str) -> None:
         with self._lock:
             self._conn.execute(
-                "UPDATE workers SET online=0, last_seen=? WHERE name=?",
+                "UPDATE workers SET online=0, reported_busy=NULL, last_seen=? WHERE name=?",
                 (time.time(), name))
         log.info("worker offline name=%s (name and backlog kept)", name)
 
@@ -740,9 +756,19 @@ class RouterStore:
                 " WHERE worker=? AND state='queued'", (name,)).fetchone()["c"])
 
     # -- durable peer chat ---------------------------------------------- #
+    def pending_peer_ack(self, sender: str) -> bool:
+        # A worker restart can erase its local timer while the same message still awaits ACK.
+        with self._lock:
+            return self._conn.execute(
+                "SELECT 1 FROM peer_messages WHERE sender=? AND acked_at IS NULL "
+                "AND abandoned_at IS NULL AND created_at>? LIMIT 1", (sender, time.time() - 120)
+            ).fetchone() is not None
+
     def _peer_dict(self, row: sqlite3.Row) -> Dict[str, Any]:
         status = "queued" if row["acked_at"] is None else (
             "delivered" if peer_identity(row["recipient"]) == ROOT_PEER_NAME else "accepted")
+        if row["abandoned_at"] is not None:
+            status = "abandoned"
         text = row["text"]
         if not text:
             with self._lock:
@@ -754,7 +780,7 @@ class RouterStore:
                 "from": row["sender"], "to": row["recipient"],
                 "text": text, "reply_to": row["reply_to"],
                 "attachments": json.loads(row["attachments_json"]),
-                "status": status,
+                "status": status, "ack_attempt": row["ack_retries"], "ack_expires_at":row["created_at"] + 120,
                 "created_at": row["created_at"], "acked_at": row["acked_at"]}
 
     def get_peer_message(self, message_id: str) -> Optional[Dict[str, Any]]:
@@ -810,7 +836,7 @@ class RouterStore:
                          " ORDER BY seq DESC LIMIT ?")
                 params = (worker, worker, cursor, limit + 1)
             else:
-                query = (" WHERE recipient=? AND acked_at IS NULL AND seq>?"
+                query = (" WHERE recipient=? AND acked_at IS NULL AND abandoned_at IS NULL AND seq>?"
                          " ORDER BY seq LIMIT ?")
                 params = (worker, cursor, limit + 1)
             if peer_identity(worker) == ROOT_PEER_NAME:
@@ -820,11 +846,11 @@ class RouterStore:
                              " ORDER BY seq DESC LIMIT ?")
                 else:
                     query = (" WHERE lower(recipient) IN ('hermes', '溪流')"
-                             " AND acked_at IS NULL AND seq>? ORDER BY seq LIMIT ?")
+                             " AND acked_at IS NULL AND abandoned_at IS NULL AND seq>? ORDER BY seq LIMIT ?")
                 params = (cursor, limit + 1)
             rows = self._conn.execute(
                 "SELECT seq, message_id, sender, recipient, text, reply_to,"
-                " attachments_json, created_at, acked_at, task_id FROM peer_messages" + query,
+                " attachments_json, created_at, acked_at, abandoned_at, ack_retries, task_id FROM peer_messages" + query,
                 params)
             try:
                 for row in rows:
@@ -844,7 +870,7 @@ class RouterStore:
         with self._lock:
             self._conn.execute(
                 "UPDATE peer_messages SET acked_at=?"
-                " WHERE message_id=? AND acked_at IS NULL",
+                " WHERE message_id=? AND acked_at IS NULL AND abandoned_at IS NULL",
                 (time.time(), message_id))
             return self.get_peer_message(message_id)
 
@@ -1849,6 +1875,7 @@ class Connection:
         self.generation = uuid.uuid4().hex
         self.state_layers = state_layers
         self.native_settlement = False
+        self.reported_busy = None
         self.watch_state = "unknown"
         self.watch_seen = None
         self.recovering_task = None
@@ -2178,7 +2205,7 @@ class RouterServer(ThreadingHTTPServer):
                 with self.store._lock:
                     row = self.store._conn.execute(
                         "SELECT * FROM peer_messages WHERE lower(recipient) IN ('hermes','溪流')"
-                        " AND seq<=? AND acked_at IS NULL ORDER BY seq LIMIT 1", (through_seq,)).fetchone()
+                        " AND seq<=? AND acked_at IS NULL AND abandoned_at IS NULL ORDER BY seq LIMIT 1", (through_seq,)).fetchone()
                 if row is None:
                     return
                 message = self.store._peer_dict(row)
@@ -2205,7 +2232,9 @@ class RouterServer(ThreadingHTTPServer):
                         return
                     with self.store._lock:
                         self.store._conn.execute("UPDATE peer_messages SET wake_parts=? WHERE seq=?", (i + 1, row["seq"]))
-                self.store.ack_peer_message(message["message_id"])
+                receipt = self.store.ack_peer_message(message["message_id"])
+                if receipt["status"] == "abandoned":
+                    continue
                 log.info("peer delivered id=%s seq=%s parts=%d", message["message_id"], message["seq"], total)
 
     def flush_peer_messages_locked(self, conn: Connection) -> None:
@@ -2223,13 +2252,45 @@ class RouterServer(ThreadingHTTPServer):
         messages, _ = self.store.peer_messages(
             conn.name, conn.peer_after, available)
         for message in messages:
-            if len(message["text"].encode("utf-8")) > PEER_PAGE_BYTES:
-                # The inbox owns the full message; keep individual SSE frames bounded.
-                conn.queue.put({"event": "worker_message_ref", "data": {"message_id": message["message_id"]}})
-            else:
-                conn.queue.put({"event": "worker_message", "data": message})
-            conn.peer_buffered += 1
+            self.queue_peer_frame(conn, message)
             conn.peer_after = message["seq"]
+
+    @staticmethod
+    def queue_peer_frame(conn, message):
+        if len(message["text"].encode("utf-8")) > PEER_PAGE_BYTES:
+            conn.queue.put({"event": "worker_message_ref", "data": {"message_id": message["message_id"]}})
+        else:
+            conn.queue.put({"event": "worker_message", "data": message})
+        conn.peer_buffered += 1
+
+    def sweep_peer_acks(self, now):
+        """The durable row owns retries; SSE reconnects keep the same message UUID and deadline."""
+        root_seq = None
+        with self.dispatch_lock, self.store._lock:
+            db = self.store._conn
+            rows = db.execute("SELECT message_id,recipient,seq,created_at,ack_retries FROM peer_messages "
+                              "WHERE acked_at IS NULL AND abandoned_at IS NULL "
+                              "AND created_at+30*(1+ack_retries)<=? ORDER BY seq", (now,)).fetchall()
+            for row in rows:
+                mid = row["message_id"]
+                if now >= row["created_at"] + 120:
+                    db.execute("UPDATE peer_messages SET abandoned_at=? WHERE message_id=?", (now, mid))
+                    log.warning("peer_ack_abandoned id=%s retries=%s", mid, row["ack_retries"])
+                    continue
+                attempt = min(3, int((now-row["created_at"])/30))
+                db.execute("UPDATE peer_messages SET ack_retries=? WHERE message_id=?", (attempt, mid))
+                if peer_identity(row["recipient"]) == ROOT_PEER_NAME:
+                    root_seq = row["seq"]
+                else:
+                    conn = self.current_conn(row["recipient"])
+                    if conn and not conn.closed and conn.peer_buffered < PEER_STREAM_BUFFER:
+                        self.queue_peer_frame(conn, self.store.get_peer_message(mid))
+                log.info("peer_ack_retry id=%s attempt=%d", mid, attempt)
+            due = db.execute("SELECT MIN(created_at+30*(ack_retries+1)) FROM peer_messages "
+                             "WHERE acked_at IS NULL AND abandoned_at IS NULL").fetchone()[0]
+        if root_seq is not None:
+            self.deliver_root_peers(root_seq)
+        return due
 
     def push(self, conn: Connection, task: Dict[str, Any]) -> bool:
         # The SSE writer and GET /tasks see the same dispatch. A closed stream
@@ -2250,12 +2311,15 @@ class RouterServer(ThreadingHTTPServer):
             self.watchdog.check(conn.name, reset=True)
             return True
 
+    def worker_occupied(self, conn: Connection) -> bool:
+        return conn.reported_busy is not None and (conn.reported_busy or self.store.pending_peer_ack(conn.name))
+
     def dispatch_one(self, worker: str) -> Optional[Dict[str, Any]]:
         """Push the next queued task when the worker has nothing running."""
         with self.dispatch_lock:
             self.expire_queued_tasks()
             conn = self.current_conn(worker)
-            if conn is None or conn.closed:
+            if conn is None or conn.closed or self.worker_occupied(conn):
                 return None
             if self.store.blocking_task(worker) is not None:
                 return None
@@ -2324,6 +2388,14 @@ class ApprovalSweeper(threading.Thread):
             try:
                 if self.server is not None:
                     deadline = self.server.sweep_cancellations()
+                    self.server.reviews.sweep()
+                    with self.store._lock:
+                        review_due = self.store._conn.execute("SELECT MIN(workflow_due) FROM tasks").fetchone()[0]
+                    if review_due is not None:
+                        deadline = review_due if deadline is None else min(review_due, deadline)
+                    peer_due = self.server.sweep_peer_acks(time.time())
+                    if peer_due is not None:
+                        deadline = peer_due if deadline is None else min(peer_due, deadline)
                     if time.monotonic() >= next_probe:
                         next_probe = time.monotonic() + PROBE_INTERVAL
                         self.server.watchdog.sweep()
@@ -2332,7 +2404,6 @@ class ApprovalSweeper(threading.Thread):
                     self.store.expire_approvals()
                     if self.server is not None:
                         self.server.expire_queued_tasks()
-                        self.server.reviews.sweep()
             except Exception:  # noqa: BLE001
                 log.exception("approval/task sweep failed")
             delay = max(0.0, next_periodic - time.monotonic())
@@ -2800,7 +2871,7 @@ class RouterHandler(BaseHTTPRequestHandler):
         # Network I/O follows the committed insert, outside the dispatch lock.
         # Exact retries repair a failed wake using the same durable event ID.
         root_recipient = peer_identity(message["to"]) == ROOT_PEER_NAME
-        if root_recipient and message["acked_at"] is None:
+        if root_recipient and message["status"] == "queued":
             self.server.deliver_root_peers(message["seq"])
             message = self.server.store.get_peer_message(message["message_id"])
         # Existing Worker senders accept queued/accepted transport receipts.
@@ -2813,7 +2884,8 @@ class RouterHandler(BaseHTTPRequestHandler):
         transport_status = message["status"]
         if root_recipient:
             status = 200
-            transport_status = "accepted" if message["acked_at"] is not None else "queued"
+            if message["status"] == "delivered":
+                transport_status = "accepted"
         return status, self._peer_receipt(response_message, duplicate=receipt["duplicate"],
                                           status=transport_status)
 
@@ -2885,6 +2957,7 @@ class RouterHandler(BaseHTTPRequestHandler):
                         raise BadRequest("attachments must reference existing uploaded images")
             message = self.server.store.add_peer_message(
                 message_id, sender, recipient, text, reply_to, attachments, fingerprint, task_id)
+            self.server.cancellations_changed.set()
             conn = self.server.current_conn(recipient)
             if conn is not None:
                 self.server.flush_peer_messages_locked(conn)
@@ -2904,6 +2977,8 @@ class RouterHandler(BaseHTTPRequestHandler):
                 return 404, {"ok": False, "error": "unknown_message"}
             if peer_identity(worker) != peer_identity(message["to"]):
                 return 403, {"ok": False, "error": "wrong_recipient"}
+            if message["status"] == "abandoned":
+                return 409, {"error":"peer_ack_timeout", "status":"abandoned"}
             already = message["status"] in ("accepted", "delivered")
             message = self.server.store.ack_peer_message(message_id)
         log.info("peer accepted id=%s already=%s from=%r to=%r seq=%s",
@@ -3071,7 +3146,13 @@ class RouterHandler(BaseHTTPRequestHandler):
                 if (state is not None or "busy" in body) and (not views or turn_views is not None):
                     busy = body.get("busy") is True or any(v["phase"] != "idle" for v in views.values() if v["fresh"])
                     idle = state == "idle" or state is None and body.get("busy") is False
-                    self.server.watchdog.observe(conn, "idle" if idle and not busy else "busy")
+                    # A state-only heartbeat after a busy sample is a fresh legacy observation.
+                    if "busy" in body or conn.reported_busy is not None and state is not None:
+                        conn.reported_busy = bool(busy or not idle)
+                        with self.server.store._lock:
+                            self.server.store._conn.execute("UPDATE workers SET reported_busy=? WHERE name=?",
+                                                            (int(conn.reported_busy), name))
+                    self.server.watchdog.observe(conn, "idle" if idle and not busy and not self.server.worker_occupied(conn) else "busy")
             dispatched = self.server.dispatch_one(name)
         for task in self.server.store.list_tasks(worker=name, state="cancelling", limit=1):
             self.server.cancel_execution(task)
@@ -3196,6 +3277,10 @@ class RouterHandler(BaseHTTPRequestHandler):
                     "message": "wait for the outstanding task to finish, then retry",
                 }
 
+            conn = self.server.current_conn(worker_name)
+            if conn and self.server.worker_occupied(conn):
+                return 409, {"ok": False, "error":"worker_busy", "busy":True, "worker":worker_name,
+                             "task_id":worker["task_id"], "retry_when":"worker_idle"}
             online = self.server.online(worker_name)
             if online and queued == 0:
                 task = store.create_task(

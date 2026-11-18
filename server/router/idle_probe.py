@@ -70,27 +70,30 @@ class IdleProbe:
             self.check(worker["name"])
 
     def advance(self, task, flow, now):
-        """One logical request, two transport attempts; a missing ACK has its own event."""
+        """One logical request and one deadline, measured from its first issue."""
         conn = self.server.current_conn(task["worker"])
         idle = (conn and not conn.closed and conn.watch_state == "idle" and conn.watch_seen is not None
                 and now - conn.watch_seen <= SAMPLE_TTL)
-        if task["state"] in ("paused", "cancelling"):
+        if not flow["attempts"] and task["state"] in ("paused", "cancelling"):
             # A paused task may resume with the same outstanding request.
             flow["delivery_due"] = now + INTERVAL
             return
-        if task["state"] not in ("running", "queued"):
+        if task["state"] not in ("running", "queued", "paused", "cancelling"):
             flow.update(delivery_due=None, delivery_state="probe_closed")
             return
+        if flow["attempts"]:
+            # Older persisted requests carried two response windows.
+            flow["expires_at"] = min(flow["expires_at"], flow["issued_at"] + self.retry_seconds)
         if flow["attempts"] and now >= flow["expires_at"]:
             flow.update(delivery_due=None, delivery_state="deliverable_missing")
             flow["pending_notices"]["deliverable_missing"] = now
-        elif idle and task["state"] == "running" and flow["attempts"] < 2:
+        elif idle and task["state"] == "running" and not flow["attempts"]:
             attempt = flow["attempts"] + 1
             flow.setdefault("issued_at", now)
-            remaining_intervals = 2 if attempt == 1 else 1
-            flow["expires_at"] = now + remaining_intervals * self.retry_seconds
+            flow["expires_at"] = now + self.retry_seconds
             flow.update(attempts=attempt, delivery_due=now + self.retry_seconds)
             self.server.reviews.save(task["task_id"], flow)
+            self.server.cancellations_changed.set()
             conn.queue.put({"event": "deliverable_request", "data": {
                 "request_id": flow["request_id"], "task_id": task["task_id"],
                 "template": PROMPT.format(task_id=task["task_id"]), "issued_at": flow["issued_at"]}})

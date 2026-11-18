@@ -46,9 +46,11 @@ trigger 不可用时返回 200/queued 并记 WARNING。使用相同 UUID、相�
 
 注册回执的 `idle_probe=true` 表示启用收工探测。Router 默认每 60 秒检查各 Worker，连接变化、状态翻转和任务派发也会触发检查。当前连接上的新鲜心跳显示连续空闲 120 秒，且 Worker 仍有 running 任务时，Router 发出一次成果询问。断线、换连接、心跳间隔超过 90 秒或重新变忙会中断连续空闲计时。`GET /workers` 的 `watchdog` 给出连接、活动、任务、检查时间、检查次数和询问次数。
 
-Router 通过 SSE 发送 `deliverable_request {request_id, task_id, template, issued_at}`。一个任务只有一个待答 UUID。5 分钟无应答且仍可接收时重发同一请求；再过 5 分钟仍无回执，标记 `deliverable_missing` 并给溪流一条 Event。断线期间保留请求；任务仍在执行态时可以晚交。每次新请求的 `issued_at` 是首次发问的 Unix 秒时间戳。
+Router 通过 SSE 发送 `deliverable_request {request_id, task_id, template, issued_at}`。一个任务只有一个待答 UUID。首次发问后 300 秒仍无回执，标记 `deliverable_missing` 并给溪流一条 Event。断线期间保留请求；任务仍在执行态时可以晚交。每个请求的 `issued_at` 是首次发问的 Unix 秒时间戳。
 
 Worker 在原线程回答，通过 `POST /tasks/{task_id}/deliverable` 平铺提交 `request_id, worker, summary, artifacts, evidence, risks`，另可带 `summary_short`。两个摘要各限 200 个 Unicode 字符，后三项为字符串数组。超长 HTTP 400 会给出实际长度，需沿用原 UUID 重写。请求 ID 错误返回 409，Worker 归属错误返回 400。同一 UUID 首次接收时持久化成果并转 `reviewing`，向溪流推送一次；后续提交返回 `duplicate=true`。私信可带 task_id 关联补充材料。questions 继续处理互动提问。
+
+私信等 ACK 期间，Router 在第 30、60、90 秒按同一 UUID 重投；120 秒仍无确认时，从待投递队列移除，在历史保留 `abandoned` 和日志 `peer_ack_abandoned`。重启沿用原始发送时间。
 
 溪流在任务详情带验收凭据可查看超长原稿。派单 context 可带 `card_id/board_id`，任务列表和成果通知原样回传。
 
@@ -386,7 +388,7 @@ queued ──dispatch──> running ──成果回执──> reviewing ──v
    └──────cancel──────> cancelled
 ```
 
-- `workers.busy` 只投影 `queued/running/paused`。原生对话活动由既有 `state/turn_source` 表达。
+- 支持 busy 心跳的 Worker 用 `state` 表示回合活动，`busy` 表示实际占用（含有期限的握手），`task_id` 单独取当前执行占位。活动的成果询问也占用至答复或 300 秒期限。旧 Worker 保留原来的任务占位投影。
   仅有 `cancelling` 时，`busy=false`，派单仍会在取消收尾期间返回真正的工单占用。
   已接受的等待任务按 FIFO 单次推一条。
 - `POST /tasks/{id}/execution` 接受当前连接、原执行代际及暂停原因。恢复需要相同原生身份的证据与新代际。

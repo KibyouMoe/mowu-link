@@ -109,22 +109,22 @@ class ProbeTests(unittest.TestCase):
         self.assertEqual([e["kind"] for e in self.events],["task.deliverable","task.result"])
         print("②⑰ POST /tasks/{id}/deliverable HTTP 200; summary=跑完三项检查; state=reviewing; verdict -> done")
 
-    def test_03_retry_once_then_one_event(self):
-        q = self.first()
-        self.advance(299)
-        self.assertTrue(self.conn.queue.empty())
-        self.advance(1)
-        retry = self.take()
-        self.assertEqual((retry["request_id"],retry["issued_at"],retry["template"]),(q["request_id"],q["issued_at"],q["template"]))
+    def test_03_missing_at_300s_releases_probe_occupancy(self):
+        self.beat(busy=False)
+        self.advance(120)
+        q = self.take()
+        self.assertTrue(self.store.get_worker("test-worker")["busy"])
         self.advance(299)
         self.assertEqual(self.events,[])
         self.advance(1)
+        self.assertEqual(self.saved()["deliverable_state"],"deliverable_missing")
+        self.assertFalse(self.store.get_worker("test-worker")["busy"])
+        self.assertEqual(self.store.get_worker("test-worker")["task_id"], self.task)
         self.advance(300)
         self.assertTrue(self.conn.queue.empty())
-        self.assertEqual(self.saved()["deliverable_state"],"deliverable_missing")
         self.assertEqual([(e["kind"],e["level"]) for e in self.events],[("task.deliverable_missing","event")])
         self.assertEqual(self.report(q)[1]["state"],"reviewing")
-        print("③ +300s attempt=2; +600s deliverable_missing; event=1; late reply=reviewing")
+        print("探测 +299s busy=true; +300s deliverable_missing,busy=false; event=1")
 
     def test_04_concurrent_ticks_and_answers_deduplicate(self):
         self.beat()
@@ -200,15 +200,40 @@ class ProbeTests(unittest.TestCase):
         conn = restored_api.attach("test-worker")
         self.now += 300
         restored_api.watchdog.observe(conn, "idle")
-        frame = conn.queue.get_nowait()
-        self.assertEqual(frame, {"event":"deliverable_request", "data":original})
+        self.assertTrue(conn.queue.empty())
+        self.assertEqual(restored.get_task(self.task)["deliverable_state"], "deliverable_missing")
         body = {"worker":"test-worker", "request_id":original["request_id"], "summary":"首次提交",
                 "artifacts":[], "evidence":["回读"], "risks":[]}
         self.assertEqual(restored_api.reviews.receive(self.task,body)[1]["state"], "reviewing")
         _, duplicate = self.api.reviews.receive(self.task, {**body, "summary":"重连后的另一份"})
         self.assertTrue(duplicate["duplicate"])
         self.assertEqual(restored.get_task(self.task)["deliverable"]["summary"],"首次提交")
-        self.assertEqual(len(self.events),1)
+        self.assertEqual([e["kind"] for e in self.events],["task.deliverable_missing","task.deliverable"])
+
+    def test_peer_ack_retry_budget_and_late_ack(self):
+        self.post("/register", {"name":"sender"})
+        self.api.attach("sender")
+        mid = str(uuid.uuid4())
+        _, receipt = self.post("/messages", {"from":"sender", "to":"test-worker", "message_id":mid, "text":"ack test"})
+        self.post("/heartbeat", {"name":"sender", "state":"idle", "busy":False})
+        self.assertTrue(self.store.get_worker("sender")["busy"])
+        self.assertEqual(self.post("/tasks", {"worker":"sender", "goal":"隔离验证"})[0], 409)
+        start = receipt["message"]["created_at"]
+        self.assertEqual(self.conn.queue.get_nowait()["data"]["message_id"],mid)
+        for attempt in range(1,4):
+            self.api.sweep_peer_acks(start + 30*attempt)
+            frame = self.conn.queue.get_nowait()["data"]
+            self.assertEqual((frame["message_id"],frame["ack_attempt"]), (mid,attempt))
+            self.api.sweep_peer_acks(start+30*attempt)
+            self.assertTrue(self.conn.queue.empty())
+        self.api.sweep_peer_acks(start+120)
+        self.assertEqual(self.store.get_peer_message(mid)["status"], "abandoned")
+        self.assertEqual(self.store.peer_messages("test-worker")[0],[])
+        self.assertFalse(self.store.get_worker("sender")["busy"])
+        self.assertEqual(self.post("/tasks", {"worker":"sender", "goal":"恢复派单"})[0], 200)
+        self.assertEqual(self.post("/messages/"+mid+"/ack", {"worker":"test-worker"})[0],409)
+        self.assertIsNone(self.store.ack_peer_message(mid)["acked_at"])
+        print("私信 +30/+60/+90s 各重发一次; +120s abandoned; pending=0")
 
     def test_busy_retry_is_suppressed_and_timeout_still_alerts(self):
         self.first()
