@@ -19,6 +19,11 @@ Router 生成 `TaskInfo` → 发起 Dispatch 协议把 TaskInfo 交给目标 Wor
 
 goal 模式由 worker 自己决定，Router 不管。
 
+**派单前的判断只看目标 worker 的 `TaskID`，不看忙闲**：
+
+- `TaskID == 0` → **直接派**
+- `TaskID != 0` → **排队**，等它手上的单收尾或取消后自动派发
+
 ## 正常结束
 
 触发：Router 发现该 worker `bBusy=false` 满 `idle_task_end_minutes`（默认 1，配置文件可调），
