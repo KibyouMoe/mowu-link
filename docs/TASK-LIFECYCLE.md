@@ -73,6 +73,34 @@ goal 模式由 worker 自己决定，Router 不管。
 取消的结果一律是 **TaskInfo 归档**（移出运行中数组），不是改某个状态字段。
 不存在 `cancelling` / `paused` 这类中间态。
 
+## 心跳
+
+Worker 每 **5 秒**上报一次 **完整的 `WorkerStatus`**（`bBusy` + `TaskID` 两个字段都必须带），
+不省略字段、不做增量上报。Router 侧以这份心跳为唯一观察来源，
+`TaskID` 在 worker 手上不清就一直报，直到 Router 确认收尾或取消。
+
+**`TaskID` 与回合（turn）必须解耦**：它属于任务，不属于某一次回合。
+回合结束、goal 模式重启、会话切换，都不影响 `TaskID` 的持有；
+只有 Router 确认「总结已收到」或「这单已取消」两件事，才允许清。
+
+### 空闲计时（**由 Router 计时，Worker 只报状态**）
+
+- Worker：每 5 秒产生一个 `WorkerStatus` 采样（`bBusy` + `TaskID`），推送一份；
+  Router 主动来要数据时，把这一整串序列甩过去
+- **Router 侧维护 `idle_since`**：
+  - 收到「`bBusy=false` 且 `TaskID != 0`」→ 记下 `idle_since`（已在计时中就保持不动）
+  - 其他任何状态（busy / TaskID=0）→ 清掉 `idle_since`，不累计
+  - 计时满 `idle_task_end_minutes` → 判任务结束，进入索取总结
+- Worker 不自算时长、不自判结束；它只负责如实报
+
 ## 通知
 
 同一任务同一时刻只允许一条主通知；「任务完成」这类机制通知不再发送。
+
+## 两条索取共用同一套机制
+
+「索取任务总结」与「取消确认」走**完全相同**的逻辑，不新开协议：
+
+- 同一套等待参数：`idle_task_end_minutes`（每次等多久）+ `summary_request_max_attempts`（共试几次）
+- 同一个应答通道：工具调用回执（`submit_deliverable` 那一类），不走私信抄送
+- 同样在拿不到回应时升级：总结 → 报警后转取消；取消确认 → 视同失联、归档并通知溪流
