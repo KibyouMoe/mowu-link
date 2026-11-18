@@ -829,6 +829,9 @@ def _merge_events(state: _BusState, events: List[Dict[str, Any]]) -> int:
                 continue
             else:
                 if len(state.events) == state.events.maxlen:
+                    if _full_body(state.events[0]):
+                        # Leave this and later IDs on the bus until the protected head is consumed.
+                        break
                     state.dropped += 1
                 state.events.append(event)
             state.high_water = event_id
@@ -973,9 +976,15 @@ def _event_head(event: Dict[str, Any]) -> str:
     return head
 
 
+def _full_body(event: Dict[str, Any]) -> bool:
+    return (event.get("kind"), event.get("source")) in {
+        ("peer.message", "私聊"), ("task.deliverable", "任务成果")}
+
+
 def _format_event(event: Dict[str, Any]) -> str:
     """One event as the two-line card every delivery seam shares."""
-    card = "%s\n> %s" % (_event_head(event), _clip_text(event.get("text")))
+    body = str(event.get("text") or "") if _full_body(event) else _clip_text(event.get("text"))
+    card = "%s\n> %s" % (_event_head(event), body)
     files = event.get("_attachment_files") or []
     if files:
         card += "\n聊天图片附件（已下载并校验，请用图片工具查看实际像素）："
@@ -995,7 +1004,7 @@ def _format_events(events: List[Dict[str, Any]],
         return ""
     if len(events) == 1:
         return _format_event(events[0])
-    blocks = [_format_event(e) for e in events[:limit]]
+    blocks = [_format_event(e) for i, e in enumerate(events) if i < limit or _full_body(e)]
     hidden = len(events) - len(blocks)
     if hidden > 0:
         blocks.append("+%d more" % hidden)

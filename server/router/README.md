@@ -18,7 +18,7 @@
 ## Worker 互聊与项目工单
 
 普通聊天不建任务：`POST /messages`，请求包含稳定 UUID `message_id`、已注册的精确
-`from` / `to`、`text`，可附 `reply_to` 和已上传的附件 ID 数组 `attachments`。
+`from` / `to`、`text`，可附 `task_id`、`reply_to` 和已上传的附件 ID 数组 `attachments`。
 所有请求沿用 `X-Router-Token`；共享令牌内的身份属于受信客户端声明，不是独立的每 worker 鉴权。
 首次保存 202、完全相同重试 200、同 ID 改内容 409；持久化后通过 SSE `worker_message` 投递。
 
@@ -29,16 +29,28 @@ Worker 已接受，均不表示模型已回答；回复显式携带 reply_to。�
 
 收件人为 `Hermes`（大小写不敏感）或 `溪流` 时，消息先持久化，再向 trigger 提交
 `source=私聊`、`kind=peer.message`、`level=notify`，`event_id=peer:<seq>`。
-唤醒正文包含发送者显示名、seq 和前 200 个字符。别名共享历史查询。
+私信只要求正文非空。超过 64 KiB 的 UTF-8 正文在同一事务内分块存储，读取时按块序号还原。
+溪流每段最多收 2000 个字符，多段时每段带 1/N 和原 message_id。收件端保留全文、换行与空白。
+`GET /messages?task_id=t-…&after=0&limit=100` 按发送次序返回关联私信。
 此路径返回 HTTP 200。trigger 接受后写入 `acked_at`，消息及 GET 查询的 `status=delivered`
 表示已交给溪流的 notify 通道。POST 的顶层发送回执沿用 `status=accepted`，嵌套 message
 显示 delivered，以兼容现有 Worker。普通 Worker 的 202/queued 和自主 ACK 流程照原协议执行。
 trigger 不可用时返回 200/queued 并记 WARNING。使用相同 UUID、相同正文重试可补投唤醒，
-trigger 依据 `peer:<seq>` 去重。已写 delivery ACK 的重试直接读回原记录。
+单段沿用 `peer:<seq>`，多段用 `peer:<seq>:<part>`，分段投递进度持久化。已写 delivery ACK 的重试直接读回原记录。
 
 自检运行 `ROUTER_TEST_PORT=<空闲端口> python3 server/router/selftest_router.py`。
 `peer secretary wake`、`peer concurrent retries`、`peer exact retry repairs a failed wake` 与
 `peer root delivery survives router restart` 应为 PASS，最终 TOTAL 全通过。
+
+### 任务结束、成果与验收
+
+注册回执中的 `review_settlement=true` 表示支持本协议。Worker 上报 `status=turn_ended` 或明确失败。Router 核对任务绑定的 thread、turn、execution_epoch、当前连接及新鲜 idle 心跳；goal 仅作参考。执行结束时记 `state=done`、`review_state=reviewing`，旧 Worker 的 done 及理由按相同规则处理。明确失败立即可见。
+
+结束后 Router 通过 Worker SSE 发送固定 `deliverable_request`。Worker 在原线程回答，由 `POST /tasks/{id}/deliverable` 报送 `name, request_id, deliverable`。成果包括摘要、产物、证据、风险四项。摘要最多 200 个 Unicode 字符，其他三项为字符串数组。首次发出后间隔 30、60、120 秒重试，第三次重试再等 240 秒。无回执标记 `deliverable_missing` 并提醒溪流。重启后沿用同一请求 ID 和已保存的进度。
+
+超长返回 HTTP 400 `deliverable_summary_too_long`；Worker 收到新 request_id 后重写。三次重写仍超限，标记 `summary_oversized` 并提醒溪流。溪流在任务详情带验收凭据可读 `deliverable.raw`；看板通知只使用通过校验的摘要。派单 context 可选 `card_id/board_id`，任务列表和成果通知原样回传。
+
+溪流通过 `POST /tasks/{id}/verdict` 提交 `status=done|failed, reason, evidence[]`，除 Router 令牌外须提供 `X-Review-Token`（与服务令牌相邻的 `.review` 文件，仅交给验收方）。决定记入 `review_state/verdict`。30 分钟未验收提醒一次，报送成果与超时均不代替验收。
 
 ### Worker 显示名
 

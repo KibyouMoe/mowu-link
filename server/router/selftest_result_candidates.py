@@ -91,6 +91,7 @@ class IdleSettlementTests(unittest.TestCase):
                                      "summary": "reported business success", "connection_generation": self.conn.generation, **fields})
 
     def finish(self, task, **fields):
+        self.heartbeat()
         binding = fixture_binding(self.store.get_task(task))
         code, _ = self.call("/tasks/" + task + "/turn-binding", {"name": self.worker, "connection_generation": self.conn.generation, **binding})
         self.assertEqual(code, 200)
@@ -149,7 +150,7 @@ class IdleSettlementTests(unittest.TestCase):
         code, _ = self.call("/questions/%s/%s/answer" % (self.worker, question), {"actor": "hermes", "answers": ["yes"]})
         self.assertEqual(code, 200)
         self.assertEqual(self.store.get_task(task)["state"], "running")
-        self.finish(task)
+        self.heartbeat()
         self.assertEqual(self.store.get_task(task)["state"], "done")
         self.assertEqual(len(self.notices()), 1)
 
@@ -217,6 +218,7 @@ class IdleSettlementTests(unittest.TestCase):
                          "cleanup_complete": True, "followups_pending": False, "thread_id": "legacy-thread",
                          "turn_id": "tail", "turn_ids": ["root", "tail"], "native_status": "completed",
                          "result": data["candidate"]}
+        self.heartbeat()
         with mock.patch.object(self.server, "worker_request", side_effect=legacy_answer):
             code, result = self.call("/result", {"name": self.worker, "task_id": task, "summary": "legacy", "status": "done"})
         self.assertEqual((code, result["state"], len(self.notices())), (200, "done", 1))
@@ -226,9 +228,7 @@ class IdleSettlementTests(unittest.TestCase):
 
     def test_reported_failure_is_preserved(self):
         task = self.task()
-        self.report(task, status="failed", error_code="fixture_error")
-        self.heartbeat(task_id=task)
-        self.finish(task)
+        self.assertEqual(self.report(task, status="failed", error_code="fixture_error")[0], 200)
         self.assertEqual(self.store.get_task(task)["result"]["error_code"], "fixture_error")
         self.assertEqual(self.store.get_task(task)["state"], "failed")
 

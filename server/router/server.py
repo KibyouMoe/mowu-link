@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from attachments import AttachmentStore, MAX_ATTACHMENTS
 from result_candidates import ResultCandidates
+from task_review import TaskReview, initial_review
 
 import argparse
 import fcntl
@@ -46,6 +47,7 @@ import subprocess
 import sqlite3
 import sys
 import threading
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -71,7 +73,8 @@ BACKLOG_MAX = 1
 QUEUE_TTL_S = 6 * 60 * 60
 MAX_GOAL_CHARS = 2000
 MAX_BODY_BYTES = 1 * 1024 * 1024
-PEER_MAX_TEXT = 20000
+PEER_CHUNK_BYTES = 64 * 1024
+IDLE_FRESH_S = 30
 PEER_PAGE_LIMIT = 100
 ROOT_PEER_NAME = "Hermes"
 ROOT_PEER_ALIASES = frozenset(("hermes", "溪流"))
@@ -394,6 +397,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     execution_epoch TEXT DEFAULT NULL,
     pause_reason TEXT DEFAULT NULL,
     turn_binding_json TEXT,
+    workflow_json TEXT,
+    workflow_due REAL,
     legacy_dispatch INTEGER DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_worker_state ON tasks(worker, state);
@@ -473,6 +478,10 @@ CREATE INDEX IF NOT EXISTS idx_peer_inbox
 -- approval channel: a worker asks a question, a human answers, the worker
 -- polls the verdict.  `status` is the single source of truth; expiry is
 -- applied both lazily on read and by a sweeper in the server process.
+CREATE TABLE IF NOT EXISTS peer_text_chunks (
+    message_id TEXT NOT NULL, part INTEGER NOT NULL, data BLOB NOT NULL,
+    PRIMARY KEY(message_id,part)
+);
 CREATE TABLE IF NOT EXISTS approvals (
     approval_id TEXT PRIMARY KEY,
     worker      TEXT NOT NULL,
@@ -519,11 +528,19 @@ class RouterStore:
                              ("request_fingerprint", "TEXT"), ("dispatch_attempted", "INTEGER"),
                              ("queue_expires_at", "REAL"), ("execution_epoch", "TEXT"),
                              ("pause_reason", "TEXT"), ("turn_binding_json", "TEXT"),
+                             ("workflow_json", "TEXT"), ("workflow_due", "REAL"),
                              ("legacy_dispatch", "INTEGER DEFAULT 0")):
             if column not in cols:
                 self._conn.execute(
                     "ALTER TABLE tasks ADD COLUMN %s %s" % (column, decl))
                 log.info("store migration: added tasks.%s", column)
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_task_workflow_due ON tasks(workflow_due) WHERE workflow_due IS NOT NULL")
+        peer_columns = {r["name"] for r in self._conn.execute("PRAGMA table_info(peer_messages)")}
+        if "task_id" not in peer_columns:
+            self._conn.execute("ALTER TABLE peer_messages ADD COLUMN task_id TEXT")
+        if "wake_parts" not in peer_columns:
+            self._conn.execute("ALTER TABLE peer_messages ADD COLUMN wake_parts INTEGER NOT NULL DEFAULT 0")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_peer_task ON peer_messages(task_id,seq)")
         # Build the index after migration so pre-idempotency databases open.
         # SQLite permits multiple NULL keys, preserving legacy task creation.
         self._conn.execute(
@@ -719,13 +736,19 @@ class RouterStore:
                 " WHERE worker=? AND state='queued'", (name,)).fetchone()["c"])
 
     # -- durable peer chat ---------------------------------------------- #
-    @staticmethod
-    def _peer_dict(row: sqlite3.Row) -> Dict[str, Any]:
+    def _peer_dict(self, row: sqlite3.Row) -> Dict[str, Any]:
         status = "queued" if row["acked_at"] is None else (
             "delivered" if peer_identity(row["recipient"]) == ROOT_PEER_NAME else "accepted")
+        text = row["text"]
+        if not text:
+            with self._lock:
+                chunks = self._conn.execute("SELECT data FROM peer_text_chunks WHERE message_id=? ORDER BY part",
+                                            (row["message_id"],))
+                text = b"".join(chunk[0] for chunk in chunks).decode()
         return {"seq": row["seq"], "message_id": row["message_id"],
+                **({"task_id": row["task_id"]} if row["task_id"] else {}),
                 "from": row["sender"], "to": row["recipient"],
-                "text": row["text"], "reply_to": row["reply_to"],
+                "text": text, "reply_to": row["reply_to"],
                 "attachments": json.loads(row["attachments_json"]),
                 "status": status,
                 "created_at": row["created_at"], "acked_at": row["acked_at"]}
@@ -747,17 +770,28 @@ class RouterStore:
     def add_peer_message(self, message_id: str, sender: str, recipient: str,
                          text: str, reply_to: Optional[str],
                          attachments: List[Dict[str, Any]],
-                         payload_json: str) -> Dict[str, Any]:
+                         payload_json: str, task_id=None) -> Dict[str, Any]:
         # The dispatch lock serializes create/dedupe, ACK and stream replay.
         # SQLite autocommit completes before any SSE notification is queued.
         with self._lock:
-            self._conn.execute(
-                "INSERT INTO peer_messages (message_id, sender, recipient, text,"
-                " reply_to, attachments_json, payload_json, created_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (message_id, sender, recipient, text, reply_to,
-                 json.dumps(attachments, ensure_ascii=True), payload_json,
-                 time.time()))
+            data = text.encode("utf-8")
+            chunked = len(data) > PEER_CHUNK_BYTES
+            self._conn.execute("SAVEPOINT peer_insert")
+            try:
+                self._conn.execute(
+                    "INSERT INTO peer_messages (message_id,sender,recipient,text,reply_to,attachments_json,"
+                    "payload_json,created_at,task_id) VALUES (?,?,?,?,?,?,?,?,?)",
+                    (message_id, sender, recipient, "" if chunked else text, reply_to,
+                     json.dumps(attachments), payload_json, time.time(), task_id))
+                if chunked:
+                    self._conn.executemany("INSERT INTO peer_text_chunks VALUES (?,?,?)",
+                        ((message_id, offset // PEER_CHUNK_BYTES, data[offset:offset + PEER_CHUNK_BYTES])
+                         for offset in range(0, len(data), PEER_CHUNK_BYTES)))
+            except Exception:
+                self._conn.execute("ROLLBACK TO peer_insert")
+                raise
+            finally:
+                self._conn.execute("RELEASE peer_insert")
             return self.get_peer_message(message_id)
 
     def peer_messages(self, worker: str, cursor: int = 0,
@@ -786,7 +820,7 @@ class RouterStore:
                 params = (cursor, limit + 1)
             rows = self._conn.execute(
                 "SELECT seq, message_id, sender, recipient, text, reply_to,"
-                " attachments_json, created_at, acked_at FROM peer_messages" + query,
+                " attachments_json, created_at, acked_at, task_id FROM peer_messages" + query,
                 params)
             try:
                 for row in rows:
@@ -818,6 +852,13 @@ class RouterStore:
                       if row["result_json"] else None)
         except (ValueError, TypeError):
             result = None
+        workflow = json.loads(row["workflow_json"] or "{}")
+        try:
+            context = json.loads(row["context"] or "{}")
+        except (TypeError, ValueError):
+            context = {}
+        if not isinstance(context, dict):
+            context = {}
         deadline_at = None
         if row["deadline_s"] is not None and row["created_at"] is not None:
             deadline_at = float(row["created_at"]) + float(row["deadline_s"])
@@ -829,6 +870,10 @@ class RouterStore:
             "workspace": row["workspace"],
             "urgency": row["urgency"],
             "execution_mode": "goal",
+            "card_id": context.get("card_id"), "board_id": context.get("board_id"),
+            "review_state": workflow.get("review_state"), "verdict": workflow.get("verdict"),
+            "deliverable_state": workflow.get("delivery_state"),
+            "deliverable": workflow.get("deliverable"),
             "state": row["state"],
             "created_at": row["created_at"],
             "started_at": row["started_at"],
@@ -998,7 +1043,7 @@ class RouterStore:
         return [dict(row) for row in rows]
 
     def finish_task(self, task_id: str, status: str,
-                    result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+                    result: Dict[str, Any], workflow=None) -> Optional[Dict[str, Any]]:
         task = self.get_task(task_id)
         progress = self.approval_progress(task) if task else None
         if progress:
@@ -1007,10 +1052,11 @@ class RouterStore:
         with self._lock:
             finished_at = time.time()
             self._conn.execute(
-                "UPDATE tasks SET state=?, finished_at=?, pause_reason=NULL, result_json=?"
+                "UPDATE tasks SET state=?, finished_at=?, pause_reason=NULL, result_json=?, workflow_json=?, workflow_due=?"
                 " WHERE task_id=?",
                 (status, finished_at,
-                 json.dumps(result, ensure_ascii=False), task_id))
+                 json.dumps(result, ensure_ascii=False), json.dumps(workflow) if workflow else None,
+                 finished_at if workflow else None, task_id))
             if task:
                 self._conn.execute(
                     "UPDATE workers SET task_id=NULL, progress_at=?,"
@@ -1800,6 +1846,7 @@ class Connection:
         self.legacy_active = None
         self.legacy_finished = None
         self.recovering_task = None
+        self.idle_at = None
         self.turn_view_seq = -1
         self.peer_after = 0
         self.peer_buffered = 0
@@ -1852,7 +1899,7 @@ class RouterServer(ThreadingHTTPServer):
                  notifier: TriggerNotifier, bridge: TriggerSubscriptionBridge,
                  ping_interval: float = PING_INTERVAL,
                  backlog_max: int = BACKLOG_MAX,
-                 queue_ttl_s: float = QUEUE_TTL_S):
+                 queue_ttl_s: float = QUEUE_TTL_S, verdict_token=None):
         self.store = store
         self.attachments = AttachmentStore(store.path + ".attachments")
         self.result_candidates = ResultCandidates(store.path)
@@ -1869,6 +1916,9 @@ class RouterServer(ThreadingHTTPServer):
         self.conns: Dict[str, Connection] = {}
         self.conn_lock = threading.Lock()
         self.dispatch_lock = threading.RLock()
+        self.root_peer_lock = threading.Lock()
+        self.reviews = TaskReview(self)
+        self.verdict_token = verdict_token
         self.cancellations_changed = threading.Event()
         self.question_lock = threading.Lock()
         self.question_requests: Dict[str, Dict[str, Any]] = {}
@@ -1984,14 +2034,14 @@ class RouterServer(ThreadingHTTPServer):
                 self.store.bind_turn(task_id, binding)
             return 200, {"ok": True, "binding": binding}
 
-    def submit_result(self, body: Dict[str, Any], attachments=None, *, legacy_check=None, idle_check=None) -> Tuple[int, Dict[str, Any]]:
+    def submit_result(self, body: Dict[str, Any], attachments=None, *, legacy_check=None, idle_check=None, candidate_revision=None) -> Tuple[int, Dict[str, Any]]:
         """A business report remains a candidate until its registered native turn ends."""
         name, task_id = str(body.get("name") or "").strip(), str(body.get("task_id") or "").strip()
         if not name or not task_id:
             raise BadRequest("name and task_id are required")
         status = str(body.get("status") or "").strip().lower()
-        if status not in ("done", "failed"):
-            raise BadRequest("status must be done or failed")
+        if status not in ("done", "failed", "turn_ended"):
+            raise BadRequest("status must be done, failed or turn_ended")
         summary = str(body.get("summary") or "")
         result_notice_summary(summary, body.get("summary_short", UNSET))
         if not isinstance(body.get("artifacts") or [], list) or not isinstance(body.get("evidence") or [], list):
@@ -2001,7 +2051,7 @@ class RouterServer(ThreadingHTTPServer):
         candidate.update(name=name, task_id=task_id, status=status, summary=summary)
         current = self.store.get_task(task_id)
         if (current and current["worker"] == name
-                and current["state"] == "running"):
+                and current["state"] == "running" and status != "failed"):
             for question in self.store.pending_questions(name):
                 if question["task_id"] == task_id:
                     self.question_request(name, question["question_id"], "get")
@@ -2016,6 +2066,8 @@ class RouterServer(ThreadingHTTPServer):
                 self.discard_result_candidate(task_id)
                 return 200, {"ok": True, "task_id": task_id, "state": task["state"],
                              "duplicate": True, "notified": False, "dispatched_next": None}
+            if candidate_revision and (self.result_candidates.get(task_id) or {}).get("revision") != candidate_revision:
+                return 202, {"ok": True, "candidate": True, "reason": "stale_candidate"}
             conn = self.current_conn(name)
             proof = body.get("native_completion")
             binding = task["turn_binding"]
@@ -2067,17 +2119,32 @@ class RouterServer(ThreadingHTTPServer):
                         self.store.bind_turn(task_id, anchor)
                     binding = anchor
                     legacy_idle = conn.legacy_finished == identity
-            can_finish = (verified or legacy_idle) and not pending
+            idle = bool(conn and not conn.closed and conn.idle_at is not None
+                        and time.monotonic() - conn.idle_at <= IDLE_FRESH_S)
+            failure = (status == "failed" and candidate.get("outcome") != "needs_inspection"
+                       and task["state"] == "running")
+            if failure and body.get("execution_epoch") is not None and body["execution_epoch"] != task["execution_epoch"]:
+                return 409, {"ok": False, "error": "stale_task_execution"}
+            if failure and body.get("connection_generation") is not None and (
+                    not conn or conn.closed or body["connection_generation"] != conn.generation
+                    or conn.recovering_task == task_id or proof is not None and not verified):
+                return 409, {"ok": False, "error": "stale_task_execution"}
+            can_finish = failure or (verified or legacy_idle) and idle and not pending
             if not can_finish:
                 # A stale observer must not replace the real business candidate.
                 if not verified and task["state"] == "running":
                     self.mark_unconfirmed(name)
-                if proof is not None and not verified:
+                if proof is not None and not verified and conn and not conn.closed and task["state"] == "running":
                     return 409, {"ok": False, "error": "native_turn_mismatch", "state": task["state"]}
-                saved = self.result_candidates.put(task_id, {"candidate": candidate, "attachments": attachments or [],
-                                                            "generation": conn.generation if conn else None,
-                                                            "execution_epoch": task["execution_epoch"]})
-                reason = "unanswered_question" if pending else "task_turn_unconfirmed"
+                prior = self.result_candidates.get(task_id)
+                prior_data = (prior or {}).get("result", {})
+                same_execution = conn and prior_data.get("generation") == conn.generation and prior_data.get("execution_epoch") == task["execution_epoch"]
+                saved_proof = proof if verified else prior_data.get("proof") if same_execution else None
+                saved = self.result_candidates.put(task_id, {"candidate": candidate,
+                    "attachments": attachments or (prior_data.get("attachments", []) if same_execution else []),
+                    "generation": conn.generation if conn else None, "proof": saved_proof,
+                    "execution_epoch": task["execution_epoch"]})
+                reason = "unanswered_question" if pending else "worker_idle_unconfirmed" if verified else "task_turn_unconfirmed"
                 waiting = {"ok": True, "task_id": task_id, "state": task["state"], "candidate": True,
                            "revision": saved["revision"], "reason": reason, "notified": False, "dispatched_next": None}
                 if (pending or task["state"] != "running" or not conn or conn.closed or conn.native_settlement
@@ -2088,8 +2155,7 @@ class RouterServer(ThreadingHTTPServer):
                 result = {k: v for k, v in candidate.items() if k not in ("name", "task_id")}
                 result.setdefault("evidence", [])
                 result.setdefault("artifacts", [])
-                if result.get("outcome") == "needs_inspection":
-                    result["status"] = "done"
+                result["status"] = "failed" if failure else "done"
                 saved = self.result_candidates.get(task_id)
                 earlier = (saved or {}).get("result", {})
                 if not attachments and earlier.get("execution_epoch") == task["execution_epoch"]:
@@ -2097,9 +2163,13 @@ class RouterServer(ThreadingHTTPServer):
                 if attachments:
                     result["attachments"] = attachments
                 completion = ({"signal": "legacy_task_idle", **binding} if legacy_idle
-                              else {"signal": "native_turn_ended", "native_status": proof["native_status"], **binding})
+                              else {"signal": "native_turn_ended", "native_status": proof["native_status"], **binding}
+                              if verified else {"signal": "worker_reported_failure"})
                 result.update(reported_at=time.time(), completion=completion)
-                task = self.store.finish_task(task_id, result["status"], result)
+                workflow = None if failure else initial_review(time.time())
+                task = self.store.finish_task(task_id, result["status"], result, workflow)
+                if workflow:
+                    self.reviews.tick(task_id)
                 self.discard_result_candidate(task_id)
                 dispatched = self.dispatch_one(name)
         if not can_finish:
@@ -2258,6 +2328,44 @@ class RouterServer(ThreadingHTTPServer):
                  conn.name, reason, current, self.store.queued_count(conn.name))
 
     # -- dispatch ------------------------------------------------------- #
+    def deliver_root_peers(self, through_seq):
+        # Serialize this recipient only. A retry resumes at the first unacknowledged
+        # part; a crash between trigger acceptance and SQLite reuses its event ID.
+        with self.root_peer_lock:
+            while True:
+                with self.store._lock:
+                    row = self.store._conn.execute(
+                        "SELECT * FROM peer_messages WHERE lower(recipient) IN ('hermes','溪流')"
+                        " AND seq<=? AND acked_at IS NULL ORDER BY seq LIMIT 1", (through_seq,)).fetchone()
+                if row is None:
+                    return
+                message = self.store._peer_dict(row)
+                content = message["text"]
+                width = 2000
+                total = (len(content) + width - 1) // width
+                for i in range(row["wake_parts"], total):
+                    part = content[i * width:(i + 1) * width]
+                    label = "" if total == 1 else "%d/%d · %s · " % (i + 1, total, message["message_id"])
+                    event_id = "peer:%s" % message["seq"] + ((":%d" % (i + 1)) if total > 1 else "")
+                    display = worker_display_name(message["from"])
+                    payload = {"source": "私聊", "kind": "peer.message", "level": "notify", "actor": display,
+                               "event_id": event_id, "text": "溪流，%s 给你发了消息（seq %s）：%s%s" % (
+                                   display, message["seq"], label, part),
+                               "payload": {key: message[key] for key in ("seq", "message_id", "from", "to", "task_id")
+                                           if key in message}}
+                    try:
+                        ok, data = self.trigger_client.post_trigger(payload)
+                    except Exception as exc:
+                        ok, data = False, {"error": type(exc).__name__}
+                    if not ok:
+                        log.warning("peer wake failed id=%s seq=%s part=%d error=%.200s",
+                                    message["message_id"], message["seq"], i + 1, data.get("error"))
+                        return
+                    with self.store._lock:
+                        self.store._conn.execute("UPDATE peer_messages SET wake_parts=? WHERE seq=?", (i + 1, row["seq"]))
+                self.store.ack_peer_message(message["message_id"])
+                log.info("peer delivered id=%s seq=%s parts=%d", message["message_id"], message["seq"], total)
+
     def flush_peer_messages_locked(self, conn: Connection) -> None:
         """Caller holds dispatch_lock; no socket I/O while replaying SQLite.
 
@@ -2273,7 +2381,11 @@ class RouterServer(ThreadingHTTPServer):
         messages, _ = self.store.peer_messages(
             conn.name, conn.peer_after, available)
         for message in messages:
-            conn.queue.put({"event": "worker_message", "data": message})
+            if len(message["text"].encode("utf-8")) > PEER_PAGE_BYTES:
+                # The inbox owns the full message; keep individual SSE frames bounded.
+                conn.queue.put({"event": "worker_message_ref", "data": {"message_id": message["message_id"]}})
+            else:
+                conn.queue.put({"event": "worker_message", "data": message})
             conn.peer_buffered += 1
             conn.peer_after = message["seq"]
 
@@ -2293,6 +2405,7 @@ class RouterServer(ThreadingHTTPServer):
                 "UPDATE tasks SET dispatch_attempted=1, execution_epoch=?, legacy_dispatch=?, turn_binding_json=NULL"
                 " WHERE task_id=?", (payload["execution_epoch"], int(not conn.state_layers), task["task_id"]))
             task.update(payload)
+            conn.idle_at = None
             conn.assigned_execution = (task["task_id"], task["execution_epoch"])
             return True
 
@@ -2374,6 +2487,7 @@ class ApprovalSweeper(threading.Thread):
                     self.store.expire_approvals()
                     if self.server is not None:
                         self.server.expire_queued_tasks()
+                        self.server.reviews.sweep()
             except Exception:  # noqa: BLE001
                 log.exception("approval/task sweep failed")
             delay = max(0.0, next_periodic - time.monotonic())
@@ -2407,22 +2521,40 @@ class RouterHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass
 
-    def _read_json(self) -> Dict[str, Any]:
+    def _read_json(self, peer=False) -> Dict[str, Any]:
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
             raise BadRequest("invalid Content-Length")
         if length <= 0:
             return {}
-        if length > MAX_BODY_BYTES:
+        if not peer and length > MAX_BODY_BYTES:
             raise BadRequest("body too large")
         try:
-            data = json.loads(self.rfile.read(length).decode("utf-8"))
+            if peer and length > MAX_BODY_BYTES:
+                # Never allocate the advertised Content-Length before receiving it.
+                with tempfile.TemporaryFile() as spool:
+                    remaining = length
+                    while remaining:
+                        chunk = self.rfile.read(min(remaining, PEER_CHUNK_BYTES))
+                        if not chunk:
+                            raise BadRequest("incomplete message body")
+                        spool.write(chunk)
+                        remaining -= len(chunk)
+                    spool.seek(0)
+                    data = json.load(spool)
+            else:
+                data = json.loads(self.rfile.read(length).decode("utf-8"))
         except (ValueError, UnicodeDecodeError) as exc:
             raise BadRequest("invalid JSON: %s" % exc)
         if not isinstance(data, dict):
             raise BadRequest("JSON body must be an object")
         return data
+
+    def _reviewer(self):
+        supplied = self.headers.get("X-Review-Token", "").encode()
+        expected = self.server.verdict_token
+        return bool(expected and hmac.compare_digest(supplied, expected.encode()))
 
     def _require_token(self) -> None:
         expected = getattr(self.server, "token", "") or ""
@@ -2550,7 +2682,7 @@ class RouterHandler(BaseHTTPRequestHandler):
             self._require_token()
             if parts == ["attachments"]:
                 return self._send_json(*self._attachment_put())
-            body = self._read_json()
+            body = self._read_json(peer=parts == ["messages"])
             if parts == ["commands"]:
                 worker = self._worker_path_param(str(body.get("worker") or ""))
                 command = parse_model_command(body.get("text"), body.get("thread_id"))
@@ -2583,6 +2715,12 @@ class RouterHandler(BaseHTTPRequestHandler):
                 return self._send_json(*self._peer_message_create(body))
             if len(parts) == 3 and parts[0] == "messages" and parts[2] == "ack":
                 return self._send_json(*self._peer_message_ack(parts[1], body))
+            if len(parts) == 3 and parts[0] == "tasks" and parts[2] == "verdict":
+                if not self._reviewer():
+                    return self._send_json(403, {"error": "reviewer_required"})
+                return self._send_json(*self.server.reviews.verdict(parts[1], body))
+            if len(parts) == 3 and parts[0] == "tasks" and parts[2] == "deliverable":
+                return self._send_json(*self.server.reviews.receive(parts[1], body))
             if parts == ["tasks"]:
                 return self._send_json(*self._task_create(body))
             if len(parts) == 3 and parts[0] == "tasks" and parts[2] == "cancel":
@@ -2694,6 +2832,8 @@ class RouterHandler(BaseHTTPRequestHandler):
             return self._send_json(404, {"ok": False, "error": "unknown_task",
                                          "task_id": task_id})
         task["progress"] = self.server.store.approval_progress(task)
+        if self._reviewer():
+            task["deliverable"] = self.server.reviews.with_raw(task_id, task["deliverable"])
         with self.server.dispatch_lock:
             candidate = self.server.result_candidates.get(task_id)
         self._send_json(200, {"ok": True, "task_id": task_id,
@@ -2755,6 +2895,27 @@ class RouterHandler(BaseHTTPRequestHandler):
         return 200, self._peer_receipt(message)
 
     def _peer_messages(self, qs: Dict[str, List[str]]) -> Tuple[int, Dict[str, Any]]:
+        if "task_id" in qs:
+            task_id = qs["task_id"][0]
+            after = self._int_param(qs, "after", 0)
+            limit = self._int_param(qs, "limit", PEER_PAGE_LIMIT)
+            if after < 0 or not 1 <= limit <= PEER_PAGE_LIMIT or set(qs) - {"task_id", "after", "limit"}:
+                raise BadRequest("task history uses task_id, after and limit")
+            store = self.server.store
+            with store._lock:
+                ids = store._conn.execute("SELECT message_id FROM peer_messages WHERE task_id=? AND seq>? ORDER BY seq LIMIT ?",
+                                          (task_id, after, limit+1)).fetchall()
+                messages = []
+                size = 0
+                for row in ids[:limit]:
+                    message = store.get_peer_message(row[0])
+                    size += len(json.dumps(message, ensure_ascii=False).encode())
+                    if messages and size > PEER_PAGE_BYTES - 1024:
+                        break
+                    messages.append(message)
+            more = len(ids) > len(messages)
+            return 200, {"ok": True, "messages": messages, "has_more": more,
+                         "next_after": messages[-1]["seq"] if more else None}
         if "id" in qs:
             if "worker" in qs or len(qs["id"]) != 1:
                 raise BadRequest("use either id or worker")
@@ -2793,25 +2954,8 @@ class RouterHandler(BaseHTTPRequestHandler):
         # Exact retries repair a failed wake using the same durable event ID.
         root_recipient = peer_identity(message["to"]) == ROOT_PEER_NAME
         if root_recipient and message["acked_at"] is None:
-            display = worker_display_name(message["from"])
-            payload = {
-                "source": "私聊", "kind": "peer.message", "level": "notify",
-                "actor": display, "event_id": "peer:%s" % message["seq"],
-                "text": "溪流，%s 给你发了消息（seq %s）：%s"
-                        % (display, message["seq"], message["text"][:200]),
-                "payload": {key: message[key] for key in ("seq", "message_id", "from", "to")},
-            }
-            try:
-                ok, data = self.server.trigger_client.post_trigger(payload)
-            except Exception as exc:
-                ok, data = False, {"error": type(exc).__name__}
-            if ok:
-                message = self.server.store.ack_peer_message(message["message_id"])
-                log.info("peer delivered id=%s seq=%s event_id=%s trigger_id=%s",
-                         message["message_id"], message["seq"], payload["event_id"], data.get("id"))
-            else:
-                log.warning("peer wake failed id=%s seq=%s error=%.200s",
-                            message["message_id"], message["seq"], data.get("error"))
+            self.server.deliver_root_peers(message["seq"])
+            message = self.server.store.get_peer_message(message["message_id"])
         # Existing Worker senders accept queued/accepted transport receipts.
         # Echo request spellings for alias-aware senders; GET and SSE use IDs.
         response_message = dict(message)
@@ -2832,24 +2976,28 @@ class RouterHandler(BaseHTTPRequestHandler):
                                   separators=(",", ":"))
         with self.server.dispatch_lock:
             previous = self.server.store.peer_payload(message_id)
+            fingerprint = "sha256:" + hashlib.sha256(payload_json.encode("ascii")).hexdigest()
             if previous is not None:
-                if previous != payload_json:
+                if previous not in (fingerprint, payload_json):
                     return 409, {"ok": False, "error": "message_id_conflict",
                                  "message_id": message_id}
                 # Do not re-resolve images or re-emit an exact retry. The
                 # original metadata and current ACK state are authoritative.
                 message = self.server.store.get_peer_message(message_id)
                 return 200, self._peer_receipt(message, duplicate=True)
-            if set(body) - {"message_id", "from", "to", "text", "reply_to", "attachments"}:
+            if set(body) - {"message_id", "from", "to", "text", "reply_to", "attachments", "task_id"}:
                 raise BadRequest("unsupported message fields")
             sender = peer_identity(self._peer_worker(body.get("from"), "from"))
             recipient = peer_identity(self._peer_worker(body.get("to"), "to"))
             for worker in (sender, recipient):
                 if peer_identity(worker) != ROOT_PEER_NAME and self.server.store.get_worker(worker) is None:
                     return 404, {"ok": False, "error": "unknown_worker"}
+            task_id = body.get("task_id")
+            if task_id is not None and (not isinstance(task_id, str) or not re.fullmatch(r"t-[a-zA-Z0-9_-]{1,126}", task_id)):
+                raise BadRequest("invalid task_id")
             text = body.get("text")
-            if not isinstance(text, str) or not text.strip() or len(text) > PEER_MAX_TEXT:
-                raise BadRequest("text must be nonempty (max 20000 chars)")
+            if not isinstance(text, str) or not text.strip():
+                raise BadRequest("text must be nonempty")
             try:
                 text.encode("utf-8")
             except UnicodeEncodeError:
@@ -2889,7 +3037,7 @@ class RouterHandler(BaseHTTPRequestHandler):
                     except (ValueError, OSError):
                         raise BadRequest("attachments must reference existing uploaded images")
             message = self.server.store.add_peer_message(
-                message_id, sender, recipient, text, reply_to, attachments, payload_json)
+                message_id, sender, recipient, text, reply_to, attachments, fingerprint, task_id)
             conn = self.server.current_conn(recipient)
             if conn is not None:
                 self.server.flush_peer_messages_locked(conn)
@@ -3027,7 +3175,7 @@ class RouterHandler(BaseHTTPRequestHandler):
             "new": created,
             "version": worker["version"],
             "state_layers": 2,
-            "native_settlement": True,
+            "native_settlement": True, "review_settlement": True,
         }
 
     def _heartbeat(self, body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
@@ -3068,6 +3216,11 @@ class RouterHandler(BaseHTTPRequestHandler):
             if not self.server.store.heartbeat(name, state, progress_at, task_id, turn_source, turn_views):
                 return 404, {"ok": False, "error": "unknown_worker", "worker": name}
             conn = self.server.current_conn(name)
+            if conn and not conn.closed and (not conn.state_layers or generation == conn.generation):
+                if state != "idle" or any(v["phase"] != "idle" for v in (body.get("turn_views") or {}).values() if v["fresh"]):
+                    conn.idle_at = None
+                elif not body.get("turn_views") or turn_views is not None:
+                    conn.idle_at = time.monotonic()
             legacy_candidate = None
             if conn and not conn.native_settlement and not (self.server.store.get_worker(name) or {}).get("control_sse"):
                 task = self.server.store.blocking_task(name)
@@ -3083,12 +3236,24 @@ class RouterHandler(BaseHTTPRequestHandler):
                         legacy_candidate = saved
             if state == "idle":
                 self.server.mark_unconfirmed(name)
+                active = self.server.store.blocking_task(name)
+                if conn and conn.idle_at is not None and active and active["state"] == "running":
+                    saved = self.server.result_candidates.get(active["task_id"])
+                    record = (saved or {}).get("result", {})
+                    if (record.get("proof") and record.get("generation") == conn.generation
+                            and record.get("execution_epoch") == active["execution_epoch"]):
+                        legacy_candidate = saved
             dispatched = self.server.dispatch_one(name)
         settlements = []
         if legacy_candidate:
             record = legacy_candidate["result"]
-            code, result = self.server.submit_result(record["candidate"], record.get("attachments"),
-                idle_check=(record["generation"], record["execution_epoch"], legacy_candidate["revision"]))
+            if record.get("proof"):
+                code, result = self.server.submit_result({**record["candidate"], "connection_generation": record["generation"],
+                    "native_completion": record["proof"]}, record.get("attachments"),
+                    candidate_revision=legacy_candidate["revision"])
+            else:
+                code, result = self.server.submit_result(record["candidate"], record.get("attachments"),
+                    idle_check=(record["generation"], record["execution_epoch"], legacy_candidate["revision"]))
             if code == 200 and not result.get("duplicate"):
                 settlements.append(result)
         for task in self.server.store.list_tasks(worker=name, state="cancelling", limit=1):
@@ -3150,6 +3315,9 @@ class RouterHandler(BaseHTTPRequestHandler):
                     "goal too long (max %d chars, got %d)"
                     % (MAX_GOAL_CHARS, len(goal)))
             context = body.get("context")
+            if isinstance(context, dict) and any(context.get(k) is not None and not isinstance(context[k], str)
+                                                 for k in ("card_id", "board_id")):
+                raise BadRequest("card_id and board_id must be strings or null")
             if context is not None and not isinstance(context, str):
                 context = json.dumps(context, ensure_ascii=False)
             workspace = body.get("workspace")
@@ -4062,7 +4230,7 @@ class RouterHandler(BaseHTTPRequestHandler):
                 if item is None:
                     reason = conn.reason or "closed"
                     break
-                if item["event"] == "worker_message":
+                if item["event"] in ("worker_message", "worker_message_ref"):
                     with self.server.dispatch_lock:
                         conn.peer_buffered -= 1
                         pending = self.server.store.get_peer_message(
@@ -4202,7 +4370,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     try:
         server = RouterServer((host, args.port), store, token, notifier,
                               bridge, ping_interval=args.ping_interval,
-                              backlog_max=args.backlog_max, queue_ttl_s=args.queue_ttl_s)
+                              backlog_max=args.backlog_max, queue_ttl_s=args.queue_ttl_s,
+                              verdict_token=load_or_create_token(token_path.with_name(token_path.name + ".review"))[0])
     except OSError as exc:
         print("error: cannot bind %s:%d: %s" % (host, args.port, exc),
               file=sys.stderr)

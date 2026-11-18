@@ -246,6 +246,7 @@ def worker_http(method, url, body=None, token=None, timeout=5.0):
     else:
         final = {"name": worker, "task_id": body["task_id"], "status": body.get("status", "done").strip().lower(),
                  "summary": body["text"], **{k: body[k] for k in ("summary_short", "outcome", "error_code") if k in body}}
+    http("POST", origin + "/heartbeat", {"name": worker, "state": "idle"}, token)
     code, result = http("POST", origin + "/result", {**final, "connection_generation": generation, "native_completion": fixture_end(binding)}, token)
     if url.endswith("/notice") and code == 200:
         if not result["notified"] and not result["duplicate"]:
@@ -459,9 +460,9 @@ def peer_selftest(checker, work, trigger_url, trigger_token, trigger_db):
 
         invalid = [{"message_id": "not-a-uuid"}, {"message_id": 123},
                    {"from": []}, {"to": ""}, {"text": " \n"}, {"text": 123},
-                   {"text": "x" * 20001}, {"text": "\ud800"},
+                   {"task_id": "not-a-task-id"}, {"text": "\ud800"},
                    {"reply_to": "not-a-uuid"}, {"deadline_s": 30}]
-        checker.check("peer validation: UUID, worker types, text/Unicode/20000 cap and no task fields",
+        checker.check("peer validation: UUID, worker types, Unicode text and optional task identity",
                       all(call("POST", "/messages", payload(**edits))[0] == 400 for edits in invalid))
         checker.check("peer validation: sender and recipient must already be known workers",
                       all(call("POST", "/messages", payload(**edits))[0] == 404
@@ -557,6 +558,20 @@ def peer_selftest(checker, work, trigger_url, trigger_token, trigger_db):
                       set(ids(root_alias_history["messages"])) ==
                       {root_message["message_id"], root_peer["message_id"], *ids(aliases)})
 
+        long_text = "溪流🐴，\n" * 10000
+        body = payload(to="Hermes", text=long_text, task_id="t-peer-50000")
+        code, posted = call("POST", "/messages", body)
+        seq = posted["message"]["seq"]
+        with sqlite3.connect(str(trigger_db)) as saved:
+            events = saved.execute("SELECT text FROM events WHERE event_id LIKE ? ORDER BY id",
+                                   ("peer:%s:%%" % seq,)).fetchall()
+        received = "".join(row[0].split(body["message_id"] + " · ", 1)[1] for row in events)
+        found = call("GET", "/messages?task_id=t-peer-50000")[1]["messages"]
+        checker.check("50000-character private message through actual trigger HTTP and SQLite",
+                      code == 200 and len(long_text) == 50000 and received == long_text and len(events) == 25
+                      and [m["message_id"] for m in found] == [body["message_id"]]
+                      and found[0]["acked_at"] is not None)
+
         concurrent_body = payload(to="溪流", text="甲🟦" * 150)
         concurrent = []
         writers = [threading.Thread(target=lambda: concurrent.append(
@@ -566,13 +581,13 @@ def peer_selftest(checker, work, trigger_url, trigger_token, trigger_db):
         for writer in writers:
             writer.join(10)
         concurrent_peer = call("GET", "/messages/" + concurrent_body["message_id"])[1]["message"]
-        checker.check("peer concurrent retries emit one notify with a 200-character Unicode preview",
+        checker.check("peer concurrent retries emit one notify with the complete Unicode text",
                       len(concurrent) == 6 and all(code == 200 for code, _ in concurrent)
                       and concurrent_peer["acked_at"] is not None
                       and len(wake_rows(concurrent_peer)) == 1
                       and wake_rows(concurrent_peer)[0]["text"] ==
                       "溪流，%s 给你发了消息（seq %s）：%s" %
-                      (a, concurrent_peer["seq"], concurrent_body["text"][:200]))
+                      (a, concurrent_peer["seq"], concurrent_body["text"]))
 
         unavailable_body = payload(to="Hermes", text="recover wake with the same UUID")
         original_token = trigger_token.read_bytes()
@@ -947,10 +962,12 @@ def task_notice_selftest(checker, work, trigger_url, trigger_token, trigger_db):
                 pending_code, pending = http("POST", base + "/notice", {
                     "worker": worker, "kind": "task.result", "task_id": task_id,
                     "status": state, "text": "pending result", "urgency": urgency}, server.token)
-                checker.check("task terminal level: %s candidate reports event without delivery" % state,
-                              pending_code == 202 and pending.get("level") == expected
-                              and pending.get("event_id") == task_id + ":" + state
-                              and pending.get("notified") is False and not events(task_id))
+                if state == "failed":
+                    checker.check("explicit worker failure delivers immediately",
+                                  pending_code == 200 and pending["level"] == expected and len(events(task_id)) == 1)
+                else:
+                    checker.check("turn completion candidate waits without delivery",
+                                  pending_code == 202 and pending["level"] == expected and not events(task_id))
                 code, settled = call("/result", {"name": worker, "task_id": task_id,
                                                   "status": state, "summary": "settled result"})
             _, receipt = notice(task_id, state, urgency=urgency)
@@ -1885,12 +1902,14 @@ def dispatch_race_selftest(checker, work):
                       and conn.queue.empty())
         code, result = worker_http("POST", base + "/result", {
             "name": name, "task_id": old_ids[0], "status": "done", "summary": "oldest completed"}, server.token)
+        assert conn.queue.get(timeout=3)["event"] == "deliverable_request"
         event = conn.queue.get(timeout=3)
         checker.check("queued recovery: completing oldest task automatically dispatches the next accepted task",
                       code == 200 and result.get("dispatched_next") == old_ids[1]
                       and event.get("data", {}).get("task_id") == old_ids[1])
         worker_http("POST", base + "/result", {"name": name, "task_id": old_ids[1],
              "status": "done", "summary": "old queue drained"}, server.token)
+        assert conn.queue.get(timeout=3)["event"] == "deliverable_request"
         code, admitted = worker_http("POST", base + "/tasks", contenders[0], server.token)
         event = conn.queue.get(timeout=3)
         checker.check("queued recovery: refused UUID succeeds once accepted old work completes",
@@ -1928,8 +1947,10 @@ def one_backlog_selftest(checker, work):
         return dict(worker=name, goal=goal, message_id=str(uuid.uuid4()), **extra)
 
     def finish(task_id):
-        return call("POST", "/result", {"name": name, "task_id": task_id,
-                    "status": "done", "summary": "one-slot test complete"})
+        result = call("POST", "/result", {"name": name, "task_id": task_id,
+                      "status": "done", "summary": "one-slot test complete"})
+        assert conn.queue.get(timeout=3)["event"] == "deliverable_request"
+        return result
 
     def curl_create(body):
         cmd = ["curl", "--silent", "--show-error", "--max-time", "5",
