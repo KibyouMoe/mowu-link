@@ -103,7 +103,7 @@ class TwoLayerStateTests(unittest.TestCase):
                 self.assertEqual((code, refused["error"]), (409, "worker_paused"))
                 self.assertEqual(self.sent, [])
                 self.assertEqual(self.call("/result", {"name": self.name, "task_id": task_id,
-                                      "status": "done", "summary": "late"})[0], 202)
+                                      "status": "done", "summary": "late"})[0], 409)
                 release = {"confirm": True, "reason": "operator independently verified stop",
                            "execution_epoch": saved["execution_epoch"]}
                 path = "/tasks/" + task_id + "/cancel-release"
@@ -142,13 +142,13 @@ class TwoLayerStateTests(unittest.TestCase):
         self.assertEqual(self.client.wait_task(3)["task_id"], task_id)
         _, idle = self.call("/heartbeat", {"name": self.name, "state": "idle", "task_id": None})
         saved = self.store.get_task(task_id)
-        self.assertEqual((saved["state"], saved["finished_at"], saved["result"]["outcome"]),
-                         ("running", None, "needs_inspection"))
+        self.assertEqual((saved["state"], saved["finished_at"], saved["result"]),
+                         ("running", None, None))
         code, candidate = self.call("/result", {"name": self.name, "task_id": task_id,
                                                 "status": "done", "summary": "late actual result"})
-        self.assertEqual((code, candidate["candidate"], idle["settlements"], len(self.sent)), (202, True, [], 0))
+        self.assertEqual((code, candidate["error"], idle["settlements"], len(self.sent)), (409, "deliverable_request_required", [], 0))
         self.assertIsNone(self.stored_views())
-        print("legacy trainer idle -> running/needs_inspection; late result HTTP 202; notifications=0", flush=True)
+        print("legacy trainer idle -> running; unsolicited result HTTP 409; notifications=0", flush=True)
 
     def test_matching_stop_releases_paused_slot_and_rejects_old_ack(self):
         _, task = self.create("stop on the original turn")
@@ -251,7 +251,7 @@ class TwoLayerStateTests(unittest.TestCase):
         idle = {"name": self.name, "state": "idle", "connection_generation": generation}
         self.call("/heartbeat", {**idle, "finished_execution_epoch": epoch})
         self.assertEqual(self.call("/result", {"name": self.name, "task_id": task_id,
-                         "status": "done", "summary": "original result"})[0], 202)
+                         "status": "done", "summary": "original result"})[0], 409)
         self.assertEqual(self.sent, [])
 
         resumed = {**paused, "state": "running", "execution_epoch": "b" * 32,
@@ -265,13 +265,10 @@ class TwoLayerStateTests(unittest.TestCase):
         self.assertEqual(self.sent, [])
         self.call("/heartbeat", {**idle, "finished_execution_epoch": running["execution_epoch"]})
         self.assertEqual(self.store.get_task(task_id)["state"], "running")
-        native = self.store.get_task(task_id)["turn_binding"]
-        code, _ = self.call("/result", {"name": self.name, "task_id": task_id, "status": "done",
-                                       "connection_generation": generation, "native_completion": fixture_end(native), "summary": "original result"})
-        self.assertEqual(code, 200)
-        self.assertEqual(self.store.get_task(task_id)["state"], "done")
-        self.assertEqual(len(self.sent), 1)
-        print("versioned SSE task -> task_recovery -> paused HTTP 200 -> worker_paused HTTP 409 -> running new epoch -> done, one notice", flush=True)
+        code, reply = self.call("/result", {"name": self.name, "task_id": task_id,
+                                         "status":"done","summary":"still waiting"})
+        self.assertEqual((code,reply["error"]), (409,"deliverable_request_required"))
+        self.assertEqual(self.store.get_task(task_id)["state"], "running")
 
     def test_pause_and_resume_on_same_connection_preserve_native_binding(self):
         self.close_worker()

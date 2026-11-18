@@ -29,12 +29,22 @@ class TaskReview:
             row = self.store._conn.execute("SELECT workflow_json FROM tasks WHERE task_id=?", (task_id,)).fetchone()
         return json.loads(row[0]) if row and row[0] else None
 
-    def save(self, task_id, flow):
+    def save(self, task_id, flow, *, state=None):
         deadlines = [t for t in (flow.get("delivery_due"), flow.get("review_due"),
                                  *flow["pending_notices"].values()) if t is not None]
+        result = None
+        if state in ("done", "failed"):
+            result = {**flow["deliverable"], "status": state, "verdict": flow["verdict"]}
+            approval = self.store.approval_progress(self.store.get_task(task_id))
+            if approval:
+                result.update(approval_id=approval["approval_id"], approval_status=approval["state"])
         with self.store._lock:
-            self.store._conn.execute("UPDATE tasks SET workflow_json=?, workflow_due=? WHERE task_id=?",
-                                     (json.dumps(flow, ensure_ascii=False), min(deadlines, default=None), task_id))
+            self.store._conn.execute(
+                "UPDATE tasks SET workflow_json=?, workflow_due=?, state=COALESCE(?,state),"
+                " finished_at=CASE WHEN ? IN ('done','failed') THEN ? ELSE finished_at END,"
+                " result_json=COALESCE(?,result_json) WHERE task_id=?",
+                (json.dumps(flow, ensure_ascii=False), min(deadlines, default=None), state, state, time.time(),
+                 json.dumps(result, ensure_ascii=False) if result else None, task_id))
 
     def with_raw(self, task_id, deliverable):
         flow = self.load(task_id)
@@ -49,8 +59,12 @@ class TaskReview:
             if not flow:
                 return
             task = self.store.get_task(task_id)
+            if flow.get("probe"):
+                now = self.server.watchdog.clock()
             due = flow.get("delivery_due")
-            if due is not None and due <= now:
+            if flow.get("probe") and due is not None and due <= now:
+                self.server.watchdog.advance(task, flow, now)
+            elif due is not None and due <= now:
                 attempt = flow["attempts"]
                 if attempt < len(RETRY_SECONDS):
                     flow.update(attempts=attempt + 1, delivery_due=now + RETRY_SECONDS[attempt])
@@ -76,17 +90,26 @@ class TaskReview:
 
     def notify(self, task_id, kind):
         task = self.store.get_task(task_id)
+        if kind == "deliverable_missing" and task["deliverable_state"] != "deliverable_missing":
+            return  # A late valid answer won the race with the notification outbox.
         data = {k: task[k] for k in ("task_id", "worker", "card_id", "board_id")}
         if kind == "deliverable":
             report = task["deliverable"]
-            data.update(summary=report["summary"], artifacts=report["artifacts"])
-            text = report["summary"] + "\n产物：" + ("、".join(report["artifacts"]) or "无")
+            summary = report.get("summary_short", report["summary"])
+            data.update(summary=summary, artifacts=report["artifacts"])
+            text = summary + "\n产物：" + ("、".join(report["artifacts"]) or "无")
+        elif kind in ("done", "failed"):
+            text = task["verdict"]["reason"]
         else:
             text = {"summary_oversized": "摘要重写三次仍超长，请人工处理。",
-                    "deliverable_missing": "成果询问重试三次仍无回执，请核对。",
+                    "deliverable_missing": "成果询问仍无回执，请核对。",
                     "review_overdue": "任务仍待验收，请溪流核对。"}[kind]
         payload = {"source": "任务成果", "kind": "task." + kind, "level": "notify", "actor": task["worker"],
                    "event_id": task_id + ":" + kind, "text": task_id + " " + text, "payload": data}
+        if kind == "deliverable_missing" and task.get("probe_id"):
+            payload["level"] = "event"
+        elif kind in ("done", "failed"):
+            payload = self.server.verdict_notice(task, kind)
         ok, _ = self.server.notifier.post_task_notice(task_id, kind, payload)
         if ok:
             with self.server.dispatch_lock:
@@ -102,9 +125,14 @@ class TaskReview:
             self.tick(row[0])
 
     def receive(self, task_id, body):
+        flow = self.load(task_id)
+        if "worker" in body or (flow and flow.get("probe")):
+            return self.server.watchdog.answer(task_id, body)
         with self.server.dispatch_lock:
             flow = self.load(task_id)
             task = self.store.get_task(task_id)
+            if not task:
+                return 404, {"error": "unknown_task"}
             if not flow or body.get("name") != task["worker"]:
                 return 409, {"error": "delivery_not_requested"}
             req = body.get("request_id")
@@ -157,11 +185,16 @@ class TaskReview:
             flow = self.load(task_id)
             if not flow:
                 return 409, {"error": "task_not_reviewing"}
+            if flow.get("probe") and self.store.get_task(task_id)["state"] != "reviewing" and not flow.get("verdict"):
+                return 409, {"error": "task_not_reviewing"}
             if flow.get("verdict"):
                 if flow["verdict"] == verdict:
                     return 200, {"ok": True, "duplicate": True, "verdict": verdict}
                 return 409, {"error": "verdict_conflict"}
             flow.update(review_state=status, review_due=None, verdict=verdict)
             flow["pending_notices"].pop("review_overdue", None)
-            self.save(task_id, flow)
-            return 200, {"ok": True, "review_state": status, "verdict": verdict}
+            if flow.get("probe"):
+                flow["pending_notices"][status] = self.server.watchdog.clock()
+            self.save(task_id, flow, state=status if flow.get("probe") else None)
+        self.tick(task_id)
+        return 200, {"ok": True, "state": self.store.get_task(task_id)["state"], "review_state": status, "verdict": verdict}

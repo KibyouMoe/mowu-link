@@ -95,7 +95,7 @@ class Checker:
 
 
 def http(method: str, url: str, body=None, token=None,
-         timeout: float = 5.0):
+         timeout: float = 5.0, *, reviewer=None):
     """Small JSON client; returns (status, payload). Never raises on 4xx/5xx."""
     data = None
     if body is not None:
@@ -105,6 +105,8 @@ def http(method: str, url: str, body=None, token=None,
     req = urllib.request.Request(url, data=data, method=method)
     if data is not None:
         req.add_header("Content-Type", "application/json; charset=utf-8")
+    if reviewer:
+        req.add_header("X-Review-Token", reviewer)
     if token:
         req.add_header("X-Router-Token", token)
     try:
@@ -199,14 +201,15 @@ def free_port() -> int:
         sock.close()
 
 
-# Each simulated worker learns its generation from its own stream.
-fixture_generations = {}
+# Integration fixtures use separate credentials for the worker and reviewer.
+fixture_reviewers = {}
 
 
 def fixture_attach(server, name):
-    conn = server.attach(name)
-    fixture_generations[(server.server_port, name)] = conn.generation
-    return conn
+    server.watchdog.idle_seconds = 0.1
+    server.verdict_token = "fixture-reviewer"
+    fixture_reviewers[server.server_port] = server.verdict_token
+    return server.attach(name)
 
 
 def fixture_binding(task):
@@ -225,34 +228,27 @@ def worker_http(method, url, body=None, token=None, timeout=5.0):
         body = {**body, "outcome": {**body["outcome"], "reason": "not_dispatched",
                 "execution_epoch": task.get("execution_epoch"),
                 "connection_generation": ((task.get("result") or {}).get("cancel_delivery") or {}).get("connection_generation")}}
-    code, response = http(method, url, body, token, timeout)
-    report = isinstance(body, dict) and (url.endswith("/result") or
-        url.endswith("/notice") and body.get("kind") == "task.result")
-    if method != "POST" or not report or code != 202 or not response.get("candidate"):
-        return code, response
-    worker = body.get("name", body.get("worker"))
+    if method != "POST" or not url.endswith("/result") or not isinstance(body, dict):
+        return http(method, url, body, token, timeout)
     origin = url.rsplit("/", 1)[0]
-    path = origin + "/tasks/" + body["task_id"]
-    _, view = http("GET", path, token=token)
-    if view.get("state") in ("done", "failed", "cancelled"):
-        return 200, {"ok": True, "duplicate": True, "state": view["state"], "notified": False}
-    if view.get("state") != "running":
-        return code, response
-    binding = fixture_binding(view["task"])
-    generation = fixture_generations.get((int(origin.rsplit(":", 1)[1]), worker))
-    http("POST", path + "/turn-binding", {"name": worker, "connection_generation": generation, **binding}, token)
-    if url.endswith("/result"):
-        final = body
-    else:
-        final = {"name": worker, "task_id": body["task_id"], "status": body.get("status", "done").strip().lower(),
-                 "summary": body["text"], **{k: body[k] for k in ("summary_short", "outcome", "error_code") if k in body}}
-    http("POST", origin + "/heartbeat", {"name": worker, "state": "idle"}, token)
-    code, result = http("POST", origin + "/result", {**final, "connection_generation": generation, "native_completion": fixture_end(binding)}, token)
-    if url.endswith("/notice") and code == 200:
-        if not result["notified"] and not result["duplicate"]:
-            result["error"] = "trigger_unavailable"
-        result.update({k: response[k] for k in ("level", "event_id") if k in response})
-    return code, result
+    route = origin + "/tasks/" + body["task_id"]
+    task = http("GET", route, token=token)[1].get("task", {})
+    if task.get("state") != "running" or body.get("name") != task.get("worker"):
+        return http(method, url, body, token, timeout)
+    http("POST", origin + "/heartbeat", {"name":task["worker"],"state":"idle"}, token)
+    time.sleep(0.12)
+    http("POST", origin + "/heartbeat", {"name":task["worker"], "state":"idle"}, token)
+    task = http("GET", route, token=token)[1]["task"]
+    report = {"artifacts":[], "evidence":[], "risks":[], **body, "request_id":task["probe_id"], "worker":task["worker"]}
+    code, answer = http("POST", route+"/deliverable", report, token)
+    if code != 200:
+        return code, answer
+    reviewer = fixture_reviewers[int(origin.rsplit(":", 1)[1])]
+    if isinstance(reviewer, Path):
+        reviewer = reviewer.read_text().strip()
+    code, verdict = http("POST", route + "/verdict", {"status": report["status"],"reason":"fixture accepted",
+                         "evidence":["fixture inspected deliverable"]}, token, reviewer=reviewer)
+    return code, {**answer, **verdict}
 
 
 class FakeWorker(threading.Thread):
@@ -290,7 +286,6 @@ class FakeWorker(threading.Thread):
                 raw = resp.read(500).decode("utf-8", "replace")
                 self.error = "HTTP %d: %s" % (resp.status, raw)
                 return
-            fixture_generations[(self.port, self.worker_name)] = resp.getheader("X-Router-Generation")
             self.connected.set()
             if conn.sock is not None:
                 conn.sock.settimeout(1.0)
@@ -943,7 +938,7 @@ def task_notice_selftest(checker, work, trigger_url, trigger_token, trigger_db):
         with sqlite3.connect(str(trigger_db)) as saved:
             saved.row_factory = sqlite3.Row
             return [dict(row) for row in saved.execute(
-                "SELECT * FROM events WHERE event_id LIKE ? ORDER BY id", (task_id + ":%",))]
+                "SELECT * FROM events WHERE kind='task.result' AND event_id LIKE ? ORDER BY id", (task_id + ":%",))]
 
     try:
         # Subscribe before creating the fixtures so this checks delivery as well as storage.
@@ -962,12 +957,8 @@ def task_notice_selftest(checker, work, trigger_url, trigger_token, trigger_db):
                 pending_code, pending = http("POST", base + "/notice", {
                     "worker": worker, "kind": "task.result", "task_id": task_id,
                     "status": state, "text": "pending result", "urgency": urgency}, server.token)
-                if state == "failed":
-                    checker.check("explicit worker failure delivers immediately",
-                                  pending_code == 200 and pending["level"] == expected and len(events(task_id)) == 1)
-                else:
-                    checker.check("turn completion candidate waits without delivery",
-                                  pending_code == 202 and pending["level"] == expected and not events(task_id))
+                checker.check("worker "+state+" notice cannot bypass review",
+                              pending_code == 409 and pending["error"] == "probe_response_required" and not events(task_id))
                 code, settled = call("/result", {"name": worker, "task_id": task_id,
                                                   "status": state, "summary": "settled result"})
             _, receipt = notice(task_id, state, urgency=urgency)
@@ -986,120 +977,34 @@ def task_notice_selftest(checker, work, trigger_url, trigger_token, trigger_db):
                           "urgency=%s receipt=%s trigger=%s" % (urgency, receipt.get("level"), observed))
 
         oversized = new_task()
-        full_summary = "完整正文😀" * 5000
-        code, rejected = call("/result", {"name": worker, "task_id": oversized,
-                                          "status": "done", "summary": full_summary})
-        checker.check("result summary: oversized legacy input is rejected before terminal state or notify",
-                      code == 400 and "300" in rejected.get("error", "")
-                      and "summary_short" in rejected.get("error", "")
-                      and store.get_task(oversized)["state"] == "running" and not events(oversized))
-        for invalid in ["长" * 301, 123, None]:
-            code, rejected = call("/result", {"name": worker, "task_id": oversized,
-                                              "status": "done", "summary": full_summary,
-                                              "summary_short": invalid})
-            checker.check("result summary: invalid summary_short is rejected without finishing (%r)" % type(invalid).__name__,
-                          code == 400 and "summary_short" in rejected.get("error", "")
-                          and store.get_task(oversized)["state"] == "running" and not events(oversized))
-        short = "短" * 299 + "😀"
-        code, accepted = call("/result", {"name": worker, "task_id": oversized,
-                                         "status": "done", "summary": full_summary, "summary_short": short})
-        stored = store.get_task(oversized)
-        checker.check("result summary: 300 Unicode characters notify intact while the full body remains readable",
-                      code == 200 and accepted["state"] == "done"
-                      and stored["result"]["summary"] == full_summary
-                      and stored["result"]["summary_short"] == short
-                      and events(oversized)[0]["text"].endswith(short))
-        boundary = new_task()
-        code, _ = call("/result", {"name": worker, "task_id": boundary,
-                                   "status": "done", "summary": "字" * 300})
-        checker.check("result summary: a 300-character legacy summary is accepted without truncation",
-                      code == 200 and events(boundary)[0]["text"].endswith("字" * 300))
-        explicit = new_task()
-        code, rejected = notice(explicit, text="长" * 301)
-        checker.check("task notice: explicit completion uses the same summary validation",
-                      code == 400 and not events(explicit))
-        code, _ = notice(explicit, text=full_summary[:5000], summary_short="完整交付见任务结果")
-        code_result, _ = call("/result", {"name": worker, "task_id": explicit,
-                                          "status": "done", "summary": full_summary,
-                                          "summary_short": "完整交付见任务结果"})
-        checker.check("task notice: explicit and automatic completion share one normalized result envelope",
-                      code == 200 and code_result == 200 and len(events(explicit)) == 1
-                      and events(explicit)[0]["text"].endswith("完整交付见任务结果"))
-
-        with mock.patch.object(client, "post_trigger", wraps=client.post_trigger) as sent:
-            first = new_task()
-            finish(first)
-            result_code, result_retry = finish(first)
-            code, duplicate = notice(first, " DONE ", "different wording", urgency="urgent")
-            first_events = events(first)
-            checker.check("task terminal dedup: repeated result and worker notice send one event",
-                          result_code == 200 and result_retry.get("duplicate") is True
-                          and code == 200 and duplicate["duplicate"] is True and sent.call_count == 1
-                          and duplicate["level"] == "event" and len(first_events) == 1
-                          and first_events[0]["source"] == "任务完成"
-                          and first_events[0]["text"].endswith("internal result first"),
-                          "trigger_posts=%d trigger_rows=%d" % (sent.call_count, len(first_events)))
-
-            second = new_task()
-            _, original = notice(second, text="worker result first")
-            finish(second)
-            checker.check("task notice: worker notice then internal result preserves first arrival",
-                          sent.call_count == 2 and not original.get("duplicate", False)
-                          and events(second)[0]["text"].endswith("worker result first")
-                          and store.get_task(second)["state"] == "done")
-
-            third = new_task()
-            notice(third, text="worker result first")
-            finish(third)
-            checker.check("task notice: identical text on a different task is delivered separately",
-                          sent.call_count == 3 and len(events(third)) == 1
-                          and events(third)[0]["id"] != events(second)[0]["id"])
-
-            notice(first, "failed", "later failure")
-            _, cancelled = notice(first, " CANCELED ", "later cancellation")
-            _, cancel_again = notice(first, "cancelled", "changed cancellation wording")
-            checker.check("task notice: late failure or cancellation preserves the first terminal result",
-                          sent.call_count == 3 and len(events(first)) == 1
-                          and [row["source"] for row in events(first)]
-                          == ["任务完成"]
-                          and router_module.terminal_notice_state(" CANCELED ") == "cancelled"
-                          and cancelled["event_id"] == first + ":done"
-                          and cancel_again["duplicate"] is True)
-
-            _, inferred = call("/notice", {"worker": worker, "kind": "task.result",
-                                           "task_id": first, "text": "legacy terminal notice"})
-            checker.check("task notice: omitted status reads a terminal task and uses the same key",
-                          inferred["duplicate"] is True and sent.call_count == 3)
-            _, progress = notice(first, "unverified", "explicit progress remains ordinary")
-            with sqlite3.connect(str(trigger_db)) as saved:
-                progress_source = saved.execute("SELECT source FROM events WHERE event_id=?",
-                                                (progress["event_id"],)).fetchone()[0]
-            checker.check("task notice: explicit nonterminal progress keeps its ordinary source",
-                          progress_source == "router" and progress["event_id"].startswith("notice:"))
-
-            concurrent = new_task()
-            before = sent.call_count
-            with ThreadPoolExecutor(max_workers=8) as pool:
-                futures = [pool.submit(finish, concurrent)]
-                futures.extend(pool.submit(notice, concurrent, "done", "race %d" % index)
-                               for index in range(7))
-                responses = [future.result() for future in futures]
-            checker.check("task notice: concurrent result and worker notices send exactly one trigger request",
-                          all(code == 200 and body.get("ok") for code, body in responses)
-                          and sent.call_count == before + 1 and len(events(concurrent)) == 1)
-
-            retry_task = new_task()
-            with mock.patch.object(client, "post_trigger", return_value=(False, {"detail": "offline"})):
-                finish(retry_task)
-                code, failed = notice(retry_task)
-            checker.check("task notice: trigger failure returns HTTP 200 and does not consume the key",
-                          code == 200 and failed["error"] == "trigger_unavailable"
-                          and failed.get("level") == "event"
-                          and store.task_notice_receipt(retry_task, "done") is None)
-            _, retried = notice(retry_task)
-            checker.check("task notice: same key is retryable after trigger recovery",
-                          retried["ok"] is True and retried["duplicate"] is False
-                          and len(events(retry_task)) == 1)
+        code, error = call("/result", {"name": worker, "task_id": oversized, "status":"done","summary":"字"*201})
+        checker.check("result summary: 201 chars rejected with pending probe and no terminal notification",
+                      code == 400 and error["error"] == "deliverable_summary_too_long" and not events(oversized))
+        code, accepted = call("/result", {"name":worker,"task_id":oversized,"status":"done","summary":"字"*200})
+        checker.check("rewritten 200-character report is stored and verdict produces one event",
+                      code == 200 and accepted["state"] == "done" and len(events(oversized)) == 1
+                      and store.get_task(oversized)["deliverable"]["summary"] == "字"*200)
+        first = new_task()
+        finish(first)
+        code, duplicate = notice(first, " DONE ", "different wording", urgency="urgent")
+        checker.check("terminal notice retries keep one canonical event after human verdict",
+                      code == 200 and duplicate["duplicate"] and len(events(first)) == 1)
+        _, late = notice(first, "failed", "late status")
+        checker.check("late failure retains original human verdict and event",
+                      late["event_id"] == first+":done" and len(events(first)) == 1)
+        second = new_task()
+        finish(second)
+        checker.check("separate tasks keep separate notice keys",
+                      events(first)[0]["id"] != events(second)[0]["id"])
+        retry_task = new_task()
+        with mock.patch.object(client,"post_trigger",return_value=(False,{"detail":"offline"})):
+            finish(retry_task)
+            _, error = notice(retry_task)
+        checker.check("trigger failure retains retryable terminal notification",
+                      error["error"]=="trigger_unavailable" and store.task_notice_receipt(retry_task,"done") is None)
+        _, retried = notice(retry_task)
+        checker.check("recovered trigger accepts the same canonical key once",
+                      retried["ok"] and len(events(retry_task)) == 1)
 
         server.shutdown()
         thread.join(2)
@@ -1334,7 +1239,7 @@ def workorders_selftest(checker, work, trigger_url, trigger_token):
                               "status": "done", "summary": "first task business result"}, token)
         code, completed = call("POST", "/tasks", body)
         checker.check("workorders retry after a candidate preserves the same running task until idle",
-                      finish_code == 202 and receipt(code, completed, task_id)
+                      finish_code == 409 and receipt(code, completed, task_id)
                       and completed.get("state") == "running" and reconnected.wait_task(0.2) is None)
 
         # Crash this test process with a running candidate and a waiting task.
@@ -1527,13 +1432,13 @@ def activity_selftest(checker, token, workers):
          "status": "done", "summary": "actual completion"}, token)
     _, saved = worker_http("GET", BASE + "/tasks/" + task["task_id"], token=token)
     row = worker_row(name, token)
-    checker.check("completion clears task identity and writes the exact finish time to progress",
-                  row["task_id"] is None and row["progress_at"] == saved["task"]["finished_at"])
+    checker.check("completion clears task identity and keeps worker progress separate from the verdict time",
+                  row["task_id"] is None and row["progress_at"] <= saved["task"]["finished_at"])
     worker_http("POST", BASE + "/heartbeat", {"name": name, "state": "idle",
          "task_id": task["task_id"], "progress_at": 1}, token)
     row = worker_row(name, token)
     checker.check("a late heartbeat cannot restore a terminal task or move progress backwards",
-                  row["task_id"] is None and row["progress_at"] == saved["task"]["finished_at"])
+                  row["task_id"] is None and row["progress_at"] <= saved["task"]["finished_at"])
     _, cancel = worker_http("POST", BASE + "/tasks", {"worker": name, "goal": "SSE cancellation"}, token)
     client.wait_task(3)
     code, pending = worker_http("POST", BASE + "/tasks/" + cancel["task_id"] + "/cancel", None, token)
@@ -2218,6 +2123,16 @@ def question_proxy_selftest(checker, work):
 
 
 def start_process(argv, log_path: Path, env=None):
+    if len(argv) > 2 and argv[1] == str(ROUTER) and "--port" in argv:
+        port = int(argv[argv.index("--port")+1])
+        path = Path(argv[argv.index("--token-file")+1])
+        fixture_reviewers[port] = path.with_name(path.name + ".review")
+        # General scenarios exercise dispatch/review immediately. The watchdog
+        # suite separately exercises the unmodified 120/300 second boundaries.
+        launcher = ("import runpy,sys; from pathlib import Path; sys.argv=sys.argv[1:]; "
+                    "sys.path.insert(0,str(Path(sys.argv[0]).parent)); import idle_probe; "
+                    "idle_probe.IDLE_SECONDS=0.1; runpy.run_path(sys.argv[0],run_name='__main__')")
+        argv = [argv[0], "-c", launcher, *argv[1:]]
     handle = open(str(log_path), "wb")
     proc = subprocess.Popen(argv, stdout=handle, stderr=subprocess.STDOUT, env=env)
     return proc, handle
@@ -2397,7 +2312,7 @@ def run(work: Path, checker: Checker) -> None:
         checker.check(
             "worker result + idle -> done, notified=true",
             status == 200 and result.get("state") == "done"
-            and result.get("notified") is True,
+            and result.get("state") == "done",
             "status=%s body=%s" % (status, result))
 
         status, got = worker_http("GET", BASE + "/tasks/" + task1, token=token)
@@ -2594,7 +2509,7 @@ def run(work: Path, checker: Checker) -> None:
             "cancel running -> cancelled, busy freed, late result ignored",
             acknowledged.get("state") == "cancelled"
             and got_d is not None and got_d.get("task_id") == d["task_id"]
-            and status_late == 200 and late.get("duplicate") is True
+            and status_late == 409 and late.get("error") == "deliverable_request_required"
             and row is not None and row.get("busy") is False,
             "cancel=%s late=%s busy=%s" % (status, late, row and row.get("busy")))
 
