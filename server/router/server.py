@@ -82,8 +82,9 @@ PEER_STREAM_BUFFER = 32
 LOG_MAX_BYTES = 5 * 1024 * 1024
 LOG_BACKUP_COUNT = 3
 
-TASK_STATES = ("queued", "running", "cancelling", "done", "failed", "cancelled")
+TASK_STATES = ("queued", "running", "paused", "cancelling", "done", "failed", "cancelled")
 TERMINAL_STATES = ("done", "failed", "cancelled")
+CANCEL_TIMEOUT_S = 60.0
 TASK_NOTICE_NAMES = {
     "done": ("任务完成", "完成"),
     "failed": ("任务失败", "失败"),
@@ -294,6 +295,26 @@ def parse_epoch(value: Any, label: str) -> float:
     raise BadRequest("%s must be epoch seconds or ISO-8601" % label)
 
 
+def parse_turn_views(value: Any) -> str:
+    """Validate optional per-thread samples without consulting them for scheduling."""
+    if not isinstance(value, dict) or len(value) > 64:
+        raise BadRequest("turn_views must contain at most 64 thread samples")
+    for thread_id, view in value.items():
+        if not thread_id or len(thread_id) > 128 or not isinstance(view, dict) or set(view) != {
+                "phase", "turnId", "observedAt", "seq", "generation", "fresh"}:
+            raise BadRequest("invalid turn_views sample")
+        turn_id, generation = view["turnId"], view["generation"]
+        if (view["phase"] not in ("thinking", "outputting", "idle")
+                or turn_id is not None and not (isinstance(turn_id, str) and 0 < len(turn_id) <= 128)
+                or type(view["seq"]) is not int or view["seq"] < 0
+                or not (isinstance(generation, str) and 0 < len(generation) <= 128
+                        or type(generation) is int and generation >= 0)
+                or not isinstance(view["fresh"], bool)
+                or not math.isfinite(parse_epoch(view["observedAt"], "observedAt"))):
+            raise BadRequest("invalid turn_views sample")
+    return json.dumps(value, ensure_ascii=False)
+
+
 class BadRequest(Exception):
     pass
 
@@ -350,7 +371,8 @@ CREATE TABLE IF NOT EXISTS workers (
     note         TEXT,
     state        TEXT,
     progress_at  REAL,
-    task_id      TEXT
+    task_id      TEXT,
+    turn_views_json TEXT DEFAULT NULL
 );
 
 CREATE TABLE IF NOT EXISTS tasks (
@@ -504,7 +526,8 @@ class RouterStore:
                  self._conn.execute("PRAGMA table_info(workers)").fetchall()}
         for column, decl in (("state", "TEXT"), ("progress_at", "REAL"),
                              ("task_id", "TEXT"), ("control_url", "TEXT"),
-                             ("turn_source", "TEXT"), ("control_sse", "INTEGER DEFAULT 0")):
+                             ("turn_source", "TEXT"), ("control_sse", "INTEGER DEFAULT 0"),
+                             ("turn_views_json", "TEXT DEFAULT NULL")):
             if column not in wcols:
                 self._conn.execute(
                     "ALTER TABLE workers ADD COLUMN %s %s" % (column, decl))
@@ -623,7 +646,8 @@ class RouterStore:
 
     def heartbeat(self, name: str, state: Optional[str] = None,
                   progress_at: Optional[float] = None,
-                  task_id: Any = UNSET, turn_source: Any = UNSET) -> bool:
+                  task_id: Any = UNSET, turn_source: Any = UNSET,
+                  turn_views_json: Optional[str] = None) -> bool:
         now = time.time()
         with self._lock:
             row = self._conn.execute(
@@ -643,6 +667,9 @@ class RouterStore:
             if turn_source is not UNSET:
                 updates.append("turn_source=?")
                 values.append(turn_source)
+            if turn_views_json is not None:
+                updates.append("turn_views_json=?")
+                values.append(turn_views_json)
             self._conn.execute("UPDATE workers SET " + ", ".join(updates) +
                                " WHERE name=?", values + [name])
             # A reconnect may have requeued a task whose native turn is still
@@ -651,30 +678,32 @@ class RouterStore:
                     and turn_source == "router" and task_id is not UNSET and task_id):
                 self._conn.execute(
                     "UPDATE tasks SET state='running', started_at=COALESCE(started_at, ?)"
-                    " WHERE task_id=? AND worker=? AND state='queued' AND dispatch_attempted=1",
-                    (now, task_id, name))
+                    " WHERE task_id=? AND worker=? AND state='queued' AND dispatch_attempted=1"
+                    " AND NOT EXISTS(SELECT 1 FROM tasks WHERE worker=?"
+                    " AND state IN ('running', 'paused', 'cancelling'))",
+                    (now, task_id, name, name))
             self.refresh_counts(name)
         return True
 
     def refresh_counts(self, name: str) -> None:
         with self._lock:
-            busy = self._conn.execute(
-                "SELECT COUNT(*) AS c FROM tasks"
-                " WHERE worker=? AND state IN ('running', 'cancelling')", (name,)).fetchone()["c"]
-            queued = self._conn.execute(
-                "SELECT COUNT(*) AS c FROM tasks"
-                " WHERE worker=? AND state='queued'", (name,)).fetchone()["c"]
             self._conn.execute(
-                "UPDATE workers SET busy=(? OR (COALESCE(turn_source, '') IN ('trainer', 'router')"
-                " AND state IN ('running', 'inProgress', 'waiting_input', 'waiting_approval'))),"
-                " queued=? WHERE name=?",
-                (int(busy), int(queued), name))
+                "UPDATE workers SET busy=EXISTS(SELECT 1 FROM tasks"
+                " WHERE worker=? AND state IN ('queued', 'running', 'paused')),"
+                " queued=(SELECT COUNT(*) FROM tasks WHERE worker=? AND state='queued')"
+                " WHERE name=?", (name, name, name))
 
-    def running_count(self, name: str) -> int:
+    def blocking_task(self, name: str) -> Optional[Dict[str, Any]]:
         with self._lock:
-            return int(self._conn.execute(
-                "SELECT COUNT(*) AS c FROM tasks"
-                " WHERE worker=? AND state IN ('running', 'cancelling')", (name,)).fetchone()["c"])
+            row = self._conn.execute(
+                "SELECT * FROM tasks WHERE worker=? AND state IN ('running', 'paused', 'cancelling')"
+                " ORDER BY (state='paused') DESC, rowid LIMIT 1", (name,)).fetchone()
+        return self._task_dict(row) if row else None
+
+    def cancelling_tasks(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute("SELECT * FROM tasks WHERE state='cancelling'").fetchall()
+        return [self._task_dict(row) for row in rows]
 
     def queued_count(self, name: str) -> int:
         with self._lock:
@@ -1819,6 +1848,7 @@ class RouterServer(ThreadingHTTPServer):
         self.conn_lock = threading.Lock()
         self.dispatch_lock = threading.RLock()
         self.idle_observations: Dict[str, float] = {}
+        self.cancellations_changed = threading.Event()
         self.question_lock = threading.Lock()
         self.question_requests: Dict[str, Dict[str, Any]] = {}
         super().__init__(addr, RouterHandler)
@@ -2097,7 +2127,7 @@ class RouterServer(ThreadingHTTPServer):
             # A reconnect is at-least-once: anything still marked running was
             # sent over the previous stream, so hand it out again.
             self.store.requeue_running(name)
-            self.flush_backlog_locked(name)
+            self.dispatch_one(name)
             self.flush_peer_messages_locked(conn)
         log.info("stream attached name=%s version=%s (queued=%d)",
                  name, version or "-", self.store.queued_count(name))
@@ -2170,9 +2200,7 @@ class RouterServer(ThreadingHTTPServer):
             conn = self.current_conn(worker)
             if conn is None or conn.closed:
                 return None
-            if self.store.running_count(worker) > 0:
-                return None
-            if (self.store.get_worker(worker) or {}).get("busy"):
+            if self.store.blocking_task(worker) is not None:
                 return None
             task = self.store.claim_next_queued(worker)
             if task is None:
@@ -2183,32 +2211,33 @@ class RouterServer(ThreadingHTTPServer):
                 return None
             return task
 
-    def flush_backlog_locked(self, worker: str) -> int:
-        """Recover accepted work within the configured admission policy."""
-        conn = self.current_conn(worker)
-        if conn is None or conn.closed:
-            return 0
-        if self.backlog_max <= 1:
-            return int(self.dispatch_one(worker) is not None)
-        self.expire_queued_tasks()
-        info = self.store.get_worker(worker) or {}
-        if info.get("turn_source") == "trainer" and info.get("busy"):
-            return 0
-        if self.store.list_tasks(worker=worker, state="cancelling", limit=1):
-            return 0
-        sent = 0
-        while True:
-            task = self.store.claim_next_queued(worker)
-            if task is None:
-                break
-            if not self.push(conn, task):
-                self.store.requeue_task(task["task_id"])
-                break
-            sent += 1
-        self.store.refresh_counts(worker)
-        if sent:
-            log.info("backlog flushed name=%s tasks=%d", worker, sent)
-        return sent
+    def sweep_cancellations(self) -> Optional[float]:
+        """Release overdue cancellations and return the next persisted deadline."""
+        expired = []
+        next_deadline = None
+        with self.dispatch_lock:
+            now = time.time()
+            for task in self.store.cancelling_tasks():
+                result = task.get("result") or {}
+                requested_at = result.get("cancel_requested_at")
+                if type(requested_at) not in (int, float) or not math.isfinite(requested_at):
+                    requested_at = task.get("started_at") or task.get("created_at") or 0
+                deadline = requested_at + CANCEL_TIMEOUT_S
+                if deadline > now:
+                    next_deadline = deadline if next_deadline is None else min(next_deadline, deadline)
+                    continue
+                result = {**result, "status": "cancelled", "error_code": "worker_cancel_timeout",
+                          "cancel_confirmed": False,
+                          "summary": "取消确认超时，Router 已释放任务占用，原生执行停止未确认。"}
+                expired.append(self.store.finish_task(task["task_id"], "cancelled", result))
+                self.discard_result_candidate(task["task_id"])
+            for worker in {task["worker"] for task in expired}:
+                self.dispatch_one(worker)
+        for task in expired:
+            notified = self.notifier.notify_result(task, "cancelled", task["result"]["summary"])
+            log.warning("cancel_timeout task_id=%s worker=%s notified=%s",
+                        task["task_id"], task["worker"], notified)
+        return next_deadline
 
     def expire_queued_tasks(self) -> int:
         with self.dispatch_lock:
@@ -2221,7 +2250,7 @@ class RouterServer(ThreadingHTTPServer):
 
 
 class ApprovalSweeper(threading.Thread):
-    """Expire pending approvals and unstarted tasks even without polling."""
+    """Expire approvals, waiting tasks and cancellations without worker traffic."""
 
     def __init__(self, store: RouterStore,
                  interval: float = APPROVAL_SWEEP_S,
@@ -2230,19 +2259,33 @@ class ApprovalSweeper(threading.Thread):
         self.store = store
         self.server = server
         self.interval = max(1.0, float(interval))
-        self._stop = threading.Event()
+        self._stopping = threading.Event()
+        self._wake = server.cancellations_changed if server is not None else threading.Event()
 
     def run(self) -> None:
-        while not self._stop.wait(self.interval):
+        next_periodic = time.monotonic() + self.interval
+        while not self._stopping.is_set():
+            self._wake.clear()
+            deadline = None
             try:
-                self.store.expire_approvals()
                 if self.server is not None:
-                    self.server.expire_queued_tasks()
+                    deadline = self.server.sweep_cancellations()
+                if time.monotonic() >= next_periodic:
+                    next_periodic = time.monotonic() + self.interval
+                    self.store.expire_approvals()
+                    if self.server is not None:
+                        self.server.expire_queued_tasks()
             except Exception:  # noqa: BLE001
-                log.exception("approval/queue sweep failed")
+                log.exception("approval/task sweep failed")
+            delay = max(0.0, next_periodic - time.monotonic())
+            if deadline is not None:
+                delay = min(delay, max(0.0, deadline - time.time()))
+            if not self._stopping.is_set():
+                self._wake.wait(delay)
 
     def stop(self) -> None:
-        self._stop.set()
+        self._stopping.set()
+        self._wake.set()
 
 
 class RouterHandler(BaseHTTPRequestHandler):
@@ -2898,9 +2941,10 @@ class RouterHandler(BaseHTTPRequestHandler):
         turn_source = body.get("turn_source", UNSET)
         if turn_source is not UNSET and turn_source not in (None, "trainer", "router"):
             raise BadRequest("turn_source must be trainer, router or null")
+        turn_views = parse_turn_views(body["turn_views"]) if "turn_views" in body else None
         with self.server.dispatch_lock:
             previous = self.server.store.get_worker(name)
-            if not self.server.store.heartbeat(name, state, progress_at, task_id, turn_source):
+            if not self.server.store.heartbeat(name, state, progress_at, task_id, turn_source, turn_views):
                 return 404, {"ok": False, "error": "unknown_worker", "worker": name}
             if state == "idle":
                 # Repeated idle heartbeats retain the original pulse, so a
@@ -3005,29 +3049,26 @@ class RouterHandler(BaseHTTPRequestHandler):
                 return 400, {"ok": False, "error": "unknown_worker",
                              "worker": worker_name}
 
-            running = store.running_count(worker_name)
+            blocking = store.blocking_task(worker_name)
             queued = store.queued_count(worker_name)
-            if ((self.server.backlog_max == 0 and (worker["busy"] or running or queued))
-                    or (self.server.backlog_max == 1 and queued >= 1)):
-                current = store.get_task(worker["task_id"]) if worker["task_id"] else None
-                if (current is None or current["worker"] != worker_name
-                        or current["state"] not in ("running", "cancelling")):
-                    active = (store.list_tasks(worker=worker_name, state="running", limit=1)
-                              or store.list_tasks(worker=worker_name, state="cancelling", limit=1)
-                              or store.list_tasks(worker=worker_name, state="queued", limit=1,
-                                                  oldest_first=True))
-                    current = active[0] if active else None
+            if blocking is not None and blocking["state"] == "paused":
+                return 409, {
+                    "ok": False, "error": "worker_paused", "worker": worker_name,
+                    "busy": True, "task_id": blocking["task_id"],
+                    "message": "resume or cancel the paused task before dispatching new work",
+                }
+            if blocking is not None or (self.server.backlog_max <= 1 and queued):
+                current = blocking or store.list_tasks(worker=worker_name, state="queued", limit=1,
+                                                       oldest_first=True)[0]
                 return 409, {
                     "ok": False, "error": "worker_busy", "worker": worker_name,
-                    "busy": True, "task_id": current["task_id"] if current else None,
-                    "turn_source": worker["turn_source"] or ("router" if current else None),
+                    "busy": True, "task_id": current["task_id"], "turn_source": "router",
                     "retry_when": "current_task_accepted_and_worker_idle",
-                    "message": "wait for the current task to complete acceptance and "
-                               "GET /workers to report busy=false, then retry",
+                    "message": "wait for the outstanding task to finish, then retry",
                 }
 
             online = self.server.online(worker_name)
-            if online and running == 0 and queued == 0 and not worker["busy"]:
+            if online and queued == 0:
                 task = store.create_task(
                     worker_name, goal, context, workspace, urgency,
                     state="running", deadline_s=deadline_s,
@@ -3112,7 +3153,7 @@ class RouterHandler(BaseHTTPRequestHandler):
                                "drain or pick another worker"
                                % self.server.backlog_max,
                 }
-            ahead = queued + store.running_count(worker_name)
+            ahead = queued
             task = store.create_task(
                 worker_name, goal, context, workspace, urgency,
                 state="queued", deadline_s=deadline_s,
@@ -3138,12 +3179,14 @@ class RouterHandler(BaseHTTPRequestHandler):
             if not already and task["state"] in TERMINAL_STATES:
                 return 409, {"ok": False, "error": "not_cancellable",
                              "task_id": task_id, "state": task["state"]}
-            was_running = (task["state"] in ("running", "cancelling") or
+            was_running = (task["state"] in ("running", "paused", "cancelling") or
                            task["state"] == "queued" and task.get("dispatch_attempted") is not False)
             retry_delivery = task["state"] == "cancelling"
             if not already:
                 task = self.server.store.cancel_task(task_id, pending=was_running)
                 self.server.store.refresh_counts(task["worker"])
+                if was_running:
+                    self.server.cancellations_changed.set()
         delivery = ((task.get("result") or {}).get("cancel_delivery") or {"ok": True, "confirmed": True}
                     if already else {"ok": True, "skipped": "queued_task"})
         if was_running or retry_delivery:
@@ -3155,9 +3198,12 @@ class RouterHandler(BaseHTTPRequestHandler):
             dispatched = self.server.dispatch_one(task["worker"]) if task["state"] == "cancelled" else None
         log.info("task cancelled id=%s worker=%s delivery=%s", task_id, task["worker"], delivery)
         pending = task["state"] == "cancelling"
+        message = "等待 Worker 确认执行停止" if pending else "执行已停止"
+        if (task.get("result") or {}).get("cancel_confirmed") is False:
+            message = task["result"]["summary"]
         return (202 if pending else 200), {"ok": bool(delivery.get("ok")), "task_id": task_id, "state": task["state"],
                      "already": already, "cancel_delivery": delivery,
-                     "message": "等待 Worker 确认执行停止" if pending else "执行已停止",
+                     "message": message,
                      "dispatched_next": dispatched["task_id"] if dispatched else None}
 
     def _task_cancel_ack(self, task_id: str, body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:

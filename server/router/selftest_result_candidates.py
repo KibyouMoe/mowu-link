@@ -269,7 +269,7 @@ class IdleSettlementTests(unittest.TestCase):
 
     def test_repeated_idle_pulse_cannot_finish_the_next_queued_task(self):
         task = self.task()
-        _, queued = self.call("/tasks", {"worker": self.worker, "goal": "next"})
+        queued = self.store.create_task(self.worker, "previously accepted next task")
         self.report(task)
         self.heartbeat(task_id=task)
         self.assertEqual(self.store.get_task(queued["task_id"])["state"], "running")

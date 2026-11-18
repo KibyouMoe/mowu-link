@@ -136,7 +136,7 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.hermes.router.plist
 |---|---|---|---|
 | POST | `/register` | `{name, version?, note?}` | `{ok, name, queued, online, new}` |
 | GET | `/stream?name=&version=` | SSE 长连接 | 见第四节 |
-| POST | `/heartbeat` | `{name, state?, progress_at?, task_id?}` | `{ok, name, online, busy, queued, last_seen}` |
+| POST | `/heartbeat` | `{name, state?, progress_at?, task_id?, turn_views?}` | `{ok, name, online, busy, queued, last_seen}` |
 | POST | `/result` | `{name, task_id, status, summary, summary_short?, artifacts?, evidence?, outcome?, error_code?}` | 200 终态或 202 `{ok, task_id, state, candidate:true, reason, notified:false}` |
 | POST | `/result/responses` | `{request_id, worker, status, body}` | 旧在途观察器请求的兼容回执 |
 | POST | `/notice` | `{worker, text, kind?, urgency?, task_id?, status?}` | `{ok, trigger_id, level, duplicate}` 或 `{ok:false, error}` |
@@ -329,20 +329,20 @@ GET 返回完整题面、选项、`status`、`answeredBy`、`nativePanelSync`、
 重试答案沿用持久问题状态和原生消息 UUID，原生投递不明时保留待核实状态。
 此通道不创建工单，也不占工单等待位；worker 本机 `/bridge/questions/{id}` 保持兼容。
 
-默认 `--backlog-max 1`，每个 worker 同时运行一张工单，并可等待一张。
+默认 `--backlog-max 1`，每个 worker 同时投递一张工单。该配置控制等待容量。
 
 ```
 worker 不存在                          → 400 unknown_worker
-worker 在线且空闲、既有队列为空          → 200 {task_id, state:"running", dispatched:true}
-worker 忙碌、等待位为空                  → 200 {task_id, state:"queued", queued:true, queued_ahead:1}
+worker 在线、任务位空闲、既有队列为空    → 200 {task_id, state:"running", dispatched:true}
+已有 running 或未到期的 cancelling      → 409 {error:"worker_busy", task_id, turn_source, retry_when}
+已有 paused                             → 409 {error:"worker_paused", task_id}
 已有一张等待单                          → 409 {error:"worker_busy", task_id, turn_source, retry_when}
 worker 离线 + queue_if_offline=false    → 409 worker_offline
 worker 离线 + queue_if_offline=true     → 200 queued（仍限一个等待位）
 ```
 
 `worker_busy` 的 `task_id` 优先指向运行或取消中的真实工单，其次指向最早的等待单。
-trainer 回合没有工单时为 `null`，`turn_source` 保留 `trainer`。
-`retry_when` 保留 `current_task_accepted_and_worker_idle`，等待当前单收尾验收并重新核对空闲与等待位。
+`retry_when` 保留旧值 `current_task_accepted_and_worker_idle`，实际重试条件由任务占用决定。
 拒收的创建 UUID 不占位，可原样重试。已接受工单的同 UUID、同请求重试返回原工单
 及 `duplicate:true`，包括排队、过期失败和终态；改请求内容返回 `message_id_conflict`。
 
@@ -354,43 +354,44 @@ trainer 回合没有工单时为 `null`，`turn_source` 保留 `trainer`。
 运行中、已下发后断线恢复的单不受排队 TTL 限制。匹配原工单的活动 router 心跳可将
 断线重排的运行单恢复为 `running`，它旁边的看守单仍只占一个等待位。
 
-默认一格及显式 `--backlog-max 0` 的重连均按 FIFO 每次恢复一条，前单完成后自动续推。
+各等待容量的重连均按 FIFO 每次恢复一条，前单完成后自动续推。
 显式 0 保留零等待模式：忙碌时拒收新单，离线拒收，恢复已接受的单仍受占用检查。
 
 显式设置大于 1 的容量（例如 `--backlog-max 128`）时沿用排队协议。
 
 ```
-worker 在线但忙                        → 202 {task_id, state:"queued", queued:true, queued_ahead:N}
 worker 离线 + queue_if_offline=false   → 409 {error:"worker_offline", worker}
 worker 离线 + queue_if_offline=true    → 202 {task_id, queued:true, queued_ahead:N}
 排队/积压已达配置容量                  → 429 {error:"backlog_full", queued, limit}
 ```
 
-`queued_ahead` 包含正在跑的那条。`queue_if_offline` 缺省为 `false`，必须是 JSON 布尔。
+`queued_ahead` 是前面的等待任务数。`queue_if_offline` 缺省为 `false`，必须是 JSON 布尔。
 
 任务状态：
 
 ```
 queued ──dispatch──> running ──/result done──> done
    │                    │      └─/result failed─> failed
-   │                    └──cancel──> cancelling ──执行体确认停止──> cancelled
+   │                    └──cancel──> cancelling ──确认／60 秒超时──> cancelled
    └──────cancel──────> cancelled
 ```
 
-- 正常派发（`POST /tasks` 且空闲、交活后续推）每次只推一条，因此同一时刻通常
-  只有一条 `running`。`busy` 包含运行/取消中的工单，以及心跳确认的人工或 router 活动回合。
-- 显式容量大于 1 时，离线积压在上线时**按创建顺序一次性推**（`flush_backlog`）；这一次可能同时
-  有多条 `running`（`ROUTER.md`「上线时按顺序一次性推」的直译），全部交回后
-  才继续推后续排队任务。
+- `workers.busy` 只投影 `queued/running/paused`。原生对话活动由既有 `state/turn_source` 表达。
+  仅有 `cancelling` 时，`busy=false`，派单仍会在取消收尾期间返回真正的工单占用。
+  已接受的等待任务按 FIFO 单次推一条。
+- Router 读取已有的 `paused` 状态并拒绝新派单。本阶段没有新增暂停或恢复入口。
 - 断线时，该 worker 的 `running` 任务回到 `queued`；重连后会再次下发。
   语义是 **at-least-once**，worker 需按 `task_id` 幂等。
 - 取消运行中的任务先进入 `cancelling`，经原鉴权 SSE 的 `task_cancel` 交给 Worker。
   Worker 向 `/tasks/{id}/cancel-ack` 回传精确执行状态，确认停止后进入 `cancelled` 并派下一条。
-  不支持 SSE 控制的旧 Worker 使用已登记的 `control_url`，投递失败继续保留取消中状态。
+  不支持 SSE 控制的旧 Worker 使用已登记的 `control_url`。
+  无确认时后台按首次取消时间的 60 秒期限写入 `cancelled`，释放占用并按终态发一条通知。
+  结果 `error_code=worker_cancel_timeout`、`cancel_confirmed=false` 表示原生停工未确认。
   取消期间迟到的 `/result` 保留等待停止，已取消的结果回传返回 `duplicate:true`。
-- 心跳的 `turn_source` 接受 `trainer`、`router` 或 `null`，活动回合期间零容量返回
-  409 `worker_busy`，正容量接收为排队任务。
-  交活时清空 `task_id`，将 `progress_at` 更新到同一完成时刻。
+- 心跳的 `turn_source` 接受 `trainer`、`router` 或 `null`。
+  可选的 `turn_views` 按 thread ID 组织，条目为 `{phase,turnId,observedAt,seq,generation,fresh}`，
+  `phase` 可为 `thinking/outputting/idle`。写入 `workers.turn_views_json`，缺省为 SQL NULL。
+  调度和看板继续使用既有数据源，省略采样的心跳不更新该列。
 - `urgency` 只记录并透传给 worker（`urgent` / `normal`），排队仍是 FIFO；
   `deadline_s` 落库并算出 `deadline_at`，0.3.0 仍不做超时回收。
 
@@ -532,7 +533,7 @@ GET /subscriptions/pending?worker=波旁&limit=50
 | ③ 断线删订阅、订阅不留存 | 完成 | `RouterServer.detach` → `purge_subscriptions` |
 | ④ worker SDK | 未做（本次范围外） | — |
 | §二 `queue_if_offline` 语义 | 完成 | 见第三节 |
-| §二 积压上限 | 完成 | `--backlog-max` 默认 1，第一张等待单 200、第二张 409；显式大容量超限 429 |
+| §二 积压上限 | 完成 | `--backlog-max` 默认 1，离线第一张等待单 200、第二张 409；显式大容量超限 429 |
 | §五 结果回流 | 完成 | 见第五节 |
 | worker → Hermes 递话 | 0.2.0 新增 | `POST /notice` |
 | ⑨ 聊天旁听（只存不发） | 0.3.0 新增 | `chat_messages` 表 + `_chat_log` / `_chat_messages` / `_chat_summary` |
@@ -545,6 +546,8 @@ GET /subscriptions/pending?worker=波旁&limit=50
 /usr/bin/python3 server/router/selftest_router.py
 # 端口被占时：
 ROUTER_TEST_PORT=18790 python3 server/router/selftest_router.py
+# 真等取消期限，使用隔离 Router：
+ROUTER_TEST_REAL_CANCEL_TIMEOUT=1 python3 server/router/selftest_two_layer_state.py -v
 ```
 
 自测启动临时 trigger 和 router 进程，用真实 HTTP 和真实 SSE 跑完整链路。
@@ -562,7 +565,7 @@ ROUTER_TEST_PORT=18790 python3 server/router/selftest_router.py
 4. 交活 → `done` → trigger 库出现 `source=任务完成 kind=task.result level=event`
 5. 断线 → offline（名字保留）→ 409 → `queue_if_offline` 202 →
    重连按顺序补推两条积压 → 交活
-6. 忙时第二条排队（不提前推）→ 第一条交活后第二条自动下发
+6. 已接受的积压按 FIFO 续投：第一条交活后第二条自动下发
 7. 取消排队 / 运行中任务；迟到 result 被忽略
 8. 离线积压 128 条全部 202，第 129 条 429 `backlog_full`
 9. 订阅：201 → `trigger_id` → trigger 侧 active → pending 拉到事件 →
@@ -580,8 +583,8 @@ ROUTER_TEST_PORT=18790 python3 server/router/selftest_router.py
     `(worker, message_id, direction)` 重复 `duplicate:true` 且不新增 →
     同 `message_id` 换方向是新行 → `limit` / `since`（id 与 epoch）/
     `direction` 过滤 → `summary` 60/180 分钟 in/out 计数与 `last`
-16. 默认零等待位，trainer 活动状态、router 活动回合、运行及取消中工单返回
-    409 `worker_busy`，携带当前单与回合来源、`retry_when`、验收和 `busy=false` 重试提示
+16. 零等待位及正容量均按实存工单占用拒绝并发派单，返回 `worker_busy` 和原工单 ID。
+    trainer 活动回合继续可读，对话活动不占任务位。
 17. 拒收 UUID 在空闲后重试成功，已接受 UUID 在忙碌、取消中、终态和离线时精确幂等
 18. 八个不同 UUID 并发只有一个派发赢家，其余 UUID 可重试；拒收后的数据库校验
 19. `queue_if_offline=true` 在零容量离线时返回 409，已接受的旧排队任务可重连恢复
