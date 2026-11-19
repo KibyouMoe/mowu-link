@@ -119,9 +119,12 @@ cancelling  取消中：已经向 worker 要取消协议，正在等回执
 
 **`cancelling` 期间的行为**：
 - **不得索取总结**（这张单已经不要了，不是正常收尾）
-- 只做「要取消协议」这一件事，按 `summary_request_max_attempts` 重试
+- **轮询式下发**：只要 worker 闲下来就再发一次取消指令，然后等它下一次空闲；不是等它"状态变化"才动
+- **worker 空闲且 `TaskID=0` → 立刻归档**（它手上已经没有这张单，等于取消已生效），不等回执、不等重试
+- worker 仍报着这张 `TaskID` → 继续按空闲轮询下发取消
 - 收到 worker 的取消回执 → 清 TaskID、归档（reason=worker_cancel）
 - 重试耗尽仍无回执 → 视同失联：归档 + 通知溪流（reason=archive_unconfirmed）
+- **`cancelling` 不得无限期占用**：任何情况下结束（归档），不允许把后续派单堵死
 
 **同一个触发点，按状态分派动作**（训练员 2026-11-19）：
 
