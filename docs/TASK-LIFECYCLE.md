@@ -47,7 +47,7 @@ goal 模式由 worker 自己决定，Router 不管。
 ```
 
 - 次数上限 `summary_request_max_attempts`（默认 3，含第 1 次），可配置。
-- 最后一次等待期满仍无总结 → 向溪流报警一次，任务保留，可继续接收总结；取消须单独发起。
+- 最后一次索取后再攒满一个空闲阈值仍无总结 → 归档并向溪流报警一次。取消须单独发起。
 
 ## 取消
 
@@ -67,7 +67,7 @@ goal 模式由 worker 自己决定，Router 不管。
 
 在线取消到达时，worker 在当前回合直接停止该 TaskID 对应的执行；已排队的输入可撤回，已结束的回合可直接核对。停手确认后以原 request_id 回执；收到归档回执后才清本地 TaskID。Codex 缺少原生停手能力时，worker 停止任务的后续派发，并用同一个取消请求回报「已收到，本轮结束后停」。Router 记录 `cancel_deferred`，保留 TaskID。确认该回合已退出后，worker 走同一成果回执接口提交 `reason=user_cancel`，再清 TaskID。原生停止出现其他错误时，保留 TaskID 并记录原因。
 
-用 task_id 和 request_id 对账：Router 写完 SSE 帧记 `cancel_sent`；worker 收到记 `cancel_received`，确认停止记 `cancel_stopped`；Router 接收回执并归档记 `cancel_acked`。到期未获确认记 `cancel_timeout`，安排下一次请求时记 `cancel_retry`。
+用 task_id 和 request_id 对账：Router 写完 SSE 帧记 `cancel_sent`；worker 收到记 `cancel_received`，确认停止记 `cancel_stopped`；Router 接收回执并归档记 `cancel_acked`。安排下一次请求时记 `cancel_retry`，索取次数耗尽记 `request_exhausted`。
 
 ### 打招呼后的等待（与总结索取同一套参数）
 
@@ -84,7 +84,7 @@ goal 模式由 worker 自己决定，Router 不管。
 
 ## 注册握手
 
-注册携带本地 TaskID。仍由该 worker 持有时，Router 返回「这单还在」、`resume_task_id` 与 `resume_prompt`；连接后复用原任务及派发回执续接，保持同一 TaskID。若该单正在等取消确认，重连时重发同一取消请求。已取消的单返回 `clear_task_id` 和取消提示；已收总结的单返回归档确认。TaskID 为 0 时正常注册。
+注册携带本地 TaskID。仍由该 worker 持有时，Router 返回「这单还在」、`resume_task_id` 与 `resume_prompt`；连接后复用原任务及派发回执续接，保持同一 TaskID。若该单正在等取消确认，注册回执提供现有请求 ID，下一次索取按空闲阈值触发。已取消的单返回 `clear_task_id` 和取消提示；已收总结的单返回归档确认。TaskID 为 0 时正常注册。
 
 ## 心跳
 
@@ -133,7 +133,7 @@ worker 没有这张 TaskID  → 直接归档，一条指令都不用发
 - 无持有时：**立即归档**（reason=worker_cancel / cancelled_without_ack），不等回执、不等重试
 - 收到回执 → 清 TaskID、归档（reason=worker_cancel）
 - 重试耗尽仍无回执 → 视同失联：归档 + 通知溪流（reason=archive_unconfirmed）
-- **从第一次请求起最多 180 秒**。持续忙碌、心跳静默和重连均不延长截止时间。到期归档为 `archive_unconfirmed` 并通知溪流，释放 Router 派单位。worker 仍报旧 TaskID 时走既有清零纠偏。
+- 发送后空闲计时归零。持续忙碌或缺少新鲜心跳时，等待下一次可确认的空闲；归档后若 worker 仍报旧 TaskID，走清零纠偏。
 
 **同一个触发点，按状态分派动作**（训练员 2026-11-19）：
 
@@ -149,6 +149,9 @@ Worker 闲下来
 
 ## 索取请求不设时间限制（训练员 2026-11-19 定，最终口径）
 
+**这套重试的目的只有一个：防止 worker 一直收不到 Router 的消息。**
+它不是惩罚执行慢，也不是给请求设截止时间——只是"没送到就再送一次"。
+
 Router 向 worker 索取总结/取消：**发出去就不管了**，不给这条请求设超时。
 
 发完那一刻，Router 侧把这一轮**当成繁忙**处理：
@@ -163,7 +166,7 @@ Router 向 worker 索取总结/取消：**发出去就不管了**，不给这条
 ```
 
 **整套里唯一与时间有关的参数只有一个：`idle_task_end_minutes`**。
-不存在 wait_turn 超时、按请求计的计时器；`wait_turn/native_report_turn_timeout` 一律作废。
+请求发出后只累计经心跳确认的空闲时长。
 
 ## 异常判定（只有一条）
 
@@ -198,8 +201,8 @@ worker 侧：TaskID 已是 0，无需再清
 
 「索取任务总结」与「取消确认」走**同一套机制**（参数与应答通道相同），但**两件事各自独立，不许串成一条链**：
 
-- 共用 `idle_task_end_minutes` 和 `summary_request_max_attempts`。取消额外受最多 3 次、总计 180 秒的限制
+- 共用 `idle_task_end_minutes` 和 `summary_request_max_attempts`。
 - 同一个应答通道：工具调用回执（`submit_deliverable` 那一类），不走私信抄送
-- **要求总结就是要求总结**：试满次数仍拿不到总结 → 只报警给溪流，**不转取消、不叠取消次数**
+- **要求总结就是要求总结**：试满次数仍拿不到总结 → 归档并报警给溪流，**不转取消、不叠取消次数**
 - **要求取消就是要求取消**：试满次数拿不到停手确认 → 视同失联，归档并通知溪流
 - 两条线的重试次数各自独立计，互不消耗
