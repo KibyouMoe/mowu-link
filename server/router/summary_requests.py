@@ -207,22 +207,24 @@ class SummaryRequests:
             conn.reoffer_after_cancel = True
         logging.getLogger("router").info("cancel_observed worker=%s task=%s reason=cancelled_without_ack", name, tid)
 
-    def archive_exhausted(self, task, purpose):
+    def exhaust_requests(self, task, conn, purpose):
         name, tid = task["worker"], task["task_id"]
-        if purpose == "cancel":
-            self.offline_archive(task, "archive_unconfirmed")
-        else:
-            with self.orders.atomic():
-                self.orders.archive(tid, "summary_missing")
-                self.notice(task, "summary_missing", f"{tid} 多次索取总结仍无回执，已归档。", reason="summary_missing")
         logging.getLogger("router").warning(
             "request_exhausted worker=%s task=%s purpose=%s attempts=%s", name, tid, purpose, self.max_attempts,
         )
+        if purpose == "summary":
+            with self.orders.atomic():
+                self.notice(
+                    task, "summary_missing", f"{tid} 多次索取总结仍无回执，已转取消。",
+                    reason="summary_missing",
+                )
+                self.contact(task, conn, "cancel", 1)
+            return
+
+        self.offline_archive(task, "archive_unconfirmed")
         self.samples.pop(name, None)
-        conn = self.server.current_conn(name)
-        if conn:
-            conn.awaiting_clear = False
-            conn.reoffer_after_cancel = True
+        conn.awaiting_clear = False
+        conn.reoffer_after_cancel = True
         self.server.dispatch_one(name)
 
     def wait_for_release(self, worker):
@@ -343,12 +345,19 @@ class SummaryRequests:
     def observe(self, name, reported, busy):
         with self.server.dispatch_lock:
             now = self.clock()
+            if busy:
+                sample = self.samples.pop(name, None)
+                if sample:
+                    logging.getLogger("router").info(
+                        "worker_idle_reset worker=%s task=%s reason=busy previous_idle_elapsed=%.3f idle_elapsed=0",
+                        name, sample[0], now - sample[1],
+                    )
+                return
             conn = self.server.current_conn(name)
             task = self.orders.get(reported) if reported else None
             if (
                 not conn
                 or conn.closed
-                or busy
                 or not task
                 or task["worker"] != name
                 or not task["in_running_tasks"]
@@ -386,7 +395,7 @@ class SummaryRequests:
         if len(requests) < self.max_attempts:
             self.contact(task, conn, purpose, len(requests) + 1)
         else:
-            self.archive_exhausted(task, purpose)
+            self.exhaust_requests(task, conn, purpose)
 
     def sweep(self):
         with self.server.dispatch_lock:

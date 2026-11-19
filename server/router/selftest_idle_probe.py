@@ -269,9 +269,20 @@ class ProbeTests(unittest.TestCase):
         self.api.lifecycle.max_attempts = 4
         self.now += 600
         self.api.lifecycle.sweep()
-        self.advance(120, "busy")
+        self.beat()
+        self.advance(10)
+        with self.assertLogs("router", level="INFO") as logs:
+            self.advance(120, "busy")
         self.assertTrue(self.conn.queue.empty())
         self.assertEqual(self.saved()["state"], "cancelling")
+        def attempts():
+            return [f["attempt"] for f in self.store.orders.facts(self.task) if f["kind"] == "cancel_request"]
+        self.assertEqual(attempts(), [1])
+        reset = [line for line in logs.output if "worker_idle_reset" in line]
+        self.assertEqual(len(reset), 1)
+        self.assertIn("reason=busy previous_idle_elapsed=15.000 idle_elapsed=0", reset[0])
+        print(reset[0])
+        print("cancel: silent 600s + busy 120s = 0 retries; retained TaskID")
         self.assertTrue(self.post(route, {})[1]["duplicate"])
         self.beat()
         for attempt in (2, 3, 4):
@@ -280,6 +291,11 @@ class ProbeTests(unittest.TestCase):
             self.advance(1)
             q = self.take()
             self.assertEqual((q["purpose"], q["attempt"]), ("cancel", attempt))
+            if attempt == 2:
+                self.beat()
+                self.assertTrue(self.conn.queue.empty())
+                self.assertEqual(attempts(), [1, 2])
+                print("cancel: busy → idle 29s = 0 retries; idle 30s = exactly 1 retry (attempt=2)")
         self.advance(30)
         self.assertEqual(self.saved()["archive"]["reason"], "archive_unconfirmed")
         self.assertEqual(self.conn.queue.get_nowait()["data"]["task_id"], queued["task_id"])
@@ -329,7 +345,7 @@ class ProbeTests(unittest.TestCase):
             "idle 29s=0 requests; 30s=1; summary HTTP 200; TaskID=0; active=false; package=TaskInfo+summary"
         )
 
-    def test_summary_resets_idle_then_archives_and_notifies_once(self):
+    def test_summary_exhaustion_alerts_once_and_starts_cancellation_without_archiving(self):
         with self.assertLogs("router", level="INFO") as logs:
             first = self.first()
             self.assertEqual(first["purpose"], "summary")
@@ -342,15 +358,31 @@ class ProbeTests(unittest.TestCase):
             self.assertTrue(self.saved()["in_running_tasks"])
             self.advance(1)
             self.api.lifecycle.sweep()
-        self.assertTrue(self.conn.queue.empty())
-        self.assertFalse(self.saved()["in_running_tasks"])
-        self.assertEqual(self.saved()["archive"]["reason"], "summary_missing")
+        task = self.saved()
+        self.assertTrue(task["in_running_tasks"])
+        self.assertEqual(task["state"], "cancelling")
+        self.assertIsNone(task["archive"])
+        self.assertFalse(any(f["kind"] == "archive" for f in self.store.orders.facts(self.task)))
+        self.assertEqual(self.store.get_worker("test-worker")["TaskID"], self.task)
         self.assertEqual([e["kind"] for e in self.events], ["task.summary_missing"])
-        self.assertFalse(any(f["kind"] == "cancel_request" for f in self.store.orders.facts(self.task)))
         self.assertFalse(any("timeout" in line for line in logs.output))
-        for line in logs.output[:5]:
-            print(line)
-        print("summary attempts=1,2,3; archived=summary_missing; alerts=1; cancellation requests=0")
+        cancel = self.take()
+        self.assertEqual((cancel["purpose"], cancel["attempt"]), ("cancel", 1))
+        self.assertEqual(self.report(first)[0], 409)
+        self.assertTrue(self.conn.queue.empty())
+        print("summary attempts=1,2,3; alerts=1; state=cancelling; archive facts=0; cancel attempt=1")
+        self.assertEqual(self.report(cancel, action="cancel")[0], 200)
+        self.beat(TaskID=0)
+        self.now += 90
+        self.beat("busy", TaskID=0)
+        self.api.lifecycle.sweep()
+        task = self.saved()
+        self.assertFalse(task["in_running_tasks"])
+        self.assertEqual(task["archive"]["reason"], "worker_cancel")
+        self.assertEqual(sum(f["kind"] == "archive" for f in self.store.orders.facts(self.task)), 1)
+        self.assertEqual([e["kind"] for e in self.events], ["task.summary_missing"])
+        self.assertTrue(self.conn.queue.empty())
+        print("cancel ACK HTTP 200; archive facts=1; reason=worker_cancel")
 
     def test_same_idle_trigger_retries_cancel_on_wire_and_rejects_summary(self):
         # Pause the SSE writer after connecting so the old summary request is
@@ -783,28 +815,35 @@ class ProbeTests(unittest.TestCase):
         p = Path(self.store.path).with_suffix(".json")
         p.write_text(
             json.dumps(
-                {"idle_task_end_seconds": 30, "summary_request_max_attempts": 2}
+                {"idle_task_end_seconds": 20, "summary_request_max_attempts": 2}
             )
         )
         api = self.api.lifecycle = SummaryRequests(self.api, p)
         api.clock = lambda: self.now
         self.beat()
-        self.advance(29)
+        self.advance(19)
         self.assertTrue(self.conn.queue.empty())
         self.advance(1)
         self.assertEqual(self.take()["attempt"], 1)
-        self.advance(30)
+        self.advance(20)
         second = self.take()
         self.assertEqual(second["attempt"], 2)
-        self.advance(30)
+        self.advance(20)
+        cancel = self.take()
+        self.assertEqual((cancel["purpose"], cancel["attempt"]), ("cancel", 1))
+        self.assertIsNone(self.saved()["archive"])
+        self.advance(20)
+        cancel = self.take()
+        self.assertEqual((cancel["purpose"], cancel["attempt"]), ("cancel", 2))
+        self.advance(20)
         self.assertTrue(self.conn.queue.empty())
         self.assertFalse(self.saved()["in_running_tasks"])
-        self.assertEqual(self.saved()["archive"]["reason"], "summary_missing")
-        self.assertEqual([e["kind"] for e in self.events], ["task.summary_missing"])
+        self.assertEqual(self.saved()["archive"]["reason"], "archive_unconfirmed")
+        self.assertEqual([e["kind"] for e in self.events], ["task.summary_missing", "task.offline_archive"])
         self.assertEqual(self.report(second)[0], 409)
         self.assertIsNone(self.saved()["deliverable"])
         print(
-            "config idle_task_end_seconds=30; summary_request_max_attempts=2 -> exactly 2 requests"
+            "config idle_task_end_seconds=20; summary_request_max_attempts=2 -> summary=2; cancel=2; archive=1"
         )
 
     def test_restart_preserves_pending_summary_and_archived_result(self):
