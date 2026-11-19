@@ -128,11 +128,18 @@ class ProbeTests(unittest.TestCase):
         for attempt in (2, 3):
             self.advance(60)
             self.assertEqual(self.take()["attempt"], attempt)
+        self.advance(180)
+        self.assertTrue(self.conn.queue.empty())
+        self.assertTrue(self.saved()["in_running_tasks"])
+        self.assertIsNone(self.saved()["archive"])
+        self.assertEqual([e["kind"] for e in self.events], ["task.summary_missing"])
+        self.assertFalse(any(f["kind"] == "cancel_request" for f in self.store.orders.facts(self.task)))
+        # Only an explicit cancellation starts its own full budget.
+        self.assertEqual(self.post("/tasks/" + self.task + "/cancel", {})[0], 202)
         for attempt in (1, 2, 3):
-            self.advance(60)
             q = self.take()
             self.assertEqual((q["purpose"], q["attempt"]), ("cancel", attempt))
-        self.advance(60)
+            self.advance(60)
         self.assertEqual(
             self.saved()["archive"]["reason"], "cancel_greetings_unanswered"
         )
@@ -141,7 +148,7 @@ class ProbeTests(unittest.TestCase):
             ["task.summary_missing", "task.offline_archive"],
         )
         print(
-            "summary attempts=1,2,3; summary_missing event=1; cancel attempts=1,2,3; archived without worker confirmation; offline_archive event=1"
+            "summary attempts=1,2,3; summary_missing event=1; still active; automatic cancellations=0; manual cancel attempts=1,2,3; archived without worker confirmation; offline_archive event=1"
         )
 
     def test_online_cancel_requires_worker_and_offline_reconciliation(self):
@@ -166,6 +173,79 @@ class ProbeTests(unittest.TestCase):
         print(
             "online cancel greeting=202; wrong worker=409; worker cancel=200, archived; offline cancel=200; register=已取消 + cancel_prompt"
         )
+
+    def test_first_registration_clears_offline_cancel_before_heartbeat(self):
+        self.beat("busy")
+        self.api.detach(self.conn)
+        self.assertTrue(self.post("/tasks/" + self.task + "/cancel", {})[1]["archived"])
+        with self.assertLogs("router", level="INFO") as logs:
+            status, reply = self.post("/register", {"name": "test-worker", "TaskID": self.task})
+        self.assertEqual(status, 200)
+        self.assertEqual(reply["clear_task_id"], self.task)
+        self.assertIn("这单已取消", reply["cancel_prompt"])
+        self.assertEqual(self.store.get_worker("test-worker")["TaskID"], 0)
+        entry = next(line for line in logs.output if "source=register" in line)
+        print(entry, "register HTTP 200; Router TaskID=0; heartbeats since reconnect=0")
+
+    def test_third_stale_report_releases_fifo_and_warns_once(self):
+        self.api.detach(self.conn)
+        self.post("/tasks/" + self.task + "/cancel", {})
+        self.conn = self.api.attach("test-worker")
+        stale = "t-no-longer-owned"
+
+        def stale_beat(seq):
+            return self.post("/heartbeat", {
+                "name": "test-worker", "bBusy": False, "TaskID": stale,
+                "seq": seq, "stream": self.conn.generation,
+            })
+
+        self.assertEqual(stale_beat(1)[1]["clear_task_id"], stale)
+        code, queued = self.post("/tasks", {"worker": "test-worker", "goal": "FIFO after clear"})
+        self.assertEqual(code, 202)
+        self.assertTrue(stale_beat(1)[1]["duplicate"])
+        self.assertEqual(stale_beat(2)[1]["clear_task_id"], stale)
+        self.assertTrue(self.conn.queue.empty())
+        # Replacing the SSE stream must preserve the correction budget.
+        self.conn = self.api.attach("test-worker")
+        self.assertTrue(self.conn.queue.empty())
+        with self.assertLogs("router", level="WARNING") as logs:
+            self.assertEqual(stale_beat(1)[1]["clear_task_id"], stale)
+        self.assertEqual(self.conn.queue.get_nowait()["data"]["task_id"], queued["task_id"])
+        self.assertNotIn("clear_task_id", stale_beat(2)[1])
+        self.api.lifecycle.sweep()
+        self.api.lifecycle.sweep()
+        alerts = [e for e in self.events if e["kind"] == "worker.task_id_correction_limit"]
+        self.assertEqual(
+            [(e["level"], e["payload"]["TaskID"], e["payload"]["attempts"]) for e in alerts],
+            [("event", stale, 3)],
+        )
+        self.assertTrue(self.conn.queue.empty())
+        self.assertEqual(self.store.get_worker("test-worker")["TaskID"], 0)
+        print(logs.output[-1], "FIFO dispatched; alerts=1; fourth stale heartbeat: no new correction")
+        # Accepting the new offer preserves FIFO ownership.
+        self.beat(TaskID=queued["task_id"])
+        self.assertEqual(self.post("/tasks", {"worker": "test-worker", "goal": "later"})[0], 202)
+        self.assertTrue(self.conn.queue.empty())
+
+    def test_history_and_different_ids_do_not_spend_live_corrections(self):
+        stale = "t-stale"
+        self.beat(TaskID="t-other")
+        self.beat(TaskID=stale)
+        _, issued = self.post("/workers/test-worker/request-status", {})
+        self.conn.queue.get_nowait()
+        samples = [{"seq": i, "TaskID": stale, "bBusy": False} for i in range(1, 4)]
+        reply = self.post("/workers/test-worker/status-history", {
+            "request_id": issued["request_id"], "stream": self.conn.generation, "samples": samples,
+        })
+        self.assertEqual(reply, (200, {"ok": True, "through": 3}))
+        self.beat(TaskID=stale)
+        self.api.lifecycle.sweep()
+        self.assertTrue(self.conn.awaiting_clear)
+        self.assertEqual(self.events, [])
+        self.beat(TaskID=self.task)
+        self.assertFalse(self.conn.awaiting_clear)
+        self.beat(TaskID=stale)
+        self.assertEqual(self.api.lifecycle.open_correction("test-worker")["attempts"], 1)
 
     def test_duplicate_single_notification_and_late_receipt(self):
         q = self.first()
@@ -280,7 +360,7 @@ class ProbeTests(unittest.TestCase):
         for _ in range(3):
             self.beat("busy", TaskID=0)
             self.api.lifecycle.sweep()
-        self.assertEqual([e["kind"] for e in self.events], ["worker.anomaly"])
+        self.assertEqual(self.events, [])
         code, body = self.post(
             "/notice",
             {
@@ -295,7 +375,7 @@ class ProbeTests(unittest.TestCase):
             self.post("/result", {"name": "test-worker", "task_id": self.task})[0], 409
         )
         print(
-            "idle+TaskID anomaly=0; busy+0 repeated 3 times: anomaly events=1; legacy completion notifications=0"
+            "idle+TaskID anomaly=0; busy+0 repeated 3 times: anomaly events=0; legacy completion notifications=0"
         )
 
     def test_fifo_uses_only_task_id_and_survives_busy_and_queue(self):
@@ -393,9 +473,14 @@ class ProbeTests(unittest.TestCase):
         self.advance(1)
         self.assertEqual(self.take()["attempt"], 1)
         self.advance(30)
-        self.assertEqual(self.take()["attempt"], 2)
+        second = self.take()
+        self.assertEqual(second["attempt"], 2)
         self.advance(30)
-        self.assertEqual(self.take()["purpose"], "cancel")
+        self.assertTrue(self.conn.queue.empty())
+        self.assertTrue(self.saved()["in_running_tasks"])
+        self.assertEqual([e["kind"] for e in self.events], ["task.summary_missing"])
+        self.assertEqual(self.report(second)[0], 200)
+        self.assertTrue(self.saved()["deliverable"])
         print(
             "config idle_task_end_minutes=0.5 -> 30s; summary_request_max_attempts=2 -> exactly 2 requests"
         )

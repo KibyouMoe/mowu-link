@@ -10,6 +10,8 @@ import uuid
 from task_lifecycle import settings
 
 CANCEL_PROMPT = "这单要取消，请确认后自己发 cancel，并清掉本地 TaskID。"
+CORRECTION_LIMIT = 3
+CLEARED_PROMPT = "这单已取消，请清掉本地 TaskID。"
 SUMMARY_PROMPT = "请调用 submit_deliverable 工具报送本任务的总结。"
 
 
@@ -70,37 +72,32 @@ class SummaryRequests:
         db = self.orders.db
         with self.orders.store._lock:
             alerts = db.execute(
-                "SELECT id,worker FROM worker_anomalies WHERE notified IS NULL ORDER BY id LIMIT 64"
+                "SELECT id,worker,task_id,attempts FROM worker_task_corrections "
+                "WHERE attempts=? AND notified_at IS NULL ORDER BY id LIMIT 64", (CORRECTION_LIMIT,)
             ).fetchall()
         for row in alerts:
             event = {
-                "kind": "worker.anomaly",
+                "kind": "worker.task_id_correction_limit",
                 "source": "Router",
                 "level": "event",
                 "actor": row["worker"],
-                "text": row["worker"] + " 心跳异常 · 忙碌且 TaskID=0",
-                "event_id": "worker:busy-without-task:" + str(row["id"]),
-                "payload": {"worker": row["worker"], "bBusy": True, "TaskID": 0},
+                "text": f"{row['worker']} 连续 {row['attempts']} 次上报失效 TaskID {row['task_id']}，已放行派单。",
+                "event_id": "worker:task-id-correction:" + str(row["id"]),
+                "payload": {"worker": row["worker"], "TaskID": row["task_id"], "attempts": row["attempts"]},
             }
             ok, _ = self.server.trigger_client.post_trigger(event)
             if ok:
                 with self.orders.store._lock:
                     db.execute(
-                        "UPDATE worker_anomalies SET notified=? WHERE id=?", (time.time(), row["id"])
+                        "UPDATE worker_task_corrections SET notified_at=? WHERE id=?", (time.time(), row["id"])
                     )
 
-    def anomaly(self, worker, busy, reported):
-        with self.orders.atomic():
-            if busy and not reported:
-                self.orders.db.execute(
-                    "INSERT OR IGNORE INTO worker_anomalies(worker,at) VALUES(?,?)",
-                    (worker, time.time()),
-                )
-            else:
-                self.orders.db.execute(
-                    "UPDATE worker_anomalies SET cleared=? WHERE worker=? AND cleared IS NULL",
-                    (time.time(), worker),
-                )
+    def open_correction(self, worker):
+        with self.orders.store._lock:
+            return self.orders.db.execute(
+                "SELECT id,task_id,attempts FROM worker_task_corrections "
+                "WHERE worker=? AND cleared_at IS NULL", (worker,),
+            ).fetchone()
 
     def contact(self, task, conn, purpose, attempt):
         tid = task["task_id"]
@@ -185,18 +182,57 @@ class SummaryRequests:
                 "duplicate": bool(requests),
             }
 
-    def reconcile(self, name, reported):
-        if not reported:
-            return {}
-        task = self.orders.get(reported)
-        if task and task["worker"] == name and task["in_running_tasks"]:
-            return {}
-        cancel = not task or task["worker"] != name or not task.get("deliverable")
-        return {
-            "clear_task_id": reported,
-            "cancel_prompt": CANCEL_PROMPT if cancel else None,
-            "reason": "已取消" if cancel else "总结已归档",
-        }
+    def reconcile(self, name, reported, source):
+        """Only live requests can carry a correction back to the worker."""
+        conn = self.server.current_conn(name)
+        with self.orders.atomic():
+            current = self.open_correction(name)
+            held = self.orders.held(name)
+            stale = reported and reported != held
+            if current and (not stale or current["task_id"] != reported):
+                self.orders.db.execute(
+                    "UPDATE worker_task_corrections SET cleared_at=? WHERE id=?",
+                    (time.time(), current["id"]),
+                )
+                # A speculative offer at the limit may have arrived before the
+                # worker cleared its old ID. Replay only that offer, once.
+                if not reported and conn and conn.offered_task == held and current["attempts"] == CORRECTION_LIMIT:
+                    conn.offered_task = None
+                current = None
+
+            if not stale:
+                if conn:
+                    conn.awaiting_clear = False
+                return reported, {}
+
+            previous = current["attempts"] if current else 0
+            if previous == 0:
+                self.orders.db.execute(
+                    "INSERT INTO worker_task_corrections(worker,task_id,attempts) VALUES(?,?,1)",
+                    (name, reported),
+                )
+            elif previous < CORRECTION_LIMIT:
+                self.orders.db.execute(
+                    "UPDATE worker_task_corrections SET attempts=attempts+1 WHERE id=?", (current["id"],),
+                )
+            attempt = min(previous + 1, CORRECTION_LIMIT)
+            if conn:
+                conn.awaiting_clear = attempt < CORRECTION_LIMIT
+            if previous == CORRECTION_LIMIT and source != "register":
+                return None, {}
+
+            task = self.orders.get(reported)
+            complete = task and task["worker"] == name and task.get("deliverable")
+            reason = "总结已归档" if complete else "已取消"
+            logger = logging.getLogger("router")
+            emit = logger.warning if previous == CORRECTION_LIMIT - 1 else logger.info
+            emit("task_id_correction worker=%s task=%s source=%s attempt=%d dispatch=%s reason=%s",
+                 name, reported, source, attempt, "allowed" if attempt == CORRECTION_LIMIT else "held", reason)
+            return None, {
+                "clear_task_id": reported,
+                "cancel_prompt": None if complete else CLEARED_PROMPT,
+                "reason": reason,
+            }
 
     def observe(self, name, reported, busy):
         with self.server.dispatch_lock:
@@ -239,13 +275,8 @@ class SummaryRequests:
         if len(requests) < self.max_attempts:
             self.contact(task, conn, purpose, len(requests) + 1)
         elif purpose == "summary":
-            with self.orders.atomic():
-                self.notice(
-                    task,
-                    "summary_missing",
-                    f"{tid} 索取总结 {len(requests)} 次仍未收到，已请求执行人取消。",
-                )
-                self.contact(task, conn, "cancel", 1)
+            if not any(f.get("notice_kind") == "summary_missing" for f in task["facts"]):
+                self.notice(task, "summary_missing", f"{tid} 索取总结 {len(requests)} 次仍未收到，请核查。")
         else:
             self.offline_archive(task, "cancel_greetings_unanswered")
             self.samples.pop(name, None)

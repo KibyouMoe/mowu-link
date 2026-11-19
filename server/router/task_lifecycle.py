@@ -8,9 +8,11 @@ import uuid
 from pathlib import Path
 
 DDL = """
-CREATE TABLE IF NOT EXISTS worker_anomalies(
- id INTEGER PRIMARY KEY, worker TEXT NOT NULL, at REAL NOT NULL, cleared REAL, notified REAL);
-CREATE UNIQUE INDEX IF NOT EXISTS worker_anomaly_open ON worker_anomalies(worker) WHERE cleared IS NULL;
+CREATE TABLE IF NOT EXISTS worker_task_corrections(
+ id INTEGER PRIMARY KEY, worker TEXT NOT NULL, task_id TEXT NOT NULL, attempts INTEGER NOT NULL,
+ cleared_at REAL, notified_at REAL);
+CREATE UNIQUE INDEX IF NOT EXISTS worker_task_correction_open
+ ON worker_task_corrections(worker) WHERE cleared_at IS NULL;
 CREATE TABLE IF NOT EXISTS task_info(
  task_id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL, owner TEXT NOT NULL,
  actor TEXT NOT NULL, at REAL NOT NULL, metadata TEXT NOT NULL, request_id TEXT UNIQUE, fingerprint TEXT);

@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from attachments import AttachmentStore, MAX_ATTACHMENTS
 from task_lifecycle import Ledger
-from summary_requests import SummaryRequests
+from summary_requests import CORRECTION_LIMIT, SummaryRequests
 
 import argparse
 import fcntl
@@ -1648,7 +1648,11 @@ class RouterServer(ThreadingHTTPServer):
                 if old is not None:
                     old.close("replaced")
             self.store.set_online(name, version)
-            self.lifecycle.samples.pop(name,None)
+            correction = self.lifecycle.open_correction(name)
+            conn.awaiting_clear = bool(old and old.awaiting_clear)
+            if correction:
+                conn.awaiting_clear = correction["attempts"] < CORRECTION_LIMIT
+            self.lifecycle.samples.pop(name, None)
             self.dispatch_one(name)
             self.flush_peer_messages_locked(conn)
         log.info("stream attached name=%s version=%s", name, version or "-")
@@ -2511,14 +2515,15 @@ class RouterHandler(BaseHTTPRequestHandler):
         control_sse = body.get("control_sse", False)
         if not isinstance(control_sse, bool):
             raise BadRequest("control_sse must be a boolean")
-        worker, created = self.server.store.upsert_worker(name, version, note, control_url, control_sse)
         reported = self._reported_task(body)
-        with self.server.dispatch_lock:
+        correction = {}
+        with self.server.dispatch_lock, self.server.store.orders.atomic():
+            worker, created = self.server.store.upsert_worker(name, version, note, control_url, control_sse)
             if "TaskID" in body or "task_id" in body:
-                with self.server.store._lock:
-                    self.server.store._conn.execute(
-                        "UPDATE workers SET task_id=? WHERE name=?", (reported, name)
-                    )
+                held, correction = self.server.lifecycle.reconcile(name, reported, "register")
+                self.server.store._conn.execute(
+                    "UPDATE workers SET task_id=? WHERE name=?", (held, name)
+                )
         return {
             "ok": True,
             "name": name,
@@ -2528,7 +2533,7 @@ class RouterHandler(BaseHTTPRequestHandler):
             "queued": worker["queued"],
             "task_lifecycle_v2": True,
             "idle_probe": True,
-            **self.server.lifecycle.reconcile(name, reported),
+            **correction,
         }
 
     @staticmethod
@@ -2570,7 +2575,11 @@ class RouterHandler(BaseHTTPRequestHandler):
                 self._reported_task(sample)
             for sample in samples:
                 if sample["seq"] > conn.status_seq:
-                    self._accept_status(name, sample["bBusy"], self._reported_task(sample))
+                    # History responses acknowledge a sequence, not a clear command.
+                    reported = self._reported_task(sample)
+                    held = reported if reported == self.server.store.orders.held(name) else None
+                    self.server.store.heartbeat(name, sample["bBusy"], held)
+                    self.server.lifecycle.observe(name, held, sample["bBusy"])
                     conn.status_seq = sample["seq"]
             if samples:
                 conn.history_offset = samples[-1]["seq"]
@@ -2580,15 +2589,10 @@ class RouterHandler(BaseHTTPRequestHandler):
             return 200, {"ok": True, "through": conn.history_offset}
 
     def _accept_status(self, name, busy, reported):
-        correction = self.server.lifecycle.reconcile(name, reported)
-        held = None if correction else reported
+        held, correction = self.server.lifecycle.reconcile(name, reported, "heartbeat")
         self.server.store.heartbeat(name, busy, held)
-        self.server.lifecycle.anomaly(name, busy, reported)
         self.server.lifecycle.observe(name, held, busy)
-        conn = self.server.current_conn(name)
-        if conn:
-            conn.awaiting_clear = bool(correction)
-        if not correction and not held:
+        if not held:
             self.server.dispatch_one(name)
         return correction
 
