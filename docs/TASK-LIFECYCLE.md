@@ -65,7 +65,9 @@ goal 模式由 worker 自己决定，Router 不管。
    → worker 回「好，我取消」，自己清掉本地 TaskID
 ```
 
-在线取消到达时，worker 在当前回合直接停止该 TaskID 对应的执行；已排队的输入可撤回，已结束的回合可直接核对。停手确认后以原 request_id 回执；收到归档回执后才清本地 TaskID。Codex 缺少原生停手能力时，worker 停止任务的后续派发，并用同一个取消请求回报「已收到，本轮结束后停」。Router 记录 `cancel_deferred`，保留 TaskID。确认该回合已退出后，worker 走同一成果回执接口提交 `reason=user_cancel`，再清 TaskID。原生停止出现其他错误时，保留 TaskID 并记录原因。
+在线取消到达时，worker 在当前回合直接停止该 TaskID 对应的执行；已排队的输入可撤回，已结束的回合可直接核对。停手确认后以原 request_id 回执；收到归档回执后才清本地 TaskID。
+
+**取消只看 TaskID，不看忙闲**（训练员 2026-11-19）：Router 核对该 worker 手上的 TaskID 是否就是这单——是，就立刻把取消消息插进去，让它优先处理；忙不忙都不影响下发。worker 收到后必须把这条消息排到队首立即处理，停手、确认、清 TaskID。**不存在「等这一轮跑完再确认」这种回法**。
 
 用 task_id 和 request_id 对账：Router 写完 SSE 帧记 `cancel_sent`；worker 收到记 `cancel_received`，确认停止记 `cancel_stopped`；Router 接收回执并归档记 `cancel_acked`。安排下一次请求时记 `cancel_retry`，索取次数耗尽记 `request_exhausted`。
 
@@ -122,7 +124,7 @@ cancelling  取消中：已经向 worker 要取消协议，正在等回执
 所以判断标准只有一个：**worker 手上到底有没有这张单**。
 
 ```
-worker 持有这张 TaskID  → 发取消指令（让它知道并清掉），空闲时轮询重发，等回执
+worker 持有这张 TaskID  → 立刻下发取消指令（让它知道并清掉），优先插入，不等它空闲
 worker 没有这张 TaskID  → 直接归档，一条指令都不用发
                          （它压根没接这单，没有"不知道被取消"的问题）
 ```
