@@ -142,6 +142,8 @@ class ProbeTests(unittest.TestCase):
             orders.db.execute("INSERT INTO active_tasks(task_id,worker) VALUES(?,?)", (ghost, "test-worker"))
             orders.db.execute("DELETE FROM dispatch_queue WHERE task_id=?", (ghost,))
         self.assertEqual(orders.facts(ghost), [])
+        self.conn.offered_task = ghost
+        self.conn.task_sent_at = self.now
         with self.assertLogs("router", "INFO") as logs:
             self.beat(TaskID=0)
         frame = self.conn.queue.get_nowait()
@@ -179,9 +181,48 @@ class ProbeTests(unittest.TestCase):
         self.assertEqual([f["kind"] for f in orders.facts(first["task_id"])], ["dispatch"])
         print("SSE enqueue refused -> queued with original FIFO position and no active task; retry commits dispatch")
 
+    def test_clearing_stale_id_reoffers_sent_task_instead_of_archiving_it(self):
+        old_id = "t-stale-archived"
+        for _ in range(3):
+            self.beat(TaskID=old_id)
+        self.conn.queued_task_offer = None
+        self.conn.offered_task = self.task
+        self.conn.task_sent_at = self.now - 20
+        self.beat(TaskID=0)
+        frame = self.conn.queue.get_nowait()
+        self.assertEqual((frame["event"], frame["data"]["task_id"]), ("task", self.task))
+        self.assertIsNone(self.saved()["archive"])
+        self.assertIsNone(self.conn.offered_task)
+        self.assertEqual(self.conn.queued_task_offer, self.task)
+        self.beat(TaskID=0)
+        self.assertTrue(self.conn.queue.empty())
+        self.assertIsNone(self.saved()["archive"])
+        self.beat()
+        self.assertEqual(self.store.get_worker("test-worker")["TaskID"], self.task)
+        print("old TaskID cleared after 3 corrections -> exact sent task reoffered once, archived=0")
+
+    def test_dispatch_logs_wire_send_and_worker_ownership_separately(self):
+        with closing(HTTPConnection("127.0.0.1", self.api.server_port, timeout=4)) as stream:
+            with self.assertLogs("router", "INFO") as logs:
+                stream.request("GET", "/stream?name=test-worker", headers={"X-Router-Token": "fixture"})
+                with closing(stream.getresponse()) as wire:
+                    self.assertEqual(wire.status, 200)
+                    while True:
+                        line = wire.readline()
+                        self.assertTrue(line)
+                        if line == b"event: task\n":
+                            self.assertEqual(json.loads(wire.readline().removeprefix(b"data: "))["task_id"], self.task)
+                            break
+                    self.beat()
+                    self.assertEqual(self.store.get_worker("test-worker")["TaskID"], self.task)
+        for event in ("dispatch_queued", "dispatch_sent", "dispatch_confirmed"):
+            print(next(line for line in logs.output if f":{event} " in line and self.task in line))
+
     def test_queued_and_just_sent_offers_survive_racing_zero_heartbeats(self):
         self.beat(TaskID=0)
         self.assertTrue(self.saved()["in_running_tasks"])
+        self.conn.queued_task_offer = None
+        self.conn.offered_task = self.task
         self.conn.task_sent_at = self.now
         self.now += 4.9
         self.beat(TaskID=0)
@@ -239,6 +280,8 @@ class ProbeTests(unittest.TestCase):
         # Clearing that ID must re-offer the same task, without dropping it.
         stale = self.post("/heartbeat", {"name": "test-worker", "bBusy": True, "TaskID": self.task})[1]
         self.assertEqual(stale["clear_task_id"], self.task)
+        self.conn.queued_task_offer = None
+        self.conn.offered_task = queued["task_id"]
         self.conn.task_sent_at = self.now
         self.now += 6
         self.beat(TaskID=0)

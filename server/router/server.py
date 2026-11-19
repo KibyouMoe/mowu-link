@@ -1464,8 +1464,10 @@ class Connection:
         self.state_layers = state_layers
         self.native_settlement = False
         self.offered_cancel = None
+        self.queued_task_offer = None
         self.offered_task = None
         self.task_sent_at = None
+        self.last_task_status = None
         self.reoffer_after_cancel = False
         self.awaiting_clear = False
         self.status_seq = 0
@@ -1820,7 +1822,7 @@ class RouterServer(ThreadingHTTPServer):
                     last = next(f for f in reversed(task["facts"]) if f["kind"] == "cancel_request")
                     self.lifecycle.send_request(conn, tid, "cancel", last["request_id"], last["attempt"], last["at"])
                     return
-                if conn.offered_task == tid:
+                if conn.queued_task_offer == tid or conn.offered_task == tid:
                     return
                 payload = {k: v for k, v in task.items() if k != "facts"}
                 payload.update(state="running", in_running_tasks=True)
@@ -1829,8 +1831,8 @@ class RouterServer(ThreadingHTTPServer):
                 # The SSE writer checks the task under the store lock before
                 # emitting it. Commit membership and evidence together.
                 orders.record_dispatch(tid, worker, conn.generation)
-            conn.offered_task = tid
-            conn.task_sent_at = None
+            conn.queued_task_offer = tid
+            log.info("dispatch_queued worker=%s task=%s stream=%s", worker, tid, conn.generation)
             return tid
 
 
@@ -2613,6 +2615,8 @@ class RouterHandler(BaseHTTPRequestHandler):
 
     def _accept_status(self, name, busy, reported):
         held, correction = self.server.lifecycle.reconcile(name, reported, "heartbeat")
+        if held and self.server.store.get_worker(name)["task_id"] != held:
+            log.info("dispatch_confirmed worker=%s task=%s", name, held)
         self.server.store.heartbeat(name, busy, held)
         self.server.lifecycle.observe(name, held, busy)
         if not held:
@@ -2656,6 +2660,13 @@ class RouterHandler(BaseHTTPRequestHandler):
                     self.server.request_status(conn)
             raw_task_id = body.get("TaskID", body.get("task_id"))
             if "TaskID" in body or "task_id" in body:
+                if conn:
+                    active = self.server.store.orders.held(name)
+                    status = (raw_task_id, active)
+                    if conn.last_task_status != status:
+                        conn.last_task_status = status
+                        log.info("dispatch_status worker=%s reported=%s active=%s queued_offer=%s sent_offer=%s",
+                                 name, raw_task_id, active, conn.queued_task_offer, conn.offered_task)
                 self.server.lifecycle.archive_cancel_if_unheld(name, reported)
                 self.server.lifecycle.requeue_unoffered(name, reported)
             if type(raw_task_id) is int and raw_task_id == 0 and not (conn and conn.reoffer_after_cancel):
@@ -3372,9 +3383,13 @@ class RouterHandler(BaseHTTPRequestHandler):
                         continue
                 data = item["data"]
                 if item["event"] == "task":
-                    task = self.server.store.get_task(data["task_id"])
-                    if not task or task.get("state") != "running":
-                        continue
+                    with self.server.dispatch_lock:
+                        task = self.server.store.get_task(data["task_id"])
+                        if conn.closed or conn.queued_task_offer != data["task_id"]:
+                            continue
+                        if not task or task.get("state") != "running":
+                            conn.queued_task_offer = None
+                            continue
                 if item["event"] == "deliverable_request":
                     # A queued summary can be superseded by a cancel before
                     # this stream gets to write it.
@@ -3391,8 +3406,11 @@ class RouterHandler(BaseHTTPRequestHandler):
                 self._write(frame)
                 if item["event"] == "task":
                     with self.server.dispatch_lock:
-                        if conn.offered_task == data["task_id"]:
+                        if conn.queued_task_offer == data["task_id"]:
+                            conn.queued_task_offer = None
+                            conn.offered_task = data["task_id"]
                             conn.task_sent_at = self.server.lifecycle.clock()
+                    log.info("dispatch_sent worker=%s task=%s stream=%s", name, data["task_id"], conn.generation)
                 if item["event"] == "deliverable_request" and data["purpose"] == "cancel":
                     log.info("cancel_sent worker=%s task=%s request=%s attempt=%s via=sse",
                              name, data["task_id"], data["request_id"], data["attempt"])

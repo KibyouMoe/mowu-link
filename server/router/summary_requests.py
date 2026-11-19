@@ -154,9 +154,12 @@ class SummaryRequests:
             return
         self.samples.pop(name, None)
         conn = self.server.current_conn(name)
-        if conn and conn.offered_task == tid:
-            conn.offered_task = None
-            conn.task_sent_at = None
+        if conn:
+            if conn.queued_task_offer == tid:
+                conn.queued_task_offer = None
+            if conn.offered_task == tid:
+                conn.offered_task = None
+                conn.task_sent_at = None
         logging.getLogger("router").info("dispatch_requeued worker=%s task=%s reason=no_dispatch_fact", name, tid)
 
     def archive_dropped_task(self, name, conn):
@@ -168,10 +171,15 @@ class SummaryRequests:
                 fact["kind"] == "dispatch" for fact in task["facts"]
             ):
                 return
-            if self.server.store.get_worker(name)["task_id"] != tid and conn and conn.offered_task == tid:
-                # The worker can sample zero before reading the SSE offer. Give
-                # an unconfirmed offer one heartbeat interval after the write.
-                if conn.task_sent_at is None or self.clock() - conn.task_sent_at < WORKER_HEARTBEAT_S:
+            if self.server.store.get_worker(name)["task_id"] != tid and conn:
+                # Clearing a different stale ID proves nothing about an offer
+                # that may have been refused while the worker held that ID.
+                correction = self.open_correction(name)
+                if correction and correction["attempts"] == CORRECTION_LIMIT:
+                    return
+                if conn.queued_task_offer == tid:
+                    return
+                if conn.offered_task == tid and self.clock() - conn.task_sent_at < WORKER_HEARTBEAT_S:
                     return
             reason = "worker_dropped_task"
             self.orders.archive(tid, reason)
@@ -193,7 +201,7 @@ class SummaryRequests:
             self.orders.archive(tid, "cancelled_without_ack", confirmed_by_worker=False)
             self.samples.pop(name, None)
         conn = self.server.current_conn(name)
-        if conn and conn.offered_task == tid:
+        if conn and tid in (conn.queued_task_offer, conn.offered_task):
             # A frame already being written can cross the cancellation. If the
             # old ID is acquired and later cleared, replay the next offer once.
             conn.reoffer_after_cancel = True
@@ -276,6 +284,7 @@ class SummaryRequests:
                 # worker cleared its old ID. Replay only that offer, once.
                 if not reported and conn and conn.offered_task == held and current["attempts"] == CORRECTION_LIMIT:
                     conn.offered_task = None
+                    conn.task_sent_at = None
                 current = None
 
             if not stale:
@@ -284,6 +293,7 @@ class SummaryRequests:
                     if conn.reoffer_after_cancel:
                         if not reported and conn.offered_task == held:
                             conn.offered_task = None
+                            conn.task_sent_at = None
                         conn.reoffer_after_cancel = False
                 if reported and source == "register":
                     task = self.orders.get(reported)
