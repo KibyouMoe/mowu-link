@@ -124,6 +124,16 @@ cancelling  取消中：已经向 worker 要取消协议，正在等回执
 - 收到 worker 的取消回执 → 清 TaskID、归档（reason=worker_cancel）
 - 重试耗尽仍无回执 → 视同失联：归档 + 通知溪流（reason=archive_unconfirmed）
 
+**同一个触发点，按状态分派动作**（训练员 2026-11-19）：
+
+```
+Worker 闲下来
+├─ 状态 running    → 发「成果总结」请求
+└─ 状态 cancelling → 再发一次「取消指令」
+```
+
+也就是说「闲下来该做什么」由任务状态决定，不是两套计时器。
+
 **正常收口不经过 `cancelling`**：空闲满 `idle_task_end_minutes` → 索取总结 → 归档。
 
 ## 异常判定（只有一条）
