@@ -229,6 +229,32 @@ class ProbeTests(unittest.TestCase):
             print(entry)
         print("wire summary frames after cancel=0; late summary HTTP 409; archive reason=worker_cancel; TaskID=0")
 
+    def test_deferred_cancel_keeps_ownership_until_final_receipt(self):
+        _, registration = self.post("/register", {"name": "test-worker", "TaskID": self.task})
+        self.assertTrue(registration["cancel_deferred"])
+        self.beat("busy")
+        self.post("/tasks/" + self.task + "/cancel", {})
+        q = self.take()
+        with self.assertLogs("router", level="INFO") as logs:
+            code, interim = self.report(q, action="cancel", deferred=True, reason="native_task_cancel_unavailable")
+            self.assertEqual((code, interim["deferred"], interim["archived"]), (202, True, False))
+            self.assertTrue(self.report(q, action="cancel", deferred=True,
+                                        reason="native_task_cancel_unavailable")[1]["duplicate"])
+            self.assertEqual(self.saved()["state"], "cancelling")
+            self.assertEqual(self.store.get_worker("test-worker")["TaskID"], self.task)
+            self.advance(180, "busy")
+            self.assertEqual(self.events, [])
+            self.assertTrue(self.conn.queue.empty())
+            code, final = self.report(q, action="cancel", reason="user_cancel")
+            self.assertEqual((code, final["worker_task_id"]), (200, 0))
+        self.assertEqual(self.saved()["archive"]["reason"], "worker_cancel")
+        self.assertEqual(self.saved()["archive"]["worker_reason"], "user_cancel")
+        self.assertEqual(sum(f["kind"] == "worker_cancel_deferred" for f in self.store.orders.facts(self.task)), 1)
+        for event in ("cancel_deferred", "cancel_acked"):
+            matches = [line for line in logs.output if f":{event} " in line]
+            self.assertEqual(len(matches), 1)
+            print(matches[0])
+
     def test_online_cancel_requires_worker_and_offline_reconciliation(self):
         route = "/tasks/" + self.task + "/cancel"
         self.assertEqual(self.post(route, {})[0], 202)

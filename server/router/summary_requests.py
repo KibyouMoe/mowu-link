@@ -320,6 +320,12 @@ class SummaryRequests:
             if "action" in body and (not cancel_request or body["action"] != "cancel"):
                 return 409, {"error": "delivery_request_mismatch"}
             confirm_cancel = cancel_request and body.get("action") == "cancel"
+            deferred = body.get("deferred", False)
+            reason = body.get("reason")
+            if type(deferred) is not bool or (deferred and (
+                not confirm_cancel or reason != "native_task_cancel_unavailable"
+            )):
+                return 400, {"error": "invalid_cancel_deferred"}
             if not confirm_cancel and not any(
                 f["kind"] == "summary_request" and f["request_id"] == rid for f in task["facts"]
             ):
@@ -379,6 +385,13 @@ class SummaryRequests:
                 json.dumps(report, ensure_ascii=False).encode("utf-8")
             except UnicodeEncodeError:
                 return 400, {"error": "invalid_deliverable", "detail": "invalid Unicode"}
+            if deferred:
+                recorded = self.orders.add(
+                    tid, "worker_cancel_deferred", "cancel_deferred:" + rid,
+                    request_id=rid, actor=task["worker"], reason=reason,
+                )
+                return 202, {"ok": True, "task_id": tid, "deferred": True,
+                             "archived": False, "duplicate": not recorded}
             if confirm_cancel:
                 self.orders.add(
                     tid,
@@ -387,9 +400,11 @@ class SummaryRequests:
                     actor=task["worker"],
                     request_id=rid,
                     report=report,
+                    **({"reason": reason} if reason == "user_cancel" else {}),
                 )
                 self.orders.archive(
-                    tid, "worker_cancel", actor=task["worker"], request_id=rid, confirmed_by_worker=True
+                    tid, "worker_cancel", actor=task["worker"], request_id=rid, confirmed_by_worker=True,
+                    **({"worker_reason": reason} if reason == "user_cancel" else {}),
                 )
                 self.wait_for_release(task["worker"])
                 self.samples.pop(task["worker"], None)

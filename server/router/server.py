@@ -2087,6 +2087,9 @@ class RouterHandler(BaseHTTPRequestHandler):
                 return self._send_json(*self._peer_message_ack(parts[1], body))
             if len(parts) == 3 and parts[0] == "tasks" and parts[2] == "deliverable":
                 status, receipt = self.server.lifecycle.receive(parts[1], body)
+                if status == 202 and receipt.get("deferred") and not receipt.get("duplicate"):
+                    log.info("cancel_deferred worker=%s task=%s request=%s reason=%s",
+                             body["worker"], parts[1], body["request_id"], body["reason"])
                 if status == 200 and body.get("action") == "cancel" and not receipt.get("duplicate"):
                     log.info("cancel_acked worker=%s task=%s request=%s", body["worker"], parts[1], body["request_id"])
                 return self._send_json(status, receipt)
@@ -2540,6 +2543,7 @@ class RouterHandler(BaseHTTPRequestHandler):
             "queued": worker["queued"],
             "task_lifecycle_v2": True,
             "idle_probe": True,
+            "cancel_deferred": True,
             **correction,
         }
 

@@ -65,7 +65,7 @@ goal 模式由 worker 自己决定，Router 不管。
    → worker 回「好，我取消」，自己清掉本地 TaskID
 ```
 
-在线取消到达时，worker 在当前回合直接停止该 TaskID 对应的执行；已排队的输入可撤回，已结束的回合可直接核对。停手确认后以原 request_id 回执；收到归档回执后才清本地 TaskID。原生停止拒绝或超时时，保留 TaskID 并记录原因。
+在线取消到达时，worker 在当前回合直接停止该 TaskID 对应的执行；已排队的输入可撤回，已结束的回合可直接核对。停手确认后以原 request_id 回执；收到归档回执后才清本地 TaskID。Codex 缺少原生停手能力时，worker 停止任务的后续派发，并用同一个取消请求回报「已收到，本轮结束后停」。Router 记录 `cancel_deferred`，保留 TaskID。确认该回合已退出后，worker 走同一成果回执接口提交 `reason=user_cancel`，再清 TaskID。原生停止出现其他错误时，保留 TaskID 并记录原因。
 
 用 task_id 和 request_id 对账：Router 写完 SSE 帧记 `cancel_sent`；worker 收到记 `cancel_received`，确认停止记 `cancel_stopped`；Router 接收回执并归档记 `cancel_acked`。到期未获确认记 `cancel_timeout`，安排下一次请求时记 `cancel_retry`。
 
