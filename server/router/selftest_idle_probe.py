@@ -130,6 +130,55 @@ class ProbeTests(unittest.TestCase):
         print(next(line for line in logs.output if "worker_dropped_task" in line),
               "notice=1, summaries=0, next FIFO dispatched, unrelated task unchanged")
 
+    def test_zero_heartbeat_requeues_unoffered_active_task_behind_waiting_work(self):
+        self.api.detach(self.conn)
+        self.assertTrue(self.post("/tasks/" + self.task + "/cancel", {})[1]["archived"])
+        self.conn = self.api.attach("test-worker")
+        orders = self.store.orders
+        ghost = orders.create("missing offer", "missing offer", "test-worker", {}, "hermes", None, None)
+        waiting = orders.create("queued next", "queued next", "test-worker", {}, "hermes", None, None)
+        # Reproduce the durable state left by the pre-fix claim/send split.
+        with orders.atomic():
+            orders.db.execute("INSERT INTO active_tasks(task_id,worker) VALUES(?,?)", (ghost, "test-worker"))
+            orders.db.execute("DELETE FROM dispatch_queue WHERE task_id=?", (ghost,))
+        self.assertEqual(orders.facts(ghost), [])
+        with self.assertLogs("router", "INFO") as logs:
+            self.beat(TaskID=0)
+        frame = self.conn.queue.get_nowait()
+        self.assertEqual((frame["event"], frame["data"]["task_id"]), ("task", waiting))
+        self.assertEqual(orders.held("test-worker"), waiting)
+        self.assertFalse(orders.get(ghost)["in_running_tasks"])
+        self.assertIsNone(orders.get(ghost)["archive"])
+        self.assertEqual(orders.facts(ghost), [])
+        with self.store._lock:
+            rows = orders.db.execute("SELECT task_id FROM dispatch_queue WHERE worker=?", ("test-worker",)).fetchall()
+        self.assertEqual([row["task_id"] for row in rows], [ghost])
+        self.api.lifecycle.sweep()
+        self.assertEqual(self.events, [])
+        self.assertTrue(self.conn.queue.empty())
+        print(next(line for line in logs.output if "dispatch_requeued" in line),
+              "preserved original TaskID; previous FIFO head dispatched on same heartbeat; archives=0")
+
+    def test_failed_enqueue_leaves_task_in_fifo_without_active_membership(self):
+        from unittest.mock import patch
+
+        self.api.detach(self.conn)
+        self.assertTrue(self.post("/tasks/" + self.task + "/cancel", {})[1]["archived"])
+        self.conn = self.api.attach("test-worker")
+        with patch.object(self.conn, "send_task", return_value=False):
+            status, first = self.post("/tasks", {"worker": "test-worker", "goal": "send failed"})
+            self.assertEqual((status, first["dispatched"], first["in_running_tasks"]), (202, False, False))
+            _, second = self.post("/tasks", {"worker": "test-worker", "goal": "later"})
+        orders = self.store.orders
+        self.assertIsNone(orders.held("test-worker"))
+        self.assertEqual(orders.facts(first["task_id"]), [])
+        self.assertEqual(orders.facts(second["task_id"]), [])
+        self.beat(TaskID=0)
+        self.assertEqual(self.conn.queue.get_nowait()["data"]["task_id"], first["task_id"])
+        self.assertEqual(orders.held("test-worker"), first["task_id"])
+        self.assertEqual([f["kind"] for f in orders.facts(first["task_id"])], ["dispatch"])
+        print("SSE enqueue refused -> queued with original FIFO position and no active task; retry commits dispatch")
+
     def test_queued_and_just_sent_offers_survive_racing_zero_heartbeats(self):
         self.beat(TaskID=0)
         self.assertTrue(self.saved()["in_running_tasks"])

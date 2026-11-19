@@ -106,18 +106,42 @@ class Ledger:
         return tid
 
     def next_dispatch(self, worker):
-        with self.atomic():
+        """Return the current task or the head of the queue without claiming it."""
+        with self.store._lock:
             held = self.held(worker)
             if held:
                 return held
             row = self.db.execute(
                 "SELECT task_id FROM dispatch_queue WHERE worker=? ORDER BY seq LIMIT 1", (worker,)
             ).fetchone()
-            if not row:
-                return None
-            tid = row["task_id"]
-            self.db.execute("INSERT INTO active_tasks(task_id,worker) VALUES(?,?)", (tid, worker))
+            return row["task_id"] if row else None
+
+    def record_dispatch(self, tid, worker, generation):
+        with self.atomic():
+            self.db.execute(
+                "INSERT INTO active_tasks(task_id,worker) VALUES(?,?) ON CONFLICT(task_id) DO NOTHING",
+                (tid, worker),
+            )
             self.db.execute("DELETE FROM dispatch_queue WHERE task_id=?", (tid,))
+            self.add(tid, "dispatch", "offer:" + generation, generation=generation)
+
+    def requeue_unoffered(self, worker, reported):
+        with self.atomic():
+            tid = self.held(worker)
+            if not tid or tid == reported:
+                return None
+            evidence = self.db.execute(
+                "SELECT 1 FROM task_facts WHERE task_id=? "
+                "AND kind IN ('dispatch','cancel_request','summary_request') LIMIT 1",
+                (tid,),
+            ).fetchone()
+            if evidence:
+                return None
+            self.db.execute("DELETE FROM active_tasks WHERE task_id=?", (tid,))
+            self.db.execute(
+                "INSERT INTO dispatch_queue(task_id,worker) VALUES(?,?) ON CONFLICT(task_id) DO NOTHING",
+                (tid, worker),
+            )
             return tid
 
     def pending_cancellations(self):

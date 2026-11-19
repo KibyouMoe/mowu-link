@@ -148,6 +148,17 @@ class SummaryRequests:
         if task and task.get("state") == "cancelling":
             self.offline_archive(task, "worker_disconnected")
 
+    def requeue_unoffered(self, name, reported):
+        tid = self.orders.requeue_unoffered(name, reported)
+        if not tid:
+            return
+        self.samples.pop(name, None)
+        conn = self.server.current_conn(name)
+        if conn and conn.offered_task == tid:
+            conn.offered_task = None
+            conn.task_sent_at = None
+        logging.getLogger("router").info("dispatch_requeued worker=%s task=%s reason=no_dispatch_fact", name, tid)
+
     def archive_dropped_task(self, name, conn):
         """Handle a live heartbeat that explicitly reported zero TaskID."""
         with self.orders.atomic():

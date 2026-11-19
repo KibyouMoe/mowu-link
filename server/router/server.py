@@ -1802,29 +1802,36 @@ class RouterServer(ThreadingHTTPServer):
     def dispatch_one(self, worker):
         with self.dispatch_lock:
             conn = self.current_conn(worker)
-            if not conn or conn.closed or getattr(conn, "awaiting_clear", False):
+            if not conn or conn.closed:
                 return
+            orders = self.store.orders
             reported = self.store.get_worker(worker)["task_id"]
-            if reported and reported != self.store.orders.held(worker):
+            self.lifecycle.requeue_unoffered(worker, reported)
+            if conn.awaiting_clear or (reported and reported != orders.held(worker)):
                 return
-            tid = self.store.orders.next_dispatch(worker)
-            if not tid:
-                return
-            task = self.store.get_task(tid)
-            if task["state"] == "cancelling":
-                # SSE replacement must replay the outstanding stop, never the task.
-                last = next(f for f in reversed(task["facts"]) if f["kind"] == "cancel_request")
-                self.lifecycle.send_request(conn, tid, "cancel", last["request_id"], last["attempt"], last["at"])
-                return
-            if conn.offered_task == tid:
-                return
+
+            with orders.atomic():
+                tid = orders.next_dispatch(worker)
+                if not tid:
+                    return
+                task = orders.get(tid)
+                if task.get("state") == "cancelling":
+                    # SSE replacement replays the outstanding stop.
+                    last = next(f for f in reversed(task["facts"]) if f["kind"] == "cancel_request")
+                    self.lifecycle.send_request(conn, tid, "cancel", last["request_id"], last["attempt"], last["at"])
+                    return
+                if conn.offered_task == tid:
+                    return
+                payload = {k: v for k, v in task.items() if k != "facts"}
+                payload.update(state="running", in_running_tasks=True)
+                if not conn.send_task(payload):
+                    return
+                # The SSE writer checks the task under the store lock before
+                # emitting it. Commit membership and evidence together.
+                orders.record_dispatch(tid, worker, conn.generation)
+            conn.offered_task = tid
             conn.task_sent_at = None
-            if conn.send_task({k: v for k, v in task.items() if k != "facts"}):
-                conn.offered_task = tid
-                self.store.orders.add(
-                    tid, "dispatch", "offer:" + conn.generation, generation=conn.generation
-                )
-                return tid
+            return tid
 
 
 class ApprovalSweeper(threading.Thread):
@@ -2650,6 +2657,7 @@ class RouterHandler(BaseHTTPRequestHandler):
             raw_task_id = body.get("TaskID", body.get("task_id"))
             if "TaskID" in body or "task_id" in body:
                 self.server.lifecycle.archive_cancel_if_unheld(name, reported)
+                self.server.lifecycle.requeue_unoffered(name, reported)
             if type(raw_task_id) is int and raw_task_id == 0 and not (conn and conn.reoffer_after_cancel):
                 self.server.lifecycle.archive_dropped_task(name, conn)
             correction = self._accept_status(name, busy, reported)
