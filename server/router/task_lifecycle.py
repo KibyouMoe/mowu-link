@@ -144,13 +144,6 @@ class Ledger:
             )
             return tid
 
-    def pending_cancellations(self):
-        with self.store._lock:
-            return self.db.execute(
-                "SELECT a.task_id, f.at FROM active_tasks a JOIN task_facts f "
-                "ON f.task_id=a.task_id AND f.event_key='cancel:1'"
-            ).fetchall()
-
     def archive(self, tid, why, **data):
         self.add(tid, "archive", "archive", reason=why, **data)
         self.db.execute(
@@ -176,6 +169,8 @@ class Ledger:
             latest = {f["kind"]: f for f in facts}
             report = latest.get("summary", {}).get("report")
             cancelling = "cancel_request" in latest
+            active = r["member"] is not None
+            request = latest.get("cancel_request") or latest.get("summary_request")
             return {
                 **json.loads(r["metadata"]),
                 "task_info": info,
@@ -184,15 +179,14 @@ class Ledger:
                 "goal": r["description"],
                 "created_at": r["at"],
                 "actor": r["actor"],
-                "in_running_tasks": r["member"] is not None,
-                **({"state": "cancelling" if cancelling else "running"} if r["member"] else {}),
+                "in_running_tasks": active,
+                **({"state": "cancelling" if cancelling else "running"} if active else {}),
                 "facts": facts,
                 "archive": latest.get("archive"),
-                "probe_id": None if cancelling else latest.get("summary_request", {}).get("request_id"),
+                "probe_id": request["request_id"] if active and request and not cancelling else None,
                 "request_kind": "cancel" if cancelling else "summary",
-                "request_id": (latest.get("cancel_request") or latest.get("summary_request") or {}).get(
-                    "request_id"
-                ),
+                "request_id": request["request_id"] if active and request else None,
+                "request_pending": bool(active and request and "worker_cancel_deferred" not in latest),
                 "deliverable": report,
             }
 

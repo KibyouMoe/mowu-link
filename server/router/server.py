@@ -1463,7 +1463,6 @@ class Connection:
         self.generation = uuid.uuid4().hex
         self.state_layers = state_layers
         self.native_settlement = False
-        self.offered_cancel = None
         self.queued_task_offer = None
         self.offered_task = None
         self.task_sent_at = None
@@ -1818,9 +1817,7 @@ class RouterServer(ThreadingHTTPServer):
                     return
                 task = orders.get(tid)
                 if task.get("state") == "cancelling":
-                    # SSE replacement replays the outstanding stop.
-                    last = next(f for f in reversed(task["facts"]) if f["kind"] == "cancel_request")
-                    self.lifecycle.send_request(conn, tid, "cancel", last["request_id"], last["attempt"], last["at"])
+                    # Connection changes do not count as another idle episode.
                     return
                 if conn.queued_task_offer == tid or conn.offered_task == tid:
                     return
@@ -1837,7 +1834,7 @@ class RouterServer(ThreadingHTTPServer):
 
 
 class ApprovalSweeper(threading.Thread):
-    """Expire approvals, waiting tasks and cancellations without worker traffic."""
+    """Expire approvals and process lifecycle and peer events."""
 
     def __init__(self, store: RouterStore,
                  interval: float = APPROVAL_SWEEP_S,
@@ -1856,10 +1853,8 @@ class ApprovalSweeper(threading.Thread):
             deadline = None
             try:
                 if self.server is not None:
-                    deadline = self.server.lifecycle.sweep()
-                    peer_due = self.server.sweep_peer_acks(time.time())
-                    if peer_due is not None:
-                        deadline = peer_due if deadline is None else min(peer_due, deadline)
+                    self.server.lifecycle.sweep()
+                    deadline = self.server.sweep_peer_acks(time.time())
                 if time.monotonic() >= next_periodic:
                     next_periodic = time.monotonic() + self.interval
                     self.store.expire_approvals()
@@ -3395,7 +3390,7 @@ class RouterHandler(BaseHTTPRequestHandler):
                     # this stream gets to write it.
                     task = self.server.store.get_task(data["task_id"])
                     if (
-                        not task or not task["in_running_tasks"]
+                        not task or not task["request_pending"]
                         or task["request_kind"] != data["purpose"]
                         or task["request_id"] != data["request_id"]
                     ):
