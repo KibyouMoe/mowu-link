@@ -68,6 +68,8 @@ class ProbeTests(unittest.TestCase):
         self.assertEqual(code, 200)
 
     def advance(self, seconds, state="idle"):
+        if state == "idle":
+            self.beat()
         while seconds:
             step = min(5, seconds)
             seconds -= step
@@ -454,33 +456,20 @@ class ProbeTests(unittest.TestCase):
             print(entry)
         print("wire summary frames after cancel=0; late summary HTTP 409; archive reason=worker_cancel; TaskID=0")
 
-    def test_deferred_cancel_keeps_ownership_until_final_receipt(self):
-        _, registration = self.post("/register", {"name": "test-worker", "TaskID": self.task})
-        self.assertTrue(registration["cancel_deferred"])
+    def test_cancel_records_immediate_fence_without_native_stop(self):
         self.beat("busy")
         self.post("/tasks/" + self.task + "/cancel", {})
-        q = self.take()
-        with self.assertLogs("router", level="INFO") as logs:
-            code, interim = self.report(q, action="cancel", deferred=True, reason="native_task_cancel_unavailable")
-            self.assertEqual((code, interim["deferred"], interim["archived"]), (202, True, False))
-            self.assertTrue(self.report(q, action="cancel", deferred=True,
-                                        reason="native_task_cancel_unavailable")[1]["duplicate"])
-            self.assertEqual(self.saved()["state"], "cancelling")
-            self.assertEqual(self.store.get_worker("test-worker")["TaskID"], self.task)
-            self.assertFalse(self.saved()["request_pending"])
-            self.assertEqual(self.saved()["request_id"], q["request_id"])
-            self.advance(240)
-            self.assertEqual(self.events, [])
-            self.assertTrue(self.conn.queue.empty())
-            code, final = self.report(q, action="cancel", reason="user_cancel")
-            self.assertEqual((code, final["worker_task_id"]), (200, 0))
-        self.assertEqual(self.saved()["archive"]["reason"], "worker_cancel")
-        self.assertEqual(self.saved()["archive"]["worker_reason"], "user_cancel")
-        self.assertEqual(sum(f["kind"] == "worker_cancel_deferred" for f in self.store.orders.facts(self.task)), 1)
-        for event in ("cancel_deferred", "cancel_acked"):
-            matches = [line for line in logs.output if f":{event} " in line]
-            self.assertEqual(len(matches), 1)
-            print(matches[0])
+        request = self.take()
+        self.assertEqual(self.report(request, action="cancel", deferred=True)[0], 400)
+        self.assertTrue(self.saved()["request_pending"])
+        code, response = self.report(request, action="cancel", reason="user_cancel", execution_stopped=False)
+        self.assertEqual((code, response["worker_task_id"]), (200, 0))
+        task = self.saved()
+        self.assertFalse(task["request_pending"])
+        self.assertEqual(task["archive"]["reason"], "worker_cancel")
+        self.assertIs(task["archive"]["execution_stopped"], False)
+        self.beat("busy", TaskID=0)
+        self.assertTrue(self.conn.queue.empty())
 
     def test_online_cancel_requires_worker_and_offline_reconciliation(self):
         route = "/tasks/" + self.task + "/cancel"
@@ -936,16 +925,40 @@ class ProbeTests(unittest.TestCase):
             "TaskInfo fields=TaskID,TaskName,TaskDesc,TaskOwner; state=running (derived); verdict HTTP 404; historical row unchanged"
         )
 
-    def test_idle_requires_fresh_samples(self):
+    def test_idle_survives_missing_heartbeats_and_resets_only_on_busy_or_request(self):
+        self.beat("busy")
         self.beat()
-        self.now += 65
+        started = self.now
+        self.now = started + 20
+        self.beat()
+        self.now = started + 29
+        self.api.lifecycle.sweep()
+        self.assertTrue(self.conn.queue.empty())
+        self.now = started + 30
+        self.api.lifecycle.sweep()
+        first = self.take()
+        self.assertEqual((first["purpose"], first["attempt"]), ("summary", 1))
+        self.api.lifecycle.sweep()
+        self.assertTrue(self.conn.queue.empty())
+        print("heartbeat t=0,20s; at 29s=0; at 30s=1 summary")
+
+        self.now += 70
         self.api.lifecycle.sweep()
         self.assertTrue(self.conn.queue.empty())
         self.beat()
-        self.advance(25)
+        self.now += 20
+        self.beat("busy")
+        self.now += 10
+        self.api.lifecycle.sweep()
         self.assertTrue(self.conn.queue.empty())
-        self.advance(5)
-        self.assertEqual(self.take()["attempt"], 1)
+        self.beat()
+        self.now += 29
+        self.api.lifecycle.sweep()
+        self.assertTrue(self.conn.queue.empty())
+        self.now += 1
+        self.api.lifecycle.sweep()
+        self.assertEqual(self.take()["attempt"], 2)
+        print("idle reset by request and busy; next first idle + 30s = attempt 2")
 
     def test_approval_progress_survives_worker_archive(self):
         self.beat()

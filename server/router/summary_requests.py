@@ -115,9 +115,7 @@ class SummaryRequests:
             )
 
         now = self.clock()
-        sample = self.samples.get(conn.name)
-        if sample and sample[0] == tid:
-            self.samples[conn.name] = (tid, now, sample[2])
+        self.samples.pop(conn.name, None)
         logging.getLogger("router").info(
             "request_idle_reset worker=%s task=%s request=%s purpose=%s attempt=%s idle_elapsed=0 at=%.3f",
             conn.name, tid, request_id, purpose, attempt, now,
@@ -142,11 +140,12 @@ class SummaryRequests:
             self.orders.add(tid, "stream_full", "full:" + request_id, request_id=request_id)
 
     def detached(self, name):
-        self.samples.pop(name, None)
         tid = self.orders.held(name)
         task = self.orders.get(tid) if tid else None
         if task and task.get("state") == "cancelling":
             self.offline_archive(task, "worker_disconnected")
+        if not task or task.get("state") == "cancelling":
+            self.samples.pop(name, None)
 
     def requeue_unoffered(self, name, reported):
         tid = self.orders.requeue_unoffered(name, reported)
@@ -355,33 +354,28 @@ class SummaryRequests:
                 return
             conn = self.server.current_conn(name)
             task = self.orders.get(reported) if reported else None
-            if (
-                not conn
-                or conn.closed
-                or not task
-                or task["worker"] != name
-                or not task["in_running_tasks"]
-            ):
+            if not task or task["worker"] != name or not task["in_running_tasks"]:
                 self.samples.pop(name, None)
                 return
-            sample = self.samples.get(name)
-            if not sample or sample[0] != reported or now - sample[2] > 15:
-                self.samples[name] = (reported, now, now)
+            if not conn or conn.closed:
                 return
-            self.samples[name] = (reported, sample[1], now)
+            sample = self.samples.get(name)
+            if not sample or sample[0] != reported:
+                self.samples[name] = (reported, now)
             self.advance(name)
 
     def advance(self, name):
         sample = self.samples.get(name)
         if not sample:
             return
-        tid, since, seen = sample
+        tid, since = sample
         now = self.clock()
-        if seen <= since or now - seen > 15 or now - since < self.interval:
+        if now - since < self.interval:
             return
         conn = self.server.current_conn(name)
         task = self.orders.get(tid)
-        if not task or not task["in_running_tasks"] or not conn or conn.closed:
+        if (not task or not task["in_running_tasks"] or not conn or conn.closed
+                or self.server.store.get_worker(name)["task_id"] != tid):
             return
         purpose = "cancel" if task["state"] == "cancelling" else "summary"
         requests = [f for f in task["facts"] if f["kind"] == purpose + "_request"]
@@ -417,12 +411,12 @@ class SummaryRequests:
             if "action" in body and (not cancel_request or body["action"] != "cancel"):
                 return 409, {"error": "delivery_request_mismatch"}
             confirm_cancel = cancel_request and body.get("action") == "cancel"
-            deferred = body.get("deferred", False)
+            if "deferred" in body:
+                return 400, {"error": "cancel_final_receipt_required"}
             reason = body.get("reason")
-            if type(deferred) is not bool or (deferred and (
-                not confirm_cancel or reason != "native_task_cancel_unavailable"
-            )):
-                return 400, {"error": "invalid_cancel_deferred"}
+            stopped = body.get("execution_stopped")
+            if "execution_stopped" in body and (not confirm_cancel or type(stopped) is not bool):
+                return 400, {"error": "invalid_execution_stopped"}
             if not confirm_cancel and not any(
                 f["kind"] == "summary_request" and f["request_id"] == rid for f in task["facts"]
             ):
@@ -482,14 +476,8 @@ class SummaryRequests:
                 json.dumps(report, ensure_ascii=False).encode("utf-8")
             except UnicodeEncodeError:
                 return 400, {"error": "invalid_deliverable", "detail": "invalid Unicode"}
-            if deferred:
-                recorded = self.orders.add(
-                    tid, "worker_cancel_deferred", "cancel_deferred:" + rid,
-                    request_id=rid, actor=task["worker"], reason=reason,
-                )
-                return 202, {"ok": True, "task_id": tid, "deferred": True,
-                             "archived": False, "duplicate": not recorded}
             if confirm_cancel:
+                stop_evidence = {"execution_stopped": stopped} if stopped is not None else {}
                 self.orders.add(
                     tid,
                     "worker_cancel_reply",
@@ -497,10 +485,12 @@ class SummaryRequests:
                     actor=task["worker"],
                     request_id=rid,
                     report=report,
+                    **stop_evidence,
                     **({"reason": reason} if reason == "user_cancel" else {}),
                 )
                 self.orders.archive(
                     tid, "worker_cancel", actor=task["worker"], request_id=rid, confirmed_by_worker=True,
+                    **stop_evidence,
                     **({"worker_reason": reason} if reason == "user_cancel" else {}),
                 )
                 self.wait_for_release(task["worker"])

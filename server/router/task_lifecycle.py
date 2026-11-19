@@ -188,7 +188,7 @@ class Ledger:
                 "probe_id": request["request_id"] if active and request and not cancelling else None,
                 "request_kind": "cancel" if cancelling else "summary",
                 "request_id": request["request_id"] if active and request else None,
-                "request_pending": bool(active and request and "worker_cancel_deferred" not in latest),
+                "request_pending": bool(active and request),
                 "deliverable": report,
             }
 

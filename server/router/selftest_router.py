@@ -981,7 +981,6 @@ def run(work: Path, checker: Checker) -> None:
             "--trigger-url", trigger_url + "/trigger",
             "--trigger-token-file", str(trigger_token),
             "--ping-interval", "1",
-            "--backlog-max", "128",
         ], work / "router.out")
         if not wait_http(BASE + "/health", timeout=10.0):
             raise RuntimeError("router did not start: " + tail(router_log))

@@ -69,12 +69,9 @@ DEFAULT_LOCK_PATH = "~/.hermes/router.lock"
 DEFAULT_LOG = "~/.hermes/router.log"
 DEFAULT_TRIGGER_URL = "http://127.0.0.1:8791/trigger"
 DEFAULT_TRIGGER_TOKEN_PATH = "~/.hermes/secrets/trigger.token"
-BACKLOG_MAX = 1
-QUEUE_TTL_S = 6 * 60 * 60
 MAX_GOAL_CHARS = 2000
 MAX_BODY_BYTES = 1 * 1024 * 1024
 PEER_CHUNK_BYTES = 64 * 1024
-IDLE_FRESH_S = 30
 PEER_PAGE_LIMIT = 100
 ROOT_PEER_NAME = "Hermes"
 ROOT_PEER_ALIASES = frozenset(("hermes", "溪流"))
@@ -1524,8 +1521,7 @@ class RouterServer(ThreadingHTTPServer):
     def __init__(self, addr, store: RouterStore, token: str,
                  notifier: TriggerNotifier, bridge: TriggerSubscriptionBridge,
                  ping_interval: float = PING_INTERVAL,
-                 backlog_max: int = BACKLOG_MAX,
-                 queue_ttl_s: float = QUEUE_TTL_S, verdict_token=None, lifecycle_config=None):
+                 verdict_token=None, lifecycle_config=None):
         self.store = store
         self.attachments = AttachmentStore(store.path + ".attachments")
         self.started_at = time.time()
@@ -1534,10 +1530,6 @@ class RouterServer(ThreadingHTTPServer):
         self.trigger_client = notifier.client
         self.trigger_bridge = bridge
         self.ping_interval = max(0.2, float(ping_interval))
-        self.backlog_max = max(0, int(backlog_max))
-        self.queue_ttl_s = float(queue_ttl_s)
-        if not math.isfinite(self.queue_ttl_s) or self.queue_ttl_s <= 0:
-            raise ValueError("queue_ttl_s must be finite and > 0")
         self.conns: Dict[str, Connection] = {}
         self.conn_lock = threading.Lock()
         self.dispatch_lock = threading.RLock()
@@ -1657,7 +1649,6 @@ class RouterServer(ThreadingHTTPServer):
             conn.reoffer_after_cancel = bool(old and old.reoffer_after_cancel)
             if correction:
                 conn.awaiting_clear = correction["attempts"] < CORRECTION_LIMIT
-            self.lifecycle.samples.pop(name, None)
             self.dispatch_one(name)
             self.flush_peer_messages_locked(conn)
         log.info("stream attached name=%s version=%s", name, version or "-")
@@ -2095,9 +2086,6 @@ class RouterHandler(BaseHTTPRequestHandler):
                 return self._send_json(*self._peer_message_ack(parts[1], body))
             if len(parts) == 3 and parts[0] == "tasks" and parts[2] == "deliverable":
                 status, receipt = self.server.lifecycle.receive(parts[1], body)
-                if status == 202 and receipt.get("deferred") and not receipt.get("duplicate"):
-                    log.info("cancel_deferred worker=%s task=%s request=%s reason=%s",
-                             body["worker"], parts[1], body["request_id"], body["reason"])
                 if status == 200 and body.get("action") == "cancel" and not receipt.get("duplicate"):
                     log.info("cancel_acked worker=%s task=%s request=%s", body["worker"], parts[1], body["request_id"])
                 return self._send_json(status, receipt)
@@ -2167,8 +2155,6 @@ class RouterHandler(BaseHTTPRequestHandler):
                 self.server.store.list_subscriptions(active_only=True)),
             "port": self.server.server_address[1],
             "db_path": self.server.store.path,
-            "backlog_max": self.server.backlog_max,
-            "queue_ttl_s": self.server.queue_ttl_s,
             "approvals_pending": self.server.store.pending_approvals(),
             "uptime_s": round(max(0.0, time.time() - self.server.started_at), 1),
         }
@@ -2552,7 +2538,6 @@ class RouterHandler(BaseHTTPRequestHandler):
             "queued": worker["queued"],
             "task_lifecycle_v2": True,
             "idle_probe": True,
-            "cancel_deferred": True,
             **correction,
         }
 
@@ -2645,7 +2630,8 @@ class RouterHandler(BaseHTTPRequestHandler):
                 if not conn or body.get("stream") != conn.generation:
                     return 409, {"error": "stale_status_stream"}
                 if seq > conn.status_seq + 1:
-                    self.server.lifecycle.samples.pop(name, None)
+                    if busy:
+                        self.server.lifecycle.observe(name, reported, busy)
                     self.server.request_status(conn)
                     return 202, {"ok": True, "history_required": True}
                 if seq <= conn.status_seq:
@@ -2748,15 +2734,6 @@ class RouterHandler(BaseHTTPRequestHandler):
                     raise BadRequest("deadline_s must be a number")
                 if not math.isfinite(deadline_s) or deadline_s <= 0:
                     raise BadRequest("deadline_s must be > 0")
-            queue_ttl_s = body.get("queue_ttl_s", self.server.queue_ttl_s)
-            try:
-                if isinstance(queue_ttl_s, bool):
-                    raise ValueError()
-                queue_ttl_s = float(queue_ttl_s)
-                if not math.isfinite(queue_ttl_s) or queue_ttl_s <= 0:
-                    raise ValueError()
-            except (TypeError, ValueError):
-                raise BadRequest("queue_ttl_s must be finite and > 0")
 
             store = self.server.store
             worker = store.get_worker(worker_name)
@@ -3487,11 +3464,6 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                    help="trigger ingest URL (default %(default)s)")
     p.add_argument("--trigger-token-file", default=DEFAULT_TRIGGER_TOKEN_PATH,
                    help="trigger token file (default %(default)s)")
-    p.add_argument("--backlog-max", type=int, default=BACKLOG_MAX,
-                   help="max queued/backlog tasks per worker "
-                        "(0 refuses new waiting tasks; default %(default)s)")
-    p.add_argument("--queue-ttl-s", type=float, default=QUEUE_TTL_S,
-                   help="never-dispatched queue TTL in seconds (default %(default)s)")
     p.add_argument("--ping-interval", type=float, default=PING_INTERVAL,
                    help="SSE comment heartbeat seconds (default %(default)s)")
     p.add_argument("--verbose", action="store_true", help="debug logging")
@@ -3507,12 +3479,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     if host not in ("127.0.0.1", "localhost") and not args.allow_remote:
         print("error: non-loopback binding requires --allow-remote; refusing to bind %r"
               % host, file=sys.stderr)
-        return 2
-    if args.backlog_max < 0:
-        print("error: --backlog-max must be >= 0", file=sys.stderr)
-        return 2
-    if not math.isfinite(args.queue_ttl_s) or args.queue_ttl_s <= 0:
-        print("error: --queue-ttl-s must be finite and > 0", file=sys.stderr)
         return 2
     if args.ping_interval <= 0:
         print("error: --ping-interval must be > 0", file=sys.stderr)
@@ -3540,7 +3506,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     try:
         server = RouterServer((host, args.port), store, token, notifier,
                               bridge, ping_interval=args.ping_interval,
-                              backlog_max=args.backlog_max, queue_ttl_s=args.queue_ttl_s,
                               lifecycle_config=args.lifecycle_config,
                               verdict_token=load_or_create_token(token_path.with_name(token_path.name + ".review"))[0])
     except OSError as exc:
@@ -3551,9 +3516,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         os.close(lock_fd)
         return 1
 
-    log.info("mowu-router %s listening on http://%s:%d (db=%s, "
-             "backlog_max=%d, ping=%.1fs)", VERSION, host, args.port,
-             store.path, args.backlog_max, args.ping_interval)
+    log.info("mowu-router %s listening on http://%s:%d (db=%s, ping=%.1fs)",
+             VERSION, host, args.port, store.path, args.ping_interval)
     log.info("router token: %s%s; every endpoint except /health needs "
              "X-Router-Token", token_path,
              " (generated)" if generated else "")
