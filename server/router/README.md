@@ -46,9 +46,14 @@ trigger 不可用时返回 200/queued 并记 WARNING。使用相同 UUID、相�
 
 任务有固定的执行人。正在执行的清单、等待派发的 FIFO 和归档可分别核对。
 Worker 每五秒报告完整的 `bBusy` 与 `TaskID`。回合结束后继续持有原编号。
-Router 在连续空闲满配置时间后通过 SSE 请求总结。Worker 调用原有的
-`submit_deliverable` 工具。Router 原子保存总结、清除占用和归档，并持久记录待发送的
-TaskInfo 与总结包。触发器恢复后会补送同一事件。溪流在 Router 之外验收。
+
+`bBusy` 只有一个含义：worker 用 `/resume` 挂载的那条会话里是否有正在跑的回合。
+其他等待都不算忙。
+
+Router 在**忙完之后第一次变闲**开始计时，空闲满 `idle_task_end_seconds` 通过 SSE 请求总结；
+发完即把空闲计时清零，再攒满才重发。成果必须由模型调用工具交给 Walker，Walker 再转给 Router。
+Router 原子保存总结、清除占用和归档，并持久记录待发送的 TaskInfo 与总结包。
+触发器恢复后会补送同一事件。溪流在 Router 之外验收。
 
 通过 `--lifecycle-config <path>` 或 `ROUTER_LIFECYCLE_CONFIG` 指定 JSON 配置。
 默认值为 `{"idle_task_end_seconds":30,"summary_request_max_attempts":3}`。
