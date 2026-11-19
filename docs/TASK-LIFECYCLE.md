@@ -72,9 +72,9 @@ goal 模式由 worker 自己决定，Router 不管。
 ### 打招呼后的等待（与总结索取同一套参数）
 
 ```
-第 1 次   打招呼后等到它下一次 idle 满 idle_task_end_minutes
-第 2 次   再等同样时长
-第 3 次   再等同样时长（summary_request_max_attempts=3，含第 1 次）
+第 1 次   worker 持有本单时立即发取消
+第 2 次   worker 仍持有且空闲满 idle_task_end_minutes 时重发
+第 3 次   再等满同样的空闲间隔（含第 1 次最多 3 次，配置更低时从低）
 三次都没等到它的取消回复 → 视为已失联：
 - **直接并到②处理：TaskInfo 归档**
 - **同时通知溪流**（这单是被判定失联后归档的，不是它自己确认取消的）
@@ -133,7 +133,7 @@ worker 没有这张 TaskID  → 直接归档，一条指令都不用发
 - 无持有时：**立即归档**（reason=worker_cancel / cancelled_without_ack），不等回执、不等重试
 - 收到回执 → 清 TaskID、归档（reason=worker_cancel）
 - 重试耗尽仍无回执 → 视同失联：归档 + 通知溪流（reason=archive_unconfirmed）
-- **`cancelling` 不得无限期占用**：任何情况下都要收口，绝不允许把后续派单堵死
+- **从第一次请求起最多 180 秒**。持续忙碌、心跳静默和重连均不延长截止时间。到期归档为 `archive_unconfirmed` 并通知溪流，释放 Router 派单位。worker 仍报旧 TaskID 时走既有清零纠偏。
 
 **同一个触发点，按状态分派动作**（训练员 2026-11-19）：
 
@@ -178,7 +178,7 @@ worker 侧：TaskID 已是 0，无需再清
 
 「索取任务总结」与「取消确认」走**同一套机制**（参数与应答通道相同），但**两件事各自独立，不许串成一条链**：
 
-- 同一套等待参数：`idle_task_end_minutes`（每次等多久）+ `summary_request_max_attempts`（共试几次）
+- 共用 `idle_task_end_minutes` 和 `summary_request_max_attempts`。取消额外受最多 3 次、总计 180 秒的限制
 - 同一个应答通道：工具调用回执（`submit_deliverable` 那一类），不走私信抄送
 - **要求总结就是要求总结**：试满次数仍拿不到总结 → 只报警给溪流，**不转取消、不叠取消次数**
 - **要求取消就是要求取消**：试满次数拿不到停手确认 → 视同失联，归档并通知溪流

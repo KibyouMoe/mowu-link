@@ -1466,6 +1466,7 @@ class Connection:
         self.offered_cancel = None
         self.offered_task = None
         self.task_sent_at = None
+        self.reoffer_after_cancel = False
         self.awaiting_clear = False
         self.status_seq = 0
         self.history_ack = 0
@@ -1652,6 +1653,7 @@ class RouterServer(ThreadingHTTPServer):
             self.store.set_online(name, version)
             correction = self.lifecycle.open_correction(name)
             conn.awaiting_clear = bool(old and old.awaiting_clear)
+            conn.reoffer_after_cancel = bool(old and old.reoffer_after_cancel)
             if correction:
                 conn.awaiting_clear = correction["attempts"] < CORRECTION_LIMIT
             self.lifecycle.samples.pop(name, None)
@@ -1845,7 +1847,7 @@ class ApprovalSweeper(threading.Thread):
             deadline = None
             try:
                 if self.server is not None:
-                    self.server.lifecycle.sweep()
+                    deadline = self.server.lifecycle.sweep()
                     peer_due = self.server.sweep_peer_acks(time.time())
                     if peer_due is not None:
                         deadline = peer_due if deadline is None else min(peer_due, deadline)
@@ -2532,6 +2534,7 @@ class RouterHandler(BaseHTTPRequestHandler):
         with self.server.dispatch_lock, self.server.store.orders.atomic():
             worker, created = self.server.store.upsert_worker(name, version, note, control_url, control_sse)
             if "TaskID" in body or "task_id" in body:
+                self.server.lifecycle.archive_cancel_if_unheld(name, reported)
                 held, correction = self.server.lifecycle.reconcile(name, reported, "register")
                 self.server.store._conn.execute(
                     "UPDATE workers SET task_id=? WHERE name=?", (held, name)
@@ -2645,7 +2648,9 @@ class RouterHandler(BaseHTTPRequestHandler):
                 if seq - conn.history_ack >= 12:
                     self.server.request_status(conn)
             raw_task_id = body.get("TaskID", body.get("task_id"))
-            if type(raw_task_id) is int and raw_task_id == 0:
+            if "TaskID" in body or "task_id" in body:
+                self.server.lifecycle.archive_cancel_if_unheld(name, reported)
+            if type(raw_task_id) is int and raw_task_id == 0 and not (conn and conn.reoffer_after_cancel):
                 self.server.lifecycle.archive_dropped_task(name, conn)
             correction = self._accept_status(name, busy, reported)
             return 200, {
@@ -3358,6 +3363,10 @@ class RouterHandler(BaseHTTPRequestHandler):
                     if pending is None or pending["status"] != "queued":
                         continue
                 data = item["data"]
+                if item["event"] == "task":
+                    task = self.server.store.get_task(data["task_id"])
+                    if not task or task.get("state") != "running":
+                        continue
                 if item["event"] == "deliverable_request":
                     # A queued summary can be superseded by a cancel before
                     # this stream gets to write it.

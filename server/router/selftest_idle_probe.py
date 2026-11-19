@@ -44,6 +44,7 @@ class ProbeTests(unittest.TestCase):
         self.base = "http://127.0.0.1:%d" % self.api.server_port
         self.now = time.time()
         self.api.lifecycle.clock = lambda: self.now
+        self.store.orders.clock = lambda: self.now
         self.post("/register", {"name": "test-worker"})
         self.conn = self.api.attach("test-worker")
         self.task = self.post("/tasks", {"worker": "test-worker", "goal": "验收"})[1][
@@ -141,16 +142,71 @@ class ProbeTests(unittest.TestCase):
         self.assertEqual(self.saved()["archive"]["reason"], "worker_dropped_task")
         print("unconfirmed offer survives pre-send and early zero; after one heartbeat interval, zero archives it")
 
-    def test_zero_does_not_replace_pending_cancellation(self):
+    def test_cancelling_zero_heartbeat_archives_and_dispatches_next(self):
         self.beat()
+        _, queued = self.post("/tasks", {"worker": "test-worker", "goal": "next"})
         self.post("/tasks/" + self.task + "/cancel", {})
         cancel = self.take()
         self.beat(TaskID=0)
+        self.assertEqual(self.saved()["archive"]["reason"], "cancelled_without_ack")
+        self.assertEqual(self.conn.queue.get_nowait()["data"]["task_id"], queued["task_id"])
+        self.api.lifecycle.sweep()
+        self.assertEqual(self.events, [])
+        self.assertEqual(self.report(cancel, action="cancel")[0], 409)
+        print("cancelling + zero TaskID -> cancelled_without_ack; next task dispatched in same heartbeat")
+
+    def test_cancel_unheld_archives_immediately_without_sending_cancel(self):
+        _, queued = self.post("/tasks", {"worker": "test-worker", "goal": "next"})
+        code, reply = self.post("/tasks/" + self.task + "/cancel", {})
+        self.assertEqual((code, reply["reason"]), (200, "cancelled_without_ack"))
+        self.assertEqual(self.saved()["archive"]["reason"], "cancelled_without_ack")
+        self.assertFalse(any(f["kind"] == "cancel_request" for f in self.store.orders.facts(self.task)))
+        self.assertEqual(self.conn.queue.get_nowait()["data"]["task_id"], queued["task_id"])
+        self.assertTrue(self.conn.queue.empty())
+        print("cancel unheld HTTP 200; cancel requests=0; next FIFO task dispatched")
+
+    def test_cancel_hard_deadline_releases_fifo_even_without_heartbeats(self):
+        from summary_requests import SummaryRequests
+
+        self.beat("busy")
+        _, queued = self.post("/tasks", {"worker": "test-worker", "goal": "next"})
+        route = "/tasks/" + self.task + "/cancel"
+        self.assertEqual(self.post(route, {})[0], 202)
+        first = self.take()
+        # Rebuild the scheduler with the same DB and no in-memory idle samples.
+        self.api.lifecycle = SummaryRequests(self.api, None)
+        self.api.lifecycle.clock = lambda: self.now
+        self.now += 179
         self.api.lifecycle.sweep()
         self.assertEqual(self.saved()["state"], "cancelling")
-        self.assertEqual(self.events, [])
-        self.assertEqual(self.report(cancel, action="cancel")[0], 200)
-        self.assertEqual(self.saved()["archive"]["reason"], "worker_cancel")
+        self.assertTrue(self.post(route, {})[1]["duplicate"])
+        self.now += 1
+        self.api.lifecycle.sweep()
+        self.assertEqual(self.saved()["archive"]["reason"], "archive_unconfirmed")
+        self.assertEqual(self.conn.queue.get_nowait()["data"]["task_id"], queued["task_id"])
+        self.assertEqual(self.events[0]["payload"]["reason"], "archive_unconfirmed")
+        self.assertEqual(self.report(first, action="cancel")[0], 409)
+        # The next offer may have reached a worker that still held the old ID.
+        # Clearing that ID must re-offer the same task, without dropping it.
+        stale = self.post("/heartbeat", {"name": "test-worker", "bBusy": True, "TaskID": self.task})[1]
+        self.assertEqual(stale["clear_task_id"], self.task)
+        self.conn.task_sent_at = self.now
+        self.now += 6
+        self.beat(TaskID=0)
+        self.assertEqual(self.conn.queue.get_nowait()["data"]["task_id"], queued["task_id"])
+        self.beat(TaskID=queued["task_id"])
+        self.api.lifecycle.sweep()
+        self.assertEqual(len(self.events), 1)
+        self.assertEqual(self.store.orders.held("test-worker"), queued["task_id"])
+        print("hard deadline: at 179s cancelling; at 180s archive_unconfirmed + FIFO dispatch; clear replays same offer")
+
+    def test_cancelling_different_task_id_archives_even_while_busy(self):
+        self.beat()
+        self.post("/tasks/" + self.task + "/cancel", {})
+        self.take()
+        self.beat("busy", TaskID="t-another-id")
+        self.assertEqual(self.saved()["archive"]["reason"], "cancelled_without_ack")
+        self.assertTrue(self.conn.queue.empty())
 
     def test_idle_archive_and_summary_notification(self):
         q = self.first()
@@ -182,13 +238,16 @@ class ProbeTests(unittest.TestCase):
         self.assertIsNone(self.saved()["archive"])
         self.assertEqual([e["kind"] for e in self.events], ["task.summary_missing"])
         self.assertFalse(any(f["kind"] == "cancel_request" for f in self.store.orders.facts(self.task)))
-        # Only an explicit cancellation starts its own full budget.
+        # Exercise the retry cap independently from the 180-second deadline
+        # and from a more permissive summary configuration.
+        self.api.lifecycle.interval = 30
+        self.api.lifecycle.max_attempts = 5
         self.assertEqual(self.post("/tasks/" + self.task + "/cancel", {})[0], 202)
         for attempt in (1, 2, 3):
             q = self.take()
             self.assertEqual((q["purpose"], q["attempt"]), ("cancel", attempt))
             with self.assertLogs("router", level="WARNING") as logs:
-                self.advance(60)
+                self.advance(30)
             self.assertTrue(any("cancel_timeout" in line and q["request_id"] in line for line in logs.output))
         self.assertEqual(
             self.saved()["archive"]["reason"], "archive_unconfirmed"
@@ -289,7 +348,7 @@ class ProbeTests(unittest.TestCase):
                                         reason="native_task_cancel_unavailable")[1]["duplicate"])
             self.assertEqual(self.saved()["state"], "cancelling")
             self.assertEqual(self.store.get_worker("test-worker")["TaskID"], self.task)
-            self.advance(180, "busy")
+            self.advance(179, "busy")
             self.assertEqual(self.events, [])
             self.assertTrue(self.conn.queue.empty())
             code, final = self.report(q, action="cancel", reason="user_cancel")
@@ -304,6 +363,7 @@ class ProbeTests(unittest.TestCase):
 
     def test_online_cancel_requires_worker_and_offline_reconciliation(self):
         route = "/tasks/" + self.task + "/cancel"
+        self.beat()
         self.assertEqual(self.post(route, {})[0], 202)
         q = self.take()
         self.assertTrue(self.saved()["in_running_tasks"])
@@ -676,6 +736,7 @@ class ProbeTests(unittest.TestCase):
         self.assertEqual(db.orders.next_dispatch("test-worker"), qid)
 
     def test_router_shutdown_preserves_unanswered_cancel_without_offline_alert(self):
+        self.beat()
         self.assertEqual(self.post("/tasks/" + self.task + "/cancel", {})[0], 202)
         self.assertEqual(self.take()["purpose"], "cancel")
         self.api.shutdown()

@@ -41,6 +41,7 @@ def settings(path=None):
 class Ledger:
     def __init__(self, store):
         self.store, self.db = store, store._conn
+        self.clock = time.time
         self.db.executescript(DDL)
         for table in ("task_info", "task_facts"):
             for op in ("UPDATE", "DELETE"):
@@ -68,7 +69,7 @@ class Ledger:
                 self.db.execute(
                     "INSERT INTO task_facts(task_id,kind,event_key,at,data) VALUES(?,?,?,?,?) "
                     "ON CONFLICT(task_id,event_key) DO NOTHING",
-                    (tid, kind, key, time.time(), json.dumps(data)),
+                    (tid, kind, key, self.clock(), json.dumps(data)),
                 ).rowcount
                 == 1
             )
@@ -118,6 +119,13 @@ class Ledger:
             self.db.execute("INSERT INTO active_tasks(task_id,worker) VALUES(?,?)", (tid, worker))
             self.db.execute("DELETE FROM dispatch_queue WHERE task_id=?", (tid,))
             return tid
+
+    def pending_cancellations(self):
+        with self.store._lock:
+            return self.db.execute(
+                "SELECT a.task_id, f.at FROM active_tasks a JOIN task_facts f "
+                "ON f.task_id=a.task_id AND f.event_key='cancel:1'"
+            ).fetchall()
 
     def archive(self, tid, why, **data):
         self.add(tid, "archive", "archive", reason=why, **data)

@@ -12,6 +12,8 @@ from task_lifecycle import settings
 CANCEL_PROMPT = "这单要取消，请确认后自己发 cancel，并清掉本地 TaskID。"
 CORRECTION_LIMIT = 3
 WORKER_HEARTBEAT_S = 5
+CANCEL_DEADLINE_S = 180
+CANCEL_MAX_ATTEMPTS = 3
 CLEARED_PROMPT = "这单已取消，请清掉本地 TaskID。"
 SUMMARY_PROMPT = "请调用 submit_deliverable 工具报送本任务的总结。"
 
@@ -107,7 +109,7 @@ class SummaryRequests:
         self.orders.add(
             tid, purpose + "_request", f"{purpose}:{attempt}", request_id=request_id, attempt=attempt
         )
-        self.send_request(conn, tid, purpose, request_id, attempt, time.time())
+        self.send_request(conn, tid, purpose, request_id, attempt, self.orders.clock())
         if purpose == "cancel" and attempt > 1:
             logging.getLogger("router").info(
                 "cancel_retry worker=%s task=%s request=%s attempt=%s",
@@ -166,6 +168,36 @@ class SummaryRequests:
             self.samples.pop(name, None)
         logging.getLogger("router").info("worker_dropped_task worker=%s task=%s", name, tid)
 
+    def archive_cancel_if_unheld(self, name, reported):
+        tid = self.orders.held(name)
+        if not tid or tid == reported:
+            return
+        task = self.orders.get(tid)
+        if task.get("state") == "cancelling":
+            self.archive_cancel_without_ack(task)
+
+    def archive_cancel_without_ack(self, task):
+        tid, name = task["task_id"], task["worker"]
+        with self.orders.atomic():
+            self.orders.archive(tid, "cancelled_without_ack", confirmed_by_worker=False)
+            self.samples.pop(name, None)
+        conn = self.server.current_conn(name)
+        if conn and conn.offered_task == tid:
+            # A frame already being written can cross the cancellation. If the
+            # old ID is acquired and later cleared, replay the next offer once.
+            conn.reoffer_after_cancel = True
+        logging.getLogger("router").info("cancel_observed worker=%s task=%s reason=cancelled_without_ack", name, tid)
+
+    def archive_cancel_timeout(self, task):
+        name = task["worker"]
+        self.offline_archive(task, "archive_unconfirmed")
+        self.samples.pop(name, None)
+        conn = self.server.current_conn(name)
+        if conn:
+            conn.awaiting_clear = False
+            conn.reoffer_after_cancel = True
+        self.server.dispatch_one(name)
+
     def wait_for_release(self, worker):
         conn = self.server.current_conn(worker)
         if conn:
@@ -198,6 +230,11 @@ class SummaryRequests:
                 return 200, {"ok": True, "task_id": tid, "archived": True, "duplicate": False}
             if not task["in_running_tasks"]:
                 return 200, {"ok": True, "task_id": tid, "archived": True, "duplicate": True}
+            if self.server.store.get_worker(worker)["task_id"] != tid:
+                self.archive_cancel_without_ack(task)
+                self.server.dispatch_one(worker)
+                return 200, {"ok": True, "task_id": tid, "archived": True,
+                             "confirmed_by_worker": False, "reason": "cancelled_without_ack"}
             conn = self.server.current_conn(worker)
             if not conn or conn.closed:
                 self.offline_archive(task, "worker_offline")
@@ -233,6 +270,10 @@ class SummaryRequests:
             if not stale:
                 if conn:
                     conn.awaiting_clear = False
+                    if conn.reoffer_after_cancel:
+                        if not reported and conn.offered_task == held:
+                            conn.offered_task = None
+                        conn.reoffer_after_cancel = False
                 if reported and source == "register":
                     task = self.orders.get(reported)
                     if task["state"] == "cancelling":
@@ -312,20 +353,35 @@ class SummaryRequests:
                 "cancel_timeout worker=%s task=%s request=%s attempt=%s",
                 name, tid, last["request_id"], last["attempt"],
             )
-        if len(requests) < self.max_attempts:
+        max_attempts = min(self.max_attempts, CANCEL_MAX_ATTEMPTS) if purpose == "cancel" else self.max_attempts
+        if len(requests) < max_attempts:
             self.contact(task, conn, purpose, len(requests) + 1)
         elif purpose == "summary":
             if not any(f.get("notice_kind") == "summary_missing" for f in task["facts"]):
                 self.notice(task, "summary_missing", f"{tid} 索取总结 {len(requests)} 次仍未收到，请核查。")
         else:
-            self.offline_archive(task, "archive_unconfirmed")
-            self.samples.pop(name, None)
+            self.archive_cancel_timeout(task)
 
     def sweep(self):
+        next_deadline = None
         with self.server.dispatch_lock:
+            now = self.orders.clock()
+            for pending in self.orders.pending_cancellations():
+                deadline = pending["at"] + CANCEL_DEADLINE_S
+                if now < deadline:
+                    next_deadline = deadline if next_deadline is None else min(deadline, next_deadline)
+                    continue
+                task = self.orders.get(pending["task_id"])
+                last = next(f for f in reversed(task["facts"]) if f["kind"] == "cancel_request")
+                logging.getLogger("router").warning(
+                    "cancel_timeout worker=%s task=%s request=%s attempt=%s reason=hard_deadline",
+                    task["worker"], task["task_id"], last["request_id"], last["attempt"],
+                )
+                self.archive_cancel_timeout(task)
             for name in list(self.samples):
                 self.advance(name)
         self.flush()
+        return next_deadline
 
     def receive(self, tid, body):
         with self.server.dispatch_lock, self.orders.atomic():
