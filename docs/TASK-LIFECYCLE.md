@@ -67,7 +67,7 @@ goal 模式由 worker 自己决定，Router 不管。
 
 在线取消到达时，worker 在当前回合直接停止该 TaskID 对应的执行；已排队的输入可撤回，已结束的回合可直接核对。停手确认后以原 request_id 回执；收到归档回执后才清本地 TaskID。原生停止拒绝或超时时，保留 TaskID 并记录原因。
 
-用 task_id 和 request_id 对账：Router 写完 SSE 帧记 `cancel_sent`；worker 收到记 `cancel_received`，确认停止记 `cancel_stopped`；Router 接收回执并归档记 `cancel_acked`。到期未获确认记 `cancel_timeout`。
+用 task_id 和 request_id 对账：Router 写完 SSE 帧记 `cancel_sent`；worker 收到记 `cancel_received`，确认停止记 `cancel_stopped`；Router 接收回执并归档记 `cancel_acked`。到期未获确认记 `cancel_timeout`，安排下一次请求时记 `cancel_retry`。
 
 ### 打招呼后的等待（与总结索取同一套参数）
 
@@ -80,8 +80,7 @@ goal 模式由 worker 自己决定，Router 不管。
 - **同时通知溪流**（这单是被判定失联后归档的，不是它自己确认取消的）
 ```
 
-取消的结果一律是 **TaskInfo 归档**（移出运行中数组），不是改某个状态字段。
-不存在 `cancelling` / `paused` 这类中间态。
+取消的结果一律是 **TaskInfo 归档**（移出运行中数组），不是保留一个终态。
 
 ## 注册握手
 
@@ -116,7 +115,7 @@ running     运行中：派发出去、等它自己收口
 cancelling  取消中：已经向 worker 要取消协议，正在等回执
 ```
 
-进入 `cancelling` 的条件：溪流/训练员下发取消。
+进入 `cancelling` 的条件是溪流或训练员下发取消。Router 根据运行中任务和已记录的取消请求返回这两个状态。排队和归档记录没有运行状态。
 
 **`cancelling` 期间的行为**：
 - **不得索取总结**（这张单已经不要了，不是正常收尾）

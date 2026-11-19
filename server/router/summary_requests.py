@@ -107,6 +107,11 @@ class SummaryRequests:
             tid, purpose + "_request", f"{purpose}:{attempt}", request_id=request_id, attempt=attempt
         )
         self.send_request(conn, tid, purpose, request_id, attempt, time.time())
+        if purpose == "cancel" and attempt > 1:
+            logging.getLogger("router").info(
+                "cancel_retry worker=%s task=%s request=%s attempt=%s",
+                conn.name, tid, request_id, attempt,
+            )
         sample = self.samples.get(conn.name)
         if sample and sample[0] == tid:
             self.samples[conn.name] = (tid, self.clock(), sample[2])
@@ -132,11 +137,12 @@ class SummaryRequests:
                 tid, request_id, attempt,
             )
             self.orders.add(tid, "stream_full", "full:" + request_id, request_id=request_id)
+
     def detached(self, name):
         self.samples.pop(name, None)
         tid = self.orders.held(name)
         task = self.orders.get(tid) if tid else None
-        if task and any(f["kind"] == "cancel_request" for f in task["facts"]):
+        if task and task.get("state") == "cancelling":
             self.offline_archive(task, "worker_disconnected")
 
     def wait_for_release(self, worker):
@@ -163,7 +169,7 @@ class SummaryRequests:
             if task.get("legacy"):
                 return 409, {"error": "historical_record"}
             worker = task["worker"]
-            requests = [f for f in task["facts"] if f["kind"] == "cancel_request"]
+            pending = task.get("state") == "cancelling"
             if "request_id" in body or "name" in body:
                 return 409, {"error": "use_deliverable_tool_to_confirm"}
             if not task["in_running_tasks"] and not task.get("archive"):
@@ -175,13 +181,14 @@ class SummaryRequests:
             if not conn or conn.closed:
                 self.offline_archive(task, "worker_offline")
                 return 200, {"ok": True, "task_id": tid, "archived": True, "confirmed_by_worker": False}
-            if not requests:
+            if not pending:
                 self.contact(task, conn, "cancel", 1)
             return 202, {
                 "ok": True,
                 "task_id": tid,
                 "notified_worker": True,
-                "duplicate": bool(requests),
+                "duplicate": pending,
+                "state": "cancelling",
             }
 
     def reconcile(self, name, reported, source):
@@ -207,7 +214,7 @@ class SummaryRequests:
                     conn.awaiting_clear = False
                 if reported and source == "register":
                     task = self.orders.get(reported)
-                    if task["request_kind"] == "cancel":
+                    if task["state"] == "cancelling":
                         return reported, {"reason": "等待取消确认", "cancel_request_id": task["request_id"]}
                     return reported, {"reason": "这单还在", "resume_task_id": reported,
                                       "resume_prompt": f"这单还在，请继续处理原工单 {reported}。"}
@@ -276,23 +283,21 @@ class SummaryRequests:
         task = self.orders.get(tid)
         if not task or not task["in_running_tasks"] or not conn or conn.closed:
             return
-        requests = [f for f in task["facts"] if f["kind"] == "cancel_request"]
-        purpose = "cancel" if requests else "summary"
-        if requests:
+        purpose = "cancel" if task["state"] == "cancelling" else "summary"
+        requests = [f for f in task["facts"] if f["kind"] == purpose + "_request"]
+        if purpose == "cancel":
             last = requests[-1]
             logging.getLogger("router").warning(
                 "cancel_timeout worker=%s task=%s request=%s attempt=%s",
                 name, tid, last["request_id"], last["attempt"],
             )
-        if not requests:
-            requests = [f for f in task["facts"] if f["kind"] == "summary_request"]
         if len(requests) < self.max_attempts:
             self.contact(task, conn, purpose, len(requests) + 1)
         elif purpose == "summary":
             if not any(f.get("notice_kind") == "summary_missing" for f in task["facts"]):
                 self.notice(task, "summary_missing", f"{tid} 索取总结 {len(requests)} 次仍未收到，请核查。")
         else:
-            self.offline_archive(task, "cancel_greetings_unanswered")
+            self.offline_archive(task, "archive_unconfirmed")
             self.samples.pop(name, None)
 
     def sweep(self):
@@ -342,11 +347,7 @@ class SummaryRequests:
                         "archived": True,
                         "worker_task_id": 0,
                     }
-            if (
-                not task["in_running_tasks"]
-                or not confirm_cancel
-                and any(f["kind"] == "cancel_request" for f in task["facts"])
-            ):
+            if not task["in_running_tasks"] or (not confirm_cancel and task["state"] == "cancelling"):
                 self.orders.add(
                     tid, "late_receipt", "late_receipt", request_id=rid, detail="迟到回执已忽略"
                 )
@@ -391,6 +392,7 @@ class SummaryRequests:
                     tid, "worker_cancel", actor=task["worker"], request_id=rid, confirmed_by_worker=True
                 )
                 self.wait_for_release(task["worker"])
+                self.samples.pop(task["worker"], None)
                 return 200, {"ok": True, "task_id": tid, "archived": True, "worker_task_id": 0}
             self.orders.add(tid, "summary", "summary", request_id=rid, report=report)
             self.orders.archive(tid, "summary_received")

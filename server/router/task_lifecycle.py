@@ -143,6 +143,7 @@ class Ledger:
             facts = self.facts(tid)
             latest = {f["kind"]: f for f in facts}
             report = latest.get("summary", {}).get("report")
+            cancelling = "cancel_request" in latest
             return {
                 **json.loads(r["metadata"]),
                 "task_info": info,
@@ -152,10 +153,11 @@ class Ledger:
                 "created_at": r["at"],
                 "actor": r["actor"],
                 "in_running_tasks": r["member"] is not None,
+                **({"state": "cancelling" if cancelling else "running"} if r["member"] else {}),
                 "facts": facts,
                 "archive": latest.get("archive"),
-                "probe_id": latest.get("summary_request", {}).get("request_id"),
-                "request_kind": "cancel" if "cancel_request" in latest else "summary",
+                "probe_id": None if cancelling else latest.get("summary_request", {}).get("request_id"),
+                "request_kind": "cancel" if cancelling else "summary",
                 "request_id": (latest.get("cancel_request") or latest.get("summary_request") or {}).get(
                     "request_id"
                 ),

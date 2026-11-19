@@ -1808,7 +1808,7 @@ class RouterServer(ThreadingHTTPServer):
             if not tid:
                 return
             task = self.store.get_task(tid)
-            if task["request_kind"] == "cancel":
+            if task["state"] == "cancelling":
                 # SSE replacement must replay the outstanding stop, never the task.
                 last = next(f for f in reversed(task["facts"]) if f["kind"] == "cancel_request")
                 self.lifecycle.send_request(conn, tid, "cancel", last["request_id"], last["attempt"], last["at"])
@@ -2755,12 +2755,14 @@ class RouterHandler(BaseHTTPRequestHandler):
                 fingerprint,
             )
             dispatched = self.server.dispatch_one(worker_name) == tid
+            task = orders.get(tid)
             return (200 if dispatched else 202), {
                 "ok": True,
                 "task_id": tid,
                 "worker": worker_name,
-                "task_info": orders.get(tid)["task_info"],
-                "in_running_tasks": orders.held(worker_name) == tid,
+                "task_info": task["task_info"],
+                "in_running_tasks": task["in_running_tasks"],
+                **({"state": task["state"]} if task["in_running_tasks"] else {}),
                 "dispatched": dispatched,
                 "duplicate": False,
                 "queued": not dispatched,
@@ -3346,12 +3348,22 @@ class RouterHandler(BaseHTTPRequestHandler):
                     # An HTTP inbox consumer may have ACKed a prefetched row.
                     if pending is None or pending["status"] != "queued":
                         continue
+                data = item["data"]
+                if item["event"] == "deliverable_request":
+                    # A queued summary can be superseded by a cancel before
+                    # this stream gets to write it.
+                    task = self.server.store.get_task(data["task_id"])
+                    if (
+                        not task or not task["in_running_tasks"]
+                        or task["request_kind"] != data["purpose"]
+                        or task["request_id"] != data["request_id"]
+                    ):
+                        continue
                 frame = ("event: %s\ndata: %s\n\n" % (
                     item["event"],
-                    json.dumps(item["data"], ensure_ascii=False))).encode("utf-8")
+                    json.dumps(data, ensure_ascii=False))).encode("utf-8")
                 self._write(frame)
-                if item["event"] == "deliverable_request" and item["data"].get("purpose") == "cancel":
-                    data = item["data"]
+                if item["event"] == "deliverable_request" and data["purpose"] == "cancel":
                     log.info("cancel_sent worker=%s task=%s request=%s attempt=%s via=sse",
                              name, data["task_id"], data["request_id"], data["attempt"])
         except (BrokenPipeError, ConnectionResetError, socket.timeout, OSError):

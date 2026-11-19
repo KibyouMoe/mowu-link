@@ -8,6 +8,7 @@ import unittest
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
+from http.client import HTTPConnection
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -143,15 +144,90 @@ class ProbeTests(unittest.TestCase):
                 self.advance(60)
             self.assertTrue(any("cancel_timeout" in line and q["request_id"] in line for line in logs.output))
         self.assertEqual(
-            self.saved()["archive"]["reason"], "cancel_greetings_unanswered"
+            self.saved()["archive"]["reason"], "archive_unconfirmed"
         )
         self.assertEqual(
             [e["kind"] for e in self.events],
             ["task.summary_missing", "task.offline_archive"],
         )
+        self.assertEqual(self.events[-1]["payload"]["reason"], "archive_unconfirmed")
+        self.assertFalse(self.saved()["archive"]["confirmed_by_worker"])
+        self.assertNotIn("state", self.saved())
+        self.assertEqual(self.store.get_worker("test-worker")["TaskID"], 0)
+        print(next(line for line in logs.output if "cancel_timeout" in line),
+              "archive reason=archive_unconfirmed; offline_archive event=1")
         print(
             "summary attempts=1,2,3; summary_missing event=1; still active; automatic cancellations=0; manual cancel attempts=1,2,3; archived without worker confirmation; offline_archive event=1"
         )
+
+    def test_same_idle_trigger_retries_cancel_on_wire_and_rejects_summary(self):
+        # Pause the SSE writer after connecting so the old summary request is
+        # still queued when a cancel arrives.
+        from unittest.mock import patch
+
+        connected = threading.Event()
+        unblock = threading.Event()
+        write = router.RouterHandler._write
+
+        def hold_connected(handler, chunk):
+            write(handler, chunk)
+            if chunk == b": connected\n\n":
+                connected.set()
+                unblock.wait(5)
+
+        with patch.object(router.RouterHandler, "_write", hold_connected):
+            with closing(HTTPConnection("127.0.0.1", self.api.server_port, timeout=4)) as stream:
+                stream.request("GET", "/stream?name=test-worker", headers={"X-Router-Token": "fixture"})
+                with closing(stream.getresponse()) as wire, self.assertLogs("router", "INFO") as logs:
+                    try:
+                        self.assertTrue(connected.wait(2))
+                        self.conn = self.api.current_conn("test-worker")
+                        self.beat()
+                        self.advance(60)
+                        summary_id = self.saved()["probe_id"]
+                        self.assertEqual(self.saved()["state"], "running")
+                        code, cancelled = self.post("/tasks/" + self.task + "/cancel", {})
+                        self.assertEqual((code, cancelled["state"]), (202, "cancelling"))
+                        task = self.saved()
+                        self.assertEqual(task["state"], "cancelling")
+                        self.assertIsNone(task["probe_id"])
+                        _, listing = http("GET", self.base + "/tasks", token="fixture")
+                        self.assertEqual(next(t["state"] for t in listing["tasks"] if t["task_id"] == self.task),
+                                         "cancelling")
+                        self.assertEqual(self.report({"request_id": summary_id})[0], 409)
+                    finally:
+                        unblock.set()
+
+                    def read_cancel():
+                        while True:
+                            line = wire.readline()
+                            self.assertTrue(line, "SSE disconnected before cancellation")
+                            if line == b"event: deliverable_request\n":
+                                payload = json.loads(wire.readline().removeprefix(b"data: "))
+                                self.assertEqual(payload["purpose"], "cancel")
+                                return payload
+
+                    first = read_cancel()
+                    self.advance(60, "busy")
+                    self.beat()
+                    self.advance(59)
+                    self.assertEqual(self.saved()["request_id"], first["request_id"])
+                    self.advance(1)
+                    retry = read_cancel()
+                    self.assertEqual((first["attempt"], retry["attempt"]), (1, 2))
+                    self.assertEqual(self.report(retry, action="cancel")[0], 200)
+                    self.assertEqual(self.report(retry, action="cancel")[1]["duplicate"], True)
+                    self.assertEqual(self.store.get_worker("test-worker")["TaskID"], 0)
+                    self.assertEqual(self.saved()["archive"]["reason"], "worker_cancel")
+                    self.assertNotIn("state", self.saved())
+                    self.assertEqual([f["request_id"] for f in self.store.orders.facts(self.task)
+                                      if f["kind"] == "summary_request"], [summary_id])
+        self.assertEqual(self.events, [])
+        for event, rid in (("cancel_sent", first["request_id"]), ("cancel_timeout", first["request_id"]),
+                           ("cancel_retry", retry["request_id"]), ("cancel_acked", retry["request_id"])):
+            entry = next(line for line in logs.output if event in line and rid in line)
+            print(entry)
+        print("wire summary frames after cancel=0; late summary HTTP 409; archive reason=worker_cancel; TaskID=0")
 
     def test_online_cancel_requires_worker_and_offline_reconciliation(self):
         route = "/tasks/" + self.task + "/cancel"
@@ -556,7 +632,7 @@ class ProbeTests(unittest.TestCase):
         self.assertEqual([e["kind"] for e in self.events], ["task.deliverable"])
         self.assertEqual(self.report(q)[1]["duplicate"], True)
 
-    def test_legacy_table_read_without_writes_and_no_lifecycle_state_in_schema_or_wire(
+    def test_legacy_table_read_without_writes_and_two_live_states_derived_from_facts(
         self,
     ):
         import sqlite3
@@ -583,7 +659,8 @@ class ProbeTests(unittest.TestCase):
         self.assertEqual(
             set(task["task_info"]), {"TaskID", "TaskName", "TaskDesc", "TaskOwner"}
         )
-        self.assertFalse({"state", "status", "bRunning", "review_state"} & task.keys())
+        self.assertEqual(task["state"], "running")
+        self.assertFalse({"status", "bRunning", "review_state"} & task.keys())
         cols = [
             r["name"] for r in self.store._conn.execute("PRAGMA table_info(task_info)")
         ]
@@ -594,7 +671,7 @@ class ProbeTests(unittest.TestCase):
             self.post("/tasks/" + self.task + "/verdict", {"status": "done"})[0], 404
         )
         print(
-            "TaskInfo fields=TaskID,TaskName,TaskDesc,TaskOwner; external task state fields=0; verdict HTTP 404; historical row unchanged"
+            "TaskInfo fields=TaskID,TaskName,TaskDesc,TaskOwner; state=running (derived); verdict HTTP 404; historical row unchanged"
         )
 
     def test_idle_requires_fresh_samples(self):
