@@ -29,13 +29,15 @@ CREATE INDEX IF NOT EXISTS task_facts_kind ON task_facts(kind,seq);
 
 def settings(path=None):
     data = json.loads(Path(path).expanduser().read_text()) if path else {}
-    minutes = data.get("idle_task_end_minutes", 1)
+    seconds = data.get("idle_task_end_seconds", 30)
     attempts = data.get("summary_request_max_attempts", 3)
-    if type(minutes) not in (int, float) or not math.isfinite(minutes) or minutes <= 0:
-        raise ValueError("idle_task_end_minutes must be positive and finite")
+    if type(seconds) not in (int, float) or not math.isfinite(seconds) or seconds <= 0:
+        raise ValueError("idle_task_end_seconds must be positive and finite")
     if type(attempts) is not int or attempts < 1:
         raise ValueError("summary_request_max_attempts must be a positive integer")
-    return minutes * 60, attempts
+    if "idle_task_end_minutes" in data:
+        raise ValueError("idle_task_end_minutes is gone; use idle_task_end_seconds")
+    return seconds, attempts
 
 
 class Ledger:

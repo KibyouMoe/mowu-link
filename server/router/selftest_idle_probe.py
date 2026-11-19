@@ -82,7 +82,7 @@ class ProbeTests(unittest.TestCase):
 
     def first(self):
         self.beat()
-        self.advance(59)
+        self.advance(29)
         self.assertTrue(self.conn.queue.empty())
         self.advance(1)
         return self.take()
@@ -275,12 +275,12 @@ class ProbeTests(unittest.TestCase):
         self.assertTrue(self.post(route, {})[1]["duplicate"])
         self.beat()
         for attempt in (2, 3, 4):
-            self.advance(59)
+            self.advance(29)
             self.assertTrue(self.conn.queue.empty())
             self.advance(1)
             q = self.take()
             self.assertEqual((q["purpose"], q["attempt"]), ("cancel", attempt))
-        self.advance(60)
+        self.advance(30)
         self.assertEqual(self.saved()["archive"]["reason"], "archive_unconfirmed")
         self.assertEqual(self.conn.queue.get_nowait()["data"]["task_id"], queued["task_id"])
         self.assertEqual(self.events[0]["payload"]["reason"], "archive_unconfirmed")
@@ -326,7 +326,7 @@ class ProbeTests(unittest.TestCase):
         self.assertEqual(self.events[0]["payload"]["task_info"], task["task_info"])
         self.assertEqual(self.events[0]["payload"]["deliverable"], task["deliverable"])
         print(
-            "idle 59s=0 requests; 60s=1; summary HTTP 200; TaskID=0; active=false; package=TaskInfo+summary"
+            "idle 29s=0 requests; 30s=1; summary HTTP 200; TaskID=0; active=false; package=TaskInfo+summary"
         )
 
     def test_summary_resets_idle_then_archives_and_notifies_once(self):
@@ -334,11 +334,11 @@ class ProbeTests(unittest.TestCase):
             first = self.first()
             self.assertEqual(first["purpose"], "summary")
             for attempt in (2, 3):
-                self.advance(59)
+                self.advance(29)
                 self.assertTrue(self.conn.queue.empty())
                 self.advance(1)
                 self.assertEqual(self.take()["attempt"], attempt)
-            self.advance(59)
+            self.advance(29)
             self.assertTrue(self.saved()["in_running_tasks"])
             self.advance(1)
             self.api.lifecycle.sweep()
@@ -375,7 +375,7 @@ class ProbeTests(unittest.TestCase):
                         self.assertTrue(connected.wait(2))
                         self.conn = self.api.current_conn("test-worker")
                         self.beat()
-                        self.advance(60)
+                        self.advance(30)
                         summary_id = self.saved()["probe_id"]
                         self.assertEqual(self.saved()["state"], "running")
                         code, cancelled = self.post("/tasks/" + self.task + "/cancel", {})
@@ -400,9 +400,9 @@ class ProbeTests(unittest.TestCase):
                                 return payload
 
                     first = read_cancel()
-                    self.advance(60, "busy")
+                    self.advance(30, "busy")
                     self.beat()
-                    self.advance(59)
+                    self.advance(29)
                     self.assertEqual(self.saved()["request_id"], first["request_id"])
                     self.advance(1)
                     retry = read_cancel()
@@ -594,7 +594,7 @@ class ProbeTests(unittest.TestCase):
 
     def test_older_summary_after_archive_can_only_record_one_ignored_receipt(self):
         older = self.first()
-        self.advance(60)
+        self.advance(30)
         accepted = self.take()
         self.assertNotEqual(older["request_id"], accepted["request_id"])
         self.assertEqual(self.report(accepted)[0], 200)
@@ -783,7 +783,7 @@ class ProbeTests(unittest.TestCase):
         p = Path(self.store.path).with_suffix(".json")
         p.write_text(
             json.dumps(
-                {"idle_task_end_minutes": 0.5, "summary_request_max_attempts": 2}
+                {"idle_task_end_seconds": 30, "summary_request_max_attempts": 2}
             )
         )
         api = self.api.lifecycle = SummaryRequests(self.api, p)
@@ -804,7 +804,7 @@ class ProbeTests(unittest.TestCase):
         self.assertEqual(self.report(second)[0], 409)
         self.assertIsNone(self.saved()["deliverable"])
         print(
-            "config idle_task_end_minutes=0.5 -> 30s; summary_request_max_attempts=2 -> exactly 2 requests"
+            "config idle_task_end_seconds=30; summary_request_max_attempts=2 -> exactly 2 requests"
         )
 
     def test_restart_preserves_pending_summary_and_archived_result(self):
@@ -903,7 +903,7 @@ class ProbeTests(unittest.TestCase):
         self.api.lifecycle.sweep()
         self.assertTrue(self.conn.queue.empty())
         self.beat()
-        self.advance(55)
+        self.advance(25)
         self.assertTrue(self.conn.queue.empty())
         self.advance(5)
         self.assertEqual(self.take()["attempt"], 1)

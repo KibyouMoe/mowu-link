@@ -26,7 +26,7 @@ goal 模式由 worker 自己决定，Router 不管。
 
 ## 正常结束
 
-触发：Router 发现该 worker `bBusy=false` 满 `idle_task_end_minutes`（默认 1，配置文件可调），
+触发：Router 发现该 worker `bBusy=false` 满 `idle_task_end_seconds`（默认 30 秒，配置文件可调），
 且 `WorkerStatus.TaskID != 0` → 判定任务已结束。
 
 行为：
@@ -42,7 +42,7 @@ goal 模式由 worker 自己决定，Router 不管。
 
 ```
 第 1 次   判定结束后立刻索取
-第 2 次   等该 worker 再次 idle 满 idle_task_end_minutes 后重试
+第 2 次   等该 worker 再次 idle 满 idle_task_end_seconds 后重试
 第 3 次   再等满同样时长后重试
 ```
 
@@ -73,7 +73,7 @@ goal 模式由 worker 自己决定，Router 不管。
 
 ```
 第 1 次   worker 持有本单时立即发取消
-第 2 次   worker 仍持有且空闲满 idle_task_end_minutes 时重发
+第 2 次   worker 仍持有且空闲满 idle_task_end_seconds 时重发
 第 3 次   再等满同样的空闲间隔（含第 1 次最多 3 次，配置更低时从低）
 三次都没等到它的取消回复 → 视为已失联：
 - **直接并到②处理：TaskInfo 归档**
@@ -103,7 +103,7 @@ Worker 每 **5 秒**上报一次 **完整的 `WorkerStatus`**（`bBusy` + `TaskI
 - **Router 侧维护 `idle_since`**：
   - 收到「`bBusy=false` 且 `TaskID != 0`」→ 记下 `idle_since`（已在计时中就保持不动）
   - 其他任何状态（busy / TaskID=0）→ 清掉 `idle_since`，不累计
-  - 计时满 `idle_task_end_minutes` → 判任务结束，进入索取总结
+  - 计时满 `idle_task_end_seconds` → 判任务结束，进入索取总结
 - Worker 不自算时长、不自判结束；它只负责如实报
 
 ## 任务对外只有两个状态：运行中 / 取消中
@@ -145,7 +145,7 @@ Worker 闲下来
 
 也就是说「闲下来该做什么」由任务状态决定，不是两套计时器。
 
-**正常收口不经过 `cancelling`**：空闲满 `idle_task_end_minutes` → 索取总结 → 归档。
+**正常收口不经过 `cancelling`**：空闲满 `idle_task_end_seconds` → 索取总结 → 归档。
 
 ## 索取请求不设时间限制（训练员 2026-11-19 定，最终口径）
 
@@ -160,7 +160,7 @@ Router 向 worker 索取总结/取消：**发出去就不管了**，不给这条
 发送请求（summary / cancel）
   → 立刻把该 worker 的 idle 计时清零（默认他这一轮"在忙"）
   → 若他仍然闲着，就从这个 0 重新累计
-  → 闲置时间满 idle_task_end_minutes → 触发下一次协议重试
+  → 闲置时间满 idle_task_end_seconds → 触发下一次协议重试
   → 每次重发都再清零，如此循环
 连续 N 次都要不到（N = summary_request_max_attempts）→ 归档 + 报警
 ```
@@ -169,7 +169,7 @@ Router 向 worker 索取总结/取消：**发出去就不管了**，不给这条
 这时 pending 立刻清掉，哪怕紧接着又 idle，也不许再发同一条请求。
 重发只发生在「没拿到回应」这一种情况。
 
-**整套里唯一与时间有关的参数只有一个：`idle_task_end_minutes`**。
+**整套里唯一与时间有关的参数只有一个：`idle_task_end_seconds`**。
 请求发出后只累计经心跳确认的空闲时长。
 
 ## 异常判定（只有一条）
@@ -205,7 +205,7 @@ worker 侧：TaskID 已是 0，无需再清
 
 「索取任务总结」与「取消确认」走**同一套机制**（参数与应答通道相同），但**两件事各自独立，不许串成一条链**：
 
-- 共用 `idle_task_end_minutes` 和 `summary_request_max_attempts`。
+- 共用 `idle_task_end_seconds` 和 `summary_request_max_attempts`。
 - 同一个应答通道：工具调用回执（`submit_deliverable` 那一类），不走私信抄送
 - **要求总结就是要求总结**：试满次数仍拿不到总结 → 归档并报警给溪流，**不转取消、不叠取消次数**
 - **要求取消就是要求取消**：试满次数拿不到停手确认 → 视同失联，归档并通知溪流

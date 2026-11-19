@@ -51,7 +51,7 @@ Router 在连续空闲满配置时间后通过 SSE 请求总结。Worker 调用�
 TaskInfo 与总结包。触发器恢复后会补送同一事件。溪流在 Router 之外验收。
 
 通过 `--lifecycle-config <path>` 或 `ROUTER_LIFECYCLE_CONFIG` 指定 JSON 配置。
-默认值为 `{"idle_task_end_minutes":1,"summary_request_max_attempts":3}`。
+默认值为 `{"idle_task_end_seconds":30,"summary_request_max_attempts":3}`。
 第一次请求计入总数。每次重试都需要重新观察到完整的连续空闲时段。
 取消确认复用同一请求通道。详见[定稿规格](../../docs/TASK-LIFECYCLE.md)。
 

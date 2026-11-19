@@ -3473,7 +3473,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p.add_argument(
         "--lifecycle-config",
         default=os.getenv("ROUTER_LIFECYCLE_CONFIG"),
-        help="JSON file with idle_task_end_minutes and summary_request_max_attempts",
+        help="JSON file with idle_task_end_seconds and summary_request_max_attempts",
     )
     p.add_argument("--db", default=DEFAULT_DB,
                    help="SQLite path (default %(default)s)")

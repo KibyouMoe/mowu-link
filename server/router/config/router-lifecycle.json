@@ -1,4 +1,4 @@
 {
-  "idle_task_end_minutes": 1,
+  "idle_task_end_seconds": 30,
   "summary_request_max_attempts": 3
 }
