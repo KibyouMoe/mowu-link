@@ -1,5 +1,16 @@
 # 任务生命周期规格（2026-11-18 训练员定稿）
 
+## 六条铁律（训练员 2026-11-19 原话定稿，任何实现不得偏离）
+
+```
+1) worker 手上恒一个 TaskID，不存在两单/待处理列表
+2) 派单只看 TaskID，bBusy 不参与；为0就立刻插进去，排队只在 Router
+3) 取消只看 TaskID，bBusy 不参与；对就立刻插进去，不许"等跑完再确认"
+4) 索取发出去不管，攒满 idle 才重发，收到即停
+5) 取消发出去不管，攒满 idle 才重发，收到即停
+6) 全局唯一时间参数 idle_task_end_seconds=30，没有别的"等多久判失败"
+```
+
 ## 数据结构
 
 ```
@@ -65,19 +76,19 @@ goal 模式由 worker 自己决定，Router 不管。
    → worker 回「好，我取消」，自己清掉本地 TaskID
 ```
 
-在线取消到达时，worker 在当前回合直接停止该 TaskID 对应的执行；已排队的输入可撤回，已结束的回合可直接核对。停手确认后以原 request_id 回执；收到归档回执后才清本地 TaskID。
+在线取消到达时，worker 在当前回合直接停止该 TaskID 对应的执行；已排队的输入可撤回，已结束的回合可直接核对。Worker 以原 request_id 回执，收到归档回执后立即持久清零。缺少原生停手能力时封存本地执行，回执标 `execution_stopped=false`。
 
-**取消只看 TaskID，不看忙闲**（训练员 2026-11-19）：Router 核对该 worker 手上的 TaskID 是否就是这单——是，就立刻把取消消息插进去，让它优先处理；忙不忙都不影响下发。worker 收到后必须把这条消息排到队首立即处理，停手、确认、清 TaskID。**不存在「等这一轮跑完再确认」这种回法**。
+**取消只看 TaskID，不看忙闲**（训练员 2026-11-19）：Router 核对该 worker 手上的 TaskID 是否就是这单——是，就立刻把取消消息插进去，让它优先处理；忙不忙都不影响下发。worker 收到后必须把这条消息排到队首立即处理，停手、确认、清 TaskID。无原生停手能力时也立即回执并清号。
 
 用 task_id 和 request_id 对账：Router 写完 SSE 帧记 `cancel_sent`；worker 收到记 `cancel_received`，确认停止记 `cancel_stopped`；Router 接收回执并归档记 `cancel_acked`。安排下一次请求时记 `cancel_retry`，索取次数耗尽记 `request_exhausted`。
 
-### 打招呼后的等待（与总结索取同一套参数）
+### 取消的重发
 
 ```
 第 1 次   worker 持有本单时立即发取消
-第 2 次   worker 仍持有且空闲满 idle_task_end_seconds 时重发
-第 3 次   再等满同样的空闲间隔（含第 1 次最多 3 次，配置更低时从低）
-三次都没等到它的取消回复 → 视为已失联：
+后续      请求已写出，收到新的匹配 TaskID 心跳且回执未到时优先重发
+次数上限  summary_request_max_attempts（默认 3，含第 1 次）
+次数用尽，且新心跳显示仍持有本单 → 视为已失联：
 - **直接并到②处理：TaskInfo 归档**
 - **同时通知溪流**（这单是被判定失联后归档的，不是它自己确认取消的）
 ```
@@ -86,7 +97,7 @@ goal 模式由 worker 自己决定，Router 不管。
 
 ## 注册握手
 
-注册携带本地 TaskID。仍由该 worker 持有时，Router 返回「这单还在」、`resume_task_id` 与 `resume_prompt`；连接后复用原任务及派发回执续接，保持同一 TaskID。若该单正在等取消确认，注册回执提供现有请求 ID，下一次索取按空闲阈值触发。已取消的单返回 `clear_task_id` 和取消提示；已收总结的单返回归档确认。TaskID 为 0 时正常注册。
+注册携带本地 TaskID。仍由该 worker 持有时，Router 返回「这单还在」、`resume_task_id` 与 `resume_prompt`；连接后复用原任务及派发回执续接，保持同一 TaskID。若该单正在等取消确认，匹配 TaskID 的新连接优先重发同一个取消请求 ID。已取消的单返回 `clear_task_id` 和取消提示；已收总结的单返回归档确认。TaskID 为 0 时正常注册。
 
 ## 心跳
 
@@ -131,21 +142,13 @@ worker 没有这张 TaskID  → 直接归档，一条指令都不用发
 
 `cancelling` 期间的行为：
 - **不得索取总结**（这张单已经不要了，不是正常收尾）
-- 有持有时：**空闲轮询下发**，只要 worker 闲下来就再发一次，然后等它下一次空闲
+- 仍持有时，新心跳触发优先重发，只核对 TaskID
 - 无持有时：**立即归档**（reason=worker_cancel / cancelled_without_ack），不等回执、不等重试
 - 收到回执 → 清 TaskID、归档（reason=worker_cancel）
 - 重试耗尽仍无回执 → 视同失联：归档 + 通知溪流（reason=archive_unconfirmed）
-- 发送后空闲计时归零。持续忙碌或缺少新鲜心跳时，等待下一次可确认的空闲；归档后若 worker 仍报旧 TaskID，走清零纠偏。
+- 归档后若 worker 仍报旧 TaskID，走清零纠偏。
 
-**同一个触发点，按状态分派动作**（训练员 2026-11-19）：
-
-```
-Worker 闲下来
-├─ 状态 running    → 发「成果总结」请求
-└─ 状态 cancelling → 再发一次「取消指令」
-```
-
-也就是说「闲下来该做什么」由任务状态决定，不是两套计时器。
+空闲时长用于正常收口。取消由请求和匹配的 TaskID 心跳驱动。
 
 **正常收口不经过 `cancelling`**：空闲满 `idle_task_end_seconds` → 索取总结 → 归档。
 
@@ -154,12 +157,12 @@ Worker 闲下来
 **这套重试的目的只有一个：防止 worker 一直收不到 Router 的消息。**
 它不是惩罚执行慢，也不是给请求设截止时间——只是"没送到就再送一次"。
 
-Router 向 worker 索取总结/取消：**发出去就不管了**，不给这条请求设超时。
+Router 向 worker 索取总结：**发出去就不管了**，不给这条请求设超时。
 
 发完那一刻，Router 侧把这一轮**当成繁忙**处理：
 
 ```
-发送请求（summary / cancel）
+发送总结请求
   → 立刻把该 worker 的 idle 计时清零（默认他这一轮"在忙"）
   → 若他仍然闲着，就从这个 0 重新累计
   → 闲置时间满 idle_task_end_seconds → 触发下一次协议重试
@@ -207,7 +210,7 @@ worker 侧：TaskID 已是 0，无需再清
 
 「索取任务总结」与「取消确认」走**同一套机制**（参数与应答通道相同），但**两件事各自独立，不许串成一条链**：
 
-- 共用 `idle_task_end_seconds` 和 `summary_request_max_attempts`。
+- 两种请求共用次数配置 `summary_request_max_attempts`。只有总结使用空闲阈值 `idle_task_end_seconds`。
 - 同一个应答通道：工具调用回执（`submit_deliverable` 那一类），不走私信抄送
 - **要求总结就是要求总结**：试满次数仍拿不到总结 → 归档并报警给溪流，**不转取消、不叠取消次数**
 - **要求取消就是要求取消**：试满次数拿不到停手确认 → 视同失联，归档并通知溪流
