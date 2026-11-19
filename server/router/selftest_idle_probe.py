@@ -139,7 +139,9 @@ class ProbeTests(unittest.TestCase):
         for attempt in (1, 2, 3):
             q = self.take()
             self.assertEqual((q["purpose"], q["attempt"]), ("cancel", attempt))
-            self.advance(60)
+            with self.assertLogs("router", level="WARNING") as logs:
+                self.advance(60)
+            self.assertTrue(any("cancel_timeout" in line and q["request_id"] in line for line in logs.output))
         self.assertEqual(
             self.saved()["archive"]["reason"], "cancel_greetings_unanswered"
         )
@@ -173,6 +175,28 @@ class ProbeTests(unittest.TestCase):
         print(
             "online cancel greeting=202; wrong worker=409; worker cancel=200, archived; offline cancel=200; register=已取消 + cancel_prompt"
         )
+
+    def test_register_resumes_only_active_work_and_replays_pending_cancel(self):
+        status, reply = self.post("/register", {"name": "test-worker", "TaskID": self.task})
+        self.assertEqual(status, 200)
+        self.assertEqual(reply["resume_task_id"], self.task)
+        self.assertIn(self.task, reply["resume_prompt"])
+        self.beat("busy")
+        self.post("/tasks/" + self.task + "/cancel", {})
+        first = self.take()
+        _, reply = self.post("/register", {"name": "test-worker", "TaskID": self.task})
+        self.assertNotIn("resume_prompt", reply)
+        self.assertEqual(reply["cancel_request_id"], first["request_id"])
+        self.conn = self.api.attach("test-worker")
+        replay = self.take()
+        self.assertEqual((replay["purpose"], replay["request_id"], replay["attempt"]),
+                         ("cancel", first["request_id"], 1))
+        with self.assertLogs("router", level="INFO") as logs:
+            self.assertEqual(self.report(replay, action="cancel")[0], 200)
+        self.assertTrue(any("cancel_acked" in line and first["request_id"] in line for line in logs.output))
+        _, reply = self.post("/register", {"name": "test-worker", "TaskID": self.task})
+        self.assertEqual(reply["clear_task_id"], self.task)
+        self.assertNotIn("resume_prompt", reply)
 
     def test_first_registration_clears_offline_cancel_before_heartbeat(self):
         self.beat("busy")

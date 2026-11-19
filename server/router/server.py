@@ -1463,6 +1463,7 @@ class Connection:
         self.generation = uuid.uuid4().hex
         self.state_layers = state_layers
         self.native_settlement = False
+        self.offered_cancel = None
         self.offered_task = None
         self.awaiting_clear = False
         self.status_seq = 0
@@ -1807,7 +1808,10 @@ class RouterServer(ThreadingHTTPServer):
             if not tid:
                 return
             task = self.store.get_task(tid)
-            if any(f["kind"] == "cancel_request" for f in task["facts"]):
+            if task["request_kind"] == "cancel":
+                # SSE replacement must replay the outstanding stop, never the task.
+                last = next(f for f in reversed(task["facts"]) if f["kind"] == "cancel_request")
+                self.lifecycle.send_request(conn, tid, "cancel", last["request_id"], last["attempt"], last["at"])
                 return
             if conn.offered_task == tid:
                 return
@@ -2082,7 +2086,10 @@ class RouterHandler(BaseHTTPRequestHandler):
             if len(parts) == 3 and parts[0] == "messages" and parts[2] == "ack":
                 return self._send_json(*self._peer_message_ack(parts[1], body))
             if len(parts) == 3 and parts[0] == "tasks" and parts[2] == "deliverable":
-                return self._send_json(*self.server.lifecycle.receive(parts[1], body))
+                status, receipt = self.server.lifecycle.receive(parts[1], body)
+                if status == 200 and body.get("action") == "cancel" and not receipt.get("duplicate"):
+                    log.info("cancel_acked worker=%s task=%s request=%s", body["worker"], parts[1], body["request_id"])
+                return self._send_json(status, receipt)
             if parts == ["tasks"]:
                 return self._send_json(*self._task_create(body))
             if len(parts) == 3 and parts[0] == "tasks" and parts[2] == "cancel":
@@ -3343,6 +3350,10 @@ class RouterHandler(BaseHTTPRequestHandler):
                     item["event"],
                     json.dumps(item["data"], ensure_ascii=False))).encode("utf-8")
                 self._write(frame)
+                if item["event"] == "deliverable_request" and item["data"].get("purpose") == "cancel":
+                    data = item["data"]
+                    log.info("cancel_sent worker=%s task=%s request=%s attempt=%s via=sse",
+                             name, data["task_id"], data["request_id"], data["attempt"])
         except (BrokenPipeError, ConnectionResetError, socket.timeout, OSError):
             reason = "write_failures"
         finally:

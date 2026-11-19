@@ -63,6 +63,11 @@ goal 模式由 worker 自己决定，Router 不管。
    → 该 worker 下次注册时带着手上的 TaskID 来问「这单还在吗」
    → Router 回「已取消」→ 自动下发取消提示
    → worker 回「好，我取消」，自己清掉本地 TaskID
+```
+
+在线取消到达时，worker 在当前回合直接停止该 TaskID 对应的执行；已排队的输入可撤回，已结束的回合可直接核对。停手确认后以原 request_id 回执；收到归档回执后才清本地 TaskID。原生停止拒绝或超时时，保留 TaskID 并记录原因。
+
+用 task_id 和 request_id 对账：Router 写完 SSE 帧记 `cancel_sent`；worker 收到记 `cancel_received`，确认停止记 `cancel_stopped`；Router 接收回执并归档记 `cancel_acked`。到期未获确认记 `cancel_timeout`。
 
 ### 打招呼后的等待（与总结索取同一套参数）
 
@@ -77,6 +82,10 @@ goal 模式由 worker 自己决定，Router 不管。
 
 取消的结果一律是 **TaskInfo 归档**（移出运行中数组），不是改某个状态字段。
 不存在 `cancelling` / `paused` 这类中间态。
+
+## 注册握手
+
+注册携带本地 TaskID。仍由该 worker 持有时，Router 返回「这单还在」、`resume_task_id` 与 `resume_prompt`；连接后复用原任务及派发回执续接，保持同一 TaskID。若该单正在等取消确认，重连时重发同一取消请求。已取消的单返回 `clear_task_id` 和取消提示；已收总结的单返回归档确认。TaskID 为 0 时正常注册。
 
 ## 心跳
 

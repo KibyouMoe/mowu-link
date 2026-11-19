@@ -102,20 +102,26 @@ class SummaryRequests:
     def contact(self, task, conn, purpose, attempt):
         tid = task["task_id"]
         request_id = str(uuid.uuid4())
-        payload = {
-            "task_id": tid,
-            "request_id": request_id,
-            "attempt": attempt,
-            "purpose": purpose,
-            "issued_at": time.time(),
-            "template": CANCEL_PROMPT if purpose == "cancel" else SUMMARY_PROMPT,
-        }
-        # The dispatcher lock keeps an immediate tool response behind this durable record.
+        # Commit the request identity before the worker can answer it.
         self.orders.add(
             tid, purpose + "_request", f"{purpose}:{attempt}", request_id=request_id, attempt=attempt
         )
+        self.send_request(conn, tid, purpose, request_id, attempt, time.time())
+        sample = self.samples.get(conn.name)
+        if sample and sample[0] == tid:
+            self.samples[conn.name] = (tid, self.clock(), sample[2])
+
+    def send_request(self, conn, tid, purpose, request_id, attempt, issued_at):
+        if purpose == "cancel" and conn.offered_cancel == request_id:
+            return
+        payload = {
+            "task_id": tid, "request_id": request_id, "attempt": attempt, "purpose": purpose,
+            "issued_at": issued_at, "template": CANCEL_PROMPT if purpose == "cancel" else SUMMARY_PROMPT,
+        }
         try:
             conn.queue.put_nowait({"event": "deliverable_request", "data": payload})
+            if purpose == "cancel":
+                conn.offered_cancel = request_id
             logging.getLogger("router").info(
                 "probe_queued task=%s request=%s attempt=%s via=sse purpose=%s",
                 tid, request_id, attempt, purpose,
@@ -126,10 +132,6 @@ class SummaryRequests:
                 tid, request_id, attempt,
             )
             self.orders.add(tid, "stream_full", "full:" + request_id, request_id=request_id)
-        sample = self.samples.get(conn.name)
-        if sample and sample[0] == tid:
-            self.samples[conn.name] = (tid, self.clock(), sample[2])
-
     def detached(self, name):
         self.samples.pop(name, None)
         tid = self.orders.held(name)
@@ -203,6 +205,12 @@ class SummaryRequests:
             if not stale:
                 if conn:
                     conn.awaiting_clear = False
+                if reported and source == "register":
+                    task = self.orders.get(reported)
+                    if task["request_kind"] == "cancel":
+                        return reported, {"reason": "等待取消确认", "cancel_request_id": task["request_id"]}
+                    return reported, {"reason": "这单还在", "resume_task_id": reported,
+                                      "resume_prompt": f"这单还在，请继续处理原工单 {reported}。"}
                 return reported, {}
 
             previous = current["attempts"] if current else 0
@@ -270,6 +278,12 @@ class SummaryRequests:
             return
         requests = [f for f in task["facts"] if f["kind"] == "cancel_request"]
         purpose = "cancel" if requests else "summary"
+        if requests:
+            last = requests[-1]
+            logging.getLogger("router").warning(
+                "cancel_timeout worker=%s task=%s request=%s attempt=%s",
+                name, tid, last["request_id"], last["attempt"],
+            )
         if not requests:
             requests = [f for f in task["facts"] if f["kind"] == "summary_request"]
         if len(requests) < self.max_attempts:
