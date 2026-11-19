@@ -107,6 +107,25 @@ Worker 每 **5 秒**上报一次 **完整的 `WorkerStatus`**（`bBusy` + `TaskI
   - 计时满 `idle_task_end_minutes` → 判任务结束，进入索取总结
 - Worker 不自算时长、不自判结束；它只负责如实报
 
+## 任务对外只有两个状态：运行中 / 取消中
+
+Router 侧对一张任务只保留两个状态（训练员 2026-11-19 定）：
+
+```
+running     运行中：派发出去、等它自己收口
+cancelling  取消中：已经向 worker 要取消协议，正在等回执
+```
+
+进入 `cancelling` 的条件：溪流/训练员下发取消。
+
+**`cancelling` 期间的行为**：
+- **不得索取总结**（这张单已经不要了，不是正常收尾）
+- 只做「要取消协议」这一件事，按 `summary_request_max_attempts` 重试
+- 收到 worker 的取消回执 → 清 TaskID、归档（reason=worker_cancel）
+- 重试耗尽仍无回执 → 视同失联：归档 + 通知溪流（reason=archive_unconfirmed）
+
+**正常收口不经过 `cancelling`**：空闲满 `idle_task_end_minutes` → 索取总结 → 归档。
+
 ## 异常判定（只有一条）
 
 `bBusy=true` 且 `TaskID=0` **不是异常**：人类跟 worker 聊天、worker 自己在思考，都是这个状态。
