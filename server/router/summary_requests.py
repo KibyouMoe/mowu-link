@@ -11,6 +11,7 @@ from task_lifecycle import settings
 
 CANCEL_PROMPT = "这单要取消，请确认后自己发 cancel，并清掉本地 TaskID。"
 CORRECTION_LIMIT = 3
+WORKER_HEARTBEAT_S = 5
 CLEARED_PROMPT = "这单已取消，请清掉本地 TaskID。"
 SUMMARY_PROMPT = "请调用 submit_deliverable 工具报送本任务的总结。"
 
@@ -144,6 +145,26 @@ class SummaryRequests:
         task = self.orders.get(tid) if tid else None
         if task and task.get("state") == "cancelling":
             self.offline_archive(task, "worker_disconnected")
+
+    def archive_dropped_task(self, name, conn):
+        """Handle a live heartbeat that explicitly reported zero TaskID."""
+        with self.orders.atomic():
+            tid = self.orders.held(name)
+            task = self.orders.get(tid) if tid else None
+            if not task or task.get("state") != "running" or not any(
+                fact["kind"] == "dispatch" for fact in task["facts"]
+            ):
+                return
+            if self.server.store.get_worker(name)["task_id"] != tid and conn and conn.offered_task == tid:
+                # The worker can sample zero before reading the SSE offer. Give
+                # an unconfirmed offer one heartbeat interval after the write.
+                if conn.task_sent_at is None or self.clock() - conn.task_sent_at < WORKER_HEARTBEAT_S:
+                    return
+            reason = "worker_dropped_task"
+            self.orders.archive(tid, reason)
+            self.notice(task, reason, f"{name} 已上报 TaskID=0，{tid} 已归档。", reason=reason)
+            self.samples.pop(name, None)
+        logging.getLogger("router").info("worker_dropped_task worker=%s task=%s", name, tid)
 
     def wait_for_release(self, worker):
         conn = self.server.current_conn(worker)

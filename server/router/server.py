@@ -1465,6 +1465,7 @@ class Connection:
         self.native_settlement = False
         self.offered_cancel = None
         self.offered_task = None
+        self.task_sent_at = None
         self.awaiting_clear = False
         self.status_seq = 0
         self.history_ack = 0
@@ -1815,6 +1816,7 @@ class RouterServer(ThreadingHTTPServer):
                 return
             if conn.offered_task == tid:
                 return
+            conn.task_sent_at = None
             if conn.send_task({k: v for k, v in task.items() if k != "facts"}):
                 conn.offered_task = tid
                 self.store.orders.add(
@@ -2642,6 +2644,9 @@ class RouterHandler(BaseHTTPRequestHandler):
                 conn.status_seq = seq
                 if seq - conn.history_ack >= 12:
                     self.server.request_status(conn)
+            raw_task_id = body.get("TaskID", body.get("task_id"))
+            if type(raw_task_id) is int and raw_task_id == 0:
+                self.server.lifecycle.archive_dropped_task(name, conn)
             correction = self._accept_status(name, busy, reported)
             return 200, {
                 "ok": True,
@@ -3367,6 +3372,10 @@ class RouterHandler(BaseHTTPRequestHandler):
                     item["event"],
                     json.dumps(data, ensure_ascii=False))).encode("utf-8")
                 self._write(frame)
+                if item["event"] == "task":
+                    with self.server.dispatch_lock:
+                        if conn.offered_task == data["task_id"]:
+                            conn.task_sent_at = self.server.lifecycle.clock()
                 if item["event"] == "deliverable_request" and data["purpose"] == "cancel":
                     log.info("cancel_sent worker=%s task=%s request=%s attempt=%s via=sse",
                              name, data["task_id"], data["request_id"], data["attempt"])

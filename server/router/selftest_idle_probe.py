@@ -105,6 +105,53 @@ class ProbeTests(unittest.TestCase):
             "task"
         ]
 
+    def test_zero_heartbeat_archives_only_the_dropped_task_and_advances_fifo(self):
+        self.beat()
+        _, queued = self.post("/tasks", {"worker": "test-worker", "goal": "next"})
+        self.post("/register", {"name": "other-worker"})
+        self.api.attach("other-worker")
+        _, unrelated = self.post("/tasks", {"worker": "other-worker", "goal": "unrelated"})
+        generation = self.conn.generation
+        zero = {"name": "test-worker", "TaskID": 0, "bBusy": False, "seq": 1, "stream": generation}
+        with self.assertLogs("router", "INFO") as logs:
+            self.assertEqual(self.post("/heartbeat", zero)[0], 200)
+        self.assertEqual(self.saved()["archive"]["reason"], "worker_dropped_task")
+        self.assertFalse(self.saved()["in_running_tasks"])
+        self.assertFalse(any(f["kind"] == "summary_request" for f in self.store.orders.facts(self.task)))
+        self.assertEqual(self.store.orders.held("other-worker"), unrelated["task_id"])
+        self.assertEqual(self.conn.queue.get_nowait()["data"]["task_id"], queued["task_id"])
+        self.assertTrue(self.post("/heartbeat", zero)[1]["duplicate"])
+        self.api.lifecycle.sweep()
+        self.api.lifecycle.sweep()
+        self.assertEqual([event["kind"] for event in self.events], ["task.worker_dropped_task"])
+        self.assertEqual(self.events[0]["payload"]["reason"], "worker_dropped_task")
+        self.assertEqual(self.store.orders.held("test-worker"), queued["task_id"])
+        print(next(line for line in logs.output if "worker_dropped_task" in line),
+              "notice=1, summaries=0, next FIFO dispatched, unrelated task unchanged")
+
+    def test_queued_and_just_sent_offers_survive_racing_zero_heartbeats(self):
+        self.beat(TaskID=0)
+        self.assertTrue(self.saved()["in_running_tasks"])
+        self.conn.task_sent_at = self.now
+        self.now += 4.9
+        self.beat(TaskID=0)
+        self.assertTrue(self.saved()["in_running_tasks"])
+        self.now += 0.2
+        self.beat(TaskID=0)
+        self.assertEqual(self.saved()["archive"]["reason"], "worker_dropped_task")
+        print("unconfirmed offer survives pre-send and early zero; after one heartbeat interval, zero archives it")
+
+    def test_zero_does_not_replace_pending_cancellation(self):
+        self.beat()
+        self.post("/tasks/" + self.task + "/cancel", {})
+        cancel = self.take()
+        self.beat(TaskID=0)
+        self.api.lifecycle.sweep()
+        self.assertEqual(self.saved()["state"], "cancelling")
+        self.assertEqual(self.events, [])
+        self.assertEqual(self.report(cancel, action="cancel")[0], 200)
+        self.assertEqual(self.saved()["archive"]["reason"], "worker_cancel")
+
     def test_idle_archive_and_summary_notification(self):
         q = self.first()
         self.assertEqual(q["purpose"], "summary")
@@ -483,8 +530,9 @@ class ProbeTests(unittest.TestCase):
         self.beat()
         self.api.lifecycle.sweep()
         self.assertEqual(self.events, [])
+        self.post("/register", {"name": "chat-only"})
         for _ in range(3):
-            self.beat("busy", TaskID=0)
+            self.assertEqual(self.post("/heartbeat", {"name": "chat-only", "bBusy": True, "TaskID": 0})[0], 200)
             self.api.lifecycle.sweep()
         self.assertEqual(self.events, [])
         code, body = self.post(
