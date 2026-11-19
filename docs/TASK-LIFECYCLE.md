@@ -149,19 +149,21 @@ Worker 闲下来
 
 ## 索取请求不设时间限制（训练员 2026-11-19 定，最终口径）
 
-Router 向 worker 索取总结/取消：**发出去就不管了**，不给这条请求设任何超时。
+Router 向 worker 索取总结/取消：**发出去就不管了**，不给这条请求设超时。
+
+发完那一刻，Router 侧把这一轮**当成繁忙**处理：
 
 ```
-发一次 → 放下
-她下一次「闲下来」→ 再要一次（这是唯一的重发触发点）
-连续 N 次空闲都要不到（N = summary_request_max_attempts）→ 归档 + 报警
+发送请求（summary / cancel）
+  → 立刻把该 worker 的 idle 计时清零（默认他这一轮"在忙"）
+  → 若他仍然闲着，就从这个 0 重新累计
+  → 闲置时间满 idle_task_end_minutes → 触发下一次协议重试
+  → 每次重发都再清零，如此循环
+连续 N 次都要不到（N = summary_request_max_attempts）→ 归档 + 报警
 ```
 
-**整套里唯一与时间有关的参数只有一个：`idle_task_end_minutes`** ——
-worker 空闲多久算「这一轮结束了、可以开始索取」。
-
-除此之外不存在 wait_turn 超时、探针超时之类的计时器；
-`wait_turn/native_report_turn_timeout` 这类概念一律作废。
+**整套里唯一与时间有关的参数只有一个：`idle_task_end_minutes`**。
+不存在 wait_turn 超时、按请求计的计时器；`wait_turn/native_report_turn_timeout` 一律作废。
 
 ## 异常判定（只有一条）
 
