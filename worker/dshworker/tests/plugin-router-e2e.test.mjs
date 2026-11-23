@@ -61,7 +61,7 @@ def forbidden_reverse_dns(*args, **kwargs):
     raise AssertionError("Router startup must not depend on reverse DNS")
 socket.getfqdn = forbidden_reverse_dns
 server = api["RouterServer"](("127.0.0.1", 0), store, Path(token_file).read_text().strip(),
-    api["TriggerNotifier"](trigger), api["TriggerSubscriptionBridge"](trigger), ping_interval=0.2)
+    api["TriggerNotifier"](trigger, store), api["TriggerSubscriptionBridge"](trigger), ping_interval=0.2)
 socket.getfqdn = original_getfqdn
 assert server.server_name == "127.0.0.1" and server.server_port == server.server_address[1]
 def stop_on_eof():
