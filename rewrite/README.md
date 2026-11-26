@@ -373,13 +373,16 @@ Windows 另从官方发布包运行 [独立 Codex App Server](desktop-check.md#w
 
 只在独立工位启用。宿主插件设置 `local_tls: true`，适配器启动参数加 `--local-tls`。两端配置同一个固定会话及绝对运行目录。该目录须位于本机受保护的路径下，目录及下列三个文件仅允许运行身份、SYSTEM 和受信任的本机管理员访问。插件用本机 Windows PowerShell 只读检查权限，按设备既有脚本执行策略运行。
 
-- `dsh-link.json` 填两个不同且未占用的端口，字段为 `host_port` 和 `worker_port`，范围为 1024–65535。两个监听都绑定 `127.0.0.1`。
+- `dsh-link.json` 的 `host_port` 为 1024–65535 的原生宿主端口。将 `worker_port` 设为 `0`，适配器每次启动会选择空闲回调端口，并在同一私有目录发布 `dsh-worker-port.json`。两个监听都绑定 `127.0.0.1`。运行目录只允许一个适配器持有回调锁。已有工位也可继续使用不同于宿主的固定回调端口。
 - `dsh-link.crt` 与 `dsh-link.key` 是该工位专用的自签证书及私钥。证书须含 IP SAN `127.0.0.1` 及服务端和客户端用途。两边都校验对端证书。不要复用 Router、飞书或登录凭据。证书、私钥、端口变更时按同一工位的双端配置重新启动测试实例。
 - 固定会话可启用 `read_only_assignments`。工位使用 SQLite 保存每次原生输入前的限制凭据，原生回合结束和排队撤销仍需各自的宿主证据。目录的运行身份权限须可继承到文件，插件会核对已有数据库和回滚日志。冷重开使用原数据库及原生会话日志。
 - 图文、纯图和普通文件复用 Worker 的附件链路。适配器在 `media` 私有目录缓存经摘要核对的字节。Windows 两端均核对缓存权限和文件身份。宿主需提供 DSH `attachments` 服务。缓存可由 Worker 的原附件重建。
-- 托管会话、命令审批、前台题转接和工单容器使用原有 Unix 套接字接入。
+- 托管会话沿用 `managed_sessions_dir`。宿主插件与 `dsh-adapter --managed-sessions-dir` 指向同一个绝对私有目录，Worker 仍登记自己的 `--session-callback-key`。用双向 TLS 时，宿主经本机回调查验已登记会话，回执只含目标会话、来源会话和操作号。名册、子会话库和锁文件沿用运行账号的私有权限。设定托管目录时，显式冷会话接管模式仍与它互斥。
+- 命令审批、前台题转接和工单容器使用原有 Unix 套接字接入。
 
 复跑时先为官方 Windows DSH 包校验 SHA-512，再解包到临时目录。用已检查权限的独立临时目录运行协定用例，环境变量 `MOWULINK_TEST_DSH_BINARY` 指向解包所得的原始应用可执行文件。运行 `python -B -m unittest -v rewrite.test_dsh_native_loop.LocalTlsLoop`。CI 的下载校验和完整步骤见 [Windows 验收入口](../.github/workflows/rewrite-windows.yml)。用例实际运行包内 DSH AgentLoop、原生持久化及工具执行，通过真实 Router 和 Worker 发回独立工单。模型与操作人使用本地测试驱动。已在 [Windows Server 2025](evidence/windows-dsh-native.json) 的官方包和 [macOS](evidence/dsh-local-tls-macos.json) 的已装包验证。已核宿主停机时保留原收件待核。用同一目录和端口重开原生宿主后，可查回同一收件，保留一条输入且无新模型请求。只读取消与转派的原生证据见 [Windows](evidence/windows-dsh-read-only-cleanup.json) 和 [macOS](evidence/dsh-local-tls-readonly-macos.json)。图文实测覆盖输入原文、纯图、普通文件字节、独立适配器进程，以及按原号重试发图。[Windows 图文证据](evidence/windows-dsh-media.json) · [macOS 图文证据](evidence/dsh-local-tls-media-macos.json)
+
+托管工位的 `/resume`、`/new`、`/clear` 和 `/fork` 已从测试飞书入口经独立适配器跑通。原切换回执丢失后沿用同一会话，重开不重演原回合。隔离备份中的三个子会话库已逐字节核对回退副本。[Windows 实测](evidence/windows-dsh-managed-sessions.json) · [macOS 实测](evidence/dsh-local-tls-managed-macos.json)
 
 实际 Desktop 窗口、真实模型和飞书另验。隔离的模型驱动收到文件名与摘要，原生附件库可读回完整文件。真实模型用宿主文件工具读取附件，以及模型产生新图，仍需独立验收。
 

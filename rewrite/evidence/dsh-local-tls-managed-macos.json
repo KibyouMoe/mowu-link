@@ -1,0 +1,89 @@
+{
+  "tested_revision": "dd85847c6f50fc8aa7ac7e59d69d9e58d46a9e6a",
+  "installed_release": {
+    "sha256": "717046c5097c85520e4dd76fd1f4da562f244765a068da9b74d9fbeecbcce003",
+    "files": 273,
+    "passed": 23
+  },
+  "dsh_release": "0.2.2-rc.5",
+  "managed_sessions": {
+    "new_binding": {
+      "handoff_id": "e0801b31-64f0-5dcd-b76a-8ddbc6c04df6",
+      "previous_session": "isolated-dsh-managed-root",
+      "session": "80e954dd-4ff9-50de-a893-0363f42d7b73",
+      "state": "bound"
+    },
+    "fork_binding": {
+      "handoff_id": "92669309-ff56-583e-8c48-6bd38af5dc13",
+      "previous_session": "80e954dd-4ff9-50de-a893-0363f42d7b73",
+      "session": "14348a1d-21a6-5167-8b80-b013629b9ef9",
+      "state": "bound"
+    },
+    "clear_binding": {
+      "handoff_id": "5d337456-d296-5faf-bdfa-525ef735c35b",
+      "previous_session": "14348a1d-21a6-5167-8b80-b013629b9ef9",
+      "session": "a1b67065-2c3d-5d4e-8aaa-88dae67aad8d",
+      "state": "bound"
+    },
+    "formal": [
+      {
+        "task_id": "2e68d58c-ddd6-4853-924d-8601837cd056",
+        "assignment_id": "9a108f11-def4-4762-835e-7412d17336e4",
+        "receipt": {
+          "delivery_id": "17dd2e34-699c-4146-a1d5-47f4763f7a0f",
+          "digest": "217b75f756ce4f36f809e1dfe2006f3f8d737e6a8a93c19641dd7e7e74799abb",
+          "native_id": "mowulink-6d03d4e376396c855e36200035d802a57b5b098afa9bcb7c7ba5811ca2f2b0d1",
+          "session": "80e954dd-4ff9-50de-a893-0363f42d7b73",
+          "turn_id": "3/1"
+        }
+      },
+      {
+        "task_id": "fce9487a-2965-42d1-9b7f-ebc238b92b60",
+        "assignment_id": "2f3e30c9-0925-400c-8808-0478d1770ee3",
+        "receipt": {
+          "delivery_id": "6b79ef6d-6483-4e71-aded-62a43d892d3f",
+          "digest": "0cc358accae35e1f2a17bc2ffb99700edd9f150dfe103ec21310cc3c00aaea35",
+          "native_id": "mowulink-3a58ff4354311ce5f27e61fa7f05cd7d8db7a77e87e9017caccf86caea1caae4",
+          "session": "14348a1d-21a6-5167-8b80-b013629b9ef9",
+          "turn_id": "29/2"
+        }
+      }
+    ],
+    "branch_parent": "80e954dd-4ff9-50de-a893-0363f42d7b73",
+    "native_inherited_count": 25,
+    "native_own_inputs": [
+      "mowulink-3a58ff4354311ce5f27e61fa7f05cd7d8db7a77e87e9017caccf86caea1caae4"
+    ],
+    "branch_native_tool_results": 2,
+    "notice_ids": [
+      "b8128008-bb31-4c02-b75c-aab479b9ce5f",
+      "029ef911-ca15-4534-9ed1-37bfb74a8091"
+    ],
+    "recovered_enrollment_count": 1,
+    "managed_snapshot_sha256": "d486a29de6b661c8145e94fa8d76ec823fd71f7b09f059f6203ddda8ded99ce7",
+    "restored_native_ledgers": 3,
+    "scope": "Isolated installed DSH SDK, real TLS adapter and rewrite Router/Worker, fixture model and platform.",
+    "resume_binding": {
+      "handoff_id": "d84d7618-834c-52ea-9037-07310f7edb5a",
+      "previous_session": "a1b67065-2c3d-5d4e-8aaa-88dae67aad8d",
+      "session": "80e954dd-4ff9-50de-a893-0363f42d7b73",
+      "state": "bound"
+    },
+    "resume_back_binding": {
+      "handoff_id": "eeb52acd-9b29-52dc-b5ec-ae60f534348e",
+      "previous_session": "80e954dd-4ff9-50de-a893-0363f42d7b73",
+      "session": "a1b67065-2c3d-5d4e-8aaa-88dae67aad8d",
+      "state": "bound"
+    },
+    "registry_secret_excluded_from_host_reply": true,
+    "shared_registry_refused": true,
+    "foreign_session_refused": true,
+    "resume_added_model_requests": 0,
+    "adapter_callback_ports": [
+      49775,
+      49870,
+      50429
+    ],
+    "second_callback_writer_refused": true
+  }
+}
