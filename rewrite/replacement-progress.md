@@ -8,6 +8,10 @@
 
 切换、Router 开始与结束丢回包、提交前目标断开三个场景连续 12 轮通过。最后一项确认目标断开 80 秒期间 Worker 仍在线且派发暂停，授权运维按原号解除后继续投给原会话。适配器进程和 Worker 各自用独立账本，CLI 配置测试核对 Worker 重开后保持新会话。复跑 `python3 -B -m unittest -v rewrite.test_worker_resume rewrite.test_service.Service.test_runtime_resume_uses_opted_in_connection_map rewrite.test_dsh_native_loop.NativeLoop.test_platform_resume_switches_live_codex_and_dsh_sessions`。
 
+从 `f9c8859d0243733a7aa7c296b806b8361658a3d8` 构建 186 文件的独立包，SHA-256 为 `e314a066d61fd559637137c97e1e4ff918ef5dba6b7055c782367ec85a251c41`。首轮安装后 14 个迁移测试未找到旧实现。按固定提交单独供应旧 Router 与 Trigger 测试夹具后，macOS 安装目录 217 项通过，复验安装文件摘要一致。Linux arm64 通过 153 项，另 64 项本机宿主用例跳过。[安装目录全量复跑](README.md#本地复跑)
+
+用 `python3 -B -m rewrite.release_check --repository . --component worker-pair --previous 2cd3b465a462a0253476b3469cd7eaa0d821fa9c --new f9c8859d0243733a7aa7c296b806b8361658a3d8` 演练隔离 TLS 旧版、混合版本、新版和回退。未启用运行中切换时，各阶段均只有一条原生输入，原收件号 `3cbe257a-b295-466a-a286-8febcd12e122` 保持一致，原快照未改变。运行中切换的恢复另由上述丢回执、目标断开和切回原会话用例覆盖。
+
 Worker 可经独立交接授权建立 Router 交接窗口。冻结和预约在 Router 内以互斥事务处理，已有预约或持单时拒绝。开始回包丢失后，Worker 重开沿用原操作号恢复冻结。解除回包丢失也能查实。提前解除会留记录，迟到的冻结不会重新打开。实测等待超过在线租期仍在线，私聊和同伴信留在原队列，解除后各收一次。Router 重新采样并等满连续空闲 10 秒，才派新单。真实隔离 HTTP 和 TLS 进程，飞书与原生宿主为夹具。[回执证据](evidence/native-handoff-admission.json) · [操作入口](README.md#原生交接窗口)
 
 复跑 `python3 -B -m unittest -v rewrite.test_handoff_admission rewrite.test_service.Service.test_three_process_worker_chat_and_assignment`。三个竞态与续接场景连过 18 轮，另用三个 TLS 进程验证隔离交接命令和解除后正式派单。macOS 全过 210 项。Linux arm64 通过 147 项，另 63 项本机宿主用例跳过。
