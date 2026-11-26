@@ -16,6 +16,8 @@
 
 首次取消期间离线入池的路径也已补上。原工位收到首次取消与两次重试后断开，十分钟后由 Router 入池。实测没有搁置帧。原工位重新连上，收到新取消并交清理 W04。隔离旧 Router 读回已取消，无成果、无持单、无重派。首次取消的收件顺序晚于池中操作，或其重试关联的空闲观测不符时，均拒绝发布。宿主和时钟为夹具。复跑 `python3 -B -m unittest -v rewrite.test_cutover -k cancel_interrupted`。[本次实测](evidence/cutover-reviewed-offline-cancel.json) · [旧失败证据](evidence/cutover-offline-cancel-reissue-gap.json)
 
+离线取消回退实现 `af483448fa30a6882f2ef69cc6c018335df7c240` 的 Linux arm64 全量通过 202 项、依环境跳过 121 项。306 文件安装包通过 74 项专项，逐文件校验一致。归档 SHA-256 为 `5f7f41a81808efe731e7344fd7299d06b14eefea3df656a3064f3674ad019627`。macOS 此提交通过 47 项生命周期专项、Codex 与 DSH 各一项原生清理测试，以及一项 macOS 到 Linux 的 Worker 重启回环。上一提交在 macOS 全量运行时，322 项中通过 316 项、跳过 5 项，剩余一项因容器无法读取临时工作树而失败。该项已在共享工作区复验通过，本提交未重跑 macOS 全量。 Windows 常规与 DSH 原生两组通过。[Windows CI](https://github.com/KibyouMoe/mowu-link/actions/runs/45910712165)
+
 工单内已答复的问题纳入回退。真实隔离 Router 和两个 Worker 验证选择、文本和跳过三种答复。一条答复到达前已转派并验收，仍送入原工位的宿主，当前工位无答复输入。重送同一问题和同一答案，保留原号和操作回执，通知与答复帧各一次。未答、答复帧缺接收确认或流向下一派发均拒绝准备。恢复后的旧 Router 读回归档，两个工位无待答题及重新派发。原 W05、题文、答复及接收记录只留私有档案，宿主使用夹具。[问答回退实测](evidence/cutover-reviewed-questions.json)
 
 问答实现 `31981cf46a980baf94021488751d0424416ac40b` 的 Linux arm64 全量通过 198 项、按环境跳过 121 项。300 文件安装包的 70 项专项全部通过，逐文件校验一致。归档 SHA-256 为 `2df06cef354843e4bad886c0cfc0859fa0ead6dbe74c263b24b376d91a70eb05`。Windows 常规与 DSH 原生两组通过。[Windows CI](https://github.com/KibyouMoe/mowu-link/actions/runs/45908280694)
