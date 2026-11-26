@@ -1,10 +1,15 @@
+import hashlib
+from threading import Thread
 import unittest
 
 from .adapter import HostAdapter
 from .devloop import FixtureHost, Loop
+from .native_files import NativeFiles
 from .storage import Fault, guid
 from .test_mainline import Clock
 from .worker import Worker
+from .wire import Client
+from .worker_service import WorkerService
 
 
 class Peers(unittest.TestCase):
@@ -39,6 +44,96 @@ class Peers(unittest.TestCase):
         with self.assertRaises(Fault) as wrong:
             self.b.report(native["native_id"],guid(),guid(),"not a task")
         self.assertEqual(wrong.exception.code,"wrong_report_origin")
+
+    def adapter_client(self,w):
+        token = guid()
+        srv = self.enterContext(WorkerService(w).listen({token:"adapter/"+w.worker_id},("127.0.0.1",0),None))
+        thread = Thread(target=srv.serve_forever,kwargs={"poll_interval":.02})
+        thread.start()
+        self.addCleanup(thread.join)
+        self.addCleanup(srv.shutdown)
+        return Client("http://127.0.0.1:"+str(srv.server_port),token)
+
+    def test_only_intended_peer_receives_bytes_after_both_transfers_are_interrupted(self):
+        sender,recipient = self.adapter_client(self.a),self.adapter_client(self.b)
+        cache = self.loop.root/"recipient-cache"
+        self.b.adapter.media_store = NativeFiles(cache,recipient)
+        content = ("两个工位独立保存的文件。\n"*16000).encode()
+        sha = hashlib.sha256(content).hexdigest()
+        status = sender.request("POST","worker/media/uploads",{"name":"交接.md","sha256":sha,"size_bytes":len(content)},guid())
+        chunk = 256*1024
+        for pos in range(0,len(content),chunk):
+            status = sender.request("PATCH","worker/media/uploads/"+status["upload_id"],content[pos:pos+chunk],
+                                    headers={"Upload-Offset":str(pos)})
+        local_id = status["attachment_id"]
+        msg = {"message_id":guid(),"to_worker":"tama","text":"","attachment_ids":[local_id]}
+        original = self.a.router.request
+        patches = []
+        def lose(*args,**kwargs):
+            reply = original(*args,**kwargs)
+            if args[0]=="PATCH":
+                patches.append(int(kwargs["headers"]["Upload-Offset"]))
+                if len(patches)==1:
+                    raise Fault(503,"fixture_lost_chunk_ack")
+            return reply
+        self.a.router.request = lose
+        with self.assertRaisesRegex(Fault,"fixture_lost_chunk_ack"):
+            sender.request("POST","worker/peer",msg)
+        self.assertEqual(sender.request("POST","worker/peer",msg),sender.request("POST","worker/peer",msg))
+        self.assertEqual(patches,list(range(0,len(content),chunk)))
+        wire = self.b.router.request
+        ranges = []
+        def interrupt(*args,**kwargs):
+            if args[1].startswith("attachments/"):
+                ranges.append(kwargs["headers"]["Range"])
+                if len(ranges)==2:
+                    raise ConnectionError("fixture receiver disconnected")
+            return wire(*args,**kwargs)
+        self.b.router.request = interrupt
+        with self.assertRaises(ConnectionError):
+            self.b.poll()
+        self.assertFalse(self.host.entries())
+        self.b = Worker(self.loop.root/"other-worker.db","tama",self.b.router,self.b.adapter)
+        self.b.poll()
+        self.b.poll()
+        self.assertEqual(ranges[1],ranges[2])
+        self.assertEqual(len(self.host.entries()),1)
+        native,proof = self.host.entries()[0]
+        self.assertEqual((native["kind"],native["attachments"][0]["kind"],proof["media_sha256"]),("peer","file",[sha]))
+        self.assertEqual((cache/sha).read_bytes(),content)
+        self.assertFalse(self.b.hold()["held_task_id"])
+        remote_id = self.b.peer_history()[0]["body"]["attachments"][0]["attachment_id"]
+        self.assertNotEqual(remote_id,local_id)
+        with self.assertRaisesRegex(Fault,"attachment_not_found"):
+            self.loop.manager_wire.request("GET","attachments/"+remote_id)
+        with self.assertRaisesRegex(Fault,"peer_file_not_owned"):
+            self.b.router.request("POST","peers/oguri/messages",{"session_id":self.b.session,"message_id":guid(),
+                                  "text":"","attachment_ids":[remote_id]},guid())
+        with self.assertRaisesRegex(Fault,"peer_message_conflict"):
+            sender.request("POST","worker/peer",{**msg,"text":"changed"})
+
+    def test_empty_and_unauthorized_files_get_no_phantom_or_partial_delivery(self):
+        sender,recipient = self.adapter_client(self.a),self.adapter_client(self.b)
+        self.b.adapter.media_store = NativeFiles(self.loop.root/"cache",recipient)
+        empty = sender.request("POST","worker/media/uploads",{"name":"empty","size_bytes":0,
+                     "sha256":hashlib.sha256(b"").hexdigest()},guid())["attachment_id"]
+        mid = guid()
+        with self.assertRaisesRegex(Fault,"attachment_not_found"):
+            sender.request("POST","worker/peer",{"message_id":mid,"to_worker":"tama","attachment_ids":[empty,guid()]})
+        self.assertFalse(self.a.peer_history())
+        sender.request("POST","worker/peer",{"message_id":mid,"to_worker":"tama","attachment_ids":[empty]})
+        wire = self.b.router.request
+        reads = []
+        def observe(method,route,*args,**kwargs):
+            if route.startswith("attachments/"):
+                reads.append((method,kwargs))
+            return wire(method,route,*args,**kwargs)
+        self.b.router.request = observe
+        self.b.poll()
+        self.assertEqual(reads,[("GET",{"max_bytes":0})])
+        (body,receipt), = self.host.entries()
+        self.assertEqual(receipt["media_sha256"],[hashlib.sha256(b"").hexdigest()])
+        self.assertEqual(body["attachments"][0]["size_bytes"],0)
 
     def test_lost_accept_retries_without_new_host_input(self):
         mid = guid()

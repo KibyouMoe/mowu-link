@@ -3,7 +3,7 @@ import json
 from threading import RLock
 from typing import Protocol
 
-from . import display, links, queued_chat, user_questions, worker_commands, worker_media
+from . import display, links, peer_files, queued_chat, user_questions, worker_commands, worker_media
 from .storage import Database, Fault, encode, guid, require, string
 
 SCHEMA = """
@@ -46,7 +46,7 @@ class AgentAdapter(Protocol):
 
 class Worker:
     def __init__(self, path, worker_id, router, adapter: AgentAdapter):
-        self.db = Database(path, SCHEMA + worker_media.SCHEMA + display.SCHEMA + links.WORKER_SCHEMA
+        self.db = Database(path, SCHEMA + worker_media.SCHEMA + peer_files.SCHEMA + display.SCHEMA + links.WORKER_SCHEMA
                            + user_questions.SCHEMA + worker_commands.SCHEMA + queued_chat.SCHEMA)
         self.worker_id, self.router, self.adapter = worker_id, router, adapter
         self.lock = RLock()
@@ -129,7 +129,10 @@ class Worker:
                     db.execute("INSERT OR IGNORE INTO peers VALUES (?,'in',?,?,NULL)", (mid,sender,encode(payload)))
                     row = db.execute("SELECT * FROM peers WHERE message_id=?", (mid,)).fetchone()
                     require(row["direction"] == "in" and row["body"] == encode(payload),409,"peer_message_conflict")
-                reply = self.adapter.deliver(frame["delivery_id"], {"kind":"peer", **payload})
+                native = {"kind":"peer", **payload}
+                if payload.get("attachments"):
+                    native["attachments"] = [peer_files.receive(self,item) for item in payload["attachments"]]
+                reply = self.adapter.deliver(frame["delivery_id"], native)
                 if reply:
                     with self.db.transaction() as db:
                         db.execute("UPDATE peers SET receipt=? WHERE message_id=?", (encode(reply),mid))
@@ -245,17 +248,27 @@ class Worker:
                 payload["attachments"] = media
             return self.adapter.deliver("chat-" + message_id, payload)
 
-    def send_peer(self, mid, target, text, reply_to=None):
+    def send_peer(self, mid, target, text, reply_to=None, attachment_ids=None, attachment_kinds=None):
         require(isinstance(target,str) and target.strip() and not any(c in target for c in "/?#%"),
                 422,"invalid_peer_target")
         body = {"message_id":mid,"text":text,"reply_to":reply_to,"session_id":self.session}
+        if attachment_ids is not None:
+            body["attachment_ids"] = attachment_ids
+        if attachment_kinds is not None:
+            body["attachment_kinds"] = attachment_kinds
+        ids,kinds = peer_files.request_files(body)
+        require(isinstance(text,str) and (text.strip() or ids),422,"invalid_peer_message")
         with self.db.transaction() as db:
+            files = peer_files.file_list(db,"adapter/"+self.worker_id,ids,kinds)
             db.execute("INSERT OR IGNORE INTO peers VALUES (?,'out',?,?,NULL)", (mid,target,encode(body)))
             row = db.execute("SELECT * FROM peers WHERE message_id=?", (mid,)).fetchone()
             require(row["direction"] == "out" and row["peer_id"] == target and row["body"] == encode(body),
                     409,"peer_message_conflict")
             if row["receipt"]:
                 return json.loads(row["receipt"])
+        if files:
+            body["attachment_ids"] = peer_files.export(self,files)
+            body["attachment_kinds"] = kinds
         reply = self.router.request("POST",f"peers/{target}/messages",body,"peer-"+mid)
         require(reply.get("message_id") == mid and reply.get("status") == "accepted",409,"missing_peer_receipt")
         with self.db.transaction() as db:

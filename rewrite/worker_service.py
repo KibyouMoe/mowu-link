@@ -109,7 +109,8 @@ class WorkerService:
         elif actor == "platform/" + w.worker_id and method == "POST" and path == "/v1/worker/trainer-answer":
             result = user_questions.resolve(w,body)
         elif actor == "adapter/" + w.worker_id and method == "POST" and path == "/v1/worker/peer":
-            result = w.send_peer(string(body,"message_id"),string(body,"to_worker"),string(body,"text"),body.get("reply_to"))
+            result = w.send_peer(string(body,"message_id"),string(body,"to_worker"),body.get("text",""),body.get("reply_to"),
+                                 body.get("attachment_ids"),body.get("attachment_kinds"))
         elif actor == "adapter/" + w.worker_id and method == "GET" and path == "/v1/worker/peers":
             result = {"items":w.peer_history()}
         elif actor == "platform/" + w.worker_id and method == "POST" and path == "/v1/worker/command":
