@@ -1,0 +1,179 @@
+{
+  "tested_revision": "d1c15eeadaa74545460ae60355ba3b1b2d86c702",
+  "goal": {
+    "commands": {
+      "creation": {
+        "event_seq": 0,
+        "id": "goal-a0b6d172-102f-4fde-b9c2-683f7da601fd",
+        "phase": "active",
+        "revision": 1,
+        "session": "dsh-real-loop-goals"
+      },
+      "eventual_native_goal": {
+        "activation": "armed",
+        "id": "goal-a0b6d172-102f-4fde-b9c2-683f7da601fd",
+        "limit": 256,
+        "objective": "隔离持久目标\n保留 第二行",
+        "phase": "active",
+        "revision": 3,
+        "started": 0
+      },
+      "initial_resume_result": {
+        "command": "/goal",
+        "message_id": "om_resume",
+        "output": {
+          "event_id": "command-om_resume",
+          "seq": 8
+        }
+      },
+      "native_inputs": 0,
+      "pause": {
+        "event_seq": 1,
+        "id": "goal-a0b6d172-102f-4fde-b9c2-683f7da601fd",
+        "phase": "paused",
+        "revision": 2,
+        "session": "dsh-real-loop-goals"
+      },
+      "router_tasks": 0,
+      "session": "dsh-real-loop-goals"
+    },
+    "continuation": {
+      "boundary": "Native DSH goal service and continuation driver; local scripted provider",
+      "created": {
+        "event_seq": 0,
+        "id": "goal-3d089b99-d889-4f8a-bcaf-87a47f78945a",
+        "phase": "active",
+        "revision": 1,
+        "session": "dsh-real-goal-rounds"
+      },
+      "paused": {
+        "event_seq": 9,
+        "id": "goal-3d089b99-d889-4f8a-bcaf-87a47f78945a",
+        "phase": "paused",
+        "revision": 2,
+        "session": "dsh-real-goal-rounds"
+      },
+      "resumed": {
+        "event_seq": 13,
+        "id": "goal-3d089b99-d889-4f8a-bcaf-87a47f78945a",
+        "phase": "active",
+        "revision": 3,
+        "session": "dsh-real-goal-rounds"
+      },
+      "rounds": [
+        {
+          "id": "goal-3d089b99-d889-4f8a-bcaf-87a47f78945a",
+          "revision": 1,
+          "round": 1
+        },
+        {
+          "id": "goal-3d089b99-d889-4f8a-bcaf-87a47f78945a",
+          "revision": 3,
+          "round": 2
+        }
+      ],
+      "router_notifications": 0,
+      "router_tasks": 0,
+      "turns": [
+        {
+          "reason": {
+            "kind": "aborted",
+            "reason": {
+              "kind": "user"
+            }
+          },
+          "turn": 1
+        },
+        {
+          "reason": {
+            "kind": "completed"
+          },
+          "turn": 2
+        }
+      ],
+      "worker_hold": {
+        "held_assignment_id": null,
+        "held_task_id": null
+      }
+    }
+  },
+  "compaction": {
+    "boundary": "Native DSH basic compaction engine and persisted surface, scripted local provider",
+    "compaction": {
+      "compaction_id": "381c42b1-faa9-4462-b696-b585ba65bf8e",
+      "end_seq": 30,
+      "items": 5,
+      "state": "completed",
+      "summary_seq": 28,
+      "tokens": 2232
+    },
+    "events": [
+      {
+        "compactionId": "381c42b1-faa9-4462-b696-b585ba65bf8e",
+        "kind": "compaction/start",
+        "seq": 27,
+        "sourceCommandId": "mowulink-0f4075d96e6b1899c84340ed23059a9d4a26913c48d260c3cd4531b92308d335"
+      },
+      {
+        "compactionId": "381c42b1-faa9-4462-b696-b585ba65bf8e",
+        "kind": "compaction/summary",
+        "seq": 28,
+        "sourceCommandId": "mowulink-0f4075d96e6b1899c84340ed23059a9d4a26913c48d260c3cd4531b92308d335"
+      },
+      {
+        "compactionId": "381c42b1-faa9-4462-b696-b585ba65bf8e",
+        "kind": "user/message",
+        "seq": 29,
+        "sourceCommandId": "mowulink-0f4075d96e6b1899c84340ed23059a9d4a26913c48d260c3cd4531b92308d335"
+      },
+      {
+        "compactionId": "381c42b1-faa9-4462-b696-b585ba65bf8e",
+        "kind": "compaction/end",
+        "seq": 30,
+        "sourceCommandId": "mowulink-0f4075d96e6b1899c84340ed23059a9d4a26913c48d260c3cd4531b92308d335"
+      }
+    ],
+    "native_in_progress": {
+      "adapter_busy": true,
+      "compacting": true,
+      "status": "idle"
+    },
+    "native_model_requests": [
+      {
+        "command": "private",
+        "model": "local",
+        "provider": "fixture",
+        "reasoningEffort": "low"
+      },
+      {
+        "command": "private",
+        "model": "local",
+        "provider": "fixture",
+        "reasoningEffort": "low"
+      },
+      {
+        "command": "private",
+        "model": "local",
+        "provider": "fixture",
+        "reasoningEffort": "low"
+      },
+      {
+        "command": "compaction",
+        "model": "local",
+        "provider": "fixture"
+      }
+    ],
+    "result_count": 1,
+    "router_tasks": 0,
+    "session": "dsh-real-compact",
+    "start_attempts": 1
+  },
+  "runner": "Windows Server 2025 x64",
+  "dsh_release": "0.2.2-rc.5",
+  "passed": 13,
+  "recorded_utc": {
+    "goal": "2026-11-26T20:42:18.5804813Z",
+    "compact": "2026-11-26T20:42:18.5821613Z"
+  },
+  "verification_url": "https://github.com/KibyouMoe/mowu-link/actions/runs/45892756279/job/140159174328"
+}

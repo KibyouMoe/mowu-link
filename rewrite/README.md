@@ -386,6 +386,8 @@ Windows 另从官方发布包运行 [独立 Codex App Server](desktop-check.md#w
 
 托管工位的 `/resume`、`/new`、`/clear` 和 `/fork` 已从测试飞书入口经独立适配器跑通。原切换回执丢失后沿用同一会话，重开不重演原回合。隔离备份中的三个子会话库已逐字节核对回退副本。[Windows 实测](evidence/windows-dsh-managed-sessions.json) · [macOS 实测](evidence/dsh-local-tls-managed-macos.json)
 
+固定会话的 `/goal` 和 `/compact` 也通过本机双向 TLS 实测。原生目标从同一编号暂停、续跑，既无 Router 工单也无工单通知。历史压缩故意丢启动回执，重投原消息后仍只有一次原生压缩和一次结果通知。[Windows 证据](evidence/windows-dsh-goal-compaction.json) · [macOS 证据](evidence/dsh-local-tls-goal-compaction-macos.json)
+
 实际 Desktop 窗口、真实模型和飞书另验。隔离的模型驱动收到文件名与摘要，原生附件库可读回完整文件。真实模型用宿主文件工具读取附件，以及模型产生新图，仍需独立验收。
 
 ### DSH 会话用量

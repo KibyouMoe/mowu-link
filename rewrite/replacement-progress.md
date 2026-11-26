@@ -4,6 +4,10 @@
 
 ## 检查点与证据
 
+Windows 和 macOS 已用 DSH 本机双向 TLS 核 `/goal` 和 `/compact`。同一原生目标经过暂停和继续，不创建 Router 工单。自动执行第一回合被暂停、第二回合完成，目标号不变。压缩启动回执被扣下，同一指令重试和 Worker 重建后，原生压缩号、四条事件及唯一结果通知均能查回。官方宿主的目标、压缩与持久化实际执行，模型和平台命令身份为夹具。[Windows 证据](evidence/windows-dsh-goal-compaction.json) · [macOS 证据](evidence/dsh-local-tls-goal-compaction-macos.json)
+
+覆盖提交 `d1c15eeadaa74545460ae60355ba3b1b2d86c702`。Windows DSH 13 项、Codex 与安装 10 项、两套回退通过。macOS 已校验的 280 文件包内专项 12 项通过、1 项仅 Windows 跳过。前一实现提交 `1c2e69322cfb40074d35a50c47f49beb3c227f48` 的 macOS 全量 297 项通过、5 项依环境跳过。Linux arm64 在覆盖提交上 187 项通过、117 项依环境跳过。主线演示另核回合结束时仍持单，经 W04 进入待验，管理端验收之后才关闭，宿主为夹具。[Windows 回归](https://github.com/KibyouMoe/mowu-link/actions/runs/45892756279)
+
 DSH 固定会话的命令审批已走通本机双向 TLS。Windows Server 2025 从官方 DSH 包加载 ApprovalService 与原生 Bash 执行组件，使用 Git Bash 实际运行获准的 `pwd -W` 一次，工作目录与审批记录一致。拒绝和超时不执行，无法核实目录的请求只在宿主处理。丢关闭回执、重开宿主和适配器后，按同一原生审批号补交，原回合、已执行结果和四条 Router 通知没有增加。平台身份代答、批准整段会话均被拒。模型和审批人由夹具提供，实际审批人和 Windows Desktop 界面另验。[Windows 审批](evidence/windows-dsh-command-approval.json) · [macOS 审批](evidence/dsh-local-tls-approval-macos.json)
 
 审批实现提交 `1c2e69322cfb40074d35a50c47f49beb3c227f48`。Windows DSH 11 项、Codex 与安装 10 项、两套回退通过。Linux arm64 全量 187 项通过、115 项依环境跳过。macOS 对 278 文件的安装包逐项校验后运行 14 项，13 项通过，Windows 文件共享专项按环境跳过。归档 SHA-256 为 `f753a14af1fec206bcdf3016692b7d366b5f3edfd53d0a616036422677935c53`。[Windows 回归](https://github.com/KibyouMoe/mowu-link/actions/runs/45892287783)
