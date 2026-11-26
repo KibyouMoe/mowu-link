@@ -1,0 +1,56 @@
+{
+  "session": "dsh-native-private-stop",
+  "first_stop": {
+    "end_seq": 11,
+    "session": "dsh-native-private-stop",
+    "turn_id": "1/1"
+  },
+  "turns": [
+    {
+      "turn": 1,
+      "reason": {
+        "kind": "aborted",
+        "reason": {
+          "kind": "user"
+        }
+      }
+    },
+    {
+      "turn": 2,
+      "reason": {
+        "kind": "completed"
+      }
+    },
+    {
+      "turn": 3,
+      "reason": {
+        "kind": "completed"
+      }
+    },
+    {
+      "turn": 4,
+      "reason": {
+        "kind": "aborted",
+        "reason": {
+          "kind": "user"
+        }
+      }
+    },
+    {
+      "turn": 5,
+      "reason": {
+        "kind": "aborted",
+        "reason": {
+          "kind": "user"
+        }
+      }
+    }
+  ],
+  "input_count": 5,
+  "preserved_native_queue_item": "mowulink-05ac02d16f5be6a1cb6e31a33de7dac85200d79d8886930222d037ffacc66504",
+  "lost_reply_status": "unknown",
+  "replay_did_not_stop_later_turn": true,
+  "formal_stop_rejected": "917af9a0-d70d-4289-bf18-d082e3468442",
+  "formal_held_pending_cleanup": true,
+  "boundary": "Native DSH AgentLoop and abort records; scripted local provider"
+}

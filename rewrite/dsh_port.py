@@ -75,6 +75,9 @@ class DshHost:
     def session_catalog(self,session):
         return self.request("session-catalog",session)
 
+    def stop_private(self,session):
+        return self.request("stop-private",session)
+
     def compact(self, session, command_id, *, start):
         return self.request("compact-start" if start else "compact-status",session,{"command_id":command_id})
 

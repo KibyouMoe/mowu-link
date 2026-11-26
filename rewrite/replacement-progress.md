@@ -4,6 +4,8 @@
 
 ## 检查点与证据
 
+DSH `/stop` 已走真实 AgentLoop。普通回合留下原生中止记录，原生排队内容在下一次输入后照常入场。丢回包时显示待核，同号重投不影响之后的回合。实际隔离 Router 下发正式单后，飞书命令和宿主端私聊停止入口都拒绝停止工单，原 Router 取消路径仍可中止并保留清理待核。复跑 `python3 -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_stop_targets_only_current_private_turn_and_never_replays_a_lost_result`。[原生停止记录](evidence/dsh-native-stop.json)。宿主真实，模型为本地夹具。
+
 DSH `/resume` 已通过宿主原生查询读取当前会话和显式获准的历史目录。隔离测试读回 12 个条目，其中 11 个是已关闭的会话。验证两页、按标题或 ID 搜索、缺失记录提示及另一 Worker 收 403。未配置的会话连标题都没有进入适配器回应。浏览前后仅原会话处于活动，无原生输入、无新工单。换绑仍待接。复跑 `python3 -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_resume_browses_only_configured_native_cold_sessions_without_activating_them`。[原生目录证据](evidence/dsh-native-catalog.json)。
 
 DSH 原生计时题过前台等待期后，受支持的单题可接入训练员飞书题卡。原生工具在隔离 DSH AgentLoop 里自行运行并记录待回答状态。测试平台分别提交选择、自定义与跳过，验证原回合和原生题号、原卡更新、非绑定用户和非原卡拒绝。选择回包丢失后只从原生会话查回，三题各一次原生答复，多选保持在 DSH。另测开卡回包丢失，原生入口先选第一项，迟到的飞书第二项被拒，原卡按实际入场的答复更新。Router 无工单。复跑 `python3 -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_dsh_native_timed_question_closes_the_original_feishu_test_card`。[原生记录](evidence/dsh-native-questions.json)。真实 DSH 工具及回合，模型为本地夹具，飞书为测试平台；原生前台阻塞题和真人飞书待验。

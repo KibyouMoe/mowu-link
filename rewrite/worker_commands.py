@@ -14,7 +14,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS platform_commands (
  message_id TEXT PRIMARY KEY, request TEXT NOT NULL, receipt TEXT NOT NULL
 );
--- Also used for new native goal actions. Keep existing intents across upgrades.
+-- Also used for native goal actions and stop. Keep existing intents across upgrades.
 CREATE TABLE IF NOT EXISTS platform_model_intents (
  message_id TEXT PRIMARY KEY, request TEXT NOT NULL, session TEXT NOT NULL
 );
@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS platform_catalog_views (
 );
 """
 HELP = "/status 查看最近一次连接、宿主忙闲和本地持单记录。\n/list 查看当前绑定会话。"
-PLANNED = {"/context","/compact","/model","/effort","/goal",
+PLANNED = {"/context","/compact","/model","/effort","/goal","/stop",
            "/new","/clear","/fork"}
 COMMAND = re.compile(r"^/[A-Za-z][A-Za-z0-9_-]*(?:\s|$)")
 MODEL_VIEWS = {"/model":"models","/effort":"efforts"}
@@ -53,6 +53,8 @@ def reply(service, name, args, hold):
             lines.append("/resume 查看当前绑定会话。历史搜索敬请期待。")
         if service.adapter_connected and service.host_compaction:
             lines.append("/compact 通过宿主压缩当前会话历史。")
+        if service.adapter_connected and service.host_stop_private:
+            lines.append("/stop 停止当前普通对话回合，保留已排队消息。")
         if service.adapter_connected and service.host_model_view:
             lines.append("/model 查看模型，/effort 查看当前模型支持的思考强度。")
         if service.adapter_connected and service.host_model_change:
@@ -272,7 +274,7 @@ def previous(db,mid,text):
     require(not intent or intent["request"]==text,409,"platform_command_conflict")
 
 
-def record(db,mid,text,name,session,answer,*,model_receipt=None,goal_receipt=None,menu=None):
+def record(db,mid,text,name,session,answer,*,model_receipt=None,goal_receipt=None,stop_receipt=None,menu=None):
     payload = {"event_id":"command-"+mid,"kind":"command","session":session,"turn_id":"","text":answer}
     if menu is not None:
         payload["model_menu"] = True
@@ -284,6 +286,8 @@ def record(db,mid,text,name,session,answer,*,model_receipt=None,goal_receipt=Non
         receipt["model_receipt"] = model_receipt
     if goal_receipt is not None:
         receipt["goal_receipt"] = goal_receipt
+    if stop_receipt is not None:
+        receipt["stop_receipt"] = stop_receipt
     db.execute("INSERT INTO platform_commands VALUES (?,?,?)",(mid,text,encode(receipt)))
     return receipt
 
@@ -403,6 +407,45 @@ def advance_compact(service):
             finish_compact(worker,mid,session,{"state":"unknown"})
 
 
+def stop_private(service,mid,text):
+    worker = service.worker
+    pending = "停止结果待核。请先查看原生会话。"
+    with service.native_command_lock:
+        with worker.db.transaction() as db:
+            old = previous(db,mid,text)
+            if old:
+                return old
+            intent = db.execute("SELECT session FROM platform_model_intents WHERE message_id=?",(mid,)).fetchone()
+            if intent:
+                return record(db,mid,text,"/stop",intent["session"],pending)
+            if not (service.adapter_connected and service.host_stop_private):
+                return None
+            session = service.host_session
+            if db.execute("SELECT 1 FROM jobs WHERE stage='accepted'").fetchone():
+                return record(db,mid,text,"/stop",session,"当前工位持有正式工单。取消请走工单流程。")
+            db.execute("INSERT INTO platform_model_intents VALUES (?,?,?)",(mid,text,session))
+        answer,receipt = pending,None
+        try:
+            proof = worker.adapter.stop_private(session)
+            require(isinstance(proof,dict) and proof.get("session")==session,502,"wrong_native_stop_receipt")
+            if proof.get("state")=="idle":
+                answer = "当前会话已空闲。"
+            else:
+                require(proof.get("state")=="stopped" and type(proof.get("end_seq")) is int and proof["end_seq"]>=0,
+                        502,"invalid_stop_receipt")
+                receipt = {"session":session,"turn_id":string(proof,"turn_id"),"end_seq":proof["end_seq"]}
+                answer = "当前普通对话回合已停止。"
+        except Fault as error:
+            if error.code=="native_stop_changed":
+                answer = "会话状态已变化。请核对后重新发送。"
+            elif error.code=="native_stop_not_private":
+                answer = "当前回合无法确认为单条普通对话。请到原生会话查看。"
+        except (URLError,OSError):
+            pass
+        with worker.db.transaction() as db:
+            return previous(db,mid,text) or record(db,mid,text,"/stop",session,answer,stop_receipt=receipt)
+
+
 def confirmed_selection(receipt,session,kind,value,expected_route):
     require(isinstance(receipt,dict) and receipt.get("session")==session,502,"invalid_model_change_receipt")
     changed,sequence = receipt.get("changed"),receipt.get("event_seq")
@@ -493,6 +536,10 @@ def handle(service, body):
     mid, text = string(body,"message_id"), string(body,"text")
     require(is_command(text),422,"invalid_platform_command")
     name,*args = text.strip().split()
+    if name=="/stop" and not args:
+        stopped = stop_private(service,mid,text)
+        if stopped is not None:
+            return stopped
     if name=="/resume" and service.adapter_connected and service.host_session_catalog and (
         not args or args[0] in ("search","page") or args in (["next"],["prev"])
     ):
@@ -541,8 +588,8 @@ def handle(service, body):
         job = db.execute("SELECT task_id,assignment_id FROM jobs WHERE stage='accepted'").fetchone()
         if name == "/queue":
             answer = queued_chat.accept(db,service,mid,text)
-        elif name=="/compact" and args:
-            answer = "用法：/compact"
+        elif name in ("/compact","/stop") and args:
+            answer = "用法："+name
         elif answer is None:
             answer = reply(service,name,args,{"held_task_id":job[0] if job else None,
                                              "held_assignment_id":job[1] if job else None})

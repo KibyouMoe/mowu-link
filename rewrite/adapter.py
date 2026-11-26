@@ -44,6 +44,7 @@ class HostAdapter:
                 "context_usage":callable(getattr(self.host,"context_usage",None)),
                 "compaction":native.get("compaction") is True,
                 "session_catalog":native.get("session_catalog") is True,
+                "stop_private":native.get("stop_private") is True,
                 "model_view":callable(getattr(self.host,"model_view",None)),
                 "model_change":callable(getattr(self.host,"model_change",None)),
                 "goal_control":callable(getattr(self.host,"goal_view",None))
@@ -53,6 +54,12 @@ class HostAdapter:
         browse = getattr(self.host,"session_catalog",None)
         require(callable(browse),422,"native_catalog_unavailable")
         return browse(self.session)
+
+    def stop_private(self,session):
+        require(session==self.session,409,"wrong_native_session")
+        stop = getattr(self.host,"stop_private",None)
+        require(callable(stop),422,"native_stop_unavailable")
+        return stop(self.session)
 
     def compact(self, session, command_id, *, start):
         require(session==self.session,409,"wrong_native_session")

@@ -19,6 +19,7 @@ const compactReleased = Promise.withResolvers();
 const usesGoals = mode==='goals' || mode==='goal-driver';
 const modelRequests = [];
 const catalogSessions = [];
+const privateStops = new Map(['one','two','three'].map(tag=>[tag,Promise.withResolvers()]));
 
 class LocalModel extends LlmAdapter {
   submitted = new Map();
@@ -48,6 +49,10 @@ class LocalModel extends LlmAdapter {
     modelRequests.push({command,provider,model,reasoningEffort});
     if (goal?.round===1) await waitForStop(signal);
     if (goal?.round===2) secondRound.resolve();
+    if (mode==='private-stop' && text.startsWith('Hold private ')) {
+      privateStops.get(text.split(' ').at(-1)).resolve();
+      await waitForStop(signal);
+    }
     if (mode==='questions' && /^Question fixture (choice|text|skip|multi|native)$/.test(text)) {
       const choice = text.split(' ').at(-1);
       if (!this.submitted.has(text)) {
@@ -213,7 +218,16 @@ async function formalScenario(agent) {
       console.log(JSON.stringify({compacting:true,status:agent.status}));
       continue;
     }
+    if (line.startsWith('wait-private ') && mode==='private-stop') {
+      await privateStops.get(line.split(' ').at(-1)).promise;
+      console.log(JSON.stringify({running:agent.status==='running'}));
+      continue;
+    }
     if (line==='finish-compact' && mode==='compact') compactReleased.resolve();
+    else if (line==='wake-private-queue' && mode==='private-stop') {
+      agent.followup({id:'fixture-next-private',role:'user',source:{kind:'user'},
+        content:[{type:'text',text:'Continue the private conversation'}]});
+    }
     else if (line==='answer-native' && mode==='questions') {
       assert.equal(ctx.get('userQuestions').answer(agent,'native-question-native',
         {answers:[{id:'primary',selected:['A']}]}),true);
@@ -236,13 +250,14 @@ async function formalScenario(agent) {
       .map(e=>({id:e.data.id,call:e.data.source.callId,seq:e.seq,body:JSON.parse(e.data.content[0].text)}));
     const continued = mode==='questions' ? ctx.get('userQuestions').continued(agent).map(q=>q.callId) : [];
     console.log(JSON.stringify({session,inputs,calls,results,turns,modelRequests,rounds,compactEvents,replies,continued,
+      inbox:mode==='private-stop' ? agent.inbox.nextTurn.map(message=>message.id) : [],
       liveSessions:mode==='catalog' ? ctx.get('agents').list().map(agent=>agent.session.id) : []}));
   }
 }
 
 try {
   const agent = await setup();
-  if (['formal','compact','questions','catalog'].includes(mode) || usesGoals) await formalScenario(agent);
+  if (['formal','compact','questions','catalog','private-stop'].includes(mode) || usesGoals) await formalScenario(agent);
   else await stopScenario(agent);
 } finally {
   for (const handle of plugins.reverse()) await handle.dispose();

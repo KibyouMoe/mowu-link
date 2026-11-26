@@ -475,3 +475,68 @@ class NativeLoop(unittest.TestCase):
                 "excluded_unconfigured_session":True,"denied_other_worker_http":403,"live_sessions_after":result["liveSessions"],
                 "native_input_count":len(result["inputs"]),"search_and_pagination_confirmed":True,
                 "boundary":"Native DSH SessionQueryEngine and persisted session files; isolated Worker HTTP"}
+
+    def test_stop_targets_only_current_private_turn_and_never_replays_a_lost_result(self):
+        session = "dsh-native-private-stop"
+        directory,loop,service,command = self.goal_worker(session)
+        with self.start_native(directory,session,"private-stop") as native:
+            service.step()
+            self.assertIn("已空闲",command("om_idle","/stop")[1])
+            first = loop.worker.chat(guid(),"Hold private one")
+            self.assertTrue(self.read_native(native,"wait-private one")["running"])
+            loop.worker.chat(guid(),"Keep queued input after abort")
+            receipt,card = command("om_stop_first","/stop")
+            self.assertIn("回合已停止",card)
+            self.assertEqual(receipt["stop_receipt"]["turn_id"],first["turn_id"])
+            stopped = self.read_native(native,"read")
+            queued, = stopped["inbox"]
+            self.assertEqual(len(stopped["inputs"]),1)
+            continued = self.read_native(native,"wake-private-queue")
+            self.assertEqual(continued["inputs"],[first["native_id"],queued,"fixture-next-private"])
+            self.assertEqual(continued["inbox"],[])
+            loop.worker.chat(guid(),"Hold private two")
+            self.assertTrue(self.read_native(native,"wait-private two")["running"])
+            original = loop.adapter.stop_private
+            def lose(session):
+                proof = original(session)
+                self.assertEqual(proof["state"],"stopped")
+                raise Fault(503,"adapter_connection_unconfirmed",True)
+            loop.adapter.stop_private = lose
+            pending,card = command("om_stop_second","/stop")
+            self.assertIn("待核",card)
+            self.assertNotIn("stop_receipt",pending)
+            loop.adapter.stop_private = original
+            loop.worker.chat(guid(),"Hold private three")
+            self.assertTrue(self.read_native(native,"wait-private three")["running"])
+            self.assertEqual(command("om_stop_first","/stop")[0],receipt)
+            self.assertEqual(command("om_stop_second","/stop")[0],pending)
+            self.assertTrue(loop.adapter.busy())
+            self.assertIn("回合已停止",command("om_stop_third","/stop")[1])
+            observed = self.read_native(native,"read")
+            self.assertEqual([turn["reason"]["kind"] for turn in observed["turns"]],
+                             ["aborted","completed","completed","aborted","aborted"])
+            self.assertEqual(len(observed["inputs"]),5)
+            self.assertEqual(loop.hermes.tasks()["items"],[])
+            tid = loop.hermes.create(guid(),"Protected dispatch","Wait for Router cancel","oguri")["task_id"]
+            loop.worker.poll()
+            service.clock.advance(10)
+            loop.worker.poll()
+            loop.worker.poll()
+            working = loop.hermes.inspect(tid)["task"]
+            self.assertEqual(working["state"],"working")
+            self.assertEqual(loop.worker.hold()["held_task_id"],tid)
+            self.assertIn("取消请走工单流程",command("om_stop_formal","/stop")[1])
+            with self.assertRaisesRegex(Fault,"native_stop_not_private"):
+                loop.adapter.stop_private(session)
+            self.assertTrue(loop.adapter.busy())
+            self.assertEqual(loop.hermes.inspect(tid)["task"],working)
+            loop.hermes.act(guid(),tid,working["revision"],"cancel",reason="End isolated formal case")
+            loop.worker.poll()
+            formal = self.read_native(native,"read")
+            self.assertEqual(formal["turns"][-2]["reason"]["kind"],"aborted")
+            self.assertEqual(loop.worker.hold()["held_task_id"],tid)
+            self.evidence = {"session":session,"first_stop":receipt["stop_receipt"],
+                "turns":observed["turns"],"input_count":len(observed["inputs"]),"preserved_native_queue_item":queued,
+                "lost_reply_status":"unknown","replay_did_not_stop_later_turn":True,
+                "formal_stop_rejected":tid,"formal_held_pending_cleanup":True,
+                "boundary":"Native DSH AgentLoop and abort records; scripted local provider"}

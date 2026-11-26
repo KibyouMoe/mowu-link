@@ -43,6 +43,7 @@ function turns(events) {
       result.push(current);
     } else if (current && event.type === 'turn/end') {
       current.open = false;
+      current.end = {seq:event.seq,reason:event.data.reason};
       current = undefined;
     } else if (current && event.type === 'user/message' && event.data.source?.kind !== 'runtime-context') {
       current.users.push(event.data);
@@ -115,6 +116,31 @@ function stopBoundTurn(agent, request, history, before) {
   if (typeof agent.cancel==='function') agent.cancel({kind:'user'}, {keepInbox:true});
 }
 
+async function stopPrivateTurn(ctx,agent,compacting,bound) {
+  const session = agent.session.id;
+  if (compacting()) throw new Error('native_stop_not_private');
+  if (agent.status==='idle') return {session,state:'idle'};
+  check(typeof agent.cancel==='function','native_stop_unavailable');
+  const before = agent.session.seq;
+  const turn = (await persisted(ctx,agent)).at(-1);
+  const user = turn?.users.length===1 ? turn.users[0] : null;
+  check(turn?.open && user?.source?.kind==='user' &&
+    !user.content.some(part=>part.type==='text' && part.text.startsWith('魔物链接投递\n')), 'native_stop_not_private');
+  await bound();
+  check(agent.status==='running' && agent.session.seq===before && !compacting(), 'native_stop_changed');
+  agent.cancel({kind:'user'},{keepInbox:true});
+  // Confirm the exact selected turn, even if preserved inbox messages start another one.
+  for (let attempt=0;attempt<15;attempt++) {
+    const ended = (await persisted(ctx,agent)).find(item=>item.id===turn.id)?.end;
+    if (ended) {
+      check(ended.reason?.kind==='aborted' && ended.reason.reason?.kind==='user','native_stop_unconfirmed');
+      return {session,state:'stopped',turn_id:turn.id,end_seq:ended.seq};
+    }
+    await new Promise(resolve=>setTimeout(resolve,50));
+  }
+  throw new Error('native_stop_unconfirmed');
+}
+
 export async function bindHost(ctx, session, directory, catalog=[]) {
   check(typeof session === 'string' && session.length > 0, 'missing_native_session');
   const controller = ctx.get('sessionController');
@@ -138,7 +164,9 @@ export async function bindHost(ctx, session, directory, catalog=[]) {
       if (request.operation === 'display-image') return displayImage(ctx,agent,request,imageCache);
       if (request.operation === 'activity') return {busy:agent.status !== 'idle' || compact.inProgress};
       if (request.operation === 'capabilities') return {compaction:compact.supported,
-        session_catalog:typeof ctx.get('sessionQuery')?.inspectSession==='function'};
+        session_catalog:typeof ctx.get('sessionQuery')?.inspectSession==='function',
+        stop_private:typeof agent.cancel==='function'};
+      if (request.operation === 'stop-private') return stopPrivateTurn(ctx,agent,()=>compact.inProgress,bound);
       if (request.operation === 'session-catalog') return browseSessions(ctx,session,catalog);
       if (['question-open','question-answer','question-proof'].includes(request.operation)) {
         return questionRequest(ctx,agent,request,()=>ownEvents(ctx,agent));
@@ -257,7 +285,8 @@ export async function apply(ctx, {session, directory, catalog_sessions=[]}) {
     } catch (error) {
       const code = /^[a-z_]{1,80}$/.test(error.message) ? error.message : 'dsh_host_unconfirmed';
       const transient = ['native_write_unconfirmed','native_agent_unavailable','native_persistence_unavailable',
-                         'dsh_host_unconfirmed','model_change_unconfirmed','goal_change_unconfirmed','compact_unconfirmed'].includes(code);
+                         'dsh_host_unconfirmed','model_change_unconfirmed','goal_change_unconfirmed',
+                         'compact_unconfirmed','native_stop_unconfirmed'].includes(code);
       res.writeHead(transient ? 503 : 409,{'Content-Type':'application/json'}).end(JSON.stringify({error:code}));
     }
   });
