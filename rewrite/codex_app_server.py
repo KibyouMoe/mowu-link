@@ -1,6 +1,7 @@
 """Text delivery and formal tool callbacks for one dedicated Codex App Server thread."""
 from contextlib import contextmanager
 import hashlib
+import json
 from pathlib import Path
 from queue import Empty
 import re
@@ -15,13 +16,19 @@ from .codex_compactions import CodexCompactions
 from .codex_images import CodexImages
 from .codex_questions import CodexQuestions
 from .codex_rpc import NativeRpcRejected
-from .storage import Fault, encode, require, string
+from .storage import Database, Fault, encode, require, string
 
 TERMINAL = {"completed","interrupted","failed"}
 WORKER_TOOLS = {item["name"] for item in TOOLSET}
 GOAL_STATES = {"active","paused","blocked","complete","usageLimited","budgetLimited"}
 PUBLIC_COMMANDS = re.compile(r"^(git (?:status|diff|log)|npm (?:test|run)|python3? -m unittest|ls|pwd)(?:\s|$)")
 AGENT_COMMAND_SOURCES = {"agent","unifiedExecStartup","unifiedExecInteraction"}
+FORK_HISTORY = """
+CREATE TABLE IF NOT EXISTS codex_fork_history (
+ slot INTEGER PRIMARY KEY CHECK(slot=1), session TEXT NOT NULL,
+ parent TEXT NOT NULL, inherited_delivery_ids TEXT NOT NULL
+);
+"""
 
 
 class AppServerHost:
@@ -34,10 +41,34 @@ class AppServerHost:
         self.rpc, self.thread_id = rpc,thread_id
         self.write_lock = RLock()
         self.usage = None
+        self.inherited_delivery_ids = frozenset()
         self.compactions = CodexCompactions(adapter_db,self) if adapter_db is not None else None
         self.questions = CodexQuestions(adapter_db,self) if adapter_db is not None else None
         require(public_image_root is None or adapter_db is not None,422,"native_image_state_required")
         self.images = CodexImages(public_image_root,adapter_db) if public_image_root is not None else None
+
+    def bind_fork_history(self,adapter_db,resumed):
+        parent = resumed.get("forkedFromId")
+        if parent is None:
+            return
+        require(isinstance(parent,str) and parent.strip() and parent!=self.thread_id,409,"native_fork_unconfirmed")
+        history = Database(adapter_db,FORK_HISTORY)
+        with history.transaction() as db:
+            saved = db.execute("SELECT * FROM codex_fork_history WHERE slot=1").fetchone()
+            if saved:
+                require((saved["session"],saved["parent"])==(self.thread_id,parent),409,"native_fork_binding_changed")
+                self.inherited_delivery_ids = frozenset(json.loads(saved["inherited_delivery_ids"]))
+                return
+            thread = self.thread(self.thread_id,include_turns=True)
+            require(thread.get("forkedFromId")==parent and thread["status"]["type"]=="idle",
+                    409,"native_fork_unconfirmed")
+            # A native fork preserves parent client IDs, even across a cold reopen.
+            inherited = {cid.removeprefix("mowulink-") for turn in thread["turns"] for item in turn["items"]
+                         if item.get("type")=="userMessage" and isinstance(cid:=item.get("clientId"),str)
+                         and cid.startswith("mowulink-")}
+            db.execute("INSERT INTO codex_fork_history VALUES (1,?,?,?)",
+                       (self.thread_id,parent,encode(sorted(inherited))))
+        self.inherited_delivery_ids = frozenset(inherited)
 
     def resolve_question(self,original,answer):
         require(self.questions,422,"native_question_answer_unavailable")
@@ -304,6 +335,7 @@ class AppServerHost:
 
     def deliver_media(self,session,did,payload,digest,files):
         require(session==self.thread_id,409,"wrong_native_session")
+        require(did not in self.inherited_delivery_ids,409,"inherited_native_delivery")
         blocks = self.input_blocks(did,payload,digest,files)
         with self.write_lock:
             if payload["kind"]=="task":
@@ -339,6 +371,8 @@ class AppServerHost:
 
     def lookup_media(self,session,did,payload,digest,files):
         require(session==self.thread_id,409,"wrong_native_session")
+        if did in self.inherited_delivery_ids:
+            return None
         blocks = self.input_blocks(did,payload,digest,files)
         return self.lookup_inputs(session,did,payload,digest,blocks)
 

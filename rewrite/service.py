@@ -92,6 +92,7 @@ def serve(args,stack):
         require(Path(saved["cwd"]).resolve()==args.cwd.resolve(),409,"wrong_native_workspace")
         resumed = rpc.request("thread/resume",{"threadId":args.session,"cwd":str(args.cwd)})["thread"]
         require(resumed.get("id")==args.session,409,"wrong_native_session")
+        native.bind_fork_history(args.db,resumed)
         media = NativeFiles(args.media_cache,client) if args.media_cache else None
         adapter = HostAdapter(args.db,native,args.session,media)
         display = CodexDisplay(adapter,client)

@@ -1,0 +1,26 @@
+{
+  "parent_thread": "01a2172e-4d56-7872-ac0b-5f92d3b36462",
+  "child_thread": "01a2172e-4d9e-72f2-ba32-2935f0ff3abb",
+  "copied_parent_input": {
+    "session": "01a2172e-4d56-7872-ac0b-5f92d3b36462",
+    "delivery_id": "chat-bcfcc56f-72a3-410e-8b73-4c8d5e07afd9",
+    "digest": "d7836302592d5c2304b79c7e4e3d58e3d59df11a8e0b5010a92addb5ee5a124a",
+    "native_id": "01a2172e-4d8a-7df0-858f-fcab54fd06e0",
+    "turn_id": "01a2172e-4d7d-7753-a220-29c12c548d50"
+  },
+  "parent_delivery_confirmed_in_child": false,
+  "parent_delivery_resent": false,
+  "child_receipt": {
+    "session": "01a2172e-4d9e-72f2-ba32-2935f0ff3abb",
+    "delivery_id": "chat-a120a431-b1c2-49b2-8959-dd19baae4109",
+    "digest": "fd52536e60b0471a49d74f42d0a18346ebf2abf23e9766bf2d4d27b920f0004f",
+    "native_id": "01a2172e-4ded-7493-983c-35be2081433a",
+    "turn_id": "01a2172e-4de6-7a60-9bc8-1d218150827f"
+  },
+  "child_receipt_recovered_after_cold_reopen": true,
+  "parent_input_count": 1,
+  "child_input_count_including_parent_history": 2,
+  "new_model_requests": 1,
+  "boundary": "Actual Codex App Server fork, manual isolated adapter selection, scripted local model",
+  "consecutive_runs": 20
+}

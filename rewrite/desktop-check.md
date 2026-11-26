@@ -89,6 +89,8 @@ python3 -m rewrite.service codex-provision \
 
 原生目标模式另有 12 轮隔离实测。原生工具创建并完成目标，宿主自动续办回合没有来自 Router 的独立输入，其报告请求被拒，工位继续持原派发。Router 正式询问后，带原派发收件凭据的新回合发出两次相同 W04，Router 只留一次报告和一次待验通知。[原生长目标回执](evidence/codex-app-server-native-formal-goal.json)
 
+隔离环境以原生 `thread/fork` 准备测试子会话，再给它一个单独的适配器库。首次连接时库保存此刻已有的投递号，冷开不再扫描到后来真正收到的新输入。历史输入留在原生界面，复制来的投递号没有子会话收件凭据。未确认的父会话投递应回原会话核查。飞书指令发起与切换尚未接。[原生分叉回执](evidence/codex-app-server-native-fork.json)
+
 适配器启动命令如下。
 
 ```sh

@@ -33,6 +33,7 @@ from .test_feishu_inbound import PNG
 from .test_mainline import Clock
 from . import test_service
 from .wire import Client
+from .worker import Worker
 from .worker_service import WorkerService
 
 CODEX = Path("/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex")
@@ -603,6 +604,94 @@ class CodexAppServer(unittest.TestCase):
         self.assertEqual(proof["turn_id"],pending_call["turnId"])
         self.assertIsNone(loop.hermes.inspect(tid)["last_report"])
         return loop,host,frame,proof,pending_call
+
+    def test_native_fork_cannot_confirm_or_resend_the_parent_delivery(self):
+        workspace = str(Path(self.root).resolve())
+        old_mid,new_mid = guid(),guid()
+        before_text,after_text = "Parent private fixture","Fork private fixture"
+        old_did,new_did = "chat-"+old_mid,"chat-"+new_mid
+        old_input = {"kind":"chat","message_id":old_mid,"text":before_text}
+        old_digest = hashlib.sha256(encode(old_input).encode()).hexdigest()
+
+        def settle(rpc,session):
+            until = time.monotonic()+12
+            while True:
+                packet = rpc.event(until)
+                if packet["method"]=="turn/completed" and packet["params"]["threadId"]==session:
+                    self.assertEqual(packet["params"]["turn"]["status"],"completed")
+                    return packet["params"]["turn"]["id"]
+
+        def user_inputs(host):
+            return [(turn["id"],item["id"],item["clientId"]) for turn in host.thread(host.thread_id,include_turns=True)["turns"]
+                    for item in turn["items"] if item["type"]=="userMessage"]
+
+        with isolated_app_server(self.root,self.origin) as rpc:
+            parent = rpc.request("thread/start",{"cwd":workspace,"ephemeral":False,"dynamicTools":[REPORT_TOOL]})["thread"]["id"]
+            host = AppServerHost(rpc,parent)
+            host.session = parent
+            loop = self.enterContext(Loop.isolated(host_factory=lambda _path,_name:host))
+            loop.worker.chat(old_mid,before_text)
+            settle(rpc,parent)
+            original = loop.worker.chat(old_mid,before_text)
+            old_inputs = user_inputs(host)
+            self.assertEqual(old_inputs,[(original["turn_id"],original["native_id"],"mowulink-"+old_did)])
+            fork = rpc.request("thread/fork",{"threadId":parent,"cwd":workspace,"ephemeral":False})["thread"]
+            child = fork["id"]
+            self.assertEqual(fork["forkedFromId"],parent)
+            self.assertNotEqual(parent,child)
+
+        child_db = loop.root/"isolated-fork-adapter.db"
+        counts = len(self.provider.observed)
+        with isolated_app_server(self.root,self.origin) as rpc:
+            resumed = rpc.request("thread/resume",{"threadId":child,"cwd":workspace})["thread"]
+            host = AppServerHost(rpc,child)
+            host.bind_fork_history(child_db,resumed)
+            adapter = HostAdapter(child_db,host,child)
+            worker = Worker(loop.worker.db.path,loop.worker.worker_id,loop.wire,adapter)
+            self.assertEqual(user_inputs(host),old_inputs)
+            self.assertIsNone(host.lookup_expected(child,old_did,old_input,old_digest))
+            self.assertEqual(worker.chat(old_mid,before_text),original)
+            with worker.db.transaction() as db:
+                db.execute("UPDATE chat_deliveries SET receipt=NULL WHERE message_id=?",(old_mid,))
+            self.assertIsNone(worker.chat(old_mid,before_text))
+            with self.assertRaisesRegex(Fault,"inherited_native_delivery"):
+                adapter.deliver(old_did,old_input,session=child)
+            self.assertIsNone(adapter.lookup_delivery(old_did,old_input,session=child))
+            with self.assertRaisesRegex(Fault,"native_turn_unconfirmed"):
+                adapter.input_for_turn(child,original["turn_id"])
+            self.assertEqual(user_inputs(host),old_inputs)
+            self.assertEqual(len(self.provider.observed),counts)
+            worker.chat(new_mid,after_text)
+            new_turn = settle(rpc,child)
+            posted = worker.chat(new_mid,after_text)
+            self.assertEqual((posted["session"],posted["turn_id"]),(child,new_turn))
+            self.assertEqual(user_inputs(host),old_inputs+[(new_turn,posted["native_id"],"mowulink-"+new_did)])
+
+        # Lose only the new receipt in the two test ledgers and reopen the same fork.
+        with adapter.db.transaction() as db:
+            db.execute("UPDATE intents SET receipt=NULL,native_id=NULL WHERE delivery_id=?",(new_did,))
+        with worker.db.transaction() as db:
+            db.execute("UPDATE chat_deliveries SET receipt=NULL WHERE message_id=?",(new_mid,))
+        with isolated_app_server(self.root,self.origin) as rpc:
+            resumed = rpc.request("thread/resume",{"threadId":child,"cwd":workspace})["thread"]
+            host = AppServerHost(rpc,child)
+            host.bind_fork_history(child_db,resumed)
+            adapter = HostAdapter(child_db,host,child)
+            worker = Worker(loop.worker.db.path,loop.worker.worker_id,loop.wire,adapter)
+            self.assertIsNone(worker.chat(old_mid,before_text))
+            self.assertEqual(worker.chat(new_mid,after_text),posted)
+            self.assertIsNone(adapter.lookup_delivery(old_did,old_input,session=child))
+            rpc.request("thread/resume",{"threadId":parent,"cwd":workspace})
+            self.assertEqual(user_inputs(AppServerHost(rpc,parent)),old_inputs)
+            self.assertEqual(len(user_inputs(host)),2)
+        self.assertEqual(len(self.provider.observed),counts+1)
+        self.assertEqual(loop.hermes.tasks()["items"],[])
+        self.evidence = {"parent_thread":parent,"child_thread":child,"copied_parent_input":original,
+                         "parent_delivery_confirmed_in_child":False,"parent_delivery_resent":False,
+                         "child_receipt":posted,"child_receipt_recovered_after_cold_reopen":True,
+                         "parent_input_count":1,"child_input_count_including_parent_history":2,
+                         "new_model_requests":1,
+                         "boundary":"Actual Codex App Server fork, manual isolated adapter selection, scripted local model"}
 
     def test_resume_catalog_uses_only_current_app_server_workspace_without_loading_history(self):
         root = Path(self.root)
