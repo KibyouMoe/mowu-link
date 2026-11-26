@@ -256,6 +256,20 @@ DSH 在独立宿主插件的参数中显式配置 `relay_command_approvals: true
 
 DSH 适配器先保留原请求和单次决定的发送意图。只有在原会话的持久历史读到同号 `approval/asked` 与 `approval/decided`，才确认请求关闭。重开时使用原适配器库、原 DSH 会话和原工位，待核关闭可按该记录补回。测试执行的允许命令只有隔离工作目录内的 `pwd`。
 
+### macOS 独立维护入口
+
+`python3 -m rewrite.service host-ops --manifest <登记表> --db <独立维护库> --identities <维护身份表> --cert <证书> --key <证书私钥>` 启动独立 HTTPS 服务。默认绑定本机。将登记表、身份文件和维护库放在各自适用的私有目录中。登记表只列已授权托管的当前用户 LaunchAgent，格式为 `{"router":{"label":"<准确标签>","plist":"<绝对路径>"}}`，分别核对已加载的 plist 路径、程序及参数。同一个标签只可登记一次。此服务独立于 Router，无默认目标、无定时巡检。
+
+身份表使用独立令牌。`host-observer` 可查全部登记项和回执，`host-maintainer/<服务名>` 只可查和操作这一项。旧 Router、普通 Worker、网关和平台凭据不具备维护权限。由外部获准的维护账号使用这些接口。
+
+| 接口 | 判据 |
+| --- | --- |
+| `GET /v1/ops/services` 或 `GET /v1/ops/services/{name}` | 返回已核对的服务、PID、启动时间和 `generation`。正在换代、已有任务的加载参数不匹配或读不到状态时返回待核。 |
+| `POST /v1/ops/services/{name}/restart` | 传 `request_id`（UUID）、`expected_generation` 和 `reason`。`202` 只表示已登记。重复使用原请求号可查原回执。 |
+| `GET /v1/ops/services/{name}/restarts/{request_id}` | `process_replaced` 表示原 PID 已退出且查到当前新进程。`process_started` 表示已加载的停机项恢复。`not_attempted` 表示操作前状态已变。`unconfirmed` 要按原号核查，重开维护服务不会补做。 |
+
+进程回执后再查服务自己的接口和状态数据。已加载的 LaunchAgent 重启沿用 launchd 当前配置。维护服务不能为 Desktop 子进程、未登记的网关或其他系统代做启停。生产接管需另核安装归属、明确维护授权及回退路径。复跑 `python3 -B -m unittest -v rewrite.test_host_ops`，测试使用三个临时用户 LaunchAgent，完成后卸载。[隔离回执](evidence/host-ops-launchd.json)
+
 ### 跨系统验收
 
 开发机需 Python 3.12 或更新版本、Git、OpenSSL 和已运行的本地 Linux Docker 引擎。先准备含 Python 3.12+、Git、tar、OpenSSL 的 Linux 测试镜像。此次实测使用官方 `python:3.13-bookworm` 的 Linux arm64 manifest `sha256:0a1254df0519003d33fd4ab8ad26aff1154e50b3c93aa5ec978e83bf83ba084c`。各引擎对已安装镜像的 ID 表示可能不同，`--image` 使用本机 `docker image inspect --format '{{.Id}}' <镜像>` 的完整结果。

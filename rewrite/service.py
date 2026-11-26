@@ -43,6 +43,9 @@ def server(args):
     paths = {db.resolve() for db in databases}
     if len(paths)!=len(databases):
         raise ValueError("expected distinct component databases")
+    if args.component=="host-ops":
+        from .host_ops import private_state
+        private_state(args.db)
     with ExitStack() as stack:
         for path in sorted(paths):
             stack.enter_context(state_writer(path))
@@ -53,8 +56,9 @@ def serve(args,stack):
     identities = private_config(args.identities)
     if not isinstance(identities, dict) or not identities or any(
             not isinstance(k, str) or not k or not isinstance(v,str)
-            or not (v == "hermes" or (v.startswith(("worker/","trigger/","adapter/","ops/","platform/","approver/","handoff/"))
-                                     and v.split("/",1)[1]))
+            or not (args.component=="host-ops" or v == "hermes" or
+                    (v.startswith(("worker/","trigger/","adapter/","ops/","platform/","approver/","handoff/"))
+                     and v.split("/",1)[1]))
             for k,v in identities.items()):
         raise ValueError("invalid identity registration")
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -66,6 +70,9 @@ def serve(args,stack):
     public_output = nullcontext()
     if args.component == "router":
         listener = serve_router(Orders(args.db), identities, address, ctx)
+    elif args.component=="host-ops":
+        from .host_ops import listen, manifest
+        listener = listen(args.db,manifest(private_config(args.manifest)),identities,address,ctx,stack)
     elif args.component == "fixture-adapter":
         from .devloop import FixtureHost
         from .native_files import NativeFiles
@@ -174,14 +181,17 @@ def main():
 
     parser = argparse.ArgumentParser(description=__doc__)
     apps = parser.add_subparsers(dest="component",required=True)
-    for name in ("router","fixture-adapter","dsh-adapter","codex-adapter","worker"):
+    for name in ("router","fixture-adapter","dsh-adapter","codex-adapter","worker","host-ops"):
         component = apps.add_parser(name)
         for flag in ("identities","cert","key","db"):
             component.add_argument("--"+flag,required=True,type=Path)
         component.add_argument("--bind",default="127.0.0.1")
         component.add_argument("--port",type=int,default=0)
-        if name != "router":
+        if name not in ("router","host-ops"):
             component.add_argument("--worker-id",required=True)
+        if name=="host-ops":
+            component.add_argument("--manifest",required=True,type=Path,
+                                   help="owner-private map from service IDs to exact loaded user LaunchAgents")
         if name == "fixture-adapter":
             component.add_argument("--fixture-db",required=True,type=Path)
         if name in ("fixture-adapter","codex-adapter"):

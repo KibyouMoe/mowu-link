@@ -1,0 +1,63 @@
+{
+  "operation": {
+    "actor": "host-maintainer/router",
+    "after": {
+      "generation": "185861cf554b84c82fe25df685ff8f125109ffda0a7fd177993580a9cea4e4f1",
+      "label": "org.mowulink.test.router-634075c7-c36f-4d8a-b302-7f3862776900",
+      "pid": 82532,
+      "service": "router",
+      "started": "Thu Nov 26 21:35:27 2026",
+      "state": "running"
+    },
+    "before": {
+      "generation": "b0119dd2a0b4419bef63f5fb8212aeb547a2e5a786385809ad7146f84f25f545",
+      "label": "org.mowulink.test.router-634075c7-c36f-4d8a-b302-7f3862776900",
+      "pid": 81802,
+      "service": "router",
+      "started": "Thu Nov 26 21:35:26 2026",
+      "state": "running"
+    },
+    "reason": "isolate restart acceptance",
+    "request_id": "07ed83d2-70ac-4a49-89e7-cceee485981b",
+    "requested_at": "2026-11-26T13:35:26.527627+00:00",
+    "service": "router",
+    "settled_at": "2026-11-26T13:35:27.840945+00:00",
+    "state": "process_replaced"
+  },
+  "router_task_id": "dc70c3e8-e8ce-450f-9a02-0b3906c1cc93",
+  "unchanged_companion_pid": 81807,
+  "old_pid_gone": true,
+  "router_task_count": 1,
+  "maintenance_requests_applied": 1,
+  "changed_plist_rejected": true,
+  "different_loaded_arguments_rejected": true,
+  "receipt_reopened": true,
+  "stopped_job_recovery": {
+    "actor": "host-maintainer/stopped",
+    "after": {
+      "generation": "b783ad28ad84f767231b77e4566a18591f8601c9bc7ae385add5162797f16176",
+      "label": "org.mowulink.test.stopped-a1b15780-74cf-486d-86a4-e749cd252db5",
+      "pid": 82547,
+      "service": "stopped",
+      "started": "Thu Nov 26 21:35:27 2026",
+      "state": "running"
+    },
+    "before": {
+      "generation": "3436a729a6ef0e3c0d12badf8ddbb2fe960e4becc031136f91ba3e5551eabbe7",
+      "label": "org.mowulink.test.stopped-a1b15780-74cf-486d-86a4-e749cd252db5",
+      "pid": null,
+      "service": "stopped",
+      "started": null,
+      "state": "stopped"
+    },
+    "reason": "isolated recovery of a stopped job",
+    "request_id": "893e6d35-d98a-4d69-ad63-08da12d98205",
+    "requested_at": "2026-11-26T13:35:27.939072+00:00",
+    "service": "stopped",
+    "settled_at": "2026-11-26T13:35:28.056970+00:00",
+    "state": "process_started"
+  },
+  "transport": "TLS loopback",
+  "fixture": "three isolated macOS user LaunchAgents",
+  "successful_repeats": 8
+}

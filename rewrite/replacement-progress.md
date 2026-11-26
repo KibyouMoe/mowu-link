@@ -4,6 +4,10 @@
 
 ## 检查点与证据
 
+旧远程维护入口由 Router 共用凭据控制固定 launchd 白名单。现有溪流的 `gateway-restart` 说明明确引用该接口，Codex 运维说明也用它验证 `codexworker` 的标签与桌面进程是否同一来源。重做版改为独立、显式启用的 `host-ops` HTTPS 服务。只读身份能查清单，单服务维护身份才能对明确代际发起操作。目标表仅登记当前用户的已加载 LaunchAgent。运行期间 plist 改动与加载参数不符都使服务代际待核，拒绝操作。[维护入口](README.md#macos-独立维护入口)
+
+实际 macOS 临时 Router 收到一次维护请求，客户端主动断开后按原 UUID 查回。旧 PID 退出，新 PID 启动，另一测试服务的 PID 不变。新 Router 从原库查回同一待派工单，原建单幂等键仍只返回一张单。维护服务重开后原回执可读。同场跑了已加载停机项恢复。另用测试队列复验维护进程中途中断留下 `unconfirmed`，旧请求不会重跑。复跑 `python3 -B -m unittest -v rewrite.test_host_ops`。三个临时 LaunchAgent 已卸载，未接现役服务。[隔离运维证据](evidence/host-ops-launchd.json)
+
 没有原生题窗时，实际 DSH 与独立 Codex App Server 可通过 Agent 工具 `worker_ask_trainer` 发布独立题卡。发卡只登记原会话与原回合。选项、自填和逐题跳过回到同一会话的新回合；等待期间不占正式工单处理权。实测 DSH 忙时未写入，改到空闲后收到一次。Codex 原生已投但回执丢失时，重开 Worker 后只查原号。挂到空适配器库仍待核，使用原账本后查回单次原生收件并更新原卡。两端均未创建工单。宿主原生运行时、隔离 Worker HTTP 和 DSH 私有 IPC 实跑，模型与飞书用夹具。[独立题卡证据](evidence/standalone-trainer-questions.json)
 
 复跑 `python3 -B -m unittest -v rewrite.test_codex_app_server.CodexAppServer.test_native_tool_publishes_standalone_question_and_accepts_answer_once rewrite.test_dsh_native_loop.NativeLoop.test_dsh_standalone_question_defers_answer_while_native_session_is_busy`。同一原生调用或同轮的原请求号重试只留原卡。修改题文、在新回合重用显式请求号、错绑会话及非训练员点卡均有拒绝证据。故意提交原生题窗关闭凭据也不能关闭独立题。
