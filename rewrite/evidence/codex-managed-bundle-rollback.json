@@ -1,0 +1,30 @@
+{
+  "pending_snapshot_manifest_sha256": "bc8818b01b7ab4c94c51eb510f57c0842350b6a214f5025d0615ec2aae62c31d",
+  "held_snapshot_manifest_sha256": "39ef361f90d98c45805371d318f121b0091ad77ef0d9cda612111442f0f7c9ad",
+  "recovered_enrollment": {
+    "handoff_id": "6a206c59-8c9e-5a29-a408-ce54307a3861",
+    "previous_session": "01a217cd-3eda-7cc3-9edb-9d21c5a918be",
+    "session": "01a217cd-4045-7700-b1bd-f4f70184dcf1",
+    "state": "bound"
+  },
+  "task_id": "2b025d20-973c-4a09-9b88-4e0dc99adbfd",
+  "assignment_id": "f320f161-15d8-44f9-b60a-7f08b8d252ef",
+  "original_native_receipt": {
+    "delivery_id": "3fca893d-9317-4af2-8b2a-2985b06ae817",
+    "digest": "ab354ddd32b4d0286f2c1def869c10d37eec25c737867e0f53eaee590d88a187",
+    "native_id": "01a217cd-4409-72d1-b09a-a504d20c43d2",
+    "session": "01a217cd-4045-7700-b1bd-f4f70184dcf1",
+    "turn_id": "01a217cd-4401-71a2-9e46-f90c3c359433"
+  },
+  "held_audit_issues": [],
+  "report_turn_id": "01a217cd-4795-7033-9b08-041bc67b7520",
+  "native_tool_calls": [
+    "native_fixture_0",
+    "native_fixture_1"
+  ],
+  "manager_notice_id": "782359d2-ebe2-4cf1-9710-190ad8125935",
+  "rollback_after_trial_effect_refused": true,
+  "scope": "Actual isolated Codex App Server and Router/Worker. Same native profile, scripted model, no real Feishu.",
+  "previous_adapter_package_used": true,
+  "previous_adapter_revision": "4e7c646e060ceb4a3abf7430e0ac3f4b49a72f09"
+}

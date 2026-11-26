@@ -33,7 +33,7 @@ from .native_files import NativeFiles
 from .orders import Orders
 from .question_cards import Actions
 from .release_check import config, serve
-from .state_bundle import capture, filename, verify
+from .state_bundle import audit_handoff, capture, filename, restore, rollback, verify
 from .storage import Fault, encode, guid
 from .test_feishu_output import PlatformFixture
 from .test_feishu_inbound import PNG
@@ -46,6 +46,7 @@ from .worker_service import WorkerService
 
 CODEX = Path("/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex")
 GOAL_FIXTURE = "Finish the isolated goal check"
+KEEP_FORMAL_HELD = "Keep the isolated order held until an update"
 
 
 class Provider(BaseHTTPRequestHandler):
@@ -169,7 +170,8 @@ class Provider(BaseHTTPRequestHandler):
             arguments = {"text":"Use the first route?","options":[{"id":"go","label":"继续"}]}
             item = {"type":"function_call","id":"fc_question","name":"worker_ask","call_id":"native_question",
                     "arguments":encode(arguments)}
-        elif payload and payload.get("kind") in ("task","task_update","task_probe","question_answer") and not question and calls<2:
+        elif (payload and payload.get("kind") in ("task","task_update","task_probe","question_answer")
+                and payload.get("instructions")!=KEEP_FORMAL_HELD and not question and calls<2):
             arguments = {"task_id":payload["task_id"],"assignment_id":payload["assignment_id"],
                          "summary":"Isolated App Server result"}
             item = {"type":"function_call","id":"fc_fixture_"+str(calls),"name":"worker_report",
@@ -1651,6 +1653,162 @@ class CodexAppServer(unittest.TestCase):
         destination = os.environ.get("MOWULINK_MANAGED_SESSION_EVIDENCE")
         if destination:
             Path(destination).write_text(json.dumps(self.evidence,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
+
+    @unittest.skipUnless(shutil.which("openssl"),"isolated TLS certificate generator required")
+    def test_managed_bundle_restores_pending_enrollment_and_rolls_back_a_held_assignment(self):
+        root = Path(self.root).resolve()
+        profile,project,registry,source = (root/name for name in ("profile","workspace","sessions","source"))
+        for directory in (profile,project,registry,source):
+            directory.mkdir(mode=0o700)
+        self.local_profile(profile)
+        package = Path(__file__).resolve().parents[1]
+        original_package = os.environ.get("MOWULINK_MANAGED_ROLLBACK_PACKAGE")
+        provisioned = subprocess.run(self.provision_command(profile,project),cwd=package,capture_output=True,
+                                     text=True,timeout=30,check=True)
+        parent = json.loads(provisioned.stdout)["thread_id"]
+        cert,key = root/"adapter.crt",root/"adapter.key"
+        subprocess.run(["openssl","req","-x509","-newkey","rsa:2048","-nodes","-days","1","-subj","/CN=localhost",
+                        "-addext","subjectAltName=IP:127.0.0.1","-out",cert,"-keyout",key],
+                       capture_output=True,timeout=10,check=True)
+        rt,mgr,worker_auth,platform,callback = (guid() for _ in range(5))
+        roles = config(root,"adapter-roles.json",{worker_auth:"worker/oguri"})
+        worker_roles = {platform:"platform/oguri",callback:"adapter/oguri/"+parent}
+        callback_key = os.urandom(32)
+        keys = {"oguri":config(root,"callback-key.json",{"key":callback_key.hex()})}
+        labels = ("router:main","worker:oguri","agent:oguri","hermes:main","trigger:source")
+        paths = {label:source/filename(label) for label in labels}
+        Trigger(paths["trigger:source"],"snapshot-fixture")
+        clock = Clock()
+        manager_native = FixtureHost(root/"manager-native.db","isolated-manager")
+        manager_host = HostAdapter(root/"manager-host.db",manager_native,manager_native.session)
+        create = {"message_id":"om_snapshot_native_new","text":"/new"}
+        enrollment = []
+
+        @contextmanager
+        def station(state,native_dir,stage,*,lose_reply=False,code=package):
+            orders = Orders(state["router:main"],clock,1)
+            with running(serve_loopback(orders,{rt:"worker/oguri",mgr:"hermes"})) as router_url:
+                manager = HermesAdapter(state["hermes:main"],Client(router_url,mgr),manager_host,clock)
+                port = RemoteAdapter(None,parent)
+                worker = Worker(state["worker:oguri"],"oguri",Client(router_url,rt),port,clock=clock,
+                                session_callback_key=callback_key)
+                gateway = WorkerService(worker,clock)
+                if lose_reply:
+                    original = port.enroll_thread
+                    def lose_after_write(*args):
+                        enrollment.append(original(*args))
+                        raise Fault(503,"adapter_connection_unconfirmed",True)
+                    port.enroll_thread = lose_after_write
+                with running(gateway.listen(worker_roles,("127.0.0.1",0),None)) as url:
+                    receiver = config(root,"adapter-to-worker-"+stage+".json",{"url":url,"token":callback})
+                    flags = ("--worker-id","oguri","--session",parent,"--worker-connection",receiver,"--codex-binary",CODEX,
+                             "--codex-profile",profile,"--cwd",project,"--prepare-sessions","--managed-sessions-dir",native_dir)
+                    with serve(code,"codex-adapter",state["agent:oguri"],roles,cert,key,dict(os.environ),flags) as address:
+                        connection = Client(address,worker_auth,cert)
+                        for target in worker.resume_targets.values():
+                            target.client = connection
+                        gateway.step()
+                        yield gateway,manager,Client(url,platform)
+
+        def wait(gateway,predicate):
+            deadline = time.monotonic()+12
+            while True:
+                gateway.step()
+                value = predicate()
+                if value and not gateway.worker.adapter.busy():
+                    return value
+                if time.monotonic()>=deadline:
+                    self.fail("timed out waiting for isolated state: "+str(gateway.status()))
+                time.sleep(.04)
+
+        with station(paths,registry,"source",lose_reply=True) as (gateway,_manager,incoming):
+            with self.assertRaisesRegex(Fault,"adapter_connection_unconfirmed"):
+                incoming.request("POST","worker/command",create)
+            self.assertEqual(gateway.status()["handoff"]["state"],"frozen")
+        recorded, = enrollment
+        child = recorded["session"]
+        pending = root/"pending-snapshot"
+        sha = capture(paths,"a"*40,pending,registries={"oguri":registry})["manifest_sha256"]
+        audit, = audit_handoff(pending,sha)["workers"]
+        self.assertEqual(audit["native_session_pending"]["native_resume_operations"],1)
+        self.assertEqual(audit["native_session_pending"]["router_admission_handoffs"],1)
+        trial_dir = root/"restored-trial"
+        trial = restore(pending,sha,trial_dir,managed_keys=keys)
+        trial_registry = trial_dir/"native--oguri"
+        with station(trial,trial_registry,"restored-trial") as (gateway,manager,incoming):
+            self.assertEqual(gateway.worker.native_session_pin,child)
+            receipt = incoming.request("POST","worker/command",create)["receipt"]["binding_receipt"]
+            self.assertEqual(receipt,{"handoff_id":recorded["operation_id"],"previous_session":parent,
+                                       "session":child,"state":"bound"})
+            self.assertEqual(len(self.provider.observed),1)
+            tid = manager.create(guid(),"Retain held order",KEEP_FORMAL_HELD,"oguri")["task_id"]
+            gateway.step()
+            clock.advance(10)
+            def received_dispatch():
+                with gateway.worker.db.transaction() as db:
+                    row = db.execute("""SELECT frame FROM inbox i JOIN jobs j USING(delivery_id)
+                                        WHERE j.task_id=? AND j.host_state='received'""",(tid,)).fetchone()
+                return json.loads(row[0]) if row else None
+            frame = wait(gateway,received_dispatch)
+            aid = frame["payload"]["assignment_id"]
+            original = gateway.worker.adapter.lookup_delivery(frame["delivery_id"],{"kind":"task",**frame["payload"]},
+                                                               session=child)
+            self.assertEqual(gateway.worker.hold(),{"held_task_id":tid,"held_assignment_id":aid})
+            self.assertEqual(manager.inspect(tid)["task"]["state"],"working")
+            self.assertFalse(any(n["payload"].get("task_id")==tid for n in manager.router.frames(0)))
+        held_snapshot = root/"held-snapshot"
+        held_sha = capture(trial,"b"*40,held_snapshot,registries={"oguri":trial_registry})["manifest_sha256"]
+        held_audit, = audit_handoff(held_snapshot,held_sha)["workers"]
+        self.assertEqual(held_audit["issues"],[])
+        self.assertEqual(held_audit["native_session_pending"]["held_assignments"],1)
+        untouched_dir = root/"untouched-candidate"
+        untouched = restore(held_snapshot,held_sha,untouched_dir,managed_keys=keys)
+        back_dir = root/"rollback"
+        back = rollback(held_snapshot,held_sha,untouched,back_dir,
+                        registries={"oguri":untouched_dir/"native--oguri"},managed_keys=keys)
+        back_registry = back_dir/"native--oguri"
+        with station(back,back_registry,"rollback",code=Path(original_package) if original_package else package) as (gateway,manager,incoming):
+            self.assertEqual(gateway.worker.native_session_pin,child)
+            self.assertEqual(gateway.worker.hold(),{"held_task_id":tid,"held_assignment_id":aid})
+            self.assertEqual(incoming.request("POST","worker/command",create)["receipt"]["binding_receipt"],receipt)
+            self.assertTrue(gateway.worker.process(frame))
+            self.assertEqual(gateway.worker.adapter.lookup_delivery(frame["delivery_id"],{"kind":"task",**frame["payload"]},
+                                                                    session=child),original)
+            self.assertEqual(len(self.provider.observed),2)
+            task = manager.inspect(tid)["task"]
+            manager.update(guid(),tid,task["revision"],{"instructions":"Now return an isolated result."})
+            def result_if_ready():
+                detail = manager.inspect(tid)
+                return detail if detail["task"]["state"]=="completed_reported" else None
+            final = wait(gateway,result_if_ready)
+            self.assertEqual(final["last_report"]["assignment_id"],aid)
+            self.assertIsNone(gateway.worker.hold()["held_assignment_id"])
+            notice, = [n for n in manager.router.frames(0) if n["payload"].get("task_id")==tid]
+        refused = root/"refused-after-effect"
+        with self.assertRaisesRegex(ValueError,"trial state changed"):
+            rollback(held_snapshot,held_sha,back,refused,registries={"oguri":back_registry},managed_keys=keys)
+        self.assertFalse(refused.exists())
+        self.assertEqual(verify(held_snapshot,held_sha)["source_revision"],"b"*40)
+        with start_app_server(CODEX,profile,project) as rpc:
+            rpc.request("thread/resume",{"threadId":child,"cwd":str(project)})
+            holds,reported = AppServerHost(rpc,child).thread(child,include_turns=True)["turns"]
+        self.assertEqual(holds["id"],original["turn_id"])
+        inputs = [item["clientId"] for item in holds["items"] if item["type"]=="userMessage"]
+        self.assertEqual(inputs,["mowulink-"+frame["delivery_id"]])
+        calls = [item for item in reported["items"] if item["type"]=="dynamicToolCall" and item["tool"]=="worker_report"]
+        self.assertEqual(len(calls),2)
+        self.assertTrue(all(item["success"] for item in calls))
+        self.assertEqual(len(self.provider.observed),5)
+        self.evidence = {"pending_snapshot_manifest_sha256":sha,"held_snapshot_manifest_sha256":held_sha,
+            "recovered_enrollment":receipt,"task_id":tid,"assignment_id":aid,"original_native_receipt":original,
+            "held_audit_issues":held_audit["issues"],"report_turn_id":reported["id"],"native_tool_calls":[c["id"] for c in calls],
+            "manager_notice_id":notice["delivery_id"],"rollback_after_trial_effect_refused":not refused.exists(),
+            "scope":"Actual isolated Codex App Server and Router/Worker. Same native profile, scripted model, no real Feishu.",
+            "previous_adapter_package_used":bool(original_package),
+            "previous_adapter_revision":os.environ.get("MOWULINK_MANAGED_ROLLBACK_REVISION") if original_package else None}
+        output = os.environ.get("MOWULINK_MANAGED_BUNDLE_EVIDENCE")
+        if output:
+            Path(output).write_text(json.dumps(self.evidence,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
 
     def test_native_app_server_reconnect_recovers_input_before_w04_without_new_model_call(self):
         with isolated_app_server(self.root,self.origin) as rpc:

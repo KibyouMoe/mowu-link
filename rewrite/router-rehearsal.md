@@ -115,6 +115,31 @@ python3 -m rewrite.state_bundle rollback --snapshot ./snapshot --manifest-sha256
 
 版本级复跑为 `python3 -m rewrite.release_check --repository . --previous b31cee5da7c8dc74a76accdd78d8a6c5cb49484c --new 5de36ad66df26dc34fe3832ed14e77b1d9f19551`。两个已提交版本在各自新目录启动真实 Router，以专用临时 TLS 和身份验同一张待派单。旧包→新包→旧包后只查到原单一张，新试用库字节未变。该演练在 macOS 跑过；Windows 与跨机宿主尚待验收。
 
+### Codex 自动登记工位的恢复与回退
+
+先停止隔离 Router、Worker、适配器和该工位的原生 App Server，保留原生 profile 和已有连接配置。将工位 ID 与原登记目录的绝对路径写入 `registries.json`。将工位 ID 与原私有回调密钥文件的绝对路径写入本机 `managed-keys.json`。两份清单只填路径。
+
+```sh
+python3 -B -m rewrite.state_bundle capture --sources sources.json --managed-registries registries.json \
+  --revision "$SOURCE_SHA" --destination ./snapshot
+python3 -B -m rewrite.state_bundle verify --snapshot ./snapshot --manifest-sha256 "$MANIFEST_SHA256"
+python3 -B -m rewrite.state_bundle audit-handoff --snapshot ./snapshot --manifest-sha256 "$MANIFEST_SHA256"
+python3 -B -m rewrite.state_bundle restore --snapshot ./snapshot --manifest-sha256 "$MANIFEST_SHA256" \
+  --managed-keys managed-keys.json --destination ./trial
+```
+
+恢复后的适配器使用恢复出来的根账本，`--managed-sessions-dir` 指向试用目录下的 `native--<工位ID>`，`--session` 和原生 profile 继续用原配置。Worker 使用恢复后的账本和原 `--session-callback-key` 文件。快照带子会话 SQLite 和回调摘要，恢复时从原密钥重建私有登记文件。原生对话历史仍由宿主保存。开启了自动登记的快照每个工位对应一个登记目录。仍绑定其他外部适配器或有交接指向外部适配器时，先结束或核清交接。
+
+重开后先核同一个宿主会话、原派发和原生收件。待核登记应沿用原操作号，已持单应沿用原派发号。切换会话要通过 Worker 的 `/resume` 交接。返用前一版本时，停止试用写者，提供恢复输出的数据库清单作为 `trial.json`，以及试用登记目录清单 `trial-registries.json`。
+
+```sh
+python3 -B -m rewrite.state_bundle rollback --snapshot ./snapshot --manifest-sha256 "$MANIFEST_SHA256" \
+  --trial-sources trial.json --managed-registries trial-registries.json --managed-keys managed-keys.json \
+  --destination ./previous-state
+```
+
+回退核对试用库和所有子会话账本。若试用已写入成果、投递或其他状态，先逐笔核对并保留试用数据；旧快照回退会拒绝覆盖这段进展。独立 App Server 已实测从快照恢复丢失登记回执、让前一版适配器接回原持单并交件、拒绝丢弃试用成果。原生 profile 在同一台机器独立保存，模型为脚本驱动。[恢复与回退证据](evidence/codex-managed-bundle-rollback.json)
+
 ### Worker 和适配器逐个升级
 
 ```sh

@@ -8,7 +8,9 @@ from pathlib import Path
 import re
 import shutil
 import sqlite3
+from tempfile import TemporaryDirectory
 
+from . import state_bundle_managed as managed
 from .cutover import digest, output_directory, readonly
 from .storage import encode, guid, state_writer
 
@@ -106,12 +108,11 @@ def copy_private(src,dst):
 
 
 @contextmanager
-def locked(sources):
+def locked(sources,registries=None):
     validate_set(sources)
     with ExitStack() as stack:
         identities = set()
-        for label in sorted(sources):
-            path = Path(sources[label])
+        def lock_database(path,role):
             if not path.is_absolute() or path.is_symlink() or not path.is_file():
                 raise ValueError("expected absolute regular component database paths")
             stat = path.stat()
@@ -127,27 +128,27 @@ def locked(sources):
                 raise ValueError("expected closed rollback-journal databases")
             # Lock all selected files before copying the first. A single busy owner aborts staging.
             db.execute("BEGIN EXCLUSIVE")
-            health(db,component(label)[0])
-        yield
+            health(db,role)
+        for label in sorted(sources):
+            lock_database(Path(sources[label]),component(label)[0])
+        yield managed.collect(sources,registries or {},stack,lock_database)
 
 
-def capture(sources,revision,destination):
+def capture(sources,revision,destination,*,registries=None):
     check_revision(revision)
     manifest = {"format":1,"snapshot_id":guid(),"source_revision":revision,"files":{}}
-    with output_directory(destination) as stage, locked(sources):
+    with output_directory(destination) as stage, locked(sources,registries) as inventory:
         for label,source in sorted(sources.items()):
             path = Path(source)
-            with closing(readonly(path)) as db:
-                tables = {row[0] for row in db.execute("SELECT name FROM sqlite_schema WHERE type='table'")}
-                if "codex_managed_session_root" in tables or ("managed_native_sessions" in tables and
-                        db.execute("SELECT 1 FROM managed_native_sessions LIMIT 1").fetchone()):
-                    raise ValueError("state file has an external native session registry: "+label)
             dest = stage/filename(label)
             copy_private(path,dest)
             checksum = digest(dest)
             if checksum != digest(path):
                 raise ValueError("state file changed during backup")
             manifest["files"][label] = {"size":dest.stat().st_size,"sha256":checksum}
+        if inventory:
+            managed.copy_ledgers(registries,inventory,stage,copy_private)
+            manifest.update(format=2,managed_native=inventory)
         metadata = stage/"manifest.json"
         metadata.write_text(encode(manifest),encoding="utf-8")
         fingerprint = digest(metadata)
@@ -161,36 +162,49 @@ def verify(snapshot,expected):
             or digest(manifest_file) != expected):
         raise ValueError("snapshot manifest does not match the recorded digest")
     manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
-    if manifest.get("format") != 1 or not isinstance(manifest.get("files"),dict):
+    if manifest.get("format") not in (1,2) or not isinstance(manifest.get("files"),dict):
         raise ValueError("unsupported snapshot")
     check_revision(manifest["source_revision"])
     validate_set(manifest["files"])
-    expected_files = {"manifest.json"} | {filename(label) for label in manifest["files"]}
+    inventory = manifest.get("managed_native",{})
+    if (not isinstance(inventory,dict) or bool(inventory)!=(manifest["format"]==2)
+            or any("agent:"+wid not in manifest["files"] for wid in inventory)):
+        raise ValueError("invalid managed snapshot members")
+    names = {wid:managed.registry_name(wid) for wid in inventory}
+    expected_files = {"manifest.json"} | {filename(label) for label in manifest["files"]} | set(names.values())
     if {p.name for p in snapshot.iterdir()} != expected_files:
         raise ValueError("missing or unexpected snapshot member")
+    sources = {label:snapshot/filename(label) for label in manifest["files"]}
     for label,entry in manifest["files"].items():
-        path = snapshot/filename(label)
+        path = sources[label]
         with closing(readonly(path)) as db:
             if path.stat().st_size != entry["size"] or digest(path) != entry["sha256"]:
                 raise ValueError("snapshot bytes do not match: "+label)
             health(db,component(label)[0])
+    directories = {wid:managed.private_registry((snapshot/name).absolute()) for wid,name in names.items()}
+    managed.validate(sources,inventory,directories,health=health)
     return manifest
 
 
-def restore_files(snapshot,expected,manifest,stage):
+def restore_files(snapshot,expected,manifest,stage,*,destination=None,managed_keys=None):
     for label,entry in manifest["files"].items():
         name = filename(label)
         copy_private(snapshot/name,stage/name)
         if digest(stage/name) != entry["sha256"]:
             raise ValueError("restored bytes do not match: "+label)
+    inventory = manifest.get("managed_native",{})
+    paths = {wid:snapshot/managed.registry_name(wid) for wid in inventory}
+    managed.copy_ledgers(paths,inventory,stage,copy_private)
     if verify(snapshot,expected) != manifest:
         raise ValueError("snapshot changed during restore")
+    managed.restore_enrollments(stage,destination,inventory,managed_keys or {},
+                                lambda wid:stage/filename("agent:"+wid))
 
 
-def restore(snapshot,expected,destination):
+def restore(snapshot,expected,destination,*,managed_keys=None):
     manifest = verify(snapshot,expected)
     with output_directory(destination) as stage:
-        restore_files(snapshot,expected,manifest,stage)
+        restore_files(snapshot,expected,manifest,stage,destination=destination,managed_keys=managed_keys)
     return {label:str(destination/filename(label)) for label in manifest["files"]}
 
 
@@ -198,6 +212,18 @@ def pending_counts(db,checks):
     tables = {row[0] for row in db.execute("SELECT name FROM sqlite_schema WHERE type='table'")}
     return {name:db.execute(query).fetchone()[0] if required<=tables else None
             for name,(required,query) in checks.items()}
+
+
+def agent_pending(paths):
+    combined = {}
+    for path in paths:
+        with closing(readonly(path)) as db:
+            totals = pending_counts(db,AGENT_NATIVE_PENDING)
+            totals.update({k:v for k,v in pending_counts(db,OPTIONAL_AGENT_PENDING).items() if v is not None})
+        for key,value in totals.items():
+            previous = combined.get(key,0)
+            combined[key] = None if value is None or previous is None else previous+value
+    return combined
 
 
 def audit_handoff(snapshot,expected):
@@ -249,11 +275,13 @@ def audit_handoff(snapshot,expected):
             problems.append("worker_session_mismatch")
         if pending:
             problems.append("report_receipt_pending")
-        if local and not adapter_has_input(snapshot,wid,local,bound[0] if bound else None):
+        root = snapshot/filename("agent:"+wid)
+        group = manifest.get("managed_native",{}).get(wid,{"children":{}})
+        child_ledgers = {sid:snapshot/managed.registry_name(wid)/(sid+".sqlite3") for sid in group["children"]}
+        bound_session = bound[0] if bound else None
+        if local and not adapter_has_input(child_ledgers.get(bound_session,root),local,bound_session):
             problems.append("adapter_receipt_unconfirmed")
-        with closing(readonly(snapshot/filename("agent:"+wid))) as db:
-            session_pending.update(pending_counts(db,AGENT_NATIVE_PENDING))
-            session_pending.update({k:v for k,v in pending_counts(db,OPTIONAL_AGENT_PENDING).items() if v is not None})
+        session_pending.update(agent_pending([root,*child_ledgers.values()]))
         if "feishu:"+wid in labels:
             with closing(readonly(snapshot/filename("feishu:"+wid))) as db:
                 session_pending.update(pending_counts(db,FEISHU_NATIVE_PENDING))
@@ -278,10 +306,10 @@ def audit_handoff(snapshot,expected):
             "issues":issues,"needs_review":bool(issues or cleanup)}
 
 
-def adapter_has_input(snapshot,wid,job,session):
+def adapter_has_input(path,job,session):
     if job["host_state"]!="received" or not session:
         return False
-    with closing(readonly(snapshot/filename("agent:"+wid))) as db:
+    with closing(readonly(path)) as db:
         row = db.execute("SELECT payload,digest,native_id,receipt FROM intents WHERE delivery_id=? AND session=?",
                          (job["delivery_id"],session)).fetchone()
         if not row or not row["receipt"] or not row["native_id"]:
@@ -298,13 +326,15 @@ def adapter_has_input(snapshot,wid,job,session):
             and payload.get("assignment_id")==job["assignment_id"])
 
 
-def stage_native_handoff(snapshot,expected,worker_id,source_session,target_session,destination):
+def stage_native_handoff(snapshot,expected,worker_id,source_session,target_session,destination,*,managed_keys=None):
     worker_label,adapter_label = "worker:"+worker_id,"agent:"+worker_id
     component(worker_label)
     if source_session==target_session or not all(
             re.fullmatch(r"[A-Za-z0-9_.:-]{1,200}",session) for session in (source_session,target_session)):
         raise ValueError("expected two distinct native session identifiers")
     manifest = verify(snapshot,expected)
+    if worker_id in manifest.get("managed_native",{}):
+        raise ValueError("restore managed sessions first and use the Worker native handoff")
     if worker_label not in manifest["files"]:
         raise ValueError("worker absent from snapshot")
     audit = audit_handoff(snapshot,expected)
@@ -319,7 +349,7 @@ def stage_native_handoff(snapshot,expected,worker_id,source_session,target_sessi
             if not pin or pin[0]!=source_session:
                 raise ValueError("original native binding unconfirmed: "+label)
     with output_directory(destination) as stage:
-        restore_files(snapshot,expected,manifest,stage)
+        restore_files(snapshot,expected,manifest,stage,destination=destination,managed_keys=managed_keys)
         worker_db = stage/filename(worker_label)
         with closing(sqlite3.connect(worker_db,timeout=0)) as db, db:
             updated = db.execute("UPDATE native_binding SET session=? WHERE slot=1 AND session=?",
@@ -334,15 +364,24 @@ def stage_native_handoff(snapshot,expected,worker_id,source_session,target_sessi
     return result
 
 
-def rollback(snapshot,expected,trial,destination):
+def rollback(snapshot,expected,trial,destination,*,registries=None,managed_keys=None):
     manifest = verify(snapshot,expected)
     if set(trial) != set(manifest["files"]):
         raise ValueError("trial component list differs from snapshot")
-    with locked(trial):
+    with locked(trial,registries) as inventory, TemporaryDirectory(prefix="mowulink-rollback-check-") as tmp:
+        if inventory!=manifest.get("managed_native",{}):
+            raise ValueError("trial state changed; reconcile managed native sessions before rollback")
         for label,path in trial.items():
-            if digest(Path(path)) != manifest["files"][label]["sha256"]:
+            expected_digest = manifest["files"][label]["sha256"]
+            wid = label.removeprefix("agent:")
+            if label.startswith("agent:") and wid in inventory:
+                staged = Path(tmp)/filename(label)
+                copy_private(snapshot/filename(label),staged)
+                managed.relocate_root(staged,Path(registries[wid]).resolve())
+                expected_digest = digest(staged)
+            if digest(Path(path)) != expected_digest:
                 raise ValueError("trial state changed; reconcile before rollback: "+label)
-        return restore(snapshot,expected,destination)
+        return restore(snapshot,expected,destination,managed_keys=managed_keys)
 
 
 def main():
@@ -350,6 +389,7 @@ def main():
     ops = parser.add_subparsers(dest="op",required=True)
     backup = ops.add_parser("capture")
     backup.add_argument("--sources",type=Path,required=True,help="role:instance to absolute database path, JSON")
+    backup.add_argument("--managed-registries",type=Path,help="Worker ID to private native registry directory, JSON")
     backup.add_argument("--revision",required=True)
     backup.add_argument("--destination",type=Path,required=True)
     for op in ("verify","restore","rollback","audit-handoff","stage-native-handoff"):
@@ -358,14 +398,25 @@ def main():
         p.add_argument("--manifest-sha256",required=True)
         if op=="rollback":
             p.add_argument("--trial-sources",type=Path,required=True)
+            p.add_argument("--managed-registries",type=Path,help="Worker ID to the trial's native registry directory, JSON")
+        if op in ("restore","rollback","stage-native-handoff"):
+            p.add_argument("--managed-keys",type=Path,help="Worker ID to the original private callback key file, JSON")
         if op=="stage-native-handoff":
             for field in ("worker-id","source-session","target-session"):
                 p.add_argument("--"+field,required=True)
         if op in ("restore","rollback","stage-native-handoff"):
             p.add_argument("--destination",type=Path,required=True)
     args = parser.parse_args()
+    def optional_map(flag):
+        path = getattr(args,flag,None)
+        data = json.loads(path.read_text()) if path is not None else {}
+        if not isinstance(data,dict) or not all(isinstance(value,str) and Path(value).is_absolute() for value in data.values()):
+            parser.error("expected a JSON map to absolute paths")
+        return data
+
     if args.op=="capture":
-        result = capture(json.loads(args.sources.read_text()),args.revision,args.destination)
+        result = capture(json.loads(args.sources.read_text()),args.revision,args.destination,
+                         registries=optional_map("managed_registries"))
     elif args.op=="verify":
         manifest = verify(args.snapshot,args.manifest_sha256)
         result = {"snapshot_id":manifest["snapshot_id"],"components":len(manifest["files"])}
@@ -373,11 +424,13 @@ def main():
         result = audit_handoff(args.snapshot,args.manifest_sha256)
     elif args.op=="stage-native-handoff":
         result = stage_native_handoff(args.snapshot,args.manifest_sha256,args.worker_id,
-                                      args.source_session,args.target_session,args.destination)
+                                      args.source_session,args.target_session,args.destination,
+                                      managed_keys=optional_map("managed_keys"))
     elif args.op=="rollback":
-        result = rollback(args.snapshot,args.manifest_sha256,json.loads(args.trial_sources.read_text()),args.destination)
+        result = rollback(args.snapshot,args.manifest_sha256,json.loads(args.trial_sources.read_text()),args.destination,
+                          registries=optional_map("managed_registries"),managed_keys=optional_map("managed_keys"))
     else:
-        result = restore(args.snapshot,args.manifest_sha256,args.destination)
+        result = restore(args.snapshot,args.manifest_sha256,args.destination,managed_keys=optional_map("managed_keys"))
     print(encode(result))
 
 

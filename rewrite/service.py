@@ -13,6 +13,7 @@ from threading import Thread
 from .orders import Orders
 from .adapter import HostAdapter
 from .host_wire import RemoteAdapter, serve_adapter
+from .managed_sessions import session_callback_key
 from .messages import valid_guid
 from .storage import Fault, StateWriterBusy, encode, require, state_writer
 from .trigger import Trigger, archive_status
@@ -127,12 +128,7 @@ def serve(args,stack):
                 raise ValueError("expected an explicit session-to-connection map")
             targets = {session:RemoteAdapter(connection(args.resume_targets.parent/Path(config)),session)
                        for session,config in entries.items()}
-        session_key = None
-        if args.session_callback_key:
-            key = private_config(args.session_callback_key)
-            require(isinstance(key,dict) and set(key)=={"key"} and isinstance(key["key"],str)
-                    and re.fullmatch(r"[a-f0-9]{64}",key["key"]),422,"invalid_session_callback_key")
-            session_key = bytes.fromhex(key["key"])
+        session_key = session_callback_key(args.session_callback_key) if args.session_callback_key else None
         worker = Worker(args.db,args.worker_id,connection(args.router_connection),
                         RemoteAdapter(connection(args.adapter_connection),args.adapter_session),
                         resume_targets=targets,session_callback_key=session_key)

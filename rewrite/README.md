@@ -184,7 +184,7 @@ DSH 历史会话在宿主插件中设 `resume_on_handoff: true`，并以 `dsh-ad
 
 要在隔离工位启用自动换绑，适配器同时传入 `--managed-sessions-dir`，路径为已有的绝对私有目录（POSIX 权限 `0700`），Worker 传入 `--session-callback-key`，其文件为仅所有者可读写的 JSON，包含一个名为 `key` 的 32 字节随机十六进制密钥。起始适配器仍由 `--adapter-session` 固定，起始回调也仍绑定该会话。每个新会话取得单独回调身份，只有当前会话可提交原生回调。`/new` 和 `/clear` 新开会话，`/fork` 保留父会话历史。Router 先确认暂停派发，Worker 才准备、登记并启用新会话。确认新绑定后才恢复派发。原飞书消息重投返回原绑定回执，旧会话可用 `/resume 会话ID` 切回。
 
-登记回执丢失时，按原操作号查回已登记会话。原生创建结果未到且没有确认的会话 ID 时，保留本次交接待核，不重发创建。重开后只恢复 Worker 已确认绑定的会话。登记目录包含子会话账本和回调身份，目前五组件离线快照无法完整收录该目录，检测到这类工位会拒绝打包。
+登记回执丢失时，按原操作号查回已登记会话。原生创建结果未到且没有确认的会话 ID 时，保留本次交接待核，不重发创建。重开后只恢复 Worker 已确认绑定的会话。离线备份需明确提供登记目录，恢复用原私有密钥重建回调身份。[自动登记工位的恢复与回退](router-rehearsal.md#codex-自动登记工位的恢复与回退)
 
 复跑 `python3 -B -m unittest -v rewrite.test_codex_app_server.CodexAppServer.test_managed_native_commands_bind_without_manual_enrollment_and_restore`。使用已安装的原生 App Server，以及测试飞书消息和本地脚本模型。未使用现役账号或会话。[原生自动换绑证据](evidence/codex-managed-native-sessions.json) · [原生会话准备与显式接入证据](evidence/codex-native-thread-preparation.json)
 

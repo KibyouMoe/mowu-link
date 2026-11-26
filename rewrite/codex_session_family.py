@@ -1,13 +1,7 @@
 """Operate explicitly enrolled native threads through one dedicated App Server."""
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
-import json
-import os
-from pathlib import Path
 from queue import Empty, Queue
-import re
-import stat
-from tempfile import NamedTemporaryFile
 from threading import Event, RLock, Thread
 import time
 
@@ -16,16 +10,9 @@ from .codex_activation import CodexActivation, pinned_thread
 from .codex_app_server import AppServerHost, worker_callbacks
 from .codex_display import CodexDisplay
 from .codex_thread_preparation import CodexThreadPreparation
-from .messages import valid_guid
+from .managed_sessions import FAMILY_SCHEMA, enrollment_fields, private_registry, read_enrollment, write_enrollment
 from .native_files import NativeFiles
-from .storage import Database, Fault, encode, require, state_writer
-
-
-FAMILY_SCHEMA = """
-CREATE TABLE IF NOT EXISTS codex_managed_session_root(
-    slot INTEGER PRIMARY KEY CHECK(slot=1), session TEXT NOT NULL, directory TEXT NOT NULL
-);
-"""
+from .storage import Database, Fault, require, state_writer
 
 
 class SessionEvents:
@@ -47,23 +34,10 @@ class Port:
     events: SessionEvents
 
 
-def callback_parameters(document):
-    require(isinstance(document,dict) and set(document)=={"source","operation_id","session","callback_token"},
-            422,"invalid_native_enrollment")
-    source,operation,session,token = (document[k] for k in ("source","operation_id","session","callback_token"))
-    require(all(valid_guid(value) for value in (source,operation,session)) and source!=session
-            and isinstance(token,str) and re.fullmatch(r"[a-f0-9]{64}",token),422,"invalid_native_enrollment")
-    return source,operation,session,token
-
-
 class CodexSessionFamily:
     def __init__(self,rpc,worker,args):
         self.rpc,self.worker,self.args = rpc,worker,args
-        self.workspace,self.directory = args.cwd.resolve(),args.managed_sessions_dir
-        info = self.directory.lstat()
-        require(self.directory.is_absolute() and self.directory.is_dir() and not self.directory.is_symlink()
-                and (os.name!="posix" or (not info.st_mode & 0o077 and info.st_uid==os.getuid())),
-                403,"private_session_registry_required")
+        self.workspace,self.directory = args.cwd.resolve(),private_registry(args.managed_sessions_dir)
         self.resources = ExitStack()
         self.ports = {}
         self.lock = RLock()
@@ -92,18 +66,8 @@ class CodexSessionFamily:
     def _metadata_path(self,session):
         return self.directory/(session+".json")
 
-    def _read(self,path):
-        with os.fdopen(os.open(path,os.O_RDONLY|getattr(os,"O_NOFOLLOW",0)),"rb") as stream:
-            info = os.fstat(stream.fileno())
-            require(stat.S_ISREG(info.st_mode) and not path.is_symlink()
-                    and (os.name!="posix" or (not info.st_mode & 0o077 and info.st_uid==os.getuid())),
-                    403,"private_session_registry_required")
-            document = json.load(stream)
-        require(callback_parameters(document)[2]==path.stem,409,"native_enrollment_conflict")
-        return document
-
     def _validate(self,document):
-        source,operation,session,token = callback_parameters(document)
+        source,operation,session,token = enrollment_fields(document)
         original = self.ports.get(source)
         require(original and original.preparation.prepared(operation).get("session")==session,
                 409,"native_enrollment_not_prepared")
@@ -124,20 +88,10 @@ class CodexSessionFamily:
             self._validate(document)
             path = self._metadata_path(session)
             if path.exists():
-                require(self._read(path)==document,409,"native_enrollment_conflict")
+                require(read_enrollment(path)==document,409,"native_enrollment_conflict")
             else:
                 require(not path.is_symlink() and session not in self.ports,409,"native_enrollment_conflict")
-                stream = NamedTemporaryFile(mode="w",encoding="utf-8",dir=self.directory,
-                                            prefix=".pending-",delete=False)
-                scratch = Path(stream.name)
-                try:
-                    with stream:
-                        stream.write(encode(document))
-                        stream.flush()
-                        os.fsync(stream.fileno())
-                    os.replace(scratch,path)
-                finally:
-                    scratch.unlink(missing_ok=True)
+                write_enrollment(path,document)
             if session not in self.ports:
                 self._register(session,callback_token)
         return {"operation_id":operation_id,"session":session,"state":"enrolled"}
@@ -174,12 +128,15 @@ class CodexSessionFamily:
                 db.execute("INSERT OR IGNORE INTO codex_managed_session_root VALUES (1,?,?)",expected)
                 binding = db.execute("SELECT session,directory FROM codex_managed_session_root WHERE slot=1").fetchone()
                 require(tuple(binding)==expected,409,"native_session_registry_changed")
-            waiting = [self._read(path) for path in sorted(self.directory.glob("*.json"))]
+            waiting = [read_enrollment(path) for path in sorted(self.directory.glob("*.json"))]
+            registered = {row["session"]+".sqlite3" for row in waiting}
+            require(all(path.name in registered for path in self.directory.glob("*.sqlite3")),
+                    409,"native_registry_membership_changed")
             # With children present, only the Worker knows which binding may be resumed.
             self.make_port(self.args.session,self.args.db,self.worker,cold=bool(waiting),
                            resources=self.resources)
             while waiting:
-                ready = [row for row in waiting if callback_parameters(row)[0] in self.ports]
+                ready = [row for row in waiting if enrollment_fields(row)[0] in self.ports]
                 require(ready,409,"native_enrollment_parent_unavailable")
                 for row in ready:
                     session,token = self._validate(row)

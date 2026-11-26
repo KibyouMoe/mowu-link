@@ -1,10 +1,10 @@
 """Switch a Worker's binding only after the Router and native host confirm it."""
-import hashlib
 import hmac
 from urllib.error import URLError
 from uuid import NAMESPACE_URL, uuid5
 
 from . import worker_catalog, worker_handoff
+from .managed_sessions import derive_callback, token_digest
 from .messages import valid_guid
 from .storage import Fault, encode, require
 
@@ -36,13 +36,7 @@ CREATION = {"/new":"new","/clear":"new","/fork":"fork"}
 
 
 def callback_token(worker,session,operation_id):
-    require(worker.session_callback_key,409,"managed_session_key_required")
-    payload = encode(["native-session-callback",worker.worker_id,session,operation_id]).encode("utf-8")
-    return hmac.new(worker.session_callback_key,payload,"sha256").hexdigest()
-
-
-def token_digest(token):
-    return hashlib.sha256(token.encode("ascii")).hexdigest()
+    return derive_callback(worker.session_callback_key,worker.worker_id,session,operation_id)
 
 
 def restore_ports(worker,db):

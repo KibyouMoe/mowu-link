@@ -16,7 +16,7 @@
 | Hermes Event、Notify、Info 与 Feishu 提示 | C01–C03、H01–H02 | 真实隔离 Hermes 插件与本地会话，先提示后交正文。Notify 空闲 10 秒逐条，Info 未唤醒。平台使用飞书 SDK 或服务器替身。 | 独立线上测试身份、真实 Feishu 消息号与客户端侧时间对证。 |
 | 旧 Trigger 订阅、历史、策略 | 来源实例游标、离线归档和只读积压查询 | 现役 0.7.0 只读盘点可见一个 active 订阅，复核时未读为零，另一时间仍有新入站。旧历史、等级、订阅和回执已在离线副本复跑并逐字节回退。新 CLI 已在隔离 TLS 上核对 T04 回执丢失、C02 乱序及重开后计数。 | 活跃消费者和旧待发送队列切换窗口；其他部署是否有需保留的规则；旧订阅开关的实际调用者。 |
 | 同伴通信、附件、旧聊天 | Worker 私聊、Router 授权附档与历史、旧飞书私聊离线导出 | 隔离 Router 验接收方、重复回执、长文、附件摘要。同机实际 DSH 与 Codex App Server 已通过原生工具互发图文和关联回信，两端模型为本地脚本。旧同伴记录仅原参与人查询，旧飞书私聊可在离线副本按工位分页导出。 | 真实授权的两个测试工位互发；旧飞书私聊档的实际保留范围和仍使用旁听接口的消费者另验。 |
-| 进程启动、版本回退与历史保全 | `rewrite.service`、`release_check`、`codex_release_check`、`state_bundle`、`cutover` | 两版 Router 与 Worker 分步安装和回退。在实际独立 Codex App Server 和脚本模型上，三轮保留原会话、收件与单次待验成果。七库恢复、旧工单与附件、受审阅的新增未派单可回灌。带结果的新库已核旧新单号、附件和回退拒绝。 | 已派发或已有结果如何经审核移交原旧端；跨物理设备、Windows 启动和真实服务的授权窗口。 |
+| 进程启动、版本回退与历史保全 | `rewrite.service`、`release_check`、`codex_release_check`、`state_bundle`、`cutover` | 两版 Router 与 Worker 分步安装和回退。独立 Codex App Server 与脚本模型已核原会话、收件与单次待验成果，也从多会话快照恢复丢失回执的登记，前一版适配器接回同一持单。试用已交件后拒绝回退到旧快照。七库恢复、旧工单与附件、受审阅的新增未派单可回灌。 | 已派发或已有结果如何经审核移交原旧端；真实 profile 跨物理设备、Windows 启动和真实服务的授权窗口。 |
 
 ## Worker 篇 A01–A11
 
@@ -40,7 +40,7 @@
 | --- | --- | --- |
 | 通用 Worker | `/help`、`/start`、`/commands`、`/status`、`/list` 测试平台端已核。原消息号按原回执重投。DSH 与独立 Codex App Server 通过原生 `/queue` 顺序与丢回执查证。 | 实际 Feishu 私聊的所有指令入口与交互。 |
 | DSH | `/context`、`/model`、`/effort`、`/queue`、`/goal`、`/compact`、`/stop` 有 SDK 或真循环证据。`/resume` 可浏览、搜索与按编号切到已运行的独立 DSH。已配置的 DSH 冷会话可在冻结派发后恢复，丢回执按原号查回，原生 Agent 两次报成果只留一条待验通知。 | 真实飞书操作、`/new`、`/fork`、新会话初始模型与思考强度、前台阻塞题、原生清理凭据。 |
-| Codex Desktop 与独立 App Server | Desktop 真实独立会话收到一条正式单，重投仍一条。独立原生 App Server 接到本地脚本模型的动态工具调用，实际完成 W04，重试回同一结果。`/model`、`/effort`、`/context` 与 `/stop` 已核原生回包。独立只读工位从飞书测试消息经 `/new`、`/clear`、`/fork` 自动登记和换绑，原消息重试复用同一会话，丢回执和重开皆已实测。原生分叉的父会话历史没有成为子会话新收件。 | Desktop 测试项目未列出 `worker_report`，默认 App Server 测试 profile 无登录。两条路径的真实模型 W04 仍需各自的授权测试条件。真实账号的请求强度、跨提供方选择、真实飞书操作、Desktop 冷会话。自动登记目录须纳入离线迁移与回退。 |
+| Codex Desktop 与独立 App Server | Desktop 真实独立会话收到一条正式单，重投仍一条。独立原生 App Server 接到本地脚本模型的动态工具调用，实际完成 W04，重试回同一结果。`/model`、`/effort`、`/context` 与 `/stop` 已核原生回包。独立只读工位从飞书测试消息经 `/new`、`/clear`、`/fork` 自动登记和换绑，原消息重试复用同一会话，丢回执和重开皆已实测。原生分叉的父会话历史没有成为子会话新收件。自动登记目录已纳入离线迁移与回退。 | Desktop 测试项目未列出 `worker_report`，默认 App Server 测试 profile 无登录。两条路径的真实模型 W04 仍需各自的授权测试条件。真实账号的请求强度、跨提供方选择、真实飞书操作、Desktop 冷会话。 |
 | Antigravity | 已核安装版本 2.32.1 及官方会话钩子、转录、MCP 入口。CLI 可克隆 App 对话供独立宿主使用，Remote Control 提供人工访问。 | 指定原桌面会话的后台唤醒、停止、真实 Gemini 回报及读写验收。CLI 或远程托管须先确认允许改用独立宿主。[兼容性核对](antigravity-compatibility.md) |
 | 授权和维护 | 认证的 Router/Worker/适配器隔离已验证；普通题卡不能执行原生授权。 | 旧 `/approvals`、`/commands`、`/ops/services` 中实际仍在使用的入口，与宿主授权逐项验证。 |
 

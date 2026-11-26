@@ -1,6 +1,10 @@
 from contextlib import closing, contextmanager
+import json
+import os
 from pathlib import Path
 import sqlite3
+import subprocess
+import sys
 import tempfile
 from threading import Thread
 import unittest
@@ -11,8 +15,9 @@ from .feishu_inbound import Inbound
 from .feishu_output import Views
 from .hermes import HermesAdapter
 from .codex_thread_preparation import SCHEMA as CODEX_PREPARATION_SCHEMA
-from .codex_session_family import FAMILY_SCHEMA
+from .managed_sessions import FAMILY_SCHEMA, derive_callback, read_enrollment, token_digest, write_enrollment
 from .orders import Orders
+from .release_check import config
 from .state_bundle import audit_handoff, capture, filename, restore, rollback, stage_native_handoff, validate_set, verify
 from .storage import Database, StateWriterBusy, encode, guid, state_writer
 from .test_feishu_output import PlatformFixture
@@ -278,10 +283,103 @@ class Bundle(unittest.TestCase):
             root = Database(self.sources["agent:oguri"],FAMILY_SCHEMA)
             with root.transaction() as db:
                 db.execute("INSERT INTO codex_managed_session_root VALUES (1,?,?)",
-                           (self.native.session,str(self.root/"private-session-directory")))
-        with self.assertRaisesRegex(ValueError,"external native session registry: agent:oguri"):
+                           (guid(),str(self.root/"private-session-directory")))
+        with self.assertRaisesRegex(ValueError,"external native session registry"):
             capture(self.sources,self.revision,self.snapshot)
         self.assertFalse(self.snapshot.exists())
+
+    def test_managed_bundle_preserves_lineage_and_can_only_rollback_unchanged_ledgers(self):
+        def command(*args):
+            result = subprocess.run([sys.executable,"-B","-m","rewrite.state_bundle",*args],
+                                    cwd=Path(__file__).resolve().parents[1],capture_output=True,text=True,
+                                    check=True,timeout=15)
+            return json.loads(result.stdout)
+
+        with self.stack(self.sources):
+            pass
+        anchor,child,op = guid(),guid(),guid()
+        key = os.urandom(32)
+        token = derive_callback(key,"oguri",child,op)
+        keys = {"oguri":config(self.root,"original-key.json",{"key":key.hex()})}
+        wrong = {"oguri":config(self.root,"unrelated-key.json",{"key":os.urandom(32).hex()})}
+        directory = self.root/"registry"
+        directory.mkdir(mode=0o700)
+        root = self.root/"managed-agent.sqlite3"
+        child_db = directory/(child+".sqlite3")
+        registry = {"oguri":directory}
+        sources = dict(self.sources,**{"agent:oguri":root})
+        HostAdapter(root,None,anchor)
+        HostAdapter(child_db,None,child)
+        with Database(root,FAMILY_SCHEMA+CODEX_PREPARATION_SCHEMA).transaction() as db:
+            db.execute("INSERT INTO codex_managed_session_root VALUES (1,?,?)",(anchor,str(directory.resolve())))
+            proof = {"state":"prepared","source_session":anchor,"operation_id":op,"kind":"new",
+                     "session":child,"parent_session":None}
+            db.execute("INSERT INTO codex_thread_preparations VALUES (?,?,?,?,?,'prepared',?,?)",
+                       (op,anchor,"new","New isolated session","{}",child,encode(proof)))
+        with Database(sources["worker:oguri"],"").transaction() as db:
+            db.execute("INSERT INTO native_resume VALUES (?,?,?,?,?,?,'done')",("test","/new","/new",op,anchor,child))
+            db.execute("INSERT INTO managed_native_sessions VALUES (?,?,?,?)",(child,anchor,op,token_digest(token)))
+        enrollment = directory/(child+".json")
+        recorded = {"source":anchor,"operation_id":op,"session":child,"callback_token":token}
+        write_enrollment(enrollment,recorded)
+        with state_writer(directory/"session-registry"):
+            with self.assertRaises(StateWriterBusy):
+                capture(sources,self.revision,self.snapshot,registries=registry)
+        self.assertFalse(self.snapshot.exists())
+        with self.assertRaisesRegex(ValueError,"native registry path differs"):
+            capture(sources,self.revision,self.snapshot,registries={"oguri":self.root})
+        with state_writer(child_db):
+            with self.assertRaises(StateWriterBusy):
+                capture(sources,self.revision,self.snapshot,registries=registry)
+        write_enrollment(enrollment,dict(recorded,source=guid()))
+        with self.assertRaisesRegex(ValueError,"no enrolled parent"):
+            capture(sources,self.revision,self.snapshot,registries=registry)
+        write_enrollment(enrollment,recorded)
+        source_map = config(self.root,"sources.json",{k:str(v) for k,v in sources.items()})
+        registry_map = config(self.root,"registries.json",{"oguri":str(directory)})
+        key_map = config(self.root,"keys.json",{"oguri":str(keys["oguri"])})
+        checksum = command("capture","--sources",source_map,"--managed-registries",registry_map,
+                           "--revision",self.revision,"--destination",self.snapshot)["manifest_sha256"]
+        manifest = verify(self.snapshot,checksum)
+        self.assertEqual(manifest["format"],2)
+        self.assertEqual(set(manifest["managed_native"]["oguri"]["children"]),{child})
+        self.assertEqual([p.name for p in (self.snapshot/"native--oguri").iterdir()],[child_db.name])
+        for private in (token,key.hex(),"callback_token"):
+            self.assertNotIn(private,(self.snapshot/"manifest.json").read_text())
+        with self.assertRaisesRegex(ValueError,"supply the original callback key"):
+            restore(self.snapshot,checksum,self.dest)
+        with self.assertRaisesRegex(ValueError,"key does not match"):
+            restore(self.snapshot,checksum,self.dest,managed_keys=wrong)
+        self.assertFalse(self.dest.exists())
+
+        trial_dir = self.root/"trial"
+        trial = command("restore","--snapshot",self.snapshot,"--manifest-sha256",checksum,
+                        "--destination",trial_dir,"--managed-keys",key_map)
+        trial_registry = {"oguri":trial_dir/"native--oguri"}
+        trial_db = trial_registry["oguri"]/child_db.name
+        self.assertEqual(trial_db.read_bytes(),child_db.read_bytes())
+        self.assertEqual(read_enrollment(trial_registry["oguri"]/enrollment.name),recorded)
+        if os.name=="posix":
+            self.assertEqual((trial_registry["oguri"]/enrollment.name).stat().st_mode & 0o777,0o600)
+        previous = rollback(self.snapshot,checksum,trial,self.dest,registries=trial_registry,managed_keys=keys)
+        with closing(sqlite3.connect(previous["agent:oguri"])) as db:
+            self.assertEqual(db.execute("SELECT session,directory FROM codex_managed_session_root").fetchone(),
+                             (anchor,str((self.dest/"native--oguri").resolve())))
+        with Database(trial_db,"").transaction() as db:
+            db.execute("INSERT INTO intents(delivery_id,session,payload,digest) VALUES (?,?,?,?)",
+                       (guid(),child,"{}","unconfirmed"))
+        refused = self.root/"refused"
+        with self.assertRaisesRegex(ValueError,"reconcile managed native sessions"):
+            rollback(self.snapshot,checksum,trial,refused,registries=trial_registry,managed_keys=keys)
+        self.assertFalse(refused.exists())
+        with self.assertRaisesRegex(ValueError,"Worker native handoff"):
+            stage_native_handoff(self.snapshot,checksum,"oguri",anchor,child,refused)
+        packed = self.snapshot/"native--oguri"/child_db.name
+        with Database(packed,"").transaction() as db:
+            db.execute("INSERT INTO intents(delivery_id,session,payload,digest) VALUES (?,?,?,?)",
+                       (guid(),child,"{}","unconfirmed"))
+        with self.assertRaisesRegex(ValueError,"native ledger bytes do not match"):
+            verify(self.snapshot,checksum)
 
     def test_native_session_audit_keeps_unknown_private_and_queued_inputs_for_the_original_host(self):
         self.native.next_turn = True
