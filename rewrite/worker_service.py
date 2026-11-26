@@ -2,6 +2,7 @@
 from threading import Event, Thread
 from urllib.error import URLError
 
+from . import worker_media
 from .storage import Fault, require, string
 from .wire import serve_authenticated
 
@@ -33,6 +34,8 @@ class WorkerService:
 
     def handle(self, actor, method, path, body, _headers):
         w = self.worker
+        if path.startswith("/v1/worker/media/"):
+            return worker_media.route(w,actor,method,path,body,_headers)
         if actor == "adapter/" + w.worker_id and method == "POST" and path == "/v1/worker/native-tool":
             native = w.adapter.input_for_turn(string(body,"session"),string(body,"turn_id"))
             args = body.get("arguments")
@@ -50,8 +53,8 @@ class WorkerService:
         elif actor == "adapter/" + w.worker_id and method == "GET" and path == "/v1/worker/peers":
             result = {"items":w.peer_history()}
         elif actor == "platform/" + w.worker_id and method == "POST" and path == "/v1/worker/chat":
-            require(set(body) == {"message_id","text"},422,"invalid_chat")
-            result = {"receipt":w.chat(string(body,"message_id"),string(body,"text"))}
+            require({"message_id","text"} <= body.keys() <= {"message_id","text","attachment_ids"},422,"invalid_chat")
+            result = {"receipt":w.chat(string(body,"message_id"),body["text"],body.get("attachment_ids"))}
         elif actor == "ops/" + w.worker_id and method == "GET" and path == "/v1/worker/status":
             result = {"worker_id":w.worker_id,"router_connected":self.router_connected,
                       "last_error":self.last_error,**w.hold()}

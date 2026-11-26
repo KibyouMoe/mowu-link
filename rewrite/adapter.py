@@ -13,7 +13,7 @@ class Host(Protocol):
 
 
 class HostAdapter:
-    def __init__(self, path, host: Host, session):
+    def __init__(self, path, host: Host, session, media_store=None):
         self.db = Database(path, """
             CREATE TABLE IF NOT EXISTS intents (
                 delivery_id TEXT PRIMARY KEY, session TEXT NOT NULL, payload TEXT NOT NULL, digest TEXT NOT NULL,
@@ -21,6 +21,7 @@ class HostAdapter:
             );
         """)
         self.host, self.session = host, session
+        self.media_store = media_store
 
     def busy(self):
         return self.host.busy(self.session)
@@ -28,6 +29,15 @@ class HostAdapter:
     def deliver(self, did, payload):
         serialized = encode(payload)
         digest = hashlib.sha256(serialized.encode()).hexdigest()
+        media = payload.get("attachments")
+        files = None
+        if media:
+            with self.db.transaction() as db:
+                known = db.execute("SELECT 1 FROM intents WHERE delivery_id=?", (did,)).fetchone()
+            if not known:
+                require(self.media_store is not None and callable(getattr(self.host,"deliver_media",None)),
+                        422,"native_media_input_unavailable")
+                files = self.media_store.prepare(media)
         with self.db.transaction() as db:
             inserted = db.execute("INSERT OR IGNORE INTO intents(delivery_id,session,payload,digest) VALUES (?,?,?,?)",
                                   (did, self.session, serialized, digest)).rowcount
@@ -37,11 +47,17 @@ class HostAdapter:
                 return json.loads(intent["receipt"])
         # After a crash only look up evidence. An inconclusive lookup never resends.
         if inserted:
-            receipt = self.host.deliver(self.session, did, payload, digest)
+            if media:
+                receipt = self.host.deliver_media(self.session,did,payload,digest,files)
+            else:
+                receipt = self.host.deliver(self.session, did, payload, digest)
         else:
             receipt = self.host.lookup(self.session, did)
         if receipt is None:
             return None
+        if media:
+            require(receipt.get("media_sha256") == [item["sha256"] for item in media],
+                    409,"native_media_unconfirmed")
         require(receipt.get("session") == self.session and receipt.get("delivery_id") == did
                 and receipt.get("digest") == digest and isinstance(receipt.get("native_id"), str)
                 and receipt["native_id"], 409, "host_receipt_mismatch")

@@ -138,7 +138,7 @@ def serve_authenticated(identities, address, tls_context, handle, tick=None):
                     length = self.headers.get("Content-Length", "")
                     require(length.isdecimal() and 0 < int(length) <= 1024 * 1024, 422, "invalid_length")
                     data = self.rfile.read(int(length))
-                    if self.command == "PATCH" and urlsplit(self.path).path.startswith("/v1/uploads/"):
+                    if self.command == "PATCH" and urlsplit(self.path).path.startswith(("/v1/uploads/","/v1/worker/media/uploads/")):
                         require(self.headers.get_content_type() == "application/octet-stream", 415, "invalid_media_type")
                         body = data
                     else:

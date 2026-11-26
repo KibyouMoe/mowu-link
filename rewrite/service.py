@@ -48,8 +48,12 @@ def server(args):
         listener = serve_router(Orders(args.db), identities, address, ctx)
     elif args.component == "fixture-adapter":
         from .devloop import FixtureHost
+        from .native_files import NativeFiles
         native = FixtureHost(args.fixture_db,args.session)
-        listener = serve_adapter(HostAdapter(args.db,native,native.session),args.worker_id,identities,address,ctx)
+        if bool(args.media_cache) != bool(args.worker_connection):
+            raise ValueError("media cache and worker connection must be configured together")
+        media = NativeFiles(args.media_cache,connection(args.worker_connection)) if args.media_cache else None
+        listener = serve_adapter(HostAdapter(args.db,native,native.session,media),args.worker_id,identities,address,ctx)
     else:
         worker = Worker(args.db,args.worker_id,connection(args.router_connection),
                         RemoteAdapter(connection(args.adapter_connection)))
@@ -95,6 +99,8 @@ def main():
         if name == "fixture-adapter":
             component.add_argument("--fixture-db",required=True,type=Path)
             component.add_argument("--session",required=True)
+            component.add_argument("--media-cache",type=Path)
+            component.add_argument("--worker-connection",type=Path)
         if name == "worker":
             component.add_argument("--router-connection",required=True,type=Path)
             component.add_argument("--adapter-connection",required=True,type=Path)

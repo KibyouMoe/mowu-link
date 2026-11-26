@@ -84,6 +84,7 @@ class CodexDesktop:
     def deliver(self, session, did, payload, digest):
         require(session == self.session, 409, "desktop_target_mismatch")
         require(digest == body_digest(payload), 409, "desktop_digest_mismatch")
+        require(not payload.get("attachments"),422,"desktop_native_media_input_unavailable")
         if self.busy(session):
             return None
         try:

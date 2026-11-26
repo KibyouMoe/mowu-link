@@ -3,6 +3,7 @@ import json
 from threading import RLock
 from typing import Protocol
 
+from . import worker_media
 from .storage import Database, Fault, encode, guid, require, string
 
 SCHEMA = """
@@ -45,7 +46,7 @@ class AgentAdapter(Protocol):
 
 class Worker:
     def __init__(self, path, worker_id, router, adapter: AgentAdapter):
-        self.db = Database(path, SCHEMA)
+        self.db = Database(path, SCHEMA + worker_media.SCHEMA)
         self.worker_id, self.router, self.adapter = worker_id, router, adapter
         self.lock = RLock()
         with self.db.transaction() as db:
@@ -208,13 +209,19 @@ class Worker:
                        ("received" if receipt else "unknown", aid))
         return receipt is not None
 
-    def chat(self, message_id, text):
+    def chat(self, message_id, text, attachment_ids=None):
+        ids = [] if attachment_ids is None else attachment_ids
+        require(isinstance(text,str) and (text.strip() or ids),422,"empty_chat")
         with self.lock:
             with self.db.transaction() as db:
-                db.execute("INSERT OR IGNORE INTO chats(message_id,text) VALUES (?,?)", (message_id, text))
+                inserted = db.execute("INSERT OR IGNORE INTO chats(message_id,text) VALUES (?,?)", (message_id,text)).rowcount
                 require(db.execute("SELECT text FROM chats WHERE message_id=?", (message_id,)).fetchone()[0] == text,
                         409, "chat_conflict")
-            return self.adapter.deliver("chat-" + message_id, {"kind": "chat", "message_id": message_id, "text": text})
+                media = worker_media.associate(db,self.worker_id,message_id,ids,inserted)
+            payload = {"kind":"chat","message_id":message_id,"text":text}
+            if media:
+                payload["attachments"] = media
+            return self.adapter.deliver("chat-" + message_id, payload)
 
     def send_peer(self, mid, target, text, reply_to=None):
         require(isinstance(target,str) and target.strip() and not any(c in target for c in "/?#%"),

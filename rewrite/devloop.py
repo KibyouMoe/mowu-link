@@ -28,13 +28,23 @@ class FixtureHost:
         assert session == self.session
         return self.is_busy
 
-    def deliver(self, session, did, payload, digest):
+    def deliver(self, session, did, payload, digest, *, media_sha256=None):
         if session != self.session:
             raise ValueError("wrong native session")
         receipt = {"session": session, "delivery_id": did, "digest": digest, "native_id": guid(), "turn_id": guid()}
+        if media_sha256 is not None:
+            receipt["media_sha256"] = media_sha256
         with self.db.transaction() as db:
             db.execute("INSERT INTO inputs VALUES (?,?,?)", (did, encode(payload), encode(receipt)))
         return receipt
+
+    def deliver_media(self, session, did, payload, digest, files):
+        import hashlib
+        hashes = []
+        for file in files:
+            with file.open("rb") as stream:
+                hashes.append(hashlib.file_digest(stream,"sha256").hexdigest())
+        return self.deliver(session,did,payload,digest,media_sha256=hashes)
 
     def lookup(self, session, did):
         if session != self.session:
