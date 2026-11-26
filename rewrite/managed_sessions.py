@@ -1,4 +1,4 @@
-"""Owner-private Codex enrollment records and the Worker callback derivation."""
+"""Owner-private native enrollment records and the Worker callback derivation."""
 import hashlib
 import hmac
 import json
@@ -29,15 +29,54 @@ def private_registry(path):
     require(path.is_absolute() and stat.S_ISDIR(info.st_mode)
             and (os.name!="posix" or (not info.st_mode & 0o077 and info.st_uid==os.getuid())),
             403,"private_session_registry_required")
+    if os.name=="nt":
+        from .windows_acl import private_directory
+
+        require(not info.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT and private_directory(path),
+                403,"private_session_registry_required")
     return path
 
 
+def windows_registry_file(path):
+    info = path.lstat()
+    require(stat.S_ISREG(info.st_mode) and not info.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT,
+            403,"private_session_registry_required")
+    return info
+
+
+def check_windows_registry_file(path,stream):
+    from .windows_acl import private_file
+
+    require(os.path.samestat(windows_registry_file(path),os.fstat(stream.fileno())) and private_file(stream.fileno()),
+            403,"private_session_registry_required")
+
+
+def protect_registry_database(path):
+    if os.name!="nt":
+        return
+    try:
+        windows_registry_file(path)
+    except FileNotFoundError:
+        try:
+            with path.open("xb"):
+                pass
+        except FileExistsError:
+            pass
+        windows_registry_file(path)
+    with path.open("rb") as stream:
+        check_windows_registry_file(path,stream)
+
+
 def private_json(path):
+    if os.name=="nt":
+        windows_registry_file(path)
     with os.fdopen(os.open(path,os.O_RDONLY|getattr(os,"O_NOFOLLOW",0)|getattr(os,"O_NONBLOCK",0)),"rb") as stream:
         info = os.fstat(stream.fileno())
         require(stat.S_ISREG(info.st_mode) and not path.is_symlink()
                 and (os.name!="posix" or (not info.st_mode & 0o077 and info.st_uid==os.getuid())),
                 403,"private_session_registry_required")
+        if os.name=="nt":
+            check_windows_registry_file(path,stream)
         return json.load(stream)
 
 
@@ -65,10 +104,14 @@ def read_enrollment(path):
 
 def write_enrollment(path,document):
     require(enrollment_fields(document)[2]==path.stem,409,"native_enrollment_conflict")
+    if os.name=="nt":
+        private_registry(path.parent)
     stream = NamedTemporaryFile(mode="w",encoding="utf-8",dir=path.parent,prefix=".pending-",delete=False)
     scratch = Path(stream.name)
     try:
         with stream:
+            if os.name=="nt":
+                check_windows_registry_file(scratch,stream)
             stream.write(encode(document))
             stream.flush()
             os.fsync(stream.fileno())

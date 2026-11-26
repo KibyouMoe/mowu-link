@@ -3,7 +3,8 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from threading import Event, RLock
 
-from .managed_sessions import enrollment_fields, private_registry, read_enrollment, write_enrollment
+from .managed_sessions import (enrollment_fields, private_registry, protect_registry_database, read_enrollment,
+                               write_enrollment)
 from .storage import Database, require, state_writer
 
 
@@ -37,6 +38,8 @@ class SessionFamily:
     def _register(self,session,token):
         db = self.directory/(session+".sqlite3")
         require(not db.is_symlink(),403,"private_session_registry_required")
+        protect_registry_database(db)
+        protect_registry_database(db.with_name(db.name+".writer"))
         with ExitStack() as pending:
             pending.enter_context(state_writer(db))
             self.ports[session] = self.make_port(session,db,self.worker.with_token(token),cold=True,resources=pending)
@@ -70,6 +73,7 @@ class SessionFamily:
     @contextmanager
     def registry(self):
         with self.resources:
+            protect_registry_database(self.directory/"session-registry.writer")
             self.resources.enter_context(state_writer(self.directory/"session-registry"))
             with Database(self.args.db,self.schema).transaction() as db:
                 expected = self.args.session,str(self.directory.resolve())

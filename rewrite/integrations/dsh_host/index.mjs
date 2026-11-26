@@ -401,8 +401,8 @@ export async function apply(ctx, {session, directory, catalog_sessions=[], relay
                                  read_only_assignments=false, relay_foreground_questions=false, assignment_container=null,
                                  local_tls=false}) {
   check(typeof local_tls==='boolean','invalid_dsh_local_link');
-  check(!local_tls || !(managed_sessions_dir || relay_command_approvals || relay_foreground_questions ||
-    assignment_container),'unsupported_dsh_local_tls_feature');
+  check(!local_tls || !(relay_command_approvals || relay_foreground_questions || assignment_container),
+    'unsupported_dsh_local_tls_feature');
   check(typeof session==='string' && session.length>0,'missing_native_session');
   check(typeof resume_on_handoff==='boolean','invalid_native_activation');
   check(typeof read_only_assignments==='boolean' &&
@@ -416,22 +416,41 @@ export async function apply(ctx, {session, directory, catalog_sessions=[], relay
   }
   const portableAdmissions = local_tls && read_only_assignments;
   const link = local_tls ? await tlsLink(directory,{admissions:portableAdmissions}) : unixLink(directory);
-  if (managed) privateDir(managed_sessions_dir);
+  if (managed) {
+    if (local_tls) {
+      check(path.isAbsolute(managed_sessions_dir) && lstatSync(managed_sessions_dir).isDirectory(),
+        'private_session_registry_required');
+    } else {
+      privateDir(managed_sessions_dir);
+    }
+  }
   const admissions = portableAdmissions ? await sqliteAdmissions(directory) : undefined;
   if (admissions) ctx.effect(() => admissions.close);
   const cleanupOptions = {admissions};
   const defaultSelection = new_session_selection ? selection(new_session_selection) : null;
   const catalog = catalogSessions(catalog_sessions);
   const scopes = new Map([[session,{port:null,selected:null,opening:null}]]);
-  function scopeFor(target) {
+  async function enrollment(target) {
+    if (local_tls) {
+      try {
+        return await callback(directory,{session:target},'/managed-session',null,link);
+      } catch (error) {
+        if (['wrong_native_session','private_session_registry_required','native_enrollment_conflict',
+             'native_enrollment_not_prepared'].includes(error.message)) throw error;
+        throw new Error('native_session_registry_unconfirmed',{cause:error});
+      }
+    }
+    privateDir(managed_sessions_dir);
+    const filename = path.join(managed_sessions_dir,target+'.json');
+    let info;
+    try { info = lstatSync(filename); } catch { throw new Error('wrong_native_session'); }
+    check(info.isFile() && info.uid===process.getuid() && !(info.mode & 0o077),'private_session_registry_required');
+    return JSON.parse(readFileSync(filename,{encoding:'utf8',flag:constants.O_RDONLY|constants.O_NOFOLLOW}));
+  }
+  async function scopeFor(target) {
     if (target!==session) {
       check(managed && guid(target),'wrong_native_session');
-      privateDir(managed_sessions_dir);
-      const filename = path.join(managed_sessions_dir,target+'.json');
-      let info;
-      try { info = lstatSync(filename); } catch { throw new Error('wrong_native_session'); }
-      check(info.isFile() && info.uid===process.getuid() && !(info.mode & 0o077),'private_session_registry_required');
-      const record = JSON.parse(readFileSync(filename,{encoding:'utf8',flag:constants.O_RDONLY|constants.O_NOFOLLOW}));
+      const record = await enrollment(target);
       check(record?.session===target && guid(record.operation_id) && typeof record.source==='string'
         && record.source!==target,'wrong_native_session');
       if (!scopes.has(target)) scopes.set(target,{port:null,selected:null,opening:null});
@@ -468,7 +487,7 @@ export async function apply(ctx, {session, directory, catalog_sessions=[], relay
     try {
       check(req.method === 'POST' && req.url === '/host','unknown_route');
       const request = await readJson(req);
-      const scope = scopeFor(request.session);
+      const scope = await scopeFor(request.session);
       const {port} = scope;
       let result;
       if (request.operation==='managed-state' && managed && request.session===session) {
@@ -495,7 +514,7 @@ export async function apply(ctx, {session, directory, catalog_sessions=[], relay
                          'dsh_host_unconfirmed','model_change_unconfirmed','goal_change_unconfirmed',
                          'compact_unconfirmed','native_stop_unconfirmed','native_session_cold',
                          'native_cold_thread_unconfirmed','native_cold_goal_unconfirmed','native_creation_unconfirmed',
-                         'native_preparation_source_unconfirmed'].includes(code);
+                         'native_preparation_source_unconfirmed','native_session_registry_unconfirmed'].includes(code);
       res.writeHead(transient ? 503 : 409,{'Content-Type':'application/json'}).end(JSON.stringify({error:code}));
     }
   });

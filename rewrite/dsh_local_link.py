@@ -1,4 +1,5 @@
 """The host plugin and adapter link never leaves this machine."""
+from contextlib import contextmanager
 from http.client import HTTPConnection, HTTPSConnection
 from http.server import ThreadingHTTPServer
 import json
@@ -7,8 +8,9 @@ import socket
 from socketserver import ThreadingMixIn
 import ssl
 import stat
+from tempfile import NamedTemporaryFile
 
-from .storage import require
+from .storage import require, state_writer
 
 
 def private_directory(path):
@@ -30,14 +32,19 @@ def private_file(path):
     require(stat.S_ISREG(info.st_mode) and not getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT,
             403, "private_dsh_link_required")
     with path.open("rb") as stream:
-        opened = os.fstat(stream.fileno())
-        if os.name == "nt":
-            from .windows_acl import private_file as private_acl
-            private = private_acl(stream.fileno())
-        else:
-            private = opened.st_uid == os.getuid() and not opened.st_mode & 0o077
-        require(private and os.path.samestat(info, opened), 403, "private_dsh_link_required")
+        check_private_stream(info,stream)
     return path
+
+
+def check_private_stream(info,stream):
+    opened = os.fstat(stream.fileno())
+    if os.name == "nt":
+        from .windows_acl import private_file as private_acl
+
+        private = private_acl(stream.fileno())
+    else:
+        private = opened.st_uid == os.getuid() and not opened.st_mode & 0o077
+    require(private and os.path.samestat(info, opened),403,"private_dsh_link_required")
 
 
 class UnixConnection(HTTPConnection):
@@ -60,7 +67,9 @@ class LocalLink:
             return
         cfg = json.loads(private_file(directory / "dsh-link.json").read_text(encoding="utf-8"))
         require(isinstance(cfg, dict) and set(cfg) == {"host_port", "worker_port"}
-                and all(type(port) is int and 1024 <= port <= 65535 for port in cfg.values())
+                and type(cfg["host_port"]) is int and 1024 <= cfg["host_port"] <= 65535
+                and type(cfg["worker_port"]) is int
+                and (cfg["worker_port"] == 0 or 1024 <= cfg["worker_port"] <= 65535)
                 and cfg["host_port"] != cfg["worker_port"], 422, "invalid_dsh_local_ports")
         cert = private_file(directory / "dsh-link.crt")
         key = private_file(directory / "dsh-link.key")
@@ -79,22 +88,52 @@ class LocalLink:
             return HTTPSConnection("127.0.0.1", self.ports["host_port"], timeout=8, context=self.client)
         return UnixConnection(self.directory / "dsh.sock")
 
+    def publish_callback_port(self, port):
+        locator = self.directory / "dsh-worker-port.json"
+        try:
+            private_file(locator)
+        except FileNotFoundError:
+            pass
+        stream = NamedTemporaryFile(mode="w",encoding="utf-8",dir=self.directory,prefix=".dsh-port-",delete=False)
+        pending = self.directory / os.path.basename(stream.name)
+        try:
+            with stream:
+                check_private_stream(pending.lstat(),stream)
+                json.dump({"port":port},stream)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(pending,locator)
+        finally:
+            pending.unlink(missing_ok=True)
+
+    @contextmanager
     def listen_for_tools(self, handler):
-        endpoint = private_directory(self.directory) / "worker.sock"
+        directory = private_directory(self.directory)
         if self.ports:
-            return TlsTools(("127.0.0.1", self.ports["worker_port"]), handler, self.server), None
+            lock = directory / "dsh-callback"
+            require(not lock.exists() and not lock.is_symlink(),403,"private_dsh_link_required")
+            try:
+                private_file(lock.with_suffix(".writer"))
+            except FileNotFoundError:
+                pass
+            with state_writer(lock), TlsTools(("127.0.0.1",self.ports["worker_port"]),handler,self.server) as server:
+                if self.ports["worker_port"] == 0:
+                    self.publish_callback_port(server.server_port)
+                yield server, None
+            return
 
         from socketserver import UnixStreamServer
 
         class Server(ThreadingMixIn, UnixStreamServer):
             daemon_threads = True
 
-        server = Server(str(endpoint), handler)
-        return server, endpoint
+        endpoint = directory / "worker.sock"
+        with Server(str(endpoint),handler) as server:
+            yield server, endpoint
 
 
 class TlsTools(ThreadingHTTPServer):
-    allow_reuse_address = False
+    allow_reuse_address = os.name != "nt"
     allow_reuse_port = False
 
     def __init__(self, address, handler, context):

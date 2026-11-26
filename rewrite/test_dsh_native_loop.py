@@ -594,12 +594,254 @@ class NativeProcess(unittest.TestCase):
             loop.native.deliver(proof["session"],"disallowed-cache",payload,hashlib.sha256(encode(payload).encode()).hexdigest())
         self.assertEqual(self.read_native(native,"read")["inputs"],observed["inputs"])
 
+    def managed_session_switches(self,*,use_tls=False):
+        sid = "isolated-dsh-managed-root"
+        root = (self.local_tls_directory(dynamic_callback=True) if use_tls else
+                Path(self.enterContext(tempfile.TemporaryDirectory(dir="/tmp",prefix="ml-dsh-managed-"))).resolve())
+        link = LocalLink(root,use_tls=True) if use_tls else None
+        registry = root/"enrolled"
+        registry.mkdir(mode=0o700)
+        clock = Clock()
+        loop = self.enterContext(Loop.isolated(clock))
+        incoming_token,callback_token,tls_token,foreign = (guid() for _ in range(4))
+        if use_tls:
+            cert,key = root/"dsh-link.crt",root/"dsh-link.key"
+        else:
+            cert,key = root/"tls.crt",root/"tls.key"
+            subprocess.run(["openssl","req","-x509","-newkey","rsa:2048","-nodes","-days","1","-subj","/CN=localhost",
+                            "-addext","subjectAltName=IP:127.0.0.1","-out",cert,"-keyout",key],
+                           capture_output=True,timeout=10,check=True)
+        roles = config(root,"adapter-roles.json",{tls_token:"worker/oguri",foreign:"worker/other"})
+        callback_key = os.urandom(32)
+        package = Path(__file__).resolve().parents[1]
+        enrollment = []
+        callback_ports = []
+
+        @contextmanager
+        def station(mode,stage,*,lose_first=False):
+            port = RemoteAdapter(None,sid)
+            worker = Worker(root/"worker.db","oguri",loop.wire,port,clock=clock,session_callback_key=callback_key)
+            gateway = WorkerService(worker,clock)
+            worker_roles = {incoming_token:"platform/oguri", callback_token:"adapter/oguri/"+sid}
+            with codex_driver.running(gateway.listen(worker_roles,("127.0.0.1",0),None)) as url:
+                to_worker = config(root,"adapter-to-worker-"+stage+".json",{"url":url,"token":callback_token})
+                extra = ("--worker-id","oguri","--session",sid,"--runtime-dir",root,"--worker-connection",to_worker,
+                         "--managed-sessions-dir",registry)
+                if use_tls:
+                    extra += ("--local-tls",)
+                with self.start_native(root,sid,mode,use_tls=use_tls) as native, \
+                     serve(package,"dsh-adapter",root/"adapter.db",roles,cert,key,dict(os.environ),extra) as host_url:
+                    actual = Client(host_url,tls_token,cert)
+                    if use_tls:
+                        callback_ports.append(json.loads((root/"dsh-worker-port.json").read_text())["port"])
+                        if stage=="initial":
+                            with self.assertRaisesRegex(RuntimeError,"state_writer_already_running"), \
+                                 serve(package,"dsh-adapter",root/"duplicate.db",roles,cert,key,dict(os.environ),
+                                       ("--worker-id","oguri","--session",sid,"--runtime-dir",root,
+                                        "--worker-connection",to_worker,"--local-tls")):
+                                self.fail("another adapter acquired the DSH callback runtime")
+                    for target in worker.resume_targets.values():
+                        target.client = actual
+                    original = port.enroll_thread
+                    if stage in ("initial","retry"):
+                        def watch(source,operation,target,token):
+                            if source==sid:
+                                self.assertTrue(loop.hermes.workers()["items"][0]["admission_paused"])
+                            reply = original(source,operation,target,token)
+                            enrollment.append(reply)
+                            if lose_first:
+                                raise Fault(503,"adapter_connection_unconfirmed",True)
+                            return reply
+                        port.enroll_thread = watch
+                    gateway.step()
+                    yield gateway,native,Client(url,incoming_token),Client(url,callback_token),host_url
+
+        def platform(incoming,mid,command):
+            inbox = Inbound(root/"feishu.db",incoming,None,"app","trainer","chat",clock=clock)
+            inbox.record("app","user","trainer",{"chat_id":"chat","chat_type":"p2p","message_id":mid,
+                "message_type":"text","content":encode({"text":command})})
+            deadline = time.monotonic()+8
+            while True:
+                try:
+                    return inbox.deliver(mid)
+                except Fault as error:
+                    if error.code not in ("native_switch_callbacks_pending","host_receipt_unconfirmed") or time.monotonic()>=deadline:
+                        raise
+                    time.sleep(.04)
+
+        def dispatch(gateway,title):
+            tid = loop.hermes.create(guid(),title,"Report one DSH fixture result","oguri")["task_id"]
+            gateway.step()
+            clock.advance(10)
+            started = time.monotonic()
+            w = gateway.worker
+            while True:
+                detail = loop.hermes.inspect(tid)
+                if detail["task"]["state"]=="completed_reported" and not w.adapter.busy():
+                    break
+                self.assertLess(time.monotonic()-started,15,gateway.status())
+                gateway.step()
+                time.sleep(.04)
+            aid = detail["last_report"]["assignment_id"]
+            with w.db.transaction() as db:
+                raw = db.execute("SELECT frame FROM inbox JOIN jobs USING(delivery_id) WHERE assignment_id=?",(aid,)).fetchone()[0]
+            frame = json.loads(raw)
+            receipt = w.adapter.lookup_delivery(frame["delivery_id"],{"kind":"task",**frame["payload"]},session=w.native_session_pin)
+            self.assertEqual(w.assignment_session(aid),w.native_session_pin)
+            self.assertIsNone(w.hold()["held_assignment_id"])
+            self.assertTrue(w.process(frame))
+            return {"task_id":tid,"assignment_id":aid,"receipt":receipt}
+
+        with station("managed-sessions","initial",lose_first=True) as (gateway,native,incoming,_callback,host_url):
+            remote = gateway.worker.adapter
+            self.assertTrue(remote.session_info()["managed_session_enrollment"])
+            before = self.read_native(native,"status")
+            with self.assertRaisesRegex(Fault,"adapter_identity_unconfirmed"):
+                RemoteAdapter(Client(host_url,foreign,cert),sid).prepare_thread(sid,guid(),"new")
+            with self.assertRaisesRegex(Fault,"adapter_connection_unconfirmed"):
+                platform(incoming,"om_dsh_managed_new","/new")
+            target = enrollment[0]["session"]
+            if use_tls:
+                self.check_tls_enrollment(registry,link,callback_ports[-1],target,remote)
+            cold = remote.for_session(target)
+            self.assertEqual(cold.session_info()["native_load_state"],"cold")
+            self.assertEqual(self.read_native(native,"status"),before)
+            self.assertEqual(gateway.worker.native_session_pin,sid)
+            self.assertTrue(loop.hermes.workers()["items"][0]["admission_paused"])
+        with station("managed-sessions-reopen","retry") as (gateway,native,incoming,old_callback,_host_url):
+            created = platform(incoming,"om_dsh_managed_new","/new")["binding_receipt"]
+            self.assertEqual((created["session"],created["previous_session"]),(target,sid))
+            self.assertEqual(len(enrollment),2)
+            self.assertEqual(enrollment[0],enrollment[1])
+            self.assertEqual(self.read_native(native,"status")["liveSessions"],[sid,target])
+            with self.assertRaisesRegex(Fault,"native_callback_inactive"):
+                old_callback.request("POST","worker/native-tool",{"session":target})
+            first = dispatch(gateway,"First managed DSH order")
+            w = gateway.worker
+            self.assertEqual(w.adapter.model_view("efforts")["current"]["effort"],"low")
+            selected = w.adapter.model_change(target,"efforts","high")
+            self.assertEqual(selected["selected"]["effort"],"high")
+            forked = platform(incoming,"om_dsh_managed_fork","/fork")["binding_receipt"]
+            branch = forked["session"]
+            self.assertEqual(forked["previous_session"],target)
+            self.assertEqual(w.adapter.model_view("efforts")["current"]["effort"],"high")
+            second = dispatch(gateway,"Forked managed DSH order")
+            history = self.read_native(native,"read "+branch)
+            self.assertEqual(history["parent"],target)
+            self.assertEqual(history["allInputs"],[first["receipt"]["native_id"],second["receipt"]["native_id"]])
+            self.assertEqual(history["ownInputs"],[second["receipt"]["native_id"]])
+            self.assertEqual(len(history["results"]),2)
+            expected = {"recorded":True,"task_state":"completed_reported","release_assignment_id":second["assignment_id"]}
+            self.assertTrue(all(not row["isError"] and json.loads(row["content"][0]["text"])==expected
+                                for row in history["results"]))
+            notes = [frame for frame in loop.manager_wire.frames(0) if frame["payload"].get("task_id")]
+            self.assertEqual([n["payload"]["task_id"] for n in notes],[first["task_id"],second["task_id"]])
+        with station("managed-sessions-reopen","ready") as (gateway,native,incoming,_callback,_host_url):
+            restored = self.read_native(native,"status")
+            self.assertEqual(restored["liveSessions"],[branch])
+            self.assertEqual(restored["modelRequests"],[])
+            self.assertEqual(gateway.worker.native_session_pin,branch)
+            self.assertEqual(platform(incoming,"om_dsh_managed_fork","/fork")["binding_receipt"],forked)
+            cleared = platform(incoming,"om_dsh_managed_clear","/clear")["binding_receipt"]
+            self.assertNotIn(cleared["session"],(branch,target,sid))
+            new = self.read_native(native,"read "+cleared["session"])
+            self.assertEqual((new["allInputs"],new["parent"],new["selection"]["reasoningEffort"]),([],None,"low"))
+            self.assertEqual(self.read_native(native,"status")["modelRequests"],[])
+            if use_tls:
+                resumed = platform(incoming,"om_dsh_managed_resume","/resume "+target)["binding_receipt"]
+                self.assertEqual((resumed["session"],resumed["previous_session"],gateway.worker.native_session_pin),
+                                 (target,cleared["session"],target))
+                self.assertEqual(self.read_native(native,"read "+target)["ownInputs"],[first["receipt"]["native_id"]])
+                self.assertEqual(platform(incoming,"om_dsh_managed_resume","/resume "+target)["binding_receipt"],resumed)
+                self.assertEqual(self.read_native(native,"status")["modelRequests"],[])
+                back = platform(incoming,"om_dsh_managed_resume_back","/resume "+cleared["session"])["binding_receipt"]
+                self.assertEqual((back["session"],back["previous_session"]),(cleared["session"],target))
+
+            def source_changed(*args):
+                self.assertTrue(loop.hermes.workers()["items"][0]["admission_paused"])
+                raise Fault(409,"native_preparation_source_changed")
+            gateway.worker.adapter.prepare_thread = source_changed
+            refusal = platform(incoming,"om_dsh_changed_source","/fork")
+            seq = refusal["output"]["seq"]
+            render, = [item["event"] for item in incoming.request("GET",f"worker/display?after={seq-1}")["items"]
+                       if item["seq"]==seq]
+            self.assertIn("原会话已变化",render["text"])
+            self.assertEqual(gateway.worker.native_session_pin,cleared["session"])
+            self.assertFalse(loop.hermes.workers()["items"][0].get("admission_paused",False))
+        loop.server.shutdown()
+        loop.thread.join()
+        trigger_db = root/"trigger.db"
+        Trigger(trigger_db,"isolated-managed-source")
+        sources = {"router:main":loop.root/"router.db","worker:oguri":root/"worker.db","agent:oguri":root/"adapter.db",
+                   "hermes:main":loop.root/"hermes-adapter.db","trigger:source":trigger_db}
+        snapshot = root/"snapshot"
+        recorded = capture(sources,"a"*40,snapshot,registries={"oguri":registry})
+        checksum = recorded["manifest_sha256"]
+        members = verify(snapshot,checksum)["managed_native"]["oguri"]["children"]
+        self.assertEqual(set(members),{target,branch,cleared["session"]})
+        keys = {"oguri":config(root,"managed-key.json",{"key":callback_key.hex()})}
+        trial = root/"trial"
+        restored_paths = restore(snapshot,checksum,trial,managed_keys=keys)
+        rolled = root/"rollback"
+        rollback(snapshot,checksum,restored_paths,rolled,registries={"oguri":trial/"native--oguri"},managed_keys=keys)
+        for child in members:
+            name = child+".sqlite3"
+            self.assertEqual((rolled/"native--oguri"/name).read_bytes(),(registry/name).read_bytes())
+        self.evidence = {"new_binding":created,"fork_binding":forked,"clear_binding":cleared,"formal":[first,second],
+            "branch_parent":history["parent"],"native_inherited_count":history["inherited"],
+            "native_own_inputs":history["ownInputs"],"branch_native_tool_results":len(history["results"]),
+            "notice_ids":[note["delivery_id"] for note in notes],"recovered_enrollment_count":len(enrollment)-1,
+            "managed_snapshot_sha256":checksum,"restored_native_ledgers":len(members),
+            "scope":"Isolated installed DSH SDK, real TLS adapter and rewrite Router/Worker, fixture model and platform.",
+            **({"resume_binding":resumed,"resume_back_binding":back,"registry_secret_excluded_from_host_reply":True,
+                "shared_registry_refused":True,"foreign_session_refused":True,"resume_added_model_requests":0,
+                "adapter_callback_ports":callback_ports,"second_callback_writer_refused":True}
+               if use_tls else {})}
+        output = os.environ.get("MOWULINK_DSH_MANAGED_EVIDENCE")
+        if output:
+            Path(output).write_text(json.dumps(self.evidence,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
+
+    def check_tls_enrollment(self,registry,link,worker_port,target,remote):
+        from http.client import HTTPSConnection
+
+        foreign = guid()
+        for sid,status in ((foreign,409),(target,200)):
+            with closing(HTTPSConnection("127.0.0.1",worker_port,timeout=4,context=link.client)) as local:
+                local.request("POST","/managed-session",body=encode({"session":sid}).encode(),
+                              headers={"Content-Type":"application/json"})
+                response = local.getresponse()
+                raw = json.load(response)
+                self.assertEqual(response.status,status)
+                if sid==target:
+                    self.assertEqual(set(raw),{"session","source","operation_id"})
+                    self.assertEqual(raw["session"],target)
+                else:
+                    self.assertEqual(raw,{"error":"wrong_native_session"})
+            if sid==foreign:
+                with self.assertRaisesRegex(Fault,"wrong_native_session"):
+                    remote.for_session(sid).session_info()
+        record = registry/(target+".json")
+        if os.name=="nt":
+            icacls = Path(os.environ["SystemRoot"])/"System32/icacls.exe"
+            subprocess.run([icacls,record,"/grant","*S-1-5-32-545:(R)"],check=True,capture_output=True)
+        else:
+            record.chmod(0o644)
+        try:
+            with self.assertRaisesRegex(Fault,"private_session_registry_required"):
+                remote.for_session(target).session_info()
+        finally:
+            if os.name=="nt":
+                subprocess.run([icacls,record,"/remove:g","*S-1-5-32-545"],check=True,capture_output=True)
+            else:
+                record.chmod(0o600)
+
+
 
 @unittest.skipUnless(EXE.is_file() or os.environ.get("MOWULINK_TEST_DSH_BINARY"),
                      "installed DSH SDK or verified packaged Windows executable required")
 @unittest.skipUnless(shutil.which("openssl"),"test TLS certificate generator required")
 class LocalTlsLoop(NativeProcess):
-    def local_tls_directory(self):
+    def local_tls_directory(self,*,dynamic_callback=False):
         directory = Path(self.enterContext(tempfile.TemporaryDirectory(prefix="mldsh-tls-"))).resolve()
         if os.name=="nt":
             system32 = Path(os.environ["SystemRoot"])/"System32"
@@ -611,7 +853,8 @@ class LocalTlsLoop(NativeProcess):
         with closing(socket.socket()) as host, closing(socket.socket()) as tools:
             host.bind(("127.0.0.1",0))
             tools.bind(("127.0.0.1",0))
-            config(directory,"dsh-link.json",{"host_port":host.getsockname()[1],"worker_port":tools.getsockname()[1]})
+            config(directory,"dsh-link.json",{"host_port":host.getsockname()[1],
+                                              "worker_port":0 if dynamic_callback else tools.getsockname()[1]})
         subprocess.run(["openssl","req","-x509","-newkey","rsa:2048","-nodes","-days","1",
                         "-subj","/CN=mowulink isolated DSH link","-addext","subjectAltName=IP:127.0.0.1",
                         "-addext","basicConstraints=critical,CA:FALSE","-addext","extendedKeyUsage=serverAuth,clientAuth",
@@ -696,6 +939,9 @@ class LocalTlsLoop(NativeProcess):
                 "native_input_count":len(observed["inputs"]),"caption":text,"image_sha256":sha,
                 "ordered_feishu_fixture_messages":[{"message_id":r[0],"kind":r[1]} for r in sent]})+"\n",
                 encoding="utf-8")
+
+    def test_managed_sessions_switch_and_recover_over_mutual_tls(self):
+        self.managed_session_switches(use_tls=True)
 
     def test_read_only_cancel_and_transfer_over_mutual_tls(self):
         self.read_only_cleanup(use_tls=True)
@@ -1143,179 +1389,7 @@ class NativeLoop(NativeProcess):
 
     @unittest.skipUnless(shutil.which("openssl"),"isolated TLS certificate generator required")
     def test_managed_dsh_creates_and_forks_through_the_worker_and_recovers_a_lost_reply(self):
-        sid = "isolated-dsh-managed-root"
-        root = Path(self.enterContext(tempfile.TemporaryDirectory(dir="/tmp",prefix="ml-dsh-managed-"))).resolve()
-        registry = root/"enrolled"
-        registry.mkdir(mode=0o700)
-        clock = Clock()
-        loop = self.enterContext(Loop.isolated(clock))
-        incoming_token,callback_token,tls_token,foreign = (guid() for _ in range(4))
-        cert,key = root/"tls.crt",root/"tls.key"
-        subprocess.run(["openssl","req","-x509","-newkey","rsa:2048","-nodes","-days","1","-subj","/CN=localhost",
-                        "-addext","subjectAltName=IP:127.0.0.1","-out",cert,"-keyout",key],
-                       capture_output=True,timeout=10,check=True)
-        roles = config(root,"adapter-roles.json",{tls_token:"worker/oguri",foreign:"worker/other"})
-        callback_key = os.urandom(32)
-        package = Path(__file__).resolve().parents[1]
-        enrollment = []
-
-        @contextmanager
-        def station(mode,stage,*,lose_first=False):
-            port = RemoteAdapter(None,sid)
-            worker = Worker(root/"worker.db","oguri",loop.wire,port,clock=clock,session_callback_key=callback_key)
-            gateway = WorkerService(worker,clock)
-            worker_roles = {incoming_token:"platform/oguri", callback_token:"adapter/oguri/"+sid}
-            with codex_driver.running(gateway.listen(worker_roles,("127.0.0.1",0),None)) as url:
-                to_worker = config(root,"adapter-to-worker-"+stage+".json",{"url":url,"token":callback_token})
-                extra = ("--worker-id","oguri","--session",sid,"--runtime-dir",root,"--worker-connection",to_worker,
-                         "--managed-sessions-dir",registry)
-                with self.start_native(root, sid, mode) as native, \
-                     serve(package,"dsh-adapter",root/"adapter.db",roles,cert,key,dict(os.environ),extra) as host_url:
-                    actual = Client(host_url,tls_token,cert)
-                    for target in worker.resume_targets.values():
-                        target.client = actual
-                    original = port.enroll_thread
-                    if stage in ("initial","retry"):
-                        def watch(source,operation,target,token):
-                            if source==sid:
-                                self.assertTrue(loop.hermes.workers()["items"][0]["admission_paused"])
-                            reply = original(source,operation,target,token)
-                            enrollment.append(reply)
-                            if lose_first:
-                                raise Fault(503,"adapter_connection_unconfirmed",True)
-                            return reply
-                        port.enroll_thread = watch
-                    gateway.step()
-                    yield gateway,native,Client(url,incoming_token),Client(url,callback_token),host_url
-
-        def platform(incoming,mid,command):
-            inbox = Inbound(root/"feishu.db",incoming,None,"app","trainer","chat",clock=clock)
-            inbox.record("app","user","trainer",{"chat_id":"chat","chat_type":"p2p","message_id":mid,
-                "message_type":"text","content":encode({"text":command})})
-            deadline = time.monotonic()+8
-            while True:
-                try:
-                    return inbox.deliver(mid)
-                except Fault as error:
-                    if error.code not in ("native_switch_callbacks_pending","host_receipt_unconfirmed") or time.monotonic()>=deadline:
-                        raise
-                    time.sleep(.04)
-
-        def dispatch(gateway,title):
-            tid = loop.hermes.create(guid(),title,"Report one DSH fixture result","oguri")["task_id"]
-            gateway.step()
-            clock.advance(10)
-            started = time.monotonic()
-            w = gateway.worker
-            while True:
-                detail = loop.hermes.inspect(tid)
-                if detail["task"]["state"]=="completed_reported" and not w.adapter.busy():
-                    break
-                self.assertLess(time.monotonic()-started,15,gateway.status())
-                gateway.step()
-                time.sleep(.04)
-            aid = detail["last_report"]["assignment_id"]
-            with w.db.transaction() as db:
-                raw = db.execute("SELECT frame FROM inbox JOIN jobs USING(delivery_id) WHERE assignment_id=?",(aid,)).fetchone()[0]
-            frame = json.loads(raw)
-            receipt = w.adapter.lookup_delivery(frame["delivery_id"],{"kind":"task",**frame["payload"]},session=w.native_session_pin)
-            self.assertEqual(w.assignment_session(aid),w.native_session_pin)
-            self.assertIsNone(w.hold()["held_assignment_id"])
-            self.assertTrue(w.process(frame))
-            return {"task_id":tid,"assignment_id":aid,"receipt":receipt}
-
-        with station("managed-sessions","initial",lose_first=True) as (gateway,native,incoming,_callback,host_url):
-            remote = gateway.worker.adapter
-            self.assertTrue(remote.session_info()["managed_session_enrollment"])
-            before = self.read_native(native,"status")
-            with self.assertRaisesRegex(Fault,"adapter_identity_unconfirmed"):
-                RemoteAdapter(Client(host_url,foreign,cert),sid).prepare_thread(sid,guid(),"new")
-            with self.assertRaisesRegex(Fault,"adapter_connection_unconfirmed"):
-                platform(incoming,"om_dsh_managed_new","/new")
-            target = enrollment[0]["session"]
-            cold = remote.for_session(target)
-            self.assertEqual(cold.session_info()["native_load_state"],"cold")
-            self.assertEqual(self.read_native(native,"status"),before)
-            self.assertEqual(gateway.worker.native_session_pin,sid)
-            self.assertTrue(loop.hermes.workers()["items"][0]["admission_paused"])
-        with station("managed-sessions-reopen","retry") as (gateway,native,incoming,old_callback,_host_url):
-            created = platform(incoming,"om_dsh_managed_new","/new")["binding_receipt"]
-            self.assertEqual((created["session"],created["previous_session"]),(target,sid))
-            self.assertEqual(len(enrollment),2)
-            self.assertEqual(enrollment[0],enrollment[1])
-            self.assertEqual(self.read_native(native,"status")["liveSessions"],[sid,target])
-            with self.assertRaisesRegex(Fault,"native_callback_inactive"):
-                old_callback.request("POST","worker/native-tool",{"session":target})
-            first = dispatch(gateway,"First managed DSH order")
-            w = gateway.worker
-            self.assertEqual(w.adapter.model_view("efforts")["current"]["effort"],"low")
-            selected = w.adapter.model_change(target,"efforts","high")
-            self.assertEqual(selected["selected"]["effort"],"high")
-            forked = platform(incoming,"om_dsh_managed_fork","/fork")["binding_receipt"]
-            branch = forked["session"]
-            self.assertEqual(forked["previous_session"],target)
-            self.assertEqual(w.adapter.model_view("efforts")["current"]["effort"],"high")
-            second = dispatch(gateway,"Forked managed DSH order")
-            history = self.read_native(native,"read "+branch)
-            self.assertEqual(history["parent"],target)
-            self.assertEqual(history["allInputs"],[first["receipt"]["native_id"],second["receipt"]["native_id"]])
-            self.assertEqual(history["ownInputs"],[second["receipt"]["native_id"]])
-            self.assertEqual(len(history["results"]),2)
-            expected = {"recorded":True,"task_state":"completed_reported","release_assignment_id":second["assignment_id"]}
-            self.assertTrue(all(not row["isError"] and json.loads(row["content"][0]["text"])==expected
-                                for row in history["results"]))
-            notes = [frame for frame in loop.manager_wire.frames(0) if frame["payload"].get("task_id")]
-            self.assertEqual([n["payload"]["task_id"] for n in notes],[first["task_id"],second["task_id"]])
-        with station("managed-sessions-reopen","ready") as (gateway,native,incoming,_callback,_host_url):
-            restored = self.read_native(native,"status")
-            self.assertEqual(restored["liveSessions"],[branch])
-            self.assertEqual(restored["modelRequests"],[])
-            self.assertEqual(gateway.worker.native_session_pin,branch)
-            self.assertEqual(platform(incoming,"om_dsh_managed_fork","/fork")["binding_receipt"],forked)
-            cleared = platform(incoming,"om_dsh_managed_clear","/clear")["binding_receipt"]
-            self.assertNotIn(cleared["session"],(branch,target,sid))
-            new = self.read_native(native,"read "+cleared["session"])
-            self.assertEqual((new["allInputs"],new["parent"],new["selection"]["reasoningEffort"]),([],None,"low"))
-            self.assertEqual(self.read_native(native,"status")["modelRequests"],[])
-            def source_changed(*args):
-                self.assertTrue(loop.hermes.workers()["items"][0]["admission_paused"])
-                raise Fault(409,"native_preparation_source_changed")
-            gateway.worker.adapter.prepare_thread = source_changed
-            refusal = platform(incoming,"om_dsh_changed_source","/fork")
-            seq = refusal["output"]["seq"]
-            render, = [item["event"] for item in incoming.request("GET",f"worker/display?after={seq-1}")["items"]
-                       if item["seq"]==seq]
-            self.assertIn("原会话已变化",render["text"])
-            self.assertEqual(gateway.worker.native_session_pin,cleared["session"])
-            self.assertFalse(loop.hermes.workers()["items"][0].get("admission_paused",False))
-        loop.server.shutdown()
-        loop.thread.join()
-        trigger_db = root/"trigger.db"
-        Trigger(trigger_db,"isolated-managed-source")
-        sources = {"router:main":loop.root/"router.db","worker:oguri":root/"worker.db","agent:oguri":root/"adapter.db",
-                   "hermes:main":loop.root/"hermes-adapter.db","trigger:source":trigger_db}
-        snapshot = root/"snapshot"
-        recorded = capture(sources,"a"*40,snapshot,registries={"oguri":registry})
-        checksum = recorded["manifest_sha256"]
-        members = verify(snapshot,checksum)["managed_native"]["oguri"]["children"]
-        self.assertEqual(set(members),{target,branch,cleared["session"]})
-        keys = {"oguri":config(root,"managed-key.json",{"key":callback_key.hex()})}
-        trial = root/"trial"
-        restored_paths = restore(snapshot,checksum,trial,managed_keys=keys)
-        rolled = root/"rollback"
-        rollback(snapshot,checksum,restored_paths,rolled,registries={"oguri":trial/"native--oguri"},managed_keys=keys)
-        for child in members:
-            name = child+".sqlite3"
-            self.assertEqual((rolled/"native--oguri"/name).read_bytes(),(registry/name).read_bytes())
-        self.evidence = {"new_binding":created,"fork_binding":forked,"clear_binding":cleared,"formal":[first,second],
-            "branch_parent":history["parent"],"native_inherited_count":history["inherited"],
-            "native_own_inputs":history["ownInputs"],"branch_native_tool_results":len(history["results"]),
-            "notice_ids":[note["delivery_id"] for note in notes],"recovered_enrollment_count":len(enrollment)-1,
-            "managed_snapshot_sha256":checksum,"restored_native_ledgers":len(members),
-            "scope":"Isolated installed DSH SDK, real TLS adapter and rewrite Router/Worker, fixture model and platform."}
-        output = os.environ.get("MOWULINK_DSH_MANAGED_EVIDENCE")
-        if output:
-            Path(output).write_text(json.dumps(self.evidence,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
+        self.managed_session_switches()
 
     def test_dsh_preparation_reopens_the_exact_native_child_after_ipc_ack_loss(self):
         sid = "isolated-dsh-preparation-source"

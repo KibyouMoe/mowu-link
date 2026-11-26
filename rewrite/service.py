@@ -91,17 +91,16 @@ def serve(args,stack):
         from .dsh_port import DshActivation, DshHost, tool_listener
         from .native_files import NativeFiles
         client = connection(args.worker_connection)
+        link = LocalLink(args.runtime_dir,use_tls=args.local_tls)
         if args.managed_sessions_dir:
-            require(not args.local_tls,422,"dsh_managed_local_tls_unavailable")
             from .dsh_session_family import DshSessionFamily
 
             require(not args.resume_on_handoff,422,"invalid_managed_session_configuration")
-            family = stack.enter_context(DshSessionFamily(client,args).run())
+            family = stack.enter_context(DshSessionFamily(client,args,link).run())
             root = family.port(args.session)
             listener = serve_adapter(root.adapter,args.worker_id,identities,address,ctx,
                                      activation=root.activation,preparation=root.preparation,family=family)
         else:
-            link = LocalLink(args.runtime_dir,use_tls=args.local_tls)
             native = DshHost(args.runtime_dir,link=link)
             media = NativeFiles(args.runtime_dir/"media",client)
             adapter = HostAdapter(args.db,native,args.session,media)

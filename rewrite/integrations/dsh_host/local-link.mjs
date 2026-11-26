@@ -61,17 +61,31 @@ export function unixLink(directory) {
   };
 }
 
+function callbackPort(directory,configured) {
+  if (configured!==0) return configured;
+  const locator = path.join(directory,'dsh-worker-port.json');
+  const info = lstatSync(locator);
+  if (!info.isFile() || info.size>128 || (process.platform!=='win32' &&
+        (info.uid!==process.getuid() || (info.mode & 0o077)))) throw new Error('dsh_callback_unconfirmed');
+  const saved = JSON.parse(readFileSync(locator));
+  if (Object.keys(saved??{}).join(',')!=='port' || !validPort(saved.port)) throw new Error('dsh_callback_unconfirmed');
+  return saved.port;
+}
+
+const validPort = port => Number.isInteger(port) && port>=1024 && port<=65535;
+
 export async function tlsLink(directory,{admissions=false}={}) {
   const [data,cert,key] = await verifiedCredentials(directory,admissions);
   const cfg = JSON.parse(data);
   if (Object.keys(cfg??{}).sort().join(',')!=='host_port,worker_port' ||
-      !Object.values(cfg).every(port=>Number.isInteger(port) && port>=1024 && port<=65535) ||
+      !validPort(cfg.host_port) || (cfg.worker_port!==0 && !validPort(cfg.worker_port)) ||
       cfg.host_port===cfg.worker_port) throw new Error('invalid_dsh_local_ports');
 
   const tls = {ca:cert,cert,key,rejectUnauthorized:true,minVersion:'TLSv1.2'};
   return {
     server: handler=>https.createServer({...tls,requestCert:true,handshakeTimeout:8000},handler),
     listen: (server,ready)=>server.listen(cfg.host_port,'127.0.0.1',ready),
-    request: (options,ready)=>https.request({...options,...tls,hostname:'127.0.0.1',port:cfg.worker_port,agent:false},ready),
+    request: (options,ready)=>https.request({...options,...tls,hostname:'127.0.0.1',port:callbackPort(directory,cfg.worker_port),
+      agent:false},ready),
   };
 }

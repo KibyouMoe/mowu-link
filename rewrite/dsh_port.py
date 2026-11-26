@@ -203,7 +203,7 @@ def tool_listener(directory, adapter, worker, *, family=None, link=None):
             self.connection.settimeout(8)
             try:
                 workspace = self.path=="/workspace-artifact"
-                require(self.path in ("/tool","/approval","/approval/attempt","/workspace-state","/workspace-artifact"),
+                require(self.path in ("/tool","/approval","/approval/attempt","/workspace-state","/workspace-artifact","/managed-session"),
                         404,"unknown_route")
                 size = int(self.headers.get("Content-Length","-1"))
                 if workspace:
@@ -219,7 +219,11 @@ def tool_listener(directory, adapter, worker, *, family=None, link=None):
                     session = string(body,"session")
                     selected = family.port(session) if family else None
                     bound,callback = (selected.adapter,selected.callback) if selected else (adapter,worker)
-                if workspace:
+                if self.path=="/managed-session":
+                    require(family is not None and link.ports,404,"unknown_route")
+                    require(set(body)=={"session"},422,"invalid_envelope")
+                    result = family.session_scope(string(body,"session"))
+                elif workspace:
                     result = stage_workspace_artifact(bound,callback,body,self.rfile,size)
                 elif self.path=="/workspace-state":
                     result = callback.request("POST","worker/workspace-state",body)
@@ -259,8 +263,7 @@ def tool_listener(directory, adapter, worker, *, family=None, link=None):
             self.end_headers()
             self.wfile.write(raw)
 
-    server, endpoint = link.listen_for_tools(Handler)
-    with server:
+    with link.listen_for_tools(Handler) as (server, endpoint):
         info = endpoint.stat() if endpoint else None
         runner = Thread(target=server.serve_forever,kwargs={"poll_interval":0.05},daemon=True)
         recovery = Thread(target=recover_approvals,daemon=True)
