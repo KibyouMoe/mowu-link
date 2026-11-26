@@ -4,6 +4,10 @@
 
 ## 检查点与证据
 
+修复了 DSH 可写工位改走本机双向 TLS 后，离线审计只查 Unix 套接字的问题。旧分支实测原宿主在线且工作区已清空时，审计错误返回空问题列表。新版即使原宿主仍持写锁、暂时读不到端口配置也拒绝；旧版没有写锁时，仍能识别配置指定端口上的监听。竞争启动第二个宿主被拒。原宿主停机后，换绑和版本回退各持同一写锁发布目录，数据库副本逐字节匹配原快照。回退旧包实际启动 Router、Worker、DSH 适配器和 DSH，读回原成果、附件和唯一通知。原号重投新增普通私聊一次，原工单没有重跑。[两版实测](evidence/dsh-tls-workspace-handoff.json) · [离线步骤](router-rehearsal.md#重做版五组件的离线恢复)
+
+修复、发布时持锁、双向 TLS 两版复验分别为 `17204feb9d3af9dc8f9438131d7a1aa5f433fe87`、`470df557ad2046c50ae4828eab5328e495a364e2`、`315eb112c2fe5fdd90beb9cc9f5ee15aea0acf29`。19 项安装包专项通过。用同一对版本的安装包经 `rewrite.release_check --component dsh-workspace-rollback` 分别复跑 Unix 套接字及双向 TLS 回退，均读回原成果。Windows Server 2025 CI 两次默认 Docker 连接分别报告 `windows` 和不可用。最新提交的 Windows DSH 13 项、Codex 与安装 10 项以及两套回退通过。macOS 全量通过 301 项、跳过 5 项。Linux arm64 全量通过 187 项、跳过 119 项。Windows 可写工位仍缺可连接 Linux 容器的隔离环境。[首次引擎观测](https://github.com/KibyouMoe/mowu-link/actions/runs/45894320633/job/140164337047) · [最新回归](https://github.com/KibyouMoe/mowu-link/actions/runs/45894741098)
+
 macOS 的 DSH 可写派发已接入本机双向 TLS。原生宿主与适配器间的工单工具、附件字节、持权查询和容器回收使用同一已认证连接。实测宿主没有 Unix 回调套接字，无证书的两向请求均被拒。原生工具写出 691200 字节，分块回执故意丢失后续传，管理端在 W04 前无法取文件，W04 后逐字节核对一致。丢 W04 回执时原容器保留。从原库重建 Worker 后用原报告重试，只发一次验收通知，容器随后自动回收。模型用脚本驱动，Docker、原生宿主、Worker 和 Router 实跑。此结果的 Docker 引擎仍是 Linux，Windows 原生可写工作区未接入。[实测](evidence/dsh-local-tls-workspace-macos.json)
 
 实现提交 `a54ca112f6da29f0add34b24966e822596ee57f2`，282 文件安装包逐项回读后，双向 TLS 成果、Unix 套接字成果、Unix 套接字取消及转派共 3 项专项通过。Windows DSH 13 项、Codex 与安装 10 项、两套回退通过。macOS 全量 300 项通过、5 项依环境跳过。Linux arm64 全量 187 项通过、118 项依环境跳过。包摘要 `3a96b3495596d0637d820a16801a87f0d9b1412b51ba7d2ff8754664e44261de`。复跑 `MOWULINK_DSH_CONTAINER_IMAGE=<已有镜像完整ID> python3 -B -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_dsh_workspace_exports_and_releases_over_mutual_tls`。[Windows 回归](https://github.com/KibyouMoe/mowu-link/actions/runs/45893121450)

@@ -1,0 +1,194 @@
+{
+  "dsh_workspace_rollback": {
+    "active_journal": {
+      "fingerprint": "a787c9659483b6a7544b702433aa72e58c4bef4b9b1eb276ac978506fa9566a1",
+      "pending": [
+        {
+          "assignment_id": "ca9d16df-2197-45de-abab-de30500476cb",
+          "phase": "active",
+          "session": "dsh-offline-workspace-handoff",
+          "task_id": "e37e44d1-08e9-47f3-b1f2-225dc855e909"
+        }
+      ]
+    },
+    "assignment_id": "ca9d16df-2197-45de-abab-de30500476cb",
+    "container_id": "9ca6962845c76b0115ba350d5143984072b0df02f6ae5d13a0c1e1aee9d8d2ec",
+    "held_before_reaper": 0,
+    "invalid_record": "dsh_workspace_journal_unconfirmed",
+    "legacy_listener_without_writer_rejected": true,
+    "live_writer_proof_without_endpoint_config": true,
+    "missing_journal": "dsh_workspace_journal_required",
+    "native_link": "IPv4 loopback with mutual TLS",
+    "new_model_requests_after_reopen": 0,
+    "original_inputs": [
+      "mowulink-9204154cf4f8ce99b36dea60865f1696e26ba2a2ca9633c60448794f9215f44d"
+    ],
+    "outputs_published_under_writer_lock": [
+      "staged",
+      "version-rollback"
+    ],
+    "previous_release": {
+      "native_input": "mowulink-5aae162f8f7f60850d97234f3aa43471b272a776d26921e39c812f58e190c131",
+      "native_replays_of_formal_order": 0,
+      "native_session": "dsh-offline-workspace-handoff",
+      "outbound_notice": "e3603af0-2278-4c85-9444-fd30b150369d",
+      "previous_artifact_id": "64ba2f83-a01b-4131-92c3-a7a2fa6c6ad2",
+      "previous_processes": [
+        "Router",
+        "Worker",
+        "DSH adapter",
+        "DSH host"
+      ],
+      "private_message": "5fdfaeb5-c82f-4fcf-8dd0-ca21f2ae9a69"
+    },
+    "public_endpoint_config_rejected": true,
+    "receipt_pending_before_reaper": 0,
+    "running_host": "dsh_workspace_host_still_running",
+    "scope": "Installed DSH AgentLoop, isolated Linux Docker and Router/Worker HTTP; scripted local model.",
+    "sealed_journal": {
+      "fingerprint": "f5abf156a45d3a6e438eaec1f966cf27bf913ef2c5f3d6e158717d9e3cb44451",
+      "pending": []
+    },
+    "second_native_writer_rejected": true,
+    "session": "dsh-offline-workspace-handoff",
+    "snapshot_format": 3,
+    "snapshot_sha256": "a93c7fb4ba5b489bf56078b1cbbe1e69f007eedc0f8901f649c90923b9c54904",
+    "staged_session": "other-session",
+    "task_id": "e37e44d1-08e9-47f3-b1f2-225dc855e909",
+    "version_rollback": {
+      "components": [
+        "agent:oguri",
+        "hermes:main",
+        "router:main",
+        "trigger:offline",
+        "worker:oguri"
+      ],
+      "database_restore_allowed_with_live_workspace": true,
+      "refusals": [
+        "dsh_workspace_journal_required",
+        "dsh_workspace_journal_mismatch",
+        "dsh_assignment_workspace_pending",
+        "dsh_workspace_host_still_running"
+      ],
+      "retained_session": "dsh-offline-workspace-handoff",
+      "snapshot_sha256_after_drain": "a93c7fb4ba5b489bf56078b1cbbe1e69f007eedc0f8901f649c90923b9c54904"
+    },
+    "w04_state_before_capture": "completed_reported",
+    "wrong_runtime": "dsh_workspace_journal_mismatch"
+  },
+  "network": "isolated HTTPS loopback",
+  "new_revision": "315eb112c2fe5fdd90beb9cc9f5ee15aea0acf29",
+  "package_sha256": [
+    "bae591d8d72790ee5144ee8c2601fcad6f7646b6105f073d64ccf2e0d1c5132f",
+    "1f722ad69fed6dd7b86c0330706f4045ed3159700591795ed930d38f95b8e81d"
+  ],
+  "previous_revision": "98daf7828f315682a015668dc92e97acbc42b8bb",
+  "baseline_reproduction": {
+    "revision": "98daf7828f315682a015668dc92e97acbc42b8bb",
+    "case": "sealed workspace with original TLS host still live",
+    "expected_issues": [
+      "dsh_workspace_host_still_running"
+    ],
+    "actual_issues": []
+  },
+  "unix_rehearsal_same_packages": {
+    "active_journal": {
+      "fingerprint": "501d11e5eead148d3a9e4456103d7ead084f5a75663b112c2b484f72c00872a2",
+      "pending": [
+        {
+          "assignment_id": "18f28782-4264-4f4f-b2d6-bb59763c8b57",
+          "phase": "active",
+          "session": "dsh-offline-workspace-handoff",
+          "task_id": "9011efa4-d3bd-4a8c-85b0-7b16c2df6d57"
+        }
+      ]
+    },
+    "assignment_id": "18f28782-4264-4f4f-b2d6-bb59763c8b57",
+    "container_id": "1fb1408cef99d44cfb2449de582da42b8e70d3a235adc63bf157ac94da9016e6",
+    "held_before_reaper": 0,
+    "invalid_record": "dsh_workspace_journal_unconfirmed",
+    "missing_journal": "dsh_workspace_journal_required",
+    "native_link": "Unix socket",
+    "new_model_requests_after_reopen": 0,
+    "original_inputs": [
+      "mowulink-e5e7cd5d6e632cfc293a8b355324917fc469fd6e3aa2f5cc1fd1085c3059f52b"
+    ],
+    "previous_release": {
+      "native_input": "mowulink-a82e71304b945e35b6bf27ac8f0e358cdd415324b824a055008c5c4cce185ed8",
+      "native_replays_of_formal_order": 0,
+      "native_session": "dsh-offline-workspace-handoff",
+      "outbound_notice": "40823b02-83b1-406e-8c12-4088dbef52c1",
+      "previous_artifact_id": "c7e4c87b-a9a2-46a9-ac30-c04083e83ab9",
+      "previous_processes": [
+        "Router",
+        "Worker",
+        "DSH adapter",
+        "DSH host"
+      ],
+      "private_message": "5f13faa8-c4dd-42c7-8110-136a31e35d15"
+    },
+    "receipt_pending_before_reaper": 0,
+    "running_host": "dsh_workspace_host_still_running",
+    "scope": "Installed DSH AgentLoop, isolated Linux Docker and Router/Worker HTTP; scripted local model.",
+    "sealed_journal": {
+      "fingerprint": "f1c7a54f6f80c477e19a1a6a77afaca44ee1c4f0b1e309d7ab03723998ebba73",
+      "pending": []
+    },
+    "session": "dsh-offline-workspace-handoff",
+    "snapshot_format": 3,
+    "snapshot_sha256": "2382dc191e6eb25f9e8b6a4b9abb3a93a91923ccc6d20f4aa7fa777bc02865ad",
+    "staged_session": "other-session",
+    "task_id": "9011efa4-d3bd-4a8c-85b0-7b16c2df6d57",
+    "version_rollback": {
+      "components": [
+        "agent:oguri",
+        "hermes:main",
+        "router:main",
+        "trigger:offline",
+        "worker:oguri"
+      ],
+      "database_restore_allowed_with_live_workspace": true,
+      "refusals": [
+        "dsh_workspace_journal_required",
+        "dsh_workspace_journal_mismatch",
+        "dsh_assignment_workspace_pending",
+        "dsh_workspace_host_still_running"
+      ],
+      "retained_session": "dsh-offline-workspace-handoff",
+      "snapshot_sha256_after_drain": "2382dc191e6eb25f9e8b6a4b9abb3a93a91923ccc6d20f4aa7fa777bc02865ad"
+    },
+    "w04_state_before_capture": "completed_reported",
+    "wrong_runtime": "dsh_workspace_journal_mismatch"
+  },
+  "windows_ci": {
+    "dsh_native_tests_passed": 13,
+    "codex_and_install_tests_passed": 10,
+    "rollback_rehearsals_passed": [
+      "Router",
+      "Worker and adapter"
+    ],
+    "default_docker_engine_observations": [
+      {
+        "result": "windows",
+        "revision": "17204feb9d3af9dc8f9438131d7a1aa5f433fe87",
+        "job": "https://github.com/KibyouMoe/mowu-link/actions/runs/45894320633/job/140164337047"
+      },
+      {
+        "result": "unavailable",
+        "revision": "315eb112c2fe5fdd90beb9cc9f5ee15aea0acf29",
+        "job": "https://github.com/KibyouMoe/mowu-link/actions/runs/45894741098/job/140165827775"
+      }
+    ],
+    "windows_linux_container_run_verified": false
+  },
+  "full_regression": {
+    "macos": {
+      "passed": 301,
+      "environment_skipped": 5
+    },
+    "linux_arm64": {
+      "passed": 187,
+      "environment_skipped": 119
+    }
+  }
+}

@@ -158,6 +158,8 @@ python3 -B -m rewrite.release_check --repository . --component dsh-workspace-rol
   --dsh-image "$TEST_DOCKER_IMAGE"
 ```
 
+本机双向 TLS 工位可在同一命令追加 `--dsh-local-tls`，前一版须支持该工作区传输方式。本轮从 `98daf7828f315682a015668dc92e97acbc42b8bb` 回退，两个版本包均按 SHA 和文件摘要校验。原宿主在线时保留旧绑定，停机后持写锁发布回退库，旧包读回同一份附件和验收通知。[双向 TLS 回退实测](evidence/dsh-tls-workspace-handoff.json)
+
 
 
 

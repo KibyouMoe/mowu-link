@@ -191,6 +191,7 @@ python3 -B -m rewrite.state_bundle stage-native-handoff --snapshot "$SNAPSHOT" -
 
 `native_session_pending.dsh_assignment_workspaces` 计入原账本尚未回收的派发。未提供原目录、目录身份不符、账本无法读取或原宿主仍运行时，该项记为未知并且换绑不发布。换绑生成目录前再次读账本，确认在准备期间没有变化。W04 和持单均清零后，尚有容器也会阻止换绑。重开原宿主及适配器，凭原回执收尾，再停机检查。早于账本登记的快照需先在原工位补采一次活动观测后重新备份。五组件数据恢复仍可接回原工位。[DSH 换绑与回退](evidence/dsh-offline-workspace-handoff.json) · [Codex 工作区停机对账](evidence/codex-assignment-workspace.json)
 
+运行可写工位的 DSH 插件在私有目录使用 `dsh-workspace.writer` 协调写入。离线程序复核 Unix 或 TLS 本机监听，读取 `dsh-link.json` 时仍检查文件权限。新宿主注册写者后，换绑和版本回退程序持有同一把锁直至目录发布。重开工位和发布目录不能同时写原账本。保留原私有运行目录及启动配置，不在停写期间移除端口配置或锁文件。使用没有写锁的旧插件时，维持原宿主确实停机，并保持端点配置供检查。[双向 TLS 锁与回退](evidence/dsh-tls-workspace-handoff.json)
 
 `native_session_pending` 另列换绑前需要核对的离线账本。包括持单、Router 已保留的派发、未处理收件、私聊与队列、同伴收据、问题、压缩、清理以及没有原生关闭回执的命令审批。缺少的旧库表显示未知。只有这些记录均为零且前述持单检查无误，`native_session_ledger_clear` 才为真。原会话重开可继续未确认的工作，换到别的会话前要把这些记录留在原会话对账。实际忙闲、原生目标和权限须在独立宿主核验。
 
