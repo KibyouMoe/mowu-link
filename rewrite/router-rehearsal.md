@@ -94,3 +94,15 @@ python3 -m rewrite.state_bundle rollback --snapshot ./snapshot --manifest-sha256
 ```
 
 版本级复跑为 `python3 -m rewrite.release_check --repository . --previous b31cee5da7c8dc74a76accdd78d8a6c5cb49484c --new 5de36ad66df26dc34fe3832ed14e77b1d9f19551`。两个已提交版本在各自新目录启动真实 Router，以专用临时 TLS 和身份验同一张待派单。旧包→新包→旧包后只查到原单一张，新试用库字节未变。该演练在 macOS 跑过；Windows 与跨机宿主尚待验收。
+
+### Worker 和适配器逐个升级
+
+```sh
+python3 -m rewrite.release_check --repository . --component worker-pair \
+  --previous 1bdfaca0f6145a45e2dbae84c4e8ee4fe7cb2760 \
+  --new db43808f3eaf518edb240298e35e8a18b5a94805
+```
+
+两版各按提交制作和校验发布包。在 macOS 临时目录先让旧 Worker 和旧适配器收到一条私聊，然后停止两端并保存 Worker、适配器、宿主夹具三份库。新适配器先用检验副本启动，旧 Worker 重送原消息。再用新版 Worker 核原回执已写入新表。最后将原备份复制到回退目录，用旧版两端重跑。四次回执完全相同，三个阶段的原生账本均只有一条输入，原始快照摘要未变。
+
+Router、Worker、适配器的独立进程和回环 TLS 实际运行，平台输入与宿主是隔离夹具。本例只用已确认私聊验证兼容顺序与零新增业务的回退。实际试用期收到新的生产消息、打开新的原生回合或提交工单成果时，需要先对账。

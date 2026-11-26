@@ -1,6 +1,6 @@
 """Rehearse switching between two Git-built packages in a temporary home on loopback."""
 import argparse
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 import json
 import os
 from pathlib import Path
@@ -12,24 +12,24 @@ import tempfile
 from threading import Thread
 
 from .release import build,materialize
-from .cutover import digest
+from .cutover import digest, readonly
 from .storage import encode, guid
 from .wire import Client
 
 
 @contextmanager
-def router(package,database,roles,cert,key,env):
-    proc = subprocess.Popen([sys.executable,"-B","-S","-m","rewrite.service","router","--db",database,
-                             "--identities",roles,"--cert",cert,"--key",key],cwd=package,env=env,
+def serve(package,component,database,roles,cert,key,env,extra=()):
+    proc = subprocess.Popen([sys.executable,"-B","-S","-m","rewrite.service",component,"--db",database,
+                             "--identities",roles,"--cert",cert,"--key",key,*extra],cwd=package,env=env,
                             stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
     try:
         q = Queue()
         Thread(target=lambda:q.put(proc.stdout.readline()),daemon=True).start()
         line = q.get(timeout=10)
         if not line:
-            raise RuntimeError("isolated Router failed to start: "+proc.stderr.read()[-500:])
+            raise RuntimeError(f"isolated {component} failed to start: "+proc.stderr.read()[-500:])
         info = json.loads(line)
-        if info.get("tls") is not True or info.get("component") != "router":
+        if info.get("tls") is not True or info.get("component") != component:
             raise RuntimeError("wrong service started")
         yield "https://127.0.0.1:"+str(info["port"])
     finally:
@@ -44,7 +44,96 @@ def router(package,database,roles,cert,key,env):
         proc.stderr.close()
 
 
-def run(repository,older,newer):
+def config(directory,filename,value):
+    path = directory/filename
+    with open(path,"x",opener=lambda name,flags:os.open(name,flags,0o600)) as out:
+        json.dump(value,out)
+    return path
+
+
+def worker_pair(root,old,new,cert,key,env):
+    worker,session = "trial","test-upgrade-session"
+    router_token,adapter_token,platform_token = (guid() for _ in range(3))
+    router_roles = config(root,"router-roles.json",{router_token:"worker/"+worker})
+    adapter_roles = config(root,"adapter-roles.json",{adapter_token:"worker/"+worker})
+    worker_roles = config(root,"worker-roles.json",{platform_token:"platform/"+worker})
+    message = {"message_id":guid(),"text":"隔离升级前的私聊"}
+    databases = ("worker.db","adapter.db","native.db")
+    before,trial,rollback = (root/name for name in ("before","trial","rollback"))
+    before.mkdir()
+
+    with serve(old,"router",root/"router.db",router_roles,cert,key,env) as router_url:
+        to_router = config(root,"to-router.json",{"url":router_url,"token":router_token,"ca_file":str(cert)})
+
+        @contextmanager
+        def adapter(package,state,stage):
+            extra = ("--worker-id",worker,"--session",session,"--fixture-db",state/"native.db")
+            with serve(package,"fixture-adapter",state/"adapter.db",adapter_roles,cert,key,env,extra) as url:
+                yield config(root,stage+"-adapter.json",{"url":url,"token":adapter_token,"ca_file":str(cert)})
+
+        def receive(package,state,to_adapter):
+            extra = ("--worker-id",worker,"--adapter-session",session,
+                     "--router-connection",to_router,"--adapter-connection",to_adapter)
+            with serve(package,"worker",state/"worker.db",worker_roles,cert,key,env,extra) as url:
+                return Client(url,platform_token,cert).request("POST","worker/chat",message)["receipt"]
+
+        with adapter(old,before,"old") as target:
+            first = receive(old,before,target)
+        if not first or first.get("session")!=session or not first.get("native_id"):
+            raise RuntimeError("the old pair did not return a native receipt")
+        fingerprints = {name:digest(before/name) for name in databases}
+        shutil.copytree(before,trial)
+        with adapter(new,trial,"new") as target:
+            mixed = receive(old,trial,target)
+            upgraded = receive(new,trial,target)
+        shutil.copytree(before,rollback)
+        with adapter(old,rollback,"rollback") as target:
+            restored = receive(old,rollback,target)
+
+    counts = {}
+    for name,state in (("before",before),("trial",trial),("rollback",rollback)):
+        with closing(readonly(state/"native.db")) as db:
+            rows = db.execute("SELECT receipt FROM inputs").fetchall()
+            if [json.loads(row["receipt"]) for row in rows]!=[first]:
+                raise RuntimeError(f"{name} wrote the wrong number of native inputs")
+            counts[name] = len(rows)
+    if first!=mixed or first!=upgraded or first!=restored:
+        raise RuntimeError("a service pair returned a different receipt for the same message")
+    with closing(readonly(trial/"worker.db")) as db:
+        row = db.execute("SELECT session,receipt FROM chat_deliveries WHERE message_id=?",
+                         (message["message_id"],)).fetchone()
+        if not row or row["session"]!=session or json.loads(row["receipt"])!=first:
+            raise RuntimeError("the upgraded Worker did not persist the recovered binding and receipt")
+    if any(digest(before/name)!=checksum for name,checksum in fingerprints.items()):
+        raise RuntimeError("the original offline input state changed")
+    return {"starts":["previous pair","new adapter with previous Worker","new pair","previous pair restored"],
+            "message_id":message["message_id"],"native_receipt":first,"native_inputs":counts,
+            "original_snapshot_unchanged":True,"upgraded_worker_persisted_receipt":True,"host":"isolated fixture"}
+
+
+def router_rehearsal(root,old,new,cert,key,env):
+    token = guid()
+    roles = config(root,"roles.json",{token:"hermes"})
+    original = root/"old-state.db"
+    candidate = root/"trial-state.db"
+    with serve(old,"router",original,roles,cert,key,env) as url:
+        first = Client(url,token,cert).request("POST","tasks",{"title":"隔离升级","instructions":"保持待派"},guid())
+    tid = first["task_id"]
+    fingerprint = digest(original)
+    shutil.copyfile(original,candidate)
+    with serve(new,"router",candidate,roles,cert,key,env) as url:
+        observed = Client(url,token,cert).request("GET","tasks/"+tid)["task"]
+    if observed!=first or digest(candidate)!=fingerprint:
+        raise RuntimeError("new version changed the pending task or offline state; rollback requires reconciliation")
+    with serve(old,"router",original,roles,cert,key,env) as url:
+        rows = Client(url,token,cert).request("GET","tasks")["items"]
+        if rows != [first]:
+            raise RuntimeError("original package did not recover the original task")
+    return {"task_id":tid,"after_upgrade":observed["state"],"after_rollback_count":len(rows),
+            "unchanged_trial":True,"starts":["previous","new","previous"]}
+
+
+def run(repository,older,newer,component="router"):
     if older==newer:
         raise ValueError("two different release commits are required")
     with tempfile.TemporaryDirectory(prefix="mowulink-release-") as folder:
@@ -62,30 +151,12 @@ def run(repository,older,newer):
         subprocess.run(["openssl","req","-x509","-newkey","rsa:2048","-nodes","-days","1",
                         "-subj","/CN=localhost","-addext","subjectAltName=IP:127.0.0.1",
                         "-keyout",key,"-out",cert],cwd=root,env=env,timeout=10,check=True,capture_output=True)
-        roles = root/"roles.json"
-        token = guid()
-        with open(roles,"x",opener=lambda p,f:os.open(p,f,0o600)) as out:
-            json.dump({token:"hermes"},out)
-        original = root/"old-state.db"
-        candidate = root/"trial-state.db"
-        with router(old,original,roles,cert,key,env) as url:
-            first = Client(url,token,cert).request("POST","tasks",{"title":"隔离升级","instructions":"保持待派"},guid())
-        tid = first["task_id"]
-        fingerprint = digest(original)
-        shutil.copyfile(original,candidate)
-        with router(new,candidate,roles,cert,key,env) as url:
-            observed = Client(url,token,cert).request("GET","tasks/"+tid)["task"]
-        if observed!=first or digest(candidate)!=fingerprint:
-            raise RuntimeError("new version changed the pending task or offline state; rollback requires reconciliation")
-        with router(old,original,roles,cert,key,env) as url:
-            rows = Client(url,token,cert).request("GET","tasks")["items"]
-            if rows != [first]:
-                raise RuntimeError("original package did not recover the original task")
+        rehearse = worker_pair if component=="worker-pair" else router_rehearsal
+        observed = rehearse(root,old,new,cert,key,env)
         for archive,sha,checksum,directory in versions:
             materialize(archive,sha,checksum,directory,install=False)
         return {"previous_revision":older,"new_revision":newer,"package_sha256":[v[2] for v in versions],
-                "task_id":tid,"after_upgrade":observed["state"],"after_rollback_count":len(rows),
-                "unchanged_trial":True,"network":"isolated HTTPS loopback","starts":["previous","new","previous"]}
+                "network":"isolated HTTPS loopback",**observed}
 
 
 def main():
@@ -93,8 +164,9 @@ def main():
     p.add_argument("--repository",type=Path,required=True)
     p.add_argument("--previous",required=True)
     p.add_argument("--new",required=True)
+    p.add_argument("--component",choices=("router","worker-pair"),default="router")
     args = p.parse_args()
-    print(encode(run(args.repository,args.previous,args.new)))
+    print(encode(run(args.repository,args.previous,args.new,args.component)))
 
 
 if __name__=="__main__":

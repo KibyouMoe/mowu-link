@@ -1,0 +1,22 @@
+{
+  "host": "isolated fixture",
+  "network": "isolated HTTPS on macOS loopback",
+  "previous_revision": "1bdfaca0f6145a45e2dbae84c4e8ee4fe7cb2760",
+  "new_revision": "db43808f3eaf518edb240298e35e8a18b5a94805",
+  "package_sha256": [
+    "6e39519f1f3f86c60ebcafb6e0abefa250f67c5bc33c328e3e702d5a0e05e699",
+    "d5c45488c2418da2dd2f3eaa686672ed56f09ff277a61872eeecfc1b9c4e7bf9"
+  ],
+  "starts": ["previous pair", "new adapter with previous Worker", "new pair", "previous pair restored"],
+  "message_id": "5271200b-dfd7-4400-95f8-6bfbfd70c78a",
+  "native_receipt": {
+    "delivery_id": "chat-5271200b-dfd7-4400-95f8-6bfbfd70c78a",
+    "digest": "12279a54891e05b3d68451c82ed4b4ecca17a75f30542728937db2356bf38890",
+    "native_id": "c4d8ba55-5521-4d4f-9394-b24f7c888b55",
+    "session": "test-upgrade-session",
+    "turn_id": "80fc6ecf-7602-4e1c-903b-b530b626e9f3"
+  },
+  "native_inputs": {"before": 1, "rollback": 1, "trial": 1},
+  "original_snapshot_unchanged": true,
+  "upgraded_worker_persisted_receipt": true
+}
