@@ -1,14 +1,19 @@
 """Manager-side adapter. Report arrival queues a Notify; only the manager can approve."""
 import json
 import time
+from pathlib import Path
 from urllib.parse import urlencode
 
 from .storage import Database, encode, require
+from .native_files import NativeFiles
 
 
 class HermesAdapter:
     def __init__(self, path, router, host_adapter, clock=time.monotonic):
         self.router, self.host, self.clock = router, host_adapter, clock
+        self.file_store = NativeFiles(Path(str(path)+".attachments"), router, router_files=True)
+        if host_adapter is not None:
+            host_adapter.media_store = self.file_store
         self.idle_since = None
         self.db = Database(path, """
             CREATE TABLE IF NOT EXISTS progress (cursor INTEGER NOT NULL);
@@ -34,6 +39,19 @@ class HermesAdapter:
 
     def messages(self, **filters):
         return self.router.request("GET", "messages?" + urlencode(filters))
+
+    def message_files(self, mid):
+        items = self.messages(message_id=mid)["items"]
+        require(len(items)==1 and items[0]["message_id"]==mid,404,"message_not_found")
+        files = items[0].get("attachments",[])
+        require([f["attachment_id"] for f in files]==items[0]["attachment_ids"],409,"message_files_unconfirmed")
+        return files
+
+    def read_file(self, mid, file_id):
+        file = next((f for f in self.message_files(mid) if f["attachment_id"]==file_id),None)
+        require(file is not None,404,"message_attachment_not_found")
+        path, = self.file_store.prepare([file])
+        return {**file, "local_path":str(path)}
 
     def answer(self, key, task_id, question_id, answer):
         return self.router.request("PUT", f"questions/{question_id}/answer",
@@ -75,7 +93,12 @@ class HermesAdapter:
                         ORDER BY (json_extract(payload,'$.level')='Event') DESC,rowid LIMIT 1""",
                         (self.idle_since is not None and self.clock()-self.idle_since >= 10,)).fetchone()
         if row:
-            receipt = self.host.deliver(row["message_id"], json.loads(row["payload"]))
+            payload = json.loads(row["payload"])
+            if payload.get("attachment_ids"):
+                files = self.message_files(row["message_id"])
+                require([file["attachment_id"] for file in files]==payload["attachment_ids"],409,"message_files_unconfirmed")
+                payload["attachments"] = files
+            receipt = self.host.deliver(row["message_id"], payload)
             if receipt:
                 with self.db.transaction() as db:
                     db.execute("UPDATE queue SET receipt=? WHERE message_id=?", (encode(receipt), row["message_id"]))

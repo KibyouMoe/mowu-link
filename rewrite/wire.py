@@ -224,7 +224,7 @@ class Client:
             handlers.append(HTTPSHandler(context=ssl.create_default_context(cafile=ca_file)))
         self.http = build_opener(*handlers)
 
-    def request(self, method, path, body=None, key=None, headers=None):
+    def request(self, method, path, body=None, key=None, headers=None, *, max_bytes=None):
         hdr = {"Authorization": "Bearer " + self.token, **(headers or {})}
         raw = None
         if isinstance(body, bytes):
@@ -238,7 +238,9 @@ class Client:
         req = Request(self.url + "/v1/" + path, data=raw, method=method, headers=hdr)
         try:
             with self.http.open(req, timeout=5) as response:
-                raw = response.read()
+                raw = response.read() if max_bytes is None else response.read(max_bytes+1)
+                if max_bytes is not None and len(raw)>max_bytes:
+                    raise Fault(409, "oversized_file_response")
                 if response.headers.get_content_type() == "application/octet-stream":
                     return {"bytes": raw, "status": response.status, "headers": dict(response.headers)}
                 if response.headers.get_content_type() == "text/event-stream":

@@ -36,7 +36,7 @@ TOOLS = {
         "action":{"type":"string","enum":["assign","resume","transfer","snooze","cancel","close","archive_failed"]},
         "worker_id":TEXT,"reason":TEXT,"resolution":TEXT,"note":TEXT,"remind_after_hours":{"type":"number"}},
         ("task_id","expected_revision","action"))),
-    "router_info": ("按条件读取消息和授权附件", fields({**PAGE,"message_id":GUID,"source":TEXT,
+    "router_info": ("查询消息；同时给出 message_id 和 attachment_id 时，校验并取得该附件在宿主侧的文件", fields({**PAGE,"message_id":GUID,"attachment_id":GUID,"source":TEXT,
         "level":{"type":"string","enum":["Event","Notify","Info"]},"since":TEXT})),
     "router_questions": ("按原单或原题查收问题和答复", fields({**PAGE,"task_id":GUID,"question_id":GUID,"pending":BOOL})),
     "router_answer": ("向该工单的指定问题交回答案", fields({"task_id":GUID,"question_id":GUID,
@@ -68,7 +68,7 @@ class ManagerTools:
             schema = TOOLS[name][1]
             require(isinstance(args,dict) and set(schema["required"]) <= args.keys() <= schema["properties"].keys(),
                     422, "invalid_tool_arguments")
-            for field in ("task_id", "question_id", "message_id"):
+            for field in ("task_id", "question_id", "message_id", "attachment_id"):
                 if field in args:
                     require(valid_guid(args[field]), 422, "invalid_" + field)
             result = self.dispatch(name, dict(args), origin)
@@ -82,6 +82,9 @@ class ManagerTools:
         readers = {"router_workers": self.adapter.workers, "router_tasks": self.adapter.tasks,
                    "router_questions": self.adapter.questions, "router_info": self.adapter.messages}
         if name in readers:
+            if name == "router_info" and "attachment_id" in args:
+                require(set(args)=={"message_id","attachment_id"},422,"attachment_needs_exact_message")
+                return self.adapter.read_file(args["message_id"], args["attachment_id"])
             if name == "router_tasks" and "task_id" in args:
                 require(len(args) == 1, 422, "detail_with_list_filters")
                 return self.adapter.inspect(args["task_id"])

@@ -155,7 +155,7 @@ class Orders:
         elif table == "questions":
             items = [questions.public({k: r[k] for k in r.keys() if k != "cursor_id"}) for r in page]
         elif table == "messages":
-            items = [messages.public(r) for r in page]
+            items = [messages.public(db,r) for r in page]
         else:
             items = [{"worker_id": r["worker_id"], "online": self.clock() - r["last_seen"] < self.lease_seconds,
                       "busy": bool(r["busy"]), "held_task_id": r["held_task_id"],

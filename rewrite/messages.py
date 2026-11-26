@@ -67,5 +67,11 @@ def notify(db, now, tid, source, text, ids=(), **details):
     delivery.enqueue(db,"hermes","message.deliver",data)
 
 
-def public(row):
-    return dict(json.loads(row["payload"]), source=row["source"], received_at=row["received_at"] or None)
+def public(db, row):
+    result = dict(json.loads(row["payload"]), source=row["source"], received_at=row["received_at"] or None)
+    if result.get("attachment_ids"):
+        result["attachments"] = []
+        for file_id in result["attachment_ids"]:
+            file = attachments.authorize(db, "hermes", file_id)
+            result["attachments"].append({k: file[k] for k in ("attachment_id", "name", "sha256", "size_bytes")})
+    return result
