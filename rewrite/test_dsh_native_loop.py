@@ -1124,6 +1124,145 @@ class NativeProcess(unittest.TestCase):
             self.evidence["link"] = "IPv4 loopback with mutual TLS"
             Path(output).write_text(encode(self.evidence)+"\n",encoding="utf-8")
 
+    def native_goal_commands(self,*,use_tls):
+        session = "dsh-real-loop-goals"
+        directory,loop,service,command = self.goal_worker(session,use_tls=use_tls)
+        with self.start_native(directory,session,"goals",use_tls=use_tls) as native:
+            service.step()
+            self.assertIn("没有目标",command("om_no_goal","/goal 状态")[1])
+            self.assertIn("没有目标",command("om_no_pause","/goal 暂停")[1])
+            self.assertIsNone(loop.native.goal_view(session)["goal"])
+            request = "/goal 隔离持久目标\n保留 第二行"
+            created,_ = command("om_create_goal",request)
+            original = loop.native.goal_view(session)["goal"]
+            self.assertEqual(original["objective"],"隔离持久目标\n保留 第二行")
+            self.assertEqual(created["goal_receipt"]["id"],original["id"])
+            self.assertEqual(command("om_create_goal",request)[0],created)
+            self.assertIn("已有未完成",command("om_replace_goal","/goal 不能替换")[1])
+            self.assertEqual(loop.native.goal_view(session)["goal"],original)
+            current = command("om_goal","/goal")[1]
+            self.assertIn(f"进行中 · 0/{original['limit']} 轮",current)
+            self.assertIn("隔离持久目标",current)
+            paused,text = command("om_pause","/goal 暂停")
+            self.assertIn("已暂停",text)
+            self.assertEqual(paused["goal_receipt"]["id"],original["id"])
+            self.assertEqual(paused["goal_receipt"]["revision"],original["revision"]+1)
+            change = loop.adapter.goal_change
+            def lost(*args):
+                change(*args)
+                raise ConnectionError("lost native goal receipt")
+            loop.adapter.goal_change = lost
+            pending,text = command("om_resume","/goal 继续")
+            self.assertIn("目标操作待核",text)
+            self.assertNotIn("goal_receipt",pending)
+            loop.adapter.goal_change = change
+            self.assertEqual(command("om_resume","/goal 继续")[0],pending)
+            self.assertEqual(command("om_pause","/goal 暂停")[0],paused)
+            self.assertIn("续跑授权 已启用",command("om_goal_now","/goal")[1])
+            self.assertEqual(loop.native.goal_view(session)["goal"]["revision"],original["revision"]+2)
+            observed = self.read_native(native,"read")
+            self.assertEqual(observed["inputs"],[])
+            self.assertEqual(loop.hermes.tasks()["items"],[])
+            self.evidence = {"session":session,"creation":created["goal_receipt"],"pause":paused["goal_receipt"],
+                             "eventual_native_goal":loop.native.goal_view(session)["goal"],
+                             "initial_resume_result":pending,"native_inputs":len(observed["inputs"]),
+                             "router_tasks":0}
+
+    def native_goal_rounds(self,*,use_tls):
+        session = "dsh-real-goal-rounds"
+        directory,loop,service,command = self.goal_worker(session,use_tls=use_tls)
+        with self.start_native(directory,session,"goal-driver",use_tls=use_tls) as native:
+            service.step()
+            creation,_ = command("om_create_live_goal","/goal 推进测试目标")
+            created = creation["goal_receipt"]
+            self.assertTrue(self.read_native(native,"first-round")["running"])
+            paused,card = command("om_pause_live_goal","/goal pause")
+            self.assertIn("已暂停 · 1/2 轮",card)
+            before = self.read_native(native,"read")
+            self.assertEqual([row["round"] for row in before["rounds"]],[1])
+            self.assertEqual([row["reason"]["kind"] for row in before["turns"]],["aborted"])
+            resumed,card = command("om_resume_live_goal","/goal resume")
+            self.assertIn("进行中",card)
+            after = self.read_native(native,"second-round")
+            self.assertEqual([row["id"] for row in after["rounds"]],[created["id"]]*2)
+            self.assertEqual([row["round"] for row in after["rounds"]],[1,2])
+            self.assertEqual([row["revision"] for row in after["rounds"]],
+                             [created["revision"],resumed["goal_receipt"]["revision"]])
+            self.assertEqual([row["reason"]["kind"] for row in after["turns"]],["aborted","completed"])
+            self.assertEqual(command("om_pause_live_goal","/goal pause")[0],paused)
+            self.assertEqual(command("om_resume_live_goal","/goal resume")[0],resumed)
+            self.assertEqual(loop.hermes.tasks()["items"],[])
+            self.assertIsNone(loop.worker.hold()["held_task_id"])
+            self.assertEqual(loop.manager_wire.frames(0),[])
+            self.evidence = {"created":created,"paused":paused["goal_receipt"],"resumed":resumed["goal_receipt"],
+                             "rounds":after["rounds"],"turns":after["turns"],
+                             "router_tasks":0,"router_notifications":0,"worker_hold":loop.worker.hold(),
+                             "boundary":"Native DSH goal service and continuation driver; local scripted provider"}
+
+    def native_compaction(self,*,use_tls):
+        session = "dsh-real-compact"
+        directory,loop,service,command = self.goal_worker(session,use_tls=use_tls)
+        with self.start_native(directory,session,"compact",use_tls=use_tls) as native:
+            service.step()
+            self.assertTrue(service.host_compaction)
+            command("om_empty","/compact")
+            original = loop.adapter.compact
+            def find_result(message_id):
+                with loop.worker.db.transaction() as db:
+                    row = db.execute("SELECT * FROM platform_compactions WHERE message_id=?",(message_id,)).fetchone()
+                    notices = db.execute("SELECT payload FROM display_events WHERE event_id=?",
+                                         ("compact-result-"+message_id,)).fetchall()
+                return dict(row),[json.loads(item[0])["text"] for item in notices]
+            worker_commands.advance_compact(service)
+            empty,_ = find_result("om_empty")
+            self.assertEqual(json.loads(empty["native_receipt"]),{"state":"empty"})
+            for index in range(3):
+                loop.worker.chat(guid(),f"Fixture paragraph {index}. "+"Many words to compress. "*120)
+                self.read_native(native,"read")
+            attempts = []
+            def lost(session,command_id,*,start):
+                result = original(session,command_id,start=start)
+                if start:
+                    attempts.append(command_id)
+                    raise ConnectionError("native compact started, reply lost")
+                return result
+            loop.adapter.compact = lost
+            receipt,text = command("om_compact","/compact")
+            self.assertIn("等待宿主",text)
+            in_progress = self.read_native(native,"first-compact")
+            self.assertTrue(in_progress["compacting"])
+            in_progress["adapter_busy"] = loop.adapter.busy()
+            self.assertTrue(in_progress["adapter_busy"])
+            worker_commands.advance_compact(service)
+            self.assertEqual(find_result("om_compact")[1],[])
+            self.assertEqual(command("om_compact","/compact")[0],receipt)
+            self.assertIn("仍待宿主确认",command("om_compact_again","/compact")[1])
+            observed = self.read_native(native,"finish-compact")
+            self.assertFalse(loop.adapter.busy())
+            recovered_service = WorkerService(loop.worker,service.clock)
+            recovered_service.step()
+            service.clock.advance(5)
+            recovered_service.step()
+            row,notices = find_result("om_compact")
+            self.assertEqual(len(notices),1)
+            self.assertIn("宿主已压缩",notices[0])
+            self.assertEqual(attempts,[row["command_id"]])
+            proof = json.loads(row["native_receipt"])
+            events = observed["compactEvents"]
+            self.assertEqual([entry["kind"] for entry in events],
+                             ["compaction/start","compaction/summary","user/message","compaction/end"])
+            self.assertEqual({entry["sourceCommandId"] for entry in events},set(attempts))
+            self.assertEqual({entry["compactionId"] for entry in events},{proof["compaction_id"]})
+            self.assertEqual(events[-1]["seq"],proof["end_seq"])
+            self.assertEqual([item["command"] for item in observed["modelRequests"]],["private"]*3+["compaction"])
+            self.assertEqual(len(observed["inputs"]),3)
+            self.assertEqual(loop.hermes.tasks()["items"],[])
+            self.evidence = {"session":session,"compaction":proof,"events":events,"result_count":len(notices),
+                             "start_attempts":len(attempts),"native_in_progress":in_progress,
+                             "native_model_requests":observed["modelRequests"],"router_tasks":0,
+                             "boundary":"Native DSH basic compaction engine and persisted surface, scripted local provider"}
+
+
 @unittest.skipUnless(EXE.is_file() or os.environ.get("MOWULINK_TEST_DSH_BINARY"),
                      "installed DSH SDK or verified packaged Windows executable required")
 @unittest.skipUnless(shutil.which("openssl"),"test TLS certificate generator required")
@@ -1260,6 +1399,18 @@ class LocalTlsLoop(NativeProcess):
 
     def test_read_only_cleanup_over_mutual_tls_requires_proof(self):
         self.read_only_cleanup_refusals(use_tls=True)
+
+    def test_goal_commands_claim_no_router_work_and_recover_over_mutual_tls(self):
+        self.native_goal_commands(use_tls=True)
+        commands = self.evidence
+        self.native_goal_rounds(use_tls=True)
+        if output := os.environ.get("MOWULINK_DSH_GOAL_TLS_EVIDENCE"):
+            Path(output).write_text(encode({"commands":commands,"continuation":self.evidence})+"\n",encoding="utf-8")
+
+    def test_compaction_lost_reply_reuses_one_original_result_over_mutual_tls(self):
+        self.native_compaction(use_tls=True)
+        if output := os.environ.get("MOWULINK_DSH_COMPACT_TLS_EVIDENCE"):
+            Path(output).write_text(encode(self.evidence)+"\n",encoding="utf-8")
 
     def test_command_approval_uses_native_decision_and_closure_over_mutual_tls(self):
         self.native_command_decisions(use_tls=True)
@@ -3028,138 +3179,13 @@ exec {docker} "$@"
                          "boundary":"Actual DSH AgentLoop and isolated Router, scripted model, no Feishu"}
 
     def test_goal_query_pause_and_resume_use_the_bound_native_goal(self):
-        session = "dsh-real-loop-goals"
-        directory,loop,service,command = self.goal_worker(session)
-        with self.start_native(directory,session,"goals") as native:
-            service.step()
-            self.assertIn("没有目标",command("om_no_goal","/goal 状态")[1])
-            self.assertIn("没有目标",command("om_no_pause","/goal 暂停")[1])
-            self.assertIsNone(loop.native.goal_view(session)["goal"])
-            request = "/goal 隔离持久目标\n保留 第二行"
-            created,_ = command("om_create_goal",request)
-            original = loop.native.goal_view(session)["goal"]
-            self.assertEqual(original["objective"],"隔离持久目标\n保留 第二行")
-            self.assertEqual(created["goal_receipt"]["id"],original["id"])
-            self.assertEqual(command("om_create_goal",request)[0],created)
-            self.assertIn("已有未完成",command("om_replace_goal","/goal 不能替换")[1])
-            self.assertEqual(loop.native.goal_view(session)["goal"],original)
-            current = command("om_goal","/goal")[1]
-            self.assertIn(f"进行中 · 0/{original['limit']} 轮",current)
-            self.assertIn("隔离持久目标",current)
-            paused,text = command("om_pause","/goal 暂停")
-            self.assertIn("已暂停",text)
-            self.assertEqual(paused["goal_receipt"]["id"],original["id"])
-            self.assertEqual(paused["goal_receipt"]["revision"],original["revision"]+1)
-            change = loop.adapter.goal_change
-            def lost(*args):
-                change(*args)
-                raise ConnectionError("lost native goal receipt")
-            loop.adapter.goal_change = lost
-            pending,text = command("om_resume","/goal 继续")
-            self.assertIn("目标操作待核",text)
-            self.assertNotIn("goal_receipt",pending)
-            loop.adapter.goal_change = change
-            self.assertEqual(command("om_resume","/goal 继续")[0],pending)
-            self.assertEqual(command("om_pause","/goal 暂停")[0],paused)
-            self.assertIn("续跑授权 已启用",command("om_goal_now","/goal")[1])
-            self.assertEqual(loop.native.goal_view(session)["goal"]["revision"],original["revision"]+2)
-            observed = self.read_native(native,"read")
-            self.assertEqual(observed["inputs"],[])
-            self.assertEqual(loop.hermes.tasks()["items"],[])
+        self.native_goal_commands(use_tls=False)
 
     def test_native_goal_rounds_pause_and_resume_without_becoming_router_orders(self):
-        session = "dsh-real-goal-rounds"
-        directory,loop,service,command = self.goal_worker(session)
-        with self.start_native(directory,session,"goal-driver") as native:
-            service.step()
-            creation,_ = command("om_create_live_goal","/goal 推进测试目标")
-            created = creation["goal_receipt"]
-            self.assertTrue(self.read_native(native,"first-round")["running"])
-            paused,card = command("om_pause_live_goal","/goal pause")
-            self.assertIn("已暂停 · 1/2 轮",card)
-            before = self.read_native(native,"read")
-            self.assertEqual([row["round"] for row in before["rounds"]],[1])
-            self.assertEqual([row["reason"]["kind"] for row in before["turns"]],["aborted"])
-            resumed,card = command("om_resume_live_goal","/goal resume")
-            self.assertIn("进行中",card)
-            after = self.read_native(native,"second-round")
-            self.assertEqual([row["id"] for row in after["rounds"]],[created["id"]]*2)
-            self.assertEqual([row["round"] for row in after["rounds"]],[1,2])
-            self.assertEqual([row["revision"] for row in after["rounds"]],
-                             [created["revision"],resumed["goal_receipt"]["revision"]])
-            self.assertEqual([row["reason"]["kind"] for row in after["turns"]],["aborted","completed"])
-            self.assertEqual(command("om_pause_live_goal","/goal pause")[0],paused)
-            self.assertEqual(command("om_resume_live_goal","/goal resume")[0],resumed)
-            self.assertEqual(loop.hermes.tasks()["items"],[])
-            self.assertIsNone(loop.worker.hold()["held_task_id"])
-            self.assertEqual(loop.manager_wire.frames(0),[])
-            self.evidence = {"created":created,"paused":paused["goal_receipt"],"resumed":resumed["goal_receipt"],
-                             "rounds":after["rounds"],"turns":after["turns"],
-                             "router_tasks":0,"router_notifications":0,"worker_hold":loop.worker.hold(),
-                             "boundary":"Native DSH goal service and continuation driver; local scripted provider"}
+        self.native_goal_rounds(use_tls=False)
 
     def test_compact_reconciles_a_lost_start_reply_against_the_native_session(self):
-        session = "dsh-real-compact"
-        directory,loop,service,command = self.goal_worker(session)
-        with self.start_native(directory,session,"compact") as native:
-            service.step()
-            self.assertTrue(service.host_compaction)
-            command("om_empty","/compact")
-            original = loop.adapter.compact
-            def find_result(message_id):
-                with loop.worker.db.transaction() as db:
-                    row = db.execute("SELECT * FROM platform_compactions WHERE message_id=?",(message_id,)).fetchone()
-                    notices = db.execute("SELECT payload FROM display_events WHERE event_id=?",
-                                         ("compact-result-"+message_id,)).fetchall()
-                return dict(row),[json.loads(item[0])["text"] for item in notices]
-            worker_commands.advance_compact(service)
-            empty,_ = find_result("om_empty")
-            self.assertEqual(json.loads(empty["native_receipt"]),{"state":"empty"})
-            for index in range(3):
-                loop.worker.chat(guid(),f"Fixture paragraph {index}. "+"Many words to compress. "*120)
-                self.read_native(native,"read")
-            attempts = []
-            def lost(session,command_id,*,start):
-                result = original(session,command_id,start=start)
-                if start:
-                    attempts.append(command_id)
-                    raise ConnectionError("native compact started, reply lost")
-                return result
-            loop.adapter.compact = lost
-            receipt,text = command("om_compact","/compact")
-            self.assertIn("等待宿主",text)
-            in_progress = self.read_native(native,"first-compact")
-            self.assertTrue(in_progress["compacting"])
-            in_progress["adapter_busy"] = loop.adapter.busy()
-            self.assertTrue(in_progress["adapter_busy"])
-            worker_commands.advance_compact(service)
-            self.assertEqual(find_result("om_compact")[1],[])
-            self.assertEqual(command("om_compact","/compact")[0],receipt)
-            self.assertIn("仍待宿主确认",command("om_compact_again","/compact")[1])
-            observed = self.read_native(native,"finish-compact")
-            self.assertFalse(loop.adapter.busy())
-            recovered_service = WorkerService(loop.worker,service.clock)
-            recovered_service.step()
-            service.clock.advance(5)
-            recovered_service.step()
-            row,notices = find_result("om_compact")
-            self.assertEqual(len(notices),1)
-            self.assertIn("宿主已压缩",notices[0])
-            self.assertEqual(attempts,[row["command_id"]])
-            proof = json.loads(row["native_receipt"])
-            events = observed["compactEvents"]
-            self.assertEqual([entry["kind"] for entry in events],
-                             ["compaction/start","compaction/summary","user/message","compaction/end"])
-            self.assertEqual({entry["sourceCommandId"] for entry in events},set(attempts))
-            self.assertEqual({entry["compactionId"] for entry in events},{proof["compaction_id"]})
-            self.assertEqual(events[-1]["seq"],proof["end_seq"])
-            self.assertEqual([item["command"] for item in observed["modelRequests"]],["private"]*3+["compaction"])
-            self.assertEqual(len(observed["inputs"]),3)
-            self.assertEqual(loop.hermes.tasks()["items"],[])
-            self.evidence = {"session":session,"compaction":proof,"events":events,"result_count":len(notices),
-                             "start_attempts":len(attempts),"native_in_progress":in_progress,
-                             "native_model_requests":observed["modelRequests"],"router_tasks":0,
-                             "boundary":"Native DSH basic compaction engine and persisted surface, scripted local provider"}
+        self.native_compaction(use_tls=False)
 
     def test_dsh_native_timed_question_closes_the_original_feishu_test_card(self):
         session = "dsh-real-timed-question"

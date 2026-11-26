@@ -157,6 +157,8 @@ jobs:
             $env:MOWULINK_DSH_CLEANUP_REFUSAL_EVIDENCE = Join-Path $dir.FullName 'native-dsh-cleanup-refusal.json'
             $env:MOWULINK_DSH_FOREGROUND_TLS_EVIDENCE = Join-Path $dir.FullName 'native-dsh-questions.json'
             $env:MOWULINK_DSH_APPROVAL_TLS_EVIDENCE = Join-Path $dir.FullName 'native-dsh-approval.json'
+            $env:MOWULINK_DSH_GOAL_TLS_EVIDENCE = Join-Path $dir.FullName 'native-dsh-goal.json'
+            $env:MOWULINK_DSH_COMPACT_TLS_EVIDENCE = Join-Path $dir.FullName 'native-dsh-compact.json'
             $state = New-Item -ItemType Directory (Join-Path $dir.FullName '状态 试用')
             $env:TMP = $state.FullName
             $env:TEMP = $state.FullName
@@ -169,6 +171,8 @@ jobs:
             Get-Content -Raw -LiteralPath $env:MOWULINK_DSH_CLEANUP_REFUSAL_EVIDENCE
             Get-Content -Raw -LiteralPath $env:MOWULINK_DSH_FOREGROUND_TLS_EVIDENCE
             Get-Content -Raw -LiteralPath $env:MOWULINK_DSH_APPROVAL_TLS_EVIDENCE
+            Get-Content -Raw -LiteralPath $env:MOWULINK_DSH_GOAL_TLS_EVIDENCE
+            Get-Content -Raw -LiteralPath $env:MOWULINK_DSH_COMPACT_TLS_EVIDENCE
           } finally {
             Remove-Item -LiteralPath $dir.FullName -Recurse -Force
           }
