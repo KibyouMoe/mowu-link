@@ -118,9 +118,9 @@ python3 -B -m rewrite.service trigger --db ./trigger-trial/trigger.sqlite3 --nam
   --connection "$ISOLATED_HANDOFF_CONNECTION"
 ```
 
-仅含无旧附件引用的事件可以省略 `--attachments`。有引用时用已停写的旧 Router 内容寻址存储，必须同时匹配旧记录的大小和 SHA-256；程序不按事件里的路径联网取件。超过 200 字的正文以原字节附档，旧结构化元数据保留在旧档；若消费逻辑依赖旧业务字段，应先盘清再迁。新 Router 使用仅绑定计划内 `instance_id` 的专用 Trigger 连接。预备目录及 `handoff.json` 按私有档案保留。T04 回执丢失时继续送同一库；从同一计划重建也复用消息及上传幂等键。逐项核对 T04、Hermes 接收回执与宿主收据。单有 T04 不表示旧端已读，也不能据此推进旧游标。
+仅含无旧附件引用的事件可以省略 `--attachments`。有引用时从已停写的旧 Router 内容寻址存储按 SHA-256 查本地文件，并核旧记录里的大小与摘要。超过 200 字的正文以原字节附档，旧结构化元数据保留在旧档。若消费逻辑依赖旧业务字段，应先盘清再迁。新 Router 使用仅绑定计划内 `instance_id` 的专用 Trigger 连接。预备目录及 `handoff.json` 按私有档案保留。T04 回执丢失时继续送同一库，从同一计划重建也复用消息及上传幂等键。推进旧游标前，逐项核对 T04、Hermes 接收回执与宿主收据。
 
-实测已用真实旧 TriggerStore、重做 Router HTTP 和 HermesAdapter 核五条旧未读。两条 Info 只供查询，一条 Event 和一条 Notify 各送一次，原消费者已有收件的一条留在旧档。丢失 T04 后重开和重建均回同一回执，旧附件与长文逐字节一致。模型、宿主与时钟使用夹具。发送后如需退回旧消费者，先保留两侧库并逐笔对账；旧确认是累计游标，不应跳过未核的旧序号。复跑 `python3 -B -m unittest -v rewrite.test_trigger_archive`。[迁入回执](evidence/trigger-unread-handoff.json)
+实测已用真实旧 TriggerStore、重做 Router HTTP 和 HermesAdapter 核五条旧未读。两条 Info 只供查询，一条 Event 和一条 Notify 各送一次，原消费者已有收件的一条留在旧档。丢失 T04 后重开和重建均回同一回执，旧附件与长文逐字节一致。模型、宿主与时钟使用夹具。发送后如需退回旧消费者，先保留两侧库并逐笔对账。旧确认是累计游标，只能推进到连续核实的最后一个序号。复跑 `python3 -B -m unittest -v rewrite.test_trigger_archive`。[迁入回执](evidence/trigger-unread-handoff.json)
 
 ## 旧采集来源交接
 
