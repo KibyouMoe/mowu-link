@@ -51,7 +51,7 @@ python3 -m rewrite.cutover export-chat --snapshot ./snapshot --worker "$WORKER_I
 python3 -m rewrite.cutover stage-queue-rollback --snapshot ./snapshot --trial ./trial --review ./review.json --destination ./queue-recovery
 ```
 
-命令在新目录生成旧库、旧附件和 `queue-replay.json`。该文件含原指令，应和离线库一起保管。已有 UUID 保留。新 Hermes 管理工具的 `hermes-…` 请求号通过来源 UUID 确定性地生成旧端可接受的请求 UUID，文件同时保存两者。仅在隔离环境打开该旧库，让旧 Router 不接 Worker，再按文件顺序将每个 `request` 发给旧端 `POST /tasks`。记录新试运行工单号、原请求号、回放请求 UUID 与旧端返回的工单号。新请求返回 202 并保持排队。同号重送须返回同一旧工单号，改正文重送须返回 409。核对旧队首、完整正文和回放后的队列顺序。复跑整个演练使用 `python3 -m unittest -v rewrite.test_cutover.Cutover.test_reviewed_new_orders_reenter_the_old_http_queue_once_and_preserve_its_head`。已派发的单、成果及其他新写入仍需逐笔处理。
+命令在新目录生成旧库、旧附件和 `queue-replay.json`。旧库保存待回放的请求号与指纹。首次启动旧 Router 前，核对数据库摘要等于 `restored_legacy_sha256`。回放文件含原指令，应与离线库一起保管。已有 UUID 保留。新 Hermes 管理工具的 `hermes-…` 请求号通过来源 UUID 确定性地生成旧端可接受的请求 UUID，文件同时保存两者。仅在隔离环境打开该旧库，让旧 Router 不接 Worker，再按文件顺序将每个 `request` 发给旧端 `POST /tasks`。记录新试运行工单号、原请求号、回放请求 UUID 与旧端返回的工单号。新请求返回 202 并保持排队。同号重送须返回同一旧工单号，改正文重送须返回 409。核对旧队首、完整正文和回放后的队列顺序。以后再次迁入重做版时，旧库须有每条回放的原任务记录和匹配指纹。原 Hermes 请求号与旧 UUID 重试都会返回同一张迁入待派单，正文有变返回 409。未完成旧端回放时保留旧库、试用库及审核过的回放文件，完成核对后才能再迁入。复跑整个演练使用 `python3 -m unittest -v rewrite.test_cutover.Cutover.test_reviewed_new_orders_reenter_the_old_http_queue_once_and_preserve_its_head`。已派发的单、成果及其他新写入仍需逐笔处理。
 
 ### 回退已验收的迁入工单
 

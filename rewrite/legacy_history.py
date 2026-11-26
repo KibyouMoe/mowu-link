@@ -1,4 +1,5 @@
 """Manager-only, historical projection of a verified legacy snapshot. No work-order writes."""
+import hashlib
 import json
 import re
 from uuid import UUID, uuid5
@@ -29,6 +30,12 @@ ROLLBACK_KEYS_SCHEMA = """CREATE TABLE IF NOT EXISTS rewrite_archive_request_key
     request_key TEXT NOT NULL UNIQUE,
     trial_source_id TEXT NOT NULL
 )"""
+QUEUE_REPLAY_SCHEMA = """CREATE TABLE IF NOT EXISTS rewrite_queue_replay_keys (
+    legacy_request_id TEXT PRIMARY KEY,
+    request_key TEXT NOT NULL UNIQUE,
+    trial_source_id TEXT NOT NULL,
+    fingerprint TEXT NOT NULL
+)"""
 
 
 def rollback_request_id(source_id, key):
@@ -38,6 +45,13 @@ def rollback_request_id(source_id, key):
 
 def rollback_archive_id(source_id, trial_task_id):
     return "t-" + uuid5(UUID(source_id),"archive-rollback/"+trial_task_id).hex[:10]
+
+
+def legacy_request_fingerprint(request):
+    # Match the legacy HTTP server's exact request fingerprint, omitting its UUID.
+    payload = {name:value for name,value in request.items() if name!="message_id"}
+    return hashlib.sha256(json.dumps(payload,sort_keys=True,ensure_ascii=True,
+                                     separators=(",",":")).encode("ascii")).hexdigest()
 
 
 def populate(db, old, source, sha, mapping):
@@ -56,14 +70,21 @@ def populate(db, old, source, sha, mapping):
                    (source,tid,mapping.get(tid),row["name"],row["description"],row["owner"],row["actor"],row["at"],
                     encode(archive) if archive is not None else None,encode(report) if report is not None else None))
     preserve_rollback_keys(db,old,source,mapping)
+    preserve_queue_keys(db,old,source,mapping)
+
+
+def has_rollback_table(old, name):
+    table = old.execute("SELECT type FROM sqlite_master WHERE name=?",(name,)).fetchone()
+    if table is None:
+        return False
+    if table["type"]!="table":
+        raise ValueError("invalid rewrite rollback request-key table")
+    return True
 
 
 def preserve_rollback_keys(db, old, source, mapping):
-    table = old.execute("SELECT type FROM sqlite_master WHERE name='rewrite_archive_request_keys'").fetchone()
-    if table is None:
+    if not has_rollback_table(old,"rewrite_archive_request_keys"):
         return
-    if table["type"]!="table":
-        raise ValueError("invalid rewrite archive request-key table")
     for row in old.execute("""SELECT a.*, t.actor, t.request_id, f.data AS archive_data
         FROM rewrite_archive_request_keys a LEFT JOIN task_info t ON t.task_id=a.legacy_task_id
         LEFT JOIN task_facts f ON f.task_id=a.legacy_task_id AND f.kind='archive' AND f.event_key='archive'"""):
@@ -75,6 +96,30 @@ def preserve_rollback_keys(db, old, source, mapping):
                 or rollback_request_id(namespace,key)!=row["request_id"] or rollback_archive_id(namespace,trial_id)!=tid
                 or tid in mapping):
             raise ValueError("rewrite archive request key does not match its legacy archive")
+        db.execute("INSERT INTO history_request_keys VALUES ('hermes',?,?,?)",(key,source,tid))
+
+
+def preserve_queue_keys(db, old, source, mapping):
+    if not has_rollback_table(old,"rewrite_queue_replay_keys"):
+        return
+    for row in old.execute("""SELECT r.*, t.task_id, t.actor, t.fingerprint AS recorded_fingerprint
+        FROM rewrite_queue_replay_keys r LEFT JOIN task_info t ON t.request_id=r.legacy_request_id"""):
+        key, namespace, legacy_key = row["request_key"],row["trial_source_id"],row["legacy_request_id"]
+        if (not isinstance(key,str) or not (valid_guid(key) or re.fullmatch(r"hermes-[0-9a-f]{64}",key))
+                or not valid_guid(namespace) or rollback_request_id(namespace,key)!=legacy_key
+                or not isinstance(row["fingerprint"],str) or not re.fullmatch(r"[0-9a-f]{64}",row["fingerprint"])):
+            raise ValueError("invalid rewrite queue replay request mapping")
+        tid = row["task_id"]
+        if not tid or row["actor"]!="hermes" or row["recorded_fingerprint"]!=row["fingerprint"]:
+            raise ValueError("legacy queue replay receipt is missing or mismatched")
+        if key==legacy_key:
+            continue  # The normal legacy import already recorded the same key.
+        if tid in mapping:
+            inserted = db.execute("""INSERT INTO operations(actor,key,request,response)
+                SELECT actor,?,request,response FROM operations WHERE actor='hermes' AND key=?""",
+                (key,legacy_key)).rowcount
+            if inserted!=1:
+                raise ValueError("legacy queued order is missing its migrated creation receipt")
         db.execute("INSERT INTO history_request_keys VALUES ('hermes',?,?,?)",(key,source,tid))
 
 

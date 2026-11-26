@@ -1,41 +1,43 @@
 {
-  "trial_sha256": "565029f6532ecce0bafa3b3e4159480dc619c4738ba47faa0fdc065153f65877",
-  "legacy_snapshot_sha256": "be740871d304006786fa32da9266f0ad4a8e92b75161c921d17ec7d2b898dec4",
+  "trial_sha256": "58fc63966f14a112765e526ed3be0be733b00907f31486037f6d417965a06f60",
+  "legacy_snapshot_sha256": "bb9e0ae2f14a9e2e0d78b1178d273d06927fc82b811314b9cff0c7c353224399",
   "closed_assignments": {
-    "1331153a-b058-427e-9f7f-9237cfb702c5": "e4770c61-2b14-458a-9ff8-9633dc46ef92",
-    "9c58f783-5f00-4595-a52b-85e481d26b34": "d4646a82-c72b-4d13-99d1-120e8d0de7ee"
+    "d38c87d6-8fdc-4de2-b981-057d197f2e7d": "b76ec3b8-f57c-4ec9-8793-e57ea1486d03",
+    "5c127cf6-499f-4abe-a7b2-b637d6f767f8": "ad11f6b0-765c-45cd-b86a-26b6bc11fa47"
   },
   "public_legacy_readback": {
     "archives": {
-      "1331153a-b058-427e-9f7f-9237cfb702c5": {
-        "legacy_task_id": "t-46de48084f",
+      "5c127cf6-499f-4abe-a7b2-b637d6f767f8": {
+        "legacy_task_id": "t-0899242b52",
         "replay": 200,
         "conflict": 409,
         "reason": "reviewed_on_rewrite"
       },
-      "9c58f783-5f00-4595-a52b-85e481d26b34": {
-        "legacy_task_id": "t-6ccb174300",
+      "d38c87d6-8fdc-4de2-b981-057d197f2e7d": {
+        "legacy_task_id": "t-1af8d112e1",
         "replay": 200,
         "conflict": 409,
         "reason": "reviewed_on_rewrite"
       }
     },
-    "head": "t-e2dd3fb3bf",
+    "head": "t-ebdfa9fdb6",
     "artifact_status": 404,
     "queued_status": 200,
     "held": null,
     "new_queue_for_oguri": null,
     "queue_order": [
-      "t-e2dd3fb3bf",
-      "t-d2da29a893"
+      "t-ebdfa9fdb6",
+      "t-b2a55f78ec"
     ],
-    "replayed_queue_id": "t-d2da29a893"
+    "replayed_queue_id": "t-b2a55f78ec"
   },
   "initial_queue_status": 202,
   "private_artifact_sha256": "22096147c94fe983a8714f76aaac9f702543e6e13736218061aad535475eb069",
   "incomplete_review_rejected": true,
   "mapped_legacy_request_collision_rejected": true,
   "later_cutover_rejects_original_and_mapped_request_keys": true,
+  "queued_request_retry_keeps_the_same_task_after_a_second_cutover": true,
+  "unreplayed_queue_prevents_a_second_cutover": true,
   "mismatched_archived_request_mapping_rejected": true,
   "both_inputs_unchanged": true,
   "boundary": "Actual old and new Router over local HTTP, SQLite and attachment bytes. Scripted Worker Agent."

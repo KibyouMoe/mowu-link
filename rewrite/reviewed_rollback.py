@@ -8,8 +8,8 @@ import sqlite3
 import time
 
 from . import legacy_history
-from .cutover import (digest, legacy_creation_request, output_directory, queue_execution_modes, queue_replay_plan,
-                      readonly, reconcile, restore_snapshot, verified)
+from .cutover import (digest, legacy_creation_request, output_directory, queue_execution_modes,
+                      readonly, reconcile, restore_snapshot, stage_queue_requests, verified)
 from .messages import valid_guid
 from .orders import task
 from .storage import encode
@@ -219,12 +219,11 @@ def archive_in_legacy(path, entries, source_id, at):
         for tid,entry in entries.items():
             if "creation_key" in entry:
                 legacy = legacy_history.rollback_archive_id(source_id,tid)
-                payload = dict(entry["legacy_creation_request"])
-                request_id = payload.pop("message_id")
+                request = entry["legacy_creation_request"]
+                request_id = request["message_id"]
                 if db.execute("SELECT 1 FROM task_info WHERE task_id=? OR request_id=?",(legacy,request_id)).fetchone():
                     raise ValueError("archived order collides with a legacy task or request identifier")
-                fingerprint = hashlib.sha256(json.dumps(payload,sort_keys=True,ensure_ascii=True,
-                                                         separators=(",",":")).encode("ascii")).hexdigest()
+                fingerprint = legacy_history.legacy_request_fingerprint(request)
                 db.execute("""INSERT INTO task_info(task_id,name,description,owner,actor,at,metadata,request_id,fingerprint)
                               VALUES (?,?,?,?,?,?,?,?,?)""",
                            (legacy,"重做版已验收工单","完整记录见私有回退档案。",entry["worker_id"],"hermes",
@@ -292,7 +291,7 @@ def stage_reviewed_rollback(snapshot,trial,review,destination):
                                                                                entry["creation_key"],task(db,tid))
             at = time.time()
             archive_in_legacy(stage/"legacy.db",entries,facts["source_id"],at)
-            plan = queue_replay_plan(db,stage/"legacy.db",facts) if facts["queue_candidates"] else None
+            plan = stage_queue_requests(db,stage/"legacy.db",facts) if facts["queue_candidates"] else None
         restored_sha = digest(stage/"legacy.db")
         queue_manifest_sha = None
         if plan:

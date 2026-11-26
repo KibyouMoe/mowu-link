@@ -505,7 +505,10 @@ store.close()
                 self.assertEqual(while_online["revision"],2)
                 loop.worker.poll()
                 finish(while_online,[])
-                queued = loop.hermes.create(guid(),"复原后可调度","等旧队首处理后再派","two")
+                queued_params = {"title":"复原后可调度","instructions":"等旧队首处理后再派","assignee_id":"two"}
+                queued = json.loads(tools.around_call("router_create_task",
+                    lambda args:tools.invoke("router_create_task",args),queued_params,
+                    session_id="isolated-trial-manager",turn_id="isolated-create-turn",tool_call_id="create-queued"))
                 self.assertIsNone(queued["assignment_id"])
             finally:
                 loop.server.shutdown()
@@ -534,6 +537,13 @@ store.close()
         second = archived[while_online["task_id"]]
         self.assertRegex(second["creation_key"],r"^hermes-[0-9a-f]{64}$")
         self.assertNotEqual(second["legacy_creation_request"]["message_id"],second["creation_key"])
+        queued_plan = json.loads((self.restore/"queue-replay.json").read_text())["requests"][0]
+        self.assertRegex(queued_plan["trial_request_id"],r"^hermes-[0-9a-f]{64}$")
+        missing_replay, unpublished = self.root/"before-replay-snapshot", self.root/"before-replay-trial"
+        backup(self.restore/"legacy.db",self.restore/"legacy.db.attachments",missing_replay)
+        with self.assertRaisesRegex(ValueError,"queue replay receipt is missing"):
+            prepare(missing_replay,unpublished,guid())
+        self.assertFalse(unpublished.exists())
 
         old_observation = """
 from server import RouterServer
@@ -595,7 +605,7 @@ print(json.dumps(result))
         again_snapshot, again = self.root/"reentry-snapshot", self.root/"reentry-trial"
         backup(self.restore/"legacy.db",self.restore/"legacy.db.attachments",again_snapshot)
         source_id = guid()
-        prepare(again_snapshot,again,source_id)
+        remigration = prepare(again_snapshot,again,source_id)
         token = guid()
         with serve_loopback(Orders(again/"router.db",clock),{token:"hermes"}) as srv:
             thread = Thread(target=srv.serve_forever,kwargs={"poll_interval":.02})
@@ -612,6 +622,13 @@ print(json.dumps(result))
                         self.assertEqual((duplicate.exception.status,duplicate.exception.code),(409,"legacy_request_recorded"))
                         self.assertEqual(duplicate.exception.details,
                             {"source_id":source_id,"legacy_task_id":after_restart["archives"][trial_id]["legacy_task_id"]})
+                alias = queued_plan["trial_request_id"]
+                migrated = client.request("POST","tasks",queued_params,queued_plan["request"]["message_id"])
+                self.assertEqual(migrated["task_id"],remigration["queued_id_map"][after_restart["replayed_queue_id"]])
+                self.assertEqual(client.request("POST","tasks",queued_params,alias),migrated)
+                with self.assertRaises(Fault) as changed:
+                    client.request("POST","tasks",{**queued_params,"instructions":"改过的试用工单"},alias)
+                self.assertEqual(changed.exception.code,"idempotency_conflict")
                 self.assertEqual(len(client.request("GET","tasks")["items"]),2)
             finally:
                 srv.shutdown()
@@ -658,6 +675,8 @@ print(json.dumps(result))
                 "initial_queue_status":before_restart["queued_status"],"private_artifact_sha256":checksum,
                 "incomplete_review_rejected":True,"mapped_legacy_request_collision_rejected":True,
                 "later_cutover_rejects_original_and_mapped_request_keys":True,
+                "queued_request_retry_keeps_the_same_task_after_a_second_cutover":True,
+                "unreplayed_queue_prevents_a_second_cutover":True,
                 "mismatched_archived_request_mapping_rejected":True,
                 "both_inputs_unchanged":True,
                 "boundary":"Actual old and new Router over local HTTP, SQLite and attachment bytes. Scripted Worker Agent."},
@@ -1048,6 +1067,8 @@ store.close()
         self.assertEqual(staged["queued_requests"],2)
         self.assertEqual(staged["legacy_sha256"],digest(self.snapshot/"legacy.db"))
         plan = json.loads((self.restore/"queue-replay.json").read_text())
+        self.assertEqual(plan["restored_legacy_sha256"],digest(self.restore/"legacy.db"))
+        self.assertEqual(plan["restored_legacy_sha256"],staged["restored_legacy_sha256"])
         example,converted = plan["requests"]
         self.assertEqual(example["trial_request_id"],direct_key)
         self.assertEqual(example["request"]["message_id"],direct_key)

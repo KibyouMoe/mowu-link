@@ -402,7 +402,7 @@ def legacy_creation_request(source_id, key, row):
             "goal":row["instructions"],"execution_mode":"goal","queue_if_offline":True}
 
 
-def queue_replay_plan(db, legacy, facts):
+def stage_queue_requests(db, legacy, facts):
     requests = []
     legacy_keys = set()
     with closing(readonly(legacy)) as old:
@@ -417,6 +417,11 @@ def queue_replay_plan(db, legacy, facts):
                 raise ValueError("creation request already exists in the rollback queue")
             legacy_keys.add(legacy_key)
             requests.append({"trial_task_id":tid,"trial_request_id":key,"request":body})
+    with closing(sqlite3.connect(legacy)) as old, old:
+        old.execute(legacy_history.QUEUE_REPLAY_SCHEMA)
+        old.executemany("INSERT INTO rewrite_queue_replay_keys VALUES (?,?,?,?)", [
+            (row["request"]["message_id"],row["trial_request_id"],facts["source_id"],
+             legacy_history.legacy_request_fingerprint(row["request"])) for row in requests])
     return {"source_id":facts["source_id"],"trial_sha256":facts["trial_sha256"],
             "legacy_sha256":facts["snapshot_sha256"],"requests":requests}
 
@@ -437,13 +442,16 @@ def stage_queue_rollback(snapshot, trial, review, destination):
     with output_directory(destination) as stage:
         restore_snapshot(snapshot,stage,manifest)
         with closing(readonly(source)) as db:
-            plan = queue_replay_plan(db,stage/"legacy.db",facts)
+            plan = stage_queue_requests(db,stage/"legacy.db",facts)
         with closing(readonly(source)):
             if digest(source)!=facts["trial_sha256"]:
                 raise ValueError("trial database changed after reconciliation")
-        (stage/"queue-replay.json").write_text(encode(plan))
+        restored_sha = digest(stage/"legacy.db")
+        with open(stage/"queue-replay.json","x",encoding="utf-8",
+                  opener=lambda name,flags:os.open(name,flags,0o600)) as output:
+            output.write(encode({**plan,"restored_legacy_sha256":restored_sha}))
     return {"trial_sha256":facts["trial_sha256"],"legacy_sha256":manifest["legacy_db_sha256"],
-            "queued_requests":len(plan["requests"])}
+            "restored_legacy_sha256":restored_sha,"queued_requests":len(plan["requests"])}
 
 
 def main():
