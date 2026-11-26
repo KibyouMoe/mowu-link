@@ -386,8 +386,46 @@ class NativeLoop(unittest.TestCase):
             views.poll()
             with views.db.transaction() as db:
                 self.assertEqual(db.execute("SELECT COUNT(*) FROM question_cards").fetchone()[0],3)
+            loop.worker.chat(guid(),"Question fixture native")
+            self.assertIn("native-question-native",self.read_native(native,"read")["continued"])
+            original_request = relay.worker.request
+            dropped = []
+            def lose_open(*args):
+                result = original_request(*args)
+                if args[1]=="worker/native-question":
+                    dropped.append(result["question_id"])
+                    raise Fault(503,"adapter_connection_unconfirmed",True)
+                return result
+            relay.worker.request = lose_open
+            with self.assertRaisesRegex(Fault,"adapter_connection_unconfirmed"):
+                for _ in range(4):
+                    relay.collect()
+                    relay.flush()
+            views.poll()
+            with views.db.transaction() as db:
+                qid,mid = db.execute("SELECT qid,mid FROM question_cards WHERE qid=?",(dropped[0],)).fetchone()
+            pending = {"question_id":qid,"mode":"choice","option_id":"2"}
+            self.assertEqual(actions.record("app","trainer","test-chat",mid,pending,None),"pending")
+            won = self.read_native(native,"answer-native")
+            self.assertNotIn("native-question-native",won["continued"])
+            relay.worker.request = original_request
+            for _ in range(4):
+                relay.collect()
+                relay.flush()
+            actions.flush()
+            views.poll()
+            self.assertEqual(sink.calls[-1],("patch",mid))
+            self.assertEqual(actions.record("app","trainer","test-chat",mid,pending,None),"rejected")
+            with loop.worker.db.transaction() as db:
+                row = db.execute("SELECT proof FROM trainer_questions WHERE question_id=?",(qid,)).fetchone()
+            native_proof = json.loads(row[0])
+            self.assertEqual(native_proof["answer"],{"mode":"choice","option_id":"1"})
+            self.assertEqual([item["id"] for item in won["replies"] if item["call"]=="native-question-native"],
+                             [native_proof["receipt_id"]])
             self.assertEqual(writes,["native-question-choice","native-question-text","native-question-skip"])
             self.assertEqual(loop.hermes.tasks()["items"],[])
             self.evidence = {"session":session,"questions":completed,"native_answer_writes":writes,
+                             "native_won_conflict":{"platform_message":mid,"question_id":qid,"proof":native_proof,
+                                                    "late_platform_choice":"2","platform_state":"rejected"},
                              "unbridged_multi":rejected["continued"],"router_tasks":0,
                              "boundary":"Native DSH timed question tool and reply admission; local scripted provider, Feishu fixture"}

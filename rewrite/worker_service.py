@@ -120,6 +120,8 @@ class WorkerService:
                                   string(args,"summary"),args.get("outcome","completed"),args.get("artifact_ids"))
         elif actor == "adapter/" + w.worker_id and method == "POST" and path == "/v1/worker/native-question":
             result = user_questions.open_native(w,body)
+        elif actor == "adapter/" + w.worker_id and method == "POST" and path == "/v1/worker/native-question-proof":
+            result = user_questions.observe_proof(w,body)
         elif actor == "platform/" + w.worker_id and method == "POST" and path == "/v1/worker/trainer-answer":
             result = user_questions.resolve(w,body)
         elif actor == "adapter/" + w.worker_id and method == "POST" and path == "/v1/worker/peer":

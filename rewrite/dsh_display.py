@@ -54,6 +54,11 @@ class DshDisplay:
 
     def apply(self,db,turn,row):
         kind = row["kind"]
+        if kind=="question-proof":
+            event = {"event_id":self.prefix+str(row["seq"])+"-question-proof","kind":kind,
+                     "session":self.session,"native_question_id":row["call_id"]}
+            db.execute("INSERT INTO dsh_public_outbox(event_id,event) VALUES (?,?)",(event["event_id"],encode(event)))
+            return turn
         if kind=="start":
             return {"id":f"{row['seq']}/{row['turn']}","number":row["turn"]}
         if not turn or (row.get("turn",turn["number"])!=turn["number"]):
@@ -101,15 +106,9 @@ class DshDisplay:
         for row in ready:
             event = json.loads(row["event"])
             if event["kind"]=="native_question":
-                fields = {key:event[key] for key in ("turn_id","native_question_id")}
-                question = self.host.request("question-open",self.session,fields)["question"]
-                receipt = {"projected":False}
-                if question:
-                    require(question.get("session")==self.session and all(question.get(k)==v for k,v in fields.items()),
-                            409,"native_question_conflict")
-                    receipt = self.worker.request("POST","worker/native-question",question)
-                    qid = receipt.get("question_id")
-                    require(isinstance(qid,str) and qid,502,"wrong_question_ack")
+                receipt = self.open_question(row,event)
+            elif event["kind"]=="question-proof":
+                receipt = self.close_question(event["native_question_id"])
             else:
                 if event["kind"]=="image":
                     media = event.pop("image")
@@ -119,6 +118,42 @@ class DshDisplay:
                         502,"wrong_display_ack")
             with self.db.transaction() as db:
                 db.execute("UPDATE dsh_public_outbox SET ack=? WHERE seq=?",(encode(receipt),row["seq"]))
+
+    def open_question(self,row,event):
+        question = event.get("original")
+        if not question:
+            fields = {key:event[key] for key in ("turn_id","native_question_id")}
+            question = self.host.request("question-open",self.session,fields)["question"]
+            if not question:
+                return {"projected":False}
+            require(question.get("session")==self.session and all(question.get(k)==v for k,v in fields.items()),
+                    409,"native_question_conflict")
+            # Preserve what was sent even if the host closes the question before a lost Worker acknowledgement is recovered.
+            with self.db.transaction() as db:
+                db.execute("UPDATE dsh_public_outbox SET event=? WHERE seq=?",(encode(dict(event,original=question)),row["seq"]))
+        receipt = self.worker.request("POST","worker/native-question",question)
+        qid = receipt.get("question_id")
+        require(isinstance(qid,str) and qid,502,"wrong_question_ack")
+        return receipt
+
+    def close_question(self,call_id):
+        with self.db.transaction() as db:
+            opens = db.execute("""SELECT event,ack FROM dsh_public_outbox
+                WHERE json_extract(event,'$.kind')='native_question'
+                AND json_extract(event,'$.native_question_id')=?""",(call_id,)).fetchall()
+        if not opens:
+            return {"projected":False}
+        require(len(opens)==1 and opens[0]["ack"],409,"native_question_conflict")
+        open_ack = json.loads(opens[0]["ack"])
+        qid = open_ack.get("question_id")
+        if not qid:
+            return {"projected":False}
+        original = json.loads(opens[0]["event"])
+        proof = self.host.lookup_answer(self.session,original["turn_id"],call_id)
+        require(proof,409,"native_question_unconfirmed")
+        receipt = self.worker.request("POST","worker/native-question-proof",{"question_id":qid,"proof":proof})
+        require(receipt.get("question_id")==qid and receipt.get("proof")==proof,502,"wrong_question_ack")
+        return receipt
 
     def upload(self,key,media):
         route = "worker/media/uploads"

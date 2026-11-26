@@ -11,6 +11,10 @@ function visible(event) {
   const d = event.data;
   if (event.type==='turn/start') return {kind:'start',turn:d.turn};
   if (event.type==='turn/end') return {kind:'end',turn:d.turn,completed:d.reason?.kind==='completed'};
+  if (event.type==='user/message' && d.source?.kind==='user-question-reply' &&
+      d.source.outcome==='answered' && typeof d.source.callId==='string') {
+    return {kind:'question-proof',call_id:d.source.callId};
+  }
   if (event.type==='user/message' && d.role==='user' && d.source?.kind==='user') {
     const text = textOf(d.content);
     const internal = /^mowulink-[a-f0-9]{64}$/.test(d.id) && text.startsWith('魔物链接投递\n');

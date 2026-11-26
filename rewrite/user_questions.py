@@ -54,6 +54,29 @@ def confirm(proof, original, answer):
     return proof
 
 
+def record_proof(db, qid, row, question, proof):
+    require(isinstance(proof,dict),409,"native_question_unconfirmed")
+    answer = proof.get("answer")
+    validate_answer(answer,question["options"])
+    confirm(proof,question,answer)
+    require(row["proof"] in (None,encode(proof)),409,"question_receipt_conflict")
+    db.execute("UPDATE trainer_questions SET proof=? WHERE question_id=?",(encode(proof),qid))
+    show(db,"trainer",qid,question,answer)
+    return {"question_id":qid,"proof":proof}
+
+
+def observe_proof(worker, body):
+    require(set(body)=={"question_id","proof"},422,"invalid_native_question_proof")
+    qid = string(body,"question_id")
+    session = worker.adapter.bound_session()
+    with worker.db.transaction() as db:
+        row = db.execute("SELECT * FROM trainer_questions WHERE question_id=?",(qid,)).fetchone()
+        require(row,404,"trainer_question_missing")
+        question = json.loads(row["original"])
+        require(question["session"]==session,403,"wrong_native_session")
+        return record_proof(db,qid,row,question,body["proof"])
+
+
 def resolve(worker, body):
     require(set(body)=={"question_id","answer"},422,"invalid_trainer_answer")
     qid,answer = string(body,"question_id"),body["answer"]
@@ -62,14 +85,13 @@ def resolve(worker, body):
         require(row,404,"trainer_question_missing")
         question = json.loads(row["original"])
         validate_answer(answer,question["options"])
-        require(row["answer"] in (None,encode(answer)),409,"answer_conflict")
         if row["proof"]:
-            return {"question_id":qid,"proof":json.loads(row["proof"])}
+            proof = json.loads(row["proof"])
+            require(proof["answer"]==answer,409,"native_question_already_answered")
+            return {"question_id":qid,"proof":proof}
+        require(row["answer"] in (None,encode(answer)),409,"answer_conflict")
         db.execute("UPDATE trainer_questions SET answer=? WHERE question_id=?",(encode(answer),qid))
     proof = confirm(worker.adapter.resolve_question(question,answer),question,answer)
     with worker.db.transaction() as db:
-        saved = db.execute("SELECT proof FROM trainer_questions WHERE question_id=?",(qid,)).fetchone()[0]
-        require(saved in (None,encode(proof)),409,"question_receipt_conflict")
-        db.execute("UPDATE trainer_questions SET proof=? WHERE question_id=?",(encode(proof),qid))
-        show(db,"trainer",qid,question,answer)
-    return {"question_id":qid,"proof":proof}
+        row = db.execute("SELECT proof FROM trainer_questions WHERE question_id=?",(qid,)).fetchone()
+        return record_proof(db,qid,row,question,proof)

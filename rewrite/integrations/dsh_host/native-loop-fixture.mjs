@@ -47,7 +47,7 @@ class LocalModel extends LlmAdapter {
     modelRequests.push({command,provider,model,reasoningEffort});
     if (goal?.round===1) await waitForStop(signal);
     if (goal?.round===2) secondRound.resolve();
-    if (mode==='questions' && /^Question fixture (choice|text|skip|multi)$/.test(text)) {
+    if (mode==='questions' && /^Question fixture (choice|text|skip|multi|native)$/.test(text)) {
       const choice = text.split(' ').at(-1);
       if (!this.submitted.has(text)) {
         this.submitted.set(text,true);
@@ -195,6 +195,10 @@ async function formalScenario(agent) {
       continue;
     }
     if (line==='finish-compact' && mode==='compact') compactReleased.resolve();
+    else if (line==='answer-native' && mode==='questions') {
+      assert.equal(ctx.get('userQuestions').answer(agent,'native-question-native',
+        {answers:[{id:'primary',selected:['A']}]}),true);
+    }
     else assert.ok(line==='read' || line==='second-round' && mode==='goal-driver');
     if (line==='second-round') await secondRound.promise;
     await agent.whenIdle();

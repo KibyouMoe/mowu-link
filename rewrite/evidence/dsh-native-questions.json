@@ -11,12 +11,12 @@
         },
         "closed": true,
         "native_question_id": "native-question-choice",
-        "receipt_id": "4b73569c-579c-4ef4-8b87-b6b26322b4d1",
+        "receipt_id": "3cd446b5-1151-4529-81a7-b273d2c69781",
         "session": "dsh-real-timed-question",
         "turn_id": "1/1"
       },
       "native_reply": {
-        "id": "4b73569c-579c-4ef4-8b87-b6b26322b4d1",
+        "id": "3cd446b5-1151-4529-81a7-b273d2c69781",
         "call": "native-question-choice",
         "seq": 20,
         "body": {
@@ -59,12 +59,12 @@
         },
         "closed": true,
         "native_question_id": "native-question-text",
-        "receipt_id": "c6df39fb-bd6a-4c84-9394-eecf6f25d5bc",
+        "receipt_id": "60a2bdb6-6655-4832-8ab6-a93a820f278c",
         "session": "dsh-real-timed-question",
         "turn_id": "25/3"
       },
       "native_reply": {
-        "id": "c6df39fb-bd6a-4c84-9394-eecf6f25d5bc",
+        "id": "60a2bdb6-6655-4832-8ab6-a93a820f278c",
         "call": "native-question-text",
         "seq": 41,
         "body": {
@@ -105,12 +105,12 @@
         },
         "closed": true,
         "native_question_id": "native-question-skip",
-        "receipt_id": "ba9d92a9-7997-4413-91eb-63da076bec74",
+        "receipt_id": "4c34f497-f4dd-4d2a-8542-7e5f87a2fb5b",
         "session": "dsh-real-timed-question",
         "turn_id": "46/5"
       },
       "native_reply": {
-        "id": "ba9d92a9-7997-4413-91eb-63da076bec74",
+        "id": "4c34f497-f4dd-4d2a-8542-7e5f87a2fb5b",
         "call": "native-question-skip",
         "seq": 62,
         "body": {
@@ -147,6 +147,23 @@
     "native-question-text",
     "native-question-skip"
   ],
+  "native_won_conflict": {
+    "platform_message": "om_18",
+    "question_id": "babf6a0b-e553-5bb7-a458-be3b2f5f937b",
+    "proof": {
+      "answer": {
+        "mode": "choice",
+        "option_id": "1"
+      },
+      "closed": true,
+      "native_question_id": "native-question-native",
+      "receipt_id": "253df4ad-9e66-4594-99e8-cea33c7feb26",
+      "session": "dsh-real-timed-question",
+      "turn_id": "80/8"
+    },
+    "late_platform_choice": "2",
+    "platform_state": "rejected"
+  },
   "unbridged_multi": [
     "native-question-multi"
   ],
