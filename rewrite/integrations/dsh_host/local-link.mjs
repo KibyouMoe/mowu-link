@@ -30,6 +30,7 @@ async function verifiedCredentials(directory,admissions) {
       await run(powershell,args,{windowsHide:true,timeout:15000,maxBuffer:65536});
     } catch (error) {
       if (error.killed) throw new Error('dsh_link_acl_check_timeout');
+      if (error.code===4) throw new Error('dsh_admissions_file_inheritance_required');
       throw new Error(error.code===3 ? 'private_dsh_link_required' : 'dsh_link_acl_check_unavailable');
     }
   } else {

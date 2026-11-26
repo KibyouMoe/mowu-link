@@ -1,4 +1,5 @@
 """Run the installed DSH AgentLoop with a local deterministic provider and a fresh profile."""
+import csv
 import hashlib
 from io import BytesIO
 import json
@@ -433,6 +434,13 @@ class NativeProcess(unittest.TestCase):
 class LocalTlsLoop(NativeProcess):
     def local_tls_directory(self):
         directory = Path(self.enterContext(tempfile.TemporaryDirectory(prefix="mldsh-tls-"))).resolve()
+        if os.name=="nt":
+            system32 = Path(os.environ["SystemRoot"])/"System32"
+            current = subprocess.check_output([system32/"whoami.exe","/user","/fo","csv","/nh"],text=True)
+            _,owner = next(csv.reader(current.splitlines()))
+            # Python's private temporary directory need not give new files inheritable rights.
+            subprocess.run([system32/"icacls.exe",directory,"/grant:r","*"+owner+":(OI)(CI)F"],
+                           check=True,capture_output=True)
         with closing(socket.socket()) as host, closing(socket.socket()) as tools:
             host.bind(("127.0.0.1",0))
             tools.bind(("127.0.0.1",0))

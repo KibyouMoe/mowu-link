@@ -23,7 +23,7 @@ function Assert-Private([string]$Path, [bool]$IsDirectory, [bool]$RequireFileInh
             $fileInheritance = $true
         }
     }
-    if ($RequireFileInheritance -and -not $fileInheritance) { exit 3 }
+    if ($RequireFileInheritance -and -not $fileInheritance) { exit 4 }
 }
 
 Assert-Private $Directory $true $CheckAdmissions.IsPresent
