@@ -12,6 +12,11 @@ CREATE TABLE IF NOT EXISTS peer_files (
  message_id TEXT NOT NULL, position INTEGER NOT NULL, attachment_id TEXT NOT NULL, kind TEXT NOT NULL,
  PRIMARY KEY(message_id,position)
 );
+CREATE TABLE IF NOT EXISTS peer_host_receipts (
+ message_id TEXT PRIMARY KEY, delivery_id TEXT NOT NULL UNIQUE, receipt_id TEXT UNIQUE NOT NULL, recorded_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS peer_delivery_lookup ON deliveries(consumer,json_extract(payload,'$.message_id'))
+ WHERE kind='peer.message';
 """
 
 
@@ -45,3 +50,33 @@ def submit(db, sender, target, body, now):
             payload["attachments"] = items
         delivery.enqueue(db,"worker/"+target,"peer.message",payload)
     return {"message_id":mid,"accepted_at":accepted,"status":"accepted"}
+
+
+def status(db,worker,mid):
+    require(valid_guid(mid),422,"invalid_peer_message")
+    row = db.execute("""SELECT sender,recipient,accepted_at FROM peer_messages WHERE message_id=?
+                        AND (sender=? OR recipient=?)""",(mid,worker,worker)).fetchone()
+    require(row,404,"peer_message_not_found")
+    frame = db.execute("""SELECT delivery_id,ack FROM deliveries WHERE consumer=? AND kind='peer.message'
+                        AND json_extract(payload,'$.message_id')=?""",("worker/"+row["recipient"],mid)).fetchone()
+    require(frame,409,"peer_delivery_unconfirmed")
+    native = db.execute("SELECT receipt_id,recorded_at FROM peer_host_receipts WHERE message_id=?",(mid,)).fetchone()
+    return {"message_id":mid,**dict(row),"delivery_id":frame["delivery_id"],"worker_received":bool(frame["ack"]),
+            "host_receipt_id":native["receipt_id"] if native else None,
+            "host_receipt_recorded_at":native["recorded_at"] if native else None}
+
+
+def confirm(db,worker,mid,body,now):
+    require(set(body)=={"session_id","delivery_id","receipt_id"} and valid_guid(body.get("receipt_id")),
+            422,"invalid_peer_receipt")
+    observed = status(db,worker,mid)
+    require(observed["recipient"]==worker,403,"wrong_peer_recipient")
+    require(observed["worker_received"] and body["delivery_id"]==observed["delivery_id"],409,"peer_delivery_unconfirmed")
+    previous = observed["host_receipt_id"]
+    if previous:
+        require(previous==body["receipt_id"],409,"peer_receipt_conflict")
+    else:
+        inserted = db.execute("INSERT OR IGNORE INTO peer_host_receipts VALUES (?,?,?,?)",
+                              (mid,body["delivery_id"],body["receipt_id"],timestamp(now))).rowcount
+        require(inserted,409,"peer_receipt_conflict")
+    return status(db,worker,mid)

@@ -15,7 +15,7 @@ from .worker_service import WorkerService
 class Peers(unittest.TestCase):
     def setUp(self):
         self.clock = Clock()
-        self.loop = self.enterContext(Loop.isolated(self.clock,extra_workers=["tama"]))
+        self.loop = self.enterContext(Loop.isolated(self.clock,extra_workers=["tama","other"]))
         self.a = self.loop.worker
         root = self.loop.root
         self.host = FixtureHost(root/"other-host.db","other-session")
@@ -53,6 +53,54 @@ class Peers(unittest.TestCase):
         self.addCleanup(thread.join)
         self.addCleanup(srv.shutdown)
         return Client("http://127.0.0.1:"+str(srv.server_port),token)
+
+    def test_sender_distinguishes_router_worker_and_host_even_after_receipt_loss(self):
+        mid = guid()
+        self.a.send_peer(mid,"tama","请确认收件")
+        sender = self.adapter_client(self.a)
+        path = "worker/peers/"+mid
+        accepted = sender.request("GET",path)
+        self.assertFalse(accepted["worker_received"])
+        self.assertIsNone(accepted["host_receipt_id"])
+        route = "peers/messages/"+mid
+        with self.assertRaisesRegex(Fault,"peer_message_not_found"):
+            self.loop.extra_clients["other"].request("GET",route)
+        with self.assertRaisesRegex(Fault,"forbidden"):
+            self.loop.manager_wire.request("GET",route)
+        original_deliver = self.b.adapter.deliver
+        self.b.adapter.deliver = lambda *_:None
+        self.b.poll()
+        only_worker = sender.request("GET",path)
+        self.assertTrue(only_worker["worker_received"])
+        self.assertIsNone(only_worker["host_receipt_id"])
+        fake = {"session_id":self.a.session,"delivery_id":only_worker["delivery_id"],"receipt_id":guid()}
+        with self.assertRaisesRegex(Fault,"wrong_peer_recipient"):
+            self.a.router.request("POST",route+"/receipt",fake,guid())
+        with self.assertRaisesRegex(Fault,"peer_delivery_unconfirmed"):
+            self.b.router.request("POST",route+"/receipt",{**fake,"session_id":self.b.session,"delivery_id":guid()},guid())
+        self.b.adapter.deliver = original_deliver
+        original_request = self.b.router.request
+        def lose(method,endpoint,*args,**kw):
+            result = original_request(method,endpoint,*args,**kw)
+            if endpoint==route+"/receipt":
+                raise ConnectionError("peer proof accepted, response lost")
+            return result
+        self.b.router.request = lose
+        with self.assertRaises(ConnectionError):
+            self.b.poll()
+        observed = sender.request("GET",path)
+        self.assertTrue(observed["host_receipt_id"])
+        self.assertEqual(observed["accepted_at"],accepted["accepted_at"])
+        self.b.router.request = original_request
+        self.b = Worker(self.loop.root/"other-worker.db","tama",self.b.router,self.b.adapter)
+        self.b.poll()
+        self.assertEqual(sender.request("GET",path),observed)
+        self.assertEqual(len(self.host.entries()),1)
+        with self.b.db.transaction() as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM peer_receipt_acks").fetchone()[0],1)
+        with self.assertRaisesRegex(Fault,"peer_receipt_conflict"):
+            self.b.router.request("POST",route+"/receipt",{**fake,"session_id":self.b.session},guid())
+        self.assertFalse(self.loop.hermes.tasks()["items"])
 
     def test_only_intended_peer_receives_bytes_after_both_transfers_are_interrupted(self):
         sender,recipient = self.adapter_client(self.a),self.adapter_client(self.b)

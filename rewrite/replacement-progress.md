@@ -27,6 +27,8 @@
 
 ## 宿主与来源复验
 
+同伴收件的三种观测可由发件工位按原消息号查询。第一次查询只有 Router 收件时间，接收 Worker 记入收件箱并确认传输后可见 `worker_received`，此时宿主收件号仍为空。指定宿主交回独立凭据后，Router 单独保存来自接收 Worker 的确认号。丢失这次回执再重开接收 Worker，查回同一号，原生输入仍只有一条。同伴消息的另一端可查，第三个工位及管理端被拒。复跑 `rewrite.test_peers.Peers.test_sender_distinguishes_router_worker_and_host_even_after_receipt_loss`。宿主用夹具，数据库、权限及两段 HTTP 实跑。
+
 同伴私聊现可转交附件。发送 Worker 到 Router 的首块回执丢失，接收 Worker 又在第二块断开；两个方向均从已确认的字节偏移续传。接收工位重开后只生成一个原生输入，文件摘要吻合，双方无持单。空文件经过零字节读取验证；混入无权访问的附件会拒绝整条消息，未向管理端授权附件。复跑 `python3 -m unittest -v rewrite.test_peers`。两个 Worker 接口、Router HTTP、分块存储与本机文件实际运行，接收宿主使用夹具。累计 111 项回归通过。
 
 旧 Router 的真实 HTTP 建单暴露出迁移夹具遗漏的差异。旧端给每张普通单写入默认目标元数据，原转换器把它一律拦截。现已在临时端口从旧 HTTP 派单入口产生待派单及已归档单，旧建单重试只记一份；迁到新 Router，原键仍查回同单，修改正文被拒，已归档单用旧键也无法复活。Worker 取得同一新单号，测试宿主读到目标约束、完整正文与原上下文。早期快照仍可读。复跑 `python3 -m unittest -v rewrite.test_cutover`，6 项通过；两端 Router、HTTP 与数据库实跑，宿主为夹具。原生目标执行待验。

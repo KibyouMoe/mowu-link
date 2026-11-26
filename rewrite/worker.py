@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS peers (
     message_id TEXT PRIMARY KEY, direction TEXT NOT NULL, peer_id TEXT NOT NULL,
     body TEXT NOT NULL, receipt TEXT
 );
+CREATE TABLE IF NOT EXISTS peer_receipt_acks(message_id TEXT PRIMARY KEY, ack TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS controls (
     assignment_id TEXT PRIMARY KEY, kind TEXT NOT NULL, task_id TEXT NOT NULL
 );
@@ -118,6 +119,7 @@ class Worker:
                     with self.db.transaction() as db:
                         db.execute("UPDATE inbox SET done=1 WHERE delivery_id=?", (frame["delivery_id"],))
             self.flush_reports()
+            self.flush_peer_receipts()
 
     def process(self, frame):
         with self.lock:
@@ -129,6 +131,9 @@ class Worker:
                     db.execute("INSERT OR IGNORE INTO peers VALUES (?,'in',?,?,NULL)", (mid,sender,encode(payload)))
                     row = db.execute("SELECT * FROM peers WHERE message_id=?", (mid,)).fetchone()
                     require(row["direction"] == "in" and row["body"] == encode(payload),409,"peer_message_conflict")
+                    if row["receipt"]:
+                        require(json.loads(row["receipt"])["delivery_id"]==frame["delivery_id"],409,"peer_delivery_conflict")
+                        return True
                 native = {"kind":"peer", **payload}
                 if payload.get("attachments"):
                     native["attachments"] = [peer_files.receive(self,item) for item in payload["attachments"]]
@@ -279,6 +284,25 @@ class Worker:
         with self.db.transaction() as db:
             rows = db.execute("SELECT * FROM peers ORDER BY rowid DESC LIMIT 20").fetchall()
         return [dict(r,body=json.loads(r["body"]),receipt=json.loads(r["receipt"]) if r["receipt"] else None) for r in rows]
+
+    def flush_peer_receipts(self):
+        from uuid import NAMESPACE_URL, uuid5
+        with self.db.transaction() as db:
+            rows = db.execute("""SELECT p.message_id,p.receipt FROM peers p LEFT JOIN peer_receipt_acks a USING(message_id)
+                     WHERE p.direction='in' AND p.receipt IS NOT NULL AND a.message_id IS NULL
+                     ORDER BY p.rowid LIMIT 32""").fetchall()
+        for row in rows:
+            proof = json.loads(row["receipt"])
+            mid = row["message_id"]
+            require(proof.get("native_id") and proof.get("session") and proof.get("delivery_id"),409,"peer_host_unconfirmed")
+            rid = str(uuid5(NAMESPACE_URL,encode(["mowulink-peer-proof",self.worker_id,mid,proof])))
+            body = {"session_id":self.session,"delivery_id":proof["delivery_id"],"receipt_id":rid}
+            ack = self.router.request("POST","peers/messages/"+mid+"/receipt",body,"peer-receipt-"+mid)
+            require(ack.get("message_id")==mid and ack.get("recipient")==self.worker_id and ack.get("worker_received") is True
+                    and ack.get("delivery_id")==proof["delivery_id"] and ack.get("host_receipt_id")==rid,
+                    409,"wrong_peer_receipt")
+            with self.db.transaction() as db:
+                db.execute("INSERT OR IGNORE INTO peer_receipt_acks VALUES (?,?)",(mid,encode(ack)))
 
     def turn_finished(self, native_id, final_text):
         origin = self.adapter.origin(native_id)

@@ -113,6 +113,11 @@ class WorkerService:
                                  body.get("attachment_ids"),body.get("attachment_kinds"))
         elif actor == "adapter/" + w.worker_id and method == "GET" and path == "/v1/worker/peers":
             result = {"items":w.peer_history()}
+        elif actor == "adapter/"+w.worker_id and method=="GET" and path.startswith("/v1/worker/peers/"):
+            from .messages import valid_guid
+            mid = path.removeprefix("/v1/worker/peers/")
+            require(valid_guid(mid),422,"invalid_peer_message")
+            result = w.router.request("GET","peers/messages/"+mid)
         elif actor == "platform/" + w.worker_id and method == "POST" and path == "/v1/worker/command":
             result = {"receipt":worker_commands.handle(self,body)}
         elif actor == "platform/" + w.worker_id and method == "POST" and path == "/v1/worker/chat":

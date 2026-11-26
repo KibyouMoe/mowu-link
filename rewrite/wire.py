@@ -26,6 +26,10 @@ def route(orders, actor, method, path, body, headers):
             result = legacy_history.query(db,parts[1],{k:v[0] for k,v in filters.items()})
         return 200,"application/json",result
     orders.tick()
+    if method=="GET" and len(parts)==3 and parts[:2]==["peers","messages"]:
+        require(actor.startswith("worker/"),403,"forbidden")
+        with orders.db.transaction() as db:
+            return 200,"application/json",peers.status(db,actor.split("/",1)[1],parts[2])
     if parts[0] == "uploads":
         require(actor.startswith(("trigger/", "worker/")), 403, "forbidden")
         if parts == ["uploads"] and method == "POST":
@@ -107,6 +111,12 @@ def route(orders, actor, method, path, body, headers):
                 sender = actor.split("/", 1)[1]
                 orders.active_session(db,sender,body)
                 return peers.submit(db,sender,target,body,orders.clock())
+        case "POST", ["peers","messages",mid,"receipt"]:
+            require(actor.startswith("worker/"),403,"forbidden")
+            def execute(db):
+                worker = actor.split("/",1)[1]
+                orders.active_session(db,worker,body)
+                return peers.confirm(db,worker,mid,body,orders.clock())
         case "POST", ["tasks", tid, "questions"]:
             require(actor.startswith("worker/"), 403, "forbidden")
             def execute(db):
