@@ -22,6 +22,10 @@ CREATE TABLE IF NOT EXISTS chats (message_id TEXT PRIMARY KEY, text TEXT NOT NUL
 CREATE TABLE IF NOT EXISTS controls (
     assignment_id TEXT PRIMARY KEY, kind TEXT NOT NULL, task_id TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS questions (
+    native_id TEXT NOT NULL, call_id TEXT NOT NULL, question_id TEXT UNIQUE NOT NULL, task_id TEXT NOT NULL,
+    assignment_id TEXT NOT NULL, body TEXT NOT NULL, receipt TEXT, answer TEXT, PRIMARY KEY(native_id,call_id)
+);
 CREATE TABLE IF NOT EXISTS cleanup_reports (
     assignment_id TEXT NOT NULL, kind TEXT NOT NULL, task_id TEXT NOT NULL, body TEXT NOT NULL,
     proof TEXT NOT NULL, receipt TEXT, PRIMARY KEY(assignment_id,kind)
@@ -94,6 +98,14 @@ class Worker:
     def process(self, frame):
         with self.lock:
             payload = frame["payload"]
+            if frame["kind"] == "question.resolved":
+                answer = encode(payload["answer"])
+                with self.db.transaction() as db:
+                    row = db.execute("""SELECT * FROM questions WHERE question_id=? AND task_id=? AND assignment_id=?""",
+                                     (payload["question_id"], payload["task_id"], payload["assignment_id"])).fetchone()
+                    require(row and row["answer"] in (None, answer), 409, "question_answer_mismatch")
+                    db.execute("UPDATE questions SET answer=? WHERE question_id=?", (answer, payload["question_id"]))
+                return self.adapter.deliver(frame["delivery_id"], {"kind": "question_answer", **payload}) is not None
             if frame["kind"] == "task.shelved":
                 with self.db.transaction() as db:
                     db.execute("UPDATE jobs SET stage='released' WHERE assignment_id=? AND stage='accepted'",
@@ -195,6 +207,34 @@ class Worker:
                 db.execute("UPDATE chats SET reply=? WHERE message_id=?", (final_text, origin["message_id"]))
         # Busy/idle is sampled separately. No result is inferred from final text.
 
+    def ask(self, native_id, call_id, text, options):
+        with self.lock:
+            origin = self.adapter.origin(native_id)
+            require(origin["kind"] in ("task", "task_update", "task_probe", "question_answer"), 403, "wrong_report_origin")
+            tid, aid = origin["task_id"], origin["assignment_id"]
+            require(isinstance(call_id, str) and call_id.strip(), 422, "missing_call_id")
+            with self.db.transaction() as db:
+                lookup = db.execute("SELECT * FROM questions WHERE native_id=? AND call_id=?", (native_id, call_id)).fetchone()
+                if lookup:
+                    qid = lookup["question_id"]
+                else:
+                    require(db.execute("SELECT 1 FROM jobs WHERE task_id=? AND assignment_id=? AND stage='accepted'",
+                                       (tid, aid)).fetchone(), 409, "stale_assignment")
+                    qid = guid()
+                body = {"session_id": self.session, "assignment_id": aid, "question_id": qid, "text": text, "options": options}
+                if lookup:
+                    require(encode(body) == lookup["body"], 409, "question_conflict")
+                    if lookup["receipt"]:
+                        return json.loads(lookup["receipt"])
+                else:
+                    db.execute("INSERT INTO questions VALUES (?,?,?,?,?,?,NULL,NULL)", (native_id, call_id, qid, tid, aid, encode(body)))
+            reply = self.router.request("POST", f"tasks/{tid}/questions", body, "ask-" + qid)
+            require(reply.get("task_id") == tid and reply.get("question_id") == qid and reply.get("received_at"),
+                    409, "question_receipt_mismatch")
+            with self.db.transaction() as db:
+                db.execute("UPDATE questions SET receipt=? WHERE question_id=?", (encode(reply), qid))
+            return reply
+
     def report(self, native_id, task_id, assignment_id, summary, outcome="completed"):
         with self.lock:
             origin = self.adapter.origin(native_id)
@@ -203,7 +243,7 @@ class Worker:
                 require(origin["kind"] == kind and origin["task_id"] == task_id
                         and origin["assignment_id"] == assignment_id, 403, "wrong_report_origin")
                 return self.confirm_cleanup(task_id, assignment_id, kind, outcome)
-            require(origin["kind"] in ("task", "task_update", "task_probe") and origin["task_id"] == task_id
+            require(origin["kind"] in ("task", "task_update", "task_probe", "question_answer") and origin["task_id"] == task_id
                     and origin["assignment_id"] == assignment_id, 403, "wrong_report_origin")
             require(outcome in ("completed", "blocked", "continue_requested"), 422, "unsupported_outcome")
             body = {"session_id": self.session, "assignment_id": assignment_id,

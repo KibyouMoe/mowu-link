@@ -7,7 +7,7 @@ from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlsplit
 from urllib.request import ProxyHandler, Request, build_opener
 
-from . import delivery, pool
+from . import delivery, pool, questions
 from .orders import task, worker_actor
 from .storage import Fault, encode, require
 
@@ -17,7 +17,7 @@ def route(orders, actor, method, path, body, headers):
     parts = url.path.removeprefix("/v1/").split("/")
     require(path.startswith("/v1/"), 404, "unknown_route")
     orders.tick()
-    if method == "GET" and parts in (["tasks"], ["workers"]):
+    if method == "GET" and parts in (["tasks"], ["workers"], ["questions"]):
         require(actor == "hermes", 403, "forbidden")
         query = parse_qs(url.query, keep_blank_values=True)
         require(all(len(v) == 1 for v in query.values()), 422, "duplicate_filter")
@@ -66,6 +66,15 @@ def route(orders, actor, method, path, body, headers):
                 wid = actor.split("/", 1)[1]
                 orders.active_session(db, wid, body)
                 return pool.candidate(db, task(db, tid), wid, body, orders.clock())
+        case "POST", ["tasks", tid, "questions"]:
+            require(actor.startswith("worker/"), 403, "forbidden")
+            def execute(db):
+                wid = actor.split("/", 1)[1]
+                orders.active_session(db, wid, body)
+                return questions.ask(db, task(db, tid), wid, body, orders.clock())
+        case "PUT", ["questions", qid, "answer"]:
+            require(actor == "hermes", 403, "forbidden")
+            execute = lambda db: questions.answer(db, qid, body)
         case "POST", ["tasks", tid, op] if op in ("accept", "report"):
             require(actor.startswith("worker/"), 403, "forbidden")
             wid = actor.split("/", 1)[1]

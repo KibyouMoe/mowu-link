@@ -29,6 +29,13 @@ class HermesAdapter:
     def tasks(self, **filters):
         return self.router.request("GET", "tasks?" + urlencode(filters))
 
+    def questions(self, **filters):
+        return self.router.request("GET", "questions?" + urlencode(filters))
+
+    def answer(self, key, task_id, question_id, answer):
+        return self.router.request("PUT", f"questions/{question_id}/answer",
+                                   {"task_id": task_id, "answer": answer}, key)
+
     def update(self, key, task_id, revision, changes):
         return self.router.request("PATCH", f"tasks/{task_id}", {"expected_revision": revision,
                                   "changes": changes}, key)
