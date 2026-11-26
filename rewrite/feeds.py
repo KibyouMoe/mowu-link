@@ -28,8 +28,15 @@ class Feed:
             CREATE TABLE IF NOT EXISTS feed_reads(generation TEXT,position INTEGER,digest TEXT NOT NULL,mid TEXT,
                 PRIMARY KEY(generation,position));
             CREATE TABLE IF NOT EXISTS feed_handoff(slot INTEGER PRIMARY KEY CHECK(slot=1),sha256 TEXT NOT NULL,
-                epoch TEXT NOT NULL, position INTEGER NOT NULL, verified INTEGER NOT NULL DEFAULT 0);
+                epoch TEXT NOT NULL, position INTEGER NOT NULL, verified INTEGER NOT NULL DEFAULT 0,
+                generation TEXT, continuity_lost INTEGER NOT NULL DEFAULT 0);
         """)
+        with self.db.transaction() as db:
+            columns = {column["name"] for column in db.execute("PRAGMA table_info(feed_handoff)")}
+            if "generation" not in columns:
+                db.execute("ALTER TABLE feed_handoff ADD COLUMN generation TEXT")
+            if "continuity_lost" not in columns:
+                db.execute("ALTER TABLE feed_handoff ADD COLUMN continuity_lost INTEGER NOT NULL DEFAULT 0")
 
     def import_cursor(self, path, *, mailbox_confirmed=False):
         require(path.is_file() and not path.is_symlink(),422,"invalid_legacy_cursor")
@@ -61,8 +68,9 @@ class Feed:
             else:
                 require(not row and not db.execute("SELECT 1 FROM archive LIMIT 1").fetchone(),
                         409,"target_feed_already_started")
-                db.execute("INSERT INTO feed_cursor VALUES (1,?,?,?,?)",(self.scope,epoch,guid(),position))
-                db.execute("INSERT INTO feed_handoff VALUES (1,?,?,?,0)",(checksum,epoch,position))
+                generation = guid()
+                db.execute("INSERT INTO feed_cursor VALUES (1,?,?,?,?)",(self.scope,epoch,generation,position))
+                db.execute("INSERT INTO feed_handoff VALUES (1,?,?,?,0,?,0)",(checksum,epoch,position,generation))
                 verified = False
         return {"source":kind,"instance_id":self.trigger.instance_id,"legacy_sha256":checksum,"verified":verified}
 
@@ -77,16 +85,23 @@ class Feed:
         with self.db.transaction() as db:
             row = db.execute("SELECT * FROM feed_cursor WHERE slot=1").fetchone()
             require((dict(row) if row else None)==before,409,"concurrent_source_poll")
-            handoff = db.execute("SELECT epoch,position FROM feed_handoff WHERE verified=0").fetchone()
-            if handoff:
+            handoff = db.execute("SELECT * FROM feed_handoff WHERE slot=1").fetchone()
+            if handoff and not handoff["verified"]:
                 require(row and row["epoch"]==handoff["epoch"]==epoch and row["position"]==handoff["position"]<=head,
                         409,"legacy_source_position_unconfirmed")
-                db.execute("UPDATE feed_handoff SET verified=1 WHERE slot=1")
-            if row and row["epoch"]==epoch and head>=row["position"]:
+                db.execute("UPDATE feed_handoff SET verified=1,generation=? WHERE slot=1",(row["generation"],))
+            lost = handoff and handoff["verified"] and (handoff["continuity_lost"] or not row
+                   or row["epoch"]!=handoff["epoch"] or epoch!=row["epoch"] or head<row["position"]
+                   or handoff["generation"] not in (None,row["generation"]))
+            if lost:
+                db.execute("UPDATE feed_handoff SET continuity_lost=1 WHERE slot=1")
+            elif row and row["epoch"]==epoch and head>=row["position"]:
                 return row["generation"],row["position"]
-            generation = guid()
-            db.execute("INSERT OR REPLACE INTO feed_cursor VALUES (1,?,?,?,?)",(self.scope,epoch,generation,head))
-            return generation,head
+            else:
+                generation = guid()
+                db.execute("INSERT OR REPLACE INTO feed_cursor VALUES (1,?,?,?,?)",(self.scope,epoch,generation,head))
+                return generation,head
+        require(False,409,"legacy_source_continuity_lost")
 
     def capture(self,generation,position,seq,level,text):
         require(type(seq) is int and 0<seq<2**63,422,"invalid_source_sequence")
@@ -94,12 +109,16 @@ class Feed:
         with self.db.transaction() as db:
             cursor = db.execute("SELECT * FROM feed_cursor WHERE slot=1").fetchone()
             require(cursor and cursor["generation"]==generation,409,"source_generation_changed")
+            handoff = db.execute("SELECT continuity_lost FROM feed_handoff WHERE slot=1").fetchone()
+            require(not handoff or not handoff[0],409,"legacy_source_continuity_lost")
             if seq<=cursor["position"]:
                 old = db.execute("SELECT digest,mid FROM feed_reads WHERE generation=? AND position=?",
                                  (generation,seq)).fetchone()
                 require(not old or old["digest"]==digest,409,"source_event_changed")
                 return old["mid"] if old else None
             require(cursor["position"]==position,409,"concurrent_source_poll")
+            if self.trigger.name=="mc_chat" and handoff:
+                require(seq==position+1,409,"legacy_game_sequence_gap")
             mid = None
             if level is not None:
                 summary,files = text,[]

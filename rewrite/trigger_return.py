@@ -42,17 +42,22 @@ def router_files(db, files, actor):
     return result
 
 
-def receipt_state(ledgers, item, legacy, level, actor, session, read_info):
-    router,manager,host,trigger = ledgers
-    mid = item["message_id"]
-    local = trigger.execute("SELECT * FROM archive WHERE id=?",(mid,)).fetchone()
+def delivery_rows(ledgers, mid):
+    router,manager,host,_ = ledgers
     message = router.execute("SELECT * FROM messages WHERE message_id=?",(mid,)).fetchone()
     frames = router.execute("""SELECT * FROM deliveries WHERE consumer='hermes' AND kind='message.deliver'
                              AND json_extract(payload,'$.message_id')=?""",(mid,)).fetchall()
     queued = manager.execute("SELECT * FROM queue WHERE message_id=?",(mid,)).fetchone()
     intent = host.execute("SELECT * FROM intents WHERE delivery_id=?",(mid,)).fetchone()
+    return message,frames,queued,intent
+
+
+def receipt_state(ledgers, item, legacy, level, actor, session, read_info):
+    trigger = ledgers[3]
+    mid = item["message_id"]
+    local = trigger.execute("SELECT * FROM archive WHERE id=?",(mid,)).fetchone()
     if level is None:
-        return "receipt_mismatch" if any((local,message,frames,queued,intent)) else "legacy_received"
+        return "receipt_mismatch" if local or any(delivery_rows(ledgers,mid)) else "legacy_received"
     if not local:
         return "receipt_mismatch"
     body = json.loads(local["body"])
@@ -69,9 +74,21 @@ def receipt_state(ledgers, item, legacy, level, actor, session, read_info):
     stored_files = trigger.execute("SELECT * FROM files WHERE message_id=? ORDER BY position",(mid,)).fetchall()
     if [(row["name"],row["size"],row["sha"]) for row in stored_files]!=expected_files:
         return "receipt_mismatch"
+    state = publication_state(ledgers,local,body,stored_files,actor,session)
+    if state=="router_archived":
+        if item["legacy_level"]!="info":
+            return "archive_only"
+        return "reviewed_info_read" if read_info else "info_read_unknown"
+    return state
+
+
+def publication_state(ledgers, local, body, stored_files, actor, session):
+    router,manager,_,_ = ledgers
+    mid,source,level = body["message_id"],body["trigger_name"],body["level"]
+    message,frames,queued,intent = delivery_rows(ledgers,mid)
     if not message:
         return "receipt_mismatch" if any((local["receipt"],frames,queued,intent)) else "not_published"
-    if (message["owner"]!=actor or message["source"]!=item["source"] or message["level"]!=level
+    if (message["owner"]!=actor or message["source"]!=source or message["level"]!=level
             or not message["received_at"]):
         return "receipt_mismatch"
     if not local["receipt"]:
@@ -84,13 +101,9 @@ def receipt_state(ledgers, item, legacy, level, actor, session, read_info):
         return "receipt_mismatch"
     files = router_files(router,stored_files,actor)
     if level=="Info":
-        if any((frames,queued,intent)):
-            return "receipt_mismatch"
-        if item["legacy_level"]!="info":
-            return "archive_only"
-        return "reviewed_info_read" if read_info else "info_read_unknown"
+        return "receipt_mismatch" if any((frames,queued,intent)) else "router_archived"
 
-    expected = {**body,"source":item["source"]}
+    expected = {**body,"source":source}
     if len(frames)!=1 or frames[0]["payload"]!=encode(expected):
         return "receipt_mismatch"
     frame = frames[0]

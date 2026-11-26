@@ -153,6 +153,22 @@ python3 -m rewrite.feeds game --config ./game-trial.json --import-legacy-cursor 
 
 相同旧游标重导入只返回原摘要与验证状态。目标库已开始工作或保存过不同游标时拒绝覆盖。隔离复跑 `python3 -m unittest -v rewrite.test_feeds`。邮件用协议夹具，游戏走临时 HTTP 流。生产来源与订阅继续待验。
 
+### 把试用采集位置交回旧客户端
+
+保留导入时的原游标文件。停两边采集器和发送端，从同一停写窗口保存试用 Router、采集 Trigger、Hermes 和原宿主适配器账本。先核试用期间的全部捕获。邮件 Info 必须有匹配的 Router 收件并保留完整私有档，游戏 Event 还须有原宿主的收件号。旧归档副本不会自动取得这些新数据，回退时一起保管试用档案与 Router 快照。仍有待确认回执时，先在试用侧查回或完成原投递。
+
+审核文件包含 `snapshot_sha256`、`legacy_cursor_sha256`、`source` 和 `filtered_positions`。在 `source` 中保存同一来源的 `epoch`、已观测的 `head` 及独立核对的 `evidence`。邮件的 `epoch` 用 UIDVALIDITY 字符串，`head` 用 UIDNEXT 减一，并核原服务器、账号、文件夹。游戏的 `epoch` 为 `"game"`，`head` 为 `lastSeq`，证据要能证明原游戏桥未重启、玩家和过滤口径一致。游戏桥只报数字序号时，头部数字变大不足以证明连续。已观测的回退会留在新账本，数字后来恢复到较高值也不能解除。游戏试用期缺号时保持原位置，待缺号补齐后才能继续。各条源端过滤在 `filtered_positions` 按原序号写核对依据。
+
+```sh
+python3 -B -m rewrite.feed_return audit --bundle ./trial-state --manifest-sha256 "$TRIAL_STATE_SHA256" \
+  --legacy-cursor ./old-offline/email-cursor.json --review ./mail-return-review.json \
+  --feed-instance mail --manager-instance main --host-session "$ORIGINAL_HOST_SESSION"
+```
+
+源名称使用快照里对应 `trigger:<实例名>` 的实例部分。得到 `safe_to_stage` 后，将 `audit` 换成 `stage` 并加 `--destination ./mail-return-copy`。输出经核对的原格式游标、私有试用档案及摘要清单。旧客户端在隔离副本先用该游标起一次，核首个 UID 或游戏序号。游戏旧客户端续接时用 `--lookback 0`。早期已验证的导入库若没有记录原导入代际，按原始来源与账本逐笔对账。
+
+实测旧邮件客户端从 13 续到 14，旧游戏客户端从 17 续到 18。试用已收件和已审核过滤的事件没有重发。原生宿主、游戏桥和邮件服务使用夹具，旧客户端、旧游戏投递 HTTP 与重做 Router 实跑。复跑 `python3 -B -m unittest -v rewrite.test_feeds`。[源端续接实测](evidence/feed-source-return.json)
+
 ## 重做版五组件的离线恢复
 
 有了验证过的五组件快照后，可先逐项核对持单。

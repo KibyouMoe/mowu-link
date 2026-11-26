@@ -7,6 +7,7 @@ import socketserver
 import ssl
 import subprocess
 import imaplib
+import os
 import sys
 from tempfile import TemporaryDirectory
 from threading import Thread
@@ -15,7 +16,11 @@ from unittest.mock import patch
 from urllib.request import ProxyHandler,build_opener
 
 from .devloop import Loop
+from .cutover import digest
+from .feed_return import audit, stage
 from .feeds import Feed, poll_game, poll_mail
+from .legacy_test_fixture import source_for
+from .state_bundle import capture
 from .storage import Fault,encode
 
 
@@ -252,3 +257,195 @@ class Sources(unittest.TestCase):
             self.game.capture(gen,base,23,"Info","stale")
         with self.assertRaises(Fault):
             Feed(self.root/"mc.db","mc_chat",["another-bridge"]).cursor()
+
+    @unittest.skipUnless(os.name=="posix","legacy Trigger requires POSIX")
+    def test_imported_mail_and_game_return_only_after_trial_receipts_and_resume_old_collectors(self):
+        origin = self.game_server()
+        opener = build_opener(ProxyHandler({}))
+        mail_scope = ["mail.example.test",993,"isolation","INBOX"]
+        mail = Feed(self.root/"return-mail.sqlite3","email",mail_scope)
+        game = Feed(self.root/"return-game.sqlite3","mc_chat",[origin])
+        cursors = {name:self.root/(name+"-previous.json") for name in ("mail","game")}
+        cursors["mail"].write_text(encode({"folder":"INBOX","uidvalidity":31,"uidnext":11,"last_uid":10}))
+        cursors["game"].write_text(encode({"source":"mc_chat","bridge":origin,"last_seq":14}))
+        old_hashes = {name:digest(path) for name,path in cursors.items()}
+        mail.import_cursor(cursors["mail"],mailbox_confirmed=True)
+        game.import_cursor(cursors["game"])
+        box = Mailbox()
+        box.next = 14
+        box.raw = {uid:f"Subject: fixture UID {uid}\r\n\r\n".encode()+b"A"*200 for uid in (11,13)}
+        poll_mail(mail,box,"INBOX")
+
+        self.head = 17
+        self.records = [(16,{"text":"missing prior game event"})]
+        with self.assertRaisesRegex(Fault,"legacy_game_sequence_gap"):
+            poll_game(game,origin,opener)
+        self.assertEqual(game.cursor()["position"],14)
+        self.records = [(15,{"actor":"Self","text":"reviewed self chat"}),
+                        (16,{"actor":"Friend","text":"SuperCreek, trial event"}),
+                        (17,{"text":"<Friend> trial information"})]
+        poll_game(game,origin,opener)
+        self.assertEqual((mail.cursor()["position"],game.cursor()["position"]),(13,17))
+
+        with Loop.isolated(trigger_ids=[x.trigger.instance_id for x in (mail,game)]) as loop:
+            sources = {"router:main":loop.root/"router.db","worker:oguri":loop.root/"worker.db",
+                       "agent:oguri":loop.root/"agent-adapter.db","hermes:main":loop.root/"hermes-adapter.db",
+                       "hermes-host:main":loop.root/"manager-receipts.db",
+                       "trigger:mail":mail.db.path,"trigger:game":game.db.path}
+
+            def snapshot(label, ledgers=sources):
+                folder = self.root/label
+                sealed = capture(ledgers,"a"*40,folder)["manifest_sha256"]
+                return folder,sealed
+
+            def request(name, bundle, head):
+                folder,sealed = bundle
+                review = self.root/(folder.name+"-"+name+"-review.json")
+                scope = {"epoch":"31" if name=="mail" else "game","head":head,
+                         "evidence":"Isolated source identity and continuity independently checked"}
+                review.write_text(encode({"snapshot_sha256":sealed,"legacy_cursor_sha256":old_hashes[name],"source":scope,
+                    "filtered_positions":{"15":"same player and self exclusion"} if name=="game" else {}}))
+                return {"bundle":folder,"expected":sealed,"legacy_cursor":cursors[name],"review":review,
+                        "feed_instance":name,"manager_instance":"main","host_session":"test-manager-session"}
+
+            pending_mail, = mail.trigger.pending()[:1]
+            wire = loop.trigger_clients[mail.trigger.instance_id]
+            send = wire.request
+
+            def lose_t04(method,path,body=None,key=None,**kwargs):
+                result = send(method,path,body,key,**kwargs)
+                if method=="POST" and path=="messages":
+                    raise ConnectionError("fixture lost receipt after the Router committed")
+                return result
+
+            wire.request = lose_t04
+            with self.assertRaisesRegex(ConnectionError,"after the Router committed"):
+                mail.trigger.send(wire,pending_mail)
+            wire.request = send
+            for mid in game.trigger.pending():
+                game.trigger.send(loop.trigger_clients[game.trigger.instance_id],mid)
+            preflight = snapshot("waiting-for-receipts")
+            mail_waiting = audit(**request("mail",preflight,14))
+            game_waiting = audit(**request("game",preflight,18))
+            self.assertEqual([row["state"] for row in mail_waiting["events"]],
+                             ["trigger_receipt_pending","not_published"])
+            self.assertEqual([row["state"] for row in game_waiting["events"]],
+                             ["reviewed_filter","not_sent_to_host","router_archived"])
+            refused = self.root/"refused"
+            with self.assertRaisesRegex(ValueError,"still need a Router or native receipt"):
+                stage(refused,**request("game",preflight,18))
+            self.assertFalse(refused.exists())
+
+            reopened = Feed(mail.db.path,"email",mail_scope)
+            for mid in reopened.trigger.pending():
+                reopened.trigger.send(wire,mid)
+            loop.hermes.poll()
+            host_inputs = [payload["message_id"] for payload,_ in loop.hermes_native.entries()]
+            self.assertEqual(len(host_inputs),1)
+            mail_box_head = 14
+            game_return_head = 18
+            self.head = game_return_head
+            complete = snapshot("settled-feeds")
+            outputs = {kind:self.root/(kind+"-restored") for kind in ("mail","game")}
+            returned = {"mail":stage(outputs["mail"],**request("mail",complete,mail_box_head))}
+            task = request("game",complete,game_return_head)
+            cli = [sys.executable,"-B","-m","rewrite.feed_return","stage","--destination",str(outputs["game"])]
+            for key,value in task.items():
+                flag = "manifest-sha256" if key=="expected" else key.replace("_","-")
+                cli.extend(("--"+flag,str(value)))
+            result = subprocess.run(cli,cwd=Path(__file__).resolve().parents[1],capture_output=True,
+                                    text=True,check=True,timeout=10)
+            returned["game"] = json.loads(result.stdout)
+            self.assertEqual([row["state"] for row in returned["game"]["events"]],
+                             ["reviewed_filter","native_received","router_archived"])
+            self.assertEqual(host_inputs,[returned["game"]["events"][1]["message_id"]])
+            self.assertEqual(len(loop.hermes.messages()["items"]),4)
+            self.assertEqual(digest(outputs["mail"]/"trial-archive.sqlite3"),digest(mail.db.path))
+
+            rewind_db = self.root/"rewind.sqlite3"
+            shutil.copyfile(game.db.path,rewind_db)
+            rewound = Feed(rewind_db,"mc_chat",[origin])
+            self.head = 3
+            with self.assertRaisesRegex(Fault,"legacy_source_continuity_lost"):
+                poll_game(rewound,origin,opener)
+            self.head = game_return_head
+            with self.assertRaisesRegex(Fault,"legacy_source_continuity_lost"):
+                poll_game(rewound,origin,opener)
+            bad = snapshot("bridge-rewound",{**sources,"trigger:game":rewind_db})
+            with self.assertRaisesRegex(ValueError,"original imported generation could not be verified"):
+                audit(**request("game",bad,game_return_head))
+
+        self.records.append((18,{"actor":"Friend","text":"First old-client game event after the trial"}))
+        legacy = self.resume_old_collectors(outputs,origin)
+        self.assertEqual(legacy,{"mail_checked":1,"mail_uids":[14],"mail_cursor":14,
+                                 "game_input_since":17,"game_event_ids":["mc_chat:sse:18"],"game_cursor":18})
+        self.assertEqual({name:digest(path) for name,path in cursors.items()},old_hashes)
+        self.return_evidence = {"mail_waiting":mail_waiting["events"],"game_waiting":game_waiting["events"],
+                                "returned":returned,"old_collector_readback":legacy,"native_game_inputs":host_inputs,
+                                "bridge_rewind_blocks_after_head_recovers":True,"source_gap_blocks_ingestion":True,
+                                "boundary":"Rewrite HTTP, old MC client and old Trigger HTTP are real. Mailbox provider, game bridge and Hermes host are fixtures. Old email cursor and poll code are real."}
+
+    def resume_old_collectors(self, outputs, origin):
+        legacy_trigger = source_for("trigger")
+        email_code = legacy_trigger.parents[1]/"sources"/"email"
+        program = r"""
+from argparse import Namespace
+from pathlib import Path
+from threading import Thread
+from client import EmailClient
+from mc_chat_client import MCClient, parse_args
+from server import TriggerServer, TriggerStore
+import json, sys
+
+mail_path, game_path, origin = sys.argv[1:]
+class Mailbox:
+    def response(self, name):
+        return name,[b"31"]
+    def status(self, folder, fields):
+        return "OK",[b"INBOX (UIDNEXT 15)"]
+    def uid(self, method, *args):
+        if method=="SEARCH":
+            return "OK",[b"11 13 14"]
+        assert args[0]=="14" and "BODY.PEEK" in args[1], args
+        return "OK",[(b"UID 14",b"Subject: First old-client mail after the trial\r\n\r\nHello")]
+    def close(self):
+        pass
+    def logout(self):
+        pass
+mail = EmailClient(Namespace(trigger_url=None,dry_run=False,poll_seconds=1,folder="INBOX",
+                            cursor=mail_path,drops_log=None,no_bus=True))
+mail.credentials = lambda: {}
+mail.connect = lambda _: Mailbox()
+seen = []
+def observe(*args):
+    seen.append(args[-2])
+    return "passed"
+mail.handle = observe
+summary = mail.poll_once()
+store = TriggerStore("fixture-trigger.db")
+with TriggerServer(("127.0.0.1",0),store) as server:
+    thread = Thread(target=server.serve_forever,kwargs={"poll_interval":.02})
+    thread.start()
+    try:
+        client = MCClient(parse_args(["--url",origin+"/stream","--no-bus","--own-name","Self",
+                          "--lookback","0","--cursor-file",game_path,
+                          "--trigger-url",f"http://127.0.0.1:{server.server_port}/trigger"]))
+        client._prepare_cursor()
+        start = client.last_seq
+        client._consume(None)
+        result = {"mail_checked":summary["checked"],"mail_uids":seen,
+                  "mail_cursor":json.loads(Path(mail_path).read_text())["last_uid"],
+                  "game_input_since":start,"game_event_ids":[item["event_id"] for item in store.list_events("fixture",0)],
+                  "game_cursor":json.loads(Path(game_path).read_text())["last_seq"]}
+    finally:
+        server.shutdown()
+        thread.join()
+store.close()
+print(json.dumps(result))
+"""
+        subprocess_result = subprocess.run([sys.executable,"-B","-c",program,
+                    str(outputs["mail"]/"email_cursor.json"),str(outputs["game"]/"mc_chat_cursor.json"),origin],
+                    cwd=self.root,text=True,capture_output=True,check=True,timeout=12,
+                    env={"PATH":os.defpath,"HOME":str(self.root),"PYTHONPATH":os.pathsep.join(map(str,
+                          (legacy_trigger,legacy_trigger/"clients",email_code))),"PYTHONDONTWRITEBYTECODE":"1"})
+        return json.loads(subprocess_result.stdout)

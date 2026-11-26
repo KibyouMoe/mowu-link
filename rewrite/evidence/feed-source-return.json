@@ -1,0 +1,105 @@
+{
+  "boundary": "Rewrite HTTP, old MC client and old Trigger HTTP are real. Mailbox provider, game bridge and Hermes host are fixtures. Old email cursor and poll code are real.",
+  "bridge_rewind_blocks_after_head_recovers": true,
+  "consecutive_runs": 10,
+  "game_waiting": [
+    {
+      "message_id": null,
+      "position": 15,
+      "state": "reviewed_filter"
+    },
+    {
+      "message_id": "c9f66779-8a56-4900-bc61-008b83e3a053",
+      "position": 16,
+      "state": "not_sent_to_host"
+    },
+    {
+      "message_id": "90a6d3a5-baff-4501-bbf9-ac8597d51141",
+      "position": 17,
+      "state": "router_archived"
+    }
+  ],
+  "mail_waiting": [
+    {
+      "message_id": "e80ba608-56de-41d3-a83e-19cb270f144c",
+      "position": 11,
+      "state": "trigger_receipt_pending"
+    },
+    {
+      "message_id": "325853a0-2578-4b67-8ccf-61ab455dec3d",
+      "position": 13,
+      "state": "not_published"
+    }
+  ],
+  "native_game_inputs": [
+    "c9f66779-8a56-4900-bc61-008b83e3a053"
+  ],
+  "old_collector_readback": {
+    "game_cursor": 18,
+    "game_event_ids": [
+      "mc_chat:sse:18"
+    ],
+    "game_input_since": 17,
+    "mail_checked": 1,
+    "mail_cursor": 14,
+    "mail_uids": [
+      14
+    ]
+  },
+  "returned": {
+    "game": {
+      "events": [
+        {
+          "message_id": null,
+          "position": 15,
+          "state": "reviewed_filter"
+        },
+        {
+          "message_id": "c9f66779-8a56-4900-bc61-008b83e3a053",
+          "position": 16,
+          "state": "native_received"
+        },
+        {
+          "message_id": "90a6d3a5-baff-4501-bbf9-ac8597d51141",
+          "position": 17,
+          "state": "router_archived"
+        }
+      ],
+      "initial_position": 14,
+      "instance_id": "752a7392-d790-4b6f-96b7-efd152b97ba0",
+      "legacy_cursor_sha256": "a90091d1b5a1035a331dad37f637823e5dbd45a4f6634bdfe389ba8c7b676f66",
+      "observed_head": 18,
+      "review_sha256": "c7df64c30a315f53ec5e30031a53aba2d64945c2d83ce56d23d264c24b74c2d7",
+      "safe_to_stage": true,
+      "snapshot_sha256": "3c9b6f599fb8c174e4be63e30e274ac3628215bbd9313c7e414f9ab1c9739f0b",
+      "source": "mc_chat",
+      "source_epoch": "game",
+      "trial_position": 17
+    },
+    "mail": {
+      "events": [
+        {
+          "message_id": "e80ba608-56de-41d3-a83e-19cb270f144c",
+          "position": 11,
+          "state": "router_archived"
+        },
+        {
+          "message_id": "325853a0-2578-4b67-8ccf-61ab455dec3d",
+          "position": 13,
+          "state": "router_archived"
+        }
+      ],
+      "initial_position": 10,
+      "instance_id": "140953de-0107-4739-9bff-7a8064bc84ea",
+      "legacy_cursor_sha256": "1a38a7a29466d382ceb8969a31fb60b5a8cb06c4d353fd0ba1e4282da754627f",
+      "observed_head": 14,
+      "review_sha256": "61ae75eaba9fd07e4721b8d709944c6df138f8e189628212aa9c76f35c98d521",
+      "safe_to_stage": true,
+      "snapshot_sha256": "3c9b6f599fb8c174e4be63e30e274ac3628215bbd9313c7e414f9ab1c9739f0b",
+      "source": "email",
+      "source_epoch": "31",
+      "trial_position": 13
+    }
+  },
+  "source_gap_blocks_ingestion": true
+}
