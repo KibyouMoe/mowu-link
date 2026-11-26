@@ -1,0 +1,225 @@
+"""Run Desktop's bundled native App Server against a scripted loopback model."""
+from collections import deque
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import json
+import os
+from pathlib import Path
+from queue import Queue
+import subprocess
+from tempfile import TemporaryDirectory
+from threading import Thread
+import time
+import unittest
+
+from .agent_tools import REPORT_TOOL
+from .codex_app_server import AppServerHost
+from .devloop import Loop
+from .storage import Fault, encode, guid
+from .test_mainline import Clock
+from .wire import Client
+from .worker_service import WorkerService
+
+CODEX = Path("/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex")
+
+
+class Stdio:
+    def __init__(self, process):
+        self.process = process
+        self.counter = 0
+        self.incoming, self.events = Queue(),deque()
+        self.reader = Thread(target=self.read,daemon=True)
+        self.reader.start()
+
+    def read(self):
+        for line in self.process.stdout:
+            self.incoming.put(json.loads(line))
+        self.incoming.put(None)
+
+    def send(self, packet):
+        self.process.stdin.write(encode(packet)+"\n")
+        self.process.stdin.flush()
+
+    def receive(self, deadline):
+        packet = self.incoming.get(timeout=max(0,deadline-time.monotonic()))
+        if packet is None:
+            raise RuntimeError("isolated App Server closed its transport")
+        return packet
+
+    def request(self,method,params):
+        self.counter += 1
+        self.send({"method":method,"params":params,"id":self.counter})
+        until = time.monotonic()+12
+        while True:
+            packet = self.receive(until)
+            if "method" not in packet and packet.get("id")==self.counter:
+                if "error" in packet:
+                    error = packet["error"]
+                    if (method=="thread/read" and params["includeTurns"] and error["code"]==-32601
+                            and error["message"]=="list_turns is not supported yet"):
+                        raise Fault(503,"native_history_unconfirmed",True)
+                    raise RuntimeError("App Server "+method+" error "+encode(error))
+                return packet["result"]
+            self.events.append(packet)
+
+    def event(self,deadline):
+        return self.events.popleft() if self.events else self.receive(deadline)
+
+
+class Provider(BaseHTTPRequestHandler):
+    def log_message(self,*args):
+        pass
+
+    def do_POST(self):
+        if self.path!="/v1/responses":
+            self.send_error(404)
+            return
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        items = body["input"]
+        markers = [block["text"] for item in items if item.get("role")=="user"
+                   for block in item.get("content",[]) if block.get("text","").startswith("魔物链接投递\n")]
+        payload = json.loads(markers[-1].split("\n",1)[1])["payload"]
+        calls = sum(item.get("type")=="function_call_output" for item in items)
+        names = [tool.get("name") for tool in body.get("tools",[])]
+        self.server.observed.append(("worker_report" in names,calls))
+        response_id = "resp_fixture_"+str(len(self.server.observed))
+        if calls<2:
+            arguments = {"task_id":payload["task_id"],"assignment_id":payload["assignment_id"],
+                         "summary":"Isolated App Server result"}
+            item = {"type":"function_call","id":"fc_fixture_"+str(calls),"name":"worker_report",
+                    "call_id":"native_fixture_"+str(calls),"arguments":encode(arguments)}
+        else:
+            item = {"id":"msg_fixture","type":"message","role":"assistant","status":"completed",
+                    "content":[{"type":"output_text","text":"Local model fixture accepted the receipt."}]}
+        stream = [
+            {"type":"response.created","response":{"id":response_id}},
+            {"type":"response.output_item.added","output_index":0,"item":item},
+            {"type":"response.output_item.done","output_index":0,"item":item},
+            {"type":"response.completed","response":{"id":response_id,
+             "usage":{"input_tokens":11,"output_tokens":5,"total_tokens":16}}},
+        ]
+        raw = "".join("event: "+event["type"]+"\ndata: "+encode(event)+"\n\n" for event in stream).encode()
+        self.send_response(200)
+        self.send_header("Content-Type","text/event-stream")
+        self.send_header("Content-Length",str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+
+@contextmanager
+def running(server):
+    with server:
+        thread = Thread(target=server.serve_forever,kwargs={"poll_interval":.02},daemon=True)
+        thread.start()
+        try:
+            yield "http://127.0.0.1:"+str(server.server_port)
+        finally:
+            server.shutdown()
+            thread.join()
+
+
+@contextmanager
+def isolated_app_server(root, url):
+    settings = [
+        'model="gpt-5.4"', 'model_provider="test_wire"', 'model_providers.test_wire.name="Local test wire"',
+        'model_providers.test_wire.base_url='+encode(url+"/v1"), 'model_providers.test_wire.wire_api="responses"',
+        'model_providers.test_wire.request_max_retries=0','model_providers.test_wire.stream_max_retries=0',
+        'web_search="disabled"',
+    ]
+    argv = [CODEX,"app-server","--stdio",*(value for setting in settings for value in ("-c",setting))]
+    with Path(root,"native.stderr").open("w+") as errors:
+        with subprocess.Popen(argv,cwd=root,env={"CODEX_HOME":root,"PATH":os.defpath},
+                              stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=errors,text=True) as process:
+            rpc = Stdio(process)
+            try:
+                rpc.request("initialize",{"clientInfo":{"name":"mowulink_local_check","title":"Isolated protocol test",
+                    "version":"1.0"},"capabilities":{"experimentalApi":True}})
+                rpc.send({"method":"initialized","params":{}})
+                yield rpc
+            finally:
+                process.terminate()
+                try:
+                    process.wait(timeout=4)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=4)
+                rpc.reader.join(timeout=4)
+
+
+@unittest.skipUnless(CODEX.is_file(),"bundled Codex App Server required")
+class CodexAppServer(unittest.TestCase):
+    def test_native_app_server_dynamic_tool_keeps_ids_and_fires_one_w04(self):
+        root = self.enterContext(TemporaryDirectory(prefix="mowulink-codex-protocol-"))
+        provider = ThreadingHTTPServer(("127.0.0.1",0),Provider)
+        provider.observed = []
+        origin = self.enterContext(running(provider))
+        rpc = self.enterContext(isolated_app_server(root,origin))
+        account = rpc.request("account/read",{"refreshToken":False})
+        self.assertIsNone(account["account"])
+        started = rpc.request("thread/start",{"cwd":root,"ephemeral":False,"dynamicTools":[REPORT_TOOL]})["thread"]
+        sid = started["id"]
+        host = AppServerHost(rpc,sid)
+        host.session = sid
+        clock = Clock()
+        loop = self.enterContext(Loop.isolated(clock,host_factory=lambda _path,_name:host))
+        token = guid()
+        service = WorkerService(loop.worker,clock)
+        source = self.enterContext(running(service.listen({token:"adapter/oguri"},("127.0.0.1",0),None)))
+        callback = Client(source,token)
+        tid = loop.hermes.create(guid(),"App Server test","Read the synthetic fixture","oguri")["task_id"]
+        loop.worker.connect()
+        loop.worker.poll()
+        clock.advance(10)
+        loop.worker.poll()
+        loop.worker.poll()
+        aid = loop.worker.hold()["held_assignment_id"]
+        self.assertEqual(loop.worker.hold()["held_task_id"],tid)
+        frame, = [frame for frame in loop.wire.frames(0) if frame["kind"]=="task.dispatch"]
+        receipts, native_calls = [],[]
+        last = time.monotonic()+16
+        while True:
+            event = rpc.event(last)
+            if event.get("method")=="item/tool/call":
+                args = event["params"]["arguments"]
+                self.assertEqual((args["task_id"],args["assignment_id"]),(tid,aid))
+                if not receipts:
+                    # The active turn is suspended waiting for this request's answer, so its input is visible.
+                    self.assertTrue(loop.worker.process(frame))
+                    self.assertEqual(loop.hermes.inspect(tid)["task"]["state"],"working")
+                    with self.assertRaisesRegex(Fault,"wrong_native_caller"):
+                        host.report_call(dict(event,params={**event["params"],"threadId":guid()}),callback)
+                    with self.assertRaisesRegex(Fault,"native_turn_unconfirmed"):
+                        host.report_call(dict(event,params={**event["params"],"turnId":guid()}),callback)
+                proof = host.report_call(event,callback)
+                receipts.append(proof)
+                native_calls.append(event["params"])
+                rpc.send({"id":event["id"],"result":{"success":True,
+                          "contentItems":[{"type":"inputText","text":encode(proof)}]}})
+            if event.get("method")=="turn/completed":
+                self.assertEqual(event["params"]["turn"]["status"],"completed")
+                break
+        turn, = host.thread(sid,include_turns=True)["turns"]
+        inputs = [item for item in turn["items"] if item.get("type")=="userMessage"]
+        recorded = [item for item in turn["items"] if item.get("type")=="dynamicToolCall"]
+        self.assertEqual(len(inputs),1)
+        self.assertEqual(inputs[0]["clientId"],"mowulink-"+frame["delivery_id"])
+        self.assertEqual([item["id"] for item in recorded],[call["callId"] for call in native_calls])
+        self.assertEqual({call["turnId"] for call in native_calls},{turn["id"]})
+        body = {"kind":"task",**frame["payload"]}
+        original = loop.adapter.lookup_delivery(frame["delivery_id"],body,session=sid)
+        self.assertEqual((original["native_id"],original["turn_id"]),(inputs[0]["id"],turn["id"]))
+        expected = {"recorded":True,"task_state":"completed_reported","release_assignment_id":aid}
+        self.assertEqual(receipts,[expected,expected])
+        self.assertIsNone(loop.worker.hold()["held_assignment_id"])
+        details = loop.hermes.inspect(tid)
+        self.assertEqual(details["task"]["state"],"completed_reported")
+        notice, = loop.manager_wire.frames(0)
+        self.assertEqual(notice["payload"]["task_id"],tid)
+        self.assertEqual(provider.observed,[(True,0),(True,1),(True,2)])
+        self.evidence = {"cli_version":started["cliVersion"],"thread_id":sid,"task_id":tid,"assignment_id":aid,"receipt":original,
+                         "native_client_input_id":inputs[0]["clientId"],
+                         "native_tool_calls":native_calls,"router_receipts":receipts,
+                         "notification_delivery_id":notice["delivery_id"],"native_input_count":len(inputs),
+                         "report_status_before_review":details["task"]["state"],"account_present":False,
+                         "scripted_provider_requests":provider.observed,
+                         "boundary":"Bundled native Codex App Server using a scripted local HTTP model. Desktop and authenticated model not exercised."}

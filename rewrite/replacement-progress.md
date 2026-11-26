@@ -4,6 +4,8 @@
 
 ## 检查点与证据
 
+独立 Codex App Server 的原生动态工具协议已接通隔离 Router。原生线程从 Worker 收一条正式派发，重投无第二条。实际 `item/tool/call` 两次调用 W04 回同一结果、只发一条待验通知；错线程和错回合均拒绝。首次查历史偶发暂不可用，保留待核，仍按原投递查回。连续 30 次通过。复跑 `python3 -m unittest -v rewrite.test_codex_app_server`。[原生记录](evidence/codex-app-server-scripted-w04.json)。原生进程实际运行，模型是本地脚本，无独立登录身份。Desktop 测试项目缺工具的原证据仍有效。
+
 DSH 原生工具执行器已走通带附件的 W04。563,200 字节测试文件由隔离适配器预先登记，原生回合调用暂存工具。最后一个分块回执丢失后，按原上传号查回，三块字节均只写一次。W04 前管理端取不到文件，正式回执后读取的字节和摘要与原件一致，只有一条 Notify。普通私聊和只获读权的训练员附件不能用此入口暂存。连续 12 次通过。[原生证据](evidence/dsh-native-artifacts.json)。复跑 `python3 -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_native_w04_stages_private_artifact_before_sharing_it_with_manager rewrite.test_work_files`。模型用本地驱动，测试不连接真实飞书。
 
 工单更新与取消实测续用各自的投递号查回。同会话空账本均收零条，接回原账本后原输入数分别保持一条。取消回执未知时仍保留持单；另一个场景模拟原投递途中断线，收到 Router 随后发出的新取消指令才进入宿主。复跑 `python3 -m unittest -v rewrite.test_link_health rewrite.test_management rewrite.test_question_cards`。临时 Router 和 Worker 实际运行，宿主采用夹具。

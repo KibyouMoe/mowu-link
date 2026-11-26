@@ -1,0 +1,72 @@
+{
+  "cli_version": "0.171.0-alpha.13.2",
+  "thread_id": "01a216b3-9527-7d12-8450-41a3ce27768b",
+  "task_id": "96968f91-96c2-4832-a738-e6264197e57b",
+  "assignment_id": "369a13fe-3d99-4743-bd06-777da031391d",
+  "receipt": {
+    "delivery_id": "6e62aa16-7744-4dae-8434-ef0873d7b484",
+    "digest": "b112f08deadb4ffc462aeac8517de8292930f7bfd0dad9f872e632af55325e25",
+    "native_id": "01a216b3-9570-7743-ada5-5f9697820a19",
+    "session": "01a216b3-9527-7d12-8450-41a3ce27768b",
+    "turn_id": "01a216b3-9565-7df1-b715-57596173a823"
+  },
+  "native_client_input_id": "mowulink-6e62aa16-7744-4dae-8434-ef0873d7b484",
+  "native_tool_calls": [
+    {
+      "threadId": "01a216b3-9527-7d12-8450-41a3ce27768b",
+      "turnId": "01a216b3-9565-7df1-b715-57596173a823",
+      "callId": "native_fixture_0",
+      "namespace": null,
+      "tool": "worker_report",
+      "arguments": {
+        "assignment_id": "369a13fe-3d99-4743-bd06-777da031391d",
+        "summary": "Isolated App Server result",
+        "task_id": "96968f91-96c2-4832-a738-e6264197e57b"
+      }
+    },
+    {
+      "threadId": "01a216b3-9527-7d12-8450-41a3ce27768b",
+      "turnId": "01a216b3-9565-7df1-b715-57596173a823",
+      "callId": "native_fixture_1",
+      "namespace": null,
+      "tool": "worker_report",
+      "arguments": {
+        "assignment_id": "369a13fe-3d99-4743-bd06-777da031391d",
+        "summary": "Isolated App Server result",
+        "task_id": "96968f91-96c2-4832-a738-e6264197e57b"
+      }
+    }
+  ],
+  "router_receipts": [
+    {
+      "recorded": true,
+      "release_assignment_id": "369a13fe-3d99-4743-bd06-777da031391d",
+      "task_state": "completed_reported"
+    },
+    {
+      "recorded": true,
+      "release_assignment_id": "369a13fe-3d99-4743-bd06-777da031391d",
+      "task_state": "completed_reported"
+    }
+  ],
+  "notification_delivery_id": "5991e8e6-1f2d-4a99-bfd7-c85a5462c741",
+  "native_input_count": 1,
+  "report_status_before_review": "completed_reported",
+  "account_present": false,
+  "scripted_provider_requests": [
+    [
+      true,
+      0
+    ],
+    [
+      true,
+      1
+    ],
+    [
+      true,
+      2
+    ]
+  ],
+  "boundary": "Bundled native Codex App Server using a scripted local HTTP model. Desktop and authenticated model not exercised.",
+  "consecutive_runs": 30
+}

@@ -40,7 +40,7 @@
 | --- | --- | --- |
 | 通用 Worker | `/help`、`/start`、`/commands`、`/status`、`/list` 测试平台端已核。原消息号按原回执重投。 | 实际 Feishu 私聊的所有指令入口与交互。 |
 | DSH | `/context`、`/model`、`/effort`、`/queue`、`/goal`、`/compact`、`/stop` 有 SDK 或真循环证据。`/resume` 可浏览获准的目录和搜索，历史会话保持冷态。 | `/resume` 换绑、`/new`、`/fork`、新会话初始模型与思考强度；前台阻塞题和原生清理凭据。 |
-| Codex Desktop | 真实独立会话收到一条正式单，重投仍一条。 | Desktop 测试项目未列出 `worker_report`。清空的 App Server 能启动，账户未登录。两项分别留证，待能加载工具的隔离测试身份。 |
+| Codex Desktop 与独立 App Server | Desktop 真实独立会话收到一条正式单，重投仍一条。独立原生 App Server 接到本地脚本模型的动态工具调用，实际完成 W04，重试回同一结果。 | Desktop 测试项目未列出 `worker_report`。默认 App Server 测试 profile 无登录。两条路径的真实模型 W04 仍需各自的授权测试条件。 |
 | Antigravity | 已核安装版本 2.32.1 及官方会话钩子、转录、MCP 入口。 | 指定空闲会话的后台唤醒、真实 Gemini 回报及完整的读写验收。详见[兼容性核对](antigravity-compatibility.md)。 |
 | 授权和维护 | 认证的 Router/Worker/适配器隔离已验证；普通题卡不能执行原生授权。 | 旧 `/approvals`、`/commands`、`/ops/services` 中实际仍在使用的入口，与宿主授权逐项验证。 |
 
@@ -66,7 +66,7 @@
 | `bridge_register_current_task` | W03 接管及独立原生收件 | 原派发会话已固定，错绑零投递。实际 DSH 原生目标试跑通过，Codex 工单目标链待验。 |
 | `bridge_create_work_order` | 溪流侧的正式建单与授权 | 已有隔离 Hermes 管理入口。现役 Worker 直接建单的调用边界及是否保留需要定案。 |
 | `bridge_work_order_status` | 溪流侧正式工单查询、工位本地持单状态 | 已核管理查询和本地状态，Worker 直接按旧单查他端成果的兼容范围待定。 |
-| `submit_deliverable` | Agent `worker_report` 经 W04，待溪流验收 | 真 DSH 原生工具及本地脚本模型通过。Codex Desktop 缺工具，独立 App Server 缺测试登录。 |
+| `submit_deliverable` | Agent `worker_report` 经 W04，待溪流验收 | 真实 DSH 与隔离 Codex App Server 的原生工具协议通过，模型为本地脚本。Desktop 工具注册和真实模型验收仍缺独立工位。 |
 | `bridge_list_workers` | 原生 `worker_list_peers` | 真 DSH 已查询对端。单独登记、在线和权限筛选已核。 |
 | `bridge_send_worker_message` | 原生 `worker_send_peer` 与三层收件查询 | 两个独立 DSH 实例互发及回原消息通过，模型为本地驱动。需要授权的实际跨宿主工位。 |
 | `bridge_worker_inbox` | 原生 `worker_peer_inbox` 的待办和回复历史 | 真实 DSH 查原信后关联回复，游标和只读性有回归。需 Codex 工具实机复验。 |

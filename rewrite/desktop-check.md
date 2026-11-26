@@ -42,3 +42,11 @@ text(await eval("(" + driver.output + ")")(tools, workdir));
 ```
 
 成功输出含 `status=verified`、两个原生标识、`native_inputs=1`、`send_calls=1` 和 `w04=null`。缺少完整证据会返回待核或错误。当前测试只读取至多十个回合、每回合六十四项，超过读取边界会保留待核。
+
+## 独立 App Server 的 W04 协议验收
+
+另启动 Desktop 随附的 Codex App Server，只监听当前进程的标准输入输出，使用空白配置和回环 HTTP 测试模型。原生线程加载 `worker_report`，同一正式派发从 Router 经 Worker 进入线程。按投递号填写原生 `clientUserMessageId`，从 `thread/read` 核对该标识、输入项、正文和回合。读历史暂不可用时保留待核，重复派发只查原历史。
+
+测试模型发出两次工具调用。由真实 App Server 送出 `item/tool/call`，Worker 核对同一原生线程、回合与原派发，再走 W04。轮换线程号和回合号的回调分别被拒绝。两次合法调用返回同一正式回执，只产生一条待验收通知。原生历史只见一个工单输入，保留两个已完成的工具调用项。[原生试验记录](evidence/codex-app-server-scripted-w04.json)。
+
+复跑 `python3 -m unittest -v rewrite.test_codex_app_server`，需要本机 ChatGPT Desktop 随附的 Codex 可执行文件。此验收连续通过 30 次。模型为本地脚本，无登录账户，Desktop 界面和真实模型 W04 仍待有授权的测试工位。
