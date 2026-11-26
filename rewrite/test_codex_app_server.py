@@ -3543,6 +3543,7 @@ class CodexAppServer(unittest.TestCase):
         self.assertEqual(notify["payload"]["task_id"],tid)
         frame, = [frame for frame in loop.wire.frames(0) if frame["kind"]=="task.dispatch"]
         with start_app_server(CODEX,profile,project) as review:
+            self.assertIsNone(review.request("account/read",{"refreshToken":False})["account"])
             native = review.request("thread/resume",{"threadId":sid,"cwd":str(project)})["thread"]
             published = AppServerHost(review,sid)
             body = {"kind":"task",**frame["payload"]}
@@ -3564,6 +3565,7 @@ class CodexAppServer(unittest.TestCase):
         self.evidence = {"thread_id":sid,"task_id":tid,"assignment_id":body["assignment_id"],"native_receipt":proof,
                          "native_tool_call_ids":calls,"notification_delivery_id":notify["delivery_id"],
                          "cli_version":native["cliVersion"],"router_state":"completed_reported","tls":True,
+                         "account_present":False,"native_assignment_inputs":1,"router_notifications":1,
                          "wrong_workspace_rejected":True,"second_profile_writer_rejected":True,
                          "provisioned_native_input_id":seed["native_input_id"],"provisioned_turn_id":seed["turn_id"],
                          "provisioned_client_input_id":seed["client_input_id"],"thread_seed_count":1,
@@ -3693,8 +3695,15 @@ class CodexAppServer(unittest.TestCase):
         self.evidence = {"cases":cases,"boundary":"Isolated Router and native App Server, scripted model. No cleanup success inferred."}
 
     def test_native_readonly_assignment_cleanup_waits_for_control_end_and_preserves_new_holder(self):
+        self.check_readonly_assignment_cleanup(("cancel","transfer","workspace_tool","control_workspace_tool"))
+
+    @unittest.skipUnless(os.name=="nt","native Windows App Server required")
+    def test_windows_native_readonly_assignment_cleanup_cancel_and_transfer(self):
+        self.check_readonly_assignment_cleanup(("cancel","transfer"))
+
+    def check_readonly_assignment_cleanup(self,actions):
         cases = []
-        for action in ("cancel","transfer","workspace_tool","control_workspace_tool"):
+        for action in actions:
             with self.subTest(action=action), ExitStack() as resources:
                 root = Path(self.root)/action
                 root.mkdir(mode=0o700)
@@ -3812,7 +3821,7 @@ class CodexAppServer(unittest.TestCase):
                 journal = Path(history["path"]).resolve()
                 self.assertTrue(journal.is_relative_to(root.resolve()))
                 policies = {}
-                for line in journal.read_text().splitlines():
+                for line in journal.read_text(encoding="utf-8").splitlines():
                     entry = json.loads(line)
                     if entry["type"]=="turn_context":
                         context = entry["payload"]
@@ -3849,10 +3858,11 @@ class CodexAppServer(unittest.TestCase):
                     "worker_proof":json.loads(stored["proof"]) if stored else None,
                     "w04":json.loads(stored["receipt"]) if stored else None,"final_task":details["task"],
                     "final_cleanup":details["pending_cleanup"],"shell_present_in_native_tool_table":"exec_command" in fixture["task_tools"]})
+        self.evidence = {"recorded_utc":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+                         "boundary":"Installed App Server, native cancellation and tool callback on a private test profile;"
+                         " model and replacement worker host are fixtures.","cases":cases}
         if output := os.environ.get("MOWULINK_CODEX_CLEANUP_EVIDENCE"):
-            Path(output).write_text(json.dumps({"recorded_utc":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
-                "boundary":"Installed App Server, native cancellation and tool callback on a private test profile;"
-                " model and replacement worker host are fixtures.","cases":cases},ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
+            Path(output).write_text(json.dumps(self.evidence,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
 
     def test_model_effort_and_context_read_native_app_server_observations(self):
         self.provider.config_observations = []

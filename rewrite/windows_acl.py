@@ -1,4 +1,4 @@
-"""Check the DACL of an already open Windows credential file."""
+"""Check the DACL of a Windows credential file or profile directory by handle."""
 import ctypes as ct
 from ctypes import wintypes as win
 from msvcrt import get_osfhandle

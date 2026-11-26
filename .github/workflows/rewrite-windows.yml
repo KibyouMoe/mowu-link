@@ -80,10 +80,11 @@ jobs:
                 'rewrite.test_codex_app_server.CodexAppServer.test_codex_adapter_process_handles_native_report_without_controller_dispatch'
                 'rewrite.test_codex_app_server.CodexAppServer.test_native_app_server_reconnect_recovers_input_before_w04_without_new_model_call'
                 'rewrite.test_codex_app_server.CodexAppServer.test_router_cancel_interrupts_bound_app_server_turn_and_preserves_unrelated_turn'
+                'rewrite.test_codex_app_server.CodexAppServer.test_windows_native_readonly_assignment_cleanup_cancel_and_transfer'
               )
               python -B -m unittest -v @tests
               $nativeEvidence = Get-Content -LiteralPath $env:MOWULINK_TEST_CODEX_EVIDENCE
-              if ($nativeEvidence.Count -ne 3) { throw 'Windows App Server evidence is incomplete' }
+              if ($nativeEvidence.Count -ne 4) { throw 'Windows App Server evidence is incomplete' }
               $nativeEvidence
             } finally {
               Pop-Location
