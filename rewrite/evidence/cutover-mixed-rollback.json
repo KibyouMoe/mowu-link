@@ -1,0 +1,39 @@
+{
+  "assignment": "d1026342-c77f-4f88-88d9-2e4438321565",
+  "boundary": "Actual isolated rewrite and legacy Router HTTP and SQLite. Worker model is scripted.",
+  "changed_request_status": 409,
+  "consecutive_runs": 10,
+  "first_boot": [
+    {
+      "legacy_task_id": "t-905e521220",
+      "status": 202,
+      "trial_task_id": "96e130a6-78f3-4ff1-b17b-336640de142a"
+    }
+  ],
+  "incomplete_review_rejected": true,
+  "legacy_active_task": null,
+  "legacy_queue_order": [
+    "t-2466291bdb",
+    "t-905e521220",
+    "t-b49802c8cc"
+  ],
+  "next_legacy_task": "t-2466291bdb",
+  "private_artifact_sha256": "b15215e78b794cff4001a466c43bb230cf3ca3d63e51bb81c2ead1147a992fff",
+  "queue_plan_sha256": "beb2b763d1db3e2eef22b79d242ce78a5adc21b957c2b19a61c460cdac7c1c7d",
+  "retry_after_legacy_restart": [
+    {
+      "legacy_task_id": "t-905e521220",
+      "status": 200,
+      "trial_task_id": "96e130a6-78f3-4ff1-b17b-336640de142a"
+    },
+    {
+      "legacy_task_id": "t-b49802c8cc",
+      "status": 202,
+      "trial_task_id": "96f3e12c-ae42-4cee-b3e6-db6dd099c164"
+    }
+  ],
+  "reviewed_archive_reason": "reviewed_on_rewrite",
+  "reviewed_trial_task": "1bd28c2a-76a6-5d25-81ad-94d1d668a8a5",
+  "source_legacy_task": "t-074eb8be06",
+  "trial_sha256": "6595b70a0ad4994fbe508ed24d8290938dfdc88c73daa93876cf61730e75ab09"
+}

@@ -353,15 +353,39 @@ def reconcile(snapshot, trial):
     return result
 
 
+def queue_execution_modes(candidates):
+    return {item["task_id"]:"goal" for item in candidates}
+
+
+def queue_replay_plan(db, legacy, facts):
+    requests = []
+    legacy_keys = set()
+    namespace = UUID(facts["source_id"])
+    with closing(readonly(legacy)) as old:
+        for item in facts["queue_candidates"]:
+            tid,key = item["task_id"],item["request_id"]
+            legacy_key = key if valid_guid(key) else str(uuid5(namespace,"queue-rollback/"+key))
+            if legacy_key in legacy_keys or old.execute("SELECT 1 FROM task_info WHERE request_id=?",(legacy_key,)).fetchone():
+                raise ValueError("creation request already exists in the rollback queue")
+            legacy_keys.add(legacy_key)
+            row = db.execute("SELECT title,instructions FROM tasks WHERE task_id=?",(tid,)).fetchone()
+            if row is None:
+                raise ValueError("trial order disappeared after reconciliation")
+            body = {"message_id":legacy_key,"worker":item["assignee_id"],"TaskName":row["title"],
+                    "goal":row["instructions"],"execution_mode":"goal","queue_if_offline":True}
+            requests.append({"trial_task_id":tid,"trial_request_id":key,"request":body})
+    return {"source_id":facts["source_id"],"trial_sha256":facts["trial_sha256"],
+            "legacy_sha256":facts["snapshot_sha256"],"requests":requests}
+
+
 def stage_queue_rollback(snapshot, trial, review, destination):
     """Prepare a legacy sandbox and reviewed requests. No live API is called."""
     facts = reconcile(snapshot,trial)
     if not facts["only_new_queued_tasks"]:
         raise ValueError("queue replay requires only new unoffered orders")
     source = trial/"router.db"
-    candidates = facts["queue_candidates"]
     approval = json.loads(review.read_text())
-    expected = {item["task_id"]:"goal" for item in candidates}
+    expected = queue_execution_modes(facts["queue_candidates"])
     if approval!={"trial_sha256":facts["trial_sha256"],"execution_modes":expected}:
         raise ValueError("review must match the trial digest and confirm goal mode for every order")
     manifest = verified(snapshot)
@@ -369,30 +393,14 @@ def stage_queue_rollback(snapshot, trial, review, destination):
         raise ValueError("legacy snapshot changed after reconciliation")
     with output_directory(destination) as stage:
         restore_snapshot(snapshot,stage,manifest)
-        requests = []
-        legacy_keys = set()
-        namespace = UUID(facts["source_id"])
-        with closing(readonly(stage/"legacy.db")) as old, closing(readonly(source)) as db:
-            for item in candidates:
-                tid,key = item["task_id"],item["request_id"]
-                legacy_key = key if valid_guid(key) else str(uuid5(namespace,"queue-rollback/"+key))
-                if legacy_key in legacy_keys or old.execute("SELECT 1 FROM task_info WHERE request_id=?",(legacy_key,)).fetchone():
-                    raise ValueError("creation request already exists in the rollback queue")
-                legacy_keys.add(legacy_key)
-                row = db.execute("SELECT title,instructions FROM tasks WHERE task_id=?",(tid,)).fetchone()
-                if row is None:
-                    raise ValueError("trial order disappeared after reconciliation")
-                body = {"message_id":legacy_key,"worker":item["assignee_id"],"TaskName":row["title"],
-                        "goal":row["instructions"],"execution_mode":"goal","queue_if_offline":True}
-                requests.append({"trial_task_id":tid,"trial_request_id":key,"request":body})
+        with closing(readonly(source)) as db:
+            plan = queue_replay_plan(db,stage/"legacy.db",facts)
         with closing(readonly(source)):
             if digest(source)!=facts["trial_sha256"]:
                 raise ValueError("trial database changed after reconciliation")
-        plan = {"source_id":facts["source_id"],"trial_sha256":facts["trial_sha256"],"legacy_sha256":manifest["legacy_db_sha256"],
-                "requests":requests}
         (stage/"queue-replay.json").write_text(encode(plan))
     return {"trial_sha256":facts["trial_sha256"],"legacy_sha256":manifest["legacy_db_sha256"],
-            "queued_requests":len(requests)}
+            "queued_requests":len(plan["requests"])}
 
 
 def main():

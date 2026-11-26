@@ -55,9 +55,11 @@ python3 -m rewrite.cutover stage-queue-rollback --snapshot ./snapshot --trial ./
 
 ### 回退已验收的迁入工单
 
-此入口覆盖从旧队列迁入、原文与处理人未改、经过一次 W03 和 W04、已由溪流验收结单的原工单。所有试用投递须有原接收方确认。Worker 仍忙、有未收清的状态查询、出现其他新单或消息、转派、候选材料、待验收成果与损坏附件时，命令会停止并保留输入。
+此入口覆盖从旧队列迁入、原文与处理人未改、经过一次 W03 和 W04、已由溪流验收结单的原工单。所有试用投递须有原接收方确认。可以同时带回试用中新建且从未派过的工单。Worker 仍忙、有未收清的状态查询、出现无关消息、转派、候选材料、待验收成果或损坏附件时，命令会停止并保留输入。
 
 停止试运行写者后运行 `reconcile`，把 `trial_sha256` 和逐单核对过的 `closed_assignments` 写入审核文件。`closed_assignments` 的键是新工单号，值是正式 W04 对应的派发号。审核文件必须覆盖这批已结单的全部变更。
+
+如果同时有 `queue_candidates`，把它们全部加入同一审核文件的 `execution_modes`，逐张确认值为 `"goal"`。`blocked_new_tasks` 必须为空。审核有遗漏时不生成任何回退目录。
 
 ```sh
 python3 -m rewrite.cutover stage-reviewed-rollback --snapshot ./snapshot --trial ./trial --review ./review.json --destination ./reviewed-recovery
@@ -66,6 +68,8 @@ python3 -m rewrite.cutover stage-reviewed-rollback --snapshot ./snapshot --trial
 目标目录中的 `legacy.db` 用旧 Router 正常打开，旧附件在 `legacy.db.attachments/`。已验收的原单在恢复库标记为 `reviewed_on_rewrite`，留有指向私有档案的 `recovery_reference`。原单号、原建单幂等键以及尚未执行的旧队列顺序保留。旧 Router 再查原单能看到归档状态，重试原建单只回原单号。
 
 `private-review/manifest.json` 保存正文、原 W04 和验收请求键、通知凭据、旧新编号及附件摘要，`private-review/files/` 保存逐块校验过的新成果附件。`private-review/trial-router.db` 是带校验摘要的完整试运行库副本。旧 Router 的通用凭据只能查看归档标记和原已授权附件。试用的新成果从私有回退包查阅，原通知无需重发。
+
+带回新工单时，同一次操作还会生成私有的 `queue-replay.json`。首次打开旧 Router 前，核对文件 SHA-256 与私有清单的 `queue_replay_sha256`，核对预回放旧库摘要与 `restored_legacy_sha256`。保留这份初始目录并从副本启动隔离旧 Router，在整个回放窗口保持 Worker 断开。按文件原序提交给旧端 `POST /tasks` 并保存新旧编号对应。部分请求成功后中断时，用**同一已写入的旧库**重开，从第一条按原请求重送。已落库项应返回 200 和原单号，后续项返回 202 并留在队列。出现 409、任何实际派发或编号不一致时停止，保存当前库和回执对账。放开 Worker 前，检查已验收原单仍归档，旧队首及相对顺序保留，新工单各出现一次，正文逐字相同。[中断后从头回放](evidence/cutover-mixed-rollback.json)
 
 复跑 `python3 -B -m unittest -v rewrite.test_cutover`。实际旧 Router 和重做 Router 都经隔离 HTTP 运行。Worker 模型使用夹具。待验收或通知未确认时未生成回退库，另验损坏附件及新入站消息使准备阶段停止。[旧端归档和附件读回](evidence/cutover-reviewed-rollback.json)
 

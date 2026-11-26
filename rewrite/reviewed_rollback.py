@@ -7,7 +7,8 @@ import shutil
 import sqlite3
 import time
 
-from .cutover import digest, output_directory, readonly, reconcile, restore_snapshot, verified
+from .cutover import (digest, output_directory, queue_execution_modes, queue_replay_plan,
+                      readonly, reconcile, restore_snapshot, verified)
 from .messages import valid_guid
 from .orders import task
 from .storage import encode
@@ -18,11 +19,19 @@ TABLES = {"tasks","reports","messages","deliveries","operations","workers","work
 
 
 def reviewed_orders(facts):
-    changes = facts["work_orders"]
+    queued = queue_execution_modes(facts["queue_candidates"])
+    changes = []
+    for row in facts["work_orders"]:
+        if row["task_id"] in queued:
+            if row["before"] or row["completed_reports"] or row["candidate_materials"]:
+                raise ValueError("new queued order already has a report or candidate material")
+        else:
+            changes.append(row)
     deltas = facts["changed_tables"]
-    if not changes or set(deltas)-TABLES or any(value["baseline_only"] for name,value in deltas.items() if name!="tasks"):
+    if (not changes or facts["blocked_new_tasks"] or set(deltas)-TABLES
+            or any(value["baseline_only"] for name,value in deltas.items() if name!="tasks")):
         raise ValueError("trial has changes outside the supported reviewed orders")
-    if deltas.get("tasks")!={"baseline_only":len(changes),"trial_only":len(changes)}:
+    if deltas.get("tasks")!={"baseline_only":len(changes),"trial_only":len(changes)+len(queued)}:
         raise ValueError("trial contains other task changes")
     entries = {}
     for row in changes:
@@ -91,15 +100,19 @@ def check_transport(db,entries):
     return workers,frames,notices
 
 
-def check_operations(db,entries,workers,frames,uploads,expected_count):
+def check_operations(db,entries,workers,frames,uploads,expected_count,queue_candidates):
     mapped,applicable,acked = {},0,set()
     report_sessions = {}
+    queued_keys = {item["request_id"] for item in queue_candidates}
     for row in db.execute("SELECT * FROM operations"):
         (method,path),body = json.loads(row["request"])
         parts = path.split("/")
         actor,reply = row["actor"],json.loads(row["response"])
         if method=="POST" and path=="/v1/tasks":
-            # Only immutable baseline creation keys may be skipped.
+            # The delta count excludes unchanged baseline rows and includes reviewed queue additions.
+            if actor=="hermes" and row["key"] in queued_keys:
+                queued_keys.remove(row["key"])
+                applicable += 1
             continue
         applicable += 1
         if method=="POST" and len(parts)==5 and parts[:3]==["","v1","tasks"] and parts[3] in entries:
@@ -140,7 +153,7 @@ def check_operations(db,entries,workers,frames,uploads,expected_count):
                 raise ValueError("trial upload registration does not match the reviewed attachment")
         else:
             raise ValueError("trial has an operation outside the reviewed orders")
-    if applicable!=expected_count or acked!=frames.keys() or set(mapped)!={(tid,op)
+    if queued_keys or applicable!=expected_count or acked!=frames.keys() or set(mapped)!={(tid,op)
             for tid in entries for op in ("accept","report","actions")}:
         raise ValueError("trial operation ledger is incomplete or has unrelated writes")
     if any(report_sessions[tid,"accept"]!=report_sessions[tid,"report"] for tid in entries):
@@ -215,8 +228,10 @@ def stage_reviewed_rollback(snapshot,trial,review,destination):
     entries = reviewed_orders(facts)
     decision = {"trial_sha256":facts["trial_sha256"],
                 "closed_assignments":{tid:row["assignment_id"] for tid,row in entries.items()}}
+    if facts["queue_candidates"]:
+        decision["execution_modes"] = queue_execution_modes(facts["queue_candidates"])
     if json.loads(review.read_text())!=decision:
-        raise ValueError("review must match the trial digest and all closed assignments")
+        raise ValueError("review must match the trial digest, all closed assignments and any new queue modes")
     manifest = verified(snapshot)
     source = trial/"router.db"
     if manifest["legacy_db_sha256"]!=facts["snapshot_sha256"]:
@@ -243,16 +258,29 @@ def stage_reviewed_rollback(snapshot,trial,review,destination):
             workers,frames,notices = check_transport(db,entries)
             uploads,files = copy_report_files(db,entries,facts["changed_tables"],private/"files")
             operations = check_operations(db,entries,workers,frames,uploads,
-                                          facts["changed_tables"].get("operations",{}).get("trial_only",0))
+                                          facts["changed_tables"].get("operations",{}).get("trial_only",0),
+                                          facts["queue_candidates"])
             for tid,entry in entries.items():
                 entry.update(notice=notices[tid],w04_key=operations[tid,"report"],review_key=operations[tid,"actions"])
-        if digest(source)!=digest(frozen):
-            raise ValueError("trial database changed while staging rollback")
+            plan = queue_replay_plan(db,stage/"legacy.db",facts) if facts["queue_candidates"] else None
         at = time.time()
         remove_from_legacy_queue(stage/"legacy.db",entries,at)
+        restored_sha = digest(stage/"legacy.db")
+        queue_manifest_sha = None
+        if plan:
+            path = stage/"queue-replay.json"
+            with open(path,"x",encoding="utf-8",opener=private_open) as output:
+                output.write(encode({**plan,"restored_legacy_sha256":restored_sha}))
+            queue_manifest_sha = digest(path)
         with open(private/"manifest.json","x",encoding="utf-8",opener=private_open) as output:
-            output.write(encode({**decision,"source_id":facts["source_id"],"legacy_sha256":facts["snapshot_sha256"],
-                                 "restored_sha256":digest(stage/"legacy.db"),"staged_at":at,
-                                 "orders":entries,"files":files}))
+            recovery = {**decision,"source_id":facts["source_id"],"legacy_sha256":facts["snapshot_sha256"],
+                        "restored_sha256":restored_sha,"staged_at":at,"orders":entries,"files":files}
+            if queue_manifest_sha:
+                recovery["queue_replay_sha256"] = queue_manifest_sha
+            output.write(encode(recovery))
+        with closing(readonly(source)):
+            if digest(source)!=digest(frozen):
+                raise ValueError("trial database changed while staging rollback")
     return {"reviewed_orders":len(entries),"private_artifacts":len(files),"trial_sha256":facts["trial_sha256"],
-            "restored_legacy_sha256":digest(destination/"legacy.db")}
+            "restored_legacy_sha256":restored_sha,"queued_requests":len(facts["queue_candidates"]),
+            "queue_replay_sha256":queue_manifest_sha}

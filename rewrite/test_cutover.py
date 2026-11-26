@@ -439,6 +439,114 @@ store.close()
                          "unacknowledged_notification_rejected":True,"corrupt_artifact_rejected":True,
                          "unrelated_trial_info_prevented_rollback":True,
                          "boundary":"Actual isolated rewrite and legacy Router HTTP and SQLite. Worker model is scripted."}
+        self.mixed_evidence = self.exercise_mixed_reviewed_queue(clock,old_ids,tid,aid,artifact,sha)
+
+    def exercise_mixed_reviewed_queue(self,clock,old_ids,tid,aid,artifact,sha):
+        mixed = self.root/"trial-with-new-queue"
+        mixed.mkdir()
+        for name in ("baseline.json","router.db"):
+            shutil.copyfile(self.trial/name,mixed/name)
+        token,first_key = guid(),guid()
+        clock.advance(31)
+        with serve_loopback(Orders(mixed/"router.db",clock),{token:"hermes"}) as server:
+            thread = Thread(target=server.serve_forever,kwargs={"poll_interval":.02})
+            thread.start()
+            try:
+                manager = HermesAdapter(self.root/"mixed-hermes.db",
+                                        Client("http://127.0.0.1:"+str(server.server_port),token),None)
+                first = manager.create(first_key,"新工单一","保留换行\n第一份要求","oguri")
+                tools = ManagerTools(manager,"mixed-rollback-hermes")
+                second = json.loads(tools.around_call("router_create_task",
+                    lambda args:tools.invoke("router_create_task",args),
+                    {"title":"新工单二","instructions":"保留换行\n第二份要求","assignee_id":"oguri"},
+                    session_id="mixed-rollback-hermes",turn_id="independent-turn",tool_call_id="create-second"))
+                self.assertTrue(all(row["state"]=="ready" and row["assignment_id"] is None
+                                    for row in (first,second)))
+            finally:
+                server.shutdown()
+                thread.join()
+
+        facts = reconcile(self.snapshot,mixed)
+        new_ids = [first["task_id"],second["task_id"]]
+        self.assertEqual([row["task_id"] for row in facts["queue_candidates"]],new_ids)
+        self.assertFalse(facts["only_new_queued_tasks"])
+        review = self.root/"mixed-review.json"
+        decision = {"trial_sha256":facts["trial_sha256"],"closed_assignments":{tid:aid}}
+        review.write_text(json.dumps({**decision,"execution_modes":{new_ids[0]:"goal"}}))
+        target = self.root/"mixed-restore"
+        with self.assertRaisesRegex(ValueError,"all closed assignments and any new queue modes"):
+            stage_reviewed_rollback(self.snapshot,mixed,review,target)
+        with self.assertRaisesRegex(ValueError,"only new unoffered orders"):
+            stage_queue_rollback(self.snapshot,mixed,review,target)
+        self.assertFalse(target.exists())
+        review.write_text(json.dumps({**decision,"execution_modes":dict.fromkeys(new_ids,"goal")}))
+        staged = stage_reviewed_rollback(self.snapshot,mixed,review,target)
+        self.assertEqual((staged["reviewed_orders"],staged["private_artifacts"],staged["queued_requests"]),(1,1,2))
+        queue = target/"queue-replay.json"
+        readback = json.loads(queue.read_text())
+        self.assertEqual(queue.stat().st_mode&0o777,0o600)
+        self.assertEqual(readback["restored_legacy_sha256"],digest(target/"legacy.db"))
+        self.assertEqual(readback["requests"][0]["request"]["message_id"],first_key)
+        self.assertRegex(readback["requests"][1]["trial_request_id"],r"^hermes-[0-9a-f]{64}$")
+        private = target/"private-review"
+        self.assertEqual(staged["queue_replay_sha256"],digest(queue))
+        self.assertEqual(json.loads((private/"manifest.json").read_text())["queue_replay_sha256"],digest(queue))
+        self.assertEqual(digest(private/"files"/artifact),sha)
+        self.assertEqual(digest(private/"trial-router.db"),facts["trial_sha256"])
+
+        replay = """
+from server import RouterServer
+from selftest_router import http
+from threading import Thread
+from unittest.mock import Mock
+store = RouterStore(sys.argv[1])
+plan = json.loads(Path(sys.argv[2]).read_text())
+auth = "offline-test"
+replies = []
+with RouterServer(("127.0.0.1",0),store,auth,Mock(),Mock()) as srv:
+    thread = Thread(target=srv.serve_forever,kwargs={"poll_interval":.02})
+    thread.start()
+    try:
+        url = f"http://127.0.0.1:{srv.server_port}"
+        status, archive = http("GET",url+"/tasks/"+sys.argv[3],token=auth)
+        assert status==200 and archive["task"]["archive"]["reason"]=="reviewed_on_rewrite"
+        for item in plan["requests"][:int(sys.argv[4])]:
+            body = item["request"]
+            status, reply = http("POST",url+"/tasks",body,auth)
+            assert status in (200,202) and not reply.get("dispatched"), (status,reply)
+            assert bool(reply.get("duplicate"))==(status==200), reply
+            clash, _ = http("POST",url+"/tasks",dict(body,goal="changed during replay"),auth)
+            assert clash==409
+            replies.append({"status":status,"legacy_task_id":reply["task_id"],"trial_task_id":item["trial_task_id"]})
+    finally:
+        srv.shutdown()
+        thread.join()
+rows = store._conn.execute('''SELECT i.task_id,i.name,i.description,i.request_id,i.metadata FROM task_info i
+                              JOIN dispatch_queue q USING(task_id) WHERE i.owner='oguri' ORDER BY q.seq''').fetchall()
+print(json.dumps({"archive":archive["task"]["archive"],"replies":replies,"rows":[dict(r) for r in rows],
+                  "active":store.orders.held("oguri")}))
+store.close()
+"""
+        first_boot = json.loads(self.old(replay,target/"legacy.db",queue,old_ids[0],1))
+        resumed = json.loads(self.old(replay,target/"legacy.db",queue,old_ids[0],2))
+        self.assertEqual([x["status"] for x in first_boot["replies"]],[202])
+        self.assertEqual([x["status"] for x in resumed["replies"]],[200,202])
+        self.assertEqual(first_boot["replies"][0]["legacy_task_id"],resumed["replies"][0]["legacy_task_id"])
+        self.assertEqual(first_boot["archive"],resumed["archive"])
+        self.assertIsNone(resumed["active"])
+        self.assertEqual([row["task_id"] for row in resumed["rows"]],
+                         [old_ids[1]]+[row["legacy_task_id"] for row in resumed["replies"]])
+        self.assertEqual([row["description"] for row in resumed["rows"][1:]],
+                         ["保留换行\n第一份要求","保留换行\n第二份要求"])
+        self.assertTrue(all(json.loads(row["metadata"])["execution_mode"]=="goal" for row in resumed["rows"][1:]))
+        self.assertEqual(digest(mixed/"router.db"),facts["trial_sha256"])
+        return {"source_legacy_task":old_ids[0],"next_legacy_task":old_ids[1],"reviewed_trial_task":tid,
+                "assignment":aid,"trial_sha256":facts["trial_sha256"],"private_artifact_sha256":sha,
+                "queue_plan_sha256":staged["queue_replay_sha256"],"incomplete_review_rejected":True,
+                "first_boot":first_boot["replies"],"retry_after_legacy_restart":resumed["replies"],
+                "legacy_queue_order":[row["task_id"] for row in resumed["rows"]],"legacy_active_task":resumed["active"],
+                "changed_request_status":409,"reviewed_archive_reason":resumed["archive"]["reason"],
+                "boundary":"Actual isolated rewrite and legacy Router HTTP and SQLite. Worker model is scripted."}
 
     def test_pending_peer_or_missing_middle_chunk_prevents_publishing_a_partial_migration(self):
         mid = guid()
