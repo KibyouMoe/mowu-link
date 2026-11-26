@@ -66,7 +66,7 @@ python3 -B -m unittest -v \
 
 四个场景用了实际 App Server、隔离 Router 和本地模型。取消在原控制回合结束后确认。转派仅释放旧派发。带命令记录的原回合和 W04 请求后仍启动命令的控制回合均保持待核。可设置 `MOWULINK_CODEX_CLEANUP_EVIDENCE` 记录原生回合、策略及 Router 回执。[原生清理实测](evidence/codex-readonly-cleanup.json)
 
-取消或转派到达时，原输入可能已进入原生会话，适配器却还没有记下凭据。适配器先按原投递号、正文和会话查回，再中止匹配的回合。尚未确认停止时只重试未写入的控制指令；原输入和已发控制输入仍只查回。丢原凭据的场景经独立 `codex-adapter` 进程和 TLS 实验复跑通过。[独立服务回执](evidence/codex-readonly-cleanup-service.json)
+取消或转派到达时，原输入可能已进入原生会话，适配器却还没有记下凭据。适配器先按原投递号、正文和会话查回，再中止匹配的回合。尚未确认停止时只重试未写入的控制指令；原输入和已发控制输入仍只查回。另在控制回合结束、Router 仍待清理时关闭独立适配器，从原 profile、原 SQLite 和本地 TLS 重开，沿同一回合凭据交 W04。[独立服务和冷恢复回执](evidence/codex-readonly-cleanup-service.json)
 
 App Server 指定回合的文字投影复用原 Worker 的飞书卡片。独立原生输入保留原空格和换行，最终答复单独成卡。只读取已结束回合，桥接投递、内部工具调用及参数不出卡。稳定事件号令重投返回同一回执。连续 12 次通过。[卡片试验记录](evidence/codex-app-server-native-display.json)。输入为隔离驱动，模型和飞书为夹具；常驻监听、原生图文和飞书云端另验。
 

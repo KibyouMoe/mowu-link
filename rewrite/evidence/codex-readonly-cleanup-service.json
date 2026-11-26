@@ -33,5 +33,35 @@
     "recorded": true,
     "release_assignment_id": "9073be71-b6bc-4477-977a-513ca3d0042f",
     "task_state": "cancelled"
+  },
+  "cold_restart_check": {
+    "thread_id": "01a2192a-1b88-7353-aec8-4a5d71ba7c6a",
+    "task_id": "b0735852-679c-4f63-919e-20902d2008d2",
+    "assignment_id": "166804e6-a0cf-4033-8b12-f5bbc311c99f",
+    "control_turn_before_restart": "01a2192a-1cce-7853-9095-883ea78bfe09",
+    "original_cleanup_wait_retained": true,
+    "adapter_cold_restart": true,
+    "proof": {
+      "assignment_id": "166804e6-a0cf-4033-8b12-f5bbc311c99f",
+      "cleaned": true,
+      "control_turn_id": "01a2192a-1cce-7853-9095-883ea78bfe09",
+      "kind": "task.cancel",
+      "receipt_id": "8d3a7718cca3c7ef5d9a0d9034935e0bc3083066ee4bff77d8c35cd4e63c39c1",
+      "scope": "codex_read_only",
+      "session": "01a2192a-1b88-7353-aec8-4a5d71ba7c6a",
+      "stopped": true,
+      "stopped_turns": [
+        {
+          "status": "interrupted",
+          "turn_id": "01a2192a-1caf-7903-a35d-933fd68cefd4"
+        }
+      ],
+      "withdrawn_inputs": []
+    },
+    "w04": {
+      "recorded": true,
+      "release_assignment_id": "166804e6-a0cf-4033-8b12-f5bbc311c99f",
+      "task_state": "cancelled"
+    }
   }
 }

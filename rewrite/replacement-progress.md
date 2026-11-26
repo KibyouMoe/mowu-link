@@ -8,6 +8,11 @@
 
 另在独立进程遇到原生已收、凭据未落库的取消竞态。现用原投递查回匹配的输入后再中止。中止观察暂缺时允许重试尚未写入的控制指令，完成后原工单输入仍为一条。通过临时 TLS 启动完整适配器，核对开启 `--read-only-assignments`、查回原收件和 W04 后 Router 标已取消。[进程证据](evidence/codex-readonly-cleanup-service.json)
 
+在同一隔离流程里，等原控制回合结束后先停适配器，此时 Router 仍保持待清理，由 Worker 库保留原请求。从同一 profile 和两个原账本冷开后核对同一控制回合，自动交回该派发的 W04。[冷恢复回执](evidence/codex-readonly-cleanup-service.json)
+
+实现提交 `5c39dcdd1966299659b79fa48906f614f9e73d1a`。macOS 全量 286 项通过，Linux arm64 187 项通过、99 项按环境跳过。254 文件发布包的 SHA-256 为 `d96f87560f2c89b26c5a21398352f84f4759603bf20709accbd34e124a6da613`。安装目录内 41 项专项通过，逐文件回读一致。由前版 `9c3ab5a8ef0cfa1ab92266dea51d371325ae7ca0` 复跑 `rewrite.release_check --component worker-pair`，两版独立进程回退通过，宿主为夹具。Codex 可写工位仍待接。现有工作区模块已在普通 Node 进程内直接调用，隔离 Linux 容器成功写文件、按摘要导出并回收。[工作区模块](integrations/dsh_host/assignment-container.mjs)
+
+
 Linux 虚拟机内的 Worker 和 macOS 上的 Codex App Server 分别启动，Worker 向 Router 和适配器、适配器回调 Worker 都走经认证的 TLS。停止原 Worker 进程期间，原生回合继续写完测试文件，首次 W04 待确认。新 Worker 进程复用原库、原端口和会话，仍持原派发。同一原生回合重报后只记一次正式成果和一次通知，Router 保持待验收，原生输入一条。无信任证书的客户端连接失败，平台身份查询运维状态返回 403。模型由本地脚本驱动，物理跨机和飞书云端另验。[证据](evidence/codex-linux-worker-restart.json) · [复跑](README.md#codex-独立工位的断联与恢复)
 
 演练提交 `5fab4d63f965f3d13dfa10400a94b8e75a77470b`。macOS 启用跨虚拟机及 DSH 环境后全量 285 项通过，Linux arm64 187 项通过、98 项依环境跳过。251 文件的发布包摘要为 `595300264b224974198c899b178fe4ad41b1ffb8e03af44295458ab5824f3f5a`。从安装目录实跑包括跨虚拟机重启、两套原生断联的 39 项回归，逐文件摘要回读一致。
