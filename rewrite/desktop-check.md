@@ -83,7 +83,7 @@ MOWULINK_DSH_CONTAINER_IMAGE=<已安装的固定镜像ID> python3 -B -m unittest
   rewrite.test_codex_workspace.CodexWorkspaceTest.test_native_workspace_artifact_release_cancel_and_transfer
 ```
 
-需要本机安装的 Codex App Server、Node、OpenSSL 和本地 Docker Unix socket。用 `MOWULINK_CODEX_WORKSPACE_EVIDENCE` 保存回执和标识。试验用真实 App Server、Docker 和隔离 Router，模型与接替工位由本地脚本驱动。[成果、取消和转派凭据](evidence/codex-assignment-workspace.json)
+需要本机安装的 Codex App Server、Node、OpenSSL 和本地 Docker Unix socket。用 `MOWULINK_CODEX_WORKSPACE_EVIDENCE` 保存回执和标识。试验包含丢 W04 回执后的冷恢复。只在原工作区回收后发布五组件回退状态。试验用真实 App Server、Docker 和隔离 Router，模型与接替工位由本地脚本驱动。[成果、回退、取消和转派凭据](evidence/codex-assignment-workspace.json)
 
 ## 独立适配器启动
 

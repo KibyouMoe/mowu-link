@@ -21,9 +21,11 @@ from .devloop import FixtureHost, Loop
 from .dsh_workspace_audit import inspect, journal
 from .host_wire import RemoteAdapter
 from .release_check import config, serve
+from .state_bundle import capture, restore, rollback, verify
 from .storage import Fault, encode, guid
 from .test_codex_app_server import CODEX, LINK_OUTAGE_FIXTURE, Provider, running
 from .test_mainline import Clock
+from .trigger import Trigger
 from .wire import Client
 from .worker import Worker
 from .worker_service import WorkerService
@@ -108,8 +110,6 @@ class CodexWorkspaceTest(unittest.TestCase):
                 worker,manager = loop.worker,loop.hermes
                 service = WorkerService(worker,clock)
                 callback_key,adapter_key = guid(),guid()
-                callback_url = resources.enter_context(running(service.listen({callback_key:"adapter/oguri"},("127.0.0.1",0),None)))
-                callback = config(root,"callback.json",{"url":callback_url,"token":callback_key})
                 roles = config(root,"adapter-roles.json",{adapter_key:"worker/oguri"})
                 configuration = config(root,"assignment-workspace.json",{"runtime":str(runtime),"node":shutil.which("node"),
                     "image":image,"docker":docker,"socket":socket.removeprefix("unix://")})
@@ -117,20 +117,31 @@ class CodexWorkspaceTest(unittest.TestCase):
                 subprocess.run(["openssl","req","-x509","-newkey","rsa:2048","-nodes","-days","1","-subj","/CN=localhost",
                     "-addext","subjectAltName=IP:127.0.0.1","-keyout",key,"-out",cert],check=True,capture_output=True,timeout=10)
                 adapter_db = root/"adapter.db"
-                args = ("--worker-id","oguri","--session",sid,"--worker-connection",callback,"--codex-binary",CODEX,
+                args = ("--worker-id","oguri","--session",sid,"--codex-binary",CODEX,
                         "--codex-profile",profile,"--cwd",project,"--assignment-workspace",configuration)
-                normal_router = worker.router.request
-                lost,allow = [],Event()
-                def router_wire(method,path,*args,**kwargs):
-                    response = normal_router(method,path,*args,**kwargs)
-                    if method=="POST" and path.endswith("/report") and action=="complete" and not allow.is_set():
-                        lost.append(response)
-                        raise Fault(503,"isolated_workspace_report_unconfirmed",True)
-                    return response
+                with ExitStack() as station:
+                    def start(current,stage):
+                        callback_url = station.enter_context(running(current.listen(
+                            {callback_key:"adapter/oguri"},("127.0.0.1",0),None)))
+                        callback = config(root,stage+"-callback.json",{"url":callback_url,"token":callback_key})
+                        target = station.enter_context(serve(Path(__file__).resolve().parent.parent,"codex-adapter",
+                            adapter_db,roles,cert,key,env,(*args,"--worker-connection",callback),shutdown_timeout=15))
+                        return RemoteAdapter(Client(target,adapter_key,cert),sid)
 
-                with serve(Path(__file__).resolve().parent.parent,"codex-adapter",adapter_db,roles,cert,key,env,args) as target:
-                    remote = worker.adapter = RemoteAdapter(Client(target,adapter_key,cert),sid)
-                    worker.router.request = router_wire
+                    remote = worker.adapter = start(service,"before")
+                    if action=="complete":
+                        normal_router = loop.wire.request
+                        attempts = []
+
+                        def observe_report(method,path,body=None,key=None,*extra,**kwargs):
+                            response = normal_router(method,path,body,key,*extra,**kwargs)
+                            if method=="POST" and path.endswith("/report"):
+                                attempts.append({"body":body,"key":key,"receipt":response})
+                                if len(attempts)==1:
+                                    raise Fault(503,"isolated_workspace_report_unconfirmed",True)
+                            return response
+
+                        loop.wire.request = observe_report
                     other_host = FixtureHost(root/"other-native.db","fixture-next-owner")
                     other = Worker(root/"other-worker.db","tama",loop.extra_clients["tama"],
                                    HostAdapter(root/"other-adapter.db",other_host,other_host.session),clock=clock)
@@ -158,7 +169,7 @@ class CodexWorkspaceTest(unittest.TestCase):
                     if action=="complete":
                         self.assertTrue(provider.report_returned.wait(10))
                         self.assertIsNone(getattr(provider,"workspace_error",None))
-                        self.assertEqual(len(lost),1)
+                        self.assertEqual(len(attempts),1)
                         self.assertEqual(manager.inspect(task)["task"]["state"],"completed_reported")
                         self.assertEqual(worker.hold()["held_assignment_id"],assignment)
                         self.assertTrue(remote.handoff_activity(session=sid)["workspace_pending"])
@@ -166,11 +177,40 @@ class CodexWorkspaceTest(unittest.TestCase):
                         self.assertEqual(exported,again)
                         artifact, = exported["artifact_ids"]
                         self.assertEqual(loop.manager_wire.request("GET","attachments/"+artifact)["bytes"],DATA)
-                        allow.set()
+                        eventually(lambda:not remote.busy(session=sid))
+                        model_requests = len(provider.observed)
+                        station.close()
+                        pending,error = inspect(runtime,{identity})
+                        self.assertIsNone(error)
+                        self.assertEqual(pending["pending"],[{"session":sid,"task_id":task,"assignment_id":assignment,
+                                                              "phase":"active"}])
+                        worker = Worker(loop.root/"worker.db","oguri",loop.wire,remote,clock=clock)
+                        self.assertEqual(worker.hold()["held_assignment_id"],assignment)
+                        worker.flush_reports()
+                        self.assertEqual(attempts,[attempts[0],attempts[0]])
+                        self.assertIsNone(worker.hold()["held_assignment_id"])
+                        trigger = Trigger(root/"trigger.db","workspace-recovery",clock)
+                        snapshot = root/"snapshot"
+                        sources = {"router:main":loop.orders.db.path,"worker:oguri":worker.db.path,"agent:oguri":adapter_db,
+                                   "hermes:main":manager.db.path,"trigger:workspace-recovery":trigger.db.path}
+                        manifest_id = capture(sources,"a"*40,snapshot)["manifest_sha256"]
+                        self.assertEqual(verify(snapshot,manifest_id)["format"],3)
+                        trial = restore(snapshot,manifest_id,root/"trial")
+                        rollback_args = (snapshot,manifest_id,trial,root/"rollback")
+                        with self.assertRaisesRegex(ValueError,"dsh_assignment_workspace_pending"):
+                            rollback(*rollback_args,dsh_runtimes={"oguri":runtime})
+                        self.assertFalse((root/"rollback").exists())
+                        self.assertEqual(json.loads(lease.read_text()),record)
+                        service = WorkerService(worker,clock)
+                        remote = worker.adapter = start(service,"after")
+                        self.assertEqual(remote.bound_session(),sid)
                         service.step()
                         notice, = manager.messages(source="oguri")["items"]
-                        proof = {"w04":lost[0],"artifact_id":artifact,"bytes":len(DATA),"sha256":hashlib.sha256(DATA).hexdigest(),
-                                 "notify_id":notice["message_id"],"workspace_alive_before_w04_receipt":True}
+                        self.assertEqual(len(provider.observed),model_requests)
+                        proof = {"w04":attempts[0]["receipt"],"w04_idempotency_key":attempts[0]["key"],
+                                 "artifact_id":artifact,"bytes":len(DATA),"sha256":hashlib.sha256(DATA).hexdigest(),
+                                 "notify_id":notice["message_id"],"workspace_alive_before_w04_receipt":True,
+                                 "pending_while_station_stopped":pending,"model_requests_after_restart":0}
                     else:
                         def detached_pid():
                             result = subprocess.run([*cli,"exec",cid,"/bin/sh","-c",
@@ -223,6 +263,13 @@ class CodexWorkspaceTest(unittest.TestCase):
                 audit,error = inspect(runtime,{identity})
                 self.assertIsNone(error)
                 self.assertEqual(audit["pending"],[])
+                if action=="complete":
+                    recovered = rollback(*rollback_args,dsh_runtimes={"oguri":runtime})
+                    self.assertEqual(recovered.keys(),sources.keys())
+                    for label,path in recovered.items():
+                        self.assertEqual(Path(path).read_bytes(),Path(trial[label]).read_bytes())
+                    proof.update(snapshot_format=3,rollback_before_reap="dsh_assignment_workspace_pending",
+                                 restored_components=sorted(recovered))
                 cases.append({"action":action,"task_id":task,"assignment_id":assignment,"original_input":dispatch,
                     "container_id":cid,"detached_child_pid_before_control":stopped_pid,"offline_workspace_audit":audit,
                     "final_task":manager.inspect(task)["task"],**proof})

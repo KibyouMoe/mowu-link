@@ -19,7 +19,7 @@ from .wire import Client
 
 
 @contextmanager
-def serve(package,component,database,roles,cert,key,env,extra=()):
+def serve(package,component,database,roles,cert,key,env,extra=(),*,shutdown_timeout=6):
     proc = subprocess.Popen([sys.executable,"-B","-S","-m","rewrite.service",component,"--db",database,
                              "--identities",roles,"--cert",cert,"--key",key,*extra],cwd=package,env=env,
                             stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
@@ -36,7 +36,7 @@ def serve(package,component,database,roles,cert,key,env,extra=()):
     finally:
         proc.terminate()
         try:
-            proc.wait(6)
+            proc.wait(shutdown_timeout)
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()

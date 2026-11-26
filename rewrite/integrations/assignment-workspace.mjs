@@ -1,4 +1,6 @@
 // Private stdio bridge to the same container and journal implementation used by DSH.
+import {createServer} from 'node:net';
+import path from 'node:path';
 import readline from 'node:readline';
 import {assignmentContainers} from './dsh_host/assignment-container.mjs';
 
@@ -6,6 +8,13 @@ const runtime = process.argv[2];
 const sessions = new Map();
 const operations = new Set();
 let config;
+
+// Offline audit must see this writer until even orphaned operations settle.
+const guard = createServer(probe => probe.destroy());
+await new Promise((resolve,reject) => {
+  guard.once('error',reject);
+  guard.listen(path.join(runtime,'dsh.sock'),resolve);
+});
 
 async function dispatch(method,params) {
   const {session,task_id:task,assignment_id:assignment} = params;
@@ -36,3 +45,4 @@ for await (const line of readline.createInterface({input:process.stdin,terminal:
   operation.finally(()=>operations.delete(operation));
 }
 await Promise.allSettled(operations);
+guard.close();

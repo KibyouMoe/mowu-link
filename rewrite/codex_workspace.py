@@ -4,7 +4,6 @@ from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
-import socket
 import subprocess
 from threading import Event, Thread
 
@@ -48,12 +47,9 @@ def open_workspace(config,session):
             409,"workspace_runtime_already_bound")
     bridge = Path(__file__).with_name("integrations")/"assignment-workspace.mjs"
     engine = {key:value for key,value in config.items() if key not in ("runtime","node")}
-    with state_writer(state), socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as guard:
-        # The existing shared journal audit probes this socket; it accepts no requests.
+    with state_writer(state):
         require(host_stopped(runtime),409,"workspace_runtime_already_running")
         guard_path.unlink(missing_ok=True)
-        guard.bind(str(guard_path))
-        guard.listen(4)
         try:
             with subprocess.Popen([node,bridge,runtime],stdin=subprocess.PIPE,stdout=subprocess.PIPE,
                                   stderr=subprocess.DEVNULL,text=True,env={"PATH":os.defpath}) as process:
