@@ -53,8 +53,14 @@ FIXTURE = Path(__file__).parent/"integrations/dsh_host/native-loop-fixture.mjs"
 
 
 def environment(directory):
-    return {"ELECTRON_RUN_AS_NODE":"1","HOME":directory,"TMPDIR":directory,
-            "XDG_CONFIG_HOME":directory,"PATH":os.defpath}
+    env = {"ELECTRON_RUN_AS_NODE":"1","HOME":directory,"TMPDIR":directory,
+           "XDG_CONFIG_HOME":directory,"PATH":os.defpath}
+    if os.name=="nt":
+        standard = ("SystemRoot","WINDIR","PATH","COMSPEC","PATHEXT","ProgramFiles","ProgramData","SystemDrive",
+                    "USERPROFILE","USERNAME","USERDOMAIN","HOMEDRIVE","HOMEPATH","LOCALAPPDATA","APPDATA","PSModulePath")
+        env.update({key:os.environ[key] for key in standard if key in os.environ})
+        env.update({"DSH_HOME":directory,"TEMP":directory,"TMP":directory})
+    return env
 
 
 def observe():
@@ -94,9 +100,6 @@ class NativeProcess(unittest.TestCase):
         if os.name=="nt":
             exe = Path(os.environ["MOWULINK_TEST_DSH_BINARY"])
             root = exe.parent/"resources/app.asar/dsh"
-            env.update({key:os.environ[key] for key in ("SystemRoot","WINDIR","PATH","COMSPEC","PATHEXT",
-                                                       "ProgramFiles","ProgramData","SystemDrive") if key in os.environ})
-            env.update({key:str(directory) for key in ("USERPROFILE","DSH_HOME","TEMP","TMP","LOCALAPPDATA","APPDATA")})
         args = [exe,fixture.resolve(),root,directory,session,mode]
         if use_tls:
             args.append("tls")
@@ -236,7 +239,7 @@ class LocalTlsLoop(NativeProcess):
             powershell = Path(os.environ["SystemRoot"])/"System32/WindowsPowerShell/v1.0/powershell.exe"
             check = FIXTURE.with_name("check-local-link.ps1")
             observed = subprocess.run([powershell,"-NoProfile","-NonInteractive","-File",check,directory],
-                                      capture_output=True,timeout=30)
+                                      env=environment(str(directory)),capture_output=True,timeout=20)
             self.assertEqual(observed.returncode,0,observed.stderr.decode("utf-8",errors="replace"))
         self.formal_report(directory,use_tls=True)
         self.evidence.update({"link":"IPv4 loopback with mutual TLS","missing_client_certificate_rejected_in_both_directions":True,

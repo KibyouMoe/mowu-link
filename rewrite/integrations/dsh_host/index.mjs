@@ -13,7 +13,7 @@ import { approvalProof, installCommandApprovals } from './command-approvals.mjs'
 import { guid, prepareSession, selection } from './session-preparation.mjs';
 import { assignmentCleanup } from './assignment-cleanup.mjs';
 import { assignmentContainers } from './assignment-container.mjs';
-import { localLink, privateDir } from './local-link.mjs';
+import { privateDir, tlsLink, unixLink } from './local-link.mjs';
 
 const tools = JSON.parse(readFileSync(new URL('../../agent-toolset.json', import.meta.url)));
 const sha = value => createHash('sha256').update(value).digest('hex');
@@ -297,7 +297,7 @@ async function readJson(stream) {
   return JSON.parse(Buffer.concat(chunks).toString('utf8'));
 }
 
-function callback(dir, envelope, route='/tool', bytes=null, link=localLink(dir,false)) {
+function callback(dir, envelope, route='/tool', bytes=null, link=unixLink(dir)) {
   const encoded = JSON.stringify(envelope);
   const body = bytes ?? Buffer.from(encoded);
   const headers = bytes===null ? {'Content-Type':'application/json'} : {
@@ -403,7 +403,7 @@ export async function apply(ctx, {session, directory, catalog_sessions=[], relay
   check(typeof local_tls==='boolean','invalid_dsh_local_link');
   check(!local_tls || !(managed_sessions_dir || relay_command_approvals || relay_foreground_questions ||
     read_only_assignments || assignment_container),'unsupported_dsh_local_tls_feature');
-  const link = localLink(directory,local_tls);
+  const link = local_tls ? await tlsLink(directory) : unixLink(directory);
   check(typeof session==='string' && session.length>0,'missing_native_session');
   check(typeof resume_on_handoff==='boolean','invalid_native_activation');
   check(typeof read_only_assignments==='boolean' &&

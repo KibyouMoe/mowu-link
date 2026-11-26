@@ -1,9 +1,12 @@
-import {execFileSync} from 'node:child_process';
+import {execFile} from 'node:child_process';
 import {lstatSync,readFileSync} from 'node:fs';
 import http from 'node:http';
 import https from 'node:https';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {promisify} from 'node:util';
+
+const run = promisify(execFile);
 
 const names = ['dsh-link.json','dsh-link.crt','dsh-link.key'];
 
@@ -14,7 +17,7 @@ export function privateDir(directory) {
   }
 }
 
-function verifiedCredentials(directory) {
+async function verifiedCredentials(directory) {
   if (process.platform==='win32') {
     if (!/^[A-Za-z]:[\\/]/.test(directory)) throw new Error('private_runtime_required');
     const system = process.env.SystemRoot;
@@ -22,11 +25,11 @@ function verifiedCredentials(directory) {
     const powershell = path.join(system,'System32','WindowsPowerShell','v1.0','powershell.exe');
     const check = fileURLToPath(new URL('./check-local-link.ps1',import.meta.url));
     try {
-      execFileSync(powershell,['-NoProfile','-NonInteractive','-File',check,directory],
-        {windowsHide:true,stdio:'ignore',timeout:20000});
+      await run(powershell,['-NoProfile','-NonInteractive','-File',check,directory],
+        {windowsHide:true,timeout:15000,maxBuffer:65536});
     } catch (error) {
-      if (error.code==='ETIMEDOUT') throw new Error('dsh_link_acl_check_timeout');
-      throw new Error(error.status===3 ? 'private_dsh_link_required' : 'dsh_link_acl_check_unavailable');
+      if (error.killed) throw new Error('dsh_link_acl_check_timeout');
+      throw new Error(error.code===3 ? 'private_dsh_link_required' : 'dsh_link_acl_check_unavailable');
     }
   } else {
     privateDir(directory);
@@ -40,20 +43,21 @@ function verifiedCredentials(directory) {
   });
 }
 
-export function localLink(directory,useTls) {
-  if (!useTls && process.platform==='win32') throw new Error('dsh_local_tls_required');
-  if (!useTls) {
-    privateDir(directory);
-    return {
-      server: handler=>http.createServer(handler),
-      listen: (server,ready)=>server.listen(path.join(directory,'dsh.sock'),ready),
-      request: (options,ready)=>{
-        privateDir(directory);
-        return http.request({...options,socketPath:path.join(directory,'worker.sock')},ready);
-      },
-    };
-  }
-  const [data,cert,key] = verifiedCredentials(directory);
+export function unixLink(directory) {
+  if (process.platform==='win32') throw new Error('dsh_local_tls_required');
+  privateDir(directory);
+  return {
+    server: handler=>http.createServer(handler),
+    listen: (server,ready)=>server.listen(path.join(directory,'dsh.sock'),ready),
+    request: (options,ready)=>{
+      privateDir(directory);
+      return http.request({...options,socketPath:path.join(directory,'worker.sock')},ready);
+    },
+  };
+}
+
+export async function tlsLink(directory) {
+  const [data,cert,key] = await verifiedCredentials(directory);
   const cfg = JSON.parse(data);
   if (Object.keys(cfg??{}).sort().join(',')!=='host_port,worker_port' ||
       !Object.values(cfg).every(port=>Number.isInteger(port) && port>=1024 && port<=65535) ||
