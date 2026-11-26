@@ -4,6 +4,8 @@
 
 ## 检查点与证据
 
+独立 App Server 以原生 `turn/interrupt` 停止一个已确认的原回合。错输入由适配器拦下，错回合由原生 API 拒绝，正确回合由历史证实已中止。Router 取消待清理，持单不释放、无成果通知。连续 15 次通过。复跑 `python3 -m unittest -v rewrite.test_codex_app_server`。[宿主证据](evidence/codex-app-server-native-interrupt.json)。控制由测试驱动发起，模型为本地脚本。
+
 独立 Codex App Server 在 W04 工具请求待响应时中断。清除适配器宿主凭据后，由新进程重开同一测试会话，查回同一宿主输入。原派发重投未产生第二个输入或模型请求，Router 保留原持单且无成果通知。连续 20 次通过。复跑 `python3 -m unittest -v rewrite.test_codex_app_server`。[原生恢复记录](evidence/codex-app-server-native-reconnect.json)。真实进程使用本地脚本模型，无生产调用。
 
 Linux arm64 以 `98097e25e6d3632d6fe7360d3b67e9f3829fe7ab` 复验通过 133 项，36 项因缺少本机 Codex 或 DSH 宿主跳过，校验 132 个发行文件。同机跨系统 TLS 试验仍只记录一个原生输入和一条成果通知，宿主与模型用夹具。

@@ -1,0 +1,36 @@
+{
+  "session": "01a216b8-b873-7a02-8fd8-e1dc9a81fe31",
+  "task_id": "94cec8e6-32a1-4b46-a43f-78d0ee6b905f",
+  "assignment_id": "5f86faed-9c52-4839-8c57-3414b1c46ea0",
+  "original_turn": {
+    "delivery_id": "f557732e-fbf2-4ce4-825b-bc16325e0d68",
+    "digest": "755d69e54568f7ad46b805a5df9a4d41758f2c81591a41ca2dbb823d9e8c35dd",
+    "native_id": "01a216b8-b8b4-7011-880b-76c724788ce5",
+    "session": "01a216b8-b873-7a02-8fd8-e1dc9a81fe31",
+    "turn_id": "01a216b8-b8ac-75e3-8db6-a7798bed4b44"
+  },
+  "native_stop": {
+    "session": "01a216b8-b873-7a02-8fd8-e1dc9a81fe31",
+    "turn_id": "01a216b8-b8ac-75e3-8db6-a7798bed4b44",
+    "native_id": "01a216b8-b8b4-7011-880b-76c724788ce5",
+    "status": "interrupted"
+  },
+  "holder_after": {
+    "kind": "worker",
+    "worker_id": "oguri"
+  },
+  "state_after": "working",
+  "wrong_turn_rejected": true,
+  "cleanup_pending": [
+    {
+      "assignment_id": "5f86faed-9c52-4839-8c57-3414b1c46ea0",
+      "kind": "task.cancel",
+      "new_assignee_id": null,
+      "reason": "Isolated native stop proof",
+      "task_id": "94cec8e6-32a1-4b46-a43f-78d0ee6b905f",
+      "worker_id": "oguri"
+    }
+  ],
+  "boundary": "Native App Server, one scripted local model turn. Only native interruption is confirmed.",
+  "consecutive_runs": 15
+}

@@ -227,35 +227,40 @@ class CodexAppServer(unittest.TestCase):
                          "scripted_provider_requests":provider.observed,
                          "boundary":"Bundled native Codex App Server using a scripted local HTTP model. Desktop and authenticated model not exercised."}
 
-    def test_native_app_server_reconnect_recovers_input_before_w04_without_new_model_call(self):
+    def pending_native_task(self,rpc):
         clock = Clock()
+        sid = rpc.request("thread/start",{"cwd":self.root,"ephemeral":False,"dynamicTools":[REPORT_TOOL]})["thread"]["id"]
+        host = AppServerHost(rpc,sid)
+        host.session = sid
+        loop = self.enterContext(Loop.isolated(clock,host_factory=lambda _path,_name:host))
+        tid = loop.hermes.create(guid(),"Pending native test","Original assignment content","oguri")["task_id"]
+        loop.worker.connect()
+        loop.worker.poll()
+        clock.advance(10)
+        loop.worker.poll()
+        loop.worker.poll()
+        deadline = time.monotonic()+14
+        while True:
+            event = rpc.event(deadline)
+            if event.get("method")=="item/tool/call":
+                pending_call = event["params"]
+                break
+        self.assertEqual(pending_call["threadId"],sid)
+        frame, = [frame for frame in loop.wire.frames(0) if frame["kind"]=="task.dispatch"]
+        self.assertTrue(loop.worker.process(frame))
+        proof = loop.adapter.lookup_delivery(frame["delivery_id"],{"kind":"task",**frame["payload"]},session=sid)
+        self.assertEqual(proof["turn_id"],pending_call["turnId"])
+        self.assertIsNone(loop.hermes.inspect(tid)["last_report"])
+        return loop,host,frame,proof,pending_call
+
+    def test_native_app_server_reconnect_recovers_input_before_w04_without_new_model_call(self):
         with isolated_app_server(self.root,self.origin) as rpc:
-            sid = rpc.request("thread/start",{"cwd":self.root,"ephemeral":False,"dynamicTools":[REPORT_TOOL]})["thread"]["id"]
-            host = AppServerHost(rpc,sid)
-            host.session = sid
-            loop = self.enterContext(Loop.isolated(clock,host_factory=lambda _path,_name:host))
-            tid = loop.hermes.create(guid(),"Recovery test","Original assignment content","oguri")["task_id"]
-            loop.worker.connect()
-            loop.worker.poll()
-            clock.advance(10)
-            loop.worker.poll()
-            loop.worker.poll()
-            deadline = time.monotonic()+14
-            while True:
-                event = rpc.event(deadline)
-                if event.get("method")=="item/tool/call":
-                    pending_call = event["params"]
-                    break
-            self.assertEqual(pending_call["threadId"],sid)
-            frame, = [frame for frame in loop.wire.frames(0) if frame["kind"]=="task.dispatch"]
-            self.assertTrue(loop.worker.process(frame))
-            body = {"kind":"task",**frame["payload"]}
-            did = frame["delivery_id"]
-            original = loop.adapter.lookup_delivery(did,body,session=sid)
-            self.assertEqual(original["turn_id"],pending_call["turnId"])
-            self.assertIsNone(loop.hermes.inspect(tid)["last_report"])
+            loop,host,frame,original,pending_call = self.pending_native_task(rpc)
             # Disconnect this isolated App Server before answering its pending tool request.
         self.assertIsNotNone(rpc.process.poll())
+        sid = host.thread_id
+        body = {"kind":"task",**frame["payload"]}
+        did,tid = frame["delivery_id"],body["task_id"]
         with loop.adapter.db.transaction() as db:
             db.execute("UPDATE intents SET receipt=NULL,native_id=NULL WHERE delivery_id=?",(did,))
         with isolated_app_server(self.root,self.origin) as reopened:
@@ -280,3 +285,44 @@ class CodexAppServer(unittest.TestCase):
                          "pending_native_call_id":pending_call["callId"],"model_requests":len(self.provider.observed),
                          "original_process_exited":rpc.process.returncode is not None,
                          "boundary":"Native App Server process restart with local scripted provider; no account or Desktop session"}
+
+    def test_native_app_server_interrupt_proves_exact_turn_without_releasing_assignment(self):
+        rpc = self.enterContext(isolated_app_server(self.root,self.origin))
+        loop,host,frame,original,_pending_call = self.pending_native_task(rpc)
+        sid,turn = original["session"],original["turn_id"]
+        tid,aid = frame["payload"]["task_id"],frame["payload"]["assignment_id"]
+        working = loop.hermes.inspect(tid)["task"]
+        cancel = loop.hermes.act(guid(),tid,working["revision"],"cancel",reason="Isolated native stop proof")
+        self.assertEqual(cancel["delivery_state"],"pending")
+        self.assertTrue(host.busy(sid))
+        with self.assertRaisesRegex(Fault,"native_turn_unconfirmed"):
+            host.stop_turn(sid,dict(original,native_id=guid()),start=True)
+        with self.assertRaisesRegex(RuntimeError,"expected active turn id"):
+            rpc.request("turn/interrupt",{"threadId":sid,"turnId":guid()})
+        self.assertTrue(host.busy(sid))
+        self.assertIsNone(host.stop_turn(sid,original,start=False))
+        proof = host.stop_turn(sid,original,start=True)
+        until = time.monotonic()+12
+        while True:
+            event = rpc.event(until)
+            if event.get("method")=="turn/completed":
+                self.assertEqual(event["params"]["turn"]["id"],turn)
+                self.assertEqual(event["params"]["turn"]["status"],"interrupted")
+                break
+        observed = host.stop_turn(sid,original,start=False)
+        self.assertEqual(observed,{"session":sid,"turn_id":turn,"native_id":original["native_id"],"status":"interrupted"})
+        if proof:
+            self.assertEqual(proof,observed)
+        self.assertEqual(host.stop_turn(sid,original,start=True),observed)
+        self.assertFalse(host.busy(sid))
+        self.assertEqual(loop.worker.hold(),{"held_task_id":tid,"held_assignment_id":aid})
+        state = loop.hermes.inspect(tid)
+        self.assertEqual(state["task"]["state"],"working")
+        self.assertEqual([row["assignment_id"] for row in state["pending_cleanup"]],[aid])
+        self.assertIsNone(state["last_report"])
+        self.assertEqual(loop.manager_wire.frames(0),[])
+        self.evidence = {"session":sid,"task_id":tid,"assignment_id":aid,"original_turn":original,
+                         "native_stop":observed,"holder_after":state["task"]["holder"],
+                         "state_after":state["task"]["state"],"wrong_turn_rejected":True,
+                         "cleanup_pending":state["pending_cleanup"],
+                         "boundary":"Native App Server, one scripted local model turn. Only native interruption is confirmed."}

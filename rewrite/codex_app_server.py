@@ -57,6 +57,26 @@ class AppServerHost:
         require(len(proof)<=1,409,"native_delivery_conflict")
         return proof[0] if proof else None
 
+    def stop_turn(self,session,receipt,*,start):
+        """An interrupted turn proves native stop only. Assignment cleanup is a separate check."""
+        require(isinstance(receipt,dict) and receipt.get("session")==session,409,"wrong_native_session")
+        thread = self.thread(session,include_turns=True)
+        turn_id = string(receipt,"turn_id")
+        turn = next((item for item in thread["turns"] if item.get("id")==turn_id),None)
+        require(turn,409,"native_turn_unconfirmed")
+        inputs = [item for item in turn["items"] if item.get("type")=="userMessage"]
+        require(len(inputs)==1 and inputs[0].get("id")==receipt.get("native_id")
+                and inputs[0].get("clientId")=="mowulink-"+string(receipt,"delivery_id"),
+                409,"native_turn_unconfirmed")
+        if turn["status"]=="interrupted":
+            return {"session":session,"turn_id":turn_id,"native_id":inputs[0]["id"],"status":"interrupted"}
+        if not start:
+            return None
+        require(turn["status"]=="inProgress" and thread["turns"][-1]["id"]==turn_id
+                and thread["status"]["type"]=="active",409,"native_turn_not_active")
+        self.rpc.request("turn/interrupt",{"threadId":session,"turnId":turn_id})
+        return self.stop_turn(session,receipt,start=False)
+
     def report_call(self, packet, worker):
         """Accept only App Server requests received on this process's dedicated transport."""
         call = packet.get("params")
