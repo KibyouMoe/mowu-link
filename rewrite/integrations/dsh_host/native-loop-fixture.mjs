@@ -23,6 +23,7 @@ const foregroundAnswer = Promise.withResolvers();
 const isCold = mode.startsWith('cold-resume');
 const isManaged = mode.startsWith('managed-sessions');
 const usesCleanup = mode.startsWith('cleanup-');
+const usesContainer = mode.startsWith('cleanup-container');
 const standalone = mode==='standalone-trainer-question';
 const foregroundRelay = mode.startsWith('foreground-relay');
 const usesForeground = foregroundRelay || mode==='foreground-question';
@@ -86,6 +87,30 @@ class LocalModel extends LlmAdapter {
         arguments:JSON.stringify({command})}};
       yield {type:'finish',reason:{kind:'tool-calls'}};
       return;
+    }
+    if (mode==='cleanup-container-export' && command==='task') {
+      const attempt = this.submitted.get(message.id) ?? 0;
+      const id = 'workspace-artifact-'+attempt;
+      const staged = messages.findLast(entry=>entry.toolCallId==='workspace-artifact-3');
+      const plan = [
+        ['worker_workspace_shell',{command:
+          `mkdir -p results; python3 -c 'from pathlib import Path; Path("results/sample.bin").write_bytes(bytes(range(256))*2700)'; ln -s /etc/passwd results/unsafe`}],
+        ['worker_workspace_export',{path:'results/unsafe'}],
+        ['worker_workspace_export',{path:'results/sample.bin'}],
+        ['worker_workspace_export',{path:'results/sample.bin'}],
+        ['worker_report',null],
+      ];
+      if (attempt<plan.length) {
+        this.submitted.set(message.id,attempt+1);
+        const [name,parameters] = plan[attempt];
+        assert.ok(tools?.some(tool=>tool.name===name));
+        const args = parameters ?? {task_id:payload.task_id,assignment_id:payload.assignment_id,
+          summary:'DSH isolated container result',artifact_ids:JSON.parse(staged.content[0].text).artifact_ids};
+        yield {type:'block-start',index:0,blockType:'tool-call'};
+        yield {type:'block-end',index:0,block:{type:'tool-call',id,name,arguments:JSON.stringify(args)}};
+        yield {type:'finish',reason:{kind:'tool-calls'}};
+        return;
+      }
     }
     if (mode==='cleanup-forbidden-tool' && command==='task' && !this.submitted.has('forbidden')) {
       this.submitted.set('forbidden',true);
@@ -297,7 +322,7 @@ class LocalModel extends LlmAdapter {
           yield {type:'finish',reason:{kind:'tool-calls'}};
           return;
         }
-      } else if (!['work-question','formal-goal','admission-race','material'].includes(mode)) {
+      } else if (!['work-question','formal-goal','admission-race','material','cleanup-container-export'].includes(mode)) {
         await waitForStop(signal);
       }
     }
@@ -492,8 +517,8 @@ async function stopScenario(agent) {
 async function formalScenario(agent) {
   await install(adapter,{session,directory,catalog_sessions:catalogSessions,
     relay_command_approvals:usesApprovals,resume_on_handoff:isCold,
-    read_only_assignments:usesCleanup && !['cleanup-unscoped','cleanup-container'].includes(mode),
-    ...(mode==='cleanup-container' ? {assignment_container:
+    read_only_assignments:usesCleanup && !usesContainer && mode!=='cleanup-unscoped',
+    ...(usesContainer ? {assignment_container:
       JSON.parse(readFileSync(path.join(directory,'assignment-container.json'),'utf8'))} : {}),
     relay_foreground_questions:foregroundRelay && mode!=='foreground-relay-reopen',
     ...(isManaged ? {managed_sessions_dir:path.join(directory,'enrolled'),

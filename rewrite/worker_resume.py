@@ -30,6 +30,7 @@ REFUSED = {
 }
 ORIGINAL_SESSION = {
     "source_approval_pending":"原会话还有待确认的审批，已保留绑定。请处理原审批后再切换。",
+    "source_workspace_pending":"原会话的工单工作区仍待回收，已保留绑定。工作区回收后可切换。",
     "source_adapter_upgrade":"原适配器需升级后才能核对审批。当前仍使用原会话。",
     "cancelling":"已取消切换，继续使用原会话。",
     "goal_active":"目标会话有正在进行的原生目标。原会话绑定保留。",
@@ -144,6 +145,8 @@ def source_admission(worker,session):
         if error.code=="handoff_adapter_upgrade_required":
             return "source_adapter_upgrade",False
         raise
+    if observation.get("workspace_pending"):
+        return "source_workspace_pending",observation["busy"]
     return ("source_approval_pending" if observation["approval_pending"] else None),observation["busy"]
 
 

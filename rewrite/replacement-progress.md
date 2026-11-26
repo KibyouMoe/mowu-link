@@ -4,9 +4,12 @@
 
 ## 检查点与证据
 
+DSH 容器工位通过原生工具导出 691200 字节的二进制文件。第一块上传回执丢失后按原偏移续传，验收人只在 W04 写入后读到文件，字节和 SHA-256 均匹配。符号链接被拒。Router 的 W04 已记账、Worker 回执在途中丢失时，容器保持运行，原绑定不能切换。重建 Worker 后以原报告和原幂等键取回回执，Router 仍为待验收且只发一次通知，原生输入仍为一条，原容器在回执落库后移除。真实 DSH AgentLoop、Linux Docker、SQLite 和测试 HTTP 服务实跑，模型由本地脚本驱动。[原生证据](evidence/dsh-workspace-artifacts.json) · [复跑入口](README.md#dsh-固定会话与飞书卡片)
+
+
 DSH 的可选 Linux 容器工位按派发隔离可写工作目录。真实 DSH 调用原生工具写入文件并留下脱离命令进程组的子进程。实际 Router 发取消或转派后，只移除旧派发的容器，DSH 用 W04 确认原回合停止与清理。另一条私聊仍入原会话一次；转派后的新处理权保留。另验证明字段里的引擎身份不符时，原回合中止，Worker 保留待核，旧容器与文件未被清理。宿主、Linux Docker 引擎、Worker 和 Router 实跑，模型和新接单端由夹具驱动。[原生证据](evidence/dsh-assignment-container.json)
 
-复跑 `MOWULINK_DSH_CONTAINER_IMAGE=<已有镜像完整ID> python3 -B -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_dsh_workspace_container_cancel_and_transfer_remove_owned_processes`。容器工作目录在内存里。普通项目读写工作树、容器成果导出、正常完成后的收尾和生产切换仍待验。
+复跑 `MOWULINK_DSH_CONTAINER_IMAGE=<已有镜像完整ID> python3 -B -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_dsh_workspace_container_cancel_and_transfer_remove_owned_processes`。容器工作目录在内存里。普通项目读写工作树和生产切换仍待验。
 
 取消、转派和引擎身份不符三种情况连续通过五轮。macOS 全量 270 项通过，包含在本机 Linux Docker 上复跑此验证。Linux arm64 通过 183 项、跳过 87 项。以 `6a709a552b3812455fbccef71eadcb43a130e007` 构建 239 份文件，SHA-256 为 `97d5c4947be0dd9bb545e140d9e5ae49b37e392cd5adfff93b990db5ac4ca397`。从安装目录通过 DSH 原生停止、只读及容器清理、快照和发布包共 37 项，文件摘要一致。以 `b88a3b548f4d45cb8bd6da8d07308f721aefb109` 为旧版，默认 Worker/适配器在隔离 HTTPS 演练分步升级与回退，三阶段各保留同一条夹具宿主收件。复跑 `python3 -B -m rewrite.release_check --repository . --component worker-pair` 并指定上述新旧 SHA。运行中的容器工位须先收尾后才可回退。
 

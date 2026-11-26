@@ -13,7 +13,7 @@ from threading import Event, Thread
 import time
 import unittest
 
-from . import test_codex_app_server as codex_driver, worker_commands
+from . import test_codex_app_server as codex_driver, worker_commands, worker_resume
 from .adapter import HostAdapter
 from .approvals import TTL_SECONDS
 from .codex_app_server import AppServerHost, worker_callbacks
@@ -1082,7 +1082,7 @@ class NativeLoop(unittest.TestCase):
                 "boundary":"Installed DSH SDK with opt-in read-only assignments, local model, real isolated Router."},
                 ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
 
-    def test_dsh_workspace_container_cancel_and_transfer_remove_owned_processes(self):
+    def container_engine(self):
         image = os.environ.get("MOWULINK_DSH_CONTAINER_IMAGE")
         docker = shutil.which("docker")
         if not image or not docker:
@@ -1090,7 +1090,21 @@ class NativeLoop(unittest.TestCase):
         socket = subprocess.check_output([docker,"context","inspect","--format","{{ .Endpoints.docker.Host }}"],
                                          text=True,timeout=5).strip()
         self.assertTrue(socket.startswith("unix:///"),socket)
-        cli = [docker,"--host",socket]
+        return image,[docker,"--host",socket]
+
+    def clean_fixture_containers(self, runtime, session, cli):
+        for owned in (runtime/"assignment-containers").glob("*.json"):
+            entry = json.loads(owned.read_text())
+            if entry.get("session")!=session or not entry.get("token"):
+                continue
+            ids = subprocess.check_output([*cli,"container","ls","--all","--no-trunc","--filter",
+                "label=io.mowulink.assignment="+entry["token"],"--format","{{.ID}}"],text=True,timeout=8).split()
+            for identity in ids:
+                subprocess.run([*cli,"container","rm","--force",identity],check=True,timeout=8,capture_output=True)
+
+    def test_dsh_workspace_container_cancel_and_transfer_remove_owned_processes(self):
+        image,cli = self.container_engine()
+        docker,_,socket = cli
         cases = []
         for action in ("cancel","transfer","foreign_engine"):
             with self.subTest(action=action):
@@ -1191,17 +1205,118 @@ class NativeLoop(unittest.TestCase):
                             "original_native_turn_end":observed["turns"][0]["reason"]["kind"],
                             "boundary":"Actual installed DSH SDK, Linux Docker engine, HTTP Router and Worker. Model and inputs are local fixtures."})
                     finally:
-                        # On a failing test clean only containers whose unguessable label belongs to this fixture directory.
-                        for owned in (runtime/"assignment-containers").glob("*.json"):
-                            entry = json.loads(owned.read_text())
-                            if entry.get("session")!=session or not entry.get("token"):
-                                continue
-                            ids = subprocess.check_output([*cli,"container","ls","--all","--no-trunc","--filter",
-                                "label=io.mowulink.assignment="+entry["token"],"--format","{{.ID}}"],text=True,timeout=8).split()
-                            for identity in ids:
-                                subprocess.run([*cli,"container","rm","--force",identity],check=True,timeout=8,capture_output=True)
+                        self.clean_fixture_containers(runtime,session,cli)
         if output := os.environ.get("MOWULINK_DSH_CONTAINER_EVIDENCE"):
             Path(output).write_text(json.dumps({"cases":cases},ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
+
+    def test_dsh_workspace_exports_artifact_and_seals_after_durable_w04_replay(self):
+        image,cli = self.container_engine()
+        docker,_,socket = cli
+        session = "dsh-isolated-workspace-artifacts"
+        directory,loop,service,_ = self.goal_worker(session)
+        runtime = Path(directory)
+        (runtime/"assignment-container.json").write_text(encode(
+            {"docker":docker,"socket":socket.removeprefix("unix://"),"image":image}),encoding="utf-8")
+        token = guid()
+        client = Client(self.open_worker(service,{token:"adapter/oguri"}),token)
+        worker = loop.worker
+        wire = worker.router.request
+        data = bytes(range(256))*2700
+        digest = hashlib.sha256(data).hexdigest()
+        report_attempts,offsets = [],[]
+        loss = True
+        self.addCleanup(self.clean_fixture_containers,runtime,session,cli)
+        with tool_listener(runtime,loop.adapter,client), self.start_native(directory,session,"cleanup-container-export") as native:
+            tid = loop.hermes.create(guid(),"Isolated container artifact","Write and stage the fixture bytes","oguri")["task_id"]
+            def lose_receipts(method,path,*args,**kwargs):
+                is_report = method=="POST" and path==f"tasks/{tid}/report"
+                if is_report:
+                    artifact, = args[0]["artifact_ids"]
+                    report_attempts.append({"idempotency_key":args[1],"body":args[0]})
+                    if loss:
+                        with self.assertRaisesRegex(Fault,"attachment_not_found"):
+                            loop.manager_wire.request("GET","attachments/"+artifact)
+                        self.assertEqual(wire("GET","attachments/"+artifact)["bytes"],data)
+                        self.assertEqual(worker.hold()["held_task_id"],tid)
+                result = wire(method,path,*args,**kwargs)
+                if method=="PATCH" and path.startswith("uploads/"):
+                    offsets.append(result["next_offset"])
+                    if len(offsets)==1:
+                        raise ConnectionError("isolated Router chunk receipt lost")
+                if is_report and loss:
+                    raise Fault(503,"fixture_w04_receipt_lost",True)
+                return result
+            worker.router.request = lose_receipts
+            worker.connect()
+            worker.poll()
+            service.clock.advance(10)
+            worker.poll()
+            worker.poll()
+            observed = self.read_native(native,"read")
+            self.assertEqual(len(observed["inputs"]),1)
+            self.assertEqual([call["name"] for call in observed["calls"]],
+                ["worker_workspace_shell",*["worker_workspace_export"]*3,"worker_report"])
+            self.assertEqual([call["isError"] for call in observed["results"]],[False,True,True,False,True],observed["results"])
+            self.assertIn("workspace_artifact_unreadable",encode(observed["results"][1]))
+            self.assertIn("fixture_w04_receipt_lost",encode(observed["results"][4]))
+            self.assertEqual(offsets,[256*1024,512*1024,len(data)])
+            self.assertEqual(len(report_attempts),1)
+            staged = json.loads(observed["results"][3]["content"][0]["text"])
+            artifact, = staged["artifact_ids"]
+            assignment = report_attempts[0]["body"]["assignment_id"]
+            lease_path, = (runtime/"assignment-containers").glob("*.json")
+            lease = json.loads(lease_path.read_text())
+            self.assertEqual((lease["assignment_id"],lease["phase"]),(assignment,"active"))
+            scope = {"session":session,"task_id":tid,"assignment_id":assignment}
+            def persisted_receipt(w):
+                with w.db.transaction() as db:
+                    return db.execute("SELECT receipt FROM outbox WHERE assignment_id=?",(assignment,)).fetchone()[0]
+            def container_exists():
+                return bool(subprocess.check_output([*cli,"container","ls","--all","--no-trunc","--filter",
+                    "id="+lease["container_id"],"--format","{{.ID}}"],timeout=8).strip())
+            self.assertIsNone(persisted_receipt(worker))
+            self.assertEqual(client.request("POST","worker/workspace-state",scope),{**scope,"state":"inactive"})
+            self.assertEqual(worker_resume.source_admission(worker,session),("source_workspace_pending",False))
+            self.assertTrue(container_exists())
+            details = loop.hermes.inspect(tid)
+            self.assertEqual(details["last_report"]["artifact_ids"],[artifact])
+            self.assertEqual(details["task"]["state"],"completed_reported")
+            file = loop.manager_wire.request("GET","attachments/"+artifact)
+            self.assertEqual(file["bytes"],data)
+            self.assertEqual(file["headers"]["X-Content-SHA256"],digest)
+
+            # The new Worker replays the persisted W04 body with its original idempotency key.
+            loss = False
+            recovered = Worker(worker.db.path,worker.worker_id,worker.router,worker.adapter,clock=service.clock)
+            service.worker = recovered
+            recovered.connect()
+            self.assertEqual(report_attempts,[report_attempts[0],report_attempts[0]])
+            receipt = json.loads(persisted_receipt(recovered))
+            self.assertEqual(receipt["release_assignment_id"],assignment)
+            self.assertIsNone(recovered.hold()["held_assignment_id"])
+            self.assertEqual(client.request("POST","worker/workspace-state",scope),{**scope,"state":"released"})
+            until = time.monotonic()+10
+            while json.loads(lease_path.read_text())["phase"]!="sealed" and time.monotonic()<until:
+                time.sleep(.05)
+            self.assertEqual(json.loads(lease_path.read_text())["phase"],"sealed")
+            self.assertFalse(container_exists())
+            self.assertEqual(worker_resume.source_admission(recovered,session),(None,False))
+            self.assertEqual(loop.hermes.inspect(tid),details)
+            notify, = loop.manager_wire.frames(0)
+            self.assertEqual(notify["payload"]["attachment_ids"],[artifact])
+            self.assertEqual(self.read_native(native,"read")["inputs"],observed["inputs"])
+            with recovered.db.transaction() as db:
+                local, = db.execute("SELECT attachment_id,sha256 FROM uploads").fetchall()
+            self.assertEqual(local["sha256"],digest)
+        if output := os.environ.get("MOWULINK_DSH_WORKSPACE_ARTIFACT_EVIDENCE"):
+            evidence = {**scope,"artifact_id":artifact,"local_artifact_id":local["attachment_id"],"bytes":len(data),
+                "sha256":digest,"native_input":observed["inputs"][0],"native_calls":observed["calls"],
+                "upload_offsets":offsets,"symlink_rejected":True,"container_id":lease["container_id"],
+                "container_present_without_w04_receipt":True,"handoff_waited_for_cleanup":True,"w04":receipt,
+                "w04_attempts":report_attempts,"container_absent_after_replay":True,
+                "manager_notification":notify["delivery_id"],"router_state":details["task"]["state"],
+                "boundary":"Installed DSH AgentLoop, real isolated Linux Docker, Worker and Router. Local scripted model. No Feishu."}
+            Path(output).write_text(json.dumps(evidence,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
 
     def test_native_dsh_stop_alone_or_unverified_tool_keeps_cleanup_pending(self):
         cases = []

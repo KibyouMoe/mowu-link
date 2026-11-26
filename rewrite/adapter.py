@@ -46,14 +46,19 @@ class HostAdapter:
         return self.host.busy(self.session)
 
     def handoff_activity(self, *, session=None):
-        busy = self.busy(session=session)
+        require(session is None or session==self.session,409,"wrong_native_session")
+        observe = getattr(self.host,"handoff_activity",None)
+        activity = observe(self.session) if callable(observe) else {"busy":self.busy()}
         # The adapter DB is pinned to this native session. Router may not know about these requests yet.
         checks = (("codex_approval_intents","router_receipt_digest"),("dsh_approvals","closure"))
         with self.db.transaction() as db:
             tables = {row[0] for row in db.execute("SELECT name FROM sqlite_schema WHERE type='table'")}
             pending = any(db.execute(f"SELECT 1 FROM {table} WHERE {receipt} IS NULL LIMIT 1").fetchone()
                           for table,receipt in checks if table in tables)
-        return {"session":self.session,"busy":busy,"approval_pending":pending}
+        result = {"session":self.session,"busy":activity["busy"],"approval_pending":pending}
+        if activity.get("workspace_pending"):
+            result["workspace_pending"] = True
+        return result
 
     def observe_activity(self):
         observe = getattr(self.host,"observe",None)

@@ -112,13 +112,21 @@ export function assignmentCleanup(ctx,agent,runtimeDir,workspace=null) {
   const directory = readOnlyDirectory(runtimeDir);
   const session = agent.session.id;
   const registered = new Map();
-  const allowed = workspace ? new Set([...safeTools,'worker_workspace_shell']) : safeTools;
+  const allowed = workspace ? new Set([...safeTools,'worker_workspace_shell','worker_workspace_export']) : safeTools;
   ctx.on('tools/pre-execute',(exec,next)=>{
     if (exec.agent!==agent) return next();
     if (registered.has(exec.name) && ctx.get('tools').get(exec.name,agent)===registered.get(exec.name)) return next();
     return Promise.resolve({kind:'reject',reason:workspace ? '这个独立工位仅执行已登记的工具。' : '这个独立只读工位仅执行已登记的查询与工单回报工具。'});
   },{prepend:true});
+  function workspaceScope(message) {
+    const origin = scopeInput(message)?.payload;
+    check(workspace && nativeID(message.id) && taskInputs.has(origin?.kind));
+    const ref = admission(directory,message.id);
+    verifyAdmission(directory,message,session,origin.assignment_id,ref);
+    return {session,task_id:origin.task_id,assignment_id:origin.assignment_id};
+  }
   return {
+    workspaceScope,
     bindTools() {
       for (const name of allowed) {
         const tool = ctx.get('tools').get(name,agent);
@@ -146,13 +154,6 @@ export function assignmentCleanup(ctx,agent,runtimeDir,workspace=null) {
         }
         check(typeof agent.inbox.remove==='function' && agent.inbox.remove(message.id));
       }
-    },
-    runWorkspace(message,args,signal) {
-      const origin = scopeInput(message)?.payload;
-      check(workspace && nativeID(message.id) && taskInputs.has(origin?.kind));
-      const ref = admission(directory,message.id);
-      verifyAdmission(directory,message,session,origin.assignment_id,ref);
-      return workspace.run(origin.task_id,origin.assignment_id,args.command,signal);
     },
     stopWorkspace(request) {
       if (!workspace) return;

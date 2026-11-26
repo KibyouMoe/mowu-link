@@ -1,4 +1,5 @@
 """DSH plugin transport, scoped to an owner-private Unix directory and a single session."""
+import base64
 from contextlib import contextmanager
 import hashlib
 from http.client import HTTPConnection, HTTPException
@@ -11,12 +12,14 @@ from sqlite3 import OperationalError
 from threading import Event, Thread
 from urllib.error import URLError
 
+from . import peer_files
 from .agent_tools import TOOLSET
 from .dsh_approvals import DshApprovals
 from .messages import valid_guid
 from .storage import Fault, encode, require, string
 
 NATIVE_TOOLS = frozenset(tool["name"] for tool in TOOLSET)
+MAX_WORKSPACE_ARTIFACT = 16 * 1024 * 1024
 
 
 def private_directory(path):
@@ -86,6 +89,12 @@ class DshHost:
         value = self.request("activity",session).get("busy")
         require(type(value) is bool,502,"invalid_host_observation")
         return value
+
+    def handoff_activity(self, session):
+        result = self.request("activity",session)
+        require(type(result.get("busy")) is bool and type(result.get("workspace_pending",False)) is bool,
+                502,"invalid_host_observation")
+        return result
 
     def context_usage(self, session):
         return self.request("context-usage",session)
@@ -167,6 +176,35 @@ class DshHost:
         return self.media_operation("lookup",session,did,payload,digest,files)
 
 
+def stage_workspace_artifact(bound, callback, body, source, size):
+    fields = {"session","turn_id","native_id","call_id","name","size_bytes","sha256"}
+    require(set(body)==fields and type(body["size_bytes"]) is int and body["size_bytes"]==size,
+            422,"invalid_workspace_artifact")
+    session,turn,native = (string(body,key) for key in ("session","turn_id","native_id"))
+    call = string(body,"call_id")
+    bound.prove_native_input(session,turn,native)
+    origin = bound.origin(native,session=session)
+    require(origin["kind"] in ("task","task_update","task_probe","question_answer"),403,"wrong_artifact_origin")
+    scope = {"session":session,"task_id":origin["task_id"],"assignment_id":origin["assignment_id"]}
+    require(callback.request("POST","worker/workspace-state",scope)=={**scope,"state":"active"},
+            409,"assignment_workspace_inactive")
+    data = source.read(size)
+    meta = peer_files.metadata(body)
+    require(len(data)==size and hashlib.sha256(data).hexdigest()==meta["sha256"],422,"digest_mismatch")
+    key = "dsh-artifact-"+hashlib.sha256(encode([scope,meta]).encode()).hexdigest()
+    result = callback.request("POST","worker/media/uploads",meta,key)
+    route = "worker/media/uploads/"+result["upload_id"]
+    while not result["complete"]:
+        offset = result["next_offset"]
+        require(type(offset) is int and 0<=offset<size,409,"invalid_upload_offset")
+        chunk = data[offset:offset+peer_files.CHUNK]
+        result = callback.request("PATCH",route,chunk,headers={"Upload-Offset":str(offset)})
+        require(result["next_offset"]==offset+len(chunk),409,"invalid_upload_ack")
+    require(result["next_offset"]==size and valid_guid(result.get("attachment_id")),409,"unconfirmed_workspace_upload")
+    return callback.request("POST","worker/native-tool",{"session":session,"turn_id":turn,"call_id":call,
+        "tool":"worker_stage_artifacts","arguments":{"attachment_ids":[result["attachment_id"]]}})
+
+
 @contextmanager
 def tool_listener(directory, adapter, worker, *, family=None):
     from socketserver import UnixStreamServer
@@ -190,18 +228,31 @@ def tool_listener(directory, adapter, worker, *, family=None):
         def do_POST(self):
             self.connection.settimeout(8)
             try:
-                require(self.path in ("/tool","/approval","/approval/attempt"),404,"unknown_route")
-                size = int(self.headers.get("Content-Length","0"))
-                require(0 < size <= 1048576,422,"invalid_envelope")
-                body = json.loads(self.rfile.read(size))
+                workspace = self.path=="/workspace-artifact"
+                require(self.path in ("/tool","/approval","/approval/attempt","/workspace-state","/workspace-artifact"),
+                        404,"unknown_route")
+                size = int(self.headers.get("Content-Length","-1"))
+                if workspace:
+                    header = self.headers.get("X-Mowu-Workspace","")
+                    require(0<=size<=MAX_WORKSPACE_ARTIFACT and 0<len(header)<=4096 and
+                            self.headers.get("Content-Type")=="application/octet-stream",422,"invalid_workspace_artifact")
+                    body = json.loads(base64.b64decode(header+"="*(-len(header)%4),altchars=b"-_",validate=True))
+                else:
+                    require(0<size<=1048576,422,"invalid_envelope")
+                    body = json.loads(self.rfile.read(size))
                 require(isinstance(body,dict),422,"invalid_envelope")
-                if self.path=="/tool":
-                    fields = {"session","turn_id","native_id","tool","call_id","arguments"}
-                    require(set(body) in (fields,fields|{"native_direct"})
-                            and string(body,"tool") in NATIVE_TOOLS,422,"invalid_envelope")
+                if workspace or self.path in ("/tool","/workspace-state"):
                     session = string(body,"session")
                     selected = family.port(session) if family else None
                     bound,callback = (selected.adapter,selected.callback) if selected else (adapter,worker)
+                if workspace:
+                    result = stage_workspace_artifact(bound,callback,body,self.rfile,size)
+                elif self.path=="/workspace-state":
+                    result = callback.request("POST","worker/workspace-state",body)
+                elif self.path=="/tool":
+                    fields = {"session","turn_id","native_id","tool","call_id","arguments"}
+                    require(set(body) in (fields,fields|{"native_direct"})
+                            and string(body,"tool") in NATIVE_TOOLS,422,"invalid_envelope")
                     if "native_direct" in body:
                         require(body["tool"]=="worker_ask_trainer" and body["native_direct"] is True
                                 and not string(body,"native_id").startswith("mowulink-")

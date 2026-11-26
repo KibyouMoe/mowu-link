@@ -1,7 +1,7 @@
 import {execFile} from 'node:child_process';
 import {createHash, randomUUID} from 'node:crypto';
 import {closeSync, constants, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync,
-  readFileSync, renameSync, writeFileSync} from 'node:fs';
+  readFileSync, readdirSync, renameSync, writeFileSync} from 'node:fs';
 import path from 'node:path';
 import {promisify} from 'node:util';
 import {guid} from './session-preparation.mjs';
@@ -11,6 +11,37 @@ const LABEL = 'io.mowulink.assignment';
 const TMPFS = {'/workspace':'rw,nosuid,nodev,size=64m,mode=1777','/tmp':'rw,nosuid,nodev,size=16m,mode=1777'};
 const containerID = value => /^[a-f0-9]{64}$/.test(value);
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+
+const MAX_ARTIFACT_BYTES = 16 * 1024 * 1024;
+const readArtifact = String.raw`
+import os
+import stat
+import sys
+
+limit = int(sys.argv[1])
+parts = sys.argv[2].split("/")
+directory = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+fd = os.open("/workspace", directory)
+try:
+    for name in parts[:-1]:
+        child = os.open(name, directory, dir_fd=fd)
+        os.close(fd)
+        fd = child
+    with os.fdopen(os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd), "rb") as source:
+        before = os.fstat(source.fileno())
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > limit:
+            raise ValueError("invalid artifact")
+        data = source.read(limit + 1)
+        after = os.fstat(source.fileno())
+        if len(data) != before.st_size or (before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
+            after.st_size, after.st_mtime_ns, after.st_ctime_ns
+        ):
+            raise ValueError("artifact changed")
+        sys.stdout.buffer.write(data)
+finally:
+    os.close(fd)
+`;
+
 
 function check(test,code='native_cleanup_unconfirmed') {
   if (!test) throw new Error(code);
@@ -167,6 +198,37 @@ export function assignmentContainers(runtime,session,config) {
         return {result};
       });
       return result;
+    },
+    async artifact(tid,aid,relative,signal) {
+      check(typeof relative==='string' && Buffer.byteLength(relative)<=1024 &&
+        !/[\\\x00-\x1f\x7f]/.test(relative),'invalid_workspace_artifact_path');
+      const parts = relative.split('/');
+      check(parts.every(part=>part && part!=='.' && part!=='..'),'invalid_workspace_artifact_path');
+      return serial(aid,async()=>{
+        signal?.throwIfAborted();
+        const record = await scope(tid,aid);
+        check(record.phase==='active' && record.container_id,'assignment_workspace_unavailable');
+        const container = await owned(record);
+        check(container?.State?.Running && !container.State.Paused,'assignment_workspace_unavailable');
+        const {stdout:bytes} = await invoke(['container','exec',container.Id,'python3','-I','-c',readArtifact,
+          String(MAX_ARTIFACT_BYTES),relative],{encoding:'buffer',maxBuffer:MAX_ARTIFACT_BYTES,signal})
+          .catch(()=>{ throw new Error('workspace_artifact_unreadable'); });
+        check(bytes.length<=MAX_ARTIFACT_BYTES,'workspace_artifact_too_large');
+        return {name:parts.at(-1),size_bytes:bytes.length,
+          sha256:createHash('sha256').update(bytes).digest('hex'),bytes};
+      });
+    },
+    pending() {
+      const pending = [];
+      for (const name of readdirSync(directory)) {
+        if (!/^[a-f0-9]{64}\.json$/.test(name)) continue;
+        const record = readRecord(path.join(directory,name));
+        if (record?.session!==session || record.phase==='sealed') continue;
+        check(guid(record.task_id) && guid(record.assignment_id) &&
+          filename(record.assignment_id)===path.join(directory,name));
+        pending.push({task_id:record.task_id,assignment_id:record.assignment_id});
+      }
+      return pending;
     },
     async seal(tid,aid) {
       return serial(aid,async()=>{

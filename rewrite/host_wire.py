@@ -47,7 +47,8 @@ class RemoteAdapter:
                 raise Fault(409,"handoff_adapter_upgrade_required") from None
             raise
         require(isinstance(reply,dict) and reply.get("session")==session
-                and type(reply.get("busy")) is bool and type(reply.get("approval_pending")) is bool,
+                and type(reply.get("busy")) is bool and type(reply.get("approval_pending")) is bool
+                and type(reply.get("workspace_pending",False)) is bool,
                 502,"invalid_handoff_observation")
         return reply
 

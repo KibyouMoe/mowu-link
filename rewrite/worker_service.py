@@ -214,6 +214,11 @@ class WorkerService:
             except (OSError,URLError):
                 raise Fault(503,"handoff_receipt_unconfirmed",True) from None
             return 200,"application/json",reply
+        if path=="/v1/worker/workspace-state":
+            require(actor=="adapter/"+w.worker_id,403,"forbidden")
+            require(method=="POST" and set(body)=={"session","task_id","assignment_id"}
+                    and valid_guid(body["task_id"]) and valid_guid(body["assignment_id"]),422,"invalid_workspace")
+            return 200,"application/json",w.workspace_state(string(body,"session"),body["task_id"],body["assignment_id"])
         if path.startswith("/v1/worker/media/"):
             return worker_media.route(w,actor,method,path,body,_headers)
         if path.startswith("/v1/worker/approvals/"):

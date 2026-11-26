@@ -178,7 +178,8 @@ export async function bindHost(ctx, session, directory, catalog=[], selected=nul
       if (request.operation === 'display-start') return displayStart;
       if (request.operation === 'display-next') return nextDisplay(ctx,agent,request,questionRecords,foreground);
       if (request.operation === 'display-image') return displayImage(ctx,agent,request,imageCache);
-      if (request.operation === 'activity') return {busy:agent.status !== 'idle' || compact.inProgress};
+      if (request.operation === 'activity') return {busy:agent.status !== 'idle' || compact.inProgress,
+        ...(workspace ? {workspace_pending:workspace.pending().length>0} : {})};
       if (request.operation === 'cleanup-evidence') {
         check(cleanup,'native_cleanup_unconfirmed');
         const {events,inherited} = await sessionEvents(ctx,agent);
@@ -264,9 +265,17 @@ export async function bindHost(ctx, session, directory, catalog=[], selected=nul
       const raw = calls[0].call.arguments;
       check(isDeepStrictEqual(typeof raw === 'string' ? JSON.parse(raw) : raw,args), 'native_arguments_mismatch');
       const user = current.users[0];
-      if (name==='worker_workspace_shell') {
+      if (name==='worker_workspace_shell' || name==='worker_workspace_export') {
         check(workspace,'assignment_container_unavailable');
-        return cleanup.runWorkspace(user,args,exec.signal);
+        const scope = cleanup.workspaceScope(user);
+        const state = await workspaceState(directory,scope);
+        check(state==='active','assignment_workspace_inactive');
+        if (name==='worker_workspace_shell') {
+          return workspace.run(scope.task_id,scope.assignment_id,args.command,exec.signal);
+        }
+        const {bytes,...metadata} = await workspace.artifact(scope.task_id,scope.assignment_id,args.path,exec.signal);
+        return callback(directory,{...metadata,session,turn_id:current.id,native_id:user.id,call_id:exec.callId},
+          '/workspace-artifact',bytes);
       }
       const direct = name==='worker_ask_trainer' && user.source?.kind==='user' && !user.id.startsWith('mowulink-')
         && !user.content.some(item=>item.type==='text' && item.text.startsWith('魔物链接投递\n'));
@@ -293,11 +302,16 @@ async function readJson(stream) {
   return JSON.parse(Buffer.concat(chunks).toString('utf8'));
 }
 
-function callback(dir, envelope, route='/tool') {
+function callback(dir, envelope, route='/tool', bytes=null) {
   privateDir(dir);
+  const encoded = JSON.stringify(envelope);
+  const body = bytes ?? Buffer.from(encoded);
+  const headers = bytes===null ? {'Content-Type':'application/json'} : {
+    'Content-Type':'application/octet-stream','X-Mowu-Workspace':Buffer.from(encoded).toString('base64url'),
+  };
   return new Promise((resolve,reject) => {
     const req = http.request({socketPath:path.join(dir,'worker.sock'),path:route,method:'POST',
-      headers:{'Content-Type':'application/json'}, timeout:8000}, async res => {
+      headers:{...headers,'Content-Length':body.length},timeout:bytes===null ? 8000 : 45000}, async res => {
       try {
         const body = await readJson(res);
         check(res.statusCode === 200, body.error || 'worker_unconfirmed');
@@ -305,7 +319,40 @@ function callback(dir, envelope, route='/tool') {
       } catch (error) { reject(error); }
     });
     req.on('error',reject).on('timeout',() => req.destroy(new Error('worker_timeout')));
-    req.end(JSON.stringify(envelope));
+    req.end(body);
+  });
+}
+
+async function workspaceState(directory,scope) {
+  const result = await callback(directory,scope,'/workspace-state');
+  check(Object.entries(scope).every(([key,value])=>result[key]===value) &&
+    ['active','inactive','released'].includes(result.state),'assignment_workspace_unconfirmed');
+  return result.state;
+}
+
+function watchWorkspaceReleases(ctx,port,directory) {
+  const session = port.agent.session.id;
+  ctx.effect(()=>{
+    let stopped = false;
+    let timer;
+    async function sweep() {
+      try {
+        for (const assignment of port.workspace.pending()) {
+          if (stopped) break;
+          try {
+            if (await workspaceState(directory,{session,...assignment})==='released') {
+              if (stopped) break;
+              await port.workspace.seal(assignment.task_id,assignment.assignment_id);
+            }
+          } catch { /* Unconfirmed release stays in the durable workspace journal. */ }
+        }
+      } catch { /* Leave the journal intact if it cannot be read. */ }
+      finally {
+        if (!stopped) timer = setTimeout(sweep,1500);
+      }
+    }
+    timer = setTimeout(sweep,1500);
+    return ()=>{ stopped=true; clearTimeout(timer); };
   });
 }
 
@@ -334,9 +381,15 @@ function installBoundTools(ctx,port,directory,relay_command_approvals) {
   if (relay_command_approvals) {
     installCommandApprovals(ctx,port.agent,()=>ownEvents(ctx,port.agent),(route,body)=>callback(directory,body,route));
   }
-  const available = port.workspace ? [...tools,{name:'worker_workspace_shell',
+  const available = port.workspace ? [...tools,{
+    name:'worker_workspace_shell',
     description:'Run a shell command inside the private workspace of the current work order.',
-    inputSchema:{type:'object',required:['command'],additionalProperties:false,properties:{command:{type:'string'}}}}] : tools;
+    inputSchema:{type:'object',required:['command'],additionalProperties:false,properties:{command:{type:'string'}}},
+  },{
+    name:'worker_workspace_export',
+    description:'Stage a regular file (up to 16 MiB) from this work order’s private workspace. Include the returned artifact IDs in worker_report to share the file.',
+    inputSchema:{type:'object',required:['path'],additionalProperties:false,properties:{path:{type:'string'}}},
+  }] : tools;
   for (const tool of available) {
     const unregister = port.agent.ctx.get('tools').register({name:tool.name,description:tool.description,
       parameters:tool.inputSchema,output:{schema:{type:'object'},render:(_args,value)=>[{type:'text',text:JSON.stringify(value)}]},
@@ -344,6 +397,7 @@ function installBoundTools(ctx,port,directory,relay_command_approvals) {
     ctx.effect(() => unregister);
   }
   port.cleanup?.bindTools();
+  if (port.workspace) watchWorkspaceReleases(ctx,port,directory);
 }
 
 export async function apply(ctx, {session, directory, catalog_sessions=[], relay_command_approvals=false,

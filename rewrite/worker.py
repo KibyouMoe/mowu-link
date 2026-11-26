@@ -666,6 +666,27 @@ class Worker:
                 and isinstance(result["material_id"],str) and result["material_id"],409,"material_receipt_mismatch")
         return result
 
+    def workspace_state(self, session, task_id, assignment_id):
+        require(self.adapter.bound_session()==session,403,"wrong_native_session")
+        with self.db.transaction() as db:
+            row = db.execute("""SELECT jobs.stage, outbox.body, outbox.receipt, controls.kind AS control FROM jobs
+                     JOIN assignment_sessions USING(assignment_id)
+                     LEFT JOIN outbox USING(assignment_id)
+                     LEFT JOIN controls USING(assignment_id)
+                     WHERE jobs.task_id=? AND jobs.assignment_id=? AND assignment_sessions.session=?""",
+                     (task_id,assignment_id,session)).fetchone()
+        state = "inactive"
+        if row and row["stage"]=="accepted" and row["body"] is None and row["control"] is None:
+            state = "active"
+        if row and row["stage"]=="released" and row["receipt"]:
+            receipt = json.loads(row["receipt"])
+            outcome = json.loads(row["body"])["outcome"]
+            expected = {"completed":"completed_reported","blocked":"blocked"}.get(outcome)
+            if (expected and receipt.get("recorded") is True and receipt.get("task_state")==expected
+                    and receipt.get("release_assignment_id")==assignment_id):
+                state = "released"
+        return {"session":session,"task_id":task_id,"assignment_id":assignment_id,"state":state}
+
     def stage_work_artifacts(self,session,native_id,args):
         require(set(args)=={"attachment_ids"},422,"invalid_arguments")
         ids,kinds = peer_files.request_files(args)
