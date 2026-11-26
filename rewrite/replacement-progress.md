@@ -8,6 +8,8 @@
 
 复跑 `python3 -B -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_read_only_dsh_acknowledges_original_cancel_or_transfer_and_recovers_w04_reply rewrite.test_dsh_native_loop.NativeLoop.test_native_dsh_stop_alone_or_unverified_tool_keeps_cleanup_pending`。
 
+两项 DSH 原生用例连续通过 12 轮。macOS 全量通过 234 项，Linux arm64 通过 158 项、跳过 76 项。从 `7c0f90d67cf328097aa798b8e479ccf33b9cefe5` 构建 206 文件的独立包，SHA-256 为 `0402b4249daaa0670644bb320f55c2ff45c55ef248b34d678a4ca831caca5225`。安装目录内通过 DSH 与 Codex 的原生取消、派发竞态及快照审计共 17 项，安装文件逐份复验一致。默认配置下的隔离 HTTPS 升级与回退在三个阶段各保留一条原生输入，原收件 `76e88422-d0bd-47de-bf92-38f7751bdc83` 一致。复跑 `python3 -B -m rewrite.release_check --repository . --component worker-pair --previous 4faf8e277945a512b37b1884ac8437e32883f645 --new 7c0f90d67cf328097aa798b8e479ccf33b9cefe5`。
+
 DSH 的 `/new`、`/clear`、`/fork` 已经走 Worker 的正式交接。原生空会话用工位默认配置，分支保留父会话标识、已落盘的历史边界和当前模型力度。写入与登记分别按原操作留证。隔离 SDK 实测原生已落盘而 IPC 回执丢失，重开查回同一会话。原生未写入且父会话已变化时，拒绝按旧边界建分支。Worker 收到拒绝后保留当前绑定并解除派发暂停。[原生回执证据](evidence/dsh-native-preparation-recovery.json)
 
 登记回执丢失时 Router 仍暂停派发，重开后沿用原登记。旧会话回调被拒。新会话和分支各接一张正式单，每张单两次原生 `worker_report` 调用只留一条待验通知。分支的父历史没有变成新的原生输入。三个子会话的适配器账本从快照恢复和回退均逐字节一致。宿主是本机安装的独立 DSH SDK，TLS、Router 和 Worker 实跑，模型及飞书为夹具。真实 DSH 客户端、飞书与跨机原生历史仍待验。[换绑、W04 和快照证据](evidence/dsh-managed-native-sessions.json)
