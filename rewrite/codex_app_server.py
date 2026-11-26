@@ -47,7 +47,8 @@ class AppServerHost:
         self.inherited_delivery_ids = frozenset()
         self.compactions = CodexCompactions(adapter_db,self) if adapter_db is not None else None
         self.questions = CodexQuestions(adapter_db,self) if adapter_db is not None else None
-        self.approvals = (CodexApprovals(rpc,thread_id,commands=relay_command_approvals,files=relay_file_approvals)
+        self.approvals = (CodexApprovals(rpc,thread_id,commands=relay_command_approvals,
+                                        files=relay_file_approvals,adapter_db=adapter_db)
                           if relay_command_approvals or relay_file_approvals else None)
         require(public_image_root is None or adapter_db is not None,422,"native_image_state_required")
         self.images = CodexImages(public_image_root,adapter_db) if public_image_root is not None else None

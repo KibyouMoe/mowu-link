@@ -2,11 +2,20 @@
 from contextlib import contextmanager
 from dataclasses import dataclass
 import hashlib
+from sqlite3 import Error as SQLiteError
 from threading import Event, Lock, Thread
 import time
 
 from .approvals import DECISIONS, TTL_SECONDS, validate_file_changes, validate_request
-from .storage import Fault, encode, guid, require
+from .storage import Database, Fault, encode, guid, require
+
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS codex_approval_intents (
+    approval_id TEXT PRIMARY KEY, session TEXT NOT NULL, turn_id TEXT NOT NULL,
+    item_id TEXT NOT NULL, request_digest TEXT NOT NULL, router_receipt_digest TEXT
+);
+"""
 
 
 @dataclass
@@ -23,13 +32,14 @@ class NativeApproval:
 
 
 class CodexApprovals:
-    def __init__(self,rpc,session,*,commands=True,files=False):
+    def __init__(self,rpc,session,*,commands=True,files=False,adapter_db=None):
         self.rpc,self.session = rpc,session
         self.commands,self.files = commands,files
         self.clock = time.monotonic
         self.lock = Lock()
         self.live = {}
         self.file_changes = {}
+        self.ledger = Database(adapter_db,SCHEMA) if adapter_db is not None else None
 
     def observe_item(self,method,params):
         if not isinstance(params,dict) or params.get("threadId")!=self.session:
@@ -89,7 +99,16 @@ class CodexApprovals:
                 require(current.request==data,409,"native_approval_conflict")
                 return
             digest = hashlib.sha256(encode(data).encode()).hexdigest()
-            self.live[rid] = NativeApproval(guid(),rid,data,digest,self.clock()+TTL_SECONDS)
+            item = NativeApproval(guid(),rid,data,digest,self.clock()+TTL_SECONDS)
+            if self.ledger is not None:
+                # A disconnected Worker may never receive this request. Keep correlation data only.
+                try:
+                    with self.ledger.transaction() as db:
+                        db.execute("INSERT INTO codex_approval_intents VALUES (?,?,?,?,?,NULL)",
+                                   (item.id,self.session,data["turn_id"],data["item_id"],digest))
+                except SQLiteError:
+                    raise Fault(503,"native_approval_journal_unconfirmed",True) from None
+            self.live[rid] = item
 
     def closed(self,params):
         if not isinstance(params,dict) or params.get("threadId")!=self.session:
@@ -126,9 +145,17 @@ class CodexApprovals:
             proof["request"] = item.request
         receipt = worker.request("PUT",route+"/closed",proof)
         require(isinstance(receipt,dict) and receipt.get("approval_id")==item.id and receipt.get("state")=="native_closed"
-                and receipt.get("attempted_response")==attempted,502,"wrong_approval_closure")
+                and receipt.get("attempted_response")==attempted and receipt.get("request_digest")==item.digest,
+                502,"wrong_approval_closure")
         with self.lock:
             if self.live.get(item.request_id) is item:
+                if self.ledger is not None:
+                    digest = hashlib.sha256(encode(receipt).encode()).hexdigest()
+                    with self.ledger.transaction() as db:
+                        changed = db.execute("""UPDATE codex_approval_intents SET router_receipt_digest=?
+                            WHERE approval_id=? AND session=? AND request_digest=?""",
+                            (digest,item.id,self.session,item.digest)).rowcount
+                        require(changed==1,503,"native_approval_journal_unconfirmed")
                 del self.live[item.request_id]
 
     def advance(self,worker,item):
@@ -188,7 +215,7 @@ class CodexApprovals:
                         return
                     try:
                         self.advance(worker,item)
-                    except (Fault,OSError):
+                    except (Fault,OSError,SQLiteError):
                         # Keep the original request available for lookup; the native response is never resent.
                         continue
         relay,deadlines = Thread(target=pump,daemon=True),Thread(target=enforce_deadlines,daemon=True)

@@ -1206,14 +1206,15 @@ class CodexAppServer(unittest.TestCase):
         rpc = self.enterContext(isolated_app_server(self.root,self.origin,
             ['model="gpt-5.5"','approval_policy="on-request"','sandbox_mode="read-only"']))
         session = rpc.request("thread/start",{"cwd":self.root,"ephemeral":False})["thread"]["id"]
-        host = AppServerHost(rpc,session,relay_command_approvals=True,relay_file_approvals=True)
+        adapter_path = root/"adapter.db"
+        host = AppServerHost(rpc,session,adapter_path,relay_command_approvals=True,relay_file_approvals=True)
         clock = Clock()
         host.approvals.clock = clock
         worker_token,operator_token,adapter_token = (guid() for _ in range(3))
         router = self.enterContext(running(serve_loopback(Orders(root/"router.db"),
                                          {worker_token:"worker/dev",operator_token:"approver/dev"})))
         worker_wire,operator = Client(router,worker_token),Client(router,operator_token)
-        worker = Worker(root/"worker.db","dev",worker_wire,HostAdapter(root/"adapter.db",host,session))
+        worker = Worker(root/"worker.db","dev",worker_wire,HostAdapter(adapter_path,host,session))
         worker.connect()
         endpoint = self.enterContext(running(WorkerService(worker).listen({adapter_token:"adapter/dev"},
                                                                   ("127.0.0.1",0),None)))
@@ -1221,6 +1222,8 @@ class CodexAppServer(unittest.TestCase):
         holding = {name:Event() for name in ("file","command")}
         release = {name:Event() for name in holding}
         releases = []
+        closure_persisted, return_closure = Event(), Event()
+        self.addCleanup(return_closure.set)
         registrations,closures = [],[]
         request = worker_wire.request
 
@@ -1242,6 +1245,8 @@ class CodexAppServer(unittest.TestCase):
             if method=="PUT" and path.endswith("/closed"):
                 closures.append(result)
                 if len(closures)==1:
+                    closure_persisted.set()
+                    return_closure.wait(8)
                     raise Fault(503,"isolated_deadline_closure_receipt_lost",True)
             return result
 
@@ -1281,6 +1286,11 @@ class CodexAppServer(unittest.TestCase):
             return next((row for row in operator.request("GET","approvals/dev")["items"]
                          if row["request"]["item_id"]==item and row["state"]==state),None)
 
+        def approval_intents():
+            with closing(sqlite3.connect(adapter_path)) as db:
+                db.row_factory = sqlite3.Row
+                return {row["item_id"]:dict(row) for row in db.execute("SELECT * FROM codex_approval_intents")}
+
         reports = {}
         for mode,item,prompt in [("file","trial-file-deadline","File approval fixture deadline"),
                                  ("command","trial-approval-deadline","Approval fixture deadline")]:
@@ -1296,6 +1306,10 @@ class CodexAppServer(unittest.TestCase):
             if mode=="file":
                 self.assertFalse(operator.request("GET","approvals/dev")["items"])
                 self.assertEqual(operator.frames(0),[])
+                intent = approval_intents()[item]
+                self.assertEqual((intent["session"],intent["turn_id"]),(session,native["params"]["turnId"]))
+                self.assertIsNone(intent["router_receipt_digest"])
+                self.assertNotIn(str(target).encode(),adapter_path.read_bytes())
             start = time.monotonic()
             clock.advance(TTL_SECONDS)
             self.assertEqual(terminals.get(timeout=3),(native["params"]["turnId"],"interrupted"))
@@ -1312,11 +1326,18 @@ class CodexAppServer(unittest.TestCase):
                              "source":closed["attempted_response"]["source"],"native_outcome":"interrupted",
                              "interrupted_in_seconds_after_deadline":interrupted_in}
             if mode=="file":
+                self.assertTrue(closure_persisted.wait(3))
+                self.assertEqual(intent["approval_id"],closed["approval_id"])
+                self.assertIsNone(approval_intents()[item]["router_receipt_digest"])
+                return_closure.set()
                 wait(lambda:len(closures)>=2)
                 self.assertEqual(closures[:2],[closed,closed])
                 self.assertEqual(registrations.count(item),1)
                 self.assertEqual(callback.request("POST","worker/approvals/"+closed["approval_id"],closed["request"]),closed)
                 self.assertEqual(operator.frames(0),[])
+            closure_digest = wait(lambda:approval_intents()[item]["router_receipt_digest"])
+            self.assertEqual(closure_digest,hashlib.sha256(encode(closed).encode()).hexdigest())
+            reports[mode]["adapter_closure_receipt_digest"] = closure_digest
 
         self.assertEqual(len(releases),1)
         self.assertEqual(releases[0]["decision"],"accept")
@@ -1328,8 +1349,12 @@ class CodexAppServer(unittest.TestCase):
         self.assertFalse(any(item["type"] in ("commandExecution","fileChange") for turn in turns for item in turn["items"]))
         self.evidence = {"session_id":session,"requests":reports,"late_accept_recorded_but_not_sent":True,
                          "file_intake_not_registered_and_no_late_notice":True,"first_closure_attempts":2,
+                         "adapter_pending_before_first_intake_and_after_lost_closure_ack":True,
+                         "adapter_ledger_excludes_raw_diff_and_path":True,
                          "on_time_native_replies":decisions,"file_sha256_after":hashlib.sha256(target.read_bytes()).hexdigest(),
                          "boundary":"Actual App Server, HTTP Router and Worker, local model. Router transport blocked with gates and native ten-minute clock advanced."}
+        if output := os.environ.get("MOWULINK_CODEX_APPROVAL_EVIDENCE"):
+            Path(output).write_text(json.dumps(self.evidence,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
 
     def test_resume_catalog_uses_only_current_app_server_workspace_without_loading_history(self):
         root = Path(self.root)

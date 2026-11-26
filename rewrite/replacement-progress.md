@@ -4,6 +4,8 @@
 
 ## 检查点与证据
 
+离线换绑会核对 Codex 适配器已收到的原生审批。隔离实测，原生文件审批已到、Router 尚未收到登记时，适配器持久保存待核记录。重开账本仍拒绝生成换绑副本。Router 已关闭但回执丢失时记录继续待核，按原号查回才消除。独立 App Server、Worker 和 Router 实跑，模型与断联由本地测试驱动。快照换绑的夹具复验另查了输出中无命令目录。复跑 `python3 -B -m unittest -v rewrite.test_state_bundle.Bundle.test_handoff_refuses_codex_approval_never_registered_with_router rewrite.test_codex_app_server.CodexAppServer.test_native_approval_deadline_survives_lost_intake_and_late_router_accept`。[断联证据](evidence/codex-approval-router-outage.json)
+
 DSH 的普通 Bash 审批支持省略 `workdir` 和相对目录。旧版 `b88116e7cfd68765f41ecf098c1724ed43a1af35` 的同一默认目录请求在六秒内未到 Router。新版按同一次原生准备、审批与执行定位，保存原参数与宿主解析的绝对目录。连续六轮核实默认、相对和带符号链接父级的真实 `pwd` 输出。等批准期间换目录，原生拒绝执行。审批已允许但进执行前换目录，原生回合留下一次工具错误，未启动 Bash。将目录绑定到本次调用后，再改会话目录时实际命令仍在获准目录内。无法核实的目录仍走宿主审批。实跑 DSH AgentLoop、ApprovalService 与 Bash，模型、审批人与目录竞态由隔离测试提供。[原生证据](evidence/dsh-approval-native-working-directory.json) · [复跑](README.md#独立宿主命令审批)
 
 macOS 全量通过 261 项，Linux arm64 通过 177 项、跳过 84 项。以 `1d8cce41f11be4b64af26d7dfc258ab716ffd5ce` 构建 234 文件独立包，SHA-256 为 `ad53a5c92485c8eff4d4383e2ccc5c33f4d89559c82ee74e78e42d49a1e3fd96`。安装目录复跑 DSH 原生审批、断联恢复、Router 服务与发布包共 15 项，逐文件摘要一致。
@@ -99,6 +101,8 @@ Router 以 `--drain-dispatch` 启动时冻结新的派发号。隔离试运行�
 四个场景连续通过 8 轮。macOS 全量通过 235 项，Linux arm64 通过 158 项、跳过 77 项。从 `9c001418b4e7df465c8b525b327cd731d574492a` 构建 207 文件的独立包，SHA-256 为 `44364c63afe6defe0aa074f78a82303300030725aaca9bf714322406f64113da`。安装目录复跑原生题和平台卡共 15 项，逐文件摘要再次核对一致。关闭前台题转接时，用默认设置演练同机隔离 HTTPS 的分步升级与回退。三个阶段各保留一条原生收件，原回执 `701d3aa6-3289-4964-8cd8-09f21bd264fa` 一致。复跑 `python3 -B -m rewrite.release_check --repository . --component worker-pair --previous a7f14002fb3be1d6a940367c31912ed35144ffa5 --new 9c001418b4e7df465c8b525b327cd731d574492a`。
 
 本机 DSH SDK 的 `dsh-experimental-worktree` 随附说明和实现只在宿主归档后尝试移除干净的专属工作树。该删除会保留有订阅会话或改动的工作树，也不查询在其中运行的进程。读写工位的旧派发仍需专属运行环境和可核验的停止与清理能力，继续标为待核。
+
+用本机 DSH SDK 的 `dsh-subprocess-local` 在临时 Git 工作树启动前台命令并落下实际目录标记。普通 `git worktree remove -- <目录>` 已成功，SDK 托管的子进程仍未退出。直到停掉这次测试独占的 subprocess provider，SDK 才观察到退出。验证只覆盖 Git 移除和独占 provider 的行为。日常 DSH provider 可能同时承载别的会话，仍缺分配到单一旧派发的进程与工作树归属凭据。
 
 启用只读模式的独立 DSH SDK 工位已经能用真实原生记录确认原派发停止并清理。取消或转派到达后，宿主撤下同一派发的排队更新，中止确切的原回合，另一个排队的私聊仍收到一次。Worker 取得清理证明后，由原生 `worker_report` 经 W04 清除旧派发。已转派的工单仍由新派发持有。Router 实际记账后丢回执，Worker 重开沿用原派发查回，清理不会生成正式成果。通用未启用模式和出现未核实工具的回合仍待核，测试写工具被原生执行前的限制挡下，文件未产生。宿主为实际安装的 DSH SDK，模型为脚本驱动。读写工作区的清理仍待实测。[清理与回执证据](evidence/dsh-read-only-cleanup.json) · [待核反例](evidence/dsh-native-cleanup-refusal.json)
 

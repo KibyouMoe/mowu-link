@@ -15,6 +15,7 @@ from .devloop import FixtureHost
 from .feishu_inbound import Inbound
 from .feishu_output import Views
 from .hermes import HermesAdapter
+from .codex_approvals import CodexApprovals
 from .codex_thread_preparation import SCHEMA as CODEX_PREPARATION_SCHEMA
 from .managed_sessions import FAMILY_SCHEMA, derive_callback, read_enrollment, token_digest, write_enrollment
 from .orders import Orders
@@ -475,6 +476,29 @@ class Bundle(unittest.TestCase):
                 self.assertIn("platform_display_ledger_mismatch",worker["issues"])
                 self.assertFalse(worker["native_session_ledger_clear"])
                 self.assertNotIn("Different display",encode(audited))
+
+    def test_handoff_refuses_codex_approval_never_registered_with_router(self):
+        session = self.native.session
+        with self.stack(self.sources,pin_session=True) as (_manager,worker,_source,_mail,_platform,_views):
+            worker.connect()
+            approvals = CodexApprovals(None,session,adapter_db=self.sources["agent:oguri"])
+            request = {"session":session,"turn_id":"original-turn","item_id":"original-item",
+                       "command":"pwd","cwd":"/private-sandbox","environment_id":None,"decisions":["cancel"]}
+            approvals.remember(41,request)
+            approvals.remember(41,request)
+        # Reopening the adapter does not recover a live request or discard its pending identity.
+        reopened = CodexApprovals(None,session,adapter_db=self.sources["agent:oguri"])
+        self.assertFalse(reopened.live)
+        seal = capture(self.sources,self.revision,self.snapshot)["manifest_sha256"]
+        worker, = audit_handoff(self.snapshot,seal)["workers"]
+        self.assertEqual(worker["native_session_pending"]["router_approvals"],0)
+        self.assertEqual(worker["native_session_pending"]["codex_approval_closures"],1)
+        self.assertFalse(worker["native_session_ledger_clear"])
+        with self.assertRaisesRegex(ValueError,"codex_approval_closures"):
+            stage_native_handoff(self.snapshot,seal,"oguri",session,"next",self.dest)
+        self.assertFalse(self.dest.exists())
+        db = self.snapshot/filename("agent:oguri")
+        self.assertNotIn(b"/private-sandbox",db.read_bytes())
 
     def test_handoff_refuses_to_copy_an_unconfirmed_native_thread_preparation(self):
         with self.stack(self.sources) as (_manager,worker,_source,_mail,_platform,_views):

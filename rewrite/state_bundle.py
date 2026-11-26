@@ -49,6 +49,8 @@ OPTIONAL_AGENT_PENDING = {
     "dsh_public_events": ({"dsh_public_outbox"},"SELECT COUNT(*) FROM dsh_public_outbox WHERE ack IS NULL"),
     "dsh_approval_closures": ({"dsh_approvals"},"SELECT COUNT(*) FROM dsh_approvals WHERE closure IS NULL"),
     "dsh_session_preparations": ({"dsh_thread_preparations"},"SELECT COUNT(*) FROM dsh_thread_preparations WHERE state<>'prepared'"),
+    "codex_approval_closures": ({"codex_approval_intents"},
+                              "SELECT COUNT(*) FROM codex_approval_intents WHERE router_receipt_digest IS NULL"),
     "codex_public_events": ({"codex_display_live"},"SELECT COUNT(*) FROM codex_display_live WHERE sent=0"),
     "codex_public_turns": ({"codex_display_turns"},"SELECT COUNT(*) FROM codex_display_turns WHERE sent=0"),
     "codex_session_preparations": ({"codex_thread_preparations"},

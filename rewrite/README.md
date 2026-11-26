@@ -268,6 +268,8 @@ python3 -m rewrite.service approvals --connection "$APPROVER_CONNECTION" --worke
 
 可取消的 Codex 请求从收到原生审批起使用本地十分钟时限。即使中间请求没有响应，适配器也按原生请求号取消一次，超时后收到的 Router 决定不会送给宿主。收到原生关闭凭据后，恢复连接便按同一审批号写入 `native_deadline`。Router 原有的操作人决定仍可查询。首次登记未到达时，Router 直接补记已关闭记录，补记和迟到登记均不会发审批通知。缺少原生关闭凭据保持待核。分步升级先更新 Router 和 Worker，再更新 Codex 适配器，使三段都能接收这种关闭记录。复跑 `python3 -B -m unittest -v rewrite.test_service.Service.test_native_deadline_closes_unregistered_request_without_opening_approval rewrite.test_codex_app_server.CodexAppServer.test_native_approval_deadline_survives_lost_intake_and_late_router_accept`。[断联实测](evidence/codex-approval-router-outage.json)
 
+启用 Codex 命令或文件审批的适配器在向 Worker 登记前，把审批号、原生会话、回合、条目与请求摘要写入自己的数据库。只有按原号核对 Router 的关闭回执后才清除待核状态。命令、路径、差异和决定正文不写进这份适配器账本。快照能看见 Router 未收到的审批。进程重开后，若原生关闭或 Router 回执不可核实，保留原会话和账本用于对账。旧版未留记录的审批须在原宿主确认。[离线换绑](router-rehearsal.md#重做版五组件的离线恢复)
+
 DSH 在独立宿主插件的参数中显式配置 `relay_command_approvals: true`，沿用同一个审批 CLI。适配器只转接绑定 Agent 的原生 `bash` 请求，按同一原生回合找到完整工具参数。普通请求省略 `workdir` 或传相对路径时，适配器用宿主的当前工作目录和文件系统解析出实际绝对路径。审批记录保存该目录及原工具参数。转回允许前与执行前都重查目录。在原生执行管线中，只把获准的绝对路径传给这一次 Bash。目录变更使重查失败时该命令不执行。目录无法核实，或未取得同一次原生执行上下文时，交给宿主原生审批。原生沙箱策略独立执行。复跑 `python3 -B -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_dsh_approval_pins_implicit_and_relative_native_working_directory`。[原生目录实测](evidence/dsh-approval-native-working-directory.json)
 
 DSH 适配器先保留原请求和单次决定的发送意图。只有在原会话的持久历史读到同号 `approval/asked` 与 `approval/decided`，才确认请求关闭。重开时使用原适配器库、原 DSH 会话和原工位，待核关闭可按该记录补回。测试执行的允许命令只有隔离工作目录内的 `pwd`。
