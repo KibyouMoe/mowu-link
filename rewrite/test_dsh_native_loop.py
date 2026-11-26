@@ -2981,13 +2981,20 @@ exec {docker} "$@"
                 "previous_processes":["Router","Worker","DSH adapter","DSH host"]}
 
     def test_offline_handoff_waits_for_dsh_workspace_after_w04_release(self):
+        self.offline_workspace_handoff(use_tls=False)
+
+    def test_offline_handoff_refuses_a_live_dsh_tls_workspace_host(self):
+        self.offline_workspace_handoff(use_tls=True)
+
+    def offline_workspace_handoff(self,*,use_tls):
         image,cli = self.container_engine()
-        docker,_,socket = cli
+        docker,_,engine_socket = cli
         session = "dsh-offline-workspace-handoff"
-        directory,loop,service,_ = self.goal_worker(session)
+        directory,loop,service,_ = self.goal_worker(session,use_tls=use_tls)
         runtime = Path(directory)
+        link = LocalLink(runtime,use_tls=use_tls)
         (runtime/"assignment-container.json").write_text(encode(
-            {"docker":docker,"socket":socket.removeprefix("unix://"),"image":image}),encoding="utf-8")
+            {"docker":docker,"socket":engine_socket.removeprefix("unix://"),"image":image}),encoding="utf-8")
         self.addCleanup(self.clean_fixture_containers,runtime,session,cli)
         loop.adapter.expected_session = session
         worker = Worker(loop.worker.db.path,"oguri",loop.wire,loop.adapter,clock=service.clock)
@@ -3002,7 +3009,8 @@ exec {docker} "$@"
                 raise Fault(503,"fixture_workspace_handoff_ack_lost",True)
             return result
         loop.wire.request = lost_report_ack
-        with tool_listener(runtime,loop.adapter,client), self.start_native(runtime,session,"cleanup-container-export") as native:
+        with tool_listener(runtime,loop.adapter,client,link=link), self.start_native(
+                runtime,session,"cleanup-container-export",use_tls=use_tls) as native:
             service.step()
             self.assertEqual(service.host_session,session)
             self.assertFalse(loop.adapter.handoff_activity().get("workspace_pending"))
@@ -3072,8 +3080,8 @@ exec {docker} "$@"
             rollback(snapshot,sealed,trial,rollback_dir,dsh_runtimes=runtimes)
         self.assertFalse(rollback_dir.exists())
 
-        with tool_listener(runtime,loop.adapter,client), self.start_native(
-                runtime,session,"cleanup-container-recovery-reopen") as resumed:
+        with tool_listener(runtime,loop.adapter,client,link=link), self.start_native(
+                runtime,session,"cleanup-container-recovery-reopen",use_tls=use_tls) as resumed:
             deadline = time.monotonic()+8
             while json.loads(journal.read_bytes())["phase"]!="sealed" and time.monotonic()<deadline:
                 time.sleep(.05)
@@ -3082,6 +3090,19 @@ exec {docker} "$@"
             self.assertEqual((replay["inputs"],replay["modelRequests"]),(run["inputs"],[]))
             running_audit, = audit_handoff(snapshot,sealed,dsh_runtimes=runtimes)["workers"]
             self.assertEqual(running_audit["issues"],["dsh_workspace_host_still_running"])
+            if use_tls:
+                with self.assertRaisesRegex(AssertionError,"dsh_workspace_writer_already_running"), \
+                     self.start_native(runtime,"another-isolated-workspace","cleanup-container-export",use_tls=True):
+                    self.fail("another host acquired the DSH workspace journal")
+
+                config = runtime/"dsh-link.json"
+                hidden = config.with_suffix(".away")
+                config.rename(hidden)
+                try:
+                    without_endpoint, = audit_handoff(snapshot,sealed,dsh_runtimes=runtimes)["workers"]
+                    self.assertEqual(without_endpoint["issues"],["dsh_workspace_host_still_running"])
+                finally:
+                    hidden.rename(config)
             with self.assertRaisesRegex(ValueError,"dsh_workspace_host_still_running"):
                 stage_native_handoff(snapshot,sealed,"oguri",session,"other-session",target,dsh_runtimes=runtimes)
             self.assertFalse(target.exists())
@@ -3097,6 +3118,20 @@ exec {docker} "$@"
             self.assertEqual(invalid["issues"],["dsh_workspace_journal_unconfirmed"])
         finally:
             bad_record.unlink()
+        if use_tls:
+            # The previous TLS implementation had no writer lock. A live listener still denies cutover.
+            with closing(socket.socket()) as listener:
+                listener.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+                listener.bind(("127.0.0.1",link.ports["host_port"]))
+                listener.listen()
+                legacy, = audit_handoff(snapshot,sealed,dsh_runtimes=runtimes)["workers"]
+                self.assertEqual(legacy["issues"],["dsh_workspace_host_still_running"])
+            config.chmod(0o644)
+            try:
+                public, = audit_handoff(snapshot,sealed,dsh_runtimes=runtimes)["workers"]
+                self.assertEqual(public["issues"],["dsh_workspace_journal_unconfirmed"])
+            finally:
+                config.chmod(0o600)
         after, = audit_handoff(snapshot,sealed,dsh_runtimes=runtimes)["workers"]
         self.assertTrue(after["native_session_ledger_clear"],after)
         self.assertEqual(after["dsh_workspace_audit"]["pending"],[])
@@ -3113,14 +3148,16 @@ exec {docker} "$@"
             self.assertEqual(db.execute("SELECT session FROM native_binding WHERE slot=1").fetchone()[0],"other-session")
         self.assertEqual(client.request("POST","worker/workspace-state",scope),{**scope,"state":"released"})
         previous = None
-        if previous_release := os.environ.get("MOWULINK_DSH_TEST_PREVIOUS_RELEASE"):
+        if not use_tls and (previous_release := os.environ.get("MOWULINK_DSH_TEST_PREVIOUS_RELEASE")):
             previous = self.previous_dsh_after_rollback(Path(previous_release),loop.root,runtime,session,rolled_back,replay,job)
-        if output := os.environ.get("MOWULINK_DSH_OFFLINE_AUDIT_EVIDENCE"):
+        evidence_name = "MOWULINK_DSH_TLS_OFFLINE_AUDIT_EVIDENCE" if use_tls else "MOWULINK_DSH_OFFLINE_AUDIT_EVIDENCE"
+        if output := os.environ.get(evidence_name):
             observations = {"session":session,"task_id":task,"assignment_id":aid,"container_id":lease["container_id"],
                 "w04_state_before_capture":job["task"]["state"],"snapshot_format":3,"snapshot_sha256":sealed,
                 "missing_journal":from_db["issues"][0],"wrong_runtime":wrong["issues"][0],
                 "active_journal":before["dsh_workspace_audit"],"invalid_record":invalid["issues"][0],
                 "running_host":running_audit["issues"][0],
+                "native_link":"IPv4 loopback with mutual TLS" if use_tls else "Unix socket",
                 "sealed_journal":after["dsh_workspace_audit"],"staged_session":handoff["expected_session"],
                 "receipt_pending_before_reaper":before["native_session_pending"]["report_receipts"],
                 "held_before_reaper":before["native_session_pending"]["held_assignments"],
@@ -3129,6 +3166,8 @@ exec {docker} "$@"
                     "refusals":[from_db["issues"][0],wrong["issues"][0],before["issues"][0],running_audit["issues"][0]],
                     "snapshot_sha256_after_drain":sealed,"components":sorted(rolled_back),"retained_session":session},
                 **({"previous_release":previous} if previous else {}),
+                **({"second_native_writer_rejected":True,"live_writer_proof_without_endpoint_config":True,
+                    "legacy_listener_without_writer_rejected":True,"public_endpoint_config_rejected":True} if use_tls else {}),
                 "scope":"Installed DSH AgentLoop, isolated Linux Docker and Router/Worker HTTP; scripted local model."}
             Path(output).write_text(json.dumps(observations,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
 

@@ -1,15 +1,17 @@
 """Offline observation of the original DSH assignment journal. No Docker calls."""
-from contextlib import closing
+from contextlib import ExitStack, closing
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import socket
+import sqlite3
 import stat
 
+from .dsh_local_link import link_ports
 from .messages import valid_guid
-from .storage import encode, require
+from .storage import Fault, StateWriterBusy, encode, require, state_writer
 
 
 IDENTITY_TABLE = "dsh_workspace_ledger"
@@ -92,21 +94,34 @@ def scan(ledger):
     return fingerprints,pending
 
 
-def host_stopped(directory):
-    endpoint = Path(directory)/"dsh.sock"
-    try:
-        info = endpoint.lstat()
-    except FileNotFoundError:
-        return True
-    if not stat.S_ISSOCK(info.st_mode) or info.st_uid!=os.getuid():
-        raise ValueError("invalid private DSH host endpoint")
-    with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as client:
+def listener_stopped(family,address):
+    with socket.socket(family,socket.SOCK_STREAM) as client:
         client.settimeout(.25)
         try:
-            client.connect(str(endpoint))
+            client.connect(address)
         except (ConnectionRefusedError,FileNotFoundError):
             return True
     return False
+
+
+def host_stopped(directory):
+    root = Path(directory)
+    endpoint = root/"dsh.sock"
+    try:
+        info = endpoint.lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        if not stat.S_ISSOCK(info.st_mode) or info.st_uid!=os.getuid():
+            raise ValueError("invalid private DSH host endpoint")
+        if not listener_stopped(socket.AF_UNIX,str(endpoint)):
+            return False
+    try:
+        port = link_ports(root)["host_port"]
+    except FileNotFoundError:
+        return True
+    # A successful TCP connection suffices to deny the offline operation.
+    return listener_stopped(socket.AF_INET,("127.0.0.1",port))
 
 
 def inspect(directory,expected):
@@ -119,12 +134,28 @@ def inspect(directory,expected):
         ledger,identity = journal(directory)
         if expected!={identity}:
             return None,"dsh_workspace_journal_mismatch"
-        if not host_stopped(directory):
-            return None,"dsh_workspace_host_still_running"
-        first,pending = scan(ledger)
-        second,_ = scan(ledger)
-        if not host_stopped(directory) or journal(directory)!=(ledger,identity) or first!=second:
-            return None,"dsh_workspace_journal_changed"
-    except (OSError,ValueError,TypeError):
+        with ExitStack() as stack:
+            writer = Path(directory)/"dsh-workspace"
+            try:
+                stack.enter_context(state_writer(writer,existing=True))
+                guarded = True
+            except FileNotFoundError:
+                guarded = False
+            if not host_stopped(directory):
+                return None,"dsh_workspace_host_still_running"
+            first,pending = scan(ledger)
+            second,_ = scan(ledger)
+            if not guarded:
+                try:
+                    writer.with_suffix(".writer").lstat()
+                except FileNotFoundError:
+                    pass
+                else:
+                    return None,"dsh_workspace_journal_changed"
+            if not host_stopped(directory) or journal(directory)!=(ledger,identity) or first!=second:
+                return None,"dsh_workspace_journal_changed"
+    except StateWriterBusy:
+        return None,"dsh_workspace_host_still_running"
+    except (Fault,OSError,sqlite3.Error,ValueError,TypeError):
         return None,"dsh_workspace_journal_unconfirmed"
     return {"fingerprint":hashlib.sha256(encode(first).encode()).hexdigest(),"pending":pending},None

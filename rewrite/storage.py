@@ -46,11 +46,13 @@ class StateWriterBusy(RuntimeError):
 
 
 @contextmanager
-def state_writer(state_file):
+def state_writer(state_file, *, existing=False):
     """Coordinate a process lifetime with other writers and offline snapshots."""
     path = Path(state_file).resolve()
     lock = path.with_name(path.name+".writer")
-    flags = os.O_CREAT | os.O_RDWR | getattr(os,"O_NOFOLLOW",0)
+    flags = os.O_RDWR | getattr(os,"O_NOFOLLOW",0)
+    if not existing:
+        flags |= os.O_CREAT
     with os.fdopen(os.open(lock,flags,0o600),"rb") as guard:
         info = os.fstat(guard.fileno())
         if not stat.S_ISREG(info.st_mode) or (os.name=="posix" and

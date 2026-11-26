@@ -48,6 +48,22 @@ def check_private_stream(info,stream):
     require(private and os.path.samestat(info, opened),403,"private_dsh_link_required")
 
 
+def link_ports(directory):
+    file = directory / "dsh-link.json"
+    info = file.lstat()
+    require(stat.S_ISREG(info.st_mode) and not getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT,
+            403, "private_dsh_link_required")
+    with file.open("rb") as stream:
+        check_private_stream(info,stream)
+        cfg = json.load(stream)
+    require(isinstance(cfg, dict) and set(cfg) == {"host_port", "worker_port"}
+            and type(cfg["host_port"]) is int and 1024 <= cfg["host_port"] <= 65535
+            and type(cfg["worker_port"]) is int
+            and (cfg["worker_port"] == 0 or 1024 <= cfg["worker_port"] <= 65535)
+            and cfg["host_port"] != cfg["worker_port"], 422, "invalid_dsh_local_ports")
+    return cfg
+
+
 class UnixConnection(HTTPConnection):
     def __init__(self, path):
         super().__init__("localhost", timeout=8)
@@ -66,12 +82,7 @@ class LocalLink:
         self.ports = None
         if not use_tls:
             return
-        cfg = json.loads(private_file(directory / "dsh-link.json").read_text(encoding="utf-8"))
-        require(isinstance(cfg, dict) and set(cfg) == {"host_port", "worker_port"}
-                and type(cfg["host_port"]) is int and 1024 <= cfg["host_port"] <= 65535
-                and type(cfg["worker_port"]) is int
-                and (cfg["worker_port"] == 0 or 1024 <= cfg["worker_port"] <= 65535)
-                and cfg["host_port"] != cfg["worker_port"], 422, "invalid_dsh_local_ports")
+        cfg = link_ports(directory)
         cert = private_file(directory / "dsh-link.crt")
         key = private_file(directory / "dsh-link.key")
         self.client = ssl.create_default_context(cafile=cert)

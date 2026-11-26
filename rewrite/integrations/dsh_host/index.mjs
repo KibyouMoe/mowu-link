@@ -7,6 +7,7 @@ import { baseline, displayImage, nextDisplay } from './display.mjs';
 import { changeModel, modelView } from './model-view.mjs';
 import { changeGoal, goalView } from './goal-view.mjs';
 import { compaction } from './compaction.mjs';
+import {holdWorkspaceWriter} from './workspace-writer.mjs';
 import { foregroundRecords, installForegroundQuestions, questionRequest, questionStateFile,
   sqliteQuestionMarks } from './questions.mjs';
 import { browseSessions, catalogSessions } from './catalog.mjs';
@@ -325,7 +326,7 @@ async function workspaceState(notify,scope) {
   return result.state;
 }
 
-function watchWorkspaceReleases(ctx,port,notify) {
+function watchWorkspaceReleases(ctx,port,notify,workspaceWriter) {
   const session = port.agent.session.id;
   ctx.effect(()=>{
     let stopped = false;
@@ -335,10 +336,11 @@ function watchWorkspaceReleases(ctx,port,notify) {
         for (const assignment of port.workspace.pending()) {
           if (stopped) break;
           try {
-            if (await workspaceState(notify,{session,...assignment})==='released') {
-              if (stopped) break;
-              await port.workspace.seal(assignment.task_id,assignment.assignment_id);
-            }
+            await workspaceWriter.run(async ()=>{
+              if (await workspaceState(notify,{session,...assignment})==='released' && !stopped) {
+                await port.workspace.seal(assignment.task_id,assignment.assignment_id);
+              }
+            });
           } catch { /* Unconfirmed release stays in the durable workspace journal. */ }
         }
       } catch { /* Leave the journal intact if it cannot be read. */ }
@@ -372,7 +374,7 @@ async function inspectColdSession(ctx,session) {
   check(phase!=='active','native_cold_goal_active');
 }
 
-function installBoundTools(ctx,port,directory,relay_command_approvals,link) {
+function installBoundTools(ctx,port,directory,relay_command_approvals,link,workspaceWriter) {
   const notify = (body,route='/tool',bytes=null)=>callback(directory,body,route,bytes,link);
   if (relay_command_approvals) {
     installCommandApprovals(ctx,port.agent,()=>ownEvents(ctx,port.agent),(route,body)=>notify(body,route));
@@ -391,11 +393,14 @@ function installBoundTools(ctx,port,directory,relay_command_approvals,link) {
   for (const tool of available) {
     const unregister = port.agent.ctx.get('tools').register({name:tool.name,description:tool.description,
       parameters:tool.inputSchema,output:{schema:{type:'object'},render:(_args,value)=>[{type:'text',text:JSON.stringify(value)}]},
-      execute:(args,exec) => port.tool(tool.name,args,exec,notify)});
+      execute:(args,exec) => {
+        const execute = ()=>port.tool(tool.name,args,exec,notify);
+        return workspaceWriter ? workspaceWriter.run(execute) : execute();
+      }});
     ctx.effect(() => unregister);
   }
   port.cleanup?.bindTools();
-  if (port.workspace) watchWorkspaceReleases(ctx,port,notify);
+  if (port.workspace) watchWorkspaceReleases(ctx,port,notify,workspaceWriter);
 }
 
 export async function apply(ctx, {session, directory, catalog_sessions=[], relay_command_approvals=false,
@@ -427,6 +432,8 @@ export async function apply(ctx, {session, directory, catalog_sessions=[], relay
       privateDir(managed_sessions_dir);
     }
   }
+  const workspaceWriter = assignment_container ? await holdWorkspaceWriter(directory) : null;
+  if (workspaceWriter) ctx.effect(() => workspaceWriter.close);
   const admissions = portableAdmissions ? await sqliteAdmissions(directory) : undefined;
   if (admissions) ctx.effect(() => admissions.close);
   const questionMarks = portableQuestions ? await sqliteQuestionMarks(directory) : local_tls ? null : undefined;
@@ -469,7 +476,7 @@ export async function apply(ctx, {session, directory, catalog_sessions=[], relay
     check(scope.selected?.session?.id===target && agents.get(target)===scope.selected,'native_agent_unavailable');
     check(scope.selected.status==='idle','native_cold_thread_unconfirmed');
     const opened = await bindHost(ctx,target,directory,catalog,scope.selected,read_only_assignments,relay_foreground_questions,assignment_container,localState);
-    installBoundTools(ctx,opened,directory,relay_command_approvals,link);
+    installBoundTools(ctx,opened,directory,relay_command_approvals,link,workspaceWriter);
     scope.port = opened;
   }
   async function activate(request,scope) {
@@ -485,7 +492,7 @@ export async function apply(ctx, {session, directory, catalog_sessions=[], relay
   }
   if (!resume_on_handoff && (!managed || !readdirSync(managed_sessions_dir).some(name=>name.endsWith('.json')))) {
     const port = await bindHost(ctx,session,directory,catalog,null,read_only_assignments,relay_foreground_questions,assignment_container,localState);
-    installBoundTools(ctx,port,directory,relay_command_approvals,link);
+    installBoundTools(ctx,port,directory,relay_command_approvals,link,workspaceWriter);
     scopes.get(session).port = port;
   }
   const server = link.server(async (req,res) => {
@@ -510,7 +517,7 @@ export async function apply(ctx, {session, directory, catalog_sessions=[], relay
       }
       else {
         check(port,'native_session_cold');
-        result = await port.handle(request);
+        result = workspaceWriter ? await workspaceWriter.run(()=>port.handle(request)) : await port.handle(request);
       }
       res.writeHead(200,{'Content-Type':'application/json'}).end(JSON.stringify(result));
     } catch (error) {
