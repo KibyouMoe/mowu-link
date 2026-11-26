@@ -23,3 +23,19 @@ python3 -m rewrite.cutover rollback --snapshot ./snapshot --trial ./trial --dest
 - 附件不完整、校验失败、有未结束日志或目标已存在时，命令报错。每个结果目录完整生成后才发布。
 - 新库尚未变化时可恢复到全新目录。回退后用实际旧 RouterStore 查归档理由与下一张待派单，逐字节对比附件并核源库摘要。
 - 新库已写入时，直接回退会丢掉新进展，命令会拒绝。保留新旧两边及新增事实，完成逐笔核对后再制定回放顺序。这种有新业务写入的回迁仍待演练。
+
+## 重做版五组件的离线恢复
+
+`python3 -m unittest -v rewrite.test_state_bundle` 在临时端口跑一张已持有的单、一个还没送到宿主的通知、一个待交原附件和一个等待投递的飞书私聊。关闭这套服务，将七个数据库作为一批备份，再从新目录重开。Worker 保留原会话和派发，宿主按原投递返回原凭据；平台沿用原卡游标，私聊只进入一次；Trigger 保留实例号，恢复后上传的 332800 字节与原件全部相同。两端原生记录和飞书云端由独立夹具保留，HTTP、SQLite 和恢复程序实跑。
+
+1. 在隔离工位停写并关闭服务，确认宿主保留了原生会话和输入记录。为这次演练列出要备份的每个数据库。跨机时先在各自的停写窗口取完整离线副本，所有工位停写区间须重叠。要从本机集中快照，源数据库使用 SQLite 的 DELETE 日志模式，待处理的 WAL 和事务需先由原程序正常关闭并检查。程序遇到占锁或活动日志会退出。
+2. 准备 `sources.json`，用 `角色:实例名` 指向每个数据库的绝对路径，例如 `"worker:oguri":"/staging/oguri/worker.db"`。角色为 router、worker、agent、hermes、trigger；使用独立宿主投递账本或飞书时，分别加入 hermes-host、feishu。每个 Worker 与对应 agent 的实例名相同；一个以上来源或工位各占一行。核对清单与各机器实际配置。凭据、连接配置和宿主登录态由各自所有者保管。缓存可由已备份的原附件重建。
+3. 执行下列命令，单独保管采集输出的源码版本、快照号和清单摘要。恢复目标必须是新目录。用返回的角色与文件映射重新连接隔离组件并验证原身份、持单、原生会话和未回执队列。
+
+```sh
+python3 -m rewrite.state_bundle capture --sources sources.json --revision "$SOURCE_SHA" --destination ./snapshot
+python3 -m rewrite.state_bundle verify --snapshot ./snapshot --manifest-sha256 "$MANIFEST_SHA256"
+python3 -m rewrite.state_bundle restore --snapshot ./snapshot --manifest-sha256 "$MANIFEST_SHA256" --destination ./recovered
+```
+
+快照只覆盖清单中的重做版状态，原生宿主和飞书已发生的外部动作不会随数据库回退。原生会话不可核、平台已过幂等时限或快照后存在新的业务写入时，应先隔离恢复目录，对照两端记录后再启用写者。旧系统的待派单转换仍用上节的旧 Router 演练流程。
