@@ -1,0 +1,46 @@
+{
+  "thread_id": "01a21729-9fd4-7711-bad4-7e0187fd1509",
+  "task_id": "02b8bb42-84af-4876-8cb4-604321bac22e",
+  "assignment_id": "9cf49970-88cc-4f00-84c4-0b9807a0002e",
+  "native_goal": {
+    "backend": "app-server",
+    "phase": "complete",
+    "objective": "Finish the isolated goal check",
+    "token_budget": null,
+    "created_at": 1795684933,
+    "updated_at": 1795684936,
+    "tokens_used": 48,
+    "time_used_seconds": 3
+  },
+  "dispatch_receipt": {
+    "delivery_id": "9738197d-1fa9-4d5e-9a30-d9e472f8dd53",
+    "digest": "44f317929f39ebcbe6a99d83f77fd1020ce93d0cef6606a4c4969370ac6d880a",
+    "native_id": "01a21729-a028-7743-9965-9b352441b86c",
+    "session": "01a21729-9fd4-7711-bad4-7e0187fd1509",
+    "turn_id": "01a21729-a01b-7a92-aa70-c5f08c03b2fa"
+  },
+  "continuation_turn_id": "01a21729-a037-7731-a4a0-1101319d67d0",
+  "continuation_report_rejected": true,
+  "status_before_probe": "working",
+  "probe_receipt": {
+    "delivery_id": "7166d268-fd74-4d90-aade-bb8c2ad3b898",
+    "digest": "c4437fb88226c95216b004f67c7f46070d62805379a67388700704d947a6abb2",
+    "native_id": "01a21729-ad42-7350-bd4d-fdf6f932bdd4",
+    "session": "01a21729-9fd4-7711-bad4-7e0187fd1509",
+    "turn_id": "01a21729-ad3d-7051-8527-142d1dc43a91"
+  },
+  "w04_calls": [
+    "native_fixture_0",
+    "native_fixture_1"
+  ],
+  "same_w04_receipt": {
+    "recorded": true,
+    "task_state": "completed_reported",
+    "release_assignment_id": "9cf49970-88cc-4f00-84c4-0b9807a0002e"
+  },
+  "notification_delivery_id": "a9b3b8cc-236a-434a-8cb2-ecda37e28efa",
+  "router_final": "completed_reported",
+  "native_input_count": 2,
+  "boundary": "Actual Codex App Server goal continuation and W04; scripted local model, test Router clock, no account",
+  "consecutive_runs": 12
+}

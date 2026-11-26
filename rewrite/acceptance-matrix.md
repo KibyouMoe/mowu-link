@@ -63,7 +63,7 @@
 | `bridge_message` | 平台私聊入口与宿主斜杠命令 | DSH 文图、已接命令与原队列有实测。独立 Codex App Server 的目录查询、图文、排队和普通回合中止已核。换绑、原生插话与真实 Feishu 仍待验。 |
 | `bridge_send_image` | 已授权的宿主图片事件，经 Worker 转送 | 真实 DSH 图像摘要及隔离平台顺序已核。需要独立飞书云端与 Codex 输出记录。 |
 | `bridge_publish_question` | 原生问题适配、Worker 题卡、平台回调 | DSH 计时题恢复有实测。Codex 原生题窗同步、主动独立题卡须分别核。 |
-| `bridge_register_current_task` | W03 接管及独立原生收件 | 原派发会话已固定，错绑零投递。实际 DSH 原生目标试跑通过，Codex 工单目标链待验。 |
+| `bridge_register_current_task` | W03 接管及独立原生收件 | 原派发会话已固定，错绑零投递。DSH 与独立 Codex App Server 均已核原生目标完成仍持原派发，收到正式询问后经 W04 报告。模型为本地脚本，日用环境另验。 |
 | `bridge_create_work_order` | 溪流侧的正式建单与授权 | 已有隔离 Hermes 管理入口。现役 Worker 直接建单的调用边界及是否保留需要定案。 |
 | `bridge_work_order_status` | 溪流侧正式工单查询、工位本地持单状态 | 已核管理查询和本地状态，Worker 直接按旧单查他端成果的兼容范围待定。 |
 | `submit_deliverable` | Agent `worker_report` 经 W04，待溪流验收 | 真实 DSH 与隔离 Codex App Server 的原生工具协议通过，模型为本地脚本。Desktop 工具注册和真实模型验收仍缺独立工位。 |

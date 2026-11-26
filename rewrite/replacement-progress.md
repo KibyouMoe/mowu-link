@@ -4,6 +4,10 @@
 
 ## 检查点与证据
 
+正式 Codex 长目标在独立 App Server 内连续 12 轮通过。模型夹具通过原生工具建目标，宿主自动续办并完成。续办回合虽与派单同源，但没有单独的原生输入，不能凭原单号代报。原派发继续持有，直到 Router 发出询问、得到新回合的原生收件后，模型经 W04 交回。两次调用回同一回执，仅一条待验通知。正式派单与询问各有一个原生输入。[长目标证据](evidence/codex-app-server-native-formal-goal.json)。复跑 `python3 -m unittest -v rewrite.test_codex_app_server.CodexAppServer.test_native_goal_finishing_keeps_original_assignment_until_bound_app_server_report`。
+
+同版 macOS 195 项全过。Linux arm64 通过 138 项，另 57 项因缺本机宿主跳过。Codex 仍使用无账号的独立原生 App Server、本地脚本模型及隔离 Router。
+
 运维 `worker-status` 可查看当前已核对的会话所声明的八项能力。隔离 TLS 中仅运维角色可查，空能力与断链未知可区分。实际 Codex App Server 报出目录能力。模拟两次查询之间换宿主会话，Worker 拒收混合观测，Router 的忙闲询问也没有生成样本。复跑 `python3 -m unittest -v rewrite.test_link_health rewrite.test_mainline rewrite.test_service`，30 项通过。
 
 Antigravity 官方 CLI 的桌面对话恢复属于克隆。Remote Control 可供人工访问原对话。两条路径均未找到 Worker 后台写回既有本地桌面会话和停止的依据。远程托管和 SDK 可作为独立宿主评估，原会话的验收仍待补。[接口对照](antigravity-compatibility.md)

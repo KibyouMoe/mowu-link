@@ -5,7 +5,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import hashlib
 import json
 from pathlib import Path
-from queue import Queue
+from queue import Empty, Queue
 import shutil
 import sqlite3
 import subprocess
@@ -36,11 +36,32 @@ from .wire import Client
 from .worker_service import WorkerService
 
 CODEX = Path("/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex")
+GOAL_FIXTURE = "Finish the isolated goal check"
 
 
 class Provider(BaseHTTPRequestHandler):
     def log_message(self,*args):
         pass
+
+    def formal_goal_item(self,run,payload,after,names,continuation):
+        def call(tool,cid,args):
+            return {"type":"function_call","id":"fc_"+cid,"name":tool,"call_id":cid,"arguments":encode(args)}
+
+        returned = {item.get("call_id"):item.get("output") for item in after
+                    if item.get("type")=="function_call_output"}
+        if not continuation:
+            run.setdefault("assignment",{name:payload[name] for name in ("task_id","assignment_id")})
+            run.setdefault("native_tools",sorted(set(names)&{"create_goal","get_goal","update_goal","worker_report"}))
+            if "fixture_goal_start" not in returned:
+                return call("create_goal","fixture_goal_start",{"objective":GOAL_FIXTURE})
+        elif "fixture_goal_unbound" not in returned:
+            return call("worker_report","fixture_goal_unbound",dict(run["assignment"],summary="Unbound goal report"))
+        elif "fixture_goal_finish" not in returned:
+            run["continuation_report_reply"] = returned["fixture_goal_unbound"]
+            return call("update_goal","fixture_goal_finish",{"status":"complete"})
+        return {"type":"message","id":"msg_goal_continued" if continuation else "msg_goal_started",
+                "role":"assistant","status":"completed","phase":"final_answer",
+                "content":[{"type":"output_text","text":"Native goal fixture step."}]}
 
     def do_POST(self):
         if self.path!="/v1/responses":
@@ -89,9 +110,14 @@ class Provider(BaseHTTPRequestHandler):
         prefix = []
         provision_action = getattr(self.server,"provision_calls_tool",False) and any(
             block.get("text")==SEED for block in latest)
+        formal_goal = getattr(self.server,"formal_goal",None)
+        goal_continuation = formal_goal is not None and any(
+            part.get("text","").startswith('<codex_internal_context source="goal">') for part in latest)
         if provision_action and not calls:
             item = {"type":"function_call","id":"fc_seed","name":"worker_report","call_id":"native_seed_fixture",
                     "arguments":"{}"}
+        elif formal_goal is not None and (goal_continuation or payload and payload.get("kind")=="task"):
+            item = self.formal_goal_item(formal_goal,payload,items[user_index+1:],names,goal_continuation)
         elif public_preview and not calls:
             commentary = {"id":"msg_preview_comment","type":"message","role":"assistant","status":"completed",
                           "phase":"commentary","content":[{"type":"output_text","text":"Checking the isolated workspace."}]}
@@ -461,6 +487,96 @@ class CodexAppServer(unittest.TestCase):
                          "report_status_before_review":details["task"]["state"],"account_present":False,
                          "scripted_provider_requests":provider.observed,
                          "boundary":"Bundled native Codex App Server using a scripted local HTTP model. Desktop and authenticated model not exercised."}
+
+    def test_native_goal_finishing_keeps_original_assignment_until_bound_app_server_report(self):
+        self.provider.formal_goal = run = {}
+        rpc = self.enterContext(isolated_app_server(self.root,self.origin,["features.goals=true"]))
+        started = rpc.request("thread/start",{"cwd":self.root,"ephemeral":False,"dynamicTools":[REPORT_TOOL]})["thread"]
+        sid = started["id"]
+        host = AppServerHost(rpc,sid)
+        host.session = sid
+        terminals = Queue()
+        clock = Clock()
+        loop = self.enterContext(Loop.isolated(clock,host_factory=lambda _path,_name:host))
+        token = guid()
+        service = WorkerService(loop.worker,clock)
+        url = self.enterContext(running(service.listen({token:"adapter/oguri"},("127.0.0.1",0),None)))
+        self.enterContext(worker_callbacks(host,Client(url,token),lambda:None,
+                                           notify_terminal=lambda tid,status:terminals.put((tid,status))))
+        tid = loop.hermes.create(guid(),"Native formal goal","Set the native goal and report on the original order","oguri")["task_id"]
+        loop.worker.connect()
+        loop.worker.poll()
+        clock.advance(10)
+        loop.worker.poll()
+        loop.worker.poll()
+        dispatch, = [frame for frame in loop.wire.frames(0) if frame["kind"]=="task.dispatch"]
+        aid = dispatch["payload"]["assignment_id"]
+
+        def await_terminal():
+            until = time.monotonic()+16
+            while time.monotonic()<until:
+                try:
+                    return terminals.get(timeout=.05)
+                except Empty:
+                    loop.worker.poll()
+            self.fail("isolated App Server did not finish the native turn")
+
+        first,first_status = await_terminal()
+        continuation,continuation_status = await_terminal()
+        self.assertEqual((first_status,continuation_status),("completed","completed"))
+        self.assertNotEqual(first,continuation)
+        self.assertTrue(loop.worker.process(dispatch))
+        initial = loop.adapter.lookup_delivery(dispatch["delivery_id"],{"kind":"task",**dispatch["payload"]},session=sid)
+        self.assertEqual((initial["session"],initial["turn_id"]),(sid,first))
+        goal = host.goal_view(sid)["goal"]
+        self.assertEqual((goal["phase"],goal["objective"],goal["token_budget"]),("complete",GOAL_FIXTURE,None))
+        self.assertEqual(run["native_tools"],["create_goal","get_goal","update_goal","worker_report"])
+        self.assertIn("native_turn_unconfirmed",encode(run["continuation_report_reply"]))
+        before = loop.hermes.inspect(tid)
+        self.assertEqual(before["task"]["state"],"working")
+        self.assertIsNone(before["last_report"])
+        self.assertEqual(loop.worker.hold(),{"held_task_id":tid,"held_assignment_id":aid})
+        self.assertEqual(loop.manager_wire.frames(0),[])
+        independent = host.read_turn(sid,continuation)
+        self.assertEqual(independent["rootTurnId"],first)
+        self.assertFalse(any(item["type"]=="userMessage" for item in independent["items"]))
+        self.assertFalse(any(event["kind"]=="native_input" for event in host.public_turn(sid,continuation)))
+
+        clock.advance(1)
+        loop.worker.poll()
+        loop.worker.poll()
+        clock.advance(10)
+        loop.worker.poll()
+        loop.worker.poll()
+        reported,reported_status = await_terminal()
+        self.assertEqual(reported_status,"completed")
+        self.assertNotIn(reported,(first,continuation))
+        probe, = [frame for frame in loop.wire.frames(0) if frame["kind"]=="task.probe"]
+        self.assertTrue(loop.worker.process(probe))
+        proof = loop.adapter.lookup_delivery(probe["delivery_id"],{"kind":"task_probe",**probe["payload"]},session=sid)
+        self.assertEqual((proof["session"],proof["turn_id"],probe["payload"]["assignment_id"]),(sid,reported,aid))
+        calls = [item for item in host.read_turn(sid,reported)["items"] if item["type"]=="dynamicToolCall"]
+        self.assertEqual(loop.worker.hold(),{"held_task_id":None,"held_assignment_id":None},calls)
+        w04_calls = [item["id"] for item in calls]
+        self.assertEqual(w04_calls,["native_fixture_0","native_fixture_1"])
+        expected = {"recorded":True,"task_state":"completed_reported","release_assignment_id":aid}
+        self.assertTrue(all(item["success"] and json.loads(item["contentItems"][0]["text"])==expected
+                            for item in calls),calls)
+        detail = loop.hermes.inspect(tid)
+        self.assertEqual(detail["task"]["state"],"completed_reported")
+        notify, = loop.manager_wire.frames(0)
+        self.assertEqual(notify["payload"]["task_id"],tid)
+        turns = host.thread(sid,include_turns=True)["turns"]
+        self.assertEqual([turn["id"] for turn in turns],[first,continuation,reported])
+        inputs = [item["clientId"] for turn in turns for item in turn["items"] if item["type"]=="userMessage"]
+        self.assertEqual(inputs,["mowulink-"+dispatch["delivery_id"],"mowulink-"+probe["delivery_id"]])
+        self.evidence = {"thread_id":sid,"task_id":tid,"assignment_id":aid,"native_goal":goal,
+                         "dispatch_receipt":initial,"continuation_turn_id":continuation,
+                         "continuation_report_rejected":True,"status_before_probe":before["task"]["state"],
+                         "probe_receipt":proof,"w04_calls":w04_calls,"same_w04_receipt":expected,
+                         "notification_delivery_id":notify["delivery_id"],
+                         "router_final":detail["task"]["state"],"native_input_count":len(inputs),
+                         "boundary":"Actual Codex App Server goal continuation and W04; scripted local model, test Router clock, no account"}
 
     def pending_native_task(self,rpc):
         clock = Clock()

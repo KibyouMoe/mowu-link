@@ -87,6 +87,8 @@ python3 -m rewrite.service codex-provision \
 
 省略 `--tool` 时只登记 `worker_report`，可指定的名称来自 `agent-toolset.json`。读取成功回执里的 `thread_id` 配置隔离 Worker。命令输出请求登记的工具名，是否能执行仍须经原生调用验证。若初始化失败而返回线程号或回合号，先查该原生会话，命令不会重发初始化消息。默认无登录的 profile 在创建线程前即返回 `codex_test_account_required`。初始化中出现工具或审批请求会终止，未给该请求授权。真实 App Server 与本地脚本模型已连续跑通 10 次冷启动、回读及后续 W04。[初始化与回执记录](evidence/codex-native-provision.json)。
 
+原生目标模式另有 12 轮隔离实测。原生工具创建并完成目标，宿主自动续办回合没有来自 Router 的独立输入，其报告请求被拒，工位继续持原派发。Router 正式询问后，带原派发收件凭据的新回合发出两次相同 W04，Router 只留一次报告和一次待验通知。[原生长目标回执](evidence/codex-app-server-native-formal-goal.json)
+
 适配器启动命令如下。
 
 ```sh
