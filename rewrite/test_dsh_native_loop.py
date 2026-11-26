@@ -9,6 +9,7 @@ import tempfile
 from threading import Thread
 import unittest
 
+from . import worker_commands
 from .devloop import Loop
 from .dsh_port import DshHost, tool_listener
 from .storage import guid
@@ -237,3 +238,66 @@ class NativeLoop(unittest.TestCase):
                              "rounds":after["rounds"],"turns":after["turns"],
                              "router_tasks":0,"router_notifications":0,"worker_hold":loop.worker.hold(),
                              "boundary":"Native DSH goal service and continuation driver; local scripted provider"}
+
+    def test_compact_reconciles_a_lost_start_reply_against_the_native_session(self):
+        session = "dsh-real-compact"
+        directory,loop,service,command = self.goal_worker(session)
+        with self.start_native(directory,session,"compact") as native:
+            service.step()
+            self.assertTrue(service.host_compaction)
+            command("om_empty","/compact")
+            original = loop.adapter.compact
+            def find_result(message_id):
+                with loop.worker.db.transaction() as db:
+                    row = db.execute("SELECT * FROM platform_compactions WHERE message_id=?",(message_id,)).fetchone()
+                    notices = db.execute("SELECT payload FROM display_events WHERE event_id=?",
+                                         ("compact-result-"+message_id,)).fetchall()
+                return dict(row),[json.loads(item[0])["text"] for item in notices]
+            worker_commands.advance_compact(service)
+            empty,_ = find_result("om_empty")
+            self.assertEqual(json.loads(empty["native_receipt"]),{"state":"empty"})
+            for index in range(3):
+                loop.worker.chat(guid(),f"Fixture paragraph {index}. "+"Many words to compress. "*120)
+                self.read_native(native,"read")
+            attempts = []
+            def lost(session,command_id,*,start):
+                result = original(session,command_id,start=start)
+                if start:
+                    attempts.append(command_id)
+                    raise ConnectionError("native compact started, reply lost")
+                return result
+            loop.adapter.compact = lost
+            receipt,text = command("om_compact","/compact")
+            self.assertIn("等待宿主",text)
+            in_progress = self.read_native(native,"first-compact")
+            self.assertTrue(in_progress["compacting"])
+            in_progress["adapter_busy"] = loop.adapter.busy()
+            self.assertTrue(in_progress["adapter_busy"])
+            worker_commands.advance_compact(service)
+            self.assertEqual(find_result("om_compact")[1],[])
+            self.assertEqual(command("om_compact","/compact")[0],receipt)
+            self.assertIn("仍待宿主确认",command("om_compact_again","/compact")[1])
+            observed = self.read_native(native,"finish-compact")
+            self.assertFalse(loop.adapter.busy())
+            recovered_service = WorkerService(loop.worker,service.clock)
+            recovered_service.step()
+            service.clock.advance(5)
+            recovered_service.step()
+            row,notices = find_result("om_compact")
+            self.assertEqual(len(notices),1)
+            self.assertIn("宿主已压缩",notices[0])
+            self.assertEqual(attempts,[row["command_id"]])
+            proof = json.loads(row["native_receipt"])
+            events = observed["compactEvents"]
+            self.assertEqual([entry["kind"] for entry in events],
+                             ["compaction/start","compaction/summary","user/message","compaction/end"])
+            self.assertEqual({entry["sourceCommandId"] for entry in events},set(attempts))
+            self.assertEqual({entry["compactionId"] for entry in events},{proof["compaction_id"]})
+            self.assertEqual(events[-1]["seq"],proof["end_seq"])
+            self.assertEqual([item["command"] for item in observed["modelRequests"]],["private"]*3+["compaction"])
+            self.assertEqual(len(observed["inputs"]),3)
+            self.assertEqual(loop.hermes.tasks()["items"],[])
+            self.evidence = {"session":session,"compaction":proof,"events":events,"result_count":len(notices),
+                             "start_attempts":len(attempts),"native_in_progress":in_progress,
+                             "native_model_requests":observed["modelRequests"],"router_tasks":0,
+                             "boundary":"Native DSH basic compaction engine and persisted surface, scripted local provider"}

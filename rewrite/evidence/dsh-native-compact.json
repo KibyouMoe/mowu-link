@@ -1,0 +1,71 @@
+{
+  "session": "dsh-real-compact",
+  "compaction": {
+    "compaction_id": "94861804-4706-44df-9d19-3493b73526c6",
+    "end_seq": 30,
+    "items": 5,
+    "state": "completed",
+    "summary_seq": 28,
+    "tokens": 2232
+  },
+  "events": [
+    {
+      "kind": "compaction/start",
+      "seq": 27,
+      "compactionId": "94861804-4706-44df-9d19-3493b73526c6",
+      "sourceCommandId": "mowulink-0f4075d96e6b1899c84340ed23059a9d4a26913c48d260c3cd4531b92308d335"
+    },
+    {
+      "kind": "compaction/summary",
+      "seq": 28,
+      "compactionId": "94861804-4706-44df-9d19-3493b73526c6",
+      "sourceCommandId": "mowulink-0f4075d96e6b1899c84340ed23059a9d4a26913c48d260c3cd4531b92308d335"
+    },
+    {
+      "kind": "user/message",
+      "seq": 29,
+      "compactionId": "94861804-4706-44df-9d19-3493b73526c6",
+      "sourceCommandId": "mowulink-0f4075d96e6b1899c84340ed23059a9d4a26913c48d260c3cd4531b92308d335"
+    },
+    {
+      "kind": "compaction/end",
+      "seq": 30,
+      "compactionId": "94861804-4706-44df-9d19-3493b73526c6",
+      "sourceCommandId": "mowulink-0f4075d96e6b1899c84340ed23059a9d4a26913c48d260c3cd4531b92308d335"
+    }
+  ],
+  "result_count": 1,
+  "start_attempts": 1,
+  "native_in_progress": {
+    "compacting": true,
+    "status": "idle",
+    "adapter_busy": true
+  },
+  "native_model_requests": [
+    {
+      "command": "private",
+      "provider": "fixture",
+      "model": "local",
+      "reasoningEffort": "low"
+    },
+    {
+      "command": "private",
+      "provider": "fixture",
+      "model": "local",
+      "reasoningEffort": "low"
+    },
+    {
+      "command": "private",
+      "provider": "fixture",
+      "model": "local",
+      "reasoningEffort": "low"
+    },
+    {
+      "command": "compaction",
+      "provider": "fixture",
+      "model": "local"
+    }
+  ],
+  "router_tasks": 0,
+  "boundary": "Native DSH basic compaction engine and persisted surface, scripted local provider"
+}

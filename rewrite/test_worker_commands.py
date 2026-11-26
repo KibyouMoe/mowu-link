@@ -1,4 +1,5 @@
 from .feishu_output import Views
+from . import worker_commands
 from .storage import Fault, guid
 from .test_feishu_inbound import PlatformCase
 from .test_feishu_output import PlatformFixture
@@ -85,3 +86,26 @@ class WorkerCommands(PlatformCase):
         self.assertEqual(self.inbound.deliver(mid),previous)
         self.assertEqual(len(self.loop.native.entries()),1)
         self.assertEqual(self.outputs(),[])
+
+    def test_compaction_with_no_native_receipt_times_out_without_a_second_start(self):
+        self.service.step()
+        self.command("om_unsupported_compact","/compact")
+        self.assertIn("敬请期待",self.outputs()[-1]["text"])
+        self.service.host_compaction = True
+        requests = []
+        def missing(session,command_id,*,start):
+            requests.append(start)
+            if start:
+                raise ConnectionError("unconfirmed")
+            return {"session":session,"command_id":command_id,"state":"missing"}
+        self.loop.adapter.compact = missing
+        mid = "om_unconfirmed_compact"
+        original = self.command(mid,"/compact")
+        with self.loop.worker.db.transaction() as db:
+            db.execute("UPDATE platform_compactions SET deadline=0 WHERE message_id=?",(mid,))
+        worker_commands.advance_compact(self.service)
+        worker_commands.advance_compact(self.service)
+        self.assertEqual(self.command(mid,"/compact"),original)
+        self.assertEqual(requests,[True,False])
+        self.assertEqual(sum("压缩结果待核" in e["text"] for e in self.outputs()),1)
+        self.assertEqual(self.loop.native.entries(),[])

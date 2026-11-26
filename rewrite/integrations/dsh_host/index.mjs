@@ -7,6 +7,7 @@ import { admitMedia } from './media.mjs';
 import { baseline, displayImage, nextDisplay } from './display.mjs';
 import { changeModel, modelView } from './model-view.mjs';
 import { changeGoal, goalView } from './goal-view.mjs';
+import { compaction } from './compaction.mjs';
 
 const tools = JSON.parse(readFileSync(new URL('../../agent-toolset.json', import.meta.url)));
 const sha = value => createHash('sha256').update(value).digest('hex');
@@ -118,6 +119,7 @@ export async function bindHost(ctx, session, directory) {
   const {agent} = await controller.resolveAgent(session);
   check(agent?.session?.id === session, 'wrong_native_session');
   const displayStart = await baseline(ctx,agent);
+  const compact = compaction(ctx,agent,()=>ownEvents(ctx,agent));
   const imageCache = {};
   async function bound() {
     const live = await controller.resolveAgent(session);
@@ -132,7 +134,11 @@ export async function bindHost(ctx, session, directory) {
       if (request.operation === 'display-start') return displayStart;
       if (request.operation === 'display-next') return nextDisplay(ctx,agent,request);
       if (request.operation === 'display-image') return displayImage(ctx,agent,request,imageCache);
-      if (request.operation === 'activity') return {busy:agent.status !== 'idle'};
+      if (request.operation === 'activity') return {busy:agent.status !== 'idle' || compact.inProgress};
+      if (request.operation === 'capabilities') return {compaction:compact.supported};
+      if (['compact-start','compact-status'].includes(request.operation)) {
+        return compact.request(request.operation,request.command_id);
+      }
       if (request.operation === 'context-usage') return contextUsage(session,await ownEvents(ctx,agent));
       if (request.operation === 'goal-view') return goalView(ctx,agent);
       if (request.operation === 'goal-change') {
@@ -146,6 +152,7 @@ export async function bindHost(ctx, session, directory) {
         return modelView(ctx,agent,request.kind,await ownEvents(ctx,agent));
       }
       if (request.operation === 'model-change' || request.operation === 'model-change-if-route') {
+        check(!compact.inProgress, 'model_change_busy');
         check(['models','efforts'].includes(request.kind) && typeof request.value === 'string'
           && request.value.length>0 && request.value.length<=401, 'invalid_model_change');
         if (request.operation === 'model-change-if-route') {
@@ -243,7 +250,7 @@ export async function apply(ctx, {session, directory}) {
     } catch (error) {
       const code = /^[a-z_]{1,80}$/.test(error.message) ? error.message : 'dsh_host_unconfirmed';
       const transient = ['native_write_unconfirmed','native_agent_unavailable','native_persistence_unavailable',
-                         'dsh_host_unconfirmed','model_change_unconfirmed','goal_change_unconfirmed'].includes(code);
+                         'dsh_host_unconfirmed','model_change_unconfirmed','goal_change_unconfirmed','compact_unconfirmed'].includes(code);
       res.writeHead(transient ? 503 : 409,{'Content-Type':'application/json'}).end(JSON.stringify({error:code}));
     }
   });

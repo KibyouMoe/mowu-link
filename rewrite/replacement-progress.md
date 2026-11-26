@@ -4,6 +4,8 @@
 
 ## 检查点与证据
 
+DSH `/compact` 已从绑定的 Worker 指令入口调用安装包的原生压缩服务。隔离测试丢弃首次提交回包，压缩期间和 Worker 服务重新初始化后重查原号，只观察到一次摘要请求、一组原生开始/摘要/替换/结束记录和一条压缩结果卡。DSH 在维护期间仍返回 idle，适配器会将自己发起的在途压缩报为忙碌。无可压缩历史时显示实情，缺证超时为待核。Router 无工单。复跑 `python3 -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_compact_reconciles_a_lost_start_reply_against_the_native_session rewrite.test_worker_commands`。[原生压缩证据](evidence/dsh-native-compact.json)。真实 DSH 压缩引擎，模型为本地夹具。
+
 DSH `/goal 目标正文` 在绑定会话通过原生服务建立目标，并使用宿主默认轮次。实测保留换行、同号重送原回执、已有未完成目标时拒绝替换。轮次驱动的验收改为由此入口建立目标后再暂停和恢复，Router 始终无工单。证据覆盖真实 DSH 循环与本地测试模型。[目标回执与两轮记录](evidence/dsh-native-goal.json)。
 
 DSH 原生目标续跑已通过隔离测试。安装包自带的轮次驱动实际入场第 1 轮。用 Worker `/goal pause` 后第 1 轮中止，`/goal resume` 后同一目标的新版本入场第 2 轮并完成该回合。两条旧指令重送只取原回执。Router 始终无工单、无通知，Worker 无持单。复跑 `python3 -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_native_goal_rounds_pause_and_resume_without_becoming_router_orders`，macOS 全套 133 项通过。模型传输为本地夹具。

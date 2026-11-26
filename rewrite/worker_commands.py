@@ -1,6 +1,8 @@
 """Trainer commands belonging to one platform binding, independent of formal work."""
+import hashlib
 import json
 import re
+import time
 from urllib.error import URLError
 
 from . import display, queued_chat
@@ -18,6 +20,10 @@ CREATE TABLE IF NOT EXISTS platform_model_intents (
 CREATE TABLE IF NOT EXISTS platform_model_menu (
  session TEXT NOT NULL, kind TEXT NOT NULL, page INTEGER NOT NULL, choices TEXT NOT NULL,
  expected_route TEXT, display_seq INTEGER NOT NULL UNIQUE, platform_mid TEXT, PRIMARY KEY(session,kind)
+);
+CREATE TABLE IF NOT EXISTS platform_compactions (
+ message_id TEXT PRIMARY KEY REFERENCES platform_commands(message_id), session TEXT NOT NULL,
+ command_id TEXT NOT NULL UNIQUE, deadline REAL NOT NULL, native_receipt TEXT
 );
 """
 HELP = ("/status 查看最近一次连接、宿主忙闲和本地持单记录。\n"
@@ -39,6 +45,8 @@ def reply(service, name, args, hold):
         lines = [HELP]
         if service.adapter_connected and service.host_context:
             lines.append("/context 查看最近一次模型回包的用量。")
+        if service.adapter_connected and service.host_compaction:
+            lines.append("/compact 通过宿主压缩当前会话历史。")
         if service.adapter_connected and service.host_model_view:
             lines.append("/model 查看模型，/effort 查看当前模型支持的思考强度。")
         if service.adapter_connected and service.host_model_change:
@@ -238,6 +246,85 @@ GOAL_ERRORS = {
     "native_goal_changed":"目标已变化。请用 /goal 查看。",
     "wrong_native_session":"会话绑定发生变化。请查当前绑定。",
 }
+COMPACTION_WAIT = 300
+COMPACTION_RESULTS = {
+    "empty":"当前会话没有可压缩的历史。",
+    "busy":"当前会话正忙。可在空闲后重新发送 /compact。",
+    "failed":"宿主记录了历史压缩失败。请先检查当前会话。",
+    "unavailable":"当前会话暂未接入历史压缩。",
+    "unknown":"压缩结果待核。请先查看原生会话的历史记录。",
+}
+
+
+def compact_receipt(proof,session,command_id):
+    require(isinstance(proof,dict) and proof.get("session")==session and proof.get("command_id")==command_id,
+            502,"wrong_native_compaction")
+    state = proof.get("state")
+    if state == "completed":
+        require(all(type(proof.get(key)) is int and 0<=proof[key]<2**53
+                    for key in ("items","tokens","summary_seq","end_seq")) and proof["items"]>0
+                and proof["end_seq"]>proof["summary_seq"],502,"invalid_compaction_receipt")
+        return {key:proof[key] for key in ("state","items","tokens","summary_seq","end_seq")} | {
+            "compaction_id":string(proof,"compaction_id")}
+    require(state in ("empty","busy","failed","unavailable","unknown","running","missing"),502,"invalid_compaction_receipt")
+    return {"state":state}
+
+
+def finish_compact(worker,mid,session,proof):
+    state = proof["state"]
+    if state in ("running","missing"):
+        return
+    answer = (f"宿主已压缩 {proof['items']} 条历史记录，约 {proof['tokens']} tokens。"
+              if state=="completed" else COMPACTION_RESULTS[state])
+    with worker.db.transaction() as db:
+        changed = db.execute("UPDATE platform_compactions SET native_receipt=? WHERE message_id=? AND native_receipt IS NULL",
+                             (encode(proof),mid)).rowcount
+        if changed:
+            display.append(db,{"event_id":"compact-result-"+mid,"kind":"command","session":session,"turn_id":"","text":answer})
+
+
+def start_compact(service,mid,text):
+    worker = service.worker
+    with worker.db.transaction() as db:
+        old = previous(db,mid,text)
+        if old:
+            return old
+        if not (service.adapter_connected and service.host_compaction):
+            return None
+        session = service.host_session
+        if db.execute("SELECT 1 FROM platform_compactions WHERE session=? AND native_receipt IS NULL",(session,)).fetchone():
+            return record(db,mid,text,"/compact",session,"上一条压缩指令仍待宿主确认。")
+        command_id = "mowulink-"+hashlib.sha256(encode([session,mid]).encode()).hexdigest()
+        local = record(db,mid,text,"/compact",session,"已接收压缩指令，等待宿主回报。")
+        db.execute("INSERT INTO platform_compactions VALUES (?,?,?,?,NULL)",
+                   (mid,session,command_id,time.time()+COMPACTION_WAIT))
+    try:
+        proof = worker.adapter.compact(session,command_id,start=True)
+        receipt = compact_receipt(proof,session,command_id)
+        if receipt["state"]!="unknown":
+            finish_compact(worker,mid,session,receipt)
+    except (Fault,URLError,OSError):
+        pass
+    return local
+
+
+def advance_compact(service):
+    worker = service.worker
+    with worker.db.transaction() as db:
+        items = db.execute("""SELECT message_id,session,command_id,deadline FROM platform_compactions
+                              WHERE native_receipt IS NULL ORDER BY deadline LIMIT 8""").fetchall()
+    now = time.time()
+    for mid,session,command_id,deadline in items:
+        try:
+            if service.adapter_connected and service.host_session==session:
+                proof = compact_receipt(worker.adapter.compact(session,command_id,start=False),session,command_id)
+                if proof["state"] not in ("missing","running","unknown"):
+                    finish_compact(worker,mid,session,proof)
+                    continue
+        except (Fault,URLError,OSError):
+            pass
+        if now>=deadline:
+            finish_compact(worker,mid,session,{"state":"unknown"})
 
 
 def confirmed_selection(receipt,session,kind,value,expected_route):
@@ -330,6 +417,10 @@ def handle(service, body):
     mid, text = string(body,"message_id"), string(body,"text")
     require(is_command(text),422,"invalid_platform_command")
     name,*args = text.strip().split()
+    if name=="/compact" and not args:
+        compact = start_compact(service,mid,text)
+        if compact is not None:
+            return compact
     mutation = None
     if name in MODEL_VIEWS and len(args)==1 and args[0] not in ("next","prev"):
         mutation = change_native(service,mid,text,name,args[0])
@@ -370,6 +461,8 @@ def handle(service, body):
         job = db.execute("SELECT task_id,assignment_id FROM jobs WHERE stage='accepted'").fetchone()
         if name == "/queue":
             answer = queued_chat.accept(db,service,mid,text)
+        elif name=="/compact" and args:
+            answer = "用法：/compact"
         elif answer is None:
             answer = reply(service,name,args,{"held_task_id":job[0] if job else None,
                                              "held_assignment_id":job[1] if job else None})

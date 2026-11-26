@@ -14,6 +14,8 @@ const {Context,Service} = await sdk('cordis');
 const {LlmAdapter,LlmRuntime} = await sdk('dsh-llm');
 const entered = Promise.withResolvers();
 const secondRound = Promise.withResolvers();
+const compactEntered = Promise.withResolvers();
+const compactReleased = Promise.withResolvers();
 const usesGoals = mode==='goals' || mode==='goal-driver';
 const modelRequests = [];
 
@@ -26,7 +28,17 @@ class LocalModel extends LlmAdapter {
     return {provider,id:model,name:'Local test model',reasoning:{
       efforts:[{id:'low',name:'Low'},{id:'high',name:'High'}],defaultEffort:'low'}};
   }
-  async *stream({provider,model,reasoningEffort,messages,signal,tools}) {
+  async *stream({provider,model,reasoningEffort,messages,signal,tools,purpose}) {
+    if (purpose==='compaction') {
+      modelRequests.push({command:'compaction',provider,model});
+      compactEntered.resolve();
+      await compactReleased.promise;
+      signal.throwIfAborted();
+      yield {type:'block-start',index:0,blockType:'text'};
+      yield {type:'text-delta',index:0,text:'Retained fixture history.'};
+      yield {type:'finish',reason:{kind:'stop'}};
+      return;
+    }
     const message = messages.findLast(entry=>entry.role==='user');
     const text = message.content.find(block=>block.type==='text').text;
     const payload = text.startsWith('魔物链接投递\n') ? JSON.parse(text.split('\n')[1]) : null;
@@ -91,6 +103,10 @@ async function setup() {
   await install(await sdk('dsh-tool-executor-native'));
   await install(LlmRuntime);
   ctx.get('llm').registerAdapter(['fixture'],new LocalModel());
+  if (mode==='compact') {
+    await install((await sdk('dsh-token-meter')).TokenMeter);
+    await install((await sdk('dsh-compaction-basic')).BasicCompactionEngine,{auto:false});
+  }
   await install((await sdk('dsh-agent-loop')).AgentLoop,{});
   if (mode==='goal-driver') await install(await sdk('dsh-goal-round-driver'));
   const {agent} = await ctx.get('agents').create({
@@ -155,7 +171,13 @@ async function formalScenario(agent) {
       console.log(JSON.stringify({running:agent.status==='running'}));
       continue;
     }
-    assert.ok(line==='read' || line==='second-round' && mode==='goal-driver');
+    if (line==='first-compact' && mode==='compact') {
+      await compactEntered.promise;
+      console.log(JSON.stringify({compacting:true,status:agent.status}));
+      continue;
+    }
+    if (line==='finish-compact' && mode==='compact') compactReleased.resolve();
+    else assert.ok(line==='read' || line==='second-round' && mode==='goal-driver');
     if (line==='second-round') await secondRound.promise;
     await agent.whenIdle();
     const events = await readEvents(agent);
@@ -165,13 +187,17 @@ async function formalScenario(agent) {
     const turns = events.filter(e=>e.type==='turn/end').map(e=>e.data);
     const rounds = events.filter(e=>e.type==='user/message' && e.data.source.kind==='goal')
       .map(e=>({id:e.data.source.goalId,revision:e.data.source.revision,round:e.data.source.round}));
-    console.log(JSON.stringify({session,inputs,calls,results,turns,modelRequests,rounds}));
+    const compactEvents = events.filter(e=>e.type.startsWith('compaction/') ||
+      e.type==='user/message' && e.data.source.kind==='compact-checkpoint')
+      .map(e=>({kind:e.type,seq:e.seq,compactionId:e.data.compactionId ?? e.data.source?.compactionId,
+        sourceCommandId:e.data.sourceCommandId ?? e.data.source?.sourceCommandId}));
+    console.log(JSON.stringify({session,inputs,calls,results,turns,modelRequests,rounds,compactEvents}));
   }
 }
 
 try {
   const agent = await setup();
-  if (mode==='formal' || usesGoals) await formalScenario(agent);
+  if (mode==='formal' || usesGoals || mode==='compact') await formalScenario(agent);
   else await stopScenario(agent);
 } finally {
   for (const handle of plugins.reverse()) await handle.dispose();
