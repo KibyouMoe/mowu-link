@@ -45,6 +45,10 @@ class WorkerService:
                         422,"unsupported_native_tool")
                 result = w.report(native,string(args,"task_id"),string(args,"assignment_id"),
                                   string(args,"summary"),args.get("outcome","completed"))
+        elif actor == "adapter/" + w.worker_id and method == "POST" and path == "/v1/worker/peer":
+            result = w.send_peer(string(body,"message_id"),string(body,"to_worker"),string(body,"text"),body.get("reply_to"))
+        elif actor == "adapter/" + w.worker_id and method == "GET" and path == "/v1/worker/peers":
+            result = {"items":w.peer_history()}
         elif actor == "platform/" + w.worker_id and method == "POST" and path == "/v1/worker/chat":
             require(set(body) == {"message_id","text"},422,"invalid_chat")
             result = {"receipt":w.chat(string(body,"message_id"),string(body,"text"))}

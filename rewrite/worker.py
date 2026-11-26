@@ -19,6 +19,10 @@ CREATE TABLE IF NOT EXISTS outbox (
     assignment_id TEXT PRIMARY KEY, body TEXT NOT NULL, receipt TEXT
 );
 CREATE TABLE IF NOT EXISTS chats (message_id TEXT PRIMARY KEY, text TEXT NOT NULL, reply TEXT);
+CREATE TABLE IF NOT EXISTS peers (
+    message_id TEXT PRIMARY KEY, direction TEXT NOT NULL, peer_id TEXT NOT NULL,
+    body TEXT NOT NULL, receipt TEXT
+);
 CREATE TABLE IF NOT EXISTS controls (
     assignment_id TEXT PRIMARY KEY, kind TEXT NOT NULL, task_id TEXT NOT NULL
 );
@@ -98,6 +102,18 @@ class Worker:
     def process(self, frame):
         with self.lock:
             payload = frame["payload"]
+            if frame["kind"] == "peer.message":
+                require(payload.get("to_worker") == self.worker_id,403,"wrong_peer_destination")
+                mid, sender = string(payload,"message_id"), string(payload,"from_worker")
+                with self.db.transaction() as db:
+                    db.execute("INSERT OR IGNORE INTO peers VALUES (?,'in',?,?,NULL)", (mid,sender,encode(payload)))
+                    row = db.execute("SELECT * FROM peers WHERE message_id=?", (mid,)).fetchone()
+                    require(row["direction"] == "in" and row["body"] == encode(payload),409,"peer_message_conflict")
+                reply = self.adapter.deliver(frame["delivery_id"], {"kind":"peer", **payload})
+                if reply:
+                    with self.db.transaction() as db:
+                        db.execute("UPDATE peers SET receipt=? WHERE message_id=?", (encode(reply),mid))
+                return reply is not None
             if frame["kind"] == "question.resolved":
                 answer = encode(payload["answer"])
                 with self.db.transaction() as db:
@@ -199,6 +215,28 @@ class Worker:
                 require(db.execute("SELECT text FROM chats WHERE message_id=?", (message_id,)).fetchone()[0] == text,
                         409, "chat_conflict")
             return self.adapter.deliver("chat-" + message_id, {"kind": "chat", "message_id": message_id, "text": text})
+
+    def send_peer(self, mid, target, text, reply_to=None):
+        require(isinstance(target,str) and target.strip() and not any(c in target for c in "/?#%"),
+                422,"invalid_peer_target")
+        body = {"message_id":mid,"text":text,"reply_to":reply_to,"session_id":self.session}
+        with self.db.transaction() as db:
+            db.execute("INSERT OR IGNORE INTO peers VALUES (?,'out',?,?,NULL)", (mid,target,encode(body)))
+            row = db.execute("SELECT * FROM peers WHERE message_id=?", (mid,)).fetchone()
+            require(row["direction"] == "out" and row["peer_id"] == target and row["body"] == encode(body),
+                    409,"peer_message_conflict")
+            if row["receipt"]:
+                return json.loads(row["receipt"])
+        reply = self.router.request("POST",f"peers/{target}/messages",body,"peer-"+mid)
+        require(reply.get("message_id") == mid and reply.get("status") == "accepted",409,"missing_peer_receipt")
+        with self.db.transaction() as db:
+            db.execute("UPDATE peers SET receipt=? WHERE message_id=?", (encode(reply),mid))
+        return reply
+
+    def peer_history(self):
+        with self.db.transaction() as db:
+            rows = db.execute("SELECT * FROM peers ORDER BY rowid DESC LIMIT 20").fetchall()
+        return [dict(r,body=json.loads(r["body"]),receipt=json.loads(r["receipt"]) if r["receipt"] else None) for r in rows]
 
     def turn_finished(self, native_id, final_text):
         origin = self.adapter.origin(native_id)
