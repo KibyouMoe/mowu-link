@@ -1,6 +1,7 @@
 """Offline component state snapshots. Keep revision and manifest digest outside the snapshot."""
 import argparse
 from contextlib import ExitStack, closing, contextmanager
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -25,7 +26,7 @@ REQUIRED = {"router","worker","agent","hermes","trigger"}
 
 def component(label):
     role,sep,name = label.partition(":")
-    if not sep or role not in TABLES or not re.fullmatch("[a-z0-9][a-z0-9_-]{0,63}",name):
+    if not sep or role not in TABLES or not re.fullmatch("[A-Za-z0-9][A-Za-z0-9_-]{0,63}",name):
         raise ValueError("invalid role or instance label")
     return role,name
 
@@ -36,9 +37,12 @@ def filename(label):
 
 
 def validate_set(labels):
+    labels = list(labels)
     roles = [component(label)[0] for label in labels]
     if not REQUIRED <= set(roles) or roles.count("router") != 1:
         raise ValueError("expected one Router and all five component roles")
+    if len({filename(label).casefold() for label in labels})!=len(labels):
+        raise ValueError("component filenames must also be distinct on case-insensitive filesystems")
     agents = {component(label)[1] for label in labels if component(label)[0]=="agent"}
     workers = {component(label)[1] for label in labels if component(label)[0]=="worker"}
     if agents != workers:
@@ -143,6 +147,73 @@ def restore(snapshot,expected,destination):
     return {label:str(destination/filename(label)) for label in manifest["files"]}
 
 
+def audit_handoff(snapshot,expected):
+    manifest = verify(snapshot,expected)
+    labels = manifest["files"]
+    router_label, = (label for label in labels if component(label)[0]=="router")
+    with closing(readonly(snapshot/filename(router_label))) as db:
+        current = {row["assignee_id"]:dict(row) for row in db.execute("""SELECT assignee_id,task_id,assignment_id
+                                                                    FROM tasks WHERE state='working' ORDER BY assignee_id""")}
+        sessions = dict(db.execute("SELECT worker_id,session_id FROM workers"))
+        cleanup = [dict(row) for row in db.execute("""SELECT worker_id,task_id,assignment_id,kind FROM cleanups
+                                                    WHERE done=0 ORDER BY worker_id,assignment_id""")]
+    workers,issues = [],[]
+    for label in sorted(labels):
+        role,wid = component(label)
+        if role!="worker":
+            continue
+        remote = current.pop(wid,None)
+        with closing(readonly(snapshot/filename(label))) as db:
+            local = db.execute("""SELECT task_id,assignment_id,delivery_id,host_state FROM jobs
+                                  WHERE stage='accepted'""").fetchone()
+            sid = db.execute("SELECT session FROM connection WHERE slot=1").fetchone()
+            pending = db.execute("SELECT COUNT(*) FROM outbox WHERE receipt IS NULL").fetchone()[0]
+            bound = None
+            if local and db.execute("SELECT 1 FROM sqlite_schema WHERE name='assignment_sessions'").fetchone():
+                bound = db.execute("SELECT session FROM assignment_sessions WHERE assignment_id=?",
+                                   (local["assignment_id"],)).fetchone()
+        local_ids = {key:local[key] for key in ("task_id","assignment_id")} if local else None
+        remote_ids = {key:remote[key] for key in ("task_id","assignment_id")} if remote else None
+        problems = []
+        if local_ids!=remote_ids:
+            problems.append("assignment_mismatch")
+        if (wid in sessions and (not sid or sid[0]!=sessions[wid])) or (local and wid not in sessions):
+            problems.append("worker_session_mismatch")
+        if pending:
+            problems.append("report_receipt_pending")
+        if local and not adapter_has_input(snapshot,wid,local,bound[0] if bound else None):
+            problems.append("adapter_receipt_unconfirmed")
+        workers.append({"worker_id":wid,"worker_assignment":local_ids,"router_assignment":remote_ids,
+                        "unconfirmed_reports":pending,"issues":problems})
+        issues.extend({"worker_id":wid,"issue":problem} for problem in problems)
+    issues.extend({"worker_id":wid,"issue":"active_worker_state_missing","task_id":row["task_id"],
+                   "assignment_id":row["assignment_id"]} for wid,row in current.items())
+    if verify(snapshot,expected)!=manifest:
+        raise ValueError("snapshot changed during handoff audit")
+    return {"snapshot_id":manifest["snapshot_id"],"workers":workers,"pending_cleanup":cleanup,
+            "issues":issues,"needs_review":bool(issues or cleanup)}
+
+
+def adapter_has_input(snapshot,wid,job,session):
+    if job["host_state"]!="received" or not session:
+        return False
+    with closing(readonly(snapshot/filename("agent:"+wid))) as db:
+        row = db.execute("SELECT payload,digest,native_id,receipt FROM intents WHERE delivery_id=? AND session=?",
+                         (job["delivery_id"],session)).fetchone()
+        if not row or not row["receipt"] or not row["native_id"]:
+            return False
+    try:
+        proof,payload = json.loads(row["receipt"]),json.loads(row["payload"])
+    except (ValueError,TypeError):
+        return False
+    return (isinstance(proof,dict) and isinstance(payload,dict)
+            and proof.get("delivery_id")==job["delivery_id"] and proof.get("session")==session
+            and proof.get("digest")==row["digest"] and proof.get("native_id")==row["native_id"]
+            and row["digest"]==hashlib.sha256(row["payload"].encode()).hexdigest() and bool(proof.get("turn_id"))
+            and payload.get("kind")=="task" and payload.get("task_id")==job["task_id"]
+            and payload.get("assignment_id")==job["assignment_id"])
+
+
 def rollback(snapshot,expected,trial,destination):
     manifest = verify(snapshot,expected)
     if set(trial) != set(manifest["files"]):
@@ -161,7 +232,7 @@ def main():
     backup.add_argument("--sources",type=Path,required=True,help="role:instance to absolute database path, JSON")
     backup.add_argument("--revision",required=True)
     backup.add_argument("--destination",type=Path,required=True)
-    for op in ("verify","restore","rollback"):
+    for op in ("verify","restore","rollback","audit-handoff"):
         p = ops.add_parser(op)
         p.add_argument("--snapshot",type=Path,required=True)
         p.add_argument("--manifest-sha256",required=True)
@@ -175,6 +246,8 @@ def main():
     elif args.op=="verify":
         manifest = verify(args.snapshot,args.manifest_sha256)
         result = {"snapshot_id":manifest["snapshot_id"],"components":len(manifest["files"])}
+    elif args.op=="audit-handoff":
+        result = audit_handoff(args.snapshot,args.manifest_sha256)
     elif args.op=="rollback":
         result = rollback(args.snapshot,args.manifest_sha256,json.loads(args.trial_sources.read_text()),args.destination)
     else:

@@ -11,7 +11,7 @@ from .feishu_inbound import Inbound
 from .feishu_output import Views
 from .hermes import HermesAdapter
 from .orders import Orders
-from .state_bundle import capture, filename, restore, rollback, verify
+from .state_bundle import audit_handoff, capture, filename, restore, rollback, validate_set, verify
 from .storage import StateWriterBusy, encode, guid, state_writer
 from .test_feishu_output import PlatformFixture
 from .test_mainline import Clock
@@ -92,6 +92,9 @@ class Bundle(unittest.TestCase):
             source_id,session = source.instance_id,w.session
         snapshot = capture(self.sources,self.revision,self.snapshot)
         self.assertEqual(snapshot["components"],7)
+        audit = audit_handoff(self.snapshot,snapshot["manifest_sha256"])
+        self.assertFalse(audit["needs_review"])
+        self.assertEqual(audit["workers"][0]["router_assignment"],{"task_id":tid,"assignment_id":hold["held_assignment_id"]})
         paths = restore(self.snapshot,snapshot["manifest_sha256"],self.dest)
         with self.stack(paths) as (m,w,source,mail,platform,views):
             self.assertEqual((source.instance_id,w.session),(source_id,session))
@@ -129,6 +132,9 @@ class Bundle(unittest.TestCase):
             return capture(sources,self.revision,self.snapshot)
         with self.assertRaisesRegex(ValueError,"five component roles"):
             backup({k:v for k,v in self.sources.items() if k!="worker:oguri"})
+        validate_set([k.replace(":oguri",":OguriCap") for k in self.sources])
+        with self.assertRaisesRegex(ValueError,"case-insensitive"):
+            validate_set([*self.sources,"worker:Oguri","agent:Oguri"])
         with self.assertRaisesRegex(ValueError,"schema"):
             backup(dict(self.sources,**{"worker:oguri":self.sources["trigger:mail"],"trigger:mail":self.sources["worker:oguri"]}))
         with state_writer(self.sources["worker:oguri"]):
@@ -164,3 +170,58 @@ class Bundle(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,"trial state changed"):
             rollback(self.snapshot,checksum,trial,self.root/"refused")
         self.assertFalse((self.root/"refused").exists())
+
+    def test_offline_handoff_audit_flags_lost_w04_receipt_without_changing_snapshot(self):
+        with self.stack(self.sources) as (m,w,_source,_mail,_platform,_views):
+            tid = m.create(guid(),"Handoff review","Report under test","oguri")["task_id"]
+            w.connect()
+            w.poll()
+            self.clock.advance(10)
+            w.poll()
+            w.poll()
+            aid = w.hold()["held_assignment_id"]
+            native_id = self.native.entries()[0][1]["native_id"]
+            transport = w.router.request
+            def lose_report(method,path,*args,**kwargs):
+                response = transport(method,path,*args,**kwargs)
+                if path==f"tasks/{tid}/report":
+                    raise ConnectionError("isolated report acknowledgement lost")
+                return response
+            w.router.request = lose_report
+            with self.assertRaises(ConnectionError):
+                w.report(native_id,tid,aid,"Private test result")
+            self.assertEqual(m.inspect(tid)["task"]["state"],"completed_reported")
+            self.assertEqual(w.hold()["held_assignment_id"],aid)
+        checksum = capture(self.sources,self.revision,self.snapshot)["manifest_sha256"]
+        seen = audit_handoff(self.snapshot,checksum)
+        self.assertTrue(seen["needs_review"])
+        self.assertEqual([row["issue"] for row in seen["issues"]],["assignment_mismatch","report_receipt_pending"])
+        self.assertNotIn("Private test result",encode(seen))
+        self.assertEqual(seen["workers"][0]["worker_assignment"],{"task_id":tid,"assignment_id":aid})
+        self.assertIsNone(seen["workers"][0]["router_assignment"])
+        self.assertEqual(audit_handoff(self.snapshot,checksum),seen)
+        restored = restore(self.snapshot,checksum,self.dest)
+        with self.stack(restored) as (m,w,_source,_mail,_platform,_views):
+            w.connect()
+            w.poll()
+            self.assertIsNone(w.hold()["held_task_id"])
+            self.assertEqual(w.report(native_id,tid,aid,"Private test result")["task_state"],"completed_reported")
+            notice, = m.router.frames(0)
+            self.assertEqual(notice["payload"]["task_id"],tid)
+
+    def test_offline_handoff_audit_detects_a_swapped_adapter_with_no_original_receipt(self):
+        with self.stack(self.sources) as (m,w,_source,_mail,_platform,_views):
+            tid = m.create(guid(),"Bound receipt check","Preserve the original receipt","oguri")["task_id"]
+            w.connect()
+            w.poll()
+            self.clock.advance(10)
+            w.poll()
+            w.poll()
+            self.assertEqual(w.hold()["held_task_id"],tid)
+        alternate = self.root/"separate-ledger.db"
+        HostAdapter(alternate,self.native,self.native.session)
+        checksum = capture({**self.sources,"agent:oguri":alternate},self.revision,self.snapshot)["manifest_sha256"]
+        seen = audit_handoff(self.snapshot,checksum)
+        self.assertTrue(seen["needs_review"])
+        self.assertEqual(seen["issues"],[{"worker_id":"oguri","issue":"adapter_receipt_unconfirmed"}])
+        self.assertEqual(seen["workers"][0]["worker_assignment"],seen["workers"][0]["router_assignment"])

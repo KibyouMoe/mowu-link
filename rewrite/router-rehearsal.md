@@ -81,6 +81,14 @@ python3 -m rewrite.feeds game --config ./game-trial.json --import-legacy-cursor 
 
 ## 重做版五组件的离线恢复
 
+有了验证过的五组件快照后，可先逐项核对持单。
+
+```sh
+python3 -m rewrite.state_bundle audit-handoff --snapshot "$SNAPSHOT" --manifest-sha256 "$MANIFEST_SHA256"
+```
+
+`worker:<ID>` 和 `agent:<ID>` 的 ID 使用 Router 上的准确拼写。命令只读取离线快照，比较 Router 持权、Worker 持单及会话、原生适配器收件凭据、待核的 W04 和原派发清理记录。输出 `needs_review: true` 时用隔离副本逐项对账。检查结果只覆盖上述账本，不能据此判断生产可切换。
+
 `python3 -m unittest -v rewrite.test_state_bundle` 在临时端口跑一张已持有的单、一个还没送到宿主的通知、一个待交原附件和一个等待投递的飞书私聊。关闭这套服务，将七个数据库作为一批备份，再从新目录重开。Worker 保留原会话和派发，宿主按原投递返回原凭据；平台沿用原卡游标，私聊只进入一次；Trigger 保留实例号，恢复后上传的 332800 字节与原件全部相同。两端原生记录和飞书云端由独立夹具保留，HTTP、SQLite 和恢复程序实跑。
 
 1. 在隔离工位停写并关闭服务，确认宿主保留了原生会话和输入记录。为这次演练列出要备份的每个数据库。跨机时先在各自的停写窗口取完整离线副本，所有工位停写区间须重叠。要从本机集中快照，源数据库使用 SQLite 的 DELETE 日志模式，待处理的 WAL 和事务需先由原程序正常关闭并检查。程序遇到占锁或活动日志会退出。
