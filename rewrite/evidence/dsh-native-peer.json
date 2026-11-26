@@ -1,38 +1,58 @@
 {
-  "letter": "dc942584-b58a-4192-bec9-eeda92c795db",
+  "letter": "29dbe7ef-ee1c-4497-a70e-94353b342c59",
   "host_input": {
-    "delivery_id": "7852549e-e808-4061-bbd1-660cdc6cff8d",
-    "digest": "30ae8d84c9082131b9428357af40f4a9dba13f51670f882f25218798bb196f55",
+    "delivery_id": "4d132d35-4f85-49bc-a0c9-893b0adf758a",
+    "digest": "f1dc43fa76070b69b4677ef624748e7f756ae784707ed4452a49c38e5d7e8eef",
     "media_sha256": [
       "e77617115ffe6399c0f4714c72aa32eefeb22fbdf45b1167a4ddb64e213b4007"
     ],
-    "native_id": "mowulink-8026b7ae6b7d8e4a15111c29dd7530ef5ec7d01ee7c800299822ef46aeaab5a7",
+    "native_id": "mowulink-b8ba784d10ae603eab58828030686a47af606c3a9cd611c44bd683ac622ad644",
     "session": "dsh-native-peer",
     "turn_id": "1/1"
   },
   "peer_reception": {
     "accepted_at": "2027-01-15T08:00:00+00:00",
-    "delivery_id": "7852549e-e808-4061-bbd1-660cdc6cff8d",
-    "host_receipt_id": "48b5e346-834a-5963-996b-2d9512b25583",
+    "delivery_id": "4d132d35-4f85-49bc-a0c9-893b0adf758a",
+    "host_receipt_id": "3c615862-d0b4-59ad-add3-6e620c399c57",
     "host_receipt_recorded_at": "2027-01-15T08:00:05+00:00",
-    "message_id": "dc942584-b58a-4192-bec9-eeda92c795db",
+    "message_id": "29dbe7ef-ee1c-4497-a70e-94353b342c59",
     "recipient": "oguri",
     "sender": "tama",
     "worker_received": true
   },
   "actual_tool_call": "peer-native-reply",
+  "native_status_call": "peer-native-status",
+  "native_status_before_host_receipt": {
+    "accepted_at": "2027-01-15T08:00:00+00:00",
+    "delivery_id": "4d132d35-4f85-49bc-a0c9-893b0adf758a",
+    "host_receipt_id": null,
+    "host_receipt_recorded_at": null,
+    "local_pending": [
+      {
+        "attempts": 1,
+        "failure": "peer_host_receipt_unconfirmed",
+        "phase": "delivery",
+        "retry_at": 1800000005
+      }
+    ],
+    "message_id": "29dbe7ef-ee1c-4497-a70e-94353b342c59",
+    "recipient": "oguri",
+    "sender": "tama",
+    "status": "accepted",
+    "worker_received": true
+  },
   "reply": {
     "accepted_at": "2027-01-15T08:00:00+00:00",
     "message_id": "c646e34d-00ac-5ee9-96a5-e1a680e82512",
     "status": "accepted"
   },
-  "reply_to": "dc942584-b58a-4192-bec9-eeda92c795db",
+  "reply_to": "29dbe7ef-ee1c-4497-a70e-94353b342c59",
   "reply_recipient_receipt": {
-    "delivery_id": "6d01ab05-b86b-436e-a325-7265e3119392",
-    "digest": "277816b5091e098f9995671d07f3573ee693d6644150cfaf126d913cce8192d7",
-    "native_id": "edb5ca34-5dd5-49f3-98d1-524b8fa4657d",
+    "delivery_id": "d0376428-49ac-4a88-bf8f-2fbce39e540c",
+    "digest": "5aa78a9fd81c8b1b10841cadba5f5993337062f7a7b16e721d2f38949d7387ab",
+    "native_id": "d490537b-8033-4ca2-85d5-295ffc8b9b7d",
     "session": "test-sending-host",
-    "turn_id": "577f6a27-de14-4c7b-9965-a7c3c4f8fa8c"
+    "turn_id": "c57262a2-e872-46c1-8e86-6f1d8e9d4d02"
   },
   "image": {
     "sha256": "e77617115ffe6399c0f4714c72aa32eefeb22fbdf45b1167a4ddb64e213b4007",

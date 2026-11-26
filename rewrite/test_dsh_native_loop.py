@@ -819,12 +819,17 @@ class NativeLoop(unittest.TestCase):
             original = json.loads(image["caption"].split("\n")[1])
             self.assertEqual((original["message_id"],original["text"]),(mid,caption))
             self.assertEqual(image["images"],[{"sha256":sha,"size":len(PNG)}])
-            (call,) = observed["calls"]
+            call,lookup = observed["calls"]
             self.assertEqual(call["name"],"worker_send_peer")
+            self.assertEqual(lookup["name"],"worker_peer_status")
             args = json.loads(call["arguments"])
             self.assertEqual((args["to_worker"],args["reply_to"]),("tama",mid))
             result = json.loads(observed["results"][0]["content"][0]["text"])
             self.assertEqual(result["status"],"accepted")
+            native_status = json.loads(observed["results"][1]["content"][0]["text"])
+            self.assertEqual((native_status["message_id"],native_status["status"]),(mid,"accepted"))
+            self.assertTrue(native_status["worker_received"])
+            self.assertIsNone(native_status["host_receipt_id"])
             with loop.adapter.db.transaction() as db:
                 proof = json.loads(db.execute("SELECT receipt FROM intents WHERE delivery_id=?",
                                               (routed["delivery_id"],)).fetchone()[0])
@@ -841,6 +846,7 @@ class NativeLoop(unittest.TestCase):
             self.assertEqual(loop.hermes.tasks()["items"],[])
             self.assertIsNone(loop.worker.hold()["held_task_id"])
             self.evidence = {"letter":mid,"host_input":proof,"peer_reception":routed,"actual_tool_call":call["callId"],
+                "native_status_call":lookup["callId"],"native_status_before_host_receipt":native_status,
                 "reply":result,"reply_to":reply["reply_to"],"reply_recipient_receipt":receipt,
                 "image":image["images"][0],"native_inputs":len(observed["inputs"]),"reply_inputs":len(sender_host.entries()),
                 "clock":"controlled test clock",

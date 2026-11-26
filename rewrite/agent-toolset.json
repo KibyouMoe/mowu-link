@@ -79,7 +79,7 @@
   },
   {
     "name": "worker_send_peer",
-    "description": "Send a private message to a named Worker or reply to their original message. The receipt confirms Router intake only. This does not create or complete a formal assignment.",
+    "description": "Send a private message to a named Worker or reply to their original message. A pending response contains the message ID for later status checks. This does not create or complete a formal assignment.",
     "inputSchema": {
       "type": "object",
       "additionalProperties": false,
@@ -91,6 +91,18 @@
         "attachment_kinds": {"type": "array", "items": {"enum": ["image", "file"]}}
       },
       "required": ["to_worker"]
+    }
+  },
+  {
+    "name": "worker_peer_status",
+    "description": "Check Router intake, the recipient Worker inbox and the native host receipt for a private message you sent or received.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "message_id": {"type": "string", "minLength": 1}
+      },
+      "required": ["message_id"]
     }
   }
 ]

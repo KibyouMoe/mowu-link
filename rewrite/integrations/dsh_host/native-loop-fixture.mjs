@@ -70,6 +70,16 @@ class LocalModel extends LlmAdapter {
         yield {type:'finish',reason:{kind:'tool-calls'}};
         return;
       }
+      const statusKey = payload?.message_id+'-status';
+      if (mode==='peer-media' && command==='peer' && !this.submitted.has(statusKey)) {
+        this.submitted.set(statusKey,true);
+        assert.ok(tools?.some(tool=>tool.name==='worker_peer_status'));
+        yield {type:'block-start',index:0,blockType:'tool-call'};
+        yield {type:'block-end',index:0,block:{type:'tool-call',id:'peer-native-status',name:'worker_peer_status',
+          arguments:JSON.stringify({message_id:payload.message_id})}};
+        yield {type:'finish',reason:{kind:'tool-calls'}};
+        return;
+      }
       yield {type:'block-start',index:0,blockType:'text'};
       yield {type:'text-delta',index:0,text:`Local fixture received ${images.length} image(s).`};
       yield {type:'finish',reason:{kind:'stop'}};

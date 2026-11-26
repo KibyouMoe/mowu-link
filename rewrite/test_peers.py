@@ -289,6 +289,35 @@ class Peers(unittest.TestCase):
         self.assertEqual(peer_retry.waiting(self.a,rejected)[0]["phase"],"send_rejected")
         self.assertFalse(self.loop.hermes.tasks()["items"])
 
+    def test_agent_can_read_pending_outgoing_message_without_claiming_acceptance(self):
+        self.a.clock = self.clock
+        adapter = self.adapter_client(self.a)
+        target = self.adapter_client(self.b)
+        turn = self.a.chat(guid(),"Send one isolated peer message")
+        caller = {"session":turn["session"],"turn_id":turn["turn_id"],"call_id":"reply-call"}
+        args = {"to_worker":"tama","text":"Original outgoing body"}
+        send = self.a.router.request
+        def before_commit(method,path,*more,**options):
+            if method=="POST" and path=="peers/tama/messages":
+                raise ConnectionError()
+            return send(method,path,*more,**options)
+        self.a.router.request = before_commit
+        result = adapter.request("POST","worker/native-tool",dict(caller,tool="worker_send_peer",arguments=args))
+        mid = result["message_id"]
+        self.assertEqual((result["status"],result["accepted_at"],result["host_receipt_id"]),("pending",None,None))
+        lookup = dict(caller,tool="worker_peer_status",arguments={"message_id":mid})
+        self.assertEqual(adapter.request("POST","worker/native-tool",lookup),result)
+        with self.assertRaisesRegex(Fault,"peer_message_not_found"):
+            target.request("GET","worker/peers/"+mid)
+        self.a.router.request = send
+        self.clock.advance(5)
+        self.a.poll()
+        self.b.poll()
+        confirmed = adapter.request("POST","worker/native-tool",lookup)
+        self.assertEqual(confirmed["status"],"accepted")
+        self.assertIsNotNone(confirmed["host_receipt_id"])
+        self.assertEqual([body["message_id"] for body,_proof in self.host.entries()],[mid])
+
     def test_lost_receipt_does_not_starve_another_confirmation(self):
         first,second = guid(),guid()
         self.a.send_peer(first,"tama","one")

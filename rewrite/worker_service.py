@@ -139,8 +139,14 @@ class WorkerService:
             if body.get("tool") == "worker_ask":
                 require(set(args) == {"text","options"},422,"invalid_arguments")
                 result = w.ask(native, string(body,"call_id"), string(args,"text"), args["options"])
-            elif body.get("tool") == "worker_send_peer":
-                result = self.send_native_peer(session,turn,native,string(body,"call_id"),args)
+            elif body.get("tool") in ("worker_send_peer","worker_peer_status"):
+                self.require_peer_origin(session,native)
+                if body["tool"] == "worker_send_peer":
+                    result = self.send_native_peer(session,turn,string(body,"call_id"),args)
+                else:
+                    require(set(args)=={"message_id"},422,"invalid_arguments")
+                    result = self.peer_status(string(args,"message_id"))
+                    result.setdefault("status","accepted")
             else:
                 require(body.get("tool") == "worker_report" and set(args) <= {"task_id","assignment_id","summary","outcome","artifact_ids"},
                         422,"unsupported_native_tool")
@@ -174,11 +180,7 @@ class WorkerService:
                 require(method=="GET",405,"read_only_history")
                 result = w.router.request("GET",route+("?"+url.query if url.query else ""))
         elif actor == "adapter/"+w.worker_id and method=="GET" and path.startswith("/v1/worker/peers/"):
-            mid = path.removeprefix("/v1/worker/peers/")
-            require(valid_guid(mid),422,"invalid_peer_message")
-            result = w.router.request("GET","peers/messages/"+mid)
-            if result["recipient"]==w.worker_id:
-                result["local_pending"] = peer_retry.waiting(w,mid)
+            result = self.peer_status(path.removeprefix("/v1/worker/peers/"))
         elif actor == "platform/" + w.worker_id and method == "POST" and path == "/v1/worker/command":
             result = {"receipt":worker_commands.handle(self,body)}
         elif actor == "platform/" + w.worker_id and method == "POST" and path == "/v1/worker/model-menu-receipt":
@@ -194,18 +196,59 @@ class WorkerService:
             raise Fault(403,"forbidden")
         return 200,"application/json",result
 
-    def send_native_peer(self,session,turn,native,call,args):
-        require({"to_worker"}<=set(args)<={"to_worker","text","reply_to","attachment_ids","attachment_kinds"},
-                422,"invalid_arguments")
+    def require_peer_origin(self,session,native):
         w = self.worker
         origin = w.adapter.origin(native,session=session)
         require(origin["kind"] in ("chat","queued_chat","peer","task","task_update","task_probe","question_answer"),
                 403,"wrong_peer_origin")
         assignment = origin.get("assignment_id")
         require(not assignment or w.assignment_session(assignment) in (None,session),403,"wrong_assignment_session")
+
+    def send_native_peer(self,session,turn,call,args):
+        require({"to_worker"}<=set(args)<={"to_worker","text","reply_to","attachment_ids","attachment_kinds"},
+                422,"invalid_arguments")
+        w = self.worker
         mid = str(uuid5(NAMESPACE_URL,encode(["native-peer-message",w.worker_id,session,turn,call])))
-        return w.send_peer(mid,string(args,"to_worker"),args.get("text",""),args.get("reply_to"),
-                           args.get("attachment_ids"),args.get("attachment_kinds"))
+        try:
+            return w.send_peer(mid,string(args,"to_worker"),args.get("text",""),args.get("reply_to"),
+                               args.get("attachment_ids"),args.get("attachment_kinds"))
+        except (Fault,OSError) as error:
+            if isinstance(error,Fault) and not peer_retry.send_retryable(error):
+                raise
+            pending = self.local_peer_status(mid)
+            require(pending,503,"peer_exchange_unconfirmed")
+            return pending
+
+    def local_peer_status(self,mid):
+        w = self.worker
+        with w.db.transaction() as db:
+            row = db.execute("""SELECT p.peer_id,p.receipt,r.phase,r.failure FROM peers p
+                LEFT JOIN peer_retry r ON r.operation_id=p.message_id AND r.phase IN ('send','send_rejected')
+                WHERE p.message_id=? AND p.direction='out'""",(mid,)).fetchone()
+        if not row:
+            return None
+        ack = json.loads(row["receipt"]) if row["receipt"] else None
+        states = {"send":"pending","send_rejected":"rejected"}
+        return {"message_id":mid,"sender":w.worker_id,"recipient":row["peer_id"],
+                "status":states.get(row["phase"],"unknown"),
+                "accepted_at":ack["accepted_at"] if ack else None,"worker_received":None,
+                "host_receipt_id":None,"local_failure":row["failure"]}
+
+    def peer_status(self,mid):
+        require(valid_guid(mid),422,"invalid_peer_message")
+        w = self.worker
+        try:
+            result = w.router.request("GET","peers/messages/"+mid)
+        except (Fault,OSError) as error:
+            if isinstance(error,Fault) and error.code!="peer_message_not_found" and error.status<500:
+                raise
+            local = self.local_peer_status(mid)
+            if local is None:
+                raise
+            return local
+        if result["recipient"]==w.worker_id:
+            result["local_pending"] = peer_retry.waiting(w,mid)
+        return result
 
     def listen(self, identities, address, ctx):
         return serve_authenticated(identities,address,ctx,self.handle)
