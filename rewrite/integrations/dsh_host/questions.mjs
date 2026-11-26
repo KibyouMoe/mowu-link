@@ -2,12 +2,32 @@ import {createHash} from 'node:crypto';
 import {closeSync,constants,fstatSync,fsyncSync,openSync,readFileSync,writeFileSync} from 'node:fs';
 import path from 'node:path';
 import {isDeepStrictEqual} from 'node:util';
+import {openPrivateState} from './local-state.mjs';
 
-export function foregroundRecords(directory,session) {
+export const questionStateFile = 'dsh-questions.sqlite3';
+
+export async function sqliteQuestionMarks(directory) {
+  const db = await openPrivateState(directory,questionStateFile,'native_question_unconfirmed');
+  try {
+    db.exec(`CREATE TABLE IF NOT EXISTS foreground_questions (
+      digest TEXT PRIMARY KEY CHECK(length(digest)=64)
+    ) STRICT, WITHOUT ROWID`);
+    const find = db.prepare('SELECT 1 FROM foreground_questions WHERE digest=?');
+    const insert = db.prepare('INSERT INTO foreground_questions VALUES (?) ON CONFLICT(digest) DO NOTHING');
+    return {close:()=>db.close(),has:id=>Boolean(find.get(id)),record:id=>insert.run(id)};
+  } catch (error) {
+    db.close();
+    throw error;
+  }
+}
+
+export function foregroundRecords(directory,session,marks) {
   function key(call) {
     const {callId,turn,step,name,arguments:args} = call.data;
     return createHash('sha256').update(JSON.stringify([session,call.seq,callId,turn,step,name,args])).digest('hex');
   }
+  if (marks) return {has:call=>marks.has(key(call)),record:call=>marks.record(key(call))};
+  if (marks===null) return {has:()=>false};
   function filename(id) {
     return path.join(directory,'question-'+id+'.open');
   }

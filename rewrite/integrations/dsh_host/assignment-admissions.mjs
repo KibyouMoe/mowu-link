@@ -1,32 +1,14 @@
-import {closeSync, lstatSync, openSync} from 'node:fs';
-import path from 'node:path';
 import {isDeepStrictEqual} from 'node:util';
-
-const filename = 'dsh-admissions.sqlite3';
+import {openPrivateState} from './local-state.mjs';
 
 function check(value) {
   if (!value) throw new Error('native_cleanup_unconfirmed');
 }
 
 export async function sqliteAdmissions(directory) {
-  const databasePath = path.join(directory,filename);
+  const db = await openPrivateState(directory,'dsh-admissions.sqlite3','native_cleanup_unconfirmed');
   try {
-    closeSync(openSync(databasePath,'wx',0o600));
-  } catch (error) {
-    if (error.code!=='EEXIST') throw error;
-  }
-  const info = lstatSync(databasePath);
-  check(info.isFile() && (process.platform==='win32' ||
-    info.uid===process.getuid() && !(info.mode & 0o077)));
-
-  const {DatabaseSync} = await import('node:sqlite');
-  const db = new DatabaseSync(databasePath,{timeout:500});
-  try {
-    const journal = db.prepare('PRAGMA journal_mode=DELETE').get();
-    check(journal.journal_mode==='delete');
-    db.exec(`PRAGMA synchronous=EXTRA;
-      PRAGMA trusted_schema=OFF;
-      CREATE TABLE IF NOT EXISTS admissions (
+    db.exec(`CREATE TABLE IF NOT EXISTS admissions (
         native_id TEXT PRIMARY KEY,
         envelope TEXT NOT NULL CHECK(length(envelope) BETWEEN 1 AND 4096)
       ) STRICT, WITHOUT ROWID`);

@@ -1,4 +1,4 @@
-param([Parameter(Mandatory=$true)][string]$Directory, [switch]$CheckAdmissions, [string]$MediaDigests)
+param([Parameter(Mandatory=$true)][string]$Directory, [switch]$CheckAdmissions, [switch]$CheckQuestions, [string]$MediaDigests)
 $ErrorActionPreference = 'Stop'
 $trusted = @([Security.Principal.WindowsIdentity]::GetCurrent().User.Value, 'S-1-5-18', 'S-1-5-32-544')
 
@@ -26,14 +26,17 @@ function Assert-Private([string]$Path, [bool]$IsDirectory, [bool]$RequireFileInh
     if ($RequireFileInheritance -and -not $fileInheritance) { exit 4 }
 }
 
-Assert-Private $Directory $true $CheckAdmissions.IsPresent
+Assert-Private $Directory $true ($CheckAdmissions.IsPresent -or $CheckQuestions.IsPresent)
 foreach ($name in @('dsh-link.json','dsh-link.crt','dsh-link.key')) {
     Assert-Private (Join-Path $Directory $name) $false
 }
-if ($CheckAdmissions) {
-    $directoryInfo = [IO.DirectoryInfo]::new($Directory)
-    foreach ($entry in $directoryInfo.EnumerateFileSystemInfos('dsh-admissions.sqlite3*')) {
-        if ($entry.Name -notin @('dsh-admissions.sqlite3','dsh-admissions.sqlite3-journal')) { exit 3 }
+$ledgers = @()
+if ($CheckAdmissions) { $ledgers += 'dsh-admissions.sqlite3' }
+if ($CheckQuestions) { $ledgers += 'dsh-questions.sqlite3' }
+$directoryInfo = [IO.DirectoryInfo]::new($Directory)
+foreach ($ledger in $ledgers) {
+    foreach ($entry in $directoryInfo.EnumerateFileSystemInfos($ledger + '*')) {
+        if ($entry.Name -notin @($ledger,($ledger + '-journal'))) { exit 3 }
         Assert-Private $entry.FullName $false
     }
 }

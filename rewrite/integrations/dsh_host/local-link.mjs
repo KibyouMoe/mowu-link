@@ -17,7 +17,7 @@ export function privateDir(directory) {
   }
 }
 
-export async function privateWindowsRuntime(directory,{admissions=false,mediaDigests=[]}={}) {
+export async function privateWindowsRuntime(directory,{admissions=false,questions=false,mediaDigests=[]}={}) {
   if (!/^[A-Za-z]:[\\/]/.test(directory)) throw new Error('private_runtime_required');
   const system = process.env.SystemRoot;
   if (!system || !path.isAbsolute(system)) throw new Error('private_runtime_required');
@@ -26,18 +26,20 @@ export async function privateWindowsRuntime(directory,{admissions=false,mediaDig
   try {
     const args = ['-NoProfile','-NonInteractive','-File',check,directory];
     if (admissions) args.push('-CheckAdmissions');
+    if (questions) args.push('-CheckQuestions');
     if (mediaDigests.length) args.push('-MediaDigests',mediaDigests.join(','));
     await run(powershell,args,{windowsHide:true,timeout:mediaDigests.length ? 5000 : 15000,maxBuffer:65536});
   } catch (error) {
     if (error.code===5) throw new Error('invalid_media_object');
     if (error.killed) throw new Error('dsh_link_acl_check_timeout');
-    if (error.code===4) throw new Error('dsh_admissions_file_inheritance_required');
+    if (error.code===4) throw new Error(admissions ? 'dsh_admissions_file_inheritance_required' :
+      'dsh_questions_file_inheritance_required');
     throw new Error(error.code===3 ? 'private_dsh_link_required' : 'dsh_link_acl_check_unavailable');
   }
 }
 
-async function verifiedCredentials(directory,admissions) {
-  if (process.platform==='win32') await privateWindowsRuntime(directory,{admissions});
+async function verifiedCredentials(directory,options) {
+  if (process.platform==='win32') await privateWindowsRuntime(directory,options);
   else privateDir(directory);
   return names.map(name=>{
     const file = path.join(directory,name);
@@ -74,8 +76,8 @@ function callbackPort(directory,configured) {
 
 const validPort = port => Number.isInteger(port) && port>=1024 && port<=65535;
 
-export async function tlsLink(directory,{admissions=false}={}) {
-  const [data,cert,key] = await verifiedCredentials(directory,admissions);
+export async function tlsLink(directory,options={}) {
+  const [data,cert,key] = await verifiedCredentials(directory,options);
   const cfg = JSON.parse(data);
   if (Object.keys(cfg??{}).sort().join(',')!=='host_port,worker_port' ||
       !validPort(cfg.host_port) || (cfg.worker_port!==0 && !validPort(cfg.worker_port)) ||
