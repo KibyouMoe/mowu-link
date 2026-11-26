@@ -1,4 +1,5 @@
 """Run the installed DSH AgentLoop with a local deterministic provider and a fresh profile."""
+import hashlib
 import json
 from contextlib import contextmanager
 import os
@@ -16,11 +17,13 @@ from .dsh_port import DshHost, tool_listener
 from .feishu_inbound import Inbound
 from .feishu_output import Views
 from .host_wire import RemoteAdapter, serve_adapter
+from .native_files import NativeFiles
 from .question_cards import Actions
 from .storage import Fault, guid
 from .test_feishu_output import PlatformFixture
 from .test_mainline import Clock
 from .test_dsh_sdk import APP, EXE
+from .test_feishu_inbound import PNG
 from .wire import Client
 from .worker_service import WorkerService
 
@@ -620,3 +623,121 @@ class NativeLoop(unittest.TestCase):
                 "continue_receipt":continuation,"reports":[json.loads(item["content"][0]["text"]) for item in finished["results"]],
                 "native_inputs":finished["inputs"],"manager_notice_count":len(notices),"router_after":detail["task"]["state"],
                 "boundary":"Real DSH tool executor and Router/Worker HTTP; scripted local model and manager input"}
+
+    def test_native_goal_finishing_releases_formal_work_only_after_its_router_probe_w04(self):
+        session = "dsh-native-formal-goal"
+        directory = self.enterContext(tempfile.TemporaryDirectory(dir="/tmp",prefix="mldsh-formal-goal-"))
+        def host(_path,_name):
+            port = DshHost(Path(directory))
+            port.session = session
+            return port
+        clock = Clock()
+        loop = self.enterContext(Loop.isolated(clock,host_factory=host))
+        credential = guid()
+        service = WorkerService(loop.worker,clock)
+        url = self.open_worker(service,{credential:"adapter/oguri"})
+        self.enterContext(tool_listener(Path(directory),loop.adapter,Client(url,credential)))
+        with self.start_native(directory,session,"formal-goal") as native:
+            tid = loop.hermes.create(guid(),"Native long work","Run a native goal and report when asked","oguri")["task_id"]
+            loop.worker.connect()
+            loop.worker.poll()
+            clock.advance(10)
+            loop.worker.poll()
+            loop.worker.poll()
+            completed = self.read_native(native,"formal-goal-round")
+            self.assertEqual([x["name"] for x in completed["calls"]],["create_goal","update_goal"],completed["results"])
+            self.assertTrue(all(not row["isError"] for row in completed["results"]),completed["results"])
+            goal = loop.native.goal_view(session)["goal"]
+            self.assertEqual(goal["phase"],"complete")
+            self.assertEqual([row["id"] for row in completed["rounds"]],[goal["id"]])
+            aid = loop.worker.hold()["held_assignment_id"]
+            self.assertTrue(aid)
+            self.assertEqual(loop.worker.hold()["held_task_id"],tid)
+            before = loop.hermes.inspect(tid)
+            self.assertEqual(before["task"]["state"],"working")
+            self.assertIsNone(before["last_report"])
+            clock.advance(1)
+            loop.worker.poll()
+            loop.worker.poll()
+            clock.advance(10)
+            loop.worker.poll()
+            loop.worker.poll()
+            after = self.read_native(native,"read")
+            self.assertEqual([x["name"] for x in after["calls"]],["create_goal","update_goal","worker_report"])
+            self.assertFalse(after["results"][-1]["isError"])
+            result = json.loads(after["results"][-1]["content"][0]["text"])
+            self.assertEqual(result,{"recorded":True,"task_state":"completed_reported","release_assignment_id":aid})
+            self.assertEqual(len(after["inputs"]),2)
+            with loop.adapter.db.transaction() as db:
+                inputs = [(json.loads(p),json.loads(r)) for p,r in db.execute("SELECT payload,receipt FROM intents ORDER BY rowid")]
+            self.assertEqual([item[0]["kind"] for item in inputs],["task","task_probe"])
+            self.assertTrue(all(item[0]["assignment_id"]==aid for item in inputs))
+            detail = loop.hermes.inspect(tid)
+            self.assertEqual(detail["task"]["state"],"completed_reported")
+            self.assertIsNone(loop.worker.hold()["held_assignment_id"])
+            self.evidence = {"session":session,"task_id":tid,"assignment_id":aid,"native_goal":goal,
+                "goal_rounds":completed["rounds"],"native_before_probe":before["task"]["state"],
+                "probe_receipt":inputs[-1][1],"w04":result,"router_final":detail["task"]["state"],
+                "boundary":"Native DSH goal tools, actual scheduled continuation and Router probes; scripted local model"}
+
+    def test_actual_dsh_loop_gives_the_same_feishu_caption_and_original_image_to_its_provider(self):
+        session = "dsh-native-media"
+        directory = self.enterContext(tempfile.TemporaryDirectory(dir="/tmp",prefix="mldsh-media-"))
+        def host(_path,_name):
+            port = DshHost(Path(directory))
+            port.session = session
+            return port
+        clock = Clock()
+        loop = self.enterContext(Loop.isolated(clock,host_factory=host))
+        service = WorkerService(loop.worker,clock)
+        platform_key,adapter_key = guid(),guid()
+        url = self.open_worker(service,{platform_key:"platform/oguri",adapter_key:"adapter/oguri"})
+        platform,adapter = Client(url,platform_key),Client(url,adapter_key)
+        loop.adapter.media_store = NativeFiles(Path(directory)/"media",adapter)
+        relay = DshDisplay(loop.adapter,adapter,"oguri")
+        downloads = []
+        def fetch(mid,key,kind,limit):
+            downloads.append((mid,key,kind))
+            return PNG
+        inbound = Inbound(loop.root/"feishu.db",platform,fetch,"app","trainer","test-chat")
+        sink = PlatformFixture()
+        views = Views(loop.root/"views.db",platform,sink,"test-chat","小栗帽",clock)
+        caption = "  图上有哪些细节？\n同一条原文。 "
+        post = {"zh_cn":{"content":[[{"tag":"text","text":caption},{"tag":"img","image_key":"img_fixture"}]]}}
+        def record(mid,kind,content):
+            return inbound.record("app","user","trainer",{"chat_id":"test-chat","chat_type":"p2p","message_type":kind,
+                "message_id":mid,"content":json.dumps(content,ensure_ascii=False)})
+        with self.start_native(directory,session,"media") as native:
+            relay.collect()
+            one = record("om_dsh_caption","post",post)
+            proof = inbound.deliver(one)
+            self.assertEqual(inbound.deliver(record(one,"post",post)),proof)
+            self.read_native(native,"read")
+            two = record("om_dsh_image","image",{"image_key":"img_fixture"})
+            pure = inbound.deliver(two)
+            self.assertEqual(inbound.deliver(two),pure)
+            observed = self.read_native(native,"read")
+            sha = hashlib.sha256(PNG).hexdigest()
+            self.assertEqual(observed["mediaRequests"],[
+                {"caption":caption,"images":[{"sha256":sha,"size":len(PNG)}],"partTypes":["text","image"]},
+                {"caption":"","images":[{"sha256":sha,"size":len(PNG)}],"partTypes":["image"]},
+            ])
+            self.assertEqual(observed["inputs"],[proof["native_id"],pure["native_id"]])
+            self.assertEqual(proof["media_sha256"],[sha])
+            self.assertEqual(pure["media_sha256"],[sha])
+            for _ in range(8):
+                relay.collect()
+                relay.flush()
+            views.poll()
+            rows = [item[2] for item in sink.messages.values()]
+            finals = [r for r in rows if r["header"]["title"]["content"]=="小栗帽-回复"]
+            self.assertEqual(len(finals),2)
+            self.assertTrue(all("Local fixture received 1 image(s)." in json.dumps(f) for f in finals))
+            platform_items = platform.request("GET","worker/display")["items"]
+            self.assertEqual([item["event"]["text"] for item in platform_items if item["event"]["kind"]=="native_input"],[caption])
+            self.assertEqual(len(downloads),2)
+            self.assertEqual(loop.hermes.tasks()["items"],[])
+            self.evidence = {"session":session,"captioned_receipt":proof,"image_only_receipt":pure,
+                "provider_messages":observed["mediaRequests"],"download_count":len(downloads),
+                "original_input_count":len(observed["inputs"]),"reply_cards":len(finals),
+                "boundary":"Actual DSH run loop and attachment storage; Feishu and model provider are fixtures"}

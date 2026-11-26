@@ -4,6 +4,12 @@
 
 ## 检查点与证据
 
+[验收对照](acceptance-matrix.md) 汇总旧入口、Worker 篇 A01–A11、原生宿主证据与切换前剩余条件。
+
+DSH 图文与纯图已通过真实 AgentLoop 的输入边界。分别给飞书夹具一条带原始空格和换行的图文及一条纯图，原生模型传输各读到同一原图的完整字节和摘要。两次重送共两条原生输入，飞书夹具各一张最终回复。复跑 `python3 -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_actual_dsh_loop_gives_the_same_feishu_caption_and_original_image_to_its_provider`。[原生图文证据](evidence/dsh-native-media.json)。模型是读取实际字节的本地夹具，图像语义识别和飞书云端待验。
+
+正式工单的 DSH 长目标已在隔离环境走通。原生工具创建目标，宿主跑一轮原生续办并标记完成；此时 Router 仍为 working，Worker 仍持原派发。Router 空闲后发原单询问，模型在该原生回合自行调用 `worker_report`。W04 后才释放，Router 待验收。复跑 `python3 -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_native_goal_finishing_releases_formal_work_only_after_its_router_probe_w04`。[长任务证据](evidence/dsh-native-formal-goal.json)。模型为本地驱动。自动续办轮本身的 W04 来源仍缺独立授权链，本路径从 Router 的正式询问取得原派发。
+
 旧邮件和游戏游标已有离线导入。邮件从原 UID 10 接续，只收 11 与 12；错误 UIDVALIDITY 保留 10，没进新档。游戏核对原地址，序号落后时不打开流；恢复后从 15 接续，只收 16 与 17。重导入后位置不退。复跑 `python3 -m unittest -v rewrite.test_feeds`，邮件协议夹具、真实临时 SSE 传输。[交接规程](router-rehearsal.md#旧采集来源交接)。旧游戏桥没有启动标识，生产游标与旧队列在授权窗口对账。
 
 旧 Trigger 0.7.0 的归档已通过隔离保全与回退测试。用原版 TriggerStore 建 5 条不同处置的事件及订阅，确认源文件摘要未变、恢复档案逐字节相同、真实旧程序仍只查到原来两条未读记录。活跃日志和被篡改的成员会阻止恢复。Mac mini 只读盘点确认仍有 1,492 条记录及 1 个 active 订阅，[聚合证据](evidence/legacy-trigger-status.json)。未复制生产原文，未启用订阅。复跑 `python3 -m unittest -v rewrite.test_trigger_archive`，操作见[旧 Trigger 归档](router-rehearsal.md#旧-trigger-历史和订阅账本)。

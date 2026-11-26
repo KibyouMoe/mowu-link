@@ -1,0 +1,36 @@
+{
+  "session": "dsh-native-formal-goal",
+  "task_id": "aa1dca40-13ce-4919-ae7d-780a914875dc",
+  "assignment_id": "01149c21-4830-4b30-a362-d7045e186936",
+  "native_goal": {
+    "id": "goal-28d6557a-9e6d-4305-a9f9-0361ebdd7456",
+    "revision": 2,
+    "objective": "Complete the isolated formal objective",
+    "phase": "complete",
+    "started": 1,
+    "limit": 1,
+    "activation": "disarmed"
+  },
+  "goal_rounds": [
+    {
+      "id": "goal-28d6557a-9e6d-4305-a9f9-0361ebdd7456",
+      "revision": 1,
+      "round": 1
+    }
+  ],
+  "native_before_probe": "working",
+  "probe_receipt": {
+    "delivery_id": "e0ca6900-dd12-43b2-896e-3836f9d9b881",
+    "digest": "0dd411700204937f9d69086e74d67f7afb49044de8337b68af2e3ead2328071f",
+    "native_id": "mowulink-061aa33b67343bb533892b522cb6d8cd45512e45b44b5fe7e7ceb14af891fb7c",
+    "session": "dsh-native-formal-goal",
+    "turn_id": "36/3"
+  },
+  "w04": {
+    "recorded": true,
+    "release_assignment_id": "01149c21-4830-4b30-a362-d7045e186936",
+    "task_state": "completed_reported"
+  },
+  "router_final": "completed_reported",
+  "boundary": "Native DSH goal tools, actual scheduled continuation and Router probes; scripted local model"
+}

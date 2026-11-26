@@ -14,12 +14,14 @@ const {Context,Service} = await sdk('cordis');
 const {LlmAdapter,LlmRuntime} = await sdk('dsh-llm');
 const entered = Promise.withResolvers();
 const secondRound = Promise.withResolvers();
+const formalRound = Promise.withResolvers();
 const compactEntered = Promise.withResolvers();
 const compactReleased = Promise.withResolvers();
-const usesGoals = mode==='goals' || mode==='goal-driver';
+const usesGoals = ['goals','goal-driver','formal-goal'].includes(mode);
 const modelRequests = [];
 const catalogSessions = [];
 const privateStops = new Map(['one','two','three'].map(tag=>[tag,Promise.withResolvers()]));
+const mediaRequests = [];
 
 class LocalModel extends LlmAdapter {
   submitted = new Map();
@@ -28,7 +30,8 @@ class LocalModel extends LlmAdapter {
   }
   async resolveModel(provider, model) {
     return {provider,id:model,name:'Local test model',reasoning:{
-      efforts:[{id:'low',name:'Low'},{id:'high',name:'High'}],defaultEffort:'low'}};
+      efforts:[{id:'low',name:'Low'},{id:'high',name:'High'}],defaultEffort:'low'},
+      inputModalities:mode==='media' ? ['text','image'] : ['text']};
   }
   async *stream({provider,model,reasoningEffort,messages,signal,tools,purpose}) {
     if (purpose==='compaction') {
@@ -42,13 +45,45 @@ class LocalModel extends LlmAdapter {
       return;
     }
     const message = messages.findLast(entry=>entry.role==='user');
-    const text = message.content.find(block=>block.type==='text').text;
+    const text = message.content.find(block=>block.type==='text')?.text ?? '';
     const payload = text.startsWith('魔物链接投递\n') ? JSON.parse(text.split('\n')[1]) : null;
     const goal = message.source.kind==='goal' ? message.source : null;
     const command = goal ? 'goal' : payload?.kind ?? 'private';
     modelRequests.push({command,provider,model,reasoningEffort});
-    if (goal?.round===1) await waitForStop(signal);
+    if (mode==='media') {
+      const store = ctx.get('attachments');
+      const images = [];
+      for (const part of message.content.filter(block=>block.type==='image')) {
+        const image = await store.readImage(part.attachment);
+        images.push({sha256:createHash('sha256').update(image.data).digest('hex'),size:image.data.length});
+      }
+      mediaRequests.push({caption:text,images,partTypes:message.content.map(part=>part.type)});
+      yield {type:'block-start',index:0,blockType:'text'};
+      yield {type:'text-delta',index:0,text:`Local fixture received ${images.length} image(s).`};
+      yield {type:'finish',reason:{kind:'stop'}};
+      return;
+    }
+    if (goal?.round===1 && mode!=='formal-goal') await waitForStop(signal);
     if (goal?.round===2) secondRound.resolve();
+    if (mode==='formal-goal') {
+      let action;
+      if (command==='task') action = ['create_goal',{objective:'Complete the isolated formal objective',max_goal_rounds:1}];
+      if (goal?.round===1) {
+        formalRound.resolve();
+        action = ['update_goal',{goal_id:goal.goalId,revision:goal.revision,action:'complete'}];
+      }
+      if (command==='task_probe') action = ['worker_report',{task_id:payload.task_id,assignment_id:payload.assignment_id,
+        summary:'Verified in the separate goal continuation',outcome:'completed'}];
+      if (action && !this.submitted.has(action[0])) {
+        const [name,args] = action;
+        this.submitted.set(name,true);
+        assert.ok(tools?.some(tool=>tool.name===name));
+        yield {type:'block-start',index:0,blockType:'tool-call'};
+        yield {type:'block-end',index:0,block:{type:'tool-call',id:'native-formal-goal-'+name,name,arguments:JSON.stringify(args)}};
+        yield {type:'finish',reason:{kind:'tool-calls'}};
+        return;
+      }
+    }
     if (mode==='private-stop' && text.startsWith('Hold private ')) {
       privateStops.get(text.split(' ').at(-1)).resolve();
       await waitForStop(signal);
@@ -101,7 +136,7 @@ class LocalModel extends LlmAdapter {
           yield {type:'finish',reason:{kind:'tool-calls'}};
           return;
         }
-      } else if (mode!=='work-question') {
+      } else if (mode!=='work-question' && mode!=='formal-goal') {
         await waitForStop(signal);
       }
     }
@@ -145,11 +180,13 @@ async function setup() {
       {fallbackMaxWords:12,fallbackMaxBytes:120,maxTitleBytes:300});
   }
   await install((await sdk('dsh-system-prompt')).SystemPrompt);
+  if (mode==='media') await install((await sdk('dsh-attachment-local')).default,{dshHome:directory});
   await install((await sdk('dsh-tools')).ToolsService);
   if (mode==='questions') {
     await install((await sdk('dsh-user-questions')).UserQuestionService);
     await install(await sdk('dsh-tool-ask-user'),{mode:'timed',timeout:1});
   }
+  if (mode==='formal-goal') await install(await sdk('dsh-tool-goal'));
   await install(await sdk('dsh-tool-executor-native'));
   await install(LlmRuntime);
   ctx.get('llm').registerAdapter(['fixture'],new LocalModel());
@@ -158,7 +195,7 @@ async function setup() {
     await install((await sdk('dsh-compaction-basic')).BasicCompactionEngine,{auto:false});
   }
   await install((await sdk('dsh-agent-loop')).AgentLoop,{});
-  if (mode==='goal-driver') await install(await sdk('dsh-goal-round-driver'));
+  if (mode==='goal-driver' || mode==='formal-goal') await install(await sdk('dsh-goal-round-driver'));
   const {agent} = await ctx.get('agents').create({
     sessionId:session,agentOptions:{provider:'fixture',model:'local'}});
   if (mode==='catalog') {
@@ -253,6 +290,7 @@ async function formalScenario(agent) {
       assert.equal(ctx.get('userQuestions').answer(agent,'native-question-native',
         {answers:[{id:'primary',selected:['A']}]}),true);
     }
+    else if (line==='formal-goal-round' && mode==='formal-goal') await formalRound.promise;
     else assert.ok(line==='read' || line==='second-round' && mode==='goal-driver');
     if (line==='second-round') await secondRound.promise;
     await agent.whenIdle();
@@ -271,6 +309,7 @@ async function formalScenario(agent) {
       .map(e=>({id:e.data.id,call:e.data.source.callId,seq:e.seq,body:JSON.parse(e.data.content[0].text)}));
     const continued = mode==='questions' ? ctx.get('userQuestions').continued(agent).map(q=>q.callId) : [];
     console.log(JSON.stringify({session,inputs,calls,results,turns,modelRequests,rounds,compactEvents,replies,continued,
+      mediaRequests,
       inbox:mode==='private-stop' ? agent.inbox.nextTurn.map(message=>message.id) : [],
       liveSessions:mode==='catalog' ? ctx.get('agents').list().map(agent=>agent.session.id) : []}));
   }
@@ -278,7 +317,7 @@ async function formalScenario(agent) {
 
 try {
   const agent = await setup();
-  if (['formal','compact','questions','catalog','private-stop','work-question'].includes(mode) || usesGoals) {
+  if (['formal','compact','questions','catalog','private-stop','work-question','media'].includes(mode) || usesGoals) {
     await formalScenario(agent);
   }
   else await stopScenario(agent);

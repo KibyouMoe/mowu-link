@@ -1,0 +1,54 @@
+{
+  "session": "dsh-native-media",
+  "captioned_receipt": {
+    "delivery_id": "chat-om_dsh_caption",
+    "digest": "9142786cd82954721284a3c70f698a121f705f51a55b191a425ae30875049d95",
+    "media_sha256": [
+      "e77617115ffe6399c0f4714c72aa32eefeb22fbdf45b1167a4ddb64e213b4007"
+    ],
+    "native_id": "mowulink-5af7bba358fd0d0570aff5d6e7f56bde2c1a9ed58a98856374c18b3260318ed0",
+    "session": "dsh-native-media",
+    "turn_id": "1/1"
+  },
+  "image_only_receipt": {
+    "delivery_id": "chat-om_dsh_image",
+    "digest": "34ac8527ddc7c9a46d8c5b2cb39a4a970edd97f03287fd7a3136167b81c483bd",
+    "media_sha256": [
+      "e77617115ffe6399c0f4714c72aa32eefeb22fbdf45b1167a4ddb64e213b4007"
+    ],
+    "native_id": "mowulink-d00c8c2e390543928b6b86356be36d3e1fbc5f5acf197c67fc347977019dedef",
+    "session": "dsh-native-media",
+    "turn_id": "12/2"
+  },
+  "provider_messages": [
+    {
+      "caption": "  图上有哪些细节？\n同一条原文。 ",
+      "images": [
+        {
+          "sha256": "e77617115ffe6399c0f4714c72aa32eefeb22fbdf45b1167a4ddb64e213b4007",
+          "size": 70
+        }
+      ],
+      "partTypes": [
+        "text",
+        "image"
+      ]
+    },
+    {
+      "caption": "",
+      "images": [
+        {
+          "sha256": "e77617115ffe6399c0f4714c72aa32eefeb22fbdf45b1167a4ddb64e213b4007",
+          "size": 70
+        }
+      ],
+      "partTypes": [
+        "image"
+      ]
+    }
+  ],
+  "download_count": 2,
+  "original_input_count": 2,
+  "reply_cards": 2,
+  "boundary": "Actual DSH run loop and attachment storage; Feishu and model provider are fixtures"
+}
