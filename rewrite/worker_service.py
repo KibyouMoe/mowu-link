@@ -23,7 +23,8 @@ class WorkerService:
         self.host_context = False
         self.host_model_view = False
         self.host_model_change = False
-        self.model_command_lock = Lock()
+        self.host_goal_control = False
+        self.native_command_lock = Lock()
         self.host_session = ""
         self.clock, self.probe_interval = clock, probe_interval
         self.next_probe = 0
@@ -52,6 +53,7 @@ class WorkerService:
                 self.host_context = info.get("context_usage") is True
                 self.host_model_view = info.get("model_view") is True
                 self.host_model_change = info.get("model_change") is True
+                self.host_goal_control = info.get("goal_control") is True
             except (Fault,URLError,OSError):
                 self.host_busy = None
                 self.adapter_connected = False

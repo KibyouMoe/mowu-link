@@ -177,6 +177,8 @@ class DshSdk(unittest.TestCase):
         self.assertEqual(command("om_original"),first)
         self.assertEqual(self.drive("count")["received"],1)
         self.assertIsNone(self.w.hold()["held_task_id"])
+        self.assertIn("暂未接入目标模式",self.platform_command("om_goal_unsupported","/goal"))
+        self.assertIn("暂未接入目标模式",self.platform_command("om_pause_unsupported","/goal pause"))
 
     def test_model_and_effort_distinguish_live_selection_from_recorded_request(self):
         self.remote_adapter("models")

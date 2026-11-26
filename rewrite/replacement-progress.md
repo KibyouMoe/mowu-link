@@ -4,6 +4,10 @@
 
 ## 检查点与证据
 
+DSH 的飞书 `/goal` 查询、暂停和继续接到原生目标服务。隔离回归查到同一目标的版本变化，暂停和继续各一条原生记录。丢失继续回执时保留待核，重送旧消息没有重复变更。同一会话未出现普通模型输入，Router 未建单。未加载目标服务的会话提示暂未接入。复跑 `python3 -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_goal_query_pause_and_resume_use_the_bound_native_goal`，macOS 全套 132 项通过。本项核验目标服务与持久状态，自动续跑另验。
+
+提交 `ab112dc8a6ee60e89b0af5bba184d9526750bbf6` 的 Linux arm64 复验通过 111 项，20 项 macOS DSH 测试跳过。跨 TLS 测试复核 105 个发行文件，原生宿主夹具只记一条输入、Router 只新增一条成果通知，认证反例通过。
+
 Antigravity 桌面兼容层新增接口对照。本机 App 为 2.32.1。Google 文档提供工作区钩子、原生会话及转录路径和 MCP 工具入口。MCP App 的消息能力从 2.34.0 起，当前仍缺按指定会话后台唤醒和取消的实测。先留隔离验收入口，不以日志或资料推断飞书全链已通。[Antigravity 兼容层核对](antigravity-compatibility.md)。
 
 Hermes 插件已能向单独登记的飞书会话投递收件提示。模拟 Notify 在 Hermes 忙时成功入箱，正文等空闲 10 秒，飞书只收到来源与等级。丢失平台回执后，重启续用同一消息号。超出安全重试窗口的提示保留待核，更换绑定也不会转发旧提示，后续 Event 照常进入宿主。复跑 `python3 -m unittest -v rewrite.test_manager_notices` 和带 SDK 的 `python3 -m rewrite.feishu_sdk_check`，macOS 全套 131 项通过。Router 与 Trigger 走实际 HTTP，通知测试的 Hermes 宿主及飞书返回为夹具。另跑真实 Hermes 隔离 LOCAL 输入，等待 11.5 秒后交 Notify，Event 续跑查回同一原生收件。正式飞书会话另验。

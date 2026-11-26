@@ -31,10 +31,16 @@ class RemoteAdapter:
         info = self.request("GET","host/session")
         return {"session":string(info,"session"),"next_turn":info.get("next_turn") is True,
                 "context_usage":info.get("context_usage") is True,"model_view":info.get("model_view") is True,
-                "model_change":info.get("model_change") is True}
+                "model_change":info.get("model_change") is True,"goal_control":info.get("goal_control") is True}
 
     def context_usage(self):
         return self.request("GET","host/context")
+
+    def goal_view(self):
+        return self.request("GET","host/goal")
+
+    def goal_change(self, session, action):
+        return self.request("POST","host/goal",{"session":session,"action":action})
 
     def model_view(self, kind):
         return self.request("GET","host/"+kind)
@@ -72,6 +78,11 @@ def serve_adapter(adapter, worker_id, identities, address, context):
                 result = {"busy":adapter.busy()}
             case "GET","/v1/host/context":
                 result = adapter.context_usage()
+            case "GET","/v1/host/goal":
+                result = adapter.goal_view()
+            case "POST","/v1/host/goal":
+                require(set(body)=={"session","action"} and body["action"] in ("pause","resume"),422,"invalid_goal_action")
+                result = adapter.goal_change(string(body,"session"),body["action"])
             case "GET",("/v1/host/models"|"/v1/host/efforts"):
                 result = adapter.model_view(path.rsplit("/",1)[1])
             case "POST","/v1/host/model-selection":

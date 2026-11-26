@@ -41,7 +41,9 @@ class HostAdapter:
         return {"session":self.session,"next_turn":getattr(self.host,"next_turn",False) is True,
                 "context_usage":callable(getattr(self.host,"context_usage",None)),
                 "model_view":callable(getattr(self.host,"model_view",None)),
-                "model_change":callable(getattr(self.host,"model_change",None))}
+                "model_change":callable(getattr(self.host,"model_change",None)),
+                "goal_control":callable(getattr(self.host,"goal_view",None))
+                and callable(getattr(self.host,"goal_change",None))}
 
     def context_usage(self):
         reader = getattr(self.host,"context_usage",None)
@@ -50,6 +52,17 @@ class HostAdapter:
         require(isinstance(result,dict) and result.get("session")==self.session and "latest" in result,
                 409,"wrong_native_context")
         return result
+
+    def goal_view(self):
+        reader = getattr(self.host,"goal_view",None)
+        require(callable(reader),422,"native_goal_unavailable")
+        return reader(self.session)
+
+    def goal_change(self, session, action):
+        require(session==self.session,409,"wrong_native_session")
+        writer = getattr(self.host,"goal_change",None)
+        require(callable(writer),422,"native_goal_unavailable")
+        return writer(self.session,action)
 
     def model_view(self, kind):
         reader = getattr(self.host,"model_view",None)

@@ -64,6 +64,12 @@ class DshHost:
     def context_usage(self, session):
         return self.request("context-usage",session)
 
+    def goal_view(self, session):
+        return self.request("goal-view",session)
+
+    def goal_change(self, session, action):
+        return self.request("goal-change",session,{"action":action})
+
     def model_view(self, session, kind):
         return self.request("model-view",session,{"kind":kind})
 

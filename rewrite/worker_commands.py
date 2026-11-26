@@ -11,6 +11,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS platform_commands (
  message_id TEXT PRIMARY KEY, request TEXT NOT NULL, receipt TEXT NOT NULL
 );
+-- Also used for new native goal actions. Keep existing intents across upgrades.
 CREATE TABLE IF NOT EXISTS platform_model_intents (
  message_id TEXT PRIMARY KEY, request TEXT NOT NULL, session TEXT NOT NULL
 );
@@ -42,6 +43,8 @@ def reply(service, name, args, hold):
             lines.append("/model 查看模型，/effort 查看当前模型支持的思考强度。")
         if service.adapter_connected and service.host_model_change:
             lines.append("/model 或 /effort 可用 next / prev 翻页，用菜单编号或名称切换。")
+        if service.adapter_connected and service.host_goal_control:
+            lines.append("/goal 查看会话目标，可用 pause 或 resume。")
         lines.append("/queue 内容：排入下一回合。" if service.adapter_connected and service.host_queue else "/queue 当前未确认可用。")
         return "\n".join(lines)
     if name == "/status":
@@ -86,6 +89,31 @@ def context_answer(service):
     return (f"最近一次模型回包 · 第 {data['turn']} 回合，第 {data['step']} 步\n"
             f"模型 {data['provider']}/{data['model']}\n输入 {count('input_tokens')} tokens\n"
             f"本次总用量 {count('total_tokens')} tokens\n模型窗口 {count('window_tokens')} tokens")
+
+
+GOAL_PHASES = {"active":"进行中","paused":"已暂停","blocked":"受阻","complete":"已完成"}
+
+
+def describe_goal(goal):
+    require(isinstance(goal,dict) and goal.get("phase") in GOAL_PHASES
+            and goal.get("activation") in ("armed","disarmed"),502,"invalid_native_goal")
+    started,limit = goal.get("started"),goal.get("limit")
+    require(type(started) is int and type(limit) is int and limit>0 and started>=0,502,"invalid_native_goal")
+    objective = string(goal,"objective")
+    summary = objective[:3000]+("…" if len(objective)>3000 else "")
+    continuation = "已启用" if goal["activation"]=="armed" else "未启用"
+    return f"{GOAL_PHASES[goal['phase']]} · {started}/{limit} 轮\n续跑授权 {continuation}\n{summary}"
+
+
+def goal_answer(service,session,args):
+    if args:
+        return "用法：/goal、/goal pause 或 /goal resume。"
+    data = service.worker.adapter.goal_view()
+    require(isinstance(data,dict) and data.get("session")==session and type(data.get("supported")) is bool,
+            409,"wrong_native_goal_view")
+    if not data["supported"]:
+        return "当前会话暂未接入目标模式。"
+    return describe_goal(data["goal"]) if data.get("goal") is not None else "当前会话没有目标。"
 
 
 def model_answer(service,session,name,args,last_page):
@@ -159,7 +187,7 @@ def previous(db,mid,text):
     require(not intent or intent["request"]==text,409,"platform_command_conflict")
 
 
-def record(db,mid,text,name,session,answer,model_receipt=None,menu=None):
+def record(db,mid,text,name,session,answer,*,model_receipt=None,goal_receipt=None,menu=None):
     payload = {"event_id":"command-"+mid,"kind":"command","session":session,"turn_id":"","text":answer}
     if menu is not None:
         payload["model_menu"] = True
@@ -169,6 +197,8 @@ def record(db,mid,text,name,session,answer,model_receipt=None,menu=None):
     receipt = {"message_id":mid,"command":name,"output":event}
     if model_receipt is not None:
         receipt["model_receipt"] = model_receipt
+    if goal_receipt is not None:
+        receipt["goal_receipt"] = goal_receipt
     db.execute("INSERT INTO platform_commands VALUES (?,?,?)",(mid,text,encode(receipt)))
     return receipt
 
@@ -190,12 +220,20 @@ def acknowledge_menu(worker,body):
 
 
 UNKNOWN_MODEL_CHANGE = "切换结果待核。请用 /model 或 /effort 查看会话当前状态。"
+UNKNOWN_GOAL_CHANGE = "目标操作待核。请用 /goal 查看会话当前状态。"
 CHANGE_ERRORS = {
     "model_change_busy":"会话正在工作。空闲后可重新发送切换命令。",
     "model_change_conflict":"查询期间会话状态已变化。请刷新选择后重试。",
     "model_menu_route_changed":"打开菜单后模型已切换。请重新用 /effort 查看选项。",
     "model_choice_unavailable":"该选项暂不可用。请查看当前模型和思考强度列表。",
     "model_choice_needs_route":"用法：/model 提供方/模型。",
+    "wrong_native_session":"会话绑定发生变化。请查当前绑定。",
+}
+GOAL_ERRORS = {
+    "native_goal_unavailable":"当前会话暂未接入目标模式。",
+    "native_goal_missing":"当前会话没有目标。",
+    "native_goal_transition_refused":"目标当前状态不允许这项操作。可用 /goal 查看。",
+    "native_goal_changed":"目标已变化。请用 /goal 查看。",
     "wrong_native_session":"会话绑定发生变化。请查当前绑定。",
 }
 
@@ -220,10 +258,24 @@ def confirmed_selection(receipt,session,kind,value,expected_route):
     return answer,{"session":session,"selected":selected,"changed":changed,"event_seq":sequence if changed else None}
 
 
-def switch_model(service,mid,text,name,value):
+def confirmed_goal(receipt,session,action):
+    require(isinstance(receipt,dict) and receipt.get("session")==session and receipt.get("operation")==action
+            and type(receipt.get("event_seq")) is int and receipt["event_seq"]>=0,502,"invalid_goal_change_receipt")
+    goal = receipt.get("goal")
+    rendered = describe_goal(goal)
+    ref = string(goal,"id")
+    phase,activation = ("paused","disarmed") if action=="pause" else ("active","armed")
+    require((goal["phase"],goal["activation"])==(phase,activation)
+            and type(goal.get("revision")) is int and goal["revision"]>=1,502,"invalid_goal_change_receipt")
+    return rendered,{"session":session,"id":ref,"revision":goal["revision"],"phase":phase,"event_seq":receipt["event_seq"]}
+
+
+def change_native(service,mid,text,name,value):
     worker = service.worker
-    kind = MODEL_VIEWS[name]
-    with service.model_command_lock:
+    kind = MODEL_VIEWS.get(name)
+    supported = service.host_model_change if kind else service.host_goal_control
+    unknown = UNKNOWN_MODEL_CHANGE if kind else UNKNOWN_GOAL_CHANGE
+    with service.native_command_lock:
         with worker.db.transaction() as db:
             old = previous(db,mid,text)
             if old:
@@ -231,12 +283,12 @@ def switch_model(service,mid,text,name,value):
             intent = db.execute("SELECT session FROM platform_model_intents WHERE message_id=?",(mid,)).fetchone()
             if intent:
                 # A prior Worker may have died after the native write. Do not write again from the same command.
-                return record(db,mid,text,name,intent["session"],UNKNOWN_MODEL_CHANGE)
-            if not (service.adapter_connected and service.host_model_change):
+                return record(db,mid,text,name,intent["session"],unknown)
+            if not (service.adapter_connected and supported):
                 return None
             session = service.host_session
             expected_route = None
-            if value.isdecimal():
+            if kind and value.isdecimal():
                 menu = db.execute("SELECT choices,expected_route,platform_mid FROM platform_model_menu WHERE session=? AND kind=?",
                                   (session,kind)).fetchone()
                 if menu and not menu["platform_mid"]:
@@ -249,19 +301,23 @@ def switch_model(service,mid,text,name,value):
                     return record(db,mid,text,name,session,"当前菜单没有绑定模型。请重新用 /effort 查看。")
                 value = choice
             db.execute("INSERT INTO platform_model_intents VALUES (?,?,?)",(mid,text,session))
-        answer = UNKNOWN_MODEL_CHANGE
+        answer = unknown
         native = None
         try:
-            options = {"expected_route":expected_route} if expected_route is not None else {}
-            receipt = worker.adapter.model_change(session,kind,value,**options)
-            answer,native = confirmed_selection(receipt,session,kind,value,expected_route)
+            if kind:
+                options = {"expected_route":expected_route} if expected_route is not None else {}
+                receipt = worker.adapter.model_change(session,kind,value,**options)
+                answer,native = confirmed_selection(receipt,session,kind,value,expected_route)
+            else:
+                answer,native = confirmed_goal(worker.adapter.goal_change(session,value),session,value)
         except Fault as error:
-            answer = CHANGE_ERRORS.get(error.code,UNKNOWN_MODEL_CHANGE)
+            answer = (CHANGE_ERRORS if kind else GOAL_ERRORS).get(error.code,unknown)
         except (URLError,OSError):
             pass
         with worker.db.transaction() as db:
             old = previous(db,mid,text)
-            return old or record(db,mid,text,name,session,answer,native)
+            receipts = {"model_receipt" if kind else "goal_receipt":native}
+            return old or record(db,mid,text,name,session,answer,**receipts)
 
 
 def handle(service, body):
@@ -269,8 +325,9 @@ def handle(service, body):
     mid, text = string(body,"message_id"), string(body,"text")
     require(is_command(text),422,"invalid_platform_command")
     name,*args = text.strip().split()
-    if name in MODEL_VIEWS and len(args)==1 and args[0] not in ("next","prev"):
-        receipt = switch_model(service,mid,text,name,args[0])
+    if len(args)==1 and (name in MODEL_VIEWS and args[0] not in ("next","prev")
+                         or name=="/goal" and args[0] in ("pause","resume")):
+        receipt = change_native(service,mid,text,name,args[0])
         if receipt is not None:
             return receipt
     answer = None
@@ -278,6 +335,7 @@ def handle(service, body):
     session = service.host_session if service.adapter_connected else ""
     if service.adapter_connected and (
         name=="/context" and service.host_context or name in MODEL_VIEWS and service.host_model_view
+        or name=="/goal" and service.host_goal_control
     ):
         with service.worker.db.transaction() as db:
             old = previous(db,mid,text)
@@ -288,6 +346,8 @@ def handle(service, body):
         # Keep native I/O outside the transaction; a retry returns the first committed answer.
         if name=="/context":
             answer = "用法：/context" if args else context_answer(service)
+        elif name=="/goal":
+            answer = goal_answer(service,session,args)
         else:
             answer,menu = model_answer(service,session,name,args,last["page"] if last else 1)
     with service.worker.db.transaction() as db:

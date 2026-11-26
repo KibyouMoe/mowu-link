@@ -74,6 +74,7 @@ async function setup() {
   await install((await sdk('dsh-session')).SessionStore);
   await install((await sdk('dsh-session-projection')).SessionProjectionRegistry);
   await install((await sdk('dsh-agent')).AgentRegistry);
+  if (mode==='goals') await install((await sdk('dsh-goal')).GoalService,{});
   await install(await sdk('dsh-session-persistence-jsonl'),{root:path.join(directory,'sessions')});
   await install((await sdk('dsh-system-prompt')).SystemPrompt);
   await install((await sdk('dsh-tools')).ToolsService);
@@ -138,6 +139,12 @@ async function formalScenario(agent) {
   console.log(JSON.stringify({ready:true,session}));
   for await (const line of createInterface({input:process.stdin,terminal:false})) {
     if (line==='exit') break;
+    if (line==='create-goal' && mode==='goals') {
+      const goal = ctx.get('goals').create(agent,{objective:'隔离持久目标'});
+      await ctx.get('sessions').flush(agent.session);
+      console.log(JSON.stringify({id:goal.id,revision:goal.revision,limit:goal.maxGoalRounds}));
+      continue;
+    }
     assert.equal(line,'read');
     await agent.whenIdle();
     const events = await readEvents(agent);
@@ -151,7 +158,7 @@ async function formalScenario(agent) {
 
 try {
   const agent = await setup();
-  if (mode==='formal') await formalScenario(agent);
+  if (mode==='formal' || mode==='goals') await formalScenario(agent);
   else await stopScenario(agent);
 } finally {
   for (const handle of plugins.reverse()) await handle.dispose();
