@@ -200,6 +200,62 @@ class NativeLoop(unittest.TestCase):
             return receipt,event["text"]
         return directory,loop,service,command
 
+    def test_native_w04_stages_private_artifact_before_sharing_it_with_manager(self):
+        session = "dsh-formal-artifact"
+        directory,loop,service,_command = self.goal_worker(session)
+        token = guid()
+        client = Client(self.open_worker(service,{token:"adapter/oguri"}),token)
+        self.enterContext(tool_listener(Path(directory),loop.adapter,client))
+        raw = bytes(range(256))*2200
+        digest = hashlib.sha256(raw).hexdigest()
+        route = "worker/media/uploads"
+        uploaded = client.request("POST",route,{"name":"sample.bin","sha256":digest,"size_bytes":len(raw)},guid())
+        local = client.request("PATCH",route+"/"+uploaded["upload_id"],raw,headers={"Upload-Offset":"0"})["attachment_id"]
+        transfer = loop.worker.router.request
+        events = []
+        with self.start_native(directory,session,"formal-artifacts") as native:
+            tid = loop.hermes.create(guid(),"Native artifact test",local,"oguri")["task_id"]
+            def fail_final_file_ack(method,path,*args,**kwargs):
+                if path==f"tasks/{tid}/report":
+                    artifact, = args[0]["artifact_ids"]
+                    with self.assertRaisesRegex(Fault,"attachment_not_found"):
+                        loop.manager_wire.request("GET","attachments/"+artifact)
+                    self.assertEqual(transfer("GET","attachments/"+artifact)["bytes"],raw)
+                    self.assertEqual(loop.worker.hold()["held_task_id"],tid)
+                    events.append(("report",artifact))
+                result = transfer(method,path,*args,**kwargs)
+                if method=="PATCH" and path.startswith("uploads/"):
+                    events.append(("chunk",result["next_offset"]))
+                    if result["complete"]:
+                        raise ConnectionError("isolated final file receipt lost")
+                return result
+            loop.worker.router.request = fail_final_file_ack
+            loop.worker.connect()
+            loop.worker.poll()
+            service.clock.advance(10)
+            loop.worker.poll()
+            loop.worker.poll()
+            observed = self.read_native(native,"read")
+        self.assertEqual([call["name"] for call in observed["calls"]],
+                         ["worker_stage_artifacts","worker_stage_artifacts","worker_report"])
+        self.assertEqual([result["isError"] for result in observed["results"]],[True,False,False])
+        self.assertEqual(len(observed["inputs"]),1)
+        _stage, staged, report = observed["results"]
+        artifact, = json.loads(staged["content"][0]["text"])["artifact_ids"]
+        self.assertEqual(events,[("chunk",256*1024),("chunk",512*1024),("chunk",len(raw)),("report",artifact)])
+        details = loop.hermes.inspect(tid)
+        self.assertEqual(details["last_report"]["artifact_ids"],[artifact])
+        self.assertEqual(details["task"]["state"],"completed_reported")
+        self.assertIsNone(loop.worker.hold()["held_assignment_id"])
+        self.assertEqual(loop.manager_wire.request("GET","attachments/"+artifact)["bytes"],raw)
+        notify, = loop.manager_wire.frames(0)
+        self.assertEqual(notify["payload"]["attachment_ids"],[artifact])
+        self.evidence = {"session":session,"native_input":observed["inputs"][0],"calls":observed["calls"],
+                         "report":json.loads(report["content"][0]["text"]),"task_id":tid,"artifact_id":artifact,
+                         "local_artifact_id":local,"sha256":digest,"bytes":len(raw),"transfer":events,
+                         "manager_notification":notify["delivery_id"],
+                         "boundary":"Actual DSH AgentLoop and isolated Router, scripted model, no Feishu"}
+
     def test_goal_query_pause_and_resume_use_the_bound_native_goal(self):
         session = "dsh-real-loop-goals"
         directory,loop,service,command = self.goal_worker(session)

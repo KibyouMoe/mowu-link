@@ -32,6 +32,8 @@ python3 -m unittest -v rewrite.test_mainline
 
 DSH 同一工单来源的回合可用 `worker_submit_material` 单独提交候选文字或已经授权的附件引用。Router 仍核对原派发、入池状态、当前持权和有没有再次派发。材料回执只返回材料号，原样重投返回同一号。新的材料在再派后会被拒绝。W04 的失效派发错误继续按原协议返回。
 
+已核验的 DSH 工单回合可用 `worker_stage_artifacts` 暂存本工位适配器拥有的文件，拿到 Router 的 `artifact_ids` 后再随 W04 或候选材料提交。暂存只收已登记的附件号。Router 收完整文件后仍只向原工位开放，正式回报或候选材料写入后才让溪流读取。
+
 首段的 Agent、Codex/Hermes 宿主、飞书输入与验收人均为夹具。真实客户端、飞书卡片、Trigger/附件、候选材料、转派与取消、完整掉线入池、询单和提问后续接入。各入口只接受本切片明示的业务动作。
 
 第二段已用本机 Codex Desktop 独立聊天验收正式工单输入，复跑方式和原生回执见 [Desktop 接入实测](desktop-check.md)。上述 `rewrite.devloop` 继续提供可离线运行的夹具回环。

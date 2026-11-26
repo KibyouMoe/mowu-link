@@ -612,6 +612,26 @@ class Worker:
                 and isinstance(result["material_id"],str) and result["material_id"],409,"material_receipt_mismatch")
         return result
 
+    def stage_work_artifacts(self,session,native_id,args):
+        require(set(args)=={"attachment_ids"},422,"invalid_arguments")
+        ids,kinds = peer_files.request_files(args)
+        require(ids and len(set(ids))==len(ids),422,"invalid_artifact_ids")
+        with self.lock:
+            origin = self.adapter.origin(native_id,session=session)
+            require(origin["kind"] in ("task","task_update","task_probe","question_answer","task.shelved"),
+                    403,"wrong_artifact_origin")
+            aid = origin["assignment_id"]
+            require(self.assignment_session(aid)==session,403,"wrong_assignment_session")
+            with self.db.transaction() as db:
+                require(db.execute("""SELECT 1 FROM jobs WHERE assignment_id=? AND task_id=?
+                                   AND (stage='accepted' OR (stage='released' AND ?='task.shelved'))""",
+                                   (aid,origin["task_id"],origin["kind"])).fetchone(),409,"stale_assignment")
+                files = peer_files.file_list(db,"adapter/"+self.worker_id,ids,kinds,owned=True)
+        try:
+            return {"artifact_ids":peer_files.export(self,files)}
+        except OSError as error:
+            raise Fault(503,"artifact_stage_unconfirmed",True) from error
+
     def display_cleanup(self, tid, aid, kind, status, text):
         with self.db.transaction() as db:
             display.append(db,{"event_id":f"cleanup-{kind}-{aid}-{status}","kind":"task","session":"",

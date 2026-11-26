@@ -185,7 +185,25 @@ class LocalModel extends LlmAdapter {
       return;
     }
     if (command==='task') {
-      if (mode==='formal') {
+      if (mode==='formal-artifacts') {
+        const attempt = this.submitted.get(payload.assignment_id) ?? 0;
+        if (attempt<3) {
+          this.submitted.set(payload.assignment_id,attempt+1);
+          const staging = attempt<2;
+          const name = staging ? 'worker_stage_artifacts' : 'worker_report';
+          assert.ok(tools?.some(tool=>tool.name===name));
+          const previous = messages.findLast(entry=>entry.toolCallId==='artifact-fixture-1');
+          const args = staging ? {attachment_ids:[payload.instructions]} : {
+            task_id:payload.task_id,assignment_id:payload.assignment_id,summary:'Native fixture with an artifact',
+            artifact_ids:JSON.parse(previous.content[0].text).artifact_ids,
+          };
+          yield {type:'block-start',index:0,blockType:'tool-call'};
+          yield {type:'block-end',index:0,block:{type:'tool-call',id:'artifact-fixture-'+attempt,
+            name,arguments:JSON.stringify(args)}};
+          yield {type:'finish',reason:{kind:'tool-calls'}};
+          return;
+        }
+      } else if (mode==='formal') {
         const attempt = this.submitted.get(payload.assignment_id) ?? 0;
         if (attempt<2) {
           this.submitted.set(payload.assignment_id,attempt+1);
@@ -399,7 +417,7 @@ async function formalScenario(agent) {
 
 try {
   const agent = await setup();
-  if (['formal','compact','questions','catalog','private-stop','work-question','admission-race',
+  if (['formal','formal-artifacts','compact','questions','catalog','private-stop','work-question','admission-race',
        'binding-close','material','peer-source'].includes(mode) || usesGoals || usesMedia) {
     await formalScenario(agent);
   }

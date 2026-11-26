@@ -151,6 +151,8 @@ class WorkerService:
                 call = string(body,"call_id")
                 key = "candidate-"+str(uuid5(NAMESPACE_URL,encode([w.worker_id,session,turn,call])))
                 result = w.submit_material(session,native,key,args)
+            elif body.get("tool") == "worker_stage_artifacts":
+                result = w.stage_work_artifacts(session,native,args)
             elif body.get("tool") in ("worker_send_peer","worker_peer_status","worker_list_peers","worker_peer_inbox"):
                 self.require_peer_origin(session,native)
                 if body["tool"] == "worker_send_peer":

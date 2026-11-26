@@ -121,6 +121,19 @@
     }
   },
   {
+    "name": "worker_stage_artifacts",
+    "description": "Stage files already owned by this Worker adapter for a formal report or a candidate material submission. Returns Router artifact IDs. Staging does not submit the report, share the files with the manager, or change the assignment.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "attachment_ids": {"type": "array", "minItems": 1, "maxItems": 10, "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}}
+      },
+      "required": ["attachment_ids"]
+    }
+  },
+  {
     "name": "worker_list_peers",
     "description": "List other registered Worker IDs available to contact. The directory reports whether each Worker connection is online and does not show their assignments.",
     "inputSchema": {

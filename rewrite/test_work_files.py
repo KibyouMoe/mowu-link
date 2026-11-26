@@ -1,6 +1,7 @@
 import hashlib
 import unittest
 
+from . import attachments
 from .devloop import Loop, agent_report
 from .storage import Fault, guid
 from .test_mainline import Clock
@@ -55,3 +56,22 @@ class WorkFiles(unittest.TestCase):
         self.assertEqual(details["materials"][0]["artifact_ids"],[good])
         self.assertIsNone(details["last_report"])
         self.assertEqual(details["task"]["state"],"blocked")
+
+    def test_staging_requires_formal_origin_and_attachment_ownership(self):
+        body = b"local platform attachment"
+        with self.w.db.transaction() as db:
+            platform = "platform/oguri"
+            upload = attachments.begin(db,platform,{"name":"private.txt","size_bytes":len(body),
+                                                    "sha256":hashlib.sha256(body).hexdigest()})
+            completed = attachments.append(db,platform,upload["upload_id"],"0",body)
+            aid = completed["attachment_id"]
+            attachments.grant(db,platform,"adapter/oguri",[aid])
+        args = {"attachment_ids":[aid]}
+        private = self.w.chat(guid(),"A private conversation")
+        with self.assertRaisesRegex(Fault,"wrong_artifact_origin"):
+            self.w.stage_work_artifacts(private["session"],private["native_id"],args)
+        with self.assertRaisesRegex(Fault,"peer_file_not_owned"):
+            self.w.stage_work_artifacts(private["session"],self.native,args)
+        with self.loop.orders.db.transaction() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM uploads").fetchone()[0],0)
+        self.assertIsNone(self.m.inspect(self.tid)["last_report"])

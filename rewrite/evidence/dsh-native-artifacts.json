@@ -1,0 +1,58 @@
+{
+  "session": "dsh-formal-artifact",
+  "native_input": "mowulink-3e65f0ffc2bf7fc49bc8ac22145c0ce6106943542f3504c49562fed06753a7e5",
+  "calls": [
+    {
+      "turn": 1,
+      "step": 1,
+      "callId": "artifact-fixture-0",
+      "name": "worker_stage_artifacts",
+      "arguments": "{\"attachment_ids\":[\"7d9cbbb9-bd7e-42eb-91c3-8be2b2fcf9a6\"]}"
+    },
+    {
+      "turn": 1,
+      "step": 2,
+      "callId": "artifact-fixture-1",
+      "name": "worker_stage_artifacts",
+      "arguments": "{\"attachment_ids\":[\"7d9cbbb9-bd7e-42eb-91c3-8be2b2fcf9a6\"]}"
+    },
+    {
+      "turn": 1,
+      "step": 3,
+      "callId": "artifact-fixture-2",
+      "name": "worker_report",
+      "arguments": "{\"task_id\":\"692c4139-c5cd-4724-811c-07e84166d33a\",\"assignment_id\":\"bb43e69d-c31f-4e6d-b0d2-f0a60a6bd08d\",\"summary\":\"Native fixture with an artifact\",\"artifact_ids\":[\"184a41b8-0192-4b16-8157-ddd3a3535c54\"]}"
+    }
+  ],
+  "report": {
+    "recorded": true,
+    "release_assignment_id": "bb43e69d-c31f-4e6d-b0d2-f0a60a6bd08d",
+    "task_state": "completed_reported"
+  },
+  "task_id": "692c4139-c5cd-4724-811c-07e84166d33a",
+  "artifact_id": "184a41b8-0192-4b16-8157-ddd3a3535c54",
+  "local_artifact_id": "7d9cbbb9-bd7e-42eb-91c3-8be2b2fcf9a6",
+  "sha256": "b4297f42ec4d95fffddd27906e4ab285ec934c5683935803c6ffe8d534a034d7",
+  "bytes": 563200,
+  "transfer": [
+    [
+      "chunk",
+      262144
+    ],
+    [
+      "chunk",
+      524288
+    ],
+    [
+      "chunk",
+      563200
+    ],
+    [
+      "report",
+      "184a41b8-0192-4b16-8157-ddd3a3535c54"
+    ]
+  ],
+  "manager_notification": "4cd815c2-d472-45af-af5d-6752fbcddefe",
+  "boundary": "Actual DSH AgentLoop and isolated Router, scripted model, no Feishu",
+  "consecutive_runs": 12
+}
