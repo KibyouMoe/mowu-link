@@ -1,4 +1,4 @@
-"""Return reviewed work to an offline legacy copy, keeping trial results private."""
+"""Return terminal work to an offline legacy copy, keeping trial records private."""
 from contextlib import closing
 import hashlib
 import json
@@ -21,7 +21,7 @@ TABLES = {"tasks","reports","messages","deliveries","operations","workers","work
 
 def reviewed_orders(facts):
     queued = queue_execution_modes(facts["queue_candidates"])
-    new = {item["task_id"]:item for item in facts["closed_new_tasks"]}
+    new = {item["task_id"]:item for item in facts["closed_new_tasks"]+facts["cancelled_new_tasks"]}
     changes = []
     for row in facts["work_orders"]:
         if row["task_id"] in queued:
@@ -39,21 +39,31 @@ def reviewed_orders(facts):
     for row in changes:
         tid = row["task_id"]
         before,after,reports = row["before"],row["trial"],row["completed_reports"]
-        if tid in new:
-            entries[tid] = {**reports[0],"creation_key":new[tid]["request_id"],"original_worker":new[tid]["assignee_id"]}
-            continue
-        if (not row["legacy_task_id"] or row["same_content"] is not True or not before or not after or before["state"]!="ready"
-                or after["state"]!="closed" or before["assignment_id"] is not None or after["assignment_id"] is not None
-                or before["revision"]!=1 or len(reports)!=1
-                or reports[0]["worker_id"]!=after["assignee_id"]):
+        if tid not in new and (not row["legacy_task_id"] or row["same_content"] is not True or not before
+                or before["state"]!="ready" or before["assignment_id"] is not None or before["revision"]!=1):
+            raise ValueError("reviewed rollback needs an unchanged migrated or trial-created order")
+        if not after or after["assignment_id"] is not None:
+            raise ValueError("trial order still has an assignment")
+        state = after["state"]
+        if state=="closed" and len(reports)==1 and reports[0]["worker_id"]==after["assignee_id"]:
+            entry = dict(reports[0])
+        elif state=="cancelled" and not reports:
+            entry = {"assignment_id":row["cancelled_assignment_id"],"worker_id":after["assignee_id"]}
+        else:
             raise ValueError("reviewed rollback needs unchanged migrated orders closed after one W04")
-        entries[tid] = {**reports[0],"legacy_task_id":row["legacy_task_id"],"original_worker":before["assignee_id"]}
+        entry["terminal_state"] = state
+        if tid in new:
+            entry.update(creation_key=new[tid]["request_id"],original_worker=new[tid]["assignee_id"])
+        else:
+            entry.update(legacy_task_id=row["legacy_task_id"],original_worker=before["assignee_id"])
+        entries[tid] = entry
     return entries
 
 
 def reviewed_files(entries):
     for entry in entries.values():
-        yield "report",entry["assignment_id"],entry["worker_id"],entry["artifact_ids"]
+        if entry["terminal_state"]=="closed":
+            yield "report",entry["assignment_id"],entry["worker_id"],entry["artifact_ids"]
         for step in entry["assignment_history"]:
             if pool := step.get("pool"):
                 yield "report",step["assignment_id"],step["worker_id"],pool["artifact_ids"]
@@ -111,6 +121,7 @@ def private_open(name,flags):
 def archive_in_legacy(path, entries, source_id, at):
     with closing(sqlite3.connect(path)) as db, db:
         for tid,entry in entries.items():
+            cancelled = entry["terminal_state"]=="cancelled"
             if "creation_key" in entry:
                 legacy = legacy_history.rollback_archive_id(source_id,tid)
                 request = entry["legacy_creation_request"]
@@ -118,9 +129,10 @@ def archive_in_legacy(path, entries, source_id, at):
                 if db.execute("SELECT 1 FROM task_info WHERE task_id=? OR request_id=?",(legacy,request_id)).fetchone():
                     raise ValueError("archived order collides with a legacy task or request identifier")
                 fingerprint = legacy_history.legacy_request_fingerprint(request)
+                title = "重做版已取消工单" if cancelled else "重做版已验收工单"
                 db.execute("""INSERT INTO task_info(task_id,name,description,owner,actor,at,metadata,request_id,fingerprint)
                               VALUES (?,?,?,?,?,?,?,?,?)""",
-                           (legacy,"重做版已验收工单","完整记录见私有回退档案。",entry["original_worker"],"hermes",
+                           (legacy,title,"完整记录见私有回退档案。",entry["original_worker"],"hermes",
                             at,"{}",request_id,fingerprint))
                 if request_id!=entry["creation_key"]:
                     db.execute(legacy_history.ROLLBACK_KEYS_SCHEMA)
@@ -133,7 +145,10 @@ def archive_in_legacy(path, entries, source_id, at):
                 if removed.rowcount!=1:
                     raise ValueError("legacy queue no longer contains the reviewed original")
             # Keep only the routing outcome and private reference in the shared legacy database.
-            metadata = {"reason":"reviewed_on_rewrite","recovery_reference":tid}
+            reason = legacy_history.CANCELLED_ARCHIVE if cancelled else legacy_history.REVIEWED_ARCHIVE
+            metadata = {"reason":reason,"recovery_reference":tid}
+            if cancelled:
+                metadata["confirmed_by_worker"] = "cancel_w04_key" in entry
             db.execute("INSERT INTO task_facts(task_id,kind,event_key,at,data) VALUES (?,'archive','archive',?,?)",
                        (legacy,at,encode(metadata)))
         if db.execute("PRAGMA integrity_check").fetchall()!=[("ok",)]:
@@ -141,15 +156,19 @@ def archive_in_legacy(path, entries, source_id, at):
 
 
 def stage_reviewed_rollback(snapshot,trial,review,destination):
-    """Prepare an offline fallback without re-enqueueing completed work."""
+    """Prepare an offline fallback without re-enqueueing terminal work."""
     facts = reconcile(snapshot,trial)
     entries = reviewed_orders(facts)
     decision = {"trial_sha256":facts["trial_sha256"],
-                "closed_assignments":{tid:row["assignment_id"] for tid,row in entries.items()}}
+                "closed_assignments":{tid:row["assignment_id"] for tid,row in entries.items()
+                                      if row["terminal_state"]=="closed"}}
+    cancelled = {tid:row["assignment_id"] for tid,row in entries.items() if row["terminal_state"]=="cancelled"}
+    if cancelled:
+        decision["cancelled_assignments"] = cancelled
     if facts["queue_candidates"]:
         decision["execution_modes"] = queue_execution_modes(facts["queue_candidates"])
     if json.loads(review.read_text())!=decision:
-        raise ValueError("review must match the trial digest, all closed assignments and any new queue modes")
+        raise ValueError("review must match the trial digest, all closed assignments and any new queue modes or cancellations")
     manifest = verified(snapshot)
     source = trial/"router.db"
     if manifest["legacy_db_sha256"]!=facts["snapshot_sha256"]:
@@ -168,6 +187,8 @@ def stage_reviewed_rollback(snapshot,trial,review,destination):
             raise ValueError("trial database changed during review")
         with closing(readonly(frozen)) as db:
             for tid,entry in entries.items():
+                if entry["terminal_state"]!="closed":
+                    continue
                 result = db.execute("SELECT summary FROM reports WHERE task_id=? AND assignment_id=?",
                                     (tid,entry["assignment_id"])).fetchone()
                 if not result or not result["summary"].strip():
@@ -203,6 +224,7 @@ def stage_reviewed_rollback(snapshot,trial,review,destination):
         with closing(readonly(source)):
             if digest(source)!=digest(frozen):
                 raise ValueError("trial database changed while staging rollback")
-    return {"reviewed_orders":len(entries),"private_artifacts":len(files),"trial_sha256":facts["trial_sha256"],
+    return {"reviewed_orders":len(entries),"cancelled_orders":len(cancelled),
+            "private_artifacts":len(files),"trial_sha256":facts["trial_sha256"],
             "restored_legacy_sha256":restored_sha,"queued_requests":len(facts["queue_candidates"]),
             "queue_replay_sha256":queue_manifest_sha}

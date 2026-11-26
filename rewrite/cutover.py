@@ -320,33 +320,44 @@ def work_order_changes(db, delta, old_ids):
         records.append({"task_id":tid,"legacy_task_id":old_ids.get(tid),"before":dict(before) if before else None,
                         "trial":dict(after) if after else None,"same_content":same_content,
                         "completed_reports":reports,"candidate_materials":materials})
+        if after and after["state"]=="cancelled":
+            offer = db.execute("""SELECT json_extract(payload,'$.assignment_id') FROM main.deliveries
+                WHERE kind='task.dispatch' AND json_extract(payload,'$.task_id')=? ORDER BY rowid DESC LIMIT 1""",
+                (tid,)).fetchone()
+            records[-1]["cancelled_assignment_id"] = offer[0] if offer else None
     return records
 
 
-def closed_new_candidates(db, changes, legacy_workers):
-    candidates = []
+def archived_new_candidates(db, changes, legacy_workers):
+    candidates = {"closed":[],"cancelled":[]}
     for change in changes:
         after, reports = change["trial"], change["completed_reports"]
         if (change["before"] is not None or change["legacy_task_id"] is not None or not after
-                or after["state"]!="closed" or after["assignment_id"] is not None
-                or len(reports)!=1 or reports[0]["worker_id"]!=after["assignee_id"]):
+                or after["state"] not in candidates or after["assignment_id"] is not None):
+            continue
+        if after["state"]=="closed" and (len(reports)!=1 or reports[0]["worker_id"]!=after["assignee_id"]):
+            continue
+        if after["state"]=="cancelled" and reports:
             continue
         row = task(db,change["task_id"])
         first = db.execute("""SELECT consumer,payload FROM main.deliveries WHERE kind='task.dispatch'
             AND json_extract(payload,'$.task_id')=? ORDER BY rowid LIMIT 1""",(row["task_id"],)).fetchone()
-        if not first or not first["consumer"].startswith("worker/"):
+        if ((first and not first["consumer"].startswith("worker/"))
+                or (not first and after["state"]=="closed")):
             continue
-        original_worker = first["consumer"].removeprefix("worker/")
+        original_worker = first["consumer"].removeprefix("worker/") if first else row["assignee_id"]
         if original_worker not in legacy_workers:
             continue
         operation = creation_receipt(db,row)
         original = dict(row,state="ready",revision=1,assignee_id=original_worker)
         if not operation or not portable_creation(original,operation) or not legacy_description_fits(row):
             continue
-        offered = dict(original,revision=2,assignment_id=json.loads(first["payload"])["assignment_id"])
-        if operation["response"] in (encode(original),encode(offered)):
-            candidates.append({"task_id":row["task_id"],"assignee_id":original_worker,
-                               "request_id":operation["key"]})
+        accepted = [encode(original)]
+        if first:
+            accepted.append(encode(dict(original,revision=2,assignment_id=json.loads(first["payload"])["assignment_id"])))
+        if operation["response"] in accepted:
+            candidates[after["state"]].append({"task_id":row["task_id"],"assignee_id":original_worker,
+                                               "request_id":operation["key"]})
     return candidates
 
 
@@ -386,10 +397,11 @@ def reconcile(snapshot, trial):
             candidates,blocked,only_queue = queued_candidates(db,delta,legacy_workers)
             old_ids = {new:old for old,new in saved["queued_id_map"].items()}
             changes = work_order_changes(db,delta,old_ids)
-            closed = closed_new_candidates(db,changes,legacy_workers)
-            closed_ids = {item["task_id"] for item in closed}
-            result.update(changed_tables=delta,queue_candidates=candidates,closed_new_tasks=closed,
-                          blocked_new_tasks=[item for item in blocked if item["task_id"] not in closed_ids],
+            archived = archived_new_candidates(db,changes,legacy_workers)
+            archived_ids = {item["task_id"] for group in archived.values() for item in group}
+            result.update(changed_tables=delta,queue_candidates=candidates,closed_new_tasks=archived["closed"],
+                          cancelled_new_tasks=archived["cancelled"],
+                          blocked_new_tasks=[item for item in blocked if item["task_id"] not in archived_ids],
                           work_orders=changes,
                           exact_rollback_allowed=before==saved["router_db_sha256"],only_new_queued_tasks=only_queue)
         with closing(readonly(source)):

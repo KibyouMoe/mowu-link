@@ -4,11 +4,13 @@
 
 ## 检查点与证据
 
-实际旧 Router 与重做 Router 实跑两种两次转派的回退。迁入单先离线入池并收候选材料，第二工位交带附件的受阻 W04，第三工位交正式成果并验收。试用新单经首次进度询问及三次重试后入池，Worker 用原搁置通知交候选。第二次转派发生在原工位仍持单时，目标工位已空闲并立即接到新派发。缺任一进度询问收件时也拒绝发布。旧派发清理可以晚于最终验收，但未确认或状态与原账本不符时拒绝发布回退目录。旧 HTTP 读回归档、原处理人和未变的待派队首。旧兼容请求重试只返回原归档编号。候选、受阻和正式成果的附件逐字节校验，只从私有包读取。复跑 `python3 -B -m unittest -v rewrite.test_cutover`，Worker 原生宿主、Agent 和时间为测试替身。 [转派实测](evidence/cutover-reviewed-transfer.json) · [回退步骤](router-rehearsal.md#回退已验收的迁入工单)
+取消单已用两代隔离 HTTP Router 做回退。六张单由旧版逐条读回 `cancelled_on_rewrite`，旧端工单成果均为空，原工位无持单且没有重派。未派、已派未接、在途取消重试后确认、主动受阻、掉线入池及转派后未接这六种路径均有原操作。缺派发收件、缺取消 W04 或原单仍待清理时拒绝发布。转派后的原工位迟到清理仍只释放旧派发。旧端和再次迁入都按原建单请求去重。宿主与时钟为夹具。 [取消实测](evidence/cutover-reviewed-cancellation.json) · [回退步骤](router-rehearsal.md#回退已验收或已取消的工单)
+
+实际旧 Router 与重做 Router 实跑两种两次转派的回退。迁入单先离线入池并收候选材料，第二工位交带附件的受阻 W04，第三工位交正式成果并验收。试用新单经首次进度询问及三次重试后入池，Worker 用原搁置通知交候选。第二次转派发生在原工位仍持单时，目标工位已空闲并立即接到新派发。缺任一进度询问收件时也拒绝发布。旧派发清理可以晚于最终验收，但未确认或状态与原账本不符时拒绝发布回退目录。旧 HTTP 读回归档、原处理人和未变的待派队首。旧兼容请求重试只返回原归档编号。候选、受阻和正式成果的附件逐字节校验，只从私有包读取。复跑 `python3 -B -m unittest -v rewrite.test_cutover`，Worker 原生宿主、Agent 和时间为测试替身。 [转派实测](evidence/cutover-reviewed-transfer.json) · [回退步骤](router-rehearsal.md#回退已验收或已取消的工单)
 
 转派回退实现 `f488a49602f805e54284565d5af201141f456491` 的 macOS 全量通过 308 项、按环境跳过 5 项。含询问入池的 `83bb54d7d4b22875f339833de72b54a84b9d9f13` 安装包 292 个文件，通过 51 项专项并逐文件核对，Linux arm64 全量通过 192 项、按环境跳过 121 项。Windows 两组 14 项和 13 项及两次版本回退通过，旧 Router 的业务数据回退在 macOS 和 Linux 执行。隔离复现仅凭候选材料结单后原工位仍持单，当前回退继续拒绝该场景。 [Windows CI](https://github.com/KibyouMoe/mowu-link/actions/runs/45902482265)
 
-回退现可接回试用期间新建并已验收的正式工单。隔离演练在 Worker 上线前后各建一单，一单带附件，两单分别经过原接管、W04 与管理验收。实际旧 Router 重开后仍用同一旧单号读出归档。旧兼容请求按原号重送均回 200 并去重，同号改正文回 409。旧接口只显示归档标记，原标题、要求、成果和逐字节校验的附件留在私有回退包。另一张未派试用单仍可按原顺序接到旧队尾。审核少一单或两类试用单映射到相同旧请求号时，没有发布回退目录。源端和试用库摘要保持原样。随后用同一回退库再次迁入，修复了旧端映射 UUID 能拦截、原 Hermes 请求号却会重建的情况。现两种原请求均指向归档，篡改的映射使准备拒绝发布。试用新建的未派单也保留原 Hermes 请求与旧 UUID，第二次迁入时两种原请求读回同一待派单。若旧端还未回放，迁入停在准备阶段。复跑 `python3 -B -m unittest -v rewrite.test_cutover`，旧新 Router 和 HTTP、SQLite 实跑，Worker Agent 为夹具。 [回退实测](evidence/cutover-trial-born-archives.json) · [操作说明](router-rehearsal.md#回退已验收的迁入工单)
+回退现可接回试用期间新建并已验收的正式工单。隔离演练在 Worker 上线前后各建一单，一单带附件，两单分别经过原接管、W04 与管理验收。实际旧 Router 重开后仍用同一旧单号读出归档。旧兼容请求按原号重送均回 200 并去重，同号改正文回 409。旧接口只显示归档标记，原标题、要求、成果和逐字节校验的附件留在私有回退包。另一张未派试用单仍可按原顺序接到旧队尾。审核少一单或两类试用单映射到相同旧请求号时，没有发布回退目录。源端和试用库摘要保持原样。随后用同一回退库再次迁入，修复了旧端映射 UUID 能拦截、原 Hermes 请求号却会重建的情况。现两种原请求均指向归档，篡改的映射使准备拒绝发布。试用新建的未派单也保留原 Hermes 请求与旧 UUID，第二次迁入时两种原请求读回同一待派单。若旧端还未回放，迁入停在准备阶段。复跑 `python3 -B -m unittest -v rewrite.test_cutover`，旧新 Router 和 HTTP、SQLite 实跑，Worker Agent 为夹具。 [回退实测](evidence/cutover-trial-born-archives.json) · [操作说明](router-rehearsal.md#回退已验收或已取消的工单)
 
 此回退往返的实现版本为 `6eee6d2092a2fa269240abf903d391aae49cad27`。290 文件安装包逐文件复核，并从安装目录执行回退、安装、状态包和 Trigger 归档 36 项，全部通过。实际旧 Router 源码固定在 `11cd53c58e312ff9ebaeb5ae45497f3dd6cf79ff`。Linux arm64 共通过 190 项、依环境跳过 121 项。已验收单往返版 `c142cb6d5c8f1c18f0c3040b06ff4e8df9a23a12` 的 macOS 全量通过 306 项、依环境跳过 5 项。Windows CI 两组 14 项和 13 项通过，另通过 Router 和工位版本回退，旧 Router 数据往返在 macOS 和 Linux 实测。 [Windows CI](https://github.com/KibyouMoe/mowu-link/actions/runs/45900360371)
 
@@ -238,7 +240,7 @@ Router 以 `--drain-dispatch` 启动时冻结新的派发号。隔离试运行�
 
 复跑 `python3 -B -m unittest -v rewrite.test_cutover`，该组 13 项通过，混合场景连过 10 轮。macOS 全量通过 241 项，Linux arm64 通过 161 项、跳过 80 项。以 `941c5f2287d00f526f4e14fb9f6f4ce6c839b140` 构建 214 文件安装包，SHA-256 为 `fdd5c988f89baed4928f7425317d876df51417d4ec3453ea277ed562163feffd`。安装目录以固定旧 Router `30f61e671465db0b5bba221ba8c9fc2194a6e43d` 复跑 `python3 -B -m unittest -q rewrite.test_cutover rewrite.test_state_bundle`，23 项通过，安装文件摘要一致。
 
-已验收的迁入工单能带成果回退。先以实际旧 Router 建单，在重做 Router 完成 W03、经 Worker 报 W04，再由溪流验收。恢复副本保留原工单号和建单回执，旧 Router 重开后读回归档，原请求重试不会再次入队，队首顺延到原本下一单。原附件继续从旧端下载。试用成果正文、附件和完整新库保存在私有包里，旧通用凭据不能下载新增成果附件。脚本模型驱动 Worker。复跑 `python3 -B -m unittest -v rewrite.test_cutover`。[回退操作](router-rehearsal.md#回退已验收的迁入工单) · [实测记录](evidence/cutover-reviewed-rollback.json)
+已验收的迁入工单能带成果回退。先以实际旧 Router 建单，在重做 Router 完成 W03、经 Worker 报 W04，再由溪流验收。恢复副本保留原工单号和建单回执，旧 Router 重开后读回归档，原请求重试不会再次入队，队首顺延到原本下一单。原附件继续从旧端下载。试用成果正文、附件和完整新库保存在私有包里，旧通用凭据不能下载新增成果附件。脚本模型驱动 Worker。复跑 `python3 -B -m unittest -v rewrite.test_cutover`。[回退操作](router-rehearsal.md#回退已验收或已取消的工单) · [实测记录](evidence/cutover-reviewed-rollback.json)
 
 普通回退继续拒绝覆盖有新写入的试用库。已结单但通知未确认、待验收、审核摘要过期、附件损坏以及出现无关的试用消息均未生成旧端副本。不能按上述步骤排空或回迁的试用写入仍需逐笔对账，保留新旧两侧。
 

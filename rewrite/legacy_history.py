@@ -7,6 +7,9 @@ from uuid import UUID, uuid5
 from .messages import valid_guid
 from .storage import encode, require
 
+REVIEWED_ARCHIVE = "reviewed_on_rewrite"
+CANCELLED_ARCHIVE = "cancelled_on_rewrite"
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS history_sources (
@@ -92,7 +95,8 @@ def preserve_rollback_keys(db, old, source, mapping):
         archive = json.loads(row["archive_data"] or "null")
         trial_id = archive.get("recovery_reference") if isinstance(archive,dict) else None
         if (row["actor"]!="hermes" or not isinstance(key,str) or not re.fullmatch(r"hermes-[0-9a-f]{64}",key)
-                or not valid_guid(namespace) or not valid_guid(trial_id) or archive.get("reason")!="reviewed_on_rewrite"
+                or not valid_guid(namespace) or not valid_guid(trial_id)
+                or archive.get("reason") not in (REVIEWED_ARCHIVE,CANCELLED_ARCHIVE)
                 or rollback_request_id(namespace,key)!=row["request_id"] or rollback_archive_id(namespace,trial_id)!=tid
                 or tid in mapping):
             raise ValueError("rewrite archive request key does not match its legacy archive")

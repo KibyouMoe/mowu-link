@@ -684,6 +684,288 @@ store.close()
                 proofs["trial_born"]["missing_inquiry_refused"] = True
             path.write_text(json.dumps(proofs,ensure_ascii=False,indent=2)+"\n")
 
+    def test_cancelled_orders_roll_back_without_replaying_work_or_inventing_results(self):
+        old_id = self.old("""
+store = RouterStore(sys.argv[1])
+for name in ("oguri","tama"):
+    store.upsert_worker(name)
+print(store.orders.create("Migrated cancellation","Isolated trial","oguri",{},"fixture",None,None))
+store.close()
+""",self.legacy)
+        original = digest(self.legacy)
+        backup(self.legacy,self.attachments,self.snapshot)
+        baseline = prepare(self.snapshot,self.trial,self.source_id)
+        clock = Clock()
+        loop = Loop(self.trial,clock,FixtureHost,extra_workers=["tama"])
+        review = self.root/"cancel-review.json"
+        ids, records = {}, {}
+
+        def write_review():
+            review.write_text(json.dumps({"trial_sha256":digest(self.trial/"router.db"),"closed_assignments":{},
+                                         "cancelled_assignments":ids}))
+
+        def cancel(tid, aid, phase):
+            before = loop.hermes.inspect(tid)["task"]
+            key = guid()
+            reason = "隔离取消演练 "+phase
+            receipt = loop.hermes.act(key,tid,before["revision"],"cancel",reason=reason)
+            self.assertEqual(loop.hermes.act(key,tid,before["revision"],"cancel",reason=reason),receipt)
+            ids[tid] = aid
+            records[phase] = {"task_id":tid,"assignment_id":aid,"action":key,
+                              "manager_reply":receipt["delivery_state"],"before":before["state"]}
+            return receipt
+
+        def create(phase):
+            manager = ManagerTools(loop.hermes,"isolated-cancel-manager")
+            order = json.loads(manager.around_call("router_create_task",
+                lambda args:manager.invoke("router_create_task",args),
+                {"title":"Cancellation "+phase,"instructions":"Isolated trial","assignee_id":"oguri"},
+                session_id="isolated-cancel-manager",turn_id="cancel-rehearsal",tool_call_id=phase))
+            return order["task_id"]
+
+        def offer(tid):
+            for _ in range(3):
+                item = loop.hermes.inspect(tid)["task"]
+                self.assertEqual(item["state"],"ready")
+                if offer_id := item["assignment_id"]:
+                    return offer_id
+                loop.worker.poll()
+                clock.advance(10)
+            item = loop.hermes.inspect(tid)["task"]
+            self.assertEqual(item["state"],"ready")
+            self.assertTrue(item["assignment_id"],"idle worker did not receive an offer")
+            return item["assignment_id"]
+
+        def accept(tid):
+            aid = loop.hermes.inspect(tid)["task"]["assignment_id"] or offer(tid)
+            loop.worker.poll()
+            self.assertEqual(loop.worker.hold()["held_assignment_id"],aid)
+            native, = [receipt["native_id"] for frame,receipt in loop.native.entries()
+                       if frame.get("assignment_id")==aid and frame["kind"]=="task"]
+            return aid,native
+
+        def finish(tid, aid, phase):
+            loop.worker.poll()
+            native = next(receipt["native_id"] for frame,receipt in loop.native.entries()
+                          if frame.get("assignment_id")==aid and frame["kind"]=="task.cancel")
+            def report():
+                return loop.worker.report(native,tid,aid,"cleaned","cancel_confirmed")
+            with self.assertRaises(Fault) as error:
+                report()
+            self.assertEqual(error.exception.code,"native_cleanup_unconfirmed")
+            loop.native.cleanup_evidence = lambda session,assignment,kind: {
+                "session":session,"assignment_id":assignment,"kind":kind,"stopped":True,
+                "cleaned":True,"receipt_id":"isolated-verified-"+aid}
+            confirmed = report()
+            self.assertEqual(report(),confirmed)
+            del loop.native.cleanup_evidence
+            self.assertEqual(confirmed,{"recorded":True,"release_assignment_id":aid,"task_state":"cancelled"})
+            self.assertIsNone(loop.worker.hold()["held_assignment_id"])
+            self.assertIsNone(loop.hermes.inspect(tid)["last_report"])
+            records[phase]["worker_reply"] = confirmed
+            loop.worker.poll()
+
+        with loop.server:
+            loop.thread.start()
+            try:
+                tid = baseline["queued_id_map"][old_id]
+                self.assertEqual(cancel(tid,None,"unoffered")["task"]["state"],"cancelled")
+                loop.worker.connect()
+                tid = create("offered")
+                aid = offer(tid)
+                frame, = [frame for frame in loop.wire.frames(0) if frame["kind"]=="task.dispatch"]
+                self.assertEqual(frame["payload"]["assignment_id"],aid)
+                self.assertEqual(cancel(tid,aid,"offered")["task"]["state"],"cancelled")
+                for query in loop.wire.frames(0):
+                    if query["kind"]=="worker.status_query":
+                        loop.worker.observe(query["payload"]["query_id"])
+                        loop.wire.ack(query)
+                write_review()
+                with self.assertRaisesRegex(ValueError,"no consumer acknowledgement"):
+                    stage_reviewed_rollback(self.snapshot,self.trial,review,self.restore)
+                self.assertFalse(self.restore.exists())
+                loop.wire.ack(frame)
+                self.assertEqual(loop.native.entries(),[])
+
+                tid = create("active")
+                aid,_ = accept(tid)
+                self.assertEqual(cancel(tid,aid,"active")["delivery_state"],"pending")
+                self.assertEqual(loop.hermes.inspect(tid)["task"]["state"],"working")
+                write_review()
+                with self.assertRaisesRegex(ValueError,"outside the supported reviewed orders"):
+                    stage_reviewed_rollback(self.snapshot,self.trial,review,self.restore)
+                self.assertFalse(self.restore.exists())
+                for seconds in (1,10,1):
+                    clock.advance(seconds)
+                    loop.worker.poll()
+                finish(tid,aid,"active")
+
+                tid = create("worker_pool")
+                aid,native = accept(tid)
+                blocked = loop.worker.report(native,tid,aid,"已主动释放工单","blocked")
+                self.assertEqual(blocked["task_state"],"blocked")
+                candidate = loop.wire.request("POST",f"tasks/{tid}/materials",
+                    {"session_id":loop.worker.session,"assignment_id":aid,"text":"仅候选材料"},guid())
+                self.assertEqual(cancel(tid,aid,"worker_pool")["task"]["state"],"cancelled")
+                records["worker_pool"]["material_id"] = candidate["material_id"]
+
+                tid = create("offline_pool")
+                aid,_ = accept(tid)
+                clock.advance(630)
+                self.assertEqual(loop.hermes.inspect(tid)["task"]["state"],"blocked")
+                queued_cancel = cancel(tid,aid,"offline_pool")
+                self.assertEqual((queued_cancel["task"]["state"],queued_cancel["delivery_state"]),("blocked","pending"))
+                loop.worker.connect()
+                finish(tid,aid,"offline_pool")
+
+                tid = create("transferred_offer")
+                former,_ = accept(tid)
+                tama_host = FixtureHost(self.trial/"tama-host.db","isolated-tama")
+                tama = Worker(self.trial/"tama.db","tama",loop.extra_clients["tama"],
+                              HostAdapter(self.trial/"tama-adapter.db",tama_host,tama_host.session))
+                tama.connect()
+                for seconds in (1,10,1):
+                    clock.advance(seconds)
+                    loop.worker.poll()
+                    tama.poll()
+                detail = loop.hermes.inspect(tid)["task"]
+                self.assertEqual(detail["state"],"working")
+                offer_after_transfer = loop.hermes.act(guid(),tid,detail["revision"],"transfer",worker_id="tama",
+                                                       reason="交给另一工位")
+                final = offer_after_transfer["task"]["assignment_id"]
+                self.assertTrue(final)
+                frame, = [frame for frame in tama.router.frames(0) if frame["kind"]=="task.dispatch"]
+                tama.router.ack(frame)
+                self.assertEqual(cancel(tid,final,"transferred_offer")["task"]["state"],"cancelled")
+                self.assertEqual(tama_host.entries(),[])
+                loop.worker.poll()
+                native, = [receipt["native_id"] for frame,receipt in loop.native.entries()
+                           if frame.get("assignment_id")==former and frame["kind"]=="task.transfer_out"]
+                loop.native.cleanup_evidence = lambda session,assignment,kind: {
+                    "session":session,"assignment_id":assignment,"kind":kind,"stopped":True,
+                    "cleaned":True,"receipt_id":"isolated-transfer-"+former}
+                late = loop.worker.report(native,tid,former,"cleaned","transfer_confirmed")
+                self.assertEqual(late,{"recorded":True,"release_assignment_id":former,"task_state":"cancelled"})
+                self.assertEqual(loop.worker.report(native,tid,former,"cleaned","transfer_confirmed"),late)
+                records["transferred_offer"]["older_cleanup"] = late
+                loop.hermes.poll()
+                loop.worker.poll()
+                tama.poll()
+            finally:
+                loop.server.shutdown()
+                loop.thread.join()
+
+        write_review()
+        reviewed = stage_reviewed_rollback(self.snapshot,self.trial,review,self.restore)
+        self.assertEqual((reviewed["reviewed_orders"],reviewed["cancelled_orders"]),(6,6))
+        private = self.restore/"private-review"
+        saved = json.loads((private/"manifest.json").read_text())["orders"]
+        for phase,record in records.items():
+            entry = saved[record["task_id"]]
+            record["legacy_id"] = entry["legacy_task_id"]
+            self.assertEqual((entry["terminal_state"],entry["cancel_key"]),("cancelled",record["action"]))
+            self.assertNotIn("summary",entry)
+            self.assertEqual("cancel_w04_key" in entry,"worker_reply" in record)
+            if "worker_reply" in record:
+                cleanup = entry["assignment_history"][-1]["cleanup"]
+                record["cancel_deliveries"] = cleanup["delivery_ids"]
+                record["w04_key"] = entry["cancel_w04_key"]
+                self.assertEqual(cleanup["receipt"],record["worker_reply"])
+        self.assertEqual(records["unoffered"]["legacy_id"],old_id)
+        self.assertGreater(len(records["active"]["cancel_deliveries"]),1)
+        blocked = saved[records["worker_pool"]["task_id"]]["assignment_history"][-1]
+        self.assertEqual(blocked["materials"][0]["material_id"],records["worker_pool"]["material_id"])
+        self.assertTrue(blocked["pool"]["report_key"])
+        transferred = saved[records["transferred_offer"]["task_id"]]["assignment_history"]
+        self.assertEqual(transferred[0]["cleanup"]["receipt"],late)
+        self.assertNotIn("accept_key",transferred[1])
+        replay = {row["legacy_task_id"]:row.get("legacy_creation_request") for row in saved.values()}
+        observed = json.loads(self.old("""
+from server import RouterServer
+from selftest_router import http
+from threading import Thread
+from unittest.mock import Mock
+store = RouterStore(sys.argv[1])
+token = "isolated-legacy-cancellation"
+with RouterServer(("127.0.0.1",0),store,token,Mock(),Mock()) as server:
+    runner = Thread(target=server.serve_forever,kwargs={"poll_interval":.02})
+    runner.start()
+    try:
+        url = f"http://127.0.0.1:{server.server_port}"
+        archives, duplicates = {}, {}
+        for old_id,request in json.loads(sys.argv[2]).items():
+            status, item = http("GET",url+"/tasks/"+old_id,token=token)
+            assert status==200 and item["task"]["deliverable"] is None, item
+            archives[old_id] = item["task"]["archive"]
+            if request:
+                code, reply = http("POST",url+"/tasks",request,token)
+                assert code==200 and reply["duplicate"] and reply["task_id"]==old_id, reply
+                duplicates[old_id] = code
+        print(json.dumps({"archives":archives,"next":store.orders.next_dispatch("oguri"),
+                          "held":store.orders.held("oguri"),"duplicates":duplicates,
+                          "empty_deliverables":len(archives)}))
+    finally:
+        server.shutdown()
+        runner.join()
+store.close()
+""",self.restore/"legacy.db",json.dumps(replay)))
+        self.assertEqual((observed["next"],observed["held"]),(None,None))
+        self.assertEqual((observed["empty_deliverables"],len(observed["duplicates"])),(6,5))
+        for record in records.values():
+            archive = observed["archives"][record["legacy_id"]]
+            self.assertEqual(archive["reason"],"cancelled_on_rewrite")
+            self.assertEqual(archive["recovery_reference"],record["task_id"])
+            self.assertIs(archive["confirmed_by_worker"],"worker_reply" in record)
+
+        again_snapshot,again = self.root/"cancel-again-snapshot",self.root/"cancel-again"
+        backup(self.restore/"legacy.db",self.restore/"legacy.db.attachments",again_snapshot)
+        next_source = guid()
+        baselines = prepare(again_snapshot,again,next_source)
+        self.assertTrue(set(replay).isdisjoint(baselines["queued_id_map"]))
+        token = guid()
+        with serve_loopback(Orders(again/"router.db",Clock()),{token:"hermes"}) as server:
+            runner = Thread(target=server.serve_forever,kwargs={"poll_interval":.02})
+            runner.start()
+            try:
+                client = Client(f"http://127.0.0.1:{server.server_port}",token)
+                for entry in saved.values():
+                    request = entry.get("legacy_creation_request")
+                    if not request:
+                        continue
+                    body = {"title":request["TaskName"],"instructions":request["goal"],"assignee_id":request["worker"]}
+                    for key in (entry["creation_key"],request["message_id"]):
+                        with self.assertRaises(Fault) as duplicate:
+                            client.request("POST","tasks",body,key)
+                        self.assertEqual((duplicate.exception.status,duplicate.exception.code),
+                                         (409,"legacy_request_recorded"))
+                        self.assertEqual(duplicate.exception.details,
+                                         {"source_id":next_source,"legacy_task_id":entry["legacy_task_id"]})
+            finally:
+                server.shutdown()
+                runner.join()
+
+        damaged = self.root/"damaged-cancel-ledger"
+        damaged.mkdir()
+        shutil.copyfile(self.trial/"baseline.json",damaged/"baseline.json")
+        shutil.copyfile(self.trial/"router.db",damaged/"router.db")
+        with closing(sqlite3.connect(damaged/"router.db")) as db,db:
+            deleted = db.execute("DELETE FROM operations WHERE actor='worker/oguri' AND key=?",
+                                 (records["active"]["w04_key"],))
+            self.assertEqual(deleted.rowcount,1)
+        approval = json.loads(review.read_text())
+        review.write_text(json.dumps(dict(approval,trial_sha256=digest(damaged/"router.db"))))
+        rejected = self.root/"rejected"
+        with self.assertRaisesRegex(ValueError,"missing or conflicting receipt.*report"):
+            stage_reviewed_rollback(self.snapshot,damaged,review,rejected)
+        self.assertFalse(rejected.exists())
+        self.assertEqual((digest(self.legacy),digest(self.trial/"router.db")),(original,reviewed["trial_sha256"]))
+        if output := os.environ.get("MOWULINK_CANCEL_ROLLBACK_EVIDENCE"):
+            evidence = {"cancelled":records,"legacy":observed,"trial_sha256":reviewed["trial_sha256"],
+                        "legacy_snapshot_sha256":original,"pending_and_missing_w04_refused":True,
+                        "unacknowledged_offer_refused":True,"remigrated_key_duplicates_rejected":True,
+                        "boundary":"Actual old and new HTTP Routers, temporary SQLite databases, scripted host and clock."}
+            Path(output).write_text(json.dumps(evidence,ensure_ascii=False,indent=2)+"\n")
+
     def test_trial_born_closed_orders_return_as_private_archives_without_a_new_dispatch(self):
         self.old("""
 store = RouterStore(sys.argv[1])
@@ -1092,7 +1374,7 @@ print(json.dumps([first,second]))
             self.assertEqual(worker.adapter.deliver(native_receipt["delivery_id"],payload),native_receipt)
             native.is_busy = True
         review = self.root/"drain-review.json"
-        with self.assertRaisesRegex(ValueError,"closed after one W04"):
+        with self.assertRaisesRegex(ValueError,"trial order still has an assignment"):
             stage_reviewed_rollback(self.snapshot,self.trial,review,self.restore)
         self.assertFalse(self.restore.exists())
         audit,draining = recover(paths,"working")

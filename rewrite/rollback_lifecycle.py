@@ -2,8 +2,10 @@
 import json
 
 from . import attachments
+from .cleanup import CANCEL_CONFIRMED_NOTICE
 from .messages import valid_guid
 from .orders import task
+from .storage import timestamp
 
 
 def order_state(order, step, state, revision, assignment_id=None):
@@ -15,7 +17,7 @@ def order_state(order, step, state, revision, assignment_id=None):
 def inquiry_frames(db, tid):
     by_assignment = {}
     for row in db.execute("""SELECT rowid AS seq,kind,payload,delivery_id FROM deliveries
-        WHERE kind IN ('task.probe','task.shelved') AND json_extract(payload,'$.task_id')=?
+        WHERE kind IN ('task.probe','task.shelved','task.cancel') AND json_extract(payload,'$.task_id')=?
         ORDER BY rowid""",(tid,)):
         aid = json.loads(row["payload"]).get("assignment_id")
         by_assignment.setdefault(aid,[]).append(row)
@@ -26,15 +28,22 @@ def retain_inquiries(step, frames, dispatch_seq, next_dispatch_seq):
     unanswered = step.get("pool",{}).get("source")=="unanswered"
     kinds = [frame["kind"] for frame in frames]
     count = kinds.count("task.probe")
+    cancellations = kinds.count("task.cancel")
+    cleanup = step.get("cleanup")
+    cancel_cleanup = cleanup and cleanup["kind"]=="task.cancel"
     expected = ["task.probe"]*count + (["task.shelved"] if unanswered else [])
-    if (kinds!=expected or count>4 or unanswered and count!=4
+    expected += ["task.cancel"]*cancellations
+    if (kinds!=expected or count>4 or unanswered and count!=4 or cancellations>4
+            or bool(cancellations)!=bool(cancel_cleanup)
             or any(frame["seq"]<=dispatch_seq or next_dispatch_seq is not None and frame["seq"]>=next_dispatch_seq
                    for frame in frames)):
         raise ValueError("trial inquiry deliveries do not match their original assignment")
     if count:
         step["probe_delivery_ids"] = [frame["delivery_id"] for frame in frames[:count]]
     if unanswered:
-        step["shelved_delivery_id"] = frames[-1]["delivery_id"]
+        step["shelved_delivery_id"] = frames[count]["delivery_id"]
+    if cancel_cleanup:
+        cleanup["delivery_ids"] = [frame["delivery_id"] for frame in frames[-cancellations:]]
 
 
 def histories(db, entries, deltas):
@@ -42,6 +51,7 @@ def histories(db, entries, deltas):
     dispatches = set()
     for tid, entry in entries.items():
         order = task(db,tid)
+        cancelled = entry["terminal_state"]=="cancelled"
         steps = []
         revision = 2
         pools = {row["assignment_id"]:dict(row) for row in db.execute("SELECT * FROM pool_entries WHERE task_id=?",(tid,))}
@@ -74,7 +84,9 @@ def histories(db, entries, deltas):
                 step["pool"] = pool
                 used["pool_entries"] += 1
             if cleanup := cleanups.pop(aid,None):
-                if (cleanup["worker_id"]!=worker or cleanup["kind"]!="task.transfer_out"
+                expected_kind = "task.cancel" if cancelled and next_frame is None else "task.transfer_out"
+                if (cleanup["worker_id"]!=worker or cleanup["kind"]!=expected_kind
+                        or expected_kind=="task.cancel" and cleanup["new_assignee_id"] is not None
                         or cleanup["done"]!=1 or not cleanup["reason"].strip()):
                     raise ValueError("original assignment cleanup is pending or cannot be verified")
                 step["cleanup"] = cleanup
@@ -88,10 +100,30 @@ def histories(db, entries, deltas):
             retain_inquiries(step,inquiries.pop(aid,[]),frame["seq"],next_frame["seq"] if next_frame else None)
             steps.append(step)
             revision += 3 + ("pool" in step)
-        if (pools or cleanups or materials or inquiries or not steps or steps[0]["worker_id"]!=entry["original_worker"]
-                or steps[-1]["assignment_id"]!=entry["assignment_id"] or steps[-1]["worker_id"]!=entry["worker_id"]
-                or order["revision"]!=revision or set(steps[-1]) & {"pool","cleanup","materials"}):
+        if pools or cleanups or materials or inquiries:
             raise ValueError("trial is missing a complete assignment chain for the reviewed result")
+        if not steps:
+            if (not cancelled or entry["assignment_id"] is not None or order["revision"]!=2
+                    or entry["worker_id"]!=entry["original_worker"]):
+                raise ValueError("trial order has no verifiable dispatch")
+            entry["assignment_history"] = []
+            continue
+        final = steps[-1]
+        if (steps[0]["worker_id"]!=entry["original_worker"] or final["assignment_id"]!=entry["assignment_id"]
+                or final["worker_id"]!=entry["worker_id"]):
+            raise ValueError("trial is missing a complete assignment chain for the reviewed result")
+        if cancelled:
+            pool,cleanup = final.get("pool"),final.get("cleanup")
+            if pool and bool(cleanup)==(pool["source"]=="worker"):
+                raise ValueError("original assignment cleanup is pending or cannot be verified")
+            if not cleanup:
+                revision = revision-1 if pool else final["revision"]+1
+                if not pool and final.get("probe_delivery_ids"):
+                    raise ValueError("unaccepted offer has a progress inquiry")
+        elif set(final) & {"pool","cleanup","materials"}:
+            raise ValueError("trial is missing a complete assignment chain for the reviewed result")
+        if order["revision"]!=revision:
+            raise ValueError("terminal action does not match the assignment revision")
         for step,target in zip(steps,steps[1:]):
             cleanup = step.get("cleanup")
             needs_cleanup = step.get("pool",{}).get("source")!="worker"
@@ -104,15 +136,18 @@ def histories(db, entries, deltas):
 
 
 def check_transport(db, entries):
-    workers = set()
+    workers, optional_workers = set(), set()
     expected_frames = {}
     expected_inquiries = {}
     expected_notices = {}
     notices = {tid:[] for tid in entries}
     cleanup_frames = {}
+    terminal_notices = set()
     for tid, entry in entries.items():
         expected_notices[tid] = []
         order = task(db,tid)
+        if not entry["assignment_history"]:
+            optional_workers.add(entry["original_worker"])
         for step in entry["assignment_history"]:
             aid, worker = step["assignment_id"], step["worker_id"]
             workers.add(worker)
@@ -125,18 +160,31 @@ def check_transport(db, entries):
                 expected_inquiries[shelved] = ("task.shelved","worker/"+worker,{"task_id":tid,
                     "assignment_id":aid,"reason":step["pool"]["reason"]})
             if cleanup := step.get("cleanup"):
-                key = ("task.transfer_out",tid,aid)
-                cleanup_frames[key] = cleanup
-                expected_frames[key] = ("worker/"+worker,None,
-                    {name:cleanup[name] for name in ("task_id","assignment_id","reason","new_assignee_id")})
+                payload = {name:cleanup[name] for name in ("task_id","assignment_id","reason")}
+                if cleanup["kind"]=="task.cancel":
+                    for did in cleanup["delivery_ids"]:
+                        expected_inquiries[did] = ("task.cancel","worker/"+worker,payload)
+                else:
+                    key = ("task.transfer_out",tid,aid)
+                    cleanup_frames[key] = cleanup
+                    expected_frames[key] = ("worker/"+worker,None,
+                                            dict(payload,new_assignee_id=cleanup["new_assignee_id"]))
             if pool := step.get("pool"):
                 source = worker if pool["source"]=="worker" else "router"
                 expected_notices[tid].append((source,pool["reason"],pool["artifact_ids"]))
-        expected_notices[tid].append((entry["worker_id"],entry["summary"],entry["artifact_ids"]))
+        if entry["terminal_state"]=="closed":
+            expected_notices[tid].append((entry["worker_id"],entry["summary"],entry["artifact_ids"]))
+            terminal_notices.add(tid)
+        elif entry["assignment_history"] and entry["assignment_history"][-1].get("cleanup"):
+            expected_notices[tid].append((entry["worker_id"],CANCEL_CONFIRMED_NOTICE,[]))
+            terminal_notices.add(tid)
     registered = db.execute("SELECT * FROM workers").fetchall()
-    if ({row["worker_id"] for row in registered} != workers or any(row["busy"] or row["held_task_id"] is not None
+    registered_workers = {row["worker_id"] for row in registered}
+    if (not workers <= registered_workers <= (workers | optional_workers)
+            or any(row["busy"] or row["held_task_id"] is not None
             or row["held_assignment_id"] is not None or row["query_id"] for row in registered)):
         raise ValueError("trial workers or their outstanding queries need reconciliation")
+    workers = registered_workers
     if any(row[0] not in workers for row in db.execute("SELECT worker_id FROM worker_adapter_links")):
         raise ValueError("trial contains an unrelated adapter link")
 
@@ -171,7 +219,7 @@ def check_transport(db, entries):
             if not saved or consumer!="hermes" or data!=saved["payload"]:
                 raise ValueError("trial notification does not match its archived message")
             saved["delivery_id"] = did
-        elif kind in ("task.probe","task.shelved"):
+        elif kind in ("task.probe","task.shelved","task.cancel"):
             if expected_inquiries.pop(did,None)!=(kind,consumer,data):
                 raise ValueError("trial inquiry delivery does not match the reviewed assignment")
         else:
@@ -186,9 +234,11 @@ def check_transport(db, entries):
             or any(len(notices[tid])!=len(items) for tid,items in expected_notices.items())):
         raise ValueError("trial is missing a dispatch, cleanup delivery, or W04 notification")
     for tid, items in notices.items():
-        entries[tid]["notice"] = items[-1]
-        if len(items)>1:
-            entries[tid]["pool_notices"] = items[:-1]
+        if tid in terminal_notices:
+            entries[tid]["notice"] = items[-1]
+            items = items[:-1]
+        if items:
+            entries[tid]["pool_notices"] = items
     return workers,frames
 
 
@@ -205,14 +255,55 @@ def take(operations, key, actor, body, replies=None, *, session=False, files=Fal
     raise ValueError("missing or conflicting receipt for the reviewed assignment: "+key[1])
 
 
+def verify_cancelled(tid, entry, order, step, operations, after, states):
+    cleanup = step.get("cleanup")
+    expected_revision = order["revision"]-(2 if cleanup else 1)
+    key = (tid,"action","cancel",expected_revision)
+    action = operations.get(key)
+    reason = action["body"].get("reason") if action else None
+    if not isinstance(reason,str) or not reason.strip() or cleanup and cleanup["reason"]!=reason:
+        raise ValueError("missing or conflicting cancellation reason")
+    reply = {"task":order,"delivery_state":"received"}
+    if cleanup:
+        pool = step.get("pool")
+        pending = order_state(order,step,"blocked" if pool else "working",order["revision"]-1,
+                              None if pool else step["assignment_id"])
+        if pool:
+            pending.update(blocked_since=timestamp(pool["entered"]),remind_at=timestamp(pool["entered"]+3600))
+        reply = {"task":pending,"delivery_state":"pending"}
+    action = take(operations,key,"hermes",{"action":"cancel","expected_revision":expected_revision,"reason":reason},[reply])
+    if action["seq"]<=after:
+        raise ValueError("cancellation predates the original assignment records")
+    entry.update(cancel_key=action["key"],cancel_reason=reason)
+    terminal_seq = action["seq"]
+    if cleanup:
+        aid = step["assignment_id"]
+        receipt = take(operations,(tid,"report",aid,"cancel_confirmed"),"worker/"+step["worker_id"],
+                       {"assignment_id":aid,"outcome":"cancel_confirmed"},
+                       [{"recorded":True,"release_assignment_id":aid,"task_state":"cancelled"}],session=True)
+        if receipt["seq"]<=terminal_seq:
+            raise ValueError("cleanup receipt predates the cancellation")
+        states.append((terminal_seq,{pending["state"]}))
+        terminal_seq = receipt["seq"]
+        cleanup.update(report_key=receipt["key"],receipt=receipt["reply"])
+        entry["cancel_w04_key"] = receipt["key"]
+    states.append((terminal_seq,{"cancelled"}))
+
+
 def verify_order(db, tid, entry, operations):
     order = task(db,tid)
     history = entry["assignment_history"]
     adjacent_states, cleanup_receipts = [],[]
     after = 0
+    cancelled = entry["terminal_state"]=="cancelled"
+    if not history:
+        verify_cancelled(tid,entry,order,{},operations,after,adjacent_states)
     for step,target in zip(history,history[1:]+[None]):
         aid, worker, revision = (step[key] for key in ("assignment_id","worker_id","revision"))
         actor = "worker/"+worker
+        if target is None and cancelled and not (step.get("cleanup") or step.get("pool")):
+            verify_cancelled(tid,entry,order,step,operations,after,adjacent_states)
+            continue
         accept = take(operations,(tid,"accept",aid),actor,{"assignment_id":aid,"revision":revision},
                       [{"accepted":True,"holder":{"kind":"worker","worker_id":worker},"assignment_id":aid}],session=True)
         if accept["seq"]<=after:
@@ -224,7 +315,7 @@ def verify_order(db, tid, entry, operations):
         source = step.get("pool",{}).get("source")
         possible = {"working","blocked"} if source in ("offline","unanswered") else {"working"}
         adjacent_states.append((after,possible))
-        if target is None:
+        if target is None and not cancelled:
             report = take(operations,(tid,"report",aid,"completed"),actor,{
                 "assignment_id":aid,"outcome":"completed","summary":entry["summary"],"artifact_ids":entry["artifact_ids"]},
                 [{"recorded":True,"release_assignment_id":aid,"task_state":"completed_reported"}],session=True,files=True)
@@ -256,6 +347,9 @@ def verify_order(db, tid, entry, operations):
             material["receipt_key"] = receipt["key"]
             after = receipt["seq"]
             adjacent_states.append((after,{"blocked"}))
+        if target is None:
+            verify_cancelled(tid,entry,order,step,operations,after,adjacent_states)
+            continue
         expected_revision = target["revision"]-2
         key = (tid,"action","transfer",expected_revision)
         transfer = operations.get(key)
@@ -279,7 +373,7 @@ def verify_order(db, tid, entry, operations):
             receipt = take(operations,(tid,"report",aid,"transfer_confirmed"),actor,
                            {"assignment_id":aid,"outcome":"transfer_confirmed"},[
                                {"recorded":True,"release_assignment_id":aid,"task_state":state}
-                               for state in ("ready","working","blocked","completed_reported","closed")],
+                               for state in ("ready","working","blocked","completed_reported","closed","cancelled")],
                            session=True)
             if receipt["seq"]<=after:
                 raise ValueError("cleanup receipt predates the transfer")

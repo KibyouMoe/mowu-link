@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS cleanups (
 );
 """
 
+CANCEL_CONFIRMED_NOTICE = "原处理人已确认取消并清理工单。"
 
 def rows(db, field, value):
     assert field in ("task_id", "worker_id")
@@ -43,7 +44,7 @@ def confirm(db, current, worker, aid, outcome, now):
             pool.leave(db, current["task_id"])
             db.execute("UPDATE tasks SET state=?,assignment_id=NULL,revision=revision+1 WHERE task_id=?",
                        (state, current["task_id"]))
-        notice = "原处理人已确认取消并清理工单。" if still_held or still_pooled else "原处理人已确认停止并清理旧派发。"
+        notice = CANCEL_CONFIRMED_NOTICE if still_held or still_pooled else "原处理人已确认停止并清理旧派发。"
         messages.notify(db, now, current["task_id"], worker, notice)
     db.execute("UPDATE cleanups SET done=1 WHERE assignment_id=?", (aid,))
     db.execute("DELETE FROM inquiries WHERE assignment_id=?", (aid,))

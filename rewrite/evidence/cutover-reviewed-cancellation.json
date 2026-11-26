@@ -1,0 +1,140 @@
+{
+  "cancelled": {
+    "unoffered": {
+      "task_id": "2f8fcda5-f2fa-5c22-a343-e6a3661a3770",
+      "assignment_id": null,
+      "action": "9ca7dd5a-f234-40ee-aca9-7450dad048a6",
+      "manager_reply": "received",
+      "before": "ready",
+      "legacy_id": "t-adaf7420a4"
+    },
+    "offered": {
+      "task_id": "74a440e1-3c8c-4f1a-87f0-2796d30286da",
+      "assignment_id": "a5f298e9-087f-45b7-a3b0-f051b519b3f7",
+      "action": "270c1564-fdb7-4a1a-82b1-813dca20696b",
+      "manager_reply": "received",
+      "before": "ready",
+      "legacy_id": "t-f0084b4f25"
+    },
+    "active": {
+      "task_id": "db88f015-084b-4ad1-b20f-493e27f7f3c6",
+      "assignment_id": "a1786d1d-ac24-48aa-b6c2-e06080204d39",
+      "action": "5123d706-9d1d-4b59-bdea-ce9f82652d57",
+      "manager_reply": "pending",
+      "before": "working",
+      "worker_reply": {
+        "recorded": true,
+        "release_assignment_id": "a1786d1d-ac24-48aa-b6c2-e06080204d39",
+        "task_state": "cancelled"
+      },
+      "legacy_id": "t-99fcc5def1",
+      "cancel_deliveries": [
+        "c888671f-3d41-4a1c-8858-bbe8bb27f5fe",
+        "9c0d7904-ebc9-474c-a71d-42b2d4d7ca82",
+        "2235f7c9-d098-4f6d-919b-af37716eaa06"
+      ],
+      "w04_key": "cancel_confirmed-a1786d1d-ac24-48aa-b6c2-e06080204d39"
+    },
+    "worker_pool": {
+      "task_id": "4d64905e-0e5b-4cdb-97d7-fd710cc5850a",
+      "assignment_id": "6665508f-285b-4474-ac30-d23c1a215055",
+      "action": "f6de5975-b1ed-43f6-81b4-79a2366cd364",
+      "manager_reply": "received",
+      "before": "blocked",
+      "material_id": "1b6202b9-e88b-4927-9f8e-f53257094c69",
+      "legacy_id": "t-b301f47b07"
+    },
+    "offline_pool": {
+      "task_id": "24a79ba6-9940-46e7-855c-0a2c1d25c3f0",
+      "assignment_id": "560646b0-12f3-46ba-8e20-76c4f31a1d2e",
+      "action": "373df940-d40f-4ba8-8352-6b1dccfbae90",
+      "manager_reply": "pending",
+      "before": "blocked",
+      "worker_reply": {
+        "recorded": true,
+        "release_assignment_id": "560646b0-12f3-46ba-8e20-76c4f31a1d2e",
+        "task_state": "cancelled"
+      },
+      "legacy_id": "t-a63e44f614",
+      "cancel_deliveries": [
+        "5abae628-52a7-4582-914f-ee5f9fb45804"
+      ],
+      "w04_key": "cancel_confirmed-560646b0-12f3-46ba-8e20-76c4f31a1d2e"
+    },
+    "transferred_offer": {
+      "task_id": "cabd221f-715a-4ddb-bdb1-d4f929e6f9ee",
+      "assignment_id": "f303aba2-164e-470e-a4da-e6214fe82c03",
+      "action": "bf1d4e75-33f0-44c1-b640-ac8fc912c2d5",
+      "manager_reply": "received",
+      "before": "ready",
+      "older_cleanup": {
+        "recorded": true,
+        "release_assignment_id": "85a91029-c4d8-427a-94eb-cfc76407d95f",
+        "task_state": "cancelled"
+      },
+      "legacy_id": "t-6b7b1357ba"
+    }
+  },
+  "legacy": {
+    "archives": {
+      "t-a63e44f614": {
+        "confirmed_by_worker": true,
+        "reason": "cancelled_on_rewrite",
+        "recovery_reference": "24a79ba6-9940-46e7-855c-0a2c1d25c3f0",
+        "kind": "archive",
+        "at": 1795731584.934068
+      },
+      "t-adaf7420a4": {
+        "confirmed_by_worker": false,
+        "reason": "cancelled_on_rewrite",
+        "recovery_reference": "2f8fcda5-f2fa-5c22-a343-e6a3661a3770",
+        "kind": "archive",
+        "at": 1795731584.934068
+      },
+      "t-b301f47b07": {
+        "confirmed_by_worker": false,
+        "reason": "cancelled_on_rewrite",
+        "recovery_reference": "4d64905e-0e5b-4cdb-97d7-fd710cc5850a",
+        "kind": "archive",
+        "at": 1795731584.934068
+      },
+      "t-f0084b4f25": {
+        "confirmed_by_worker": false,
+        "reason": "cancelled_on_rewrite",
+        "recovery_reference": "74a440e1-3c8c-4f1a-87f0-2796d30286da",
+        "kind": "archive",
+        "at": 1795731584.934068
+      },
+      "t-6b7b1357ba": {
+        "confirmed_by_worker": false,
+        "reason": "cancelled_on_rewrite",
+        "recovery_reference": "cabd221f-715a-4ddb-bdb1-d4f929e6f9ee",
+        "kind": "archive",
+        "at": 1795731584.934068
+      },
+      "t-99fcc5def1": {
+        "confirmed_by_worker": true,
+        "reason": "cancelled_on_rewrite",
+        "recovery_reference": "db88f015-084b-4ad1-b20f-493e27f7f3c6",
+        "kind": "archive",
+        "at": 1795731584.934068
+      }
+    },
+    "next": null,
+    "held": null,
+    "duplicates": {
+      "t-a63e44f614": 200,
+      "t-b301f47b07": 200,
+      "t-f0084b4f25": 200,
+      "t-6b7b1357ba": 200,
+      "t-99fcc5def1": 200
+    },
+    "empty_deliverables": 6
+  },
+  "trial_sha256": "79611f58516404a8e969bbfd3570ddddcd78a11d45926f14405898f783f10d23",
+  "legacy_snapshot_sha256": "06b7c2fa65fe8c2e1f43ff9176e15def7174d7f6d2c4194cfeae3b308c567a66",
+  "pending_and_missing_w04_refused": true,
+  "unacknowledged_offer_refused": true,
+  "remigrated_key_duplicates_rejected": true,
+  "boundary": "Actual old and new HTTP Routers, temporary SQLite databases, scripted host and clock."
+}
