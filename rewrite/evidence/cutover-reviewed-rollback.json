@@ -1,0 +1,32 @@
+{
+  "source_legacy_task": "t-d72170f71a",
+  "trial_task": "9ae0445f-c62c-5057-a9b0-0452395aa437",
+  "assignment": "55180dca-f655-4ff1-8d3e-8a3c293d1052",
+  "review_key": "2e6be972-ff56-4984-94b6-186f82be48f6",
+  "notification_delivery": "c898169a-6876-4de1-89df-e572a2e20a5d",
+  "artifact_id": "126c8edf-f981-4550-9af9-e9b76626413e",
+  "artifact_sha256": "b15215e78b794cff4001a466c43bb230cf3ca3d63e51bb81c2ead1147a992fff",
+  "trial_sha256": "704c8b36b995f9c0bfb581e469e8c2c785808cd4abc394176f89fec0726e82ff",
+  "legacy_original_sha256": "bcb8ab8cf2db602699422e45a165d957b226b2d77eb39b360927829646648e06",
+  "legacy_readback": {
+    "status": 200,
+    "archive": {
+      "reason": "reviewed_on_rewrite",
+      "recovery_reference": "9ae0445f-c62c-5057-a9b0-0452395aa437",
+      "kind": "archive",
+      "at": 1795700765.617849
+    },
+    "deliverable": null,
+    "attachment_status": 404,
+    "previous_attachment_sha256": "041115cbec2142d932b0aabd42f26ad866a4dc626af5991da2414a4d0247aa39",
+    "legacy_creation_replayed": "t-d72170f71a",
+    "head": "t-6cc18b1d18",
+    "active": null
+  },
+  "unacknowledged_notification_rejected": true,
+  "corrupt_artifact_rejected": true,
+  "unrelated_trial_info_prevented_rollback": true,
+  "boundary": "Actual isolated rewrite and legacy Router HTTP and SQLite. Worker model is scripted.",
+  "pending_review_still_blocked": true,
+  "successful_repeats": 10
+}

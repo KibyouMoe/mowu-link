@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -15,6 +16,7 @@ from .devloop import FixtureHost, Loop, agent_report
 from .legacy_test_fixture import source_for
 from .test_mainline import Clock
 from .orders import Orders
+from .reviewed_rollback import stage_reviewed_rollback
 from .storage import Fault, guid
 from .hermes import HermesAdapter
 from .hermes_tools import ManagerTools
@@ -253,12 +255,190 @@ print(json.dumps(tid))
             self.assertNotIn(secret_text,seen)
         with self.assertRaisesRegex(ValueError,"reconcile"):
             rollback(self.snapshot,self.trial,self.restore)
+        review = self.root/"pending-review.json"
+        review.write_text(json.dumps({"trial_sha256":trial_before,"closed_assignments":{tid:aid}}))
+        with self.assertRaisesRegex(ValueError,"closed after one W04"):
+            stage_reviewed_rollback(self.snapshot,self.trial,review,self.restore)
         self.assertFalse(self.restore.exists())
         self.assertEqual((digest(self.snapshot/"legacy.db"),digest(self.trial/"router.db")),(old_before,trial_before))
         self.evidence = {"work_order":change,"router_notification_count":len(notices),
                          "trial_sha256":facts["trial_sha256"],"legacy_snapshot_sha256":old_before,
                          "exact_rollback_allowed":facts["exact_rollback_allowed"],"both_databases_preserved":True,
                          "boundary":"Actual legacy and rewrite SQLite; isolated Router over HTTP and scripted Agent"}
+
+    def test_reviewed_migrated_report_rolls_back_as_archive_without_redispatch_or_public_attachment(self):
+        creation = {"message_id":guid(),"worker":"oguri","TaskName":"Complete while trial is live",
+                    "goal":"Isolated migrated task"}
+        old_ids = json.loads(self.old("""
+from server import RouterServer
+from selftest_router import http
+from threading import Thread
+from unittest.mock import Mock
+store = RouterStore(sys.argv[1])
+store.upsert_worker("oguri")
+with RouterServer(("127.0.0.1",0),store,"offline-test",Mock(),Mock()) as srv:
+    thread = Thread(target=srv.serve_forever,kwargs={"poll_interval":.02})
+    thread.start()
+    try:
+        status, reply = http("POST",f"http://127.0.0.1:{srv.server_port}/tasks",
+                             json.loads(sys.argv[2]),"offline-test")
+        assert status==202 and reply["queued"], (status,reply)
+        first = reply["task_id"]
+    finally:
+        srv.shutdown()
+        thread.join()
+second = store.orders.create("Keep this queued","Do after recovery","oguri",{},"fixture",None,None)
+store.close()
+print(json.dumps([first,second]))
+""",self.legacy,json.dumps(creation)))
+        backup(self.legacy,self.attachments,self.snapshot)
+        base = prepare(self.snapshot,self.trial,self.source_id)
+        tid,waiting = (base["queued_id_map"][old] for old in old_ids)
+        clock = Clock()
+        loop = Loop(self.trial,clock,FixtureHost)
+        blob = b"private archive bytes\0" * 20
+        sha = hashlib.sha256(blob).hexdigest()
+        summary = "试用中已验收。\n正文和附件只能在私有材料包里查看。"
+        with loop.server:
+            loop.thread.start()
+            try:
+                loop.worker.connect()
+                loop.worker.poll()
+                clock.advance(10)
+                loop.worker.poll()
+                loop.worker.poll()
+                self.assertEqual(loop.worker.hold()["held_task_id"],tid)
+                aid = loop.worker.hold()["held_assignment_id"]
+                native = loop.native.entries()[0][1]["native_id"]
+                upload = loop.wire.request("POST","uploads",{"name":"reviewed.bin","size_bytes":len(blob),
+                                           "sha256":sha},guid())["upload_id"]
+                loop.wire.request("PATCH","uploads/"+upload,blob[:31],headers={"Upload-Offset":"0"})
+                artifact = loop.wire.request("PATCH","uploads/"+upload,blob[31:],
+                                             headers={"Upload-Offset":"31"})["attachment_id"]
+                call = {"task_id":tid,"assignment_id":aid,"summary":summary,"artifact_ids":[artifact]}
+                report = agent_report(loop.worker,native,call)
+                self.assertFalse(report["isError"])
+                self.assertEqual(agent_report(loop.worker,native,call),report)
+                received = loop.hermes.inspect(tid)["task"]
+                self.assertEqual(received["state"],"completed_reported")
+                approval_key = guid()
+                self.assertEqual(loop.hermes.approve(approval_key,tid,received["revision"])["task"]["state"],"closed")
+                notice, = loop.manager_wire.frames(0)
+                self.assertEqual(loop.hermes.inspect(waiting)["task"]["state"],"ready")
+            finally:
+                loop.server.shutdown()
+                loop.thread.join()
+        review = self.root/"review-approved.json"
+        approval = {"trial_sha256":digest(self.trial/"router.db"),"closed_assignments":{tid:aid}}
+        review.write_text(json.dumps(approval))
+        with self.assertRaisesRegex(ValueError,"no consumer acknowledgement"):
+            stage_reviewed_rollback(self.snapshot,self.trial,review,self.restore)
+        self.assertFalse(self.restore.exists())
+
+        token = guid()
+        with serve_loopback(loop.orders,{token:"hermes"}) as server:
+            thread = Thread(target=server.serve_forever,kwargs={"poll_interval":.02})
+            thread.start()
+            try:
+                loop.hermes.router = Client("http://127.0.0.1:"+str(server.server_port),token)
+                loop.hermes.poll()
+                self.assertEqual(len(loop.hermes.router.frames(notice["cursor"])),0)
+            finally:
+                server.shutdown()
+                thread.join()
+        before = digest(self.legacy)
+        trial_digest = digest(self.trial/"router.db")
+        with self.assertRaisesRegex(ValueError,"review must match"):
+            stage_reviewed_rollback(self.snapshot,self.trial,review,self.restore)
+        review.write_text(json.dumps({**approval,"trial_sha256":trial_digest}))
+        result = stage_reviewed_rollback(self.snapshot,self.trial,review,self.restore)
+        self.assertEqual((result["reviewed_orders"],result["private_artifacts"]),(1,1))
+        self.assertEqual(digest(self.restore/"legacy.db"),result["restored_legacy_sha256"])
+        private = self.restore/"private-review"
+        record = json.loads((private/"manifest.json").read_text())
+        saved = record["orders"][tid]
+        self.assertEqual((saved["legacy_task_id"],saved["assignment_id"],saved["summary"],saved["review_key"]),
+                         (old_ids[0],aid,summary,approval_key))
+        self.assertEqual(saved["notice"]["delivery_id"],notice["delivery_id"])
+        self.assertEqual(record["files"][artifact]["sha256"],sha)
+        self.assertEqual((private/"files"/artifact).read_bytes(),blob)
+        self.assertEqual((private/"files"/artifact).stat().st_mode&0o777,0o600)
+        self.assertEqual((private/"manifest.json").stat().st_mode&0o777,0o600)
+        self.assertEqual(private.stat().st_mode&0o777,0o700)
+        self.assertEqual(digest(private/"trial-router.db"),trial_digest)
+        self.assertEqual(digest(self.legacy),before)
+        self.assertEqual(digest(self.trial/"router.db"),trial_digest)
+
+        observed = json.loads(self.old("""
+from server import RouterServer
+from selftest_router import http
+from threading import Thread
+from urllib.request import Request, urlopen
+from unittest.mock import Mock
+store = RouterStore(sys.argv[1])
+with RouterServer(("127.0.0.1",0),store,"offline-operator-token",Mock(),Mock()) as srv:
+    thread = Thread(target=srv.serve_forever,kwargs={"poll_interval":.02})
+    thread.start()
+    try:
+        url = "http://127.0.0.1:"+str(srv.server_port)
+        status, archive = http("GET",url+"/tasks/"+sys.argv[2],token="offline-operator-token")
+        gone, _ = http("GET",url+"/attachments/"+sys.argv[3], token="offline-operator-token")
+        repeated_status,repeated = http("POST",url+"/tasks",json.loads(sys.argv[5]),"offline-operator-token")
+        assert repeated_status==200 and repeated["duplicate"] and repeated["task_id"]==sys.argv[2], repeated
+        existing = Request(url+"/attachments/"+sys.argv[4],headers={"X-Router-Token":"offline-operator-token"})
+        with urlopen(existing,timeout=5) as response:
+            old_file_digest = hashlib.sha256(response.read()).hexdigest()
+        print(json.dumps({"status":status,"archive":archive["task"]["archive"],
+                          "deliverable":archive["task"]["deliverable"],"attachment_status":gone,
+                          "previous_attachment_sha256":old_file_digest,
+                          "legacy_creation_replayed":repeated["task_id"],
+                          "head":store.orders.next_dispatch("oguri"),"active":store.orders.held("oguri")}))
+    finally:
+        srv.shutdown()
+        thread.join()
+store.close()
+""",self.restore/"legacy.db",old_ids[0],sha,self.sha,json.dumps(creation)))
+        self.assertEqual(observed["status"],200)
+        self.assertEqual(observed["archive"]["reason"],"reviewed_on_rewrite")
+        self.assertEqual(observed["archive"]["recovery_reference"],tid)
+        self.assertEqual(observed["legacy_creation_replayed"],old_ids[0])
+        self.assertIsNone(observed["deliverable"])
+        self.assertEqual((observed["head"],observed["active"],observed["attachment_status"]),(old_ids[1],None,404))
+        self.assertEqual(observed["previous_attachment_sha256"],self.sha)
+        corrupt = self.root/"corrupt-trial"
+        corrupt.mkdir()
+        shutil.copyfile(self.trial/"baseline.json",corrupt/"baseline.json")
+        shutil.copyfile(self.trial/"router.db",corrupt/"router.db")
+        with closing(sqlite3.connect(corrupt/"router.db")) as db,db:
+            db.execute("UPDATE chunks SET bytes=? WHERE upload_id=? AND start=31",(b"x"*len(blob[31:]),upload))
+        review.write_text(json.dumps({**approval,"trial_sha256":digest(corrupt/"router.db")}))
+        failed = self.root/"damaged-back"
+        with self.assertRaisesRegex(ValueError,"attachment digest mismatch"):
+            stage_reviewed_rollback(self.snapshot,corrupt,review,failed)
+        self.assertFalse(failed.exists())
+        shutil.copyfile(self.trial/"router.db",corrupt/"router.db")
+        info_instance,info_key = guid(),guid()
+        with serve_loopback(Orders(corrupt/"router.db",clock),{info_key:"trigger/"+info_instance}) as server:
+            thread = Thread(target=server.serve_forever,kwargs={"poll_interval":.02})
+            thread.start()
+            try:
+                trigger = Client("http://127.0.0.1:"+str(server.server_port),info_key)
+                trigger.request("POST","messages",{"message_id":guid(),"instance_id":info_instance,
+                    "trigger_name":"isolated-info","level":"Info","text":"New trial archival message",
+                    "generated_at":"2026-01-01T00:00:00Z","attachment_ids":[]},guid())
+            finally:
+                server.shutdown()
+                thread.join()
+        review.write_text(json.dumps({**approval,"trial_sha256":digest(corrupt/"router.db")}))
+        with self.assertRaisesRegex(ValueError,"outside the reviewed W04 results"):
+            stage_reviewed_rollback(self.snapshot,corrupt,review,failed)
+        self.assertFalse(failed.exists())
+        self.evidence = {"source_legacy_task":old_ids[0],"trial_task":tid,"assignment":aid,"review_key":approval_key,
+                         "notification_delivery":notice["delivery_id"],"artifact_id":artifact,"artifact_sha256":sha,
+                         "trial_sha256":trial_digest,"legacy_original_sha256":before,"legacy_readback":observed,
+                         "unacknowledged_notification_rejected":True,"corrupt_artifact_rejected":True,
+                         "unrelated_trial_info_prevented_rollback":True,
+                         "boundary":"Actual isolated rewrite and legacy Router HTTP and SQLite. Worker model is scripted."}
 
     def test_pending_peer_or_missing_middle_chunk_prevents_publishing_a_partial_migration(self):
         mid = guid()

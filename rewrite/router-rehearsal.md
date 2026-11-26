@@ -37,7 +37,7 @@ python3 -m rewrite.cutover export-chat --snapshot ./snapshot --worker "$WORKER_I
 - 有持单、待确认的同伴消息、待答问题、审批、订阅或处理权纠正时，备份照常保留，准备新写者会列出待处理数。指定工作区、特殊时限、紧急优先级、未知元数据或已有投递事实的排队单需要显式对照。历史旧格式任务表有内容时同样需要单独迁移。早期格式 1 快照仍按原标准校验，准备阶段再核本版支持范围。
 - 附件不完整、校验失败、有未结束日志或目标已存在时，命令报错。每个结果目录完整生成后才发布。
 - 新库尚未变化时可恢复到全新目录。回退后用实际旧 RouterStore 查归档理由与下一张待派单，逐字节对比附件并核源库摘要。
-- 新库已写入时，直接回退会丢掉新进展，命令会拒绝。保留新旧两边及新增事实，完成逐笔核对后再制定回放顺序。这种有新业务写入的回迁仍待演练。
+- 新库已写入时，直接回退会丢掉新进展，命令会拒绝。保留新旧两边及新增事实，按下面已演练的场景准备回退。其他新写入逐笔对账。
 
 `reconcile` 可用准备试运行时的同一源码和 SQLite 运行环境，在临时目录从旧快照重建基线，再按实际表对账。输出包含三份库摘要、每张表两侧的差异行数、候选工单号及原建单请求号。已派过的单、未指定处理人、旧库未登记的工位及旧端会修改或拒收的正文分别列出原因。输出只列标识和记录数。
 
@@ -52,6 +52,22 @@ python3 -m rewrite.cutover stage-queue-rollback --snapshot ./snapshot --trial ./
 ```
 
 命令在新目录生成旧库、旧附件和 `queue-replay.json`。该文件含原指令，应和离线库一起保管。已有 UUID 保留。新 Hermes 管理工具的 `hermes-…` 请求号通过来源 UUID 确定性地生成旧端可接受的请求 UUID，文件同时保存两者。仅在隔离环境打开该旧库，让旧 Router 不接 Worker，再按文件顺序将每个 `request` 发给旧端 `POST /tasks`。记录新试运行工单号、原请求号、回放请求 UUID 与旧端返回的工单号。新请求返回 202 并保持排队。同号重送须返回同一旧工单号，改正文重送须返回 409。核对旧队首、完整正文和回放后的队列顺序。复跑整个演练使用 `python3 -m unittest -v rewrite.test_cutover.Cutover.test_reviewed_new_orders_reenter_the_old_http_queue_once_and_preserve_its_head`。已派发的单、成果及其他新写入仍需逐笔处理。
+
+### 回退已验收的迁入工单
+
+此入口覆盖从旧队列迁入、原文与处理人未改、经过一次 W03 和 W04、已由溪流验收结单的原工单。所有试用投递须有原接收方确认。Worker 仍忙、有未收清的状态查询、出现其他新单或消息、转派、候选材料、待验收成果与损坏附件时，命令会停止并保留输入。
+
+停止试运行写者后运行 `reconcile`，把 `trial_sha256` 和逐单核对过的 `closed_assignments` 写入审核文件。`closed_assignments` 的键是新工单号，值是正式 W04 对应的派发号。审核文件必须覆盖这批已结单的全部变更。
+
+```sh
+python3 -m rewrite.cutover stage-reviewed-rollback --snapshot ./snapshot --trial ./trial --review ./review.json --destination ./reviewed-recovery
+```
+
+目标目录中的 `legacy.db` 用旧 Router 正常打开，旧附件在 `legacy.db.attachments/`。已验收的原单在恢复库标记为 `reviewed_on_rewrite`，留有指向私有档案的 `recovery_reference`。原单号、原建单幂等键以及尚未执行的旧队列顺序保留。旧 Router 再查原单能看到归档状态，重试原建单只回原单号。
+
+`private-review/manifest.json` 保存正文、原 W04 和验收请求键、通知凭据、旧新编号及附件摘要，`private-review/files/` 保存逐块校验过的新成果附件。`private-review/trial-router.db` 是带校验摘要的完整试运行库副本。旧 Router 的通用凭据只能查看归档标记和原已授权附件。试用的新成果从私有回退包查阅，原通知无需重发。
+
+复跑 `python3 -B -m unittest -v rewrite.test_cutover`。实际旧 Router 和重做 Router 都经隔离 HTTP 运行。Worker 模型使用夹具。待验收或通知未确认时未生成回退库，另验损坏附件及新入站消息使准备阶段停止。[旧端归档和附件读回](evidence/cutover-reviewed-rollback.json)
 
 ## 旧 Trigger 历史和订阅账本
 

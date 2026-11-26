@@ -293,6 +293,10 @@ def work_order_changes(db, delta, old_ids):
                               WHERE task_id=?""",(tid,)).fetchone()
         after = db.execute("""SELECT assignee_id,assignment_id,revision,state FROM main.tasks
                              WHERE task_id=?""",(tid,)).fetchone()
+        same_content = None
+        if before and after:
+            same_content = bool(db.execute("""SELECT 1 FROM main.tasks t JOIN baseline.tasks b USING(task_id)
+                 WHERE t.task_id=? AND t.title=b.title AND t.instructions=b.instructions""",(tid,)).fetchone())
         reports = [dict(row,artifact_ids=attachments.linked(db,"report",row["assignment_id"]))
                    for row in db.execute("""SELECT assignment_id,worker_id FROM main.reports
                                            WHERE task_id=? ORDER BY rowid""",(tid,))]
@@ -300,7 +304,8 @@ def work_order_changes(db, delta, old_ids):
                      for row in db.execute("""SELECT material_id,assignment_id,submitted_by FROM main.materials
                                               WHERE task_id=? ORDER BY rowid""",(tid,))]
         records.append({"task_id":tid,"legacy_task_id":old_ids.get(tid),"before":dict(before) if before else None,
-                        "trial":dict(after) if after else None,"completed_reports":reports,"candidate_materials":materials})
+                        "trial":dict(after) if after else None,"same_content":same_content,
+                        "completed_reports":reports,"candidate_materials":materials})
     return records
 
 
@@ -391,12 +396,15 @@ def stage_queue_rollback(snapshot, trial, review, destination):
 
 
 def main():
+    from .reviewed_rollback import stage_reviewed_rollback
+
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="op", required=True)
     for op, names in (("backup",("database","attachments","destination")),
                       ("verify",("snapshot",)),("prepare",("snapshot","destination")),
                       ("reconcile",("snapshot","trial")),
                       ("stage-queue-rollback",("snapshot","trial","review","destination")),
+                      ("stage-reviewed-rollback",("snapshot","trial","review","destination")),
                       ("rollback",("snapshot","trial","destination")),
                       ("export-chat",("snapshot","destination"))):
         command = commands.add_parser(op)
@@ -412,6 +420,7 @@ def main():
     args = vars(parser.parse_args())
     command = {"backup":backup,"verify":verified,"prepare":prepare,
                "reconcile":reconcile,"rollback":rollback,"stage-queue-rollback":stage_queue_rollback,
+               "stage-reviewed-rollback":stage_reviewed_rollback,
                "export-chat":export_chat}[args.pop("op")]
     print(encode(command(**args)))
 
