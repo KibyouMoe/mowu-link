@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 from queue import Queue
 import shutil
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -20,6 +21,7 @@ from .adapter import HostAdapter
 from .devloop import FixtureHost, Loop
 from .dsh_workspace_audit import inspect, journal
 from .host_wire import RemoteAdapter
+from .release import build, materialize
 from .release_check import config, serve
 from .state_bundle import capture, restore, rollback, verify
 from .storage import Fault, encode, guid
@@ -73,6 +75,55 @@ def eventually(check):
             return result
         time.sleep(.04)
     raise AssertionError("the isolated Codex workspace did not reach its expected state")
+
+
+def boot_previous(root,revision,recovered,sid,profile,project,cert,key,env,dispatch,payload):
+    repository = Path(__file__).resolve().parents[1]
+    release = build(repository,revision,root/"previous-release")
+    package = root/"previous-package"
+    materialize(Path(release["archive"]),revision,release["sha256"],package,install=True)
+    worker_key,manager_key,adapter_key,callback_key,platform_key = (guid() for _ in range(5))
+    router_roles = config(root,"old-router-roles.json",{worker_key:"worker/oguri",manager_key:"hermes"})
+    adapter_roles = config(root,"old-adapter-roles.json",{adapter_key:"worker/oguri"})
+    worker_roles = config(root,"old-worker-roles.json",{callback_key:"adapter/oguri",platform_key:"platform/oguri"})
+    with ExitStack() as stack:
+        router_url = stack.enter_context(serve(package,"router",recovered["router:main"],router_roles,cert,key,env))
+        manage = Client(router_url,manager_key,cert)
+        def connection(name,url,token):
+            return config(root,name+".json",{"url":url,"token":token,"ca_file":str(cert)})
+        to_router = connection("old-router",router_url,worker_key)
+        with socket.socket() as reservation:
+            reservation.bind(("127.0.0.1",0))
+            port = reservation.getsockname()[1]
+        to_worker = connection("old-callback",f"https://127.0.0.1:{port}",callback_key)
+        adapter_options = ("--worker-id","oguri","--session",sid,"--worker-connection",to_worker,"--codex-binary",CODEX,
+                           "--codex-profile",profile,"--cwd",project,"--read-only-assignments")
+        adapter_url = stack.enter_context(serve(package,"codex-adapter",recovered["agent:oguri"],adapter_roles,cert,key,env,
+                                               adapter_options,shutdown_timeout=15))
+        to_adapter = connection("old-adapter",adapter_url,adapter_key)
+        worker_options = ("--worker-id","oguri","--port",str(port),"--router-connection",to_router,
+                          "--adapter-session",sid,"--adapter-connection",to_adapter)
+        worker_url = stack.enter_context(serve(package,"worker",recovered["worker:oguri"],worker_roles,cert,key,env,
+                                              worker_options,shutdown_timeout=20))
+        adapter = RemoteAdapter(Client(adapter_url,adapter_key,cert),sid)
+        original = adapter.lookup_delivery(dispatch["delivery_id"],payload,session=sid)
+        platform = Client(worker_url,platform_key,cert)
+        chat = {"message_id":guid(),"text":"Isolated previous-version private chat"}
+        def receive():
+            try:
+                return platform.request("POST","worker/chat",chat)["receipt"]
+            except Fault as error:
+                if error.status not in (409,503):
+                    raise
+                return None
+        first = eventually(receive)
+        repeated = receive()
+        eventually(lambda:not adapter.busy(session=sid))
+        task = manage.request("GET","tasks/"+payload["task_id"])
+        artifact, = task["last_report"]["artifact_ids"]
+        contents = manage.request("GET","attachments/"+artifact)["bytes"]
+        return {"revision":revision,"package_sha256":release["sha256"],"original_input":original,
+                "private_chat":first,"retry_chat":repeated,"task":task,"artifact_sha256":hashlib.sha256(contents).hexdigest()}
 
 
 @unittest.skipUnless(CODEX.is_file() and shutil.which("node") and shutil.which("openssl"),
@@ -257,8 +308,9 @@ class CodexWorkspaceTest(unittest.TestCase):
                     with closing(sqlite3.connect(adapter_db)) as db:
                         commands = db.execute("SELECT turn_id,call_id FROM codex_workspace_commands").fetchall()
                         self.assertEqual(len(commands),1)
-                        inputs = db.execute("SELECT receipt FROM intents WHERE json_extract(payload,'$.kind')='task'").fetchall()
-                        dispatch, = [json.loads(row[0]) for row in inputs]
+                        inputs = db.execute("SELECT receipt,payload FROM intents WHERE json_extract(payload,'$.kind')='task'").fetchall()
+                        (receipt,payload), = inputs
+                        dispatch,payload = json.loads(receipt),json.loads(payload)
                         self.assertEqual(commands[0],(dispatch["turn_id"],"workspace-shell"))
                 audit,error = inspect(runtime,{identity})
                 self.assertIsNone(error)
@@ -270,6 +322,18 @@ class CodexWorkspaceTest(unittest.TestCase):
                         self.assertEqual(Path(path).read_bytes(),Path(trial[label]).read_bytes())
                     proof.update(snapshot_format=3,rollback_before_reap="dsh_assignment_workspace_pending",
                                  restored_components=sorted(recovered))
+                    if previous := os.environ.get("MOWULINK_CODEX_WORKSPACE_PREVIOUS"):
+                        count = len(provider.observed)
+                        confirmation = boot_previous(root,previous,recovered,sid,profile,project,cert,key,env,dispatch,payload)
+                        self.assertEqual(confirmation["original_input"],dispatch)
+                        self.assertEqual(confirmation["private_chat"],confirmation["retry_chat"])
+                        self.assertEqual(confirmation["private_chat"]["session"],sid)
+                        self.assertEqual(confirmation["task"]["task"],manager.inspect(task)["task"])
+                        self.assertEqual(confirmation["task"]["last_report"]["artifact_ids"],[artifact])
+                        self.assertEqual(confirmation["artifact_sha256"],proof["sha256"])
+                        eventually(lambda:len(provider.observed)>count)
+                        self.assertEqual(len(provider.observed)-count,1)
+                        proof.update(previous_release=confirmation,previous_native_model_requests=1)
                 cases.append({"action":action,"task_id":task,"assignment_id":assignment,"original_input":dispatch,
                     "container_id":cid,"detached_child_pid_before_control":stopped_pid,"offline_workspace_audit":audit,
                     "final_task":manager.inspect(task)["task"],**proof})

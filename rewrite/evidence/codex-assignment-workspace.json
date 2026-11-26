@@ -1,22 +1,22 @@
 {
-  "recorded_utc": "2026-11-26T19:02:45Z",
+  "recorded_utc": "2026-11-26T19:04:57Z",
   "boundary": "Bundled Codex App Server, independent TLS adapter and Linux Docker. Local scripted model and replacement host.",
   "cases": [
     {
       "action": "complete",
-      "task_id": "9daec554-8268-4202-8981-e74b259acb54",
-      "assignment_id": "47f21a00-cfc0-49fc-b594-e1f88b4852f1",
+      "task_id": "54fc1513-d392-4bb8-bfaf-5752aa22e979",
+      "assignment_id": "5a063dad-be01-49e9-8e10-a7c10a58e7dc",
       "original_input": {
-        "delivery_id": "582123fd-e46d-48b1-8f12-f1e38dc92043",
-        "digest": "99d6353b4c47c15b34cbe395ad8ed8216ad7dfe77a93bd6a6b6eca34a7bb537d",
-        "native_id": "01a2193c-e179-7811-bd2f-625edbda7d56",
-        "session": "01a2193c-dfa2-7921-8a2c-412341278aa7",
-        "turn_id": "01a2193c-e171-76a2-ba27-113b8a756085"
+        "delivery_id": "8e6f4be7-ad66-41d0-b9d6-bb63fcbeeecd",
+        "digest": "962f10d3e6b0f7eacc62b7ab82e618719245182e964ebb60c43764431da58294",
+        "native_id": "01a2193e-f828-7d31-8c8a-13c051135e97",
+        "session": "01a2193e-f6c0-75a3-b159-30b0e79b127e",
+        "turn_id": "01a2193e-f820-7e70-9384-e2a7a62bfc68"
       },
-      "container_id": "9c6e8b95d683cf3c0134c9c376c1b53470b767904bda5c9d310109b43102c856",
+      "container_id": "6f181f832528c9ff3965bc75d5fc10dd081624c771fffa46900881cd13473f59",
       "detached_child_pid_before_control": null,
       "offline_workspace_audit": {
-        "fingerprint": "b5982794b8dd29e3c31d4141249c83521a7d825fc1d085c6c768b8d8b21b49c1",
+        "fingerprint": "0421984b80ae2c6b9c3facda70ec246aaf130bcbc7b18a6cb99af3958a67eb75",
         "pending": []
       },
       "final_task": {
@@ -28,27 +28,27 @@
         "instructions": "Continue this isolated assignment through a link outage",
         "revision": 4,
         "state": "completed_reported",
-        "task_id": "9daec554-8268-4202-8981-e74b259acb54",
+        "task_id": "54fc1513-d392-4bb8-bfaf-5752aa22e979",
         "title": "Native Codex workspace"
       },
       "w04": {
         "recorded": true,
-        "release_assignment_id": "47f21a00-cfc0-49fc-b594-e1f88b4852f1",
+        "release_assignment_id": "5a063dad-be01-49e9-8e10-a7c10a58e7dc",
         "task_state": "completed_reported"
       },
-      "w04_idempotency_key": "complete-47f21a00-cfc0-49fc-b594-e1f88b4852f1",
-      "artifact_id": "adcfeb74-197b-4111-9c6b-84e3115ba639",
+      "w04_idempotency_key": "complete-5a063dad-be01-49e9-8e10-a7c10a58e7dc",
+      "artifact_id": "cc2ec444-e6bc-4ba6-93c9-2e2003be490a",
       "bytes": 691200,
       "sha256": "80320ac86029606b61d5b57728512a639950cca654e5683f89d160df3ca0a953",
-      "notify_id": "bbe3a51f-3008-4487-9f88-9f92d982c127",
+      "notify_id": "5e12272c-cf8e-4146-8a47-0480094449f8",
       "workspace_alive_before_w04_receipt": true,
       "pending_while_station_stopped": {
-        "fingerprint": "1f439e226aaa9e12061fa7261205cfc3786d5aeade5c0643cc061991d3f3a5c3",
+        "fingerprint": "3b3a88243f501137f2f0f0971e8cb584edb7092c8d4dc385d1893fc4a95e17eb",
         "pending": [
           {
-            "session": "01a2193c-dfa2-7921-8a2c-412341278aa7",
-            "task_id": "9daec554-8268-4202-8981-e74b259acb54",
-            "assignment_id": "47f21a00-cfc0-49fc-b594-e1f88b4852f1",
+            "session": "01a2193e-f6c0-75a3-b159-30b0e79b127e",
+            "task_id": "54fc1513-d392-4bb8-bfaf-5752aa22e979",
+            "assignment_id": "5a063dad-be01-49e9-8e10-a7c10a58e7dc",
             "phase": "active"
           }
         ]
@@ -62,23 +62,77 @@
         "router:main",
         "trigger:workspace-recovery",
         "worker:oguri"
-      ]
+      ],
+      "previous_release": {
+        "revision": "7c53afa41d6639b43c808f872f0c318620cebbd4",
+        "package_sha256": "2841dbc7c6cc8c2db099b80c9dae93b07f9b3919e47cb6972d02abeeb5544b85",
+        "original_input": {
+          "delivery_id": "8e6f4be7-ad66-41d0-b9d6-bb63fcbeeecd",
+          "digest": "962f10d3e6b0f7eacc62b7ab82e618719245182e964ebb60c43764431da58294",
+          "native_id": "01a2193e-f828-7d31-8c8a-13c051135e97",
+          "session": "01a2193e-f6c0-75a3-b159-30b0e79b127e",
+          "turn_id": "01a2193e-f820-7e70-9384-e2a7a62bfc68"
+        },
+        "private_chat": {
+          "delivery_id": "chat-720ef642-40f8-4c77-8eed-b6810b185147",
+          "digest": "a448895814cd272d258f3d7467c4aed791581af0f6d13ec9038ebc6dbb8f6034",
+          "native_id": "01a2193f-11fa-7ff2-99cf-7176c37c7229",
+          "session": "01a2193e-f6c0-75a3-b159-30b0e79b127e",
+          "turn_id": "01a2193f-11f6-7201-bcdc-6e59c3a74066"
+        },
+        "retry_chat": {
+          "delivery_id": "chat-720ef642-40f8-4c77-8eed-b6810b185147",
+          "digest": "a448895814cd272d258f3d7467c4aed791581af0f6d13ec9038ebc6dbb8f6034",
+          "native_id": "01a2193f-11fa-7ff2-99cf-7176c37c7229",
+          "session": "01a2193e-f6c0-75a3-b159-30b0e79b127e",
+          "turn_id": "01a2193f-11f6-7201-bcdc-6e59c3a74066"
+        },
+        "task": {
+          "delivery_state": "received",
+          "last_report": {
+            "artifact_ids": [
+              "cc2ec444-e6bc-4ba6-93c9-2e2003be490a"
+            ],
+            "assignment_id": "5a063dad-be01-49e9-8e10-a7c10a58e7dc",
+            "outcome": "completed",
+            "summary": "Isolated Codex artifact",
+            "task_id": "54fc1513-d392-4bb8-bfaf-5752aa22e979",
+            "worker_id": "oguri"
+          },
+          "materials": [],
+          "pending_cleanup": [],
+          "task": {
+            "assignee_id": "oguri",
+            "assignment_id": null,
+            "holder": {
+              "kind": "router"
+            },
+            "instructions": "Continue this isolated assignment through a link outage",
+            "revision": 4,
+            "state": "completed_reported",
+            "task_id": "54fc1513-d392-4bb8-bfaf-5752aa22e979",
+            "title": "Native Codex workspace"
+          }
+        },
+        "artifact_sha256": "80320ac86029606b61d5b57728512a639950cca654e5683f89d160df3ca0a953"
+      },
+      "previous_native_model_requests": 1
     },
     {
       "action": "cancel",
-      "task_id": "e1d4de87-4450-4619-b420-62f9034cc233",
-      "assignment_id": "0ac2e977-3dcb-4dce-b29a-d70ff46d3085",
+      "task_id": "693c2e56-9d42-4158-99f0-94bb83d64876",
+      "assignment_id": "813645bb-83e2-4e6f-b62b-f5fed8e37111",
       "original_input": {
-        "delivery_id": "7fb89435-bdaf-401d-b08e-706b7c0aa71a",
-        "digest": "4c63605c2c8660e46fb646557f6c47e8ebd761672c32b92bfbbc2c1f6d2bed9c",
-        "native_id": "01a2193d-1371-7ee2-ab50-e2e699f0d9ec",
-        "session": "01a2193d-1186-76b2-b142-a4cd806fbf35",
-        "turn_id": "01a2193d-136a-7612-801e-f23ec98c53b9"
+        "delivery_id": "347505ab-f915-4829-95a3-a249d82898ac",
+        "digest": "c21b7b8dc16fcd71a23060dcb7ab19fe2e492d0b1856f264d648791ba275dfd2",
+        "native_id": "01a2193f-16c2-7783-8f52-fd5f631cde74",
+        "session": "01a2193f-151f-7f00-8a18-745d6ae6466d",
+        "turn_id": "01a2193f-16bb-7581-a228-1271dda769aa"
       },
-      "container_id": "a34dcc9d8f10f94a12cbc8987dd409594742341e4e81f90b065a374e7119b8cd",
-      "detached_child_pid_before_control": "20",
+      "container_id": "48f824461550a9474ef415c6e2fdc27db66531ce90421df2fda468f1bccb5d1c",
+      "detached_child_pid_before_control": "21",
       "offline_workspace_audit": {
-        "fingerprint": "44fa9861843adc042e13a10cfd0bbedee5db633fb326945a56bd7e39f8fa85da",
+        "fingerprint": "113f730524b2cc2bdfa68ebc26ffd05d24001ce0097b9c67381d143ed2438bfd",
         "pending": []
       },
       "final_task": {
@@ -90,57 +144,57 @@
         "instructions": "Continue this isolated assignment through a link outage",
         "revision": 5,
         "state": "cancelled",
-        "task_id": "e1d4de87-4450-4619-b420-62f9034cc233",
+        "task_id": "693c2e56-9d42-4158-99f0-94bb83d64876",
         "title": "Native Codex workspace"
       },
       "w04": {
         "recorded": true,
-        "release_assignment_id": "0ac2e977-3dcb-4dce-b29a-d70ff46d3085",
+        "release_assignment_id": "813645bb-83e2-4e6f-b62b-f5fed8e37111",
         "task_state": "cancelled"
       },
       "native_cleanup": {
-        "assignment_id": "0ac2e977-3dcb-4dce-b29a-d70ff46d3085",
+        "assignment_id": "813645bb-83e2-4e6f-b62b-f5fed8e37111",
         "cleaned": true,
-        "control_turn_id": "01a2193d-156a-7c53-a91b-5a671baccb95",
+        "control_turn_id": "01a2193f-18d8-7232-8771-d5d32b78f112",
         "kind": "task.cancel",
-        "receipt_id": "2c36fb94da4e84b8ea50c43a966b053ab58d6a73d2cb857179204f78be60c848",
+        "receipt_id": "7e226e1e98d74a651bdf2d337955f8fe1efe1c58f056b4ae501d3e6394bf1471",
         "scope": "assignment_container",
-        "session": "01a2193d-1186-76b2-b142-a4cd806fbf35",
+        "session": "01a2193f-151f-7f00-8a18-745d6ae6466d",
         "stopped": true,
         "stopped_turns": [
           {
             "status": "interrupted",
-            "turn_id": "01a2193d-136a-7612-801e-f23ec98c53b9"
+            "turn_id": "01a2193f-16bb-7581-a228-1271dda769aa"
           }
         ],
         "withdrawn_inputs": [],
         "workspace": {
-          "container_id": "a34dcc9d8f10f94a12cbc8987dd409594742341e4e81f90b065a374e7119b8cd",
-          "receipt_id": "f4f12c542a7a6a8d669509891fc1723543d438f040889e16c16326ff68a93150",
+          "container_id": "48f824461550a9474ef415c6e2fdc27db66531ce90421df2fda468f1bccb5d1c",
+          "receipt_id": "c0b88cb23cb3a7e08814e86258ffa6b7483d3946dbb2359ea7f605f560d9e4cf",
           "state": "removed"
         }
       }
     },
     {
       "action": "transfer",
-      "task_id": "1a10e479-b3e8-494f-b223-79a4b8d2be50",
-      "assignment_id": "71457f5e-caec-485d-afe8-51312be06035",
+      "task_id": "ca91e605-55d8-404a-a281-3905f4edf209",
+      "assignment_id": "b28f802f-fcb2-40e6-ab7a-e4c34ee14415",
       "original_input": {
-        "delivery_id": "951a49a2-4668-41f4-a77b-b5b6947fdff3",
-        "digest": "68b31a6def6ea620d1f87f853d57cf64fba58fa3fdea93794252ad26af751b48",
-        "native_id": "01a2193d-1acd-7891-be88-7662b7d1a39d",
-        "session": "01a2193d-1917-72e0-b89f-82f15f6c5d8f",
-        "turn_id": "01a2193d-1ac3-7a42-a941-2cbf7c6e9fe9"
+        "delivery_id": "3746803c-b32b-4b69-a291-eed317fd616e",
+        "digest": "130ddf229d5b4290663d9dd4ddb282e3ef9dc68bb1f2d9f71783f68c4ecf9f3e",
+        "native_id": "01a2193f-1d5c-7d13-baf0-a92f7f8a8277",
+        "session": "01a2193f-1ba2-7a93-b142-8598f5577330",
+        "turn_id": "01a2193f-1d56-7dd1-b032-e3007e28af13"
       },
-      "container_id": "9d825472a0353b505919679aa48b17a93179a4eba7e9851acfb0474b27c8d36f",
+      "container_id": "79fe817f02a9003aa92232914f89788118b17f3dc7e75463b487eaf23893afff",
       "detached_child_pid_before_control": "21",
       "offline_workspace_audit": {
-        "fingerprint": "7a865bd1e3b4057a09c73b931b2f47e6f94e3f8b860d0c393bf4dbae23c85818",
+        "fingerprint": "fd0eb03f8624c507db6f0d2136e91c53298c80155e496c689f75e40971005c19",
         "pending": []
       },
       "final_task": {
         "assignee_id": "tama",
-        "assignment_id": "f8c29ce7-dc16-4f9a-a0c1-da69a56c4728",
+        "assignment_id": "592e11c8-87d9-4b81-8a6c-36b1905ceeb2",
         "holder": {
           "kind": "worker",
           "worker_id": "tama"
@@ -148,33 +202,33 @@
         "instructions": "Continue this isolated assignment through a link outage",
         "revision": 6,
         "state": "working",
-        "task_id": "1a10e479-b3e8-494f-b223-79a4b8d2be50",
+        "task_id": "ca91e605-55d8-404a-a281-3905f4edf209",
         "title": "Native Codex workspace"
       },
       "w04": {
         "recorded": true,
-        "release_assignment_id": "71457f5e-caec-485d-afe8-51312be06035",
+        "release_assignment_id": "b28f802f-fcb2-40e6-ab7a-e4c34ee14415",
         "task_state": "working"
       },
       "native_cleanup": {
-        "assignment_id": "71457f5e-caec-485d-afe8-51312be06035",
+        "assignment_id": "b28f802f-fcb2-40e6-ab7a-e4c34ee14415",
         "cleaned": true,
-        "control_turn_id": "01a2193d-1c65-7f32-bfa3-fedfcf190ec5",
+        "control_turn_id": "01a2193f-1f03-7f72-81fd-a1903453807e",
         "kind": "task.transfer_out",
-        "receipt_id": "e030eed471e852a93be866026b29373768a3cc087994fa6d4479787fef69b228",
+        "receipt_id": "fee7c8f7c58fa82fd91d23f9f4b8f6e62f4e76d65b1ba7662ce35d2bd327445c",
         "scope": "assignment_container",
-        "session": "01a2193d-1917-72e0-b89f-82f15f6c5d8f",
+        "session": "01a2193f-1ba2-7a93-b142-8598f5577330",
         "stopped": true,
         "stopped_turns": [
           {
             "status": "interrupted",
-            "turn_id": "01a2193d-1ac3-7a42-a941-2cbf7c6e9fe9"
+            "turn_id": "01a2193f-1d56-7dd1-b032-e3007e28af13"
           }
         ],
         "withdrawn_inputs": [],
         "workspace": {
-          "container_id": "9d825472a0353b505919679aa48b17a93179a4eba7e9851acfb0474b27c8d36f",
-          "receipt_id": "85dc88d45f42886bed185dcd2a45496a09f13805b44ff47a00abda45f585ae39",
+          "container_id": "79fe817f02a9003aa92232914f89788118b17f3dc7e75463b487eaf23893afff",
+          "receipt_id": "b4d0b8a1a6389b527444bffd2478fd518b682079aa084c7180429b3dc7342941",
           "state": "removed"
         }
       }
