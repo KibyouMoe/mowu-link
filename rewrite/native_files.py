@@ -1,4 +1,5 @@
 """Adapter-owned immutable files, fetched by range from one authenticated origin."""
+from contextlib import contextmanager
 import hashlib
 import os
 from pathlib import Path
@@ -34,20 +35,26 @@ class NativeFiles:
                 and private_directory(self.root),403,"invalid_media_cache")
 
     @staticmethod
-    def _open(path, mode):
-        stream = open(path,mode,opener=lambda p,flags:os.open(p,flags|getattr(os,"O_NOFOLLOW",0),0o600))
-        if os.name == "nt":
-            from .windows_acl import private_file
+    def _check_windows_file(path):
+        info = path.lstat()
+        require(stat.S_ISREG(info.st_mode) and not info.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT,
+                403,"invalid_media_object")
+        return info
 
+    @contextmanager
+    def _open(self, path, mode):
+        if os.name == "nt":
             try:
-                info = path.lstat()
-                require(stat.S_ISREG(info.st_mode) and not info.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT
-                        and os.path.samestat(info,os.fstat(stream.fileno()))
+                self._check_windows_file(path)
+            except FileNotFoundError:
+                pass
+        with open(path,mode,opener=lambda p,flags:os.open(p,flags|getattr(os,"O_NOFOLLOW",0),0o600)) as stream:
+            if os.name == "nt":
+                from .windows_acl import private_file
+
+                require(os.path.samestat(self._check_windows_file(path),os.fstat(stream.fileno()))
                         and private_file(stream.fileno()),403,"invalid_media_object")
-            except BaseException:
-                stream.close()
-                raise
-        return stream
+            yield stream
 
     def prepare(self, media):
         require(isinstance(media,list) and media,422,"invalid_native_media")

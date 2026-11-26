@@ -147,6 +147,7 @@ jobs:
             $env:MOWULINK_TEST_DSH_BINARY = $executables[0].FullName
             $env:MOWULINK_TEST_DSH_EVIDENCE = Join-Path $dir.FullName 'native-dsh.json'
             $env:MOWULINK_TEST_DSH_MEDIA_EVIDENCE = Join-Path $dir.FullName 'native-dsh-media.json'
+            $env:MOWULINK_TEST_DSH_MEDIA_PROCESS_EVIDENCE = Join-Path $dir.FullName 'native-dsh-media-process.json'
             $env:MOWULINK_DSH_CLEANUP_EVIDENCE = Join-Path $dir.FullName 'native-dsh-cleanup.json'
             $env:MOWULINK_DSH_CLEANUP_REFUSAL_EVIDENCE = Join-Path $dir.FullName 'native-dsh-cleanup-refusal.json'
             $state = New-Item -ItemType Directory (Join-Path $dir.FullName '状态 试用')
@@ -155,6 +156,7 @@ jobs:
             python -B -m unittest -v rewrite.test_dsh_native_loop.LocalTlsLoop
             Get-Content -Raw -LiteralPath $env:MOWULINK_TEST_DSH_EVIDENCE
             Get-Content -Raw -LiteralPath $env:MOWULINK_TEST_DSH_MEDIA_EVIDENCE
+            Get-Content -Raw -LiteralPath $env:MOWULINK_TEST_DSH_MEDIA_PROCESS_EVIDENCE
             Get-Content -Raw -LiteralPath $env:MOWULINK_DSH_CLEANUP_EVIDENCE
             Get-Content -Raw -LiteralPath $env:MOWULINK_DSH_CLEANUP_REFUSAL_EVIDENCE
           } finally {

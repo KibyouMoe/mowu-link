@@ -645,6 +645,58 @@ class LocalTlsLoop(NativeProcess):
     def test_captioned_image_and_reply_order_over_mutual_tls(self):
         self.native_media(use_tls=True)
 
+    def test_dsh_adapter_process_delivers_media(self):
+        session = "dsh-native-process-media"
+        runtime = self.local_tls_directory()
+        cert,key = runtime/"dsh-link.crt",runtime/"dsh-link.key"
+        clock = Clock()
+        loop = self.enterContext(Loop.isolated(clock))
+        port = RemoteAdapter(None,session)
+        worker = Worker(runtime/"worker.db","oguri",loop.wire,port,clock=clock)
+        worker_service = WorkerService(worker,clock)
+        platform_token,callback_token,adapter_token = (guid() for _ in range(3))
+        worker_url = self.open_worker(worker_service,{platform_token:"platform/oguri",callback_token:"adapter/oguri"})
+        platform = Client(worker_url,platform_token)
+        roles = config(runtime,"adapter-roles.json",{adapter_token:"worker/oguri"})
+        connection = config(runtime,"worker-connection.json",{"url":worker_url,"token":callback_token})
+        flags = ("--worker-id","oguri","--session",session,"--runtime-dir",runtime,"--worker-connection",connection,
+                 "--local-tls")
+        package = Path(__file__).resolve().parents[1]
+        with self.start_native(runtime,session,"media-echo",use_tls=True) as native, \
+             serve(package,"dsh-adapter",runtime/"adapter.db",roles,cert,key,dict(os.environ),flags) as adapter_url:
+            port.client = Client(adapter_url,adapter_token,cert)
+            worker.connect()
+            inbox = Inbound(runtime/"inbox.db",platform,lambda *_:PNG,"app","trainer","private-chat")
+            text = "实际适配器进程与固定会话"
+            mid = inbox.record("app","user","trainer",{"message_id":"om_dsh_process","chat_id":"private-chat",
+                "chat_type":"p2p","message_type":"post",
+                "content":encode({"content":[[{"tag":"text","text":text},{"tag":"img","image_key":"img_local_fixture"}]]})})
+            receipt = inbox.deliver(mid)
+            self.assertEqual(inbox.deliver(mid),receipt)
+            observed = self.read_native(native,"read")
+            sha = hashlib.sha256(PNG).hexdigest()
+            self.assertEqual(observed["inputs"],[receipt["native_id"]])
+            self.assertEqual(observed["mediaRequests"],[
+                {"caption":text,"images":[{"sha256":sha,"size":len(PNG)}],"partTypes":["text","image"]}])
+            self.assertEqual(receipt["media_sha256"],[sha])
+            self.assertEqual((runtime/"media"/sha).read_bytes(),PNG)
+            sink = PlatformFixture()
+            views = Views(runtime/"views.db",platform,sink,"private-chat","小栗帽",clock)
+            deadline = time.monotonic()+8
+            while len(sink.messages)<4 and time.monotonic()<deadline:
+                views.poll()
+                time.sleep(.05)
+            sent = list(sink.messages.values())
+            self.assertEqual([message[1] for message in sent],["interactive","interactive","image","interactive"])
+            self.assertEqual(sink.images,[PNG])
+            self.assertFalse(loop.hermes.tasks()["items"])
+        output = os.environ.get("MOWULINK_TEST_DSH_MEDIA_PROCESS_EVIDENCE")
+        if output:
+            Path(output).write_text(encode({"separate_adapter_process":True,"input_receipt":receipt,
+                "native_input_count":len(observed["inputs"]),"caption":text,"image_sha256":sha,
+                "ordered_feishu_fixture_messages":[{"message_id":r[0],"kind":r[1]} for r in sent]})+"\n",
+                encoding="utf-8")
+
     def test_read_only_cancel_and_transfer_over_mutual_tls(self):
         self.read_only_cleanup(use_tls=True)
 
