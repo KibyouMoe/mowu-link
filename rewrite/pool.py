@@ -4,6 +4,9 @@ import math
 from . import attachments, delivery, messages
 from .storage import guid, require, string, timestamp
 
+INITIAL_REMINDER_SECONDS = 3600
+REMINDER_NOTICE = "无法完成池中的工单仍待处理。"
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS pool_entries (
   assignment_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, worker_id TEXT NOT NULL,
@@ -24,7 +27,8 @@ CREATE INDEX IF NOT EXISTS dispatch_by_task ON deliveries(json_extract(payload,'
 
 def enter(db, current, source, reason, now, ids=()):
     tid, aid, wid = current["task_id"], current["assignment_id"], current["assignee_id"]
-    db.execute("INSERT INTO pool_entries VALUES (?,?,?,?,?,?,?,1)", (aid, tid, wid, reason, source, now, now+3600))
+    db.execute("INSERT INTO pool_entries VALUES (?,?,?,?,?,?,?,1)",
+               (aid, tid, wid, reason, source, now, now+INITIAL_REMINDER_SECONDS))
     db.execute("UPDATE tasks SET state='blocked',assignment_id=NULL,revision=revision+1 WHERE task_id=?", (tid,))
     # A shelved cancellation must never subsequently claim the task was cancelled.
     db.execute("UPDATE cleanups SET done=2 WHERE assignment_id=? AND kind='task.cancel' AND done=0", (aid,))
@@ -67,7 +71,7 @@ def timers(db, now, lease):
         enter(db, row, "offline", "Worker 已连续离线十分钟，工单进入无法完成池。", now)
     due = db.execute("SELECT * FROM pool_entries WHERE active=1 AND remind_at<=?", (now,)).fetchall()
     for entry in due:
-        messages.notify(db, now, entry["task_id"], "router", "无法完成池中的工单仍待处理。")
+        messages.notify(db, now, entry["task_id"], "router", REMINDER_NOTICE)
         db.execute("UPDATE pool_entries SET remind_at=NULL WHERE assignment_id=?", (entry["assignment_id"],))
 
 

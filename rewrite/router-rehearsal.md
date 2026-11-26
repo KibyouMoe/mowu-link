@@ -73,7 +73,7 @@ python3 -m rewrite.cutover stage-reviewed-rollback --snapshot ./snapshot --trial
 
 试用新建且已验收或已取消的工单直接写入旧库归档。旧端可查到新旧编号映射及归档标记。标题、原指令、成果及附件从私有档案查询。已取消单标记为 `cancelled_on_rewrite`，旧 HTTP 的成果字段为空。只有存在对应取消 W04 时，`confirmed_by_worker` 才为真。`cancel_key`、取消原因和适用的 `cancel_w04_key` 从私有档案查阅。该单的旧兼容请求保存在 `private-review/manifest.json` 对应工单的 `legacy_creation_request` 字段，与其旧编号一起保存。重放该请求会回同一旧单号，改动正文再用同一个请求号会得到 409。无需发送这个请求来创建或归档工单。映射若与已有旧单或待回放工单的请求号冲突，准备会停止。回退库中的归档请求映射随数据库备份保存，旧 HTTP 仍只显示归档。以后用该旧库再次试迁时，重做 Router 会核对旧单号和归档引用，同一条验收或取消归档对应的原 Hermes 请求号和映射后的 UUID 都返回 409 与旧归档标识。映射不一致时停止准备。[试用新单验证](evidence/cutover-trial-born-archives.json)
 
-`private-review/manifest.json` 保存正文、原 W04 和验收请求键、通知凭据、旧新编号及附件摘要，`private-review/files/` 保存逐块校验过的新成果附件。`private-review/trial-router.db` 是带校验摘要的完整试运行库副本。旧 Router 的通用凭据只能查看归档标记和原已授权附件。试用的新成果从私有回退包查阅，原通知无需重发。发生转派时，`assignment_history` 按派发保存接管、候选材料、受阻附件、转派与清理回执。正式成果仍由工单条目的 `artifact_ids` 与 `w04_key` 定位。旧派发的迟到清理回执须与当时的新派发状态相符。当前覆盖离线入池、进度询问无答复、Worker 主动受阻后的转派，以及工作中的直接转派。进度询问无答复时，需核对首次询问、三次重试和原搁置通知的收件。取消待原工位确认、取消重试耗尽后再次发起、无处理人的试用新单、Router 主动入池后结单或失败归档、挂起后处置、修改正文和其他未对账试用写入均需人工对账。已复现离线入池后仅凭候选材料结单，此时 Router 没有正式 W04，原工位仍持单且宿主忙。该场景拒绝发布回退目录。
+`private-review/manifest.json` 保存正文、原 W04 和验收请求键、通知凭据、旧新编号及附件摘要，`private-review/files/` 保存逐块校验过的新成果附件。`private-review/trial-router.db` 是带校验摘要的完整试运行库副本。旧 Router 的通用凭据只能查看归档标记和原已授权附件。试用的新成果从私有回退包查阅，原通知无需重发。发生转派时，`assignment_history` 按派发保存接管、候选材料、受阻附件、转派与清理回执。正式成果仍由工单条目的 `artifact_ids` 与 `w04_key` 定位。旧派发的迟到清理回执须与当时的新派发状态相符。当前覆盖离线入池、进度询问无答复、Worker 主动受阻后的转派，以及工作中的直接转派。进度询问无答复时，需核对首次询问、三次重试和原搁置通知的收件。取消待原工位确认、取消重试耗尽后再次发起、无处理人的试用新单、Router 主动入池后结单或失败归档、挂起后以新派发继续推进、修改正文和其他未对账试用写入均需人工对账。已复现离线入池后仅凭候选材料结单，此时 Router 没有正式 W04，原工位仍持单且宿主忙。该场景拒绝发布回退目录。
 
 带回新工单时，同一次操作还会生成私有的 `queue-replay.json`。首次打开旧 Router 前，核对文件 SHA-256 与私有清单的 `queue_replay_sha256`，核对预回放旧库摘要与 `restored_legacy_sha256`。保留这份初始目录并从副本启动隔离旧 Router，在整个回放窗口保持 Worker 断开。按文件原序提交给旧端 `POST /tasks` 并保存新旧编号对应。部分请求成功后中断时，用**同一已写入的旧库**重开，从第一条按原请求重送。已落库项应返回 200 和原单号，后续项返回 202 并留在队列。出现 409、任何实际派发或编号不一致时停止，保存当前库和回执对账。放开 Worker 前，检查已验收、已取消及已处置的池中原单仍归档，旧队首及相对顺序保留，新工单各出现一次，正文逐字相同。[中断后从头回放](evidence/cutover-mixed-rollback.json)
 
@@ -82,6 +82,8 @@ python3 -m rewrite.cutover stage-reviewed-rollback --snapshot ./snapshot --trial
 取消复跑使用 `python3 -B -m unittest -v rewrite.test_cutover.Cutover.test_cancelled_orders_roll_back_without_replaying_work_or_inventing_results`。旧与重做 Router 均实际提供隔离 HTTP。Worker 使用宿主夹具和可控时钟。测试包含迁入单未派取消、已派未接取消、在途重试后确认、主动受阻后取消、掉线入池后确认和转派后新工位未接即取消。旧端按原号读回，五张试用新单的原建单请求重送均去重。再次迁入时，两种请求号均返回 409。[取消实测](evidence/cutover-reviewed-cancellation.json)
 
 池中归档复跑使用 `python3 -B -m unittest -v rewrite.test_cutover.Cutover.test_pool_archives_only_return_after_the_worker_released_the_assignment`。隔离旧端读回原两种归档及同一请求号。候选附件从私有回退包逐字节比对，旧 HTTP 返回 404。离线入池后管理端明确归档但原工位仍忙时，演练拒绝发布。[池中归档实测](evidence/cutover-pool-archives.json)
+
+已挂起的单后续转派、取消、池中结单或失败归档，可按各自的最终处置审核。核对原操作版本、每次挂起时长、当前期限和实际通知的接收确认。替换前尚未到期和归档时撤销的提醒均留在历史中。已发的提醒按所属派发与原期限识别，在私有包保留原消息和投递标识。旧端无需重播通知。缺接收确认、时间早于原期限或通知出现在下一派发之后，停止生成回退目录。若因时钟回拨而不能重建原顺序，保留两套库核对。复跑对应的转派、取消和池中归档测试。[提醒与回退实测](evidence/cutover-pool-reminders.json)
 
 ### 在途工单先排空再回退
 

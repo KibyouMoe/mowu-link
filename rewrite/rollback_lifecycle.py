@@ -1,10 +1,13 @@
 """Check the committed assignment chain before publishing an offline rollback."""
+from datetime import datetime, timedelta, timezone
 import json
+import math
 
 from . import attachments
 from .cleanup import CANCEL_CONFIRMED_NOTICE
 from .messages import valid_guid
 from .orders import task
+from .pool import INITIAL_REMINDER_SECONDS, REMINDER_NOTICE
 from .storage import timestamp
 
 
@@ -50,9 +53,56 @@ def retain_inquiries(step, frames, dispatch_seq, next_dispatch_seq):
         cleanup["delivery_ids"] = [frame["delivery_id"] for frame in frames[-cancellations:]]
 
 
+def utc_time(value):
+    try:
+        instant = datetime.fromisoformat(value)
+        if instant.tzinfo==timezone.utc and value==instant.isoformat():
+            return instant
+    except (TypeError, ValueError):
+        pass
+    raise ValueError("invalid timestamp in the reviewed pool history")
+
+
+def snooze_actions(db):
+    actions = {}
+    for request,reply in db.execute("""SELECT request,response FROM operations
+        WHERE json_extract(request,'$[1].action')='snooze'
+        AND json_extract(request,'$[0][0]')='POST'
+        AND json_extract(request,'$[0][1]') GLOB '/v1/tasks/*/actions'"""):
+        (_,path),body = json.loads(request)
+        index = path.split("/")[3],body.get("expected_revision")
+        if index in actions:
+            raise ValueError("duplicate pool snooze revision")
+        actions[index] = body.get("remind_after_hours"),json.loads(reply).get("task",{}).get("remind_at")
+    return actions
+
+
+def retain_snoozes(pool, tid, revision, actions):
+    # The rolled back copy contains ISO microsecond receipts, rather than the
+    # execution timestamp. Recover the schedule with the same duration.
+    started = utc_time(timestamp(pool["entered"]))
+    while (tid,revision) in actions:
+        hours,value = actions.pop((tid,revision))
+        if type(hours) not in (int,float) or not 0<hours<1e100 or not math.isfinite(hours):
+            raise ValueError("invalid duration in a reviewed pool snooze")
+        deadline = utc_time(value)
+        try:
+            since = deadline-timedelta(hours=hours)
+        except OverflowError as exc:
+            raise ValueError("pool snooze deadline cannot be reconciled") from exc
+        if since < started-timedelta(microseconds=1):
+            raise ValueError("pool snooze is outside its assignment history")
+        pool.setdefault("snoozes",[]).append({
+            "expected_revision":revision,"remind_after_hours":hours,"remind_at":value,
+            "scheduled_at":since.isoformat()})
+        revision += 1
+        started = max(started,since)
+
+
 def histories(db, entries, deltas):
     used = dict.fromkeys(("pool_entries","cleanups","materials"),0)
     dispatches = set()
+    snoozes = snooze_actions(db)
     for tid, entry in entries.items():
         order = task(db,tid)
         cancelled = entry["terminal_state"]=="cancelled"
@@ -75,7 +125,8 @@ def histories(db, entries, deltas):
                                                      "title":order["title"],"instructions":order["instructions"]}):
                 raise ValueError("trial dispatch does not match the reviewed order")
             dispatches.add(aid)
-            step = {"assignment_id":aid,"worker_id":worker,"revision":revision,"delivery_id":frame["delivery_id"]}
+            step = {"assignment_id":aid,"worker_id":worker,"revision":revision,"delivery_id":frame["delivery_id"],
+                    "dispatch_seq":frame["seq"]}
             if pool := pools.pop(aid,None):
                 if (pool["worker_id"]!=worker or pool["active"]!=0 or pool["remind_at"] is not None
                         or pool["source"] not in ("worker","offline","unanswered") or not pool["reason"].strip()):
@@ -85,6 +136,8 @@ def histories(db, entries, deltas):
                     raise ValueError("Router pool notification has unexpected files")
                 if pool["source"]=="unanswered" and pool["reason"]!="进度询问三次重试仍无答复。":
                     raise ValueError("trial has an unsupported exhausted inquiry")
+                # W03 and entry into the pool each advance the dispatch revision.
+                retain_snoozes(pool,tid,revision+2,snoozes)
                 step["pool"] = pool
                 used["pool_entries"] += 1
             if cleanup := cleanups.pop(aid,None):
@@ -103,7 +156,7 @@ def histories(db, entries, deltas):
                 used["materials"] += len(candidates)
             retain_inquiries(step,inquiries.pop(aid,[]),frame["seq"],next_frame["seq"] if next_frame else None)
             steps.append(step)
-            revision += 3 + ("pool" in step)
+            revision += 3 + ("pool" in step) + len(step.get("pool",{}).get("snoozes",[]))
         if pools or cleanups or materials or inquiries:
             raise ValueError("trial is missing a complete assignment chain for the reviewed result")
         if not steps:
@@ -139,8 +192,21 @@ def histories(db, entries, deltas):
                     or cleanup and cleanup["new_assignee_id"]!=target["worker_id"]):
                 raise ValueError("transfer does not match the former assignment and its cleanup")
         entry["assignment_history"] = steps
+    if snoozes:
+        raise ValueError("trial contains a snooze outside the reviewed pool history")
     if any(deltas.get(table,{}).get("trial_only",0)!=count for table,count in used.items()):
         raise ValueError("trial contains unrelated pool, cleanup, or material rows")
+
+
+def retain_reminder(pool, message_id, observed):
+    initial = pool.setdefault("initial_reminder",{"remind_at":timestamp(pool["entered"]+INITIAL_REMINDER_SECONDS)})
+    schedule = [initial,*pool.get("snoozes",[])]
+    for slot,replacement in zip(schedule,schedule[1:]+[None]):
+        if ("reminder_message_id" not in slot and observed>=utc_time(slot["remind_at"])
+                and (replacement is None or observed<=utc_time(replacement["scheduled_at"])+timedelta(microseconds=1))):
+            slot["reminder_message_id"] = message_id
+            return
+    raise ValueError("pool reminder does not match an outstanding deadline")
 
 
 def check_transport(db, entries):
@@ -151,12 +217,17 @@ def check_transport(db, entries):
     notices = {tid:[] for tid in entries}
     cleanup_frames = {}
     terminal_notices = set()
+    pool_bounds = {}
+    pool_messages = {}
+    active_pools = {}
+    consumed = dict.fromkeys(entries,0)
     for tid, entry in entries.items():
         expected_notices[tid] = []
         order = task(db,tid)
         if not entry["assignment_history"]:
             optional_workers.add(entry["original_worker"])
-        for step in entry["assignment_history"]:
+        history = entry["assignment_history"]
+        for step,target in zip(history,history[1:]+[None]):
             aid, worker = step["assignment_id"], step["worker_id"]
             workers.add(worker)
             expected_frames["task.dispatch",tid,aid] = ("worker/"+worker,step["delivery_id"],
@@ -179,12 +250,13 @@ def check_transport(db, entries):
                                             dict(payload,new_assignee_id=cleanup["new_assignee_id"]))
             if pool := step.get("pool"):
                 source = worker if pool["source"]=="worker" else "router"
-                expected_notices[tid].append((source,pool["reason"],pool["artifact_ids"]))
+                expected_notices[tid].append((source,pool["reason"],pool["artifact_ids"],pool))
+                pool_bounds[aid] = (step["dispatch_seq"],target["dispatch_seq"] if target else None)
         if is_reviewed_completion(entry):
-            expected_notices[tid].append((entry["worker_id"],entry["summary"],entry["artifact_ids"]))
+            expected_notices[tid].append((entry["worker_id"],entry["summary"],entry["artifact_ids"],None))
             terminal_notices.add(tid)
         elif entry["terminal_state"]=="cancelled" and entry["assignment_history"] and entry["assignment_history"][-1].get("cleanup"):
-            expected_notices[tid].append((entry["worker_id"],CANCEL_CONFIRMED_NOTICE,[]))
+            expected_notices[tid].append((entry["worker_id"],CANCEL_CONFIRMED_NOTICE,[],None))
             terminal_notices.add(tid)
     registered = db.execute("SELECT * FROM workers").fetchall()
     registered_workers = {row["worker_id"] for row in registered}
@@ -200,20 +272,36 @@ def check_transport(db, entries):
     for row in db.execute("SELECT * FROM messages ORDER BY rowid"):
         body = json.loads(row["payload"])
         tid, mid = body.get("task_id"), row["message_id"]
-        index = len(notices[tid]) if tid in notices else 0
-        expected = expected_notices.get(tid,[])
-        if index>=len(expected) or row["owner"]!="router" or row["level"]!="Notify" or not row["received_at"]:
+        if tid not in entries or row["owner"]!="router" or row["level"]!="Notify" or not row["received_at"]:
             raise ValueError("trial has a notice outside the reviewed W04 results")
-        source,text,files = expected[index]
+        reminder = row["source"]=="router" and body.get("text")==REMINDER_NOTICE
+        if reminder:
+            source,text,files = "router",REMINDER_NOTICE,[]
+            pool = active_pools.get(tid)
+            if not pool:
+                raise ValueError("pool reminder has no reviewed pool entry")
+            retain_reminder(pool,mid,utc_time(row["received_at"]))
+        else:
+            index = consumed[tid]
+            if index>=len(expected_notices[tid]):
+                raise ValueError("trial has a notice outside the reviewed W04 results")
+            source,text,files,pool = expected_notices[tid][index]
+            consumed[tid] += 1
+            active_pools[tid] = pool
+            if pool and row["received_at"]!=timestamp(pool["entered"]):
+                raise ValueError("pool entry notification time differs from the assignment")
         if row["source"]!=source or body!={"message_id":mid,"level":"Notify","task_id":tid,
                                           "source":source,"text":text,"attachment_ids":files}:
             raise ValueError("trial has a notice outside the reviewed W04 results")
         notice = {"payload":body,"received_at":row["received_at"]}
         notices[tid].append(notice)
         messages[mid] = notice
+        if pool:
+            pool_messages[mid] = pool["assignment_id"],reminder
 
     frames = {}
-    for row in db.execute("SELECT * FROM deliveries ORDER BY rowid"):
+    pool_start_frames = {}
+    for row in db.execute("SELECT rowid AS seq,* FROM deliveries ORDER BY rowid"):
         data = json.loads(row["payload"])
         kind,consumer,did = row["kind"],row["consumer"],row["delivery_id"]
         tid, aid = data.get("task_id"),data.get("assignment_id")
@@ -223,10 +311,20 @@ def check_transport(db, entries):
             if set(data)!={"worker_id","query_id"} or data["worker_id"] not in workers or consumer!="worker/"+data["worker_id"]:
                 raise ValueError("unexpected worker status query")
         elif kind=="message.deliver":
-            saved = messages.pop(data.get("message_id"),None)
+            mid = data.get("message_id")
+            saved = messages.pop(mid,None)
             if not saved or consumer!="hermes" or data!=saved["payload"]:
                 raise ValueError("trial notification does not match its archived message")
             saved["delivery_id"] = did
+            if mid in pool_messages:
+                origin,is_reminder = pool_messages[mid]
+                start,end = pool_bounds[origin]
+                if is_reminder:
+                    start = pool_start_frames.get(origin)
+                if start is None or not start < row["seq"] or end is not None and row["seq"]>=end:
+                    raise ValueError("pool notification delivery is outside its assignment")
+                if not is_reminder:
+                    pool_start_frames[origin] = row["seq"]
         elif kind in ("task.probe","task.shelved","task.cancel"):
             if expected_inquiries.pop(did,None)!=(kind,consumer,data):
                 raise ValueError("trial inquiry delivery does not match the reviewed assignment")
@@ -239,7 +337,7 @@ def check_transport(db, entries):
                 cleanup_frames[key]["delivery_id"] = did
         frames[did] = (consumer,row["cursor"])
     if (messages or expected_frames or expected_inquiries
-            or any(len(notices[tid])!=len(items) for tid,items in expected_notices.items())):
+            or any(consumed[tid]!=len(items) for tid,items in expected_notices.items())):
         raise ValueError("trial is missing a dispatch, cleanup delivery, or W04 notification")
     for tid, items in notices.items():
         if tid in terminal_notices:
@@ -279,15 +377,21 @@ def verify_cancelled(tid, entry, order, step, operations, after, states):
     reason = action["body"].get("reason") if action else None
     if not isinstance(reason,str) or not reason.strip() or cleanup and cleanup["reason"]!=reason:
         raise ValueError("missing or conflicting cancellation reason")
-    reply = {"task":order,"delivery_state":"received"}
+    replies = [{"task":order,"delivery_state":"received"}]
     if cleanup:
         pool = step.get("pool")
-        pending = order_state(order,step,"blocked" if pool else "working",order["revision"]-1,
+        snoozes = pool.get("snoozes",[]) if pool else []
+        state = "snoozed" if snoozes else "blocked" if pool else "working"
+        pending = order_state(order,step,state,order["revision"]-1,
                               None if pool else step["assignment_id"])
         if pool:
-            pending.update(blocked_since=timestamp(pool["entered"]),remind_at=timestamp(pool["entered"]+3600))
-        reply = {"task":pending,"delivery_state":"pending"}
-    action = take(operations,key,"hermes",{"action":"cancel","expected_revision":expected_revision,"reason":reason},[reply])
+            initial = {"remind_at":timestamp(pool["entered"]+INITIAL_REMINDER_SECONDS),**pool.get("initial_reminder",{})}
+            schedule = snoozes[-1] if snoozes else initial
+            pending.update(blocked_since=timestamp(pool["entered"]),remind_at=schedule["remind_at"])
+        replies = [{"task":pending,"delivery_state":"pending"}]
+        if pool and "reminder_message_id" in schedule:
+            replies.append({"task":dict(pending,remind_at=None),"delivery_state":"pending"})
+    action = take(operations,key,"hermes",{"action":"cancel","expected_revision":expected_revision,"reason":reason},replies)
     if action["seq"]<=after:
         raise ValueError("cancellation predates the original assignment records")
     entry.update(cancel_key=action["key"],cancel_reason=reason)
@@ -332,6 +436,37 @@ def verify_pool_archive(tid, entry, order, operations, after, states):
         raise ValueError("pool archive predates the release or selected material")
     entry["pool_archive"] = {"action_key":archive["key"],"request":request}
     states.append((archive["seq"],{state}))
+
+
+def verify_pool_activity(tid, step, order, operations, after, states):
+    pool = step["pool"]
+    activity = []
+    last_snooze = after
+    for snooze in pool.get("snoozes",[]):
+        revision = snooze["expected_revision"]
+        expected = order_state(order,step,"snoozed",revision+1)
+        expected.update(blocked_since=timestamp(pool["entered"]),remind_at=snooze["remind_at"])
+        action = take(operations,(tid,"action","snooze",revision),"hermes",
+                      {"action":"snooze","expected_revision":revision,"remind_after_hours":snooze["remind_after_hours"]},
+                      [{"task":expected,"delivery_state":"received"}])
+        if action["seq"]<=last_snooze:
+            raise ValueError("snooze predates pool entry or a previous snooze")
+        snooze["action_key"] = action["key"]
+        last_snooze = action["seq"]
+        activity.append((last_snooze,{"snoozed"}))
+    first_snooze = activity[0][0] if activity else None
+    for material in step.get("materials",[]):
+        mid = material["material_id"]
+        receipt = take(operations,(tid,"material",mid),"worker/"+step["worker_id"],
+                       {"assignment_id":step["assignment_id"],"text":material["text"],"artifact_ids":material["artifact_ids"]},
+                       [{"material_id":mid,"received":True}],session=True,files=True)
+        if receipt["seq"]<=after:
+            raise ValueError("candidate material predates its blocked assignment")
+        material["receipt_key"] = receipt["key"]
+        after = receipt["seq"]
+        activity.append((after,{"snoozed" if first_snooze is not None and after>first_snooze else "blocked"}))
+    states.extend(sorted(activity))
+    return max(after,last_snooze)
 
 
 def verify_order(db, tid, entry, operations):
@@ -384,16 +519,8 @@ def verify_order(db, tid, entry, operations):
             pool["report_key"] = blocked["key"]
             after = blocked["seq"]
             adjacent_states.append((after,{"blocked"}))
-        for material in step.get("materials",[]):
-            mid = material["material_id"]
-            receipt = take(operations,(tid,"material",mid),actor,
-                           {"assignment_id":aid,"text":material["text"],"artifact_ids":material["artifact_ids"]},
-                           [{"material_id":mid,"received":True}],session=True,files=True)
-            if receipt["seq"]<=after:
-                raise ValueError("candidate material predates its blocked assignment")
-            material["receipt_key"] = receipt["key"]
-            after = receipt["seq"]
-            adjacent_states.append((after,{"blocked"}))
+        if pool:
+            after = verify_pool_activity(tid,step,order,operations,after,adjacent_states)
         if target is None:
             if cancelled:
                 verify_cancelled(tid,entry,order,step,operations,after,adjacent_states)
@@ -423,7 +550,7 @@ def verify_order(db, tid, entry, operations):
             receipt = take(operations,(tid,"report",aid,"transfer_confirmed"),actor,
                            {"assignment_id":aid,"outcome":"transfer_confirmed"},[
                                {"recorded":True,"release_assignment_id":aid,"task_state":state}
-                               for state in ("ready","working","blocked","completed_reported","closed","cancelled","failed_archived")],
+                               for state in ("ready","working","blocked","snoozed","completed_reported","closed","cancelled","failed_archived")],
                            session=True)
             if receipt["seq"]<=after:
                 raise ValueError("cleanup receipt predates the transfer")

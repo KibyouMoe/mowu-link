@@ -17,6 +17,7 @@ from .devloop import FixtureHost, Loop, agent_report
 from .legacy_test_fixture import source_for
 from .test_mainline import Clock
 from .orders import Orders
+from .pool import REMINDER_NOTICE
 from .reviewed_rollback import stage_reviewed_rollback
 from .state_bundle import audit_handoff, capture, restore
 from .storage import Fault, guid
@@ -519,6 +520,11 @@ store.close()
                 if migrated:
                     clock.advance(630)
                     self.assertEqual(manager.inspect(tid)["task"]["state"],"blocked")
+                    current = manager.inspect(tid)["task"]
+                    transfer_snooze = guid()
+                    manager.act(transfer_snooze,tid,current["revision"],"snooze",remind_after_hours=0.25)
+                    clock.advance(900)
+                    self.assertIsNone(manager.inspect(tid)["task"]["remind_at"])
                 else:
                     for seconds in (1,10,1,1,1,1):
                         clock.advance(seconds)
@@ -600,6 +606,10 @@ store.close()
         self.assertEqual(orig["materials"][0]["receipt_key"],material_key)
         if migrated:
             self.assertEqual(intermediate["pool"]["artifact_ids"],[blocked_file])
+            schedule, = orig["pool"]["snoozes"]
+            self.assertEqual(schedule["action_key"],transfer_snooze)
+            self.assertIn(schedule["reminder_message_id"],
+                          {notice["payload"]["message_id"] for notice in archived["pool_notices"]})
         else:
             self.assertEqual(intermediate["cleanup"]["receipt"],later)
             self.assertEqual(orig["pool"]["source"],"unanswered")
@@ -684,6 +694,8 @@ store.close()
                 "candidate upload. Scripted host and agent, controlled clock."}
             if not migrated:
                 proofs["trial_born"]["missing_inquiry_refused"] = True
+            else:
+                proofs["migrated"]["original_snooze"] = schedule
             path.write_text(json.dumps(proofs,ensure_ascii=False,indent=2)+"\n")
 
     def test_cancelled_orders_roll_back_without_replaying_work_or_inventing_results(self):
@@ -815,8 +827,13 @@ store.close()
                 aid,_ = accept(tid)
                 clock.advance(630)
                 self.assertEqual(loop.hermes.inspect(tid)["task"]["state"],"blocked")
+                current = loop.hermes.inspect(tid)["task"]
+                cancel_snooze = guid()
+                loop.hermes.act(cancel_snooze,tid,current["revision"],"snooze",remind_after_hours=0.25)
+                clock.advance(900)
                 queued_cancel = cancel(tid,aid,"offline_pool")
-                self.assertEqual((queued_cancel["task"]["state"],queued_cancel["delivery_state"]),("blocked","pending"))
+                self.assertEqual((queued_cancel["task"]["state"],queued_cancel["delivery_state"]),("snoozed","pending"))
+                self.assertIsNone(queued_cancel["task"]["remind_at"])
                 loop.worker.connect()
                 finish(tid,aid,"offline_pool")
 
@@ -881,6 +898,10 @@ store.close()
         transferred = saved[records["transferred_offer"]["task_id"]]["assignment_history"]
         self.assertEqual(transferred[0]["cleanup"]["receipt"],late)
         self.assertNotIn("accept_key",transferred[1])
+        cancelled_pool = saved[records["offline_pool"]["task_id"]]["assignment_history"][-1]["pool"]
+        schedule, = cancelled_pool["snoozes"]
+        self.assertEqual(schedule["action_key"],cancel_snooze)
+        records["offline_pool"]["snooze"] = schedule
         replay = {row["legacy_task_id"]:row.get("legacy_creation_request") for row in saved.values()}
         observed = json.loads(self.old("""
 from server import RouterServer
@@ -1009,6 +1030,18 @@ store.close()
                                          "closed_assignments":{},"pool_archives":approvals}))
             return stage_reviewed_rollback(self.snapshot,self.trial,review,destination)
 
+        def postpone(tid, hours):
+            key = guid()
+            revision = manager.inspect(tid)["task"]["revision"]
+            reply = manager.act(key,tid,revision,"snooze",remind_after_hours=hours)
+            self.assertEqual(manager.act(key,tid,revision,"snooze",remind_after_hours=hours),reply)
+            self.assertEqual(reply["task"]["state"],"snoozed")
+            return key,reply["task"]["remind_at"]
+
+        def reminders(tid):
+            return [frame["payload"]["message_id"] for frame in loop.manager_wire.frames(0)
+                    if frame["payload"].get("task_id")==tid and frame["payload"].get("text")==REMINDER_NOTICE]
+
         with loop.server:
             loop.thread.start()
             try:
@@ -1022,7 +1055,21 @@ store.close()
                                                 headers={"Upload-Offset":"0"})["attachment_id"]
                 material = loop.wire.request("POST",f"tasks/{closed}/materials",
                     {"session_id":worker.session,"assignment_id":aid,"text":"候选资料","artifact_ids":[attachment]},guid())
+                superseded,old_deadline = postpone(closed,0.25)
+                clock.advance(60)
+                first,first_deadline = postpone(closed,0.5)
+                clock.advance(840)
+                self.assertEqual(reminders(closed),[])
+                clock.advance(960)
+                first_notice, = reminders(closed)
+                second,second_deadline = postpone(closed,0.25)
+                clock.advance(900)
+                first_notice_again, second_notice = reminders(closed)
+                self.assertEqual(first_notice_again,first_notice)
+                cancelled_timer,last_deadline = postpone(closed,0.25)
                 close_key = resolve(closed,aid,"close",material_id=material["material_id"],note="原材料已核验")
+                clock.advance(900)
+                self.assertEqual(reminders(closed),[first_notice,second_notice])
 
                 tools = ManagerTools(manager,"pool-archive-manager")
                 created = tools.around_call("router_create_task",lambda args:tools.invoke("router_create_task",args),
@@ -1031,7 +1078,14 @@ store.close()
                 failed = json.loads(created)["task_id"]
                 fail_aid,native = take(failed)
                 self.assertEqual(worker.report(native,failed,fail_aid,"Cannot continue","blocked")["task_state"],"blocked")
+                clock.advance(3600)
+                default_notice, = reminders(failed)
                 fail_key = resolve(failed,fail_aid,"archive_failed",reason="原任务缺必要条件")
+                worker.poll()
+                without_ack = self.root/"pool-reminder-unacknowledged"
+                with self.assertRaisesRegex(ValueError,"no consumer acknowledgement"):
+                    stage(without_ack)
+                self.assertFalse(without_ack.exists())
                 manager.poll()
                 worker.poll()
                 self.assertEqual(manager.inspect(closed)["last_report"]["outcome"],"blocked")
@@ -1066,6 +1120,26 @@ store.close()
             self.assertTrue(item["assignment_history"][-1]["pool"]["report_key"])
             self.assertEqual((item["pool_archive"]["action_key"],item["pool_archive"]["request"]["action"]),(key,action))
         self.assertEqual(manifest["orders"][closed]["pool_archive"]["request"]["material_id"],material["material_id"])
+        closed_pool = manifest["orders"][closed]["assignment_history"][-1]["pool"]
+        schedules = closed_pool["snoozes"]
+        self.assertEqual([(rec["action_key"],rec["remind_at"],rec.get("reminder_message_id")) for rec in schedules],
+                         [(superseded,old_deadline,None),(first,first_deadline,first_notice),
+                          (second,second_deadline,second_notice),(cancelled_timer,last_deadline,None)])
+        initial = manifest["orders"][failed]["assignment_history"][-1]["pool"]["initial_reminder"]
+        self.assertEqual(initial["reminder_message_id"],default_notice)
+        damaged = self.root/"premature-pool-reminder"
+        damaged.mkdir()
+        shutil.copyfile(self.trial/"baseline.json",damaged/"baseline.json")
+        shutil.copyfile(private/"trial-router.db",damaged/"router.db")
+        with closing(sqlite3.connect(damaged/"router.db")) as db,db:
+            changed = db.execute("UPDATE messages SET received_at=? WHERE message_id=?",(old_deadline,first_notice))
+            self.assertEqual(changed.rowcount,1)
+        review.write_text(json.dumps({"trial_sha256":digest(damaged/"router.db"),"closed_assignments":{},
+                                     "pool_archives":manifest["pool_archives"]}))
+        cannot_restore = self.root/"premature-rollback"
+        with self.assertRaisesRegex(ValueError,"reminder does not match an outstanding deadline"):
+            stage_reviewed_rollback(self.snapshot,damaged,review,cannot_restore)
+        self.assertFalse(cannot_restore.exists())
         fail_id = manifest["orders"][failed]["legacy_task_id"]
         observed = json.loads(self.old("""
 from server import RouterServer
@@ -1112,6 +1186,8 @@ store.close()
                         "unsafe":{"task_id":unsafe,"assignment_id":unsafe_aid,"restoration_rejected":True},
                         "legacy":observed,"trial_sha256":settled_trial,"legacy_snapshot_sha256":source_sha,
                         "remigrated_failure_request_ids":True,
+                        "snoozes":schedules,"initial_reminder":initial,
+                        "premature_and_unacknowledged_reminders_refused":True,
                         "boundary":"Real isolated old and new HTTP Routers, private SQLite copies, scripted host and clock."}
             Path(output).write_text(json.dumps(evidence,ensure_ascii=False,indent=2)+"\n")
 

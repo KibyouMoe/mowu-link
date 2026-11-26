@@ -1,0 +1,138 @@
+{
+  "pool_archives": {
+    "adopted": {
+      "task_id": "ebb5b5b4-01a3-5969-881f-1ce820598b3b",
+      "assignment_id": "3069713e-5ba3-463e-b518-191a57747515",
+      "action_key": "79af4e16-ff56-4c23-aa9d-11e91bfc06d2",
+      "material_id": "27b41b15-4a3b-4c94-9e03-0ee30d147543",
+      "file_sha256": "dcbf642b0f7c837cd28e58014760b31a6840c99ef7db2895a60adca83054e791"
+    },
+    "failed": {
+      "task_id": "df13f91e-b3a7-4ca8-8e9f-0cafaace2405",
+      "assignment_id": "66f99c62-09a0-4195-83fe-045aa2576567",
+      "action_key": "0b2fa890-8f9d-4d36-8d9b-bc6680e0b45e"
+    },
+    "unsafe": {
+      "task_id": "ae395f86-9950-478e-b280-33119e399f65",
+      "assignment_id": "af9fa8b5-9675-4fc3-a656-c8dd60f630c8",
+      "restoration_rejected": true
+    },
+    "legacy": {
+      "archives": {
+        "t-491d8c4ec1": "pool_closed_on_rewrite",
+        "t-fcab31ae37": "failed_on_rewrite"
+      },
+      "file_status": 404,
+      "replay_status": 200,
+      "next": null,
+      "held": null
+    },
+    "trial_sha256": "6273b520744b15253ae281ba006fdcfe280de607f9d588c72a12dfb06b0af2ba",
+    "legacy_snapshot_sha256": "0d50ed0650b9260f36b392c897f8b93ce49a74f371adf6449b3559f65197150d",
+    "remigrated_failure_request_ids": true,
+    "snoozes": [
+      {
+        "action_key": "d0b9872a-dbdf-478e-9028-66fd51689e51",
+        "expected_revision": 4,
+        "remind_after_hours": 0.25,
+        "remind_at": "2027-01-15T08:15:20+00:00",
+        "scheduled_at": "2027-01-15T08:00:20+00:00"
+      },
+      {
+        "action_key": "2d473b17-487a-4c06-a563-52ece0fbcdfc",
+        "expected_revision": 5,
+        "remind_after_hours": 0.5,
+        "remind_at": "2027-01-15T08:31:20+00:00",
+        "reminder_message_id": "99ece356-e894-42f7-a34d-7dd6d8ad73e7",
+        "scheduled_at": "2027-01-15T08:01:20+00:00"
+      },
+      {
+        "action_key": "b38a4acc-da79-4b65-b93d-f0d21e062af1",
+        "expected_revision": 6,
+        "remind_after_hours": 0.25,
+        "remind_at": "2027-01-15T08:46:20+00:00",
+        "reminder_message_id": "8edb0175-3bce-4866-8aef-d3d53112b3c3",
+        "scheduled_at": "2027-01-15T08:31:20+00:00"
+      },
+      {
+        "action_key": "78af602a-e4f7-4b24-b185-ef5626e6861c",
+        "expected_revision": 7,
+        "remind_after_hours": 0.25,
+        "remind_at": "2027-01-15T09:01:20+00:00",
+        "scheduled_at": "2027-01-15T08:46:20+00:00"
+      }
+    ],
+    "initial_reminder": {
+      "remind_at": "2027-01-15T10:01:40+00:00",
+      "reminder_message_id": "0fd98df0-6354-4442-a792-00b5cceea1d1"
+    },
+    "premature_and_unacknowledged_reminders_refused": true,
+    "boundary": "Real isolated old and new HTTP Routers, private SQLite copies, scripted host and clock."
+  },
+  "offline_cancel": {
+    "task_id": "35017992-8349-4971-8596-0fc5c985cca0",
+    "assignment_id": "50836353-f37b-4588-9217-c4e3772da16f",
+    "action": "1981c517-136c-45b7-877e-2066796a73a9",
+    "manager_reply": "pending",
+    "before": "snoozed",
+    "worker_reply": {
+      "recorded": true,
+      "release_assignment_id": "50836353-f37b-4588-9217-c4e3772da16f",
+      "task_state": "cancelled"
+    },
+    "legacy_id": "t-9c8d2b0280",
+    "cancel_deliveries": [
+      "6d6b79a4-b72a-4b09-851a-d43f8a977ee7"
+    ],
+    "w04_key": "cancel_confirmed-50836353-f37b-4588-9217-c4e3772da16f",
+    "snooze": {
+      "action_key": "450fc449-bb06-48f9-b84d-811c946bced3",
+      "expected_revision": 4,
+      "remind_after_hours": 0.25,
+      "remind_at": "2027-01-15T08:27:02+00:00",
+      "reminder_message_id": "db43f56c-f471-41dc-a67f-631434f278cc",
+      "scheduled_at": "2027-01-15T08:12:02+00:00"
+    }
+  },
+  "transfer": {
+    "task_id": "f5e29f3e-4264-53ff-b69d-d74716fecc9b",
+    "assignment_ids": [
+      "1c9d898b-05d0-45b2-93ee-23044e5cee2d",
+      "306b50ac-f246-47bb-bbc6-57f5d5eef1f2",
+      "37ab4d44-d822-461f-abbf-d120d07b4523"
+    ],
+    "snooze": {
+      "action_key": "41e754b9-03f8-403d-9382-57aad59c05fe",
+      "expected_revision": 4,
+      "remind_after_hours": 0.25,
+      "remind_at": "2027-01-15T08:25:40+00:00",
+      "reminder_message_id": "5fd40f4c-c7d9-42f0-948d-d77223aabfdc",
+      "scheduled_at": "2027-01-15T08:10:40+00:00"
+    },
+    "legacy": {
+      "status": 200,
+      "archive": {
+        "reason": "reviewed_on_rewrite",
+        "recovery_reference": "f5e29f3e-4264-53ff-b69d-d74716fecc9b",
+        "kind": "archive",
+        "at": 1795732621.3441558
+      },
+      "owner": "oguri",
+      "deliverable": null,
+      "queues": [
+        null,
+        null,
+        null,
+        "t-5b27336ca5"
+      ],
+      "attachment_statuses": [
+        404,
+        404,
+        404
+      ],
+      "replay": null
+    },
+    "pending_cleanup_refused": true
+  },
+  "boundary": "Actual isolated legacy and rewrite HTTP Router and SQLite; scripted Worker host and controlled clock."
+}
