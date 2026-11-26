@@ -94,11 +94,15 @@ class ScriptedModel:
                     model.event_waiting.set()
                     if not model.release_event.wait(30):
                         return self.send_error(503,"Event test release timed out")
-                    call = ("call_describe_trigger_reader","tool_describe",{"names":["router_info"]})
-                elif tool_result and tool_result.get("tool_call_id")=="call_describe_trigger_reader":
+                    call = ("call_describe_router_tools","tool_describe",
+                            {"names":["router_info","router_create_task"]})
+                elif tool_result and tool_result.get("tool_call_id")=="call_describe_router_tools":
                     file, = body["message"]["attachments"]
                     call = ("call_read_trigger_original","tool_call",{"calls":[{"name":"router_info","arguments":{
                         "message_id":body["message_id"],"attachment_id":file["attachment_id"]}}]})
+                elif tool_result and tool_result.get("tool_call_id")=="call_read_trigger_original":
+                    call = ("call_create_manager_task","tool_call",{"calls":[{"name":"router_create_task","arguments":{
+                        "title":"隔离 Hermes 原生建单","instructions":"Fixture-only, remain unassigned"}}]})
                 else:
                     call = None
                 if call:
@@ -251,17 +255,24 @@ class HermesGateway(unittest.TestCase):
                 self.assertEqual(record["outcome"],"completed")
                 native_body = json.loads(record["payload_json"])["text"].split("\n",1)[1]
                 self.assertEqual(json.loads(native_body)["message_id"],message_ids[level])
-            event_first, event_description, event_tool, notify = model.requests
+            event_first, event_description, event_tool, creation, notify = model.requests
             self.assertEqual([r["input"]["message_id"] for r in model.requests],
-                             [message_ids["Event"]]*3+[message_ids["Notify"]])
+                             [message_ids["Event"]]*4+[message_ids["Notify"]])
             self.assertTrue(all(r["input"]["session"]==session for r in model.requests))
             self.assertIn("tool_describe",event_first["tools"])
             self.assertIn("tool_call",event_first["tools"])
             description = json.loads(event_description["tool_result"]["content"])
-            self.assertIn("router_info",description["tools"])
+            self.assertEqual(set(description["tools"]),{"router_info","router_create_task"})
             response = json.loads(event_tool["tool_result"]["content"])
             self.assertEqual(event_tool["tool_result"]["tool_call_id"],"call_read_trigger_original")
             self.assertEqual(sha256(Path(response["local_path"]).read_bytes()).hexdigest(),sha256(original).hexdigest())
+            created_task = json.loads(creation["tool_result"]["content"])
+            self.assertEqual(creation["tool_result"]["tool_call_id"],"call_create_manager_task")
+            self.assertEqual(loop.hermes.tasks(unassigned="true")["items"],[created_task])
+            observed_task = loop.hermes.inspect(created_task["task_id"])["task"]
+            self.assertEqual(observed_task,created_task)
+            self.assertEqual(observed_task["holder"],{"kind":"router"})
+            self.assertIsNone(observed_task["assignment_id"])
             self.assertGreaterEqual(notify["time"]-released,10)
 
             def receipt(mid):
@@ -270,9 +281,11 @@ class HermesGateway(unittest.TestCase):
             self.assertFalse(rows(manager_db,"SELECT receipt FROM queue WHERE message_id=?",message_ids["Info"]))
             info, = loop.hermes.messages(message_id=message_ids["Info"])["items"]
             self.assertEqual(info["level"],"Info")
-            tool_record, = rows(native_db,"SELECT id,tool_call_id FROM messages "
-                                 "WHERE session_id=? AND role='tool' AND tool_name='router_info'",session)
-            self.assertEqual(tool_record["tool_call_id"],"call_read_trigger_original")
+            native_calls = {row["tool_name"]:row for row in rows(native_db,
+                "SELECT id,tool_name,tool_call_id FROM messages WHERE session_id=? AND role='tool' "
+                "AND tool_name IN ('router_info','router_create_task')",session)}
+            self.assertEqual(native_calls["router_info"]["tool_call_id"],"call_read_trigger_original")
+            self.assertEqual(native_calls["router_create_task"]["tool_call_id"],"call_create_manager_task")
             first = self.wait(lambda:receipt(message_ids["Event"]))
             second = self.wait(lambda:receipt(message_ids["Notify"]))
             self.assertEqual(first["native_id"],event_input["admission_id"])
@@ -290,15 +303,17 @@ class HermesGateway(unittest.TestCase):
             again = self.wait(lambda:receipt(message_ids["Event"]))
             self.assertEqual(again,first)
             self.assertEqual(self.wait(native_inputs),[event_input,notify_input])
-            self.assertEqual(len(model.requests),4)
+            self.assertEqual(len(model.requests),5)
+            self.assertEqual(loop.hermes.tasks(unassigned="true")["items"],[created_task])
 
         if output := os.environ.get("MOWULINK_HERMES_GATEWAY_EVIDENCE"):
             evidence = {"hermes_source_revision":revision,"session_id":session,"route":route["session_key"],
                 "native_pids":[pid,new_pid],"message_ids":message_ids,"event_native_admission":first["native_id"],
                 "notify_native_admission":second["native_id"],"notify_after_event_release_seconds":
                 round(notify["time"]-released,2),"info_native_inputs":0,"native_admission_count":2,
-                "model_http_calls":4,"tool_discovery":"native tool_describe and tool_call",
-                "tool_name":"router_info","tool_call_id":tool_record["tool_call_id"],"tool_transcript_row":tool_record["id"],
+                "model_http_calls":5,"tool_discovery":"native tool_describe and tool_call","native_tool_calls":native_calls,
+                "router_task":{"task_id":created_task["task_id"],"state":created_task["state"],
+                               "unassigned_task_count_after_restart":1},
                 "original_attachment_sha256":sha256(original).hexdigest(),"cold_recovery_reused_admission":True,
                 "boundary":"Real Router, Trigger, Hermes gateway, private LOCAL session, tool execution and ledger. "
                            "Scripted OpenAI-compatible localhost model. No cloud credentials or Feishu."}

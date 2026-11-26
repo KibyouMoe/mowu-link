@@ -1,27 +1,65 @@
 {
   "hermes_source_revision": "464bd0dd659f336bd0bf468bf02cad8aac211136",
-  "session_id": "local-4a140093bbaa48444f16a983b271e7cc2836e95a3bcea4d19bd684037bbf41c0",
-  "route": "agent:main:local:dm:local-4a140093bbaa48444f16a983b271e7cc2836e95a3bcea4d19bd684037bbf41c0",
+  "session_id": "local-4c345c5f74f1ffb8837dda63decfced7c874bd67ca558a75c267d47e6c7ecee8",
+  "route": "agent:main:local:dm:local-4c345c5f74f1ffb8837dda63decfced7c874bd67ca558a75c267d47e6c7ecee8",
   "native_pids": [
-    29803,
-    43786
+    67113,
+    68012
   ],
   "message_ids": {
-    "Info": "3e7594d8-12db-4031-969f-db05cd1bd0fd",
-    "Event": "1ba2baa1-bd76-4133-92da-0e8bbf89ce7f",
-    "Notify": "af38496a-4aa9-41e2-8108-1fca8a73df6a"
+    "Info": "87e0c3c7-5e31-44b9-b165-dd298599ea7e",
+    "Event": "8a5ca5bd-f1a9-4a57-9381-884bc2e5fbdb",
+    "Notify": "5f8f7b9c-4133-4615-a604-1f29fa2ef751"
   },
-  "event_native_admission": "848e6d15cc7042b4a2e2e598f3218fc6",
-  "notify_native_admission": "d20b8741ac49494cbaaedbcb601b4dfd",
-  "notify_after_event_release_seconds": 10.81,
+  "event_native_admission": "1e04b291ab4d4843b69935057da670bb",
+  "notify_native_admission": "ad9e43e22650453aa0be9fc12c0fb2e0",
+  "notify_after_event_release_seconds": 11.01,
   "info_native_inputs": 0,
   "native_admission_count": 2,
-  "model_http_calls": 4,
+  "model_http_calls": 5,
   "tool_discovery": "native tool_describe and tool_call",
-  "tool_name": "router_info",
-  "tool_call_id": "call_read_trigger_original",
-  "tool_transcript_row": 5,
+  "native_tool_calls": {
+    "router_info": {
+      "id": 5,
+      "tool_name": "router_info",
+      "tool_call_id": "call_read_trigger_original"
+    },
+    "router_create_task": {
+      "id": 7,
+      "tool_name": "router_create_task",
+      "tool_call_id": "call_create_manager_task"
+    }
+  },
+  "router_task": {
+    "task_id": "3d4e398b-c914-4eb6-adef-b837c6dac49f",
+    "state": "ready",
+    "unassigned_task_count_after_restart": 1
+  },
   "original_attachment_sha256": "06219adabc9facac06e434bafb1a82e1f38309c77c6b945ed1eb0d2c213071b7",
   "cold_recovery_reused_admission": true,
-  "boundary": "Real Router, Trigger, Hermes gateway, private LOCAL session, tool execution and ledger. Scripted OpenAI-compatible localhost model. No cloud credentials or Feishu."
+  "boundary": "Real Router, Trigger, Hermes gateway, private LOCAL session, tool execution and ledger. Scripted OpenAI-compatible localhost model. No cloud credentials or Feishu.",
+  "read_only_checkpoint_validation": {
+    "revision": "2d134fe78bde61ad245aba85f8950446475026d4",
+    "installed_archive_sha256": "f281c5a0994ee890750ee8925a48928b3b81f3810a0d5693795bf3808b954e2a",
+    "archive_files": 289,
+    "installed_specialized_tests_passed": 7,
+    "macos": {
+      "passed": 305,
+      "environment_skipped": 5
+    },
+    "linux_arm64": {
+      "passed": 189,
+      "environment_skipped": 121
+    },
+    "windows_ci": {
+      "run": "https://github.com/KibyouMoe/mowu-link/actions/runs/45897991172",
+      "codex_install_and_ops_tests_passed": 14,
+      "dsh_native_tests_passed": 13,
+      "rollback_rehearsals_passed": [
+        "Router",
+        "Worker and adapter"
+      ],
+      "default_docker_engine": "windows"
+    }
+  }
 }
