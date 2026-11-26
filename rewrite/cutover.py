@@ -12,7 +12,7 @@ import tempfile
 from uuid import UUID, uuid5
 
 from .orders import Orders, task
-from . import legacy_history, legacy_peers
+from . import attachments, legacy_history, legacy_peers
 from .messages import valid_guid
 from .storage import encode
 
@@ -229,10 +229,13 @@ def schema(db, database):
                           WHERE name NOT GLOB 'sqlite_*' ORDER BY type,name""").fetchall()
 
 
-def row_delta(db, table, first, second):
+def row_difference(table, first, second):
     name = '"' + table.replace('"','""') + '"'
-    return db.execute(f"""SELECT count(*) FROM (
-        SELECT rowid,* FROM {first}.{name} EXCEPT SELECT rowid,* FROM {second}.{name})""").fetchone()[0]
+    return f"SELECT rowid,* FROM {first}.{name} EXCEPT SELECT rowid,* FROM {second}.{name}"
+
+
+def row_delta(db, table, first, second):
+    return db.execute(f"SELECT count(*) FROM ({row_difference(table,first,second)})").fetchone()[0]
 
 
 def queued_candidates(db, delta, legacy_workers):
@@ -275,6 +278,32 @@ def queued_candidates(db, delta, legacy_workers):
     return candidates,blocked,only_queue
 
 
+def work_order_changes(db, delta, old_ids):
+    """Locate changed formal records without exporting instructions, results or file bytes."""
+    touched = set()
+    for table in ("tasks","reports","materials"):
+        if table not in delta:
+            continue
+        for first,second in (("main","baseline"),("baseline","main")):
+            touched.update(row[0] for row in db.execute(
+                f"SELECT task_id FROM ({row_difference(table,first,second)})"))
+    records = []
+    for tid in sorted(touched):
+        before = db.execute("""SELECT assignee_id,assignment_id,revision,state FROM baseline.tasks
+                              WHERE task_id=?""",(tid,)).fetchone()
+        after = db.execute("""SELECT assignee_id,assignment_id,revision,state FROM main.tasks
+                             WHERE task_id=?""",(tid,)).fetchone()
+        reports = [dict(row,artifact_ids=attachments.linked(db,"report",row["assignment_id"]))
+                   for row in db.execute("""SELECT assignment_id,worker_id FROM main.reports
+                                           WHERE task_id=? ORDER BY rowid""",(tid,))]
+        materials = [dict(row,artifact_ids=attachments.linked(db,"material",row["material_id"]))
+                     for row in db.execute("""SELECT material_id,assignment_id,submitted_by FROM main.materials
+                                              WHERE task_id=? ORDER BY rowid""",(tid,))]
+        records.append({"task_id":tid,"legacy_task_id":old_ids.get(tid),"before":dict(before) if before else None,
+                        "trial":dict(after) if after else None,"completed_reports":reports,"candidate_materials":materials})
+    return records
+
+
 def reconcile(snapshot, trial):
     """Read the exact post-cutover difference. Original snapshots and trial databases stay intact."""
     saved = json.loads((trial/"baseline.json").read_text())
@@ -309,7 +338,9 @@ def reconcile(snapshot, trial):
                 if baseline_only or trial_only:
                     delta[table] = {"baseline_only":baseline_only,"trial_only":trial_only}
             candidates,blocked,only_queue = queued_candidates(db,delta,legacy_workers)
+            old_ids = {new:old for old,new in saved["queued_id_map"].items()}
             result.update(changed_tables=delta,queue_candidates=candidates,blocked_new_tasks=blocked,
+                          work_orders=work_order_changes(db,delta,old_ids),
                           exact_rollback_allowed=before==saved["router_db_sha256"],only_new_queued_tasks=only_queue)
         with closing(readonly(source)):
             if digest(source)!=before:

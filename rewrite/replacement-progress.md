@@ -4,6 +4,8 @@
 
 ## 检查点与证据
 
+隔离迁移后已有正式进展的回退对账已实测。旧待派单按原号映射到试运行库，模拟 Agent 经实际 Worker 提交带附件 W04，重投只留一条通知。对账读回旧新单号、状态、原派发和成果附件，无正文和文件名；原样回退被拒，两份库保留。连续 8 次通过。复跑 `python3 -m unittest -v rewrite.test_cutover`。[回退边界证据](evidence/cutover-reconcile-formal-report.json)。已完成或仍持单的业务事实须逐笔核准，仍未自动回灌原旧端。
+
 实际 DSH 从搁置通知暂存 640000 字节，原生工具仅以附件另交候选材料。暂存后管理端读不到，候选入池后按原附件号读回相同字节，下一位 Worker 仍无读权。原 W04 首次迟交仍回 409，转派后同号只回读原材料号，另交新材料被拒，无成果或凭候选释放持单。连续 12 次通过。[原生材料记录](evidence/dsh-native-candidate-artifact.json)。复跑 `python3 -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_shelved_dsh_assignment_submits_candidate_without_changing_ownership`。模型、时钟和第二工位使用夹具。
 
 隔离 Codex `/resume` 已用原生索引完成目录和搜索。冷开后只恢复绑定线程，查询可见同目录的另一会话，归档会话和其他目录都不显示。历史会话查询前后未加载，无新增模型请求或工单，原会话仍绑定，选择编号明确提示换绑未接。连续 12 次通过。复跑 `python3 -m unittest -v rewrite.test_codex_app_server.CodexAppServer.test_resume_catalog_uses_only_current_app_server_workspace_without_loading_history`。[原生目录记录](evidence/codex-app-server-native-catalog.json)。

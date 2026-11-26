@@ -1,4 +1,5 @@
 from contextlib import closing, contextmanager
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -10,7 +11,7 @@ import unittest
 from threading import Thread
 
 from .cutover import backup, digest, export_chat, prepare, reconcile, rollback, stage_queue_rollback, verified
-from .devloop import FixtureHost, Loop
+from .devloop import FixtureHost, Loop, agent_report
 from .test_mainline import Clock
 from .orders import Orders
 from .storage import Fault, guid
@@ -194,6 +195,69 @@ store._conn.close()
         with self.assertRaisesRegex(ValueError,"reconcile"):
             rollback(self.snapshot,self.trial,self.restore)
         self.assertFalse(self.restore.exists())
+
+    def test_migrated_formal_result_and_attachment_stop_exact_rollback_with_a_crosswalk(self):
+        legacy_id = json.loads(self.old("""
+store = RouterStore(sys.argv[1])
+store.upsert_worker("oguri")
+tid = store.orders.create("Migrated work","Reconciliation fixture private input","oguri",{},"fixture",None,None)
+store.close()
+print(json.dumps(tid))
+""",self.legacy))
+        backup(self.legacy,self.attachments,self.snapshot)
+        base = prepare(self.snapshot,self.trial,self.source_id)
+        tid = base["queued_id_map"][legacy_id]
+        clock = Clock()
+        loop = Loop(self.trial,clock,FixtureHost)
+        blob = b"Private result binary"
+        with loop.server:
+            loop.thread.start()
+            try:
+                loop.worker.connect()
+                loop.worker.poll()
+                clock.advance(10)
+                loop.worker.poll()
+                loop.worker.poll()
+                aid = loop.worker.hold()["held_assignment_id"]
+                native = loop.native.entries()[0][1]["native_id"]
+                declared = loop.wire.request("POST","uploads",{"name":"private-name.bin",
+                            "size_bytes":len(blob),"sha256":hashlib.sha256(blob).hexdigest()},guid())
+                artifact = loop.wire.request("PATCH","uploads/"+declared["upload_id"],blob,
+                                             headers={"Upload-Offset":"0"})["attachment_id"]
+                args = {"task_id":tid,"assignment_id":aid,"summary":"Reconciliation fixture private result",
+                        "artifact_ids":[artifact]}
+                report = agent_report(loop.worker,native,args)
+                self.assertFalse(report["isError"])
+                self.assertEqual(agent_report(loop.worker,native,args),report)
+                self.assertIsNone(loop.worker.hold()["held_assignment_id"])
+                notices = loop.manager_wire.frames(0)
+                self.assertEqual(len(notices),1)
+            finally:
+                loop.server.shutdown()
+                loop.thread.join()
+        old_before = digest(self.snapshot/"legacy.db")
+        trial_before = digest(self.trial/"router.db")
+        facts = reconcile(self.snapshot,self.trial)
+        change = next(row for row in facts["work_orders"] if row["task_id"]==tid)
+        self.assertEqual(change["legacy_task_id"],legacy_id)
+        self.assertEqual(change["before"],{"assignee_id":"oguri","assignment_id":None,"revision":1,"state":"ready"})
+        self.assertEqual(change["trial"]["state"],"completed_reported")
+        self.assertIsNone(change["trial"]["assignment_id"])
+        self.assertEqual(change["completed_reports"],
+                         [{"assignment_id":aid,"worker_id":"oguri","artifact_ids":[artifact]}])
+        self.assertEqual(change["candidate_materials"],[])
+        self.assertFalse(facts["only_new_queued_tasks"] or facts["exact_rollback_allowed"])
+        seen = json.dumps(facts)
+        for secret_text in (args["summary"],"Reconciliation fixture private input","private-name.bin",blob.decode()):
+            self.assertNotIn(secret_text,seen)
+        with self.assertRaisesRegex(ValueError,"reconcile"):
+            rollback(self.snapshot,self.trial,self.restore)
+        self.assertFalse(self.restore.exists())
+        self.assertEqual((digest(self.snapshot/"legacy.db"),digest(self.trial/"router.db")),(old_before,trial_before))
+        self.evidence = {"work_order":change,"router_notification_count":len(notices),
+                         "trial_sha256":facts["trial_sha256"],"legacy_snapshot_sha256":old_before,
+                         "exact_rollback_allowed":facts["exact_rollback_allowed"],"both_databases_preserved":True,
+                         "boundary":"Actual legacy and rewrite SQLite; isolated Router over HTTP and scripted Agent"}
 
     def test_pending_peer_or_missing_middle_chunk_prevents_publishing_a_partial_migration(self):
         mid = guid()

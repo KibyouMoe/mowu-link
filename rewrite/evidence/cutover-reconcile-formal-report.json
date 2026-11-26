@@ -1,0 +1,35 @@
+{
+  "work_order": {
+    "task_id": "02327222-81d9-542c-b1c9-c5368d23c668",
+    "legacy_task_id": "t-33f25221e8",
+    "before": {
+      "assignee_id": "oguri",
+      "assignment_id": null,
+      "revision": 1,
+      "state": "ready"
+    },
+    "trial": {
+      "assignee_id": "oguri",
+      "assignment_id": null,
+      "revision": 4,
+      "state": "completed_reported"
+    },
+    "completed_reports": [
+      {
+        "assignment_id": "a09ab5ae-cb04-46a0-999b-16c1063e5b33",
+        "worker_id": "oguri",
+        "artifact_ids": [
+          "c83430b6-6267-4ca6-98e2-fb2b6a27bec3"
+        ]
+      }
+    ],
+    "candidate_materials": []
+  },
+  "router_notification_count": 1,
+  "trial_sha256": "b90dedcabe152f5fa6f930e6cdd6ca6064cc307234e4aa71af54094883b6b6c7",
+  "legacy_snapshot_sha256": "b948e1e38686b0cbe4c4a28aa7b0e47c6d8e8226e842710c921790071ddfe0cc",
+  "exact_rollback_allowed": false,
+  "both_databases_preserved": true,
+  "boundary": "Actual legacy and rewrite SQLite; isolated Router over HTTP and scripted Agent",
+  "consecutive_runs": 8
+}

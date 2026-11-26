@@ -41,6 +41,8 @@ python3 -m rewrite.cutover export-chat --snapshot ./snapshot --worker "$WORKER_I
 
 `reconcile` 可用准备试运行时的同一源码和 SQLite 运行环境，在临时目录从旧快照重建基线，再按实际表对账。输出包含三份库摘要、每张表两侧的差异行数、候选工单号及原建单请求号。已派过的单、未指定处理人、旧库未登记的工位及旧端会修改或拒收的正文分别列出原因。输出只列标识和记录数。
 
+输出中的 `work_orders` 逐单列原旧单号、新单号、试运行前后的状态和派发号，以及当前正式完工和候选材料各自的编号与附件引用。试运行收到正式成果时，应保留两份库，用这些标识逐笔核对；原样回退会使旧排队单再次派出，因此命令拒绝。这条路径已用实际旧库、隔离重做 Router 和带附件的 W04 演练 8 次。原回报重投只有一条成果通知，前后两份库摘要一致，未在旧端重发工单或结果。复跑 `python3 -m unittest -v rewrite.test_cutover.Cutover.test_migrated_formal_result_and_attachment_stop_exact_rollback_with_a_crosswalk`。[对账记录](evidence/cutover-reconcile-formal-report.json)。Agent 使用夹具。
+
 ### 试运行只增加未派工单时的回退演练
 
 只有 `only_new_queued_tasks` 为真时，才可为每一张候选单审核旧端目标模式。将回读的 `trial_sha256` 与 `execution_modes` 写入审核文件。后者必须逐一列出候选工单 UUID，值为明确审核过的 `"goal"`。
