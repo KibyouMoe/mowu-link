@@ -75,13 +75,15 @@ def serve(args,stack):
         listener = serve_adapter(HostAdapter(args.db,native,native.session,media),args.worker_id,identities,address,ctx)
     elif args.component == "dsh-adapter":
         from .dsh_display import publishing
-        from .dsh_port import DshHost, tool_listener
+        from .dsh_port import DshActivation, DshHost, tool_listener
         from .native_files import NativeFiles
         client = connection(args.worker_connection)
-        adapter = HostAdapter(args.db,DshHost(args.runtime_dir),args.session,NativeFiles(args.runtime_dir/"media",client))
+        native = DshHost(args.runtime_dir)
+        adapter = HostAdapter(args.db,native,args.session,NativeFiles(args.runtime_dir/"media",client))
+        activation = DshActivation(native,args.session) if args.resume_on_handoff else None
         callbacks = tool_listener(args.runtime_dir,adapter,client)
-        public_output = publishing(adapter,client,args.worker_id)
-        listener = serve_adapter(adapter,args.worker_id,identities,address,ctx)
+        public_output = publishing(adapter,client,args.worker_id,activation=activation)
+        listener = serve_adapter(adapter,args.worker_id,identities,address,ctx,activation=activation)
     elif args.component == "codex-adapter":
         from .codex_activation import CodexActivation, pinned_thread
         from .codex_app_server import AppServerHost, worker_callbacks
@@ -166,6 +168,9 @@ def main():
             component.add_argument("--worker-connection",required=name!="fixture-adapter",type=Path)
         if name == "dsh-adapter":
             component.add_argument("--runtime-dir",required=True,type=Path)
+        if name in ("codex-adapter","dsh-adapter"):
+            component.add_argument("--resume-on-handoff",action="store_true",
+                                   help="wait for the Worker to explicitly restore this pinned native session")
         if name == "codex-adapter":
             for flag in ("codex-binary","codex-profile","cwd"):
                 component.add_argument("--"+flag,required=True,type=Path)
@@ -173,8 +178,6 @@ def main():
                                    help="owner-private directory of approved, shareable native images")
             component.add_argument("--relay-command-approvals",action="store_true",
                                    help="relay one-time command decisions through the configured Router operator")
-            component.add_argument("--resume-on-handoff",action="store_true",
-                                   help="wait for the Worker to explicitly restore this pinned native thread")
         if name == "worker":
             component.add_argument("--router-connection",required=True,type=Path)
             component.add_argument("--adapter-connection",required=True,type=Path)

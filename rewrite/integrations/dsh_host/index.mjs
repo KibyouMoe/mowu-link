@@ -142,10 +142,10 @@ async function stopPrivateTurn(ctx,agent,compacting,bound) {
   throw new Error('native_stop_unconfirmed');
 }
 
-export async function bindHost(ctx, session, directory, catalog=[]) {
+export async function bindHost(ctx, session, directory, catalog=[], selected=null) {
   check(typeof session === 'string' && session.length > 0, 'missing_native_session');
   const controller = ctx.get('sessionController');
-  const {agent} = await controller.resolveAgent(session);
+  const agent = selected ?? (await controller.resolveAgent(session)).agent;
   const agents = ctx.get('agents');
   check(agent?.session?.id === session && agents?.get(session) === agent, 'wrong_native_session');
   const displayStart = await baseline(ctx,agent);
@@ -158,7 +158,7 @@ export async function bindHost(ctx, session, directory, catalog=[]) {
   }
   bound();
   return {
-    agent,
+    agent, checkBinding:bound,
     async handle(request) {
       check(request.session === session, 'wrong_native_session');
       bound();
@@ -277,9 +277,25 @@ function callback(dir, envelope, route='/tool') {
 export const name = 'mowulink-dsh-host';
 export const inject = ['sessionController','agents','sessions','sessionPersistence','tools'];
 
-export async function apply(ctx, {session, directory, catalog_sessions=[], relay_command_approvals=false}) {
-  privateDir(directory);
-  const port = await bindHost(ctx,session,directory,catalogSessions(catalog_sessions));
+async function inspectColdSession(ctx,session) {
+  const query = ctx.get('sessionQuery');
+  check(typeof query?.inspectSession==='function','native_cold_inspection_unavailable');
+  const view = await query.inspectSession(session,native=>{
+    if (native.id!==session || native.header.origin==='subagent') return null;
+    const event = native.snapshotEvents().findLast(item=>item.type==='goal/change');
+    return {goal:event?.data ?? null};
+  },AbortSignal.timeout(3000));
+  check(view,'native_cold_thread_unconfirmed');
+  const goal = view.goal;
+  if (!goal) return;
+  check(goal.kind==='goal/change' && goal.version===1,'native_cold_goal_unconfirmed');
+  if (goal.operation==='clear') return;
+  const phase = goal.goal?.phase;
+  check(['active','paused','blocked','complete'].includes(phase),'native_cold_goal_unconfirmed');
+  check(phase!=='active','native_cold_goal_active');
+}
+
+function installBoundTools(ctx,port,directory,relay_command_approvals) {
   if (relay_command_approvals) {
     installCommandApprovals(ctx,port.agent,()=>ownEvents(ctx,port.agent),(route,body)=>callback(directory,body,route));
   }
@@ -289,16 +305,70 @@ export async function apply(ctx, {session, directory, catalog_sessions=[], relay
       execute:(args,exec) => port.tool(tool.name,args,exec,body=>callback(directory,body))});
     ctx.effect(() => unregister);
   }
+}
+
+export async function apply(ctx, {session, directory, catalog_sessions=[], relay_command_approvals=false,
+                                 resume_on_handoff=false}) {
+  privateDir(directory);
+  check(typeof session==='string' && session.length>0,'missing_native_session');
+  check(typeof resume_on_handoff==='boolean','invalid_native_activation');
+  if (resume_on_handoff) {
+    check(typeof ctx.get('sessionQuery')?.inspectSession==='function','native_cold_inspection_unavailable');
+  }
+  const catalog = catalogSessions(catalog_sessions);
+  let port,selected,opening;
+  function verifyPort() {
+    port?.checkBinding();
+  }
+  async function resolveCold() {
+    await inspectColdSession(ctx,session);
+    const agents = ctx.get('agents');
+    selected ??= agents.get(session) ?? (await ctx.get('sessionController').resolveAgent(session)).agent;
+    check(selected?.session?.id===session && agents.get(session)===selected,'native_agent_unavailable');
+    check(selected.status==='idle','native_cold_thread_unconfirmed');
+    const opened = await bindHost(ctx,session,directory,catalog,selected);
+    installBoundTools(ctx,opened,directory,relay_command_approvals);
+    port = opened;
+  }
+  async function activate(request) {
+    check(resume_on_handoff,'native_activation_unavailable');
+    const operation_id = request.operation_id;
+    check(typeof operation_id==='string' && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(operation_id),
+      'invalid_native_activation');
+    if (!port) {
+      opening ??= resolveCold().finally(()=>{ opening=undefined; });
+      await opening;
+    }
+    verifyPort();
+    return {session,operation_id,state:'loaded'};
+  }
+  if (!resume_on_handoff) {
+    port = await bindHost(ctx,session,directory,catalog);
+    installBoundTools(ctx,port,directory,relay_command_approvals);
+  }
   const server = http.createServer(async (req,res) => {
     try {
       check(req.method === 'POST' && req.url === '/host','unknown_route');
-      const result = await port.handle(await readJson(req));
+      const request = await readJson(req);
+      check(request.session===session,'wrong_native_session');
+      let result;
+      if (request.operation==='activate') result = await activate(request);
+      else if (request.operation==='load-state' && resume_on_handoff) {
+        verifyPort();
+        result = {session,state:port ? 'loaded' : 'cold'};
+      }
+      else if (!port && request.operation==='capabilities') result = {};
+      else {
+        check(port,'native_session_cold');
+        result = await port.handle(request);
+      }
       res.writeHead(200,{'Content-Type':'application/json'}).end(JSON.stringify(result));
     } catch (error) {
       const code = /^[a-z_]{1,80}$/.test(error.message) ? error.message : 'dsh_host_unconfirmed';
       const transient = ['native_write_unconfirmed','native_agent_unavailable','native_persistence_unavailable',
                          'dsh_host_unconfirmed','model_change_unconfirmed','goal_change_unconfirmed',
-                         'compact_unconfirmed','native_stop_unconfirmed'].includes(code);
+                         'compact_unconfirmed','native_stop_unconfirmed','native_session_cold',
+                         'native_cold_thread_unconfirmed','native_cold_goal_unconfirmed'].includes(code);
       res.writeHead(transient ? 503 : 409,{'Content-Type':'application/json'}).end(JSON.stringify({error:code}));
     }
   });

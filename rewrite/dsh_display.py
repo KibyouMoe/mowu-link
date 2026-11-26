@@ -175,7 +175,7 @@ class DshDisplay:
 
 
 @contextmanager
-def publishing(adapter,worker,worker_id):
+def publishing(adapter,worker,worker_id,*,activation=None):
     publisher = DshDisplay(adapter,worker,worker_id)
     stopped = Event()
     def run():
@@ -183,6 +183,8 @@ def publishing(adapter,worker,worker_id):
         while not stopped.is_set():
             for op in (publisher.collect,publisher.flush):
                 try:
+                    if activation is not None and activation.state!="loaded":
+                        break
                     op()
                     failures.pop(op.__name__,None)
                 except (Fault,OSError,URLError,ValueError,KeyError,TypeError,OperationalError) as exc:

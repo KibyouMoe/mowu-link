@@ -37,6 +37,24 @@ class UnixConnection(HTTPConnection):
         self.sock.connect(str(self.path))
 
 
+class DshActivation:
+    def __init__(self,host,session):
+        self.host,self.session = host,session
+
+    @property
+    def state(self):
+        proof = self.host.request("load-state",self.session)
+        require(proof.get("session")==self.session and proof.get("state") in ("cold","loaded"),
+                502,"invalid_host_observation")
+        return proof["state"]
+
+    def activate(self,session,operation_id):
+        require(session==self.session,409,"wrong_native_session")
+        proof = self.host.request("activate",session,{"operation_id":operation_id})
+        require(proof=={"session":session,"operation_id":operation_id,"state":"loaded"},502,"invalid_native_activation")
+        return proof
+
+
 class DshHost:
     # DSH Agent.followup places an identified input at the next-turn boundary.
     next_turn = True

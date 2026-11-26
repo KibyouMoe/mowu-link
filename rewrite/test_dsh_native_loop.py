@@ -4,6 +4,7 @@ import json
 from contextlib import contextmanager
 from http.server import ThreadingHTTPServer
 import os
+import shutil
 from pathlib import Path
 import select
 import subprocess
@@ -19,12 +20,13 @@ from .codex_app_server import AppServerHost, worker_callbacks
 from .codex_display import CodexDisplay
 from .devloop import FixtureHost, Loop
 from .dsh_display import DshDisplay
-from .dsh_port import DshHost, tool_listener
+from .dsh_port import DshActivation, DshHost, tool_listener
 from .feishu_inbound import Inbound
 from .feishu_output import Views
 from .host_wire import RemoteAdapter, serve_adapter
 from .native_files import NativeFiles
 from .orders import Orders
+from .release_check import config, serve
 from .question_cards import Actions
 from .state_bundle import capture, filename, verify
 from .storage import Fault, encode, guid
@@ -254,6 +256,168 @@ class NativeLoop(unittest.TestCase):
                 with self.assertRaisesRegex(Fault,"native_agent_unavailable"):
                     host.deliver(session,"chat-closed-test",payload,digest)
                 self.assertEqual(self.read_native(native,"status"),reopened)
+
+    def test_cold_dsh_requires_explicit_activation_and_keeps_active_goals_unloaded(self):
+        sid = "isolated-dsh-cold-active-goal"
+        with tempfile.TemporaryDirectory(dir="/tmp",prefix="ml-dsh-cold-goal-") as directory:
+            with self.start_native(directory,sid,"cold-resume-goal") as native:
+                host = DshHost(Path(directory))
+                activation = DshActivation(host,sid)
+                before = self.read_native(native,"status")
+                self.assertEqual((before["controllerResolutions"],before["live"]),(0,False))
+                self.assertEqual(len(before["modelRequests"]),1)
+                self.assertEqual(activation.state,"cold")
+                self.assertEqual(host.capabilities(sid),{})
+                with self.assertRaisesRegex(Fault,"native_session_cold"):
+                    host.busy(sid)
+                with self.assertRaisesRegex(Fault,"native_cold_goal_active"):
+                    activation.activate(sid,guid())
+                self.assertEqual(activation.state,"cold")
+                self.assertEqual(self.read_native(native,"status"),before)
+                self.evidence = before | {"session":sid,"refusal":"native_cold_goal_active"}
+
+    @unittest.skipUnless(shutil.which("openssl"),"isolated TLS certificate generator required")
+    def test_cold_dsh_reopens_only_the_authorized_session_and_recovers_lost_activation_reply(self):
+        sid = "isolated-dsh-cold-handoff"
+        directory = Path(self.enterContext(tempfile.TemporaryDirectory(dir="/tmp",prefix="ml-dsh-cold-")))
+        clock = Clock()
+        loop = self.enterContext(Loop.isolated(clock))
+        source_session = loop.native.session
+        source_token,target_token,platform_token,source_callback,target_callback = (guid() for _ in range(5))
+        source_url = self.enterContext(codex_driver.running(serve_adapter(
+            loop.adapter,"oguri",{source_token:"worker/oguri"},("127.0.0.1",0),None)))
+        primary = RemoteAdapter(Client(source_url,source_token),source_session)
+        target = RemoteAdapter(None,sid)
+        worker = Worker(loop.root/"cold-worker.db","oguri",loop.wire,primary,clock=clock,resume_targets={sid:target})
+        service = WorkerService(worker,clock)
+        worker_url = self.open_worker(service,{platform_token:"platform/oguri",
+            source_callback:"adapter/oguri/"+source_session,target_callback:"adapter/oguri/"+sid})
+        platform = Client(worker_url,platform_token)
+        inbox_db = loop.root/"cold-platform.db"
+        inbox = Inbound(inbox_db,platform,None,"app","trainer","chat",clock=clock)
+        sink = PlatformFixture()
+        views = Views(inbox_db,platform,sink,"chat","隔离 DSH",clock)
+        to_worker = config(loop.root,"cold-to-worker",{"url":worker_url,"token":target_callback})
+        foreign = guid()
+        roles = config(loop.root,"target-roles",{target_token:"worker/oguri",foreign:"worker/foreign"})
+        cert,key = loop.root/"tls.crt",loop.root/"tls.key"
+        subprocess.run(["openssl","req","-x509","-newkey","rsa:2048","-nodes","-days","1","-subj","/CN=localhost",
+                        "-addext","subjectAltName=IP:127.0.0.1","-out",cert,"-keyout",key],
+                       capture_output=True,timeout=10,check=True)
+        adapter_db = loop.root/"cold-dsh-adapter.db"
+        extra = ("--worker-id","oguri","--session",sid,"--worker-connection",to_worker,"--runtime-dir",directory,
+                 "--resume-on-handoff")
+        package = Path(__file__).resolve().parents[1]
+
+        def record(mid,text):
+            return inbox.record("app","user","trainer",{"chat_type":"p2p","chat_id":"chat","message_id":mid,
+                "message_type":"text","content":encode({"text":text})})
+
+        activation_calls = []
+        def connect(url,lose_reply=False):
+            transport = target.client = Client(url,target_token,cert)
+            request = transport.request
+
+            def inspect(method,path,*args,**kwargs):
+                if path=="host/bound/activate":
+                    activation_calls.append(args[0]["operation_id"])
+                    if lose_reply:
+                        self.assertTrue(loop.hermes.workers()["items"][0]["admission_paused"])
+                        self.assertEqual(worker.native_session_pin,source_session)
+                    reply = request(method,path,*args,**kwargs)
+                    if lose_reply:
+                        raise ConnectionError("lost activation receipt after DSH resolves original session")
+                    return reply
+                return request(method,path,*args,**kwargs)
+
+            transport.request = inspect
+
+        with self.start_native(directory,sid,"cold-resume") as native, \
+             serve(package,"dsh-adapter",adapter_db,roles,cert,key,dict(os.environ),extra) as url:
+            connect(url,lose_reply=True)
+            service.step()
+            initial = self.read_native(native,"status")
+            self.assertEqual((initial["controllerResolutions"],initial["live"]),(0,False))
+            self.assertEqual(len(initial["modelRequests"]),1)
+            self.assertEqual(target.session_info()["native_load_state"],"cold")
+            with self.assertRaisesRegex(Fault,"native_activation_unavailable"):
+                Client(url,target_token,cert).request("POST","host/activate",{"operation_id":guid()})
+            with self.assertRaisesRegex(Fault,"adapter_identity_unconfirmed"):
+                RemoteAdapter(Client(url,foreign,cert),sid).activate(sid,guid())
+            with self.assertRaisesRegex(Fault,"native_session_cold"):
+                target.deliver("cold-wrong-input",{"kind":"chat","text":"Must not be delivered while cold"})
+            inbox.deliver(record("om_dsh_cold_catalog","/resume"))
+            views.poll()
+            self.assertEqual(self.read_native(native,"status"),initial)
+            select = record("om_dsh_cold_select","/resume "+sid)
+            with self.assertRaisesRegex(Fault,"native_switch_host_unconfirmed"):
+                inbox.deliver(select)
+            resolved = self.read_native(native,"status")
+            self.assertEqual(resolved,initial | {"controllerResolutions":1,"live":True})
+            self.assertEqual(target.session_info()["native_load_state"],"loaded")
+            self.assertEqual(worker.native_session_pin,source_session)
+            self.assertTrue(loop.hermes.workers()["items"][0]["admission_paused"])
+            waiting = loop.hermes.create(guid(),"Isolated cold DSH report","Return a native W04 result","oguri")["task_id"]
+            self.assertIsNone(loop.hermes.inspect(waiting)["task"]["assignment_id"])
+            service.step()
+            switched = inbox.deliver(select)
+            op = switched["binding_receipt"]["handoff_id"]
+            self.assertEqual((switched["binding_receipt"]["session"],worker.native_session_pin),(sid,sid))
+            self.assertEqual(activation_calls,[op])
+            service.step()
+            clock.advance(10)
+            deadline = time.monotonic()+10
+            while time.monotonic()<deadline:
+                service.step()
+                done = loop.hermes.inspect(waiting)
+                public = [entry["event"] for entry in platform.request("GET","worker/display")["items"]]
+                finals = [event for event in public if event["kind"]=="final" and event["session"]==sid]
+                if done["task"]["state"]=="completed_reported" and finals and not target.busy():
+                    break
+                time.sleep(.03)
+            self.assertEqual(done["task"]["state"],"completed_reported",self.read_native(native,"status"))
+            self.assertEqual(len(finals),1)
+            self.assertFalse(any("Seed the isolated historical session" in event.get("text","") for event in public))
+            evidence = self.read_native(native,"read")
+            self.assertEqual(evidence["inputs"][0],"seed-cold-dsh")
+            self.assertEqual(len(evidence["inputs"]),2)
+            aid = done["last_report"]["assignment_id"]
+            expected = {"recorded":True,"task_state":"completed_reported","release_assignment_id":aid}
+            self.assertEqual([json.loads(result["content"][0]["text"]) for result in evidence["results"]],[expected,expected])
+            self.assertEqual(worker.assignment_session(aid),sid)
+            self.assertIsNone(worker.hold()["held_assignment_id"])
+            notice, = loop.manager_wire.frames(0)
+            self.assertEqual(notice["payload"]["task_id"],waiting)
+            self.assertEqual(loop.native.entries(),[])
+            # Closing the native object cannot silently attach a replacement through the same plugin.
+            closed = self.read_native(native,"close")
+            self.assertEqual((closed["controllerResolutions"],closed["live"]),(1,False))
+            with self.assertRaisesRegex(Fault,"native_agent_unavailable"):
+                RemoteAdapter(Client(url,target_token,cert),sid).activate(sid,op)
+            self.assertEqual(self.read_native(native,"status"),closed)
+
+        with self.start_native(directory,sid,"cold-resume-reopen") as native, \
+             serve(package,"dsh-adapter",adapter_db,roles,cert,key,dict(os.environ),extra) as url:
+            connect(url)
+            self.assertEqual(target.session_info()["native_load_state"],"cold")
+            self.assertEqual(self.read_native(native,"status"),{"controllerResolutions":0,"live":False,"modelRequests":[]})
+            clock.advance(5)
+            service.step()
+            self.assertEqual(service.status()["host_session"],sid)
+            self.assertEqual(activation_calls,[op,op])
+            self.assertEqual(inbox.deliver(select),switched)
+            reopened = self.read_native(native,"read")
+            self.assertEqual(reopened["modelRequests"],[])
+            self.assertEqual(reopened["inputs"],evidence["inputs"])
+            self.assertEqual(reopened["results"],evidence["results"])
+            self.assertEqual(loop.hermes.inspect(waiting)["last_report"],done["last_report"])
+        self.evidence = {"session":sid,"binding":switched["binding_receipt"],"cold_observation":initial,
+            "native_activation_calls":activation_calls,"inputs":evidence["inputs"],"task_id":waiting,
+            "assignment_id":aid,"native_tool_calls":[call["callId"] for call in evidence["calls"]],
+            "formal_receipt":expected,"notification_id":notice["delivery_id"],"restarted_model_calls":0,
+            "final_display_event":finals[0]["event_id"],"old_input_republished":False,
+            "scope":"Installed DSH SDK AgentRegistry, persistence and tools, TLS adapter and isolated Router. "
+                    "SessionController wiring, model and Feishu are fixtures."}
 
     def test_native_tool_executor_files_w04_through_the_worker(self):
         session = "dsh-real-loop-formal"

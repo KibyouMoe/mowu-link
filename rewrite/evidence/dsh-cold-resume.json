@@ -1,0 +1,68 @@
+{
+  "at_utc": "2026-11-26T11:43:41.076331+00:00",
+  "repetitions": 12,
+  "cases": [
+    "test_cold_dsh_reopens_only_the_authorized_session_and_recovers_lost_activation_reply",
+    "test_cold_dsh_requires_explicit_activation_and_keeps_active_goals_unloaded",
+    "test_closed_native_binding_never_resumes_or_sends_to_a_new_agent"
+  ],
+  "native_handoff": {
+    "session": "isolated-dsh-cold-handoff",
+    "binding": {
+      "handoff_id": "be5d3527-a843-5100-9a5d-48eff011d865",
+      "previous_session": "test-agent-session",
+      "session": "isolated-dsh-cold-handoff",
+      "state": "bound"
+    },
+    "cold_observation": {
+      "controllerResolutions": 0,
+      "live": false,
+      "modelRequests": [
+        {
+          "command": "private",
+          "provider": "fixture",
+          "model": "local",
+          "reasoningEffort": "low"
+        }
+      ]
+    },
+    "native_activation_calls": [
+      "be5d3527-a843-5100-9a5d-48eff011d865",
+      "be5d3527-a843-5100-9a5d-48eff011d865"
+    ],
+    "inputs": [
+      "seed-cold-dsh",
+      "mowulink-a386ed59fe54de3c2d945cb5354fd5f2556f868fc91e3d00f9680d12d0dae26e"
+    ],
+    "task_id": "17a31ce9-edf3-4843-8849-097c0a59b052",
+    "assignment_id": "2bb7556c-6446-4668-9a05-23ff8d7c2ec6",
+    "native_tool_calls": [
+      "native-w04-fixture-0",
+      "native-w04-fixture-1"
+    ],
+    "formal_receipt": {
+      "recorded": true,
+      "task_state": "completed_reported",
+      "release_assignment_id": "2bb7556c-6446-4668-9a05-23ff8d7c2ec6"
+    },
+    "notification_id": "b6818a16-7425-4a14-a1e4-8176d816fa6d",
+    "restarted_model_calls": 0,
+    "final_display_event": "host-dsh-fc4b256599717c17469730c3-30.0-final",
+    "old_input_republished": false,
+    "scope": "Installed DSH SDK AgentRegistry, persistence and tools, TLS adapter and isolated Router. SessionController wiring, model and Feishu are fixtures."
+  },
+  "active_goal_refusal": {
+    "controllerResolutions": 0,
+    "live": false,
+    "modelRequests": [
+      {
+        "command": "private",
+        "provider": "fixture",
+        "model": "local",
+        "reasoningEffort": "low"
+      }
+    ],
+    "session": "isolated-dsh-cold-active-goal",
+    "refusal": "native_cold_goal_active"
+  }
+}

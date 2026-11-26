@@ -174,7 +174,11 @@ Worker 先确认没有持单和待处理的原生业务，暂停派发，核对�
 
 切换尚在 `starting` 时，目标断开会保留原会话及交接窗口。可从 `worker-status` 读取 `native_switch.handoff_id`，用原号执行 `handoff-admission ... end`。确认解除后继续使用原会话。到达 `bound` 时，恢复沿用已经提交的目标，目标重新可读后才解除交接。验收覆盖隔离 Codex App Server、DSH、真实 TLS 进程和飞书夹具。[目录与原生回执](evidence/native-resume-catalog.json)
 
-已准备好的独立 Codex App Server 历史会话可用 `codex-adapter --resume-on-handoff`。将适配器的固定 `--session`、`--cwd` 和独立 profile 对齐，再将其连接配置加入 Worker 的 `--resume-targets`。适配器可以先上线并保持会话冷态。浏览目录不会打开会话。Worker 在 Router 确认暂停派发后，才用原交接号请求恢复这一指定会话。恢复完成后先核对会话和忙闲，再提交绑定。已有活动原生目标时，Worker 保留原会话并解除交接。适配器重开后只按已提交的绑定和交接回执恢复当前会话。DSH 冷会话和 Codex Desktop 日常会话仍待接。[Codex 冷会话证据](evidence/codex-cold-resume.json)
+已准备好的独立 Codex App Server 历史会话可用 `codex-adapter --resume-on-handoff`。将适配器的固定 `--session`、`--cwd` 和独立 profile 对齐，再将其连接配置加入 Worker 的 `--resume-targets`。[Codex 冷会话证据](evidence/codex-cold-resume.json)
+
+DSH 历史会话在宿主插件中设 `resume_on_handoff: true`，并以 `dsh-adapter --resume-on-handoff` 启动对应的适配器。两端使用相同的 `session` 和宿主运行目录。隔离宿主须提供 `sessionQuery.inspectSession` 和已持久保存的目标会话。适配器连接也须加入 Worker 的 `--resume-targets`。DSH 核对原生历史后通过 SessionController 恢复，再为这一原生 Agent 安装业务工具。已绑定对象关闭后，原插件会报告宿主不可用。宿主和适配器重开后，可按已提交的交接回执恢复当前会话。[DSH 冷会话证据](evidence/dsh-cold-resume.json)
+
+两端均可先启动适配器并保持会话冷态。浏览目录不会打开会话。Worker 等 Router 确认暂停派发才用原交接号恢复会话，核对会话和忙闲后提交绑定。发现活动原生目标时，保留原会话并解除交接。Codex Desktop 日常会话仍待接。
 
 ### Hermes 专用会话
 

@@ -19,7 +19,8 @@ const compactEntered = Promise.withResolvers();
 const compactReleased = Promise.withResolvers();
 const foregroundQuestion = Promise.withResolvers();
 const foregroundAnswer = Promise.withResolvers();
-const usesGoals = ['goals','goal-driver','formal-goal'].includes(mode);
+const isCold = mode.startsWith('cold-resume');
+const usesGoals = ['goals','goal-driver','formal-goal','cold-resume-goal'].includes(mode);
 const usesMedia = ['media','peer-media','handoff'].includes(mode);
 const usesApprovals = ['command-approvals','command-approvals-reopen'].includes(mode);
 const modelRequests = [];
@@ -231,7 +232,7 @@ class LocalModel extends LlmAdapter {
           yield {type:'finish',reason:{kind:'tool-calls'}};
           return;
         }
-      } else if (['formal','handoff'].includes(mode)) {
+      } else if (isCold || ['formal','handoff'].includes(mode)) {
         const attempt = this.submitted.get(payload.assignment_id) ?? 0;
         if (attempt<2) {
           this.submitted.set(payload.assignment_id,attempt+1);
@@ -264,6 +265,7 @@ async function waitForStop(signal) {
 const ctx = new Context();
 const plugins = [];
 let originalHandle;
+let resumedHandle;
 let controllerResolutions = 0;
 async function install(plugin,options) {
   const handle = ctx.plugin(plugin,options);
@@ -283,7 +285,7 @@ async function setup() {
   await install((await sdk('dsh-agent')).AgentRegistry);
   if (usesGoals) await install((await sdk('dsh-goal')).GoalService,mode==='goal-driver' ? {defaultMaxGoalRounds:2} : {});
   await install(await sdk('dsh-session-persistence-jsonl'),{root:path.join(directory,'sessions')});
-  if (mode==='catalog') {
+  if (mode==='catalog' || isCold) {
     await install((await sdk('dsh-session-query')).SessionQueryEngine);
     await install((await sdk('dsh-session-title')).SessionTitleService,
       {fallbackMaxWords:12,fallbackMaxBytes:120,maxTitleBytes:300});
@@ -327,10 +329,20 @@ async function setup() {
   if (mode==='goal-driver' || mode==='formal-goal') await install(await sdk('dsh-goal-round-driver'));
   const agentOptions = {provider:'fixture',model:'local'};
   const registry = ctx.get('agents');
-  originalHandle = mode==='command-approvals-reopen'
-    ? await registry.resume({resumeSessionId:session,agentOptions})
-    : await registry.create({sessionId:session,agentOptions});
-  const {agent} = originalHandle;
+  if (mode!=='cold-resume-reopen') {
+    originalHandle = mode==='command-approvals-reopen'
+      ? await registry.resume({resumeSessionId:session,agentOptions})
+      : await registry.create({sessionId:session,agentOptions});
+  }
+  const agent = originalHandle?.agent;
+  if (isCold && agent) {
+    agent.followup({id:'seed-cold-dsh',role:'user',source:{kind:'user'},
+      content:[{type:'text',text:'Seed the isolated historical session'}]});
+    await agent.whenIdle();
+    if (mode==='cold-resume-goal') ctx.get('goals').create(agent,{objective:'Preserve this isolated active goal'});
+    assert.equal(await ctx.get('sessions').flush(agent.session),true);
+    await originalHandle.dispose();
+  }
   if (mode==='catalog') {
     const titles = ctx.get('sessionTitle');
     titles.rename(agent.session,'已绑定的会话');
@@ -350,8 +362,9 @@ async function setup() {
       if (target!==session) return {error:'unknown'};
       controllerResolutions++;
       const live = ctx.get('agents').get(target);
-      if (live || mode!=='binding-close') return {agent:live};
-      return ctx.get('agents').resume({resumeSessionId:target,agentOptions:{provider:'fixture',model:'local'}});
+      if (live || mode!=='binding-close' && !isCold) return {agent:live};
+      resumedHandle = await ctx.get('agents').resume({resumeSessionId:target,agentOptions});
+      return resumedHandle;
     }
   }
   await install(Controller);
@@ -402,10 +415,19 @@ async function stopScenario(agent) {
 
 async function formalScenario(agent) {
   await install(adapter,{session,directory,catalog_sessions:catalogSessions,
-    relay_command_approvals:usesApprovals});
+    relay_command_approvals:usesApprovals,resume_on_handoff:isCold});
   console.log(JSON.stringify({ready:true,session}));
   for await (const line of createInterface({input:process.stdin,terminal:false})) {
     if (line==='exit') break;
+    if (isCold) {
+      if (line==='close') await resumedHandle?.dispose();
+      agent = ctx.get('agents').get(session);
+      if (line==='status' || line==='close') {
+        console.log(JSON.stringify({controllerResolutions,live:!!agent,modelRequests}));
+        continue;
+      }
+      assert.ok(agent,'cold fixture has not been resolved');
+    }
     if (line==='approval-state' && usesApprovals) {
       console.log(JSON.stringify(agent.session.snapshotEvents()
         .filter(event=>['user/message','assistant/message','tool/call','tool/result','approval/asked','approval/decided','turn/end'].includes(event.type))
@@ -490,7 +512,7 @@ async function formalScenario(agent) {
 try {
   const agent = await setup();
   if (['formal','formal-artifacts','compact','questions','foreground-question','catalog','private-stop','work-question','admission-race',
-       'binding-close','material','peer-source'].includes(mode) || usesGoals || usesMedia || usesApprovals) {
+       'binding-close','material','peer-source'].includes(mode) || isCold || usesGoals || usesMedia || usesApprovals) {
     await formalScenario(agent);
   }
   else await stopScenario(agent);
