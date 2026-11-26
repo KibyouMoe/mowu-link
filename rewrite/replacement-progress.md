@@ -4,6 +4,8 @@
 
 ## 检查点与证据
 
+新版派发在 W03 前固定原生会话。隔离 Router 接管成功后立即换到另一个已认证的适配器，旧单保持 working，另一会话没有收到它；单独给另一会话构造同号输入后，那里发出的 W04 被拒。重开原绑定后，原派发只有一次原生输入，正式 W04 才释放持单。复跑 `python3 -m unittest -v rewrite.test_mainline.Mainline.test_assignment_keeps_original_native_session_across_replacement`。Router、Worker 及传输实际运行，宿主为夹具。
+
 首次确认宿主会话前断链时，普通私聊先留在 Worker 入箱。隔离测试在探测过程能读回已提交的消息，此时没有原生输入。重开 Worker 后同号继续首次投递，回执可重查，原生账本一条。复跑 `python3 -m unittest -v rewrite.test_mainline.Mainline.test_private_chat_pending_before_adapter_probe_resumes_once`。宿主为夹具，此处只验证入箱到首次写入的边界。
 
 已加独立工位的只读运维检查。三进程 TLS 中，测试平台身份读状态被拒，专用运维身份读到预期和确认的同一会话及当前持单。两个真实回环断链试验分别核 Router 重连倒计时及宿主忙闲未知，另一链保持可观察。复跑 `python3 -m unittest -v rewrite.test_link_health rewrite.test_service`。原生宿主为夹具。

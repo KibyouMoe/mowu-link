@@ -295,7 +295,7 @@ class Mainline(unittest.TestCase):
         class OtherAdapter:
             def __init__(self):
                 self.inputs = {}
-            def busy(self):
+            def busy(self, *, session=None):
                 return False
             def bound_session(self):
                 return "other-agent-session"
@@ -306,7 +306,9 @@ class Mainline(unittest.TestCase):
                 self.inputs.setdefault(native, payload)
                 return {"native_id":native,"session":self.bound_session(),"delivery_id":did,
                         "digest":hashlib.sha256(encode(payload).encode()).hexdigest()}
-            def origin(self, native_id):
+            def origin(self, native_id, *, session=None):
+                if session is not None:
+                    assert session == self.bound_session()
                 return self.inputs[native_id]
         adapter = OtherAdapter()
         self.w.adapter = adapter
@@ -378,6 +380,45 @@ class Mainline(unittest.TestCase):
         proof = restarted.chat("cold-chat","Hi")
         self.assertEqual(restarted.chat("cold-chat","Hi"),proof)
         self.assertEqual([receipt for _body,receipt in self.loop.native.entries()],[proof])
+
+    def test_assignment_keeps_original_native_session_across_replacement(self):
+        tid = self.create("Pinned job")
+        original = self.loop.adapter
+        alternate_host = FixtureHost(self.loop.root/"alternate-host.db","alternate-host")
+        alternate = HostAdapter(self.loop.root/"alternate-adapter.db",alternate_host,alternate_host.session)
+        send = self.w.router.request
+        accepted = []
+        def swap_after_accept(method,path,*args,**kwargs):
+            reply = send(method,path,*args,**kwargs)
+            if path==f"tasks/{tid}/accept":
+                accepted.append(reply)
+                self.w.adapter = alternate
+            return reply
+        self.w.router.request = swap_after_accept
+        self.idle()
+        self.w.poll()
+        (w03,) = accepted
+        aid = w03["assignment_id"]
+        self.assertEqual(self.w.assignment_session(aid),original.bound_session())
+        self.assertEqual(self.w.hold()["held_assignment_id"],aid)
+        self.assertEqual(self.loop.native.entries(),[])
+        self.assertEqual(alternate_host.entries(),[])
+        self.assertEqual(self.m.inspect(tid)["task"]["state"],"working")
+
+        # A genuine input in the structurally valid but wrong adapter is still not this assignment.
+        foreign_payload = {"kind":"task","task_id":tid,"assignment_id":aid}
+        foreign = alternate.deliver("manual-wrong-session-fixture",foreign_payload)
+        self.fault("wrong_assignment_session",lambda: self.w.report(foreign["native_id"],**self.args(tid,aid)))
+        self.assertIsNone(self.m.inspect(tid)["last_report"])
+        self.assertEqual(self.w.hold()["held_assignment_id"],aid)
+        reopened = Worker(self.w.db.path,self.w.worker_id,self.w.router,original)
+        reopened.connect()
+        reopened.poll()
+        reopened.poll()
+        (payload,receipt), = self.loop.native.entries()
+        self.assertEqual((payload["assignment_id"],receipt["session"]),(aid,original.bound_session()))
+        self.assertTrue(reopened.report(receipt["native_id"],**self.args(tid,aid))["recorded"])
+        self.assertIsNone(reopened.hold()["held_assignment_id"])
 
     def test_wrong_native_session_receipt_stays_unconfirmed(self):
         tid = self.create()

@@ -107,13 +107,13 @@ class LinkHealth(unittest.TestCase):
         task = self.dispatched()
         tid = task["task_id"]
         original = self.worker.adapter.deliver
-        def disconnected(did,payload):
+        def disconnected(did,payload,**kwargs):
             if payload["kind"]=="task_update":
-                original(did,payload)
+                original(did,payload,**kwargs)
                 return None
             if payload["kind"]=="task.cancel":
                 raise Fault(503,"adapter_connection_unconfirmed",True)
-            return original(did,payload)
+            return original(did,payload,**kwargs)
         self.worker.adapter.deliver = disconnected
         status = self.manager.inspect(tid)["task"]
         updated = self.manager.update(guid(),tid,status["revision"],{"instructions":"Revised"})

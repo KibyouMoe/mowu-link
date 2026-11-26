@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     assignment_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, delivery_id TEXT NOT NULL, stage TEXT NOT NULL,
     host_state TEXT NOT NULL DEFAULT 'pending'
 );
+CREATE TABLE IF NOT EXISTS assignment_sessions (assignment_id TEXT PRIMARY KEY, session TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS samples (query_id TEXT PRIMARY KEY, body TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS registration (slot INTEGER PRIMARY KEY CHECK(slot=1), key TEXT NOT NULL, body TEXT NOT NULL);
 CREATE UNIQUE INDEX IF NOT EXISTS single_hold ON jobs(stage) WHERE stage='accepted';
@@ -45,11 +46,11 @@ CREATE TABLE IF NOT EXISTS cleanup_reports (
 
 
 class AgentAdapter(Protocol):
-    def busy(self) -> bool: ...
+    def busy(self, *, session: str | None = None) -> bool: ...
     def bound_session(self) -> str: ...
     def deliver(self, did: str, payload: dict, *, session: str | None = None) -> dict | None: ...
     def lookup_delivery(self, did: str, payload: dict, *, session: str) -> dict | None: ...
-    def origin(self, native_id: str) -> dict: ...
+    def origin(self, native_id: str, *, session: str | None = None) -> dict: ...
 
 
 class Worker:
@@ -69,6 +70,11 @@ class Worker:
             return {"held_task_id": row["task_id"] if row else None,
                     "held_assignment_id": row["assignment_id"] if row else None}
 
+    def assignment_session(self,assignment_id):
+        with self.db.transaction() as db:
+            row = db.execute("SELECT session FROM assignment_sessions WHERE assignment_id=?",(assignment_id,)).fetchone()
+            return row["session"] if row else None
+
     def send_task_input(self, delivery_id, payload):
         kind = payload["kind"]
         if kind in ("task_update","task.cancel","task.transfer_out","task.shelved"):
@@ -84,7 +90,12 @@ class Worker:
                 # Past releases may already have projected the same delivery with host metadata.
                 if not db.execute("SELECT 1 FROM display_events WHERE event_id=?",(notice,)).fetchone():
                     display.append(db,{"event_id":notice,"kind":"task","session":"","turn_id":"","text":text+"\n"+tid})
-        return self.adapter.deliver(delivery_id,payload)
+        session = self.assignment_session(payload["assignment_id"])
+        if not session:
+            return self.adapter.deliver(delivery_id,payload)
+        if self.adapter.bound_session()!=session:
+            return None
+        return self.adapter.deliver(delivery_id,payload,session=session)
 
     def connect(self):
         with self.lock:
@@ -170,7 +181,7 @@ class Worker:
                     require(row and row["answer"] in (None, answer), 409, "question_answer_mismatch")
                     db.execute("UPDATE questions SET answer=? WHERE question_id=?", (answer, payload["question_id"]))
                     user_questions.mirror_manager(db, row["question_id"], payload["answer"])
-                return self.adapter.deliver(frame["delivery_id"], {"kind": "question_answer", **payload}) is not None
+                return self.send_task_input(frame["delivery_id"], {"kind": "question_answer", **payload}) is not None
             if frame["kind"] == "task.shelved":
                 with self.db.transaction() as db:
                     db.execute("UPDATE jobs SET stage='released' WHERE assignment_id=? AND stage='accepted'",
@@ -232,8 +243,16 @@ class Worker:
         if job["stage"] in ("released", "stale"):
             return True
         if job["stage"] == "offered":
-            if self.adapter.busy() or self.hold()["held_assignment_id"]:
+            if self.hold()["held_assignment_id"]:
                 return False
+            session = self.adapter.bound_session()
+            require(isinstance(session,str) and session.strip(),502,"invalid_host_observation")
+            if self.assignment_session(aid) not in (None,session) or self.adapter.busy(session=session):
+                return False
+            with self.db.transaction() as db:
+                db.execute("INSERT OR IGNORE INTO assignment_sessions VALUES (?,?)",(aid,session))
+                require(db.execute("SELECT session FROM assignment_sessions WHERE assignment_id=?",(aid,)).fetchone()[0]
+                        == session,409,"wrong_assignment_session")
             try:
                 reply = self.router.request("POST", f"tasks/{tid}/accept",
                                             {"session_id": self.session, "assignment_id": aid, "revision": p["revision"]},
@@ -384,11 +403,12 @@ class Worker:
 
     def ask(self, native_id, call_id, text, options):
         with self.lock:
-            origin = self.adapter.origin(native_id)
+            session = self.adapter.bound_session()
+            origin = self.adapter.origin(native_id,session=session)
             require(origin["kind"] in ("task", "task_update", "task_probe", "question_answer"), 403, "wrong_report_origin")
             tid, aid = origin["task_id"], origin["assignment_id"]
             require(isinstance(call_id, str) and call_id.strip(), 422, "missing_call_id")
-            session = self.adapter.bound_session()
+            require(self.assignment_session(aid) in (None,session),403,"wrong_assignment_session")
             with self.db.transaction() as db:
                 lookup = db.execute("SELECT * FROM questions WHERE native_id=? AND call_id=?", (native_id, call_id)).fetchone()
                 if lookup:
@@ -418,7 +438,9 @@ class Worker:
             if artifact_ids is not None:
                 require(isinstance(artifact_ids,list) and all(isinstance(i,str) and i for i in artifact_ids)
                         and outcome in ("completed","blocked"),422,"invalid_artifact_ids")
-            origin = self.adapter.origin(native_id)
+            target = self.assignment_session(assignment_id)
+            require(not target or self.adapter.bound_session()==target,403,"wrong_assignment_session")
+            origin = self.adapter.origin(native_id,session=target)
             if outcome in ("cancel_confirmed", "transfer_confirmed"):
                 kind = "task.cancel" if outcome == "cancel_confirmed" else "task.transfer_out"
                 require(origin["kind"] == kind and origin["task_id"] == task_id

@@ -27,7 +27,8 @@ class HostAdapter:
         self.host, self.session = host, session
         self.media_store = media_store
 
-    def busy(self):
+    def busy(self, *, session=None):
+        require(session is None or session==self.session,409,"wrong_native_session")
         return self.host.busy(self.session)
 
     def observe_activity(self):
@@ -197,7 +198,8 @@ class HostAdapter:
                        (encode(receipt), receipt["native_id"], did))
         return receipt
 
-    def origin(self, native_id):
+    def origin(self, native_id, *, session=None):
+        require(session is None or session==self.session,409,"wrong_native_session")
         with self.db.transaction() as db:
             row = db.execute("SELECT payload FROM intents WHERE session=? AND native_id=? AND receipt IS NOT NULL",
                              (self.session, native_id)).fetchone()

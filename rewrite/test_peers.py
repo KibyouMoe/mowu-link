@@ -209,8 +209,8 @@ class Peers(unittest.TestCase):
         tid = self.loop.hermes.create(guid(),"Independent dispatch","Continue working","tama")["task_id"]
         receive = self.b.adapter.deliver
         calls = []
-        def inconsistent(did,payload):
-            receipt = receive(did,payload)
+        def inconsistent(did,payload,**kwargs):
+            receipt = receive(did,payload,**kwargs)
             if payload.get("message_id")==failed:
                 calls.append(did)
                 return {**receipt,"session":"different-session"}

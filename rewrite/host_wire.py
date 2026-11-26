@@ -32,8 +32,8 @@ class RemoteAdapter:
         except (URLError,OSError):
             raise Fault(503,"adapter_connection_unconfirmed",True) from None
 
-    def busy(self):
-        reply = self.request("GET", "host/activity")
+    def busy(self, *, session=None):
+        reply = self.request("GET","host/activity",native_session=session)
         require(type(reply.get("busy")) is bool, 502, "invalid_host_observation")
         return reply["busy"]
 
@@ -86,8 +86,8 @@ class RemoteAdapter:
     def lookup_delivery(self,did,payload,*,session):
         return self.request("POST","host/find-chat",{"delivery_id":did,"payload":payload},native_session=session)["receipt"]
 
-    def origin(self, native_id):
-        return self.request("POST", "host/origin", {"native_id":native_id})["origin"]
+    def origin(self, native_id, *, session=None):
+        return self.request("POST","host/origin",{"native_id":native_id},native_session=session)["origin"]
 
     def input_for_turn(self, session, turn):
         return self.request("POST", "host/turn", {"session":session, "turn_id":turn})["native_id"]
