@@ -8,6 +8,8 @@
 
 复跑 `python3 -B -m unittest -v rewrite.test_codex_app_server.CodexAppServer.test_cold_codex_activates_only_after_router_pauses_and_recovers_lost_reply rewrite.test_codex_app_server.CodexAppServer.test_native_cold_activation_checks_goal_and_recovers_a_missing_app_server_reply rewrite.test_worker_resume.WorkerResume.test_cold_target_with_active_goal_keeps_source_even_when_release_reply_is_lost`。三个场景连续通过 12 轮。源码目录 macOS 通过 221 项，Linux arm64 通过 155 项，另 66 项本机宿主用例跳过。DSH、Desktop 的冷启动和真实飞书验收仍待接。
 
+从 `cb3953c4fa3b9781117aa9d8f35fb751fa80560e` 构建 190 文件独立包，SHA-256 为 `56bcf267ed6b45e8b11901470f2de664ecfc46fca67ca950389637538b68b4d7`。从安装目录复跑 221 项后，复验文件摘要一致。两版冷恢复功能关闭时，隔离 TLS 的旧版、混合版、新版和回退每阶段各保留一条私聊原生输入，原收件号 `1170899e-6e8c-4f41-90d4-7f345eeb2692` 一致。复跑 `python3 -B -m rewrite.release_check --repository . --component worker-pair --previous c9edeb5c3acacb330f049a61e37da2b410a1845d --new cb3953c4fa3b9781117aa9d8f35fb751fa80560e`。
+
 `/resume` 的目录按旧版从 0 编号。翻页复用当次目录，刷新和搜索生成新目录，选编号需已确认的卡片。隔离实测卡片送达回执丢失、重复发送、目录重排、翻页后回复错页与回复刷新前的旧卡，均未误切。完整标题重复时需用 ID，目录内未配置的冷会话只可浏览。原生联调从真实 Codex App Server 生成的目录卡按编号切到 DSH，完成私聊和正式工单，再按 ID 切回。对应两组场景连续通过 12 轮，模型与飞书为夹具。[目录与原生回执](evidence/native-resume-catalog.json)
 
 复跑 `python3 -B -m unittest -v rewrite.test_worker_resume.WorkerResume.test_number_uses_the_confirmed_catalog_and_old_card_cannot_redirect_it rewrite.test_dsh_native_loop.NativeLoop.test_platform_resume_switches_live_codex_and_dsh_sessions`。macOS 218 项通过，Linux arm64 154 项通过，另 64 项本机宿主用例跳过。冷目录中自动打开宿主仍待接。
