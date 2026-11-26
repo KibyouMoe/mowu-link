@@ -6,6 +6,10 @@
 
 进度询问按原续做回执重建轮次。真实隔离 Router 与 Worker 实跑两次保留原持单，轮次询问数为 0、3、4。最后一轮无人答复才入池，原工位未提交成果。转派后新工位提交并验收，原工位随后交清理回执。旧 Router 的恢复库仍只读回已验收归档，原两工位无待派。删除续做回执或把关联的空闲观测改成忙，均拒绝准备。宿主和时钟为夹具。[询问轮次实测](evidence/cutover-reviewed-inquiries.json)
 
+询问轮次提交 `cfa78b3dbd1f11f1928b2366782113833fbca7da` 的 Linux arm64 全量通过 199 项、按环境跳过 121 项。302 文件安装包的 71 项专项全部通过，逐文件校验一致。归档 SHA-256 为 `34a81a432a4b9351058235368da892ce228218c22fb501cca365490a2c67c97a`。Windows 常规与 DSH 原生两组通过。[Windows CI](https://github.com/KibyouMoe/mowu-link/actions/runs/45908802146)
+
+另以隔离 Router 复现取消重试耗尽后的重新发起。第一次共四条取消指令，未确认后保持入池。溪流再次取消，原工位经第五条指令交 W04，Router 记录 `cancelled`。回退仍报 `trial has an unsupported exhausted inquiry`，未生成旧端目录。两次取消、原入池及最终清理回执仍需一起对账。
+
 工单内已答复的问题纳入回退。真实隔离 Router 和两个 Worker 验证选择、文本和跳过三种答复。一条答复到达前已转派并验收，仍送入原工位的宿主，当前工位无答复输入。重送同一问题和同一答案，保留原号和操作回执，通知与答复帧各一次。未答、答复帧缺接收确认或流向下一派发均拒绝准备。恢复后的旧 Router 读回归档，两个工位无待答题及重新派发。原 W05、题文、答复及接收记录只留私有档案，宿主使用夹具。[问答回退实测](evidence/cutover-reviewed-questions.json)
 
 问答实现 `31981cf46a980baf94021488751d0424416ac40b` 的 Linux arm64 全量通过 198 项、按环境跳过 121 项。300 文件安装包的 70 项专项全部通过，逐文件校验一致。归档 SHA-256 为 `2df06cef354843e4bad886c0cfc0859fa0ead6dbe74c263b24b376d91a70eb05`。Windows 常规与 DSH 原生两组通过。[Windows CI](https://github.com/KibyouMoe/mowu-link/actions/runs/45908280694)
