@@ -10,6 +10,8 @@
 
 复跑 `python3 -B -m unittest -v rewrite.test_state_bundle rewrite.test_codex_app_server.CodexAppServer.test_managed_bundle_restores_pending_enrollment_and_rolls_back_a_held_assignment`。调试前一版适配器时，可把独立安装目录设为 `MOWULINK_MANAGED_ROLLBACK_PACKAGE` 并附其 `MOWULINK_MANAGED_ROLLBACK_REVISION`。macOS 全量通过 230 项，Linux arm64 通过 158 项、跳过 72 项本机宿主用例。
 
+从 `fb6b03054e2bcc370533839a38bea1f08f292592` 构建 198 文件的独立包，SHA-256 为 `9e94ac1be8d2d8ffbb39ab36773fa0301106abd92cdcb92d1393823916c9d7e9`。安装目录通过恢复、快照审计、老版本适配器接回持单及自动换绑等 12 项，文件摘要复验一致。
+
 独立 Codex App Server 已跑通 `/new`、`/clear` 和 `/fork` 的自动登记与换绑。重放原飞书测试消息仍得到原绑定，旧会话凭据冒用新会话被拒。主动丢弃第一次登记回执并重开 Worker 与适配器后，Router 仍保持派单冻结，Worker 查回同一登记，再启用并确认新绑定。另一次重开只恢复当前分支，旧会话保持冷态。普通私聊继续进入当前分支。
 
 两张新派发分别进入新会话和分支，各产生一次新原生输入和一个回合。各回合两次调用原生 `worker_report`，Router 各留一条待验通知，Worker 各释放一次持单。分支继承的父输入没有成为新派发收件。实测宿主为独立原生 App Server，模型和飞书为本地夹具；多会话登记目录及密钥的备份和回退仍待演练。[会话、派发、原生回合与通知证据](evidence/codex-managed-native-sessions.json)
