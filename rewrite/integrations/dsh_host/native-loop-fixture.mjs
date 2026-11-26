@@ -90,7 +90,10 @@ class LocalModel extends LlmAdapter {
       this.submitted.set(message.id,true);
       const variant = text.substring('DSH approval fixture '.length);
       const args = {description:'Read the isolated working directory',command:'pwd'};
-      if (variant!=='implicit') args.workdir = directory;
+      if (variant==='unverifiable') args.workdir = 'absent-approval-directory';
+      else if (variant==='relative') args.workdir = 'approval-child';
+      else if (variant==='physical-parent') args.workdir = 'approval-link/..';
+      else if (!['implicit','waiting-change','dispatch-change','after-pin-change'].includes(variant)) args.workdir = directory;
       assert.ok(tools?.some(tool=>tool.name==='bash'));
       yield {type:'block-start',index:0,blockType:'tool-call'};
       yield {type:'block-end',index:0,block:{type:'tool-call',id:'fixture-bash-'+variant,name:'bash',
@@ -484,6 +487,19 @@ async function formalScenario(agent) {
     ...(isManaged ? {managed_sessions_dir:path.join(directory,'enrolled'),
       new_session_selection:{provider:'fixture',model:'local',effort:'low'}} : {})});
   console.log(JSON.stringify({ready:true,session}));
+  if (usesApprovals) ctx.on('tools/execute',async (exec,next)=>{
+    if (exec.agent===agent && exec.callId==='fixture-bash-dispatch-change') {
+      await ctx.get('workingDirectory').set(agent,path.join(directory,'approval-child'),exec.signal);
+    }
+    return next();
+  },{prepend:true});
+  if (usesApprovals) ctx.on('tools/execute',async (exec,next)=>{
+    if (exec.agent===agent && exec.callId==='fixture-bash-after-pin-change') {
+      assert.ok(path.isAbsolute(exec.arguments.workdir));
+      await ctx.get('workingDirectory').set(agent,path.join(directory,'approval-child'),exec.signal);
+    }
+    return next();
+  });
   for await (const line of createInterface({input:process.stdin,terminal:false})) {
     if (line==='exit') break;
     if (standalone && line==='hold-question-reply') {
@@ -544,6 +560,11 @@ async function formalScenario(agent) {
       console.log(JSON.stringify(agent.session.snapshotEvents()
         .filter(event=>['user/message','assistant/message','tool/call','tool/result','approval/asked','approval/decided','turn/end'].includes(event.type))
         .map(({type,data})=>({type,data}))));
+      continue;
+    }
+    if (line.startsWith('set-approval-cwd ') && usesApprovals) {
+      const cwd = await ctx.get('workingDirectory').set(agent,line.slice('set-approval-cwd '.length));
+      console.log(JSON.stringify({cwd}));
       continue;
     }
     if (line==='foreground-question' && usesForeground) {

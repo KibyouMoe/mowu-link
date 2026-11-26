@@ -1,0 +1,538 @@
+{
+  "baseline": {
+    "revision": "b88116e7cfd68765f41ecf098c1724ed43a1af35",
+    "observation": "The same native request with omitted workdir produced no Router approval during the six-second observation."
+  },
+  "native_runtime_sha256": "6f019878f523428f452957dbaad601c6468051df4093eda8af751ec65226f88e",
+  "runs": [
+    {
+      "bash_success_count": 4,
+      "boundary": "Installed DSH native AgentLoop, ApprovalService and Bash. Model, operator and directory changes are fixtures.",
+      "outcomes": {
+        "after-pin-change": {
+          "approval_id": "8f38c56c-1abc-4b78-af00-8bf93d0d048d",
+          "asked_seq": 107,
+          "bash_executed": true,
+          "decided_seq": 108,
+          "effective_directory": ".",
+          "native_outcome": "allowed-once",
+          "original_workdir": null,
+          "router_attempted_response": {
+            "decision": "accept",
+            "source": "operator"
+          },
+          "turn_id": "98/6"
+        },
+        "dispatch-change": {
+          "approval_id": "027300cc-51d6-4855-86fd-f93e396c35a7",
+          "asked_seq": 82,
+          "bash_executed": false,
+          "decided_seq": 83,
+          "effective_directory": ".",
+          "native_outcome": "allowed-once",
+          "original_workdir": null,
+          "router_attempted_response": {
+            "decision": "accept",
+            "source": "operator"
+          },
+          "turn_id": "73/5"
+        },
+        "implicit": {
+          "approval_id": "f1681242-5b4d-4986-92f7-9d7acfac9f7e",
+          "asked_seq": 12,
+          "bash_executed": true,
+          "decided_seq": 13,
+          "effective_directory": ".",
+          "native_outcome": "allowed-once",
+          "original_workdir": null,
+          "router_attempted_response": {
+            "decision": "accept",
+            "source": "operator"
+          },
+          "turn_id": "1/1"
+        },
+        "physical-parent": {
+          "approval_id": "68f2e9e0-b45f-4784-a891-a955f3aa5a39",
+          "asked_seq": 42,
+          "bash_executed": true,
+          "decided_seq": 43,
+          "effective_directory": "physical-directory",
+          "native_outcome": "allowed-once",
+          "original_workdir": "approval-link/..",
+          "router_attempted_response": {
+            "decision": "accept",
+            "source": "operator"
+          },
+          "turn_id": "36/3"
+        },
+        "relative": {
+          "approval_id": "68af5132-ab6b-40eb-94a6-7313c6409082",
+          "asked_seq": 27,
+          "bash_executed": true,
+          "decided_seq": 28,
+          "effective_directory": "approval-child",
+          "native_outcome": "allowed-once",
+          "original_workdir": "approval-child",
+          "router_attempted_response": {
+            "decision": "accept",
+            "source": "operator"
+          },
+          "turn_id": "21/2"
+        },
+        "waiting-change": {
+          "approval_id": "ee59616e-9159-4f98-9c68-b63fe7b28eda",
+          "asked_seq": 57,
+          "bash_executed": false,
+          "decided_seq": 60,
+          "effective_directory": ".",
+          "native_outcome": "unavailable",
+          "original_workdir": null,
+          "router_attempted_response": null,
+          "turn_id": "51/4"
+        }
+      },
+      "session": "isolated-dsh-approval-working-directory"
+    },
+    {
+      "bash_success_count": 4,
+      "boundary": "Installed DSH native AgentLoop, ApprovalService and Bash. Model, operator and directory changes are fixtures.",
+      "outcomes": {
+        "after-pin-change": {
+          "approval_id": "ee3b055b-4188-43d9-9f26-1281785f53e1",
+          "asked_seq": 107,
+          "bash_executed": true,
+          "decided_seq": 108,
+          "effective_directory": ".",
+          "native_outcome": "allowed-once",
+          "original_workdir": null,
+          "router_attempted_response": {
+            "decision": "accept",
+            "source": "operator"
+          },
+          "turn_id": "98/6"
+        },
+        "dispatch-change": {
+          "approval_id": "fd1e5cd3-167d-4684-a369-b6ea1e855843",
+          "asked_seq": 82,
+          "bash_executed": false,
+          "decided_seq": 83,
+          "effective_directory": ".",
+          "native_outcome": "allowed-once",
+          "original_workdir": null,
+          "router_attempted_response": {
+            "decision": "accept",
+            "source": "operator"
+          },
+          "turn_id": "73/5"
+        },
+        "implicit": {
+          "approval_id": "c749ce4f-9dda-4665-bfb0-960048c1288e",
+          "asked_seq": 12,
+          "bash_executed": true,
+          "decided_seq": 13,
+          "effective_directory": ".",
+          "native_outcome": "allowed-once",
+          "original_workdir": null,
+          "router_attempted_response": {
+            "decision": "accept",
+            "source": "operator"
+          },
+          "turn_id": "1/1"
+        },
+        "physical-parent": {
+          "approval_id": "7b2cb91c-9ce7-4338-8691-5ac29a799d30",
+          "asked_seq": 42,
+          "bash_executed": true,
+          "decided_seq": 43,
+          "effective_directory": "physical-directory",
+          "native_outcome": "allowed-once",
+          "original_workdir": "approval-link/..",
+          "router_attempted_response": {
+            "decision": "accept",
+            "source": "operator"
+          },
+          "turn_id": "36/3"
+        },
+        "relative": {
+          "approval_id": "5e0d25fd-5714-44b2-b1b8-876fac8f9d54",
+          "asked_seq": 27,
+          "bash_executed": true,
+          "decided_seq": 28,
+          "effective_directory": "approval-child",
+          "native_outcome": "allowed-once",
+          "original_workdir": "approval-child",
+          "router_attempted_response": {
+            "decision": "accept",
+            "source": "operator"
+          },
+          "turn_id": "21/2"
+        },
+        "waiting-change": {
+          "approval_id": "df0cb2a7-a948-4feb-b1a4-c2c3c88d805b",
+          "asked_seq": 57,
+          "bash_executed": false,
+          "decided_seq": 60,
+          "effective_directory": ".",
+          "native_outcome": "unavailable",
+          "original_workdir": null,
+          "router_attempted_response": null,
+          "turn_id": "51/4"
+        }
+      },
+      "session": "isolated-dsh-approval-working-directory"
+    },
+    {
+      "bash_success_count": 4,
+      "boundary": "Installed DSH native AgentLoop, ApprovalService and Bash. Model, operator and directory changes are fixtures.",
+      "outcomes": {
+        "after-pin-change": {
+          "approval_id": "09ab5275-c30f-4e44-b2e1-a23f78fdf82a",
+          "asked_seq": 107,
+          "bash_executed": true,
+          "decided_seq": 108,
+          "effective_directory": ".",
+          "native_outcome": "allowed-once",
+          "original_workdir": null,
+          "router_attempted_response": {
+            "decision": "accept",
+            "source": "operator"
+          },
+          "turn_id": "98/6"
+        },
+        "dispatch-change": {
+          "approval_id": "a14dd0c7-fcac-45a9-ab41-cc54072830b1",
+          "asked_seq": 82,
+          "bash_executed": false,
+          "decided_seq": 83,
+          "effective_directory": ".",
+          "native_outcome": "allowed-once",
+          "original_workdir": null,
+          "router_attempted_response": {
+            "decision": "accept",
+            "source": "operator"
+          },
+          "turn_id": "73/5"
+        },
+        "implicit": {
+          "approval_id": "60d093ed-67b3-4592-972b-1cab5fe21c85",
+          "asked_seq": 12,
+          "bash_executed": true,
+          "decided_seq": 13,
+          "effective_directory": ".",
+          "native_outcome": "allowed-once",
+          "original_workdir": null,
+          "router_attempted_response": {
+            "decision": "accept",
+            "source": "operator"
+          },
+          "turn_id": "1/1"
+        },
+        "physical-parent": {
+          "approval_id": "cf2f20b6-7954-4dbd-af7a-352acaeff8a9",
+          "asked_seq": 42,
+          "bash_executed": true,
+          "decided_seq": 43,
+          "effective_directory": "physical-directory",
+          "native_outcome": "allowed-once",
+          "original_workdir": "approval-link/..",
+          "router_attempted_response": {
+            "decision": "accept",
+            "source": "operator"
+          },
+          "turn_id": "36/3"
+        },
+        "relative": {
+          "approval_id": "70f7af29-2fbb-403a-b239-75333509ea8a",
+          "asked_seq": 27,
+          "bash_executed": true,
+          "decided_seq": 28,
+          "effective_directory": "approval-child",
+          "native_outcome": "allowed-once",
+          "original_workdir": "approval-child",
+          "router_attempted_response": {
+            "decision": "accept",
+            "source": "operator"
+          },
+          "turn_id": "21/2"
+        },
+        "waiting-change": {
+          "approval_id": "15e0938b-1765-441e-8717-e68508ee2545",
+          "asked_seq": 57,
+          "bash_executed": false,
+          "decided_seq": 60,
+          "effective_directory": ".",
+          "native_outcome": "unavailable",
+          "original_workdir": null,
+          "router_attempted_response": null,
+          "turn_id": "51/4"
+        }
+      },
+      "session": "isolated-dsh-approval-working-directory"
+    },
+    {
+      "bash_success_count": 4,
+      "boundary": "Installed DSH native AgentLoop, ApprovalService and Bash. Model, operator and directory changes are fixtures.",
+      "outcomes": {
+        "after-pin-change": {
+          "approval_id": "a398181b-3299-43aa-8bd3-92fcc7322891",
+          "asked_seq": 107,
+          "bash_executed": true,
+          "decided_seq": 108,
+          "effective_directory": ".",
+          "native_outcome": "allowed-once",
+          "original_workdir": null,
+          "router_attempted_response": {
+            "decision": "accept",
+            "source": "operator"
+          },
+          "turn_id": "98/6"
+        },
+        "dispatch-change": {
+          "approval_id": "af0246bf-06c2-482b-83d9-cc87d4290181",
+          "asked_seq": 82,
+          "bash_executed": false,
+          "decided_seq": 83,
+          "effective_directory": ".",
+          "native_outcome": "allowed-once",
+          "original_workdir": null,
+          "router_attempted_response": {
+            "decision": "accept",
+            "source": "operator"
+          },
+          "turn_id": "73/5"
+        },
+        "implicit": {
+          "approval_id": "e4cb0ded-e271-4b30-85d3-4e5ce8764b1b",
+          "asked_seq": 12,
+          "bash_executed": true,
+          "decided_seq": 13,
+          "effective_directory": ".",
+          "native_outcome": "allowed-once",
+          "original_workdir": null,
+          "router_attempted_response": {
+            "decision": "accept",
+            "source": "operator"
+          },
+          "turn_id": "1/1"
+        },
+        "physical-parent": {
+          "approval_id": "d29f284f-a27c-4434-9465-b1a827117da5",
+          "asked_seq": 42,
+          "bash_executed": true,
+          "decided_seq": 43,
+          "effective_directory": "physical-directory",
+          "native_outcome": "allowed-once",
+          "original_workdir": "approval-link/..",
+          "router_attempted_response": {
+            "decision": "accept",
+            "source": "operator"
+          },
+          "turn_id": "36/3"
+        },
+        "relative": {
+          "approval_id": "df1b77b3-d991-4869-a8a9-ec3922a7301e",
+          "asked_seq": 27,
+          "bash_executed": true,
+          "decided_seq": 28,
+          "effective_directory": "approval-child",
+          "native_outcome": "allowed-once",
+          "original_workdir": "approval-child",
+          "router_attempted_response": {
+            "decision": "accept",
+            "source": "operator"
+          },
+          "turn_id": "21/2"
+        },
+        "waiting-change": {
+          "approval_id": "252e4654-89d6-49a3-b05f-67ec502ff81a",
+          "asked_seq": 57,
+          "bash_executed": false,
+          "decided_seq": 60,
+          "effective_directory": ".",
+          "native_outcome": "unavailable",
+          "original_workdir": null,
+          "router_attempted_response": null,
+          "turn_id": "51/4"
+        }
+      },
+      "session": "isolated-dsh-approval-working-directory"
+    },
+    {
+      "bash_success_count": 4,
+      "boundary": "Installed DSH native AgentLoop, ApprovalService and Bash. Model, operator and directory changes are fixtures.",
+      "outcomes": {
+        "after-pin-change": {
+          "approval_id": "8fc7d31d-0fab-4ac1-b137-a5cc6dd96867",
+          "asked_seq": 107,
+          "bash_executed": true,
+          "decided_seq": 108,
+          "effective_directory": ".",
+          "native_outcome": "allowed-once",
+          "original_workdir": null,
+          "router_attempted_response": {
+            "decision": "accept",
+            "source": "operator"
+          },
+          "turn_id": "98/6"
+        },
+        "dispatch-change": {
+          "approval_id": "d7f16b77-f2d7-471e-a599-d86886b457f9",
+          "asked_seq": 82,
+          "bash_executed": false,
+          "decided_seq": 83,
+          "effective_directory": ".",
+          "native_outcome": "allowed-once",
+          "original_workdir": null,
+          "router_attempted_response": {
+            "decision": "accept",
+            "source": "operator"
+          },
+          "turn_id": "73/5"
+        },
+        "implicit": {
+          "approval_id": "34b6cbbd-af8a-4ac2-9a9c-83c16c691f9b",
+          "asked_seq": 12,
+          "bash_executed": true,
+          "decided_seq": 13,
+          "effective_directory": ".",
+          "native_outcome": "allowed-once",
+          "original_workdir": null,
+          "router_attempted_response": {
+            "decision": "accept",
+            "source": "operator"
+          },
+          "turn_id": "1/1"
+        },
+        "physical-parent": {
+          "approval_id": "02e4f604-4498-4074-a1d5-a70ae1a02279",
+          "asked_seq": 42,
+          "bash_executed": true,
+          "decided_seq": 43,
+          "effective_directory": "physical-directory",
+          "native_outcome": "allowed-once",
+          "original_workdir": "approval-link/..",
+          "router_attempted_response": {
+            "decision": "accept",
+            "source": "operator"
+          },
+          "turn_id": "36/3"
+        },
+        "relative": {
+          "approval_id": "44b4ce12-e0b9-4fe9-9321-a29a2cdd57c2",
+          "asked_seq": 27,
+          "bash_executed": true,
+          "decided_seq": 28,
+          "effective_directory": "approval-child",
+          "native_outcome": "allowed-once",
+          "original_workdir": "approval-child",
+          "router_attempted_response": {
+            "decision": "accept",
+            "source": "operator"
+          },
+          "turn_id": "21/2"
+        },
+        "waiting-change": {
+          "approval_id": "4a718a41-fa1e-4baf-a37c-f15b22987cfb",
+          "asked_seq": 57,
+          "bash_executed": false,
+          "decided_seq": 60,
+          "effective_directory": ".",
+          "native_outcome": "unavailable",
+          "original_workdir": null,
+          "router_attempted_response": null,
+          "turn_id": "51/4"
+        }
+      },
+      "session": "isolated-dsh-approval-working-directory"
+    },
+    {
+      "bash_success_count": 4,
+      "boundary": "Installed DSH native AgentLoop, ApprovalService and Bash. Model, operator and directory changes are fixtures.",
+      "outcomes": {
+        "after-pin-change": {
+          "approval_id": "20533dc5-c3ee-41c3-9517-a38eab37ebba",
+          "asked_seq": 107,
+          "bash_executed": true,
+          "decided_seq": 108,
+          "effective_directory": ".",
+          "native_outcome": "allowed-once",
+          "original_workdir": null,
+          "router_attempted_response": {
+            "decision": "accept",
+            "source": "operator"
+          },
+          "turn_id": "98/6"
+        },
+        "dispatch-change": {
+          "approval_id": "1cca6587-b7ee-48e5-a1bf-b787a64aea01",
+          "asked_seq": 82,
+          "bash_executed": false,
+          "decided_seq": 83,
+          "effective_directory": ".",
+          "native_outcome": "allowed-once",
+          "original_workdir": null,
+          "router_attempted_response": {
+            "decision": "accept",
+            "source": "operator"
+          },
+          "turn_id": "73/5"
+        },
+        "implicit": {
+          "approval_id": "800c755b-455d-404d-a1b0-3ef08d3fbb6c",
+          "asked_seq": 12,
+          "bash_executed": true,
+          "decided_seq": 13,
+          "effective_directory": ".",
+          "native_outcome": "allowed-once",
+          "original_workdir": null,
+          "router_attempted_response": {
+            "decision": "accept",
+            "source": "operator"
+          },
+          "turn_id": "1/1"
+        },
+        "physical-parent": {
+          "approval_id": "9ddc73d9-2db5-4ced-8d8c-348e9fdcedda",
+          "asked_seq": 42,
+          "bash_executed": true,
+          "decided_seq": 43,
+          "effective_directory": "physical-directory",
+          "native_outcome": "allowed-once",
+          "original_workdir": "approval-link/..",
+          "router_attempted_response": {
+            "decision": "accept",
+            "source": "operator"
+          },
+          "turn_id": "36/3"
+        },
+        "relative": {
+          "approval_id": "93632915-565f-4b41-bee1-5dc643f79aac",
+          "asked_seq": 27,
+          "bash_executed": true,
+          "decided_seq": 28,
+          "effective_directory": "approval-child",
+          "native_outcome": "allowed-once",
+          "original_workdir": "approval-child",
+          "router_attempted_response": {
+            "decision": "accept",
+            "source": "operator"
+          },
+          "turn_id": "21/2"
+        },
+        "waiting-change": {
+          "approval_id": "919e10c6-3fd6-4c63-a751-4e6171d3af41",
+          "asked_seq": 57,
+          "bash_executed": false,
+          "decided_seq": 60,
+          "effective_directory": ".",
+          "native_outcome": "unavailable",
+          "original_workdir": null,
+          "router_attempted_response": null,
+          "turn_id": "51/4"
+        }
+      },
+      "session": "isolated-dsh-approval-working-directory"
+    }
+  ],
+  "verified_runs": 6
+}

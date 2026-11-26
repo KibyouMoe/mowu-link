@@ -4,6 +4,10 @@ import { isDeepStrictEqual } from 'node:util';
 
 const guid = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 
+function absoluteWorkdir(args) {
+  return typeof args?.workdir==='string' && path.isAbsolute(args.workdir);
+}
+
 function origin(events,callId) {
   const start = events.findLastIndex(event=>event.type==='turn/start' || event.type==='turn/end');
   if (start<0 || events[start].type!=='turn/start') return null;
@@ -36,18 +40,68 @@ export function approvalProof(events,approvalId,turnId) {
 export function installCommandApprovals(ctx,agent,readEvents,notify) {
   const lifecycle = new AbortController();
   const active = new Set();
+  const preparing = new Map();
+  const approved = new WeakMap();
   const session = agent.session.id;
   const bound = () => ctx.get('agents').get(session)===agent && agent.session.id===session;
 
-  function requestContext(native,reason) {
-    const workdir = native.args.workdir;
-    // Bash resolves a relative override against the session directory after the prompt.
-    // A delegated grant needs an explicit absolute directory in the original call.
-    if (typeof workdir!=='string' || !path.isAbsolute(workdir)) return null;
-    return {session,turn_id:native.turn,item_id:native.id,command:native.args.command,cwd:workdir,
+  async function resolveDirectory(args,signal) {
+    const workingDirectory = ctx.get('workingDirectory');
+    const fs = ctx.get('fs');
+    const base = workingDirectory?.get(agent.session);
+    if (typeof base!=='string' || !path.isAbsolute(base)
+        || (args.workdir!==undefined && typeof args.workdir!=='string')
+        || typeof fs?.processPath!=='function') return null;
+    // Preserve the native spelling before realpath so parent traversal through links has Bash's meaning.
+    const candidate = args.workdir===undefined ? base : base+path.sep+args.workdir;
+    const target = await fs.resolve(candidate,{signal});
+    const cwd = fs.processPath(target);
+    if (typeof cwd!=='string' || !path.isAbsolute(cwd) || (await fs.stat(target,signal))?.type!=='directory'
+        || workingDirectory.get(agent.session)!==base) return null;
+    return {base,cwd};
+  }
+
+  function requestContext(native,reason,cwd) {
+    return {session,turn_id:native.turn,item_id:native.id,command:native.args.command,cwd,
       environment_id:null,arguments:native.args,reason:typeof reason==='string' ? reason : '',
       decisions:['accept','cancel']};
   }
+
+  const watchPrepare = ctx.on('tools/pre-execute',async (exec,next)=>{
+    const gate = await next();
+    if (exec.agent===agent && exec.name==='bash' && gate.kind==='ask' && !absoluteWorkdir(exec.arguments)) {
+      preparing.set(exec.callId,exec);
+    }
+    return gate;
+  },{prepend:true});
+
+  const pinAtDispatch = ctx.on('tools/execute',async (exec,next)=>{
+    const grant = approved.get(exec);
+    if (!grant) return next();
+    if (grant.dispatched) throw new Error('DSH Bash approval has already been used');
+    grant.dispatched = true;
+    const {native,directory} = grant;
+    const actual = await resolveDirectory(native.args,exec.signal);
+    const proof = approvalProof(agent.session.snapshotEvents(),native.id,native.turn);
+    if (!bound() || !isDeepStrictEqual(exec.arguments,native.args)
+        || !isDeepStrictEqual(actual,directory) || proof?.outcome!=='allowed-once') {
+      throw new Error('DSH Bash approval no longer matches the working directory');
+    }
+    exec.signal.throwIfAborted();
+    const original = exec.arguments;
+    // The native tool may resolve the session directory again. Keep this one approved call absolute.
+    exec.arguments = Object.freeze({...original,workdir:directory.cwd});
+    try {
+      return await next();
+    } finally {
+      exec.arguments = original;
+    }
+  });
+
+  const stopWatching = ctx.on('tools/result',exec=>{
+    if (preparing.get(exec.callId)===exec) preparing.delete(exec.callId);
+    approved.delete(exec);
+  });
 
   async function readOffer(entry) {
     const reply = await notify('/approval',{approval_id:entry.native.id,data:entry.offer});
@@ -68,14 +122,24 @@ export function installCommandApprovals(ctx,agent,readEvents,notify) {
 
   const unsubscribe = ctx.on('approval/request',async (request,next)=>{
     if (request.agent!==agent || request.toolName!=='bash' || typeof request.callId!=='string' || !bound()) return next();
-    let native,offer;
+    let native,offer,execution,directory;
     try {
       const live = origin(agent.session.snapshotEvents(),request.callId);
       if (!live) return next();
       if (active.has(live.id)) return 'unavailable';
       native = origin(await readEvents(),request.callId);
       if (!isDeepStrictEqual(live,native)) return next();
-      offer = requestContext(native,request.reason);
+      if (absoluteWorkdir(native.args)) {
+        offer = requestContext(native,request.reason,native.args.workdir);
+      } else {
+        execution = preparing.get(request.callId);
+        // A request from inside the tool body, including sandbox escalation, has no prepare-stage pin.
+        if (!execution || execution.signal!==request.signal || !isDeepStrictEqual(execution.arguments,native.args)
+            || native.args.sandbox_permissions!==undefined) return next();
+        directory = await resolveDirectory(native.args,request.signal);
+        if (!directory) return next();
+        offer = requestContext(native,request.reason,directory.cwd);
+      }
     } catch {
       return next();
     }
@@ -86,6 +150,8 @@ export function installCommandApprovals(ctx,agent,readEvents,notify) {
     const signals = [lifecycle.signal,AbortSignal.timeout(610_000)];
     if (request.signal) signals.push(request.signal);
     const signal = AbortSignal.any(signals);
+    const sameDirectory = async () => !directory
+      || isDeepStrictEqual(await resolveDirectory(native.args,signal),directory);
     try {
       while (bound() && !signal.aborted) {
         let reply;
@@ -110,12 +176,18 @@ export function installCommandApprovals(ctx,agent,readEvents,notify) {
           const current = origin(await readEvents(),request.callId);
           signal.throwIfAborted();
           if (!bound() || !isDeepStrictEqual(current,native)
-              || !isDeepStrictEqual(requestContext(native,request.reason),offer)) break;
+              || !await sameDirectory() || !isDeepStrictEqual(requestContext(native,request.reason,offer.cwd),offer)) break;
           await recordAttempt(entry,{source:'operator',decision:reply.decision});
           signal.throwIfAborted();
           if (!bound() || Date.now()>=reply.expires_at*1000
               || !isDeepStrictEqual(origin(agent.session.snapshotEvents(),request.callId),native)
-              || !isDeepStrictEqual(requestContext(native,request.reason),offer)) break;
+              || !await sameDirectory() || !isDeepStrictEqual(requestContext(native,request.reason,offer.cwd),offer)) break;
+          signal.throwIfAborted();
+          if (!bound() || Date.now()>=reply.expires_at*1000) break;
+          if (reply.decision==='accept' && directory) {
+            execution.signal = AbortSignal.any([execution.signal,lifecycle.signal]);
+            approved.set(execution,{native,directory});
+          }
           return reply.decision==='accept' ? 'allowed-once' : 'rejected';
         }
         await delay(250,null,{signal});
@@ -131,6 +203,10 @@ export function installCommandApprovals(ctx,agent,readEvents,notify) {
     return () => {
       lifecycle.abort();
       unsubscribe();
+      watchPrepare();
+      pinAtDispatch();
+      stopWatching();
+      preparing.clear();
     };
   });
 }

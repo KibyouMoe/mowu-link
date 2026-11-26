@@ -4,6 +4,8 @@
 
 ## 检查点与证据
 
+DSH 的普通 Bash 审批支持省略 `workdir` 和相对目录。旧版 `b88116e7cfd68765f41ecf098c1724ed43a1af35` 的同一默认目录请求在六秒内未到 Router。新版按同一次原生准备、审批与执行定位，保存原参数与宿主解析的绝对目录。连续六轮核实默认、相对和带符号链接父级的真实 `pwd` 输出。等批准期间换目录，原生拒绝执行。审批已允许但进执行前换目录，原生回合留下一次工具错误，未启动 Bash。将目录绑定到本次调用后，再改会话目录时实际命令仍在获准目录内。无法核实的目录仍走宿主审批。实跑 DSH AgentLoop、ApprovalService 与 Bash，模型、审批人与目录竞态由隔离测试提供。[原生证据](evidence/dsh-approval-native-working-directory.json) · [复跑](README.md#独立宿主命令审批)
+
 DSH 冷开后按原生凭据补记审批关闭。旧版 `d73e9585bbb224f397dbca2b0a53e94aa64abe2e` 在原生审批 `ccf9fe3b-c6b4-48ae-8750-392013f7558c` 已取消后仍发出通知 `44380a98-ef8e-4249-9bf1-62ab2e212711`。新版连续六轮分别验到登记从未送达、登记已落账但回执丢失。重开 DSH 与适配器后，Router 一次保存同号原生取消凭据。关闭回执丢失可按原号重试，迟到登记不生成新通知。第二种情况保留既有允许决定，原生结果仍为取消，两种均无 Bash 执行。DSH AgentLoop、落盘日志、Worker 与 Router 实跑，使用本地模型、操作人和断联夹具。[实测与命令](evidence/dsh-approval-router-outage.json) · [复跑](README.md#独立宿主命令审批)
 
 macOS 全量通过 260 项，Linux arm64 通过 177 项、跳过 83 项。从 `536ae99fed5a41166772745f74c734faa6a38463` 构建 233 文件独立包，SHA-256 为 `2acac7736cdfa9705d8269dbf78bfd91ba36fdec9c19c98207188ac135d21560`。安装目录复跑原生审批、Router 服务和发布包共 14 项，逐文件摘要一致。升级实际上一版 Router 创建的临时库，原审批逐字段一致。新版写入关闭凭据后，用上一版读取仍为已关闭，同号登记没有补发通知。这次库升级的原生凭据由夹具提供。
@@ -198,7 +200,7 @@ Worker 可经独立交接授权建立 Router 交接窗口。冻结和预约在 R
 
 全量回归在 macOS 通过 202 项，Linux arm64 通过 142 项，另 60 项本机宿主用例跳过。复跑 `python3 -B -m unittest discover -q -s rewrite -t .`。
 
-DSH 命令审批已用实际 SDK 的 AgentLoop、ApprovalService 和 Bash 验证。带绝对工作目录的请求沿用原生审批号，测试审批人允许后只执行一次隔离 `pwd`，拒绝及超时均未执行。原生结果已写盘但关闭回执被扣住时，重开适配器及宿主可从原会话补回，原生输入、决定和工具结果不新增。省略工作目录时仍由宿主原生审批。连续 16 轮通过。模型和审批操作者用测试夹具。[原生审批记录](evidence/dsh-native-command-approval.json) · [操作入口](README.md#独立宿主命令审批)
+DSH 命令审批已用实际 SDK 的 AgentLoop、ApprovalService 和 Bash 验证。带绝对工作目录的请求沿用原生审批号，测试审批人允许后只执行一次隔离 `pwd`，拒绝及超时均未执行。原生结果已写盘但关闭回执被扣住时，重开适配器及宿主可从原会话补回，原生输入、决定和工具结果不新增。该次验收版本在省略工作目录时交由宿主原生审批。连续 16 轮通过。模型和审批操作者用测试夹具。[原生审批记录](evidence/dsh-native-command-approval.json) · [操作入口](README.md#独立宿主命令审批)
 
 三段 TLS 和 DSH 私有 Unix 回调接口另用独立进程实跑。审批 CLI 允许 `adb32960-a5f8-4ef2-9153-f831352283e9`，原生回合回读同号、`allowed-once`，仅一次 Bash 结果。复跑 `python3 -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_dsh_native_command_decisions_match_persisted_approval_ids`。
 

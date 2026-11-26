@@ -167,10 +167,10 @@ class NativeLoop(unittest.TestCase):
                     "decided_seq":decided["seq"],"outcome":outcome}
 
         with tool_listener(directory,adapter,callback_wire), self.start_native(directory,session,"command-approvals") as native:
-            worker.chat(guid(),"DSH approval fixture implicit")
+            worker.chat(guid(),"DSH approval fixture unverifiable")
             local = self.read_native(native,"read")
             first_local,last_local = local["approvals"]
-            self.assertEqual(first_local["data"]["callId"],"fixture-bash-implicit")
+            self.assertEqual(first_local["data"]["callId"],"fixture-bash-unverifiable")
             self.assertEqual(last_local["data"],{"id":first_local["data"]["id"],"outcome":"rejected"})
             self.assertEqual(observer.request("GET","approvals/dev")["items"],[])
             denied,denied_route = open_offer("reject")
@@ -234,9 +234,98 @@ class NativeLoop(unittest.TestCase):
                          "router_notifications":[notice["delivery_id"] for notice in notices],
                          "closure_retry_same_receipt":confirmations[0]==confirmations[1],
                          "cold_reopen_recovered_original_closure":True,
-                         "implicit_directory_used_native_answerer":True,
+                         "unverifiable_directory_used_native_answerer":True,
                          "successful_bash_calls":1,
                          "boundary":"Installed DSH AgentLoop, ApprovalService and Bash provider; test model and operator identity"}
+
+    def test_dsh_approval_pins_implicit_and_relative_native_working_directory(self):
+        session = "isolated-dsh-approval-working-directory"
+        root = Path(self.enterContext(tempfile.TemporaryDirectory(dir="/tmp",prefix="mldsh-approval-cwd-")))
+        nested,physical = root/"approval-child",root/"physical-directory"
+        nested.mkdir()
+        (physical/"nested").mkdir(parents=True)
+        (root/"approval-link").symlink_to(physical/"nested",target_is_directory=True)
+        worker_token,operator_token,adapter_token = (guid() for _ in range(3))
+        router = self.enterContext(codex_driver.running(serve_loopback(Orders(root/"router.db"),
+                                         {worker_token:"worker/dev",operator_token:"approver/dev"})))
+        host = DshHost(root)
+        adapter = HostAdapter(root/"adapter.db",host,session)
+        worker = Worker(root/"worker.db","dev",Client(router,worker_token),adapter)
+        endpoint = self.open_worker(WorkerService(worker),{adapter_token:"adapter/dev"})
+        worker.connect()
+        callback,operator = Client(endpoint,adapter_token),Client(router,operator_token)
+        scenarios = [
+            ("implicit",None,root,"allowed-once",True),
+            ("relative","approval-child",nested,"allowed-once",True),
+            ("physical-parent","approval-link/..",physical,"allowed-once",True),
+            ("waiting-change",None,root,"unavailable",False),
+            ("dispatch-change",None,root,"allowed-once",False),
+            ("after-pin-change",None,root,"allowed-once",True),
+        ]
+        outcomes = {}
+
+        def wait(predicate):
+            deadline = time.monotonic()+6
+            while time.monotonic()<deadline:
+                result = predicate()
+                if result:
+                    return result
+                time.sleep(.05)
+            self.fail("DSH did not produce the expected approval and cwd proof")
+
+        def pending():
+            return next((row for row in operator.request("GET","approvals/dev")["items"]
+                         if row["state"]=="pending"),None)
+
+        with tool_listener(root,adapter,callback), self.start_native(root,session,"command-approvals") as native:
+            for mode,requested,effective,native_outcome,ran in scenarios:
+                worker.chat(guid(),"DSH approval fixture "+mode)
+                offered = wait(pending)
+                request = offered["request"]
+                self.assertEqual((request["session"],request["cwd"],request["command"]),
+                                 (session,str(effective.resolve()),"pwd"))
+                self.assertEqual(request["arguments"].get("workdir"),requested)
+                if requested is None:
+                    self.assertNotIn("workdir",request["arguments"])
+                if mode=="waiting-change":
+                    self.assertEqual(self.read_native(native,"set-approval-cwd "+str(nested))["cwd"],
+                                     str(nested.resolve()))
+                aid = offered["approval_id"]
+                route = "approvals/dev/"+aid
+                decision = {"request_digest":offered["request_digest"],"decision":"accept"}
+                operator.request("PUT",route+"/decision",decision)
+                history = self.read_native(native,"read")
+                asked,decided = [event for event in history["approvals"] if event["data"]["id"]==aid]
+                self.assertEqual(asked["data"]["callId"],"fixture-bash-"+mode)
+                self.assertEqual(decided["data"]["outcome"],native_outcome)
+                result, = [item for item in history["results"] if item["toolCallId"]==asked["data"]["callId"]]
+                self.assertEqual(result["isError"],not ran)
+                if ran:
+                    self.assertIn(str(effective.resolve()),encode(result))
+                if mode=="dispatch-change":
+                    self.assertIn("DSH Bash approval no longer matches the working directory",encode(result))
+                if mode in ("waiting-change","dispatch-change"):
+                    self.assertEqual(self.read_native(native,"set-approval-cwd "+str(root))["cwd"],str(root.resolve()))
+
+                def closed():
+                    record = operator.request("GET",route)
+                    return record if record["state"]=="native_closed" else None
+
+                settled = wait(closed)
+                expected = None if mode=="waiting-change" else {"source":"operator","decision":"accept"}
+                self.assertEqual(settled["attempted_response"],expected)
+                self.assertEqual(operator.request("PUT",route+"/decision",decision),settled)
+                outcomes[mode] = {"approval_id":aid,"turn_id":request["turn_id"],"native_outcome":native_outcome,
+                                  "bash_executed":ran,"asked_seq":asked["seq"],"decided_seq":decided["seq"],
+                                  "effective_directory":effective.resolve().relative_to(root.resolve()).as_posix(),
+                                  "original_workdir":requested,"router_attempted_response":expected}
+            history = self.read_native(native,"read")
+            self.assertEqual(sum(record["isError"] is False for record in history["results"]),4)
+            notices = operator.frames(0)
+            self.assertEqual([item["payload"]["approval_id"] for item in notices],
+                             [record["approval_id"] for record in outcomes.values()])
+        self.evidence = {"session":session,"outcomes":outcomes,"bash_success_count":4,
+                         "boundary":"Installed DSH native AgentLoop, ApprovalService and Bash. Model, operator and directory changes are fixtures."}
 
     def test_dsh_unacknowledged_approval_recovers_without_a_late_notification(self):
         session = "isolated-dsh-unacknowledged-approval"
