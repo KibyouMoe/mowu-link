@@ -6,6 +6,8 @@
 
 飞书入箱的换绑命令按收到顺序确认。旧版复现目标会话暂不可达时，后发消息误进原会话。新版在入箱中留住后续消息，旧会话已存的回复卡照常送出。重开后仍等待原切换命令，目标恢复后后发消息只进目标宿主一次。另验早于切换的重试消息先送原宿主，以及从旧库和回退后旧版写入记录中重建切换顺序。实际 Router、Worker HTTP 与 SQLite，飞书和宿主使用夹具。[实测](evidence/feishu-resume-inbox-order.json) · [操作说明](README.md#飞书切换会话)
 
+两项新回归连续通过 10 轮。macOS 全量通过 253 项，Linux arm64 通过 173 项、跳过 80 项；Linux 另跑官方 SDK 收发和重试耗尽恢复。从 `112805e7ac4e18c0f1464d03bf924f4377cfc0e5` 构建 227 文件独立包，SHA-256 为 `0b6a522b7ddc193ae3df3d35aa8d8b8d88a5aa90b588d7632ea0bfdca5a2bcaf`。安装目录通过 `rewrite.test_state_bundle`、`rewrite.test_worker_resume`、`rewrite.test_feishu_inbound`、`rewrite.test_feishu_output`、`rewrite.test_question_cards` 的 42 项及 SDK 两项复验，文件摘要一致。
+
 离线换绑现在核对 Worker 展示队列和飞书游标。旧审计在 Worker 已写旧会话回复、飞书尚未轮询时误报账本已清。隔离复验把同一条尾项按原绑定补投一次，积压从 1 变 0，然后才生成换绑副本。配对库同序号正文不一致或飞书游标领先时均报错。实际 Worker HTTP 与 SQLite，飞书和宿主用夹具。[实测](evidence/feishu-handoff-display-tail.json) · [恢复与复跑](router-rehearsal.md#飞书输出回执与换绑)
 
 换绑与错配场景连续通过 10 轮。macOS 全量通过 251 项，Linux arm64 通过 171 项、跳过 80 项。以 `02de55e3798e74964a02e433c3672ed67643fdc2` 构建 226 文件独立包，SHA-256 为 `25c1de0dbf6cdf47496c19cda89ea02f496b83d086ab3fc5a904c3f76461c1f6`。安装目录运行 `python3 -B -m unittest -q rewrite.test_release rewrite.test_cutover rewrite.test_state_bundle rewrite.test_feishu_output`，通过 38 项，文件摘要一致。旧版本回退夹具来自 `30f61e671465db0b5bba221ba8c9fc2194a6e43d`，用 `MOWULINK_TEST_LEGACY_ROOT` 指定。
