@@ -350,6 +350,27 @@ DSH 未收到 Router 的登记回执而宿主已经取消、拒绝或确认不�
 
 进程回执后再查服务自己的接口和状态数据。已加载的 LaunchAgent 重启沿用 launchd 当前配置。维护服务不能为 Desktop 子进程、未登记的网关或其他系统代做启停。生产接管需另核安装归属、明确维护授权及回退路径。复跑 `python3 -B -m unittest -v rewrite.test_host_ops`，测试使用三个临时用户 LaunchAgent，完成后卸载。[隔离回执](evidence/host-ops-launchd.json)
 
+#### 独立维护客户端
+
+在目标服务之外，用维护账号的私有 JSON 配置执行 `rewrite.host_ops_cli`。配置包含 HTTPS 源站 `url`、该操作人自己的 `token` 和私有 CA 需要的 `ca_file`。权限沿用独立维护端登记，观察者只查状态与回执。先用 `show` 读目标当前代际，发起时保存本次请求 UUID。响应中断时，用同一 UUID 查原回执。
+
+```sh
+python3 -B -m rewrite.host_ops_cli --connection ./ops-connection.json list
+python3 -B -m rewrite.host_ops_cli --connection ./ops-connection.json show gateway
+python3 -B -m rewrite.host_ops_cli --connection ./ops-connection.json restart gateway \
+  --request-id "$REQUEST_ID" --expected-generation "$GENERATION" --reason "$MAINTENANCE_REASON"
+python3 -B -m rewrite.host_ops_cli --connection ./ops-connection.json receipt gateway "$REQUEST_ID" --wait-seconds 30
+```
+
+若读取仍返回 `accepted`，操作尚待确认。网关的 `process_replaced` 回执确认进程换代。独立检查仍要核原 PID 退出、新进程与原生 `gateway.pid` 以及认证健康接口的 PID 一致，并读实际服务状态。测试 profile 的本机 API adapter 已连接，Hermes 总就绪状态为 `degraded`，线上模型与飞书未参与。
+
+用带运行依赖的独立 Python 环境和已固定版本的 Hermes 源码复跑。测试会归档该提交，在临时 profile 启动真实 Hermes 和维护服务，并卸载临时 LaunchAgent。 [网关维护实测](evidence/hermes-gateway-maintenance.json)
+
+```sh
+MOWULINK_HERMES_TEST_PYTHON="$ISOLATED_PYTHON" MOWULINK_HERMES_TEST_SOURCE="$HERMES_REPOSITORY" \
+  python3 -B -m unittest -v rewrite.test_host_ops
+```
+
 ### 跨系统验收
 
 开发机需 Python 3.12 或更新版本、Git、OpenSSL 和已运行的本地 Linux Docker 引擎。先准备含 Python 3.12+、Git、tar、OpenSSL 的 Linux 测试镜像。此次实测使用官方 `python:3.13-bookworm` 的 Linux arm64 manifest `sha256:0a1254df0519003d33fd4ab8ad26aff1154e50b3c93aa5ec978e83bf83ba084c`。各引擎对已安装镜像的 ID 表示可能不同，`--image` 使用本机 `docker image inspect --format '{{.Id}}' <镜像>` 的完整结果。

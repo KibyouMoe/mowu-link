@@ -4,6 +4,10 @@
 
 ## 检查点与证据
 
+正式维护入口新增独立 HTTPS 客户端。请求显式带原 UUID 与已查询的代际。写入回包丢失时保留请求号，可按原号查询。外部观察者试图重启被拒。实际隔离 Hermes GatewayRunner 运行在临时 LaunchAgent，认证健康接口及原生 PID 文件与新维护回执一致，原 PID 已退出。维护服务冷重开后查回原回执，重投原请求时网关 PID 不变。网关本机 API adapter 已连通，整体就绪仍为 `degraded`，没有使用模型或飞书凭据。[网关维护实测](evidence/hermes-gateway-maintenance.json) · [复跑与用法](README.md#独立维护客户端)
+
+实现提交 `ee406806afc4ab2eadf1960f46b011875f926107`。Hermes 源码固定在 `464bd0dd659f336bd0bf468bf02cad8aac211136`。286 文件安装包的六项维护专项通过，安装目录核对摘要一致。用同一份 Hermes 源码另跑插件注册和原生入站。八项管理工具均可见，同号重放建单仍一张。断联后 Event 按原号查回，Notify 空闲超过十秒送达，Info 未唤醒会话。入站试验的模型回合使用夹具，和真实网关进程换代分开取证。Windows DSH 13 项、Codex 与安装及维护客户端共 14 项、两套回退通过。macOS 全量 304 项通过、5 项依环境跳过。Linux arm64 全量 189 项通过、120 项依环境跳过。安装包摘要为 `30074fa0d048523d520d516211f60bee08b067e83f859516211a85066666eff3`。[Windows 回归](https://github.com/KibyouMoe/mowu-link/actions/runs/45896280812)
+
 修复了 DSH 可写工位改走本机双向 TLS 后，离线审计只查 Unix 套接字的问题。旧分支实测原宿主在线且工作区已清空时，审计错误返回空问题列表。新版即使原宿主仍持写锁、暂时读不到端口配置也拒绝；旧版没有写锁时，仍能识别配置指定端口上的监听。竞争启动第二个宿主被拒。原宿主停机后，换绑和版本回退各持同一写锁发布目录，数据库副本逐字节匹配原快照。回退旧包实际启动 Router、Worker、DSH 适配器和 DSH，读回原成果、附件和唯一通知。原号重投新增普通私聊一次，原工单没有重跑。[两版实测](evidence/dsh-tls-workspace-handoff.json) · [离线步骤](router-rehearsal.md#重做版五组件的离线恢复)
 
 修复、发布时持锁、双向 TLS 两版复验分别为 `17204feb9d3af9dc8f9438131d7a1aa5f433fe87`、`470df557ad2046c50ae4828eab5328e495a364e2`、`315eb112c2fe5fdd90beb9cc9f5ee15aea0acf29`。19 项安装包专项通过。用同一对版本的安装包经 `rewrite.release_check --component dsh-workspace-rollback` 分别复跑 Unix 套接字及双向 TLS 回退，均读回原成果。Windows Server 2025 CI 两次默认 Docker 连接分别报告 `windows` 和不可用。最新提交的 Windows DSH 13 项、Codex 与安装 10 项以及两套回退通过。macOS 全量通过 301 项、跳过 5 项。Linux arm64 全量通过 187 项、跳过 119 项。Windows 可写工位仍缺可连接 Linux 容器的隔离环境。[首次引擎观测](https://github.com/KibyouMoe/mowu-link/actions/runs/45894320633/job/140164337047) · [最新回归](https://github.com/KibyouMoe/mowu-link/actions/runs/45894741098)

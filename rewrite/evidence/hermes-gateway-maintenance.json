@@ -1,0 +1,112 @@
+{
+  "tested_revision": "ee406806afc4ab2eadf1960f46b011875f926107",
+  "archive_sha256": "30074fa0d048523d520d516211f60bee08b067e83f859516211a85066666eff3",
+  "archive_files": 286,
+  "installed_specialized_tests": 6,
+  "lifecycle": {
+    "boundary": "Real Hermes GatewayRunner with its local API adapter, isolated profile and no model or platform credentials.",
+    "hermes_source_revision": "464bd0dd659f336bd0bf468bf02cad8aac211136",
+    "native_pid_matches_launchd": true,
+    "new_gateway_health": {
+      "active_agents": 0,
+      "gateway_state": "running",
+      "pid": 78082,
+      "status": "degraded"
+    },
+    "old_gateway_health": {
+      "active_agents": 0,
+      "gateway_state": "running",
+      "pid": 76915,
+      "status": "degraded"
+    },
+    "old_pid_exited": true,
+    "operation": {
+      "actor": "host-maintainer/gateway",
+      "after": {
+        "generation": "081f01ac709916263741e3816ecf48d1010941b9f149bd03010a9155069e63b8",
+        "label": "org.mowulink.test.gateway-94c1a09c-7add-4d21-a0ce-3355b7f0fc1b",
+        "pid": 78082,
+        "service": "gateway",
+        "started": "Fri Nov 27 05:11:02 2026",
+        "state": "running"
+      },
+      "before": {
+        "generation": "045c5b0dfa6ba5c230c835cb2b960f47cfde36abb05b53810357a78d88c8e51b",
+        "label": "org.mowulink.test.gateway-94c1a09c-7add-4d21-a0ce-3355b7f0fc1b",
+        "pid": 76915,
+        "service": "gateway",
+        "started": "Fri Nov 27 05:10:58 2026",
+        "state": "running"
+      },
+      "reason": "isolated Hermes gateway lifecycle proof",
+      "request_id": "9873baf1-f866-4e6d-bab5-47d4620b4f7b",
+      "requested_at": "2026-11-26T21:11:01.196629+00:00",
+      "service": "gateway",
+      "settled_at": "2026-11-26T21:11:02.236093+00:00",
+      "state": "process_replaced"
+    },
+    "receipt_after_maintenance_cold_restart": true,
+    "restart_submissions_idempotent": true,
+    "unauthenticated_gateway_status": 401,
+    "unauthorized_maintenance_status": 403
+  },
+  "tool_registration_separate_test": {
+    "caller": "fixture, no model turn",
+    "foreign_session_status": 403,
+    "hermes_source_revision": "464bd0dd659f336bd0bf468bf02cad8aac211136",
+    "registered_tools": [
+      "router_workers",
+      "router_tasks",
+      "router_create_task",
+      "router_update_task",
+      "router_act_on_task",
+      "router_info",
+      "router_questions",
+      "router_answer"
+    ],
+    "router_count": 1,
+    "same_call_same_task": true,
+    "task_id": "f56ec070-40dd-435f-a10b-51d02f036f59"
+  },
+  "native_input_separate_test": {
+    "after_plugin_receipt_loss": "same native admission",
+    "attachment_delivery": "Router reference plus authenticated local retrieval",
+    "blocked_router_requests": 33,
+    "caller": "real plugin and Hermes input authority; model handler is a fixture; no cloud or live gateway",
+    "event_message_id": "8749dc29-dcaa-47eb-a604-3d61b2f51cb9",
+    "event_native_admission": "88ad3b3f566d4238b436c7000c8c9ea1",
+    "hermes_source_revision": "464bd0dd659f336bd0bf468bf02cad8aac211136",
+    "info_native_inputs": 0,
+    "native_gateway_inputs": 2,
+    "notify_idle_seconds": 10.75,
+    "notify_message_id": "1f8b3d4a-e5d7-4ffa-bad3-e65d001471ff",
+    "notify_native_admission": "74b170c50f8440478a424d96c925a7e4",
+    "offline_router_attachment_reads": 0,
+    "original_file_verified_sha256": "528470843f5683315c95821662ece0b3493d9d6ff54519c454aa57b8b77cd1cf",
+    "plugin_reloads": 1,
+    "profile": "fresh local fixture",
+    "route": "agent:main:local:dm:local-902461a57a1c75f21a3039765f012add535e465c112fe7d38b9a8ed840faf179",
+    "router_outage_while_recovering": true,
+    "session_id": "local-902461a57a1c75f21a3039765f012add535e465c112fe7d38b9a8ed840faf179"
+  },
+  "windows_ci": {
+    "run": "https://github.com/KibyouMoe/mowu-link/actions/runs/45896280812",
+    "codex_install_and_ops_tests_passed": 14,
+    "dsh_native_tests_passed": 13,
+    "rollback_rehearsals_passed": [
+      "Router",
+      "Worker and adapter"
+    ],
+    "gateway_host_process_replacement_verified_on_windows": false
+  },
+  "full_regression": {
+    "macos": {
+      "passed": 304,
+      "environment_skipped": 5
+    },
+    "linux_arm64": {
+      "passed": 189,
+      "environment_skipped": 120
+    }
+  }
+}
