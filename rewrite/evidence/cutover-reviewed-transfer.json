@@ -132,6 +132,35 @@
     "rollback_refused": "reviewed rollback needs unchanged migrated orders closed after one W04",
     "rollback_directory_published": false,
     "original_databases_preserved": true,
-    "boundary": "Actual old and new Router SQLite, Rewrite HTTP and Worker. Controlled host and clock."
+    "boundary": "Actual old and new Router SQLite, Rewrite HTTP and Worker. Controlled host and clock.",
+    "revision": "f488a49602f805e54284565d5af201141f456491"
+  },
+  "verification": {
+    "implementation_revision": "83bb54d7d4b22875f339833de72b54a84b9d9f13",
+    "legacy_router_revision": "11cd53c58e312ff9ebaeb5ae45497f3dd6cf79ff",
+    "legacy_trigger_revision": "c541f7f9e936dbfd8cc9a04e41e0630a6c2478e8",
+    "archive_files": 292,
+    "archive_sha256": "5e961f339fcfc59d701a6a9e27121710d777c7f3116587f85d9bab0462d9106b",
+    "installed_specialized_tests_passed": 51,
+    "linux_arm64": {
+      "passed": 192,
+      "environment_skipped": 121
+    },
+    "macos_transfer_baseline": {
+      "revision": "f488a49602f805e54284565d5af201141f456491",
+      "passed": 308,
+      "environment_skipped": 5
+    },
+    "windows_ci": {
+      "run": "https://github.com/KibyouMoe/mowu-link/actions/runs/45902482265",
+      "codex_install_and_ops_passed": 14,
+      "dsh_native_passed": 13,
+      "rollback_rehearsals_passed": [
+        "Router",
+        "Worker and adapter"
+      ],
+      "legacy_router_cutover_run_on_windows": false,
+      "default_docker_engine": "windows"
+    }
   }
 }
