@@ -48,9 +48,12 @@ def verify_cancellations(step, sources, samples, acknowledged):
     earlier = step.get("superseded_cancels",[])
     expired = step.get("expired_cancel")
     cleanup = step["cleanup"]
-    for attempt, successor in zip(earlier,[*earlier[1:],expired or cleanup]):
-        verify_cancel_attempt(attempt,sources,samples,acknowledged,before=successor["action_seq"])
-        attempt["superseded_by"] = successor["action_key"]
+    pooled = step.get("pool",{}).get("cancel_attempts",[])
+    after_work = expired or (pooled[0] if pooled else cleanup)
+    for attempts, subsequent in ((earlier,after_work),(pooled,cleanup)):
+        for attempt, successor in zip(attempts,[*attempts[1:],subsequent]):
+            verify_cancel_attempt(attempt,sources,samples,acknowledged,before=successor["action_seq"])
+            attempt["superseded_by"] = successor["action_key"]
     if cleanup["kind"]=="task.cancel":
         verify_cancel_attempt(cleanup,sources,samples,acknowledged,before=cleanup["report_seq"])
     if not expired:
@@ -80,7 +83,7 @@ def verify_rounds(entries, sources, samples, continued, windows, acknowledged):
             aid = step["assignment_id"]
             probes = step.get("probe_delivery_ids",[])
             shelved = step.get("shelved_delivery_id")
-            if step.get("expired_cancel") or step.get("superseded_cancels"):
+            if step.get("expired_cancel") or step.get("superseded_cancels") or step.get("pool",{}).get("cancel_attempts"):
                 verify_cancellations(step,sources,samples,acknowledged)
             if step.get("expired_cancel"):
                 shelved = None  # The cancellation timer is independent of progress inquiries.

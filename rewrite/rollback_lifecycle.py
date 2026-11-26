@@ -100,6 +100,8 @@ def retain_inquiries(step, frames, dispatch_seq, next_dispatch_seq):
         if key!=("task.shelved",None) or len(notices)!=1:
             raise ValueError("trial inquiry deliveries do not match their original assignment")
         step["shelved_delivery_id"] = notices[0]["delivery_id"]
+    for attempt in step.get("pool",{}).get("cancel_attempts",[]):
+        retain_cancel_deliveries(attempt,groups,scopes,maximum=1)
     cleanup = step.get("cleanup")
     if cleanup and cleanup["kind"]=="task.cancel":
         retain_cancel_deliveries(cleanup,groups,scopes,maximum=1 if step.get("pool") else 4,final=True)
@@ -137,17 +139,31 @@ def pool_actions(db):
     return actions
 
 
-def retain_pool_changes(pool, order, worker, content, revision, edits, snoozes):
+def retain_pool_changes(pool, order, worker, content, revision, edits, snoozes, cancellations):
     # The rolled back copy contains ISO microsecond receipts, rather than the
     # execution timestamp. Recover the schedule with the same duration.
     started = utc_time(timestamp(pool["entered"]))
     earliest = started-clock_precision(started)
     state = "blocked"
     tid = order["task_id"]
-    while (tid,revision) in snoozes or (tid,revision) in edits:
+    while (tid,revision) in snoozes or (tid,revision) in edits or (tid,revision) in cancellations:
         if (tid,revision) in edits:
             content,edit = retain_edit(edits,order,worker,content,state,revision)
             pool.setdefault("edits",[]).append(edit)
+            revision += 1
+            continue
+        if (tid,revision) not in snoozes:
+            body,reply = cancellations[tid,revision]
+            if reply.get("delivery_state")!="pending":
+                break
+            pending = reply.get("task",{})
+            reason = body.get("reason")
+            if (pool["source"]=="worker" or pending.get("state")!=state or pending.get("assignment_id") is not None
+                    or not isinstance(reason,str) or not reason.strip()):
+                raise ValueError("pending cancellation does not match its pool entry")
+            pool.setdefault("cancel_attempts",[]).append({
+                "expected_revision":revision,"reason":reason,"content":content,"state":state,
+                "snooze_count":len(pool.get("snoozes",[]))})
             revision += 1
             continue
         body,reply = snoozes.pop((tid,revision))
@@ -264,13 +280,17 @@ def histories(db, entries, deltas):
                     step["expired_cancel"] = attempts.pop()
                 elif attempts:
                     raise ValueError("a pending cancellation cannot enter this reviewed pool")
-                revision,content = retain_pool_changes(pool,order,worker,content,revision+1,edits,snoozes)
+                revision,content = retain_pool_changes(pool,order,worker,content,revision+1,edits,snoozes,
+                                                       actions["cancel"])
+                if cancelled and next_frame is None and pool.get("cancel_attempts"):
+                    step["final_pooled_cancel"] = pool["cancel_attempts"].pop()
                 step["pool"] = pool
                 used["pool_entries"] += 1
             elif attempts and cancelled and next_frame is None:
                 step["final_working_cancel"] = attempts.pop()
             if attempts:
                 step["superseded_cancels"] = attempts
+            pooled_attempts = step.get("pool",{}).get("cancel_attempts",[])
             if cleanup := cleanups.pop(aid,None):
                 expected_kind = "task.cancel" if cancelled and next_frame is None else "task.transfer_out"
                 if (cleanup["worker_id"]!=worker or cleanup["kind"]!=expected_kind
@@ -279,11 +299,12 @@ def histories(db, entries, deltas):
                     raise ValueError("original assignment cleanup is pending or cannot be verified")
                 cleanup_id = cleanup.get("cleanup_id")
                 if (cleanup_id is not None and not valid_guid(cleanup_id)
-                        or (step.get("expired_cancel") or attempts) and expected_kind=="task.cancel" and not cleanup_id):
+                        or (step.get("expired_cancel") or attempts or pooled_attempts)
+                        and expected_kind=="task.cancel" and not cleanup_id):
                     raise ValueError("reissued cancellation has no verifiable cleanup scope")
                 step["cleanup"] = cleanup
                 used["cleanups"] += 1
-            elif attempts or "expired_cancel" in step or "final_working_cancel" in step:
+            elif attempts or pooled_attempts or {"expired_cancel","final_working_cancel","final_pooled_cancel"}&step.keys():
                 raise ValueError("a cancellation history needs the original assignment's final cleanup")
             if candidates := materials.pop(aid,None):
                 if not pool or any(m["submitted_by"]!=worker or not m["received_at"]
@@ -316,8 +337,9 @@ def histories(db, entries, deltas):
                     entry["completed_edits"] = completed
                 revision += 1  # Manager close.
             else:
-                # A working cancel already counted its pending A06 above.
-                revision += 1 + ("cleanup" in step and "final_working_cancel" not in step)
+                # A pending A06 may already have advanced the revision.
+                pending = "final_working_cancel" in step or "final_pooled_cancel" in step
+                revision += 1 + ("cleanup" in step and not pending)
         if pools or cleanups or materials or inquiries:
             raise ValueError("trial is missing a complete assignment chain for the reviewed result")
         if any(order[field]!=value for field,value in content.items()):
@@ -402,6 +424,7 @@ def check_transport(db, entries, reviewed_questions):
             previous_cancels = list(step.get("superseded_cancels",[]))
             if expired:
                 previous_cancels.append(expired)
+            previous_cancels.extend(step.get("pool",{}).get("cancel_attempts",[]))
             edits = list(step.get("working_edits",[]))
             for attempt in (*previous_cancels,step.get("final_working_cancel",{})):
                 edits.extend(attempt.get("working_edits",[]))
@@ -614,33 +637,29 @@ def optional_close_note(actual, request):
 def verify_cancelled(tid, entry, order, step, operations, after, states):
     cleanup = step.get("cleanup")
     working_cancel = step.get("final_working_cancel")
-    expected_revision = working_cancel["expected_revision"] if working_cancel else order["revision"]-(2 if cleanup else 1)
+    pooled_cancel = step.get("final_pooled_cancel")
+    final = working_cancel or pooled_cancel
+    expected_revision = final["expected_revision"] if final else order["revision"]-(2 if cleanup else 1)
     key = (tid,"action","cancel",expected_revision)
-    action = operations.get(key)
-    reason = action["body"].get("reason") if action else None
+    saved = operations.get(key)
+    reason = pooled_cancel["reason"] if pooled_cancel else saved["body"].get("reason") if saved else None
     if not isinstance(reason,str) or not reason.strip() or cleanup and cleanup["reason"]!=reason:
         raise ValueError("missing or conflicting cancellation reason")
     replies = [{"task":order,"delivery_state":"received"}]
-    if cleanup:
-        pool = step.get("pool")
-        snoozes = pool.get("snoozes",[]) if pool else []
-        state = "snoozed" if snoozes else "blocked" if pool else "working"
+    if cleanup and not pooled_cancel:
+        if step.get("pool"):
+            raise ValueError("pool cleanup has no verified management action")
         content = working_cancel["content"] if working_cancel else {field:order[field] for field in ("title","instructions")}
-        final = dict(step,content=content)
-        pending = order_state(order,final,state,expected_revision+1,
-                              None if pool else step["assignment_id"])
-        if pool:
-            initial = {"remind_at":timestamp(pool["entered"]+INITIAL_REMINDER_SECONDS),**pool.get("initial_reminder",{})}
-            schedule = snoozes[-1] if snoozes else initial
-            pending.update(blocked_since=timestamp(pool["entered"]),remind_at=schedule["remind_at"])
+        pending = order_state(order,dict(step,content=content),"working",expected_revision+1,step["assignment_id"])
         replies = [{"task":pending,"delivery_state":"pending"}]
-        if pool and "reminder_message_id" in schedule:
-            replies.append({"task":dict(pending,remind_at=None),"delivery_state":"pending"})
-    action = take(operations,key,"hermes",{"action":"cancel","expected_revision":expected_revision,"reason":reason},replies)
-    if action["seq"]<=after:
-        raise ValueError("cancellation predates the original assignment records")
+    if pooled_cancel:
+        action = {"key":pooled_cancel["action_key"],"seq":pooled_cancel["action_seq"]}
+    else:
+        action = take(operations,key,"hermes",{"action":"cancel","expected_revision":expected_revision,"reason":reason},replies)
+        if action["seq"]<=after:
+            raise ValueError("cancellation predates the original assignment records")
     entry.update(cancel_key=action["key"],cancel_reason=reason)
-    terminal_seq = action["seq"]
+    terminal_seq = max(after,action["seq"])
     if cleanup:
         aid = step["assignment_id"]
         request = {"assignment_id":aid,"outcome":"cancel_confirmed"}
@@ -652,10 +671,11 @@ def verify_cancelled(tid, entry, order, step, operations, after, states):
             terminal_seq = verify_edits(tid,working_cancel.get("working_edits",[]),operations,terminal_seq)
         if receipt["seq"]<=terminal_seq:
             raise ValueError("cleanup receipt predates the cancellation")
-        states.append((action["seq"],{pending["state"]}))
+        if not pooled_cancel:
+            states.append((action["seq"],{"working"}))
         terminal_seq = receipt["seq"]
         cleanup.update(report_key=receipt["key"],receipt=receipt["reply"])
-        if step.get("expired_cancel") or step.get("superseded_cancels"):
+        if step.get("expired_cancel") or step.get("superseded_cancels") or step.get("pool",{}).get("cancel_attempts"):
             cleanup.update(action_key=action["key"],action_seq=action["seq"],report_seq=receipt["seq"])
         entry["cancel_w04_key"] = receipt["key"]
     states.append((terminal_seq,{"cancelled"}))
@@ -690,6 +710,24 @@ def verify_pool_archive(tid, entry, order, operations, after, states):
     states.append((archive["seq"],{state}))
 
 
+def verify_pooled_cancel(tid, step, order, attempt, operations, after):
+    pool = step["pool"]
+    revision,reason = attempt["expected_revision"],attempt["reason"]
+    initial = {"remind_at":timestamp(pool["entered"]+INITIAL_REMINDER_SECONDS),**pool.get("initial_reminder",{})}
+    schedule = [initial,*pool.get("snoozes",[])][attempt["snooze_count"]]
+    pending = order_state(order,dict(step,content=attempt["content"]),attempt["state"],revision+1)
+    pending.update(blocked_since=timestamp(pool["entered"]),remind_at=schedule["remind_at"])
+    replies = [{"task":pending,"delivery_state":"pending"}]
+    if "reminder_message_id" in schedule:
+        replies.append({"task":dict(pending,remind_at=None),"delivery_state":"pending"})
+    action = take(operations,(tid,"action","cancel",revision),"hermes",
+                  {"action":"cancel","expected_revision":revision,"reason":reason},replies)
+    if action["seq"]<=after:
+        raise ValueError("pool cancellation predates its assignment or previous action")
+    attempt.update(action_key=action["key"],receipt=action["reply"],action_seq=action["seq"])
+    return action["seq"]
+
+
 def verify_pool_activity(tid, step, order, operations, after, states):
     pool = step["pool"]
     activity = []
@@ -697,20 +735,27 @@ def verify_pool_activity(tid, step, order, operations, after, states):
     first_snooze = None
     revisions = [(item["expected_revision"],"edit",item) for item in pool.get("edits",[])]
     revisions.extend((item["expected_revision"],"snooze",item) for item in pool.get("snoozes",[]))
-    for _,kind,snooze in sorted(revisions):
+    revisions.extend((item["expected_revision"],"cancel",item) for item in pool.get("cancel_attempts",[]))
+    if final := step.get("final_pooled_cancel"):
+        revisions.append((final["expected_revision"],"cancel",final))
+    for _,kind,item in sorted(revisions):
         if kind=="edit":
-            position = verify_edits(tid,[snooze],operations,position)
-            activity.append((position,{snooze["receipt"]["state"]}))
+            position = verify_edits(tid,[item],operations,position)
+            activity.append((position,{item["receipt"]["state"]}))
             continue
-        revision = snooze["expected_revision"]
-        expected = order_state(order,dict(step,content=snooze["content"]),"snoozed",revision+1)
-        expected.update(blocked_since=timestamp(pool["entered"]),remind_at=snooze["remind_at"])
+        if kind=="cancel":
+            position = verify_pooled_cancel(tid,step,order,item,operations,position)
+            activity.append((position,{item["state"]}))
+            continue
+        revision = item["expected_revision"]
+        expected = order_state(order,dict(step,content=item["content"]),"snoozed",revision+1)
+        expected.update(blocked_since=timestamp(pool["entered"]),remind_at=item["remind_at"])
         action = take(operations,(tid,"action","snooze",revision),"hermes",
-                      {"action":"snooze","expected_revision":revision,"remind_after_hours":snooze["remind_after_hours"]},
+                      {"action":"snooze","expected_revision":revision,"remind_after_hours":item["remind_after_hours"]},
                       [{"task":expected,"delivery_state":"received"}])
         if action["seq"]<=position:
             raise ValueError("snooze predates pool entry or a previous action")
-        snooze["action_key"] = action["key"]
+        item["action_key"] = action["key"]
         position = action["seq"]
         if first_snooze is None:
             first_snooze = position
@@ -876,7 +921,7 @@ def verify_order(db, tid, entry, operations, windows):
                            session=True)
             if receipt["seq"]<=transfer["seq"]:
                 raise ValueError("cleanup receipt predates the transfer")
-            if expired or step.get("superseded_cancels"):
+            if expired or step.get("superseded_cancels") or step.get("pool",{}).get("cancel_attempts"):
                 cleanup.update(action_key=transfer["key"],action_seq=transfer["seq"],report_seq=receipt["seq"])
             cleanup_receipts.append((cleanup,receipt))
     for cleanup,receipt in cleanup_receipts:

@@ -18,7 +18,7 @@
 
 在执行状态发起多次取消的回退已补。四条隔离链路分别是直接确认、后一次重试耗尽后重新取消、直接转派、离线入池后转派。验证器按管理操作和清理号保留每次取消与空闲重试。工单在两次取消之间或最后一次在途取消后修改，仍核原修订与收件。只有最后一次有效控制及其 W04 能归档。两代 HTTP Router 实跑，旧端按原单号读回已取消或已验收，两个工位无持单、无重派。移除中间清理号、把最终收件延后到 W04 之后或替换 W04 里的清理号时，拒绝生成旧库。宿主和时钟为夹具。复跑 `python3 -B -m unittest -v rewrite.test_cutover -k working_cancel`。[本次实测](evidence/cutover-working-cancel-rounds.json) · [修复前复现](evidence/cutover-active-reissued-cancel-gap.json)
 
-另一条尚待对账。Worker 离线入池后，管理端在同一次入池中连续发起两次取消，新号 W04 已确认，回退仍拒绝生成旧库，试用库摘要未变。[同池多次取消](evidence/cutover-repeated-pool-cancel-gap.json)
+同一次入池中的多次取消也已核验。离线入池后，管理端连续三次取消，期间修改工单与提醒期限，最后一次取消之后仍有修订。前两个清理回执均返回 409，最终 W04 确认取消。另一条从在途取消重试耗尽入池，池中两次取消后转派，保留全部原控制，后继 Worker 正常报成果并验收。旧 Router 按原单号读回已取消或已验收，旧工位和新工位都无持单、无重派。篡改池中某次取消的提醒期限回执会拒绝生成恢复目录。宿主和时钟为夹具。复跑 `python3 -B -m unittest -v rewrite.test_cutover -k pool`。[同池取消实测](evidence/cutover-pooled-cancel-rounds.json) · [修复前复现](evidence/cutover-repeated-pool-cancel-gap.json)
 
 取消重试耗尽后的两种处置已纳入隔离回退。四条取消指令无清理确认才入池，首次迟到的取消 W04 返回 409。挂起后重新取消，由原工位确认并归档。另一张单转派后由新工位提交成果、溪流验收，原工位只清理旧派发。两代 HTTP Router 实测，旧端分别读回已取消和已验收，两个工位都无持单、无重派。首次取消、三次空闲重试、搁置和后续清理分别保留凭据。清理未确认或篡改重试的空闲观测时，回退不生成目录。宿主和时钟为夹具。复跑 `python3 -B -m unittest -v rewrite.test_cutover -k exhausted_cancel`。[取消重试回退实测](evidence/cutover-reviewed-cancel-retry.json)
 
