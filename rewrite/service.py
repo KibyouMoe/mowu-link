@@ -12,7 +12,7 @@ from threading import Thread
 from .orders import Orders
 from .adapter import HostAdapter
 from .host_wire import RemoteAdapter, serve_adapter
-from .storage import StateWriterBusy, encode, state_writer
+from .storage import StateWriterBusy, encode, require, state_writer
 from .trigger import Trigger
 from .wire import Client, serve_router
 from .worker import Worker
@@ -43,10 +43,10 @@ def server(args):
     with ExitStack() as stack:
         for path in sorted(paths):
             stack.enter_context(state_writer(path))
-        serve(args)
+        serve(args,stack)
 
 
-def serve(args):
+def serve(args,stack):
     identities = private_config(args.identities)
     if not isinstance(identities, dict) or not identities or any(
             not isinstance(k, str) or not k or not isinstance(v,str)
@@ -78,6 +78,24 @@ def serve(args):
         adapter = HostAdapter(args.db,DshHost(args.runtime_dir),args.session,NativeFiles(args.runtime_dir/"media",client))
         callbacks = tool_listener(args.runtime_dir,adapter,client)
         public_output = publishing(adapter,client,args.worker_id)
+        listener = serve_adapter(adapter,args.worker_id,identities,address,ctx)
+    elif args.component == "codex-adapter":
+        from .codex_app_server import AppServerHost, report_callbacks
+        from .codex_rpc import start_app_server
+        from .native_files import NativeFiles
+        client = connection(args.worker_connection)
+        rpc = stack.enter_context(start_app_server(args.codex_binary,args.codex_profile,args.cwd))
+        account = rpc.request("account/read",{"refreshToken":False})
+        require(type(account.get("requiresOpenaiAuth")) is bool,503,"codex_account_unconfirmed")
+        require(not account.get("requiresOpenaiAuth") or account.get("account"),503,"codex_test_account_required")
+        native = AppServerHost(rpc,args.session)
+        saved = native.thread(args.session,include_turns=False)
+        require(Path(saved["cwd"]).resolve()==args.cwd.resolve(),409,"wrong_native_workspace")
+        resumed = rpc.request("thread/resume",{"threadId":args.session,"cwd":str(args.cwd)})["thread"]
+        require(resumed.get("id")==args.session,409,"wrong_native_session")
+        media = NativeFiles(args.media_cache,client) if args.media_cache else None
+        adapter = HostAdapter(args.db,native,args.session,media)
+        callbacks = report_callbacks(native,client)
         listener = serve_adapter(adapter,args.worker_id,identities,address,ctx)
     else:
         worker = Worker(args.db,args.worker_id,connection(args.router_connection),
@@ -113,7 +131,7 @@ def source(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     apps = parser.add_subparsers(dest="component",required=True)
-    for name in ("router","fixture-adapter","dsh-adapter","worker"):
+    for name in ("router","fixture-adapter","dsh-adapter","codex-adapter","worker"):
         component = apps.add_parser(name)
         for flag in ("identities","cert","key","db"):
             component.add_argument("--"+flag,required=True,type=Path)
@@ -123,12 +141,16 @@ def main():
             component.add_argument("--worker-id",required=True)
         if name == "fixture-adapter":
             component.add_argument("--fixture-db",required=True,type=Path)
+        if name in ("fixture-adapter","codex-adapter"):
             component.add_argument("--media-cache",type=Path)
-        if name in ("fixture-adapter","dsh-adapter"):
+        if name in ("fixture-adapter","dsh-adapter","codex-adapter"):
             component.add_argument("--session",required=True)
-            component.add_argument("--worker-connection",required=name=="dsh-adapter",type=Path)
+            component.add_argument("--worker-connection",required=name!="fixture-adapter",type=Path)
         if name == "dsh-adapter":
             component.add_argument("--runtime-dir",required=True,type=Path)
+        if name == "codex-adapter":
+            for flag in ("codex-binary","codex-profile","cwd"):
+                component.add_argument("--"+flag,required=True,type=Path)
         if name == "worker":
             component.add_argument("--router-connection",required=True,type=Path)
             component.add_argument("--adapter-connection",required=True,type=Path)

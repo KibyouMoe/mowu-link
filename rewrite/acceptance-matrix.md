@@ -58,7 +58,7 @@
 | `bridge_verify_manager_binding` | 按工位授权的 `worker-status` | 平台身份被拒，运维身份可核同一会话。 |
 | `bridge_inspect_native_contract` | 适配器声明能力与实际独立回执 | 目录、压缩、目标、停止能力在真实 DSH 有证据。Codex 各能力需从实际测试宿主逐项读回。 |
 | `bridge_verify_native_write_path` | 原派发或消息号、正文摘要、原生输入及回合 | 真实独立 Desktop 已核文字收件及重投去重。无人值守入口、图文与实际授权待验。 |
-| `bridge_start_local_manager` | Router、Worker、宿主适配器独立入口 | 临时进程与分步升级已跑。现役 Desktop 启动权、同时仅一名写入者仍待实机验证。 |
+| `bridge_start_local_manager` | Router、Worker、宿主适配器独立入口 | 临时进程与分步升级已跑。独立 App Server 适配器已用 TLS 与专用 profile 启动，拒绝第二个写者。现役 Desktop 受信启动链仍待单验。 |
 | `bridge_reload_business_modules` | 锁定提交的发布包、分步升级与原快照回退 | 已演练冷切，原收件无重复。原位热加载及现役启停授权尚未核。 |
 | `bridge_message` | 平台私聊入口与宿主斜杠命令 | DSH 文图、已接命令与原队列有实测。Codex 支持过的选择会话、图文、原生插话需逐项回归。 |
 | `bridge_send_image` | 已授权的宿主图片事件，经 Worker 转送 | 真实 DSH 图像摘要及隔离平台顺序已核。需要独立飞书云端与 Codex 输出记录。 |

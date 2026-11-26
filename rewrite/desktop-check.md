@@ -58,3 +58,20 @@ App Server 原生中止会核对指定线程、活跃回合和唯一原生输入
 App Server 指定回合的文字投影复用原 Worker 的飞书卡片。独立原生输入保留原空格和换行，最终答复单独成卡。只读取已结束回合，桥接投递、内部工具调用及参数不出卡。稳定事件号令重投返回同一回执。连续 12 次通过。[卡片试验记录](evidence/codex-app-server-native-display.json)。输入为隔离驱动，模型和飞书为夹具；常驻监听、原生图文和飞书云端另验。
 
 独立 App Server 的图文与纯图使用原生 `localImage`。飞书夹具按原消息上传，适配器先核私有缓存的长度与摘要，再递交到固定会话。同条原文和图实际出现在模型请求，原生 App Server 添加的图片元数据单独核对。丢回执后按原客户端标识查回原生输入，两次试验输入分别只出现一条。重复 12 轮通过。[图片试验记录](evidence/codex-app-server-native-media.json)。目前只接已登记图像，模型、飞书为夹具。
+
+## 独立适配器启动
+
+以专用 Codex profile 启动 App Server，用 `thread/start` 加载 `rewrite/agent-toolset.json` 的 `worker_report` 定义并保存测试线程。先用 `thread/read` 核对原线程和工作目录，再为 Worker 配置隔离 TLS 连接。启动命令如下。
+
+```sh
+python3 -m rewrite.service codex-adapter \
+  --db "$TEST_ADAPTER_DB" --identities "$TEST_ADAPTER_ROLES" \
+  --cert "$TEST_TLS_CERT" --key "$TEST_TLS_KEY" \
+  --worker-id "$TEST_WORKER_ID" --worker-connection "$TEST_ADAPTER_TO_WORKER" \
+  --session "$TEST_NATIVE_THREAD" --codex-binary "$CODEX_BINARY" \
+  --codex-profile "$TEST_CODEX_PROFILE" --cwd "$TEST_PROJECT"
+```
+
+`--media-cache` 可指定适配器拥有的绝对图像缓存目录。同一专用 profile 已启动时，第二个进程会被拒绝。默认 Desktop profile 不用于此入口。若原生配置要求 OpenAI 登录，须有独立授权的测试账号。适配器从自己的 App Server 标准输入输出接工具请求，只按原线程和原回合交给 Worker 的业务入口；生产 Desktop 插件的加载和授权仍需另验。
+
+当前已用独立进程、TLS 和真实 App Server 连续跑通 12 次 W04。错工作目录和第二个 profile 写者均拒绝，原生工具回放只留一条 Router 通知。测试模型为本地脚本。[进程与回执记录](evidence/codex-adapter-process-w04.json)。

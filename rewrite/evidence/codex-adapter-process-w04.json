@@ -1,0 +1,24 @@
+{
+  "thread_id": "01a216ca-6e1b-7cd2-bff8-9d1cc1ce0ef0",
+  "task_id": "6d1cf63d-daad-4e14-9d04-8de68f1c828c",
+  "assignment_id": "67e66946-5a81-46a0-b229-b02c72fb888e",
+  "native_receipt": {
+    "session": "01a216ca-6e1b-7cd2-bff8-9d1cc1ce0ef0",
+    "delivery_id": "9620303d-9e87-4c0e-967a-48fd4737c833",
+    "digest": "aa4d75ea5fb56fed90f0f3b80dfb91d647efa9b4f3bd741b898fc168b3c76e8f",
+    "native_id": "01a216ca-70eb-7671-86c4-c8c64283c630",
+    "turn_id": "01a216ca-70e6-7793-810c-4b74ef4cfc01"
+  },
+  "native_tool_call_ids": [
+    "native_fixture_0",
+    "native_fixture_1"
+  ],
+  "notification_delivery_id": "fe9b85b0-19bf-4acc-9e3a-b40b39b54bb0",
+  "cli_version": "0.171.0-alpha.13.2",
+  "router_state": "completed_reported",
+  "tls": true,
+  "wrong_workspace_rejected": true,
+  "second_profile_writer_rejected": true,
+  "boundary": "Separate codex-adapter process drove the native App Server with a local scripted model",
+  "consecutive_runs": 12
+}

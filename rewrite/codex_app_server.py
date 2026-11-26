@@ -1,6 +1,11 @@
 """Text delivery and formal tool callbacks for one dedicated Codex App Server thread."""
+from contextlib import contextmanager
 import hashlib
+from queue import Empty
+from threading import Event, Thread
+import time
 
+from .codex_rpc import NativeRpcRejected
 from .storage import Fault, encode, require, string
 
 
@@ -8,9 +13,15 @@ class AppServerHost:
     def __init__(self, rpc, thread_id):
         self.rpc, self.thread_id = rpc,thread_id
 
+    def request(self,method,params):
+        try:
+            return self.rpc.request(method,params)
+        except NativeRpcRejected:
+            raise Fault(502,"native_app_server_rejected",True) from None
+
     def thread(self, session, *, include_turns):
         require(session==self.thread_id,409,"wrong_native_session")
-        result = self.rpc.request("thread/read",{"threadId":session,"includeTurns":include_turns})["thread"]
+        result = self.request("thread/read",{"threadId":session,"includeTurns":include_turns})["thread"]
         require(result["id"]==self.thread_id,409,"wrong_native_session")
         return result
 
@@ -45,8 +56,8 @@ class AppServerHost:
     def deliver_media(self,session,did,payload,digest,files):
         require(session==self.thread_id,409,"wrong_native_session")
         blocks = self.input_blocks(did,payload,digest,files)
-        turn = self.rpc.request("turn/start",{"threadId":session,"input":blocks,
-                                              "clientUserMessageId":"mowulink-"+did})["turn"]
+        turn = self.request("turn/start",{"threadId":session,"input":blocks,
+                                          "clientUserMessageId":"mowulink-"+did})["turn"]
         proof = self.lookup_inputs(session,did,payload,digest,blocks)
         require(not proof or proof["turn_id"]==turn["id"],409,"host_receipt_mismatch")
         return proof
@@ -100,7 +111,7 @@ class AppServerHost:
             return None
         require(turn["status"]=="inProgress" and thread["turns"][-1]["id"]==turn_id
                 and thread["status"]["type"]=="active",409,"native_turn_not_active")
-        self.rpc.request("turn/interrupt",{"threadId":session,"turnId":turn_id})
+        self.request("turn/interrupt",{"threadId":session,"turnId":turn_id})
         return self.stop_turn(session,receipt,start=False)
 
     def public_turn(self,session,turn_id):
@@ -151,7 +162,51 @@ class AppServerHost:
                 and call.get("tool")=="worker_report",403,"wrong_native_caller")
         args = call.get("arguments")
         require(isinstance(args,dict),422,"invalid_arguments")
-        return worker.request("POST","worker/native-tool",{
+        receipt = worker.request("POST","worker/native-tool",{
             "session":self.thread_id,"turn_id":string(call,"turnId"),"tool":"worker_report",
             "call_id":string(call,"callId"),"arguments":args,
         })
+        require(isinstance(receipt,dict) and receipt.get("recorded") is True,502,"worker_report_unconfirmed")
+        return receipt
+
+
+@contextmanager
+def report_callbacks(host,worker):
+    stop = Event()
+
+    def to_worker(packet):
+        until = time.monotonic()+3
+        while True:
+            try:
+                receipt = host.report_call(packet,worker)
+                return {"success":True,"contentItems":[{"type":"inputText","text":encode(receipt)}]}
+            except Fault as error:
+                # A native tool request can precede persistence of its original user input.
+                if error.code=="native_turn_unconfirmed" and time.monotonic()<until and not stop.wait(.05):
+                    continue
+                return {"success":False,"contentItems":[{"type":"inputText","text":error.code}]}
+            except OSError:
+                return {"success":False,"contentItems":[{"type":"inputText","text":"worker_report_unconfirmed"}]}
+
+    def read_events():
+        while not stop.is_set():
+            try:
+                packet = host.rpc.event(time.monotonic()+.2)
+            except Empty:
+                continue
+            except Fault:
+                break
+            if packet.get("method")!="item/tool/call" or type(packet.get("id")) not in (str,int):
+                continue
+            try:
+                host.rpc.send({"id":packet["id"],"result":to_worker(packet)})
+            except Fault:
+                break
+
+    thread = Thread(target=read_events,daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join(timeout=6)

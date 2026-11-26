@@ -1,14 +1,14 @@
 """Run Desktop's bundled native App Server against a scripted loopback model."""
 import base64
-from collections import deque
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import hashlib
 import json
-import os
 from pathlib import Path
 from queue import Queue
+import shutil
 import subprocess
+import sys
 from tempfile import TemporaryDirectory
 from threading import Thread
 import time
@@ -16,61 +16,21 @@ import unittest
 
 from .agent_tools import REPORT_TOOL
 from .codex_app_server import AppServerHost
+from .codex_rpc import start_app_server
 from .devloop import Loop
 from .feishu_inbound import Inbound
 from .feishu_output import Views
+from .host_wire import RemoteAdapter
 from .native_files import NativeFiles
 from .storage import Fault, encode, guid
 from .test_feishu_output import PlatformFixture
 from .test_feishu_inbound import PNG
 from .test_mainline import Clock
+from . import test_service
 from .wire import Client
 from .worker_service import WorkerService
 
 CODEX = Path("/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex")
-
-
-class Stdio:
-    def __init__(self, process):
-        self.process = process
-        self.counter = 0
-        self.incoming, self.events = Queue(),deque()
-        self.reader = Thread(target=self.read,daemon=True)
-        self.reader.start()
-
-    def read(self):
-        for line in self.process.stdout:
-            self.incoming.put(json.loads(line))
-        self.incoming.put(None)
-
-    def send(self, packet):
-        self.process.stdin.write(encode(packet)+"\n")
-        self.process.stdin.flush()
-
-    def receive(self, deadline):
-        packet = self.incoming.get(timeout=max(0,deadline-time.monotonic()))
-        if packet is None:
-            raise RuntimeError("isolated App Server closed its transport")
-        return packet
-
-    def request(self,method,params):
-        self.counter += 1
-        self.send({"method":method,"params":params,"id":self.counter})
-        until = time.monotonic()+12
-        while True:
-            packet = self.receive(until)
-            if "method" not in packet and packet.get("id")==self.counter:
-                if "error" in packet:
-                    error = packet["error"]
-                    if (method=="thread/read" and params["includeTurns"] and error["code"]==-32601
-                            and error["message"]=="list_turns is not supported yet"):
-                        raise Fault(503,"native_history_unconfirmed",True)
-                    raise RuntimeError("App Server "+method+" error "+encode(error))
-                return packet["result"]
-            self.events.append(packet)
-
-    def event(self,deadline):
-        return self.events.popleft() if self.events else self.receive(deadline)
 
 
 class Provider(BaseHTTPRequestHandler):
@@ -141,24 +101,8 @@ def isolated_app_server(root, url):
         'model_providers.test_wire.request_max_retries=0','model_providers.test_wire.stream_max_retries=0',
         'web_search="disabled"',
     ]
-    argv = [CODEX,"app-server","--stdio",*(value for setting in settings for value in ("-c",setting))]
-    with Path(root,"native.stderr").open("w+") as errors:
-        with subprocess.Popen(argv,cwd=root,env={"CODEX_HOME":root,"PATH":os.defpath},
-                              stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=errors,text=True) as process:
-            rpc = Stdio(process)
-            try:
-                rpc.request("initialize",{"clientInfo":{"name":"mowulink_local_check","title":"Isolated protocol test",
-                    "version":"1.0"},"capabilities":{"experimentalApi":True}})
-                rpc.send({"method":"initialized","params":{}})
-                yield rpc
-            finally:
-                process.terminate()
-                try:
-                    process.wait(timeout=4)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=4)
-                rpc.reader.join(timeout=4)
+    with start_app_server(CODEX,root,root,settings) as rpc:
+        yield rpc
 
 
 @unittest.skipUnless(CODEX.is_file(),"bundled Codex App Server required")
@@ -437,3 +381,105 @@ class CodexAppServer(unittest.TestCase):
         self.evidence = {"thread_id":sid,"receipts":proofs,"model_input":self.provider.media,
                          "native_input_count":len(inputs),"router_tasks":0,
                          "boundary":"Native App Server receives Feishu fixture images; local model records the original PNG bytes"}
+
+    @unittest.skipUnless(shutil.which("openssl"),"isolated TLS certificate generator required")
+    def test_codex_adapter_process_handles_native_report_without_controller_dispatch(self):
+        root = Path(self.root)
+        profile,project = root/"codex-profile",root/"test-project"
+        profile.mkdir(mode=0o700)
+        project.mkdir(mode=0o700)
+        (profile/"config.toml").write_text('model = "gpt-5.4"\nmodel_provider = "test_wire"\n'
+                                            'web_search = "disabled"\n'
+                                            '[model_providers.test_wire]\nname = "Local test wire"\n'
+                                            'base_url = '+encode(self.origin+"/v1")+'\nwire_api = "responses"\n'
+                                            'request_max_retries = 0\nstream_max_retries = 0\n',encoding="utf-8")
+        with start_app_server(CODEX,profile,project) as provision:
+            sid = provision.request("thread/start",{"cwd":str(project),"ephemeral":False,
+                                                     "dynamicTools":[REPORT_TOOL]})["thread"]["id"]
+            provision.request("turn/start",{"threadId":sid,"input":[{"type":"text","text":"Provision the test thread",
+                                                                    "text_elements":[]}]})
+            until = time.monotonic()+12
+            while provision.event(until).get("method")!="turn/completed":
+                pass
+        self.assertEqual(self.provider.observed,[(True,0)])
+        self.provider.observed.clear()
+        clock = Clock()
+        loop = self.enterContext(Loop.isolated(clock))
+        callback_token,adapter_token = guid(),guid()
+        callback_server = WorkerService(loop.worker,clock).listen({callback_token:"adapter/oguri"},("127.0.0.1",0),None)
+        callback_url = self.enterContext(running(callback_server))
+        def write(name,body):
+            dest = root/name
+            dest.write_text(encode(body),encoding="utf-8")
+            dest.chmod(0o600)
+            return dest
+        worker_conn = write("worker-connection.json",{"url":callback_url,"token":callback_token})
+        roles = write("adapter-roles.json",{adapter_token:"worker/oguri"})
+        cert,key = root/"test.crt",root/"test.key"
+        subprocess.run(["openssl","req","-x509","-newkey","rsa:2048","-nodes","-days","1","-subj","/CN=localhost",
+                        "-addext","subjectAltName=IP:127.0.0.1","-out",cert,"-keyout",key],
+                       check=True,capture_output=True,timeout=10)
+        adapter_db = root/"codex-adapter.db"
+        command = [sys.executable,"-m","rewrite.service","codex-adapter","--db",adapter_db,"--identities",roles,
+                   "--cert",cert,"--key",key,"--worker-id","oguri","--session",sid,"--worker-connection",worker_conn,
+                   "--codex-binary",CODEX,"--codex-profile",profile,"--cwd",project]
+        wrong_project = subprocess.run([*command[:-1],root],cwd=Path(__file__).resolve().parent.parent,
+                                       capture_output=True,text=True,timeout=8)
+        self.assertNotEqual(wrong_project.returncode,0)
+        self.assertIn("wrong_native_workspace",wrong_project.stderr)
+        process = subprocess.Popen(command,cwd=Path(__file__).resolve().parent.parent,text=True,
+                                   stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+        try:
+            ready = Queue()
+            Thread(target=lambda:ready.put(process.stdout.readline()),daemon=True).start()
+            line = ready.get(timeout=12)
+            self.assertTrue(line,process.stderr.read() if process.poll() is not None else "no adapter readiness")
+            info = json.loads(line)
+            self.assertEqual(info["component"],"codex-adapter")
+            self.assertTrue(info["tls"])
+            other_db = [root/"alternate-adapter.db" if value==adapter_db else value for value in command]
+            duplicate = subprocess.run(other_db,cwd=Path(__file__).resolve().parent.parent,capture_output=True,
+                                       text=True,timeout=8)
+            self.assertEqual((duplicate.returncode,duplicate.stderr),(1,"state_writer_already_running\n"))
+            transport = Client("https://127.0.0.1:"+str(info["port"]),adapter_token,cert)
+            with self.assertRaisesRegex(Fault,"wrong_native_session"):
+                RemoteAdapter(transport,guid()).busy()
+            remote = RemoteAdapter(transport,sid)
+            loop.worker.adapter = remote
+            tid = loop.hermes.create(guid(),"Standalone Codex adapter test","File an isolated result","oguri")["task_id"]
+            loop.worker.connect()
+            loop.worker.poll()
+            clock.advance(10)
+            loop.worker.poll()
+            loop.worker.poll()
+            until = time.monotonic()+9
+            while time.monotonic()<until:
+                loop.worker.poll()
+                if loop.hermes.inspect(tid)["task"]["state"]=="completed_reported" and not remote.busy():
+                    break
+                time.sleep(.05)
+            self.assertEqual(loop.hermes.inspect(tid)["task"]["state"],"completed_reported")
+            self.assertIsNone(loop.worker.hold()["held_assignment_id"])
+            self.assertFalse(loop.native.entries())
+        finally:
+            test_service.Service.stop(process)
+        self.assertEqual(self.provider.observed,[(True,0),(True,1),(True,2)])
+        notify, = loop.manager_wire.frames(0)
+        self.assertEqual(notify["payload"]["task_id"],tid)
+        frame, = [frame for frame in loop.wire.frames(0) if frame["kind"]=="task.dispatch"]
+        with start_app_server(CODEX,profile,project) as review:
+            native = review.request("thread/resume",{"threadId":sid,"cwd":str(project)})["thread"]
+            published = AppServerHost(review,sid)
+            body = {"kind":"task",**frame["payload"]}
+            did = frame["delivery_id"]
+            proof = published.lookup_expected(sid,did,body,hashlib.sha256(encode(body).encode()).hexdigest())
+            self.assertIsNotNone(proof)
+            turns = published.thread(sid,include_turns=True)["turns"]
+            self.assertEqual(len(turns),2)
+            calls = [item["id"] for item in turns[1]["items"] if item.get("type")=="dynamicToolCall"]
+            self.assertEqual(calls,["native_fixture_0","native_fixture_1"])
+        self.evidence = {"thread_id":sid,"task_id":tid,"assignment_id":body["assignment_id"],"native_receipt":proof,
+                         "native_tool_call_ids":calls,"notification_delivery_id":notify["delivery_id"],
+                         "cli_version":native["cliVersion"],"router_state":"completed_reported","tls":True,
+                         "wrong_workspace_rejected":True,"second_profile_writer_rejected":True,
+                         "boundary":"Separate codex-adapter process drove the native App Server with a local scripted model"}
