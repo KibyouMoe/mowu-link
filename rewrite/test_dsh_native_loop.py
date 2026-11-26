@@ -358,6 +358,7 @@ class NativeProcess(unittest.TestCase):
                         cold = self.read_native(native,"read")
                         self.assertEqual(cold["inputs"],native_end["inputs"])
                         self.assertEqual(cold["modelRequests"],[])
+                    self.restore_read_only_proof(runtime,loop.adapter,aid,proof)
                 if action=="cancel":
                     reopened = Worker(w.db.path,"oguri",w.router,loop.adapter,clock=service.clock)
                     reopened.connect()
@@ -377,12 +378,27 @@ class NativeProcess(unittest.TestCase):
                     "new_assignment_id":current["task"]["assignment_id"] if action=="transfer" else None,
                     "dropped_router_w04_receipts":int(action=="cancel"),"recorded_w04_replays":len(cleanup_receipts),
                     **({"durable_admissions":len(records),"proof_recovered_after_cold_restart":True,
-                        "new_model_requests_after_reopen":len(cold["modelRequests"])} if use_tls else {})})
+                        "new_model_requests_after_reopen":len(cold["modelRequests"]),
+                        "copied_native_state_proof_matches":True} if use_tls else {})})
         output = os.environ.get("MOWULINK_DSH_CLEANUP_EVIDENCE")
         if output:
             Path(output).write_text(json.dumps({"cases":cases,
                 "boundary":"Installed DSH SDK with opt-in read-only assignments, local model, real isolated Router."},
                 ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
+
+    def restore_read_only_proof(self,runtime,original,aid,proof):
+        restored = self.local_tls_directory()
+        self.assertFalse((runtime/"dsh-admissions.sqlite3-journal").exists())
+        shutil.copy2(runtime/"dsh-admissions.sqlite3",restored/"dsh-admissions.sqlite3")
+        shutil.copytree(runtime/"sessions",restored/"sessions")
+        state = restored/"adapter.db"
+        with closing(sqlite3.connect(original.db.path)) as source, closing(sqlite3.connect(state)) as target:
+            source.backup(target)
+        link = LocalLink(restored,use_tls=True)
+        recovered = HostAdapter(state,DshHost(restored,link=link),original.session)
+        with self.start_native(restored,original.session,"cleanup-read-only-reopen",use_tls=True) as native:
+            self.assertEqual(recovered.cleanup_evidence(aid,proof["kind"]),proof)
+            self.assertEqual(self.read_native(native,"read")["modelRequests"],[])
 
     def read_only_cleanup_refusals(self,*,use_tls=False):
         cases = []
