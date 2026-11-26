@@ -10,9 +10,10 @@ from .devloop import FixtureHost
 from .feishu_inbound import Inbound
 from .feishu_output import Views
 from .hermes import HermesAdapter
+from .codex_thread_preparation import SCHEMA as CODEX_PREPARATION_SCHEMA
 from .orders import Orders
 from .state_bundle import audit_handoff, capture, filename, restore, rollback, stage_native_handoff, validate_set, verify
-from .storage import StateWriterBusy, encode, guid, state_writer
+from .storage import Database, StateWriterBusy, encode, guid, state_writer
 from .test_feishu_output import PlatformFixture
 from .test_mainline import Clock
 from .trigger import Trigger
@@ -251,6 +252,25 @@ class Bundle(unittest.TestCase):
         self.assertFalse(self.dest.exists())
         self.assertEqual(audit_handoff(self.snapshot,checksum),before)
         self.assertEqual(self.native.entries(),[])
+
+    def test_handoff_refuses_to_copy_an_unconfirmed_native_thread_preparation(self):
+        with self.stack(self.sources) as (_manager,worker,_source,_mail,_platform,_views):
+            worker.adapter.expected_session = self.native.session
+            pinned = Worker(worker.db.path,worker.worker_id,worker.router,worker.adapter)
+            WorkerService(pinned,self.clock).step()
+            ledger = Database(self.sources["agent:oguri"],CODEX_PREPARATION_SCHEMA)
+            with ledger.transaction() as db:
+                db.execute("INSERT INTO codex_thread_preparations VALUES (?,?,?,?,?,'issuing',NULL,NULL)",
+                           (guid(),self.native.session,"new","Test pending preparation","{}"))
+                db.execute("INSERT INTO codex_thread_preparations VALUES (?,?,?,?,?,'prepared',?,?)",
+                           (guid(),self.native.session,"fork","Prior preparation","{}",guid(),"{}"))
+        checksum = capture(self.sources,self.revision,self.snapshot)["manifest_sha256"]
+        worker, = audit_handoff(self.snapshot,checksum)["workers"]
+        self.assertFalse(worker["native_session_ledger_clear"])
+        self.assertEqual(worker["native_session_pending"]["codex_session_preparations"],1)
+        with self.assertRaisesRegex(ValueError,"codex_session_preparations"):
+            stage_native_handoff(self.snapshot,checksum,"oguri",self.native.session,"next",self.dest)
+        self.assertFalse(self.dest.exists())
 
     def test_native_session_audit_keeps_unknown_private_and_queued_inputs_for_the_original_host(self):
         self.native.next_turn = True

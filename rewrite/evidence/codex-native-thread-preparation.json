@@ -1,0 +1,90 @@
+{
+  "at_utc": "2026-11-26T11:55:00.176781+00:00",
+  "repetitions": 12,
+  "cases": [
+    "test_thread_preparation_retains_native_identity_and_never_retries_an_uncertain_creation",
+    "test_prepare_sessions_cli_uses_authenticated_pinned_adapter_and_replays_after_restart",
+    "test_handoff_refuses_to_copy_an_unconfirmed_native_thread_preparation"
+  ],
+  "native_preparation": {
+    "parent": "01a217b5-6cac-7582-a1e7-94994a2ac53a",
+    "parent_turn": "01a217b5-6cb3-7d60-957d-23d055649d01",
+    "new": {
+      "operation_id": "78ff2b94-5131-4303-b416-efe6a9dea0da",
+      "source_session": "01a217b5-6cac-7582-a1e7-94994a2ac53a",
+      "session": "01a217b5-6cca-7fb3-b678-079c41385b1c",
+      "parent_session": null,
+      "kind": "new",
+      "title": "魔物链接会话 #001",
+      "selection": {
+        "effort": "high",
+        "model": "gpt-5.4",
+        "provider": "test_wire"
+      },
+      "state": "prepared"
+    },
+    "fork": {
+      "operation_id": "f1089e16-4c04-46be-ad25-1c845908c168",
+      "source_session": "01a217b5-6cac-7582-a1e7-94994a2ac53a",
+      "session": "01a217b5-6cd7-7b10-b95b-dbf804d31438",
+      "parent_session": "01a217b5-6cac-7582-a1e7-94994a2ac53a",
+      "kind": "fork",
+      "title": "魔物链接分支 #002",
+      "selection": {
+        "effort": "high",
+        "model": "gpt-5.4",
+        "provider": "test_wire"
+      },
+      "state": "prepared"
+    },
+    "native_creations": [
+      [
+        "thread/start",
+        "01a217b5-6cca-7fb3-b678-079c41385b1c"
+      ],
+      [
+        "thread/fork",
+        "01a217b5-6cd7-7b10-b95b-dbf804d31438"
+      ],
+      [
+        "thread/start",
+        "01a217b5-6cec-74a2-bc44-70d89f1d728b"
+      ]
+    ],
+    "unknown_receipt_operation": "5b8f1022-d989-47e3-b986-5f556f813ca8",
+    "unknown_retries": 4,
+    "automatic_model_calls": 0,
+    "scope": "Installed independent Codex App Server, loopback model fixture and temporary profile"
+  },
+  "explicit_adapter_enrollment": {
+    "prepared": {
+      "kind": "new",
+      "operation_id": "7fc628de-b821-4b70-ad9b-2926f21079cf",
+      "parent_session": null,
+      "selection": {
+        "effort": null,
+        "model": "gpt-5.4",
+        "provider": "test_wire"
+      },
+      "session": "01a217b5-7004-7c33-8cb8-97abd03e792d",
+      "source_session": "01a217b5-6db6-7181-808c-d6634e587f2d",
+      "state": "prepared",
+      "title": "魔物链接会话 #001"
+    },
+    "adoption": {
+      "handoff_id": "fd29f241-f35b-5e77-b730-8aa9c4b16f1b",
+      "previous_session": "test-agent-session",
+      "session": "01a217b5-7004-7c33-8cb8-97abd03e792d",
+      "state": "bound"
+    },
+    "native_turn": "01a217b5-74e7-7af1-be9e-ebf9405ee803",
+    "native_worker_reports": [
+      "native_fixture_0",
+      "native_fixture_1"
+    ],
+    "task_id": "9501ddbd-f039-4297-ad37-c79efd645b68",
+    "assignment_id": "0338b6cc-b97f-4c0c-a872-8aeea7665fdc",
+    "notification_id": "7fa583f8-619e-42a7-99ae-5a832d01bb18",
+    "scope": "Actual isolated App Server and TLS adapters. An explicit second adapter enrolls the prepared thread. Model is a fixture."
+  }
+}

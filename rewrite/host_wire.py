@@ -51,6 +51,7 @@ class RemoteAdapter:
         state = info.get("native_load_state")
         require(state in (None,"cold","loaded"),502,"invalid_host_observation")
         return {**({"native_load_state":state} if state is not None else {}),
+                **({"session_preparation":True} if info.get("session_preparation") is True else {}),
                 "session":session,"next_turn":info.get("next_turn") is True,
                 "context_usage":info.get("context_usage") is True,"model_view":info.get("model_view") is True,
                 "model_change":info.get("model_change") is True,"goal_control":info.get("goal_control") is True,
@@ -59,6 +60,10 @@ class RemoteAdapter:
 
     def activate(self,session,operation_id):
         return self.request("POST","host/activate",{"operation_id":operation_id},native_session=session)
+
+    def prepare_thread(self,session,operation_id,kind):
+        return self.request("POST","host/prepare-thread",{"operation_id":operation_id,"kind":kind},
+                            native_session=session)
 
     def context_usage(self):
         return self.request("GET","host/context")
@@ -117,7 +122,7 @@ class RemoteAdapter:
         return self.request("POST","host/answer-question",{"original":original,"answer":answer})["proof"]
 
 
-def serve_adapter(adapter, worker_id, identities, address, context, *, activation=None):
+def serve_adapter(adapter, worker_id, identities, address, context, *, activation=None, preparation=None):
     def handle(actor, method, path, body, headers):
         require(actor == "worker/" + worker_id, 403, "wrong_adapter_owner")
         pinned = path.startswith("/v1/host/bound/")
@@ -133,10 +138,16 @@ def serve_adapter(adapter, worker_id, identities, address, context, *, activatio
                 result = info() if info else {"session":adapter.bound_session(),"next_turn":False}
                 if activation is not None:
                     result["native_load_state"] = activation.state
+                if preparation is not None:
+                    result["session_preparation"] = True
             case "POST","/v1/host/activate":
                 require(pinned and activation is not None,403,"native_activation_unavailable")
                 require(set(body)=={"operation_id"} and valid_guid(body.get("operation_id")),422,"invalid_native_activation")
                 result = activation.activate(adapter.bound_session(),body["operation_id"])
+            case "POST","/v1/host/prepare-thread":
+                require(pinned and preparation is not None,403,"native_preparation_unavailable")
+                require(set(body)=={"operation_id","kind"},422,"invalid_native_preparation")
+                result = preparation.prepare(adapter.bound_session(),body["operation_id"],body["kind"])
             case "GET","/v1/host/activity":
                 result = {"busy":adapter.busy()}
             case "GET","/v1/host/context":

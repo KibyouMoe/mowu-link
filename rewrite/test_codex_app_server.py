@@ -23,6 +23,7 @@ from .codex_app_server import AppServerHost, worker_callbacks
 from .codex_display import CodexDisplay
 from .codex_provision import SEED
 from .codex_rpc import NativeRpcRejected, start_app_server
+from .codex_thread_preparation import CodexThreadPreparation
 from .devloop import FixtureHost, Loop
 from .feishu_inbound import Inbound
 from .feishu_output import Views
@@ -1276,6 +1277,194 @@ class CodexAppServer(unittest.TestCase):
         self.evidence = {"session":sid,"operation_id":operation_id,"existing_turn":original,
                          "goal_refused_while_cold":True,"goal_after_restore":"paused",
                          "native_resume_calls":len(loads),"additional_model_calls":0}
+
+    def test_thread_preparation_retains_native_identity_and_never_retries_an_uncertain_creation(self):
+        root = Path(self.root).resolve()
+        with isolated_app_server(root,self.origin,['model_reasoning_effort="high"']) as rpc:
+            parent = rpc.request("thread/start",{"cwd":str(root),"ephemeral":False,
+                                                  "dynamicTools":[REPORT_TOOL]})["thread"]["id"]
+            seeded = rpc.request("turn/start",{"threadId":parent,"clientUserMessageId":"mowulink-prior-parent",
+                "input":[{"type":"text","text":"Only the existing parent's input","text_elements":[]}]})["turn"]["id"]
+            until = time.monotonic()+12
+            while rpc.event(until)["method"]!="turn/completed":
+                pass
+            host = AppServerHost(rpc,parent)
+            db = root/"prepared.db"
+            prepare = CodexThreadPreparation(host,root,db)
+            native = host.request
+            allocated = []
+            lose_name = True
+            lose_creation = False
+
+            def lose(method,params):
+                nonlocal lose_name
+                result = native(method,params)
+                if method in ("thread/start","thread/fork"):
+                    allocated.append((method,result["thread"]["id"]))
+                    if lose_creation:
+                        raise Fault(503,"isolated_native_reply_lost",True)
+                if method=="thread/name/set" and lose_name:
+                    lose_name = False
+                    raise Fault(503,"isolated_name_reply_lost",True)
+                return result
+
+            host.request = lose
+            new_id,fork_id,unknown = (guid() for _ in range(3))
+            with self.assertRaisesRegex(Fault,"isolated_name_reply_lost"):
+                prepare.prepare(parent,new_id,"new")
+            with prepare.db.transaction() as ledger:
+                saved = ledger.execute("SELECT state,native_session FROM codex_thread_preparations WHERE operation_id=?",
+                                       (new_id,)).fetchone()
+            self.assertEqual(tuple(saved),("received",allocated[0][1]))
+            reopened = CodexThreadPreparation(host,root,db)
+            new = reopened.prepare(parent,new_id,"new")
+            self.assertEqual(new["session"],allocated[0][1])
+            self.assertEqual(reopened.prepare(parent,new_id,"new"),new)
+            with self.assertRaisesRegex(Fault,"native_preparation_conflict"):
+                reopened.prepare(parent,new_id,"fork")
+            fork = reopened.prepare(parent,fork_id,"fork")
+            self.assertEqual(fork["parent_session"],parent)
+            self.assertEqual(fork["session"],allocated[1][1])
+            self.assertEqual(reopened.prepare(parent,fork_id,"fork"),fork)
+            self.assertEqual(new["selection"],fork["selection"])
+            self.assertEqual(new["selection"],{"model":"gpt-5.4","provider":"test_wire","effort":"high"})
+            self.assertIsNone(new["parent_session"])
+            child = AppServerHost(rpc,fork["session"])
+            child.bind_fork_history(root/"child-baseline.db",child.thread(fork["session"],include_turns=False))
+            history = child.thread(fork["session"],include_turns=True)["turns"]
+            self.assertEqual([turn["id"] for turn in history],[seeded])
+            self.assertIn("prior-parent",child.inherited_delivery_ids)
+            self.assertEqual([turn["id"] for turn in host.thread(parent,include_turns=True)["turns"]],[seeded])
+            empty = native("thread/read",{"threadId":new["session"],"includeTurns":False})["thread"]
+            self.assertEqual(empty["name"],new["title"])
+            lose_creation = True
+            for _ in range(3):
+                with self.assertRaisesRegex(Fault,"native_creation_unconfirmed"):
+                    reopened.prepare(parent,unknown,"new")
+            self.assertEqual([method for method,_sid in allocated],["thread/start","thread/fork","thread/start"])
+            self.assertEqual(len({sid for _method,sid in allocated}),3)
+            self.assertEqual(len(self.provider.observed),1)
+
+        with isolated_app_server(root,self.origin) as rpc:
+            host = AppServerHost(rpc,parent)
+            after_restart = CodexThreadPreparation(host,root,db)
+            self.assertEqual(after_restart.prepare(parent,new_id,"new"),new)
+            self.assertEqual(after_restart.prepare(parent,fork_id,"fork"),fork)
+            with self.assertRaisesRegex(Fault,"native_creation_unconfirmed"):
+                after_restart.prepare(parent,unknown,"new")
+            observed = host.request("thread/read",{"threadId":new["session"],"includeTurns":False})["thread"]
+            self.assertEqual((observed["id"],observed["status"]["type"]),(new["session"],"notLoaded"))
+        self.assertEqual(len(self.provider.observed),1)
+        self.evidence = {"parent":parent,"parent_turn":seeded,"new":new,"fork":fork,"native_creations":allocated,
+            "unknown_receipt_operation":unknown,"unknown_retries":4,"automatic_model_calls":0,
+            "scope":"Installed independent Codex App Server, loopback model fixture and temporary profile"}
+
+    @unittest.skipUnless(shutil.which("openssl"),"isolated TLS certificate generator required")
+    def test_prepare_sessions_cli_uses_authenticated_pinned_adapter_and_replays_after_restart(self):
+        root = Path(self.root).resolve()
+        profile,project = root/"prepare-profile",root/"prepare-workspace"
+        profile.mkdir(mode=0o700)
+        project.mkdir(mode=0o700)
+        self.local_profile(profile)
+        package = Path(__file__).resolve().parents[1]
+        provisioned = subprocess.run(self.provision_command(profile,project),cwd=package,capture_output=True,text=True,
+                                     timeout=30,check=True)
+        parent = json.loads(provisioned.stdout)["thread_id"]
+        self.assertEqual(len(self.provider.observed),1)
+        worker,foreign = guid(),guid()
+        roles = config(root,"prepare-adapter-roles.json",{worker:"worker/oguri",foreign:"worker/other"})
+        # No model or public display event is expected during preparation.
+        callback = config(root,"prepare-to-unused-test-worker.json",{"url":"http://127.0.0.1:1","token":guid()})
+        cert,key = root/"prepare.crt",root/"prepare.key"
+        subprocess.run(["openssl","req","-x509","-newkey","rsa:2048","-nodes","-days","1","-subj","/CN=localhost",
+                        "-addext","subjectAltName=IP:127.0.0.1","-out",cert,"-keyout",key],
+                       capture_output=True,timeout=10,check=True)
+        flags = ("--worker-id","oguri","--session",parent,"--worker-connection",callback,"--codex-binary",CODEX,
+                 "--codex-profile",profile,"--cwd",project)
+        db = root/"preparation-adapter.db"
+        op = guid()
+        with serve(package,"codex-adapter",db,roles,cert,key,dict(os.environ),flags) as url:
+            initial = RemoteAdapter(Client(url,worker,cert),parent)
+            self.assertNotIn("session_preparation",initial.session_info())
+            with self.assertRaisesRegex(Fault,"native_preparation_unavailable"):
+                initial.prepare_thread(parent,op,"new")
+        enabled = (*flags,"--prepare-sessions")
+        with serve(package,"codex-adapter",db,roles,cert,key,dict(os.environ),enabled) as url:
+            client = Client(url,worker,cert)
+            remote = RemoteAdapter(client,parent)
+            self.assertTrue(remote.session_info()["session_preparation"])
+            with self.assertRaisesRegex(Fault,"native_preparation_unavailable"):
+                client.request("POST","host/prepare-thread",{"operation_id":op,"kind":"new"})
+            with self.assertRaisesRegex(Fault,"adapter_identity_unconfirmed"):
+                RemoteAdapter(Client(url,foreign,cert),parent).prepare_thread(parent,op,"new")
+            wrong = guid()
+            with self.assertRaisesRegex(Fault,"wrong_native_session"):
+                RemoteAdapter(client,wrong).prepare_thread(wrong,op,"new")
+            with self.assertRaisesRegex(Fault,"invalid_native_preparation"):
+                remote.prepare_thread(parent,op,"delete")
+            new = remote.prepare_thread(parent,op,"new")
+            self.assertEqual(remote.prepare_thread(parent,op,"new"),new)
+            self.assertEqual(remote.session_info()["session"],parent)
+        with serve(package,"codex-adapter",db,roles,cert,key,dict(os.environ),enabled) as url:
+            remote = RemoteAdapter(Client(url,worker,cert),parent)
+            self.assertEqual(remote.prepare_thread(parent,op,"new"),new)
+            self.assertEqual(remote.session_info()["session"],parent)
+        self.assertEqual(len(self.provider.observed),1)
+        with closing(sqlite3.connect(db)) as ledger:
+            self.assertEqual(ledger.execute("SELECT state,native_session FROM codex_thread_preparations").fetchall(),
+                             [("prepared",new["session"])])
+
+        # The prepared native ID can be enrolled as a separate test adapter with its own callback identity.
+        clock = Clock()
+        loop = self.enterContext(Loop.isolated(clock))
+        initial_session,child = loop.native.session,new["session"]
+        source_token,platform_token,cold_callback,warm_callback = (guid() for _ in range(4))
+        initial_url = self.enterContext(running(serve_adapter(loop.adapter,"oguri",{source_token:"worker/oguri"},
+                                                             ("127.0.0.1",0),None)))
+        initial = RemoteAdapter(Client(initial_url,source_token),initial_session)
+        target = RemoteAdapter(None,child)
+        rebuilt = Worker(root/"enrolled-worker.db","oguri",loop.wire,initial,clock=clock,resume_targets={child:target})
+        gateway = WorkerService(rebuilt,clock)
+        gateway_url = self.enterContext(running(gateway.listen({platform_token:"platform/oguri",
+            cold_callback:"adapter/oguri/"+child,warm_callback:"adapter/oguri/"+initial_session},("127.0.0.1",0),None)))
+        incoming = Client(gateway_url,platform_token)
+        enrolled = config(root,"enrolled-callback.json",{"url":gateway_url,"token":cold_callback})
+        child_flags = ("--worker-id","oguri","--session",child,"--worker-connection",enrolled,"--codex-binary",CODEX,
+                       "--codex-profile",profile,"--cwd",project,"--resume-on-handoff")
+        with serve(package,"codex-adapter",root/"enrolled-adapter.db",roles,cert,key,dict(os.environ),child_flags) as url:
+            target.client = Client(url,worker,cert)
+            self.assertEqual(target.session_info()["native_load_state"],"cold")
+            gateway.step()
+            select = {"message_id":"om_choose_prepared_test_child","text":"/resume "+child}
+            binding = incoming.request("POST","worker/command",select)
+            self.assertEqual(binding["receipt"]["binding_receipt"]["session"],child)
+            self.assertEqual(incoming.request("POST","worker/command",select),binding)
+            self.assertEqual(len(self.provider.observed),1)
+            tid = loop.hermes.create(guid(),"Adopted test child","Return one native result","oguri")["task_id"]
+            gateway.step()
+            clock.advance(10)
+            deadline = time.monotonic()+10
+            while time.monotonic()<deadline:
+                gateway.step()
+                order = loop.hermes.inspect(tid)
+                if order["task"]["state"]=="completed_reported" and not target.busy():
+                    break
+                time.sleep(.04)
+            self.assertEqual(order["task"]["state"],"completed_reported")
+            aid = order["last_report"]["assignment_id"]
+            self.assertEqual(rebuilt.assignment_session(aid),child)
+            self.assertIsNone(rebuilt.hold()["held_assignment_id"])
+            notice, = loop.manager_wire.frames(0)
+            self.assertEqual(notice["payload"]["task_id"],tid)
+        with start_app_server(CODEX,profile,project) as rpc:
+            rpc.request("thread/resume",{"threadId":child,"cwd":str(project)})
+            native = AppServerHost(rpc,child).thread(child,include_turns=True)["turns"]
+            turn, = native
+            calls = [item["id"] for item in turn["items"] if item["type"]=="dynamicToolCall" and item["tool"]=="worker_report"]
+            self.assertEqual(len(calls),2)
+        self.evidence = {"prepared":new,"adoption":binding["receipt"]["binding_receipt"],"native_turn":turn["id"],
+            "native_worker_reports":calls,"task_id":tid,"assignment_id":aid,"notification_id":notice["delivery_id"],
+            "scope":"Actual isolated App Server and TLS adapters. An explicit second adapter enrolls the prepared thread. Model is a fixture."}
 
     def test_native_app_server_reconnect_recovers_input_before_w04_without_new_model_call(self):
         with isolated_app_server(self.root,self.origin) as rpc:

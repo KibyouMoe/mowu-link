@@ -48,6 +48,8 @@ OPTIONAL_AGENT_PENDING = {
     "dsh_approval_closures": ({"dsh_approvals"},"SELECT COUNT(*) FROM dsh_approvals WHERE closure IS NULL"),
     "codex_public_events": ({"codex_display_live"},"SELECT COUNT(*) FROM codex_display_live WHERE sent=0"),
     "codex_public_turns": ({"codex_display_turns"},"SELECT COUNT(*) FROM codex_display_turns WHERE sent=0"),
+    "codex_session_preparations": ({"codex_thread_preparations"},
+                                  "SELECT COUNT(*) FROM codex_thread_preparations WHERE state<>'prepared'"),
 }
 WORKER_ADMISSION_PENDING = {
     "local_admission_handoffs": ({"native_handoff_admission"},"""SELECT COUNT(*) FROM native_handoff_admission

@@ -89,6 +89,7 @@ def serve(args,stack):
         from .codex_app_server import AppServerHost, worker_callbacks
         from .codex_display import CodexDisplay
         from .codex_rpc import require_test_account, start_app_server
+        from .codex_thread_preparation import CodexThreadPreparation
         from .native_files import NativeFiles
         client = connection(args.worker_connection)
         rpc = stack.enter_context(start_app_server(args.codex_binary,args.codex_profile,args.cwd))
@@ -104,9 +105,10 @@ def serve(args,stack):
         adapter = HostAdapter(args.db,native,args.session,media)
         display = CodexDisplay(adapter,client)
         activation = CodexActivation(native,args.cwd,args.db,display.initialize) if args.resume_on_handoff else None
+        preparation = CodexThreadPreparation(native,args.cwd,args.db) if args.prepare_sessions else None
         callbacks = worker_callbacks(native,client,display.wake.set,display.observe,display.observe_terminal)
         public_output = display.run(deferred=activation is not None)
-        listener = serve_adapter(adapter,args.worker_id,identities,address,ctx,activation=activation)
+        listener = serve_adapter(adapter,args.worker_id,identities,address,ctx,activation=activation,preparation=preparation)
     else:
         targets = {}
         if args.resume_targets:
@@ -178,6 +180,8 @@ def main():
                                    help="owner-private directory of approved, shareable native images")
             component.add_argument("--relay-command-approvals",action="store_true",
                                    help="relay one-time command decisions through the configured Router operator")
+            component.add_argument("--prepare-sessions",action="store_true",
+                                   help="allow authenticated preparation of independent read-only Codex sessions")
         if name == "worker":
             component.add_argument("--router-connection",required=True,type=Path)
             component.add_argument("--adapter-connection",required=True,type=Path)
