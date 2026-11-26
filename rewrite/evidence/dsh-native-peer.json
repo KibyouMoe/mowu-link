@@ -1,30 +1,40 @@
 {
-  "letter": "29dbe7ef-ee1c-4497-a70e-94353b342c59",
+  "letter": "f2cabeca-9b68-41a7-9b97-e032624cdd08",
   "host_input": {
-    "delivery_id": "4d132d35-4f85-49bc-a0c9-893b0adf758a",
-    "digest": "f1dc43fa76070b69b4677ef624748e7f756ae784707ed4452a49c38e5d7e8eef",
+    "delivery_id": "b4196469-6252-484a-a188-6100d1469da8",
+    "digest": "ae656656791cfce76ab2cbe231cd51200bb46baf11deb98d047767bca84717a2",
     "media_sha256": [
       "e77617115ffe6399c0f4714c72aa32eefeb22fbdf45b1167a4ddb64e213b4007"
     ],
-    "native_id": "mowulink-b8ba784d10ae603eab58828030686a47af606c3a9cd611c44bd683ac622ad644",
+    "native_id": "mowulink-12fbb019e4e1d8c9d70ad4b635bc6d9f3fdc13914474420533859de7d41b0be7",
     "session": "dsh-native-peer",
     "turn_id": "1/1"
   },
   "peer_reception": {
     "accepted_at": "2027-01-15T08:00:00+00:00",
-    "delivery_id": "4d132d35-4f85-49bc-a0c9-893b0adf758a",
-    "host_receipt_id": "3c615862-d0b4-59ad-add3-6e620c399c57",
+    "delivery_id": "b4196469-6252-484a-a188-6100d1469da8",
+    "host_receipt_id": "023fa5b2-14c8-58f5-b07c-d154f01ff507",
     "host_receipt_recorded_at": "2027-01-15T08:00:05+00:00",
-    "message_id": "29dbe7ef-ee1c-4497-a70e-94353b342c59",
+    "message_id": "f2cabeca-9b68-41a7-9b97-e032624cdd08",
     "recipient": "oguri",
     "sender": "tama",
     "worker_received": true
   },
   "actual_tool_call": "peer-native-reply",
+  "directory_call": "peer-native-directory",
+  "native_directory": {
+    "items": [
+      {
+        "online": true,
+        "worker_id": "tama"
+      }
+    ],
+    "next_cursor": null
+  },
   "native_status_call": "peer-native-status",
   "native_status_before_host_receipt": {
     "accepted_at": "2027-01-15T08:00:00+00:00",
-    "delivery_id": "4d132d35-4f85-49bc-a0c9-893b0adf758a",
+    "delivery_id": "b4196469-6252-484a-a188-6100d1469da8",
     "host_receipt_id": null,
     "host_receipt_recorded_at": null,
     "local_pending": [
@@ -35,7 +45,7 @@
         "retry_at": 1800000005
       }
     ],
-    "message_id": "29dbe7ef-ee1c-4497-a70e-94353b342c59",
+    "message_id": "f2cabeca-9b68-41a7-9b97-e032624cdd08",
     "recipient": "oguri",
     "sender": "tama",
     "status": "accepted",
@@ -46,13 +56,13 @@
     "message_id": "c646e34d-00ac-5ee9-96a5-e1a680e82512",
     "status": "accepted"
   },
-  "reply_to": "29dbe7ef-ee1c-4497-a70e-94353b342c59",
+  "reply_to": "f2cabeca-9b68-41a7-9b97-e032624cdd08",
   "reply_recipient_receipt": {
-    "delivery_id": "d0376428-49ac-4a88-bf8f-2fbce39e540c",
-    "digest": "5aa78a9fd81c8b1b10841cadba5f5993337062f7a7b16e721d2f38949d7387ab",
-    "native_id": "d490537b-8033-4ca2-85d5-295ffc8b9b7d",
+    "delivery_id": "27c0b60e-c3a7-4f27-bc47-ae68c2a98938",
+    "digest": "d6a02ad0c8d3a78cd23e6b5ba0c1467189e2392910875b36ccfbf16c9dc14dbe",
+    "native_id": "61934d29-ad55-4df1-9e13-a751e3cbb42d",
     "session": "test-sending-host",
-    "turn_id": "c57262a2-e872-46c1-8e86-6f1d8e9d4d02"
+    "turn_id": "77340388-a97f-4a0e-b54b-6137b3917965"
   },
   "image": {
     "sha256": "e77617115ffe6399c0f4714c72aa32eefeb22fbdf45b1167a4ddb64e213b4007",

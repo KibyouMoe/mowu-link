@@ -33,6 +33,15 @@ def route(orders, actor, method, path, body, headers):
         with orders.db.transaction() as db:
             result = legacy_history.query(db,parts[1],{k:v[0] for k,v in filters.items()})
         return 200,"application/json",result
+    if method=="GET" and parts==["peers","workers"]:
+        require(actor.startswith("worker/"),403,"forbidden")
+        viewer = actor.split("/",1)[1]
+        filters = parse_qs(url.query,keep_blank_values=True)
+        require(all(len(v)==1 for v in filters.values()),422,"duplicate_filter")
+        with orders.db.transaction() as db:
+            require(db.execute("SELECT 1 FROM workers WHERE worker_id=?",(viewer,)).fetchone(),403,"unregistered_worker")
+            result = orders.list_records(db,"workers",{k:v[0] for k,v in filters.items()},peers_for=viewer)
+        return 200,"application/json",result
     orders.tick()
     if method=="GET" and len(parts)==3 and parts[:2]==["peers","messages"]:
         require(actor.startswith("worker/"),403,"forbidden")

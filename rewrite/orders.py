@@ -125,14 +125,19 @@ class Orders:
             self.dispatch(db, worker)
         return task(db, tid)
 
-    def list_records(self, db, table, filters):
+    def list_records(self, db, table, filters, *, peers_for=None):
         allowed = {"workers": {"online", "worker_id"}, "tasks": {"assignee_id", "state", "pool", "unassigned"},
                    "questions": {"task_id", "question_id", "pending"}, "messages": {"message_id", "level", "source", "since"}}
         require(table in allowed and set(filters) <= allowed[table] | {"limit", "cursor"}, 422, "invalid_filter")
+        if peers_for is not None:
+            require(table=="workers" and set(filters)<={"limit","cursor","online"},422,"invalid_peer_filters")
         cursor, limit = filters.get("cursor", "0"), filters.get("limit", "50")
         require(re.fullmatch(r"[0-9]{1,18}", cursor) and re.fullmatch(r"[0-9]{1,3}", limit)
                 and 1 <= int(limit) <= 200, 422, "invalid_pagination")
         clauses, args = ["rowid > ?"], [int(cursor)]
+        if peers_for is not None:
+            clauses.append("worker_id<>?")
+            args.append(peers_for)
         for field, value in filters.items():
             if field in ("assignee_id", "state", "worker_id", "task_id", "question_id", "message_id", "level", "source"):
                 clauses.append(field + " = ?")
@@ -162,6 +167,8 @@ class Orders:
             items = [questions.public({k: r[k] for k in r.keys() if k != "cursor_id"}) for r in page]
         elif table == "messages":
             items = [messages.public(db,r) for r in page]
+        elif peers_for is not None:
+            items = [{"worker_id":r["worker_id"],"online":self.clock()-r["last_seen"]<self.lease_seconds} for r in page]
         else:
             items = [{"worker_id": r["worker_id"], "online": self.clock() - r["last_seen"] < self.lease_seconds,
                       "busy": bool(r["busy"]), "held_task_id": r["held_task_id"],

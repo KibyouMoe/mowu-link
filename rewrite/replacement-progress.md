@@ -4,6 +4,8 @@
 
 ## 检查点与证据
 
+DSH 原生 `worker_list_peers` 已验证可读到登记的对端，再用原生工具回复对方。独立 Router 验了分页、在线筛选、未登记身份拒绝，以及查询结果无工单或持单字段。管理查询权限照旧。复跑 `python3 -m unittest -v rewrite.test_peers.Peers.test_only_registered_peers_see_worker_ids_without_task_ownership rewrite.test_dsh_native_loop.NativeLoop.test_dsh_peer_image_and_native_reply_travel_on_the_same_private_chain`。[原生目录与私聊记录](evidence/dsh-native-peer.json)。模型为本地驱动。
+
 真实 DSH 收到 Router 的搁置通知后，通过原生 `worker_submit_material` 留下一份文字候选。同一工单的迟到 W04 仍回 409，正式报告为空，交材料时持权留在 Router。转给另一测试工位后，原调用只取原材料号，新调用拒绝，第二派发仍由新工位持有，待清理仍指向第一派发。连续 12 次通过。复跑 `python3 -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_shelved_dsh_assignment_submits_candidate_without_changing_ownership rewrite.test_pool rewrite.test_work_files`。[原生记录](evidence/dsh-native-material.json)。第二工位宿主与模型为夹具。附件候选由独立协议回归覆盖。
 
 DSH 原生 `worker_peer_status` 回读 Router 收件、Worker 入箱及原生回执。真 DSH 工具实测，原生回包丢失时先见前两层，第三层为空；后台续办后才有原生确认。另以系统级夹具从发送前断线复跑，工具返回原消息号和 pending，对端读不到该未入账记录。重复查询不补发。复跑 `python3 -m unittest -v rewrite.test_peers.Peers.test_agent_can_read_pending_outgoing_message_without_claiming_acceptance rewrite.test_dsh_native_loop.NativeLoop.test_dsh_peer_image_and_native_reply_travel_on_the_same_private_chain`。

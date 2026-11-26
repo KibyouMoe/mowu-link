@@ -119,5 +119,19 @@
       },
       "required": ["task_id", "assignment_id"]
     }
+  },
+  {
+    "name": "worker_list_peers",
+    "description": "List other registered Worker IDs available to contact. The directory reports whether each Worker connection is online and does not show their assignments.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "online": {"type": "boolean"},
+        "cursor": {"type": "string"},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 200}
+      },
+      "required": []
+    }
   }
 ]

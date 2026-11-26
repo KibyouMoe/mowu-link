@@ -46,7 +46,7 @@ class DshSdk(unittest.TestCase):
         self.ready = self.read()
         self.assertTrue(self.ready["ready"])
         self.assertEqual(set(self.ready["names"]),{"worker_report","worker_ask","worker_send_peer",
-                                                   "worker_peer_status","worker_submit_material"})
+                                                   "worker_peer_status","worker_submit_material","worker_list_peers"})
         self.assertEqual(self.ready["globalNames"],[])
         self.clock = Clock()
         def host(_path,_name):

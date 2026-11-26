@@ -318,6 +318,29 @@ class Peers(unittest.TestCase):
         self.assertIsNotNone(confirmed["host_receipt_id"])
         self.assertEqual([body["message_id"] for body,_proof in self.host.entries()],[mid])
 
+    def test_only_registered_peers_see_worker_ids_without_task_ownership(self):
+        path = "peers/workers"
+        with self.assertRaisesRegex(Fault,"unregistered_worker"):
+            self.loop.extra_clients["other"].request("GET",path)
+        with self.assertRaisesRegex(Fault,"forbidden"):
+            self.loop.manager_wire.request("GET",path)
+        with self.assertRaisesRegex(Fault,"forbidden"):
+            self.a.router.request("GET","workers")
+        other = Worker(self.loop.root/"unavailable-worker.db","other",self.loop.extra_clients["other"],self.a.adapter)
+        other.connect()
+        self.clock.advance(31)
+        self.a.connect()
+        self.b.connect()
+        first = self.a.router.request("GET",path+"?limit=1")
+        self.assertEqual(first["items"],[{"worker_id":"tama","online":True}])
+        page = self.a.router.request("GET",path+"?cursor="+first["next_cursor"])
+        self.assertEqual(page,{"items":[{"worker_id":"other","online":False}],"next_cursor":None})
+        self.assertEqual(self.a.router.request("GET",path+"?online=false"),page)
+        self.assertEqual(self.a.router.request("GET",path+"?online=true")["items"],first["items"])
+        with self.assertRaisesRegex(Fault,"invalid_peer_filters"):
+            self.a.router.request("GET",path+"?worker_id=tama")
+        self.assertFalse(self.loop.hermes.tasks()["items"])
+
     def test_lost_receipt_does_not_starve_another_confirmation(self):
         first,second = guid(),guid()
         self.a.send_peer(first,"tama","one")

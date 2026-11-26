@@ -1,7 +1,7 @@
 """Long-lived Worker state and narrow authenticated callbacks from its bound services."""
 from threading import Event, Lock, Thread
 import time
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 from urllib.error import URLError
 from uuid import NAMESPACE_URL, uuid5
 
@@ -145,14 +145,16 @@ class WorkerService:
                 call = string(body,"call_id")
                 key = "candidate-"+str(uuid5(NAMESPACE_URL,encode([w.worker_id,session,turn,call])))
                 result = w.submit_material(session,native,key,args)
-            elif body.get("tool") in ("worker_send_peer","worker_peer_status"):
+            elif body.get("tool") in ("worker_send_peer","worker_peer_status","worker_list_peers"):
                 self.require_peer_origin(session,native)
                 if body["tool"] == "worker_send_peer":
                     result = self.send_native_peer(session,turn,string(body,"call_id"),args)
-                else:
+                elif body["tool"] == "worker_peer_status":
                     require(set(args)=={"message_id"},422,"invalid_arguments")
                     result = self.peer_status(string(args,"message_id"))
                     result.setdefault("status","accepted")
+                else:
+                    result = self.peer_directory(args)
             else:
                 require(body.get("tool") == "worker_report" and set(args) <= {"task_id","assignment_id","summary","outcome","artifact_ids"},
                         422,"unsupported_native_tool")
@@ -255,6 +257,16 @@ class WorkerService:
         if result["recipient"]==w.worker_id:
             result["local_pending"] = peer_retry.waiting(w,mid)
         return result
+
+    def peer_directory(self,args):
+        require(set(args)<={"online","cursor","limit"},422,"invalid_peer_filters")
+        query = dict(args)
+        if "online" in query:
+            require(type(query["online"]) is bool,422,"invalid_peer_filters")
+            query["online"] = str(query["online"]).lower()
+        require(type(query.get("limit",1)) is int and isinstance(query.get("cursor","0"),str),
+                422,"invalid_peer_filters")
+        return self.worker.router.request("GET","peers/workers?"+urlencode(query))
 
     def listen(self, identities, address, ctx):
         return serve_authenticated(identities,address,ctx,self.handle)
