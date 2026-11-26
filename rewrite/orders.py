@@ -3,7 +3,7 @@ import json
 import re
 import time
 
-from . import cleanup, delivery, pool, questions
+from . import attachments, cleanup, delivery, messages, pool, questions
 from .storage import Database, encode, guid, require, string, timestamp
 
 SCHEMA = """
@@ -49,7 +49,8 @@ def held_pair(data):
 
 class Orders:
     def __init__(self, path, clock=time.time, poll_seconds=5, lease_seconds=30):
-        self.db = Database(path, SCHEMA + delivery.SCHEMA + pool.SCHEMA + cleanup.SCHEMA + questions.SCHEMA)
+        self.db = Database(path, SCHEMA + delivery.SCHEMA + pool.SCHEMA + cleanup.SCHEMA + questions.SCHEMA
+                           + attachments.SCHEMA + messages.SCHEMA)
         self.clock = clock
         self.poll_seconds = poll_seconds
         self.lease_seconds = lease_seconds
@@ -120,15 +121,18 @@ class Orders:
 
     def list_records(self, db, table, filters):
         allowed = {"workers": {"online", "worker_id"}, "tasks": {"assignee_id", "state", "pool", "unassigned"},
-                   "questions": {"task_id", "question_id", "pending"}}
+                   "questions": {"task_id", "question_id", "pending"}, "messages": {"message_id", "level", "source", "since"}}
         require(table in allowed and set(filters) <= allowed[table] | {"limit", "cursor"}, 422, "invalid_filter")
         cursor, limit = filters.get("cursor", "0"), filters.get("limit", "50")
         require(re.fullmatch(r"[0-9]{1,18}", cursor) and re.fullmatch(r"[0-9]{1,3}", limit)
                 and 1 <= int(limit) <= 200, 422, "invalid_pagination")
         clauses, args = ["rowid > ?"], [int(cursor)]
         for field, value in filters.items():
-            if field in ("assignee_id", "state", "worker_id", "task_id", "question_id"):
+            if field in ("assignee_id", "state", "worker_id", "task_id", "question_id", "message_id", "level", "source"):
                 clauses.append(field + " = ?")
+                args.append(value)
+            elif field == "since":
+                clauses.append("julianday(received_at) >= julianday(?)")
                 args.append(value)
             elif field == "pool":
                 require(value == "blocked", 422, "invalid_pool")
@@ -150,6 +154,8 @@ class Orders:
             items = [task(db, row["task_id"]) for row in page]
         elif table == "questions":
             items = [questions.public({k: r[k] for k in r.keys() if k != "cursor_id"}) for r in page]
+        elif table == "messages":
+            items = [messages.public(r) for r in page]
         else:
             items = [{"worker_id": r["worker_id"], "online": self.clock() - r["last_seen"] < self.lease_seconds,
                       "busy": bool(r["busy"]), "held_task_id": r["held_task_id"],

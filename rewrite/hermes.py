@@ -32,6 +32,9 @@ class HermesAdapter:
     def questions(self, **filters):
         return self.router.request("GET", "questions?" + urlencode(filters))
 
+    def messages(self, **filters):
+        return self.router.request("GET", "messages?" + urlencode(filters))
+
     def answer(self, key, task_id, question_id, answer):
         return self.router.request("PUT", f"questions/{question_id}/answer",
                                    {"task_id": task_id, "answer": answer}, key)
@@ -58,7 +61,7 @@ class HermesAdapter:
             cursor = db.execute("SELECT cursor FROM progress").fetchone()[0]
         for frame in self.router.frames(cursor):
             p = frame["payload"]
-            require(frame["kind"] == "message.deliver" and p["level"] == "Notify", 422, "unsupported_delivery")
+            require(frame["kind"] == "message.deliver" and p["level"] in ("Notify", "Event"), 422, "unsupported_delivery")
             with self.db.transaction() as db:
                 db.execute("INSERT OR IGNORE INTO queue(message_id,payload) VALUES (?,?)",
                            (p["message_id"], encode(p)))
@@ -66,10 +69,11 @@ class HermesAdapter:
             with self.db.transaction() as db:
                 db.execute("UPDATE progress SET cursor=MAX(cursor,?)", (ack["confirmed_cursor"],))
         self.activity(self.host.busy())
-        if self.idle_since is None or self.clock() - self.idle_since < 10:
-            return None
         with self.db.transaction() as db:
-            row = db.execute("SELECT * FROM queue WHERE receipt IS NULL ORDER BY rowid LIMIT 1").fetchone()
+            row = db.execute("""SELECT * FROM queue WHERE receipt IS NULL
+                        AND (json_extract(payload,'$.level')='Event' OR ?)
+                        ORDER BY (json_extract(payload,'$.level')='Event') DESC,rowid LIMIT 1""",
+                        (self.idle_since is not None and self.clock()-self.idle_since >= 10,)).fetchone()
         if row:
             receipt = self.host.deliver(row["message_id"], json.loads(row["payload"]))
             if receipt:

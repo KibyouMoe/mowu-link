@@ -75,17 +75,20 @@ def agent_report(worker, native_id, args):
 
 
 class Loop:
-    def __init__(self, root, clock, host_factory, extra_workers=()):
+    def __init__(self, root, clock, host_factory, extra_workers=(), trigger_ids=()):
         self.root = Path(root)
         self.orders = Orders(self.root / "router.db", clock, poll_seconds=1)
         worker_token, manager_token = guid(), guid()
         tokens = {name: guid() for name in extra_workers}
         identities = {token: worker_actor(name) for name, token in tokens.items()}
+        sources = {instance: guid() for instance in trigger_ids}
+        identities.update({token: "trigger/" + instance for instance, token in sources.items()})
         self.server = serve_loopback(self.orders, {**identities, worker_token: worker_actor("oguri"), manager_token: "hermes"})
         url = "http://127.0.0.1:" + str(self.server.server_port)
         self.wire = Client(url, worker_token)
         self.manager_wire = Client(url, manager_token)
         self.extra_clients = {name: Client(url, token) for name, token in tokens.items()}
+        self.trigger_clients = {instance: Client(url, token) for instance, token in sources.items()}
         self.native = host_factory(self.root / "fixture-agent.db", "test-agent-session")
         self.hermes_native = FixtureHost(self.root / "fixture-hermes.db", "test-manager-session")
         self.adapter = HostAdapter(self.root / "agent-adapter.db", self.native, self.native.session)
@@ -97,9 +100,9 @@ class Loop:
 
     @classmethod
     @contextmanager
-    def isolated(cls, clock=time.time, host_factory=FixtureHost, extra_workers=()):
+    def isolated(cls, clock=time.time, host_factory=FixtureHost, extra_workers=(), trigger_ids=()):
         with tempfile.TemporaryDirectory(prefix="mowulink-mainline-") as root:
-            loop = cls(root, clock, host_factory, extra_workers)
+            loop = cls(root, clock, host_factory, extra_workers, trigger_ids)
             loop.thread.start()
             try:
                 yield loop

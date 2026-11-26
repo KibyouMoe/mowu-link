@@ -7,7 +7,7 @@ from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlsplit
 from urllib.request import ProxyHandler, Request, build_opener
 
-from . import delivery, pool, questions
+from . import attachments, delivery, messages, pool, questions
 from .orders import task, worker_actor
 from .storage import Fault, encode, require
 
@@ -17,7 +17,25 @@ def route(orders, actor, method, path, body, headers):
     parts = url.path.removeprefix("/v1/").split("/")
     require(path.startswith("/v1/"), 404, "unknown_route")
     orders.tick()
-    if method == "GET" and parts in (["tasks"], ["workers"], ["questions"]):
+    if parts[0] == "uploads":
+        require(actor.startswith(("trigger/", "worker/")), 403, "forbidden")
+        if parts == ["uploads"] and method == "POST":
+            result = orders.write(actor, headers.get("Idempotency-Key"), [method, path], body,
+                                  lambda db: attachments.begin(db, actor, body))
+            return 201, "application/json", result
+        if len(parts) == 2 and method in ("GET", "PATCH"):
+            with orders.db.transaction() as db:
+                if method == "GET":
+                    result = attachments.progress(attachments.owned(db, actor, parts[1]))
+                else:
+                    result = attachments.append(db, actor, parts[1], headers.get("Upload-Offset"), body)
+            return 200, "application/json", result
+    if len(parts) == 2 and parts[0] == "attachments" and method == "GET":
+        with orders.db.transaction() as db:
+            row = attachments.authorize(db, actor, parts[1])
+            result = attachments.Download(orders.db, row, headers.get("Range"))
+        return (206 if "Content-Range" in result.headers else 200), "application/octet-stream", result
+    if method == "GET" and parts in (["tasks"], ["workers"], ["questions"], ["messages"]):
         require(actor == "hermes", 403, "forbidden")
         query = parse_qs(url.query, keep_blank_values=True)
         require(all(len(v) == 1 for v in query.values()), 422, "duplicate_filter")
@@ -50,6 +68,9 @@ def route(orders, actor, method, path, body, headers):
             require(actor == "hermes", 403, "forbidden")
             status = 201
             execute = lambda db: orders.create(db, body)
+        case "POST", ["messages"]:
+            require(actor.startswith("trigger/"), 403, "forbidden")
+            execute = lambda db: messages.submit(db, actor, body, orders.clock())
         case "POST", ["tasks", tid, "actions"]:
             require(actor == "hermes", 403, "forbidden")
             execute = lambda db: orders.act(db, tid, body)
@@ -100,8 +121,13 @@ def serve_loopback(orders, identities):
                 if self.command != "GET":
                     length = self.headers.get("Content-Length", "")
                     require(length.isdecimal() and 0 < int(length) <= 1024 * 1024, 422, "invalid_length")
-                    body = json.loads(self.rfile.read(int(length)))
-                    require(isinstance(body, dict), 422, "invalid_body")
+                    data = self.rfile.read(int(length))
+                    if self.command == "PATCH" and urlsplit(self.path).path.startswith("/v1/uploads/"):
+                        require(self.headers.get_content_type() == "application/octet-stream", 415, "invalid_media_type")
+                        body = data
+                    else:
+                        body = json.loads(data)
+                        require(isinstance(body, dict), 422, "invalid_body")
                 status, content_type, response = route(orders, actor, self.command, self.path, body, self.headers)
             except (ValueError, UnicodeError):
                 error = Fault(422, "invalid_json")
@@ -111,7 +137,19 @@ def serve_loopback(orders, identities):
                 error = None
             if error:
                 status, content_type = error.status, "application/json"
-                response = {"error": {"code": error.code, "message": str(error), "retryable": error.retryable}}
+                response = {"error": {"code": error.code, "message": str(error), "retryable": error.retryable, **error.details}}
+            if isinstance(response, attachments.Download):
+                self.send_response(status)
+                self.send_header("Content-Type", content_type)
+                for key, value in response.headers.items():
+                    self.send_header(key, value)
+                self.send_header("Content-Length", str(response.length))
+                self.end_headers()
+                try:
+                    response.write_to(self.wfile)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+                return
             raw = response if isinstance(response, bytes) else encode(response).encode()
             self.send_response(status)
             self.send_header("Content-Type", content_type)
@@ -144,7 +182,10 @@ class Client:
     def request(self, method, path, body=None, key=None, headers=None):
         hdr = {"Authorization": "Bearer " + self.token, **(headers or {})}
         raw = None
-        if body is not None:
+        if isinstance(body, bytes):
+            hdr["Content-Type"] = "application/octet-stream"
+            raw = body
+        elif body is not None:
             hdr["Content-Type"] = "application/json"
             raw = encode(body).encode()
         if key:
@@ -153,13 +194,16 @@ class Client:
         try:
             with self.http.open(req, timeout=5) as response:
                 raw = response.read()
+                if response.headers.get_content_type() == "application/octet-stream":
+                    return {"bytes": raw, "status": response.status, "headers": dict(response.headers)}
                 if response.headers.get_content_type() == "text/event-stream":
                     return [json.loads(line[6:]) for line in raw.splitlines() if line.startswith(b"data: ")]
                 return json.loads(raw)
         except HTTPError as exc:
             with exc:
                 error = json.load(exc)["error"]
-            raise Fault(exc.code, error["code"], error["retryable"]) from exc
+            raise Fault(exc.code, error["code"], error["retryable"],
+                        {k:v for k,v in error.items() if k not in ("code","message","retryable")}) from exc
 
     def frames(self, cursor):
         return self.request("GET", "deliveries/stream", headers={"Accept": "text/event-stream",

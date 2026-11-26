@@ -19,11 +19,12 @@ def timestamp(seconds):
 
 
 class Fault(Exception):
-    def __init__(self, status, code, retryable=False):
+    def __init__(self, status, code, retryable=False, details=None):
         super().__init__(code)
         self.status = status
         self.code = code
         self.retryable = retryable
+        self.details = details or {}
 
 
 def require(condition, status, code):
