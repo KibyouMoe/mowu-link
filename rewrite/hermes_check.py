@@ -7,6 +7,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 
 from .devloop import Loop
@@ -58,6 +59,18 @@ def run(python, source, host_input=False):
             return isolated(python,source,host_input,root,temp,trigger,loop)
 
 
+def tracked_runtime(source,checkout):
+    # Keep installed user configuration and untracked .env files out of the rehearsal.
+    checkout.mkdir()
+    archive = checkout.parent / "tracked.tar"
+    revision = subprocess.check_output(["git","-C",str(source),"rev-parse","HEAD"],text=True).strip()
+    subprocess.run(["git","-C",str(source),"archive","--output",str(archive),revision],check=True)
+    with tarfile.open(archive) as files:
+        files.extractall(checkout,filter="data")
+    archive.unlink()
+    return revision
+
+
 def isolated(python,source,host_input,root,temp,trigger,loop):
     profile = temp / "profile"
     plugin = profile / "plugins" / "mowulink_manager"
@@ -78,16 +91,8 @@ def isolated(python,source,host_input,root,temp,trigger,loop):
             trigger.send(client,mid)
     (profile / "config.yaml").write_text(encode({"plugins":{"enabled":["mowulink_manager"],
         "entries":{"mowulink_manager":entry}}}))
-    # Use tracked Hermes source in an empty directory, excluding any installation .env or user data.
     checkout = temp / "runtime"
-    checkout.mkdir()
-    archive = temp / "tracked.tar"
-    revision = subprocess.check_output(["git","-C",str(source),"rev-parse","HEAD"],text=True).strip()
-    subprocess.run(["git","-C",str(source),"archive","--output",str(archive),revision],check=True)
-    import tarfile
-    with tarfile.open(archive) as files:
-        files.extractall(checkout,filter="data")
-    archive.unlink()
+    revision = tracked_runtime(source,checkout)
     env = {"PATH":os.defpath,"HOME":str(temp),"HERMES_HOME":str(profile),"TMPDIR":str(temp),
            "XDG_CACHE_HOME":str(temp/"cache"),"PYTHONDONTWRITEBYTECODE":"1","PYTHONNOUSERSITE":"1",
            "PYTHONPATH":os.pathsep.join([str(root),str(checkout)])}

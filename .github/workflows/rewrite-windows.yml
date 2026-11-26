@@ -76,6 +76,7 @@ jobs:
                 'rewrite.test_service.Service.test_cli_tls_restart_preserves_identity_file_and_receipts'
                 'rewrite.test_service.Service.test_three_process_worker_chat_and_assignment'
                 'rewrite.test_service.Service.test_windows_public_config_rejected'
+                'rewrite.test_host_ops.HostOpsState'
                 'rewrite.test_codex_rpc.WindowsCodexRpc'
                 'rewrite.test_codex_app_server.CodexAppServer.test_codex_adapter_process_handles_native_report_without_controller_dispatch'
                 'rewrite.test_codex_app_server.CodexAppServer.test_native_app_server_reconnect_recovers_input_before_w04_without_new_model_call'

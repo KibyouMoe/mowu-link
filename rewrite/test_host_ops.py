@@ -1,20 +1,26 @@
 """Maintenance authorization, operation recovery, and an isolated real macOS LaunchAgent."""
-from contextlib import contextmanager
-from http.client import HTTPSConnection
+from contextlib import closing, contextmanager, redirect_stdout
+from http.client import HTTPConnection, HTTPException, HTTPSConnection
 import json
+from io import StringIO
 import os
 from pathlib import Path
 import plistlib
+import secrets
 import shutil
+import socket
 import ssl
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
 import time
 import unittest
+from unittest.mock import Mock, patch
 from urllib.error import URLError
 from urllib.parse import urlsplit
 
+from . import host_ops_cli
+from .hermes_check import tracked_runtime
 from .host_ops import HostOps, Job, Launchd, roles_allowed
 from .release_check import config, serve
 from .storage import Fault, encode, guid
@@ -22,6 +28,37 @@ from .wire import Client
 
 
 PACKAGE = Path(__file__).resolve().parent.parent
+
+# The gateway gets a fresh profile, local credentials and no inherited process environment.
+GATEWAY_ENTRY = """import asyncio
+import json
+import os
+from pathlib import Path
+import sys
+
+root = Path.cwd().resolve()
+home = Path(os.environ["HERMES_HOME"])
+if not root.name.startswith("mlhgw-") or home != root/"profile" or Path.home() != root:
+    raise SystemExit("expected an isolated Hermes lifecycle profile")
+
+def isolate(event,args):
+    if event in ("socket.connect","socket.bind"):
+        address = args[1]
+        if isinstance(address,tuple) and address[0] in ("127.0.0.1","::1"):
+            return
+        if isinstance(address,(str,bytes)) and Path(os.fsdecode(address)).resolve().is_relative_to(root):
+            return
+        raise PermissionError("only isolated loopback and private local sockets")
+    if event in ("subprocess.Popen","os.system","os.posix_spawn"):
+        raise PermissionError("the gateway cannot start external processes in this rehearsal")
+    if event=="os.kill" and args[1]!=0 and args[0]!=os.getpid():
+        raise PermissionError("the gateway cannot signal other processes in this rehearsal")
+
+sys.addaudithook(isolate)
+os.environ["API_SERVER_KEY"] = json.loads((root/"gateway-auth.json").read_text())["token"]
+from gateway.run import start_gateway
+raise SystemExit(0 if asyncio.run(start_gateway()) else 1)
+"""
 
 
 class NoWriteBackend:
@@ -41,6 +78,25 @@ class HeldQueue:
 
 
 class HostOpsState(unittest.TestCase):
+    def test_external_cli_rejects_unencrypted_operator_connection(self):
+        root = Path(self.enterContext(TemporaryDirectory()))
+        path = config(root,"plain.json",{"url":"http://127.0.0.1:8123","token":"fixture"})
+        with self.assertRaisesRegex(ValueError,"private HTTPS maintenance connection"):
+            host_ops_cli.connect(path)
+
+    def test_external_cli_keeps_the_original_request_id_when_the_reply_is_lost(self):
+        client = Mock()
+        client.request.side_effect = ConnectionResetError("lost fixture response")
+        output = StringIO()
+        rid = guid()
+        args = ["--connection","fixture.json","restart","gateway","--request-id",rid,
+                "--expected-generation","a"*64,"--reason","isolated response loss"]
+        with patch.object(host_ops_cli,"connect",return_value=client), redirect_stdout(output):
+            self.assertEqual(host_ops_cli.main(args),1)
+        client.request.assert_called_once_with("POST","ops/services/gateway/restart",
+            {"request_id":rid,"expected_generation":"a"*64,"reason":"isolated response loss"})
+        self.assertEqual(json.loads(output.getvalue()),{"error":"restart_receipt_unconfirmed","request_id":rid})
+
     def test_interrupted_restart_stays_unconfirmed_and_scoped(self):
         root = Path(self.enterContext(TemporaryDirectory()))
         job = Job("test.router",root/"unused.plist","/bin/true","")
@@ -104,14 +160,14 @@ class LaunchdMaintenance(unittest.TestCase):
         self.fail("isolated maintenance observation timed out")
 
     @contextmanager
-    def job(self,root,program,stem,*,run_at_load=True):
+    def job(self,root,program,stem,*,run_at_load=True,working_directory=PACKAGE):
         domain = f"gui/{os.getuid()}"
         label = "org.mowulink.test."+stem+"-"+guid()
         target = domain+"/"+label
         plist = root/(stem+".plist")
         output = root/(stem+".stdout")
         plist.write_bytes(plistlib.dumps({"Label":label,"ProgramArguments":list(map(str,program)),"RunAtLoad":run_at_load,
-            "WorkingDirectory":str(PACKAGE),"ThrottleInterval":1,"ExitTimeOut":3,
+            "WorkingDirectory":str(working_directory),"ThrottleInterval":1,"ExitTimeOut":3,
             "StandardOutPath":str(output),"StandardErrorPath":str(root/(stem+".stderr")),
             "EnvironmentVariables":{"PYTHONDONTWRITEBYTECODE":"1","HOME":str(root)}}))
         plist.chmod(0o600)
@@ -258,3 +314,111 @@ class LaunchdMaintenance(unittest.TestCase):
                          "changed_plist_rejected":True,"different_loaded_arguments_rejected":True,"receipt_reopened":True,
                          "stopped_job_recovery":stopped_after,
                          "transport":"TLS loopback","fixture":"three isolated macOS user LaunchAgents"}
+
+    @unittest.skipUnless(os.environ.get("MOWULINK_HERMES_TEST_PYTHON") and
+                         os.environ.get("MOWULINK_HERMES_TEST_SOURCE"), "independent Hermes test runtime required")
+    def test_isolated_hermes_gateway_matches_external_restart_and_native_health(self):
+        root = Path(self.enterContext(TemporaryDirectory(prefix="mlhgw-",dir="/tmp"))).resolve()
+        python = Path(os.environ["MOWULINK_HERMES_TEST_PYTHON"]).absolute()
+        source = Path(os.environ["MOWULINK_HERMES_TEST_SOURCE"]).resolve()
+        checkout = root/"source"
+        revision = tracked_runtime(source,checkout)
+        home = root/"profile"
+        home.mkdir(mode=0o700)
+        entry = root/"gateway-entry.py"
+        entry.write_text(GATEWAY_ENTRY,encoding="utf-8")
+        key = secrets.token_hex(32)
+        config(root,"gateway-auth.json",{"token":key})
+        with closing(socket.socket()) as station:
+            station.bind(("127.0.0.1",0))
+            port = station.getsockname()[1]
+        config(home,"config.yaml",{"gateway":{"api_server":{"enabled":True,"host":"127.0.0.1","port":port}}})
+
+        env = {"HOME":str(root),"PATH":os.defpath,"PYTHONDONTWRITEBYTECODE":"1","PYTHONNOUSERSITE":"1",
+               "HERMES_HOME":str(home),"HERMES_GATEWAY_LOCK_DIR":str(root/"locks"),"PYTHONPATH":str(checkout),
+               "XDG_CACHE_HOME":str(root/"cache"),"XDG_STATE_HOME":str(root/"state"),"TMPDIR":str(root)}
+        program = ["/usr/bin/env","-i",*(name+"="+value for name,value in env.items()),python,"-B",entry]
+        # The gateway's bootstrap resolves its own private socket paths relative to this directory.
+        job,_ = self.enterContext(self.job(root,program,"gateway",working_directory=root))
+        maintainer,observer = guid(),guid()
+        roles = config(root,"ops-identities.json",{maintainer:"host-maintainer/gateway",observer:"host-observer"})
+        manifest = config(root,"ops-manifest.json",{"gateway":job})
+        cert,tls_key = root/"ops.crt",root/"ops.key"
+        subprocess.run(["openssl","req","-x509","-newkey","rsa:2048","-nodes","-days","1",
+            "-subj","/CN=localhost","-addext","subjectAltName=IP:127.0.0.1","-out",cert,"-keyout",tls_key],
+            check=True,capture_output=True,timeout=10)
+        clean_env = {"HOME":str(root),"PATH":os.defpath,"PYTHONNOUSERSITE":"1","PYTHONDONTWRITEBYTECODE":"1"}
+
+        def native_health(pid):
+            with closing(HTTPConnection("127.0.0.1",port,timeout=1)) as gateway:
+                try:
+                    gateway.request("GET","/health/detailed",headers={"Authorization":"Bearer "+key})
+                    response = gateway.getresponse()
+                    report = json.load(response)
+                    native = json.loads((home/"gateway.pid").read_text())
+                except (HTTPException,ValueError,FileNotFoundError):
+                    return None
+            if (response.status!=200 or report.get("gateway_state")!="running" or
+                    report.get("platforms",{}).get("api_server",{}).get("state")!="connected" or
+                    native.get("kind")!="hermes-gateway" or native.get("pid")!=pid or report.get("pid")!=pid):
+                return None
+            return {field:report[field] for field in ("pid","gateway_state","status","active_agents")}
+
+        with serve(PACKAGE,"host-ops",root/"ops.db",roles,cert,tls_key,clean_env,("--manifest",manifest)) as address:
+            admin = config(root,"ops-client.json",{"url":address,"token":maintainer,"ca_file":str(cert)})
+            viewer = config(root,"ops-reader.json",{"url":address,"token":observer,"ca_file":str(cert)})
+
+            def cli(cfg,*args,code=0):
+                run = subprocess.run([sys.executable,"-B","-m","rewrite.host_ops_cli","--connection",cfg,*args],
+                                     cwd=PACKAGE,env=clean_env,timeout=35,capture_output=True,text=True)
+                self.assertEqual(run.returncode,code,run.stdout+run.stderr)
+                return json.loads(run.stdout)
+
+            self.assertEqual([row["service"] for row in cli(viewer,"list")["services"]],["gateway"])
+            def ready():
+                authority = cli(viewer,"show","gateway")
+                if authority["state"]=="running" and (health := native_health(authority["pid"])):
+                    return authority,health
+                return None
+
+            before,baseline = self.wait(ready,seconds=35)
+            with closing(HTTPConnection("127.0.0.1",port,timeout=3)) as gateway:
+                gateway.request("GET","/health/detailed")
+                response = gateway.getresponse()
+                self.assertEqual(response.status,401)
+                response.read()
+            rid = guid()
+            start = ("restart","gateway","--request-id",rid,"--expected-generation",before["generation"],
+                     "--reason","isolated Hermes gateway lifecycle proof")
+            denied = cli(viewer,*start,code=1)
+            self.assertEqual((denied["error"],denied["status"]),("forbidden",403))
+            self.assertEqual(cli(viewer,"show","gateway"),before)
+            self.assertEqual(native_health(before["pid"]),baseline)
+
+            accepted = cli(admin,*start)
+            self.assertEqual((accepted["state"],accepted["request_id"],accepted["before"]),("accepted",rid,before))
+            replay = cli(admin,"receipt","gateway",rid,"--wait-seconds","26")
+            self.assertEqual(replay["state"],"process_replaced",replay)
+            after = replay["after"]
+            self.assertNotEqual(after["pid"],before["pid"])
+            self.assertNotEqual(after["generation"],before["generation"])
+            self.assertEqual(Launchd().birth(before["pid"]),"")
+            healthy = self.wait(lambda:native_health(after["pid"]),seconds=35)
+            self.assertEqual((baseline["active_agents"],healthy["active_agents"]),(0,0))
+            self.assertEqual(cli(admin,*start),replay)
+            self.assertEqual(cli(viewer,"show","gateway"),after)
+            self.assertEqual(native_health(after["pid"]),healthy)
+
+        with serve(PACKAGE,"host-ops",root/"ops.db",roles,cert,tls_key,clean_env,("--manifest",manifest)) as address:
+            recovered = config(root,"ops-reopened.json",{"url":address,"token":maintainer,"ca_file":str(cert)})
+            self.assertEqual(cli(recovered,"receipt","gateway",rid),replay)
+            self.assertEqual(cli(recovered,*start),replay)
+            self.assertEqual(cli(recovered,"show","gateway"),after)
+            self.assertEqual(native_health(after["pid"]),healthy)
+
+        if output := os.environ.get("MOWULINK_HERMES_MAINTENANCE_EVIDENCE"):
+            evidence = {"hermes_source_revision":revision,"operation":replay,"old_gateway_health":baseline,
+                "new_gateway_health":healthy,"old_pid_exited":True,"native_pid_matches_launchd":True,
+                "unauthorized_maintenance_status":denied["status"],"unauthenticated_gateway_status":401,
+                "restart_submissions_idempotent":True,"receipt_after_maintenance_cold_restart":True,"boundary":"Real Hermes GatewayRunner with its local API adapter, isolated profile and no model or platform credentials."}
+            Path(output).write_text(encode(evidence)+"\n",encoding="utf-8")
