@@ -320,30 +320,36 @@ def work_order_changes(db, delta, old_ids):
         records.append({"task_id":tid,"legacy_task_id":old_ids.get(tid),"before":dict(before) if before else None,
                         "trial":dict(after) if after else None,"same_content":same_content,
                         "completed_reports":reports,"candidate_materials":materials})
-        if after and after["state"]=="cancelled":
+        if after and (after["state"] in ("cancelled","failed_archived") or after["state"]=="closed" and not reports):
             offer = db.execute("""SELECT json_extract(payload,'$.assignment_id') FROM main.deliveries
                 WHERE kind='task.dispatch' AND json_extract(payload,'$.task_id')=? ORDER BY rowid DESC LIMIT 1""",
                 (tid,)).fetchone()
-            records[-1]["cancelled_assignment_id"] = offer[0] if offer else None
+            field = "cancelled_assignment_id" if after["state"]=="cancelled" else "pool_archive_assignment_id"
+            records[-1][field] = offer[0] if offer else None
     return records
 
 
 def archived_new_candidates(db, changes, legacy_workers):
-    candidates = {"closed":[],"cancelled":[]}
+    candidates = {"closed":[],"cancelled":[],"pool":[]}
     for change in changes:
         after, reports = change["trial"], change["completed_reports"]
         if (change["before"] is not None or change["legacy_task_id"] is not None or not after
-                or after["state"] not in candidates or after["assignment_id"] is not None):
+                or after["assignment_id"] is not None):
             continue
-        if after["state"]=="closed" and (len(reports)!=1 or reports[0]["worker_id"]!=after["assignee_id"]):
-            continue
-        if after["state"]=="cancelled" and reports:
+        state = after["state"]
+        if state=="closed" and len(reports)==1 and reports[0]["worker_id"]==after["assignee_id"]:
+            category = "closed"
+        elif state=="cancelled" and not reports:
+            category = "cancelled"
+        elif not reports and change.get("pool_archive_assignment_id"):
+            category = "pool"
+        else:
             continue
         row = task(db,change["task_id"])
         first = db.execute("""SELECT consumer,payload FROM main.deliveries WHERE kind='task.dispatch'
             AND json_extract(payload,'$.task_id')=? ORDER BY rowid LIMIT 1""",(row["task_id"],)).fetchone()
         if ((first and not first["consumer"].startswith("worker/"))
-                or (not first and after["state"]=="closed")):
+                or (not first and category!="cancelled")):
             continue
         original_worker = first["consumer"].removeprefix("worker/") if first else row["assignee_id"]
         if original_worker not in legacy_workers:
@@ -356,8 +362,8 @@ def archived_new_candidates(db, changes, legacy_workers):
         if first:
             accepted.append(encode(dict(original,revision=2,assignment_id=json.loads(first["payload"])["assignment_id"])))
         if operation["response"] in accepted:
-            candidates[after["state"]].append({"task_id":row["task_id"],"assignee_id":original_worker,
-                                               "request_id":operation["key"]})
+            candidates[category].append({"task_id":row["task_id"],"assignee_id":original_worker,
+                                         "request_id":operation["key"]})
     return candidates
 
 
@@ -401,6 +407,7 @@ def reconcile(snapshot, trial):
             archived_ids = {item["task_id"] for group in archived.values() for item in group}
             result.update(changed_tables=delta,queue_candidates=candidates,closed_new_tasks=archived["closed"],
                           cancelled_new_tasks=archived["cancelled"],
+                          archived_pool_new_tasks=archived["pool"],
                           blocked_new_tasks=[item for item in blocked if item["task_id"] not in archived_ids],
                           work_orders=changes,
                           exact_rollback_allowed=before==saved["router_db_sha256"],only_new_queued_tasks=only_queue)

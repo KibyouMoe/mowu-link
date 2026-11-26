@@ -326,7 +326,8 @@ print(json.dumps([first,second]))
                 received = loop.hermes.inspect(tid)["task"]
                 self.assertEqual(received["state"],"completed_reported")
                 approval_key = guid()
-                self.assertEqual(loop.hermes.approve(approval_key,tid,received["revision"])["task"]["state"],"closed")
+                approval = loop.hermes.act(approval_key,tid,received["revision"],"close",note="已核原附件")
+                self.assertEqual(approval["task"]["state"],"closed")
                 notice, = loop.manager_wire.frames(0)
                 self.assertEqual(loop.hermes.inspect(waiting)["task"]["state"],"ready")
             finally:
@@ -363,6 +364,7 @@ print(json.dumps([first,second]))
         saved = record["orders"][tid]
         self.assertEqual((saved["legacy_task_id"],saved["assignment_id"],saved["summary"],saved["review_key"]),
                          (old_ids[0],aid,summary,approval_key))
+        self.assertEqual(saved["review_note"],"已核原附件")
         self.assertEqual(saved["notice"]["delivery_id"],notice["delivery_id"])
         self.assertEqual(record["files"][artifact]["sha256"],sha)
         self.assertEqual((private/"files"/artifact).read_bytes(),blob)
@@ -964,6 +966,153 @@ store.close()
                         "legacy_snapshot_sha256":original,"pending_and_missing_w04_refused":True,
                         "unacknowledged_offer_refused":True,"remigrated_key_duplicates_rejected":True,
                         "boundary":"Actual old and new HTTP Routers, temporary SQLite databases, scripted host and clock."}
+            Path(output).write_text(json.dumps(evidence,ensure_ascii=False,indent=2)+"\n")
+
+    def test_pool_archives_only_return_after_the_worker_released_the_assignment(self):
+        old_id = self.old("""
+store = RouterStore(sys.argv[1])
+store.upsert_worker("oguri")
+print(store.orders.create("Review candidate","Isolated order","oguri",{},"fixture",None,None))
+store.close()
+""",self.legacy)
+        source_sha = digest(self.legacy)
+        backup(self.legacy,self.attachments,self.snapshot)
+        baseline = prepare(self.snapshot,self.trial,self.source_id)
+        clock = Clock()
+        loop = Loop(self.trial,clock,FixtureHost)
+        manager,worker = loop.hermes,loop.worker
+        review = self.root/"pool-review.json"
+        approvals = {}
+        content = b"isolated source material"
+        checksum = hashlib.sha256(content).hexdigest()
+
+        def take(tid):
+            for _ in range(5):
+                worker.poll()
+                if worker.hold()["held_task_id"]==tid:
+                    aid = worker.hold()["held_assignment_id"]
+                    native = loop.native.entries()[-1][1]["native_id"]
+                    return aid,native
+                clock.advance(10)
+            self.fail("worker never accepted test order")
+
+        def resolve(tid, aid, action, **argument):
+            detail = manager.inspect(tid)["task"]
+            args = (guid(),tid,detail["revision"],action)
+            receipt = manager.act(*args,**argument)
+            self.assertEqual(manager.act(*args,**argument),receipt)
+            approvals[tid] = {"assignment_id":aid,"state":receipt["task"]["state"]}
+            return args[0]
+
+        def stage(destination):
+            review.write_text(json.dumps({"trial_sha256":digest(self.trial/"router.db"),
+                                         "closed_assignments":{},"pool_archives":approvals}))
+            return stage_reviewed_rollback(self.snapshot,self.trial,review,destination)
+
+        with loop.server:
+            loop.thread.start()
+            try:
+                worker.connect()
+                closed = baseline["queued_id_map"][old_id]
+                aid,native = take(closed)
+                self.assertEqual(worker.report(native,closed,aid,"Needs review","blocked")["task_state"],"blocked")
+                upload = loop.wire.request("POST","uploads",
+                    {"name":"candidate.txt","size_bytes":len(content),"sha256":checksum},guid())["upload_id"]
+                attachment = loop.wire.request("PATCH","uploads/"+upload,content,
+                                                headers={"Upload-Offset":"0"})["attachment_id"]
+                material = loop.wire.request("POST",f"tasks/{closed}/materials",
+                    {"session_id":worker.session,"assignment_id":aid,"text":"候选资料","artifact_ids":[attachment]},guid())
+                close_key = resolve(closed,aid,"close",material_id=material["material_id"],note="原材料已核验")
+
+                tools = ManagerTools(manager,"pool-archive-manager")
+                created = tools.around_call("router_create_task",lambda args:tools.invoke("router_create_task",args),
+                    {"title":"Archive failure","instructions":"Isolated order","assignee_id":"oguri"},
+                    session_id="pool-archive-manager",turn_id="failure-archive",tool_call_id="create")
+                failed = json.loads(created)["task_id"]
+                fail_aid,native = take(failed)
+                self.assertEqual(worker.report(native,failed,fail_aid,"Cannot continue","blocked")["task_state"],"blocked")
+                fail_key = resolve(failed,fail_aid,"archive_failed",reason="原任务缺必要条件")
+                manager.poll()
+                worker.poll()
+                self.assertEqual(manager.inspect(closed)["last_report"]["outcome"],"blocked")
+                self.assertEqual(stage(self.restore)["pool_archived_orders"],2)
+                settled_trial = digest(self.trial/"router.db")
+
+                unsafe = manager.create(guid(),"Host may still be working","Isolated order","oguri")["task_id"]
+                unsafe_aid,_ = take(unsafe)
+                loop.native.is_busy = True
+                clock.advance(630)
+                self.assertEqual(manager.inspect(unsafe)["task"]["state"],"blocked")
+                resolve(unsafe,unsafe_aid,"archive_failed",reason="业务状态可以归档，原生仍待核")
+                manager.poll()
+                self.assertEqual(worker.hold()["held_assignment_id"],unsafe_aid)
+                self.assertTrue(loop.native.is_busy)
+                rejected = self.root/"rejected-pool-archive"
+                with self.assertRaisesRegex(ValueError,"final worker released"):
+                    stage(rejected)
+                self.assertFalse(rejected.exists())
+            finally:
+                loop.server.shutdown()
+                loop.thread.join()
+
+        private = self.restore/"private-review"
+        manifest = json.loads((private/"manifest.json").read_text())
+        self.assertEqual(digest(private/"trial-router.db"),settled_trial)
+        self.assertEqual(digest(self.legacy),source_sha)
+        self.assertEqual((private/"files"/attachment).read_bytes(),content)
+        for tid,key,action in ((closed,close_key,"close"),(failed,fail_key,"archive_failed")):
+            item = manifest["orders"][tid]
+            self.assertNotIn("summary",item)
+            self.assertTrue(item["assignment_history"][-1]["pool"]["report_key"])
+            self.assertEqual((item["pool_archive"]["action_key"],item["pool_archive"]["request"]["action"]),(key,action))
+        self.assertEqual(manifest["orders"][closed]["pool_archive"]["request"]["material_id"],material["material_id"])
+        fail_id = manifest["orders"][failed]["legacy_task_id"]
+        observed = json.loads(self.old("""
+from server import RouterServer
+from selftest_router import http
+from threading import Thread
+from unittest.mock import Mock
+store = RouterStore(sys.argv[1])
+token = "isolated-legacy-pool-archive"
+with RouterServer(("127.0.0.1",0),store,token,Mock(),Mock()) as server:
+    runner = Thread(target=server.serve_forever,kwargs={"poll_interval":.02})
+    runner.start()
+    try:
+        url = f"http://127.0.0.1:{server.server_port}"
+        records = {}
+        for tid in sys.argv[2:4]:
+            status,item = http("GET",url+"/tasks/"+tid,token=token)
+            assert status==200 and item["task"]["deliverable"] is None, item
+            records[tid] = item["task"]["archive"]["reason"]
+        replay_status,replay = http("POST",url+"/tasks",json.loads(sys.argv[4]),token)
+        assert replay_status==200 and replay["duplicate"] and replay["task_id"]==sys.argv[3], replay
+        file_status,_ = http("GET",url+"/attachments/"+sys.argv[5],token=token)
+        print(json.dumps({"archives":records,"file_status":file_status,"replay_status":replay_status,
+                          "next":store.orders.next_dispatch("oguri"),"held":store.orders.held("oguri")}))
+    finally:
+        server.shutdown()
+        runner.join()
+store.close()
+""",self.restore/"legacy.db",old_id,fail_id,json.dumps(manifest["orders"][failed]["legacy_creation_request"]),checksum))
+        self.assertEqual(observed["archives"],{old_id:"pool_closed_on_rewrite",fail_id:"failed_on_rewrite"})
+        self.assertEqual((observed["file_status"],observed["next"],observed["held"]),(404,None,None))
+
+        snapshot,trial = self.root/"pool-archive-snapshot",self.root/"pool-archive-remigration"
+        backup(self.restore/"legacy.db",self.restore/"legacy.db.attachments",snapshot)
+        self.assertNotIn(fail_id,prepare(snapshot,trial,guid())["queued_id_map"])
+        entry = manifest["orders"][failed]
+        with closing(sqlite3.connect(trial/"router.db")) as db:
+            keys = db.execute("SELECT request_key FROM history_request_keys WHERE actor='hermes' AND legacy_task_id=?",
+                              (fail_id,)).fetchall()
+        self.assertEqual({row[0] for row in keys},{entry["creation_key"],entry["legacy_creation_request"]["message_id"]})
+        if output := os.environ.get("MOWULINK_POOL_ARCHIVE_EVIDENCE"):
+            evidence = {"adopted":{"task_id":closed,"assignment_id":aid,"action_key":close_key,
+                                   "material_id":material["material_id"],"file_sha256":checksum},
+                        "failed":{"task_id":failed,"assignment_id":fail_aid,"action_key":fail_key},
+                        "unsafe":{"task_id":unsafe,"assignment_id":unsafe_aid,"restoration_rejected":True},
+                        "legacy":observed,"trial_sha256":settled_trial,"legacy_snapshot_sha256":source_sha,
+                        "remigrated_failure_request_ids":True,
+                        "boundary":"Real isolated old and new HTTP Routers, private SQLite copies, scripted host and clock."}
             Path(output).write_text(json.dumps(evidence,ensure_ascii=False,indent=2)+"\n")
 
     def test_trial_born_closed_orders_return_as_private_archives_without_a_new_dispatch(self):

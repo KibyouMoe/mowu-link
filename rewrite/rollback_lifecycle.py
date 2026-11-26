@@ -8,6 +8,10 @@ from .orders import task
 from .storage import timestamp
 
 
+def is_reviewed_completion(entry):
+    return entry["terminal_state"]=="closed" and not entry.get("pool_archive")
+
+
 def order_state(order, step, state, revision, assignment_id=None):
     holder = {"kind":"worker","worker_id":step["worker_id"]} if state=="working" else {"kind":"router"}
     return dict(order,state=state,revision=revision,assignment_id=assignment_id,
@@ -120,6 +124,10 @@ def histories(db, entries, deltas):
                 revision = revision-1 if pool else final["revision"]+1
                 if not pool and final.get("probe_delivery_ids"):
                     raise ValueError("unaccepted offer has a progress inquiry")
+        elif entry.get("pool_archive"):
+            if final.get("pool",{}).get("source")!="worker" or "cleanup" in final:
+                raise ValueError("pool archive needs evidence that the final worker released its assignment")
+            revision -= 1
         elif set(final) & {"pool","cleanup","materials"}:
             raise ValueError("trial is missing a complete assignment chain for the reviewed result")
         if order["revision"]!=revision:
@@ -172,10 +180,10 @@ def check_transport(db, entries):
             if pool := step.get("pool"):
                 source = worker if pool["source"]=="worker" else "router"
                 expected_notices[tid].append((source,pool["reason"],pool["artifact_ids"]))
-        if entry["terminal_state"]=="closed":
+        if is_reviewed_completion(entry):
             expected_notices[tid].append((entry["worker_id"],entry["summary"],entry["artifact_ids"]))
             terminal_notices.add(tid)
-        elif entry["assignment_history"] and entry["assignment_history"][-1].get("cleanup"):
+        elif entry["terminal_state"]=="cancelled" and entry["assignment_history"] and entry["assignment_history"][-1].get("cleanup"):
             expected_notices[tid].append((entry["worker_id"],CANCEL_CONFIRMED_NOTICE,[]))
             terminal_notices.add(tid)
     registered = db.execute("SELECT * FROM workers").fetchall()
@@ -255,6 +263,14 @@ def take(operations, key, actor, body, replies=None, *, session=False, files=Fal
     raise ValueError("missing or conflicting receipt for the reviewed assignment: "+key[1])
 
 
+def optional_close_note(actual, request):
+    if "note" in actual:
+        note = actual["note"]
+        if not isinstance(note,str):
+            raise ValueError("close note is invalid")
+        request["note"] = note
+
+
 def verify_cancelled(tid, entry, order, step, operations, after, states):
     cleanup = step.get("cleanup")
     expected_revision = order["revision"]-(2 if cleanup else 1)
@@ -290,6 +306,34 @@ def verify_cancelled(tid, entry, order, step, operations, after, states):
     states.append((terminal_seq,{"cancelled"}))
 
 
+def verify_pool_archive(tid, entry, order, operations, after, states):
+    state = order["state"]
+    action = "archive_failed" if state=="failed_archived" else "close"
+    revision = order["revision"]-1
+    key = (tid,"action",action,revision)
+    operation = operations.get(key)
+    actual = operation["body"] if operation else {}
+    request = {"action":action,"expected_revision":revision}
+    if action=="archive_failed":
+        reason = actual.get("reason")
+        if not isinstance(reason,str) or not reason.strip():
+            raise ValueError("pool failure archive is missing its reason")
+        request["reason"] = reason
+    else:
+        optional_close_note(actual,request)
+        if "material_id" in actual:
+            mid = actual["material_id"]
+            if mid is not None and not any(material["material_id"]==mid for step in entry["assignment_history"]
+                                           for material in step.get("materials",[])):
+                raise ValueError("selected material is missing from the reviewed order")
+            request["material_id"] = mid
+    archive = take(operations,key,"hermes",request,[{"task":order,"delivery_state":"received"}])
+    if archive["seq"]<=after:
+        raise ValueError("pool archive predates the release or selected material")
+    entry["pool_archive"] = {"action_key":archive["key"],"request":request}
+    states.append((archive["seq"],{state}))
+
+
 def verify_order(db, tid, entry, operations):
     order = task(db,tid)
     history = entry["assignment_history"]
@@ -315,17 +359,20 @@ def verify_order(db, tid, entry, operations):
         source = step.get("pool",{}).get("source")
         possible = {"working","blocked"} if source in ("offline","unanswered") else {"working"}
         adjacent_states.append((after,possible))
-        if target is None and not cancelled:
+        if target is None and is_reviewed_completion(entry):
             report = take(operations,(tid,"report",aid,"completed"),actor,{
                 "assignment_id":aid,"outcome":"completed","summary":entry["summary"],"artifact_ids":entry["artifact_ids"]},
                 [{"recorded":True,"release_assignment_id":aid,"task_state":"completed_reported"}],session=True,files=True)
-            close = take(operations,(tid,"action","close",order["revision"]-1),"hermes",
-                         {"action":"close","expected_revision":order["revision"]-1},
-                         [{"task":order,"delivery_state":"received"}])
+            key = (tid,"action","close",order["revision"]-1)
+            request = {"action":"close","expected_revision":order["revision"]-1}
+            optional_close_note(operations.get(key,{}).get("body",{}),request)
+            close = take(operations,key,"hermes",request,[{"task":order,"delivery_state":"received"}])
             if not after<report["seq"]<close["seq"]:
                 raise ValueError("acceptance, report, and manager review are out of order")
             adjacent_states.extend([(report["seq"],{"completed_reported"}),(close["seq"],{"closed"})])
             entry.update(w04_key=report["key"],review_key=close["key"])
+            if "note" in request:
+                entry["review_note"] = request["note"]
             continue
         pool = step.get("pool")
         if pool and pool["source"]=="worker":
@@ -348,7 +395,10 @@ def verify_order(db, tid, entry, operations):
             after = receipt["seq"]
             adjacent_states.append((after,{"blocked"}))
         if target is None:
-            verify_cancelled(tid,entry,order,step,operations,after,adjacent_states)
+            if cancelled:
+                verify_cancelled(tid,entry,order,step,operations,after,adjacent_states)
+            else:
+                verify_pool_archive(tid,entry,order,operations,after,adjacent_states)
             continue
         expected_revision = target["revision"]-2
         key = (tid,"action","transfer",expected_revision)
@@ -373,7 +423,7 @@ def verify_order(db, tid, entry, operations):
             receipt = take(operations,(tid,"report",aid,"transfer_confirmed"),actor,
                            {"assignment_id":aid,"outcome":"transfer_confirmed"},[
                                {"recorded":True,"release_assignment_id":aid,"task_state":state}
-                               for state in ("ready","working","blocked","completed_reported","closed","cancelled")],
+                               for state in ("ready","working","blocked","completed_reported","closed","cancelled","failed_archived")],
                            session=True)
             if receipt["seq"]<=after:
                 raise ValueError("cleanup receipt predates the transfer")

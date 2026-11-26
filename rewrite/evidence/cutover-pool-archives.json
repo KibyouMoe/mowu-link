@@ -1,0 +1,33 @@
+{
+  "adopted": {
+    "task_id": "22af7c9a-02d2-59a2-83aa-aa29737c19ab",
+    "assignment_id": "7e195f5e-f362-41a1-a57b-7d39a2f9eb69",
+    "action_key": "595ce570-96dc-4560-b11e-f8a6d360b6ef",
+    "material_id": "f2a6e73c-49e8-49ad-baa6-c4b095dad7c0",
+    "file_sha256": "dcbf642b0f7c837cd28e58014760b31a6840c99ef7db2895a60adca83054e791"
+  },
+  "failed": {
+    "task_id": "e2cf403b-97b3-4137-b4c5-b17afa12d794",
+    "assignment_id": "99f2757a-2e46-4387-83cc-812abe413652",
+    "action_key": "07eeb1ec-3cd9-40b8-bdc9-5045feb04505"
+  },
+  "unsafe": {
+    "task_id": "75e3e8a6-3c8e-482e-96e4-5cc462dba88b",
+    "assignment_id": "ca004f1a-fe32-49a2-a313-bf5c2b41f569",
+    "restoration_rejected": true
+  },
+  "legacy": {
+    "archives": {
+      "t-7893f66fbf": "pool_closed_on_rewrite",
+      "t-83e9395b03": "failed_on_rewrite"
+    },
+    "file_status": 404,
+    "replay_status": 200,
+    "next": null,
+    "held": null
+  },
+  "trial_sha256": "e33edb704c8d6778e7f55efdec22095603a6d51deccd98fd454b0ecfaed1ebab",
+  "legacy_snapshot_sha256": "3baa77ad252b5ed30aae4d1c03bc0bfe7611d13044840b267af6d510c8fd5e23",
+  "remigrated_failure_request_ids": true,
+  "boundary": "Real isolated old and new HTTP Routers, private SQLite copies, scripted host and clock."
+}

@@ -12,6 +12,7 @@ from .cutover import (digest, legacy_creation_request, output_directory, queue_e
                       readonly, reconcile, restore_snapshot, stage_queue_requests, verified)
 from .messages import valid_guid
 from .orders import task
+from .rollback_lifecycle import is_reviewed_completion
 from .storage import encode
 
 
@@ -21,7 +22,8 @@ TABLES = {"tasks","reports","messages","deliveries","operations","workers","work
 
 def reviewed_orders(facts):
     queued = queue_execution_modes(facts["queue_candidates"])
-    new = {item["task_id"]:item for item in facts["closed_new_tasks"]+facts["cancelled_new_tasks"]}
+    new = {item["task_id"]:item for field in ("closed_new_tasks","cancelled_new_tasks","archived_pool_new_tasks")
+           for item in facts[field]}
     changes = []
     for row in facts["work_orders"]:
         if row["task_id"] in queued:
@@ -49,6 +51,9 @@ def reviewed_orders(facts):
             entry = dict(reports[0])
         elif state=="cancelled" and not reports:
             entry = {"assignment_id":row["cancelled_assignment_id"],"worker_id":after["assignee_id"]}
+        elif not reports and row.get("pool_archive_assignment_id"):
+            entry = {"assignment_id":row["pool_archive_assignment_id"],"worker_id":after["assignee_id"],
+                     "pool_archive":True}
         else:
             raise ValueError("reviewed rollback needs unchanged migrated orders closed after one W04")
         entry["terminal_state"] = state
@@ -62,7 +67,7 @@ def reviewed_orders(facts):
 
 def reviewed_files(entries):
     for entry in entries.values():
-        if entry["terminal_state"]=="closed":
+        if is_reviewed_completion(entry):
             yield "report",entry["assignment_id"],entry["worker_id"],entry["artifact_ids"]
         for step in entry["assignment_history"]:
             if pool := step.get("pool"):
@@ -118,10 +123,20 @@ def private_open(name,flags):
     return os.open(name,flags,0o600)
 
 
+def archive_labels(entry):
+    if entry["terminal_state"]=="cancelled":
+        return "重做版已取消工单",legacy_history.CANCELLED_ARCHIVE
+    if entry["terminal_state"]=="failed_archived":
+        return "重做版失败归档工单",legacy_history.FAILED_ARCHIVE
+    if entry.get("pool_archive"):
+        return "重做版池中结单",legacy_history.POOL_CLOSED_ARCHIVE
+    return "重做版已验收工单",legacy_history.REVIEWED_ARCHIVE
+
+
 def archive_in_legacy(path, entries, source_id, at):
     with closing(sqlite3.connect(path)) as db, db:
         for tid,entry in entries.items():
-            cancelled = entry["terminal_state"]=="cancelled"
+            title,reason = archive_labels(entry)
             if "creation_key" in entry:
                 legacy = legacy_history.rollback_archive_id(source_id,tid)
                 request = entry["legacy_creation_request"]
@@ -129,7 +144,6 @@ def archive_in_legacy(path, entries, source_id, at):
                 if db.execute("SELECT 1 FROM task_info WHERE task_id=? OR request_id=?",(legacy,request_id)).fetchone():
                     raise ValueError("archived order collides with a legacy task or request identifier")
                 fingerprint = legacy_history.legacy_request_fingerprint(request)
-                title = "重做版已取消工单" if cancelled else "重做版已验收工单"
                 db.execute("""INSERT INTO task_info(task_id,name,description,owner,actor,at,metadata,request_id,fingerprint)
                               VALUES (?,?,?,?,?,?,?,?,?)""",
                            (legacy,title,"完整记录见私有回退档案。",entry["original_worker"],"hermes",
@@ -145,9 +159,8 @@ def archive_in_legacy(path, entries, source_id, at):
                 if removed.rowcount!=1:
                     raise ValueError("legacy queue no longer contains the reviewed original")
             # Keep only the routing outcome and private reference in the shared legacy database.
-            reason = legacy_history.CANCELLED_ARCHIVE if cancelled else legacy_history.REVIEWED_ARCHIVE
             metadata = {"reason":reason,"recovery_reference":tid}
-            if cancelled:
+            if reason==legacy_history.CANCELLED_ARCHIVE:
                 metadata["confirmed_by_worker"] = "cancel_w04_key" in entry
             db.execute("INSERT INTO task_facts(task_id,kind,event_key,at,data) VALUES (?,'archive','archive',?,?)",
                        (legacy,at,encode(metadata)))
@@ -161,14 +174,18 @@ def stage_reviewed_rollback(snapshot,trial,review,destination):
     entries = reviewed_orders(facts)
     decision = {"trial_sha256":facts["trial_sha256"],
                 "closed_assignments":{tid:row["assignment_id"] for tid,row in entries.items()
-                                      if row["terminal_state"]=="closed"}}
+                                      if is_reviewed_completion(row)}}
     cancelled = {tid:row["assignment_id"] for tid,row in entries.items() if row["terminal_state"]=="cancelled"}
     if cancelled:
         decision["cancelled_assignments"] = cancelled
+    pool_archives = {tid:{"assignment_id":row["assignment_id"],"state":row["terminal_state"]}
+                     for tid,row in entries.items() if row.get("pool_archive")}
+    if pool_archives:
+        decision["pool_archives"] = pool_archives
     if facts["queue_candidates"]:
         decision["execution_modes"] = queue_execution_modes(facts["queue_candidates"])
     if json.loads(review.read_text())!=decision:
-        raise ValueError("review must match the trial digest, all closed assignments and any new queue modes or cancellations")
+        raise ValueError("review must match the trial digest, all closed assignments and any new queue modes, cancellations or pool archives")
     manifest = verified(snapshot)
     source = trial/"router.db"
     if manifest["legacy_db_sha256"]!=facts["snapshot_sha256"]:
@@ -187,7 +204,7 @@ def stage_reviewed_rollback(snapshot,trial,review,destination):
             raise ValueError("trial database changed during review")
         with closing(readonly(frozen)) as db:
             for tid,entry in entries.items():
-                if entry["terminal_state"]!="closed":
+                if not is_reviewed_completion(entry):
                     continue
                 result = db.execute("SELECT summary FROM reports WHERE task_id=? AND assignment_id=?",
                                     (tid,entry["assignment_id"])).fetchone()
@@ -224,7 +241,7 @@ def stage_reviewed_rollback(snapshot,trial,review,destination):
         with closing(readonly(source)):
             if digest(source)!=digest(frozen):
                 raise ValueError("trial database changed while staging rollback")
-    return {"reviewed_orders":len(entries),"cancelled_orders":len(cancelled),
+    return {"reviewed_orders":len(entries),"cancelled_orders":len(cancelled),"pool_archived_orders":len(pool_archives),
             "private_artifacts":len(files),"trial_sha256":facts["trial_sha256"],
             "restored_legacy_sha256":restored_sha,"queued_requests":len(facts["queue_candidates"]),
             "queue_replay_sha256":queue_manifest_sha}

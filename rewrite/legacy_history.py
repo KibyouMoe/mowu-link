@@ -9,6 +9,8 @@ from .storage import encode, require
 
 REVIEWED_ARCHIVE = "reviewed_on_rewrite"
 CANCELLED_ARCHIVE = "cancelled_on_rewrite"
+POOL_CLOSED_ARCHIVE = "pool_closed_on_rewrite"
+FAILED_ARCHIVE = "failed_on_rewrite"
 
 
 SCHEMA = """
@@ -96,7 +98,7 @@ def preserve_rollback_keys(db, old, source, mapping):
         trial_id = archive.get("recovery_reference") if isinstance(archive,dict) else None
         if (row["actor"]!="hermes" or not isinstance(key,str) or not re.fullmatch(r"hermes-[0-9a-f]{64}",key)
                 or not valid_guid(namespace) or not valid_guid(trial_id)
-                or archive.get("reason") not in (REVIEWED_ARCHIVE,CANCELLED_ARCHIVE)
+                or archive.get("reason") not in (REVIEWED_ARCHIVE,CANCELLED_ARCHIVE,POOL_CLOSED_ARCHIVE,FAILED_ARCHIVE)
                 or rollback_request_id(namespace,key)!=row["request_id"] or rollback_archive_id(namespace,trial_id)!=tid
                 or tid in mapping):
             raise ValueError("rewrite archive request key does not match its legacy archive")
