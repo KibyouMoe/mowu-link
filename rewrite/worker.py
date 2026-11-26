@@ -1,9 +1,11 @@
 """Worker side: durable inbox, local assignment and explicit Agent report outbox."""
+import hashlib
 import json
+import time
 from threading import RLock
 from typing import Protocol
 
-from . import display, links, peer_files, queued_chat, user_questions, worker_commands, worker_media
+from . import display, links, peer_files, peer_retry, queued_chat, user_questions, worker_commands, worker_media
 from .storage import Database, Fault, encode, guid, require, string
 
 SCHEMA = """
@@ -46,9 +48,10 @@ class AgentAdapter(Protocol):
 
 
 class Worker:
-    def __init__(self, path, worker_id, router, adapter: AgentAdapter):
+    def __init__(self, path, worker_id, router, adapter: AgentAdapter, *, clock=time.time):
         self.db = Database(path, SCHEMA + worker_media.SCHEMA + peer_files.SCHEMA + display.SCHEMA + links.WORKER_SCHEMA
-                           + user_questions.SCHEMA + worker_commands.SCHEMA + queued_chat.SCHEMA)
+                           + user_questions.SCHEMA + worker_commands.SCHEMA + queued_chat.SCHEMA + peer_retry.SCHEMA)
+        self.clock = clock
         self.worker_id, self.router, self.adapter = worker_id, router, adapter
         self.lock = RLock()
         with self.db.transaction() as db:
@@ -113,11 +116,19 @@ class Worker:
                 with self.db.transaction() as db:
                     db.execute("UPDATE connection SET cursor=MAX(cursor,?)", (ack["confirmed_cursor"],))
             with self.db.transaction() as db:
-                pending = [json.loads(r[0]) for r in db.execute("SELECT frame FROM inbox WHERE done=0 ORDER BY rowid")]
+                pending = [json.loads(r[0]) for r in db.execute("""SELECT i.frame FROM inbox i
+                    LEFT JOIN peer_retry p ON p.operation_id=i.delivery_id AND p.phase='delivery'
+                    WHERE i.done=0 AND COALESCE(p.retry_at,0)<=? ORDER BY i.rowid""",(self.clock(),))]
             for frame in pending:
-                if self.process(frame):
+                if frame["kind"]=="peer.message":
+                    done = peer_retry.attempt(self,"delivery",frame["delivery_id"],frame["payload"]["message_id"],
+                                              self.process,frame)
+                else:
+                    done = self.process(frame)
+                if done:
                     with self.db.transaction() as db:
                         db.execute("UPDATE inbox SET done=1 WHERE delivery_id=?", (frame["delivery_id"],))
+                        db.execute("DELETE FROM peer_retry WHERE phase='delivery' AND operation_id=?",(frame["delivery_id"],))
             self.flush_reports()
             self.flush_peer_receipts()
 
@@ -139,6 +150,11 @@ class Worker:
                     native["attachments"] = [peer_files.receive(self,item) for item in payload["attachments"]]
                 reply = self.adapter.deliver(frame["delivery_id"], native)
                 if reply:
+                    require(isinstance(reply,dict) and reply.get("delivery_id")==frame["delivery_id"]
+                            and reply.get("session")==self.adapter.bound_session()
+                            and reply.get("digest")==hashlib.sha256(encode(native).encode()).hexdigest()
+                            and isinstance(reply.get("native_id"),str) and reply["native_id"],
+                            409,"peer_host_unconfirmed")
                     with self.db.transaction() as db:
                         db.execute("UPDATE peers SET receipt=? WHERE message_id=?", (encode(reply),mid))
                 return reply is not None
@@ -286,23 +302,30 @@ class Worker:
         return [dict(r,body=json.loads(r["body"]),receipt=json.loads(r["receipt"]) if r["receipt"] else None) for r in rows]
 
     def flush_peer_receipts(self):
-        from uuid import NAMESPACE_URL, uuid5
         with self.db.transaction() as db:
             rows = db.execute("""SELECT p.message_id,p.receipt FROM peers p LEFT JOIN peer_receipt_acks a USING(message_id)
-                     WHERE p.direction='in' AND p.receipt IS NOT NULL AND a.message_id IS NULL
-                     ORDER BY p.rowid LIMIT 32""").fetchall()
+                     LEFT JOIN peer_retry r ON r.operation_id=p.message_id AND r.phase='receipt'
+                     WHERE p.direction='in' AND p.receipt IS NOT NULL AND a.message_id IS NULL AND COALESCE(r.retry_at,0)<=?
+                     ORDER BY p.rowid LIMIT 32""",(self.clock(),)).fetchall()
         for row in rows:
             proof = json.loads(row["receipt"])
             mid = row["message_id"]
-            require(proof.get("native_id") and proof.get("session") and proof.get("delivery_id"),409,"peer_host_unconfirmed")
-            rid = str(uuid5(NAMESPACE_URL,encode(["mowulink-peer-proof",self.worker_id,mid,proof])))
-            body = {"session_id":self.session,"delivery_id":proof["delivery_id"],"receipt_id":rid}
-            ack = self.router.request("POST","peers/messages/"+mid+"/receipt",body,"peer-receipt-"+mid)
-            require(ack.get("message_id")==mid and ack.get("recipient")==self.worker_id and ack.get("worker_received") is True
-                    and ack.get("delivery_id")==proof["delivery_id"] and ack.get("host_receipt_id")==rid,
-                    409,"wrong_peer_receipt")
-            with self.db.transaction() as db:
-                db.execute("INSERT OR IGNORE INTO peer_receipt_acks VALUES (?,?)",(mid,encode(ack)))
+            peer_retry.attempt(self,"receipt",mid,mid,self.confirm_peer_receipt,mid,proof)
+
+    def confirm_peer_receipt(self,mid,proof):
+        from uuid import NAMESPACE_URL, uuid5
+        require(isinstance(proof,dict) and proof.get("native_id") and proof.get("session") and proof.get("delivery_id"),
+                409,"peer_host_unconfirmed")
+        rid = str(uuid5(NAMESPACE_URL,encode(["mowulink-peer-proof",self.worker_id,mid,proof])))
+        body = {"session_id":self.session,"delivery_id":proof["delivery_id"],"receipt_id":rid}
+        ack = self.router.request("POST","peers/messages/"+mid+"/receipt",body,"peer-receipt-"+mid)
+        require(ack.get("message_id")==mid and ack.get("recipient")==self.worker_id and ack.get("worker_received") is True
+                and ack.get("delivery_id")==proof["delivery_id"] and ack.get("host_receipt_id")==rid,
+                409,"wrong_peer_receipt")
+        with self.db.transaction() as db:
+            db.execute("INSERT OR IGNORE INTO peer_receipt_acks VALUES (?,?)",(mid,encode(ack)))
+            db.execute("DELETE FROM peer_retry WHERE phase='receipt' AND operation_id=?",(mid,))
+        return True
 
     def turn_finished(self, native_id, final_text):
         origin = self.adapter.origin(native_id)

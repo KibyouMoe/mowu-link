@@ -20,7 +20,7 @@ class Peers(unittest.TestCase):
         root = self.loop.root
         self.host = FixtureHost(root/"other-host.db","other-session")
         self.b = Worker(root/"other-worker.db","tama",self.loop.extra_clients["tama"],
-                        HostAdapter(root/"other-adapter.db",self.host,self.host.session))
+                        HostAdapter(root/"other-adapter.db",self.host,self.host.session),clock=self.clock)
         self.a.connect()
         self.b.connect()
 
@@ -86,13 +86,14 @@ class Peers(unittest.TestCase):
                 raise ConnectionError("peer proof accepted, response lost")
             return result
         self.b.router.request = lose
-        with self.assertRaises(ConnectionError):
-            self.b.poll()
+        self.clock.advance(5)
+        self.b.poll()
         observed = sender.request("GET",path)
         self.assertTrue(observed["host_receipt_id"])
         self.assertEqual(observed["accepted_at"],accepted["accepted_at"])
         self.b.router.request = original_request
-        self.b = Worker(self.loop.root/"other-worker.db","tama",self.b.router,self.b.adapter)
+        self.b = Worker(self.loop.root/"other-worker.db","tama",self.b.router,self.b.adapter,clock=self.clock)
+        self.clock.advance(5)
         self.b.poll()
         self.assertEqual(sender.request("GET",path),observed)
         self.assertEqual(len(self.host.entries()),1)
@@ -138,10 +139,10 @@ class Peers(unittest.TestCase):
                     raise ConnectionError("fixture receiver disconnected")
             return wire(*args,**kwargs)
         self.b.router.request = interrupt
-        with self.assertRaises(ConnectionError):
-            self.b.poll()
+        self.b.poll()
         self.assertFalse(self.host.entries())
-        self.b = Worker(self.loop.root/"other-worker.db","tama",self.b.router,self.b.adapter)
+        self.b = Worker(self.loop.root/"other-worker.db","tama",self.b.router,self.b.adapter,clock=self.clock)
+        self.clock.advance(5)
         self.b.poll()
         self.b.poll()
         self.assertEqual(ranges[1],ranges[2])
@@ -200,3 +201,69 @@ class Peers(unittest.TestCase):
             self.b.send_peer(guid(),"oguri","answer",guid())
         with self.assertRaises(Fault):
             self.a.send_peer(mid,"tama","different")
+
+    def test_unknown_peer_does_not_block_other_chat_or_formal_dispatch(self):
+        failed,healthy = guid(),guid()
+        self.a.send_peer(failed,"tama","first")
+        self.a.send_peer(healthy,"tama","second")
+        tid = self.loop.hermes.create(guid(),"Independent dispatch","Continue working","tama")["task_id"]
+        receive = self.b.adapter.deliver
+        calls = []
+        def inconsistent(did,payload):
+            receipt = receive(did,payload)
+            if payload.get("message_id")==failed:
+                calls.append(did)
+                return {**receipt,"session":"different-session"}
+            return receipt
+        self.b.adapter.deliver = inconsistent
+        recipient = self.adapter_client(self.b)
+        sender = self.adapter_client(self.a)
+        path = "worker/peers/"+failed
+        self.b.poll()
+        observed = recipient.request("GET",path)
+        self.assertIsNone(observed["host_receipt_id"])
+        pending, = observed["local_pending"]
+        self.assertEqual((pending["phase"],pending["attempts"],pending["failure"]),("delivery",1,"peer_host_unconfirmed"))
+        self.assertNotIn("local_pending",sender.request("GET",path))
+        self.assertTrue(sender.request("GET","worker/peers/"+healthy)["host_receipt_id"])
+        self.b.poll()
+        self.assertEqual(len(calls),1)
+        self.clock.advance(10)
+        self.b.poll()
+        self.b.poll()
+        self.assertEqual(self.b.hold()["held_task_id"],tid)
+        self.assertEqual(len(calls),2)
+        self.b.adapter.deliver = receive
+        self.b = Worker(self.loop.root/"other-worker.db","tama",self.b.router,self.b.adapter,clock=self.clock)
+        self.b.poll()
+        self.assertIsNone(sender.request("GET",path)["host_receipt_id"])
+        self.clock.advance(10)
+        self.b.poll()
+        self.assertTrue(sender.request("GET",path)["host_receipt_id"])
+        self.assertEqual(recipient.request("GET",path)["local_pending"],[])
+        self.assertEqual([p["kind"] for p,_ in self.host.entries()],["peer","peer","task"])
+        self.assertEqual(self.loop.hermes.inspect(tid)["task"]["state"],"working")
+
+    def test_lost_receipt_does_not_starve_another_confirmation(self):
+        first,second = guid(),guid()
+        self.a.send_peer(first,"tama","one")
+        self.a.send_peer(second,"tama","two")
+        request = self.b.router.request
+        def fail(method,path,*args,**kwargs):
+            if path=="peers/messages/"+first+"/receipt":
+                raise Fault(503,"peer_receipt_temporarily_unavailable")
+            return request(method,path,*args,**kwargs)
+        self.b.router.request = fail
+        self.b.poll()
+        recipient = self.adapter_client(self.b)
+        pending = recipient.request("GET","worker/peers/"+first)
+        self.assertIsNone(pending["host_receipt_id"])
+        self.assertEqual(pending["local_pending"][0]["phase"],"receipt")
+        self.assertTrue(recipient.request("GET","worker/peers/"+second)["host_receipt_id"])
+        self.b.router.request = request
+        self.clock.advance(5)
+        self.b.poll()
+        recovered = recipient.request("GET","worker/peers/"+first)
+        self.assertTrue(recovered["host_receipt_id"])
+        self.assertEqual(recovered["local_pending"],[])
+        self.assertEqual(len(self.host.entries()),2)

@@ -3,7 +3,7 @@ from threading import Event, Thread
 import time
 from urllib.error import URLError
 
-from . import display, links, queued_chat, user_questions, worker_commands, worker_media
+from . import display, links, peer_retry, queued_chat, user_questions, worker_commands, worker_media
 from .storage import Fault, require, string
 from .wire import serve_authenticated
 
@@ -118,6 +118,8 @@ class WorkerService:
             mid = path.removeprefix("/v1/worker/peers/")
             require(valid_guid(mid),422,"invalid_peer_message")
             result = w.router.request("GET","peers/messages/"+mid)
+            if result["recipient"]==w.worker_id:
+                result["local_pending"] = peer_retry.waiting(w,mid)
         elif actor == "platform/" + w.worker_id and method == "POST" and path == "/v1/worker/command":
             result = {"receipt":worker_commands.handle(self,body)}
         elif actor == "platform/" + w.worker_id and method == "POST" and path == "/v1/worker/chat":
