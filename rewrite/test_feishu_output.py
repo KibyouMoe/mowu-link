@@ -13,6 +13,7 @@ class PlatformFixture:
         self.images = []
         self.calls = []
         self.lose_next = False
+        self.lose_upload = False
 
     def send(self, chat, kind, body, key):
         record = self.messages.setdefault(key,["om_"+str(len(self.messages)+1),kind,body])
@@ -37,6 +38,9 @@ class PlatformFixture:
 
     def upload_image(self,data):
         self.images.append(data)
+        if self.lose_upload:
+            self.lose_upload = False
+            raise ConnectionError("platform stored image, upload acknowledgement lost")
         return "img_fixture_"+str(len(self.images))
 
 

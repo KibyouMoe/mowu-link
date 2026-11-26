@@ -28,6 +28,8 @@ class Views:
             CREATE TABLE IF NOT EXISTS view_attempt(seq INTEGER PRIMARY KEY,event TEXT NOT NULL,first_try REAL NOT NULL,mid TEXT);
             CREATE TABLE IF NOT EXISTS view_writes(seq INTEGER PRIMARY KEY,request TEXT,prepared_at REAL,platform_mid TEXT);
             CREATE TABLE IF NOT EXISTS view_images(seq INTEGER PRIMARY KEY,image_key TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS view_image_uploads(seq INTEGER PRIMARY KEY,sha256 TEXT NOT NULL,
+                attempts INTEGER NOT NULL,retry_at REAL NOT NULL);
             CREATE TABLE IF NOT EXISTS segments(session TEXT,turn TEXT,mid TEXT NOT NULL,text TEXT NOT NULL,
                 PRIMARY KEY(session,turn));
         """ + question_cards.SCHEMA)
@@ -39,8 +41,9 @@ class Views:
         with self.db.transaction() as db:
             after = db.execute("SELECT cursor FROM view_cursor").fetchone()[0]
         rows = self.worker.request("GET",f"worker/display?after={after}")["items"]
-        for row in rows:
-            self.deliver(row["seq"],row["event"])
+        for completed,row in enumerate(rows):
+            if self.deliver(row["seq"],row["event"]) is None:
+                return completed
         return len(rows)
 
     def input_notices(self, inbound):
@@ -90,18 +93,8 @@ class Views:
             else:
                 db.execute("INSERT INTO view_attempt VALUES (?,?,?,NULL)",(seq,serialized,self.clock()))
                 db.execute("INSERT INTO view_writes(seq) VALUES (?)",(seq,))
-        if event["kind"] == "image":
-            with self.db.transaction() as db:
-                stored = db.execute("SELECT image_key FROM view_images WHERE seq=?",(seq,)).fetchone()
-                if not stored:
-                    response = self.worker.request("GET","worker/media/files/"+event["attachment_id"])
-                    data = response["bytes"]
-                    require(response["status"] == 200 and hashlib.sha256(data).hexdigest() ==
-                            response["headers"].get("X-Content-SHA256"),502,"unconfirmed_image_bytes")
-                    image_format(data)
-                    image_key = self.platform.upload_image(data)
-                    require(isinstance(image_key,str) and image_key.startswith("img_"),502,"unconfirmed_image_key")
-                    db.execute("INSERT INTO view_images VALUES (?,?)",(seq,image_key))
+        if event["kind"] == "image" and not self.ensure_image(seq,event["attachment_id"]):
+            return None
         # Persist the exact provider call before the first attempt. Reopening with a different renderer
         # or display name must keep both the request key and its original content.
         with self.db.transaction() as db:
@@ -140,6 +133,37 @@ class Views:
             db.execute("UPDATE view_attempt SET mid=? WHERE seq=?",(mid,seq))
             db.execute("UPDATE view_cursor SET cursor=?",(seq,))
             return mid
+
+    def ensure_image(self,seq,attachment_id):
+        with self.db.transaction() as db:
+            if db.execute("SELECT 1 FROM view_images WHERE seq=?",(seq,)).fetchone():
+                return True
+            previous = db.execute("SELECT * FROM view_image_uploads WHERE seq=?",(seq,)).fetchone()
+            if previous and self.clock()<previous["retry_at"]:
+                return False
+            response = self.worker.request("GET","worker/media/files/"+attachment_id)
+            data = response["bytes"]
+            sha = hashlib.sha256(data).hexdigest()
+            require(response["status"]==200 and sha==response["headers"].get("X-Content-SHA256")
+                    and (not previous or sha==previous["sha256"]),502,"unconfirmed_image_bytes")
+            image_format(data)
+            attempts = previous["attempts"]+1 if previous else 1
+            delay = min(300,5*2**min(attempts-1,6))
+            # Asset upload has no message UUID. Persist backoff before calling the provider.
+            db.execute("INSERT OR REPLACE INTO view_image_uploads VALUES (?,?,?,?)",
+                       (seq,sha,attempts,self.clock()+delay))
+
+        with self.db.transaction() as db:
+            if db.execute("SELECT 1 FROM view_images WHERE seq=?",(seq,)).fetchone():
+                return True
+            current = db.execute("SELECT attempts FROM view_image_uploads WHERE seq=?",(seq,)).fetchone()
+            if current["attempts"]!=attempts:
+                return False
+            image_key = self.platform.upload_image(data)
+            require(isinstance(image_key,str) and image_key.startswith("img_"),502,"unconfirmed_image_key")
+            db.execute("INSERT INTO view_images VALUES (?,?)",(seq,image_key))
+            db.execute("DELETE FROM view_image_uploads WHERE seq=?",(seq,))
+            return True
 
     def send_write(self,request,prepared_at):
         if request["method"]=="patch":

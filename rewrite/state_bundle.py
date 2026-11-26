@@ -68,6 +68,7 @@ FEISHU_NATIVE_PENDING = {
 FEISHU_OPTIONAL_PENDING = {
     "platform_known_receipts_uncommitted": ({"view_attempt","view_writes"},"""SELECT COUNT(*) FROM view_attempt
         JOIN view_writes USING(seq) WHERE view_attempt.mid IS NULL AND view_writes.platform_mid IS NOT NULL"""),
+    "platform_image_uploads_unconfirmed": ({"view_image_uploads"},"SELECT COUNT(*) FROM view_image_uploads"),
 }
 
 

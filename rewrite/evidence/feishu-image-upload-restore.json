@@ -1,0 +1,32 @@
+{
+  "boundary": "Actual Worker HTTP and SQLite, simulated Feishu provider, native host and clock.",
+  "confirmed_asset_key": "img_fixture_3",
+  "consecutive_runs": 10,
+  "pending_uploads": [
+    1,
+    0
+  ],
+  "platform_assets": 3,
+  "platform_message_kinds": [
+    "interactive",
+    "image",
+    "interactive"
+  ],
+  "platform_operations": [
+    [
+      "send",
+      "om_1"
+    ],
+    [
+      "send",
+      "om_2"
+    ],
+    [
+      "send",
+      "om_3"
+    ]
+  ],
+  "settled_snapshot": "2b4c99610d1fbef1992e48f84738150aa06b3bfaa66c259e6a8e30cf089f17fd",
+  "snapshot_with_unconfirmed_upload": "b77d68b501581f80fcf7f88070093ea9389f8599f8edfc5b9fb417395d7e74b3",
+  "worker_attachment_sha256": "e77617115ffe6399c0f4714c72aa32eefeb22fbdf45b1167a4ddb64e213b4007"
+}

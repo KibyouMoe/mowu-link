@@ -1,4 +1,5 @@
 from contextlib import closing, contextmanager
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -19,7 +20,8 @@ from .managed_sessions import FAMILY_SCHEMA, derive_callback, read_enrollment, t
 from .orders import Orders
 from .release_check import config
 from .state_bundle import audit_handoff, capture, filename, restore, rollback, stage_native_handoff, validate_set, verify
-from .storage import Database, StateWriterBusy, encode, guid, state_writer
+from .storage import Database, Fault, StateWriterBusy, encode, guid, state_writer
+from .test_feishu_inbound import PNG
 from .test_feishu_output import PlatformFixture
 from .test_mainline import Clock
 from .trigger import Trigger
@@ -214,6 +216,68 @@ class Bundle(unittest.TestCase):
                                 "remote_operations":self.platform.calls,"original_payload_reused":True,
                                 "known_platform_receipt_reused_after_seconds":3601,
                                 "boundary":"Actual Worker HTTP and SQLite, simulated Feishu provider and native host."}
+
+    def test_feishu_image_upload_backoff_survives_snapshot_without_reordering_messages(self):
+        digest = hashlib.sha256(PNG).hexdigest()
+        with self.stack(self.sources) as (_m,w,_source,_mail,_inbound,views):
+            w.connect()
+            w.poll()
+            upload = views.worker.request("POST","worker/media/uploads",
+                {"name":"fixture.png","size_bytes":len(PNG),"sha256":digest},"test-image")
+            image = views.worker.request("PATCH","worker/media/uploads/"+upload["upload_id"],PNG,
+                                         headers={"Upload-Offset":"0"})
+            frame = {"session":self.native.session,"turn_id":"test-turn"}
+            with w.db.transaction() as db:
+                display.append(db,{**frame,"event_id":"before","kind":"progress","text":"图前"})
+                middle = display.append(db,{**frame,"event_id":"image","kind":"image",
+                                            "attachment_id":image["attachment_id"]})
+                display.append(db,{**frame,"event_id":"after","kind":"progress","text":"图后"})
+            self.platform.lose_upload = True
+            with self.assertRaisesRegex(ConnectionError,"upload acknowledgement lost"):
+                views.poll()
+            self.assertEqual(self.platform.images,[PNG])
+            self.assertEqual(len(self.platform.messages),1)
+
+        checksum = capture(self.sources,self.revision,self.snapshot)["manifest_sha256"]
+        pending, = audit_handoff(self.snapshot,checksum)["workers"]
+        self.assertEqual(pending["native_session_pending"]["platform_image_uploads_unconfirmed"],1)
+        self.assertFalse(pending["native_session_ledger_clear"])
+        recovered = restore(self.snapshot,checksum,self.dest)
+        with self.stack(recovered) as (_m,_w,_source,_mail,_inbound,views):
+            self.clock.advance(4)
+            self.assertEqual(views.poll(),0)
+            self.assertEqual(self.platform.images,[PNG])
+            self.clock.advance(1)
+            self.platform.lose_upload = True
+            with self.assertRaisesRegex(ConnectionError,"upload acknowledgement lost"):
+                views.poll()
+            self.clock.advance(9)
+            self.assertEqual(views.poll(),0)
+            self.assertEqual(self.platform.images,[PNG,PNG])
+            self.assertEqual(len(self.platform.messages),1)
+            self.clock.advance(1)
+            self.assertEqual(views.poll(),2)
+            self.assertEqual(views.poll(),0)
+            with views.db.transaction() as db:
+                stored, = db.execute("SELECT image_key FROM view_images WHERE seq=?",(middle["seq"],)).fetchone()
+            self.assertEqual(stored,"img_fixture_3")
+            before,image,after = self.platform.messages.values()
+            self.assertEqual([before[1],image[1],after[1]],["interactive","image","interactive"])
+            self.assertEqual(image[2],{"image_key":stored})
+            self.assertEqual([card[2]["elements"][0]["text"]["content"] for card in (before,after)],["图前","图后"])
+            self.assertEqual(self.platform.images,[PNG]*3)
+        settled = self.root/"settled-image"
+        seal = capture(recovered,self.revision,settled)["manifest_sha256"]
+        finished, = audit_handoff(settled,seal)["workers"]
+        self.assertEqual(finished["native_session_pending"]["platform_image_uploads_unconfirmed"],0)
+        self.assertTrue(finished["native_session_ledger_clear"],finished)
+        self.image_evidence = {"snapshot_with_unconfirmed_upload":checksum,"settled_snapshot":seal,
+                               "worker_attachment_sha256":digest,"platform_assets":len(self.platform.images),
+                               "platform_operations":self.platform.calls,"confirmed_asset_key":stored,
+                               "platform_message_kinds":[message[1] for message in self.platform.messages.values()],
+                               "pending_uploads":[pending["native_session_pending"]["platform_image_uploads_unconfirmed"],
+                                                  finished["native_session_pending"]["platform_image_uploads_unconfirmed"]],
+                               "boundary":"Actual Worker HTTP and SQLite, simulated Feishu provider, native host and clock."}
 
     def test_wrong_role_active_writer_or_incomplete_inventory_preserves_destination(self):
         with self.stack(self.sources):
