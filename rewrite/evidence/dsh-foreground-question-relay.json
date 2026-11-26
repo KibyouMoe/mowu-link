@@ -1,0 +1,125 @@
+{
+  "cases": [
+    {
+      "case": "feishu-first",
+      "opening": {
+        "session": "dsh-real-question-feishu-first",
+        "status": "running",
+        "turn_id": "1/1",
+        "call_id": "native-question-foreground",
+        "continued": 0,
+        "timed": false,
+        "question_ids": [
+          "primary"
+        ]
+      },
+      "question_id": "144729a9-b6f2-577b-b64c-c2f165689dab",
+      "fixture_message_id": "om_3",
+      "proof": {
+        "answer": {
+          "mode": "choice",
+          "option_id": "1"
+        },
+        "closed": true,
+        "native_question_id": "native-question-foreground",
+        "receipt_id": "3c8237c2-3d45-48fa-88ad-10fc77491976",
+        "session": "dsh-real-question-feishu-first",
+        "turn_id": "1/1"
+      },
+      "native_calls": 1,
+      "native_continued_replies": 0,
+      "original_card_updates": 1,
+      "reopened_receipt_id": "3c8237c2-3d45-48fa-88ad-10fc77491976"
+    },
+    {
+      "case": "native-first",
+      "opening": {
+        "session": "dsh-real-question-native-first",
+        "status": "running",
+        "turn_id": "1/1",
+        "call_id": "native-question-foreground",
+        "continued": 0,
+        "timed": false,
+        "question_ids": [
+          "primary"
+        ]
+      },
+      "question_id": "7e335284-8d82-504c-bc18-56aebda1951c",
+      "fixture_message_id": "om_3",
+      "proof": {
+        "answer": {
+          "mode": "choice",
+          "option_id": "2"
+        },
+        "closed": true,
+        "native_question_id": "native-question-foreground",
+        "receipt_id": "0b372a38-4aca-4971-aa1f-8517d54e058e",
+        "session": "dsh-real-question-native-first",
+        "turn_id": "1/1"
+      },
+      "native_calls": 1,
+      "native_continued_replies": 0,
+      "original_card_updates": 1
+    },
+    {
+      "case": "canceled",
+      "opening": {
+        "session": "dsh-real-question-canceled",
+        "status": "running",
+        "turn_id": "1/1",
+        "call_id": "native-question-foreground",
+        "continued": 0,
+        "timed": false,
+        "question_ids": [
+          "primary"
+        ]
+      },
+      "question_id": "7e1320eb-edd3-5819-aa68-d8a82c84a1f3",
+      "fixture_message_id": "om_3",
+      "proof": {
+        "answer": null,
+        "closed": true,
+        "native_question_id": "native-question-foreground",
+        "receipt_id": "dsh-turn-end:12",
+        "session": "dsh-real-question-canceled",
+        "state": "ended_unanswered",
+        "turn_id": "1/1"
+      },
+      "native_calls": 1,
+      "native_continued_replies": 0,
+      "original_card_updates": 1
+    },
+    {
+      "case": "timed-out",
+      "opening": {
+        "session": "dsh-real-question-timed-out",
+        "status": "running",
+        "turn_id": "1/1",
+        "call_id": "native-question-foreground",
+        "continued": 0,
+        "timed": true,
+        "question_ids": [
+          "primary"
+        ]
+      },
+      "question_id": "9de10965-29d3-58a0-a89b-529f344a9e24",
+      "fixture_message_id": "om_3",
+      "proof": {
+        "answer": {
+          "mode": "choice",
+          "option_id": "1"
+        },
+        "closed": true,
+        "native_question_id": "native-question-foreground",
+        "receipt_id": "19d86a4a-2dea-448c-a95c-bbf030b1e100",
+        "session": "dsh-real-question-timed-out",
+        "turn_id": "1/1"
+      },
+      "native_calls": 1,
+      "native_continued_replies": 1,
+      "original_card_updates": 1
+    }
+  ],
+  "boundary": "Installed DSH AgentLoop, question SDK and persistence. Local model, native answer provider and Feishu test platform.",
+  "successful_repeats": 8
+}

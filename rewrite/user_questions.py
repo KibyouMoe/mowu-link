@@ -12,8 +12,8 @@ CREATE TABLE IF NOT EXISTS trainer_questions(question_id TEXT PRIMARY KEY, origi
 """
 
 
-def show(db, recipient, qid, question, answer=None):
-    kind = "question_open" if answer is None else "question_answered"
+def show(db, recipient, qid, question, answer=None, *, ended=False):
+    kind = "question_closed" if ended else "question_open" if answer is None else "question_answered"
     event = {"event_id":f"{kind}-{recipient}-{qid}", "kind":kind, "recipient":recipient, "question_id":qid,
              "session":question["session"], "turn_id":question.get("turn_id",""),
              **content(question)}
@@ -57,11 +57,16 @@ def confirm(proof, original, answer):
 def record_proof(db, qid, row, question, proof):
     require(isinstance(proof,dict),409,"native_question_unconfirmed")
     answer = proof.get("answer")
-    validate_reply(answer,question)
+    ended = proof.get("state")=="ended_unanswered"
+    if ended:
+        require(answer is None and set(proof)=={"state","closed","answer","receipt_id","session","turn_id","native_question_id"},
+                409,"native_question_unconfirmed")
+    else:
+        validate_reply(answer,question)
     confirm(proof,question,answer)
     require(row["proof"] in (None,encode(proof)),409,"question_receipt_conflict")
     db.execute("UPDATE trainer_questions SET proof=? WHERE question_id=?",(encode(proof),qid))
-    show(db,"trainer",qid,question,answer)
+    show(db,"trainer",qid,question,answer,ended=ended)
     return {"question_id":qid,"proof":proof}
 
 
@@ -87,6 +92,7 @@ def resolve(worker, body):
         validate_reply(answer,question)
         if row["proof"]:
             proof = json.loads(row["proof"])
+            require(proof.get("state")!="ended_unanswered",409,"native_question_ended")
             require(proof["answer"]==answer,409,"native_question_already_answered")
             return {"question_id":qid,"proof":proof}
         require(row["answer"] in (None,encode(answer)),409,"answer_conflict")

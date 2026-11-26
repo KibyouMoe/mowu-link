@@ -4,6 +4,12 @@
 
 ## 检查点与证据
 
+独立 DSH 工位可启用前台题转接。真实 AgentLoop 的同一个原生请求由原客户端与飞书共用。两端先答各测一次，迟到的不同答案不会覆盖已入场的答案。Worker 回执丢失后用原生工具结果查回，原生会话重新打开仍能找到同一凭据。前台超时后同一卡可续答。原回合被取消时，原卡标已关闭且无答案，拒绝后来点卡。四个场景均只创建一张测试卡、更新一次。模型、原客户端答题者和飞书均为本地测试替身。[前台题回执](evidence/dsh-foreground-question-relay.json)
+
+复跑 `python3 -B -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_foreground_question_uses_one_native_answer_and_one_original_card`。初版试跑中原生持久化拒读未经声明的扩展事件。最终版的转接标记写入宿主私有目录，原生会话日志保持 SDK 原格式。原生的原题、工具结果、续答消息及回合结束构成关闭凭据。
+
+本机 DSH SDK 的 `dsh-experimental-worktree` 随附说明和实现只在宿主归档后尝试移除干净的专属工作树。该删除会保留有订阅会话或改动的工作树，也不查询在其中运行的进程。读写工位的旧派发仍需专属运行环境和可核验的停止与清理能力，继续标为待核。
+
 启用只读模式的独立 DSH SDK 工位已经能用真实原生记录确认原派发停止并清理。取消或转派到达后，宿主撤下同一派发的排队更新，中止确切的原回合，另一个排队的私聊仍收到一次。Worker 取得清理证明后，由原生 `worker_report` 经 W04 清除旧派发。已转派的工单仍由新派发持有。Router 实际记账后丢回执，Worker 重开沿用原派发查回，清理不会生成正式成果。通用未启用模式和出现未核实工具的回合仍待核，测试写工具被原生执行前的限制挡下，文件未产生。宿主为实际安装的 DSH SDK，模型为脚本驱动。读写工作区的清理仍待实测。[清理与回执证据](evidence/dsh-read-only-cleanup.json) · [待核反例](evidence/dsh-native-cleanup-refusal.json)
 
 复跑 `python3 -B -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_read_only_dsh_acknowledges_original_cancel_or_transfer_and_recovers_w04_reply rewrite.test_dsh_native_loop.NativeLoop.test_native_dsh_stop_alone_or_unverified_tool_keeps_cleanup_pending`。
@@ -100,7 +106,7 @@ Worker 可经独立交接授权建立 Router 交接窗口。冻结和预约在 R
 
 训练员题卡可一次提交同一原生请求里的多道公开题。Codex App Server 按原题 ID 回填单选、自填和跳过。任一题标为密题时整组留在宿主。DSH 已进入续答状态的计时题支持多选、自填与逐题跳过。选项顺序取原题，同样的选择换顺序重提仍只留一次答案。飞书测试卡收到原生关闭凭据后才更新同一张卡。两端各连过 8 轮，模型与飞书均用夹具，未启动日用会话。[Codex 原生记录](evidence/codex-app-server-native-question-batch.json) · [DSH 原生记录](evidence/dsh-native-question-batch.json)
 
-批量卡以输入框收选项序号。现有 DSH SDK 的续答入口只接受已超时的题，尚未接仍在前台等待的原生题。飞书实际显示、真人点击与同时打开的桌面原卡留待独立测试身份验证。
+批量卡以输入框收选项序号。此处的续答证据使用 DSH SDK 已超时的题；原生前台答题见本页最新检查点。飞书实际显示、真人点击与同时打开的桌面原卡留待独立测试身份验证。
 
 另用 DSH 随附 SDK 起阻塞式原生题，确认 `user-questions/request` 交给原答题者时，`continued(agent)` 仍为空。适配器按同一会话、回合与调用号查询和尝试作答均未得到凭据。原答题者给出测试答案后只生成同一工具调用的结果，没有第二条回合输入或飞书题卡。连续 12 轮通过，以隔离测试答题者代替客户端 UI。复跑 `python3 -B -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_native_foreground_question_remains_with_its_original_answer_provider`。[阻塞题证据](evidence/dsh-native-foreground-question.json)
 

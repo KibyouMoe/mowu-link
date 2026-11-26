@@ -1,5 +1,5 @@
 import {createHash} from 'node:crypto';
-import {pendingCall} from './questions.mjs';
+import {awaitingQuestionProvider,pendingCall} from './questions.mjs';
 
 const digest = e => createHash('sha256').update(JSON.stringify(e)).digest('hex');
 
@@ -54,6 +54,9 @@ function visible(event) {
   if (event.type==='tool/result') {
     const callId = pendingCall(event);
     if (callId) return {kind:'question',turn:d.turn,call_id:callId};
+    if (typeof d.message?.toolCallId==='string') {
+      return {kind:'question-result',turn:d.turn,call_id:d.message.toolCallId};
+    }
   }
   return {kind:'other'};
 }
@@ -78,7 +81,7 @@ export function baseline(ctx,agent) {
   });
 }
 
-export function nextDisplay(ctx,agent,{offset,anchor}) {
+export function nextDisplay(ctx,agent,{offset,anchor},questionRecords,foreground) {
   return withLog(ctx,agent,async log=>{
     if (!Number.isSafeInteger(offset) || offset<log.inheritedEventCount) throw new Error('unknown_display_cursor');
     const {events} = await log.read(Math.max(0,offset-1),offset ? 17 : 16);
@@ -91,6 +94,14 @@ export function nextDisplay(ctx,agent,{offset,anchor}) {
     for (const event of events) {
       if (event.seq!==offset+rows.length) throw new Error('display_history_changed');
       const row = {seq:event.seq,anchor:digest(event),...visible(event)};
+      if (event.type==='tool/call' && event.data.name==='ask_user_question') {
+        if (questionRecords.has(event)) {
+          row.foreground = event.data.callId;
+        } else if (foreground && awaitingQuestionProvider(agent,event)) {
+          // The log can expose a call before it enters the native answer provider.
+          break;
+        }
+      }
       const length = Buffer.byteLength(JSON.stringify(row));
       if (length>800000) throw new Error('display_event_too_large');
       if (bytes+length>800000) break;

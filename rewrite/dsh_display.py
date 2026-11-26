@@ -17,6 +17,9 @@ CREATE TABLE IF NOT EXISTS dsh_display (
 CREATE TABLE IF NOT EXISTS dsh_public_outbox (
  seq INTEGER PRIMARY KEY, event_id TEXT UNIQUE NOT NULL, event TEXT NOT NULL, ack TEXT
 );
+CREATE INDEX IF NOT EXISTS dsh_question_outbox
+ ON dsh_public_outbox (json_extract(event,'$.native_question_id'),json_extract(event,'$.turn_id'))
+ WHERE json_extract(event,'$.kind')='native_question';
 """
 
 
@@ -71,10 +74,19 @@ class DshDisplay:
                 event["text"] = text
             db.execute("INSERT INTO dsh_public_outbox(event_id,event) VALUES (?,?)",(key,encode(event)))
 
+        def foreground_questions(call_id=None):
+            return db.execute("""SELECT json_extract(event,'$.native_question_id') AS call
+                FROM dsh_public_outbox WHERE json_extract(event,'$.kind')='native_question'
+                AND json_extract(event,'$.turn_id')=? AND json_extract(event,'$.foreground')=1
+                AND (? IS NULL OR json_extract(event,'$.native_question_id')=?)""",
+                (turn["id"],call_id,call_id)).fetchall()
+
         if kind in ("model","tool","user","end") and turn.get("pending"):
             seq,text = turn.pop("pending")
             emit(seq,"final" if kind=="end" and row["completed"] else "progress",text)
         if kind=="end":
+            for index,question in enumerate(foreground_questions()):
+                emit(f"{row['seq']}.{index}","question-proof",native_question_id=question["call"],optional=True)
             return None
         if kind=="user":
             turn["visible"] = True
@@ -92,8 +104,13 @@ class DshDisplay:
                         turn["pending"] = [seq,part["text"]]
             if kind=="tool":
                 emit(row["seq"],"tool",row["preview"] or "宿主已调用工具",tool_name=row["name"])
+                if row.get("foreground"):
+                    emit(row["seq"],"native_question",native_question_id=row["foreground"],foreground=True)
             if kind=="question":
-                emit(row["seq"],"native_question",native_question_id=row["call_id"])
+                if not foreground_questions(row["call_id"]):
+                    emit(row["seq"],"native_question",native_question_id=row["call_id"],foreground=row.get("foreground",False))
+            if kind=="question-result" and foreground_questions(row["call_id"]):
+                emit(row["seq"],"question-proof",native_question_id=row["call_id"],optional=True)
         return turn
 
     def flush(self):
@@ -108,7 +125,7 @@ class DshDisplay:
             if event["kind"]=="native_question":
                 receipt = self.open_question(row,event)
             elif event["kind"]=="question-proof":
-                receipt = self.close_question(event["native_question_id"])
+                receipt = self.close_question(event["native_question_id"],optional=event.get("optional",False))
             else:
                 if event["kind"]=="image":
                     media = event.pop("image")
@@ -136,7 +153,7 @@ class DshDisplay:
         require(isinstance(qid,str) and qid,502,"wrong_question_ack")
         return receipt
 
-    def close_question(self,call_id):
+    def close_question(self,call_id,*,optional=False):
         with self.db.transaction() as db:
             opens = db.execute("""SELECT event,ack FROM dsh_public_outbox
                 WHERE json_extract(event,'$.kind')='native_question'
@@ -150,6 +167,8 @@ class DshDisplay:
             return {"projected":False}
         original = json.loads(opens[0]["event"])
         proof = self.host.lookup_answer(self.session,original["turn_id"],call_id)
+        if optional and not proof:
+            return {"projected":False}
         require(proof,409,"native_question_unconfirmed")
         receipt = self.worker.request("POST","worker/native-question-proof",{"question_id":qid,"proof":proof})
         require(receipt.get("question_id")==qid and receipt.get("proof")==proof,502,"wrong_question_ack")

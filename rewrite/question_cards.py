@@ -22,7 +22,7 @@ def button(qid,label,name,mode,**args):
             "value":{"question_id":qid,"mode":mode,**args}}
 
 
-def batch_elements(qid,fields,answer):
+def batch_elements(qid,fields,answer,closed=False):
     elements = []
     for index,field in enumerate(fields,1):
         heading = f"{field['header']} · " if "header" in field else ""
@@ -37,14 +37,14 @@ def batch_elements(qid,fields,answer):
                 values.append(value["text"])
             lines.append("训练员的回答："+("、".join(values) or "已跳过"))
         elements.append({"tag":"div","text":plain("\n".join(lines))})
-        if answer:
+        if answer or closed:
             continue
         if field["options"]:
             hint = "可多选，用逗号分隔序号" if field["multiple"] else "填写一个选项序号"
             elements.append({"tag":"input","name":f"options_{index}","placeholder":plain(hint),"max_length":24})
         if field["custom"]:
             elements.append({"tag":"input","name":f"reply_{index}","placeholder":plain("自定义答案"),"max_length":1000})
-    if answer:
+    if answer or closed:
         return elements
     if all(not field["multiple"] for field in fields):
         hint = "每题选序号或填写自定义答案，留空即跳过。"
@@ -89,18 +89,21 @@ def batch_reply(value,form,fields):
 
 def render(name,event):
     qid,answer = event["question_id"],event.get("answer")
+    closed = event["kind"]=="question_closed"
     if "questions" in event:
-        elements = batch_elements(qid,event["questions"],answer)
+        elements = batch_elements(qid,event["questions"],answer,closed)
     else:
-        elements = single_elements(qid,event,answer)
+        elements = single_elements(qid,event,answer,closed)
+    if closed:
+        elements.append({"tag":"div","text":plain("原会话已结束这道题，未收到答案。")})
     if event.get("session"):
         elements.append({"tag":"div","text":plain("会话 "+event["session"])})
-    title = name+"-提问"+(" · 已回答" if answer else "")
+    title = name+"-提问"+(" · 已关闭" if closed else " · 已回答" if answer else "")
     return {"schema":"2.0","config":{"update_multi":True},"header":{"title":plain(title),"template":"indigo"},
             "body":{"elements":elements}}
 
 
-def single_elements(qid,event,answer):
+def single_elements(qid,event,answer,closed=False):
     who = "训练员" if event["recipient"]=="trainer" else "溪流"
     lines = [event["text"]] + [f"{i}. {o['label']}" for i,o in enumerate(event["options"],1)]
     if answer:
@@ -112,7 +115,7 @@ def single_elements(qid,event,answer):
     elif who=="溪流":
         lines.append("等溪流回答")
     elements = [dict(tag="div",text=plain("\n".join(lines)))]
-    if who=="训练员" and not answer:
+    if who=="训练员" and not answer and not closed:
         form = [button(qid,f"选择 {i}",f"choice_{i}","choice",option_id=o["id"])
                 for i,o in enumerate(event["options"],1)]
         form.extend([{"tag":"input","name":"reply","placeholder":plain("自定义答案"),"max_length":1000},
@@ -137,6 +140,8 @@ def publish(db,platform,chat,name,event,key):
                 409,"question_card_changed")
         mid = platform.patch(row["mid"],card)
         require(mid==row["mid"],502,"wrong_card_receipt")
+        if event["kind"]=="question_closed":
+            db.execute("UPDATE question_cards SET question=? WHERE recipient=? AND qid=?",(encode(event),recipient,qid))
     return mid
 
 
@@ -154,6 +159,7 @@ class Actions:
                              (qid,mid)).fetchone()
             require(row,403,"not_original_trainer_card")
             question = json.loads(row["question"])
+            require(question["kind"]!="question_closed",409,"native_question_ended")
             if "questions" in question:
                 answer = batch_reply(value,form,question["questions"])
             else:

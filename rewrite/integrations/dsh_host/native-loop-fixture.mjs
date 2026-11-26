@@ -23,6 +23,8 @@ const foregroundAnswer = Promise.withResolvers();
 const isCold = mode.startsWith('cold-resume');
 const isManaged = mode.startsWith('managed-sessions');
 const usesCleanup = mode.startsWith('cleanup-');
+const foregroundRelay = mode.startsWith('foreground-relay');
+const usesForeground = foregroundRelay || mode==='foreground-question';
 const usesGoals = ['goals','goal-driver','formal-goal','cold-resume-goal'].includes(mode);
 const usesMedia = ['media','peer-media','handoff'].includes(mode);
 const usesApprovals = ['command-approvals','command-approvals-reopen'].includes(mode);
@@ -31,6 +33,7 @@ const catalogSessions = [];
 const privateStops = new Map(['one','two','three'].map(tag=>[tag,Promise.withResolvers()]));
 const raceRelease = Promise.withResolvers();
 const mediaRequests = [];
+let foregroundProviderCloses = 0;
 
 class LocalModel extends LlmAdapter {
   submitted = new Map();
@@ -197,7 +200,7 @@ class LocalModel extends LlmAdapter {
       else await waitForStop(signal);
     }
     if ((mode==='questions' && /^Question fixture (choice|text|skip|multi|native)$/.test(text)) ||
-        (mode==='foreground-question' && text==='Question fixture foreground')) {
+        (usesForeground && text==='Question fixture foreground')) {
       const choice = text.split(' ').at(-1);
       if (!this.submitted.has(text)) {
         this.submitted.set(text,true);
@@ -338,15 +341,24 @@ async function setup() {
     ctx.on('approval/request',(request,next)=>request.toolName==='bash'
       ? Promise.resolve('rejected') : next());
   }
-  if (['questions','foreground-question'].includes(mode)) {
+  if (mode==='questions' || usesForeground) {
     await install((await sdk('dsh-user-questions')).UserQuestionService);
-    await install(await sdk('dsh-tool-ask-user'),{mode:'timed',timeout:mode==='questions' ? 1 : -1});
+    const options = foregroundRelay && mode!=='foreground-relay-timed' ? {} :
+      {mode:'timed',timeout:mode==='questions' ? 1 : mode==='foreground-relay-timed' ? 3 : -1};
+    await install(await sdk('dsh-tool-ask-user'),options);
   }
-  if (mode==='foreground-question') {
+  if (usesForeground) {
     ctx.on('user-questions/request',(request,next)=>{
       if (request.agent?.session.id!==session) return next();
       foregroundQuestion.resolve(request);
-      return foregroundAnswer.promise;
+      return new Promise((resolve,reject)=>{
+        const abort = ()=>{
+          foregroundProviderCloses++;
+          reject(request.signal.reason);
+        };
+        request.signal?.addEventListener('abort',abort,{once:true});
+        foregroundAnswer.promise.then(resolve,reject).finally(()=>request.signal?.removeEventListener('abort',abort));
+      });
     });
   }
   if (mode==='formal-goal') await install(await sdk('dsh-tool-goal'));
@@ -362,7 +374,7 @@ async function setup() {
   const agentOptions = {provider:'fixture',model:'local'};
   const registry = ctx.get('agents');
   if (!['cold-resume-reopen','managed-sessions-reopen'].includes(mode)) {
-    originalHandle = mode==='command-approvals-reopen'
+    originalHandle = ['command-approvals-reopen','foreground-relay-reopen'].includes(mode)
       ? await registry.resume({resumeSessionId:session,agentOptions})
       : await registry.create({sessionId:session,agentOptions,...(isManaged ? {meta:{cwd:directory}} : {})});
   }
@@ -455,6 +467,7 @@ async function formalScenario(agent) {
   await install(adapter,{session,directory,catalog_sessions:catalogSessions,
     relay_command_approvals:usesApprovals,resume_on_handoff:isCold,
     read_only_assignments:usesCleanup && mode!=='cleanup-unscoped',
+    relay_foreground_questions:foregroundRelay && mode!=='foreground-relay-reopen',
     ...(isManaged ? {managed_sessions_dir:path.join(directory,'enrolled'),
       new_session_selection:{provider:'fixture',model:'local',effort:'low'}} : {})});
   console.log(JSON.stringify({ready:true,session}));
@@ -513,12 +526,14 @@ async function formalScenario(agent) {
         .map(({type,data})=>({type,data}))));
       continue;
     }
-    if (line==='foreground-question' && mode==='foreground-question') {
+    if (line==='foreground-question' && usesForeground) {
       const request = await foregroundQuestion.promise;
-      const starts = (await readEvents(agent)).filter(event=>event.type==='turn/start');
+      const events = await readEvents(agent);
+      const starts = events.filter(event=>event.type==='turn/start');
       const turn = starts.at(-1);
       console.log(JSON.stringify({session,status:agent.status,turn_id:turn.seq+'/'+turn.data.turn,
-        call_id:request.wait?.callId,continued:ctx.get('userQuestions').continued(agent).length,
+        call_id:request.wait?.callId ?? events.findLast(event=>event.type==='tool/call')?.data.callId,
+        continued:ctx.get('userQuestions').continued(agent).length,
         timed:request.wait?.timed===true,question_ids:request.questions.map(item=>item.id)}));
       continue;
     }
@@ -558,9 +573,10 @@ async function formalScenario(agent) {
       assert.equal(ctx.get('userQuestions').answer(agent,'native-question-native',
         {answers:[{id:'primary',selected:['A']}]}),true);
     }
-    else if (line==='answer-foreground' && mode==='foreground-question') {
+    else if (line==='answer-foreground' && usesForeground) {
       foregroundAnswer.resolve({answers:[{id:'primary',selected:['B']}]});
     }
+    else if (line==='cancel-foreground' && foregroundRelay) agent.cancel({kind:'user'},{keepInbox:true});
     else if (line==='formal-goal-round' && mode==='formal-goal') await formalRound.promise;
     else assert.ok(line==='read' || line==='second-round' && mode==='goal-driver');
     if (line==='second-round') await secondRound.promise;
@@ -578,11 +594,11 @@ async function formalScenario(agent) {
         sourceCommandId:e.data.sourceCommandId ?? e.data.source?.sourceCommandId}));
     const replies = events.filter(e=>e.type==='user/message' && e.data.source.kind==='user-question-reply')
       .map(e=>({id:e.data.id,call:e.data.source.callId,seq:e.seq,body:JSON.parse(e.data.content[0].text)}));
-    const continued = mode==='questions' ? ctx.get('userQuestions').continued(agent).map(q=>q.callId) : [];
+    const continued = mode==='questions' || usesForeground ? ctx.get('userQuestions').continued(agent).map(q=>q.callId) : [];
     const approvals = usesApprovals ? events.filter(event=>['approval/asked','approval/decided'].includes(event.type))
       .map(({type,seq,data})=>({type,seq,data})) : [];
     console.log(JSON.stringify({session,inputs,calls,results,turns,modelRequests,rounds,compactEvents,replies,continued,
-      mediaRequests,approvals,
+      mediaRequests,approvals,foregroundProviderCloses,
       inbox:mode==='private-stop' ? agent.inbox.nextTurn.map(message=>message.id) : [],
       liveSessions:mode==='catalog' ? ctx.get('agents').list().map(agent=>agent.session.id) : []}));
   }
@@ -592,7 +608,7 @@ try {
   const agent = await setup();
   if (['formal','formal-artifacts','compact','questions','foreground-question','catalog','private-stop','work-question','admission-race',
        'binding-close','material','peer-source'].includes(mode) || isCold || isManaged || usesGoals || usesMedia
-       || usesApprovals || usesCleanup) {
+       || usesApprovals || usesCleanup || foregroundRelay) {
     await formalScenario(agent);
   }
   else await stopScenario(agent);

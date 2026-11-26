@@ -1,4 +1,48 @@
+import {createHash} from 'node:crypto';
+import {closeSync,constants,fstatSync,fsyncSync,openSync,readFileSync,writeFileSync} from 'node:fs';
+import path from 'node:path';
 import {isDeepStrictEqual} from 'node:util';
+
+export function foregroundRecords(directory,session) {
+  function key(call) {
+    const {callId,turn,step,name,arguments:args} = call.data;
+    return createHash('sha256').update(JSON.stringify([session,call.seq,callId,turn,step,name,args])).digest('hex');
+  }
+  function filename(id) {
+    return path.join(directory,'question-'+id+'.open');
+  }
+  function has(call) {
+    const id = key(call);
+    let fd;
+    try {
+      fd = openSync(filename(id),constants.O_RDONLY|constants.O_NOFOLLOW|constants.O_NONBLOCK);
+      const info = fstatSync(fd);
+      if (!info.isFile() || info.uid!==process.getuid() || (info.mode&0o077) || info.size!==id.length) return false;
+      return readFileSync(fd,'utf8')===id;
+    } catch (error) {
+      if (error.code==='ENOENT') return false;
+      throw error;
+    } finally {
+      if (fd!==undefined) closeSync(fd);
+    }
+  }
+  return {has,record(call) {
+    const id = key(call);
+    let fd;
+    try {
+      fd = openSync(filename(id),'wx',0o600);
+      writeFileSync(fd,id,'utf8');
+      fsyncSync(fd);
+      const parent = openSync(directory,'r');
+      try { fsyncSync(parent); }
+      finally { closeSync(parent); }
+    } catch (error) {
+      if (error.code!=='EEXIST' || !has(call)) throw error;
+    } finally {
+      if (fd!==undefined) closeSync(fd);
+    }
+  }};
+}
 
 function json(content) {
   try { return JSON.parse(content?.find(part=>part.type==='text')?.text); }
@@ -13,29 +57,41 @@ export function pendingCall(event) {
     result.callId===message.toolCallId ? message.toolCallId : null;
 }
 
-function findQuestion(session, events, turnId, callId) {
-  const starts = events.filter(e=>e.type==='turn/start' && e.seq+'/'+e.data.turn===turnId);
-  if (starts.length!==1) return null;
-  const [start] = starts;
-  const calls = events.filter(e=>e.type==='tool/call' && e.data.callId===callId);
-  if (calls.length!==1 || calls[0].seq<=start.seq || calls[0].data.turn!==start.data.turn ||
-      calls[0].data.name!=='ask_user_question') return null;
-  const replies = events.filter(e=>e.data?.turn===start.data.turn && e.seq>calls[0].seq && pendingCall(e)===callId);
-  if (replies.length!==1) return null;
+function form(session,start,call) {
   let args;
-  try { args = JSON.parse(calls[0].data.arguments); }
+  try { args = JSON.parse(call.data.arguments); }
   catch { return null; }
   if (!Array.isArray(args?.questions) || !args.questions.length || args.questions.length>6) return null;
   const fields = args.questions.map(questionField);
   if (fields.some(field=>!field) || new Set(fields.map(field=>field.id)).size!==fields.length) return null;
-  const question = {session,turn_id:turnId,native_question_id:callId};
+  const question = {session,turn_id:start.seq+'/'+start.data.turn,native_question_id:call.data.callId};
   if (fields.length===1 && !fields[0].multiple) {
     const {text,options} = fields[0];
     Object.assign(question,{text,options:options.map(({id,label})=>({id,label}))});
   } else {
     question.questions = fields;
   }
-  return {question,fields,pending:replies[0].seq};
+  return {question,fields};
+}
+
+function findQuestion(session,events,turnId,callId,records) {
+  const start = events.find(e=>e.type==='turn/start' && e.seq+'/'+e.data.turn===turnId);
+  if (!start) return null;
+  const calls = events.filter(e=>e.type==='tool/call' && e.data.callId===callId);
+  const [call] = calls;
+  if (calls.length!==1 || call.seq<=start.seq || call.data.turn!==start.data.turn ||
+      call.data.name!=='ask_user_question') return null;
+  const end = events.find(e=>e.type==='turn/end' && e.data.turn===start.data.turn && e.seq>call.seq);
+  const window = events.filter(e=>e.data?.turn===start.data.turn && e.seq>call.seq && (!end || e.seq<end.seq));
+  const results = window.filter(e=>e.type==='tool/result' && e.data.message?.toolCallId===callId &&
+    e.data.message.source?.kind==='tool' && e.data.message.source.callId===callId);
+  if (results.length>1) return null;
+  const [result] = results;
+  const pending = result && pendingCall(result)===callId ? result.seq : null;
+  const foreground = records.has(call);
+  if (!pending && !foreground) return null;
+  const found = form(session,start,call);
+  return found && {...found,pending,foreground,result,end};
 }
 
 function nonempty(value,max) {
@@ -60,16 +116,9 @@ function questionField(q) {
   return field;
 }
 
-function acceptedAnswer(found, events) {
+function proofFromAnswers(found,body,receiptId) {
   const callId = found.question.native_question_id;
-  const replies = events.filter(e=>e.type==='user/message' && e.seq>found.pending &&
-    e.data.source?.kind==='user-question-reply' && e.data.source.callId===callId
-    && e.data.source.outcome==='answered');
-  if (!replies.length) return null;
-  if (replies.length!==1) throw new Error('native_question_unconfirmed');
-  const [event] = replies;
-  const body = json(event.data.content);
-  if (body?.kind!=='answer_to_pending_question' || body.callId!==callId || !Array.isArray(body.answers) ||
+  if (typeof receiptId!=='string' || !receiptId || !Array.isArray(body?.answers) ||
       body.answers.length!==found.fields.length) throw new Error('native_question_unconfirmed');
   const answers = found.fields.map(field=>{
     const matching = body.answers.filter(item=>item?.id===field.id);
@@ -91,8 +140,31 @@ function acceptedAnswer(found, events) {
     if (single.option_ids.length) answer = {mode:'choice',option_id:single.option_ids[0]};
     if ('text' in single) answer = {mode:'text',text:single.text};
   }
-  return {closed:true,answer,receipt_id:event.data.id,session:found.question.session,
+  return {closed:true,answer,receipt_id:receiptId,session:found.question.session,
     turn_id:found.question.turn_id,native_question_id:callId};
+}
+
+function acceptedAnswer(found,events) {
+  const callId = found.question.native_question_id;
+  if (found.pending!==null) {
+    const replies = events.filter(e=>e.type==='user/message' && e.seq>found.pending &&
+      e.data.source?.kind==='user-question-reply' && e.data.source.callId===callId
+      && e.data.source.outcome==='answered');
+    if (!replies.length) return null;
+    if (replies.length!==1) throw new Error('native_question_unconfirmed');
+    const [event] = replies;
+    const body = json(event.data.content);
+    if (body?.kind!=='answer_to_pending_question' || body.callId!==callId) throw new Error('native_question_unconfirmed');
+    return proofFromAnswers(found,body,event.data.id);
+  }
+  const message = found.result?.data.message;
+  if (message && !found.result.data.error && !message.isError) {
+    return proofFromAnswers(found,json(message.content),message.id);
+  }
+  if (!found.end) return null;
+  const {session,turn_id,native_question_id} = found.question;
+  return {session,turn_id,native_question_id,closed:true,answer:null,state:'ended_unanswered',
+    receipt_id:'dsh-turn-end:'+found.end.seq};
 }
 
 function nativeAnswer(field,value) {
@@ -131,23 +203,121 @@ function nativeAnswers(found,answer) {
   return [nativeAnswer(field,value)];
 }
 
-export async function questionRequest(ctx,agent,request,readEvents) {
+function liveForm(agent,request,events) {
+  const start = events.findLast(e=>e.type==='turn/start'||e.type==='turn/end');
+  if (start?.type!=='turn/start') return null;
+  const finished = new Set(events.filter(e=>e.type==='tool/result').map(e=>e.data.message?.toolCallId));
+  const calls = events.filter(e=>e.type==='tool/call' && e.data.name==='ask_user_question'
+    && e.seq>start.seq && e.data.turn===start.data.turn && !finished.has(e.data.callId)
+    && (!request.wait || e.data.callId===request.wait.callId));
+  if (calls.length!==1) return null;
+  const [call] = calls;
+  const found = form(agent.session.id,start,call);
+  if (!found || events.filter(e=>e.type==='tool/call' && e.data.callId===call.data.callId).length!==1) return null;
+  const fields = request.questions.map(q=>{
+    // Never mirror requests belonging to permission flows or plan reviews.
+    if (q.intent!==undefined || q.detail!==undefined) return null;
+    const {multiSelect,...rest} = q;
+    return questionField({...rest,...(multiSelect===undefined ? {} : {multi_select:multiSelect})});
+  });
+  return isDeepStrictEqual(fields,found.fields) ? {...found,call} : null;
+}
+
+export function awaitingQuestionProvider(agent,call) {
+  const events = agent.session.snapshotEvents();
+  const start = events.findLast(event=>event.type==='turn/start'||event.type==='turn/end');
+  return start?.type==='turn/start' && start.seq<call.seq && form(agent.session.id,start,call)!==null
+    && !events.some(event=>event.type==='tool/result' && event.seq>call.seq
+      && event.data.message?.toolCallId===call.data.callId);
+}
+
+export function installForegroundQuestions(ctx,agent,records,bound) {
+  const active = new Map();
+  const lifetime = new AbortController();
+  const unsubscribe = ctx.on('user-questions/request',async (request,next)=>{
+    const originalSignal = request.signal;
+    if (request.agent!==agent || !originalSignal || originalSignal.aborted) return next();
+    const found = liveForm(agent,request,agent.session.snapshotEvents());
+    if (!found) return next();
+    bound();
+    const signal = AbortSignal.any([originalSignal,lifetime.signal]);
+    signal.throwIfAborted();
+    const callId = found.question.native_question_id;
+    if (active.has(callId)) return next();
+    // Register synchronously before yielding to a native answerer. The display path independently
+    // validates this record against the exact tool call in the persisted native Session.
+    try { records.record(found.call); }
+    catch { return next(); }
+    const waiting = Promise.withResolvers();
+    const provider = new AbortController();
+    const stop = ()=>waiting.reject(signal.reason);
+    const entry = {question:found.question,offer(answer) {
+      if (signal.aborted || active.get(callId)!==entry) return;
+      active.delete(callId);
+      waiting.resolve(answer);
+    }};
+    active.set(callId,entry);
+    signal.addEventListener('abort',stop,{once:true});
+    try {
+      // The original answerer still gets this exact native question. Its view closes when the
+      // same waterfall accepts the Feishu answer or the native lifetime ends.
+      request.signal = AbortSignal.any([signal,provider.signal]);
+      const desktop = Promise.resolve().then(next).catch(error=>{
+        if (error?.code==='NO_PROVIDER') return waiting.promise;
+        throw error;
+      });
+      return await Promise.race([waiting.promise,desktop]);
+    } finally {
+      active.delete(callId);
+      signal.removeEventListener('abort',stop);
+      provider.abort();
+    }
+  },{prepend:true});
+  ctx.effect(()=>()=>{
+    unsubscribe();
+    lifetime.abort();
+  });
+  return active;
+}
+
+export async function questionRequest(ctx,agent,request,readEvents,foreground,records) {
   const service = ctx.get('userQuestions');
   if (!service) return {question:null,proof:null};
   const {session,turn_id,native_question_id,operation,original,answer} = request;
   if (typeof turn_id!=='string' || typeof native_question_id!=='string' ||
       !turn_id || !native_question_id) throw new Error('invalid_native_question');
   let events = await readEvents();
-  const found = findQuestion(session,events,turn_id,native_question_id);
+  const found = findQuestion(session,events,turn_id,native_question_id,records);
   if (!found) return {question:null,proof:null};
-  const active = () => service.continued(agent).some(q=>q.callId===native_question_id);
-  if (operation==='question-open') return {question:active() ? found.question : null};
+  const waiting = foreground?.get(native_question_id);
+  const active = () => found.pending!==null && service.continued(agent).some(q=>q.callId===native_question_id);
+  if (operation==='question-open') return {question:found.foreground || active() ? found.question : null};
   const saved = acceptedAnswer(found,events);
   if (operation==='question-proof') return {proof:saved};
   if (!isDeepStrictEqual(original,found.question)) throw new Error('native_question_conflict');
   if (saved) {
+    if (saved.state==='ended_unanswered') throw new Error('native_question_ended');
     if (!isDeepStrictEqual(saved.answer,answer)) throw new Error('native_question_already_answered');
     return {proof:saved};
+  }
+  if (waiting) {
+    if (!isDeepStrictEqual(waiting.question,found.question)) throw new Error('native_question_conflict');
+    waiting.offer({answers:nativeAnswers(found,answer)});
+    // The SDK tool, rather than the answerer, writes the result. A lost reply is recovered
+    // by reading the original tool result using this same turn and native call ID.
+    for (let attempt=0;attempt<10;attempt++) {
+      const observed = await readEvents();
+      const current = findQuestion(session,observed,turn_id,native_question_id,records);
+      const proof = current && acceptedAnswer(current,observed);
+      if (proof) {
+        if (proof.state==='ended_unanswered') throw new Error('native_question_ended');
+        if (!isDeepStrictEqual(proof.answer,answer)) throw new Error('native_question_already_answered');
+        return {proof};
+      }
+      if (current?.pending!=null) break;
+      await new Promise(resolve=>setTimeout(resolve,20));
+    }
+    return {proof:null};
   }
   if (!active()) return {proof:null};
   try {

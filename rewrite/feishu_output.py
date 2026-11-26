@@ -106,7 +106,7 @@ class Views:
             segment = db.execute("SELECT * FROM segments WHERE session=? AND turn=?",(session,turn)).fetchone()
             editing = kind=="progress" and segment
             text = event.get("text","")
-            if kind in ("question_open","question_answered"):
+            if kind in ("question_open","question_answered","question_closed"):
                 if kind=="question_open":
                     require(0 <= self.clock()-attempt["first_try"] < 55*60,409,"platform_receipt_unknown")
                 mid = question_cards.publish(db,self.platform,self.chat,self.name,event,key)

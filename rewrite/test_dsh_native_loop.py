@@ -1275,6 +1275,123 @@ class NativeLoop(unittest.TestCase):
                 "adapter_answer_result":answer,"original_provider_result":observed,"platform_question_cards":0,
                 "boundary":"Installed SDK's blocking tool, in-process model and native answer-provider test fixtures"}
 
+    def test_foreground_question_uses_one_native_answer_and_one_original_card(self):
+        evidence = []
+        for outcome in ("feishu-first","native-first","canceled","timed-out"):
+            with self.subTest(outcome=outcome):
+                evidence.append(self.foreground_relay(outcome))
+        self.evidence = {"cases":evidence,
+            "boundary":"Installed DSH AgentLoop, question SDK and persistence. Local model, native answer provider and Feishu test platform."}
+
+    def foreground_relay(self,outcome):
+        session = "dsh-real-question-"+outcome
+        directory = Path(self.enterContext(tempfile.TemporaryDirectory(dir="/tmp",prefix="mldsh-live-q-")))
+        native = DshHost(directory)
+        native.session = session
+        clock = Clock()
+        loop = self.enterContext(Loop.isolated(clock,host_factory=lambda _path,_name:native))
+        adapter_key,platform_key = guid(),guid()
+        url = self.open_worker(WorkerService(loop.worker,clock),
+                               {adapter_key:"adapter/oguri",platform_key:"platform/oguri"})
+        platform = Client(url,platform_key)
+        relay = DshDisplay(loop.adapter,Client(url,adapter_key),"oguri")
+        sink = PlatformFixture()
+        views = Views(loop.root/"foreground-views.db",platform,sink,"test-chat","小栗帽",clock)
+        actions = Actions(views,Inbound(loop.root/"feishu.db",platform,None,"app","trainer","test-chat"))
+
+        def project():
+            for _ in range(4):
+                relay.collect()
+                relay.flush()
+            views.poll()
+
+        fixture = "foreground-relay-timed" if outcome=="timed-out" else "foreground-relay"
+        with self.start_native(directory,session,fixture) as process:
+            project()
+            loop.worker.chat(guid(),"Question fixture foreground")
+            waiting = self.read_native(process,"foreground-question")
+            self.assertEqual((waiting["status"],waiting["continued"]),("running",0))
+            self.assertEqual(waiting["timed"],outcome=="timed-out")
+            project()
+            with views.db.transaction() as db:
+                qid,mid = tuple(db.execute("SELECT qid,mid FROM question_cards").fetchone())
+            target = {"turn_id":waiting["turn_id"],"native_question_id":waiting["call_id"]}
+            self.assertIsNone(native.lookup_answer(session,"0/0",waiting["call_id"]))
+            self.assertIsNone(native.lookup_answer(session,waiting["turn_id"],waiting["call_id"]))
+            value = {"question_id":qid,"mode":"choice","option_id":"1"}
+            keys = ("app","trainer","test-chat",mid,value,None)
+            self.assertEqual(actions.record(*keys),"pending")
+            if outcome=="feishu-first":
+                accept = native.resolve_question
+                attempts = []
+                def lost_reply(original,answer):
+                    proof = accept(original,answer)
+                    attempts.append(proof["receipt_id"])
+                    raise Fault(503,"adapter_connection_unconfirmed",True)
+                native.resolve_question = lost_reply
+                actions.flush()
+                observed = self.read_native(process,"answer-foreground")
+                self.assertEqual(actions.record(*keys),"pending")
+                native.resolve_question = accept
+                clock.advance(16)
+                actions.flush()
+                self.assertEqual(actions.record(*keys),"confirmed")
+                self.assertEqual(attempts,[observed["results"][0]["id"]])
+                self.assertGreaterEqual(observed["foregroundProviderCloses"],1)
+            elif outcome=="native-first":
+                observed = self.read_native(process,"answer-foreground")
+                actions.flush()
+                self.assertEqual(actions.record(*keys),"rejected")
+            elif outcome=="canceled":
+                observed = self.read_native(process,"cancel-foreground")
+                actions.flush()
+            else:
+                timed = self.read_native(process,"read")
+                self.assertIn(waiting["call_id"],timed["continued"])
+                project()
+                self.assertEqual(sink.calls.count(("send",mid)),1)
+                actions.flush()
+                observed = self.read_native(process,"read")
+            project()
+            project()
+            with loop.worker.db.transaction() as db:
+                proof = json.loads(db.execute("SELECT proof FROM trainer_questions WHERE question_id=?",(qid,)).fetchone()[0])
+                self.assertEqual(db.execute("SELECT count(*) FROM trainer_questions").fetchone()[0],1)
+            self.assertEqual(native.lookup_answer(session,waiting["turn_id"],waiting["call_id"]),proof)
+            self.assertEqual((sink.calls.count(("send",mid)),sink.calls.count(("patch",mid))),(1,1))
+            card = next(row[2] for row in sink.messages.values() if row[0]==mid)
+            self.assertFalse(any(row["tag"]=="form" for row in card["body"]["elements"]))
+            self.assertEqual(loop.hermes.tasks()["items"],[])
+            if outcome=="canceled":
+                self.assertEqual(proof["state"],"ended_unanswered")
+                self.assertIsNone(proof["answer"])
+                self.assertEqual(observed["turns"][-1]["reason"]["kind"],"aborted")
+                with self.assertRaisesRegex(Fault,"native_question_ended"):
+                    actions.record(*keys)
+            else:
+                selected,expected = ("B","2") if outcome=="native-first" else ("A","1")
+                self.assertEqual(proof["answer"],{"mode":"choice","option_id":expected})
+                if outcome=="timed-out":
+                    reply, = observed["replies"]
+                    self.assertEqual((proof["receipt_id"],reply["body"]["answers"][0]["selected"]),(reply["id"],[selected]))
+                else:
+                    result, = observed["results"]
+                    self.assertEqual(proof["receipt_id"],result["id"])
+                    self.assertEqual(json.loads(result["content"][0]["text"]),
+                                     {"answers":[{"id":"primary","selected":[selected]}]})
+                    self.assertEqual(observed["replies"],[])
+            result = {"case":outcome,"opening":waiting,"question_id":qid,"fixture_message_id":mid,
+                      "proof":proof,"native_calls":len(observed["calls"]),
+                      "native_continued_replies":len(observed["replies"]),"original_card_updates":1}
+        if outcome=="feishu-first":
+            with self.start_native(directory,session,"foreground-relay-reopen") as process:
+                self.assertEqual(native.lookup_answer(session,waiting["turn_id"],waiting["call_id"]),proof)
+                readback = self.read_native(process,"read")
+                self.assertEqual(readback["results"],observed["results"])
+                self.assertEqual(sink.calls.count(("patch",mid)),1)
+                result["reopened_receipt_id"] = proof["receipt_id"]
+        return result
+
     def test_resume_browses_only_configured_native_cold_sessions_without_activating_them(self):
         session = "dsh-native-catalog-bound"
         directory,loop,service,command = self.goal_worker(session)
