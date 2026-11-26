@@ -4,6 +4,10 @@
 
 ## 检查点与证据
 
+Windows 和 macOS 的 DSH 本机双向 TLS 工位已核前台题转接。飞书先答、原生先答、原回合取消、原生超时后飞书续答四种情况各只有一个原生提问、一个原始测试卡更新。故意丢答复回包后，用原题查回原生关闭回执。停写后把会话日志及题目指纹库复制到另一套私有目录、端口和证书，再查还是同一回执，模型请求为零。两端均拒绝向其他普通账户开放的题目指纹库。实际运行 DSH AgentLoop、原生问题服务和会话持久化，模型、原生答题客户端及飞书为夹具。[Windows 证据](evidence/windows-dsh-foreground-questions.json) · [macOS 证据](evidence/dsh-local-tls-foreground-macos.json) · [恢复须带的文件](router-rehearsal.md#重做版五组件的离线恢复)
+
+Windows 首轮提问两项通过，原有托管会话专项在冷重开时收到 `WinError 5`，没能替换端口记录。随后以实际 Windows 文件句柄挡住第一次替换，关闭句柄后原子重试成功，旧端口记录在失败时仍完整，临时文件已清除。修复提交 `13a8eeb46dfb6178341961adafc3521615034194`，Windows DSH 10 项、Codex 与安装 10 项、两套回退通过，Linux arm64 187 项通过、114 项依环境跳过。macOS 在题目实现 `7fd579f9f4d915961e2899cd66434a8c6e1d5781` 全量 296 项通过、4 项依环境跳过，同提交安装包 276 文件，安装目录 10 项通过且逐文件回读一致。[首次失败](https://github.com/KibyouMoe/mowu-link/actions/runs/45891567490/job/140155255791) · [修复后](https://github.com/KibyouMoe/mowu-link/actions/runs/45891876343)
+
 Windows DSH 托管会话已实测 `/new`、`/fork`、`/clear`、`/resume`。首次登记回执丢失后重开原生宿主和适配器，原飞书消息用原号查回同一个新会话。新会话完成一张正式单，分支继承父会话及力度后完成第二张，两单各留一条成果通知。清空后创建无历史会话，恢复原会话只加载已有记录，新增模型请求为零。没有登记的会话、向其他普通用户开放的名册及第二个适配器实例均被拒。宿主读取的登记回执只含目标、来源和操作号。备份回退副本中的三个子会话库逐字节相同。模型与飞书为夹具。[Windows 实测](evidence/windows-dsh-managed-sessions.json) · [macOS 实测](evidence/dsh-local-tls-managed-macos.json)
 
 首次在 macOS 按固定回调端口冷重开复现端口占用。本机 TLS 支持将 `worker_port` 设为零，由适配器选临时端口并在私有运行目录原子发布。Windows 同轮三次启动选了三个不同端口，期间测试记录一次回环连接重置，切换回执和正式报告均已查回。双向证书、回环监听及运行目录单写者仍校验。验收提交 `dd85847c6f50fc8aa7ac7e59d69d9e58d46a9e6a`。Windows DSH 7 项、Codex 与安装 10 项、Router 和 Worker 两套回退通过。macOS 校验 273 文件安装包，DSH 与快照专项 23 项通过，全量 294 项通过、4 项按环境跳过。Linux arm64 全量 187 项通过、111 项按环境跳过。[Windows 端口独占说明](https://learn.microsoft.com/en-us/windows/win32/winsock/so-exclusiveaddruse)

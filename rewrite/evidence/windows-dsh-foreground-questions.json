@@ -1,0 +1,140 @@
+{
+  "recorded_utc": "2026-11-26T20:34:49.0168399Z",
+  "tested_revision": "13a8eeb46dfb6178341961adafc3521615034194",
+  "verification_url": "https://github.com/KibyouMoe/mowu-link/actions/runs/45891876343/job/140156259030",
+  "runner": "Windows Server 2025 x64",
+  "dsh_release": "0.2.2-rc.5",
+  "passed": 10,
+  "previous_locator_conflict_url": "https://github.com/KibyouMoe/mowu-link/actions/runs/45891567490/job/140155255791",
+  "temporary_windows_reader_recovery_verified": true,
+  "shared_question_ledger_refused": true,
+  "boundary": "Packaged DSH AgentLoop, question SDK and persistence. Local model, native answer provider and Feishu test platform.",
+  "cases": [
+    {
+      "case": "feishu-first",
+      "copied_session_receipt_id": "04477ed4-e3f4-48e6-a0e8-668e779bcc92",
+      "fixture_message_id": "om_3",
+      "model_requests_after_restore": 0,
+      "native_calls": 1,
+      "native_continued_replies": 0,
+      "opening": {
+        "call_id": "native-question-foreground",
+        "continued": 0,
+        "question_ids": [
+          "primary"
+        ],
+        "session": "dsh-real-question-feishu-first",
+        "status": "running",
+        "timed": false,
+        "turn_id": "1/1"
+      },
+      "original_card_updates": 1,
+      "proof": {
+        "answer": {
+          "mode": "choice",
+          "option_id": "1"
+        },
+        "closed": true,
+        "native_question_id": "native-question-foreground",
+        "receipt_id": "04477ed4-e3f4-48e6-a0e8-668e779bcc92",
+        "session": "dsh-real-question-feishu-first",
+        "turn_id": "1/1"
+      },
+      "question_id": "144729a9-b6f2-577b-b64c-c2f165689dab",
+      "question_mark_count": 1,
+      "reopened_receipt_id": "04477ed4-e3f4-48e6-a0e8-668e779bcc92"
+    },
+    {
+      "case": "native-first",
+      "fixture_message_id": "om_3",
+      "native_calls": 1,
+      "native_continued_replies": 0,
+      "opening": {
+        "call_id": "native-question-foreground",
+        "continued": 0,
+        "question_ids": [
+          "primary"
+        ],
+        "session": "dsh-real-question-native-first",
+        "status": "running",
+        "timed": false,
+        "turn_id": "1/1"
+      },
+      "original_card_updates": 1,
+      "proof": {
+        "answer": {
+          "mode": "choice",
+          "option_id": "2"
+        },
+        "closed": true,
+        "native_question_id": "native-question-foreground",
+        "receipt_id": "f9bbd56b-a179-4e08-b20b-bb4244351cf1",
+        "session": "dsh-real-question-native-first",
+        "turn_id": "1/1"
+      },
+      "question_id": "7e335284-8d82-504c-bc18-56aebda1951c",
+      "question_mark_count": 1
+    },
+    {
+      "case": "canceled",
+      "fixture_message_id": "om_3",
+      "native_calls": 1,
+      "native_continued_replies": 0,
+      "opening": {
+        "call_id": "native-question-foreground",
+        "continued": 0,
+        "question_ids": [
+          "primary"
+        ],
+        "session": "dsh-real-question-canceled",
+        "status": "running",
+        "timed": false,
+        "turn_id": "1/1"
+      },
+      "original_card_updates": 1,
+      "proof": {
+        "answer": null,
+        "closed": true,
+        "native_question_id": "native-question-foreground",
+        "receipt_id": "dsh-turn-end:12",
+        "session": "dsh-real-question-canceled",
+        "state": "ended_unanswered",
+        "turn_id": "1/1"
+      },
+      "question_id": "7e1320eb-edd3-5819-aa68-d8a82c84a1f3",
+      "question_mark_count": 1
+    },
+    {
+      "case": "timed-out",
+      "fixture_message_id": "om_3",
+      "native_calls": 1,
+      "native_continued_replies": 1,
+      "opening": {
+        "call_id": "native-question-foreground",
+        "continued": 0,
+        "question_ids": [
+          "primary"
+        ],
+        "session": "dsh-real-question-timed-out",
+        "status": "running",
+        "timed": true,
+        "turn_id": "1/1"
+      },
+      "original_card_updates": 1,
+      "proof": {
+        "answer": {
+          "mode": "choice",
+          "option_id": "1"
+        },
+        "closed": true,
+        "native_question_id": "native-question-foreground",
+        "receipt_id": "056c13ea-a60b-40b3-ba32-8b2628529bb3",
+        "session": "dsh-real-question-timed-out",
+        "turn_id": "1/1"
+      },
+      "question_id": "9de10965-29d3-58a0-a89b-529f344a9e24",
+      "question_mark_count": 1
+    }
+  ],
+  "link": "IPv4 loopback with mutual TLS"
+}

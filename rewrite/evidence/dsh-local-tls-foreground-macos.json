@@ -1,0 +1,136 @@
+{
+  "tested_revision": "7fd579f9f4d915961e2899cd66434a8c6e1d5781",
+  "archive_sha256": "762b9bb673da28b053fe346fb3f5ff28b7531a6d2f39d48618f49f483646a979",
+  "archive_files": 276,
+  "passed": 10,
+  "shared_question_ledger_refused": true,
+  "boundary": "Packaged DSH AgentLoop, question SDK and persistence. Local model, native answer provider and Feishu test platform.",
+  "cases": [
+    {
+      "case": "feishu-first",
+      "copied_session_receipt_id": "63db7f00-2e16-4786-afab-a6fc895f7d89",
+      "fixture_message_id": "om_3",
+      "model_requests_after_restore": 0,
+      "native_calls": 1,
+      "native_continued_replies": 0,
+      "opening": {
+        "call_id": "native-question-foreground",
+        "continued": 0,
+        "question_ids": [
+          "primary"
+        ],
+        "session": "dsh-real-question-feishu-first",
+        "status": "running",
+        "timed": false,
+        "turn_id": "1/1"
+      },
+      "original_card_updates": 1,
+      "proof": {
+        "answer": {
+          "mode": "choice",
+          "option_id": "1"
+        },
+        "closed": true,
+        "native_question_id": "native-question-foreground",
+        "receipt_id": "63db7f00-2e16-4786-afab-a6fc895f7d89",
+        "session": "dsh-real-question-feishu-first",
+        "turn_id": "1/1"
+      },
+      "question_id": "144729a9-b6f2-577b-b64c-c2f165689dab",
+      "question_mark_count": 1,
+      "reopened_receipt_id": "63db7f00-2e16-4786-afab-a6fc895f7d89"
+    },
+    {
+      "case": "native-first",
+      "fixture_message_id": "om_3",
+      "native_calls": 1,
+      "native_continued_replies": 0,
+      "opening": {
+        "call_id": "native-question-foreground",
+        "continued": 0,
+        "question_ids": [
+          "primary"
+        ],
+        "session": "dsh-real-question-native-first",
+        "status": "running",
+        "timed": false,
+        "turn_id": "1/1"
+      },
+      "original_card_updates": 1,
+      "proof": {
+        "answer": {
+          "mode": "choice",
+          "option_id": "2"
+        },
+        "closed": true,
+        "native_question_id": "native-question-foreground",
+        "receipt_id": "ca4c4581-4a49-44a0-938a-e469d56633c3",
+        "session": "dsh-real-question-native-first",
+        "turn_id": "1/1"
+      },
+      "question_id": "7e335284-8d82-504c-bc18-56aebda1951c",
+      "question_mark_count": 1
+    },
+    {
+      "case": "canceled",
+      "fixture_message_id": "om_3",
+      "native_calls": 1,
+      "native_continued_replies": 0,
+      "opening": {
+        "call_id": "native-question-foreground",
+        "continued": 0,
+        "question_ids": [
+          "primary"
+        ],
+        "session": "dsh-real-question-canceled",
+        "status": "running",
+        "timed": false,
+        "turn_id": "1/1"
+      },
+      "original_card_updates": 1,
+      "proof": {
+        "answer": null,
+        "closed": true,
+        "native_question_id": "native-question-foreground",
+        "receipt_id": "dsh-turn-end:12",
+        "session": "dsh-real-question-canceled",
+        "state": "ended_unanswered",
+        "turn_id": "1/1"
+      },
+      "question_id": "7e1320eb-edd3-5819-aa68-d8a82c84a1f3",
+      "question_mark_count": 1
+    },
+    {
+      "case": "timed-out",
+      "fixture_message_id": "om_3",
+      "native_calls": 1,
+      "native_continued_replies": 1,
+      "opening": {
+        "call_id": "native-question-foreground",
+        "continued": 0,
+        "question_ids": [
+          "primary"
+        ],
+        "session": "dsh-real-question-timed-out",
+        "status": "running",
+        "timed": true,
+        "turn_id": "1/1"
+      },
+      "original_card_updates": 1,
+      "proof": {
+        "answer": {
+          "mode": "choice",
+          "option_id": "1"
+        },
+        "closed": true,
+        "native_question_id": "native-question-foreground",
+        "receipt_id": "83a716f1-b5a0-4eb9-8b44-05fd2953b077",
+        "session": "dsh-real-question-timed-out",
+        "turn_id": "1/1"
+      },
+      "question_id": "9de10965-29d3-58a0-a89b-529f344a9e24",
+      "question_mark_count": 1
+    }
+  ],
+  "link": "IPv4 loopback with mutual TLS"
+}

@@ -286,7 +286,7 @@ Router 拉取与原生输入分别运行。Router 断开时，已在插件入箱
 
 已绑定的适配器在观察到原生题窗后，将原会话、回合、原生题号、题面和选项提交至 `POST /v1/worker/native-question`。平台通过已配置的应用、训练员、私聊和原卡 ID 核对真人回调后将答案持久排队。只有原宿主返回与原题、原回合及答案一致的关闭凭据，Worker 才发布已回答事件。DSH 计时题在超时后可从原卡续答，支持选择、自定义、跳过、批量题和多选。授权和计划审批使用各自的原生入口。溪流的工单问题和答复走 W05/A09，飞书上可读。
 
-独立 DSH 工位可在宿主插件配置中显式启用 `relay_foreground_questions: true`，让公开的原生 `ask_user_question` 在前台等待时也出现飞书题卡。先更新 Worker、飞书投影及适配器到同版本。原客户端和飞书共用同一次原生请求，先被宿主采纳的答案生效。前台答案凭原生工具结果更新原卡，超时仍可在同一张卡续答。宿主取消原回合时，回合结束记录使原卡显示已关闭、未答。权限请求、计划审批和无法唯一对应原工具调用的题保留在原生端。选项默认关闭。迁移测试工位时一并保留原生会话日志、适配器库及宿主私有 runtime 目录内的 `question-*.open` 记录，文件只含原生调用指纹。
+独立 DSH 工位可在宿主插件配置中显式启用 `relay_foreground_questions: true`，让公开的原生 `ask_user_question` 在前台等待时也出现飞书题卡。先更新 Worker、飞书投影及适配器到同版本。原客户端和飞书共用同一次原生请求，先被宿主采纳的答案生效。前台答案凭原生工具结果更新原卡，超时仍可在同一张卡续答。宿主取消原回合时，回合结束记录使原卡显示已关闭、未答。权限请求、计划审批和无法唯一对应原工具调用的题保留在原生端。选项默认关闭。迁移测试工位时一并保留原生会话日志、适配器库和宿主私有运行目录的题目记录。Unix 套接字工位用 `question-*.open`，本机双向 TLS 工位用 `dsh-questions.sqlite3`。两种记录均只保存原生调用指纹。
 
 复跑 `python3 -B -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_foreground_question_uses_one_native_answer_and_one_original_card`。真实 DSH SDK 和会话日志实跑，答题客户端、模型和飞书用本地测试替身。[前台题回执](evidence/dsh-foreground-question-relay.json)
 
@@ -378,7 +378,8 @@ Windows 另从官方发布包运行 [独立 Codex App Server](desktop-check.md#w
 - 固定会话可启用 `read_only_assignments`。工位使用 SQLite 保存每次原生输入前的限制凭据，原生回合结束和排队撤销仍需各自的宿主证据。目录的运行身份权限须可继承到文件，插件会核对已有数据库和回滚日志。冷重开使用原数据库及原生会话日志。
 - 图文、纯图和普通文件复用 Worker 的附件链路。适配器在 `media` 私有目录缓存经摘要核对的字节。Windows 两端均核对缓存权限和文件身份。宿主需提供 DSH `attachments` 服务。缓存可由 Worker 的原附件重建。
 - 托管会话沿用 `managed_sessions_dir`。宿主插件与 `dsh-adapter --managed-sessions-dir` 指向同一个绝对私有目录，Worker 仍登记自己的 `--session-callback-key`。用双向 TLS 时，宿主经本机回调查验已登记会话，回执只含目标会话、来源会话和操作号。名册、子会话库和锁文件沿用运行账号的私有权限。设定托管目录时，显式冷会话接管模式仍与它互斥。
-- 命令审批、前台题转接和工单容器使用原有 Unix 套接字接入。
+- 前台题转接可在宿主插件内显式启用 `relay_foreground_questions`。私有运行目录的文件继承权限与只读工位相同。恢复时保留 `dsh-questions.sqlite3` 及配套原生会话日志，即使暂时关闭转接也可查回原题。Windows 和 macOS 均核对四种答复顺序、原卡单次更新和换目录恢复。[Windows 题目证据](evidence/windows-dsh-foreground-questions.json) · [macOS 题目证据](evidence/dsh-local-tls-foreground-macos.json)
+- 命令审批与工单容器使用原有 Unix 套接字接入。
 
 复跑时先为官方 Windows DSH 包校验 SHA-512，再解包到临时目录。用已检查权限的独立临时目录运行协定用例，环境变量 `MOWULINK_TEST_DSH_BINARY` 指向解包所得的原始应用可执行文件。运行 `python -B -m unittest -v rewrite.test_dsh_native_loop.LocalTlsLoop`。CI 的下载校验和完整步骤见 [Windows 验收入口](../.github/workflows/rewrite-windows.yml)。用例实际运行包内 DSH AgentLoop、原生持久化及工具执行，通过真实 Router 和 Worker 发回独立工单。模型与操作人使用本地测试驱动。已在 [Windows Server 2025](evidence/windows-dsh-native.json) 的官方包和 [macOS](evidence/dsh-local-tls-macos.json) 的已装包验证。已核宿主停机时保留原收件待核。用同一目录和端口重开原生宿主后，可查回同一收件，保留一条输入且无新模型请求。只读取消与转派的原生证据见 [Windows](evidence/windows-dsh-read-only-cleanup.json) 和 [macOS](evidence/dsh-local-tls-readonly-macos.json)。图文实测覆盖输入原文、纯图、普通文件字节、独立适配器进程，以及按原号重试发图。[Windows 图文证据](evidence/windows-dsh-media.json) · [macOS 图文证据](evidence/dsh-local-tls-media-macos.json)
 
