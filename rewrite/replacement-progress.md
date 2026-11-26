@@ -4,6 +4,8 @@
 
 ## 检查点与证据
 
+DSH 原生目标续跑已通过隔离测试。安装包自带的轮次驱动实际入场第 1 轮。用 Worker `/goal pause` 后第 1 轮中止，`/goal resume` 后同一目标的新版本入场第 2 轮并完成该回合。两条旧指令重送只取原回执。Router 始终无工单、无通知，Worker 无持单。复跑 `python3 -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_native_goal_rounds_pause_and_resume_without_becoming_router_orders`，macOS 全套 133 项通过。模型传输为本地夹具。
+
 DSH 的飞书 `/goal` 查询、暂停和继续接到原生目标服务。隔离回归查到同一目标的版本变化，暂停和继续各一条原生记录。丢失继续回执时保留待核，重送旧消息没有重复变更。同一会话未出现普通模型输入，Router 未建单。未加载目标服务的会话提示暂未接入。复跑 `python3 -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_goal_query_pause_and_resume_use_the_bound_native_goal`，macOS 全套 132 项通过。本项核验目标服务与持久状态，自动续跑另验。
 
 提交 `ab112dc8a6ee60e89b0af5bba184d9526750bbf6` 的 Linux arm64 复验通过 111 项，20 项 macOS DSH 测试跳过。跨 TLS 测试复核 105 个发行文件，原生宿主夹具只记一条输入、Router 只新增一条成果通知，认证反例通过。

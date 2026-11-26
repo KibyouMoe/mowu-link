@@ -13,6 +13,8 @@ const sdk = name=>import(pathToFileURL(dependency.resolve('@deepseek-ai/'+name))
 const {Context,Service} = await sdk('cordis');
 const {LlmAdapter,LlmRuntime} = await sdk('dsh-llm');
 const entered = Promise.withResolvers();
+const secondRound = Promise.withResolvers();
+const usesGoals = mode==='goals' || mode==='goal-driver';
 const modelRequests = [];
 
 class LocalModel extends LlmAdapter {
@@ -25,10 +27,14 @@ class LocalModel extends LlmAdapter {
       efforts:[{id:'low',name:'Low'},{id:'high',name:'High'}],defaultEffort:'low'}};
   }
   async *stream({provider,model,reasoningEffort,messages,signal,tools}) {
-    const text = messages.findLast(message=>message.role==='user').content.find(block=>block.type==='text').text;
+    const message = messages.findLast(entry=>entry.role==='user');
+    const text = message.content.find(block=>block.type==='text').text;
     const payload = text.startsWith('魔物链接投递\n') ? JSON.parse(text.split('\n')[1]) : null;
-    const command = payload?.kind ?? 'private';
+    const goal = message.source.kind==='goal' ? message.source : null;
+    const command = goal ? 'goal' : payload?.kind ?? 'private';
     modelRequests.push({command,provider,model,reasoningEffort});
+    if (goal?.round===1) await waitForStop(signal);
+    if (goal?.round===2) secondRound.resolve();
     if (command==='task') {
       if (mode==='formal') {
         const attempt = this.submitted.get(payload.assignment_id) ?? 0;
@@ -43,17 +49,21 @@ class LocalModel extends LlmAdapter {
           return;
         }
       } else {
-        const stop = Promise.withResolvers();
-        signal.addEventListener('abort',()=>stop.resolve(),{once:true});
-        entered.resolve();
-        if (!signal.aborted) await stop.promise;
-        signal.throwIfAborted();
+        await waitForStop(signal);
       }
     }
     yield {type:'block-start',index:0,blockType:'text'};
     yield {type:'text-delta',index:0,text:'isolated fixture response'};
     yield {type:'finish',reason:{kind:'stop'}};
   }
+}
+
+async function waitForStop(signal) {
+  const stop = Promise.withResolvers();
+  signal.addEventListener('abort',()=>stop.resolve(),{once:true});
+  entered.resolve();
+  if (!signal.aborted) await stop.promise;
+  signal.throwIfAborted();
 }
 
 const ctx = new Context();
@@ -74,7 +84,7 @@ async function setup() {
   await install((await sdk('dsh-session')).SessionStore);
   await install((await sdk('dsh-session-projection')).SessionProjectionRegistry);
   await install((await sdk('dsh-agent')).AgentRegistry);
-  if (mode==='goals') await install((await sdk('dsh-goal')).GoalService,{});
+  if (usesGoals) await install((await sdk('dsh-goal')).GoalService,mode==='goal-driver' ? {defaultMaxGoalRounds:2} : {});
   await install(await sdk('dsh-session-persistence-jsonl'),{root:path.join(directory,'sessions')});
   await install((await sdk('dsh-system-prompt')).SystemPrompt);
   await install((await sdk('dsh-tools')).ToolsService);
@@ -82,6 +92,7 @@ async function setup() {
   await install(LlmRuntime);
   ctx.get('llm').registerAdapter(['fixture'],new LocalModel());
   await install((await sdk('dsh-agent-loop')).AgentLoop,{});
+  if (mode==='goal-driver') await install(await sdk('dsh-goal-round-driver'));
   const {agent} = await ctx.get('agents').create({
     sessionId:session,agentOptions:{provider:'fixture',model:'local'}});
   class Controller extends Service {
@@ -139,26 +150,34 @@ async function formalScenario(agent) {
   console.log(JSON.stringify({ready:true,session}));
   for await (const line of createInterface({input:process.stdin,terminal:false})) {
     if (line==='exit') break;
-    if (line==='create-goal' && mode==='goals') {
+    if (line==='create-goal' && usesGoals) {
       const goal = ctx.get('goals').create(agent,{objective:'隔离持久目标'});
       await ctx.get('sessions').flush(agent.session);
       console.log(JSON.stringify({id:goal.id,revision:goal.revision,limit:goal.maxGoalRounds}));
       continue;
     }
-    assert.equal(line,'read');
+    if (line==='first-round' && mode==='goal-driver') {
+      await entered.promise;
+      console.log(JSON.stringify({running:agent.status==='running'}));
+      continue;
+    }
+    assert.ok(line==='read' || line==='second-round' && mode==='goal-driver');
+    if (line==='second-round') await secondRound.promise;
     await agent.whenIdle();
     const events = await readEvents(agent);
     const inputs = events.filter(e=>e.type==='user/message' && e.data.source.kind==='user').map(e=>e.data.id);
     const calls = events.filter(e=>e.type==='tool/call').map(e=>e.data);
     const results = events.filter(e=>e.type==='tool/result').map(e=>e.data.message);
     const turns = events.filter(e=>e.type==='turn/end').map(e=>e.data);
-    console.log(JSON.stringify({session,inputs,calls,results,turns,modelRequests}));
+    const rounds = events.filter(e=>e.type==='user/message' && e.data.source.kind==='goal')
+      .map(e=>({id:e.data.source.goalId,revision:e.data.source.revision,round:e.data.source.round}));
+    console.log(JSON.stringify({session,inputs,calls,results,turns,modelRequests,rounds}));
   }
 }
 
 try {
   const agent = await setup();
-  if (mode==='formal' || mode==='goals') await formalScenario(agent);
+  if (mode==='formal' || usesGoals) await formalScenario(agent);
   else await stopScenario(agent);
 } finally {
   for (const handle of plugins.reverse()) await handle.dispose();

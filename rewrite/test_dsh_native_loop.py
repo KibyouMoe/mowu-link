@@ -149,8 +149,7 @@ class NativeLoop(unittest.TestCase):
                          "router_w04":request,"notification_delivery_ids":notified,"worker_after":loop.worker.hold(),
                          "boundary":"Native DSH AgentLoop, tool execution and real isolated Router/Worker; scripted local model"}
 
-    def test_goal_query_pause_and_resume_use_the_bound_native_goal(self):
-        session = "dsh-real-loop-goals"
+    def goal_worker(self,session):
         directory = self.enterContext(tempfile.TemporaryDirectory(dir="/tmp",prefix="mldsh-goals-"))
         def host(_path,_name):
             port = DshHost(Path(directory))
@@ -166,6 +165,11 @@ class NativeLoop(unittest.TestCase):
             items = platform.request("GET","worker/display")["items"]
             event = next(item["event"] for item in items if item["seq"]==receipt["output"]["seq"])
             return receipt,event["text"]
+        return directory,loop,service,command
+
+    def test_goal_query_pause_and_resume_use_the_bound_native_goal(self):
+        session = "dsh-real-loop-goals"
+        directory,loop,service,command = self.goal_worker(session)
         with self.start_native(directory,session,"goals") as native:
             service.step()
             self.assertIn("没有目标",command("om_no_goal","/goal")[1])
@@ -193,3 +197,29 @@ class NativeLoop(unittest.TestCase):
             observed = self.read_native(native,"read")
             self.assertEqual(observed["inputs"],[])
             self.assertEqual(loop.hermes.tasks()["items"],[])
+
+    def test_native_goal_rounds_pause_and_resume_without_becoming_router_orders(self):
+        session = "dsh-real-goal-rounds"
+        directory,loop,service,command = self.goal_worker(session)
+        with self.start_native(directory,session,"goal-driver") as native:
+            service.step()
+            created = self.read_native(native,"create-goal")
+            self.assertTrue(self.read_native(native,"first-round")["running"])
+            paused,card = command("om_pause_live_goal","/goal pause")
+            self.assertIn("已暂停 · 1/2 轮",card)
+            before = self.read_native(native,"read")
+            self.assertEqual([row["round"] for row in before["rounds"]],[1])
+            self.assertEqual([row["reason"]["kind"] for row in before["turns"]],["aborted"])
+            resumed,card = command("om_resume_live_goal","/goal resume")
+            self.assertIn("进行中",card)
+            after = self.read_native(native,"second-round")
+            self.assertEqual([row["id"] for row in after["rounds"]],[created["id"]]*2)
+            self.assertEqual([row["round"] for row in after["rounds"]],[1,2])
+            self.assertEqual([row["revision"] for row in after["rounds"]],
+                             [created["revision"],resumed["goal_receipt"]["revision"]])
+            self.assertEqual([row["reason"]["kind"] for row in after["turns"]],["aborted","completed"])
+            self.assertEqual(command("om_pause_live_goal","/goal pause")[0],paused)
+            self.assertEqual(command("om_resume_live_goal","/goal resume")[0],resumed)
+            self.assertEqual(loop.hermes.tasks()["items"],[])
+            self.assertIsNone(loop.worker.hold()["held_task_id"])
+            self.assertEqual(loop.manager_wire.frames(0),[])
