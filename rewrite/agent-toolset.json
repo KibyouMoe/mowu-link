@@ -78,6 +78,29 @@
     }
   },
   {
+    "name": "worker_ask_trainer",
+    "description": "Publish a public clarification to the trainer when there is no native question panel for it. A reply resumes this same bound chat as a separate input. For formal assignments use worker_ask to ask the manager. Do not send secrets, permissions requests, or a duplicate of a native question.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "request_id": {"type": "string", "format": "uuid", "description": "Optional stable request ID to reuse for the same question within this turn."},
+        "questions": {
+          "type": "array", "minItems": 1, "maxItems": 3,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "properties": {
+              "title": {"type": "string", "minLength": 1, "maxLength": 3000},
+              "options": {"type": "array", "maxItems": 6, "items": {"type": "string", "minLength": 1, "maxLength": 300}}
+            },
+            "required": ["title"]
+          }
+        }
+      },
+      "required": ["questions"]
+    }
+  },
+  {
     "name": "worker_send_peer",
     "description": "Send a private message to a named Worker or reply to their original message. A pending response contains the message ID for later status checks. This does not create or complete a formal assignment.",
     "inputSchema": {

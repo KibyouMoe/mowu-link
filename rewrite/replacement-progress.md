@@ -4,6 +4,10 @@
 
 ## 检查点与证据
 
+没有原生题窗时，实际 DSH 与独立 Codex App Server 可通过 Agent 工具 `worker_ask_trainer` 发布独立题卡。发卡只登记原会话与原回合。选项、自填和逐题跳过回到同一会话的新回合；等待期间不占正式工单处理权。实测 DSH 忙时未写入，改到空闲后收到一次。Codex 原生已投但回执丢失时，重开 Worker 后只查原号。挂到空适配器库仍待核，使用原账本后查回单次原生收件并更新原卡。两端均未创建工单。宿主原生运行时、隔离 Worker HTTP 和 DSH 私有 IPC 实跑，模型与飞书用夹具。[独立题卡证据](evidence/standalone-trainer-questions.json)
+
+复跑 `python3 -B -m unittest -v rewrite.test_codex_app_server.CodexAppServer.test_native_tool_publishes_standalone_question_and_accepts_answer_once rewrite.test_dsh_native_loop.NativeLoop.test_dsh_standalone_question_defers_answer_while_native_session_is_busy`。同一原生调用或同轮的原请求号重试只留原卡。修改题文、在新回合重用显式请求号、错绑会话及非训练员点卡均有拒绝证据。故意提交原生题窗关闭凭据也不能关闭独立题。
+
 独立 DSH 工位可启用前台题转接。真实 AgentLoop 的同一个原生请求由原客户端与飞书共用。两端先答各测一次，迟到的不同答案不会覆盖已入场的答案。Worker 回执丢失后用原生工具结果查回，原生会话重新打开仍能找到同一凭据。前台超时后同一卡可续答。原回合被取消时，原卡标已关闭且无答案，拒绝后来点卡。四个场景均只创建一张测试卡、更新一次。模型、原客户端答题者和飞书均为本地测试替身。[前台题回执](evidence/dsh-foreground-question-relay.json)
 
 复跑 `python3 -B -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_foreground_question_uses_one_native_answer_and_one_original_card`。初版试跑中原生持久化拒读未经声明的扩展事件。最终版的转接标记写入宿主私有目录，原生会话日志保持 SDK 原格式。原生的原题、工具结果、续答消息及回合结束构成关闭凭据。

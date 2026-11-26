@@ -23,6 +23,7 @@ const foregroundAnswer = Promise.withResolvers();
 const isCold = mode.startsWith('cold-resume');
 const isManaged = mode.startsWith('managed-sessions');
 const usesCleanup = mode.startsWith('cleanup-');
+const standalone = mode==='standalone-trainer-question';
 const foregroundRelay = mode.startsWith('foreground-relay');
 const usesForeground = foregroundRelay || mode==='foreground-question';
 const usesGoals = ['goals','goal-driver','formal-goal','cold-resume-goal'].includes(mode);
@@ -33,6 +34,7 @@ const catalogSessions = [];
 const privateStops = new Map(['one','two','three'].map(tag=>[tag,Promise.withResolvers()]));
 const raceRelease = Promise.withResolvers();
 const mediaRequests = [];
+const standaloneAnswers = [];
 let foregroundProviderCloses = 0;
 
 class LocalModel extends LlmAdapter {
@@ -106,6 +108,17 @@ class LocalModel extends LlmAdapter {
       yield {type:'finish',reason:{kind:'tool-calls'}};
       return;
     }
+    if (standalone && text.startsWith('Standalone trainer fixture\n') && !this.submitted.has(message.id)) {
+      this.submitted.set(message.id,true);
+      assert.ok(tools.some(tool=>tool.name==='worker_ask_trainer'));
+      yield {type:'block-start',index:0,blockType:'tool-call'};
+      yield {type:'block-end',index:0,block:{type:'tool-call',id:'standalone-'+message.id,name:'worker_ask_trainer',
+        arguments:text.split('\n')[1]}};
+      yield {type:'finish',reason:{kind:'tool-calls'}};
+      return;
+    }
+    if (standalone && command==='trainer_answer') standaloneAnswers.push(payload);
+    if (standalone && text==='Hold another isolated turn') await waitForStop(signal);
     if (usesMedia) {
       const store = ctx.get('attachments');
       const images = [];
@@ -473,6 +486,13 @@ async function formalScenario(agent) {
   console.log(JSON.stringify({ready:true,session}));
   for await (const line of createInterface({input:process.stdin,terminal:false})) {
     if (line==='exit') break;
+    if (standalone && line==='hold-question-reply') {
+      agent.followup({id:'hold-unrelated-native-turn',role:'user',source:{kind:'user'},
+        content:[{type:'text',text:'Hold another isolated turn'}]});
+      await entered.promise;
+      console.log(JSON.stringify({busy:agent.status==='running'}));
+      continue;
+    }
     if (usesCleanup && line==='work-started') {
       await entered.promise;
       console.log(JSON.stringify({running:agent.status==='running'}));
@@ -577,6 +597,11 @@ async function formalScenario(agent) {
       foregroundAnswer.resolve({answers:[{id:'primary',selected:['B']}]});
     }
     else if (line==='cancel-foreground' && foregroundRelay) agent.cancel({kind:'user'},{keepInbox:true});
+    else if (line==='stop-unrelated-turn' && standalone) agent.cancel({kind:'user'},{keepInbox:true});
+    else if (line.startsWith('direct-trainer ') && standalone) {
+      agent.followup({id:'standalone-direct-origin',role:'user',source:{kind:'user'},
+        content:[{type:'text',text:'Standalone trainer fixture\n'+line.slice('direct-trainer '.length)}]});
+    }
     else if (line==='formal-goal-round' && mode==='formal-goal') await formalRound.promise;
     else assert.ok(line==='read' || line==='second-round' && mode==='goal-driver');
     if (line==='second-round') await secondRound.promise;
@@ -598,7 +623,7 @@ async function formalScenario(agent) {
     const approvals = usesApprovals ? events.filter(event=>['approval/asked','approval/decided'].includes(event.type))
       .map(({type,seq,data})=>({type,seq,data})) : [];
     console.log(JSON.stringify({session,inputs,calls,results,turns,modelRequests,rounds,compactEvents,replies,continued,
-      mediaRequests,approvals,foregroundProviderCloses,
+      mediaRequests,approvals,foregroundProviderCloses,...(standalone ? {standaloneAnswers} : {}),
       inbox:mode==='private-stop' ? agent.inbox.nextTurn.map(message=>message.id) : [],
       liveSessions:mode==='catalog' ? ctx.get('agents').list().map(agent=>agent.session.id) : []}));
   }
@@ -608,7 +633,7 @@ try {
   const agent = await setup();
   if (['formal','formal-artifacts','compact','questions','foreground-question','catalog','private-stop','work-question','admission-race',
        'binding-close','material','peer-source'].includes(mode) || isCold || isManaged || usesGoals || usesMedia
-       || usesApprovals || usesCleanup || foregroundRelay) {
+       || usesApprovals || usesCleanup || foregroundRelay || standalone) {
     await formalScenario(agent);
   }
   else await stopScenario(agent);

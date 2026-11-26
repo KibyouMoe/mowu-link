@@ -59,6 +59,7 @@ class DshHost:
     # DSH Agent.followup places an identified input at the next-turn boundary.
     next_turn = True
     rejects_busy_before_task_write = True
+    rejects_busy_before_answer_write = True
 
     def __init__(self, directory):
         self.directory = private_directory(directory)
@@ -195,12 +196,18 @@ def tool_listener(directory, adapter, worker, *, family=None):
                 body = json.loads(self.rfile.read(size))
                 require(isinstance(body,dict),422,"invalid_envelope")
                 if self.path=="/tool":
-                    require(set(body)=={"session","turn_id","native_id","tool","call_id","arguments"}
+                    fields = {"session","turn_id","native_id","tool","call_id","arguments"}
+                    require(set(body) in (fields,fields|{"native_direct"})
                             and string(body,"tool") in NATIVE_TOOLS,422,"invalid_envelope")
                     session = string(body,"session")
                     selected = family.port(session) if family else None
                     bound,callback = (selected.adapter,selected.callback) if selected else (adapter,worker)
-                    bound.prove_native_input(session,string(body,"turn_id"),string(body,"native_id"))
+                    if "native_direct" in body:
+                        require(body["tool"]=="worker_ask_trainer" and body["native_direct"] is True
+                                and not string(body,"native_id").startswith("mowulink-")
+                                and session==bound.bound_session(),403,"wrong_native_session")
+                    else:
+                        bound.prove_native_input(session,string(body,"turn_id"),string(body,"native_id"))
                     del body["native_id"]
                     result = callback.request("POST","worker/native-tool",body)
                 else:

@@ -29,6 +29,7 @@ async function input(request, ctx, agent, directory) {
   const payload = JSON.parse(payload_json);
   const id = 'mowulink-' + sha(JSON.stringify([session,delivery_id,digest]));
   if (payload.kind === 'queued_chat') check(payload.session === session, 'queued_session_mismatch');
+  if (payload.kind === 'trainer_answer') check(payload.session === session, 'wrong_native_session');
   const text = ['chat','queued_chat'].includes(payload.kind) ? payload.text : '魔物链接投递\n' + payload_json;
   const media = payload.attachments;
   check(typeof text === 'string' && (text.trim() || media?.length), 'empty_input');
@@ -231,6 +232,9 @@ export async function bindHost(ctx, session, directory, catalog=[], selected=nul
       if (request.operation==='deliver' && JSON.parse(request.payload_json).kind==='task') {
         check(agent.status==='idle' && !compact.inProgress,'native_task_not_admitted_busy');
       }
+      if (request.operation==='deliver' && JSON.parse(request.payload_json).kind==='trainer_answer') {
+        check(agent.status==='idle' && !compact.inProgress,'native_answer_not_admitted_busy');
+      }
       try {
         if (request.operation==='deliver-control') {
           const sameTurn = agent.session.seq===before;
@@ -256,8 +260,11 @@ export async function bindHost(ctx, session, directory, catalog=[], selected=nul
         'native_call_unconfirmed');
       const raw = calls[0].call.arguments;
       check(isDeepStrictEqual(typeof raw === 'string' ? JSON.parse(raw) : raw,args), 'native_arguments_mismatch');
-      return notify({session,turn_id:current.id,native_id:current.users[0].id,
-        call_id:exec.callId,tool:name,arguments:args});
+      const user = current.users[0];
+      const direct = name==='worker_ask_trainer' && user.source?.kind==='user' && !user.id.startsWith('mowulink-')
+        && !user.content.some(item=>item.type==='text' && item.text.startsWith('魔物链接投递\n'));
+      return notify({session,turn_id:current.id,native_id:user.id,
+        call_id:exec.callId,tool:name,arguments:args,...(direct ? {native_direct:true} : {})});
     }
   };
 }

@@ -178,7 +178,9 @@ class HostAdapter:
                                     and getattr(self.host,"rejects_busy_before_control_write",False))
                 queue_deferred = (payload["kind"]=="queued_chat" and error.code=="native_queue_not_admitted_busy"
                                   and getattr(self.host,"rejects_busy_before_queue_write",False))
-                if error.status!=409 or not (task_deferred or control_deferred or queue_deferred):
+                answer_deferred = (payload["kind"]=="trainer_answer" and error.code=="native_answer_not_admitted_busy"
+                                   and getattr(self.host,"rejects_busy_before_answer_write",False))
+                if error.status!=409 or not (task_deferred or control_deferred or queue_deferred or answer_deferred):
                     raise
                 # This host explicitly refused before entering the native write.
                 # All uncertain writes retain their original intent for lookup only.
@@ -186,7 +188,8 @@ class HostAdapter:
                     removed = db.execute("""DELETE FROM intents WHERE delivery_id=?
                                           AND digest=? AND receipt IS NULL""",(did,digest)).rowcount
                 require(removed,409,"host_delivery_unconfirmed")
-                reason = ("queued_chat_delivery_deferred" if queue_deferred
+                reason = ("trainer_answer_delivery_deferred" if answer_deferred else
+                          "queued_chat_delivery_deferred" if queue_deferred
                           else "control_delivery_deferred" if control_deferred else "task_delivery_deferred")
                 raise Fault(409,reason,True) from error
         else:

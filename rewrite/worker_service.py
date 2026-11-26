@@ -240,9 +240,20 @@ class WorkerService:
             raise Fault(403,"forbidden")
         if actor == "adapter/" + w.worker_id and method == "POST" and path == "/v1/worker/native-tool":
             session,turn = string(body,"session"),string(body,"turn_id")
-            native = w.adapter.input_for_turn(session,turn)
             args = body.get("arguments")
             require(isinstance(args,dict),422,"invalid_arguments")
+            if body.get("tool")=="worker_ask_trainer":
+                if "native_direct" in body:
+                    require(body["native_direct"] is True,422,"invalid_native_question_origin")
+                else:
+                    native = w.adapter.input_for_turn(session,turn)
+                    origin = w.adapter.origin(native,session=session)
+                    require(origin["kind"] in ("chat","queued_chat","trainer_answer"),403,"wrong_trainer_question_origin")
+                result = {**user_questions.open_standalone(w,session,turn,string(body,"call_id"),args),
+                          "state":"queued_for_trainer"}
+                return 200,"application/json",result
+            require("native_direct" not in body,422,"invalid_native_question_origin")
+            native = w.adapter.input_for_turn(session,turn)
             if body.get("tool") == "worker_ask":
                 require(set(args) == {"text","options"},422,"invalid_arguments")
                 result = w.ask(native, string(body,"call_id"), string(args,"text"), args["options"])
@@ -321,7 +332,7 @@ class WorkerService:
     def require_peer_origin(self,session,native):
         w = self.worker
         origin = w.adapter.origin(native,session=session)
-        require(origin["kind"] in ("chat","queued_chat","peer","task","task_update","task_probe","question_answer"),
+        require(origin["kind"] in ("chat","queued_chat","trainer_answer","peer","task","task_update","task_probe","question_answer"),
                 403,"wrong_peer_origin")
         assignment = origin.get("assignment_id")
         require(not assignment or w.assignment_session(assignment) in (None,session),403,"wrong_assignment_session")

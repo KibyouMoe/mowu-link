@@ -114,6 +114,8 @@ class RemoteAdapter:
         route = "host/find-peer" if kind=="peer" else "host/find-chat"
         if kind in TASK_INPUTS:
             route = "host/find-task"
+        if kind=="trainer_answer":
+            route = "host/find-trainer-answer"
         result = self.request("POST",route,{"delivery_id":did,"payload":payload},native_session=session)
         require(isinstance(result,dict) and "receipt" in result,502,"host_receipt_unconfirmed")
         return result["receipt"]
@@ -208,8 +210,12 @@ def serve_adapter(adapter, worker_id, identities, address, context, *, activatio
             case "POST","/v1/host/deliver":
                 payload = body.get("payload")
                 require(isinstance(payload,dict) and isinstance(payload.get("kind"),str)
-                        and payload["kind"] in TASK_INPUTS | {"chat","queued_chat","peer"},422,"invalid_host_input")
-                result = {"receipt": adapter.deliver(string(body,"delivery_id"),payload)}
+                        and payload["kind"] in TASK_INPUTS | {"chat","queued_chat","peer","trainer_answer"},
+                        422,"invalid_host_input")
+                did = string(body,"delivery_id")
+                if payload["kind"]=="trainer_answer":
+                    trainer_answer(did,payload,adapter.bound_session(),pinned)
+                result = {"receipt": adapter.deliver(did,payload)}
             case "POST","/v1/host/find-chat":
                 payload = body.get("payload")
                 did = string(body,"delivery_id")
@@ -234,6 +240,11 @@ def serve_adapter(adapter, worker_id, identities, address, context, *, activatio
                         and valid_guid(payload.get("task_id")) and valid_guid(payload.get("assignment_id")),
                         422,"invalid_host_input")
                 result = {"receipt":adapter.lookup_delivery(did,payload,session=adapter.bound_session())}
+            case "POST","/v1/host/find-trainer-answer":
+                payload = body.get("payload")
+                did,session = string(body,"delivery_id"),adapter.bound_session()
+                trainer_answer(did,payload,session,pinned)
+                result = {"receipt":adapter.lookup_delivery(did,payload,session=session)}
             case "POST","/v1/host/origin":
                 result = {"origin":adapter.origin(string(body,"native_id"))}
             case "POST","/v1/host/turn":
@@ -247,3 +258,16 @@ def serve_adapter(adapter, worker_id, identities, address, context, *, activatio
                 raise Fault(404, "unknown_host_route")
         return 200, "application/json", result
     return serve_authenticated(identities,address,context,handle)
+
+
+def trainer_answer(did,payload,session,pinned):
+    from .question_forms import validate_form, validate_reply
+
+    require(pinned and isinstance(payload,dict)
+            and set(payload)=={"kind","session","source_turn_id","question_id","questions","answer"}
+            and payload["kind"]=="trainer_answer" and payload["session"]==session
+            and valid_guid(payload["question_id"]) and did=="trainer-answer-"+payload["question_id"],
+            422,"invalid_trainer_answer_delivery")
+    string(payload,"source_turn_id")
+    validate_form(payload)
+    validate_reply(payload["answer"],payload)

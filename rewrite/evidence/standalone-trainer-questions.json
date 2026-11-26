@@ -1,0 +1,80 @@
+{
+  "codex": {
+    "session": "01a21805-9579-7ab2-988b-0db08e491a5e",
+    "source_turn_id": "01a21805-95c0-7a21-b07f-e3011fe52ee3",
+    "native_tool": "worker_ask_trainer",
+    "question_id": "76022242-4d06-5ec5-9378-f4daee6c96dc",
+    "fixture_message_id": "om_1",
+    "host_receipt": {
+      "session": "01a21805-9579-7ab2-988b-0db08e491a5e",
+      "delivery_id": "trainer-answer-76022242-4d06-5ec5-9378-f4daee6c96dc",
+      "digest": "ce9402059947c992c0b78aaf37d7e1c4d2047d90526f411653a886ddbd0b86e9",
+      "native_id": "01a21805-95ef-7510-aa4c-e10130491fe5",
+      "turn_id": "01a21805-95ea-7b90-9373-adcb128d5933"
+    },
+    "worker_proof": {
+      "answer": {
+        "answers": [
+          {
+            "id": "1",
+            "option_ids": [
+              "2"
+            ]
+          },
+          {
+            "id": "2",
+            "option_ids": [],
+            "text": "From the bound trainer"
+          },
+          {
+            "id": "3",
+            "option_ids": []
+          }
+        ],
+        "mode": "batch"
+      },
+      "answer_turn_id": "01a21805-95ea-7b90-9373-adcb128d5933",
+      "closed": true,
+      "delivery_id": "trainer-answer-76022242-4d06-5ec5-9378-f4daee6c96dc",
+      "native_question_id": "standalone-76022242-4d06-5ec5-9378-f4daee6c96dc",
+      "receipt_id": "01a21805-95ef-7510-aa4c-e10130491fe5",
+      "session": "01a21805-9579-7ab2-988b-0db08e491a5e",
+      "turn_id": "01a21805-95c0-7a21-b07f-e3011fe52ee3"
+    },
+    "original_card_updates": 1,
+    "native_writes": 1,
+    "retry_without_adapter_ledger": "pending",
+    "boundary": "Bundled App Server, isolated adapter and Worker HTTP, local model and Feishu fixture."
+  },
+  "dsh": {
+    "session": "isolated-dsh-standalone-trainer",
+    "native_tool_call": "standalone-mowulink-eefb5a22d5d32159286c617b95ccc6e38bd2249ab48ee963d13eaddfc3138d6c",
+    "public_question_id": "922b37d4-6ab9-5848-b186-328915d570de",
+    "original_fixture_card": "om_1",
+    "busy_attempt_started": 0,
+    "answer_proof": {
+      "answer": {
+        "answers": [
+          {
+            "id": "1",
+            "option_ids": [
+              "1"
+            ]
+          }
+        ],
+        "mode": "batch"
+      },
+      "answer_turn_id": "25/3",
+      "closed": true,
+      "delivery_id": "trainer-answer-922b37d4-6ab9-5848-b186-328915d570de",
+      "native_question_id": "standalone-922b37d4-6ab9-5848-b186-328915d570de",
+      "receipt_id": "mowulink-e91a102266fa79b08a1c880ad0fb9119fe3ac9781c678bc25450037236bb5c10",
+      "session": "isolated-dsh-standalone-trainer",
+      "turn_id": "1/1"
+    },
+    "direct_native_question_id": "f832745f-a460-59e7-aee2-16fc560884cf",
+    "answer_admissions": 1,
+    "boundary": "Installed DSH SDK, private host IPC and isolated Worker HTTP, local model and Feishu fixture."
+  },
+  "successful_repeats": 10
+}

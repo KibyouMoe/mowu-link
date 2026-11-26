@@ -47,6 +47,9 @@ from .worker_service import WorkerService
 CODEX = Path("/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex")
 GOAL_FIXTURE = "Finish the isolated goal check"
 KEEP_FORMAL_HELD = "Keep the isolated order held until an update"
+TRAINER_CARD_FIXTURE = "Publish a standalone trainer test question"
+TRAINER_CARD_QUESTIONS = [{"title":"Which isolated route?","options":["North","South"]},
+                          {"title":"Leave a note"},{"title":"Optional note"}]
 
 
 class Provider(BaseHTTPRequestHandler):
@@ -129,6 +132,9 @@ class Provider(BaseHTTPRequestHandler):
         if provision_action and not calls:
             item = {"type":"function_call","id":"fc_seed","name":"worker_report","call_id":"native_seed_fixture",
                     "arguments":"{}"}
+        elif any(block.get("text")==TRAINER_CARD_FIXTURE for block in latest) and not calls:
+            item = {"type":"function_call","id":"fc_standalone_trainer","name":"worker_ask_trainer",
+                    "call_id":"isolated-standalone-trainer","arguments":encode({"questions":TRAINER_CARD_QUESTIONS})}
         elif formal_goal is not None and (goal_continuation or payload and payload.get("kind")=="task"):
             item = self.formal_goal_item(formal_goal,payload,items[user_index+1:],names,goal_continuation)
         elif approval_prompt and not calls:
@@ -187,6 +193,8 @@ class Provider(BaseHTTPRequestHandler):
                 answer = next(entry["output"] for entry in reversed(items[user_index+1:])
                               if entry.get("type")=="function_call_output")
                 self.server.trainer_responses.append((trainer_prompt,answer))
+            if payload and payload.get("kind")=="trainer_answer":
+                self.server.standalone_received.append(payload)
         stream = [{"type":"response.created","response":{"id":response_id}}]
         for index,entry in enumerate([*prefix,item]):
             stream.extend({"type":"response.output_item."+kind,"output_index":index,"item":entry}
@@ -2148,6 +2156,99 @@ class CodexAppServer(unittest.TestCase):
         self.evidence = {"thread_id":sid,"turn_id":turn,"events":events,"tool_receipt_replayed":tool_acks[1],
                          "private_arguments_omitted":True,"early_cards":3,"card_titles":card_titles(),
                          "boundary":"Actual App Server command execution in an isolated test directory; model and Feishu fixtures"}
+
+    def test_native_tool_publishes_standalone_question_and_accepts_answer_once(self):
+        self.provider.standalone_received = []
+        rpc = self.enterContext(isolated_app_server(self.root,self.origin))
+        tool, = [item for item in TOOLSET if item["name"]=="worker_ask_trainer"]
+        session = rpc.request("thread/start",{"cwd":self.root,"ephemeral":False,"dynamicTools":[tool]})["thread"]["id"]
+        host = AppServerHost(rpc,session)
+        host.session = session
+        clock = Clock()
+        loop = self.enterContext(Loop.isolated(clock,host_factory=lambda _path,_name:host))
+        adapter_key,platform_key,worker_key = guid(),guid(),guid()
+        adapter_url = self.enterContext(running(serve_adapter(loop.adapter,"oguri",{worker_key:"worker/oguri"},
+                                                      ("127.0.0.1",0),None)))
+        loop.worker.adapter = RemoteAdapter(Client(adapter_url,worker_key),session)
+        worker_server = WorkerService(loop.worker,clock).listen(
+            {adapter_key:"adapter/oguri",platform_key:"platform/oguri"},("127.0.0.1",0),None)
+        worker_url = self.enterContext(running(worker_server))
+        platform,adapter = Client(worker_url,platform_key),Client(worker_url,adapter_key)
+        sink = PlatformFixture()
+        views = Views(loop.root/"standalone-codex-views.db",platform,sink,"test-chat","小栗帽",clock)
+        actions = Actions(views,Inbound(loop.root/"standalone-inbound.db",platform,None,"app","trainer","test-chat"))
+        sent = Event()
+        self.enterContext(worker_callbacks(host,adapter,sent.set))
+        source_turn = rpc.request("turn/start",{"threadId":session,"input":[
+            {"type":"text","text":TRAINER_CARD_FIXTURE,"text_elements":[]}]})["turn"]["id"]
+        self.assertTrue(sent.wait(12))
+        sent.clear()
+        before = host.read_turn(session,source_turn)
+        native_tool, = [row for row in before["items"] if row["type"]=="dynamicToolCall"]
+        self.assertEqual(native_tool["tool"],"worker_ask_trainer")
+        views.poll()
+        with views.db.transaction() as db:
+            qid,mid = tuple(db.execute("SELECT qid,mid FROM question_cards").fetchone())
+        self.assertEqual(self.provider.standalone_received,[])
+        self.assertEqual([turn["id"] for turn in host.thread(session,include_turns=True)["turns"]],[source_turn])
+        value = {"question_id":qid,"mode":"batch"}
+        with self.assertRaisesRegex(Fault,"wrong_card_actor"):
+            actions.record("app","other","test-chat",mid,value,{})
+        forged = {"question_id":qid,"proof":{"closed":True}}
+        with self.assertRaisesRegex(Fault,"standalone_question_requires_delivery_receipt"):
+            adapter.request("POST","worker/native-question-proof",forged)
+        data = ("app","trainer","test-chat",mid,value,{"options_1":"2","reply_2":"From the bound trainer"})
+        self.assertEqual(actions.record(*data),"pending")
+        original = host.deliver
+        writes = []
+        def lose(*args):
+            original(*args)
+            writes.append(args)
+            raise Fault(503,"isolated_trainer_answer_ack_lost",True)
+        host.deliver = lose
+        actions.flush()
+        self.assertTrue(sent.wait(12))
+        self.assertEqual(actions.record(*data),"pending")
+        views.poll()
+        self.assertEqual(sink.calls,[("send",mid)])
+        self.assertEqual(len(writes),1)
+        # Resume the Worker using its durable state and the same adapter; its replay uses lookup.
+        worker_server.shutdown()
+        empty = HostAdapter(loop.root/"replacement-without-answer-intent.db",host,session)
+        missing_url = self.enterContext(running(serve_adapter(empty,"oguri",{worker_key:"worker/oguri"},
+                                                      ("127.0.0.1",0),None)))
+        no_history = RemoteAdapter(Client(missing_url,worker_key),session)
+        restarted = Worker(loop.worker.db.path,"oguri",loop.worker.router,no_history,clock=clock)
+        recovered_url = self.enterContext(running(WorkerService(restarted,clock).listen(
+            {platform_key:"platform/oguri"},("127.0.0.1",0),None)))
+        views.worker = Client(recovered_url,platform_key)
+        clock.advance(16)
+        actions.flush()
+        self.assertEqual(actions.record(*data),"pending")
+        self.assertEqual(len(writes),1)
+        restarted.adapter = loop.worker.adapter
+        clock.advance(16)
+        actions.flush()
+        views.poll()
+        self.assertEqual(actions.record(*data),"confirmed")
+        self.assertEqual(sink.calls,[("send",mid),("patch",mid)])
+        self.assertEqual(len(writes),1)
+        reply, = self.provider.standalone_received
+        self.assertEqual((reply["question_id"],reply["source_turn_id"],reply["session"]),(qid,source_turn,session))
+        self.assertEqual(reply["answer"],{"mode":"batch","answers":[{"id":"1","option_ids":["2"]},
+            {"id":"2","option_ids":[],"text":"From the bound trainer"},{"id":"3","option_ids":[]}]})
+        native_receipt = host.lookup_expected(*writes[0])
+        turns = host.thread(session,include_turns=True)["turns"]
+        self.assertEqual([turn["id"] for turn in turns],[source_turn,native_receipt["turn_id"]])
+        self.assertEqual(loop.hermes.tasks()["items"],[])
+        with restarted.db.transaction() as db:
+            proof = json.loads(db.execute("SELECT proof FROM trainer_questions WHERE question_id=?",(qid,)).fetchone()[0])
+        self.assertEqual((proof["receipt_id"],proof["answer_turn_id"]),(native_receipt["native_id"],native_receipt["turn_id"]))
+        self.evidence = {"session":session,"source_turn_id":source_turn,"native_tool":native_tool["tool"],
+                         "question_id":qid,"fixture_message_id":mid,"host_receipt":native_receipt,
+                         "worker_proof":proof,"original_card_updates":1,"native_writes":1,
+                         "retry_without_adapter_ledger":"pending",
+                         "boundary":"Bundled App Server, isolated adapter and Worker HTTP, local model and Feishu fixture."}
 
     def test_native_trainer_question_closes_original_card_only_after_app_server_receipt(self):
         self.provider.trainer_responses = []

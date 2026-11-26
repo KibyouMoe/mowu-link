@@ -1275,6 +1275,91 @@ class NativeLoop(unittest.TestCase):
                 "adapter_answer_result":answer,"original_provider_result":observed,"platform_question_cards":0,
                 "boundary":"Installed SDK's blocking tool, in-process model and native answer-provider test fixtures"}
 
+    def test_dsh_standalone_question_defers_answer_while_native_session_is_busy(self):
+        session = "isolated-dsh-standalone-trainer"
+        directory = Path(self.enterContext(tempfile.TemporaryDirectory(dir="/tmp",prefix="mldsh-standalone-")))
+        host = DshHost(directory)
+        host.session = session
+        clock = Clock()
+        loop = self.enterContext(Loop.isolated(clock,host_factory=lambda _path,_name:host))
+        adapter_key,platform_key,worker_key = guid(),guid(),guid()
+        url = self.open_worker(WorkerService(loop.worker,clock),
+                               {adapter_key:"adapter/oguri",platform_key:"platform/oguri"})
+        adapter,platform = Client(url,adapter_key),Client(url,platform_key)
+        port = self.enterContext(codex_driver.running(serve_adapter(loop.adapter,"oguri",
+                                 {worker_key:"worker/oguri"},("127.0.0.1",0),None)))
+        remote = RemoteAdapter(Client(port,worker_key),session)
+        loop.worker.adapter = remote
+        self.enterContext(tool_listener(directory,loop.adapter,adapter))
+        sink = PlatformFixture()
+        views = Views(loop.root/"standalone-dsh-views.db",platform,sink,"test-chat","小栗帽",clock)
+        actions = Actions(views,Inbound(loop.root/"standalone-dsh-inbound.db",platform,None,"app","trainer","test-chat"))
+        args = {"request_id":guid(),"questions":[{"title":"Choose an isolated route","options":["North","South"]}]}
+        with self.start_native(directory,session,"standalone-trainer-question") as native:
+            source = loop.worker.chat(guid(),"Standalone trainer fixture\n"+encode(args))
+            observed = self.read_native(native,"read")
+            call, = observed["calls"]
+            self.assertEqual((call["name"],json.loads(call["arguments"])),("worker_ask_trainer",args))
+            opened = json.loads(observed["results"][0]["content"][0]["text"])
+            qid = opened["question_id"]
+            replay = {"session":session,"turn_id":source["turn_id"],"tool":call["name"],
+                      "call_id":call["callId"],"arguments":args}
+            self.assertEqual(adapter.request("POST","worker/native-tool",replay),opened)
+            self.assertEqual(adapter.request("POST","worker/native-tool",dict(replay,call_id="retry-tool-call")),opened)
+            with self.assertRaisesRegex(Fault,"native_question_conflict"):
+                adapter.request("POST","worker/native-tool",dict(replay,arguments=dict(args,questions=[{"title":"Changed"}])))
+            with self.assertRaisesRegex(Fault,"forbidden"):
+                platform.request("POST","worker/native-tool",replay)
+            self.assertFalse(loop.hermes.tasks()["items"])
+            self.assertEqual(self.read_native(native,"hold-question-reply"),{"busy":True})
+            views.poll()
+            with views.db.transaction() as db:
+                mid = db.execute("SELECT mid FROM question_cards WHERE qid=?",(qid,)).fetchone()[0]
+            value = {"question_id":qid,"mode":"batch"}
+            data = ("app","trainer","test-chat",mid,value,{"options_1":"1"})
+            self.assertEqual(actions.record(*data),"pending")
+            actions.flush()
+            self.assertEqual(actions.record(*data),"pending")
+            with loop.worker.db.transaction() as db:
+                state = tuple(db.execute("SELECT started,proof FROM trainer_reply_deliveries JOIN trainer_questions "
+                                         "USING(question_id) WHERE question_id=?",(qid,)).fetchone())
+            self.assertEqual(state,(0,None))
+            views.poll()
+            self.assertEqual(sink.calls,[("send",mid)])
+            after_stop = self.read_native(native,"stop-unrelated-turn")
+            self.assertEqual(after_stop["standaloneAnswers"],[])
+            clock.advance(16)
+            actions.flush()
+            finished = self.read_native(native,"read")
+            clock.advance(16)
+            actions.flush()
+            views.poll()
+            self.assertEqual(actions.record(*data),"confirmed")
+            self.assertEqual(sink.calls,[("send",mid),("patch",mid)])
+            payload, = finished["standaloneAnswers"]
+            self.assertEqual((payload["question_id"],payload["source_turn_id"],payload["session"]),
+                             (qid,source["turn_id"],session))
+            self.assertEqual(payload["answer"],{"mode":"batch","answers":[{"id":"1","option_ids":["1"]}]})
+            self.assertEqual(len(finished["inputs"]),len(after_stop["inputs"])+1)
+            with loop.worker.db.transaction() as db:
+                proof = json.loads(db.execute("SELECT proof FROM trainer_questions WHERE question_id=?",(qid,)).fetchone()[0])
+            self.assertEqual(proof["receipt_id"],finished["inputs"][-1])
+            with self.assertRaisesRegex(Fault,"wrong_native_session"):
+                RemoteAdapter(remote.client,"other-bound-session").lookup_delivery(proof["delivery_id"],payload,
+                                                                                    session="other-bound-session")
+            direct = self.read_native(native,"direct-trainer "+encode({"questions":[{"title":"A direct native question"}]}))
+            direct_open = json.loads(direct["results"][-1]["content"][0]["text"])
+            self.assertEqual(direct_open["state"],"queued_for_trainer")
+            self.assertNotEqual(direct_open["question_id"],qid)
+            with self.assertRaisesRegex(Fault,"native_question_conflict"):
+                adapter.request("POST","worker/native-tool",
+                                dict(replay,turn_id=proof["answer_turn_id"],call_id="retry-in-a-new-turn"))
+            self.assertFalse(loop.hermes.tasks()["items"])
+            self.evidence = {"session":session,"native_tool_call":call["callId"],"public_question_id":qid,
+                             "original_fixture_card":mid,"busy_attempt_started":state[0],"answer_proof":proof,
+                             "direct_native_question_id":direct_open["question_id"],"answer_admissions":1,
+                             "boundary":"Installed DSH SDK, private host IPC and isolated Worker HTTP, local model and Feishu fixture."}
+
     def test_foreground_question_uses_one_native_answer_and_one_original_card(self):
         evidence = []
         for outcome in ("feishu-first","native-first","canceled","timed-out"):

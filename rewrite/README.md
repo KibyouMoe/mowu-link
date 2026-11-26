@@ -226,6 +226,10 @@ DSH 的自动换绑使用同一套 Worker 交接。先在独立 DSH 宿主插件
 
 复跑 `python3 -B -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_foreground_question_uses_one_native_answer_and_one_original_card`。真实 DSH SDK 和会话日志实跑，答题客户端、模型和飞书用本地测试替身。[前台题回执](evidence/dsh-foreground-question-relay.json)
 
+若原本没有原生题窗，固定会话里的 Agent 可用 `worker_ask_trainer` 发独立公开题卡。工具接受一至三道题，每题可给选项，也可留空收文字。返回 `queued_for_trainer` 表示 Worker 已登记，发卡时不启动宿主回合。原卡通过既有训练员身份校验收取选择、自填及跳过。答复在原固定会话空闲且无正式持单时，作为新的原生输入交回。Worker 持久保存原卡号、原回合和答复；只有查到相符的原生收件后，才把原卡更新为已回答。明确未开始的忙碌拒绝可以重试，确认不了是否写入时只查原号。正式工单仍用 `worker_ask` 问溪流。
+
+复验时保留 Worker、宿主适配器和平台状态库。新开独立 Codex App Server 会话时可登记 `worker_ask_trainer`，已绑定现役 Desktop 会话需单独验其工具加载。DSH 插件使用同一工具表。复跑独立题卡证据所列两项测试，模型和飞书均为本地测试替身。[独立题卡证据](evidence/standalone-trainer-questions.json)
+
 平台配置中的 `worker_name` 用于飞书卡片标题。宿主适配器以自身身份向 Worker 的 `POST /v1/worker/display` 交已观测的公开事件，携带稳定事件号、目标会话和回合。每段增量文字仅发新增部分；独立的最终答复事件才显示为「回复」。工具事件仅接受工具名和用于展示的预览文本。查询或抄送都不会写正式完工报告。
 
 独立平台入口 `python3 -m rewrite.feishu_client --config <专用测试配置>` 使用飞书官方 Python SDK。配置是仅属当前用户的 JSON，显式提供 `app_id`、`app_secret`、`trainer_open_id`、`chat_id`、平台队列的 `database` 和指向 Worker 的 `worker_connection`。普通私聊及其文件保存在 Worker 端，断开 Router 仍能投递。使用配置前需要单独的测试应用和会话。无需账号即可运行 `rewrite.test_feishu_inbound` 或官方事件解析复验 `rewrite.feishu_sdk_check`。[平台消息资源说明](https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/guide/faq) [飞书 Python SDK](https://github.com/larksuite/oapi-sdk-python)

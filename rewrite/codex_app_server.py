@@ -37,6 +37,7 @@ class AppServerHost:
     rejects_busy_before_task_write = True
     rejects_busy_before_control_write = True
     rejects_busy_before_queue_write = True
+    rejects_busy_before_answer_write = True
 
     def __init__(self, rpc, thread_id, adapter_db=None, public_image_root=None, *, relay_command_approvals=False):
         self.rpc, self.thread_id = rpc,thread_id
@@ -344,6 +345,9 @@ class AppServerHost:
                 require(not self.busy(session),409,"native_task_not_admitted_busy")
             elif payload["kind"]=="queued_chat":
                 require(not self.busy(session),409,"native_queue_not_admitted_busy")
+            elif payload["kind"]=="trainer_answer":
+                require(payload["session"]==session,409,"wrong_native_session")
+                require(not self.busy(session),409,"native_answer_not_admitted_busy")
             turn = self.request("turn/start",{"threadId":session,"input":blocks,
                                               "clientUserMessageId":"mowulink-"+did})["turn"]
             proof = self.lookup_inputs(session,did,payload,digest,blocks)
@@ -537,12 +541,18 @@ class AppServerHost:
         turn_id = string(call,"turnId")
         thread = self.thread(self.thread_id,include_turns=True)
         turn = next((item for item in thread["turns"] if item.get("id")==turn_id),None)
-        require(turn and sum(item.get("type")=="userMessage" for item in turn["items"])==1,
-                409,"native_turn_unconfirmed")
-        receipt = worker.request("POST","worker/native-tool",{
+        users = [item for item in turn["items"] if item.get("type")=="userMessage"] if turn else []
+        require(len(users)==1,409,"native_turn_unconfirmed")
+        envelope = {
             "session":self.thread_id,"turn_id":turn_id,"tool":tool,
             "call_id":string(call,"callId"),"arguments":args,
-        })
+        }
+        if tool=="worker_ask_trainer" and not users[0].get("clientId"):
+            require(turn.get("status") not in TERMINAL,409,"native_turn_not_active")
+            require(not any(part.get("text","").startswith("魔物链接投递\n") for part in users[0]["content"]),
+                    403,"wrong_trainer_question_origin")
+            envelope["native_direct"] = True
+        receipt = worker.request("POST","worker/native-tool",envelope)
         require(isinstance(receipt,dict),502,"worker_tool_unconfirmed")
         if tool=="worker_report":
             require(receipt.get("recorded") is True,502,"worker_report_unconfirmed")
