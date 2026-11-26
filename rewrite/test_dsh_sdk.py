@@ -261,6 +261,46 @@ class DshSdk(unittest.TestCase):
                 "SELECT payload FROM display_events WHERE event_id='command-om_restart_model'").fetchone()[0])["text"]
         self.assertIn("切换结果待核",text)
 
+    def test_numbered_model_choices_use_the_last_published_page_and_effort_checks_its_route(self):
+        self.remote_adapter("models")
+        sink = PlatformFixture()
+        views = Views(self.directory/"menu-views.db",self.inbound.worker,sink,"chat","玉藻")
+        self.assertIn("没有该编号",self.platform_command("om_model_before","/model 12"))
+        self.assertIn("第 1/2 页",self.platform_command("om_model_first","/model"))
+        views.poll()
+        second = self.platform_command("om_model_forward","/model next")
+        self.assertIn("12. fixture/route-10",second)
+        original = views.worker.request
+        def lose_menu_receipt(method,path,*a,**kw):
+            if path=="worker/model-menu-receipt":
+                raise ConnectionError("Worker unavailable after Feishu accepted the card")
+            return original(method,path,*a,**kw)
+        with patch.object(views.worker,"request",side_effect=lose_menu_receipt):
+            with self.assertRaises(ConnectionError):
+                views.poll()
+        card_id = sink.calls[-1][1]
+        self.assertIn("尚未确认送达",self.platform_command("om_menu_unknown","/model 2"))
+        views.poll()
+        self.assertEqual(sink.calls.count(("send",card_id)),2)
+        self.assertEqual([row[0] for row in sink.messages.values()].count(card_id),1)
+        self.assertIn("第 1/2 页",self.platform_command("om_model_back","/model prev"))
+        views.poll()
+        self.inbound.worker.request("POST","worker/command",{"message_id":"om_model_forward","text":"/model next"})
+        self.assertIn("没有该编号",self.platform_command("om_old_page","/model 12"))
+        self.assertEqual(self.platform_command("om_model_forward_new","/model next"),second)
+        views.poll()
+        self.assertIn("本会话已切换为 fixture/route-10",self.platform_command("om_model_12","/model 12"))
+        self.drive("select-model",model="fixture",effort="low")
+        self.assertIn("2. high",self.platform_command("om_effort_old_menu","/effort"))
+        views.poll()
+        self.drive("select-model",model="route-1",effort="low")
+        self.assertIn("打开菜单后模型已切换",self.platform_command("om_effort_stale","/effort 2"))
+        self.assertEqual(self.drive("model-records")["selected"]["reasoningEffort"],"low")
+        self.assertIn("2. high",self.platform_command("om_effort_new_menu","/effort"))
+        views.poll()
+        self.assertIn("已切换为 fixture/route-1 · high",self.platform_command("om_effort_2","/effort 2"))
+        self.assertEqual(self.drive("count")["received"],0)
+
     def test_next_turn_queue_recovers_receipt_without_steering_or_replaying(self):
         self.drive("manual")
         self.service.step()

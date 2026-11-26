@@ -39,8 +39,11 @@ class RemoteAdapter:
     def model_view(self, kind):
         return self.request("GET","host/"+kind)
 
-    def model_change(self, session, kind, value):
-        return self.request("POST","host/model-selection",{"session":session,"kind":kind,"value":value})
+    def model_change(self, session, kind, value, *, expected_route=None):
+        body = {"session":session,"kind":kind,"value":value}
+        if expected_route is not None:
+            body["expected_route"] = expected_route
+        return self.request("POST","host/model-selection",body)
 
     def deliver(self, did, payload):
         return self.request("POST", "host/deliver", {"delivery_id":did, "payload":payload})["receipt"]
@@ -72,9 +75,15 @@ def serve_adapter(adapter, worker_id, identities, address, context):
             case "GET",("/v1/host/models"|"/v1/host/efforts"):
                 result = adapter.model_view(path.rsplit("/",1)[1])
             case "POST","/v1/host/model-selection":
-                require(set(body)=={"session","kind","value"} and body.get("kind") in ("models","efforts"),
+                require({"session","kind","value"}<=set(body)<={"session","kind","value","expected_route"}
+                        and body["kind"] in ("models","efforts"),
                         422,"invalid_model_change")
-                result = adapter.model_change(string(body,"session"),body["kind"],string(body,"value"))
+                args = (string(body,"session"),body["kind"],string(body,"value"))
+                if "expected_route" in body:
+                    require(body["kind"]=="efforts",422,"invalid_model_change")
+                    result = adapter.model_change(*args,expected_route=string(body,"expected_route"))
+                else:
+                    result = adapter.model_change(*args)
             case "POST","/v1/host/deliver":
                 payload = body.get("payload")
                 require(isinstance(payload,dict) and payload.get("kind") in (

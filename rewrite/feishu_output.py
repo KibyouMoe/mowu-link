@@ -130,6 +130,9 @@ class Views:
                         text = self.name+"已上线\n"+text
                     mid = self.platform.create(self.chat,card(self.name+labels[kind],text,session),key)
             require(isinstance(mid,str) and mid.startswith("om_"),502,"unconfirmed_platform_message")
+            if event.get("model_menu") is True:
+                proof = self.worker.request("POST","worker/model-menu-receipt",{"seq":seq,"platform_message_id":mid})
+                require(proof=={"recorded":True,"seq":seq},409,"model_menu_receipt_unconfirmed")
             if kind=="progress":
                 db.execute("INSERT OR REPLACE INTO segments VALUES (?,?,?,?)",(session,turn,mid,text))
             else:

@@ -69,7 +69,8 @@ class Routes extends Service {
   resolveModelInfo(provider, id) {
     if (provider!=='fixture') throw new Error('unknown_provider');
     return {inputModalities:id==='text-only' ? ['text'] : ['text','image'],
-      reasoning:id==='fixture' ? {efforts:[{id:'low',name:'低'},{id:'high',name:'高'}],defaultEffort:'low'} : undefined};
+      reasoning:['fixture','route-1'].includes(id)
+        ? {efforts:[{id:'low',name:'低'},{id:'high',name:'高'}],defaultEffort:'low'} : undefined};
   }
   async resolveCallConfig(choice) {
     if (!this.listModels(choice.provider).some(model=>model.id===choice.model)) throw new Error('unavailable_model');

@@ -125,10 +125,16 @@ export async function bindHost(ctx, session, directory) {
         check(['models','efforts'].includes(request.kind), 'invalid_model_view');
         return modelView(ctx,agent,request.kind,await ownEvents(ctx,agent));
       }
-      if (request.operation === 'model-change') {
+      if (request.operation === 'model-change' || request.operation === 'model-change-if-route') {
         check(['models','efforts'].includes(request.kind) && typeof request.value === 'string'
           && request.value.length>0 && request.value.length<=401, 'invalid_model_change');
-        return changeModel(ctx,agent,request.kind,request.value,bound,()=>ownEvents(ctx,agent));
+        if (request.operation === 'model-change-if-route') {
+          check(request.kind==='efforts' && typeof request.expected_route==='string'
+            && request.expected_route.length>0 && request.expected_route.length<=401, 'invalid_model_change');
+        } else {
+          check(request.expected_route===undefined, 'invalid_model_change');
+        }
+        return changeModel(ctx,agent,request,bound,()=>ownEvents(ctx,agent));
       }
       check(['deliver','lookup'].includes(request.operation), 'unsupported_operation');
       const expected = await input(request,ctx,agent,directory);

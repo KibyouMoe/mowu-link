@@ -33,7 +33,8 @@ export async function modelView(ctx, agent, kind, events) {
     more:items.length>200};
 }
 
-export async function changeModel(ctx, agent, kind, value, bound, readEvents) {
+export async function changeModel(ctx, agent, request, bound, readEvents) {
+  const {kind,value,expected_route:expectedRoute} = request;
   if (agent.status!=='idle') throw new Error('model_change_busy');
   const before = agent.session.seq;
   const llm = agent.ctx?.get('llm') ?? ctx.get('llm');
@@ -41,6 +42,9 @@ export async function changeModel(ctx, agent, kind, value, bound, readEvents) {
   if (kind==='efforts') {
     const current = selection(agent.model.current());
     if (!current) throw new Error('model_choice_unavailable');
+    if (expectedRoute!==undefined && current.provider+'/'+current.model!==expectedRoute) {
+      throw new Error('model_menu_route_changed');
+    }
     choice = {provider:current.provider,model:current.model};
     try {
       const info = await llm.resolveModelInfo(choice.provider,choice.model);

@@ -146,6 +146,8 @@ class WorkerService:
                 result["local_pending"] = peer_retry.waiting(w,mid)
         elif actor == "platform/" + w.worker_id and method == "POST" and path == "/v1/worker/command":
             result = {"receipt":worker_commands.handle(self,body)}
+        elif actor == "platform/" + w.worker_id and method == "POST" and path == "/v1/worker/model-menu-receipt":
+            result = worker_commands.acknowledge_menu(w,body)
         elif actor == "platform/" + w.worker_id and method == "POST" and path == "/v1/worker/chat":
             require({"message_id","text"} <= body.keys() <= {"message_id","text","attachment_ids","attachment_kinds"},
                     422,"invalid_chat")

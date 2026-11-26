@@ -56,11 +56,13 @@ class HostAdapter:
         require(callable(reader),422,"native_model_view_unavailable")
         return reader(self.session,kind)
 
-    def model_change(self, session, kind, value):
+    def model_change(self, session, kind, value, *, expected_route=None):
         require(session==self.session,409,"wrong_native_session")
         writer = getattr(self.host,"model_change",None)
         require(callable(writer),422,"native_model_change_unavailable")
-        return writer(self.session,kind,value)
+        if expected_route is None:
+            return writer(self.session,kind,value)
+        return writer(self.session,kind,value,expected_route=expected_route)
 
     def deliver(self, did, payload):
         if payload.get("kind") == "queued_chat":

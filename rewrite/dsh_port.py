@@ -66,8 +66,11 @@ class DshHost:
     def model_view(self, session, kind):
         return self.request("model-view",session,{"kind":kind})
 
-    def model_change(self, session, kind, value):
-        return self.request("model-change",session,{"kind":kind,"value":value})
+    def model_change(self, session, kind, value, *, expected_route=None):
+        fields = {"kind":kind,"value":value}
+        if expected_route is None:
+            return self.request("model-change",session,fields)
+        return self.request("model-change-if-route",session,{**fields,"expected_route":expected_route})
 
     def delivery(self, operation, session, did, payload, digest):
         result = self.request(operation,session,{"delivery_id":did,"payload_json":encode(payload),"digest":digest})
