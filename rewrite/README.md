@@ -66,6 +66,15 @@ DSH 可用 `worker_list_peers` 浏览已登记的其他工位。它只返回工�
 
 绑定的训练员私聊发生格式、附件或收件问题时，平台进程在原消息下回复状态卡。平台已尝试而回执丢失时，沿用原 UUID 和卡片正文，首次尝试满 55 分钟后标记 `receipt_unknown`，继续处理其他消息。等待中已查实且尚未发送的提示自动撤销。若已提示待核，查到宿主凭据后再发一条恢复确认。消息的受理状态在 `platform_events`，平台回复的状态和消息号在 `input_notices`。[飞书回复消息接口](https://open.feishu.cn/document/server-docs/im-v1/message/reply.md)
 
+### 来源留档与通知积压
+
+```sh
+python3 -B -m rewrite.service trigger-status --db /path/to/source.db
+python3 -B -m rewrite.service delivery-status --connection /path/to/consumer.json
+```
+
+`trigger-status` 读取现有来源库的实例、已留档数和仍缺 T04 回执的条数。文件不存在就返回错误。已生成时间来自来源本机时钟。第二条查询已认证接收者在 Router 的最新投递游标、连续确认位置及仍未确认条数。后发帧先确认时，连续游标停在缺口前。Info 没有推送帧。C02 只证明接收端入箱，宿主收件仍由各适配器核对。两条命令均只输出汇总。
+
 ### 训练员原生题卡
 
 训练员可以在原卡一次提交同一公开请求里的多道题。按题目下方的序号选择，支持多选的题用逗号隔开，留空跳过。公开原题允许自填时才提供输入框。Worker 等同一会话和原请求的宿主关闭凭据再更新原卡。Codex App Server 每题单选，DSH 计时题进入原生续答后可多选。测试使用飞书 JSON 2.0 表单的批量回调结构，实际飞书交互待验。[飞书卡片组件](https://open.feishu.cn/document/feishu-cards/card-json-v2-components/component-json-v2-overview?lang=en-US)

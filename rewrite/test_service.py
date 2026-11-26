@@ -15,6 +15,7 @@ from .approvals import TTL_SECONDS, route as approval_route
 from .orders import Orders
 from .service import private_config
 from .storage import Fault, guid
+from .trigger import Trigger
 from .wire import Client
 from .host_wire import RemoteAdapter
 
@@ -123,6 +124,81 @@ class Service(unittest.TestCase):
             private_config(path)
         with self.assertRaises(ValueError):
             Client("http://example.test","unused")
+
+    @unittest.skipUnless(shutil.which("openssl"), "TLS fixture certificate generator unavailable")
+    def test_source_receipts_and_consumer_cursor_are_observed_independently(self):
+        cert,key = self.certificate()
+        source_path = self.root/"watched-source.db"
+        source_arg = ("trigger-status","--db",source_path)
+        missing = subprocess.run([*CLI,*map(str,source_arg)],cwd=ROOT,capture_output=True,text=True,timeout=10)
+        self.assertEqual((missing.returncode,json.loads(missing.stderr)),(1,{"error":"trigger_archive_missing"}))
+        self.assertFalse(source_path.exists())
+        source = Trigger(source_path,"test-source")
+        sender,manager,other = (guid() for _ in range(3))
+        ids = self.write_config("status-roles.json",{sender:"trigger/"+source.instance_id,manager:"hermes",
+                                                     other:"worker/unrelated"})
+        process,url = self.start(ids,cert,key)
+        writer,reader,unrelated = (Client(url,token,cert) for token in (sender,manager,other))
+        reader_config = self.write_config("reader.json",{"url":url,"token":manager,"ca_file":str(cert)})
+        consumer_arg = ("delivery-status","--connection",reader_config)
+
+        def counts():
+            observation = self.command(*consumer_arg)
+            self.assertEqual(observation["consumer"],"hermes")
+            return tuple(observation[key] for key in ("latest_cursor","confirmed_cursor","awaiting_consumer_ack"))
+
+        self.assertEqual(counts(),(0,0,0))
+        note = source.record("Notify","Private fixture body")
+        event = source.record("Event","Second fixture body")
+        info = source.record("Info","Archive-only fixture body")
+        snapshot = source_path.read_bytes()
+        status = self.command(*source_arg)
+        self.assertEqual((status["instance_id"],status["archived"],status["awaiting_router_receipt"]),
+                         (source.instance_id,3,3))
+        self.assertIsNone(status["latest_router_received_at"])
+        self.assertEqual(source_path.read_bytes(),snapshot)
+
+        request = writer.request
+        def drop(*args,**kwargs):
+            request(*args,**kwargs)
+            raise ConnectionError("fixture loses T04 receipt")
+        writer.request = drop
+        with self.assertRaises(ConnectionError):
+            source.send(writer,note)
+        writer.request = request
+        local_after_loss = self.command(*source_arg)
+        consumer_after_loss = counts()
+        self.assertEqual(local_after_loss["awaiting_router_receipt"],3)
+        self.assertEqual(consumer_after_loss,(1,0,1))
+        for mid in (note,event,info):
+            source.send(writer,mid)
+        status = self.command(*source_arg)
+        self.assertEqual((status["archived"],status["awaiting_router_receipt"]),(3,0))
+        self.assertTrue(status["latest_router_received_at"])
+        self.assertNotIn("fixture body",json.dumps(status))
+        self.assertEqual(counts(),(2,0,2))
+        self.assertEqual(unrelated.request("GET","deliveries/status"),
+                         {"consumer":"worker/unrelated","latest_cursor":0,"confirmed_cursor":0,"awaiting_consumer_ack":0})
+        with self.assertRaisesRegex(Fault,"forbidden"):
+            writer.request("GET","deliveries/status")
+        with self.assertRaisesRegex(Fault,"unknown_status_filter"):
+            unrelated.request("GET","deliveries/status?consumer=hermes")
+        first,second = reader.frames(0)
+        self.assertEqual([first["payload"]["message_id"],second["payload"]["message_id"]],[note,event])
+        self.assertEqual(reader.ack(second)["confirmed_cursor"],0)
+        self.assertEqual(counts(),(2,0,1))
+        self.stop(process)
+        _,new_url = self.start(ids,cert,key)
+        new_reader = Client(new_url,manager,cert)
+        reboot = new_reader.request("GET","deliveries/status")
+        self.assertEqual((reboot["latest_cursor"],reboot["confirmed_cursor"],reboot["awaiting_consumer_ack"]),(2,0,1))
+        self.assertEqual(new_reader.ack(first)["confirmed_cursor"],2)
+        closed = new_reader.request("GET","deliveries/status")
+        self.assertEqual(closed["awaiting_consumer_ack"],0)
+        self.evidence = {"messages":[note,event,info],"source_after_lost_t04":local_after_loss,
+            "router_after_lost_t04":dict(zip(("latest_cursor","confirmed_cursor","awaiting_consumer_ack"),consumer_after_loss)),
+            "source_after_replay":status,"out_of_order_ack_after_restart":reboot,"all_acks":closed,
+            "boundary":"Temporary TLS Router, disposable identities and synthetic consumer ACKs. No host read receipt."}
 
     @unittest.skipUnless(shutil.which("openssl"), "TLS fixture certificate generator unavailable")
     def test_command_approval_requires_a_separate_operator_and_keeps_the_original_decision(self):

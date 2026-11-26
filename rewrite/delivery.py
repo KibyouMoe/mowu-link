@@ -26,6 +26,14 @@ def confirmed(db, consumer):
     """, (consumer,)).fetchone()[0]
 
 
+def status(db, consumer):
+    latest,pending = db.execute("""
+        SELECT COALESCE(MAX(cursor),0),COUNT(*) FILTER (WHERE ack=0)
+        FROM deliveries WHERE consumer=?""",(consumer,)).fetchone()
+    return {"consumer":consumer,"latest_cursor":latest,"confirmed_cursor":confirmed(db,consumer),
+            "awaiting_consumer_ack":pending}
+
+
 def read(db, consumer, after):
     require(0 <= after <= confirmed(db, consumer), 409, "unconfirmed_cursor")
     rows = db.execute("""SELECT cursor,delivery_id,kind,payload FROM deliveries

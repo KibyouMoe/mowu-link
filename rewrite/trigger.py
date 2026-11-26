@@ -1,11 +1,29 @@
 """Provider-independent Trigger. The local SQLite archive survives process restarts."""
 import hashlib
-from contextlib import ExitStack
+from contextlib import ExitStack, closing
 import json
 from pathlib import Path
+import sqlite3
 import time
 
-from .storage import Database, encode, guid, require, timestamp
+from .storage import Database, Fault, encode, guid, require, timestamp
+
+
+def archive_status(path):
+    require(path.is_file(),404,"trigger_archive_missing")
+    try:
+        with closing(sqlite3.connect(path.resolve().as_uri()+"?mode=ro",uri=True,timeout=5)) as db:
+            db.execute("BEGIN")
+            row = db.execute("SELECT id FROM instance WHERE slot=1").fetchone()
+            require(row,409,"trigger_instance_missing")
+            archived,waiting,latest,acknowledged = db.execute("""
+                SELECT COUNT(*),COUNT(*) FILTER (WHERE receipt IS NULL),
+                       MAX(json_extract(body,'$.generated_at')),MAX(json_extract(receipt,'$.received_at'))
+                FROM archive""").fetchone()
+    except sqlite3.DatabaseError as exc:
+        raise Fault(409,"trigger_archive_unavailable") from exc
+    return {"instance_id":row[0],"archived":archived,"awaiting_router_receipt":waiting,
+            "latest_generated_at":latest,"latest_router_received_at":acknowledged}
 
 
 class Trigger:

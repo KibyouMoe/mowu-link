@@ -47,6 +47,12 @@ def route(orders, actor, method, path, body, headers, approval_workers=frozenset
             require(db.execute("SELECT 1 FROM workers WHERE worker_id=?",(viewer,)).fetchone(),403,"unregistered_worker")
             result = orders.list_records(db,"workers",{k:v[0] for k,v in filters.items()},peers_for=viewer)
         return 200,"application/json",result
+    if parts==["deliveries","status"]:
+        require(method=="GET",405,"read_only_status")
+        require(actor=="hermes" or actor.startswith(("worker/","approver/")),403,"forbidden")
+        require(not url.query,422,"unknown_status_filter")
+        with orders.db.transaction() as db:
+            return 200,"application/json",delivery.status(db,actor)
     orders.tick()
     if method=="GET" and len(parts)==3 and parts[:2]==["peers","messages"]:
         require(actor.startswith("worker/"),403,"forbidden")

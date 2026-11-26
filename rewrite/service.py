@@ -15,7 +15,7 @@ from .adapter import HostAdapter
 from .host_wire import RemoteAdapter, serve_adapter
 from .messages import valid_guid
 from .storage import Fault, StateWriterBusy, encode, require, state_writer
-from .trigger import Trigger
+from .trigger import Trigger, archive_status
 from .wire import Client, serve_router
 from .worker import Worker
 from .worker_service import WorkerService
@@ -179,6 +179,10 @@ def main():
     send = ops.add_parser("send")
     send.add_argument("--connection",required=True,type=Path)
     send.add_argument("--message-id")
+    source_status = apps.add_parser("trigger-status",help="read the local Trigger archive and T04 receipt counts")
+    source_status.add_argument("--db",required=True,type=Path)
+    inbox_status = apps.add_parser("delivery-status",help="read Router delivery counts for this connection's identity")
+    inbox_status.add_argument("--connection",required=True,type=Path)
     status = apps.add_parser("worker-status",help="read an isolated Worker's last connection observations")
     status.add_argument("--connection",required=True,type=Path)
     status.add_argument("--worker-id",required=True)
@@ -201,6 +205,13 @@ def main():
     args = parser.parse_args()
     if args.component == "trigger":
         print(encode(source(args)))
+    elif args.component in ("trigger-status","delivery-status"):
+        try:
+            status = archive_status(args.db) if args.component=="trigger-status" else connection(
+                args.connection).request("GET","deliveries/status")
+        except Fault as error:
+            parser.exit(1,encode({"error":error.code})+"\n")
+        print(encode(status))
     elif args.component == "worker-status":
         observation = connection(args.connection).request("GET","worker/status")
         if observation.get("worker_id")!=args.worker_id:

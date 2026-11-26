@@ -1,0 +1,40 @@
+{
+  "messages": [
+    "e02f7a81-c55d-4681-af27-fe79aeb44627",
+    "8931db1b-ecf9-4a87-b6b4-2b7631c4bccf",
+    "210e6bfe-af08-47bb-af28-465cbc90b846"
+  ],
+  "source_after_lost_t04": {
+    "archived": 3,
+    "awaiting_router_receipt": 3,
+    "instance_id": "e8982472-7c81-4852-8253-d1d653826a7a",
+    "latest_generated_at": "2026-11-26T10:23:54.731174+00:00",
+    "latest_router_received_at": null
+  },
+  "router_after_lost_t04": {
+    "latest_cursor": 1,
+    "confirmed_cursor": 0,
+    "awaiting_consumer_ack": 1
+  },
+  "source_after_replay": {
+    "archived": 3,
+    "awaiting_router_receipt": 0,
+    "instance_id": "e8982472-7c81-4852-8253-d1d653826a7a",
+    "latest_generated_at": "2026-11-26T10:23:54.731174+00:00",
+    "latest_router_received_at": "2026-11-26T10:23:57.005272+00:00"
+  },
+  "out_of_order_ack_after_restart": {
+    "awaiting_consumer_ack": 1,
+    "confirmed_cursor": 0,
+    "consumer": "hermes",
+    "latest_cursor": 2
+  },
+  "all_acks": {
+    "awaiting_consumer_ack": 0,
+    "confirmed_cursor": 2,
+    "consumer": "hermes",
+    "latest_cursor": 2
+  },
+  "boundary": "Temporary TLS Router, disposable identities and synthetic consumer ACKs. No host read receipt.",
+  "successful_repeats": 10
+}

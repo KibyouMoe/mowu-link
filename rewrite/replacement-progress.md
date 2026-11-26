@@ -4,6 +4,10 @@
 
 ## 检查点与证据
 
+来源留档和 Router 投递分别有只读状态入口。临时 TLS 实测首次 T04 回执丢失时来源仍有三条待核，Router 已有一帧。按原号重试后来源剩零条，Router 共两帧，Info 仅留档。测试接收者先确认第二帧，连续游标仍为 0；Router 重开后补第一帧，游标到 2。来源不能查询接收者，另一工位只能查看自己的零积压，查询不返回正文或推进游标。复跑 `python3 -B -m unittest -v rewrite.test_service.Service.test_source_receipts_and_consumer_cursor_are_observed_independently`。[计数证据](evidence/trigger-delivery-status.json) · [操作入口](README.md#来源留档与通知积压)
+
+积压与续接场景连续 10 轮通过。使用隔离 TLS Router 和测试接收者确认，未调用真实 Hermes 或飞书。本版 macOS 全过 204 项，Linux arm64 通过 143 项，另 61 项本机宿主用例跳过。
+
 训练员题卡可一次提交同一原生请求里的多道公开题。Codex App Server 按原题 ID 回填单选、自填和跳过。任一题标为密题时整组留在宿主。DSH 已进入续答状态的计时题支持多选、自填与逐题跳过。选项顺序取原题，同样的选择换顺序重提仍只留一次答案。飞书测试卡收到原生关闭凭据后才更新同一张卡。两端各连过 8 轮，模型与飞书均用夹具，未启动日用会话。[Codex 原生记录](evidence/codex-app-server-native-question-batch.json) · [DSH 原生记录](evidence/dsh-native-question-batch.json)
 
 批量卡以输入框收选项序号。现有 DSH SDK 的续答入口只接受已超时的题，尚未接仍在前台等待的原生题。飞书实际显示、真人点击与同时打开的桌面原卡留待独立测试身份验证。
