@@ -3,7 +3,7 @@ name: Rewrite Windows installation
 on:
   push:
     branches: [feat/rewrite-formal-mainline]
-    paths: ["rewrite/**", ".github/workflows/rewrite-windows.yml"]
+    paths: ["rewrite/**", "!rewrite/**/*.md", "!rewrite/evidence/**", ".github/workflows/rewrite-windows.yml"]
 
 permissions:
   contents: read
@@ -58,6 +58,17 @@ jobs:
             $installed = Join-Path $dir.FullName 'installed'
             $release = python -B -m rewrite.release build --repository . --revision $env:GITHUB_SHA --destination $archive | ConvertFrom-Json
             python -B -m rewrite.release install --archive $release.archive --revision $release.revision --sha256 $release.sha256 --destination $installed
+            $native = New-Item -ItemType Directory (Join-Path $dir.FullName 'codex')
+            $package = Join-Path $dir.FullName 'codex-native.tar.gz'
+            $url = 'https://github.com/openai/codex/releases/download/rust-v0.171.0-alpha.13.2/codex-package-x86_64-pc-windows-msvc.tar.gz'
+            curl.exe --fail --location --silent --show-error --max-time 120 --output $package $url
+            if ((Get-FileHash -LiteralPath $package -Algorithm SHA256).Hash -ine '6d3be3ea2e3f759f77f23b543ee882aae6433dc6a6cd260788c2e8793d616eac') {
+              throw 'Codex package checksum mismatch'
+            }
+            tar.exe -xzf $package -C $native.FullName
+            $env:MOWULINK_TEST_CODEX_BINARY = Join-Path $native.FullName 'bin\codex.exe'
+            & $env:MOWULINK_TEST_CODEX_BINARY --version
+            $env:MOWULINK_TEST_CODEX_EVIDENCE = Join-Path $dir.FullName 'native-codex.jsonl'
             Push-Location -LiteralPath $installed
             try {
               $tests = @(
@@ -65,8 +76,15 @@ jobs:
                 'rewrite.test_service.Service.test_cli_tls_restart_preserves_identity_file_and_receipts'
                 'rewrite.test_service.Service.test_three_process_worker_chat_and_assignment'
                 'rewrite.test_service.Service.test_windows_public_config_rejected'
+                'rewrite.test_codex_rpc.WindowsCodexRpc'
+                'rewrite.test_codex_app_server.CodexAppServer.test_codex_adapter_process_handles_native_report_without_controller_dispatch'
+                'rewrite.test_codex_app_server.CodexAppServer.test_native_app_server_reconnect_recovers_input_before_w04_without_new_model_call'
+                'rewrite.test_codex_app_server.CodexAppServer.test_router_cancel_interrupts_bound_app_server_turn_and_preserves_unrelated_turn'
               )
               python -B -m unittest -v @tests
+              $nativeEvidence = Get-Content -LiteralPath $env:MOWULINK_TEST_CODEX_EVIDENCE
+              if ($nativeEvidence.Count -ne 3) { throw 'Windows App Server evidence is incomplete' }
+              $nativeEvidence
             } finally {
               Pop-Location
             }

@@ -1,5 +1,5 @@
 """A private stdio transport for an explicitly started Codex App Server."""
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import json
 import os
 from pathlib import Path
@@ -117,17 +117,28 @@ def start_app_server(binary,profile,cwd,settings=()):
     if os.name=="posix":
         owner = profile.stat()
         require(owner.st_uid==os.getuid() and not (owner.st_mode & 0o077),422,"dedicated_codex_profile_required")
+    env = {"CODEX_HOME":str(profile),"PATH":os.defpath}
+    child_scope = nullcontext
+    if os.name=="nt":
+        from .windows_acl import private_directory
+        from .windows_job import owned_process_tree
+        require(not profile.is_junction() and private_directory(profile),422,"dedicated_codex_profile_required")
+        env.update(SystemRoot=os.environ["SystemRoot"],USERPROFILE=str(profile),APPDATA=str(profile),
+                   LOCALAPPDATA=str(profile),TEMP=str(profile),TMP=str(profile))
+        child_scope = owned_process_tree
     argv = [binary,"app-server","--stdio",*(value for setting in settings for value in ("-c",setting))]
     with state_writer(profile/"mowulink-app-server"):
-        with subprocess.Popen(argv,cwd=cwd,env={"CODEX_HOME":str(profile),"PATH":os.defpath},
-                              stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,
+        with subprocess.Popen(argv,cwd=cwd,env=env,
+                              stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,encoding="utf-8",
                               start_new_session=os.name=="posix") as process:
-            rpc = AppServerRpc(process)
+            rpc = None
             try:
-                rpc.request("initialize",{"clientInfo":{"name":"mowulink_app_server","title":"MowuLink worker adapter",
-                    "version":"1.0"},"capabilities":{"experimentalApi":True}})
-                rpc.send({"method":"initialized","params":{}})
-                yield rpc
+                with child_scope(process.pid):
+                    rpc = AppServerRpc(process)
+                    rpc.request("initialize",{"clientInfo":{"name":"mowulink_app_server","title":"MowuLink worker adapter",
+                        "version":"1.0"},"capabilities":{"experimentalApi":True}})
+                    rpc.send({"method":"initialized","params":{}})
+                    yield rpc
             finally:
                 # Native helpers may still have files open in the private profile.
                 signal_private_server(process)
@@ -136,4 +147,5 @@ def start_app_server(binary,profile,cwd,settings=()):
                 except subprocess.TimeoutExpired:
                     signal_private_server(process,force=True)
                     process.wait(timeout=4)
-                rpc.reader.join(timeout=4)
+                if rpc is not None:
+                    rpc.reader.join(timeout=4)

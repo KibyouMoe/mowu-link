@@ -15,6 +15,8 @@ kernel.CloseHandle.argtypes = (win.HANDLE,)
 kernel.CloseHandle.restype = win.BOOL
 kernel.LocalFree.argtypes = (win.HLOCAL,)
 kernel.LocalFree.restype = win.HLOCAL
+kernel.CreateFileW.argtypes = (win.LPCWSTR,win.DWORD,win.DWORD,Pointer,win.DWORD,win.DWORD,win.HANDLE)
+kernel.CreateFileW.restype = win.HANDLE
 advapi.OpenProcessToken.argtypes = (win.HANDLE,win.DWORD,ct.POINTER(win.HANDLE))
 advapi.OpenProcessToken.restype = win.BOOL
 advapi.GetTokenInformation.argtypes = (win.HANDLE,ct.c_int,Pointer,win.DWORD,ct.POINTER(win.DWORD))
@@ -42,6 +44,11 @@ ACCESS_DENIED_ACE_TYPE = 1
 WIN_LOCAL_SYSTEM_SID = 22
 WIN_BUILTIN_ADMINISTRATORS_SID = 26
 WIN_CREATOR_OWNER_RIGHTS_SID = 71
+READ_CONTROL = 0x00020000
+SHARE_ALL = 7
+OPEN_EXISTING = 3
+FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+INVALID_HANDLE_VALUE = Pointer(-1).value
 
 
 class AclSize(ct.Structure):
@@ -70,6 +77,20 @@ def user_token():
 
 
 def private_file(fd):
+    return private_handle(get_osfhandle(fd))
+
+
+def private_directory(path):
+    handle = kernel.CreateFileW(str(path),READ_CONTROL,SHARE_ALL,None,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS,None)
+    if handle==INVALID_HANDLE_VALUE:
+        raise ct.WinError(ct.get_last_error())
+    try:
+        return private_handle(handle)
+    finally:
+        kernel.CloseHandle(handle)
+
+
+def private_handle(handle):
     # TOKEN_USER begins with SID_AND_ATTRIBUTES, whose first member is the SID pointer.
     user = user_token()
     user_sid = Pointer.from_buffer(user).value
@@ -79,7 +100,7 @@ def private_file(fd):
                             or advapi.IsWellKnownSid(sid,WIN_BUILTIN_ADMINISTRATORS_SID)))
 
     owner,dacl,security = Pointer(),Pointer(),Pointer()
-    status = advapi.GetSecurityInfo(get_osfhandle(fd),SE_FILE_OBJECT,OWNER_SECURITY_INFORMATION|DACL_SECURITY_INFORMATION,
+    status = advapi.GetSecurityInfo(handle,SE_FILE_OBJECT,OWNER_SECURITY_INFORMATION|DACL_SECURITY_INFORMATION,
                                    ct.byref(owner),None,ct.byref(dacl),None,ct.byref(security))
     if status:
         raise ct.WinError(status)

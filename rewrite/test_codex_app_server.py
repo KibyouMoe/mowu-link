@@ -46,7 +46,8 @@ from .wire import Client, serve_loopback
 from .worker import Worker
 from .worker_service import WorkerService
 
-CODEX = Path("/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex")
+CODEX = Path(os.environ.get("MOWULINK_TEST_CODEX_BINARY",
+                           "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex"))
 GOAL_FIXTURE = "Finish the isolated goal check"
 KEEP_FORMAL_HELD = "Keep the isolated order held until an update"
 LINK_OUTAGE_FIXTURE = "Continue this isolated assignment through a link outage"
@@ -294,7 +295,7 @@ def isolated_app_server(root, url, extra=()):
         'model="gpt-5.4"', 'model_provider="test_wire"', 'model_providers.test_wire.name="Local test wire"',
         'model_providers.test_wire.base_url='+encode(url+"/v1"), 'model_providers.test_wire.wire_api="responses"',
         'model_providers.test_wire.request_max_retries=0','model_providers.test_wire.stream_max_retries=0',
-        'web_search="disabled"',
+        'web_search="disabled"', 'features.plugins=false',
     ]
     with start_app_server(CODEX,root,root,[*settings,*extra]) as rpc:
         yield rpc
@@ -340,13 +341,19 @@ class CodexAppServer(unittest.TestCase):
         self.provider.media = []
         self.origin = self.enterContext(running(self.provider))
 
+    def tearDown(self):
+        if (output := os.environ.get("MOWULINK_TEST_CODEX_EVIDENCE")) and hasattr(self,"evidence"):
+            with Path(output).open("a",encoding="utf-8") as stream:
+                stream.write(encode({"test":self._testMethodName,"evidence":self.evidence})+"\n")
+
     def provision_command(self,profile,project):
-        return [sys.executable,"-m","rewrite.service","codex-provision","--codex-binary",CODEX,
+        return [sys.executable,"-B","-m","rewrite.service","codex-provision","--codex-binary",CODEX,
                 "--codex-profile",profile,"--cwd",project]
 
     def local_profile(self,profile):
         (profile/"config.toml").write_text('model = "gpt-5.4"\nmodel_provider = "test_wire"\n'
                                           'web_search = "disabled"\n'
+                                          '[features]\nplugins = false\n'
                                           '[model_providers.test_wire]\nname = "Local test wire"\n'
                                           'base_url = '+encode(self.origin+"/v1")+'\nwire_api = "responses"\n'
                                           'request_max_retries = 0\nstream_max_retries = 0\n',encoding="utf-8")
@@ -3475,10 +3482,10 @@ class CodexAppServer(unittest.TestCase):
         roles = write("adapter-roles.json",{adapter_token:"worker/oguri"})
         cert,key = root/"test.crt",root/"test.key"
         subprocess.run(["openssl","req","-x509","-newkey","rsa:2048","-nodes","-days","1","-subj","/CN=localhost",
-                        "-addext","subjectAltName=IP:127.0.0.1","-out",cert,"-keyout",key],
-                       check=True,capture_output=True,timeout=10)
+                        "-addext","subjectAltName=IP:127.0.0.1","-out",cert.name,"-keyout",key.name],
+                       cwd=root,check=True,capture_output=True,timeout=10)
         adapter_db = root/"codex-adapter.db"
-        command = [sys.executable,"-m","rewrite.service","codex-adapter","--db",adapter_db,"--identities",roles,
+        command = [sys.executable,"-B","-m","rewrite.service","codex-adapter","--db",adapter_db,"--identities",roles,
                    "--cert",cert,"--key",key,"--worker-id","oguri","--session",sid,"--worker-connection",worker_conn,
                    "--codex-binary",CODEX,"--codex-profile",profile,"--cwd",project]
         wrong_project = subprocess.run([*command[:-1],root],cwd=Path(__file__).resolve().parent.parent,
