@@ -1,0 +1,50 @@
+{
+  "session": "dsh-cold-project-recovery",
+  "task_id": "a29b395d-8f01-491c-a518-2510cfa92888",
+  "assignment_id": "c3e5b26d-45a4-4b40-93ef-6e047d052d84",
+  "container_id": "b13ffc2ec212d1634091c0fe9b349e3867ee4282cfce971947ef6b6896d51a90",
+  "container_start": "2026-11-26T17:23:25.931952103Z",
+  "project_seed_sha256": "9685ddd72e19abe4209ebda0994f56ec91345177fbb29f6b3e515878388b8e62",
+  "artifact_id": "c2a6165c-c6f9-49c3-b438-c6dbe95f0475",
+  "native_inputs": [
+    "mowulink-58dbb835bd9b35325efdab6c8fb7e1bf6eb3461d8d68b02653c51b06f7b49c52",
+    "mowulink-5b93bffc8538a8c3cac2db8dafe155b12f40c405257aa7a66a9fd95601595204"
+  ],
+  "tools": [
+    "worker_workspace_shell",
+    "worker_workspace_export",
+    "worker_report"
+  ],
+  "new_model_requests_after_release_replay": 0,
+  "w04_acknowledgements_lost": 2,
+  "w04_replays": 1,
+  "w04_key": "complete-c3e5b26d-45a4-4b40-93ef-6e047d052d84",
+  "w04_receipt": {
+    "recorded": true,
+    "release_assignment_id": "c3e5b26d-45a4-4b40-93ef-6e047d052d84",
+    "task_state": "completed_reported"
+  },
+  "manager_notice": "aafcbb0e-c3f9-43b1-a73f-73c568d3ae8a",
+  "container_after_w04": "removed",
+  "processes": [
+    {
+      "stage": "write",
+      "dsh_pid": 65628,
+      "worker_tls_port": 58699,
+      "adapter_tls_port": 58700
+    },
+    {
+      "stage": "continue",
+      "dsh_pid": 65656,
+      "worker_tls_port": 58750,
+      "adapter_tls_port": 58753
+    },
+    {
+      "stage": "recover",
+      "dsh_pid": 65667,
+      "worker_tls_port": 58805,
+      "adapter_tls_port": 58807
+    }
+  ],
+  "run_scope": "Same isolated Linux engine, actual DSH native persistence and independent TLS adapter/Worker processes; scripted test model, no production credentials."
+}

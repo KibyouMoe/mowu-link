@@ -119,6 +119,11 @@ python3 -B -m unittest -v rewrite.test_question_cards \
 
 复跑 `MOWULINK_DSH_CONTAINER_IMAGE=<已有镜像完整ID> python3 -B -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_dsh_workspace_seeds_private_project_and_recovers_seed_ack rewrite.test_dsh_native_loop.NativeLoop.test_dsh_workspace_refuses_unverified_or_escaping_project_seeds rewrite.test_dsh_native_loop.NativeLoop.test_dsh_workspace_restart_cannot_reseed_or_confirm_lost_work`。[项目快照实测](evidence/dsh-workspace-project-seed.json)
 
+同机冷恢复时保留原 DSH 会话目录、私有运行目录和仍运行的原 Linux 引擎，停写后再复制 Worker 与适配器的 SQLite 账本。重开仍用原身份与绑定。在途派发可继续用原容器内的改动。Router 已记录成果、本地还没收到 W04 回执时，重开的 Worker 从原发件账本重取回执，DSH 再按原容器回收。这个演练覆盖宿主和两个 HTTPS 进程均停机重建。容器工作目录位于引擎内存，跨机交接前应按原派发导出成果并确认回收。
+
+复跑 `MOWULINK_DSH_CONTAINER_IMAGE=<已有镜像完整ID> python3 -B -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_dsh_workspaces_cold_restart_recovers_unreported_work_and_committed_w04`。[同引擎冷恢复证据](evidence/dsh-workspace-cold-recovery.json)
+
+
 启用原生目标服务的 DSH 会话可用 `/goal` 查询、`/goal 目标正文` 新建、`/goal pause` 暂停、`/goal resume` 恢复。原生服务使用自己的默认轮次，已有未完成目标时拒绝替换。状态卡显示原生阶段、轮次和续跑授权。未确认的变更保留待核，重送同号不会再次修改。续跑由 DSH 宿主负责。
 
 启用原生压缩服务的 DSH 会话支持 `/compact`。Worker 先保存指令，宿主空闲时开始压缩。回执丢失后只按原指令号查原生记录。宿主保存了摘要、替换记录及结束条目后，飞书才显示已压缩的条数。连续五分钟无法确认时提示待核。摘要正文保留在宿主。

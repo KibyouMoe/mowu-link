@@ -2,13 +2,16 @@
 import hashlib
 from io import BytesIO
 import json
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from http.server import ThreadingHTTPServer
 import os
 import shutil
 from pathlib import Path
 import select
 import shlex
+import socket
+import sqlite3
+import ssl
 import subprocess
 import tarfile
 import tempfile
@@ -33,13 +36,13 @@ from .orders import Orders
 from .release_check import config, serve
 from .question_cards import Actions
 from .state_bundle import agent_pending, capture, filename, restore, rollback, verify
-from .storage import Fault, encode, guid
+from .storage import Fault, encode, guid, state_writer
 from .test_feishu_output import PlatformFixture
 from .test_mainline import Clock
 from .trigger import Trigger
 from .test_dsh_sdk import APP, EXE
 from .test_feishu_inbound import PNG
-from .wire import Client, serve_loopback
+from .wire import Client, route, serve_authenticated, serve_loopback
 from .worker import Worker
 from .worker_service import WorkerService
 
@@ -1524,6 +1527,210 @@ exec {docker} "$@"
                 "container_id":container,"started_at_before":lease["started_at"],"started_at_after":started,
                 "shell_and_export_error":"assignment_workspace_restarted","released_by":"cancel_confirmed"}
             Path(output).write_text(json.dumps(evidence,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
+
+    @unittest.skipUnless(shutil.which("openssl"),"isolated TLS certificate generator required")
+    def test_dsh_workspaces_cold_restart_recovers_unreported_work_and_committed_w04(self):
+        image,cli = self.container_engine()
+        session = "dsh-cold-project-recovery"
+        root = Path(self.enterContext(tempfile.TemporaryDirectory(dir="/tmp",prefix="ml-dsh-workspace-")))
+        runtime = root/"host"
+        runtime.mkdir(mode=0o700)
+        archive,seed,source,_ = self.create_project_seed(runtime)
+        self.seed_runtime(session,runtime,cli,image,archive,seed)
+        cert,key = root/"tls.crt",root/"tls.key"
+        subprocess.run(["openssl","req","-x509","-newkey","rsa:2048","-nodes","-days","1","-subj","/CN=localhost",
+                        "-addext","subjectAltName=IP:127.0.0.1","-out",cert,"-keyout",key],
+                       capture_output=True,timeout=10,check=True)
+        tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        tls.load_cert_chain(cert,key)
+        router_worker,hermes_token,adapter_token,callback_token,ops_token = (guid() for _ in range(5))
+        adapter_roles = config(root,"adapter-roles",{adapter_token:"worker/oguri"})
+        worker_roles = config(root,"worker-roles",{callback_token:"adapter/oguri",ops_token:"ops/oguri"})
+        clock = Clock()
+        orders = Orders(root/"router.db",clock,poll_seconds=1)
+        lose_report = Event()
+        lose_report.set()
+        w04_attempts = []
+        task_id = None
+
+        def router_request(actor,method,path,body,headers):
+            reply = route(orders,actor,method,path,body,headers)
+            if actor=="worker/oguri" and method=="POST" and path==f"/v1/tasks/{task_id}/report":
+                w04_attempts.append({"key":headers["Idempotency-Key"],"body":body})
+                if lose_report.is_set():
+                    raise Fault(503,"fixture_cold_w04_reply_lost",True)
+            return reply
+
+        router = serve_authenticated({router_worker:"worker/oguri",hermes_token:"hermes"},
+                                     ("127.0.0.1",0),tls,router_request,orders.tick)
+        self.enterContext(codex_driver.running(router))
+        base = "https://127.0.0.1:"+str(router.server_port)
+        manage = Client(base,hermes_token,cert)
+        to_router = config(root,"to-router",{"url":base,"token":router_worker,"ca_file":str(cert)})
+        package = Path(__file__).resolve().parents[1]
+        env = {"HOME":str(root),"PATH":os.defpath,"PYTHONDONTWRITEBYTECODE":"1"}
+        process_observations = []
+
+        @contextmanager
+        def station(state,stage,mode):
+            with socket.socket() as reservation:
+                reservation.bind(("127.0.0.1",0))
+                worker_port = reservation.getsockname()[1]
+                worker_url = f"https://127.0.0.1:{worker_port}"
+                to_worker = config(root,stage+"-worker",{"url":worker_url,"token":callback_token,"ca_file":str(cert)})
+                host_options = ("--worker-id","oguri","--session",session,"--runtime-dir",runtime,
+                                "--worker-connection",to_worker)
+                with self.start_native(runtime,session,mode) as native, \
+                     serve(package,"dsh-adapter",state/"adapter.db",adapter_roles,cert,key,env,host_options) as host_url:
+                    to_adapter = config(root,stage+"-adapter",{"url":host_url,"token":adapter_token,"ca_file":str(cert)})
+                    worker_options = ("--worker-id","oguri","--port",str(worker_port),"--router-connection",to_router,
+                                      "--adapter-session",session,"--adapter-connection",to_adapter)
+                    reservation.close()
+                    with serve(package,"worker",state/"worker.db",worker_roles,cert,key,env,worker_options) as url:
+                        self.assertEqual(url,worker_url)
+                        process_observations.append({"stage":stage,"dsh_pid":native.pid,
+                            "worker_tls_port":worker_port,"adapter_tls_port":int(host_url.rsplit(":",1)[1])})
+                        yield native,Client(url,ops_token,cert),Client(url,callback_token,cert)
+            self.assertIsNotNone(native.poll())
+
+        def wait_for(read,predicate):
+            end = time.monotonic()+10
+            while True:
+                value = read()
+                if predicate(value):
+                    return value
+                self.assertLess(time.monotonic(),end,value)
+                time.sleep(.05)
+
+        def copy_pair(source_dir,target_dir):
+            target_dir.mkdir(mode=0o700)
+            for name in ("adapter.db","worker.db"):
+                with state_writer(source_dir/name):
+                    self.assertFalse(any((source_dir/(name+suffix)).exists() for suffix in ("-journal","-wal","-shm")))
+                    shutil.copy2(source_dir/name,target_dir/name)
+
+        def read_outbox(directory):
+            uri = (directory/"worker.db").as_uri()+"?mode=ro"
+            with closing(sqlite3.connect(uri,uri=True)) as db:
+                row = db.execute("SELECT body,receipt FROM outbox WHERE assignment_id=?",(assignment,)).fetchone()
+            return None if row is None else (json.loads(row[0]),json.loads(row[1]) if row[1] else None)
+
+        def project_file():
+            return subprocess.check_output([*cli,"exec",lease["container_id"],"cat","/workspace/project/hello.txt"],timeout=5)
+
+        def observed_start():
+            return subprocess.check_output([*cli,"container","inspect","--format","{{.State.StartedAt}}",
+                                            lease["container_id"]],text=True,timeout=5).strip()
+
+        before,trial,recovered = (root/name for name in ("before","trial","recovered"))
+        before.mkdir(mode=0o700)
+        first_task = manage.request("POST","tasks",{"title":"Cold-restart project",
+            "instructions":"Write locally and leave the formal order open","assignee_id":"oguri"},guid())
+        task_id = first_task["task_id"]
+        route_to_task = f"tasks/{task_id}"
+        def inspect():
+            return manage.request("GET",route_to_task)
+        def idle():
+            return manage.request("GET","workers")["items"]
+        def connected(client):
+            return wait_for(lambda:client.request("GET","worker/status"),
+                            lambda state:state["router_connected"] and state["adapter_connected"])
+
+        def check_workspace(callback,expected):
+            scope = {"session":session,"task_id":task_id,"assignment_id":assignment}
+            self.assertEqual(callback.request("POST","worker/workspace-state",scope),{**scope,"state":expected})
+
+        with station(before,"write","cleanup-container-recovery") as (native,ops,callback):
+            self.assertEqual(connected(ops)["host_session"],session)
+            wait_for(idle,lambda rows:bool(rows) and rows[0]["busy"] is False)
+            clock.advance(10)
+            job = wait_for(inspect,lambda row:row["task"]["state"]=="working")
+            assignment = job["task"]["assignment_id"]
+            jobs = runtime/"assignment-containers"
+            journal = wait_for(lambda:list(jobs.glob("*.json")),lambda items:len(items)==1)[0]
+            lease = wait_for(lambda:json.loads(journal.read_bytes()),lambda row:row["phase"]=="active")
+            initial_native = self.read_native(native,"read")
+            self.assertEqual([row["name"] for row in initial_native["calls"]],["worker_workspace_shell"])
+            self.assertEqual(json.loads(initial_native["results"][0]["content"][0]["text"])["exit_code"],0)
+            self.assertEqual(lease["assignment_id"],assignment)
+            self.assertEqual(observed_start(),lease["started_at"])
+            self.assertEqual(project_file(),b"modified result\n")
+            self.assertEqual(ops.request("GET","worker/status")["held_assignment_id"],assignment)
+            self.assertIsNone(read_outbox(before))
+            check_workspace(callback,"active")
+            self.assertFalse(manage.frames(0))
+
+        original_bytes = {name:hashlib.sha256((before/name).read_bytes()).hexdigest() for name in ("worker.db","adapter.db")}
+        copy_pair(before,trial)
+        self.assertEqual(project_file(),b"modified result\n")
+        with station(trial,"continue","cleanup-container-recovery-reopen") as (native,ops,callback):
+            self.assertEqual(connected(ops)["held_assignment_id"],assignment)
+            loaded = self.read_native(native,"read")
+            self.assertEqual((loaded["inputs"],loaded["results"],loaded["modelRequests"]),
+                             (initial_native["inputs"],initial_native["results"],[]))
+            self.assertEqual(observed_start(),lease["started_at"])
+            updated = manage.request("PATCH",route_to_task,{"expected_revision":job["task"]["revision"],
+                "changes":{"instructions":"Export the already modified file and use the original W04 scope"}},guid())
+            self.assertEqual(updated["assignment_id"],assignment)
+            reported = wait_for(inspect,lambda row:row["task"]["state"]=="completed_reported")
+            submitted = self.read_native(native,"read")
+            self.assertEqual([row["name"] for row in submitted["calls"]],
+                ["worker_workspace_shell","worker_workspace_export","worker_report"])
+            self.assertEqual([row["isError"] for row in submitted["results"]],[False,False,True])
+            self.assertIn("fixture_cold_w04_reply_lost",encode(submitted["results"][-1]))
+            self.assertEqual({row["command"] for row in submitted["modelRequests"]},{"task_update"})
+            self.assertEqual(len(submitted["inputs"]),2)
+            latest = read_outbox(trial)
+            self.assertIsNone(latest[1])
+            check_workspace(callback,"inactive")
+            self.assertEqual(project_file(),b"modified result\n")
+            self.assertEqual(json.loads(journal.read_bytes())["phase"],"active")
+            artifact, = reported["last_report"]["artifact_ids"]
+            self.assertEqual(manage.request("GET","attachments/"+artifact)["bytes"],b"modified result\n")
+
+        trial_bytes = {name:hashlib.sha256((trial/name).read_bytes()).hexdigest() for name in ("worker.db","adapter.db")}
+        copy_pair(trial,recovered)
+        self.assertEqual(project_file(),b"modified result\n")
+        loss_count = len(w04_attempts)
+        self.assertGreaterEqual(loss_count,1)
+        lose_report.clear()
+        with station(recovered,"recover","cleanup-container-recovery-reopen") as (native,ops,callback):
+            status = connected(ops)
+            self.assertIsNone(status["held_assignment_id"])
+            check_workspace(callback,"released")
+            state = wait_for(lambda:json.loads(journal.read_bytes()),lambda row:row["phase"]=="sealed")
+            self.assertEqual(state["container_id"],lease["container_id"])
+            self.assertEqual(state["started_at"],lease["started_at"])
+            self.assertFalse(subprocess.check_output([*cli,"container","ls","--all","--filter",
+                "id="+lease["container_id"],"--format","{{.ID}}"],timeout=5).strip())
+            restored = self.read_native(native,"read")
+            for key in ("inputs","calls","results","turns"):
+                self.assertEqual(restored[key],submitted[key])
+            self.assertEqual(restored["modelRequests"],[])
+            body,receipt = read_outbox(recovered)
+            self.assertEqual(body,latest[0])
+            self.assertEqual(receipt,{"recorded":True,"release_assignment_id":assignment,"task_state":"completed_reported"})
+            self.assertEqual(inspect(),reported)
+            event, = manage.frames(0)
+            self.assertEqual(event["payload"]["attachment_ids"],[artifact])
+            self.assertEqual(event["payload"]["task_id"],task_id)
+            self.assertGreater(len(w04_attempts),loss_count)
+            self.assertTrue(all(attempt=={"key":"complete-"+assignment,"body":body} for attempt in w04_attempts))
+            self.assertEqual(source.read_bytes(),b"original project\n")
+        for folder,expected in ((before,original_bytes),(trial,trial_bytes)):
+            self.assertEqual({name:hashlib.sha256((folder/name).read_bytes()).hexdigest()
+                              for name in expected},expected)
+        self.assertEqual(len({entry["dsh_pid"] for entry in process_observations}),3)
+        if output := os.environ.get("MOWULINK_DSH_COLD_WORKSPACE_EVIDENCE"):
+            result = {"session":session,"task_id":task_id,"assignment_id":assignment,"container_id":lease["container_id"],
+                "container_start":lease["started_at"],"project_seed_sha256":seed,"artifact_id":artifact,
+                "native_inputs":restored["inputs"],"tools":[row["name"] for row in restored["calls"]],
+                "new_model_requests_after_release_replay":len(restored["modelRequests"]),
+                "w04_acknowledgements_lost":loss_count,"w04_replays":len(w04_attempts)-loss_count,
+                "w04_key":w04_attempts[0]["key"],"w04_receipt":receipt,"manager_notice":event["delivery_id"],
+                "container_after_w04":"removed","processes":process_observations,
+                "run_scope":"Same isolated Linux engine, actual DSH native persistence and independent TLS adapter/Worker processes; scripted test model, no production credentials."}
+            Path(output).write_text(json.dumps(result,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
 
     def test_native_dsh_stop_alone_or_unverified_tool_keeps_cleanup_pending(self):
         cases = []

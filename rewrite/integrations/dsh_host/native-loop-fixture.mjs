@@ -25,6 +25,10 @@ const isManaged = mode.startsWith('managed-sessions');
 const usesCleanup = mode.startsWith('cleanup-');
 const usesContainer = mode.startsWith('cleanup-container');
 const usesSeed = mode.startsWith('cleanup-container-seed');
+const workspaceRecovery = mode.startsWith('cleanup-container-recovery');
+const projectFixtureEdit = 'set -eu; test "$(cat project/hello.txt)" = "original project"; '+
+  'test ! -e project/.git; test "$(stat -c %a project/checks/fixture.sh)" = 700; '+
+  'sh project/checks/fixture.sh; printf "modified result\n" > project/hello.txt';
 const standalone = mode==='standalone-trainer-question';
 const foregroundRelay = mode.startsWith('foreground-relay');
 const usesForeground = foregroundRelay || mode==='foreground-question';
@@ -116,10 +120,7 @@ class LocalModel extends LlmAdapter {
     if (usesSeed && command==='task') {
       const attempt = this.submitted.get(message.id) ?? 0;
       const prefix = 'workspace-seed-'+payload.assignment_id+'-';
-      const command = 'set -eu; test "$(cat project/hello.txt)" = "original project"; '+
-        'test ! -e project/.git; test "$(stat -c %a project/checks/fixture.sh)" = 700; '+
-        'sh project/checks/fixture.sh; printf "modified result\n" > project/hello.txt';
-      const shell = ['worker_workspace_shell',{command}];
+      const shell = ['worker_workspace_shell',{command:projectFixtureEdit}];
       const invalid = mode==='cleanup-container-seed-invalid';
       const loss = payload.instructions==='lose seed acknowledgement';
       const restart = mode==='cleanup-container-seed-restart';
@@ -141,6 +142,27 @@ class LocalModel extends LlmAdapter {
           summary:'DSH isolated project result',artifact_ids:JSON.parse(exported.content[0].text).artifact_ids};
         yield {type:'block-start',index:0,blockType:'tool-call'};
         yield {type:'block-end',index:0,block:{type:'tool-call',id:prefix+attempt,name,arguments:JSON.stringify(args)}};
+        yield {type:'finish',reason:{kind:'tool-calls'}};
+        return;
+      }
+    }
+    if (workspaceRecovery && ['task','task_update'].includes(command)) {
+      const attempt = this.submitted.get(message.id) ?? 0;
+      const id = 'cold-workspace-'+command+'-'+attempt;
+      if (command==='task' && attempt===0 || command==='task_update' && attempt<2) {
+        this.submitted.set(message.id,attempt+1);
+        const name = command==='task' ? 'worker_workspace_shell' : attempt===0 ? 'worker_workspace_export' : 'worker_report';
+        assert.ok(tools.some(tool=>tool.name===name));
+        const exported = messages.findLast(entry=>entry.toolCallId==='cold-workspace-task_update-0');
+        const args = {
+          worker_workspace_shell:()=>({command:projectFixtureEdit}),
+          worker_workspace_export:()=>({path:'project/hello.txt'}),
+          worker_report:()=>({task_id:payload.task_id,assignment_id:payload.assignment_id,
+            summary:'DSH project result after local cold recovery',
+            artifact_ids:JSON.parse(exported.content[0].text).artifact_ids}),
+        }[name]();
+        yield {type:'block-start',index:0,blockType:'tool-call'};
+        yield {type:'block-end',index:0,block:{type:'tool-call',id,name,arguments:JSON.stringify(args)}};
         yield {type:'finish',reason:{kind:'tool-calls'}};
         return;
       }
@@ -355,7 +377,7 @@ class LocalModel extends LlmAdapter {
           yield {type:'finish',reason:{kind:'tool-calls'}};
           return;
         }
-      } else if (!usesSeed && !['work-question','formal-goal','admission-race','material','cleanup-container-export'].includes(mode)) {
+      } else if (!usesSeed && !workspaceRecovery && !['work-question','formal-goal','admission-race','material','cleanup-container-export'].includes(mode)) {
         await waitForStop(signal);
       }
     }
@@ -458,7 +480,7 @@ async function setup() {
   const agentOptions = {provider:'fixture',model:'local'};
   const registry = ctx.get('agents');
   if (!['cold-resume-reopen','managed-sessions-reopen'].includes(mode)) {
-    originalHandle = ['command-approvals-reopen','foreground-relay-reopen'].includes(mode)
+    originalHandle = ['command-approvals-reopen','foreground-relay-reopen','cleanup-container-recovery-reopen'].includes(mode)
       ? await registry.resume({resumeSessionId:session,agentOptions})
       : await registry.create({sessionId:session,agentOptions,...(isManaged ? {meta:{cwd:directory}} : {})});
   }
