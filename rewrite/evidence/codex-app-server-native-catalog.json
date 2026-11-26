@@ -1,0 +1,30 @@
+{
+  "thread_id": "01a216ec-4e99-75f0-8db9-f50f6205673b",
+  "visible_entries": [
+    {
+      "id": "01a216ec-4eb6-7222-90b8-50399e311ade",
+      "title": "Cold fixture"
+    },
+    {
+      "id": "01a216ec-4e99-75f0-8db9-f50f6205673b",
+      "title": "Bound demo"
+    }
+  ],
+  "cold_before": "notLoaded",
+  "cold_after": "notLoaded",
+  "out_of_scope_ids": [
+    "01a216ec-4ec7-7e31-9766-080ad1c805d0",
+    "01a216ec-4eda-74a3-a1fd-797bff0e17ca"
+  ],
+  "additional_model_requests": 0,
+  "replayed_catalog_receipt": {
+    "command": "/resume",
+    "message_id": "search_native_catalog",
+    "output": {
+      "event_id": "command-search_native_catalog",
+      "seq": 3
+    }
+  },
+  "boundary": "Actual App Server, fresh profile and native history. Fixture model seeds catalog and platform is isolated.",
+  "consecutive_runs": 12
+}

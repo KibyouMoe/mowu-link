@@ -82,6 +82,8 @@ def reply(service, name, args, hold):
             return "当前绑定会话待确认。"
         if not args or args==[session] or args==["1"] and not service.host_session_catalog:
             return "当前绑定会话\n1. "+session
+        if name in ("/resume","/switch") and service.host_session_catalog:
+            return "切换会话敬请期待。"
         return "历史会话切换和搜索：敬请期待。"
     if name in PLANNED:
         return f"{name} 敬请期待。"
@@ -122,6 +124,8 @@ def catalog_answer(adapter,session,query,page):
     items,unavailable = result.get("items"),result.get("unavailable")
     require(isinstance(items,list) and len(items)<=200 and type(unavailable) is int and 0<=unavailable<=200,
             502,"invalid_session_catalog")
+    more = result.get("more",False)
+    require(type(more) is bool,502,"invalid_session_catalog")
     entries = []
     seen = set()
     for row in items:
@@ -147,6 +151,8 @@ def catalog_answer(adapter,session,query,page):
         lines.append(f"{index}. {title or '未命名会话'}{marker}\n{sid}")
     if unavailable:
         lines.append(f"{unavailable} 个会话的记录暂不可读。")
+    if more:
+        lines.append("检索范围限宿主返回的前 200 个会话。")
     lines.append("切换会话敬请期待。")
     return "\n".join(lines),page
 

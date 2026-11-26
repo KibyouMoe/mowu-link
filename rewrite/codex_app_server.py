@@ -1,9 +1,11 @@
 """Text delivery and formal tool callbacks for one dedicated Codex App Server thread."""
 from contextlib import contextmanager
 import hashlib
+from pathlib import Path
 from queue import Empty
 from threading import Event, RLock, Thread
 import time
+import unicodedata
 
 from .agent_tools import TOOLSET
 from .codex_rpc import NativeRpcRejected
@@ -43,7 +45,34 @@ class AppServerHost:
 
     def capabilities(self,session):
         require(session==self.thread_id,409,"wrong_native_session")
-        return {"stop_private":True}
+        return {"stop_private":True,"session_catalog":True}
+
+    def session_catalog(self,session):
+        thread = self.thread(session,include_turns=False)
+        workspace = Path(string(thread,"cwd")).resolve()
+        page = self.request("thread/list",{"cwd":str(workspace),"limit":200,"archived":False,
+                                           "currentAccountOnly":True,"useStateDbOnly":True})
+        rows,cursor = page.get("data"),page.get("nextCursor")
+        require(isinstance(rows,list) and len(rows)<=200 and (cursor is None or isinstance(cursor,str)),
+                502,"invalid_native_session_catalog")
+        entries = []
+        unavailable = 0
+        seen = set()
+        for row in rows:
+            if not isinstance(row,dict):
+                unavailable += 1
+                continue
+            sid,cwd = row.get("id"),row.get("cwd")
+            title = row.get("name") or ""
+            if (not isinstance(sid,str) or not 0<len(sid)<=200 or not sid.isprintable() or sid in seen
+                    or not isinstance(cwd,str) or not Path(cwd).is_absolute() or Path(cwd).resolve()!=workspace
+                    or not isinstance(title,str) or len(title)>160
+                    or any(unicodedata.category(ch) in ("Cc","Cs","Zl","Zp") for ch in title)):
+                unavailable += 1
+                continue
+            seen.add(sid)
+            entries.append({"id":sid,"title":title})
+        return {"session":session,"items":entries,"unavailable":unavailable,"more":bool(cursor)}
 
     def stop_bound_private(self,session,private_input):
         with self.write_lock:

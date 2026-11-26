@@ -4,6 +4,8 @@
 
 ## 检查点与证据
 
+隔离 Codex `/resume` 已用原生索引完成目录和搜索。冷开后只恢复绑定线程，查询可见同目录的另一会话，归档会话和其他目录都不显示。历史会话查询前后未加载，无新增模型请求或工单，原会话仍绑定，选择编号明确提示换绑未接。连续 12 次通过。复跑 `python3 -m unittest -v rewrite.test_codex_app_server.CodexAppServer.test_resume_catalog_uses_only_current_app_server_workspace_without_loading_history`。[原生目录记录](evidence/codex-app-server-native-catalog.json)。
+
 隔离 App Server 的 `/queue` 已接通。Worker 观察为空闲后宿主突然开始普通对话，原生写前明确拒绝队首投递，另两个消息仍排队。空闲后成功写入，故意丢回执则查原输入。两个排队消息按顺序各进一次新回合，原普通回合也只有一条输入。连续 16 次通过。复跑 `python3 -m unittest -v rewrite.test_codex_app_server.CodexAppServer.test_app_server_next_turn_queue_never_steers_busy_turn_or_replays_lost_ack`。[原生队列记录](evidence/codex-app-server-native-queue.json)。平台与模型为夹具。
 
 Linux arm64 已复验 `827eedcc65273a0897b7e697e9a4a9582a498135`，通过 135 项，47 项依赖本机 Codex 或 DSH 跳过，校验 147 个发行文件。独立系统上的隔离 TLS 只留一条正式成果通知，身份和证书反例通过，宿主为夹具。

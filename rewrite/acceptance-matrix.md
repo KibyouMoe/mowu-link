@@ -60,7 +60,7 @@
 | `bridge_verify_native_write_path` | 原派发或消息号、正文摘要、原生输入及回合 | 真实独立 Desktop 已核文字收件及重投去重。无人值守入口、图文与实际授权待验。 |
 | `bridge_start_local_manager` | Router、Worker、宿主适配器独立入口 | 临时进程与分步升级已跑。独立 App Server 工位初始化能冷开查回唯一输入，适配器已用 TLS 与专用 profile 启动，拒绝第二个写者。现役 Desktop 受信启动链仍待单验。 |
 | `bridge_reload_business_modules` | 锁定提交的发布包、分步升级与原快照回退 | 已演练冷切，原收件无重复。原位热加载及现役启停授权尚未核。 |
-| `bridge_message` | 平台私聊入口与宿主斜杠命令 | DSH 文图、已接命令与原队列有实测。Codex 支持过的选择会话、图文、原生插话需逐项回归。 |
+| `bridge_message` | 平台私聊入口与宿主斜杠命令 | DSH 文图、已接命令与原队列有实测。独立 Codex App Server 的目录查询、图文、排队和普通回合中止已核。换绑、原生插话与真实 Feishu 仍待验。 |
 | `bridge_send_image` | 已授权的宿主图片事件，经 Worker 转送 | 真实 DSH 图像摘要及隔离平台顺序已核。需要独立飞书云端与 Codex 输出记录。 |
 | `bridge_publish_question` | 原生问题适配、Worker 题卡、平台回调 | DSH 计时题恢复有实测。Codex 原生题窗同步、主动独立题卡须分别核。 |
 | `bridge_register_current_task` | W03 接管及独立原生收件 | 原派发会话已固定，错绑零投递。实际 DSH 原生目标试跑通过，Codex 工单目标链待验。 |

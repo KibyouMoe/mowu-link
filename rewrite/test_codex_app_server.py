@@ -278,6 +278,76 @@ class CodexAppServer(unittest.TestCase):
         self.assertIsNone(loop.hermes.inspect(tid)["last_report"])
         return loop,host,frame,proof,pending_call
 
+    def test_resume_catalog_uses_only_current_app_server_workspace_without_loading_history(self):
+        root = Path(self.root)
+        work,elsewhere = root/"approved",root/"other"
+        work.mkdir()
+        elsewhere.mkdir()
+
+        def create(rpc,folder,title):
+            sid = rpc.request("thread/start",{"cwd":str(folder),"ephemeral":False})["thread"]["id"]
+            rpc.request("turn/start",{"threadId":sid,"input":[{"type":"text","text":"Local catalog fixture",
+                                                             "text_elements":[]}]})
+            until = time.monotonic()+12
+            while True:
+                event = rpc.event(until)
+                if event["method"]=="turn/completed" and event["params"]["threadId"]==sid:
+                    self.assertEqual(event["params"]["turn"]["status"],"completed")
+                    break
+            rpc.request("thread/name/set",{"threadId":sid,"name":title})
+            return sid
+
+        with isolated_app_server(self.root,self.origin) as setup:
+            sid = create(setup,work,"Bound demo")
+            cold = create(setup,work,"Cold fixture")
+            archived = create(setup,work,"Archived hidden")
+            other = create(setup,elsewhere,"Other workspace hidden")
+            setup.request("thread/archive",{"threadId":archived})
+        self.assertEqual(len(self.provider.observed),4)
+
+        rpc = self.enterContext(isolated_app_server(self.root,self.origin))
+        self.assertEqual(rpc.request("thread/resume",{"threadId":sid,"cwd":str(work)})["thread"]["id"],sid)
+        host = AppServerHost(rpc,sid)
+        host.session = sid
+        loop = self.enterContext(Loop.isolated(host_factory=lambda _path,_name:host))
+        service = WorkerService(loop.worker)
+        token = guid()
+        url = self.enterContext(running(service.listen({token:"platform/oguri"},("127.0.0.1",0),None)))
+        platform = Client(url,token)
+        service.step()
+
+        def render(mid,text):
+            entry = platform.request("POST","worker/command",{"message_id":mid,"text":text})["receipt"]
+            card = next(row["event"]["text"] for row in platform.request("GET","worker/display")["items"]
+                        if row["seq"]==entry["output"]["seq"])
+            return entry,card
+
+        prior = rpc.request("thread/read",{"threadId":cold,"includeTurns":False})["thread"]["status"]["type"]
+        self.assertEqual(prior,"notLoaded")
+        entries = host.session_catalog(sid)["items"]
+        self.assertEqual({(row["id"],row["title"]) for row in entries},
+                         {(sid,"Bound demo"),(cold,"Cold fixture")},entries)
+        _,shown = render("list_native_catalog","/resume")
+        self.assertIn("Bound demo（当前绑定）",shown)
+        self.assertIn(cold,shown)
+        self.assertNotIn(archived,shown)
+        self.assertNotIn(other,shown)
+        found,search = render("search_native_catalog","/resume search Cold fixture")
+        self.assertIn(cold,search)
+        self.assertNotIn(sid,search)
+        self.assertEqual(render("search_native_catalog","/resume search Cold fixture")[0],found)
+        self.assertIn("切换会话敬请期待",render("pick_native_catalog","/resume 1")[1])
+        self.assertEqual(loop.adapter.bound_session(),sid)
+        after = rpc.request("thread/read",{"threadId":cold,"includeTurns":False})["thread"]["status"]["type"]
+        self.assertEqual(after,prior)
+        self.assertEqual(len(host.thread(sid,include_turns=True)["turns"]),1)
+        self.assertEqual(len(self.provider.observed),4)
+        self.assertFalse(loop.hermes.tasks()["items"])
+        self.evidence = {"thread_id":sid,"visible_entries":entries,"cold_before":prior,"cold_after":after,
+                         "out_of_scope_ids":[archived,other],"additional_model_requests":0,
+                         "replayed_catalog_receipt":found,
+                         "boundary":"Actual App Server, fresh profile and native history. Fixture model seeds catalog and platform is isolated."}
+
     def test_native_app_server_reconnect_recovers_input_before_w04_without_new_model_call(self):
         with isolated_app_server(self.root,self.origin) as rpc:
             loop,host,frame,original,pending_call = self.pending_native_task(rpc)
