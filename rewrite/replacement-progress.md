@@ -6,6 +6,8 @@
 
 离线换绑会核对 Codex 适配器已收到的原生审批。隔离实测，原生文件审批已到、Router 尚未收到登记时，适配器持久保存待核记录。重开账本仍拒绝生成换绑副本。Router 已关闭但回执丢失时记录继续待核，按原号查回才消除。独立 App Server、Worker 和 Router 实跑，模型与断联由本地测试驱动。快照换绑的夹具复验另查了输出中无命令目录。复跑 `python3 -B -m unittest -v rewrite.test_state_bundle.Bundle.test_handoff_refuses_codex_approval_never_registered_with_router rewrite.test_codex_app_server.CodexAppServer.test_native_approval_deadline_survives_lost_intake_and_late_router_accept`。[断联证据](evidence/codex-approval-router-outage.json)
 
+两项连续通过 5 轮。macOS 全量通过 262 项，Linux arm64 通过 178 项、跳过 84 项。以 `79623b2bb412ffa5f9dc80901707e39a201ef68d` 构建的独立包包含 234 份文件，SHA-256 为 `1eaf80916d55246b3be409c4c1d69a83a5ad1698aeab5348f8e91ec175b2a245`。安装目录复跑快照、发布包和 Codex 断联审批共 17 项，文件摘要一致。以 `a2cc41fbfe65e0cdf1a98c13bbbcdbbdc826987c` 为旧版，在真实独立 Codex App Server 演练混合版本、升级与回退，各保留三条输入，新增为零，待验通知 `e794961d-f566-47fe-a710-854fc6b94211` 原号不变，旧快照摘要一致。使用本地脚本模型，审批转接专项另测。复跑 `python3 -B -m rewrite.codex_release_check`，指定上述新旧提交与本机 App Server 二进制路径。
+
 DSH 的普通 Bash 审批支持省略 `workdir` 和相对目录。旧版 `b88116e7cfd68765f41ecf098c1724ed43a1af35` 的同一默认目录请求在六秒内未到 Router。新版按同一次原生准备、审批与执行定位，保存原参数与宿主解析的绝对目录。连续六轮核实默认、相对和带符号链接父级的真实 `pwd` 输出。等批准期间换目录，原生拒绝执行。审批已允许但进执行前换目录，原生回合留下一次工具错误，未启动 Bash。将目录绑定到本次调用后，再改会话目录时实际命令仍在获准目录内。无法核实的目录仍走宿主审批。实跑 DSH AgentLoop、ApprovalService 与 Bash，模型、审批人与目录竞态由隔离测试提供。[原生证据](evidence/dsh-approval-native-working-directory.json) · [复跑](README.md#独立宿主命令审批)
 
 macOS 全量通过 261 项，Linux arm64 通过 177 项、跳过 84 项。以 `1d8cce41f11be4b64af26d7dfc258ab716ffd5ce` 构建 234 文件独立包，SHA-256 为 `ad53a5c92485c8eff4d4383e2ccc5c33f4d89559c82ee74e78e42d49a1e3fd96`。安装目录复跑 DSH 原生审批、断联恢复、Router 服务与发布包共 15 项，逐文件摘要一致。
