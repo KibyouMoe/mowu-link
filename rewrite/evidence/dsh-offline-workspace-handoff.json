@@ -1,46 +1,51 @@
 {
-  "session": "dsh-offline-workspace-handoff",
-  "task_id": "2fe01514-08c6-44f4-833a-c517acde3a0e",
-  "assignment_id": "d6519ea3-651f-4f90-959b-30a5cda60f38",
-  "container_id": "d6cdef0f13b8963bd34f91623720c223d918ae1a1cf1be7e3f515b9a6a843773",
-  "w04_state_before_capture": "completed_reported",
-  "snapshot_format": 3,
-  "snapshot_sha256": "59d0c625997b09217e8d4721e7d063c0aa7a1a1936e1d8006c204c961e657ced",
-  "missing_journal": "dsh_workspace_journal_required",
-  "wrong_runtime": "dsh_workspace_journal_mismatch",
   "active_journal": {
-    "fingerprint": "2097c916512ed0ef804e8af35b91e8f44deddf05cf01568f5e1a28d174917151",
+    "fingerprint": "a57ba9a0862289a560d858fe39019d7dc5364303710344800add1d0be81bd212",
     "pending": [
       {
+        "assignment_id": "ac54ffdd-7439-44cd-a34b-c5a651b820a6",
+        "phase": "active",
         "session": "dsh-offline-workspace-handoff",
-        "task_id": "2fe01514-08c6-44f4-833a-c517acde3a0e",
-        "assignment_id": "d6519ea3-651f-4f90-959b-30a5cda60f38",
-        "phase": "active"
+        "task_id": "3e6667b4-416b-4aed-89a5-5659814a224a"
       }
     ]
   },
+  "assignment_id": "ac54ffdd-7439-44cd-a34b-c5a651b820a6",
+  "container_id": "bcd1d36e8bd8c3bb393285b8bf41680b0d90dc7b0cfb4a1dfbc8f521c21a22f0",
+  "held_before_reaper": 0,
   "invalid_record": "dsh_workspace_journal_unconfirmed",
+  "missing_journal": "dsh_workspace_journal_required",
+  "new_model_requests_after_reopen": 0,
+  "original_inputs": [
+    "mowulink-024f255333665aa5251b4d41854d86170540b4d1aa7918c1213edd3c863792c8"
+  ],
+  "previous_release": {
+    "native_input": "mowulink-4efac3a97e98330bf38f6a011c01b84f176f1826c67eea45e8c29360e130bb19",
+    "native_replays_of_formal_order": 0,
+    "native_session": "dsh-offline-workspace-handoff",
+    "outbound_notice": "ff42f268-efb6-4670-a40f-29a7707e88b1",
+    "previous_artifact_id": "208025f2-932e-442c-8300-b65f4aaa991a",
+    "previous_processes": [
+      "Router",
+      "Worker",
+      "DSH adapter",
+      "DSH host"
+    ],
+    "private_message": "17a9ed26-83c7-41b3-8724-2ef5e05d789f"
+  },
+  "receipt_pending_before_reaper": 0,
   "running_host": "dsh_workspace_host_still_running",
+  "scope": "Installed DSH AgentLoop, isolated Linux Docker and Router/Worker HTTP; scripted local model.",
   "sealed_journal": {
-    "fingerprint": "479b896048bddb7097b3e4da8587c1883cda7232b8c8236826a95d8702e2f2fa",
+    "fingerprint": "84fe5f58307c0ef7a0f60a57124902a061596edc304b7b4151627958705f701b",
     "pending": []
   },
+  "session": "dsh-offline-workspace-handoff",
+  "snapshot_format": 3,
+  "snapshot_sha256": "39504161d5e1d1c0ca1a8b8dadf35b936e442db2607ee4c379fd1dd631c39cce",
   "staged_session": "other-session",
-  "receipt_pending_before_reaper": 0,
-  "held_before_reaper": 0,
-  "original_inputs": [
-    "mowulink-02827e2f0c6aa51210f53123e1c9fee76d3d4d96a490545063d9ab9d94a79cad"
-  ],
-  "new_model_requests_after_reopen": 0,
+  "task_id": "3e6667b4-416b-4aed-89a5-5659814a224a",
   "version_rollback": {
-    "database_restore_allowed_with_live_workspace": true,
-    "refusals": [
-      "dsh_workspace_journal_required",
-      "dsh_workspace_journal_mismatch",
-      "dsh_assignment_workspace_pending",
-      "dsh_workspace_host_still_running"
-    ],
-    "snapshot_sha256_after_drain": "59d0c625997b09217e8d4721e7d063c0aa7a1a1936e1d8006c204c961e657ced",
     "components": [
       "agent:oguri",
       "hermes:main",
@@ -48,7 +53,25 @@
       "trigger:offline",
       "worker:oguri"
     ],
-    "retained_session": "dsh-offline-workspace-handoff"
+    "database_restore_allowed_with_live_workspace": true,
+    "refusals": [
+      "dsh_workspace_journal_required",
+      "dsh_workspace_journal_mismatch",
+      "dsh_assignment_workspace_pending",
+      "dsh_workspace_host_still_running"
+    ],
+    "retained_session": "dsh-offline-workspace-handoff",
+    "snapshot_sha256_after_drain": "39504161d5e1d1c0ca1a8b8dadf35b936e442db2607ee4c379fd1dd631c39cce"
   },
-  "scope": "Installed DSH AgentLoop, isolated Linux Docker and Router/Worker HTTP; scripted local model."
+  "w04_state_before_capture": "completed_reported",
+  "wrong_runtime": "dsh_workspace_journal_mismatch",
+  "release": {
+    "network": "isolated HTTPS loopback",
+    "new_revision": "4159eed4b66eb0fcbf18a2c215608e458924d493",
+    "package_sha256": [
+      "c12d03ac244b49a0ed5140af793fea70daaa9abf0a8136145ed90ad751e03a09",
+      "c2a0121747394a4f62e4dedd79b2913158704faca766ff6c013293130b4928ba"
+    ],
+    "previous_revision": "a469849b7815aaaf9eb6e9be504afac3c2ae4e4b"
+  }
 }
