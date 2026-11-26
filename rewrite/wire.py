@@ -3,7 +3,7 @@ import json
 import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 from urllib.request import ProxyHandler, Request, build_opener
 
 from . import delivery
@@ -12,8 +12,16 @@ from .storage import Fault, encode, require
 
 
 def route(orders, actor, method, path, body, headers):
-    parts = path.removeprefix("/v1/").split("/")
+    url = urlsplit(path)
+    parts = url.path.removeprefix("/v1/").split("/")
     require(path.startswith("/v1/"), 404, "unknown_route")
+    if method == "GET" and parts in (["tasks"], ["workers"]):
+        require(actor == "hermes", 403, "forbidden")
+        query = parse_qs(url.query, keep_blank_values=True)
+        require(all(len(v) == 1 for v in query.values()), 422, "duplicate_filter")
+        with orders.db.transaction() as db:
+            page = orders.list_records(db, parts[0], {k: v[0] for k, v in query.items()})
+        return 200, "application/json", page
     if method == "GET" and parts == ["deliveries", "stream"]:
         cursor = headers.get("Last-Event-ID", "0")
         require(re.fullmatch(r"[0-9]{1,15}", cursor), 422, "invalid_cursor")
@@ -42,7 +50,10 @@ def route(orders, actor, method, path, body, headers):
             execute = lambda db: orders.create(db, body)
         case "POST", ["tasks", tid, "actions"]:
             require(actor == "hermes", 403, "forbidden")
-            execute = lambda db: orders.close(db, tid, body)
+            execute = lambda db: orders.act(db, tid, body)
+        case "PATCH", ["tasks", tid]:
+            require(actor == "hermes", 403, "forbidden")
+            execute = lambda db: orders.update(db, tid, body)
         case "PUT", ["workers", wid, op] if op in ("session", "presence"):
             require(actor == worker_actor(wid), 403, "forbidden")
             handler = orders.session if op == "session" else orders.presence
@@ -91,7 +102,7 @@ def serve_loopback(orders, identities):
             self.end_headers()
             self.wfile.write(raw)
 
-        do_GET = do_POST = do_PUT = handle_request
+        do_GET = do_POST = do_PUT = do_PATCH = handle_request
 
     return ThreadingHTTPServer(("127.0.0.1", 0), Handler)
 

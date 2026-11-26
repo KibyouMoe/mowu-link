@@ -86,6 +86,11 @@ class Worker:
             if frame["kind"] == "worker.status_query":
                 self.observe(payload["query_id"])
                 return True
+            if frame["kind"] == "task.updated":
+                held = self.hold()
+                if (held["held_task_id"], held["held_assignment_id"]) != (payload["task_id"], payload["assignment_id"]):
+                    return True
+                return self.adapter.deliver(frame["delivery_id"], {"kind": "task_update", **payload}) is not None
             require(frame["kind"] == "task.dispatch", 422, "unsupported_delivery")
             return self.take(frame)
 
@@ -159,7 +164,7 @@ class Worker:
     def report(self, native_id, task_id, assignment_id, summary):
         with self.lock:
             origin = self.adapter.origin(native_id)
-            require(origin["kind"] == "task" and origin["task_id"] == task_id
+            require(origin["kind"] in ("task", "task_update") and origin["task_id"] == task_id
                     and origin["assignment_id"] == assignment_id, 403, "wrong_report_origin")
             body = {"session_id": self.session, "assignment_id": assignment_id,
                     "outcome": "completed", "summary": summary}

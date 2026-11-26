@@ -1,5 +1,6 @@
 """Router's sole writer for work orders, assignments and formal reports."""
 import json
+import re
 import time
 
 from . import delivery
@@ -92,7 +93,7 @@ class Orders:
         if db.execute("SELECT 1 FROM tasks WHERE assignee_id=? AND assignment_id IS NOT NULL",
                       (worker_id,)).fetchone():
             return
-        waiting = db.execute("SELECT task_id FROM tasks WHERE assignee_id=? AND state='ready' LIMIT 1",
+        waiting = db.execute("SELECT task_id FROM tasks WHERE assignee_id=? AND state='ready' ORDER BY rowid LIMIT 1",
                              (worker_id,)).fetchone()
         if not waiting:
             return
@@ -112,6 +113,66 @@ class Orders:
         if worker:
             self.dispatch(db, worker)
         return task(db, tid)
+
+    def list_records(self, db, table, filters):
+        allowed = {"workers": {"online", "worker_id"}, "tasks": {"assignee_id", "state", "pool", "unassigned"}}
+        require(table in allowed and set(filters) <= allowed[table] | {"limit", "cursor"}, 422, "invalid_filter")
+        cursor, limit = filters.get("cursor", "0"), filters.get("limit", "50")
+        require(re.fullmatch(r"[0-9]{1,18}", cursor) and re.fullmatch(r"[0-9]{1,3}", limit)
+                and 1 <= int(limit) <= 200, 422, "invalid_pagination")
+        clauses, args = ["rowid > ?"], [int(cursor)]
+        for field, value in filters.items():
+            if field in ("assignee_id", "state", "worker_id"):
+                clauses.append(field + " = ?")
+                args.append(value)
+            elif field == "pool":
+                require(value == "blocked", 422, "invalid_pool")
+                clauses.append("state IN ('blocked', 'snoozed')")
+            elif field in ("unassigned", "online"):
+                require(value in ("true", "false"), 422, "invalid_filter")
+                if field == "unassigned":
+                    clauses.append("(assignee_id IS NULL) = ?")
+                else:
+                    clauses.append("(last_seen > ?) = ?")
+                    args.append(self.clock() - self.lease_seconds)
+                args.append(int(value == "true"))
+        query = f"SELECT rowid AS cursor_id,* FROM {table} WHERE " + " AND ".join(clauses)
+        rows = db.execute(query + " ORDER BY rowid LIMIT ?", [*args, int(limit) + 1]).fetchall()
+        page = rows[:int(limit)]
+        if table == "tasks":
+            items = [task(db, row["task_id"]) for row in page]
+        else:
+            items = [{"worker_id": r["worker_id"], "online": self.clock() - r["last_seen"] < self.lease_seconds,
+                      "busy": bool(r["busy"]), "held_task_id": r["held_task_id"],
+                      "held_assignment_id": r["held_assignment_id"], "last_seen_at": timestamp(r["last_seen"])}
+                     for r in page]
+        return {"items": items, "next_cursor": str(page[-1]["cursor_id"]) if len(rows) > len(page) else None}
+
+    def update(self, db, tid, data):
+        current = self.revision(db, tid, data)
+        changes = data.get("changes")
+        require(isinstance(changes, dict) and changes and set(changes) <= {"title", "instructions"},
+                422, "invalid_changes")
+        require(current["state"] not in ("closed", "cancelled", "failed_archived"), 409, "task_archived")
+        for name in changes:
+            string(changes, name)
+        db.execute("UPDATE tasks SET title=?,instructions=?,revision=revision+1 WHERE task_id=?",
+                   (changes.get("title", current["title"]), changes.get("instructions", current["instructions"]), tid))
+        if current["state"] == "working":
+            delivery.enqueue(db, worker_actor(current["assignee_id"]), "task.updated",
+                             {"task_id": tid, "assignment_id": current["assignment_id"],
+                              "revision": current["revision"] + 1, "changes": changes})
+        elif current["assignment_id"]:
+            # An outstanding offer carries the old instructions. Fence it before issuing the replacement.
+            db.execute("UPDATE tasks SET assignment_id=NULL WHERE task_id=?", (tid,))
+            self.dispatch(db, current["assignee_id"])
+        return task(db, tid)
+
+    def revision(self, db, tid, data):
+        current = task(db, tid)
+        require(type(data.get("expected_revision")) is int
+                and current["revision"] == data["expected_revision"], 409, "revision_conflict")
+        return current
 
     def session(self, db, worker, data):
         sid = string(data, "session_id")
@@ -208,10 +269,18 @@ class Orders:
         return {"task": current, "delivery_state": state, "last_report": dict(report) if report else None,
                 "pending_cleanup": []}
 
-    def close(self, db, tid, data):
+    def act(self, db, tid, data):
+        current = self.revision(db, tid, data)
+        if data.get("action") == "assign":
+            worker = string(data, "worker_id")
+            require(current["state"] == "ready" and current["assignee_id"] in (None, worker),
+                    409, "transfer_required")
+            if current["assignee_id"] != worker:
+                db.execute("UPDATE tasks SET assignee_id=?,revision=revision+1 WHERE task_id=?", (worker, tid))
+            self.dispatch(db, worker)
+            details = self.details(db, tid)
+            return {"task": details["task"], "delivery_state": details["delivery_state"]}
         require(data.get("action") == "close", 422, "unsupported_action")
-        current = task(db, tid)
-        require(current["revision"] == data.get("expected_revision"), 409, "revision_conflict")
         require(current["state"] == "completed_reported", 409, "not_reported")
         db.execute("UPDATE tasks SET state='closed',revision=revision+1 WHERE task_id=?", (tid,))
         return {"task": task(db, tid), "delivery_state": "received"}

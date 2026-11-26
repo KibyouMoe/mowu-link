@@ -1,6 +1,7 @@
 """Manager-side adapter. Report arrival queues a Notify; only the manager can approve."""
 import json
 import time
+from urllib.parse import urlencode
 
 from .storage import Database, encode, require
 
@@ -22,9 +23,22 @@ class HermesAdapter:
     def inspect(self, task_id):
         return self.router.request("GET", f"tasks/{task_id}")
 
-    def approve(self, key, task_id, revision):
+    def workers(self, **filters):
+        return self.router.request("GET", "workers?" + urlencode(filters))
+
+    def tasks(self, **filters):
+        return self.router.request("GET", "tasks?" + urlencode(filters))
+
+    def update(self, key, task_id, revision, changes):
+        return self.router.request("PATCH", f"tasks/{task_id}", {"expected_revision": revision,
+                                  "changes": changes}, key)
+
+    def act(self, key, task_id, revision, action, **params):
         return self.router.request("POST", f"tasks/{task_id}/actions",
-                                   {"action": "close", "expected_revision": revision}, key)
+                                   {**params, "action": action, "expected_revision": revision}, key)
+
+    def approve(self, key, task_id, revision):
+        return self.act(key, task_id, revision, "close")
 
     def activity(self, busy):
         if busy:
