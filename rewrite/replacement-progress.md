@@ -6,6 +6,8 @@
 
 飞书图片资源上传与会话展示分开确认。上传开始前保存原图摘要和退避时间，快照恢复后沿用同一等待进度。平台替身连续两次存图但丢编号，之后会话仍只有图前卡、单图、图后卡各一条。待核上传从 1 变 0。三次调用上传了相同原始字节，平台可能留下两份未引用资源。隔离 Worker HTTP 与 SQLite 实跑，飞书、宿主和时钟用夹具。该场景连续通过 10 轮。[实测](evidence/feishu-image-upload-restore.json) · [恢复与复跑](router-rehearsal.md#飞书输出回执与换绑)
 
+macOS 全量通过 249 项。Linux arm64 通过 169 项、跳过 80 项。从 `61b3c6a98202074a6f90f68e047e2646ff1b1536` 构建 223 文件独立包，SHA-256 为 `ff30560ab7239f2286a529c60ad8962fd9651853eece061a74b739bf4e65df9a`。安装目录通过 `python3 -B -m unittest -q rewrite.test_feishu_output rewrite.test_feishu_inbound rewrite.test_question_cards rewrite.test_state_bundle` 的 31 项，文件摘要一致。另查到飞书 SDK 1.7.5 的长连接地址发现请求未传超时，现有 TCP 断连复验未覆盖 HTTP 连接仍开着而一直没有响应的情形，待做隔离复现。[SDK 地址发现实现](https://github.com/larksuite/oapi-sdk-python/blob/v1.7.5/lark_oapi/ws/client.py#L261-L265)
+
 飞书输出的原请求和平台消息号分阶段落盘。隔离恢复改显示名后，丢回执的发卡沿用同一正文和幂等号，找回同一张卡。飞书已回消息号而 Worker 菜单确认丢失时，模拟一小时后恢复只补录原消息号，无新平台请求。同一私聊仍只进宿主一次。旧版未留原请求的未知卡和已超时的未知创建仍待核。实际 Worker HTTP 与 SQLite，飞书和宿主用夹具。[实测](evidence/feishu-receipt-restore.json) · [恢复步骤](router-rehearsal.md#飞书输出回执与换绑)
 
 回执恢复场景连过 10 轮。macOS 全量通过 248 项，Linux arm64 通过 168 项、跳过 80 项。从 `9c896b80675a84cf6ec12c95caf70c56978748d0` 构建 222 文件安装包，SHA-256 为 `c17f3e7d5328d241a0571b30c89c686e6b045c61336984c15d6b4d95b3ba3e2f`。安装目录复验 32 项，覆盖飞书收发、问题卡、组件快照以及两种菜单回执丢失，文件摘要一致。`/resume` 和 `/model` 各核发卡一次，仍要求原菜单绑定确认后才接受编号。
