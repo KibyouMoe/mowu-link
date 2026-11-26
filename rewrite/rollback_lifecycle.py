@@ -63,6 +63,11 @@ def utc_time(value):
     raise ValueError("invalid timestamp in the reviewed pool history")
 
 
+def clock_precision(instant):
+    # The Router computes the deadline as a float, then serializes microseconds.
+    return timedelta(microseconds=1+math.ceil(math.ulp(instant.timestamp())*1_000_000))
+
+
 def pool_actions(db):
     actions = {"snooze":{},"resume":{}}
     for request,reply in db.execute("""SELECT request,response FROM operations
@@ -82,6 +87,7 @@ def retain_snoozes(pool, tid, revision, actions):
     # The rolled back copy contains ISO microsecond receipts, rather than the
     # execution timestamp. Recover the schedule with the same duration.
     started = utc_time(timestamp(pool["entered"]))
+    earliest = started-clock_precision(started)
     while (tid,revision) in actions:
         body,reply = actions.pop((tid,revision))
         hours,value = body.get("remind_after_hours"),reply.get("task",{}).get("remind_at")
@@ -89,16 +95,17 @@ def retain_snoozes(pool, tid, revision, actions):
             raise ValueError("invalid duration in a reviewed pool snooze")
         deadline = utc_time(value)
         try:
-            since = deadline-timedelta(hours=hours)
+            since = deadline-timedelta(seconds=hours*3600)
         except OverflowError as exc:
             raise ValueError("pool snooze deadline cannot be reconciled") from exc
-        if since < started-timedelta(microseconds=1):
+        precision = clock_precision(deadline)
+        if since+precision < earliest:
             raise ValueError("pool snooze is outside its assignment history")
         pool.setdefault("snoozes",[]).append({
             "expected_revision":revision,"remind_after_hours":hours,"remind_at":value,
             "scheduled_at":since.isoformat()})
         revision += 1
-        started = max(started,since)
+        earliest = max(earliest,since-precision)
 
 
 def histories(db, entries, deltas):
@@ -219,7 +226,8 @@ def retain_reminder(pool, message_id, observed):
     schedule = [initial,*pool.get("snoozes",[])]
     for slot,replacement in zip(schedule,schedule[1:]+[None]):
         if ("reminder_message_id" not in slot and observed>=utc_time(slot["remind_at"])
-                and (replacement is None or observed<=utc_time(replacement["scheduled_at"])+timedelta(microseconds=1))):
+                and (replacement is None or observed<=utc_time(replacement["scheduled_at"])
+                     +clock_precision(utc_time(replacement["remind_at"])))):
             slot["reminder_message_id"] = message_id
             return
     raise ValueError("pool reminder does not match an outstanding deadline")

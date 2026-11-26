@@ -1048,6 +1048,7 @@ store.close()
                 worker.connect()
                 closed = baseline["queued_id_map"][old_id]
                 aid,native = take(closed)
+                clock.advance(0.000002)
                 self.assertEqual(worker.report(native,closed,aid,"Needs review","blocked")["task_state"],"blocked")
                 upload = loop.wire.request("POST","uploads",
                     {"name":"candidate.txt","size_bytes":len(content),"sha256":checksum},guid())["upload_id"]
@@ -1055,6 +1056,8 @@ store.close()
                                                 headers={"Upload-Offset":"0"})["attachment_id"]
                 material = loop.wire.request("POST",f"tasks/{closed}/materials",
                     {"session_id":worker.session,"assignment_id":aid,"text":"候选资料","artifact_ids":[attachment]},guid())
+                far_future,far_deadline = postpone(closed,60_000_000)
+                clock.advance(1)
                 superseded,old_deadline = postpone(closed,0.25)
                 clock.advance(60)
                 first,first_deadline = postpone(closed,0.5)
@@ -1123,7 +1126,7 @@ store.close()
         closed_pool = manifest["orders"][closed]["assignment_history"][-1]["pool"]
         schedules = closed_pool["snoozes"]
         self.assertEqual([(rec["action_key"],rec["remind_at"],rec.get("reminder_message_id")) for rec in schedules],
-                         [(superseded,old_deadline,None),(first,first_deadline,first_notice),
+                         [(far_future,far_deadline,None),(superseded,old_deadline,None),(first,first_deadline,first_notice),
                           (second,second_deadline,second_notice),(cancelled_timer,last_deadline,None)])
         initial = manifest["orders"][failed]["assignment_history"][-1]["pool"]["initial_reminder"]
         self.assertEqual(initial["reminder_message_id"],default_notice)

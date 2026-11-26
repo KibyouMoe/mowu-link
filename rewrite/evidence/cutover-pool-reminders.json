@@ -134,5 +134,19 @@
     },
     "pending_cleanup_refused": true
   },
-  "boundary": "Actual isolated legacy and rewrite HTTP Router and SQLite; scripted Worker host and controlled clock."
+  "boundary": "Actual isolated legacy and rewrite HTTP Router and SQLite; scripted Worker host and controlled clock.",
+  "long_deadline_rounding": {
+    "schedule": {
+      "action_key": "824b78f9-0bb3-4950-98a1-d97dca9019e0",
+      "expected_revision": 4,
+      "remind_after_hours": 60000000,
+      "remind_at": "8871-10-22T08:00:20+00:00",
+      "scheduled_at": "2027-01-15T08:00:20+00:00"
+    },
+    "trial_sha256": "f06fc3c993b921076a89272cdf4db3e5f85f8f9d180b2ee5457c72cbf8376173",
+    "rollback_archives": {
+      "t-d9a625baae": "pool_closed_on_rewrite",
+      "t-7a7c203ded": "failed_on_rewrite"
+    }
+  }
 }
