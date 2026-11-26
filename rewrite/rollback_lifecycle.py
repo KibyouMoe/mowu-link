@@ -7,7 +7,7 @@ from . import attachments, rollback_inquiries, rollback_questions
 from .cleanup import CANCEL_CONFIRMED_NOTICE
 from .messages import valid_guid
 from .orders import task
-from .pool import INITIAL_REMINDER_SECONDS, REMINDER_NOTICE, RESUME_INSTRUCTION_PREFIX
+from .pool import CANCELLATION_EXHAUSTED, INITIAL_REMINDER_SECONDS, PROGRESS_EXHAUSTED, REMINDER_NOTICE, RESUME_INSTRUCTION_PREFIX
 from .storage import timestamp
 
 
@@ -67,12 +67,15 @@ def retain_inquiries(step, frames, dispatch_seq, next_dispatch_seq):
     unanswered = step.get("pool",{}).get("source")=="unanswered"
     kinds = [frame["kind"] for frame in frames]
     count = kinds.count("task.probe")
-    cancellations = kinds.count("task.cancel")
+    expired = step.get("expired_cancel")
+    expired_count = 4 if expired else 0
+    cancellations = kinds.count("task.cancel")-expired_count
     cleanup = step.get("cleanup")
     cancel_cleanup = cleanup and cleanup["kind"]=="task.cancel"
-    expected = ["task.probe"]*count + (["task.shelved"] if unanswered else [])
+    expected = ["task.probe"]*count + ["task.cancel"]*expired_count + (["task.shelved"] if unanswered else [])
     expected += ["task.cancel"]*cancellations
-    if (kinds!=expected or cancellations>4
+    if (kinds!=expected or not 0<=cancellations<=(1 if step.get("pool") else 4)
+            or expired and not unanswered
             or bool(cancellations)!=bool(cancel_cleanup)
             or any(frame["seq"]<=dispatch_seq or next_dispatch_seq is not None and frame["seq"]>=next_dispatch_seq
                    for frame in frames)):
@@ -80,7 +83,9 @@ def retain_inquiries(step, frames, dispatch_seq, next_dispatch_seq):
     if count:
         step["probe_delivery_ids"] = [frame["delivery_id"] for frame in frames[:count]]
     if unanswered:
-        step["shelved_delivery_id"] = frames[count]["delivery_id"]
+        step["shelved_delivery_id"] = frames[count+expired_count]["delivery_id"]
+    if expired:
+        expired["delivery_ids"] = [frame["delivery_id"] for frame in frames[count:count+expired_count]]
     if cancel_cleanup:
         cleanup["delivery_ids"] = [frame["delivery_id"] for frame in frames[-cancellations:]]
 
@@ -101,9 +106,9 @@ def clock_precision(instant):
 
 
 def pool_actions(db):
-    actions = {"snooze":{},"resume":{}}
+    actions = {"snooze":{},"resume":{},"cancel":{}}
     for request,reply in db.execute("""SELECT request,response FROM operations
-        WHERE json_extract(request,'$[1].action') IN ('snooze','resume')
+        WHERE json_extract(request,'$[1].action') IN ('snooze','resume','cancel')
         AND json_extract(request,'$[0][0]')='POST'
         AND json_extract(request,'$[0][1]') GLOB '/v1/tasks/*/actions'"""):
         (_,path),body = json.loads(request)
@@ -212,8 +217,18 @@ def histories(db, entries, deltas):
                 pool["artifact_ids"] = attachments.linked(db,"report",aid)
                 if pool["source"]!="worker" and pool["artifact_ids"]:
                     raise ValueError("Router pool notification has unexpected files")
-                if pool["source"]=="unanswered" and pool["reason"]!="进度询问三次重试仍无答复。":
-                    raise ValueError("trial has an unsupported exhausted inquiry")
+                if pool["source"]=="unanswered" and pool["reason"]!=PROGRESS_EXHAUSTED:
+                    if pool["reason"]!=CANCELLATION_EXHAUSTED:
+                        raise ValueError("trial has an unsupported exhausted inquiry")
+                    original = actions["cancel"].get((tid,revision))
+                    reason = original[0].get("reason") if original else None
+                    if not isinstance(reason,str) or not reason.strip():
+                        raise ValueError("exhausted cancellation is missing its original action")
+                    expired = {"expected_revision":revision,"reason":reason,"content":content}
+                    revision,content,working = retain_edits(edits,order,worker,content,"working",revision+1,aid)
+                    if working:
+                        expired["working_edits"] = working
+                    step["expired_cancel"] = expired
                 revision,content = retain_pool_changes(pool,order,worker,content,revision+1,edits,snoozes)
                 step["pool"] = pool
                 used["pool_entries"] += 1
@@ -225,6 +240,8 @@ def histories(db, entries, deltas):
                     raise ValueError("original assignment cleanup is pending or cannot be verified")
                 step["cleanup"] = cleanup
                 used["cleanups"] += 1
+            elif step.get("expired_cancel"):
+                raise ValueError("exhausted cancellation needs the original assignment's final cleanup")
             if candidates := materials.pop(aid,None):
                 if not pool or any(m["submitted_by"]!=worker or not m["received_at"]
                                    or not (m["text"].strip() or m["artifact_ids"]) for m in candidates):
@@ -318,6 +335,7 @@ def check_transport(db, entries, reviewed_questions):
     expected_notices = {}
     notices = {tid:[] for tid in entries}
     cleanup_frames = {}
+    expired_assignments,expired_retry_ids = set(),set()
     update_frames = {}
     terminal_notices = set()
     pool_bounds = {}
@@ -335,7 +353,8 @@ def check_transport(db, entries, reviewed_questions):
             workers.add(worker)
             expected_frames["task.dispatch",tid,aid] = ("worker/"+worker,step["delivery_id"],
                 {"task_id":tid,"assignment_id":aid,"revision":step["revision"],**step["content"]})
-            for edit in step.get("working_edits",[]):
+            expired = step.get("expired_cancel",{})
+            for edit in (*step.get("working_edits",[]),*expired.get("working_edits",[])):
                 revision = edit["expected_revision"]+1
                 update_frames[tid,aid,revision] = (edit,"worker/"+worker,step["dispatch_seq"],
                                                   target["dispatch_seq"] if target else None)
@@ -344,6 +363,12 @@ def check_transport(db, entries, reviewed_questions):
             if shelved := step.get("shelved_delivery_id"):
                 expected_inquiries[shelved] = ("task.shelved","worker/"+worker,{"task_id":tid,
                     "assignment_id":aid,"reason":step["pool"]["reason"]})
+            for did in expired.get("delivery_ids",[]):
+                expected_inquiries[did] = ("task.cancel","worker/"+worker,
+                    {"task_id":tid,"assignment_id":aid,"reason":expired["reason"]})
+            expired_retry_ids.update(expired.get("delivery_ids",[])[1:])
+            if expired:
+                expired_assignments.add(aid)
             if cleanup := step.get("cleanup"):
                 payload = {name:cleanup[name] for name in ("task_id","assignment_id","reason")}
                 if cleanup["kind"]=="task.cancel":
@@ -414,6 +439,7 @@ def check_transport(db, entries, reviewed_questions):
     pool_start_frames = {}
     latest_update = {}
     work_stopped = set()
+    shelved_assignments = set()
     latest_query,inquiry_sources = {},{}
     for row in db.execute("SELECT rowid AS seq,* FROM deliveries ORDER BY rowid"):
         data = json.loads(row["payload"])
@@ -449,7 +475,9 @@ def check_transport(db, entries, reviewed_questions):
                 raise ValueError("trial inquiry delivery does not match the reviewed assignment")
             if kind=="task.cancel":
                 work_stopped.add(aid)
-            else:
+            elif kind=="task.shelved":
+                shelved_assignments.add(aid)
+            if kind!="task.cancel" or did in expired_retry_ids:
                 inquiry_sources[did] = rollback_inquiries.source(latest_query,consumer,tid,aid)
         elif kind=="question.resolved":
             rollback_questions.record_answer_delivery(reviewed_questions,data,consumer,did,row["seq"])
@@ -471,6 +499,8 @@ def check_transport(db, entries, reviewed_questions):
             if not expected or consumer!=expected[0] or expected[1] not in (None,did) or data!=expected[2]:
                 raise ValueError("trial has a transport frame outside the reviewed orders")
             if key in cleanup_frames:
+                if aid in expired_assignments and aid not in shelved_assignments:
+                    raise ValueError("transfer cleanup predates the exhausted cancellation")
                 cleanup_frames[key]["delivery_id"] = did
                 work_stopped.add(aid)
         frames[did] = (consumer,row["cursor"])
@@ -557,6 +587,8 @@ def verify_cancelled(tid, entry, order, step, operations, after, states):
         states.append((terminal_seq,{pending["state"]}))
         terminal_seq = receipt["seq"]
         cleanup.update(report_key=receipt["key"],receipt=receipt["reply"])
+        if step.get("expired_cancel"):
+            cleanup.update(action_seq=action["seq"],report_seq=receipt["seq"])
         entry["cancel_w04_key"] = receipt["key"]
     states.append((terminal_seq,{"cancelled"}))
     return action["seq"]
@@ -625,7 +657,10 @@ def verify_pool_activity(tid, step, order, operations, after, states):
         material["receipt_key"] = receipt["key"]
         after = receipt["seq"]
         activity.append((after,{"snoozed" if first_snooze is not None and after>first_snooze else "blocked"}))
-    states.extend(sorted(activity))
+    activity.sort()
+    if activity and (expired := step.get("expired_cancel")):
+        expired["pool_action_seq"] = activity[0][0]
+    states.extend(activity)
     return max(after,position)
 
 
@@ -638,6 +673,22 @@ def transition_replies(order, step, target):
         offered = order_state(order,target,"ready",target["revision"],target["assignment_id"])
         replies.append({"task":offered,"delivery_state":"pending"})
     return replies
+
+
+def verify_expired_cancel(tid, step, order, operations, after, states):
+    expired = step["expired_cancel"]
+    revision = expired["expected_revision"]
+    pending = order_state(order,dict(step,content=expired["content"]),"working",revision+1,step["assignment_id"])
+    action = take(operations,(tid,"action","cancel",revision),"hermes",
+                  {"action":"cancel","expected_revision":revision,"reason":expired["reason"]},
+                  [{"task":pending,"delivery_state":"pending"}])
+    if action["seq"]<=after:
+        raise ValueError("exhausted cancellation predates its original assignment")
+    expired.update(action_key=action["key"],receipt=action["reply"],action_seq=action["seq"])
+    after = verify_edits(tid,expired.get("working_edits",[]),operations,action["seq"])
+    expired["working_end_seq"] = after
+    states.append((action["seq"],{"working","blocked"}))
+    return after
 
 
 def verify_order(db, tid, entry, operations, windows):
@@ -668,6 +719,9 @@ def verify_order(db, tid, entry, operations, windows):
         possible = {"working","blocked"} if source in ("offline","unanswered") else {"working"}
         adjacent_states.append((after,possible))
         after = verify_edits(tid,step.get("working_edits",[]),operations,after)
+        if expired := step.get("expired_cancel"):
+            after = verify_expired_cancel(tid,step,order,operations,after,adjacent_states)
+            windows[aid] = (accept["seq"],expired["action_seq"])
         if target is None and is_reviewed_completion(entry):
             report = take(operations,(tid,"report",aid,"completed"),actor,{
                 "assignment_id":aid,"outcome":"completed","summary":entry["summary"],"artifact_ids":entry["artifact_ids"]},
@@ -704,6 +758,8 @@ def verify_order(db, tid, entry, operations, windows):
             if cancelled:
                 end = verify_cancelled(tid,entry,order,step,operations,after,adjacent_states)
                 windows.setdefault(aid,(accept["seq"],end))
+                if expired:
+                    expired.setdefault("pool_action_seq",end)
             else:
                 verify_pool_archive(tid,entry,order,operations,after,adjacent_states)
             continue
@@ -733,6 +789,8 @@ def verify_order(db, tid, entry, operations, windows):
         if transfer["seq"]<=after:
             raise ValueError("transfer predates the original assignment records")
         windows.setdefault(aid,(accept["seq"],transfer["seq"]))
+        if expired:
+            expired.setdefault("pool_action_seq",transfer["seq"])
         step.update(transfer_key=transfer["key"],transfer_reason=reason)
         adjacent_states.append((transfer["seq"],{"ready"}))
         after = verify_edits(tid,transition.get("waiting_edits",[]),operations,transfer["seq"])
@@ -745,6 +803,8 @@ def verify_order(db, tid, entry, operations, windows):
                            session=True)
             if receipt["seq"]<=transfer["seq"]:
                 raise ValueError("cleanup receipt predates the transfer")
+            if expired:
+                cleanup.update(action_seq=transfer["seq"],report_seq=receipt["seq"])
             cleanup_receipts.append((cleanup,receipt))
     for cleanup,receipt in cleanup_receipts:
         _, states = next((item for item in reversed(adjacent_states) if item[0]<receipt["seq"]))

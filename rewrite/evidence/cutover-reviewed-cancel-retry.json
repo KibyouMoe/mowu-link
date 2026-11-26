@@ -1,0 +1,108 @@
+{
+  "reissued_cancel": {
+    "boundary": "Actual isolated rewrite and legacy HTTP Routers and rewrite Workers; scripted hosts and clock.",
+    "cancel_retries": [
+      {
+        "delivery_id": "4e2cf626-ccdb-4bb8-85e8-0a37bf2f06b6",
+        "presence_key": "presence-68c39405-25a7-4bce-b970-4d2d9743b168"
+      },
+      {
+        "delivery_id": "61c1c0f1-763c-4ab7-afb1-adde82fd5aaa",
+        "presence_key": "presence-795bf8df-e544-4cd3-83fd-1ec6001427b6"
+      },
+      {
+        "delivery_id": "50f93c59-1a13-4b7f-8d73-3d88807bd5c1",
+        "presence_key": "presence-75a7c1f3-e565-489e-86c2-871f85840f70"
+      }
+    ],
+    "cleanup_delivery_id": "81544ab5-8014-4a5f-b898-6037b05fc523",
+    "cleanup_reply": {
+      "recorded": true,
+      "release_assignment_id": "b9cf10f4-3e4c-405e-9383-9a53f29b031b",
+      "task_state": "cancelled"
+    },
+    "cleanup_report_key": "cancel_confirmed-b9cf10f4-3e4c-405e-9383-9a53f29b031b",
+    "first_cancel_deliveries": [
+      "8777d14a-b8c8-40b7-9014-fcc1538f3a32",
+      "4e2cf626-ccdb-4bb8-85e8-0a37bf2f06b6",
+      "61c1c0f1-763c-4ab7-afb1-adde82fd5aaa",
+      "50f93c59-1a13-4b7f-8d73-3d88807bd5c1"
+    ],
+    "first_cancel_key": "6294b42a-517b-4e95-84ab-ea44464469ad",
+    "late_original_report": "stale_assignment",
+    "legacy": {
+      "deliverable": null,
+      "held": [
+        null,
+        null
+      ],
+      "queues": [
+        null,
+        null
+      ],
+      "reason": "cancelled_on_rewrite",
+      "status": 200
+    },
+    "new_action_key": "7398aaf0-e174-49b8-a740-7fbfb6b7cf17",
+    "new_assignment": null,
+    "original_assignment": "b9cf10f4-3e4c-405e-9383-9a53f29b031b",
+    "shelved_delivery_id": "f70a4ee0-6b74-41f6-9fe4-8af514dc85ab",
+    "shelved_presence_key": "presence-72351fb4-84d4-4fb4-b3b8-7b9e3d594e75",
+    "task_id": "aa5fd2e8-4e10-5217-8348-9c7a55edc116",
+    "trial_sha256": "d15597f7b7e98c3103734943c8c710804e9f3660418bd5ec45e4e9a1116ae1a6",
+    "wrong_idle_observation_refused": true
+  },
+  "transferred": {
+    "boundary": "Actual isolated rewrite and legacy HTTP Routers and rewrite Workers; scripted hosts and clock.",
+    "cancel_retries": [
+      {
+        "delivery_id": "2c775a83-bba1-4b83-8453-9b35bb370d90",
+        "presence_key": "presence-beb0278f-4e3a-4347-8711-bc56c64c4f02"
+      },
+      {
+        "delivery_id": "74cd75b2-2cd4-4129-b66f-86b0907cd8f9",
+        "presence_key": "presence-2fd47488-9914-4787-9e53-a57dac0a8071"
+      },
+      {
+        "delivery_id": "03736e7b-d61d-41ad-b8ee-309de85a5ed5",
+        "presence_key": "presence-88034275-bd09-4dd5-8650-2337f6243443"
+      }
+    ],
+    "cleanup_delivery_id": "8409483f-e1ca-4e67-8769-0712659b8120",
+    "cleanup_reply": {
+      "recorded": true,
+      "release_assignment_id": "9b21234e-8351-456d-b12c-d7af503d0aa1",
+      "task_state": "closed"
+    },
+    "cleanup_report_key": "transfer_confirmed-9b21234e-8351-456d-b12c-d7af503d0aa1",
+    "first_cancel_deliveries": [
+      "b94b33ba-b4f8-423d-b8dd-945471dd8787",
+      "2c775a83-bba1-4b83-8453-9b35bb370d90",
+      "74cd75b2-2cd4-4129-b66f-86b0907cd8f9",
+      "03736e7b-d61d-41ad-b8ee-309de85a5ed5"
+    ],
+    "first_cancel_key": "84f0b613-8f0e-4d16-99f4-caeb4d7ac487",
+    "late_original_report": "stale_assignment",
+    "legacy": {
+      "deliverable": null,
+      "held": [
+        null,
+        null
+      ],
+      "queues": [
+        null,
+        null
+      ],
+      "reason": "reviewed_on_rewrite",
+      "status": 200
+    },
+    "new_action_key": "0af8463d-95ec-43ca-ba00-190567e8ad04",
+    "new_assignment": "fcff46ee-a5bb-4a2f-aa18-b0c2b17e3dbc",
+    "original_assignment": "9b21234e-8351-456d-b12c-d7af503d0aa1",
+    "shelved_delivery_id": "292e4951-e397-4aa0-9a1c-106d0677a85d",
+    "shelved_presence_key": "presence-988d3c7c-df6e-4d55-ba7f-a7c3b0935d20",
+    "task_id": "211e56b8-ee72-5041-bdc5-d5d5cd8ac25c",
+    "trial_sha256": "ac48714667b989909951de5fd501e390e62fd37f678cb495fafd10c9575e8ee6",
+    "wrong_idle_observation_refused": true
+  }
+}

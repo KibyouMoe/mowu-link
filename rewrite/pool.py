@@ -7,6 +7,8 @@ from .storage import guid, require, string, timestamp
 INITIAL_REMINDER_SECONDS = 3600
 REMINDER_NOTICE = "无法完成池中的工单仍待处理。"
 RESUME_INSTRUCTION_PREFIX = "\n\n继续推进："
+CANCELLATION_EXHAUSTED = "取消三次重试仍无清理回执。"
+PROGRESS_EXHAUSTED = "进度询问三次重试仍无答复。"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS pool_entries (
@@ -48,7 +50,7 @@ def on_idle_sample(db, worker, tid, aid, now, interval):
     if request and now - request["last_sent"] < interval:
         return
     if request and request["retries"] == 3:
-        reason = "取消三次重试仍无清理回执。" if request["kind"] == "task.cancel" else "进度询问三次重试仍无答复。"
+        reason = CANCELLATION_EXHAUSTED if request["kind"] == "task.cancel" else PROGRESS_EXHAUSTED
         enter(db, row, "unanswered", reason, now)
         delivery.enqueue(db, "worker/" + worker, "task.shelved",
                          {"task_id": tid, "assignment_id": aid, "reason": reason})

@@ -1863,6 +1863,201 @@ store.close()
                         "boundary":"Actual isolated rewrite HTTP Router and Workers, legacy RouterStore and SQLite; scripted hosts and clock."}
             Path(output).write_text(json.dumps(evidence,ensure_ascii=False,indent=2)+"\n")
 
+    def test_exhausted_cancel_requires_a_new_confirmed_cancellation_for_rollback(self):
+        self.exercise_exhausted_cancel_rollback(reissue=True)
+
+    def test_exhausted_cancel_preserves_new_holder_and_requires_original_cleanup_for_rollback(self):
+        self.exercise_exhausted_cancel_rollback(reissue=False)
+
+    def exercise_exhausted_cancel_rollback(self, *, reissue):
+        original = self.old("""
+store = RouterStore(sys.argv[1])
+for name in ("oguri","tama"):
+    store.upsert_worker(name)
+print(store.orders.create("Exhausted cancellation","Isolated cancellation test","oguri",{},"fixture",None,None))
+store.close()
+""",self.legacy)
+        before = digest(self.legacy)
+        backup(self.legacy,self.attachments,self.snapshot)
+        tid = prepare(self.snapshot,self.trial,self.source_id)["queued_id_map"][original]
+        clock = Clock()
+        loop = Loop(self.trial,clock,FixtureHost,extra_workers=["tama"])
+        manager,worker = loop.hermes,loop.worker
+        other_host = FixtureHost(self.trial/"cancel-other-host.db","cancel-other")
+        other = Worker(self.trial/"cancel-other.db","tama",loop.extra_clients["tama"],
+                       HostAdapter(self.trial/"cancel-other-adapter.db",other_host,other_host.session))
+        review = self.root/"cancel-retry-review.json"
+        first_action,last_action = guid(),guid()
+        closed,cancelled = {},{}
+
+        def task():
+            return manager.inspect(tid)["task"]
+
+        def advance(seconds):
+            clock.advance(seconds)
+            worker.poll()
+            worker.poll()
+
+        def stage(trial,destination):
+            approval = {"trial_sha256":digest(trial/"router.db"),"closed_assignments":closed}
+            if cancelled:
+                approval["cancelled_assignments"] = cancelled
+            review.write_text(json.dumps(approval))
+            return stage_reviewed_rollback(self.snapshot,trial,review,destination)
+
+        with loop.server:
+            loop.thread.start()
+            try:
+                worker.connect()
+                worker.poll()
+                advance(10)
+                aid = worker.hold()["held_assignment_id"]
+                self.assertTrue(aid)
+                advance(1)
+                advance(10)
+                self.assertEqual([p["kind"] for p,_ in loop.native.entries()],["task","task_probe"])
+                revision = task()["revision"]
+                receipt = manager.act(first_action,tid,revision,"cancel",reason="Original stop request")
+                self.assertEqual(receipt["task"]["state"],"working")
+                self.assertEqual(receipt["delivery_state"],"pending")
+                self.assertEqual(manager.act(first_action,tid,revision,"cancel",reason="Original stop request"),receipt)
+                if not reissue:
+                    edit = manager.update(guid(),tid,task()["revision"],{"instructions":"Edited before shelving"})
+                    self.assertEqual(edit["assignment_id"],aid)
+                for seconds in (1,10,1,1,1):
+                    advance(seconds)
+                current = task()
+                self.assertEqual(current["state"],"blocked")
+                self.assertIsNone(worker.hold()["held_assignment_id"])
+                self.assertIsNone(manager.inspect(tid)["last_report"])
+                frames = [p["kind"] for p,_ in loop.native.entries()]
+                self.assertEqual(frames.count("task.cancel"),4)
+                self.assertEqual(frames[-1],"task.shelved")
+                with self.assertRaisesRegex(ValueError,"reviewed rollback needs unchanged migrated orders"):
+                    stage(self.trial,self.restore)
+                self.assertFalse(self.restore.exists())
+                with self.assertRaises(Fault) as late:
+                    loop.wire.request("POST",f"tasks/{tid}/report",
+                        {"session_id":worker.session,"assignment_id":aid,"outcome":"cancel_confirmed"},guid())
+                self.assertEqual((late.exception.status,late.exception.code),(409,"stale_assignment"))
+
+                if reissue:
+                    cancelled[tid] = aid
+                    current = manager.act(guid(),tid,current["revision"],"snooze",remind_after_hours=0.25)["task"]
+                    pending = manager.act(last_action,tid,current["revision"],"cancel",reason="Verify stop again")
+                    self.assertEqual((pending["delivery_state"],pending["task"]["state"]),("pending","snoozed"))
+                    control,outcome,terminal = "task.cancel","cancel_confirmed","cancelled"
+                else:
+                    other.connect()
+                    other.poll()
+                    advance(10)
+                    other.poll()
+                    manager.act(last_action,tid,current["revision"],"transfer",worker_id="tama",reason="Continue elsewhere")
+                    other.poll()
+                    new_aid = other.hold()["held_assignment_id"]
+                    self.assertTrue(new_aid)
+                    self.assertNotEqual(new_aid,aid)
+                    closed[tid] = new_aid
+                    native, = [r for p,r in other_host.entries() if p["kind"]=="task"]
+                    result = other.report(native["native_id"],tid,new_aid,"Result from the new holder")
+                    self.assertEqual(result["task_state"],"completed_reported")
+                    self.assertEqual(manager.approve(guid(),tid,task()["revision"])["task"]["state"],"closed")
+                    control,outcome,terminal = "task.transfer_out","transfer_confirmed","closed"
+                worker.poll()
+                frames = [r for p,r in loop.native.entries() if p["kind"]==control]
+                self.assertEqual(len(frames),5 if reissue else 1)
+
+                def report():
+                    return worker.report(frames[-1]["native_id"],tid,aid,"Original work cleared",outcome)
+
+                with self.assertRaises(Fault) as unconfirmed:
+                    report()
+                self.assertEqual(unconfirmed.exception.code,"native_cleanup_unconfirmed")
+                with self.assertRaisesRegex(ValueError,"reviewed rollback needs unchanged migrated orders|cleanup"):
+                    stage(self.trial,self.restore)
+                self.assertFalse(self.restore.exists())
+                loop.native.cleanup_evidence = lambda session,assignment,kind: {
+                    "session":session,"assignment_id":assignment,"kind":kind,"stopped":True,
+                    "cleaned":True,"receipt_id":"isolated-exhausted-cancel-cleanup"}
+                final = {"recorded":True,"release_assignment_id":aid,"task_state":terminal}
+                self.assertEqual(report(),final)
+                self.assertEqual(report(),final)
+                manager.poll()
+                worker.poll()
+                if not reissue:
+                    other.poll()
+                    self.assertEqual(len([p for p,_ in other_host.entries() if p["kind"]=="task"]),1)
+                settled = stage(self.trial,self.restore)
+            finally:
+                loop.server.shutdown()
+                loop.thread.join()
+
+        private = self.restore/"private-review"
+        order = json.loads((private/"manifest.json").read_text())["orders"][tid]
+        first = order["assignment_history"][0]
+        expired,cleanup = first["expired_cancel"],first["cleanup"]
+        self.assertEqual(expired["action_key"],first_action)
+        self.assertEqual(expired["receipt"]["task"]["state"],"working")
+        self.assertEqual(len(expired["delivery_ids"]),4)
+        self.assertEqual(len(expired["retries"]),3)
+        self.assertTrue(first["shelved_presence_key"])
+        self.assertEqual(cleanup["receipt"],final)
+        self.assertLess(expired["action_seq"],cleanup["action_seq"])
+        self.assertLess(cleanup["action_seq"],cleanup["report_seq"])
+        self.assertEqual(len(first["inquiry_rounds"][0]["probes"]),1)
+        self.assertEqual(digest(self.legacy),before)
+        self.assertEqual(digest(self.trial/"router.db"),settled["trial_sha256"])
+        observed = json.loads(self.old("""
+from server import RouterServer
+from selftest_router import http
+from threading import Thread
+from unittest.mock import Mock
+store = RouterStore(sys.argv[1])
+token = "isolated-legacy-cancel-retry"
+with RouterServer(("127.0.0.1",0),store,token,Mock(),Mock()) as server:
+    runner = Thread(target=server.serve_forever,kwargs={"poll_interval":.02})
+    runner.start()
+    try:
+        url = f"http://127.0.0.1:{server.server_port}"
+        status,item = http("GET",url+"/tasks/"+sys.argv[2],token=token)
+        task = item["task"]
+        print(json.dumps({"status":status,"reason":task["archive"]["reason"],"deliverable":task["deliverable"],
+                          "queues":[store.orders.next_dispatch(name) for name in ("oguri","tama")],
+                          "held":[store.orders.held(name) for name in ("oguri","tama")]}))
+    finally:
+        server.shutdown()
+        runner.join()
+store.close()
+""",self.restore/"legacy.db",original))
+        self.assertEqual(observed,{"status":200,"reason":"cancelled_on_rewrite" if reissue else "reviewed_on_rewrite",
+                                   "deliverable":None,"queues":[None,None],"held":[None,None]})
+        changed = self.root/"changed-retry"
+        changed.mkdir()
+        shutil.copyfile(self.trial/"baseline.json",changed/"baseline.json")
+        shutil.copyfile(private/"trial-router.db",changed/"router.db")
+        with closing(sqlite3.connect(changed/"router.db")) as db,db:
+            delta = db.execute("UPDATE operations SET request=json_set(request,'$[1].busy',json('true')) "
+                               "WHERE actor='worker/oguri' AND key=?",(expired["retries"][0]["presence_key"],))
+            self.assertEqual(delta.rowcount,1)
+        denied = self.root/"refused-retry"
+        with self.assertRaisesRegex(ValueError,"original idle worker observation"):
+            stage(changed,denied)
+        self.assertFalse(denied.exists())
+        if output := os.environ.get("MOWULINK_CANCEL_RETRY_EVIDENCE"):
+            path = Path(output)
+            evidence = json.loads(path.read_text()) if path.exists() else {}
+            evidence["reissued_cancel" if reissue else "transferred"] = {
+                "task_id":tid,"original_assignment":aid,"new_assignment":closed.get(tid),
+                "first_cancel_key":first_action,"first_cancel_deliveries":expired["delivery_ids"],
+                "cancel_retries":expired["retries"],"shelved_delivery_id":first["shelved_delivery_id"],
+                "shelved_presence_key":first["shelved_presence_key"],"new_action_key":last_action,
+                "cleanup_delivery_id":cleanup["delivery_ids"][0] if reissue else cleanup["delivery_id"],
+                "cleanup_report_key":cleanup["report_key"],"cleanup_reply":final,
+                "late_original_report":late.exception.code,"legacy":observed,
+                "trial_sha256":settled["trial_sha256"],"wrong_idle_observation_refused":True,
+                "boundary":"Actual isolated rewrite and legacy HTTP Routers and rewrite Workers; scripted hosts and clock."}
+            path.write_text(json.dumps(evidence,ensure_ascii=False,indent=2,sort_keys=True)+"\n")
+
     def test_trial_born_closed_orders_return_as_private_archives_without_a_new_dispatch(self):
         self.old("""
 store = RouterStore(sys.argv[1])

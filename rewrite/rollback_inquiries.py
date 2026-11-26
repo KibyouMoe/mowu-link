@@ -22,12 +22,40 @@ def bind(delivery_id, sources, samples, acknowledged):
     raise ValueError("inquiry is missing its original idle worker observation")
 
 
+def verify_expired_cancel(step, sources, samples, acknowledged):
+    expired = step["expired_cancel"]
+    initial,*retries = expired["delivery_ids"]
+    position = expired["action_seq"]
+    if acknowledged.get(initial,0)<=position:
+        raise ValueError("exhausted cancellation has no original delivery receipt")
+    retry_proofs = []
+    for did in retries:
+        sample = bind(did,sources,samples,acknowledged)
+        if sample["seq"]<=position:
+            raise ValueError("exhausted cancellation retries are out of order")
+        position = sample["seq"]
+        retry_proofs.append({"delivery_id":did,"presence_key":sample["key"]})
+    shelve = bind(step["shelved_delivery_id"],sources,samples,acknowledged)
+    if (not max(position,expired["working_end_seq"])<shelve["seq"]<expired["pool_action_seq"]
+            or shelve["reply"]!={"observed_at":timestamp(step["pool"]["entered"])}):
+        raise ValueError("exhausted cancellation was not shelved by its original observation")
+    cleanup = step["cleanup"]
+    successor = cleanup["delivery_ids"][0] if cleanup["kind"]=="task.cancel" else cleanup["delivery_id"]
+    if not shelve["seq"]<cleanup["action_seq"]<acknowledged.get(successor,0)<cleanup["report_seq"]:
+        raise ValueError("cleanup after an exhausted cancellation lacks its own receipt")
+    expired["retries"] = retry_proofs
+    step["shelved_presence_key"] = shelve["key"]
+
+
 def verify_rounds(entries, sources, samples, continued, windows, acknowledged):
     for tid,entry in entries.items():
         for step in entry["assignment_history"]:
             aid = step["assignment_id"]
             probes = step.get("probe_delivery_ids",[])
             shelved = step.get("shelved_delivery_id")
+            if step.get("expired_cancel"):
+                verify_expired_cancel(step,sources,samples,acknowledged)
+                shelved = None  # The cancellation timer is independent of progress inquiries.
             reports = continued.pop(aid,[])
             if not (probes or shelved or reports):
                 continue
