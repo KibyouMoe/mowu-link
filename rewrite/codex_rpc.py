@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 from queue import Empty, Queue
+import signal
 import subprocess
 from threading import Lock, Thread
 import time
@@ -20,6 +21,18 @@ def require_test_account(rpc):
     require(isinstance(account,dict) and type(account.get("requiresOpenaiAuth")) is bool,
             503,"codex_account_unconfirmed")
     require(not account["requiresOpenaiAuth"] or account.get("account"),503,"codex_test_account_required")
+
+
+def signal_private_server(process, *, force=False):
+    if os.name=="posix":
+        try:
+            os.killpg(process.pid,signal.SIGKILL if force else signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    elif force:
+        process.kill()
+    else:
+        process.terminate()
 
 
 class AppServerRpc:
@@ -107,7 +120,8 @@ def start_app_server(binary,profile,cwd,settings=()):
     argv = [binary,"app-server","--stdio",*(value for setting in settings for value in ("-c",setting))]
     with state_writer(profile/"mowulink-app-server"):
         with subprocess.Popen(argv,cwd=cwd,env={"CODEX_HOME":str(profile),"PATH":os.defpath},
-                              stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True) as process:
+                              stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,
+                              start_new_session=os.name=="posix") as process:
             rpc = AppServerRpc(process)
             try:
                 rpc.request("initialize",{"clientInfo":{"name":"mowulink_app_server","title":"MowuLink worker adapter",
@@ -115,10 +129,11 @@ def start_app_server(binary,profile,cwd,settings=()):
                 rpc.send({"method":"initialized","params":{}})
                 yield rpc
             finally:
-                process.terminate()
+                # Native helpers may still have files open in the private profile.
+                signal_private_server(process)
                 try:
                     process.wait(timeout=4)
                 except subprocess.TimeoutExpired:
-                    process.kill()
+                    signal_private_server(process,force=True)
                     process.wait(timeout=4)
                 rpc.reader.join(timeout=4)
