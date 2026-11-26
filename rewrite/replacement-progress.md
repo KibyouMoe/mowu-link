@@ -10,6 +10,8 @@ DSH 的 `/new`、`/clear`、`/fork` 已经走 Worker 的正式交接。原生空
 
 复跑 `python3 -B -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_managed_dsh_creates_and_forks_through_the_worker_and_recovers_a_lost_reply rewrite.test_dsh_native_loop.NativeLoop.test_dsh_preparation_reopens_the_exact_native_child_after_ipc_ack_loss`。
 
+两项原生 DSH 用例连续通过 12 轮。macOS 全量通过 232 项，Linux arm64 通过 158 项、跳过 74 项本机宿主用例。从 `e1f9a49ec3fdb77b30151f913ddf03c31fb2a553` 构建 203 文件的独立包，SHA-256 为 `416e1d0baace48a5188f3f5c1d6a114aa68ad4b4106063c735f2494575643f4a`。安装目录通过 DSH、Codex 和快照的 15 项测试，逐文件复验一致。关闭自动登记时，分步升级与回退沿用同一条私聊原生收件 `281e6f01-3fca-4542-b94e-4588662e7403`。复跑 `python3 -B -m rewrite.release_check --repository . --component worker-pair --previous 392a68db1b211f5cc6236a3e9ead201739697d62 --new e1f9a49ec3fdb77b30151f913ddf03c31fb2a553`。
+
 自动登记工位的离线快照已收录全部子会话账本，核对 Worker 操作号、原生准备记录、子库会话和回调摘要。仅使用原私有密钥在目标目录重建回调身份。漏登记目录、注册表或子库被占用、错父会话、错密钥及试用库已变动均会拒绝。恢复运营前可审计子库的原收件和待核项。[恢复与回退操作](router-rehearsal.md#codex-自动登记工位的恢复与回退)
 
 隔离 Router 与真实 Codex App Server 从落账后丢登记回执的快照恢复，找回同一操作和会话。前一版适配器 `4e7c646e060ceb4a3abf7430e0ac3f4b49a72f09` 从回退目录接回同一持单，重投不产生第二条原生输入。原单更新后，两个原生工具回包只落一条成果和一条待验通知。带新成果的试用库拒绝覆盖回退。前一版适配器实跑 12 轮。原生 profile 保留在同机独立目录，模型为本地夹具，飞书线上未验。[快照、派发、回合与通知证据](evidence/codex-managed-bundle-rollback.json)
