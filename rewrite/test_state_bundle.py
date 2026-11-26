@@ -57,7 +57,7 @@ class Bundle(unittest.TestCase):
         self.revision = "a"*40
 
     @contextmanager
-    def stack(self,paths):
+    def stack(self,paths,*,pin_session=False):
         source = Trigger(paths["trigger:mail"],"mail",self.clock)
         router = Orders(paths["router:main"],self.clock,1)
         ids = {"mgr":"hermes","w":"worker/oguri","mail":"trigger/"+source.instance_id}
@@ -65,6 +65,8 @@ class Bundle(unittest.TestCase):
             manager = HermesAdapter(paths["hermes:main"],Client(url,"mgr"),
                       HostAdapter(paths["hermes-host:main"],self.hermes_host,self.hermes_host.session),self.clock)
             agent = HostAdapter(paths["agent:oguri"],self.native,self.native.session)
+            if pin_session:
+                agent.expected_session = self.native.session
             worker = Worker(paths["worker:oguri"],"oguri",Client(url,"w"),agent)
             server = WorkerService(worker).listen({"platform":"platform/oguri"},("127.0.0.1",0),None)
             with running(server) as worker_url:
@@ -286,6 +288,8 @@ class Bundle(unittest.TestCase):
             return capture(sources,self.revision,self.snapshot)
         with self.assertRaisesRegex(ValueError,"five component roles"):
             backup({k:v for k,v in self.sources.items() if k!="worker:oguri"})
+        with self.assertRaisesRegex(ValueError,"Feishu ledger must have its named Worker"):
+            backup({"feishu:other" if key=="feishu:oguri" else key:value for key,value in self.sources.items()})
         validate_set([k.replace(":oguri",":OguriCap") for k in self.sources])
         with self.assertRaisesRegex(ValueError,"case-insensitive"):
             validate_set([*self.sources,"worker:Oguri","agent:Oguri"])
@@ -405,6 +409,72 @@ class Bundle(unittest.TestCase):
         self.assertFalse(self.dest.exists())
         self.assertEqual(audit_handoff(self.snapshot,checksum),before)
         self.assertEqual(self.native.entries(),[])
+
+    def test_handoff_waits_for_feishu_to_read_the_worker_display_tail(self):
+        original = self.native.session
+        with self.stack(self.sources,pin_session=True) as (_m,w,_source,_mail,_inbound,views):
+            WorkerService(w,self.clock).step()
+            views.poll()
+            with w.db.transaction() as db:
+                last = display.append(db,{"event_id":"private-tail","kind":"final","session":original,
+                                          "turn_id":"fixture-turn","text":"Unpublished private reply"})
+
+        checksum = capture(self.sources,self.revision,self.snapshot)["manifest_sha256"]
+        pending, = audit_handoff(self.snapshot,checksum)["workers"]
+        self.assertFalse(pending["native_session_ledger_clear"],pending)
+        self.assertEqual(pending["native_session_pending"]["platform_display_unseen"],1)
+        self.assertEqual(pending["native_session_pending"]["platform_display_attempts"],0)
+        self.assertNotIn("Unpublished private reply",encode(pending))
+        with self.assertRaisesRegex(ValueError,"platform_display_unseen"):
+            stage_native_handoff(self.snapshot,checksum,"oguri",original,"next",self.dest)
+        self.assertFalse(self.dest.exists())
+
+        restored = restore(self.snapshot,checksum,self.root/"display-retry")
+        with self.stack(restored,pin_session=True) as (_m,_w,_source,_mail,_inbound,views):
+            self.assertEqual(views.poll(),1)
+            self.assertEqual(views.poll(),0)
+            with views.db.transaction() as db:
+                mid, = db.execute("SELECT mid FROM view_attempt WHERE seq=?",(last["seq"],)).fetchone()
+            self.assertEqual(self.platform.calls.count(("send",mid)),1)
+        settled = self.root/"display-settled"
+        seal = capture(restored,self.revision,settled)["manifest_sha256"]
+        cleared, = audit_handoff(settled,seal)["workers"]
+        self.assertTrue(cleared["native_session_ledger_clear"],cleared)
+        self.assertEqual(cleared["native_session_pending"]["platform_display_unseen"],0)
+        result = stage_native_handoff(settled,seal,"oguri",original,"next",self.dest)
+        self.assertEqual(result["expected_session"],"next")
+        self.display_evidence = {"pending_snapshot":checksum,"settled_snapshot":seal,"display_seq":last["seq"],
+                                 "fixture_platform_mid":mid,"unseen_before_and_after":[1,0],
+                                 "platform_writes_for_event":1,"handoff_blocked_before_drain":True,
+                                 "handoff_staged_after_drain":True,
+                                 "boundary":"Actual Worker HTTP and SQLite, simulated Feishu provider and native host."}
+
+    def test_handoff_detects_different_display_payload_or_cursor_ahead_of_worker(self):
+        with self.stack(self.sources) as (_m,w,_source,_mail,_inbound,views):
+            w.connect()
+            w.poll()
+            event = {"event_id":"display-origin","kind":"final","session":self.native.session,
+                     "turn_id":"fixture-turn","text":"Original private display"}
+            with w.db.transaction() as db:
+                receipt = display.append(db,event)
+            views.poll()
+
+        worker_db = Database(self.sources["worker:oguri"],"")
+        changes = {"foreign-payload":("UPDATE display_events SET payload=? WHERE seq=?",
+                                      (encode(dict(event,text="Different display")),receipt["seq"])),
+                   "older-worker":("DELETE FROM display_events WHERE seq=?",(receipt["seq"],))}
+        for name,(query,args) in changes.items():
+            with self.subTest(name=name):
+                with worker_db.transaction() as db:
+                    db.execute(query,args)
+                path = self.root/name
+                seal = capture(self.sources,self.revision,path)["manifest_sha256"]
+                audited = audit_handoff(path,seal)
+                worker, = audited["workers"]
+                self.assertTrue(audited["needs_review"])
+                self.assertIn("platform_display_ledger_mismatch",worker["issues"])
+                self.assertFalse(worker["native_session_ledger_clear"])
+                self.assertNotIn("Different display",encode(audited))
 
     def test_handoff_refuses_to_copy_an_unconfirmed_native_thread_preparation(self):
         with self.stack(self.sources) as (_manager,worker,_source,_mail,_platform,_views):
@@ -554,7 +624,7 @@ class Bundle(unittest.TestCase):
         worker, = seen["workers"]
         self.assertFalse(worker["native_session_ledger_clear"])
         self.assertEqual({name:count for name,count in worker["native_session_pending"].items() if count},
-                         {"private_chat":1,"queued_chat":1,"adapter_deliveries":1})
+                         {"private_chat":1,"queued_chat":1,"adapter_deliveries":1,"platform_display_unseen":2})
         self.assertNotIn(private_text,encode(seen))
         self.assertNotIn(queue_text,encode(seen))
         self.assertEqual(audit_handoff(self.snapshot,checksum),seen)
@@ -564,12 +634,13 @@ class Bundle(unittest.TestCase):
 
         restored = restore(self.snapshot,checksum,self.dest)
         self.native.is_busy = False
-        with self.stack(restored) as (_m,w,_source,_mail,_platform,_views):
+        with self.stack(restored) as (_m,w,_source,_mail,_platform,views):
             self.assertEqual(w.chat(private_mid,private_text),original)
             service = WorkerService(w,self.clock)
             service.step()
             service.step()
             self.assertEqual([payload["text"] for payload,_ in self.native.entries()],[private_text,queue_text])
+            views.poll()
         resolved = self.root/"resolved"
         later = capture(restored,self.revision,resolved)["manifest_sha256"]
         clean, = audit_handoff(resolved,later)["workers"]

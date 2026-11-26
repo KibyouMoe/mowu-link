@@ -205,7 +205,9 @@ python3 -m rewrite.state_bundle rollback --snapshot ./snapshot --manifest-sha256
 
 ### 飞书输出回执与换绑
 
-拍快照时同时保留 `feishu:<工位 ID>` 和对应的 Worker、宿主及外部消息记录。使用与原来相同的飞书应用、会话和工位身份恢复。在 `audit-handoff` 的 `native_session_pending` 核对 `platform_display_attempts`、`platform_input_notices`、`platform_known_receipts_uncommitted` 和 `platform_image_uploads_unconfirmed`。后两项分别计入已取得消息号、待 Worker 确认的展示，以及仍缺图片资源编号的展示。上述待核项清零前，保持原绑定。
+拍快照时同时保留 `feishu:<工位 ID>` 和对应的 Worker、宿主及外部消息记录。使用与原来相同的飞书应用、会话和工位身份恢复。在 `audit-handoff` 的 `native_session_pending` 核对 `platform_display_unseen`、`platform_display_attempts`、`platform_input_notices`、`platform_known_receipts_uncommitted` 和 `platform_image_uploads_unconfirmed`。第一项是 Worker 已存、飞书尚未开始处理的展示。后两项分别计入已取得消息号、待 Worker 确认的展示，以及仍缺图片资源编号的展示。上述待核项清零前，保持原绑定。
+
+审计用同一快照里的 Worker 展示队列逐条核对飞书游标之前的事件和消息号。游标领先、缺前序收件或同序号正文不符时会显示 `platform_display_ledger_mismatch`，换绑会中止。先选回同一停写窗口内的两份库。只有尚未尝试的尾项时，按原绑定恢复平台并确认送达，再重新停写、采集和审计。
 
 准备发送时保存完整的目标、正文和幂等号。显示名或渲染参数变化后，恢复仍使用这份请求。取得飞书消息号后先落盘，再确认 Worker 的菜单关联。只缺 Worker 回执时，恢复会沿用原消息号补录。若平台新消息回执仍未知，超过程序的 55 分钟重试窗口即保留待核。已知目标卡的内容更新可向原卡重试同一正文。
 
@@ -216,6 +218,8 @@ python3 -m rewrite.state_bundle rollback --snapshot ./snapshot --manifest-sha256
 复跑 `python3 -B -m unittest -v rewrite.test_feishu_output rewrite.test_state_bundle.Bundle.test_feishu_restore_reuses_original_card_and_keeps_known_provider_receipt_after_deadline`。隔离 Worker HTTP 与 SQLite 实跑，飞书服务和宿主使用夹具。换显示名恢复后只有原卡，模拟超过一小时且已有飞书消息号时仅补录 Worker 回执，同条私聊仍只有一次宿主输入。未知平台回执过期与旧包未确认记录均未重发。[实测](evidence/feishu-receipt-restore.json)
 
 图片上传可用 `python3 -B -m unittest -v rewrite.test_state_bundle.Bundle.test_feishu_image_upload_backoff_survives_snapshot_without_reordering_messages` 复跑。快照恢复后，平台替身前两次保存了图片但未返回编号，之后实际展示仍是图前卡、单图、图后卡各一条。切回未读取 `view_image_uploads` 的旧包前先核清该项，以免旧包把仍待退避的上传立刻重试。
+
+用 `python3 -B -m unittest -v rewrite.test_state_bundle` 复验换绑。回环中留一条飞书尚未轮询的旧会话输出，第一次拒绝生成换绑副本。恢复后仅发送一次，重新采集后才允许生成副本。错配 Worker 库的正文和游标也各测了一次。[展示队列审计](evidence/feishu-handoff-display-tail.json)
 
 ### Codex 自动登记工位的恢复与回退
 

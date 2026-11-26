@@ -95,6 +95,9 @@ def validate_set(labels):
     workers = {component(label)[1] for label in labels if component(label)[0]=="worker"}
     if agents != workers:
         raise ValueError("each Worker must have its named adapter")
+    platforms = {component(label)[1] for label in labels if component(label)[0]=="feishu"}
+    if not platforms <= workers:
+        raise ValueError("each Feishu ledger must have its named Worker")
 
 
 def health(db,role):
@@ -238,6 +241,25 @@ def agent_pending(paths):
     return combined
 
 
+def feishu_display_backlog(db,platform_path):
+    if not db.execute("SELECT 1 FROM sqlite_schema WHERE name='display_events' AND type='table'").fetchone():
+        return None,"platform_display_ledger_unconfirmed"
+    db.execute("ATTACH DATABASE ? AS feishu",(platform_path.resolve().as_uri()+"?mode=ro&immutable=1",))
+    slots = db.execute("SELECT slot,cursor FROM feishu.view_cursor LIMIT 2").fetchall()
+    if len(slots)!=1 or slots[0]["slot"]!=1 or type(slots[0]["cursor"]) is not int or slots[0]["cursor"]<0:
+        return None,"platform_display_cursor_unconfirmed"
+    cursor = slots[0]["cursor"]
+    # A cursor is meaningful only against the identical, contiguous Worker event prefix.
+    matched = db.execute("""SELECT COUNT(*) FROM main.display_events e JOIN feishu.view_attempt v USING(seq)
+        WHERE e.seq BETWEEN 1 AND ? AND v.event=e.payload AND substr(v.mid,1,3)='om_'""",(cursor,)).fetchone()[0]
+    diverged = db.execute("""SELECT 1 FROM feishu.view_attempt v LEFT JOIN main.display_events e USING(seq)
+        WHERE v.seq<1 OR (v.seq>? AND (v.seq>?+1 OR v.mid IS NOT NULL OR e.seq IS NULL OR v.event<>e.payload))
+        LIMIT 1""",(cursor,cursor)).fetchone()
+    unseen = db.execute("""SELECT COUNT(*) FROM main.display_events e LEFT JOIN feishu.view_attempt v USING(seq)
+        WHERE e.seq>? AND v.seq IS NULL""",(cursor,)).fetchone()[0]
+    return unseen,"platform_display_ledger_mismatch" if matched!=cursor or diverged else None
+
+
 def audit_handoff(snapshot,expected):
     manifest = verify(snapshot,expected)
     labels = manifest["files"]
@@ -267,6 +289,8 @@ def audit_handoff(snapshot,expected):
         if role!="worker":
             continue
         remote = current.pop(wid,None)
+        platform_label = "feishu:"+wid
+        platform_issue = None
         with closing(readonly(snapshot/filename(label))) as db:
             local = db.execute("""SELECT task_id,assignment_id,delivery_id,host_state FROM jobs
                                   WHERE stage='accepted'""").fetchone()
@@ -274,13 +298,16 @@ def audit_handoff(snapshot,expected):
             pending = db.execute("SELECT COUNT(*) FROM outbox WHERE receipt IS NULL").fetchone()[0]
             session_pending = pending_counts(db,WORKER_NATIVE_PENDING)
             session_pending.update({k:v for k,v in pending_counts(db,WORKER_ADMISSION_PENDING).items() if v is not None})
+            if platform_label in labels:
+                unseen,platform_issue = feishu_display_backlog(db,snapshot/filename(platform_label))
+                session_pending["platform_display_unseen"] = unseen
             bound = None
             if local and db.execute("SELECT 1 FROM sqlite_schema WHERE name='assignment_sessions'").fetchone():
                 bound = db.execute("SELECT session FROM assignment_sessions WHERE assignment_id=?",
                                    (local["assignment_id"],)).fetchone()
         local_ids = {key:local[key] for key in ("task_id","assignment_id")} if local else None
         remote_ids = {key:remote[key] for key in ("task_id","assignment_id")} if remote else None
-        problems = []
+        problems = [platform_issue] if platform_issue else []
         if local_ids!=remote_ids:
             problems.append("assignment_mismatch")
         if (wid in sessions and (not sid or sid[0]!=sessions[wid])) or (local and wid not in sessions):
@@ -294,8 +321,8 @@ def audit_handoff(snapshot,expected):
         if local and not adapter_has_input(child_ledgers.get(bound_session,root),local,bound_session):
             problems.append("adapter_receipt_unconfirmed")
         session_pending.update(agent_pending([root,*child_ledgers.values()]))
-        if "feishu:"+wid in labels:
-            with closing(readonly(snapshot/filename("feishu:"+wid))) as db:
+        if platform_label in labels:
+            with closing(readonly(snapshot/filename(platform_label))) as db:
                 session_pending.update(pending_counts(db,FEISHU_NATIVE_PENDING))
                 session_pending.update({k:v for k,v in pending_counts(db,FEISHU_OPTIONAL_PENDING).items()
                                         if v is not None})

@@ -1,0 +1,17 @@
+{
+  "boundary": "Actual Worker HTTP and SQLite, simulated Feishu provider and native host.",
+  "consecutive_runs": 10,
+  "cursor_ahead_of_worker_rejected": true,
+  "display_seq": 2,
+  "fixture_platform_mid": "om_2",
+  "handoff_blocked_before_drain": true,
+  "handoff_staged_after_drain": true,
+  "mismatched_committed_payload_rejected": true,
+  "pending_snapshot": "5e7de0b67088595505b2c5fac745c74e61069f065545da701997596df12ea685",
+  "platform_writes_for_event": 1,
+  "settled_snapshot": "e06ebcab32618edfa1fe49d86ef10e1f461dbbcedf7a7c2aaf2f69310c95abe6",
+  "unseen_before_and_after": [
+    1,
+    0
+  ]
+}
