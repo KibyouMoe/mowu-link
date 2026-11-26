@@ -6,6 +6,8 @@
 
 试用采集可核清后交回旧客户端。邮件重开并查回 T04，两个 Info 保存在私有试用档。游戏先核 Event 的原宿主收件，并保存 Info 和已审核过滤项。实际旧邮件客户端只读 UID 14，实际旧游戏客户端从 17 续取，只上报事件 18。试用未收回执、缺号或桥序号回退会阻止交接。桥的数字后来恢复也不会解除已记录的回退。邮件服务、游戏桥与 Hermes 宿主使用夹具。[源端实测](evidence/feed-source-return.json) · [旧客户端交接步骤](router-rehearsal.md#把试用采集位置交回旧客户端)
 
+双来源回退连过 10 轮。macOS 全量通过 245 项，Linux arm64 通过 165 项、跳过 80 项。从 `e808c18c2d0a6e6978673fe03372a965d0893772` 构建 221 文件安装包，SHA-256 为 `18e452861f7336d4c07b39396e964c8be4acf47357e43897a79d0d9a64aaaf18`。安装目录通过采集、旧归档、Trigger 和组件快照共 26 项，文件摘要一致。旧 Router、Trigger、邮件客户端固定取 `30f61e671465db0b5bba221ba8c9fc2194a6e43d`。
+
 旧 Trigger 可用同一停写快照的四类收件账本决定回退游标。回退工具只允许旧 `/ack` 确认连续核实的序号。模拟后序 Event 越过前序 Notify、前序进宿主后掉回执，两次均拒绝生成回退副本。按原投递号查回后，旧 Trigger 通过 HTTP 推进 1→8，重开并重投确认后新增确认数为零，原未投递尾项仍可取。Info 另核管理端查阅证据。宿主与时钟使用夹具。[实测回执](evidence/trigger-return-prefix.json) · [回退步骤](router-rehearsal.md#试用发送后退回原订阅)
 
 累计游标回退场景连过 10 轮。macOS 全量通过 244 项，Linux arm64 通过 164 项、跳过 80 项。以 `babbeea16f52cb1a987c087a07c40381acb6a8b2` 构建 219 文件安装包，SHA-256 为 `fed53595bda54eb9c4808a0cf988bf3ad55b3481e5baf36984f527e43eae0613`。安装目录通过归档、Trigger 和组件快照回归共 19 项，文件摘要一致。测试用旧 Router 和 Trigger 源码取自 `30f61e671465db0b5bba221ba8c9fc2194a6e43d`，通过 `MOWULINK_TEST_LEGACY_ROOT` 指定。

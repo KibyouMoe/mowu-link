@@ -15,7 +15,7 @@ python3 -m unittest -v rewrite.test_mainline
 
 **怎样读结果。** `host_receipt` 来自目标宿主夹具自己的输入账本，带会话、输入号、投递号和正文摘要。`after_turn` 应为 `working`。夹具 Agent 在该输入专属的 MCP 管道调用 `worker_report` 后，W04 回应 `completed_reported` 并给出原派发号。Hermes 侧收到一条含成果正文、同一工单号的 `Notify`。最后由模拟溪流显式验收，才出现 `after_review: closed`。
 
-完整回归从仓库根目录运行 `python3 -B -m unittest discover -q -s rewrite -t .`。独立发布包只带 `rewrite/`。从安装目录跑全套时，把固定提交的 `server/router` 与 `server/trigger` 导出到另一个临时目录，将 `MOWULINK_TEST_LEGACY_ROOT` 指向该目录。这两套旧源码只用于迁移与回退用例生成测试数据。
+完整回归从仓库根目录运行 `python3 -B -m unittest discover -q -s rewrite -t .`。独立发布包只带 `rewrite/`。从安装目录跑全套时，把固定提交的 `server/router`、`server/trigger` 和 `sources/email` 导出到另一个临时目录，将 `MOWULINK_TEST_LEGACY_ROOT` 指向该目录。旧源码只用于迁移与回退用例。
 
 ## 边界与证据
 
