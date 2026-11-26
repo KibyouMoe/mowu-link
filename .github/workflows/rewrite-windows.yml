@@ -63,6 +63,7 @@ jobs:
                 'rewrite.test_service.Service.test_daemon_rejects_second_writer_and_cold_restart_recovers_same_state'
                 'rewrite.test_service.Service.test_cli_tls_restart_preserves_identity_file_and_receipts'
                 'rewrite.test_service.Service.test_three_process_worker_chat_and_assignment'
+                'rewrite.test_service.Service.test_windows_public_config_rejected'
               )
               python -B -m unittest -v @tests
             } finally {

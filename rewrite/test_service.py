@@ -22,7 +22,7 @@ from .wire import Client
 from .host_wire import RemoteAdapter
 
 
-CLI = [sys.executable,"-m","rewrite.service"]
+CLI = [sys.executable,"-B","-m","rewrite.service"]
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -128,6 +128,20 @@ class Service(unittest.TestCase):
             private_config(path)
         with self.assertRaises(ValueError):
             Client("http://example.test","unused")
+
+    @unittest.skipUnless(os.name=="nt","Windows ACL only")
+    def test_windows_public_config_rejected(self):
+        path = self.write_config("windows-config.json",{"fixture":True})
+        self.assertEqual(private_config(path),{"fixture":True})
+        subprocess.run(["icacls",path,"/grant","*S-1-1-0:(R)"],check=True,capture_output=True,timeout=10)
+        with self.assertRaisesRegex(ValueError,"owner-private"):
+            private_config(path)
+        cert,key = self.certificate()
+        refusal = subprocess.run([*CLI,"router","--db",self.root/"public-config.db","--identities",path,
+            "--cert",cert,"--key",key],cwd=ROOT,capture_output=True,text=True,timeout=10)
+        self.assertEqual((refusal.returncode,refusal.stdout),(1,""))
+        self.assertIn("expected an owner-private configuration file",refusal.stderr)
+        self.assertFalse((self.root/"public-config.db").exists())
 
     @unittest.skipUnless(shutil.which("openssl"), "TLS fixture certificate generator unavailable")
     def test_source_receipts_and_consumer_cursor_are_observed_independently(self):

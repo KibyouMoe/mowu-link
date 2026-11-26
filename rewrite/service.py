@@ -28,6 +28,10 @@ def private_config(path):
         if not stat.S_ISREG(info.st_mode) or (os.name == "posix" and
                 (info.st_mode & 0o077 or info.st_uid != os.getuid())):
             raise ValueError("expected an owner-private configuration file")
+        if os.name=="nt":
+            from .windows_acl import private_file
+            if not private_file(stream.fileno()):
+                raise ValueError("expected an owner-private configuration file")
         return json.load(stream)
 
 
