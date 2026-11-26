@@ -10,6 +10,8 @@
 
 复跑 `python3 -B -m unittest -v rewrite.test_codex_app_server.CodexAppServer.test_managed_native_commands_bind_without_manual_enrollment_and_restore rewrite.test_state_bundle.Bundle.test_capture_refuses_to_leave_native_session_registry_outside_the_backup`。macOS 全量 228 项通过。Linux arm64 157 项通过，另 71 项本机宿主用例跳过。
 
+从 `149788b782232b4fe75d4c5ba9e3d8f4af2502e1` 构建的独立包包含 195 份文件，SHA-256 为 `d6ee315bcb6b6010a7f09e187beccd5ed6484b8f6e86b237a6bbff215b3586aa`。安装目录通过真实原生自动换绑、创建待核、快照防漏与旧方式换绑四项，逐文件摘要复验一致。复跑时设置 `PYTHONDONTWRITEBYTECODE=1`，使测试子进程也不写字节码缓存。不开启自动登记时，隔离 HTTPS 的旧版、混合版、新版和回退阶段保留同一条原生私聊回执 `3542952d-dfcb-4633-8845-7e4f41abb816`，升级前、试用和回退各只有一条原生输入。复跑 `python3 -B -m rewrite.release_check --repository . --component worker-pair --previous 7d16090452d0e2bd8895e75584eeac191caf72da --new 149788b782232b4fe75d4c5ba9e3d8f4af2502e1`。
+
 Codex 独立只读工位已能经授权固定会话接口准备新会话或分支。实测沿用原工作区、模型和思考强度。空会话准备不增加模型请求，原生分支保留原父会话及历史。命名回执丢失时使用已落账的原生 ID 继续确认。创建回执丢失时，同一操作重试与原生进程重开均保留待核，未再发创建。当前安装的 App Server schema 中 `thread/start` 和 `thread/fork` 无供调用者提交幂等号的字段。离线停写换绑已能核对这类待核记录。[原生准备与接入证据](evidence/codex-native-thread-preparation.json)
 
 用准备端返回的原生 ID 显式登记独立适配器，再经现有交接将空会话从冷态启用。正式单仅产生一个原生回合，模型夹具两次调用 `worker_report`，Router 只留一条待验通知。飞书 `/new`、`/fork` 的自动适配器接入和换绑尚待实现，本轮未向真实用户会话投递。
