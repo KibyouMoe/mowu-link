@@ -137,7 +137,7 @@ class HostAdapter:
                 elif (payload.get("kind") in ("task.cancel","task.transfer_out")
                       and callable(getattr(self.host,"deliver_control",None))):
                     with self.db.transaction() as db:
-                        bindings = db.execute("""SELECT native_id,json_extract(receipt,'$.turn_id') AS turn_id
+                        bindings = db.execute("""SELECT delivery_id,native_id,json_extract(receipt,'$.turn_id') AS turn_id
                             FROM intents WHERE session=? AND receipt IS NOT NULL
                             AND json_extract(payload,'$.task_id')=? AND json_extract(payload,'$.assignment_id')=?
                             AND json_extract(payload,'$.kind') IN ('task','task_update','task_probe','question_answer')
@@ -147,8 +147,12 @@ class HostAdapter:
                 else:
                     receipt = self.host.deliver(self.session, did, payload, digest)
             except Fault as error:
-                if (payload["kind"]!="task" or error.status!=409 or error.code!="native_task_not_admitted_busy"
-                        or not getattr(self.host,"rejects_busy_before_task_write",False)):
+                task_deferred = (payload["kind"]=="task" and error.code=="native_task_not_admitted_busy"
+                                 and getattr(self.host,"rejects_busy_before_task_write",False))
+                control_deferred = (payload["kind"] in ("task.cancel","task.transfer_out")
+                                    and error.code=="native_control_not_admitted_busy"
+                                    and getattr(self.host,"rejects_busy_before_control_write",False))
+                if error.status!=409 or not (task_deferred or control_deferred):
                     raise
                 # This host explicitly refused before entering the native write.
                 # All uncertain writes retain their original intent for lookup only.
@@ -156,7 +160,8 @@ class HostAdapter:
                     removed = db.execute("""DELETE FROM intents WHERE delivery_id=?
                                           AND digest=? AND receipt IS NULL""",(did,digest)).rowcount
                 require(removed,409,"host_delivery_unconfirmed")
-                raise Fault(409,"task_delivery_deferred",True) from error
+                reason = "control_delivery_deferred" if control_deferred else "task_delivery_deferred"
+                raise Fault(409,reason,True) from error
         else:
             receipt = self.lookup_receipt(did,payload,digest)
         return self.record_receipt(did,payload,digest,receipt)

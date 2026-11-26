@@ -2,7 +2,7 @@
 from contextlib import contextmanager
 import hashlib
 from queue import Empty
-from threading import Event, Thread
+from threading import Event, RLock, Thread
 import time
 
 from .agent_tools import TOOLSET
@@ -14,8 +14,12 @@ WORKER_TOOLS = {item["name"] for item in TOOLSET}
 
 
 class AppServerHost:
+    rejects_busy_before_task_write = True
+    rejects_busy_before_control_write = True
+
     def __init__(self, rpc, thread_id):
         self.rpc, self.thread_id = rpc,thread_id
+        self.write_lock = RLock()
 
     def request(self,method,params):
         try:
@@ -60,11 +64,32 @@ class AppServerHost:
     def deliver_media(self,session,did,payload,digest,files):
         require(session==self.thread_id,409,"wrong_native_session")
         blocks = self.input_blocks(did,payload,digest,files)
-        turn = self.request("turn/start",{"threadId":session,"input":blocks,
-                                          "clientUserMessageId":"mowulink-"+did})["turn"]
-        proof = self.lookup_inputs(session,did,payload,digest,blocks)
-        require(not proof or proof["turn_id"]==turn["id"],409,"host_receipt_mismatch")
+        with self.write_lock:
+            if payload["kind"]=="task":
+                require(not self.busy(session),409,"native_task_not_admitted_busy")
+            turn = self.request("turn/start",{"threadId":session,"input":blocks,
+                                              "clientUserMessageId":"mowulink-"+did})["turn"]
+            proof = self.lookup_inputs(session,did,payload,digest,blocks)
+            require(not proof or proof["turn_id"]==turn["id"],409,"host_receipt_mismatch")
         return proof
+
+    def deliver_control(self,session,did,payload,digest,bindings):
+        with self.write_lock:
+            thread = self.thread(session,include_turns=True)
+            if thread["status"]["type"]=="active":
+                require(thread["turns"],409,"native_control_not_admitted_busy")
+                current = thread["turns"][-1]
+                users = [item for item in current["items"] if item.get("type")=="userMessage"]
+                known = next((item for item in bindings if len(users)==1
+                              and item["turn_id"]==current["id"] and item["native_id"]==users[0]["id"]),None)
+                require(known,409,"native_control_not_admitted_busy")
+                if not self.stop_turn(session,{"session":session,**known},start=True):
+                    return None
+                if self.busy(session):
+                    return None
+            else:
+                require(thread["status"]["type"]=="idle",503,"native_agent_unavailable")
+            return self.deliver(session,did,payload,digest)
 
     def lookup_expected(self,session,did,payload,digest):
         return self.lookup_media(session,did,payload,digest,[])
@@ -167,8 +192,13 @@ class AppServerHost:
         require(tool in WORKER_TOOLS,403,"unsupported_native_tool")
         args = call.get("arguments")
         require(isinstance(args,dict),422,"invalid_arguments")
+        turn_id = string(call,"turnId")
+        thread = self.thread(self.thread_id,include_turns=True)
+        turn = next((item for item in thread["turns"] if item.get("id")==turn_id),None)
+        require(turn and sum(item.get("type")=="userMessage" for item in turn["items"])==1,
+                409,"native_turn_unconfirmed")
         receipt = worker.request("POST","worker/native-tool",{
-            "session":self.thread_id,"turn_id":string(call,"turnId"),"tool":tool,
+            "session":self.thread_id,"turn_id":turn_id,"tool":tool,
             "call_id":string(call,"callId"),"arguments":args,
         })
         require(isinstance(receipt,dict),502,"worker_tool_unconfirmed")
@@ -189,7 +219,8 @@ def worker_callbacks(host,worker,notify_turn_end):
                 return {"success":True,"contentItems":[{"type":"inputText","text":encode(receipt)}]}
             except Fault as error:
                 # A native tool request can precede persistence of its original user input.
-                if error.code=="native_turn_unconfirmed" and time.monotonic()<until and not stop.wait(.05):
+                if (error.code in ("native_turn_unconfirmed","native_history_unconfirmed")
+                        and time.monotonic()<until and not stop.wait(.05)):
                     continue
                 return {"success":False,"contentItems":[{"type":"inputText","text":error.code}]}
             except OSError:

@@ -105,7 +105,15 @@ class Worker:
                 first = db.execute("""UPDATE assignment_followups SET started=1
                                       WHERE delivery_id=? AND started=0""",(delivery_id,)).rowcount
         if first:
-            proof = self.adapter.deliver(delivery_id,payload,session=session)
+            try:
+                proof = self.adapter.deliver(delivery_id,payload,session=session)
+            except Fault as error:
+                if not (kind in ("task.cancel","task.transfer_out") and error.status==409
+                        and error.code=="control_delivery_deferred" and error.retryable):
+                    raise
+                with self.db.transaction() as db:
+                    db.execute("UPDATE assignment_followups SET started=0 WHERE delivery_id=?",(delivery_id,))
+                return None
         else:
             # An upgraded inbox entry without an attempt record may already have entered the host.
             proof = self.adapter.lookup_delivery(delivery_id,payload,session=session)

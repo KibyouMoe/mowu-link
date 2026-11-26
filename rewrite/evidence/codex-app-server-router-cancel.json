@@ -1,0 +1,63 @@
+{
+  "cases": [
+    {
+      "task_id": "42ed19d2-9553-4596-945c-34c4a607fb56",
+      "assignment_id": "86b18e2d-097d-49db-a9e8-4b58f31b26a0",
+      "original": {
+        "delivery_id": "45ba3af4-9cb1-4395-8cb8-a8a44c823841",
+        "digest": "5666c46219fd55802e583c19dfb9ffe4cce42a0cfeee7995506aed4b22230e0f",
+        "native_id": "01a216d6-fc5b-79b2-b57f-48ee44ec7a0a",
+        "session": "01a216d6-fc1e-7900-9e00-bbbf5580101e",
+        "turn_id": "01a216d6-fc52-7ab1-8b41-0ddcb1d12001"
+      },
+      "control_receipt": {
+        "delivery_id": "42bca757-3582-4bda-9d8b-9982fa96e246",
+        "digest": "a8d03efc0b916bfb4407b06b5d3b2f5474ada7b13f89f311eec04ed6ba0610bb",
+        "native_id": "01a216d6-fc75-7410-ab70-0619928147e7",
+        "session": "01a216d6-fc1e-7900-9e00-bbbf5580101e",
+        "turn_id": "01a216d6-fc72-7f51-898c-1d8638687748"
+      },
+      "unrelated": null,
+      "unrelated_preserved_at_cancel": false,
+      "native_statuses": [
+        "interrupted",
+        "completed"
+      ],
+      "cleanup_pending": true
+    },
+    {
+      "task_id": "4034e0e7-0fb1-46e6-b285-5c2d3e666403",
+      "assignment_id": "7b3394e9-bb62-450f-8dc5-bb6e4e8796a4",
+      "original": {
+        "delivery_id": "f567aa2c-3dbf-40d3-bcb5-46064f76ff98",
+        "digest": "029b8a8e7743a2ef331cb78ecd55ebf64ffa5210aed000b8e1feee1e98bf6884",
+        "native_id": "01a216d6-fcf3-7f13-93b7-e7d57dec9ded",
+        "session": "01a216d6-fcb7-7751-ae12-52ddc5d9b672",
+        "turn_id": "01a216d6-fced-72a2-b763-82292d701028"
+      },
+      "control_receipt": {
+        "delivery_id": "a9c5c4bc-a08e-4b87-9887-41a613210701",
+        "digest": "770f60c6a744fe82b6e8ea0b20c9bbf2b17b7630a3d8e8a98a17d9d50ba0e2a9",
+        "native_id": "01a216d6-fd23-7fd2-9672-1561b9f25fc0",
+        "session": "01a216d6-fcb7-7751-ae12-52ddc5d9b672",
+        "turn_id": "01a216d6-fd20-7932-9a22-1000eb9aa78d"
+      },
+      "unrelated": {
+        "session": "01a216d6-fcb7-7751-ae12-52ddc5d9b672",
+        "delivery_id": "38ece0f1-1bde-45bc-9cbd-7212dda17fb6",
+        "digest": "e8256b6b1c634d28c8d2291a3321b0127ea62fbab41e542889f01a891f8645f3",
+        "native_id": "01a216d6-fd07-7382-b529-1613523bb6f8",
+        "turn_id": "01a216d6-fd04-7df0-a9a5-4740d6576f9c"
+      },
+      "unrelated_preserved_at_cancel": true,
+      "native_statuses": [
+        "interrupted",
+        "interrupted",
+        "completed"
+      ],
+      "cleanup_pending": true
+    }
+  ],
+  "boundary": "Isolated Router and native App Server, scripted model. No cleanup success inferred.",
+  "consecutive_runs": 12
+}

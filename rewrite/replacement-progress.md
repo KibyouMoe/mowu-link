@@ -4,6 +4,8 @@
 
 ## 检查点与证据
 
+在实际 App Server 发现活跃时调用 `turn/start` 会复用当前回合，后续历史可见两条输入。重做适配器已在正式写入前确认空闲，原生工具调用也核对该回合只存在一条用户输入。真实 Router 取消原派发时，已核只中止该原生回合。另一个回合活跃时续用原控制号等待，它仍保持活跃，随后空闲才收到取消。资源清理无凭据时不释放持单。两个场景各 12 次通过。[取消证据](evidence/codex-app-server-router-cancel.json)。复跑 `python3 -m unittest -v rewrite.test_codex_app_server`，模型为本地脚本。
+
 独立 App Server 的工单提问已从原生 `worker_ask` 走 W05。管理端的原回答经同一工单、派发和题号回到实际线程，原生工具回报完工后才释放。原答复重投只返回原回执。适配器只接受已知 Worker 工具名，拒绝任意工具、错线程和错回合。连续 12 次通过。复跑 `python3 -m unittest -v rewrite.test_codex_app_server`。[问答证据](evidence/codex-app-server-native-question.json)。本地脚本模型、隔离管理驾驶，无飞书云端。
 
 独立 Codex 适配器已把新结束回合接入原 Worker 的卡片投影。首次绑定前的试验回合零抄送。Worker 先记回复再丢回执时，适配器重投同一事件，前后确认的序号一致。用另一 App Server 进程读取同一历史和账本，原输出未重复。连续 10 轮，每轮原卡形态的工单和回复各一张、Router 成果通知一条。复跑 `python3 -m unittest -v rewrite.test_codex_app_server.CodexAppServer.test_codex_adapter_process_handles_native_report_without_controller_dispatch`。[出向证据](evidence/codex-adapter-output.json)。飞书和模型由夹具提供。

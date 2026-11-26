@@ -66,7 +66,7 @@ class Provider(BaseHTTPRequestHandler):
             arguments = {"text":"Use the first route?","options":[{"id":"go","label":"继续"}]}
             item = {"type":"function_call","id":"fc_question","name":"worker_ask","call_id":"native_question",
                     "arguments":encode(arguments)}
-        elif payload and not question and calls<2:
+        elif payload and payload.get("kind") not in ("task.cancel","task.transfer_out") and not question and calls<2:
             arguments = {"task_id":payload["task_id"],"assignment_id":payload["assignment_id"],
                          "summary":"Isolated App Server result"}
             item = {"type":"function_call","id":"fc_fixture_"+str(calls),"name":"worker_report",
@@ -585,3 +585,58 @@ class CodexAppServer(unittest.TestCase):
                          "manager_answer":answer,"report_tool_calls":[item["id"] for item in results],
                          "notification_ids":[question_notice["delivery_id"],result_notice["delivery_id"]],
                          "boundary":"Native App Server with scripted local model and an isolated manager test driver"}
+
+    def test_router_cancel_interrupts_bound_app_server_turn_and_preserves_unrelated_turn(self):
+        cases = []
+        for unrelated in (False,True):
+            with self.subTest(unrelated=unrelated), isolated_app_server(self.root,self.origin) as rpc:
+                loop,host,frame,original,_call = self.pending_native_task(rpc)
+                sid = original["session"]
+                tid,aid = frame["payload"]["task_id"],frame["payload"]["assignment_id"]
+                foreign = None
+                if unrelated:
+                    self.assertIsNotNone(host.stop_turn(sid,original,start=True))
+                    foreign_id = guid()
+                    other = {"kind":"task","task_id":guid(),"assignment_id":guid()}
+                    digest = hashlib.sha256(encode(other).encode()).hexdigest()
+                    host.deliver(sid,foreign_id,other,digest)
+                    until = time.monotonic()+12
+                    while True:
+                        event = rpc.event(until)
+                        if event.get("method")=="item/tool/call":
+                            break
+                    foreign = host.lookup_expected(sid,foreign_id,other,digest)
+                    self.assertIsNotNone(foreign)
+                    with self.assertRaisesRegex(Fault,"native_task_not_admitted_busy"):
+                        host.deliver(sid,guid(),other,digest)
+                current = loop.hermes.inspect(tid)["task"]
+                loop.hermes.act(guid(),tid,current["revision"],"cancel",reason="Cancel original isolated work")
+                loop.worker.poll()
+                if foreign:
+                    live = host.thread(sid,include_turns=True)["turns"][-1]
+                    self.assertEqual((live["id"],live["status"]),(foreign["turn_id"],"inProgress"))
+                    self.assertIsNotNone(host.stop_turn(sid,foreign,start=True))
+                until = time.monotonic()+12
+                while time.monotonic()<until:
+                    loop.worker.poll()
+                    turns = host.thread(sid,include_turns=True)["turns"]
+                    if len(turns)==(3 if unrelated else 2) and turns[-1]["status"]=="completed":
+                        break
+                    time.sleep(.02)
+                self.assertEqual([turn["status"] for turn in turns],["interrupted"]*(2 if unrelated else 1)+["completed"])
+                control, = [item for item in loop.wire.frames(0) if item["kind"]=="task.cancel"]
+                body = {"kind":"task.cancel",**control["payload"]}
+                receipt = loop.adapter.lookup_delivery(control["delivery_id"],body,session=sid)
+                self.assertEqual(receipt["turn_id"],turns[-1]["id"])
+                with self.assertRaisesRegex(Fault,"native_cleanup_unconfirmed"):
+                    loop.worker.report(receipt["native_id"],tid,aid,"No cleanup proof","cancel_confirmed")
+                self.assertEqual(loop.worker.hold(),{"held_task_id":tid,"held_assignment_id":aid})
+                result = loop.hermes.inspect(tid)
+                self.assertIsNone(result["last_report"])
+                self.assertEqual(result["task"]["state"],"working")
+                self.assertEqual([row["assignment_id"] for row in result["pending_cleanup"]],[aid])
+                self.assertEqual(loop.manager_wire.frames(0),[])
+                cases.append({"task_id":tid,"assignment_id":aid,"original":original,"control_receipt":receipt,
+                              "unrelated":foreign,"unrelated_preserved_at_cancel":unrelated,
+                              "native_statuses":[turn["status"] for turn in turns],"cleanup_pending":True})
+        self.evidence = {"cases":cases,"boundary":"Isolated Router and native App Server, scripted model. No cleanup success inferred."}
