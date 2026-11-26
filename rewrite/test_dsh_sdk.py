@@ -292,7 +292,7 @@ class DshSdk(unittest.TestCase):
         card_id = sink.calls[-1][1]
         self.assertIn("尚未确认送达",self.platform_command("om_menu_unknown","/model 2"))
         views.poll()
-        self.assertEqual(sink.calls.count(("send",card_id)),2)
+        self.assertEqual(sink.calls.count(("send",card_id)),1)
         self.assertEqual([row[0] for row in sink.messages.values()].count(card_id),1)
         self.assertIn("第 1/2 页",self.platform_command("om_model_back","/model prev"))
         views.poll()

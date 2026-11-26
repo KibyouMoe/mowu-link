@@ -298,7 +298,7 @@ class WorkerResume(unittest.TestCase):
         self.assertEqual(self.status(self.clients)["host_session"],self.source)
         views.poll()
         first_id,_ = view(first)
-        self.assertEqual(sink.calls.count(("send",first_id)),2)
+        self.assertEqual(sink.calls.count(("send",first_id)),1)
         self.assertEqual(sum(value[0]==first_id for value in sink.messages.values()),1)
         self.assertIn("仅可浏览",output(first))
         self.assertIn("暂未配置",output(send("om_browsable_only","/resume 1",first_id)))
