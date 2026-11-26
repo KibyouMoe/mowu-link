@@ -48,13 +48,14 @@ def held_pair(data):
 
 
 class Orders:
-    def __init__(self, path, clock=time.time, poll_seconds=5, lease_seconds=30):
+    def __init__(self, path, clock=time.time, poll_seconds=5, lease_seconds=30, *, drain_dispatch=False):
         self.db = Database(path, SCHEMA + delivery.SCHEMA + pool.SCHEMA + cleanup.SCHEMA + questions.SCHEMA
                            + attachments.SCHEMA + messages.SCHEMA + peers.SCHEMA + links.ROUTER_SCHEMA
                            + legacy_history.SCHEMA + legacy_peers.SCHEMA + approvals.SCHEMA + admission.SCHEMA)
         self.clock = clock
         self.poll_seconds = poll_seconds
         self.lease_seconds = lease_seconds
+        self.drain_dispatch = drain_dispatch
 
     def tick(self):
         with self.db.transaction() as db:
@@ -98,6 +99,8 @@ class Orders:
                 and now - row["idle_since"] >= 10 and not admission.active(db,row["worker_id"]))
 
     def dispatch(self, db, worker_id):
+        if self.drain_dispatch:
+            return
         row = db.execute("SELECT * FROM workers WHERE worker_id=?", (worker_id,)).fetchone()
         if not self.available(db,row):
             return

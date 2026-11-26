@@ -47,6 +47,8 @@ class Service(unittest.TestCase):
         Thread(target=lambda: ready.put(process.stdout.readline()),daemon=True).start()
         info = json.loads(ready.get(timeout=10))
         self.assertTrue(info["tls"])
+        if role=="router":
+            self.assertEqual(info["dispatch_draining"],"--drain-dispatch" in extra)
         return process,"https://127.0.0.1:"+str(info["port"])
 
     def certificate(self):
@@ -85,7 +87,7 @@ class Service(unittest.TestCase):
         primary.kill()
         primary.wait(8)
         self.assertTrue((self.root/"router.db.writer").is_file())
-        _,reopened = self.start(identities,cert,key)
+        _,reopened = self.start(identities,cert,key,extra=("--drain-dispatch",))
         task = Client(reopened,token,cert).request("GET","tasks/"+created["task_id"])["task"]
         self.assertEqual(task["title"],"Keep this state")
 

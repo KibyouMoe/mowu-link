@@ -16,7 +16,7 @@
 | Hermes Event、Notify、Info 与 Feishu 提示 | C01–C03、H01–H02 | 真实隔离 Hermes 插件与本地会话，先提示后交正文。Notify 空闲 10 秒逐条，Info 未唤醒。平台使用飞书 SDK 或服务器替身。 | 独立线上测试身份、真实 Feishu 消息号与客户端侧时间对证。 |
 | 旧 Trigger 订阅、历史、策略 | 来源实例游标、离线归档和只读积压查询 | 现役 0.7.0 只读盘点可见一个 active 订阅，复核时未读为零，另一时间仍有新入站。旧历史、等级、订阅和回执已在离线副本复跑并逐字节回退。新 CLI 已在隔离 TLS 上核对 T04 回执丢失、C02 乱序及重开后计数。 | 活跃消费者和旧待发送队列切换窗口；其他部署是否有需保留的规则；旧订阅开关的实际调用者。 |
 | 同伴通信、附件、旧聊天 | Worker 私聊、Router 授权附档与历史、旧飞书私聊离线导出 | 隔离 Router 验接收方、重复回执、长文、附件摘要。同机实际 DSH 与 Codex App Server 已通过原生工具互发图文和关联回信，两端模型为本地脚本。旧同伴记录仅原参与人查询，旧飞书私聊可在离线副本按工位分页导出。 | 真实授权的两个测试工位互发；旧飞书私聊档的实际保留范围和仍使用旁听接口的消费者另验。 |
-| 进程启动、版本回退与历史保全 | `rewrite.service`、`release_check`、`codex_release_check`、`state_bundle`、`cutover` | 两版 Router 与 Worker 分步安装和回退。独立 Codex App Server 已核原会话、单次待验成果和多会话快照复原，前一版适配器接回原持单。隔离演练涵盖七库恢复、原旧工单与附件、已验收迁入单原号归档和结果私有保留。已验收原单与未派新单可一起回退，旧 Router 回放中断后重开，按原号重送无重复。[混合回退](evidence/cutover-mixed-rollback.json) | 仍在途的工单和其他试用写入的回迁，真实 profile 跨机、Windows 启动和生产切换窗口。 |
+| 进程启动、版本回退与历史保全 | `rewrite.service`、`release_check`、`codex_release_check`、`state_bundle`、`cutover` | 两版 Router 与 Worker 分步安装和回退。独立 Codex App Server 已核原会话、单次待验成果和多会话快照复原，前一版适配器接回原持单。隔离演练涵盖七库恢复、原旧工单与附件、已验收迁入单原号归档和结果私有保留。已验收原单与未派新单可一起回退；回放中断后按原号重送无重复。在途迁入单可冻结新派发，恢复原派发并查回丢失的 W04，验收后再回旧版。[混合回退](evidence/cutover-mixed-rollback.json) · [在途排空](evidence/cutover-inflight-drain.json) | 宿主无法核回、派发已变化及其他试用写入的回迁，真实 profile 跨机、Windows 启动和生产切换窗口。 |
 
 ## Worker 篇 A01–A11
 

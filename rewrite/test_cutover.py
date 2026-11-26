@@ -11,16 +11,20 @@ import tempfile
 import unittest
 from threading import Thread
 
+from .adapter import HostAdapter
 from .cutover import backup, digest, export_chat, prepare, reconcile, rollback, stage_queue_rollback, verified
 from .devloop import FixtureHost, Loop, agent_report
 from .legacy_test_fixture import source_for
 from .test_mainline import Clock
 from .orders import Orders
 from .reviewed_rollback import stage_reviewed_rollback
+from .state_bundle import audit_handoff, capture, restore
 from .storage import Fault, guid
 from .hermes import HermesAdapter
 from .hermes_tools import ManagerTools
+from .trigger import Trigger
 from .wire import Client, serve_loopback
+from .worker import Worker
 from .worker_service import WorkerService
 
 
@@ -547,6 +551,166 @@ store.close()
                 "legacy_queue_order":[row["task_id"] for row in resumed["rows"]],"legacy_active_task":resumed["active"],
                 "changed_request_status":409,"reviewed_archive_reason":resumed["archive"]["reason"],
                 "boundary":"Actual isolated rewrite and legacy Router HTTP and SQLite. Worker model is scripted."}
+
+    def test_inflight_rollback_drains_same_assignment_before_old_router_can_resume(self):
+        old_ids = json.loads(self.old("""
+store = RouterStore(sys.argv[1])
+store.upsert_worker("oguri")
+first = store.orders.create("Finish in the trial","Keep the original holder","oguri",{},"fixture",None,None)
+second = store.orders.create("Leave queued","The old Router will pick this up","oguri",{},"fixture",None,None)
+store.close()
+print(json.dumps([first,second]))
+""",self.legacy))
+        backup(self.legacy,self.attachments,self.snapshot)
+        baseline = prepare(self.snapshot,self.trial,self.source_id)
+        tid,waiting = (baseline["queued_id_map"][old] for old in old_ids)
+        clock = Clock()
+        native = FixtureHost(self.root/"native.db","drain-native-session")
+        native_manager = FixtureHost(self.root/"native-admin.db","drain-manager-session")
+        paths = {"router:main":self.trial/"router.db","worker:oguri":self.root/"worker.db",
+                 "agent:oguri":self.root/"agent.db","hermes:main":self.root/"manager.db",
+                 "hermes-host:main":self.root/"manager-host.db","trigger:mail":self.root/"trigger.db"}
+        Trigger(paths["trigger:mail"],"mail",clock)
+
+        @contextmanager
+        def boot(files,*,drain):
+            tokens = {"manager":"hermes","fixture-worker":"worker/oguri"}
+            with serve_loopback(Orders(files["router:main"],clock,poll_seconds=1,drain_dispatch=drain),tokens) as server:
+                thread = Thread(target=server.serve_forever,kwargs={"poll_interval":.02})
+                thread.start()
+                try:
+                    url = "http://127.0.0.1:"+str(server.server_port)
+                    worker = Worker(files["worker:oguri"],"oguri",Client(url,"fixture-worker"),
+                                    HostAdapter(files["agent:oguri"],native,native.session))
+                    manager = HermesAdapter(files["hermes:main"],Client(url,"manager"),
+                        HostAdapter(files["hermes-host:main"],native_manager,native_manager.session),clock)
+                    yield manager,worker
+                finally:
+                    server.shutdown()
+                    thread.join()
+
+        def recover(files,label):
+            stored = self.root/(label+"-snapshot")
+            seal = capture(files,"a"*40,stored)["manifest_sha256"]
+            audit = audit_handoff(stored,seal)
+            recovered = restore(stored,seal,self.root/(label+"-recovered"))
+            return audit,{role:Path(path) for role,path in recovered.items()}
+
+        def view(files,label):
+            folder = self.root/label
+            folder.mkdir()
+            shutil.copyfile(files["router:main"],folder/"router.db")
+            shutil.copyfile(self.trial/"baseline.json",folder/"baseline.json")
+            return folder
+
+        with boot(paths,drain=False) as (manager,worker):
+            worker.connect()
+            worker.poll()
+            clock.advance(10)
+            worker.poll()
+            worker.poll()
+            held = worker.hold()
+            self.assertEqual(held["held_task_id"],tid)
+            aid = held["held_assignment_id"]
+            payload,native_receipt = native.entries()[0]
+            self.assertEqual(worker.adapter.deliver(native_receipt["delivery_id"],payload),native_receipt)
+            native.is_busy = True
+        review = self.root/"drain-review.json"
+        with self.assertRaisesRegex(ValueError,"closed after one W04"):
+            stage_reviewed_rollback(self.snapshot,self.trial,review,self.restore)
+        self.assertFalse(self.restore.exists())
+        audit,draining = recover(paths,"working")
+        self.assertFalse(audit["needs_review"])
+        self.assertEqual(audit["workers"][0]["router_assignment"],{"task_id":tid,"assignment_id":aid})
+
+        attempts = []
+        summary = "从原派发恢复并只报一次。"
+        with boot(draining,drain=True) as (manager,worker):
+            self.assertEqual(worker.connect()["reconcile"],"continue")
+            worker.poll()
+            self.assertEqual(worker.hold(),held)
+            self.assertEqual(native.entries(),[(payload,native_receipt)])
+            send = worker.router.request
+
+            def lose_receipt(method,path,body=None,key=None,**kwargs):
+                reply = send(method,path,body,key,**kwargs)
+                if path==f"tasks/{tid}/report":
+                    attempts.append((key,reply))
+                    raise ConnectionError("simulated loss after durable W04")
+                return reply
+
+            worker.router.request = lose_receipt
+            with self.assertRaisesRegex(ConnectionError,"after durable W04"):
+                worker.report(native_receipt["native_id"],tid,aid,summary)
+            self.assertEqual(worker.hold(),held)
+            self.assertEqual(manager.inspect(tid)["task"]["state"],"completed_reported")
+
+        pending_view = view(draining,"durable-report")
+        with self.assertRaisesRegex(ValueError,"closed after one W04"):
+            stage_reviewed_rollback(self.snapshot,pending_view,review,self.restore)
+        self.assertFalse(self.restore.exists())
+        pending,settling = recover(draining,"waiting-for-w04-receipt")
+        self.assertTrue(pending["needs_review"])
+        self.assertEqual([item["issue"] for item in pending["issues"]],
+                         ["assignment_mismatch","report_receipt_pending"])
+
+        with boot(settling,drain=True) as (manager,worker):
+            send = worker.router.request
+
+            def observe_retry(method,path,body=None,key=None,**kwargs):
+                reply = send(method,path,body,key,**kwargs)
+                if path==f"tasks/{tid}/report":
+                    attempts.append((key,reply))
+                return reply
+
+            worker.router.request = observe_retry
+            self.assertEqual(worker.connect()["release_assignment_ids"],[aid])
+            self.assertEqual(len(attempts),2)
+            self.assertEqual(attempts[0],attempts[1])
+            self.assertEqual(attempts[0][1]["release_assignment_id"],aid)
+            self.assertIsNone(worker.hold()["held_task_id"])
+            native.is_busy = False
+            worker.poll()
+            manager.poll()
+            clock.advance(12)
+            worker.poll()
+            worker.poll()
+            manager.poll()
+            state = manager.workers(worker_id="oguri")["items"][0]
+            self.assertTrue(state["online"])
+            self.assertFalse(state["busy"])
+            self.assertIsNone(manager.inspect(waiting)["task"]["assignment_id"])
+            self.assertEqual(native.entries(),[(payload,native_receipt)])
+            notice, = native_manager.entries()
+            self.assertEqual(notice[0]["task_id"],tid)
+            delivered = manager.inspect(tid)["task"]
+            self.assertEqual(delivered["state"],"completed_reported")
+            self.assertEqual(manager.approve(guid(),tid,delivered["revision"])["task"]["state"],"closed")
+
+        final_view = view(settling,"after-review")
+        final_seal = capture(settling,"a"*40,self.root/"settled-snapshot")["manifest_sha256"]
+        audited = audit_handoff(self.root/"settled-snapshot",final_seal)
+        self.assertFalse(audited["needs_review"])
+        self.assertTrue(audited["workers"][0]["native_session_ledger_clear"])
+        with closing(sqlite3.connect(final_view/"router.db")) as db:
+            count = db.execute("SELECT count(*) FROM deliveries WHERE kind='task.dispatch'").fetchone()[0]
+        self.assertEqual(count,1)
+        review.write_text(json.dumps({"trial_sha256":digest(final_view/"router.db"),"closed_assignments":{tid:aid}}))
+        self.assertEqual(stage_reviewed_rollback(self.snapshot,final_view,review,self.restore)["reviewed_orders"],1)
+        readback = json.loads(self.old("""
+store = RouterStore(sys.argv[1])
+tid = sys.argv[2]
+print(json.dumps({"archived":store.orders.get(tid)["archive"]["reason"],"next":store.orders.next_dispatch("oguri"),
+                  "held":store.orders.held("oguri")}))
+store.close()
+""",self.restore/"legacy.db",old_ids[0]))
+        self.assertEqual(readback,{"archived":"reviewed_on_rewrite","next":old_ids[1],"held":None})
+        self.drain_evidence = {"trial_task_id":tid,"assignment_id":aid,"native_receipt":native_receipt,
+                               "lost_receipt_audit":pending["issues"],"w04_key":attempts[1][0],"w04_receipt":attempts[1][1],
+                               "router_dispatches":count,"manager_native_notices":len(native_manager.entries()),
+                               "next_trial_task_unassigned":waiting,"settled_snapshot_sha256":final_seal,
+                               "legacy_readback":readback,"old_router_blocked_before_review":True,
+                               "boundary":"Isolated rewrite HTTP and real legacy store; host, model and clock are fixtures."}
 
     def test_pending_peer_or_missing_middle_chunk_prevents_publishing_a_partial_migration(self):
         mid = guid()

@@ -69,7 +69,7 @@ def serve(args,stack):
     callbacks = nullcontext()
     public_output = nullcontext()
     if args.component == "router":
-        listener = serve_router(Orders(args.db), identities, address, ctx)
+        listener = serve_router(Orders(args.db,drain_dispatch=args.drain_dispatch), identities, address, ctx)
     elif args.component=="host-ops":
         from .host_ops import listen, manifest
         listener = listen(args.db,manifest(private_config(args.manifest)),identities,address,ctx,stack)
@@ -156,7 +156,10 @@ def serve(args,stack):
         signal.signal(signal.SIGTERM,stop)
         if worker_service:
             worker_service.thread.start()
-        print(encode({"component":args.component,"port":listener.server_port,"tls":True}),flush=True)
+        ready = {"component":args.component,"port":listener.server_port,"tls":True}
+        if args.component=="router":
+            ready["dispatch_draining"] = args.drain_dispatch
+        print(encode(ready),flush=True)
         try:
             listener.serve_forever(poll_interval=0.2)
         finally:
@@ -189,6 +192,9 @@ def main():
         component.add_argument("--port",type=int,default=0)
         if name not in ("router","host-ops"):
             component.add_argument("--worker-id",required=True)
+        if name=="router":
+            component.add_argument("--drain-dispatch",action="store_true",
+                                   help="pause new assignment reservations while existing work drains")
         if name=="host-ops":
             component.add_argument("--manifest",required=True,type=Path,
                                    help="owner-private map from service IDs to exact loaded user LaunchAgents")

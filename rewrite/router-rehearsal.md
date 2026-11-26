@@ -73,6 +73,16 @@ python3 -m rewrite.cutover stage-reviewed-rollback --snapshot ./snapshot --trial
 
 复跑 `python3 -B -m unittest -v rewrite.test_cutover`。实际旧 Router 和重做 Router 都经隔离 HTTP 运行。Worker 模型使用夹具。待验收或通知未确认时未生成回退库，另验损坏附件及新入站消息使准备阶段停止。[旧端归档和附件读回](evidence/cutover-reviewed-rollback.json)
 
+### 在途工单先排空再回退
+
+旧 Router 保持停写。先停试用写者并采集[五组件快照](#重做版五组件的离线恢复)，保留迁入时的旧快照和 `baseline.json`。从新的目录恢复这套重做组件，使用原 Worker 身份、原适配器账本及原生会话。启动重做 Router 时，在现有启动参数上加 `--drain-dispatch`，核对启动回执中 `dispatch_draining` 为 `true`。每次重开都须保留这个参数。此模式停止分配新派发号，已有派发、重连对账、业务回执和定时规则继续按原契约处理。冻结外部试用入口，避免排空时又发生无关写入。
+
+核对原工单号、派发号、Worker 持单和宿主收据。已有可核的宿主收据时只接回原会话。W04 回执未到时保留原 outbox，由 Worker 以原幂等键恢复；Router 只有成果待验时仍由溪流实际验收。关停排空实例后再次采集，核对 `audit-handoff` 中的持单、待确认报告和宿主账本。保留每次采集的摘要。将最后一次 Router 库的离线副本作为 `router.db`，连同原来的 `baseline.json` 放在新的试运行目录，核对该库 SHA-256 与排空快照中 Router 成员一致，再使用上面的 `stage-reviewed-rollback`。切回旧端前核对原单归档、原队首和在途清单。
+
+宿主接收未知、原模型仍无法接续、派发已转移或回报与原任务不符时，保留新旧两侧并逐笔对账。排空开关不会暂停离线入池，也不会隐去已在网络上的原派发。回退命令继续拒绝未验收或不符合上述回迁范围的写入。
+
+复跑 `python3 -B -m unittest -v rewrite.test_cutover.Cutover.test_inflight_rollback_drains_same_assignment_before_old_router_can_resume`。隔离重做 Router、Worker 以及旧 RouterStore 实跑；宿主、模型和时钟使用夹具。第一次恢复原持单，第二次重开按原 W04 键读回丢失的回执，整个过程中下一张单保持无派发号。实际验收后才生成旧版回退副本。[排空与回执实测](evidence/cutover-inflight-drain.json)
+
 ## 旧 Trigger 历史和订阅账本
 
 `rewrite.trigger_archive` 接收明确准备好的旧版离线 SQLite 副本，可另带已有的 blocked 与 drops 日志。保存原事件、读收据、游标、订阅和规则表，逐文件核摘要。捕获时记录活跃订阅中有未确认可见事件的数量，切换前需和实际消费者对账。归档本身既没有订阅，也没有发送队列。

@@ -1,0 +1,39 @@
+{
+  "assignment_id": "7ea4003f-3304-4e4e-87b4-50cb98e0a943",
+  "boundary": "Isolated rewrite HTTP and real legacy store; host, model and clock are fixtures.",
+  "consecutive_runs": 10,
+  "legacy_readback": {
+    "archived": "reviewed_on_rewrite",
+    "held": null,
+    "next": "t-ff892c0a78"
+  },
+  "lost_receipt_audit": [
+    {
+      "issue": "assignment_mismatch",
+      "worker_id": "oguri"
+    },
+    {
+      "issue": "report_receipt_pending",
+      "worker_id": "oguri"
+    }
+  ],
+  "manager_native_notices": 1,
+  "native_receipt": {
+    "delivery_id": "2c4b204f-3440-463f-98b5-a4ed2e0d5285",
+    "digest": "7f099ad21ad832004421c840d195f4d54131f5a6d0020377895c8c59e1561ac3",
+    "native_id": "60d2da43-1f4b-4b8c-9df6-837acc12b280",
+    "session": "drain-native-session",
+    "turn_id": "05cc931e-e290-4b7d-af4e-710a1a4dab2b"
+  },
+  "next_trial_task_unassigned": "66e9f09a-33fa-51aa-9297-a25427ae55cf",
+  "old_router_blocked_before_review": true,
+  "router_dispatches": 1,
+  "settled_snapshot_sha256": "ccacfbadd05ec79111c2f41c337158f0d9fe4850e82551ecf3a59f441d295aeb",
+  "trial_task_id": "b5c831ca-395b-5197-8bf6-05d60d38bb0c",
+  "w04_key": "complete-7ea4003f-3304-4e4e-87b4-50cb98e0a943",
+  "w04_receipt": {
+    "recorded": true,
+    "release_assignment_id": "7ea4003f-3304-4e4e-87b4-50cb98e0a943",
+    "task_state": "completed_reported"
+  }
+}
