@@ -8,6 +8,8 @@
 
 实际隔离 Codex App Server 从原会话冷换到原生分叉。重放父会话私聊只返回原收据。子会话收到一条新私聊、一张正式工单，原生工具两次 W04 返回同一原派发回执，Router 留一条待验通知。继续从试用后状态切回，保留新成果和两端收据，模型请求数不增加。共 12 轮，模型和飞书用夹具。macOS 通过 206 项，Linux arm64 通过 144 项，另 62 项本机宿主用例跳过。飞书 `/resume` 仍为目录查询。[原生交接证据](evidence/codex-native-session-handoff.json)
 
+实现提交 `cc5caff4d769f3cb94c3e0785edb5aa48a19a890` 构建 177 文件发布包，SHA-256 为 `f0ec0c2cd2cdffbee69f419940cdec048d8ad6679b6ca3989a78598c33681c3e`。安装目录复跑 8 项交接、备份与回退测试均过。另从 `058f7b81955bd34b2c7c431d8c6a0024223d8ac1` 实跑同会话的混合版本、新版和回退。三阶段均保留三个原生输入与同一成果通知 `a495c798-c1d1-4064-8e02-cf22fc534bae`，未新增原生输入，原快照未改变。复跑入口为 `python3 -B -m rewrite.codex_release_check`，指定这两个提交及已安装的 Codex App Server 路径。[发布演练](router-rehearsal.md#保留实际-codex-测试工位的升级与回退)
+
 来源留档和 Router 投递分别有只读状态入口。临时 TLS 实测首次 T04 回执丢失时来源仍有三条待核，Router 已有一帧。按原号重试后来源剩零条，Router 共两帧，Info 仅留档。测试接收者先确认第二帧，连续游标仍为 0；Router 重开后补第一帧，游标到 2。来源不能查询接收者，另一工位只能查看自己的零积压，查询不返回正文或推进游标。复跑 `python3 -B -m unittest -v rewrite.test_service.Service.test_source_receipts_and_consumer_cursor_are_observed_independently`。[计数证据](evidence/trigger-delivery-status.json) · [操作入口](README.md#来源留档与通知积压)
 
 积压与续接场景连续 10 轮通过。使用隔离 TLS Router 和测试接收者确认，未调用真实 Hermes 或飞书。本版 macOS 全过 204 项，Linux arm64 通过 143 项，另 61 项本机宿主用例跳过。
