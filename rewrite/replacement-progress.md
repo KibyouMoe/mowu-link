@@ -4,6 +4,10 @@
 
 ## 检查点与证据
 
+独立 Codex 的 `/model` 和 `/effort` 读到指定原生会话当前为 test_wire/gpt-5.4、high，与本地模型请求一致。`/context` 从原生用量事件和回合历史读到第 1 回合输入 11、总计 16、模型窗口 258400。连续 10 轮通过。原生模型目录没有标明各项所属提供方，当前只展示会话选择，切换仍待核。[回读证据](evidence/codex-app-server-native-context.json)。复跑 `python3 -m unittest -v rewrite.test_codex_app_server.CodexAppServer.test_model_effort_and_context_read_native_app_server_observations`。模型为本地脚本。
+
+Linux arm64 已复验 `c10762113fa53737338acefd16af0cfee915e9e7`，通过 135 项，44 项依赖本机 Codex 或 DSH 跳过，核对 143 个发行文件。同机跨系统 TLS 复核原生收件及正式完工通知各一条，宿主与模型使用夹具。
+
 同机两个隔离宿主已实测 Codex App Server 向 DSH 发原图、DSH 按原消息号回复。两端都由本机原生工具执行器产出请求，原图摘要一致，Router 记录两端宿主凭据，重投不增输入，未建工单。连续 10 轮通过。[跨宿主记录](evidence/codex-dsh-native-peer.json)。复跑 `python3 -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_codex_and_dsh_roundtrip_native_peer_image_and_linked_reply`。双方模型为脚本，两进程同在 Mac。
 
 在实际 App Server 发现活跃时调用 `turn/start` 会复用当前回合，后续历史可见两条输入。重做适配器已在正式写入前确认空闲，原生工具调用也核对该回合只存在一条用户输入。真实 Router 取消原派发时，已核只中止该原生回合。另一个回合活跃时续用原控制号等待，它仍保持活跃，随后空闲才收到取消。资源清理无凭据时不释放持单。两个场景各 12 次通过。[取消证据](evidence/codex-app-server-router-cancel.json)。复跑 `python3 -m unittest -v rewrite.test_codex_app_server`，模型为本地脚本。

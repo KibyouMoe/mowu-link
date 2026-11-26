@@ -20,6 +20,7 @@ class AppServerHost:
     def __init__(self, rpc, thread_id):
         self.rpc, self.thread_id = rpc,thread_id
         self.write_lock = RLock()
+        self.usage = None
 
     def request(self,method,params):
         try:
@@ -37,6 +38,41 @@ class AppServerHost:
         status = self.thread(session,include_turns=False)["status"]["type"]
         require(status in ("idle","active"),503,"native_agent_unavailable")
         return status=="active"
+
+    def model_view(self,session,kind):
+        require(kind in ("models","efforts"),422,"invalid_model_view")
+        thread = self.thread(session,include_turns=False)
+        current = {"provider":string(thread,"modelProvider"),"model":string(thread,"model"),
+                   "effort":thread.get("reasoningEffort")}
+        # model/list is an App Server catalog, and its entries do not identify the bound provider.
+        return {"session":session,"current":current,"observed":None,"items":[],"unavailable":1,"more":False}
+
+    def observe_usage(self,params):
+        if not isinstance(params,dict) or params.get("threadId")!=self.thread_id:
+            return
+        turn = params.get("turnId")
+        usage = params.get("tokenUsage")
+        if not isinstance(turn,str) or not turn or not isinstance(usage,dict):
+            return
+        last = usage.get("last")
+        if not isinstance(last,dict):
+            return
+        counts = {"input_tokens":last.get("inputTokens"),"total_tokens":last.get("totalTokens"),
+                  "window_tokens":usage.get("modelContextWindow")}
+        if (any(counts[name] is not None for name in ("input_tokens","total_tokens"))
+                and all(number is None or type(number) is int and 0<=number<2**53 for number in counts.values())):
+            self.usage = turn,counts
+
+    def context_usage(self,session):
+        require(session==self.thread_id,409,"wrong_native_session")
+        sample = self.usage
+        if not sample:
+            return {"session":session,"latest":None}
+        turn,counts = sample
+        history = self.thread(session,include_turns=True)["turns"]
+        ordinal = next((i for i,item in enumerate(history,1) if item["id"]==turn),None)
+        require(ordinal is not None,502,"native_history_unconfirmed")
+        return {"session":session,"latest":{"turn":ordinal,**counts}}
 
     @staticmethod
     def input_blocks(did,payload,digest,files):
@@ -238,6 +274,9 @@ def worker_callbacks(host,worker,notify_turn_end):
                 params = packet.get("params")
                 if isinstance(params,dict) and params.get("threadId")==host.thread_id:
                     notify_turn_end()
+                continue
+            if packet.get("method")=="thread/tokenUsage/updated":
+                host.observe_usage(packet.get("params"))
                 continue
             if packet.get("method")!="item/tool/call" or type(packet.get("id")) not in (str,int):
                 continue

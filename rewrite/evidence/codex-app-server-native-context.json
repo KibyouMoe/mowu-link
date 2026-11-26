@@ -1,0 +1,20 @@
+{
+  "thread_id": "01a216de-61e2-7590-bba8-eff9f7a51590",
+  "model_card": "会话当前选择 test_wire/gpt-5.4 · high\n最近记录的请求配置 未记录\n目录查询暂不可用。",
+  "effort_card": "会话当前选择 test_wire/gpt-5.4 · high\n最近记录的请求配置 未记录\n目录查询暂不可用。",
+  "context_card": "最近一次模型回包 · 第 1 回合\n输入 11 tokens\n本次总用量 16 tokens\n模型窗口 258400 tokens",
+  "native_usage": {
+    "turn": 1,
+    "input_tokens": 11,
+    "total_tokens": 16,
+    "window_tokens": 258400
+  },
+  "scripted_provider_config": [
+    [
+      "gpt-5.4",
+      "high"
+    ]
+  ],
+  "boundary": "Actual isolated App Server settings and usage events from a local model fixture",
+  "consecutive_runs": 10
+}

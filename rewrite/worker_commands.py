@@ -95,15 +95,24 @@ def context_answer(service):
     data = snapshot["latest"]
     if data is None:
         return "当前会话还没有模型回包的用量记录。"
-    require(isinstance(data,dict) and all(isinstance(data.get(k),str) and 0<len(data[k])<=200
-                and all(c.isprintable() for c in data[k]) for k in ("provider","model")),502,"invalid_context_observation")
-    require(all(type(data.get(k)) is int and data[k]>=0 for k in ("turn","step")),502,"invalid_context_observation")
+    require(isinstance(data,dict),502,"invalid_context_observation")
+    provider,model = data.get("provider"),data.get("model")
+    route = (provider,model)
+    require(route==(None,None) or all(isinstance(part,str) and 0<len(part)<=200 and part.isprintable() for part in route),
+            502,"invalid_context_observation")
+    turn,step = data.get("turn"),data.get("step")
+    require(type(turn) is int and turn>=0 and (step is None or type(step) is int and step>=0),
+            502,"invalid_context_observation")
     def count(key):
         n = data.get(key)
         require(n is None or type(n) is int and 0<=n<2**53,502,"invalid_context_observation")
         return "未记录" if n is None else str(n)
-    return (f"最近一次模型回包 · 第 {data['turn']} 回合，第 {data['step']} 步\n"
-            f"模型 {data['provider']}/{data['model']}\n输入 {count('input_tokens')} tokens\n"
+    position = f"最近一次模型回包 · 第 {turn} 回合"
+    if step is not None:
+        position += f"，第 {step} 步"
+    if provider is not None:
+        position += f"\n模型 {provider}/{model}"
+    return (position+f"\n输入 {count('input_tokens')} tokens\n"
             f"本次总用量 {count('total_tokens')} tokens\n模型窗口 {count('window_tokens')} tokens")
 
 

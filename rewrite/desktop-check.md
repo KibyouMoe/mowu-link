@@ -63,6 +63,8 @@ App Server 指定回合的文字投影复用原 Worker 的飞书卡片。独立�
 
 ## 独立适配器启动
 
+独立 App Server 的 `/model`、`/effort` 从原生会话回读当前选择。`/context` 根据原生用量事件核对最近已观察到的回包及回合号，启动后没有事件时显示未记录。同一 App Server 的模型目录未提供各模型所属提供方，暂不对该会话提供切换入口。连续 10 次实际回读成功，模型是本地脚本。[回读记录](evidence/codex-app-server-native-context.json)。
+
 以专用 Codex profile 启动 App Server，用 `thread/start` 加载 `rewrite/agent-toolset.json` 中测试所需的工具定义并保存线程。完工要加载 `worker_report`，工单提问还要加载 `worker_ask`。先用 `thread/read` 核对原线程和工作目录，再为 Worker 配置隔离 TLS 连接。启动命令如下。
 
 ```sh

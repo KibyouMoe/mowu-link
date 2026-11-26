@@ -45,6 +45,8 @@ class Provider(BaseHTTPRequestHandler):
             self.send_error(404)
             return
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        if hasattr(self.server,"config_observations"):
+            self.server.config_observations.append((body.get("model"),(body.get("reasoning") or {}).get("effort")))
         items = body["input"]
         user_index = next(i for i in range(len(items)-1,-1,-1) if items[i].get("role")=="user")
         latest = items[user_index]["content"]
@@ -106,14 +108,14 @@ def running(server):
 
 
 @contextmanager
-def isolated_app_server(root, url):
+def isolated_app_server(root, url, extra=()):
     settings = [
         'model="gpt-5.4"', 'model_provider="test_wire"', 'model_providers.test_wire.name="Local test wire"',
         'model_providers.test_wire.base_url='+encode(url+"/v1"), 'model_providers.test_wire.wire_api="responses"',
         'model_providers.test_wire.request_max_retries=0','model_providers.test_wire.stream_max_retries=0',
         'web_search="disabled"',
     ]
-    with start_app_server(CODEX,root,root,settings) as rpc:
+    with start_app_server(CODEX,root,root,[*settings,*extra]) as rpc:
         yield rpc
 
 
@@ -644,3 +646,46 @@ class CodexAppServer(unittest.TestCase):
                               "unrelated":foreign,"unrelated_preserved_at_cancel":unrelated,
                               "native_statuses":[turn["status"] for turn in turns],"cleanup_pending":True})
         self.evidence = {"cases":cases,"boundary":"Isolated Router and native App Server, scripted model. No cleanup success inferred."}
+
+    def test_model_effort_and_context_read_native_app_server_observations(self):
+        self.provider.config_observations = []
+        rpc = self.enterContext(isolated_app_server(self.root,self.origin,['model_reasoning_effort="high"']))
+        sid = rpc.request("thread/start",{"cwd":self.root,"ephemeral":False})["thread"]["id"]
+        host = AppServerHost(rpc,sid)
+        host.session = sid
+        loop = self.enterContext(Loop.isolated(host_factory=lambda _path,_name:host))
+        service = WorkerService(loop.worker)
+        platform_token,adapter_token = guid(),guid()
+        server = service.listen({platform_token:"platform/oguri",adapter_token:"adapter/oguri"},("127.0.0.1",0),None)
+        url = self.enterContext(running(server))
+        platform = Client(url,platform_token)
+        settled = Event()
+        self.enterContext(worker_callbacks(host,Client(url,adapter_token),settled.set))
+        service.step()
+
+        def command(mid,text):
+            receipt = platform.request("POST","worker/command",{"message_id":mid,"text":text})["receipt"]
+            view = platform.request("GET","worker/display")["items"]
+            return next(item["event"]["text"] for item in view if item["seq"]==receipt["output"]["seq"])
+
+        current = command("om_model_native","/model")
+        effort = command("om_effort_native","/effort")
+        self.assertIn("会话当前选择 test_wire/gpt-5.4 · high",current)
+        self.assertIn("最近记录的请求配置 未记录",effort)
+        self.assertIn("切换敬请期待",command("om_effort_change","/effort low"))
+        self.assertIn("还没有模型回包",command("om_context_pending","/context"))
+        rpc.request("turn/start",{"threadId":sid,"input":[{"type":"text","text":"Context fixture","text_elements":[]}]})
+        self.assertTrue(settled.wait(8))
+        usage = host.context_usage(sid)["latest"]
+        self.assertEqual((usage["turn"],usage["input_tokens"],usage["total_tokens"]),(1,11,16))
+        self.assertGreater(usage["window_tokens"],0)
+        context = command("om_context_after","/context")
+        self.assertIn("第 1 回合",context)
+        self.assertNotIn("步",context)
+        self.assertIn("输入 11 tokens",context)
+        self.assertIn("模型窗口 "+str(usage["window_tokens"])+" tokens",context)
+        self.assertEqual(self.provider.config_observations,[("gpt-5.4","high")])
+        self.assertFalse(loop.hermes.tasks()["items"])
+        self.evidence = {"thread_id":sid,"model_card":current,"effort_card":effort,"context_card":context,
+                         "native_usage":usage,"scripted_provider_config":self.provider.config_observations,
+                         "boundary":"Actual isolated App Server settings and usage events from a local model fixture"}
