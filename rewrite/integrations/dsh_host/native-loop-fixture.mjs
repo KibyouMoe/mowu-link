@@ -21,6 +21,7 @@ const usesGoals = ['goals','goal-driver','formal-goal'].includes(mode);
 const modelRequests = [];
 const catalogSessions = [];
 const privateStops = new Map(['one','two','three'].map(tag=>[tag,Promise.withResolvers()]));
+const raceRelease = Promise.withResolvers();
 const mediaRequests = [];
 
 class LocalModel extends LlmAdapter {
@@ -84,9 +85,10 @@ class LocalModel extends LlmAdapter {
         return;
       }
     }
-    if (mode==='private-stop' && text.startsWith('Hold private ')) {
+    if (['private-stop','admission-race'].includes(mode) && text.startsWith('Hold private ')) {
       privateStops.get(text.split(' ').at(-1)).resolve();
-      await waitForStop(signal);
+      if (mode==='admission-race') await Promise.race([raceRelease.promise,waitForStop(signal)]);
+      else await waitForStop(signal);
     }
     if (mode==='questions' && /^Question fixture (choice|text|skip|multi|native)$/.test(text)) {
       const choice = text.split(' ').at(-1);
@@ -136,7 +138,7 @@ class LocalModel extends LlmAdapter {
           yield {type:'finish',reason:{kind:'tool-calls'}};
           return;
         }
-      } else if (mode!=='work-question' && mode!=='formal-goal') {
+      } else if (!['work-question','formal-goal','admission-race'].includes(mode)) {
         await waitForStop(signal);
       }
     }
@@ -276,9 +278,9 @@ async function formalScenario(agent) {
       console.log(JSON.stringify({compacting:true,status:agent.status}));
       continue;
     }
-    if (line.startsWith('wait-private ') && mode==='private-stop') {
+    if (line.startsWith('wait-private ') && ['private-stop','admission-race'].includes(mode)) {
       await privateStops.get(line.split(' ').at(-1)).promise;
-      console.log(JSON.stringify({running:agent.status==='running'}));
+      console.log(JSON.stringify({running:agent.status==='running',inbox:agent.inbox.nextTurn.map(message=>message.id)}));
       continue;
     }
     if (line==='finish-compact' && mode==='compact') compactReleased.resolve();
@@ -286,6 +288,7 @@ async function formalScenario(agent) {
       agent.followup({id:'fixture-next-private',role:'user',source:{kind:'user'},
         content:[{type:'text',text:'Continue the private conversation'}]});
     }
+    else if (line==='end-race-private' && mode==='admission-race') raceRelease.resolve();
     else if (line==='answer-native' && mode==='questions') {
       assert.equal(ctx.get('userQuestions').answer(agent,'native-question-native',
         {answers:[{id:'primary',selected:['A']}]}),true);
@@ -317,7 +320,7 @@ async function formalScenario(agent) {
 
 try {
   const agent = await setup();
-  if (['formal','compact','questions','catalog','private-stop','work-question','media'].includes(mode) || usesGoals) {
+  if (['formal','compact','questions','catalog','private-stop','work-question','media','admission-race'].includes(mode) || usesGoals) {
     await formalScenario(agent);
   }
   else await stopScenario(agent);

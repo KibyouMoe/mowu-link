@@ -741,3 +741,53 @@ class NativeLoop(unittest.TestCase):
                 "provider_messages":observed["mediaRequests"],"download_count":len(downloads),
                 "original_input_count":len(observed["inputs"]),"reply_cards":len(finals),
                 "boundary":"Actual DSH run loop and attachment storage; Feishu and model provider are fixtures"}
+
+    def test_native_race_after_w03_never_prequeues_a_formal_task(self):
+        facts = []
+        for cancelled in (False,True):
+            with self.subTest(cancelled=cancelled):
+                session = "dsh-admission-race-"+str(cancelled).lower()
+                directory,loop,service,_ = self.goal_worker(session)
+                with self.start_native(directory,session,"admission-race") as native:
+                    tid = loop.hermes.create(guid(),"Check admission race","Only admit when idle","oguri")["task_id"]
+                    original = loop.worker.router.request
+                    during_accept = []
+                    def accept(method,path,*args,**kwargs):
+                        response = original(method,path,*args,**kwargs)
+                        if path==f"tasks/{tid}/accept":
+                            private = {"kind":"chat","text":"Hold private one","message_id":guid()}
+                            during_accept.append(loop.adapter.deliver(guid(),private))
+                            self.assertTrue(self.read_native(native,"wait-private one")["running"])
+                        return response
+                    loop.worker.router.request = accept
+                    loop.worker.connect()
+                    loop.worker.poll()
+                    service.clock.advance(10)
+                    loop.worker.poll()
+                    loop.worker.poll()
+                    self.assertEqual(len(during_accept),1)
+                    self.assertEqual(loop.hermes.inspect(tid)["task"]["state"],"working")
+                    self.assertEqual(loop.worker.hold()["held_task_id"],tid)
+                    self.assertEqual(self.read_native(native,"wait-private one")["inbox"],[])
+                    with loop.adapter.db.transaction() as db:
+                        count = db.execute("SELECT COUNT(*) FROM intents WHERE json_extract(payload,'$.kind')='task'").fetchone()[0]
+                    self.assertEqual(count,0)
+                    if cancelled:
+                        task = loop.hermes.inspect(tid)["task"]
+                        loop.hermes.act(guid(),tid,task["revision"],"cancel",reason="Cancel before native admission")
+                        loop.worker.poll()
+                        # The cancellation must preserve the unrelated user's live turn.
+                        self.assertTrue(self.read_native(native,"wait-private one")["running"])
+                    self.read_native(native,"end-race-private")
+                    loop.worker.poll()
+                    observed = self.read_native(native,"read")
+                    loop.worker.poll()
+                    self.assertEqual(self.read_native(native,"read")["inputs"],observed["inputs"])
+                    with loop.adapter.db.transaction() as db:
+                        entries = [json.loads(row[0])["kind"] for row in db.execute("SELECT payload FROM intents ORDER BY rowid")]
+                    self.assertEqual(entries,["chat","task.cancel" if cancelled else "task"])
+                    self.assertEqual(len(observed["inputs"]),2)
+                    facts.append({"session":session,"task_id":tid,"held_after_w03":True,
+                        "formal_inbox_while_private_active":0,"native_input_kinds":entries,
+                        "native_input_count_after_replay":len(observed["inputs"]),"cancelled_before_admission":cancelled})
+        self.evidence = {"cases":facts,"boundary":"Real DSH AgentLoop and isolated Router acceptance; local scripted provider"}

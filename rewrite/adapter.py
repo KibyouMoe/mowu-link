@@ -129,20 +129,30 @@ class HostAdapter:
                 return json.loads(intent["receipt"])
         # After a crash only look up evidence. An inconclusive lookup never resends.
         if inserted:
-            if media:
-                receipt = self.host.deliver_media(self.session,did,payload,digest,files)
-            elif (payload.get("kind") in ("task.cancel","task.transfer_out")
-                  and callable(getattr(self.host,"deliver_control",None))):
+            try:
+                if media:
+                    receipt = self.host.deliver_media(self.session,did,payload,digest,files)
+                elif (payload.get("kind") in ("task.cancel","task.transfer_out")
+                      and callable(getattr(self.host,"deliver_control",None))):
+                    with self.db.transaction() as db:
+                        bindings = db.execute("""SELECT native_id,json_extract(receipt,'$.turn_id') AS turn_id
+                            FROM intents WHERE session=? AND receipt IS NOT NULL
+                            AND json_extract(payload,'$.task_id')=? AND json_extract(payload,'$.assignment_id')=?
+                            AND json_extract(payload,'$.kind') IN ('task','task_update','task_probe','question_answer')
+                            ORDER BY rowid DESC LIMIT 256""",
+                            (self.session,string(payload,"task_id"),string(payload,"assignment_id"))).fetchall()
+                    receipt = self.host.deliver_control(self.session,did,payload,digest,[dict(row) for row in bindings])
+                else:
+                    receipt = self.host.deliver(self.session, did, payload, digest)
+            except Fault as error:
+                if (payload["kind"]!="task" or error.status!=409 or error.code!="native_task_not_admitted_busy"
+                        or not getattr(self.host,"rejects_busy_before_task_write",False)):
+                    raise
+                # This host explicitly refused before entering the native write.
+                # All uncertain writes retain their original intent for lookup only.
                 with self.db.transaction() as db:
-                    bindings = db.execute("""SELECT native_id,json_extract(receipt,'$.turn_id') AS turn_id
-                        FROM intents WHERE session=? AND receipt IS NOT NULL
-                        AND json_extract(payload,'$.task_id')=? AND json_extract(payload,'$.assignment_id')=?
-                        AND json_extract(payload,'$.kind') IN ('task','task_update','task_probe','question_answer')
-                        ORDER BY rowid DESC LIMIT 256""",
-                        (self.session,string(payload,"task_id"),string(payload,"assignment_id"))).fetchall()
-                receipt = self.host.deliver_control(self.session,did,payload,digest,[dict(row) for row in bindings])
-            else:
-                receipt = self.host.deliver(self.session, did, payload, digest)
+                    db.execute("DELETE FROM intents WHERE delivery_id=? AND digest=? AND receipt IS NULL",(did,digest))
+                return None
         else:
             receipt = self.lookup_receipt(did,payload,digest)
         return self.record_receipt(did,payload,digest,receipt)

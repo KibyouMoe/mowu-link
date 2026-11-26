@@ -206,6 +206,9 @@ export async function bindHost(ctx, session, directory, catalog=[]) {
       if (seen || request.operation === 'lookup') return {receipt:seen};
       // Only the adapter which first persisted its write intent can request delivery.
       await bound();
+      if (request.operation==='deliver' && JSON.parse(request.payload_json).kind==='task') {
+        check(agent.status==='idle' && !compact.inProgress,'native_task_not_admitted_busy');
+      }
       try {
         if (request.operation==='deliver-control') stopBoundTurn(agent,request,history,before);
         agent.followup(expected);

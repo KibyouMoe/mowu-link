@@ -1,0 +1,30 @@
+{
+  "cases": [
+    {
+      "session": "dsh-admission-race-false",
+      "task_id": "4d49203f-dae0-4112-b284-0ae8bb1c3096",
+      "held_after_w03": true,
+      "formal_inbox_while_private_active": 0,
+      "native_input_kinds": [
+        "chat",
+        "task"
+      ],
+      "native_input_count_after_replay": 2,
+      "cancelled_before_admission": false
+    },
+    {
+      "session": "dsh-admission-race-true",
+      "task_id": "76ba4d0a-c41f-49cb-bb40-a5e4489dc962",
+      "held_after_w03": true,
+      "formal_inbox_while_private_active": 0,
+      "native_input_kinds": [
+        "chat",
+        "task.cancel"
+      ],
+      "native_input_count_after_replay": 2,
+      "cancelled_before_admission": true
+    }
+  ],
+  "boundary": "Real DSH AgentLoop and isolated Router acceptance; local scripted provider",
+  "consecutive_runs": 12
+}

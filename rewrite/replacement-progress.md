@@ -4,6 +4,8 @@
 
 ## 检查点与证据
 
+DSH 在 W03 的回包之后、原生收件之前突然变忙时，会在入原生队列前明确拒收。适配器只对明确没发起写入的状态允许后续重试。真宿主复跑两支：自然空闲后原派发只收一次；此间先收到 Router 取消，宿主只收取消指令，普通对话照常完成，原派发执行从未开始。复跑 `python3 -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_native_race_after_w03_never_prequeues_a_formal_task`。[原生事实](evidence/dsh-native-admission-race.json)。实际 DSH 与隔离 Router，本地模型。
+
 [验收对照](acceptance-matrix.md) 汇总旧入口、Worker 篇 A01–A11、原生宿主证据与切换前剩余条件。
 
 DSH 图文与纯图已通过真实 AgentLoop 的输入边界。分别给飞书夹具一条带原始空格和换行的图文及一条纯图，原生模型传输各读到同一原图的完整字节和摘要。两次重送共两条原生输入，飞书夹具各一张最终回复。复跑 `python3 -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_actual_dsh_loop_gives_the_same_feishu_caption_and_original_image_to_its_provider`。[原生图文证据](evidence/dsh-native-media.json)。模型是读取实际字节的本地夹具，图像语义识别和飞书云端待验。
