@@ -210,6 +210,8 @@ DSH 的自动换绑使用同一套 Worker 交接。先在独立 DSH 宿主插件
 
 已有宿主授权的独立 LOCAL 会话可额外配置 `input_session_key`，取同一会话已登记的原生路由键。插件检查自身所属 profile、当前宿主、原会话 ID、路由键和宿主现有的投递授权。接收方通过 Hermes 插件输入接口递交，从 Hermes 的原生输入台账核对生产者、消息正文和回执。附件以经校验的 Router 引用交给会话，查看文件时用 `router_info(message_id, attachment_id)`。未知回执保留在插件队列的 `failure` 字段；重试只查原生记录。Notify 队列维持原顺序，其他 Event 可继续接收。显式关闭或卸载插件时停止接收。
 
+Router 拉取与原生输入分别运行。Router 断开时，已在插件入箱的文本和已核实的原收件凭据可继续交付或查回，Notify 仍以原生会话连续空闲满 10 秒为准。附件元数据首次核实后随原投递保留。还缺附件数据的消息等待 Router，原消息号不变；已确认失败的单次连接尝试会短暂退避。同一工位升级时保留插件队列、原生适配器账本及附件缓存，旧库中尚未保存的附件元数据需要等 Router 恢复。[离线收件实测](evidence/hermes-router-outage.json)
+
 隔离复跑使用 `python3 -m rewrite.hermes_check --host-input --hermes-source <源码仓> --hermes-python <带依赖的测试Python>`。探针准备全新的 profile、测试授权和临时 Router，实际运行插件及会话输入台账，模型响应由本地测试函数生成。客户端只开放 TUI/CLI、缺少插件输入授权或会话不匹配时，宿主收件保持未确认。
 
 该测试 profile 可另配 `notice_chat_id` 和 `notice_feishu_file`，前者是明确授权的飞书会话，后者指向用户私有的 SDK 凭据配置路径，包含 `app_id` 和 `app_secret`。需要同一环境安装飞书 SDK。Router 消息持久入箱时，插件只排一条来源和等级的飞书提示，正文仍走 Hermes 原生输入。飞书失败不改变原生输入状态。提示使用同一标识重试，超出回执可安全重试的窗口后保留待核。绑定变化不会转发旧提示。复跑用 `python3 -m unittest -v rewrite.test_manager_notices`。

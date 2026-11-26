@@ -29,6 +29,8 @@ class HermesAdapter:
                 db.execute("ALTER TABLE queue ADD COLUMN retry_at REAL NOT NULL DEFAULT 0")
             if "failure" not in columns:
                 db.execute("ALTER TABLE queue ADD COLUMN failure TEXT")
+            if "host_payload" not in columns:
+                db.execute("ALTER TABLE queue ADD COLUMN host_payload TEXT")
 
     def create(self, key, title, instructions, assignee_id=None):
         return self.router.request("POST", "tasks", {"title": title, "instructions": instructions,
@@ -87,7 +89,7 @@ class HermesAdapter:
             self.idle_since = self.clock()
         self.activity_generation = generation
 
-    def poll(self):
+    def receive(self):
         with self.db.transaction() as db:
             cursor = db.execute("SELECT cursor FROM progress").fetchone()[0]
         for frame in self.router.frames(cursor):
@@ -101,7 +103,31 @@ class HermesAdapter:
             ack = self.router.ack(frame)
             with self.db.transaction() as db:
                 db.execute("UPDATE progress SET cursor=MAX(cursor,?)", (ack["confirmed_cursor"],))
-        self.activity(*self.host.observe_activity())
+
+    def delivery_payload(self,row):
+        if row["host_payload"] is not None:
+            return json.loads(row["host_payload"])
+        payload = json.loads(row["payload"])
+        if not payload.get("attachment_ids"):
+            return payload
+        mid = row["message_id"]
+        files = self.message_files(mid)
+        require([f["attachment_id"] for f in files]==payload["attachment_ids"],409,"message_files_unconfirmed")
+        payload["attachments"] = files
+        # Keep the original authorized file metadata for native receipt lookup without Router.
+        serialized = encode(payload)
+        with self.db.transaction() as db:
+            db.execute("UPDATE queue SET host_payload=? WHERE message_id=? AND host_payload IS NULL",(serialized,mid))
+            saved = db.execute("SELECT host_payload FROM queue WHERE message_id=?",(mid,)).fetchone()[0]
+            require(saved==serialized,409,"manager_host_payload_changed")
+        return payload
+
+    def deliver_next(self):
+        try:
+            self.activity(*self.host.observe_activity())
+        except Exception:
+            self.activity(None)
+            raise
         with self.db.transaction() as db:
             row = db.execute("""SELECT * FROM queue WHERE receipt IS NULL AND retry_at<=?
                         AND (json_extract(payload,'$.level')='Event' OR (? AND rowid=(
@@ -111,14 +137,12 @@ class HermesAdapter:
         if row:
             mid = row["message_id"]
             try:
-                payload = json.loads(row["payload"])
-                if payload.get("attachment_ids"):
-                    files = self.message_files(mid)
-                    require([f["attachment_id"] for f in files]==payload["attachment_ids"],409,"message_files_unconfirmed")
-                    payload["attachments"] = files
-                receipt = self.host.deliver(mid, payload)
+                receipt = self.host.deliver(mid,self.delivery_payload(row))
             except Fault as exc:
                 self.defer(mid, exc.code)
+                raise
+            except OSError:
+                self.defer(mid,"delivery_connection_unconfirmed")
                 raise
             if not receipt:
                 self.defer(mid,"host_receipt_unknown")
@@ -127,6 +151,10 @@ class HermesAdapter:
                 db.execute("UPDATE queue SET receipt=?,failure=NULL,retry_at=0 WHERE message_id=?", (encode(receipt),mid))
             return receipt
         return None
+
+    def poll(self):
+        self.receive()
+        return self.deliver_next()
 
     def defer(self, mid, reason):
         with self.db.transaction() as db:

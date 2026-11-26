@@ -4,11 +4,13 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from .devloop import Loop
 from .hermes import HermesAdapter
 from .hermes_tools import ManagerTools
 from .storage import guid
+from .test_mainline import Clock
 from .trigger import Trigger
 
 
@@ -42,19 +44,52 @@ class ManagerFiles(unittest.TestCase):
                     raise ConnectionError("interrupted range")
             return send(method,path,*args,**kwargs)
         self.manager.router.request = drop
-        with self.assertRaises(ConnectionError):
-            self.manager.poll()
-        with self.manager.db.transaction() as db:
-            self.assertIsNone(db.execute("SELECT receipt FROM queue WHERE message_id=?",(mid,)).fetchone()[0])
-        self.assertFalse(self.loop.hermes_native.entries())
-        restarted = HermesAdapter(self.manager.db.path,self.manager.router,self.manager.host)
-        receipt = restarted.poll()
+        clock = Clock()
+        with patch("rewrite.hermes.time.time",clock):
+            with self.assertRaises(ConnectionError):
+                self.manager.poll()
+            with self.manager.db.transaction() as db:
+                self.assertIsNone(db.execute("SELECT receipt FROM queue WHERE message_id=?",(mid,)).fetchone()[0])
+            self.assertFalse(self.loop.hermes_native.entries())
+            restarted = HermesAdapter(self.manager.db.path,self.manager.router,self.manager.host)
+            self.assertIsNone(restarted.poll())
+            clock.advance(5)
+            receipt = restarted.poll()
         self.assertEqual(offsets,["bytes=0-262143","bytes=262144-524287","bytes=262144-524287","bytes=524288-639999"])
         self.assertEqual(receipt["media_sha256"],[hashlib.sha256(d).hexdigest() for d in (data,b"")])
         payload, _ = self.loop.hermes_native.entries()[0]
         self.assertEqual([f["name"] for f in payload["attachments"]],["原图 0.bin","原图 1.bin"])
         self.assertIsNone(restarted.poll())
         self.assertEqual(len(self.loop.hermes_native.entries()),1)
+
+    def test_router_outage_defers_unresolved_attachment_but_not_local_event(self):
+        file = self.submit("Event",b"Requires an authorized Router attachment lookup")
+        text = self.submit("Event")
+        self.manager.receive()
+        original = self.manager.router.request
+        paths = []
+
+        def offline(_method,path,*_args,**_kwargs):
+            paths.append(path)
+            raise ConnectionError("isolation fixture interrupted the Router transport")
+
+        self.manager.router.request = offline
+        clock = Clock()
+        with patch("rewrite.hermes.time.time",clock):
+            with self.assertRaises(ConnectionError):
+                self.manager.receive()
+            with self.assertRaises(ConnectionError):
+                self.manager.deliver_next()
+            self.assertEqual(self.manager.deliver_next()["delivery_id"],text)
+            with self.manager.db.transaction() as db:
+                self.assertEqual(tuple(db.execute("SELECT receipt,host_payload,failure FROM queue WHERE message_id=?",
+                                                  (file,)).fetchone()),(None,None,"delivery_connection_unconfirmed"))
+            self.manager.router.request = original
+            self.assertIsNone(self.manager.deliver_next())
+            clock.advance(5)
+            self.assertEqual(self.manager.deliver_next()["delivery_id"],file)
+        self.assertEqual(paths,["deliveries/stream","messages?message_id="+file])
+        self.assertEqual([row[1]["delivery_id"] for row in self.loop.hermes_native.entries()],[text,file])
 
     def test_on_demand_access_checks_message_scope_even_for_cached_file(self):
         data = b"owned by the first Info"

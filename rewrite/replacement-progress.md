@@ -4,6 +4,8 @@
 
 ## 检查点与证据
 
+Hermes 插件的 Router 收件与原生输入独立推进。旧版在断开 Router 后 23 秒内没查回已收的 Event。新版连续三轮在 Router 仍断开时卸载并重载插件，从隔离 Hermes 的原生台账查回带附件 Event 的原收件号。每轮已入箱的 Notify 等原会话空闲 10.89–10.92 秒后送达，Info 零注入。已核实的附件元数据可以重用，仍缺附件的 Event 暂缓，同批普通 Event 可先交。使用实际 Hermes 插件、会话台账及 Router HTTP。模型用夹具，断链由隔离测试注入。[实测](evidence/hermes-router-outage.json) · [复跑](README.md#hermes-专用会话)
+
 运行中切换在探测目标前持久记下原请求号。目标暂不可达时，重开仍查得到交接号，授权运维可用原号撤回。实测原工位在等待期间接到一张正式单，旧宿主回调仍有效，Router 暂停接口调用为零。撤回后迟到的原命令只读原取消回执，等待的私聊只到原会话一次。目标会话零收件，重复撤回或迟到的开始请求沿用原回执。实际 Router、Worker HTTP 与 SQLite，飞书和宿主用夹具。[实测](evidence/feishu-resume-preflight-cancel.json) · [复跑](README.md#飞书切换会话)
 
 复跑 `python3 -B -m unittest -v rewrite.test_worker_resume.WorkerResume.test_cancel_unreachable_switch_before_router_fence_survives_restart`，连续通过 10 轮。macOS 全量通过 254 项，Linux arm64 通过 174 项、跳过 80 项。以 `2e12d73ff5ab167b76f9c0afb46f25a06eeb7ce4` 构建 228 文件独立包，SHA-256 为 `36e9d19b69d2b22b2f5e631161d110d56e569be4f5672905e53232b3a13c6568`。安装目录通过切换、组件快照、回退和飞书收发共 52 项，文件摘要一致。旧版本回退夹具来自 `30f61e671465db0b5bba221ba8c9fc2194a6e43d`，用 `MOWULINK_TEST_LEGACY_ROOT` 指定。

@@ -107,21 +107,24 @@ def start_input(ctx, manager, config):
     native = HermesLocalHost(ctx,session,config["input_session_key"])
     manager.host = HostAdapter(str(config["database"])+".host",native,session,manager.file_store)
     stop = threading.Event()
-    def poll():
+    def poll(action,label):
         last = None
         while not stop.is_set():
             try:
-                manager.poll()
+                action()
                 last = None
             except Exception as exc:
-                manager.activity(None)
                 reason = exc.code if isinstance(exc,Fault) else type(exc).__name__
                 if reason!=last:
-                    logging.getLogger(__name__).warning("manager input pending: %s",reason)
+                    logging.getLogger(__name__).warning("%s pending: %s",label,reason)
                     last = reason
             stop.wait(1)
-    thread = threading.Thread(target=poll,name="mowulink-hermes-input",daemon=True)
-    threads = [thread]
+    threads = [
+        threading.Thread(target=poll,args=(manager.receive,"manager Router intake"),
+                         name="mowulink-hermes-router",daemon=True),
+        threading.Thread(target=poll,args=(manager.deliver_next,"manager native input"),
+                         name="mowulink-hermes-input",daemon=True),
+    ]
     if manager.notices is not None:
         def publish():
             log = logging.getLogger(__name__)

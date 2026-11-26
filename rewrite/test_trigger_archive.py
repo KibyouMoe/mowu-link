@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from .cutover import digest
 from .devloop import FixtureHost, Loop
@@ -306,8 +307,9 @@ store.close()
                 raise ConnectionError("fixture lost host receipt after the native write")
 
             loop.hermes_native.deliver = lose_after_native
-            with self.assertRaisesRegex(ConnectionError,"after the native write"):
-                loop.hermes.poll()
+            with patch("rewrite.hermes.time.time",clock):
+                with self.assertRaisesRegex(ConnectionError,"after the native write"):
+                    loop.hermes.poll()
             unconfirmed = receipts("uncertain-native")
             pending = audit(self.snapshot,legacy_sha,**unconfirmed)
             self.assertEqual(pending["events"][2]["state"],"host_receipt_unknown")
@@ -316,7 +318,10 @@ store.close()
             with self.assertRaisesRegex(ValueError,"prevents legacy resume"):
                 stage_return(self.snapshot,legacy_sha,self.restored,**unconfirmed)
             loop.hermes_native.deliver = deliver
-            loop.hermes.poll()
+            with patch("rewrite.hermes.time.time",clock):
+                self.assertIsNone(loop.hermes.poll())
+                clock.advance(5)
+                self.assertEqual(loop.hermes.poll()["delivery_id"],items[2]["message_id"])
             completed = receipts("settled")
             native = [payload["message_id"] for payload,_ in loop.hermes_native.entries()]
             self.assertEqual(native,[items[index]["message_id"] for index in (0,3,2)])
