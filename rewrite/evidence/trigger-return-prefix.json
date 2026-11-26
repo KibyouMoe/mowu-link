@@ -1,0 +1,98 @@
+{
+  "boundary": "Actual legacy and rewrite HTTP and SQLite. Native host, clock and old proof are fixtures.",
+  "consecutive_runs": 10,
+  "host_inputs": [
+    "99dbf1f8-db8b-52ce-b2da-9b3e175c1f5f",
+    "65621522-717f-51e6-a41b-bb3171732934",
+    "2982f44f-6ea9-5efb-9049-a1cd09245230"
+  ],
+  "info_required_consumer_review": "info_read_unknown",
+  "legacy_after_restart": {
+    "ack": {
+      "acked": 0,
+      "last_id": 8,
+      "ok": true,
+      "subscriber": "fixture-live"
+    },
+    "unread": [
+      "tail"
+    ]
+  },
+  "legacy_first_ack": {
+    "acked": 7,
+    "last_id": 8,
+    "ok": true,
+    "subscriber": "fixture-live"
+  },
+  "lost_host_receipt": {
+    "legacy_event_id": "first-notify",
+    "message_id": "2982f44f-6ea9-5efb-9049-a1cd09245230",
+    "received_beyond_gap": false,
+    "seq": 6,
+    "state": "host_receipt_unknown"
+  },
+  "out_of_order": {
+    "events": [
+      {
+        "legacy_event_id": "pending",
+        "message_id": "99dbf1f8-db8b-52ce-b2da-9b3e175c1f5f",
+        "received_beyond_gap": false,
+        "seq": 2,
+        "state": "native_received"
+      },
+      {
+        "legacy_event_id": "info",
+        "message_id": "215e1bf8-41f7-5eac-80e7-9aa4be0e6c4b",
+        "received_beyond_gap": false,
+        "seq": 3,
+        "state": "reviewed_info_read"
+      },
+      {
+        "legacy_event_id": "first-notify",
+        "message_id": "2982f44f-6ea9-5efb-9049-a1cd09245230",
+        "received_beyond_gap": false,
+        "seq": 6,
+        "state": "not_sent_to_host"
+      },
+      {
+        "legacy_event_id": "later-event",
+        "message_id": "65621522-717f-51e6-a41b-bb3171732934",
+        "received_beyond_gap": true,
+        "seq": 7,
+        "state": "native_received"
+      },
+      {
+        "legacy_event_id": "legacy-seen",
+        "message_id": "8e478078-a508-5a8a-bcad-3c50290c6b8c",
+        "received_beyond_gap": true,
+        "seq": 8,
+        "state": "legacy_received"
+      },
+      {
+        "legacy_event_id": "tail",
+        "message_id": "d89033e8-f8e1-5dfe-bf90-2ad4b1513946",
+        "received_beyond_gap": false,
+        "seq": 9,
+        "state": "not_published"
+      }
+    ],
+    "info_review_sha256": "da6b8ca0c1823a656faa7170fd4813b5283eac6e5c0339176f3872f033f6d280",
+    "initial_cursor": 1,
+    "legacy_archive_sha256": "f570ff65130e1b79138d09e080e4827b2c39e56e768b695fab97b0a77ed7406d",
+    "levels": [
+      "event",
+      "info",
+      "notify"
+    ],
+    "new_snapshot_sha256": "cc4c8c94246b7a74515497063cf103ba86107324bc4ce0b6921b90fc99a631fc",
+    "plan_sha256": "1a8fd5e8623db7fba0e2ad21b0a6f2d3da0f3092499c0069c39c78b9a5d2ac19",
+    "reviewed_info_sequences": [
+      3
+    ],
+    "safe_to_stage": false,
+    "subscriber": "fixture-live",
+    "verified_cursor": 3
+  },
+  "settled_prefix": 8,
+  "unchanged_legacy_source": true
+}

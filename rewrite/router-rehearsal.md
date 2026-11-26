@@ -122,6 +122,24 @@ python3 -B -m rewrite.service trigger --db ./trigger-trial/trigger.sqlite3 --nam
 
 实测已用真实旧 TriggerStore、重做 Router HTTP 和 HermesAdapter 核五条旧未读。两条 Info 只供查询，一条 Event 和一条 Notify 各送一次，原消费者已有收件的一条留在旧档。丢失 T04 后重开和重建均回同一回执，旧附件与长文逐字节一致。模型、宿主与时钟使用夹具。发送后如需退回旧消费者，先保留两侧库并逐笔对账。旧确认是累计游标，只能推进到连续核实的最后一个序号。复跑 `python3 -B -m unittest -v rewrite.test_trigger_archive`。[迁入回执](evidence/trigger-unread-handoff.json)
 
+### 试用发送后退回原订阅
+
+保持新旧发送端停写，用[组件快照](#重做版五组件的离线恢复)采集同一次停写窗口内的 Router、迁入专用 Trigger、Hermes 和原宿主适配器账本。保留其他组件和收件记录。用迁入时返回的 `journal_sha256` 校验原 `handoff.json`，核实待切回的旧端仍使用计划里同一订阅及等级过滤。若其中任何账本曾被替换、旧源在停写后又有新记录，先比对两侧现状再选择回退基线。
+
+```sh
+python3 -B -m rewrite.trigger_return audit \
+  --snapshot ./trigger-snapshot --manifest-sha256 "$TRIGGER_SHA256" \
+  --journal ./trigger-trial/handoff.json --journal-sha256 "$HANDOFF_SHA256" \
+  --bundle ./trial-state --bundle-sha256 "$TRIAL_STATE_SHA256" \
+  --trigger-instance handoff --manager-instance main --host-session "$ORIGINAL_HOST_SESSION"
+```
+
+`--trigger-instance` 和 `--manager-instance` 对应快照成员名里的实例部分。核对报告中的 `verified_cursor` 及逐项状态。确认送进新宿主的事件需要匹配 T04、Router 投递和 C02、Hermes 队列及原宿主收件号。旧消费者已收的条目沿用迁入时审核。旧 Info 在新档里可查时，需另有原消费者确认已经查阅。可提交 `--info-review`，文件含 `plan_sha256` 及 `archive_reads`，后者按旧序号填写实际查阅凭据。降为 Info 的旧 Event 或 Notify 仍留待原订阅。只剩有完整账本且尚未送进宿主的尾部事件时，它们继续在旧订阅待取。遇到未知的宿主回执、已收件但前序有缺口或有飞书提示未对账时，审计停在缺口前。
+
+报告确认 `safe_to_stage` 后，将同一命令的 `audit` 换成 `stage`，加 `--destination ./trigger-return-copy`。输出旧归档字节副本及私有的 `ack-replay.json`。保持源端、订阅消费者和试用发送端停写，在隔离旧 Trigger 副本先校验现有旧游标为 `initial_cursor`，只在 `request` 非空时按原样执行 `POST /ack`。回包的 `last_id` 须等于 `verified_cursor`。若已执行但回执丢失，在同一副本重新发送原请求，按实际游标与待取列表核对。用相同的等级过滤读 `GET /events`，只应看到 `remaining_event_ids`。如消费程序另存本地游标，启动前同步到已核的旧游标。仍在新系统的其他来源与平台回执另行交接。
+
+实测让后序 Event 先到宿主，前序 Notify 只有 C02 时禁止准备回退。Notify 进入宿主后模拟丢回执，仍禁止回退。沿原投递号查回后，原旧序号从 1 推进到 8。真实旧 Trigger HTTP 重开后重投确认，新增确认数为零，仅保留从未送出的尾项。Info 经实际查询及测试管理审核后才计入连续前缀。测试宿主和时钟使用夹具。[累计确认实测](evidence/trigger-return-prefix.json)
+
 ## 旧采集来源交接
 
 在演练窗口准备好来源游标副本和专用配置。交接检查旧采集端已处理到的最后一条、待上行队列和新实例标识。游标导入只保存位置与摘要。仍在旧采集端等待发送的事件需要在接管前另外对账。

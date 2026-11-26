@@ -12,11 +12,13 @@ import unittest
 from .cutover import digest
 from .devloop import FixtureHost, Loop
 from .legacy_test_fixture import source_for
+from .state_bundle import capture as capture_components
 from .storage import guid
 from .test_mainline import Clock
 from .trigger import Trigger
 from .trigger_archive import DATABASE, capture, event, restore, verify
 from .trigger_handoff import HANDOFF_DB, plan, stage
+from .trigger_return import audit, stage_return
 
 
 class TriggerArchive(unittest.TestCase):
@@ -232,3 +234,154 @@ store.close()
                          "original_file_sha256":checksum,"both_artifacts_byte_verified":True,
                          "old_archive_unchanged":True,"information_did_not_wake":True,
                          "boundary":"Actual old TriggerStore and rewrite HTTP and SQLite; Hermes host and clock are fixtures."}
+
+    def test_trigger_return_waits_for_the_original_host_before_advancing_the_legacy_prefix(self):
+        self.old("""
+store = TriggerStore(sys.argv[1])
+store.add_event("email","Notify before later Event",level="notify",priority=1,event_id="first-notify")
+store.add_event("mc_chat","Event overtakes Notify",level="event",priority=0,event_id="later-event")
+store.add_event("email","Read by the old host",level="notify",priority=1,event_id="legacy-seen")
+store.add_event("email","Keep my original unread status",level="notify",priority=1,event_id="tail")
+store.close()
+""",self.source)
+        original = digest(self.source)
+        legacy_sha = capture(self.source,self.snapshot)["manifest_sha256"]
+        report = plan(self.snapshot,legacy_sha,"fixture-live",1,["event","notify","info"],guid())
+        items = report["plan"]["candidates"]
+        names = ["pending","info","first-notify","later-event","legacy-seen","tail"]
+        self.assertEqual([item["legacy_event_id"] for item in items],names)
+        decisions = {str(item["seq"]):{"level":item["legacy_level"].capitalize(),"evidence":"fixture old host checked"}
+                     for item in items}
+        decisions[str(items[4]["seq"])] = {"already_received":"fixture original host admission"}
+        saved,review = self.root/"return-plan.json",self.root/"return-review.json"
+        saved.write_text(json.dumps(report),encoding="utf-8")
+        review.write_text(json.dumps({"plan_sha256":report["plan_sha256"],"events":decisions}),encoding="utf-8")
+        pool = self.root/"handoff"
+        prepared = stage(self.snapshot,legacy_sha,saved,review,pool)
+        trigger = Trigger(pool/HANDOFF_DB,"legacy-handoff")
+        clock = Clock()
+        args = {"journal":pool/"handoff.json","journal_sha256":prepared["journal_sha256"],
+                "trigger_instance":"handoff","manager_instance":"main","host_session":"test-manager-session"}
+        with Loop.isolated(clock,FixtureHost,trigger_ids=(trigger.instance_id,)) as loop:
+            sources = {"router:main":loop.root/"router.db","worker:oguri":loop.root/"worker.db",
+                       "agent:oguri":loop.root/"agent-adapter.db","hermes:main":loop.root/"hermes-adapter.db",
+                       "hermes-host:main":loop.root/"manager-receipts.db","trigger:handoff":pool/HANDOFF_DB}
+
+            def receipts(label):
+                target = self.root/label
+                seal = capture_components(sources,"a"*40,target)["manifest_sha256"]
+                return {"bundle":target,"bundle_sha256":seal,**args}
+
+            for item in items[:4]:
+                trigger.send(loop.trigger_clients[trigger.instance_id],item["message_id"])
+            loop.hermes.poll()
+            loop.hermes.poll()
+            before = receipts("overtaken")
+            unread_info = audit(self.snapshot,legacy_sha,**before)
+            self.assertEqual(unread_info["events"][1]["state"],"info_read_unknown")
+            self.assertEqual(unread_info["verified_cursor"],items[0]["seq"])
+            original_info, = loop.hermes.messages(message_id=items[1]["message_id"])["items"]
+            self.assertEqual(original_info["level"],"Info")
+            info_proof = self.root/"info-proof.json"
+            info_proof.write_text(json.dumps({"plan_sha256":report["plan_sha256"],
+                "archive_reads":{str(items[1]["seq"]):"fixture manager read "+original_info["message_id"]}}))
+            args["info_review"] = info_proof
+            before["info_review"] = info_proof
+            state = audit(self.snapshot,legacy_sha,**before)
+            self.assertFalse(state["safe_to_stage"])
+            self.assertEqual(state["verified_cursor"],items[1]["seq"])
+            self.assertEqual([row["state"] for row in state["events"]],
+                             ["native_received","reviewed_info_read","not_sent_to_host","native_received",
+                              "legacy_received","not_published"])
+            self.assertTrue(state["events"][3]["received_beyond_gap"])
+            with self.assertRaisesRegex(ValueError,"prevents legacy resume"):
+                stage_return(self.snapshot,legacy_sha,self.restored,**before)
+            self.assertFalse(self.restored.exists())
+
+            clock.advance(10)
+            deliver = loop.hermes_native.deliver
+
+            def lose_after_native(*args,**kwargs):
+                deliver(*args,**kwargs)
+                raise ConnectionError("fixture lost host receipt after the native write")
+
+            loop.hermes_native.deliver = lose_after_native
+            with self.assertRaisesRegex(ConnectionError,"after the native write"):
+                loop.hermes.poll()
+            unconfirmed = receipts("uncertain-native")
+            pending = audit(self.snapshot,legacy_sha,**unconfirmed)
+            self.assertEqual(pending["events"][2]["state"],"host_receipt_unknown")
+            self.assertFalse(pending["safe_to_stage"])
+            self.assertEqual(pending["verified_cursor"],state["verified_cursor"])
+            with self.assertRaisesRegex(ValueError,"prevents legacy resume"):
+                stage_return(self.snapshot,legacy_sha,self.restored,**unconfirmed)
+            loop.hermes_native.deliver = deliver
+            loop.hermes.poll()
+            completed = receipts("settled")
+            native = [payload["message_id"] for payload,_ in loop.hermes_native.entries()]
+            self.assertEqual(native,[items[index]["message_id"] for index in (0,3,2)])
+
+        with self.assertRaisesRegex(ValueError,"journal digest differs"):
+            audit(self.snapshot,legacy_sha,**{**completed,"journal_sha256":"0"*64})
+        with self.assertRaisesRegex(ValueError,"required receipt ledger record is missing"):
+            audit(self.snapshot,legacy_sha,**{**completed,"host_session":"another-native-session"})
+        status = audit(self.snapshot,legacy_sha,**completed)
+        self.assertEqual(status["verified_cursor"],items[4]["seq"])
+        self.assertEqual(status["info_review_sha256"],digest(info_proof))
+        self.assertTrue(status["safe_to_stage"])
+        cli = [sys.executable,"-B","-m","rewrite.trigger_return","stage","--snapshot",str(self.snapshot),
+               "--manifest-sha256",legacy_sha,"--destination",str(self.restored)]
+        for key,value in completed.items():
+            cli.extend(("--"+key.replace("_","-"),str(value)))
+        command = subprocess.run(cli,cwd=Path(__file__).resolve().parents[1],capture_output=True,
+                                 check=True,text=True,timeout=10)
+        self.assertEqual(json.loads(command.stdout),status)
+        replay = json.loads((self.restored/"ack-replay.json").read_text())
+        self.assertEqual(replay["remaining_event_ids"],["tail"])
+        staged = self.restored/"legacy"/DATABASE
+        self.assertEqual(digest(staged),original)
+
+        def legacy_http(code):
+            return json.loads(self.old("""
+from server import TriggerServer
+from threading import Thread
+from urllib.request import Request, urlopen
+from pathlib import Path
+receipt = json.loads(Path("restored/ack-replay.json").read_text())
+auth = {"X-Trigger-Token":"isolated-return","Content-Type":"application/json"}
+store = TriggerStore(sys.argv[1])
+with TriggerServer(("127.0.0.1",0),store,token="isolated-return") as server:
+    thread = Thread(target=server.serve_forever,kwargs={"poll_interval":.02})
+    thread.start()
+    try:
+        url = f"http://127.0.0.1:{server.server_port}"
+        def send(path, body=None):
+            data = json.dumps(body).encode() if body is not None else None
+            with urlopen(Request(url+path,data=data,headers=auth),timeout=5) as response:
+                return json.load(response)
+""" + code + """
+    finally:
+        server.shutdown()
+        thread.join()
+store.close()
+""",staged))
+
+        first = legacy_http("""
+        print(json.dumps(send("/ack",receipt["request"])))
+""")
+        repeated = legacy_http("""
+        repeated = send("/ack",receipt["request"])
+        events = send("/events?subscriber=fixture-live&levels=event,notify,info")["events"]
+        print(json.dumps({"ack":repeated,"unread":[event["event_id"] for event in events]}))
+""")
+        self.assertEqual(first["last_id"],status["verified_cursor"])
+        self.assertEqual(repeated["ack"]["last_id"],first["last_id"])
+        self.assertEqual(repeated["ack"]["acked"],0)
+        self.assertEqual(repeated["unread"],["tail"])
+        self.assertEqual(digest(self.source),original)
+        self.return_evidence = {"out_of_order":state,"lost_host_receipt":pending["events"][2],
+                                "info_required_consumer_review":unread_info["events"][1]["state"],
+                                "host_inputs":native,"settled_prefix":status["verified_cursor"],
+                                "legacy_first_ack":first,"legacy_after_restart":repeated,
+                                "unchanged_legacy_source":True,
+                                "boundary":"Actual legacy and rewrite HTTP and SQLite. Native host, clock and old proof are fixtures."}

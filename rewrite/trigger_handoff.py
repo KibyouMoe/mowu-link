@@ -18,6 +18,8 @@ from .trigger_archive import DATABASE, verify
 
 LEVELS = {"event", "notify", "info"}
 HANDOFF_DB = "trigger.sqlite3"
+LONG_TEXT_SUMMARY = "旧 Trigger 迁入，原文见附件。"
+LONG_TEXT_NAME = "legacy-trigger-original.txt"
 
 
 def plan(snapshot, expected, subscriber, consumer_cursor, levels, source_id):
@@ -75,14 +77,23 @@ def approved_level(selection, candidate):
     raise ValueError("event needs original consumer evidence and a permitted disposition: "+str(candidate["seq"]))
 
 
-def legacy_files(row, directory, stack):
+def reviewed_levels(checked, review_data):
+    items = checked["plan"]["candidates"]
+    decisions = review_data.get("events")
+    if (set(review_data)!={"plan_sha256","events"} or review_data["plan_sha256"]!=checked["plan_sha256"]
+            or not isinstance(decisions,dict) or decisions.keys()!={str(item["seq"]) for item in items}):
+        raise ValueError("review must cover each unread event in the exact plan")
+    return [approved_level(decisions[str(item["seq"])],item) for item in items]
+
+
+def legacy_attachment_refs(row):
     payload = json.loads(row["payload_json"]) if row["payload_json"] is not None else None
     if not isinstance(payload,dict) or "attachments" not in payload:
-        return [],[]
+        return []
     metadata = payload["attachments"]
-    if not isinstance(metadata,list) or not 1<=len(metadata)<=10 or directory is None or directory.is_symlink():
-        raise ValueError("legacy attachment references require an offline content store")
-    streams,checksums = [],[]
+    if not isinstance(metadata,list) or not 1<=len(metadata)<=10:
+        raise ValueError("invalid legacy attachment list")
+    references = []
     for item in metadata:
         checksum = item.get("id") if isinstance(item,dict) else None
         if not isinstance(checksum,str) or not re.fullmatch("[0-9a-f]{64}",checksum):
@@ -92,6 +103,16 @@ def legacy_files(row, directory, stack):
                 or type(size) is not int or size<=0 or not isinstance(name,str) or not name.strip()
                 or name in (".","..") or any(c in name for c in ("/","\\","\x00","\n","\r"))):
             raise ValueError("invalid legacy attachment metadata")
+        references.append((name,size,checksum))
+    return references
+
+
+def legacy_files(row, directory, stack):
+    references = legacy_attachment_refs(row)
+    if references and (directory is None or directory.is_symlink()):
+        raise ValueError("legacy attachment references require an offline content store")
+    streams,checksums = [],[]
+    for name,size,checksum in references:
         source = directory/checksum
         if source.is_symlink() or not source.is_file():
             raise ValueError("legacy attachment bytes are missing")
@@ -110,8 +131,8 @@ def stage_event(db, trigger, row, item, level, attachments):
         files,expected = legacy_files(row,attachments,stack)
         text = row["text"]
         if len(text)>200:
-            files.append(("legacy-trigger-original.txt",BytesIO(text.encode("utf-8"))))
-            text = "旧 Trigger 迁入，原文见附件。"
+            files.append((LONG_TEXT_NAME,BytesIO(text.encode("utf-8"))))
+            text = LONG_TEXT_SUMMARY
         mid = trigger.archive(db,level,text,files,origin=origin)
         copied = db.execute("SELECT size,sha FROM files WHERE message_id=? ORDER BY position",(mid,)).fetchall()
         if [tuple(part) for part in copied[:len(expected)]]!=expected:
@@ -128,11 +149,7 @@ def stage(snapshot, expected, saved, review, destination, *, attachments=None):
         raise ValueError("handoff plan differs from the verified legacy archive")
     review_data = json.loads(review.read_text(encoding="utf-8"))
     items = checked["plan"]["candidates"]
-    decisions = review_data.get("events")
-    if (set(review_data)!={"plan_sha256","events"} or review_data["plan_sha256"]!=checked["plan_sha256"]
-            or not isinstance(decisions,dict) or decisions.keys()!={str(item["seq"]) for item in items}):
-        raise ValueError("review must cover each unread event in the exact plan")
-    levels = [approved_level(decisions[str(item["seq"])],item) for item in items]
+    levels = reviewed_levels(checked,review_data)
     destination_id = checked["plan"]["instance_id"]
     with output_directory(destination) as folder:
         path = folder/HANDOFF_DB
@@ -147,9 +164,10 @@ def stage(snapshot, expected, saved, review, destination, *, attachments=None):
         journal = folder/"handoff.json"
         journal.write_text(encode({**checked,"review":review_data,"staged_sha256":digest(path)}),encoding="utf-8")
         journal.chmod(0o600)
+        journal_sha256 = digest(journal)
     count = sum(level is not None for level in levels)
     return {"instance_id":destination_id,"pending":count,"already_received":len(items)-count,
-            "plan_sha256":checked["plan_sha256"]}
+            "plan_sha256":checked["plan_sha256"],"journal_sha256":journal_sha256}
 
 
 def main():
