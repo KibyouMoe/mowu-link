@@ -97,6 +97,15 @@ python3 -B -m unittest -v rewrite.test_codex_app_server.CodexAppServer.test_nati
 
 设置 `MOWULINK_CODEX_LINK_OUTAGE_EVIDENCE` 为临时文件路径可输出原生回合与业务回执。模型和计时由本地测试驱动，真实 Desktop 独立账号与飞书另验。
 
+另有 macOS 与 Linux 虚拟机的双向 TLS 演练。Router 和 Codex App Server 位于 macOS，Worker 在 Linux 虚拟机内由 `rewrite.service worker` 启动。适配器通过原端口回连 Worker，重启后复用原 Worker 库。原生回合在 Worker 停止时继续工作，恢复后由同一回合交出一次 W04。[跨虚拟机实测](evidence/codex-linux-worker-restart.json)
+
+```sh
+MOWULINK_CODEX_CROSS_GUEST_IMAGE=<已有-linux-arm64-镜像完整ID> \
+  python3 -B -m unittest -v rewrite.test_cross_guest
+```
+
+该测试需要本地 Linux 虚拟机中的 Docker、有双向回环转发的配置，以及 Docker 可挂载的本机目录。Colima 使用 `host.lima.internal`。可分别通过 `MOWULINK_CODEX_CROSS_GUEST_HOST` 和 `MOWULINK_CODEX_CROSS_GUEST_SHARED` 指定 Linux 可达的宿主别名和临时共享目录。测试使用临时端口、独立证书和会话，模型由本地脚本驱动。可设 `MOWULINK_CODEX_CROSS_GUEST_EVIDENCE` 保存回执对照。
+
 ### DSH 固定会话与飞书卡片
 
 在独立 DSH 测试配置加载 `integrations/dsh_host/index.mjs`，指定测试会话的 `session` 和仅当前用户可读写的绝对目录 `directory`。单独启动 `python3 -m rewrite.service dsh-adapter --help` 所示的适配器，将 `--session`、`--runtime-dir` 分别指向同一会话和目录。收图需宿主提供 `attachments` 服务；`--worker-connection` 指向适配器访问专用 Worker 的连接配置。固定会话插件中仅登记 Agent 业务工具，本体负责发送飞书卡片。

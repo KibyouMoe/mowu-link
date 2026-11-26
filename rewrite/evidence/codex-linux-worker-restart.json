@@ -1,0 +1,108 @@
+{
+  "after": {
+    "adapter_connected": true,
+    "expected_host_session": "01a21917-52dd-7ff3-8389-40471ed72c38",
+    "held_assignment_id": null,
+    "held_task_id": null,
+    "host_busy": true,
+    "host_error": null,
+    "host_observation_age_seconds": 2.6604648339998676,
+    "host_session": "01a21917-52dd-7ff3-8389-40471ed72c38",
+    "last_error": null,
+    "native_capabilities": {
+      "compaction": false,
+      "context_usage": true,
+      "goal_control": true,
+      "model_change": true,
+      "model_view": true,
+      "next_turn": true,
+      "session_catalog": true,
+      "stop_private": true
+    },
+    "router_connected": true,
+    "router_observed": true,
+    "router_retry_in_seconds": null,
+    "worker_id": "oguri"
+  },
+  "assignment_id": "e360e0f3-e5dd-4055-a9f2-872cadd42961",
+  "boundary": "Native App Server on macOS, real Worker process in a Linux VM, TLS on both directions. Model is a local fixture; no Desktop identity or cloud platform.",
+  "codex_version": "0.171.0-alpha.13.2",
+  "command_result": "continued",
+  "first_response": "worker_tool_unconfirmed",
+  "initial": {
+    "adapter_connected": true,
+    "expected_host_session": "01a21917-52dd-7ff3-8389-40471ed72c38",
+    "held_assignment_id": null,
+    "held_task_id": null,
+    "host_busy": false,
+    "host_error": null,
+    "host_observation_age_seconds": 0.08945275000587571,
+    "host_session": "01a21917-52dd-7ff3-8389-40471ed72c38",
+    "last_error": null,
+    "native_capabilities": {
+      "compaction": false,
+      "context_usage": true,
+      "goal_control": true,
+      "model_change": true,
+      "model_view": true,
+      "next_turn": true,
+      "session_catalog": true,
+      "stop_private": true
+    },
+    "router_connected": true,
+    "router_observed": true,
+    "router_retry_in_seconds": null,
+    "worker_id": "oguri"
+  },
+  "native_input_ids": [
+    "01a21917-56a5-7472-a8ef-46c26c71a8ab"
+  ],
+  "native_receipt": {
+    "delivery_id": "05af301b-528b-49d4-9908-effe527dab5e",
+    "digest": "381661701fa19df1f68eb326ef0f4ce1a0edb5db5d412b44a47e668852fc8c55",
+    "native_id": "01a21917-56a5-7472-a8ef-46c26c71a8ab",
+    "session": "01a21917-52dd-7ff3-8389-40471ed72c38",
+    "turn_id": "01a21917-5698-7de2-aef5-9288339d74e5"
+  },
+  "native_report_call_ids": [
+    "link-report-first",
+    "link-report-retry"
+  ],
+  "notify_id": "df45f5a4-5dbd-43a6-8d4d-40a47cb49c26",
+  "observed_utc": "2026-11-26T18:21:33Z",
+  "reconnected": {
+    "adapter_connected": true,
+    "expected_host_session": "01a21917-52dd-7ff3-8389-40471ed72c38",
+    "held_assignment_id": "e360e0f3-e5dd-4055-a9f2-872cadd42961",
+    "held_task_id": "f32acb40-23a0-49c1-9c22-39b8774434e3",
+    "host_busy": true,
+    "host_error": null,
+    "host_observation_age_seconds": 2.551212417994975,
+    "host_session": "01a21917-52dd-7ff3-8389-40471ed72c38",
+    "last_error": null,
+    "native_capabilities": {
+      "compaction": false,
+      "context_usage": true,
+      "goal_control": true,
+      "model_change": true,
+      "model_view": true,
+      "next_turn": true,
+      "session_catalog": true,
+      "stop_private": true
+    },
+    "router_connected": true,
+    "router_observed": true,
+    "router_retry_in_seconds": null,
+    "worker_id": "oguri"
+  },
+  "task_id": "f32acb40-23a0-49c1-9c22-39b8774434e3",
+  "w04": {
+    "recorded": true,
+    "release_assignment_id": "e360e0f3-e5dd-4055-a9f2-872cadd42961",
+    "task_state": "completed_reported"
+  },
+  "worker_container_ids": [
+    "346eb840eafcf508485939d0d22493f05faddabd3f634ca1f8f1b201a9d9e0a8",
+    "ba0651fccebab14da9a993df32e8e5b3cc1b7276b480be3c0ff07a21dc83ae74"
+  ]
+}

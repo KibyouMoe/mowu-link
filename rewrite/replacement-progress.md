@@ -4,7 +4,11 @@
 
 ## 检查点与证据
 
+Linux 虚拟机内的 Worker 和 macOS 上的 Codex App Server 分别启动，Worker 向 Router 和适配器、适配器回调 Worker 都走经认证的 TLS。停止原 Worker 进程期间，原生回合继续写完测试文件，首次 W04 待确认。新 Worker 进程复用原库、原端口和会话，仍持原派发。同一原生回合重报后只记一次正式成果和一次通知，Router 保持待验收，原生输入一条。无信任证书的客户端连接失败，平台身份查询运维状态返回 403。模型由本地脚本驱动，物理跨机和飞书云端另验。[证据](evidence/codex-linux-worker-restart.json) · [复跑](README.md#codex-独立工位的断联与恢复)
+
 Codex 侧 A10/A11 用桌面安装包内的真实 App Server、独立 profile 与隔离 Router 验证。两种断联期间同一原生回合都实际完成测试文件写入。断 Router 后首次 W04 在 Worker 存为待确认。原回调因 TCP 重置无 HTTP 响应，现返回可重试的 `503 worker_report_unconfirmed`。原派发入池后，重连重放得到 `stale_assignment`，无正式报告或成果通知。只断适配器时 Router 继续看到原持单，恢复后同回合正式提交，Router 待验收，仅一份成果和一条通知。两次各一条原生输入、一张测试飞书断联卡。模型、计时和飞书均为夹具。另用短断链证明原 W04 可从待发队列交回，只通知一次。[证据](evidence/codex-worker-link-outage.json) · [复跑](README.md#codex-独立工位的断联与恢复)
+
+实现提交 `c9dc01d37b0fd4d153eb3b1722cc0c55a9e4f2e9`。该检查点 macOS 284 项通过，Linux arm64 187 项通过、97 项依环境跳过。与前版 `e233f831f583268dfeab7962d4e490a104a51923` 的 `rewrite.release_check --component worker-pair` 隔离两版回退通过，同一私聊各阶段只保留一个原生输入，宿主为夹具。
 
 修复失联入池后取消漏发。修复前隔离 Router 立即变成 `cancelled`，原工位 W01 回 `no_task` 且没有停止指令。修复后真实 DSH 原容器继续运行，Router 只记录旧派发待清理。到重连时，原生回合因取消中止、容器移除，Agent 调用 W04 后 Router 才从 `blocked` 变为 `cancelled`。保留原工单输入一条。另用隔离协议测试核原回执同号重放只发一次通知，迟到清理只能影响旧派发并保留新持单。原生 DSH、Linux 引擎和 Router 实跑，模型、时间和飞书为夹具。[取消记录](evidence/dsh-offline-pooled-cancel.json) · [复跑入口](README.md#dsh-固定会话与飞书卡片)
 

@@ -16,6 +16,7 @@
 | Hermes Event、Notify、Info 与 Feishu 提示 | C01–C03、H01–H02 | 真实隔离 Hermes 插件与本地会话。Notify 空闲 10 秒逐条，Info 未唤醒。Router 断开时，已入箱的 Notify 继续发送，丢失的带附件 Event 回执查回原生原号。平台使用飞书 SDK 或服务器替身。[离线收件](evidence/hermes-router-outage.json) | 独立线上测试身份、真实 Feishu 消息号与客户端侧时间对证。 |
 | 旧 Trigger 订阅、历史、策略 | 来源实例游标、离线归档、受审核的迁入和累计确认回退 | 现役 0.7.0 只读盘点查到一个活跃订阅。隔离实测迁入未读批次，T04 丢回执后重开和重建均幂等，附件逐字节一致。已用真实旧 Trigger HTTP 验证按连续收件回退，前序未知时拒绝准备，重试旧确认不再新增，原未投递尾项保留。[迁入回执](evidence/trigger-unread-handoff.json) · [回退证据](evidence/trigger-return-prefix.json) | 现役消费者和旧待发送队列的切换窗口，新来源及平台回执对账，其他部署规则与在用的旧订阅调用。 |
 | 同伴通信、附件、旧聊天 | Worker 私聊、Router 授权附档与历史、旧飞书私聊离线导出 | 隔离 Router 验接收方、重复回执、长文、附件摘要。同机实际 DSH 与 Codex App Server 已通过原生工具互发图文和关联回信，两端模型为本地脚本。旧同伴记录仅原参与人查询，旧飞书私聊可在离线副本按工位分页导出。 | 真实授权的两个测试工位互发；旧飞书私聊档的实际保留范围和仍使用旁听接口的消费者另验。 |
+| Worker 与宿主跨机部署 | 独立 `worker` 服务、适配器固定会话及双向 TLS | macOS Codex 适配器和 Linux 虚拟机 Worker 跨虚拟网实跑。Worker 冷重启后保留原持单，原生输入一条，同一回合重报后 Router 待验收，成果通知一条。无信任证书及身份不符被拒。[跨虚拟机](evidence/codex-linux-worker-restart.json) | 实际分开机器的部署与网络规则、已登录的独立试验工位及真人通知。 |
 | 进程启动、版本回退与历史保全 | `rewrite.service`、`release_check`、`codex_release_check`、`state_bundle`、`cutover` | 两版 Router 与 Worker 分步安装和回退。独立 Codex App Server 已核原会话、单次待验成果和多会话快照复原，前一版适配器接回原持单。隔离演练涵盖七库恢复、原旧工单与附件、已验收迁入单原号归档和结果私有保留。已验收原单与未派新单可一起回退；回放中断后按原号重送无重复。在途迁入单可冻结新派发，恢复原派发并查回丢失的 W04，验收后再回旧版。[混合回退](evidence/cutover-mixed-rollback.json) · [在途排空](evidence/cutover-inflight-drain.json) | 宿主无法核回、派发已变化及其他试用写入的回迁，真实 profile 跨机、Windows 启动和生产切换窗口。 |
 
 ## Worker 篇 A01–A11
