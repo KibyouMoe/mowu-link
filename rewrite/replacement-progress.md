@@ -4,6 +4,10 @@
 
 ## 检查点与证据
 
+运行中换绑核对 Codex 和 DSH 适配器的原生审批账本。基线 `a3d421ad737b6179789b3138c64f4444b47e6b18` 在两个隔离反例中都写入了新绑定。一类是原生已空闲但 Router 尚未收到登记，另一类是派发暂停后才收到原审批。改版在第一类从未请求暂停，第二类以原交接号解除，丢解除回执后重开仍保留原绑定。旧适配器不支持审批观测时保留普通聊天并提示先升级。真实 Codex App Server 两会话实测，审批补记关闭后，新切换后的目标只新增一次输入。真实 DSH SDK 同样验证未登记和已登记但回执丢失的原审批，源宿主恢复并核到关闭后，允许新切换。DSH 目标宿主、模型、飞书、审批人和故障均为隔离测试夹具。[原生证据](evidence/native-handoff-approval.json)
+
+复跑 `python3 -B -m unittest -v rewrite.test_worker_resume rewrite.test_codex_app_server.CodexAppServer.test_runtime_switch_waits_for_unregistered_native_approval_to_close rewrite.test_dsh_native_loop.NativeLoop.test_dsh_unacknowledged_approval_recovers_without_a_late_notification`。原生应用授权等未接入的审批仍需另验。
+
 离线换绑会核对 Codex 适配器已收到的原生审批。隔离实测，原生文件审批已到、Router 尚未收到登记时，适配器持久保存待核记录。重开账本仍拒绝生成换绑副本。Router 已关闭但回执丢失时记录继续待核，按原号查回才消除。独立 App Server、Worker 和 Router 实跑，模型与断联由本地测试驱动。快照换绑的夹具复验另查了输出中无命令目录。复跑 `python3 -B -m unittest -v rewrite.test_state_bundle.Bundle.test_handoff_refuses_codex_approval_never_registered_with_router rewrite.test_codex_app_server.CodexAppServer.test_native_approval_deadline_survives_lost_intake_and_late_router_accept`。[断联证据](evidence/codex-approval-router-outage.json)
 
 两项连续通过 5 轮。macOS 全量通过 262 项，Linux arm64 通过 178 项、跳过 84 项。以 `79623b2bb412ffa5f9dc80901707e39a201ef68d` 构建的独立包包含 234 份文件，SHA-256 为 `1eaf80916d55246b3be409c4c1d69a83a5ad1698aeab5348f8e91ec175b2a245`。安装目录复跑快照、发布包和 Codex 断联审批共 17 项，文件摘要一致。以 `a2cc41fbfe65e0cdf1a98c13bbbcdbbdc826987c` 为旧版，在真实独立 Codex App Server 演练混合版本、升级与回退，各保留三条输入，新增为零，待验通知 `e794961d-f566-47fe-a710-854fc6b94211` 原号不变，旧快照摘要一致。使用本地脚本模型，审批转接专项另测。复跑 `python3 -B -m rewrite.codex_release_check`，指定上述新旧提交与本机 App Server 二进制路径。

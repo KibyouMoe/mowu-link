@@ -330,13 +330,30 @@ class NativeLoop(unittest.TestCase):
     def test_dsh_unacknowledged_approval_recovers_without_a_late_notification(self):
         session = "isolated-dsh-unacknowledged-approval"
         root = Path(self.enterContext(tempfile.TemporaryDirectory(dir="/tmp",prefix="mldsh-approval-outage-")))
-        worker_token,operator_token,adapter_token = (guid() for _ in range(3))
+        worker_token,operator_token,adapter_token,target_token,platform_token = (guid() for _ in range(5))
         router = self.enterContext(codex_driver.running(serve_loopback(Orders(root/"router.db"),
                                          {worker_token:"worker/dev",operator_token:"approver/dev"})))
         host = DshHost(root)
         adapter_path = root/"adapter.db"
-        worker = Worker(root/"worker.db","dev",Client(router,worker_token),HostAdapter(adapter_path,host,session))
-        endpoint = self.open_worker(WorkerService(worker),{adapter_token:"adapter/dev"})
+        target = "isolated-dsh-approval-switch-target"
+        target_host = FixtureHost(root/"target-native.db",target)
+        ports = {}
+        for sid,adapter in ((session,HostAdapter(adapter_path,host,session)),
+                            (target,HostAdapter(root/"target.db",target_host,target))):
+            token = guid()
+            url = self.enterContext(codex_driver.running(serve_adapter(adapter,"dev",
+                {token:"worker/dev"},("127.0.0.1",0),None)))
+            ports[sid] = RemoteAdapter(Client(url,token),sid)
+        worker = Worker(root/"worker.db","dev",Client(router,worker_token),ports[session],
+                        resume_targets={target:ports[target]})
+        service = WorkerService(worker)
+        endpoint = self.open_worker(service,{adapter_token:"adapter/dev/"+session,
+            target_token:"adapter/dev/"+target,platform_token:"platform/dev"})
+        platform = Client(endpoint,platform_token)
+
+        def switch(mid):
+            return platform.request("POST","worker/command",
+                {"message_id":mid,"text":"/resume "+target})["receipt"]
         worker.connect()
         operator = Client(router,operator_token)
         callback = Client(endpoint,adapter_token)
@@ -384,7 +401,9 @@ class NativeLoop(unittest.TestCase):
             adapter = HostAdapter(adapter_path,host,session)
             fixture = "command-approvals" if mode=="missing" else "command-approvals-reopen"
             with tool_listener(root,adapter,callback), self.start_native(root,session,fixture) as native:
-                worker.chat(guid(),"DSH approval fixture "+mode)
+                service.probe_adapter()
+                prompt = {"message_id":guid(),"text":"DSH approval fixture "+mode}
+                worker.chat(prompt["message_id"],prompt["text"])
                 self.assertTrue(blocked.wait(5))
                 state = self.read_native(native,"approval-state")
                 asked, = (event["data"] for event in state if event["type"]=="approval/asked"
@@ -411,6 +430,13 @@ class NativeLoop(unittest.TestCase):
                 self.assertNotEqual(outcome,"allowed-once")
                 self.assertTrue(all(result.get("isError") is not False for result in before["results"]))
                 self.assertEqual(before["turns"][-1]["reason"]["kind"],"aborted")
+                until(lambda:not ports[session].busy())
+                self.assertTrue(ports[session].handoff_activity(session=session)["approval_pending"])
+                refused = switch("om_isolated_dsh_approval_"+mode)
+                self.assertNotIn("binding_receipt",refused)
+                self.assertEqual(worker.native_session_pin,session)
+                self.assertFalse(service.status().get("handoff"))
+                self.assertEqual(target_host.entries(),[])
             cut.clear()
             reopened = HostAdapter(adapter_path,host,session)
             with tool_listener(root,reopened,callback), self.start_native(root,session,"command-approvals-reopen") as native:
@@ -429,10 +455,21 @@ class NativeLoop(unittest.TestCase):
                 rolled_in = send("POST","worker/approvals/"+aid,receipt["request"])
                 self.assertEqual(rolled_in,receipt)
                 self.assertEqual(operator.frames(0),notices)
+                self.assertEqual(switch("om_isolated_dsh_approval_"+mode),refused)
+                until(lambda:not ports[session].handoff_activity(session=session)["approval_pending"])
                 evidence[mode] = {"proof":proof,"router_decision":receipt["decision"],"forwarded_decision":None,
-                                  "same_closure_after_lost_reply":True,"original_router_notices":len(notices)}
+                                  "same_closure_after_lost_reply":True,"original_router_notices":len(notices),
+                                  "switch_refused_before_closure":refused}
+                if mode=="committed":
+                    self.assertTrue(worker.chat(prompt["message_id"],prompt["text"]))
+                    try_switch = switch("om_isolated_dsh_approval_closed")
+                    self.assertEqual(try_switch["binding_receipt"]["session"],target)
+                    self.assertEqual(target_host.entries(),[])
         self.evidence = {"session":session,"recovered":evidence,"new_notices_after_recovery":0,
-                         "boundary":"Installed DSH AgentLoop and native event log, local model and operator fixture; approval receipt failure injected."}
+                         "binding_after_closure":try_switch["binding_receipt"],
+                         "boundary":"Installed DSH AgentLoop and native event log, local model, target and operator fixtures; approval receipt failure injected."}
+        if output := os.environ.get("MOWULINK_DSH_APPROVAL_HANDOFF_EVIDENCE"):
+            Path(output).write_text(json.dumps(self.evidence,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
 
     def test_closed_native_binding_never_resumes_or_sends_to_a_new_agent(self):
         session = "dsh-binding-close"

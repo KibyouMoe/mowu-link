@@ -6,6 +6,8 @@ from types import SimpleNamespace
 import unittest
 
 from .adapter import HostAdapter
+from .codex_approvals import CodexApprovals
+from .dsh_approvals import DshApprovals
 from .devloop import FixtureHost, Loop
 from .feishu_client import pump_once, receive
 from .feishu_inbound import Inbound
@@ -320,6 +322,93 @@ class WorkerResume(unittest.TestCase):
         self.evidence = {"binding":receipt["binding_receipt"],"lost":["begin","end"],
                          "private_receipt":seen,"task_id":task,"formal_receipt":formal,
                          "source_inputs":0,"target_inputs":2}
+
+    def test_unregistered_codex_approval_keeps_source_before_dispatch_fence(self):
+        path = self.loop.root/(self.source+".adapter.db")
+        approvals = CodexApprovals(None,self.source,adapter_db=path)
+        approvals.remember(1,{"session":self.source,"turn_id":"native-turn","item_id":"native-item",
+                              "command":"pwd","cwd":str(self.loop.root),"environment_id":None,"decisions":["cancel"]})
+        requests = []
+        transport = self.loop.wire.request
+
+        def trace(method,route,body=None,*args,**kwargs):
+            if "/admission-handoffs/" in route:
+                requests.append(body["action"])
+            return transport(method,route,body,*args,**kwargs)
+
+        self.loop.wire.request = trace
+        receipt = self.switch(self.clients,"om_wait_approval",self.target)
+        self.assertNotIn("binding_receipt",receipt)
+        self.assertEqual(requests,[])
+        self.assertEqual(self.worker.native_session_pin,self.source)
+        self.assertIsNone(self.status(self.clients).get("native_switch"))
+        self.assertTrue(self.native_display(self.clients["adapter/oguri/"+self.source],self.source)["event_id"])
+        self.assertEqual(self.switch(self.clients,"om_wait_approval",self.target),receipt)
+        self.assertEqual(self.hosts[self.target].entries(),[])
+
+    def test_dsh_approval_arriving_during_fence_aborts_and_recovers_lost_end(self):
+        adapter = HostAdapter(self.loop.root/(self.source+".adapter.db"),self.hosts[self.source],self.source)
+        approval_id = guid()
+        DshApprovals(adapter,None)
+        observed = self.ports[self.target].busy
+        transport = self.loop.wire.request
+        attempts,offered = [],[]
+
+        def attach_new_approval(*args,**kwargs):
+            busy = observed(*args,**kwargs)
+            if attempts==["begin"] and not offered:
+                offer = {"session":self.source,"turn_id":"native-turn","item_id":approval_id,"command":"pwd",
+                         "cwd":str(self.loop.root),"environment_id":None,"decisions":["cancel"]}
+                with adapter.db.transaction() as db:
+                    db.execute("INSERT INTO dsh_approvals(approval_id,request) VALUES (?,?)",(approval_id,encode(offer)))
+                offered.append(approval_id)
+            return busy
+
+        def once_drop_end(method,route,body=None,*args,**kwargs):
+            result = transport(method,route,body,*args,**kwargs)
+            if "/admission-handoffs/" in route:
+                attempts.append(body["action"])
+                if attempts==["begin","end"]:
+                    raise ConnectionError("first handoff end reply was lost")
+            return result
+
+        self.ports[self.target].busy = attach_new_approval
+        self.loop.wire.request = once_drop_end
+        mid = "om_approval_during_switch"
+        with self.assertRaisesRegex(Fault,"native_switch_unconfirmed"):
+            self.switch(self.clients,mid,self.target)
+        self.assertEqual(self.worker.native_session_pin,self.source)
+        retry_worker,_,clients = self.open_worker()
+        self.assertNotIn("binding_receipt",self.switch(clients,mid,self.target))
+        self.assertEqual(attempts,["begin","end","end"])
+        self.assertEqual(retry_worker.native_session_pin,self.source)
+        self.assertFalse(self.loop.hermes.workers()["items"][0].get("admission_paused",False))
+        source = clients["adapter/oguri/"+self.source]
+        self.assertTrue(self.native_display(source,self.source)["event_id"])
+        self.assertEqual(self.message(clients,guid())["session"],self.source)
+        self.assertEqual(self.hosts[self.target].entries(),[])
+
+    def test_older_source_adapter_keeps_chat_available_and_refuses_switch(self):
+        adapter = self.ports[self.source]
+        with self.assertRaisesRegex(Fault,"native_handoff_observation_requires_pin"):
+            adapter.client.request("GET","host/handoff-activity")
+        self.assertEqual(adapter.handoff_activity(session=self.source),
+                         {"session":self.source,"busy":False,"approval_pending":False})
+        transport = adapter.client.request
+
+        def old_adapter(method,route,*args,**kwargs):
+            if route=="host/bound/handoff-activity":
+                raise Fault(404,"unknown_host_route")
+            return transport(method,route,*args,**kwargs)
+
+        adapter.client.request = old_adapter
+        response = self.switch(self.clients,"om_old_source_adapter",self.target)
+        self.assertNotIn("binding_receipt",response)
+        cards = self.clients["platform/oguri"].request("GET","worker/display")["items"]
+        self.assertIn("原适配器需升级",encode(cards))
+        self.assertNotIn("native_switch",self.status(self.clients))
+        self.assertFalse(self.loop.hermes.workers()["items"][0].get("admission_paused",False))
+        self.assertEqual(self.message(self.clients,guid())["session"],self.source)
 
     def test_in_flight_callback_prevents_cutover_and_busy_target_never_starts_it(self):
         clients = self.clients

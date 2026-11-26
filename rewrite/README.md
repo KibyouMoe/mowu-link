@@ -178,6 +178,8 @@ Worker 为每个候选会话和原会话登记各自的 `adapter/<Worker ID>/<�
 
 Worker 先确认没有持单和待处理的原生业务，暂停派发，核对两个会话均空闲后保存新绑定。Router 确认解除才返回切换卡。新消息使用新会话，已投递消息重试只读原回执。Worker 重开时以已提交的绑定为准，旧会话身份发来的新回调会被拒。
 
+Worker 在暂停派发之前和写入新绑定之前，会用固定会话查询原适配器是否还有未确认的原生审批。Codex 和 DSH 适配器都从自己的审批账本判断。即使原生已空闲、Router 尚未收到登记，待确认审批也会保留原会话。若交接已经暂停派发，则用原交接号解除，丢回执后沿用原号。原审批按原号核对后，可发一条新切换命令。新 Worker 遇到暂未提供该观察能力的旧适配器会提示升级，普通对话沿用原会话。测试限于已接入的审批和独立宿主，日常客户端及飞书真机另验。[审批期间切换实测](evidence/native-handoff-approval.json)
+
 飞书入箱按本地收件顺序处理切换。`/resume` 的选择、`/switch` 和新建、清空、分支会话的命令要等之前已收的消息取得回执或明确失败。目标暂不可达时，后收的消息等同一切换命令有结果，再交给当时已确认的会话。待核及等待顺序跨进程重开保留。普通消息间仍可各自重试，已记下的展示卡片可继续出向。[入箱顺序复验](evidence/feishu-resume-inbox-order.json)
 
 目标已确定但还在探测时，`worker-status` 显示 `native_switch.phase=checking`。原工位继续接收正式派单和原生回调。飞书后收的私聊仍在入箱等待原请求。用输出中的 `native_switch.handoff_id` 执行 `handoff-admission ... end` 可撤回，Worker 记录原命令的撤回回执，后续私聊继续进原会话。这个阶段尚未请求 Router 暂停派发。[预检撤回复验](evidence/feishu-resume-preflight-cancel.json)

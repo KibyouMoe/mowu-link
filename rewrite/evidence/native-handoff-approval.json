@@ -1,0 +1,99 @@
+{
+  "repetitions": 5,
+  "codex": {
+    "source_session": "01a218af-d76e-7c32-8f03-4c328389344f",
+    "native_turn": "01a218af-d7f2-70b0-a015-4520834c9cc5",
+    "approval_id": "8aa61193-a57a-437c-81f3-97f23903a83f",
+    "native_rpc_request_id": 0,
+    "source_observation_while_router_has_no_approval": {
+      "approval_pending": true,
+      "busy": false,
+      "session": "01a218af-d76e-7c32-8f03-4c328389344f"
+    },
+    "refused_command": {
+      "command": "/resume",
+      "message_id": "om_switch_waiting_native_approval",
+      "output": {
+        "event_id": "command-om_switch_waiting_native_approval",
+        "seq": 2
+      }
+    },
+    "router_admission_requests_before_closure": 0,
+    "native_cancellations": 1,
+    "approved_binding_after_closure": {
+      "handoff_id": "e7a6710e-d0f3-5eb4-8a82-70ac560be517",
+      "previous_session": "01a218af-d76e-7c32-8f03-4c328389344f",
+      "session": "01a218af-d77d-7622-a302-d0b3f994bd19",
+      "state": "bound"
+    },
+    "router_admission_requests": [
+      "begin",
+      "end"
+    ],
+    "new_target_inputs_before_closure": 0,
+    "new_target_inputs_after_closure": 1,
+    "target_input_receipt": {
+      "delivery_id": "chat-9eb8842d-576e-411a-ad5c-cd9f5c79da92",
+      "digest": "73a1c4f70509ea35f5287deabe916769f84fce0068bb5069cb48900b0c10e628",
+      "native_id": "01a218af-daca-70d3-ad77-28799920559d",
+      "session": "01a218af-d77d-7622-a302-d0b3f994bd19",
+      "turn_id": "01a218af-dac7-75a3-9d0d-b05e441cba4e"
+    },
+    "boundary": "Actual Codex App Server in both sessions and loopback Worker/Router/adapter HTTP. Model, clock, fault and platform input are fixtures."
+  },
+  "dsh": {
+    "session": "isolated-dsh-unacknowledged-approval",
+    "recovered": {
+      "missing": {
+        "proof": {
+          "approval_id": "14c188c2-658f-4ba3-ba7d-af88a22a9acd",
+          "turn_id": "1/1",
+          "asked_seq": 12,
+          "decided_seq": 13,
+          "outcome": "cancelled"
+        },
+        "router_decision": null,
+        "forwarded_decision": null,
+        "same_closure_after_lost_reply": true,
+        "original_router_notices": 0,
+        "switch_refused_before_closure": {
+          "command": "/resume",
+          "message_id": "om_isolated_dsh_approval_missing",
+          "output": {
+            "event_id": "command-om_isolated_dsh_approval_missing",
+            "seq": 1
+          }
+        }
+      },
+      "committed": {
+        "proof": {
+          "approval_id": "29aa63e1-d447-4b2b-bed2-b7126ec81403",
+          "turn_id": "19/2",
+          "asked_seq": 26,
+          "decided_seq": 27,
+          "outcome": "cancelled"
+        },
+        "router_decision": "accept",
+        "forwarded_decision": null,
+        "same_closure_after_lost_reply": true,
+        "original_router_notices": 1,
+        "switch_refused_before_closure": {
+          "command": "/resume",
+          "message_id": "om_isolated_dsh_approval_committed",
+          "output": {
+            "event_id": "command-om_isolated_dsh_approval_committed",
+            "seq": 2
+          }
+        }
+      }
+    },
+    "new_notices_after_recovery": 0,
+    "binding_after_closure": {
+      "handoff_id": "a17cb68b-f865-5602-8056-f399525bce7a",
+      "previous_session": "isolated-dsh-unacknowledged-approval",
+      "session": "isolated-dsh-approval-switch-target",
+      "state": "bound"
+    },
+    "boundary": "Installed DSH AgentLoop and native event log, local model, target and operator fixtures; approval receipt failure injected."
+  }
+}

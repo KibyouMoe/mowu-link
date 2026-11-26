@@ -29,6 +29,8 @@ REFUSED = {
     "resume_target_busy":"目标会话正在运行，请等它空闲。",
 }
 ORIGINAL_SESSION = {
+    "source_approval_pending":"原会话还有待确认的审批，已保留绑定。请处理原审批后再切换。",
+    "source_adapter_upgrade":"原适配器需升级后才能核对审批。当前仍使用原会话。",
     "cancelling":"已取消切换，继续使用原会话。",
     "goal_active":"目标会话有正在进行的原生目标。原会话绑定保留。",
     "source_changed":"原会话已变化，继续使用原会话。要分支请重新发送 /fork。",
@@ -135,6 +137,16 @@ def observe(port,session,*,allow_cold=False,operation_id=None):
     return info,busy
 
 
+def source_admission(worker,session):
+    try:
+        observation = worker.adapter.handoff_activity(session=session)
+    except Fault as error:
+        if error.code=="handoff_adapter_upgrade_required":
+            return "source_adapter_upgrade",False
+        raise
+    return ("source_approval_pending" if observation["approval_pending"] else None),observation["busy"]
+
+
 def finish(worker,row,session,text,receipt=None,*,cancel_unstarted=False):
     from .worker_commands import previous, record
 
@@ -169,9 +181,15 @@ def advance(service,row):
         if phase=="checking":
             require(w.native_session_pin==source,409,"native_binding_changed")
             require(service.adapter_connected and service.host_session==source,503,"native_switch_unconfirmed")
-            _info,busy = observe(w.resume_targets[target],target,allow_cold=True)
+            refusal,busy = source_admission(w,source)
+            if refusal:
+                return finish(w,row,source,ORIGINAL_SESSION[refusal])
             if busy:
-                return finish(w,row,source,REFUSED["resume_target_busy"])
+                return finish(w,row,source,REFUSED["handoff_native_busy"])
+            if target:
+                _info,busy = observe(w.resume_targets[target],target,allow_cold=True)
+                if busy:
+                    return finish(w,row,source,REFUSED["resume_target_busy"])
             with service.native_callback_lock:
                 require(service.native_callbacks_in_flight==0,503,"native_switch_callbacks_pending")
                 with w.db.transaction() as db:
@@ -192,11 +210,13 @@ def advance(service,row):
             if result["state"]=="released":
                 return finish(w,row,source,"这次交接已解除，仍在原会话。")
             require(result["state"]=="frozen",503,"native_switch_unconfirmed")
-            source_info,source_busy = observe(w.adapter,source)
+            refusal,source_busy = source_admission(w,source)
+            if refusal:
+                return keep_source(w,row,refusal)
             require(not source_busy,503,"native_switch_waiting_for_idle")
             if not target:
                 try:
-                    target = prepare_target(service,row,source_info)
+                    target = prepare_target(service,row,w.adapter.session_info())
                 except Fault as error:
                     if error.code=="native_preparation_source_changed":
                         return keep_source(w,row,"source_changed")
@@ -208,6 +228,11 @@ def advance(service,row):
                     return keep_source(w,row,"goal_active")
                 raise
             require(not target_busy,503,"native_switch_waiting_for_idle")
+            # Native work can start while the target is being checked or loaded.
+            refusal,source_busy = source_admission(w,source)
+            if refusal:
+                return keep_source(w,row,refusal)
+            require(not source_busy,503,"native_switch_waiting_for_idle")
             with w.db.transaction() as db:
                 changed = db.execute("UPDATE native_binding SET session=? WHERE slot=1 AND session=?",(target,source)).rowcount
                 require(changed==1,409,"native_binding_changed")
@@ -288,7 +313,7 @@ def handle(service,mid,text,name,target,*,reply_to=None):
         handoff = str(uuid5(NAMESPACE_URL,encode(["native-resume",w.worker_id,mid])))
         with w.db.transaction() as db:
             db.execute("INSERT INTO native_resume VALUES (?,?,?,?,?,?,?)",
-                       (mid,request,name,handoff,w.native_session_pin,target,"starting" if create else "checking"))
+                       (mid,request,name,handoff,w.native_session_pin,target,"checking"))
     return advance(service,pending(w))
 
 

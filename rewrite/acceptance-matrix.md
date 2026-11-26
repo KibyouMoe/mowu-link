@@ -54,7 +54,7 @@
 | --- | --- | --- |
 | `bridge_probe` | Worker `worker-status`，加适配器连接观测 | 独立 TLS 实测断链、恢复、持单和忙闲未知。现役 Codex 启动链路切换须单验。 |
 | `bridge_binding_status` | Worker 状态与固定原生会话校验 | 隔离 TLS 可区分预期会话与已确认会话，同身份错绑零输入。 |
-| `bridge_bind_manager` | 独立运行参数、停写换绑及运行中交接窗口 | 隔离冷切保留两端图文、收据、原卡和正式成果。运行中切换已在 Codex App Server 和 DSH 间往返，旧适配器的回调被拒，回执丢失和目标掉线可按原号恢复或撤回。等待首次目标确认期间仍可接工单，撤回后待处理私聊各按原号回原会话。可恢复预先登记的冷会话。Codex Desktop 的界面批准和真实飞书 `/resume` 待验。[入箱顺序](evidence/feishu-resume-inbox-order.json) · [预检撤回](evidence/feishu-resume-preflight-cancel.json) |
+| `bridge_bind_manager` | 独立运行参数、停写换绑及运行中交接窗口 | 隔离冷切保留两端图文、收据、原卡和正式成果。运行中切换已在 Codex App Server 和 DSH 间往返，旧适配器的回调被拒，回执丢失和目标掉线可按原号恢复或撤回。等待首次目标确认期间仍可接工单，撤回后待处理私聊各按原号回原会话。可恢复预先登记的冷会话。运行中切换核对原适配器未关闭的审批。实测 Codex 和 DSH 原生审批未对账时保留原会话，审批关闭后才接受新切换请求。另用夹具核交接途中到达的原审批及丢解除回执。[审批实测](evidence/native-handoff-approval.json) Codex Desktop 的界面批准和真实飞书 `/resume` 待验。[入箱顺序](evidence/feishu-resume-inbox-order.json) · [预检撤回](evidence/feishu-resume-preflight-cancel.json) |
 | `bridge_verify_manager_binding` | 按工位授权的 `worker-status` | 平台身份被拒，运维身份可核同一会话。 |
 | `bridge_inspect_native_contract` | 运维 `worker-status` 读取当前绑定会话的 `native_capabilities` | 权限或会话对不上时不采信外部观测，断开时能力未知。DSH 与独立 Codex App Server 分别保留目录、停止、历史压缩、原生目标等实际操作的回执。 |
 | `bridge_verify_native_write_path` | 原派发或消息号、正文摘要、原生输入及回合 | 真实独立 Desktop 已核文字收件及重投去重。无人值守入口、图文与实际授权待验。 |

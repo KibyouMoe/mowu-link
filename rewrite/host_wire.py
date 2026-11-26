@@ -39,6 +39,18 @@ class RemoteAdapter:
         require(isinstance(reply,dict) and type(reply.get("busy")) is bool, 502, "invalid_host_observation")
         return reply["busy"]
 
+    def handoff_activity(self, *, session):
+        try:
+            reply = self.request("GET","host/handoff-activity",native_session=session)
+        except Fault as error:
+            if error.status==404 and error.code=="unknown_host_route":
+                raise Fault(409,"handoff_adapter_upgrade_required") from None
+            raise
+        require(isinstance(reply,dict) and reply.get("session")==session
+                and type(reply.get("busy")) is bool and type(reply.get("approval_pending")) is bool,
+                502,"invalid_handoff_observation")
+        return reply
+
     def bound_session(self):
         return self.session_info()["session"]
 
@@ -175,6 +187,9 @@ def serve_adapter(adapter, worker_id, identities, address, context, *, activatio
                 result = family.enroll(adapter.bound_session(),body["operation_id"],body["session"],body["callback_token"])
             case "GET","/v1/host/activity":
                 result = {"busy":adapter.busy()}
+            case "GET","/v1/host/handoff-activity":
+                require(pinned,403,"native_handoff_observation_requires_pin")
+                result = adapter.handoff_activity()
             case "GET","/v1/host/context":
                 result = adapter.context_usage()
             case "GET","/v1/host/session-catalog":

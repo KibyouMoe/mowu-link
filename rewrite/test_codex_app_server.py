@@ -1356,6 +1356,131 @@ class CodexAppServer(unittest.TestCase):
         if output := os.environ.get("MOWULINK_CODEX_APPROVAL_EVIDENCE"):
             Path(output).write_text(json.dumps(self.evidence,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
 
+    def test_runtime_switch_waits_for_unregistered_native_approval_to_close(self):
+        root = Path(self.root).resolve()
+        self.provider.approval_commands = {"switch":"pwd"}
+        rpc = self.enterContext(isolated_app_server(self.root,self.origin,
+                              ['approval_policy="on-request"','sandbox_mode="read-only"']))
+        source = rpc.request("thread/start",{"cwd":self.root,"ephemeral":False})["thread"]["id"]
+        target = rpc.request("thread/start",{"cwd":self.root,"ephemeral":False})["thread"]["id"]
+        adapter_path = root/"source.db"
+        host = AppServerHost(rpc,source,adapter_path,relay_command_approvals=True)
+        clock = Clock()
+        host.approvals.clock = clock
+        target_host = AppServerHost(rpc,target)
+        seed = rpc.request("turn/start",{"threadId":target,"input":[
+            {"type":"text","text":"Prior isolated target input","text_elements":[]}]})["turn"]["id"]
+        deadline = time.monotonic()+8
+        while True:
+            event = rpc.event(deadline)
+            if event["method"]=="turn/completed" and event["params"]["turn"]["id"]==seed:
+                self.assertEqual(event["params"]["turn"]["status"],"completed")
+                break
+        original = target_host.thread(target,include_turns=True)["turns"]
+        self.assertEqual([item["id"] for item in original],[seed])
+        ports = {}
+        for session,adapter in ((source,HostAdapter(adapter_path,host,source)),
+                                (target,HostAdapter(root/"target.db",target_host,target))):
+            port_token = guid()
+            url = self.enterContext(running(serve_adapter(adapter,"dev",{port_token:"worker/dev"},("127.0.0.1",0),None)))
+            ports[session] = RemoteAdapter(Client(url,port_token),session)
+        worker_token,approver_token,callback_token,target_token,platform_token = (guid() for _ in range(5))
+        orders = Orders(root/"router.db")
+        router = self.enterContext(running(serve_loopback(orders,{worker_token:"worker/dev",approver_token:"approver/dev"})))
+        wire,approver = Client(router,worker_token),Client(router,approver_token)
+        worker = Worker(root/"worker.db","dev",wire,ports[source],resume_targets={target:ports[target]})
+        service = WorkerService(worker)
+        endpoint = self.enterContext(running(service.listen({callback_token:"adapter/dev/"+source,
+                                                            target_token:"adapter/dev/"+target,platform_token:"platform/dev"},("127.0.0.1",0),None)))
+        callback,platform = Client(endpoint,callback_token),Client(endpoint,platform_token)
+        service.step()
+        intake,release = Event(),Event()
+        terminals = Queue()
+        calls,handoffs = [],[]
+        send,native_callback,router_request = rpc.send,callback.request,wire.request
+
+        def monitor_rpc(packet):
+            if "decision" in packet.get("result",{}):
+                calls.append(packet)
+            send(packet)
+
+        def block_first_offer(method,path,*args,**kw):
+            if method=="POST" and path.startswith("worker/approvals/") and not intake.is_set():
+                intake.set()
+                release.wait(8)
+                raise Fault(503,"isolated_router_intake_unavailable",True)
+            return native_callback(method,path,*args,**kw)
+
+        def observe_router(method,path,body=None,*args,**kw):
+            if "/admission-handoffs/" in path:
+                handoffs.append(body["action"])
+            return router_request(method,path,body,*args,**kw)
+
+        rpc.send,callback.request,wire.request = monitor_rpc,block_first_offer,observe_router
+
+        def switch(mid):
+            return platform.request("POST","worker/command",
+                {"message_id":mid,"text":"/resume "+target})["receipt"]
+
+        def wait_until(probe):
+            deadline = time.monotonic()+6
+            while time.monotonic()<deadline:
+                result = probe()
+                if result:
+                    return result
+                time.sleep(.05)
+            self.fail("approval or host activity did not settle")
+
+        with worker_callbacks(host,callback,lambda:None,notify_terminal=lambda tid,state:terminals.put((tid,state))):
+            try:
+                turn = rpc.request("turn/start",{"threadId":source,"input":[
+                    {"type":"text","text":"Approval fixture switch","text_elements":[]}]})["turn"]["id"]
+                self.assertTrue(intake.wait(6))
+                clock.advance(TTL_SECONDS)
+                self.assertEqual(terminals.get(timeout=4),(turn,"interrupted"))
+                wait_until(lambda:not ports[source].busy())
+                pending = ports[source].handoff_activity(session=source)
+                self.assertEqual(pending,{"session":source,"busy":False,"approval_pending":True})
+                self.assertEqual(approver.request("GET","approvals/dev")["items"],[])
+                refused = switch("om_switch_waiting_native_approval")
+                self.assertNotIn("binding_receipt",refused)
+                self.assertFalse(handoffs)
+                self.assertEqual(worker.native_session_pin,source)
+                self.assertEqual(target_host.thread(target,include_turns=True)["turns"],original)
+                self.assertEqual(switch("om_switch_waiting_native_approval"),refused)
+            finally:
+                release.set()
+            wait_until(lambda:not ports[source].handoff_activity(session=source)["approval_pending"])
+            approval, = approver.request("GET","approvals/dev")["items"]
+            self.assertEqual((approval["state"],approval["request"]["turn_id"]),("native_closed",turn))
+            self.assertEqual(approval["attempted_response"],{"source":"native_deadline","decision":"cancel"})
+            self.assertEqual(len(calls),1)
+            self.assertEqual(calls[0]["result"],{"decision":"cancel"})
+            self.assertEqual(approver.frames(0),[])
+            accepted = switch("om_switch_after_native_approval")
+            self.assertEqual(accepted["binding_receipt"]["session"],target)
+            self.assertEqual(handoffs,["begin","end"])
+            message = {"message_id":guid(),"text":"Isolated target input"}
+            result = wait_until(lambda:platform.request("POST","worker/chat",message)["receipt"])
+            wait_until(lambda:not ports[target].busy())
+            self.assertEqual(result["session"],target)
+            replay = platform.request("POST","worker/chat",message)["receipt"]
+            self.assertEqual(replay,result)
+            prior_turn,target_turn = target_host.thread(target,include_turns=True)["turns"]
+            self.assertEqual(prior_turn,original[0])
+            delivered, = [item for item in target_turn["items"] if item["type"]=="userMessage"]
+            self.assertEqual((target_turn["id"],delivered["id"]),(result["turn_id"],result["native_id"]))
+            self.assertEqual(len(host.thread(source,include_turns=True)["turns"]),1)
+
+        self.evidence = {"source_session":source,"native_turn":turn,"approval_id":approval["approval_id"],
+            "native_rpc_request_id":calls[0]["id"],"source_observation_while_router_has_no_approval":pending,
+            "refused_command":refused,"router_admission_requests_before_closure":0,"native_cancellations":len(calls),
+            "approved_binding_after_closure":accepted["binding_receipt"],"router_admission_requests":handoffs,
+            "new_target_inputs_before_closure":0,"new_target_inputs_after_closure":1,"target_input_receipt":result,
+            "boundary":"Actual Codex App Server in both sessions and loopback Worker/Router/adapter HTTP. Model, clock, fault and platform input are fixtures."}
+        if output := os.environ.get("MOWULINK_APPROVAL_HANDOFF_EVIDENCE"):
+            Path(output).write_text(json.dumps(self.evidence,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
+
     def test_resume_catalog_uses_only_current_app_server_workspace_without_loading_history(self):
         root = Path(self.root)
         work,elsewhere = root/"approved",root/"other"
