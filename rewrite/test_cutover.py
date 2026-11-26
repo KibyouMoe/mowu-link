@@ -494,7 +494,7 @@ store.close()
                                worker_id=worker,reason="移交给下一工位")
 
         def finish_cleanup(worker,host,assignment):
-            self.assertEqual(worker.connect()["reconcile"],"confirm_transfer")
+            self.assertIn(assignment,[row["assignment_id"] for row in worker.connect()["pending_cleanup"]])
             worker.poll()
             control,receipt = next((p,r) for p,r in host.entries() if p["kind"]=="task.transfer_out")
             self.assertEqual(control["assignment_id"],assignment)
@@ -514,15 +514,28 @@ store.close()
                        manager.create(original_key,"Original order","An isolated request","oguri")["task_id"])
                 former = register(loop.worker)
                 self.assertTrue(former)
-                clock.advance(630)
-                self.assertEqual(manager.inspect(tid)["task"]["state"],"blocked")
+                if migrated:
+                    clock.advance(630)
+                    self.assertEqual(manager.inspect(tid)["task"]["state"],"blocked")
+                else:
+                    for seconds in (1,10,1,1,1,1):
+                        clock.advance(seconds)
+                        loop.worker.poll()
+                        loop.worker.poll()
+                    self.assertEqual(manager.inspect(tid)["task"]["state"],"blocked")
+                    self.assertIsNone(loop.worker.hold()["held_assignment_id"])
                 original = b"old material bytes"
                 first,first_sha = upload(loop.wire,"material.bin",original)
                 private_files.append((first,first_sha,original))
                 material_key = guid()
                 material = {"session_id":loop.worker.session,"assignment_id":former,"text":"旧派发的候选",
                             "artifact_ids":[first]}
-                record = loop.wire.request("POST",f"tasks/{tid}/materials",material,material_key)
+                if migrated:
+                    record = loop.wire.request("POST",f"tasks/{tid}/materials",material,material_key)
+                else:
+                    shelved, = [receipt for payload,receipt in loop.native.entries() if payload["kind"]=="task.shelved"]
+                    record = loop.worker.submit_material(loop.native.session,shelved["native_id"],material_key,
+                        {**material,"task_id":tid})
                 transfer("tama")
                 tama,host2 = station("tama")
                 second = register(tama)
@@ -587,6 +600,9 @@ store.close()
             self.assertEqual(intermediate["pool"]["artifact_ids"],[blocked_file])
         else:
             self.assertEqual(intermediate["cleanup"]["receipt"],later)
+            self.assertEqual(orig["pool"]["source"],"unanswered")
+            self.assertEqual(len(orig["probe_delivery_ids"]),4)
+            self.assertTrue(orig["shelved_delivery_id"])
         self.assertEqual(archived["artifact_ids"],[result_file])
         for file,_,body in private_files:
             self.assertEqual((private/"files"/file).read_bytes(),body)
@@ -641,17 +657,31 @@ store.close()
         with self.assertRaisesRegex(ValueError,"changes the state of a different assignment"):
             stage_reviewed_rollback(self.snapshot,inconsistent,review,refused)
         self.assertFalse(refused.exists())
+        if not migrated:
+            with closing(sqlite3.connect(inconsistent/"router.db")) as db,db:
+                db.execute("UPDATE operations SET response=? WHERE actor='worker/oguri' AND key=?",
+                           (json.dumps(late),orig["cleanup"]["report_key"]))
+                db.execute("DELETE FROM deliveries WHERE delivery_id=?",(orig["probe_delivery_ids"][0],))
+            review.write_text(json.dumps({"trial_sha256":digest(inconsistent/"router.db"),"closed_assignments":{tid:final}}))
+            with self.assertRaisesRegex(ValueError,"inquiry deliveries do not match"):
+                stage_reviewed_rollback(self.snapshot,inconsistent,review,refused)
+            self.assertFalse(refused.exists())
         if output := os.environ.get("MOWULINK_TRANSFER_ROLLBACK_EVIDENCE"):
             path = Path(output)
             proofs = json.loads(path.read_text()) if path.exists() else {}
             proofs["migrated" if migrated else "trial_born"] = {
                 "task_id":tid,"assignment_ids":[former,second,final],"material_id":record["material_id"],
                 "late_cleanups":[late] if migrated else [late,later],
+                "entry_pool_source":orig["pool"]["source"],
+                "probe_delivery_ids":orig.get("probe_delivery_ids",[]),
+                "shelved_delivery_id":orig.get("shelved_delivery_id"),
                 "retained_files_sha256":[checksum for _,checksum,_ in private_files],
                 "legacy":observed,"trial_sha256":trial_digest,"snapshot_sha256":baseline_source,
                 "pending_cleanup_refused":True,"inconsistent_late_cleanup_refused":True,
                 "boundary":"Actual old and new HTTP Routers, SQLite, Worker W03/W04 and "
                 "candidate upload. Scripted host and agent, controlled clock."}
+            if not migrated:
+                proofs["trial_born"]["missing_inquiry_refused"] = True
             path.write_text(json.dumps(proofs,ensure_ascii=False,indent=2)+"\n")
 
     def test_trial_born_closed_orders_return_as_private_archives_without_a_new_dispatch(self):

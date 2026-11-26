@@ -12,6 +12,31 @@ def order_state(order, step, state, revision, assignment_id=None):
                 assignee_id=step["worker_id"],holder=holder)
 
 
+def inquiry_frames(db, tid):
+    by_assignment = {}
+    for row in db.execute("""SELECT rowid AS seq,kind,payload,delivery_id FROM deliveries
+        WHERE kind IN ('task.probe','task.shelved') AND json_extract(payload,'$.task_id')=?
+        ORDER BY rowid""",(tid,)):
+        aid = json.loads(row["payload"]).get("assignment_id")
+        by_assignment.setdefault(aid,[]).append(row)
+    return by_assignment
+
+
+def retain_inquiries(step, frames, dispatch_seq, next_dispatch_seq):
+    unanswered = step.get("pool",{}).get("source")=="unanswered"
+    kinds = [frame["kind"] for frame in frames]
+    count = kinds.count("task.probe")
+    expected = ["task.probe"]*count + (["task.shelved"] if unanswered else [])
+    if (kinds!=expected or count>4 or unanswered and count!=4
+            or any(frame["seq"]<=dispatch_seq or next_dispatch_seq is not None and frame["seq"]>=next_dispatch_seq
+                   for frame in frames)):
+        raise ValueError("trial inquiry deliveries do not match their original assignment")
+    if count:
+        step["probe_delivery_ids"] = [frame["delivery_id"] for frame in frames[:count]]
+    if unanswered:
+        step["shelved_delivery_id"] = frames[-1]["delivery_id"]
+
+
 def histories(db, entries, deltas):
     used = dict.fromkeys(("pool_entries","cleanups","materials"),0)
     dispatches = set()
@@ -25,8 +50,10 @@ def histories(db, entries, deltas):
         for row in db.execute("SELECT * FROM materials WHERE task_id=? ORDER BY rowid",(tid,)):
             material = dict(row,artifact_ids=attachments.linked(db,"material",row["material_id"]))
             materials.setdefault(row["assignment_id"],[]).append(material)
-        for frame in db.execute("""SELECT * FROM deliveries WHERE kind='task.dispatch'
-                                  AND json_extract(payload,'$.task_id')=? ORDER BY rowid""",(tid,)):
+        inquiries = inquiry_frames(db,tid)
+        offers = db.execute("""SELECT rowid AS seq,* FROM deliveries WHERE kind='task.dispatch'
+                             AND json_extract(payload,'$.task_id')=? ORDER BY rowid""",(tid,)).fetchall()
+        for frame,next_frame in zip(offers,offers[1:]+[None]):
             payload = json.loads(frame["payload"])
             aid, worker = payload.get("assignment_id"), frame["consumer"].removeprefix("worker/")
             if (not frame["consumer"].startswith("worker/") or not worker or not valid_guid(aid)
@@ -37,11 +64,13 @@ def histories(db, entries, deltas):
             step = {"assignment_id":aid,"worker_id":worker,"revision":revision,"delivery_id":frame["delivery_id"]}
             if pool := pools.pop(aid,None):
                 if (pool["worker_id"]!=worker or pool["active"]!=0 or pool["remind_at"] is not None
-                        or pool["source"] not in ("worker","offline") or not pool["reason"].strip()):
+                        or pool["source"] not in ("worker","offline","unanswered") or not pool["reason"].strip()):
                     raise ValueError("trial has an unresolved or unsupported blocked assignment")
                 pool["artifact_ids"] = attachments.linked(db,"report",aid)
-                if pool["source"]=="offline" and pool["artifact_ids"]:
-                    raise ValueError("offline pool notification has unexpected files")
+                if pool["source"]!="worker" and pool["artifact_ids"]:
+                    raise ValueError("Router pool notification has unexpected files")
+                if pool["source"]=="unanswered" and pool["reason"]!="进度询问三次重试仍无答复。":
+                    raise ValueError("trial has an unsupported exhausted inquiry")
                 step["pool"] = pool
                 used["pool_entries"] += 1
             if cleanup := cleanups.pop(aid,None):
@@ -56,16 +85,17 @@ def histories(db, entries, deltas):
                     raise ValueError("candidate material does not belong to its original blocked assignment")
                 step["materials"] = candidates
                 used["materials"] += len(candidates)
+            retain_inquiries(step,inquiries.pop(aid,[]),frame["seq"],next_frame["seq"] if next_frame else None)
             steps.append(step)
             revision += 3 + ("pool" in step)
-        if (pools or cleanups or materials or not steps or steps[0]["worker_id"]!=entry["original_worker"]
+        if (pools or cleanups or materials or inquiries or not steps or steps[0]["worker_id"]!=entry["original_worker"]
                 or steps[-1]["assignment_id"]!=entry["assignment_id"] or steps[-1]["worker_id"]!=entry["worker_id"]
                 or order["revision"]!=revision or set(steps[-1]) & {"pool","cleanup","materials"}):
             raise ValueError("trial is missing a complete assignment chain for the reviewed result")
         for step,target in zip(steps,steps[1:]):
             cleanup = step.get("cleanup")
-            released_by_worker = step.get("pool",{}).get("source")=="worker"
-            if (step["worker_id"]==target["worker_id"] or bool(cleanup)==released_by_worker
+            needs_cleanup = step.get("pool",{}).get("source")!="worker"
+            if (step["worker_id"]==target["worker_id"] or bool(cleanup)!=needs_cleanup
                     or cleanup and cleanup["new_assignee_id"]!=target["worker_id"]):
                 raise ValueError("transfer does not match the former assignment and its cleanup")
         entry["assignment_history"] = steps
@@ -76,6 +106,7 @@ def histories(db, entries, deltas):
 def check_transport(db, entries):
     workers = set()
     expected_frames = {}
+    expected_inquiries = {}
     expected_notices = {}
     notices = {tid:[] for tid in entries}
     cleanup_frames = {}
@@ -88,6 +119,11 @@ def check_transport(db, entries):
             expected_frames["task.dispatch",tid,aid] = ("worker/"+worker,step["delivery_id"],
                 {"task_id":tid,"assignment_id":aid,"revision":step["revision"],
                  "title":order["title"],"instructions":order["instructions"]})
+            for did in step.get("probe_delivery_ids",[]):
+                expected_inquiries[did] = ("task.probe","worker/"+worker,{"task_id":tid,"assignment_id":aid})
+            if shelved := step.get("shelved_delivery_id"):
+                expected_inquiries[shelved] = ("task.shelved","worker/"+worker,{"task_id":tid,
+                    "assignment_id":aid,"reason":step["pool"]["reason"]})
             if cleanup := step.get("cleanup"):
                 key = ("task.transfer_out",tid,aid)
                 cleanup_frames[key] = cleanup
@@ -135,6 +171,9 @@ def check_transport(db, entries):
             if not saved or consumer!="hermes" or data!=saved["payload"]:
                 raise ValueError("trial notification does not match its archived message")
             saved["delivery_id"] = did
+        elif kind in ("task.probe","task.shelved"):
+            if expected_inquiries.pop(did,None)!=(kind,consumer,data):
+                raise ValueError("trial inquiry delivery does not match the reviewed assignment")
         else:
             key = (kind,tid,aid)
             expected = expected_frames.pop(key,None)
@@ -143,7 +182,8 @@ def check_transport(db, entries):
             if key in cleanup_frames:
                 cleanup_frames[key]["delivery_id"] = did
         frames[did] = (consumer,row["cursor"])
-    if messages or expected_frames or any(len(notices[tid])!=len(items) for tid,items in expected_notices.items()):
+    if (messages or expected_frames or expected_inquiries
+            or any(len(notices[tid])!=len(items) for tid,items in expected_notices.items())):
         raise ValueError("trial is missing a dispatch, cleanup delivery, or W04 notification")
     for tid, items in notices.items():
         entries[tid]["notice"] = items[-1]
@@ -181,7 +221,8 @@ def verify_order(db, tid, entry, operations):
         after = accept["seq"]
         # The offline timer does not write an operation. Between W03 and the
         # next action, an admitted assignment can have reached its saved pool.
-        possible = {"working","blocked"} if step.get("pool",{}).get("source")=="offline" else {"working"}
+        source = step.get("pool",{}).get("source")
+        possible = {"working","blocked"} if source in ("offline","unanswered") else {"working"}
         adjacent_states.append((after,possible))
         if target is None:
             report = take(operations,(tid,"report",aid,"completed"),actor,{

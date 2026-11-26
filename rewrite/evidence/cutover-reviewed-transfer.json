@@ -1,19 +1,22 @@
 {
   "migrated": {
-    "task_id": "a73951da-6d5d-510a-9879-5e940a2b6d1a",
+    "task_id": "24958267-e2c3-5f6f-8a09-bd6d8d362e64",
     "assignment_ids": [
-      "25d2d4e0-56f6-4144-a06f-6df8bc3c9c9e",
-      "7a0055ae-493f-4502-9542-06ba32a2b490",
-      "6f79e5f9-cd86-4f5e-baf0-1e81e44a1b02"
+      "a7a88758-e40e-4929-b66e-b93c905b0a0f",
+      "15084380-faae-4b48-b69e-7d9f43930916",
+      "d7a8a69d-ae91-4c04-856a-7da16230571e"
     ],
-    "material_id": "36cff492-fe5e-4c19-9938-bc0166da343d",
+    "material_id": "630bfc62-8423-4c91-8227-a52299328265",
     "late_cleanups": [
       {
         "recorded": true,
-        "release_assignment_id": "25d2d4e0-56f6-4144-a06f-6df8bc3c9c9e",
+        "release_assignment_id": "a7a88758-e40e-4929-b66e-b93c905b0a0f",
         "task_state": "closed"
       }
     ],
+    "entry_pool_source": "offline",
+    "probe_delivery_ids": [],
+    "shelved_delivery_id": null,
     "retained_files_sha256": [
       "90904ba2df68c78ca15a31de1fa402742184fd8a24ea236abd9e5b4f41f896e6",
       "b11226ad56a1c9e86b0a82ccda2be4f0e5d06870b4e9d95b2a4935562df0aa35",
@@ -23,9 +26,9 @@
       "status": 200,
       "archive": {
         "reason": "reviewed_on_rewrite",
-        "recovery_reference": "a73951da-6d5d-510a-9879-5e940a2b6d1a",
+        "recovery_reference": "24958267-e2c3-5f6f-8a09-bd6d8d362e64",
         "kind": "archive",
-        "at": 1795730356.8744268
+        "at": 1795730692.288898
       },
       "owner": "oguri",
       "deliverable": null,
@@ -33,7 +36,7 @@
         null,
         null,
         null,
-        "t-674699cff2"
+        "t-7e9ddae289"
       ],
       "attachment_statuses": [
         404,
@@ -42,32 +45,40 @@
       ],
       "replay": null
     },
-    "trial_sha256": "2e7f80f974a4c3cb5d8b426c083a5943d15f375725e705ff7800b0a17c1d3db7",
-    "snapshot_sha256": "1382a850ac3ccebcd8ee11531f8c5a88ae3ebe89b5cf582fd0ab588d1cd26bbf",
+    "trial_sha256": "696a3ea91794ff4dae7d5ee2f89b376dd85fee8264b43865e93c853449896d98",
+    "snapshot_sha256": "1047d170c581ed9fdeb3b3bafad2e25e34eda48816c718ebf213a76b897b8d95",
     "pending_cleanup_refused": true,
     "inconsistent_late_cleanup_refused": true,
     "boundary": "Actual old and new HTTP Routers, SQLite, Worker W03/W04 and candidate upload. Scripted host and agent, controlled clock."
   },
   "trial_born": {
-    "task_id": "36191837-bc85-4154-ad29-e5b9b4fa8374",
+    "task_id": "785db86b-3f00-4733-a71c-837f1b5bb02b",
     "assignment_ids": [
-      "a37dbc55-97c4-4308-8c3e-2ca3e291693a",
-      "d7d93468-c560-46ca-a364-fe083a6fab0a",
-      "80a4e4e5-df4d-4114-8d6b-f3dd5c5a37dc"
+      "c73e51e8-254e-4120-a49f-b7ba010549d9",
+      "3089c556-1292-4d86-8faa-95f740013049",
+      "836b7996-a609-469e-9fad-964c221e0320"
     ],
-    "material_id": "3c207713-1934-418b-8dd5-f7b6a5ab172f",
+    "material_id": "a8a3576a-1422-48d4-b25c-764f1e581b3a",
     "late_cleanups": [
       {
         "recorded": true,
-        "release_assignment_id": "a37dbc55-97c4-4308-8c3e-2ca3e291693a",
+        "release_assignment_id": "c73e51e8-254e-4120-a49f-b7ba010549d9",
         "task_state": "closed"
       },
       {
         "recorded": true,
-        "release_assignment_id": "d7d93468-c560-46ca-a364-fe083a6fab0a",
+        "release_assignment_id": "3089c556-1292-4d86-8faa-95f740013049",
         "task_state": "closed"
       }
     ],
+    "entry_pool_source": "unanswered",
+    "probe_delivery_ids": [
+      "fcb551a5-eae2-4eb4-82c0-c9681c4581a2",
+      "253dfefe-ac4c-4261-a825-440d47f0fead",
+      "2bd4c025-3475-4916-b738-5003364fa519",
+      "ec3f0656-00b7-4d06-91fa-0bf1c2330c03"
+    ],
+    "shelved_delivery_id": "bc04c5d8-d321-4ba2-aca7-9bb7d458effa",
     "retained_files_sha256": [
       "90904ba2df68c78ca15a31de1fa402742184fd8a24ea236abd9e5b4f41f896e6",
       "1a6e05cd816884739f8751ef585a9c304df00ddd82c449be2433cbcc614a5483"
@@ -76,9 +87,9 @@
       "status": 200,
       "archive": {
         "reason": "reviewed_on_rewrite",
-        "recovery_reference": "36191837-bc85-4154-ad29-e5b9b4fa8374",
+        "recovery_reference": "785db86b-3f00-4733-a71c-837f1b5bb02b",
         "kind": "archive",
-        "at": 1795730357.736599
+        "at": 1795730693.691186
       },
       "owner": "oguri",
       "deliverable": null,
@@ -86,7 +97,7 @@
         null,
         null,
         null,
-        "t-4df07da694"
+        "t-102af2f635"
       ],
       "attachment_statuses": [
         404,
@@ -98,14 +109,29 @@
           "ok": true,
           "duplicate": true,
           "worker": "oguri",
-          "task_id": "t-c9eed56673"
+          "task_id": "t-2101e6dc95"
         }
       ]
     },
-    "trial_sha256": "2481e95fc136e160d7fcd11ae46bfa6ce88cab6e2e3cd283a5b9941b53776e53",
-    "snapshot_sha256": "7262f1c948573ed7151e0692221f81a94671900eda9f3d755ed30062c9ba5658",
+    "trial_sha256": "b6b7d0d104b15649e7316a6e893f2710aecfe2e19b43e84c39b8d2bc24b96869",
+    "snapshot_sha256": "29fce30b9a9d323591cad46e9664bf0da7e89ec773c77363e03cea84a6818683",
     "pending_cleanup_refused": true,
     "inconsistent_late_cleanup_refused": true,
-    "boundary": "Actual old and new HTTP Routers, SQLite, Worker W03/W04 and candidate upload. Scripted host and agent, controlled clock."
+    "boundary": "Actual old and new HTTP Routers, SQLite, Worker W03/W04 and candidate upload. Scripted host and agent, controlled clock.",
+    "missing_inquiry_refused": true
+  },
+  "candidate_only_boundary": {
+    "task_id": "d8a3b881-850e-5100-b145-f872910e63dc",
+    "assignment_id": "01ce1e9b-7277-4129-a0b2-1aed859f7cec",
+    "material_id": "9f43c1fc-a583-4bdb-b732-57ba6683d996",
+    "state": "closed",
+    "last_report": null,
+    "pending_cleanup": [],
+    "fixture_host_still_busy": true,
+    "worker_still_has_local_hold": true,
+    "rollback_refused": "reviewed rollback needs unchanged migrated orders closed after one W04",
+    "rollback_directory_published": false,
+    "original_databases_preserved": true,
+    "boundary": "Actual old and new Router SQLite, Rewrite HTTP and Worker. Controlled host and clock."
   }
 }
