@@ -27,6 +27,8 @@
 
 ## 宿主与来源复验
 
+版本包的构建、安装、核验和升级入口见 [隔离安装](README.md#隔离安装与升级)。从 b31cee5 升到 5de36ad，再退回前版，三个实际临时 Router 进程先后启用同一张待派单，仅原单一张。原始工单号 `2bd9d658-d841-4a7e-9f28-e52086a56c64`；两版源码包 SHA-256 分别为 `8ca669d7142031d022a5a37ae124aaa8f739113c70c40fab2eaf120c6c954d25`、`318fa45ec72c8ab1fa1edde64f4bd56bc4d10c17d8f5e9be33aff43abb316a37`。复验命令在 [回退演练](router-rehearsal.md)。七库试运行出现新业务写入时，整组回退另外实测拒绝。
+
 五组件离线备份的复跑入口为 `python3 -m unittest -v rewrite.test_state_bundle`，步骤见 [离线恢复](router-rehearsal.md)。七库从同一停写点恢复，原持单、未交的私聊和通知、待上传附件都实跑续接。一次已有写锁、错误角色或清单摘要不匹配会阻止发布恢复目录。真实云端状态及跨机器停写窗口另验。上一关 DSH 提交 b31cee5，完整回归 84 项。
 
 DSH 的适配器可在独立宿主进程加载 `integrations/dsh_host/index.mjs`，只对显式指定的会话注册 `worker_ask` 和 `worker_report`。宿主插件与同机适配器经用户私有目录里的 Unix 套接字通信；适配器通过 HTTPS 与 Worker 通信。接入参数是会话 ID 和绝对目录，启动器说明见 `python3 -m rewrite.service dsh-adapter --help`。宿主侧不持有 Router 凭据。

@@ -39,3 +39,11 @@ python3 -m rewrite.state_bundle restore --snapshot ./snapshot --manifest-sha256 
 ```
 
 快照只覆盖清单中的重做版状态，原生宿主和飞书已发生的外部动作不会随数据库回退。原生会话不可核、平台已过幂等时限或快照后存在新的业务写入时，应先隔离恢复目录，对照两端记录后再启用写者。旧系统的待派单转换仍用上节的旧 Router 演练流程。
+
+需要退回原版本时，保留新系统试运行的全部库，将其映射写成 `trial.json`；可直接使用 restore 输出的映射。使用下列命令，将试运行库全部锁定并与原快照核对。任一库有写入、角色清单变化或写者仍占锁，都会拒绝生成回退目录。
+
+```sh
+python3 -m rewrite.state_bundle rollback --snapshot ./snapshot --manifest-sha256 "$MANIFEST_SHA256" --trial-sources ./trial.json --destination ./previous-state
+```
+
+版本级复跑为 `python3 -m rewrite.release_check --repository . --previous b31cee5da7c8dc74a76accdd78d8a6c5cb49484c --new 5de36ad66df26dc34fe3832ed14e77b1d9f19551`。两个已提交版本在各自新目录启动真实 Router，以专用临时 TLS 和身份验同一张待派单。旧包→新包→旧包后只查到原单一张，新试用库字节未变。该演练在 macOS 跑过；Windows 与跨机宿主尚待验收。

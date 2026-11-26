@@ -1,6 +1,6 @@
 """Offline component state snapshots. Keep revision and manifest digest outside the snapshot."""
 import argparse
-from contextlib import ExitStack, closing
+from contextlib import ExitStack, closing, contextmanager
 import json
 import os
 from pathlib import Path
@@ -63,11 +63,10 @@ def copy_private(src,dst):
         os.fsync(writer.fileno())
 
 
-def capture(sources,revision,destination):
-    check_revision(revision)
+@contextmanager
+def locked(sources):
     validate_set(sources)
-    manifest = {"format":1,"snapshot_id":guid(),"source_revision":revision,"files":{}}
-    with output_directory(destination) as stage, ExitStack() as stack:
+    with ExitStack() as stack:
         identities = set()
         for label in sorted(sources):
             path = Path(sources[label])
@@ -86,6 +85,13 @@ def capture(sources,revision,destination):
             # Lock all selected files before copying the first. A single busy owner aborts staging.
             db.execute("BEGIN EXCLUSIVE")
             health(db,component(label)[0])
+        yield
+
+
+def capture(sources,revision,destination):
+    check_revision(revision)
+    manifest = {"format":1,"snapshot_id":guid(),"source_revision":revision,"files":{}}
+    with output_directory(destination) as stage, locked(sources):
         for label,source in sorted(sources.items()):
             path = Path(source)
             dest = stage/filename(label)
@@ -136,6 +142,17 @@ def restore(snapshot,expected,destination):
     return {label:str(destination/filename(label)) for label in manifest["files"]}
 
 
+def rollback(snapshot,expected,trial,destination):
+    manifest = verify(snapshot,expected)
+    if set(trial) != set(manifest["files"]):
+        raise ValueError("trial component list differs from snapshot")
+    with locked(trial):
+        for label,path in trial.items():
+            if digest(Path(path)) != manifest["files"][label]["sha256"]:
+                raise ValueError("trial state changed; reconcile before rollback: "+label)
+        return restore(snapshot,expected,destination)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     ops = parser.add_subparsers(dest="op",required=True)
@@ -143,11 +160,13 @@ def main():
     backup.add_argument("--sources",type=Path,required=True,help="role:instance to absolute database path, JSON")
     backup.add_argument("--revision",required=True)
     backup.add_argument("--destination",type=Path,required=True)
-    for op in ("verify","restore"):
+    for op in ("verify","restore","rollback"):
         p = ops.add_parser(op)
         p.add_argument("--snapshot",type=Path,required=True)
         p.add_argument("--manifest-sha256",required=True)
-        if op=="restore":
+        if op=="rollback":
+            p.add_argument("--trial-sources",type=Path,required=True)
+        if op in ("restore","rollback"):
             p.add_argument("--destination",type=Path,required=True)
     args = parser.parse_args()
     if args.op=="capture":
@@ -155,6 +174,8 @@ def main():
     elif args.op=="verify":
         manifest = verify(args.snapshot,args.manifest_sha256)
         result = {"snapshot_id":manifest["snapshot_id"],"components":len(manifest["files"])}
+    elif args.op=="rollback":
+        result = rollback(args.snapshot,args.manifest_sha256,json.loads(args.trial_sources.read_text()),args.destination)
     else:
         result = restore(args.snapshot,args.manifest_sha256,args.destination)
     print(encode(result))

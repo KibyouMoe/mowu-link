@@ -36,6 +36,21 @@ python3 -m unittest -v rewrite.test_mainline
 
 后续已扩展 Router 生命周期、消息附件、问答、同伴私聊及插件。以[全量替换进度](replacement-progress.md)核对各项版本和实测边界。
 
+### 隔离安装与升级
+
+在受信任的构建机选定一个完整提交号。以下命令可从源码工作区运行。构建只取该次提交中受 Git 跟踪的 `rewrite/`，包括该版的宿主入口、说明和测试。将归档传给测试机时，经独立可信渠道核对提交号与输出的 SHA-256。安装目标取一个尚不存在的版本目录，运行状态和连接配置使用单独的私有目录。
+
+```sh
+python3 -m rewrite.release build --repository . --revision "$REVISION" --destination ./build
+python3 -m rewrite.release install --archive ./build/mowulink.tar --revision "$REVISION" --sha256 "$SHA256" --destination "./releases/$REVISION"
+python3 -m rewrite.release verify --archive ./build/mowulink.tar --revision "$REVISION" --sha256 "$SHA256" --destination "./releases/$REVISION"
+(cd "./releases/$REVISION" && python3 -B -m rewrite.service router --help)
+```
+
+目标机器需要 Python 3.11 或以上。安装器本身可随相同源码提供；安装好的版本在自己的目录下启动。使用 `-B` 将字节码缓存留在版本目录之外。Router、Worker、Trigger 使用标准库；飞书需要独立 Python 环境中的官方 SDK，DSH 与 Hermes 使用宿主提供的插件依赖。逐字节核验会识别未登记的文件及已改内容。已验证的前一版本目录保留作回退。
+
+升级先停隔离写者，按[离线恢复](router-rehearsal.md)采集组件清单和状态摘要。在新状态目录恢复副本，仅让新包在该副本上启动。先核原持单、投递凭据、未送消息和附件，再引入新工作。返回原版本前停新写者，通过 `state_bundle rollback` 核对试用期间的写入；新写入先逐笔对账。原生宿主绑定、认证及平台投递记录由相应所有者另核。
+
 ### 邮件和游戏聊天来源
 
 在独立环境运行 `python3 -m rewrite.feeds mail --config <邮箱测试配置>` 可只读采一次。仅属当前用户的配置包含 database、host、user、password，可选 port、folder 和 ca_file。首次在邮箱当前 UID 建立基线，后续保存发件人、主题和原来源规定的 200 字正文预览。组合后的信息超过 200 字时，消息携带完整预览文本附件。切换邮箱或文件夹时使用新库。

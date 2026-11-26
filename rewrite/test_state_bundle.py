@@ -11,7 +11,7 @@ from .feishu_inbound import Inbound
 from .feishu_output import Views
 from .hermes import HermesAdapter
 from .orders import Orders
-from .state_bundle import capture, filename, restore, verify
+from .state_bundle import capture, filename, restore, rollback, verify
 from .storage import encode, guid
 from .test_feishu_output import PlatformFixture
 from .test_mainline import Clock
@@ -146,3 +146,17 @@ class Bundle(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,"bytes"):
             restore(self.snapshot,checksum,self.dest)
         self.assertFalse(self.dest.exists())
+
+    def test_restore_previous_release_only_before_trial_changes(self):
+        with self.stack(self.sources) as (_,_,source,_,_,_):
+            source.record("Info","快照之前")
+        checksum = capture(self.sources,self.revision,self.snapshot)["manifest_sha256"]
+        trial = restore(self.snapshot,checksum,self.root/"trial")
+        previous = rollback(self.snapshot,checksum,trial,self.dest)
+        with self.stack(previous) as (_,_,source,_,_,_):
+            self.assertEqual(len(source.pending()),1)
+        with self.stack(trial) as (_,_,source,_,_,_):
+            source.record("Info","快照之后")
+        with self.assertRaisesRegex(ValueError,"trial state changed"):
+            rollback(self.snapshot,checksum,trial,self.root/"refused")
+        self.assertFalse((self.root/"refused").exists())
