@@ -2,6 +2,7 @@ import hashlib
 from threading import Thread
 import unittest
 
+from . import peer_retry
 from .adapter import HostAdapter
 from .devloop import FixtureHost, Loop
 from .native_files import NativeFiles
@@ -243,6 +244,50 @@ class Peers(unittest.TestCase):
         self.assertEqual(recipient.request("GET",path)["local_pending"],[])
         self.assertEqual([p["kind"] for p,_ in self.host.entries()],["peer","peer","task"])
         self.assertEqual(self.loop.hermes.inspect(tid)["task"]["state"],"working")
+
+    def test_outgoing_peer_send_recovers_both_sides_of_router_accept_without_a_new_call(self):
+        self.a.clock = self.clock
+        request = self.a.router.request
+        pending = [guid(),guid()]
+        rejected = guid()
+        with self.assertRaisesRegex(Fault,"peer_not_registered"):
+            self.a.send_peer(rejected,"missing","terminal result")
+        sends = []
+        by_id = "peers/messages/"
+        def drop(method,path,*args,**kwargs):
+            if method=="POST" and path=="peers/tama/messages":
+                mid = args[0]["message_id"]
+                sends.append((mid,args[1]))
+                if mid==pending[0] and sends.count((mid,"peer-"+mid))==1:
+                    request(method,path,*args,**kwargs)
+                    raise ConnectionError("response lost after Router commit")
+                if mid==pending[1] and sends.count((mid,"peer-"+mid))==1:
+                    raise ConnectionError("connection closed before Router commit")
+            return request(method,path,*args,**kwargs)
+        self.a.router.request = drop
+        for mid in pending:
+            with self.assertRaises(ConnectionError):
+                self.a.send_peer(mid,"tama","keep exact ID "+mid)
+        self.assertFalse(self.a.router.request("GET",by_id+pending[0])["worker_received"])
+        with self.assertRaisesRegex(Fault,"peer_message_not_found"):
+            self.a.router.request("GET",by_id+pending[1])
+        self.a = Worker(self.a.db.path,self.a.worker_id,self.a.router,self.a.adapter,clock=self.clock)
+        self.a.connect()
+        self.clock.advance(4)
+        self.a.poll()
+        self.assertEqual(len(sends),2)
+        self.clock.advance(1)
+        self.a.poll()
+        self.a.poll()
+        self.assertEqual([mid for mid,_key in sends],pending+pending)
+        self.assertTrue(all(key=="peer-"+mid for mid,key in sends))
+        self.b.poll()
+        self.b.poll()
+        self.assertEqual([payload["message_id"] for payload,_proof in self.host.entries()],pending)
+        self.assertTrue(all(self.a.router.request("GET",by_id+mid)["host_receipt_id"] for mid in pending))
+        self.assertEqual([peer_retry.waiting(self.a,mid) for mid in pending],[[],[]])
+        self.assertEqual(peer_retry.waiting(self.a,rejected)[0]["phase"],"send_rejected")
+        self.assertFalse(self.loop.hermes.tasks()["items"])
 
     def test_lost_receipt_does_not_starve_another_confirmation(self):
         first,second = guid(),guid()

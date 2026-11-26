@@ -48,6 +48,8 @@ python3 -m unittest -v rewrite.test_mainline
 
 DSH 的 `worker_send_peer` 可在已核对的原生回合中直接联系指定工位。回复带原消息号作为 `reply_to`。Worker 从原会话、原回合和工具调用号生成稳定消息号，同一调用重试取原 Router 回执。附件只接受本工位已有授权的媒体引用。此工具没有建工单、答题或报成果权限。
 
+发件 Worker 在首次请求前保留原信与附件引用。连接失败或 Router 回执待核时，恢复后续用原消息号和原请求键。没有登记的收件工位等明确拒绝会停止后台重试。已确认入箱的私聊继续单独核对对端收件。
+
 ### 飞书私聊的异常回执
 
 绑定的训练员私聊发生格式、附件或收件问题时，平台进程在原消息下回复状态卡。平台已尝试而回执丢失时，沿用原 UUID 和卡片正文，首次尝试满 55 分钟后标记 `receipt_unknown`，继续处理其他消息。等待中已查实且尚未发送的提示自动撤销。若已提示待核，查到宿主凭据后再发一条恢复确认。消息的受理状态在 `platform_events`，平台回复的状态和消息号在 `input_notices`。[飞书回复消息接口](https://open.feishu.cn/document/server-docs/im-v1/message/reply.md)

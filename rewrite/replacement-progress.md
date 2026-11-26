@@ -4,6 +4,8 @@
 
 ## 检查点与证据
 
+发件 Worker 已能自动恢复待确认的同伴私聊。实测 Router 提交前断线、提交后丢回包两支，重开原 Worker 后不再调用发送工具，待发送队列分别用原键补交或查回，对端各只收一条。未登记工位的拒绝保存在本地，后台不重复发送。复跑 `python3 -m unittest -v rewrite.test_peers.Peers.test_outgoing_peer_send_recovers_both_sides_of_router_accept_without_a_new_call`。Router、Worker 和 HTTP 实跑，宿主与时钟为夹具。
+
 实际 DSH AgentLoop 收到同伴的一条带原图私聊，经原生工具执行器调用 `worker_send_peer` 回复原消息。隔离 Router 可分别观察三层收件。原生回执丢失时按原投递查回，同一工具回调重投返回同号，换正文拒绝，发送端只收一次回复。原图摘要吻合，第三工位读不到消息，没建工单。连续 20 次通过。复跑 `python3 -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_dsh_peer_image_and_native_reply_travel_on_the_same_private_chain`。[实测记录](evidence/dsh-native-peer.json)。接收端是实际 DSH，模型和另一工位宿主是夹具。
 
 新版派发在 W03 前固定原生会话。隔离 Router 接管成功后立即换到另一个已认证的适配器，旧单保持 working，另一会话没有收到它；单独给另一会话构造同号输入后，那里发出的 W04 被拒。重开原绑定后，原派发只有一次原生输入，正式 W04 才释放持单。复跑 `python3 -m unittest -v rewrite.test_mainline.Mainline.test_assignment_keeps_original_native_session_across_replacement`。Router、Worker 及传输实际运行，宿主为夹具。

@@ -146,6 +146,7 @@ class Worker:
                         db.execute("DELETE FROM peer_retry WHERE phase='delivery' AND operation_id=?",(frame["delivery_id"],))
             self.flush_reports()
             self.flush_peer_receipts()
+            self.flush_peer_sends()
 
     def process(self, frame):
         with self.lock:
@@ -354,14 +355,43 @@ class Worker:
                     409,"peer_message_conflict")
             if row["receipt"]:
                 return json.loads(row["receipt"])
+            db.execute("DELETE FROM peer_retry WHERE operation_id=? AND phase='send_rejected'",(mid,))
+            db.execute("""INSERT OR IGNORE INTO peer_retry VALUES (?,'send',?,0,?,'router_intake_unconfirmed')""",
+                       (mid,mid,self.clock()+5))
+        try:
+            return self.submit_peer(mid,target,body,files,kinds)
+        except Fault as error:
+            if (not peer_retry.send_retryable(error) and
+                    error.code not in ("unauthenticated","stale_session","missing_session")):
+                peer_retry.stop_sending(self,mid,error.code)
+            raise
+
+    def submit_peer(self,mid,target,body,files,kinds):
         if files:
             body["attachment_ids"] = peer_files.export(self,files)
             body["attachment_kinds"] = kinds
         reply = self.router.request("POST",f"peers/{target}/messages",body,"peer-"+mid)
-        require(reply.get("message_id") == mid and reply.get("status") == "accepted",409,"missing_peer_receipt")
+        require(isinstance(reply,dict) and reply.get("message_id")==mid and reply.get("status")=="accepted"
+                and reply.get("accepted_at"),409,"missing_peer_receipt")
         with self.db.transaction() as db:
             db.execute("UPDATE peers SET receipt=? WHERE message_id=?", (encode(reply),mid))
+            db.execute("DELETE FROM peer_retry WHERE operation_id=? AND phase IN ('send','send_rejected')",(mid,))
         return reply
+
+    def flush_peer_sends(self):
+        with self.db.transaction() as db:
+            rows = db.execute("""SELECT p.message_id,p.peer_id,p.body FROM peers p
+                JOIN peer_retry r ON r.operation_id=p.message_id AND r.phase='send'
+                WHERE p.direction='out' AND p.receipt IS NULL AND r.retry_at<=?
+                ORDER BY r.retry_at,p.rowid LIMIT 32""",(self.clock(),)).fetchall()
+        for mid,target,raw in rows:
+            peer_retry.attempt(self,"send",mid,mid,self.retry_peer_send,mid,target,json.loads(raw))
+
+    def retry_peer_send(self,mid,target,body):
+        ids,kinds = peer_files.request_files(body)
+        with self.db.transaction() as db:
+            files = peer_files.file_list(db,"adapter/"+self.worker_id,ids,kinds)
+        return self.submit_peer(mid,target,body,files,kinds)
 
     def peer_history(self):
         with self.db.transaction() as db:
