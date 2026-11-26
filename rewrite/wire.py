@@ -1,11 +1,12 @@
 """02A loopback development transport. No ambient proxies, credentials or live services."""
 import json
 import re
+import ssl
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlsplit
-from urllib.request import ProxyHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Request, build_opener
 
 from . import attachments, delivery, messages, pool, questions
 from .orders import task, worker_actor
@@ -107,7 +108,9 @@ def route(orders, actor, method, path, body, headers):
     return status, "application/json", result
 
 
-def serve_loopback(orders, identities):
+def serve_router(orders, identities, address, tls_context=None):
+    if address[0] != "127.0.0.1" and tls_context is None:
+        raise ValueError("a network listener requires TLS")
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass
@@ -162,22 +165,46 @@ def serve_loopback(orders, identities):
     class Server(ThreadingHTTPServer):
         next_tick = 0
 
+        def finish_request(self, request, client_address):
+            request.settimeout(15)
+            if tls_context is None:
+                return super().finish_request(request, client_address)
+            try:
+                with tls_context.wrap_socket(request, server_side=True) as secure:
+                    super().finish_request(secure, client_address)
+            except (ssl.SSLError, TimeoutError, ConnectionResetError):
+                return
+
         def service_actions(self):
             super().service_actions()
             if time.monotonic() >= self.next_tick:
                 orders.tick()
                 self.next_tick = time.monotonic() + 1
 
-    return Server(("127.0.0.1", 0), Handler)
+    return Server(address, Handler)
+
+
+def serve_loopback(orders, identities):
+    return serve_router(orders, identities, ("127.0.0.1", 0))
+
+
+class NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
 
 
 class Client:
-    def __init__(self, url, token):
+    def __init__(self, url, token, ca_file=None):
         parts = urlsplit(url)
-        if parts.scheme != "http" or parts.hostname != "127.0.0.1" or parts.path:
-            raise ValueError("development Router must be loopback")
+        if (not parts.hostname or parts.path or parts.query or parts.fragment or parts.username is not None
+                or parts.password is not None or parts.scheme not in ("http","https")
+                or (parts.scheme == "http" and parts.hostname != "127.0.0.1")):
+            raise ValueError("expected a single HTTPS origin or an isolated HTTP loopback")
         self.url, self.token = url, token
-        self.http = build_opener(ProxyHandler({}))
+        handlers = [ProxyHandler({}), NoRedirect()]
+        if parts.scheme == "https":
+            handlers.append(HTTPSHandler(context=ssl.create_default_context(cafile=ca_file)))
+        self.http = build_opener(*handlers)
 
     def request(self, method, path, body=None, key=None, headers=None):
         hdr = {"Authorization": "Bearer " + self.token, **(headers or {})}
@@ -201,7 +228,10 @@ class Client:
                 return json.loads(raw)
         except HTTPError as exc:
             with exc:
-                error = json.load(exc)["error"]
+                try:
+                    error = json.load(exc)["error"]
+                except (ValueError, KeyError, TypeError):
+                    raise Fault(exc.code, "unexpected_http_response") from exc
             raise Fault(exc.code, error["code"], error["retryable"],
                         {k:v for k,v in error.items() if k not in ("code","message","retryable")}) from exc
 
