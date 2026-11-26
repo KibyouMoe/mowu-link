@@ -252,12 +252,17 @@ store.close()
         backup(self.legacy,self.attachments,self.snapshot)
         prepare(self.snapshot,self.trial,self.source_id)
         loop = Loop(self.trial,Clock(),FixtureHost)
-        keys = [guid(),guid()]
+        direct_key = guid()
         with loop.server:
             loop.thread.start()
             try:
-                new_ids = [loop.hermes.create(key,title,"逐字保留\n第二行","two")["task_id"]
-                           for key,title in zip(keys,("先入队","后入队"))]
+                first = loop.hermes.create(direct_key,"先入队","逐字保留\n第二行","two")
+                tools = ManagerTools(loop.hermes,"isolated-hermes")
+                params = {"title":"后入队","instructions":"逐字保留\n第二行","assignee_id":"two"}
+                second = json.loads(tools.around_call("router_create_task",
+                    lambda args:tools.invoke("router_create_task",args),params,
+                    session_id="isolated-hermes",turn_id="runner-turn",tool_call_id="runner-call"))
+                new_ids = [first["task_id"],second["task_id"]]
             finally:
                 loop.server.shutdown()
                 loop.thread.join()
@@ -272,6 +277,14 @@ store.close()
         staged = stage_queue_rollback(self.snapshot,self.trial,review,self.restore)
         self.assertEqual(staged["queued_requests"],2)
         self.assertEqual(staged["legacy_sha256"],digest(self.snapshot/"legacy.db"))
+        plan = json.loads((self.restore/"queue-replay.json").read_text())
+        example,converted = plan["requests"]
+        self.assertEqual(example["trial_request_id"],direct_key)
+        self.assertEqual(example["request"]["message_id"],direct_key)
+        self.assertRegex(converted["trial_request_id"],r"^hermes-[0-9a-f]{64}$")
+        other_stage = self.root/"same-replay-again"
+        stage_queue_rollback(self.snapshot,self.trial,review,other_stage)
+        self.assertEqual(json.loads((other_stage/"queue-replay.json").read_text()),plan)
         self.assertEqual((self.restore/"attachments"/self.sha).read_bytes(),(self.attachments/self.sha).read_bytes())
         observed = json.loads(self.old("""
 from server import RouterServer
@@ -306,7 +319,7 @@ store.close()
         self.assertEqual(observed["head"],self.queued)
         inserted = observed["queue"][1:]
         self.assertEqual([row["task_id"] for row in inserted],[observed["mapping"][tid] for tid in new_ids])
-        self.assertEqual([row["request_id"] for row in inserted],keys)
+        self.assertEqual([row["request_id"] for row in inserted],[row["request"]["message_id"] for row in plan["requests"]])
         self.assertEqual([row["name"] for row in inserted],["先入队","后入队"])
         self.assertTrue(all(row["description"]=="逐字保留\n第二行" and
                             json.loads(row["metadata"])["execution_mode"]=="goal" for row in inserted))

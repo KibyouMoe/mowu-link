@@ -237,7 +237,9 @@ def queued_candidates(db, delta, legacy_workers):
         operation = recorded[0]
         original = {"title":row["title"],"instructions":row["instructions"],"assignee_id":row["assignee_id"]}
         response = dict(row,holder={"kind":"router"})
-        if (not valid_guid(operation["key"]) or operation["request"]!=encode([["POST","/v1/tasks"],original])
+        key = operation["key"]
+        portable_key = valid_guid(key) or isinstance(key,str) and re.fullmatch(r"hermes-[0-9a-f]{64}",key)
+        if (not portable_key or operation["request"]!=encode([["POST","/v1/tasks"],original])
                 or operation["response"]!=encode(response)):
             blocked.append({"task_id":tid,"reason":"creation_receipt_incompatible"})
             continue
@@ -245,7 +247,7 @@ def queued_candidates(db, delta, legacy_workers):
         if row["instructions"]!=row["instructions"].strip() or len(row["instructions"])>2000:
             blocked.append({"task_id":tid,"reason":"legacy_description_would_change_or_be_rejected"})
             continue
-        candidates.append({"task_id":tid,"assignee_id":row["assignee_id"],"request_id":operation["key"]})
+        candidates.append({"task_id":tid,"assignee_id":row["assignee_id"],"request_id":key})
     only_queue = (bool(candidates) and not blocked and set(delta)=={"tasks","operations"}
                   and all(values=={"baseline_only":0,"trial_only":len(candidates)} for values in delta.values()))
     return candidates,blocked,only_queue
@@ -265,7 +267,8 @@ def reconcile(snapshot, trial):
             legacy_workers = {row[0] for row in old.execute("SELECT name FROM workers")}
         with closing(readonly(source)) as db:
             before = digest(source)
-            result.update(snapshot_sha256=saved["snapshot_sha256"],baseline_sha256=saved["router_db_sha256"],
+            result.update(source_id=saved["source_id"],snapshot_sha256=saved["snapshot_sha256"],
+                          baseline_sha256=saved["router_db_sha256"],
                           trial_sha256=before)
             if [row[0] for row in db.execute("PRAGMA integrity_check")]!=["ok"]:
                 raise ValueError("trial database integrity check failed")
@@ -309,21 +312,25 @@ def stage_queue_rollback(snapshot, trial, review, destination):
     with output_directory(destination) as stage:
         restore_snapshot(snapshot,stage,manifest)
         requests = []
+        legacy_keys = set()
+        namespace = UUID(facts["source_id"])
         with closing(readonly(stage/"legacy.db")) as old, closing(readonly(source)) as db:
             for item in candidates:
                 tid,key = item["task_id"],item["request_id"]
-                if old.execute("SELECT 1 FROM task_info WHERE request_id=?",(key,)).fetchone():
-                    raise ValueError("creation request already exists in the legacy snapshot")
+                legacy_key = key if valid_guid(key) else str(uuid5(namespace,"queue-rollback/"+key))
+                if legacy_key in legacy_keys or old.execute("SELECT 1 FROM task_info WHERE request_id=?",(legacy_key,)).fetchone():
+                    raise ValueError("creation request already exists in the rollback queue")
+                legacy_keys.add(legacy_key)
                 row = db.execute("SELECT title,instructions FROM tasks WHERE task_id=?",(tid,)).fetchone()
                 if row is None:
                     raise ValueError("trial order disappeared after reconciliation")
-                body = {"message_id":key,"worker":item["assignee_id"],"TaskName":row["title"],
+                body = {"message_id":legacy_key,"worker":item["assignee_id"],"TaskName":row["title"],
                         "goal":row["instructions"],"execution_mode":"goal","queue_if_offline":True}
-                requests.append({"trial_task_id":tid,"request":body})
+                requests.append({"trial_task_id":tid,"trial_request_id":key,"request":body})
         with closing(readonly(source)):
             if digest(source)!=facts["trial_sha256"]:
                 raise ValueError("trial database changed after reconciliation")
-        plan = {"trial_sha256":facts["trial_sha256"],"legacy_sha256":manifest["legacy_db_sha256"],
+        plan = {"source_id":facts["source_id"],"trial_sha256":facts["trial_sha256"],"legacy_sha256":manifest["legacy_db_sha256"],
                 "requests":requests}
         (stage/"queue-replay.json").write_text(encode(plan))
     return {"trial_sha256":facts["trial_sha256"],"legacy_sha256":manifest["legacy_db_sha256"],
