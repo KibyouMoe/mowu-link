@@ -6,6 +6,8 @@
 
 旧 Trigger 可用同一停写快照的四类收件账本决定回退游标。回退工具只允许旧 `/ack` 确认连续核实的序号。模拟后序 Event 越过前序 Notify、前序进宿主后掉回执，两次均拒绝生成回退副本。按原投递号查回后，旧 Trigger 通过 HTTP 推进 1→8，重开并重投确认后新增确认数为零，原未投递尾项仍可取。Info 另核管理端查阅证据。宿主与时钟使用夹具。[实测回执](evidence/trigger-return-prefix.json) · [回退步骤](router-rehearsal.md#试用发送后退回原订阅)
 
+累计游标回退场景连过 10 轮。macOS 全量通过 244 项，Linux arm64 通过 164 项、跳过 80 项。以 `babbeea16f52cb1a987c087a07c40381acb6a8b2` 构建 219 文件安装包，SHA-256 为 `fed53595bda54eb9c4808a0cf988bf3ad55b3481e5baf36984f527e43eae0613`。安装目录通过归档、Trigger 和组件快照回归共 19 项，文件摘要一致。测试用旧 Router 和 Trigger 源码取自 `30f61e671465db0b5bba221ba8c9fc2194a6e43d`，通过 `MOWULINK_TEST_LEGACY_ROOT` 指定。
+
 旧 Trigger 积压可按消费者游标、有效等级和原收件凭据审核迁入。实际旧 TriggerStore 查到五条未读，新 Router 留档四条，已有原消费者收件的一条留在旧档。隔离 HermesAdapter 只送一条 Event 和一条 Notify，两条 Info 可查且未唤醒。T04 丢失后重开和按同一计划重建均取回原回执，两份附件字节一致。缺旧附件、附件摘要不符、游标不合或审核不全时不生成迁入库。旧档与游标原样保留。宿主和时钟由夹具驱动，试用发送后退回旧消费者仍须按原序号对账。[实测回执](evidence/trigger-unread-handoff.json) · [交接步骤](router-rehearsal.md#迁入已对账的旧订阅积压)
 
 迁入场景连过 10 轮。macOS 通过全量 243 项，Linux arm64 通过 163 项、跳过 80 项。从 `c2f6292a7b24c6783d863c23ab077b252f6b9216` 构建 217 文件安装包，SHA-256 为 `1408088d49bd6eccdacc7b4de7619c833a74ab6283ff63321a3b877bf7e1aa6a`。安装目录的旧归档、迁入、Trigger、采集和独立 TLS 状态回归共 15 项通过，文件摘要一致。旧 Router 和 Trigger 测试源码由 `30f61e671465db0b5bba221ba8c9fc2194a6e43d` 提取，通过 `MOWULINK_TEST_LEGACY_ROOT` 指定。
