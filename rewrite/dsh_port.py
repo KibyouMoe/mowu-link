@@ -67,8 +67,11 @@ class DshHost:
     def goal_view(self, session):
         return self.request("goal-view",session)
 
-    def goal_change(self, session, action):
-        return self.request("goal-change",session,{"action":action})
+    def goal_change(self, session, action, *, objective=None):
+        fields = {"action":action}
+        if objective is not None:
+            fields["objective"] = objective
+        return self.request("goal-change",session,fields)
 
     def model_view(self, session, kind):
         return self.request("model-view",session,{"kind":kind})

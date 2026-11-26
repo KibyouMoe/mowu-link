@@ -150,12 +150,6 @@ async function formalScenario(agent) {
   console.log(JSON.stringify({ready:true,session}));
   for await (const line of createInterface({input:process.stdin,terminal:false})) {
     if (line==='exit') break;
-    if (line==='create-goal' && usesGoals) {
-      const goal = ctx.get('goals').create(agent,{objective:'隔离持久目标'});
-      await ctx.get('sessions').flush(agent.session);
-      console.log(JSON.stringify({id:goal.id,revision:goal.revision,limit:goal.maxGoalRounds}));
-      continue;
-    }
     if (line==='first-round' && mode==='goal-driver') {
       await entered.promise;
       console.log(JSON.stringify({running:agent.status==='running'}));

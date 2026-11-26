@@ -39,8 +39,11 @@ class RemoteAdapter:
     def goal_view(self):
         return self.request("GET","host/goal")
 
-    def goal_change(self, session, action):
-        return self.request("POST","host/goal",{"session":session,"action":action})
+    def goal_change(self, session, action, *, objective=None):
+        body = {"session":session,"action":action}
+        if objective is not None:
+            body["objective"] = objective
+        return self.request("POST","host/goal",body)
 
     def model_view(self, kind):
         return self.request("GET","host/"+kind)
@@ -81,8 +84,13 @@ def serve_adapter(adapter, worker_id, identities, address, context):
             case "GET","/v1/host/goal":
                 result = adapter.goal_view()
             case "POST","/v1/host/goal":
-                require(set(body)=={"session","action"} and body["action"] in ("pause","resume"),422,"invalid_goal_action")
-                result = adapter.goal_change(string(body,"session"),body["action"])
+                action = body.get("action")
+                if action=="create":
+                    require(set(body)=={"session","action","objective"},422,"invalid_goal_action")
+                    result = adapter.goal_change(string(body,"session"),action,objective=string(body,"objective"))
+                else:
+                    require(set(body)=={"session","action"} and action in ("pause","resume"),422,"invalid_goal_action")
+                    result = adapter.goal_change(string(body,"session"),action)
             case "GET",("/v1/host/models"|"/v1/host/efforts"):
                 result = adapter.model_view(path.rsplit("/",1)[1])
             case "POST","/v1/host/model-selection":

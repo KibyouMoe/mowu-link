@@ -136,8 +136,10 @@ export async function bindHost(ctx, session, directory) {
       if (request.operation === 'context-usage') return contextUsage(session,await ownEvents(ctx,agent));
       if (request.operation === 'goal-view') return goalView(ctx,agent);
       if (request.operation === 'goal-change') {
-        check(['pause','resume'].includes(request.action),'invalid_goal_action');
-        return changeGoal(ctx,agent,request.action,()=>ownEvents(ctx,agent));
+        check(['pause','resume','create'].includes(request.action) &&
+          (request.action==='create' ? typeof request.objective==='string' && request.objective.trim()
+            : request.objective===undefined),'invalid_goal_action');
+        return changeGoal(ctx,agent,request.action,request.objective,()=>ownEvents(ctx,agent));
       }
       if (request.operation === 'model-view') {
         check(['models','efforts'].includes(request.kind), 'invalid_model_view');

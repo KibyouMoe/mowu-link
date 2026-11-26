@@ -44,7 +44,7 @@ def reply(service, name, args, hold):
         if service.adapter_connected and service.host_model_change:
             lines.append("/model 或 /effort 可用 next / prev 翻页，用菜单编号或名称切换。")
         if service.adapter_connected and service.host_goal_control:
-            lines.append("/goal 查看会话目标，可用 pause 或 resume。")
+            lines.append("/goal 查看会话目标，/goal 目标正文建立目标，也可用 pause 或 resume。")
         lines.append("/queue 内容：排入下一回合。" if service.adapter_connected and service.host_queue else "/queue 当前未确认可用。")
         return "\n".join(lines)
     if name == "/status":
@@ -92,6 +92,7 @@ def context_answer(service):
 
 
 GOAL_PHASES = {"active":"进行中","paused":"已暂停","blocked":"受阻","complete":"已完成"}
+GOAL_ACTIONS = {"pause":"pause","暂停":"pause","resume":"resume","继续":"resume"}
 
 
 def describe_goal(goal):
@@ -106,8 +107,8 @@ def describe_goal(goal):
 
 
 def goal_answer(service,session,args):
-    if args:
-        return "用法：/goal、/goal pause 或 /goal resume。"
+    if args and not (len(args)==1 and args[0].casefold() in ("status","状态")):
+        return "用法：/goal、/goal 目标正文、/goal pause 或 /goal resume。"
     data = service.worker.adapter.goal_view()
     require(isinstance(data,dict) and data.get("session")==session and type(data.get("supported")) is bool,
             409,"wrong_native_goal_view")
@@ -232,6 +233,7 @@ CHANGE_ERRORS = {
 GOAL_ERRORS = {
     "native_goal_unavailable":"当前会话暂未接入目标模式。",
     "native_goal_missing":"当前会话没有目标。",
+    "native_goal_exists":"当前会话已有未完成的目标。可用 /goal 查看。",
     "native_goal_transition_refused":"目标当前状态不允许这项操作。可用 /goal 查看。",
     "native_goal_changed":"目标已变化。请用 /goal 查看。",
     "wrong_native_session":"会话绑定发生变化。请查当前绑定。",
@@ -258,7 +260,7 @@ def confirmed_selection(receipt,session,kind,value,expected_route):
     return answer,{"session":session,"selected":selected,"changed":changed,"event_seq":sequence if changed else None}
 
 
-def confirmed_goal(receipt,session,action):
+def confirmed_goal(receipt,session,action,objective):
     require(isinstance(receipt,dict) and receipt.get("session")==session and receipt.get("operation")==action
             and type(receipt.get("event_seq")) is int and receipt["event_seq"]>=0,502,"invalid_goal_change_receipt")
     goal = receipt.get("goal")
@@ -267,10 +269,12 @@ def confirmed_goal(receipt,session,action):
     phase,activation = ("paused","disarmed") if action=="pause" else ("active","armed")
     require((goal["phase"],goal["activation"])==(phase,activation)
             and type(goal.get("revision")) is int and goal["revision"]>=1,502,"invalid_goal_change_receipt")
+    if action=="create":
+        require(goal["objective"]==objective and goal["revision"]==1,502,"invalid_goal_change_receipt")
     return rendered,{"session":session,"id":ref,"revision":goal["revision"],"phase":phase,"event_seq":receipt["event_seq"]}
 
 
-def change_native(service,mid,text,name,value):
+def change_native(service,mid,text,name,value,*,objective=None):
     worker = service.worker
     kind = MODEL_VIEWS.get(name)
     supported = service.host_model_change if kind else service.host_goal_control
@@ -309,7 +313,8 @@ def change_native(service,mid,text,name,value):
                 receipt = worker.adapter.model_change(session,kind,value,**options)
                 answer,native = confirmed_selection(receipt,session,kind,value,expected_route)
             else:
-                answer,native = confirmed_goal(worker.adapter.goal_change(session,value),session,value)
+                options = {"objective":objective} if objective is not None else {}
+                answer,native = confirmed_goal(worker.adapter.goal_change(session,value,**options),session,value,objective)
         except Fault as error:
             answer = (CHANGE_ERRORS if kind else GOAL_ERRORS).get(error.code,unknown)
         except (URLError,OSError):
@@ -325,11 +330,18 @@ def handle(service, body):
     mid, text = string(body,"message_id"), string(body,"text")
     require(is_command(text),422,"invalid_platform_command")
     name,*args = text.strip().split()
-    if len(args)==1 and (name in MODEL_VIEWS and args[0] not in ("next","prev")
-                         or name=="/goal" and args[0] in ("pause","resume")):
-        receipt = change_native(service,mid,text,name,args[0])
-        if receipt is not None:
-            return receipt
+    mutation = None
+    if name in MODEL_VIEWS and len(args)==1 and args[0] not in ("next","prev"):
+        mutation = change_native(service,mid,text,name,args[0])
+    elif name=="/goal" and args:
+        phrase = text.strip()[len(name):].strip()
+        action = GOAL_ACTIONS.get(phrase.casefold())
+        if action:
+            mutation = change_native(service,mid,text,name,action)
+        elif args[0].casefold() not in ("edit","clear","complete","block","status","状态"):
+            mutation = change_native(service,mid,text,name,"create",objective=phrase)
+    if mutation is not None:
+        return mutation
     answer = None
     menu = None
     session = service.host_session if service.adapter_connected else ""

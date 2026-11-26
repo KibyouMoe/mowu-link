@@ -58,11 +58,13 @@ class HostAdapter:
         require(callable(reader),422,"native_goal_unavailable")
         return reader(self.session)
 
-    def goal_change(self, session, action):
+    def goal_change(self, session, action, *, objective=None):
         require(session==self.session,409,"wrong_native_session")
         writer = getattr(self.host,"goal_change",None)
         require(callable(writer),422,"native_goal_unavailable")
-        return writer(self.session,action)
+        if objective is None:
+            return writer(self.session,action)
+        return writer(self.session,action,objective=objective)
 
     def model_view(self, kind):
         reader = getattr(self.host,"model_view",None)

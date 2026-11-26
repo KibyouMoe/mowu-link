@@ -172,12 +172,21 @@ class NativeLoop(unittest.TestCase):
         directory,loop,service,command = self.goal_worker(session)
         with self.start_native(directory,session,"goals") as native:
             service.step()
-            self.assertIn("没有目标",command("om_no_goal","/goal")[1])
-            original = self.read_native(native,"create-goal")
+            self.assertIn("没有目标",command("om_no_goal","/goal 状态")[1])
+            self.assertIn("没有目标",command("om_no_pause","/goal 暂停")[1])
+            self.assertIsNone(loop.native.goal_view(session)["goal"])
+            request = "/goal 隔离持久目标\n保留 第二行"
+            created,_ = command("om_create_goal",request)
+            original = loop.native.goal_view(session)["goal"]
+            self.assertEqual(original["objective"],"隔离持久目标\n保留 第二行")
+            self.assertEqual(created["goal_receipt"]["id"],original["id"])
+            self.assertEqual(command("om_create_goal",request)[0],created)
+            self.assertIn("已有未完成",command("om_replace_goal","/goal 不能替换")[1])
+            self.assertEqual(loop.native.goal_view(session)["goal"],original)
             current = command("om_goal","/goal")[1]
             self.assertIn(f"进行中 · 0/{original['limit']} 轮",current)
             self.assertIn("隔离持久目标",current)
-            paused,text = command("om_pause","/goal pause")
+            paused,text = command("om_pause","/goal 暂停")
             self.assertIn("已暂停",text)
             self.assertEqual(paused["goal_receipt"]["id"],original["id"])
             self.assertEqual(paused["goal_receipt"]["revision"],original["revision"]+1)
@@ -186,12 +195,12 @@ class NativeLoop(unittest.TestCase):
                 change(*args)
                 raise ConnectionError("lost native goal receipt")
             loop.adapter.goal_change = lost
-            pending,text = command("om_resume","/goal resume")
+            pending,text = command("om_resume","/goal 继续")
             self.assertIn("目标操作待核",text)
             self.assertNotIn("goal_receipt",pending)
             loop.adapter.goal_change = change
-            self.assertEqual(command("om_resume","/goal resume")[0],pending)
-            self.assertEqual(command("om_pause","/goal pause")[0],paused)
+            self.assertEqual(command("om_resume","/goal 继续")[0],pending)
+            self.assertEqual(command("om_pause","/goal 暂停")[0],paused)
             self.assertIn("续跑授权 已启用",command("om_goal_now","/goal")[1])
             self.assertEqual(loop.native.goal_view(session)["goal"]["revision"],original["revision"]+2)
             observed = self.read_native(native,"read")
@@ -203,7 +212,8 @@ class NativeLoop(unittest.TestCase):
         directory,loop,service,command = self.goal_worker(session)
         with self.start_native(directory,session,"goal-driver") as native:
             service.step()
-            created = self.read_native(native,"create-goal")
+            creation,_ = command("om_create_live_goal","/goal 推进测试目标")
+            created = creation["goal_receipt"]
             self.assertTrue(self.read_native(native,"first-round")["running"])
             paused,card = command("om_pause_live_goal","/goal pause")
             self.assertIn("已暂停 · 1/2 轮",card)
@@ -223,3 +233,7 @@ class NativeLoop(unittest.TestCase):
             self.assertEqual(loop.hermes.tasks()["items"],[])
             self.assertIsNone(loop.worker.hold()["held_task_id"])
             self.assertEqual(loop.manager_wire.frames(0),[])
+            self.evidence = {"created":created,"paused":paused["goal_receipt"],"resumed":resumed["goal_receipt"],
+                             "rounds":after["rounds"],"turns":after["turns"],
+                             "router_tasks":0,"router_notifications":0,"worker_hold":loop.worker.hold(),
+                             "boundary":"Native DSH goal service and continuation driver; local scripted provider"}

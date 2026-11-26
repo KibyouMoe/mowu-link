@@ -1,0 +1,59 @@
+{
+  "created": {
+    "event_seq": 0,
+    "id": "goal-3569c1a2-1e4b-4862-b194-48d3a6846bf0",
+    "phase": "active",
+    "revision": 1,
+    "session": "dsh-real-goal-rounds"
+  },
+  "paused": {
+    "event_seq": 9,
+    "id": "goal-3569c1a2-1e4b-4862-b194-48d3a6846bf0",
+    "phase": "paused",
+    "revision": 2,
+    "session": "dsh-real-goal-rounds"
+  },
+  "resumed": {
+    "event_seq": 13,
+    "id": "goal-3569c1a2-1e4b-4862-b194-48d3a6846bf0",
+    "phase": "active",
+    "revision": 3,
+    "session": "dsh-real-goal-rounds"
+  },
+  "rounds": [
+    {
+      "id": "goal-3569c1a2-1e4b-4862-b194-48d3a6846bf0",
+      "revision": 1,
+      "round": 1
+    },
+    {
+      "id": "goal-3569c1a2-1e4b-4862-b194-48d3a6846bf0",
+      "revision": 3,
+      "round": 2
+    }
+  ],
+  "turns": [
+    {
+      "turn": 1,
+      "reason": {
+        "kind": "aborted",
+        "reason": {
+          "kind": "user"
+        }
+      }
+    },
+    {
+      "turn": 2,
+      "reason": {
+        "kind": "completed"
+      }
+    }
+  ],
+  "router_tasks": 0,
+  "router_notifications": 0,
+  "worker_hold": {
+    "held_task_id": null,
+    "held_assignment_id": null
+  },
+  "boundary": "Native DSH goal service and continuation driver; local scripted provider"
+}

@@ -9,16 +9,18 @@ export function goalView(ctx,agent) {
   return {session:agent.session.id,supported:!!service,goal:service ? project(service.get(agent)) : null};
 }
 
-export async function changeGoal(ctx,agent,operation,readEvents) {
+export async function changeGoal(ctx,agent,operation,objective,readEvents) {
   const service = ctx.get('goals');
   if (!service) throw new Error('native_goal_unavailable');
   const current = service.get(agent);
-  if (!current) throw new Error('native_goal_missing');
+  if (!current && operation!=='create') throw new Error('native_goal_missing');
   const before = agent.session.seq;
   let updated;
   try {
-    updated = service[operation](agent,{id:current.id,revision:current.revision});
+    updated = operation==='create' ? service.create(agent,{objective})
+      : service[operation](agent,{id:current.id,revision:current.revision});
   } catch (error) {
+    if (error.code==='GOAL_ALREADY_EXISTS') throw new Error('native_goal_exists');
     if (error.code==='GOAL_INVALID_TRANSITION') throw new Error('native_goal_transition_refused');
     if (error.code==='GOAL_STALE_REVISION') throw new Error('native_goal_changed');
     throw new Error('goal_change_unconfirmed');
