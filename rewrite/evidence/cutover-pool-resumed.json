@@ -1,0 +1,40 @@
+{
+  "orders": {
+    "deferred": {
+      "task_id": "1cb8f163-1f80-5446-b414-df5db87fc7a4",
+      "assignments": [
+        "17089550-5f3a-4134-bbbd-6d34edd96ba3",
+        "12584758-72b3-4d08-9a88-5cb33bb9cc73"
+      ],
+      "resume": "2f12804c-e5b1-455c-8ad5-300662c5789e",
+      "state_at_resume": "resuming",
+      "original": "Original migrated instructions",
+      "resumed": "Original migrated instructions\n\n继续推进：Use the approved input deferred"
+    },
+    "immediate": {
+      "task_id": "22779009-0284-45a0-9735-bfa90448d6ad",
+      "assignments": [
+        "0839a1f7-8004-431b-a9f8-792195b07a2c",
+        "07af4dbf-a8c5-4332-89be-341077e83570"
+      ],
+      "resume": "6dbbf554-53ba-4c91-a9e1-ed76c3a49813",
+      "state_at_resume": "ready",
+      "original": "Original trial instructions",
+      "resumed": "Original trial instructions\n\n继续推进：Use the approved input immediate"
+    }
+  },
+  "legacy": {
+    "replay": 200,
+    "changed_request": 409,
+    "next": null,
+    "reasons": [
+      "reviewed_on_rewrite",
+      "reviewed_on_rewrite"
+    ]
+  },
+  "trial_sha256": "c7c20b3e07930824e86bc4e98856ee70f6a29c07c6d42f806eb7ada15d042fc2",
+  "legacy_snapshot_sha256": "37012a8211de5d56f366243c72b54bb6e1e42aa9d8e549e51c42744a11562705",
+  "offline_resume_refused": "0217438a-70ba-4a31-b78b-25679d66554d",
+  "mismatched_dispatch_refused": true,
+  "boundary": "Actual isolated legacy and rewrite Router HTTP; scripted Worker host and clock."
+}

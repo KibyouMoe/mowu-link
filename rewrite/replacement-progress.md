@@ -4,7 +4,11 @@
 
 ## 检查点与证据
 
-挂起单的隔离回退已核三条主路。实际旧新 HTTP Router 实跑工作中掉线再挂起后转派、挂起到期后由原工位确认取消、Worker 已释放后带材料结单和失败归档。替换旧期限、两次实际到期、正式归档撤销下一次提醒及默认期限均可从私有包对证。缺提醒接收确认和伪造提前提醒均拒绝生成回退目录。继续推进会改变正文并产生新派发，单列后续验收。复跑 `python3 -B -m unittest -v rewrite.test_cutover`。宿主和时钟为夹具。[提醒与回退实测](evidence/cutover-pool-reminders.json)
+原 Worker 已交受阻 W04 的续办单支持回退。实际旧新 HTTP Router 验证两种时序。迁入单续办后等同一工位空闲再下发，试用新单在工位已空闲时立即下发。两张单都按原工单号、新派发号执行和验收。旧端以最初正文和请求号去重，用续办后正文重送得到 409。对账输出只显示标识，续办回执及两版正文只写私有档案。缺原释放凭据和篡改新派发正文均拒绝发布。复跑 `python3 -B -m unittest -v rewrite.test_cutover.Cutover.test_resumed_orders_archive_the_original_request_and_all_dispatch_versions`。Worker 宿主和时钟为夹具。[续办回退实测](evidence/cutover-pool-resumed.json)
+
+挂起单的隔离回退已核三条主路。实际旧新 HTTP Router 实跑工作中掉线再挂起后转派、挂起到期后由原工位确认取消、Worker 已释放后带材料结单和失败归档。替换旧期限、两次实际到期、正式归档撤销下一次提醒及默认期限均可从私有包对证。缺提醒接收确认和伪造提前提醒均拒绝生成回退目录。复跑 `python3 -B -m unittest -v rewrite.test_cutover`。宿主和时钟为夹具。[提醒与回退实测](evidence/cutover-pool-reminders.json)
+
+挂起回退提交 `5a3b9a0f6b2c18f65a17ac3696b3272303b89f03` 的 Linux arm64 全量通过 195 项、依环境跳过 121 项。296 文件安装包逐文件读回，安装目录 59 项通过。归档 SHA-256 为 `cbf61577d15752e478612af4fb56033c67f68e87ebde6d409c2adb726d2cc8c5`。Windows 常规与 DSH 原生两组通过。[Windows CI](https://github.com/KibyouMoe/mowu-link/actions/runs/45906100345)
 
 Worker 主动受阻并交原 W04 后，池中结单和失败归档可以回退。真实旧 Router 分别读到 `pool_closed_on_rewrite`、`failed_on_rewrite`，无成果和待执行记录。原选择的材料号、操作及附件留在私有档案，旧 HTTP 下载返回 404。原建单重试回原归档，再次迁入保留原 Hermes 请求和旧 UUID。已复现 Router 离线入池后的失败归档，原宿主仍忙，回退拒绝发布。真实旧新 Router HTTP，Worker 宿主及时间为夹具。[池中归档实测](evidence/cutover-pool-archives.json)
 

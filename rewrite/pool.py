@@ -6,6 +6,7 @@ from .storage import guid, require, string, timestamp
 
 INITIAL_REMINDER_SECONDS = 3600
 REMINDER_NOTICE = "无法完成池中的工单仍待处理。"
+RESUME_INSTRUCTION_PREFIX = "\n\n继续推进："
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS pool_entries (

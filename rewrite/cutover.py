@@ -240,6 +240,7 @@ def row_delta(db, table, first, second):
 
 def creation_receipt(db, row):
     recorded = db.execute("""SELECT key,request,response FROM main.operations WHERE actor='hermes'
+                             AND json_extract(request,'$[0][0]')='POST' AND json_extract(request,'$[0][1]')='/v1/tasks'
                              AND json_extract(response,'$.task_id')=?
                              AND key NOT IN (SELECT key FROM baseline.operations WHERE actor='hermes')""",
                           (row["task_id"],)).fetchall()
@@ -292,7 +293,7 @@ def queued_candidates(db, delta, legacy_workers):
     return candidates,blocked,only_queue
 
 
-def work_order_changes(db, delta, old_ids):
+def work_order_changes(db, delta, old_ids, original_tasks):
     """Locate changed formal records without exporting instructions, results or file bytes."""
     touched = set()
     for table in ("tasks","reports","materials"):
@@ -311,6 +312,9 @@ def work_order_changes(db, delta, old_ids):
         if before and after:
             same_content = bool(db.execute("""SELECT 1 FROM main.tasks t JOIN baseline.tasks b USING(task_id)
                  WHERE t.task_id=? AND t.title=b.title AND t.instructions=b.instructions""",(tid,)).fetchone())
+            if original_tasks is not None:
+                original_tasks[tid] = dict(db.execute("SELECT title,instructions FROM baseline.tasks WHERE task_id=?",
+                                                      (tid,)).fetchone())
         reports = [dict(row,artifact_ids=attachments.linked(db,"report",row["assignment_id"]))
                    for row in db.execute("""SELECT assignment_id,worker_id FROM main.reports
                                            WHERE task_id=? ORDER BY rowid""",(tid,))]
@@ -329,7 +333,7 @@ def work_order_changes(db, delta, old_ids):
     return records
 
 
-def archived_new_candidates(db, changes, legacy_workers):
+def archived_new_candidates(db, changes, legacy_workers, original_tasks):
     candidates = {"closed":[],"cancelled":[],"pool":[]}
     for change in changes:
         after, reports = change["trial"], change["completed_reports"]
@@ -355,8 +359,14 @@ def archived_new_candidates(db, changes, legacy_workers):
         if original_worker not in legacy_workers:
             continue
         operation = creation_receipt(db,row)
-        original = dict(row,state="ready",revision=1,assignee_id=original_worker)
-        if not operation or not portable_creation(original,operation) or not legacy_description_fits(row):
+        if not operation:
+            continue
+        creation = json.loads(operation["response"])
+        if not all(isinstance(creation.get(field),str) and creation[field].strip() for field in ("title","instructions")):
+            continue
+        original = dict(row,state="ready",revision=1,assignee_id=original_worker,
+                        title=creation["title"],instructions=creation["instructions"])
+        if not portable_creation(original,operation) or not legacy_description_fits(original):
             continue
         accepted = [encode(original)]
         if first:
@@ -364,10 +374,12 @@ def archived_new_candidates(db, changes, legacy_workers):
         if operation["response"] in accepted:
             candidates[category].append({"task_id":row["task_id"],"assignee_id":original_worker,
                                          "request_id":operation["key"]})
+            if original_tasks is not None:
+                original_tasks[row["task_id"]] = {field:original[field] for field in ("title","instructions")}
     return candidates
 
 
-def reconcile(snapshot, trial):
+def reconcile(snapshot, trial, *, original_tasks=None):
     """Read the exact post-cutover difference. Original snapshots and trial databases stay intact."""
     saved = json.loads((trial/"baseline.json").read_text())
     source = trial/"router.db"
@@ -402,8 +414,8 @@ def reconcile(snapshot, trial):
                     delta[table] = {"baseline_only":baseline_only,"trial_only":trial_only}
             candidates,blocked,only_queue = queued_candidates(db,delta,legacy_workers)
             old_ids = {new:old for old,new in saved["queued_id_map"].items()}
-            changes = work_order_changes(db,delta,old_ids)
-            archived = archived_new_candidates(db,changes,legacy_workers)
+            changes = work_order_changes(db,delta,old_ids,original_tasks)
+            archived = archived_new_candidates(db,changes,legacy_workers,original_tasks)
             archived_ids = {item["task_id"] for group in archived.values() for item in group}
             result.update(changed_tables=delta,queue_candidates=candidates,closed_new_tasks=archived["closed"],
                           cancelled_new_tasks=archived["cancelled"],

@@ -1191,6 +1191,169 @@ store.close()
                         "boundary":"Real isolated old and new HTTP Routers, private SQLite copies, scripted host and clock."}
             Path(output).write_text(json.dumps(evidence,ensure_ascii=False,indent=2)+"\n")
 
+    def test_resumed_orders_archive_the_original_request_and_all_dispatch_versions(self):
+        old_id = self.old("""
+store = RouterStore(sys.argv[1])
+store.upsert_worker("oguri")
+print(store.orders.create("Migrated resume","Original migrated instructions","oguri",{},"fixture",None,None))
+store.close()
+""",self.legacy)
+        source_sha = digest(self.legacy)
+        backup(self.legacy,self.attachments,self.snapshot)
+        original = prepare(self.snapshot,self.trial,self.source_id)
+        clock = Clock()
+        loop = Loop(self.trial,clock,FixtureHost)
+        manager,worker = loop.hermes,loop.worker
+        review = self.root/"resume-review.json"
+        approvals,records = {},{}
+
+        def accept(tid):
+            for _ in range(5):
+                worker.poll()
+                if worker.hold()["held_task_id"]==tid:
+                    aid = worker.hold()["held_assignment_id"]
+                    return next((p,r) for p,r in loop.native.entries()
+                                if p.get("assignment_id")==aid and p["kind"]=="task")
+                clock.advance(10)
+            self.fail("worker did not take the resumed order")
+
+        def resume(tid, solution):
+            before = manager.inspect(tid)["task"]
+            key = guid()
+            reply = manager.act(key,tid,before["revision"],"resume",resolution=solution)
+            self.assertEqual(manager.act(key,tid,before["revision"],"resume",resolution=solution),reply)
+            self.assertEqual(reply["delivery_state"],"pending")
+            self.assertNotIn("remind_at",reply["task"])
+            return key,reply
+
+        def finish(tid, delivery, native):
+            aid = delivery["assignment_id"]
+            self.assertEqual(worker.report(native["native_id"],tid,aid,"Resolved")["task_state"],"completed_reported")
+            current = manager.inspect(tid)["task"]
+            self.assertEqual(manager.approve(guid(),tid,current["revision"])["task"]["state"],"closed")
+            approvals[tid] = aid
+            manager.poll()
+            worker.poll()
+
+        def stage(trial,destination,approved):
+            review.write_text(json.dumps({"trial_sha256":digest(trial/"router.db"),"closed_assignments":approved}))
+            return stage_reviewed_rollback(self.snapshot,trial,review,destination)
+
+        with loop.server:
+            loop.thread.start()
+            try:
+                worker.connect()
+                migrated = original["queued_id_map"][old_id]
+                born = manager.create(guid(),"Trial-born resume","Original trial instructions","oguri")["task_id"]
+                for label,tid in (("deferred",migrated),("immediate",born)):
+                    first,native = accept(tid)
+                    aid = first["assignment_id"]
+                    self.assertEqual(worker.report(native["native_id"],tid,aid,"Needs a decision","blocked")["task_state"],
+                                     "blocked")
+                    self.assertIsNone(worker.hold()["held_assignment_id"])
+                    current = manager.inspect(tid)["task"]
+                    manager.act(guid(),tid,current["revision"],"snooze",remind_after_hours=1)
+                    if label=="immediate":
+                        clock.advance(1)
+                        worker.poll()
+                        clock.advance(10)
+                        worker.poll()
+                    solution = "Use the approved input "+label
+                    key,reply = resume(tid,solution)
+                    second,new_native = accept(tid)
+                    self.assertNotEqual(second["assignment_id"],aid)
+                    self.assertEqual(reply["task"]["state"],"ready" if label=="immediate" else "resuming")
+                    expected = first["instructions"]+"\n\n继续推进："+solution
+                    self.assertEqual((reply["task"]["instructions"],second["instructions"]),(expected,expected))
+                    self.assertEqual([p["assignment_id"] for p,_ in loop.native.entries()
+                                      if p.get("task_id")==tid and p["kind"]=="task"],[aid,second["assignment_id"]])
+                    finish(tid,second,new_native)
+                    records[label] = {"task_id":tid,"assignments":[aid,second["assignment_id"]],
+                                      "resume":key,"state_at_resume":reply["task"]["state"],
+                                      "original":first["instructions"],"resumed":expected}
+                settled = stage(self.trial,self.restore,approvals)
+                public_facts = json.dumps(reconcile(self.snapshot,self.trial))
+                for record in records.values():
+                    self.assertNotIn(record["original"],public_facts)
+
+                bad = manager.create(guid(),"Offline resume","Original unsafe instructions","oguri")["task_id"]
+                former,_ = accept(bad)
+                clock.advance(630)
+                self.assertEqual(manager.inspect(bad)["task"]["state"],"blocked")
+                resume(bad,"Proceed after disconnection")
+                worker.connect()
+                second,native = accept(bad)
+                finish(bad,second,native)
+                rejected = self.root/"unverified-offline-resume"
+                with self.assertRaisesRegex(ValueError,"original worker released"):
+                    stage(self.trial,rejected,approvals)
+                self.assertFalse(rejected.exists())
+            finally:
+                loop.server.shutdown()
+                loop.thread.join()
+
+        private = self.restore/"private-review"
+        manifest = json.loads((private/"manifest.json").read_text())
+        self.assertEqual(set(manifest["orders"]),{migrated,born})
+        self.assertEqual(digest(private/"trial-router.db"),settled["trial_sha256"])
+        self.assertEqual(digest(self.legacy),source_sha)
+        self.assertEqual(manifest["orders"][migrated]["legacy_task_id"],old_id)
+        for record in records.values():
+            history = manifest["orders"][record["task_id"]]["assignment_history"]
+            self.assertEqual([step["assignment_id"] for step in history],record["assignments"])
+            self.assertEqual([step["content"]["instructions"] for step in history],[record["original"],record["resumed"]])
+            self.assertEqual(history[0]["resume"]["action_key"],record["resume"])
+        born_entry = manifest["orders"][born]
+        request = born_entry["legacy_creation_request"]
+        self.assertEqual(request["goal"],records["immediate"]["original"])
+        observed = json.loads(self.old("""
+from server import RouterServer
+from selftest_router import http
+from threading import Thread
+from unittest.mock import Mock
+store = RouterStore(sys.argv[1])
+token = "isolated-legacy-resume"
+with RouterServer(("127.0.0.1",0),store,token,Mock(),Mock()) as server:
+    runner = Thread(target=server.serve_forever,kwargs={"poll_interval":.02})
+    runner.start()
+    try:
+        url = f"http://127.0.0.1:{server.server_port}"
+        request = json.loads(sys.argv[4])
+        replay,ret = http("POST",url+"/tasks",request,token)
+        edited,_ = http("POST",url+"/tasks",dict(request,goal=sys.argv[5]),token)
+        assert ret["duplicate"] and ret["task_id"]==sys.argv[3],ret
+        archives = [http("GET",url+"/tasks/"+tid,token=token) for tid in sys.argv[2:4]]
+        assert all(code==200 and item["task"]["deliverable"] is None for code,item in archives)
+        print(json.dumps({"replay":replay,"changed_request":edited,"next":store.orders.next_dispatch("oguri"),
+                          "reasons":[item["task"]["archive"]["reason"] for _,item in archives]}))
+    finally:
+        server.shutdown()
+        runner.join()
+store.close()
+""",self.restore/"legacy.db",old_id,born_entry["legacy_task_id"],json.dumps(request),records["immediate"]["resumed"]))
+        self.assertEqual(observed,{"replay":200,"changed_request":409,"next":None,
+                                   "reasons":["reviewed_on_rewrite","reviewed_on_rewrite"]})
+
+        changed = self.root/"changed-resumed-delivery"
+        changed.mkdir()
+        shutil.copyfile(self.trial/"baseline.json",changed/"baseline.json")
+        shutil.copyfile(private/"trial-router.db",changed/"router.db")
+        with closing(sqlite3.connect(changed/"router.db")) as db,db:
+            frame = born_entry["assignment_history"][-1]["delivery_id"]
+            updated = db.execute("UPDATE deliveries SET payload=json_set(payload,'$.instructions','mismatched') WHERE delivery_id=?",
+                                 (frame,))
+            self.assertEqual(updated.rowcount,1)
+        refused = self.root/"refused-resumed-delivery"
+        with self.assertRaisesRegex(ValueError,"dispatch does not match"):
+            stage(changed,refused,manifest["closed_assignments"])
+        self.assertFalse(refused.exists())
+        if output := os.environ.get("MOWULINK_RESUMED_ROLLBACK_EVIDENCE"):
+            evidence = {"orders":records,"legacy":observed,"trial_sha256":settled["trial_sha256"],
+                        "legacy_snapshot_sha256":source_sha,"offline_resume_refused":former["assignment_id"],
+                        "mismatched_dispatch_refused":True,
+                        "boundary":"Actual isolated legacy and rewrite Router HTTP; scripted Worker host and clock."}
+            Path(output).write_text(json.dumps(evidence,ensure_ascii=False,indent=2)+"\n")
+
     def test_trial_born_closed_orders_return_as_private_archives_without_a_new_dispatch(self):
         self.old("""
 store = RouterStore(sys.argv[1])

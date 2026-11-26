@@ -406,7 +406,7 @@ class Orders:
                 if action == "resume":
                     resolution = string(data, "resolution")
                     db.execute("UPDATE tasks SET state='resuming',revision=revision+1,instructions=? WHERE task_id=?",
-                               (current["instructions"] + "\n\n继续推进：" + resolution, tid))
+                               (current["instructions"] + pool.RESUME_INSTRUCTION_PREFIX + resolution, tid))
                     self.dispatch(db, current["assignee_id"])
                 else:
                     if action == "archive_failed":

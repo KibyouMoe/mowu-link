@@ -7,7 +7,7 @@ from . import attachments
 from .cleanup import CANCEL_CONFIRMED_NOTICE
 from .messages import valid_guid
 from .orders import task
-from .pool import INITIAL_REMINDER_SECONDS, REMINDER_NOTICE
+from .pool import INITIAL_REMINDER_SECONDS, REMINDER_NOTICE, RESUME_INSTRUCTION_PREFIX
 from .storage import timestamp
 
 
@@ -17,7 +17,7 @@ def is_reviewed_completion(entry):
 
 def order_state(order, step, state, revision, assignment_id=None):
     holder = {"kind":"worker","worker_id":step["worker_id"]} if state=="working" else {"kind":"router"}
-    return dict(order,state=state,revision=revision,assignment_id=assignment_id,
+    return dict(order,**step["content"],state=state,revision=revision,assignment_id=assignment_id,
                 assignee_id=step["worker_id"],holder=holder)
 
 
@@ -63,17 +63,18 @@ def utc_time(value):
     raise ValueError("invalid timestamp in the reviewed pool history")
 
 
-def snooze_actions(db):
-    actions = {}
+def pool_actions(db):
+    actions = {"snooze":{},"resume":{}}
     for request,reply in db.execute("""SELECT request,response FROM operations
-        WHERE json_extract(request,'$[1].action')='snooze'
+        WHERE json_extract(request,'$[1].action') IN ('snooze','resume')
         AND json_extract(request,'$[0][0]')='POST'
         AND json_extract(request,'$[0][1]') GLOB '/v1/tasks/*/actions'"""):
         (_,path),body = json.loads(request)
         index = path.split("/")[3],body.get("expected_revision")
-        if index in actions:
-            raise ValueError("duplicate pool snooze revision")
-        actions[index] = body.get("remind_after_hours"),json.loads(reply).get("task",{}).get("remind_at")
+        group = actions[body["action"]]
+        if index in group:
+            raise ValueError("duplicate pool action revision")
+        group[index] = body,json.loads(reply)
     return actions
 
 
@@ -82,7 +83,8 @@ def retain_snoozes(pool, tid, revision, actions):
     # execution timestamp. Recover the schedule with the same duration.
     started = utc_time(timestamp(pool["entered"]))
     while (tid,revision) in actions:
-        hours,value = actions.pop((tid,revision))
+        body,reply = actions.pop((tid,revision))
+        hours,value = body.get("remind_after_hours"),reply.get("task",{}).get("remind_at")
         if type(hours) not in (int,float) or not 0<hours<1e100 or not math.isfinite(hours):
             raise ValueError("invalid duration in a reviewed pool snooze")
         deadline = utc_time(value)
@@ -102,9 +104,11 @@ def retain_snoozes(pool, tid, revision, actions):
 def histories(db, entries, deltas):
     used = dict.fromkeys(("pool_entries","cleanups","materials"),0)
     dispatches = set()
-    snoozes = snooze_actions(db)
+    actions = pool_actions(db)
+    snoozes,resumes = actions["snooze"],actions["resume"]
     for tid, entry in entries.items():
         order = task(db,tid)
+        content = entry["original_content"]
         cancelled = entry["terminal_state"]=="cancelled"
         steps = []
         revision = 2
@@ -121,12 +125,11 @@ def histories(db, entries, deltas):
             payload = json.loads(frame["payload"])
             aid, worker = payload.get("assignment_id"), frame["consumer"].removeprefix("worker/")
             if (not frame["consumer"].startswith("worker/") or not worker or not valid_guid(aid)
-                    or aid in dispatches or payload!={"task_id":tid,"assignment_id":aid,"revision":revision,
-                                                     "title":order["title"],"instructions":order["instructions"]}):
+                    or aid in dispatches or payload!={"task_id":tid,"assignment_id":aid,"revision":revision,**content}):
                 raise ValueError("trial dispatch does not match the reviewed order")
             dispatches.add(aid)
             step = {"assignment_id":aid,"worker_id":worker,"revision":revision,"delivery_id":frame["delivery_id"],
-                    "dispatch_seq":frame["seq"]}
+                    "dispatch_seq":frame["seq"],"content":content}
             if pool := pools.pop(aid,None):
                 if (pool["worker_id"]!=worker or pool["active"]!=0 or pool["remind_at"] is not None
                         or pool["source"] not in ("worker","offline","unanswered") or not pool["reason"].strip()):
@@ -157,8 +160,17 @@ def histories(db, entries, deltas):
             retain_inquiries(step,inquiries.pop(aid,[]),frame["seq"],next_frame["seq"] if next_frame else None)
             steps.append(step)
             revision += 3 + ("pool" in step) + len(step.get("pool",{}).get("snoozes",[]))
+            if next_frame and (resume := resumes.pop((tid,revision-2),None)):
+                resolution = resume[0].get("resolution")
+                if (step.get("pool",{}).get("source")!="worker" or "cleanup" in step
+                        or not isinstance(resolution,str) or not resolution.strip()):
+                    raise ValueError("resume needs evidence that the original worker released its assignment")
+                step["resume"] = {"resolution":resolution}
+                content = dict(content,instructions=content["instructions"]+RESUME_INSTRUCTION_PREFIX+resolution)
         if pools or cleanups or materials or inquiries:
             raise ValueError("trial is missing a complete assignment chain for the reviewed result")
+        if any(order[field]!=value for field,value in content.items()):
+            raise ValueError("trial contents differ from the verified history")
         if not steps:
             if (not cancelled or entry["assignment_id"] is not None or order["revision"]!=2
                     or entry["worker_id"]!=entry["original_worker"]):
@@ -186,14 +198,18 @@ def histories(db, entries, deltas):
         if order["revision"]!=revision:
             raise ValueError("terminal action does not match the assignment revision")
         for step,target in zip(steps,steps[1:]):
+            if "resume" in step:
+                if step["worker_id"]!=target["worker_id"]:
+                    raise ValueError("resume changed the original assignee")
+                continue
             cleanup = step.get("cleanup")
             needs_cleanup = step.get("pool",{}).get("source")!="worker"
             if (step["worker_id"]==target["worker_id"] or bool(cleanup)!=needs_cleanup
                     or cleanup and cleanup["new_assignee_id"]!=target["worker_id"]):
                 raise ValueError("transfer does not match the former assignment and its cleanup")
         entry["assignment_history"] = steps
-    if snoozes:
-        raise ValueError("trial contains a snooze outside the reviewed pool history")
+    if snoozes or resumes:
+        raise ValueError("trial contains a snooze or resume outside the reviewed pool history")
     if any(deltas.get(table,{}).get("trial_only",0)!=count for table,count in used.items()):
         raise ValueError("trial contains unrelated pool, cleanup, or material rows")
 
@@ -223,7 +239,6 @@ def check_transport(db, entries):
     consumed = dict.fromkeys(entries,0)
     for tid, entry in entries.items():
         expected_notices[tid] = []
-        order = task(db,tid)
         if not entry["assignment_history"]:
             optional_workers.add(entry["original_worker"])
         history = entry["assignment_history"]
@@ -231,8 +246,7 @@ def check_transport(db, entries):
             aid, worker = step["assignment_id"], step["worker_id"]
             workers.add(worker)
             expected_frames["task.dispatch",tid,aid] = ("worker/"+worker,step["delivery_id"],
-                {"task_id":tid,"assignment_id":aid,"revision":step["revision"],
-                 "title":order["title"],"instructions":order["instructions"]})
+                {"task_id":tid,"assignment_id":aid,"revision":step["revision"],**step["content"]})
             for did in step.get("probe_delivery_ids",[]):
                 expected_inquiries[did] = ("task.probe","worker/"+worker,{"task_id":tid,"assignment_id":aid})
             if shelved := step.get("shelved_delivery_id"):
@@ -528,6 +542,19 @@ def verify_order(db, tid, entry, operations):
                 verify_pool_archive(tid,entry,order,operations,after,adjacent_states)
             continue
         expected_revision = target["revision"]-2
+        if resume := step.get("resume"):
+            replies = [{"task":order_state(order,target,"resuming",target["revision"]-1),"delivery_state":"pending"},
+                       {"task":order_state(order,target,"ready",target["revision"],target["assignment_id"]),
+                        "delivery_state":"pending"}]
+            action = take(operations,(tid,"action","resume",expected_revision),"hermes",
+                          {"action":"resume","expected_revision":expected_revision,"resolution":resume["resolution"]},replies)
+            if action["seq"]<=after:
+                raise ValueError("resume predates the original assignment release")
+            resume.update(action_key=action["key"],receipt=action["reply"])
+            after = action["seq"]
+            possible = {"ready"} if action["reply"]["task"]["state"]=="ready" else {"resuming","ready"}
+            adjacent_states.append((after,possible))
+            continue
         key = (tid,"action","transfer",expected_revision)
         transfer = operations.get(key)
         reason = transfer["body"].get("reason") if transfer else None
@@ -550,7 +577,8 @@ def verify_order(db, tid, entry, operations):
             receipt = take(operations,(tid,"report",aid,"transfer_confirmed"),actor,
                            {"assignment_id":aid,"outcome":"transfer_confirmed"},[
                                {"recorded":True,"release_assignment_id":aid,"task_state":state}
-                               for state in ("ready","working","blocked","snoozed","completed_reported","closed","cancelled","failed_archived")],
+                               for state in ("ready","resuming","working","blocked","snoozed","completed_reported",
+                                             "closed","cancelled","failed_archived")],
                            session=True)
             if receipt["seq"]<=after:
                 raise ValueError("cleanup receipt predates the transfer")

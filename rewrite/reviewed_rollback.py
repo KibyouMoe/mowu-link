@@ -11,7 +11,6 @@ from . import legacy_history, rollback_lifecycle
 from .cutover import (digest, legacy_creation_request, output_directory, queue_execution_modes,
                       readonly, reconcile, restore_snapshot, stage_queue_requests, verified)
 from .messages import valid_guid
-from .orders import task
 from .rollback_lifecycle import is_reviewed_completion
 from .storage import encode
 
@@ -20,7 +19,7 @@ TABLES = {"tasks","reports","messages","deliveries","operations","workers","work
           "uploads","chunks","attachment_grants","business_files","pool_entries","cleanups","materials"}
 
 
-def reviewed_orders(facts):
+def reviewed_orders(facts, original_tasks):
     queued = queue_execution_modes(facts["queue_candidates"])
     new = {item["task_id"]:item for field in ("closed_new_tasks","cancelled_new_tasks","archived_pool_new_tasks")
            for item in facts[field]}
@@ -41,9 +40,9 @@ def reviewed_orders(facts):
     for row in changes:
         tid = row["task_id"]
         before,after,reports = row["before"],row["trial"],row["completed_reports"]
-        if tid not in new and (not row["legacy_task_id"] or row["same_content"] is not True or not before
+        if tid not in new and (not row["legacy_task_id"] or not before
                 or before["state"]!="ready" or before["assignment_id"] is not None or before["revision"]!=1):
-            raise ValueError("reviewed rollback needs an unchanged migrated or trial-created order")
+            raise ValueError("reviewed rollback needs a migrated or trial-created order")
         if not after or after["assignment_id"] is not None:
             raise ValueError("trial order still has an assignment")
         state = after["state"]
@@ -57,6 +56,7 @@ def reviewed_orders(facts):
         else:
             raise ValueError("reviewed rollback needs unchanged migrated orders closed after one W04")
         entry["terminal_state"] = state
+        entry["original_content"] = original_tasks[tid]
         if tid in new:
             entry.update(creation_key=new[tid]["request_id"],original_worker=new[tid]["assignee_id"])
         else:
@@ -170,8 +170,9 @@ def archive_in_legacy(path, entries, source_id, at):
 
 def stage_reviewed_rollback(snapshot,trial,review,destination):
     """Prepare an offline fallback without re-enqueueing terminal work."""
-    facts = reconcile(snapshot,trial)
-    entries = reviewed_orders(facts)
+    original_tasks = {}
+    facts = reconcile(snapshot,trial,original_tasks=original_tasks)
+    entries = reviewed_orders(facts,original_tasks)
     decision = {"trial_sha256":facts["trial_sha256"],
                 "closed_assignments":{tid:row["assignment_id"] for tid,row in entries.items()
                                       if is_reviewed_completion(row)}}
@@ -219,7 +220,7 @@ def stage_reviewed_rollback(snapshot,trial,review,destination):
                                                 facts["queue_candidates"])
             for tid,entry in entries.items():
                 if "creation_key" in entry:
-                    original = dict(task(db,tid),assignee_id=entry["original_worker"])
+                    original = dict(entry["original_content"],assignee_id=entry["original_worker"])
                     entry["legacy_creation_request"] = legacy_creation_request(facts["source_id"],
                                                                                entry["creation_key"],original)
             at = time.time()
