@@ -4,6 +4,8 @@
 
 ## 检查点与证据
 
+独立 Codex App Server 已用 `localImage` 接图文与纯图。飞书夹具经实际 Worker HTTP 上传，原生模型请求保留测试原图 SHA-256，图文正文保留换行与空格。模拟平台丢失 Worker 回执后只查原输入，原生各一条、Router 无工单。连续 12 轮通过。复跑 `python3 -m unittest -v rewrite.test_codex_app_server`。[图文记录](evidence/codex-app-server-native-media.json)。飞书与模型均为夹具。
+
 新增离线快照持单核对。实测 Router 已接收 W04、Worker 丢回执，命令报持单不一致和一条待核报告。隔离恢复后读回原成果，只留一条通知。互换同会话名的适配器账本时，Router 与 Worker 即使持单一致，命令仍指出缺原收件证据。原始快照校验前后一致，输出不含工单正文。复跑 `python3 -m unittest -v rewrite.test_state_bundle`，CLI 见[迁移演练](router-rehearsal.md#重做版五组件的离线恢复)。
 
 独立 Codex App Server 的指定回合可生成原 Worker 样式的飞书卡。原生普通输入和最终答复各一张，原空格及换行保持，重投无新增。同套原生 W04 记录只投影公开答复，不抄工具参数或桥接正文。连续 12 次通过。复跑 `python3 -m unittest -v rewrite.test_codex_app_server`。[卡片记录](evidence/codex-app-server-native-display.json)。原生 App Server 实际运行，输入与模型由驱动生成，飞书替身。

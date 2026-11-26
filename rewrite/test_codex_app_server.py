@@ -1,7 +1,9 @@
 """Run Desktop's bundled native App Server against a scripted loopback model."""
+import base64
 from collections import deque
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -15,9 +17,12 @@ import unittest
 from .agent_tools import REPORT_TOOL
 from .codex_app_server import AppServerHost
 from .devloop import Loop
+from .feishu_inbound import Inbound
 from .feishu_output import Views
+from .native_files import NativeFiles
 from .storage import Fault, encode, guid
 from .test_feishu_output import PlatformFixture
+from .test_feishu_inbound import PNG
 from .test_mainline import Clock
 from .wire import Client
 from .worker_service import WorkerService
@@ -78,6 +83,14 @@ class Provider(BaseHTTPRequestHandler):
             return
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         items = body["input"]
+        latest = next(item for item in reversed(items) if item.get("role")=="user")["content"]
+        pictures = [part for part in latest if part.get("type")=="input_image"]
+        if pictures:
+            captions = [part["text"] for part in latest if part.get("type")=="input_text"
+                        and not part["text"].startswith("<image name=[Image #") and part["text"]!="</image>"]
+            images = [hashlib.sha256(base64.b64decode(part["image_url"].split(",",1)[1],validate=True)).hexdigest()
+                      for part in pictures]
+            self.server.media.append({"caption":captions,"image_sha256":images})
         markers = [block["text"] for item in items if item.get("role")=="user"
                    for block in item.get("content",[]) if block.get("text","").startswith("魔物链接投递\n")]
         payload = json.loads(markers[-1].split("\n",1)[1])["payload"] if markers else None
@@ -154,6 +167,7 @@ class CodexAppServer(unittest.TestCase):
         self.root = self.enterContext(TemporaryDirectory(prefix="mowulink-codex-protocol-"))
         self.provider = ThreadingHTTPServer(("127.0.0.1",0),Provider)
         self.provider.observed = []
+        self.provider.media = []
         self.origin = self.enterContext(running(self.provider))
 
     def test_native_app_server_dynamic_tool_keeps_ids_and_fires_one_w04(self):
@@ -370,3 +384,56 @@ class CodexAppServer(unittest.TestCase):
         self.evidence = {"thread_id":sid,"turn_id":turn,"worker_events":first,"card_titles":titles,
                          "fixture_card_ids":[row[0] for row in messages],"fixture_model_requests":1,
                          "boundary":"Native App Server history, synthetic user input and local model, Feishu fixture"}
+
+    def test_native_app_server_admits_captioned_and_pure_images_with_original_bytes(self):
+        rpc = self.enterContext(isolated_app_server(self.root,self.origin))
+        sid = rpc.request("thread/start",{"cwd":self.root,"ephemeral":False})["thread"]["id"]
+        host = AppServerHost(rpc,sid)
+        host.session = sid
+        loop = self.enterContext(Loop.isolated(host_factory=lambda _path,_name:host))
+        service = WorkerService(loop.worker)
+        token,platform_token = guid(),guid()
+        url = self.enterContext(running(service.listen({token:"adapter/oguri",platform_token:"platform/oguri"},
+                                                       ("127.0.0.1",0),None)))
+        loop.adapter.media_store = NativeFiles(loop.root/"codex-media",Client(url,token))
+        platform = Client(url,platform_token)
+        inbound = Inbound(loop.root/"codex-inbox.db",platform,lambda mid,key,kind,limit: PNG,"app","trainer","chat")
+        text = "图和文字是一条。\n  保留空格。  "
+        post = {"zh_cn":{"content":[[{"tag":"text","text":text},{"tag":"img","image_key":"img_fixture"}]]}}
+        samples = (("om_caption","post",post),("om_image","image",{"image_key":"img_fixture"}))
+        original_request = platform.request
+        def lose_reply(method,path,*args,**kwargs):
+            reply = original_request(method,path,*args,**kwargs)
+            if path=="worker/chat":
+                raise ConnectionError("isolated chat response lost")
+            return reply
+        proofs = []
+        for mid,kind,body in samples:
+            inbound.record("app","user","trainer",{"chat_type":"p2p","chat_id":"chat","message_id":mid,
+                           "message_type":kind,"content":encode(body)})
+            platform.request = lose_reply
+            with self.assertRaises(ConnectionError):
+                inbound.deliver(mid)
+            platform.request = original_request
+            until = time.monotonic()+14
+            while True:
+                event = rpc.event(until)
+                if event.get("method")=="turn/completed":
+                    self.assertEqual(event["params"]["turn"]["status"],"completed")
+                    break
+            proof = inbound.deliver(mid)
+            self.assertEqual(inbound.deliver(mid),proof)
+            proofs.append(proof)
+        sha = hashlib.sha256(PNG).hexdigest()
+        self.assertEqual(self.provider.media,[{"caption":[text],"image_sha256":[sha]},
+                                             {"caption":[],"image_sha256":[sha]}])
+        turns = host.thread(sid,include_turns=True)["turns"]
+        self.assertEqual(len(turns),len(samples))
+        inputs = [item for turn in turns for item in turn["items"] if item["type"]=="userMessage"]
+        self.assertEqual([item["id"] for item in inputs],[proof["native_id"] for proof in proofs])
+        self.assertEqual([proof["media_sha256"] for proof in proofs],[[sha],[sha]])
+        self.assertEqual((loop.root/"codex-media"/sha).read_bytes(),PNG)
+        self.assertFalse(loop.hermes.tasks()["items"])
+        self.evidence = {"thread_id":sid,"receipts":proofs,"model_input":self.provider.media,
+                         "native_input_count":len(inputs),"router_tasks":0,
+                         "boundary":"Native App Server receives Feishu fixture images; local model records the original PNG bytes"}

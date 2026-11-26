@@ -1,0 +1,45 @@
+{
+  "thread_id": "01a216c4-1904-7c61-a6ce-86367b884d81",
+  "receipts": [
+    {
+      "delivery_id": "chat-om_caption",
+      "digest": "c59f9ba7c51eb13da8dc11a18fea27dae0e30afb63ea453a9f2fe4572d5c36ff",
+      "media_sha256": [
+        "e77617115ffe6399c0f4714c72aa32eefeb22fbdf45b1167a4ddb64e213b4007"
+      ],
+      "native_id": "01a216c4-1937-7980-ad9d-fb8e6596bdda",
+      "session": "01a216c4-1904-7c61-a6ce-86367b884d81",
+      "turn_id": "01a216c4-1930-78d2-b6fc-94c2c9aa98d8"
+    },
+    {
+      "delivery_id": "chat-om_image",
+      "digest": "e728138116480066f8da76a74bbf76a3ff5b938616480b573be730702ba4c450",
+      "media_sha256": [
+        "e77617115ffe6399c0f4714c72aa32eefeb22fbdf45b1167a4ddb64e213b4007"
+      ],
+      "native_id": "01a216c4-194a-7850-b9c6-1358a961ddd5",
+      "session": "01a216c4-1904-7c61-a6ce-86367b884d81",
+      "turn_id": "01a216c4-1947-7e60-a282-417e98fdf55f"
+    }
+  ],
+  "model_input": [
+    {
+      "caption": [
+        "图和文字是一条。\n  保留空格。  "
+      ],
+      "image_sha256": [
+        "e77617115ffe6399c0f4714c72aa32eefeb22fbdf45b1167a4ddb64e213b4007"
+      ]
+    },
+    {
+      "caption": [],
+      "image_sha256": [
+        "e77617115ffe6399c0f4714c72aa32eefeb22fbdf45b1167a4ddb64e213b4007"
+      ]
+    }
+  ],
+  "native_input_count": 2,
+  "router_tasks": 0,
+  "boundary": "Native App Server receives Feishu fixture images; local model records the original PNG bytes",
+  "consecutive_runs": 12
+}

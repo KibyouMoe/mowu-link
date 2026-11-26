@@ -20,23 +20,46 @@ class AppServerHost:
         return status=="active"
 
     @staticmethod
-    def input_text(did,payload,digest):
+    def input_blocks(did,payload,digest,files):
         require(hashlib.sha256(encode(payload).encode()).hexdigest()==digest,409,"delivery_conflict")
-        require(not payload.get("attachments"),422,"native_media_input_unavailable")
-        return "魔物链接投递\n"+encode({"delivery_id":did,"payload":payload,"digest":digest})
+        media = payload.get("attachments",[])
+        require(len(media)==len(files) and all(item["kind"]=="image" for item in media),
+                422,"native_media_input_unavailable")
+        if payload["kind"] in ("chat","queued_chat"):
+            text = payload["text"]
+        else:
+            text = "魔物链接投递\n"+encode({"delivery_id":did,"payload":payload,"digest":digest})
+        blocks = [{"type":"text","text":text,"text_elements":[]}] if text else []
+        for item,path in zip(media,files):
+            require(path.is_absolute() and not path.is_symlink() and path.is_file()
+                    and path.stat().st_size==item["size_bytes"],409,"native_image_unconfirmed")
+            with path.open("rb") as source:
+                require(hashlib.file_digest(source,"sha256").hexdigest()==item["sha256"],409,"native_image_unconfirmed")
+            blocks.append({"type":"localImage","path":str(path)})
+        require(blocks,422,"empty_native_input")
+        return blocks
 
     def deliver(self,session,did,payload,digest):
+        return self.deliver_media(session,did,payload,digest,[])
+
+    def deliver_media(self,session,did,payload,digest,files):
         require(session==self.thread_id,409,"wrong_native_session")
-        text = self.input_text(did,payload,digest)
-        item = {"type":"text","text":text,"text_elements":[]}
-        turn = self.rpc.request("turn/start",{"threadId":session,"input":[item],
+        blocks = self.input_blocks(did,payload,digest,files)
+        turn = self.rpc.request("turn/start",{"threadId":session,"input":blocks,
                                               "clientUserMessageId":"mowulink-"+did})["turn"]
-        proof = self.lookup_expected(session,did,payload,digest)
+        proof = self.lookup_inputs(session,did,payload,digest,blocks)
         require(not proof or proof["turn_id"]==turn["id"],409,"host_receipt_mismatch")
         return proof
 
     def lookup_expected(self,session,did,payload,digest):
-        text = self.input_text(did,payload,digest)
+        return self.lookup_media(session,did,payload,digest,[])
+
+    def lookup_media(self,session,did,payload,digest,files):
+        require(session==self.thread_id,409,"wrong_native_session")
+        blocks = self.input_blocks(did,payload,digest,files)
+        return self.lookup_inputs(session,did,payload,digest,blocks)
+
+    def lookup_inputs(self,session,did,payload,digest,expected):
         try:
             thread = self.thread(session,include_turns=True)
         except Fault as error:
@@ -49,12 +72,15 @@ class AppServerHost:
                 if item.get("type")!="userMessage" or item.get("clientId")!="mowulink-"+did:
                     continue
                 blocks = item.get("content")
-                require(isinstance(blocks,list) and len(blocks)==1 and isinstance(blocks[0],dict)
-                        and blocks[0].get("type")=="text" and blocks[0].get("text")==text,
+                require(isinstance(blocks,list) and len(blocks)==len(expected)
+                        and all(isinstance(actual,dict) and all(actual.get(key)==value for key,value in planned.items())
+                                for actual,planned in zip(blocks,expected)),
                         409,"native_delivery_conflict")
                 proof.append({"session":session,"delivery_id":did,"digest":digest,
                               "native_id":string(item,"id"),"turn_id":string(turn,"id")})
         require(len(proof)<=1,409,"native_delivery_conflict")
+        if proof and payload.get("attachments"):
+            proof[0]["media_sha256"] = [item["sha256"] for item in payload["attachments"]]
         return proof[0] if proof else None
 
     def stop_turn(self,session,receipt,*,start):
