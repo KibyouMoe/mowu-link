@@ -1,12 +1,13 @@
 """Run Desktop's bundled native App Server against a scripted loopback model."""
 import base64
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import hashlib
 import json
 from pathlib import Path
 from queue import Queue
 import shutil
+import sqlite3
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
@@ -15,7 +16,9 @@ import time
 import unittest
 
 from .agent_tools import REPORT_TOOL
+from .adapter import HostAdapter
 from .codex_app_server import AppServerHost
+from .codex_display import CodexDisplay
 from .codex_rpc import start_app_server
 from .devloop import Loop
 from .feishu_inbound import Inbound
@@ -405,8 +408,18 @@ class CodexAppServer(unittest.TestCase):
         self.provider.observed.clear()
         clock = Clock()
         loop = self.enterContext(Loop.isolated(clock))
-        callback_token,adapter_token = guid(),guid()
-        callback_server = WorkerService(loop.worker,clock).listen({callback_token:"adapter/oguri"},("127.0.0.1",0),None)
+        callback_token,adapter_token,platform_token = guid(),guid(),guid()
+        display_acks = []
+        class LostDisplayReceipt(WorkerService):
+            def handle(self,actor,method,path,body,headers):
+                result = super().handle(actor,method,path,body,headers)
+                if method=="POST" and path=="/v1/worker/display":
+                    display_acks.append(result[2])
+                    if len(display_acks)==1:
+                        raise Fault(503,"isolated_display_receipt_lost",True)
+                return result
+        callback_server = LostDisplayReceipt(loop.worker,clock).listen(
+            {callback_token:"adapter/oguri",platform_token:"platform/oguri"},("127.0.0.1",0),None)
         callback_url = self.enterContext(running(callback_server))
         def write(name,body):
             dest = root/name
@@ -455,12 +468,22 @@ class CodexAppServer(unittest.TestCase):
             until = time.monotonic()+9
             while time.monotonic()<until:
                 loop.worker.poll()
-                if loop.hermes.inspect(tid)["task"]["state"]=="completed_reported" and not remote.busy():
+                with closing(sqlite3.connect(adapter_db)) as db:
+                    pending_output = db.execute("SELECT COUNT(*) FROM codex_display_turns WHERE sent=0").fetchone()[0]
+                if (len(display_acks)==2 and pending_output==0
+                        and loop.hermes.inspect(tid)["task"]["state"]=="completed_reported" and not remote.busy()):
                     break
                 time.sleep(.05)
             self.assertEqual(loop.hermes.inspect(tid)["task"]["state"],"completed_reported")
             self.assertIsNone(loop.worker.hold()["held_assignment_id"])
             self.assertFalse(loop.native.entries())
+            self.assertEqual(len(display_acks),2)
+            self.assertEqual(display_acks[0],display_acks[1])
+            sink = PlatformFixture()
+            views = Views(root/"codex-views.db",Client(callback_url,platform_token),sink,"fixture-chat","小栗帽")
+            self.assertEqual((views.poll(),views.poll()),(2,0))
+            titles = [card[2]["header"]["title"]["content"] for card in sink.messages.values()]
+            self.assertEqual(titles,["小栗帽·工单","小栗帽-回复"])
         finally:
             test_service.Service.stop(process)
         self.assertEqual(self.provider.observed,[(True,0),(True,1),(True,2)])
@@ -478,8 +501,13 @@ class CodexAppServer(unittest.TestCase):
             self.assertEqual(len(turns),2)
             calls = [item["id"] for item in turns[1]["items"] if item.get("type")=="dynamicToolCall"]
             self.assertEqual(calls,["native_fixture_0","native_fixture_1"])
+            restored_display = CodexDisplay(HostAdapter(adapter_db,published,sid),Client(callback_url,callback_token))
+            restored_display.collect()
+            restored_display.flush()
+            self.assertEqual(len(display_acks),2)
         self.evidence = {"thread_id":sid,"task_id":tid,"assignment_id":body["assignment_id"],"native_receipt":proof,
                          "native_tool_call_ids":calls,"notification_delivery_id":notify["delivery_id"],
                          "cli_version":native["cliVersion"],"router_state":"completed_reported","tls":True,
                          "wrong_workspace_rejected":True,"second_profile_writer_rejected":True,
+                         "worker_display_receipts":display_acks,"fixture_card_titles":titles,
                          "boundary":"Separate codex-adapter process drove the native App Server with a local scripted model"}

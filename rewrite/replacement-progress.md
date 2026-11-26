@@ -4,6 +4,8 @@
 
 ## 检查点与证据
 
+独立 Codex 适配器已把新结束回合接入原 Worker 的卡片投影。首次绑定前的试验回合零抄送。Worker 先记回复再丢回执时，适配器重投同一事件，前后确认的序号一致。用另一 App Server 进程读取同一历史和账本，原输出未重复。连续 10 轮，每轮原卡形态的工单和回复各一张、Router 成果通知一条。复跑 `python3 -m unittest -v rewrite.test_codex_app_server.CodexAppServer.test_codex_adapter_process_handles_native_report_without_controller_dispatch`。[出向证据](evidence/codex-adapter-output.json)。飞书和模型由夹具提供。
+
 新增独立 `codex-adapter` 启动入口。用专用 profile 核原生线程与工作目录后恢复线程，在 TLS 上接真实隔离 Worker。App Server 的原生请求由适配器直接转交 W04，控制器未代调。连续 12 次，两次原生工具调用均只给一条 Router 通知，错工作目录、错会话和第二个 profile 写者都被拒。复跑 `python3 -m unittest -v rewrite.test_codex_app_server.CodexAppServer.test_codex_adapter_process_handles_native_report_without_controller_dispatch`。[原生进程记录](evidence/codex-adapter-process-w04.json)。模型用本地脚本，Desktop 插件及真实模型待授权。
 
 独立 Codex App Server 已用 `localImage` 接图文与纯图。飞书夹具经实际 Worker HTTP 上传，原生模型请求保留测试原图 SHA-256，图文正文保留换行与空格。模拟平台丢失 Worker 回执后只查原输入，原生各一条、Router 无工单。连续 12 轮通过。复跑 `python3 -m unittest -v rewrite.test_codex_app_server`。[图文记录](evidence/codex-app-server-native-media.json)。飞书与模型均为夹具。

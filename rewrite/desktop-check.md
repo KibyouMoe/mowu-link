@@ -75,3 +75,5 @@ python3 -m rewrite.service codex-adapter \
 `--media-cache` 可指定适配器拥有的绝对图像缓存目录。同一专用 profile 已启动时，第二个进程会被拒绝。默认 Desktop profile 不用于此入口。若原生配置要求 OpenAI 登录，须有独立授权的测试账号。适配器从自己的 App Server 标准输入输出接工具请求，只按原线程和原回合交给 Worker 的业务入口；生产 Desktop 插件的加载和授权仍需另验。
 
 当前已用独立进程、TLS 和真实 App Server 连续跑通 12 次 W04。错工作目录和第二个 profile 写者均拒绝，原生工具回放只留一条 Router 通知。测试模型为本地脚本。[进程与回执记录](evidence/codex-adapter-process-w04.json)。
+
+独立适配器同时记录首次绑定时已存在的回合，只传之后结束的新回合。回执丢失时重传相同展示事件，原 Worker 只收一条；同一账本恢复后也不会重复抄送。独立进程跑过 10 轮，测试飞书每次只得到原样式的工单和回复两张卡。[出向试验记录](evidence/codex-adapter-output.json)。已结束回合的输出与 W04 投递各自推进。

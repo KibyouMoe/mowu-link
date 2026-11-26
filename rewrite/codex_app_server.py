@@ -8,6 +8,8 @@ import time
 from .codex_rpc import NativeRpcRejected
 from .storage import Fault, encode, require, string
 
+TERMINAL = {"completed","interrupted","failed"}
+
 
 class AppServerHost:
     def __init__(self, rpc, thread_id):
@@ -119,7 +121,7 @@ class AppServerHost:
         thread = self.thread(session,include_turns=True)
         turn = next((item for item in thread["turns"] if item.get("id")==turn_id),None)
         require(turn,409,"native_turn_unconfirmed")
-        if turn["status"] not in ("completed","interrupted","failed"):
+        if turn["status"] not in TERMINAL:
             return []
         results = []
         items = turn["items"]
@@ -171,7 +173,7 @@ class AppServerHost:
 
 
 @contextmanager
-def report_callbacks(host,worker):
+def report_callbacks(host,worker,notify_turn_end):
     stop = Event()
 
     def to_worker(packet):
@@ -196,6 +198,11 @@ def report_callbacks(host,worker):
                 continue
             except Fault:
                 break
+            if packet.get("method")=="turn/completed":
+                params = packet.get("params")
+                if isinstance(params,dict) and params.get("threadId")==host.thread_id:
+                    notify_turn_end()
+                continue
             if packet.get("method")!="item/tool/call" or type(packet.get("id")) not in (str,int):
                 continue
             try:

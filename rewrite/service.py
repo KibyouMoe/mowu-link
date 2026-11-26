@@ -81,6 +81,7 @@ def serve(args,stack):
         listener = serve_adapter(adapter,args.worker_id,identities,address,ctx)
     elif args.component == "codex-adapter":
         from .codex_app_server import AppServerHost, report_callbacks
+        from .codex_display import CodexDisplay
         from .codex_rpc import start_app_server
         from .native_files import NativeFiles
         client = connection(args.worker_connection)
@@ -95,7 +96,9 @@ def serve(args,stack):
         require(resumed.get("id")==args.session,409,"wrong_native_session")
         media = NativeFiles(args.media_cache,client) if args.media_cache else None
         adapter = HostAdapter(args.db,native,args.session,media)
-        callbacks = report_callbacks(native,client)
+        display = CodexDisplay(adapter,client)
+        callbacks = report_callbacks(native,client,display.wake.set)
+        public_output = display.run()
         listener = serve_adapter(adapter,args.worker_id,identities,address,ctx)
     else:
         worker = Worker(args.db,args.worker_id,connection(args.router_connection),

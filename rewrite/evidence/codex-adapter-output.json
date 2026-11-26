@@ -1,0 +1,38 @@
+{
+  "thread_id": "01a216ce-8c4d-70e2-910e-8650eef810f7",
+  "task_id": "1d48a0ec-fbbf-4288-a6f9-0b0cc0cf9312",
+  "assignment_id": "2e782965-fb0f-40ed-9ca8-a5bd8b9267ad",
+  "native_receipt": {
+    "session": "01a216ce-8c4d-70e2-910e-8650eef810f7",
+    "delivery_id": "e51ab376-3793-4365-93e1-cfda95de644b",
+    "digest": "0a64672990849e9138f6ced5a1074251da227a5a2a66a523e490930d37f72339",
+    "native_id": "01a216ce-8db2-75a3-8658-29d7fb106b11",
+    "turn_id": "01a216ce-8dad-7a81-9fd1-8bcc55f4b56b"
+  },
+  "native_tool_call_ids": [
+    "native_fixture_0",
+    "native_fixture_1"
+  ],
+  "notification_delivery_id": "effcc265-b22a-4f00-b762-4b0a322e5107",
+  "cli_version": "0.171.0-alpha.13.2",
+  "router_state": "completed_reported",
+  "tls": true,
+  "wrong_workspace_rejected": true,
+  "second_profile_writer_rejected": true,
+  "worker_display_receipts": [
+    {
+      "event_id": "host-codex-325483943094f129447bd2a742fbb869238c3f5ee09c17eb9b2a6a5c78101ade",
+      "seq": 2
+    },
+    {
+      "event_id": "host-codex-325483943094f129447bd2a742fbb869238c3f5ee09c17eb9b2a6a5c78101ade",
+      "seq": 2
+    }
+  ],
+  "fixture_card_titles": [
+    "小栗帽·工单",
+    "小栗帽-回复"
+  ],
+  "boundary": "Separate codex-adapter process drove the native App Server with a local scripted model",
+  "consecutive_runs": 10
+}
