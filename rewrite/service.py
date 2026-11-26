@@ -132,9 +132,17 @@ def main():
     send = ops.add_parser("send")
     send.add_argument("--connection",required=True,type=Path)
     send.add_argument("--message-id")
+    status = apps.add_parser("worker-status",help="read an isolated Worker's last connection observations")
+    status.add_argument("--connection",required=True,type=Path)
+    status.add_argument("--worker-id",required=True)
     args = parser.parse_args()
     if args.component == "trigger":
         print(encode(source(args)))
+    elif args.component == "worker-status":
+        observation = connection(args.connection).request("GET","worker/status")
+        if observation.get("worker_id")!=args.worker_id:
+            raise ValueError("status receipt belongs to a different Worker")
+        print(encode(observation))
     else:
         server(args)
 

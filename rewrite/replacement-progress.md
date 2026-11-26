@@ -4,6 +4,8 @@
 
 ## 检查点与证据
 
+已加独立工位的只读运维检查。三进程 TLS 中，测试平台身份读状态被拒，专用运维身份读到预期和确认的同一会话及当前持单。两个真实回环断链试验分别核 Router 重连倒计时及宿主忙闲未知，另一链保持可观察。复跑 `python3 -m unittest -v rewrite.test_link_health rewrite.test_service`。原生宿主为夹具。
+
 旧飞书私聊增加离线专用导出。用实际旧 RouterStore 写两工位记录，按一工位分页、筛选，并逐项比对旧查询的原 ID、方向、消息号、原会话、时间和文本。另一工位记录未导出，原库摘要未变，坏快照拒绝，不触发新 Router 或平台。复跑 `python3 -m unittest -v rewrite.test_cutover.Cutover.test_export_legacy_chat_keeps_original_fields_and_private_scope`。未取生产私聊日志；旧在线旁听的现有使用方另核。
 
 用两版发布包实跑 Worker 与适配器逐个升级、回退。旧包、先升适配器、升完整套、旧包回退返回同一原生回执；升级版 Worker 已保存从原账本查到的会话和回执。各阶段原生账本只记一条，三份原快照摘要未变。[复跑命令](router-rehearsal.md#worker-和适配器逐个升级)与[原始输出](evidence/worker-pair-release-trial.json)。独立进程和回环 TLS 实跑，宿主与平台为夹具。

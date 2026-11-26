@@ -19,6 +19,8 @@ class WorkerService:
         self.router_observed = False
         self.adapter_connected = None
         self.host_busy = None
+        self.host_error = None
+        self.host_observed_at = None
         self.host_queue = False
         self.host_context = False
         self.host_compaction = False
@@ -52,6 +54,7 @@ class WorkerService:
                 require(isinstance(session,str) and session and type(busy) is bool,
                         502,"invalid_host_observation")
                 self.host_session, self.host_busy, self.adapter_connected = session,busy,True
+                self.host_error = None
                 self.host_queue = info.get("next_turn") is True
                 self.host_context = info.get("context_usage") is True
                 self.host_compaction = info.get("compaction") is True
@@ -60,9 +63,11 @@ class WorkerService:
                 self.host_model_view = info.get("model_view") is True
                 self.host_model_change = info.get("model_change") is True
                 self.host_goal_control = info.get("goal_control") is True
-            except (Fault,URLError,OSError):
+            except (Fault,URLError,OSError) as err:
                 self.host_busy = None
                 self.adapter_connected = False
+                self.host_error = err.code if isinstance(err,Fault) else "adapter_connection_unconfirmed"
+            self.host_observed_at = self.clock()
             links.observe(w,"adapter",self.adapter_connected,self.host_session)
             self.next_probe = self.clock()+self.probe_interval
             queued_chat.advance(self)
@@ -90,8 +95,10 @@ class WorkerService:
                 self.router_connected = False
                 self.next_router_attempt = self.clock() + 20*60
                 links.observe(w,"router",False,self.host_session)
-            if err.code == "adapter_connection_unconfirmed":
+            if err.code in ("adapter_connection_unconfirmed","wrong_native_session","native_agent_unavailable"):
                 self.adapter_connected = False
+                self.host_error = err.code
+                self.host_observed_at = self.clock()
                 links.observe(w,"adapter",False,self.host_session)
             self.last_error = err.code
 
@@ -99,6 +106,19 @@ class WorkerService:
         while not self.stop.is_set():
             self.step()
             self.stop.wait(0.2)
+
+    def status(self):
+        now = self.clock()
+        connected = self.adapter_connected
+        return {"worker_id":self.worker.worker_id,"router_connected":self.router_connected,
+                "router_observed":self.router_observed,"adapter_connected":connected,
+                "last_error":self.last_error,"host_error":self.host_error,
+                "host_session":self.host_session if connected else None,
+                "expected_host_session":getattr(self.worker.adapter,"expected_session",None),
+                "host_busy":self.host_busy if connected else None,
+                "host_observation_age_seconds":None if self.host_observed_at is None else max(0,now-self.host_observed_at),
+                "router_retry_in_seconds":None if self.router_connected or not self.router_observed
+                else max(0,self.next_router_attempt-now),**self.worker.hold()}
 
     def handle(self, actor, method, path, body, _headers):
         w = self.worker
@@ -165,8 +185,7 @@ class WorkerService:
             result = {"receipt":w.chat(string(body,"message_id"),body["text"],body.get("attachment_ids"),
                                        body.get("attachment_kinds"))}
         elif actor == "ops/" + w.worker_id and method == "GET" and path == "/v1/worker/status":
-            result = {"worker_id":w.worker_id,"router_connected":self.router_connected,
-                      "adapter_connected":self.adapter_connected,"last_error":self.last_error,**w.hold()}
+            result = self.status()
         else:
             raise Fault(403,"forbidden")
         return 200,"application/json",result

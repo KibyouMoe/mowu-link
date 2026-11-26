@@ -145,6 +145,13 @@ class Service(unittest.TestCase):
         self.assertEqual(result,caller.request("POST","worker/native-tool",body))
         self.assertEqual(result["task_state"],"completed_reported")
         self.assertIsNone(Client(gateway,ops,cert).request("GET","worker/status")["held_assignment_id"])
+        with self.assertRaisesRegex(Fault,"forbidden"):
+            chat.request("GET","worker/status")
+        status = self.command("worker-status","--worker-id","dev","--connection",target("to-ops",gateway,ops))
+        self.assertEqual((status["host_session"],status["expected_host_session"]),(session,session))
+        self.assertIs(status["host_busy"],False)
+        self.assertIs(status["router_connected"],True)
+        self.assertIsNone(status["held_task_id"])
         self.assertEqual(len(manager_client.frames(0)),1)
 
     @unittest.skipUnless(shutil.which("openssl"), "TLS fixture certificate generator unavailable")
