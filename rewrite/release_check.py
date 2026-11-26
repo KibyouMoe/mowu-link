@@ -3,6 +3,7 @@ import argparse
 from contextlib import closing, contextmanager
 import json
 import os
+import re
 from pathlib import Path
 from queue import Queue
 import shutil
@@ -133,7 +134,30 @@ def router_rehearsal(root,old,new,cert,key,env):
             "unchanged_trial":True,"starts":["previous","new","previous"]}
 
 
-def run(repository,older,newer,component="router"):
+def dsh_workspace_rollback(root,old,new,env,image):
+    docker = shutil.which("docker")
+    if not docker or not isinstance(image,str) or not re.fullmatch(r"sha256:[0-9a-f]{64}",image):
+        raise ValueError("DSH workspace rollback requires a local Docker CLI and a pinned --dsh-image")
+    endpoint = subprocess.check_output([docker,"context","inspect","--format","{{ .Endpoints.docker.Host }}"],
+                                       text=True,timeout=5).strip()
+    if not endpoint.startswith("unix:///"):
+        raise ValueError("DSH workspace rollback requires a local Unix Docker engine")
+    output = root/"dsh-workspace-rollback.json"
+    isolated = {**env,"MOWULINK_DSH_CONTAINER_IMAGE":image,"MOWULINK_DSH_TEST_DOCKER":docker,
+                "MOWULINK_DSH_TEST_DOCKER_ENDPOINT":endpoint,"MOWULINK_DSH_TEST_PREVIOUS_RELEASE":str(old),
+                "MOWULINK_DSH_OFFLINE_AUDIT_EVIDENCE":str(output)}
+    test = "rewrite.test_dsh_native_loop.NativeLoop.test_offline_handoff_waits_for_dsh_workspace_after_w04_release"
+    process = subprocess.run([sys.executable,"-B","-m","unittest","-v",test],cwd=new,env=isolated,
+                             check=False,timeout=55,capture_output=True,text=True)
+    if process.returncode!=0 or not output.is_file():
+        raise RuntimeError("isolated DSH rollback did not produce evidence:\n"+process.stderr[-3500:])
+    observed = json.loads(output.read_text())
+    if not observed.get("previous_release") or not observed.get("version_rollback"):
+        raise RuntimeError("previous DSH release was not exercised")
+    return {"dsh_workspace_rollback":observed}
+
+
+def run(repository,older,newer,component="router",*,dsh_image=None):
     if older==newer:
         raise ValueError("two different release commits are required")
     with tempfile.TemporaryDirectory(prefix="mowulink-release-") as folder:
@@ -147,12 +171,15 @@ def run(repository,older,newer,component="router"):
             materialize(archive,sha,result["sha256"],directory,install=True)
             versions.append((archive,sha,result["sha256"],directory))
         old,new = versions[0][3],versions[1][3]
-        cert,key = root/"cert.pem",root/"key.pem"
-        subprocess.run(["openssl","req","-x509","-newkey","rsa:2048","-nodes","-days","1",
-                        "-subj","/CN=localhost","-addext","subjectAltName=IP:127.0.0.1",
-                        "-keyout",key,"-out",cert],cwd=root,env=env,timeout=10,check=True,capture_output=True)
-        rehearse = worker_pair if component=="worker-pair" else router_rehearsal
-        observed = rehearse(root,old,new,cert,key,env)
+        if component=="dsh-workspace-rollback":
+            observed = dsh_workspace_rollback(root,old,new,env,dsh_image)
+        else:
+            cert,key = root/"cert.pem",root/"key.pem"
+            subprocess.run(["openssl","req","-x509","-newkey","rsa:2048","-nodes","-days","1",
+                            "-subj","/CN=localhost","-addext","subjectAltName=IP:127.0.0.1",
+                            "-keyout",key,"-out",cert],cwd=root,env=env,timeout=10,check=True,capture_output=True)
+            rehearse = worker_pair if component=="worker-pair" else router_rehearsal
+            observed = rehearse(root,old,new,cert,key,env)
         for archive,sha,checksum,directory in versions:
             materialize(archive,sha,checksum,directory,install=False)
         return {"previous_revision":older,"new_revision":newer,"package_sha256":[v[2] for v in versions],
@@ -164,9 +191,10 @@ def main():
     p.add_argument("--repository",type=Path,required=True)
     p.add_argument("--previous",required=True)
     p.add_argument("--new",required=True)
-    p.add_argument("--component",choices=("router","worker-pair"),default="router")
+    p.add_argument("--component",choices=("router","worker-pair","dsh-workspace-rollback"),default="router")
+    p.add_argument("--dsh-image",help="pinned existing Linux image ID for the DSH workspace rollback rehearsal")
     args = p.parse_args()
-    print(encode(run(args.repository,args.previous,args.new,args.component)))
+    print(encode(run(args.repository,args.previous,args.new,args.component,dsh_image=args.dsh_image)))
 
 
 if __name__=="__main__":

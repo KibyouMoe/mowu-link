@@ -477,13 +477,21 @@ class Bundle(unittest.TestCase):
             original_restore(*args,**kwargs)
             with open(journal/name,"x",opener=lambda p,flags:os.open(p,flags,0o600)) as stream:
                 stream.write(encode(record))
-        with patch.object(state_bundle,"restore_files",side_effect=changed):
-            with self.assertRaisesRegex(ValueError,"workspace journal changed during handoff"):
-                stage_native_handoff(self.snapshot,seal,"oguri",original,"next",self.dest,dsh_runtimes=runtimes)
-        self.assertFalse(self.dest.exists())
-        pending, = audit_handoff(self.snapshot,seal,dsh_runtimes=runtimes)["workers"]
-        self.assertEqual(pending["native_session_pending"]["dsh_assignment_workspaces"],1)
-        self.assertNotIn(record["token"],encode(pending))
+        trial = restore(self.snapshot,seal,self.root/"trial")
+        operations = {
+            "handoff":lambda:stage_native_handoff(self.snapshot,seal,"oguri",original,"next",self.dest,
+                                                  dsh_runtimes=runtimes),
+            "rollback":lambda:rollback(self.snapshot,seal,trial,self.dest,dsh_runtimes=runtimes),
+        }
+        for label,operation in operations.items():
+            with self.subTest(operation=label), patch.object(state_bundle,"restore_files",side_effect=changed):
+                with self.assertRaisesRegex(ValueError,"workspace journal changed during "+label):
+                    operation()
+                self.assertFalse(self.dest.exists())
+                pending, = audit_handoff(self.snapshot,seal,dsh_runtimes=runtimes)["workers"]
+                self.assertEqual(pending["native_session_pending"]["dsh_assignment_workspaces"],1)
+                self.assertNotIn(record["token"],encode(pending))
+            (journal/name).unlink()
 
     def test_handoff_detects_different_display_payload_or_cursor_ahead_of_worker(self):
         with self.stack(self.sources) as (_m,w,_source,_mail,_inbound,views):

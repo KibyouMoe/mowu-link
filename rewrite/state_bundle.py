@@ -148,11 +148,33 @@ def locked(sources,registries=None):
         yield managed.collect(sources,registries or {},stack,lock_database)
 
 
+def agent_ledger_paths(directory,manifest):
+    managed_native = manifest.get("managed_native",{})
+    for label in manifest["files"]:
+        role,wid = component(label)
+        if role=="agent":
+            group = managed_native.get(wid,{"children":{}})
+            children = [directory/managed.registry_name(wid)/(sid+".sqlite3") for sid in group["children"]]
+            yield wid,[directory/filename(label),*children]
+
+
 def has_workspace_journal(directory,manifest):
-    ledgers = [directory/filename(label) for label in manifest["files"] if label.startswith("agent:")]
-    for wid,group in manifest.get("managed_native",{}).items():
-        ledgers.extend(directory/managed.registry_name(wid)/(sid+".sqlite3") for sid in group["children"])
-    return bool(dsh_workspace_audit.identities(ledgers))
+    return any(dsh_workspace_audit.identities(paths) for _wid,paths in agent_ledger_paths(directory,manifest))
+
+
+def workspace_audits(snapshot,manifest,dsh_runtimes):
+    dsh_runtimes = dsh_runtimes or {}
+    ledgers = dict(agent_ledger_paths(snapshot,manifest))
+    if set(dsh_runtimes)-ledgers.keys():
+        raise ValueError("DSH runtime does not belong to a snapshot Worker")
+    audits = {}
+    for wid,paths in ledgers.items():
+        workspace,issue = dsh_workspace_audit.inspect(dsh_runtimes.get(wid),dsh_workspace_audit.identities(paths))
+        if workspace is not None and workspace["pending"]:
+            issue = "dsh_assignment_workspace_pending"
+        if workspace is not None or issue:
+            audits[wid] = (workspace,issue)
+    return audits
 
 
 def capture(sources,revision,destination,*,registries=None):
@@ -278,9 +300,7 @@ def feishu_display_backlog(db,platform_path):
 def audit_handoff(snapshot,expected,*,dsh_runtimes=None):
     manifest = verify(snapshot,expected)
     labels = manifest["files"]
-    dsh_runtimes = dsh_runtimes or {}
-    if any("agent:"+wid not in labels for wid in dsh_runtimes):
-        raise ValueError("DSH runtime does not belong to a snapshot Worker")
+    workspaces = workspace_audits(snapshot,manifest,dsh_runtimes)
     router_label, = (label for label in labels if component(label)[0]=="router")
     with closing(readonly(snapshot/filename(router_label))) as db:
         current = {row["assignee_id"]:dict(row) for row in db.execute("""SELECT assignee_id,task_id,assignment_id
@@ -340,15 +360,11 @@ def audit_handoff(snapshot,expected,*,dsh_runtimes=None):
             problems.append("adapter_receipt_unconfirmed")
         agent_paths = [root,*child_ledgers.values()]
         session_pending.update(agent_pending(agent_paths))
-        workspace,workspace_issue = dsh_workspace_audit.inspect(dsh_runtimes.get(wid),
-            dsh_workspace_audit.identities(agent_paths))
+        workspace,workspace_issue = workspaces.get(wid,(None,None))
         if workspace_issue:
-            session_pending["dsh_assignment_workspaces"] = None
             problems.append(workspace_issue)
-        elif workspace is not None:
-            session_pending["dsh_assignment_workspaces"] = len(workspace["pending"])
-            if workspace["pending"]:
-                problems.append("dsh_assignment_workspace_pending")
+        if wid in workspaces:
+            session_pending["dsh_assignment_workspaces"] = len(workspace["pending"]) if workspace is not None else None
         if platform_label in labels:
             with closing(readonly(snapshot/filename(platform_label))) as db:
                 session_pending.update(pending_counts(db,FEISHU_NATIVE_PENDING))
@@ -440,7 +456,7 @@ def stage_native_handoff(snapshot,expected,worker_id,source_session,target_sessi
     return result
 
 
-def rollback(snapshot,expected,trial,destination,*,registries=None,managed_keys=None):
+def rollback(snapshot,expected,trial,destination,*,registries=None,managed_keys=None,dsh_runtimes=None):
     manifest = verify(snapshot,expected)
     if set(trial) != set(manifest["files"]):
         raise ValueError("trial component list differs from snapshot")
@@ -457,7 +473,15 @@ def rollback(snapshot,expected,trial,destination,*,registries=None,managed_keys=
                 expected_digest = digest(staged)
             if digest(Path(path)) != expected_digest:
                 raise ValueError("trial state changed; reconcile before rollback: "+label)
-        return restore(snapshot,expected,destination,managed_keys=managed_keys)
+        workspaces = workspace_audits(snapshot,manifest,dsh_runtimes)
+        for wid,(_workspace,issue) in workspaces.items():
+            if issue:
+                raise ValueError(f"version rollback still pending for {wid}: {issue}")
+        with output_directory(destination) as stage:
+            restore_files(snapshot,expected,manifest,stage,destination=destination,managed_keys=managed_keys)
+            if workspace_audits(snapshot,manifest,dsh_runtimes)!=workspaces:
+                raise ValueError("DSH workspace journal changed during rollback")
+    return {label:str(destination/filename(label)) for label in manifest["files"]}
 
 
 def main():
@@ -477,7 +501,7 @@ def main():
             p.add_argument("--managed-registries",type=Path,help="Worker ID to the trial's native registry directory, JSON")
         if op in ("restore","rollback","stage-native-handoff"):
             p.add_argument("--managed-keys",type=Path,help="Worker ID to the original private callback key file, JSON")
-        if op in ("audit-handoff","stage-native-handoff"):
+        if op in ("audit-handoff","stage-native-handoff","rollback"):
             p.add_argument("--dsh-runtimes",type=Path,help="Worker ID to original stopped DSH runtime, JSON")
         if op=="stage-native-handoff":
             for field in ("worker-id","source-session","target-session"):
@@ -506,7 +530,8 @@ def main():
                                       managed_keys=optional_map("managed_keys"),dsh_runtimes=optional_map("dsh_runtimes"))
     elif args.op=="rollback":
         result = rollback(args.snapshot,args.manifest_sha256,json.loads(args.trial_sources.read_text()),args.destination,
-                          registries=optional_map("managed_registries"),managed_keys=optional_map("managed_keys"))
+                          registries=optional_map("managed_registries"),managed_keys=optional_map("managed_keys"),
+                          dsh_runtimes=optional_map("dsh_runtimes"))
     else:
         result = restore(args.snapshot,args.manifest_sha256,args.destination,managed_keys=optional_map("managed_keys"))
     print(encode(result))

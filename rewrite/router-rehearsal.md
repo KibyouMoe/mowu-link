@@ -216,6 +216,11 @@ python3 -m rewrite.state_bundle restore --snapshot ./snapshot --manifest-sha256 
 python3 -m rewrite.state_bundle rollback --snapshot ./snapshot --manifest-sha256 "$MANIFEST_SHA256" --trial-sources ./trial.json --destination ./previous-state
 ```
 
+含 DSH 工作区登记的格式 3 快照，版本回退还要加 `--dsh-runtimes ./dsh-runtimes.json`，在能读取原私有运行目录的机器上执行。原宿主仍在运行、原账本未核验、容器尚未回收时，回退目录不会发布。准备期间账本发生变化也会中止。需要先保留原库来接回同机同引擎时，用上面的 `restore` 生成数据副本，仍从原工作区回收容器。回收完成并再次停机后，才能准备旧版的状态目录。
+
+已用两版安装包复验。新版先确认 W04 已落库、Worker 清零，实测容器仍活跃时拦回退。按原回执回收容器后，从同一快照准备旧版数据。启动旧版 Router、Worker、DSH 适配器和 DSH 宿主，读回相同成果和附件。重发一条同号私聊，原会话只新收一次，原工单未重跑。复跑命令见[DSH 工作区验收](README.md#dsh-固定会话与飞书卡片)，[实测证据](evidence/dsh-offline-workspace-handoff.json)。
+
+
 版本级复跑为 `python3 -m rewrite.release_check --repository . --previous b31cee5da7c8dc74a76accdd78d8a6c5cb49484c --new 5de36ad66df26dc34fe3832ed14e77b1d9f19551`。两个已提交版本在各自新目录启动真实 Router，以专用临时 TLS 和身份验同一张待派单。旧包→新包→旧包后只查到原单一张，新试用库字节未变。该演练在 macOS 跑过；Windows 与跨机宿主尚待验收。
 
 ### 飞书输出回执与换绑

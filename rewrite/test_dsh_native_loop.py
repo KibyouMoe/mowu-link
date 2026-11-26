@@ -74,8 +74,8 @@ class NativeLoop(unittest.TestCase):
         return json.loads(native.stdout.readline())
 
     @contextmanager
-    def start_native(self,directory,session,mode):
-        with subprocess.Popen([EXE,FIXTURE.resolve(),APP/"Resources/app.asar/dsh",directory,session,mode],
+    def start_native(self,directory,session,mode,*,fixture=FIXTURE):
+        with subprocess.Popen([EXE,fixture.resolve(),APP/"Resources/app.asar/dsh",directory,session,mode],
                               env=environment(directory),cwd=directory,stdin=subprocess.PIPE,
                               stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True) as native:
             try:
@@ -1090,11 +1090,13 @@ class NativeLoop(unittest.TestCase):
 
     def container_engine(self):
         image = os.environ.get("MOWULINK_DSH_CONTAINER_IMAGE")
-        docker = shutil.which("docker")
+        docker = os.environ.get("MOWULINK_DSH_TEST_DOCKER") or shutil.which("docker")
         if not image or not docker:
             self.skipTest("configured isolated local Docker image required")
-        socket = subprocess.check_output([docker,"context","inspect","--format","{{ .Endpoints.docker.Host }}"],
-                                         text=True,timeout=5).strip()
+        socket = os.environ.get("MOWULINK_DSH_TEST_DOCKER_ENDPOINT")
+        if socket is None:
+            socket = subprocess.check_output([docker,"context","inspect","--format","{{ .Endpoints.docker.Host }}"],
+                                             text=True,timeout=5).strip()
         self.assertTrue(socket.startswith("unix:///"),socket)
         return image,[docker,"--host",socket]
 
@@ -1887,6 +1889,63 @@ exec {docker} "$@"
                 "run_scope":"Same isolated Linux engine, actual DSH native persistence and independent TLS adapter/Worker processes; scripted test model, no production credentials."}
             Path(output).write_text(json.dumps(result,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
 
+    def previous_dsh_after_rollback(self,package,root,runtime,session,paths,before,job):
+        old_fixture = package/"rewrite/integrations/dsh_host/native-loop-fixture.mjs"
+        cert,key = root/"previous-tls.crt",root/"previous-tls.key"
+        subprocess.run(["openssl","req","-x509","-newkey","rsa:2048","-nodes","-days","1","-subj","/CN=localhost",
+            "-addext","subjectAltName=IP:127.0.0.1","-keyout",key,"-out",cert],check=True,timeout=10,capture_output=True)
+        worker,manager,adapter,callback,ops,platform = (guid() for _ in range(6))
+        router_roles = config(root,"previous-router-roles",{worker:"worker/oguri",manager:"hermes"})
+        adapter_roles = config(root,"previous-adapter-roles",{adapter:"worker/oguri"})
+        worker_roles = config(root,"previous-worker-roles",{callback:"adapter/oguri",ops:"ops/oguri",platform:"platform/oguri"})
+        env = {"HOME":str(root),"PATH":os.defpath,"PYTHONDONTWRITEBYTECODE":"1"}
+        mode = "cleanup-container-recovery-reopen"
+        with serve(package,"router",paths["router:main"],router_roles,cert,key,env) as routing, \
+             self.start_native(runtime,session,mode,fixture=old_fixture) as native, socket.socket() as reserved:
+            restored = self.read_native(native,"read")
+            self.assertEqual((restored["inputs"],restored["calls"],restored["modelRequests"]),
+                             (before["inputs"],before["calls"],[]))
+            reserved.bind(("127.0.0.1",0))
+            port = reserved.getsockname()[1]
+            to_router = config(root,"previous-router",{"url":routing,"token":worker,"ca_file":str(cert)})
+            to_worker = config(root,"previous-worker",{"url":f"https://127.0.0.1:{port}","token":callback,"ca_file":str(cert)})
+            host_options = ("--worker-id","oguri","--session",session,"--runtime-dir",runtime,
+                            "--worker-connection",to_worker)
+            with serve(package,"dsh-adapter",paths["agent:oguri"],adapter_roles,cert,key,env,host_options) as host:
+                to_adapter = config(root,"previous-adapter",{"url":host,"token":adapter,"ca_file":str(cert)})
+                worker_options = ("--worker-id","oguri","--port",str(port),"--adapter-session",session,
+                                  "--router-connection",to_router,"--adapter-connection",to_adapter)
+                reserved.close()
+                with serve(package,"worker",paths["worker:oguri"],worker_roles,cert,key,env,worker_options) as url:
+                    status = Client(url,ops,cert)
+                    deadline = time.monotonic()+10
+                    while True:
+                        observed = status.request("GET","worker/status")
+                        if observed["router_connected"] and observed["adapter_connected"]:
+                            break
+                        self.assertLess(time.monotonic(),deadline,observed)
+                        time.sleep(.05)
+                    self.assertEqual(observed["host_session"],session)
+                    self.assertIsNone(observed["held_assignment_id"])
+                    management = Client(routing,manager,cert)
+                    self.assertEqual(management.request("GET","tasks/"+job["task"]["task_id"]),job)
+                    artifact, = job["last_report"]["artifact_ids"]
+                    self.assertEqual(management.request("GET","attachments/"+artifact)["bytes"],bytes(range(256))*2700)
+                    notice, = management.frames(0)
+                    self.assertEqual(notice["payload"]["attachment_ids"],[artifact])
+                    chat = {"message_id":guid(),"text":"Isolated first chat after restoring the prior package"}
+                    incoming = Client(url,platform,cert)
+                    receipt = incoming.request("POST","worker/chat",chat)["receipt"]
+                    self.assertEqual(receipt["session"],session)
+                    self.assertEqual(incoming.request("POST","worker/chat",chat)["receipt"],receipt)
+                    after = self.read_native(native,"read")
+                    self.assertEqual(after["inputs"],before["inputs"]+[receipt["native_id"]])
+                    self.assertEqual(after["calls"],before["calls"])
+                    self.assertEqual([req["command"] for req in after["modelRequests"]],["private"])
+        return {"native_session":session,"private_message":chat["message_id"],"native_input":receipt["native_id"],
+                "native_replays_of_formal_order":0,"previous_artifact_id":artifact,"outbound_notice":notice["delivery_id"],
+                "previous_processes":["Router","Worker","DSH adapter","DSH host"]}
+
     def test_offline_handoff_waits_for_dsh_workspace_after_w04_release(self):
         image,cli = self.container_engine()
         docker,_,socket = cli
@@ -1950,11 +2009,22 @@ exec {docker} "$@"
             stage_native_handoff(snapshot,sealed,"oguri",session,"other-session",target)
         self.assertFalse(target.exists())
 
+        # The normal data-copy path can preserve original state while the original
+        # engine still owns the running container. Version rollback has a stricter gate.
+        trial = restore(snapshot,sealed,loop.root/"data-copy")
+        rollback_dir = loop.root/"version-rollback"
+        with self.assertRaisesRegex(ValueError,"dsh_workspace_journal_required"):
+            rollback(snapshot,sealed,trial,rollback_dir)
+        self.assertFalse(rollback_dir.exists())
+
         incorrect = loop.root/"unrelated-runtime"
         (incorrect/"assignment-containers").mkdir(mode=0o700,parents=True)
         incorrect.chmod(0o700)
         wrong, = audit_handoff(snapshot,sealed,dsh_runtimes={"oguri":incorrect})["workers"]
         self.assertEqual(wrong["issues"],["dsh_workspace_journal_mismatch"])
+        with self.assertRaisesRegex(ValueError,"dsh_workspace_journal_mismatch"):
+            rollback(snapshot,sealed,trial,rollback_dir,dsh_runtimes={"oguri":incorrect})
+        self.assertFalse(rollback_dir.exists())
         runtimes = {"oguri":runtime}
         before, = audit_handoff(snapshot,sealed,dsh_runtimes=runtimes)["workers"]
         self.assertEqual(before["native_session_pending"]["held_assignments"],0)
@@ -1964,6 +2034,9 @@ exec {docker} "$@"
         with self.assertRaisesRegex(ValueError,"dsh_assignment_workspace_pending"):
             stage_native_handoff(snapshot,sealed,"oguri",session,"other-session",target,dsh_runtimes=runtimes)
         self.assertFalse(target.exists())
+        with self.assertRaisesRegex(ValueError,"dsh_assignment_workspace_pending"):
+            rollback(snapshot,sealed,trial,rollback_dir,dsh_runtimes=runtimes)
+        self.assertFalse(rollback_dir.exists())
 
         with tool_listener(runtime,loop.adapter,client), self.start_native(
                 runtime,session,"cleanup-container-recovery-reopen") as resumed:
@@ -1978,6 +2051,9 @@ exec {docker} "$@"
             with self.assertRaisesRegex(ValueError,"dsh_workspace_host_still_running"):
                 stage_native_handoff(snapshot,sealed,"oguri",session,"other-session",target,dsh_runtimes=runtimes)
             self.assertFalse(target.exists())
+            with self.assertRaisesRegex(ValueError,"dsh_workspace_host_still_running"):
+                rollback(snapshot,sealed,trial,rollback_dir,dsh_runtimes=runtimes)
+            self.assertFalse(rollback_dir.exists())
         self.assertFalse(subprocess.check_output([*cli,"container","ls","--all","--filter","id="+lease["container_id"],
             "--format","{{.ID}}"],timeout=5).strip())
         bad_record = journal.with_name("f"*64+".json")
@@ -1993,9 +2069,18 @@ exec {docker} "$@"
         handoff = stage_native_handoff(snapshot,sealed,"oguri",session,"other-session",target,dsh_runtimes=runtimes)
         self.assertEqual(handoff["dsh_workspace_journal_sha256"],after["dsh_workspace_audit"]["fingerprint"])
         self.assertEqual(handoff["expected_session"],"other-session")
+        rolled_back = rollback(snapshot,sealed,trial,rollback_dir,dsh_runtimes=runtimes)
+        self.assertEqual(set(rolled_back),set(sources))
+        for label,path in rolled_back.items():
+            self.assertEqual(Path(path).read_bytes(),(snapshot/filename(label)).read_bytes())
+        with closing(sqlite3.connect(rolled_back["worker:oguri"])) as db:
+            self.assertEqual(db.execute("SELECT session FROM native_binding WHERE slot=1").fetchone()[0],session)
         with closing(sqlite3.connect(target/filename("worker:oguri"))) as db:
             self.assertEqual(db.execute("SELECT session FROM native_binding WHERE slot=1").fetchone()[0],"other-session")
         self.assertEqual(client.request("POST","worker/workspace-state",scope),{**scope,"state":"released"})
+        previous = None
+        if previous_release := os.environ.get("MOWULINK_DSH_TEST_PREVIOUS_RELEASE"):
+            previous = self.previous_dsh_after_rollback(Path(previous_release),loop.root,runtime,session,rolled_back,replay,job)
         if output := os.environ.get("MOWULINK_DSH_OFFLINE_AUDIT_EVIDENCE"):
             observations = {"session":session,"task_id":task,"assignment_id":aid,"container_id":lease["container_id"],
                 "w04_state_before_capture":job["task"]["state"],"snapshot_format":3,"snapshot_sha256":sealed,
@@ -2006,6 +2091,10 @@ exec {docker} "$@"
                 "receipt_pending_before_reaper":before["native_session_pending"]["report_receipts"],
                 "held_before_reaper":before["native_session_pending"]["held_assignments"],
                 "original_inputs":replay["inputs"],"new_model_requests_after_reopen":len(replay["modelRequests"]),
+                "version_rollback":{"database_restore_allowed_with_live_workspace":True,
+                    "refusals":[from_db["issues"][0],wrong["issues"][0],before["issues"][0],running_audit["issues"][0]],
+                    "snapshot_sha256_after_drain":sealed,"components":sorted(rolled_back),"retained_session":session},
+                **({"previous_release":previous} if previous else {}),
                 "scope":"Installed DSH AgentLoop, isolated Linux Docker and Router/Worker HTTP; scripted local model."}
             Path(output).write_text(json.dumps(observations,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
 

@@ -1,20 +1,20 @@
 {
   "session": "dsh-offline-workspace-handoff",
-  "task_id": "e856b2d7-0643-4d16-8907-ae2c2e513e8b",
-  "assignment_id": "ec8de0e5-6f04-4e83-a5d7-8eadac99927b",
-  "container_id": "a90a2e00ac5b4e064a3f7a4ebf99fba9ad416cb730497bb1715adfdf431814a5",
+  "task_id": "2fe01514-08c6-44f4-833a-c517acde3a0e",
+  "assignment_id": "d6519ea3-651f-4f90-959b-30a5cda60f38",
+  "container_id": "d6cdef0f13b8963bd34f91623720c223d918ae1a1cf1be7e3f515b9a6a843773",
   "w04_state_before_capture": "completed_reported",
   "snapshot_format": 3,
-  "snapshot_sha256": "1ab4288a7445963fcd8e147063547bac5f1c632a85b51147f2c62204ab32d90e",
+  "snapshot_sha256": "59d0c625997b09217e8d4721e7d063c0aa7a1a1936e1d8006c204c961e657ced",
   "missing_journal": "dsh_workspace_journal_required",
   "wrong_runtime": "dsh_workspace_journal_mismatch",
   "active_journal": {
-    "fingerprint": "f60169b75dcbf6f5e6ea6ed62f4d0ad8edd4dbc2157868b9f748bead0d44a8fa",
+    "fingerprint": "2097c916512ed0ef804e8af35b91e8f44deddf05cf01568f5e1a28d174917151",
     "pending": [
       {
         "session": "dsh-offline-workspace-handoff",
-        "task_id": "e856b2d7-0643-4d16-8907-ae2c2e513e8b",
-        "assignment_id": "ec8de0e5-6f04-4e83-a5d7-8eadac99927b",
+        "task_id": "2fe01514-08c6-44f4-833a-c517acde3a0e",
+        "assignment_id": "d6519ea3-651f-4f90-959b-30a5cda60f38",
         "phase": "active"
       }
     ]
@@ -22,15 +22,33 @@
   "invalid_record": "dsh_workspace_journal_unconfirmed",
   "running_host": "dsh_workspace_host_still_running",
   "sealed_journal": {
-    "fingerprint": "edd4c1d2ff270735ff090d603f2b0fc4a91125a985322a1c94933455b8f9f4ea",
+    "fingerprint": "479b896048bddb7097b3e4da8587c1883cda7232b8c8236826a95d8702e2f2fa",
     "pending": []
   },
   "staged_session": "other-session",
   "receipt_pending_before_reaper": 0,
   "held_before_reaper": 0,
   "original_inputs": [
-    "mowulink-fdd88e5ebf560148a4bd2fd4c7ce641dd7089647ef375c9de9b8f17b5223209e"
+    "mowulink-02827e2f0c6aa51210f53123e1c9fee76d3d4d96a490545063d9ab9d94a79cad"
   ],
   "new_model_requests_after_reopen": 0,
+  "version_rollback": {
+    "database_restore_allowed_with_live_workspace": true,
+    "refusals": [
+      "dsh_workspace_journal_required",
+      "dsh_workspace_journal_mismatch",
+      "dsh_assignment_workspace_pending",
+      "dsh_workspace_host_still_running"
+    ],
+    "snapshot_sha256_after_drain": "59d0c625997b09217e8d4721e7d063c0aa7a1a1936e1d8006c204c961e657ced",
+    "components": [
+      "agent:oguri",
+      "hermes:main",
+      "router:main",
+      "trigger:offline",
+      "worker:oguri"
+    ],
+    "retained_session": "dsh-offline-workspace-handoff"
+  },
   "scope": "Installed DSH AgentLoop, isolated Linux Docker and Router/Worker HTTP; scripted local model."
 }
