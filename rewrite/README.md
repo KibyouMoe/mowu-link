@@ -367,6 +367,8 @@ python3 -m rewrite.linux_check --repository . \
 
 安装包按 `rewrite.release build/install/verify` 校验提交、归档摘要和逐文件字节。Windows 原生验收从已校验的安装包执行，临时库放进带中文与空格的目录，进程只在本机回环监听。复跑用受保护的测试目录、Python 3.13、Git 和 OpenSSL，命令见 [Windows 测试入口](../.github/workflows/rewrite-windows.yml)。旧版与验证版各自启动，核对 Router 的原队首和 Worker 的原收件，回退后无重复。宿主和模型用夹具，实际 Windows Desktop 启动与真实平台仍待验。[Windows 实测](evidence/windows-release-rollback.json)
 
+Windows 另从官方发布包运行 [独立 Codex App Server](desktop-check.md#windows-独立-app-server)，实测原生工具经 W04 交成果、原收件查回、只读派发取消及转派，并核对 Windows profile ACL 和进程回收。模型、飞书和接替工位用夹具。旧新版 Router 和 Worker 回退继续每轮验证。
+
 ### DSH 会话用量
 
 训练员在飞书私聊发送 `/context` 可查询绑定 DSH 会话最近一次模型回包的路由、回合、步骤、输入与总用量。窗口取自该回包之前同一路由的原生请求记录。原生端缺某一数值时按缺项显示，指令本身不向模型发起推理。宿主适配器的 `GET /v1/host/context` 只允许本工位读取。

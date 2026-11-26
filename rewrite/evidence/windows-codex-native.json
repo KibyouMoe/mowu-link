@@ -1,0 +1,366 @@
+{
+  "recorded_utc": "2026-11-26T19:32:04Z",
+  "verification_url": "https://github.com/KibyouMoe/mowu-link/actions/runs/45884226172/job/140130800505",
+  "runner": "Windows Server 2025, build 26100 AMD64; CPython 3.13.17",
+  "boundary": "Official Windows App Server, installed rewrite package, Windows Job Object and ACLs, real isolated Router and Worker. The model, Feishu and replacement worker host are fixtures.",
+  "codex_release": {
+    "tag": "rust-v0.171.0-alpha.13.2",
+    "asset": "codex-package-x86_64-pc-windows-msvc.tar.gz",
+    "sha256": "6d3be3ea2e3f759f77f23b543ee882aae6433dc6a6cd260788c2e8793d616eac"
+  },
+  "installed_release": {
+    "revision": "6e517f865ab987bb7b710de0b8e21b7750ce27ce",
+    "sha256": "470183fbd3fe6fa4901e43e7dd7a832a85688ce3c24ff36628f1ede651c7a180",
+    "files": 262,
+    "verified_after_tests": true
+  },
+  "tests": [
+    "test_daemon_rejects_second_writer_and_cold_restart_recovers_same_state (rewrite.test_service.Service.test_daemon_rejects_second_writer_and_cold_restart_recovers_same_state) ... ok",
+    "test_cli_tls_restart_preserves_identity_file_and_receipts (rewrite.test_service.Service.test_cli_tls_restart_preserves_identity_file_and_receipts) ... ok",
+    "test_three_process_worker_chat_and_assignment (rewrite.test_service.Service.test_three_process_worker_chat_and_assignment) ... ok",
+    "test_windows_public_config_rejected (rewrite.test_service.Service.test_windows_public_config_rejected) ... ok",
+    "test_adapter_exit_stops_dedicated_windows_process_tree (rewrite.test_codex_rpc.WindowsCodexRpc.test_adapter_exit_stops_dedicated_windows_process_tree) ... ok",
+    "test_shared_windows_profile_is_rejected_before_launch (rewrite.test_codex_rpc.WindowsCodexRpc.test_shared_windows_profile_is_rejected_before_launch) ... ok",
+    "test_codex_adapter_process_handles_native_report_without_controller_dispatch (rewrite.test_codex_app_server.CodexAppServer.test_codex_adapter_process_handles_native_report_without_controller_dispatch) ... ok",
+    "test_native_app_server_reconnect_recovers_input_before_w04_without_new_model_call (rewrite.test_codex_app_server.CodexAppServer.test_native_app_server_reconnect_recovers_input_before_w04_without_new_model_call) ... ok",
+    "test_router_cancel_interrupts_bound_app_server_turn_and_preserves_unrelated_turn (rewrite.test_codex_app_server.CodexAppServer.test_router_cancel_interrupts_bound_app_server_turn_and_preserves_unrelated_turn) ... ok",
+    "test_windows_native_readonly_assignment_cleanup_cancel_and_transfer (rewrite.test_codex_app_server.CodexAppServer.test_windows_native_readonly_assignment_cleanup_cancel_and_transfer) ... ok"
+  ],
+  "native_cases": [
+    {
+      "evidence": {
+        "account_present": false,
+        "assignment_id": "eca59aa1-2824-410c-a247-39eeacaa4bcb",
+        "boundary": "Separate codex-adapter process drove the native App Server with a local scripted model",
+        "cli_version": "0.171.0-alpha.13.2",
+        "fixture_card_titles": [
+          "小栗帽·工单",
+          "小栗帽-回复"
+        ],
+        "native_assignment_inputs": 1,
+        "native_receipt": {
+          "delivery_id": "119cdb36-c868-4d99-8f34-00f24e93d018",
+          "digest": "35c4fdc1050ff7e4016cf08da75d295a3dfd84ad8d34d7f823d4cf9837d9dd9e",
+          "native_id": "01a21957-be1b-76f3-b9b1-ce6d3439542a",
+          "session": "01a21957-b55d-7c42-a563-64749a1b0f7f",
+          "turn_id": "01a21957-be08-7561-acf0-811395328c64"
+        },
+        "native_tool_call_ids": [
+          "native_fixture_0",
+          "native_fixture_1"
+        ],
+        "notification_delivery_id": "15459e64-ebbf-4993-9fab-799569da28e2",
+        "provisioned_client_input_id": "mowulink-provision-f4f5be4d-a02f-4fa0-bd44-0461e58c7ac2",
+        "provisioned_native_input_id": "01a21957-b5cf-7450-bbe4-e6f4c0297911",
+        "provisioned_turn_id": "01a21957-b577-76e1-b45b-3af299eac0fd",
+        "router_notifications": 1,
+        "router_state": "completed_reported",
+        "second_profile_writer_rejected": true,
+        "task_id": "b17834d3-2f53-4d22-8cb0-35ca780fdba6",
+        "thread_id": "01a21957-b55d-7c42-a563-64749a1b0f7f",
+        "thread_seed_count": 1,
+        "tls": true,
+        "worker_display_receipts": [
+          {
+            "event_id": "host-codex-b03424effa7d29197fdf4b96be6bff50bfd81c587b5cb68df6232407876e1954",
+            "seq": 2
+          },
+          {
+            "event_id": "host-codex-b03424effa7d29197fdf4b96be6bff50bfd81c587b5cb68df6232407876e1954",
+            "seq": 2
+          }
+        ],
+        "wrong_workspace_rejected": true
+      },
+      "test": "test_codex_adapter_process_handles_native_report_without_controller_dispatch"
+    },
+    {
+      "evidence": {
+        "assignment_id": "ab1ff83c-9775-4f4f-a7c8-3c85e377ba61",
+        "boundary": "Native App Server process restart with local scripted provider; no account or Desktop session",
+        "model_requests": 1,
+        "native_input_count": 1,
+        "original": {
+          "delivery_id": "c0fe9f55-bf02-4dc1-91ff-075279d46453",
+          "digest": "3e7060137eed9d5c8743dc8d2651f80ff4bcec05bf6825a0e661537642eb25ff",
+          "native_id": "01a21957-c75f-72a2-9b8c-158d5535ac9c",
+          "session": "01a21957-c57c-7983-ad89-374d75d331de",
+          "turn_id": "01a21957-c72f-7db0-99a0-8b918d44fc9d"
+        },
+        "original_process_exited": true,
+        "pending_native_call_id": "native_fixture_0",
+        "recovered": {
+          "delivery_id": "c0fe9f55-bf02-4dc1-91ff-075279d46453",
+          "digest": "3e7060137eed9d5c8743dc8d2651f80ff4bcec05bf6825a0e661537642eb25ff",
+          "native_id": "01a21957-c75f-72a2-9b8c-158d5535ac9c",
+          "session": "01a21957-c57c-7983-ad89-374d75d331de",
+          "turn_id": "01a21957-c72f-7db0-99a0-8b918d44fc9d"
+        },
+        "router_state": "working",
+        "task_id": "15fa3699-e6b0-4a79-98d7-6abed5432a30",
+        "thread_id": "01a21957-c57c-7983-ad89-374d75d331de"
+      },
+      "test": "test_native_app_server_reconnect_recovers_input_before_w04_without_new_model_call"
+    },
+    {
+      "evidence": {
+        "boundary": "Isolated Router and native App Server, scripted model. No cleanup success inferred.",
+        "cases": [
+          {
+            "assignment_id": "47cf9069-e854-470b-aebc-7583c1a32cdf",
+            "cleanup_pending": true,
+            "control_receipt": {
+              "delivery_id": "5292bee5-cd24-486c-9d2c-448f4215b113",
+              "digest": "97fd1875466602df34b6966df499aa212b3c266300f8758a25a4386781f805c0",
+              "native_id": "01a21957-cb14-7112-a58c-c1e6eb09665f",
+              "session": "01a21957-c8d1-76c0-a8cd-5c8e8bf82cc1",
+              "turn_id": "01a21957-cb06-75b3-bbd7-ad65a1977e8a"
+            },
+            "native_statuses": [
+              "interrupted",
+              "completed"
+            ],
+            "original": {
+              "delivery_id": "1a3c3cc6-8307-48e7-9c0a-38e4d43847a7",
+              "digest": "790fec63d20b7f6d639ff20e90b4e46c18e05b137198e244ce98e54f4e8cbe6a",
+              "native_id": "01a21957-caa1-7641-a5f0-bda7830d87aa",
+              "session": "01a21957-c8d1-76c0-a8cd-5c8e8bf82cc1",
+              "turn_id": "01a21957-ca72-7742-8b80-9ad996930503"
+            },
+            "task_id": "b1b10d79-8fe7-4be6-95b5-6b217d21d7ba",
+            "unrelated": null,
+            "unrelated_preserved_at_cancel": false
+          },
+          {
+            "assignment_id": "9261fa69-1b09-4074-a52f-67c776a44222",
+            "cleanup_pending": true,
+            "control_receipt": {
+              "delivery_id": "c80a1afd-53cf-4b51-9373-a40a2135265e",
+              "digest": "573f48090a49e112a1aa679db6ab7d4f9012cc94b2445522ecd9260c7befcf4a",
+              "native_id": "01a21957-cdf5-7ba3-8aae-cc7471a95f5c",
+              "session": "01a21957-cb7a-7c93-b1cf-bd91b6cccb2f",
+              "turn_id": "01a21957-cde9-70d1-9f98-b19d5a0e0162"
+            },
+            "native_statuses": [
+              "interrupted",
+              "interrupted",
+              "completed"
+            ],
+            "original": {
+              "delivery_id": "186b265d-8856-4862-8fbd-2c754f1d2075",
+              "digest": "beee95945e1cf36142a8b2c155e82016aba390899c1d00b2b6b6908d232876b3",
+              "native_id": "01a21957-cd1e-7041-a62f-0273460d7e33",
+              "session": "01a21957-cb7a-7c93-b1cf-bd91b6cccb2f",
+              "turn_id": "01a21957-ccf9-79a2-a978-69b3974d9a44"
+            },
+            "task_id": "b1146f60-58a0-4e03-b1f0-70bac462043c",
+            "unrelated": {
+              "delivery_id": "90b49925-bcb5-4f0c-a459-9c94e51caaba",
+              "digest": "9dc978fce48c03f2e7629ea0e2119746fe1154be1c34ebb7200768175ea3dbd1",
+              "native_id": "01a21957-cd6c-7852-83e8-facb41e01291",
+              "session": "01a21957-cb7a-7c93-b1cf-bd91b6cccb2f",
+              "turn_id": "01a21957-cd5e-7cb0-834e-68fb6ea27983"
+            },
+            "unrelated_preserved_at_cancel": true
+          }
+        ]
+      },
+      "test": "test_router_cancel_interrupts_bound_app_server_turn_and_preserves_unrelated_turn"
+    },
+    {
+      "evidence": {
+        "boundary": "Installed App Server, native cancellation and tool callback on a private test profile; model and replacement worker host are fixtures.",
+        "cases": [
+          {
+            "action": "cancel",
+            "assignment_id": "a3fe1511-4aa5-4b77-9a2c-d7d21cc3db96",
+            "cli_version": "0.171.0-alpha.13.2",
+            "control_retried_after_stop_unconfirmed": true,
+            "control_turn_id": "01a21957-d387-7a53-907a-d84d83938445",
+            "final_cleanup": [],
+            "final_task": {
+              "assignee_id": "oguri",
+              "assignment_id": null,
+              "holder": {
+                "kind": "router"
+              },
+              "instructions": "Wait for the original assignment control",
+              "revision": 5,
+              "state": "cancelled",
+              "task_id": "4ff30b76-489f-45d7-9648-5ef9d588b316",
+              "title": "Scoped native cleanup"
+            },
+            "first_reply": "native_cleanup_waiting",
+            "lost_original_receipt_recovered": true,
+            "native_input_ids": [
+              "01a21957-d29f-7dd0-aa7e-c605f2ca0996",
+              "01a21957-d398-72a2-b6b1-ae9006b57f0e"
+            ],
+            "native_turn_policies": {
+              "01a21957-d270-75c3-b7a2-3407a48e0010": {
+                "approvals": "never",
+                "sandbox": "read-only"
+              },
+              "01a21957-d387-7a53-907a-d84d83938445": {
+                "approvals": "never",
+                "sandbox": "read-only"
+              }
+            },
+            "original": {
+              "delivery_id": "37c14f5e-2141-40c2-a3f3-3d167d81e0dc",
+              "digest": "7337637fbbeff373f72f287e8f86ab8e1a396beee8e7b60d030e19884d785012",
+              "native_id": "01a21957-d29f-7dd0-aa7e-c605f2ca0996",
+              "session": "01a21957-cf39-7083-a52a-55890babb4df",
+              "turn_id": "01a21957-d270-75c3-b7a2-3407a48e0010"
+            },
+            "shell_present_in_native_tool_table": false,
+            "sqlite_wait_reopened": true,
+            "task_id": "4ff30b76-489f-45d7-9648-5ef9d588b316",
+            "w04": {
+              "recorded": true,
+              "release_assignment_id": "a3fe1511-4aa5-4b77-9a2c-d7d21cc3db96",
+              "task_state": "cancelled"
+            },
+            "worker_proof": {
+              "assignment_id": "a3fe1511-4aa5-4b77-9a2c-d7d21cc3db96",
+              "cleaned": true,
+              "control_turn_id": "01a21957-d387-7a53-907a-d84d83938445",
+              "kind": "task.cancel",
+              "receipt_id": "fee3fbf2949838c51cc36048f3ab07997f102c0f8efb176629b01f6b1d9c0411",
+              "scope": "codex_read_only",
+              "session": "01a21957-cf39-7083-a52a-55890babb4df",
+              "stopped": true,
+              "stopped_turns": [
+                {
+                  "status": "interrupted",
+                  "turn_id": "01a21957-d270-75c3-b7a2-3407a48e0010"
+                }
+              ],
+              "withdrawn_inputs": []
+            }
+          },
+          {
+            "action": "transfer",
+            "assignment_id": "b6ac424b-8c46-472e-8963-2538bd82a1f0",
+            "cli_version": "0.171.0-alpha.13.2",
+            "control_retried_after_stop_unconfirmed": false,
+            "control_turn_id": "01a21957-db2f-7992-905e-d9e73e731b51",
+            "final_cleanup": [],
+            "final_task": {
+              "assignee_id": "tama",
+              "assignment_id": "239b6120-f330-41a2-979d-b359b23dbdd6",
+              "holder": {
+                "kind": "worker",
+                "worker_id": "tama"
+              },
+              "instructions": "Wait for the original assignment control",
+              "revision": 6,
+              "state": "working",
+              "task_id": "480fce55-c0ee-432b-8462-2e087cc656e6",
+              "title": "Scoped native cleanup"
+            },
+            "first_reply": "native_cleanup_waiting",
+            "lost_original_receipt_recovered": false,
+            "native_input_ids": [
+              "01a21957-da75-73f0-8698-72ed4ce8a85f",
+              "01a21957-db40-7d10-b7a5-b089ea348a43"
+            ],
+            "native_turn_policies": {
+              "01a21957-da49-7792-9af7-fccc9fa1a7bb": {
+                "approvals": "never",
+                "sandbox": "read-only"
+              },
+              "01a21957-db2f-7992-905e-d9e73e731b51": {
+                "approvals": "never",
+                "sandbox": "read-only"
+              }
+            },
+            "original": {
+              "delivery_id": "aa5c9232-39ed-47e9-8eeb-d8bfab16056f",
+              "digest": "88a80447424ab3bdb5d0031fc0b1e50c3c2830cd1b028f003ee1dc31a4e8376e",
+              "native_id": "01a21957-da75-73f0-8698-72ed4ce8a85f",
+              "session": "01a21957-d6fe-7af3-8fa9-74059b077d4b",
+              "turn_id": "01a21957-da49-7792-9af7-fccc9fa1a7bb"
+            },
+            "shell_present_in_native_tool_table": false,
+            "sqlite_wait_reopened": false,
+            "task_id": "480fce55-c0ee-432b-8462-2e087cc656e6",
+            "w04": {
+              "recorded": true,
+              "release_assignment_id": "b6ac424b-8c46-472e-8963-2538bd82a1f0",
+              "task_state": "working"
+            },
+            "worker_proof": {
+              "assignment_id": "b6ac424b-8c46-472e-8963-2538bd82a1f0",
+              "cleaned": true,
+              "control_turn_id": "01a21957-db2f-7992-905e-d9e73e731b51",
+              "kind": "task.transfer_out",
+              "receipt_id": "3b3ebf1950d82492a31226f0639d8e6720d61ab24e6707f1c59b6d3819ffd042",
+              "scope": "codex_read_only",
+              "session": "01a21957-d6fe-7af3-8fa9-74059b077d4b",
+              "stopped": true,
+              "stopped_turns": [
+                {
+                  "status": "interrupted",
+                  "turn_id": "01a21957-da49-7792-9af7-fccc9fa1a7bb"
+                }
+              ],
+              "withdrawn_inputs": []
+            }
+          }
+        ],
+        "recorded_utc": "2026-11-26T19:31:58Z"
+      },
+      "test": "test_windows_native_readonly_assignment_cleanup_cancel_and_transfer"
+    }
+  ],
+  "worker_pair_rollback": {
+    "host": "isolated fixture",
+    "message_id": "e78d843c-d50a-493c-8d85-c41536f39dc3",
+    "native_inputs": {
+      "before": 1,
+      "rollback": 1,
+      "trial": 1
+    },
+    "native_receipt": {
+      "delivery_id": "chat-e78d843c-d50a-493c-8d85-c41536f39dc3",
+      "digest": "960da84a6316f0e2f5b8ba05c5954208ae31ed0b9d813830b1ec9aa751e23dba",
+      "native_id": "ab2d9109-ddb1-4c1d-969d-7e5bbb94f443",
+      "session": "test-upgrade-session",
+      "turn_id": "e841ea1a-967c-430b-8c1d-2029a3778a93"
+    },
+    "network": "isolated HTTPS loopback",
+    "new_revision": "6e517f865ab987bb7b710de0b8e21b7750ce27ce",
+    "original_snapshot_unchanged": true,
+    "package_sha256": [
+      "313505734940b770afc0bd2659e50cdecdbe36457f0edc1ac766671072af89ab",
+      "470183fbd3fe6fa4901e43e7dd7a832a85688ce3c24ff36628f1ede651c7a180"
+    ],
+    "previous_revision": "307a8a119c6a97ea2cb816280227afb3295e5675",
+    "starts": [
+      "previous pair",
+      "new adapter with previous Worker",
+      "new pair",
+      "previous pair restored"
+    ],
+    "upgraded_worker_persisted_receipt": true
+  },
+  "router_rollback": {
+    "after_rollback_count": 1,
+    "after_upgrade": "ready",
+    "network": "isolated HTTPS loopback",
+    "new_revision": "6e517f865ab987bb7b710de0b8e21b7750ce27ce",
+    "package_sha256": [
+      "313505734940b770afc0bd2659e50cdecdbe36457f0edc1ac766671072af89ab",
+      "470183fbd3fe6fa4901e43e7dd7a832a85688ce3c24ff36628f1ede651c7a180"
+    ],
+    "previous_revision": "307a8a119c6a97ea2cb816280227afb3295e5675",
+    "starts": [
+      "previous",
+      "new",
+      "previous"
+    ],
+    "task_id": "9d4ff68d-c5a9-4709-9e23-bacbf0fdba0c",
+    "unchanged_trial": true
+  }
+}

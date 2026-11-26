@@ -4,6 +4,10 @@
 
 ## 检查点与证据
 
+Windows Server 2025 已跑真实 Codex App Server。以 `6e517f865ab987bb7b710de0b8e21b7750ce27ce` 构建的 262 文件安装包，测试前后摘要均为 `470183fbd3fe6fa4901e43e7dd7a832a85688ce3c24ff36628f1ede651c7a180`。Windows 专项 10 项及 Router、Worker 两套回退通过。独立适配器从指定会话收到原生工具调用并交 W04，两次调用只记一条成果通知，工单保持待验收。原生收件丢失后从同一 profile 查回，一条输入、一次本地模型请求。只读工位取消和转派先停原回合，等控制回合终止再交回原派发，转派继续由新工位持有。另核无证明时保留待清理并拒绝代交。Windows profile ACL、重复写者和适配器退出后的进程清理均实测。模型、飞书和接替工位使用夹具，Windows Desktop、线上 W04 和真实飞书待验。[实测](evidence/windows-codex-native.json) · [复跑](desktop-check.md#windows-独立-app-server)
+
+macOS 在运行时实现提交 `2a1f515e495f4f213ddf984129f1d6649614ee69` 全量 287 项通过、3 项按环境跳过。增加 Windows 只读验收用例后，macOS 再跑原生成果和只读清理两项通过。Linux arm64 在 `6e517f865ab987bb7b710de0b8e21b7750ce27ce` 全量 187 项通过、104 项按环境跳过。
+
 Windows Server 2025 在隔离 GitHub runner 从指定提交安装并逐文件回读 260 文件。测试库使用含中文和空格的路径。四项专项覆盖第二写者被拒、冷重启保留身份及附件、三个真实 HTTPS 进程走 W03/W04 并只通知一次，以及普通用户有读取权限的配置被拒绝。测试 OpenSSL 从原目录以相对文件名生成证书，避免 Windows OpenSSL 命令行误读中文路径。
 
 同一 Windows 运行从旧版 `307a8a119c6a97ea2cb816280227afb3295e5675` 升级到 `ab5cb6561c259251a67989ddaba5beea01433ded` 再回退。Router 恢复同一张队首工单。Worker 与适配器各组合取回同一个私聊收件，每阶段仅一条原生收件记录。旧库摘要保持一致。已验版本包 SHA-256 为 `88fb2a28a5717f1314d3d18f283ba9d9ee4ef5887bcbc8769eddeeb0de81d733`。宿主和模型为夹具，Windows Codex Desktop、DSH 原生启动与真实飞书仍待验。[Windows 实测](evidence/windows-release-rollback.json) · [复跑](README.md#windows-安装与回退)

@@ -72,6 +72,14 @@ App Server 指定回合的文字投影复用原 Worker 的飞书卡片。独立�
 
 独立 App Server 的图文与纯图使用原生 `localImage`。飞书夹具按原消息上传，适配器先核私有缓存的长度与摘要，再递交到固定会话。同条原文和图实际出现在模型请求，原生 App Server 添加的图片元数据单独核对。丢回执后按原客户端标识查回原生输入，两次试验输入分别只出现一条。重复 12 轮通过。[图片试验记录](evidence/codex-app-server-native-media.json)。目前只接已登记图像，模型、飞书为夹具。
 
+## Windows 独立 App Server
+
+Windows Server 2025 从 OpenAI 发布的 `0.171.0-alpha.13.2` 原生包启动 App Server。验收使用临时 profile、本地脚本模型和独立 Router、Worker。安装包在测试前后逐文件一致。一个原生输入产生两次 `worker_report` 调用，Router 只记一次成果和通知，状态为待验收。重开后按原投递号查回输入，原生会话未多执行。只读工位的取消和转派须等控制回合终止再交 W04。转派释放旧派发并保留新工位持权。另用无清理证据和非目标回合验证拒绝与保留。[Windows 原生证据](evidence/windows-codex-native.json) · [官方原生包](https://github.com/openai/codex/releases/expanded_assets/rust-v0.171.0-alpha.13.2)
+
+Windows 适配器先核专用 profile 目录 ACL，在原生协议初始化前把该进程登记到独占 Job Object。用独立辅助进程验证适配器退出时，被登记的宿主及子进程一同停止。无需调整系统权限或共享客户端配置。[Windows Job Object](https://learn.microsoft.com/windows/win32/procthread/job-objects)
+
+本地复跑使用受保护的测试临时目录，将 `MOWULINK_TEST_CODEX_BINARY` 指向已校验的 Windows 包中 `bin\codex.exe` 的绝对路径。完整命令在 [Windows 测试入口](../.github/workflows/rewrite-windows.yml)。此回归覆盖独立 App Server。Windows Desktop 插件入口、线上模型、真实飞书及 Windows 容器工作区另验。
+
 ## 隔离可写工位
 
 单独准备获准的测试 profile、工作目录和属主独占的短路径运行目录。用 `codex-provision --tool worker_report --tool worker_workspace_shell --tool worker_workspace_export` 登记工具，将返回的固定会话交给 `codex-adapter --assignment-workspace /绝对路径/workspace.json`。JSON 文件权限为 600，填写 `runtime`、`node`、`docker`、`socket` 的绝对路径和已审核的本地 `image` 完整镜像 ID。可选的 `seed` 与 `execute_workspace_files` 沿用 [DSH 工位的容器配置](README.md#dsh-固定会话与飞书卡片)。此模式与 `--read-only-assignments`、审批转接互斥。App Server 本身保持只读，工作区位于原派发专用的无网络 Linux 容器。
