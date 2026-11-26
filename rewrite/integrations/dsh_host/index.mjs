@@ -105,8 +105,12 @@ export async function bindHost(ctx, session, directory) {
       if (seen || request.operation === 'lookup') return {receipt:seen};
       // Only the adapter which first persisted its write intent can request delivery.
       await bound();
-      agent.followup(expected);
-      return {receipt:receipt(request,expected,await persisted(ctx,agent))};
+      try {
+        agent.followup(expected);
+        return {receipt:receipt(request,expected,await persisted(ctx,agent))};
+      } catch (cause) {
+        throw new Error('native_write_unconfirmed',{cause});
+      }
     },
     async tool(name, args, exec, notify) {
       await bound();
@@ -178,7 +182,9 @@ export async function apply(ctx, {session, directory}) {
       res.writeHead(200,{'Content-Type':'application/json'}).end(JSON.stringify(result));
     } catch (error) {
       const code = /^[a-z_]{1,80}$/.test(error.message) ? error.message : 'dsh_host_unconfirmed';
-      res.writeHead(409,{'Content-Type':'application/json'}).end(JSON.stringify({error:code}));
+      const transient = ['native_write_unconfirmed','native_agent_unavailable','native_persistence_unavailable',
+                         'dsh_host_unconfirmed'].includes(code);
+      res.writeHead(transient ? 503 : 409,{'Content-Type':'application/json'}).end(JSON.stringify({error:code}));
     }
   });
   server.requestTimeout = 10000;

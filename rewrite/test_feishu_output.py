@@ -26,6 +26,9 @@ class PlatformFixture:
     def create(self, chat, body, key):
         return self.send(chat,"interactive",body,key)
 
+    def reply(self, chat, mid, topic, body, key):
+        return self.send(mid,"reply",{"parent":mid,"card":body},key)
+
     def patch(self, mid, body):
         record, = [r for r in self.messages.values() if r[0]==mid]
         record[2] = body
@@ -57,6 +60,66 @@ class PlatformOutput(PlatformCase):
                                       "sha256":hashlib.sha256(PNG).hexdigest()},"fixture-image")
         done = self.adapter.request("PATCH","worker/media/uploads/"+status["upload_id"],PNG,headers={"Upload-Offset":"0"})
         return done["attachment_id"]
+
+    def test_rejection_replies_once_to_the_trainer_input(self):
+        self.assertIsNone(self.record("om_bot","sticker",{},sender_type="app"))
+        mid = self.record("om_bad","sticker",{})
+        with self.assertRaises(Fault):
+            self.inbound.deliver(mid)
+        self.views.input_notices(self.inbound)
+        with self.assertRaises(Fault):
+            self.inbound.deliver(mid)
+        self.reopen().input_notices(self.inbound)
+        (acked,kind,body), = list(self.sink.messages.values())
+        self.assertEqual((kind,body["parent"]),("reply",mid))
+        self.assertIn("暂时无法读取",body["card"]["elements"][0]["text"]["content"])
+        with self.inbound.db.transaction() as db:
+            self.assertEqual(tuple(db.execute("SELECT platform_mid,outcome FROM input_notices").fetchone()),(acked,"sent"))
+        self.assertEqual(len(self.sink.calls),1)
+        self.assertFalse(self.loop.native.entries())
+
+    def test_lost_host_and_platform_receipts_recover_in_order(self):
+        mid = self.record("om_lost","text",{"text":"private content"})
+        original = self.platform.request
+        def lose(*args):
+            original(*args)
+            raise ConnectionError("private transport text")
+        self.platform.request = lose
+        with self.assertRaises(ConnectionError):
+            self.inbound.deliver(mid)
+        self.sink.lose_next = True
+        with self.assertLogs(level="WARNING"):
+            self.views.input_notices(self.inbound)
+        self.platform.request = original
+        self.inbound.deliver(mid)
+        self.clock.advance(6)
+        self.reopen().input_notices(self.inbound)
+        self.views.input_notices(self.inbound)
+        rows = [r[2] for r in self.sink.messages.values()]
+        self.assertEqual([row["parent"] for row in rows],[mid,mid])
+        texts = [row["card"]["elements"][0]["text"]["content"] for row in rows]
+        self.assertIn("正在核对",texts[0])
+        self.assertIn("已确认原会话收到",texts[1])
+        self.assertNotIn("private",str(rows))
+        self.assertEqual(len(self.loop.native.entries()),1)
+        self.assertEqual(len(self.sink.calls),3)
+
+    def test_expired_notice_does_not_block_another_message_or_resend(self):
+        mid = self.record("om_before","sticker",{})
+        with self.assertRaises(Fault):
+            self.inbound.deliver(mid)
+        self.sink.lose_next = True
+        with self.assertLogs(level="WARNING"):
+            self.views.input_notices(self.inbound)
+        self.clock.advance(3600)
+        later = self.record("om_after","sticker",{})
+        with self.assertRaises(Fault):
+            self.inbound.deliver(later)
+        self.reopen().input_notices(self.inbound)
+        with self.inbound.db.transaction() as db:
+            self.assertEqual([tuple(r) for r in db.execute("SELECT mid,outcome FROM input_notices ORDER BY seq")],
+                             [(mid,"receipt_unknown"),(later,"sent")])
+        self.assertEqual(len(self.sink.calls),2)
 
     def test_tools_final_and_segments_straddling_an_image(self):
         self.event("1","native_input",text="Look at the picture")

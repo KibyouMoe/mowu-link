@@ -48,7 +48,7 @@ class DshHost:
             result = json.loads(raw)
             require(isinstance(result,dict),502,"invalid_host_observation")
             if response.status != 200:
-                raise Fault(409,result.get("error","dsh_host_unconfirmed"))
+                raise Fault(response.status,result.get("error","dsh_host_unconfirmed"),response.status>=500)
             return result
         except (HTTPException,OSError,ValueError):
             raise Fault(503,"adapter_connection_unconfirmed",True) from None

@@ -1,12 +1,14 @@
 """One durable Feishu projection of public Worker events. Never derives work completion."""
 import hashlib
 import io
+import json
+import logging
 import time
 from uuid import NAMESPACE_URL, uuid5
 
 from .feishu_inbound import image_format
 from . import question_cards
-from .storage import Database, encode, require
+from .storage import Database, Fault, encode, require
 
 
 def card(title, text, session):
@@ -39,6 +41,37 @@ class Views:
         for row in rows:
             self.deliver(row["seq"],row["event"])
         return len(rows)
+
+    def input_notices(self, inbound):
+        require(inbound.binding[2]==self.chat,409,"view_chat_mismatch")
+        with inbound.db.transaction() as db:
+            rows = db.execute("""SELECT seq FROM input_notices n WHERE outcome='pending' AND retry<=?
+                AND NOT EXISTS(SELECT 1 FROM input_notices prev WHERE prev.mid=n.mid AND prev.seq<n.seq
+                               AND prev.outcome='pending') ORDER BY seq LIMIT 32""",(self.clock(),)).fetchall()
+        for row in rows:
+            seq = row["seq"]
+            with inbound.db.transaction() as db:
+                notice = db.execute("SELECT * FROM input_notices WHERE seq=? AND outcome='pending'",(seq,)).fetchone()
+                if not notice or notice["retry"]>self.clock():
+                    continue
+                now = self.clock()
+                if notice["first_try"] is not None and not 0<=now-notice["first_try"]<55*60:
+                    db.execute("UPDATE input_notices SET outcome='receipt_unknown' WHERE seq=?",(seq,))
+                    continue
+                body = notice["card"] or encode(card(self.name+"-输出",notice["text"],""))
+                topic = db.execute("SELECT root FROM input_topics WHERE mid=?",(notice["mid"],)).fetchone()
+                # Commit the immutable send intent before the platform can receive anything.
+                db.execute("""UPDATE input_notices SET first_try=COALESCE(first_try,?),card=?,retry=?
+                              WHERE seq=?""",(now,body,now+5,seq))
+            key = str(uuid5(NAMESPACE_URL,encode(["mowulink-input-notice",*inbound.binding,notice["mid"],notice["stage"]])))
+            try:
+                mid = self.platform.reply(self.chat,notice["mid"],topic[0] if topic else None,json.loads(body),key)
+                require(isinstance(mid,str) and mid.startswith("om_"),502,"unconfirmed_platform_message")
+            except (Fault,OSError) as error:
+                logging.warning("Feishu input notice %s: %s",seq,error.code if isinstance(error,Fault) else "connection_unconfirmed")
+                continue
+            with inbound.db.transaction() as db:
+                db.execute("UPDATE input_notices SET outcome='sent',platform_mid=? WHERE seq=?",(mid,seq))
 
     def deliver(self, seq, event):
         key = str(uuid5(NAMESPACE_URL,encode(["mowulink-feishu",self.chat,event["event_id"]])))
@@ -121,6 +154,17 @@ class SDKMessages:
 
     def create(self,chat,card,key):
         return self.send(chat,"interactive",card,key)
+
+    def reply(self,chat,mid,topic,body,key):
+        from lark_oapi.api.im.v1 import ReplyMessageRequest, ReplyMessageRequestBody
+        payload = ReplyMessageRequestBody.builder().msg_type("interactive").content(encode(body)).uuid(key).build()
+        req = ReplyMessageRequest.builder().message_id(mid).request_body(payload).build()
+        response = self.client.im.v1.message.reply(req)
+        data = response.data
+        require(response.success() and data and data.chat_id==chat and data.message_id
+                and (data.parent_id==mid or (topic and data.thread_id and data.parent_id==data.root_id==topic)),
+                503,"feishu_reply_unconfirmed")
+        return response.data.message_id
 
     def patch(self,mid,card):
         from lark_oapi.api.im.v1 import PatchMessageRequest, PatchMessageRequestBody

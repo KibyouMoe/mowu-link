@@ -113,6 +113,18 @@ class DshSdk(unittest.TestCase):
     def call(self, name, call_id, args, append=True):
         return self.drive("tool",name=name,call_id=call_id,args=args,append=append)["result"]
 
+    def test_native_input_written_before_failure_recovers_from_the_same_record(self):
+        self.drive("lose-admission")
+        mid = self.inbound.record("app","user","trainer",{"chat_type":"p2p","chat_id":"chat","message_id":"om_lost",
+                                  "message_type":"text","content":encode({"text":"核对回执"})})
+        with self.assertRaisesRegex(Fault,"native_write_unconfirmed") as lost:
+            self.inbound.deliver(mid)
+        self.assertEqual(lost.exception.status,503)
+        receipt = self.inbound.deliver(mid)
+        self.assertEqual((receipt["session"],receipt["delivery_id"]),(self.session,"chat-"+mid))
+        self.assertEqual(self.drive("count")["received"],1)
+        self.assertFalse(self.loop.worker.hold()["held_task_id"])
+
     def test_next_turn_queue_recovers_receipt_without_steering_or_replaying(self):
         self.drive("manual")
         self.service.step()

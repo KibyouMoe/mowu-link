@@ -15,7 +15,8 @@ from .storage import Fault
 def receive(inbound, event):
     sender, message = event.event.sender,event.event.message
     return inbound.record(event.header.app_id,sender.sender_type,sender.sender_id.open_id,
-                          {k:getattr(message,k) for k in ("chat_id","chat_type","message_id","message_type","content")})
+                          {k:getattr(message,k,None) for k in ("chat_id","chat_type","message_id","message_type",
+                                                                "content","thread_id","root_id")})
 
 
 def card_action(actions, callback):
@@ -40,6 +41,8 @@ class SDKResources:
         request = GetMessageResourceRequest.builder().message_id(mid).file_key(key).type(kind).build()
         response = self.client.im.v1.message_resource.get(request)
         if not response.success() or not response.file:
+            if getattr(response.raw,"status_code",None) in (403,404,410):
+                raise Fault(422,"feishu_resource_unavailable")
             raise Fault(503,"feishu_resource_unconfirmed",True)
         with response.file as stream:
             return stream.read(limit+1)
@@ -68,11 +71,11 @@ def main():
                     inbound.deliver(mid)
                 except (Fault,URLError,OSError) as error:
                     logging.warning("Feishu event %s: %s",mid,error.code if isinstance(error,Fault) else "connection_unconfirmed")
-            try:
-                actions.flush()
-                views.poll()
-            except (Fault,URLError,OSError) as error:
-                logging.warning("Feishu output: %s",error.code if isinstance(error,Fault) else "connection_unconfirmed")
+            for publish in (lambda:views.input_notices(inbound),actions.flush,views.poll):
+                try:
+                    publish()
+                except (Fault,URLError,OSError) as error:
+                    logging.warning("Feishu output: %s",error.code if isinstance(error,Fault) else "connection_unconfirmed")
             stopped.wait(0.5)
     thread = Thread(target=process,daemon=True)
     thread.start()

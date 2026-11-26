@@ -79,8 +79,12 @@ class Inbound:
             CREATE TABLE IF NOT EXISTS binding(slot INTEGER PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS platform_events(mid TEXT PRIMARY KEY,body TEXT NOT NULL,
                 state TEXT NOT NULL, retry REAL NOT NULL DEFAULT 0,error TEXT,receipt TEXT);
+            CREATE TABLE IF NOT EXISTS input_topics(mid TEXT PRIMARY KEY, root TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS resources(mid TEXT NOT NULL,rkey TEXT NOT NULL, bytes BLOB NOT NULL,
                 name TEXT NOT NULL, sha TEXT NOT NULL,PRIMARY KEY(mid,rkey));
+            CREATE TABLE IF NOT EXISTS input_notices(seq INTEGER PRIMARY KEY, mid TEXT NOT NULL,
+                stage TEXT NOT NULL,text TEXT NOT NULL,first_try REAL,card TEXT,retry REAL NOT NULL DEFAULT 0,
+                outcome TEXT NOT NULL DEFAULT 'pending',platform_mid TEXT,UNIQUE(mid,stage));
         """)
         with self.db.transaction() as db:
             db.execute("INSERT OR IGNORE INTO binding VALUES (1,?)",(encode(self.binding),))
@@ -96,6 +100,12 @@ class Inbound:
             db.execute("INSERT OR IGNORE INTO platform_events(mid,body,state) VALUES (?,?,'pending')",(mid,body))
             require(db.execute("SELECT body FROM platform_events WHERE mid=?",(mid,)).fetchone()[0] == body,
                     409,"platform_message_conflict")
+            root = message.get("root_id")
+            if message.get("thread_id") and root:
+                require(isinstance(root,str) and re.fullmatch(r"om_[A-Za-z0-9_-]+",root),422,"invalid_thread_root")
+                db.execute("INSERT OR IGNORE INTO input_topics VALUES(?,?)",(mid,root))
+                require(db.execute("SELECT root FROM input_topics WHERE mid=?",(mid,)).fetchone()[0]==root,
+                        409,"platform_topic_conflict")
         return mid
 
     def upload(self, mid, ref):
@@ -133,6 +143,7 @@ class Inbound:
         require(row,404,"platform_event_missing")
         if row["receipt"]:
             return json.loads(row["receipt"])
+        require(row["state"]!="rejected",409,row["error"] or "input_rejected")
         body = json.loads(row["body"])
         try:
             try:
@@ -161,16 +172,41 @@ class Inbound:
                         503,"host_receipt_unconfirmed")
         except (Fault,URLError,OSError) as err:
             terminal = isinstance(err,Fault) and 400 <= err.status < 500 and err.status != 429
+            code = err.code if isinstance(err,Fault) else "connection_unconfirmed"
             with self.db.transaction() as db:
-                db.execute("UPDATE platform_events SET state=?,retry=?,error=? WHERE mid=? AND receipt IS NULL",
-                           ("rejected" if terminal else "pending",self.clock()+5,
-                            err.code if isinstance(err,Fault) else "connection_unconfirmed",mid))
+                changed = db.execute("""UPDATE platform_events SET state=?,retry=?,error=? WHERE mid=?
+                                      AND receipt IS NULL AND state='pending'""",
+                                     ("rejected" if terminal else "pending",self.clock()+5,code,mid)).rowcount
+                if changed:
+                    if terminal:
+                        db.execute("DELETE FROM input_notices WHERE mid=? AND stage='unknown' AND first_try IS NULL",(mid,))
+                    stage = "failed" if terminal else "unknown"
+                    db.execute("INSERT OR IGNORE INTO input_notices(mid,stage,text) VALUES(?,?,?)",
+                               (mid,stage,notice_text(code,terminal)))
             raise
         with self.db.transaction() as db:
             db.execute("UPDATE platform_events SET state='received',receipt=?,error=NULL WHERE mid=?",(encode(receipt),mid))
+            db.execute("DELETE FROM input_notices WHERE mid=? AND first_try IS NULL",(mid,))
+            if db.execute("SELECT 1 FROM input_notices WHERE mid=?",(mid,)).fetchone():
+                text = "已查到这条指令的处理回执。" if "output" in receipt else "已确认原会话收到这条消息。"
+                db.execute("INSERT OR IGNORE INTO input_notices(mid,stage,text) VALUES(?,'confirmed',?)",(mid,text))
         return receipt
 
     def pending(self):
         with self.db.transaction() as db:
             return [r[0] for r in db.execute("SELECT mid FROM platform_events WHERE state='pending' AND retry<=? ORDER BY rowid",
                                              (self.clock(),))]
+
+
+def notice_text(code,terminal):
+    if not terminal:
+        return "正在核对这条消息的处理回执，请保留原消息，无需重发。"
+    if code in {"unsupported_feishu_message","unsupported_post_element","invalid_post","bad_feishu_content"}:
+        return "暂时无法读取这条消息的格式。可以发纯文字、图片或文件。"
+    if code in {"model_does_not_support_images","native_media_input_unavailable"}:
+        return "当前会话无法接收这类附件。可以单独发送文字。"
+    if code in {"unsupported_image_format","invalid_image_format","dsh_invalid_image"}:
+        return "图片无法读取。请重新导出后发送。"
+    if code=="feishu_resource_unavailable":
+        return "飞书未提供这条消息的附件。请检查原文件及应用的读取权限。"
+    return "未能确认这条消息的处理结果，已停止自动重试。"

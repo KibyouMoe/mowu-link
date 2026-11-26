@@ -38,6 +38,8 @@ python3 -m unittest -v rewrite.test_mainline
 
 ### DSH 固定会话与飞书卡片
 
+绑定的训练员私聊发生格式、附件或收件问题时，平台进程在原消息下回复状态卡。平台已尝试而回执丢失时，沿用原 UUID 和卡片正文，首次尝试满 55 分钟后标记 `receipt_unknown`，继续处理其他消息。等待中已查实且尚未发送的提示自动撤销。若已提示待核，查到宿主凭据后再发一条恢复确认。消息的受理状态在 `platform_events`，平台回复的状态和消息号在 `input_notices`。[飞书回复消息接口](https://open.feishu.cn/document/server-docs/im-v1/message/reply.md)
+
 在独立 DSH 测试配置加载 `integrations/dsh_host/index.mjs`，指定测试会话的 `session` 和仅当前用户可读写的绝对目录 `directory`。单独启动 `python3 -m rewrite.service dsh-adapter --help` 所示的适配器，将 `--session`、`--runtime-dir` 分别指向同一会话和目录。收图需宿主提供 `attachments` 服务；`--worker-connection` 指向适配器访问专用 Worker 的连接配置。固定会话插件中仅登记 Agent 业务工具，本体负责发送飞书卡片。
 
 图文在同一次输入进入 DSH，宿主保留规范化图片和普通文件引用。适配器从 DSH 已持久写入的公开会话事件生成原生输入、过程输出、工具、图片与最终答复。工具预览仅包含可判明的命令动词。首次绑定以插件接入时的位置为起点；续跑通过原会话、位置和上一条记录摘要核对。在中断的回合中，已有回复草稿按过程输出显示。复跑 `python3 -m unittest -v rewrite.test_dsh_sdk`，该套件使用本机 DSH SDK、临时工位及测试驱动，模型和飞书云端另验。

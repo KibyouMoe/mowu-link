@@ -30,6 +30,7 @@ const session = ctx.get('sessions').create(id,{meta:header});
 let number = 0;
 let step = 1;
 let received = 0;
+let loseAdmission = false;
 let lastMessage, selectedModel;
 const agent = {session,status:'idle',model:{current:()=>selectedModel},followup(message) {
   lastMessage = message;
@@ -41,6 +42,10 @@ const agent = {session,status:'idle',model:{current:()=>selectedModel},followup(
     session.append('step/start',{turn:number,step});
   }
   session.append('user/message',message,{surfaceOp:'append'});
+  if (loseAdmission) {
+    loseAdmission = false;
+    throw new Error('fixture_ack_lost');
+  }
 }};
 const scope = createScope(ctx,agent);
 agent.ctx = scope.ctx;
@@ -66,7 +71,9 @@ try {
     try {
       const cmd = JSON.parse(line);
       if (cmd.action === 'exit') break;
-      if (cmd.action === 'end') {
+      if (cmd.action === 'lose-admission') {
+        loseAdmission = true;
+      } else if (cmd.action === 'end') {
         session.append('step/end',{turn:number,step});
         session.append('turn/end',{turn:number,reason:cmd.aborted ? {kind:'aborted',reason:{kind:'user'}} : {kind:'completed'}});
         agent.status = 'idle';
