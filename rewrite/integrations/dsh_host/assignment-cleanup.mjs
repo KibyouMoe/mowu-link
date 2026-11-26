@@ -108,18 +108,19 @@ function canceledInputs(events,wanted) {
   return removed;
 }
 
-export function readOnlyCleanup(ctx,agent,runtimeDir) {
+export function assignmentCleanup(ctx,agent,runtimeDir,workspace=null) {
   const directory = readOnlyDirectory(runtimeDir);
   const session = agent.session.id;
   const registered = new Map();
+  const allowed = workspace ? new Set([...safeTools,'worker_workspace_shell']) : safeTools;
   ctx.on('tools/pre-execute',(exec,next)=>{
     if (exec.agent!==agent) return next();
     if (registered.has(exec.name) && ctx.get('tools').get(exec.name,agent)===registered.get(exec.name)) return next();
-    return Promise.resolve({kind:'reject',reason:'这个独立只读工位仅执行已登记的查询与工单回报工具。'});
+    return Promise.resolve({kind:'reject',reason:workspace ? '这个独立工位仅执行已登记的工具。' : '这个独立只读工位仅执行已登记的查询与工单回报工具。'});
   },{prepend:true});
   return {
     bindTools() {
-      for (const name of safeTools) {
+      for (const name of allowed) {
         const tool = ctx.get('tools').get(name,agent);
         if (tool) registered.set(name,tool);
       }
@@ -146,7 +147,20 @@ export function readOnlyCleanup(ctx,agent,runtimeDir) {
         check(typeof agent.inbox.remove==='function' && agent.inbox.remove(message.id));
       }
     },
-    proof(request,history,events) {
+    runWorkspace(message,args,signal) {
+      const origin = scopeInput(message)?.payload;
+      check(workspace && nativeID(message.id) && taskInputs.has(origin?.kind));
+      const ref = admission(directory,message.id);
+      verifyAdmission(directory,message,session,origin.assignment_id,ref);
+      return workspace.run(origin.task_id,origin.assignment_id,args.command,signal);
+    },
+    stopWorkspace(request) {
+      if (!workspace) return;
+      const {task_id,assignment_id} = JSON.parse(request.payload_json);
+      // Notify the original session even if the container engine cannot yet confirm cleanup.
+      workspace.seal(task_id,assignment_id).catch(()=>{});
+    },
+    async proof(request,history,events) {
       const {assignment_id:aid,kind,bindings} = request;
       check(guid(aid) && ['task.cancel','task.transfer_out'].includes(kind) && Array.isArray(bindings));
       const controls = bindings.filter(ref=>ref.kind===kind);
@@ -162,7 +176,7 @@ export function readOnlyCleanup(ctx,agent,runtimeDir) {
       const completedInputs = new Set();
       check(scoped.every(turn=>{
         const ref = sources.get(turn.users[0].id);
-        if (!ref || !Array.isArray(turn.calls) || turn.calls.some(call=>!safeTools.has(call.name))) return false;
+        if (!ref || !Array.isArray(turn.calls) || turn.calls.some(call=>!allowed.has(call.name))) return false;
         check(turn.users.length===1 && turn.id===ref.turn_id && !completedInputs.has(ref.native_id));
         verifyAdmission(directory,turn.users[0],session,aid,ref);
         completedInputs.add(ref.native_id);
@@ -184,8 +198,14 @@ export function readOnlyCleanup(ctx,agent,runtimeDir) {
         return {native_id:ref.native_id,delivery_id:ref.delivery_id,discard_seq:found.seq};
       });
       const stopped_turns = finished.map(turn=>({turn_id:turn.id,end_seq:turn.end.seq,reason:turn.end.reason?.kind}));
-      return {session,assignment_id:aid,kind,stopped:true,cleaned:true,scope:'read_only',
-        receipt_id:hash(JSON.stringify([session,aid,kind,control.native_id,stopped_turns,withdrawn_inputs])),
+      const removedWorkspace = workspace ? await workspace.seal(control.task_id,aid).catch(()=>{
+        throw new Error('native_cleanup_unconfirmed');
+      }) : null;
+      const proofKey = [session,aid,kind,control.native_id,stopped_turns,withdrawn_inputs];
+      if (removedWorkspace) proofKey.push(removedWorkspace.receipt_id);
+      return {session,assignment_id:aid,kind,stopped:true,cleaned:true,scope:workspace?'assignment_container':'read_only',
+        receipt_id:hash(JSON.stringify(proofKey)),
+        ...(removedWorkspace ? {workspace:removedWorkspace} : {}),
         control_turn_id:last.id,stopped_turns,withdrawn_inputs};
     },
   };

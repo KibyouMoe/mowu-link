@@ -1,7 +1,7 @@
 // Real DSH AgentLoop and persistence in an isolated directory. The only model provider is an in-process test stream.
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
-import {writeFileSync} from 'node:fs';
+import {readFileSync,writeFileSync} from 'node:fs';
 import {createRequire} from 'node:module';
 import path from 'node:path';
 import {pathToFileURL} from 'node:url';
@@ -76,6 +76,16 @@ class LocalModel extends LlmAdapter {
         yield {type:'finish',reason:{kind:'tool-calls'}};
         return;
       }
+    }
+    if (mode==='cleanup-container' && command==='task' && !this.submitted.has(message.id)) {
+      this.submitted.set(message.id,true);
+      assert.ok(tools.some(tool=>tool.name==='worker_workspace_shell'));
+      const command = 'printf owned-write > /workspace/marker; setsid /bin/sleep 120 </dev/null >/dev/null 2>&1 & echo $! > /workspace/pid';
+      yield {type:'block-start',index:0,blockType:'tool-call'};
+      yield {type:'block-end',index:0,block:{type:'tool-call',id:'fixture-contained-write',name:'worker_workspace_shell',
+        arguments:JSON.stringify({command})}};
+      yield {type:'finish',reason:{kind:'tool-calls'}};
+      return;
     }
     if (mode==='cleanup-forbidden-tool' && command==='task' && !this.submitted.has('forbidden')) {
       this.submitted.set('forbidden',true);
@@ -482,7 +492,9 @@ async function stopScenario(agent) {
 async function formalScenario(agent) {
   await install(adapter,{session,directory,catalog_sessions:catalogSessions,
     relay_command_approvals:usesApprovals,resume_on_handoff:isCold,
-    read_only_assignments:usesCleanup && mode!=='cleanup-unscoped',
+    read_only_assignments:usesCleanup && !['cleanup-unscoped','cleanup-container'].includes(mode),
+    ...(mode==='cleanup-container' ? {assignment_container:
+      JSON.parse(readFileSync(path.join(directory,'assignment-container.json'),'utf8'))} : {}),
     relay_foreground_questions:foregroundRelay && mode!=='foreground-relay-reopen',
     ...(isManaged ? {managed_sessions_dir:path.join(directory,'enrolled'),
       new_session_selection:{provider:'fixture',model:'local',effort:'low'}} : {})});

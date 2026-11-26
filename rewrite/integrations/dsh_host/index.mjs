@@ -12,7 +12,8 @@ import { foregroundRecords, installForegroundQuestions, questionRequest } from '
 import { browseSessions, catalogSessions } from './catalog.mjs';
 import { approvalProof, installCommandApprovals } from './command-approvals.mjs';
 import { guid, prepareSession, selection } from './session-preparation.mjs';
-import { readOnlyCleanup } from './read-only-cleanup.mjs';
+import { assignmentCleanup } from './assignment-cleanup.mjs';
+import { assignmentContainers } from './assignment-container.mjs';
 
 const tools = JSON.parse(readFileSync(new URL('../../agent-toolset.json', import.meta.url)));
 const sha = value => createHash('sha256').update(value).digest('hex');
@@ -150,7 +151,7 @@ async function stopPrivateTurn(ctx,agent,compacting,bound) {
   throw new Error('native_stop_unconfirmed');
 }
 
-export async function bindHost(ctx, session, directory, catalog=[], selected=null, readOnly=false, foreground=false) {
+export async function bindHost(ctx, session, directory, catalog=[], selected=null, readOnly=false, foreground=false, workspaceConfig=null) {
   check(typeof session === 'string' && session.length > 0, 'missing_native_session');
   const controller = ctx.get('sessionController');
   const agent = selected ?? (await controller.resolveAgent(session)).agent;
@@ -158,7 +159,8 @@ export async function bindHost(ctx, session, directory, catalog=[], selected=nul
   check(agent?.session?.id === session && agents?.get(session) === agent, 'wrong_native_session');
   const displayStart = await baseline(ctx,agent);
   const compact = compaction(ctx,agent,()=>ownEvents(ctx,agent));
-  const cleanup = readOnly ? readOnlyCleanup(ctx,agent,directory) : null;
+  const workspace = workspaceConfig ? assignmentContainers(directory,session,workspaceConfig) : null;
+  const cleanup = readOnly || workspace ? assignmentCleanup(ctx,agent,directory,workspace) : null;
   const imageCache = {};
   function bound() {
     // Resolving through SessionController here could reopen a closed session.
@@ -169,7 +171,7 @@ export async function bindHost(ctx, session, directory, catalog=[], selected=nul
   const questionRecords = foregroundRecords(directory,session);
   const questions = foreground ? installForegroundQuestions(ctx,agent,questionRecords,bound) : null;
   return {
-    agent, checkBinding:bound, cleanup,
+    agent, checkBinding:bound, cleanup, workspace,
     async handle(request) {
       check(request.session === session, 'wrong_native_session');
       bound();
@@ -181,7 +183,7 @@ export async function bindHost(ctx, session, directory, catalog=[], selected=nul
         check(cleanup,'native_cleanup_unconfirmed');
         const {events,inherited} = await sessionEvents(ctx,agent);
         bound();
-        return {proof:cleanup.proof(request,turns(events.slice(inherited)),events)};
+        return {proof:await cleanup.proof(request,turns(events.slice(inherited)),events)};
       }
       if (request.operation === 'capabilities') return {compaction:compact.supported,
         session_catalog:typeof ctx.get('sessionQuery')?.inspectSession==='function',
@@ -240,6 +242,7 @@ export async function bindHost(ctx, session, directory, catalog=[], selected=nul
           const sameTurn = agent.session.seq===before;
           cleanup?.withdraw(request);
           stopBoundTurn(agent,request,history,sameTurn ? agent.session.seq : before);
+          cleanup?.stopWorkspace(request);
         }
         cleanup?.admit(request,expected);
         agent.followup(expected);
@@ -261,6 +264,10 @@ export async function bindHost(ctx, session, directory, catalog=[], selected=nul
       const raw = calls[0].call.arguments;
       check(isDeepStrictEqual(typeof raw === 'string' ? JSON.parse(raw) : raw,args), 'native_arguments_mismatch');
       const user = current.users[0];
+      if (name==='worker_workspace_shell') {
+        check(workspace,'assignment_container_unavailable');
+        return cleanup.runWorkspace(user,args,exec.signal);
+      }
       const direct = name==='worker_ask_trainer' && user.source?.kind==='user' && !user.id.startsWith('mowulink-')
         && !user.content.some(item=>item.type==='text' && item.text.startsWith('魔物链接投递\n'));
       return notify({session,turn_id:current.id,native_id:user.id,
@@ -327,7 +334,10 @@ function installBoundTools(ctx,port,directory,relay_command_approvals) {
   if (relay_command_approvals) {
     installCommandApprovals(ctx,port.agent,()=>ownEvents(ctx,port.agent),(route,body)=>callback(directory,body,route));
   }
-  for (const tool of tools) {
+  const available = port.workspace ? [...tools,{name:'worker_workspace_shell',
+    description:'Run a shell command inside the private workspace of the current work order.',
+    inputSchema:{type:'object',required:['command'],additionalProperties:false,properties:{command:{type:'string'}}}}] : tools;
+  for (const tool of available) {
     const unregister = port.agent.ctx.get('tools').register({name:tool.name,description:tool.description,
       parameters:tool.inputSchema,output:{schema:{type:'object'},render:(_args,value)=>[{type:'text',text:JSON.stringify(value)}]},
       execute:(args,exec) => port.tool(tool.name,args,exec,body=>callback(directory,body))});
@@ -338,11 +348,13 @@ function installBoundTools(ctx,port,directory,relay_command_approvals) {
 
 export async function apply(ctx, {session, directory, catalog_sessions=[], relay_command_approvals=false,
                                  resume_on_handoff=false, managed_sessions_dir=null, new_session_selection=null,
-                                 read_only_assignments=false, relay_foreground_questions=false}) {
+                                 read_only_assignments=false, relay_foreground_questions=false, assignment_container=null}) {
   privateDir(directory);
   check(typeof session==='string' && session.length>0,'missing_native_session');
   check(typeof resume_on_handoff==='boolean','invalid_native_activation');
-  check(typeof read_only_assignments==='boolean','invalid_native_cleanup_configuration');
+  check(typeof read_only_assignments==='boolean' &&
+    (!assignment_container || (!read_only_assignments && !relay_command_approvals)),
+    'invalid_native_cleanup_configuration');
   check(typeof relay_foreground_questions==='boolean','invalid_native_question_configuration');
   const managed = managed_sessions_dir!==null;
   check(!managed || (!resume_on_handoff && typeof managed_sessions_dir==='string'),'invalid_managed_session_configuration');
@@ -374,7 +386,7 @@ export async function apply(ctx, {session, directory, catalog_sessions=[], relay
     scope.selected ??= agents.get(target) ?? (await ctx.get('sessionController').resolveAgent(target)).agent;
     check(scope.selected?.session?.id===target && agents.get(target)===scope.selected,'native_agent_unavailable');
     check(scope.selected.status==='idle','native_cold_thread_unconfirmed');
-    const opened = await bindHost(ctx,target,directory,catalog,scope.selected,read_only_assignments,relay_foreground_questions);
+    const opened = await bindHost(ctx,target,directory,catalog,scope.selected,read_only_assignments,relay_foreground_questions,assignment_container);
     installBoundTools(ctx,opened,directory,relay_command_approvals);
     scope.port = opened;
   }
@@ -390,7 +402,7 @@ export async function apply(ctx, {session, directory, catalog_sessions=[], relay
     return {session:request.session,operation_id,state:'loaded'};
   }
   if (!resume_on_handoff && (!managed || !readdirSync(managed_sessions_dir).some(name=>name.endsWith('.json')))) {
-    const port = await bindHost(ctx,session,directory,catalog,null,read_only_assignments,relay_foreground_questions);
+    const port = await bindHost(ctx,session,directory,catalog,null,read_only_assignments,relay_foreground_questions,assignment_container);
     installBoundTools(ctx,port,directory,relay_command_approvals);
     scopes.get(session).port = port;
   }

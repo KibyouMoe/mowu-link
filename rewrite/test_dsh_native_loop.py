@@ -1082,6 +1082,127 @@ class NativeLoop(unittest.TestCase):
                 "boundary":"Installed DSH SDK with opt-in read-only assignments, local model, real isolated Router."},
                 ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
 
+    def test_dsh_workspace_container_cancel_and_transfer_remove_owned_processes(self):
+        image = os.environ.get("MOWULINK_DSH_CONTAINER_IMAGE")
+        docker = shutil.which("docker")
+        if not image or not docker:
+            self.skipTest("configured isolated local Docker image required")
+        socket = subprocess.check_output([docker,"context","inspect","--format","{{ .Endpoints.docker.Host }}"],
+                                         text=True,timeout=5).strip()
+        self.assertTrue(socket.startswith("unix:///"),socket)
+        cli = [docker,"--host",socket]
+        cases = []
+        for action in ("cancel","transfer","foreign_engine"):
+            with self.subTest(action=action):
+                session = "isolated-dsh-contained-workspace-"+action
+                directory,loop,service,_ = self.goal_worker(session,extra_workers=("tama",))
+                runtime = Path(directory)
+                (runtime/"assignment-container.json").write_text(encode(
+                    {"docker":docker,"socket":socket.removeprefix("unix://"),"image":image}),encoding="utf-8")
+                sentinel = runtime/"outside-marker"
+                sentinel.write_text("never touched",encoding="utf-8")
+                token = guid()
+                client = Client(self.open_worker(service,{token:"adapter/oguri"}),token)
+                worker = loop.worker
+                alternate = FixtureHost(loop.root/"alternate.db","alternate-container-test")
+                other = Worker(loop.root/"alternate-worker.db","tama",loop.extra_clients["tama"],
+                               HostAdapter(loop.root/"alternate-adapter.db",alternate,alternate.session),clock=service.clock)
+                order = loop.hermes.create(guid(),"Read-write containment","End the isolated write","oguri")["task_id"]
+                with tool_listener(runtime,loop.adapter,client), self.start_native(directory,session,"cleanup-container") as native:
+                    try:
+                        other.connect()
+                        worker.connect()
+                        worker.poll()
+                        other.poll()
+                        service.clock.advance(10)
+                        worker.poll()
+                        worker.poll()
+                        self.assertTrue(self.read_native(native,"work-started")["running"])
+                        state = loop.hermes.inspect(order)["task"]
+                        assignment = state["assignment_id"]
+                        lease_path, = (runtime/"assignment-containers").glob("*.json")
+                        lease = json.loads(lease_path.read_text())
+                        container_id = lease["container_id"]
+                        self.assertEqual(lease["assignment_id"],assignment)
+                        self.assertEqual(lease["phase"],"active")
+                        self.assertRegex(container_id,r"^[a-f0-9]{64}$")
+                        def docker_cmd(*args):
+                            return subprocess.check_output([*cli,*args],text=True,timeout=8).strip()
+                        recorded = docker_cmd("exec",container_id,"/bin/sh","-c",
+                            'cat /workspace/marker; echo; n=$(cat /workspace/pid); test -e "/proc/$n/cmdline"; cat "/proc/$n/cmdline"')
+                        self.assertEqual(recorded.splitlines()[0],"owned-write")
+                        self.assertIn("/bin/sleep",recorded)
+                        peer_message = guid()
+                        self.assertIsNone(worker.chat(peer_message,"Keep private input outside the job"))
+                        next_worker = {"worker_id":"tama"} if action=="transfer" else {}
+                        if action=="foreign_engine":
+                            lease_path.write_text(encode(dict(lease,daemon="other-isolated-engine")),encoding="utf-8")
+                        operation = "transfer" if action=="transfer" else "cancel"
+                        loop.hermes.act(guid(),order,state["revision"],operation,reason="Stop original execution scope",**next_worker)
+                        recipient = None
+                        if action=="transfer":
+                            other.poll()
+                            recipient = loop.hermes.inspect(order)["task"]
+                            self.assertNotEqual(recipient["assignment_id"],assignment)
+                            self.assertEqual(other.hold()["held_assignment_id"],recipient["assignment_id"])
+                        worker.poll()
+                        observed = self.read_native(native,"read")
+                        self.assertEqual(observed["turns"][0]["reason"]["kind"],"aborted")
+                        report = next(row for row in observed["results"] if row["toolCallId"]=="cleanup-report-"+assignment)
+                        if action=="foreign_engine":
+                            self.assertTrue(report["isError"],report)
+                            self.assertIn("native_cleanup_unconfirmed",encode(report))
+                            self.assertEqual(worker.hold()["held_assignment_id"],assignment)
+                            self.assertEqual([item["assignment_id"] for item in
+                                loop.hermes.inspect(order)["pending_cleanup"]],[assignment])
+                            self.assertEqual(docker_cmd("exec",container_id,"cat","/workspace/marker"),"owned-write")
+                            cases.append({"action":action,"session":session,"task_id":order,"assignment_id":assignment,
+                                "container_id":container_id,"native_stop":"aborted","cleanup":"native_cleanup_unconfirmed",
+                                "working_container_untouched":True})
+                            continue
+                        self.assertFalse(report["isError"],report)
+                        with worker.db.transaction() as db:
+                            record = db.execute("SELECT proof,receipt FROM cleanup_reports WHERE assignment_id=?",
+                                                (assignment,)).fetchone()
+                        proof = json.loads(record["proof"])
+                        self.assertEqual((proof["scope"],proof["workspace"]["container_id"],proof["workspace"]["state"]),
+                                         ("assignment_container",container_id,"removed"))
+                        self.assertEqual(json.loads(record["receipt"])["release_assignment_id"],assignment)
+                        self.assertIsNone(worker.hold()["held_assignment_id"])
+                        current = loop.hermes.inspect(order)
+                        self.assertEqual(current["pending_cleanup"],[])
+                        if recipient:
+                            self.assertEqual(current["task"],recipient)
+                        else:
+                            self.assertEqual(current["task"]["state"],"cancelled")
+                        self.assertEqual(docker_cmd("container","ls","--all","--no-trunc","--filter","id="+container_id,
+                                                    "--format","{{.ID}}"),"")
+                        control_kind = "task.transfer_out" if action=="transfer" else "task.cancel"
+                        self.assertEqual(loop.adapter.cleanup_evidence(assignment,control_kind),proof)
+                        self.assertEqual(json.loads(lease_path.read_text())["phase"],"sealed")
+                        retained = worker.chat(peer_message,"Keep private input outside the job")
+                        self.assertEqual(observed["inputs"].count(retained["native_id"]),1)
+                        self.assertEqual(sentinel.read_text(),"never touched")
+                        cases.append({"action":action,"session":session,"task_id":order,"assignment_id":assignment,
+                            "new_assignment_id":recipient["assignment_id"] if recipient else None,"container_id":container_id,
+                            "writable_marker_read_back":True,"detached_child_seen_before_removal":True,
+                            "container_absent_after_removal":True,"workspace_scope":proof["workspace"],
+                            "w04":json.loads(record["receipt"]),"retained_private_input":retained["native_id"],
+                            "original_native_turn_end":observed["turns"][0]["reason"]["kind"],
+                            "boundary":"Actual installed DSH SDK, Linux Docker engine, HTTP Router and Worker. Model and inputs are local fixtures."})
+                    finally:
+                        # On a failing test clean only containers whose unguessable label belongs to this fixture directory.
+                        for owned in (runtime/"assignment-containers").glob("*.json"):
+                            entry = json.loads(owned.read_text())
+                            if entry.get("session")!=session or not entry.get("token"):
+                                continue
+                            ids = subprocess.check_output([*cli,"container","ls","--all","--no-trunc","--filter",
+                                "label=io.mowulink.assignment="+entry["token"],"--format","{{.ID}}"],text=True,timeout=8).split()
+                            for identity in ids:
+                                subprocess.run([*cli,"container","rm","--force",identity],check=True,timeout=8,capture_output=True)
+        if output := os.environ.get("MOWULINK_DSH_CONTAINER_EVIDENCE"):
+            Path(output).write_text(json.dumps({"cases":cases},ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
+
     def test_native_dsh_stop_alone_or_unverified_tool_keeps_cleanup_pending(self):
         cases = []
         for mode in ("cleanup-unscoped","cleanup-forbidden-tool"):

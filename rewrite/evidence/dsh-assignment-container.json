@@ -1,0 +1,62 @@
+{
+  "cases": [
+    {
+      "action": "cancel",
+      "session": "isolated-dsh-contained-workspace-cancel",
+      "task_id": "bce13235-4d4d-4e76-9e03-dca2da5ed98b",
+      "assignment_id": "2e640fb0-06ed-48b0-8235-36a6762bdd15",
+      "new_assignment_id": null,
+      "container_id": "72c6307c97827054652fb1facc935bbcff233a409ee1757b31a1b70d38d972cb",
+      "writable_marker_read_back": true,
+      "detached_child_seen_before_removal": true,
+      "container_absent_after_removal": true,
+      "workspace_scope": {
+        "container_id": "72c6307c97827054652fb1facc935bbcff233a409ee1757b31a1b70d38d972cb",
+        "receipt_id": "3b0a0ea84b06cd267b18d43e68c5284096f1cd488977aafefe775abe48d3cf39",
+        "state": "removed"
+      },
+      "w04": {
+        "recorded": true,
+        "release_assignment_id": "2e640fb0-06ed-48b0-8235-36a6762bdd15",
+        "task_state": "cancelled"
+      },
+      "retained_private_input": "mowulink-93a4e6852ef1da8d45672626308ae4daec8058aae3e46595ea2f04ebd3a76489",
+      "original_native_turn_end": "aborted",
+      "boundary": "Actual installed DSH SDK, Linux Docker engine, HTTP Router and Worker. Model and inputs are local fixtures."
+    },
+    {
+      "action": "transfer",
+      "session": "isolated-dsh-contained-workspace-transfer",
+      "task_id": "823ab046-b647-410a-90d9-1bc9bb1c3eea",
+      "assignment_id": "cb606662-0f30-41ab-ab93-58fef2af7106",
+      "new_assignment_id": "81e71044-1852-4bd6-8ab5-6423144f1294",
+      "container_id": "870288a2e963355baf99b079980d6e23e94fb1b763f3f7a19fa7b2443fd17373",
+      "writable_marker_read_back": true,
+      "detached_child_seen_before_removal": true,
+      "container_absent_after_removal": true,
+      "workspace_scope": {
+        "container_id": "870288a2e963355baf99b079980d6e23e94fb1b763f3f7a19fa7b2443fd17373",
+        "receipt_id": "14e2f3abe6fff05949477946445066eef0a166d1c24aa20864af7332efbe1350",
+        "state": "removed"
+      },
+      "w04": {
+        "recorded": true,
+        "release_assignment_id": "cb606662-0f30-41ab-ab93-58fef2af7106",
+        "task_state": "working"
+      },
+      "retained_private_input": "mowulink-f0de10fc386b76a415c64d49777636ff4cfc5163cd8701f4d6e50288d195c368",
+      "original_native_turn_end": "aborted",
+      "boundary": "Actual installed DSH SDK, Linux Docker engine, HTTP Router and Worker. Model and inputs are local fixtures."
+    },
+    {
+      "action": "foreign_engine",
+      "session": "isolated-dsh-contained-workspace-foreign_engine",
+      "task_id": "c0c7a14a-969f-4978-987a-72596381452e",
+      "assignment_id": "c7e0794b-8623-4169-8a2c-4c0d07c14f9d",
+      "container_id": "cc085bc6d0fdb3787005a894ce76de971f582a1cef2dc01c2b753c0c1b716458",
+      "native_stop": "aborted",
+      "cleanup": "native_cleanup_unconfirmed",
+      "working_container_untouched": true
+    }
+  ]
+}
