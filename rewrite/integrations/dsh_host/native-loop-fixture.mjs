@@ -242,7 +242,7 @@ class LocalModel extends LlmAdapter {
     if (usesApprovals && text.startsWith('DSH approval fixture ') && !this.submitted.has(message.id)) {
       this.submitted.set(message.id,true);
       const variant = text.substring('DSH approval fixture '.length);
-      const args = {description:'Read the isolated working directory',command:'pwd'};
+      const args = {description:'Read the isolated working directory',command:process.platform==='win32' ? 'pwd -W' : 'pwd'};
       if (variant==='unverifiable') args.workdir = 'absent-approval-directory';
       else if (variant==='relative') args.workdir = 'approval-child';
       else if (variant==='physical-parent') args.workdir = 'approval-link/..';

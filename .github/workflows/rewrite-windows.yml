@@ -144,6 +144,10 @@ jobs:
             $executables = @(Get-ChildItem -LiteralPath $bundles[0].Directory.Parent.FullName -Filter '*.exe' -File |
               Where-Object { $_.BaseName -match '^DeepSeek[ -]Harness$' })
             if ($executables.Count -ne 1) { throw 'Expected one packaged DSH executable' }
+            $gitRoot = Split-Path (Split-Path (Get-Command git).Source)
+            $gitBash = Join-Path $gitRoot 'bin'
+            if (-not (Test-Path -LiteralPath (Join-Path $gitBash 'bash.exe') -PathType Leaf)) { throw 'Git Bash missing' }
+            $env:PATH = "$gitBash;$env:PATH"
             $env:MOWULINK_TEST_DSH_BINARY = $executables[0].FullName
             $env:MOWULINK_TEST_DSH_EVIDENCE = Join-Path $dir.FullName 'native-dsh.json'
             $env:MOWULINK_TEST_DSH_MEDIA_EVIDENCE = Join-Path $dir.FullName 'native-dsh-media.json'
@@ -152,6 +156,7 @@ jobs:
             $env:MOWULINK_DSH_CLEANUP_EVIDENCE = Join-Path $dir.FullName 'native-dsh-cleanup.json'
             $env:MOWULINK_DSH_CLEANUP_REFUSAL_EVIDENCE = Join-Path $dir.FullName 'native-dsh-cleanup-refusal.json'
             $env:MOWULINK_DSH_FOREGROUND_TLS_EVIDENCE = Join-Path $dir.FullName 'native-dsh-questions.json'
+            $env:MOWULINK_DSH_APPROVAL_TLS_EVIDENCE = Join-Path $dir.FullName 'native-dsh-approval.json'
             $state = New-Item -ItemType Directory (Join-Path $dir.FullName '状态 试用')
             $env:TMP = $state.FullName
             $env:TEMP = $state.FullName
@@ -163,6 +168,7 @@ jobs:
             Get-Content -Raw -LiteralPath $env:MOWULINK_DSH_CLEANUP_EVIDENCE
             Get-Content -Raw -LiteralPath $env:MOWULINK_DSH_CLEANUP_REFUSAL_EVIDENCE
             Get-Content -Raw -LiteralPath $env:MOWULINK_DSH_FOREGROUND_TLS_EVIDENCE
+            Get-Content -Raw -LiteralPath $env:MOWULINK_DSH_APPROVAL_TLS_EVIDENCE
           } finally {
             Remove-Item -LiteralPath $dir.FullName -Recurse -Force
           }

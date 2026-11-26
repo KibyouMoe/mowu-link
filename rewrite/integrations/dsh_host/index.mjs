@@ -402,7 +402,7 @@ export async function apply(ctx, {session, directory, catalog_sessions=[], relay
                                  read_only_assignments=false, relay_foreground_questions=false, assignment_container=null,
                                  local_tls=false}) {
   check(typeof local_tls==='boolean','invalid_dsh_local_link');
-  check(!local_tls || !(relay_command_approvals || assignment_container),
+  check(!local_tls || !assignment_container,
     'unsupported_dsh_local_tls_feature');
   check(typeof session==='string' && session.length>0,'missing_native_session');
   check(typeof resume_on_handoff==='boolean','invalid_native_activation');
