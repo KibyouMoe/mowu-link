@@ -397,7 +397,7 @@ def queue_execution_modes(candidates):
 
 
 def legacy_creation_request(source_id, key, row):
-    legacy_key = key if valid_guid(key) else str(uuid5(UUID(source_id),"queue-rollback/"+key))
+    legacy_key = legacy_history.rollback_request_id(source_id,key)
     return {"message_id":legacy_key,"worker":row["assignee_id"],"TaskName":row["title"],
             "goal":row["instructions"],"execution_mode":"goal","queue_if_offline":True}
 

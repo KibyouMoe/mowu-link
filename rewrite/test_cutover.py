@@ -591,6 +591,43 @@ print(json.dumps(result))
         self.assertTrue(all(row["reason"]=="reviewed_on_rewrite" for row in after_restart["archives"].values()))
         self.assertEqual((digest(self.legacy),digest(self.trial/"router.db")),(original,trial_digest))
 
+        # A later cutover must also remember the manager's original opaque request key.
+        again_snapshot, again = self.root/"reentry-snapshot", self.root/"reentry-trial"
+        backup(self.restore/"legacy.db",self.restore/"legacy.db.attachments",again_snapshot)
+        source_id = guid()
+        prepare(again_snapshot,again,source_id)
+        token = guid()
+        with serve_loopback(Orders(again/"router.db",clock),{token:"hermes"}) as srv:
+            thread = Thread(target=srv.serve_forever,kwargs={"poll_interval":.02})
+            thread.start()
+            try:
+                client = Client(f"http://127.0.0.1:{srv.server_port}",token)
+                for trial_id, entry in archived.items():
+                    request = entry["legacy_creation_request"]
+                    keys = {entry["creation_key"],request["message_id"]}
+                    for key in keys:
+                        with self.assertRaises(Fault) as duplicate:
+                            client.request("POST","tasks",{"title":request["TaskName"],"instructions":request["goal"],
+                                                           "assignee_id":request["worker"]},key)
+                        self.assertEqual((duplicate.exception.status,duplicate.exception.code),(409,"legacy_request_recorded"))
+                        self.assertEqual(duplicate.exception.details,
+                            {"source_id":source_id,"legacy_task_id":after_restart["archives"][trial_id]["legacy_task_id"]})
+                self.assertEqual(len(client.request("GET","tasks")["items"]),2)
+            finally:
+                srv.shutdown()
+                thread.join()
+        inconsistent_old = self.root/"inconsistent-old.db"
+        shutil.copyfile(self.restore/"legacy.db",inconsistent_old)
+        with closing(sqlite3.connect(inconsistent_old)) as db, db:
+            updated = db.execute("UPDATE rewrite_archive_request_keys SET trial_source_id=?",(guid(),))
+            self.assertEqual(updated.rowcount,1)
+        inconsistent_snapshot = self.root/"inconsistent-snapshot"
+        backup(inconsistent_old,self.restore/"legacy.db.attachments",inconsistent_snapshot)
+        refused = self.root/"cannot-reenter"
+        with self.assertRaisesRegex(ValueError,"does not match its legacy archive"):
+            prepare(inconsistent_snapshot,refused,guid())
+        self.assertFalse(refused.exists())
+
         # The old endpoint has one UUID namespace even when two Rewrite keys differ.
         collision_trial = self.root/"collision-trial"
         shutil.copytree(self.trial,collision_trial)
@@ -620,6 +657,8 @@ print(json.dumps(result))
                 "closed_assignments":evidence,"public_legacy_readback":after_restart,
                 "initial_queue_status":before_restart["queued_status"],"private_artifact_sha256":checksum,
                 "incomplete_review_rejected":True,"mapped_legacy_request_collision_rejected":True,
+                "later_cutover_rejects_original_and_mapped_request_keys":True,
+                "mismatched_archived_request_mapping_rejected":True,
                 "both_inputs_unchanged":True,
                 "boundary":"Actual old and new Router over local HTTP, SQLite and attachment bytes. Scripted Worker Agent."},
                 ensure_ascii=False,indent=2)+"\n")

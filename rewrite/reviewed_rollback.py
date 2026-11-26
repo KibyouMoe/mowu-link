@@ -6,8 +6,8 @@ import os
 import shutil
 import sqlite3
 import time
-from uuid import UUID, uuid5
 
+from . import legacy_history
 from .cutover import (digest, legacy_creation_request, output_directory, queue_execution_modes, queue_replay_plan,
                       readonly, reconcile, restore_snapshot, verified)
 from .messages import valid_guid
@@ -218,7 +218,7 @@ def archive_in_legacy(path, entries, source_id, at):
     with closing(sqlite3.connect(path)) as db, db:
         for tid,entry in entries.items():
             if "creation_key" in entry:
-                legacy = "t-" + uuid5(UUID(source_id),"archive-rollback/"+tid).hex[:10]
+                legacy = legacy_history.rollback_archive_id(source_id,tid)
                 payload = dict(entry["legacy_creation_request"])
                 request_id = payload.pop("message_id")
                 if db.execute("SELECT 1 FROM task_info WHERE task_id=? OR request_id=?",(legacy,request_id)).fetchone():
@@ -229,6 +229,10 @@ def archive_in_legacy(path, entries, source_id, at):
                               VALUES (?,?,?,?,?,?,?,?,?)""",
                            (legacy,"重做版已验收工单","完整记录见私有回退档案。",entry["worker_id"],"hermes",
                             at,"{}",request_id,fingerprint))
+                if request_id!=entry["creation_key"]:
+                    db.execute(legacy_history.ROLLBACK_KEYS_SCHEMA)
+                    db.execute("INSERT INTO rewrite_archive_request_keys VALUES (?,?,?)",
+                               (legacy,entry["creation_key"],source_id))
                 entry["legacy_task_id"] = legacy
             else:
                 legacy = entry["legacy_task_id"]

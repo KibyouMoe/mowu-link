@@ -1,40 +1,42 @@
 {
-  "trial_sha256": "e8fd9b9a1dd5ed488ed5b71dfa5df111211d5df1bd468385959c29af15e30f15",
-  "legacy_snapshot_sha256": "554d4a2824accc11f1ee31ceb7ba3bcea1aec3e076c5a5e7e8dcf636b0fda77e",
+  "trial_sha256": "565029f6532ecce0bafa3b3e4159480dc619c4738ba47faa0fdc065153f65877",
+  "legacy_snapshot_sha256": "be740871d304006786fa32da9266f0ad4a8e92b75161c921d17ec7d2b898dec4",
   "closed_assignments": {
-    "25543605-3b86-404c-90cd-509f408c171d": "d301249e-bc8b-493c-8ff7-f7b3831463e8",
-    "6aa359e4-177b-4730-963c-ee6871536d07": "1c616efb-665e-4bf4-92d2-f17af5d9ebce"
+    "1331153a-b058-427e-9f7f-9237cfb702c5": "e4770c61-2b14-458a-9ff8-9633dc46ef92",
+    "9c58f783-5f00-4595-a52b-85e481d26b34": "d4646a82-c72b-4d13-99d1-120e8d0de7ee"
   },
   "public_legacy_readback": {
     "archives": {
-      "25543605-3b86-404c-90cd-509f408c171d": {
-        "legacy_task_id": "t-468f241f1d",
+      "1331153a-b058-427e-9f7f-9237cfb702c5": {
+        "legacy_task_id": "t-46de48084f",
         "replay": 200,
         "conflict": 409,
         "reason": "reviewed_on_rewrite"
       },
-      "6aa359e4-177b-4730-963c-ee6871536d07": {
-        "legacy_task_id": "t-682a8f58c3",
+      "9c58f783-5f00-4595-a52b-85e481d26b34": {
+        "legacy_task_id": "t-6ccb174300",
         "replay": 200,
         "conflict": 409,
         "reason": "reviewed_on_rewrite"
       }
     },
-    "head": "t-c0cad496c1",
+    "head": "t-e2dd3fb3bf",
     "artifact_status": 404,
     "queued_status": 200,
     "held": null,
     "new_queue_for_oguri": null,
     "queue_order": [
-      "t-c0cad496c1",
-      "t-d6b945dc87"
+      "t-e2dd3fb3bf",
+      "t-d2da29a893"
     ],
-    "replayed_queue_id": "t-d6b945dc87"
+    "replayed_queue_id": "t-d2da29a893"
   },
   "initial_queue_status": 202,
   "private_artifact_sha256": "22096147c94fe983a8714f76aaac9f702543e6e13736218061aad535475eb069",
   "incomplete_review_rejected": true,
   "mapped_legacy_request_collision_rejected": true,
+  "later_cutover_rejects_original_and_mapped_request_keys": true,
+  "mismatched_archived_request_mapping_rejected": true,
   "both_inputs_unchanged": true,
   "boundary": "Actual old and new Router over local HTTP, SQLite and attachment bytes. Scripted Worker Agent."
 }

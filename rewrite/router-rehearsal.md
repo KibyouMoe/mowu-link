@@ -67,7 +67,7 @@ python3 -m rewrite.cutover stage-reviewed-rollback --snapshot ./snapshot --trial
 
 目标目录中的 `legacy.db` 用旧 Router 正常打开，旧附件在 `legacy.db.attachments/`。已验收的原单在恢复库标记为 `reviewed_on_rewrite`，留有指向私有档案的 `recovery_reference`。原单号、原建单幂等键以及尚未执行的旧队列顺序保留。旧 Router 再查原单能看到归档状态，重试原建单只回原单号。
 
-试用新建且已验收的工单直接写入旧库归档。旧端可查到新旧编号映射及 `reviewed_on_rewrite` 标记；标题、原指令、成果及附件从私有档案查询。该单的旧兼容请求保存在 `private-review/manifest.json` 对应工单的 `legacy_creation_request` 字段，与其旧编号一起保存。重放该请求会回同一旧单号，改动正文再用同一个请求号会得到 409。无需发送这个请求来创建或归档工单。映射若与已有旧单或待回放工单的请求号冲突，准备会停止。[试用新单验证](evidence/cutover-trial-born-archives.json)
+试用新建且已验收的工单直接写入旧库归档。旧端可查到新旧编号映射及 `reviewed_on_rewrite` 标记；标题、原指令、成果及附件从私有档案查询。该单的旧兼容请求保存在 `private-review/manifest.json` 对应工单的 `legacy_creation_request` 字段，与其旧编号一起保存。重放该请求会回同一旧单号，改动正文再用同一个请求号会得到 409。无需发送这个请求来创建或归档工单。映射若与已有旧单或待回放工单的请求号冲突，准备会停止。回退库中的归档请求映射随数据库备份保存，旧 HTTP 仍只显示归档。以后用该旧库再次试迁时，重做 Router 会核对旧单号和归档引用，同一条验收归档对应的原 Hermes 请求号和映射后的 UUID 都返回 409 与旧归档标识。映射不一致时停止准备。[试用新单验证](evidence/cutover-trial-born-archives.json)
 
 `private-review/manifest.json` 保存正文、原 W04 和验收请求键、通知凭据、旧新编号及附件摘要，`private-review/files/` 保存逐块校验过的新成果附件。`private-review/trial-router.db` 是带校验摘要的完整试运行库副本。旧 Router 的通用凭据只能查看归档标记和原已授权附件。试用的新成果从私有回退包查阅，原通知无需重发。
 

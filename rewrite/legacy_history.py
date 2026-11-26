@@ -1,6 +1,7 @@
 """Manager-only, historical projection of a verified legacy snapshot. No work-order writes."""
 import json
 import re
+from uuid import UUID, uuid5
 
 from .messages import valid_guid
 from .storage import encode, require
@@ -22,6 +23,22 @@ CREATE TABLE IF NOT EXISTS history_request_keys (
 );
 """
 
+# This optional table lives in the restored copy. The legacy HTTP server does not expose it.
+ROLLBACK_KEYS_SCHEMA = """CREATE TABLE IF NOT EXISTS rewrite_archive_request_keys (
+    legacy_task_id TEXT PRIMARY KEY REFERENCES task_info(task_id),
+    request_key TEXT NOT NULL UNIQUE,
+    trial_source_id TEXT NOT NULL
+)"""
+
+
+def rollback_request_id(source_id, key):
+    # Preserve the request UUID mapping used by existing queue replay plans.
+    return key if valid_guid(key) else str(uuid5(UUID(source_id),"queue-rollback/"+key))
+
+
+def rollback_archive_id(source_id, trial_task_id):
+    return "t-" + uuid5(UUID(source_id),"archive-rollback/"+trial_task_id).hex[:10]
+
 
 def populate(db, old, source, sha, mapping):
     db.execute("INSERT INTO history_sources VALUES (?,?)",(source,sha))
@@ -38,6 +55,27 @@ def populate(db, old, source, sha, mapping):
         db.execute("INSERT INTO history_tasks VALUES (?,?,?,?,?,?,?,?,?,?)",
                    (source,tid,mapping.get(tid),row["name"],row["description"],row["owner"],row["actor"],row["at"],
                     encode(archive) if archive is not None else None,encode(report) if report is not None else None))
+    preserve_rollback_keys(db,old,source,mapping)
+
+
+def preserve_rollback_keys(db, old, source, mapping):
+    table = old.execute("SELECT type FROM sqlite_master WHERE name='rewrite_archive_request_keys'").fetchone()
+    if table is None:
+        return
+    if table["type"]!="table":
+        raise ValueError("invalid rewrite archive request-key table")
+    for row in old.execute("""SELECT a.*, t.actor, t.request_id, f.data AS archive_data
+        FROM rewrite_archive_request_keys a LEFT JOIN task_info t ON t.task_id=a.legacy_task_id
+        LEFT JOIN task_facts f ON f.task_id=a.legacy_task_id AND f.kind='archive' AND f.event_key='archive'"""):
+        key, namespace, tid = row["request_key"],row["trial_source_id"],row["legacy_task_id"]
+        archive = json.loads(row["archive_data"] or "null")
+        trial_id = archive.get("recovery_reference") if isinstance(archive,dict) else None
+        if (row["actor"]!="hermes" or not isinstance(key,str) or not re.fullmatch(r"hermes-[0-9a-f]{64}",key)
+                or not valid_guid(namespace) or not valid_guid(trial_id) or archive.get("reason")!="reviewed_on_rewrite"
+                or rollback_request_id(namespace,key)!=row["request_id"] or rollback_archive_id(namespace,trial_id)!=tid
+                or tid in mapping):
+            raise ValueError("rewrite archive request key does not match its legacy archive")
+        db.execute("INSERT INTO history_request_keys VALUES ('hermes',?,?,?)",(key,source,tid))
 
 
 def query(db, source, filters):

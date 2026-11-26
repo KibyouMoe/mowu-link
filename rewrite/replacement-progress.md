@@ -4,7 +4,7 @@
 
 ## 检查点与证据
 
-回退现可接回试用期间新建并已验收的正式工单。隔离演练在 Worker 上线前后各建一单，一单带附件，两单分别经过原接管、W04 与管理验收。实际旧 Router 重开后仍用同一旧单号读出归档。旧兼容请求按原号重送均回 200 并去重，同号改正文回 409。旧接口只显示归档标记，原标题、要求、成果和逐字节校验的附件留在私有回退包。另一张未派试用单仍可按原顺序接到旧队尾。审核少一单或两类试用单映射到相同旧请求号时，没有发布回退目录。源端和试用库摘要保持原样。复跑 `python3 -B -m unittest -v rewrite.test_cutover`，旧新 Router 和 HTTP、SQLite 实跑，Worker Agent 为夹具。 [回退实测](evidence/cutover-trial-born-archives.json) · [操作说明](router-rehearsal.md#回退已验收的迁入工单)
+回退现可接回试用期间新建并已验收的正式工单。隔离演练在 Worker 上线前后各建一单，一单带附件，两单分别经过原接管、W04 与管理验收。实际旧 Router 重开后仍用同一旧单号读出归档。旧兼容请求按原号重送均回 200 并去重，同号改正文回 409。旧接口只显示归档标记，原标题、要求、成果和逐字节校验的附件留在私有回退包。另一张未派试用单仍可按原顺序接到旧队尾。审核少一单或两类试用单映射到相同旧请求号时，没有发布回退目录。源端和试用库摘要保持原样。随后用同一回退库再次迁入，修复了旧端映射 UUID 能拦截、原 Hermes 请求号却会重建的情况。现两种原请求均指向归档，篡改的映射使准备拒绝发布。复跑 `python3 -B -m unittest -v rewrite.test_cutover`，旧新 Router 和 HTTP、SQLite 实跑，Worker Agent 为夹具。 [回退实测](evidence/cutover-trial-born-archives.json) · [操作说明](router-rehearsal.md#回退已验收的迁入工单)
 
 真实隔离 Hermes 网关从原生控制接口创建 LOCAL 会话并加载管理插件。真实 Trigger 经 Router 发送 Event、Notify、Info，网关原生输入台账只有前两条，均为 `completed`。Event 在本地脚本模型指示下，经真实 `tool_describe`、`tool_call` 调用 `router_info`，附件与原件 SHA-256 相同。同一会话再用 `router_create_task` 建单，原生工具记录与 Router 的工单号相符。阻塞 Event 超过 10 秒期间 Notify 未启动，Event 释放后 11.01 秒送达。Info 可从 Router 按消息号读回。清掉适配器和插件的 Event 回执后冷开网关，同一原生收件号补回，网关 PID 变化，收件仍两条、模型 HTTP 请求仍五次、Router 只有原未派单。Hermes 固定在 `464bd0dd659f336bd0bf468bf02cad8aac211136`。云端模型和真实飞书留待独立试验。 [实测记录](evidence/hermes-gateway-trigger.json) · [复跑方法](README.md#hermes-专用会话)
 
