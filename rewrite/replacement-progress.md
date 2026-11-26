@@ -8,6 +8,8 @@
 
 复跑 `python3 -B -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_foreground_question_uses_one_native_answer_and_one_original_card`。初版试跑中原生持久化拒读未经声明的扩展事件。最终版的转接标记写入宿主私有目录，原生会话日志保持 SDK 原格式。原生的原题、工具结果、续答消息及回合结束构成关闭凭据。
 
+四个场景连续通过 8 轮。macOS 全量通过 235 项，Linux arm64 通过 158 项、跳过 77 项。从 `9c001418b4e7df465c8b525b327cd731d574492a` 构建 207 文件的独立包，SHA-256 为 `44364c63afe6defe0aa074f78a82303300030725aaca9bf714322406f64113da`。安装目录复跑原生题和平台卡共 15 项，逐文件摘要再次核对一致。关闭前台题转接时，用默认设置演练同机隔离 HTTPS 的分步升级与回退。三个阶段各保留一条原生收件，原回执 `701d3aa6-3289-4964-8cd8-09f21bd264fa` 一致。复跑 `python3 -B -m rewrite.release_check --repository . --component worker-pair --previous a7f14002fb3be1d6a940367c31912ed35144ffa5 --new 9c001418b4e7df465c8b525b327cd731d574492a`。
+
 本机 DSH SDK 的 `dsh-experimental-worktree` 随附说明和实现只在宿主归档后尝试移除干净的专属工作树。该删除会保留有订阅会话或改动的工作树，也不查询在其中运行的进程。读写工位的旧派发仍需专属运行环境和可核验的停止与清理能力，继续标为待核。
 
 启用只读模式的独立 DSH SDK 工位已经能用真实原生记录确认原派发停止并清理。取消或转派到达后，宿主撤下同一派发的排队更新，中止确切的原回合，另一个排队的私聊仍收到一次。Worker 取得清理证明后，由原生 `worker_report` 经 W04 清除旧派发。已转派的工单仍由新派发持有。Router 实际记账后丢回执，Worker 重开沿用原派发查回，清理不会生成正式成果。通用未启用模式和出现未核实工具的回合仍待核，测试写工具被原生执行前的限制挡下，文件未产生。宿主为实际安装的 DSH SDK，模型为脚本驱动。读写工作区的清理仍待实测。[清理与回执证据](evidence/dsh-read-only-cleanup.json) · [待核反例](evidence/dsh-native-cleanup-refusal.json)
