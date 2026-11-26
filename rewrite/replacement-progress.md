@@ -4,6 +4,10 @@
 
 ## 检查点与证据
 
+Windows DSH 图文已走通原有 Worker 附件与发卡流程。独立 `dsh-adapter --local-tls` 进程给指定原生会话投递一次原图和原文，重投返回原收件。纯图、原样空格及换行均通过。故意清掉本地缓存和适配器收件后从 Worker 重取，原生输入不增加。普通文件 `交接.md` 的 322000 字节由原生附件服务读回，摘要与入站相同。测试模型沿用原图作为输出组件，飞书替身收到前卡、单图、后卡。故意漏发图回执后，两次发送尝试同为 `om_3`，留下一个图片消息。Windows 的 Python 适配器与宿主均拒绝普通账户可读的缓存对象。真实模型读普通文件、产生新图及飞书云端尚待验。[Windows 图文](evidence/windows-dsh-media.json) · [macOS 图文](evidence/dsh-local-tls-media-macos.json)
+
+验收提交 `9dce72a310e13b1b524eb93b2e4669e45af9a323`。Windows DSH 6 项、Codex 与安装 10 项、Router 和 Worker 两套回退通过。macOS 安装包含 271 文件，校验后复跑 DSH 24 项通过，归档 SHA-256 为 `b020c728b050da1407d5eb9a4f126687b13b48511d876c69a4bc1ee13c2b5aa3`。Linux arm64 在媒体实现提交 `14141fc21d8a063fbe10661986c93466c6013a80` 全量 187 项通过、109 项按环境跳过。 macOS 首次全量有一项既有 Codex 审批用例等待原生终止超时。该用例随后单独复跑四次通过，未改审批代码。验收提交的 macOS 全量复跑为 293 项通过、4 项按环境跳过。
+
 Windows DSH 双向 TLS 工位已验只读取消和转派。原派发收到控制请求，宿主确认原生回合中止并撤下该派发的排队更新，普通私聊只进入一次。Tool W04 以原派发交回，丢取消回执后 Worker 重建按原号查回。转派前后新工位持单完全一致。缺少原生清理凭据或出现未获准工具时，旧派发仍待清理。宿主拒绝其他普通用户可读的限制账本。Windows 和 macOS 冷重开后查回同一清理凭据。把已关闭的原生会话和 SQLite 限制账本连同适配器库复制到有独立端口及证书的新目录，清理凭据逐字段相同，原生模型请求仍为零。官方 DSH AgentLoop、Router 和 Worker 实跑，模型和接替工位为夹具。[Windows 实测](evidence/windows-dsh-read-only-cleanup.json) · [macOS 实测](evidence/dsh-local-tls-readonly-macos.json) · [迁移说明](router-rehearsal.md#重做版五组件的离线恢复)
 
 实现与隔离恢复验收提交 `c70cc3c9d89957067b86b67e7e6bfa76a9a20620`。Windows DSH 专项 4 项、Codex 与安装专项 10 项、Router 和 Worker 两套回退通过。macOS 同提交构建 269 文件归档，逐文件读回后复跑 DSH 专项 4 项通过，归档 SHA-256 为 `33133789f5f43cdf78e2bde48d6c59906c7728d701798e35e8947fec731e039b`。初始实现 `9ff6651dc9ba544a09a316a3f1716e971985f898` 的 macOS 全量 291 项通过、4 项按环境跳过，Linux arm64 全量 187 项通过、108 项按环境跳过。Windows 测试目录为当前账号配置继承权限，宿主保留拒绝共享账本的校验。Windows Desktop 界面、真实模型及飞书、原生可写工作区和图文仍待验。

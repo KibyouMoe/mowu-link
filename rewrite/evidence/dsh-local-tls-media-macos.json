@@ -1,0 +1,149 @@
+{
+  "tested_revision": "9dce72a310e13b1b524eb93b2e4669e45af9a323",
+  "installed_release": {
+    "sha256": "b020c728b050da1407d5eb9a4f126687b13b48511d876c69a4bc1ee13c2b5aa3",
+    "files": 271,
+    "passed": 24
+  },
+  "dsh_release": "0.2.2-rc.5",
+  "media": {
+    "boundary": "Actual DSH run loop and attachment storage; Feishu and model provider are fixtures",
+    "captioned_receipt": {
+      "delivery_id": "chat-om_dsh_caption",
+      "digest": "9e19f036b8b383f6141141d0965abc3249bf1d1e8d956468c66da5adfb7eb68a",
+      "media_sha256": [
+        "e77617115ffe6399c0f4714c72aa32eefeb22fbdf45b1167a4ddb64e213b4007"
+      ],
+      "native_id": "mowulink-e3df76ea7985f412c9756c614058e01052cf6fe9ae4468d38562c9cfc0769a63",
+      "session": "dsh-native-media",
+      "turn_id": "1/1"
+    },
+    "download_count": 3,
+    "image_only_receipt": {
+      "delivery_id": "chat-om_dsh_image",
+      "digest": "67a603af7f2bcdfb2eb65b2787e7ed2203e52bad25c24e3eb8e5cfa9180a8cd0",
+      "media_sha256": [
+        "e77617115ffe6399c0f4714c72aa32eefeb22fbdf45b1167a4ddb64e213b4007"
+      ],
+      "native_id": "mowulink-67f53e14d7eeec0e074b1e734a276f33acd4de9827a8b1312e06cadd893447c1",
+      "session": "dsh-native-media",
+      "turn_id": "12/2"
+    },
+    "native_file_observations": [
+      {
+        "inputId": "mowulink-37722c0659af34d623756358018e26cd3894d647f6edfdb3c82bb9d190936f40",
+        "name": "交接.md",
+        "sha256": "d189aaf46dd8f0c9d98f70ab86f0886380f5311f8598a638240b08a1d4b2a311",
+        "size": 322000
+      }
+    ],
+    "ordered_feishu_fixture_messages": [
+      {
+        "kind": "interactive",
+        "message_id": "om_1"
+      },
+      {
+        "kind": "interactive",
+        "message_id": "om_2"
+      },
+      {
+        "kind": "image",
+        "message_id": "om_3"
+      },
+      {
+        "kind": "interactive",
+        "message_id": "om_4"
+      },
+      {
+        "kind": "interactive",
+        "message_id": "om_5"
+      },
+      {
+        "kind": "interactive",
+        "message_id": "om_6"
+      }
+    ],
+    "ordinary_file_receipt": {
+      "delivery_id": "chat-om_dsh_file",
+      "digest": "aa8184e5fad7ffd16a01d7f02c38261d94dcad600fe7d60c747939c94bae950c",
+      "media_sha256": [
+        "d189aaf46dd8f0c9d98f70ab86f0886380f5311f8598a638240b08a1d4b2a311"
+      ],
+      "native_id": "mowulink-37722c0659af34d623756358018e26cd3894d647f6edfdb3c82bb9d190936f40",
+      "session": "dsh-native-media",
+      "turn_id": "20/3"
+    },
+    "original_input_count": 3,
+    "original_media_receipt_recovered_after_cache_loss": true,
+    "output_image_send_attempts": [
+      "om_3",
+      "om_3"
+    ],
+    "output_image_sha256": "e77617115ffe6399c0f4714c72aa32eefeb22fbdf45b1167a4ddb64e213b4007",
+    "provider_messages": [
+      {
+        "caption": "  图上有哪些细节？\n同一条原文。 ",
+        "images": [
+          {
+            "sha256": "e77617115ffe6399c0f4714c72aa32eefeb22fbdf45b1167a4ddb64e213b4007",
+            "size": 70
+          }
+        ],
+        "partTypes": [
+          "text",
+          "image"
+        ]
+      },
+      {
+        "caption": "",
+        "images": [
+          {
+            "sha256": "e77617115ffe6399c0f4714c72aa32eefeb22fbdf45b1167a4ddb64e213b4007",
+            "size": 70
+          }
+        ],
+        "partTypes": [
+          "image"
+        ]
+      }
+    ],
+    "reply_cards": 3,
+    "session": "dsh-native-media",
+    "shared_media_rejected_by_both_sides": false,
+    "untrusted_cache_native_inputs_added": 0
+  },
+  "adapter_process": {
+    "caption": "实际适配器进程与固定会话",
+    "image_sha256": "e77617115ffe6399c0f4714c72aa32eefeb22fbdf45b1167a4ddb64e213b4007",
+    "input_receipt": {
+      "delivery_id": "chat-om_dsh_process",
+      "digest": "dd89705972ec47796026f97893a38be24410b6164b4e04999037369ca331d22a",
+      "media_sha256": [
+        "e77617115ffe6399c0f4714c72aa32eefeb22fbdf45b1167a4ddb64e213b4007"
+      ],
+      "native_id": "mowulink-0d0d8e24ed391a1278f15d3a489e12adf58b2c27e68424ce315dd370fffd3543",
+      "session": "dsh-native-process-media",
+      "turn_id": "1/1"
+    },
+    "native_input_count": 1,
+    "ordered_feishu_fixture_messages": [
+      {
+        "kind": "interactive",
+        "message_id": "om_1"
+      },
+      {
+        "kind": "interactive",
+        "message_id": "om_2"
+      },
+      {
+        "kind": "image",
+        "message_id": "om_3"
+      },
+      {
+        "kind": "interactive",
+        "message_id": "om_4"
+      }
+    ],
+    "separate_adapter_process": true
+  }
+}
