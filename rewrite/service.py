@@ -103,7 +103,7 @@ def serve(args,stack):
         else:
             link = LocalLink(args.runtime_dir,use_tls=args.local_tls)
             native = DshHost(args.runtime_dir,link=link)
-            media = None if args.local_tls else NativeFiles(args.runtime_dir/"media",client)
+            media = NativeFiles(args.runtime_dir/"media",client)
             adapter = HostAdapter(args.db,native,args.session,media)
             activation = DshActivation(native,args.session) if args.resume_on_handoff else None
             callbacks = tool_listener(args.runtime_dir,adapter,client,link=link)

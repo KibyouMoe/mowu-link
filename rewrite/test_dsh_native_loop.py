@@ -443,6 +443,157 @@ class NativeProcess(unittest.TestCase):
             Path(output).write_text(json.dumps({"cases":cases},ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
 
 
+    def native_media(self,*,use_tls=False):
+        session = "dsh-native-media"
+        directory = (self.local_tls_directory() if use_tls else
+                     Path(self.enterContext(tempfile.TemporaryDirectory(dir="/tmp",prefix="mldsh-media-"))))
+        link = LocalLink(directory,use_tls=use_tls)
+
+        def host(_path,_name):
+            port = DshHost(directory,link=link)
+            port.session = session
+            return port
+        clock = Clock()
+        loop = self.enterContext(Loop.isolated(clock,host_factory=host))
+        service = WorkerService(loop.worker,clock)
+        platform_key,adapter_key = guid(),guid()
+        url = self.open_worker(service,{platform_key:"platform/oguri",adapter_key:"adapter/oguri"})
+        platform,adapter = Client(url,platform_key),Client(url,adapter_key)
+        loop.adapter.media_store = NativeFiles(Path(directory)/"media",adapter)
+        relay = DshDisplay(loop.adapter,adapter,"oguri")
+        downloads = []
+        sample_file = b"# DSH isolated handoff\n"*14000
+        def fetch(mid,key,kind,limit):
+            downloads.append((mid,key,kind))
+            return sample_file if kind=="file" else PNG
+        inbound = Inbound(loop.root/"feishu.db",platform,fetch,"app","trainer","test-chat")
+        sink = PlatformFixture()
+        views = Views(loop.root/"views.db",platform,sink,"test-chat","小栗帽",clock)
+        caption = "  图上有哪些细节？\n同一条原文。 "
+        post = {"zh_cn":{"content":[[{"tag":"text","text":caption},{"tag":"img","image_key":"img_fixture"}]]}}
+        def record(mid,kind,content):
+            return inbound.record("app","user","trainer",{"chat_id":"test-chat","chat_type":"p2p","message_type":kind,
+                "message_id":mid,"content":json.dumps(content,ensure_ascii=False)})
+        mode = "media-echo" if use_tls else "media"
+        with self.start_native(directory,session,mode,use_tls=use_tls) as native:
+            relay.collect()
+            one = record("om_dsh_caption","post",post)
+            proof = inbound.deliver(one)
+            self.assertEqual(inbound.deliver(record(one,"post",post)),proof)
+            self.read_native(native,"read")
+            two = record("om_dsh_image","image",{"image_key":"img_fixture"})
+            pure = inbound.deliver(two)
+            self.assertEqual(inbound.deliver(two),pure)
+            if use_tls:
+                three = record("om_dsh_file","file",{"file_key":"file_fixture","file_name":"交接.md"})
+                document = inbound.deliver(three)
+                self.assertEqual(inbound.deliver(three),document)
+                expected_file = hashlib.sha256(sample_file).hexdigest()
+                self.assertEqual(document["media_sha256"],[expected_file])
+            observed = self.read_native(native,"read")
+            sha = hashlib.sha256(PNG).hexdigest()
+            expected_requests = [
+                {"caption":caption,"images":[{"sha256":sha,"size":len(PNG)}],"partTypes":["text","image"]},
+                {"caption":"","images":[{"sha256":sha,"size":len(PNG)}],"partTypes":["image"]},
+            ]
+            inputs = [proof["native_id"],pure["native_id"]]
+            if use_tls:
+                inputs.append(document["native_id"])
+                self.assertEqual(observed["nativeFiles"],[{"inputId":document["native_id"],"name":"交接.md",
+                                                          "sha256":expected_file,"size":len(sample_file)}])
+                materialized = observed["mediaRequests"][-1]
+                self.assertIn(f'[File "交接.md" ({len(sample_file)} bytes, sha256:{expected_file[:8]})',materialized["caption"])
+                self.assertEqual(materialized["partTypes"],["text"])
+                self.assertEqual(materialized["images"],[])
+                self.assertEqual(observed["mediaRequests"][:-1],expected_requests)
+            else:
+                self.assertEqual(observed["mediaRequests"],expected_requests)
+            self.assertEqual(observed["inputs"],inputs)
+            self.assertEqual(proof["media_sha256"],[sha])
+            self.assertEqual(pure["media_sha256"],[sha])
+            for _ in range(8):
+                relay.collect()
+                relay.flush()
+            if use_tls:
+                self.recover_media_receipt(directory,loop,proof,observed,native)
+                send = sink.send
+                sent_image = []
+                def drop_image_ack(chat,kind,body,key):
+                    mid = send(chat,kind,body,key)
+                    if kind=="image":
+                        sent_image.append(mid)
+                        if len(sent_image)==1:
+                            raise ConnectionError("isolated image send acknowledgement lost")
+                    return mid
+                sink.send = drop_image_ack
+                with self.assertRaisesRegex(ConnectionError,"isolated image send acknowledgement lost"):
+                    views.poll()
+                clock.advance(5)
+            views.poll()
+            finals = [item[2] for item in sink.messages.values() if item[1]=="interactive"
+                      and item[2]["header"]["title"]["content"]=="小栗帽-回复"]
+            self.assertEqual(len(finals),3 if use_tls else 2)
+            def body(card):
+                return card["elements"][0]["text"]["content"]
+            if use_tls:
+                sent = list(sink.messages.values())
+                self.assertEqual([r[1] for r in sent],["interactive","interactive","image",
+                                                          "interactive","interactive","interactive"])
+                self.assertEqual(sent_image,[sent[2][0],sent[2][0]])
+                self.assertEqual([body(sent[i][2]) for i in (1,3)],["图前","图后"])
+                self.assertEqual(body(finals[0]),"图后")
+                self.assertEqual(body(finals[-1]),"Local fixture received 0 image(s).")
+                self.assertEqual(sink.images,[PNG])
+                self.assertEqual(views.poll(),0)
+                self.assertTrue(len({r[0] for r in sent})==len(sent))
+                self.reject_shared_media(directory,loop,proof,observed,native)
+            else:
+                self.assertEqual(sink.images,[])
+            self.assertEqual(body(finals[1]),"Local fixture received 1 image(s).")
+            platform_items = platform.request("GET","worker/display")["items"]
+            self.assertEqual([item["event"]["text"] for item in platform_items if item["event"]["kind"]=="native_input"],[caption])
+            self.assertEqual(len(downloads),3 if use_tls else 2)
+            self.assertEqual(loop.hermes.tasks()["items"],[])
+            self.evidence = {"session":session,"captioned_receipt":proof,"image_only_receipt":pure,
+                "provider_messages":expected_requests,"download_count":len(downloads),
+                "original_input_count":len(observed["inputs"]),"reply_cards":len(finals),
+                "boundary":"Actual DSH run loop and attachment storage; Feishu and model provider are fixtures",
+                **({"ordered_feishu_fixture_messages":[{"message_id":r[0],"kind":r[1]} for r in sent],
+                    "ordinary_file_receipt":document,"native_file_observations":observed["nativeFiles"],
+                    "output_image_sha256":hashlib.sha256(sink.images[0]).hexdigest(),
+                    "output_image_send_attempts":sent_image,"original_media_receipt_recovered_after_cache_loss":True,
+                    "shared_media_rejected_by_both_sides":os.name=="nt",
+                    "untrusted_cache_native_inputs_added":0} if use_tls else {})}
+        output = os.environ.get("MOWULINK_TEST_DSH_MEDIA_EVIDENCE") if use_tls else None
+        if output:
+            Path(output).write_text(encode(self.evidence)+"\n",encoding="utf-8")
+
+    def recover_media_receipt(self,directory,loop,proof,observed,native):
+        did = proof["delivery_id"]
+        with loop.adapter.db.transaction() as db:
+            old = db.execute("SELECT payload FROM intents WHERE delivery_id=?",(did,)).fetchone()[0]
+            db.execute("UPDATE intents SET receipt=NULL,native_id=NULL WHERE delivery_id=?",(did,))
+        (directory/"media"/proof["media_sha256"][0]).unlink()
+        self.assertEqual(loop.adapter.deliver(did,json.loads(old)),proof)
+        self.assertEqual(self.read_native(native,"read"),observed)
+
+    def reject_shared_media(self,directory,loop,proof,observed,native):
+        with loop.adapter.db.transaction() as db:
+            original = db.execute("SELECT payload FROM intents WHERE delivery_id=?",(proof["delivery_id"],)).fetchone()[0]
+        payload = json.loads(original)
+        cache = directory/"media"/proof["media_sha256"][0]
+        if os.name=="nt":
+            icacls = Path(os.environ["SystemRoot"])/"System32/icacls.exe"
+            subprocess.run([icacls,cache,"/grant","*S-1-5-32-545:(R)"],check=True,capture_output=True)
+            with self.assertRaisesRegex(Fault,"invalid_media_object"):
+                loop.adapter.media_store.prepare(payload["attachments"])
+        else:
+            cache.chmod(0o644)
+        payload["text"] = "隔离测试。共享缓存必须拒绝。"
+        with self.assertRaisesRegex(Fault,"invalid_media_object"):
+            loop.native.deliver(proof["session"],"disallowed-cache",payload,hashlib.sha256(encode(payload).encode()).hexdigest())
+        self.assertEqual(self.read_native(native,"read")["inputs"],observed["inputs"])
+
 
 @unittest.skipUnless(EXE.is_file() or os.environ.get("MOWULINK_TEST_DSH_BINARY"),
                      "installed DSH SDK or verified packaged Windows executable required")
@@ -490,6 +641,9 @@ class LocalTlsLoop(NativeProcess):
         output = os.environ.get("MOWULINK_TEST_DSH_EVIDENCE")
         if output:
             Path(output).write_text(encode(self.evidence)+"\n",encoding="utf-8")
+
+    def test_captioned_image_and_reply_order_over_mutual_tls(self):
+        self.native_media(use_tls=True)
 
     def test_read_only_cancel_and_transfer_over_mutual_tls(self):
         self.read_only_cleanup(use_tls=True)
@@ -3332,66 +3486,7 @@ exec {docker} "$@"
                 "boundary":"Native DSH goal tools, actual scheduled continuation and Router probes; scripted local model"}
 
     def test_actual_dsh_loop_gives_the_same_feishu_caption_and_original_image_to_its_provider(self):
-        session = "dsh-native-media"
-        directory = self.enterContext(tempfile.TemporaryDirectory(dir="/tmp",prefix="mldsh-media-"))
-        def host(_path,_name):
-            port = DshHost(Path(directory))
-            port.session = session
-            return port
-        clock = Clock()
-        loop = self.enterContext(Loop.isolated(clock,host_factory=host))
-        service = WorkerService(loop.worker,clock)
-        platform_key,adapter_key = guid(),guid()
-        url = self.open_worker(service,{platform_key:"platform/oguri",adapter_key:"adapter/oguri"})
-        platform,adapter = Client(url,platform_key),Client(url,adapter_key)
-        loop.adapter.media_store = NativeFiles(Path(directory)/"media",adapter)
-        relay = DshDisplay(loop.adapter,adapter,"oguri")
-        downloads = []
-        def fetch(mid,key,kind,limit):
-            downloads.append((mid,key,kind))
-            return PNG
-        inbound = Inbound(loop.root/"feishu.db",platform,fetch,"app","trainer","test-chat")
-        sink = PlatformFixture()
-        views = Views(loop.root/"views.db",platform,sink,"test-chat","小栗帽",clock)
-        caption = "  图上有哪些细节？\n同一条原文。 "
-        post = {"zh_cn":{"content":[[{"tag":"text","text":caption},{"tag":"img","image_key":"img_fixture"}]]}}
-        def record(mid,kind,content):
-            return inbound.record("app","user","trainer",{"chat_id":"test-chat","chat_type":"p2p","message_type":kind,
-                "message_id":mid,"content":json.dumps(content,ensure_ascii=False)})
-        with self.start_native(directory,session,"media") as native:
-            relay.collect()
-            one = record("om_dsh_caption","post",post)
-            proof = inbound.deliver(one)
-            self.assertEqual(inbound.deliver(record(one,"post",post)),proof)
-            self.read_native(native,"read")
-            two = record("om_dsh_image","image",{"image_key":"img_fixture"})
-            pure = inbound.deliver(two)
-            self.assertEqual(inbound.deliver(two),pure)
-            observed = self.read_native(native,"read")
-            sha = hashlib.sha256(PNG).hexdigest()
-            self.assertEqual(observed["mediaRequests"],[
-                {"caption":caption,"images":[{"sha256":sha,"size":len(PNG)}],"partTypes":["text","image"]},
-                {"caption":"","images":[{"sha256":sha,"size":len(PNG)}],"partTypes":["image"]},
-            ])
-            self.assertEqual(observed["inputs"],[proof["native_id"],pure["native_id"]])
-            self.assertEqual(proof["media_sha256"],[sha])
-            self.assertEqual(pure["media_sha256"],[sha])
-            for _ in range(8):
-                relay.collect()
-                relay.flush()
-            views.poll()
-            rows = [item[2] for item in sink.messages.values()]
-            finals = [r for r in rows if r["header"]["title"]["content"]=="小栗帽-回复"]
-            self.assertEqual(len(finals),2)
-            self.assertTrue(all("Local fixture received 1 image(s)." in json.dumps(f) for f in finals))
-            platform_items = platform.request("GET","worker/display")["items"]
-            self.assertEqual([item["event"]["text"] for item in platform_items if item["event"]["kind"]=="native_input"],[caption])
-            self.assertEqual(len(downloads),2)
-            self.assertEqual(loop.hermes.tasks()["items"],[])
-            self.evidence = {"session":session,"captioned_receipt":proof,"image_only_receipt":pure,
-                "provider_messages":observed["mediaRequests"],"download_count":len(downloads),
-                "original_input_count":len(observed["inputs"]),"reply_cards":len(finals),
-                "boundary":"Actual DSH run loop and attachment storage; Feishu and model provider are fixtures"}
+        self.native_media()
 
     def test_dsh_peer_image_and_native_reply_travel_on_the_same_private_chain(self):
         session = "dsh-native-peer"

@@ -17,25 +17,28 @@ export function privateDir(directory) {
   }
 }
 
-async function verifiedCredentials(directory,admissions) {
-  if (process.platform==='win32') {
-    if (!/^[A-Za-z]:[\\/]/.test(directory)) throw new Error('private_runtime_required');
-    const system = process.env.SystemRoot;
-    if (!system || !path.isAbsolute(system)) throw new Error('private_runtime_required');
-    const powershell = path.join(system,'System32','WindowsPowerShell','v1.0','powershell.exe');
-    const check = fileURLToPath(new URL('./check-local-link.ps1',import.meta.url));
-    try {
-      const args = ['-NoProfile','-NonInteractive','-File',check,directory];
-      if (admissions) args.push('-CheckAdmissions');
-      await run(powershell,args,{windowsHide:true,timeout:15000,maxBuffer:65536});
-    } catch (error) {
-      if (error.killed) throw new Error('dsh_link_acl_check_timeout');
-      if (error.code===4) throw new Error('dsh_admissions_file_inheritance_required');
-      throw new Error(error.code===3 ? 'private_dsh_link_required' : 'dsh_link_acl_check_unavailable');
-    }
-  } else {
-    privateDir(directory);
+export async function privateWindowsRuntime(directory,{admissions=false,mediaDigests=[]}={}) {
+  if (!/^[A-Za-z]:[\\/]/.test(directory)) throw new Error('private_runtime_required');
+  const system = process.env.SystemRoot;
+  if (!system || !path.isAbsolute(system)) throw new Error('private_runtime_required');
+  const powershell = path.join(system,'System32','WindowsPowerShell','v1.0','powershell.exe');
+  const check = fileURLToPath(new URL('./check-local-link.ps1',import.meta.url));
+  try {
+    const args = ['-NoProfile','-NonInteractive','-File',check,directory];
+    if (admissions) args.push('-CheckAdmissions');
+    if (mediaDigests.length) args.push('-MediaDigests',mediaDigests.join(','));
+    await run(powershell,args,{windowsHide:true,timeout:mediaDigests.length ? 5000 : 15000,maxBuffer:65536});
+  } catch (error) {
+    if (error.code===5) throw new Error('invalid_media_object');
+    if (error.killed) throw new Error('dsh_link_acl_check_timeout');
+    if (error.code===4) throw new Error('dsh_admissions_file_inheritance_required');
+    throw new Error(error.code===3 ? 'private_dsh_link_required' : 'dsh_link_acl_check_unavailable');
   }
+}
+
+async function verifiedCredentials(directory,admissions) {
+  if (process.platform==='win32') await privateWindowsRuntime(directory,{admissions});
+  else privateDir(directory);
   return names.map(name=>{
     const file = path.join(directory,name);
     const info = lstatSync(file);

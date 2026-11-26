@@ -155,7 +155,6 @@ class DshHost:
         return self.delivery("lookup",session,did,payload,digest)
 
     def media_operation(self, operation, session, did, payload, digest, files):
-        require(not self.link.ports,409,"dsh_local_tls_media_unavailable")
         expected = [self.directory/"media"/item["sha256"] for item in payload["attachments"]]
         require(files==expected,409,"dsh_media_cache_mismatch")
         return self.delivery(operation,session,did,payload,digest)

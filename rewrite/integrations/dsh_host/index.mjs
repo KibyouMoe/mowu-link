@@ -24,7 +24,7 @@ function check(condition, code) {
   if (!condition) throw new Error(code);
 }
 
-async function input(request, ctx, agent, directory, allowMedia) {
+async function input(request, ctx, agent, directory) {
   const {session, delivery_id, payload_json, digest} = request;
   check(typeof payload_json === 'string' && sha(payload_json) === digest, 'delivery_digest_mismatch');
   check(typeof delivery_id === 'string' && delivery_id.length > 0, 'invalid_delivery_id');
@@ -34,7 +34,6 @@ async function input(request, ctx, agent, directory, allowMedia) {
   if (payload.kind === 'trainer_answer') check(payload.session === session, 'wrong_native_session');
   const text = ['chat','queued_chat'].includes(payload.kind) ? payload.text : '魔物链接投递\n' + payload_json;
   const media = payload.attachments;
-  check(allowMedia || !media?.length, 'dsh_local_tls_media_unavailable');
   check(typeof text === 'string' && (text.trim() || media?.length), 'empty_input');
   const parts = text ? [{type:'text',text}] : [];
   const content = media?.length ? await admitMedia(ctx,agent,directory,media,parts,request.operation==='deliver') : parts;
@@ -153,7 +152,7 @@ async function stopPrivateTurn(ctx,agent,compacting,bound) {
   throw new Error('native_stop_unconfirmed');
 }
 
-export async function bindHost(ctx, session, directory, catalog=[], selected=null, readOnly=false, foreground=false, workspaceConfig=null, {allowMedia=true,admissions}={}) {
+export async function bindHost(ctx, session, directory, catalog=[], selected=null, readOnly=false, foreground=false, workspaceConfig=null, {admissions}={}) {
   check(typeof session === 'string' && session.length > 0, 'missing_native_session');
   const controller = ctx.get('sessionController');
   const agent = selected ?? (await controller.resolveAgent(session)).agent;
@@ -227,7 +226,7 @@ export async function bindHost(ctx, session, directory, catalog=[], selected=nul
         return changeModel(ctx,agent,request,bound,()=>ownEvents(ctx,agent));
       }
       check(['deliver','lookup','deliver-control'].includes(request.operation), 'unsupported_operation');
-      const expected = await input(request,ctx,agent,directory,allowMedia);
+      const expected = await input(request,ctx,agent,directory);
       const before = agent.session.seq;
       const history = await persisted(ctx,agent);
       const seen = receipt(request,expected,history);
@@ -420,7 +419,7 @@ export async function apply(ctx, {session, directory, catalog_sessions=[], relay
   if (managed) privateDir(managed_sessions_dir);
   const admissions = portableAdmissions ? await sqliteAdmissions(directory) : undefined;
   if (admissions) ctx.effect(() => admissions.close);
-  const cleanupOptions = {allowMedia:!local_tls,admissions};
+  const cleanupOptions = {admissions};
   const defaultSelection = new_session_selection ? selection(new_session_selection) : null;
   const catalog = catalogSessions(catalog_sessions);
   const scopes = new Map([[session,{port:null,selected:null,opening:null}]]);

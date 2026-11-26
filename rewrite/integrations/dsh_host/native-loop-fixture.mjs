@@ -43,7 +43,7 @@ const standalone = mode==='standalone-trainer-question';
 const foregroundRelay = mode.startsWith('foreground-relay');
 const usesForeground = foregroundRelay || mode==='foreground-question';
 const usesGoals = ['goals','goal-driver','formal-goal','cold-resume-goal'].includes(mode);
-const usesMedia = ['media','peer-media','handoff'].includes(mode);
+const usesMedia = ['media','media-echo','peer-media','handoff'].includes(mode);
 const usesApprovals = ['command-approvals','command-approvals-reopen'].includes(mode);
 const modelRequests = [];
 const catalogSessions = [];
@@ -283,6 +283,16 @@ class LocalModel extends LlmAdapter {
         images.push({sha256:createHash('sha256').update(image.data).digest('hex'),size:image.data.length});
       }
       mediaRequests.push({caption:text,images,partTypes:message.content.map(part=>part.type)});
+      if (mode==='media-echo' && text && images.length) {
+        const image = message.content.find(part=>part.type==='image');
+        const output = [{type:'text',text:'图前'},{type:'image',attachment:image.attachment},{type:'text',text:'图后'}];
+        for (const [index,block] of output.entries()) {
+          yield {type:'block-start',index,blockType:block.type};
+          yield {type:'block-end',index,block};
+        }
+        yield {type:'finish',reason:{kind:'stop'}};
+        return;
+      }
       if (mode==='peer-media' && command==='peer' && !this.submitted.has('peer-history')) {
         this.submitted.set('peer-history',true);
         assert.ok(tools?.some(tool=>tool.name==='worker_peer_inbox'));
@@ -803,7 +813,22 @@ async function formalScenario(agent) {
     if (line==='second-round') await secondRound.promise;
     await agent.whenIdle();
     const events = await readEvents(agent);
-    const inputs = events.filter(e=>e.type==='user/message' && e.data.source.kind==='user').map(e=>e.data.id);
+    const users = events.filter(e=>e.type==='user/message' && e.data.source.kind==='user').map(e=>e.data);
+    const inputs = users.map(user=>user.id);
+    const nativeFiles = [];
+    if (mode==='media-echo') {
+      for (const user of users) {
+        for (const part of user.content.filter(block=>block.type==='file')) {
+          const hash = createHash('sha256');
+          let size = 0;
+          for await (const chunk of ctx.get('attachments').readFileStream(part.attachment)) {
+            hash.update(chunk);
+            size+=chunk.length;
+          }
+          nativeFiles.push({inputId:user.id,name:part.attachment.name,sha256:hash.digest('hex'),size});
+        }
+      }
+    }
     const calls = events.filter(e=>e.type==='tool/call').map(e=>e.data);
     const results = events.filter(e=>e.type==='tool/result').map(e=>e.data.message);
     const turns = events.filter(e=>e.type==='turn/end').map(e=>e.data);
@@ -819,7 +844,7 @@ async function formalScenario(agent) {
     const approvals = usesApprovals ? events.filter(event=>['approval/asked','approval/decided'].includes(event.type))
       .map(({type,seq,data})=>({type,seq,data})) : [];
     console.log(JSON.stringify({session,inputs,calls,results,turns,modelRequests,rounds,compactEvents,replies,continued,
-      mediaRequests,approvals,foregroundProviderCloses,...(standalone ? {standaloneAnswers} : {}),
+      mediaRequests,approvals,foregroundProviderCloses,...(mode==='media-echo' ? {nativeFiles} : {}),...(standalone ? {standaloneAnswers} : {}),
       inbox:mode==='private-stop' ? agent.inbox.nextTurn.map(message=>message.id) : [],
       liveSessions:mode==='catalog' ? ctx.get('agents').list().map(agent=>agent.session.id) : []}));
   }

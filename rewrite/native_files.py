@@ -3,6 +3,7 @@ import hashlib
 import os
 from pathlib import Path
 import re
+import stat
 
 from .messages import valid_guid
 from .storage import Database, require
@@ -18,7 +19,35 @@ class NativeFiles:
         self.worker = worker
         self.router_files = router_files
         self.route = "attachments/" if router_files else "worker/media/files/"
-        self.lock = Database(self.root / ".download.lock", "")
+        guard = self.root/".download.lock"
+        if os.name == "nt":
+            self._check_windows_cache()
+            with self._open(guard,"ab"):
+                pass
+        self.lock = Database(guard, "")
+
+    def _check_windows_cache(self):
+        from .windows_acl import private_directory
+
+        info = self.root.lstat()
+        require(stat.S_ISDIR(info.st_mode) and not info.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT
+                and private_directory(self.root),403,"invalid_media_cache")
+
+    @staticmethod
+    def _open(path, mode):
+        stream = open(path,mode,opener=lambda p,flags:os.open(p,flags|getattr(os,"O_NOFOLLOW",0),0o600))
+        if os.name == "nt":
+            from .windows_acl import private_file
+
+            try:
+                info = path.lstat()
+                require(stat.S_ISREG(info.st_mode) and not info.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT
+                        and os.path.samestat(info,os.fstat(stream.fileno()))
+                        and private_file(stream.fileno()),403,"invalid_media_object")
+            except BaseException:
+                stream.close()
+                raise
+        return stream
 
     def prepare(self, media):
         require(isinstance(media,list) and media,422,"invalid_native_media")
@@ -34,6 +63,10 @@ class NativeFiles:
 
     def fetch(self, item):
         # Serialize writers across processes. A restart can reuse fully written prefix bytes.
+        if os.name == "nt":
+            self._check_windows_cache()
+            with self._open(self.lock.path,"rb"):
+                pass
         with self.lock.transaction():
             return self._download(item)
 
@@ -43,12 +76,12 @@ class NativeFiles:
         partial = path.with_suffix(".part")
         require(not path.is_symlink() and not partial.is_symlink(),409,"adapter_cache_corrupt")
         if path.exists():
-            with path.open("rb") as existing:
+            with self._open(path,"rb") as existing:
                 require(path.stat().st_size == size and hashlib.file_digest(existing,"sha256").hexdigest() == sha,
                         409,"adapter_cache_corrupt")
             return path
         route = self.route + item["attachment_id"]
-        with open(partial,"ab+",opener=lambda p,f:os.open(p,f,0o600)) as stream:
+        with self._open(partial,"ab+") as stream:
             pos = stream.tell()
             if pos > size:
                 stream.truncate(0)
