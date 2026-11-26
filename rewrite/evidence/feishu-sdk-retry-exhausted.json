@@ -1,0 +1,173 @@
+{
+  "consecutive_recoveries": 10,
+  "cooldowns_seconds": [
+    [
+      0.253,
+      0.253
+    ],
+    [
+      0.252,
+      0.253
+    ],
+    [
+      0.252,
+      0.252
+    ],
+    [
+      0.253,
+      0.253
+    ],
+    [
+      0.253,
+      0.253
+    ],
+    [
+      0.251,
+      0.253
+    ],
+    [
+      0.252,
+      0.253
+    ],
+    [
+      0.253,
+      0.251
+    ],
+    [
+      0.253,
+      0.253
+    ],
+    [
+      0.252,
+      0.253
+    ]
+  ],
+  "discovery_timeout_regression": {
+    "cloud_platform": false,
+    "disconnect": "TCP closed without a WebSocket close frame",
+    "discovery_retry_seconds": 0.502,
+    "discovery_timeout_seconds": 0.5,
+    "durable_messages": [
+      "om_before",
+      "om_after"
+    ],
+    "endpoint_requests": 3,
+    "event_acknowledgements": [
+      [
+        "before",
+        200
+      ],
+      [
+        "before",
+        200
+      ],
+      [
+        "after",
+        200
+      ]
+    ],
+    "host": "fixture",
+    "network": "actual loopback HTTP and WebSocket",
+    "original_worker_receipt_kept": true,
+    "same_receiver_process": true,
+    "sdk_version": "1.7.5",
+    "websocket_connections": 2,
+    "worker_native_inputs": 2
+  },
+  "explicit_platform_stop": {
+    "blocked_observation_seconds": 3,
+    "cloud_platform": false,
+    "endpoint_requests": 1,
+    "event_acknowledgements": [
+      [
+        "before",
+        200
+      ]
+    ],
+    "fault": "reconnect_disabled",
+    "receiver_alive": true,
+    "recovery_observed": false,
+    "sdk_version": "1.7.5",
+    "websocket_connections": 1
+  },
+  "raw_sdk": {
+    "blocked_observation_seconds": 3,
+    "cloud_platform": false,
+    "endpoint_requests": 2,
+    "event_acknowledgements": [
+      [
+        "before",
+        200
+      ]
+    ],
+    "fault": "retry_exhausted",
+    "receiver_alive": true,
+    "recovery_observed": false,
+    "sdk_version": "1.7.5",
+    "websocket_connections": 1
+  },
+  "recovery": {
+    "cloud_platform": false,
+    "disconnect": "TCP closed without a WebSocket close frame",
+    "durable_messages": [
+      "om_before",
+      "om_after"
+    ],
+    "endpoint_requests": 4,
+    "event_acknowledgements": [
+      [
+        "before",
+        200
+      ],
+      [
+        "before",
+        200
+      ],
+      [
+        "after",
+        200
+      ]
+    ],
+    "exhausted_rounds": 2,
+    "host": "fixture",
+    "network": "actual loopback HTTP and WebSocket",
+    "original_worker_receipt_kept": true,
+    "retry_cooldowns_seconds": [
+      0.252,
+      0.253
+    ],
+    "same_receiver_process": true,
+    "sdk_version": "1.7.5",
+    "websocket_connections": 2,
+    "worker_native_inputs": 2
+  },
+  "tcp_close_regression": {
+    "cloud_platform": false,
+    "disconnect": "TCP closed without a WebSocket close frame",
+    "durable_messages": [
+      "om_before",
+      "om_after"
+    ],
+    "endpoint_requests": 2,
+    "event_acknowledgements": [
+      [
+        "before",
+        200
+      ],
+      [
+        "before",
+        200
+      ],
+      [
+        "after",
+        200
+      ]
+    ],
+    "host": "fixture",
+    "network": "actual loopback HTTP and WebSocket",
+    "original_worker_receipt_kept": true,
+    "sdk_version": "1.7.5",
+    "websocket_connections": 2,
+    "worker_native_inputs": 2
+  }
+}

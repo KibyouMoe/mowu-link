@@ -4,11 +4,13 @@
 
 ## 检查点与证据
 
+有限重连次数用完时，飞书收件进程记一条不可用日志，等待至少 30 秒且不短于平台下发的间隔，再经原 SDK 重新连。隔离端点两轮均回 HTTP 503，随后同一进程成功连上。断线前的消息已经送进宿主，平台后来重发只查回原 Worker 收件凭据，新消息也只投了一次。明确下发零次重连时仅有首次取址，日志标明停止收件。官方 SDK 1.7.5、实际本地 HTTP/WebSocket 与 Worker 路径，平台和宿主使用夹具。[实测](evidence/feishu-sdk-retry-exhausted.json) · [复跑](README.md#飞书入口)
+
 飞书 SDK 断线后，重连取地址的 HTTP 请求没有响应时，原始 SDK 1.7.5 进程仍活着，连续观察 3 秒没有发出下一次请求。配置连接和读超时后，在本地以 0.5 秒测试值重连，同一进程继续收件。旧消息发两次，新消息发一次，三次均回 200，Worker 宿主共收到两条原输入。实际 SDK、HTTP、WebSocket、Worker 和 SQLite，飞书平台及宿主为夹具。保留飞书下发的重试间隔，平台进程使用 15 秒的连接和读超时。未验飞书云端重连策略。[断线证据](evidence/feishu-sdk-discovery-timeout.json) · [复跑](README.md#飞书入口)
 
 macOS 的取址恢复连续通过 10 轮，间隔 0.501–0.504 秒，Linux arm64 独立复验 0.508 秒且原事件仍只入队一次。SDK 题卡夹具经实际发卡路径建立存档，重复点卡只留一条答案，关卡后提交原表单被拒。macOS 全量通过 249 项，Linux arm64 通过 169 项、跳过 80 项。从 `1461cde39fc17ca612e97a89d63107aa6d6d3b0b` 构建 224 文件独立包，SHA-256 为 `e510f7163015034e84e5e4c157ee052228e872b1238120f0fc5b0a6e56d02c3a`。安装目录通过 SDK 收发和断线复验及 31 项相关回归，逐文件摘要一致。
 
-另用本地端点设定只重试一次并回 HTTP 503，SDK 后台抛出 `ServerUnreachableException` 后进程仍存活。随后观察 3 秒，没有第三次取址。该分支需让运行管理端明确获知收件已停，再验证恢复和原收件去重。[SDK 重连实现](https://github.com/larksuite/oapi-sdk-python/blob/v1.7.5/lark_oapi/ws/client.py)
+原 SDK 对照中，本地端点设定只重试一次并回 HTTP 503，SDK 后台抛出 `ServerUnreachableException` 后进程仍存活。随后观察 3 秒，没有第三次取址。[SDK 重连实现](https://github.com/larksuite/oapi-sdk-python/blob/v1.7.5/lark_oapi/ws/client.py)
 
 飞书图片资源上传与会话展示分开确认。上传开始前保存原图摘要和退避时间，快照恢复后沿用同一等待进度。平台替身连续两次存图但丢编号，之后会话仍只有图前卡、单图、图后卡各一条。待核上传从 1 变 0。三次调用上传了相同原始字节，平台可能留下两份未引用资源。隔离 Worker HTTP 与 SQLite 实跑，飞书、宿主和时钟用夹具。该场景连续通过 10 轮。[实测](evidence/feishu-image-upload-restore.json) · [恢复与复跑](router-rehearsal.md#飞书输出回执与换绑)
 

@@ -1,5 +1,6 @@
 """Feishu long-connection entry for an explicitly configured Worker private chat."""
 import argparse
+import asyncio
 from contextlib import contextmanager
 import logging
 from pathlib import Path
@@ -106,11 +107,27 @@ def discovery_timeout(seconds):
         sdk.requests = requests
 
 
-def start_long_connection(app_id,app_secret,dispatcher,*,discovery_seconds=15,**options):
+def start_long_connection(app_id,app_secret,dispatcher,*,discovery_seconds=15,retry_cooldown=30,**options):
     import lark_oapi as lark
+    from lark_oapi.ws.exception import ServerUnreachableException
+
+    class RecoveringClient(lark.ws.Client):
+        async def _reconnect(self):
+            while True:
+                try:
+                    return await super()._reconnect()
+                except ServerUnreachableException:
+                    # The SDK raises inside its receiver task and leaves the main process idle.
+                    # Keep one receiver and let the SDK enforce each retry round and handshake.
+                    if self._reconnect_count==0:
+                        logging.error("Feishu receiving stopped: endpoint disabled reconnects")
+                        raise
+                    delay = max(retry_cooldown,self._reconnect_interval)
+                    logging.warning("Feishu receiving unavailable: SDK retry round exhausted; retry in %g seconds",delay)
+                    await asyncio.sleep(delay)
 
     with discovery_timeout(discovery_seconds):
-        lark.ws.Client(app_id,app_secret,event_handler=dispatcher,**options).start()
+        RecoveringClient(app_id,app_secret,event_handler=dispatcher,**options).start()
 
 
 def serve(cfg):

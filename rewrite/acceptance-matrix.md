@@ -22,7 +22,7 @@
 
 | 用例 | 已有隔离证据 | 仍须在实际两端看到 |
 | --- | --- | --- |
-| A01 上线 | 首次上线和断后恢复各记一条，重复轮询未新增。原生飞书 SDK 用本地 TCP 断链和取址请求无响应两种故障测过，同一进程重连，原事件只进 Worker 一次。[取址恢复](evidence/feishu-sdk-discovery-timeout.json) | 两次 Feishu 在线卡及实际消息号。 |
+| A01 上线 | 首次上线和断后恢复各记一条，重复轮询未新增。原生飞书 SDK 用本地 TCP 断链、取址请求无响应、两轮重试耗尽三种故障测过，同一进程重连，原事件只进 Worker 一次。平台明确关闭重连时记停并保留收件账本。[取址恢复](evidence/feishu-sdk-discovery-timeout.json) · [耗尽重试恢复](evidence/feishu-sdk-retry-exhausted.json) | 两次 Feishu 在线卡、实际消息号和云端重连行为。 |
 | A02 纯文 | DSH 真循环收到本地平台原文。Codex Desktop 有独立会话原生收件，输入走的是 Desktop 驱动。 | 从真人测试飞书到固定 Codex 会话，原文、回复、身份顺序一致。 |
 | A03 纯图 | DSH 和独立 Codex App Server 的原生请求均包含测试原图完整字节，模型由本地脚本替代。 | 真模型识图和 Feishu 纯图入站，Codex Desktop 独立会话同验。 |
 | A04 同条图文 | DSH 与独立 Codex App Server 原生输入包含原样空格、换行和原图 SHA-256，重投原消息无第二条。 | 真模型按同条原文指认图像细节。 |

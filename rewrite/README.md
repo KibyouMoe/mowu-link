@@ -236,9 +236,11 @@ DSH 的自动换绑使用同一套 Worker 交接。先在独立 DSH 宿主插件
 
 独立平台入口 `python3 -m rewrite.feishu_client --config <专用测试配置>` 使用飞书官方 Python SDK。配置是仅属当前用户的 JSON，显式提供 `app_id`、`app_secret`、`trainer_open_id`、`chat_id`、平台队列的 `database` 和指向 Worker 的 `worker_connection`。普通私聊及其文件保存在 Worker 端，断开 Router 仍能投递。使用配置前需要单独的测试应用和会话。无需账号即可运行 `rewrite.test_feishu_inbound` 或官方事件解析复验 `rewrite.feishu_sdk_check`。[平台消息资源说明](https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/guide/faq) [飞书 Python SDK](https://github.com/larksuite/oapi-sdk-python)
 
-平台进程对获取长连接地址的 HTTP 请求设置 15 秒的连接和读超时，触发后由 SDK 按飞书下发的间隔重试。握手、收件和回执继续使用官方 SDK。该接入已用 `lark-oapi==1.7.5` 验证，升级 SDK 后复跑下面两项再切换。[SDK 地址发现实现](https://github.com/larksuite/oapi-sdk-python/blob/v1.7.5/lark_oapi/ws/client.py)
+平台进程对获取长连接地址的 HTTP 请求设置 15 秒的连接和读超时，触发后由 SDK 按飞书下发的间隔重试。有限重试耗尽时记录收件不可用，等待至少 30 秒且不短于平台下发的重连间隔，再由同一 SDK 实例开始下一轮。明确下发零次重试时记为停止收件。握手、收件和回执继续使用官方 SDK。该接入已用 `lark-oapi==1.7.5` 验证，升级 SDK 后复跑以下故障场景再切换。[SDK 重连实现](https://github.com/larksuite/oapi-sdk-python/blob/v1.7.5/lark_oapi/ws/client.py)
 
 在带飞书 SDK 的测试 Python 中运行 `python3 -B -m rewrite.feishu_reconnect_check`，可断开临时 WebSocket 的底层 TCP，观察 SDK 重新取地址并建立新连接。加 `--stall-discovery` 可让首次重连的取地址请求一直没有响应，确认同进程会再次取址。加 `--stall-discovery --raw-sdk` 复跑原 SDK 的三秒阻塞对照。旧事件重发后仍只有一条本地输入，新事件照常交给 Worker。无需云端账号，服务端和原生宿主均由隔离测试提供。[断连记录](evidence/feishu-sdk-discovery-timeout.json)
+
+同一命令加 `--exhaust-retries` 模拟两轮重连各遇一次 HTTP 503，确认记录两次暂停，同进程重连，旧事件保留断线前已取得的 Worker 收件凭据。加 `--exhaust-retries --raw-sdk` 看原 SDK 停止取址的对照。加 `--platform-stop` 验证平台给出零次重试时没有再次拨号，日志明确显示停止收件。夹具缩短等待间隔，真实平台另验。[耗尽重试记录](evidence/feishu-sdk-retry-exhausted.json)
 
 飞书平台进程的本地队列遇到暂时数据库锁或无法核对的上游响应，会保留入箱和卡片游标并继续处理。Worker 回执缺字段时先保留待核，沿用同一消息号查回。
 
