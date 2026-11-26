@@ -101,7 +101,8 @@ class HostAdapter:
             return writer(self.session,kind,value)
         return writer(self.session,kind,value,expected_route=expected_route)
 
-    def deliver(self, did, payload):
+    def deliver(self, did, payload, *, session=None):
+        require(session is None or session==self.session,409,"wrong_native_session")
         if payload.get("kind") == "queued_chat":
             require(payload.get("session")==self.session,409,"queued_session_mismatch")
             require(self.session_info()["next_turn"],422,"native_next_turn_unavailable")
@@ -156,6 +157,18 @@ class HostAdapter:
         else:
             receipt = self.lookup_receipt(did,payload,digest)
         return self.record_receipt(did,payload,digest,receipt)
+
+    def lookup_delivery(self,did,payload,*,session):
+        require(session==self.session,409,"wrong_native_session")
+        with self.db.transaction() as db:
+            intent = db.execute("SELECT session,payload,digest,receipt FROM intents WHERE delivery_id=?",(did,)).fetchone()
+        if not intent:
+            return None
+        require(intent["session"]==session and intent["payload"]==encode(payload),409,"delivery_conflict")
+        if intent["receipt"]:
+            return json.loads(intent["receipt"])
+        digest = intent["digest"]
+        return self.record_receipt(did,payload,digest,self.lookup_receipt(did,payload,digest))
 
     def lookup_receipt(self,did,payload,digest):
         media = payload.get("attachments")

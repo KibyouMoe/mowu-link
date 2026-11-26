@@ -4,6 +4,8 @@
 
 ## 检查点与证据
 
+普通私聊经 Worker 重启或更换适配器时，同飞书消息号已确认为原会话则返回原回执；首次投递状态未知时只查回。隔离实测更换为另一会话，三条旧消息（含无绑定的历史记录）都未写入新会话，只有新消息进入。即使原会话的适配器账本空了也没有二次写入；恢复原账本后查到两条原回执。复跑 `python3 -m unittest -v rewrite.test_mainline.Mainline.test_chat_replay_stays_with_original_native_session_after_restart rewrite.test_service.Service.test_pinned_worker_rejects_same_authenticated_adapter_when_session_differs`。SQLite、HTTP/TLS 与重启接续实测，宿主为夹具。主动换绑仍待验。
+
 Worker 支持用 `--adapter-session` 固定 HTTPS 目标会话。专用请求路径会在服务端逐次核会话；适配器地址及认证相同但原生会话换了，忙闲和发送均回 409，错误会话零输入。指定正确测试会话才取得本机收件。复跑 `python3 -m unittest -v rewrite.test_service`。这里验证的是进程、TLS 与绑定拒绝，宿主为夹具。
 
 DSH 在 W03 的回包之后、原生收件之前突然变忙时，会在入原生队列前明确拒收。适配器只对明确没发起写入的状态允许后续重试。真宿主复跑两支：自然空闲后原派发只收一次；此间先收到 Router 取消，宿主只收取消指令，普通对话照常完成，原派发执行从未开始。复跑 `python3 -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_native_race_after_w03_never_prequeues_a_formal_task`。[原生事实](evidence/dsh-native-admission-race.json)。实际 DSH 与隔离 Router，本地模型。

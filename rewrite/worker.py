@@ -22,6 +22,9 @@ CREATE TABLE IF NOT EXISTS outbox (
     assignment_id TEXT PRIMARY KEY, body TEXT NOT NULL, receipt TEXT
 );
 CREATE TABLE IF NOT EXISTS chats (message_id TEXT PRIMARY KEY, text TEXT NOT NULL, reply TEXT);
+CREATE TABLE IF NOT EXISTS chat_deliveries (
+    message_id TEXT PRIMARY KEY, session TEXT NOT NULL, receipt TEXT
+);
 CREATE TABLE IF NOT EXISTS peers (
     message_id TEXT PRIMARY KEY, direction TEXT NOT NULL, peer_id TEXT NOT NULL,
     body TEXT NOT NULL, receipt TEXT
@@ -43,7 +46,9 @@ CREATE TABLE IF NOT EXISTS cleanup_reports (
 
 class AgentAdapter(Protocol):
     def busy(self) -> bool: ...
-    def deliver(self, did: str, payload: dict) -> dict | None: ...
+    def bound_session(self) -> str: ...
+    def deliver(self, did: str, payload: dict, *, session: str | None = None) -> dict | None: ...
+    def lookup_delivery(self, did: str, payload: dict, *, session: str) -> dict | None: ...
     def origin(self, native_id: str) -> dict: ...
 
 
@@ -270,10 +275,42 @@ class Worker:
                 require(db.execute("SELECT text FROM chats WHERE message_id=?", (message_id,)).fetchone()[0] == text,
                         409, "chat_conflict")
                 media = worker_media.associate(db,self.worker_id,message_id,ids,inserted,attachment_kinds)
+                original = db.execute("SELECT session,receipt FROM chat_deliveries WHERE message_id=?",
+                                      (message_id,)).fetchone()
+                if original and original["receipt"]:
+                    return json.loads(original["receipt"])
+                if inserted:
+                    session = self.adapter.bound_session()
+                    db.execute("INSERT INTO chat_deliveries VALUES (?,?,NULL)",(message_id,session))
             payload = {"kind":"chat","message_id":message_id,"text":text}
             if media:
                 payload["attachments"] = media
-            return self.adapter.deliver("chat-" + message_id, payload)
+            did = "chat-" + message_id
+            if original:
+                session = original["session"]
+                if session != self.adapter.bound_session():
+                    return None
+            if inserted:
+                receipt = self.adapter.deliver(did,payload,session=session)
+            else:
+                # The previously selected adapter may have lost its ledger.
+                # Only recover a native receipt; never write a second time.
+                if original is None:
+                    session = self.adapter.bound_session()
+                receipt = self.adapter.lookup_delivery(did,payload,session=session)
+            if receipt:
+                digest = hashlib.sha256(encode(payload).encode()).hexdigest()
+                require(isinstance(receipt,dict) and receipt.get("session")==session
+                        and receipt.get("delivery_id")==did and receipt.get("digest")==digest
+                        and isinstance(receipt.get("native_id"),str) and receipt["native_id"],
+                        409,"host_receipt_mismatch")
+                with self.db.transaction() as db:
+                    recorded = db.execute("""INSERT INTO chat_deliveries VALUES (?,?,?)
+                        ON CONFLICT(message_id) DO UPDATE SET receipt=excluded.receipt
+                        WHERE session=excluded.session AND (receipt IS NULL OR receipt=excluded.receipt)""",
+                        (message_id,session,encode(receipt))).rowcount
+                    require(recorded,409,"host_receipt_mismatch")
+            return receipt
 
     def send_peer(self, mid, target, text, reply_to=None, attachment_ids=None, attachment_kinds=None):
         require(isinstance(target,str) and target.strip() and not any(c in target for c in "/?#%"),

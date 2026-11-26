@@ -1,11 +1,12 @@
+import hashlib
 import json
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 
 from .adapter import HostAdapter
-from .devloop import Loop, agent_report
-from .storage import Fault, guid
+from .devloop import FixtureHost, Loop, agent_report
+from .storage import Fault, encode, guid
 from .wire import Client
 from .worker import Worker
 
@@ -296,10 +297,15 @@ class Mainline(unittest.TestCase):
                 self.inputs = {}
             def busy(self):
                 return False
-            def deliver(self, did, payload):
+            def bound_session(self):
+                return "other-agent-session"
+            def deliver(self, did, payload, *, session=None):
+                if session is not None:
+                    assert session == self.bound_session()
                 native = "alternate/" + did
                 self.inputs.setdefault(native, payload)
-                return {"native_id": native}
+                return {"native_id":native,"session":self.bound_session(),"delivery_id":did,
+                        "digest":hashlib.sha256(encode(payload).encode()).hexdigest()}
             def origin(self, native_id):
                 return self.inputs[native_id]
         adapter = OtherAdapter()
@@ -312,6 +318,48 @@ class Mainline(unittest.TestCase):
         native, p = next((n, p) for n, p in adapter.inputs.items() if p["kind"] == "task")
         self.assertTrue(self.w.report(native, **self.args(tid, p["assignment_id"]))["recorded"])
         self.assertEqual(self.m.inspect(tid)["task"]["state"], "completed_reported")
+
+    def test_chat_replay_stays_with_original_native_session_after_restart(self):
+        complete = self.w.chat("received","already there")
+        native_write = self.loop.native.deliver
+        def lose_reply(*args):
+            native_write(*args)
+            return None
+        self.loop.native.deliver = lose_reply
+        self.assertIsNone(self.w.chat("pending","written but unconfirmed"))
+        self.loop.native.deliver = native_write
+        with self.w.db.transaction() as db:
+            # Simulate pre-upgrade Worker state for rows with and without a known native intent.
+            db.execute("INSERT INTO chats(message_id,text) VALUES ('legacy-unknown','old without proof')")
+            db.execute("INSERT INTO chats(message_id,text) VALUES ('legacy-proven','old delivery')")
+        old_payload = {"kind":"chat","message_id":"legacy-proven","text":"old delivery"}
+        self.loop.native.deliver = lose_reply
+        self.assertIsNone(self.loop.adapter.deliver("chat-legacy-proven",old_payload))
+        self.loop.native.deliver = native_write
+
+        native = FixtureHost(self.loop.root/"other-native.db","other-native-session")
+        adapter = HostAdapter(self.loop.root/"other-adapter.db",native,native.session)
+        replaced = Worker(self.w.db.path,self.w.worker_id,self.w.router,adapter)
+        self.assertEqual(replaced.chat("received","already there"),complete)
+        self.fault("chat_conflict",lambda: replaced.chat("received","changed"))
+        self.assertIsNone(replaced.chat("pending","written but unconfirmed"))
+        self.assertIsNone(replaced.chat("legacy-unknown","old without proof"))
+        self.assertIsNone(replaced.chat("legacy-proven","old delivery"))
+        self.assertEqual(native.entries(),[])
+        self.assertEqual(replaced.chat("fresh","new destination")["session"],native.session)
+        self.assertEqual(len(native.entries()),1)
+
+        # A fresh ledger for even the same session must never resubmit an uncertain chat.
+        empty_ledger = HostAdapter(self.loop.root/"empty-adapter.db",self.loop.native,self.loop.native.session)
+        recovered = Worker(self.w.db.path,self.w.worker_id,self.w.router,empty_ledger)
+        self.assertIsNone(recovered.chat("pending","written but unconfirmed"))
+
+        for mid, body in (("pending","written but unconfirmed"),("legacy-proven","old delivery")):
+            proof = self.w.chat(mid,body)
+            self.assertEqual(proof["session"],self.loop.native.session)
+            self.assertEqual(replaced.chat(mid,body),proof)
+        self.assertEqual(len(self.loop.native.entries()),3)
+        self.assertEqual(len(native.entries()),1)
 
     def test_wrong_native_session_receipt_stays_unconfirmed(self):
         tid = self.create()

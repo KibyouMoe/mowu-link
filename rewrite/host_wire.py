@@ -17,11 +17,13 @@ class RemoteAdapter:
             raise ValueError("expected a native session identifier")
         self.expected_session = expected_session
 
-    def request(self, method, path, *args):
+    def request(self, method, path, *args, native_session=None):
         try:
-            if self.expected_session:
+            require(native_session is None or self.expected_session in (None,native_session),409,"wrong_native_session")
+            session = self.expected_session or native_session
+            if session:
                 route = "host/bound/"+path.removeprefix("host/")
-                return self.client.request(method,route,*args,headers={SESSION_HEADER:self.expected_session})
+                return self.client.request(method,route,*args,headers={SESSION_HEADER:session})
             return self.client.request(method,path,*args)
         except Fault as err:
             if err.status in (401,403) and err.code in ("unauthenticated","wrong_adapter_owner"):
@@ -78,8 +80,11 @@ class RemoteAdapter:
             body["expected_route"] = expected_route
         return self.request("POST","host/model-selection",body)
 
-    def deliver(self, did, payload):
-        return self.request("POST", "host/deliver", {"delivery_id":did, "payload":payload})["receipt"]
+    def deliver(self, did, payload, *, session=None):
+        return self.request("POST","host/deliver",{"delivery_id":did,"payload":payload},native_session=session)["receipt"]
+
+    def lookup_delivery(self,did,payload,*,session):
+        return self.request("POST","host/find-chat",{"delivery_id":did,"payload":payload},native_session=session)["receipt"]
 
     def origin(self, native_id):
         return self.request("POST", "host/origin", {"native_id":native_id})["origin"]
@@ -144,6 +149,12 @@ def serve_adapter(adapter, worker_id, identities, address, context):
                     "task","task_update","task_probe","task.shelved","task.cancel","task.transfer_out",
                     "question_answer","chat","queued_chat","peer"), 422, "invalid_host_input")
                 result = {"receipt": adapter.deliver(string(body,"delivery_id"),payload)}
+            case "POST","/v1/host/find-chat":
+                payload = body.get("payload")
+                did = string(body,"delivery_id")
+                require(isinstance(payload,dict) and payload.get("kind")=="chat"
+                        and did=="chat-"+string(payload,"message_id"),422,"invalid_host_input")
+                result = {"receipt":adapter.lookup_delivery(did,payload,session=adapter.bound_session())}
             case "POST","/v1/host/origin":
                 result = {"origin":adapter.origin(string(body,"native_id"))}
             case "POST","/v1/host/turn":

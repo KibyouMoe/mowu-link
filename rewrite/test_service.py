@@ -160,7 +160,14 @@ class Service(unittest.TestCase):
             old.busy()
         with self.assertRaisesRegex(Fault,"wrong_native_session"):
             old.deliver(guid(),{"kind":"chat","text":"Must remain outside the wrong session"})
+        unpinned = RemoteAdapter(Client(url,adapter_token,cert))
+        with self.assertRaisesRegex(Fault,"wrong_native_session"):
+            unpinned.deliver(guid(),{"kind":"chat","text":"Chosen by an earlier read"},session="old-pinned-session")
         self.assertEqual(FixtureHost(native_db,"new-unintended-session").entries(),[])
         current = RemoteAdapter(Client(url,adapter_token,cert),"new-unintended-session")
-        proof = current.deliver(guid(),{"kind":"chat","text":"Dedicated test input"})
+        body = {"kind":"chat","message_id":"test-native","text":"Dedicated test input"}
+        self.assertIsNone(current.lookup_delivery("chat-test-native",body,session="new-unintended-session"))
+        self.assertEqual(FixtureHost(native_db,"new-unintended-session").entries(),[])
+        proof = current.deliver("chat-test-native",body)
+        self.assertEqual(current.lookup_delivery("chat-test-native",body,session="new-unintended-session"),proof)
         self.assertEqual(proof["session"],"new-unintended-session")
