@@ -90,14 +90,26 @@ class LinkHealth(unittest.TestCase):
         self.service.step()
         self.assertTrue(self.manager.workers()["items"][0]["adapter_connected"])
 
-    def test_task_cards_use_worker_acceptance_then_host_control_receipts(self):
+    def test_task_cards_use_worker_acceptance_independently_of_host_receipts(self):
         unknown = self.manager.create(guid(),"Offline","Do not display as delivered","other")
         self.assertFalse(self.events("task"))
         task = self.dispatched()
         tid = task["task_id"]
+        original = self.worker.adapter.deliver
+        def disconnected(did,payload):
+            if payload["kind"]=="task_update":
+                original(did,payload)
+                return None
+            if payload["kind"]=="task.cancel":
+                raise Fault(503,"adapter_connection_unconfirmed",True)
+            return original(did,payload)
+        self.worker.adapter.deliver = disconnected
         status = self.manager.inspect(tid)["task"]
         updated = self.manager.update(guid(),tid,status["revision"],{"instructions":"Revised"})
         self.service.step()
+        self.assertEqual(len(self.events("task")),2)
+        self.assertIn("工位已收到工单更新",self.events("task")[-1]["text"])
+        self.assertEqual([p["kind"] for p,_ in self.loop.native.entries()],["task","task_update"])
         self.manager.act(guid(),tid,updated["revision"],"cancel",reason="Operator requested")
         self.service.step()
         self.service.step()
@@ -106,4 +118,13 @@ class LinkHealth(unittest.TestCase):
         self.assertEqual([t in event["text"] for t,event in zip(("Original","Revised","Operator requested"),events)],
                          [True,True,True])
         self.assertTrue(all(tid in event["text"] and unknown["task_id"] not in event["text"] for event in events))
+        self.assertEqual(events[2]["session"],"")
+        self.assertEqual([p["kind"] for p,_ in self.loop.native.entries()],["task","task_update"])
         self.assertEqual(self.manager.inspect(tid)["task"]["state"],"working")
+        self.worker.adapter.deliver = original
+        self.clock.advance(5)
+        self.service.step()
+        self.service.step()
+        self.assertEqual(self.events("task"),events)
+        self.assertEqual([p["kind"] for p,_ in self.loop.native.entries()],["task","task_update","task.cancel"])
+        self.assertEqual(self.worker.hold()["held_task_id"],tid)

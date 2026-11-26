@@ -65,20 +65,21 @@ class Worker:
                     "held_assignment_id": row["assignment_id"] if row else None}
 
     def send_task_input(self, delivery_id, payload):
-        receipt = self.adapter.deliver(delivery_id,payload)
         kind = payload["kind"]
-        if receipt and kind in ("task_update","task.cancel","task.transfer_out","task.shelved"):
+        if kind in ("task_update","task.cancel","task.transfer_out","task.shelved"):
             tid = payload["task_id"]
             if kind == "task_update":
                 labels = {"title":"标题","instructions":"要求"}
-                text = "工单已更新\n"+"\n".join(labels[k]+"："+v for k,v in payload["changes"].items())
+                text = "工位已收到工单更新\n"+"\n".join(labels[k]+"："+v for k,v in payload["changes"].items())
             else:
-                label = {"task.cancel":"取消指令","task.transfer_out":"转接指令","task.shelved":"工单已搁置"}[kind]
-                text = label+"\n"+payload["reason"]
+                label = {"task.cancel":"取消指令","task.transfer_out":"转接指令","task.shelved":"工单搁置通知"}[kind]
+                text = "工位已收到"+label+"\n"+payload["reason"]
+            notice = "task-"+delivery_id
             with self.db.transaction() as db:
-                display.append(db,{"event_id":"task-"+delivery_id,"kind":"task","session":receipt.get("session",""),
-                                  "turn_id":receipt.get("turn_id",""),"text":text+"\n"+tid})
-        return receipt
+                # Past releases may already have projected the same delivery with host metadata.
+                if not db.execute("SELECT 1 FROM display_events WHERE event_id=?",(notice,)).fetchone():
+                    display.append(db,{"event_id":notice,"kind":"task","session":"","turn_id":"","text":text+"\n"+tid})
+        return self.adapter.deliver(delivery_id,payload)
 
     def connect(self):
         with self.lock:

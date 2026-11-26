@@ -4,6 +4,8 @@
 
 ## 检查点与证据
 
+工位收到原单更新、取消、转接和搁置即保存飞书提示。原生收件有独立凭据，控制提示也不会当作已经停止或清理。隔离实测，更新输入已进宿主但回包丢失、取消还没进宿主时，飞书待发队列均已有对应正文。恢复后原生各一条，飞书无重复，Router 仍待取消清理。复跑 `python3 -m unittest -v rewrite.test_link_health.LinkHealth.test_task_cards_use_worker_acceptance_independently_of_host_receipts`。真实工单与 Worker，宿主和飞书为夹具。
+
 DSH 的正式题已跑通原生 `worker_ask`、Router 回题和原派发续办。答复回包故意丢失，原生会话只有一条答复输入；`continue_requested` 保留同一个派发和持单。溪流更新原单后，下一原生回合自行用 W04 交成果，Router 待验收，工位释放。飞书展示中的两条题卡事件均归溪流，训练员无作答入口。复跑 `python3 -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_native_formal_question_returns_to_its_assignment_and_keeps_ownership_until_completion`。[正式题答复与回执](evidence/dsh-native-work-question.json)。真实 DSH 工具执行器和隔离 Router，模型、经理输入为测试驱动。
 
 DSH `/stop` 已走真实 AgentLoop。普通回合留下原生中止记录，原生排队内容在下一次输入后照常入场。丢回包时显示待核，同号重投不影响之后的回合。实际隔离 Router 下发正式单后，飞书命令和宿主端私聊停止入口都拒绝停止工单，原 Router 取消路径仍可中止并保留清理待核。复跑 `python3 -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_stop_targets_only_current_private_turn_and_never_replays_a_lost_result`。[原生停止记录](evidence/dsh-native-stop.json)。宿主真实，模型为本地夹具。
