@@ -77,6 +77,46 @@ class AppServerHost:
         self.rpc.request("turn/interrupt",{"threadId":session,"turnId":turn_id})
         return self.stop_turn(session,receipt,start=False)
 
+    def public_turn(self,session,turn_id):
+        """Project a selected finished turn. The caller chooses the new turns to publish."""
+        thread = self.thread(session,include_turns=True)
+        turn = next((item for item in thread["turns"] if item.get("id")==turn_id),None)
+        require(turn,409,"native_turn_unconfirmed")
+        if turn["status"] not in ("completed","interrupted","failed"):
+            return []
+        results = []
+        items = turn["items"]
+        for index,item in enumerate(items):
+            kind = item.get("type")
+            if kind=="userMessage":
+                if (item.get("clientId") or "").startswith("mowulink-"):
+                    continue
+                blocks = [part["text"] for part in item["content"] if part.get("type")=="text"]
+                text = "\n".join(blocks)
+                if text.startswith("魔物链接投递\n"):
+                    continue
+                display = "native_input"
+            elif kind=="agentMessage":
+                text = item["text"]
+                phase = item.get("phase")
+                final = turn["status"]=="completed" and (phase=="final_answer" or (phase is None and index==len(items)-1))
+                display = "final" if final else "progress"
+            else:
+                continue
+            if text.strip():
+                key = hashlib.sha256(encode([session,turn_id,string(item,"id"),display]).encode()).hexdigest()
+                results.append({"event_id":"codex-"+key,"session":session,"turn_id":turn_id,"kind":display,"text":text})
+        return results
+
+    def publish_public_turn(self,session,turn_id,worker):
+        receipts = []
+        for event in self.public_turn(session,turn_id):
+            ack = worker.request("POST","worker/display",event)
+            require(isinstance(ack,dict) and ack.get("event_id")=="host-"+event["event_id"]
+                    and type(ack.get("seq")) is int,502,"wrong_display_ack")
+            receipts.append(ack)
+        return receipts
+
     def report_call(self, packet, worker):
         """Accept only App Server requests received on this process's dedicated transport."""
         call = packet.get("params")

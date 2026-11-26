@@ -15,7 +15,9 @@ import unittest
 from .agent_tools import REPORT_TOOL
 from .codex_app_server import AppServerHost
 from .devloop import Loop
+from .feishu_output import Views
 from .storage import Fault, encode, guid
+from .test_feishu_output import PlatformFixture
 from .test_mainline import Clock
 from .wire import Client
 from .worker_service import WorkerService
@@ -78,12 +80,12 @@ class Provider(BaseHTTPRequestHandler):
         items = body["input"]
         markers = [block["text"] for item in items if item.get("role")=="user"
                    for block in item.get("content",[]) if block.get("text","").startswith("魔物链接投递\n")]
-        payload = json.loads(markers[-1].split("\n",1)[1])["payload"]
+        payload = json.loads(markers[-1].split("\n",1)[1])["payload"] if markers else None
         calls = sum(item.get("type")=="function_call_output" for item in items)
         names = [tool.get("name") for tool in body.get("tools",[])]
         self.server.observed.append(("worker_report" in names,calls))
         response_id = "resp_fixture_"+str(len(self.server.observed))
-        if calls<2:
+        if payload and calls<2:
             arguments = {"task_id":payload["task_id"],"assignment_id":payload["assignment_id"],
                          "summary":"Isolated App Server result"}
             item = {"type":"function_call","id":"fc_fixture_"+str(calls),"name":"worker_report",
@@ -219,6 +221,9 @@ class CodexAppServer(unittest.TestCase):
         notice, = loop.manager_wire.frames(0)
         self.assertEqual(notice["payload"]["task_id"],tid)
         self.assertEqual(provider.observed,[(True,0),(True,1),(True,2)])
+        public = host.public_turn(sid,turn["id"])
+        self.assertEqual([(item["kind"],item["text"]) for item in public],
+                         [("final","Local model fixture accepted the receipt.")])
         self.evidence = {"cli_version":started["cliVersion"],"thread_id":sid,"task_id":tid,"assignment_id":aid,"receipt":original,
                          "native_client_input_id":inputs[0]["clientId"],
                          "native_tool_calls":native_calls,"router_receipts":receipts,
@@ -326,3 +331,42 @@ class CodexAppServer(unittest.TestCase):
                          "state_after":state["task"]["state"],"wrong_turn_rejected":True,
                          "cleanup_pending":state["pending_cleanup"],
                          "boundary":"Native App Server, one scripted local model turn. Only native interruption is confirmed."}
+
+    def test_native_app_server_conversation_uses_standard_feishu_cards(self):
+        rpc = self.enterContext(isolated_app_server(self.root,self.origin))
+        sid = rpc.request("thread/start",{"cwd":self.root,"ephemeral":False})["thread"]["id"]
+        host = AppServerHost(rpc,sid)
+        host.session = sid
+        loop = self.enterContext(Loop.isolated(host_factory=lambda _path,_name:host))
+        service = WorkerService(loop.worker)
+        token,platform_token = guid(),guid()
+        url = self.enterContext(running(service.listen({token:"adapter/oguri",platform_token:"platform/oguri"},
+                                                       ("127.0.0.1",0),None)))
+        callback = Client(url,token)
+        trainer_text = "  这句从原生会话发出。\n保留换行。  "
+        turn = rpc.request("turn/start",{"threadId":sid,"input":[{"type":"text","text":trainer_text,"text_elements":[]}],
+                                        "clientUserMessageId":"trainer-test-input"})["turn"]["id"]
+        until = time.monotonic()+14
+        while True:
+            event = rpc.event(until)
+            if event.get("method")=="turn/completed":
+                self.assertEqual(event["params"]["turn"]["status"],"completed")
+                break
+        first = host.publish_public_turn(sid,turn,callback)
+        self.assertEqual(host.publish_public_turn(sid,turn,callback),first)
+        platform = Client(url,platform_token)
+        display = platform.request("GET","worker/display")["items"]
+        self.assertEqual([(row["event"]["kind"],row["event"]["text"]) for row in display],
+                         [("native_input",trainer_text),("final","Local model fixture accepted the receipt.")])
+        sink = PlatformFixture()
+        views = Views(loop.root/"codex-views.db",platform,sink,"isolated-private-chat","小栗帽")
+        self.assertEqual((views.poll(),views.poll()),(2,0))
+        messages = list(sink.messages.values())
+        titles = [message[2]["header"]["title"]["content"] for message in messages]
+        self.assertEqual(titles,["小栗帽·原生输入","小栗帽-回复"])
+        self.assertEqual([message[1] for message in messages],["interactive","interactive"])
+        self.assertEqual(self.provider.observed,[(False,0)])
+        self.assertFalse(loop.hermes.tasks()["items"])
+        self.evidence = {"thread_id":sid,"turn_id":turn,"worker_events":first,"card_titles":titles,
+                         "fixture_card_ids":[row[0] for row in messages],"fixture_model_requests":1,
+                         "boundary":"Native App Server history, synthetic user input and local model, Feishu fixture"}

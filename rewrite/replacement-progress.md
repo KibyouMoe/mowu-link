@@ -4,6 +4,8 @@
 
 ## 检查点与证据
 
+独立 Codex App Server 的指定回合可生成原 Worker 样式的飞书卡。原生普通输入和最终答复各一张，原空格及换行保持，重投无新增。同套原生 W04 记录只投影公开答复，不抄工具参数或桥接正文。连续 12 次通过。复跑 `python3 -m unittest -v rewrite.test_codex_app_server`。[卡片记录](evidence/codex-app-server-native-display.json)。原生 App Server 实际运行，输入与模型由驱动生成，飞书替身。
+
 独立 App Server 以原生 `turn/interrupt` 停止一个已确认的原回合。错输入由适配器拦下，错回合由原生 API 拒绝，正确回合由历史证实已中止。Router 取消待清理，持单不释放、无成果通知。连续 15 次通过。复跑 `python3 -m unittest -v rewrite.test_codex_app_server`。[宿主证据](evidence/codex-app-server-native-interrupt.json)。控制由测试驱动发起，模型为本地脚本。
 
 独立 Codex App Server 在 W04 工具请求待响应时中断。清除适配器宿主凭据后，由新进程重开同一测试会话，查回同一宿主输入。原派发重投未产生第二个输入或模型请求，Router 保留原持单且无成果通知。连续 20 次通过。复跑 `python3 -m unittest -v rewrite.test_codex_app_server`。[原生恢复记录](evidence/codex-app-server-native-reconnect.json)。真实进程使用本地脚本模型，无生产调用。

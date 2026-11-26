@@ -1,0 +1,25 @@
+{
+  "thread_id": "01a216bc-57ed-7c31-b8ca-f8a0d3301653",
+  "turn_id": "01a216bc-5814-7d43-8931-bce0e215ac41",
+  "worker_events": [
+    {
+      "event_id": "host-codex-2233385cb9cc7f472916493a5be9cd67c4f5b103b975779b635344bc7fd9f3cf",
+      "seq": 1
+    },
+    {
+      "event_id": "host-codex-780df9209b07f26c570695f923f1dec45d224429d19626e7f0c04b73110859c1",
+      "seq": 2
+    }
+  ],
+  "card_titles": [
+    "小栗帽·原生输入",
+    "小栗帽-回复"
+  ],
+  "fixture_card_ids": [
+    "om_1",
+    "om_2"
+  ],
+  "fixture_model_requests": 1,
+  "boundary": "Native App Server history, synthetic user input and local model, Feishu fixture",
+  "consecutive_runs": 12
+}
