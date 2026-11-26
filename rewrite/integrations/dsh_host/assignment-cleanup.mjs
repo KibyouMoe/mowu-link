@@ -71,9 +71,9 @@ function readOnlyDirectory(directory) {
   return dir;
 }
 
-function verifyAdmission(directory,message,session,aid,ref) {
+function verifyAdmission(admissions,message,session,aid,ref) {
   check(message.id===ref.native_id);
-  const record = admission(directory,ref.native_id);
+  const record = admissions.read(ref.native_id);
   check(isDeepStrictEqual(record,{session,native_id:ref.native_id,delivery_id:ref.delivery_id,digest:ref.digest,
     assignment_id:aid,task_id:ref.task_id,kind:ref.kind}));
   const envelope = scopeInput(message);
@@ -108,8 +108,15 @@ function canceledInputs(events,wanted) {
   return removed;
 }
 
-export function assignmentCleanup(ctx,agent,runtimeDir,workspace=null) {
+function fileAdmissions(runtimeDir) {
   const directory = readOnlyDirectory(runtimeDir);
+  return {
+    read: id => admission(directory,id),
+    save: entry => saveAdmission(directory,entry),
+  };
+}
+
+export function assignmentCleanup(ctx,agent,runtimeDir,workspace=null,admissions=fileAdmissions(runtimeDir)) {
   const session = agent.session.id;
   const registered = new Map();
   const allowed = workspace ? new Set([...safeTools,'worker_workspace_shell','worker_workspace_export']) : safeTools;
@@ -121,8 +128,8 @@ export function assignmentCleanup(ctx,agent,runtimeDir,workspace=null) {
   function workspaceScope(message) {
     const origin = scopeInput(message)?.payload;
     check(workspace && nativeID(message.id) && taskInputs.has(origin?.kind));
-    const ref = admission(directory,message.id);
-    verifyAdmission(directory,message,session,origin.assignment_id,ref);
+    const ref = admissions.read(message.id);
+    verifyAdmission(admissions,message,session,origin.assignment_id,ref);
     return {session,task_id:origin.task_id,assignment_id:origin.assignment_id};
   }
   return {
@@ -137,7 +144,7 @@ export function assignmentCleanup(ctx,agent,runtimeDir,workspace=null) {
       const {kind,assignment_id,task_id} = JSON.parse(request.payload_json);
       if (!taskInputs.has(kind) && !['task.cancel','task.transfer_out'].includes(kind)) return;
       check(guid(task_id) && guid(assignment_id));
-      saveAdmission(directory,{session,native_id:expected.id,delivery_id:request.delivery_id,
+      admissions.save({session,native_id:expected.id,delivery_id:request.delivery_id,
         digest:request.digest,assignment_id,task_id,kind});
     },
     withdraw(request) {
@@ -148,7 +155,7 @@ export function assignmentCleanup(ctx,agent,runtimeDir,workspace=null) {
         if (!nativeID(message.id) || !taskInputs.has(origin?.kind)
             || origin.task_id!==tid || origin.assignment_id!==aid) continue;
         try {
-          verifyAdmission(directory,message,session,aid,admission(directory,message.id));
+          verifyAdmission(admissions,message,session,aid,admissions.read(message.id));
         } catch {
           continue;
         }
@@ -179,7 +186,7 @@ export function assignmentCleanup(ctx,agent,runtimeDir,workspace=null) {
         const ref = sources.get(turn.users[0].id);
         if (!ref || !Array.isArray(turn.calls) || turn.calls.some(call=>!allowed.has(call.name))) return false;
         check(turn.users.length===1 && turn.id===ref.turn_id && !completedInputs.has(ref.native_id));
-        verifyAdmission(directory,turn.users[0],session,aid,ref);
+        verifyAdmission(admissions,turn.users[0],session,aid,ref);
         completedInputs.add(ref.native_id);
         return true;
       }));
@@ -195,7 +202,7 @@ export function assignmentCleanup(ctx,agent,runtimeDir,workspace=null) {
       const withdrawn_inputs = pending.map(ref=>{
         const found = removed.get(ref.native_id);
         check(taskInputs.has(ref.kind) && ref.turn_id===null && found && found.seq<boundary);
-        verifyAdmission(directory,found.message,session,aid,ref);
+        verifyAdmission(admissions,found.message,session,aid,ref);
         return {native_id:ref.native_id,delivery_id:ref.delivery_id,discard_seq:found.seq};
       });
       const stopped_turns = finished.map(turn=>({turn_id:turn.id,end_seq:turn.end.seq,reason:turn.end.reason?.kind}));

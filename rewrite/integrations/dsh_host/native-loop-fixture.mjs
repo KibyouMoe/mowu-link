@@ -543,7 +543,7 @@ async function setup() {
   const agentOptions = {provider:'fixture',model:'local'};
   const registry = ctx.get('agents');
   if (!['cold-resume-reopen','managed-sessions-reopen'].includes(mode)) {
-    originalHandle = ['formal-reopen','command-approvals-reopen','foreground-relay-reopen',
+    originalHandle = ['formal-reopen','cleanup-read-only-reopen','command-approvals-reopen','foreground-relay-reopen',
       'cleanup-container-recovery-reopen','cleanup-container-build-reopen'].includes(mode)
       ? await registry.resume({resumeSessionId:session,agentOptions})
       : await registry.create({sessionId:session,agentOptions,...(isManaged ? {meta:{cwd:directory}} : {})});

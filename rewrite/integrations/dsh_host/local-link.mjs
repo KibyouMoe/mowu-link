@@ -17,7 +17,7 @@ export function privateDir(directory) {
   }
 }
 
-async function verifiedCredentials(directory) {
+async function verifiedCredentials(directory,admissions) {
   if (process.platform==='win32') {
     if (!/^[A-Za-z]:[\\/]/.test(directory)) throw new Error('private_runtime_required');
     const system = process.env.SystemRoot;
@@ -25,8 +25,9 @@ async function verifiedCredentials(directory) {
     const powershell = path.join(system,'System32','WindowsPowerShell','v1.0','powershell.exe');
     const check = fileURLToPath(new URL('./check-local-link.ps1',import.meta.url));
     try {
-      await run(powershell,['-NoProfile','-NonInteractive','-File',check,directory],
-        {windowsHide:true,timeout:15000,maxBuffer:65536});
+      const args = ['-NoProfile','-NonInteractive','-File',check,directory];
+      if (admissions) args.push('-CheckAdmissions');
+      await run(powershell,args,{windowsHide:true,timeout:15000,maxBuffer:65536});
     } catch (error) {
       if (error.killed) throw new Error('dsh_link_acl_check_timeout');
       throw new Error(error.code===3 ? 'private_dsh_link_required' : 'dsh_link_acl_check_unavailable');
@@ -56,8 +57,8 @@ export function unixLink(directory) {
   };
 }
 
-export async function tlsLink(directory) {
-  const [data,cert,key] = await verifiedCredentials(directory);
+export async function tlsLink(directory,{admissions=false}={}) {
+  const [data,cert,key] = await verifiedCredentials(directory,admissions);
   const cfg = JSON.parse(data);
   if (Object.keys(cfg??{}).sort().join(',')!=='host_port,worker_port' ||
       !Object.values(cfg).every(port=>Number.isInteger(port) && port>=1024 && port<=65535) ||

@@ -12,6 +12,7 @@ import { browseSessions, catalogSessions } from './catalog.mjs';
 import { approvalProof, installCommandApprovals } from './command-approvals.mjs';
 import { guid, prepareSession, selection } from './session-preparation.mjs';
 import { assignmentCleanup } from './assignment-cleanup.mjs';
+import { sqliteAdmissions } from './assignment-admissions.mjs';
 import { assignmentContainers } from './assignment-container.mjs';
 import { privateDir, tlsLink, unixLink } from './local-link.mjs';
 
@@ -152,7 +153,7 @@ async function stopPrivateTurn(ctx,agent,compacting,bound) {
   throw new Error('native_stop_unconfirmed');
 }
 
-export async function bindHost(ctx, session, directory, catalog=[], selected=null, readOnly=false, foreground=false, workspaceConfig=null, allowMedia=true) {
+export async function bindHost(ctx, session, directory, catalog=[], selected=null, readOnly=false, foreground=false, workspaceConfig=null, {allowMedia=true,admissions}={}) {
   check(typeof session === 'string' && session.length > 0, 'missing_native_session');
   const controller = ctx.get('sessionController');
   const agent = selected ?? (await controller.resolveAgent(session)).agent;
@@ -161,7 +162,7 @@ export async function bindHost(ctx, session, directory, catalog=[], selected=nul
   const displayStart = await baseline(ctx,agent);
   const compact = compaction(ctx,agent,()=>ownEvents(ctx,agent));
   const workspace = workspaceConfig ? assignmentContainers(directory,session,workspaceConfig) : null;
-  const cleanup = readOnly || workspace ? assignmentCleanup(ctx,agent,directory,workspace) : null;
+  const cleanup = readOnly || workspace ? assignmentCleanup(ctx,agent,directory,workspace,admissions) : null;
   const imageCache = {};
   function bound() {
     // Resolving through SessionController here could reopen a closed session.
@@ -402,8 +403,7 @@ export async function apply(ctx, {session, directory, catalog_sessions=[], relay
                                  local_tls=false}) {
   check(typeof local_tls==='boolean','invalid_dsh_local_link');
   check(!local_tls || !(managed_sessions_dir || relay_command_approvals || relay_foreground_questions ||
-    read_only_assignments || assignment_container),'unsupported_dsh_local_tls_feature');
-  const link = local_tls ? await tlsLink(directory) : unixLink(directory);
+    assignment_container),'unsupported_dsh_local_tls_feature');
   check(typeof session==='string' && session.length>0,'missing_native_session');
   check(typeof resume_on_handoff==='boolean','invalid_native_activation');
   check(typeof read_only_assignments==='boolean' &&
@@ -415,7 +415,12 @@ export async function apply(ctx, {session, directory, catalog_sessions=[], relay
   if (resume_on_handoff || managed) {
     check(typeof ctx.get('sessionQuery')?.inspectSession==='function','native_cold_inspection_unavailable');
   }
+  const portableAdmissions = local_tls && read_only_assignments;
+  const link = local_tls ? await tlsLink(directory,{admissions:portableAdmissions}) : unixLink(directory);
   if (managed) privateDir(managed_sessions_dir);
+  const admissions = portableAdmissions ? await sqliteAdmissions(directory) : undefined;
+  if (admissions) ctx.effect(() => admissions.close);
+  const cleanupOptions = {allowMedia:!local_tls,admissions};
   const defaultSelection = new_session_selection ? selection(new_session_selection) : null;
   const catalog = catalogSessions(catalog_sessions);
   const scopes = new Map([[session,{port:null,selected:null,opening:null}]]);
@@ -440,7 +445,7 @@ export async function apply(ctx, {session, directory, catalog_sessions=[], relay
     scope.selected ??= agents.get(target) ?? (await ctx.get('sessionController').resolveAgent(target)).agent;
     check(scope.selected?.session?.id===target && agents.get(target)===scope.selected,'native_agent_unavailable');
     check(scope.selected.status==='idle','native_cold_thread_unconfirmed');
-    const opened = await bindHost(ctx,target,directory,catalog,scope.selected,read_only_assignments,relay_foreground_questions,assignment_container,!local_tls);
+    const opened = await bindHost(ctx,target,directory,catalog,scope.selected,read_only_assignments,relay_foreground_questions,assignment_container,cleanupOptions);
     installBoundTools(ctx,opened,directory,relay_command_approvals,link);
     scope.port = opened;
   }
@@ -456,7 +461,7 @@ export async function apply(ctx, {session, directory, catalog_sessions=[], relay
     return {session:request.session,operation_id,state:'loaded'};
   }
   if (!resume_on_handoff && (!managed || !readdirSync(managed_sessions_dir).some(name=>name.endsWith('.json')))) {
-    const port = await bindHost(ctx,session,directory,catalog,null,read_only_assignments,relay_foreground_questions,assignment_container,!local_tls);
+    const port = await bindHost(ctx,session,directory,catalog,null,read_only_assignments,relay_foreground_questions,assignment_container,cleanupOptions);
     installBoundTools(ctx,port,directory,relay_command_approvals,link);
     scopes.get(session).port = port;
   }
