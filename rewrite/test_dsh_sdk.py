@@ -123,6 +123,13 @@ class DshSdk(unittest.TestCase):
         with self.assertRaisesRegex(Fault,"native_write_unconfirmed") as lost:
             self.inbound.deliver(mid)
         self.assertEqual(lost.exception.status,503)
+        with self.loop.adapter.db.transaction() as db:
+            pending = db.execute("SELECT * FROM intents").fetchone()
+        native_id = self.loop.native.delivery_native_id(self.session,pending["delivery_id"],pending["digest"])
+        with self.assertRaisesRegex(Fault,"native_turn_unconfirmed"):
+            self.loop.adapter.prove_native_input(self.session,"wrong-turn",native_id)
+        with self.loop.adapter.db.transaction() as db:
+            self.assertIsNone(db.execute("SELECT receipt FROM intents").fetchone()[0])
         receipt = self.inbound.deliver(mid)
         self.assertEqual((receipt["session"],receipt["delivery_id"]),(self.session,"chat-"+mid))
         self.assertEqual(self.drive("count")["received"],1)

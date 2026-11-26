@@ -1,0 +1,153 @@
+{
+  "native": {
+    "session": "dsh-real-loop-formal",
+    "inputs": [
+      "mowulink-efd6f2d5492745a670dbb95afb6b2cd56e031d154e5a4ecc90b3eb7adbe2fdb6"
+    ],
+    "calls": [
+      {
+        "turn": 1,
+        "step": 1,
+        "callId": "native-w04-fixture-0",
+        "name": "worker_report",
+        "arguments": "{\"task_id\":\"b9ad9faa-7f9a-4775-a977-2b6bf4e42dd8\",\"assignment_id\":\"0470e789-5067-4b45-8b36-c3fc41ac1dcd\",\"summary\":\"DSH native tool fixture result\"}"
+      },
+      {
+        "turn": 1,
+        "step": 2,
+        "callId": "native-w04-fixture-1",
+        "name": "worker_report",
+        "arguments": "{\"task_id\":\"b9ad9faa-7f9a-4775-a977-2b6bf4e42dd8\",\"assignment_id\":\"0470e789-5067-4b45-8b36-c3fc41ac1dcd\",\"summary\":\"DSH native tool fixture result\"}"
+      }
+    ],
+    "results": [
+      {
+        "role": "tool",
+        "source": {
+          "kind": "tool",
+          "callId": "native-w04-fixture-0"
+        },
+        "toolCallId": "native-w04-fixture-0",
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"recorded\":true,\"release_assignment_id\":\"0470e789-5067-4b45-8b36-c3fc41ac1dcd\",\"task_state\":\"completed_reported\"}"
+          }
+        ],
+        "isError": false,
+        "id": "a2300b98-a05d-44dd-99fb-4ec5243ea258"
+      },
+      {
+        "role": "tool",
+        "source": {
+          "kind": "tool",
+          "callId": "native-w04-fixture-1"
+        },
+        "toolCallId": "native-w04-fixture-1",
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"recorded\":true,\"release_assignment_id\":\"0470e789-5067-4b45-8b36-c3fc41ac1dcd\",\"task_state\":\"completed_reported\"}"
+          }
+        ],
+        "isError": false,
+        "id": "85e1356a-7f5f-44e6-aeb8-5597cc417c5e"
+      }
+    ],
+    "turns": [
+      {
+        "turn": 1,
+        "reason": {
+          "kind": "completed"
+        }
+      }
+    ],
+    "modelRequests": [
+      {
+        "command": "task",
+        "provider": "fixture",
+        "model": "local",
+        "reasoningEffort": "low"
+      },
+      {
+        "command": "task",
+        "provider": "fixture",
+        "model": "local",
+        "reasoningEffort": "low"
+      },
+      {
+        "command": "task",
+        "provider": "fixture",
+        "model": "local",
+        "reasoningEffort": "low"
+      }
+    ]
+  },
+  "input_receipt": {
+    "delivery_id": "5321ea93-e5e2-4958-b986-8611879d40d8",
+    "digest": "25148c2da1e20cdc7e95e2926fc0be7db75fa1f56de85c55b2f42aac773f73ac",
+    "native_id": "mowulink-efd6f2d5492745a670dbb95afb6b2cd56e031d154e5a4ecc90b3eb7adbe2fdb6",
+    "session": "dsh-real-loop-formal",
+    "turn_id": "1/1"
+  },
+  "router": {
+    "delivery_state": "received",
+    "last_report": {
+      "artifact_ids": [],
+      "assignment_id": "0470e789-5067-4b45-8b36-c3fc41ac1dcd",
+      "outcome": "completed",
+      "summary": "DSH native tool fixture result",
+      "task_id": "b9ad9faa-7f9a-4775-a977-2b6bf4e42dd8",
+      "worker_id": "oguri"
+    },
+    "materials": [],
+    "pending_cleanup": [],
+    "task": {
+      "assignee_id": "oguri",
+      "assignment_id": null,
+      "holder": {
+        "kind": "router"
+      },
+      "instructions": "Report a local fixture result",
+      "revision": 4,
+      "state": "completed_reported",
+      "task_id": "b9ad9faa-7f9a-4775-a977-2b6bf4e42dd8",
+      "title": "Native pipeline test"
+    }
+  },
+  "router_w04": {
+    "before": {
+      "router": {
+        "assignee_id": "oguri",
+        "assignment_id": "0470e789-5067-4b45-8b36-c3fc41ac1dcd",
+        "holder": {
+          "kind": "worker",
+          "worker_id": "oguri"
+        },
+        "instructions": "Report a local fixture result",
+        "revision": 3,
+        "state": "working",
+        "task_id": "b9ad9faa-7f9a-4775-a977-2b6bf4e42dd8",
+        "title": "Native pipeline test"
+      },
+      "worker": {
+        "held_task_id": "b9ad9faa-7f9a-4775-a977-2b6bf4e42dd8",
+        "held_assignment_id": "0470e789-5067-4b45-8b36-c3fc41ac1dcd"
+      }
+    },
+    "receipt": {
+      "recorded": true,
+      "release_assignment_id": "0470e789-5067-4b45-8b36-c3fc41ac1dcd",
+      "task_state": "completed_reported"
+    }
+  },
+  "notification_delivery_ids": [
+    "5b02d340-ad1c-49c8-938d-4f97a1666f50"
+  ],
+  "worker_after": {
+    "held_task_id": null,
+    "held_assignment_id": null
+  },
+  "boundary": "Native DSH AgentLoop, tool execution and real isolated Router/Worker; scripted local model",
+  "consecutive_runs": 30
+}

@@ -3,7 +3,7 @@ import hashlib
 import json
 from typing import Protocol
 
-from .storage import Database, encode, require, string
+from .storage import Database, Fault, encode, require, string
 
 
 class Host(Protocol):
@@ -106,14 +106,23 @@ class HostAdapter:
                 receipt = self.host.deliver_control(self.session,did,payload,digest,[dict(row) for row in bindings])
             else:
                 receipt = self.host.deliver(self.session, did, payload, digest)
-        elif media and hasattr(self.host,"lookup_media"):
-            require(self.media_store is not None,422,"native_media_input_unavailable")
-            receipt = self.host.lookup_media(self.session,did,payload,digest,self.media_store.prepare(media))
         else:
-            lookup_expected = getattr(self.host,"lookup_expected",None)
-            receipt = lookup_expected(self.session,did,payload,digest) if lookup_expected else self.host.lookup(self.session,did)
+            receipt = self.lookup_receipt(did,payload,digest)
+        return self.record_receipt(did,payload,digest,receipt)
+
+    def lookup_receipt(self,did,payload,digest):
+        media = payload.get("attachments")
+        if media and hasattr(self.host,"lookup_media"):
+            require(self.media_store is not None,422,"native_media_input_unavailable")
+            return self.host.lookup_media(self.session,did,payload,digest,self.media_store.prepare(media))
+        lookup_expected = getattr(self.host,"lookup_expected",None)
+        return lookup_expected(self.session,did,payload,digest) if lookup_expected else self.host.lookup(self.session,did)
+
+    def record_receipt(self,did,payload,digest,receipt):
         if receipt is None:
             return None
+        require(isinstance(receipt,dict),409,"host_receipt_mismatch")
+        media = payload.get("attachments")
         if media:
             require(receipt.get("media_sha256") == [item["sha256"] for item in media],
                     409,"native_media_unconfirmed")
@@ -121,8 +130,9 @@ class HostAdapter:
                 and receipt.get("digest") == digest and isinstance(receipt.get("native_id"), str)
                 and receipt["native_id"], 409, "host_receipt_mismatch")
         with self.db.transaction() as db:
-            original = db.execute("SELECT receipt FROM intents WHERE delivery_id=?", (did,)).fetchone()[0]
-            require(original in (None, encode(receipt)), 409, "host_receipt_conflict")
+            original = db.execute("SELECT session,digest,receipt FROM intents WHERE delivery_id=?", (did,)).fetchone()
+            require(original and (original["session"],original["digest"])==(self.session,digest)
+                    and original["receipt"] in (None,encode(receipt)),409,"host_receipt_conflict")
             db.execute("UPDATE intents SET receipt=?,native_id=? WHERE delivery_id=?",
                        (encode(receipt), receipt["native_id"], did))
         return receipt
@@ -141,6 +151,32 @@ class HostAdapter:
                 AND json_extract(receipt,'$.turn_id')=? LIMIT 2""", (session, turn)).fetchall()
         require(len(rows) == 1, 409, "native_turn_unconfirmed")
         return rows[0]["native_id"]
+
+    def prove_native_input(self, session, turn, native_id):
+        try:
+            confirmed = self.input_for_turn(session,turn)
+        except Fault as error:
+            if error.code!="native_turn_unconfirmed":
+                raise
+        else:
+            require(confirmed==native_id,409,"native_input_mismatch")
+            return native_id
+        identify = getattr(self.host,"delivery_native_id",None)
+        if callable(identify):
+            with self.db.transaction() as db:
+                rows = db.execute("""SELECT delivery_id,payload,digest FROM intents
+                                     WHERE session=? AND receipt IS NULL""",(session,)).fetchall()
+            matches = [row for row in rows if identify(session,row["delivery_id"],row["digest"])==native_id]
+            require(len(matches)<=1,409,"native_turn_unconfirmed")
+            if matches:
+                pending = matches[0]
+                did,payload,digest = pending["delivery_id"],json.loads(pending["payload"]),pending["digest"]
+                proof = self.lookup_receipt(did,payload,digest)
+                require(isinstance(proof,dict) and proof.get("turn_id")==turn and proof.get("native_id")==native_id,
+                        409,"native_turn_unconfirmed")
+                self.record_receipt(did,payload,digest,proof)
+        require(self.input_for_turn(session,turn)==native_id,409,"native_input_mismatch")
+        return native_id
 
     def cleanup_evidence(self, assignment_id, kind):
         lookup = getattr(self.host, "cleanup_evidence", None)

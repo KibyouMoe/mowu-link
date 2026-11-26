@@ -1,5 +1,6 @@
 """DSH plugin transport, scoped to an owner-private Unix directory and a single session."""
 from contextlib import contextmanager
+import hashlib
 from http.client import HTTPConnection, HTTPException
 from http.server import BaseHTTPRequestHandler
 import json
@@ -72,6 +73,11 @@ class DshHost:
             return self.request("model-change",session,fields)
         return self.request("model-change-if-route",session,{**fields,"expected_route":expected_route})
 
+    @staticmethod
+    def delivery_native_id(session, did, digest):
+        parts = encode([session,did,digest])
+        return "mowulink-"+hashlib.sha256(parts.encode()).hexdigest()
+
     def delivery(self, operation, session, did, payload, digest, **fields):
         result = self.request(operation,session,{"delivery_id":did,"payload_json":encode(payload),"digest":digest,**fields})
         require("receipt" in result,502,"invalid_host_observation")
@@ -116,8 +122,8 @@ def tool_listener(directory, adapter, worker):
                 body = json.loads(self.rfile.read(size))
                 require(isinstance(body,dict) and set(body) == {"session","turn_id","native_id","tool","call_id","arguments"}
                         and body.get("tool") in ("worker_report","worker_ask"),422,"invalid_envelope")
-                native = adapter.input_for_turn(string(body,"session"),string(body,"turn_id"))
-                require(body.pop("native_id") == native,409,"native_input_mismatch")
+                adapter.prove_native_input(string(body,"session"),string(body,"turn_id"),string(body,"native_id"))
+                del body["native_id"]
                 result = worker.request("POST","worker/native-tool",body)
                 status = 200
             except Fault as error:
