@@ -1217,6 +1217,176 @@ class NativeLoop(unittest.TestCase):
         if output := os.environ.get("MOWULINK_DSH_CONTAINER_EVIDENCE"):
             Path(output).write_text(json.dumps({"cases":cases},ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
 
+    def test_native_dsh_work_survives_one_broken_link(self):
+        image,cli = self.container_engine()
+        cases = []
+        for broken in ("router","adapter"):
+            with self.subTest(link=broken):
+                session = "dsh-native-link-"+broken
+                directory,loop,service,_ = self.goal_worker(session,extra_workers=("tama",))
+                runtime = Path(directory)
+                clock,worker = service.clock,loop.worker
+                (runtime/"assignment-container.json").write_text(encode(
+                    {"docker":cli[0],"socket":cli[2].removeprefix("unix://"),"image":image}),encoding="utf-8")
+                self.addCleanup(self.clean_fixture_containers,runtime,session,cli)
+
+                native_key,platform_key,host_key = guid(),guid(),guid()
+                worker_url = self.open_worker(service,{native_key:"adapter/oguri",platform_key:"platform/oguri"})
+                callback,platform = Client(worker_url,native_key),Client(worker_url,platform_key)
+                sink = PlatformFixture()
+                views = Views(loop.root/"outage-views.db",platform,sink,"fixture-chat","小栗帽",clock)
+                manager = loop.hermes
+                router = serve_loopback(loop.orders,{loop.wire.token:"worker/oguri"})
+                adapter = serve_adapter(loop.adapter,"oguri",{host_key:"worker/oguri"},("127.0.0.1",0),None)
+                online = Event()
+                online.set()
+                drops = []
+                def allow_connection(_socket,_client):
+                    if online.is_set():
+                        return True
+                    drops.append(clock())
+                    return False
+                (router if broken=="router" else adapter).verify_request = allow_connection
+
+                def container(*args):
+                    return subprocess.check_output([*cli,*args],text=True,timeout=8).strip()
+
+                with (codex_driver.running(router) as router_url, codex_driver.running(adapter) as adapter_url,
+                      tool_listener(runtime,loop.adapter,callback), self.start_native(runtime,session,
+                      "cleanup-container-link-outage") as native):
+                    worker.router = Client(router_url,loop.wire.token)
+                    worker.adapter = RemoteAdapter(Client(adapter_url,host_key),session)
+                    service.step()
+                    clock.advance(10)
+                    service.step()
+                    tid = manager.create(guid(),"Isolated link failure","Keep the original native work","oguri")["task_id"]
+                    service.step()
+                    self.assertTrue(self.read_native(native,"work-started")["running"])
+                    working = manager.inspect(tid)["task"]
+                    aid = working["assignment_id"]
+                    self.assertEqual(worker.hold()["held_assignment_id"],aid)
+                    lease_file, = (runtime/"assignment-containers").glob("*.json")
+                    cid = json.loads(lease_file.read_text())["container_id"]
+                    with worker.db.transaction() as db:
+                        dispatch = json.loads(db.execute("""SELECT frame FROM inbox JOIN jobs USING(delivery_id)
+                            WHERE assignment_id=?""",(aid,)).fetchone()[0])
+                    payload = {"kind":"task",**dispatch["payload"]}
+                    receipt = loop.adapter.lookup_delivery(dispatch["delivery_id"],payload,session=session)
+                    self.assertEqual(receipt["session"],session)
+                    views.poll()
+
+                    # Reject TCP connections at just one listener. Both clients keep their original endpoints.
+                    online.clear()
+                    clock.advance(5)
+                    service.step()
+                    outage = service.status()
+                    views.poll()
+                    notices = [(mid,body) for mid,_,body in sink.messages.values() if "连接已中断" in encode(body)]
+                    self.assertEqual(len(notices),1)
+                    target = "Router" if broken=="router" else "宿主适配器"
+                    self.assertIn("与"+target+"的连接已中断。",encode(notices[0][1]))
+                    self.assertTrue(drops)
+                    self.assertEqual(outage["held_assignment_id"],aid)
+                    if broken=="router":
+                        self.assertFalse(outage["router_connected"])
+                        self.assertTrue(outage["adapter_connected"])
+                        self.assertTrue(outage["host_busy"])
+                        self.assertEqual(outage["router_retry_in_seconds"],1200)
+                        self.assertTrue(self.read_native(native,"continue-work")["running"])
+                        self.assertEqual(container("exec",cid,"cat","/workspace/after-link-failure"),"continued")
+                        first_drops = len(drops)
+                        retry_at = clock()+1200
+                        with loop.orders.db.transaction() as db:
+                            last_seen = db.execute("SELECT last_seen FROM workers WHERE worker_id='oguri'").fetchone()[0]
+                        pool_at = last_seen+loop.orders.lease_seconds+600
+                        clock.advance(pool_at-clock()-1)
+                        loop.orders.tick()
+                        self.assertEqual(manager.inspect(tid)["task"],working)
+                        clock.advance(1)
+                        loop.orders.tick()
+                        pooled = manager.inspect(tid)["task"]
+                        self.assertEqual((pooled["state"],pooled["holder"]),("blocked",{"kind":"router"}))
+                        self.assertEqual(worker.hold()["held_assignment_id"],aid)
+                        clock.advance(retry_at-clock()-1)
+                        service.step()
+                        self.assertEqual(service.status()["router_retry_in_seconds"],1)
+                        self.assertEqual(len(drops),first_drops)
+                    else:
+                        self.assertTrue(outage["router_connected"])
+                        self.assertFalse(outage["adapter_connected"])
+                        self.assertIsNone(outage["host_busy"])
+                        for _ in range(32):
+                            clock.advance(20)
+                            service.step()
+                            loop.orders.tick()
+                        observed_worker, = manager.workers(worker_id="oguri")["items"]
+                        self.assertEqual([observed_worker[k] for k in ("online","busy","adapter_connected","held_assignment_id")],
+                                         [True,None,False,aid])
+                        self.assertEqual(manager.inspect(tid)["task"],working)
+                        alert, = manager.messages(source="oguri")["items"]
+                        self.assertEqual(alert["text"],"Worker 本体在线，与宿主适配器的连接已中断。")
+
+                    self.assertEqual(container("exec",cid,"sh","-c",'kill -0 "$(cat /workspace/pid)" && cat /workspace/marker'),"owned-write")
+                    views.poll()
+                    self.assertEqual(sum("连接已中断" in encode(body) for _,_,body in sink.messages.values()),1)
+                    online.set()
+                    clock.advance(1 if broken=="router" else 5)
+                    service.step()
+                    recovered = service.status()
+                    self.assertTrue(recovered["router_connected"] and recovered["adapter_connected"])
+                    self.assertEqual(recovered["host_session"],session)
+                    self.assertTrue(recovered["host_busy"])
+                    if broken=="router":
+                        self.assertIsNone(recovered["held_assignment_id"])
+                        self.assertEqual(manager.inspect(tid)["task"],pooled)
+                        self.assertEqual(container("exec",cid,"cat","/workspace/after-link-failure"),"continued")
+                        later = FixtureHost(loop.root/"transfer-host.db","next-holder-fixture")
+                        next_worker = Worker(loop.root/"transfer-worker.db","tama",loop.extra_clients["tama"],
+                            HostAdapter(loop.root/"transfer-adapter.db",later,later.session),clock=clock)
+                        next_worker.connect()
+                        next_worker.poll()
+                        clock.advance(10)
+                        next_worker.poll()
+                        manager.act(guid(),tid,pooled["revision"],"transfer",reason="Explicitly transfer the original order",worker_id="tama")
+                        next_worker.poll()
+                        new_holder = manager.inspect(tid)["task"]
+                        self.assertNotEqual(new_holder["assignment_id"],aid)
+                        self.assertEqual(next_worker.hold()["held_assignment_id"],new_holder["assignment_id"])
+                    else:
+                        self.assertEqual(recovered["held_assignment_id"],aid)
+                        self.assertTrue(self.read_native(native,"continue-work")["running"])
+                        self.assertEqual(container("exec",cid,"cat","/workspace/after-link-failure"),"continued")
+                        manager.act(guid(),tid,working["revision"],"cancel",reason="Explicitly stop the original order")
+                    service.step()
+                    end = self.read_native(native,"read")
+                    self.assertEqual(end["inputs"].count(receipt["native_id"]),1)
+                    self.assertEqual(end["turns"][0]["reason"]["kind"],"aborted")
+                    self.assertEqual([call["name"] for call in end["calls"]],
+                                     ["worker_workspace_shell","worker_workspace_shell","worker_report"])
+                    self.assertTrue(all(not row["isError"] for row in end["results"]),end["results"])
+                    report = json.loads(end["results"][-1]["content"][0]["text"])
+                    self.assertEqual(report["release_assignment_id"],aid)
+                    self.assertEqual(json.loads(lease_file.read_text())["phase"],"sealed")
+                    self.assertEqual(container("container","ls","-aq","--filter","id="+cid),"")
+                    final = manager.inspect(tid)
+                    self.assertIsNone(worker.hold()["held_assignment_id"])
+                    self.assertEqual(final["pending_cleanup"],[])
+                    if broken=="router":
+                        self.assertEqual(final["task"],new_holder)
+                    else:
+                        self.assertEqual(final["task"]["state"],"cancelled")
+                    cases.append({"broken_link":broken,"task_id":tid,"assignment_id":aid,"container_id":cid,
+                        "dropped_tcp_connections":len(drops),"outage":outage,"recovered":recovered,
+                        "router_during_outage":pooled if broken=="router" else observed_worker,
+                        "test_platform_disconnect_id":notices[0][0],"w04_cleanup":report,"final_task":final["task"],
+                        "host_receipt":receipt,"native_inputs":end["inputs"],"native_calls":end["calls"],
+                        "native_turns":end["turns"],"container_removed_after_explicit_control":True})
+        if output := os.environ.get("MOWULINK_DSH_LINK_OUTAGE_EVIDENCE"):
+            Path(output).write_text(json.dumps({"recorded_utc":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+                "boundary":"Installed DSH AgentLoop, Linux Docker, authenticated HTTP and SQLite. Local model, accelerated clock,"
+                " Feishu test platform and replacement holder are fixtures.","cases":cases},
+                ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
+
     def test_dsh_workspace_exports_artifact_and_seals_after_durable_w04_replay(self):
         image,cli = self.container_engine()
         docker,_,socket = cli

@@ -24,6 +24,7 @@ const isCold = mode.startsWith('cold-resume');
 const isManaged = mode.startsWith('managed-sessions');
 const usesCleanup = mode.startsWith('cleanup-');
 const usesContainer = mode.startsWith('cleanup-container');
+const linkOutage = mode==='cleanup-container-link-outage';
 const usesSeed = mode.startsWith('cleanup-container-seed');
 const workspaceRecovery = mode.startsWith('cleanup-container-recovery');
 const workspaceBuild = mode.startsWith('cleanup-container-build');
@@ -92,15 +93,27 @@ class LocalModel extends LlmAdapter {
         return;
       }
     }
-    if (mode==='cleanup-container' && command==='task' && !this.submitted.has(message.id)) {
-      this.submitted.set(message.id,true);
-      assert.ok(tools.some(tool=>tool.name==='worker_workspace_shell'));
-      const command = 'printf owned-write > /workspace/marker; setsid /bin/sleep 120 </dev/null >/dev/null 2>&1 & echo $! > /workspace/pid';
-      yield {type:'block-start',index:0,blockType:'tool-call'};
-      yield {type:'block-end',index:0,block:{type:'tool-call',id:'fixture-contained-write',name:'worker_workspace_shell',
-        arguments:JSON.stringify({command})}};
-      yield {type:'finish',reason:{kind:'tool-calls'}};
-      return;
+    if ((mode==='cleanup-container' || linkOutage) && command==='task') {
+      const attempt = this.submitted.get(message.id) ?? 0;
+      if (linkOutage && attempt===1) {
+        await Promise.race([raceRelease.promise,waitForStop(signal)]);
+        signal.throwIfAborted();
+      } else if (linkOutage && attempt===2) {
+        formalRound.resolve();
+      }
+      if (attempt<(linkOutage ? 2 : 1)) {
+        this.submitted.set(message.id,attempt+1);
+        assert.ok(tools.some(tool=>tool.name==='worker_workspace_shell'));
+        const shell = attempt===0
+          ? 'printf owned-write > /workspace/marker; setsid /bin/sleep 120 </dev/null >/dev/null 2>&1 & echo $! > /workspace/pid'
+          : 'printf continued > /workspace/after-link-failure';
+        yield {type:'block-start',index:0,blockType:'tool-call'};
+        yield {type:'block-end',index:0,block:{type:'tool-call',
+          id:attempt===0 ? 'fixture-contained-write' : 'fixture-outage-write',name:'worker_workspace_shell',
+          arguments:JSON.stringify({command:shell})}};
+        yield {type:'finish',reason:{kind:'tool-calls'}};
+        return;
+      }
     }
     if (mode==='cleanup-container-export' && command==='task') {
       const attempt = this.submitted.get(message.id) ?? 0;
@@ -664,6 +677,12 @@ async function formalScenario(agent) {
     }
     if (usesCleanup && line==='work-started') {
       await entered.promise;
+      console.log(JSON.stringify({running:agent.status==='running'}));
+      continue;
+    }
+    if (linkOutage && line==='continue-work') {
+      raceRelease.resolve();
+      await formalRound.promise;
       console.log(JSON.stringify({running:agent.status==='running'}));
       continue;
     }

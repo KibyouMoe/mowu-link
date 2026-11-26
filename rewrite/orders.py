@@ -285,7 +285,9 @@ class Orders:
         require(current["revision"] == data.get("revision"), 409, "revision_conflict")
         require(current["state"] == "ready" and self.available(db,row), 409, "worker_not_available")
         db.execute("UPDATE tasks SET state='working',revision=revision+1 WHERE task_id=?", (tid,))
-        db.execute("UPDATE workers SET idle_since=NULL WHERE worker_id=?", (worker,))
+        # W03 already establishes the holder. A later host observation may never arrive.
+        db.execute("UPDATE workers SET idle_since=NULL,held_task_id=?,held_assignment_id=? WHERE worker_id=?",
+                   (tid, aid, worker))
         return {"accepted": True, "holder": {"kind": "worker", "worker_id": worker}, "assignment_id": aid}
 
     def report(self, db, worker, tid, data):

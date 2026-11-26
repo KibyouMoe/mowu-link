@@ -1,0 +1,275 @@
+{
+  "recorded_utc": "2026-11-26T18:03:17Z",
+  "boundary": "Installed DSH AgentLoop, Linux Docker, authenticated HTTP and SQLite. Local model, accelerated clock, Feishu test platform and replacement holder are fixtures.",
+  "cases": [
+    {
+      "broken_link": "router",
+      "task_id": "59feada7-13b5-47ca-8093-75e7ae90088f",
+      "assignment_id": "2e92fd9d-d281-4e9e-adcf-0d41036a41b9",
+      "container_id": "cdcbaaea0698380f319a54159523f7d25449c16b4ef860179809b32d2e380326",
+      "dropped_tcp_connections": 1,
+      "outage": {
+        "worker_id": "oguri",
+        "router_connected": false,
+        "router_observed": true,
+        "adapter_connected": true,
+        "last_error": "router_connection_unconfirmed",
+        "host_error": null,
+        "host_session": "dsh-native-link-router",
+        "expected_host_session": "dsh-native-link-router",
+        "host_busy": true,
+        "native_capabilities": {
+          "next_turn": true,
+          "context_usage": true,
+          "compaction": false,
+          "session_catalog": false,
+          "stop_private": true,
+          "model_view": true,
+          "model_change": true,
+          "goal_control": true
+        },
+        "host_observation_age_seconds": 0,
+        "router_retry_in_seconds": 1200,
+        "held_task_id": "59feada7-13b5-47ca-8093-75e7ae90088f",
+        "held_assignment_id": "2e92fd9d-d281-4e9e-adcf-0d41036a41b9"
+      },
+      "recovered": {
+        "worker_id": "oguri",
+        "router_connected": true,
+        "router_observed": true,
+        "adapter_connected": true,
+        "last_error": null,
+        "host_error": null,
+        "host_session": "dsh-native-link-router",
+        "expected_host_session": "dsh-native-link-router",
+        "host_busy": true,
+        "native_capabilities": {
+          "next_turn": true,
+          "context_usage": true,
+          "compaction": false,
+          "session_catalog": false,
+          "stop_private": true,
+          "model_view": true,
+          "model_change": true,
+          "goal_control": true
+        },
+        "host_observation_age_seconds": 1.0,
+        "router_retry_in_seconds": null,
+        "held_task_id": null,
+        "held_assignment_id": null
+      },
+      "router_during_outage": {
+        "assignee_id": "oguri",
+        "assignment_id": null,
+        "blocked_since": "2027-01-15T08:10:40+00:00",
+        "holder": {
+          "kind": "router"
+        },
+        "instructions": "Keep the original native work",
+        "remind_at": "2027-01-15T09:10:40+00:00",
+        "revision": 4,
+        "state": "blocked",
+        "task_id": "59feada7-13b5-47ca-8093-75e7ae90088f",
+        "title": "Isolated link failure"
+      },
+      "test_platform_disconnect_id": "om_3",
+      "w04_cleanup": {
+        "recorded": true,
+        "release_assignment_id": "2e92fd9d-d281-4e9e-adcf-0d41036a41b9",
+        "task_state": "working"
+      },
+      "final_task": {
+        "assignee_id": "tama",
+        "assignment_id": "8701ad83-f597-4b1b-a84f-09b146d3c427",
+        "holder": {
+          "kind": "worker",
+          "worker_id": "tama"
+        },
+        "instructions": "Keep the original native work",
+        "revision": 7,
+        "state": "working",
+        "task_id": "59feada7-13b5-47ca-8093-75e7ae90088f",
+        "title": "Isolated link failure"
+      },
+      "host_receipt": {
+        "delivery_id": "393108d6-487e-46e4-b3ca-5da696175a23",
+        "digest": "0bb46d80cd7bb56a7019e777431ffe428cd0a3e65c48f61daeefd90cb085d5bf",
+        "native_id": "mowulink-cc1f24af06665af7d3164bc18a04867dcda879fac5a468fa70f50cd01ff0bada",
+        "session": "dsh-native-link-router",
+        "turn_id": "1/1"
+      },
+      "native_inputs": [
+        "mowulink-cc1f24af06665af7d3164bc18a04867dcda879fac5a468fa70f50cd01ff0bada",
+        "mowulink-900f6c2837ae859946cbc59b56b399601e8823b79d15d52c59272cd6ca05a170"
+      ],
+      "native_calls": [
+        {
+          "turn": 1,
+          "step": 1,
+          "callId": "fixture-contained-write",
+          "name": "worker_workspace_shell",
+          "arguments": "{\"command\":\"printf owned-write > /workspace/marker; setsid /bin/sleep 120 </dev/null >/dev/null 2>&1 & echo $! > /workspace/pid\"}"
+        },
+        {
+          "turn": 1,
+          "step": 2,
+          "callId": "fixture-outage-write",
+          "name": "worker_workspace_shell",
+          "arguments": "{\"command\":\"printf continued > /workspace/after-link-failure\"}"
+        },
+        {
+          "turn": 2,
+          "step": 1,
+          "callId": "cleanup-report-2e92fd9d-d281-4e9e-adcf-0d41036a41b9",
+          "name": "worker_report",
+          "arguments": "{\"task_id\":\"59feada7-13b5-47ca-8093-75e7ae90088f\",\"assignment_id\":\"2e92fd9d-d281-4e9e-adcf-0d41036a41b9\",\"summary\":\"Old assignment stopped\",\"outcome\":\"transfer_confirmed\"}"
+        }
+      ],
+      "native_turns": [
+        {
+          "turn": 1,
+          "reason": {
+            "kind": "aborted",
+            "reason": {
+              "kind": "user"
+            }
+          }
+        },
+        {
+          "turn": 2,
+          "reason": {
+            "kind": "completed"
+          }
+        }
+      ],
+      "container_removed_after_explicit_control": true
+    },
+    {
+      "broken_link": "adapter",
+      "task_id": "20e08d28-dd90-44bd-bb1b-12ce4865eec2",
+      "assignment_id": "43b0fd04-6f1e-454e-a021-bb859a19eddf",
+      "container_id": "788efb58fd0118b6f00dcbc8cb4ddaee7ddd26b23121d6be6ae2262ba8802852",
+      "dropped_tcp_connections": 66,
+      "outage": {
+        "worker_id": "oguri",
+        "router_connected": true,
+        "router_observed": true,
+        "adapter_connected": false,
+        "last_error": "adapter_connection_unconfirmed",
+        "host_error": "adapter_connection_unconfirmed",
+        "host_session": null,
+        "expected_host_session": "dsh-native-link-adapter",
+        "host_busy": null,
+        "native_capabilities": null,
+        "host_observation_age_seconds": 0,
+        "router_retry_in_seconds": null,
+        "held_task_id": "20e08d28-dd90-44bd-bb1b-12ce4865eec2",
+        "held_assignment_id": "43b0fd04-6f1e-454e-a021-bb859a19eddf"
+      },
+      "recovered": {
+        "worker_id": "oguri",
+        "router_connected": true,
+        "router_observed": true,
+        "adapter_connected": true,
+        "last_error": null,
+        "host_error": null,
+        "host_session": "dsh-native-link-adapter",
+        "expected_host_session": "dsh-native-link-adapter",
+        "host_busy": true,
+        "native_capabilities": {
+          "next_turn": true,
+          "context_usage": true,
+          "compaction": false,
+          "session_catalog": false,
+          "stop_private": true,
+          "model_view": true,
+          "model_change": true,
+          "goal_control": true
+        },
+        "host_observation_age_seconds": 0,
+        "router_retry_in_seconds": null,
+        "held_task_id": "20e08d28-dd90-44bd-bb1b-12ce4865eec2",
+        "held_assignment_id": "43b0fd04-6f1e-454e-a021-bb859a19eddf"
+      },
+      "router_during_outage": {
+        "adapter_connected": false,
+        "busy": null,
+        "held_assignment_id": "43b0fd04-6f1e-454e-a021-bb859a19eddf",
+        "held_task_id": "20e08d28-dd90-44bd-bb1b-12ce4865eec2",
+        "last_seen_at": "2027-01-15T08:10:55+00:00",
+        "online": true,
+        "worker_id": "oguri"
+      },
+      "test_platform_disconnect_id": "om_3",
+      "w04_cleanup": {
+        "recorded": true,
+        "release_assignment_id": "43b0fd04-6f1e-454e-a021-bb859a19eddf",
+        "task_state": "cancelled"
+      },
+      "final_task": {
+        "assignee_id": "oguri",
+        "assignment_id": null,
+        "holder": {
+          "kind": "router"
+        },
+        "instructions": "Keep the original native work",
+        "revision": 5,
+        "state": "cancelled",
+        "task_id": "20e08d28-dd90-44bd-bb1b-12ce4865eec2",
+        "title": "Isolated link failure"
+      },
+      "host_receipt": {
+        "delivery_id": "b4044dfd-6933-45b0-af35-4ecd23e56e34",
+        "digest": "53545c2079a03e795c364ba28ab243b5f79595148b1670a4f012cc7b71b9a2a9",
+        "native_id": "mowulink-ffde21113839d1efd04826e45ddbd5f8b4d1cc4768088b254c01190d6a90bd25",
+        "session": "dsh-native-link-adapter",
+        "turn_id": "1/1"
+      },
+      "native_inputs": [
+        "mowulink-ffde21113839d1efd04826e45ddbd5f8b4d1cc4768088b254c01190d6a90bd25",
+        "mowulink-11adfb110729f05fb6f6b99645bd6b89b5594ddf8c5857ab520fa28e65bbf268"
+      ],
+      "native_calls": [
+        {
+          "turn": 1,
+          "step": 1,
+          "callId": "fixture-contained-write",
+          "name": "worker_workspace_shell",
+          "arguments": "{\"command\":\"printf owned-write > /workspace/marker; setsid /bin/sleep 120 </dev/null >/dev/null 2>&1 & echo $! > /workspace/pid\"}"
+        },
+        {
+          "turn": 1,
+          "step": 2,
+          "callId": "fixture-outage-write",
+          "name": "worker_workspace_shell",
+          "arguments": "{\"command\":\"printf continued > /workspace/after-link-failure\"}"
+        },
+        {
+          "turn": 2,
+          "step": 1,
+          "callId": "cleanup-report-43b0fd04-6f1e-454e-a021-bb859a19eddf",
+          "name": "worker_report",
+          "arguments": "{\"task_id\":\"20e08d28-dd90-44bd-bb1b-12ce4865eec2\",\"assignment_id\":\"43b0fd04-6f1e-454e-a021-bb859a19eddf\",\"summary\":\"Old assignment stopped\",\"outcome\":\"cancel_confirmed\"}"
+        }
+      ],
+      "native_turns": [
+        {
+          "turn": 1,
+          "reason": {
+            "kind": "aborted",
+            "reason": {
+              "kind": "user"
+            }
+          }
+        },
+        {
+          "turn": 2,
+          "reason": {
+            "kind": "completed"
+          }
+        }
+      ],
+      "container_removed_after_explicit_control": true
+    }
+  ]
+}

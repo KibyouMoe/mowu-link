@@ -78,6 +78,7 @@ class LinkHealth(unittest.TestCase):
 
     def test_adapter_outage_is_reported_to_router_no_idle_or_false_offline(self):
         task = self.dispatched()
+        assignment = self.worker.hold()["held_assignment_id"]
         self.worker.adapter = RemoteAdapter(self.unavailable)
         for _ in range(31):
             self.clock.advance(20)
@@ -86,6 +87,7 @@ class LinkHealth(unittest.TestCase):
         self.assertTrue(row["online"])
         self.assertIsNone(row["busy"])
         self.assertFalse(row["adapter_connected"])
+        self.assertEqual((row["held_task_id"],row["held_assignment_id"]),(task["task_id"],assignment))
         self.assertTrue(self.service.router_connected)
         self.assertFalse(self.service.adapter_connected)
         outage = self.service.status()
