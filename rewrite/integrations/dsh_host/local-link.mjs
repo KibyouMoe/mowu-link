@@ -23,9 +23,10 @@ function verifiedCredentials(directory) {
     const check = fileURLToPath(new URL('./check-local-link.ps1',import.meta.url));
     try {
       execFileSync(powershell,['-NoProfile','-NonInteractive','-File',check,directory],
-        {windowsHide:true,stdio:'ignore',timeout:8000});
-    } catch {
-      throw new Error('private_dsh_link_required');
+        {windowsHide:true,stdio:'ignore',timeout:20000});
+    } catch (error) {
+      if (error.code==='ETIMEDOUT') throw new Error('dsh_link_acl_check_timeout');
+      throw new Error(error.status===3 ? 'private_dsh_link_required' : 'dsh_link_acl_check_unavailable');
     }
   } else {
     privateDir(directory);

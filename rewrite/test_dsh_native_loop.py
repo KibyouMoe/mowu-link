@@ -76,7 +76,7 @@ class NativeProcess(unittest.TestCase):
             reader = Thread(target=lambda:output.put(native.stdout.readline()),daemon=True)
             reader.start()
             try:
-                line = output.get(timeout=12)
+                line = output.get(timeout=30)
             except Empty:
                 native.kill()
                 reader.join(3)
@@ -94,8 +94,9 @@ class NativeProcess(unittest.TestCase):
         if os.name=="nt":
             exe = Path(os.environ["MOWULINK_TEST_DSH_BINARY"])
             root = exe.parent/"resources/app.asar/dsh"
-            env.update({key:os.environ[key] for key in ("SystemRoot","WINDIR","PATH") if key in os.environ})
-            env.update({"USERPROFILE":str(directory),"DSH_HOME":str(directory),"TEMP":str(directory),"TMP":str(directory)})
+            env.update({key:os.environ[key] for key in ("SystemRoot","WINDIR","PATH","COMSPEC","PATHEXT",
+                                                       "ProgramFiles","ProgramData","SystemDrive") if key in os.environ})
+            env.update({key:str(directory) for key in ("USERPROFILE","DSH_HOME","TEMP","TMP","LOCALAPPDATA","APPDATA")})
         args = [exe,fixture.resolve(),root,directory,session,mode]
         if use_tls:
             args.append("tls")
@@ -231,6 +232,12 @@ class LocalTlsLoop(NativeProcess):
             with self.assertRaisesRegex(Fault,"private_dsh_link_required"):
                 LocalLink(directory,use_tls=True)
             (directory/"dsh-link.key").chmod(0o600)
+        if os.name=="nt":
+            powershell = Path(os.environ["SystemRoot"])/"System32/WindowsPowerShell/v1.0/powershell.exe"
+            check = FIXTURE.with_name("check-local-link.ps1")
+            observed = subprocess.run([powershell,"-NoProfile","-NonInteractive","-File",check,directory],
+                                      capture_output=True,timeout=30)
+            self.assertEqual(observed.returncode,0,observed.stderr.decode("utf-8",errors="replace"))
         self.formal_report(directory,use_tls=True)
         self.evidence.update({"link":"IPv4 loopback with mutual TLS","missing_client_certificate_rejected_in_both_directions":True,
                               "foreign_session_rejected":True,"input_count_after_replay":1})

@@ -3,20 +3,19 @@ $ErrorActionPreference = 'Stop'
 $trusted = @([Security.Principal.WindowsIdentity]::GetCurrent().User.Value, 'S-1-5-18', 'S-1-5-32-544')
 
 function Assert-Private([string]$Path, [bool]$IsDirectory) {
-    $entry = Get-Item -LiteralPath $Path -Force
-    if ($entry.PSIsContainer -ne $IsDirectory -or ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
-        throw 'private_dsh_link_required'
-    }
-    $acl = Get-Acl -LiteralPath $Path
-    $raw = New-Object Security.AccessControl.RawSecurityDescriptor($acl.Sddl)
+    $attributes = [IO.File]::GetAttributes($Path)
+    if ([bool]($attributes -band [IO.FileAttributes]::Directory) -ne $IsDirectory -or
+            ($attributes -band [IO.FileAttributes]::ReparsePoint)) { exit 3 }
+    $acl = if ($IsDirectory) { [IO.Directory]::GetAccessControl($Path) } else { [IO.File]::GetAccessControl($Path) }
+    $raw = [Security.AccessControl.RawSecurityDescriptor]::new($acl.Sddl)
     if ($raw.Owner.Value -notin $trusted -or $null -eq $raw.DiscretionaryAcl) {
-        throw 'private_dsh_link_required'
+        exit 3
     }
     foreach ($ace in $raw.DiscretionaryAcl) {
         if ($ace.AceType -eq [Security.AccessControl.AceType]::AccessDenied) { continue }
         if ($ace.AceType -ne [Security.AccessControl.AceType]::AccessAllowed -or
                 $ace.SecurityIdentifier.Value -notin ($trusted + 'S-1-3-4')) {
-            throw 'private_dsh_link_required'
+            exit 3
         }
     }
 }
