@@ -4,6 +4,10 @@
 
 ## 检查点与证据
 
+Codex 文件审批已接上原生条目与 Router 单次决定。独立 App Server 连续六轮实测，授权 CLI 读到同一回合的完整差异，正确摘要允许两个临时文件各改一次。错摘要、其他工位和会话级允许被拒。缺差异或目录授权请求按原号取消，未进 Router，飞书展示链未收到差异。模型和操作人用本地夹具，缺差异与目录授权由测试注入。[实测与复跑](evidence/codex-app-server-file-approval.json) · [操作入口](README.md#独立宿主命令审批)
+
+macOS 全量通过 256 项，Linux arm64 通过 175 项、跳过 81 项。以 `3846ff95ecc19c21c61481992189267cce1d5475` 构建 231 文件独立包，SHA-256 为 `132cf201de7ef89d5d946411396e92c695ff1f93903691b6a428e93d85e4129c`。安装目录复跑原生审批和服务共 11 项，逐文件摘要一致。另从安装包启动三段隔离 HTTPS，用实际 Codex 适配器的 `--relay-file-approvals` 收到审批 `e11518cc-2ee7-49fe-848c-d3a85b1068d6`，CLI 放行后冷读原生回合 `01a2188a-8718-7e90-b526-86fb73a9b7e9`。等待审批时首个聊天回执为空，批准后按原消息号找回同一输入，重投未新增回合。使用本地模型和独立测试身份。Desktop 应用授权、原生 Hook 与额外权限待验。
+
 Hermes 插件的 Router 收件与原生输入独立推进。旧版在断开 Router 后 23 秒内没查回已收的 Event。新版连续三轮在 Router 仍断开时卸载并重载插件，从隔离 Hermes 的原生台账查回带附件 Event 的原收件号。每轮已入箱的 Notify 等原会话空闲 10.89–10.92 秒后送达，Info 零注入。已核实的附件元数据可以重用，仍缺附件的 Event 暂缓，同批普通 Event 可先交。使用实际 Hermes 插件、会话台账及 Router HTTP。模型用夹具，断链由隔离测试注入。[实测](evidence/hermes-router-outage.json) · [复跑](README.md#hermes-专用会话)
 
 macOS 全量通过 255 项，Linux arm64 通过 175 项、跳过 80 项。以 `e54f9c825487d75c3b32bcb773a6bbd4c0c70850` 构建 229 文件独立包，SHA-256 为 `3c369309622bb1a30efd74df6e6e193532e0caf334434f058c5f83cca3474dd2`。安装目录通过队列、附件、旧订阅回退与组件快照等 32 项，实际 Hermes 插件另通过一次断联重载，找回原收件 `6083f780923848ec9870625d094450ba`，文件摘要复验一致。旧版本回退夹具取自 `30f61e671465db0b5bba221ba8c9fc2194a6e43d`，用 `MOWULINK_TEST_LEGACY_ROOT` 指定。

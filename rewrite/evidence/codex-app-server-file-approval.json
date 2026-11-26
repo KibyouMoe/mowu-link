@@ -1,4 +1,28 @@
 {
+  "installed_https_run": {
+    "app_server_session": "01a2188a-71af-73f0-ab30-58b46137ff2c",
+    "approval_id": "e11518cc-2ee7-49fe-848c-d3a85b1068d6",
+    "boundary": "Installed Router, Worker and Codex adapter, native App Server, local scripted model and operator",
+    "file_sha256_after_accept": "7b9a72466d3960eb2aacccfc848939453490db0678bd4725def3f789b891c919",
+    "first_input_receipt_present": false,
+    "manager_approval_notices": 0,
+    "native_closed": true,
+    "native_file_item": "trial-file-tls",
+    "notice_id": "3eb88990-e9dd-44be-9224-c5e41941e6b5",
+    "original_input_receipt": {
+      "delivery_id": "chat-8679ad70-27d7-4649-8634-b15acf72629d",
+      "digest": "aa7da597789a57eadafcb6b35f0a26a15ba148f56c34a49c723e84176c87ff8b",
+      "native_id": "01a2188a-871d-7bc2-b9c2-30c24bf874fe",
+      "session": "01a2188a-71af-73f0-ab30-58b46137ff2c",
+      "turn_id": "01a2188a-8718-7e90-b526-86fb73a9b7e9"
+    },
+    "package_revision": "3846ff95ecc19c21c61481992189267cce1d5475",
+    "package_sha256": "132cf201de7ef89d5d946411396e92c695ff1f93903691b6a428e93d85e4129c",
+    "request_digest": "7451e4a8582d8337d59498ed0fad15526ffe45ddcfff5beba0c9ee07bbac456f",
+    "same_decision_and_input_replay": true,
+    "transport": "three isolated HTTPS services",
+    "turn_id": "01a2188a-8718-7e90-b526-86fb73a9b7e9"
+  },
   "native_binary_sha256": "e1c3d034b7fd295d160d6ab412357f9c54241c8ed7a2a861f4730b8a4dd88ddb",
   "native_version": "0.171.0-alpha.13.2",
   "runs": [
