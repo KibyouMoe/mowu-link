@@ -10,6 +10,8 @@ DSH 命令审批已用实际 SDK 的 AgentLoop、ApprovalService 和 Bash 验证
 
 同版 macOS 201 项全过。Linux arm64 通过 141 项，60 项因本机宿主依赖跳过。
 
+从 `3d36e488e7879a060786e4a773fe8ba81edbdb19` 构建并安装了发布包，再从安装目录运行 DSH 命令审批回归，校验 171 个文件。归档 SHA-256 为 `782a474c4150ccfbe4f892a03eb18daa3095c4c4b730eea1b719ea9017b20e51`。
+
 独立 Codex App Server 的命令审批通过 Worker 按原请求号到 Router。请求与单次决定分别持久记录，C01 通知仅给该工位获准的审批身份。同号重投没有第二条通知。一次故意丢掉 Router 闭合回执，适配器取回同一记录；另一次丢原生关闭回执，Router 保留决定已登记，未误记关闭，也未重发原生决定。第三次推进隔离 Router 时钟，超时后原生请求只收到一次取消，没有操作人决定。连过 12 轮。模型和人机操作使用夹具，实际授权流程仍待验。[原生审批记录](evidence/codex-app-server-native-approval.json) · [审批入口](README.md#独立宿主命令审批)
 
 另用正式服务入口启动三个隔离 TLS 进程。获准 CLI 取消 `de39f540-e4ad-4c87-95a0-32b4aa591566` 后，独立宿主冷开回读同一回合已中断，且无命令执行项。复跑 `python3 -m unittest -v rewrite.test_service rewrite.test_codex_app_server.CodexAppServer.test_native_command_approval_cancels_exact_request_and_does_not_infer_missing_proof`。
