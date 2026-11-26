@@ -4,6 +4,8 @@
 
 ## 检查点与证据
 
+换原生会话前可用 `state_bundle audit-handoff` 对照未核的原生私聊、下一轮队列、派发、题目、压缩和清理。隔离试验中，原宿主已收到私聊但回包丢失，同时有一条排队消息。正式持单账本一致，原生会话账本仍显示待核；从原会话恢复后查回私聊并交付队列，各只有一次原生输入。审计仅返回计数。复跑 `python3 -m unittest -v rewrite.test_state_bundle`。[停写窗口与恢复](router-rehearsal.md#重做版五组件的离线恢复)
+
 Codex App Server 的原生分叉会复制父会话的输入号、投递号和回合号。新会话首次接入时保存已存在的投递号，旧号既不能证明在子会话新收件，也无法再次写入。临时改接子会话后，原消息有回执时读回父会话的回执，缺回执时仍待核。子会话只收到一条新消息，故意丢收件后冷开可按原号查回。连续 20 轮通过。[原生分叉记录](evidence/codex-app-server-native-fork.json)。复跑 `python3 -m unittest -v rewrite.test_codex_app_server.CodexAppServer.test_native_fork_cannot_confirm_or_resend_the_parent_delivery`。换绑由测试显式选择，飞书 `/fork` 与 `/resume` 换绑仍待接。
 
 正式 Codex 长目标在独立 App Server 内连续 12 轮通过。模型夹具通过原生工具建目标，宿主自动续办并完成。续办回合虽与派单同源，但没有单独的原生输入，不能凭原单号代报。原派发继续持有，直到 Router 发出询问、得到新回合的原生收件后，模型经 W04 交回。两次调用回同一回执，仅一条待验通知。正式派单与询问各有一个原生输入。[长目标证据](evidence/codex-app-server-native-formal-goal.json)。复跑 `python3 -m unittest -v rewrite.test_codex_app_server.CodexAppServer.test_native_goal_finishing_keeps_original_assignment_until_bound_app_server_report`。

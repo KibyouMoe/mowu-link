@@ -225,3 +225,48 @@ class Bundle(unittest.TestCase):
         self.assertTrue(seen["needs_review"])
         self.assertEqual(seen["issues"],[{"worker_id":"oguri","issue":"adapter_receipt_unconfirmed"}])
         self.assertEqual(seen["workers"][0]["worker_assignment"],seen["workers"][0]["router_assignment"])
+
+    def test_native_session_audit_keeps_unknown_private_and_queued_inputs_for_the_original_host(self):
+        self.native.next_turn = True
+        self.native.is_busy = True
+        private_mid,queue_mid = guid(),guid()
+        private_text,queue_text = "Private unknown fixture","Private queued fixture"
+        with self.stack(self.sources) as (m,w,_source,_mail,_platform,_views):
+            service = WorkerService(w,self.clock)
+            service.step()
+            original_deliver = self.native.deliver
+            def lose_host_receipt(*args,**kwargs):
+                original_deliver(*args,**kwargs)
+                return None
+            self.native.deliver = lose_host_receipt
+            self.assertIsNone(w.chat(private_mid,private_text))
+            self.native.deliver = original_deliver
+            service.handle("platform/oguri","POST","/v1/worker/command",
+                           {"message_id":queue_mid,"text":"/queue "+queue_text},{})
+            ((_,original),) = self.native.entries()
+            self.assertEqual(m.tasks()["items"],[])
+
+        checksum = capture(self.sources,self.revision,self.snapshot)["manifest_sha256"]
+        seen = audit_handoff(self.snapshot,checksum)
+        self.assertFalse(seen["needs_review"])
+        worker, = seen["workers"]
+        self.assertFalse(worker["native_session_ledger_clear"])
+        self.assertEqual({name:count for name,count in worker["native_session_pending"].items() if count},
+                         {"private_chat":1,"queued_chat":1,"adapter_deliveries":1})
+        self.assertNotIn(private_text,encode(seen))
+        self.assertNotIn(queue_text,encode(seen))
+        self.assertEqual(audit_handoff(self.snapshot,checksum),seen)
+
+        restored = restore(self.snapshot,checksum,self.dest)
+        self.native.is_busy = False
+        with self.stack(restored) as (_m,w,_source,_mail,_platform,_views):
+            self.assertEqual(w.chat(private_mid,private_text),original)
+            service = WorkerService(w,self.clock)
+            service.step()
+            service.step()
+            self.assertEqual([payload["text"] for payload,_ in self.native.entries()],[private_text,queue_text])
+        resolved = self.root/"resolved"
+        later = capture(restored,self.revision,resolved)["manifest_sha256"]
+        clean, = audit_handoff(resolved,later)["workers"]
+        self.assertTrue(clean["native_session_ledger_clear"],clean)
+        self.assertTrue(all(count==0 for count in clean["native_session_pending"].values()))

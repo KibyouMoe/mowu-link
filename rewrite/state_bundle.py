@@ -22,6 +22,21 @@ TABLES = {
     "feishu":{"binding","platform_events","view_cursor","view_attempt"},
 }
 REQUIRED = {"router","worker","agent","hermes","trigger"}
+WORKER_NATIVE_PENDING = {
+    "inbox": ({"inbox"},"SELECT COUNT(*) FROM inbox WHERE done=0"),
+    "private_chat": ({"chats","chat_deliveries"},"""SELECT COUNT(*) FROM chats c
+        LEFT JOIN chat_deliveries n USING(message_id) WHERE n.receipt IS NULL"""),
+    "queued_chat": ({"queued_chats"},"SELECT COUNT(*) FROM queued_chats WHERE receipt IS NULL"),
+    "peer_ingress": ({"peers","peer_receipt_acks"},"""SELECT COUNT(*) FROM peers p
+        LEFT JOIN peer_receipt_acks a USING(message_id) WHERE p.direction='in' AND a.ack IS NULL"""),
+    "trainer_questions": ({"trainer_questions"},"SELECT COUNT(*) FROM trainer_questions WHERE proof IS NULL"),
+    "compactions": ({"platform_compactions"},"SELECT COUNT(*) FROM platform_compactions WHERE native_receipt IS NULL"),
+    "cleanup_reports": ({"cleanup_reports"},"SELECT COUNT(*) FROM cleanup_reports WHERE receipt IS NULL"),
+}
+AGENT_NATIVE_PENDING = {
+    "adapter_deliveries": ({"intents"},"SELECT COUNT(*) FROM intents WHERE receipt IS NULL"),
+    "adapter_questions": ({"question_resolutions"},"SELECT COUNT(*) FROM question_resolutions WHERE proof IS NULL"),
+}
 
 
 def component(label):
@@ -147,6 +162,12 @@ def restore(snapshot,expected,destination):
     return {label:str(destination/filename(label)) for label in manifest["files"]}
 
 
+def pending_counts(db,checks):
+    tables = {row[0] for row in db.execute("SELECT name FROM sqlite_schema WHERE type='table'")}
+    return {name:db.execute(query).fetchone()[0] if required<=tables else None
+            for name,(required,query) in checks.items()}
+
+
 def audit_handoff(snapshot,expected):
     manifest = verify(snapshot,expected)
     labels = manifest["files"]
@@ -155,6 +176,8 @@ def audit_handoff(snapshot,expected):
         current = {row["assignee_id"]:dict(row) for row in db.execute("""SELECT assignee_id,task_id,assignment_id
                                                                     FROM tasks WHERE state='working' ORDER BY assignee_id""")}
         sessions = dict(db.execute("SELECT worker_id,session_id FROM workers"))
+        reserved = dict(db.execute("""SELECT assignee_id,COUNT(*) FROM tasks WHERE state='ready'
+                                    AND assignment_id IS NOT NULL GROUP BY assignee_id"""))
         cleanup = [dict(row) for row in db.execute("""SELECT worker_id,task_id,assignment_id,kind FROM cleanups
                                                     WHERE done=0 ORDER BY worker_id,assignment_id""")]
     workers,issues = [],[]
@@ -168,6 +191,7 @@ def audit_handoff(snapshot,expected):
                                   WHERE stage='accepted'""").fetchone()
             sid = db.execute("SELECT session FROM connection WHERE slot=1").fetchone()
             pending = db.execute("SELECT COUNT(*) FROM outbox WHERE receipt IS NULL").fetchone()[0]
+            session_pending = pending_counts(db,WORKER_NATIVE_PENDING)
             bound = None
             if local and db.execute("SELECT 1 FROM sqlite_schema WHERE name='assignment_sessions'").fetchone():
                 bound = db.execute("SELECT session FROM assignment_sessions WHERE assignment_id=?",
@@ -183,8 +207,15 @@ def audit_handoff(snapshot,expected):
             problems.append("report_receipt_pending")
         if local and not adapter_has_input(snapshot,wid,local,bound[0] if bound else None):
             problems.append("adapter_receipt_unconfirmed")
+        with closing(readonly(snapshot/filename("agent:"+wid))) as db:
+            session_pending.update(pending_counts(db,AGENT_NATIVE_PENDING))
+        session_pending["report_receipts"] = pending
+        session_pending["held_assignments"] = int(bool(local or remote))
+        session_pending["router_reserved_assignments"] = reserved.get(wid,0)
+        session_pending["router_cleanup"] = sum(row["worker_id"]==wid for row in cleanup)
         workers.append({"worker_id":wid,"worker_assignment":local_ids,"router_assignment":remote_ids,
-                        "unconfirmed_reports":pending,"issues":problems})
+                        "unconfirmed_reports":pending,"issues":problems,"native_session_pending":session_pending,
+                        "native_session_ledger_clear":not problems and all(count==0 for count in session_pending.values())})
         issues.extend({"worker_id":wid,"issue":problem} for problem in problems)
     issues.extend({"worker_id":wid,"issue":"active_worker_state_missing","task_id":row["task_id"],
                    "assignment_id":row["assignment_id"]} for wid,row in current.items())
