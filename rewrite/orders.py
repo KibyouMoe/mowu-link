@@ -220,7 +220,7 @@ class Orders:
         tid, aid = held_pair(data)
         now = self.clock()
         idle = row["idle_since"]
-        if busy or tid:
+        if busy:
             idle = None
         elif idle is None or now - row["last_seen"] >= self.lease_seconds:
             idle = now
@@ -230,6 +230,8 @@ class Orders:
             # A stale frame can still arrive; its old assignment will fail W03.
             db.execute("""UPDATE tasks SET assignment_id=NULL,revision=revision+1 WHERE assignee_id=?
                        AND state='ready' AND assignment_id IS NOT NULL""", (worker,))
+        if not busy and tid and idle is not None and now-idle >= 10:
+            pool.on_idle_sample(db, worker, tid, aid, now, self.poll_seconds)
         self.dispatch(db, worker)
         return {"observed_at": timestamp(now)}
 
@@ -241,6 +243,7 @@ class Orders:
         require(current["revision"] == data.get("revision"), 409, "revision_conflict")
         require(current["state"] == "ready" and self.available(row), 409, "worker_not_available")
         db.execute("UPDATE tasks SET state='working',revision=revision+1 WHERE task_id=?", (tid,))
+        db.execute("UPDATE workers SET idle_since=NULL WHERE worker_id=?", (worker,))
         return {"accepted": True, "holder": {"kind": "worker", "worker_id": worker}, "assignment_id": aid}
 
     def report(self, db, worker, tid, data):
@@ -254,6 +257,8 @@ class Orders:
         require(not db.execute("SELECT 1 FROM cleanups WHERE assignment_id=? AND done=0", (aid,)).fetchone(),
                 409, "stale_assignment")
         if data.get("outcome") == "continue_requested":
+            db.execute("DELETE FROM inquiries WHERE assignment_id=?", (aid,))
+            db.execute("UPDATE workers SET idle_since=NULL WHERE worker_id=?", (worker,))
             return {"recorded": True, "task_state": "working"}
         if data.get("outcome") == "blocked":
             require(not data.get("artifact_ids"), 422, "attachments_not_supported")
@@ -262,6 +267,7 @@ class Orders:
         require(data.get("outcome") == "completed", 422, "unsupported_outcome")
         require(not data.get("artifact_ids"), 422, "attachments_not_supported")
         summary = string(data, "summary")
+        db.execute("DELETE FROM inquiries WHERE assignment_id=?", (aid,))
         db.execute("INSERT INTO reports VALUES (?,?,?,?)", (aid, tid, worker, summary))
         db.execute("UPDATE tasks SET state='completed_reported',assignment_id=NULL,revision=revision+1 WHERE task_id=?",
                    (tid,))
@@ -312,6 +318,10 @@ class Orders:
             require(target is None or target != current["assignee_id"], 422, "same_assignee")
             if current["state"] == "working":
                 kind = "task.transfer_out" if target else "task.cancel"
+                db.execute("DELETE FROM inquiries WHERE assignment_id=?", (current["assignment_id"],))
+                if not target:
+                    db.execute("INSERT INTO inquiries VALUES (?,'task.cancel',0,?)",
+                               (current["assignment_id"], self.clock()))
                 cleanup.start(db, tid, current["assignment_id"], current["assignee_id"], kind, reason, target)
             if pooled:
                 prior = db.execute("SELECT * FROM pool_entries WHERE task_id=? AND active=1", (tid,)).fetchone()

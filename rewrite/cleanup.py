@@ -41,6 +41,7 @@ def confirm(db, current, worker, aid, outcome):
                    (state, current["task_id"]))
         pool.notify(db, current["task_id"], worker, "原处理人已确认取消并清理工单。")
     db.execute("UPDATE cleanups SET done=1 WHERE assignment_id=?", (aid,))
+    db.execute("DELETE FROM inquiries WHERE assignment_id=?", (aid,))
     db.execute("""UPDATE workers SET held_task_id=NULL,held_assignment_id=NULL,idle_since=NULL
                WHERE worker_id=? AND held_assignment_id=?""", (worker, aid))
     return {"recorded": True, "release_assignment_id": aid, "task_state": state}

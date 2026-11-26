@@ -78,7 +78,7 @@ class Worker:
                 with self.db.transaction() as db:
                     db.execute("INSERT OR IGNORE INTO inbox(delivery_id,frame) VALUES (?,?)",
                                (frame["delivery_id"], encode(frame)))
-                    if frame["kind"] in ("task.cancel", "task.transfer_out"):
+                    if frame["kind"] in ("task.cancel", "task.transfer_out", "task.shelved"):
                         self.save_control(db, frame["kind"], frame["payload"])
                 ack = self.router.ack(frame)
                 with self.db.transaction() as db:
@@ -94,6 +94,11 @@ class Worker:
     def process(self, frame):
         with self.lock:
             payload = frame["payload"]
+            if frame["kind"] == "task.shelved":
+                with self.db.transaction() as db:
+                    db.execute("UPDATE jobs SET stage='released' WHERE assignment_id=? AND stage='accepted'",
+                               (payload["assignment_id"],))
+                return self.adapter.deliver(frame["delivery_id"], {"kind": "task.shelved", **payload}) is not None
             if frame["kind"] in ("task.cancel", "task.transfer_out"):
                 with self.db.transaction() as db:
                     record = db.execute("SELECT kind FROM controls WHERE assignment_id=?",
@@ -104,14 +109,15 @@ class Worker:
             if frame["kind"] == "worker.status_query":
                 self.observe(payload["query_id"])
                 return True
-            if frame["kind"] == "task.updated":
+            if frame["kind"] in ("task.updated", "task.probe"):
                 held = self.hold()
                 if (held["held_task_id"], held["held_assignment_id"]) != (payload["task_id"], payload["assignment_id"]):
                     return True
                 with self.db.transaction() as db:
                     if db.execute("SELECT 1 FROM controls WHERE assignment_id=?", (payload["assignment_id"],)).fetchone():
                         return True
-                return self.adapter.deliver(frame["delivery_id"], {"kind": "task_update", **payload}) is not None
+                kind = "task_update" if frame["kind"] == "task.updated" else "task_probe"
+                return self.adapter.deliver(frame["delivery_id"], {"kind": kind, **payload}) is not None
             require(frame["kind"] == "task.dispatch", 422, "unsupported_delivery")
             return self.take(frame)
 
@@ -197,7 +203,7 @@ class Worker:
                 require(origin["kind"] == kind and origin["task_id"] == task_id
                         and origin["assignment_id"] == assignment_id, 403, "wrong_report_origin")
                 return self.confirm_cleanup(task_id, assignment_id, kind, outcome)
-            require(origin["kind"] in ("task", "task_update") and origin["task_id"] == task_id
+            require(origin["kind"] in ("task", "task_update", "task_probe") and origin["task_id"] == task_id
                     and origin["assignment_id"] == assignment_id, 403, "wrong_report_origin")
             require(outcome in ("completed", "blocked", "continue_requested"), 422, "unsupported_outcome")
             body = {"session_id": self.session, "assignment_id": assignment_id,

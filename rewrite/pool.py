@@ -14,6 +14,9 @@ CREATE TABLE IF NOT EXISTS materials (
   material_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, assignment_id TEXT NOT NULL,
   submitted_by TEXT NOT NULL, text TEXT NOT NULL, received_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS inquiries (
+ assignment_id TEXT PRIMARY KEY, kind TEXT NOT NULL, retries INTEGER NOT NULL, last_sent REAL NOT NULL
+);
 CREATE INDEX IF NOT EXISTS dispatch_by_task ON deliveries(json_extract(payload,'$.task_id'))
     WHERE kind='task.dispatch';
 """
@@ -30,9 +33,35 @@ def enter(db, current, source, reason, now):
     db.execute("UPDATE tasks SET state='blocked',assignment_id=NULL,revision=revision+1 WHERE task_id=?", (tid,))
     # A shelved cancellation must never subsequently claim the task was cancelled.
     db.execute("UPDATE cleanups SET done=2 WHERE assignment_id=? AND kind='task.cancel' AND done=0", (aid,))
+    db.execute("DELETE FROM inquiries WHERE assignment_id=?", (aid,))
     db.execute("""UPDATE workers SET held_task_id=NULL,held_assignment_id=NULL,idle_since=NULL
                   WHERE worker_id=? AND held_assignment_id=?""", (wid, aid))
     notify(db, tid, wid if source == "worker" else "router", reason)
+
+
+def on_idle_sample(db, worker, tid, aid, now, interval):
+    row = db.execute("SELECT * FROM tasks WHERE task_id=? AND assignment_id=? AND assignee_id=? AND state='working'",
+                     (tid, aid, worker)).fetchone()
+    if not row:
+        return
+    request = db.execute("SELECT * FROM inquiries WHERE assignment_id=?", (aid,)).fetchone()
+    if request and now - request["last_sent"] < interval:
+        return
+    if request and request["retries"] == 3:
+        reason = "取消三次重试仍无清理回执。" if request["kind"] == "task.cancel" else "进度询问三次重试仍无答复。"
+        enter(db, row, "unanswered", reason, now)
+        delivery.enqueue(db, "worker/" + worker, "task.shelved",
+                         {"task_id": tid, "assignment_id": aid, "reason": reason})
+        return
+    kind = request["kind"] if request else "task.probe"
+    body = {"task_id": tid, "assignment_id": aid}
+    if kind == "task.cancel":
+        control = db.execute("SELECT reason FROM cleanups WHERE assignment_id=? AND done=0", (aid,)).fetchone()
+        require(control, 409, "cancel_not_pending")
+        body["reason"] = control["reason"]
+    delivery.enqueue(db, "worker/" + worker, kind, body)
+    db.execute("""INSERT INTO inquiries VALUES (?,?,0,?) ON CONFLICT(assignment_id) DO UPDATE
+        SET retries=retries+1,last_sent=excluded.last_sent""", (aid, kind, now))
 
 
 def timers(db, now, lease):

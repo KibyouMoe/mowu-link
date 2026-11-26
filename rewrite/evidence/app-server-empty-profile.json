@@ -1,0 +1,32 @@
+{
+  "surface": "Codex Desktop bundled App Server, separate stdio process",
+  "platform": "macOS",
+  "local_date": "2026-11-26",
+  "profile": "temporary empty home and CODEX_HOME; no inherited credentials",
+  "schema": {
+    "method": "thread/start",
+    "field": "dynamicTools",
+    "call": "item/tool/call",
+    "required_call_fields": [
+      "arguments",
+      "callId",
+      "threadId",
+      "tool",
+      "turnId"
+    ]
+  },
+  "initialize": {
+    "succeeded": true
+  },
+  "account_read": {
+    "params": {
+      "refreshToken": false
+    },
+    "error_code": null,
+    "present": false,
+    "requiresOpenaiAuth": true
+  },
+  "turn_started": false,
+  "worker_report_called": false,
+  "router_w04_verified": false
+}
