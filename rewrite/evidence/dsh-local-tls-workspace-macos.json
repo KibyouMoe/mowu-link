@@ -1,0 +1,98 @@
+{
+  "tested_revision": "a54ca112f6da29f0add34b24966e822596ee57f2",
+  "archive_sha256": "3a96b3495596d0637d820a16801a87f0d9b1412b51ba7d2ff8754664e44261de",
+  "archive_files": 282,
+  "installed_specialized_tests": 3,
+  "anonymous_clients_rejected": true,
+  "worker_unix_socket_absent_during_trial": true,
+  "session": "dsh-isolated-workspace-artifacts",
+  "task_id": "8a3c9be2-1cd2-43c8-872f-0b9a58d569ac",
+  "assignment_id": "bd0b1789-cec9-4e12-a754-d23e46b12ea8",
+  "artifact_id": "1e1ca2ff-e1af-4c52-b266-56d1c2d8dd8b",
+  "local_artifact_id": "72988d14-3b4c-45c9-82b0-1045d64f4350",
+  "bytes": 691200,
+  "sha256": "80320ac86029606b61d5b57728512a639950cca654e5683f89d160df3ca0a953",
+  "native_input": "mowulink-3ec43e26b04970411016e044da8effec9ad5cf30c3074a8cdf6c9ac0ff248f38",
+  "native_calls": [
+    {
+      "turn": 1,
+      "step": 1,
+      "callId": "workspace-artifact-0",
+      "name": "worker_workspace_shell",
+      "arguments": "{\"command\":\"mkdir -p results; python3 -c 'from pathlib import Path; Path(\\\"results/sample.bin\\\").write_bytes(bytes(range(256))*2700)'; ln -s /etc/passwd results/unsafe\"}"
+    },
+    {
+      "turn": 1,
+      "step": 2,
+      "callId": "workspace-artifact-1",
+      "name": "worker_workspace_export",
+      "arguments": "{\"path\":\"results/unsafe\"}"
+    },
+    {
+      "turn": 1,
+      "step": 3,
+      "callId": "workspace-artifact-2",
+      "name": "worker_workspace_export",
+      "arguments": "{\"path\":\"results/sample.bin\"}"
+    },
+    {
+      "turn": 1,
+      "step": 4,
+      "callId": "workspace-artifact-3",
+      "name": "worker_workspace_export",
+      "arguments": "{\"path\":\"results/sample.bin\"}"
+    },
+    {
+      "turn": 1,
+      "step": 5,
+      "callId": "workspace-artifact-4",
+      "name": "worker_report",
+      "arguments": "{\"task_id\":\"8a3c9be2-1cd2-43c8-872f-0b9a58d569ac\",\"assignment_id\":\"bd0b1789-cec9-4e12-a754-d23e46b12ea8\",\"summary\":\"DSH isolated container result\",\"artifact_ids\":[\"1e1ca2ff-e1af-4c52-b266-56d1c2d8dd8b\"]}"
+    }
+  ],
+  "upload_offsets": [
+    262144,
+    524288,
+    691200
+  ],
+  "symlink_rejected": true,
+  "container_id": "1497228a760332095964e9b8cdf9f23bdbc5a5e02593102c79e41d48fbc98f1b",
+  "container_present_without_w04_receipt": true,
+  "handoff_waited_for_cleanup": true,
+  "w04": {
+    "recorded": true,
+    "release_assignment_id": "bd0b1789-cec9-4e12-a754-d23e46b12ea8",
+    "task_state": "completed_reported"
+  },
+  "w04_attempts": [
+    {
+      "idempotency_key": "complete-bd0b1789-cec9-4e12-a754-d23e46b12ea8",
+      "body": {
+        "session_id": "4d1f9aa8-5cbb-4365-a1c5-79eef7286ada",
+        "assignment_id": "bd0b1789-cec9-4e12-a754-d23e46b12ea8",
+        "outcome": "completed",
+        "summary": "DSH isolated container result",
+        "artifact_ids": [
+          "1e1ca2ff-e1af-4c52-b266-56d1c2d8dd8b"
+        ]
+      }
+    },
+    {
+      "idempotency_key": "complete-bd0b1789-cec9-4e12-a754-d23e46b12ea8",
+      "body": {
+        "artifact_ids": [
+          "1e1ca2ff-e1af-4c52-b266-56d1c2d8dd8b"
+        ],
+        "assignment_id": "bd0b1789-cec9-4e12-a754-d23e46b12ea8",
+        "outcome": "completed",
+        "session_id": "4d1f9aa8-5cbb-4365-a1c5-79eef7286ada",
+        "summary": "DSH isolated container result"
+      }
+    }
+  ],
+  "container_absent_after_replay": true,
+  "manager_notification": "11887b59-5ac4-4ea7-b94e-1c611a8743d3",
+  "router_state": "completed_reported",
+  "native_link": "IPv4 loopback with mutual TLS",
+  "boundary": "Installed DSH AgentLoop, real isolated Linux Docker, Worker and Router. Local scripted model. No Feishu."
+}

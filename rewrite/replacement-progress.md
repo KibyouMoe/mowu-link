@@ -4,6 +4,10 @@
 
 ## 检查点与证据
 
+macOS 的 DSH 可写派发已接入本机双向 TLS。原生宿主与适配器间的工单工具、附件字节、持权查询和容器回收使用同一已认证连接。实测宿主没有 Unix 回调套接字，无证书的两向请求均被拒。原生工具写出 691200 字节，分块回执故意丢失后续传，管理端在 W04 前无法取文件，W04 后逐字节核对一致。丢 W04 回执时原容器保留。从原库重建 Worker 后用原报告重试，只发一次验收通知，容器随后自动回收。模型用脚本驱动，Docker、原生宿主、Worker 和 Router 实跑。此结果的 Docker 引擎仍是 Linux，Windows 原生可写工作区未接入。[实测](evidence/dsh-local-tls-workspace-macos.json)
+
+实现提交 `a54ca112f6da29f0add34b24966e822596ee57f2`，282 文件安装包逐项回读后，双向 TLS 成果、Unix 套接字成果、Unix 套接字取消及转派共 3 项专项通过。Windows DSH 13 项、Codex 与安装 10 项、两套回退通过。macOS 全量 300 项通过、5 项依环境跳过。Linux arm64 全量 187 项通过、118 项依环境跳过。包摘要 `3a96b3495596d0637d820a16801a87f0d9b1412b51ba7d2ff8754664e44261de`。复跑 `MOWULINK_DSH_CONTAINER_IMAGE=<已有镜像完整ID> python3 -B -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_dsh_workspace_exports_and_releases_over_mutual_tls`。[Windows 回归](https://github.com/KibyouMoe/mowu-link/actions/runs/45893121450)
+
 Windows 和 macOS 已用 DSH 本机双向 TLS 核 `/goal` 和 `/compact`。同一原生目标经过暂停和继续，不创建 Router 工单。自动执行第一回合被暂停、第二回合完成，目标号不变。压缩启动回执被扣下，同一指令重试和 Worker 重建后，原生压缩号、四条事件及唯一结果通知均能查回。官方宿主的目标、压缩与持久化实际执行，模型和平台命令身份为夹具。[Windows 证据](evidence/windows-dsh-goal-compaction.json) · [macOS 证据](evidence/dsh-local-tls-goal-compaction-macos.json)
 
 覆盖提交 `d1c15eeadaa74545460ae60355ba3b1b2d86c702`。Windows DSH 13 项、Codex 与安装 10 项、两套回退通过。macOS 已校验的 280 文件包内专项 12 项通过、1 项仅 Windows 跳过。前一实现提交 `1c2e69322cfb40074d35a50c47f49beb3c227f48` 的 macOS 全量 297 项通过、5 项依环境跳过。Linux arm64 在覆盖提交上 187 项通过、117 项依环境跳过。主线演示另核回合结束时仍持单，经 W04 进入待验，管理端验收之后才关闭，宿主为夹具。[Windows 回归](https://github.com/KibyouMoe/mowu-link/actions/runs/45892756279)
