@@ -16,6 +16,7 @@ from . import test_codex_app_server as codex_driver, worker_commands
 from .adapter import HostAdapter
 from .approvals import TTL_SECONDS
 from .codex_app_server import AppServerHost, worker_callbacks
+from .codex_display import CodexDisplay
 from .devloop import FixtureHost, Loop
 from .dsh_display import DshDisplay
 from .dsh_port import DshHost, tool_listener
@@ -25,6 +26,7 @@ from .host_wire import RemoteAdapter, serve_adapter
 from .native_files import NativeFiles
 from .orders import Orders
 from .question_cards import Actions
+from .state_bundle import capture, filename, verify
 from .storage import Fault, encode, guid
 from .test_feishu_output import PlatformFixture
 from .test_mainline import Clock
@@ -1275,6 +1277,216 @@ class NativeLoop(unittest.TestCase):
                              "dsh_input":dsh_result["inputs"][0],"codex_reply_input":received["id"],
                              "reply_to":inbound["reply_to"],"image_sha256":digest,"router_receipts":receipts,
                              "boundary":"Actual Codex App Server and DSH AgentLoop on one Mac with scripted providers"}
+
+    @unittest.skipUnless(codex_driver.CODEX.is_file(),"bundled Codex App Server required")
+    def test_one_worker_cold_switches_between_native_engines_and_keeps_both_reports(self):
+        root = Path(self.enterContext(tempfile.TemporaryDirectory(dir="/tmp",prefix="ml-host-handoff-")))
+        directory = self.enterContext(tempfile.TemporaryDirectory(dir="/tmp",prefix="ml-dsh-handoff-"))
+        profile = root/"codex"
+        profile.mkdir(mode=0o700)
+        dsh_session = "isolated-dsh-worker-handoff"
+        model = ThreadingHTTPServer(("127.0.0.1",0),codex_driver.Provider)
+        model.observed,model.media = [],[]
+        origin = self.enterContext(codex_driver.running(model))
+        labels = ("router:main","worker:oguri","agent:oguri","hermes:main","trigger:source","feishu:oguri")
+        clock = Clock()
+        manager_native = FixtureHost(root/"manager.db","fixture-manager")
+        manager_host = HostAdapter(root/"manager-adapter.db",manager_native,manager_native.session)
+        sink = PlatformFixture()
+        downloaded = []
+        sha = hashlib.sha256(PNG).hexdigest()
+        caption = "  同一张图，换工位宿主以后仍可收到。\n第二行"
+        picture = {"zh_cn":{"content":[[{"tag":"text","text":caption},{"tag":"img","image_key":"img_fixture"}]]}}
+        old_mid,new_mid = "om_before_switch","om_after_switch"
+
+        def files(directory):
+            return {label:directory/filename(label) for label in labels}
+
+        def platform(paths,client):
+            def resource(mid,key,kind,_limit):
+                self.assertEqual((key,kind),("img_fixture","image"))
+                downloaded.append(mid)
+                return PNG
+            path = paths["feishu:oguri"]
+            return Inbound(path,client,resource,"fixture-app","trainer","test-chat",clock=clock),Views(
+                path,client,sink,"test-chat","小栗帽",clock)
+
+        def receive(inbound,mid):
+            self.assertEqual(inbound.record("fixture-app","user","trainer",{"chat_type":"p2p","chat_id":"test-chat",
+                "message_id":mid,"message_type":"post","content":encode(picture)}),mid)
+            try:
+                return inbound.deliver(mid)
+            except Fault as error:
+                if error.code!="host_receipt_unconfirmed":
+                    raise
+                return None
+
+        def finish_report(manager,worker):
+            tid = manager.create(guid(),"Native engine handoff","Submit the isolated result","oguri")["task_id"]
+            worker.poll()
+            clock.advance(10)
+            deadline = time.monotonic()+12
+            while time.monotonic()<deadline:
+                worker.poll()
+                record = manager.inspect(tid)
+                if record["task"]["state"]=="completed_reported" and not worker.hold()["held_assignment_id"]:
+                    return record
+                time.sleep(.025)
+            self.fail("isolated W04 did not arrive")
+
+        def report_receipt(record):
+            return {"recorded":True,"task_state":"completed_reported",
+                    "release_assignment_id":record["last_report"]["assignment_id"]}
+
+        def formal_input(adapter,worker,record):
+            tid,aid = record["task"]["task_id"],record["last_report"]["assignment_id"]
+            with adapter.db.transaction() as db:
+                row, = db.execute("""SELECT receipt FROM intents WHERE json_extract(payload,'$.kind')='task'
+                    AND json_extract(payload,'$.task_id')=? AND json_extract(payload,'$.assignment_id')=?""",
+                    (tid,aid)).fetchall()
+            receipt = json.loads(row[0])
+            self.assertEqual(worker.assignment_session(aid),receipt["session"])
+            return receipt
+
+        def reply_card(views,receipt):
+            with views.db.transaction() as db:
+                row, = db.execute("""SELECT mid FROM view_attempt WHERE json_extract(event,'$.kind')='final'
+                    AND json_extract(event,'$.session')=? AND json_extract(event,'$.turn_id')=?""",
+                    (receipt["session"],receipt["turn_id"])).fetchall()
+            mid, = row
+            body, = [body for actual,kind,body in sink.messages.values() if actual==mid and kind=="interactive"]
+            self.assertEqual(body["header"]["title"]["content"],"小栗帽-回复")
+            self.assertEqual(sink.calls.count(("send",mid)),1)
+            return mid
+
+        original = files(root)
+        with codex_driver.isolated_app_server(profile,origin) as rpc:
+            codex = rpc.request("thread/start",{"cwd":str(profile),"ephemeral":False,
+                                "dynamicTools":[codex_driver.REPORT_TOOL]})["thread"]["id"]
+            rpc.request("turn/start",{"threadId":codex,"input":[{"type":"text","text":"Seed isolated Codex before attachment",
+                                                               "text_elements":[]}]})
+            deadline = time.monotonic()+10
+            while rpc.event(deadline)["method"]!="turn/completed":
+                pass
+            host = AppServerHost(rpc,codex)
+            with codex_driver.handoff_station(original,clock,host,codex,manager_host) as station:
+                worker,manager,adapter,platform_client,callback = station
+                adapter.media_store = NativeFiles(root/"codex-media",callback)
+                inbound,views = platform(original,platform_client)
+                relay = CodexDisplay(adapter,callback)
+                relay.collect()
+                finished = Event()
+                with worker_callbacks(host,callback,finished.set,relay.observe,relay.observe_terminal):
+                    receive(inbound,old_mid)
+                    self.assertTrue(finished.wait(12))
+                    old = inbound.deliver(old_mid)
+                    self.assertEqual(old["media_sha256"],[sha])
+                    relay.collect()
+                    relay.flush()
+                    views.poll()
+                    old_card = reply_card(views,old)
+                    finished.clear()
+                    codex_order = finish_report(manager,worker)
+                    self.assertTrue(finished.wait(12))
+                    seed,first,second = host.thread(codex,include_turns=True)["turns"]
+                    self.assertEqual(first["id"],old["turn_id"])
+                    codex_calls = [item for item in second["items"] if item["type"]=="dynamicToolCall"]
+                    self.assertEqual([json.loads(c["contentItems"][0]["text"]) for c in codex_calls],
+                                     [report_receipt(codex_order)]*2)
+                    codex_input = formal_input(adapter,worker,codex_order)
+                    self.assertEqual(codex_input["turn_id"],second["id"])
+                    self.assertEqual([item["id"] for item in second["items"] if item["type"]=="userMessage"],
+                                     [codex_input["native_id"]])
+                    relay.collect()
+                    relay.flush()
+                    views.poll()
+                    expected_session = worker.session
+                    before_frames = manager.router.frames(0)
+                    self.assertEqual(len(before_frames),1)
+        snapshot = root/"initial-snapshot"
+        original_sha = capture(original,"a"*40,snapshot)["manifest_sha256"]
+        trial = root/"dsh-state"
+        plan = codex_driver.stage_handoff_cli(snapshot,original_sha,codex,dsh_session,trial)
+        trial_paths = files(trial)
+        trial_paths["agent:oguri"] = Path(plan["target_adapter_db"])
+
+        with self.start_native(directory,dsh_session,"handoff") as process:
+            host = DshHost(Path(directory))
+            with codex_driver.handoff_station(trial_paths,clock,host,dsh_session,manager_host) as station:
+                worker,manager,adapter,platform_client,callback = station
+                self.assertEqual(worker.session,expected_session)
+                adapter.media_store = NativeFiles(Path(directory)/"media",callback)
+                inbound,views = platform(trial_paths,platform_client)
+                relay = DshDisplay(adapter,callback,"oguri")
+                relay.collect()
+                with tool_listener(Path(directory),adapter,callback):
+                    self.assertEqual(receive(inbound,old_mid),old)
+                    self.assertEqual(self.read_native(process,"read")["inputs"],[])
+                    receive(inbound,new_mid)
+                    observed = self.read_native(process,"read")
+                    new = inbound.deliver(new_mid)
+                    self.assertEqual(observed["inputs"],[new["native_id"]])
+                    self.assertEqual(new["media_sha256"],[sha])
+                    self.assertEqual(observed["mediaRequests"],[
+                        {"caption":caption,"images":[{"sha256":sha,"size":len(PNG)}],"partTypes":["text","image"]}])
+                    relay.collect()
+                    relay.flush()
+                    views.poll()
+                    dsh_card = reply_card(views,new)
+                    dsh_order = finish_report(manager,worker)
+                    dsh_input = formal_input(adapter,worker,dsh_order)
+                    observed = self.read_native(process,"read")
+                    self.assertEqual([json.loads(item["content"][0]["text"]) for item in observed["results"]],
+                                     [report_receipt(dsh_order)]*2)
+                    for _ in range(4):
+                        relay.collect()
+                        relay.flush()
+                    views.poll()
+                    self.assertEqual(receive(inbound,new_mid),new)
+                    self.assertEqual(self.read_native(process,"read")["inputs"],observed["inputs"])
+                    frame_old,frame_new = manager.router.frames(0)
+                    self.assertEqual([frame_old],before_frames)
+                    self.assertEqual(frame_new["payload"]["task_id"],dsh_order["task"]["task_id"])
+                    self.assertEqual(observed["inputs"],[new["native_id"],dsh_input["native_id"]])
+
+        snapshot_dsh = root/"dsh-snapshot"
+        dsh_sha = capture(trial_paths,"a"*40,snapshot_dsh)["manifest_sha256"]
+        returned = root/"return-state"
+        codex_driver.stage_handoff_cli(snapshot_dsh,dsh_sha,dsh_session,codex,returned)
+        paths = files(returned)
+        paths["agent:oguri"] = Path(plan["previous_adapter_db"])
+        model_before = len(model.observed)
+        with codex_driver.isolated_app_server(profile,origin) as rpc:
+            rpc.request("thread/resume",{"threadId":codex,"cwd":str(profile)})
+            host = AppServerHost(rpc,codex)
+            with codex_driver.handoff_station(paths,clock,host,codex,manager_host) as station:
+                worker,manager,adapter,platform_client,callback = station
+                self.assertEqual(worker.session,expected_session)
+                inbound,views = platform(paths,platform_client)
+                self.assertEqual(receive(inbound,old_mid),old)
+                self.assertEqual(receive(inbound,new_mid),new)
+                relay = CodexDisplay(adapter,callback)
+                relay.collect()
+                relay.flush()
+                views.poll()
+                self.assertEqual(manager.router.frames(0),[frame_old,frame_new])
+                for order in (codex_order,dsh_order):
+                    self.assertEqual(manager.inspect(order["task"]["task_id"])["last_report"],order["last_report"])
+                self.assertEqual(host.thread(codex,include_turns=True)["turns"],[seed,first,second])
+                self.assertEqual(reply_card(views,new),dsh_card)
+                self.assertEqual(reply_card(views,old),old_card)
+        self.assertEqual(len(model.observed),model_before)
+        self.assertEqual(model.media,[{"caption":[caption],"image_sha256":[sha]}])
+        self.assertEqual(downloaded,[old_mid,new_mid])
+        verify(snapshot,original_sha)
+        verify(snapshot_dsh,dsh_sha)
+        self.evidence = {"before":old,"after":new,"image_sha256":sha,"input_resources":downloaded,
+            "reply_cards":[old_card,dsh_card],"native_dsh_inputs":observed["inputs"],
+            "reports":[{"task_id":record["task"]["task_id"],**report_receipt(record),
+                        "notification_id":frame["delivery_id"],"host_receipt":receipt} for record,frame,receipt in
+                        ((codex_order,frame_old,codex_input),(dsh_order,frame_new,dsh_input))],
+            "new_model_calls_after_return":len(model.observed)-model_before,
+            "boundary":"Actual bundled Codex App Server and DSH SDK on one Mac. Scripted models and Feishu test sink."}
 
     def test_shelved_dsh_assignment_submits_candidate_without_changing_ownership(self):
         directory,loop,service,_ = self.goal_worker("dsh-native-material",extra_workers=["tama"])

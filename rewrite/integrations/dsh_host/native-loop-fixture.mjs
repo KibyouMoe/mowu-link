@@ -20,7 +20,7 @@ const compactReleased = Promise.withResolvers();
 const foregroundQuestion = Promise.withResolvers();
 const foregroundAnswer = Promise.withResolvers();
 const usesGoals = ['goals','goal-driver','formal-goal'].includes(mode);
-const usesMedia = mode==='media' || mode==='peer-media';
+const usesMedia = ['media','peer-media','handoff'].includes(mode);
 const usesApprovals = ['command-approvals','command-approvals-reopen'].includes(mode);
 const modelRequests = [];
 const catalogSessions = [];
@@ -124,10 +124,12 @@ class LocalModel extends LlmAdapter {
         yield {type:'finish',reason:{kind:'tool-calls'}};
         return;
       }
-      yield {type:'block-start',index:0,blockType:'text'};
-      yield {type:'text-delta',index:0,text:`Local fixture received ${images.length} image(s).`};
-      yield {type:'finish',reason:{kind:'stop'}};
-      return;
+      if (mode!=='handoff' || command!=='task') {
+        yield {type:'block-start',index:0,blockType:'text'};
+        yield {type:'text-delta',index:0,text:`Local fixture received ${images.length} image(s).`};
+        yield {type:'finish',reason:{kind:'stop'}};
+        return;
+      }
     }
     if (goal?.round===1 && mode!=='formal-goal') await waitForStop(signal);
     if (goal?.round===2) secondRound.resolve();
@@ -229,7 +231,7 @@ class LocalModel extends LlmAdapter {
           yield {type:'finish',reason:{kind:'tool-calls'}};
           return;
         }
-      } else if (mode==='formal') {
+      } else if (['formal','handoff'].includes(mode)) {
         const attempt = this.submitted.get(payload.assignment_id) ?? 0;
         if (attempt<2) {
           this.submitted.set(payload.assignment_id,attempt+1);

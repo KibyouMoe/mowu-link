@@ -219,6 +219,37 @@ def isolated_app_server(root, url, extra=()):
         yield rpc
 
 
+@contextmanager
+def handoff_station(paths,clock,host,session,manager_host):
+    orders = Orders(paths["router:main"],clock,1)
+    Trigger(paths["trigger:source"],"fixture")
+    adapter = HostAdapter(paths["agent:oguri"],host,session)
+    adapter_token,worker_token,manager_token,platform_token,callback = (guid() for _ in range(5))
+    with ExitStack() as resources:
+        router = resources.enter_context(running(serve_loopback(orders,
+            {worker_token:"worker/oguri",manager_token:"hermes"})))
+        adapter_url = resources.enter_context(running(serve_adapter(adapter,"oguri",
+            {adapter_token:"worker/oguri"},("127.0.0.1",0),None)))
+        port = RemoteAdapter(Client(adapter_url,adapter_token),session)
+        worker = Worker(paths["worker:oguri"],"oguri",Client(router,worker_token),port,clock=clock)
+        service = WorkerService(worker,clock)
+        service.step()
+        if service.status()["host_session"]!=session:
+            raise AssertionError(service.status())
+        worker_url = resources.enter_context(running(service.listen(
+            {platform_token:"platform/oguri",callback:"adapter/oguri"},("127.0.0.1",0),None)))
+        manager = HermesAdapter(paths["hermes:main"],Client(router,manager_token),manager_host,clock)
+        yield worker,manager,adapter,Client(worker_url,platform_token),Client(worker_url,callback)
+
+
+def stage_handoff_cli(snapshot,fingerprint,source,target,destination):
+    result = subprocess.run([sys.executable,"-B","-m","rewrite.state_bundle","stage-native-handoff",
+        "--snapshot",snapshot,"--manifest-sha256",fingerprint,"--worker-id","oguri",
+        "--source-session",source,"--target-session",target,"--destination",destination],
+        cwd=Path(__file__).resolve().parent.parent,capture_output=True,text=True,check=True,timeout=12)
+    return json.loads(result.stdout)
+
+
 @unittest.skipUnless(CODEX.is_file(),"bundled Codex App Server required")
 class CodexAppServer(unittest.TestCase):
     def setUp(self):
@@ -316,7 +347,12 @@ class CodexAppServer(unittest.TestCase):
             original = loop.adapter.compact
             def lose_worker_ack(session,command_id,*,start):
                 receipt = original(session,command_id,start=start)
-                self.assertIn(receipt["state"],("running","completed"))
+                self.assertEqual(receipt["command_id"],command_id)
+                # Acceptance is durable even when App Server history still omits the original anchor.
+                with host.compactions.db.transaction() as db:
+                    row = db.execute("SELECT accepted,session FROM codex_compactions WHERE command_id=?",
+                                     (command_id,)).fetchone()
+                self.assertEqual(tuple(row),(1,sid))
                 raise Fault(503,"isolated_worker_ack_lost",True)
             loop.adapter.compact = lose_worker_ack
             first = command("compact_first")
@@ -722,37 +758,20 @@ class CodexAppServer(unittest.TestCase):
         original_paths = {label:state/filename(label) for label in labels}
         revision = "a"*40
         clock = Clock()
-        manager_host = FixtureHost(root/"manager-inputs.db","manager-test-session")
+        manager_native = FixtureHost(root/"manager-inputs.db","manager-test-session")
+        manager_host = HostAdapter(root/"manager-host.db",manager_native,manager_native.session)
         old_message = {"message_id":guid(),"text":"Original isolated session"}
         new_message = {"message_id":guid(),"text":"New isolated session"}
 
         @contextmanager
         def station(paths,rpc,thread):
             sid = thread["id"]
-            orders = Orders(paths["router:main"],clock,1)
-            Trigger(paths["trigger:source"],"fixture")
             host = AppServerHost(rpc,sid)
             host.bind_fork_history(paths["agent:oguri"],thread)
-            adapter = HostAdapter(paths["agent:oguri"],host,sid)
-            adapter_token,worker_token,manager_token,platform_token,callback = (guid() for _ in range(5))
-            with ExitStack() as resources:
-                router_url = resources.enter_context(running(serve_loopback(orders,
-                    {worker_token:"worker/oguri",manager_token:"hermes"})))
-                adapter_url = resources.enter_context(running(serve_adapter(adapter,"oguri",
-                    {adapter_token:"worker/oguri"},("127.0.0.1",0),None)))
-                owner = Client(router_url,worker_token)
-                port = RemoteAdapter(Client(adapter_url,adapter_token),sid)
-                worker = Worker(paths["worker:oguri"],"oguri",owner,port,clock=clock)
-                service = WorkerService(worker,clock)
-                service.step()
-                self.assertEqual(service.status()["host_session"],sid)
-                worker_url = resources.enter_context(running(service.listen(
-                    {platform_token:"platform/oguri",callback:"adapter/oguri"},("127.0.0.1",0),None)))
-                manager = HermesAdapter(paths["hermes:main"],Client(router_url,manager_token),
-                                        HostAdapter(root/"manager-host.db",manager_host,manager_host.session),clock)
+            with handoff_station(paths,clock,host,sid,manager_host) as (worker,manager,_adapter,platform,callback):
                 completed = Event()
-                resources.enter_context(worker_callbacks(host,Client(worker_url,callback),completed.set))
-                yield worker,manager,host,Client(worker_url,platform_token),completed
+                with worker_callbacks(host,callback,completed.set):
+                    yield worker,manager,host,platform,completed
 
         def inputs(host):
             return [(turn["id"],item["id"],item["clientId"]) for turn in host.thread(host.thread_id,include_turns=True)["turns"]
@@ -760,13 +779,6 @@ class CodexAppServer(unittest.TestCase):
 
         def chat(platform,msg):
             return platform.request("POST","worker/chat",msg)["receipt"]
-
-        def handoff(snapshot,fingerprint,source,target,destination):
-            result = subprocess.run([sys.executable,"-B","-m","rewrite.state_bundle","stage-native-handoff",
-                "--snapshot",snapshot,"--manifest-sha256",fingerprint,"--worker-id","oguri",
-                "--source-session",source,"--target-session",target,"--destination",destination],
-                cwd=Path(__file__).resolve().parent.parent,capture_output=True,text=True,check=True,timeout=12)
-            return json.loads(result.stdout)
 
         with isolated_app_server(root,self.origin) as rpc:
             parent = rpc.request("thread/start",{"cwd":str(root),"ephemeral":False,"dynamicTools":[REPORT_TOOL]})["thread"]
@@ -783,7 +795,7 @@ class CodexAppServer(unittest.TestCase):
         snapshot = root/"source-snapshot"
         fingerprint = capture(original_paths,revision,snapshot)["manifest_sha256"]
         staged = root/"trial"
-        plan = handoff(snapshot,fingerprint,source,target,staged)
+        plan = stage_handoff_cli(snapshot,fingerprint,source,target,staged)
         self.assertEqual(json.loads((staged/"native-handoff.json").read_text()),plan)
         self.assertEqual(plan["expected_session"],target)
         trial_paths = {label:staged/filename(label) for label in labels}
@@ -835,7 +847,7 @@ class CodexAppServer(unittest.TestCase):
         trial_snapshot = root/"trial-snapshot"
         trial_fingerprint = capture(trial_paths,revision,trial_snapshot)["manifest_sha256"]
         back = root/"return"
-        handoff(trial_snapshot,trial_fingerprint,target,source,back)
+        stage_handoff_cli(trial_snapshot,trial_fingerprint,target,source,back)
         return_paths = {label:back/filename(label) for label in labels}
         return_paths["agent:oguri"] = Path(plan["previous_adapter_db"])
         before_return = len(self.provider.observed)

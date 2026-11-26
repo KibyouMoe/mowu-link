@@ -1,0 +1,68 @@
+{
+  "before": {
+    "delivery_id": "chat-om_before_switch",
+    "digest": "a4cfc63bd6c0fda04f684b12a0207453d90955d69f25640f9794eb0db0f21ba6",
+    "media_sha256": [
+      "e77617115ffe6399c0f4714c72aa32eefeb22fbdf45b1167a4ddb64e213b4007"
+    ],
+    "native_id": "01a21773-3e04-7af0-8b7c-fd9c716c3243",
+    "session": "01a21773-3da4-7c81-aab2-cf610c5b6dd4",
+    "turn_id": "01a21773-3e00-7cf2-8387-8b56040397db"
+  },
+  "after": {
+    "delivery_id": "chat-om_after_switch",
+    "digest": "425ab62785459647adf4850cfff3966f25773fd9ea94a8afaae93ff5666aef9b",
+    "media_sha256": [
+      "e77617115ffe6399c0f4714c72aa32eefeb22fbdf45b1167a4ddb64e213b4007"
+    ],
+    "native_id": "mowulink-ad7a4c4b1f263140cebf2453bd5a919586749d45677178a8874ec388ac8116ae",
+    "session": "isolated-dsh-worker-handoff",
+    "turn_id": "1/1"
+  },
+  "image_sha256": "e77617115ffe6399c0f4714c72aa32eefeb22fbdf45b1167a4ddb64e213b4007",
+  "input_resources": [
+    "om_before_switch",
+    "om_after_switch"
+  ],
+  "reply_cards": [
+    "om_2",
+    "om_7"
+  ],
+  "native_dsh_inputs": [
+    "mowulink-ad7a4c4b1f263140cebf2453bd5a919586749d45677178a8874ec388ac8116ae",
+    "mowulink-cb880b2183074f2d0e13ba2a48fe1308d3942f6e45af9e716cb7c416d3fe6e08"
+  ],
+  "reports": [
+    {
+      "task_id": "51ab8b15-b386-47c8-82dd-1d23a5418fa5",
+      "recorded": true,
+      "task_state": "completed_reported",
+      "release_assignment_id": "e44b0aa3-9330-4f5b-9c74-14bf9bf05c22",
+      "notification_id": "e1e6e53e-579c-4168-87b3-a5d54eff03a1",
+      "host_receipt": {
+        "delivery_id": "d94b01d5-e53c-44ee-87c6-179c8b71ac90",
+        "digest": "c9b20823b9c47551240c12c9e7f689cf42aa06a48a1a2d17da536119573f022f",
+        "native_id": "01a21773-3e48-7dc2-b9a0-b58c81f1068d",
+        "session": "01a21773-3da4-7c81-aab2-cf610c5b6dd4",
+        "turn_id": "01a21773-3e43-7fe2-b0cb-a1dab03ce506"
+      }
+    },
+    {
+      "task_id": "7e2bf964-f5b9-4ee0-b22b-df0380139247",
+      "recorded": true,
+      "task_state": "completed_reported",
+      "release_assignment_id": "70108c7a-757b-440e-8ffe-ee668dc1c8a5",
+      "notification_id": "4399018b-d888-4982-adfb-bd6662b29df6",
+      "host_receipt": {
+        "delivery_id": "959660dc-00a7-4656-bd88-be8eea31bd4d",
+        "digest": "a1da21578ae53d107288578c3af3d33686b0605c3bca225ef9817f71e7ac023a",
+        "native_id": "mowulink-cb880b2183074f2d0e13ba2a48fe1308d3942f6e45af9e716cb7c416d3fe6e08",
+        "session": "isolated-dsh-worker-handoff",
+        "turn_id": "12/2"
+      }
+    }
+  ],
+  "new_model_calls_after_return": 0,
+  "boundary": "Actual bundled Codex App Server and DSH SDK on one Mac. Scripted models and Feishu test sink.",
+  "successful_repeats": 12
+}
