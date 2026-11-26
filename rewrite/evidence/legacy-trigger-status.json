@@ -26,5 +26,10 @@
   },
   "explicit_rules_path": false,
   "default_rules_file_present": false,
+  "active_subscription_followup": {
+    "observed_unread": 0,
+    "cursor": 1496,
+    "last_seen_age_minutes": 0
+  },
   "boundary": "Service counters only. No production event data copied, source polled or subscription opened."
 }

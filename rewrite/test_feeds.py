@@ -1,11 +1,13 @@
 from email.message import EmailMessage
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
+import json
 from pathlib import Path
 import shutil
 import socketserver
 import ssl
 import subprocess
 import imaplib
+import sys
 from tempfile import TemporaryDirectory
 from threading import Thread
 import unittest
@@ -174,6 +176,65 @@ class Sources(unittest.TestCase):
         self.assertEqual(len(self.game.trigger.pending()),1)
         self.flush(self.game)
         self.assertEqual(len(self.loop.hermes.messages()["items"]),3)
+
+    def test_imported_mailbox_position_refuses_another_epoch_and_captures_only_new_uids(self):
+        root = self.root
+        legacy = root/"old-mail.json"
+        legacy.write_text(encode({"folder":"INBOX","uidvalidity":31,"uidnext":12,"last_uid":10}),encoding="utf-8")
+        config = root/"migration.json"
+        destination = root/"mail-trial.db"
+        config.write_text(encode({"database":str(destination),"host":"mail.example.test",
+                                  "user":"test-owner","port":993}),encoding="utf-8")
+        config.chmod(0o600)
+        args = [sys.executable,"-m","rewrite.feeds","mail","--config",str(config),"--import-legacy-cursor",str(legacy)]
+        proc = subprocess.run([*args,"--confirm-legacy-mailbox"],text=True,capture_output=True,check=True,
+                              cwd=Path(__file__).resolve().parents[1])
+        receipt = json.loads(proc.stdout)
+        self.assertFalse(receipt["verified"])
+        feed = Feed(destination,"email",["mail.example.test",993,"test-owner","INBOX"])
+        self.assertEqual(receipt["instance_id"],feed.trigger.instance_id)
+        self.assertEqual(feed.cursor()["position"],10)
+        box = Mailbox()
+        box.epoch = 32
+        with self.assertRaisesRegex(Fault,"legacy_source_position_unconfirmed"):
+            poll_mail(feed,box,"INBOX")
+        self.assertEqual(feed.cursor()["position"],10)
+        self.assertFalse(feed.trigger.pending())
+        box.epoch,box.next = 31,13
+        for uid in (10,11,12):
+            box.raw[uid] = f"Subject: Fixture mail {uid}\r\n\r\nMail body".encode()
+        poll_mail(feed,box,"INBOX")
+        poll_mail(feed,box,"INBOX")
+        self.assertEqual(feed.cursor()["position"],12)
+        with feed.db.transaction() as db:
+            subjects = [json.loads(row[0])["text"].splitlines()[0] for row in db.execute("SELECT body FROM archive ORDER BY rowid")]
+        self.assertEqual(subjects,["Fixture mail 11","Fixture mail 12"])
+        self.assertTrue(feed.import_cursor(legacy,mailbox_confirmed=True)["verified"])
+        self.assertEqual(feed.cursor()["position"],12)
+        with self.assertRaisesRegex(Fault,"legacy_mailbox_scope_unconfirmed"):
+            feed.import_cursor(legacy)
+        self.assertEqual(len(feed.trigger.pending()),2)
+
+    def test_imported_game_position_rejects_wrong_bridge_and_does_not_reset_on_first_probe(self):
+        origin = self.game_server()
+        feed = Feed(self.root/"game-trial.db","mc_chat",[origin])
+        cursor = self.root/"old-mc.json"
+        cursor.write_text(encode({"source":"mc_chat","bridge":"http://127.0.0.1:1","last_seq":15}),encoding="utf-8")
+        with self.assertRaisesRegex(Fault,"legacy_game_origin_mismatch"):
+            feed.import_cursor(cursor)
+        cursor.write_text(encode({"source":"mc_chat","bridge":origin,"last_seq":15}),encoding="utf-8")
+        self.assertFalse(feed.import_cursor(cursor)["verified"])
+        opener = build_opener(ProxyHandler({}))
+        with self.assertRaisesRegex(Fault,"legacy_source_position_unconfirmed"):
+            poll_game(feed,origin,opener)
+        self.assertEqual(self.requests,[])
+        self.head = 17
+        self.records = [(15,{"text":"already received"}),(16,{"text":"one"}),(17,{"text":"two"})]
+        poll_game(feed,origin,opener)
+        self.assertEqual(self.requests,[("/stream?since=15","15")])
+        self.assertEqual(feed.cursor()["position"],17)
+        self.assertTrue(feed.import_cursor(cursor)["verified"])
+        self.assertEqual(len(feed.trigger.pending()),2)
 
     def test_archive_failure_cannot_advance_cursor_and_stale_reader_cannot_skip_event(self):
         gen,base = self.game.start(None,"source",20)

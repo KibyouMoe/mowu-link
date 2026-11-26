@@ -4,6 +4,8 @@
 
 ## 检查点与证据
 
+旧邮件和游戏游标已有离线导入。邮件从原 UID 10 接续，只收 11 与 12；错误 UIDVALIDITY 保留 10，没进新档。游戏核对原地址，序号落后时不打开流；恢复后从 15 接续，只收 16 与 17。重导入后位置不退。复跑 `python3 -m unittest -v rewrite.test_feeds`，邮件协议夹具、真实临时 SSE 传输。[交接规程](router-rehearsal.md#旧采集来源交接)。旧游戏桥没有启动标识，生产游标与旧队列在授权窗口对账。
+
 旧 Trigger 0.7.0 的归档已通过隔离保全与回退测试。用原版 TriggerStore 建 5 条不同处置的事件及订阅，确认源文件摘要未变、恢复档案逐字节相同、真实旧程序仍只查到原来两条未读记录。活跃日志和被篡改的成员会阻止恢复。Mac mini 只读盘点确认仍有 1,492 条记录及 1 个 active 订阅，[聚合证据](evidence/legacy-trigger-status.json)。未复制生产原文，未启用订阅。复跑 `python3 -m unittest -v rewrite.test_trigger_archive`，操作见[旧 Trigger 归档](router-rehearsal.md#旧-trigger-历史和订阅账本)。
 
 工位收到原单更新、取消、转接和搁置即保存飞书提示。原生收件有独立凭据，控制提示也不会当作已经停止或清理。隔离实测，更新输入已进宿主但回包丢失、取消还没进宿主时，飞书待发队列均已有对应正文。恢复后原生各一条，飞书无重复，Router 仍待取消清理。复跑 `python3 -m unittest -v rewrite.test_link_health.LinkHealth.test_task_cards_use_worker_acceptance_independently_of_host_receipts`。真实工单与 Worker，宿主和飞书为夹具。

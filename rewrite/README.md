@@ -103,6 +103,8 @@ python3 -m rewrite.release verify --archive ./build/mowulink.tar --revision "$RE
 
 两个采集器可在 Router 离线时工作。另用 `python3 -m rewrite.service trigger --db <来源库> --name email send --connection <Router测试连接>` 发送已留档的信息；游戏使用同一命令并将名称换为 mc_chat。拿到 Router 业务回执后移出待发送列表。这里只提供显式启动入口。
 
+迁移旧采集器时，用 `rewrite.feeds` 的 `--import-legacy-cursor` 把经核对的游标导入新来源库。这一步离线完成。邮件核对原账号与文件夹，首次采集再验证 UIDVALIDITY；游戏核对同一桥接地址与连续运行的实例。遇到旧位置无法确认时保留待核。见[旧采集来源交接](router-rehearsal.md#旧采集来源交接)。
+
 已绑定的适配器在观察到原生题窗后，将原会话、回合、原生题号、题面和选项提交至 `POST /v1/worker/native-question`。平台通过已配置的应用、训练员、私聊和原卡 ID 核对真人回调后将答案持久排队。适配器保留关闭意图，只有原宿主返回与原题、原回合及答案一致的关闭凭据，Worker 才发布已回答事件。DSH 已接入原生计时题超时后仍可作答的单题。选择、自定义和跳过均需 DSH 持久记录原生答复才会更新原卡。DSH 端先答时，原卡显示原生答案，冲突的飞书回调不能覆盖它。阻塞题、多题和多选仍由 DSH 原界面处理。授权和计划审批使用各自原生入口。溪流的工单问题和答复继续走 W05/A09，飞书上可读。
 
 平台配置中的 `worker_name` 用于飞书卡片标题。宿主适配器以自身身份向 Worker 的 `POST /v1/worker/display` 交已观测的公开事件，携带稳定事件号、目标会话和回合。每段增量文字仅发新增部分；独立的最终答复事件才显示为「回复」。工具事件仅接受工具名和用于展示的预览文本。查询或抄送都不会写正式完工报告。

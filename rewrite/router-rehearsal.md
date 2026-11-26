@@ -56,7 +56,20 @@ python3 -m rewrite.trigger_archive restore --snapshot ./trigger-snapshot --manif
 
 有额外日志时，`capture` 可加 `--blocked` 或 `--drops` 指向相应副本。包含原文的查询留在隔离目录内执行。只把恢复文件交给经授权的旧服务窗口。复跑 `python3 -m unittest -v rewrite.test_trigger_archive`。实测使用真实旧 TriggerStore，5 条历史、原订阅和回执都读回。旧程序重开时只查到两条原本未读的可投递消息；日志档案与已丢弃消息均原样保留。活动日志或篡改的归档成员会阻止生成恢复目录。
 
-Mac mini 的 [旧 Trigger 只读核对](evidence/legacy-trigger-status.json) 确认 0.7.0 仍在运行，历史 1,492 条，订阅状态 active 1、expired 6、closed 9。生产快照、活跃消费者的未确认交接与旧源端游标仍待核。未看到此工位有默认规则文件或显式规则文件参数；其他工位单独核对。
+Mac mini 的 [旧 Trigger 只读核对](evidence/legacy-trigger-status.json) 确认 0.7.0 仍在运行，首读有 1,492 条历史，订阅状态 active 1、expired 6、closed 9。复核时 active 订阅刚有活动，游标 1,496，当时未读为零。实际切换时仍需重新核对并取生产快照。未看到此工位有默认规则文件或显式规则文件参数；其他工位单独核对。
+
+## 旧采集来源交接
+
+在演练窗口准备好来源游标副本和专用配置。交接检查旧采集端已处理到的最后一条、待上行队列和新实例标识。游标导入只保存位置与摘要。仍在旧采集端等待发送的事件需要在接管前另外对账。
+
+```sh
+python3 -m rewrite.feeds mail --config ./mail-trial.json --import-legacy-cursor ./old-offline/mail-cursor.json --confirm-legacy-mailbox
+python3 -m rewrite.feeds game --config ./game-trial.json --import-legacy-cursor ./old-offline/game-cursor.json
+```
+
+旧邮件游标只记文件夹、UIDVALIDITY 和末尾 UID。使用 `--confirm-legacy-mailbox` 前，核对旧配置的服务器、端口、账号和文件夹确实相同。首次采集读回原 UIDVALIDITY，且服务端最新可读位置不小于旧 UID 时，才验证成功。游戏游标必须和配置的桥地址相同，首次观测到序号比旧游标小时会中止。旧桥缺少启动标识，若切换前桥已重启并重新超过旧游标，仅凭序号无法判定同一实例。核对连续运行状态后再用该游标。
+
+相同旧游标重导入只返回原摘要与验证状态。目标库已开始工作或保存过不同游标时拒绝覆盖。隔离复跑 `python3 -m unittest -v rewrite.test_feeds`。邮件用协议夹具，游戏走临时 HTTP 流。生产来源与订阅继续待验。
 
 ## 重做版五组件的离线恢复
 
