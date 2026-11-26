@@ -165,7 +165,7 @@ def run(*,stall_discovery=False,raw_sdk=False):
         try:
             with endpoint(ws.socket.getsockname()[1],stall_discovery) as (port,calls,blocked):
                 env = {"HOME":folder,"TMPDIR":folder,"PATH":os.defpath,"PYTHONNOUSERSITE":"1"}
-                command = [sys.executable,"-m","rewrite.feishu_reconnect_check","--fixture-receiver",folder,str(port),
+                command = [sys.executable,"-B","-m","rewrite.feishu_reconnect_check","--fixture-receiver",folder,str(port),
                            "raw" if raw_sdk else "bounded"]
                 with subprocess.Popen(command,env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE) as child:
                     stalled = False
