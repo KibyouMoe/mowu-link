@@ -1,0 +1,42 @@
+# Codex Desktop 独立会话收件验收
+
+在打开的本机 Codex Desktop 内，测试驱动调用宿主提供的 `create_thread`、`send_message_to_thread` 和 `read_thread`。新建无项目的测试会话后，驱动固定其本机宿主号、会话号与工作目录，并核对它与生产 Worker 当前绑定不同。Worker 经 W03 接管后，适配器才发出正式输入。Python 进程只能请求读取固定会话或投递工单，无法指定另一个会话；运行凭据由 Desktop 保管。
+
+原生输入以 Desktop 委托项出现在会话中。适配器核对该项的工具来源、发件会话、目标会话、投递号与完整工单内容，再返回原生输入号和回合号。查回使用宿主自己的会话记录。发送调用即使已返回成功，也须取得上述证据才记作已收。发生丢回包、读取不全或超时，沿用原投递意图，只查回。相同投递号对应两项、会话不同或内容摘要不符均报冲突。
+
+## 本机实测
+
+| 观测 | 结果 |
+| --- | --- |
+| 独立会话 | `01a21527-24e0-7380-9a9f-dec0fddf1549`，测试前仅有一个初始化回合 |
+| 隔离工单 / 派发 | `82633282-9eb0-4791-b41c-1a770688eda2` / `e3181553-0d38-4015-8ee7-4f23e5609c5d` |
+| 投递号 | `238ebaba-66f7-4a37-b704-4654ddd22417` |
+| Desktop 回合 / 输入项 | `01a21529-79cc-73d2-908d-3213471857cd` / `fco_01a21529-79cc-73d2-908d-322db32d76d2` |
+| 原生最终回复 | 「独立宿主已收到工单」 |
+| 同帧重投后 | 底层发送共 1 次；目标会话共 2 个回合，其中正式工单输入共 1 条。回读可按原投递号定位同一输入项。 |
+| 工单状态 | W03 已接管。原生回合结束后持单副本仍是原派发，Router 为 `working`，正式报告为空。 |
+
+本次真实运行的是本机 Desktop 及模型、重做版 Worker、Agent 适配器、临时 HTTP Router 和 SQLite。建单来自测试驱动，空闲计时用可控时钟。未接入生产 Worker、飞书和真实 Hermes。真实模型只回复收件，此次未挂载真实会话的 W04 工具；W04 另由首段的 MCP 夹具回归覆盖。当前接入依赖运行在 Desktop 内的工具驱动；独立后台 Worker 自行启动和无人值守写入仍待验证。
+
+## 复跑
+
+仓库根目录运行下列命令。需要 Python 3.11 或更高版本。
+
+```sh
+python3 -m unittest -v rewrite.test_mainline rewrite.test_codex_desktop
+```
+
+原有 14 项外，新增 5 项覆盖发送回执丢失、重启后只读查回、错误发件人或输入类型、截断或重复凭据、错误目标及引导消息。
+
+实机复跑需要已打开的本机 Codex Desktop，并能调用上述聊天工具和 Worker 的只读绑定查询。在 Desktop 的工具执行环境运行下列代码，将工作目录改为本分支的实际绝对路径。本机驱动使用 macOS 的临时终端，Windows 尚未验收。每次复跑会新建一个测试会话、一张临时工单并消耗一个测试回复，临时 Router 使用随机回环端口和临时目录。
+
+```js
+const workdir = "/Users/kibyou/Workspace/OguriCap/worktrees/mowulink-formal-mainline";
+const driver = await tools.exec_command({
+  cmd: "cat rewrite/desktop_check.js", workdir, max_output_tokens: 3500
+});
+if (driver.exit_code !== 0) throw new Error("找不到本分支的 Desktop 驱动");
+text(await eval("(" + driver.output + ")")(tools, workdir));
+```
+
+成功输出含 `status=verified`、两个原生标识、`native_inputs=1`、`send_calls=1` 和 `w04=null`。缺少完整证据会返回待核或错误。当前测试只读取至多十个回合、每回合六十四项，超过读取边界会保留待核。
