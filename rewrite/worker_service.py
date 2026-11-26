@@ -7,7 +7,7 @@ from urllib.parse import urlencode, urlsplit
 from urllib.error import URLError
 from uuid import NAMESPACE_URL, uuid5
 
-from . import display, links, peer_files, peer_retry, queued_chat, user_questions, worker_commands, worker_handoff, worker_media, worker_resume
+from . import display, links, peer_files, peer_retry, queued_chat, user_questions, worker_catalog, worker_commands, worker_handoff, worker_media, worker_resume
 from .messages import valid_guid
 from .storage import Fault, encode, require, string
 from .wire import serve_authenticated
@@ -291,6 +291,8 @@ class WorkerService:
             result = {"receipt":worker_commands.handle(self,body)}
         elif actor == "platform/" + w.worker_id and method == "POST" and path == "/v1/worker/model-menu-receipt":
             result = worker_commands.acknowledge_menu(w,body)
+        elif actor == "platform/" + w.worker_id and method == "POST" and path == "/v1/worker/session-menu-receipt":
+            result = worker_catalog.acknowledge(w,body)
         elif actor == "platform/" + w.worker_id and method == "POST" and path == "/v1/worker/chat":
             require({"message_id","text"} <= body.keys() <= {"message_id","text","attachment_ids","attachment_kinds"},
                     422,"invalid_chat")

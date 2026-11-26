@@ -168,9 +168,11 @@ python3 -m rewrite.release verify --archive ./build/mowulink.tar --revision "$RE
 
 Worker 为每个候选会话和原会话登记各自的 `adapter/<Worker ID>/<会话 ID>` 回调身份。令牌各不相同。启用切换时，Worker 会拒绝同工位的旧式通用适配器身份。保留 `handoff/<Worker ID>` 的独立授权供运维中止未提交的切换。
 
-绑定的飞书训练员可发 `/resume 会话ID` 或 `/switch 会话ID`。Worker 先确认没有持单和待处理的原生业务，暂停派发，核对两个会话均空闲后保存新绑定。Router 确认解除才返回切换卡。新消息使用新会话，已投递消息重试只读原回执。Worker 重开时以已提交的绑定为准，旧会话身份发来的新回调会被拒。
+绑定的飞书训练员可发 `/resume` 看目录，再用 `/resume 编号`、`/resume 完整标题` 或 `/resume 会话ID` 切换。`/switch 会话ID` 复用同一条切换链。目录沿用旧版从 0 编号的规则，每页十项，翻页保持本次列表顺序。按编号选择前需查到卡片送达凭据。可回复对应页的目录卡。刷新、搜索或成功切换后，旧目录卡会失效。同名会话请用 ID，标为「仅可浏览」的会话需先配置适配器。
 
-切换尚在 `starting` 时，目标断开会保留原会话及交接窗口。可从 `worker-status` 读取 `native_switch.handoff_id`，用原号执行 `handoff-admission ... end`。确认解除后继续使用原会话。到达 `bound` 时，恢复沿用已经提交的目标，目标重新可读后才解除交接。仍需接入冷会话自动打开和目录序号切换。验收覆盖隔离 Codex App Server、DSH、真实 TLS 进程和飞书夹具。
+Worker 先确认没有持单和待处理的原生业务，暂停派发，核对两个会话均空闲后保存新绑定。Router 确认解除才返回切换卡。新消息使用新会话，已投递消息重试只读原回执。Worker 重开时以已提交的绑定为准，旧会话身份发来的新回调会被拒。
+
+切换尚在 `starting` 时，目标断开会保留原会话及交接窗口。可从 `worker-status` 读取 `native_switch.handoff_id`，用原号执行 `handoff-admission ... end`。确认解除后继续使用原会话。到达 `bound` 时，恢复沿用已经提交的目标，目标重新可读后才解除交接。冷会话目前可浏览，切入仍需原生适配器先恢复该会话。验收覆盖隔离 Codex App Server、DSH、真实 TLS 进程和飞书夹具。[目录与原生回执](evidence/native-resume-catalog.json)
 
 ### Hermes 专用会话
 

@@ -5,7 +5,7 @@ import time
 from threading import RLock
 from typing import Protocol
 
-from . import display, links, peer_files, peer_retry, queued_chat, user_questions, worker_commands, worker_handoff, worker_media, worker_resume
+from . import display, links, peer_files, peer_retry, queued_chat, user_questions, worker_catalog, worker_commands, worker_handoff, worker_media, worker_resume
 from .storage import Database, Fault, encode, guid, require, string
 
 FOLLOWUP_FRAMES = {"task.updated","task.probe","task.shelved","task.cancel","task.transfer_out","question.resolved"}
@@ -64,7 +64,7 @@ class Worker:
     def __init__(self, path, worker_id, router, adapter: AgentAdapter, *, clock=time.time, resume_targets=None):
         self.db = Database(path, SCHEMA + worker_media.SCHEMA + peer_files.SCHEMA + display.SCHEMA + links.WORKER_SCHEMA
                            + user_questions.SCHEMA + worker_commands.SCHEMA + queued_chat.SCHEMA + peer_retry.SCHEMA
-                           + worker_handoff.SCHEMA + worker_resume.SCHEMA)
+                           + worker_handoff.SCHEMA + worker_resume.SCHEMA + worker_catalog.SCHEMA)
         self.clock = clock
         self.worker_id, self.router, self.adapter = worker_id, router, adapter
         self.lock = RLock()

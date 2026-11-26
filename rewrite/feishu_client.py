@@ -36,7 +36,7 @@ def receive(inbound, event):
     sender, message = event.event.sender,event.event.message
     return inbound.record(event.header.app_id,sender.sender_type,sender.sender_id.open_id,
                           {k:getattr(message,k,None) for k in ("chat_id","chat_type","message_id","message_type",
-                                                                "content","thread_id","root_id")})
+                                                                "content","thread_id","root_id","parent_id")})
 
 
 def card_action(actions, callback):

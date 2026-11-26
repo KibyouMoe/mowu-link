@@ -8,6 +8,7 @@ from urllib.error import URLError
 
 from .storage import Database, Fault, encode, require, string
 from .worker_commands import is_command
+from .worker_catalog import numbered_selection
 
 MAX_IMAGE = 10 * 1024 * 1024
 MAX_FILE = 100_000_000
@@ -95,10 +96,17 @@ class Inbound:
             return None
         mid = string(message,"message_id")
         require(re.fullmatch(r"om_[A-Za-z0-9_-]+",mid),422,"bad_feishu_message_id")
-        body = encode({"kind":message.get("message_type"),"content":message.get("content")})
+        parent = message.get("parent_id")
+        if parent=="":
+            parent = None
+        require(parent is None or isinstance(parent,str) and re.fullmatch(r"om_[A-Za-z0-9_-]{1,197}",parent),
+                422,"invalid_message_parent")
+        body = {"kind":message.get("message_type"),"content":message.get("content")}
         with self.db.transaction() as db:
-            db.execute("INSERT OR IGNORE INTO platform_events(mid,body,state) VALUES (?,?,'pending')",(mid,body))
-            require(db.execute("SELECT body FROM platform_events WHERE mid=?",(mid,)).fetchone()[0] == body,
+            db.execute("INSERT OR IGNORE INTO platform_events(mid,body,state) VALUES (?,?,'pending')",
+                       (mid,encode(dict(body,parent_id=parent))))
+            saved = json.loads(db.execute("SELECT body FROM platform_events WHERE mid=?",(mid,)).fetchone()[0])
+            require(saved==body or saved==dict(body,parent_id=parent),
                     409,"platform_message_conflict")
             root = message.get("root_id")
             if message.get("thread_id") and root:
@@ -154,7 +162,10 @@ class Inbound:
             receipt = None
             if body["kind"] == "text" and is_command(text):
                 try:
-                    reply = self.worker.request("POST","worker/command",{"message_id":mid,"text":text})
+                    request = {"message_id":mid,"text":text}
+                    if body.get("parent_id") and numbered_selection(text):
+                        request["reply_to"] = body["parent_id"]
+                    reply = self.worker.request("POST","worker/command",request)
                     receipt = reply.get("receipt") if isinstance(reply,dict) else None
                     require(isinstance(receipt,dict) and receipt.get("message_id")==mid
                             and isinstance(receipt.get("output"),dict)

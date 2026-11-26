@@ -2,7 +2,7 @@
 from urllib.error import URLError
 from uuid import NAMESPACE_URL, uuid5
 
-from . import worker_handoff
+from . import worker_catalog, worker_handoff
 from .storage import Fault, encode, require
 
 
@@ -30,9 +30,11 @@ def pending(worker):
 
 
 def selection(text):
+    words = text.strip().split(maxsplit=1)
+    if len(words)==2 and words[0]=="/resume" and words[1].split()[0].casefold() not in worker_catalog.BROWSE:
+        return words
     words = text.strip().split()
-    if (len(words)==2 and words[0] in ("/resume","/switch") and not words[1].isdecimal()
-            and words[1] not in ("next","prev","search","page")):
+    if len(words)==2 and words[0]=="/switch" and not words[1].isdecimal():
         return words
     return None
 
@@ -85,6 +87,7 @@ def advance(service,row):
             with w.db.transaction() as db:
                 changed = db.execute("UPDATE native_binding SET session=? WHERE slot=1 AND session=?",(target,source)).rowcount
                 require(changed==1,409,"native_binding_changed")
+                db.execute("DELETE FROM resume_catalog")
                 db.execute("UPDATE native_resume SET phase='bound' WHERE message_id=?",(row["message_id"],))
             w.adapter,w.native_session_pin = next_port,target
             service.adapter_connected = False
@@ -110,35 +113,53 @@ def cancel(service,row,body):
     return {"handoff_id":row["handoff_id"],"state":"released"}
 
 
-def handle(service,mid,text,name,target):
+def handle(service,mid,text,name,target,*,reply_to=None):
     from .worker_commands import previous, record
 
     w = service.worker
+    request = encode([text,reply_to]) if reply_to else text
     with w.db.transaction() as db:
-        old = previous(db,mid,text)
+        old = previous(db,mid,request)
         if old:
             return old
     original = pending(w)
     if original:
         require(original["message_id"]==mid,503,"native_handoff_in_progress")
-        require(original["request"]==text,409,"platform_command_conflict")
+        require(original["request"]==request,409,"platform_command_conflict")
         return advance(service,original)
+    if name=="/resume":
+        answer = None
+        if worker_catalog.numbered_selection(text):
+            with w.db.transaction() as db:
+                target,answer = worker_catalog.select_number(db,w.native_session_pin,target,reply_to)
+        elif target not in w.resume_targets:
+            if len(target)>1 and target[0]==target[-1] and target[0] in "\"'":
+                target = target[1:-1]
+            if target not in w.resume_targets:
+                require(service.adapter_connected,503,"native_switch_unconfirmed")
+                try:
+                    target,answer = worker_catalog.exact_title(service,w.native_session_pin,target)
+                except (Fault,URLError,OSError):
+                    raise Fault(503,"native_switch_host_unconfirmed",True) from None
+        if answer:
+            with w.db.transaction() as db:
+                return record(db,mid,request,name,w.native_session_pin,answer)
     if target not in w.resume_targets or target==w.native_session_pin:
         answer = ("当前已绑定会话 "+target) if target==w.native_session_pin else "这个会话暂未配置切换权限。"
         with w.db.transaction() as db:
-            return record(db,mid,text,name,w.native_session_pin,answer)
+            return record(db,mid,request,name,w.native_session_pin,answer)
     require(service.adapter_connected and service.host_session==w.native_session_pin,503,"native_switch_unconfirmed")
     _info,busy = observe(w.resume_targets[target],target)
     if busy:
         with w.db.transaction() as db:
-            return record(db,mid,text,name,w.native_session_pin,REFUSED["resume_target_busy"])
+            return record(db,mid,request,name,w.native_session_pin,REFUSED["resume_target_busy"])
     with w.lock, service.native_callback_lock:
         require(service.native_callbacks_in_flight==0,503,"native_switch_callbacks_pending")
         require(not worker_handoff.active(w),503,"native_handoff_in_progress")
         handoff = str(uuid5(NAMESPACE_URL,encode(["native-resume",w.worker_id,mid])))
         with w.db.transaction() as db:
             db.execute("INSERT INTO native_resume VALUES (?,?,?,?,?,?,'starting')",
-                       (mid,text,name,handoff,w.native_session_pin,target))
+                       (mid,request,name,handoff,w.native_session_pin,target))
     return advance(service,pending(w))
 
 

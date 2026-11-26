@@ -1318,9 +1318,9 @@ class NativeLoop(unittest.TestCase):
         sink = PlatformFixture()
         views = Views(platform_db,platform,sink,"chat","小栗帽",clock)
 
-        def record(mid,text):
+        def record(mid,text,parent=None):
             return inbound.record("app","user","trainer",{"chat_type":"p2p","chat_id":"chat","message_id":mid,
-                "message_type":"text","content":encode({"text":text})})
+                "message_type":"text","content":encode({"text":text}),"parent_id":parent})
 
         before,after = record("om_codex_before_live_resume","An original private message"),"om_live_dsh_after_resume"
         try:
@@ -1331,7 +1331,15 @@ class NativeLoop(unittest.TestCase):
         first = inbound.deliver(before)
         original_turns = codex_host.thread(codex,include_turns=True)["turns"]
         self.assertEqual(len(original_turns),1)
-        cmd = record("om_live_native_resume","/resume "+sid)
+        menu = inbound.deliver(record("om_live_resume_catalog","/resume"))
+        views.poll()
+        with views.db.transaction() as db:
+            catalog = db.execute("SELECT mid,event FROM view_attempt WHERE seq=?",(menu["output"]["seq"],)).fetchone()
+        catalog_id = catalog["mid"]
+        lines = json.loads(catalog["event"])["text"].splitlines()
+        index = lines[lines.index(sid)-1].partition(".")[0]
+        self.assertTrue(index.isdecimal())
+        cmd = record("om_live_native_resume","/resume "+index,catalog_id)
         selected = inbound.deliver(cmd)
         self.assertEqual(selected["binding_receipt"]["session"],sid)
         with self.assertRaisesRegex(Fault,"native_callback_inactive"):
@@ -1386,6 +1394,7 @@ class NativeLoop(unittest.TestCase):
         self.assertEqual(len(cards),2)
         self.assertTrue(all(sink.calls.count(("send",mid))==1 for mid in cards.values()))
         self.evidence = {"switch":selected["binding_receipt"],"return":returned["binding_receipt"],"cards":cards,
+            "catalog_card":catalog_id,"selected_number":int(index),
             "codex_input":first,"dsh_input":second,"dsh_work_input":observed["inputs"][-1],"task_id":tid,
             "assignment_id":aid,"w04_receipt":expected,"notification_id":notice["delivery_id"],
             "codex_turns_after_replay":len(original_turns),"dsh_inputs_after_replay":len(observed["inputs"]),

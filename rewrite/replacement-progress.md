@@ -4,6 +4,10 @@
 
 ## 检查点与证据
 
+`/resume` 的目录按旧版从 0 编号。翻页复用当次目录，刷新和搜索生成新目录，选编号需已确认的卡片。隔离实测卡片送达回执丢失、重复发送、目录重排、翻页后回复错页与回复刷新前的旧卡，均未误切。完整标题重复时需用 ID，目录内未配置的冷会话只可浏览。原生联调从真实 Codex App Server 生成的目录卡按编号切到 DSH，完成私聊和正式工单，再按 ID 切回。对应两组场景连续通过 12 轮，模型与飞书为夹具。[目录与原生回执](evidence/native-resume-catalog.json)
+
+复跑 `python3 -B -m unittest -v rewrite.test_worker_resume.WorkerResume.test_number_uses_the_confirmed_catalog_and_old_card_cannot_redirect_it rewrite.test_dsh_native_loop.NativeLoop.test_platform_resume_switches_live_codex_and_dsh_sessions`。macOS 218 项通过，Linux arm64 154 项通过，另 64 项本机宿主用例跳过。冷目录中自动打开宿主仍待接。
+
 `/resume 会话ID` 可将同一 Worker 切到已配置、已运行的独立适配器。`/switch 会话ID` 使用同一条链。运行中的 Codex App Server 与 DSH 隔离会话已往返切换。重投老消息、旧切换指令均读回原回执。原 Codex 一次私聊，DSH 一次私聊加一张工单。DSH 的两次原生 W04 返回同一结果，Router 仅一条待验通知。切走后，旧适配器即使把新会话 ID 写进回调正文也会被拒。模型和飞书是本地夹具。真实飞书、生产宿主、冷目录和编号选择仍待核。[原生与回执证据](evidence/native-live-resume.json) · [运行入口](README.md#飞书切换会话)
 
 切换、Router 开始与结束丢回包、提交前目标断开三个场景连续 12 轮通过。最后一项确认目标断开 80 秒期间 Worker 仍在线且派发暂停，授权运维按原号解除后继续投给原会话。适配器进程和 Worker 各自用独立账本，CLI 配置测试核对 Worker 重开后保持新会话。复跑 `python3 -B -m unittest -v rewrite.test_worker_resume rewrite.test_service.Service.test_runtime_resume_uses_opted_in_connection_map rewrite.test_dsh_native_loop.NativeLoop.test_platform_resume_switches_live_codex_and_dsh_sessions`。

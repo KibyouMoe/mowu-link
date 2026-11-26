@@ -2,12 +2,17 @@
 import json
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
+from types import SimpleNamespace
 import unittest
 
 from .adapter import HostAdapter
 from .devloop import FixtureHost, Loop
+from .feishu_client import receive
+from .feishu_inbound import Inbound
+from .feishu_output import Views
 from .host_wire import RemoteAdapter, serve_adapter
-from .storage import Fault, guid
+from .storage import Fault, encode, guid
+from .test_feishu_output import PlatformFixture
 from .test_mainline import Clock
 from .test_state_bundle import running
 from .wire import Client
@@ -240,3 +245,95 @@ class WorkerResume(unittest.TestCase):
         receipt = self.switch(self.clients,"om_resume_before_w01",self.target)
         self.assertEqual(receipt["binding_receipt"]["handoff_id"],valid_op)
         self.assertEqual(self.status(self.clients)["host_session"],self.target)
+
+    def test_number_uses_the_confirmed_catalog_and_old_card_cannot_redirect_it(self):
+        source_host = self.hosts[self.source]
+        entries = [{"id":self.source,"title":"Shared title"},
+                   *({"id":f"cold-{i}","title":"Shared title" if i==0 else f"Cold record {i}"} for i in range(9)),
+                   {"id":self.target,"title":"Selected  test target"}]
+        source_host.capabilities = lambda session: {"session_catalog":True}
+        source_host.session_catalog = lambda session: {"session":session,"items":list(entries),"unavailable":0}
+        self.clock.advance(5)
+        self.service.step()
+        platform = self.clients["platform/oguri"]
+        path = self.loop.root/"platform.db"
+        inbound = Inbound(path,platform,None,"app","trainer","chat",clock=self.clock)
+        sink = PlatformFixture()
+        views = Views(path,platform,sink,"chat","小栗帽",self.clock)
+
+        def event(mid,text,parent=None):
+            return SimpleNamespace(header=SimpleNamespace(app_id="app"),event=SimpleNamespace(
+                sender=SimpleNamespace(sender_type="user",sender_id=SimpleNamespace(open_id="trainer")),
+                message=SimpleNamespace(chat_id="chat",chat_type="p2p",message_id=mid,message_type="text",
+                                        content=encode({"text":text}),parent_id=parent)))
+
+        def send(mid,text,parent=None):
+            return inbound.deliver(receive(inbound,event(mid,text,parent)))
+
+        def view(receipt):
+            with views.db.transaction() as db:
+                row = db.execute("SELECT mid,event FROM view_attempt WHERE seq=?",(receipt["output"]["seq"],)).fetchone()
+            return row["mid"],json.loads(row["event"])["text"]
+
+        def output(receipt):
+            entries = platform.request("GET","worker/display")["items"]
+            return next(item["event"]["text"] for item in entries if item["seq"]==receipt["output"]["seq"])
+
+        first = send("om_catalog_start","/resume")
+        self.assertIn("0. Shared title",output(first))
+        route = platform.request
+        delay = True
+
+        def lose_ack(method,path,*args,**kwargs):
+            nonlocal delay
+            if path=="worker/session-menu-receipt" and delay:
+                delay = False
+                raise ConnectionError("card created but Worker did not receive the menu acknowledgement")
+            return route(method,path,*args,**kwargs)
+
+        platform.request = lose_ack
+        with self.assertRaises(ConnectionError):
+            views.poll()
+        self.assertIn("尚未确认送达",output(send("om_unconfirmed_menu","/resume 1")))
+        self.assertEqual(self.status(self.clients)["host_session"],self.source)
+        views.poll()
+        first_id,_ = view(first)
+        self.assertEqual(sink.calls.count(("send",first_id)),2)
+        self.assertEqual(sum(value[0]==first_id for value in sink.messages.values()),1)
+        self.assertIn("仅可浏览",output(first))
+        self.assertIn("暂未配置",output(send("om_browsable_only","/resume 1",first_id)))
+        self.assertIn("没有该编号",output(send("om_hidden_number","/resume 10")))
+        self.assertIn("同名会话",output(send("om_ambiguous_title","/resume Shared title")))
+
+        entries.insert(0,entries.pop())
+        second = send("om_catalog_next","/resume next")
+        self.assertIn("10. Selected  test target",output(second))
+        views.poll()
+        second_id,_ = view(second)
+        self.assertIn("没有该编号",output(send("om_reply_wrong_page","/resume 10",first_id)))
+        refreshed = send("om_catalog_refresh","/resume")
+        self.assertIn("0. Selected  test target",output(refreshed))
+        self.assertEqual(route("POST","worker/session-menu-receipt",{
+            "seq":second["output"]["seq"],"platform_message_id":second_id}),{"recorded":True,"seq":second["output"]["seq"]})
+        self.assertIn("已失效",output(send("om_stale_catalog","/resume 10",second_id)))
+        self.assertIn("尚未确认送达",output(send("om_unacked_refresh","/resume 0")))
+        self.assertEqual(self.status(self.clients)["host_session"],self.source)
+        self.assertEqual(self.hosts[self.target].entries(),[])
+        views.poll()
+        new_id,_ = view(refreshed)
+        result = send("om_number_switch","/resume 0",new_id)
+        self.assertEqual(result["binding_receipt"]["session"],self.target)
+        with self.assertRaisesRegex(Fault,"platform_message_conflict"):
+            receive(inbound,event("om_number_switch","/resume 0",second_id))
+        self.assertEqual(self.switch(self.clients,"om_back_after_number",self.source)["binding_receipt"]["session"],self.source)
+        self.assertEqual(send("om_number_switch","/resume 0",new_id),result)
+        self.assertIn("请先",output(send("om_number_after_return","/resume 0")))
+        self.assertEqual(self.status(self.clients)["host_session"],self.source)
+        title = send("om_title_switch",'/resume "Selected  test target"')
+        self.assertEqual(title["binding_receipt"]["session"],self.target)
+        self.assertEqual(self.hosts[self.source].entries(),[])
+        self.assertEqual(self.hosts[self.target].entries(),[])
+        self.assertEqual(self.message(self.clients,guid())["session"],self.target)
+        self.evidence = {"first_page":first_id,"second_page":second_id,"refreshed_page":new_id,
+                         "first_card_send_attempts":2,"unique_first_card":1,"old_card_selection_refused":True,
+                         "number_receipt":result["binding_receipt"],"title_receipt":title["binding_receipt"]}

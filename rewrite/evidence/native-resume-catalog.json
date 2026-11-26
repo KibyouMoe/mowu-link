@@ -1,0 +1,77 @@
+{
+  "at_utc": "2026-11-26T11:22:31.288141+00:00",
+  "repetitions": 12,
+  "native_loop": {
+    "switch": {
+      "handoff_id": "2e3e1c8c-ae1c-5cd7-a774-f33034921317",
+      "previous_session": "01a21797-beef-7f82-960f-56fe1bb68d1e",
+      "session": "isolated-dsh-resume-target",
+      "state": "bound"
+    },
+    "return": {
+      "handoff_id": "ef103ef6-643e-5d62-a0e0-da149b8e5a39",
+      "previous_session": "isolated-dsh-resume-target",
+      "session": "01a21797-beef-7f82-960f-56fe1bb68d1e",
+      "state": "bound"
+    },
+    "cards": {
+      "command-om_live_native_resume": "om_3",
+      "command-om_live_native_return": "om_5"
+    },
+    "catalog_card": "om_2",
+    "selected_number": 1,
+    "codex_input": {
+      "delivery_id": "chat-om_codex_before_live_resume",
+      "digest": "00c93e40261d3de5dc360f75da576b507485d8b76942a3aa667048fe6280cb46",
+      "native_id": "01a21797-bfdf-7fc1-9590-9ccdf1fa8c80",
+      "session": "01a21797-beef-7f82-960f-56fe1bb68d1e",
+      "turn_id": "01a21797-bfd5-70f3-8dfc-d4bcc63f7ba9"
+    },
+    "dsh_input": {
+      "delivery_id": "chat-om_live_dsh_after_resume",
+      "digest": "5e7220cb11791f0788a07a41374f237b82e308992c7e2c9ad03ce6cc3ed96eaf",
+      "native_id": "mowulink-54f3b5ac29957135bc448bb4a00c31eafb133ce60bcc0ba54e5a67510deb4785",
+      "session": "isolated-dsh-resume-target",
+      "turn_id": "1/1"
+    },
+    "dsh_work_input": "mowulink-b26109dfa42f181b3927a34154bbc24d9f103378713cf7d4b6ada41d70653ff8",
+    "task_id": "b2164af0-6cfb-4b80-a8c2-e7c6fdeae10a",
+    "assignment_id": "5314ef83-3d15-4f2b-ab6a-c1fdc6970763",
+    "w04_receipt": {
+      "recorded": true,
+      "task_state": "completed_reported",
+      "release_assignment_id": "5314ef83-3d15-4f2b-ab6a-c1fdc6970763"
+    },
+    "notification_id": "beccdf5d-4288-487f-80aa-a8a5de4019f2",
+    "codex_turns_after_replay": 1,
+    "dsh_inputs_after_replay": 2,
+    "w04_result_receipts": 2,
+    "new_result_notifications": 1,
+    "late_callback": "native_callback_inactive",
+    "boundary": "Live independent Codex App Server and DSH SDK; local test models and Feishu fixture"
+  },
+  "catalog_snapshot_fixture": {
+    "first_page": "om_2",
+    "second_page": "om_7",
+    "refreshed_page": "om_9",
+    "first_card_send_attempts": 2,
+    "unique_first_card": 1,
+    "old_card_selection_refused": true,
+    "number_receipt": {
+      "handoff_id": "79be24e5-ed9c-5c09-a5a6-1ea12f687fa0",
+      "previous_session": "resume-source",
+      "session": "resume-target",
+      "state": "bound"
+    },
+    "title_receipt": {
+      "handoff_id": "19b8985d-fda6-5984-8bc9-67c1b92846a3",
+      "previous_session": "resume-source",
+      "session": "resume-target",
+      "state": "bound"
+    }
+  },
+  "cases": [
+    "test_platform_resume_switches_live_codex_and_dsh_sessions",
+    "test_number_uses_the_confirmed_catalog_and_old_card_cannot_redirect_it"
+  ]
+}

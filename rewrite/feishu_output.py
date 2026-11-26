@@ -133,6 +133,9 @@ class Views:
             if event.get("model_menu") is True:
                 proof = self.worker.request("POST","worker/model-menu-receipt",{"seq":seq,"platform_message_id":mid})
                 require(proof=={"recorded":True,"seq":seq},409,"model_menu_receipt_unconfirmed")
+            if event.get("session_menu") is True:
+                proof = self.worker.request("POST","worker/session-menu-receipt",{"seq":seq,"platform_message_id":mid})
+                require(proof=={"recorded":True,"seq":seq},409,"session_menu_receipt_unconfirmed")
             if kind=="progress":
                 db.execute("INSERT OR REPLACE INTO segments VALUES (?,?,?,?)",(session,turn,mid,text))
             else:
