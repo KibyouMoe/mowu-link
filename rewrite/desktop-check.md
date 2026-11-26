@@ -63,7 +63,9 @@ App Server 指定回合的文字投影复用原 Worker 的飞书卡片。独立�
 
 ## 独立适配器启动
 
-独立 App Server 的 `/model`、`/effort` 从原生会话回读当前选择。`/context` 根据原生用量事件核对最近已观察到的回包及回合号，启动后没有事件时显示未记录。同一 App Server 的模型目录未提供各模型所属提供方，暂不对该会话提供切换入口。连续 10 次实际回读成功，模型是本地脚本。[回读记录](evidence/codex-app-server-native-context.json)。
+独立 App Server 的 `/model`、`/effort` 针对当前提供方查询模型目录，按原生会话设置更新并读回。目录未列出的模型仍可显示原选择；其未确认选项不可写。原编号菜单需平台确认送达，换模型后旧力度菜单失效。实际本地请求验证 Sol 转 Astra、`max` 与重开后 `low`。原生选择的 `ultra` 在本地 Responses 提供方请求中为 `xhigh`，真实账号的请求强度另验，卡片注明暂无实际请求回读。连续 12 轮通过。[设置与请求记录](evidence/codex-app-server-native-selection.json)。
+
+`/context` 根据原生用量事件核对最近已观察到的回包及回合号。启动后没有事件时显示未记录。连续 10 次实际回读成功，模型是本地脚本。[用量记录](evidence/codex-app-server-native-context.json)。
 
 独立 App Server 的平台 `/stop` 只中止本工位拥有收件凭据的单输入普通私聊，回执包含原生回合号与输入号。收件未知、原生混合输入或正式工单走各自的核验流程。丢回包后同消息号重投读回原待核卡，后续普通回合仍在运行。连续 20 轮通过，平台和模型用夹具。[原生中止记录](evidence/codex-app-server-private-stop.json)。
 

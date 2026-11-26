@@ -1,0 +1,52 @@
+{
+  "thread_id": "01a216ff-cad4-77f1-9346-47d176b5df4f",
+  "native_writes": [
+    {
+      "threadId": "01a216ff-cad4-77f1-9346-47d176b5df4f",
+      "model": "gpt-6.2-astra"
+    },
+    {
+      "threadId": "01a216ff-cad4-77f1-9346-47d176b5df4f",
+      "effort": "max"
+    },
+    {
+      "threadId": "01a216ff-cad4-77f1-9346-47d176b5df4f",
+      "effort": "ultra"
+    },
+    {
+      "threadId": "01a216ff-cad4-77f1-9346-47d176b5df4f",
+      "effort": "high"
+    },
+    {
+      "threadId": "01a216ff-cad4-77f1-9346-47d176b5df4f",
+      "effort": "low"
+    }
+  ],
+  "cold_choice": {
+    "provider": "test_wire",
+    "model": "gpt-6.2-astra",
+    "effort": "low"
+  },
+  "request_settings": [
+    [
+      "gpt-6.2-sol",
+      "low"
+    ],
+    [
+      "gpt-6.2-astra",
+      "max"
+    ],
+    [
+      "gpt-6.2-astra",
+      "xhigh"
+    ],
+    [
+      "gpt-6.2-astra",
+      "low"
+    ]
+  ],
+  "stale_effort_menu_refused": true,
+  "unconfirmed_attempt_did_not_replay": true,
+  "boundary": "Actual App Server per-thread selection and local model requests; platform fixture",
+  "consecutive_runs": 12
+}

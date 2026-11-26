@@ -150,13 +150,90 @@ class AppServerHost:
             return {"session":session,"state":"stopped","turn_id":proof["turn_id"],
                     "native_input_id":proof["native_id"]}
 
+    @staticmethod
+    def current_selection(thread):
+        effort = thread.get("reasoningEffort")
+        require(effort is None or isinstance(effort,str) and 0<len(effort)<=30 and effort.isprintable(),
+                502,"invalid_native_model_view")
+        return {"provider":string(thread,"modelProvider"),"model":string(thread,"model"),
+                "effort":effort}
+
+    def model_options(self,provider):
+        result = self.request("model/list",{"modelProvider":provider,"limit":200,"includeHidden":False})
+        rows,cursor = result.get("data"),result.get("nextCursor")
+        require(isinstance(rows,list) and len(rows)<=200 and (cursor is None or isinstance(cursor,str)),
+                502,"invalid_native_model_view")
+        options = {}
+        for row in rows:
+            if not isinstance(row,dict):
+                continue
+            model,name = row.get("model"),row.get("displayName")
+            efforts = row.get("supportedReasoningEfforts")
+            if (not isinstance(model,str) or not 0<len(model)<=200 or not model.isprintable()
+                    or not isinstance(name,str) or not 0<len(name)<=200 or not name.isprintable()
+                    or not isinstance(efforts,list) or len(efforts)>30):
+                continue
+            choices = {}
+            for effort in efforts:
+                if isinstance(effort,dict):
+                    value = effort.get("reasoningEffort")
+                    if isinstance(value,str) and 0<len(value)<=30 and value.isprintable():
+                        choices[value] = {"id":value,"name":value}
+            default = row.get("defaultReasoningEffort")
+            options[model] = {"id":model,"name":name,"provider":provider,"efforts":choices,
+                              "default":default if isinstance(default,str) else None}
+        return options,len(rows)-len(options),bool(cursor)
+
     def model_view(self,session,kind):
         require(kind in ("models","efforts"),422,"invalid_model_view")
-        thread = self.thread(session,include_turns=False)
-        current = {"provider":string(thread,"modelProvider"),"model":string(thread,"model"),
-                   "effort":thread.get("reasoningEffort")}
-        # model/list is an App Server catalog, and its entries do not identify the bound provider.
-        return {"session":session,"current":current,"observed":None,"items":[],"unavailable":1,"more":False}
+        current = self.current_selection(self.thread(session,include_turns=False))
+        try:
+            options,unavailable,more = self.model_options(current["provider"])
+        except Fault as error:
+            if error.status>=500:
+                return {"session":session,"current":current,"observed":None,"items":[],"unavailable":1,"more":False}
+            raise
+        result = {"session":session,"current":current,"observed":None,"unavailable":unavailable,"more":more}
+        if kind=="models":
+            return {**result,"items":[{key:row[key] for key in ("id","name","provider")} for row in options.values()]}
+        chosen = options.get(current["model"])
+        if not chosen:
+            return {**result,"items":[],"unavailable":unavailable+1,"more":False}
+        return {**result,"items":list(chosen["efforts"].values()),"more":False,
+                "default_effort":chosen["default"] if chosen["default"] in chosen["efforts"] else None}
+
+    def model_change(self,session,kind,value,*,expected_route=None):
+        require(kind in ("models","efforts"),422,"invalid_model_change")
+        with self.write_lock:
+            thread = self.thread(session,include_turns=False)
+            require(thread["status"]["type"]=="idle",409,"model_change_busy")
+            before = self.current_selection(thread)
+            provider = before["provider"]
+            route = provider+"/"+before["model"]
+            require(expected_route is None or expected_route==route,409,"model_menu_route_changed")
+            options,_,_ = self.model_options(provider)
+            desired = dict(before)
+            request = {"threadId":session}
+            if kind=="models":
+                change_provider,separator,model = value.partition("/")
+                require(separator,422,"model_choice_needs_route")
+                chosen = options.get(model) if change_provider==provider else None
+                require(chosen,422,"model_choice_unavailable")
+                desired["model"] = request["model"] = model
+                if before["effort"] is not None and before["effort"] not in chosen["efforts"]:
+                    require(chosen["default"] in chosen["efforts"],422,"model_choice_unavailable")
+                    desired["effort"] = request["effort"] = chosen["default"]
+            else:
+                chosen = options.get(before["model"])
+                require(chosen and value in chosen["efforts"],422,"model_choice_unavailable")
+                desired["effort"] = request["effort"] = value
+            changed = before!=desired
+            if changed:
+                require(not self.busy(session),409,"model_change_busy")
+                require(self.request("thread/settings/update",request)=={},502,"native_model_change_unconfirmed")
+                verified = self.current_selection(self.thread(session,include_turns=False))
+                require(verified==desired,409,"model_change_conflict")
+            return {"session":session,"selected":desired,"changed":changed,"backend":"app-server"}
 
     def observe_usage(self,params):
         if not isinstance(params,dict) or params.get("threadId")!=self.thread_id:

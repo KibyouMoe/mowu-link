@@ -1147,7 +1147,7 @@ class CodexAppServer(unittest.TestCase):
         effort = command("om_effort_native","/effort")
         self.assertIn("会话当前选择 test_wire/gpt-5.4 · high",current)
         self.assertIn("最近记录的请求配置 未记录",effort)
-        self.assertIn("切换敬请期待",command("om_effort_change","/effort low"))
+        self.assertIn("该选项暂不可用",command("om_effort_change","/effort low"))
         self.assertIn("还没有模型回包",command("om_context_pending","/context"))
         rpc.request("turn/start",{"threadId":sid,"input":[{"type":"text","text":"Context fixture","text_elements":[]}]})
         self.assertTrue(settled.wait(8))
@@ -1164,3 +1164,104 @@ class CodexAppServer(unittest.TestCase):
         self.evidence = {"thread_id":sid,"model_card":current,"effort_card":effort,"context_card":context,
                          "native_usage":usage,"scripted_provider_config":self.provider.config_observations,
                          "boundary":"Actual isolated App Server settings and usage events from a local model fixture"}
+
+    def test_native_model_and_effort_commands_change_next_request_and_persist_cold(self):
+        self.provider.config_observations = []
+        writes = []
+
+        def send(rpc,worker,phrase):
+            worker.chat(guid(),phrase)
+            until = time.monotonic()+12
+            while True:
+                event = rpc.event(until)
+                if event["method"]=="turn/completed":
+                    self.assertEqual(event["params"]["turn"]["status"],"completed")
+                    return
+
+        with isolated_app_server(self.root,self.origin) as rpc:
+            sid = rpc.request("thread/start",{"cwd":self.root,"ephemeral":False,"model":"gpt-6.2-sol"})["thread"]["id"]
+            actual = rpc.request
+            def native(method,params):
+                result = actual(method,params)
+                if method=="thread/settings/update":
+                    writes.append(params)
+                return result
+            rpc.request = native
+            host = AppServerHost(rpc,sid)
+            host.session = sid
+            loop = self.enterContext(Loop.isolated(host_factory=lambda _path,_name:host))
+            service = WorkerService(loop.worker)
+            token = guid()
+            server = service.listen({token:"platform/oguri"},("127.0.0.1",0),None)
+            url = self.enterContext(running(server))
+            platform = Client(url,token)
+            platform_feed = Views(loop.root/"settings-views.db",platform,PlatformFixture(),"fixture-chat","小栗帽")
+            service.step()
+
+            def command(mid,text):
+                receipt = platform.request("POST","worker/command",{"message_id":mid,"text":text})["receipt"]
+                card = next(row["event"]["text"] for row in platform.request("GET","worker/display")["items"]
+                            if row["seq"]==receipt["output"]["seq"])
+                return receipt,card
+
+            def option(card,part):
+                return next(line.split(".",1)[0] for line in card.splitlines() if f" {part} · " in line)
+
+            send(rpc,loop.worker,"Observe the original Sol request")
+            _,models = command("models","/model")
+            _,efforts = command("efforts_original","/effort")
+            astra = option(models,"test_wire/gpt-6.2-astra")
+            high = option(efforts,"high")
+            self.assertIn("尚未确认送达",command("early_selection","/model "+astra)[1])
+            platform_feed.poll()
+            changed,card = command("model_astra","/model "+astra)
+            self.assertIn("已切换为 test_wire/gpt-6.2-astra",card)
+            self.assertEqual(changed["model_receipt"]["selected"],
+                             {"provider":"test_wire","model":"gpt-6.2-astra","effort":None})
+            self.assertIn("打开菜单后模型已切换",command("old_effort","/effort "+high)[1])
+            self.assertIn("该选项暂不可用",command("other_provider","/model another/gpt-6.2-sol")[1])
+            _,fresh = command("efforts_current","/effort")
+            platform_feed.poll()
+            maximum,card = command("effort_max","/effort "+option(fresh,"max"))
+            self.assertIn("已切换为 test_wire/gpt-6.2-astra · max",card)
+            self.assertEqual(maximum["model_receipt"]["selected"]["effort"],"max")
+            send(rpc,loop.worker,"Observe the new Astra and max request")
+            effort,card = command("effort_ultra","/effort "+option(fresh,"ultra"))
+            self.assertIn("已切换为 test_wire/gpt-6.2-astra · ultra",card)
+            self.assertIn("实际模型请求配置暂无回读",card)
+            self.assertEqual(effort["model_receipt"]["selected"]["effort"],"ultra")
+            send(rpc,loop.worker,"Observe the new Astra and ultra request")
+
+            actual_change = loop.adapter.model_change
+            def lose(session,kind,value,**kw):
+                self.assertEqual(actual_change(session,kind,value,**kw)["selected"]["effort"],"high")
+                raise Fault(503,"isolated_model_ack_lost",True)
+            loop.adapter.model_change = lose
+            pending,card = command("effort_lost","/effort high")
+            self.assertIn("切换结果待核",card)
+            self.assertNotIn("model_receipt",pending)
+            loop.adapter.model_change = actual_change
+            low,card = command("effort_low","/effort low")
+            self.assertEqual(low["model_receipt"]["selected"]["effort"],"low")
+            self.assertIn("· low",card)
+            self.assertEqual(command("effort_lost","/effort high")[0],pending)
+            self.assertEqual(len(writes),5)
+
+        with isolated_app_server(self.root,self.origin) as reopened:
+            host = AppServerHost(reopened,sid)
+            loop.adapter.host = host
+            selected = host.model_view(sid,"models")["current"]
+            self.assertEqual(selected,{"provider":"test_wire","model":"gpt-6.2-astra","effort":"low"})
+            self.assertEqual(reopened.request("thread/resume",{"threadId":sid,"cwd":self.root})["thread"]["id"],sid)
+            send(reopened,loop.worker,"Observe the selection after cold resume")
+        sol,maximum,ultra,cold = self.provider.config_observations
+        self.assertEqual((sol,maximum,cold),
+                         (("gpt-6.2-sol","low"),("gpt-6.2-astra","max"),("gpt-6.2-astra","low")))
+        self.assertEqual(ultra[0],"gpt-6.2-astra")
+        self.assertIn(ultra[1],("xhigh","ultra"))
+        self.assertEqual(writes,[{"threadId":sid,"model":"gpt-6.2-astra"},*({"threadId":sid,"effort":item}
+                                  for item in ("max","ultra","high","low"))])
+        self.assertFalse(loop.hermes.tasks()["items"])
+        self.evidence = {"thread_id":sid,"native_writes":writes,"cold_choice":selected,"request_settings":self.provider.config_observations,
+                         "stale_effort_menu_refused":True,"unconfirmed_attempt_did_not_replay":True,
+                         "boundary":"Actual App Server per-thread selection and local model requests; platform fixture"}

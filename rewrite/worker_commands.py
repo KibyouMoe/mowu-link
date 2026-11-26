@@ -483,7 +483,8 @@ def stop_private(service,mid,text):
 def confirmed_selection(receipt,session,kind,value,expected_route):
     require(isinstance(receipt,dict) and receipt.get("session")==session,502,"invalid_model_change_receipt")
     changed,sequence = receipt.get("changed"),receipt.get("event_seq")
-    require(type(changed) is bool and (not changed or type(sequence) is int and sequence>=0),
+    native_app_server = receipt.get("backend")=="app-server"
+    require(type(changed) is bool and (not changed or native_app_server or type(sequence) is int and sequence>=0),
             502,"invalid_model_change_receipt")
     selected = receipt.get("selected")
     require(isinstance(selected,dict) and set(selected)=={"provider","model","effort"},
@@ -497,7 +498,10 @@ def confirmed_selection(receipt,session,kind,value,expected_route):
     require(value==(route if kind=="models" else effort or "default"),502,"invalid_model_change_receipt")
     action = "已切换为" if changed else "当前已选择"
     answer = f"本会话{action} {route} · {effort or '随模型默认'}。"
-    return answer,{"session":session,"selected":selected,"changed":changed,"event_seq":sequence if changed else None}
+    proof = {"session":session,"selected":selected,"changed":changed}
+    if native_app_server:
+        return answer+"\n已核原生会话设置，实际模型请求配置暂无回读。",{**proof,"backend":"app-server"}
+    return answer,{**proof,"event_seq":sequence if changed else None}
 
 
 def confirmed_goal(receipt,session,action,objective):

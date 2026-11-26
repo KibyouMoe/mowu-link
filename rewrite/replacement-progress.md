@@ -4,6 +4,8 @@
 
 ## 检查点与证据
 
+独立 Codex `/model`、`/effort` 已通过指定提供方目录和原生线程设置接通。实际下一次模型请求由 Sol 改至 Astra，`max` 透传。丢回执重投保持待核，后续 `low` 冷开读回且进入下一次请求。原生选择 `ultra` 时本地 Responses 请求为 `xhigh`，真实账号的请求值仍需实测，卡片只确认客户端设置。旧模型的力度菜单、未送达菜单、其他提供方均拒绝写入。连续 12 轮通过。复跑 `python3 -m unittest -v rewrite.test_codex_app_server.CodexAppServer.test_native_model_and_effort_commands_change_next_request_and_persist_cold`。[设置与请求记录](evidence/codex-app-server-native-selection.json)。测试模型、平台使用夹具。
+
 独立 Codex `/goal` 通过原生查看、建立、暂停和继续。带授权平台身份的显式指令才走原生用户写入，适配器角色发起同一路由被拒。已有目标无法覆盖，实际无自设 token 预算。丢继续回执后按原消息号重投，最后的原生暂停仍生效。连续 15 轮通过。[原生目标记录](evidence/codex-app-server-native-goal.json)。复跑 `python3 -m unittest -v rewrite.test_codex_app_server.CodexAppServer.test_platform_goal_uses_native_user_origin_and_does_not_replay_after_lost_ack`，模型、平台使用夹具。
 
 独立 Codex `/compact` 已走原生 `thread/compact/start`。收到 App Server 确认、返回 Worker 的回执丢失时，冷开后凭原压缩回合和记录查回，只发一条成功提示。若 App Server 原确认丢失，指令保持待核，即使历史后来出现压缩，其关联也不确认。两次实际原生调用各产生一个压缩回合，同消息号重投无第三次。连续 15 轮通过。[原生回执](evidence/codex-app-server-native-compaction.json)。复跑 `python3 -m unittest -v rewrite.test_codex_app_server.CodexAppServer.test_app_server_compact_recovers_native_turn_without_restarting_uncertain_request`。平台与模型使用夹具。
