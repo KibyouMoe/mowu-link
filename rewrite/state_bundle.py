@@ -62,6 +62,12 @@ WORKER_ADMISSION_PENDING = {
 FEISHU_NATIVE_PENDING = {
     "platform_inputs": ({"platform_events"},"SELECT COUNT(*) FROM platform_events WHERE state='pending'"),
     "platform_answers": ({"card_answers"},"SELECT COUNT(*) FROM card_answers WHERE state='pending'"),
+    "platform_display_attempts": ({"view_attempt"},"SELECT COUNT(*) FROM view_attempt WHERE mid IS NULL"),
+    "platform_input_notices": ({"input_notices"},"SELECT COUNT(*) FROM input_notices WHERE outcome<>'sent'"),
+}
+FEISHU_OPTIONAL_PENDING = {
+    "platform_known_receipts_uncommitted": ({"view_attempt","view_writes"},"""SELECT COUNT(*) FROM view_attempt
+        JOIN view_writes USING(seq) WHERE view_attempt.mid IS NULL AND view_writes.platform_mid IS NOT NULL"""),
 }
 
 
@@ -290,6 +296,8 @@ def audit_handoff(snapshot,expected):
         if "feishu:"+wid in labels:
             with closing(readonly(snapshot/filename("feishu:"+wid))) as db:
                 session_pending.update(pending_counts(db,FEISHU_NATIVE_PENDING))
+                session_pending.update({k:v for k,v in pending_counts(db,FEISHU_OPTIONAL_PENDING).items()
+                                        if v is not None})
         session_pending["report_receipts"] = pending
         session_pending["held_assignments"] = int(bool(local or remote))
         session_pending["router_reserved_assignments"] = reserved.get(wid,0)

@@ -26,6 +26,7 @@ class Views:
         self.db = Database(database,"""
             CREATE TABLE IF NOT EXISTS view_cursor(slot INTEGER PRIMARY KEY,chat TEXT NOT NULL,cursor INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS view_attempt(seq INTEGER PRIMARY KEY,event TEXT NOT NULL,first_try REAL NOT NULL,mid TEXT);
+            CREATE TABLE IF NOT EXISTS view_writes(seq INTEGER PRIMARY KEY,request TEXT,prepared_at REAL,platform_mid TEXT);
             CREATE TABLE IF NOT EXISTS view_images(seq INTEGER PRIMARY KEY,image_key TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS segments(session TEXT,turn TEXT,mid TEXT NOT NULL,text TEXT NOT NULL,
                 PRIMARY KEY(session,turn));
@@ -74,7 +75,6 @@ class Views:
                 db.execute("UPDATE input_notices SET outcome='sent',platform_mid=? WHERE seq=?",(mid,seq))
 
     def deliver(self, seq, event):
-        key = str(uuid5(NAMESPACE_URL,encode(["mowulink-feishu",self.chat,event["event_id"]])))
         serialized = encode(event)
         with self.db.transaction() as db:
             cursor = db.execute("SELECT cursor FROM view_cursor").fetchone()[0]
@@ -84,7 +84,12 @@ class Views:
                 require(old and old["mid"],409,"unknown_prior_view")
                 return old["mid"]
             require(seq == cursor+1,409,"display_gap")
-            db.execute("INSERT OR IGNORE INTO view_attempt VALUES (?,?,?,NULL)",(seq,serialized,self.clock()))
+            if old:
+                require(db.execute("SELECT 1 FROM view_writes WHERE seq=?",(seq,)).fetchone(),409,
+                        "legacy_platform_write_unconfirmed")
+            else:
+                db.execute("INSERT INTO view_attempt VALUES (?,?,?,NULL)",(seq,serialized,self.clock()))
+                db.execute("INSERT INTO view_writes(seq) VALUES (?)",(seq,))
         if event["kind"] == "image":
             with self.db.transaction() as db:
                 stored = db.execute("SELECT image_key FROM view_images WHERE seq=?",(seq,)).fetchone()
@@ -97,39 +102,31 @@ class Views:
                     image_key = self.platform.upload_image(data)
                     require(isinstance(image_key,str) and image_key.startswith("img_"),502,"unconfirmed_image_key")
                     db.execute("INSERT INTO view_images VALUES (?,?)",(seq,image_key))
-        # Serialize this destination's writes. The intent survives a crash before a platform receipt.
+        # Persist the exact provider call before the first attempt. Reopening with a different renderer
+        # or display name must keep both the request key and its original content.
         with self.db.transaction() as db:
-            attempt = db.execute("SELECT * FROM view_attempt WHERE seq=?",(seq,)).fetchone()
+            write = db.execute("SELECT request FROM view_writes WHERE seq=?",(seq,)).fetchone()
+            if not write["request"]:
+                request = self.prepare_write(db,seq,event)
+                db.execute("UPDATE view_writes SET request=?,prepared_at=? WHERE seq=?",
+                           (encode(request),self.clock(),seq))
+
+        # Save the provider receipt before any dependent Worker acknowledgement.
+        with self.db.transaction() as db:
+            write = db.execute("SELECT * FROM view_writes WHERE seq=?",(seq,)).fetchone()
+            if not write["platform_mid"]:
+                mid = self.send_write(json.loads(write["request"]),write["prepared_at"])
+                db.execute("UPDATE view_writes SET platform_mid=? WHERE seq=?",(mid,seq))
+
+        with self.db.transaction() as db:
+            attempt = db.execute("SELECT mid FROM view_attempt WHERE seq=?",(seq,)).fetchone()
             if attempt["mid"]:
                 return attempt["mid"]
+            write = db.execute("SELECT request,platform_mid FROM view_writes WHERE seq=?",(seq,)).fetchone()
+            request,mid = json.loads(write["request"]),write["platform_mid"]
             session,turn,kind = event.get("session",""),event.get("turn_id",""),event["kind"]
-            segment = db.execute("SELECT * FROM segments WHERE session=? AND turn=?",(session,turn)).fetchone()
-            editing = kind=="progress" and segment
-            text = event.get("text","")
             if kind in ("question_open","question_answered","question_closed"):
-                if kind=="question_open":
-                    require(0 <= self.clock()-attempt["first_try"] < 55*60,409,"platform_receipt_unknown")
-                mid = question_cards.publish(db,self.platform,self.chat,self.name,event,key)
-            elif editing:
-                text = segment["text"]+text
-                mid = self.platform.patch(segment["mid"],card(self.name+"-输出",text,session))
-                require(mid==segment["mid"],502,"wrong_card_receipt")
-            else:
-                elapsed = self.clock()-attempt["first_try"]
-                require(0 <= elapsed < 55*60,409,"platform_receipt_unknown")
-                if kind=="image":
-                    image_key = db.execute("SELECT image_key FROM view_images WHERE seq=?",(seq,)).fetchone()[0]
-                    mid = self.platform.send(self.chat,"image",{"image_key":image_key},key)
-                else:
-                    labels = {"progress":"-输出","tool":"-工具","native_input":"·原生输入","final":"-回复",
-                              "online":"-在线","disconnect":"-连接提醒","task":"·工单","command":"-输出"}
-                    require(kind in labels,422,"unsupported_card_kind")
-                    if kind=="tool":
-                        text = event["tool_name"]+"\n"+text
-                    if kind=="online":
-                        text = self.name+"已上线\n"+text
-                    mid = self.platform.create(self.chat,card(self.name+labels[kind],text,session),key)
-            require(isinstance(mid,str) and mid.startswith("om_"),502,"unconfirmed_platform_message")
+                question_cards.record_view(db,event,mid)
             if event.get("model_menu") is True:
                 proof = self.worker.request("POST","worker/model-menu-receipt",{"seq":seq,"platform_message_id":mid})
                 require(proof=={"recorded":True,"seq":seq},409,"model_menu_receipt_unconfirmed")
@@ -137,12 +134,59 @@ class Views:
                 proof = self.worker.request("POST","worker/session-menu-receipt",{"seq":seq,"platform_message_id":mid})
                 require(proof=={"recorded":True,"seq":seq},409,"session_menu_receipt_unconfirmed")
             if kind=="progress":
-                db.execute("INSERT OR REPLACE INTO segments VALUES (?,?,?,?)",(session,turn,mid,text))
+                db.execute("INSERT OR REPLACE INTO segments VALUES (?,?,?,?)",(session,turn,mid,request["segment_text"]))
             else:
                 db.execute("DELETE FROM segments WHERE session=? AND turn=?",(session,turn))
             db.execute("UPDATE view_attempt SET mid=? WHERE seq=?",(mid,seq))
             db.execute("UPDATE view_cursor SET cursor=?",(seq,))
             return mid
+
+    def send_write(self,request,prepared_at):
+        if request["method"]=="patch":
+            mid = self.platform.patch(request["target"],request["body"])
+            require(mid==request["target"],502,"wrong_card_receipt")
+        else:
+            require(request["target"]==self.chat,409,"view_chat_mismatch")
+            require(0 <= self.clock()-prepared_at < 55*60,409,"platform_receipt_unknown")
+            if request["method"]=="image":
+                mid = self.platform.send(self.chat,"image",request["body"],request["key"])
+            else:
+                require(request["method"]=="create",409,"invalid_platform_write")
+                mid = self.platform.create(self.chat,request["body"],request["key"])
+        require(isinstance(mid,str) and mid.startswith("om_"),502,"unconfirmed_platform_message")
+        return mid
+
+    def prepare_write(self,db,seq,event):
+        session,turn,kind = event.get("session",""),event.get("turn_id",""),event["kind"]
+        key = str(uuid5(NAMESPACE_URL,encode(["mowulink-feishu",self.chat,event["event_id"]])))
+        target,method = self.chat,"create"
+        text = event.get("text","")
+        if kind in ("question_open","question_answered","question_closed"):
+            original = question_cards.target(db,event)
+            if original:
+                target,method = original,"patch"
+            body = question_cards.render(self.name,event)
+        elif kind=="image":
+            image_key = db.execute("SELECT image_key FROM view_images WHERE seq=?",(seq,)).fetchone()[0]
+            body,method = {"image_key":image_key},"image"
+        else:
+            labels = {"progress":"-输出","tool":"-工具","native_input":"·原生输入","final":"-回复",
+                      "online":"-在线","disconnect":"-连接提醒","task":"·工单","command":"-输出"}
+            require(kind in labels,422,"unsupported_card_kind")
+            if kind=="progress":
+                segment = db.execute("SELECT mid,text FROM segments WHERE session=? AND turn=?",
+                                     (session,turn)).fetchone()
+                if segment:
+                    target,method,text = segment["mid"],"patch",segment["text"]+text
+            elif kind=="tool":
+                text = event["tool_name"]+"\n"+text
+            elif kind=="online":
+                text = self.name+"已上线\n"+text
+            body = card(self.name+labels[kind],text,session)
+        request = {"method":method,"target":target,"key":key,"body":body}
+        if kind=="progress":
+            request["segment_text"] = text
+        return request
 
 
 class SDKMessages:

@@ -1,0 +1,28 @@
+{
+  "boundary": "Actual Worker HTTP and SQLite, simulated Feishu provider and native host.",
+  "consecutive_runs": 10,
+  "initial_platform_mid": "om_1",
+  "initial_request_key": "70cc1030-6fac-5ad8-b414-ab9ed61e4d50",
+  "known_platform_receipt_reused_after_seconds": 3601,
+  "menu_platform_mid": "om_2",
+  "native_inputs": 1,
+  "original_payload_reused": true,
+  "remote_operations": [
+    [
+      "send",
+      "om_1"
+    ],
+    [
+      "send",
+      "om_1"
+    ],
+    [
+      "send",
+      "om_2"
+    ]
+  ],
+  "settled_snapshot": "ac45f7468494013e1360e2b7fc3ec283a603a0b0c669aba59fdc36d3382ccbfb",
+  "snapshot_with_known_receipt": "a9b42ae7a3951e8a08b50f2ad09b0992c3f19f030dc4dba02d87fe4ad0dfdaa4",
+  "snapshot_with_unconfirmed_send": "462e0d02d4156e1f497b04d53f31829217662e0b7b702306fabf933ba83f555f",
+  "worker_bound_menu_mid": "om_2"
+}

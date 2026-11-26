@@ -151,6 +151,36 @@ class PlatformOutput(PlatformCase):
         self.assertEqual(len(self.sink.images),1)
         self.assertEqual(len(self.sink.messages),1)
 
+    def test_card_update_retries_original_target_and_body_after_renderer_change(self):
+        self.event("part1","progress",text="Before")
+        self.assertEqual(self.views.poll(),1)
+        self.event("part2","progress",text=" and after")
+        patch = self.sink.patch
+        writes = []
+
+        def lose(mid,body):
+            writes.append((mid,body))
+            patch(mid,body)
+            raise ConnectionError("platform patch receipt lost")
+
+        self.sink.patch = lose
+        with self.assertRaisesRegex(ConnectionError,"patch receipt lost"):
+            self.views.poll()
+        def confirm(mid,body):
+            writes.append((mid,body))
+            return patch(mid,body)
+
+        self.sink.patch = confirm
+        self.clock.advance(3601)
+        resumed = self.reopen()
+        resumed.name = "另一显示名"
+        self.assertEqual(resumed.poll(),1)
+        self.assertEqual(len(writes),2)
+        self.assertEqual(writes[0],writes[1])
+        self.assertEqual(writes[1][1]["header"]["title"]["content"],"小栗帽-输出")
+        self.assertEqual(writes[1][1]["elements"][0]["text"]["content"],"Before and after")
+        self.assertEqual(len(self.sink.messages),1)
+
     def test_after_platform_dedup_window_unknown_is_not_resent(self):
         self.event("7","final",text="Done")
         self.sink.lose_next = True
@@ -160,6 +190,17 @@ class PlatformOutput(PlatformCase):
         with self.assertRaises(Fault) as failure:
             self.reopen().poll()
         self.assertEqual(failure.exception.code,"platform_receipt_unknown")
+        self.assertEqual(len(self.sink.calls),1)
+
+    def test_legacy_unconfirmed_card_without_frozen_request_requires_original_sender(self):
+        self.event("legacy-card","final",text="Original card")
+        self.sink.lose_next = True
+        with self.assertRaises(ConnectionError):
+            self.views.poll()
+        with self.views.db.transaction() as db:
+            db.execute("DROP TABLE view_writes")  # shape of an original package's pending record
+        with self.assertRaisesRegex(Fault,"legacy_platform_write_unconfirmed"):
+            self.reopen().poll()
         self.assertEqual(len(self.sink.calls),1)
 
     def test_foreign_session_and_raw_tool_arguments_are_rejected(self):

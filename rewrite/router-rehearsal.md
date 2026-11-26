@@ -203,6 +203,16 @@ python3 -m rewrite.state_bundle rollback --snapshot ./snapshot --manifest-sha256
 
 版本级复跑为 `python3 -m rewrite.release_check --repository . --previous b31cee5da7c8dc74a76accdd78d8a6c5cb49484c --new 5de36ad66df26dc34fe3832ed14e77b1d9f19551`。两个已提交版本在各自新目录启动真实 Router，以专用临时 TLS 和身份验同一张待派单。旧包→新包→旧包后只查到原单一张，新试用库字节未变。该演练在 macOS 跑过；Windows 与跨机宿主尚待验收。
 
+### 飞书输出回执与换绑
+
+拍快照时同时保留 `feishu:<工位 ID>` 和对应的 Worker、宿主及外部消息记录。使用与原来相同的飞书应用、会话和工位身份恢复。在 `audit-handoff` 的 `native_session_pending` 核对 `platform_display_attempts`、`platform_known_receipts_uncommitted` 和 `platform_input_notices`。第二项是第一项中已取得飞书消息号、仍待 Worker 确认的部分。三项未清前，保持原绑定对账。
+
+准备发送时保存完整的目标、正文和幂等号。显示名或渲染参数变化后，恢复仍使用这份请求。取得飞书消息号后先落盘，再确认 Worker 的菜单关联。只缺 Worker 回执时，恢复会沿用原消息号补录。若平台新消息回执仍未知，超过程序的 55 分钟重试窗口即保留待核。已知目标卡的内容更新可向原卡重试同一正文。
+
+旧版若只有已尝试、无消息号的记录，证据不足时保留原库。能确认原版本、原配置和重试窗口时，再从原版隔离恢复核对。退回尚不会读取 `view_writes` 的软件前，先在能正确读取的版本收齐回执。切回仍用本次已对账的状态副本，避免已发出的试用消息在回退中丢失本地收据。
+
+复跑 `python3 -B -m unittest -v rewrite.test_feishu_output rewrite.test_state_bundle.Bundle.test_feishu_restore_reuses_original_card_and_keeps_known_provider_receipt_after_deadline`。隔离 Worker HTTP 与 SQLite 实跑，飞书服务和宿主使用夹具。换显示名恢复后只有原卡，模拟超过一小时且已有飞书消息号时仅补录 Worker 回执，同条私聊仍只有一次宿主输入。未知平台回执过期与旧包未确认记录均未重发。[实测](evidence/feishu-receipt-restore.json)
+
 ### Codex 自动登记工位的恢复与回退
 
 先停止隔离 Router、Worker、适配器和该工位的原生 App Server，保留原生 profile 和已有连接配置。将工位 ID 与原登记目录的绝对路径写入 `registries.json`。将工位 ID 与原私有回调密钥文件的绝对路径写入本机 `managed-keys.json`。两份清单只填路径。

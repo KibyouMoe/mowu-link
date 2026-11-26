@@ -124,25 +124,25 @@ def single_elements(qid,event,answer,closed=False):
     return elements
 
 
-def publish(db,platform,chat,name,event,key):
+def target(db,event):
     qid,recipient = event["question_id"],event["recipient"]
     row = db.execute("SELECT * FROM question_cards WHERE recipient=? AND qid=?",(recipient,qid)).fetchone()
-    card = render(name,event)
     if event["kind"]=="question_open":
         require(not row,409,"question_card_conflict")
-        mid = platform.create(chat,card,key)
-        require(isinstance(mid,str) and mid.startswith("om_"),502,"unconfirmed_platform_message")
+        return None
+    require(row,409,"original_question_card_missing")
+    before = json.loads(row["question"])
+    require(all(before[k]==event[k] for k in ("session","turn_id")) and content(before)==content(event),
+            409,"question_card_changed")
+    return row["mid"]
+
+
+def record_view(db,event,mid):
+    qid,recipient = event["question_id"],event["recipient"]
+    if event["kind"]=="question_open":
         db.execute("INSERT INTO question_cards VALUES (?,?,?,?)",(recipient,qid,mid,encode(event)))
-    else:
-        require(row,409,"original_question_card_missing")
-        before = json.loads(row["question"])
-        require(all(before[k]==event[k] for k in ("session","turn_id")) and content(before)==content(event),
-                409,"question_card_changed")
-        mid = platform.patch(row["mid"],card)
-        require(mid==row["mid"],502,"wrong_card_receipt")
-        if event["kind"]=="question_closed":
-            db.execute("UPDATE question_cards SET question=? WHERE recipient=? AND qid=?",(encode(event),recipient,qid))
-    return mid
+    elif event["kind"]=="question_closed":
+        db.execute("UPDATE question_cards SET question=? WHERE recipient=? AND qid=?",(encode(event),recipient,qid))
 
 
 class Actions:

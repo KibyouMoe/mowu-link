@@ -25,6 +25,7 @@ from .test_mainline import Clock
 from .trigger import Trigger
 from .wire import Client, serve_loopback
 from .worker import Worker
+from . import display, worker_commands
 from .worker_service import WorkerService
 
 
@@ -131,6 +132,88 @@ class Bundle(unittest.TestCase):
             self.assertEqual(m.inspect(tid)["task"]["state"],"completed_reported")
             self.assertIsNone(w.hold()["held_task_id"])
         self.assertEqual(verify(self.snapshot,snapshot["manifest_sha256"])["source_revision"],self.revision)
+
+    def test_feishu_restore_reuses_original_card_and_keeps_known_provider_receipt_after_deadline(self):
+        message = {"chat_type":"p2p","chat_id":"chat","message_id":"om_trial_input","message_type":"text",
+                   "content":encode({"text":"隔离收件"})}
+        event = {"event_id":"trial-progress","kind":"progress","session":self.native.session,
+                 "turn_id":"trial-turn","text":"第一次输出"}
+        with self.stack(self.sources) as (_m,w,_source,_mail,inbound,views):
+            w.connect()
+            w.poll()
+            inbound.record("app","user","trainer",message)
+            receipt = inbound.deliver(message["message_id"])
+            with w.db.transaction() as db:
+                original = display.append(db,event)
+            self.platform.lose_next = True
+            with self.assertRaisesRegex(ConnectionError,"platform accepted"):
+                views.poll()
+            key, = self.platform.messages
+            provider_mid,_,card = self.platform.messages[key]
+            self.assertEqual(card["header"]["title"]["content"],"工位-输出")
+        checksum = capture(self.sources,self.revision,self.snapshot)["manifest_sha256"]
+        pending, = audit_handoff(self.snapshot,checksum)["workers"]
+        self.assertEqual(pending["native_session_pending"]["platform_display_attempts"],1)
+        self.assertEqual(pending["native_session_pending"]["platform_known_receipts_uncommitted"],0)
+        self.assertFalse(pending["native_session_ledger_clear"])
+        with self.assertRaisesRegex(ValueError,"platform_display_attempts"):
+            stage_native_handoff(self.snapshot,checksum,"oguri",self.native.session,"other",self.dest)
+        recovered = restore(self.snapshot,checksum,self.dest)
+        self.clock.advance(6)
+
+        with self.stack(recovered) as (_m,w,_source,_mail,inbound,views):
+            views.name = "恢复后的名称"
+            self.assertEqual(views.poll(),1)
+            self.assertEqual(views.deliver(original["seq"],event),provider_mid)
+            self.assertEqual(self.platform.calls,[("send",provider_mid),("send",provider_mid)])
+            inbound.record("app","user","trainer",message)
+            self.assertEqual(inbound.deliver(message["message_id"]),receipt)
+            self.assertEqual(len(self.native.entries()),1)
+            with w.db.transaction() as db:
+                command = worker_commands.record(db,"om_menu_fixture","/model","/model",self.native.session,"模型列表",
+                    menu=(self.native.session,"models",1,encode({"1":"fixture/model"}),None))
+            route = views.worker.request
+
+            def lose_worker_ack(method,path,*args,**kwargs):
+                result = route(method,path,*args,**kwargs)
+                if path=="worker/model-menu-receipt":
+                    raise ConnectionError("fixture lost Worker menu acknowledgement")
+                return result
+
+            views.worker.request = lose_worker_ack
+            with self.assertRaisesRegex(ConnectionError,"lost Worker menu acknowledgement"):
+                views.poll()
+            menu_seq = command["output"]["seq"]
+            with views.db.transaction() as db:
+                mid, = db.execute("SELECT platform_mid FROM view_writes WHERE seq=?",(menu_seq,)).fetchone()
+                self.assertIsNone(db.execute("SELECT mid FROM view_attempt WHERE seq=?",(menu_seq,)).fetchone()[0])
+            self.assertEqual(self.platform.calls[-1],("send",mid))
+            sends = list(self.platform.calls)
+
+        with_receipt = self.root/"provider-receipt"
+        sha = capture(recovered,self.revision,with_receipt)["manifest_sha256"]
+        waiting, = audit_handoff(with_receipt,sha)["workers"]
+        self.assertEqual(waiting["native_session_pending"]["platform_known_receipts_uncommitted"],1)
+        final = restore(with_receipt,sha,self.root/"after-known-receipt")
+        self.clock.advance(3601)
+        with self.stack(final) as (_m,w,_source,_mail,_inbound,views):
+            self.assertEqual(views.poll(),1)
+            self.assertEqual(views.poll(),0)
+            with w.db.transaction() as db:
+                worker_mid, = db.execute("SELECT platform_mid FROM platform_model_menu WHERE display_seq=?",
+                                         (menu_seq,)).fetchone()
+            self.assertEqual(worker_mid,mid)
+            self.assertEqual(self.platform.calls,sends)
+        settled = self.root/"settled-platform"
+        seal = capture(final,self.revision,settled)["manifest_sha256"]
+        finished, = audit_handoff(settled,seal)["workers"]
+        self.assertTrue(finished["native_session_ledger_clear"],finished)
+        self.feishu_evidence = {"snapshot_with_unconfirmed_send":checksum,"snapshot_with_known_receipt":sha,
+                                "settled_snapshot":seal,"initial_request_key":key,"initial_platform_mid":provider_mid,
+                                "menu_platform_mid":mid,"worker_bound_menu_mid":worker_mid,"native_inputs":1,
+                                "remote_operations":self.platform.calls,"original_payload_reused":True,
+                                "known_platform_receipt_reused_after_seconds":3601,
+                                "boundary":"Actual Worker HTTP and SQLite, simulated Feishu provider and native host."}
 
     def test_wrong_role_active_writer_or_incomplete_inventory_preserves_destination(self):
         with self.stack(self.sources):
