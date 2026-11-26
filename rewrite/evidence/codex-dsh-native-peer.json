@@ -1,0 +1,35 @@
+{
+  "codex_session": "01a216da-869a-7ff2-b207-2ac3fe6a9bd7",
+  "dsh_session": "dsh-cross-peer",
+  "source_tool": "native_peer_fixture",
+  "dsh_reply_tool": "peer-native-reply",
+  "source_input": "01a216da-8756-7410-a248-4b41339ec4ea",
+  "dsh_input": "mowulink-ffe9ee5301702d7b1918f1e7261e66d85df84eb110f070fbb3116fccdb0387fc",
+  "codex_reply_input": "01a216da-88c2-71e2-8609-0ac8dfc8c4b2",
+  "reply_to": "45135521-3d1b-5054-9dc1-d799dedf1a22",
+  "image_sha256": "e77617115ffe6399c0f4714c72aa32eefeb22fbdf45b1167a4ddb64e213b4007",
+  "router_receipts": [
+    {
+      "accepted_at": "2027-01-15T08:00:00+00:00",
+      "delivery_id": "bdf93569-6c8f-45dc-9627-bd2b1ac9fbeb",
+      "host_receipt_id": "3cc33e58-e471-54cd-a855-90e75adc4d34",
+      "host_receipt_recorded_at": "2027-01-15T08:00:00+00:00",
+      "message_id": "45135521-3d1b-5054-9dc1-d799dedf1a22",
+      "recipient": "oguri",
+      "sender": "tama",
+      "worker_received": true
+    },
+    {
+      "accepted_at": "2027-01-15T08:00:00+00:00",
+      "delivery_id": "68ac1c88-4b26-4c50-8960-2b2bfb36ccf1",
+      "host_receipt_id": "74a32fe1-c2c8-5c70-98c0-1629335961bc",
+      "host_receipt_recorded_at": "2027-01-15T08:00:05+00:00",
+      "message_id": "9807c410-0e3f-5f2f-af1c-499aba57968a",
+      "recipient": "tama",
+      "sender": "oguri",
+      "worker_received": true
+    }
+  ],
+  "boundary": "Actual Codex App Server and DSH AgentLoop on one Mac with scripted providers",
+  "consecutive_runs": 10
+}

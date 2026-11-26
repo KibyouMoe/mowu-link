@@ -2,16 +2,19 @@
 import hashlib
 import json
 from contextlib import contextmanager
+from http.server import ThreadingHTTPServer
 import os
 from pathlib import Path
 import select
 import subprocess
 import tempfile
-from threading import Thread
+from threading import Event, Thread
+import time
 import unittest
 
-from . import worker_commands
+from . import test_codex_app_server as codex_driver, worker_commands
 from .adapter import HostAdapter
+from .codex_app_server import AppServerHost, worker_callbacks
 from .devloop import FixtureHost, Loop
 from .dsh_display import DshDisplay
 from .dsh_port import DshHost, tool_listener
@@ -980,6 +983,88 @@ class NativeLoop(unittest.TestCase):
                 "reply_to":native_reply["reply_to"],"router_receipts":receipts,"image_sha256":sha,
                 "formal_task_count":0,"clock":"controlled test clock",
                 "boundary":"Two actual DSH AgentLoop processes with scripted local providers"}
+
+    @unittest.skipUnless(codex_driver.CODEX.is_file(),"bundled Codex App Server required")
+    def test_codex_and_dsh_roundtrip_native_peer_image_and_linked_reply(self):
+        directory,loop,service,_ = self.goal_worker("dsh-cross-peer",extra_workers=["tama"])
+        target_session,clock = loop.adapter.bound_session(),service.clock
+        loop.worker.clock = clock
+        profile = loop.root/"codex-peer-profile"
+        profile.mkdir(mode=0o700)
+        model = ThreadingHTTPServer(("127.0.0.1",0),codex_driver.Provider)
+        model.observed,model.media = [],[]
+        url = self.enterContext(codex_driver.running(model))
+        rpc = self.enterContext(codex_driver.isolated_app_server(str(profile),url))
+        tools = [tool for tool in codex_driver.TOOLSET if tool["name"]=="worker_send_peer"]
+        sid = rpc.request("thread/start",{"cwd":str(profile),"ephemeral":False,"dynamicTools":tools})["thread"]["id"]
+        codex = AppServerHost(rpc,sid)
+        codex_adapter = HostAdapter(loop.root/"codex-peer-adapter.db",codex,sid)
+        sender = Worker(loop.root/"codex-peer-worker.db","tama",loop.extra_clients["tama"],codex_adapter,clock=clock)
+        a,b = guid(),guid()
+        source = Client(self.open_worker(WorkerService(sender,clock),{a:"adapter/tama"}),a)
+        target = Client(self.open_worker(service,{b:"adapter/oguri"}),b)
+        loop.adapter.media_store = NativeFiles(Path(directory)/"media",target)
+        self.enterContext(tool_listener(Path(directory),loop.adapter,target))
+        settled = Event()
+        self.enterContext(worker_callbacks(codex,source,settled.set))
+        digest = hashlib.sha256(PNG).hexdigest()
+        upload = source.request("POST","worker/media/uploads",{"name":"codex-to-dsh.png","sha256":digest,
+                                "size_bytes":len(PNG)},guid())
+        file = source.request("PATCH","worker/media/uploads/"+upload["upload_id"],PNG,headers={"Upload-Offset":"0"})
+        args = {"to_worker":"oguri","text":"Cross-host original image","attachment_ids":[file["attachment_id"]],
+                "attachment_kinds":["image"]}
+
+        def wait_for_codex():
+            until = time.monotonic()+10
+            while not settled.wait(.02) and time.monotonic()<until:
+                sender.poll()
+            self.assertTrue(settled.is_set())
+            settled.clear()
+
+        with self.start_native(directory,target_session,"peer-media") as dsh:
+            sender.connect()
+            loop.worker.connect()
+            mid = guid()
+            prompt = "Send peer fixture\n"+encode(args)
+            prompt_receipt = sender.chat(mid,prompt)
+            until = time.monotonic()+4
+            while prompt_receipt is None and time.monotonic()<until:
+                prompt_receipt = sender.chat(mid,prompt)
+                time.sleep(.02)
+            self.assertIsNotNone(prompt_receipt)
+            wait_for_codex()
+            first, = codex.thread(sid,include_turns=True)["turns"]
+            sent, = [item for item in first["items"] if item.get("type")=="dynamicToolCall"]
+            self.assertEqual((sent["tool"],sent["arguments"],sent["success"]),("worker_send_peer",args,True))
+            posted = json.loads(sent["contentItems"][0]["text"])
+            loop.worker.poll()
+            dsh_result = self.read_native(dsh,"read")
+            loop.worker.poll()
+            loop.worker.poll()
+            self.assertEqual(self.read_native(dsh,"read")["inputs"],dsh_result["inputs"])
+            self.assertEqual(len(dsh_result["inputs"]),1)
+            self.assertEqual(dsh_result["mediaRequests"][0]["images"],[{"sha256":digest,"size":len(PNG)}])
+            _,_,call,_ = dsh_result["calls"]
+            self.assertEqual(json.loads(call["arguments"])["reply_to"],posted["message_id"])
+            reply = json.loads(dsh_result["results"][2]["content"][0]["text"])
+            sender.poll()
+            wait_for_codex()
+            clock.advance(5)
+            sender.poll()
+            loop.worker.poll()
+            first,second = codex.thread(sid,include_turns=True)["turns"]
+            received, = [item for item in second["items"] if item.get("type")=="userMessage"]
+            inbound = json.loads(received["content"][0]["text"].split("\n",1)[1])["payload"]
+            self.assertEqual((inbound["message_id"],inbound["reply_to"]),(reply["message_id"],posted["message_id"]))
+            receipts = [sender.router.request("GET","peers/messages/"+value) for value in
+                        (posted["message_id"],reply["message_id"])]
+            self.assertTrue(all(receipt["host_receipt_id"] for receipt in receipts),receipts)
+            self.assertFalse(loop.hermes.tasks()["items"])
+            self.evidence = {"codex_session":sid,"dsh_session":target_session,"source_tool":sent["id"],
+                             "dsh_reply_tool":call["callId"],"source_input":prompt_receipt["native_id"],
+                             "dsh_input":dsh_result["inputs"][0],"codex_reply_input":received["id"],
+                             "reply_to":inbound["reply_to"],"image_sha256":digest,"router_receipts":receipts,
+                             "boundary":"Actual Codex App Server and DSH AgentLoop on one Mac with scripted providers"}
 
     def test_shelved_dsh_assignment_submits_candidate_without_changing_ownership(self):
         directory,loop,service,_ = self.goal_worker("dsh-native-material",extra_workers=["tama"])

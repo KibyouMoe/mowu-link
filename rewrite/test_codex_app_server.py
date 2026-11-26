@@ -62,11 +62,15 @@ class Provider(BaseHTTPRequestHandler):
         self.server.observed.append(("worker_report" in names,calls))
         response_id = "resp_fixture_"+str(len(self.server.observed))
         question = payload and payload.get("instructions")=="Ask the scripted manager before proceeding"
-        if question and not calls:
+        peer = next((block["text"] for block in latest if block.get("text","").startswith("Send peer fixture\n")),None)
+        if peer and not calls:
+            item = {"type":"function_call","id":"fc_peer","name":"worker_send_peer","call_id":"native_peer_fixture",
+                    "arguments":peer.split("\n",1)[1]}
+        elif question and not calls:
             arguments = {"text":"Use the first route?","options":[{"id":"go","label":"继续"}]}
             item = {"type":"function_call","id":"fc_question","name":"worker_ask","call_id":"native_question",
                     "arguments":encode(arguments)}
-        elif payload and payload.get("kind") not in ("task.cancel","task.transfer_out") and not question and calls<2:
+        elif payload and payload.get("kind") in ("task","task_update","task_probe","question_answer") and not question and calls<2:
             arguments = {"task_id":payload["task_id"],"assignment_id":payload["assignment_id"],
                          "summary":"Isolated App Server result"}
             item = {"type":"function_call","id":"fc_fixture_"+str(calls),"name":"worker_report",

@@ -4,6 +4,8 @@
 
 ## 检查点与证据
 
+同机两个隔离宿主已实测 Codex App Server 向 DSH 发原图、DSH 按原消息号回复。两端都由本机原生工具执行器产出请求，原图摘要一致，Router 记录两端宿主凭据，重投不增输入，未建工单。连续 10 轮通过。[跨宿主记录](evidence/codex-dsh-native-peer.json)。复跑 `python3 -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_codex_and_dsh_roundtrip_native_peer_image_and_linked_reply`。双方模型为脚本，两进程同在 Mac。
+
 在实际 App Server 发现活跃时调用 `turn/start` 会复用当前回合，后续历史可见两条输入。重做适配器已在正式写入前确认空闲，原生工具调用也核对该回合只存在一条用户输入。真实 Router 取消原派发时，已核只中止该原生回合。另一个回合活跃时续用原控制号等待，它仍保持活跃，随后空闲才收到取消。资源清理无凭据时不释放持单。两个场景各 12 次通过。[取消证据](evidence/codex-app-server-router-cancel.json)。复跑 `python3 -m unittest -v rewrite.test_codex_app_server`，模型为本地脚本。
 
 独立 App Server 的工单提问已从原生 `worker_ask` 走 W05。管理端的原回答经同一工单、派发和题号回到实际线程，原生工具回报完工后才释放。原答复重投只返回原回执。适配器只接受已知 Worker 工具名，拒绝任意工具、错线程和错回合。连续 12 次通过。复跑 `python3 -m unittest -v rewrite.test_codex_app_server`。[问答证据](evidence/codex-app-server-native-question.json)。本地脚本模型、隔离管理驾驶，无飞书云端。
