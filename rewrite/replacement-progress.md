@@ -6,6 +6,8 @@
 
 Worker 主动受阻并交原 W04 后，池中结单和失败归档可以回退。真实旧 Router 分别读到 `pool_closed_on_rewrite`、`failed_on_rewrite`，无成果和待执行记录。原选择的材料号、操作及附件留在私有档案，旧 HTTP 下载返回 404。原建单重试回原归档，再次迁入保留原 Hermes 请求和旧 UUID。已复现 Router 离线入池后的失败归档，原宿主仍忙，回退拒绝发布。真实旧新 Router HTTP，Worker 宿主及时间为夹具。[池中归档实测](evidence/cutover-pool-archives.json)
 
+实现 `1b827f789d43dcc9d899d3bbd089c5f83e83f4a6` 的 Linux arm64 全量通过 195 项、依环境跳过 121 项。macOS 的 295 文件安装包中 56 项专项通过，安装前后逐文件校验一致。归档 SHA-256 为 `0c783e8a0164876e1f64074ee9a9bfbc024395352d9054a58f584c104c886ade`。Windows 常规及 DSH 原生任务均通过，旧 Router 业务回退由 macOS 和 Linux 测试覆盖。[Windows CI](https://github.com/KibyouMoe/mowu-link/actions/runs/45905144930)
+
 Hermes 原生工具登记已提供 `router_act_on_task` 的 `material_id`。实际隔离 Hermes 用原生分发调用该工具，按指定材料号结单，重复调用回同一回执，原 Worker 报告仍为受阻。隔离 Router 拒绝其他会话、未知材料，以及对正式完工单使用材料号，原单状态未变。调用方、Worker 宿主和时钟为夹具。复跑 `python3 -B -m unittest -v rewrite.test_hermes_tools rewrite.test_pool`，实际 Hermes 用 `python3 -B -m rewrite.hermes_check` 指定独立测试 Python 与固定源码。[实测](evidence/hermes-manager-candidate-review.json)
 
 Hermes 管理入口提交 `313dfa67bc19dec1023a02567b129957e1c6aff9`，Linux arm64 通过 194 项、依环境跳过 121 项。实际工具分发使用 Hermes 源码 `464bd0dd659f336bd0bf468bf02cad8aac211136`。
