@@ -5,6 +5,7 @@ from queue import Queue
 import shutil
 import subprocess
 import sys
+import time
 from tempfile import TemporaryDirectory
 from threading import Thread
 import unittest
@@ -33,9 +34,9 @@ class Service(unittest.TestCase):
             json.dump(value,stream)
         return path
 
-    def start(self, identities, cert, key):
-        process = subprocess.Popen([*CLI,"router","--db",self.root/"router.db","--identities",identities,
-                                   "--cert",cert,"--key",key],stdout=subprocess.PIPE,stderr=subprocess.PIPE,
+    def start(self, identities, cert, key, role="router", extra=()):
+        process = subprocess.Popen([*CLI,role,"--db",self.root/(role+".db"),"--identities",identities,
+                                   "--cert",cert,"--key",key,*extra],stdout=subprocess.PIPE,stderr=subprocess.PIPE,
                                    text=True,cwd=ROOT)
         self.addCleanup(self.stop,process)
         ready = Queue()
@@ -43,6 +44,13 @@ class Service(unittest.TestCase):
         info = json.loads(ready.get(timeout=10))
         self.assertTrue(info["tls"])
         return process,"https://127.0.0.1:"+str(info["port"])
+
+    def certificate(self):
+        cert,key = self.root/"test.crt", self.root/"test.key"
+        subprocess.run(["openssl","req","-x509","-newkey","rsa:2048","-nodes","-days","1",
+                        "-subj","/CN=localhost","-addext","subjectAltName=IP:127.0.0.1,DNS:localhost",
+                        "-keyout",key,"-out",cert],capture_output=True,check=True,timeout=10)
+        return cert,key
 
     @staticmethod
     def stop(process):
@@ -58,10 +66,7 @@ class Service(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("openssl"), "TLS fixture certificate generator unavailable")
     def test_cli_tls_restart_preserves_identity_file_and_receipts(self):
-        cert,key = self.root/"test.crt", self.root/"test.key"
-        subprocess.run(["openssl","req","-x509","-newkey","rsa:2048","-nodes","-days","1",
-                        "-subj","/CN=localhost","-addext","subjectAltName=IP:127.0.0.1,DNS:localhost",
-                        "-keyout",key,"-out",cert],capture_output=True,check=True,timeout=10)
+        cert,key = self.certificate()
         src = ["trigger","--db",self.root/"source.db","--name","trial"]
         source_id = self.command(*src,"identity")["instance_id"]
         sender,manager = guid(),guid()
@@ -94,3 +99,48 @@ class Service(unittest.TestCase):
             private_config(path)
         with self.assertRaises(ValueError):
             Client("http://example.test","unused")
+
+    @unittest.skipUnless(shutil.which("openssl"), "TLS fixture certificate generator unavailable")
+    def test_three_process_worker_chat_and_assignment(self):
+        from .devloop import FixtureHost
+        cert,key = self.certificate()
+        router_token,manager,adapter_token,callback,platform,ops = (guid() for _ in range(6))
+        ids = self.write_config("routes.json",{router_token:"worker/dev",manager:"hermes"})
+        _, router = self.start(ids,cert,key)
+        native_db = self.root/"native.db"
+        session = "isolated-fixture"
+        _, adapter = self.start(self.write_config("host.json",{adapter_token:"worker/dev"}),cert,key,
+                               "fixture-adapter",["--worker-id","dev","--fixture-db",native_db,"--session",session])
+        def target(name,url,token):
+            return self.write_config(name,{"url":url,"token":token,"ca_file":str(cert)})
+        _, gateway = self.start(self.write_config("worker.json",{callback:"adapter/dev",platform:"platform/dev",ops:"ops/dev"}),
+                                cert,key,"worker",["--worker-id","dev","--router-connection",
+                                target("to-router",router,router_token),"--adapter-connection",target("to-host",adapter,adapter_token)])
+        chat = Client(gateway,platform,cert)
+        msg = {"message_id":guid(),"text":"fixture incoming text"}
+        first = chat.request("POST","worker/chat",msg)
+        self.assertEqual(first,chat.request("POST","worker/chat",msg))
+        manager_client = Client(router,manager,cert)
+        tid = manager_client.request("POST","tasks",{"assignee_id":"dev","title":"Scope","instructions":"Send one result"},guid())["task_id"]
+        native = FixtureHost(native_db,session)
+        deadline = time.monotonic()+32
+        while time.monotonic()<deadline:
+            entries = native.entries()
+            if len(entries)>=2:
+                break
+            time.sleep(0.15)
+        self.assertEqual([p["kind"] for p,_ in entries],["chat","task"])
+        task,receipt = entries[1]
+        aid = task["assignment_id"]
+        caller = Client(gateway,callback,cert)
+        body = {"session":session,"turn_id":receipt["turn_id"],"tool":"worker_report",
+                "arguments":{"task_id":tid,"assignment_id":aid,"summary":"controlled host report"}}
+        with self.assertRaises(Fault):
+            chat.request("POST","worker/native-tool",body)
+        with self.assertRaises(Fault):
+            caller.request("POST","worker/native-tool",dict(body,turn_id=first["receipt"]["turn_id"]))
+        result = caller.request("POST","worker/native-tool",body)
+        self.assertEqual(result,caller.request("POST","worker/native-tool",body))
+        self.assertEqual(result["task_state"],"completed_reported")
+        self.assertIsNone(Client(gateway,ops,cert).request("GET","worker/status")["held_assignment_id"])
+        self.assertEqual(len(manager_client.frames(0)),1)

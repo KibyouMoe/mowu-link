@@ -31,7 +31,7 @@ class FixtureHost:
     def deliver(self, session, did, payload, digest):
         if session != self.session:
             raise ValueError("wrong native session")
-        receipt = {"session": session, "delivery_id": did, "digest": digest, "native_id": guid()}
+        receipt = {"session": session, "delivery_id": did, "digest": digest, "native_id": guid(), "turn_id": guid()}
         with self.db.transaction() as db:
             db.execute("INSERT INTO inputs VALUES (?,?,?)", (did, encode(payload), encode(receipt)))
         return receipt

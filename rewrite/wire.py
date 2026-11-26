@@ -109,6 +109,13 @@ def route(orders, actor, method, path, body, headers):
 
 
 def serve_router(orders, identities, address, tls_context=None):
+    def handle(actor, method, path, body, headers):
+        return route(orders, actor, method, path, body, headers)
+
+    return serve_authenticated(identities, address, tls_context, handle, orders.tick)
+
+
+def serve_authenticated(identities, address, tls_context, handle, tick=None):
     if address[0] != "127.0.0.1" and tls_context is None:
         raise ValueError("a network listener requires TLS")
     class Handler(BaseHTTPRequestHandler):
@@ -131,7 +138,7 @@ def serve_router(orders, identities, address, tls_context=None):
                     else:
                         body = json.loads(data)
                         require(isinstance(body, dict), 422, "invalid_body")
-                status, content_type, response = route(orders, actor, self.command, self.path, body, self.headers)
+                status, content_type, response = handle(actor, self.command, self.path, body, self.headers)
             except (ValueError, UnicodeError):
                 error = Fault(422, "invalid_json")
             except Fault as exc:
@@ -177,8 +184,8 @@ def serve_router(orders, identities, address, tls_context=None):
 
         def service_actions(self):
             super().service_actions()
-            if time.monotonic() >= self.next_tick:
-                orders.tick()
+            if tick is not None and time.monotonic() >= self.next_tick:
+                tick()
                 self.next_tick = time.monotonic() + 1
 
     return Server(address, Handler)
