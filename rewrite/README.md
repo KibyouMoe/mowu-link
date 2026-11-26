@@ -107,7 +107,7 @@ python3 -B -m unittest -v rewrite.test_question_cards \
 
 独立 DSH 测试工位可配置 `assignment_container`，提供本机 Docker CLI 的绝对路径 `docker`、已授权的本地 Linux 引擎 Unix 套接字绝对路径 `socket` 和已经存在的 Linux 镜像 ID `image`。该模式与 `read_only_assignments`、`relay_command_approvals` 互斥。镜像需要 `/bin/sh` 和 `/bin/sleep`，且无默认持久卷。工具 `worker_workspace_shell` 只能由原生回合中与原派发匹配的调用执行。每个派发拥有自己的容器和内存工作目录，使用普通用户、只读根文件系统、有限资源和独立网络命名空间。没有项目目录、凭据或 Docker 套接字挂载，也不会自动拉镜像。
 
-取消或转派时，DSH 仍核对原生回合结束和原收件箱撤销，宿主同时收尾该派发的容器。以原引擎、容器 ID、标签及派发账本核对移除，确认后才交 W04。引擎身份不符或无法确认时保留原派发待核。同一派发重复查回执沿用原记录。测试时用 `MOWULINK_DSH_CONTAINER_IMAGE=<已有镜像完整ID> python3 -B -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_dsh_workspace_container_cancel_and_transfer_remove_owned_processes`。实验范围为无网络的私有临时工作目录。普通 DSH 项目绑定、正常完成后的收尾和从容器导出成果仍待验。[原生实测](evidence/dsh-assignment-container.json) · [Docker 容器移除](https://docs.docker.com/reference/cli/docker/container/rm/) · [临时存储](https://docs.docker.com/engine/storage/tmpfs/)
+取消或转派时，DSH 仍核对原生回合结束和原收件箱撤销，宿主同时收尾该派发的容器。以原引擎、容器 ID、标签及派发账本核对移除，确认后才交 W04。引擎身份不符或无法确认时保留原派发待核。同一派发重复查回执沿用原记录。测试时用 `MOWULINK_DSH_CONTAINER_IMAGE=<已有镜像完整ID> python3 -B -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_dsh_workspace_container_cancel_and_transfer_remove_owned_processes`。实验范围为无网络的私有临时工作目录。升级或回退前先用支持该配置的版本收尾原派发并核对容器。旧版插件无法识别这个配置。普通 DSH 项目绑定、正常完成后的收尾和从容器导出成果仍待验。[原生实测](evidence/dsh-assignment-container.json) · [Docker 容器移除](https://docs.docker.com/reference/cli/docker/container/rm/) · [临时存储](https://docs.docker.com/engine/storage/tmpfs/)
 
 启用原生目标服务的 DSH 会话可用 `/goal` 查询、`/goal 目标正文` 新建、`/goal pause` 暂停、`/goal resume` 恢复。原生服务使用自己的默认轮次，已有未完成目标时拒绝替换。状态卡显示原生阶段、轮次和续跑授权。未确认的变更保留待核，重送同号不会再次修改。续跑由 DSH 宿主负责。
 

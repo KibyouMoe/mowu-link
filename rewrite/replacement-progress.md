@@ -8,6 +8,8 @@ DSH 的可选 Linux 容器工位按派发隔离可写工作目录。真实 DSH �
 
 复跑 `MOWULINK_DSH_CONTAINER_IMAGE=<已有镜像完整ID> python3 -B -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_dsh_workspace_container_cancel_and_transfer_remove_owned_processes`。容器工作目录在内存里。普通项目读写工作树、容器成果导出、正常完成后的收尾和生产切换仍待验。
 
+取消、转派和引擎身份不符三种情况连续通过五轮。macOS 全量 270 项通过，包含在本机 Linux Docker 上复跑此验证。Linux arm64 通过 183 项、跳过 87 项。以 `6a709a552b3812455fbccef71eadcb43a130e007` 构建 239 份文件，SHA-256 为 `97d5c4947be0dd9bb545e140d9e5ae49b37e392cd5adfff93b990db5ac4ca397`。从安装目录通过 DSH 原生停止、只读及容器清理、快照和发布包共 37 项，文件摘要一致。以 `b88a3b548f4d45cb8bd6da8d07308f721aefb109` 为旧版，默认 Worker/适配器在隔离 HTTPS 演练分步升级与回退，三阶段各保留同一条夹具宿主收件。复跑 `python3 -B -m rewrite.release_check --repository . --component worker-pair` 并指定上述新旧 SHA。运行中的容器工位须先收尾后才可回退。
+
 Codex 已把收到的原生审批关闭通知保存到适配器账本。基线 `b4f8c521da38620cadd5260ad662c9ff2d9dc8b1` 的原生测试回合已经中止，Router 仍只有登记，重开八秒后仍未补交。新版用原 Worker、原会话和登记摘要补原关闭，第一次补交回执丢失后按原号查回，实际只有一次补交、零新增通知、零原生决定重放。已落库的另一条只读原回执。丢失原生关闭通知的一条继续待核，三个回合的原生历史一致。隔离 App Server、Worker、Router 与数据库实跑，模型、时钟、网络和事件丢失使用夹具。[原生关闭实测](evidence/codex-durable-approval-resolution.json)
 
 复跑 `python3 -B -m unittest -v rewrite.test_service.Service.test_recovered_codex_resolution_requires_the_original_registered_request rewrite.test_codex_app_server.CodexAppServer.test_cold_adapter_reads_committed_approval_closure_without_native_replay`。同时验证错会话、错回合、错条目或无原登记均拒绝补交。Router 从未登记、适配器也已退出时仍缺可核原请求，继续待核。
