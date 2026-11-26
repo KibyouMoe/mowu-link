@@ -1,0 +1,270 @@
+{
+  "recorded_utc": "2026-11-26T18:16:44Z",
+  "boundary": "Installed Codex App Server, native command and tool calls, authenticated HTTP and SQLite. Local scripted model, accelerated clock and Feishu fixture; no Desktop session or test account.",
+  "cases": [
+    {
+      "broken_link": "router",
+      "cli_version": "0.171.0-alpha.13.2",
+      "task_id": "93a5bbb9-b7c7-4347-9f13-70ff8d96cc47",
+      "assignment_id": "2366e609-2a48-4437-8cf3-37b116a5fdd4",
+      "host_receipt": {
+        "session": "01a21912-f5d7-7012-a321-4b54da4b3b52",
+        "delivery_id": "63b84852-6503-4f38-943a-9a6b3ab1e531",
+        "digest": "3f006efce90adfed8a1e8ac7d37a0800dcf529856316e46fb708784e5556d564",
+        "native_id": "01a21912-f64d-7da0-8268-e422182789ff",
+        "turn_id": "01a21912-f649-7d13-9622-fa2c9afc2785"
+      },
+      "native_input_ids": [
+        "01a21912-f64d-7da0-8268-e422182789ff"
+      ],
+      "native_command_result": "continued",
+      "native_report_calls": [
+        {
+          "type": "dynamicToolCall",
+          "id": "link-report-first",
+          "namespace": null,
+          "tool": "worker_report",
+          "arguments": {
+            "assignment_id": "2366e609-2a48-4437-8cf3-37b116a5fdd4",
+            "summary": "Native command finished in the isolated workspace",
+            "task_id": "93a5bbb9-b7c7-4347-9f13-70ff8d96cc47"
+          },
+          "status": "failed",
+          "contentItems": [
+            {
+              "type": "inputText",
+              "text": "worker_report_unconfirmed"
+            }
+          ],
+          "success": false,
+          "durationMs": 4,
+          "startedAtMs": 1795717003200,
+          "completedAtMs": 1795717003204
+        },
+        {
+          "type": "dynamicToolCall",
+          "id": "link-report-retry",
+          "namespace": null,
+          "tool": "worker_report",
+          "arguments": {
+            "assignment_id": "2366e609-2a48-4437-8cf3-37b116a5fdd4",
+            "summary": "Native command finished in the isolated workspace",
+            "task_id": "93a5bbb9-b7c7-4347-9f13-70ff8d96cc47"
+          },
+          "status": "failed",
+          "contentItems": [
+            {
+              "type": "inputText",
+              "text": "stale_assignment"
+            }
+          ],
+          "success": false,
+          "durationMs": 3,
+          "startedAtMs": 1795717003247,
+          "completedAtMs": 1795717003251
+        }
+      ],
+      "first_response": "worker_report_unconfirmed",
+      "retry_response": "stale_assignment",
+      "outage": {
+        "worker_id": "oguri",
+        "router_connected": false,
+        "router_observed": true,
+        "adapter_connected": true,
+        "last_error": "router_connection_unconfirmed",
+        "host_error": null,
+        "host_session": "01a21912-f5d7-7012-a321-4b54da4b3b52",
+        "expected_host_session": "01a21912-f5d7-7012-a321-4b54da4b3b52",
+        "host_busy": true,
+        "native_capabilities": {
+          "next_turn": true,
+          "context_usage": true,
+          "compaction": false,
+          "session_catalog": true,
+          "stop_private": true,
+          "model_view": true,
+          "model_change": true,
+          "goal_control": true
+        },
+        "host_observation_age_seconds": 0,
+        "router_retry_in_seconds": 1200,
+        "held_task_id": "93a5bbb9-b7c7-4347-9f13-70ff8d96cc47",
+        "held_assignment_id": "2366e609-2a48-4437-8cf3-37b116a5fdd4"
+      },
+      "router_during_outage": {
+        "assignee_id": "oguri",
+        "assignment_id": null,
+        "blocked_since": "2027-01-15T08:10:45+00:00",
+        "holder": {
+          "kind": "router"
+        },
+        "instructions": "Continue this isolated assignment through a link outage",
+        "remind_at": "2027-01-15T09:10:45+00:00",
+        "revision": 4,
+        "state": "blocked",
+        "task_id": "93a5bbb9-b7c7-4347-9f13-70ff8d96cc47",
+        "title": "Codex link outage"
+      },
+      "recovered": {
+        "worker_id": "oguri",
+        "router_connected": true,
+        "router_observed": true,
+        "adapter_connected": true,
+        "last_error": null,
+        "host_error": null,
+        "host_session": "01a21912-f5d7-7012-a321-4b54da4b3b52",
+        "expected_host_session": "01a21912-f5d7-7012-a321-4b54da4b3b52",
+        "host_busy": true,
+        "native_capabilities": {
+          "next_turn": true,
+          "context_usage": true,
+          "compaction": false,
+          "session_catalog": true,
+          "stop_private": true,
+          "model_view": true,
+          "model_change": true,
+          "goal_control": true
+        },
+        "host_observation_age_seconds": 1,
+        "router_retry_in_seconds": null,
+        "held_task_id": null,
+        "held_assignment_id": null
+      },
+      "outbox_pending_at_disconnect": true,
+      "outbox_receipt": {
+        "error": "stale_assignment"
+      },
+      "final_router_state": "blocked",
+      "notify_ids": [],
+      "test_platform_disconnect_id": "om_4",
+      "dropped_tcp_connections": 2
+    },
+    {
+      "broken_link": "adapter",
+      "cli_version": "0.171.0-alpha.13.2",
+      "task_id": "92ef3f95-cd03-430d-8b0a-d57862eaf4f8",
+      "assignment_id": "8b354b41-7840-4868-87ed-e963a5c4fe2e",
+      "host_receipt": {
+        "session": "01a21912-f953-76b2-8091-0f4dcaf7ac26",
+        "delivery_id": "c1adbf10-5853-4a9f-9c73-8aa86d4d1056",
+        "digest": "767bdbd27baf292190cbe38d381ab9c723fe5b4cdc91dfbf4e5e0fc5c7a23b40",
+        "native_id": "01a21912-f9cb-76c2-b87e-d23ca22d7e6c",
+        "turn_id": "01a21912-f9c7-7170-89fd-c3b003830e0f"
+      },
+      "native_input_ids": [
+        "01a21912-f9cb-76c2-b87e-d23ca22d7e6c"
+      ],
+      "native_command_result": "continued",
+      "native_report_calls": [
+        {
+          "type": "dynamicToolCall",
+          "id": "link-report-first",
+          "namespace": null,
+          "tool": "worker_report",
+          "arguments": {
+            "assignment_id": "8b354b41-7840-4868-87ed-e963a5c4fe2e",
+            "summary": "Native command finished in the isolated workspace",
+            "task_id": "92ef3f95-cd03-430d-8b0a-d57862eaf4f8"
+          },
+          "status": "failed",
+          "contentItems": [
+            {
+              "type": "inputText",
+              "text": "adapter_connection_unconfirmed"
+            }
+          ],
+          "success": false,
+          "durationMs": 2,
+          "startedAtMs": 1795717004169,
+          "completedAtMs": 1795717004172
+        },
+        {
+          "type": "dynamicToolCall",
+          "id": "link-report-retry",
+          "namespace": null,
+          "tool": "worker_report",
+          "arguments": {
+            "assignment_id": "8b354b41-7840-4868-87ed-e963a5c4fe2e",
+            "summary": "Native command finished in the isolated workspace",
+            "task_id": "92ef3f95-cd03-430d-8b0a-d57862eaf4f8"
+          },
+          "status": "completed",
+          "contentItems": [
+            {
+              "type": "inputText",
+              "text": "{\"recorded\":true,\"release_assignment_id\":\"8b354b41-7840-4868-87ed-e963a5c4fe2e\",\"task_state\":\"completed_reported\"}"
+            }
+          ],
+          "success": true,
+          "durationMs": 4,
+          "startedAtMs": 1795717004327,
+          "completedAtMs": 1795717004331
+        }
+      ],
+      "first_response": "adapter_connection_unconfirmed",
+      "retry_response": "{\"recorded\":true,\"release_assignment_id\":\"8b354b41-7840-4868-87ed-e963a5c4fe2e\",\"task_state\":\"completed_reported\"}",
+      "outage": {
+        "worker_id": "oguri",
+        "router_connected": true,
+        "router_observed": true,
+        "adapter_connected": false,
+        "last_error": "adapter_connection_unconfirmed",
+        "host_error": "adapter_connection_unconfirmed",
+        "host_session": null,
+        "expected_host_session": "01a21912-f953-76b2-8091-0f4dcaf7ac26",
+        "host_busy": null,
+        "native_capabilities": null,
+        "host_observation_age_seconds": 0,
+        "router_retry_in_seconds": null,
+        "held_task_id": "92ef3f95-cd03-430d-8b0a-d57862eaf4f8",
+        "held_assignment_id": "8b354b41-7840-4868-87ed-e963a5c4fe2e"
+      },
+      "router_during_outage": {
+        "adapter_connected": false,
+        "busy": null,
+        "held_assignment_id": "8b354b41-7840-4868-87ed-e963a5c4fe2e",
+        "held_task_id": "92ef3f95-cd03-430d-8b0a-d57862eaf4f8",
+        "last_seen_at": "2027-01-15T08:10:55+00:00",
+        "online": true,
+        "worker_id": "oguri"
+      },
+      "recovered": {
+        "worker_id": "oguri",
+        "router_connected": true,
+        "router_observed": true,
+        "adapter_connected": true,
+        "last_error": null,
+        "host_error": null,
+        "host_session": "01a21912-f953-76b2-8091-0f4dcaf7ac26",
+        "expected_host_session": "01a21912-f953-76b2-8091-0f4dcaf7ac26",
+        "host_busy": true,
+        "native_capabilities": {
+          "next_turn": true,
+          "context_usage": true,
+          "compaction": false,
+          "session_catalog": true,
+          "stop_private": true,
+          "model_view": true,
+          "model_change": true,
+          "goal_control": true
+        },
+        "host_observation_age_seconds": 0,
+        "router_retry_in_seconds": null,
+        "held_task_id": "92ef3f95-cd03-430d-8b0a-d57862eaf4f8",
+        "held_assignment_id": "8b354b41-7840-4868-87ed-e963a5c4fe2e"
+      },
+      "outbox_pending_at_disconnect": false,
+      "outbox_receipt": {
+        "recorded": true,
+        "release_assignment_id": "8b354b41-7840-4868-87ed-e963a5c4fe2e",
+        "task_state": "completed_reported"
+      },
+      "final_router_state": "completed_reported",
+      "notify_ids": [
+        "6c924651-d906-4a22-9a26-fe06ca86d125"
+      ],
+      "test_platform_disconnect_id": "om_4",
+      "dropped_tcp_connections": 67
+    }
+  ]
+}

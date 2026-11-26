@@ -31,8 +31,8 @@
 | A07 问训练员 | DSH 计时题与独立 Codex App Server 已核同组多题、原卡更新和逐题跳过。DSH 计时题续答支持多选。Codex 关题回执丢失时保持待核，含密题的整组留在宿主。DSH 显式启用前台题转接后，两端先答、超时续答和取消都已核同一张测试卡。模型、答题客户端和飞书用夹具。 | 真人点卡，同时核对实际飞书与 Desktop 原题窗。 |
 | A08 问溪流 | Router 送原题，训练员视图为只读；答复回到原派发，DSH 走原生工具。 | 真人核对只读控件与原卡更新。 |
 | A09 工单双端 | 工位先存收到、更新、取消提示。丢失宿主回执时仍能看见。独立 Codex App Server 的 Router 取消已核原派发精确中止、其他回合保留，以及待清理不释放。 | 同一实际飞书聊天与目标 Codex Desktop 会话的派单、更新和取消，及各宿主资源清理凭据。 |
-| A10 断 Router | 独立 DSH 原生回合在 TCP 断开后继续写 Linux 容器。受控时钟核对 Router 离线满 10 分钟入池，Worker 从确认断联起满 20 分钟重连。入池及重新上线均保留原执行。明确转派后原 W04 清理回执只结清旧派发，原输入一条，测试飞书收到一张断联卡。[实测](evidence/dsh-worker-link-outage.json) | Codex 与 DSH 的独立在线模型、实际跨机断链及飞书云端消息。 |
-| A11 断适配器 | 只断 Worker 到 DSH 适配器的 TCP 链路。Router 继续看到本体在线、宿主忙闲未知、W03 原持单，收到一次报警。测试飞书收到一张针对适配器的断联卡。恢复后查到同一原生回合和持单，恢复执行后才按显式取消清理，原输入一条。[实测](evidence/dsh-worker-link-outage.json) | 实际跨机断链、在线模型、正式飞书客户端卡片与云端回执。 |
+| A10 断 Router | DSH 和独立 Codex App Server 均在 TCP 断开后完成原生写入。受控时钟核对离线入池及重连。DSH 明确转派后只清旧派发。Codex 的在途成果返回可重试的 503，原 W04 重放后如实记录 `stale_assignment`。各有一次原生输入和一张测试飞书断联卡。[DSH](evidence/dsh-worker-link-outage.json) · [Codex](evidence/codex-worker-link-outage.json) | 独立在线模型、实际跨机断链及飞书云端消息。 |
+| A11 断适配器 | 分别断 Worker 到 DSH 和 Codex 适配器的 TCP 链路。Router 保持本体在线、宿主忙闲未知及 W03 原持单，收到一次报警。DSH 恢复后按显式取消清理。Codex 恢复后用同一原生回合交 W04，只有一次成果和一次通知，两项的原输入各一条。[DSH](evidence/dsh-worker-link-outage.json) · [Codex](evidence/codex-worker-link-outage.json) | 实际跨机断链、在线模型、飞书客户端卡片及云端回执。 |
 
 ## 宿主能用的指令及未完成边界
 

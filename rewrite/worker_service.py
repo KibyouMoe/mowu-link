@@ -298,8 +298,11 @@ class WorkerService:
             else:
                 require(body.get("tool") == "worker_report" and set(args) <= {"task_id","assignment_id","summary","outcome","artifact_ids"},
                         422,"unsupported_native_tool")
-                result = w.report(native,string(args,"task_id"),string(args,"assignment_id"),
-                                  string(args,"summary"),args.get("outcome","completed"),args.get("artifact_ids"))
+                try:
+                    result = w.report(native,string(args,"task_id"),string(args,"assignment_id"),
+                                      string(args,"summary"),args.get("outcome","completed"),args.get("artifact_ids"))
+                except OSError:
+                    raise Fault(503,"worker_report_unconfirmed",True) from None
         elif actor == "adapter/" + w.worker_id and method == "POST" and path == "/v1/worker/native-question":
             result = user_questions.open_native(w,body)
         elif actor == "adapter/" + w.worker_id and method == "POST" and path == "/v1/worker/native-question-proof":

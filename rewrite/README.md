@@ -87,6 +87,16 @@ python3 -B -m unittest -v rewrite.test_question_cards \
   rewrite.test_dsh_native_loop.NativeLoop.test_dsh_native_timed_question_closes_the_original_feishu_test_card
 ```
 
+### Codex 独立工位的断联与恢复
+
+本机安装包的 App Server 在独立 profile 中接到一张正式单。分别断开 Worker 到 Router 和到适配器的 TCP 链路，原生回合都继续写完测试文件。断 Router 后，W04 待发队列保留成果并返回可重试的 503。原派发已入池时，重连重放得到 `stale_assignment`。断适配器时 Router 保留原持单和在线状态，宿主忙闲未知。原生工具恢复后重报，Router 记录一次正式成果并待验收。两项各一条原生工单输入，飞书断联提示由测试平台收取。[实测](evidence/codex-worker-link-outage.json)
+
+```sh
+python3 -B -m unittest -v rewrite.test_codex_app_server.CodexAppServer.test_native_codex_work_and_w04_across_router_and_adapter_outages rewrite.test_link_health
+```
+
+设置 `MOWULINK_CODEX_LINK_OUTAGE_EVIDENCE` 为临时文件路径可输出原生回合与业务回执。模型和计时由本地测试驱动，真实 Desktop 独立账号与飞书另验。
+
 ### DSH 固定会话与飞书卡片
 
 在独立 DSH 测试配置加载 `integrations/dsh_host/index.mjs`，指定测试会话的 `session` 和仅当前用户可读写的绝对目录 `directory`。单独启动 `python3 -m rewrite.service dsh-adapter --help` 所示的适配器，将 `--session`、`--runtime-dir` 分别指向同一会话和目录。收图需宿主提供 `attachments` 服务；`--worker-connection` 指向适配器访问专用 Worker 的连接配置。固定会话插件中仅登记 Agent 业务工具，本体负责发送飞书卡片。

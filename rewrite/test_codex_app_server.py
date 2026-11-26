@@ -48,6 +48,7 @@ from .worker_service import WorkerService
 CODEX = Path("/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex")
 GOAL_FIXTURE = "Finish the isolated goal check"
 KEEP_FORMAL_HELD = "Keep the isolated order held until an update"
+LINK_OUTAGE_FIXTURE = "Continue this isolated assignment through a link outage"
 TRAINER_CARD_FIXTURE = "Publish a standalone trainer test question"
 TRAINER_CARD_QUESTIONS = [{"title":"Which isolated route?","options":["North","South"]},
                           {"title":"Leave a note"},{"title":"Optional note"}]
@@ -76,6 +77,29 @@ class Provider(BaseHTTPRequestHandler):
         return {"type":"message","id":"msg_goal_continued" if continuation else "msg_goal_started",
                 "role":"assistant","status":"completed","phase":"final_answer",
                 "content":[{"type":"output_text","text":"Native goal fixture step."}]}
+
+    def link_outage_item(self,payload,after):
+        fixture = self.server.link_outage
+        outputs = {item["call_id"]:item["output"] for item in after if item.get("type")=="function_call_output"}
+        report = {"task_id":payload["task_id"],"assignment_id":payload["assignment_id"],
+                  "summary":"Native command finished in the isolated workspace"}
+        if "link-work" not in outputs:
+            command = ("touch .link-started && for i in $(seq 1 250); do "
+                       "[ -f .link-continue ] && break; sleep .04; done; "
+                       "test -f .link-continue && printf continued > .link-result")
+            call,tool,args = "link-work","exec_command",{"cmd":command,"yield_time_ms":10000}
+        elif "link-report-first" not in outputs:
+            call,tool,args = "link-report-first","worker_report",report
+        elif "link-report-retry" not in outputs:
+            fixture["first"].put(outputs["link-report-first"])
+            if not fixture["resume"].wait(12):
+                raise TimeoutError("link outage fixture did not reconnect")
+            call,tool,args = "link-report-retry","worker_report",report
+        else:
+            fixture["retry"].put(outputs["link-report-retry"])
+            return {"type":"message","id":"msg_link_outage","role":"assistant","status":"completed",
+                    "phase":"final_answer","content":[{"type":"output_text","text":"Isolated work step finished."}]}
+        return {"type":"function_call","id":"fc_"+call,"name":tool,"call_id":call,"arguments":encode(args)}
 
     def do_POST(self):
         if self.path!="/v1/responses":
@@ -142,6 +166,8 @@ class Provider(BaseHTTPRequestHandler):
                     "call_id":"isolated-standalone-trainer","arguments":encode({"questions":TRAINER_CARD_QUESTIONS})}
         elif formal_goal is not None and (goal_continuation or payload and payload.get("kind")=="task"):
             item = self.formal_goal_item(formal_goal,payload,items[user_index+1:],names,goal_continuation)
+        elif payload and payload.get("kind")=="task" and payload.get("instructions")==LINK_OUTAGE_FIXTURE:
+            item = self.link_outage_item(payload,items[user_index+1:])
         elif approval_prompt and not calls:
             item = {"type":"function_call","id":"fc_approval_"+approval_prompt,"name":"exec_command",
                     "call_id":"trial-approval-"+approval_prompt,
@@ -2477,6 +2503,174 @@ class CodexAppServer(unittest.TestCase):
                          "pending_native_call_id":pending_call["callId"],"model_requests":len(self.provider.observed),
                          "original_process_exited":rpc.process.returncode is not None,
                          "boundary":"Native App Server process restart with local scripted provider; no account or Desktop session"}
+
+    def test_native_codex_work_and_w04_across_router_and_adapter_outages(self):
+        cases = []
+        for broken in ("router","adapter"):
+            with self.subTest(link=broken), ExitStack() as resources:
+                root = Path(self.root)/broken
+                root.mkdir(mode=0o700)
+                fixture = self.provider.link_outage = {"first":Queue(),"retry":Queue(),"resume":Event()}
+                rpc = resources.enter_context(isolated_app_server(root,self.origin))
+                self.assertIsNone(rpc.request("account/read",{"refreshToken":False})["account"])
+                started = rpc.request("thread/start",{"cwd":str(root),"ephemeral":False,"sandbox":"workspace-write",
+                    "approvalPolicy":"never","dynamicTools":[REPORT_TOOL]})["thread"]
+                sid = started["id"]
+                seed = rpc.request("turn/start",{"threadId":sid,"input":[{
+                    "type":"text","text":"Seed the isolated outage session","text_elements":[]}]})["turn"]
+                until = time.monotonic()+8
+                while rpc.event(until)["method"]!="turn/completed":
+                    pass
+                host = AppServerHost(rpc,sid)
+                host.session = sid
+                clock = Clock()
+                loop = resources.enter_context(Loop.isolated(clock,host_factory=lambda _path,_name:host))
+                worker,manager = loop.worker,loop.hermes
+                service = WorkerService(worker,clock)
+                host_key,source_key,platform_key = guid(),guid(),guid()
+                router = serve_loopback(loop.orders,{loop.wire.token:"worker/oguri"})
+                adapter = serve_adapter(loop.adapter,"oguri",{host_key:"worker/oguri"},("127.0.0.1",0),None)
+                drops = []
+                cut = Event()
+                def connected(_socket,_address):
+                    if not cut.is_set():
+                        return True
+                    drops.append(clock())
+                    return False
+                (router if broken=="router" else adapter).verify_request = connected
+                worker.router = Client(resources.enter_context(running(router)),loop.wire.token)
+                worker.adapter = RemoteAdapter(Client(resources.enter_context(running(adapter)),host_key),sid)
+                endpoint = resources.enter_context(running(service.listen(
+                    {source_key:"adapter/oguri",platform_key:"platform/oguri"},("127.0.0.1",0),None)))
+                source,platform = Client(endpoint,source_key),Client(endpoint,platform_key)
+                sink = PlatformFixture()
+                views = Views(root/"views.db",platform,sink,"fixture-chat","小栗帽",clock)
+                display = CodexDisplay(loop.adapter,source)
+                resources.enter_context(display.run())
+                settled = Queue()
+                resources.enter_context(worker_callbacks(host,source,display.wake.set,display.observe,
+                    lambda tid,state: (display.observe_terminal(tid,state),settled.put((tid,state)))))
+                resources.callback(fixture["resume"].set)
+                resources.callback((root/".link-continue").touch)
+
+                service.step()
+                clock.advance(10)
+                service.step()
+                tid = manager.create(guid(),"Codex link outage",LINK_OUTAGE_FIXTURE,"oguri")["task_id"]
+                service.step()
+                until = time.monotonic()+8
+                while not (root/".link-started").exists() and time.monotonic()<until:
+                    time.sleep(.03)
+                self.assertTrue((root/".link-started").exists(),host.thread(sid,include_turns=True))
+                self.assertTrue(host.busy(sid))
+                order = manager.inspect(tid)["task"]
+                aid = order["assignment_id"]
+                with worker.db.transaction() as db:
+                    frame = json.loads(db.execute("""SELECT frame FROM inbox JOIN jobs USING(delivery_id)
+                        WHERE assignment_id=?""",(aid,)).fetchone()[0])
+                body = {"kind":"task",**frame["payload"]}
+                proof = loop.adapter.lookup_delivery(frame["delivery_id"],body,session=sid)
+                self.assertEqual(worker.hold()["held_assignment_id"],aid)
+
+                cut.set()
+                clock.advance(5)
+                service.step()
+                outage = service.status()
+                self.assertTrue(drops)
+                self.assertFalse((root/".link-result").exists())
+                (root/".link-continue").touch()
+                first = fixture["first"].get(timeout=12)
+                self.assertEqual((root/".link-result").read_text(),"continued")
+                self.assertTrue(host.busy(sid))
+                self.assertEqual(manager.inspect(tid)["task"],order)
+                self.assertIsNone(manager.inspect(tid)["last_report"])
+                self.assertEqual(worker.hold()["held_assignment_id"],aid)
+                with worker.db.transaction() as db:
+                    stored = db.execute("SELECT body,receipt FROM outbox WHERE assignment_id=?",(aid,)).fetchone()
+                pending = json.loads(stored["body"]) if stored else None
+                if broken=="router":
+                    self.assertEqual(first,"worker_report_unconfirmed")
+                    self.assertIsNone(stored["receipt"])
+                    self.assertEqual(pending["assignment_id"],aid)
+                    self.assertFalse(outage["router_connected"])
+                    self.assertTrue(outage["host_busy"])
+                    self.assertEqual(outage["router_retry_in_seconds"],1200)
+                    rejoin = clock()+1200
+                    clock.advance(loop.orders.lease_seconds+600)
+                    loop.orders.tick()
+                    observed = manager.inspect(tid)["task"]
+                    self.assertEqual((observed["state"],observed["holder"]),("blocked",{"kind":"router"}))
+                    before_retry = len(drops)
+                    clock.advance(rejoin-clock()-1)
+                    service.step()
+                    self.assertEqual(service.status()["router_retry_in_seconds"],1)
+                    self.assertEqual(len(drops),before_retry)
+                else:
+                    self.assertEqual(first,"adapter_connection_unconfirmed")
+                    self.assertIsNone(pending)
+                    self.assertTrue(outage["router_connected"])
+                    self.assertFalse(outage["adapter_connected"])
+                    self.assertIsNone(outage["host_busy"])
+                    for _ in range(32):
+                        clock.advance(20)
+                        service.step()
+                    observed, = manager.workers(worker_id="oguri")["items"]
+                    self.assertEqual((observed["online"],observed["busy"],observed["held_assignment_id"]),(True,None,aid))
+                    self.assertEqual(manager.inspect(tid)["task"],order)
+                    warning, = manager.messages(source="oguri")["items"]
+                    self.assertEqual(warning["text"],"Worker 本体在线，与宿主适配器的连接已中断。")
+                views.poll()
+                notice, = [(mid,card) for mid,_,card in sink.messages.values() if "连接已中断" in encode(card)]
+                self.assertIn("与"+("Router" if broken=="router" else "宿主适配器")+"的连接已中断。",encode(notice[1]))
+                cut.clear()
+                clock.advance(1 if broken=="router" else 5)
+                service.step()
+                recovered = service.status()
+                self.assertTrue(recovered["router_connected"] and recovered["adapter_connected"])
+                self.assertEqual(recovered["host_session"],sid)
+                self.assertTrue(host.busy(sid))
+                fixture["resume"].set()
+                retry = fixture["retry"].get(timeout=12)
+                self.assertEqual(settled.get(timeout=12),(proof["turn_id"],"completed"))
+                initial,turn = host.thread(sid,include_turns=True)["turns"]
+                self.assertEqual(initial["id"],seed["id"])
+                inputs = [item["id"] for item in turn["items"] if item["type"]=="userMessage"]
+                calls = [item for item in turn["items"] if item["type"]=="dynamicToolCall"]
+                self.assertEqual(inputs,[proof["native_id"]])
+                self.assertEqual([call["id"] for call in calls],["link-report-first","link-report-retry"])
+                self.assertEqual([item["status"] for item in turn["items"] if item["type"]=="commandExecution"],["completed"])
+                self.assertFalse(calls[0]["success"])
+                self.assertEqual(calls[1]["success"],broken=="adapter")
+                with worker.db.transaction() as db:
+                    saved = json.loads(db.execute("SELECT receipt FROM outbox WHERE assignment_id=?",(aid,)).fetchone()[0])
+                report_notices = [item for item in manager.messages(source="oguri")["items"] if item.get("task_id")==tid]
+                details = manager.inspect(tid)
+                if broken=="router":
+                    self.assertEqual(retry,"stale_assignment")
+                    self.assertEqual(saved,{"error":"stale_assignment"})
+                    self.assertEqual(details["task"]["state"],"blocked")
+                    self.assertIsNone(details["last_report"])
+                    self.assertEqual(report_notices,[])
+                else:
+                    self.assertEqual(saved,{"recorded":True,"task_state":"completed_reported","release_assignment_id":aid})
+                    self.assertEqual(json.loads(retry),saved)
+                    self.assertEqual(details["task"]["state"],"completed_reported")
+                    self.assertEqual(details["last_report"]["assignment_id"],aid)
+                    self.assertEqual(len(report_notices),1)
+                self.assertEqual(loop.adapter.lookup_delivery(frame["delivery_id"],body,session=sid),proof)
+                self.assertIsNone(worker.hold()["held_assignment_id"])
+                cases.append({"broken_link":broken,"cli_version":started["cliVersion"],"task_id":tid,"assignment_id":aid,
+                    "host_receipt":proof,"native_input_ids":inputs,"native_command_result":(root/".link-result").read_text(),
+                    "native_report_calls":calls,"first_response":first,"retry_response":retry,
+                    "outage":outage,"router_during_outage":observed,"recovered":recovered,
+                    "outbox_pending_at_disconnect":pending is not None,"outbox_receipt":saved,
+                    "final_router_state":details["task"]["state"],"notify_ids":[item["message_id"] for item in report_notices],
+                    "test_platform_disconnect_id":notice[0],"dropped_tcp_connections":len(drops)})
+        if output := os.environ.get("MOWULINK_CODEX_LINK_OUTAGE_EVIDENCE"):
+            Path(output).write_text(json.dumps({"recorded_utc":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+                "boundary":"Installed Codex App Server, native command and tool calls, authenticated HTTP and SQLite."
+                " Local scripted model, accelerated clock and Feishu fixture; no Desktop session or test account.","cases":cases},
+                ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
 
     def test_rejected_first_native_history_read_keeps_original_assignment_lookup_only(self):
         rpc = self.enterContext(isolated_app_server(self.root,self.origin))

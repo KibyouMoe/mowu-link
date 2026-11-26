@@ -108,6 +108,36 @@ class LinkHealth(unittest.TestCase):
         self.assertIsNone(self.service.status()["host_error"])
         self.assertIs(self.service.status()["native_capabilities"]["session_catalog"],False)
 
+    def test_native_report_returns_retryable_503_and_recovers_the_original_outbox(self):
+        task = self.dispatched()
+        aid = self.worker.hold()["held_assignment_id"]
+        _,native = self.loop.native.entries()[0]
+        token = guid()
+        server = self.enterContext(self.service.listen({token:"adapter/oguri"},("127.0.0.1",0),None))
+        thread = Thread(target=server.serve_forever,kwargs={"poll_interval":.01},daemon=True)
+        thread.start()
+        self.addCleanup(thread.join)
+        self.addCleanup(server.shutdown)
+        source = Client("http://127.0.0.1:"+str(server.server_port),token)
+        request = {"session":native["session"],"turn_id":native["turn_id"],"call_id":guid(),"tool":"worker_report",
+                   "arguments":{"task_id":task["task_id"],"assignment_id":aid,"summary":"Original pending result"}}
+        self.worker.router = self.unavailable
+        with self.assertRaises(Fault) as lost:
+            source.request("POST","worker/native-tool",request)
+        self.assertEqual((lost.exception.status,lost.exception.code,lost.exception.retryable),
+                         (503,"worker_report_unconfirmed",True))
+        with self.worker.db.transaction() as db:
+            report = db.execute("SELECT receipt FROM outbox WHERE assignment_id=?",(aid,)).fetchone()
+            self.assertIsNotNone(report)
+            self.assertIsNone(report["receipt"])
+        self.assertEqual(self.worker.hold()["held_assignment_id"],aid)
+        self.worker.router = self.loop.wire
+        self.service.step()
+        receipt = source.request("POST","worker/native-tool",request)
+        self.assertEqual(receipt,{"recorded":True,"task_state":"completed_reported","release_assignment_id":aid})
+        self.assertIsNone(self.worker.hold()["held_assignment_id"])
+        self.assertEqual(len(self.manager.messages(source="oguri")["items"]),1)
+
     def test_status_does_not_merge_capabilities_and_activity_from_different_sessions(self):
         session = self.loop.adapter.bound_session()
         token = guid()

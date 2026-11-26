@@ -4,6 +4,8 @@
 
 ## 检查点与证据
 
+Codex 侧 A10/A11 用桌面安装包内的真实 App Server、独立 profile 与隔离 Router 验证。两种断联期间同一原生回合都实际完成测试文件写入。断 Router 后首次 W04 在 Worker 存为待确认。原回调因 TCP 重置无 HTTP 响应，现返回可重试的 `503 worker_report_unconfirmed`。原派发入池后，重连重放得到 `stale_assignment`，无正式报告或成果通知。只断适配器时 Router 继续看到原持单，恢复后同回合正式提交，Router 待验收，仅一份成果和一条通知。两次各一条原生输入、一张测试飞书断联卡。模型、计时和飞书均为夹具。另用短断链证明原 W04 可从待发队列交回，只通知一次。[证据](evidence/codex-worker-link-outage.json) · [复跑](README.md#codex-独立工位的断联与恢复)
+
 修复失联入池后取消漏发。修复前隔离 Router 立即变成 `cancelled`，原工位 W01 回 `no_task` 且没有停止指令。修复后真实 DSH 原容器继续运行，Router 只记录旧派发待清理。到重连时，原生回合因取消中止、容器移除，Agent 调用 W04 后 Router 才从 `blocked` 变为 `cancelled`。保留原工单输入一条。另用隔离协议测试核原回执同号重放只发一次通知，迟到清理只能影响旧派发并保留新持单。原生 DSH、Linux 引擎和 Router 实跑，模型、时间和飞书为夹具。[取消记录](evidence/dsh-offline-pooled-cancel.json) · [复跑入口](README.md#dsh-固定会话与飞书卡片)
 
 实现提交 `2c0d3dfb60d908bec55cf2d9815a8c5c96b8edce`。macOS 全量 282 项通过，Linux arm64 186 项通过、96 项依环境跳过。248 文件的包摘要为 `ae41fee8c5363d5490a768186eb077d283c760978750858bbe511c72ebbbef6a`，安装目录专项 36 项通过，逐文件摘要回读一致。用前版 `3e3293e074d80767f4c74545ca5a90cba349be43` 复跑 DSH 版间回退通过。另装同一前版 Router 对暂存的入池取消实测 W04 返回 `409 stale_assignment`，当前版对同一派发接受回执。回到该前版前须由当前版收清这类待确认取消。[回退步骤](router-rehearsal.md#worker-和适配器逐个升级)
