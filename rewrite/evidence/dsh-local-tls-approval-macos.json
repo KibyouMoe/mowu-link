@@ -1,0 +1,50 @@
+{
+  "tested_revision": "1c2e69322cfb40074d35a50c47f49beb3c227f48",
+  "archive_sha256": "f753a14af1fec206bcdf3016692b7d366b5f3edfd53d0a616036422677935c53",
+  "archive_files": 278,
+  "passed": 13,
+  "skipped": 1,
+  "boundary": "Installed DSH AgentLoop, ApprovalService and Bash provider; test model and operator identity",
+  "closure_retry_same_receipt": true,
+  "cold_reopen_recovered_original_closure": true,
+  "link": "IPv4 loopback with mutual TLS",
+  "native_records": [
+    {
+      "asked_seq": 27,
+      "decided_seq": 28,
+      "native_id": "d32ef917-c50b-4b81-aad8-5d4e056bd6e3",
+      "outcome": "rejected",
+      "turn": "21/2"
+    },
+    {
+      "asked_seq": 42,
+      "decided_seq": 43,
+      "native_id": "0ab4c06a-aaf7-4a58-a696-d95b000de232",
+      "outcome": "allowed-once",
+      "turn": "36/3"
+    },
+    {
+      "asked_seq": 57,
+      "decided_seq": 58,
+      "native_id": "6eb3d287-8b48-4cad-9369-bda91d5fc289",
+      "outcome": "rejected",
+      "turn": "51/4"
+    },
+    {
+      "asked_seq": 72,
+      "decided_seq": 73,
+      "native_id": "419f2c96-e2bd-4273-8f5b-83eb47ef56b7",
+      "outcome": "rejected",
+      "turn": "66/5"
+    }
+  ],
+  "router_notifications": [
+    "feebccdd-d426-4fab-9e95-2d129fdc844d",
+    "bced5c93-2be4-4ca8-907b-03ae70e8133d",
+    "db42dcfb-107d-4de6-8d0f-4383d0e54649",
+    "b0a63108-56ba-4170-93fc-3708ba2a317d"
+  ],
+  "session": "isolated-dsh-bash-approvals",
+  "successful_bash_calls": 1,
+  "unverifiable_directory_used_native_answerer": true
+}

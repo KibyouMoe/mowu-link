@@ -4,6 +4,10 @@
 
 ## 检查点与证据
 
+DSH 固定会话的命令审批已走通本机双向 TLS。Windows Server 2025 从官方 DSH 包加载 ApprovalService 与原生 Bash 执行组件，使用 Git Bash 实际运行获准的 `pwd -W` 一次，工作目录与审批记录一致。拒绝和超时不执行，无法核实目录的请求只在宿主处理。丢关闭回执、重开宿主和适配器后，按同一原生审批号补交，原回合、已执行结果和四条 Router 通知没有增加。平台身份代答、批准整段会话均被拒。模型和审批人由夹具提供，实际审批人和 Windows Desktop 界面另验。[Windows 审批](evidence/windows-dsh-command-approval.json) · [macOS 审批](evidence/dsh-local-tls-approval-macos.json)
+
+审批实现提交 `1c2e69322cfb40074d35a50c47f49beb3c227f48`。Windows DSH 11 项、Codex 与安装 10 项、两套回退通过。Linux arm64 全量 187 项通过、115 项依环境跳过。macOS 对 278 文件的安装包逐项校验后运行 14 项，13 项通过，Windows 文件共享专项按环境跳过。归档 SHA-256 为 `f753a14af1fec206bcdf3016692b7d366b5f3edfd53d0a616036422677935c53`。[Windows 回归](https://github.com/KibyouMoe/mowu-link/actions/runs/45892287783)
+
 Windows 和 macOS 的 DSH 本机双向 TLS 工位已核前台题转接。飞书先答、原生先答、原回合取消、原生超时后飞书续答四种情况各只有一个原生提问、一个原始测试卡更新。故意丢答复回包后，用原题查回原生关闭回执。停写后把会话日志及题目指纹库复制到另一套私有目录、端口和证书，再查还是同一回执，模型请求为零。两端均拒绝向其他普通账户开放的题目指纹库。实际运行 DSH AgentLoop、原生问题服务和会话持久化，模型、原生答题客户端及飞书为夹具。[Windows 证据](evidence/windows-dsh-foreground-questions.json) · [macOS 证据](evidence/dsh-local-tls-foreground-macos.json) · [恢复须带的文件](router-rehearsal.md#重做版五组件的离线恢复)
 
 Windows 首轮提问两项通过，原有托管会话专项在冷重开时收到 `WinError 5`，没能替换端口记录。随后以实际 Windows 文件句柄挡住第一次替换，关闭句柄后原子重试成功，旧端口记录在失败时仍完整，临时文件已清除。修复提交 `13a8eeb46dfb6178341961adafc3521615034194`，Windows DSH 10 项、Codex 与安装 10 项、两套回退通过，Linux arm64 187 项通过、114 项依环境跳过。macOS 在题目实现 `7fd579f9f4d915961e2899cd66434a8c6e1d5781` 全量 296 项通过、4 项依环境跳过，同提交安装包 276 文件，安装目录 10 项通过且逐文件回读一致。[首次失败](https://github.com/KibyouMoe/mowu-link/actions/runs/45891567490/job/140155255791) · [修复后](https://github.com/KibyouMoe/mowu-link/actions/runs/45891876343)

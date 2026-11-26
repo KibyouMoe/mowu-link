@@ -1,0 +1,51 @@
+{
+  "recorded_utc": "2026-11-26T20:37:50.4955678Z",
+  "tested_revision": "1c2e69322cfb40074d35a50c47f49beb3c227f48",
+  "verification_url": "https://github.com/KibyouMoe/mowu-link/actions/runs/45892287783/job/140157605298",
+  "runner": "Windows Server 2025 x64",
+  "dsh_release": "0.2.2-rc.5",
+  "passed": 11,
+  "boundary": "Installed DSH AgentLoop, ApprovalService and Bash provider; test model and operator identity",
+  "closure_retry_same_receipt": true,
+  "cold_reopen_recovered_original_closure": true,
+  "link": "IPv4 loopback with mutual TLS",
+  "native_records": [
+    {
+      "asked_seq": 27,
+      "decided_seq": 28,
+      "native_id": "ba2306b9-2421-4242-b2f4-fbf0d9eb6c99",
+      "outcome": "rejected",
+      "turn": "21/2"
+    },
+    {
+      "asked_seq": 42,
+      "decided_seq": 43,
+      "native_id": "6b8d7d7f-6e54-4f7b-ad4e-cd9ef0797987",
+      "outcome": "allowed-once",
+      "turn": "36/3"
+    },
+    {
+      "asked_seq": 57,
+      "decided_seq": 58,
+      "native_id": "d5ad12b3-0ecc-49e4-86d3-89a443663cee",
+      "outcome": "rejected",
+      "turn": "51/4"
+    },
+    {
+      "asked_seq": 72,
+      "decided_seq": 73,
+      "native_id": "3f63fdec-05ec-402d-a180-b1a94ac03675",
+      "outcome": "rejected",
+      "turn": "66/5"
+    }
+  ],
+  "router_notifications": [
+    "948c1657-8563-4356-adc6-fee7c922c551",
+    "2da717b7-0805-49cf-b211-f59dc2e6b090",
+    "1d51b7dc-0447-43a7-abf7-b7c17b286595",
+    "78e11ecd-7c81-45f6-876b-4f188ac6c560"
+  ],
+  "session": "isolated-dsh-bash-approvals",
+  "successful_bash_calls": 1,
+  "unverifiable_directory_used_native_answerer": true
+}
