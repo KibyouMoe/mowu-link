@@ -9,7 +9,7 @@ from .feishu_inbound import Inbound
 from .feishu_output import SDKMessages, Views
 from .question_cards import Actions
 from .service import connection, private_config
-from .storage import Fault
+from .storage import Fault, StateWriterBusy, state_writer
 
 RECOVERABLE = (Fault,OSError,OperationalError,ValueError,KeyError,TypeError)
 
@@ -72,8 +72,16 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config",type=Path,required=True)
     args = parser.parse_args()
-    import lark_oapi as lark
     cfg = private_config(args.config)
+    try:
+        with state_writer(cfg["database"]):
+            serve(cfg)
+    except StateWriterBusy as exc:
+        parser.exit(1,str(exc)+"\n")
+
+
+def serve(cfg):
+    import lark_oapi as lark
     api = lark.Client.builder().app_id(cfg["app_id"]).app_secret(cfg["app_secret"]).build()
     worker = connection(Path(cfg["worker_connection"]))
     inbound = Inbound(cfg["database"],worker,SDKResources(api),

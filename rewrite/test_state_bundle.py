@@ -12,7 +12,7 @@ from .feishu_output import Views
 from .hermes import HermesAdapter
 from .orders import Orders
 from .state_bundle import capture, filename, restore, rollback, verify
-from .storage import encode, guid
+from .storage import StateWriterBusy, encode, guid, state_writer
 from .test_feishu_output import PlatformFixture
 from .test_mainline import Clock
 from .trigger import Trigger
@@ -131,6 +131,10 @@ class Bundle(unittest.TestCase):
             backup({k:v for k,v in self.sources.items() if k!="worker:oguri"})
         with self.assertRaisesRegex(ValueError,"schema"):
             backup(dict(self.sources,**{"worker:oguri":self.sources["trigger:mail"],"trigger:mail":self.sources["worker:oguri"]}))
+        with state_writer(self.sources["worker:oguri"]):
+            with self.assertRaisesRegex(StateWriterBusy,"state_writer_already_running"):
+                backup(self.sources)
+        self.assertFalse(self.snapshot.exists())
         with closing(sqlite3.connect(self.sources["worker:oguri"])) as writer:
             writer.execute("BEGIN IMMEDIATE")
             with self.assertRaises(sqlite3.OperationalError):

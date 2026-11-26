@@ -9,7 +9,7 @@ import shutil
 import sqlite3
 
 from .cutover import digest, output_directory, readonly
-from .storage import encode, guid
+from .storage import encode, guid, state_writer
 
 TABLES = {
     "router":{"tasks","workers","reports","operations","deliveries"},
@@ -77,6 +77,7 @@ def locked(sources):
             if identity in identities:
                 raise ValueError("two roles point to the same database")
             identities.add(identity)
+            stack.enter_context(state_writer(path))
             if any(path.with_name(path.name+s).exists() for s in ("-wal","-journal","-shm")):
                 raise ValueError("checkpoint and stop all isolated writers before snapshot")
             db = stack.enter_context(closing(sqlite3.connect(path.resolve().as_uri()+"?mode=rw",uri=True,timeout=0)))

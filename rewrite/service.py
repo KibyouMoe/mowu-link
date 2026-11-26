@@ -1,6 +1,6 @@
 """Independent Router and Trigger processes. Addresses and identities are explicit."""
 import argparse
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 import json
 import os
 from pathlib import Path
@@ -12,7 +12,7 @@ from threading import Thread
 from .orders import Orders
 from .adapter import HostAdapter
 from .host_wire import RemoteAdapter, serve_adapter
-from .storage import encode
+from .storage import StateWriterBusy, encode, state_writer
 from .trigger import Trigger
 from .wire import Client, serve_router
 from .worker import Worker
@@ -34,6 +34,19 @@ def connection(path):
 
 
 def server(args):
+    databases = [args.db]
+    if args.component=="fixture-adapter":
+        databases.append(args.fixture_db)
+    paths = {db.resolve() for db in databases}
+    if len(paths)!=len(databases):
+        raise ValueError("expected distinct component databases")
+    with ExitStack() as stack:
+        for path in sorted(paths):
+            stack.enter_context(state_writer(path))
+        serve(args)
+
+
+def serve(args):
     identities = private_config(args.identities)
     if not isinstance(identities, dict) or not identities or any(
             not isinstance(k, str) or not k or not isinstance(v,str)
@@ -144,7 +157,10 @@ def main():
             raise ValueError("status receipt belongs to a different Worker")
         print(encode(observation))
     else:
-        server(args)
+        try:
+            server(args)
+        except StateWriterBusy as exc:
+            parser.exit(1,str(exc)+"\n")
 
 
 if __name__ == "__main__":

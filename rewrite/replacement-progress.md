@@ -4,6 +4,10 @@
 
 ## 检查点与证据
 
+隔离启动增加按组件状态库生效的进程锁。实际 TLS Router 留一张待派单，另一个进程试用同一数据库，退出码 1，首实例仍可查原单。终止首个试验进程后保留原锁文件，新进程成功打开同一数据库。备份遇仍持锁的组件立即拒绝，未生成目标目录。复跑 `python3 -m unittest -v rewrite.test_service rewrite.test_state_bundle`。锁覆盖新版独立启动入口，老程序仍须按迁移手册停写。
+
+Linux arm64 以 `3e0eba5426f8c0f1344f195929ecae84b1c546b5` 复验通过 130 项，34 项因缺少 macOS DSH 跳过，校验 128 个发行文件。macOS Worker 与 Linux 隔离 Router、宿主夹具用不同 TLS 端口，核对原生输入与正式完工通知各一条，拒绝未知身份和不受信证书。物理机相同，无真实模型或真人飞书参与。
+
 W03 后断在首次原生收件回程时，Worker 已保留原派发与宿主待核状态。隔离测试切到同名空账本，重复轮询两次无新输入；恢复旧账本后查原收件号，工单仍由原 Worker 持有。TLS 查回端口核对收件号、会话及原派发内容。实际 DSH 在宿主尚未写入前明确拒绝忙时派发，原私聊结束后才收到正式单；若先取消，只收到取消。复跑 `python3 -m unittest -v rewrite.test_mainline rewrite.test_service rewrite.test_dsh_native_loop.NativeLoop.test_native_race_after_w03_never_prequeues_a_formal_task`。
 
 `/queue` 实测在本地 HTTP 发出前已将投递标为待核。原宿主收件后丢回执，换到同会话号的空账本后两次复核均无写入，接回原账本查到原输入号。仅各有一条待核与恢复提示。真实 DSH SDK 的排队测试同时验证两条消息依原次序进入独立回合。复跑 `python3 -m unittest -v rewrite.test_worker_commands rewrite.test_dsh_sdk`。平台及模型使用夹具。

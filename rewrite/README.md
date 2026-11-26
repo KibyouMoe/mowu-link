@@ -119,6 +119,8 @@ python3 -m rewrite.release verify --archive ./build/mowulink.tar --revision "$RE
 
 目标机器需要 Python 3.11 或以上。安装好的版本在自己的目录下启动，`-B` 禁止写入字节码缓存。Router、Worker、Trigger 使用标准库。飞书需要独立 Python 环境中的官方 SDK，DSH 与 Hermes 使用宿主提供的插件依赖。逐字节核验会识别未登记的文件及已改内容。保留已验证的前一版本目录可供回退。
 
+新版 Router、Worker、宿主适配器及飞书平台入口运行时持有相邻的 `.writer` 状态锁。同一状态路径已被占用时，第二个实例以 `state_writer_already_running` 退出。进程退出即释放锁，目录内保留空的锁文件供下次使用。离线备份遇到占用会拒绝开始；切换仍须停掉使用旧版入口的写者。
+
 升级先停隔离写者，按[离线恢复](router-rehearsal.md)采集组件清单和状态摘要。在新状态目录恢复副本，仅让新包在该副本上启动。先核原持单、投递凭据、未送消息和附件，再引入新工作。返回原版本前停新写者，通过 `state_bundle rollback` 核对试用期间的写入；新写入先逐笔对账。原生宿主绑定、认证及平台投递记录由相应所有者另核。
 
 ### Hermes 专用会话

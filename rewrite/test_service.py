@@ -66,6 +66,27 @@ class Service(unittest.TestCase):
         process.stderr.close()
 
     @unittest.skipUnless(shutil.which("openssl"), "TLS fixture certificate generator unavailable")
+    def test_daemon_rejects_second_writer_and_cold_restart_recovers_same_state(self):
+        cert,key = self.certificate()
+        token = guid()
+        identities = self.write_config("router-roles.json",{token:"hermes"})
+        primary,url = self.start(identities,cert,key)
+        created = Client(url,token,cert).request("POST","tasks",{"title":"Keep this state","instructions":"Isolated"},
+                                               guid())
+        conflict = subprocess.run([*CLI,"router","--db",self.root/"router.db","--identities",identities,
+                                   "--cert",cert,"--key",key],cwd=ROOT,capture_output=True,text=True,timeout=8)
+        self.assertEqual((conflict.returncode,conflict.stdout,conflict.stderr),
+                         (1,"","state_writer_already_running\n"))
+        self.assertIsNone(primary.poll())
+        self.assertEqual(Client(url,token,cert).request("GET","tasks")["items"][0]["task_id"],created["task_id"])
+        primary.kill()
+        primary.wait(8)
+        self.assertTrue((self.root/"router.db.writer").is_file())
+        _,reopened = self.start(identities,cert,key)
+        task = Client(reopened,token,cert).request("GET","tasks/"+created["task_id"])["task"]
+        self.assertEqual(task["title"],"Keep this state")
+
+    @unittest.skipUnless(shutil.which("openssl"), "TLS fixture certificate generator unavailable")
     def test_cli_tls_restart_preserves_identity_file_and_receipts(self):
         cert,key = self.certificate()
         src = ["trigger","--db",self.root/"source.db","--name","trial"]
