@@ -3,7 +3,7 @@ import json
 import re
 import time
 
-from . import delivery, pool
+from . import cleanup, delivery, pool
 from .storage import Database, encode, guid, require, string, timestamp
 
 SCHEMA = """
@@ -49,7 +49,7 @@ def held_pair(data):
 
 class Orders:
     def __init__(self, path, clock=time.time, poll_seconds=5, lease_seconds=30):
-        self.db = Database(path, SCHEMA + delivery.SCHEMA + pool.SCHEMA)
+        self.db = Database(path, SCHEMA + delivery.SCHEMA + pool.SCHEMA + cleanup.SCHEMA)
         self.clock = clock
         self.poll_seconds = poll_seconds
         self.lease_seconds = lease_seconds
@@ -192,14 +192,19 @@ class Orders:
                            (worker,)).fetchone()
         released = []
         if aid and db.execute("""SELECT 1 FROM reports WHERE worker_id=? AND task_id=? AND assignment_id=?
-            UNION ALL SELECT 1 FROM pool_entries WHERE worker_id=? AND task_id=? AND assignment_id=?""",
-                              (worker, tid, aid, worker, tid, aid)).fetchone():
+            UNION ALL SELECT 1 FROM pool_entries WHERE worker_id=? AND task_id=? AND assignment_id=?
+            UNION ALL SELECT 1 FROM cleanups WHERE worker_id=? AND task_id=? AND assignment_id=? AND done=1""",
+                              (worker, tid, aid) * 3).fetchone():
             released.append(aid)
         reconcile = "no_task"
         if owned or (aid and not released):
             reconcile = "continue" if owned and tuple(owned) == (tid, aid) else "wait"
+        pending = cleanup.rows(db, "worker_id", worker)
+        own_cleanup = next((r for r in pending if r["assignment_id"] == aid), None)
+        if own_cleanup:
+            reconcile = "confirm_cancel" if own_cleanup["kind"] == "task.cancel" else "confirm_transfer"
         return {"session_id": sid, "reconcile": reconcile, "release_assignment_ids": released,
-                "pending_cleanup": [], "cursor": delivery.confirmed(db, worker_actor(worker))}
+                "pending_cleanup": pending, "cursor": delivery.confirmed(db, worker_actor(worker))}
 
     def active_session(self, db, worker, data):
         row = db.execute("SELECT * FROM workers WHERE worker_id=?", (worker,)).fetchone()
@@ -242,8 +247,12 @@ class Orders:
         self.active_session(db, worker, data)
         current = task(db, tid)
         aid = string(data, "assignment_id")
+        if data.get("outcome") in ("cancel_confirmed", "transfer_confirmed"):
+            return cleanup.confirm(db, current, worker, aid, data["outcome"])
         require(current["state"] == "working" and current["assignee_id"] == worker
                 and current["assignment_id"] == aid, 409, "stale_assignment")
+        require(not db.execute("SELECT 1 FROM cleanups WHERE assignment_id=? AND done=0", (aid,)).fetchone(),
+                409, "stale_assignment")
         if data.get("outcome") == "continue_requested":
             return {"recorded": True, "task_state": "working"}
         if data.get("outcome") == "blocked":
@@ -289,12 +298,38 @@ class Orders:
             state = "received"
         materials = db.execute("SELECT * FROM materials WHERE task_id=? ORDER BY rowid", (tid,))
         return {"task": current, "delivery_state": state, "last_report": report or None,
-                "pending_cleanup": [], "materials": [dict(r) for r in materials]}
+                "pending_cleanup": cleanup.rows(db, "task_id", tid), "materials": [dict(r) for r in materials]}
 
     def act(self, db, tid, data):
         current = self.revision(db, tid, data)
         action = data.get("action")
         pooled = current["state"] in ("blocked", "snoozed")
+        if action in ("transfer", "cancel"):
+            require(current["state"] in ("ready", "resuming", "blocked", "snoozed", "working"),
+                    409, "task_not_active")
+            reason = string(data, "reason")
+            target = string(data, "worker_id") if action == "transfer" else None
+            require(target is None or target != current["assignee_id"], 422, "same_assignee")
+            if current["state"] == "working":
+                kind = "task.transfer_out" if target else "task.cancel"
+                cleanup.start(db, tid, current["assignment_id"], current["assignee_id"], kind, reason, target)
+            if pooled:
+                prior = db.execute("SELECT * FROM pool_entries WHERE task_id=? AND active=1", (tid,)).fetchone()
+                if target and prior["source"] != "worker":
+                    cleanup.start(db, tid, prior["assignment_id"], prior["worker_id"], "task.transfer_out",
+                                  reason, target)
+                pool.leave(db, tid)
+            if target:
+                db.execute("UPDATE tasks SET assignee_id=?,state='ready',assignment_id=NULL,revision=revision+1 WHERE task_id=?",
+                           (target, tid))
+                self.dispatch(db, target)
+            elif current["state"] == "working":
+                db.execute("UPDATE tasks SET revision=revision+1 WHERE task_id=?", (tid,))
+                return {"task": task(db, tid), "delivery_state": "pending"}
+            else:
+                db.execute("UPDATE tasks SET state='cancelled',assignment_id=NULL,revision=revision+1 WHERE task_id=?", (tid,))
+            detail = self.details(db, tid)
+            return {"task": detail["task"], "delivery_state": detail["delivery_state"]}
         if action in ("snooze", "resume", "archive_failed") or (action == "close" and pooled):
             require(pooled, 409, "task_not_pooled")
             if action == "snooze":

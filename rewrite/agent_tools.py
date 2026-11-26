@@ -11,7 +11,8 @@ REPORT_TOOL = {
     "description": "Report completion, a blocker, or a request to continue the formal assignment on this input.",
     "inputSchema": {"type": "object", "additionalProperties": False,
                     "properties": {"task_id": {"type": "string"}, "assignment_id": {"type": "string"},
-                                   "outcome": {"enum": ["completed", "blocked", "continue_requested"]},
+                                   "outcome": {"enum": ["completed", "blocked", "continue_requested",
+                                                       "cancel_confirmed", "transfer_confirmed"]},
                                    "summary": {"type": "string", "minLength": 1}},
                     "required": ["task_id", "assignment_id", "summary"]},
 }

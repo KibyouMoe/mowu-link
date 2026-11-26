@@ -66,3 +66,13 @@ class HostAdapter:
                 AND json_extract(receipt,'$.turn_id')=? LIMIT 2""", (session, turn)).fetchall()
         require(len(rows) == 1, 409, "native_turn_unconfirmed")
         return rows[0]["native_id"]
+
+    def cleanup_evidence(self, assignment_id, kind):
+        lookup = getattr(self.host, "cleanup_evidence", None)
+        proof = lookup(self.session, assignment_id, kind) if lookup else None
+        require(isinstance(proof, dict) and proof.get("session") == self.session
+                and proof.get("assignment_id") == assignment_id and proof.get("kind") == kind
+                and proof.get("stopped") is True and proof.get("cleaned") is True
+                and isinstance(proof.get("receipt_id"), str) and proof["receipt_id"].strip(),
+                409, "native_cleanup_unconfirmed")
+        return proof

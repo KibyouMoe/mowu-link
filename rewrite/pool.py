@@ -28,6 +28,8 @@ def enter(db, current, source, reason, now):
     tid, aid, wid = current["task_id"], current["assignment_id"], current["assignee_id"]
     db.execute("INSERT INTO pool_entries VALUES (?,?,?,?,?,?,?,1)", (aid, tid, wid, reason, source, now, now+3600))
     db.execute("UPDATE tasks SET state='blocked',assignment_id=NULL,revision=revision+1 WHERE task_id=?", (tid,))
+    # A shelved cancellation must never subsequently claim the task was cancelled.
+    db.execute("UPDATE cleanups SET done=2 WHERE assignment_id=? AND kind='task.cancel' AND done=0", (aid,))
     db.execute("""UPDATE workers SET held_task_id=NULL,held_assignment_id=NULL,idle_since=NULL
                   WHERE worker_id=? AND held_assignment_id=?""", (wid, aid))
     notify(db, tid, wid if source == "worker" else "router", reason)

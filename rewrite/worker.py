@@ -19,6 +19,13 @@ CREATE TABLE IF NOT EXISTS outbox (
     assignment_id TEXT PRIMARY KEY, body TEXT NOT NULL, receipt TEXT
 );
 CREATE TABLE IF NOT EXISTS chats (message_id TEXT PRIMARY KEY, text TEXT NOT NULL, reply TEXT);
+CREATE TABLE IF NOT EXISTS controls (
+    assignment_id TEXT PRIMARY KEY, kind TEXT NOT NULL, task_id TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS cleanup_reports (
+    assignment_id TEXT NOT NULL, kind TEXT NOT NULL, task_id TEXT NOT NULL, body TEXT NOT NULL,
+    proof TEXT NOT NULL, receipt TEXT, PRIMARY KEY(assignment_id,kind)
+);
 """
 
 
@@ -56,6 +63,8 @@ class Worker:
                 # to retrieve its original W04 receipt even after W01 releases it.
                 for aid in reply["release_assignment_ids"]:
                     db.execute("UPDATE jobs SET stage='released' WHERE stage='accepted' AND assignment_id=?", (aid,))
+                for control in reply["pending_cleanup"]:
+                    self.save_control(db, control["kind"], control)
                 db.execute("UPDATE connection SET cursor=?", (reply["cursor"],))
                 db.execute("DELETE FROM registration WHERE key=?", (attempt["key"],))
             self.flush_reports()
@@ -69,6 +78,8 @@ class Worker:
                 with self.db.transaction() as db:
                     db.execute("INSERT OR IGNORE INTO inbox(delivery_id,frame) VALUES (?,?)",
                                (frame["delivery_id"], encode(frame)))
+                    if frame["kind"] in ("task.cancel", "task.transfer_out"):
+                        self.save_control(db, frame["kind"], frame["payload"])
                 ack = self.router.ack(frame)
                 with self.db.transaction() as db:
                     db.execute("UPDATE connection SET cursor=MAX(cursor,?)", (ack["confirmed_cursor"],))
@@ -83,6 +94,13 @@ class Worker:
     def process(self, frame):
         with self.lock:
             payload = frame["payload"]
+            if frame["kind"] in ("task.cancel", "task.transfer_out"):
+                with self.db.transaction() as db:
+                    record = db.execute("SELECT kind FROM controls WHERE assignment_id=?",
+                                        (payload["assignment_id"],)).fetchone()
+                if not record or record["kind"] != frame["kind"]:
+                    return True
+                return self.adapter.deliver(frame["delivery_id"], {"kind": frame["kind"], **payload}) is not None
             if frame["kind"] == "worker.status_query":
                 self.observe(payload["query_id"])
                 return True
@@ -90,9 +108,17 @@ class Worker:
                 held = self.hold()
                 if (held["held_task_id"], held["held_assignment_id"]) != (payload["task_id"], payload["assignment_id"]):
                     return True
+                with self.db.transaction() as db:
+                    if db.execute("SELECT 1 FROM controls WHERE assignment_id=?", (payload["assignment_id"],)).fetchone():
+                        return True
                 return self.adapter.deliver(frame["delivery_id"], {"kind": "task_update", **payload}) is not None
             require(frame["kind"] == "task.dispatch", 422, "unsupported_delivery")
             return self.take(frame)
+
+    @staticmethod
+    def save_control(db, kind, payload):
+        db.execute("""INSERT INTO controls VALUES (?,?,?) ON CONFLICT(assignment_id) DO UPDATE SET kind=excluded.kind
+                      WHERE controls.kind!='task.transfer_out'""", (payload["assignment_id"], kind, payload["task_id"]))
 
     def observe(self, query):
         observed = {"query_id": query, "session_id": self.session, "busy": self.adapter.busy(), **self.hold()}
@@ -114,6 +140,8 @@ class Worker:
         p = frame["payload"]
         aid, tid = p["assignment_id"], p["task_id"]
         with self.db.transaction() as db:
+            if db.execute("SELECT 1 FROM controls WHERE assignment_id=?", (aid,)).fetchone():
+                return True
             db.execute("""INSERT OR IGNORE INTO jobs(assignment_id,task_id,delivery_id,stage)
                           VALUES (?,?,?,'offered')""", (aid, tid, frame["delivery_id"]))
             job = db.execute("SELECT * FROM jobs WHERE assignment_id=?", (aid,)).fetchone()
@@ -164,6 +192,11 @@ class Worker:
     def report(self, native_id, task_id, assignment_id, summary, outcome="completed"):
         with self.lock:
             origin = self.adapter.origin(native_id)
+            if outcome in ("cancel_confirmed", "transfer_confirmed"):
+                kind = "task.cancel" if outcome == "cancel_confirmed" else "task.transfer_out"
+                require(origin["kind"] == kind and origin["task_id"] == task_id
+                        and origin["assignment_id"] == assignment_id, 403, "wrong_report_origin")
+                return self.confirm_cleanup(task_id, assignment_id, kind, outcome)
             require(origin["kind"] in ("task", "task_update") and origin["task_id"] == task_id
                     and origin["assignment_id"] == assignment_id, 403, "wrong_report_origin")
             require(outcome in ("completed", "blocked", "continue_requested"), 422, "unsupported_outcome")
@@ -189,6 +222,38 @@ class Worker:
                     require(job and job["stage"] == "accepted", 409, "stale_assignment")
                     db.execute("INSERT INTO outbox VALUES (?,?,NULL)", (assignment_id, encode(body)))
             return self.submit(task_id, assignment_id, body)
+
+    def confirm_cleanup(self, tid, aid, kind, outcome):
+        with self.db.transaction() as db:
+            row = db.execute("SELECT * FROM cleanup_reports WHERE assignment_id=? AND kind=?", (aid, kind)).fetchone()
+            if row and row["receipt"]:
+                reply = json.loads(row["receipt"])
+                if "error" in reply:
+                    raise Fault(409, reply["error"])
+                return reply
+            if row:
+                body = json.loads(row["body"])
+            else:
+                lookup = getattr(self.adapter, "cleanup_evidence", None)
+                require(lookup, 409, "native_cleanup_unconfirmed")
+                proof = lookup(aid, kind)
+                body = {"session_id": self.session, "assignment_id": aid, "outcome": outcome}
+                db.execute("INSERT INTO cleanup_reports VALUES (?,?,?,?,?,NULL)",
+                           (aid, kind, tid, encode(body), encode(proof)))
+        try:
+            reply = self.router.request("POST", f"tasks/{tid}/report", body, outcome + "-" + aid)
+            require(reply.get("recorded") is True and reply.get("release_assignment_id") == aid,
+                    409, "cleanup_receipt_mismatch")
+        except Fault as error:
+            if error.code == "stale_assignment":
+                with self.db.transaction() as db:
+                    db.execute("UPDATE cleanup_reports SET receipt=? WHERE assignment_id=? AND kind=?",
+                               (encode({"error": error.code}), aid, kind))
+            raise
+        with self.db.transaction() as db:
+            db.execute("UPDATE cleanup_reports SET receipt=? WHERE assignment_id=? AND kind=?", (encode(reply), aid, kind))
+            db.execute("UPDATE jobs SET stage='released' WHERE assignment_id=? AND stage='accepted'", (aid,))
+        return reply
 
     def submit(self, tid, aid, body):
         completed = body["outcome"] == "completed"
@@ -216,6 +281,14 @@ class Worker:
         for row in pending:
             try:
                 self.submit(row["task_id"], row["assignment_id"], json.loads(row["body"]))
+            except Fault as error:
+                if error.code != "stale_assignment":
+                    raise
+        with self.db.transaction() as db:
+            cleanups = db.execute("SELECT * FROM cleanup_reports WHERE receipt IS NULL").fetchall()
+        for row in cleanups:
+            try:
+                self.confirm_cleanup(row["task_id"], row["assignment_id"], row["kind"], json.loads(row["body"])["outcome"])
             except Fault as error:
                 if error.code != "stale_assignment":
                     raise

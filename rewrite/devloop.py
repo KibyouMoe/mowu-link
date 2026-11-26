@@ -75,14 +75,17 @@ def agent_report(worker, native_id, args):
 
 
 class Loop:
-    def __init__(self, root, clock, host_factory):
+    def __init__(self, root, clock, host_factory, extra_workers=()):
         self.root = Path(root)
         self.orders = Orders(self.root / "router.db", clock, poll_seconds=1)
         worker_token, manager_token = guid(), guid()
-        self.server = serve_loopback(self.orders, {worker_token: worker_actor("oguri"), manager_token: "hermes"})
+        tokens = {name: guid() for name in extra_workers}
+        identities = {token: worker_actor(name) for name, token in tokens.items()}
+        self.server = serve_loopback(self.orders, {**identities, worker_token: worker_actor("oguri"), manager_token: "hermes"})
         url = "http://127.0.0.1:" + str(self.server.server_port)
         self.wire = Client(url, worker_token)
         self.manager_wire = Client(url, manager_token)
+        self.extra_clients = {name: Client(url, token) for name, token in tokens.items()}
         self.native = host_factory(self.root / "fixture-agent.db", "test-agent-session")
         self.hermes_native = FixtureHost(self.root / "fixture-hermes.db", "test-manager-session")
         self.adapter = HostAdapter(self.root / "agent-adapter.db", self.native, self.native.session)
@@ -94,9 +97,9 @@ class Loop:
 
     @classmethod
     @contextmanager
-    def isolated(cls, clock=time.time, host_factory=FixtureHost):
+    def isolated(cls, clock=time.time, host_factory=FixtureHost, extra_workers=()):
         with tempfile.TemporaryDirectory(prefix="mowulink-mainline-") as root:
-            loop = cls(root, clock, host_factory)
+            loop = cls(root, clock, host_factory, extra_workers)
             loop.thread.start()
             try:
                 yield loop
