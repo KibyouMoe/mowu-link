@@ -146,6 +146,28 @@ def verified(snapshot):
     return manifest
 
 
+def export_chat(snapshot, destination, worker, after=0, limit=500, direction=None):
+    if (not isinstance(worker,str) or not worker.strip() or type(after) is not int or not 0<=after<2**63
+            or type(limit) is not int or not 1<=limit<=5000 or direction not in (None,"in","out")):
+        raise ValueError("supply an exact worker, a nonnegative cursor and a valid export range")
+    manifest = verified(snapshot)
+    with output_directory(destination) as stage, closing(readonly(snapshot/"legacy.db")) as db:
+        rows = db.execute("""SELECT id,worker,direction,text,session_id,ts,message_id FROM chat_messages
+            WHERE worker=? AND id>? AND (? IS NULL OR direction=?) ORDER BY id LIMIT ?""",
+            (worker,after,direction,direction,limit+1)).fetchall()
+        path = stage/"messages.jsonl"
+        with open(path,"x",encoding="utf-8",opener=lambda name,flags:os.open(name,flags,0o600)) as stream:
+            for row in rows[:limit]:
+                stream.write(encode(dict(row))+"\n")
+        result = {"snapshot_sha256":manifest["legacy_db_sha256"],"worker":worker,"direction":direction,
+                  "after":after,"count":min(len(rows),limit),"next_cursor":rows[limit-1]["id"] if len(rows)>limit else None,
+                  "messages_sha256":digest(path)}
+        if digest(snapshot/"legacy.db")!=manifest["legacy_db_sha256"]:
+            raise ValueError("snapshot changed during export")
+        (stage/"manifest.json").write_text(encode(result),encoding="utf-8")
+    return result
+
+
 def prepare(snapshot, destination, source_id):
     namespace = UUID(source_id)
     manifest = verified(snapshot)
@@ -344,15 +366,22 @@ def main():
                       ("verify",("snapshot",)),("prepare",("snapshot","destination")),
                       ("reconcile",("snapshot","trial")),
                       ("stage-queue-rollback",("snapshot","trial","review","destination")),
-                      ("rollback",("snapshot","trial","destination"))):
+                      ("rollback",("snapshot","trial","destination")),
+                      ("export-chat",("snapshot","destination"))):
         command = commands.add_parser(op)
         for name in names:
             command.add_argument("--"+name,type=Path,required=True)
         if op == "prepare":
             command.add_argument("--source-id",required=True)
+        elif op == "export-chat":
+            command.add_argument("--worker",required=True)
+            command.add_argument("--after",type=int,default=0)
+            command.add_argument("--limit",type=int,default=500)
+            command.add_argument("--direction",choices=("in","out"))
     args = vars(parser.parse_args())
     command = {"backup":backup,"verify":verified,"prepare":prepare,
-               "reconcile":reconcile,"rollback":rollback,"stage-queue-rollback":stage_queue_rollback}[args.pop("op")]
+               "reconcile":reconcile,"rollback":rollback,"stage-queue-rollback":stage_queue_rollback,
+               "export-chat":export_chat}[args.pop("op")]
     print(encode(command(**args)))
 
 

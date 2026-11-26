@@ -24,6 +24,14 @@ python3 -m rewrite.cutover rollback --snapshot ./snapshot --trial ./trial --dest
 
 `manifest.json` 保存数据库摘要、附件大小及内容摘要、尚待交接事项的计数。`baseline.json` 保存新旧库摘要和待派单号对照表。核验使用离线目录中的完整文件。为校验备份来源，应另外保管输出的摘要及对应版本。备份仅提供拥有该目录的用户访问。
 
+### 导出旧飞书私聊
+
+```sh
+python3 -m rewrite.cutover export-chat --snapshot ./snapshot --worker "$WORKER_ID" --destination ./private-chat-page1
+```
+
+将 `WORKER_ID` 设为旧台账中的工位 ID，即可从已核验的离线库导出旧 `/chat/{worker}/messages` 字段。可用 `--direction in` 或 `--direction out` 筛选，按原 ID 升序分页。下一页用回执中的 `next_cursor` 作为 `--after`，并指定新目录。回执只含计数、位置和摘要，正文写入该用户独占目录里的 `messages.jsonl`，文件权限为 600。敏感的附加元数据仍留在完整原备份。导出不会生成新平台消息或新工单。重做版的日常飞书私聊继续由 Worker 持有。
+
 ## 停止切换和回退
 
 - 有持单、待确认的同伴消息、待答问题、审批、订阅或处理权纠正时，备份照常保留，准备新写者会列出待处理数。指定工作区、特殊时限、紧急优先级、未知元数据或已有投递事实的排队单需要显式对照。历史旧格式任务表有内容时同样需要单独迁移。早期格式 1 快照仍按原标准校验，准备阶段再核本版支持范围。

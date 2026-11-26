@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from threading import Thread
 
-from .cutover import backup, digest, prepare, reconcile, rollback, stage_queue_rollback, verified
+from .cutover import backup, digest, export_chat, prepare, reconcile, rollback, stage_queue_rollback, verified
 from .devloop import FixtureHost, Loop
 from .test_mainline import Clock
 from .orders import Orders
@@ -71,6 +71,41 @@ store._conn.close()
         self.assertEqual(json.loads(history),{"next":self.queued,"report":"summary_received"})
         self.assertEqual((self.restore/"attachments"/self.sha).read_bytes(),(self.attachments/self.sha).read_bytes())
         self.assertEqual(digest(self.legacy),original)
+
+    def test_export_legacy_chat_keeps_original_fields_and_private_scope(self):
+        conversation = json.loads(self.old("""
+store = RouterStore(sys.argv[1])
+store.add_chat_message("oguri","in","原问题", "old-session", 123, "om_same", meta="raw retained in snapshot")
+store.add_chat_message("tamamo","out","other worker body", "other-session", 124, "om_other")
+store.add_chat_message("oguri","out","原回复", "old-session", 125, "om_same")
+store.add_chat_message("oguri","out","new session", "other-thread", 126, "om_next")
+print(json.dumps(store.list_chat_messages("oguri",since_id=0)))
+store.close()
+""",self.legacy))
+        backup(self.legacy,self.attachments,self.snapshot)
+        before = digest(self.snapshot/"legacy.db")
+        def data(folder):
+            path = folder/"messages.jsonl"
+            self.assertEqual(path.stat().st_mode&0o777,0o600)
+            return [json.loads(line) for line in path.read_text().splitlines()]
+        first = self.root/"first-chat"
+        initial = export_chat(self.snapshot,first,"oguri",limit=2)
+        self.assertEqual((initial["count"],initial["next_cursor"]),(2,conversation[1]["id"]))
+        self.assertEqual(initial["messages_sha256"],digest(first/"messages.jsonl"))
+        self.assertEqual(data(first),conversation[:2])
+        second = self.root/"second-chat"
+        end = export_chat(self.snapshot,second,"oguri",after=initial["next_cursor"])
+        self.assertIsNone(end["next_cursor"])
+        self.assertEqual(data(second),conversation[2:])
+        answers = self.root/"answers"
+        export_chat(self.snapshot,answers,"oguri",direction="out")
+        self.assertEqual(data(answers),conversation[1:])
+        self.assertEqual(digest(self.snapshot/"legacy.db"),before)
+        self.assertEqual(digest(self.legacy),before)
+        (self.snapshot/"legacy.db").write_bytes(b"damaged snapshot")
+        with self.assertRaisesRegex(ValueError,"snapshot verification failed"):
+            export_chat(self.snapshot,self.root/"rejected","oguri")
+        self.assertFalse((self.root/"rejected").exists())
 
     def test_old_http_default_order_migrates_with_goal_and_idempotency(self):
         queued_key,archived_key = guid(),guid()

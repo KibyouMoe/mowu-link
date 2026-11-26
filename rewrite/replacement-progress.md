@@ -4,6 +4,8 @@
 
 ## 检查点与证据
 
+旧飞书私聊增加离线专用导出。用实际旧 RouterStore 写两工位记录，按一工位分页、筛选，并逐项比对旧查询的原 ID、方向、消息号、原会话、时间和文本。另一工位记录未导出，原库摘要未变，坏快照拒绝，不触发新 Router 或平台。复跑 `python3 -m unittest -v rewrite.test_cutover.Cutover.test_export_legacy_chat_keeps_original_fields_and_private_scope`。未取生产私聊日志；旧在线旁听的现有使用方另核。
+
 用两版发布包实跑 Worker 与适配器逐个升级、回退。旧包、先升适配器、升完整套、旧包回退返回同一原生回执；升级版 Worker 已保存从原账本查到的会话和回执。各阶段原生账本只记一条，三份原快照摘要未变。[复跑命令](router-rehearsal.md#worker-和适配器逐个升级)与[原始输出](evidence/worker-pair-release-trial.json)。独立进程和回环 TLS 实跑，宿主与平台为夹具。
 
 DSH 真正关闭原生 Agent 后，旧适配器的忙闲、输出游标和目录检查均报 503。原生注册表没有新增实例，解析器没有再调。宿主明确用同会话 ID 恢复出另一个 Agent，旧适配器写入仍被拒，新实例为零输入。复跑 `python3 -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_closed_native_binding_never_resumes_or_sends_to_a_new_agent`。实际安装包的 AgentRegistry、持久会话与私有 Unix 套接字，测试控制器调用原生恢复。没有触发真实模型、飞书或生产会话。
