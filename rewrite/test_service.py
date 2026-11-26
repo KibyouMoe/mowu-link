@@ -185,4 +185,11 @@ class Service(unittest.TestCase):
         self.assertEqual(current.lookup_delivery(did,peer,session=proof["session"]),peer_proof)
         with self.assertRaisesRegex(Fault,"invalid_host_input"):
             current.lookup_delivery(did,dict(peer,to_worker="other"),session=proof["session"])
-        self.assertEqual(len(FixtureHost(native_db,proof["session"]).entries()),2)
+        did = guid()
+        task = {"kind":"task","task_id":guid(),"assignment_id":guid(),"instructions":"Isolated task"}
+        self.assertIsNone(current.lookup_delivery(did,task,session=proof["session"]))
+        task_proof = current.deliver(did,task,session=proof["session"])
+        self.assertEqual(current.lookup_delivery(did,task,session=proof["session"]),task_proof)
+        with self.assertRaisesRegex(Fault,"delivery_conflict"):
+            current.lookup_delivery(did,dict(task,assignment_id=guid()),session=proof["session"])
+        self.assertEqual(len(FixtureHost(native_db,proof["session"]).entries()),3)

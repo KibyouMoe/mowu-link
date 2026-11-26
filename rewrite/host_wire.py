@@ -87,7 +87,7 @@ class RemoteAdapter:
         return self.request("POST","host/deliver",{"delivery_id":did,"payload":payload},native_session=session)["receipt"]
 
     def lookup_delivery(self,did,payload,*,session):
-        route = "host/find-peer" if payload["kind"]=="peer" else "host/find-chat"
+        route = {"peer":"host/find-peer","task":"host/find-task"}.get(payload["kind"],"host/find-chat")
         return self.request("POST",route,{"delivery_id":did,"payload":payload},native_session=session)["receipt"]
 
     def origin(self, native_id, *, session=None):
@@ -167,6 +167,13 @@ def serve_adapter(adapter, worker_id, identities, address, context):
                 did = string(body,"delivery_id")
                 require(valid_guid(did) and isinstance(payload,dict) and payload.get("kind")=="peer"
                         and payload.get("to_worker")==worker_id and valid_guid(payload.get("message_id")),
+                        422,"invalid_host_input")
+                result = {"receipt":adapter.lookup_delivery(did,payload,session=adapter.bound_session())}
+            case "POST","/v1/host/find-task":
+                payload = body.get("payload")
+                did = string(body,"delivery_id")
+                require(isinstance(payload,dict) and payload.get("kind")=="task" and valid_guid(did)
+                        and valid_guid(payload.get("task_id")) and valid_guid(payload.get("assignment_id")),
                         422,"invalid_host_input")
                 result = {"receipt":adapter.lookup_delivery(did,payload,session=adapter.bound_session())}
             case "POST","/v1/host/origin":

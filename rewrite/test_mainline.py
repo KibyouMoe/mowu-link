@@ -281,6 +281,14 @@ class Mainline(unittest.TestCase):
         lookup = self.loop.native.lookup
         self.loop.native.lookup = lambda session, did: None
         self.w.poll()
+        original_adapter = self.w.adapter
+        fresh = FixtureHost(self.loop.root/"replacement-inputs.db",self.loop.native.session)
+        self.w.adapter = HostAdapter(self.loop.root/"replacement-adapter.db",fresh,fresh.session)
+        self.w.poll()
+        self.w.poll()
+        self.assertFalse(fresh.entries())
+        self.assertEqual(self.w.hold()["held_task_id"],tid)
+        self.w.adapter = original_adapter
         native_id = self.loop.native.entries()[0][1]["native_id"]
         with self.w.db.transaction() as db:
             self.assertEqual(db.execute("SELECT host_state FROM jobs").fetchone()[0], "unknown")
@@ -305,7 +313,7 @@ class Mainline(unittest.TestCase):
                 native = "alternate/" + did
                 self.inputs.setdefault(native, payload)
                 return {"native_id":native,"session":self.bound_session(),"delivery_id":did,
-                        "digest":hashlib.sha256(encode(payload).encode()).hexdigest()}
+                        "digest":hashlib.sha256(encode(payload).encode()).hexdigest(),"turn_id":native}
             def origin(self, native_id, *, session=None):
                 if session is not None:
                     assert session == self.bound_session()

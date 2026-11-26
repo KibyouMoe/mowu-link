@@ -153,8 +153,10 @@ class HostAdapter:
                 # This host explicitly refused before entering the native write.
                 # All uncertain writes retain their original intent for lookup only.
                 with self.db.transaction() as db:
-                    db.execute("DELETE FROM intents WHERE delivery_id=? AND digest=? AND receipt IS NULL",(did,digest))
-                return None
+                    removed = db.execute("""DELETE FROM intents WHERE delivery_id=?
+                                          AND digest=? AND receipt IS NULL""",(did,digest)).rowcount
+                require(removed,409,"host_delivery_unconfirmed")
+                raise Fault(409,"task_delivery_deferred",True) from error
         else:
             receipt = self.lookup_receipt(did,payload,digest)
         return self.record_receipt(did,payload,digest,receipt)

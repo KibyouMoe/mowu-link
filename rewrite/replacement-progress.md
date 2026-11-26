@@ -4,6 +4,8 @@
 
 ## 检查点与证据
 
+W03 后断在首次原生收件回程时，Worker 已保留原派发与宿主待核状态。隔离测试切到同名空账本，重复轮询两次无新输入；恢复旧账本后查原收件号，工单仍由原 Worker 持有。TLS 查回端口核对收件号、会话及原派发内容。实际 DSH 在宿主尚未写入前明确拒绝忙时派发，原私聊结束后才收到正式单；若先取消，只收到取消。复跑 `python3 -m unittest -v rewrite.test_mainline rewrite.test_service rewrite.test_dsh_native_loop.NativeLoop.test_native_race_after_w03_never_prequeues_a_formal_task`。
+
 `/queue` 实测在本地 HTTP 发出前已将投递标为待核。原宿主收件后丢回执，换到同会话号的空账本后两次复核均无写入，接回原账本查到原输入号。仅各有一条待核与恢复提示。真实 DSH SDK 的排队测试同时验证两条消息依原次序进入独立回合。复跑 `python3 -m unittest -v rewrite.test_worker_commands rewrite.test_dsh_sdk`。平台及模型使用夹具。
 
 Worker 后台遇到临时 SQLite 写入错误会继续轮询。隔离测试注入一次锁错误，原线程恢复后接管待派工单，宿主只有一条输入。另用实际 HTTP 返回非 JSON、缺会话、数组和损坏的 SSE，核对宿主状态标为待核，Router 连接保持，恢复后可继续接单。Router 暂断时同伴状态保留本地 Router 收件时间，对端两层留空。复跑 `python3 -m unittest -v rewrite.test_link_health rewrite.test_peers`。Router 与 Worker 运行于本机隔离环境，故障与宿主用夹具。

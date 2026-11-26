@@ -251,6 +251,39 @@ class Worker:
             if error.code != "stale_query":
                 raise
 
+    def deliver_assignment(self, did, payload):
+        aid = payload["assignment_id"]
+        session = self.adapter.bound_session()
+        require(isinstance(session,str) and session.strip(),502,"invalid_host_observation")
+        if self.assignment_session(aid) not in (None,session):
+            return False
+        with self.db.transaction() as db:
+            first = db.execute("""UPDATE jobs SET host_state='unknown'
+                                  WHERE assignment_id=? AND stage='accepted' AND host_state='ready'""",(aid,)).rowcount
+        if first:
+            try:
+                proof = self.adapter.deliver(did,payload,session=session)
+            except Fault as error:
+                if not (error.status==409 and error.code=="task_delivery_deferred" and error.retryable):
+                    raise
+                # The original adapter confirmed refusal before any native input.
+                with self.db.transaction() as db:
+                    db.execute("UPDATE jobs SET host_state='ready' WHERE assignment_id=?",(aid,))
+                return False
+        else:
+            # Receipts lost after W03 may be looked up even through a reconnected adapter.
+            # An empty ledger is not evidence that the earlier native write never happened.
+            proof = self.adapter.lookup_delivery(did,payload,session=session)
+        if not proof:
+            return False
+        digest = hashlib.sha256(encode(payload).encode()).hexdigest()
+        require(isinstance(proof,dict) and proof.get("session")==session and proof.get("delivery_id")==did
+                and proof.get("digest")==digest and isinstance(proof.get("native_id"),str) and proof["native_id"]
+                and isinstance(proof.get("turn_id"),str) and proof["turn_id"],409,"host_receipt_mismatch")
+        with self.db.transaction() as db:
+            db.execute("UPDATE jobs SET host_state='received' WHERE assignment_id=?",(aid,))
+        return True
+
     def take(self, frame):
         p = frame["payload"]
         aid, tid = p["assignment_id"], p["task_id"]
@@ -290,17 +323,14 @@ class Worker:
                     and reply.get("holder") == {"kind": "worker", "worker_id": self.worker_id},
                     409, "accept_receipt_mismatch")
         with self.db.transaction() as db:
-            db.execute("UPDATE jobs SET stage='accepted' WHERE assignment_id=? AND stage='offered'",(aid,))
+            db.execute("""UPDATE jobs SET stage='accepted',host_state='ready'
+                          WHERE assignment_id=? AND stage='offered'""",(aid,))
             notice_id = "task-"+job["delivery_id"]
             if not db.execute("SELECT 1 FROM display_events WHERE event_id=?",(notice_id,)).fetchone():
                 # W03 confirms this Worker has the order. The host receipt is recorded independently below.
                 text = f"溪流派单 · {p['title']}\n已接单，正在交给宿主。\n{p['instructions']}\n{tid}"
                 display.append(db,{"event_id":notice_id,"kind":"task","session":"","turn_id":"","text":text})
-        receipt = self.send_task_input(job["delivery_id"], {"kind": "task", **p})
-        with self.db.transaction() as db:
-            db.execute("UPDATE jobs SET host_state=? WHERE assignment_id=?",
-                       ("received" if receipt else "unknown", aid))
-        return receipt is not None
+        return self.deliver_assignment(job["delivery_id"], {"kind": "task", **p})
 
     def chat(self, message_id, text, attachment_ids=None, attachment_kinds=None):
         ids = [] if attachment_ids is None else attachment_ids
