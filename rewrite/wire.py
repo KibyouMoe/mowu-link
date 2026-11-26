@@ -9,7 +9,7 @@ from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlsplit
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Request, build_opener
 
-from . import approvals, attachments, delivery, legacy_history, legacy_peers, links, messages, peers, pool, questions
+from . import admission, approvals, attachments, delivery, legacy_history, legacy_peers, links, messages, peers, pool, questions
 from .orders import task, worker_actor
 from .storage import Fault, encode, require
 
@@ -53,6 +53,11 @@ def route(orders, actor, method, path, body, headers, approval_workers=frozenset
         require(not url.query,422,"unknown_status_filter")
         with orders.db.transaction() as db:
             return 200,"application/json",delivery.status(db,actor)
+    if len(parts)==4 and parts[0]=="workers" and parts[2]=="admission-handoffs":
+        require(actor==worker_actor(parts[1]),403,"forbidden")
+        require(method=="PUT" and not url.query,422,"invalid_handoff")
+        with orders.db.transaction() as db:
+            return 200,"application/json",admission.change(db,orders,parts[1],parts[3],body)
     orders.tick()
     if method=="GET" and len(parts)==3 and parts[:2]==["peers","messages"]:
         require(actor.startswith("worker/"),403,"forbidden")

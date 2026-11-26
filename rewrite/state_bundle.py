@@ -49,6 +49,10 @@ OPTIONAL_AGENT_PENDING = {
     "codex_public_events": ({"codex_display_live"},"SELECT COUNT(*) FROM codex_display_live WHERE sent=0"),
     "codex_public_turns": ({"codex_display_turns"},"SELECT COUNT(*) FROM codex_display_turns WHERE sent=0"),
 }
+WORKER_ADMISSION_PENDING = {
+    "local_admission_handoffs": ({"native_handoff_admission"},"""SELECT COUNT(*) FROM native_handoff_admission
+        WHERE state IN ('beginning','frozen','ending')"""),
+}
 FEISHU_NATIVE_PENDING = {
     "platform_inputs": ({"platform_events"},"SELECT COUNT(*) FROM platform_events WHERE state='pending'"),
     "platform_answers": ({"card_answers"},"SELECT COUNT(*) FROM card_answers WHERE state='pending'"),
@@ -208,6 +212,9 @@ def audit_handoff(snapshot,expected):
         has_approvals = db.execute("SELECT 1 FROM sqlite_schema WHERE name='native_approvals' AND type='table'").fetchone()
         open_approvals = dict(db.execute("""SELECT worker_id,COUNT(*) FROM native_approvals WHERE closed_at IS NULL
                                          GROUP BY worker_id""")) if has_approvals else None
+        has_handoffs = db.execute("SELECT 1 FROM sqlite_schema WHERE name='admission_handoffs' AND type='table'").fetchone()
+        handoffs = dict(db.execute("""SELECT worker_id,COUNT(*) FROM admission_handoffs
+            WHERE released_at IS NULL GROUP BY worker_id""")) if has_handoffs else {}
     workers,issues = [],[]
     for label in sorted(labels):
         role,wid = component(label)
@@ -220,6 +227,7 @@ def audit_handoff(snapshot,expected):
             sid = db.execute("SELECT session FROM connection WHERE slot=1").fetchone()
             pending = db.execute("SELECT COUNT(*) FROM outbox WHERE receipt IS NULL").fetchone()[0]
             session_pending = pending_counts(db,WORKER_NATIVE_PENDING)
+            session_pending.update({k:v for k,v in pending_counts(db,WORKER_ADMISSION_PENDING).items() if v is not None})
             bound = None
             if local and db.execute("SELECT 1 FROM sqlite_schema WHERE name='assignment_sessions'").fetchone():
                 bound = db.execute("SELECT session FROM assignment_sessions WHERE assignment_id=?",
@@ -249,6 +257,7 @@ def audit_handoff(snapshot,expected):
         session_pending["router_waiting_deliveries"] = frames.get("worker/"+wid,0)
         session_pending["router_waiting_questions"] = questions.get(wid,0) if questions is not None else None
         session_pending["router_registration_unconfirmed"] = int(wid not in sessions)
+        session_pending["router_admission_handoffs"] = handoffs.get(wid,0)
         workers.append({"worker_id":wid,"worker_assignment":local_ids,"router_assignment":remote_ids,
                         "unconfirmed_reports":pending,"issues":problems,"native_session_pending":session_pending,
                         "native_session_ledger_clear":not problems and all(count==0 for count in session_pending.values())})

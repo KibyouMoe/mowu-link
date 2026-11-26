@@ -1,0 +1,37 @@
+{
+  "handoff_id": "4cc71943-98e6-4c70-a7ba-57a8aab0ddac",
+  "recovered": [
+    "begin",
+    "end"
+  ],
+  "online_during_pause": true,
+  "paused_private_delivery": "om_held_by_platform",
+  "native_inputs": [
+    {
+      "delivery_id": "a577e2c3-f0bc-4290-8548-ec9a72e48e93",
+      "digest": "ac5ec80cc4c3a1fa32e56de568201276ed45d40c404e81b2feaa5513d05dcb65",
+      "native_id": "f25786b2-8723-40fb-8886-7f3355280a08",
+      "session": "test-agent-session",
+      "turn_id": "0659523a-819d-403a-9fee-014e2d2c76cd"
+    },
+    {
+      "delivery_id": "chat-om_held_by_platform",
+      "digest": "bb94f2b2e16781fee5c5558395b86b5f780ea021c9bf741ab7d906ca948d65c0",
+      "native_id": "64e6e3ea-44da-4110-b889-6c9fc9605b7d",
+      "session": "test-agent-session",
+      "turn_id": "c961317f-7f90-480d-8242-350b26c12cb7"
+    },
+    {
+      "delivery_id": "cf12fa55-281d-4155-8d7e-fc14f1627575",
+      "digest": "afadb6dbc29d5cc121fd9982cf56c712c9bfdd2ed7f873dd131df6f29f5dff33",
+      "native_id": "e5912d55-2fb2-4018-8a26-125952727273",
+      "session": "test-agent-session",
+      "turn_id": "6dac1f9c-cdb7-405c-802f-29ddf991cbd2"
+    }
+  ],
+  "task_id": "65eb4679-4890-4f19-90d8-7bafc2daf54c",
+  "held_assignment_id": "bbdc622a-a4c5-4503-b956-8ccb47373038",
+  "boundary": "Real isolated Router/Worker HTTP and SQLite; platform and native host fixtures",
+  "successful_repeats": 18,
+  "tests_per_repeat": 3
+}

@@ -7,7 +7,7 @@ from urllib.parse import urlencode, urlsplit
 from urllib.error import URLError
 from uuid import NAMESPACE_URL, uuid5
 
-from . import display, links, peer_files, peer_retry, queued_chat, user_questions, worker_commands, worker_media
+from . import display, links, peer_files, peer_retry, queued_chat, user_questions, worker_commands, worker_handoff, worker_media
 from .messages import valid_guid
 from .storage import Fault, encode, require, string
 from .wire import serve_authenticated
@@ -40,6 +40,7 @@ class WorkerService:
         for flag in HOST_CAPABILITY_FLAGS.values():
             setattr(self,flag,False)
         self.native_command_lock = Lock()
+        self.platform_admission_lock = Lock()
         self.host_session = ""
         self.clock, self.probe_interval = clock, probe_interval
         self.next_probe = 0
@@ -78,8 +79,10 @@ class WorkerService:
             self.host_observed_at = self.clock()
             links.observe(w,"adapter",self.adapter_connected,self.host_session)
             self.next_probe = self.clock()+self.probe_interval
-            queued_chat.advance(self)
-            worker_commands.advance_compact(self)
+            with self.platform_admission_lock:
+                if not worker_handoff.active(w):
+                    queued_chat.advance(self)
+                    worker_commands.advance_compact(self)
         try:
             if not self.router_connected:
                 if self.clock() < self.next_router_attempt:
@@ -88,7 +91,8 @@ class WorkerService:
                 links.observe(w,"router",True,self.host_session)
                 self.router_connected = True
                 self.router_observed = True
-            links.publish(w,heartbeat=probe and not self.adapter_connected)
+            worker_handoff.recover(w)
+            links.publish(w,heartbeat=probe and (not self.adapter_connected or worker_handoff.active(w) is not None))
             w.poll()
             self.last_error = None if self.adapter_connected else self.host_error
         except (URLError,OSError):
@@ -121,6 +125,7 @@ class WorkerService:
     def status(self):
         now = self.clock()
         connected = self.adapter_connected
+        handoff = worker_handoff.active(self.worker)
         return {"worker_id":self.worker.worker_id,"router_connected":self.router_connected,
                 "router_observed":self.router_observed,"adapter_connected":connected,
                 "last_error":self.last_error,"host_error":self.host_error,
@@ -130,10 +135,29 @@ class WorkerService:
                 "native_capabilities":self.host_capabilities if connected else None,
                 "host_observation_age_seconds":None if self.host_observed_at is None else max(0,now-self.host_observed_at),
                 "router_retry_in_seconds":None if self.router_connected or not self.router_observed
-                else max(0,self.next_router_attempt-now),**self.worker.hold()}
+                else max(0,self.next_router_attempt-now),**self.worker.hold(),
+                **({"handoff":handoff} if handoff else {})}
 
     def handle(self, actor, method, path, body, _headers):
+        if actor=="platform/"+self.worker.worker_id and method=="POST" and path in (
+                "/v1/worker/chat","/v1/worker/command","/v1/worker/trainer-answer"):
+            with self.platform_admission_lock:
+                if worker_handoff.active(self.worker):
+                    raise Fault(503,"native_handoff_in_progress",True)
+                return self.route(actor,method,path,body,_headers)
+        return self.route(actor,method,path,body,_headers)
+
+    def route(self, actor, method, path, body, _headers):
         w = self.worker
+        if path=="/v1/worker/handoff-admission":
+            require(actor=="handoff/"+w.worker_id,403,"forbidden")
+            require(method=="PUT",405,"invalid_handoff")
+            try:
+                with self.platform_admission_lock:
+                    reply = worker_handoff.request(w,body)
+            except (OSError,URLError):
+                raise Fault(503,"handoff_receipt_unconfirmed",True) from None
+            return 200,"application/json",reply
         if path.startswith("/v1/worker/media/"):
             return worker_media.route(w,actor,method,path,body,_headers)
         if path.startswith("/v1/worker/approvals/"):

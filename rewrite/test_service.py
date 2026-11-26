@@ -295,7 +295,7 @@ class Service(unittest.TestCase):
     def test_three_process_worker_chat_and_assignment(self):
         from .devloop import FixtureHost
         cert,key = self.certificate()
-        router_token,manager,adapter_token,callback,platform,ops = (guid() for _ in range(6))
+        router_token,manager,adapter_token,callback,platform,ops,handoff = (guid() for _ in range(7))
         ids = self.write_config("routes.json",{router_token:"worker/dev",manager:"hermes"})
         _, router = self.start(ids,cert,key)
         native_db = self.root/"native.db"
@@ -304,7 +304,8 @@ class Service(unittest.TestCase):
                                "fixture-adapter",["--worker-id","dev","--fixture-db",native_db,"--session",session])
         def target(name,url,token):
             return self.write_config(name,{"url":url,"token":token,"ca_file":str(cert)})
-        worker_roles = self.write_config("worker.json",{callback:"adapter/dev",platform:"platform/dev",ops:"ops/dev"})
+        worker_roles = self.write_config("worker.json",{callback:"adapter/dev",platform:"platform/dev",
+                                                        ops:"ops/dev",handoff:"handoff/dev"})
         worker_flags = ["--worker-id","dev","--router-connection",target("to-router",router,router_token),
                         "--adapter-connection",target("to-host",adapter,adapter_token)]
         worker_process,gateway = self.start(worker_roles,cert,key,"worker",[*worker_flags,"--adapter-session",session])
@@ -313,7 +314,12 @@ class Service(unittest.TestCase):
         first = chat.request("POST","worker/chat",msg)
         self.assertEqual(first,chat.request("POST","worker/chat",msg))
         manager_client = Client(router,manager,cert)
+        handoff_id = guid()
+        cli = ("handoff-admission","--connection",target("to-handoff",gateway,handoff),"--handoff-id",handoff_id)
+        self.assertEqual(self.command(*cli,"begin"),{"handoff_id":handoff_id,"state":"frozen"})
         tid = manager_client.request("POST","tasks",{"assignee_id":"dev","title":"Scope","instructions":"Send one result"},guid())["task_id"]
+        self.assertIsNone(manager_client.request("GET","tasks/"+tid)["task"]["assignment_id"])
+        self.assertEqual(self.command(*cli,"end"),{"handoff_id":handoff_id,"state":"released"})
         native = FixtureHost(native_db,session)
         deadline = time.monotonic()+32
         while time.monotonic()<deadline:

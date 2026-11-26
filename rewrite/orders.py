@@ -3,7 +3,7 @@ import json
 import re
 import time
 
-from . import approvals, attachments, cleanup, delivery, legacy_history, legacy_peers, links, messages, peers, pool, questions
+from . import admission, approvals, attachments, cleanup, delivery, legacy_history, legacy_peers, links, messages, peers, pool, questions
 from .storage import Database, Fault, encode, guid, require, string, timestamp
 
 SCHEMA = """
@@ -51,7 +51,7 @@ class Orders:
     def __init__(self, path, clock=time.time, poll_seconds=5, lease_seconds=30):
         self.db = Database(path, SCHEMA + delivery.SCHEMA + pool.SCHEMA + cleanup.SCHEMA + questions.SCHEMA
                            + attachments.SCHEMA + messages.SCHEMA + peers.SCHEMA + links.ROUTER_SCHEMA
-                           + legacy_history.SCHEMA + legacy_peers.SCHEMA + approvals.SCHEMA)
+                           + legacy_history.SCHEMA + legacy_peers.SCHEMA + approvals.SCHEMA + admission.SCHEMA)
         self.clock = clock
         self.poll_seconds = poll_seconds
         self.lease_seconds = lease_seconds
@@ -91,15 +91,15 @@ class Orders:
         delivery.enqueue(db, worker_actor(row["worker_id"]), "worker.status_query",
                          {"worker_id": row["worker_id"], "query_id": qid})
 
-    def available(self, row):
+    def available(self, db, row):
         now = self.clock()
         return (row and now - row["last_seen"] < self.lease_seconds and not row["busy"]
                 and not row["held_task_id"] and row["idle_since"] is not None
-                and now - row["idle_since"] >= 10)
+                and now - row["idle_since"] >= 10 and not admission.active(db,row["worker_id"]))
 
     def dispatch(self, db, worker_id):
         row = db.execute("SELECT * FROM workers WHERE worker_id=?", (worker_id,)).fetchone()
-        if not self.available(row):
+        if not self.available(db,row):
             return
         if db.execute("SELECT 1 FROM tasks WHERE assignee_id=? AND assignment_id IS NOT NULL",
                       (worker_id,)).fetchone():
@@ -175,6 +175,8 @@ class Orders:
                       "held_assignment_id": r["held_assignment_id"], "last_seen_at": timestamp(r["last_seen"])}
                      for r in page]
             for item in items:
+                if admission.active(db,item["worker_id"]):
+                    item["admission_paused"] = True
                 link = db.execute("""SELECT l.up FROM worker_adapter_links l JOIN workers w ON w.worker_id=l.worker_id
                                   AND w.session_id=l.session WHERE l.worker_id=?""",(item["worker_id"],)).fetchone()
                 item["adapter_connected"] = bool(link["up"]) if link else None
@@ -210,6 +212,8 @@ class Orders:
 
     def session(self, db, worker, data):
         sid = string(data, "session_id")
+        frozen = admission.active(db,worker)
+        require(not frozen or frozen["session_id"]==sid,409,"worker_handoff_active")
         tid, aid = held_pair(data)
         db.execute("""INSERT INTO workers(worker_id,session_id,last_seen,held_task_id,held_assignment_id)
                       VALUES (?,?,?,?,?) ON CONFLICT(worker_id) DO UPDATE SET
@@ -274,7 +278,7 @@ class Orders:
         aid = string(data, "assignment_id")
         require(current["assignee_id"] == worker and current["assignment_id"] == aid, 409, "stale_assignment")
         require(current["revision"] == data.get("revision"), 409, "revision_conflict")
-        require(current["state"] == "ready" and self.available(row), 409, "worker_not_available")
+        require(current["state"] == "ready" and self.available(db,row), 409, "worker_not_available")
         db.execute("UPDATE tasks SET state='working',revision=revision+1 WHERE task_id=?", (tid,))
         db.execute("UPDATE workers SET idle_since=NULL WHERE worker_id=?", (worker,))
         return {"accepted": True, "holder": {"kind": "worker", "worker_id": worker}, "assignment_id": aid}

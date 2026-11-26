@@ -52,7 +52,7 @@ def serve(args,stack):
     identities = private_config(args.identities)
     if not isinstance(identities, dict) or not identities or any(
             not isinstance(k, str) or not k or not isinstance(v,str)
-            or not (v == "hermes" or (v.startswith(("worker/","trigger/","adapter/","ops/","platform/","approver/"))
+            or not (v == "hermes" or (v.startswith(("worker/","trigger/","adapter/","ops/","platform/","approver/","handoff/"))
                                      and v.split("/",1)[1]))
             for k,v in identities.items()):
         raise ValueError("invalid identity registration")
@@ -183,6 +183,10 @@ def main():
     source_status.add_argument("--db",required=True,type=Path)
     inbox_status = apps.add_parser("delivery-status",help="read Router delivery counts for this connection's identity")
     inbox_status.add_argument("--connection",required=True,type=Path)
+    handoff = apps.add_parser("handoff-admission",help="hold or release dispatch during an isolated handoff")
+    handoff.add_argument("--connection",required=True,type=Path)
+    handoff.add_argument("--handoff-id",required=True)
+    handoff.add_argument("action",choices=("begin","end"))
     status = apps.add_parser("worker-status",help="read an isolated Worker's last connection observations")
     status.add_argument("--connection",required=True,type=Path)
     status.add_argument("--worker-id",required=True)
@@ -205,6 +209,15 @@ def main():
     args = parser.parse_args()
     if args.component == "trigger":
         print(encode(source(args)))
+    elif args.component=="handoff-admission":
+        if not valid_guid(args.handoff_id):
+            parser.error("expected a handoff ID")
+        try:
+            result = connection(args.connection).request("PUT","worker/handoff-admission",
+                    {"handoff_id":args.handoff_id,"action":args.action})
+        except Fault as error:
+            parser.exit(1,encode({"error":error.code})+"\n")
+        print(encode(result))
     elif args.component in ("trigger-status","delivery-status"):
         try:
             status = archive_status(args.db) if args.component=="trigger-status" else connection(

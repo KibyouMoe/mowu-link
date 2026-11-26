@@ -113,6 +113,20 @@ DSH 的 `/stop` 可中断当前已确认的单条普通对话回合，宿主收�
 
 启动 Worker 时可加 `--adapter-session <原生会话ID>`，将适配器访问固定到该会话。固定请求使用独立路径，适配器逐次比对。Worker 首次收到同一会话的有效忙闲回包后，保存这个绑定。此后删除参数或直接改为另一个会话会拒绝启动。适配器投递库也固定到原生会话。隔离换绑用新的状态副本和目标适配器库，见[停写换绑演练](router-rehearsal.md#隔离工位冷换原生会话)。
 
+### 原生交接窗口
+
+为独立测试工位在 Worker 的身份配置里明确登记 `handoff/<Worker ID>`，使用此角色的专用连接文件。只读 `ops`、平台和其他 Worker 身份均无此权限。为一次交接生成一个 UUID，开始、查询故障和解除都沿用此号。
+
+```sh
+python3 -B -m rewrite.service handoff-admission --connection "$HANDOFF_CONNECTION" --handoff-id "$HANDOFF_ID" begin
+python3 -B -m rewrite.service worker-status --connection "$STATUS_CONNECTION" --worker-id "$WORKER_ID"
+python3 -B -m rewrite.service handoff-admission --connection "$HANDOFF_CONNECTION" --handoff-id "$HANDOFF_ID" end
+```
+
+开始回包为 `frozen` 时，Router 已停止为此工位预约新派发。已有预约、持单、待处理业务或正在运行的原生回合会拒绝开始。工位在线状态仍持续更新。窗口内飞书入站与同伴信各自保留在原队列，待解除后按原号进入工位。确认 `released` 后还要等一次新的忙闲观测，再从头计算连续空闲时间。回包丢失时 Worker 保留原交接号，重开或重试使用同一号恢复。升级回退及停机换绑前先确认已解除。
+
+此入口用于交接前暂停和恢复派发。原生会话仍按固定绑定运行，飞书 `/resume` 运行中切换待接。
+
 新版接管的新派发在发出 W03 前固定其空闲宿主会话。接管回包到达后若会话已变，工位保留原持单，原派发、更新、取消和原题答复都不交给另一会话。另一会话的报告不能触发 W04。升级前的在途旧派发没有这份本地记录，演练时先完成旧单对账，并保留原工位的显式会话配置。
 
 正式派发首次尝试前，Worker 先写入宿主收件待核状态。之后只用原派发的投递号向原会话查凭据。空账本查不到记录时保留持单。仅在适配器确认宿主忙碌且未写入时，才允许等待下一次接收。先升级适配器以提供新查回端口，再升级 Worker，保留两个状态目录。
