@@ -47,7 +47,11 @@ class Service(unittest.TestCase):
         self.addCleanup(self.stop,process)
         ready = Queue()
         Thread(target=lambda: ready.put(process.stdout.readline()),daemon=True).start()
-        info = json.loads(ready.get(timeout=10))
+        line = ready.get(timeout=10)
+        if not line:
+            process.wait(timeout=5)
+            self.fail(process.stderr.read()[-1500:])
+        info = json.loads(line)
         self.assertTrue(info["tls"])
         if role=="router":
             self.assertEqual(info["dispatch_draining"],"--drain-dispatch" in extra)

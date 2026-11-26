@@ -41,6 +41,7 @@ ACCESS_ALLOWED_ACE_TYPE = 0
 ACCESS_DENIED_ACE_TYPE = 1
 WIN_LOCAL_SYSTEM_SID = 22
 WIN_BUILTIN_ADMINISTRATORS_SID = 26
+WIN_CREATOR_OWNER_RIGHTS_SID = 71
 
 
 class AclSize(ct.Structure):
@@ -93,7 +94,10 @@ def private_file(fd):
             entry = AccessEntry.from_address(address.value)
             if entry.kind==ACCESS_DENIED_ACE_TYPE:
                 continue
-            if entry.kind!=ACCESS_ALLOWED_ACE_TYPE or not trusted(address.value+AccessEntry.sid_start.offset):
+            sid = address.value+AccessEntry.sid_start.offset
+            # Owner Rights grants only to the current owner, already checked above.
+            if entry.kind!=ACCESS_ALLOWED_ACE_TYPE or not (
+                    trusted(sid) or advapi.IsWellKnownSid(sid,WIN_CREATOR_OWNER_RIGHTS_SID)):
                 return False
         return True
     finally:
