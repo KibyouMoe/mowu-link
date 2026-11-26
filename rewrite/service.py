@@ -46,6 +46,7 @@ def server(args):
     address = (args.bind,args.port)
     worker_service = None
     callbacks = nullcontext()
+    public_output = nullcontext()
     if args.component == "router":
         listener = serve_router(Orders(args.db), identities, address, ctx)
     elif args.component == "fixture-adapter":
@@ -57,18 +58,20 @@ def server(args):
         media = NativeFiles(args.media_cache,connection(args.worker_connection)) if args.media_cache else None
         listener = serve_adapter(HostAdapter(args.db,native,native.session,media),args.worker_id,identities,address,ctx)
     elif args.component == "dsh-adapter":
+        from .dsh_display import publishing
         from .dsh_port import DshHost, tool_listener
         from .native_files import NativeFiles
         client = connection(args.worker_connection)
         adapter = HostAdapter(args.db,DshHost(args.runtime_dir),args.session,NativeFiles(args.runtime_dir/"media",client))
         callbacks = tool_listener(args.runtime_dir,adapter,client)
+        public_output = publishing(adapter,client,args.worker_id)
         listener = serve_adapter(adapter,args.worker_id,identities,address,ctx)
     else:
         worker = Worker(args.db,args.worker_id,connection(args.router_connection),
                         RemoteAdapter(connection(args.adapter_connection)))
         worker_service = WorkerService(worker)
         listener = worker_service.listen(identities,address,ctx)
-    with listener, callbacks:
+    with listener, callbacks, public_output:
         def stop(_number,_frame):
             Thread(target=listener.shutdown, daemon=True).start()
         signal.signal(signal.SIGTERM,stop)

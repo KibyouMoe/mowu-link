@@ -4,6 +4,7 @@ import http from 'node:http';
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { admitMedia } from './media.mjs';
+import { baseline, displayImage, nextDisplay } from './display.mjs';
 
 const tools = JSON.parse(readFileSync(new URL('../../agent-toolset.json', import.meta.url)));
 const sha = value => createHash('sha256').update(value).digest('hex');
@@ -82,6 +83,8 @@ export async function bindHost(ctx, session, directory) {
   const controller = ctx.get('sessionController');
   const {agent} = await controller.resolveAgent(session);
   check(agent?.session?.id === session, 'wrong_native_session');
+  const displayStart = await baseline(ctx,agent);
+  const imageCache = {};
   async function bound() {
     const live = await controller.resolveAgent(session);
     check(live.agent === agent && agent.session.id === session
@@ -92,6 +95,9 @@ export async function bindHost(ctx, session, directory) {
     async handle(request) {
       check(request.session === session, 'wrong_native_session');
       await bound();
+      if (request.operation === 'display-start') return displayStart;
+      if (request.operation === 'display-next') return nextDisplay(ctx,agent,request);
+      if (request.operation === 'display-image') return displayImage(ctx,agent,request,imageCache);
       if (request.operation === 'activity') return {busy:agent.status !== 'idle'};
       check(['deliver','lookup'].includes(request.operation), 'unsupported_operation');
       const expected = await input(request,ctx,agent,directory);

@@ -28,6 +28,7 @@ const header = {version:4,id,createdAt:Date.now(),isSeeded:false,delegationDepth
 const writer = await ctx.get('sessionPersistence').create(header);
 const session = ctx.get('sessions').create(id,{meta:header});
 let number = 0;
+let step = 1;
 let received = 0;
 let lastMessage, selectedModel;
 const agent = {session,status:'idle',model:{current:()=>selectedModel},followup(message) {
@@ -35,8 +36,9 @@ const agent = {session,status:'idle',model:{current:()=>selectedModel},followup(
   received++;
   if (agent.status === 'idle') {
     agent.status = 'running';
+    step = 1;
     session.append('turn/start',{turn:++number});
-    session.append('step/start',{turn:number,step:1});
+    session.append('step/start',{turn:number,step});
   }
   session.append('user/message',message,{surfaceOp:'append'});
 }};
@@ -65,8 +67,8 @@ try {
       const cmd = JSON.parse(line);
       if (cmd.action === 'exit') break;
       if (cmd.action === 'end') {
-        session.append('step/end',{turn:number,step:1});
-        session.append('turn/end',{turn:number,reason:{kind:'completed'}});
+        session.append('step/end',{turn:number,step});
+        session.append('turn/end',{turn:number,reason:cmd.aborted ? {kind:'aborted',reason:{kind:'user'}} : {kind:'completed'}});
         agent.status = 'idle';
       } else if (cmd.action === 'tool') {
         const block = {type:'tool-call',id:cmd.call_id,name:cmd.name,arguments:JSON.stringify(cmd.args)};
@@ -78,6 +80,17 @@ try {
         const result = await executeToolBatch({agent,calls:[block],signal:new AbortController().signal},pipeline,()=>1);
         console.log(JSON.stringify({received,result:result.results[0].result}));
         continue;
+      } else if (cmd.action === 'output') {
+        const message = {id:cmd.id,role:'assistant',source:{kind:'model',provider:'fixture',model:'fixture'},
+          content:cmd.content};
+        session.append('assistant/message',{turn:number,step,message},{surfaceOp:'append'});
+      } else if (cmd.action === 'observed-tool') {
+        session.append('tool/call',{turn:number,step,callId:cmd.id,name:cmd.name,arguments:JSON.stringify(cmd.args)});
+        const message = {id:'result-'+cmd.id,role:'tool',source:{kind:'tool',callId:cmd.id},toolCallId:cmd.id,
+          content:[{type:'text',text:'fixture tool result'}],isError:false};
+        session.append('tool/result',{turn:number,step,message},{surfaceOp:'append'});
+        session.append('step/end',{turn:number,step});
+        session.append('step/start',{turn:number,step:++step});
       } else if (cmd.action === 'select-text-only') {
         selectedModel = {provider:'fixture',model:'text-only'};
       } else if (cmd.action === 'inspect-media') {

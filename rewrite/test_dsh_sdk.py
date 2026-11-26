@@ -11,11 +11,14 @@ import unittest
 
 from .devloop import Loop
 from .dsh_port import DshHost, tool_listener
+from .dsh_display import DshDisplay
 from .feishu_inbound import Inbound
+from .feishu_output import Views
 from .native_files import NativeFiles
 from .storage import Fault, encode, guid
 from .test_mainline import Clock
 from .test_feishu_inbound import PNG
+from .test_feishu_output import PlatformFixture
 from .wire import Client
 from .worker import Worker
 from .worker_service import WorkerService
@@ -59,6 +62,7 @@ class DshSdk(unittest.TestCase):
         url = "http://127.0.0.1:"+str(server.server_port)
         worker_client = Client(url,token)
         self.loop.adapter.media_store = NativeFiles(self.directory/"media",worker_client)
+        self.display = DshDisplay(self.loop.adapter,worker_client,"oguri")
         self.enterContext(tool_listener(self.directory,self.loop.adapter,worker_client))
         self.inbound = Inbound(self.directory/"feishu.db",Client(url,platform),None,"app","trainer","chat")
 
@@ -194,6 +198,84 @@ class DshSdk(unittest.TestCase):
         with self.assertRaisesRegex(Fault,"model_does_not_support_images"):
             receive("om_textmodel",PNG)
         self.assertEqual(self.drive("count")["received"],0)
+
+    def test_public_log_to_feishu_cards_preserves_final_and_replays_lost_worker_ack(self):
+        self.drive("manual")
+        self.drive("output",id="msg1",content=[{"type":"text","text":"我先检查。"},
+                   {"type":"tool-call","id":"call-1","name":"terminal","arguments":'{"command":"git status --private-example"}'}])
+        self.drive("observed-tool",id="call-1",name="terminal",args={"command":"git status --private-example"})
+        self.drive("output",id="msg2",content=[{"type":"text","text":"检查好了。"}])
+        self.display.collect()
+        send = self.display.worker.request
+        def lose(*args,**kw):
+            send(*args,**kw)
+            raise OSError("display acknowledgement lost")
+        self.display.worker.request = lose
+        with self.assertRaises(OSError):
+            self.display.flush()
+        self.display.worker.request = send
+        restored = DshDisplay(self.loop.adapter,self.display.worker,"oguri")
+        restored.collect()
+        restored.flush()
+        sink = PlatformFixture()
+        views = Views(self.directory/"views.db",self.inbound.worker,sink,"chat","玉藻")
+        self.assertEqual(views.poll(),3)
+        self.drive("end")
+        restored.collect()
+        restored.flush()
+        self.assertEqual(views.poll(),1)
+        self.assertEqual([r[2]["header"]["title"]["content"] for r in sink.messages.values()],
+                         ["玉藻·原生输入","玉藻-输出","玉藻-工具","玉藻-回复"])
+        bodies = [r[2]["elements"][0]["text"]["content"] for r in sink.messages.values()]
+        self.assertEqual(bodies,["manual follow-up","我先检查。","terminal\ngit status","检查好了。"])
+        self.assertEqual(views.poll(),0)
+        self.assertFalse(self.m.tasks()["items"])
+
+    def test_aborted_native_turn_and_protocol_input_never_become_a_final_or_a_report(self):
+        self.w.chat("plain","在吗")
+        self.drive("output",id="draft",content=[{"type":"text","text":"尚在处理"}])
+        self.drive("end",aborted=True)
+        tid,_,_ = self.assign()
+        self.drive("output",id="unreported",content=[{"type":"text","text":"写在聊天里。"}])
+        self.drive("end")
+        for _ in range(3):
+            self.display.collect()
+            self.display.flush()
+        rows = self.inbound.worker.request("GET","worker/display")["items"]
+        observed = [(r["event"]["kind"],r["event"]["text"]) for r in rows if r["event"]["event_id"].startswith("host-dsh-")]
+        self.assertEqual(observed,[("native_input","在吗"),("progress","尚在处理"),("final","写在聊天里。")])
+        self.assertEqual(self.w.hold()["held_task_id"],tid)
+
+    def test_committed_native_image_preserves_order_and_is_bound_to_the_public_record(self):
+        self.inbound.resources = lambda *args:PNG
+        self.inbound.record("app","user","trainer",{"chat_type":"p2p","chat_id":"chat","message_id":"om_ref",
+            "message_type":"image","content":encode({"image_key":"img_ref"})})
+        self.inbound.deliver("om_ref")
+        original, = self.drive("inspect-media")["content"]
+        self.drive("output",id="with-image",content=[{"type":"text","text":"图前"},
+                   {"type":"image","attachment":original["ref"]},{"type":"text","text":"图后"}])
+        self.drive("end")
+        self.display.collect()
+        with self.display.db.transaction() as db:
+            media = json.loads(db.execute("SELECT event FROM dsh_public_outbox WHERE event_id LIKE '%-image'").fetchone()[0])["image"]
+        with self.assertRaisesRegex(Fault,"invalid_display_image"):
+            self.loop.native.request("display-image",self.session,{"seq":media["seq"],"anchor":media["anchor"],
+                               "index":0,"offset":0})
+        with self.assertRaisesRegex(Fault,"display_history_changed"):
+            self.loop.native.request("display-image",self.session,{"seq":media["seq"],"anchor":"mismatch",
+                               "index":media["index"],"offset":0})
+        self.display.flush()
+        platform = PlatformFixture()
+        views = Views(self.directory/"views.db",self.inbound.worker,platform,"chat","玉藻")
+        self.assertEqual(views.poll(),3)
+        before,image,after = platform.messages.values()
+        self.assertEqual([before[1],image[1],after[1]],["interactive","image","interactive"])
+        self.assertEqual(before[2]["elements"][0]["text"]["content"],"图前")
+        self.assertEqual(after[2]["elements"][0]["text"]["content"],"图后")
+        self.assertEqual(hashlib.sha256(platform.images[0]).hexdigest(),original["sha256"])
+        self.display.collect()
+        self.display.flush()
+        self.assertEqual(views.poll(),0)
 
     def test_formal_receipt_recovered_from_sdk_log_and_registered_reports(self):
         tid,aid,row = self.assign()
