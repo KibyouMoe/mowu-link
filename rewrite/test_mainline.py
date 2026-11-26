@@ -361,6 +361,24 @@ class Mainline(unittest.TestCase):
         self.assertEqual(len(self.loop.native.entries()),3)
         self.assertEqual(len(native.entries()),1)
 
+    def test_private_chat_pending_before_adapter_probe_resumes_once(self):
+        read_binding = self.loop.adapter.bound_session
+        def disconnected():
+            # The callback can read the committed inbox even while the probe is in progress.
+            with self.w.db.transaction() as db:
+                row = db.execute("SELECT session,receipt FROM chat_deliveries WHERE message_id='cold-chat'").fetchone()
+                self.assertEqual(tuple(row),("",None))
+            raise Fault(503,"adapter_connection_unconfirmed",True)
+        self.loop.adapter.bound_session = disconnected
+        self.assertEqual(self.fault("adapter_connection_unconfirmed",lambda: self.w.chat("cold-chat","Hi")),503)
+        self.assertEqual(self.loop.native.entries(),[])
+        self.loop.adapter.bound_session = read_binding
+        restarted = Worker(self.w.db.path,self.w.worker_id,self.w.router,self.loop.adapter)
+        self.fault("chat_conflict",lambda: restarted.chat("cold-chat","changed"))
+        proof = restarted.chat("cold-chat","Hi")
+        self.assertEqual(restarted.chat("cold-chat","Hi"),proof)
+        self.assertEqual([receipt for _body,receipt in self.loop.native.entries()],[proof])
+
     def test_wrong_native_session_receipt_stays_unconfirmed(self):
         tid = self.create()
         self.idle()

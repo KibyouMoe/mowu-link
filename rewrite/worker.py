@@ -275,28 +275,33 @@ class Worker:
                 require(db.execute("SELECT text FROM chats WHERE message_id=?", (message_id,)).fetchone()[0] == text,
                         409, "chat_conflict")
                 media = worker_media.associate(db,self.worker_id,message_id,ids,inserted,attachment_kinds)
+                if inserted:
+                    # Empty means no target was reserved and no host write could have begun.
+                    db.execute("INSERT INTO chat_deliveries VALUES (?,'',NULL)",(message_id,))
                 original = db.execute("SELECT session,receipt FROM chat_deliveries WHERE message_id=?",
                                       (message_id,)).fetchone()
                 if original and original["receipt"]:
                     return json.loads(original["receipt"])
-                if inserted:
-                    session = self.adapter.bound_session()
-                    db.execute("INSERT INTO chat_deliveries VALUES (?,?,NULL)",(message_id,session))
             payload = {"kind":"chat","message_id":message_id,"text":text}
             if media:
                 payload["attachments"] = media
             did = "chat-" + message_id
-            if original:
-                session = original["session"]
-                if session != self.adapter.bound_session():
-                    return None
-            if inserted:
+            session = self.adapter.bound_session()
+            require(isinstance(session,str) and session.strip(),502,"invalid_host_observation")
+            first_attempt = False
+            if original and not original["session"]:
+                with self.db.transaction() as db:
+                    first_attempt = db.execute("""UPDATE chat_deliveries SET session=?
+                        WHERE message_id=? AND session=''""",(session,message_id)).rowcount == 1
+                    original = db.execute("SELECT session FROM chat_deliveries WHERE message_id=?",
+                                          (message_id,)).fetchone()
+            if original and original["session"]!=session:
+                return None
+            if first_attempt:
                 receipt = self.adapter.deliver(did,payload,session=session)
             else:
                 # The previously selected adapter may have lost its ledger.
                 # Only recover a native receipt; never write a second time.
-                if original is None:
-                    session = self.adapter.bound_session()
                 receipt = self.adapter.lookup_delivery(did,payload,session=session)
             if receipt:
                 digest = hashlib.sha256(encode(payload).encode()).hexdigest()

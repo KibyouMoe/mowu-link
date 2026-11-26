@@ -4,6 +4,8 @@
 
 ## 检查点与证据
 
+首次确认宿主会话前断链时，普通私聊先留在 Worker 入箱。隔离测试在探测过程能读回已提交的消息，此时没有原生输入。重开 Worker 后同号继续首次投递，回执可重查，原生账本一条。复跑 `python3 -m unittest -v rewrite.test_mainline.Mainline.test_private_chat_pending_before_adapter_probe_resumes_once`。宿主为夹具，此处只验证入箱到首次写入的边界。
+
 已加独立工位的只读运维检查。三进程 TLS 中，测试平台身份读状态被拒，专用运维身份读到预期和确认的同一会话及当前持单。两个真实回环断链试验分别核 Router 重连倒计时及宿主忙闲未知，另一链保持可观察。复跑 `python3 -m unittest -v rewrite.test_link_health rewrite.test_service`。原生宿主为夹具。
 
 旧飞书私聊增加离线专用导出。用实际旧 RouterStore 写两工位记录，按一工位分页、筛选，并逐项比对旧查询的原 ID、方向、消息号、原会话、时间和文本。另一工位记录未导出，原库摘要未变，坏快照拒绝，不触发新 Router 或平台。复跑 `python3 -m unittest -v rewrite.test_cutover.Cutover.test_export_legacy_chat_keeps_original_fields_and_private_scope`。未取生产私聊日志；旧在线旁听的现有使用方另核。
