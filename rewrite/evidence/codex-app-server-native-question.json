@@ -1,0 +1,24 @@
+{
+  "session": "01a216d3-37ca-7631-b827-7fbbd8cb1493",
+  "task_id": "42af880f-632f-4497-9fc1-2ba877709d71",
+  "assignment_id": "c84ece80-a35b-4283-a6d3-d521b7c5264e",
+  "question_id": "dcfe0c23-fda1-423d-bca7-ccb84ee4f3ca",
+  "original_question_turn": "01a216d3-3804-7253-92f0-dfdc90acdcbd",
+  "original_tool_call": "native_question",
+  "answer_turn": "01a216d3-386e-7af0-878d-c8f9e6e72209",
+  "answer_input": "01a216d3-3871-7a11-86ce-78e95d8825b7",
+  "manager_answer": {
+    "mode": "choice",
+    "option_id": "go"
+  },
+  "report_tool_calls": [
+    "native_fixture_0",
+    "native_fixture_1"
+  ],
+  "notification_ids": [
+    "ff81db04-530d-45f6-b41a-73b664f6a61d",
+    "d7332ddd-fac2-43f6-9105-0213ed143c9e"
+  ],
+  "boundary": "Native App Server with scripted local model and an isolated manager test driver",
+  "consecutive_runs": 12
+}

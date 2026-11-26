@@ -80,7 +80,7 @@ def serve(args,stack):
         public_output = publishing(adapter,client,args.worker_id)
         listener = serve_adapter(adapter,args.worker_id,identities,address,ctx)
     elif args.component == "codex-adapter":
-        from .codex_app_server import AppServerHost, report_callbacks
+        from .codex_app_server import AppServerHost, worker_callbacks
         from .codex_display import CodexDisplay
         from .codex_rpc import start_app_server
         from .native_files import NativeFiles
@@ -97,7 +97,7 @@ def serve(args,stack):
         media = NativeFiles(args.media_cache,client) if args.media_cache else None
         adapter = HostAdapter(args.db,native,args.session,media)
         display = CodexDisplay(adapter,client)
-        callbacks = report_callbacks(native,client,display.wake.set)
+        callbacks = worker_callbacks(native,client,display.wake.set)
         public_output = display.run()
         listener = serve_adapter(adapter,args.worker_id,identities,address,ctx)
     else:

@@ -61,7 +61,7 @@ App Server 指定回合的文字投影复用原 Worker 的飞书卡片。独立�
 
 ## 独立适配器启动
 
-以专用 Codex profile 启动 App Server，用 `thread/start` 加载 `rewrite/agent-toolset.json` 的 `worker_report` 定义并保存测试线程。先用 `thread/read` 核对原线程和工作目录，再为 Worker 配置隔离 TLS 连接。启动命令如下。
+以专用 Codex profile 启动 App Server，用 `thread/start` 加载 `rewrite/agent-toolset.json` 中测试所需的工具定义并保存线程。完工要加载 `worker_report`，工单提问还要加载 `worker_ask`。先用 `thread/read` 核对原线程和工作目录，再为 Worker 配置隔离 TLS 连接。启动命令如下。
 
 ```sh
 python3 -m rewrite.service codex-adapter \
@@ -77,3 +77,5 @@ python3 -m rewrite.service codex-adapter \
 当前已用独立进程、TLS 和真实 App Server 连续跑通 12 次 W04。错工作目录和第二个 profile 写者均拒绝，原生工具回放只留一条 Router 通知。测试模型为本地脚本。[进程与回执记录](evidence/codex-adapter-process-w04.json)。
 
 独立适配器同时记录首次绑定时已存在的回合，只传之后结束的新回合。回执丢失时重传相同展示事件，原 Worker 只收一条；同一账本恢复后也不会重复抄送。独立进程跑过 10 轮，测试飞书每次只得到原样式的工单和回复两张卡。[出向试验记录](evidence/codex-adapter-output.json)。已结束回合的输出与 W04 投递各自推进。
+
+独立 App Server 也可将 `worker_ask` 交给原工单。测试管理端的原答复经同一派发返回同一原生线程，生成后续原生回合，再由该回合调用 W04。原题和成果各一条通知，原答复重投不产生第二个答复回合。连续 12 次通过。[原生问答记录](evidence/codex-app-server-native-question.json)。这里验证的是工单问溪流的协议，模型和管理操作者使用夹具。

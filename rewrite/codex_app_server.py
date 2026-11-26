@@ -5,10 +5,12 @@ from queue import Empty
 from threading import Event, Thread
 import time
 
+from .agent_tools import TOOLSET
 from .codex_rpc import NativeRpcRejected
 from .storage import Fault, encode, require, string
 
 TERMINAL = {"completed","interrupted","failed"}
+WORKER_TOOLS = {item["name"] for item in TOOLSET}
 
 
 class AppServerHost:
@@ -156,31 +158,34 @@ class AppServerHost:
             receipts.append(ack)
         return receipts
 
-    def report_call(self, packet, worker):
+    def worker_call(self, packet, worker):
         """Accept only App Server requests received on this process's dedicated transport."""
         call = packet.get("params")
         require(packet.get("method")=="item/tool/call" and type(packet.get("id")) in (str,int) and isinstance(call,dict)
-                and call.get("threadId")==self.thread_id and call.get("namespace") is None
-                and call.get("tool")=="worker_report",403,"wrong_native_caller")
+                and call.get("threadId")==self.thread_id and call.get("namespace") is None,403,"wrong_native_caller")
+        tool = string(call,"tool")
+        require(tool in WORKER_TOOLS,403,"unsupported_native_tool")
         args = call.get("arguments")
         require(isinstance(args,dict),422,"invalid_arguments")
         receipt = worker.request("POST","worker/native-tool",{
-            "session":self.thread_id,"turn_id":string(call,"turnId"),"tool":"worker_report",
+            "session":self.thread_id,"turn_id":string(call,"turnId"),"tool":tool,
             "call_id":string(call,"callId"),"arguments":args,
         })
-        require(isinstance(receipt,dict) and receipt.get("recorded") is True,502,"worker_report_unconfirmed")
+        require(isinstance(receipt,dict),502,"worker_tool_unconfirmed")
+        if tool=="worker_report":
+            require(receipt.get("recorded") is True,502,"worker_report_unconfirmed")
         return receipt
 
 
 @contextmanager
-def report_callbacks(host,worker,notify_turn_end):
+def worker_callbacks(host,worker,notify_turn_end):
     stop = Event()
 
     def to_worker(packet):
         until = time.monotonic()+3
         while True:
             try:
-                receipt = host.report_call(packet,worker)
+                receipt = host.worker_call(packet,worker)
                 return {"success":True,"contentItems":[{"type":"inputText","text":encode(receipt)}]}
             except Fault as error:
                 # A native tool request can precede persistence of its original user input.
@@ -188,7 +193,7 @@ def report_callbacks(host,worker,notify_turn_end):
                     continue
                 return {"success":False,"contentItems":[{"type":"inputText","text":error.code}]}
             except OSError:
-                return {"success":False,"contentItems":[{"type":"inputText","text":"worker_report_unconfirmed"}]}
+                return {"success":False,"contentItems":[{"type":"inputText","text":"worker_tool_unconfirmed"}]}
 
     def read_events():
         while not stop.is_set():

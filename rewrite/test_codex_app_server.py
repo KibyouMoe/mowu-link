@@ -11,13 +11,13 @@ import sqlite3
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
-from threading import Thread
+from threading import Event, Thread
 import time
 import unittest
 
-from .agent_tools import REPORT_TOOL
+from .agent_tools import REPORT_TOOL, TOOLSET
 from .adapter import HostAdapter
-from .codex_app_server import AppServerHost
+from .codex_app_server import AppServerHost, worker_callbacks
 from .codex_display import CodexDisplay
 from .codex_rpc import start_app_server
 from .devloop import Loop
@@ -46,7 +46,8 @@ class Provider(BaseHTTPRequestHandler):
             return
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         items = body["input"]
-        latest = next(item for item in reversed(items) if item.get("role")=="user")["content"]
+        user_index = next(i for i in range(len(items)-1,-1,-1) if items[i].get("role")=="user")
+        latest = items[user_index]["content"]
         pictures = [part for part in latest if part.get("type")=="input_image"]
         if pictures:
             captions = [part["text"] for part in latest if part.get("type")=="input_text"
@@ -54,14 +55,18 @@ class Provider(BaseHTTPRequestHandler):
             images = [hashlib.sha256(base64.b64decode(part["image_url"].split(",",1)[1],validate=True)).hexdigest()
                       for part in pictures]
             self.server.media.append({"caption":captions,"image_sha256":images})
-        markers = [block["text"] for item in items if item.get("role")=="user"
-                   for block in item.get("content",[]) if block.get("text","").startswith("魔物链接投递\n")]
+        markers = [block["text"] for block in latest if block.get("text","").startswith("魔物链接投递\n")]
         payload = json.loads(markers[-1].split("\n",1)[1])["payload"] if markers else None
-        calls = sum(item.get("type")=="function_call_output" for item in items)
+        calls = sum(item.get("type")=="function_call_output" for item in items[user_index+1:])
         names = [tool.get("name") for tool in body.get("tools",[])]
         self.server.observed.append(("worker_report" in names,calls))
         response_id = "resp_fixture_"+str(len(self.server.observed))
-        if payload and calls<2:
+        question = payload and payload.get("instructions")=="Ask the scripted manager before proceeding"
+        if question and not calls:
+            arguments = {"text":"Use the first route?","options":[{"id":"go","label":"继续"}]}
+            item = {"type":"function_call","id":"fc_question","name":"worker_ask","call_id":"native_question",
+                    "arguments":encode(arguments)}
+        elif payload and not question and calls<2:
             arguments = {"task_id":payload["task_id"],"assignment_id":payload["assignment_id"],
                          "summary":"Isolated App Server result"}
             item = {"type":"function_call","id":"fc_fixture_"+str(calls),"name":"worker_report",
@@ -153,10 +158,12 @@ class CodexAppServer(unittest.TestCase):
                     self.assertTrue(loop.worker.process(frame))
                     self.assertEqual(loop.hermes.inspect(tid)["task"]["state"],"working")
                     with self.assertRaisesRegex(Fault,"wrong_native_caller"):
-                        host.report_call(dict(event,params={**event["params"],"threadId":guid()}),callback)
+                        host.worker_call(dict(event,params={**event["params"],"threadId":guid()}),callback)
                     with self.assertRaisesRegex(Fault,"native_turn_unconfirmed"):
-                        host.report_call(dict(event,params={**event["params"],"turnId":guid()}),callback)
-                proof = host.report_call(event,callback)
+                        host.worker_call(dict(event,params={**event["params"],"turnId":guid()}),callback)
+                    with self.assertRaisesRegex(Fault,"unsupported_native_tool"):
+                        host.worker_call(dict(event,params={**event["params"],"tool":"arbitrary_tool"}),callback)
+                proof = host.worker_call(event,callback)
                 receipts.append(proof)
                 native_calls.append(event["params"])
                 rpc.send({"id":event["id"],"result":{"success":True,
@@ -511,3 +518,70 @@ class CodexAppServer(unittest.TestCase):
                          "wrong_workspace_rejected":True,"second_profile_writer_rejected":True,
                          "worker_display_receipts":display_acks,"fixture_card_titles":titles,
                          "boundary":"Separate codex-adapter process drove the native App Server with a local scripted model"}
+
+    def test_native_question_returns_to_the_original_app_server_assignment(self):
+        rpc = self.enterContext(isolated_app_server(self.root,self.origin))
+        allowed = [tool for tool in TOOLSET if tool["name"] in ("worker_ask","worker_report")]
+        sid = rpc.request("thread/start",{"cwd":self.root,"ephemeral":False,"dynamicTools":allowed})["thread"]["id"]
+        host = AppServerHost(rpc,sid)
+        host.session = sid
+        clock = Clock()
+        loop = self.enterContext(Loop.isolated(clock,host_factory=lambda _path,_name:host))
+        token = guid()
+        server = WorkerService(loop.worker,clock).listen({token:"adapter/oguri"},("127.0.0.1",0),None)
+        callback = Client(self.enterContext(running(server)),token)
+        settled = Event()
+        self.enterContext(worker_callbacks(host,callback,settled.set))
+        tid = loop.hermes.create(guid(),"Original native question","Ask the scripted manager before proceeding",
+                                 "oguri")["task_id"]
+        loop.worker.connect()
+        loop.worker.poll()
+        clock.advance(10)
+        loop.worker.poll()
+        loop.worker.poll()
+        def wait_for_native_turn():
+            until = time.monotonic()+8
+            while not settled.wait(.02) and time.monotonic()<until:
+                loop.worker.poll()
+            self.assertTrue(settled.is_set())
+            settled.clear()
+        wait_for_native_turn()
+        aid = loop.worker.hold()["held_assignment_id"]
+        questions = loop.hermes.questions(task_id=tid,pending="true")["items"]
+        native_turns = host.thread(sid,include_turns=True)["turns"]
+        self.assertEqual(len(questions),1,native_turns)
+        question, = questions
+        qid = question["question_id"]
+        self.assertEqual(question["assignment_id"],aid)
+        self.assertEqual(question["text"],"Use the first route?")
+        self.assertEqual(loop.hermes.inspect(tid)["task"]["state"],"working")
+        self.assertIsNone(loop.hermes.inspect(tid)["last_report"])
+        answer = {"mode":"choice","option_id":"go"}
+        key = guid()
+        reply = loop.hermes.answer(key,tid,qid,answer)
+        self.assertEqual(loop.hermes.answer(key,tid,qid,answer),reply)
+        loop.worker.poll()
+        loop.worker.poll()
+        wait_for_native_turn()
+        thread = host.thread(sid,include_turns=True)
+        first,second = thread["turns"]
+        asks = [item for item in first["items"] if item.get("type")=="dynamicToolCall"]
+        resumed_input, = [item for item in second["items"] if item.get("type")=="userMessage"]
+        content = resumed_input["content"][0]["text"]
+        resumed = json.loads(content.split("\n",1)[1])["payload"]
+        self.assertEqual((resumed["kind"],resumed["task_id"],resumed["assignment_id"],resumed["question_id"],resumed["answer"]),
+                         ("question_answer",tid,aid,qid,answer))
+        ask, = asks
+        self.assertEqual((ask["tool"],ask["id"],ask["success"]),("worker_ask","native_question",True))
+        results = [item for item in second["items"] if item.get("type")=="dynamicToolCall"]
+        self.assertEqual([item["tool"] for item in results],["worker_report","worker_report"])
+        self.assertTrue(all(item["success"] for item in results))
+        self.assertEqual(loop.hermes.inspect(tid)["task"]["state"],"completed_reported")
+        self.assertIsNone(loop.worker.hold()["held_task_id"])
+        question_notice,result_notice = loop.manager_wire.frames(0)
+        self.assertEqual((question_notice["payload"]["task_id"],result_notice["payload"]["task_id"]),(tid,tid))
+        self.evidence = {"session":sid,"task_id":tid,"assignment_id":aid,"question_id":qid,"original_question_turn":first["id"],
+                         "original_tool_call":ask["id"],"answer_turn":second["id"],"answer_input":resumed_input["id"],
+                         "manager_answer":answer,"report_tool_calls":[item["id"] for item in results],
+                         "notification_ids":[question_notice["delivery_id"],result_notice["delivery_id"]],
+                         "boundary":"Native App Server with scripted local model and an isolated manager test driver"}
