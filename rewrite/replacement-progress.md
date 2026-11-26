@@ -4,6 +4,8 @@
 
 ## 检查点与证据
 
+旧 Trigger 0.7.0 的归档已通过隔离保全与回退测试。用原版 TriggerStore 建 5 条不同处置的事件及订阅，确认源文件摘要未变、恢复档案逐字节相同、真实旧程序仍只查到原来两条未读记录。活跃日志和被篡改的成员会阻止恢复。Mac mini 只读盘点确认仍有 1,492 条记录及 1 个 active 订阅，[聚合证据](evidence/legacy-trigger-status.json)。未复制生产原文，未启用订阅。复跑 `python3 -m unittest -v rewrite.test_trigger_archive`，操作见[旧 Trigger 归档](router-rehearsal.md#旧-trigger-历史和订阅账本)。
+
 工位收到原单更新、取消、转接和搁置即保存飞书提示。原生收件有独立凭据，控制提示也不会当作已经停止或清理。隔离实测，更新输入已进宿主但回包丢失、取消还没进宿主时，飞书待发队列均已有对应正文。恢复后原生各一条，飞书无重复，Router 仍待取消清理。复跑 `python3 -m unittest -v rewrite.test_link_health.LinkHealth.test_task_cards_use_worker_acceptance_independently_of_host_receipts`。真实工单与 Worker，宿主和飞书为夹具。
 
 DSH 的正式题已跑通原生 `worker_ask`、Router 回题和原派发续办。答复回包故意丢失，原生会话只有一条答复输入；`continue_requested` 保留同一个派发和持单。溪流更新原单后，下一原生回合自行用 W04 交成果，Router 待验收，工位释放。飞书展示中的两条题卡事件均归溪流，训练员无作答入口。复跑 `python3 -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_native_formal_question_returns_to_its_assignment_and_keeps_ownership_until_completion`。[正式题答复与回执](evidence/dsh-native-work-question.json)。真实 DSH 工具执行器和隔离 Router，模型、经理输入为测试驱动。

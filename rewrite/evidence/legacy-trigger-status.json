@@ -1,0 +1,30 @@
+{
+  "observed_on": "2026-11-26 Asia/Taipei",
+  "scope": "Mac mini, read-only loopback service inventory",
+  "service_label": "ai.hermes.trigger",
+  "version": "0.7.0",
+  "http": {
+    "health": 200,
+    "sources": 200,
+    "stats": 200,
+    "subscriptions": 200
+  },
+  "event_count": 1492,
+  "visible_events_by_level": {
+    "event": 361,
+    "notify": 1065,
+    "info": 65,
+    "log": 1
+  },
+  "declared_sources": 0,
+  "historical_source_count": 19,
+  "known_names_in_history": ["email", "manual", "mc_chat"],
+  "subscription_status": {
+    "active": 1,
+    "expired": 6,
+    "closed": 9
+  },
+  "explicit_rules_path": false,
+  "default_rules_file_present": false,
+  "boundary": "Service counters only. No production event data copied, source polled or subscription opened."
+}

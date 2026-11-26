@@ -43,6 +43,21 @@ python3 -m rewrite.cutover stage-queue-rollback --snapshot ./snapshot --trial ./
 
 命令在新目录生成旧库、旧附件和 `queue-replay.json`。该文件含原指令，应和离线库一起保管。已有 UUID 保留。新 Hermes 管理工具的 `hermes-…` 请求号通过来源 UUID 确定性地生成旧端可接受的请求 UUID，文件同时保存两者。仅在隔离环境打开该旧库，让旧 Router 不接 Worker，再按文件顺序将每个 `request` 发给旧端 `POST /tasks`。记录新试运行工单号、原请求号、回放请求 UUID 与旧端返回的工单号。新请求返回 202 并保持排队。同号重送须返回同一旧工单号，改正文重送须返回 409。核对旧队首、完整正文和回放后的队列顺序。复跑整个演练使用 `python3 -m unittest -v rewrite.test_cutover.Cutover.test_reviewed_new_orders_reenter_the_old_http_queue_once_and_preserve_its_head`。已派发的单、成果及其他新写入仍需逐笔处理。
 
+## 旧 Trigger 历史和订阅账本
+
+`rewrite.trigger_archive` 接收明确准备好的旧版离线 SQLite 副本，可另带已有的 blocked 与 drops 日志。保存原事件、读收据、游标、订阅和规则表，逐文件核摘要。捕获时记录活跃订阅中有未确认可见事件的数量，切换前需和实际消费者对账。归档本身既没有订阅，也没有发送队列。
+
+```sh
+python3 -m rewrite.trigger_archive capture --database ./old-offline/trigger.db --destination ./trigger-snapshot
+python3 -m rewrite.trigger_archive verify --snapshot ./trigger-snapshot --manifest-sha256 "$TRIGGER_SHA256"
+python3 -m rewrite.trigger_archive event --snapshot ./trigger-snapshot --manifest-sha256 "$TRIGGER_SHA256" --event-id "$OLD_EVENT_ID"
+python3 -m rewrite.trigger_archive restore --snapshot ./trigger-snapshot --manifest-sha256 "$TRIGGER_SHA256" --destination ./trigger-restored
+```
+
+有额外日志时，`capture` 可加 `--blocked` 或 `--drops` 指向相应副本。包含原文的查询留在隔离目录内执行。只把恢复文件交给经授权的旧服务窗口。复跑 `python3 -m unittest -v rewrite.test_trigger_archive`。实测使用真实旧 TriggerStore，5 条历史、原订阅和回执都读回。旧程序重开时只查到两条原本未读的可投递消息；日志档案与已丢弃消息均原样保留。活动日志或篡改的归档成员会阻止生成恢复目录。
+
+Mac mini 的 [旧 Trigger 只读核对](evidence/legacy-trigger-status.json) 确认 0.7.0 仍在运行，历史 1,492 条，订阅状态 active 1、expired 6、closed 9。生产快照、活跃消费者的未确认交接与旧源端游标仍待核。未看到此工位有默认规则文件或显式规则文件参数；其他工位单独核对。
+
 ## 重做版五组件的离线恢复
 
 `python3 -m unittest -v rewrite.test_state_bundle` 在临时端口跑一张已持有的单、一个还没送到宿主的通知、一个待交原附件和一个等待投递的飞书私聊。关闭这套服务，将七个数据库作为一批备份，再从新目录重开。Worker 保留原会话和派发，宿主按原投递返回原凭据；平台沿用原卡游标，私聊只进入一次；Trigger 保留实例号，恢复后上传的 332800 字节与原件全部相同。两端原生记录和飞书云端由独立夹具保留，HTTP、SQLite 和恢复程序实跑。
