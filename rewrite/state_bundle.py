@@ -163,14 +163,15 @@ def has_workspace_journal(directory,manifest):
     return any(dsh_workspace_audit.identities(paths) for _wid,paths in agent_ledger_paths(directory,manifest))
 
 
-def workspace_audits(snapshot,manifest,dsh_runtimes):
+def workspace_audits(snapshot,manifest,dsh_runtimes,*,reservations=None):
     dsh_runtimes = dsh_runtimes or {}
     ledgers = dict(agent_ledger_paths(snapshot,manifest))
     if set(dsh_runtimes)-ledgers.keys():
         raise ValueError("DSH runtime does not belong to a snapshot Worker")
     audits = {}
     for wid,paths in ledgers.items():
-        workspace,issue = dsh_workspace_audit.inspect(dsh_runtimes.get(wid),dsh_workspace_audit.identities(paths))
+        workspace,issue = dsh_workspace_audit.inspect(dsh_runtimes.get(wid),dsh_workspace_audit.identities(paths),
+                                                     reservations=reservations)
         if workspace is not None and workspace["pending"]:
             issue = "dsh_assignment_workspace_pending"
         if workspace is not None or issue:
@@ -436,7 +437,7 @@ def stage_native_handoff(snapshot,expected,worker_id,source_session,target_sessi
             pin = db.execute(f"SELECT session FROM {table} WHERE slot=1").fetchone() if exists else None
             if not pin or pin[0]!=source_session:
                 raise ValueError("original native binding unconfirmed: "+label)
-    with output_directory(destination) as stage:
+    with ExitStack() as reservations, output_directory(destination) as stage:
         restore_files(snapshot,expected,manifest,stage,destination=destination,managed_keys=managed_keys)
         worker_db = stage/filename(worker_label)
         with closing(sqlite3.connect(worker_db,timeout=0)) as db, db:
@@ -450,7 +451,7 @@ def stage_native_handoff(snapshot,expected,worker_id,source_session,target_sessi
                   "target_adapter_db":str(destination/("target-"+filename(adapter_label)))}
         if workspace := worker.get("dsh_workspace_audit"):
             identity = dsh_workspace_audit.identities([snapshot/filename(adapter_label)])
-            if dsh_workspace_audit.inspect(dsh_runtimes[worker_id],identity)!=(workspace,None):
+            if dsh_workspace_audit.inspect(dsh_runtimes[worker_id],identity,reservations=reservations)!=(workspace,None):
                 raise ValueError("DSH workspace journal changed during handoff")
             result["dsh_workspace_journal_sha256"] = workspace["fingerprint"]
         (stage/"native-handoff.json").write_text(encode(result),encoding="utf-8")
@@ -478,9 +479,9 @@ def rollback(snapshot,expected,trial,destination,*,registries=None,managed_keys=
         for wid,(_workspace,issue) in workspaces.items():
             if issue:
                 raise ValueError(f"version rollback still pending for {wid}: {issue}")
-        with output_directory(destination) as stage:
+        with ExitStack() as reservations, output_directory(destination) as stage:
             restore_files(snapshot,expected,manifest,stage,destination=destination,managed_keys=managed_keys)
-            if workspace_audits(snapshot,manifest,dsh_runtimes)!=workspaces:
+            if workspace_audits(snapshot,manifest,dsh_runtimes,reservations=reservations)!=workspaces:
                 raise ValueError("DSH workspace journal changed during rollback")
     return {label:str(destination/filename(label)) for label in manifest["files"]}
 

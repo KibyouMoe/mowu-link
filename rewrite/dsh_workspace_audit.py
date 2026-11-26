@@ -124,7 +124,7 @@ def host_stopped(directory):
     return listener_stopped(socket.AF_INET,("127.0.0.1",port))
 
 
-def inspect(directory,expected):
+def inspect(directory,expected,*,reservations=None):
     if directory is None:
         return (None,"dsh_workspace_journal_required") if expected else (None,None)
     if not expected:
@@ -154,6 +154,8 @@ def inspect(directory,expected):
                     return None,"dsh_workspace_journal_changed"
             if not host_stopped(directory) or journal(directory)!=(ledger,identity) or first!=second:
                 return None,"dsh_workspace_journal_changed"
+            if reservations is not None:
+                reservations.enter_context(stack.pop_all())
     except StateWriterBusy:
         return None,"dsh_workspace_host_still_running"
     except (Fault,OSError,sqlite3.Error,ValueError,TypeError):

@@ -22,7 +22,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from . import test_codex_app_server as codex_driver, worker_commands, worker_resume
+from . import state_bundle, test_codex_app_server as codex_driver, worker_commands, worker_resume
 from .adapter import HostAdapter
 from .approvals import TTL_SECONDS
 from .codex_app_server import AppServerHost, worker_callbacks
@@ -40,7 +40,7 @@ from .orders import Orders
 from .release_check import config, serve
 from .question_cards import Actions
 from .state_bundle import agent_pending, audit_handoff, capture, filename, restore, rollback, stage_native_handoff, verify
-from .storage import Fault, encode, guid, state_writer
+from .storage import Fault, StateWriterBusy, encode, guid, state_writer
 from .test_feishu_output import PlatformFixture
 from .test_mainline import Clock
 from .trigger import Trigger
@@ -3135,10 +3135,28 @@ exec {docker} "$@"
         after, = audit_handoff(snapshot,sealed,dsh_runtimes=runtimes)["workers"]
         self.assertTrue(after["native_session_ledger_clear"],after)
         self.assertEqual(after["dsh_workspace_audit"]["pending"],[])
-        handoff = stage_native_handoff(snapshot,sealed,"oguri",session,"other-session",target,dsh_runtimes=runtimes)
-        self.assertEqual(handoff["dsh_workspace_journal_sha256"],after["dsh_workspace_audit"]["fingerprint"])
-        self.assertEqual(handoff["expected_session"],"other-session")
-        rolled_back = rollback(snapshot,sealed,trial,rollback_dir,dsh_runtimes=runtimes)
+        published_under_lock = []
+        output_directory = state_bundle.output_directory
+
+        @contextmanager
+        def probe_publication(destination):
+            with output_directory(destination) as staged:
+                yield staged
+                if use_tls:
+                    self.assertFalse(destination.exists())
+                    with self.assertRaises(StateWriterBusy), state_writer(runtime/"dsh-workspace",existing=True):
+                        self.fail("DSH could restart before publication")
+                    published_under_lock.append(destination.name)
+
+        with patch.object(state_bundle,"output_directory",probe_publication):
+            handoff = stage_native_handoff(snapshot,sealed,"oguri",session,"other-session",target,dsh_runtimes=runtimes)
+            self.assertEqual(handoff["dsh_workspace_journal_sha256"],after["dsh_workspace_audit"]["fingerprint"])
+            self.assertEqual(handoff["expected_session"],"other-session")
+            rolled_back = rollback(snapshot,sealed,trial,rollback_dir,dsh_runtimes=runtimes)
+        if use_tls:
+            self.assertEqual(published_under_lock,[target.name,rollback_dir.name])
+            with state_writer(runtime/"dsh-workspace",existing=True):
+                self.assertTrue(rollback_dir.is_dir())
         self.assertEqual(set(rolled_back),set(sources))
         for label,path in rolled_back.items():
             self.assertEqual(Path(path).read_bytes(),(snapshot/filename(label)).read_bytes())
@@ -3167,7 +3185,8 @@ exec {docker} "$@"
                     "snapshot_sha256_after_drain":sealed,"components":sorted(rolled_back),"retained_session":session},
                 **({"previous_release":previous} if previous else {}),
                 **({"second_native_writer_rejected":True,"live_writer_proof_without_endpoint_config":True,
-                    "legacy_listener_without_writer_rejected":True,"public_endpoint_config_rejected":True} if use_tls else {}),
+                    "legacy_listener_without_writer_rejected":True,"public_endpoint_config_rejected":True,
+                    "outputs_published_under_writer_lock":published_under_lock} if use_tls else {}),
                 "scope":"Installed DSH AgentLoop, isolated Linux Docker and Router/Worker HTTP; scripted local model."}
             Path(output).write_text(json.dumps(observations,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
 
