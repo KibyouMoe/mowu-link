@@ -98,6 +98,30 @@ python3 -m rewrite.trigger_archive restore --snapshot ./trigger-snapshot --manif
 
 Mac mini 的 [旧 Trigger 只读核对](evidence/legacy-trigger-status.json) 确认 0.7.0 仍在运行，首读有 1,492 条历史，订阅状态 active 1、expired 6、closed 9。复核时 active 订阅刚有活动，游标 1,496，当时未读为零。实际切换时仍需重新核对并取生产快照。未看到此工位有默认规则文件或显式规则文件参数；其他工位单独核对。
 
+### 迁入已对账的旧订阅积压
+
+先停止该订阅的旧投递和源端写入，独立保存旧消费者最后确认的游标、实际使用的等级过滤、宿主收件凭据及旧离线归档。在出计划时为同一个旧 Trigger 库选定一个来源 UUID，之后为该来源始终沿用。下面以原消费者实际使用 `event,notify` 为例。
+
+```sh
+python3 -B -m rewrite.trigger_handoff plan --snapshot ./trigger-snapshot --manifest-sha256 "$TRIGGER_SHA256" \
+  --subscriber "$LEGACY_SUBSCRIBER" --consumer-cursor "$OLD_CURSOR" --level event --level notify \
+  --source-id "$LEGACY_SOURCE_UUID" > ./handoff-plan.json
+```
+
+计划按旧序号列出可读未确认项。已经确认、丢弃及日志档案均留在旧档。消费者游标与旧账本不合时停止。逐条查原消费者最后一段持久收件，回执未知时先核证。审核文件含 `plan_sha256` 和 `events`，事件表的键用计划中的旧序号。已读但旧确认丢失的条目写 `{"already_received":"原宿主收件凭据"}`。需补送的条目写 `{"level":"Notify","evidence":"原消费者收件账本核对结果"}`，等级需在该项的 `allowed_levels` 内。旧 Info 只能按 Info 迁入。旧 Event 未具备唤醒条件时最多按 Notify 迁入。其他活跃订阅会列在计划里，须分别核对消费归属。
+
+```sh
+python3 -B -m rewrite.trigger_handoff stage --snapshot ./trigger-snapshot --manifest-sha256 "$TRIGGER_SHA256" \
+  --saved ./handoff-plan.json --review ./handoff-review.json --destination ./trigger-trial \
+  --attachments ./snapshot/attachments
+python3 -B -m rewrite.service trigger --db ./trigger-trial/trigger.sqlite3 --name legacy-handoff send \
+  --connection "$ISOLATED_HANDOFF_CONNECTION"
+```
+
+仅含无旧附件引用的事件可以省略 `--attachments`。有引用时用已停写的旧 Router 内容寻址存储，必须同时匹配旧记录的大小和 SHA-256；程序不按事件里的路径联网取件。超过 200 字的正文以原字节附档，旧结构化元数据保留在旧档；若消费逻辑依赖旧业务字段，应先盘清再迁。新 Router 使用仅绑定计划内 `instance_id` 的专用 Trigger 连接。预备目录及 `handoff.json` 按私有档案保留。T04 回执丢失时继续送同一库；从同一计划重建也复用消息及上传幂等键。逐项核对 T04、Hermes 接收回执与宿主收据。单有 T04 不表示旧端已读，也不能据此推进旧游标。
+
+实测已用真实旧 TriggerStore、重做 Router HTTP 和 HermesAdapter 核五条旧未读。两条 Info 只供查询，一条 Event 和一条 Notify 各送一次，原消费者已有收件的一条留在旧档。丢失 T04 后重开和重建均回同一回执，旧附件与长文逐字节一致。模型、宿主与时钟使用夹具。发送后如需退回旧消费者，先保留两侧库并逐笔对账；旧确认是累计游标，不应跳过未核的旧序号。复跑 `python3 -B -m unittest -v rewrite.test_trigger_archive`。[迁入回执](evidence/trigger-unread-handoff.json)
+
 ## 旧采集来源交接
 
 在演练窗口准备好来源游标副本和专用配置。交接检查旧采集端已处理到的最后一条、待上行队列和新实例标识。游标导入只保存位置与摘要。仍在旧采集端等待发送的事件需要在接管前另外对账。

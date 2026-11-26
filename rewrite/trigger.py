@@ -5,7 +5,9 @@ import json
 from pathlib import Path
 import sqlite3
 import time
+from uuid import UUID, uuid5
 
+from .messages import valid_guid
 from .storage import Database, Fault, encode, guid, require, timestamp
 
 
@@ -27,7 +29,8 @@ def archive_status(path):
 
 
 class Trigger:
-    def __init__(self, path, name, clock=time.time):
+    def __init__(self, path, name, clock=time.time, *, instance_id=None):
+        require(instance_id is None or valid_guid(instance_id),422,"invalid_trigger_instance")
         self.name, self.clock = name, clock
         self.db = Database(path, """
           CREATE TABLE IF NOT EXISTS instance (slot INTEGER PRIMARY KEY CHECK(slot=1),id TEXT NOT NULL);
@@ -37,24 +40,29 @@ class Trigger:
           CREATE TABLE IF NOT EXISTS pieces (id TEXT,start INTEGER,bytes BLOB NOT NULL,PRIMARY KEY(id,start));
         """)
         with self.db.transaction() as db:
-            db.execute("INSERT OR IGNORE INTO instance VALUES (1,?)", (guid(),))
+            db.execute("INSERT OR IGNORE INTO instance VALUES (1,?)", (instance_id or guid(),))
             self.instance_id = db.execute("SELECT id FROM instance").fetchone()[0]
+            require(instance_id is None or self.instance_id==instance_id,409,"trigger_instance_mismatch")
 
     def record(self, level, text, paths=()):
         with ExitStack() as stack, self.db.transaction() as db:
             streams = [(p.name,stack.enter_context(p.open("rb"))) for p in map(Path,paths)]
             return self.archive(db,level,text,streams)
 
-    def archive(self, db, level, text, streams):
+    def archive(self, db, level, text, streams, *, origin=None):
         """The source may commit its cursor in this same transaction."""
         require(level in ("Event","Notify","Info") and isinstance(text,str) and len(text)<=200
                 and (text.strip() or streams),422,"invalid_trigger_message")
-        mid = guid()
+        mid = origin["message_id"] if origin else guid()
         body = {"message_id":mid,"trigger_name":self.name,"instance_id":self.instance_id,
                 "generated_at":timestamp(self.clock()),"level":level,"text":text,"attachment_ids":[]}
+        if origin:
+            body["trigger_name"] = origin["trigger_name"]
+            body["generated_at"] = origin["generated_at"]
         db.execute("INSERT INTO archive VALUES (?,?,NULL)",(mid,encode(body)))
         for position,(name,stream) in enumerate(streams):
-            fid,offset,digest = guid(),0,hashlib.sha256()
+            fid = str(uuid5(UUID(mid),f"attachment/{position}")) if origin else guid()
+            offset,digest = 0,hashlib.sha256()
             while chunk := stream.read(256*1024):
                 db.execute("INSERT INTO pieces VALUES (?,?,?)",(fid,offset,chunk))
                 offset += len(chunk)

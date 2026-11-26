@@ -1,0 +1,39 @@
+{
+  "both_artifacts_byte_verified": true,
+  "boundary": "Actual old TriggerStore and rewrite HTTP and SQLite; Hermes host and clock are fixtures.",
+  "consecutive_runs": 10,
+  "information_did_not_wake": true,
+  "manager_host_inputs": [
+    "c7fee3fe-e3c8-56a2-a61a-f6b62cabccee",
+    "ded071d5-429d-524c-b043-250434d7fb43"
+  ],
+  "mapped": {
+    "already-seen": "2062dce0-ddaf-58d5-bfe7-c97513540b81",
+    "info": "4eb8628a-f70e-5e78-b8e1-a96dc7d8af2a",
+    "pending": "c7fee3fe-e3c8-56a2-a61a-f6b62cabccee",
+    "quiet": "37c5d12b-0ea0-57ac-a6fb-e61ea467f350",
+    "with-files": "ded071d5-429d-524c-b043-250434d7fb43"
+  },
+  "old_archive_unchanged": true,
+  "old_cursor": 1,
+  "old_unread_ids": [
+    "pending",
+    "info",
+    "already-seen",
+    "with-files",
+    "quiet"
+  ],
+  "original_file_sha256": "ad48d9159dee922fa82e761e650902a37b37cb1ac9eab3f1e8ed32120c2e7cbe",
+  "receipt_after_retry": {
+    "duplicate": false,
+    "message_id": "ded071d5-429d-524c-b043-250434d7fb43",
+    "received_at": "2027-01-15T08:00:00+00:00"
+  },
+  "router_delivery_status": {
+    "awaiting_consumer_ack": 0,
+    "confirmed_cursor": 2,
+    "consumer": "hermes",
+    "latest_cursor": 2
+  },
+  "trigger_instance_id": "02e7b843-569d-57d5-909b-3555cfd2193b"
+}

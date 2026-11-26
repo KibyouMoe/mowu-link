@@ -4,6 +4,8 @@
 
 ## 检查点与证据
 
+旧 Trigger 积压可按消费者游标、有效等级和原收件凭据审核迁入。实际旧 TriggerStore 查到五条未读，新 Router 留档四条；已有原消费者收件的一条留在旧档。隔离 HermesAdapter 只送一条 Event 和一条 Notify，两条 Info 可查且未唤醒。T04 丢失后重开和按同一计划重建均取回原回执，两份附件字节一致。缺旧附件、附件摘要不符、游标不合或审核不全时不生成迁入库。旧档与游标原样保留。宿主和时钟由夹具驱动，试用发送后退回旧消费者仍须按原序号对账。[实测回执](evidence/trigger-unread-handoff.json) · [交接步骤](router-rehearsal.md#迁入已对账的旧订阅积压)
+
 Router 以 `--drain-dispatch` 启动时冻结新的派发号。隔离试运行中，一张持单从六库快照恢复至原 Worker 和原生收据。W04 已落库但回执丢失，第二次恢复按原 W04 键取回，只有一条正式派发、一次宿主输入、一条验收通知。经过 12 秒模拟空闲，下一张单仍未获派发号。测试管理身份显式验收后，旧 RouterStore 读回原单归档、原队首不变。仍在执行或待验收时均未生成旧端库。运行重做 Router HTTP 及真实旧库，宿主、模型与时钟使用夹具。[证据](evidence/cutover-inflight-drain.json) · [复跑与回退步骤](router-rehearsal.md#在途工单先排空再回退)
 
 在途恢复和回退连过 10 轮。macOS 全量通过 242 项，Linux arm64 通过 162 项、跳过 80 项。以 `b59d1e1521114440ba18ca10232a89a8d963c081` 构建 215 文件安装包，SHA-256 为 `fa86a847c76db8f08e7e9c242fe78d2f4d6459c5e626928e560c7b83685a65e8`。独立安装目录通过回退、状态快照与 Router 排空启动回归共 25 项，安装文件摘要一致。旧 Router 测试源码取自 `30f61e671465db0b5bba221ba8c9fc2194a6e43d`，用 `MOWULINK_TEST_LEGACY_ROOT` 指定。
