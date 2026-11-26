@@ -87,7 +87,7 @@ def serve(args,stack):
         client = connection(args.worker_connection)
         rpc = stack.enter_context(start_app_server(args.codex_binary,args.codex_profile,args.cwd))
         require_test_account(rpc)
-        native = AppServerHost(rpc,args.session)
+        native = AppServerHost(rpc,args.session,args.db)
         saved = native.thread(args.session,include_turns=False)
         require(Path(saved["cwd"]).resolve()==args.cwd.resolve(),409,"wrong_native_workspace")
         resumed = rpc.request("thread/resume",{"threadId":args.session,"cwd":str(args.cwd)})["thread"]

@@ -20,7 +20,7 @@ from .adapter import HostAdapter
 from .codex_app_server import AppServerHost, worker_callbacks
 from .codex_display import CodexDisplay
 from .codex_provision import SEED
-from .codex_rpc import start_app_server
+from .codex_rpc import NativeRpcRejected, start_app_server
 from .devloop import Loop
 from .feishu_inbound import Inbound
 from .feishu_output import Views
@@ -173,6 +173,107 @@ class CodexAppServer(unittest.TestCase):
         self.assertTrue(failure["thread_id"] and failure["turn_id"])
         self.assertFalse(refused_tool.stdout)
         self.assertEqual(self.provider.observed,[(True,0)])
+
+    def test_app_server_compact_recovers_native_turn_without_restarting_uncertain_request(self):
+        clock = Clock()
+        ledger = Path(self.root)/"native-compaction.db"
+        compact_calls = []
+
+        def completed(rpc,sid):
+            deadline = time.monotonic()+12
+            while True:
+                event = rpc.event(deadline)
+                if event["method"]=="turn/completed" and event["params"]["threadId"]==sid:
+                    state = event["params"]["turn"]
+                    self.assertEqual(state["status"],"completed")
+                    return state["id"]
+
+        def instrument(rpc,lose_native_ack=False):
+            actual = rpc.request
+            def request(method,params):
+                result = actual(method,params)
+                if method=="thread/compact/start":
+                    compact_calls.append(params["threadId"])
+                    if lose_native_ack:
+                        raise Fault(503,"isolated_native_ack_lost",True)
+                return result
+            rpc.request = request
+
+        with isolated_app_server(self.root,self.origin) as initial:
+            instrument(initial)
+            sid = initial.request("thread/start",{"cwd":self.root,"ephemeral":False})["thread"]["id"]
+            initial.request("turn/start",{"threadId":sid,"input":[{"type":"text","text":"Keep the native test history",
+                                                                  "text_elements":[]}]})
+            seed = completed(initial,sid)
+            host = AppServerHost(initial,sid,ledger)
+            host.session = sid
+            loop = self.enterContext(Loop.isolated(clock,host_factory=lambda _path,_name:host))
+            service = WorkerService(loop.worker,clock)
+            token = guid()
+            url = self.enterContext(running(service.listen({token:"platform/oguri"},("127.0.0.1",0),None)))
+            platform = Client(url,token)
+            service.step()
+
+            def command(mid):
+                return platform.request("POST","worker/command",{"message_id":mid,"text":"/compact"})["receipt"]
+
+            def row(mid):
+                with loop.worker.db.transaction() as db:
+                    return db.execute("SELECT command_id,native_receipt FROM platform_compactions WHERE message_id=?",(mid,)).fetchone()
+
+            def cards(mid):
+                return [item["event"]["text"] for item in platform.request("GET","worker/display")["items"]
+                        if item["event"]["event_id"]=="compact-result-"+mid]
+
+            original = loop.adapter.compact
+            def lose_worker_ack(session,command_id,*,start):
+                receipt = original(session,command_id,start=start)
+                self.assertIn(receipt["state"],("running","completed"))
+                raise Fault(503,"isolated_worker_ack_lost",True)
+            loop.adapter.compact = lose_worker_ack
+            first = command("compact_first")
+            self.assertIsNone(row("compact_first")["native_receipt"])
+            old_compaction_turn = completed(initial,sid)
+            self.assertNotEqual(old_compaction_turn,seed)
+            self.assertEqual(cards("compact_first"),[])
+            loop.adapter.compact = original
+
+        with isolated_app_server(self.root,self.origin) as reopened:
+            instrument(reopened,lose_native_ack=True)
+            reopened.request("thread/resume",{"threadId":sid,"cwd":self.root})
+            host = AppServerHost(reopened,sid,ledger)
+            loop.adapter.host = host
+            clock.advance(5)
+            service.step()
+            durable = row("compact_first")
+            proof = json.loads(durable["native_receipt"])
+            self.assertEqual((proof["state"],proof["turn_id"]),("completed",old_compaction_turn))
+            self.assertEqual(cards("compact_first"),["宿主已确认完成历史压缩。"])
+            self.assertEqual(command("compact_first"),first)
+            self.assertEqual(loop.adapter.compact(sid,durable["command_id"],start=True),
+                             {"session":sid,"command_id":durable["command_id"],**proof})
+            self.assertEqual(compact_calls,[sid])
+
+            second = command("compact_uncertain")
+            unconfirmed_turn = completed(reopened,sid)
+            later = row("compact_uncertain")
+            self.assertIsNone(later["native_receipt"])
+            self.assertEqual(loop.adapter.compact(sid,later["command_id"],start=True)["state"],"unknown")
+            self.assertEqual(command("compact_uncertain"),second)
+            self.assertEqual(compact_calls,[sid,sid])
+            with loop.worker.db.transaction() as db:
+                db.execute("UPDATE platform_compactions SET deadline=0 WHERE message_id='compact_uncertain'")
+            clock.advance(5)
+            service.step()
+            self.assertEqual(cards("compact_uncertain"),["压缩结果待核。请先查看原生会话的历史记录。"])
+            turns = host.thread(sid,include_turns=True)["turns"]
+            self.assertEqual([turn["id"] for turn in turns],[seed,old_compaction_turn,unconfirmed_turn])
+            self.assertEqual([turn["items"][0]["type"] for turn in turns],["userMessage","contextCompaction","contextCompaction"])
+            self.assertEqual(proof["compaction_id"],turns[1]["items"][0]["id"])
+        self.assertEqual(loop.hermes.tasks()["items"],[])
+        self.evidence = {"thread_id":sid,"verified_original":proof,"uncertain_native_turn":unconfirmed_turn,
+                         "native_start_requests":len(compact_calls),"replay_created_no_extra_turns":True,
+                         "boundary":"Actual App Server compaction and cold history with local model and isolated platform"}
 
     def test_native_app_server_dynamic_tool_keeps_ids_and_fires_one_w04(self):
         root,provider = self.root,self.provider
@@ -380,6 +481,30 @@ class CodexAppServer(unittest.TestCase):
                          "pending_native_call_id":pending_call["callId"],"model_requests":len(self.provider.observed),
                          "original_process_exited":rpc.process.returncode is not None,
                          "boundary":"Native App Server process restart with local scripted provider; no account or Desktop session"}
+
+    def test_rejected_first_native_history_read_keeps_original_assignment_lookup_only(self):
+        rpc = self.enterContext(isolated_app_server(self.root,self.origin))
+        original = rpc.request
+        native_starts = []
+        rejections = []
+        def request(method,params):
+            if method=="thread/read" and params.get("includeTurns") and native_starts and not rejections:
+                rejections.append(params["threadId"])
+                raise NativeRpcRejected("isolated initial history rejection")
+            result = original(method,params)
+            if method=="turn/start":
+                native_starts.append(result["turn"]["id"])
+            return result
+        rpc.request = request
+        loop,host,frame,proof,_call = self.pending_native_task(rpc)
+        self.assertEqual(rejections,[host.thread_id])
+        self.assertEqual(native_starts,[proof["turn_id"]])
+        payload = {"kind":"task",**frame["payload"]}
+        self.assertEqual(loop.adapter.lookup_delivery(frame["delivery_id"],payload,session=host.thread_id),proof)
+        self.assertTrue(loop.worker.process(frame))
+        self.assertEqual(len(native_starts),1)
+        self.assertEqual(loop.hermes.inspect(payload["task_id"])["task"]["state"],"working")
+        self.assertFalse(loop.manager_wire.frames(0))
 
     def test_native_app_server_interrupt_proves_exact_turn_without_releasing_assignment(self):
         rpc = self.enterContext(isolated_app_server(self.root,self.origin))

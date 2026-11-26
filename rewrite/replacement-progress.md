@@ -4,6 +4,10 @@
 
 ## 检查点与证据
 
+独立 Codex `/compact` 已走原生 `thread/compact/start`。收到 App Server 确认、返回 Worker 的回执丢失时，冷开后凭原压缩回合和记录查回，只发一条成功提示。若 App Server 原确认丢失，指令保持待核，即使历史后来出现压缩，其关联也不确认。两次实际原生调用各产生一个压缩回合，同消息号重投无第三次。连续 15 轮通过。[原生回执](evidence/codex-app-server-native-compaction.json)。复跑 `python3 -m unittest -v rewrite.test_codex_app_server.CodexAppServer.test_app_server_compact_recovers_native_turn_without_restarting_uncertain_request`。平台与模型使用夹具。
+
+macOS 全套复测曾遇到第一次原生历史读取被 App Server 拒绝。已将可重试的历史错误保留为待核，按原标识复查。隔离回归实际写一次原生输入、在首次读回注入拒绝，随后读回原号，仍由同一工位持单。最终 macOS 187 项全过。Linux arm64 锁定 `c52c30c9a17892cfdf6924996ac020931c990e16`，136 项通过、49 项因缺本机宿主跳过，校验 151 个文件，跨系统 TLS 回环使用夹具。
+
 隔离迁移后已有正式进展的回退对账已实测。旧待派单按原号映射到试运行库，模拟 Agent 经实际 Worker 提交带附件 W04，重投只留一条通知。对账读回旧新单号、状态、原派发和成果附件，无正文和文件名；原样回退被拒，两份库保留。连续 8 次通过。复跑 `python3 -m unittest -v rewrite.test_cutover`。[回退边界证据](evidence/cutover-reconcile-formal-report.json)。已完成或仍持单的业务事实须逐笔核准，仍未自动回灌原旧端。
 
 实际 DSH 从搁置通知暂存 640000 字节，原生工具仅以附件另交候选材料。暂存后管理端读不到，候选入池后按原附件号读回相同字节，下一位 Worker 仍无读权。原 W04 首次迟交仍回 409，转派后同号只回读原材料号，另交新材料被拒，无成果或凭候选释放持单。连续 12 次通过。[原生材料记录](evidence/dsh-native-candidate-artifact.json)。复跑 `python3 -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_shelved_dsh_assignment_submits_candidate_without_changing_ownership`。模型、时钟和第二工位使用夹具。

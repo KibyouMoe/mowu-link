@@ -1,0 +1,13 @@
+{
+  "thread_id": "01a216f5-0468-7941-ba65-5c4c07d03a7d",
+  "verified_original": {
+    "compaction_id": "01a216f5-04b1-7d91-84ca-43081a9f1f09",
+    "state": "completed",
+    "turn_id": "01a216f5-04af-7680-878f-29300193e7f5"
+  },
+  "uncertain_native_turn": "01a216f5-04ef-74a1-84cf-a9d0d26636ec",
+  "native_start_requests": 2,
+  "replay_created_no_extra_turns": true,
+  "boundary": "Actual App Server compaction and cold history with local model and isolated platform",
+  "consecutive_runs": 15
+}

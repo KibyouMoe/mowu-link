@@ -356,6 +356,8 @@ def compact_receipt(proof,session,command_id):
             502,"wrong_native_compaction")
     state = proof.get("state")
     if state == "completed":
+        if "turn_id" in proof:
+            return {"state":state,"turn_id":string(proof,"turn_id"),"compaction_id":string(proof,"compaction_id")}
         require(all(type(proof.get(key)) is int and 0<=proof[key]<2**53
                     for key in ("items","tokens","summary_seq","end_seq")) and proof["items"]>0
                 and proof["end_seq"]>proof["summary_seq"],502,"invalid_compaction_receipt")
@@ -369,8 +371,11 @@ def finish_compact(worker,mid,session,proof):
     state = proof["state"]
     if state in ("running","missing"):
         return
-    answer = (f"宿主已压缩 {proof['items']} 条历史记录，约 {proof['tokens']} tokens。"
-              if state=="completed" else COMPACTION_RESULTS[state])
+    if state=="completed":
+        answer = (f"宿主已压缩 {proof['items']} 条历史记录，约 {proof['tokens']} tokens。"
+                  if "items" in proof else "宿主已确认完成历史压缩。")
+    else:
+        answer = COMPACTION_RESULTS[state]
     with worker.db.transaction() as db:
         changed = db.execute("UPDATE platform_compactions SET native_receipt=? WHERE message_id=? AND native_receipt IS NULL",
                              (encode(proof),mid)).rowcount

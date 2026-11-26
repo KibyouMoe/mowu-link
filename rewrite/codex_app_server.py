@@ -8,6 +8,7 @@ import time
 import unicodedata
 
 from .agent_tools import TOOLSET
+from .codex_compactions import CodexCompactions
 from .codex_rpc import NativeRpcRejected
 from .storage import Fault, encode, require, string
 
@@ -21,10 +22,11 @@ class AppServerHost:
     rejects_busy_before_control_write = True
     rejects_busy_before_queue_write = True
 
-    def __init__(self, rpc, thread_id):
+    def __init__(self, rpc, thread_id, compaction_db=None):
         self.rpc, self.thread_id = rpc,thread_id
         self.write_lock = RLock()
         self.usage = None
+        self.compactions = CodexCompactions(compaction_db,self) if compaction_db is not None else None
 
     def request(self,method,params):
         try:
@@ -34,7 +36,12 @@ class AppServerHost:
 
     def thread(self, session, *, include_turns):
         require(session==self.thread_id,409,"wrong_native_session")
-        result = self.request("thread/read",{"threadId":session,"includeTurns":include_turns})["thread"]
+        try:
+            result = self.request("thread/read",{"threadId":session,"includeTurns":include_turns})["thread"]
+        except Fault as error:
+            if include_turns and error.retryable and error.status>=500:
+                raise Fault(503,"native_history_unconfirmed",True) from None
+            raise
         require(result["id"]==self.thread_id,409,"wrong_native_session")
         return result
 
@@ -45,7 +52,11 @@ class AppServerHost:
 
     def capabilities(self,session):
         require(session==self.thread_id,409,"wrong_native_session")
-        return {"stop_private":True,"session_catalog":True}
+        return {"stop_private":True,"session_catalog":True,"compaction":self.compactions is not None}
+
+    def compact(self,session,command_id,*,start):
+        require(self.compactions,422,"native_compaction_unavailable")
+        return self.compactions.run(session,command_id,start=start)
 
     def session_catalog(self,session):
         thread = self.thread(session,include_turns=False)
