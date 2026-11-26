@@ -1,9 +1,11 @@
 """Long-lived Worker state and narrow authenticated callbacks from its bound services."""
 from threading import Event, Thread
 import time
+from urllib.parse import urlsplit
 from urllib.error import URLError
 
-from . import display, links, peer_retry, queued_chat, user_questions, worker_commands, worker_media
+from . import display, links, peer_files, peer_retry, queued_chat, user_questions, worker_commands, worker_media
+from .messages import valid_guid
 from .storage import Fault, require, string
 from .wire import serve_authenticated
 
@@ -115,8 +117,23 @@ class WorkerService:
                                  body.get("attachment_ids"),body.get("attachment_kinds"))
         elif actor == "adapter/" + w.worker_id and method == "GET" and path == "/v1/worker/peers":
             result = {"items":w.peer_history()}
+        elif actor=="adapter/"+w.worker_id and path.startswith("/v1/worker/history/"):
+            url = urlsplit(path)
+            parts = url.path.removeprefix("/v1/worker/history/").split("/")
+            require(len(parts) in (2,3,4) and parts[1]=="peers" and valid_guid(parts[0]),404,"unknown_history_route")
+            if len(parts)>2:
+                require(valid_guid(parts[2]),422,"invalid_peer_message")
+            route = "history/"+"/".join(parts[:3])
+            if len(parts)==4:
+                require(parts[3]=="file" and not url.query and method=="POST" and isinstance(body,dict)
+                        and set(body)=={"position"} and type(body["position"]) is int,422,"invalid_history_file")
+                files = w.router.request("GET",route)["attachments"]
+                require(0<=body["position"]<len(files),404,"history_attachment_not_found")
+                result = peer_files.receive(w,files[body["position"]])
+            else:
+                require(method=="GET",405,"read_only_history")
+                result = w.router.request("GET",route+("?"+url.query if url.query else ""))
         elif actor == "adapter/"+w.worker_id and method=="GET" and path.startswith("/v1/worker/peers/"):
-            from .messages import valid_guid
             mid = path.removeprefix("/v1/worker/peers/")
             require(valid_guid(mid),422,"invalid_peer_message")
             result = w.router.request("GET","peers/messages/"+mid)

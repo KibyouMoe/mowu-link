@@ -1,7 +1,7 @@
 """Ordinary peer messages do not hold, create or complete a formal task."""
 from . import attachments, delivery, peer_files
 from .messages import valid_guid
-from .storage import require, string, timestamp
+from .storage import Fault, require, string, timestamp
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS peer_messages (
@@ -26,6 +26,10 @@ def submit(db, sender, target, body, now):
     ids,kinds = peer_files.request_files(body)
     require(isinstance(text,str) and (text.strip() or ids),422,"invalid_peer_message")
     require(valid_guid(mid) and target != sender,422,"invalid_peer_message")
+    historical = db.execute("SELECT source_id,sender_actor FROM history_peers WHERE message_id=?",(mid,)).fetchone()
+    if historical:
+        require(historical["sender_actor"]=="worker/"+sender,409,"peer_message_conflict")
+        raise Fault(409,"legacy_peer_recorded",details={"source_id":historical["source_id"],"message_id":mid})
     require(db.execute("SELECT 1 FROM workers WHERE worker_id=?", (target,)).fetchone(),404,"peer_not_registered")
     parent = body.get("reply_to")
     if parent is not None:

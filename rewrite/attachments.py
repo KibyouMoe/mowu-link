@@ -83,7 +83,9 @@ def authorize(db, actor, file_id):
 def grant(db, owner, recipient, ids):
     require(isinstance(ids, list) and all(isinstance(i, str) and i for i in ids), 422, "invalid_attachment_ids")
     for file_id in ids:
-        authorize(db, owner, file_id)
+        upload = authorize(db, owner, file_id)
+        require(not upload["owner"].startswith("history/") or owner==upload["owner"],
+                403, "historical_attachment_read_only")
         db.execute("INSERT OR IGNORE INTO attachment_grants VALUES (?,?)", (file_id, recipient))
 
 

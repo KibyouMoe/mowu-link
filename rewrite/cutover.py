@@ -12,7 +12,7 @@ import tempfile
 from uuid import UUID, uuid5
 
 from .orders import Orders, task
-from . import legacy_history
+from . import legacy_history, legacy_peers
 from .storage import encode
 
 
@@ -173,6 +173,7 @@ def prepare(snapshot, destination, source_id):
                                (row["request_id"],encode([["POST","/v1/tasks"],original]),encode(task(db,tid))))
                 mapping[row["task_id"]] = tid
             legacy_history.populate(db,old,str(namespace),manifest["legacy_db_sha256"],mapping)
+            legacy_peers.populate(db,old,str(namespace),snapshot/"attachments")
         baseline = {"snapshot_sha256":manifest["legacy_db_sha256"],"source_id":str(namespace),
                     "router_db_sha256":digest(stage/"router.db"),"queued_id_map":mapping}
         (stage/"baseline.json").write_text(encode(baseline))

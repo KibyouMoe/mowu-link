@@ -8,7 +8,7 @@ from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlsplit
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Request, build_opener
 
-from . import attachments, delivery, legacy_history, links, messages, peers, pool, questions
+from . import attachments, delivery, legacy_history, legacy_peers, links, messages, peers, pool, questions
 from .orders import task, worker_actor
 from .storage import Fault, encode, require
 
@@ -17,6 +17,14 @@ def route(orders, actor, method, path, body, headers):
     url = urlsplit(path)
     parts = url.path.removeprefix("/v1/").split("/")
     require(path.startswith("/v1/"), 404, "unknown_route")
+    if len(parts) in (3,4) and parts[0]=="history" and parts[2]=="peers":
+        require(method=="GET",405,"read_only_history")
+        filters = parse_qs(url.query,keep_blank_values=True)
+        require(all(len(v)==1 for v in filters.values()),422,"duplicate_filter")
+        with orders.db.transaction() as db:
+            history = legacy_peers.query(db,actor,parts[1],parts[3] if len(parts)==4 else None,
+                                         {k:v[0] for k,v in filters.items()})
+        return 200,"application/json",history
     if len(parts)==3 and parts[0]=="history" and parts[2]=="tasks":
         require(actor=="hermes",403,"forbidden")
         require(method=="GET",405,"read_only_history")

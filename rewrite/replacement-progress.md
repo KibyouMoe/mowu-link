@@ -4,6 +4,8 @@
 
 ## 检查点与证据
 
+旧 Router 私聊迁移保留原消息号、回复关联、工单号、确认或放弃时间、分段正文和附件。测试由实际旧 RouterStore 写入数据，两个新端 HTTP 入口查回，原图逐字节一致。第三方和平台入口无法读取，收件人直接用历史附件引用提交 W04 时被拒，持单仍在。原号重送未唤醒宿主，未确认消息或正文中间缺段会阻止生成试运行库。复跑 `python3 -m unittest -v rewrite.test_cutover`，macOS 全套 117 项通过。飞书私聊记录与订阅另验。
+
 DSH 的飞书 `/context` 已接入绑定会话的版本 4 原生日志。隔离测试的第一条模型回包为输入 46、总计 51、窗口 32768；下一条改用另一路由且缺用量，三个数均显示「未记录」，同号重送仍读回第一张卡。错误 Worker 身份被适配器拒绝。真实 DSH SDK、SQLite、Unix 套接字和两段 HTTP 已运行，模型事件与飞书为测试输入；真实账户消费另验。复跑 `python3 -m unittest -v rewrite.test_dsh_sdk.DshSdk.test_context_command_reads_only_committed_usage_for_the_same_route`。macOS 全套 115 项通过。
 
 同伴消息和宿主回执按单条恢复。故障复现时，首条私聊的错误连续三轮阻挡后续私聊和新工单，接收工位原生输入为零、工单一直待派。修正后，同一时序下第二条私聊与正式派发均送达；首条凭据指向错误会话时保持待核。重启并查回原凭据后，首条只进宿主一次。一条上行回执暂时失败时其他回执照常提交。测试使用真实 Router、Worker、SQLite、HTTP，宿主与时钟为夹具。复跑 `python3 -m unittest -v rewrite.test_peers`，七项通过，macOS 全套 114 项通过。
@@ -94,7 +96,7 @@ DSH 的 `/queue 正文` 已接入固定会话。飞书命令回执证明 Worker 
 | 旧入口与使用者 | 新入口／归属 | 已有证据；迁移条件 |
 | --- | --- | --- |
 | 溪流、客户端使用 Router 的 /workers、/tasks、/tasks/{id}、/tasks/{id}/cancel；Worker 用 /register、/heartbeat、/stream、/result、/tasks/{id}/deliverable（server/router/server.py） | A01–06、C01–02、W01–04 | 建单收件和验收已有主线；须逐项验证改派、取消、旧清理、晚报与管理查询 |
-| 工位点对点消息 /messages、消息 ack；飞书与 Worker 的聊天记录 /chat、订阅与 notice | Worker 私聊与 Router 投递；训练员私聊由 Worker 对接 | 新私聊夹具可隔离工单语义；跨机收发、关联、历史与订阅迁移未验 |
+| 工位点对点消息 /messages、消息 ack；飞书与 Worker 的聊天记录 /chat、订阅与 notice | Worker 私聊与 Router 投递；训练员私聊由 Worker 对接 | 同伴收发、确认、附件和旧同伴历史已用隔离 HTTP 验证；宿主输入为夹具，旧飞书聊天记录、订阅与真人工位另验 |
 | 工位问答 /questions、/questions/responses，审批 /approvals，远端命令 /commands、/commands/responses，运维 /ops/services | W05、A08–09；宿主授权及运维能力单列 | 验收要覆盖原题、原请求发起人和权限；保留独立审批边界，禁止用问答代批准 |
 | Trigger 来源 sources/email/client.py、sources/mc_chat、server/trigger/clients/mc_chat_client.py；/trigger、/sources、/stats、/events、/drops、/blocked、/subscribe、/ack、/renew、/unsubscribe | 来源实例持久队列、T01–04，订阅、健康和运维另测 | 两来源都有登记；按启动状态另核。须复现断传、重发、按实例查发件与接收 |
 | Hermes trigger-bus 本机已安装；register 挂 pre_gateway_dispatch、pre_llm_call、transform_tool_result、post_llm_call；旧附件获取 | HermesRouterAdapter C01–03、H01–02、A07 | Notify 空闲 10 秒已有宿主夹具；Event、Info、文件和真实 Hermes 单列 |

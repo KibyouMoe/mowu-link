@@ -17,6 +17,7 @@ from .storage import Fault, guid
 from .hermes import HermesAdapter
 from .hermes_tools import ManagerTools
 from .wire import Client, serve_loopback
+from .worker_service import WorkerService
 
 
 @unittest.skipUnless(os.name == "posix","this version of the old Router imports fcntl")
@@ -158,6 +159,116 @@ store._conn.close()
         with self.assertRaisesRegex(ValueError,"reconcile"):
             rollback(self.snapshot,self.trial,self.restore)
         self.assertFalse(self.restore.exists())
+
+    def test_pending_peer_or_missing_middle_chunk_prevents_publishing_a_partial_migration(self):
+        mid = guid()
+        self.old("""
+store = RouterStore(sys.argv[1])
+store.add_peer_message(sys.argv[2],"tama","oguri","a"*240000,None,[],"fixture")
+store.close()
+""",self.legacy,mid)
+        backup(self.legacy,self.attachments,self.snapshot)
+        with self.assertRaisesRegex(ValueError,"unconfirmed_peer_messages"):
+            prepare(self.snapshot,self.trial,self.source_id)
+        self.old("""
+store = RouterStore(sys.argv[1])
+store.ack_peer_message(sys.argv[2])
+assert store._conn.execute("DELETE FROM peer_text_chunks WHERE message_id=? AND part=1",(sys.argv[2],)).rowcount==1
+store.close()
+""",self.legacy,mid)
+        second = self.root/"snapshot-with-gap"
+        backup(self.legacy,self.attachments,second)
+        with self.assertRaisesRegex(ValueError,"incomplete legacy peer text"):
+            prepare(second,self.trial,self.source_id)
+        self.assertFalse(self.trial.exists())
+
+    def test_archived_peer_threads_files_and_permissions_survive_without_replay(self):
+        first,reply,root_msg = guid(),guid(),guid()
+        sample = "原样保留🟣"*13000
+        result = json.loads(self.old("""
+store = RouterStore(sys.argv[1])
+src = AttachmentStore(Path(sys.argv[2]))
+ref = src.describe(sys.argv[3],"附件.gif")
+first,reply,root = sys.argv[4:7]
+store.add_peer_message(first,"tama","oguri","原样保留🟣"*13000,None,[ref],"fixture",sys.argv[7])
+store.ack_peer_message(first)
+store.add_peer_message(reply,"oguri","tama","收到",first,[],"fixture")
+store._conn.execute("UPDATE peer_messages SET abandoned_at=created_at WHERE message_id=?",(reply,))
+store.add_peer_message(root,"Hermes","tama","one manager message",None,[],"fixture")
+store.ack_peer_message(root)
+print(json.dumps(store.get_peer_message(first)["acked_at"]))
+store.close()
+""",self.legacy,self.attachments,self.sha,first,reply,root_msg,self.archived))
+        backup(self.legacy,self.attachments,self.snapshot)
+        prepare(self.snapshot,self.trial,self.source_id)
+        loop = Loop(self.trial,Clock(),FixtureHost,extra_workers=("tama","stranger"))
+        loop.thread.start()
+        self.addCleanup(loop.server.server_close)
+        self.addCleanup(loop.thread.join)
+        self.addCleanup(loop.server.shutdown)
+        loop.worker.connect()
+        self.assertFalse([f for f in loop.wire.frames(0) if f["kind"]=="peer.message"])
+        route = "history/"+self.source_id+"/peers"
+        first_page = loop.wire.request("GET",route+"?limit=1")
+        self.assertEqual(first_page["items"][0]["message_id"],first)
+        self.assertNotIn("text",first_page["items"][0])
+        second, = loop.wire.request("GET",route+"?cursor="+str(first_page["next_cursor"]))["items"]
+        self.assertEqual((second["message_id"],second["reply_to"],second["acked_at"]),(reply,first,None))
+        self.assertIsNotNone(second["abandoned_at"])
+        self.assertEqual([m["message_id"] for m in loop.manager_wire.request("GET",route)["items"]],[root_msg])
+        for other in (loop.manager_wire,loop.extra_clients["stranger"]):
+            with self.assertRaisesRegex(Fault,"legacy_peer_not_found"):
+                other.request("GET",route+"/"+first)
+        with self.assertRaisesRegex(Fault,"legacy_peer_recorded"):
+            loop.worker.send_peer(reply,"tama","收到",first)
+        key,platform = guid(),guid()
+        listener = self.enterContext(WorkerService(loop.worker).listen({key:"adapter/oguri",platform:"platform/oguri"},
+                                                                       ("127.0.0.1",0),None))
+        thread = Thread(target=listener.serve_forever,kwargs={"poll_interval":.02})
+        thread.start()
+        self.addCleanup(thread.join)
+        self.addCleanup(listener.shutdown)
+        origin = "http://127.0.0.1:"+str(listener.server_port)
+        native = Client(origin,key)
+        detail = "worker/"+route+"/"+first
+        item = native.request("GET",detail)
+        self.assertEqual(item["message"]["acked_at"],result)
+        self.assertEqual(item["message"]["task_id"],self.archived)
+        self.assertNotIn("host_receipt_id",item["message"])
+        self.assertGreater(item["message"]["text_parts"],1)
+        pieces = [item["text"]]
+        while item["next_part"] is not None:
+            item = native.request("GET",detail+"?part="+str(item["next_part"]))
+            pieces.append(item["text"])
+        self.assertEqual("".join(pieces),sample)
+        ref, = item["attachments"]
+        for other in (loop.manager_wire,loop.extra_clients["stranger"]):
+            with self.assertRaisesRegex(Fault,"attachment_not_found"):
+                other.request("GET","attachments/"+ref["attachment_id"])
+        with self.assertRaises(Fault):
+            Client(origin,platform).request("GET",detail)
+        fetched = native.request("POST",detail+"/file",{"position":0})
+        self.assertEqual(native.request("POST",detail+"/file",{"position":0}),fetched)
+        self.assertNotEqual(fetched["attachment_id"],ref["attachment_id"])
+        self.assertEqual(native.request("GET","worker/media/files/"+fetched["attachment_id"])["bytes"],
+                         (self.attachments/self.sha).read_bytes())
+        self.assertEqual(loop.native.entries(),[])
+        self.assertFalse(loop.worker.hold()["held_task_id"])
+        clock = loop.orders.clock
+        tid = loop.hermes.create(guid(),"New work","独立正式单","oguri")["task_id"]
+        loop.worker.poll()
+        clock.advance(10)
+        loop.worker.poll()
+        loop.worker.poll()
+        held = loop.worker.hold()
+        self.assertEqual(held["held_task_id"],tid)
+        with self.assertRaisesRegex(Fault,"historical_attachment_read_only"):
+            loop.wire.request("POST","tasks/"+tid+"/report",{
+                "session_id":loop.worker.session,"assignment_id":held["held_assignment_id"],
+                "outcome":"completed","summary":"private file reference","artifact_ids":[ref["attachment_id"]]},guid())
+        self.assertEqual(loop.hermes.inspect(tid)["task"]["state"],"working")
+        with self.assertRaisesRegex(Fault,"attachment_not_found"):
+            loop.manager_wire.request("GET","attachments/"+ref["attachment_id"])
 
     def test_original_id_and_source_read_back_via_manager_without_reviving_archived_order(self):
         backup(self.legacy,self.attachments,self.snapshot)
