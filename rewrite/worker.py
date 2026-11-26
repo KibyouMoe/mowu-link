@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS peers (
     message_id TEXT PRIMARY KEY, direction TEXT NOT NULL, peer_id TEXT NOT NULL,
     body TEXT NOT NULL, receipt TEXT
 );
+CREATE TABLE IF NOT EXISTS peer_delivery_sessions (message_id TEXT PRIMARY KEY, session TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS peer_receipt_acks(message_id TEXT PRIMARY KEY, ack TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS controls (
     assignment_id TEXT PRIMARY KEY, kind TEXT NOT NULL, task_id TEXT NOT NULL
@@ -152,28 +153,7 @@ class Worker:
         with self.lock:
             payload = frame["payload"]
             if frame["kind"] == "peer.message":
-                require(payload.get("to_worker") == self.worker_id,403,"wrong_peer_destination")
-                mid, sender = string(payload,"message_id"), string(payload,"from_worker")
-                with self.db.transaction() as db:
-                    db.execute("INSERT OR IGNORE INTO peers VALUES (?,'in',?,?,NULL)", (mid,sender,encode(payload)))
-                    row = db.execute("SELECT * FROM peers WHERE message_id=?", (mid,)).fetchone()
-                    require(row["direction"] == "in" and row["body"] == encode(payload),409,"peer_message_conflict")
-                    if row["receipt"]:
-                        require(json.loads(row["receipt"])["delivery_id"]==frame["delivery_id"],409,"peer_delivery_conflict")
-                        return True
-                native = {"kind":"peer", **payload}
-                if payload.get("attachments"):
-                    native["attachments"] = [peer_files.receive(self,item) for item in payload["attachments"]]
-                reply = self.adapter.deliver(frame["delivery_id"], native)
-                if reply:
-                    require(isinstance(reply,dict) and reply.get("delivery_id")==frame["delivery_id"]
-                            and reply.get("session")==self.adapter.bound_session()
-                            and reply.get("digest")==hashlib.sha256(encode(native).encode()).hexdigest()
-                            and isinstance(reply.get("native_id"),str) and reply["native_id"],
-                            409,"peer_host_unconfirmed")
-                    with self.db.transaction() as db:
-                        db.execute("UPDATE peers SET receipt=? WHERE message_id=?", (encode(reply),mid))
-                return reply is not None
+                return self.receive_peer(frame["delivery_id"],payload)
             if frame["kind"] == "question.resolved":
                 answer = encode(payload["answer"])
                 with self.db.transaction() as db:
@@ -209,6 +189,46 @@ class Worker:
                 return self.send_task_input(frame["delivery_id"], {"kind": kind, **payload}) is not None
             require(frame["kind"] == "task.dispatch", 422, "unsupported_delivery")
             return self.take(frame)
+
+    def receive_peer(self,did,payload):
+        require(payload.get("to_worker")==self.worker_id,403,"wrong_peer_destination")
+        mid,sender = string(payload,"message_id"),string(payload,"from_worker")
+        with self.db.transaction() as db:
+            stored = encode(payload)
+            inserted = db.execute("INSERT OR IGNORE INTO peers VALUES (?,'in',?,?,NULL)",(mid,sender,stored)).rowcount
+            row = db.execute("SELECT direction,body,receipt FROM peers WHERE message_id=?",(mid,)).fetchone()
+            require(row["direction"]=="in" and row["body"]==stored,409,"peer_message_conflict")
+            if row["receipt"]:
+                require(json.loads(row["receipt"])["delivery_id"]==did,409,"peer_delivery_conflict")
+                return True
+            if inserted:
+                db.execute("INSERT INTO peer_delivery_sessions VALUES (?,'')",(mid,))
+            target = db.execute("SELECT session FROM peer_delivery_sessions WHERE message_id=?",(mid,)).fetchone()
+        session = self.adapter.bound_session()
+        require(isinstance(session,str) and session.strip(),409,"peer_host_unconfirmed")
+        require(not target or target["session"] in ("",session),409,"peer_native_session_changed")
+        native = {"kind":"peer",**payload}
+        if payload.get("attachments"):
+            native["attachments"] = [peer_files.receive(self,item) for item in payload["attachments"]]
+        first_attempt = False
+        if target and not target["session"]:
+            with self.db.transaction() as db:
+                first_attempt = db.execute("""UPDATE peer_delivery_sessions SET session=?
+                    WHERE message_id=? AND session=''""",(session,mid)).rowcount==1
+                actual = db.execute("SELECT session FROM peer_delivery_sessions WHERE message_id=?",(mid,)).fetchone()[0]
+                require(actual==session,409,"peer_native_session_changed")
+        proof = (self.adapter.deliver(did,native,session=session) if first_attempt else
+                 self.adapter.lookup_delivery(did,native,session=session))
+        if proof is None:
+            return False
+        require(isinstance(proof,dict) and proof.get("delivery_id")==did and proof.get("session")==session
+                and proof.get("digest")==hashlib.sha256(encode(native).encode()).hexdigest()
+                and isinstance(proof.get("native_id"),str) and proof["native_id"],409,"peer_host_unconfirmed")
+        with self.db.transaction() as db:
+            saved = db.execute("""UPDATE peers SET receipt=? WHERE message_id=? AND (receipt IS NULL OR receipt=?)""",
+                               (encode(proof),mid,encode(proof))).rowcount
+            require(saved,409,"peer_host_unconfirmed")
+        return True
 
     @staticmethod
     def save_control(db, kind, payload):

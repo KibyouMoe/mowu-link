@@ -2,6 +2,7 @@
 import re
 from urllib.error import URLError
 
+from .messages import valid_guid
 from .storage import Fault, require, string
 from .wire import serve_authenticated
 
@@ -84,7 +85,8 @@ class RemoteAdapter:
         return self.request("POST","host/deliver",{"delivery_id":did,"payload":payload},native_session=session)["receipt"]
 
     def lookup_delivery(self,did,payload,*,session):
-        return self.request("POST","host/find-chat",{"delivery_id":did,"payload":payload},native_session=session)["receipt"]
+        route = "host/find-peer" if payload["kind"]=="peer" else "host/find-chat"
+        return self.request("POST",route,{"delivery_id":did,"payload":payload},native_session=session)["receipt"]
 
     def origin(self, native_id, *, session=None):
         return self.request("POST","host/origin",{"native_id":native_id},native_session=session)["origin"]
@@ -154,6 +156,13 @@ def serve_adapter(adapter, worker_id, identities, address, context):
                 did = string(body,"delivery_id")
                 require(isinstance(payload,dict) and payload.get("kind")=="chat"
                         and did=="chat-"+string(payload,"message_id"),422,"invalid_host_input")
+                result = {"receipt":adapter.lookup_delivery(did,payload,session=adapter.bound_session())}
+            case "POST","/v1/host/find-peer":
+                payload = body.get("payload")
+                did = string(body,"delivery_id")
+                require(valid_guid(did) and isinstance(payload,dict) and payload.get("kind")=="peer"
+                        and payload.get("to_worker")==worker_id and valid_guid(payload.get("message_id")),
+                        422,"invalid_host_input")
                 result = {"receipt":adapter.lookup_delivery(did,payload,session=adapter.bound_session())}
             case "POST","/v1/host/origin":
                 result = {"origin":adapter.origin(string(body,"native_id"))}

@@ -178,3 +178,11 @@ class Service(unittest.TestCase):
         proof = current.deliver("chat-test-native",body)
         self.assertEqual(current.lookup_delivery("chat-test-native",body,session="new-unintended-session"),proof)
         self.assertEqual(proof["session"],"new-unintended-session")
+        did = guid()
+        peer = {"kind":"peer","message_id":guid(),"to_worker":"dev","text":"Original private message"}
+        self.assertIsNone(current.lookup_delivery(did,peer,session=proof["session"]))
+        peer_proof = current.deliver(did,peer,session=proof["session"])
+        self.assertEqual(current.lookup_delivery(did,peer,session=proof["session"]),peer_proof)
+        with self.assertRaisesRegex(Fault,"invalid_host_input"):
+            current.lookup_delivery(did,dict(peer,to_worker="other"),session=proof["session"])
+        self.assertEqual(len(FixtureHost(native_db,proof["session"]).entries()),2)

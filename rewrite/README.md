@@ -42,6 +42,8 @@ DSH 同一工单来源的回合可用 `worker_submit_material` 单独提交候�
 
 接收工位查询指定消息时，`local_pending` 列出投递或确认失败的阶段、错误、尝试次数和下次重试时间。未拿到可靠凭据时继续沿用原投递号，按单条从 5 秒退避至最多 5 分钟。重启后沿用同一记录，其他同伴消息和工单可继续处理。
 
+接收同伴私聊开始宿主投递前，Worker 保存原生会话。此后收件不明只查原记录。更换会话或重新创建适配器账本时，待核消息不会再写一遍。旧版未回执记录也仅查回。升级先更换适配器，再更换 Worker，并保留原账本。
+
 从旧 Router 带入的已确认或已放弃私聊由原参与人按来源 UUID 查询。Router 入口为 `GET /v1/history/{source_id}/peers`，宿主经绑定的 Worker 访问 `GET /v1/worker/history/{source_id}/peers`。列表用 `limit` 和 `next_cursor` 分页。消息详情路径再附原消息号，长正文按 `next_part` 逐段读取。宿主可向详情路径下的 `/file` 提交 `{"position":0}`，取得本工位媒体引用供查看。历史记录只有原 Router 确认时间或放弃时间，迁移过程不产生新的投递或宿主回执。见[迁移演练](router-rehearsal.md#复跑)。
 
 同伴消息的发件和收件宿主可通过各自 Worker 的 `GET /v1/worker/peers/{message_id}` 查回交接进度。`accepted_at` 记录 Router 收件，`worker_received` 表示接收 Worker 已确认入箱；`host_receipt_id` 有值表示接收 Worker 已核指定宿主的原生凭据并向 Router 报备。宿主会话及原生收件详情留在接收工位。上述回执都不代表对方已经回复。

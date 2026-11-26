@@ -69,7 +69,10 @@ class Peers(unittest.TestCase):
         with self.assertRaisesRegex(Fault,"forbidden"):
             self.loop.manager_wire.request("GET",route)
         original_deliver = self.b.adapter.deliver
-        self.b.adapter.deliver = lambda *_:None
+        def lost_native_reply(*args,**kwargs):
+            original_deliver(*args,**kwargs)
+            return None
+        self.b.adapter.deliver = lost_native_reply
         self.b.poll()
         only_worker = sender.request("GET",path)
         self.assertTrue(only_worker["worker_received"])
@@ -209,14 +212,15 @@ class Peers(unittest.TestCase):
         self.a.send_peer(healthy,"tama","second")
         tid = self.loop.hermes.create(guid(),"Independent dispatch","Continue working","tama")["task_id"]
         receive = self.b.adapter.deliver
+        lookup = self.b.adapter.lookup_delivery
         calls = []
-        def inconsistent(did,payload,**kwargs):
-            receipt = receive(did,payload,**kwargs)
+        def inconsistent(receipt,did,payload):
             if payload.get("message_id")==failed:
                 calls.append(did)
                 return {**receipt,"session":"different-session"}
             return receipt
-        self.b.adapter.deliver = inconsistent
+        self.b.adapter.deliver = lambda did,payload,**kwargs:inconsistent(receive(did,payload,**kwargs),did,payload)
+        self.b.adapter.lookup_delivery = lambda did,payload,**kwargs:inconsistent(lookup(did,payload,**kwargs),did,payload)
         recipient = self.adapter_client(self.b)
         sender = self.adapter_client(self.a)
         path = "worker/peers/"+failed
@@ -235,6 +239,7 @@ class Peers(unittest.TestCase):
         self.assertEqual(self.b.hold()["held_task_id"],tid)
         self.assertEqual(len(calls),2)
         self.b.adapter.deliver = receive
+        self.b.adapter.lookup_delivery = lookup
         self.b = Worker(self.loop.root/"other-worker.db","tama",self.b.router,self.b.adapter,clock=self.clock)
         self.b.poll()
         self.assertIsNone(sender.request("GET",path)["host_receipt_id"])
@@ -340,6 +345,39 @@ class Peers(unittest.TestCase):
         with self.assertRaisesRegex(Fault,"invalid_peer_filters"):
             self.a.router.request("GET",path+"?worker_id=tama")
         self.assertFalse(self.loop.hermes.tasks()["items"])
+
+    def test_uncertain_peer_receipt_never_writes_to_another_session_or_a_fresh_ledger(self):
+        mid = guid()
+        self.a.send_peer(mid,"tama","Keep my original receipt")
+        status = "peers/messages/"+mid
+        original = self.b.adapter
+        dispatch = original.deliver
+        def lost_after_input(*args,**kwargs):
+            dispatch(*args,**kwargs)
+            return None
+        original.deliver = lost_after_input
+        self.b.poll()
+        self.assertEqual(len(self.host.entries()),1)
+        self.assertIsNone(self.a.router.request("GET",status)["host_receipt_id"])
+        original.deliver = dispatch
+        other_host = FixtureHost(self.loop.root/"wrong-peer-host.db","wrong-peer-session")
+        other = HostAdapter(self.loop.root/"wrong-peer-adapter.db",other_host,other_host.session)
+        self.b = Worker(self.b.db.path,"tama",self.b.router,other,clock=self.clock)
+        self.clock.advance(5)
+        self.b.poll()
+        self.assertEqual(other_host.entries(),[])
+        self.assertEqual(peer_retry.waiting(self.b,mid)[0]["failure"],"peer_native_session_changed")
+        self.b.adapter = HostAdapter(self.loop.root/"fresh-peer-ledger.db",self.host,self.host.session)
+        self.clock.advance(10)
+        self.b.poll()
+        self.assertEqual(len(self.host.entries()),1)
+        self.assertIsNone(self.a.router.request("GET",status)["host_receipt_id"])
+        self.b.adapter = original
+        self.clock.advance(20)
+        self.b.poll()
+        self.assertTrue(self.a.router.request("GET",status)["host_receipt_id"])
+        self.assertEqual(len(self.host.entries()),1)
+        self.assertEqual(other_host.entries(),[])
 
     def test_lost_receipt_does_not_starve_another_confirmation(self):
         first,second = guid(),guid()
