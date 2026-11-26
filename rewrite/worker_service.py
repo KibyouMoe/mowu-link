@@ -22,6 +22,7 @@ class WorkerService:
         self.host_queue = False
         self.host_context = False
         self.host_compaction = False
+        self.host_session_catalog = False
         self.host_model_view = False
         self.host_model_change = False
         self.host_goal_control = False
@@ -53,6 +54,7 @@ class WorkerService:
                 self.host_queue = info.get("next_turn") is True
                 self.host_context = info.get("context_usage") is True
                 self.host_compaction = info.get("compaction") is True
+                self.host_session_catalog = info.get("session_catalog") is True
                 self.host_model_view = info.get("model_view") is True
                 self.host_model_change = info.get("model_change") is True
                 self.host_goal_control = info.get("goal_control") is True

@@ -9,6 +9,7 @@ import { changeModel, modelView } from './model-view.mjs';
 import { changeGoal, goalView } from './goal-view.mjs';
 import { compaction } from './compaction.mjs';
 import { questionRequest } from './questions.mjs';
+import { browseSessions, catalogSessions } from './catalog.mjs';
 
 const tools = JSON.parse(readFileSync(new URL('../../agent-toolset.json', import.meta.url)));
 const sha = value => createHash('sha256').update(value).digest('hex');
@@ -114,7 +115,7 @@ function stopBoundTurn(agent, request, history, before) {
   if (typeof agent.cancel==='function') agent.cancel({kind:'user'}, {keepInbox:true});
 }
 
-export async function bindHost(ctx, session, directory) {
+export async function bindHost(ctx, session, directory, catalog=[]) {
   check(typeof session === 'string' && session.length > 0, 'missing_native_session');
   const controller = ctx.get('sessionController');
   const {agent} = await controller.resolveAgent(session);
@@ -136,7 +137,9 @@ export async function bindHost(ctx, session, directory) {
       if (request.operation === 'display-next') return nextDisplay(ctx,agent,request);
       if (request.operation === 'display-image') return displayImage(ctx,agent,request,imageCache);
       if (request.operation === 'activity') return {busy:agent.status !== 'idle' || compact.inProgress};
-      if (request.operation === 'capabilities') return {compaction:compact.supported};
+      if (request.operation === 'capabilities') return {compaction:compact.supported,
+        session_catalog:typeof ctx.get('sessionQuery')?.inspectSession==='function'};
+      if (request.operation === 'session-catalog') return browseSessions(ctx,session,catalog);
       if (['question-open','question-answer','question-proof'].includes(request.operation)) {
         return questionRequest(ctx,agent,request,()=>ownEvents(ctx,agent));
       }
@@ -237,9 +240,9 @@ function callback(dir, envelope) {
 export const name = 'mowulink-dsh-host';
 export const inject = ['sessionController','sessions','sessionPersistence','tools'];
 
-export async function apply(ctx, {session, directory}) {
+export async function apply(ctx, {session, directory, catalog_sessions=[]}) {
   privateDir(directory);
-  const port = await bindHost(ctx,session,directory);
+  const port = await bindHost(ctx,session,directory,catalogSessions(catalog_sessions));
   for (const tool of tools) {
     const unregister = port.agent.ctx.get('tools').register({name:tool.name,description:tool.description,
       parameters:tool.inputSchema,output:{schema:{type:'object'},render:(_args,value)=>[{type:'text',text:JSON.stringify(value)}]},

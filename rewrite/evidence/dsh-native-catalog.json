@@ -1,0 +1,13 @@
+{
+  "session": "dsh-native-catalog-bound",
+  "allowed_catalog_entries": 12,
+  "unreadable": 1,
+  "excluded_unconfigured_session": true,
+  "denied_other_worker_http": 403,
+  "live_sessions_after": [
+    "dsh-native-catalog-bound"
+  ],
+  "native_input_count": 0,
+  "search_and_pagination_confirmed": true,
+  "boundary": "Native DSH SessionQueryEngine and persisted session files; isolated Worker HTTP"
+}

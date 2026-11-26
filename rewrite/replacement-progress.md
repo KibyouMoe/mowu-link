@@ -4,6 +4,8 @@
 
 ## 检查点与证据
 
+DSH `/resume` 已通过宿主原生查询读取当前会话和显式获准的历史目录。隔离测试读回 12 个条目，其中 11 个是已关闭的会话。验证两页、按标题或 ID 搜索、缺失记录提示及另一 Worker 收 403。未配置的会话连标题都没有进入适配器回应。浏览前后仅原会话处于活动，无原生输入、无新工单。换绑仍待接。复跑 `python3 -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_resume_browses_only_configured_native_cold_sessions_without_activating_them`。[原生目录证据](evidence/dsh-native-catalog.json)。
+
 DSH 原生计时题过前台等待期后，受支持的单题可接入训练员飞书题卡。原生工具在隔离 DSH AgentLoop 里自行运行并记录待回答状态。测试平台分别提交选择、自定义与跳过，验证原回合和原生题号、原卡更新、非绑定用户和非原卡拒绝。选择回包丢失后只从原生会话查回，三题各一次原生答复，多选保持在 DSH。另测开卡回包丢失，原生入口先选第一项，迟到的飞书第二项被拒，原卡按实际入场的答复更新。Router 无工单。复跑 `python3 -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_dsh_native_timed_question_closes_the_original_feishu_test_card`。[原生记录](evidence/dsh-native-questions.json)。真实 DSH 工具及回合，模型为本地夹具，飞书为测试平台；原生前台阻塞题和真人飞书待验。
 
 DSH `/compact` 已从绑定的 Worker 指令入口调用安装包的原生压缩服务。隔离测试丢弃首次提交回包，压缩期间和 Worker 服务重新初始化后重查原号，只观察到一次摘要请求、一组原生开始/摘要/替换/结束记录和一条压缩结果卡。DSH 在维护期间仍返回 idle，适配器会将自己发起的在途压缩报为忙碌。无可压缩历史时显示实情，缺证超时为待核。Router 无工单。复跑 `python3 -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_compact_reconciles_a_lost_start_reply_against_the_native_session rewrite.test_worker_commands`。[原生压缩证据](evidence/dsh-native-compact.json)。真实 DSH 压缩引擎，模型为本地夹具。

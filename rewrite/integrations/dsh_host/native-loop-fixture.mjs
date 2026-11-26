@@ -18,6 +18,7 @@ const compactEntered = Promise.withResolvers();
 const compactReleased = Promise.withResolvers();
 const usesGoals = mode==='goals' || mode==='goal-driver';
 const modelRequests = [];
+const catalogSessions = [];
 
 class LocalModel extends LlmAdapter {
   submitted = new Map();
@@ -112,6 +113,11 @@ async function setup() {
   await install((await sdk('dsh-agent')).AgentRegistry);
   if (usesGoals) await install((await sdk('dsh-goal')).GoalService,mode==='goal-driver' ? {defaultMaxGoalRounds:2} : {});
   await install(await sdk('dsh-session-persistence-jsonl'),{root:path.join(directory,'sessions')});
+  if (mode==='catalog') {
+    await install((await sdk('dsh-session-query')).SessionQueryEngine);
+    await install((await sdk('dsh-session-title')).SessionTitleService,
+      {fallbackMaxWords:12,fallbackMaxBytes:120,maxTitleBytes:300});
+  }
   await install((await sdk('dsh-system-prompt')).SystemPrompt);
   await install((await sdk('dsh-tools')).ToolsService);
   if (mode==='questions') {
@@ -129,6 +135,19 @@ async function setup() {
   if (mode==='goal-driver') await install(await sdk('dsh-goal-round-driver'));
   const {agent} = await ctx.get('agents').create({
     sessionId:session,agentOptions:{provider:'fixture',model:'local'}});
+  if (mode==='catalog') {
+    const titles = ctx.get('sessionTitle');
+    titles.rename(agent.session,'已绑定的会话');
+    for (let index=0;index<12;index++) {
+      const id = 'mowulink-test-catalog-'+index;
+      const handle = await ctx.get('agents').create({sessionId:id,agentOptions:{provider:'fixture',model:'local'}});
+      titles.rename(handle.agent.session,index===11 ? '仅宿主可见' : '目录中的会话 '+index);
+      await ctx.get('sessions').flush(handle.agent.session);
+      if (index!==11) catalogSessions.push(id);
+      await handle.dispose();
+    }
+    catalogSessions.push('mowulink-test-catalog-unreadable');
+  }
   class Controller extends Service {
     constructor(c) { super(c,'sessionController'); }
     resolveAgent(target) { return target===session ? {agent} : {error:'unknown'}; }
@@ -180,7 +199,7 @@ async function stopScenario(agent) {
 }
 
 async function formalScenario(agent) {
-  await install(adapter,{session,directory});
+  await install(adapter,{session,directory,catalog_sessions:catalogSessions});
   console.log(JSON.stringify({ready:true,session}));
   for await (const line of createInterface({input:process.stdin,terminal:false})) {
     if (line==='exit') break;
@@ -216,13 +235,14 @@ async function formalScenario(agent) {
     const replies = events.filter(e=>e.type==='user/message' && e.data.source.kind==='user-question-reply')
       .map(e=>({id:e.data.id,call:e.data.source.callId,seq:e.seq,body:JSON.parse(e.data.content[0].text)}));
     const continued = mode==='questions' ? ctx.get('userQuestions').continued(agent).map(q=>q.callId) : [];
-    console.log(JSON.stringify({session,inputs,calls,results,turns,modelRequests,rounds,compactEvents,replies,continued}));
+    console.log(JSON.stringify({session,inputs,calls,results,turns,modelRequests,rounds,compactEvents,replies,continued,
+      liveSessions:mode==='catalog' ? ctx.get('agents').list().map(agent=>agent.session.id) : []}));
   }
 }
 
 try {
   const agent = await setup();
-  if (['formal','compact','questions'].includes(mode) || usesGoals) await formalScenario(agent);
+  if (['formal','compact','questions','catalog'].includes(mode) || usesGoals) await formalScenario(agent);
   else await stopScenario(agent);
 } finally {
   for (const handle of plugins.reverse()) await handle.dispose();

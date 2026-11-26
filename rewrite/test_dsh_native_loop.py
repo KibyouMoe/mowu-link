@@ -15,6 +15,7 @@ from .dsh_display import DshDisplay
 from .dsh_port import DshHost, tool_listener
 from .feishu_inbound import Inbound
 from .feishu_output import Views
+from .host_wire import RemoteAdapter, serve_adapter
 from .question_cards import Actions
 from .storage import Fault, guid
 from .test_feishu_output import PlatformFixture
@@ -429,3 +430,48 @@ class NativeLoop(unittest.TestCase):
                                                     "late_platform_choice":"2","platform_state":"rejected"},
                              "unbridged_multi":rejected["continued"],"router_tasks":0,
                              "boundary":"Native DSH timed question tool and reply admission; local scripted provider, Feishu fixture"}
+
+    def test_resume_browses_only_configured_native_cold_sessions_without_activating_them(self):
+        session = "dsh-native-catalog-bound"
+        directory,loop,service,command = self.goal_worker(session)
+        with self.start_native(directory,session,"catalog") as native:
+            allowed,foreign = guid(),guid()
+            server = self.enterContext(serve_adapter(loop.adapter,"oguri",
+                {allowed:"worker/oguri",foreign:"worker/other"},("127.0.0.1",0),None))
+            thread = Thread(target=server.serve_forever,kwargs={"poll_interval":.02})
+            thread.start()
+            self.addCleanup(thread.join)
+            self.addCleanup(server.shutdown)
+            url = "http://127.0.0.1:"+str(server.server_port)
+            loop.worker.adapter = RemoteAdapter(Client(url,allowed))
+            with self.assertRaisesRegex(Fault,"wrong_adapter_owner"):
+                Client(url,foreign).request("GET","host/session-catalog")
+            service.step()
+            self.assertTrue(service.host_session_catalog)
+            catalog = loop.worker.adapter.session_catalog()
+            ids = {item["id"] for item in catalog["items"]}
+            self.assertEqual(ids,{session,*("mowulink-test-catalog-"+str(i) for i in range(11))})
+            self.assertEqual(catalog["unavailable"],1)
+            page1,text = command("om_catalog","/resume")
+            self.assertIn("第 1/2 页",text)
+            _,text = command("om_page_next","/resume next")
+            self.assertIn("第 2/2 页",text)
+            self.assertIn("1 个会话的记录暂不可读",text)
+            self.assertIn("第 1/2 页",command("om_prev","/resume prev")[1])
+            self.assertIn("第 2/2 页",command("om_page_two","/resume page 2")[1])
+            _,text = command("om_title_search","/resume search 目录中的会话 10")
+            self.assertIn("mowulink-test-catalog-10",text)
+            self.assertNotIn("mowulink-test-catalog-0",text)
+            self.assertIn("当前绑定",command("om_binding","/resume search dsh-native-catalog-bound")[1])
+            self.assertIn("没有符合",command("om_hidden","/resume search 仅宿主可见")[1])
+            self.assertIn("敬请期待",command("om_no_select","/resume 1")[1])
+            self.assertIn("敬请期待",command("om_no_foreign_select","/resume mowulink-test-catalog-10")[1])
+            self.assertEqual(command("om_catalog","/resume")[0],page1)
+            result = self.read_native(native,"read")
+            self.assertEqual(result["liveSessions"],[session])
+            self.assertEqual(result["inputs"],[])
+            self.assertEqual(loop.hermes.tasks()["items"],[])
+            self.evidence = {"session":session,"allowed_catalog_entries":len(ids),"unreadable":catalog["unavailable"],
+                "excluded_unconfigured_session":True,"denied_other_worker_http":403,"live_sessions_after":result["liveSessions"],
+                "native_input_count":len(result["inputs"]),"search_and_pagination_confirmed":True,
+                "boundary":"Native DSH SessionQueryEngine and persisted session files; isolated Worker HTTP"}

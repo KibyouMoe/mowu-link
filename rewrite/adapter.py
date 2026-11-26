@@ -38,14 +38,21 @@ class HostAdapter:
         return self.session
 
     def session_info(self):
-        compaction = getattr(self.host,"can_compact",None)
+        capabilities = getattr(self.host,"capabilities",None)
+        native = capabilities(self.session) if callable(capabilities) else {}
         return {"session":self.session,"next_turn":getattr(self.host,"next_turn",False) is True,
                 "context_usage":callable(getattr(self.host,"context_usage",None)),
-                "compaction":bool(compaction and compaction(self.session)),
+                "compaction":native.get("compaction") is True,
+                "session_catalog":native.get("session_catalog") is True,
                 "model_view":callable(getattr(self.host,"model_view",None)),
                 "model_change":callable(getattr(self.host,"model_change",None)),
                 "goal_control":callable(getattr(self.host,"goal_view",None))
                 and callable(getattr(self.host,"goal_change",None))}
+
+    def session_catalog(self):
+        browse = getattr(self.host,"session_catalog",None)
+        require(callable(browse),422,"native_catalog_unavailable")
+        return browse(self.session)
 
     def compact(self, session, command_id, *, start):
         require(session==self.session,409,"wrong_native_session")

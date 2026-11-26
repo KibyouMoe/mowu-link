@@ -64,13 +64,16 @@ class DshHost:
     def context_usage(self, session):
         return self.request("context-usage",session)
 
-    def can_compact(self, session):
+    def capabilities(self, session):
         try:
-            return self.request("capabilities",session).get("compaction") is True
+            return self.request("capabilities",session)
         except Fault as error:
             if error.code == "unsupported_operation":
-                return False
+                return {}
             raise
+
+    def session_catalog(self,session):
+        return self.request("session-catalog",session)
 
     def compact(self, session, command_id, *, start):
         return self.request("compact-start" if start else "compact-status",session,{"command_id":command_id})

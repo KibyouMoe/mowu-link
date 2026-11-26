@@ -32,10 +32,13 @@ class RemoteAdapter:
         return {"session":string(info,"session"),"next_turn":info.get("next_turn") is True,
                 "context_usage":info.get("context_usage") is True,"model_view":info.get("model_view") is True,
                 "model_change":info.get("model_change") is True,"goal_control":info.get("goal_control") is True,
-                "compaction":info.get("compaction") is True}
+                "compaction":info.get("compaction") is True,"session_catalog":info.get("session_catalog") is True}
 
     def context_usage(self):
         return self.request("GET","host/context")
+
+    def session_catalog(self):
+        return self.request("GET","host/session-catalog")
 
     def compact(self, session, command_id, *, start):
         return self.request("POST","host/compact",{"session":session,"command_id":command_id,"start":start})
@@ -85,6 +88,8 @@ def serve_adapter(adapter, worker_id, identities, address, context):
                 result = {"busy":adapter.busy()}
             case "GET","/v1/host/context":
                 result = adapter.context_usage()
+            case "GET","/v1/host/session-catalog":
+                result = adapter.session_catalog()
             case "POST","/v1/host/compact":
                 require(set(body)=={"session","command_id","start"} and type(body["start"]) is bool,422,"invalid_compact_request")
                 result = adapter.compact(string(body,"session"),string(body,"command_id"),start=body["start"])

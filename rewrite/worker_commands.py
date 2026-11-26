@@ -3,6 +3,7 @@ import hashlib
 import json
 import re
 import time
+import unicodedata
 from urllib.error import URLError
 
 from . import display, queued_chat
@@ -25,10 +26,11 @@ CREATE TABLE IF NOT EXISTS platform_compactions (
  message_id TEXT PRIMARY KEY REFERENCES platform_commands(message_id), session TEXT NOT NULL,
  command_id TEXT NOT NULL UNIQUE, deadline REAL NOT NULL, native_receipt TEXT
 );
+CREATE TABLE IF NOT EXISTS platform_catalog_views (
+ session TEXT PRIMARY KEY, query TEXT NOT NULL, page INTEGER NOT NULL
+);
 """
-HELP = ("/status 查看最近一次连接、宿主忙闲和本地持单记录。\n"
-        "/list 或 /resume 查看当前绑定会话，/switch 1 确认当前选择。\n"
-        "/resume 的历史搜索和切换仍在接入。")
+HELP = "/status 查看最近一次连接、宿主忙闲和本地持单记录。\n/list 查看当前绑定会话。"
 PLANNED = {"/context","/compact","/model","/effort","/goal",
            "/new","/clear","/fork"}
 COMMAND = re.compile(r"^/[A-Za-z][A-Za-z0-9_-]*(?:\s|$)")
@@ -45,6 +47,10 @@ def reply(service, name, args, hold):
         lines = [HELP]
         if service.adapter_connected and service.host_context:
             lines.append("/context 查看最近一次模型回包的用量。")
+        if service.adapter_connected and service.host_session_catalog:
+            lines.append("/resume 查看会话目录，可用 next、prev、page 页码或 search 关键词。")
+        else:
+            lines.append("/resume 查看当前绑定会话。历史搜索敬请期待。")
         if service.adapter_connected and service.host_compaction:
             lines.append("/compact 通过宿主压缩当前会话历史。")
         if service.adapter_connected and service.host_model_view:
@@ -72,7 +78,7 @@ def reply(service, name, args, hold):
             return "用法：/switch 1"
         if not session:
             return "当前绑定会话待确认。"
-        if not args or args in (["1"],[session]):
+        if not args or args==[session] or args==["1"] and not service.host_session_catalog:
             return "当前绑定会话\n1. "+session
         return "历史会话切换和搜索：敬请期待。"
     if name in PLANNED:
@@ -97,6 +103,76 @@ def context_answer(service):
     return (f"最近一次模型回包 · 第 {data['turn']} 回合，第 {data['step']} 步\n"
             f"模型 {data['provider']}/{data['model']}\n输入 {count('input_tokens')} tokens\n"
             f"本次总用量 {count('total_tokens')} tokens\n模型窗口 {count('window_tokens')} tokens")
+
+
+def catalog_answer(adapter,session,query,page):
+    result = adapter.session_catalog()
+    require(isinstance(result,dict) and result.get("session")==session,409,"wrong_native_session_catalog")
+    items,unavailable = result.get("items"),result.get("unavailable")
+    require(isinstance(items,list) and len(items)<=200 and type(unavailable) is int and 0<=unavailable<=200,
+            502,"invalid_session_catalog")
+    entries = []
+    seen = set()
+    for row in items:
+        require(isinstance(row,dict),502,"invalid_session_catalog")
+        sid,title = row.get("id"),row.get("title")
+        require(isinstance(sid,str) and 0<len(sid)<=200 and sid.isprintable()
+                and sid not in seen and isinstance(title,str) and len(title)<=160
+                and all(unicodedata.category(ch) not in ("Cc","Cs","Zl","Zp") for ch in title),
+                502,"invalid_session_catalog")
+        seen.add(sid)
+        if not query or query.casefold() in (sid+" "+title).casefold():
+            entries.append((sid,title))
+    pages = max(1,(len(entries)+9)//10)
+    page = min(pages,page)
+    lines = [f"会话目录 · 第 {page}/{pages} 页"]
+    if query:
+        lines.append("搜索 "+query)
+    if not entries:
+        lines.append("目录中没有符合条件的会话。")
+    offset = (page-1)*10
+    for index,(sid,title) in enumerate(entries[offset:offset+10],offset+1):
+        marker = "（当前绑定）" if sid==session else ""
+        lines.append(f"{index}. {title or '未命名会话'}{marker}\n{sid}")
+    if unavailable:
+        lines.append(f"{unavailable} 个会话的记录暂不可读。")
+    lines.append("切换会话敬请期待。")
+    return "\n".join(lines),page
+
+
+def browse_catalog(service,mid,text,args):
+    worker,session = service.worker,service.host_session
+    with service.native_command_lock:
+        with worker.db.transaction() as db:
+            old = previous(db,mid,text)
+            if old:
+                return old
+            saved = db.execute("SELECT query,page FROM platform_catalog_views WHERE session=?",(session,)).fetchone()
+        query,page = ("",1) if not saved or not args else tuple(saved)
+        if args and args[0]=="search":
+            query = text.strip().split(maxsplit=2)[-1].strip() if len(args)>1 else ""
+            if not query or len(query)>100 or not query.isprintable():
+                with worker.db.transaction() as db:
+                    return record(db,mid,text,"/resume",session,"用法：/resume search 关键词")
+            page = 1
+        elif args and args[0]=="page":
+            if len(args)!=2 or not re.fullmatch(r"[1-9][0-9]?",args[1]):
+                with worker.db.transaction() as db:
+                    return record(db,mid,text,"/resume",session,"用法：/resume page 页码")
+            page = int(args[1])
+        elif args in (["next"],["prev"]):
+            page = max(1,page+(1 if args[0]=="next" else -1))
+        try:
+            answer,page = catalog_answer(worker.adapter,session,query,page)
+        except (Fault,URLError,OSError):
+            answer,page = "会话目录暂时不可读。请稍后重试。",None
+        with worker.db.transaction() as db:
+            old = previous(db,mid,text)
+            if old:
+                return old
+            if page is not None:
+                db.execute("INSERT OR REPLACE INTO platform_catalog_views VALUES (?,?,?)",(session,query,page))
+            return record(db,mid,text,"/resume",session,answer)
 
 
 GOAL_PHASES = {"active":"进行中","paused":"已暂停","blocked":"受阻","complete":"已完成"}
@@ -417,6 +493,10 @@ def handle(service, body):
     mid, text = string(body,"message_id"), string(body,"text")
     require(is_command(text),422,"invalid_platform_command")
     name,*args = text.strip().split()
+    if name=="/resume" and service.adapter_connected and service.host_session_catalog and (
+        not args or args[0] in ("search","page") or args in (["next"],["prev"])
+    ):
+        return browse_catalog(service,mid,text,args)
     if name=="/compact" and not args:
         compact = start_compact(service,mid,text)
         if compact is not None:
