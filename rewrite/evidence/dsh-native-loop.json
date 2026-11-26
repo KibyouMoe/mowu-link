@@ -1,0 +1,64 @@
+{
+  "session": "dsh-isolated-real-loop",
+  "assignment": {
+    "task_id": "test-order",
+    "assignment_id": "test-assignment"
+  },
+  "original": {
+    "session": "dsh-isolated-real-loop",
+    "delivery_id": "order-delivery",
+    "digest": "0417d8267cf1969b48ee0dab4db57de9c259d29760919ab912a2f1ce12d7c6e6",
+    "native_id": "mowulink-3aabb99d08e7b78d50348c4a7e935f6c5fcb2928421ac8cac572845376c9985a",
+    "turn_id": "2/1"
+  },
+  "control": {
+    "session": "dsh-isolated-real-loop",
+    "delivery_id": "cancel-delivery",
+    "digest": "0c696d0739d3ee2a2b6e0b5a6443bde612e5c2a2d3089486134dab8947bd558b",
+    "native_id": "mowulink-7bdffe2fdf854ecf1a1033c4848ee71ed6e15fd15c867ff6a5cc0f54501b9278",
+    "turn_id": "21/3"
+  },
+  "turns": [
+    [
+      1,
+      "aborted",
+      "user"
+    ],
+    [
+      2,
+      "completed",
+      null
+    ],
+    [
+      3,
+      "completed",
+      null
+    ]
+  ],
+  "admitted": [
+    "mowulink-3aabb99d08e7b78d50348c4a7e935f6c5fcb2928421ac8cac572845376c9985a",
+    "keep-private",
+    "mowulink-7bdffe2fdf854ecf1a1033c4848ee71ed6e15fd15c867ff6a5cc0f54501b9278"
+  ],
+  "modelRequests": [
+    {
+      "command": "task",
+      "provider": "fixture",
+      "model": "local",
+      "reasoningEffort": "high"
+    },
+    {
+      "command": "private",
+      "provider": "fixture",
+      "model": "local",
+      "reasoningEffort": "high"
+    },
+    {
+      "command": "task.cancel",
+      "provider": "fixture",
+      "model": "local",
+      "reasoningEffort": "high"
+    }
+  ],
+  "boundary": "macOS installed DSH AgentLoop, native executor and persisted session; in-process scripted model provider, direct isolated adapter call"
+}

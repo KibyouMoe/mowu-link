@@ -4,6 +4,8 @@
 
 ## 检查点与证据
 
+DSH 隔离环境已使用安装包中的真实 AgentLoop、原生工具执行器和 V4 会话存储。回合 1 在模型流中止，已排队的普通聊天和取消指令分别进入回合 2、3。控制投递重试仍返回回合 3 的原凭据。原生模型请求及后续两条请求均带已选 `high`。复跑 `python3 -m unittest -v rewrite.test_dsh_native_loop`，macOS 全套 127 项通过。本项采用进程内测试模型及直接适配器调用。工作环境清理仍需独立凭据。[原生回合记录](evidence/dsh-native-loop.json)。
+
 DSH 原生停止请求限定到已确认过的工单回合。适配器将原派发的输入号和回合号交给插件。在原生会话仍处于这一回合、只有该工单输入且会话位置一致时，插件发出保留原收件箱的停止请求。普通私聊回合保持运行。隔离回归中丢弃取消指令的本地回执后，插件从原生日志查回同一收件，停止调用仍只有一次。相关测试用实际 DSH SDK 读写原生日志，执行停止的 Agent 与模型为夹具。停止请求、取消指令送达及原工作区清理确认分别核验。复跑 `python3 -m unittest -v rewrite.test_dsh_sdk`，macOS 全套 126 项通过。
 
 DSH 取消的待核分支已复跑。隔离 SDK 先记原回合中止，再向同一会话发送原派发的取消请求。两次试报均因缺少工作环境清理凭据返回 `native_cleanup_unconfirmed`，Router 保留原派发与清理记录，Worker 保留持单并只发一张待核卡。另用通用宿主夹具提供可核凭据，验证 Router 回执后才发确认卡。复跑 `python3 -m unittest -v rewrite.test_dsh_sdk.DshSdk.test_cancel_stops_reporting_at_missing_native_cleanup_even_after_an_aborted_turn rewrite.test_cleanup`，macOS 全套 124 项通过。DSH 停止及工作区清理的正向实机验收仍待补。
