@@ -280,6 +280,8 @@ python3 -m rewrite.release_check --repository . --component worker-pair \
 
 Router、Worker、适配器的独立进程和回环 TLS 实际运行，平台输入与宿主是隔离夹具。本例只用已确认私聊验证兼容顺序与零新增业务的回退。实际试用期收到新的生产消息、打开新的原生回合或提交工单成果时，需要先对账。
 
+回退到 `3e3293e074d80767f4c74545ca5a90cba349be43` 时，先核 `pending_cleanup` 中因断联入池后发出的取消。该版 Router 以 SQLite 副本实测将这类 W04 拒为 `409 stale_assignment`。若试用产生此类未确认取消，由当前版收清原派发的 W04，再核对工单与部署前快照。有试用业务写入时按对账流程处理。隔离 DSH 清理实测见[原派发取消](evidence/dsh-offline-pooled-cancel.json)。
+
 ### 保留实际 Codex 测试工位的升级与回退
 
 ```sh
