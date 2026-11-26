@@ -232,6 +232,30 @@ class NativeProcess(unittest.TestCase):
                     no_identity.request("POST",path,body=b"{}")
                     no_identity.getresponse()
 
+    def local_tls_directory(self,*,dynamic_callback=False):
+        directory = Path(self.enterContext(tempfile.TemporaryDirectory(prefix="mldsh-tls-"))).resolve()
+        if os.name=="nt":
+            system32 = Path(os.environ["SystemRoot"])/"System32"
+            current = subprocess.check_output([system32/"whoami.exe","/user","/fo","csv","/nh"],text=True)
+            _,owner = next(csv.reader(current.splitlines()))
+            # Python's private temporary directory need not give new files inheritable rights.
+            subprocess.run([system32/"icacls.exe",directory,"/grant:r","*"+owner+":(OI)(CI)F"],
+                           check=True,capture_output=True)
+        with closing(socket.socket()) as host, closing(socket.socket()) as tools:
+            host.bind(("127.0.0.1",0))
+            tools.bind(("127.0.0.1",0))
+            config(directory,"dsh-link.json",{"host_port":host.getsockname()[1],
+                                              "worker_port":0 if dynamic_callback else tools.getsockname()[1]})
+        subprocess.run(["openssl","req","-x509","-newkey","rsa:2048","-nodes","-days","1",
+                        "-subj","/CN=mowulink isolated DSH link","-addext","subjectAltName=IP:127.0.0.1",
+                        "-addext","basicConstraints=critical,CA:FALSE","-addext","extendedKeyUsage=serverAuth,clientAuth",
+                        "-out","dsh-link.crt","-keyout","dsh-link.key"],
+                       cwd=directory,check=True,capture_output=True)
+        if os.name=="posix":
+            for name in ("dsh-link.crt","dsh-link.key"):
+                (directory/name).chmod(0o600)
+        return directory
+
     def goal_worker(self,session,extra_workers=(),*,use_tls=False):
         directory = (self.local_tls_directory() if use_tls else
                      Path(self.enterContext(tempfile.TemporaryDirectory(dir="/tmp",prefix="mldsh-goals-"))))
@@ -1267,30 +1291,6 @@ class NativeProcess(unittest.TestCase):
                      "installed DSH SDK or verified packaged Windows executable required")
 @unittest.skipUnless(shutil.which("openssl"),"test TLS certificate generator required")
 class LocalTlsLoop(NativeProcess):
-    def local_tls_directory(self,*,dynamic_callback=False):
-        directory = Path(self.enterContext(tempfile.TemporaryDirectory(prefix="mldsh-tls-"))).resolve()
-        if os.name=="nt":
-            system32 = Path(os.environ["SystemRoot"])/"System32"
-            current = subprocess.check_output([system32/"whoami.exe","/user","/fo","csv","/nh"],text=True)
-            _,owner = next(csv.reader(current.splitlines()))
-            # Python's private temporary directory need not give new files inheritable rights.
-            subprocess.run([system32/"icacls.exe",directory,"/grant:r","*"+owner+":(OI)(CI)F"],
-                           check=True,capture_output=True)
-        with closing(socket.socket()) as host, closing(socket.socket()) as tools:
-            host.bind(("127.0.0.1",0))
-            tools.bind(("127.0.0.1",0))
-            config(directory,"dsh-link.json",{"host_port":host.getsockname()[1],
-                                              "worker_port":0 if dynamic_callback else tools.getsockname()[1]})
-        subprocess.run(["openssl","req","-x509","-newkey","rsa:2048","-nodes","-days","1",
-                        "-subj","/CN=mowulink isolated DSH link","-addext","subjectAltName=IP:127.0.0.1",
-                        "-addext","basicConstraints=critical,CA:FALSE","-addext","extendedKeyUsage=serverAuth,clientAuth",
-                        "-out","dsh-link.crt","-keyout","dsh-link.key"],
-                       cwd=directory,check=True,capture_output=True)
-        if os.name=="posix":
-            for name in ("dsh-link.crt","dsh-link.key"):
-                (directory/name).chmod(0o600)
-        return directory
-
     @unittest.skipUnless(os.name=="nt","Windows file share flags required")
     def test_dynamic_callback_port_survives_a_temporary_reader(self):
         runtime = self.local_tls_directory(dynamic_callback=True)
@@ -2239,11 +2239,18 @@ class NativeLoop(NativeProcess):
                 ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
 
     def test_dsh_workspace_exports_artifact_and_seals_after_durable_w04_replay(self):
+        self.workspace_artifacts(use_tls=False)
+
+    def test_dsh_workspace_exports_and_releases_over_mutual_tls(self):
+        self.workspace_artifacts(use_tls=True)
+
+    def workspace_artifacts(self,*,use_tls):
         image,cli = self.container_engine()
         docker,_,socket = cli
         session = "dsh-isolated-workspace-artifacts"
-        directory,loop,service,_ = self.goal_worker(session)
+        directory,loop,service,_ = self.goal_worker(session,use_tls=use_tls)
         runtime = Path(directory)
+        link = LocalLink(runtime,use_tls=use_tls)
         (runtime/"assignment-container.json").write_text(encode(
             {"docker":docker,"socket":socket.removeprefix("unix://"),"image":image}),encoding="utf-8")
         token = guid()
@@ -2255,7 +2262,11 @@ class NativeLoop(NativeProcess):
         report_attempts,offsets = [],[]
         loss = True
         self.addCleanup(self.clean_fixture_containers,runtime,session,cli)
-        with tool_listener(runtime,loop.adapter,client), self.start_native(directory,session,"cleanup-container-export") as native:
+        with tool_listener(runtime,loop.adapter,client,link=link), \
+             self.start_native(directory,session,"cleanup-container-export",use_tls=use_tls) as native:
+            if use_tls:
+                self.assert_client_certificate_required(link)
+                self.assertFalse((runtime/"worker.sock").exists())
             tid = loop.hermes.create(guid(),"Isolated container artifact","Write and stage the fixture bytes","oguri")["task_id"]
             def lose_receipts(method,path,*args,**kwargs):
                 is_report = method=="POST" and path==f"tasks/{tid}/report"
@@ -2337,13 +2348,15 @@ class NativeLoop(NativeProcess):
             with recovered.db.transaction() as db:
                 local, = db.execute("SELECT attachment_id,sha256 FROM uploads").fetchall()
             self.assertEqual(local["sha256"],digest)
-        if output := os.environ.get("MOWULINK_DSH_WORKSPACE_ARTIFACT_EVIDENCE"):
+        name = ("MOWULINK_DSH_WORKSPACE_TLS_EVIDENCE" if use_tls else "MOWULINK_DSH_WORKSPACE_ARTIFACT_EVIDENCE")
+        if output := os.environ.get(name):
             evidence = {**scope,"artifact_id":artifact,"local_artifact_id":local["attachment_id"],"bytes":len(data),
                 "sha256":digest,"native_input":observed["inputs"][0],"native_calls":observed["calls"],
                 "upload_offsets":offsets,"symlink_rejected":True,"container_id":lease["container_id"],
                 "container_present_without_w04_receipt":True,"handoff_waited_for_cleanup":True,"w04":receipt,
                 "w04_attempts":report_attempts,"container_absent_after_replay":True,
                 "manager_notification":notify["delivery_id"],"router_state":details["task"]["state"],
+                 "native_link":"IPv4 loopback with mutual TLS" if use_tls else "Unix socket",
                 "boundary":"Installed DSH AgentLoop, real isolated Linux Docker, Worker and Router. Local scripted model. No Feishu."}
             Path(output).write_text(json.dumps(evidence,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
 

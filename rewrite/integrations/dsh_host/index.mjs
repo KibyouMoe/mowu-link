@@ -270,13 +270,13 @@ export async function bindHost(ctx, session, directory, catalog=[], selected=nul
       if (name==='worker_workspace_shell' || name==='worker_workspace_export') {
         check(workspace,'assignment_container_unavailable');
         const scope = cleanup.workspaceScope(user);
-        const state = await workspaceState(directory,scope);
+        const state = await workspaceState(notify,scope);
         check(state==='active','assignment_workspace_inactive');
         if (name==='worker_workspace_shell') {
           return workspace.run(scope.task_id,scope.assignment_id,args.command,exec.signal);
         }
         const {bytes,...metadata} = await workspace.artifact(scope.task_id,scope.assignment_id,args.path,exec.signal);
-        return callback(directory,{...metadata,session,turn_id:current.id,native_id:user.id,call_id:exec.callId},
+        return notify({...metadata,session,turn_id:current.id,native_id:user.id,call_id:exec.callId},
           '/workspace-artifact',bytes);
       }
       const direct = name==='worker_ask_trainer' && user.source?.kind==='user' && !user.id.startsWith('mowulink-')
@@ -318,14 +318,14 @@ function callback(dir, envelope, route='/tool', bytes=null, link=unixLink(dir)) 
   });
 }
 
-async function workspaceState(directory,scope) {
-  const result = await callback(directory,scope,'/workspace-state');
+async function workspaceState(notify,scope) {
+  const result = await notify(scope,'/workspace-state');
   check(Object.entries(scope).every(([key,value])=>result[key]===value) &&
     ['active','inactive','released'].includes(result.state),'assignment_workspace_unconfirmed');
   return result.state;
 }
 
-function watchWorkspaceReleases(ctx,port,directory) {
+function watchWorkspaceReleases(ctx,port,notify) {
   const session = port.agent.session.id;
   ctx.effect(()=>{
     let stopped = false;
@@ -335,7 +335,7 @@ function watchWorkspaceReleases(ctx,port,directory) {
         for (const assignment of port.workspace.pending()) {
           if (stopped) break;
           try {
-            if (await workspaceState(directory,{session,...assignment})==='released') {
+            if (await workspaceState(notify,{session,...assignment})==='released') {
               if (stopped) break;
               await port.workspace.seal(assignment.task_id,assignment.assignment_id);
             }
@@ -373,8 +373,9 @@ async function inspectColdSession(ctx,session) {
 }
 
 function installBoundTools(ctx,port,directory,relay_command_approvals,link) {
+  const notify = (body,route='/tool',bytes=null)=>callback(directory,body,route,bytes,link);
   if (relay_command_approvals) {
-    installCommandApprovals(ctx,port.agent,()=>ownEvents(ctx,port.agent),(route,body)=>callback(directory,body,route,null,link));
+    installCommandApprovals(ctx,port.agent,()=>ownEvents(ctx,port.agent),(route,body)=>notify(body,route));
   }
   const available = port.workspace ? [...tools,{
     name:'worker_workspace_shell',
@@ -390,11 +391,11 @@ function installBoundTools(ctx,port,directory,relay_command_approvals,link) {
   for (const tool of available) {
     const unregister = port.agent.ctx.get('tools').register({name:tool.name,description:tool.description,
       parameters:tool.inputSchema,output:{schema:{type:'object'},render:(_args,value)=>[{type:'text',text:JSON.stringify(value)}]},
-      execute:(args,exec) => port.tool(tool.name,args,exec,body=>callback(directory,body,'/tool',null,link))});
+      execute:(args,exec) => port.tool(tool.name,args,exec,notify)});
     ctx.effect(() => unregister);
   }
   port.cleanup?.bindTools();
-  if (port.workspace) watchWorkspaceReleases(ctx,port,directory);
+  if (port.workspace) watchWorkspaceReleases(ctx,port,notify);
 }
 
 export async function apply(ctx, {session, directory, catalog_sessions=[], relay_command_approvals=false,
@@ -402,8 +403,7 @@ export async function apply(ctx, {session, directory, catalog_sessions=[], relay
                                  read_only_assignments=false, relay_foreground_questions=false, assignment_container=null,
                                  local_tls=false}) {
   check(typeof local_tls==='boolean','invalid_dsh_local_link');
-  check(!local_tls || !assignment_container,
-    'unsupported_dsh_local_tls_feature');
+  check(!assignment_container || process.platform!=='win32','unsupported_dsh_local_tls_feature');
   check(typeof session==='string' && session.length>0,'missing_native_session');
   check(typeof resume_on_handoff==='boolean','invalid_native_activation');
   check(typeof read_only_assignments==='boolean' &&
