@@ -3,7 +3,7 @@ from threading import Event, Thread
 import time
 from urllib.error import URLError
 
-from . import display, links, user_questions, worker_commands, worker_media
+from . import display, links, queued_chat, user_questions, worker_commands, worker_media
 from .storage import Fault, require, string
 from .wire import serve_authenticated
 
@@ -17,6 +17,7 @@ class WorkerService:
         self.router_observed = False
         self.adapter_connected = None
         self.host_busy = None
+        self.host_queue = False
         self.host_session = ""
         self.clock, self.probe_interval = clock, probe_interval
         self.next_probe = 0
@@ -34,16 +35,20 @@ class WorkerService:
         probe = self.clock() >= self.next_probe
         if probe:
             try:
-                session = w.adapter.bound_session()
+                describe = getattr(w.adapter,"session_info",None)
+                info = describe() if describe else {"session":w.adapter.bound_session()}
+                session = info["session"]
                 busy = w.adapter.busy()
                 require(isinstance(session,str) and session and type(busy) is bool,
                         502,"invalid_host_observation")
                 self.host_session, self.host_busy, self.adapter_connected = session,busy,True
+                self.host_queue = info.get("next_turn") is True
             except (Fault,URLError,OSError):
                 self.host_busy = None
                 self.adapter_connected = False
             links.observe(w,"adapter",self.adapter_connected,self.host_session)
             self.next_probe = self.clock()+self.probe_interval
+            queued_chat.advance(self)
         try:
             if not self.router_connected:
                 if self.clock() < self.next_router_attempt:

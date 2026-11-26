@@ -31,6 +31,9 @@ class UnixConnection(HTTPConnection):
 
 
 class DshHost:
+    # DSH Agent.followup places an identified input at the next-turn boundary.
+    next_turn = True
+
     def __init__(self, directory):
         self.directory = private_directory(directory)
 

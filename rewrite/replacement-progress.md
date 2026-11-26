@@ -65,6 +65,8 @@ Hermes 源码版本 `a2de7418a3405307f8b3abce01a66d5d71351edc`。从 Git 跟踪�
 
 ## 旧入口与替代条件
 
+DSH 的 `/queue 正文` 已接入固定会话。飞书命令回执证明 Worker 已持久排队；宿主收件由独立输入号和回合号证明。忙时两条消息都留在 Worker，重建 Worker 后按原顺序进入两个独立回合。首条原生回执在传回途中丢失，复查原号后输入总数仍为三条（原回合一条和排队两条）。适配器拒绝将原消息交给另一会话。DSH SDK 在临时目录实际加载插件并落 V4 日志，Agent 驱动和飞书输入由夹具提供。旧宿主未声明下一回合投递能力时提示未接入。复跑 `python3 -m unittest -v rewrite.test_dsh_sdk rewrite.test_worker_commands`。
+
 旧 Codex 的实际命令入口是 `Plugins/Codex/desktop-manager.mjs` 的 `message` 和指令分发器。除帮助列出的主要命令，还处理 `/start /commands /clear /switch /list /stop`。Antigravity 的 `interface/feishu-commands.mjs` 明确限定固定会话，历史切换另列。仓内 `client/desktop/README.md` 和 `client/mobile/README.md` 仅记未来客户端，本仓这两个目录没有可执行消费者。
 
 重做版的纯文本指令现由绑定的飞书训练员交给 Worker。隔离 HTTP 实测 `/help`、`/status`、固定会话查询和同会话选择。状态卡分别显示两条连接、宿主最近忙闲、本地工单号与派发号。帮助别名为 `/start` 和 `/commands`。此时 `/resume` 仅能查看当前会话，同会话编号及 ID 可确认；历史翻页、检索、换绑仍待接。未知指令给出「暂不开放」。尚无执行回读的命令不会送入普通对话。重试丢失的 Worker 回执只出现一张指令卡；旧版已交给宿主的同号消息可查回旧收据。四项新增回归 `python3 -m unittest -v rewrite.test_worker_commands`，全量 97 项。飞书卡片使用平台替身，真实云端另验。

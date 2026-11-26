@@ -25,7 +25,11 @@ class RemoteAdapter:
         return reply["busy"]
 
     def bound_session(self):
-        return string(self.request("GET","host/session"),"session")
+        return self.session_info()["session"]
+
+    def session_info(self):
+        info = self.request("GET","host/session")
+        return {"session":string(info,"session"),"next_turn":info.get("next_turn") is True}
 
     def deliver(self, did, payload):
         return self.request("POST", "host/deliver", {"delivery_id":did, "payload":payload})["receipt"]
@@ -48,14 +52,15 @@ def serve_adapter(adapter, worker_id, identities, address, context):
         require(actor == "worker/" + worker_id, 403, "wrong_adapter_owner")
         match method,path:
             case "GET","/v1/host/session":
-                result = {"session":adapter.bound_session()}
+                info = getattr(adapter,"session_info",None)
+                result = info() if info else {"session":adapter.bound_session(),"next_turn":False}
             case "GET","/v1/host/activity":
                 result = {"busy":adapter.busy()}
             case "POST","/v1/host/deliver":
                 payload = body.get("payload")
                 require(isinstance(payload,dict) and payload.get("kind") in (
                     "task","task_update","task_probe","task.shelved","task.cancel","task.transfer_out",
-                    "question_answer","chat","peer"), 422, "invalid_host_input")
+                    "question_answer","chat","queued_chat","peer"), 422, "invalid_host_input")
                 result = {"receipt": adapter.deliver(string(body,"delivery_id"),payload)}
             case "POST","/v1/host/origin":
                 result = {"origin":adapter.origin(string(body,"native_id"))}

@@ -19,7 +19,8 @@ function input(request) {
   const payload = JSON.parse(payload_json);
   check(!payload.attachments?.length, 'native_media_input_unavailable');
   const id = 'mowulink-' + sha(JSON.stringify([session,delivery_id,digest]));
-  const text = payload.kind === 'chat' ? payload.text : '魔物链接投递\n' + payload_json;
+  if (payload.kind === 'queued_chat') check(payload.session === session, 'queued_session_mismatch');
+  const text = ['chat','queued_chat'].includes(payload.kind) ? payload.text : '魔物链接投递\n' + payload_json;
   check(typeof text === 'string' && text.trim(), 'empty_input');
   return {id, role:'user', content:[{type:'text',text}], source:{kind:'user'}};
 }

@@ -2,7 +2,7 @@
 import json
 import re
 
-from . import display
+from . import display, queued_chat
 from .storage import encode, require, string
 
 
@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS platform_commands (
 HELP = ("/status 查看最近一次连接、宿主忙闲和本地持单记录。\n"
         "/list 或 /resume 查看当前绑定会话，/switch 1 确认当前选择。\n"
         "/resume 的历史搜索和切换仍在接入。")
-PLANNED = {"/queue","/context","/compact","/model","/effort","/goal",
+PLANNED = {"/context","/compact","/model","/effort","/goal",
            "/new","/clear","/fork"}
 COMMAND = re.compile(r"^/[A-Za-z][A-Za-z0-9_-]*(?:\s|$)")
 
@@ -26,7 +26,8 @@ def is_command(text):
 def reply(service, name, args, hold):
     session = service.host_session if service.adapter_connected else ""
     if name in ("/help","/start","/commands"):
-        return HELP
+        return HELP + ("\n/queue 内容：排入下一回合。" if service.adapter_connected and service.host_queue
+                       else "\n/queue 当前未确认可用。")
     if name == "/status":
         if args:
             return "用法：/status"
@@ -66,8 +67,11 @@ def handle(service, body):
         # /status samples local ownership in the same transaction as the answer.
         job = db.execute("SELECT task_id,assignment_id FROM jobs WHERE stage='accepted'").fetchone()
         name,*args = text.strip().split()
-        answer = reply(service,name,args,{"held_task_id":job[0] if job else None,
-                                         "held_assignment_id":job[1] if job else None})
+        if name == "/queue":
+            answer = queued_chat.accept(db,service,mid,text)
+        else:
+            answer = reply(service,name,args,{"held_task_id":job[0] if job else None,
+                                             "held_assignment_id":job[1] if job else None})
         event = display.append(db,{"event_id":"command-"+mid,"kind":"command",
                                  "session":service.host_session if service.adapter_connected else "",
                                  "turn_id":"","text":answer})

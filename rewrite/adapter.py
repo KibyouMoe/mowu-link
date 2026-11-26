@@ -37,7 +37,13 @@ class HostAdapter:
     def bound_session(self):
         return self.session
 
+    def session_info(self):
+        return {"session":self.session,"next_turn":getattr(self.host,"next_turn",False) is True}
+
     def deliver(self, did, payload):
+        if payload.get("kind") == "queued_chat":
+            require(payload.get("session")==self.session,409,"queued_session_mismatch")
+            require(self.session_info()["next_turn"],422,"native_next_turn_unavailable")
         serialized = encode(payload)
         digest = hashlib.sha256(serialized.encode()).hexdigest()
         media = payload.get("attachments")

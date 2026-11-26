@@ -10,9 +10,11 @@ import unittest
 
 from .devloop import Loop
 from .dsh_port import DshHost, tool_listener
+from .feishu_inbound import Inbound
 from .storage import Fault, encode, guid
 from .test_mainline import Clock
 from .wire import Client
+from .worker import Worker
 from .worker_service import WorkerService
 
 APP = Path("/Applications/DeepSeek Harness.app/Contents")
@@ -44,12 +46,16 @@ class DshSdk(unittest.TestCase):
         self.loop = self.enterContext(Loop.isolated(self.clock,host_factory=host))
         self.w,self.m = self.loop.worker,self.loop.hermes
         token = guid()
-        server = self.enterContext(WorkerService(self.w).listen({token:"adapter/oguri"},("127.0.0.1",0),None))
+        platform = guid()
+        self.service = WorkerService(self.w,self.clock)
+        server = self.enterContext(self.service.listen({token:"adapter/oguri",platform:"platform/oguri"},("127.0.0.1",0),None))
         runner = Thread(target=server.serve_forever,kwargs={"poll_interval":0.02})
         runner.start()
         self.addCleanup(runner.join)
         self.addCleanup(server.shutdown)
-        self.enterContext(tool_listener(self.directory,self.loop.adapter,Client("http://127.0.0.1:"+str(server.server_port),token)))
+        url = "http://127.0.0.1:"+str(server.server_port)
+        self.enterContext(tool_listener(self.directory,self.loop.adapter,Client(url,token)))
+        self.inbound = Inbound(self.directory/"feishu.db",Client(url,platform),None,"app","trainer","chat")
 
     def stop_driver(self):
         if self.proc.poll() is None:
@@ -97,6 +103,51 @@ class DshSdk(unittest.TestCase):
 
     def call(self, name, call_id, args, append=True):
         return self.drive("tool",name=name,call_id=call_id,args=args,append=append)["result"]
+
+    def test_next_turn_queue_recovers_receipt_without_steering_or_replaying(self):
+        self.drive("manual")
+        self.service.step()
+        mids = ("om_queue1","om_queue2")
+        for mid in mids:
+            self.inbound.record("app","user","trainer",{"chat_type":"p2p","chat_id":"chat","message_id":mid,
+                "message_type":"text","content":encode({"text":"/queue 下一回合\n"+mid})})
+            self.assertEqual(self.inbound.deliver(mid)["message_id"],mid)
+        self.clock.advance(5)
+        self.service.step()
+        self.assertEqual(self.drive("count")["received"],1)
+        self.drive("end")
+        reopened = Worker(self.w.db.path,"oguri",self.w.router,self.loop.adapter)
+        service = WorkerService(reopened,self.clock)
+        send = reopened.adapter.deliver
+        def lost(did,body):
+            send(did,body)
+            raise OSError("worker missed native proof")
+        reopened.adapter.deliver = lost
+        service.step()
+        self.assertEqual(self.drive("count")["received"],2)
+        reopened.adapter.deliver = send
+        self.clock.advance(5)
+        service.step()
+        self.assertEqual(self.drive("count")["received"],2)
+        self.drive("end")
+        self.clock.advance(5)
+        service.step()
+        with reopened.db.transaction() as db:
+            rows = db.execute("SELECT * FROM queued_chats ORDER BY rowid").fetchall()
+            recovered = db.execute("SELECT COUNT(*) FROM display_events WHERE event_id LIKE 'queue-recovered-%'").fetchone()[0]
+        self.assertEqual(recovered,1)
+        self.assertEqual([row["text"] for row in rows],["下一回合\n"+mid for mid in mids])
+        proofs = [json.loads(row["receipt"]) for row in rows]
+        self.assertEqual([p["delivery_id"] for p in proofs],["queued-chat-"+mid for mid in mids])
+        self.assertEqual(len({p["turn_id"] for p in proofs}),2)
+        self.assertTrue(all(p["session"]==self.session for p in proofs))
+        self.assertEqual(self.drive("count")["received"],3)
+        self.assertFalse(self.m.tasks()["items"])
+
+    def test_queued_delivery_rejects_another_session_before_writing(self):
+        with self.assertRaisesRegex(Fault,"queued_session_mismatch"):
+            self.loop.adapter.deliver("queued-chat-1",{"kind":"queued_chat","session":"other","text":"no"})
+        self.assertEqual(self.drive("count")["received"],0)
 
     def test_formal_receipt_recovered_from_sdk_log_and_registered_reports(self):
         tid,aid,row = self.assign()
