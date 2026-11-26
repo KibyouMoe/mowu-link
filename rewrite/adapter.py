@@ -38,7 +38,16 @@ class HostAdapter:
         return self.session
 
     def session_info(self):
-        return {"session":self.session,"next_turn":getattr(self.host,"next_turn",False) is True}
+        return {"session":self.session,"next_turn":getattr(self.host,"next_turn",False) is True,
+                "context_usage":callable(getattr(self.host,"context_usage",None))}
+
+    def context_usage(self):
+        reader = getattr(self.host,"context_usage",None)
+        require(callable(reader),422,"native_context_unavailable")
+        result = reader(self.session)
+        require(isinstance(result,dict) and result.get("session")==self.session and "latest" in result,
+                409,"wrong_native_context")
+        return result
 
     def deliver(self, did, payload):
         if payload.get("kind") == "queued_chat":

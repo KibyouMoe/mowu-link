@@ -18,6 +18,7 @@ class WorkerService:
         self.adapter_connected = None
         self.host_busy = None
         self.host_queue = False
+        self.host_context = False
         self.host_session = ""
         self.clock, self.probe_interval = clock, probe_interval
         self.next_probe = 0
@@ -43,6 +44,7 @@ class WorkerService:
                         502,"invalid_host_observation")
                 self.host_session, self.host_busy, self.adapter_connected = session,busy,True
                 self.host_queue = info.get("next_turn") is True
+                self.host_context = info.get("context_usage") is True
             except (Fault,URLError,OSError):
                 self.host_busy = None
                 self.adapter_connected = False

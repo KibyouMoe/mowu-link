@@ -88,9 +88,11 @@ try {
         console.log(JSON.stringify({received,result:result.results[0].result}));
         continue;
       } else if (cmd.action === 'output') {
-        const message = {id:cmd.id,role:'assistant',source:{kind:'model',provider:'fixture',model:'fixture'},
+        const message = {id:cmd.id,role:'assistant',source:{kind:'model',provider:'fixture',model:cmd.model ?? 'fixture'},
           content:cmd.content};
-        session.append('assistant/message',{turn:number,step,message},{surfaceOp:'append'});
+        session.append('assistant/message',{turn:number,step,message,...(cmd.usage ? {usage:cmd.usage} : {})},{surfaceOp:'append'});
+      } else if (cmd.action === 'context') {
+        session.append('request/context',{provider:'fixture',model:cmd.model,contextWindow:cmd.window});
       } else if (cmd.action === 'observed-tool') {
         session.append('tool/call',{turn:number,step,callId:cmd.id,name:cmd.name,arguments:JSON.stringify(cmd.args)});
         const message = {id:'result-'+cmd.id,role:'tool',source:{kind:'tool',callId:cmd.id},toolCallId:cmd.id,

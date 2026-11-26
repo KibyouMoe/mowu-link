@@ -60,6 +60,9 @@ class DshHost:
         require(type(value) is bool,502,"invalid_host_observation")
         return value
 
+    def context_usage(self, session):
+        return self.request("context-usage",session)
+
     def delivery(self, operation, session, did, payload, digest):
         result = self.request(operation,session,{"delivery_id":did,"payload_json":encode(payload),"digest":digest})
         require("receipt" in result,502,"invalid_host_observation")

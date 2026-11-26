@@ -49,7 +49,7 @@ function turns(events) {
   return result;
 }
 
-async function persisted(ctx, agent) {
+async function ownEvents(ctx, agent) {
   check(await ctx.get('sessions').flush(agent.session), 'native_persistence_unavailable');
   const handle = await ctx.get('sessionPersistence').open(agent.session.id, 'read');
   try {
@@ -57,10 +57,30 @@ async function persisted(ctx, agent) {
     const {events} = await handle.read(0);
     const inherited = handle.inheritedEventCount;
     check(Number.isSafeInteger(inherited) && inherited >= 0 && inherited <= events.length, 'unknown_history_boundary');
-    return turns(events.slice(inherited));
+    return events.slice(inherited);
   } finally {
     await handle.close();
   }
+}
+
+async function persisted(ctx,agent) {
+  return turns(await ownEvents(ctx,agent));
+}
+
+function contextUsage(session,events) {
+  const count = n => Number.isSafeInteger(n) && n>=0 ? n : null;
+  let context, latest = null;
+  for (const {type,data} of events) {
+    if (type==='request/context') context=data;
+    if (type!=='assistant/message') continue;
+    const source = data.message?.source;
+    if (data.message?.role!=='assistant' || source?.kind!=='model') continue;
+    latest = {turn:data.turn,step:data.step,provider:source.provider,model:source.model,
+      input_tokens:count(data.usage?.inputTokens),total_tokens:count(data.usage?.totalTokens),
+      window_tokens:context?.provider===source.provider && context?.model===source.model
+        ? count(context?.contextWindow) : null};
+  }
+  return {session, latest};
 }
 
 function receipt(request, expected, history) {
@@ -99,6 +119,7 @@ export async function bindHost(ctx, session, directory) {
       if (request.operation === 'display-next') return nextDisplay(ctx,agent,request);
       if (request.operation === 'display-image') return displayImage(ctx,agent,request,imageCache);
       if (request.operation === 'activity') return {busy:agent.status !== 'idle'};
+      if (request.operation === 'context-usage') return contextUsage(session,await ownEvents(ctx,agent));
       check(['deliver','lookup'].includes(request.operation), 'unsupported_operation');
       const expected = await input(request,ctx,agent,directory);
       const seen = receipt(request,expected,await persisted(ctx,agent));

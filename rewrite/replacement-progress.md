@@ -4,6 +4,8 @@
 
 ## 检查点与证据
 
+DSH 的飞书 `/context` 已接入绑定会话的版本 4 原生日志。隔离测试的第一条模型回包为输入 46、总计 51、窗口 32768；下一条改用另一路由且缺用量，三个数均显示「未记录」，同号重送仍读回第一张卡。错误 Worker 身份被适配器拒绝。真实 DSH SDK、SQLite、Unix 套接字和两段 HTTP 已运行，模型事件与飞书为测试输入；真实账户消费另验。复跑 `python3 -m unittest -v rewrite.test_dsh_sdk.DshSdk.test_context_command_reads_only_committed_usage_for_the_same_route`。macOS 全套 115 项通过。
+
 同伴消息和宿主回执按单条恢复。故障复现时，首条私聊的错误连续三轮阻挡后续私聊和新工单，接收工位原生输入为零、工单一直待派。修正后，同一时序下第二条私聊与正式派发均送达；首条凭据指向错误会话时保持待核。重启并查回原凭据后，首条只进宿主一次。一条上行回执暂时失败时其他回执照常提交。测试使用真实 Router、Worker、SQLite、HTTP，宿主与时钟为夹具。复跑 `python3 -m unittest -v rewrite.test_peers`，七项通过，macOS 全套 114 项通过。
 
 macOS Worker 与 Linux arm64 Router、宿主适配器已通过两个独立 TLS 端口核验。两端安装同一提交 `2025c300`，Linux 复核 92 个发行文件。重投后宿主日志仅一条输入，回合结束仍为 working，夹具 Agent 报告后转待验收，只发一条通知。Linux 回归 102 项通过、10 项因 macOS DSH SDK 缺席跳过。实测使用同机 Linux 来宾，跨物理设备、真实模型调用另验。[原始记录](evidence/linux-cross-os.json)和[复跑说明](README.md#跨系统验收)。

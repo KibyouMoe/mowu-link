@@ -14,6 +14,7 @@ from .dsh_port import DshHost, tool_listener
 from .dsh_display import DshDisplay
 from .feishu_inbound import Inbound
 from .feishu_output import Views
+from .host_wire import RemoteAdapter, serve_adapter
 from .native_files import NativeFiles
 from .storage import Fault, encode, guid
 from .test_mainline import Clock
@@ -124,6 +125,43 @@ class DshSdk(unittest.TestCase):
         self.assertEqual((receipt["session"],receipt["delivery_id"]),(self.session,"chat-"+mid))
         self.assertEqual(self.drive("count")["received"],1)
         self.assertFalse(self.loop.worker.hold()["held_task_id"])
+
+    def test_context_command_reads_only_committed_usage_for_the_same_route(self):
+        credential, other = guid(),guid()
+        listener = self.enterContext(serve_adapter(self.loop.adapter,"oguri",{credential:"worker/oguri",other:"worker/other"},
+                                                   ("127.0.0.1",0),None))
+        thread = Thread(target=listener.serve_forever,kwargs={"poll_interval":.02})
+        thread.start()
+        self.addCleanup(thread.join)
+        self.addCleanup(listener.shutdown)
+        url = "http://127.0.0.1:"+str(listener.server_port)
+        with self.assertRaises(Fault) as denied:
+            Client(url,other).request("GET","host/context")
+        self.assertEqual(denied.exception.status,403)
+        self.w.adapter = RemoteAdapter(Client(url,credential))
+        self.service.step()
+        def command(mid):
+            self.inbound.record("app","user","trainer",{"chat_type":"p2p","chat_id":"chat","message_id":mid,
+                "message_type":"text","content":encode({"text":"/context"})})
+            self.inbound.deliver(mid)
+            events = self.inbound.worker.request("GET","worker/display")["items"]
+            return next(x["event"]["text"] for x in events if x["event"]["event_id"]=="command-"+mid)
+        self.assertIn("还没有模型回包",command("om_empty"))
+        self.drive("manual")
+        self.drive("context",model="fixture",window=32768)
+        self.drive("output",id="sample-one",content=[{"type":"text","text":"private body not for the card"}],
+                   usage={"inputTokens":46,"outputTokens":5,"totalTokens":51})
+        first = command("om_original")
+        for part in ("fixture/fixture","输入 46","本次总用量 51","模型窗口 32768"):
+            self.assertIn(part,first)
+        self.assertNotIn("private body",first)
+        self.drive("output",id="sample-two",model="other",content=[{"type":"text","text":"another answer"}])
+        second = command("om_next")
+        self.assertIn("fixture/other",second)
+        self.assertEqual(second.count("未记录"),3)
+        self.assertEqual(command("om_original"),first)
+        self.assertEqual(self.drive("count")["received"],1)
+        self.assertIsNone(self.w.hold()["held_task_id"])
 
     def test_next_turn_queue_recovers_receipt_without_steering_or_replaying(self):
         self.drive("manual")
