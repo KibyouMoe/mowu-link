@@ -77,7 +77,7 @@ export async function changeModel(ctx, agent, request, bound, readEvents) {
   } catch {
     throw new Error('model_choice_unavailable');
   }
-  await bound();
+  bound();
   if (agent.status!=='idle' || agent.session.seq!==before) throw new Error('model_change_conflict');
   const selected = selection(choice);
   if (isDeepStrictEqual(selection(agent.model.current()),selected)) {

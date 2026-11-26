@@ -67,6 +67,11 @@ class Controller extends Service {
   resolveAgent(target) { return target === id ? {agent} : {error:'unknown'}; }
 }
 await install(Controller);
+class LiveAgents extends Service {
+  constructor(c) { super(c,'agents'); }
+  get(target) { return target === id ? agent : undefined; }
+}
+await install(LiveAgents);
 class Routes extends Service {
   constructor(c) { super(c,'llm'); }
   listProviders() { return [{id:'fixture'},{id:'unavailable'}]; }

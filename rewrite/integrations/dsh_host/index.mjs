@@ -126,7 +126,7 @@ async function stopPrivateTurn(ctx,agent,compacting,bound) {
   const user = turn?.users.length===1 ? turn.users[0] : null;
   check(turn?.open && user?.source?.kind==='user' &&
     !user.content.some(part=>part.type==='text' && part.text.startsWith('魔物链接投递\n')), 'native_stop_not_private');
-  await bound();
+  bound();
   check(agent.status==='running' && agent.session.seq===before && !compacting(), 'native_stop_changed');
   agent.cancel({kind:'user'},{keepInbox:true});
   // Confirm the exact selected turn, even if preserved inbox messages start another one.
@@ -145,20 +145,22 @@ export async function bindHost(ctx, session, directory, catalog=[]) {
   check(typeof session === 'string' && session.length > 0, 'missing_native_session');
   const controller = ctx.get('sessionController');
   const {agent} = await controller.resolveAgent(session);
-  check(agent?.session?.id === session, 'wrong_native_session');
+  const agents = ctx.get('agents');
+  check(agent?.session?.id === session && agents?.get(session) === agent, 'wrong_native_session');
   const displayStart = await baseline(ctx,agent);
   const compact = compaction(ctx,agent,()=>ownEvents(ctx,agent));
   const imageCache = {};
-  async function bound() {
-    const live = await controller.resolveAgent(session);
-    check(live.agent === agent && agent.session.id === session
+  function bound() {
+    // Resolving through SessionController here could reopen a closed session.
+    check(agents.get(session) === agent && agent.session.id === session
       && ['idle','running'].includes(agent.status), 'native_agent_unavailable');
   }
+  bound();
   return {
     agent,
     async handle(request) {
       check(request.session === session, 'wrong_native_session');
-      await bound();
+      bound();
       if (request.operation === 'display-start') return displayStart;
       if (request.operation === 'display-next') return nextDisplay(ctx,agent,request);
       if (request.operation === 'display-image') return displayImage(ctx,agent,request,imageCache);
@@ -205,7 +207,7 @@ export async function bindHost(ctx, session, directory, catalog=[]) {
       const seen = receipt(request,expected,history);
       if (seen || request.operation === 'lookup') return {receipt:seen};
       // Only the adapter which first persisted its write intent can request delivery.
-      await bound();
+      bound();
       if (request.operation==='deliver' && JSON.parse(request.payload_json).kind==='task') {
         check(agent.status==='idle' && !compact.inProgress,'native_task_not_admitted_busy');
       }
@@ -218,7 +220,7 @@ export async function bindHost(ctx, session, directory, catalog=[]) {
       }
     },
     async tool(name, args, exec, notify) {
-      await bound();
+      bound();
       check(exec?.agent === agent && typeof exec.callId === 'string' && exec.callId, 'wrong_native_caller');
       const history = await persisted(ctx,agent);
       const current = history.at(-1);
@@ -269,7 +271,7 @@ function callback(dir, envelope) {
 }
 
 export const name = 'mowulink-dsh-host';
-export const inject = ['sessionController','sessions','sessionPersistence','tools'];
+export const inject = ['sessionController','agents','sessions','sessionPersistence','tools'];
 
 export async function apply(ctx, {session, directory, catalog_sessions=[]}) {
   privateDir(directory);

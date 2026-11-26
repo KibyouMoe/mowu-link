@@ -19,7 +19,7 @@ from .feishu_output import Views
 from .host_wire import RemoteAdapter, serve_adapter
 from .native_files import NativeFiles
 from .question_cards import Actions
-from .storage import Fault, guid
+from .storage import Fault, encode, guid
 from .test_feishu_output import PlatformFixture
 from .test_mainline import Clock
 from .test_dsh_sdk import APP, EXE
@@ -88,6 +88,27 @@ class NativeLoop(unittest.TestCase):
         self.assertEqual(observed["admitted"],[original["native_id"],"keep-private",control["native_id"]])
         self.assertEqual([(r["command"],r["reasoningEffort"]) for r in observed["modelRequests"]],
                          [("task","high"),("private","high"),("task.cancel","high")])
+
+    def test_closed_native_binding_never_resumes_or_sends_to_a_new_agent(self):
+        session = "dsh-binding-close"
+        with tempfile.TemporaryDirectory(dir="/tmp",prefix="mldsh-binding-") as directory:
+            with self.start_native(directory,session,"binding-close") as native:
+                host = DshHost(Path(directory))
+                self.assertFalse(host.busy(session))
+                closed = self.read_native(native,"close")
+                self.assertEqual(closed,{"controllerResolutions":1,"live":False,"sameAgent":False,"inputs":0})
+                for operation in ("activity","display-start","session-catalog"):
+                    with self.assertRaisesRegex(Fault,"native_agent_unavailable") as error:
+                        host.request(operation,session)
+                    self.assertEqual(error.exception.status,503)
+                self.assertEqual(self.read_native(native,"status"),closed)
+                reopened = self.read_native(native,"reopen")
+                self.assertEqual(reopened,{"controllerResolutions":2,"live":True,"sameAgent":False,"inputs":0})
+                payload = {"kind":"chat","text":"Must not reach a replacement agent","message_id":"closed-test"}
+                digest = hashlib.sha256(encode(payload).encode()).hexdigest()
+                with self.assertRaisesRegex(Fault,"native_agent_unavailable"):
+                    host.deliver(session,"chat-closed-test",payload,digest)
+                self.assertEqual(self.read_native(native,"status"),reopened)
 
     def test_native_tool_executor_files_w04_through_the_worker(self):
         session = "dsh-real-loop-formal"

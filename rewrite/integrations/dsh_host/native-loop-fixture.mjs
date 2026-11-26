@@ -158,6 +158,8 @@ async function waitForStop(signal) {
 
 const ctx = new Context();
 const plugins = [];
+let originalHandle;
+let controllerResolutions = 0;
 async function install(plugin,options) {
   const handle = ctx.plugin(plugin,options);
   plugins.push(handle);
@@ -198,8 +200,9 @@ async function setup() {
   }
   await install((await sdk('dsh-agent-loop')).AgentLoop,{});
   if (mode==='goal-driver' || mode==='formal-goal') await install(await sdk('dsh-goal-round-driver'));
-  const {agent} = await ctx.get('agents').create({
+  originalHandle = await ctx.get('agents').create({
     sessionId:session,agentOptions:{provider:'fixture',model:'local'}});
+  const {agent} = originalHandle;
   if (mode==='catalog') {
     const titles = ctx.get('sessionTitle');
     titles.rename(agent.session,'已绑定的会话');
@@ -215,7 +218,13 @@ async function setup() {
   }
   class Controller extends Service {
     constructor(c) { super(c,'sessionController'); }
-    resolveAgent(target) { return target===session ? {agent} : {error:'unknown'}; }
+    async resolveAgent(target) {
+      if (target!==session) return {error:'unknown'};
+      controllerResolutions++;
+      const live = ctx.get('agents').get(target);
+      if (live || mode!=='binding-close') return {agent:live};
+      return ctx.get('agents').resume({resumeSessionId:target,agentOptions:{provider:'fixture',model:'local'}});
+    }
   }
   await install(Controller);
   return agent;
@@ -268,6 +277,17 @@ async function formalScenario(agent) {
   console.log(JSON.stringify({ready:true,session}));
   for await (const line of createInterface({input:process.stdin,terminal:false})) {
     if (line==='exit') break;
+    if (mode==='binding-close') {
+      if (line==='close') await originalHandle.dispose();
+      if (line==='reopen') {
+        const {agent:reopened} = await ctx.get('sessionController').resolveAgent(session);
+        assert.notEqual(reopened,agent);
+      }
+      const live = ctx.get('agents').get(session);
+      console.log(JSON.stringify({controllerResolutions,live:!!live,sameAgent:live===agent,
+        inputs:live?.session.snapshotEvents().filter(event=>event.type==='user/message').length ?? 0}));
+      continue;
+    }
     if (line==='first-round' && mode==='goal-driver') {
       await entered.promise;
       console.log(JSON.stringify({running:agent.status==='running'}));
@@ -320,7 +340,8 @@ async function formalScenario(agent) {
 
 try {
   const agent = await setup();
-  if (['formal','compact','questions','catalog','private-stop','work-question','media','admission-race'].includes(mode) || usesGoals) {
+  if (['formal','compact','questions','catalog','private-stop','work-question','media','admission-race',
+       'binding-close'].includes(mode) || usesGoals) {
     await formalScenario(agent);
   }
   else await stopScenario(agent);

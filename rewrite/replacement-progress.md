@@ -4,6 +4,8 @@
 
 ## 检查点与证据
 
+DSH 真正关闭原生 Agent 后，旧适配器的忙闲、输出游标和目录检查均报 503。原生注册表没有新增实例，解析器没有再调。宿主明确用同会话 ID 恢复出另一个 Agent，旧适配器写入仍被拒，新实例为零输入。复跑 `python3 -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_closed_native_binding_never_resumes_or_sends_to_a_new_agent`。实际安装包的 AgentRegistry、持久会话与私有 Unix 套接字，测试控制器调用原生恢复。没有触发真实模型、飞书或生产会话。
+
 普通私聊经 Worker 重启或更换适配器时，同飞书消息号已确认为原会话则返回原回执；首次投递状态未知时只查回。隔离实测更换为另一会话，三条旧消息（含无绑定的历史记录）都未写入新会话，只有新消息进入。即使原会话的适配器账本空了也没有二次写入；恢复原账本后查到两条原回执。复跑 `python3 -m unittest -v rewrite.test_mainline.Mainline.test_chat_replay_stays_with_original_native_session_after_restart rewrite.test_service.Service.test_pinned_worker_rejects_same_authenticated_adapter_when_session_differs`。SQLite、HTTP/TLS 与重启接续实测，宿主为夹具。主动换绑仍待验。
 
 Worker 支持用 `--adapter-session` 固定 HTTPS 目标会话。专用请求路径会在服务端逐次核会话；适配器地址及认证相同但原生会话换了，忙闲和发送均回 409，错误会话零输入。指定正确测试会话才取得本机收件。复跑 `python3 -m unittest -v rewrite.test_service`。这里验证的是进程、TLS 与绑定拒绝，宿主为夹具。
