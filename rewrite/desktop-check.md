@@ -106,4 +106,6 @@ python3 -m rewrite.service codex-adapter \
 
 后续版本还监听原生项的开始和结束通知。同一原生回合的输入、已完成的公开过程发言、执行中的命令工具会在回合结束前进入各自的飞书卡，最终答复在宿主确认回合完成后单发。工具只抄已识别的命令动词，参数、终端输出及内部 Worker 工具不出卡。丢工具回执后查到相同卡，最终对账没有第二张工具卡。连续 12 轮通过，[卡片与回执](evidence/codex-app-server-live-tool-card.json)。App Server 实际执行本地试验命令，模型和飞书是夹具。原生输出图与流式分段仍待核。
 
+独立工位可在测试 profile 使用 `features.default_mode_request_user_input = true` 验原生题卡。当前支持带选项、可自填的单个非密题且无自动解题时限。测试平台回传选择、自填和跳过，适配器按原生请求号确认 `serverRequest/resolved` 后才更新原卡。缺回执时，同卡仍待核，同输入不会向宿主答第二次。密题、其他表单以及同原生题的新传输请求均拒绝。连续 10 轮通过。App Server 和 Worker 实际运行，飞书动作和模型为夹具，Desktop 窗口和真人点卡另验。[题卡与原生回执](evidence/codex-app-server-native-trainer-question.json)。
+
 独立 App Server 也可将 `worker_ask` 交给原工单。测试管理端的原答复经同一派发返回同一原生线程，生成后续原生回合，再由该回合调用 W04。原题和成果各一条通知，原答复重投不产生第二个答复回合。连续 12 次通过。[原生问答记录](evidence/codex-app-server-native-question.json)。这里验证的是工单问溪流的协议，模型和管理操作者使用夹具。

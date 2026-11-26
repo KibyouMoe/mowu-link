@@ -26,6 +26,7 @@ from .feishu_inbound import Inbound
 from .feishu_output import Views
 from .host_wire import RemoteAdapter
 from .native_files import NativeFiles
+from .question_cards import Actions
 from .storage import Fault, encode, guid
 from .test_feishu_output import PlatformFixture
 from .test_feishu_inbound import PNG
@@ -74,6 +75,9 @@ class Provider(BaseHTTPRequestHandler):
         peer = next((block["text"] for block in latest if block.get("text","").startswith("Send peer fixture\n")),None)
         public_preview = getattr(self.server,"public_preview",False) and any(
             block.get("text")=="Native tool preview fixture" for block in latest)
+        trainer_prompt = next((block["text"].split(": ",1)[1] for block in latest
+                              if hasattr(self.server,"trainer_responses")
+                              and block.get("text","").startswith("Native trainer question: ")),None)
         prefix = []
         provision_action = getattr(self.server,"provision_calls_tool",False) and any(
             block.get("text")==SEED for block in latest)
@@ -87,6 +91,12 @@ class Provider(BaseHTTPRequestHandler):
             item = {"type":"function_call","id":"fc_preview","name":"exec_command","call_id":"codex_preview_fixture",
                     "arguments":encode({"cmd":"pwd && while [ ! -f .release-preview ]; do sleep .05; done # PREVIEW_PRIVATE_MARKER",
                                         "yield_time_ms":9000})}
+        elif trainer_prompt and not calls:
+            native_q = {"id":"route","header":"路线","question":"选择路线 · "+trainer_prompt,
+                        "isSecret":trainer_prompt=="private","isOther":True,
+                        "options":[{"label":"第一项","description":"First"},{"label":"第二项","description":"Second"}]}
+            item = {"type":"function_call","id":"fc_trainer_"+trainer_prompt,"name":"request_user_input",
+                    "call_id":"native_trainer_"+trainer_prompt,"arguments":encode({"questions":[native_q]})}
         elif peer and not calls:
             item = {"type":"function_call","id":"fc_peer","name":"worker_send_peer","call_id":"native_peer_fixture",
                     "arguments":peer.split("\n",1)[1]}
@@ -102,6 +112,10 @@ class Provider(BaseHTTPRequestHandler):
         else:
             item = {"id":"msg_fixture","type":"message","role":"assistant","status":"completed",
                     "content":[{"type":"output_text","text":"Local model fixture accepted the receipt."}]}
+            if trainer_prompt and calls:
+                answer = next(entry["output"] for entry in reversed(items[user_index+1:])
+                              if entry.get("type")=="function_call_output")
+                self.server.trainer_responses.append((trainer_prompt,answer))
         stream = [{"type":"response.created","response":{"id":response_id}}]
         for index,entry in enumerate([*prefix,item]):
             stream.extend({"type":"response.output_item."+kind,"output_index":index,"item":entry}
@@ -865,6 +879,118 @@ class CodexAppServer(unittest.TestCase):
         self.evidence = {"thread_id":sid,"turn_id":turn,"events":events,"tool_receipt_replayed":tool_acks[1],
                          "private_arguments_omitted":True,"early_cards":3,"card_titles":card_titles(),
                          "boundary":"Actual App Server command execution in an isolated test directory; model and Feishu fixtures"}
+
+    def test_native_trainer_question_closes_original_card_only_after_app_server_receipt(self):
+        self.provider.trainer_responses = []
+        rpc = self.enterContext(isolated_app_server(self.root,self.origin,
+                                                    ["features.default_mode_request_user_input=true"]))
+        sid = rpc.request("thread/start",{"cwd":self.root,"ephemeral":False})["thread"]["id"]
+        rpc.request("turn/start",{"threadId":sid,"input":[{"type":"text","text":"Seed the trainer question fixture",
+                                                          "text_elements":[]}]})
+        until = time.monotonic()+12
+        while rpc.event(until)["method"]!="turn/completed":
+            pass
+        host = AppServerHost(rpc,sid,Path(self.root)/"native-questions.db")
+        host.session = sid
+        clock = Clock()
+        loop = self.enterContext(Loop.isolated(clock,host_factory=lambda _path,_name:host))
+        service = WorkerService(loop.worker,clock)
+        token,trainer_token = guid(),guid()
+        url = self.enterContext(running(service.listen({token:"adapter/oguri",trainer_token:"platform/oguri"},
+                                                       ("127.0.0.1",0),None)))
+        adapter,platform = Client(url,token),Client(url,trainer_token)
+        sink = PlatformFixture()
+        platform_db = loop.root/"native-trainer-platform.db"
+        inbound = Inbound(platform_db,platform,None,"app","trainer","private-chat",clock=clock)
+        views = Views(platform_db,platform,sink,"private-chat","小栗帽",clock)
+        actions = Actions(views,inbound)
+        output = CodexDisplay(loop.adapter,adapter)
+        self.enterContext(output.run())
+        self.enterContext(worker_callbacks(host,adapter,output.wake.set,output.observe))
+
+        def events():
+            return [item["event"] for item in platform.request("GET","worker/display")["items"]]
+
+        def wait_for(observe):
+            until = time.monotonic()+10
+            while time.monotonic()<until:
+                result = observe()
+                if result:
+                    return result
+                time.sleep(.025)
+            self.fail("native trainer question state did not arrive")
+
+        def send(mode):
+            self.assertFalse(host.busy(sid))
+            return rpc.request("turn/start",{"threadId":sid,"input":[{"type":"text",
+                               "text":"Native trainer question: "+mode,"text_elements":[]}]})["turn"]["id"]
+
+        def open_card(mode):
+            turn = send(mode)
+            event = wait_for(lambda: next((e for e in events() if e["kind"]=="question_open" and e["turn_id"]==turn),None))
+            qid = event["question_id"]
+            self.assertEqual(event["text"],"选择路线 · "+mode)
+            self.assertEqual([opt["label"] for opt in event["options"]],["第一项","第二项"])
+            views.poll()
+            with views.db.transaction() as db:
+                mid = db.execute("SELECT mid FROM question_cards WHERE qid=?",(qid,)).fetchone()[0]
+            card = next(item for item in sink.messages.values() if item[0]==mid)
+            self.assertIn("form",[element["tag"] for element in card[2]["body"]["elements"]])
+            return turn,qid,mid,card
+
+        delivered = []
+        for mode,value,form,wanted in (
+                ("choice",{"mode":"choice","option_id":"2"},None,{"route":{"answers":["第二项"]}}),
+                ("text",{"mode":"text"},{"reply":"  原样回答  "},{"route":{"answers":["  原样回答  "]}}),
+                ("skip",{"mode":"skip"},None,{})):
+            turn,qid,mid,card = open_card(mode)
+            action = {"question_id":qid,**value}
+            with self.assertRaisesRegex(Fault,"wrong_card_actor"):
+                actions.record("app","another","private-chat",mid,action,form)
+            with self.assertRaisesRegex(Fault,"not_original_trainer_card"):
+                actions.record("app","trainer","private-chat","om_wrong",action,form)
+            self.assertEqual(actions.record("app","trainer","private-chat",mid,action,form),"pending")
+            actions.flush()
+            proof = host.questions.lookup(sid,turn,"native_trainer_"+mode)
+            self.assertTrue(proof and proof["closed"])
+            self.assertEqual(actions.record("app","trainer","private-chat",mid,action,form),"confirmed")
+            wait_for(lambda: not host.busy(sid))
+            observed = wait_for(lambda: next((json.loads(raw) for name,raw in self.provider.trainer_responses if name==mode),None))
+            self.assertEqual(observed["answers"],wanted)
+            views.poll()
+            self.assertEqual(card[2]["header"]["title"]["content"],"小栗帽-提问 · 已回答")
+            self.assertNotIn("form",[element["tag"] for element in card[2]["body"]["elements"]])
+            self.assertEqual(sink.calls.count(("patch",mid)),1)
+            delivered.append({"mode":mode,"message_id":mid,"question_id":qid,"proof":proof,"model_saw":observed})
+        turn,qid,mid,card = open_card("unconfirmed")
+        original_closed = host.questions.closed
+        host.questions.closed = lambda _params: None
+        try:
+            action = {"question_id":qid,"mode":"choice","option_id":"1"}
+            actions.record("app","trainer","private-chat",mid,action,None)
+            actions.flush()
+            self.assertIsNone(host.questions.lookup(sid,turn,"native_trainer_unconfirmed"))
+            clock.advance(16)
+            actions.flush()
+        finally:
+            host.questions.closed = original_closed
+        views.poll()
+        self.assertIn("form",[element["tag"] for element in card[2]["body"]["elements"]])
+        self.assertEqual(actions.record("app","trainer","private-chat",mid,action,None),"pending")
+        self.assertEqual(sum(name=="unconfirmed" for name,_ in self.provider.trainer_responses),1)
+        wait_for(lambda: not host.busy(sid))
+        secret = send("private")
+        wait_for(lambda: any(name=="private" for name,_ in self.provider.trainer_responses))
+        self.assertFalse([item for item in events() if item["turn_id"]==secret and item["kind"]=="question_open"])
+        with self.assertRaisesRegex(Fault,"native_question_already_offered"):
+            host.questions.offer({"id":900,"params":{"threadId":sid,"turnId":turn,
+                "itemId":"native_trainer_unconfirmed","autoResolutionMs":None,
+                "questions":[{"id":"route","question":"选择路线 · unconfirmed","isOther":True,"isSecret":False,
+                              "options":[{"label":"第一项"},{"label":"第二项"}]}]}})
+        self.assertFalse(loop.hermes.tasks()["items"])
+        self.evidence = {"thread_id":sid,"answered":delivered,"unconfirmed_card_id":mid,"unconfirmed_untouched":True,
+                         "secret_question_projected":False,
+                         "boundary":"Actual App Server requestUserInput and fixture card actions, no Feishu identity or cloud model"}
 
     def test_native_app_server_conversation_uses_standard_feishu_cards(self):
         rpc = self.enterContext(isolated_app_server(self.root,self.origin))

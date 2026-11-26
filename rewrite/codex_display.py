@@ -87,11 +87,13 @@ class CodexDisplay:
                 with self.db.transaction() as db:
                     db.execute("UPDATE codex_display_live SET sent=1 WHERE seq=?",(row["seq"],))
             if turn["status"] not in TERMINAL:
-                return
+                break
             self.host.publish_public_turn(self.session,tid,self.worker,turn=turn)
             with self.db.transaction() as db:
                 db.execute("DELETE FROM codex_display_live WHERE turn_id=?",(tid,))
                 db.execute("UPDATE codex_display_turns SET sent=1 WHERE turn_id=?",(tid,))
+        if self.host.questions:
+            self.host.questions.publish(self.worker)
 
     def pump(self):
         while not self.stop.is_set():

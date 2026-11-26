@@ -5,12 +5,14 @@ from pathlib import Path
 from queue import Empty
 import re
 import shlex
+from sqlite3 import OperationalError
 from threading import Event, RLock, Thread
 import time
 import unicodedata
 
 from .agent_tools import TOOLSET
 from .codex_compactions import CodexCompactions
+from .codex_questions import CodexQuestions
 from .codex_rpc import NativeRpcRejected
 from .storage import Fault, encode, require, string
 
@@ -27,11 +29,19 @@ class AppServerHost:
     rejects_busy_before_control_write = True
     rejects_busy_before_queue_write = True
 
-    def __init__(self, rpc, thread_id, compaction_db=None):
+    def __init__(self, rpc, thread_id, adapter_db=None):
         self.rpc, self.thread_id = rpc,thread_id
         self.write_lock = RLock()
         self.usage = None
-        self.compactions = CodexCompactions(compaction_db,self) if compaction_db is not None else None
+        self.compactions = CodexCompactions(adapter_db,self) if adapter_db is not None else None
+        self.questions = CodexQuestions(adapter_db,self) if adapter_db is not None else None
+
+    def resolve_question(self,original,answer):
+        require(self.questions,422,"native_question_answer_unavailable")
+        return self.questions.resolve(original,answer)
+
+    def lookup_answer(self,session,turn,native_id):
+        return self.questions.lookup(session,turn,native_id) if self.questions else None
 
     def request(self,method,params):
         try:
@@ -508,9 +518,25 @@ def worker_callbacks(host,worker,notify_turn_end,notify_item=None):
                 continue
             except Fault:
                 break
+            if host.questions and packet.get("method")=="item/tool/requestUserInput":
+                try:
+                    host.questions.offer(packet)
+                    notify_turn_end()
+                except (Fault,OperationalError):
+                    if type(packet.get("id")) in (str,int):
+                        try:
+                            host.rpc.send({"id":packet["id"],"error":{"code":-32602,"message":"unsupported_trainer_question"}})
+                        except Fault:
+                            break
+                continue
+            if host.questions and packet.get("method")=="serverRequest/resolved":
+                host.questions.closed(packet.get("params"))
+                continue
             if packet.get("method")=="turn/completed":
                 params = packet.get("params")
                 if isinstance(params,dict) and params.get("threadId")==host.thread_id:
+                    if host.questions and isinstance(params.get("turn"),dict):
+                        host.questions.retire_turn(params["turn"].get("id"))
                     notify_turn_end()
                 continue
             if packet.get("method")=="thread/tokenUsage/updated":

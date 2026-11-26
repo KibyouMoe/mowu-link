@@ -4,6 +4,10 @@
 
 ## 检查点与证据
 
+独立 Codex A07 已接单个公开原生题。测试平台选择、自填和跳过实际进入同一个 App Server 原题，关题回执按原请求号匹配，测试平台仅更新原卡一次。错人、错卡、密题、同原生题再次注册均拒绝。故意丢原生关题回执，模型只收到一次原答案，卡保持待核。连续 10 轮通过。[题卡证据](evidence/codex-app-server-native-trainer-question.json)。复跑 `python3 -m unittest -v rewrite.test_codex_app_server.CodexAppServer.test_native_trainer_question_closes_original_card_only_after_app_server_receipt`，模型与飞书用独立夹具。
+
+完整回归曾见隔离 App Server 的原生辅助进程晚于主进程退出，暂存目录仍有写入。已用单独进程组停止该试验服务及其辅助进程，单测记录辅助进程收到终止信号。macOS 全套 192 项通过。真实宿主服务由各自的发布窗口验收。
+
 独立 Codex A05 工具卡已核。实际 App Server 在只读试验目录运行命令期间，Worker 测试平台依次收到原生输入、公开过程发言、工具预览三张标准卡。原生命令仍在等待。故意丢工具写入回执，重复提交仍是同一事件。释放命令后只追加独立回复卡，完整参数、终端内容和内部工具未进入卡片。连续 12 轮通过。[卡片与回执](evidence/codex-app-server-live-tool-card.json)。复跑 `python3 -m unittest -v rewrite.test_codex_app_server.CodexAppServer.test_codex_tool_card_arrives_during_native_execution_and_final_stays_distinct`。模型与飞书是夹具。
 
 独立 Codex `/model`、`/effort` 已通过指定提供方目录和原生线程设置接通。实际下一次模型请求由 Sol 改至 Astra，`max` 透传。丢回执重投保持待核，后续 `low` 冷开读回且进入下一次请求。原生选择 `ultra` 时本地 Responses 请求为 `xhigh`，真实账号的请求值仍需实测，卡片只确认客户端设置。旧模型的力度菜单、未送达菜单、其他提供方均拒绝写入。连续 12 轮通过。复跑 `python3 -m unittest -v rewrite.test_codex_app_server.CodexAppServer.test_native_model_and_effort_commands_change_next_request_and_persist_cold`。[设置与请求记录](evidence/codex-app-server-native-selection.json)。测试模型、平台使用夹具。

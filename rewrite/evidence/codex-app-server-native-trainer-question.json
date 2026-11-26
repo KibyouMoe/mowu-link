@@ -1,0 +1,81 @@
+{
+  "thread_id": "01a2170c-20c6-7c31-8a41-b9010aaaecfb",
+  "answered": [
+    {
+      "mode": "choice",
+      "message_id": "om_2",
+      "question_id": "b80a34f7-30f7-5fe3-808a-e5aaf7607be9",
+      "proof": {
+        "answer": {
+          "mode": "choice",
+          "option_id": "2"
+        },
+        "closed": true,
+        "native_question_id": "native_trainer_choice",
+        "native_request_id": 0,
+        "receipt_id": "codex-question-313788a644a65a8ee16f47ff2ca044db69f936722661d862c3aa1d86708ca11f",
+        "session": "01a2170c-20c6-7c31-8a41-b9010aaaecfb",
+        "turn_id": "01a2170c-211a-7593-ac2b-7d62d52ee61f"
+      },
+      "model_saw": {
+        "answers": {
+          "route": {
+            "answers": [
+              "第二项"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "mode": "text",
+      "message_id": "om_5",
+      "question_id": "8ab8facb-8172-55f2-a6bc-aa8927ae8c2a",
+      "proof": {
+        "answer": {
+          "mode": "text",
+          "text": "  原样回答  "
+        },
+        "closed": true,
+        "native_question_id": "native_trainer_text",
+        "native_request_id": 1,
+        "receipt_id": "codex-question-ee8c3e2ed0d2f3cef42921d69ae88aa0e82e7ef6ae91fb2970678707b79b13c4",
+        "session": "01a2170c-20c6-7c31-8a41-b9010aaaecfb",
+        "turn_id": "01a2170c-2172-7f42-8dff-f7fb94601f66"
+      },
+      "model_saw": {
+        "answers": {
+          "route": {
+            "answers": [
+              "  原样回答  "
+            ]
+          }
+        }
+      }
+    },
+    {
+      "mode": "skip",
+      "message_id": "om_8",
+      "question_id": "2f8803f6-d99b-5de4-a568-39c59a7b4779",
+      "proof": {
+        "answer": {
+          "mode": "skip"
+        },
+        "closed": true,
+        "native_question_id": "native_trainer_skip",
+        "native_request_id": 2,
+        "receipt_id": "codex-question-c6dbc9c1e8b6435b75b2dba04bf82c52d9cb805ec8d41cf496714af8c7c8e96d",
+        "session": "01a2170c-20c6-7c31-8a41-b9010aaaecfb",
+        "turn_id": "01a2170c-21c9-71c3-9d1d-973978c93ffd"
+      },
+      "model_saw": {
+        "answers": {}
+      }
+    }
+  ],
+  "unconfirmed_card_id": "om_11",
+  "unconfirmed_untouched": true,
+  "secret_question_projected": false,
+  "boundary": "Actual App Server requestUserInput and fixture card actions, no Feishu identity or cloud model",
+  "consecutive_runs": 10
+}
