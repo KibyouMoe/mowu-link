@@ -81,7 +81,7 @@ python3 -m rewrite.cutover stage-reviewed-rollback --snapshot ./snapshot --trial
 
 宿主接收未知、原模型仍无法接续、派发已转移或回报与原任务不符时，保留新旧两侧并逐笔对账。排空开关不会暂停离线入池，也不会隐去已在网络上的原派发。回退命令继续拒绝未验收或不符合上述回迁范围的写入。
 
-复跑 `python3 -B -m unittest -v rewrite.test_cutover.Cutover.test_inflight_rollback_drains_same_assignment_before_old_router_can_resume`。隔离重做 Router、Worker 以及旧 RouterStore 实跑；宿主、模型和时钟使用夹具。第一次恢复原持单，第二次重开按原 W04 键读回丢失的回执，整个过程中下一张单保持无派发号。实际验收后才生成旧版回退副本。[排空与回执实测](evidence/cutover-inflight-drain.json)
+复跑 `python3 -B -m unittest -v rewrite.test_cutover.Cutover.test_inflight_rollback_drains_same_assignment_before_old_router_can_resume`。隔离重做 Router、Worker 以及旧 RouterStore 实跑，宿主、模型和时钟使用夹具。第一次恢复原持单，第二次重开按原 W04 键读回丢失的回执，整个过程中下一张单保持无派发号。测试管理身份确认验收后才生成旧版回退副本。[排空与回执实测](evidence/cutover-inflight-drain.json)
 
 ## 旧 Trigger 历史和订阅账本
 
