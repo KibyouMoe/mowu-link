@@ -1,9 +1,11 @@
 import os
 from pathlib import Path
+import subprocess
 import sys
 from tempfile import TemporaryDirectory
 import time
 import unittest
+from unittest.mock import patch
 
 from .codex_rpc import start_app_server
 
@@ -13,7 +15,7 @@ class CodexRpc(unittest.TestCase):
     def test_shutdown_reaches_the_isolated_native_helper(self):
         root = Path(self.enterContext(TemporaryDirectory(prefix="mowulink-native-helper-")))
         server = root/"test-app-server"
-        server.write_text("#!"+sys.executable+"\n"+"""
+        server.write_text("""
 import json
 from pathlib import Path
 import signal
@@ -36,8 +38,6 @@ for line in sys.stdin:
     if "id" in packet:
         print(json.dumps({"id":packet["id"],"result":{}}),flush=True)
 """,encoding="utf-8")
-        server.chmod(0o700)
-
         def wait_for(name):
             end = time.monotonic()+3
             path = root/name
@@ -45,6 +45,11 @@ for line in sys.stdin:
                 time.sleep(.02)
             self.assertTrue(path.exists(),name)
 
-        with start_app_server(server,root,root):
-            wait_for("ready")
+        spawn = subprocess.Popen
+        def launch(argv,**options):
+            return spawn([argv[0],server,*argv[1:]],**options)
+
+        with patch("rewrite.codex_rpc.subprocess.Popen",side_effect=launch):
+            with start_app_server(sys.executable,root,root):
+                wait_for("ready")
         wait_for("terminated")
