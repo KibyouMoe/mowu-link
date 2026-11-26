@@ -9,6 +9,7 @@ import sys
 import tempfile
 from threading import Thread
 import unittest
+from unittest.mock import patch
 
 from .adapter import HostAdapter
 from .devloop import FixtureHost
@@ -28,7 +29,7 @@ from .test_mainline import Clock
 from .trigger import Trigger
 from .wire import Client, serve_loopback
 from .worker import Worker
-from . import display, worker_commands
+from . import display, dsh_workspace_audit, state_bundle, worker_commands
 from .worker_service import WorkerService
 
 
@@ -449,6 +450,40 @@ class Bundle(unittest.TestCase):
                                  "platform_writes_for_event":1,"handoff_blocked_before_drain":True,
                                  "handoff_staged_after_drain":True,
                                  "boundary":"Actual Worker HTTP and SQLite, simulated Feishu provider and native host."}
+
+    @unittest.skipUnless(os.name=="posix","DSH private Unix runtime required")
+    def test_handoff_rechecks_dsh_workspace_journal_before_publishing(self):
+        runtime = self.root/"dsh-runtime"
+        runtime.mkdir(mode=0o700)
+        (runtime/"assignment-containers").mkdir(mode=0o700)
+        journal,identity = dsh_workspace_audit.journal(runtime)
+        original = self.native.session
+        with self.stack(self.sources,pin_session=True) as (_m,w,_source,_mail,_platform,views):
+            WorkerService(w,self.clock).step()
+            with w.adapter.db.transaction() as db:
+                dsh_workspace_audit.marker(db,original,identity)
+            views.poll()
+        seal = capture(self.sources,self.revision,self.snapshot)["manifest_sha256"]
+        self.assertEqual(verify(self.snapshot,seal)["format"],3)
+        runtimes = {"oguri":runtime}
+        ready, = audit_handoff(self.snapshot,seal,dsh_runtimes=runtimes)["workers"]
+        self.assertTrue(ready["native_session_ledger_clear"],ready)
+        aid = guid()
+        record = {"session":original,"task_id":guid(),"assignment_id":aid,
+                  "container_id":"a"*64,"phase":"active","token":guid()}
+        name = hashlib.sha256(encode([original,aid]).encode()).hexdigest()+".json"
+        original_restore = state_bundle.restore_files
+        def changed(*args,**kwargs):
+            original_restore(*args,**kwargs)
+            with open(journal/name,"x",opener=lambda p,flags:os.open(p,flags,0o600)) as stream:
+                stream.write(encode(record))
+        with patch.object(state_bundle,"restore_files",side_effect=changed):
+            with self.assertRaisesRegex(ValueError,"workspace journal changed during handoff"):
+                stage_native_handoff(self.snapshot,seal,"oguri",original,"next",self.dest,dsh_runtimes=runtimes)
+        self.assertFalse(self.dest.exists())
+        pending, = audit_handoff(self.snapshot,seal,dsh_runtimes=runtimes)["workers"]
+        self.assertEqual(pending["native_session_pending"]["dsh_assignment_workspaces"],1)
+        self.assertNotIn(record["token"],encode(pending))
 
     def test_handoff_detects_different_display_payload_or_cursor_ahead_of_worker(self):
         with self.stack(self.sources) as (_m,w,_source,_mail,_inbound,views):

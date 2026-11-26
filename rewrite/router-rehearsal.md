@@ -179,6 +179,19 @@ python3 -m rewrite.state_bundle audit-handoff --snapshot "$SNAPSHOT" --manifest-
 
 `worker:<ID>` 和 `agent:<ID>` 的 ID 使用 Router 上的准确拼写。命令只读取离线快照，比较 Router 持权、Worker 持单及会话、原生适配器收件凭据、待核的 W04 和原派发清理记录。输出 `needs_review: true` 时用隔离副本逐项对账。检查结果只覆盖上述账本，不能据此判断生产可切换。
 
+启用 `assignment_container` 的 DSH 工位，先用新版适配器核到原绑定的宿主活动状态，再停写拍快照。适配器会登记原工作区账本的文件系统身份。含该登记的快照采用格式 3，用新版工具读回。保持原 DSH 宿主停止，准备 `dsh-runtimes.json`，按工位 ID 指向当时的原私有运行目录，例如 `{"oguri":"/isolated/oguri/dsh-runtime"}`。在能读取该原目录的机器上，用同一个参数执行审计和换绑。
+
+```sh
+python3 -B -m rewrite.state_bundle audit-handoff --snapshot "$SNAPSHOT" --manifest-sha256 "$MANIFEST_SHA256" \
+  --dsh-runtimes ./dsh-runtimes.json
+python3 -B -m rewrite.state_bundle stage-native-handoff --snapshot "$SNAPSHOT" --manifest-sha256 "$MANIFEST_SHA256" \
+  --dsh-runtimes ./dsh-runtimes.json --worker-id oguri --source-session "$ORIGINAL_SESSION" \
+  --target-session "$TARGET_SESSION" --destination ./trial-native-binding
+```
+
+`native_session_pending.dsh_assignment_workspaces` 计入原账本尚未回收的派发。未提供原目录、目录身份不符、账本无法读取或原宿主仍运行时，该项记为未知并且换绑不发布。换绑生成目录前再次读账本，确认在准备期间没有变化。W04 和持单均清零后，尚有容器也会阻止换绑。重开原 DSH 及适配器，凭原回执收尾，再停机检查。早于账本登记的快照需先在原工位补采一次活动观测后重新备份。五组件数据恢复仍可接回原工位。[真实容器实测](evidence/dsh-offline-workspace-handoff.json)
+
+
 `native_session_pending` 另列换绑前需要核对的离线账本。包括持单、Router 已保留的派发、未处理收件、私聊与队列、同伴收据、问题、压缩、清理以及没有原生关闭回执的命令审批。缺少的旧库表显示未知。只有这些记录均为零且前述持单检查无误，`native_session_ledger_clear` 才为真。原会话重开可继续未确认的工作，换到别的会话前要把这些记录留在原会话对账。实际忙闲、原生目标和权限须在独立宿主核验。
 
 启用 Codex 审批的新版适配器另报 `codex_approval_closures`。它包含原生审批已到适配器、Router 尚未收到登记，以及 Router 已写关闭但适配器尚未核到回执两种情况。单工位与其纳入快照的托管会话均计数。未出现这项时，较早版本或未开启转接的工位需核对实际配置与原宿主记录。出现待核时保留原会话和账本。重开后原绑定 Worker 可查回 Router 已保存的关闭回执。已经保存原生关闭、且 Router 保有原登记时可补交关闭。宿主空闲无法填补缺失的原生关闭凭据。运行中换绑也会查询已登记的原适配器账本。运行中的待核审批恢复使用原会话，无需重放旧审批或改变权限。[运行中换绑](README.md#飞书切换会话)

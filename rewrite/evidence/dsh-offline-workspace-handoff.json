@@ -1,0 +1,36 @@
+{
+  "session": "dsh-offline-workspace-handoff",
+  "task_id": "e856b2d7-0643-4d16-8907-ae2c2e513e8b",
+  "assignment_id": "ec8de0e5-6f04-4e83-a5d7-8eadac99927b",
+  "container_id": "a90a2e00ac5b4e064a3f7a4ebf99fba9ad416cb730497bb1715adfdf431814a5",
+  "w04_state_before_capture": "completed_reported",
+  "snapshot_format": 3,
+  "snapshot_sha256": "1ab4288a7445963fcd8e147063547bac5f1c632a85b51147f2c62204ab32d90e",
+  "missing_journal": "dsh_workspace_journal_required",
+  "wrong_runtime": "dsh_workspace_journal_mismatch",
+  "active_journal": {
+    "fingerprint": "f60169b75dcbf6f5e6ea6ed62f4d0ad8edd4dbc2157868b9f748bead0d44a8fa",
+    "pending": [
+      {
+        "session": "dsh-offline-workspace-handoff",
+        "task_id": "e856b2d7-0643-4d16-8907-ae2c2e513e8b",
+        "assignment_id": "ec8de0e5-6f04-4e83-a5d7-8eadac99927b",
+        "phase": "active"
+      }
+    ]
+  },
+  "invalid_record": "dsh_workspace_journal_unconfirmed",
+  "running_host": "dsh_workspace_host_still_running",
+  "sealed_journal": {
+    "fingerprint": "edd4c1d2ff270735ff090d603f2b0fc4a91125a985322a1c94933455b8f9f4ea",
+    "pending": []
+  },
+  "staged_session": "other-session",
+  "receipt_pending_before_reaper": 0,
+  "held_before_reaper": 0,
+  "original_inputs": [
+    "mowulink-fdd88e5ebf560148a4bd2fd4c7ce641dd7089647ef375c9de9b8f17b5223209e"
+  ],
+  "new_model_requests_after_reopen": 0,
+  "scope": "Installed DSH AgentLoop, isolated Linux Docker and Router/Worker HTTP; scripted local model."
+}

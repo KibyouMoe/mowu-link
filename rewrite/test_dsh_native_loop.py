@@ -35,7 +35,7 @@ from .native_files import NativeFiles
 from .orders import Orders
 from .release_check import config, serve
 from .question_cards import Actions
-from .state_bundle import agent_pending, capture, filename, restore, rollback, verify
+from .state_bundle import agent_pending, audit_handoff, capture, filename, restore, rollback, stage_native_handoff, verify
 from .storage import Fault, encode, guid, state_writer
 from .test_feishu_output import PlatformFixture
 from .test_mainline import Clock
@@ -1886,6 +1886,128 @@ exec {docker} "$@"
                 "container_after_w04":"removed","processes":process_observations,
                 "run_scope":"Same isolated Linux engine, actual DSH native persistence and independent TLS adapter/Worker processes; scripted test model, no production credentials."}
             Path(output).write_text(json.dumps(result,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
+
+    def test_offline_handoff_waits_for_dsh_workspace_after_w04_release(self):
+        image,cli = self.container_engine()
+        docker,_,socket = cli
+        session = "dsh-offline-workspace-handoff"
+        directory,loop,service,_ = self.goal_worker(session)
+        runtime = Path(directory)
+        (runtime/"assignment-container.json").write_text(encode(
+            {"docker":docker,"socket":socket.removeprefix("unix://"),"image":image}),encoding="utf-8")
+        self.addCleanup(self.clean_fixture_containers,runtime,session,cli)
+        loop.adapter.expected_session = session
+        worker = Worker(loop.worker.db.path,"oguri",loop.wire,loop.adapter,clock=service.clock)
+        service.worker = worker
+        token = guid()
+        client = Client(self.open_worker(service,{token:"adapter/oguri"}),token)
+        task = loop.hermes.create(guid(),"Leave one unreaped workspace","Report without receiving the acknowledgement","oguri")["task_id"]
+        request = loop.wire.request
+        def lost_report_ack(method,path,*args,**kwargs):
+            result = request(method,path,*args,**kwargs)
+            if method=="POST" and path==f"tasks/{task}/report":
+                raise Fault(503,"fixture_workspace_handoff_ack_lost",True)
+            return result
+        loop.wire.request = lost_report_ack
+        with tool_listener(runtime,loop.adapter,client), self.start_native(runtime,session,"cleanup-container-export") as native:
+            service.step()
+            self.assertEqual(service.host_session,session)
+            self.assertFalse(loop.adapter.handoff_activity().get("workspace_pending"))
+            service.clock.advance(10)
+            worker.poll()
+            worker.poll()
+            run = self.read_native(native,"read")
+            self.assertIn("fixture_workspace_handoff_ack_lost",encode(run["results"][-1]))
+            job = loop.hermes.inspect(task)
+            self.assertEqual(job["task"]["state"],"completed_reported")
+            aid = job["last_report"]["assignment_id"]
+            journal, = (runtime/"assignment-containers").glob("*.json")
+            lease = json.loads(journal.read_bytes())
+            self.assertEqual((lease["phase"],lease["assignment_id"]),("active",aid))
+        # No DSH process is listening to reap the container while W01 and W04 settle the Worker.
+        loop.wire.request = request
+        worker.connect()
+        self.assertIsNone(worker.hold()["held_assignment_id"])
+        scope = {"session":session,"task_id":task,"assignment_id":aid}
+        self.assertEqual(client.request("POST","worker/workspace-state",scope),{**scope,"state":"released"})
+        self.assertEqual(json.loads(journal.read_bytes()),lease)
+        self.assertTrue(subprocess.check_output([*cli,"container","ls","--filter","id="+lease["container_id"],
+            "--format","{{.ID}}"],timeout=5).strip())
+        loop.server.shutdown()
+        loop.thread.join()
+        trigger = Trigger(loop.root/"trigger.db","offline-audit",service.clock)
+        sources = {"router:main":loop.orders.db.path,"worker:oguri":worker.db.path,"agent:oguri":loop.adapter.db.path,
+                   "hermes:main":loop.hermes.db.path,"trigger:offline":trigger.db.path}
+        snapshot = loop.root/"offline"
+        sealed = capture(sources,"a"*40,snapshot)["manifest_sha256"]
+        self.assertEqual(verify(snapshot,sealed)["format"],3)
+        from_db, = audit_handoff(snapshot,sealed)["workers"]
+        self.assertEqual(from_db["issues"],["dsh_workspace_journal_required"])
+        self.assertIsNone(from_db["native_session_pending"]["dsh_assignment_workspaces"])
+        self.assertFalse(from_db["native_session_ledger_clear"])
+        target = loop.root/"staged"
+        with self.assertRaisesRegex(ValueError,"dsh_workspace_journal_required"):
+            stage_native_handoff(snapshot,sealed,"oguri",session,"other-session",target)
+        self.assertFalse(target.exists())
+
+        incorrect = loop.root/"unrelated-runtime"
+        (incorrect/"assignment-containers").mkdir(mode=0o700,parents=True)
+        incorrect.chmod(0o700)
+        wrong, = audit_handoff(snapshot,sealed,dsh_runtimes={"oguri":incorrect})["workers"]
+        self.assertEqual(wrong["issues"],["dsh_workspace_journal_mismatch"])
+        runtimes = {"oguri":runtime}
+        before, = audit_handoff(snapshot,sealed,dsh_runtimes=runtimes)["workers"]
+        self.assertEqual(before["native_session_pending"]["held_assignments"],0)
+        self.assertEqual(before["native_session_pending"]["report_receipts"],0)
+        self.assertEqual(before["issues"],["dsh_assignment_workspace_pending"])
+        self.assertEqual(before["dsh_workspace_audit"]["pending"],[{**scope,"phase":"active"}])
+        with self.assertRaisesRegex(ValueError,"dsh_assignment_workspace_pending"):
+            stage_native_handoff(snapshot,sealed,"oguri",session,"other-session",target,dsh_runtimes=runtimes)
+        self.assertFalse(target.exists())
+
+        with tool_listener(runtime,loop.adapter,client), self.start_native(
+                runtime,session,"cleanup-container-recovery-reopen") as resumed:
+            deadline = time.monotonic()+8
+            while json.loads(journal.read_bytes())["phase"]!="sealed" and time.monotonic()<deadline:
+                time.sleep(.05)
+            self.assertEqual(json.loads(journal.read_bytes())["phase"],"sealed")
+            replay = self.read_native(resumed,"read")
+            self.assertEqual((replay["inputs"],replay["modelRequests"]),(run["inputs"],[]))
+            running_audit, = audit_handoff(snapshot,sealed,dsh_runtimes=runtimes)["workers"]
+            self.assertEqual(running_audit["issues"],["dsh_workspace_host_still_running"])
+            with self.assertRaisesRegex(ValueError,"dsh_workspace_host_still_running"):
+                stage_native_handoff(snapshot,sealed,"oguri",session,"other-session",target,dsh_runtimes=runtimes)
+            self.assertFalse(target.exists())
+        self.assertFalse(subprocess.check_output([*cli,"container","ls","--all","--filter","id="+lease["container_id"],
+            "--format","{{.ID}}"],timeout=5).strip())
+        bad_record = journal.with_name("f"*64+".json")
+        bad_record.symlink_to(journal)
+        try:
+            invalid, = audit_handoff(snapshot,sealed,dsh_runtimes=runtimes)["workers"]
+            self.assertEqual(invalid["issues"],["dsh_workspace_journal_unconfirmed"])
+        finally:
+            bad_record.unlink()
+        after, = audit_handoff(snapshot,sealed,dsh_runtimes=runtimes)["workers"]
+        self.assertTrue(after["native_session_ledger_clear"],after)
+        self.assertEqual(after["dsh_workspace_audit"]["pending"],[])
+        handoff = stage_native_handoff(snapshot,sealed,"oguri",session,"other-session",target,dsh_runtimes=runtimes)
+        self.assertEqual(handoff["dsh_workspace_journal_sha256"],after["dsh_workspace_audit"]["fingerprint"])
+        self.assertEqual(handoff["expected_session"],"other-session")
+        with closing(sqlite3.connect(target/filename("worker:oguri"))) as db:
+            self.assertEqual(db.execute("SELECT session FROM native_binding WHERE slot=1").fetchone()[0],"other-session")
+        self.assertEqual(client.request("POST","worker/workspace-state",scope),{**scope,"state":"released"})
+        if output := os.environ.get("MOWULINK_DSH_OFFLINE_AUDIT_EVIDENCE"):
+            observations = {"session":session,"task_id":task,"assignment_id":aid,"container_id":lease["container_id"],
+                "w04_state_before_capture":job["task"]["state"],"snapshot_format":3,"snapshot_sha256":sealed,
+                "missing_journal":from_db["issues"][0],"wrong_runtime":wrong["issues"][0],
+                "active_journal":before["dsh_workspace_audit"],"invalid_record":invalid["issues"][0],
+                "running_host":running_audit["issues"][0],
+                "sealed_journal":after["dsh_workspace_audit"],"staged_session":handoff["expected_session"],
+                "receipt_pending_before_reaper":before["native_session_pending"]["report_receipts"],
+                "held_before_reaper":before["native_session_pending"]["held_assignments"],
+                "original_inputs":replay["inputs"],"new_model_requests_after_reopen":len(replay["modelRequests"]),
+                "scope":"Installed DSH AgentLoop, isolated Linux Docker and Router/Worker HTTP; scripted local model."}
+            Path(output).write_text(json.dumps(observations,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
 
     def test_native_dsh_stop_alone_or_unverified_tool_keeps_cleanup_pending(self):
         cases = []

@@ -10,6 +10,7 @@ import shutil
 import sqlite3
 from tempfile import TemporaryDirectory
 
+from . import dsh_workspace_audit
 from . import state_bundle_managed as managed
 from .cutover import digest, output_directory, readonly
 from .storage import encode, guid, state_writer
@@ -147,6 +148,13 @@ def locked(sources,registries=None):
         yield managed.collect(sources,registries or {},stack,lock_database)
 
 
+def has_workspace_journal(directory,manifest):
+    ledgers = [directory/filename(label) for label in manifest["files"] if label.startswith("agent:")]
+    for wid,group in manifest.get("managed_native",{}).items():
+        ledgers.extend(directory/managed.registry_name(wid)/(sid+".sqlite3") for sid in group["children"])
+    return bool(dsh_workspace_audit.identities(ledgers))
+
+
 def capture(sources,revision,destination,*,registries=None):
     check_revision(revision)
     manifest = {"format":1,"snapshot_id":guid(),"source_revision":revision,"files":{}}
@@ -162,6 +170,8 @@ def capture(sources,revision,destination,*,registries=None):
         if inventory:
             managed.copy_ledgers(registries,inventory,stage,copy_private)
             manifest.update(format=2,managed_native=inventory)
+        if has_workspace_journal(stage,manifest):
+            manifest["format"] = 3
         metadata = stage/"manifest.json"
         metadata.write_text(encode(manifest),encoding="utf-8")
         fingerprint = digest(metadata)
@@ -175,12 +185,13 @@ def verify(snapshot,expected):
             or digest(manifest_file) != expected):
         raise ValueError("snapshot manifest does not match the recorded digest")
     manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
-    if manifest.get("format") not in (1,2) or not isinstance(manifest.get("files"),dict):
+    version = manifest.get("format")
+    if version not in (1,2,3) or not isinstance(manifest.get("files"),dict):
         raise ValueError("unsupported snapshot")
     check_revision(manifest["source_revision"])
     validate_set(manifest["files"])
     inventory = manifest.get("managed_native",{})
-    if (not isinstance(inventory,dict) or bool(inventory)!=(manifest["format"]==2)
+    if (not isinstance(inventory,dict) or version in (1,2) and bool(inventory)!=(version==2)
             or any("agent:"+wid not in manifest["files"] for wid in inventory)):
         raise ValueError("invalid managed snapshot members")
     names = {wid:managed.registry_name(wid) for wid in inventory}
@@ -196,6 +207,8 @@ def verify(snapshot,expected):
             health(db,component(label)[0])
     directories = {wid:managed.private_registry((snapshot/name).absolute()) for wid,name in names.items()}
     managed.validate(sources,inventory,directories,health=health)
+    if has_workspace_journal(snapshot,manifest)!=(version==3):
+        raise ValueError("snapshot version does not match the DSH workspace registry")
     return manifest
 
 
@@ -262,9 +275,12 @@ def feishu_display_backlog(db,platform_path):
     return unseen,"platform_display_ledger_mismatch" if matched!=cursor or diverged else None
 
 
-def audit_handoff(snapshot,expected):
+def audit_handoff(snapshot,expected,*,dsh_runtimes=None):
     manifest = verify(snapshot,expected)
     labels = manifest["files"]
+    dsh_runtimes = dsh_runtimes or {}
+    if any("agent:"+wid not in labels for wid in dsh_runtimes):
+        raise ValueError("DSH runtime does not belong to a snapshot Worker")
     router_label, = (label for label in labels if component(label)[0]=="router")
     with closing(readonly(snapshot/filename(router_label))) as db:
         current = {row["assignee_id"]:dict(row) for row in db.execute("""SELECT assignee_id,task_id,assignment_id
@@ -322,7 +338,17 @@ def audit_handoff(snapshot,expected):
         bound_session = bound[0] if bound else None
         if local and not adapter_has_input(child_ledgers.get(bound_session,root),local,bound_session):
             problems.append("adapter_receipt_unconfirmed")
-        session_pending.update(agent_pending([root,*child_ledgers.values()]))
+        agent_paths = [root,*child_ledgers.values()]
+        session_pending.update(agent_pending(agent_paths))
+        workspace,workspace_issue = dsh_workspace_audit.inspect(dsh_runtimes.get(wid),
+            dsh_workspace_audit.identities(agent_paths))
+        if workspace_issue:
+            session_pending["dsh_assignment_workspaces"] = None
+            problems.append(workspace_issue)
+        elif workspace is not None:
+            session_pending["dsh_assignment_workspaces"] = len(workspace["pending"])
+            if workspace["pending"]:
+                problems.append("dsh_assignment_workspace_pending")
         if platform_label in labels:
             with closing(readonly(snapshot/filename(platform_label))) as db:
                 session_pending.update(pending_counts(db,FEISHU_NATIVE_PENDING))
@@ -339,7 +365,8 @@ def audit_handoff(snapshot,expected):
         session_pending["router_admission_handoffs"] = handoffs.get(wid,0)
         workers.append({"worker_id":wid,"worker_assignment":local_ids,"router_assignment":remote_ids,
                         "unconfirmed_reports":pending,"issues":problems,"native_session_pending":session_pending,
-                        "native_session_ledger_clear":not problems and all(count==0 for count in session_pending.values())})
+                        "native_session_ledger_clear":not problems and all(count==0 for count in session_pending.values()),
+                        **({"dsh_workspace_audit":workspace} if workspace is not None else {})})
         issues.extend({"worker_id":wid,"issue":problem} for problem in problems)
     issues.extend({"worker_id":wid,"issue":"active_worker_state_missing","task_id":row["task_id"],
                    "assignment_id":row["assignment_id"]} for wid,row in current.items())
@@ -369,7 +396,8 @@ def adapter_has_input(path,job,session):
             and payload.get("assignment_id")==job["assignment_id"])
 
 
-def stage_native_handoff(snapshot,expected,worker_id,source_session,target_session,destination,*,managed_keys=None):
+def stage_native_handoff(snapshot,expected,worker_id,source_session,target_session,destination,*,
+                         managed_keys=None,dsh_runtimes=None):
     worker_label,adapter_label = "worker:"+worker_id,"agent:"+worker_id
     component(worker_label)
     if source_session==target_session or not all(
@@ -380,7 +408,7 @@ def stage_native_handoff(snapshot,expected,worker_id,source_session,target_sessi
         raise ValueError("restore managed sessions first and use the Worker native handoff")
     if worker_label not in manifest["files"]:
         raise ValueError("worker absent from snapshot")
-    audit = audit_handoff(snapshot,expected)
+    audit = audit_handoff(snapshot,expected,dsh_runtimes=dsh_runtimes)
     worker, = (row for row in audit["workers"] if row["worker_id"]==worker_id)
     if not worker["native_session_ledger_clear"]:
         pending = [key for key,count in worker["native_session_pending"].items() if count!=0]
@@ -403,6 +431,11 @@ def stage_native_handoff(snapshot,expected,worker_id,source_session,target_sessi
                   "expected_session":target_session,"worker_db":str(destination/worker_db.name),
                   "previous_adapter_db":str(destination/filename(adapter_label)),
                   "target_adapter_db":str(destination/("target-"+filename(adapter_label)))}
+        if workspace := worker.get("dsh_workspace_audit"):
+            identity = dsh_workspace_audit.identities([snapshot/filename(adapter_label)])
+            if dsh_workspace_audit.inspect(dsh_runtimes[worker_id],identity)!=(workspace,None):
+                raise ValueError("DSH workspace journal changed during handoff")
+            result["dsh_workspace_journal_sha256"] = workspace["fingerprint"]
         (stage/"native-handoff.json").write_text(encode(result),encoding="utf-8")
     return result
 
@@ -444,6 +477,8 @@ def main():
             p.add_argument("--managed-registries",type=Path,help="Worker ID to the trial's native registry directory, JSON")
         if op in ("restore","rollback","stage-native-handoff"):
             p.add_argument("--managed-keys",type=Path,help="Worker ID to the original private callback key file, JSON")
+        if op in ("audit-handoff","stage-native-handoff"):
+            p.add_argument("--dsh-runtimes",type=Path,help="Worker ID to original stopped DSH runtime, JSON")
         if op=="stage-native-handoff":
             for field in ("worker-id","source-session","target-session"):
                 p.add_argument("--"+field,required=True)
@@ -464,11 +499,11 @@ def main():
         manifest = verify(args.snapshot,args.manifest_sha256)
         result = {"snapshot_id":manifest["snapshot_id"],"components":len(manifest["files"])}
     elif args.op=="audit-handoff":
-        result = audit_handoff(args.snapshot,args.manifest_sha256)
+        result = audit_handoff(args.snapshot,args.manifest_sha256,dsh_runtimes=optional_map("dsh_runtimes"))
     elif args.op=="stage-native-handoff":
         result = stage_native_handoff(args.snapshot,args.manifest_sha256,args.worker_id,
                                       args.source_session,args.target_session,args.destination,
-                                      managed_keys=optional_map("managed_keys"))
+                                      managed_keys=optional_map("managed_keys"),dsh_runtimes=optional_map("dsh_runtimes"))
     elif args.op=="rollback":
         result = rollback(args.snapshot,args.manifest_sha256,json.loads(args.trial_sources.read_text()),args.destination,
                           registries=optional_map("managed_registries"),managed_keys=optional_map("managed_keys"))

@@ -15,6 +15,7 @@ from urllib.error import URLError
 from . import peer_files
 from .agent_tools import TOOLSET
 from .dsh_approvals import DshApprovals
+from .dsh_workspace_audit import journal as workspace_journal
 from .messages import valid_guid
 from .storage import Fault, encode, require, string
 
@@ -94,7 +95,14 @@ class DshHost:
         result = self.request("activity",session)
         require(type(result.get("busy")) is bool and type(result.get("workspace_pending",False)) is bool,
                 502,"invalid_host_observation")
-        return result
+        activity = {"busy":result["busy"]}
+        if "workspace_pending" in result:
+            try:
+                _,identity = workspace_journal(self.directory)
+            except (OSError,ValueError):
+                raise Fault(503,"dsh_workspace_journal_unconfirmed",True) from None
+            activity.update(workspace_pending=result["workspace_pending"],workspace_ledger_identity=identity)
+        return activity
 
     def context_usage(self, session):
         return self.request("context-usage",session)

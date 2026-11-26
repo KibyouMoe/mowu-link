@@ -3,6 +3,7 @@ import hashlib
 import json
 from typing import Protocol
 
+from .dsh_workspace_audit import marker as workspace_marker
 from .storage import Database, Fault, encode, require, string
 
 
@@ -41,22 +42,29 @@ class HostAdapter:
         self.host, self.session = host, session
         self.media_store = media_store
 
-    def busy(self, *, session=None):
-        require(session is None or session==self.session,409,"wrong_native_session")
-        return self.host.busy(self.session)
-
-    def handoff_activity(self, *, session=None):
+    def host_activity(self,session):
         require(session is None or session==self.session,409,"wrong_native_session")
         observe = getattr(self.host,"handoff_activity",None)
-        activity = observe(self.session) if callable(observe) else {"busy":self.busy()}
+        return observe(self.session) if callable(observe) else {"busy":self.host.busy(self.session)}
+
+    def busy(self, *, session=None):
+        activity = self.host_activity(session)
+        if identity := activity.get("workspace_ledger_identity"):
+            with self.db.transaction() as db:
+                workspace_marker(db,self.session,identity)
+        return activity["busy"]
+
+    def handoff_activity(self, *, session=None):
+        activity = self.host_activity(session)
         # The adapter DB is pinned to this native session. Router may not know about these requests yet.
         checks = (("codex_approval_intents","router_receipt_digest"),("dsh_approvals","closure"))
         with self.db.transaction() as db:
             tables = {row[0] for row in db.execute("SELECT name FROM sqlite_schema WHERE type='table'")}
             pending = any(db.execute(f"SELECT 1 FROM {table} WHERE {receipt} IS NULL LIMIT 1").fetchone()
                           for table,receipt in checks if table in tables)
+            known_workspace = workspace_marker(db,self.session,activity.get("workspace_ledger_identity"))
         result = {"session":self.session,"busy":activity["busy"],"approval_pending":pending}
-        if activity.get("workspace_pending"):
+        if activity.get("workspace_pending",known_workspace):
             result["workspace_pending"] = True
         return result
 

@@ -125,6 +125,9 @@ python3 -B -m unittest -v rewrite.test_question_cards \
 
 复跑 `MOWULINK_DSH_CONTAINER_IMAGE=<已有镜像完整ID> python3 -B -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_dsh_workspaces_cold_restart_recovers_unreported_work_and_committed_w04`。[同引擎冷恢复证据](evidence/dsh-workspace-cold-recovery.json)
 
+离线换绑使用格式 3 快照时，`audit-handoff` 与 `stage-native-handoff` 接收 `--dsh-runtimes`，用其指向已停机的原私有运行目录。工作区未回收或原记录无法核验时保留原绑定，即使 W04 已确认。操作步骤见[离线恢复说明](router-rehearsal.md#重做版五组件的离线恢复)。实跑 `MOWULINK_DSH_CONTAINER_IMAGE=<已有镜像完整ID> python3 -B -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_offline_handoff_waits_for_dsh_workspace_after_w04_release rewrite.test_state_bundle.Bundle.test_handoff_rechecks_dsh_workspace_journal_before_publishing`。[换绑实测](evidence/dsh-offline-workspace-handoff.json)
+
+
 
 启用原生目标服务的 DSH 会话可用 `/goal` 查询、`/goal 目标正文` 新建、`/goal pause` 暂停、`/goal resume` 恢复。原生服务使用自己的默认轮次，已有未完成目标时拒绝替换。状态卡显示原生阶段、轮次和续跑授权。未确认的变更保留待核，重送同号不会再次修改。续跑由 DSH 宿主负责。
 
