@@ -109,7 +109,7 @@ python3 -B -m unittest -v rewrite.test_question_cards \
 
 取消或转派时，DSH 仍核对原生回合结束和原收件箱撤销，宿主同时收尾该派发的容器。以原引擎、容器 ID、标签及派发账本核对移除，确认后才交 W04。引擎身份不符或无法确认时保留原派发待核。同一派发重复查回执沿用原记录。测试时用 `MOWULINK_DSH_CONTAINER_IMAGE=<已有镜像完整ID> python3 -B -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_dsh_workspace_container_cancel_and_transfer_remove_owned_processes`。实验范围为无网络的私有临时工作目录。升级或回退前先用支持该配置的版本收尾原派发并核对容器。旧版插件无法识别这个配置。普通 DSH 项目绑定和跨机恢复仍待验。[原生实测](evidence/dsh-assignment-container.json) · [Docker 容器移除](https://docs.docker.com/reference/cli/docker/container/rm/) · [临时存储](https://docs.docker.com/engine/storage/tmpfs/)
 
-模型可调用 `worker_workspace_export`，提交 `/workspace` 下的相对路径。单文件限 16 MiB，拒绝符号链接和非普通文件。Worker 校验内容摘要，经原有附件通道暂存，续传按原偏移和附件 ID。成果工具 `worker_report` 接收暂存工具返回的 `artifact_ids`，由 Router 在 W04 正式记录后给验收人读取权限。成功或阻塞报告要等 Worker 持久化 Router 的释放回执，宿主才回收工作区。回执未确认时保留容器和原会话绑定，重开 Worker 后沿原 W04 重取回执。单纯结束原生回合不会触发回收。
+模型可调用 `worker_workspace_export`，提交 `/workspace` 下的相对路径。单文件限 16 MiB，拒绝符号链接和非普通文件。Worker 校验内容摘要，经原有附件通道暂存，续传按原偏移和附件 ID。成果工具 `worker_report` 接收暂存工具返回的 `artifact_ids`，由 Router 在 W04 正式记录后给验收人读取权限。成功或阻塞报告要等 Worker 持久化 Router 的释放回执，宿主才回收工作区。回执未确认时保留容器和原会话绑定，重开 Worker 后沿原 W04 重取回执。单纯结束原生回合不会触发回收。启用容器工位时成对升级 Worker 和 DSH 适配器。新版宿主需要 Worker 的工作区状态回执，旧 Worker 缺少该接口时工作区工具会拒绝执行。
 
 复跑 `MOWULINK_DSH_CONTAINER_IMAGE=<已有镜像完整ID> python3 -B -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_dsh_workspace_exports_artifact_and_seals_after_durable_w04_replay`。真实 DSH AgentLoop、Linux Docker、Worker 和 Router 完成导出和回收。测试输入和模型工具调用由本地脚本驱动。[附件和回收证据](evidence/dsh-workspace-artifacts.json)
 

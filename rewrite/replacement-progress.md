@@ -6,6 +6,9 @@
 
 DSH 容器工位通过原生工具导出 691200 字节的二进制文件。第一块上传回执丢失后按原偏移续传，验收人只在 W04 写入后读到文件，字节和 SHA-256 均匹配。符号链接被拒。Router 的 W04 已记账、Worker 回执在途中丢失时，容器保持运行，原绑定不能切换。重建 Worker 后以原报告和原幂等键取回回执，Router 仍为待验收且只发一次通知，原生输入仍为一条，原容器在回执落库后移除。真实 DSH AgentLoop、Linux Docker、SQLite 和测试 HTTP 服务实跑，模型由本地脚本驱动。[原生证据](evidence/dsh-workspace-artifacts.json) · [复跑入口](README.md#dsh-固定会话与飞书卡片)
 
+实现提交 `f33f68f6ee7ddf5f403f335c426497643aa2388a`。macOS 全量 271 项通过。Linux arm64 实跑 183 项、按环境跳过 88 项。原生附件测试连续复跑 4 次通过。从该提交构建并安装 240 文件的发行包，校验摘要为 `5a420fc9ae9457ac4ce307de9d5d4ea067e256c94a0f16862fa0ad9701cb707d`，安装后专项 31 项通过，回读安装包校验一致。用 `python3 -B -m rewrite.release_check --repository . --component worker-pair --previous c448c2ff36a40e679d9c6968912e56299c158c34 --new f33f68f6ee7ddf5f403f335c426497643aa2388a` 验证 Worker 与适配器的隔离升级和回退，原生收件始终一条。此演练的宿主是夹具。仍需核对普通项目工作目录、实际测试账号、飞书云端和跨机工作区恢复。
+
+
 
 DSH 的可选 Linux 容器工位按派发隔离可写工作目录。真实 DSH 调用原生工具写入文件并留下脱离命令进程组的子进程。实际 Router 发取消或转派后，只移除旧派发的容器，DSH 用 W04 确认原回合停止与清理。另一条私聊仍入原会话一次；转派后的新处理权保留。另验证明字段里的引擎身份不符时，原回合中止，Worker 保留待核，旧容器与文件未被清理。宿主、Linux Docker 引擎、Worker 和 Router 实跑，模型和新接单端由夹具驱动。[原生证据](evidence/dsh-assignment-container.json)
 
