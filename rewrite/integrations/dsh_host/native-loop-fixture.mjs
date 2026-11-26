@@ -67,6 +67,27 @@ class LocalModel extends LlmAdapter {
         return;
       }
     }
+    if (mode==='work-question' && ['task','question_answer','task_update'].includes(command) &&
+        !this.submitted.has(command)) {
+      this.submitted.set(command,true);
+      const initial = command==='task';
+      const name = initial ? 'worker_ask' : 'worker_report';
+      assert.ok(tools?.some(tool=>tool.name===name));
+      if (command==='question_answer') {
+        assert.equal(payload.answer.mode,'choice');
+        assert.equal(payload.answer.option_id,'go');
+        assert.ok(payload.question_id);
+      }
+      const args = initial ? {text:'Use the first route?',options:[{id:'go',label:'继续'}]} : {
+        task_id:payload.task_id,assignment_id:payload.assignment_id,
+        outcome:command==='question_answer' ? 'continue_requested' : 'completed',
+        summary:command==='question_answer' ? 'Will continue the original assignment' : 'Finished after the confirmed answer',
+      };
+      yield {type:'block-start',index:0,blockType:'tool-call'};
+      yield {type:'block-end',index:0,block:{type:'tool-call',id:'native-w05-'+command,name,arguments:JSON.stringify(args)}};
+      yield {type:'finish',reason:{kind:'tool-calls'}};
+      return;
+    }
     if (command==='task') {
       if (mode==='formal') {
         const attempt = this.submitted.get(payload.assignment_id) ?? 0;
@@ -80,7 +101,7 @@ class LocalModel extends LlmAdapter {
           yield {type:'finish',reason:{kind:'tool-calls'}};
           return;
         }
-      } else {
+      } else if (mode!=='work-question') {
         await waitForStop(signal);
       }
     }
@@ -257,7 +278,9 @@ async function formalScenario(agent) {
 
 try {
   const agent = await setup();
-  if (['formal','compact','questions','catalog','private-stop'].includes(mode) || usesGoals) await formalScenario(agent);
+  if (['formal','compact','questions','catalog','private-stop','work-question'].includes(mode) || usesGoals) {
+    await formalScenario(agent);
+  }
   else await stopScenario(agent);
 } finally {
   for (const handle of plugins.reverse()) await handle.dispose();

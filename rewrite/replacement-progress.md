@@ -4,6 +4,8 @@
 
 ## 检查点与证据
 
+DSH 的正式题已跑通原生 `worker_ask`、Router 回题和原派发续办。答复回包故意丢失，原生会话只有一条答复输入；`continue_requested` 保留同一个派发和持单。溪流更新原单后，下一原生回合自行用 W04 交成果，Router 待验收，工位释放。飞书展示中的两条题卡事件均归溪流，训练员无作答入口。复跑 `python3 -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_native_formal_question_returns_to_its_assignment_and_keeps_ownership_until_completion`。[正式题答复与回执](evidence/dsh-native-work-question.json)。真实 DSH 工具执行器和隔离 Router，模型、经理输入为测试驱动。
+
 DSH `/stop` 已走真实 AgentLoop。普通回合留下原生中止记录，原生排队内容在下一次输入后照常入场。丢回包时显示待核，同号重投不影响之后的回合。实际隔离 Router 下发正式单后，飞书命令和宿主端私聊停止入口都拒绝停止工单，原 Router 取消路径仍可中止并保留清理待核。复跑 `python3 -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_stop_targets_only_current_private_turn_and_never_replays_a_lost_result`。[原生停止记录](evidence/dsh-native-stop.json)。宿主真实，模型为本地夹具。
 
 DSH `/resume` 已通过宿主原生查询读取当前会话和显式获准的历史目录。隔离测试读回 12 个条目，其中 11 个是已关闭的会话。验证两页、按标题或 ID 搜索、缺失记录提示及另一 Worker 收 403。未配置的会话连标题都没有进入适配器回应。浏览前后仅原会话处于活动，无原生输入、无新工单。换绑仍待接。复跑 `python3 -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_resume_browses_only_configured_native_cold_sessions_without_activating_them`。[原生目录证据](evidence/dsh-native-catalog.json)。

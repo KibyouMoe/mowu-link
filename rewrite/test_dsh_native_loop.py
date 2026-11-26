@@ -540,3 +540,83 @@ class NativeLoop(unittest.TestCase):
                 "lost_reply_status":"unknown","replay_did_not_stop_later_turn":True,
                 "formal_stop_rejected":tid,"formal_held_pending_cleanup":True,
                 "boundary":"Native DSH AgentLoop and abort records; scripted local provider"}
+
+    def test_native_formal_question_returns_to_its_assignment_and_keeps_ownership_until_completion(self):
+        session = "dsh-native-w05"
+        directory = self.enterContext(tempfile.TemporaryDirectory(dir="/tmp",prefix="mldsh-w05-"))
+        def host(_path,_name):
+            port = DshHost(Path(directory))
+            port.session = session
+            return port
+        clock = Clock()
+        loop = self.enterContext(Loop.isolated(clock,host_factory=host))
+        credential,platform_key = guid(),guid()
+        service = WorkerService(loop.worker,clock)
+        url = self.open_worker(service,{credential:"adapter/oguri",platform_key:"platform/oguri"})
+        self.enterContext(tool_listener(Path(directory),loop.adapter,Client(url,credential)))
+        platform = Client(url,platform_key)
+        with self.start_native(directory,session,"work-question") as native:
+            tid = loop.hermes.create(guid(),"Formal native Q&A","Ask before continuing","oguri")["task_id"]
+            loop.worker.connect()
+            loop.worker.poll()
+            clock.advance(10)
+            loop.worker.poll()
+            loop.worker.poll()
+            asked = self.read_native(native,"read")
+            self.assertEqual([call["name"] for call in asked["calls"]],["worker_ask"],asked["results"])
+            self.assertFalse(asked["results"][0]["isError"])
+            question, = loop.hermes.questions(task_id=tid)["items"]
+            qid,aid = question["question_id"],question["assignment_id"]
+            self.assertEqual(json.loads(asked["results"][0]["content"][0]["text"])["question_id"],qid)
+            self.assertEqual(loop.worker.hold(),{"held_task_id":tid,"held_assignment_id":aid})
+            self.assertEqual(loop.hermes.inspect(tid)["task"]["state"],"working")
+            self.assertIsNone(loop.hermes.inspect(tid)["last_report"])
+            choice = {"mode":"choice","option_id":"go"}
+            key = guid()
+            answer = loop.hermes.answer(key,tid,qid,choice)
+            self.assertEqual(loop.hermes.answer(key,tid,qid,choice),answer)
+            dropped = []
+            native_deliver = loop.native.deliver
+            def miss(session,delivery_id,payload,digest):
+                result = native_deliver(session,delivery_id,payload,digest)
+                if payload["kind"]=="question_answer":
+                    dropped.append((delivery_id,payload))
+                    return None
+                return result
+            loop.native.deliver = miss
+            loop.worker.poll()
+            continued = self.read_native(native,"read")
+            self.assertEqual(len(dropped),1)
+            did,payload = dropped[0]
+            self.assertEqual((payload["task_id"],payload["assignment_id"],payload["question_id"],payload["answer"]),
+                             (tid,aid,qid,choice))
+            self.assertEqual(loop.worker.hold(),{"held_task_id":tid,"held_assignment_id":aid})
+            self.assertEqual(loop.hermes.inspect(tid)["task"]["state"],"working")
+            continuation = json.loads(continued["results"][-1]["content"][0]["text"])
+            self.assertEqual(continuation,{"recorded":True,"task_state":"working"},continued["results"])
+            loop.worker.poll()
+            self.assertEqual(self.read_native(native,"read")["inputs"],continued["inputs"])
+            task = loop.hermes.inspect(tid)["task"]
+            loop.hermes.update(guid(),tid,task["revision"],{"instructions":"Use the confirmed choice and report."})
+            loop.worker.poll()
+            finished = self.read_native(native,"read")
+            detail = loop.hermes.inspect(tid)
+            self.assertEqual(detail["task"]["state"],"completed_reported")
+            self.assertEqual(len(finished["inputs"]),3)
+            self.assertEqual([call["name"] for call in finished["calls"]],["worker_ask","worker_report","worker_report"])
+            self.assertFalse(any(item["isError"] for item in finished["results"]))
+            self.assertIsNone(loop.worker.hold()["held_assignment_id"])
+            with loop.adapter.db.transaction() as db:
+                input_receipt = json.loads(db.execute("SELECT receipt FROM intents WHERE delivery_id=?",(did,)).fetchone()[0])
+            self.assertEqual(input_receipt["native_id"],finished["inputs"][1])
+            items = platform.request("GET","worker/display")["items"]
+            cards = [row["event"] for row in items if row["event"].get("question_id")==qid]
+            self.assertEqual([(card["kind"],card["recipient"]) for card in cards],
+                             [("question_open","manager"),("question_answered","manager")])
+            notices = [frame["payload"] for frame in loop.manager_wire.frames(0) if frame["payload"].get("task_id")==tid]
+            self.assertEqual([item["text"] for item in notices],["Use the first route?","Finished after the confirmed answer"])
+            self.evidence = {"session":session,"task_id":tid,"assignment_id":aid,"question_id":qid,
+                "question_call":asked["calls"][0],"answer":choice,"answer_receipt":input_receipt,
+                "continue_receipt":continuation,"reports":[json.loads(item["content"][0]["text"]) for item in finished["results"]],
+                "native_inputs":finished["inputs"],"manager_notice_count":len(notices),"router_after":detail["task"]["state"],
+                "boundary":"Real DSH tool executor and Router/Worker HTTP; scripted local model and manager input"}

@@ -1,0 +1,53 @@
+{
+  "session": "dsh-native-w05",
+  "task_id": "0f02809d-c1bc-4280-bc4f-46d2fb93d8f6",
+  "assignment_id": "15d46cdd-f650-457b-b455-89cec298b3a4",
+  "question_id": "96878f41-de46-445d-882e-5920845e1add",
+  "question_call": {
+    "turn": 1,
+    "step": 1,
+    "callId": "native-w05-task",
+    "name": "worker_ask",
+    "arguments": "{\"text\":\"Use the first route?\",\"options\":[{\"id\":\"go\",\"label\":\"继续\"}]}"
+  },
+  "answer": {
+    "mode": "choice",
+    "option_id": "go"
+  },
+  "answer_receipt": {
+    "delivery_id": "ee67cdaa-e9dc-4384-91bc-a56f698a527e",
+    "digest": "9437980d5ecd9f57abf9d7a0f6340005d34e296e12d96191cd29a97e7c1dff8d",
+    "native_id": "mowulink-5c003b4c1cfda62a2d97eee417bb3d5628b928e9ae6eaccf49abf7e8bcaf9994",
+    "session": "dsh-native-w05",
+    "turn_id": "17/2"
+  },
+  "continue_receipt": {
+    "recorded": true,
+    "task_state": "working"
+  },
+  "reports": [
+    {
+      "question_id": "96878f41-de46-445d-882e-5920845e1add",
+      "received_at": "2027-01-15T08:00:10+00:00",
+      "task_id": "0f02809d-c1bc-4280-bc4f-46d2fb93d8f6"
+    },
+    {
+      "recorded": true,
+      "task_state": "working"
+    },
+    {
+      "recorded": true,
+      "release_assignment_id": "15d46cdd-f650-457b-b455-89cec298b3a4",
+      "task_state": "completed_reported"
+    }
+  ],
+  "native_inputs": [
+    "mowulink-e8caa781c5e07f6ad4056e10db7567e8267f5f6f2077eb7fbf421d1eac1d27b9",
+    "mowulink-5c003b4c1cfda62a2d97eee417bb3d5628b928e9ae6eaccf49abf7e8bcaf9994",
+    "mowulink-7c9862b213ecdd17e08fa3644652dcaff8f94cccdfae6440f8caf0e0e98097a9"
+  ],
+  "manager_notice_count": 2,
+  "router_after": "completed_reported",
+  "boundary": "Real DSH tool executor and Router/Worker HTTP; scripted local model and manager input",
+  "consecutive_runs": 20
+}
