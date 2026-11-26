@@ -8,6 +8,8 @@ Codex 已把收到的原生审批关闭通知保存到适配器账本。基线 `
 
 复跑 `python3 -B -m unittest -v rewrite.test_service.Service.test_recovered_codex_resolution_requires_the_original_registered_request rewrite.test_codex_app_server.CodexAppServer.test_cold_adapter_reads_committed_approval_closure_without_native_replay`。同时验证错会话、错回合、错条目或无原登记均拒绝补交。Router 从未登记、适配器也已退出时仍缺可核原请求，继续待核。
 
+macOS 全量通过 269 项，Linux arm64 通过 183 项、跳过 86 项。两个专项复跑连续通过五轮。并行测试曾有一次四秒等待未收到原生终止事件，回归改用十秒并附失败诊断。以 `fb0f35cb7131e1edb3b48b6910b13c1e4814d348` 构建的独立包包含 237 个文件，SHA-256 为 `2f05796ba0993a4c9d71bef65bf639022c7a8266e789223c283f086b7b7faed7`。安装目录通过审批、切换、快照及服务的 44 项复验，文件摘要一致。用新旧安装包在同一隔离 SQLite 审批库上演练升级、回退并写入另一条原始审批、再升回去，三条原始审批和一条关闭凭据均保留。库升级演练注入原生回执。实际隔离 App Server 的独立发布演练中，三个阶段均只有原先的三条输入，待验通知 `943b13c0-ddc7-4e39-94b9-aa91d4bda44a` 保持不变，使用本地脚本模型。复跑 `python3 -B -m rewrite.codex_release_check`，指定上述提交、旧版 `b4f8c521da38620cadd5260ad662c9ff2d9dc8b1` 和本机 App Server 二进制。
+
 Codex 适配器冷重开可从原 Worker 查回 Router 已保存的审批关闭回执。基线 `18238d2bd40892d4f74ac06cb8053383971ee0fd` 的真实 App Server 测试在 8 秒内仍未补回已落库的关闭。新版用原 Worker 注册、原生会话、审批号和请求摘要取回相同摘要。另一条丢在 Router 落库前的关闭仍待核。两条原生回合均未重跑，重开后新增原生决定和审批通知均为零。实跑独立 App Server、Worker 与 Router，模型、时钟和丢包由测试驱动。另验错绑、错误摘要、已更换的 Worker 注册和其他身份均不能读到回执。[冷重开证据](evidence/codex-cold-approval-reconcile.json)
 
 复跑 `python3 -B -m unittest -v rewrite.test_service.Service.test_lookup_returns_only_original_closed_approval_receipt_digest rewrite.test_codex_app_server.CodexAppServer.test_cold_adapter_reads_committed_approval_closure_without_native_replay`。对关闭尚未写入 Router 的扩展，见本页最新检查点。

@@ -1555,7 +1555,14 @@ class CodexAppServer(unittest.TestCase):
                             {"type":"text","text":"Approval fixture "+suffix,"text_elements":[]}]})["turn"]["id"]
                         row = until(lambda:approvals().get("trial-approval-"+suffix))
                         clock.advance(TTL_SECONDS)
-                        self.assertEqual(terminals.get(timeout=4),(turn,"interrupted"))
+                        try:
+                            terminal = terminals.get(timeout=10)
+                        except Empty:
+                            with host.approvals.lock:
+                                decisions = [(item.request_id,item.attempted_response)
+                                             for item in host.approvals.live.values()]
+                            self.fail(f"{suffix} did not reach a native terminal event: {decisions}")
+                        self.assertEqual(terminal,(turn,"interrupted"),suffix)
                         if seen is not None:
                             until(lambda:row["approval_id"] in seen)
                         else:
