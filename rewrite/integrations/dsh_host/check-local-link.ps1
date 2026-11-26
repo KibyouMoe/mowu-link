@@ -18,7 +18,7 @@ function Assert-Private([string]$Path, [bool]$IsDirectory, [bool]$RequireFileInh
                 $ace.SecurityIdentifier.Value -notin ($trusted + 'S-1-3-4')) {
             exit 3
         }
-        if (($ace.AceFlags -band [Security.AccessControl.AceFlags]::ObjectInherit) -and
+        if (([int]$ace.AceFlags -band [int][Security.AccessControl.AceFlags]::ObjectInherit) -and
                 $ace.SecurityIdentifier.Value -eq $trusted[0]) {
             $fileInheritance = $true
         }
