@@ -94,21 +94,30 @@ def serve(args,stack):
         client = connection(args.worker_connection)
         rpc = stack.enter_context(start_app_server(args.codex_binary,args.codex_profile,args.cwd))
         require_test_account(rpc)
-        native = AppServerHost(rpc,args.session,args.db,args.public_image_root,
-                               relay_command_approvals=args.relay_command_approvals)
-        pinned_thread(native,args.cwd.resolve())
-        if not args.resume_on_handoff:
-            resumed = rpc.request("thread/resume",{"threadId":args.session,"cwd":str(args.cwd)})["thread"]
-            require(resumed.get("id")==args.session,409,"wrong_native_session")
-            native.bind_fork_history(args.db,resumed)
-        media = NativeFiles(args.media_cache,client) if args.media_cache else None
-        adapter = HostAdapter(args.db,native,args.session,media)
-        display = CodexDisplay(adapter,client)
-        activation = CodexActivation(native,args.cwd,args.db,display.initialize) if args.resume_on_handoff else None
-        preparation = CodexThreadPreparation(native,args.cwd,args.db) if args.prepare_sessions else None
-        callbacks = worker_callbacks(native,client,display.wake.set,display.observe,display.observe_terminal)
-        public_output = display.run(deferred=activation is not None)
-        listener = serve_adapter(adapter,args.worker_id,identities,address,ctx,activation=activation,preparation=preparation)
+        if args.managed_sessions_dir:
+            from .codex_session_family import CodexSessionFamily
+
+            require(args.prepare_sessions and not args.resume_on_handoff,422,"invalid_managed_session_configuration")
+            family = stack.enter_context(CodexSessionFamily(rpc,client,args).run())
+            root = family.port(args.session)
+            listener = serve_adapter(root.adapter,args.worker_id,identities,address,ctx,
+                                     activation=root.activation,preparation=root.preparation,family=family)
+        else:
+            native = AppServerHost(rpc,args.session,args.db,args.public_image_root,
+                                   relay_command_approvals=args.relay_command_approvals)
+            pinned_thread(native,args.cwd.resolve())
+            if not args.resume_on_handoff:
+                resumed = rpc.request("thread/resume",{"threadId":args.session,"cwd":str(args.cwd)})["thread"]
+                require(resumed.get("id")==args.session,409,"wrong_native_session")
+                native.bind_fork_history(args.db,resumed)
+            media = NativeFiles(args.media_cache,client) if args.media_cache else None
+            adapter = HostAdapter(args.db,native,args.session,media)
+            display = CodexDisplay(adapter,client)
+            activation = CodexActivation(native,args.cwd,args.db,display.initialize) if args.resume_on_handoff else None
+            preparation = CodexThreadPreparation(native,args.cwd,args.db) if args.prepare_sessions else None
+            callbacks = worker_callbacks(native,client,display.wake.set,display.observe,display.observe_terminal)
+            public_output = display.run(deferred=activation is not None)
+            listener = serve_adapter(adapter,args.worker_id,identities,address,ctx,activation=activation,preparation=preparation)
     else:
         targets = {}
         if args.resume_targets:
@@ -118,8 +127,15 @@ def serve(args,stack):
                 raise ValueError("expected an explicit session-to-connection map")
             targets = {session:RemoteAdapter(connection(args.resume_targets.parent/Path(config)),session)
                        for session,config in entries.items()}
+        session_key = None
+        if args.session_callback_key:
+            key = private_config(args.session_callback_key)
+            require(isinstance(key,dict) and set(key)=={"key"} and isinstance(key["key"],str)
+                    and re.fullmatch(r"[a-f0-9]{64}",key["key"]),422,"invalid_session_callback_key")
+            session_key = bytes.fromhex(key["key"])
         worker = Worker(args.db,args.worker_id,connection(args.router_connection),
-                        RemoteAdapter(connection(args.adapter_connection),args.adapter_session),resume_targets=targets)
+                        RemoteAdapter(connection(args.adapter_connection),args.adapter_session),
+                        resume_targets=targets,session_callback_key=session_key)
         worker_service = WorkerService(worker)
         listener = worker_service.listen(identities,address,ctx)
     with listener, callbacks, public_output:
@@ -182,12 +198,16 @@ def main():
                                    help="relay one-time command decisions through the configured Router operator")
             component.add_argument("--prepare-sessions",action="store_true",
                                    help="allow authenticated preparation of independent read-only Codex sessions")
+            component.add_argument("--managed-sessions-dir",type=Path,
+                                   help="absolute owner-private directory hosting enrolled Codex session ledgers")
         if name == "worker":
             component.add_argument("--router-connection",required=True,type=Path)
             component.add_argument("--adapter-connection",required=True,type=Path)
             component.add_argument("--adapter-session",help="pin all adapter requests to this native session")
             component.add_argument("--resume-targets",type=Path,
                                    help="owner-private map of allowed native session IDs to connection files")
+            component.add_argument("--session-callback-key",type=Path,
+                                   help="owner-private local key file for scoped callbacks of new native sessions")
     t = apps.add_parser("trigger")
     t.add_argument("--db",required=True,type=Path)
     t.add_argument("--name",required=True)

@@ -180,9 +180,13 @@ DSH 历史会话在宿主插件中设 `resume_on_handoff: true`，并以 `dsh-ad
 
 两端均可先启动适配器并保持会话冷态。浏览目录不会打开会话。Worker 等 Router 确认暂停派发才用原交接号恢复会话，核对会话和忙闲后提交绑定。发现活动原生目标时，保留原会话并解除交接。Codex Desktop 日常会话仍待接。
 
-隔离 Codex 适配器可以显式启用 `--prepare-sessions`，供受信 Worker 通过固定会话的 `POST /v1/host/bound/prepare-thread` 准备新会话或分支。请求带原操作 UUID 和 `kind`，类型为 `new` 或 `fork`。适配器用原会话的工作目录、模型和思考强度准备只读测试会话，并记录原生会话 ID。该入口只准备会话。切换仍须把新会话作为独立适配器接入 Worker，再走已有交接。飞书的 `/new` 和 `/fork` 尚待自动接入。
+隔离 Codex 适配器可启用 `--prepare-sessions`。固定会话入口 `POST /v1/host/bound/prepare-thread` 接收原操作 UUID 和 `new` 或 `fork`，沿用工作区、模型及思考强度准备只读测试会话，并记录原生会话 ID。只启用该选项时，仍可按新 ID 显式配置独立适配器，再走已有的 `/resume` 交接。
 
-如果准备端收到了创建结果，重试只查原生会话与命名，返回原凭据。原生创建结果一直未到时原操作保持待核，停写换绑会提示待核数量。已验证通过显式接入新适配器，将准备的空会话从冷态启用并完成一张隔离正式单。[原生会话准备与接入证据](evidence/codex-native-thread-preparation.json)
+要在隔离工位启用自动换绑，适配器同时传入 `--managed-sessions-dir`，路径为已有的绝对私有目录（POSIX 权限 `0700`），Worker 传入 `--session-callback-key`，其文件为仅所有者可读写的 JSON，包含一个名为 `key` 的 32 字节随机十六进制密钥。起始适配器仍由 `--adapter-session` 固定，起始回调也仍绑定该会话。每个新会话取得单独回调身份，只有当前会话可提交原生回调。`/new` 和 `/clear` 新开会话，`/fork` 保留父会话历史。Router 先确认暂停派发，Worker 才准备、登记并启用新会话。确认新绑定后才恢复派发。原飞书消息重投返回原绑定回执，旧会话可用 `/resume 会话ID` 切回。
+
+登记回执丢失时，按原操作号查回已登记会话。原生创建结果未到且没有确认的会话 ID 时，保留本次交接待核，不重发创建。重开后只恢复 Worker 已确认绑定的会话。登记目录包含子会话账本和回调身份，目前五组件离线快照无法完整收录该目录，检测到这类工位会拒绝打包。
+
+复跑 `python3 -B -m unittest -v rewrite.test_codex_app_server.CodexAppServer.test_managed_native_commands_bind_without_manual_enrollment_and_restore`。使用已安装的原生 App Server，以及测试飞书消息和本地脚本模型。未使用现役账号或会话。[原生自动换绑证据](evidence/codex-managed-native-sessions.json) · [原生会话准备与显式接入证据](evidence/codex-native-thread-preparation.json)
 
 ### Hermes 专用会话
 

@@ -22,6 +22,13 @@ class CodexThreadPreparation:
         self.host,self.workspace = host,Path(workspace).resolve()
         self.db = Database(db,SCHEMA)
 
+    def prepared(self,operation_id):
+        with self.db.transaction() as db:
+            row = db.execute("""SELECT receipt FROM codex_thread_preparations
+                WHERE operation_id=? AND source_session=? AND state='prepared'""",
+                             (operation_id,self.host.thread_id)).fetchone()
+        return json.loads(row[0]) if row else {}
+
     def prepare(self,source,operation_id,kind):
         require(source==self.host.thread_id,409,"wrong_native_session")
         require(valid_guid(operation_id) and kind in ("new","fork"),422,"invalid_native_preparation")

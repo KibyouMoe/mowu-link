@@ -1466,6 +1466,192 @@ class CodexAppServer(unittest.TestCase):
             "native_worker_reports":calls,"task_id":tid,"assignment_id":aid,"notification_id":notice["delivery_id"],
             "scope":"Actual isolated App Server and TLS adapters. An explicit second adapter enrolls the prepared thread. Model is a fixture."}
 
+    @unittest.skipUnless(shutil.which("openssl"),"isolated TLS certificate generator required")
+    def test_managed_native_commands_bind_without_manual_enrollment_and_restore(self):
+        root = Path(self.root).resolve()
+        profile,project,registry = (root/name for name in ("managed-profile","managed-project","managed-sessions"))
+        for directory in (profile,project,registry):
+            directory.mkdir(mode=0o700)
+        self.local_profile(profile)
+        package = Path(__file__).resolve().parents[1]
+        provisioned = subprocess.run(self.provision_command(profile,project),cwd=package,capture_output=True,
+                                     text=True,timeout=30,check=True)
+        parent = json.loads(provisioned.stdout)["thread_id"]
+        tls_token,platform_token,parent_token = (guid() for _ in range(3))
+        roles = config(root,"managed-adapter-roles.json",{tls_token:"worker/oguri"})
+        worker_roles = {platform_token:"platform/oguri",parent_token:"adapter/oguri/"+parent}
+        cert,key = root/"managed.crt",root/"managed.key"
+        subprocess.run(["openssl","req","-x509","-newkey","rsa:2048","-nodes","-days","1","-subj","/CN=localhost",
+                        "-addext","subjectAltName=IP:127.0.0.1","-out",cert,"-keyout",key],
+                       capture_output=True,timeout=10,check=True)
+        clock = Clock()
+        loop = self.enterContext(Loop.isolated(clock))
+        parent_port = RemoteAdapter(None,parent)
+        worker_db,host_db = root/"managed-worker.db",root/"managed-adapter.db"
+        callback_key = os.urandom(32)
+
+        def rebuilt_worker():
+            return Worker(worker_db,"oguri",loop.wire,parent_port,clock=clock,session_callback_key=callback_key)
+
+        def command(mid,text,**extra):
+            return client.request("POST","worker/command",{"message_id":"om_managed_"+mid,"text":text,**extra})["receipt"]
+
+        def platform_input(inbox,suffix,message):
+            mid = "om_managed_"+suffix
+            inbox.record("app","user","trainer",{"message_id":mid,"chat_id":"test-chat","chat_type":"p2p",
+                "message_type":"text","content":encode({"text":message})})
+            deadline = time.monotonic()+10
+            while True:
+                try:
+                    return inbox.deliver(mid)
+                except Fault as error:
+                    if (error.code not in ("native_switch_callbacks_pending","host_receipt_unconfirmed")
+                            or time.monotonic()>=deadline):
+                        raise
+                    time.sleep(.04)
+
+        def formal(label,gateway):
+            result = loop.hermes.create(guid(),label,"Return one native result","oguri")
+            task = result["task_id"]
+            gateway.step()
+            clock.advance(10)
+            deadline = time.monotonic()+15
+            while time.monotonic()<deadline:
+                gateway.step()
+                detail = loop.hermes.inspect(task)
+                adapter = gateway.worker.adapter
+                if detail["task"]["state"]=="completed_reported" and not adapter.busy():
+                    break
+                time.sleep(.04)
+            self.assertEqual(detail["task"]["state"],"completed_reported")
+            assignment = detail["last_report"]["assignment_id"]
+            self.assertEqual(gateway.worker.assignment_session(assignment),gateway.worker.native_session_pin)
+            self.assertIsNone(gateway.worker.hold()["held_assignment_id"])
+            with gateway.worker.db.transaction() as db:
+                delivery = db.execute("SELECT delivery_id FROM jobs WHERE assignment_id=?",(assignment,)).fetchone()[0]
+            return {"task_id":task,"assignment_id":assignment,"delivery_id":delivery}
+
+        gateway = WorkerService(rebuilt_worker(),clock)
+        old_enroll = parent_port.enroll_thread
+        enrollment = []
+
+        def lose_first_enrollment(source,operation,session,token):
+            receipt = old_enroll(source,operation,session,token)
+            enrollment.append(receipt)
+            if len(enrollment)==1:
+                raise Fault(503,"adapter_connection_unconfirmed",True)
+            return receipt
+
+        parent_port.enroll_thread = lose_first_enrollment
+        with running(gateway.listen(worker_roles,("127.0.0.1",0),None)) as gateway_url:
+            client = Client(gateway_url,platform_token)
+            feishu_db = root/"managed-feishu.db"
+            inbox = Inbound(feishu_db,client,None,"app","trainer","test-chat",clock)
+            parent_callback = Client(gateway_url,parent_token)
+            callback = config(root,"managed-callback.json",{"url":gateway_url,"token":parent_token})
+            flags = ("--worker-id","oguri","--session",parent,"--worker-connection",callback,"--codex-binary",CODEX,
+                     "--codex-profile",profile,"--cwd",project,"--prepare-sessions","--managed-sessions-dir",registry)
+            with serve(package,"codex-adapter",host_db,roles,cert,key,dict(os.environ),flags) as url:
+                parent_port.client = Client(url,tls_token,cert)
+                gateway.step()
+                self.assertTrue(gateway.status()["native_capabilities"]["managed_session_enrollment"])
+                with self.assertRaisesRegex(Fault,"wrong_native_session"):
+                    parent_port.for_session(guid()).session_info()
+                with self.assertRaisesRegex(Fault,"native_enrollment_not_prepared"):
+                    old_enroll(parent,guid(),guid(),"a"*64)
+                with self.assertRaisesRegex(Fault,"adapter_connection_unconfirmed"):
+                    platform_input(inbox,"new","/new")
+                self.assertEqual(gateway.status()["handoff"]["state"],"frozen")
+                self.assertEqual(gateway.worker.native_session_pin,parent)
+                self.assertEqual(len(self.provider.observed),1)
+            # Restart both the adapter and Worker after child enrollment but before the binding was recorded.
+        endpoint = ("127.0.0.1",int(gateway_url.rsplit(":",1)[1]))
+        gateway = WorkerService(rebuilt_worker(),clock)
+        with running(gateway.listen(worker_roles,endpoint,None)) as reconnected:
+            self.assertEqual(reconnected,gateway_url)
+            with serve(package,"codex-adapter",host_db,roles,cert,key,dict(os.environ),flags) as url:
+                parent_port.client = Client(url,tls_token,cert)
+                gateway.step()
+                created = platform_input(inbox,"new","/new")
+                self.assertEqual(created,command("new","/new"))
+                child = created["binding_receipt"]["session"]
+                self.assertEqual(enrollment, [{"operation_id":created["binding_receipt"]["handoff_id"],
+                                               "session":child,"state":"enrolled"}]*2)
+                self.assertNotEqual(child,parent)
+                with self.assertRaisesRegex(Fault,"native_enrollment_conflict"):
+                    old_enroll(parent,enrollment[0]["operation_id"],child,"b"*64)
+                with self.assertRaisesRegex(Fault,"native_callback_inactive"):
+                    parent_callback.request("POST","worker/native-tool",{"session":child})
+                first = formal("New session result",gateway)
+                forked = platform_input(inbox,"fork","/fork")
+                self.assertEqual(forked,command("fork","/fork"))
+                fork = forked["binding_receipt"]["session"]
+                self.assertEqual(forked["binding_receipt"]["previous_session"],child)
+                self.assertNotIn(fork,(parent,child))
+                second = formal("Forked session result",gateway)
+                discarded = platform_input(inbox,"clear","/clear")
+                fresh = discarded["binding_receipt"]["session"]
+                self.assertNotIn(fresh,(parent,child,fork))
+                self.assertEqual(discarded,command("clear","/clear"))
+                self.assertEqual(gateway.worker.native_session_pin,fresh)
+                self.assertEqual(command("back","/resume "+fork)["binding_receipt"]["session"],fork)
+                notices = [frame for frame in loop.manager_wire.frames(0) if frame["payload"].get("task_id")]
+                self.assertEqual([frame["payload"]["task_id"] for frame in notices],[first["task_id"],second["task_id"]])
+        with self.assertRaisesRegex(Fault,"managed_session_key_changed"):
+            Worker(worker_db,"oguri",loop.wire,parent_port,clock=clock,session_callback_key=os.urandom(32))
+        with serve(package,"codex-adapter",host_db,roles,cert,key,dict(os.environ),flags) as url:
+            parent_port.client = Client(url,tls_token,cert)
+            worker = rebuilt_worker()
+            self.assertEqual(worker.native_session_pin,fork)
+            self.assertEqual(parent_port.session_info()["native_load_state"],"cold")
+            self.assertEqual(worker.adapter.session_info()["native_load_state"],"cold")
+            gateway = WorkerService(worker,clock)
+            with running(gateway.listen(worker_roles,endpoint,None)):
+                gateway.step()
+                self.assertIs(gateway.status()["adapter_connected"],True)
+                self.assertEqual(gateway.status()["host_session"],fork)
+                self.assertEqual(parent_port.session_info()["native_load_state"],"cold")
+                self.assertEqual(command("fork","/fork"),forked)
+                private = platform_input(inbox,"private","Managed private chat after reconnect.")
+                self.assertEqual(private["session"],fork)
+                self.assertIsNone(worker.hold()["held_assignment_id"])
+                deadline = time.monotonic()+10
+                while time.monotonic()<deadline and worker.adapter.busy():
+                    time.sleep(.04)
+                self.assertFalse(worker.adapter.busy())
+        with start_app_server(CODEX,profile,project) as rpc:
+            def native_story(sid):
+                rpc.request("thread/resume",{"threadId":sid,"cwd":str(project)})
+                thread = AppServerHost(rpc,sid).thread(sid,include_turns=True)
+                inputs = [item["clientId"] for turn in thread["turns"] for item in turn["items"]
+                          if item["type"]=="userMessage"]
+                return thread,inputs
+            parent_thread,parent_inputs = native_story(parent)
+            child_thread,child_inputs = native_story(child)
+            fork_thread,fork_inputs = native_story(fork)
+            self.assertEqual(len(parent_inputs),1)
+            self.assertIsNone(child_thread["forkedFromId"])
+            self.assertEqual(child_inputs,["mowulink-"+first["delivery_id"]])
+            self.assertEqual(fork_thread["forkedFromId"],child)
+            self.assertEqual(fork_inputs,child_inputs+["mowulink-"+second["delivery_id"],"mowulink-"+private["delivery_id"]])
+            for result,turn in ((first,child_thread["turns"][-1]),(second,fork_thread["turns"][-2])):
+                result["native_turn"] = turn["id"]
+                result["native_calls"] = [item["id"] for item in turn["items"]
+                    if item["type"]=="dynamicToolCall" and item["tool"]=="worker_report"]
+                self.assertEqual(len(result["native_calls"]),2)
+            third_thread = rpc.request("thread/read",{"threadId":fresh,"includeTurns":False})["thread"]
+            self.assertIsNone(third_thread["forkedFromId"])
+        self.assertEqual(len(self.provider.observed),8)
+        self.evidence = {"original_session":parent_thread["id"],"new_binding":created["binding_receipt"],
+            "fork_binding":forked["binding_receipt"],"clear_binding":discarded["binding_receipt"],
+            "formals":[first,second],"manager_notifications":[notice["delivery_id"] for notice in notices],
+            "restart_restored_session":fork,"enrollment_receipts":len(enrollment),
+            "private_input":private["native_id"],"private_turn":fork_thread["turns"][-1]["id"],
+            "scope":"Installed isolated Codex App Server and actual Router/Worker. Platform command fixture and local scripted model."}
+        destination = os.environ.get("MOWULINK_MANAGED_SESSION_EVIDENCE")
+        if destination:
+            Path(destination).write_text(json.dumps(self.evidence,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
+
     def test_native_app_server_reconnect_recovers_input_before_w04_without_new_model_call(self):
         with isolated_app_server(self.root,self.origin) as rpc:
             loop,host,frame,original,pending_call = self.pending_native_task(rpc)

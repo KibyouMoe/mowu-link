@@ -1,0 +1,52 @@
+{
+  "original_session": "01a217c2-6379-7f80-8a74-9ea995db0543",
+  "new_binding": {
+    "handoff_id": "237b776a-3ccd-5fb4-a8b1-3f8218e87c79",
+    "previous_session": "01a217c2-6379-7f80-8a74-9ea995db0543",
+    "session": "01a217c2-64df-77d2-a0db-be21543d9e84",
+    "state": "bound"
+  },
+  "fork_binding": {
+    "handoff_id": "c76e68d3-4b43-56f1-bf45-afaf4b4f274b",
+    "previous_session": "01a217c2-64df-77d2-a0db-be21543d9e84",
+    "session": "01a217c2-68ea-7ce1-bc57-4bc4826b6449",
+    "state": "bound"
+  },
+  "clear_binding": {
+    "handoff_id": "3636bee4-ec43-5c54-9cad-25bec5ad5da3",
+    "previous_session": "01a217c2-68ea-7ce1-bc57-4bc4826b6449",
+    "session": "01a217c2-6a39-7172-aa12-7bdc82137e1b",
+    "state": "bound"
+  },
+  "formals": [
+    {
+      "task_id": "3c5f3b03-e8b7-4025-800d-11b09d94f698",
+      "assignment_id": "847ed3d0-88d8-438f-b905-1f95571a0e1a",
+      "delivery_id": "4f013fb2-0cbf-47b9-a06e-ab6f575c1a1a",
+      "native_turn": "01a217c2-685b-7ab1-9bac-8a3268bddce0",
+      "native_calls": [
+        "native_fixture_0",
+        "native_fixture_1"
+      ]
+    },
+    {
+      "task_id": "83111006-5599-4fb7-81b8-aa5fb7bd1a0a",
+      "assignment_id": "6b3c6c53-f0b4-4885-a373-b949a60d299e",
+      "delivery_id": "bda6d5f2-4987-4e8f-a3e6-e865b0528d3d",
+      "native_turn": "01a217c2-6977-7c82-b3a7-b7e9ede2c071",
+      "native_calls": [
+        "native_fixture_0",
+        "native_fixture_1"
+      ]
+    }
+  ],
+  "manager_notifications": [
+    "806e7dc6-86be-4cab-b904-2971ddabc2aa",
+    "2ec6d8ed-8d38-4f05-81c8-1ac725380a29"
+  ],
+  "restart_restored_session": "01a217c2-68ea-7ce1-bc57-4bc4826b6449",
+  "enrollment_receipts": 2,
+  "private_input": "01a217c2-6f06-7981-a6da-117f0a9357a9",
+  "private_turn": "01a217c2-6f02-7300-acdd-d1eea71d0567",
+  "scope": "Installed isolated Codex App Server and actual Router/Worker. Platform command fixture and local scripted model."
+}

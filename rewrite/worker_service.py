@@ -23,6 +23,10 @@ HOST_CAPABILITY_FLAGS = {
     "model_change":"host_model_change",
     "goal_control":"host_goal_control",
 }
+OPTIONAL_HOST_CAPABILITY_FLAGS = {
+    "session_preparation":"host_session_preparation",
+    "managed_session_enrollment":"host_managed_session_enrollment",
+}
 
 
 class WorkerService:
@@ -37,12 +41,13 @@ class WorkerService:
         self.host_error = None
         self.host_observed_at = None
         self.host_capabilities = None
-        for flag in HOST_CAPABILITY_FLAGS.values():
+        for flag in (HOST_CAPABILITY_FLAGS | OPTIONAL_HOST_CAPABILITY_FLAGS).values():
             setattr(self,flag,False)
         self.native_command_lock = Lock()
         self.platform_admission_lock = Lock()
         self.native_callback_lock = Lock()
         self.native_callbacks_in_flight = 0
+        self.identities = {}
         self.host_session = ""
         self.clock, self.probe_interval = clock, probe_interval
         self.next_probe = 0
@@ -54,6 +59,11 @@ class WorkerService:
         capabilities = {key:info.get(key) is True for key in HOST_CAPABILITY_FLAGS}
         for key,flag in HOST_CAPABILITY_FLAGS.items():
             setattr(self,flag,capabilities[key])
+        for key,flag in OPTIONAL_HOST_CAPABILITY_FLAGS.items():
+            value = info.get(key) is True
+            setattr(self,flag,value)
+            if value:
+                capabilities[key] = value
         self.host_capabilities = capabilities
         self.host_session,self.host_busy,self.adapter_connected = info["session"],busy,True
         self.host_error = None
@@ -176,7 +186,8 @@ class WorkerService:
                 "/v1/worker/chat","/v1/worker/command","/v1/worker/trainer-answer"):
             with self.platform_admission_lock:
                 text = body.get("text")
-                resume = path=="/v1/worker/command" and w.resume_targets and isinstance(text,str) and worker_resume.selection(text)
+                resume = path=="/v1/worker/command" and w.resume_targets and isinstance(text,str) and (
+                    worker_resume.selection(text) or (w.session_callback_key and worker_resume.creation(text)))
                 if not resume and (worker_handoff.active(w) or worker_resume.pending(w)):
                     raise Fault(503,"native_handoff_in_progress",True)
                 try:
@@ -372,9 +383,23 @@ class WorkerService:
         return self.worker.router.request("GET","peers/workers?"+urlencode(query))
 
     def listen(self, identities, address, ctx):
-        if self.worker.resume_targets:
-            adapter = "adapter/"+self.worker.worker_id
+        w = self.worker
+        self.identities = dict(identities)
+        if w.resume_targets:
+            adapter = "adapter/"+w.worker_id
             roles = set(identities.values())
-            require(adapter not in roles and all(adapter+"/"+session in roles for session in self.worker.resume_targets),
+            configured = w.resume_targets.keys()-w.managed_native_sessions.keys()
+            require(adapter not in roles and all(adapter+"/"+session in roles for session in configured),
                     422,"scoped_native_callbacks_required")
-        return serve_authenticated(identities,address,ctx,self.handle)
+            for session,(_anchor,op) in w.managed_native_sessions.items():
+                token = worker_resume.callback_token(w,session,op)
+                self.check_managed_callback(session,token)
+                self.add_managed_callback(session,token)
+        return serve_authenticated(self.identities,address,ctx,self.handle)
+
+    def check_managed_callback(self,session,token):
+        role = "adapter/"+self.worker.worker_id+"/"+session
+        require(token not in self.identities and role not in self.identities.values(),409,"managed_callback_identity_conflict")
+
+    def add_managed_callback(self,session,token):
+        self.identities[token] = "adapter/"+self.worker.worker_id+"/"+session

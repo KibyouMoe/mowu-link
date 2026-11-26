@@ -274,11 +274,14 @@ class Client:
                 or parts.password is not None or parts.scheme not in ("http","https")
                 or (parts.scheme == "http" and parts.hostname != "127.0.0.1")):
             raise ValueError("expected a single HTTPS origin or an isolated HTTP loopback")
-        self.url, self.token = url, token
+        self.url, self.token, self.ca_file = url, token, ca_file
         handlers = [ProxyHandler({}), NoRedirect()]
         if parts.scheme == "https":
             handlers.append(HTTPSHandler(context=ssl.create_default_context(cafile=ca_file)))
         self.http = build_opener(*handlers)
+
+    def with_token(self,token):
+        return Client(self.url,token,self.ca_file)
 
     def request(self, method, path, body=None, key=None, headers=None, *, max_bytes=None):
         hdr = {"Authorization": "Bearer " + self.token, **(headers or {})}

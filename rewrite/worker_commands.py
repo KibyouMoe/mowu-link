@@ -49,6 +49,9 @@ def reply(service, name, args, hold):
             lines.append("/resume 查看当前绑定会话。历史搜索敬请期待。")
         if service.worker.resume_targets:
             lines.append("/resume 编号、完整标题或会话 ID 切到已配置的会话。")
+        if (service.adapter_connected and service.worker.session_callback_key and service.host_session_preparation
+                and service.host_managed_session_enrollment):
+            lines.append("/new 或 /clear 新开会话，/fork 从当前会话分支。")
         if service.adapter_connected and service.host_compaction:
             lines.append("/compact 通过宿主压缩当前会话历史。")
         if service.adapter_connected and service.host_stop_private:
@@ -516,6 +519,8 @@ def handle(service, body):
                 422,"invalid_catalog_reply")
     if service.worker.resume_targets:
         target = worker_resume.selection(text)
+        if not target and service.worker.session_callback_key:
+            target = worker_resume.creation(text)
         if target:
             return worker_resume.handle(service,mid,text,*target,reply_to=reply_to)
     if name=="/stop" and not args:

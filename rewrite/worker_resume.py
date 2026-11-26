@@ -1,8 +1,11 @@
-"""Switch a Worker's binding between explicitly configured native ports."""
+"""Switch a Worker's binding only after the Router and native host confirm it."""
+import hashlib
+import hmac
 from urllib.error import URLError
 from uuid import NAMESPACE_URL, uuid5
 
 from . import worker_catalog, worker_handoff
+from .messages import valid_guid
 from .storage import Fault, encode, require
 
 
@@ -12,6 +15,10 @@ CREATE TABLE IF NOT EXISTS native_resume(
     handoff_id TEXT NOT NULL UNIQUE, old_session TEXT NOT NULL, target TEXT NOT NULL, phase TEXT NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS one_resume ON native_resume((1)) WHERE phase<>'done';
+CREATE TABLE IF NOT EXISTS managed_native_sessions(
+    session TEXT PRIMARY KEY, anchor TEXT NOT NULL, operation_id TEXT NOT NULL UNIQUE,
+    callback_digest TEXT NOT NULL
+);
 """
 
 REFUSED = {
@@ -25,6 +32,28 @@ ORIGINAL_SESSION = {
     "cancelling":"已取消切换，继续使用原会话。",
     "goal_active":"目标会话有正在进行的原生目标。原会话绑定保留。",
 }
+CREATION = {"/new":"new","/clear":"new","/fork":"fork"}
+
+
+def callback_token(worker,session,operation_id):
+    require(worker.session_callback_key,409,"managed_session_key_required")
+    payload = encode(["native-session-callback",worker.worker_id,session,operation_id]).encode("utf-8")
+    return hmac.new(worker.session_callback_key,payload,"sha256").hexdigest()
+
+
+def token_digest(token):
+    return hashlib.sha256(token.encode("ascii")).hexdigest()
+
+
+def restore_ports(worker,db):
+    configured = dict(worker.resume_targets)
+    for row in db.execute("SELECT * FROM managed_native_sessions"):
+        sid,anchor,op = row["session"],row["anchor"],row["operation_id"]
+        require(anchor in configured and sid not in configured,409,"managed_session_anchor_required")
+        token = callback_token(worker,sid,op)
+        require(hmac.compare_digest(row["callback_digest"],token_digest(token)),409,"managed_session_key_changed")
+        worker.resume_targets[sid] = configured[anchor].for_session(sid)
+        worker.managed_native_sessions[sid] = anchor,op
 
 
 def pending(worker):
@@ -41,6 +70,39 @@ def selection(text):
     if len(words)==2 and words[0]=="/switch" and not words[1].isdecimal():
         return words
     return None
+
+
+def creation(text):
+    command = text.strip()
+    return (command,"") if command in CREATION else None
+
+
+def prepare_target(service,row,source_info):
+    w = service.worker
+    require(source_info.get("session_preparation") and source_info.get("managed_session_enrollment"),
+            503,"native_creation_host_unconfirmed")
+    source,op,kind = row["old_session"],row["handoff_id"],CREATION[row["command"]]
+    plan = w.adapter.prepare_thread(source,op,kind)
+    target = plan.get("session") if isinstance(plan,dict) else None
+    require(valid_guid(target) and target!=source and plan.get("operation_id")==op and plan.get("state")=="prepared"
+            and plan.get("source_session")==source and plan.get("kind")==kind
+            and plan.get("parent_session")== (source if kind=="fork" else None),502,"native_preparation_receipt_unconfirmed")
+    require(target not in w.resume_targets,409,"managed_session_already_authorized")
+    token = callback_token(w,target,op)
+    service.check_managed_callback(target,token)
+    receipt = w.adapter.enroll_thread(source,op,target,token)
+    require(receipt=={"operation_id":op,"session":target,"state":"enrolled"},502,"native_enrollment_receipt_unconfirmed")
+    anchor = w.managed_native_sessions.get(source,(source,None))[0]
+    port = w.resume_targets[anchor].for_session(target)
+    with w.db.transaction() as db:
+        db.execute("INSERT INTO managed_native_sessions VALUES (?,?,?,?)",(target,anchor,op,token_digest(token)))
+        updated = db.execute("UPDATE native_resume SET target=? WHERE message_id=? AND target=''",
+                             (target,row["message_id"])).rowcount
+        require(updated==1,409,"native_binding_changed")
+    w.resume_targets[target] = port
+    w.managed_native_sessions[target] = anchor,op
+    service.add_managed_callback(target,token)
+    return target
 
 
 def activate(port,session,operation_id):
@@ -97,12 +159,15 @@ def advance(service,row):
     w = service.worker
     operation = {"handoff_id":row["handoff_id"],"action":"begin"}
     source,target = row["old_session"],row["target"]
-    next_port = w.resume_targets[target]
     with w.lock:
         if row["phase"] in ORIGINAL_SESSION:
             return keep_source(w,row,row["phase"])
         if row["phase"]=="starting":
             require(w.native_session_pin==source,409,"native_binding_changed")
+            if w.session_callback_key:
+                source_info = w.adapter.session_info()
+                if source_info.get("native_load_state")=="cold":
+                    restore_committed_binding(w,source_info)
             try:
                 result = worker_handoff.request(w,operation)
             except Fault as error:
@@ -112,10 +177,12 @@ def advance(service,row):
             if result["state"]=="released":
                 return finish(w,row,source,"这次交接已解除，仍在原会话。")
             require(result["state"]=="frozen",503,"native_switch_unconfirmed")
-            _info,source_busy = observe(w.adapter,source)
+            source_info,source_busy = observe(w.adapter,source)
             require(not source_busy,503,"native_switch_waiting_for_idle")
+            if not target:
+                target = prepare_target(service,row,source_info)
             try:
-                _info,target_busy = observe(next_port,target,operation_id=row["handoff_id"])
+                _info,target_busy = observe(w.resume_targets[target],target,operation_id=row["handoff_id"])
             except Fault as error:
                 if error.code=="native_cold_goal_active":
                     return keep_source(w,row,"goal_active")
@@ -126,11 +193,11 @@ def advance(service,row):
                 require(changed==1,409,"native_binding_changed")
                 db.execute("DELETE FROM resume_catalog")
                 db.execute("UPDATE native_resume SET phase='bound' WHERE message_id=?",(row["message_id"],))
-            w.adapter,w.native_session_pin = next_port,target
+            w.adapter,w.native_session_pin = w.resume_targets[target],target
             service.adapter_connected = False
             service.next_probe = 0
         require(w.native_session_pin==target,409,"native_binding_changed")
-        info,busy = observe(next_port,target,operation_id=row["handoff_id"])
+        info,busy = observe(w.resume_targets[target],target,operation_id=row["handoff_id"])
         require(not busy,503,"native_switch_waiting_for_idle")
         service.record_host_observation(info,busy)
         result = worker_handoff.request(w,dict(operation,action="end"))
@@ -180,12 +247,16 @@ def handle(service,mid,text,name,target,*,reply_to=None):
         if answer:
             with w.db.transaction() as db:
                 return record(db,mid,request,name,w.native_session_pin,answer)
-    if target not in w.resume_targets or target==w.native_session_pin:
+    create = name in CREATION
+    if not create and (target not in w.resume_targets or target==w.native_session_pin):
         answer = ("当前已绑定会话 "+target) if target==w.native_session_pin else "这个会话暂未配置切换权限。"
         with w.db.transaction() as db:
             return record(db,mid,request,name,w.native_session_pin,answer)
     require(service.adapter_connected and service.host_session==w.native_session_pin,503,"native_switch_unconfirmed")
-    _info,busy = observe(w.resume_targets[target],target,allow_cold=True)
+    if create and not (service.host_session_preparation and service.host_managed_session_enrollment):
+        with w.db.transaction() as db:
+            return record(db,mid,request,name,w.native_session_pin,"当前宿主暂未开放创建和分支会话。")
+    _info,busy = (None,False) if create else observe(w.resume_targets[target],target,allow_cold=True)
     if busy:
         with w.db.transaction() as db:
             return record(db,mid,request,name,w.native_session_pin,REFUSED["resume_target_busy"])
@@ -211,8 +282,13 @@ def restore_committed_binding(worker,info):
                 WHERE n.target=? AND n.phase='done'
                 AND json_extract(p.receipt,'$.binding_receipt.handoff_id')=n.handoff_id
                 ORDER BY n.rowid DESC LIMIT 1""",(session,)).fetchone()
-        require(row,503,"native_activation_waiting_for_handoff")
-        return activate(worker.adapter,session,row[0])
+        if row:
+            return activate(worker.adapter,session,row[0])
+        require(worker.session_callback_key and info.get("managed_session_enrollment") and
+                session==worker.initial_native_session,503,"native_activation_waiting_for_handoff")
+        # The original session may be restored only after matching the committed Worker pin.
+        operation = str(uuid5(NAMESPACE_URL,encode(["native-anchor",worker.worker_id,session])))
+        return activate(worker.adapter,session,operation)
 
 
 def recover(service):
@@ -225,6 +301,6 @@ def recover(service):
     except Fault as error:
         if error.code in ("stale_session","missing_session","unauthenticated"):
             raise
-        return "native_switch_unconfirmed"
+        return error.code if error.code=="native_creation_unconfirmed" else "native_switch_unconfirmed"
     except (URLError,OSError):
         return "native_switch_unconfirmed"

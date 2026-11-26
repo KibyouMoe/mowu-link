@@ -40,7 +40,7 @@
 | --- | --- | --- |
 | 通用 Worker | `/help`、`/start`、`/commands`、`/status`、`/list` 测试平台端已核。原消息号按原回执重投。DSH 与独立 Codex App Server 通过原生 `/queue` 顺序与丢回执查证。 | 实际 Feishu 私聊的所有指令入口与交互。 |
 | DSH | `/context`、`/model`、`/effort`、`/queue`、`/goal`、`/compact`、`/stop` 有 SDK 或真循环证据。`/resume` 可浏览、搜索与按编号切到已运行的独立 DSH。已配置的 DSH 冷会话可在冻结派发后恢复，丢回执按原号查回，原生 Agent 两次报成果只留一条待验通知。 | 真实飞书操作、`/new`、`/fork`、新会话初始模型与思考强度、前台阻塞题、原生清理凭据。 |
-| Codex Desktop 与独立 App Server | Desktop 真实独立会话收到一条正式单，重投仍一条。独立原生 App Server 接到本地脚本模型的动态工具调用，实际完成 W04，重试回同一结果。`/model`、`/effort`、`/context` 与 `/stop` 已核原生回包。原生分叉已核父会话历史不会成为子会话收件。已配置的冷会话经冻结派发后恢复。独立只读工位已实测原生准备新会话或分支，显式接入新会话适配器后完成正式单。 | Desktop 测试项目未列出 `worker_report`，默认 App Server 测试 profile 无登录。两条路径的真实模型 W04 仍需各自的授权测试条件。真实账号的请求强度、跨提供方选择、真实飞书操作、Desktop 冷会话、飞书 `/new` 和 `/fork` 的自动换绑。 |
+| Codex Desktop 与独立 App Server | Desktop 真实独立会话收到一条正式单，重投仍一条。独立原生 App Server 接到本地脚本模型的动态工具调用，实际完成 W04，重试回同一结果。`/model`、`/effort`、`/context` 与 `/stop` 已核原生回包。独立只读工位从飞书测试消息经 `/new`、`/clear`、`/fork` 自动登记和换绑，原消息重试复用同一会话，丢回执和重开皆已实测。原生分叉的父会话历史没有成为子会话新收件。 | Desktop 测试项目未列出 `worker_report`，默认 App Server 测试 profile 无登录。两条路径的真实模型 W04 仍需各自的授权测试条件。真实账号的请求强度、跨提供方选择、真实飞书操作、Desktop 冷会话。自动登记目录须纳入离线迁移与回退。 |
 | Antigravity | 已核安装版本 2.32.1 及官方会话钩子、转录、MCP 入口。CLI 可克隆 App 对话供独立宿主使用，Remote Control 提供人工访问。 | 指定原桌面会话的后台唤醒、停止、真实 Gemini 回报及读写验收。CLI 或远程托管须先确认允许改用独立宿主。[兼容性核对](antigravity-compatibility.md) |
 | 授权和维护 | 认证的 Router/Worker/适配器隔离已验证；普通题卡不能执行原生授权。 | 旧 `/approvals`、`/commands`、`/ops/services` 中实际仍在使用的入口，与宿主授权逐项验证。 |
 
@@ -60,7 +60,7 @@
 | `bridge_verify_native_write_path` | 原派发或消息号、正文摘要、原生输入及回合 | 真实独立 Desktop 已核文字收件及重投去重。无人值守入口、图文与实际授权待验。 |
 | `bridge_start_local_manager` | Router、Worker、宿主适配器独立入口 | 临时进程与分步升级已跑。独立 App Server 工位初始化能冷开查回唯一输入，适配器已用 TLS 与专用 profile 启动，拒绝第二个写者。现役 Desktop 受信启动链仍待单验。 |
 | `bridge_reload_business_modules` | 锁定提交的发布包、分步升级与原快照回退 | 已演练冷切，原收件无重复。原位热加载及现役启停授权尚未核。 |
-| `bridge_message` | 平台私聊入口与宿主斜杠命令 | DSH 文图、已接命令与原队列有实测。独立 Codex App Server 的目录查询、图文、排队和普通回合中止已核。可从已确认目录切到已配置的运行中会话及冷会话。Desktop 冷会话、原生插话和真实 Feishu 仍待验。 |
+| `bridge_message` | 平台私聊入口与宿主斜杠命令 | DSH 文图、已接命令与原队列有实测。独立 Codex App Server 的目录查询、图文、排队和普通回合中止已核，可从已确认目录切到已配置的运行中或冷会话，也可自动接入原生新会话和分支。Desktop 冷会话、原生插话和真实 Feishu 仍待验。 |
 | `bridge_send_image` | 已授权的宿主图片事件，经 Worker 转送 | 真实 DSH 图像摘要及隔离平台顺序已核。需要独立飞书云端与 Codex 输出记录。 |
 | `bridge_publish_question` | 原生问题适配、Worker 题卡、平台回调 | 独立 Codex App Server 和 DSH 计时题已核批量回答及原卡更新。DSH 续答可多选；Codex 组内任一密题整组留宿主。真实飞书点击、桌面原题窗同步、DSH 前台答题与主动独立题卡待验。 |
 | `bridge_register_current_task` | W03 接管及独立原生收件 | 原派发会话已固定，错绑零投递。DSH 与独立 Codex App Server 均已核原生目标完成仍持原派发，收到正式询问后经 W04 报告。模型为本地脚本，日用环境另验。 |

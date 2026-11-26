@@ -11,6 +11,7 @@ from .feishu_inbound import Inbound
 from .feishu_output import Views
 from .hermes import HermesAdapter
 from .codex_thread_preparation import SCHEMA as CODEX_PREPARATION_SCHEMA
+from .codex_session_family import FAMILY_SCHEMA
 from .orders import Orders
 from .state_bundle import audit_handoff, capture, filename, restore, rollback, stage_native_handoff, validate_set, verify
 from .storage import Database, StateWriterBusy, encode, guid, state_writer
@@ -271,6 +272,16 @@ class Bundle(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,"codex_session_preparations"):
             stage_native_handoff(self.snapshot,checksum,"oguri",self.native.session,"next",self.dest)
         self.assertFalse(self.dest.exists())
+
+    def test_capture_refuses_to_leave_native_session_registry_outside_the_backup(self):
+        with self.stack(self.sources):
+            root = Database(self.sources["agent:oguri"],FAMILY_SCHEMA)
+            with root.transaction() as db:
+                db.execute("INSERT INTO codex_managed_session_root VALUES (1,?,?)",
+                           (self.native.session,str(self.root/"private-session-directory")))
+        with self.assertRaisesRegex(ValueError,"external native session registry: agent:oguri"):
+            capture(self.sources,self.revision,self.snapshot)
+        self.assertFalse(self.snapshot.exists())
 
     def test_native_session_audit_keeps_unknown_private_and_queued_inputs_for_the_original_host(self):
         self.native.next_turn = True

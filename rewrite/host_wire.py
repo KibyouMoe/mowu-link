@@ -1,4 +1,4 @@
-"""Authenticated Worker-to-adapter port. One server is bound to one worker and native session."""
+"""Authenticated Worker-to-adapter port with explicit native session pins."""
 import re
 from urllib.error import URLError
 
@@ -52,6 +52,7 @@ class RemoteAdapter:
         require(state in (None,"cold","loaded"),502,"invalid_host_observation")
         return {**({"native_load_state":state} if state is not None else {}),
                 **({"session_preparation":True} if info.get("session_preparation") is True else {}),
+                **({"managed_session_enrollment":True} if info.get("managed_session_enrollment") is True else {}),
                 "session":session,"next_turn":info.get("next_turn") is True,
                 "context_usage":info.get("context_usage") is True,"model_view":info.get("model_view") is True,
                 "model_change":info.get("model_change") is True,"goal_control":info.get("goal_control") is True,
@@ -64,6 +65,14 @@ class RemoteAdapter:
     def prepare_thread(self,session,operation_id,kind):
         return self.request("POST","host/prepare-thread",{"operation_id":operation_id,"kind":kind},
                             native_session=session)
+
+    def enroll_thread(self,source,operation_id,session,callback_token):
+        return self.request("POST","host/enroll-thread",
+                            {"operation_id":operation_id,"session":session,"callback_token":callback_token},
+                            native_session=source)
+
+    def for_session(self,session):
+        return RemoteAdapter(self.client,session)
 
     def context_usage(self):
         return self.request("GET","host/context")
@@ -122,13 +131,21 @@ class RemoteAdapter:
         return self.request("POST","host/answer-question",{"original":original,"answer":answer})["proof"]
 
 
-def serve_adapter(adapter, worker_id, identities, address, context, *, activation=None, preparation=None):
+def serve_adapter(adapter, worker_id, identities, address, context, *, activation=None, preparation=None, family=None):
     def handle(actor, method, path, body, headers):
         require(actor == "worker/" + worker_id, 403, "wrong_adapter_owner")
         pinned = path.startswith("/v1/host/bound/")
+        current = adapter,activation,preparation
         if pinned:
-            require(headers.get(SESSION_HEADER)==adapter.bound_session(),409,"wrong_native_session")
+            session = headers.get(SESSION_HEADER)
+            if session!=adapter.bound_session():
+                require(family is not None,409,"wrong_native_session")
+                port = family.port(session)
+                current = port.adapter,port.activation,port.preparation
             path = "/v1/host/"+path.removeprefix("/v1/host/bound/")
+        return route(*current,method,path,body,pinned)
+
+    def route(adapter,activation,preparation,method,path,body,pinned):
         if activation is not None and path not in ("/v1/host/session","/v1/host/activate"):
             if activation.state!="loaded":
                 raise Fault(503,"native_session_cold",True)
@@ -140,6 +157,8 @@ def serve_adapter(adapter, worker_id, identities, address, context, *, activatio
                     result["native_load_state"] = activation.state
                 if preparation is not None:
                     result["session_preparation"] = True
+                if family is not None:
+                    result["managed_session_enrollment"] = True
             case "POST","/v1/host/activate":
                 require(pinned and activation is not None,403,"native_activation_unavailable")
                 require(set(body)=={"operation_id"} and valid_guid(body.get("operation_id")),422,"invalid_native_activation")
@@ -148,6 +167,10 @@ def serve_adapter(adapter, worker_id, identities, address, context, *, activatio
                 require(pinned and preparation is not None,403,"native_preparation_unavailable")
                 require(set(body)=={"operation_id","kind"},422,"invalid_native_preparation")
                 result = preparation.prepare(adapter.bound_session(),body["operation_id"],body["kind"])
+            case "POST","/v1/host/enroll-thread":
+                require(pinned and family is not None,403,"native_enrollment_unavailable")
+                require(set(body)=={"operation_id","session","callback_token"},422,"invalid_native_enrollment")
+                result = family.enroll(adapter.bound_session(),body["operation_id"],body["session"],body["callback_token"])
             case "GET","/v1/host/activity":
                 result = {"busy":adapter.busy()}
             case "GET","/v1/host/context":

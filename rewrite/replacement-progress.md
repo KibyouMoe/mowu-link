@@ -4,6 +4,12 @@
 
 ## 检查点与证据
 
+独立 Codex App Server 已跑通 `/new`、`/clear` 和 `/fork` 的自动登记与换绑。重放原飞书测试消息仍得到原绑定，旧会话凭据冒用新会话被拒。主动丢弃第一次登记回执并重开 Worker 与适配器后，Router 仍保持派单冻结，Worker 查回同一登记，再启用并确认新绑定。另一次重开只恢复当前分支，旧会话保持冷态。普通私聊继续进入当前分支。
+
+两张新派发分别进入新会话和分支，各产生一次新原生输入和一个回合。各回合两次调用原生 `worker_report`，Router 各留一条待验通知，Worker 各释放一次持单。分支继承的父输入没有成为新派发收件。实测宿主为独立原生 App Server，模型和飞书为本地夹具；多会话登记目录及密钥的备份和回退仍待演练。[会话、派发、原生回合与通知证据](evidence/codex-managed-native-sessions.json)
+
+复跑 `python3 -B -m unittest -v rewrite.test_codex_app_server.CodexAppServer.test_managed_native_commands_bind_without_manual_enrollment_and_restore rewrite.test_state_bundle.Bundle.test_capture_refuses_to_leave_native_session_registry_outside_the_backup`。macOS 全量 228 项通过。Linux arm64 157 项通过，另 71 项本机宿主用例跳过。
+
 Codex 独立只读工位已能经授权固定会话接口准备新会话或分支。实测沿用原工作区、模型和思考强度。空会话准备不增加模型请求，原生分支保留原父会话及历史。命名回执丢失时使用已落账的原生 ID 继续确认。创建回执丢失时，同一操作重试与原生进程重开均保留待核，未再发创建。当前安装的 App Server schema 中 `thread/start` 和 `thread/fork` 无供调用者提交幂等号的字段。离线停写换绑已能核对这类待核记录。[原生准备与接入证据](evidence/codex-native-thread-preparation.json)
 
 用准备端返回的原生 ID 显式登记独立适配器，再经现有交接将空会话从冷态启用。正式单仅产生一个原生回合，模型夹具两次调用 `worker_report`，Router 只留一条待验通知。飞书 `/new`、`/fork` 的自动适配器接入和换绑尚待实现，本轮未向真实用户会话投递。

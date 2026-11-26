@@ -137,6 +137,11 @@ def capture(sources,revision,destination):
     with output_directory(destination) as stage, locked(sources):
         for label,source in sorted(sources.items()):
             path = Path(source)
+            with closing(readonly(path)) as db:
+                tables = {row[0] for row in db.execute("SELECT name FROM sqlite_schema WHERE type='table'")}
+                if "codex_managed_session_root" in tables or ("managed_native_sessions" in tables and
+                        db.execute("SELECT 1 FROM managed_native_sessions LIMIT 1").fetchone()):
+                    raise ValueError("state file has an external native session registry: "+label)
             dest = stage/filename(label)
             copy_private(path,dest)
             checksum = digest(dest)
