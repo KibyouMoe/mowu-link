@@ -3,7 +3,7 @@ import json
 import re
 import time
 
-from . import delivery
+from . import delivery, pool
 from .storage import Database, encode, guid, require, string, timestamp
 
 SCHEMA = """
@@ -49,10 +49,14 @@ def held_pair(data):
 
 class Orders:
     def __init__(self, path, clock=time.time, poll_seconds=5, lease_seconds=30):
-        self.db = Database(path, SCHEMA + delivery.SCHEMA)
+        self.db = Database(path, SCHEMA + delivery.SCHEMA + pool.SCHEMA)
         self.clock = clock
         self.poll_seconds = poll_seconds
         self.lease_seconds = lease_seconds
+
+    def tick(self):
+        with self.db.transaction() as db:
+            pool.timers(db, self.clock(), self.lease_seconds)
 
     def write(self, actor, key, operation, data, perform):
         require(isinstance(key, str) and key.strip(), 422, "missing_idempotency_key")
@@ -93,11 +97,11 @@ class Orders:
         if db.execute("SELECT 1 FROM tasks WHERE assignee_id=? AND assignment_id IS NOT NULL",
                       (worker_id,)).fetchone():
             return
-        waiting = db.execute("SELECT task_id FROM tasks WHERE assignee_id=? AND state='ready' ORDER BY rowid LIMIT 1",
+        waiting = db.execute("SELECT task_id FROM tasks WHERE assignee_id=? AND state IN ('ready','resuming') ORDER BY rowid LIMIT 1",
                              (worker_id,)).fetchone()
         if not waiting:
             return
-        db.execute("UPDATE tasks SET assignment_id=?,revision=revision+1 WHERE task_id=?", (guid(), waiting[0]))
+        db.execute("UPDATE tasks SET assignment_id=?,state='ready',revision=revision+1 WHERE task_id=?", (guid(), waiting[0]))
         current = task(db, waiting[0])
         delivery.enqueue(db, worker_actor(worker_id), "task.dispatch",
                          {k: current[k] for k in ("task_id", "assignment_id", "revision", "title", "instructions")})
@@ -187,8 +191,9 @@ class Orders:
         owned = db.execute("SELECT task_id,assignment_id FROM tasks WHERE assignee_id=? AND state='working'",
                            (worker,)).fetchone()
         released = []
-        if aid and db.execute("SELECT 1 FROM reports WHERE worker_id=? AND task_id=? AND assignment_id=?",
-                              (worker, tid, aid)).fetchone():
+        if aid and db.execute("""SELECT 1 FROM reports WHERE worker_id=? AND task_id=? AND assignment_id=?
+            UNION ALL SELECT 1 FROM pool_entries WHERE worker_id=? AND task_id=? AND assignment_id=?""",
+                              (worker, tid, aid, worker, tid, aid)).fetchone():
             released.append(aid)
         reconcile = "no_task"
         if owned or (aid and not released):
@@ -241,6 +246,10 @@ class Orders:
                 and current["assignment_id"] == aid, 409, "stale_assignment")
         if data.get("outcome") == "continue_requested":
             return {"recorded": True, "task_state": "working"}
+        if data.get("outcome") == "blocked":
+            require(not data.get("artifact_ids"), 422, "attachments_not_supported")
+            pool.enter(db, current, "worker", string(data, "summary"), self.clock())
+            return {"recorded": True, "release_assignment_id": aid, "task_state": "blocked"}
         require(data.get("outcome") == "completed", 422, "unsupported_outcome")
         require(not data.get("artifact_ids"), 422, "attachments_not_supported")
         summary = string(data, "summary")
@@ -255,8 +264,20 @@ class Orders:
 
     def details(self, db, tid):
         current = task(db, tid)
-        report = db.execute("SELECT * FROM reports WHERE task_id=?", (tid,)).fetchone()
-        if current["state"] == "ready":
+        report = db.execute("""SELECT worker_id,task_id,assignment_id,summary,'completed' AS outcome
+                     FROM reports WHERE task_id=? UNION ALL
+                     SELECT worker_id,task_id,assignment_id,reason,'blocked' FROM pool_entries
+                     WHERE task_id=? AND source='worker'""", (tid, tid)).fetchall()
+        if report:
+            by_id = {r["assignment_id"]: dict(r) for r in report}
+            dispatches = db.execute("""SELECT json_extract(payload,'$.assignment_id') FROM deliveries
+                WHERE kind='task.dispatch' AND json_extract(payload,'$.task_id')=? ORDER BY rowid DESC""", (tid,))
+            report = next((by_id[r[0]] for r in dispatches if r[0] in by_id), None)
+        entry = db.execute("SELECT * FROM pool_entries WHERE task_id=? AND active=1", (tid,)).fetchone()
+        if entry:
+            current["blocked_since"] = timestamp(entry["entered"])
+            current["remind_at"] = timestamp(entry["remind_at"]) if entry["remind_at"] is not None else None
+        if current["state"] in ("ready", "resuming"):
             state = "pending"
             if current["assignment_id"]:
                 acknowledged = db.execute("""SELECT 1 FROM deliveries WHERE consumer=? AND kind='task.dispatch'
@@ -266,11 +287,37 @@ class Orders:
                     state = "received"
         else:
             state = "received"
-        return {"task": current, "delivery_state": state, "last_report": dict(report) if report else None,
-                "pending_cleanup": []}
+        materials = db.execute("SELECT * FROM materials WHERE task_id=? ORDER BY rowid", (tid,))
+        return {"task": current, "delivery_state": state, "last_report": report or None,
+                "pending_cleanup": [], "materials": [dict(r) for r in materials]}
 
     def act(self, db, tid, data):
         current = self.revision(db, tid, data)
+        action = data.get("action")
+        pooled = current["state"] in ("blocked", "snoozed")
+        if action in ("snooze", "resume", "archive_failed") or (action == "close" and pooled):
+            require(pooled, 409, "task_not_pooled")
+            if action == "snooze":
+                pool.snooze(db, tid, data.get("remind_after_hours"), self.clock())
+            else:
+                pool.leave(db, tid)
+                if action == "resume":
+                    resolution = string(data, "resolution")
+                    db.execute("UPDATE tasks SET state='resuming',revision=revision+1,instructions=? WHERE task_id=?",
+                               (current["instructions"] + "\n\n继续推进：" + resolution, tid))
+                    self.dispatch(db, current["assignee_id"])
+                else:
+                    if action == "archive_failed":
+                        string(data, "reason")
+                    state = "failed_archived" if action == "archive_failed" else "closed"
+                    mid = data.get("material_id")
+                    if mid is not None:
+                        require(action == "close" and db.execute(
+                            "SELECT 1 FROM materials WHERE material_id=? AND task_id=?", (mid, tid)).fetchone(),
+                            422, "unknown_material")
+                    db.execute("UPDATE tasks SET state=?,revision=revision+1 WHERE task_id=?", (state, tid))
+            details = self.details(db, tid)
+            return {"task": details["task"], "delivery_state": details["delivery_state"]}
         if data.get("action") == "assign":
             worker = string(data, "worker_id")
             require(current["state"] == "ready" and current["assignee_id"] in (None, worker),

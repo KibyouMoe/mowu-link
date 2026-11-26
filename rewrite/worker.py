@@ -161,20 +161,29 @@ class Worker:
                 db.execute("UPDATE chats SET reply=? WHERE message_id=?", (final_text, origin["message_id"]))
         # Busy/idle is sampled separately. No result is inferred from final text.
 
-    def report(self, native_id, task_id, assignment_id, summary):
+    def report(self, native_id, task_id, assignment_id, summary, outcome="completed"):
         with self.lock:
             origin = self.adapter.origin(native_id)
             require(origin["kind"] in ("task", "task_update") and origin["task_id"] == task_id
                     and origin["assignment_id"] == assignment_id, 403, "wrong_report_origin")
+            require(outcome in ("completed", "blocked", "continue_requested"), 422, "unsupported_outcome")
             body = {"session_id": self.session, "assignment_id": assignment_id,
-                    "outcome": "completed", "summary": summary}
+                    "outcome": outcome, "summary": summary}
             string(body, "summary")
+            if outcome == "continue_requested":
+                reply = self.router.request("POST", f"tasks/{task_id}/report", body, "continue-" + native_id)
+                require(reply.get("recorded") is True and not reply.get("release_assignment_id")
+                        and reply.get("task_state") == "working", 409, "report_receipt_mismatch")
+                return reply
             with self.db.transaction() as db:
                 previous = db.execute("SELECT * FROM outbox WHERE assignment_id=?", (assignment_id,)).fetchone()
                 if previous:
                     require(previous["body"] == encode(body), 409, "idempotency_conflict")
                     if previous["receipt"]:
-                        return json.loads(previous["receipt"])
+                        receipt = json.loads(previous["receipt"])
+                        if "error" in receipt:
+                            raise Fault(409, receipt["error"])
+                        return receipt
                 else:
                     job = db.execute("SELECT stage FROM jobs WHERE assignment_id=?", (assignment_id,)).fetchone()
                     require(job and job["stage"] == "accepted", 409, "stale_assignment")
@@ -182,9 +191,19 @@ class Worker:
             return self.submit(task_id, assignment_id, body)
 
     def submit(self, tid, aid, body):
-        reply = self.router.request("POST", f"tasks/{tid}/report", body, "complete-" + aid)
+        completed = body["outcome"] == "completed"
+        key = ("complete-" if completed else "blocked-") + aid
+        try:
+            reply = self.router.request("POST", f"tasks/{tid}/report", body, key)
+        except Fault as error:
+            if error.code == "stale_assignment":
+                with self.db.transaction() as db:
+                    db.execute("UPDATE outbox SET receipt=? WHERE assignment_id=?",
+                               (encode({"error": error.code}), aid))
+            raise
         require(reply.get("recorded") is True and reply.get("release_assignment_id") == aid
-                and reply.get("task_state") == "completed_reported", 409, "report_receipt_mismatch")
+                and reply.get("task_state") == ("completed_reported" if completed else "blocked"),
+                409, "report_receipt_mismatch")
         with self.db.transaction() as db:
             db.execute("UPDATE outbox SET receipt=? WHERE assignment_id=?", (encode(reply), aid))
             db.execute("UPDATE jobs SET stage='released' WHERE assignment_id=? AND stage='accepted'", (aid,))
@@ -195,4 +214,8 @@ class Worker:
             pending = db.execute("""SELECT task_id,assignment_id,body FROM outbox
                                     JOIN jobs USING(assignment_id) WHERE receipt IS NULL""").fetchall()
         for row in pending:
-            self.submit(row["task_id"], row["assignment_id"], json.loads(row["body"]))
+            try:
+                self.submit(row["task_id"], row["assignment_id"], json.loads(row["body"]))
+            except Fault as error:
+                if error.code != "stale_assignment":
+                    raise

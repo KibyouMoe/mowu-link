@@ -8,10 +8,10 @@ from .storage import Fault, encode
 
 REPORT_TOOL = {
     "name": "worker_report",
-    "description": "Submit the completed result of the formal assignment on this input.",
+    "description": "Report completion, a blocker, or a request to continue the formal assignment on this input.",
     "inputSchema": {"type": "object", "additionalProperties": False,
                     "properties": {"task_id": {"type": "string"}, "assignment_id": {"type": "string"},
-                                   "outcome": {"const": "completed"},
+                                   "outcome": {"enum": ["completed", "blocked", "continue_requested"]},
                                    "summary": {"type": "string", "minLength": 1}},
                     "required": ["task_id", "assignment_id", "summary"]},
 }
@@ -19,7 +19,8 @@ REPORT_TOOL = {
 
 def serve(worker, native_id, reader, writer):
     def report(_params, args):
-        return worker.report(native_id, args["task_id"], args["assignment_id"], args["summary"])
+        return worker.report(native_id, args["task_id"], args["assignment_id"], args["summary"],
+                             args.get("outcome", "completed"))
 
     serve_report_tool(report, reader, writer)
 
@@ -51,7 +52,7 @@ def serve_report_tool(report, reader, writer, observe=None):
                 args = params["arguments"]
                 schema = REPORT_TOOL["inputSchema"]
                 if (not isinstance(args, dict) or not set(schema["required"]) <= set(args) <= set(schema["properties"])
-                        or args.get("outcome", "completed") != "completed"
+                        or args.get("outcome", "completed") not in schema["properties"]["outcome"]["enum"]
                         or any(not isinstance(args[k], str) or not args[k].strip() for k in schema["required"])):
                     raise ValueError("invalid tool arguments")
                 try:

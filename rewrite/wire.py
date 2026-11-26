@@ -1,13 +1,14 @@
 """02A loopback development transport. No ambient proxies, credentials or live services."""
 import json
 import re
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlsplit
 from urllib.request import ProxyHandler, Request, build_opener
 
-from . import delivery
-from .orders import worker_actor
+from . import delivery, pool
+from .orders import task, worker_actor
 from .storage import Fault, encode, require
 
 
@@ -15,6 +16,7 @@ def route(orders, actor, method, path, body, headers):
     url = urlsplit(path)
     parts = url.path.removeprefix("/v1/").split("/")
     require(path.startswith("/v1/"), 404, "unknown_route")
+    orders.tick()
     if method == "GET" and parts in (["tasks"], ["workers"]):
         require(actor == "hermes", 403, "forbidden")
         query = parse_qs(url.query, keep_blank_values=True)
@@ -58,6 +60,12 @@ def route(orders, actor, method, path, body, headers):
             require(actor == worker_actor(wid), 403, "forbidden")
             handler = orders.session if op == "session" else orders.presence
             execute = lambda db: handler(db, wid, body)
+        case "POST", ["tasks", tid, "materials"]:
+            require(actor.startswith("worker/"), 403, "forbidden")
+            def execute(db):
+                wid = actor.split("/", 1)[1]
+                orders.active_session(db, wid, body)
+                return pool.candidate(db, task(db, tid), wid, body, orders.clock())
         case "POST", ["tasks", tid, op] if op in ("accept", "report"):
             require(actor.startswith("worker/"), 403, "forbidden")
             wid = actor.split("/", 1)[1]
@@ -104,7 +112,16 @@ def serve_loopback(orders, identities):
 
         do_GET = do_POST = do_PUT = do_PATCH = handle_request
 
-    return ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    class Server(ThreadingHTTPServer):
+        next_tick = 0
+
+        def service_actions(self):
+            super().service_actions()
+            if time.monotonic() >= self.next_tick:
+                orders.tick()
+                self.next_tick = time.monotonic() + 1
+
+    return Server(("127.0.0.1", 0), Handler)
 
 
 class Client:
