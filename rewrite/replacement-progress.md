@@ -8,6 +8,8 @@ Codex 适配器冷重开可从原 Worker 查回 Router 已保存的审批关闭�
 
 复跑 `python3 -B -m unittest -v rewrite.test_service.Service.test_lookup_returns_only_original_closed_approval_receipt_digest rewrite.test_codex_app_server.CodexAppServer.test_cold_adapter_reads_committed_approval_closure_without_native_replay`。Router 从未保存关闭时的原生证明恢复尚待实现。
 
+两项连续通过 5 轮。macOS 全量通过 268 项，Linux arm64 通过 182 项、跳过 86 项。以 `3eab3960c393cfab0d839f91a37f47d79c986b76` 构建 236 份文件的独立包，SHA-256 为 `b39dab9971ecd361f7f83aadeb2f172437bdbbe8d8ce63051ff2224e5c1fc892`。安装目录复跑审批、切换、快照与服务 42 项通过，文件摘要一致。另在临时 TLS 端口演练旧 Router 写入并关闭审批 `5a4014ae-fe00-40f3-9437-cf92aa3e596e`。将停写库复制给新版，按原审批号核到关闭摘要 `473bb1c31a48f91768ce0678f432eb9c98ce6cca1b8f715c0f3c56b710f6b6a1`。在原试用库上起旧包后仍读回同一关闭。三阶段各一条原通知，原库和回退试用库的摘要均未变。现场使用两版锁定安装包与合成审批，无原生动作。
+
 运行中换绑核对 Codex 和 DSH 适配器的原生审批账本。基线 `a3d421ad737b6179789b3138c64f4444b47e6b18` 在两个隔离反例中都写入了新绑定。一类是原生已空闲但 Router 尚未收到登记，另一类是派发暂停后才收到原审批。改版在第一类从未请求暂停，第二类以原交接号解除，丢解除回执后重开仍保留原绑定。旧适配器不支持审批观测时保留普通聊天并提示先升级。真实 Codex App Server 两会话实测，审批补记关闭后，新切换后的目标只新增一次输入。真实 DSH SDK 同样验证未登记和已登记但回执丢失的原审批，源宿主恢复并核到关闭后，允许新切换。DSH 目标宿主、模型、飞书、审批人和故障均为隔离测试夹具。[原生证据](evidence/native-handoff-approval.json)
 
 复跑 `python3 -B -m unittest -v rewrite.test_worker_resume rewrite.test_codex_app_server.CodexAppServer.test_runtime_switch_waits_for_unregistered_native_approval_to_close rewrite.test_dsh_native_loop.NativeLoop.test_dsh_unacknowledged_approval_recovers_without_a_late_notification`。原生应用授权等未接入的审批仍需另验。
