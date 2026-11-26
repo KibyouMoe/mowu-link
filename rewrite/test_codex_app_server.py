@@ -148,12 +148,15 @@ def isolated_app_server(root, url):
 
 @unittest.skipUnless(CODEX.is_file(),"bundled Codex App Server required")
 class CodexAppServer(unittest.TestCase):
+    def setUp(self):
+        self.root = self.enterContext(TemporaryDirectory(prefix="mowulink-codex-protocol-"))
+        self.provider = ThreadingHTTPServer(("127.0.0.1",0),Provider)
+        self.provider.observed = []
+        self.origin = self.enterContext(running(self.provider))
+
     def test_native_app_server_dynamic_tool_keeps_ids_and_fires_one_w04(self):
-        root = self.enterContext(TemporaryDirectory(prefix="mowulink-codex-protocol-"))
-        provider = ThreadingHTTPServer(("127.0.0.1",0),Provider)
-        provider.observed = []
-        origin = self.enterContext(running(provider))
-        rpc = self.enterContext(isolated_app_server(root,origin))
+        root,provider = self.root,self.provider
+        rpc = self.enterContext(isolated_app_server(root,self.origin))
         account = rpc.request("account/read",{"refreshToken":False})
         self.assertIsNone(account["account"])
         started = rpc.request("thread/start",{"cwd":root,"ephemeral":False,"dynamicTools":[REPORT_TOOL]})["thread"]
@@ -223,3 +226,57 @@ class CodexAppServer(unittest.TestCase):
                          "report_status_before_review":details["task"]["state"],"account_present":False,
                          "scripted_provider_requests":provider.observed,
                          "boundary":"Bundled native Codex App Server using a scripted local HTTP model. Desktop and authenticated model not exercised."}
+
+    def test_native_app_server_reconnect_recovers_input_before_w04_without_new_model_call(self):
+        clock = Clock()
+        with isolated_app_server(self.root,self.origin) as rpc:
+            sid = rpc.request("thread/start",{"cwd":self.root,"ephemeral":False,"dynamicTools":[REPORT_TOOL]})["thread"]["id"]
+            host = AppServerHost(rpc,sid)
+            host.session = sid
+            loop = self.enterContext(Loop.isolated(clock,host_factory=lambda _path,_name:host))
+            tid = loop.hermes.create(guid(),"Recovery test","Original assignment content","oguri")["task_id"]
+            loop.worker.connect()
+            loop.worker.poll()
+            clock.advance(10)
+            loop.worker.poll()
+            loop.worker.poll()
+            deadline = time.monotonic()+14
+            while True:
+                event = rpc.event(deadline)
+                if event.get("method")=="item/tool/call":
+                    pending_call = event["params"]
+                    break
+            self.assertEqual(pending_call["threadId"],sid)
+            frame, = [frame for frame in loop.wire.frames(0) if frame["kind"]=="task.dispatch"]
+            self.assertTrue(loop.worker.process(frame))
+            body = {"kind":"task",**frame["payload"]}
+            did = frame["delivery_id"]
+            original = loop.adapter.lookup_delivery(did,body,session=sid)
+            self.assertEqual(original["turn_id"],pending_call["turnId"])
+            self.assertIsNone(loop.hermes.inspect(tid)["last_report"])
+            # Disconnect this isolated App Server before answering its pending tool request.
+        self.assertIsNotNone(rpc.process.poll())
+        with loop.adapter.db.transaction() as db:
+            db.execute("UPDATE intents SET receipt=NULL,native_id=NULL WHERE delivery_id=?",(did,))
+        with isolated_app_server(self.root,self.origin) as reopened:
+            result = reopened.request("thread/resume",{"threadId":sid,"cwd":self.root})
+            self.assertEqual(result["thread"]["id"],sid)
+            host = AppServerHost(reopened,sid)
+            loop.adapter.host = host
+            self.assertTrue(loop.worker.process(frame))
+            recovered = loop.adapter.lookup_delivery(did,body,session=sid)
+            self.assertEqual(recovered,original)
+            thread = host.thread(sid,include_turns=True)
+            inputs = [item["id"] for turn in thread["turns"] for item in turn["items"] if item["type"]=="userMessage"]
+            self.assertEqual(inputs,[original["native_id"]])
+        self.assertEqual(self.provider.observed,[(True,0)])
+        self.assertEqual(loop.worker.hold(),{"held_task_id":tid,"held_assignment_id":body["assignment_id"]})
+        task = loop.hermes.inspect(tid)
+        self.assertEqual(task["task"]["state"],"working")
+        self.assertIsNone(task["last_report"])
+        self.assertEqual(loop.manager_wire.frames(0),[])
+        self.evidence = {"thread_id":sid,"task_id":tid,"assignment_id":body["assignment_id"],"original":original,
+                         "recovered":recovered,"native_input_count":len(inputs),"router_state":task["task"]["state"],
+                         "pending_native_call_id":pending_call["callId"],"model_requests":len(self.provider.observed),
+                         "original_process_exited":rpc.process.returncode is not None,
+                         "boundary":"Native App Server process restart with local scripted provider; no account or Desktop session"}

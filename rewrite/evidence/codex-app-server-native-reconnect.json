@@ -1,0 +1,26 @@
+{
+  "thread_id": "01a216b5-84f7-7253-8b66-61e3787a4edf",
+  "task_id": "18251b45-e927-4da9-ac4e-7a872b2ea9dc",
+  "assignment_id": "95b597b8-a8a1-44f7-9178-2a61b8617ee6",
+  "original": {
+    "delivery_id": "8cd2ec3f-dfb2-4189-a716-52973449112b",
+    "digest": "eb324f2d95c27dc98c8fc03d5173f9c17e238c31c21305893814e5b78b13bbd7",
+    "native_id": "01a216b5-8537-7250-899f-0d3506737257",
+    "session": "01a216b5-84f7-7253-8b66-61e3787a4edf",
+    "turn_id": "01a216b5-852e-7291-859d-59b8c555c524"
+  },
+  "recovered": {
+    "delivery_id": "8cd2ec3f-dfb2-4189-a716-52973449112b",
+    "digest": "eb324f2d95c27dc98c8fc03d5173f9c17e238c31c21305893814e5b78b13bbd7",
+    "native_id": "01a216b5-8537-7250-899f-0d3506737257",
+    "session": "01a216b5-84f7-7253-8b66-61e3787a4edf",
+    "turn_id": "01a216b5-852e-7291-859d-59b8c555c524"
+  },
+  "native_input_count": 1,
+  "router_state": "working",
+  "pending_native_call_id": "native_fixture_0",
+  "model_requests": 1,
+  "original_process_exited": true,
+  "boundary": "Native App Server process restart with local scripted provider; no account or Desktop session",
+  "consecutive_runs": 20
+}

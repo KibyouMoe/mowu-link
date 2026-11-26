@@ -4,6 +4,10 @@
 
 ## 检查点与证据
 
+独立 Codex App Server 在 W04 工具请求待响应时中断。清除适配器宿主凭据后，由新进程重开同一测试会话，查回同一宿主输入。原派发重投未产生第二个输入或模型请求，Router 保留原持单且无成果通知。连续 20 次通过。复跑 `python3 -m unittest -v rewrite.test_codex_app_server`。[原生恢复记录](evidence/codex-app-server-native-reconnect.json)。真实进程使用本地脚本模型，无生产调用。
+
+Linux arm64 以 `98097e25e6d3632d6fe7360d3b67e9f3829fe7ab` 复验通过 133 项，36 项因缺少本机 Codex 或 DSH 宿主跳过，校验 132 个发行文件。同机跨系统 TLS 试验仍只记录一个原生输入和一条成果通知，宿主与模型用夹具。
+
 独立 Codex App Server 的原生动态工具协议已接通隔离 Router。原生线程从 Worker 收一条正式派发，重投无第二条。实际 `item/tool/call` 两次调用 W04 回同一结果、只发一条待验通知；错线程和错回合均拒绝。首次查历史偶发暂不可用，保留待核，仍按原投递查回。连续 30 次通过。复跑 `python3 -m unittest -v rewrite.test_codex_app_server`。[原生记录](evidence/codex-app-server-scripted-w04.json)。原生进程实际运行，模型是本地脚本，无独立登录身份。Desktop 测试项目缺工具的原证据仍有效。
 
 DSH 原生工具执行器已走通带附件的 W04。563,200 字节测试文件由隔离适配器预先登记，原生回合调用暂存工具。最后一个分块回执丢失后，按原上传号查回，三块字节均只写一次。W04 前管理端取不到文件，正式回执后读取的字节和摘要与原件一致，只有一条 Notify。普通私聊和只获读权的训练员附件不能用此入口暂存。连续 12 次通过。[原生证据](evidence/dsh-native-artifacts.json)。复跑 `python3 -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_native_w04_stages_private_artifact_before_sharing_it_with_manager rewrite.test_work_files`。模型用本地驱动，测试不连接真实飞书。
