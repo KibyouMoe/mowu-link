@@ -377,7 +377,14 @@ class Worker:
                 kind = "task.cancel" if outcome == "cancel_confirmed" else "task.transfer_out"
                 require(origin["kind"] == kind and origin["task_id"] == task_id
                         and origin["assignment_id"] == assignment_id, 403, "wrong_report_origin")
-                return self.confirm_cleanup(task_id, assignment_id, kind, outcome)
+                try:
+                    receipt = self.confirm_cleanup(task_id, assignment_id, kind, outcome)
+                except Fault as error:
+                    if error.code=="native_cleanup_unconfirmed":
+                        self.display_cleanup(task_id,assignment_id,kind,"pending","原派发停止与清理仍待确认。")
+                    raise
+                self.display_cleanup(task_id,assignment_id,kind,"recorded","Router 已收到原派发的清理确认。")
+                return receipt
             require(origin["kind"] in ("task", "task_update", "task_probe", "question_answer") and origin["task_id"] == task_id
                     and origin["assignment_id"] == assignment_id, 403, "wrong_report_origin")
             require(outcome in ("completed", "blocked", "continue_requested"), 422, "unsupported_outcome")
@@ -405,6 +412,11 @@ class Worker:
                     require(job and job["stage"] == "accepted", 409, "stale_assignment")
                     db.execute("INSERT INTO outbox VALUES (?,?,NULL)", (assignment_id, encode(body)))
             return self.submit(task_id, assignment_id, body)
+
+    def display_cleanup(self, tid, aid, kind, status, text):
+        with self.db.transaction() as db:
+            display.append(db,{"event_id":f"cleanup-{kind}-{aid}-{status}","kind":"task","session":"",
+                               "turn_id":"","text":text+"\n"+tid})
 
     def confirm_cleanup(self, tid, aid, kind, outcome):
         with self.db.transaction() as db:

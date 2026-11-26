@@ -4,6 +4,8 @@
 
 ## 检查点与证据
 
+DSH 取消的待核分支已复跑。隔离 SDK 先记原回合中止，再向同一会话发送原派发的取消请求。两次试报均因缺少工作环境清理凭据返回 `native_cleanup_unconfirmed`，Router 保留原派发与清理记录，Worker 保留持单并只发一张待核卡。另用通用宿主夹具提供可核凭据，验证 Router 回执后才发确认卡。复跑 `python3 -m unittest -v rewrite.test_dsh_sdk.DshSdk.test_cancel_stops_reporting_at_missing_native_cleanup_even_after_an_aborted_turn rewrite.test_cleanup`，macOS 全套 124 项通过。DSH 停止及工作区清理的正向实机验收仍待补。
+
 DSH 的目录翻页和数字选择已接入。菜单产生后要等飞书返回消息号，Worker 才接受编号。模拟飞书已收、Worker 尚未记菜单回执时，旧编号不会误选，重投原卡仍只有一个平台消息号。力度菜单打开后手动换到另一模型，即使两模型都支持同一编号和强度，旧菜单也被宿主拒绝。重新查询后可换到 high。复跑 `python3 -m unittest -v rewrite.test_dsh_sdk.DshSdk.test_numbered_model_choices_use_the_last_published_page_and_effort_checks_its_route`，macOS 全套 123 项通过。实际 DSH SDK 和 HTTP 已运行，飞书和目录为夹具。
 
 回退回放同时验证了真实管理工具生成的 `hermes-…` 建单请求号。旧 Router 只接收 UUID，演练按来源生成稳定的旧请求号，并在计划中保留原号。两次生成计划一致，经旧 HTTP 重送仅入队一次。前一版 `8ecfd7ce9418862cb98eea0cb1df69d7b15af498` 在 Linux arm64 复核了 98 个发行文件，108 项通过，14 项 macOS DSH 测试跳过。跨 TLS 复跑仍只有一条夹具宿主输入和一条成果通知。

@@ -73,6 +73,10 @@ class Cleanup(unittest.TestCase):
         self.assertEqual(self.finish_cleanup("task.cancel", "cancel_confirmed")["task_state"], "cancelled")
         self.assertIsNone(self.old.hold()["held_task_id"])
         self.assertIsNone(self.manager.inspect(self.tid)["last_report"])
+        with self.old.db.transaction() as db:
+            events = db.execute("SELECT event_id FROM display_events WHERE event_id LIKE 'cleanup-%' ORDER BY seq").fetchall()
+        self.assertEqual([row[0] for row in events],[
+            f"cleanup-task.cancel-{self.aid}-pending",f"cleanup-task.cancel-{self.aid}-recorded"])
 
     def test_material_before_transfer_survives_new_holder(self):
         self.clock.advance(630)

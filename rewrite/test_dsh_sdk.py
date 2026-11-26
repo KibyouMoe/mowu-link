@@ -487,6 +487,28 @@ class DshSdk(unittest.TestCase):
         frames = self.loop.manager_wire.frames(0)
         self.assertEqual(sum(f["payload"].get("text") == args["summary"] for f in frames),1)
 
+    def test_cancel_stops_reporting_at_missing_native_cleanup_even_after_an_aborted_turn(self):
+        tid,aid,_ = self.assign()
+        self.drive("end",aborted=True)
+        self.m.act(guid(),tid,self.m.inspect(tid)["task"]["revision"],"cancel",reason="隔离取消")
+        self.w.poll()
+        self.assertEqual(self.drive("count")["received"],2)
+        params = {"task_id":tid,"assignment_id":aid,"outcome":"cancel_confirmed","summary":"测试停止"}
+        for suffix in ("first","retry"):
+            reply = self.call("worker_report","cleanup-"+suffix,params)
+            self.assertTrue(reply["isError"],reply)
+            self.assertIn("native_cleanup_unconfirmed",str(reply))
+        details = self.m.inspect(tid)
+        self.assertEqual((details["task"]["state"],details["pending_cleanup"][0]["assignment_id"]),("working",aid))
+        self.assertIsNone(details["last_report"])
+        self.assertEqual(self.w.hold()["held_assignment_id"],aid)
+        sink = PlatformFixture()
+        views = Views(self.directory/"cleanup-views.db",self.inbound.worker,sink,"chat","玉藻")
+        views.poll()
+        texts = [card["elements"][0]["text"]["content"] for _,_,card in sink.messages.values()]
+        self.assertEqual(sum("原派发停止与清理仍待确认" in text for text in texts),1)
+        self.assertFalse(any("Router 已收到原派发的清理确认" in text for text in texts))
+
     def test_private_chat_and_mixed_input_cannot_report(self):
         tid,aid,_ = self.assign()
         self.drive("end")
