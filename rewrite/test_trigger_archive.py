@@ -8,6 +8,7 @@ import tempfile
 import unittest
 
 from .cutover import digest
+from .legacy_test_fixture import source_for
 from .trigger_archive import DATABASE, capture, event, restore, verify
 
 
@@ -35,7 +36,7 @@ store.close()
 
     def old(self,body,database):
         code = "from server import TriggerStore\nimport json,sys\n"+body
-        module = Path(__file__).resolve().parents[1]/"server/trigger"
+        module = source_for("trigger")
         result = subprocess.run([sys.executable,"-c",code,str(database)],cwd=self.root,check=True,
                                 env={"HOME":str(self.root),"PATH":os.defpath,"PYTHONPATH":str(module),
                                      "PYTHONDONTWRITEBYTECODE":"1"},capture_output=True,text=True)

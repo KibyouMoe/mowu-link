@@ -12,6 +12,7 @@ from threading import Thread
 
 from .cutover import backup, digest, export_chat, prepare, reconcile, rollback, stage_queue_rollback, verified
 from .devloop import FixtureHost, Loop, agent_report
+from .legacy_test_fixture import source_for
 from .test_mainline import Clock
 from .orders import Orders
 from .storage import Fault, guid
@@ -44,7 +45,7 @@ print(json.dumps([a,q,att["id"]]))
         self.archived,self.queued,self.sha = json.loads(ids)
 
     def old(self,code,*args):
-        source = Path(__file__).resolve().parents[1]/"server/router"
+        source = source_for("router")
         program = "from server import RouterStore, AttachmentStore\nfrom pathlib import Path\nimport sys,json,hashlib,io\n" + code
         output = subprocess.run([sys.executable,"-c",program,*map(str,args)],check=True,capture_output=True,
                                 text=True,cwd=self.root,env={"PATH":os.defpath,"HOME":str(self.root),

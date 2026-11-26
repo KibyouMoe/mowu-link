@@ -156,6 +156,6 @@ python3 -B -m rewrite.state_bundle stage-native-handoff \
 
 已有试用消息或成果时，先停止试用端并用**试用后的当前库**重新采集快照，再以上次目标为来源、原会话为目标重复换绑。源组件清单里的 `agent:<Worker ID>` 使用试用适配器库；切回启动适配器使用之前保留的原会话账本。这样保留试用期间的新工单、成果和两端收据。旧版恢复到试验前数据仍受快照摘要检查。
 
-复跑 `python3 -B -m unittest -v rewrite.test_state_bundle rewrite.test_codex_app_server.CodexAppServer.test_cold_switch_and_return_preserve_receipts_and_use_the_target_native_session`。原生用例运行独立 Codex App Server，实际工作单经 W04 待验，模型与平台采用夹具。飞书 `/resume` 保持目录查询；日用会话的运行中换绑另验。
+复跑 `python3 -B -m unittest -v rewrite.test_state_bundle rewrite.test_codex_app_server.CodexAppServer.test_cold_switch_and_return_preserve_receipts_and_use_the_target_native_session`。原生用例运行独立 Codex App Server，实际工作单经 W04 待验，模型与平台采用夹具。已经运行的独立适配器另有[飞书切换会话](README.md#飞书切换会话)入口，日用会话待验。
 
 跨引擎复跑用 `python3 -B -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_one_worker_cold_switches_between_native_engines_and_keeps_both_reports`。在同一台 Mac 上运行实际 Codex App Server 和 DSH SDK，使用同一个 Worker 身份、两个适配器账本和一套连续的 Worker 与平台记录。两个会话各接一条相同的测试图文和一张正式单。切回后仍保留两张原卡和两份待验成果。[跨引擎记录](evidence/cross-native-handoff.json)
