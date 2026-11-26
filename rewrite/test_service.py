@@ -61,7 +61,7 @@ class Service(unittest.TestCase):
         cert,key = self.root/"test.crt", self.root/"test.key"
         subprocess.run(["openssl","req","-x509","-newkey","rsa:2048","-nodes","-days","1",
                         "-subj","/CN=localhost","-addext","subjectAltName=IP:127.0.0.1,DNS:localhost",
-                        "-keyout",key,"-out",cert],capture_output=True,check=True,timeout=10)
+                        "-keyout",key.name,"-out",cert.name],cwd=self.root,capture_output=True,check=True,timeout=10)
         return cert,key
 
     @staticmethod

@@ -182,7 +182,7 @@ def run(repository,older,newer,component="router",*,dsh_image=None):
             cert,key = root/"cert.pem",root/"key.pem"
             subprocess.run([openssl,"req","-x509","-newkey","rsa:2048","-nodes","-days","1",
                             "-subj","/CN=localhost","-addext","subjectAltName=IP:127.0.0.1",
-                            "-keyout",key,"-out",cert],cwd=root,env=env,timeout=10,check=True,capture_output=True)
+                            "-keyout",key.name,"-out",cert.name],cwd=root,env=env,timeout=10,check=True,capture_output=True)
             rehearse = worker_pair if component=="worker-pair" else router_rehearsal
             observed = rehearse(root,old,new,cert,key,env)
         for archive,sha,checksum,directory in versions:
