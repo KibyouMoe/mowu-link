@@ -1,0 +1,35 @@
+{
+  "task_id": "1941d216-1b73-4eed-be9a-ef9c7f483a8e",
+  "original_assignment": "ecdd6131-bd01-4c38-b075-e41034664053",
+  "requests": [
+    {
+      "id": "bef72267-ded8-49e9-8982-b530ed3392e2",
+      "state": "working",
+      "delivery": "pending",
+      "worker_status": 409,
+      "worker_error": "stale_assignment",
+      "native_input": "f6630bf2-3355-40db-9d1e-4359342c2a93",
+      "http_forwarded": true
+    },
+    {
+      "id": "385d86f5-dc75-4565-86ac-8dc574dcbd3a",
+      "state": "blocked",
+      "delivery": "pending",
+      "worker_status": 409,
+      "worker_error": "stale_assignment",
+      "native_input": "18d073ac-dbc0-4abe-8d4b-5a06f153c130",
+      "http_forwarded": false
+    }
+  ],
+  "native_cancel_inputs": 5,
+  "cached_cleanup_receipt": {
+    "error": "stale_assignment"
+  },
+  "original_report_idempotency_key": "cancel_confirmed-ecdd6131-bd01-4c38-b075-e41034664053",
+  "same_old_request_replayed_directly_to_router_diagnostic_only": {
+    "recorded": true,
+    "release_assignment_id": "ecdd6131-bd01-4c38-b075-e41034664053",
+    "task_state": "cancelled"
+  },
+  "boundary": "Actual isolated rewrite HTTP Router and Worker. Scripted host and clock; direct W04 only diagnoses the Router and does not count as a Worker success."
+}

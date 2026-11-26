@@ -1,0 +1,19 @@
+{
+  "task_id": "a610c251-e899-59d1-b521-0d385a037809",
+  "assignment_id": "c9bb8663-ee44-44f1-9697-2fd3a94bffa1",
+  "first_cancel_key": "2cf09b5a-9760-4703-8bd4-63c80f5c9d5a",
+  "new_cancel_key": "613991b4-ad8e-4492-93f9-3f058e22b55d",
+  "cancel_native_inputs": [
+    "70873edd-31e7-4d3f-ab40-df544bd15958",
+    "11c52841-1b5d-4e5b-8bbc-2e8a50f5894e"
+  ],
+  "shelved_delivery": null,
+  "cleanup_reply": {
+    "recorded": true,
+    "release_assignment_id": "c9bb8663-ee44-44f1-9697-2fd3a94bffa1",
+    "task_state": "cancelled"
+  },
+  "rollback_error": "trial inquiry deliveries do not match their original assignment",
+  "refused_without_output": true,
+  "boundary": "Actual isolated rewrite HTTP Router and Worker, pinned old RouterStore, scripted host and clock."
+}

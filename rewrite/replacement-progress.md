@@ -10,6 +10,12 @@
 
 取消重试耗尽后的两种处置已纳入隔离回退。四条取消指令无清理确认才入池，首次迟到的取消 W04 返回 409。挂起后重新取消，由原工位确认并归档。另一张单转派后由新工位提交成果、溪流验收，原工位只清理旧派发。两代 HTTP Router 实测，旧端分别读回已取消和已验收，两个工位都无持单、无重派。首次取消、三次空闲重试、搁置和后续清理分别保留凭据。清理未确认或篡改重试的空闲观测时，回退不生成目录。宿主和时钟为夹具。复跑 `python3 -B -m unittest -v rewrite.test_cutover -k exhausted_cancel`。[取消重试回退实测](evidence/cutover-reviewed-cancel-retry.json)
 
+取消重试回退实现 `42ad8dc34f5d985768fea13326158d27a92a85b8` 的 Linux arm64 全量通过 201 项、依环境跳过 121 项。303 文件安装包通过 73 项专项，逐文件校验一致。归档 SHA-256 为 `abac5a9649dd8415254780e2cc892ce722b0322c423f422aec1603eb7cfc4174`。Windows 常规与 DSH 原生两组通过。[Windows CI](https://github.com/KibyouMoe/mowu-link/actions/runs/45909766891)
+
+后续发现一条仍未通过的 Worker 路径。第一次取消耗尽后，若原工位真正向 Router 提交过迟到的取消 W04，Worker 会把 409 按派发号和控制类型缓存。重新取消有新的宿主输入，但 Worker 直接复用旧错误，没有发出第二次 HTTP 请求。把原请求及原幂等键直接重放给隔离 Router，Router 又会接受，因为请求缺少可区分两次取消的标识。直接重放只用于诊断。前述回退实测覆盖最终清理已由正确流程确认的工单。后续需要把新清理回执与具体取消请求关联，同时保留已成功回执的幂等查回。宿主和时钟为夹具。[Worker 重新取消阻点](evidence/worker-stale-cancel-reissue.json)
+
+另一条回退待补。原工位收到了首次取消，但在回复前离线十分钟。实际 Router 入池，没有发送重试耗尽的搁置通知。原工位上线后收到第二条取消并交 W04，Router 记已取消。隔离回退拒绝合并这两次取消，原库摘要不变，也未生成旧库。该路径要按离线入池对账。[离线后重新取消](evidence/cutover-offline-cancel-reissue-gap.json)
+
 工单内已答复的问题纳入回退。真实隔离 Router 和两个 Worker 验证选择、文本和跳过三种答复。一条答复到达前已转派并验收，仍送入原工位的宿主，当前工位无答复输入。重送同一问题和同一答案，保留原号和操作回执，通知与答复帧各一次。未答、答复帧缺接收确认或流向下一派发均拒绝准备。恢复后的旧 Router 读回归档，两个工位无待答题及重新派发。原 W05、题文、答复及接收记录只留私有档案，宿主使用夹具。[问答回退实测](evidence/cutover-reviewed-questions.json)
 
 问答实现 `31981cf46a980baf94021488751d0424416ac40b` 的 Linux arm64 全量通过 198 项、按环境跳过 121 项。300 文件安装包的 70 项专项全部通过，逐文件校验一致。归档 SHA-256 为 `2df06cef354843e4bad886c0cfc0859fa0ead6dbe74c263b24b376d91a70eb05`。Windows 常规与 DSH 原生两组通过。[Windows CI](https://github.com/KibyouMoe/mowu-link/actions/runs/45908280694)
