@@ -1,0 +1,48 @@
+{
+  "revision": "2025c3001d1019016b832ff7d578eb1aa56c7899",
+  "release_sha256": "341679a5227c22de554867645db1ea560889715589d3ed3cedf08d607eb54ae9",
+  "verified_release_files": 92,
+  "guest_image_id": "sha256:0a1254df0519003d33fd4ab8ad26aff1154e50b3c93aa5ec978e83bf83ba084c",
+  "cross_os": {
+    "controller": "Darwin",
+    "worker_release": "2025c3001d1019016b832ff7d578eb1aa56c7899",
+    "task_id": "a660eacc-2e61-4c60-b78e-1cac1c97c5ae",
+    "assignment_id": "4533e3d2-c061-4e5f-8481-865ac13309ec",
+    "delivery_id": "131a99e3-d896-4f22-b399-fea1e00f2f87",
+    "fixture_native_id": "b6741142-1805-4eff-afb5-21eab3cfe680",
+    "fixture_turn_id": "2c22e69d-a3cb-46f6-be79-de1daea78956",
+    "after_turn": "working",
+    "after_report": "completed_reported",
+    "worker_holds_after_receipt": {
+      "held_task_id": null,
+      "held_assignment_id": null
+    },
+    "router_notifications": 1,
+    "unknown_identity_http": 401,
+    "untrusted_certificate_rejected": true
+  },
+  "independently_read_guest_inputs": 1,
+  "linux_regression": {
+    "system": "Linux",
+    "kernel": "6.8.0-117-generic",
+    "architecture": "aarch64",
+    "python": "3.13.18",
+    "uid": 65534,
+    "tests_run": 112,
+    "skipped": [
+      "rewrite.test_dsh_sdk.DshSdk.test_aborted_native_turn_and_protocol_input_never_become_a_final_or_a_report",
+      "rewrite.test_dsh_sdk.DshSdk.test_committed_native_image_preserves_order_and_is_bound_to_the_public_record",
+      "rewrite.test_dsh_sdk.DshSdk.test_formal_receipt_recovered_from_sdk_log_and_registered_reports",
+      "rewrite.test_dsh_sdk.DshSdk.test_invalid_raster_and_text_only_model_do_not_receive_an_input",
+      "rewrite.test_dsh_sdk.DshSdk.test_native_input_written_before_failure_recovers_from_the_same_record",
+      "rewrite.test_dsh_sdk.DshSdk.test_next_turn_queue_recovers_receipt_without_steering_or_replaying",
+      "rewrite.test_dsh_sdk.DshSdk.test_private_chat_and_mixed_input_cannot_report",
+      "rewrite.test_dsh_sdk.DshSdk.test_public_log_to_feishu_cards_preserves_final_and_replays_lost_worker_ack",
+      "rewrite.test_dsh_sdk.DshSdk.test_queued_delivery_rejects_another_session_before_writing",
+      "rewrite.test_dsh_sdk.DshSdk.test_sdk_keeps_caption_image_and_generic_file_in_native_content"
+    ],
+    "failed": 0,
+    "errors": 0
+  },
+  "boundary": "One physical host, separate OS kernels over TLS. Host, Agent and manager invocation are fixtures."
+}

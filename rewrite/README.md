@@ -88,3 +88,15 @@ python3 -m rewrite.release verify --archive ./build/mowulink.tar --revision "$RE
 平台配置中的 `worker_name` 用于飞书卡片标题。宿主适配器以自身身份向 Worker 的 `POST /v1/worker/display` 交已观测的公开事件，携带稳定事件号、目标会话和回合。每段增量文字仅发新增部分；独立的最终答复事件才显示为「回复」。工具事件仅接受工具名和用于展示的预览文本。查询或抄送都不会写正式完工报告。
 
 独立平台入口 `python3 -m rewrite.feishu_client --config <专用测试配置>` 使用飞书官方 Python SDK。配置是仅属当前用户的 JSON，显式提供 `app_id`、`app_secret`、`trainer_open_id`、`chat_id`、平台队列的 `database` 和指向 Worker 的 `worker_connection`。普通私聊及其文件保存在 Worker 端，断开 Router 仍能投递。使用配置前需要单独的测试应用和会话。无需账号即可运行 `rewrite.test_feishu_inbound` 或官方事件解析复验 `rewrite.feishu_sdk_check`。[平台消息资源说明](https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/guide/faq) [飞书 Python SDK](https://github.com/larksuite/oapi-sdk-python)
+### 跨系统验收
+
+开发机需 Python 3.12 或更新版本、Git、OpenSSL 和已运行的本地 Linux Docker 引擎。先准备含 Python 3.12+、Git、tar、OpenSSL 的 Linux 测试镜像。此次实测使用官方 `python:3.13-bookworm` 的 Linux arm64 manifest `sha256:0a1254df0519003d33fd4ab8ad26aff1154e50b3c93aa5ec978e83bf83ba084c`。各引擎对已安装镜像的 ID 表示可能不同，`--image` 使用本机 `docker image inspect --format '{{.Id}}' <镜像>` 的完整结果。
+
+```sh
+python3 -m rewrite.linux_check --repository . \
+  --revision 2025c3001d1019016b832ff7d578eb1aa56c7899 \
+  --image sha256:0a1254df0519003d33fd4ab8ad26aff1154e50b3c93aa5ec978e83bf83ba084c \
+  --socket "$HOME/.colima/default/docker.sock"
+```
+
+脚本从指定提交制作发行包，两端各自安装。Worker 在开发机运行，Router 和宿主适配器在全新 Linux 容器里运行，各用独立的身份和 HTTPS 端口。两个端口只映射到开发机回环地址。容器以普通用户运行，根目录只读，临时盘保存测试数据库。结束时清理测试容器、专用网络及一次性身份。测试重投后独立读回宿主输入数，核对签发者校验、未登记身份、W03 持单、回合结束与 W04 待验收。Agent 与宿主为夹具。两种系统运行在一台物理机上。原始记录见[Linux 跨系统验收记录](evidence/linux-cross-os.json)。

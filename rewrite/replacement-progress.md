@@ -4,6 +4,8 @@
 
 ## 检查点与证据
 
+macOS Worker 与 Linux arm64 Router、宿主适配器已通过两个独立 TLS 端口核验。两端安装同一提交 `2025c300`，Linux 复核 92 个发行文件。重投后宿主日志仅一条输入，回合结束仍为 working，夹具 Agent 报告后转待验收，只发一条通知。Linux 回归 102 项通过、10 项因 macOS DSH SDK 缺席跳过。实测使用同机 Linux 来宾，跨物理设备、真实模型调用另验。[原始记录](evidence/linux-cross-os.json)和[复跑说明](README.md#跨系统验收)。
+
 | 范围 | 当前结果 | 复验入口与原始证据 | 下一项 |
 | --- | --- | --- | --- |
 | 正式主线 17fccee | 真实临时 HTTP Router 与 Worker；双宿主及 Agent 为夹具，14 项 | `python3 -m rewrite.devloop`、`rewrite/test_mainline.py` | 扩充 A/W 接口 |
