@@ -4,6 +4,8 @@
 
 ## 检查点与证据
 
+实际 DSH 从搁置通知暂存 640000 字节，原生工具仅以附件另交候选材料。暂存后管理端读不到，候选入池后按原附件号读回相同字节，下一位 Worker 仍无读权。原 W04 首次迟交仍回 409，转派后同号只回读原材料号，另交新材料被拒，无成果或凭候选释放持单。连续 12 次通过。[原生材料记录](evidence/dsh-native-candidate-artifact.json)。复跑 `python3 -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_shelved_dsh_assignment_submits_candidate_without_changing_ownership`。模型、时钟和第二工位使用夹具。
+
 隔离 Codex `/resume` 已用原生索引完成目录和搜索。冷开后只恢复绑定线程，查询可见同目录的另一会话，归档会话和其他目录都不显示。历史会话查询前后未加载，无新增模型请求或工单，原会话仍绑定，选择编号明确提示换绑未接。连续 12 次通过。复跑 `python3 -m unittest -v rewrite.test_codex_app_server.CodexAppServer.test_resume_catalog_uses_only_current_app_server_workspace_without_loading_history`。[原生目录记录](evidence/codex-app-server-native-catalog.json)。
 
 隔离 App Server 的 `/queue` 已接通。Worker 观察为空闲后宿主突然开始普通对话，原生写前明确拒绝队首投递，另两个消息仍排队。空闲后成功写入，故意丢回执则查原输入。两个排队消息按顺序各进一次新回合，原普通回合也只有一条输入。连续 16 次通过。复跑 `python3 -m unittest -v rewrite.test_codex_app_server.CodexAppServer.test_app_server_next_turn_queue_never_steers_busy_turn_or_replays_lost_ack`。[原生队列记录](evidence/codex-app-server-native-queue.json)。平台与模型为夹具。

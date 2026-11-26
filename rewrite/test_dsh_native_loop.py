@@ -1072,13 +1072,33 @@ class NativeLoop(unittest.TestCase):
         token = guid()
         client = Client(self.open_worker(service,{token:"adapter/oguri"}),token)
         self.enterContext(tool_listener(Path(directory),loop.adapter,client))
+        raw = b"evidence from native shelved assignment\n" * 16000
+        digest = hashlib.sha256(raw).hexdigest()
+        upload = client.request("POST","worker/media/uploads",
+                                {"name":"candidate.txt","sha256":digest,"size_bytes":len(raw)},guid())
+        source = client.request("PATCH","worker/media/uploads/"+upload["upload_id"],raw,
+                                headers={"Upload-Offset":"0"})["attachment_id"]
         next_host = FixtureHost(loop.root/"new-holder-native.db","new-holder-session")
         next_worker = Worker(loop.root/"new-holder.db","tama",loop.extra_clients["tama"],
                              HostAdapter(loop.root/"new-holder-adapter.db",next_host,next_host.session))
         next_worker.connect()
         next_worker.poll()
         with self.start_native(directory,session,"material") as native:
-            tid = loop.hermes.create(guid(),"Candidate","Wait for independent candidate","oguri")["task_id"]
+            tid = loop.hermes.create(guid(),"Candidate",source,"oguri")["task_id"]
+            router_request = loop.worker.router.request
+            checked_scope = []
+
+            def confirm_material_scope(method,path,*args,**kwargs):
+                if method=="POST" and path==f"tasks/{tid}/materials" and not checked_scope:
+                    artifact, = args[0]["artifact_ids"]
+                    with self.assertRaisesRegex(Fault,"attachment_not_found"):
+                        loop.manager_wire.request("GET","attachments/"+artifact)
+                    self.assertEqual(router_request("GET","attachments/"+artifact)["bytes"],raw)
+                    self.assertIsNone(loop.worker.hold()["held_assignment_id"])
+                    checked_scope.append(artifact)
+                return router_request(method,path,*args,**kwargs)
+
+            loop.worker.router.request = confirm_material_scope
             loop.worker.connect()
             loop.worker.poll()
             clock.advance(10)
@@ -1092,17 +1112,25 @@ class NativeLoop(unittest.TestCase):
                 loop.worker.poll()
                 loop.worker.poll()
                 result = self.read_native(native,"read")
-            (call,) = result["calls"]
-            self.assertEqual(call["name"],"worker_submit_material")
+            stage,call = result["calls"]
+            self.assertEqual([stage["name"],call["name"]],["worker_stage_artifacts","worker_submit_material"])
             args = json.loads(call["arguments"])
             self.assertEqual((args["task_id"],args["assignment_id"]),(tid,aid))
-            material = json.loads(result["results"][0]["content"][0]["text"])
+            self.assertEqual(set(args),{"task_id","assignment_id","artifact_ids"})
+            self.assertEqual(args["artifact_ids"],checked_scope)
+            artifact, = checked_scope
+            self.assertEqual([item["isError"] for item in result["results"]],[False,False])
+            material = json.loads(result["results"][1]["content"][0]["text"])
             self.assertEqual(set(material),{"received","material_id"})
             self.assertTrue(material["received"])
             details = loop.hermes.inspect(tid)
             self.assertEqual((details["task"]["state"],details["task"]["holder"]),("blocked",{"kind":"router"}))
             self.assertIsNone(details["last_report"])
             self.assertEqual([item["material_id"] for item in details["materials"]],[material["material_id"]])
+            self.assertEqual(details["materials"][0]["artifact_ids"],[artifact])
+            self.assertEqual(loop.manager_wire.request("GET","attachments/"+artifact)["bytes"],raw)
+            with self.assertRaisesRegex(Fault,"attachment_not_found"):
+                loop.extra_clients["tama"].request("GET","attachments/"+artifact)
             self.assertIsNone(loop.worker.hold()["held_assignment_id"])
             with self.assertRaisesRegex(Fault,"stale_assignment") as stale:
                 loop.wire.request("POST",f"tasks/{tid}/report",{"session_id":loop.worker.session,
@@ -1131,8 +1159,12 @@ class NativeLoop(unittest.TestCase):
             self.assertEqual([row["assignment_id"] for row in final["pending_cleanup"]],[aid])
             self.assertEqual(len(final["materials"]),1)
             self.assertIsNone(final["last_report"])
+            self.assertFalse([frame for frame in loop.manager_wire.frames(0)
+                              if artifact in frame["payload"].get("attachment_ids",[])])
             self.evidence = {"session":session,"task_id":tid,"old_assignment_id":aid,"shelved_receipt":proof,
                 "native_tool":call["name"],"native_call_id":call["callId"],"first_receipt":material,
+                "stage_tool_call_id":stage["callId"],"local_artifact":source,"router_artifact":artifact,
+                "artifact_sha256":digest,"artifact_bytes":len(raw),"manager_read_only_after_submission":True,
                 "first_w04":stale.exception.status,"before_new_assignment":details["task"]["holder"],"new_assignment_id":new_aid,
                 "new_holder":final["task"]["holder"],"pending_cleanup":aid,
                 "final_material_count":len(final["materials"]),"final_report":final["last_report"],

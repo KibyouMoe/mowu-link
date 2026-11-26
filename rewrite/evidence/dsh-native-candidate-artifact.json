@@ -1,0 +1,38 @@
+{
+  "session": "dsh-native-material",
+  "task_id": "8f75349d-f31a-4bf7-b00c-f193069d3f40",
+  "old_assignment_id": "ed6268af-b5c2-4856-9df8-dddeb37b3756",
+  "shelved_receipt": {
+    "delivery_id": "a8101cc4-831c-48b3-a4b4-a00b8d55d8c7",
+    "digest": "07f692bda9bdcfb700a9a78f27e279cdc83cefc274f6f21b1e649422de128331",
+    "native_id": "mowulink-248a281a3a59ff5e9227c56206ce8bac05cc2470bc610edd996e83983320e42d",
+    "session": "dsh-native-material",
+    "turn_id": "44/6"
+  },
+  "native_tool": "worker_submit_material",
+  "native_call_id": "native-candidate",
+  "first_receipt": {
+    "material_id": "94e29034-14e1-495f-b0e9-f14bea673512",
+    "received": true
+  },
+  "stage_tool_call_id": "candidate-stage",
+  "local_artifact": "94aa6691-bd74-45eb-bf00-badf03042d83",
+  "router_artifact": "656c9ec5-ffa8-48cb-85fc-d3312c5f505c",
+  "artifact_sha256": "ba85494bfdcb4d4b42e1ce87b1938b85af1d3dfdf0bf08b6059433ec08ca9d74",
+  "artifact_bytes": 640000,
+  "manager_read_only_after_submission": true,
+  "first_w04": 409,
+  "before_new_assignment": {
+    "kind": "router"
+  },
+  "new_assignment_id": "13fb5c4c-9bc3-42de-9743-8de5b68dbb38",
+  "new_holder": {
+    "kind": "worker",
+    "worker_id": "tama"
+  },
+  "pending_cleanup": "ed6268af-b5c2-4856-9df8-dddeb37b3756",
+  "final_material_count": 1,
+  "final_report": null,
+  "boundary": "Actual DSH native tool and Router, scripted local model and test clock",
+  "consecutive_runs": 12
+}

@@ -115,12 +115,16 @@ class LocalModel extends LlmAdapter {
     }
     if (goal?.round===1 && mode!=='formal-goal') await waitForStop(signal);
     if (goal?.round===2) secondRound.resolve();
+    if (mode==='material' && command==='task') this.candidateFile = payload.instructions;
     if (mode==='material' && command==='task.shelved' && !this.submitted.has('material')) {
-      this.submitted.set('material',true);
-      assert.ok(tools?.some(tool=>tool.name==='worker_submit_material'));
-      const args = {task_id:payload.task_id,assignment_id:payload.assignment_id,text:'Keep this candidate without closing the task'};
+      const result = messages.findLast(entry=>entry.toolCallId==='candidate-stage');
+      const name = result ? 'worker_submit_material' : 'worker_stage_artifacts';
+      assert.ok(tools?.some(tool=>tool.name===name));
+      const args = result ? {task_id:payload.task_id,assignment_id:payload.assignment_id,
+        artifact_ids:JSON.parse(result.content[0].text).artifact_ids} : {attachment_ids:[this.candidateFile]};
+      if (result) this.submitted.set('material',true);
       yield {type:'block-start',index:0,blockType:'tool-call'};
-      yield {type:'block-end',index:0,block:{type:'tool-call',id:'native-candidate',name:'worker_submit_material',
+      yield {type:'block-end',index:0,block:{type:'tool-call',id:result ? 'native-candidate' : 'candidate-stage',name,
         arguments:JSON.stringify(args)}};
       yield {type:'finish',reason:{kind:'tool-calls'}};
       return;
