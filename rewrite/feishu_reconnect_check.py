@@ -1,4 +1,5 @@
 """Verify the installed Feishu SDK against a local long-connection fixture."""
+import argparse
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.metadata import version
@@ -10,12 +11,12 @@ from socket import SHUT_RDWR
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
-from threading import Thread
+from threading import Event, Thread
 from time import monotonic
 
 from .adapter import HostAdapter
 from .devloop import FixtureHost
-from .feishu_client import receive
+from .feishu_client import receive, start_long_connection
 from .feishu_inbound import Inbound
 from .storage import encode, guid
 from .wire import Client
@@ -26,14 +27,17 @@ from .worker_service import WorkerService
 APP, SECRET, TRAINER, CHAT = "fixture-app","fixture-secret","fixture-trainer","fixture-chat"
 
 
-def sdk_receiver(folder, port):
+def sdk_receiver(folder, port, mode):
     import lark_oapi as lark
 
     inbox = Inbound(Path(folder)/"inbox.db",None,None,APP,TRAINER,CHAT)
     dispatcher = (lark.EventDispatcherHandler.builder("","")
                   .register_p2_im_message_receive_v1(lambda event:receive(inbox,event)).build())
-    lark.ws.Client(APP,SECRET,domain=f"http://127.0.0.1:{int(port)}",event_handler=dispatcher,
-                   log_level=lark.LogLevel.ERROR).start()
+    options = {"domain":f"http://127.0.0.1:{int(port)}","log_level":lark.LogLevel.ERROR}
+    if mode=="raw":
+        lark.ws.Client(APP,SECRET,event_handler=dispatcher,**options).start()
+    else:
+        start_long_connection(APP,SECRET,dispatcher,discovery_seconds=.5,**options)
 
 
 def event_frame(sequence, label):
@@ -51,8 +55,9 @@ def event_frame(sequence, label):
 
 
 @contextmanager
-def endpoint(ws_port):
+def endpoint(ws_port,stall_discovery):
     calls = []
+    blocked,release = Event(),Event()
     class Handler(BaseHTTPRequestHandler):
         def log_message(self,*args):
             pass
@@ -63,7 +68,12 @@ def endpoint(ws_port):
                 self.send_error(400)
                 return
             number = len(calls)+1
-            calls.append(number)
+            calls.append(monotonic())
+            if stall_discovery and number==2:
+                blocked.set()
+                # Keep the socket open and send no headers or bytes.
+                release.wait()
+                return
             url = f"ws://127.0.0.1:{ws_port}/?device_id=fixture-{number}&service_id=1"
             body = encode({"code":0,"msg":"ok","data":{"URL":url,"ClientConfig":{
                 "ReconnectCount":3,"ReconnectInterval":0,"ReconnectNonce":0,"PingInterval":60}}}).encode()
@@ -77,8 +87,9 @@ def endpoint(ws_port):
         runner = Thread(target=http.serve_forever,kwargs={"poll_interval":.05})
         runner.start()
         try:
-            yield http.server_port,calls
+            yield http.server_port,calls,blocked
         finally:
+            release.set()
             http.shutdown()
             runner.join()
 
@@ -109,7 +120,7 @@ def deliver_to_worker(folder):
     return len(entries)
 
 
-def run():
+def run(*,stall_discovery=False,raw_sdk=False):
     from websockets.exceptions import ConnectionClosed
     from websockets.sync.server import serve
     from lark_oapi.ws.pb.pbbp2_pb2 import Frame
@@ -152,19 +163,31 @@ def run():
         runner = Thread(target=ws.serve_forever)
         runner.start()
         try:
-            with endpoint(ws.socket.getsockname()[1]) as (port,calls):
+            with endpoint(ws.socket.getsockname()[1],stall_discovery) as (port,calls,blocked):
                 env = {"HOME":folder,"TMPDIR":folder,"PATH":os.defpath,"PYTHONNOUSERSITE":"1"}
-                command = [sys.executable,"-m","rewrite.feishu_reconnect_check","--fixture-receiver",folder,str(port)]
+                command = [sys.executable,"-m","rewrite.feishu_reconnect_check","--fixture-receiver",folder,str(port),
+                           "raw" if raw_sdk else "bounded"]
                 with subprocess.Popen(command,env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE) as child:
                     stalled = False
                     try:
-                        error = finished.get(timeout=12)
+                        if raw_sdk and not blocked.wait(timeout=10):
+                            raise RuntimeError("raw SDK did not attempt endpoint discovery again")
+                        error = finished.get(timeout=3 if raw_sdk else 12)
                         if error:
                             raise error
+                        if child.poll() is not None:
+                            raise RuntimeError("SDK receiver exited during reconnect")
                         inbox = Inbound(Path(folder)/"inbox.db",None,None,APP,TRAINER,CHAT)
                         messages = inbox.pending()
                     except Empty:
                         stalled = True
+                        if raw_sdk:
+                            if child.poll() is not None or not blocked.is_set() or len(calls)!=2 or acks!=[("before",200)]:
+                                raise RuntimeError("raw SDK stall did not match the expected transport state")
+                            return {"sdk_version":version("lark-oapi"),"endpoint_requests":len(calls),
+                                    "websocket_connections":len(connections),"event_acknowledgements":acks,
+                                    "blocked_observation_seconds":3,"receiver_alive":True,
+                                    "recovery_observed":False,"cloud_platform":False}
                     finally:
                         child.terminate()
                         _stdout,stderr = child.communicate(timeout=5)
@@ -174,19 +197,32 @@ def run():
         finally:
             ws.shutdown()
             runner.join()
-    if calls!=[1,2] or len(connections)!=2 or acks!=[("before",200),("before",200),("after",200)]:
+    if raw_sdk:
+        raise RuntimeError("raw SDK recovered while the rediscovery response was withheld")
+    if len(calls)!=(3 if stall_discovery else 2) or len(connections)!=2 or acks!=[("before",200),("before",200),("after",200)]:
         raise RuntimeError("expected two SDK connections and three acknowledged deliveries")
     if messages!=["om_before","om_after"]:
         raise RuntimeError("expected only one durable input for the replayed message")
-    return {"sdk_version":version("lark-oapi"),"websocket_connections":len(connections),
+    result = {"sdk_version":version("lark-oapi"),"websocket_connections":len(connections),
             "endpoint_requests":len(calls),"event_acknowledgements":acks,"durable_messages":messages,
             "worker_native_inputs":inputs,"host":"fixture","cloud_platform":False,
             "disconnect":"TCP closed without a WebSocket close frame",
             "network":"actual loopback HTTP and WebSocket"}
+    if stall_discovery:
+        result["discovery_retry_seconds"] = round(calls[2]-calls[1],3)
+        result["discovery_timeout_seconds"] = .5
+        result["same_receiver_process"] = True
+    return result
 
 
 if __name__=="__main__":
-    if len(sys.argv)==4 and sys.argv[1]=="--fixture-receiver":
-        sdk_receiver(sys.argv[2],sys.argv[3])
+    if len(sys.argv)==5 and sys.argv[1]=="--fixture-receiver":
+        sdk_receiver(sys.argv[2],sys.argv[3],sys.argv[4])
     else:
-        print(encode(run()))
+        parser = argparse.ArgumentParser(description=__doc__)
+        parser.add_argument("--stall-discovery",action="store_true")
+        parser.add_argument("--raw-sdk",action="store_true",help="measure the SDK with no discovery timeout")
+        args = parser.parse_args()
+        if args.raw_sdk and not args.stall_discovery:
+            parser.error("--raw-sdk requires --stall-discovery")
+        print(encode(run(stall_discovery=args.stall_discovery,raw_sdk=args.raw_sdk)))

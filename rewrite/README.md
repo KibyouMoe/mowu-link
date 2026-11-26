@@ -230,11 +230,15 @@ DSH 的自动换绑使用同一套 Worker 交接。先在独立 DSH 宿主插件
 
 复验时保留 Worker、宿主适配器和平台状态库。新开独立 Codex App Server 会话时可登记 `worker_ask_trainer`，已绑定现役 Desktop 会话需单独验其工具加载。DSH 插件使用同一工具表。复跑独立题卡证据所列两项测试，模型和飞书均为本地测试替身。[独立题卡证据](evidence/standalone-trainer-questions.json)
 
+### 飞书入口
+
 平台配置中的 `worker_name` 用于飞书卡片标题。宿主适配器以自身身份向 Worker 的 `POST /v1/worker/display` 交已观测的公开事件，携带稳定事件号、目标会话和回合。每段增量文字仅发新增部分；独立的最终答复事件才显示为「回复」。工具事件仅接受工具名和用于展示的预览文本。查询或抄送都不会写正式完工报告。
 
 独立平台入口 `python3 -m rewrite.feishu_client --config <专用测试配置>` 使用飞书官方 Python SDK。配置是仅属当前用户的 JSON，显式提供 `app_id`、`app_secret`、`trainer_open_id`、`chat_id`、平台队列的 `database` 和指向 Worker 的 `worker_connection`。普通私聊及其文件保存在 Worker 端，断开 Router 仍能投递。使用配置前需要单独的测试应用和会话。无需账号即可运行 `rewrite.test_feishu_inbound` 或官方事件解析复验 `rewrite.feishu_sdk_check`。[平台消息资源说明](https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/guide/faq) [飞书 Python SDK](https://github.com/larksuite/oapi-sdk-python)
 
-在带飞书 SDK 的测试 Python 中运行 `python3 -m rewrite.feishu_reconnect_check`，可断开临时 WebSocket 的底层 TCP，观察 SDK 重新取连接地址并建立新连接。用 1.7.5 实测，断线前的事件在新连接重发后仍只有一条本地输入，新事件照常交给 Worker。无需云端账号，服务端和原生宿主均由隔离测试提供。
+平台进程对获取长连接地址的 HTTP 请求设置 15 秒的连接和读超时，触发后由 SDK 按飞书下发的间隔重试。握手、收件和回执继续使用官方 SDK。该接入已用 `lark-oapi==1.7.5` 验证，升级 SDK 后复跑下面两项再切换。[SDK 地址发现实现](https://github.com/larksuite/oapi-sdk-python/blob/v1.7.5/lark_oapi/ws/client.py)
+
+在带飞书 SDK 的测试 Python 中运行 `python3 -B -m rewrite.feishu_reconnect_check`，可断开临时 WebSocket 的底层 TCP，观察 SDK 重新取地址并建立新连接。加 `--stall-discovery` 可让首次重连的取地址请求一直没有响应，确认同进程会再次取址。加 `--stall-discovery --raw-sdk` 复跑原 SDK 的三秒阻塞对照。旧事件重发后仍只有一条本地输入，新事件照常交给 Worker。无需云端账号，服务端和原生宿主均由隔离测试提供。[断连记录](evidence/feishu-sdk-discovery-timeout.json)
 
 飞书平台进程的本地队列遇到暂时数据库锁或无法核对的上游响应，会保留入箱和卡片游标并继续处理。Worker 回执缺字段时先保留待核，沿用同一消息号查回。
 

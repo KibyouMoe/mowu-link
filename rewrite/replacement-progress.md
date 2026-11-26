@@ -4,6 +4,8 @@
 
 ## 检查点与证据
 
+飞书 SDK 断线后，重连取地址的 HTTP 请求没有响应时，原始 SDK 1.7.5 进程仍活着，连续观察 3 秒没有发出下一次请求。配置连接和读超时后，在本地以 0.5 秒测试值重连，同一进程继续收件。重复旧消息和一条新消息均回 200，Worker 宿主共收到两条原输入。实际 SDK、HTTP、WebSocket、Worker 和 SQLite，飞书平台及宿主为夹具。保留飞书下发的重试间隔，平台进程使用 15 秒的连接和读超时。未验飞书云端重连策略和 SDK 耗尽重试的情况。[断线证据](evidence/feishu-sdk-discovery-timeout.json) · [复跑](README.md#飞书入口)
+
 飞书图片资源上传与会话展示分开确认。上传开始前保存原图摘要和退避时间，快照恢复后沿用同一等待进度。平台替身连续两次存图但丢编号，之后会话仍只有图前卡、单图、图后卡各一条。待核上传从 1 变 0。三次调用上传了相同原始字节，平台可能留下两份未引用资源。隔离 Worker HTTP 与 SQLite 实跑，飞书、宿主和时钟用夹具。该场景连续通过 10 轮。[实测](evidence/feishu-image-upload-restore.json) · [恢复与复跑](router-rehearsal.md#飞书输出回执与换绑)
 
 macOS 全量通过 249 项。Linux arm64 通过 169 项、跳过 80 项。从 `61b3c6a98202074a6f90f68e047e2646ff1b1536` 构建 223 文件独立包，SHA-256 为 `ff30560ab7239f2286a529c60ad8962fd9651853eece061a74b739bf4e65df9a`。安装目录通过 `python3 -B -m unittest -q rewrite.test_feishu_output rewrite.test_feishu_inbound rewrite.test_question_cards rewrite.test_state_bundle` 的 31 项，文件摘要一致。另查到飞书 SDK 1.7.5 的长连接地址发现请求未传超时，现有 TCP 断连复验未覆盖 HTTP 连接仍开着而一直没有响应的情形，待做隔离复现。[SDK 地址发现实现](https://github.com/larksuite/oapi-sdk-python/blob/v1.7.5/lark_oapi/ws/client.py#L261-L265)

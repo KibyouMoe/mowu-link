@@ -1,9 +1,11 @@
 """Feishu long-connection entry for an explicitly configured Worker private chat."""
 import argparse
+from contextlib import contextmanager
 import logging
 from pathlib import Path
 from sqlite3 import OperationalError
 from threading import Event, Thread
+from urllib.parse import urlsplit
 
 from .feishu_inbound import Inbound
 from .feishu_output import SDKMessages, Views
@@ -80,6 +82,37 @@ def main():
         parser.exit(1,str(exc)+"\n")
 
 
+@contextmanager
+def discovery_timeout(seconds):
+    # The Python SDK has no WS discovery timeout parameter. Replace only the WS module's
+    # transport reference for this process's single client, keeping its SDK handshake intact.
+    from lark_oapi.ws import client as sdk
+
+    requests = sdk.requests
+
+    class BoundedDiscovery:
+        def post(self,url,**options):
+            if urlsplit(url).path==sdk.GEN_ENDPOINT_URI and options.get("timeout") is None:
+                options["timeout"] = seconds
+            return requests.post(url,**options)
+
+        def __getattr__(self,name):
+            return getattr(requests,name)
+
+    sdk.requests = BoundedDiscovery()
+    try:
+        yield
+    finally:
+        sdk.requests = requests
+
+
+def start_long_connection(app_id,app_secret,dispatcher,*,discovery_seconds=15,**options):
+    import lark_oapi as lark
+
+    with discovery_timeout(discovery_seconds):
+        lark.ws.Client(app_id,app_secret,event_handler=dispatcher,**options).start()
+
+
 def serve(cfg):
     import lark_oapi as lark
     api = lark.Client.builder().app_id(cfg["app_id"]).app_secret(cfg["app_secret"]).build()
@@ -99,7 +132,7 @@ def serve(cfg):
     thread = Thread(target=process,daemon=True)
     thread.start()
     try:
-        lark.ws.Client(cfg["app_id"],cfg["app_secret"],event_handler=dispatcher).start()
+        start_long_connection(cfg["app_id"],cfg["app_secret"],dispatcher)
     finally:
         stopped.set()
         thread.join(timeout=5)
