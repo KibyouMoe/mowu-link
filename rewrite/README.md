@@ -36,6 +36,14 @@ python3 -m unittest -v rewrite.test_mainline
 
 后续已扩展 Router 生命周期、消息附件、问答、同伴私聊及插件。以[全量替换进度](replacement-progress.md)核对各项版本和实测边界。
 
+### 邮件和游戏聊天来源
+
+在独立环境运行 `python3 -m rewrite.feeds mail --config <邮箱测试配置>` 可只读采一次。仅属当前用户的配置包含 database、host、user、password，可选 port、folder 和 ca_file。首次在邮箱当前 UID 建立基线，后续保存发件人、主题和原来源规定的 200 字正文预览。组合后的信息超过 200 字时，消息携带完整预览文本附件。切换邮箱或文件夹时使用新库。
+
+游戏来源用 `python3 -m rewrite.feeds game --config <游戏桥测试配置>`，读取显式设置的 origin 和 database，可指定 player。客户端读取 /state，再带原序号订阅 /stream，连接结束即退出。每次重开均从上次持久位置继续。旧游戏桥缺少启动标识，只能以序号下降识别重开。读不到稳定序号时停止采集，保留已确认的位置。
+
+两个采集器可在 Router 离线时工作。另用 `python3 -m rewrite.service trigger --db <来源库> --name email send --connection <Router测试连接>` 发送已留档的信息；游戏使用同一命令并将名称换为 mc_chat。拿到 Router 业务回执后移出待发送列表。这里只提供显式启动入口。
+
 已绑定的适配器在观察到原生题窗后，将原会话、回合、原生题号、题面和选项提交至 `POST /v1/worker/native-question`。平台通过已配置的应用、训练员、私聊和原卡 ID 核对真人回调后将答案持久排队。适配器保留关闭意图，只有原宿主返回与原题、原回合及答案一致的关闭凭据，Worker 才发布已回答事件。只有测试宿主目前实现了这项原生关闭能力。溪流的工单问题和答复继续走 W05/A09；投影到飞书时没有作答控件。
 
 平台配置中的 `worker_name` 用于飞书卡片标题。宿主适配器以自身身份向 Worker 的 `POST /v1/worker/display` 交已观测的公开事件，携带稳定事件号、目标会话和回合。每段增量文字仅发新增部分；独立的最终答复事件才显示为「回复」。工具事件仅接受工具名和用于展示的预览文本。查询或抄送都不会写正式完工报告。

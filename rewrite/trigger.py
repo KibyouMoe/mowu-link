@@ -1,5 +1,6 @@
 """Provider-independent Trigger. The local SQLite archive survives process restarts."""
 import hashlib
+from contextlib import ExitStack
 import json
 from pathlib import Path
 import time
@@ -22,22 +23,26 @@ class Trigger:
             self.instance_id = db.execute("SELECT id FROM instance").fetchone()[0]
 
     def record(self, level, text, paths=()):
+        with ExitStack() as stack, self.db.transaction() as db:
+            streams = [(p.name,stack.enter_context(p.open("rb"))) for p in map(Path,paths)]
+            return self.archive(db,level,text,streams)
+
+    def archive(self, db, level, text, streams):
+        """The source may commit its cursor in this same transaction."""
         require(level in ("Event","Notify","Info") and isinstance(text,str) and len(text)<=200
-                and (text.strip() or paths), 422, "invalid_trigger_message")
+                and (text.strip() or streams),422,"invalid_trigger_message")
         mid = guid()
-        with self.db.transaction() as db:
-            body = {"message_id":mid, "trigger_name":self.name, "instance_id":self.instance_id,
-                    "generated_at":timestamp(self.clock()), "level":level, "text":text, "attachment_ids":[]}
-            db.execute("INSERT INTO archive VALUES (?,?,NULL)", (mid, encode(body)))
-            for position, path in enumerate(map(Path, paths)):
-                fid, offset, digest = guid(), 0, hashlib.sha256()
-                with path.open("rb") as stream:
-                    while chunk := stream.read(256*1024):
-                        db.execute("INSERT INTO pieces VALUES (?,?,?)", (fid, offset, chunk))
-                        offset += len(chunk)
-                        digest.update(chunk)
-                db.execute("INSERT INTO files VALUES (?,?,?,?,?,?,NULL,NULL)",
-                           (fid, mid, position, path.name, offset, digest.hexdigest()))
+        body = {"message_id":mid,"trigger_name":self.name,"instance_id":self.instance_id,
+                "generated_at":timestamp(self.clock()),"level":level,"text":text,"attachment_ids":[]}
+        db.execute("INSERT INTO archive VALUES (?,?,NULL)",(mid,encode(body)))
+        for position,(name,stream) in enumerate(streams):
+            fid,offset,digest = guid(),0,hashlib.sha256()
+            while chunk := stream.read(256*1024):
+                db.execute("INSERT INTO pieces VALUES (?,?,?)",(fid,offset,chunk))
+                offset += len(chunk)
+                digest.update(chunk)
+            db.execute("INSERT INTO files VALUES (?,?,?,?,?,?,NULL,NULL)",
+                       (fid,mid,position,name,offset,digest.hexdigest()))
         return mid
 
     def upload(self, router, file):
