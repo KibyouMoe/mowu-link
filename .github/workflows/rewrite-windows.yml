@@ -40,14 +40,17 @@ jobs:
           $dir = New-Item -ItemType Directory (Join-Path $env:RUNNER_TEMP ('mowulink-' + [Guid]::NewGuid().ToString('N')))
           try {
             $owner = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-            icacls $dir.FullName /inheritance:r /grant:r "*$($owner):(OI)(CI)F" '*S-1-5-18:(OI)(CI)F'
             $acl = Get-Acl -LiteralPath $dir.FullName
-            $rules = $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])
-            if (-not $acl.AreAccessRulesProtected -or ($rules | Where-Object {
+            $acl.SetSecurityDescriptorSddlForm("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;$owner)", [Security.AccessControl.AccessControlSections]::Access)
+            Set-Acl -LiteralPath $dir.FullName -AclObject $acl
+            $acl = Get-Acl -LiteralPath $dir.FullName
+            $rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
+            if (-not $acl.AreAccessRulesProtected -or $rules.Count -ne 2 -or ($rules | Where-Object {
               $_.IdentityReference.Value -notin @($owner, 'S-1-5-18')
             })) {
-              throw 'Expected a private test directory'
+              throw "Expected a private test directory (protected=$($acl.AreAccessRulesProtected), rules=$($rules.Count))"
             }
+            Write-Output 'Temporary test ACL verified'
             $env:TMP = $dir.FullName
             $env:TEMP = $dir.FullName
             $archive = Join-Path $dir.FullName 'archive'
