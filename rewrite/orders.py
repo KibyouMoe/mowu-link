@@ -262,7 +262,7 @@ class Orders:
         current = task(db, tid)
         aid = string(data, "assignment_id")
         if data.get("outcome") in ("cancel_confirmed", "transfer_confirmed"):
-            return cleanup.confirm(db, current, worker, aid, data["outcome"])
+            return cleanup.confirm(db, current, worker, aid, data["outcome"], self.clock())
         require(current["state"] == "working" and current["assignee_id"] == worker
                 and current["assignment_id"] == aid, 409, "stale_assignment")
         require(not db.execute("SELECT 1 FROM cleanups WHERE assignment_id=? AND done=0", (aid,)).fetchone(),
@@ -286,8 +286,7 @@ class Orders:
                    (tid,))
         db.execute("""UPDATE workers SET held_task_id=NULL,held_assignment_id=NULL,idle_since=NULL
                       WHERE worker_id=? AND (held_assignment_id IS NULL OR held_assignment_id=?)""", (worker, aid))
-        delivery.enqueue(db, "hermes", "message.deliver", {"message_id": guid(), "level": "Notify",
-                         "source": worker, "text": summary, "task_id": tid, "attachment_ids": ids})
+        messages.notify(db, self.clock(), tid, worker, summary, ids)
         return {"recorded": True, "release_assignment_id": aid, "task_state": "completed_reported"}
 
     def details(self, db, tid):

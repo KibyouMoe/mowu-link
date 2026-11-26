@@ -2,8 +2,8 @@
 import json
 from uuid import UUID
 
-from . import delivery
-from .storage import encode, guid, require, string, timestamp
+from . import delivery, messages
+from .storage import encode, require, string, timestamp
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS questions(
@@ -45,8 +45,7 @@ def ask(db, current, worker, body, now):
                 409, "stale_assignment")
         received = timestamp(now)
         db.execute("INSERT INTO questions VALUES (?,?,?,?,?,?,?,NULL)", (qid, tid, aid, worker, text, encode(options), received))
-        delivery.enqueue(db, "hermes", "message.deliver", {"message_id": guid(), "level": "Notify", "source": worker,
-                         "text": text, "options": options, "attachment_ids": [], "task_id": tid, "question_id": qid})
+        messages.notify(db, now, tid, worker, text, options=options, question_id=qid)
     return {"question_id": qid, "task_id": tid, "received_at": received}
 
 

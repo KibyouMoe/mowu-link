@@ -1,7 +1,7 @@
 """Router-owned blocked pool, reminders and independent candidate material."""
 import math
 
-from . import attachments, delivery
+from . import attachments, delivery, messages
 from .storage import guid, require, string, timestamp
 
 SCHEMA = """
@@ -22,11 +22,6 @@ CREATE INDEX IF NOT EXISTS dispatch_by_task ON deliveries(json_extract(payload,'
 """
 
 
-def notify(db, tid, source, text, ids=()):
-    delivery.enqueue(db, "hermes", "message.deliver", {"message_id": guid(), "level": "Notify",
-                     "task_id": tid, "source": source, "text": text, "attachment_ids": list(ids)})
-
-
 def enter(db, current, source, reason, now, ids=()):
     tid, aid, wid = current["task_id"], current["assignment_id"], current["assignee_id"]
     db.execute("INSERT INTO pool_entries VALUES (?,?,?,?,?,?,?,1)", (aid, tid, wid, reason, source, now, now+3600))
@@ -36,7 +31,7 @@ def enter(db, current, source, reason, now, ids=()):
     db.execute("DELETE FROM inquiries WHERE assignment_id=?", (aid,))
     db.execute("""UPDATE workers SET held_task_id=NULL,held_assignment_id=NULL,idle_since=NULL
                   WHERE worker_id=? AND held_assignment_id=?""", (wid, aid))
-    notify(db, tid, wid if source == "worker" else "router", reason, ids)
+    messages.notify(db, now, tid, wid if source == "worker" else "router", reason, ids)
 
 
 def on_idle_sample(db, worker, tid, aid, now, interval):
@@ -72,7 +67,7 @@ def timers(db, now, lease):
         enter(db, row, "offline", "Worker 已连续离线十分钟，工单进入无法完成池。", now)
     due = db.execute("SELECT * FROM pool_entries WHERE active=1 AND remind_at<=?", (now,)).fetchall()
     for entry in due:
-        notify(db, entry["task_id"], "router", "无法完成池中的工单仍待处理。")
+        messages.notify(db, now, entry["task_id"], "router", "无法完成池中的工单仍待处理。")
         db.execute("UPDATE pool_entries SET remind_at=NULL WHERE assignment_id=?", (entry["assignment_id"],))
 
 

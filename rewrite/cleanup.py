@@ -1,5 +1,5 @@
 """Router bookkeeping for a former holder's cleanup. Keys always include the assignment."""
-from . import delivery, pool
+from . import delivery, messages
 from .storage import require
 
 
@@ -28,7 +28,7 @@ def start(db, tid, aid, wid, kind, reason, target=None):
     delivery.enqueue(db, "worker/" + wid, kind, data)
 
 
-def confirm(db, current, worker, aid, outcome):
+def confirm(db, current, worker, aid, outcome, now):
     kind = "task.cancel" if outcome == "cancel_confirmed" else "task.transfer_out"
     row = db.execute("""SELECT * FROM cleanups WHERE task_id=? AND assignment_id=? AND worker_id=?
                      AND kind=? AND done=0""", (current["task_id"], aid, worker, kind)).fetchone()
@@ -39,7 +39,7 @@ def confirm(db, current, worker, aid, outcome):
         state = "cancelled"
         db.execute("UPDATE tasks SET state=?,assignment_id=NULL,revision=revision+1 WHERE task_id=?",
                    (state, current["task_id"]))
-        pool.notify(db, current["task_id"], worker, "原处理人已确认取消并清理工单。")
+        messages.notify(db, now, current["task_id"], worker, "原处理人已确认取消并清理工单。")
     db.execute("UPDATE cleanups SET done=1 WHERE assignment_id=?", (aid,))
     db.execute("DELETE FROM inquiries WHERE assignment_id=?", (aid,))
     db.execute("""UPDATE workers SET held_task_id=NULL,held_assignment_id=NULL,idle_since=NULL
