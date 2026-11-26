@@ -145,8 +145,16 @@ class Provider(BaseHTTPRequestHandler):
             native_q = {"id":"route","header":"路线","question":"选择路线 · "+trainer_prompt,
                         "isSecret":trainer_prompt=="private","isOther":True,
                         "options":[{"label":"第一项","description":"First"},{"label":"第二项","description":"Second"}]}
+            native_questions = [native_q]
+            if trainer_prompt in ("batch","mixed-private"):
+                native_questions.extend([
+                    {"id":"note","header":"备注","question":"留一句话","isSecret":trainer_prompt=="mixed-private",
+                     "isOther":True,"options":[{"label":"有","description":"提供备注"},{"label":"无","description":"留空"}]},
+                    {"id":"optional","header":"略过","question":"这题可以跳过","isSecret":False,"isOther":True,
+                     "options":[{"label":"可选","description":"选填"}]},
+                ])
             item = {"type":"function_call","id":"fc_trainer_"+trainer_prompt,"name":"request_user_input",
-                    "call_id":"native_trainer_"+trainer_prompt,"arguments":encode({"questions":[native_q]})}
+                    "call_id":"native_trainer_"+trainer_prompt,"arguments":encode({"questions":native_questions})}
         elif peer and not calls:
             item = {"type":"function_call","id":"fc_peer","name":"worker_send_peer","call_id":"native_peer_fixture",
                     "arguments":peer.split("\n",1)[1]}
@@ -1290,8 +1298,14 @@ class CodexAppServer(unittest.TestCase):
             turn = send(mode)
             event = wait_for(lambda: next((e for e in events() if e["kind"]=="question_open" and e["turn_id"]==turn),None))
             qid = event["question_id"]
-            self.assertEqual(event["text"],"选择路线 · "+mode)
-            self.assertEqual([opt["label"] for opt in event["options"]],["第一项","第二项"])
+            if mode=="batch":
+                fields = event["questions"]
+                self.assertEqual([field["id"] for field in fields],["route","note","optional"])
+                self.assertTrue(all(field["custom"] for field in fields))
+                self.assertFalse(any(field["multiple"] for field in fields))
+            else:
+                self.assertEqual(event["text"],"选择路线 · "+mode)
+                self.assertEqual([opt["label"] for opt in event["options"]],["第一项","第二项"])
             views.poll()
             with views.db.transaction() as db:
                 mid = db.execute("SELECT mid FROM question_cards WHERE qid=?",(qid,)).fetchone()[0]
@@ -1303,13 +1317,20 @@ class CodexAppServer(unittest.TestCase):
         for mode,value,form,wanted in (
                 ("choice",{"mode":"choice","option_id":"2"},None,{"route":{"answers":["第二项"]}}),
                 ("text",{"mode":"text"},{"reply":"  原样回答  "},{"route":{"answers":["  原样回答  "]}}),
-                ("skip",{"mode":"skip"},None,{})):
+                ("skip",{"mode":"skip"},None,{}),
+                ("batch",{"mode":"batch"},{"options_1":"2","reply_2":"  留在原题  "},
+                 {"route":{"answers":["第二项"]},"note":{"answers":["  留在原题  "]}})):
             turn,qid,mid,card = open_card(mode)
             action = {"question_id":qid,**value}
             with self.assertRaisesRegex(Fault,"wrong_card_actor"):
                 actions.record("app","another","private-chat",mid,action,form)
             with self.assertRaisesRegex(Fault,"not_original_trainer_card"):
                 actions.record("app","trainer","private-chat","om_wrong",action,form)
+            if mode=="batch":
+                self.assertIn("First",json.dumps(card[2],ensure_ascii=False))
+                for invalid in (dict(form,options_1="1,2"),dict(form,reply_1="不能与选项同时提交")):
+                    with self.assertRaises(Fault):
+                        actions.record("app","trainer","private-chat",mid,action,invalid)
             self.assertEqual(actions.record("app","trainer","private-chat",mid,action,form),"pending")
             actions.flush()
             proof = host.questions.lookup(sid,turn,"native_trainer_"+mode)
@@ -1340,9 +1361,11 @@ class CodexAppServer(unittest.TestCase):
         self.assertEqual(actions.record("app","trainer","private-chat",mid,action,None),"pending")
         self.assertEqual(sum(name=="unconfirmed" for name,_ in self.provider.trainer_responses),1)
         wait_for(lambda: not host.busy(sid))
-        secret = send("private")
-        wait_for(lambda: any(name=="private" for name,_ in self.provider.trainer_responses))
-        self.assertFalse([item for item in events() if item["turn_id"]==secret and item["kind"]=="question_open"])
+        for mode in ("private","mixed-private"):
+            secret = send(mode)
+            wait_for(lambda: any(name==mode for name,_ in self.provider.trainer_responses))
+            self.assertFalse([item for item in events() if item["turn_id"]==secret and item["kind"]=="question_open"])
+            wait_for(lambda: not host.busy(sid))
         with self.assertRaisesRegex(Fault,"native_question_already_offered"):
             host.questions.offer({"id":900,"params":{"threadId":sid,"turnId":turn,
                 "itemId":"native_trainer_unconfirmed","autoResolutionMs":None,
@@ -1350,7 +1373,7 @@ class CodexAppServer(unittest.TestCase):
                               "options":[{"label":"第一项"},{"label":"第二项"}]}]}})
         self.assertFalse(loop.hermes.tasks()["items"])
         self.evidence = {"thread_id":sid,"answered":delivered,"unconfirmed_card_id":mid,"unconfirmed_untouched":True,
-                         "secret_question_projected":False,
+                         "secret_question_projected":False,"mixed_secret_group_projected":False,
                          "boundary":"Actual App Server requestUserInput and fixture card actions, no Feishu identity or cloud model"}
 
     def test_native_approved_image_splits_the_platform_card_and_replays_the_original_upload(self):

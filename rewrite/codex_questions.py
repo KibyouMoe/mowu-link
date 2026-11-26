@@ -1,21 +1,56 @@
-"""Bridge a bound App Server's single public question to the authorized platform."""
+"""Bridge a bound App Server's public questions to the authorized platform."""
 from dataclasses import dataclass, field
 import hashlib
 import json
 from threading import Event, Lock
 
-from .questions import validate_answer
+from .question_forms import selected_labels, validate_form, validate_reply
 from .storage import Database, encode, require, string
 
 
 @dataclass
 class LiveQuestion:
     request_id: int | str
-    native_choice_id: str
+    choice_ids: tuple
     original: dict
     published: bool = False
     attempted: bool = False
     resolved: Event = field(default_factory=Event)
+
+
+def field_for(item):
+    require(isinstance(item,dict) and item.get("isSecret") is False and type(item.get("isOther")) is bool,
+            422,"native_question_form_unsupported")
+    options = item.get("options")
+    require(options is None or isinstance(options,list) and len(options)<=8,422,"native_question_form_unsupported")
+    field = {"id":string(item,"id"),"text":string(item,"question"),"options":[],
+             "multiple":False,"custom":item["isOther"]}
+    if isinstance(item.get("header"),str) and item["header"].strip():
+        field["header"] = item["header"]
+    for index,option in enumerate(options or [],1):
+        require(isinstance(option,dict),422,"native_question_form_unsupported")
+        entry = {"id":str(index),"label":string(option,"label")}
+        if isinstance(option.get("description"),str) and option["description"].strip():
+            entry["description"] = option["description"]
+        field["options"].append(entry)
+    return field
+
+
+def rpc_answers(item,answer):
+    original = item.original
+    if "questions" in original:
+        result = {}
+        for field,value in zip(original["questions"],answer["answers"]):
+            choices = [value["text"]] if "text" in value else selected_labels(field,value)
+            if choices:
+                result[field["id"]] = {"answers":choices}
+        return result
+    if answer["mode"]=="skip":
+        return {}
+    chosen = answer.get("text")
+    if answer["mode"]=="choice":
+        chosen = next(option["label"] for option in original["options"] if option["id"]==answer["option_id"])
+    return {item.choice_ids[0]:{"answers":[chosen]}}
 
 
 class CodexQuestions:
@@ -40,24 +75,21 @@ class CodexQuestions:
         require(type(rid) in (str,int) and isinstance(params,dict) and params.get("threadId")==session,
                 403,"wrong_native_question_source")
         questions = params.get("questions")
-        require(isinstance(questions,list) and len(questions)==1,422,"native_question_form_unsupported")
-        item = questions[0]
-        require(isinstance(item,dict) and item.get("isSecret") is False and item.get("isOther") is True
-                and params.get("autoResolutionMs") is None,422,"native_question_form_unsupported")
-        options = item.get("options")
-        require(isinstance(options,list) and 1<=len(options)<=8 and all(isinstance(opt,dict) for opt in options),
+        require(isinstance(questions,list) and 1<=len(questions)<=6 and params.get("autoResolutionMs") is None,
                 422,"native_question_form_unsupported")
-        labels = [string(opt,"label") for opt in options]
-        require(len(set(labels))==len(labels) and all(len(label)<=300 for label in labels),
-                422,"native_question_form_unsupported")
+        fields = [field_for(item) for item in questions]
+        validate_form({"questions":fields})
         original = {"session":session,"turn_id":string(params,"turnId"),"native_question_id":string(params,"itemId"),
-                    "text":string(item,"question"),"options":[{"id":str(i),"label":label} for i,label in enumerate(labels,1)]}
-        require(len(original["text"])<=3000,422,"native_question_form_unsupported")
-        offered = LiveQuestion(rid,string(item,"id"),original)
+                    "questions":fields}
+        field = fields[0]
+        if len(fields)==1 and field["custom"] and field["options"]:
+            del original["questions"]
+            original.update(text=field["text"],options=[{"id":opt["id"],"label":opt["label"]} for opt in field["options"]])
+        offered = LiveQuestion(rid,tuple(field["id"] for field in fields),original)
         with self.lock:
             previous = self.requests.get(rid)
             if previous:
-                require(previous.original==original and previous.native_choice_id==offered.native_choice_id,
+                require(previous.original==original and previous.choice_ids==offered.choice_ids,
                         409,"native_question_conflict")
             else:
                 with self.db.transaction() as db:
@@ -108,14 +140,8 @@ class CodexQuestions:
                 matches = [q for q in self.requests.values() if q.original==original and not q.attempted]
             require(len(matches)==1,409,"native_question_unconfirmed")
             item = matches[0]
-            validate_answer(answer,original["options"])
-            if answer["mode"]=="skip":
-                values = {}
-            else:
-                chosen = answer.get("text")
-                if answer["mode"]=="choice":
-                    chosen = next(option["label"] for option in original["options"] if option["id"]==answer["option_id"])
-                values = {item.native_choice_id:{"answers":[chosen]}}
+            validate_reply(answer,original)
+            values = rpc_answers(item,answer)
             current = self.host.read_turn(session,turn)
             require(current["status"]=="inProgress",409,"native_question_unconfirmed")
             with self.lock:

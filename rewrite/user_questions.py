@@ -3,7 +3,7 @@ import json
 from uuid import NAMESPACE_URL, uuid5
 
 from . import display
-from .questions import validate_answer, validate_options
+from .question_forms import content, validate_form, validate_reply
 from .storage import encode, require, string
 
 SCHEMA = """
@@ -16,7 +16,7 @@ def show(db, recipient, qid, question, answer=None):
     kind = "question_open" if answer is None else "question_answered"
     event = {"event_id":f"{kind}-{recipient}-{qid}", "kind":kind, "recipient":recipient, "question_id":qid,
              "session":question["session"], "turn_id":question.get("turn_id",""),
-             "text":question["text"], "options":question["options"]}
+             **content(question)}
     if answer is not None:
         event["answer"] = answer
     display.append(db,event)
@@ -33,11 +33,11 @@ def mirror_manager(db, qid, answer=None):
 
 
 def open_native(worker, body):
-    require(set(body)=={"session","turn_id","native_question_id","text","options"},422,"invalid_native_question")
+    required = {"session","turn_id","native_question_id"}
+    require(set(body) in (required | {"text","options"},required | {"questions"}),422,"invalid_native_question")
     session,turn,native = (string(body,k) for k in ("session","turn_id","native_question_id"))
     require(session==worker.adapter.bound_session(),403,"wrong_native_session")
-    string(body,"text")
-    validate_options(body["options"])
+    validate_form(body)
     qid = str(uuid5(NAMESPACE_URL,encode(["trainer-question",worker.worker_id,session,turn,native])))
     with worker.db.transaction() as db:
         db.execute("INSERT OR IGNORE INTO trainer_questions VALUES (?,?,NULL,NULL)",(qid,encode(body)))
@@ -57,7 +57,7 @@ def confirm(proof, original, answer):
 def record_proof(db, qid, row, question, proof):
     require(isinstance(proof,dict),409,"native_question_unconfirmed")
     answer = proof.get("answer")
-    validate_answer(answer,question["options"])
+    validate_reply(answer,question)
     confirm(proof,question,answer)
     require(row["proof"] in (None,encode(proof)),409,"question_receipt_conflict")
     db.execute("UPDATE trainer_questions SET proof=? WHERE question_id=?",(encode(proof),qid))
@@ -84,7 +84,7 @@ def resolve(worker, body):
         row = db.execute("SELECT * FROM trainer_questions WHERE question_id=?",(qid,)).fetchone()
         require(row,404,"trainer_question_missing")
         question = json.loads(row["original"])
-        validate_answer(answer,question["options"])
+        validate_reply(answer,question)
         if row["proof"]:
             proof = json.loads(row["proof"])
             require(proof["answer"]==answer,409,"native_question_already_answered")

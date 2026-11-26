@@ -25,17 +25,39 @@ function findQuestion(session, events, turnId, callId) {
   let args;
   try { args = JSON.parse(calls[0].data.arguments); }
   catch { return null; }
-  if (args?.questions?.length!==1) return null;
-  const q = args.questions[0];
-  if (!q || typeof q.id!=='string' || !q.id || typeof q.question!=='string' || !q.question.trim() ||
-      q.question.length>3000 || q.multi_select || q.intent || q.detail ||
-      q.options!==undefined && (!Array.isArray(q.options) || q.options.length>8)) return null;
-  const labels = (q.options ?? []).map(option=>option?.label);
+  if (!Array.isArray(args?.questions) || !args.questions.length || args.questions.length>6) return null;
+  const fields = args.questions.map(questionField);
+  if (fields.some(field=>!field) || new Set(fields.map(field=>field.id)).size!==fields.length) return null;
+  const question = {session,turn_id:turnId,native_question_id:callId};
+  if (fields.length===1 && !fields[0].multiple) {
+    const {text,options} = fields[0];
+    Object.assign(question,{text,options:options.map(({id,label})=>({id,label}))});
+  } else {
+    question.questions = fields;
+  }
+  return {question,fields,pending:replies[0].seq};
+}
+
+function nonempty(value,max) {
+  return typeof value==='string' && value.trim() && value.length<=max;
+}
+
+function questionField(q) {
+  if (!q || !nonempty(q.id,200) || !nonempty(q.question,3000) || 'intent' in q || 'detail' in q ||
+      (q.multi_select!==undefined && typeof q.multi_select!=='boolean') ||
+      (q.options!==undefined && (!Array.isArray(q.options) || q.options.length>8)) ||
+      (q.header!==undefined && typeof q.header!=='string')) return null;
+  const options = q.options ?? [];
+  const labels = options.map(option=>option?.label);
   if (new Set(labels).size!==labels.length ||
-      labels.some(label=>typeof label!=='string' || !label.trim() || label.length>200)) return null;
-  const question = {session,turn_id:turnId,native_question_id:callId,text:q.question,
-    options:labels.map((label,index)=>({id:String(index+1),label}))};
-  return {question,id:q.id,labels,pending:replies[0].seq};
+      labels.some(label=>!nonempty(label,200)) || q.header?.length>200 ||
+      options.some(option=>(option.description!==undefined && typeof option.description!=='string') ||
+        option.description?.length>500)) return null;
+  const field = {id:q.id,text:q.question,multiple:q.multi_select===true,custom:true,
+    options:options.map(({label,description},index)=>({id:String(index+1),label,
+      ...(description?.trim() ? {description} : {})}))};
+  if (q.header?.trim()) field.header = q.header;
+  return field;
 }
 
 function acceptedAnswer(found, events) {
@@ -47,20 +69,66 @@ function acceptedAnswer(found, events) {
   if (replies.length!==1) throw new Error('native_question_unconfirmed');
   const [event] = replies;
   const body = json(event.data.content);
-  const [item] = Array.isArray(body?.answers) ? body.answers : [];
-  if (body?.kind!=='answer_to_pending_question' || body.callId!==callId || body.answers?.length!==1 ||
-      item?.id!==found.id || !Array.isArray(item.selected)) throw new Error('native_question_unconfirmed');
-  const [label] = item.selected;
-  const index = found.labels.indexOf(label);
-  let answer;
-  if (item.selected.length===0 && item.custom===undefined) answer = {mode:'skip'};
-  else if (item.selected.length===0 && typeof item.custom==='string' && item.custom.trim()) {
-    answer = {mode:'text',text:item.custom};
-  } else if (item.selected.length===1 && item.custom===undefined && index>=0) {
-    answer = {mode:'choice',option_id:String(index+1)};
-  } else throw new Error('native_question_unconfirmed');
+  if (body?.kind!=='answer_to_pending_question' || body.callId!==callId || !Array.isArray(body.answers) ||
+      body.answers.length!==found.fields.length) throw new Error('native_question_unconfirmed');
+  const answers = found.fields.map(field=>{
+    const matching = body.answers.filter(item=>item?.id===field.id);
+    const [native] = matching;
+    if (matching.length!==1 || !Array.isArray(native.selected) ||
+        native.selected.length!==new Set(native.selected).size ||
+        native.selected.some(label=>!field.options.some(option=>option.label===label))) {
+      throw new Error('native_question_unconfirmed');
+    }
+    const value = {id:field.id,option_ids:field.options.filter(option=>native.selected.includes(option.label)).map(option=>option.id)};
+    if (native.custom!==undefined) value.text = native.custom;
+    nativeAnswer(field,value);
+    return value;
+  });
+  let answer = {mode:'batch',answers};
+  if (!found.question.questions) {
+    const [single] = answers;
+    answer = {mode:'skip'};
+    if (single.option_ids.length) answer = {mode:'choice',option_id:single.option_ids[0]};
+    if ('text' in single) answer = {mode:'text',text:single.text};
+  }
   return {closed:true,answer,receipt_id:event.data.id,session:found.question.session,
     turn_id:found.question.turn_id,native_question_id:callId};
+}
+
+function nativeAnswer(field,value) {
+  const fields = ['id','option_ids'];
+  if (Object.hasOwn(value ?? {},'text')) fields.push('text');
+  if (!value || !isDeepStrictEqual(Object.keys(value).sort(),fields) || value.id!==field.id ||
+      !Array.isArray(value.option_ids)) throw new Error('invalid_native_question');
+  const options = field.options.filter(option=>value.option_ids.includes(option.id));
+  if (!isDeepStrictEqual(options.map(option=>option.id),value.option_ids) ||
+      (!field.multiple && (options.length>1 || (options.length && 'text' in value)))) {
+    throw new Error('invalid_native_option');
+  }
+  const answer = {id:field.id,selected:options.map(option=>option.label)};
+  if ('text' in value) {
+    if (!nonempty(value.text,1000)) throw new Error('invalid_native_question');
+    answer.custom = value.text;
+  }
+  return answer;
+}
+
+function nativeAnswers(found,answer) {
+  if (found.question.questions) {
+    if (answer?.mode!=='batch' || !isDeepStrictEqual(Object.keys(answer).sort(),['answers','mode']) ||
+        !Array.isArray(answer.answers) || answer.answers.length!==found.fields.length) {
+      throw new Error('invalid_native_question');
+    }
+    return found.fields.map((field,index)=>nativeAnswer(field,answer.answers[index]));
+  }
+  const expectedKeys = {choice:['mode','option_id'],text:['mode','text'],skip:['mode']};
+  if (!isDeepStrictEqual(Object.keys(answer ?? {}).sort(),expectedKeys[answer?.mode])) {
+    throw new Error('invalid_native_question');
+  }
+  const [field] = found.fields;
+  const value = {id:field.id,option_ids:answer.mode==='choice' ? [answer.option_id] : []};
+  if (answer.mode==='text') value.text = answer.text;
+  return [nativeAnswer(field,value)];
 }
 
 export async function questionRequest(ctx,agent,request,readEvents) {
@@ -82,24 +150,8 @@ export async function questionRequest(ctx,agent,request,readEvents) {
     return {proof:saved};
   }
   if (!active()) return {proof:null};
-  const expectedKeys = {choice:['mode','option_id'],text:['mode','text'],skip:['mode']};
-  if (!isDeepStrictEqual(Object.keys(answer ?? {}).sort(),expectedKeys[answer?.mode])) {
-    throw new Error('invalid_native_question');
-  }
-  const item = {id:found.id,selected:[]};
-  if (answer.mode==='choice') {
-    const option = found.question.options.find(value=>value.id===answer.option_id);
-    if (!option) throw new Error('invalid_native_option');
-    item.selected = [option.label];
-  }
-  if (answer.mode==='text') {
-    if (typeof answer.text!=='string' || !answer.text.trim() || answer.text.length>1000) {
-      throw new Error('invalid_native_question');
-    }
-    item.custom = answer.text;
-  }
   try {
-    service.answer(agent,native_question_id,{answers:[item]});
+    service.answer(agent,native_question_id,{answers:nativeAnswers(found,answer)});
   } catch (error) {
     if (error.code!=='REPLY_QUEUED') throw error;
   }

@@ -602,14 +602,40 @@ class NativeLoop(unittest.TestCase):
                 self.assertEqual((proof["receipt_id"],proof["turn_id"]),(found["id"],original["turn_id"]))
                 completed.append({"platform_message":mid,"question_id":qid,"proof":proof,"native_reply":found})
             loop.worker.chat(guid(),"Question fixture multi")
-            rejected = self.read_native(native,"read")
-            self.assertIn("native-question-multi",rejected["continued"])
+            multi_call = "native-question-multi"
+            self.assertIn(multi_call,self.read_native(native,"read")["continued"])
             for _ in range(4):
                 relay.collect()
                 relay.flush()
             views.poll()
             with views.db.transaction() as db:
-                self.assertEqual(db.execute("SELECT COUNT(*) FROM question_cards").fetchone()[0],3)
+                qid,mid,raw = db.execute("""SELECT qid,mid,question FROM question_cards
+                    WHERE json_extract(question,'$.questions[0].text')='Pick multi?'""").fetchone()
+            card = next(item for item in sink.messages.values() if item[0]==mid)
+            self.assertEqual([field["id"] for field in json.loads(raw)["questions"]],["primary","note","optional"])
+            self.assertIn("Follow the same route",json.dumps(card[2],ensure_ascii=False))
+            value = {"question_id":qid,"mode":"batch"}
+            form = {"options_1":"2，1","reply_1":"同时自填","reply_2":"  记住  "}
+            with self.assertRaisesRegex(Fault,"invalid_option"):
+                actions.record("app","trainer","test-chat",mid,value,dict(form,options_1="2,2"))
+            self.assertEqual(actions.record("app","trainer","test-chat",mid,value,form),"pending")
+            self.assertEqual(actions.record("app","trainer","test-chat",mid,value,dict(form,options_1="1,2")),"pending")
+            actions.flush()
+            observed = self.read_native(native,"read")
+            self.assertNotIn(multi_call,observed["continued"])
+            found, = [row for row in observed["replies"] if row["call"]==multi_call]
+            self.assertEqual(found["body"]["answers"],[{"id":"primary","selected":["A","B"],"custom":"同时自填"},
+                {"id":"note","selected":[],"custom":"  记住  "},{"id":"optional","selected":[]}])
+            for _ in range(4):
+                relay.collect()
+                relay.flush()
+            views.poll()
+            self.assertEqual(actions.record("app","trainer","test-chat",mid,value,form),"confirmed")
+            self.assertEqual(sink.calls.count(("patch",mid)),1)
+            with loop.worker.db.transaction() as db:
+                proof = json.loads(db.execute("SELECT proof FROM trainer_questions WHERE question_id=?",(qid,)).fetchone()[0])
+            self.assertEqual(proof["receipt_id"],found["id"])
+            completed.append({"platform_message":mid,"question_id":qid,"proof":proof,"native_reply":found})
             loop.worker.chat(guid(),"Question fixture native")
             self.assertIn("native-question-native",self.read_native(native,"read")["continued"])
             original_request = relay.worker.request
@@ -646,12 +672,12 @@ class NativeLoop(unittest.TestCase):
             self.assertEqual(native_proof["answer"],{"mode":"choice","option_id":"1"})
             self.assertEqual([item["id"] for item in won["replies"] if item["call"]=="native-question-native"],
                              [native_proof["receipt_id"]])
-            self.assertEqual(writes,["native-question-choice","native-question-text","native-question-skip"])
+            self.assertEqual(writes,["native-question-choice","native-question-text","native-question-skip",multi_call])
             self.assertEqual(loop.hermes.tasks()["items"],[])
             self.evidence = {"session":session,"questions":completed,"native_answer_writes":writes,
                              "native_won_conflict":{"platform_message":mid,"question_id":qid,"proof":native_proof,
                                                     "late_platform_choice":"2","platform_state":"rejected"},
-                             "unbridged_multi":rejected["continued"],"router_tasks":0,
+                             "router_tasks":0,
                              "boundary":"Native DSH timed question tool and reply admission; local scripted provider, Feishu fixture"}
 
     def test_resume_browses_only_configured_native_cold_sessions_without_activating_them(self):

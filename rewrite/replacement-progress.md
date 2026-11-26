@@ -4,6 +4,12 @@
 
 ## 检查点与证据
 
+训练员题卡可一次提交同一原生请求里的多道公开题。Codex App Server 按原题 ID 回填单选、自填和跳过。任一题标为密题时整组留在宿主。DSH 已进入续答状态的计时题支持多选、自填与逐题跳过。选项顺序取原题，同样的选择换顺序重提仍只留一次答案。飞书测试卡收到原生关闭凭据后才更新同一张卡。两端各连过 8 轮，模型与飞书均用夹具，未启动日用会话。[Codex 原生记录](evidence/codex-app-server-native-question-batch.json) · [DSH 原生记录](evidence/dsh-native-question-batch.json)
+
+批量卡以输入框收选项序号。现有 DSH SDK 的续答入口只接受已超时的题，尚未接仍在前台等待的原生题。飞书实际显示、真人点击与同时打开的桌面原卡留待独立测试身份验证。
+
+全量回归在 macOS 通过 202 项，Linux arm64 通过 142 项，另 60 项本机宿主用例跳过。复跑 `python3 -B -m unittest discover -q -s rewrite -t .`。
+
 DSH 命令审批已用实际 SDK 的 AgentLoop、ApprovalService 和 Bash 验证。带绝对工作目录的请求沿用原生审批号，测试审批人允许后只执行一次隔离 `pwd`，拒绝及超时均未执行。原生结果已写盘但关闭回执被扣住时，重开适配器及宿主可从原会话补回，原生输入、决定和工具结果不新增。省略工作目录时仍由宿主原生审批。连续 16 轮通过。模型和审批操作者用测试夹具。[原生审批记录](evidence/dsh-native-command-approval.json) · [操作入口](README.md#独立宿主命令审批)
 
 三段 TLS 和 DSH 私有 Unix 回调接口另用独立进程实跑。审批 CLI 允许 `adb32960-a5f8-4ef2-9153-f831352283e9`，原生回合回读同号、`allowed-once`，仅一次 Bash 结果。复跑 `python3 -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_dsh_native_command_decisions_match_persisted_approval_ids`。

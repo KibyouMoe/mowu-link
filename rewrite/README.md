@@ -66,6 +66,16 @@ DSH 可用 `worker_list_peers` 浏览已登记的其他工位。它只返回工�
 
 绑定的训练员私聊发生格式、附件或收件问题时，平台进程在原消息下回复状态卡。平台已尝试而回执丢失时，沿用原 UUID 和卡片正文，首次尝试满 55 分钟后标记 `receipt_unknown`，继续处理其他消息。等待中已查实且尚未发送的提示自动撤销。若已提示待核，查到宿主凭据后再发一条恢复确认。消息的受理状态在 `platform_events`，平台回复的状态和消息号在 `input_notices`。[飞书回复消息接口](https://open.feishu.cn/document/server-docs/im-v1/message/reply.md)
 
+### 训练员原生题卡
+
+训练员可以在原卡一次提交同一公开请求里的多道题。按题目下方的序号选择，支持多选的题用逗号隔开，留空跳过。公开原题允许自填时才提供输入框。Worker 等同一会话和原请求的宿主关闭凭据再更新原卡。Codex App Server 每题单选，DSH 计时题进入原生续答后可多选。测试使用飞书 JSON 2.0 表单的批量回调结构，实际飞书交互待验。[飞书卡片组件](https://open.feishu.cn/document/feishu-cards/card-json-v2-components/component-json-v2-overview?lang=en-US)
+
+```sh
+python3 -B -m unittest -v rewrite.test_question_cards \
+  rewrite.test_codex_app_server.CodexAppServer.test_native_trainer_question_closes_original_card_only_after_app_server_receipt \
+  rewrite.test_dsh_native_loop.NativeLoop.test_dsh_native_timed_question_closes_the_original_feishu_test_card
+```
+
 ### DSH 固定会话与飞书卡片
 
 在独立 DSH 测试配置加载 `integrations/dsh_host/index.mjs`，指定测试会话的 `session` 和仅当前用户可读写的绝对目录 `directory`。单独启动 `python3 -m rewrite.service dsh-adapter --help` 所示的适配器，将 `--session`、`--runtime-dir` 分别指向同一会话和目录。收图需宿主提供 `attachments` 服务；`--worker-connection` 指向适配器访问专用 Worker 的连接配置。固定会话插件中仅登记 Agent 业务工具，本体负责发送飞书卡片。

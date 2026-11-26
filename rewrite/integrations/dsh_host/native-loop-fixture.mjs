@@ -174,9 +174,14 @@ class LocalModel extends LlmAdapter {
         assert.ok(tools?.some(tool=>tool.name==='ask_user_question'));
         const options = [{label:'A'},{label:'B'}];
         const question = {id:'primary',question:'Pick '+choice+'?',options,multi_select:choice==='multi'};
+        const questions = [question];
+        if (choice==='multi') {
+          questions.push({id:'note',question:'What should the agent remember?',header:'备注'},
+            {id:'optional',question:'Optional follow-up?',options:[{label:'A',description:'Follow the same route'}]});
+        }
         yield {type:'block-start',index:0,blockType:'tool-call'};
         yield {type:'block-end',index:0,block:{type:'tool-call',id:'native-question-'+choice,name:'ask_user_question',
-          arguments:JSON.stringify({questions:[question]})}};
+          arguments:JSON.stringify({questions})}};
         yield {type:'finish',reason:{kind:'tool-calls'}};
         return;
       }

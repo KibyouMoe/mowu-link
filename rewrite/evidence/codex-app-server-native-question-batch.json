@@ -1,0 +1,129 @@
+{
+  "thread_id": "01a2175c-7f6e-7040-8f0f-30d8b818d2ec",
+  "answered": [
+    {
+      "mode": "choice",
+      "message_id": "om_2",
+      "question_id": "355d8ecc-fe7b-5162-ad44-66eb4580480b",
+      "proof": {
+        "answer": {
+          "mode": "choice",
+          "option_id": "2"
+        },
+        "closed": true,
+        "native_question_id": "native_trainer_choice",
+        "native_request_id": 0,
+        "receipt_id": "codex-question-ee0676a3cfbcc1d48e4ee28c83af70a66efbf55ea8ca3ccade37bbdebc279309",
+        "session": "01a2175c-7f6e-7040-8f0f-30d8b818d2ec",
+        "turn_id": "01a2175c-7fee-70f1-90cb-579dd8f97b38"
+      },
+      "model_saw": {
+        "answers": {
+          "route": {
+            "answers": [
+              "第二项"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "mode": "text",
+      "message_id": "om_5",
+      "question_id": "61da34c8-781a-50ca-8ced-9a7bad93102b",
+      "proof": {
+        "answer": {
+          "mode": "text",
+          "text": "  原样回答  "
+        },
+        "closed": true,
+        "native_question_id": "native_trainer_text",
+        "native_request_id": 1,
+        "receipt_id": "codex-question-596e2b9f4112b3141812f838133891cc6159898a35db5f7ae8dca1ca1059df29",
+        "session": "01a2175c-7f6e-7040-8f0f-30d8b818d2ec",
+        "turn_id": "01a2175c-803d-75a0-9653-3ea4ed09e353"
+      },
+      "model_saw": {
+        "answers": {
+          "route": {
+            "answers": [
+              "  原样回答  "
+            ]
+          }
+        }
+      }
+    },
+    {
+      "mode": "skip",
+      "message_id": "om_8",
+      "question_id": "dc963135-a4bb-5e32-9ba9-926be527aff7",
+      "proof": {
+        "answer": {
+          "mode": "skip"
+        },
+        "closed": true,
+        "native_question_id": "native_trainer_skip",
+        "native_request_id": 2,
+        "receipt_id": "codex-question-5ba80c1b023f07e8225cc7c68bb7e338da3f7d19d966694ef359bd602a5cc00d",
+        "session": "01a2175c-7f6e-7040-8f0f-30d8b818d2ec",
+        "turn_id": "01a2175c-808f-7241-beaf-be8c4ac1442c"
+      },
+      "model_saw": {
+        "answers": {}
+      }
+    },
+    {
+      "mode": "batch",
+      "message_id": "om_11",
+      "question_id": "173e5385-4583-56de-ae72-438e34d0eeaf",
+      "proof": {
+        "answer": {
+          "answers": [
+            {
+              "id": "route",
+              "option_ids": [
+                "2"
+              ]
+            },
+            {
+              "id": "note",
+              "option_ids": [],
+              "text": "  留在原题  "
+            },
+            {
+              "id": "optional",
+              "option_ids": []
+            }
+          ],
+          "mode": "batch"
+        },
+        "closed": true,
+        "native_question_id": "native_trainer_batch",
+        "native_request_id": 3,
+        "receipt_id": "codex-question-d24ebbeb06b7b318106ef39d870eae267abd7190deab0b59f79bbb81777b9487",
+        "session": "01a2175c-7f6e-7040-8f0f-30d8b818d2ec",
+        "turn_id": "01a2175c-80e3-71d3-95d8-c8fc014e6a16"
+      },
+      "model_saw": {
+        "answers": {
+          "route": {
+            "answers": [
+              "第二项"
+            ]
+          },
+          "note": {
+            "answers": [
+              "  留在原题  "
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "unconfirmed_card_id": "om_14",
+  "unconfirmed_untouched": true,
+  "secret_question_projected": false,
+  "mixed_secret_group_projected": false,
+  "boundary": "Actual App Server requestUserInput and fixture card actions, no Feishu identity or cloud model",
+  "successful_repeats": 8
+}

@@ -98,6 +98,39 @@ class QuestionCards(PlatformCase):
         self.assertEqual(self.executions,1)
         self.assertEqual(self.sink.calls[-1],("patch",card[0]))
 
+    def test_batch_submit_skips_blanks_and_keeps_original_field_options(self):
+        self.question.pop("text")
+        self.question.pop("options")
+        self.question["questions"] = [
+            {"id":"first","text":"选一项","options":self.options,"multiple":False,"custom":False},
+            {"id":"colors","text":"可选任意项","options":self.options,"multiple":True,"custom":True},
+            {"id":"note","text":"仅自填","options":[],"multiple":False,"custom":True},
+        ]
+        qid,card = self.open()
+        mid = card[0]
+        form = {"options_1":"2","options_2":"2,1"}
+        for invalid in (dict(form,options_1="1,2"),dict(form,options_2="1,1"),dict(form,options_2="3"),
+                        dict(form,reply_1="不接受"),dict(form,options_3="1")):
+            with self.assertRaises(Fault):
+                self.click(qid,mid,"batch",invalid)
+        self.assertEqual(self.executions,0)
+        self.assertEqual(self.click(qid,mid,"batch",form),"pending")
+        self.assertEqual(self.click(qid,mid,"batch",dict(form,options_2="1,2")),"pending")
+        with self.assertRaisesRegex(Fault,"answer_conflict"):
+            self.click(qid,mid,"skip")
+        self.actions.flush()
+        self.views.poll()
+        proof, = self.closed.values()
+        self.assertEqual(proof["answer"],{"mode":"batch","answers":[
+            {"id":"first","option_ids":["no"]},{"id":"colors","option_ids":["yes","no"]},{"id":"note","option_ids":[]},
+        ]})
+        self.assertEqual(self.sink.calls.count(("patch",mid)),1)
+        fields = [e["text"]["content"] for e in card[2]["body"]["elements"][:3]]
+        self.assertEqual([field.splitlines()[-1] for field in fields],
+                         ["训练员的回答：第二项","训练员的回答：第一项、第二项","训练员的回答：已跳过"])
+        self.assertEqual(self.executions,1)
+        self.assertFalse(self.loop.hermes.tasks()["items"])
+
     def test_manager_is_read_only_and_original_card_updates_after_answer(self):
         manager,w = self.loop.hermes,self.loop.worker
         tid = manager.create(guid(),"题卡","找溪流","oguri")["task_id"]
