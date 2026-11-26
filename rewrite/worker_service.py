@@ -3,7 +3,7 @@ from threading import Event, Thread
 import time
 from urllib.error import URLError
 
-from . import display, links, worker_media
+from . import display, links, user_questions, worker_media
 from .storage import Fault, require, string
 from .wire import serve_authenticated
 
@@ -92,6 +92,10 @@ class WorkerService:
                         422,"unsupported_native_tool")
                 result = w.report(native,string(args,"task_id"),string(args,"assignment_id"),
                                   string(args,"summary"),args.get("outcome","completed"),args.get("artifact_ids"))
+        elif actor == "adapter/" + w.worker_id and method == "POST" and path == "/v1/worker/native-question":
+            result = user_questions.open_native(w,body)
+        elif actor == "platform/" + w.worker_id and method == "POST" and path == "/v1/worker/trainer-answer":
+            result = user_questions.resolve(w,body)
         elif actor == "adapter/" + w.worker_id and method == "POST" and path == "/v1/worker/peer":
             result = w.send_peer(string(body,"message_id"),string(body,"to_worker"),string(body,"text"),body.get("reply_to"))
         elif actor == "adapter/" + w.worker_id and method == "GET" and path == "/v1/worker/peers":

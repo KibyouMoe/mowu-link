@@ -19,6 +19,10 @@ class HostAdapter:
                 delivery_id TEXT PRIMARY KEY, session TEXT NOT NULL, payload TEXT NOT NULL, digest TEXT NOT NULL,
                 receipt TEXT, native_id TEXT, UNIQUE(session,native_id)
             );
+            CREATE TABLE IF NOT EXISTS question_resolutions (
+                session TEXT,turn TEXT,qid TEXT,original TEXT NOT NULL,answer TEXT NOT NULL,proof TEXT,
+                PRIMARY KEY(session,turn,qid)
+            );
         """)
         self.host, self.session = host, session
         self.media_store = media_store
@@ -94,4 +98,30 @@ class HostAdapter:
                 and proof.get("stopped") is True and proof.get("cleaned") is True
                 and isinstance(proof.get("receipt_id"), str) and proof["receipt_id"].strip(),
                 409, "native_cleanup_unconfirmed")
+        return proof
+
+    def resolve_question(self, original, answer):
+        from .user_questions import confirm
+        from .storage import string
+        require(string(original,"session")==self.session,403,"wrong_native_session")
+        identity = (self.session,string(original,"turn_id"),string(original,"native_question_id"))
+        resolve = getattr(self.host,"resolve_question",None)
+        require(callable(resolve),422,"native_question_answer_unavailable")
+        with self.db.transaction() as db:
+            inserted = db.execute("INSERT OR IGNORE INTO question_resolutions VALUES (?,?,?,?,?,NULL)",
+                                  (*identity,encode(original),encode(answer))).rowcount
+            row = db.execute("SELECT * FROM question_resolutions WHERE session=? AND turn=? AND qid=?",identity).fetchone()
+            require(row["original"]==encode(original) and row["answer"]==encode(answer),409,"answer_conflict")
+            if row["proof"]:
+                return json.loads(row["proof"])
+        if inserted:
+            proof = resolve(original,answer)
+        else:
+            lookup = getattr(self.host,"lookup_answer",None)
+            proof = lookup(*identity) if lookup else None
+        confirm(proof,original,answer)
+        with self.db.transaction() as db:
+            changed = db.execute("""UPDATE question_resolutions SET proof=? WHERE session=? AND turn=? AND qid=?
+                                  AND (proof IS NULL OR proof=?)""",(encode(proof),*identity,encode(proof))).rowcount
+            require(changed,409,"question_receipt_conflict")
         return proof

@@ -39,6 +39,9 @@ class RemoteAdapter:
     def cleanup_evidence(self, assignment_id, kind):
         return self.request("POST", "host/cleanup-evidence", {"assignment_id":assignment_id,"kind":kind})["proof"]
 
+    def resolve_question(self, original, answer):
+        return self.request("POST","host/answer-question",{"original":original,"answer":answer})["proof"]
+
 
 def serve_adapter(adapter, worker_id, identities, address, context):
     def handle(actor, method, path, body, _headers):
@@ -60,6 +63,9 @@ def serve_adapter(adapter, worker_id, identities, address, context):
                 result = {"native_id":adapter.input_for_turn(string(body,"session"),string(body,"turn_id"))}
             case "POST","/v1/host/cleanup-evidence":
                 result = {"proof":adapter.cleanup_evidence(string(body,"assignment_id"),string(body,"kind"))}
+            case "POST","/v1/host/answer-question":
+                require(isinstance(body.get("original"),dict) and isinstance(body.get("answer"),dict),422,"invalid_question")
+                result = {"proof":adapter.resolve_question(body["original"],body["answer"])}
             case _:
                 raise Fault(404, "unknown_host_route")
         return 200, "application/json", result

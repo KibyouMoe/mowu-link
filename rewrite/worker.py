@@ -3,7 +3,7 @@ import json
 from threading import RLock
 from typing import Protocol
 
-from . import display, links, worker_media
+from . import display, links, user_questions, worker_media
 from .storage import Database, Fault, encode, guid, require, string
 
 SCHEMA = """
@@ -46,7 +46,7 @@ class AgentAdapter(Protocol):
 
 class Worker:
     def __init__(self, path, worker_id, router, adapter: AgentAdapter):
-        self.db = Database(path, SCHEMA + worker_media.SCHEMA + display.SCHEMA + links.WORKER_SCHEMA)
+        self.db = Database(path, SCHEMA + worker_media.SCHEMA + display.SCHEMA + links.WORKER_SCHEMA + user_questions.SCHEMA)
         self.worker_id, self.router, self.adapter = worker_id, router, adapter
         self.lock = RLock()
         with self.db.transaction() as db:
@@ -140,6 +140,7 @@ class Worker:
                                      (payload["question_id"], payload["task_id"], payload["assignment_id"])).fetchone()
                     require(row and row["answer"] in (None, answer), 409, "question_answer_mismatch")
                     db.execute("UPDATE questions SET answer=? WHERE question_id=?", (answer, payload["question_id"]))
+                    user_questions.mirror_manager(db, row["question_id"], payload["answer"])
                 return self.adapter.deliver(frame["delivery_id"], {"kind": "question_answer", **payload}) is not None
             if frame["kind"] == "task.shelved":
                 with self.db.transaction() as db:
@@ -276,6 +277,7 @@ class Worker:
             require(origin["kind"] in ("task", "task_update", "task_probe", "question_answer"), 403, "wrong_report_origin")
             tid, aid = origin["task_id"], origin["assignment_id"]
             require(isinstance(call_id, str) and call_id.strip(), 422, "missing_call_id")
+            session = self.adapter.bound_session()
             with self.db.transaction() as db:
                 lookup = db.execute("SELECT * FROM questions WHERE native_id=? AND call_id=?", (native_id, call_id)).fetchone()
                 if lookup:
@@ -291,11 +293,13 @@ class Worker:
                         return json.loads(lookup["receipt"])
                 else:
                     db.execute("INSERT INTO questions VALUES (?,?,?,?,?,?,NULL,NULL)", (native_id, call_id, qid, tid, aid, encode(body)))
+                    db.execute("INSERT INTO question_sessions VALUES (?,?)", (qid, session))
             reply = self.router.request("POST", f"tasks/{tid}/questions", body, "ask-" + qid)
             require(reply.get("task_id") == tid and reply.get("question_id") == qid and reply.get("received_at"),
                     409, "question_receipt_mismatch")
             with self.db.transaction() as db:
                 db.execute("UPDATE questions SET receipt=? WHERE question_id=?", (encode(reply), qid))
+                user_questions.mirror_manager(db, qid)
             return reply
 
     def report(self, native_id, task_id, assignment_id, summary, outcome="completed", artifact_ids=None):

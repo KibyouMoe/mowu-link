@@ -5,6 +5,7 @@ import time
 from uuid import NAMESPACE_URL, uuid5
 
 from .feishu_inbound import image_format
+from . import question_cards
 from .storage import Database, encode, require
 
 
@@ -26,7 +27,7 @@ class Views:
             CREATE TABLE IF NOT EXISTS view_images(seq INTEGER PRIMARY KEY,image_key TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS segments(session TEXT,turn TEXT,mid TEXT NOT NULL,text TEXT NOT NULL,
                 PRIMARY KEY(session,turn));
-        """)
+        """ + question_cards.SCHEMA)
         with self.db.transaction() as db:
             db.execute("INSERT OR IGNORE INTO view_cursor VALUES (1,?,0)",(chat,))
             require(db.execute("SELECT chat FROM view_cursor").fetchone()[0]==chat,409,"view_chat_mismatch")
@@ -72,7 +73,11 @@ class Views:
             segment = db.execute("SELECT * FROM segments WHERE session=? AND turn=?",(session,turn)).fetchone()
             editing = kind=="progress" and segment
             text = event.get("text","")
-            if editing:
+            if kind in ("question_open","question_answered"):
+                if kind=="question_open":
+                    require(0 <= self.clock()-attempt["first_try"] < 55*60,409,"platform_receipt_unknown")
+                mid = question_cards.publish(db,self.platform,self.chat,self.name,event,key)
+            elif editing:
                 text = segment["text"]+text
                 mid = self.platform.patch(segment["mid"],card(self.name+"-输出",text,session))
                 require(mid==segment["mid"],502,"wrong_card_receipt")

@@ -17,14 +17,7 @@ def public(row):
     return dict(row, options=json.loads(row["options"]), answer=json.loads(row["answer"]) if row["answer"] else None)
 
 
-def ask(db, current, worker, body, now):
-    require(set(body) == {"session_id","assignment_id","question_id","text","options"}, 422, "invalid_question")
-    qid, aid, text = (string(body, k) for k in ("question_id", "assignment_id", "text"))
-    try:
-        require(str(UUID(qid)) == qid, 422, "invalid_question_id")
-    except ValueError:
-        require(False, 422, "invalid_question_id")
-    options = body["options"]
+def validate_options(options):
     require(isinstance(options, list), 422, "invalid_options")
     seen = set()
     for opt in options:
@@ -33,6 +26,17 @@ def ask(db, current, worker, body, now):
         string(opt, "label")
         require(oid not in seen, 422, "duplicate_option")
         seen.add(oid)
+
+
+def ask(db, current, worker, body, now):
+    require(set(body) == {"session_id","assignment_id","question_id","text","options"}, 422, "invalid_question")
+    qid, aid, text = (string(body, k) for k in ("question_id", "assignment_id", "text"))
+    try:
+        require(str(UUID(qid)) == qid, 422, "invalid_question_id")
+    except ValueError:
+        require(False, 422, "invalid_question_id")
+    options = body["options"]
+    validate_options(options)
     tid = current["task_id"]
     previous = db.execute("SELECT * FROM questions WHERE question_id=?", (qid,)).fetchone()
     if previous:
@@ -49,11 +53,7 @@ def ask(db, current, worker, body, now):
     return {"question_id": qid, "task_id": tid, "received_at": received}
 
 
-def answer(db, qid, body):
-    require(set(body) == {"task_id","answer"}, 422, "invalid_answer")
-    row = db.execute("SELECT * FROM questions WHERE question_id=? AND task_id=?", (qid, string(body, "task_id"))).fetchone()
-    require(row, 404, "question_not_found")
-    value = body["answer"]
+def validate_answer(value, options):
     require(isinstance(value, dict), 422, "invalid_answer")
     mode = string(value, "mode")
     fields = {"skip": {"mode"}, "text": {"mode","text"}, "choice": {"mode","option_id"}}
@@ -61,7 +61,15 @@ def answer(db, qid, body):
     if mode == "text":
         string(value, "text")
     if mode == "choice":
-        require(string(value, "option_id") in {o["id"] for o in json.loads(row["options"])}, 422, "invalid_option")
+        require(string(value, "option_id") in {o["id"] for o in options}, 422, "invalid_option")
+
+
+def answer(db, qid, body):
+    require(set(body) == {"task_id","answer"}, 422, "invalid_answer")
+    row = db.execute("SELECT * FROM questions WHERE question_id=? AND task_id=?", (qid, string(body, "task_id"))).fetchone()
+    require(row, 404, "question_not_found")
+    value = body["answer"]
+    validate_answer(value, json.loads(row["options"]))
     serialized = encode(value)
     if row["answer"]:
         require(row["answer"] == serialized, 409, "answer_conflict")
