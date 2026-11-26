@@ -5,6 +5,23 @@
     "unexpected_notification": "44380a98-ef8e-4249-9bf1-62ab2e212711"
   },
   "native_binary_sha256": "a44e0ef9293c1bbcb1adc5cb4d71804784cde18533e6e96063050cd2e9e17352",
+  "isolated_schema_upgrade": {
+    "previous_revision": "d73e9585bbb224f397dbca2b0a53e94aa64abe2e",
+    "new_revision": "536ae99fed5a41166772745f74c734faa6a38463",
+    "old_approval": "531738e6-d01a-4e30-87a9-9800d5aeab59",
+    "old_receipt_unchanged": true,
+    "new_approval": "ce98bf9f-5ea6-45fe-9f4a-00e16d55b7e9",
+    "new_native_proof": {
+      "approval_id": "ce98bf9f-5ea6-45fe-9f4a-00e16d55b7e9",
+      "asked_seq": 22,
+      "decided_seq": 23,
+      "outcome": "cancelled",
+      "turn_id": "12/2"
+    },
+    "original_notice_count": 1,
+    "previous_revision_reads_closed_and_replays_without_new_notice": true,
+    "boundary": "Prior and current packaged Router code use the same temporary SQLite database. Native proof is a fixture in this schema upgrade check."
+  },
   "runs": [
     {
       "boundary": "Installed DSH AgentLoop and native event log, local model and operator fixture; approval receipt failure injected.",
