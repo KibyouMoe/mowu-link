@@ -173,6 +173,21 @@ class NativeProcess(unittest.TestCase):
                 db.execute("UPDATE intents SET receipt=NULL,native_id=NULL")
             self.assertEqual(loop.adapter.deliver(intent["delivery_id"],json.loads(intent["payload"])),receipt)
             self.assertEqual(self.read_native(native,"read"),observed)
+        cold = None
+        if use_tls:
+            with loop.adapter.db.transaction() as db:
+                db.execute("UPDATE intents SET receipt=NULL,native_id=NULL WHERE delivery_id=?",(receipt["delivery_id"],))
+            payload = json.loads(intent["payload"])
+            with self.assertRaisesRegex(Fault,"adapter_connection_unconfirmed"):
+                loop.adapter.deliver(receipt["delivery_id"],payload)
+            with loop.adapter.db.transaction() as db:
+                pending = db.execute("SELECT receipt FROM intents WHERE delivery_id=?",(receipt["delivery_id"],)).fetchone()
+            self.assertIsNone(pending["receipt"])
+            with self.start_native(directory,session,"formal-reopen",use_tls=True) as reopened:
+                self.assertEqual(loop.adapter.deliver(receipt["delivery_id"],payload),receipt)
+                cold = self.read_native(reopened,"read")
+                self.assertEqual({**cold,"modelRequests":observed["modelRequests"]},observed)
+                self.assertEqual(cold["modelRequests"],[])
         details = loop.hermes.inspect(tid)
         self.assertEqual(details["task"]["state"],"completed_reported")
         self.assertEqual(observed["inputs"],[receipt["native_id"]])
@@ -199,6 +214,9 @@ class NativeProcess(unittest.TestCase):
         self.evidence = {"native":observed,"input_receipt":receipt,"router":details,
                          "router_w04":request,"notification_delivery_ids":notified,"worker_after":loop.worker.hold(),
                          "boundary":"Native DSH AgentLoop, tool execution and real isolated Router/Worker; scripted local model"}
+        if cold is not None:
+            self.evidence["cold_restart"] = {"offline_receipt_unconfirmed":True,"same_receipt":True,
+                                             "native_inputs":len(cold["inputs"]),"new_model_calls":0}
 
 
     def assert_client_certificate_required(self,link):

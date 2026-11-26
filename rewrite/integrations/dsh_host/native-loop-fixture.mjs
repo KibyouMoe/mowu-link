@@ -543,7 +543,8 @@ async function setup() {
   const agentOptions = {provider:'fixture',model:'local'};
   const registry = ctx.get('agents');
   if (!['cold-resume-reopen','managed-sessions-reopen'].includes(mode)) {
-    originalHandle = ['command-approvals-reopen','foreground-relay-reopen','cleanup-container-recovery-reopen','cleanup-container-build-reopen'].includes(mode)
+    originalHandle = ['formal-reopen','command-approvals-reopen','foreground-relay-reopen',
+      'cleanup-container-recovery-reopen','cleanup-container-build-reopen'].includes(mode)
       ? await registry.resume({resumeSessionId:session,agentOptions})
       : await registry.create({sessionId:session,agentOptions,...(isManaged ? {meta:{cwd:directory}} : {})});
   }
@@ -826,7 +827,7 @@ async function formalScenario(agent) {
 
 try {
   const agent = await setup();
-  if (['formal','formal-artifacts','compact','questions','foreground-question','catalog','private-stop','work-question','admission-race',
+  if (['formal','formal-reopen','formal-artifacts','compact','questions','foreground-question','catalog','private-stop','work-question','admission-race',
        'binding-close','material','peer-source'].includes(mode) || isCold || isManaged || usesGoals || usesMedia
        || usesApprovals || usesCleanup || foregroundRelay || standalone) {
     await formalScenario(agent);
