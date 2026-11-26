@@ -58,9 +58,19 @@ class HostAdapter:
 
     def stop_private(self,session):
         require(session==self.session,409,"wrong_native_session")
+        stop_bound = getattr(self.host,"stop_bound_private",None)
+        if callable(stop_bound):
+            return stop_bound(session,self.private_input)
         stop = getattr(self.host,"stop_private",None)
         require(callable(stop),422,"native_stop_unavailable")
         return stop(self.session)
+
+    def private_input(self,turn_id,native_id):
+        with self.db.transaction() as db:
+            row = db.execute("""SELECT receipt FROM intents WHERE session=? AND native_id=?
+                AND json_extract(receipt,'$.turn_id')=? AND json_extract(payload,'$.kind') IN ('chat','queued_chat')""",
+                (self.session,native_id,turn_id)).fetchone()
+        return json.loads(row[0]) if row else None
 
     def compact(self, session, command_id, *, start):
         require(session==self.session,409,"wrong_native_session")

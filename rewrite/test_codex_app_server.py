@@ -63,6 +63,12 @@ class Provider(BaseHTTPRequestHandler):
         calls = sum(item.get("type")=="function_call_output" for item in items[user_index+1:])
         names = [tool.get("name") for tool in body.get("tools",[])]
         self.server.observed.append(("worker_report" in names,calls))
+        if hasattr(self.server,"private_admissions"):
+            held = next((item["text"] for item in latest if item.get("text","").startswith("Hold bound private ")),None)
+            if held:
+                self.server.private_admissions.put(held)
+                self.server.release_private.wait(15)
+                return
         response_id = "resp_fixture_"+str(len(self.server.observed))
         question = payload and payload.get("instructions")=="Ask the scripted manager before proceeding"
         peer = next((block["text"] for block in latest if block.get("text","").startswith("Send peer fixture\n")),None)
@@ -345,6 +351,82 @@ class CodexAppServer(unittest.TestCase):
                          "state_after":state["task"]["state"],"wrong_turn_rejected":True,
                          "cleanup_pending":state["pending_cleanup"],
                          "boundary":"Native App Server, one scripted local model turn. Only native interruption is confirmed."}
+
+    def test_platform_stop_interrupts_only_the_proven_private_app_server_turn(self):
+        self.provider.private_admissions = Queue()
+        self.provider.release_private = Event()
+        rpc = self.enterContext(isolated_app_server(self.root,self.origin))
+        self.addCleanup(self.provider.release_private.set)
+        sid = rpc.request("thread/start",{"cwd":self.root,"ephemeral":False,"dynamicTools":[REPORT_TOOL]})["thread"]["id"]
+        host = AppServerHost(rpc,sid)
+        host.session = sid
+        clock = Clock()
+        loop = self.enterContext(Loop.isolated(clock,host_factory=lambda _path,_name:host))
+        service = WorkerService(loop.worker,clock)
+        token = guid()
+        url = self.enterContext(running(service.listen({token:"platform/oguri"},("127.0.0.1",0),None)))
+        platform = Client(url,token)
+        service.step()
+
+        def command(mid):
+            receipt = platform.request("POST","worker/command",{"message_id":mid,"text":"/stop"})["receipt"]
+            card = next(row["event"]["text"] for row in platform.request("GET","worker/display")["items"]
+                        if row["seq"]==receipt["output"]["seq"])
+            return receipt,card
+
+        def open_private(marker):
+            text = "Hold bound private "+marker
+            mid = guid()
+            loop.worker.chat(mid,text)
+            self.assertEqual(self.provider.private_admissions.get(timeout=8),text)
+            return loop.worker.chat(mid,text)
+
+        self.assertIn("已空闲",command("stop_idle")[1])
+        first = open_private("one")
+        saved,card = command("stop_first")
+        self.assertIn("回合已停止",card)
+        self.assertEqual(saved["stop_receipt"],{"session":sid,"turn_id":first["turn_id"],"native_input_id":first["native_id"]})
+        self.assertEqual(host.thread(sid,include_turns=True)["turns"][-1]["status"],"interrupted")
+
+        second = open_private("two")
+        original_stop = loop.adapter.stop_private
+        def lose_stop_ack(session):
+            self.assertEqual(original_stop(session)["native_input_id"],second["native_id"])
+            raise Fault(503,"isolated_stop_ack_lost",True)
+        loop.adapter.stop_private = lose_stop_ack
+        pending,card = command("stop_lost")
+        loop.adapter.stop_private = original_stop
+        self.assertIn("待核",card)
+        self.assertNotIn("stop_receipt",pending)
+
+        third = open_private("three")
+        self.assertEqual(command("stop_first")[0],saved)
+        self.assertEqual(command("stop_lost")[0],pending)
+        self.assertTrue(host.busy(sid))
+        self.assertEqual(command("stop_third")[0]["stop_receipt"]["turn_id"],third["turn_id"])
+        private_turns = host.thread(sid,include_turns=True)["turns"]
+        self.assertEqual([(turn["id"],turn["status"]) for turn in private_turns],
+                         [(item["turn_id"],"interrupted") for item in (first,second,third)])
+
+        task = loop.hermes.create(guid(),"Hold formal","No private stop permission","oguri")["task_id"]
+        loop.worker.poll()
+        clock.advance(10)
+        loop.worker.poll()
+        loop.worker.poll()
+        deadline = time.monotonic()+12
+        while rpc.event(deadline)["method"]!="item/tool/call":
+            pass
+        self.assertEqual(loop.worker.hold()["held_task_id"],task)
+        self.assertIn("取消请走工单流程",command("stop_formal")[1])
+        with self.assertRaisesRegex(Fault,"native_stop_not_private"):
+            loop.adapter.stop_private(sid)
+        self.assertTrue(host.busy(sid))
+        self.assertEqual(loop.hermes.inspect(task)["task"]["state"],"working")
+        self.assertFalse(loop.manager_wire.frames(0))
+        self.evidence = {"thread_id":sid,"native_stop":saved["stop_receipt"],"lost_receipt_state":"unknown",
+                         "later_turn_was_kept":third["turn_id"],"formal_task_kept":task,
+                         "interrupted_private_turns":[turn["id"] for turn in private_turns],
+                         "boundary":"Actual bundled App Server, scripted local model and isolated platform calls"}
 
     def test_native_app_server_conversation_uses_standard_feishu_cards(self):
         rpc = self.enterContext(isolated_app_server(self.root,self.origin))

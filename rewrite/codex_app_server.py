@@ -39,6 +39,33 @@ class AppServerHost:
         require(status in ("idle","active"),503,"native_agent_unavailable")
         return status=="active"
 
+    def capabilities(self,session):
+        require(session==self.thread_id,409,"wrong_native_session")
+        return {"stop_private":True}
+
+    def stop_bound_private(self,session,private_input):
+        with self.write_lock:
+            if not self.busy(session):
+                return {"session":session,"state":"idle"}
+            thread = self.thread(session,include_turns=True)
+            status = thread["status"]["type"]
+            if status=="idle":
+                return {"session":session,"state":"idle"}
+            require(status=="active" and thread["turns"],409,"native_stop_not_private")
+            turn = thread["turns"][-1]
+            users = [item for item in turn["items"] if item.get("type")=="userMessage"]
+            require(len(users)==1 and turn["status"]=="inProgress",409,"native_stop_not_private")
+            receipt = private_input(string(turn,"id"),string(users[0],"id"))
+            require(receipt,409,"native_stop_not_private")
+            proof = self.stop_turn(session,receipt,start=True)
+            until = time.monotonic()+1
+            while proof is None and time.monotonic()<until:
+                time.sleep(.05)
+                proof = self.stop_turn(session,receipt,start=False)
+            require(proof,503,"native_stop_unconfirmed")
+            return {"session":session,"state":"stopped","turn_id":proof["turn_id"],
+                    "native_input_id":proof["native_id"]}
+
     def model_view(self,session,kind):
         require(kind in ("models","efforts"),422,"invalid_model_view")
         thread = self.thread(session,include_turns=False)

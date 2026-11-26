@@ -4,6 +4,8 @@
 
 ## 检查点与证据
 
+隔离 Codex App Server 已接平台 `/stop`。Worker 持单时拒绝，适配器也独立核对原生单输入与私聊收件账本。普通聊天停后回读原回合和输入号。故意丢停止回执，同号重投仍是待核，第三个真实回合继续运行直至接到自己的停止命令。连续 20 轮通过。复跑 `python3 -m unittest -v rewrite.test_codex_app_server.CodexAppServer.test_platform_stop_interrupts_only_the_proven_private_app_server_turn`。[试验记录](evidence/codex-app-server-private-stop.json)。本地平台和模型夹具。
+
 `codex-provision` 已实测新建独立原生测试工位。一次初始化输入后退出并冷开 App Server，线程、回合和输入号全部读回。独立 TLS 适配器使用该线程接工单，原生工具调用回同一 W04 凭据且仅一条成果通知。连续 10 轮通过。默认无授权登录时在建线程前拒绝，脚本模型尝试在初始化时调用工具也被拒绝，无成功凭据。复跑 `python3 -m unittest -v rewrite.test_codex_app_server`。[初始化试验](evidence/codex-native-provision.json)。模型为本地脚本。
 
 独立 Codex 的 `/model` 和 `/effort` 读到指定原生会话当前为 test_wire/gpt-5.4、high，与本地模型请求一致。`/context` 从原生用量事件和回合历史读到第 1 回合输入 11、总计 16、模型窗口 258400。连续 10 轮通过。原生模型目录没有标明各项所属提供方，当前只展示会话选择，切换仍待核。[回读证据](evidence/codex-app-server-native-context.json)。复跑 `python3 -m unittest -v rewrite.test_codex_app_server.CodexAppServer.test_model_effort_and_context_read_native_app_server_observations`。模型为本地脚本。

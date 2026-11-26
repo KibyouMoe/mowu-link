@@ -1,0 +1,18 @@
+{
+  "thread_id": "01a216e7-63cb-76c2-950a-8afeabd9c5db",
+  "native_stop": {
+    "native_input_id": "01a216e7-6407-7832-947e-d8a7cd2f43e0",
+    "session": "01a216e7-63cb-76c2-950a-8afeabd9c5db",
+    "turn_id": "01a216e7-63ff-7e53-a04b-569d318dfb0e"
+  },
+  "lost_receipt_state": "unknown",
+  "later_turn_was_kept": "01a216e7-6428-7542-ace8-52f8ada14928",
+  "formal_task_kept": "3060d935-59b8-4e72-88f4-b86228baea52",
+  "interrupted_private_turns": [
+    "01a216e7-63ff-7e53-a04b-569d318dfb0e",
+    "01a216e7-6417-7390-83e7-aab7af9355d4",
+    "01a216e7-6428-7542-ace8-52f8ada14928"
+  ],
+  "boundary": "Actual bundled App Server, scripted local model and isolated platform calls",
+  "consecutive_runs": 20
+}

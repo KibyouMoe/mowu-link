@@ -440,9 +440,13 @@ def stop_private(service,mid,text):
             if proof.get("state")=="idle":
                 answer = "当前会话已空闲。"
             else:
-                require(proof.get("state")=="stopped" and type(proof.get("end_seq")) is int and proof["end_seq"]>=0,
-                        502,"invalid_stop_receipt")
-                receipt = {"session":session,"turn_id":string(proof,"turn_id"),"end_seq":proof["end_seq"]}
+                require(proof.get("state")=="stopped",502,"invalid_stop_receipt")
+                receipt = {"session":session,"turn_id":string(proof,"turn_id")}
+                if "end_seq" in proof:
+                    require(type(proof["end_seq"]) is int and proof["end_seq"]>=0,502,"invalid_stop_receipt")
+                    receipt["end_seq"] = proof["end_seq"]
+                else:
+                    receipt["native_input_id"] = string(proof,"native_input_id")
                 answer = "当前普通对话回合已停止。"
         except Fault as error:
             if error.code=="native_stop_changed":
