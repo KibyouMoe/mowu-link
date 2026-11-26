@@ -40,5 +40,32 @@
   "unreplayed_queue_prevents_a_second_cutover": true,
   "mismatched_archived_request_mapping_rejected": true,
   "both_inputs_unchanged": true,
-  "boundary": "Actual old and new Router over local HTTP, SQLite and attachment bytes. Scripted Worker Agent."
+  "boundary": "Actual old and new Router over local HTTP, SQLite and attachment bytes. Scripted Worker Agent.",
+  "verification": {
+    "implementation_revision": "6eee6d2092a2fa269240abf903d391aae49cad27",
+    "legacy_router_revision": "11cd53c58e312ff9ebaeb5ae45497f3dd6cf79ff",
+    "legacy_trigger_revision": "c541f7f9e936dbfd8cc9a04e41e0630a6c2478e8",
+    "archive_files": 290,
+    "archive_sha256": "63c503a8e38589dcae5037570407d17e9943f11b8b0326946154583d46ef60fc",
+    "installed_specialized_tests_passed": 36,
+    "linux_arm64": {
+      "passed": 190,
+      "environment_skipped": 121
+    },
+    "macos_baseline": {
+      "revision": "c142cb6d5c8f1c18f0c3040b06ff4e8df9a23a12",
+      "passed": 306,
+      "environment_skipped": 5
+    },
+    "windows_ci": {
+      "run": "https://github.com/KibyouMoe/mowu-link/actions/runs/45900360371",
+      "codex_install_and_ops_passed": 14,
+      "dsh_native_passed": 13,
+      "rollback_rehearsals_passed": [
+        "Router",
+        "Worker and adapter"
+      ],
+      "legacy_router_cutover_run_on_windows": false
+    }
+  }
 }
