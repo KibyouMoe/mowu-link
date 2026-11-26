@@ -220,6 +220,10 @@ def agent_pending(paths):
     for path in paths:
         with closing(readonly(path)) as db:
             totals = pending_counts(db,AGENT_NATIVE_PENDING)
+            excluded = pending_counts(db,{"adapter_deliveries":({"intents","assignment_withdrawals"},"""
+                SELECT COUNT(*) FROM intents LEFT JOIN assignment_withdrawals USING(delivery_id)
+                WHERE receipt IS NULL AND discard_seq IS NULL""")})
+            totals.update({k:v for k,v in excluded.items() if v is not None})
             totals.update({k:v for k,v in pending_counts(db,OPTIONAL_AGENT_PENDING).items() if v is not None})
         for key,value in totals.items():
             previous = combined.get(key,0)

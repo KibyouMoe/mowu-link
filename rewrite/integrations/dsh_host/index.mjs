@@ -12,6 +12,7 @@ import { questionRequest } from './questions.mjs';
 import { browseSessions, catalogSessions } from './catalog.mjs';
 import { approvalProof, installCommandApprovals } from './command-approvals.mjs';
 import { guid, prepareSession, selection } from './session-preparation.mjs';
+import { readOnlyCleanup } from './read-only-cleanup.mjs';
 
 const tools = JSON.parse(readFileSync(new URL('../../agent-toolset.json', import.meta.url)));
 const sha = value => createHash('sha256').update(value).digest('hex');
@@ -57,7 +58,7 @@ function turns(events) {
   return result;
 }
 
-async function ownEvents(ctx, agent) {
+async function sessionEvents(ctx, agent) {
   check(await ctx.get('sessions').flush(agent.session), 'native_persistence_unavailable');
   const handle = await ctx.get('sessionPersistence').open(agent.session.id, 'read');
   try {
@@ -65,10 +66,15 @@ async function ownEvents(ctx, agent) {
     const {events} = await handle.read(0);
     const inherited = handle.inheritedEventCount;
     check(Number.isSafeInteger(inherited) && inherited >= 0 && inherited <= events.length, 'unknown_history_boundary');
-    return events.slice(inherited);
+    return {events,inherited};
   } finally {
     await handle.close();
   }
+}
+
+async function ownEvents(ctx,agent) {
+  const {events,inherited} = await sessionEvents(ctx,agent);
+  return events.slice(inherited);
 }
 
 async function persisted(ctx,agent) {
@@ -143,7 +149,7 @@ async function stopPrivateTurn(ctx,agent,compacting,bound) {
   throw new Error('native_stop_unconfirmed');
 }
 
-export async function bindHost(ctx, session, directory, catalog=[], selected=null) {
+export async function bindHost(ctx, session, directory, catalog=[], selected=null, readOnly=false) {
   check(typeof session === 'string' && session.length > 0, 'missing_native_session');
   const controller = ctx.get('sessionController');
   const agent = selected ?? (await controller.resolveAgent(session)).agent;
@@ -151,6 +157,7 @@ export async function bindHost(ctx, session, directory, catalog=[], selected=nul
   check(agent?.session?.id === session && agents?.get(session) === agent, 'wrong_native_session');
   const displayStart = await baseline(ctx,agent);
   const compact = compaction(ctx,agent,()=>ownEvents(ctx,agent));
+  const cleanup = readOnly ? readOnlyCleanup(ctx,agent,directory) : null;
   const imageCache = {};
   function bound() {
     // Resolving through SessionController here could reopen a closed session.
@@ -159,7 +166,7 @@ export async function bindHost(ctx, session, directory, catalog=[], selected=nul
   }
   bound();
   return {
-    agent, checkBinding:bound,
+    agent, checkBinding:bound, cleanup,
     async handle(request) {
       check(request.session === session, 'wrong_native_session');
       bound();
@@ -167,6 +174,12 @@ export async function bindHost(ctx, session, directory, catalog=[], selected=nul
       if (request.operation === 'display-next') return nextDisplay(ctx,agent,request);
       if (request.operation === 'display-image') return displayImage(ctx,agent,request,imageCache);
       if (request.operation === 'activity') return {busy:agent.status !== 'idle' || compact.inProgress};
+      if (request.operation === 'cleanup-evidence') {
+        check(cleanup,'native_cleanup_unconfirmed');
+        const {events,inherited} = await sessionEvents(ctx,agent);
+        bound();
+        return {proof:cleanup.proof(request,turns(events.slice(inherited)),events)};
+      }
       if (request.operation === 'capabilities') return {compaction:compact.supported,
         session_catalog:typeof ctx.get('sessionQuery')?.inspectSession==='function',
         stop_private:typeof agent.cancel==='function'};
@@ -217,7 +230,12 @@ export async function bindHost(ctx, session, directory, catalog=[], selected=nul
         check(agent.status==='idle' && !compact.inProgress,'native_task_not_admitted_busy');
       }
       try {
-        if (request.operation==='deliver-control') stopBoundTurn(agent,request,history,before);
+        if (request.operation==='deliver-control') {
+          const sameTurn = agent.session.seq===before;
+          cleanup?.withdraw(request);
+          stopBoundTurn(agent,request,history,sameTurn ? agent.session.seq : before);
+        }
+        cleanup?.admit(request,expected);
         agent.followup(expected);
         return {receipt:receipt(request,expected,await persisted(ctx,agent))};
       } catch (cause) {
@@ -306,13 +324,16 @@ function installBoundTools(ctx,port,directory,relay_command_approvals) {
       execute:(args,exec) => port.tool(tool.name,args,exec,body=>callback(directory,body))});
     ctx.effect(() => unregister);
   }
+  port.cleanup?.bindTools();
 }
 
 export async function apply(ctx, {session, directory, catalog_sessions=[], relay_command_approvals=false,
-                                 resume_on_handoff=false, managed_sessions_dir=null, new_session_selection=null}) {
+                                 resume_on_handoff=false, managed_sessions_dir=null, new_session_selection=null,
+                                 read_only_assignments=false}) {
   privateDir(directory);
   check(typeof session==='string' && session.length>0,'missing_native_session');
   check(typeof resume_on_handoff==='boolean','invalid_native_activation');
+  check(typeof read_only_assignments==='boolean','invalid_native_cleanup_configuration');
   const managed = managed_sessions_dir!==null;
   check(!managed || (!resume_on_handoff && typeof managed_sessions_dir==='string'),'invalid_managed_session_configuration');
   if (resume_on_handoff || managed) {
@@ -343,7 +364,7 @@ export async function apply(ctx, {session, directory, catalog_sessions=[], relay
     scope.selected ??= agents.get(target) ?? (await ctx.get('sessionController').resolveAgent(target)).agent;
     check(scope.selected?.session?.id===target && agents.get(target)===scope.selected,'native_agent_unavailable');
     check(scope.selected.status==='idle','native_cold_thread_unconfirmed');
-    const opened = await bindHost(ctx,target,directory,catalog,scope.selected);
+    const opened = await bindHost(ctx,target,directory,catalog,scope.selected,read_only_assignments);
     installBoundTools(ctx,opened,directory,relay_command_approvals);
     scope.port = opened;
   }
@@ -359,7 +380,7 @@ export async function apply(ctx, {session, directory, catalog_sessions=[], relay
     return {session:request.session,operation_id,state:'loaded'};
   }
   if (!resume_on_handoff && (!managed || !readdirSync(managed_sessions_dir).some(name=>name.endsWith('.json')))) {
-    const port = await bindHost(ctx,session,directory,catalog);
+    const port = await bindHost(ctx,session,directory,catalog,null,read_only_assignments);
     installBoundTools(ctx,port,directory,relay_command_approvals);
     scopes.get(session).port = port;
   }

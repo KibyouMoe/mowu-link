@@ -1,6 +1,7 @@
 // Real DSH AgentLoop and persistence in an isolated directory. The only model provider is an in-process test stream.
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
+import {writeFileSync} from 'node:fs';
 import {createRequire} from 'node:module';
 import path from 'node:path';
 import {pathToFileURL} from 'node:url';
@@ -21,6 +22,7 @@ const foregroundQuestion = Promise.withResolvers();
 const foregroundAnswer = Promise.withResolvers();
 const isCold = mode.startsWith('cold-resume');
 const isManaged = mode.startsWith('managed-sessions');
+const usesCleanup = mode.startsWith('cleanup-');
 const usesGoals = ['goals','goal-driver','formal-goal','cold-resume-goal'].includes(mode);
 const usesMedia = ['media','peer-media','handoff'].includes(mode);
 const usesApprovals = ['command-approvals','command-approvals-reopen'].includes(mode);
@@ -58,6 +60,27 @@ class LocalModel extends LlmAdapter {
     const goal = message.source.kind==='goal' ? message.source : null;
     const command = goal ? 'goal' : payload?.kind ?? 'private';
     modelRequests.push({command,provider,model,reasoningEffort});
+    if (usesCleanup && (command==='task.cancel' || command==='task.transfer_out')) {
+      const tag = 'cleanup-report-'+payload.assignment_id;
+      if (!this.submitted.has(tag)) {
+        this.submitted.set(tag,true);
+        const args = {task_id:payload.task_id,assignment_id:payload.assignment_id,summary:'Old assignment stopped',
+          outcome:command==='task.cancel' ? 'cancel_confirmed' : 'transfer_confirmed'};
+        yield {type:'block-start',index:0,blockType:'tool-call'};
+        yield {type:'block-end',index:0,block:{type:'tool-call',id:tag,name:'worker_report',arguments:JSON.stringify(args)}};
+        yield {type:'finish',reason:{kind:'tool-calls'}};
+        return;
+      }
+    }
+    if (mode==='cleanup-forbidden-tool' && command==='task' && !this.submitted.has('forbidden')) {
+      this.submitted.set('forbidden',true);
+      assert.ok(tools.some(tool=>tool.name==='fixture_write_workspace'));
+      yield {type:'block-start',index:0,blockType:'tool-call'};
+      yield {type:'block-end',index:0,block:{type:'tool-call',id:'cleanup-forbidden-tool',name:'fixture_write_workspace',
+        arguments:'{}'}};
+      yield {type:'finish',reason:{kind:'tool-calls'}};
+      return;
+    }
     if (usesApprovals && text.startsWith('DSH approval fixture ') && !this.submitted.has(message.id)) {
       this.submitted.set(message.id,true);
       const variant = text.substring('DSH approval fixture '.length);
@@ -294,6 +317,14 @@ async function setup() {
   await install((await sdk('dsh-system-prompt')).SystemPrompt);
   if (usesMedia) await install((await sdk('dsh-attachment-local')).default,{dshHome:directory});
   await install((await sdk('dsh-tools')).ToolsService);
+  if (mode==='cleanup-forbidden-tool') {
+    ctx.get('tools').register({name:'fixture_write_workspace',description:'Write only in the isolated fixture directory',
+      parameters:{type:'object',additionalProperties:false},output:{schema:{type:'object'},render:()=>[]},
+      execute:()=>{
+        writeFileSync(path.join(directory,'workspace-write.txt'),'fixture proof');
+        return {written:true};
+      }});
+  }
   if (usesApprovals) {
     await install((await sdk('dsh-user-approval')).ApprovalService,{policy:'ask'});
     await install((await sdk('dsh-fs-local')).LocalFileSystem,{cwd:directory});
@@ -423,11 +454,17 @@ async function stopScenario(agent) {
 async function formalScenario(agent) {
   await install(adapter,{session,directory,catalog_sessions:catalogSessions,
     relay_command_approvals:usesApprovals,resume_on_handoff:isCold,
+    read_only_assignments:usesCleanup && mode!=='cleanup-unscoped',
     ...(isManaged ? {managed_sessions_dir:path.join(directory,'enrolled'),
       new_session_selection:{provider:'fixture',model:'local',effort:'low'}} : {})});
   console.log(JSON.stringify({ready:true,session}));
   for await (const line of createInterface({input:process.stdin,terminal:false})) {
     if (line==='exit') break;
+    if (usesCleanup && line==='work-started') {
+      await entered.promise;
+      console.log(JSON.stringify({running:agent.status==='running'}));
+      continue;
+    }
     if (isManaged) {
       if (line==='status') {
         console.log(JSON.stringify({controllerResolutions,modelRequests,
@@ -554,7 +591,8 @@ async function formalScenario(agent) {
 try {
   const agent = await setup();
   if (['formal','formal-artifacts','compact','questions','foreground-question','catalog','private-stop','work-question','admission-race',
-       'binding-close','material','peer-source'].includes(mode) || isCold || isManaged || usesGoals || usesMedia || usesApprovals) {
+       'binding-close','material','peer-source'].includes(mode) || isCold || isManaged || usesGoals || usesMedia
+       || usesApprovals || usesCleanup) {
     await formalScenario(agent);
   }
   else await stopScenario(agent);

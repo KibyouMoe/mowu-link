@@ -29,7 +29,7 @@ from .native_files import NativeFiles
 from .orders import Orders
 from .release_check import config, serve
 from .question_cards import Actions
-from .state_bundle import capture, filename, restore, rollback, verify
+from .state_bundle import agent_pending, capture, filename, restore, rollback, verify
 from .storage import Fault, encode, guid
 from .test_feishu_output import PlatformFixture
 from .test_mainline import Clock
@@ -731,6 +731,164 @@ class NativeLoop(unittest.TestCase):
             event = next(item["event"] for item in items if item["seq"]==receipt["output"]["seq"])
             return receipt,event["text"]
         return directory,loop,service,command
+
+    def test_read_only_dsh_acknowledges_original_cancel_or_transfer_and_recovers_w04_reply(self):
+        cases = []
+        for action in ("cancel","transfer"):
+            with self.subTest(action=action):
+                session = "dsh-read-only-"+action
+                directory,loop,service,_command = self.goal_worker(session,extra_workers=("tama",))
+                token = guid()
+                client = Client(self.open_worker(service,{token:"adapter/oguri"}),token)
+                w = loop.worker
+                alternate = FixtureHost(loop.root/"alternate.db","alternate")
+                other = Worker(loop.root/"second-worker.db","tama",loop.extra_clients["tama"],
+                               HostAdapter(loop.root/"second-adapter.db",alternate,"alternate"),clock=service.clock)
+                tid = loop.hermes.create(guid(),"Scope native stop","Preserve exact assignment scope","oguri")["task_id"]
+                original_request = w.router.request
+                cleanup_receipts = []
+                def lose_cleanup_reply(method,route,*args,**kwargs):
+                    reply = original_request(method,route,*args,**kwargs)
+                    if method=="POST" and route==f"tasks/{tid}/report" and args[0].get("outcome")=="cancel_confirmed":
+                        cleanup_receipts.append(reply)
+                        if len(cleanup_receipts)==1:
+                            raise Fault(503,"test_cleanup_reply_lost",True)
+                    return reply
+                w.router.request = lose_cleanup_reply
+                runtime = Path(directory)
+                workspace = runtime/"workspace-sentinel"
+                workspace.write_text("preserve this file",encoding="utf-8")
+                with tool_listener(runtime,loop.adapter,client), self.start_native(directory,session,"cleanup-read-only") as native:
+                    other.connect()
+                    w.connect()
+                    w.poll()
+                    other.poll()
+                    service.clock.advance(10)
+                    w.poll()
+                    w.poll()
+                    self.assertTrue(self.read_native(native,"work-started")["running"])
+                    before = loop.hermes.inspect(tid)["task"]
+                    aid = before["assignment_id"]
+                    self.assertEqual(w.hold()["held_assignment_id"],aid)
+                    loop.hermes.update(guid(),tid,before["revision"],{"title":"Update queued on the old assignment"})
+                    w.poll()
+                    private_mid = guid()
+                    self.assertIsNone(w.chat(private_mid,"Keep this unrelated queued input"))
+                    with loop.adapter.db.transaction() as db:
+                        pending_update = db.execute("""SELECT delivery_id,digest,receipt FROM intents
+                            WHERE json_extract(payload,'$.assignment_id')=? AND json_extract(payload,'$.kind')='task_update'""",
+                                                    (aid,)).fetchone()
+                    self.assertIsNotNone(pending_update)
+                    self.assertIsNone(pending_update["receipt"])
+                    queued_native_id = loop.native.delivery_native_id(session,pending_update["delivery_id"],pending_update["digest"])
+                    before = loop.hermes.inspect(tid)["task"]
+                    fields = {"worker_id":"tama"} if action=="transfer" else {}
+                    loop.hermes.act(guid(),tid,before["revision"],action,reason="End only the old assignment",**fields)
+                    if action=="transfer":
+                        other.poll()
+                        new_holder = loop.hermes.inspect(tid)["task"]
+                        self.assertNotEqual(new_holder["assignment_id"],aid)
+                        self.assertEqual(other.hold()["held_assignment_id"],new_holder["assignment_id"])
+                    w.poll()
+                    native_end = self.read_native(native,"read")
+                    self.assertEqual([turn["reason"]["kind"] for turn in native_end["turns"]],
+                                     ["aborted","completed","completed"])
+                    results = native_end["results"]
+                    native_result, = results
+                    with w.db.transaction() as db:
+                        record = db.execute("SELECT proof,receipt FROM cleanup_reports WHERE assignment_id=?",(aid,)).fetchone()
+                    self.assertIsNotNone(record,native_result)
+                    proof = json.loads(record["proof"])
+                    self.assertEqual((proof["assignment_id"],proof["scope"],proof["stopped"],proof["cleaned"]),
+                                     (aid,"read_only",True,True))
+                    self.assertEqual(proof["stopped_turns"][0]["reason"],"aborted")
+                    withdrawal, = proof["withdrawn_inputs"]
+                    self.assertEqual((withdrawal["delivery_id"],withdrawal["native_id"]),
+                                     (pending_update["delivery_id"],queued_native_id))
+                    self.assertNotIn(queued_native_id,native_end["inputs"])
+                    private_receipt = w.chat(private_mid,"Keep this unrelated queued input")
+                    self.assertEqual(native_end["inputs"].count(private_receipt["native_id"]),1)
+                    with loop.adapter.db.transaction() as db:
+                        discarded = db.execute("SELECT native_id,discard_seq FROM assignment_withdrawals WHERE delivery_id=?",
+                                               (withdrawal["delivery_id"],)).fetchone()
+                    self.assertEqual(tuple(discarded),(withdrawal["native_id"],withdrawal["discard_seq"]))
+                    self.assertEqual(workspace.read_text(encoding="utf-8"),"preserve this file")
+                    if action=="transfer":
+                        self.assertFalse(native_result["isError"])
+                        reply = json.loads(native_result["content"][0]["text"])
+                        self.assertEqual(reply["release_assignment_id"],aid)
+                        self.assertEqual(w.hold()["held_assignment_id"],None)
+                        self.assertEqual(loop.hermes.inspect(tid)["task"],new_holder)
+                        self.assertEqual(json.loads(record["receipt"]),reply)
+                    else:
+                        self.assertTrue(native_result["isError"])
+                        self.assertIsNone(record["receipt"])
+                        self.assertEqual(w.hold()["held_assignment_id"],aid)
+                        self.assertEqual(loop.hermes.inspect(tid)["task"]["state"],"cancelled")
+                if action=="cancel":
+                    reopened = Worker(w.db.path,"oguri",w.router,loop.adapter,clock=service.clock)
+                    reopened.connect()
+                    self.assertEqual(cleanup_receipts,[cleanup_receipts[0]]*2)
+                    self.assertIsNone(reopened.hold()["held_assignment_id"])
+                    with reopened.db.transaction() as db:
+                        recovered = json.loads(db.execute("SELECT receipt FROM cleanup_reports WHERE assignment_id=?",
+                                                          (aid,)).fetchone()[0])
+                    self.assertEqual(recovered,cleanup_receipts[0])
+                current = loop.hermes.inspect(tid)
+                self.assertEqual(current["pending_cleanup"],[])
+                self.assertIsNone(current["last_report"])
+                self.assertEqual(agent_pending([loop.adapter.db.path])["adapter_deliveries"],0)
+                cases.append({"action":action,"task_id":tid,"old_assignment_id":aid,
+                    "native_inputs":native_end["inputs"],"proof":proof,"final_state":current["task"]["state"],
+                    "retained_private_input":private_receipt["native_id"],
+                    "new_assignment_id":current["task"]["assignment_id"] if action=="transfer" else None,
+                    "dropped_router_w04_receipts":int(action=="cancel"),"recorded_w04_replays":len(cleanup_receipts)})
+        output = os.environ.get("MOWULINK_DSH_CLEANUP_EVIDENCE")
+        if output:
+            Path(output).write_text(json.dumps({"cases":cases,
+                "boundary":"Installed DSH SDK with opt-in read-only assignments, local model, real isolated Router."},
+                ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
+
+    def test_native_dsh_stop_alone_or_unverified_tool_keeps_cleanup_pending(self):
+        cases = []
+        for mode in ("cleanup-unscoped","cleanup-forbidden-tool"):
+            with self.subTest(mode=mode):
+                sid = "dsh-"+mode
+                directory,loop,service,_command = self.goal_worker(sid)
+                token = guid()
+                client = Client(self.open_worker(service,{token:"adapter/oguri"}),token)
+                w = loop.worker
+                runtime = Path(directory)
+                with tool_listener(runtime,loop.adapter,client), self.start_native(directory,sid,mode) as native:
+                    tid = loop.hermes.create(guid(),"Unverified cleanup","Do not infer workspace cleanup","oguri")["task_id"]
+                    w.connect()
+                    w.poll()
+                    service.clock.advance(10)
+                    w.poll()
+                    w.poll()
+                    self.assertTrue(self.read_native(native,"work-started")["running"])
+                    active = loop.hermes.inspect(tid)["task"]
+                    aid = active["assignment_id"]
+                    loop.hermes.act(guid(),tid,active["revision"],"cancel",reason="Native stop is only one witness")
+                    w.poll()
+                    observed = self.read_native(native,"read")
+                    self.assertEqual(observed["turns"][0]["reason"]["kind"],"aborted")
+                    report = next(row for row in observed["results"] if row["toolCallId"]=="cleanup-report-"+aid)
+                    self.assertTrue(report["isError"])
+                    self.assertIn("native_cleanup_unconfirmed",encode(report))
+                    self.assertEqual(w.hold()["held_assignment_id"],aid)
+                    self.assertEqual([item["assignment_id"] for item in loop.hermes.inspect(tid)["pending_cleanup"]],[aid])
+                    self.assertFalse((runtime/"workspace-write.txt").exists())
+                    if mode=="cleanup-forbidden-tool":
+                        blocked = next(row for row in observed["results"] if row["toolCallId"]=="cleanup-forbidden-tool")
+                        self.assertTrue(blocked["isError"])
+                        self.assertIn("只读工位",encode(blocked))
+                    cases.append({"mode":mode,"task_id":tid,"assignment_id":aid,"native_stop":"aborted",
+                                  "native_report":"native_cleanup_unconfirmed",
+                                  "workspace_write_observed":(runtime/"workspace-write.txt").exists()})
+        output = os.environ.get("MOWULINK_DSH_CLEANUP_REFUSAL_EVIDENCE")
+        if output:
+            Path(output).write_text(json.dumps({"cases":cases},ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
 
     def test_native_w04_stages_private_artifact_before_sharing_it_with_manager(self):
         session = "dsh-formal-artifact"

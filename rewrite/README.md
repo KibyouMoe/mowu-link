@@ -99,6 +99,12 @@ python3 -B -m unittest -v rewrite.test_question_cards \
 
 收到取消或转派时，如果原生会话仍在执行可核对的原派发回合，DSH 插件请求停止，保留其他待处理消息，再交控制请求。原生输入号、回合号或会话位置无法对准时，插件仅递交控制请求。没有清理凭据时，Worker 保留原派发的待核状态。
 
+独立只读 DSH 工位可在宿主插件打开 `read_only_assignments`。该配置只适合会话内仅需查询和工单回报的工位。宿主会限制该会话的原生工具执行，并保存派发输入是在这条限制下交付的本地记录。收到取消或转派时，只撤下该旧派发已登记的排队输入，之后读回实际回合结束和原生收件箱撤销事件。工位随后才能经模型的 `worker_report` 确认旧派发清理。回执按原派发保存和重试。普通读写工位仍需实际工作区清理凭据。
+
+停写迁移时，随原生宿主记录保留运行目录里的 `read-only-admissions`。适配器 SQLite 单独保存已核实的原生撤销事件。已提交给 Router 的回执由 Worker 的发件账本负责查回。
+
+复跑 `python3 -B -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_read_only_dsh_acknowledges_original_cancel_or_transfer_and_recovers_w04_reply rewrite.test_dsh_native_loop.NativeLoop.test_native_dsh_stop_alone_or_unverified_tool_keeps_cleanup_pending`。[只读工位证据](evidence/dsh-read-only-cleanup.json) · [待核反例](evidence/dsh-native-cleanup-refusal.json)
+
 启用原生目标服务的 DSH 会话可用 `/goal` 查询、`/goal 目标正文` 新建、`/goal pause` 暂停、`/goal resume` 恢复。原生服务使用自己的默认轮次，已有未完成目标时拒绝替换。状态卡显示原生阶段、轮次和续跑授权。未确认的变更保留待核，重送同号不会再次修改。续跑由 DSH 宿主负责。
 
 启用原生压缩服务的 DSH 会话支持 `/compact`。Worker 先保存指令，宿主空闲时开始压缩。回执丢失后只按原指令号查原生记录。宿主保存了摘要、替换记录及结束条目后，飞书才显示已压缩的条数。连续五分钟无法确认时提示待核。摘要正文保留在宿主。

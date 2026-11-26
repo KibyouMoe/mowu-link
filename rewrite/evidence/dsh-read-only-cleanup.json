@@ -1,0 +1,83 @@
+{
+  "cases": [
+    {
+      "action": "cancel",
+      "task_id": "77ac7860-1b3f-4f51-9e20-16dcc3508c32",
+      "old_assignment_id": "6910311e-4971-4bb2-a517-85148dd0e835",
+      "native_inputs": [
+        "mowulink-3e108129b775fac48b0bb3275aa815ee9f21be6429dbf50c417c0cff1f5c39ae",
+        "mowulink-0844ef40472516e156ea43df530749224161e35391bd7bb64e30304023e17888",
+        "mowulink-1ec18385401770759904fe549836bcb3c81cb3ed17446185e879b1630753357d"
+      ],
+      "proof": {
+        "assignment_id": "6910311e-4971-4bb2-a517-85148dd0e835",
+        "cleaned": true,
+        "control_turn_id": "22/3",
+        "kind": "task.cancel",
+        "receipt_id": "b4d008b283511f345ececc386c958f42ae9f2ae24329eb42be1b0157ccd6059a",
+        "scope": "read_only",
+        "session": "dsh-read-only-cancel",
+        "stopped": true,
+        "stopped_turns": [
+          {
+            "end_seq": 14,
+            "reason": "aborted",
+            "turn_id": "1/1"
+          }
+        ],
+        "withdrawn_inputs": [
+          {
+            "delivery_id": "6e13b68e-1c1d-4045-bdb8-92264610a29d",
+            "discard_seq": 10,
+            "native_id": "mowulink-3febb4539a4567966be0c3dbbba66bfc117dd9f4bb006bc9a09189d40e24121a"
+          }
+        ]
+      },
+      "final_state": "cancelled",
+      "retained_private_input": "mowulink-0844ef40472516e156ea43df530749224161e35391bd7bb64e30304023e17888",
+      "new_assignment_id": null,
+      "dropped_router_w04_receipts": 1,
+      "recorded_w04_replays": 2
+    },
+    {
+      "action": "transfer",
+      "task_id": "4daf9843-6cd3-4c3a-a9c4-75b9cf8421ce",
+      "old_assignment_id": "c0537110-946c-4901-9f19-8906cd031cd8",
+      "native_inputs": [
+        "mowulink-b7faf557924566d66ba4a2e1b0a5a1dda1478ec6c40bb90d3f3bca49e5c86a16",
+        "mowulink-26e93929dddc06d8973a94d53eebc3e18a982c7105543e5c772197e1f8a90c19",
+        "mowulink-e4fd4bdc40d1ad2d2daa2a0301868a4fc471f6aea48395721f8ce7108ab131da"
+      ],
+      "proof": {
+        "assignment_id": "c0537110-946c-4901-9f19-8906cd031cd8",
+        "cleaned": true,
+        "control_turn_id": "22/3",
+        "kind": "task.transfer_out",
+        "receipt_id": "787defe404d79ec961cd958e60ca23040efa0c69796305ada3afb46e443208ce",
+        "scope": "read_only",
+        "session": "dsh-read-only-transfer",
+        "stopped": true,
+        "stopped_turns": [
+          {
+            "end_seq": 14,
+            "reason": "aborted",
+            "turn_id": "1/1"
+          }
+        ],
+        "withdrawn_inputs": [
+          {
+            "delivery_id": "71339fe4-c565-4046-bc7c-b00b29645ce0",
+            "discard_seq": 10,
+            "native_id": "mowulink-b56a9d4608fcf1b5b6656ba665d0d87dd78e9c22db82155bdd65fd97d1e5b153"
+          }
+        ]
+      },
+      "final_state": "working",
+      "retained_private_input": "mowulink-26e93929dddc06d8973a94d53eebc3e18a982c7105543e5c772197e1f8a90c19",
+      "new_assignment_id": "f5164eb6-5274-4238-b0a1-983378577892",
+      "dropped_router_w04_receipts": 0,
+      "recorded_w04_replays": 0
+    }
+  ],
+  "boundary": "Installed DSH SDK with opt-in read-only assignments, local model, real isolated Router."
+}

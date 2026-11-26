@@ -1,0 +1,20 @@
+{
+  "cases": [
+    {
+      "mode": "cleanup-unscoped",
+      "task_id": "a1c27ec0-937e-4919-a61b-6afc70567fe0",
+      "assignment_id": "c5ef55c6-042d-4126-93a0-a2473213d9bc",
+      "native_stop": "aborted",
+      "native_report": "native_cleanup_unconfirmed",
+      "workspace_write_observed": false
+    },
+    {
+      "mode": "cleanup-forbidden-tool",
+      "task_id": "d6475814-0e96-483c-b7df-ce4fa7f3de4f",
+      "assignment_id": "be559746-26c8-4576-ae77-e11aaaf83a3f",
+      "native_stop": "aborted",
+      "native_report": "native_cleanup_unconfirmed",
+      "workspace_write_observed": false
+    }
+  ]
+}

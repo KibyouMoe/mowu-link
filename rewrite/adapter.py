@@ -26,6 +26,10 @@ class HostAdapter:
                 session TEXT,turn TEXT,qid TEXT,original TEXT NOT NULL,answer TEXT NOT NULL,proof TEXT,
                 PRIMARY KEY(session,turn,qid)
             );
+            CREATE TABLE IF NOT EXISTS assignment_withdrawals(
+                delivery_id TEXT PRIMARY KEY REFERENCES intents(delivery_id),
+                native_id TEXT NOT NULL, discard_seq INTEGER NOT NULL
+            );
         """)
         with self.db.transaction() as db:
             stored = db.execute("SELECT session FROM adapter_native_binding WHERE slot=1").fetchone()
@@ -271,13 +275,48 @@ class HostAdapter:
         return native_id
 
     def cleanup_evidence(self, assignment_id, kind):
-        lookup = getattr(self.host, "cleanup_evidence", None)
-        proof = lookup(self.session, assignment_id, kind) if lookup else None
+        scoped_lookup = getattr(self.host,"scoped_cleanup_evidence",None)
+        if scoped_lookup:
+            with self.db.transaction() as db:
+                rows = db.execute("""SELECT delivery_id,digest,native_id,
+                    json_extract(payload,'$.task_id') AS task_id,json_extract(payload,'$.kind') AS kind,
+                    json_extract(receipt,'$.turn_id') AS turn_id
+                    FROM intents WHERE session=? AND json_extract(payload,'$.assignment_id')=?
+                    AND ((json_extract(payload,'$.kind')=? AND receipt IS NOT NULL) OR
+                         json_extract(payload,'$.kind') IN ('task','task_update','task_probe','question_answer'))""",
+                                  (self.session,assignment_id,kind)).fetchall()
+            bindings = [dict(row) for row in rows]
+            for ref in bindings:
+                if ref["native_id"] is None and ref["turn_id"] is None:
+                    ref["native_id"] = self.host.delivery_native_id(self.session,ref["delivery_id"],ref["digest"])
+                require(ref["native_id"] and (ref["turn_id"] or ref["kind"]!=kind),409,"native_cleanup_unconfirmed")
+            proof = scoped_lookup(self.session,assignment_id,kind,bindings)
+        else:
+            lookup = getattr(self.host,"cleanup_evidence",None)
+            proof = lookup(self.session,assignment_id,kind) if lookup else None
         require(isinstance(proof, dict) and proof.get("session") == self.session
                 and proof.get("assignment_id") == assignment_id and proof.get("kind") == kind
                 and proof.get("stopped") is True and proof.get("cleaned") is True
                 and isinstance(proof.get("receipt_id"), str) and proof["receipt_id"].strip(),
                 409, "native_cleanup_unconfirmed")
+        if scoped_lookup:
+            pending = {ref["delivery_id"]:ref["native_id"] for ref in bindings if ref["turn_id"] is None}
+            removed = proof.get("withdrawn_inputs")
+            require(isinstance(removed,list) and len(removed)==len(pending) and all(
+                isinstance(row,dict) and pending.get(row.get("delivery_id"))==row.get("native_id")
+                and row.get("delivery_id") in pending and type(row.get("discard_seq")) is int and row["discard_seq"]>=0
+                for row in removed) and len({row["delivery_id"] for row in removed})==len(pending),
+                409,"native_cleanup_unconfirmed")
+            with self.db.transaction() as db:
+                for row in removed:
+                    did = row["delivery_id"]
+                    intent = db.execute("SELECT receipt FROM intents WHERE delivery_id=?",(did,)).fetchone()
+                    require(intent and intent[0] is None,409,"native_cleanup_unconfirmed")
+                    values = (row["native_id"],row["discard_seq"])
+                    db.execute("INSERT OR IGNORE INTO assignment_withdrawals VALUES (?,?,?)",(did,*values))
+                    stored = db.execute("SELECT native_id,discard_seq FROM assignment_withdrawals WHERE delivery_id=?",
+                                        (did,)).fetchone()
+                    require(tuple(stored)==values,409,"native_cleanup_unconfirmed")
         return proof
 
     def resolve_question(self, original, answer):

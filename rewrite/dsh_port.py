@@ -147,6 +147,10 @@ class DshHost:
     def deliver_control(self, session, did, payload, digest, bindings):
         return self.delivery("deliver-control",session,did,payload,digest,bindings=bindings)
 
+    def scoped_cleanup_evidence(self, session, assignment_id, kind, bindings):
+        return self.request("cleanup-evidence",session,
+                            {"assignment_id":assignment_id,"kind":kind,"bindings":bindings}).get("proof")
+
     def lookup_expected(self, session, did, payload, digest):
         return self.delivery("lookup",session,did,payload,digest)
 
