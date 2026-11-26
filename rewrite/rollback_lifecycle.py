@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 import json
 import math
 
-from . import attachments
+from . import attachments, rollback_questions
 from .cleanup import CANCEL_CONFIRMED_NOTICE
 from .messages import valid_guid
 from .orders import task
@@ -311,7 +311,7 @@ def retain_reminder(pool, message_id, observed):
     raise ValueError("pool reminder does not match an outstanding deadline")
 
 
-def check_transport(db, entries):
+def check_transport(db, entries, reviewed_questions):
     workers, optional_workers = set(), set()
     expected_frames = {}
     expected_inquiries = {}
@@ -322,6 +322,7 @@ def check_transport(db, entries):
     terminal_notices = set()
     pool_bounds = {}
     pool_messages = {}
+    terminal_messages = {}
     active_pools = {}
     consumed = dict.fromkeys(entries,0)
     for tid, entry in entries.items():
@@ -379,6 +380,9 @@ def check_transport(db, entries):
         tid, mid = body.get("task_id"), row["message_id"]
         if tid not in entries or row["owner"]!="router" or row["level"]!="Notify" or not row["received_at"]:
             raise ValueError("trial has a notice outside the reviewed W04 results")
+        if "question_id" in body:
+            messages[mid] = rollback_questions.record_notice(reviewed_questions,row,body)
+            continue
         reminder = row["source"]=="router" and body.get("text")==REMINDER_NOTICE
         if reminder:
             source,text,files = "router",REMINDER_NOTICE,[]
@@ -403,10 +407,13 @@ def check_transport(db, entries):
         messages[mid] = notice
         if pool:
             pool_messages[mid] = pool["assignment_id"],reminder
+        elif tid in terminal_notices:
+            terminal_messages[mid] = entries[tid]["assignment_id"]
 
     frames = {}
     pool_start_frames = {}
     latest_update = {}
+    work_stopped = set()
     for row in db.execute("SELECT rowid AS seq,* FROM deliveries ORDER BY rowid"):
         data = json.loads(row["payload"])
         kind,consumer,did = row["kind"],row["consumer"],row["delivery_id"]
@@ -422,6 +429,10 @@ def check_transport(db, entries):
             if not saved or consumer!="hermes" or data!=saved["payload"]:
                 raise ValueError("trial notification does not match its archived message")
             saved["delivery_id"] = did
+            if "question_id" in data:
+                rollback_questions.prove_notice_delivery(reviewed_questions,data,row["seq"],pool_start_frames,work_stopped)
+            if mid in terminal_messages:
+                work_stopped.add(terminal_messages[mid])
             if mid in pool_messages:
                 origin,is_reminder = pool_messages[mid]
                 start,end = pool_bounds[origin]
@@ -434,6 +445,10 @@ def check_transport(db, entries):
         elif kind in ("task.probe","task.shelved","task.cancel"):
             if expected_inquiries.pop(did,None)!=(kind,consumer,data):
                 raise ValueError("trial inquiry delivery does not match the reviewed assignment")
+            if kind=="task.cancel":
+                work_stopped.add(aid)
+        elif kind=="question.resolved":
+            rollback_questions.record_answer_delivery(reviewed_questions,data,consumer,did,row["seq"])
         elif kind=="task.updated":
             revision = data.get("revision")
             match = update_frames.pop((tid,aid,revision),None)
@@ -453,6 +468,7 @@ def check_transport(db, entries):
                 raise ValueError("trial has a transport frame outside the reviewed orders")
             if key in cleanup_frames:
                 cleanup_frames[key]["delivery_id"] = did
+                work_stopped.add(aid)
         frames[did] = (consumer,row["cursor"])
     if (messages or expected_frames or expected_inquiries or update_frames
             or any(consumed[tid]!=len(items) for tid,items in expected_notices.items())):
@@ -539,6 +555,7 @@ def verify_cancelled(tid, entry, order, step, operations, after, states):
         cleanup.update(report_key=receipt["key"],receipt=receipt["reply"])
         entry["cancel_w04_key"] = receipt["key"]
     states.append((terminal_seq,{"cancelled"}))
+    return action["seq"]
 
 
 def verify_pool_archive(tid, entry, order, operations, after, states):
@@ -619,7 +636,7 @@ def transition_replies(order, step, target):
     return replies
 
 
-def verify_order(db, tid, entry, operations):
+def verify_order(db, tid, entry, operations, windows):
     order = task(db,tid)
     history = entry["assignment_history"]
     adjacent_states, cleanup_receipts = [],[]
@@ -657,6 +674,7 @@ def verify_order(db, tid, entry, operations):
             close = take(operations,key,"hermes",request,[{"task":order,"delivery_state":"received"}])
             if report["seq"]<=after:
                 raise ValueError("completion predates acceptance or edits")
+            windows[aid] = (accept["seq"],report["seq"])
             after = verify_edits(tid,entry.get("completed_edits",[]),operations,report["seq"])
             if close["seq"]<=after:
                 raise ValueError("acceptance, report, and manager review are out of order")
@@ -673,13 +691,15 @@ def verify_order(db, tid, entry, operations):
             if blocked["seq"]<=after:
                 raise ValueError("blocked report predates acceptance")
             pool["report_key"] = blocked["key"]
+            windows[aid] = (accept["seq"],blocked["seq"])
             after = blocked["seq"]
             adjacent_states.append((after,{"blocked"}))
         if pool:
             after = verify_pool_activity(tid,step,order,operations,after,adjacent_states)
         if target is None:
             if cancelled:
-                verify_cancelled(tid,entry,order,step,operations,after,adjacent_states)
+                end = verify_cancelled(tid,entry,order,step,operations,after,adjacent_states)
+                windows.setdefault(aid,(accept["seq"],end))
             else:
                 verify_pool_archive(tid,entry,order,operations,after,adjacent_states)
             continue
@@ -708,6 +728,7 @@ def verify_order(db, tid, entry, operations):
                                                 "worker_id":target["worker_id"],"reason":reason},replies)
         if transfer["seq"]<=after:
             raise ValueError("transfer predates the original assignment records")
+        windows.setdefault(aid,(accept["seq"],transfer["seq"]))
         step.update(transfer_key=transfer["key"],transfer_reason=reason)
         adjacent_states.append((transfer["seq"],{"ready"}))
         after = verify_edits(tid,transition.get("waiting_edits",[]),operations,transfer["seq"])
@@ -728,8 +749,9 @@ def verify_order(db, tid, entry, operations):
         cleanup.update(report_key=receipt["key"],receipt=receipt["reply"])
 
 
-def check_operations(db,entries,workers,frames,uploads,expected_count,queue_candidates):
-    operations, applicable, acked, sessions = {},0,set(),{}
+def check_operations(db,entries,workers,frames,uploads,expected_count,queue_candidates,reviewed_questions):
+    operations, applicable, acked, sessions = {},0,{},{}
+    asks,answers = {},{}
     creation_keys = {item["request_id"] for item in queue_candidates}
     creation_keys.update(entry["creation_key"] for entry in entries.values() if "creation_key" in entry)
     for row in db.execute("SELECT rowid AS seq,* FROM operations ORDER BY rowid"):
@@ -742,7 +764,14 @@ def check_operations(db,entries,workers,frames,uploads,expected_count,queue_cand
                 applicable += 1
             continue
         applicable += 1
-        if method=="PATCH" and len(parts)==4 and parts[:3]==["","v1","tasks"] and parts[3] in entries:
+        if method=="POST" and len(parts)==5 and parts[:3]==["","v1","tasks"] and parts[4]=="questions":
+            if actor not in sessions or body.get("session_id")!=sessions[actor]:
+                raise ValueError("question receipt uses an unregistered worker session")
+            asks.setdefault(body.get("question_id"),[]).append(
+                {"seq":row["seq"],"actor":actor,"key":row["key"],"body":body,"reply":reply,"task_id":parts[3]})
+        elif method=="PUT" and len(parts)==5 and parts[:3]==["","v1","questions"] and parts[4]=="answer":
+            answers.setdefault(parts[3],[]).append({"seq":row["seq"],"actor":actor,"key":row["key"],"body":body,"reply":reply})
+        elif method=="PATCH" and len(parts)==4 and parts[:3]==["","v1","tasks"] and parts[3] in entries:
             key = (parts[3],"edit",body.get("expected_revision"))
             if key in operations:
                 raise ValueError("duplicate task edit receipt")
@@ -768,7 +797,7 @@ def check_operations(db,entries,workers,frames,uploads,expected_count,queue_cand
             did = parts[3]
             if frames.get(did)!=(actor,body.get("cursor")) or did in acked or reply.get("recorded") is not True:
                 raise ValueError("trial has an unrecognized delivery acknowledgement")
-            acked.add(did)
+            acked[did] = row["seq"]
         elif method=="PUT" and parts[:3]==["","v1","workers"] and len(parts)>=5 and parts[3] in workers:
             if actor!="worker/"+parts[3] or parts[4:] not in (["session"],["presence"],["links","adapter"]):
                 raise ValueError("trial has an unrecognized worker operation")
@@ -783,7 +812,9 @@ def check_operations(db,entries,workers,frames,uploads,expected_count,queue_cand
                 raise ValueError("trial upload registration does not match the reviewed attachment")
         else:
             raise ValueError("trial has an operation outside the reviewed orders")
+    windows = {}
     for tid,entry in entries.items():
-        verify_order(db,tid,entry,operations)
-    if creation_keys or applicable!=expected_count or acked!=frames.keys() or operations:
+        verify_order(db,tid,entry,operations,windows)
+    rollback_questions.verify_receipts(reviewed_questions,asks,answers,windows,acked)
+    if creation_keys or applicable!=expected_count or acked.keys()!=frames.keys() or operations:
         raise ValueError("trial operation ledger is incomplete or has unrelated writes")

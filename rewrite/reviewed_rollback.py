@@ -7,7 +7,7 @@ import shutil
 import sqlite3
 import time
 
-from . import legacy_history, rollback_lifecycle
+from . import legacy_history, rollback_lifecycle, rollback_questions
 from .cutover import (digest, legacy_creation_request, output_directory, queue_execution_modes,
                       readonly, reconcile, restore_snapshot, stage_queue_requests, verified)
 from .messages import valid_guid
@@ -16,7 +16,7 @@ from .storage import encode
 
 
 TABLES = {"tasks","reports","messages","deliveries","operations","workers","worker_adapter_links",
-          "uploads","chunks","attachment_grants","business_files","pool_entries","cleanups","materials"}
+          "uploads","chunks","attachment_grants","business_files","pool_entries","cleanups","materials","questions"}
 
 
 def reviewed_orders(facts, original_tasks):
@@ -213,11 +213,12 @@ def stage_reviewed_rollback(snapshot,trial,review,destination):
                     raise ValueError("missing reviewed report")
                 entry["summary"] = result["summary"]
             rollback_lifecycle.histories(db,entries,facts["changed_tables"])
-            workers,frames = rollback_lifecycle.check_transport(db,entries)
+            questions = rollback_questions.retain(db,entries,facts["changed_tables"].get("questions",{}).get("trial_only",0))
+            workers,frames = rollback_lifecycle.check_transport(db,entries,questions)
             uploads,files = copy_reviewed_files(db,entries,facts["changed_tables"],private/"files")
             rollback_lifecycle.check_operations(db,entries,workers,frames,uploads,
                                                 facts["changed_tables"].get("operations",{}).get("trial_only",0),
-                                                facts["queue_candidates"])
+                                                facts["queue_candidates"],questions)
             for tid,entry in entries.items():
                 if "creation_key" in entry:
                     original = dict(entry["original_content"],assignee_id=entry["original_worker"])

@@ -4,6 +4,8 @@
 
 ## 检查点与证据
 
+工单内已答复的问题纳入回退。真实隔离 Router 和两个 Worker 验证选择、文本和跳过三种答复。一条答复到达前已转派并验收，仍送入原工位的宿主，当前工位无答复输入。重送同一问题和同一答案，保留原号和操作回执，通知与答复帧各一次。未答、答复帧缺接收确认或流向下一派发均拒绝准备。恢复后的旧 Router 读回归档，两个工位无待答题及重新派发。原 W05、题文、答复及接收记录只留私有档案，宿主使用夹具。[问答回退实测](evidence/cutover-reviewed-questions.json)
+
 正式工单的直接修订已接入隔离回退。实际旧新 HTTP Router 验证首次派发前两次修改，执行中两条修订沿原派发送入测试宿主，旧派发作废后的立即重派、延后重派及未重派即取消。另一张单完成池中两次修订、挂起、续办和待派再修订后验收。旧 Router 按最初建单请求返回原归档，同号改正文返回 409。改动修订的目标派发或取消传输确认后，回退均停止。修订操作、传输凭据和正文版本留在私有档案。Worker 宿主和时钟为夹具。[修订回退实测](evidence/cutover-reviewed-edits.json)
 
 原 Worker 已交受阻 W04 的续办单支持回退。实际旧新 HTTP Router 验证两种时序。迁入单续办后等同一工位空闲再下发，试用新单在工位已空闲时立即下发。两张单都按原工单号、新派发号执行和验收。旧端以最初正文和请求号去重，用续办后正文重送得到 409。对账输出只显示标识，续办回执及两版正文只写私有档案。缺原释放凭据和篡改新派发正文均拒绝发布。复跑 `python3 -B -m unittest -v rewrite.test_cutover.Cutover.test_resumed_orders_archive_the_original_request_and_all_dispatch_versions`。Worker 宿主和时钟为夹具。[续办回退实测](evidence/cutover-pool-resumed.json)

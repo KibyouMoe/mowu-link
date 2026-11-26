@@ -1589,6 +1589,153 @@ store.close()
                         "boundary":"Actual isolated legacy and rewrite HTTP Router and SQLite; scripted Worker host and controlled clock."}
             Path(output).write_text(json.dumps(evidence,ensure_ascii=False,indent=2)+"\n")
 
+    def test_reviewed_questions_keep_the_original_worker_after_transfer_and_rollback(self):
+        original = self.old("""
+store = RouterStore(sys.argv[1])
+for worker in ("oguri","tama"):
+    store.upsert_worker(worker)
+print(store.orders.create("Questions with transfer","Isolated question test","oguri",{},"fixture",None,None))
+store.close()
+""",self.legacy)
+        before = digest(self.legacy)
+        backup(self.legacy,self.attachments,self.snapshot)
+        tid = prepare(self.snapshot,self.trial,self.source_id)["queued_id_map"][original]
+        clock = Clock()
+        loop = Loop(self.trial,clock,FixtureHost,extra_workers=["tama"])
+        manager,worker = loop.hermes,loop.worker
+        other_host = FixtureHost(self.trial/"tama-question-host.db","tama-question-session")
+        other = Worker(self.trial/"tama-question.db","tama",loop.extra_clients["tama"],
+                       HostAdapter(self.trial/"tama-question-adapter.db",other_host,other_host.session))
+        review = self.root/"questions-review.json"
+
+        def stage(trial,destination):
+            review.write_text(json.dumps({"trial_sha256":digest(trial/"router.db"),"closed_assignments":{tid:new_aid}}))
+            return stage_reviewed_rollback(self.snapshot,trial,review,destination)
+
+        with loop.server:
+            loop.thread.start()
+            try:
+                for item in (worker,other):
+                    item.connect()
+                    item.poll()
+                clock.advance(10)
+                for item in (worker,other):
+                    item.poll()
+                    item.poll()
+                aid = worker.hold()["held_assignment_id"]
+                native = loop.native.entries()[0][1]["native_id"]
+                options = [{"id":"y","label":"Proceed"}]
+                first = worker.ask(native,"early","Proceed?",options)
+                late = worker.ask(native,"late","Anything before transfer?",[])
+                text = worker.ask(native,"notes","Add a note?",[])["question_id"]
+                early,late = first["question_id"],late["question_id"]
+                chosen = {"mode":"choice","option_id":"y"}
+                skipped = {"mode":"skip"}
+                written = {"mode":"text","text":"Test note"}
+                early_key,repeat_answer,text_key = guid(),guid(),guid()
+                self.assertEqual(manager.answer(early_key,tid,early,chosen),manager.answer(repeat_answer,tid,early,chosen))
+                manager.answer(text_key,tid,text,written)
+                worker.poll()
+                current = manager.inspect(tid)["task"]
+                manager.act(guid(),tid,current["revision"],"transfer",worker_id="tama",reason="Use the other worker")
+                other.poll()
+                new_aid = other.hold()["held_assignment_id"]
+                self.assertTrue(new_aid)
+                self.assertNotEqual(new_aid,aid)
+                worker.poll()
+                cleanup, = [r for p,r in loop.native.entries() if p["kind"]=="task.transfer_out"]
+                loop.native.cleanup_evidence = lambda session,assignment,kind: {
+                    "session":session,"assignment_id":assignment,"kind":kind,"stopped":True,"cleaned":True,
+                    "receipt_id":"isolated-question-transfer"}
+                self.assertEqual(worker.report(cleanup["native_id"],tid,aid,"Transferred","transfer_confirmed")["task_state"],
+                                 "working")
+                report = other.report(other_host.entries()[0][1]["native_id"],tid,new_aid,"Reviewed result")
+                self.assertEqual(report["task_state"],"completed_reported")
+                current = manager.inspect(tid)["task"]
+                self.assertEqual(manager.approve(guid(),tid,current["revision"])["task"]["state"],"closed")
+                manager.poll()
+                worker.poll()
+                other.poll()
+
+                unanswered = self.root/"still-unanswered-question"
+                with self.assertRaisesRegex(ValueError,"still awaiting an answer"):
+                    stage(self.trial,unanswered)
+                self.assertFalse(unanswered.exists())
+                late_key,repeat_ask = guid(),guid()
+                body = {"session_id":worker.session,"assignment_id":aid,"question_id":early,"text":"Proceed?","options":options}
+                self.assertEqual(loop.wire.request("POST",f"tasks/{tid}/questions",body,repeat_ask),first)
+                manager.answer(late_key,tid,late,skipped)
+                undelivered = self.root/"unacknowledged-answer"
+                with self.assertRaisesRegex(ValueError,"no consumer acknowledgement"):
+                    stage(self.trial,undelivered)
+                self.assertFalse(undelivered.exists())
+                worker.poll()
+                observed_answers = [(p["question_id"],p["answer"],p["assignment_id"],r["native_id"])
+                                    for p,r in loop.native.entries() if p["kind"]=="question_answer"]
+                self.assertEqual([(qid,answer,original_aid) for qid,answer,original_aid,_ in observed_answers],
+                                 [(early,chosen,aid),(text,written,aid),(late,skipped,aid)])
+                self.assertEqual([p["kind"] for p,_ in other_host.entries()],["task"])
+                self.assertEqual(manager.inspect(tid)["task"]["state"],"closed")
+                settled = stage(self.trial,self.restore)
+            finally:
+                loop.server.shutdown()
+                loop.thread.join()
+
+        private = self.restore/"private-review"
+        manifest = json.loads((private/"manifest.json").read_text())
+        first_step,second_step = manifest["orders"][tid]["assignment_history"]
+        self.assertEqual((first_step["assignment_id"],second_step["assignment_id"]),(aid,new_aid))
+        self.assertNotIn("questions",second_step)
+        by_id = {q["question_id"]:q for q in first_step["questions"]}
+        self.assertEqual(set(by_id),{early,text,late})
+        self.assertEqual(by_id[early]["request_keys"],["ask-"+early,repeat_ask])
+        self.assertEqual(by_id[early]["answer_keys"],[early_key,repeat_answer])
+        self.assertEqual(by_id[text]["answer_keys"],[text_key])
+        self.assertEqual(by_id[late]["answer_keys"],[late_key])
+        self.assertEqual(digest(self.trial/"router.db"),settled["trial_sha256"])
+        self.assertEqual(digest(self.legacy),before)
+        old = json.loads(self.old("""
+from server import RouterServer
+from selftest_router import http
+from threading import Thread
+from unittest.mock import Mock
+store = RouterStore(sys.argv[1])
+token = "isolated-legacy-question"
+with RouterServer(("127.0.0.1",0),store,token,Mock(),Mock()) as server:
+    runner = Thread(target=server.serve_forever,kwargs={"poll_interval":.02})
+    runner.start()
+    try:
+        status, reply = http("GET",f"http://127.0.0.1:{server.server_port}/tasks/"+sys.argv[2],token=token)
+        print(json.dumps({"status":status,"archive":reply["task"]["archive"]["reason"],"pending_question_counts":
+                          [len(store.pending_questions(worker)) for worker in ("oguri","tama")],
+                          "queues":[store.orders.next_dispatch(worker) for worker in ("oguri","tama")]}))
+    finally:
+        server.shutdown()
+        runner.join()
+store.close()
+""",self.restore/"legacy.db",original))
+        self.assertEqual(old,{"status":200,"archive":"reviewed_on_rewrite","pending_question_counts":[0,0],"queues":[None,None]})
+        damaged = self.root/"misrouted-question"
+        damaged.mkdir()
+        shutil.copyfile(self.trial/"baseline.json",damaged/"baseline.json")
+        shutil.copyfile(self.trial/"router.db",damaged/"router.db")
+        with closing(sqlite3.connect(damaged/"router.db")) as db,db:
+            row = db.execute("UPDATE deliveries SET payload=json_set(payload,'$.assignment_id',?) WHERE delivery_id=?",
+                             (new_aid,by_id[late]["answer_delivery_id"]))
+            self.assertEqual(row.rowcount,1)
+        rejected = self.root/"rejected-question-route"
+        with self.assertRaisesRegex(ValueError,"answer delivery does not match the original asking worker"):
+            stage(damaged,rejected)
+        self.assertFalse(rejected.exists())
+        if output := os.environ.get("MOWULINK_QUESTION_ROLLBACK_EVIDENCE"):
+            proof = {"task_id":tid,"original_assignment_id":aid,"new_assignment_id":new_aid,
+                     "questions":[{"question_id":qid,"router":by_id[qid],"native_answer_id":native_id}
+                                  for qid,_,_,native_id in observed_answers],
+                     "old_router":old,"trial_sha256":settled["trial_sha256"],
+                     "pending_unacknowledged_and_misrouted_refused":True,
+                     "boundary":"Actual legacy and rewrite Router and Worker over isolated HTTP. Scripted native hosts."}
+            Path(output).write_text(json.dumps(proof,ensure_ascii=False,indent=2)+"\n")
+
     def test_trial_born_closed_orders_return_as_private_archives_without_a_new_dispatch(self):
         self.old("""
 store = RouterStore(sys.argv[1])

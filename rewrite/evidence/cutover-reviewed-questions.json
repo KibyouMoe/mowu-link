@@ -1,0 +1,150 @@
+{
+  "task_id": "4d757b62-f620-59f5-8b99-f16d1f5fcb52",
+  "original_assignment_id": "277a231c-7907-4359-8c42-68aba275c15b",
+  "new_assignment_id": "fcb5472e-be7f-41d5-adb0-bee2d5dc85fb",
+  "questions": [
+    {
+      "question_id": "8277f355-1cf8-400d-8125-fafa7d7d36c2",
+      "router": {
+        "answer": {
+          "mode": "choice",
+          "option_id": "y"
+        },
+        "answer_delivery_id": "006d596c-0370-472a-9ff2-1ed6849394c5",
+        "answer_keys": [
+          "48601ee8-8e68-4819-b1ba-52010af95669",
+          "55c3ae6a-775c-4898-be5c-aab9017525b5"
+        ],
+        "asked_by": "oguri",
+        "assignment_id": "277a231c-7907-4359-8c42-68aba275c15b",
+        "notice": {
+          "delivery_id": "ab5d3b91-254c-4aa9-affe-606298935073",
+          "payload": {
+            "attachment_ids": [],
+            "level": "Notify",
+            "message_id": "8f3a1416-6d50-4104-b0ff-6c58bf3632ee",
+            "options": [
+              {
+                "id": "y",
+                "label": "Proceed"
+              }
+            ],
+            "question_id": "8277f355-1cf8-400d-8125-fafa7d7d36c2",
+            "source": "oguri",
+            "task_id": "4d757b62-f620-59f5-8b99-f16d1f5fcb52",
+            "text": "Proceed?"
+          },
+          "received_at": "2027-01-15T08:00:10+00:00",
+          "transport_seq": 6
+        },
+        "options": [
+          {
+            "id": "y",
+            "label": "Proceed"
+          }
+        ],
+        "question_id": "8277f355-1cf8-400d-8125-fafa7d7d36c2",
+        "received_at": "2027-01-15T08:00:10+00:00",
+        "request_keys": [
+          "ask-8277f355-1cf8-400d-8125-fafa7d7d36c2",
+          "13f6a0aa-ae3b-421d-8b79-6a2580dbbf99"
+        ],
+        "task_id": "4d757b62-f620-59f5-8b99-f16d1f5fcb52",
+        "text": "Proceed?"
+      },
+      "native_answer_id": "a6da4d5f-b2a9-450b-893d-5cf415bc19e3"
+    },
+    {
+      "question_id": "502f5ad8-6224-4319-9566-7f20b665dfb5",
+      "router": {
+        "answer": {
+          "mode": "text",
+          "text": "Test note"
+        },
+        "answer_delivery_id": "855ead85-26d8-4c31-a3db-6f94853c6b93",
+        "answer_keys": [
+          "a437eaa6-a69a-47ad-bbc2-41cb088b71da"
+        ],
+        "asked_by": "oguri",
+        "assignment_id": "277a231c-7907-4359-8c42-68aba275c15b",
+        "notice": {
+          "delivery_id": "279cf767-80a7-485c-88bc-e17ac2eb43ff",
+          "payload": {
+            "attachment_ids": [],
+            "level": "Notify",
+            "message_id": "1b1bb16f-b445-40a6-9d72-95b11485d635",
+            "options": [],
+            "question_id": "502f5ad8-6224-4319-9566-7f20b665dfb5",
+            "source": "oguri",
+            "task_id": "4d757b62-f620-59f5-8b99-f16d1f5fcb52",
+            "text": "Add a note?"
+          },
+          "received_at": "2027-01-15T08:00:10+00:00",
+          "transport_seq": 8
+        },
+        "options": [],
+        "question_id": "502f5ad8-6224-4319-9566-7f20b665dfb5",
+        "received_at": "2027-01-15T08:00:10+00:00",
+        "request_keys": [
+          "ask-502f5ad8-6224-4319-9566-7f20b665dfb5"
+        ],
+        "task_id": "4d757b62-f620-59f5-8b99-f16d1f5fcb52",
+        "text": "Add a note?"
+      },
+      "native_answer_id": "dd509d26-5745-4422-b99f-be1c128f7983"
+    },
+    {
+      "question_id": "0fc9862e-3d08-46d4-ac7e-738d17b42a7d",
+      "router": {
+        "answer": {
+          "mode": "skip"
+        },
+        "answer_delivery_id": "1ed5417c-0c83-4681-82e4-16371cb7b9d1",
+        "answer_keys": [
+          "9da4d0af-c05d-4ea8-9e90-06fa8dc54401"
+        ],
+        "asked_by": "oguri",
+        "assignment_id": "277a231c-7907-4359-8c42-68aba275c15b",
+        "notice": {
+          "delivery_id": "1f15d2ee-aacb-41b5-9356-0d3d9f9ffa34",
+          "payload": {
+            "attachment_ids": [],
+            "level": "Notify",
+            "message_id": "d4ddf9c1-9ae0-4e6a-8061-77e220b70d46",
+            "options": [],
+            "question_id": "0fc9862e-3d08-46d4-ac7e-738d17b42a7d",
+            "source": "oguri",
+            "task_id": "4d757b62-f620-59f5-8b99-f16d1f5fcb52",
+            "text": "Anything before transfer?"
+          },
+          "received_at": "2027-01-15T08:00:10+00:00",
+          "transport_seq": 7
+        },
+        "options": [],
+        "question_id": "0fc9862e-3d08-46d4-ac7e-738d17b42a7d",
+        "received_at": "2027-01-15T08:00:10+00:00",
+        "request_keys": [
+          "ask-0fc9862e-3d08-46d4-ac7e-738d17b42a7d"
+        ],
+        "task_id": "4d757b62-f620-59f5-8b99-f16d1f5fcb52",
+        "text": "Anything before transfer?"
+      },
+      "native_answer_id": "19ca1312-f47d-4df2-b19f-bdd696bd559b"
+    }
+  ],
+  "old_router": {
+    "status": 200,
+    "archive": "reviewed_on_rewrite",
+    "pending_question_counts": [
+      0,
+      0
+    ],
+    "queues": [
+      null,
+      null
+    ]
+  },
+  "trial_sha256": "7e09608f076813c6e1b32e2d43de9dd3b83b2348c9303ea0d9c7c4f1394a30ea",
+  "pending_unacknowledged_and_misrouted_refused": true,
+  "boundary": "Actual legacy and rewrite Router and Worker over isolated HTTP. Scripted native hosts."
+}

@@ -89,6 +89,8 @@ Worker 已以受阻 W04 释放原派发时，`resume` 可从受阻或挂起起�
 
 直接修订标题或说明的已处置工单，按原建单、修订版本、派发和最终处置一起核对。派发前的修订改变首次派发正文。已派未接时，旧派发可有传输收件，仍须能证明无 W03。新版派发须对应修订回执。执行中的修订须有 `task.updated` 送往原派发、原工位，以及该工位的传输接收确认。池中、等待续派或成果待验时的修订也逐版核对。这几种修订保留在私有档案。旧 Router 按最初请求校验去重，停写库不重放修订或工单。版本、派发或传输确认有缺口时拒绝准备。演练另核了测试宿主的实际收件。复跑 `python3 -B -m unittest -v rewrite.test_cutover.Cutover.test_reviewed_edits_preserve_original_requests_and_fence_old_offers`。[修订回退实测](evidence/cutover-reviewed-edits.json)
 
+工单内已答复的问题随原派发写入私有档案。逐题核对 W05、管理端答复、原问题通知和原工位答复帧的传输确认。原问题的选择、文本和跳过都保留。转派后或结单后的答复仍归原提问人。旧 Router 只恢复正式归档，原两工位没有待答题或重新派发。未答、未确认传输或与原派发不符的问答会停止回退。演练另用宿主夹具核对了实际投递。复跑 `python3 -B -m unittest -v rewrite.test_cutover.Cutover.test_reviewed_questions_keep_the_original_worker_after_transfer_and_rollback`。[问答回退实测](evidence/cutover-reviewed-questions.json)
+
 ### 在途工单先排空再回退
 
 旧 Router 保持停写。先停试用写者并采集[五组件快照](#重做版五组件的离线恢复)，保留迁入时的旧快照和 `baseline.json`。从新的目录恢复这套重做组件，使用原 Worker 身份、原适配器账本及原生会话。启动重做 Router 时，在现有启动参数上加 `--drain-dispatch`，核对启动回执中 `dispatch_draining` 为 `true`。每次重开都须保留这个参数。此模式停止分配新派发号，已有派发、重连对账、业务回执和定时规则继续按原契约处理。冻结外部试用入口，避免排空时又发生无关写入。
