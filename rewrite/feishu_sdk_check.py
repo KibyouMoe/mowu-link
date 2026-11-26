@@ -16,7 +16,7 @@ from .storage import Fault, encode
 def run():
     import lark_oapi as lark
     from lark_oapi.core.model import RawRequest
-    from lark_oapi.api.im.v1 import ReplyMessageResponse, GetMessageResourceResponse
+    from lark_oapi.api.im.v1 import CreateMessageResponse, ReplyMessageResponse, GetMessageResourceResponse
     from lark_oapi.core.model import RawResponse
     with TemporaryDirectory() as temp:
         inbox = Inbound(Path(temp)/"events.db",None,None,"test-app","test-trainer","test-chat")
@@ -58,6 +58,15 @@ def run():
             raise RuntimeError("missing fixture card action")
         api = Mock()
         reply = SDKMessages(api)
+        create = api.im.v1.message.create
+        create.return_value = CreateMessageResponse({"code":0,"data":{"message_id":"om_fixture_notice"}})
+        line = {"text":"已收到测试来源的 Notify 消息。"}
+        if reply.send("oc_fixture_manager","text",line,"notice-uuid")!="om_fixture_notice":
+            raise RuntimeError("SDK did not confirm the configured manager notice")
+        req = create.call_args.args[0]
+        if (req.receive_id_type,req.request_body.receive_id,req.request_body.msg_type,req.request_body.uuid,
+                json.loads(req.request_body.content))!=("chat_id","oc_fixture_manager","text","notice-uuid",line):
+            raise RuntimeError("SDK request changed the manager notice")
         operation = api.im.v1.message.reply
         def response(parent):
             return ReplyMessageResponse({"code":0,"data":{"message_id":"om_fixture_reply","parent_id":parent,
@@ -89,7 +98,7 @@ def run():
             else:
                 raise RuntimeError("missing resource was accepted")
         return {"sdk_version":version("lark-oapi"),"fixture_events":2,"pending_inputs":len(items),
-                "fixture_topic_replies":1,"wrong_topic_rejected":True,"resource_http_cases":[404,503],
+                "fixture_topic_replies":1,"manager_text_notices":1,"wrong_topic_rejected":True,"resource_http_cases":[404,503],
                 "fixture_card_callbacks":2,"pending_card_answers":len(rows),"network":"unused","platform_account":"none"}
 
 

@@ -4,13 +4,15 @@ import time
 from pathlib import Path
 from urllib.parse import urlencode
 
+from . import manager_notices
 from .storage import Database, Fault, encode, require
 from .native_files import NativeFiles
 
 
 class HermesAdapter:
-    def __init__(self, path, router, host_adapter, clock=time.monotonic):
+    def __init__(self, path, router, host_adapter, clock=time.monotonic, *, notices=None):
         self.router, self.host, self.clock = router, host_adapter, clock
+        self.notices = notices
         self.file_store = NativeFiles(Path(str(path)+".attachments"), router, router_files=True)
         if host_adapter is not None:
             host_adapter.media_store = self.file_store
@@ -20,7 +22,7 @@ class HermesAdapter:
             CREATE TABLE IF NOT EXISTS progress (cursor INTEGER NOT NULL);
             INSERT INTO progress SELECT 0 WHERE NOT EXISTS (SELECT 1 FROM progress);
             CREATE TABLE IF NOT EXISTS queue (message_id TEXT PRIMARY KEY, payload TEXT NOT NULL, receipt TEXT);
-        """)
+        """ + manager_notices.SCHEMA)
         with self.db.transaction() as db:
             columns = {r["name"] for r in db.execute("PRAGMA table_info(queue)")}
             if "retry_at" not in columns:
@@ -92,8 +94,10 @@ class HermesAdapter:
             p = frame["payload"]
             require(frame["kind"] == "message.deliver" and p["level"] in ("Notify", "Event"), 422, "unsupported_delivery")
             with self.db.transaction() as db:
-                db.execute("INSERT OR IGNORE INTO queue(message_id,payload) VALUES (?,?)",
-                           (p["message_id"], encode(p)))
+                inserted = db.execute("INSERT OR IGNORE INTO queue(message_id,payload) VALUES (?,?)",
+                                      (p["message_id"], encode(p))).rowcount
+                if inserted and self.notices is not None:
+                    self.notices.queue(db,p)
             ack = self.router.ack(frame)
             with self.db.transaction() as db:
                 db.execute("UPDATE progress SET cursor=MAX(cursor,?)", (ack["confirmed_cursor"],))

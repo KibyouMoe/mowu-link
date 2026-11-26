@@ -123,7 +123,17 @@ def register(ctx):
         raise ValueError("configure a private connection_file for the isolated manager")
     cfg = private_config(Path(path))
     client = Client(cfg["url"],cfg["token"],cfg.get("ca_file"))
-    adapter = HermesAdapter(cfg["database"],client,None)
+    notices = None
+    if "notice_chat_id" in cfg or "notice_feishu_file" in cfg:
+        if not all(cfg.get(key) for key in ("notice_chat_id","notice_feishu_file","input_session_key")):
+            raise ValueError("configure a Feishu notice destination, private Feishu credentials and the input session")
+        import lark_oapi
+        from .feishu_output import SDKMessages
+        from .manager_notices import ManagerNotices
+        feishu = private_config(Path(cfg["notice_feishu_file"]))
+        lark = lark_oapi.Client.builder().app_id(feishu["app_id"]).app_secret(feishu["app_secret"]).timeout(8).build()
+        notices = ManagerNotices(SDKMessages(lark),cfg["notice_chat_id"],feishu["app_id"])
+    adapter = HermesAdapter(cfg["database"],client,None,notices=notices)
     ManagerTools(adapter,cfg["session_id"]).register(ctx)
     if "input_session_key" in cfg:
         from .hermes_host import start_input

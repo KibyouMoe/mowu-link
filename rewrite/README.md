@@ -85,6 +85,8 @@ python3 -m rewrite.release verify --archive ./build/mowulink.tar --revision "$RE
 
 隔离复跑使用 `python3 -m rewrite.hermes_check --host-input --hermes-source <源码仓> --hermes-python <带依赖的测试Python>`。探针准备全新的 profile、测试授权和临时 Router，实际运行插件及会话输入台账，模型响应由本地测试函数生成。客户端只开放 TUI/CLI、缺少插件输入授权或会话不匹配时，宿主收件保持未确认。
 
+该测试 profile 可另配 `notice_chat_id` 和 `notice_feishu_file`，前者是明确授权的飞书会话，后者指向用户私有的 SDK 凭据配置路径，包含 `app_id` 和 `app_secret`。需要同一环境安装飞书 SDK。Router 消息持久入箱时，插件只排一条来源和等级的飞书提示，正文仍走 Hermes 原生输入。飞书失败不改变原生输入状态。提示使用同一标识重试，超出回执可安全重试的窗口后保留待核。绑定变化不会转发旧提示。复跑用 `python3 -m unittest -v rewrite.test_manager_notices`。
+
 ### 邮件和游戏聊天来源
 
 在独立环境运行 `python3 -m rewrite.feeds mail --config <邮箱测试配置>` 可只读采一次。仅属当前用户的配置包含 database、host、user、password，可选 port、folder 和 ca_file。首次在邮箱当前 UID 建立基线，后续保存发件人、主题和原来源规定的 200 字正文预览。组合后的信息超过 200 字时，消息携带完整预览文本附件。切换邮箱或文件夹时使用新库。

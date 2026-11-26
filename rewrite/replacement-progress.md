@@ -4,6 +4,8 @@
 
 ## 检查点与证据
 
+Hermes 插件已能向单独登记的飞书会话投递收件提示。模拟 Notify 在 Hermes 忙时成功入箱，正文等空闲 10 秒，飞书只收到来源与等级。丢失平台回执后，重启续用同一消息号。超出安全重试窗口的提示保留待核，更换绑定也不会转发旧提示，后续 Event 照常进入宿主。复跑 `python3 -m unittest -v rewrite.test_manager_notices` 和带 SDK 的 `python3 -m rewrite.feishu_sdk_check`，macOS 全套 131 项通过。Router 与 Trigger 走实际 HTTP，通知测试的 Hermes 宿主及飞书返回为夹具。另跑真实 Hermes 隔离 LOCAL 输入，等待 11.5 秒后交 Notify，Event 续跑查回同一原生收件。正式飞书会话另验。
+
 派单飞书卡现在与本体 W03 接管一起入库，卡片明确写「已接单，正在交给宿主」。此前宿主回执丢失会留下持单、漏掉派单卡。隔离回归主动抛弃原生回执，本体仍产生一张工单卡。查回原回执后只有一次宿主输入和一张派单卡。复跑 `python3 -m unittest -v rewrite.test_mainline rewrite.test_link_health rewrite.test_dsh_native_loop`，macOS 全套 129 项通过。原生控制指令仍各自按实际宿主回执显示。
 
 DSH 的真实原生工具执行器已通过隔离 Worker 向 Router 报完工。复跑时发现首调用可能早于适配器写宿主收件凭据。修正后，Worker 只查询已存在的投递意图和指定原生输入，并核对原回合再放行。隔离测试主动丢弃原生投递回执，两个原生 `worker_report` 调用仍取同一业务回执。发出 W04 时 Worker 持原单，收到回执后清持单，Router 只发一条通知并停在待验收。回读宿主只存在一条工单输入。复跑 `python3 -m unittest -v rewrite.test_dsh_native_loop`，同场景连续 30 次通过，macOS 全套 128 项通过。实测使用实际 DSH 运行循环和工具执行器、临时 Router/Worker 及本地测试模型。真实账户和 Codex 原生 W04 另验。[原生与业务回执](evidence/dsh-native-w04.json)。

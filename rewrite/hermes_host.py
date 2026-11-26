@@ -121,8 +121,21 @@ def start_input(ctx, manager, config):
                     last = reason
             stop.wait(1)
     thread = threading.Thread(target=poll,name="mowulink-hermes-input",daemon=True)
+    threads = [thread]
+    if manager.notices is not None:
+        def publish():
+            log = logging.getLogger(__name__)
+            while not stop.is_set():
+                try:
+                    manager.notices.flush(manager.db)
+                except (Fault,OSError) as exc:
+                    log.warning("manager Feishu notice pending: %s",exc.code if isinstance(exc,Fault) else type(exc).__name__)
+                stop.wait(1)
+        threads.append(threading.Thread(target=publish,name="mowulink-hermes-feishu-notice",daemon=True))
     def shutdown():
         stop.set()
-        thread.join()
+        for runner in threads:
+            runner.join()
     ctx.on_unload(shutdown)
-    thread.start()
+    for runner in threads:
+        runner.start()
