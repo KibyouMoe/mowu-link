@@ -30,6 +30,10 @@ class HostAdapter:
     def busy(self):
         return self.host.busy(self.session)
 
+    def observe_activity(self):
+        observe = getattr(self.host,"observe",None)
+        return observe(self.session) if observe else (self.busy(),None)
+
     def bound_session(self):
         return self.session
 
@@ -38,13 +42,17 @@ class HostAdapter:
         digest = hashlib.sha256(serialized.encode()).hexdigest()
         media = payload.get("attachments")
         files = None
-        if media:
+        preflight = getattr(self.host,"preflight",None)
+        if media or preflight:
             with self.db.transaction() as db:
                 known = db.execute("SELECT 1 FROM intents WHERE delivery_id=?", (did,)).fetchone()
             if not known:
-                require(self.media_store is not None and callable(getattr(self.host,"deliver_media",None)),
-                        422,"native_media_input_unavailable")
-                files = self.media_store.prepare(media)
+                if preflight:
+                    preflight(self.session)
+                if media:
+                    require(self.media_store is not None and callable(getattr(self.host,"deliver_media",None)),
+                            422,"native_media_input_unavailable")
+                    files = self.media_store.prepare(media)
         with self.db.transaction() as db:
             inserted = db.execute("INSERT OR IGNORE INTO intents(delivery_id,session,payload,digest) VALUES (?,?,?,?)",
                                   (did, self.session, serialized, digest)).rowcount

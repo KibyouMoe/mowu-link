@@ -4,7 +4,7 @@ import time
 from pathlib import Path
 from urllib.parse import urlencode
 
-from .storage import Database, encode, require
+from .storage import Database, Fault, encode, require
 from .native_files import NativeFiles
 
 
@@ -15,11 +15,18 @@ class HermesAdapter:
         if host_adapter is not None:
             host_adapter.media_store = self.file_store
         self.idle_since = None
+        self.activity_generation = None
         self.db = Database(path, """
             CREATE TABLE IF NOT EXISTS progress (cursor INTEGER NOT NULL);
             INSERT INTO progress SELECT 0 WHERE NOT EXISTS (SELECT 1 FROM progress);
             CREATE TABLE IF NOT EXISTS queue (message_id TEXT PRIMARY KEY, payload TEXT NOT NULL, receipt TEXT);
         """)
+        with self.db.transaction() as db:
+            columns = {r["name"] for r in db.execute("PRAGMA table_info(queue)")}
+            if "retry_at" not in columns:
+                db.execute("ALTER TABLE queue ADD COLUMN retry_at REAL NOT NULL DEFAULT 0")
+            if "failure" not in columns:
+                db.execute("ALTER TABLE queue ADD COLUMN failure TEXT")
 
     def create(self, key, title, instructions, assignee_id=None):
         return self.router.request("POST", "tasks", {"title": title, "instructions": instructions,
@@ -68,11 +75,12 @@ class HermesAdapter:
     def approve(self, key, task_id, revision):
         return self.act(key, task_id, revision, "close")
 
-    def activity(self, busy):
-        if busy:
+    def activity(self, busy, generation=None):
+        if busy is not False:
             self.idle_since = None
-        elif self.idle_since is None:
+        elif self.idle_since is None or generation != self.activity_generation:
             self.idle_since = self.clock()
+        self.activity_generation = generation
 
     def poll(self):
         with self.db.transaction() as db:
@@ -86,21 +94,34 @@ class HermesAdapter:
             ack = self.router.ack(frame)
             with self.db.transaction() as db:
                 db.execute("UPDATE progress SET cursor=MAX(cursor,?)", (ack["confirmed_cursor"],))
-        self.activity(self.host.busy())
+        self.activity(*self.host.observe_activity())
         with self.db.transaction() as db:
-            row = db.execute("""SELECT * FROM queue WHERE receipt IS NULL
-                        AND (json_extract(payload,'$.level')='Event' OR ?)
+            row = db.execute("""SELECT * FROM queue WHERE receipt IS NULL AND retry_at<=?
+                        AND (json_extract(payload,'$.level')='Event' OR (? AND rowid=(
+                            SELECT MIN(rowid) FROM queue WHERE receipt IS NULL AND json_extract(payload,'$.level')='Notify')))
                         ORDER BY (json_extract(payload,'$.level')='Event') DESC,rowid LIMIT 1""",
-                        (self.idle_since is not None and self.clock()-self.idle_since >= 10,)).fetchone()
+                        (time.time(),self.idle_since is not None and self.clock()-self.idle_since >= 10)).fetchone()
         if row:
-            payload = json.loads(row["payload"])
-            if payload.get("attachment_ids"):
-                files = self.message_files(row["message_id"])
-                require([file["attachment_id"] for file in files]==payload["attachment_ids"],409,"message_files_unconfirmed")
-                payload["attachments"] = files
-            receipt = self.host.deliver(row["message_id"], payload)
-            if receipt:
-                with self.db.transaction() as db:
-                    db.execute("UPDATE queue SET receipt=? WHERE message_id=?", (encode(receipt), row["message_id"]))
-                return receipt
+            mid = row["message_id"]
+            try:
+                payload = json.loads(row["payload"])
+                if payload.get("attachment_ids"):
+                    files = self.message_files(mid)
+                    require([f["attachment_id"] for f in files]==payload["attachment_ids"],409,"message_files_unconfirmed")
+                    payload["attachments"] = files
+                receipt = self.host.deliver(mid, payload)
+            except Fault as exc:
+                self.defer(mid, exc.code)
+                raise
+            if not receipt:
+                self.defer(mid,"host_receipt_unknown")
+                return None
+            with self.db.transaction() as db:
+                db.execute("UPDATE queue SET receipt=?,failure=NULL,retry_at=0 WHERE message_id=?", (encode(receipt),mid))
+            return receipt
         return None
+
+    def defer(self, mid, reason):
+        with self.db.transaction() as db:
+            db.execute("UPDATE queue SET retry_at=?,failure=? WHERE message_id=? AND receipt IS NULL",
+                       (time.time()+5,reason,mid))

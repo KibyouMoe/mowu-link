@@ -1,0 +1,17 @@
+{
+  "after_plugin_receipt_loss": "same native admission",
+  "attachment_delivery": "Router reference plus authenticated local retrieval",
+  "caller": "real plugin and Hermes input authority; model handler is a fixture; no cloud or live gateway",
+  "event_message_id": "e234b024-d4fd-4dd0-b7d7-a2598e4ebc7c",
+  "event_native_admission": "4588d1ae145a46b78c8eb5681fe530dc",
+  "hermes_source_revision": "464bd0dd659f336bd0bf468bf02cad8aac211136",
+  "info_native_inputs": 0,
+  "native_gateway_inputs": 2,
+  "notify_idle_seconds": 10.94,
+  "notify_message_id": "9cd89e20-9e7a-4956-a9d7-04e32d996bb5",
+  "notify_native_admission": "5738b26cfe9d44c5bf98f1ed8744861c",
+  "original_file_verified_sha256": "528470843f5683315c95821662ece0b3493d9d6ff54519c454aa57b8b77cd1cf",
+  "profile": "fresh local fixture",
+  "route": "agent:main:local:dm:local-902461a57a1c75f21a3039765f012add535e465c112fe7d38b9a8ed840faf179",
+  "session_id": "local-902461a57a1c75f21a3039765f012add535e465c112fe7d38b9a8ed840faf179"
+}

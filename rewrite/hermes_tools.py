@@ -120,3 +120,6 @@ def register(ctx):
     client = Client(cfg["url"],cfg["token"],cfg.get("ca_file"))
     adapter = HermesAdapter(cfg["database"],client,None)
     ManagerTools(adapter,cfg["session_id"]).register(ctx)
+    if "input_session_key" in cfg:
+        from .hermes_host import start_input
+        start_input(ctx,adapter,cfg)

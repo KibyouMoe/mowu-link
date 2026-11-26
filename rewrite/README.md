@@ -51,6 +51,14 @@ python3 -m rewrite.release verify --archive ./build/mowulink.tar --revision "$RE
 
 升级先停隔离写者，按[离线恢复](router-rehearsal.md)采集组件清单和状态摘要。在新状态目录恢复副本，仅让新包在该副本上启动。先核原持单、投递凭据、未送消息和附件，再引入新工作。返回原版本前停新写者，通过 `state_bundle rollback` 核对试用期间的写入；新写入先逐笔对账。原生宿主绑定、认证及平台投递记录由相应所有者另核。
 
+### Hermes 专用会话
+
+将 `integrations/hermes_manager` 安装到专用测试 profile 的插件目录，令该环境能够导入 `rewrite`。插件的 `connection_file` 指向用户私有 JSON，含 Router 地址 `url`、该插件的 `token`、插件数据库路径 `database`、指定会话 `session_id`，私有 CA 可用 `ca_file`。八个管理工具在指定会话生效。
+
+已有宿主授权的独立 LOCAL 会话可额外配置 `input_session_key`，取同一会话已登记的原生路由键。插件检查自身所属 profile、当前宿主、原会话 ID、路由键和宿主现有的投递授权。接收方通过 Hermes 插件输入接口递交，从 Hermes 的原生输入台账核对生产者、消息正文和回执。附件以经校验的 Router 引用交给会话，查看文件时用 `router_info(message_id, attachment_id)`。未知回执保留在插件队列的 `failure` 字段；重试只查原生记录。Notify 队列维持原顺序，其他 Event 可继续接收。显式关闭或卸载插件时停止接收。
+
+隔离复跑使用 `python3 -m rewrite.hermes_check --host-input --hermes-source <源码仓> --hermes-python <带依赖的测试Python>`。探针准备全新的 profile、测试授权和临时 Router，实际运行插件及会话输入台账，模型响应由本地测试函数生成。客户端只开放 TUI/CLI、缺少插件输入授权或会话不匹配时，宿主收件保持未确认。
+
 ### 邮件和游戏聊天来源
 
 在独立环境运行 `python3 -m rewrite.feeds mail --config <邮箱测试配置>` 可只读采一次。仅属当前用户的配置包含 database、host、user、password，可选 port、folder 和 ca_file。首次在邮箱当前 UID 建立基线，后续保存发件人、主题和原来源规定的 200 字正文预览。组合后的信息超过 200 字时，消息携带完整预览文本附件。切换邮箱或文件夹时使用新库。
