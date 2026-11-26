@@ -8,6 +8,10 @@
 
 复跑 `python3 -B -m unittest -v rewrite.test_worker_resume.WorkerResume.test_number_uses_the_confirmed_catalog_and_old_card_cannot_redirect_it rewrite.test_dsh_native_loop.NativeLoop.test_platform_resume_switches_live_codex_and_dsh_sessions`。macOS 218 项通过，Linux arm64 154 项通过，另 64 项本机宿主用例跳过。冷目录中自动打开宿主仍待接。
 
+从 `3e7e7c2028deaf9f351752a36cf097609b43fe92` 构建并校验 188 文件的独立包，SHA-256 为 `93ca1d51faa9e332755feb37b8f6f1c84d582a1114e1246ebe696a43aed78aa4`。安装目录通过目录、双宿主切换、Codex 和 DSH 冷目录只读、TLS 配置五项，复验安装文件一致。
+
+另在独立 Codex App Server 原生接口查证，临时会话 `01a21799-ed4c-7f43-aec1-62549209fd59` 从 `notLoaded` 恢复到 `idle`。查询目标未加载会话，显式 `thread/resume` 后仍只有原回合 `01a21799-ed53-73b2-8c79-cf9646412bea`，新增模型请求为 0。此项只验证宿主入口，Worker 的冷会话交接尚未接入。
+
 `/resume 会话ID` 可将同一 Worker 切到已配置、已运行的独立适配器。`/switch 会话ID` 使用同一条链。运行中的 Codex App Server 与 DSH 隔离会话已往返切换。重投老消息、旧切换指令均读回原回执。原 Codex 一次私聊，DSH 一次私聊加一张工单。DSH 的两次原生 W04 返回同一结果，Router 仅一条待验通知。切走后，旧适配器即使把新会话 ID 写进回调正文也会被拒。模型和飞书是本地夹具。真实飞书、生产宿主、冷目录和编号选择仍待核。[原生与回执证据](evidence/native-live-resume.json) · [运行入口](README.md#飞书切换会话)
 
 切换、Router 开始与结束丢回包、提交前目标断开三个场景连续 12 轮通过。最后一项确认目标断开 80 秒期间 Worker 仍在线且派发暂停，授权运维按原号解除后继续投给原会话。适配器进程和 Worker 各自用独立账本，CLI 配置测试核对 Worker 重开后保持新会话。复跑 `python3 -B -m unittest -v rewrite.test_worker_resume rewrite.test_service.Service.test_runtime_resume_uses_opted_in_connection_map rewrite.test_dsh_native_loop.NativeLoop.test_platform_resume_switches_live_codex_and_dsh_sessions`。
