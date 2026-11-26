@@ -8,7 +8,7 @@ import {pathToFileURL} from 'node:url';
 import {createInterface} from 'node:readline';
 import * as adapter from './index.mjs';
 
-const [root,directory,session,mode='stop'] = process.argv.slice(2);
+const [root,directory,session,mode='stop',link] = process.argv.slice(2);
 const dependency = createRequire(path.join(root,'probe.cjs'));
 const sdk = name=>import(pathToFileURL(dependency.resolve('@deepseek-ai/'+name)));
 const {Context,Service} = await sdk('cordis');
@@ -633,7 +633,7 @@ async function stopScenario(agent) {
 }
 
 async function formalScenario(agent) {
-  await install(adapter,{session,directory,catalog_sessions:catalogSessions,
+  await install(adapter,{session,directory,catalog_sessions:catalogSessions,local_tls:link==='tls',
     relay_command_approvals:usesApprovals,resume_on_handoff:isCold,
     read_only_assignments:usesCleanup && !usesContainer && mode!=='cleanup-unscoped',
     ...(usesContainer ? {assignment_container:

@@ -87,10 +87,12 @@ def serve(args,stack):
         listener = serve_adapter(HostAdapter(args.db,native,native.session,media),args.worker_id,identities,address,ctx)
     elif args.component == "dsh-adapter":
         from .dsh_display import publishing
+        from .dsh_local_link import LocalLink
         from .dsh_port import DshActivation, DshHost, tool_listener
         from .native_files import NativeFiles
         client = connection(args.worker_connection)
         if args.managed_sessions_dir:
+            require(not args.local_tls,422,"dsh_managed_local_tls_unavailable")
             from .dsh_session_family import DshSessionFamily
 
             require(not args.resume_on_handoff,422,"invalid_managed_session_configuration")
@@ -99,10 +101,12 @@ def serve(args,stack):
             listener = serve_adapter(root.adapter,args.worker_id,identities,address,ctx,
                                      activation=root.activation,preparation=root.preparation,family=family)
         else:
-            native = DshHost(args.runtime_dir)
-            adapter = HostAdapter(args.db,native,args.session,NativeFiles(args.runtime_dir/"media",client))
+            link = LocalLink(args.runtime_dir,use_tls=args.local_tls)
+            native = DshHost(args.runtime_dir,link=link)
+            media = None if args.local_tls else NativeFiles(args.runtime_dir/"media",client)
+            adapter = HostAdapter(args.db,native,args.session,media)
             activation = DshActivation(native,args.session) if args.resume_on_handoff else None
-            callbacks = tool_listener(args.runtime_dir,adapter,client)
+            callbacks = tool_listener(args.runtime_dir,adapter,client,link=link)
             public_output = publishing(adapter,client,args.worker_id,activation=activation)
             listener = serve_adapter(adapter,args.worker_id,identities,address,ctx,activation=activation)
     elif args.component == "codex-adapter":
@@ -222,6 +226,8 @@ def main():
             component.add_argument("--worker-connection",required=name!="fixture-adapter",type=Path)
         if name == "dsh-adapter":
             component.add_argument("--runtime-dir",required=True,type=Path)
+            component.add_argument("--local-tls",action="store_true",
+                                   help="use the owner-private local link credentials and ports")
         if name in ("codex-adapter","dsh-adapter"):
             component.add_argument("--resume-on-handoff",action="store_true",
                                    help="wait for the Worker to explicitly restore this pinned native session")

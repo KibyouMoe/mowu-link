@@ -95,3 +95,62 @@ jobs:
           } finally {
             Remove-Item -LiteralPath $dir.FullName -Recurse -Force
           }
+
+  dsh-native:
+    runs-on: windows-2025
+    timeout-minutes: 10
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - name: Verify and run the packaged Windows DSH SDK
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          if (-not (Get-Command openssl -ErrorAction SilentlyContinue)) {
+            $gitRoot = Split-Path (Split-Path (Get-Command git).Source)
+            $env:PATH = "$(Join-Path $gitRoot 'mingw64\bin');$(Join-Path $gitRoot 'usr\bin');$env:PATH"
+          }
+          $dir = New-Item -ItemType Directory (Join-Path $env:RUNNER_TEMP ('mowulink-dsh-' + [Guid]::NewGuid().ToString('N')))
+          try {
+            $owner = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+            $acl = Get-Acl -LiteralPath $dir.FullName
+            $acl.SetSecurityDescriptorSddlForm("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;$owner)", [Security.AccessControl.AccessControlSections]::Access)
+            Set-Acl -LiteralPath $dir.FullName -AclObject $acl
+            $download = Join-Path $dir.FullName 'dsh-installer.exe'
+            $url = 'https://download.deepseek.com/dsh-desk/bin/win-x64/deepseek-harness-0.2.2-rc.5-win-x64.exe'
+            curl.exe --fail --location --silent --show-error --max-time 180 --output $download $url
+            $hash = [Convert]::FromHexString((Get-FileHash -LiteralPath $download -Algorithm SHA512).Hash)
+            if ([Convert]::ToBase64String($hash) -cne 'wWySRp7Hk5gcH324jBxAc7KV0mniHzQDofyQexOJMIAWXBkgHTsRCr3IrdwX1XO8OIhDZsLYmve4mLxskikYIg==') {
+              throw 'DSH installer checksum mismatch'
+            }
+            Write-Output 'Verified DeepSeek Windows DSH 0.2.2-rc.5 installer'
+            $sevenZip = Join-Path $env:ProgramFiles '7-Zip\7z.exe'
+            $payload = Join-Path $dir.FullName 'payload'
+            & $sevenZip x -y -bso0 "-o$payload" $download
+            $nested = @(Get-ChildItem -LiteralPath $payload -Filter app-64.7z -File -Recurse)
+            if ($nested.Count -eq 1) {
+              $payload = Join-Path $dir.FullName 'app'
+              & $sevenZip x -y -bso0 "-o$payload" $nested[0].FullName
+            }
+            $bundles = @(Get-ChildItem -LiteralPath $payload -Filter app.asar -File -Recurse)
+            if ($bundles.Count -ne 1) { throw 'Expected one packaged DSH app.asar' }
+            $executables = @(Get-ChildItem -LiteralPath $bundles[0].Directory.Parent.FullName -Filter '*.exe' -File |
+              Where-Object { $_.BaseName -match '^DeepSeek[ -]Harness$' })
+            if ($executables.Count -ne 1) { throw 'Expected one packaged DSH executable' }
+            $env:MOWULINK_TEST_DSH_BINARY = $executables[0].FullName
+            $env:MOWULINK_TEST_DSH_EVIDENCE = Join-Path $dir.FullName 'native-dsh.json'
+            $state = New-Item -ItemType Directory (Join-Path $dir.FullName '状态 试用')
+            $env:TMP = $state.FullName
+            $env:TEMP = $state.FullName
+            python -B -m unittest -v rewrite.test_dsh_native_loop.LocalTlsLoop
+            Get-Content -LiteralPath $env:MOWULINK_TEST_DSH_EVIDENCE
+          } finally {
+            Remove-Item -LiteralPath $dir.FullName -Recurse -Force
+          }

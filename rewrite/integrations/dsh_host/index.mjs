@@ -1,6 +1,5 @@
 import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync, lstatSync, realpathSync, constants } from 'node:fs';
-import http from 'node:http';
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { admitMedia } from './media.mjs';
@@ -14,6 +13,7 @@ import { approvalProof, installCommandApprovals } from './command-approvals.mjs'
 import { guid, prepareSession, selection } from './session-preparation.mjs';
 import { assignmentCleanup } from './assignment-cleanup.mjs';
 import { assignmentContainers } from './assignment-container.mjs';
+import { localLink, privateDir } from './local-link.mjs';
 
 const tools = JSON.parse(readFileSync(new URL('../../agent-toolset.json', import.meta.url)));
 const sha = value => createHash('sha256').update(value).digest('hex');
@@ -23,7 +23,7 @@ function check(condition, code) {
   if (!condition) throw new Error(code);
 }
 
-async function input(request, ctx, agent, directory) {
+async function input(request, ctx, agent, directory, allowMedia) {
   const {session, delivery_id, payload_json, digest} = request;
   check(typeof payload_json === 'string' && sha(payload_json) === digest, 'delivery_digest_mismatch');
   check(typeof delivery_id === 'string' && delivery_id.length > 0, 'invalid_delivery_id');
@@ -33,6 +33,7 @@ async function input(request, ctx, agent, directory) {
   if (payload.kind === 'trainer_answer') check(payload.session === session, 'wrong_native_session');
   const text = ['chat','queued_chat'].includes(payload.kind) ? payload.text : '魔物链接投递\n' + payload_json;
   const media = payload.attachments;
+  check(allowMedia || !media?.length, 'dsh_local_tls_media_unavailable');
   check(typeof text === 'string' && (text.trim() || media?.length), 'empty_input');
   const parts = text ? [{type:'text',text}] : [];
   const content = media?.length ? await admitMedia(ctx,agent,directory,media,parts,request.operation==='deliver') : parts;
@@ -151,7 +152,7 @@ async function stopPrivateTurn(ctx,agent,compacting,bound) {
   throw new Error('native_stop_unconfirmed');
 }
 
-export async function bindHost(ctx, session, directory, catalog=[], selected=null, readOnly=false, foreground=false, workspaceConfig=null) {
+export async function bindHost(ctx, session, directory, catalog=[], selected=null, readOnly=false, foreground=false, workspaceConfig=null, allowMedia=true) {
   check(typeof session === 'string' && session.length > 0, 'missing_native_session');
   const controller = ctx.get('sessionController');
   const agent = selected ?? (await controller.resolveAgent(session)).agent;
@@ -225,7 +226,7 @@ export async function bindHost(ctx, session, directory, catalog=[], selected=nul
         return changeModel(ctx,agent,request,bound,()=>ownEvents(ctx,agent));
       }
       check(['deliver','lookup','deliver-control'].includes(request.operation), 'unsupported_operation');
-      const expected = await input(request,ctx,agent,directory);
+      const expected = await input(request,ctx,agent,directory,allowMedia);
       const before = agent.session.seq;
       const history = await persisted(ctx,agent);
       const seen = receipt(request,expected,history);
@@ -285,12 +286,6 @@ export async function bindHost(ctx, session, directory, catalog=[], selected=nul
   };
 }
 
-function privateDir(dir) {
-  const info = lstatSync(dir);
-  check(path.isAbsolute(dir) && info.isDirectory() && info.uid === process.getuid()
-    && !(info.mode & 0o077), 'private_runtime_required');
-}
-
 async function readJson(stream) {
   let size = 0;
   const chunks = [];
@@ -302,15 +297,14 @@ async function readJson(stream) {
   return JSON.parse(Buffer.concat(chunks).toString('utf8'));
 }
 
-function callback(dir, envelope, route='/tool', bytes=null) {
-  privateDir(dir);
+function callback(dir, envelope, route='/tool', bytes=null, link=localLink(dir,false)) {
   const encoded = JSON.stringify(envelope);
   const body = bytes ?? Buffer.from(encoded);
   const headers = bytes===null ? {'Content-Type':'application/json'} : {
     'Content-Type':'application/octet-stream','X-Mowu-Workspace':Buffer.from(encoded).toString('base64url'),
   };
   return new Promise((resolve,reject) => {
-    const req = http.request({socketPath:path.join(dir,'worker.sock'),path:route,method:'POST',
+    const req = link.request({path:route,method:'POST',
       headers:{...headers,'Content-Length':body.length},timeout:bytes===null ? 8000 : 45000}, async res => {
       try {
         const body = await readJson(res);
@@ -377,9 +371,9 @@ async function inspectColdSession(ctx,session) {
   check(phase!=='active','native_cold_goal_active');
 }
 
-function installBoundTools(ctx,port,directory,relay_command_approvals) {
+function installBoundTools(ctx,port,directory,relay_command_approvals,link) {
   if (relay_command_approvals) {
-    installCommandApprovals(ctx,port.agent,()=>ownEvents(ctx,port.agent),(route,body)=>callback(directory,body,route));
+    installCommandApprovals(ctx,port.agent,()=>ownEvents(ctx,port.agent),(route,body)=>callback(directory,body,route,null,link));
   }
   const available = port.workspace ? [...tools,{
     name:'worker_workspace_shell',
@@ -395,7 +389,7 @@ function installBoundTools(ctx,port,directory,relay_command_approvals) {
   for (const tool of available) {
     const unregister = port.agent.ctx.get('tools').register({name:tool.name,description:tool.description,
       parameters:tool.inputSchema,output:{schema:{type:'object'},render:(_args,value)=>[{type:'text',text:JSON.stringify(value)}]},
-      execute:(args,exec) => port.tool(tool.name,args,exec,body=>callback(directory,body))});
+      execute:(args,exec) => port.tool(tool.name,args,exec,body=>callback(directory,body,'/tool',null,link))});
     ctx.effect(() => unregister);
   }
   port.cleanup?.bindTools();
@@ -404,8 +398,12 @@ function installBoundTools(ctx,port,directory,relay_command_approvals) {
 
 export async function apply(ctx, {session, directory, catalog_sessions=[], relay_command_approvals=false,
                                  resume_on_handoff=false, managed_sessions_dir=null, new_session_selection=null,
-                                 read_only_assignments=false, relay_foreground_questions=false, assignment_container=null}) {
-  privateDir(directory);
+                                 read_only_assignments=false, relay_foreground_questions=false, assignment_container=null,
+                                 local_tls=false}) {
+  check(typeof local_tls==='boolean','invalid_dsh_local_link');
+  check(!local_tls || !(managed_sessions_dir || relay_command_approvals || relay_foreground_questions ||
+    read_only_assignments || assignment_container),'unsupported_dsh_local_tls_feature');
+  const link = localLink(directory,local_tls);
   check(typeof session==='string' && session.length>0,'missing_native_session');
   check(typeof resume_on_handoff==='boolean','invalid_native_activation');
   check(typeof read_only_assignments==='boolean' &&
@@ -442,8 +440,8 @@ export async function apply(ctx, {session, directory, catalog_sessions=[], relay
     scope.selected ??= agents.get(target) ?? (await ctx.get('sessionController').resolveAgent(target)).agent;
     check(scope.selected?.session?.id===target && agents.get(target)===scope.selected,'native_agent_unavailable');
     check(scope.selected.status==='idle','native_cold_thread_unconfirmed');
-    const opened = await bindHost(ctx,target,directory,catalog,scope.selected,read_only_assignments,relay_foreground_questions,assignment_container);
-    installBoundTools(ctx,opened,directory,relay_command_approvals);
+    const opened = await bindHost(ctx,target,directory,catalog,scope.selected,read_only_assignments,relay_foreground_questions,assignment_container,!local_tls);
+    installBoundTools(ctx,opened,directory,relay_command_approvals,link);
     scope.port = opened;
   }
   async function activate(request,scope) {
@@ -458,11 +456,11 @@ export async function apply(ctx, {session, directory, catalog_sessions=[], relay
     return {session:request.session,operation_id,state:'loaded'};
   }
   if (!resume_on_handoff && (!managed || !readdirSync(managed_sessions_dir).some(name=>name.endsWith('.json')))) {
-    const port = await bindHost(ctx,session,directory,catalog,null,read_only_assignments,relay_foreground_questions,assignment_container);
-    installBoundTools(ctx,port,directory,relay_command_approvals);
+    const port = await bindHost(ctx,session,directory,catalog,null,read_only_assignments,relay_foreground_questions,assignment_container,!local_tls);
+    installBoundTools(ctx,port,directory,relay_command_approvals,link);
     scopes.get(session).port = port;
   }
-  const server = http.createServer(async (req,res) => {
+  const server = link.server(async (req,res) => {
     try {
       check(req.method === 'POST' && req.url === '/host','unknown_route');
       const request = await readJson(req);
@@ -499,7 +497,8 @@ export async function apply(ctx, {session, directory, catalog_sessions=[], relay
   });
   server.requestTimeout = 10000;
   await new Promise((resolve,reject) => {
-    server.once('error',reject).listen(path.join(directory,'dsh.sock'),resolve);
+    server.once('error',reject);
+    link.listen(server,resolve);
   });
   ctx.effect(() => () => new Promise(resolve=>server.close(resolve)));
 }

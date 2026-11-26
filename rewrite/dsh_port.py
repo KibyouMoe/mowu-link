@@ -1,13 +1,11 @@
-"""DSH plugin transport, scoped to an owner-private Unix directory and a single session."""
+"""DSH plugin transport, scoped to one owner-private runtime and a single session."""
 import base64
 from contextlib import contextmanager
 import hashlib
-from http.client import HTTPConnection, HTTPException
+from http.client import HTTPException
 from http.server import BaseHTTPRequestHandler
 import json
 import os
-import socket
-from socketserver import ThreadingMixIn
 from sqlite3 import OperationalError
 from threading import Event, Thread
 from urllib.error import URLError
@@ -15,30 +13,13 @@ from urllib.error import URLError
 from . import workspace_artifacts
 from .agent_tools import TOOLSET
 from .dsh_approvals import DshApprovals
+from .dsh_local_link import LocalLink
 from .dsh_workspace_audit import journal as workspace_journal
 from .messages import valid_guid
 from .storage import Fault, encode, require, string
 
 NATIVE_TOOLS = frozenset(tool["name"] for tool in TOOLSET)
 MAX_WORKSPACE_ARTIFACT = 16 * 1024 * 1024
-
-
-def private_directory(path):
-    info = path.lstat()
-    require(path.is_absolute() and path.is_dir() and not path.is_symlink()
-            and info.st_uid == os.getuid() and not info.st_mode & 0o077, 403, "private_runtime_required")
-    return path
-
-
-class UnixConnection(HTTPConnection):
-    def __init__(self, path):
-        super().__init__("localhost",timeout=8)
-        self.path = path
-
-    def connect(self):
-        self.sock = socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
-        self.sock.settimeout(self.timeout)
-        self.sock.connect(str(self.path))
 
 
 class DshActivation:
@@ -65,11 +46,12 @@ class DshHost:
     rejects_busy_before_task_write = True
     rejects_busy_before_answer_write = True
 
-    def __init__(self, directory):
-        self.directory = private_directory(directory)
+    def __init__(self, directory, *, link=None):
+        self.directory = directory
+        self.link = link or LocalLink(directory)
 
     def request(self, operation, session, fields=None):
-        client = UnixConnection(private_directory(self.directory) / "dsh.sock")
+        client = self.link.connect_host()
         try:
             body = encode({"operation":operation,"session":session,**(fields or {})}).encode()
             client.request("POST","/host",body=body,headers={"Content-Type":"application/json"})
@@ -173,6 +155,7 @@ class DshHost:
         return self.delivery("lookup",session,did,payload,digest)
 
     def media_operation(self, operation, session, did, payload, digest, files):
+        require(not self.link.ports,409,"dsh_local_tls_media_unavailable")
         expected = [self.directory/"media"/item["sha256"] for item in payload["attachments"]]
         require(files==expected,409,"dsh_media_cache_mismatch")
         return self.delivery(operation,session,did,payload,digest)
@@ -199,9 +182,8 @@ def stage_workspace_artifact(bound, callback, body, source, size):
 
 
 @contextmanager
-def tool_listener(directory, adapter, worker, *, family=None):
-    from socketserver import UnixStreamServer
-    endpoint = private_directory(directory) / "worker.sock"
+def tool_listener(directory, adapter, worker, *, family=None, link=None):
+    link = link or LocalLink(directory)
     approvals = DshApprovals(adapter,worker) if family is None else None
     stop = Event()
 
@@ -278,11 +260,9 @@ def tool_listener(directory, adapter, worker, *, family=None):
             self.end_headers()
             self.wfile.write(raw)
 
-    class Server(ThreadingMixIn,UnixStreamServer):
-        daemon_threads = True
-
-    with Server(str(endpoint),Handler) as server:
-        info = endpoint.stat()
+    server, endpoint = link.listen_for_tools(Handler)
+    with server:
+        info = endpoint.stat() if endpoint else None
         runner = Thread(target=server.serve_forever,kwargs={"poll_interval":0.05},daemon=True)
         recovery = Thread(target=recover_approvals,daemon=True)
         runner.start()
@@ -294,5 +274,5 @@ def tool_listener(directory, adapter, worker, *, family=None):
             server.shutdown()
             runner.join()
             recovery.join(timeout=16)
-            if endpoint.exists() and os.path.samestat(info,endpoint.lstat()):
+            if endpoint and endpoint.exists() and os.path.samestat(info,endpoint.lstat()):
                 endpoint.unlink()

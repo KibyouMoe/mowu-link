@@ -8,6 +8,7 @@ import os
 import shutil
 from pathlib import Path
 import select
+from queue import Empty, Queue
 import shlex
 import socket
 import sqlite3
@@ -26,6 +27,7 @@ from .codex_app_server import AppServerHost, worker_callbacks
 from .codex_display import CodexDisplay
 from .devloop import FixtureHost, Loop
 from .dsh_display import DshDisplay
+from .dsh_local_link import LocalLink
 from .dsh_port import DshActivation, DshHost, tool_listener
 from .dsh_session_family import DshPreparation
 from .feishu_inbound import Inbound
@@ -64,26 +66,47 @@ def observe():
         return json.loads(result.stdout)
 
 
-@unittest.skipUnless(EXE.is_file(),"installed macOS DSH SDK required")
-class NativeLoop(unittest.TestCase):
+class NativeProcess(unittest.TestCase):
     def read_native(self,native,command=None):
         if command is not None:
             native.stdin.write(command+"\n")
             native.stdin.flush()
-        self.assertTrue(select.select([native.stdout],[],[],10)[0],"DSH did not return a native observation")
-        return json.loads(native.stdout.readline())
+        if os.name=="nt":
+            output = Queue()
+            reader = Thread(target=lambda:output.put(native.stdout.readline()),daemon=True)
+            reader.start()
+            try:
+                line = output.get(timeout=12)
+            except Empty:
+                native.kill()
+                reader.join(3)
+                self.fail("DSH did not return a native observation")
+        else:
+            self.assertTrue(select.select([native.stdout],[],[],10)[0],"DSH did not return a native observation")
+            line = native.stdout.readline()
+        self.assertTrue(line,"DSH fixture exited without a native observation")
+        return json.loads(line)
 
     @contextmanager
-    def start_native(self,directory,session,mode,*,fixture=FIXTURE):
-        with subprocess.Popen([EXE,fixture.resolve(),APP/"Resources/app.asar/dsh",directory,session,mode],
-                              env=environment(directory),cwd=directory,stdin=subprocess.PIPE,
-                              stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True) as native:
+    def start_native(self,directory,session,mode,*,fixture=FIXTURE,use_tls=False):
+        exe, root = EXE,APP/"Resources/app.asar/dsh"
+        env = environment(str(directory))
+        if os.name=="nt":
+            exe = Path(os.environ["MOWULINK_TEST_DSH_BINARY"])
+            root = exe.parent/"resources/app.asar/dsh"
+            env.update({key:os.environ[key] for key in ("SystemRoot","WINDIR","PATH") if key in os.environ})
+            env.update({"USERPROFILE":str(directory),"DSH_HOME":str(directory),"TEMP":str(directory),"TMP":str(directory)})
+        args = [exe,fixture.resolve(),root,directory,session,mode]
+        if use_tls:
+            args.append("tls")
+        with subprocess.Popen(args,env=env,cwd=directory,stdin=subprocess.PIPE,
+                              stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,encoding="utf-8") as native:
             try:
                 self.assertEqual(self.read_native(native),{"ready":True,"session":session})
                 yield native
             finally:
                 try:
-                    tail,errors = native.communicate("exit\n",timeout=6)
+                    tail,errors = native.communicate("exit\n" if native.poll() is None else None,timeout=6)
                 except subprocess.TimeoutExpired:
                     native.kill()
                     native.communicate()
@@ -98,6 +121,126 @@ class NativeLoop(unittest.TestCase):
         self.addCleanup(server.shutdown)
         return "http://127.0.0.1:"+str(server.server_port)
 
+    def formal_report(self,directory,*,use_tls=False):
+        session = "dsh-real-loop-formal"
+        link = LocalLink(directory,use_tls=use_tls)
+        class LateDeliveryReceipt(DshHost):
+            def deliver(self,actual_session,did,payload,digest):
+                proof = super().deliver(actual_session,did,payload,digest)
+                return None if payload["kind"]=="task" else proof
+        def host(_path,_name):
+            port = LateDeliveryReceipt(directory,link=link)
+            port.session = session
+            return port
+        clock = Clock()
+        loop = self.enterContext(Loop.isolated(clock,host_factory=host))
+        credential = guid()
+        service = WorkerService(loop.worker,clock)
+        client = Client(self.open_worker(service,{credential:"adapter/oguri"}),credential)
+        self.enterContext(tool_listener(directory,loop.adapter,client,link=link))
+        router_requests = []
+        with self.start_native(directory,session,"formal",use_tls=use_tls) as native:
+            if use_tls:
+                self.assert_client_certificate_required(link)
+                with self.assertRaisesRegex(Fault,"wrong_native_session"):
+                    link_host = DshHost(directory,link=link)
+                    link_host.request("activity","foreign-session")
+            tid = loop.hermes.create(guid(),"Native pipeline test","Report a local fixture result","oguri")["task_id"]
+            send = loop.worker.router.request
+            def observe_report(method,path,*args,**kwargs):
+                if path!=f"tasks/{tid}/report":
+                    return send(method,path,*args,**kwargs)
+                before = {"router":loop.hermes.inspect(tid)["task"],"worker":loop.worker.hold()}
+                proof = send(method,path,*args,**kwargs)
+                router_requests.append({"before":before,"receipt":proof})
+                return proof
+            loop.worker.router.request = observe_report
+            loop.worker.connect()
+            loop.worker.poll()
+            clock.advance(10)
+            loop.worker.poll()
+            loop.worker.poll()
+            observed = self.read_native(native,"read")
+            with loop.adapter.db.transaction() as db:
+                intent = db.execute("SELECT * FROM intents WHERE json_extract(payload,'$.task_id')=?",(tid,)).fetchone()
+            receipt = json.loads(intent["receipt"])
+            # Reconstruct the host receipt after dropping the adapter's copy. DSH must not insert a new input.
+            with loop.adapter.db.transaction() as db:
+                db.execute("UPDATE intents SET receipt=NULL,native_id=NULL")
+            self.assertEqual(loop.adapter.deliver(intent["delivery_id"],json.loads(intent["payload"])),receipt)
+            self.assertEqual(self.read_native(native,"read"),observed)
+        details = loop.hermes.inspect(tid)
+        self.assertEqual(details["task"]["state"],"completed_reported")
+        self.assertEqual(observed["inputs"],[receipt["native_id"]])
+        report = details["last_report"]
+        aid = report["assignment_id"]
+        self.assertEqual(json.loads(intent["payload"])["assignment_id"],aid)
+        self.assertEqual([r["name"] for r in observed["calls"]],["worker_report","worker_report"])
+        self.assertEqual([json.loads(r["arguments"])["assignment_id"] for r in observed["calls"]],[aid,aid])
+        expected = {"recorded":True,"task_state":"completed_reported","release_assignment_id":aid}
+        request, = router_requests
+        self.assertEqual(request["before"]["router"]["state"],"working")
+        self.assertEqual(request["before"]["worker"],{"held_task_id":tid,"held_assignment_id":aid})
+        self.assertEqual(request["receipt"],expected)
+        self.assertEqual([r["toolCallId"] for r in observed["results"]],[c["callId"] for c in observed["calls"]])
+        self.assertEqual([r["isError"] for r in observed["results"]],[False,False],observed["results"])
+        self.assertEqual([json.loads(r["content"][0]["text"]) for r in observed["results"]],[expected,expected])
+        self.assertEqual(loop.worker.hold(),{"held_task_id":None,"held_assignment_id":None})
+        with loop.worker.db.transaction() as db:
+            notice, = db.execute("SELECT payload FROM display_events WHERE event_id=?",
+                                 ("task-"+receipt["delivery_id"],)).fetchall()
+        self.assertIn(tid,json.loads(notice["payload"])["text"])
+        notified = [f["delivery_id"] for f in loop.manager_wire.frames(0) if f["payload"].get("text")==report["summary"]]
+        self.assertEqual(len(notified),1)
+        self.evidence = {"native":observed,"input_receipt":receipt,"router":details,
+                         "router_w04":request,"notification_delivery_ids":notified,"worker_after":loop.worker.hold(),
+                         "boundary":"Native DSH AgentLoop, tool execution and real isolated Router/Worker; scripted local model"}
+
+
+    def assert_client_certificate_required(self,link):
+        from http.client import HTTPSConnection
+
+        trust = ssl.create_default_context(cafile=link.directory/"dsh-link.crt")
+        for role,path in [("host","/host"),("worker","/tool")]:
+            with self.subTest(role=role), closing(HTTPSConnection("127.0.0.1",link.ports[role+"_port"],
+                                                                  context=trust,timeout=3)) as no_identity:
+                with self.assertRaises(OSError):
+                    no_identity.request("POST",path,body=b"{}")
+                    no_identity.getresponse()
+
+
+@unittest.skipUnless(EXE.is_file() or os.environ.get("MOWULINK_TEST_DSH_BINARY"),
+                     "installed DSH SDK or verified packaged Windows executable required")
+@unittest.skipUnless(shutil.which("openssl"),"test TLS certificate generator required")
+class LocalTlsLoop(NativeProcess):
+    def test_fixed_session_w04_over_mutual_tls(self):
+        directory = Path(self.enterContext(tempfile.TemporaryDirectory(prefix="mldsh-tls-"))).resolve()
+        with closing(socket.socket()) as host, closing(socket.socket()) as tools:
+            host.bind(("127.0.0.1",0))
+            tools.bind(("127.0.0.1",0))
+            config(directory,"dsh-link.json",{"host_port":host.getsockname()[1],"worker_port":tools.getsockname()[1]})
+        subprocess.run(["openssl","req","-x509","-newkey","rsa:2048","-nodes","-days","1",
+                        "-subj","/CN=mowulink isolated DSH link","-addext","subjectAltName=IP:127.0.0.1",
+                        "-addext","basicConstraints=critical,CA:FALSE","-addext","extendedKeyUsage=serverAuth,clientAuth",
+                        "-out","dsh-link.crt","-keyout","dsh-link.key"],
+                       cwd=directory,check=True,capture_output=True)
+        if os.name=="posix":
+            for name in ("dsh-link.crt","dsh-link.key"):
+                (directory/name).chmod(0o600)
+            (directory/"dsh-link.key").chmod(0o644)
+            with self.assertRaisesRegex(Fault,"private_dsh_link_required"):
+                LocalLink(directory,use_tls=True)
+            (directory/"dsh-link.key").chmod(0o600)
+        self.formal_report(directory,use_tls=True)
+        self.evidence.update({"link":"IPv4 loopback with mutual TLS","missing_client_certificate_rejected_in_both_directions":True,
+                              "foreign_session_rejected":True,"input_count_after_replay":1})
+        output = os.environ.get("MOWULINK_TEST_DSH_EVIDENCE")
+        if output:
+            Path(output).write_text(encode(self.evidence)+"\n",encoding="utf-8")
+
+
+@unittest.skipUnless(EXE.is_file(),"installed macOS DSH SDK required")
+class NativeLoop(NativeProcess):
     def test_original_turn_stops_queued_chat_survives_and_native_request_uses_new_effort(self):
         observed = observe()
         self.assertEqual(observed["turns"],[[1,"aborted","user"],[2,"completed",None],[3,"completed",None]])
@@ -884,74 +1027,8 @@ class NativeLoop(unittest.TestCase):
                     "SessionController wiring, model and Feishu are fixtures."}
 
     def test_native_tool_executor_files_w04_through_the_worker(self):
-        session = "dsh-real-loop-formal"
-        directory = self.enterContext(tempfile.TemporaryDirectory(dir="/tmp",prefix="mldsh-formal-"))
-        class LateDeliveryReceipt(DshHost):
-            def deliver(self,actual_session,did,payload,digest):
-                proof = super().deliver(actual_session,did,payload,digest)
-                return None if payload["kind"]=="task" else proof
-        def host(_path,_name):
-            port = LateDeliveryReceipt(Path(directory))
-            port.session = session
-            return port
-        clock = Clock()
-        loop = self.enterContext(Loop.isolated(clock,host_factory=host))
-        credential = guid()
-        service = WorkerService(loop.worker,clock)
-        client = Client(self.open_worker(service,{credential:"adapter/oguri"}),credential)
-        self.enterContext(tool_listener(Path(directory),loop.adapter,client))
-        router_requests = []
-        with self.start_native(directory,session,"formal") as native:
-            tid = loop.hermes.create(guid(),"Native pipeline test","Report a local fixture result","oguri")["task_id"]
-            send = loop.worker.router.request
-            def observe_report(method,path,*args,**kwargs):
-                if path!=f"tasks/{tid}/report":
-                    return send(method,path,*args,**kwargs)
-                before = {"router":loop.hermes.inspect(tid)["task"],"worker":loop.worker.hold()}
-                proof = send(method,path,*args,**kwargs)
-                router_requests.append({"before":before,"receipt":proof})
-                return proof
-            loop.worker.router.request = observe_report
-            loop.worker.connect()
-            loop.worker.poll()
-            clock.advance(10)
-            loop.worker.poll()
-            loop.worker.poll()
-            observed = self.read_native(native,"read")
-            with loop.adapter.db.transaction() as db:
-                intent = db.execute("SELECT * FROM intents WHERE json_extract(payload,'$.task_id')=?",(tid,)).fetchone()
-            receipt = json.loads(intent["receipt"])
-            # Reconstruct the host receipt after dropping the adapter's copy. DSH must not insert a new input.
-            with loop.adapter.db.transaction() as db:
-                db.execute("UPDATE intents SET receipt=NULL,native_id=NULL")
-            self.assertEqual(loop.adapter.deliver(intent["delivery_id"],json.loads(intent["payload"])),receipt)
-            self.assertEqual(self.read_native(native,"read"),observed)
-        details = loop.hermes.inspect(tid)
-        self.assertEqual(details["task"]["state"],"completed_reported")
-        self.assertEqual(observed["inputs"],[receipt["native_id"]])
-        report = details["last_report"]
-        aid = report["assignment_id"]
-        self.assertEqual(json.loads(intent["payload"])["assignment_id"],aid)
-        self.assertEqual([r["name"] for r in observed["calls"]],["worker_report","worker_report"])
-        self.assertEqual([json.loads(r["arguments"])["assignment_id"] for r in observed["calls"]],[aid,aid])
-        expected = {"recorded":True,"task_state":"completed_reported","release_assignment_id":aid}
-        request, = router_requests
-        self.assertEqual(request["before"]["router"]["state"],"working")
-        self.assertEqual(request["before"]["worker"],{"held_task_id":tid,"held_assignment_id":aid})
-        self.assertEqual(request["receipt"],expected)
-        self.assertEqual([r["toolCallId"] for r in observed["results"]],[c["callId"] for c in observed["calls"]])
-        self.assertEqual([r["isError"] for r in observed["results"]],[False,False],observed["results"])
-        self.assertEqual([json.loads(r["content"][0]["text"]) for r in observed["results"]],[expected,expected])
-        self.assertEqual(loop.worker.hold(),{"held_task_id":None,"held_assignment_id":None})
-        with loop.worker.db.transaction() as db:
-            notice, = db.execute("SELECT payload FROM display_events WHERE event_id=?",
-                                 ("task-"+receipt["delivery_id"],)).fetchall()
-        self.assertIn(tid,json.loads(notice["payload"])["text"])
-        notified = [f["delivery_id"] for f in loop.manager_wire.frames(0) if f["payload"].get("text")==report["summary"]]
-        self.assertEqual(len(notified),1)
-        self.evidence = {"native":observed,"input_receipt":receipt,"router":details,
-                         "router_w04":request,"notification_delivery_ids":notified,"worker_after":loop.worker.hold(),
-                         "boundary":"Native DSH AgentLoop, tool execution and real isolated Router/Worker; scripted local model"}
+        directory = Path(self.enterContext(tempfile.TemporaryDirectory(dir="/tmp",prefix="mldsh-formal-")))
+        self.formal_report(directory)
 
     def goal_worker(self,session,extra_workers=()):
         directory = self.enterContext(tempfile.TemporaryDirectory(dir="/tmp",prefix="mldsh-goals-"))
