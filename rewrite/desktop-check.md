@@ -65,7 +65,17 @@ App Server 指定回合的文字投影复用原 Worker 的飞书卡片。独立�
 
 独立 App Server 的 `/model`、`/effort` 从原生会话回读当前选择。`/context` 根据原生用量事件核对最近已观察到的回包及回合号，启动后没有事件时显示未记录。同一 App Server 的模型目录未提供各模型所属提供方，暂不对该会话提供切换入口。连续 10 次实际回读成功，模型是本地脚本。[回读记录](evidence/codex-app-server-native-context.json)。
 
-以专用 Codex profile 启动 App Server，用 `thread/start` 加载 `rewrite/agent-toolset.json` 中测试所需的工具定义并保存线程。完工要加载 `worker_report`，工单提问还要加载 `worker_ask`。先用 `thread/read` 核对原线程和工作目录，再为 Worker 配置隔离 TLS 连接。启动命令如下。
+新建工位时准备独立工作目录、属主独占的 Codex 测试 profile 及明确获准的测试模型连接。初始化命令会向该模型发送一条只读初始化消息，再关闭并重开 App Server，确认同一个线程、回合及输入号已由宿主保存。
+
+```sh
+python3 -m rewrite.service codex-provision \
+  --codex-binary "$CODEX_BINARY" --codex-profile "$TEST_CODEX_PROFILE" --cwd "$TEST_PROJECT" \
+  --tool worker_report --tool worker_ask
+```
+
+省略 `--tool` 时只登记 `worker_report`，可指定的名称来自 `agent-toolset.json`。读取成功回执里的 `thread_id` 配置隔离 Worker。命令输出请求登记的工具名，是否能执行仍须经原生调用验证。若初始化失败而返回线程号或回合号，先查该原生会话，命令不会重发初始化消息。默认无登录的 profile 在创建线程前即返回 `codex_test_account_required`。初始化中出现工具或审批请求会终止，未给该请求授权。真实 App Server 与本地脚本模型已连续跑通 10 次冷启动、回读及后续 W04。[初始化与回执记录](evidence/codex-native-provision.json)。
+
+适配器启动命令如下。
 
 ```sh
 python3 -m rewrite.service codex-adapter \

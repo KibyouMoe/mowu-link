@@ -15,6 +15,13 @@ class NativeRpcRejected(RuntimeError):
     pass
 
 
+def require_test_account(rpc):
+    account = rpc.request("account/read",{"refreshToken":False})
+    require(isinstance(account,dict) and type(account.get("requiresOpenaiAuth")) is bool,
+            503,"codex_account_unconfirmed")
+    require(not account["requiresOpenaiAuth"] or account.get("account"),503,"codex_test_account_required")
+
+
 class AppServerRpc:
     def __init__(self, process):
         self.process = process

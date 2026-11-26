@@ -19,6 +19,7 @@ from .agent_tools import REPORT_TOOL, TOOLSET
 from .adapter import HostAdapter
 from .codex_app_server import AppServerHost, worker_callbacks
 from .codex_display import CodexDisplay
+from .codex_provision import SEED
 from .codex_rpc import start_app_server
 from .devloop import Loop
 from .feishu_inbound import Inbound
@@ -65,7 +66,12 @@ class Provider(BaseHTTPRequestHandler):
         response_id = "resp_fixture_"+str(len(self.server.observed))
         question = payload and payload.get("instructions")=="Ask the scripted manager before proceeding"
         peer = next((block["text"] for block in latest if block.get("text","").startswith("Send peer fixture\n")),None)
-        if peer and not calls:
+        provision_action = getattr(self.server,"provision_calls_tool",False) and any(
+            block.get("text")==SEED for block in latest)
+        if provision_action and not calls:
+            item = {"type":"function_call","id":"fc_seed","name":"worker_report","call_id":"native_seed_fixture",
+                    "arguments":"{}"}
+        elif peer and not calls:
             item = {"type":"function_call","id":"fc_peer","name":"worker_send_peer","call_id":"native_peer_fixture",
                     "arguments":peer.split("\n",1)[1]}
         elif question and not calls:
@@ -127,6 +133,40 @@ class CodexAppServer(unittest.TestCase):
         self.provider.observed = []
         self.provider.media = []
         self.origin = self.enterContext(running(self.provider))
+
+    def provision_command(self,profile,project):
+        return [sys.executable,"-m","rewrite.service","codex-provision","--codex-binary",CODEX,
+                "--codex-profile",profile,"--cwd",project]
+
+    def local_profile(self,profile):
+        (profile/"config.toml").write_text('model = "gpt-5.4"\nmodel_provider = "test_wire"\n'
+                                          'web_search = "disabled"\n'
+                                          '[model_providers.test_wire]\nname = "Local test wire"\n'
+                                          'base_url = '+encode(self.origin+"/v1")+'\nwire_api = "responses"\n'
+                                          'request_max_retries = 0\nstream_max_retries = 0\n',encoding="utf-8")
+
+    def test_provision_blocks_missing_identity_and_test_seed_tool_calls(self):
+        root = Path(self.root)
+        profile,project = root/"profile",root/"project"
+        profile.mkdir(mode=0o700)
+        project.mkdir(mode=0o700)
+        command = self.provision_command(profile,project)
+        repo = Path(__file__).resolve().parent.parent
+        refusal = subprocess.run(command,cwd=repo,capture_output=True,text=True,timeout=25)
+        self.assertEqual((refusal.returncode,json.loads(refusal.stderr)),
+                         (1,{"error":"codex_test_account_required"}))
+        with start_app_server(CODEX,profile,project) as review:
+            self.assertFalse(review.request("thread/list",{"limit":1})["data"])
+        self.assertEqual(self.provider.observed,[])
+
+        self.local_profile(profile)
+        self.provider.provision_calls_tool = True
+        refused_tool = subprocess.run(command,cwd=repo,capture_output=True,text=True,timeout=25)
+        failure = json.loads(refused_tool.stderr)
+        self.assertEqual((refused_tool.returncode,failure["error"]),(1,"codex_provision_requested_action"))
+        self.assertTrue(failure["thread_id"] and failure["turn_id"])
+        self.assertFalse(refused_tool.stdout)
+        self.assertEqual(self.provider.observed,[(True,0)])
 
     def test_native_app_server_dynamic_tool_keeps_ids_and_fires_one_w04(self):
         root,provider = self.root,self.provider
@@ -404,19 +444,14 @@ class CodexAppServer(unittest.TestCase):
         profile,project = root/"codex-profile",root/"test-project"
         profile.mkdir(mode=0o700)
         project.mkdir(mode=0o700)
-        (profile/"config.toml").write_text('model = "gpt-5.4"\nmodel_provider = "test_wire"\n'
-                                            'web_search = "disabled"\n'
-                                            '[model_providers.test_wire]\nname = "Local test wire"\n'
-                                            'base_url = '+encode(self.origin+"/v1")+'\nwire_api = "responses"\n'
-                                            'request_max_retries = 0\nstream_max_retries = 0\n',encoding="utf-8")
-        with start_app_server(CODEX,profile,project) as provision:
-            sid = provision.request("thread/start",{"cwd":str(project),"ephemeral":False,
-                                                     "dynamicTools":[REPORT_TOOL]})["thread"]["id"]
-            provision.request("turn/start",{"threadId":sid,"input":[{"type":"text","text":"Provision the test thread",
-                                                                    "text_elements":[]}]})
-            until = time.monotonic()+12
-            while provision.event(until).get("method")!="turn/completed":
-                pass
+        self.local_profile(profile)
+        seed_result = subprocess.run(self.provision_command(profile,project),
+                                     cwd=Path(__file__).resolve().parent.parent,capture_output=True,text=True,timeout=30)
+        self.assertEqual(seed_result.returncode,0,seed_result.stderr)
+        seed = json.loads(seed_result.stdout)
+        sid = seed["thread_id"]
+        self.assertEqual(seed["requested_tools"],["worker_report"])
+        self.assertEqual(seed["cwd"],str(project.resolve()))
         self.assertEqual(self.provider.observed,[(True,0)])
         self.provider.observed.clear()
         clock = Clock()
@@ -512,6 +547,10 @@ class CodexAppServer(unittest.TestCase):
             self.assertIsNotNone(proof)
             turns = published.thread(sid,include_turns=True)["turns"]
             self.assertEqual(len(turns),2)
+            self.assertEqual(turns[0]["id"],seed["turn_id"])
+            seed_inputs = [item for item in turns[0]["items"] if item.get("type")=="userMessage"]
+            self.assertEqual([(item["id"],item["clientId"]) for item in seed_inputs],
+                             [(seed["native_input_id"],seed["client_input_id"])])
             calls = [item["id"] for item in turns[1]["items"] if item.get("type")=="dynamicToolCall"]
             self.assertEqual(calls,["native_fixture_0","native_fixture_1"])
             restored_display = CodexDisplay(HostAdapter(adapter_db,published,sid),Client(callback_url,callback_token))
@@ -522,6 +561,8 @@ class CodexAppServer(unittest.TestCase):
                          "native_tool_call_ids":calls,"notification_delivery_id":notify["delivery_id"],
                          "cli_version":native["cliVersion"],"router_state":"completed_reported","tls":True,
                          "wrong_workspace_rejected":True,"second_profile_writer_rejected":True,
+                         "provisioned_native_input_id":seed["native_input_id"],"provisioned_turn_id":seed["turn_id"],
+                         "provisioned_client_input_id":seed["client_input_id"],"thread_seed_count":1,
                          "worker_display_receipts":display_acks,"fixture_card_titles":titles,
                          "boundary":"Separate codex-adapter process drove the native App Server with a local scripted model"}
 

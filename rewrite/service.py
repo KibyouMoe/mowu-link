@@ -12,7 +12,7 @@ from threading import Thread
 from .orders import Orders
 from .adapter import HostAdapter
 from .host_wire import RemoteAdapter, serve_adapter
-from .storage import StateWriterBusy, encode, require, state_writer
+from .storage import Fault, StateWriterBusy, encode, require, state_writer
 from .trigger import Trigger
 from .wire import Client, serve_router
 from .worker import Worker
@@ -82,13 +82,11 @@ def serve(args,stack):
     elif args.component == "codex-adapter":
         from .codex_app_server import AppServerHost, worker_callbacks
         from .codex_display import CodexDisplay
-        from .codex_rpc import start_app_server
+        from .codex_rpc import require_test_account, start_app_server
         from .native_files import NativeFiles
         client = connection(args.worker_connection)
         rpc = stack.enter_context(start_app_server(args.codex_binary,args.codex_profile,args.cwd))
-        account = rpc.request("account/read",{"refreshToken":False})
-        require(type(account.get("requiresOpenaiAuth")) is bool,503,"codex_account_unconfirmed")
-        require(not account.get("requiresOpenaiAuth") or account.get("account"),503,"codex_test_account_required")
+        require_test_account(rpc)
         native = AppServerHost(rpc,args.session)
         saved = native.thread(args.session,include_turns=False)
         require(Path(saved["cwd"]).resolve()==args.cwd.resolve(),409,"wrong_native_workspace")
@@ -132,6 +130,8 @@ def source(args):
 
 
 def main():
+    from .codex_provision import TOOL_NAMES, provision
+
     parser = argparse.ArgumentParser(description=__doc__)
     apps = parser.add_subparsers(dest="component",required=True)
     for name in ("router","fixture-adapter","dsh-adapter","codex-adapter","worker"):
@@ -173,6 +173,11 @@ def main():
     status = apps.add_parser("worker-status",help="read an isolated Worker's last connection observations")
     status.add_argument("--connection",required=True,type=Path)
     status.add_argument("--worker-id",required=True)
+    provision_parser = apps.add_parser("codex-provision",help="create and read back one isolated native test thread")
+    for flag in ("codex-binary","codex-profile","cwd"):
+        provision_parser.add_argument("--"+flag,required=True,type=Path)
+    provision_parser.add_argument("--tool",action="append",choices=TOOL_NAMES,
+                                  help="native tool to register; repeat to select multiple (default: worker_report)")
     args = parser.parse_args()
     if args.component == "trigger":
         print(encode(source(args)))
@@ -181,6 +186,13 @@ def main():
         if observation.get("worker_id")!=args.worker_id:
             raise ValueError("status receipt belongs to a different Worker")
         print(encode(observation))
+    elif args.component=="codex-provision":
+        try:
+            print(encode(provision(args.codex_binary,args.codex_profile,args.cwd,args.tool or ["worker_report"])))
+        except Fault as error:
+            parser.exit(1,encode({"error":error.code,**error.details})+"\n")
+        except StateWriterBusy as error:
+            parser.exit(1,str(error)+"\n")
     else:
         try:
             server(args)

@@ -1,0 +1,42 @@
+{
+  "thread_id": "01a216e4-34da-7fd0-b466-066bd58020e1",
+  "task_id": "7e653461-7869-4c7d-b0dc-6040a4df0752",
+  "assignment_id": "b56e9ab2-bd9b-4d80-9d96-6f226a21725b",
+  "native_receipt": {
+    "session": "01a216e4-34da-7fd0-b466-066bd58020e1",
+    "delivery_id": "6858c4fb-36c4-499d-9367-92fe6d93146c",
+    "digest": "caae3991e974b011e2d31b8186b8ac198a57c84a39f97445cafb97c1848acfce",
+    "native_id": "01a216e4-36ad-7ef3-b732-a0a95481d3f0",
+    "turn_id": "01a216e4-36a8-73a0-9b66-6484e607bf5c"
+  },
+  "native_tool_call_ids": [
+    "native_fixture_0",
+    "native_fixture_1"
+  ],
+  "notification_delivery_id": "18311be5-fe8a-4897-bb11-b76d27087432",
+  "cli_version": "0.171.0-alpha.13.2",
+  "router_state": "completed_reported",
+  "tls": true,
+  "wrong_workspace_rejected": true,
+  "second_profile_writer_rejected": true,
+  "provisioned_native_input_id": "01a216e4-34eb-7722-923e-ba4df00c34b3",
+  "provisioned_turn_id": "01a216e4-34e2-7e43-8bbc-58d3b3692ec0",
+  "provisioned_client_input_id": "mowulink-provision-74c2c47c-56ee-4d9f-9a93-322a5685d270",
+  "thread_seed_count": 1,
+  "worker_display_receipts": [
+    {
+      "event_id": "host-codex-77734f0afac9b2f7efa6c46a3d807b22c8c88ccbdc0e9451b7b7c13163e4fa99",
+      "seq": 2
+    },
+    {
+      "event_id": "host-codex-77734f0afac9b2f7efa6c46a3d807b22c8c88ccbdc0e9451b7b7c13163e4fa99",
+      "seq": 2
+    }
+  ],
+  "fixture_card_titles": [
+    "小栗帽·工单",
+    "小栗帽-回复"
+  ],
+  "boundary": "Separate codex-adapter process drove the native App Server with a local scripted model",
+  "consecutive_runs": 10
+}
