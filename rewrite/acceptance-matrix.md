@@ -41,7 +41,7 @@
 | 通用 Worker | `/help`、`/start`、`/commands`、`/status`、`/list` 测试平台端已核。原消息号按原回执重投。DSH 与独立 Codex App Server 通过原生 `/queue` 顺序与丢回执查证。 | 实际 Feishu 私聊的所有指令入口与交互。 |
 | DSH | `/context`、`/model`、`/effort`、`/queue`、`/goal`、`/compact`、`/stop` 有 SDK 或真循环证据。`/resume` 可浏览获准的目录和搜索，历史会话保持冷态。 | `/resume` 换绑、`/new`、`/fork`、新会话初始模型与思考强度；前台阻塞题和原生清理凭据。 |
 | Codex Desktop 与独立 App Server | Desktop 真实独立会话收到一条正式单，重投仍一条。独立原生 App Server 接到本地脚本模型的动态工具调用，实际完成 W04，重试回同一结果。独立会话的 `/model`、`/effort` 已核原生设置、冷开和本地请求，`/context` 回读原生用量。`/stop` 已核普通回合及丢回执重投。 | Desktop 测试项目未列出 `worker_report`。默认 App Server 测试 profile 无登录。两条路径的真实模型 W04 仍需各自的授权测试条件；真实账号的请求强度、其他提供方切换未验。 |
-| Antigravity | 已核安装版本 2.32.1 及官方会话钩子、转录、MCP 入口。 | 指定空闲会话的后台唤醒、真实 Gemini 回报及完整的读写验收。详见[兼容性核对](antigravity-compatibility.md)。 |
+| Antigravity | 已核安装版本 2.32.1 及官方会话钩子、转录、MCP 入口。CLI 可克隆 App 对话供独立宿主使用，Remote Control 提供人工访问。 | 指定原桌面会话的后台唤醒、停止、真实 Gemini 回报及读写验收。CLI 或远程托管须先确认允许改用独立宿主。[兼容性核对](antigravity-compatibility.md) |
 | 授权和维护 | 认证的 Router/Worker/适配器隔离已验证；普通题卡不能执行原生授权。 | 旧 `/approvals`、`/commands`、`/ops/services` 中实际仍在使用的入口，与宿主授权逐项验证。 |
 
 当前可以复跑隔离联调。离「可切换」还差真实宿主、实际 Feishu 测试身份、原生清理和活跃消费端的迁移对账。
@@ -56,7 +56,7 @@
 | `bridge_binding_status` | Worker 状态与固定原生会话校验 | 隔离 TLS 可区分预期会话与已确认会话，同身份错绑零输入。 |
 | `bridge_bind_manager` | 独立运行参数与首次显式选定的宿主会话 | 临时 Worker 和 DSH 接入已跑，Codex 的用户界面批准与既有绑定交接待验。 |
 | `bridge_verify_manager_binding` | 按工位授权的 `worker-status` | 平台身份被拒，运维身份可核同一会话。 |
-| `bridge_inspect_native_contract` | 适配器声明能力与实际独立回执 | 目录、压缩、目标、停止能力在真实 DSH 有证据。独立 Codex App Server 已核目录、停止、历史压缩、原生私人目标及丢回执查证。 |
+| `bridge_inspect_native_contract` | 运维 `worker-status` 读取当前绑定会话的 `native_capabilities` | 权限或会话对不上时不采信外部观测，断开时能力未知。DSH 与独立 Codex App Server 分别保留目录、停止、历史压缩、原生目标等实际操作的回执。 |
 | `bridge_verify_native_write_path` | 原派发或消息号、正文摘要、原生输入及回合 | 真实独立 Desktop 已核文字收件及重投去重。无人值守入口、图文与实际授权待验。 |
 | `bridge_start_local_manager` | Router、Worker、宿主适配器独立入口 | 临时进程与分步升级已跑。独立 App Server 工位初始化能冷开查回唯一输入，适配器已用 TLS 与专用 profile 启动，拒绝第二个写者。现役 Desktop 受信启动链仍待单验。 |
 | `bridge_reload_business_modules` | 锁定提交的发布包、分步升级与原快照回退 | 已演练冷切，原收件无重复。原位热加载及现役启停授权尚未核。 |

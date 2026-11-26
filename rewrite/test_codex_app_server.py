@@ -532,6 +532,8 @@ class CodexAppServer(unittest.TestCase):
                         if row["seq"]==entry["output"]["seq"])
             return entry,card
 
+        self.assertEqual(service.status()["host_session"],sid)
+        self.assertIs(service.status()["native_capabilities"]["session_catalog"],True)
         prior = rpc.request("thread/read",{"threadId":cold,"includeTurns":False})["thread"]["status"]["type"]
         self.assertEqual(prior,"notLoaded")
         entries = host.session_catalog(sid)["items"]

@@ -13,6 +13,18 @@ from .storage import Fault, encode, require, string
 from .wire import serve_authenticated
 
 
+HOST_CAPABILITY_FLAGS = {
+    "next_turn":"host_queue",
+    "context_usage":"host_context",
+    "compaction":"host_compaction",
+    "session_catalog":"host_session_catalog",
+    "stop_private":"host_stop_private",
+    "model_view":"host_model_view",
+    "model_change":"host_model_change",
+    "goal_control":"host_goal_control",
+}
+
+
 class WorkerService:
     def __init__(self, worker, clock=time.monotonic, probe_interval=5):
         self.worker = worker
@@ -24,14 +36,9 @@ class WorkerService:
         self.host_busy = None
         self.host_error = None
         self.host_observed_at = None
-        self.host_queue = False
-        self.host_context = False
-        self.host_compaction = False
-        self.host_session_catalog = False
-        self.host_stop_private = False
-        self.host_model_view = False
-        self.host_model_change = False
-        self.host_goal_control = False
+        self.host_capabilities = None
+        for flag in HOST_CAPABILITY_FLAGS.values():
+            setattr(self,flag,False)
         self.native_command_lock = Lock()
         self.host_session = ""
         self.clock, self.probe_interval = clock, probe_interval
@@ -55,18 +62,14 @@ class WorkerService:
                 require(isinstance(info,dict),502,"invalid_host_observation")
                 session = info.get("session")
                 require(isinstance(session,str) and session,502,"invalid_host_observation")
-                busy = w.adapter.busy()
+                busy = w.adapter.busy(session=session)
                 require(type(busy) is bool,502,"invalid_host_observation")
+                capabilities = {key:info.get(key) is True for key in HOST_CAPABILITY_FLAGS}
+                for key,flag in HOST_CAPABILITY_FLAGS.items():
+                    setattr(self,flag,capabilities[key])
+                self.host_capabilities = capabilities
                 self.host_session, self.host_busy, self.adapter_connected = session,busy,True
                 self.host_error = None
-                self.host_queue = info.get("next_turn") is True
-                self.host_context = info.get("context_usage") is True
-                self.host_compaction = info.get("compaction") is True
-                self.host_session_catalog = info.get("session_catalog") is True
-                self.host_stop_private = info.get("stop_private") is True
-                self.host_model_view = info.get("model_view") is True
-                self.host_model_change = info.get("model_change") is True
-                self.host_goal_control = info.get("goal_control") is True
             except (Fault,URLError,OSError) as err:
                 self.host_busy = None
                 self.adapter_connected = False
@@ -123,6 +126,7 @@ class WorkerService:
                 "host_session":self.host_session if connected else None,
                 "expected_host_session":getattr(self.worker.adapter,"expected_session",None),
                 "host_busy":self.host_busy if connected else None,
+                "native_capabilities":self.host_capabilities if connected else None,
                 "host_observation_age_seconds":None if self.host_observed_at is None else max(0,now-self.host_observed_at),
                 "router_retry_in_seconds":None if self.router_connected or not self.router_observed
                 else max(0,self.next_router_attempt-now),**self.worker.hold()}

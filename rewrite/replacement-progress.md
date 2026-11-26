@@ -4,6 +4,10 @@
 
 ## 检查点与证据
 
+运维 `worker-status` 可查看当前已核对的会话所声明的八项能力。隔离 TLS 中仅运维角色可查，空能力与断链未知可区分。实际 Codex App Server 报出目录能力。模拟两次查询之间换宿主会话，Worker 拒收混合观测，Router 的忙闲询问也没有生成样本。复跑 `python3 -m unittest -v rewrite.test_link_health rewrite.test_mainline rewrite.test_service`，30 项通过。
+
+Antigravity 官方 CLI 的桌面对话恢复属于克隆。Remote Control 可供人工访问原对话。两条路径均未找到 Worker 后台写回既有本地桌面会话和停止的依据。远程托管和 SDK 可作为独立宿主评估，原会话的验收仍待补。[接口对照](antigravity-compatibility.md)
+
 完整发布包完成实际隔离 Codex 工位升级和回退。旧包内真实 App Server 用脚本模型自主调用 W04，只有一条待验通知。在复制的 Worker 库模拟丢私聊回执，依次切新适配器、升级 Worker、用原状态回退。三轮独立演练中始终保留同一原生线程和三个输入，无新增模型请求或通知，快照及包摘要核对一致。复跑见[版本演练](router-rehearsal.md#保留实际-codex-测试工位的升级与回退)及[原生收件与版本证据](evidence/codex-native-release-cycle.json)。
 
 Linux arm64 在提交 `38d4ee4a3693dd030631a7597f2eb74c583b8ae5` 上通过 137 项、56 项宿主依赖跳过，校验 161 个发布文件。首轮发现隔离子进程单测把临时脚本当可执行文件启动，Linux 临时卷拒绝；改由系统 Python 读取脚本后通过。隔离跨系统 TLS 复核只见原生夹具输入和待验通知各一条，错误身份与证书被拒。

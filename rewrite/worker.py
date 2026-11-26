@@ -262,7 +262,11 @@ class Worker:
                       WHERE controls.kind!='task.transfer_out'""", (payload["assignment_id"], kind, payload["task_id"]))
 
     def observe(self, query):
-        observed = {"query_id": query, "session_id": self.session, "busy": self.adapter.busy(), **self.hold()}
+        target = self.adapter.bound_session()
+        require(isinstance(target,str) and target.strip(),502,"invalid_host_observation")
+        busy = self.adapter.busy(session=target)
+        require(type(busy) is bool,502,"invalid_host_observation")
+        observed = {"query_id": query, "session_id": self.session, "busy": busy, **self.hold()}
         with self.db.transaction() as db:
             sample = db.execute("SELECT body FROM samples WHERE query_id=?", (query,)).fetchone()
             if sample:

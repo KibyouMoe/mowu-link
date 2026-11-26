@@ -10,7 +10,14 @@
 | Agent 工具回报 | App 官方支持在自定义设置添加 MCP 工具。钩子还可观察工具调用、步骤号及失败信号。 | 独立测试会话要实际枚举并由 Gemini 调用 `worker_report`。须核目标会话、原生输入、派发号和调用号，再测 W04 与去重。 |
 | 忙闲、模型、上下文、选会话 | `Stop` 有空闲信号，钩子带 `modelName`；App 有原生会话选择 UI。 | 还没有证据能从 Worker 可靠读到当前思考强度、全量 Token 用量或搜索与改名，也缺少同一会话的程序调用验证。没有接入的命令维持原提示。 |
 
-SDK 文档提供自建 `Agent` 的对话与持久化能力，但尚无依据确认它可以接管正在运行的 App 会话或与 App 共写同一会话。CLI 的恢复能力要另行评估。本轮仍按工作区钩子与原生 MCP 的范围核桌面能力。
+| 备选宿主 | 官方入口能做到的事 | 原桌面会话是否保持 |
+| --- | --- | --- |
+| Antigravity CLI | 交互式 `/resume` 可以从 App 克隆对话历史、上下文和工具轨迹。无头模式可用结构化输入输出，继续自己先前创建的对话 ID。[交互式恢复](https://antigravity.google/docs/cli/commands/resume/) · [无头模式](https://antigravity.google/docs/cli/headless/) | 克隆后由 CLI 继续。未核到写回原 App 会话的接口。 |
+| Remote Control | 同一 Google 账号可从浏览器打开已有会话并与它交互。[Remote Control](https://antigravity.google/docs/remote-control?tab=cli) | 文档提供人工操作入口。Worker 后台按 ID 写入、取消和查询收件凭据仍缺公开契约。 |
+| Remote Agents | 可以从多个客户端使用同一个远程托管会话，受 Google 账号及产品资格约束。[Remote Agents](https://antigravity.google/docs/remote-agents) | 可另选远程托管工位，原有本地会话接管未验证。 |
+| Antigravity SDK | 自建 Agent 可以保存和恢复 SDK 会话。[SDK 生命周期](https://antigravity.google/docs/sdk/lifecycle/) | 与本机已运行的 App 会话共写缺少官方保证。 |
+
+要保留多伯原桌面会话，继续核工作区钩子与实际 MCP 工具，并等待受支持的后台投递、停止入口。若允许多伯使用独立宿主，可另做 CLI 或 SDK 的隔离验收。当前只核文档与安装版本，未安装 CLI、注册工具或运行这几条备选。
 
 独立验收先取一对问答的逐条显示证据，再试在原会话空闲时下发，以及在已知派发工作中取消。每个入口分别取得宿主、Worker 和飞书的回执。读取会话必须绑定指定会话，输出选择经验证的用户正文和 Agent 最终答复。
 

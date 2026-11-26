@@ -7,7 +7,7 @@ from unittest.mock import patch
 from . import display
 from .adapter import HostAdapter
 from .devloop import FixtureHost, Loop
-from .host_wire import RemoteAdapter
+from .host_wire import SESSION_HEADER, RemoteAdapter
 from .storage import Fault, guid
 from .test_mainline import Clock
 from .wire import Client, serve_authenticated
@@ -92,6 +92,7 @@ class LinkHealth(unittest.TestCase):
         self.assertEqual(outage["host_error"],"adapter_connection_unconfirmed")
         self.assertIsNone(outage["host_session"])
         self.assertIsNone(outage["host_busy"])
+        self.assertIsNone(outage["native_capabilities"])
         self.assertEqual(outage["held_task_id"],task["task_id"])
         self.assertEqual(self.manager.inspect(task["task_id"])["task"]["state"],"working")
         self.assertEqual(len(self.events("disconnect")),1)
@@ -103,6 +104,37 @@ class LinkHealth(unittest.TestCase):
         self.service.step()
         self.assertTrue(self.manager.workers()["items"][0]["adapter_connected"])
         self.assertIsNone(self.service.status()["host_error"])
+        self.assertIs(self.service.status()["native_capabilities"]["session_catalog"],False)
+
+    def test_status_does_not_merge_capabilities_and_activity_from_different_sessions(self):
+        session = self.loop.adapter.bound_session()
+        token = guid()
+        def handle(_actor,_method,path,_body,headers):
+            if path=="/v1/host/session":
+                return 200,"application/json",{"session":session,"session_catalog":True}
+            if path=="/v1/host/bound/activity" and headers.get(SESSION_HEADER)==session:
+                raise Fault(409,"wrong_native_session")
+            return 200,"application/json",{"busy":False}
+        server = self.enterContext(serve_authenticated({token:"worker/oguri"},("127.0.0.1",0),None,handle))
+        thread = Thread(target=server.serve_forever,kwargs={"poll_interval":0.01},daemon=True)
+        thread.start()
+        self.addCleanup(thread.join)
+        self.addCleanup(server.shutdown)
+        self.worker.adapter = RemoteAdapter(Client("http://127.0.0.1:"+str(server.server_port),token))
+        self.clock.advance(5)
+        self.service.step()
+        status = self.service.status()
+        self.assertTrue(status["router_connected"])
+        self.assertFalse(status["adapter_connected"])
+        self.assertEqual(status["host_error"],"wrong_native_session")
+        self.assertIsNone(status["host_session"])
+        self.assertIsNone(status["host_busy"])
+        self.assertIsNone(status["native_capabilities"])
+        query = guid()
+        with self.assertRaisesRegex(Fault,"wrong_native_session"):
+            self.worker.observe(query)
+        with self.worker.db.transaction() as db:
+            self.assertIsNone(db.execute("SELECT 1 FROM samples WHERE query_id=?",(query,)).fetchone())
 
     def test_bad_wire_observation_leaves_host_unknown_and_recovers_without_reconnect(self):
         session = self.loop.adapter.bound_session()

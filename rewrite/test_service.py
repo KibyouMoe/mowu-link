@@ -171,6 +171,9 @@ class Service(unittest.TestCase):
         status = self.command("worker-status","--worker-id","dev","--connection",target("to-ops",gateway,ops))
         self.assertEqual((status["host_session"],status["expected_host_session"]),(session,session))
         self.assertIs(status["host_busy"],False)
+        self.assertEqual(status["native_capabilities"],
+                         {"next_turn":False,"context_usage":False,"compaction":False,"session_catalog":False,
+                          "stop_private":False,"model_view":False,"model_change":False,"goal_control":False})
         self.assertIs(status["router_connected"],True)
         self.assertIsNone(status["held_task_id"])
         self.assertEqual(len(manager_client.frames(0)),1)
