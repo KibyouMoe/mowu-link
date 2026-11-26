@@ -1,0 +1,27 @@
+{
+  "boundary": "Actual Router and Worker HTTP and SQLite with fixture Feishu and native hosts.",
+  "cancel_receipt": {
+    "handoff_id": "e565af47-bd01-5525-bf7e-0b4cd9081e78",
+    "state": "released"
+  },
+  "cancellation_cards": 1,
+  "consecutive_runs": 10,
+  "following_receipt": {
+    "delivery_id": "chat-om_after_cancel",
+    "digest": "138f20a68326b718da5d58a2bf88067528afc248b1c7f334d09eb8e789a2529a",
+    "native_id": "63065a50-9061-419f-b34f-9bfb3e6d0979",
+    "session": "resume-source",
+    "turn_id": "37afadbb-1c78-4163-be17-2d5612f97f52"
+  },
+  "formal_task_while_checking": "61a5a658-21c5-429b-9c2c-ae6c7c988925",
+  "late_begin_returned_original_release": true,
+  "router_handoff_calls": [],
+  "source_inputs": 2,
+  "target_inputs": 0,
+  "waiting": {
+    "handoff_id": "e565af47-bd01-5525-bf7e-0b4cd9081e78",
+    "phase": "checking",
+    "source": "resume-source",
+    "target": "resume-target"
+  }
+}

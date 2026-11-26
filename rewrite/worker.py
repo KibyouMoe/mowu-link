@@ -184,7 +184,7 @@ class Worker:
 
     def poll(self):
         with self.lock:
-            if worker_handoff.active(self) or worker_resume.pending(self):
+            if worker_handoff.active(self) or worker_resume.blocks_admission(self):
                 return
             with self.db.transaction() as db:
                 cursor = db.execute("SELECT cursor FROM connection").fetchone()[0]

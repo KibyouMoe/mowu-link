@@ -57,6 +57,11 @@ def pending(worker):
     return dict(row) if row else None
 
 
+def blocks_admission(worker):
+    row = pending(worker)
+    return bool(row and row["phase"]!="checking")
+
+
 def selection(text):
     words = text.strip().split(maxsplit=1)
     if len(words)==2 and words[0]=="/resume" and words[1].split()[0].casefold() not in worker_catalog.BROWSE:
@@ -130,12 +135,15 @@ def observe(port,session,*,allow_cold=False,operation_id=None):
     return info,busy
 
 
-def finish(worker,row,session,text,receipt=None):
+def finish(worker,row,session,text,receipt=None,*,cancel_unstarted=False):
     from .worker_commands import previous, record
 
     with worker.db.transaction() as db:
         prior = previous(db,row["message_id"],row["request"])
         result = prior or record(db,row["message_id"],row["request"],row["command"],session,text,binding_receipt=receipt)
+        if cancel_unstarted:
+            # The Worker has never sent begin in this phase. Keep an idempotent local end receipt.
+            db.execute("INSERT INTO native_handoff_admission VALUES (?,'released',NULL)",(row["handoff_id"],))
         db.execute("UPDATE native_resume SET phase='done' WHERE message_id=?",(row["message_id"],))
         return result
 
@@ -155,9 +163,21 @@ def advance(service,row):
     operation = {"handoff_id":row["handoff_id"],"action":"begin"}
     source,target = row["old_session"],row["target"]
     with w.lock:
-        if row["phase"] in ORIGINAL_SESSION:
-            return keep_source(w,row,row["phase"])
-        if row["phase"]=="starting":
+        phase = row["phase"]
+        if phase in ORIGINAL_SESSION:
+            return keep_source(w,row,phase)
+        if phase=="checking":
+            require(w.native_session_pin==source,409,"native_binding_changed")
+            require(service.adapter_connected and service.host_session==source,503,"native_switch_unconfirmed")
+            _info,busy = observe(w.resume_targets[target],target,allow_cold=True)
+            if busy:
+                return finish(w,row,source,REFUSED["resume_target_busy"])
+            with service.native_callback_lock:
+                require(service.native_callbacks_in_flight==0,503,"native_switch_callbacks_pending")
+                with w.db.transaction() as db:
+                    db.execute("UPDATE native_resume SET phase='starting' WHERE message_id=?",(row["message_id"],))
+            phase = "starting"
+        if phase=="starting":
             require(w.native_session_pin==source,409,"native_binding_changed")
             if w.session_callback_key:
                 source_info = w.adapter.session_info()
@@ -208,11 +228,16 @@ def advance(service,row):
 
 def cancel(service,row,body):
     require(body=={"action":"end","handoff_id":row["handoff_id"]} and
-            row["phase"] in ("starting",*ORIGINAL_SESSION),409,"native_switch_manages_handoff")
+            row["phase"] in ("checking","starting",*ORIGINAL_SESSION),409,"native_switch_manages_handoff")
     w = service.worker
     with w.lock:
-        phase = row["phase"] if row["phase"] in ORIGINAL_SESSION else "cancelling"
-        keep_source(w,row,phase)
+        if row["phase"]=="checking":
+            source = row["old_session"]
+            require(w.native_session_pin==source,409,"native_binding_changed")
+            finish(w,row,source,ORIGINAL_SESSION["cancelling"],cancel_unstarted=True)
+        else:
+            phase = row["phase"] if row["phase"] in ORIGINAL_SESSION else "cancelling"
+            keep_source(w,row,phase)
     return {"handoff_id":row["handoff_id"],"state":"released"}
 
 
@@ -252,21 +277,18 @@ def handle(service,mid,text,name,target,*,reply_to=None):
         answer = ("当前已绑定会话 "+target) if target==w.native_session_pin else "这个会话暂未配置切换权限。"
         with w.db.transaction() as db:
             return record(db,mid,request,name,w.native_session_pin,answer)
-    require(service.adapter_connected and service.host_session==w.native_session_pin,503,"native_switch_unconfirmed")
-    if create and not (service.host_session_preparation and service.host_managed_session_enrollment):
-        with w.db.transaction() as db:
-            return record(db,mid,request,name,w.native_session_pin,"当前宿主暂未开放创建和分支会话。")
-    _info,busy = (None,False) if create else observe(w.resume_targets[target],target,allow_cold=True)
-    if busy:
-        with w.db.transaction() as db:
-            return record(db,mid,request,name,w.native_session_pin,REFUSED["resume_target_busy"])
+    if create:
+        require(service.adapter_connected and service.host_session==w.native_session_pin,503,"native_switch_unconfirmed")
+        if not (service.host_session_preparation and service.host_managed_session_enrollment):
+            with w.db.transaction() as db:
+                return record(db,mid,request,name,w.native_session_pin,"当前宿主暂未开放创建和分支会话。")
     with w.lock, service.native_callback_lock:
         require(service.native_callbacks_in_flight==0,503,"native_switch_callbacks_pending")
         require(not worker_handoff.active(w),503,"native_handoff_in_progress")
         handoff = str(uuid5(NAMESPACE_URL,encode(["native-resume",w.worker_id,mid])))
         with w.db.transaction() as db:
-            db.execute("INSERT INTO native_resume VALUES (?,?,?,?,?,?,'starting')",
-                       (mid,request,name,handoff,w.native_session_pin,target))
+            db.execute("INSERT INTO native_resume VALUES (?,?,?,?,?,?,?)",
+                       (mid,request,name,handoff,w.native_session_pin,target,"starting" if create else "checking"))
     return advance(service,pending(w))
 
 
@@ -296,6 +318,9 @@ def recover(service):
     if row is None:
         worker_handoff.recover(service.worker)
         return
+    if row["phase"]=="checking":
+        # Feishu retries the original message on its own schedule, leaving source work active.
+        return "native_switch_host_unconfirmed"
     try:
         advance(service,row)
     except Fault as error:

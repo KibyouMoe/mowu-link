@@ -4,6 +4,8 @@
 
 ## 检查点与证据
 
+运行中切换在探测目标前持久记下原请求号。目标暂不可达时，重开仍查得到交接号，授权运维可用原号撤回。实测原工位在等待期间接到一张正式单，旧宿主回调仍有效，Router 暂停接口调用为零。撤回后迟到的原命令只读原取消回执，等待的私聊只到原会话一次。目标会话零收件，重复撤回或迟到的开始请求沿用原回执。实际 Router、Worker HTTP 与 SQLite，飞书和宿主用夹具。[实测](evidence/feishu-resume-preflight-cancel.json) · [复跑](README.md#飞书切换会话)
+
 飞书入箱的换绑命令按收到顺序确认。旧版复现目标会话暂不可达时，后发消息误进原会话。新版在入箱中留住后续消息，旧会话已存的回复卡照常送出。重开后仍等待原切换命令，目标恢复后后发消息只进目标宿主一次。另验早于切换的重试消息先送原宿主，以及从旧库和回退后旧版写入记录中重建切换顺序。实际 Router、Worker HTTP 与 SQLite，飞书和宿主使用夹具。[实测](evidence/feishu-resume-inbox-order.json) · [操作说明](README.md#飞书切换会话)
 
 两项新回归连续通过 10 轮。macOS 全量通过 253 项，Linux arm64 通过 173 项、跳过 80 项；Linux 另跑官方 SDK 收发和重试耗尽恢复。从 `112805e7ac4e18c0f1464d03bf924f4377cfc0e5` 构建 227 文件独立包，SHA-256 为 `0b6a522b7ddc193ae3df3d35aa8d8b8d88a5aa90b588d7632ea0bfdca5a2bcaf`。安装目录通过 `rewrite.test_state_bundle`、`rewrite.test_worker_resume`、`rewrite.test_feishu_inbound`、`rewrite.test_feishu_output`、`rewrite.test_question_cards` 的 42 项及 SDK 两项复验，文件摘要一致。

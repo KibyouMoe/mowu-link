@@ -115,7 +115,8 @@ class WorkerResume(unittest.TestCase):
         with self.assertLogs(level="WARNING"):
             pump_once(inbound,views,Actions(views,inbound))
         self.assertEqual(self.status(self.clients)["host_session"],self.source)
-        self.assertNotIn("native_switch",self.status(self.clients))
+        self.assertEqual(self.status(self.clients)["native_switch"]["phase"],"checking")
+        self.assertNotIn("handoff",self.status(self.clients))
         self.assertEqual(self.hosts[self.source].entries(),[])
         with views.db.transaction() as db:
             original_mid, = db.execute("SELECT mid FROM view_attempt WHERE seq=?",(old_display["seq"],)).fetchone()
@@ -147,6 +148,88 @@ class WorkerResume(unittest.TestCase):
                          "original_display_id":original_mid,"original_display_sends":1,
                          "switch_card_id":switch_card,"old_display_before_switch_card":True,
                          "old_host_inputs":0,"new_host_inputs":1,"pending_after_final_poll":0,
+                         "boundary":"Actual Router and Worker HTTP and SQLite with fixture Feishu and native hosts."}
+
+    def test_cancel_unreachable_switch_before_router_fence_survives_restart(self):
+        target = self.ports[self.target]
+        describe = target.session_info
+
+        def unavailable():
+            raise ConnectionError("fixture target offline")
+
+        target.session_info = unavailable
+        request = self.loop.wire.request
+        router_handoffs = []
+
+        def trace(method,path,*args,**kwargs):
+            if "/admission-handoffs/" in path:
+                router_handoffs.append(args[0]["action"])
+            return request(method,path,*args,**kwargs)
+
+        self.loop.wire.request = trace
+        path = self.loop.root/"preflight-cancel.db"
+
+        def inbox(clients):
+            return Inbound(path,clients["platform/oguri"],None,"app","trainer","chat",clock=self.clock)
+
+        inbound = inbox(self.clients)
+        before = {"chat_id":"chat","chat_type":"p2p","message_type":"text"}
+        switch = inbound.record("app","user","trainer",{**before,"message_id":"om_waiting_for_target",
+                                                        "content":encode({"text":"/resume "+self.target})})
+        chat = inbound.record("app","user","trainer",{**before,"message_id":"om_after_cancel",
+                                                      "content":encode({"text":"Wait for the original decision"})})
+        with self.assertRaisesRegex(Fault,"native_switch_host_unconfirmed"):
+            inbound.deliver(switch)
+        status = self.status(self.clients)
+        waiting = status["native_switch"]
+        self.assertEqual((waiting["phase"],status["host_session"]),("checking",self.source))
+        self.assertNotIn("handoff",status)
+        self.assertFalse(inbound.pending())
+        self.assertTrue(self.native_display(self.clients["adapter/oguri/"+self.source],self.source)["event_id"])
+
+        reopened,service,clients = self.open_worker()
+        self.assertEqual(self.status(clients)["native_switch"],waiting)
+        order = self.loop.hermes.create(guid(),"During preflight","Keep formal admission open","oguri")["task_id"]
+        self.clock.advance(10)
+        service.step()
+        service.step()
+        self.assertEqual(reopened.hold()["held_task_id"],order)
+        self.assertFalse(self.loop.hermes.workers()["items"][0].get("admission_paused"))
+
+        cancel = {"action":"end","handoff_id":waiting["handoff_id"]}
+        route = "worker/handoff-admission"
+        with self.assertRaisesRegex(Fault,"forbidden"):
+            clients["platform/oguri"].request("PUT",route,cancel)
+        ops = clients["handoff/oguri"]
+        with self.assertRaisesRegex(Fault,"native_switch_manages_handoff"):
+            ops.request("PUT",route,dict(cancel,handoff_id=guid()))
+        receipt = {"handoff_id":cancel["handoff_id"],"state":"released"}
+        self.assertEqual(ops.request("PUT",route,cancel),receipt)
+        self.assertEqual(ops.request("PUT",route,cancel),receipt)
+        self.assertEqual(ops.request("PUT",route,dict(cancel,action="begin")),receipt)
+        self.assertEqual(router_handoffs,[])
+
+        inbound = inbox(clients)
+        target.session_info = describe
+        self.assertEqual(inbound.pending(),[switch])
+        cancelled = inbound.deliver(switch)
+        self.assertNotIn("binding_receipt",cancelled)
+        self.assertEqual(inbound.pending(),[chat])
+        delivered = inbound.deliver(chat)
+        self.assertEqual(delivered["session"],self.source)
+        newest,_,final_clients = self.open_worker()
+        self.assertNotIn("native_switch",self.status(final_clients))
+        self.assertEqual(inbox(final_clients).deliver(chat),delivered)
+        self.assertEqual(newest.native_session_pin,self.source)
+        self.assertEqual(self.hosts[self.target].entries(),[])
+        self.assertEqual(len(self.hosts[self.source].entries()),2)
+        cards = final_clients["platform/oguri"].request("GET","worker/display")["items"]
+        cancellation, = [card["event"] for card in cards if card["event"]["event_id"]=="command-"+switch]
+        self.assertEqual(cancellation["text"],"已取消切换，继续使用原会话。")
+        self.evidence = {"waiting":waiting,"cancel_receipt":receipt,"following_receipt":delivered,
+                         "formal_task_while_checking":order,"router_handoff_calls":router_handoffs,
+                         "late_begin_returned_original_release":True,
+                         "source_inputs":2,"target_inputs":0,"cancellation_cards":1,
                          "boundary":"Actual Router and Worker HTTP and SQLite with fixture Feishu and native hosts."}
 
     def test_pending_input_in_older_platform_database_precedes_session_change(self):

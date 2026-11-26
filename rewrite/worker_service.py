@@ -78,7 +78,7 @@ class WorkerService:
             session = info.get("session")
             require(isinstance(session,str) and session,502,"invalid_host_observation")
             if info.get("native_load_state")=="cold":
-                require(not worker_resume.pending(w) and not worker_handoff.active(w),503,"native_handoff_in_progress")
+                require(not worker_resume.blocks_admission(w) and not worker_handoff.active(w),503,"native_handoff_in_progress")
                 info = worker_resume.restore_committed_binding(w,info)
             busy = w.adapter.busy(session=session)
             require(type(busy) is bool,502,"invalid_host_observation")
@@ -103,7 +103,7 @@ class WorkerService:
         if probe:
             with self.platform_admission_lock:
                 self.probe_adapter()
-                if not worker_handoff.active(w) and not worker_resume.pending(w):
+                if not worker_handoff.active(w) and not worker_resume.blocks_admission(w):
                     queued_chat.advance(self)
                     worker_commands.advance_compact(self)
         try:
@@ -116,7 +116,7 @@ class WorkerService:
                 self.router_observed = True
             with self.platform_admission_lock:
                 switch_error = worker_resume.recover(self)
-                paused = bool(worker_handoff.active(w) or worker_resume.pending(w))
+                paused = bool(worker_handoff.active(w) or worker_resume.blocks_admission(w))
             links.publish(w,heartbeat=probe and (not self.adapter_connected or paused))
             w.poll()
             self.last_error = switch_error or (None if self.adapter_connected else self.host_error)
@@ -175,7 +175,7 @@ class WorkerService:
                 require(actor!=adapter,403,"scoped_native_callback_required")
                 if actor!=adapter+"/"+w.native_session_pin:
                     raise Fault(409,"native_callback_inactive",True)
-                require(not worker_resume.pending(w),503,"native_handoff_in_progress")
+                require(not worker_resume.blocks_admission(w),503,"native_handoff_in_progress")
                 self.native_callbacks_in_flight += 1
             try:
                 return self.route(adapter,method,path,body,_headers)
@@ -188,7 +188,7 @@ class WorkerService:
                 text = body.get("text")
                 resume = path=="/v1/worker/command" and w.resume_targets and isinstance(text,str) and (
                     worker_resume.selection(text) or (w.session_callback_key and worker_resume.creation(text)))
-                if not resume and (worker_handoff.active(w) or worker_resume.pending(w)):
+                if not resume and (worker_handoff.active(w) or worker_resume.blocks_admission(w)):
                     raise Fault(503,"native_handoff_in_progress",True)
                 try:
                     return self.route(actor,method,path,body,_headers)
