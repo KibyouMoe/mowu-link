@@ -35,7 +35,7 @@ class RemoteAdapter:
 
     def busy(self, *, session=None):
         reply = self.request("GET","host/activity",native_session=session)
-        require(type(reply.get("busy")) is bool, 502, "invalid_host_observation")
+        require(isinstance(reply,dict) and type(reply.get("busy")) is bool, 502, "invalid_host_observation")
         return reply["busy"]
 
     def bound_session(self):
@@ -43,7 +43,9 @@ class RemoteAdapter:
 
     def session_info(self):
         info = self.request("GET","host/session")
-        session = string(info,"session")
+        require(isinstance(info,dict) and isinstance(info.get("session"),str) and info["session"].strip(),
+                502,"invalid_host_observation")
+        session = info["session"]
         require(self.expected_session is None or session==self.expected_session,409,"wrong_native_session")
         return {"session":session,"next_turn":info.get("next_turn") is True,
                 "context_usage":info.get("context_usage") is True,"model_view":info.get("model_view") is True,

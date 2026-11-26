@@ -321,6 +321,14 @@ class Peers(unittest.TestCase):
         confirmed = adapter.request("POST","worker/native-tool",lookup)
         self.assertEqual(confirmed["status"],"accepted")
         self.assertIsNotNone(confirmed["host_receipt_id"])
+        def unreachable(*_args,**_kwargs):
+            raise ConnectionError("Router unavailable")
+        self.a.router.request = unreachable
+        cached = adapter.request("POST","worker/native-tool",lookup)
+        self.assertEqual(cached["status"],"accepted")
+        self.assertEqual(cached["accepted_at"],confirmed["accepted_at"])
+        self.assertIsNone(cached["worker_received"])
+        self.assertIsNone(cached["host_receipt_id"])
         self.assertEqual([body["message_id"] for body,_proof in self.host.entries()],[mid])
 
     def test_only_registered_peers_see_worker_ids_without_task_ownership(self):

@@ -1,13 +1,15 @@
 import socketserver
-from threading import Thread
+from sqlite3 import OperationalError
+from threading import Event, Thread
 import unittest
+from unittest.mock import patch
 
 from . import display
 from .devloop import Loop
 from .host_wire import RemoteAdapter
 from .storage import Fault, guid
 from .test_mainline import Clock
-from .wire import Client
+from .wire import Client, serve_authenticated
 from .worker_service import WorkerService
 
 
@@ -100,6 +102,80 @@ class LinkHealth(unittest.TestCase):
         self.service.step()
         self.assertTrue(self.manager.workers()["items"][0]["adapter_connected"])
         self.assertIsNone(self.service.status()["host_error"])
+
+    def test_bad_wire_observation_leaves_host_unknown_and_recovers_without_reconnect(self):
+        session = self.loop.adapter.bound_session()
+        original_router = self.worker.router.request
+        bad = {"/v1/host/session":b"<html>not a receipt</html>",
+               "/v1/host/activity":b'{"busy":false}',
+               "/v1/deliveries/stream":b'data: {"delivery_id":\n'}
+        def handle(_actor,_method,path,_body,_headers):
+            headers = "text/event-stream" if "stream" in path else "application/json"
+            return 200,headers,bad[path]
+        token = guid()
+        server = self.enterContext(serve_authenticated({token:"worker/oguri"},("127.0.0.1",0),None,handle))
+        thread = Thread(target=server.serve_forever,kwargs={"poll_interval":0.01},daemon=True)
+        thread.start()
+        self.addCleanup(thread.join)
+        self.addCleanup(server.shutdown)
+        damaged = Client("http://127.0.0.1:"+str(server.server_port),token)
+        self.worker.adapter = RemoteAdapter(damaged)
+        for body,error in ((bad["/v1/host/session"],"invalid_wire_reply"),
+                           (b'{"capabilities":[]}',"invalid_host_observation"),(b'[]',"invalid_host_observation")):
+            bad["/v1/host/session"] = body
+            self.clock.advance(5)
+            self.service.step()
+            status = self.service.status()
+            self.assertTrue(status["router_connected"])
+            self.assertFalse(status["adapter_connected"])
+            self.assertEqual(status["host_error"],error)
+            self.assertIsNone(status["host_session"])
+            self.assertIsNone(status["host_busy"])
+        self.worker.adapter = self.loop.adapter
+        self.clock.advance(5)
+        with patch.object(self.worker.router,"request",
+                          side_effect=lambda method,path,*args,**kwargs:
+                          damaged.request(method,path,*args,**kwargs) if path=="deliveries/stream"
+                          else original_router(method,path,*args,**kwargs)):
+            self.service.step()
+            self.assertEqual(self.service.status()["last_error"],"invalid_wire_reply")
+            self.assertEqual(self.service.status()["host_session"],session)
+        self.service.step()
+        self.assertIsNone(self.service.status()["last_error"])
+        self.clock.advance(10)
+        self.service.step()
+        self.dispatched()
+        self.assertEqual(len(self.loop.native.entries()),1)
+
+    def test_storage_error_does_not_end_worker_pump(self):
+        task = self.manager.create(guid(),"Storage recovery","Repeat the same event","oguri")
+        first_wait, continue_poll, recovered = Event(), Event(), Event()
+        request = self.worker.poll
+        def before_poll():
+            if not first_wait.is_set():
+                raise OperationalError("database is locked")
+            request()
+            recovered.set()
+        def wait(_seconds):
+            first_wait.set()
+            continue_poll.wait(6)
+        with patch.object(self.worker,"poll",side_effect=before_poll),patch.object(self.service.stop,"wait",side_effect=wait):
+            self.service.thread.start()
+            try:
+                self.assertTrue(first_wait.wait(4))
+                self.assertTrue(self.service.thread.is_alive())
+                self.assertEqual(self.service.status()["last_error"],"worker_storage_unconfirmed")
+                self.assertIsNone(self.worker.hold()["held_task_id"])
+                continue_poll.set()
+                self.assertTrue(recovered.wait(6))
+            finally:
+                self.service.stop.set()
+                continue_poll.set()
+                self.service.thread.join(6)
+        self.assertFalse(self.service.thread.is_alive())
+        self.assertIsNone(self.service.status()["last_error"])
+        self.assertEqual(self.worker.hold()["held_task_id"],task["task_id"])
+        self.assertEqual(len(self.loop.native.entries()),1)
 
     def test_task_cards_use_worker_acceptance_independently_of_host_receipts(self):
         unknown = self.manager.create(guid(),"Offline","Do not display as delivered","other")

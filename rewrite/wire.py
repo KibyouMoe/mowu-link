@@ -3,6 +3,7 @@ import json
 import re
 import ssl
 import time
+from http.client import IncompleteRead
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlsplit
@@ -278,21 +279,34 @@ class Client:
                     raise Fault(409, "oversized_file_response")
                 if response.headers.get_content_type() == "application/octet-stream":
                     return {"bytes": raw, "status": response.status, "headers": dict(response.headers)}
-                if response.headers.get_content_type() == "text/event-stream":
-                    return [json.loads(line[6:]) for line in raw.splitlines() if line.startswith(b"data: ")]
-                return json.loads(raw)
+                try:
+                    if response.headers.get_content_type() == "text/event-stream":
+                        return [json.loads(line[6:]) for line in raw.splitlines() if line.startswith(b"data: ")]
+                    return json.loads(raw)
+                except ValueError as exc:
+                    raise Fault(502, "invalid_wire_reply", True) from exc
+        except IncompleteRead as exc:
+            raise Fault(502, "incomplete_wire_reply", True) from exc
         except HTTPError as exc:
             with exc:
                 try:
                     error = json.load(exc)["error"]
-                except (ValueError, KeyError, TypeError):
-                    raise Fault(exc.code, "unexpected_http_response") from exc
+                    if not isinstance(error["code"],str) or type(error["retryable"]) is not bool:
+                        raise ValueError("invalid wire error")
+                except (ValueError, KeyError, TypeError, IncompleteRead):
+                    raise Fault(exc.code, "unexpected_http_response", exc.code>=500) from exc
             raise Fault(exc.code, error["code"], error["retryable"],
                         {k:v for k,v in error.items() if k not in ("code","message","retryable")}) from exc
 
     def frames(self, cursor):
-        return self.request("GET", "deliveries/stream", headers={"Accept": "text/event-stream",
-                                                                "Last-Event-ID": str(cursor)})
+        result = self.request("GET", "deliveries/stream", headers={"Accept": "text/event-stream",
+                                                                   "Last-Event-ID": str(cursor)})
+        require(isinstance(result,list) and all(isinstance(frame,dict) and
+                isinstance(frame.get("delivery_id"),str) and isinstance(frame.get("kind"),str) and
+                isinstance(frame.get("payload"),dict) and type(frame.get("cursor")) is int and
+                frame["cursor"]>0 for frame in result),
+                502,"invalid_delivery_stream")
+        return result
 
     def ack(self, frame):
         return self.request("POST", f"deliveries/{frame['delivery_id']}/ack", {"cursor": frame["cursor"]},

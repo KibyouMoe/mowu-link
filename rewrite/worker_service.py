@@ -1,4 +1,6 @@
 """Long-lived Worker state and narrow authenticated callbacks from its bound services."""
+import json
+import sqlite3
 from threading import Event, Lock, Thread
 import time
 from urllib.parse import urlencode, urlsplit
@@ -50,10 +52,11 @@ class WorkerService:
             try:
                 describe = getattr(w.adapter,"session_info",None)
                 info = describe() if describe else {"session":w.adapter.bound_session()}
-                session = info["session"]
+                require(isinstance(info,dict),502,"invalid_host_observation")
+                session = info.get("session")
+                require(isinstance(session,str) and session,502,"invalid_host_observation")
                 busy = w.adapter.busy()
-                require(isinstance(session,str) and session and type(busy) is bool,
-                        502,"invalid_host_observation")
+                require(type(busy) is bool,502,"invalid_host_observation")
                 self.host_session, self.host_busy, self.adapter_connected = session,busy,True
                 self.host_error = None
                 self.host_queue = info.get("next_turn") is True
@@ -78,12 +81,12 @@ class WorkerService:
                 if self.clock() < self.next_router_attempt:
                     return
                 w.connect()
+                links.observe(w,"router",True,self.host_session)
                 self.router_connected = True
                 self.router_observed = True
-                links.observe(w,"router",True,self.host_session)
             links.publish(w,heartbeat=probe and not self.adapter_connected)
             w.poll()
-            self.last_error = None if self.adapter_connected else "adapter_connection_unconfirmed"
+            self.last_error = None if self.adapter_connected else self.host_error
         except (URLError,OSError):
             self.router_observed = True
             self.router_connected = False
@@ -105,7 +108,10 @@ class WorkerService:
 
     def poll(self):
         while not self.stop.is_set():
-            self.step()
+            try:
+                self.step()
+            except sqlite3.OperationalError:
+                self.last_error = "worker_storage_unconfirmed"
             self.stop.wait(0.2)
 
     def status(self):
@@ -241,7 +247,7 @@ class WorkerService:
         ack = json.loads(row["receipt"]) if row["receipt"] else None
         states = {"send":"pending","send_rejected":"rejected"}
         return {"message_id":mid,"sender":w.worker_id,"recipient":row["peer_id"],
-                "status":states.get(row["phase"],"unknown"),
+                "status":"accepted" if ack else states.get(row["phase"],"unknown"),
                 "accepted_at":ack["accepted_at"] if ack else None,"worker_received":None,
                 "host_receipt_id":None,"local_failure":row["failure"]}
 
