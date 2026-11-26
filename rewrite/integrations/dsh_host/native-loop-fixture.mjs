@@ -47,6 +47,20 @@ class LocalModel extends LlmAdapter {
     modelRequests.push({command,provider,model,reasoningEffort});
     if (goal?.round===1) await waitForStop(signal);
     if (goal?.round===2) secondRound.resolve();
+    if (mode==='questions' && /^Question fixture (choice|text|skip|multi)$/.test(text)) {
+      const choice = text.split(' ').at(-1);
+      if (!this.submitted.has(text)) {
+        this.submitted.set(text,true);
+        assert.ok(tools?.some(tool=>tool.name==='ask_user_question'));
+        const options = [{label:'A'},{label:'B'}];
+        const question = {id:'primary',question:'Pick '+choice+'?',options,multi_select:choice==='multi'};
+        yield {type:'block-start',index:0,blockType:'tool-call'};
+        yield {type:'block-end',index:0,block:{type:'tool-call',id:'native-question-'+choice,name:'ask_user_question',
+          arguments:JSON.stringify({questions:[question]})}};
+        yield {type:'finish',reason:{kind:'tool-calls'}};
+        return;
+      }
+    }
     if (command==='task') {
       if (mode==='formal') {
         const attempt = this.submitted.get(payload.assignment_id) ?? 0;
@@ -100,6 +114,10 @@ async function setup() {
   await install(await sdk('dsh-session-persistence-jsonl'),{root:path.join(directory,'sessions')});
   await install((await sdk('dsh-system-prompt')).SystemPrompt);
   await install((await sdk('dsh-tools')).ToolsService);
+  if (mode==='questions') {
+    await install((await sdk('dsh-user-questions')).UserQuestionService);
+    await install(await sdk('dsh-tool-ask-user'),{mode:'timed',timeout:1});
+  }
   await install(await sdk('dsh-tool-executor-native'));
   await install(LlmRuntime);
   ctx.get('llm').registerAdapter(['fixture'],new LocalModel());
@@ -191,13 +209,16 @@ async function formalScenario(agent) {
       e.type==='user/message' && e.data.source.kind==='compact-checkpoint')
       .map(e=>({kind:e.type,seq:e.seq,compactionId:e.data.compactionId ?? e.data.source?.compactionId,
         sourceCommandId:e.data.sourceCommandId ?? e.data.source?.sourceCommandId}));
-    console.log(JSON.stringify({session,inputs,calls,results,turns,modelRequests,rounds,compactEvents}));
+    const replies = events.filter(e=>e.type==='user/message' && e.data.source.kind==='user-question-reply')
+      .map(e=>({id:e.data.id,call:e.data.source.callId,seq:e.seq,body:JSON.parse(e.data.content[0].text)}));
+    const continued = mode==='questions' ? ctx.get('userQuestions').continued(agent).map(q=>q.callId) : [];
+    console.log(JSON.stringify({session,inputs,calls,results,turns,modelRequests,rounds,compactEvents,replies,continued}));
   }
 }
 
 try {
   const agent = await setup();
-  if (mode==='formal' || usesGoals || mode==='compact') await formalScenario(agent);
+  if (['formal','compact','questions'].includes(mode) || usesGoals) await formalScenario(agent);
   else await stopScenario(agent);
 } finally {
   for (const handle of plugins.reverse()) await handle.dispose();

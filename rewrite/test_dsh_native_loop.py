@@ -11,8 +11,13 @@ import unittest
 
 from . import worker_commands
 from .devloop import Loop
+from .dsh_display import DshDisplay
 from .dsh_port import DshHost, tool_listener
-from .storage import guid
+from .feishu_inbound import Inbound
+from .feishu_output import Views
+from .question_cards import Actions
+from .storage import Fault, guid
+from .test_feishu_output import PlatformFixture
 from .test_mainline import Clock
 from .test_dsh_sdk import APP, EXE
 from .wire import Client
@@ -301,3 +306,88 @@ class NativeLoop(unittest.TestCase):
                              "start_attempts":len(attempts),"native_in_progress":in_progress,
                              "native_model_requests":observed["modelRequests"],"router_tasks":0,
                              "boundary":"Native DSH basic compaction engine and persisted surface, scripted local provider"}
+
+    def test_dsh_native_timed_question_closes_the_original_feishu_test_card(self):
+        session = "dsh-real-timed-question"
+        directory = self.enterContext(tempfile.TemporaryDirectory(dir="/tmp",prefix="mldsh-questions-"))
+        def host(_path,_name):
+            port = DshHost(Path(directory))
+            port.session = session
+            return port
+        clock = Clock()
+        loop = self.enterContext(Loop.isolated(clock,host_factory=host))
+        service = WorkerService(loop.worker,clock)
+        platform_key,adapter_key = guid(),guid()
+        url = self.open_worker(service,{platform_key:"platform/oguri",adapter_key:"adapter/oguri"})
+        platform = Client(url,platform_key)
+        relay = DshDisplay(loop.adapter,Client(url,adapter_key),"oguri")
+        inbound = Inbound(loop.root/"feishu.db",platform,None,"app","trainer","test-chat")
+        sink = PlatformFixture()
+        views = Views(loop.root/"views.db",platform,sink,"test-chat","小栗帽",clock)
+        actions = Actions(views,inbound)
+        completed = []
+        writes = []
+        with self.start_native(directory,session,"questions") as native:
+            relay.collect()
+            resolve = loop.native.resolve_question
+            def lose(original,answer):
+                proof = resolve(original,answer)
+                writes.append(original["native_question_id"])
+                if answer["mode"]=="choice":
+                    raise Fault(503,"adapter_connection_unconfirmed",True)
+                return proof
+            loop.native.resolve_question = lose
+            for mode,form,options in (
+                ("choice",None,{"option_id":"2"}),("text",{"reply":"C"},{}),("skip",None,{})):
+                loop.worker.chat(guid(),"Question fixture "+mode)
+                opened = self.read_native(native,"read")
+                call_id = "native-question-"+mode
+                self.assertIn(call_id,opened["continued"])
+                for _ in range(4):
+                    relay.collect()
+                    relay.flush()
+                views.poll()
+                with views.db.transaction() as db:
+                    row = db.execute("""SELECT qid,mid,question FROM question_cards
+                                      WHERE json_extract(question,'$.text')=?""",("Pick "+mode+"?",)).fetchone()
+                self.assertIsNotNone(row)
+                qid,mid,raw = row
+                original = json.loads(raw)
+                self.assertIsNone(loop.native.lookup_answer(session,"0/0",call_id))
+                value = {"question_id":qid,"mode":mode,**options}
+                with self.assertRaisesRegex(Fault,"wrong_card_actor"):
+                    actions.record("app","other","test-chat",mid,value,form)
+                with self.assertRaisesRegex(Fault,"not_original_trainer_card"):
+                    actions.record("app","trainer","test-chat","om_other",value,form)
+                self.assertEqual(actions.record("app","trainer","test-chat",mid,value,form),"pending")
+                actions.flush()
+                observed = self.read_native(native,"read")
+                self.assertNotIn(call_id,observed["continued"])
+                matching = [row for row in observed["replies"] if row["call"]==call_id]
+                self.assertEqual(len(matching),1)
+                found, = matching
+                if mode=="choice":
+                    self.assertEqual(actions.record("app","trainer","test-chat",mid,value,form),"pending")
+                    clock.advance(16)
+                    actions.flush()
+                views.poll()
+                self.assertEqual(sink.calls[-1],("patch",mid))
+                self.assertEqual(actions.record("app","trainer","test-chat",mid,value,form),"confirmed")
+                with loop.worker.db.transaction() as db:
+                    proof = json.loads(db.execute("SELECT proof FROM trainer_questions WHERE question_id=?",(qid,)).fetchone()[0])
+                self.assertEqual((proof["receipt_id"],proof["turn_id"]),(found["id"],original["turn_id"]))
+                completed.append({"platform_message":mid,"question_id":qid,"proof":proof,"native_reply":found})
+            loop.worker.chat(guid(),"Question fixture multi")
+            rejected = self.read_native(native,"read")
+            self.assertIn("native-question-multi",rejected["continued"])
+            for _ in range(4):
+                relay.collect()
+                relay.flush()
+            views.poll()
+            with views.db.transaction() as db:
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM question_cards").fetchone()[0],3)
+            self.assertEqual(writes,["native-question-choice","native-question-text","native-question-skip"])
+            self.assertEqual(loop.hermes.tasks()["items"],[])
+            self.evidence = {"session":session,"questions":completed,"native_answer_writes":writes,
+                             "unbridged_multi":rejected["continued"],"router_tasks":0,
+                             "boundary":"Native DSH timed question tool and reply admission; local scripted provider, Feishu fixture"}

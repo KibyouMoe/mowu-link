@@ -8,6 +8,7 @@ import { baseline, displayImage, nextDisplay } from './display.mjs';
 import { changeModel, modelView } from './model-view.mjs';
 import { changeGoal, goalView } from './goal-view.mjs';
 import { compaction } from './compaction.mjs';
+import { questionRequest } from './questions.mjs';
 
 const tools = JSON.parse(readFileSync(new URL('../../agent-toolset.json', import.meta.url)));
 const sha = value => createHash('sha256').update(value).digest('hex');
@@ -136,6 +137,9 @@ export async function bindHost(ctx, session, directory) {
       if (request.operation === 'display-image') return displayImage(ctx,agent,request,imageCache);
       if (request.operation === 'activity') return {busy:agent.status !== 'idle' || compact.inProgress};
       if (request.operation === 'capabilities') return {compaction:compact.supported};
+      if (['question-open','question-answer','question-proof'].includes(request.operation)) {
+        return questionRequest(ctx,agent,request,()=>ownEvents(ctx,agent));
+      }
       if (['compact-start','compact-status'].includes(request.operation)) {
         return compact.request(request.operation,request.command_id);
       }

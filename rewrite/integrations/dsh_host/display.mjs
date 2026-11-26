@@ -1,4 +1,5 @@
 import {createHash} from 'node:crypto';
+import {pendingCall} from './questions.mjs';
 
 const digest = e => createHash('sha256').update(JSON.stringify(e)).digest('hex');
 
@@ -45,6 +46,10 @@ function visible(event) {
       } catch { /* A tool with opaque arguments still has a public name. */ }
     }
     return {kind:'tool',turn:d.turn,name:d.name,preview};
+  }
+  if (event.type==='tool/result') {
+    const callId = pendingCall(event);
+    if (callId) return {kind:'question',turn:d.turn,call_id:callId};
   }
   return {kind:'other'};
 }

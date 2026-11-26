@@ -87,6 +87,8 @@ class DshDisplay:
                         turn["pending"] = [seq,part["text"]]
             if kind=="tool":
                 emit(row["seq"],"tool",row["preview"] or "宿主已调用工具",tool_name=row["name"])
+            if kind=="question":
+                emit(row["seq"],"native_question",native_question_id=row["call_id"])
         return turn
 
     def flush(self):
@@ -98,12 +100,23 @@ class DshDisplay:
             ready = db.execute("SELECT * FROM dsh_public_outbox WHERE ack IS NULL ORDER BY seq LIMIT 32").fetchall()
         for row in ready:
             event = json.loads(row["event"])
-            if event["kind"]=="image":
-                media = event.pop("image")
-                event["attachment_id"] = self.upload(event["event_id"],media)
-            receipt = self.worker.request("POST","worker/display",event)
-            require(receipt.get("event_id")=="host-"+row["event_id"] and type(receipt.get("seq")) is int,
-                    502,"wrong_display_ack")
+            if event["kind"]=="native_question":
+                fields = {key:event[key] for key in ("turn_id","native_question_id")}
+                question = self.host.request("question-open",self.session,fields)["question"]
+                receipt = {"projected":False}
+                if question:
+                    require(question.get("session")==self.session and all(question.get(k)==v for k,v in fields.items()),
+                            409,"native_question_conflict")
+                    receipt = self.worker.request("POST","worker/native-question",question)
+                    qid = receipt.get("question_id")
+                    require(isinstance(qid,str) and qid,502,"wrong_question_ack")
+            else:
+                if event["kind"]=="image":
+                    media = event.pop("image")
+                    event["attachment_id"] = self.upload(event["event_id"],media)
+                receipt = self.worker.request("POST","worker/display",event)
+                require(receipt.get("event_id")=="host-"+row["event_id"] and type(receipt.get("seq")) is int,
+                        502,"wrong_display_ack")
             with self.db.transaction() as db:
                 db.execute("UPDATE dsh_public_outbox SET ack=? WHERE seq=?",(encode(receipt),row["seq"]))
 

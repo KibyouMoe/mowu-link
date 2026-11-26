@@ -75,6 +75,13 @@ class DshHost:
     def compact(self, session, command_id, *, start):
         return self.request("compact-start" if start else "compact-status",session,{"command_id":command_id})
 
+    def lookup_answer(self,session,turn,native):
+        return self.request("question-proof",session,{"turn_id":turn,"native_question_id":native})["proof"]
+
+    def resolve_question(self,original,answer):
+        fields = {key:original[key] for key in ("turn_id","native_question_id")}
+        return self.request("question-answer",original["session"],{**fields,"original":original,"answer":answer})["proof"]
+
     def goal_view(self, session):
         return self.request("goal-view",session)
 

@@ -1,0 +1,155 @@
+{
+  "session": "dsh-real-timed-question",
+  "questions": [
+    {
+      "platform_message": "om_3",
+      "question_id": "709d7028-c896-5b6c-af12-fb88ed813c27",
+      "proof": {
+        "answer": {
+          "mode": "choice",
+          "option_id": "2"
+        },
+        "closed": true,
+        "native_question_id": "native-question-choice",
+        "receipt_id": "4b73569c-579c-4ef4-8b87-b6b26322b4d1",
+        "session": "dsh-real-timed-question",
+        "turn_id": "1/1"
+      },
+      "native_reply": {
+        "id": "4b73569c-579c-4ef4-8b87-b6b26322b4d1",
+        "call": "native-question-choice",
+        "seq": 20,
+        "body": {
+          "kind": "answer_to_pending_question",
+          "tool": "ask_user_question",
+          "callId": "native-question-choice",
+          "questions": [
+            {
+              "id": "primary",
+              "question": "Pick choice?",
+              "options": [
+                {
+                  "label": "A"
+                },
+                {
+                  "label": "B"
+                }
+              ],
+              "multiSelect": false
+            }
+          ],
+          "answers": [
+            {
+              "id": "primary",
+              "selected": [
+                "B"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "platform_message": "om_7",
+      "question_id": "fd66dd10-c55a-5933-91f5-680b0cc80f48",
+      "proof": {
+        "answer": {
+          "mode": "text",
+          "text": "C"
+        },
+        "closed": true,
+        "native_question_id": "native-question-text",
+        "receipt_id": "c6df39fb-bd6a-4c84-9394-eecf6f25d5bc",
+        "session": "dsh-real-timed-question",
+        "turn_id": "25/3"
+      },
+      "native_reply": {
+        "id": "c6df39fb-bd6a-4c84-9394-eecf6f25d5bc",
+        "call": "native-question-text",
+        "seq": 41,
+        "body": {
+          "kind": "answer_to_pending_question",
+          "tool": "ask_user_question",
+          "callId": "native-question-text",
+          "questions": [
+            {
+              "id": "primary",
+              "question": "Pick text?",
+              "options": [
+                {
+                  "label": "A"
+                },
+                {
+                  "label": "B"
+                }
+              ],
+              "multiSelect": false
+            }
+          ],
+          "answers": [
+            {
+              "id": "primary",
+              "selected": [],
+              "custom": "C"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "platform_message": "om_11",
+      "question_id": "3e13324b-36f8-5836-82a2-2c45778585f1",
+      "proof": {
+        "answer": {
+          "mode": "skip"
+        },
+        "closed": true,
+        "native_question_id": "native-question-skip",
+        "receipt_id": "ba9d92a9-7997-4413-91eb-63da076bec74",
+        "session": "dsh-real-timed-question",
+        "turn_id": "46/5"
+      },
+      "native_reply": {
+        "id": "ba9d92a9-7997-4413-91eb-63da076bec74",
+        "call": "native-question-skip",
+        "seq": 62,
+        "body": {
+          "kind": "answer_to_pending_question",
+          "tool": "ask_user_question",
+          "callId": "native-question-skip",
+          "questions": [
+            {
+              "id": "primary",
+              "question": "Pick skip?",
+              "options": [
+                {
+                  "label": "A"
+                },
+                {
+                  "label": "B"
+                }
+              ],
+              "multiSelect": false
+            }
+          ],
+          "answers": [
+            {
+              "id": "primary",
+              "selected": []
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "native_answer_writes": [
+    "native-question-choice",
+    "native-question-text",
+    "native-question-skip"
+  ],
+  "unbridged_multi": [
+    "native-question-multi"
+  ],
+  "router_tasks": 0,
+  "boundary": "Native DSH timed question tool and reply admission; local scripted provider, Feishu fixture"
+}
