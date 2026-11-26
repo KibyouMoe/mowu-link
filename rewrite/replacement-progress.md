@@ -4,6 +4,8 @@
 
 ## 检查点与证据
 
+飞书入站及出站循环遇到暂时数据库锁、无效上游响应仍会继续运行。隔离回归先注入入箱读取锁和显示响应错误，再让实际 Worker 写入但返回缺回执的数据。平台保留待核，退避后查回原凭据，宿主只有一次输入，题卡队列仍继续。复跑 `python3 -m unittest -v rewrite.test_feishu_inbound.PlatformInput.test_platform_queue_recovers_after_locked_inbox_and_a_malformed_worker_receipt`。故障为注入，Worker 传输实际运行，未连飞书云端。
+
 DSH 原生 `worker_peer_inbox` 已验证从自己的收件箱补查原消息号和回复关系。隔离回归核了待回执游标、确认后移出待办、原样重复读取、历史不含正文。原生 DSH 在收件回合先查历史再发回复，只产生一条回复。复跑 `python3 -m unittest -v rewrite.test_peers.Peers.test_inbox_cursor_and_history_are_read_only_and_keep_reply_correlation rewrite.test_dsh_native_loop.NativeLoop.test_dsh_peer_image_and_native_reply_travel_on_the_same_private_chain`。
 
 飞书官方 Python SDK 1.7.5 通过实际回环 WebSocket 验证 TCP 中断后自愈。测试直接断开连接，无 WebSocket 关闭帧。SDK 第二次取地址并重连，三次事件回包为 200，其中一条是断线前事件重发。共享入箱只有两条，另一个进程重新打开入箱并交给实际 Worker，宿主输入也只有两条。连续 6 次通过。复跑带 SDK 的 `python3 -m rewrite.feishu_reconnect_check`。[传输记录](evidence/feishu-sdk-reconnect.json)。未连真实飞书，原生宿主用夹具。

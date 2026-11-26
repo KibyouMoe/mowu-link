@@ -154,7 +154,8 @@ class Inbound:
             receipt = None
             if body["kind"] == "text" and is_command(text):
                 try:
-                    receipt = self.worker.request("POST","worker/command",{"message_id":mid,"text":text})["receipt"]
+                    reply = self.worker.request("POST","worker/command",{"message_id":mid,"text":text})
+                    receipt = reply.get("receipt") if isinstance(reply,dict) else None
                     require(isinstance(receipt,dict) and receipt.get("message_id")==mid
                             and isinstance(receipt.get("output"),dict)
                             and receipt["output"].get("event_id")=="command-"+mid,503,"command_receipt_unconfirmed")
@@ -167,8 +168,9 @@ class Inbound:
                 chat = {"message_id":mid,"text":text,"attachment_ids":ids}
                 if refs:
                     chat["attachment_kinds"] = [kind for kind,_key,_name in refs]
-                receipt = self.worker.request("POST","worker/chat",chat)["receipt"]
-                require(receipt and receipt.get("delivery_id") == "chat-"+mid and receipt.get("native_id"),
+                reply = self.worker.request("POST","worker/chat",chat)
+                receipt = reply.get("receipt") if isinstance(reply,dict) else None
+                require(isinstance(receipt,dict) and receipt.get("delivery_id")=="chat-"+mid and receipt.get("native_id"),
                         503,"host_receipt_unconfirmed")
         except (Fault,URLError,OSError) as err:
             terminal = isinstance(err,Fault) and 400 <= err.status < 500 and err.status != 429

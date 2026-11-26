@@ -2,14 +2,34 @@
 import argparse
 import logging
 from pathlib import Path
+from sqlite3 import OperationalError
 from threading import Event, Thread
-from urllib.error import URLError
 
 from .feishu_inbound import Inbound
 from .feishu_output import SDKMessages, Views
 from .question_cards import Actions
 from .service import connection, private_config
 from .storage import Fault
+
+RECOVERABLE = (Fault,OSError,OperationalError,ValueError,KeyError,TypeError)
+
+
+def pump_once(inbound,views,actions):
+    try:
+        pending = inbound.pending()
+    except RECOVERABLE as error:
+        logging.warning("Feishu inbox read: %s",error.code if isinstance(error,Fault) else type(error).__name__)
+        pending = []
+    for mid in pending:
+        try:
+            inbound.deliver(mid)
+        except RECOVERABLE as error:
+            logging.warning("Feishu event %s: %s",mid,error.code if isinstance(error,Fault) else type(error).__name__)
+    for publish in (lambda:views.input_notices(inbound),actions.flush,views.poll):
+        try:
+            publish()
+        except RECOVERABLE as error:
+            logging.warning("Feishu output: %s",error.code if isinstance(error,Fault) else type(error).__name__)
 
 
 def receive(inbound, event):
@@ -66,16 +86,7 @@ def main():
     stopped = Event()
     def process():
         while not stopped.is_set():
-            for mid in inbound.pending():
-                try:
-                    inbound.deliver(mid)
-                except (Fault,URLError,OSError) as error:
-                    logging.warning("Feishu event %s: %s",mid,error.code if isinstance(error,Fault) else "connection_unconfirmed")
-            for publish in (lambda:views.input_notices(inbound),actions.flush,views.poll):
-                try:
-                    publish()
-                except (Fault,URLError,OSError) as error:
-                    logging.warning("Feishu output: %s",error.code if isinstance(error,Fault) else "connection_unconfirmed")
+            pump_once(inbound,views,actions)
             stopped.wait(0.5)
     thread = Thread(target=process,daemon=True)
     thread.start()

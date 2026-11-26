@@ -143,6 +143,8 @@ python3 -m rewrite.release verify --archive ./build/mowulink.tar --revision "$RE
 
 在带飞书 SDK 的测试 Python 中运行 `python3 -m rewrite.feishu_reconnect_check`，可断开临时 WebSocket 的底层 TCP，观察 SDK 重新取连接地址并建立新连接。用 1.7.5 实测，断线前的事件在新连接重发后仍只有一条本地输入，新事件照常交给 Worker。无需云端账号，服务端和原生宿主均由隔离测试提供。
 
+飞书平台进程的本地队列遇到暂时数据库锁或无法核对的上游响应，会保留入箱和卡片游标并继续处理。Worker 回执缺字段时先保留待核，沿用同一消息号查回。
+
 ### 跨系统验收
 
 开发机需 Python 3.12 或更新版本、Git、OpenSSL 和已运行的本地 Linux Docker 引擎。先准备含 Python 3.12+、Git、tar、OpenSSL 的 Linux 测试镜像。此次实测使用官方 `python:3.13-bookworm` 的 Linux arm64 manifest `sha256:0a1254df0519003d33fd4ab8ad26aff1154e50b3c93aa5ec978e83bf83ba084c`。各引擎对已安装镜像的 ID 表示可能不同，`--image` 使用本机 `docker image inspect --format '{{.Id}}' <镜像>` 的完整结果。

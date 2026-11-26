@@ -1,10 +1,13 @@
 import base64
 import hashlib
 import json
+from sqlite3 import OperationalError
 from threading import Thread
 import unittest
+from unittest.mock import Mock
 
 from .devloop import Loop
+from .feishu_client import pump_once
 from .feishu_inbound import Inbound
 from .native_files import NativeFiles
 from .storage import Fault, encode
@@ -45,6 +48,36 @@ class PlatformCase(unittest.TestCase):
 
 
 class PlatformInput(PlatformCase):
+    def test_platform_queue_recovers_after_locked_inbox_and_a_malformed_worker_receipt(self):
+        mid = self.record("om_transport_retry","text",{"text":"original body"})
+        clock = [1.0]
+        self.inbound.clock = lambda:clock[0]
+        pending = self.inbound.pending
+        self.inbound.pending = Mock(side_effect=[OperationalError("isolated lock"),[mid]])
+        views,actions = Mock(),Mock()
+        views.poll.side_effect = [ValueError("isolated malformed output"),None,None]
+        request = self.platform.request
+        def malformed_after_write(method,path,*args,**kwargs):
+            reply = request(method,path,*args,**kwargs)
+            return {} if path=="worker/chat" else reply
+        self.platform.request = malformed_after_write
+        with self.assertLogs(level="WARNING") as logs:
+            pump_once(self.inbound,views,actions)
+            self.assertEqual(self.loop.native.entries(),[])
+            pump_once(self.inbound,views,actions)
+        self.assertTrue(any("host_receipt_unconfirmed" in line for line in logs.output))
+        self.assertEqual(views.poll.call_count,2)
+        self.assertEqual(actions.flush.call_count,2)
+        self.inbound.pending = pending
+        self.assertFalse(self.inbound.pending())
+        clock[0] += 5
+        self.assertEqual(self.inbound.pending(),[mid])
+        self.platform.request = request
+        pump_once(self.inbound,views,actions)
+        self.assertEqual(self.inbound.pending(),[])
+        self.assertEqual(actions.flush.call_count,3)
+        self.assertEqual([payload["message_id"] for payload,_receipt in self.loop.native.entries()],[mid])
+
     def test_single_captioned_input_with_image_bytes_and_replay_after_lost_receipt(self):
         caption = "这张图是什么颜色？"
         post = {"zh_cn":{"content":[[{"tag":"text","text":caption},{"tag":"img","image_key":"img_one"}]]}}
