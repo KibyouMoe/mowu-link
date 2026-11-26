@@ -1,13 +1,13 @@
 {
-  "tested_revision": "0c149f7385ec62f8f46513f09652ee3c9afd0dd0",
+  "tested_revision": "7f7c47ab79d6c50c84669ffdb74f54cbeed60899",
   "os": "macOS",
   "dsh": "0.2.2-rc.5",
   "scope": "Native DSH AgentLoop, tool execution and real isolated Router/Worker; scripted local model",
   "local_link": "IPv4 loopback with mutual TLS",
   "host_receipt": {
-    "delivery_id": "c386d94a-cbd8-4b1f-bd0d-30c2d352d29e",
-    "digest": "dc9d59622669c68d688e28e12e6bae1b98320938771ca35fb01d71d13ba99733",
-    "native_id": "mowulink-2b1c9f2ead95c9cb6aa868d52758e620d0eebfd860f0f8076812ed886c22819e",
+    "delivery_id": "c79855ac-2a5b-47f8-9b95-66d455d937b0",
+    "digest": "c06e285547a043ffd31f1ac2450954272213bcafc7450688845f07002c17e9ec",
+    "native_id": "mowulink-7882055360950c8dec440df4212612826fde8d422369b475eb42e20d15b397a3",
     "session": "dsh-real-loop-formal",
     "turn_id": "1/1"
   },
@@ -29,25 +29,31 @@
       "native-w04-fixture-1"
     ]
   ],
-  "task_id": "be3e54b0-d70c-4d27-b7bf-0bbb71f02715",
-  "assignment_id": "12a132a9-d117-42a3-bebe-bddb1b998600",
+  "task_id": "3363452f-37cd-481c-b65e-381dba41c19a",
+  "assignment_id": "5765d6ee-eaed-43d1-a0ab-64d8f1e4265e",
   "router_w04": {
     "recorded": true,
-    "release_assignment_id": "12a132a9-d117-42a3-bebe-bddb1b998600",
+    "release_assignment_id": "5765d6ee-eaed-43d1-a0ab-64d8f1e4265e",
     "task_state": "completed_reported"
   },
   "worker_before_w04": {
-    "held_assignment_id": "12a132a9-d117-42a3-bebe-bddb1b998600",
-    "held_task_id": "be3e54b0-d70c-4d27-b7bf-0bbb71f02715"
+    "held_assignment_id": "5765d6ee-eaed-43d1-a0ab-64d8f1e4265e",
+    "held_task_id": "3363452f-37cd-481c-b65e-381dba41c19a"
   },
   "worker_after_w04": {
     "held_assignment_id": null,
     "held_task_id": null
   },
   "notification_ids": [
-    "7332615a-0968-4c56-9816-9c6badd369f9"
+    "47cb8976-2435-4c32-b50a-03415b78aa6b"
   ],
   "input_count_after_replay": 1,
   "unauthenticated_rejected_both_ways": true,
-  "foreign_session_rejected": true
+  "foreign_session_rejected": true,
+  "cold_restart": {
+    "native_inputs": 1,
+    "new_model_calls": 0,
+    "offline_receipt_unconfirmed": true,
+    "same_receipt": true
+  }
 }

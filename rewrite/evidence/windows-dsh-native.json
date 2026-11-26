@@ -1,7 +1,7 @@
 {
-  "recorded_utc": "2026-11-26T19:46:29.1550310Z",
-  "verification_url": "https://github.com/KibyouMoe/mowu-link/actions/runs/45886027589/job/140136816257",
-  "tested_revision": "7e06c1bca614197f14b76d314597832265b28f33",
+  "recorded_utc": "2026-11-26T19:48:53.8760841Z",
+  "verification_url": "https://github.com/KibyouMoe/mowu-link/actions/runs/45886339579/job/140137861265",
+  "tested_revision": "7f7c47ab79d6c50c84669ffdb74f54cbeed60899",
   "runner": "Windows Server 2025 x64",
   "vendor_release": {
     "version": "0.2.2-rc.5",
@@ -11,9 +11,9 @@
   "scope": "Native DSH AgentLoop, tool execution and real isolated Router/Worker; scripted local model",
   "local_link": "IPv4 loopback with mutual TLS",
   "host_receipt": {
-    "delivery_id": "edbb45b5-38d6-4422-96b3-c895f87611ee",
-    "digest": "544aace46368ba7f3d2d19f9b4b007fdecce9d3ead130a7ecbaf91da94d352eb",
-    "native_id": "mowulink-be5453b68bee9cf534f346161dd25be82c88341f94e3c6df7eabb1e1947c4d53",
+    "delivery_id": "9eb89523-7e58-44fd-b64f-71ffd9a4ea75",
+    "digest": "27a4d04ae6e46b647a4fd0a6791bd739036d309415af89a9e8077b760b1e88db",
+    "native_id": "mowulink-acd01ba39550f65f1113ceaf8ea01dc3dd0b09d414190493ad48448e17f1ee5f",
     "session": "dsh-real-loop-formal",
     "turn_id": "1/1"
   },
@@ -35,25 +35,31 @@
       "native-w04-fixture-1"
     ]
   ],
-  "task_id": "9aab3789-8e57-41a5-8bec-a382da46a9b4",
-  "assignment_id": "4e93ea8c-ef51-4417-8e50-08651644d38f",
+  "task_id": "d3cac47c-5029-43f2-bf75-b1844cc32b34",
+  "assignment_id": "58690d7c-7f2a-4e33-9609-6102ec45f74c",
   "router_w04": {
     "recorded": true,
-    "release_assignment_id": "4e93ea8c-ef51-4417-8e50-08651644d38f",
+    "release_assignment_id": "58690d7c-7f2a-4e33-9609-6102ec45f74c",
     "task_state": "completed_reported"
   },
   "worker_before_w04": {
-    "held_assignment_id": "4e93ea8c-ef51-4417-8e50-08651644d38f",
-    "held_task_id": "9aab3789-8e57-41a5-8bec-a382da46a9b4"
+    "held_assignment_id": "58690d7c-7f2a-4e33-9609-6102ec45f74c",
+    "held_task_id": "d3cac47c-5029-43f2-bf75-b1844cc32b34"
   },
   "worker_after_w04": {
     "held_assignment_id": null,
     "held_task_id": null
   },
   "notification_ids": [
-    "6c3086c9-267b-477d-a381-a78b418f1cf8"
+    "91677d4b-3f11-4eb6-bad4-3b24a5e97639"
   ],
   "input_count_after_replay": 1,
   "unauthenticated_rejected_both_ways": true,
-  "foreign_session_rejected": true
+  "foreign_session_rejected": true,
+  "cold_restart": {
+    "native_inputs": 1,
+    "new_model_calls": 0,
+    "offline_receipt_unconfirmed": true,
+    "same_receipt": true
+  }
 }
