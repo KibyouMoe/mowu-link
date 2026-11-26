@@ -178,6 +178,8 @@ Worker 为每个候选会话和原会话登记各自的 `adapter/<Worker ID>/<�
 
 Worker 先确认没有持单和待处理的原生业务，暂停派发，核对两个会话均空闲后保存新绑定。Router 确认解除才返回切换卡。新消息使用新会话，已投递消息重试只读原回执。Worker 重开时以已提交的绑定为准，旧会话身份发来的新回调会被拒。
 
+飞书入箱按本地收件顺序处理切换。`/resume` 的选择、`/switch` 和新建、清空、分支会话的命令要等之前已收的消息取得回执或明确失败。目标暂不可达时，后收的消息等同一切换命令有结果，再交给当时已确认的会话。待核及等待顺序跨进程重开保留。普通消息间仍可各自重试，已记下的展示卡片可继续出向。[入箱顺序复验](evidence/feishu-resume-inbox-order.json)
+
 切换尚在 `starting` 时，目标断开会保留原会话及交接窗口。可从 `worker-status` 读取 `native_switch.handoff_id`，用原号执行 `handoff-admission ... end`。确认解除后继续使用原会话。到达 `bound` 时，恢复沿用已经提交的目标，目标重新可读后才解除交接。验收覆盖隔离 Codex App Server、DSH、真实 TLS 进程和飞书夹具。[目录与原生回执](evidence/native-resume-catalog.json)
 
 已准备好的独立 Codex App Server 历史会话可用 `codex-adapter --resume-on-handoff`。将适配器的固定 `--session`、`--cwd` 和独立 profile 对齐，再将其连接配置加入 Worker 的 `--resume-targets`。[Codex 冷会话证据](evidence/codex-cold-resume.json)

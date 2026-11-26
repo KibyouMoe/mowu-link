@@ -1,0 +1,26 @@
+{
+  "binding": {
+    "handoff_id": "ec04031e-09bf-585b-b8fd-c514e3b8dd3e",
+    "previous_session": "resume-source",
+    "session": "resume-target",
+    "state": "bound"
+  },
+  "boundary": "Actual Router and Worker HTTP and SQLite with fixture Feishu and native hosts.",
+  "consecutive_runs": 10,
+  "earlier_unconfirmed_input_kept_ahead_of_switch": true,
+  "following_receipt": {
+    "delivery_id": "chat-om_after_switch",
+    "digest": "df4cf9b15b9af484948ad0848fcd4e9910f87efeabee295b2212c4d7d6065676",
+    "native_id": "1b8651ec-46be-4c7f-8ce6-83f2b56ac957",
+    "session": "resume-target",
+    "turn_id": "36341056-1c78-4450-b56e-9ddd612b4bd6"
+  },
+  "migrated_database_recognizes_fences_written_by_predecessor": true,
+  "new_host_inputs": 1,
+  "old_display_before_switch_card": true,
+  "old_host_inputs": 0,
+  "original_display_id": "om_3",
+  "original_display_sends": 1,
+  "pending_after_final_poll": 0,
+  "switch_card_id": "om_5"
+}

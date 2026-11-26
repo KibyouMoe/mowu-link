@@ -9,6 +9,7 @@ from urllib.error import URLError
 from .storage import Database, Fault, encode, require, string
 from .worker_commands import is_command
 from .worker_catalog import numbered_selection
+from .worker_resume import creation, selection
 
 MAX_IMAGE = 10 * 1024 * 1024
 MAX_FILE = 100_000_000
@@ -70,6 +71,17 @@ def parts(kind, content):
     return text, files
 
 
+def changes_session(body):
+    if body["kind"]!="text":
+        return False
+    try:
+        content = json.loads(body["content"])
+    except (TypeError,ValueError):
+        return False
+    text = content.get("text") if isinstance(content,dict) else None
+    return isinstance(text,str) and bool(selection(text) or creation(text))
+
+
 class Inbound:
     def __init__(self, path, worker, resources, app_id, trainer_id, chat_id, clock=time.time):
         if not all(isinstance(s,str) and s.strip() for s in (app_id,trainer_id,chat_id)):
@@ -79,7 +91,7 @@ class Inbound:
         self.db = Database(path, """
             CREATE TABLE IF NOT EXISTS binding(slot INTEGER PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS platform_events(mid TEXT PRIMARY KEY,body TEXT NOT NULL,
-                state TEXT NOT NULL, retry REAL NOT NULL DEFAULT 0,error TEXT,receipt TEXT);
+                state TEXT NOT NULL, retry REAL NOT NULL DEFAULT 0,error TEXT,receipt TEXT,session_change INTEGER);
             CREATE TABLE IF NOT EXISTS input_topics(mid TEXT PRIMARY KEY, root TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS resources(mid TEXT NOT NULL,rkey TEXT NOT NULL, bytes BLOB NOT NULL,
                 name TEXT NOT NULL, sha TEXT NOT NULL,PRIMARY KEY(mid,rkey));
@@ -90,6 +102,12 @@ class Inbound:
         with self.db.transaction() as db:
             db.execute("INSERT OR IGNORE INTO binding VALUES (1,?)",(encode(self.binding),))
             require(db.execute("SELECT value FROM binding").fetchone()[0] == encode(self.binding),409,"platform_binding_conflict")
+            if not any(row["name"]=="session_change" for row in db.execute("PRAGMA table_info(platform_events)")):
+                db.execute("ALTER TABLE platform_events ADD COLUMN session_change INTEGER")
+            # Original releases leave this column NULL. Reclassify pending events even after a rollback.
+            prior = db.execute("SELECT mid,body FROM platform_events WHERE state='pending' AND session_change IS NULL").fetchall()
+            db.executemany("UPDATE platform_events SET session_change=? WHERE mid=?",
+                          ((changes_session(json.loads(row["body"])),row["mid"]) for row in prior))
 
     def record(self, app_id, sender_type, sender_id, message):
         if (app_id,sender_id,message.get("chat_id")) != self.binding or sender_type != "user" or message.get("chat_type") != "p2p":
@@ -103,8 +121,8 @@ class Inbound:
                 422,"invalid_message_parent")
         body = {"kind":message.get("message_type"),"content":message.get("content")}
         with self.db.transaction() as db:
-            db.execute("INSERT OR IGNORE INTO platform_events(mid,body,state) VALUES (?,?,'pending')",
-                       (mid,encode(dict(body,parent_id=parent))))
+            db.execute("INSERT OR IGNORE INTO platform_events(mid,body,state,session_change) VALUES (?,?,'pending',?)",
+                       (mid,encode(dict(body,parent_id=parent)),changes_session(body)))
             saved = json.loads(db.execute("SELECT body FROM platform_events WHERE mid=?",(mid,)).fetchone()[0])
             require(saved==body or saved==dict(body,parent_id=parent),
                     409,"platform_message_conflict")
@@ -147,11 +165,15 @@ class Inbound:
 
     def deliver(self, mid):
         with self.db.transaction() as db:
-            row = db.execute("SELECT * FROM platform_events WHERE mid=?",(mid,)).fetchone()
-        require(row,404,"platform_event_missing")
-        if row["receipt"]:
-            return json.loads(row["receipt"])
-        require(row["state"]!="rejected",409,row["error"] or "input_rejected")
+            row = db.execute("SELECT rowid AS arrival,* FROM platform_events WHERE mid=?",(mid,)).fetchone()
+            require(row,404,"platform_event_missing")
+            if row["receipt"]:
+                return json.loads(row["receipt"])
+            require(row["state"]!="rejected",409,row["error"] or "input_rejected")
+            earlier = db.execute("""SELECT 1 FROM platform_events WHERE state='pending' AND rowid<?
+                AND (?=1 OR session_change=1) LIMIT 1""",(row["arrival"],row["session_change"])).fetchone()
+            if earlier:
+                raise Fault(503,"platform_session_order_pending",True)
         body = json.loads(row["body"])
         try:
             try:
@@ -194,8 +216,10 @@ class Inbound:
                     if terminal:
                         db.execute("DELETE FROM input_notices WHERE mid=? AND stage='unknown' AND first_try IS NULL",(mid,))
                     stage = "failed" if terminal else "unknown"
+                    text = ("正在确认会话切换。此私聊的后续消息会等到切换结果确认。"
+                            if row["session_change"] and not terminal else notice_text(code,terminal))
                     db.execute("INSERT OR IGNORE INTO input_notices(mid,stage,text) VALUES(?,?,?)",
-                               (mid,stage,notice_text(code,terminal)))
+                               (mid,stage,text))
             raise
         with self.db.transaction() as db:
             db.execute("UPDATE platform_events SET state='received',receipt=?,error=NULL WHERE mid=?",(encode(receipt),mid))
@@ -207,8 +231,14 @@ class Inbound:
 
     def pending(self):
         with self.db.transaction() as db:
-            return [r[0] for r in db.execute("SELECT mid FROM platform_events WHERE state='pending' AND retry<=? ORDER BY rowid",
-                                             (self.clock(),))]
+            rows = db.execute("""WITH boundary AS (
+                SELECT MIN(rowid) AS first,MIN(CASE WHEN session_change=1 THEN rowid END) AS session_change
+                FROM platform_events WHERE state='pending'
+            ) SELECT mid FROM platform_events e CROSS JOIN boundary b
+              WHERE e.state='pending' AND e.retry<=?
+              AND (b.session_change IS NULL OR e.rowid<b.session_change OR e.rowid=b.first)
+              ORDER BY e.rowid""",(self.clock(),))
+            return [row[0] for row in rows]
 
 
 def notice_text(code,terminal):

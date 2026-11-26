@@ -7,11 +7,12 @@ import unittest
 
 from .adapter import HostAdapter
 from .devloop import FixtureHost, Loop
-from .feishu_client import receive
+from .feishu_client import pump_once, receive
 from .feishu_inbound import Inbound
 from .feishu_output import Views
 from .host_wire import RemoteAdapter, serve_adapter
-from .storage import Fault, encode, guid
+from .question_cards import Actions
+from .storage import Database, Fault, encode, guid
 from .test_feishu_output import PlatformFixture
 from .test_mainline import Clock
 from .test_state_bundle import running
@@ -88,6 +89,101 @@ class WorkerResume(unittest.TestCase):
         self.assertEqual(self.status(clients)["host_session"],self.source)
         self.assertEqual(len(self.hosts[self.source].entries()),1)
         self.assertEqual(len(self.hosts[self.target].entries()),1)
+
+    def test_pending_platform_switch_preserves_message_order_and_drains_old_display(self):
+        platform = self.clients["platform/oguri"]
+        old_host = self.clients["adapter/oguri/"+self.source]
+        old_display = self.native_display(old_host,self.source)
+        target = self.ports[self.target]
+        describe = target.session_info
+
+        def unavailable():
+            raise ConnectionError("fixture target temporarily unavailable")
+
+        target.session_info = unavailable
+        path = self.loop.root/"platform-switch-order.db"
+        inbound = Inbound(path,platform,None,"app","trainer","chat",clock=self.clock)
+        sink = PlatformFixture()
+        views = Views(path,platform,sink,"chat","小栗帽",self.clock)
+
+        def incoming(mid,text):
+            return inbound.record("app","user","trainer",{"chat_id":"chat","chat_type":"p2p","message_id":mid,
+                "message_type":"text","content":encode({"text":text})})
+
+        switch = incoming("om_switch_wait","/resume "+self.target)
+        following = incoming("om_after_switch","Send this to the target session")
+        with self.assertLogs(level="WARNING"):
+            pump_once(inbound,views,Actions(views,inbound))
+        self.assertEqual(self.status(self.clients)["host_session"],self.source)
+        self.assertNotIn("native_switch",self.status(self.clients))
+        self.assertEqual(self.hosts[self.source].entries(),[])
+        with views.db.transaction() as db:
+            original_mid, = db.execute("SELECT mid FROM view_attempt WHERE seq=?",(old_display["seq"],)).fetchone()
+        self.assertIsNotNone(original_mid)
+        with self.assertRaisesRegex(Fault,"platform_session_order_pending"):
+            inbound.deliver(following)
+
+        inbound = Inbound(path,platform,None,"app","trainer","chat",clock=self.clock)
+        self.assertEqual(inbound.pending(),[])
+        target.session_info = describe
+        self.clock.advance(5)
+        actions = Actions(views,inbound)
+        pump_once(inbound,views,actions)
+        self.assertEqual(inbound.pending(),[following])
+        pump_once(inbound,views,actions)
+        self.assertFalse(inbound.pending())
+        receipt = inbound.deliver(following)
+        self.assertEqual(receipt["session"],self.target)
+        self.assertEqual(self.hosts[self.source].entries(),[])
+        self.assertEqual(len(self.hosts[self.target].entries()),1)
+        self.assertEqual(sink.calls.count(("send",original_mid)),1)
+        binding = inbound.deliver(switch)
+        self.assertEqual(binding["binding_receipt"]["session"],self.target)
+        self.assertEqual(inbound.deliver(following),receipt)
+        with views.db.transaction() as db:
+            switch_card, = db.execute("SELECT mid FROM view_attempt WHERE seq=?",(binding["output"]["seq"],)).fetchone()
+        self.assertLess(sink.calls.index(("send",original_mid)),sink.calls.index(("send",switch_card)))
+        self.evidence = {"binding":binding["binding_receipt"],"following_receipt":receipt,
+                         "original_display_id":original_mid,"original_display_sends":1,
+                         "switch_card_id":switch_card,"old_display_before_switch_card":True,
+                         "old_host_inputs":0,"new_host_inputs":1,"pending_after_final_poll":0,
+                         "boundary":"Actual Router and Worker HTTP and SQLite with fixture Feishu and native hosts."}
+
+    def test_pending_input_in_older_platform_database_precedes_session_change(self):
+        path = self.loop.root/"old-platform-inbox.db"
+        legacy = Database(path,"""CREATE TABLE platform_events(mid TEXT PRIMARY KEY,body TEXT NOT NULL,
+            state TEXT NOT NULL,retry REAL NOT NULL DEFAULT 0,error TEXT,receipt TEXT);""")
+        entries = [("om_earlier","Text for old session"),("om_change","/switch "+self.target),
+                   ("om_later","Text for new session")]
+        with legacy.transaction() as db:
+            for index,(mid,text) in enumerate(entries):
+                body = encode({"kind":"text","content":encode({"text":text})})
+                db.execute("INSERT INTO platform_events(mid,body,state,retry) VALUES (?,?,'pending',?)",
+                           (mid,body,self.clock()+5 if index==0 else 0))
+        client = self.clients["platform/oguri"]
+        inbound = Inbound(path,client,None,"app","trainer","chat",clock=self.clock)
+        self.assertFalse(inbound.pending())
+        with self.assertRaisesRegex(Fault,"platform_session_order_pending"):
+            inbound.deliver("om_change")
+        self.clock.advance(5)
+        self.assertEqual(inbound.pending(),["om_earlier"])
+        self.assertEqual(inbound.deliver("om_earlier")["session"],self.source)
+        self.assertEqual(inbound.pending(),["om_change"])
+        self.assertEqual(inbound.deliver("om_change")["binding_receipt"]["session"],self.target)
+        self.assertEqual(inbound.pending(),["om_later"])
+        self.assertEqual(inbound.deliver("om_later")["session"],self.target)
+        self.assertEqual([len(self.hosts[s].entries()) for s in (self.source,self.target)],[1,1])
+
+        # A previous release can still insert events into the upgraded table.
+        with legacy.transaction() as db:
+            for mid,text in (("om_return","/switch "+self.source),("om_returned","Text after rollback")):
+                db.execute("INSERT INTO platform_events(mid,body,state) VALUES (?,?,'pending')",
+                           (mid,encode({"kind":"text","content":encode({"text":text})})))
+        inbound = Inbound(path,client,None,"app","trainer","chat",clock=self.clock)
+        self.assertEqual(inbound.pending(),["om_return"])
+        self.assertEqual(inbound.deliver("om_return")["binding_receipt"]["session"],self.source)
+        self.assertEqual(inbound.deliver("om_returned")["session"],self.source)
+        self.assertEqual([len(self.hosts[s].entries()) for s in (self.source,self.target)],[2,1])
 
     def test_lost_begin_and_end_keep_operation_and_target_binding_across_restart(self):
         request = self.loop.wire.request
