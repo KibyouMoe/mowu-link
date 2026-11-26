@@ -6,7 +6,7 @@ import time
 import unicodedata
 from urllib.error import URLError
 
-from . import display, queued_chat
+from . import display, queued_chat, worker_resume
 from .storage import Fault, encode, require, string
 
 
@@ -51,6 +51,8 @@ def reply(service, name, args, hold):
             lines.append("/resume 查看会话目录，可用 next、prev、page 页码或 search 关键词。")
         else:
             lines.append("/resume 查看当前绑定会话。历史搜索敬请期待。")
+        if service.worker.resume_targets:
+            lines.append("/resume 会话 ID 切到已配置的会话。")
         if service.adapter_connected and service.host_compaction:
             lines.append("/compact 通过宿主压缩当前会话历史。")
         if service.adapter_connected and service.host_stop_private:
@@ -118,7 +120,7 @@ def context_answer(service):
             f"本次总用量 {count('total_tokens')} tokens\n模型窗口 {count('window_tokens')} tokens")
 
 
-def catalog_answer(adapter,session,query,page):
+def catalog_answer(adapter,session,query,page,resume_targets=()):
     result = adapter.session_catalog()
     require(isinstance(result,dict) and result.get("session")==session,409,"wrong_native_session_catalog")
     items,unavailable = result.get("items"),result.get("unavailable")
@@ -153,7 +155,7 @@ def catalog_answer(adapter,session,query,page):
         lines.append(f"{unavailable} 个会话的记录暂不可读。")
     if more:
         lines.append("检索范围限宿主返回的前 200 个会话。")
-    lines.append("切换会话敬请期待。")
+    lines.append("用 /resume 会话 ID 切到已配置的会话。" if resume_targets else "切换会话敬请期待。")
     return "\n".join(lines),page
 
 
@@ -180,7 +182,7 @@ def browse_catalog(service,mid,text,args):
         elif args in (["next"],["prev"]):
             page = max(1,page+(1 if args[0]=="next" else -1))
         try:
-            answer,page = catalog_answer(worker.adapter,session,query,page)
+            answer,page = catalog_answer(worker.adapter,session,query,page,worker.resume_targets)
         except (Fault,URLError,OSError):
             answer,page = "会话目录暂时不可读。请稍后重试。",None
         with worker.db.transaction() as db:
@@ -299,7 +301,7 @@ def previous(db,mid,text):
     require(not intent or intent["request"]==text,409,"platform_command_conflict")
 
 
-def record(db,mid,text,name,session,answer,*,model_receipt=None,goal_receipt=None,stop_receipt=None,menu=None):
+def record(db,mid,text,name,session,answer,*,model_receipt=None,goal_receipt=None,stop_receipt=None,menu=None,binding_receipt=None):
     payload = {"event_id":"command-"+mid,"kind":"command","session":session,"turn_id":"","text":answer}
     if menu is not None:
         payload["model_menu"] = True
@@ -313,6 +315,8 @@ def record(db,mid,text,name,session,answer,*,model_receipt=None,goal_receipt=Non
         receipt["goal_receipt"] = goal_receipt
     if stop_receipt is not None:
         receipt["stop_receipt"] = stop_receipt
+    if binding_receipt is not None:
+        receipt["binding_receipt"] = binding_receipt
     db.execute("INSERT INTO platform_commands VALUES (?,?,?)",(mid,text,encode(receipt)))
     return receipt
 
@@ -580,6 +584,10 @@ def handle(service, body):
     mid, text = string(body,"message_id"), string(body,"text")
     require(is_command(text),422,"invalid_platform_command")
     name,*args = text.strip().split()
+    if service.worker.resume_targets:
+        target = worker_resume.selection(text)
+        if target:
+            return worker_resume.handle(service,mid,text,*target)
     if name=="/stop" and not args:
         stopped = stop_private(service,mid,text)
         if stopped is not None:

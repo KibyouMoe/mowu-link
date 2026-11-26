@@ -7,7 +7,7 @@ from urllib.parse import urlencode, urlsplit
 from urllib.error import URLError
 from uuid import NAMESPACE_URL, uuid5
 
-from . import display, links, peer_files, peer_retry, queued_chat, user_questions, worker_commands, worker_handoff, worker_media
+from . import display, links, peer_files, peer_retry, queued_chat, user_questions, worker_commands, worker_handoff, worker_media, worker_resume
 from .messages import valid_guid
 from .storage import Fault, encode, require, string
 from .wire import serve_authenticated
@@ -41,12 +41,43 @@ class WorkerService:
             setattr(self,flag,False)
         self.native_command_lock = Lock()
         self.platform_admission_lock = Lock()
+        self.native_callback_lock = Lock()
+        self.native_callbacks_in_flight = 0
         self.host_session = ""
         self.clock, self.probe_interval = clock, probe_interval
         self.next_probe = 0
         self.next_router_attempt = 0
         self.started = False
         self.last_error = None
+
+    def record_host_observation(self,info,busy):
+        capabilities = {key:info.get(key) is True for key in HOST_CAPABILITY_FLAGS}
+        for key,flag in HOST_CAPABILITY_FLAGS.items():
+            setattr(self,flag,capabilities[key])
+        self.host_capabilities = capabilities
+        self.host_session,self.host_busy,self.adapter_connected = info["session"],busy,True
+        self.host_error = None
+        self.host_observed_at = self.clock()
+
+    def probe_adapter(self):
+        w = self.worker
+        try:
+            describe = getattr(w.adapter,"session_info",None)
+            info = describe() if describe else {"session":w.adapter.bound_session()}
+            require(isinstance(info,dict),502,"invalid_host_observation")
+            session = info.get("session")
+            require(isinstance(session,str) and session,502,"invalid_host_observation")
+            busy = w.adapter.busy(session=session)
+            require(type(busy) is bool,502,"invalid_host_observation")
+            w.observe_native_binding(session)
+            self.record_host_observation(info,busy)
+        except (Fault,URLError,OSError) as err:
+            self.host_busy = None
+            self.adapter_connected = False
+            self.host_error = err.code if isinstance(err,Fault) else "adapter_connection_unconfirmed"
+            self.host_observed_at = self.clock()
+        links.observe(w,"adapter",self.adapter_connected,self.host_session)
+        self.next_probe = self.clock()+self.probe_interval
 
     def step(self):
         w = self.worker
@@ -57,30 +88,9 @@ class WorkerService:
             self.started = True
         probe = self.clock() >= self.next_probe
         if probe:
-            try:
-                describe = getattr(w.adapter,"session_info",None)
-                info = describe() if describe else {"session":w.adapter.bound_session()}
-                require(isinstance(info,dict),502,"invalid_host_observation")
-                session = info.get("session")
-                require(isinstance(session,str) and session,502,"invalid_host_observation")
-                busy = w.adapter.busy(session=session)
-                require(type(busy) is bool,502,"invalid_host_observation")
-                w.observe_native_binding(session)
-                capabilities = {key:info.get(key) is True for key in HOST_CAPABILITY_FLAGS}
-                for key,flag in HOST_CAPABILITY_FLAGS.items():
-                    setattr(self,flag,capabilities[key])
-                self.host_capabilities = capabilities
-                self.host_session, self.host_busy, self.adapter_connected = session,busy,True
-                self.host_error = None
-            except (Fault,URLError,OSError) as err:
-                self.host_busy = None
-                self.adapter_connected = False
-                self.host_error = err.code if isinstance(err,Fault) else "adapter_connection_unconfirmed"
-            self.host_observed_at = self.clock()
-            links.observe(w,"adapter",self.adapter_connected,self.host_session)
-            self.next_probe = self.clock()+self.probe_interval
             with self.platform_admission_lock:
-                if not worker_handoff.active(w):
+                self.probe_adapter()
+                if not worker_handoff.active(w) and not worker_resume.pending(w):
                     queued_chat.advance(self)
                     worker_commands.advance_compact(self)
         try:
@@ -91,10 +101,12 @@ class WorkerService:
                 links.observe(w,"router",True,self.host_session)
                 self.router_connected = True
                 self.router_observed = True
-            worker_handoff.recover(w)
-            links.publish(w,heartbeat=probe and (not self.adapter_connected or worker_handoff.active(w) is not None))
+            with self.platform_admission_lock:
+                switch_error = worker_resume.recover(self)
+                paused = bool(worker_handoff.active(w) or worker_resume.pending(w))
+            links.publish(w,heartbeat=probe and (not self.adapter_connected or paused))
             w.poll()
-            self.last_error = None if self.adapter_connected else self.host_error
+            self.last_error = switch_error or (None if self.adapter_connected else self.host_error)
         except (URLError,OSError):
             self.router_observed = True
             self.router_connected = False
@@ -126,6 +138,7 @@ class WorkerService:
         now = self.clock()
         connected = self.adapter_connected
         handoff = worker_handoff.active(self.worker)
+        switch = worker_resume.pending(self.worker)
         return {"worker_id":self.worker.worker_id,"router_connected":self.router_connected,
                 "router_observed":self.router_observed,"adapter_connected":connected,
                 "last_error":self.last_error,"host_error":self.host_error,
@@ -136,15 +149,43 @@ class WorkerService:
                 "host_observation_age_seconds":None if self.host_observed_at is None else max(0,now-self.host_observed_at),
                 "router_retry_in_seconds":None if self.router_connected or not self.router_observed
                 else max(0,self.next_router_attempt-now),**self.worker.hold(),
-                **({"handoff":handoff} if handoff else {})}
+                **({"handoff":handoff} if handoff else {}),
+                **({"native_switch":{"source":switch["old_session"],"target":switch["target"],"phase":switch["phase"],
+                                     "handoff_id":switch["handoff_id"]}}
+                   if switch else {})}
 
     def handle(self, actor, method, path, body, _headers):
-        if actor=="platform/"+self.worker.worker_id and method=="POST" and path in (
+        w = self.worker
+        adapter = "adapter/"+w.worker_id
+        if w.resume_targets and (actor==adapter or actor.startswith(adapter+"/")):
+            with self.native_callback_lock:
+                require(actor!=adapter,403,"scoped_native_callback_required")
+                if actor!=adapter+"/"+w.native_session_pin:
+                    raise Fault(409,"native_callback_inactive",True)
+                require(not worker_resume.pending(w),503,"native_handoff_in_progress")
+                self.native_callbacks_in_flight += 1
+            try:
+                return self.route(adapter,method,path,body,_headers)
+            finally:
+                with self.native_callback_lock:
+                    self.native_callbacks_in_flight -= 1
+        if actor=="platform/"+w.worker_id and method=="POST" and path in (
                 "/v1/worker/chat","/v1/worker/command","/v1/worker/trainer-answer"):
             with self.platform_admission_lock:
-                if worker_handoff.active(self.worker):
+                text = body.get("text")
+                resume = path=="/v1/worker/command" and w.resume_targets and isinstance(text,str) and worker_resume.selection(text)
+                if not resume and (worker_handoff.active(w) or worker_resume.pending(w)):
                     raise Fault(503,"native_handoff_in_progress",True)
-                return self.route(actor,method,path,body,_headers)
+                try:
+                    return self.route(actor,method,path,body,_headers)
+                except Fault as error:
+                    if resume and error.code in ("stale_session","missing_session","unauthenticated"):
+                        raise Fault(503,"native_switch_unconfirmed",True) from None
+                    raise
+                except (OSError,URLError):
+                    if resume:
+                        raise Fault(503,"native_switch_unconfirmed",True) from None
+                    raise
         return self.route(actor,method,path,body,_headers)
 
     def route(self, actor, method, path, body, _headers):
@@ -154,7 +195,8 @@ class WorkerService:
             require(method=="PUT",405,"invalid_handoff")
             try:
                 with self.platform_admission_lock:
-                    reply = worker_handoff.request(w,body)
+                    switch = worker_resume.pending(w)
+                    reply = worker_resume.cancel(self,switch,body) if switch else worker_handoff.request(w,body)
             except (OSError,URLError):
                 raise Fault(503,"handoff_receipt_unconfirmed",True) from None
             return 200,"application/json",reply
@@ -325,4 +367,9 @@ class WorkerService:
         return self.worker.router.request("GET","peers/workers?"+urlencode(query))
 
     def listen(self, identities, address, ctx):
+        if self.worker.resume_targets:
+            adapter = "adapter/"+self.worker.worker_id
+            roles = set(identities.values())
+            require(adapter not in roles and all(adapter+"/"+session in roles for session in self.worker.resume_targets),
+                    422,"scoped_native_callbacks_required")
         return serve_authenticated(identities,address,ctx,self.handle)

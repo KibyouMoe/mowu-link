@@ -4,7 +4,11 @@
 
 ## 检查点与证据
 
-Worker 可经独立交接授权建立 Router 交接窗口。冻结和预约在 Router 内以互斥事务处理，已有预约或持单时拒绝。开始回包丢失后，Worker 重开沿用原操作号恢复冻结；解除回包丢失也能查实。提前解除会留记录，迟到的冻结不会重新打开。实测等待超过在线租期仍在线，私聊和同伴信留在原队列，解除后各收一次。Router 重新采样并等满连续空闲 10 秒，才派新单。真实隔离 HTTP 和 TLS 进程，飞书与原生宿主为夹具。运行中更换绑定和飞书 `/resume` 仍待接。[回执证据](evidence/native-handoff-admission.json) · [操作入口](README.md#原生交接窗口)
+`/resume 会话ID` 可将同一 Worker 切到已配置、已运行的独立适配器。`/switch 会话ID` 使用同一条链。运行中的 Codex App Server 与 DSH 隔离会话已往返切换。重投老消息、旧切换指令均读回原回执。原 Codex 一次私聊，DSH 一次私聊加一张工单。DSH 的两次原生 W04 返回同一结果，Router 仅一条待验通知。切走后，旧适配器即使把新会话 ID 写进回调正文也会被拒。模型和飞书是本地夹具。真实飞书、生产宿主、冷目录和编号选择仍待核。[原生与回执证据](evidence/native-live-resume.json) · [运行入口](README.md#飞书切换会话)
+
+切换、Router 开始与结束丢回包、提交前目标断开三个场景连续 12 轮通过。最后一项确认目标断开 80 秒期间 Worker 仍在线且派发暂停，授权运维按原号解除后继续投给原会话。适配器进程和 Worker 各自用独立账本，CLI 配置测试核对 Worker 重开后保持新会话。复跑 `python3 -B -m unittest -v rewrite.test_worker_resume rewrite.test_service.Service.test_runtime_resume_uses_opted_in_connection_map rewrite.test_dsh_native_loop.NativeLoop.test_platform_resume_switches_live_codex_and_dsh_sessions`。
+
+Worker 可经独立交接授权建立 Router 交接窗口。冻结和预约在 Router 内以互斥事务处理，已有预约或持单时拒绝。开始回包丢失后，Worker 重开沿用原操作号恢复冻结。解除回包丢失也能查实。提前解除会留记录，迟到的冻结不会重新打开。实测等待超过在线租期仍在线，私聊和同伴信留在原队列，解除后各收一次。Router 重新采样并等满连续空闲 10 秒，才派新单。真实隔离 HTTP 和 TLS 进程，飞书与原生宿主为夹具。[回执证据](evidence/native-handoff-admission.json) · [操作入口](README.md#原生交接窗口)
 
 复跑 `python3 -B -m unittest -v rewrite.test_handoff_admission rewrite.test_service.Service.test_three_process_worker_chat_and_assignment`。三个竞态与续接场景连过 18 轮，另用三个 TLS 进程验证隔离交接命令和解除后正式派单。macOS 全过 210 项。Linux arm64 通过 147 项，另 63 项本机宿主用例跳过。
 

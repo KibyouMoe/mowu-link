@@ -33,6 +33,13 @@ def check_local(db):
     require(not any(db.execute(sql+" LIMIT 1").fetchone() for sql in checks),409,"handoff_local_work_pending")
 
 
+def prepare_cancel(db,handoff_id):
+    # Ensure an end can be recorded even if the first begin never reached Router.
+    db.execute("""INSERT INTO native_handoff_admission VALUES (?,'ending',NULL)
+        ON CONFLICT(handoff_id) DO UPDATE SET state='ending',error=NULL
+        WHERE state<>'released'""",(handoff_id,))
+
+
 def apply(worker,handoff_id,action):
     path = f"workers/{worker.worker_id}/admission-handoffs/{handoff_id}"
     try:

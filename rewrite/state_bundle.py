@@ -52,6 +52,7 @@ OPTIONAL_AGENT_PENDING = {
 WORKER_ADMISSION_PENDING = {
     "local_admission_handoffs": ({"native_handoff_admission"},"""SELECT COUNT(*) FROM native_handoff_admission
         WHERE state IN ('beginning','frozen','ending')"""),
+    "native_resume_operations": ({"native_resume"},"SELECT COUNT(*) FROM native_resume WHERE phase<>'done'"),
 }
 FEISHU_NATIVE_PENDING = {
     "platform_inputs": ({"platform_events"},"SELECT COUNT(*) FROM platform_events WHERE state='pending'"),

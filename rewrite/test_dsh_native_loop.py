@@ -1279,6 +1279,121 @@ class NativeLoop(unittest.TestCase):
                              "boundary":"Actual Codex App Server and DSH AgentLoop on one Mac with scripted providers"}
 
     @unittest.skipUnless(codex_driver.CODEX.is_file(),"bundled Codex App Server required")
+    def test_platform_resume_switches_live_codex_and_dsh_sessions(self):
+        clock = Clock()
+        loop = self.enterContext(Loop.isolated(clock))
+        directory = self.enterContext(tempfile.TemporaryDirectory(dir="/tmp",prefix="ml-resume-dsh-"))
+        profile = loop.root/"resume-codex"
+        profile.mkdir(mode=0o700)
+        model = ThreadingHTTPServer(("127.0.0.1",0),codex_driver.Provider)
+        model.observed,model.media = [],[]
+        origin = self.enterContext(codex_driver.running(model))
+        sid = "isolated-dsh-resume-target"
+        rpc = self.enterContext(codex_driver.isolated_app_server(profile,origin))
+        codex = rpc.request("thread/start",{"cwd":str(profile),"ephemeral":False,
+                            "dynamicTools":[codex_driver.REPORT_TOOL]})["thread"]["id"]
+        codex_host = AppServerHost(rpc,codex)
+        native = self.enterContext(self.start_native(directory,sid,"formal"))
+        dsh_adapter = HostAdapter(loop.root/"live-dsh.db",DshHost(Path(directory)),sid)
+        adapters = {sid:dsh_adapter,codex:HostAdapter(loop.root/"live-codex.db",codex_host,codex)}
+        ports = {}
+        for session,adapter in adapters.items():
+            token = guid()
+            url = self.enterContext(codex_driver.running(serve_adapter(adapter,"oguri",
+                    {token:"worker/oguri"},("127.0.0.1",0),None)))
+            ports[session] = RemoteAdapter(Client(url,token),session)
+        w = Worker(loop.root/"live-worker.db","oguri",loop.wire,ports[codex],clock=clock,resume_targets={sid:ports[sid]})
+        service = WorkerService(w,clock)
+        roles = {guid():role for role in ("platform/oguri","ops/oguri","adapter/oguri/"+codex,"adapter/oguri/"+sid)}
+        port = self.open_worker(service,roles)
+        clients = {role:Client(port,token) for token,role in roles.items()}
+        service.step()
+        dsh_callback,codex_callback = (clients["adapter/oguri/"+session] for session in (sid,codex))
+        self.enterContext(tool_listener(Path(directory),dsh_adapter,dsh_callback))
+        settled = Event()
+        self.enterContext(worker_callbacks(codex_host,codex_callback,settled.set))
+        platform = clients["platform/oguri"]
+        platform_db = loop.root/"runtime-platform.db"
+        inbound = Inbound(platform_db,platform,None,"app","trainer","chat",clock=clock)
+        sink = PlatformFixture()
+        views = Views(platform_db,platform,sink,"chat","小栗帽",clock)
+
+        def record(mid,text):
+            return inbound.record("app","user","trainer",{"chat_type":"p2p","chat_id":"chat","message_id":mid,
+                "message_type":"text","content":encode({"text":text})})
+
+        before,after = record("om_codex_before_live_resume","An original private message"),"om_live_dsh_after_resume"
+        try:
+            inbound.deliver(before)
+        except Fault as error:
+            self.assertEqual(error.code,"host_receipt_unconfirmed")
+        self.assertTrue(settled.wait(12))
+        first = inbound.deliver(before)
+        original_turns = codex_host.thread(codex,include_turns=True)["turns"]
+        self.assertEqual(len(original_turns),1)
+        cmd = record("om_live_native_resume","/resume "+sid)
+        selected = inbound.deliver(cmd)
+        self.assertEqual(selected["binding_receipt"]["session"],sid)
+        with self.assertRaisesRegex(Fault,"native_callback_inactive"):
+            codex_callback.request("POST","worker/display",{"event_id":guid(),"kind":"final","session":sid,
+                                    "turn_id":first["turn_id"],"text":"Late source callback"})
+        self.assertEqual(inbound.deliver(before),first)
+        self.assertEqual(self.read_native(native,"read")["inputs"],[])
+        record(after,"A new private message after resume")
+        try:
+            inbound.deliver(after)
+        except Fault as error:
+            self.assertEqual(error.code,"host_receipt_unconfirmed")
+        self.read_native(native,"read")
+        second = inbound.deliver(after)
+        self.assertEqual(second["session"],sid)
+        tid = loop.hermes.create(guid(),"Runtime resume","Report in the target native session","oguri")["task_id"]
+        service.step()
+        clock.advance(10)
+        deadline = time.monotonic()+10
+        while time.monotonic()<deadline:
+            service.step()
+            order = loop.hermes.inspect(tid)
+            if order["task"]["state"]=="completed_reported":
+                break
+            time.sleep(.025)
+        self.assertEqual(order["task"]["state"],"completed_reported")
+        observed = self.read_native(native,"read")
+        aid = order["last_report"]["assignment_id"]
+        expected = {"recorded":True,"task_state":"completed_reported","release_assignment_id":aid}
+        self.assertEqual([json.loads(result["content"][0]["text"]) for result in observed["results"]],[expected,expected])
+        self.assertEqual(observed["inputs"][0],second["native_id"])
+        self.assertEqual(len(observed["inputs"]),2)
+        self.assertEqual(w.assignment_session(aid),sid)
+        self.assertIsNone(w.hold()["held_assignment_id"])
+        clock.advance(5)
+        service.step()
+        back = record("om_live_native_return","/switch "+codex)
+        returned = inbound.deliver(back)
+        self.assertEqual(returned["binding_receipt"]["session"],codex)
+        self.assertEqual(inbound.deliver(cmd),selected)
+        self.assertEqual(inbound.deliver(after),second)
+        self.assertEqual(codex_host.thread(codex,include_turns=True)["turns"],original_turns)
+        self.assertEqual(self.read_native(native,"read")["inputs"],observed["inputs"])
+        self.assertEqual(loop.hermes.inspect(tid)["last_report"],order["last_report"])
+        notice, = loop.manager_wire.frames(0)
+        self.assertEqual(notice["payload"]["task_id"],tid)
+        views.poll()
+        self.assertEqual(views.poll(),0)
+        with views.db.transaction() as db:
+            cards = dict(db.execute("""SELECT json_extract(event,'$.event_id'),mid FROM view_attempt
+                WHERE json_extract(event,'$.event_id') IN (?,?)""",("command-"+cmd,"command-"+back)))
+        self.assertEqual(len(cards),2)
+        self.assertTrue(all(sink.calls.count(("send",mid))==1 for mid in cards.values()))
+        self.evidence = {"switch":selected["binding_receipt"],"return":returned["binding_receipt"],"cards":cards,
+            "codex_input":first,"dsh_input":second,"dsh_work_input":observed["inputs"][-1],"task_id":tid,
+            "assignment_id":aid,"w04_receipt":expected,"notification_id":notice["delivery_id"],
+            "codex_turns_after_replay":len(original_turns),"dsh_inputs_after_replay":len(observed["inputs"]),
+            "w04_result_receipts":len(observed["results"]),"new_result_notifications":1,
+            "late_callback":"native_callback_inactive",
+            "boundary":"Live independent Codex App Server and DSH SDK; local test models and Feishu fixture"}
+
+    @unittest.skipUnless(codex_driver.CODEX.is_file(),"bundled Codex App Server required")
     def test_one_worker_cold_switches_between_native_engines_and_keeps_both_reports(self):
         root = Path(self.enterContext(tempfile.TemporaryDirectory(dir="/tmp",prefix="ml-host-handoff-")))
         directory = self.enterContext(tempfile.TemporaryDirectory(dir="/tmp",prefix="ml-dsh-handoff-"))

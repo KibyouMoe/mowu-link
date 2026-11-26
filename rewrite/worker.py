@@ -5,7 +5,7 @@ import time
 from threading import RLock
 from typing import Protocol
 
-from . import display, links, peer_files, peer_retry, queued_chat, user_questions, worker_commands, worker_handoff, worker_media
+from . import display, links, peer_files, peer_retry, queued_chat, user_questions, worker_commands, worker_handoff, worker_media, worker_resume
 from .storage import Database, Fault, encode, guid, require, string
 
 FOLLOWUP_FRAMES = {"task.updated","task.probe","task.shelved","task.cancel","task.transfer_out","question.resolved"}
@@ -61,17 +61,31 @@ class AgentAdapter(Protocol):
 
 
 class Worker:
-    def __init__(self, path, worker_id, router, adapter: AgentAdapter, *, clock=time.time):
+    def __init__(self, path, worker_id, router, adapter: AgentAdapter, *, clock=time.time, resume_targets=None):
         self.db = Database(path, SCHEMA + worker_media.SCHEMA + peer_files.SCHEMA + display.SCHEMA + links.WORKER_SCHEMA
                            + user_questions.SCHEMA + worker_commands.SCHEMA + queued_chat.SCHEMA + peer_retry.SCHEMA
-                           + worker_handoff.SCHEMA)
+                           + worker_handoff.SCHEMA + worker_resume.SCHEMA)
         self.clock = clock
         self.worker_id, self.router, self.adapter = worker_id, router, adapter
         self.lock = RLock()
         self.native_session_pin = getattr(adapter,"expected_session",None)
+        self.resume_targets = {}
+        if resume_targets:
+            require(self.native_session_pin and self.native_session_pin not in resume_targets and
+                    all(getattr(port,"expected_session",None)==sid for sid,port in resume_targets.items()),
+                    422,"invalid_resume_targets")
+            self.resume_targets = {self.native_session_pin:adapter,**resume_targets}
         with self.db.transaction() as db:
             current = db.execute("SELECT session FROM native_binding WHERE slot=1").fetchone()
-            require(not current or current[0]==self.native_session_pin,409,"native_binding_change_requires_handoff")
+            if current and self.resume_targets:
+                require(current[0] in self.resume_targets,409,"native_session_not_authorized")
+                self.native_session_pin = current[0]
+                self.adapter = self.resume_targets[current[0]]
+            else:
+                require(not current or current[0]==self.native_session_pin,409,"native_binding_change_requires_handoff")
+            switching = db.execute("SELECT old_session,target FROM native_resume WHERE phase<>'done'").fetchone()
+            require(not switching or all(session in self.resume_targets for session in switching),
+                    409,"pending_resume_targets_required")
             db.execute("INSERT OR IGNORE INTO connection VALUES (1,?,0,0)", (guid(),))
             self.session = db.execute("SELECT session FROM connection").fetchone()[0]
 
@@ -160,7 +174,7 @@ class Worker:
 
     def poll(self):
         with self.lock:
-            if worker_handoff.active(self):
+            if worker_handoff.active(self) or worker_resume.pending(self):
                 return
             with self.db.transaction() as db:
                 cursor = db.execute("SELECT cursor FROM connection").fetchone()[0]

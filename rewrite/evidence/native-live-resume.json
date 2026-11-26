@@ -1,0 +1,85 @@
+{
+  "observed_at_utc": "2026-11-26T11:09:07.360045+00:00",
+  "repetitions": 12,
+  "cases_per_round": [
+    "test_platform_resume_switches_live_codex_and_dsh_sessions",
+    "test_lost_begin_and_end_keep_operation_and_target_binding_across_restart",
+    "test_lost_target_keeps_worker_online_and_operator_can_cancel_before_commit"
+  ],
+  "native_runtime": {
+    "switch": {
+      "handoff_id": "2e3e1c8c-ae1c-5cd7-a774-f33034921317",
+      "previous_session": "01a2178b-791f-7322-9111-d9f0bffa82da",
+      "session": "isolated-dsh-resume-target",
+      "state": "bound"
+    },
+    "return": {
+      "handoff_id": "ef103ef6-643e-5d62-a0e0-da149b8e5a39",
+      "previous_session": "isolated-dsh-resume-target",
+      "session": "01a2178b-791f-7322-9111-d9f0bffa82da",
+      "state": "bound"
+    },
+    "cards": {
+      "command-om_live_native_resume": "om_2",
+      "command-om_live_native_return": "om_4"
+    },
+    "codex_input": {
+      "delivery_id": "chat-om_codex_before_live_resume",
+      "digest": "00c93e40261d3de5dc360f75da576b507485d8b76942a3aa667048fe6280cb46",
+      "native_id": "01a2178b-7a0c-7a32-ae0a-c61ad1febfb9",
+      "session": "01a2178b-791f-7322-9111-d9f0bffa82da",
+      "turn_id": "01a2178b-7a04-7352-b74f-af5837f3c379"
+    },
+    "dsh_input": {
+      "delivery_id": "chat-om_live_dsh_after_resume",
+      "digest": "5e7220cb11791f0788a07a41374f237b82e308992c7e2c9ad03ce6cc3ed96eaf",
+      "native_id": "mowulink-54f3b5ac29957135bc448bb4a00c31eafb133ce60bcc0ba54e5a67510deb4785",
+      "session": "isolated-dsh-resume-target",
+      "turn_id": "1/1"
+    },
+    "dsh_work_input": "mowulink-a166e1b2d0c38ce061c3d07b195d6eeffee6ee9e8159cbd9ea328052cbe68f70",
+    "task_id": "491fc687-0b06-48e3-a353-2e223e24672e",
+    "assignment_id": "b7011487-b39e-48ea-a957-a5b4a049bd27",
+    "w04_receipt": {
+      "recorded": true,
+      "task_state": "completed_reported",
+      "release_assignment_id": "b7011487-b39e-48ea-a957-a5b4a049bd27"
+    },
+    "notification_id": "451256c6-7d2f-46ac-b3f3-46fe94db3542",
+    "codex_turns_after_replay": 1,
+    "dsh_inputs_after_replay": 2,
+    "w04_result_receipts": 2,
+    "new_result_notifications": 1,
+    "late_callback": "native_callback_inactive",
+    "boundary": "Live independent Codex App Server and DSH SDK; local test models and Feishu fixture"
+  },
+  "replayed_after_lost_router_ack": {
+    "binding": {
+      "handoff_id": "7a51ff00-c23d-56b8-9479-0de9239e9119",
+      "previous_session": "resume-source",
+      "session": "resume-target",
+      "state": "bound"
+    },
+    "lost": [
+      "begin",
+      "end"
+    ],
+    "private_receipt": {
+      "delivery_id": "chat-927c417b-7ba7-4857-82ca-5edbfef33008",
+      "digest": "d7b090fc6a6850cff017db07093a7018e18662de679b9fd91b4426de172c9e59",
+      "native_id": "d18108e9-ce17-48b2-97a3-1972c2dbfb0e",
+      "session": "resume-target",
+      "turn_id": "24fac875-fd38-49a2-adee-4be9a96fb973"
+    },
+    "task_id": "57638cd7-e06a-4ed6-a167-9e3536f04a14",
+    "formal_receipt": {
+      "delivery_id": "a0eafe75-e7ed-4b00-8f54-bcc39ba326ce",
+      "digest": "d2dc535034a5b019a38e643cc484690ae3363fd9a69e090fcc480060100e7fc1",
+      "native_id": "82c18c36-c083-4e60-a753-67903104836a",
+      "session": "resume-target",
+      "turn_id": "764acdd9-e616-48bd-9aa5-e7cbe1aa3a4f"
+    },
+    "source_inputs": 0,
+    "target_inputs": 2
+  }
+}

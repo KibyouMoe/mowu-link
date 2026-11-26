@@ -104,8 +104,16 @@ def serve(args,stack):
         public_output = display.run()
         listener = serve_adapter(adapter,args.worker_id,identities,address,ctx)
     else:
+        targets = {}
+        if args.resume_targets:
+            entries = private_config(args.resume_targets)
+            if not isinstance(entries,dict) or not entries or len(entries)>20 or not all(
+                    isinstance(value,str) and value for value in entries.values()):
+                raise ValueError("expected an explicit session-to-connection map")
+            targets = {session:RemoteAdapter(connection(args.resume_targets.parent/Path(config)),session)
+                       for session,config in entries.items()}
         worker = Worker(args.db,args.worker_id,connection(args.router_connection),
-                        RemoteAdapter(connection(args.adapter_connection),args.adapter_session))
+                        RemoteAdapter(connection(args.adapter_connection),args.adapter_session),resume_targets=targets)
         worker_service = WorkerService(worker)
         listener = worker_service.listen(identities,address,ctx)
     with listener, callbacks, public_output:
@@ -167,6 +175,8 @@ def main():
             component.add_argument("--router-connection",required=True,type=Path)
             component.add_argument("--adapter-connection",required=True,type=Path)
             component.add_argument("--adapter-session",help="pin all adapter requests to this native session")
+            component.add_argument("--resume-targets",type=Path,
+                                   help="owner-private map of allowed native session IDs to connection files")
     t = apps.add_parser("trigger")
     t.add_argument("--db",required=True,type=Path)
     t.add_argument("--name",required=True)

@@ -363,6 +363,69 @@ class Service(unittest.TestCase):
         self.assertEqual(len(native.entries()),2)
 
     @unittest.skipUnless(shutil.which("openssl"), "TLS fixture certificate generator unavailable")
+    def test_runtime_resume_uses_opted_in_connection_map(self):
+        from .devloop import FixtureHost
+
+        cert,key = self.certificate()
+        router_token,platform,ops = (guid() for _ in range(3))
+        _,router = self.start(self.write_config("router-roles.json",{router_token:"worker/dev"}),cert,key)
+
+        def connection_file(name,url,token):
+            return self.write_config(name,{"url":url,"token":token,"ca_file":str(cert)})
+
+        connections,hosts,roles = {},{},{platform:"platform/dev",ops:"ops/dev"}
+        for session in ("initial","target"):
+            reader = guid()
+            roles[guid()] = "adapter/dev/"+session
+            path = self.root/(session+".native.db")
+            _,url = self.start(self.write_config(session+".roles",{reader:"worker/dev"}),cert,key,"fixture-adapter",
+                               ["--worker-id","dev","--db",self.root/(session+".adapter.db"),"--fixture-db",path,
+                                "--session",session])
+            hosts[session] = FixtureHost(path,session)
+            connections[session] = connection_file(session+".connection",url,reader)
+
+        ids = self.write_config("worker-roles.json",roles)
+        targets = self.write_config("resume-targets.json",{"target":connections["target"].name})
+        flags = ["--worker-id","dev","--router-connection",connection_file("to-router",router,router_token),
+                 "--adapter-connection",connections["initial"],"--adapter-session","initial","--resume-targets",targets]
+        process,gateway = self.start(ids,cert,key,"worker",flags)
+        platform_client = Client(gateway,platform,cert)
+
+        def status(url):
+            return Client(url,ops,cert).request("GET","worker/status")
+
+        def wait_ready(url,session):
+            deadline = time.monotonic()+8
+            while time.monotonic()<deadline:
+                state = status(url)
+                if state["host_session"]==session and state["router_connected"]:
+                    return
+                time.sleep(0.05)
+            self.fail("Worker did not confirm the expected binding: "+repr(state))
+
+        wait_ready(gateway,"initial")
+        first = {"message_id":guid(),"text":"Original session before TLS switch"}
+        before = platform_client.request("POST","worker/chat",first)
+        cmd = {"message_id":guid(),"text":"/resume target"}
+        switched = platform_client.request("POST","worker/command",cmd)
+        self.assertEqual(switched["receipt"]["binding_receipt"]["session"],"target")
+        wait_ready(gateway,"target")
+        second = {"message_id":guid(),"text":"Selected session after TLS switch"}
+        after = platform_client.request("POST","worker/chat",second)
+        self.assertEqual((before["receipt"]["session"],after["receipt"]["session"]),("initial","target"))
+
+        self.stop(process)
+        _,reopened = self.start(ids,cert,key,"worker",flags)
+        wait_ready(reopened,"target")
+        again = Client(reopened,platform,cert)
+        self.assertEqual(again.request("POST","worker/command",cmd),switched)
+        self.assertEqual(again.request("POST","worker/chat",first),before)
+        self.assertEqual(again.request("POST","worker/chat",second),after)
+        display = again.request("GET","worker/display")["items"]
+        self.assertEqual(sum(item["event"]["event_id"]=="command-"+cmd["message_id"] for item in display),1)
+        self.assertEqual([len(host.entries()) for host in hosts.values()],[1,1])
+
+    @unittest.skipUnless(shutil.which("openssl"), "TLS fixture certificate generator unavailable")
     def test_pinned_worker_rejects_same_authenticated_adapter_when_session_differs(self):
         from .devloop import FixtureHost
         cert,key = self.certificate()
