@@ -198,6 +198,10 @@ DSH 命令审批已用实际 SDK 的 AgentLoop、ApprovalService 和 Bash 验证
 
 另用正式服务入口启动三个隔离 TLS 进程。获准 CLI 取消 `de39f540-e4ad-4c87-95a0-32b4aa591566` 后，独立宿主冷开回读同一回合已中断，且无命令执行项。复跑 `python3 -m unittest -v rewrite.test_service rewrite.test_codex_app_server.CodexAppServer.test_native_command_approval_cancels_exact_request_and_does_not_infer_missing_proof`。
 
+同一回归加入单次允许，隔离 Codex App Server 连续九轮通过。示例审批 `9513f08a-ecd8-4e99-ad9c-1daeee74b2ff` 对应原生回合 `01a2187d-6794-7b82-890e-929f10650f88`。用其他请求的摘要提交会被拒绝。正确摘要获准后原回合只执行一次隔离目录的 `pwd`，退出码为 0，Router 回到 `native_closed`，原决定重投返回同一回执。两次取消及一次超时均无执行记录。实际 App Server、Router 与 Worker，模型及审批者用本地夹具。[允许与原生命令证据](evidence/codex-app-server-approval-accept.json)
+
+macOS 全量通过 255 项，Linux arm64 通过 175 项、跳过 80 项。从 `b7d4682209edcea619d3b166ce2e3d343f9e99d6` 构建 230 文件独立包，SHA-256 为 `675963c342da8fcaf55e48037715da3f102f84943a79b08a051032eb22360fc1`。安装目录以同一命令复跑原生审批和服务的 10 项，文件摘要复验一致。
+
 同版 macOS 200 项全过，Linux arm64 通过 141 项，另 59 项因缺本机宿主跳过。
 
 分叉校验与离线审计进入新发布包 `02dbb460da5cc21cc0627498e01773344c32783e`。从 `2a8f081841310259a48ea9f077297d1440857c56` 出发，用独立原生 Codex 工位实跑混合版本、升级及回退。三阶段都保留原会话的三条输入，仅原成果待验通知 `98014442-52d8-49cf-8da1-3fa821499a78`，快照摘要未变。新包 SHA-256 为 `a6bb3dff99add0aacc2670740ca2801ed5f2c0068d028f4751b3a3cd4e518389`。复跑方法见[发布演练](router-rehearsal.md#保留实际-codex-测试工位的升级与回退)。macOS 197 项全过，Linux arm64 通过 139 项、另 58 项因缺本机宿主跳过。
