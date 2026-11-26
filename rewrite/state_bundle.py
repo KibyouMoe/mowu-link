@@ -58,6 +58,7 @@ OPTIONAL_AGENT_PENDING = {
                                   "SELECT COUNT(*) FROM codex_thread_preparations WHERE state<>'prepared'"),
 }
 WORKER_ADMISSION_PENDING = {
+    "cleanup_waits": ({"cleanup_waits"},"SELECT COUNT(*) FROM cleanup_waits"),
     "local_admission_handoffs": ({"native_handoff_admission"},"""SELECT COUNT(*) FROM native_handoff_admission
         WHERE state IN ('beginning','frozen','ending')"""),
     "native_resume_operations": ({"native_resume"},"SELECT COUNT(*) FROM native_resume WHERE phase<>'done'"),

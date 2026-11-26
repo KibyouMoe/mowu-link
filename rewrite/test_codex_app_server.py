@@ -21,6 +21,7 @@ from .adapter import HostAdapter
 from .approvals import TTL_SECONDS
 from .codex_activation import CodexActivation
 from .codex_app_server import AppServerHost, worker_callbacks
+from .codex_cleanup import SETTINGS as CLEANUP_SETTINGS
 from .codex_display import CodexDisplay
 from .codex_provision import SEED
 from .codex_rpc import NativeRpcRejected, start_app_server
@@ -49,6 +50,7 @@ CODEX = Path("/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.ap
 GOAL_FIXTURE = "Finish the isolated goal check"
 KEEP_FORMAL_HELD = "Keep the isolated order held until an update"
 LINK_OUTAGE_FIXTURE = "Continue this isolated assignment through a link outage"
+CLEANUP_FIXTURE = "Wait for the original assignment control"
 TRAINER_CARD_FIXTURE = "Publish a standalone trainer test question"
 TRAINER_CARD_QUESTIONS = [{"title":"Which isolated route?","options":["North","South"]},
                           {"title":"Leave a note"},{"title":"Optional note"}]
@@ -156,6 +158,7 @@ class Provider(BaseHTTPRequestHandler):
         provision_action = getattr(self.server,"provision_calls_tool",False) and any(
             block.get("text")==SEED for block in latest)
         formal_goal = getattr(self.server,"formal_goal",None)
+        cleanup = getattr(self.server,"cleanup_fixture",None)
         goal_continuation = formal_goal is not None and any(
             part.get("text","").startswith('<codex_internal_context source="goal">') for part in latest)
         if provision_action and not calls:
@@ -166,6 +169,35 @@ class Provider(BaseHTTPRequestHandler):
                     "call_id":"isolated-standalone-trainer","arguments":encode({"questions":TRAINER_CARD_QUESTIONS})}
         elif formal_goal is not None and (goal_continuation or payload and payload.get("kind")=="task"):
             item = self.formal_goal_item(formal_goal,payload,items[user_index+1:],names,goal_continuation)
+        elif cleanup and payload and payload.get("kind")=="task" and payload.get("instructions")==CLEANUP_FIXTURE:
+            if calls:
+                item = {"type":"message","id":"msg_cleanup_probe_done","role":"assistant","status":"completed",
+                        "content":[{"type":"output_text","text":"Workspace tool ran."}]}
+            else:
+                cleanup["task_tools"] = names
+                cleanup["entered"].set()
+                if not cleanup["unsafe"]:
+                    cleanup["release_task"].wait(14)
+                    return
+                item = {"type":"function_call","id":"fc_cleanup_probe","name":"exec_command","call_id":"cleanup_nonpassive",
+                        "arguments":encode({"cmd":"pwd","yield_time_ms":1000})}
+        elif cleanup and payload and payload.get("kind") in ("task.cancel","task.transfer_out") and not calls:
+            outcome = "cancel_confirmed" if payload["kind"]=="task.cancel" else "transfer_confirmed"
+            args = dict(task_id=payload["task_id"],assignment_id=payload["assignment_id"],
+                        outcome=outcome,summary="Original assignment stopped")
+            item = {"type":"function_call","id":"fc_cleanup_native","name":"worker_report",
+                    "call_id":"cleanup_native","arguments":encode(args)}
+        elif cleanup and payload and payload.get("kind") in ("task.cancel","task.transfer_out"):
+            item = {"type":"message","id":"msg_cleanup_closed","role":"assistant","status":"completed",
+                    "content":[{"type":"output_text","text":"Original assignment control acknowledged."}]}
+            if calls==1:
+                result = next(entry["output"] for entry in items[user_index+1:]
+                              if entry.get("type")=="function_call_output" and entry.get("call_id")=="cleanup_native")
+                cleanup["response"].put(result)
+                cleanup["release_control"].wait(14)
+                if cleanup["late_tool"]:
+                    item = {"type":"function_call","id":"fc_cleanup_late_tool","name":"exec_command",
+                            "call_id":"cleanup_late_tool","arguments":encode({"cmd":"pwd","yield_time_ms":1000})}
         elif payload and payload.get("kind")=="task" and payload.get("instructions")==LINK_OUTAGE_FIXTURE:
             item = self.link_outage_item(payload,items[user_index+1:])
         elif approval_prompt and not calls:
@@ -3652,6 +3684,168 @@ class CodexAppServer(unittest.TestCase):
                               "unrelated":foreign,"unrelated_preserved_at_cancel":unrelated,
                               "native_statuses":[turn["status"] for turn in turns],"cleanup_pending":True})
         self.evidence = {"cases":cases,"boundary":"Isolated Router and native App Server, scripted model. No cleanup success inferred."}
+
+    def test_native_readonly_assignment_cleanup_waits_for_control_end_and_preserves_new_holder(self):
+        cases = []
+        for action in ("cancel","transfer","workspace_tool","control_workspace_tool"):
+            with self.subTest(action=action), ExitStack() as resources:
+                root = Path(self.root)/action
+                root.mkdir(mode=0o700)
+                unsafe = action=="workspace_tool"
+                late_tool = action=="control_workspace_tool"
+                mode = "transfer" if action=="transfer" else "cancel"
+                restricted = not (unsafe or late_tool)
+                fixture = self.provider.cleanup_fixture = {
+                    "unsafe":unsafe,"late_tool":late_tool,"entered":Event(),"release_task":Event(),
+                    "release_control":Event(),"response":Queue()}
+                rpc = resources.enter_context(isolated_app_server(root,self.origin,CLEANUP_SETTINGS if restricted else ()))
+                started = rpc.request("thread/start",{"cwd":str(root),"ephemeral":False,
+                    "dynamicTools":[REPORT_TOOL]})["thread"]
+                sid = started["id"]
+                host = AppServerHost(rpc,sid,root/"adapter.db",read_only_assignments=True)
+                clock = Clock()
+                loop = resources.enter_context(Loop.isolated(clock,extra_workers=("tama",)))
+                worker,manager = loop.worker,loop.hermes
+                bound = HostAdapter(root/"adapter.db",host,sid)
+                host_key,source_key = guid(),guid()
+                adapter_url = resources.enter_context(running(serve_adapter(bound,"oguri",{host_key:"worker/oguri"},
+                    ("127.0.0.1",0),None)))
+                worker.adapter = RemoteAdapter(Client(adapter_url,host_key),sid)
+                service = WorkerService(worker,clock)
+                source = resources.enter_context(running(service.listen({source_key:"adapter/oguri"},("127.0.0.1",0),None)))
+                ended = Queue()
+                resources.enter_context(worker_callbacks(host,Client(source,source_key),lambda:None,
+                    notify_terminal=lambda tid,status: ended.put((tid,status))))
+                resources.callback(fixture["release_task"].set)
+                resources.callback(fixture["release_control"].set)
+
+                other_host = FixtureHost(root/"other-host.db","fixture-new-owner")
+                other = Worker(root/"other-worker.db","tama",loop.extra_clients["tama"],
+                               HostAdapter(root/"other-adapter.db",other_host,other_host.session),clock=clock)
+                tid = manager.create(guid(),"Scoped native cleanup",CLEANUP_FIXTURE,"oguri")["task_id"]
+                other.connect()
+                other.poll()
+                service.step()
+                clock.advance(10)
+                other.poll()
+                service.step()
+                service.step()
+                self.assertTrue(fixture["entered"].wait(8))
+                working = manager.inspect(tid)["task"]
+                aid = working["assignment_id"]
+                dispatch, = [frame for frame in loop.wire.frames(0) if frame["kind"]=="task.dispatch"]
+                original = bound.lookup_delivery(dispatch["delivery_id"],{"kind":"task",**dispatch["payload"]},session=sid)
+                self.assertIsNotNone(original)
+                if unsafe:
+                    self.assertIn("exec_command",fixture["task_tools"])
+                    self.assertEqual(ended.get(timeout=8),(original["turn_id"],"completed"))
+                else:
+                    self.assertIn("worker_report",fixture["task_tools"])
+                    if restricted:
+                        self.assertNotIn("exec_command",fixture["task_tools"])
+                    self.assertTrue(host.busy(sid))
+                lost_original = action=="cancel"
+                deferred_stop = []
+                if lost_original:
+                    with bound.db.transaction() as db:
+                        db.execute("UPDATE intents SET receipt=NULL,native_id=NULL WHERE delivery_id=?",(dispatch["delivery_id"],))
+                    stop = host.stop_turn
+                    def delayed_confirmation(session,receipt,*,start):
+                        result = stop(session,receipt,start=start)
+                        if start and not deferred_stop:
+                            deferred_stop.append(True)
+                            return None
+                        return result
+                    host.stop_turn = delayed_confirmation
+                manager.act(guid(),tid,working["revision"],mode,reason="Stop the original isolated assignment",
+                            **({"worker_id":"tama"} if mode=="transfer" else {}))
+                if mode=="transfer":
+                    other.poll()
+                    later = manager.inspect(tid)["task"]
+                    self.assertEqual(other.hold()["held_assignment_id"],later["assignment_id"])
+                    self.assertNotEqual(aid,later["assignment_id"])
+                until = time.monotonic()+8
+                while fixture["response"].empty() and time.monotonic()<until:
+                    service.step()
+                    time.sleep(.03)
+                first = fixture["response"].get_nowait()
+                self.assertEqual(first,"native_cleanup_unconfirmed" if unsafe else "native_cleanup_waiting")
+                if lost_original:
+                    self.assertEqual(deferred_stop,[True])
+                    with bound.db.transaction() as db:
+                        recovered = db.execute("SELECT receipt FROM intents WHERE delivery_id=?",(dispatch["delivery_id"],)).fetchone()[0]
+                    self.assertEqual(json.loads(recovered),original)
+                self.assertEqual([row["assignment_id"] for row in manager.inspect(tid)["pending_cleanup"]],[aid])
+                if not unsafe:
+                    self.assertEqual(ended.get(timeout=8),(original["turn_id"],"interrupted"))
+                with worker.db.transaction() as db:
+                    waiting = db.execute("SELECT * FROM cleanup_waits WHERE assignment_id=?",(aid,)).fetchone()
+                    self.assertEqual(waiting is None,unsafe)
+                    self.assertIsNone(db.execute("SELECT * FROM cleanup_reports WHERE assignment_id=?",(aid,)).fetchone())
+                recovered_wait = False
+                if restricted and mode=="cancel":
+                    worker = service.worker = Worker(worker.db.path,"oguri",worker.router,worker.adapter,clock=clock)
+                    worker.connect()
+                    self.assertEqual(manager.inspect(tid)["task"]["state"],"working")
+                    with worker.db.transaction() as db:
+                        recovered_wait = db.execute("SELECT assignment_id FROM cleanup_waits").fetchone()[0]==aid
+                    self.assertTrue(recovered_wait)
+                fixture["release_control"].set()
+                control_turn,status = ended.get(timeout=8)
+                self.assertEqual(status,"completed")
+                service.step()
+                service.step()
+                details = manager.inspect(tid)
+                with worker.db.transaction() as db:
+                    stored = db.execute("SELECT proof,receipt FROM cleanup_reports WHERE assignment_id=?",(aid,)).fetchone()
+                    self.assertFalse(db.execute("SELECT 1 FROM cleanup_waits").fetchone())
+                history = host.thread(sid,include_turns=True)
+                turns = history["turns"]
+                self.assertEqual([turn["id"] for turn in turns],[original["turn_id"],control_turn])
+                journal = Path(history["path"]).resolve()
+                self.assertTrue(journal.is_relative_to(root.resolve()))
+                policies = {}
+                for line in journal.read_text().splitlines():
+                    entry = json.loads(line)
+                    if entry["type"]=="turn_context":
+                        context = entry["payload"]
+                        policies[context["turn_id"]] = {"sandbox":context["sandbox_policy"]["type"],
+                                                        "approvals":context["approval_policy"]}
+                self.assertEqual(policies,{turn["id"]:{"sandbox":"read-only","approvals":"never"} for turn in turns})
+                source_ids = [item["id"] for turn in turns for item in turn["items"] if item.get("type")=="userMessage"]
+                self.assertEqual(len(source_ids),2)
+                self.assertEqual(source_ids[0],original["native_id"])
+                self.assertIsNone(details["last_report"])
+                if not restricted:
+                    self.assertIsNone(stored)
+                    self.assertEqual(details["task"]["state"],"working")
+                    self.assertEqual(worker.hold()["held_assignment_id"],aid)
+                    self.assertEqual([row["assignment_id"] for row in details["pending_cleanup"]],[aid])
+                    tool_turn = turns[0 if unsafe else 1]
+                    self.assertTrue(any(item["type"]=="commandExecution" for item in tool_turn["items"]))
+                else:
+                    proof,w04 = json.loads(stored["proof"]),json.loads(stored["receipt"])
+                    self.assertEqual((proof["scope"],proof["control_turn_id"]),("codex_read_only",control_turn))
+                    self.assertEqual(proof["stopped_turns"],[{"turn_id":original["turn_id"],"status":"interrupted"}])
+                    self.assertEqual(w04["release_assignment_id"],aid)
+                    self.assertFalse(details["pending_cleanup"])
+                    self.assertIsNone(worker.hold()["held_assignment_id"])
+                    if mode=="cancel":
+                        self.assertEqual(details["task"]["state"],"cancelled")
+                    else:
+                        self.assertEqual(details["task"],later)
+                cases.append({"action":action,"cli_version":started["cliVersion"],"task_id":tid,"assignment_id":aid,
+                    "original":original,"control_turn_id":control_turn,"native_input_ids":source_ids,"first_reply":first,
+                    "sqlite_wait_reopened":recovered_wait,"lost_original_receipt_recovered":lost_original,
+                    "control_retried_after_stop_unconfirmed":bool(deferred_stop),
+                    "native_turn_policies":policies,
+                    "worker_proof":json.loads(stored["proof"]) if stored else None,
+                    "w04":json.loads(stored["receipt"]) if stored else None,"final_task":details["task"],
+                    "final_cleanup":details["pending_cleanup"],"shell_present_in_native_tool_table":"exec_command" in fixture["task_tools"]})
+        if output := os.environ.get("MOWULINK_CODEX_CLEANUP_EVIDENCE"):
+            Path(output).write_text(json.dumps({"recorded_utc":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+                "boundary":"Installed App Server, native cancellation and tool callback on a private test profile;"
+                " model and replacement worker host are fixtures.","cases":cases},ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
 
     def test_model_effort_and_context_read_native_app_server_observations(self):
         self.provider.config_observations = []

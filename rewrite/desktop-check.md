@@ -57,6 +57,17 @@ App Server 原生中止会核对指定线程、活跃回合和唯一原生输入
 
 已另用真正的 Router 取消验证适配器控制入口。原派发仍在执行时，Worker 收到取消会中止精确原生回合并交取消消息。会话忙于其他回合时，宿主拒绝将取消写入该回合，空闲后才能接收。同一时期的新正式输入也在写入前被拒。资源清理待核时 W04 取消确认仍被拒，工位保留原持单。两个场景各连续 12 次通过。[Router 取消记录](evidence/codex-app-server-router-cancel.json)。
 
+专用只读工位可在 `codex-adapter` 加 `--read-only-assignments`。该模式使用只读沙箱，关闭审批、命令执行与原生目标续跑，并要求没有额外 MCP 服务。适配器在写入前记录原派发的读写边界。收到 Agent 的 `cancel_confirmed` 或 `transfer_confirmed` 时，控制回合仍在运行会返回 `native_cleanup_waiting`。Worker 保存原请求，等 App Server 提供完整的终止回合记录再交 W04。旧的无登记回合、受控回合历史不全，以及工单或控制回合有工作区工具记录时，清理保持待核。可写工位仍需独立工作区及清理凭据。
+
+```sh
+python3 -B -m unittest -v \
+  rewrite.test_codex_app_server.CodexAppServer.test_native_readonly_assignment_cleanup_waits_for_control_end_and_preserves_new_holder
+```
+
+四个场景用了实际 App Server、隔离 Router 和本地模型。取消在原控制回合结束后确认。转派仅释放旧派发。带命令记录的原回合和 W04 请求后仍启动命令的控制回合均保持待核。可设置 `MOWULINK_CODEX_CLEANUP_EVIDENCE` 记录原生回合、策略及 Router 回执。[原生清理实测](evidence/codex-readonly-cleanup.json)
+
+取消或转派到达时，原输入可能已进入原生会话，适配器却还没有记下凭据。适配器先按原投递号、正文和会话查回，再中止匹配的回合。尚未确认停止时只重试未写入的控制指令；原输入和已发控制输入仍只查回。丢原凭据的场景经独立 `codex-adapter` 进程和 TLS 实验复跑通过。[独立服务回执](evidence/codex-readonly-cleanup-service.json)
+
 App Server 指定回合的文字投影复用原 Worker 的飞书卡片。独立原生输入保留原空格和换行，最终答复单独成卡。只读取已结束回合，桥接投递、内部工具调用及参数不出卡。稳定事件号令重投返回同一回执。连续 12 次通过。[卡片试验记录](evidence/codex-app-server-native-display.json)。输入为隔离驱动，模型和飞书为夹具；常驻监听、原生图文和飞书云端另验。
 
 独立 App Server 的图文与纯图使用原生 `localImage`。飞书夹具按原消息上传，适配器先核私有缓存的长度与摘要，再递交到固定会话。同条原文和图实际出现在模型请求，原生 App Server 添加的图片元数据单独核对。丢回执后按原客户端标识查回原生输入，两次试验输入分别只出现一条。重复 12 轮通过。[图片试验记录](evidence/codex-app-server-native-media.json)。目前只接已登记图像，模型、飞书为夹具。

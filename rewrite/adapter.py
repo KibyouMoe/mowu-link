@@ -183,14 +183,7 @@ class HostAdapter:
                     receipt = self.host.deliver_media(self.session,did,payload,digest,files)
                 elif (payload.get("kind") in ("task.cancel","task.transfer_out")
                       and callable(getattr(self.host,"deliver_control",None))):
-                    with self.db.transaction() as db:
-                        bindings = db.execute("""SELECT delivery_id,native_id,json_extract(receipt,'$.turn_id') AS turn_id
-                            FROM intents WHERE session=? AND receipt IS NOT NULL
-                            AND json_extract(payload,'$.task_id')=? AND json_extract(payload,'$.assignment_id')=?
-                            AND json_extract(payload,'$.kind') IN ('task','task_update','task_probe','question_answer')
-                            ORDER BY rowid DESC LIMIT 256""",
-                            (self.session,string(payload,"task_id"),string(payload,"assignment_id"))).fetchall()
-                    receipt = self.host.deliver_control(self.session,did,payload,digest,[dict(row) for row in bindings])
+                    receipt = self.host.deliver_control(self.session,did,payload,digest,self.control_bindings(payload))
                 else:
                     receipt = self.host.deliver(self.session, did, payload, digest)
             except Fault as error:
@@ -218,6 +211,28 @@ class HostAdapter:
         else:
             receipt = self.lookup_receipt(did,payload,digest)
         return self.record_receipt(did,payload,digest,receipt)
+
+    def control_bindings(self,payload):
+        recoverable = getattr(self.host,"control_input_kinds",None)
+        kinds = recoverable or ("task","task_update","task_probe","question_answer")
+        slots = ",".join("?" for _ in kinds)
+        with self.db.transaction() as db:
+            rows = db.execute(f"""SELECT delivery_id,payload,native_id,json_extract(receipt,'$.turn_id') AS turn_id
+                FROM intents WHERE session=? AND (? OR receipt IS NOT NULL)
+                AND json_extract(payload,'$.task_id')=? AND json_extract(payload,'$.assignment_id')=?
+                AND json_extract(payload,'$.kind') IN ({slots}) ORDER BY rowid DESC LIMIT 256""",
+                (self.session,bool(recoverable),string(payload,"task_id"),string(payload,"assignment_id"),*kinds)).fetchall()
+        bindings = []
+        for row in rows:
+            did,native,turn = row["delivery_id"],row["native_id"],row["turn_id"]
+            if not turn and recoverable:
+                # Control may arrive while the original input's receipt is still missing.
+                proof = self.lookup_delivery(did,json.loads(row["payload"]),session=self.session)
+                if not proof:
+                    continue
+                native,turn = proof["native_id"],proof["turn_id"]
+            bindings.append({"delivery_id":did,"native_id":native,"turn_id":turn})
+        return bindings
 
     def lookup_delivery(self,did,payload,*,session):
         require(session==self.session,409,"wrong_native_session")
@@ -303,18 +318,25 @@ class HostAdapter:
     def cleanup_evidence(self, assignment_id, kind):
         scoped_lookup = getattr(self.host,"scoped_cleanup_evidence",None)
         if scoped_lookup:
+            kinds = tuple(getattr(self.host,"cleanup_assignment_inputs",("task","task_update","task_probe","question_answer")))
+            slots = ",".join("?" for _ in kinds)
             with self.db.transaction() as db:
-                rows = db.execute("""SELECT delivery_id,digest,native_id,
+                rows = db.execute(f"""SELECT delivery_id,digest,native_id,payload,
                     json_extract(payload,'$.task_id') AS task_id,json_extract(payload,'$.kind') AS kind,
                     json_extract(receipt,'$.turn_id') AS turn_id
                     FROM intents WHERE session=? AND json_extract(payload,'$.assignment_id')=?
                     AND ((json_extract(payload,'$.kind')=? AND receipt IS NOT NULL) OR
-                         json_extract(payload,'$.kind') IN ('task','task_update','task_probe','question_answer'))""",
-                                  (self.session,assignment_id,kind)).fetchall()
+                         json_extract(payload,'$.kind') IN ({slots}))""",
+                                  (self.session,assignment_id,kind,*kinds)).fetchall()
             bindings = [dict(row) for row in rows]
             for ref in bindings:
+                payload = json.loads(ref.pop("payload"))
                 if ref["native_id"] is None and ref["turn_id"] is None:
-                    ref["native_id"] = self.host.delivery_native_id(self.session,ref["delivery_id"],ref["digest"])
+                    identify = getattr(self.host,"delivery_native_id",None)
+                    if identify:
+                        ref["native_id"] = identify(self.session,ref["delivery_id"],ref["digest"])
+                    elif proof := self.lookup_delivery(ref["delivery_id"],payload,session=self.session):
+                        ref.update(native_id=proof["native_id"],turn_id=proof["turn_id"])
                 require(ref["native_id"] and (ref["turn_id"] or ref["kind"]!=kind),409,"native_cleanup_unconfirmed")
             proof = scoped_lookup(self.session,assignment_id,kind,bindings)
         else:

@@ -1,7 +1,7 @@
 [
   {
     "name": "worker_report",
-    "description": "Report completion, a blocker, or a request to continue the formal assignment on this input.",
+    "description": "Report completion, a blocker, a request to continue, or the original assignment's cancellation or transfer. If the host reports native_cleanup_waiting, end the control turn so the Worker can verify its closure and submit the original confirmation.",
     "inputSchema": {
       "type": "object",
       "additionalProperties": false,

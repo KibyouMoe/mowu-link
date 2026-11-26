@@ -4,6 +4,10 @@
 
 ## 检查点与证据
 
+独立 Codex App Server 可显式启用只读派发清理。原工单写入前登记派发、会话、投递号与内容摘要，按原生只读沙箱运行。对端 Agent 发 W04 后，Worker 持久保存清理请求，原控制回合仍在运行时只回待核。控制回合结束后审计完整原生记录，随后以原派发结清取消或转派。工单取消场景重开 Worker SQLite 后继续等待，转派场景保留新持单。两类反例覆盖原工作回合运行命令、控制回合提出 W04 后又运行命令，Router 都保留旧派发待清理。模型和接替工位为夹具。[原生证据](evidence/codex-readonly-cleanup.json) · [启用及复跑](desktop-check.md#独立-app-server-的-w04-协议验收)
+
+另在独立进程遇到原生已收、凭据未落库的取消竞态。现用原投递查回匹配的输入后再中止。中止观察暂缺时允许重试尚未写入的控制指令，完成后原工单输入仍为一条。通过临时 TLS 启动完整适配器，核对开启 `--read-only-assignments`、查回原收件和 W04 后 Router 标已取消。[进程证据](evidence/codex-readonly-cleanup-service.json)
+
 Linux 虚拟机内的 Worker 和 macOS 上的 Codex App Server 分别启动，Worker 向 Router 和适配器、适配器回调 Worker 都走经认证的 TLS。停止原 Worker 进程期间，原生回合继续写完测试文件，首次 W04 待确认。新 Worker 进程复用原库、原端口和会话，仍持原派发。同一原生回合重报后只记一次正式成果和一次通知，Router 保持待验收，原生输入一条。无信任证书的客户端连接失败，平台身份查询运维状态返回 403。模型由本地脚本驱动，物理跨机和飞书云端另验。[证据](evidence/codex-linux-worker-restart.json) · [复跑](README.md#codex-独立工位的断联与恢复)
 
 演练提交 `5fab4d63f965f3d13dfa10400a94b8e75a77470b`。macOS 启用跨虚拟机及 DSH 环境后全量 285 项通过，Linux arm64 187 项通过、98 项依环境跳过。251 文件的发布包摘要为 `595300264b224974198c899b178fe4ad41b1ffb8e03af44295458ab5824f3f5a`。从安装目录实跑包括跨虚拟机重启、两套原生断联的 39 项回归，逐文件摘要回读一致。

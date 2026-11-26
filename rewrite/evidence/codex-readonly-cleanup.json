@@ -1,0 +1,259 @@
+{
+  "recorded_utc": "2026-11-26T18:38:33Z",
+  "boundary": "Installed App Server, native cancellation and tool callback on a private test profile; model and replacement worker host are fixtures.",
+  "cases": [
+    {
+      "action": "cancel",
+      "cli_version": "0.171.0-alpha.13.2",
+      "task_id": "d2aa671d-2e97-47bf-a7a7-62a2d1ba5e18",
+      "assignment_id": "d1aeec12-2841-4187-b53b-4c43a7483e21",
+      "original": {
+        "session": "01a21926-e841-76e0-b533-0765c7527c76",
+        "delivery_id": "ac0dd026-70e5-426d-8d03-05c41d95ce66",
+        "digest": "9e9d4f4831f906ac84b5bbcef64e09cc3fdc8f01a7c5e9c1055e4b28c2e21511",
+        "native_id": "01a21926-e8ce-7a20-b15a-c0f93984ef40",
+        "turn_id": "01a21926-e8c1-7482-9873-4699aff74e1d"
+      },
+      "control_turn_id": "01a21926-e91a-7d90-97dd-404cda67bc9b",
+      "native_input_ids": [
+        "01a21926-e8ce-7a20-b15a-c0f93984ef40",
+        "01a21926-e920-7261-ab33-94fc8f3656cd"
+      ],
+      "first_reply": "native_cleanup_waiting",
+      "sqlite_wait_reopened": true,
+      "lost_original_receipt_recovered": true,
+      "control_retried_after_stop_unconfirmed": true,
+      "native_turn_policies": {
+        "01a21926-e8c1-7482-9873-4699aff74e1d": {
+          "sandbox": "read-only",
+          "approvals": "never"
+        },
+        "01a21926-e91a-7d90-97dd-404cda67bc9b": {
+          "sandbox": "read-only",
+          "approvals": "never"
+        }
+      },
+      "worker_proof": {
+        "assignment_id": "d1aeec12-2841-4187-b53b-4c43a7483e21",
+        "cleaned": true,
+        "control_turn_id": "01a21926-e91a-7d90-97dd-404cda67bc9b",
+        "kind": "task.cancel",
+        "receipt_id": "5ed5324ad135340c1512e4d8f2dc7590be7bd9b5939b89c42915c3a78df7c0f8",
+        "scope": "codex_read_only",
+        "session": "01a21926-e841-76e0-b533-0765c7527c76",
+        "stopped": true,
+        "stopped_turns": [
+          {
+            "status": "interrupted",
+            "turn_id": "01a21926-e8c1-7482-9873-4699aff74e1d"
+          }
+        ],
+        "withdrawn_inputs": []
+      },
+      "w04": {
+        "recorded": true,
+        "release_assignment_id": "d1aeec12-2841-4187-b53b-4c43a7483e21",
+        "task_state": "cancelled"
+      },
+      "final_task": {
+        "assignee_id": "oguri",
+        "assignment_id": null,
+        "holder": {
+          "kind": "router"
+        },
+        "instructions": "Wait for the original assignment control",
+        "revision": 5,
+        "state": "cancelled",
+        "task_id": "d2aa671d-2e97-47bf-a7a7-62a2d1ba5e18",
+        "title": "Scoped native cleanup"
+      },
+      "final_cleanup": [],
+      "shell_present_in_native_tool_table": false
+    },
+    {
+      "action": "transfer",
+      "cli_version": "0.171.0-alpha.13.2",
+      "task_id": "3818fb6b-a2c6-463b-abb5-6551039c6af6",
+      "assignment_id": "506edf54-94c4-4ede-b01e-f812350ee48e",
+      "original": {
+        "session": "01a21926-ead0-76b2-afde-e13bd084c7a8",
+        "delivery_id": "fbf8c944-1fb3-48ee-81a8-70688c6ea3fe",
+        "digest": "f26ffa2aef7f440efd4c49fe754b848f6e4c6b3188a3e1d4859fb522c13b6155",
+        "native_id": "01a21926-eb63-7c90-bdda-0e9076985001",
+        "turn_id": "01a21926-eb56-72f2-a6f5-30253b287bfe"
+      },
+      "control_turn_id": "01a21926-eb8a-73d2-8c4f-38c7db9dcdb8",
+      "native_input_ids": [
+        "01a21926-eb63-7c90-bdda-0e9076985001",
+        "01a21926-eb90-7d31-991a-3c0cd9b466f7"
+      ],
+      "first_reply": "native_cleanup_waiting",
+      "sqlite_wait_reopened": false,
+      "lost_original_receipt_recovered": false,
+      "control_retried_after_stop_unconfirmed": false,
+      "native_turn_policies": {
+        "01a21926-eb56-72f2-a6f5-30253b287bfe": {
+          "sandbox": "read-only",
+          "approvals": "never"
+        },
+        "01a21926-eb8a-73d2-8c4f-38c7db9dcdb8": {
+          "sandbox": "read-only",
+          "approvals": "never"
+        }
+      },
+      "worker_proof": {
+        "assignment_id": "506edf54-94c4-4ede-b01e-f812350ee48e",
+        "cleaned": true,
+        "control_turn_id": "01a21926-eb8a-73d2-8c4f-38c7db9dcdb8",
+        "kind": "task.transfer_out",
+        "receipt_id": "b932923cff3843a2c8357a99837db592481a32178f64970e083c15de2b947bb0",
+        "scope": "codex_read_only",
+        "session": "01a21926-ead0-76b2-afde-e13bd084c7a8",
+        "stopped": true,
+        "stopped_turns": [
+          {
+            "status": "interrupted",
+            "turn_id": "01a21926-eb56-72f2-a6f5-30253b287bfe"
+          }
+        ],
+        "withdrawn_inputs": []
+      },
+      "w04": {
+        "recorded": true,
+        "release_assignment_id": "506edf54-94c4-4ede-b01e-f812350ee48e",
+        "task_state": "working"
+      },
+      "final_task": {
+        "assignee_id": "tama",
+        "assignment_id": "6a3c6c27-8ccf-4f83-bd24-3258053f992e",
+        "holder": {
+          "kind": "worker",
+          "worker_id": "tama"
+        },
+        "instructions": "Wait for the original assignment control",
+        "revision": 6,
+        "state": "working",
+        "task_id": "3818fb6b-a2c6-463b-abb5-6551039c6af6",
+        "title": "Scoped native cleanup"
+      },
+      "final_cleanup": [],
+      "shell_present_in_native_tool_table": false
+    },
+    {
+      "action": "workspace_tool",
+      "cli_version": "0.171.0-alpha.13.2",
+      "task_id": "e385ccb4-9154-4c48-8a4b-4509b36b9242",
+      "assignment_id": "2cd9802d-5aed-4309-8fe4-33c3dccd91c9",
+      "original": {
+        "session": "01a21926-ed5e-7461-bfab-625c8a271b58",
+        "delivery_id": "a941624f-ed27-414a-9ea0-0b4ec9711f0b",
+        "digest": "08e8ce26f06e996231f6ef79cf73d1c14f5ac62494c966e2b6be2d79868435ae",
+        "native_id": "01a21926-edd8-7fa0-a8d2-7c48e50ba6f4",
+        "turn_id": "01a21926-edce-7243-9836-b71d27717586"
+      },
+      "control_turn_id": "01a21926-ef37-7470-ab8f-c45d5e347917",
+      "native_input_ids": [
+        "01a21926-edd8-7fa0-a8d2-7c48e50ba6f4",
+        "01a21926-ef3a-7a93-a5a7-c8325750d0bc"
+      ],
+      "first_reply": "native_cleanup_unconfirmed",
+      "sqlite_wait_reopened": false,
+      "lost_original_receipt_recovered": false,
+      "control_retried_after_stop_unconfirmed": false,
+      "native_turn_policies": {
+        "01a21926-edce-7243-9836-b71d27717586": {
+          "sandbox": "read-only",
+          "approvals": "never"
+        },
+        "01a21926-ef37-7470-ab8f-c45d5e347917": {
+          "sandbox": "read-only",
+          "approvals": "never"
+        }
+      },
+      "worker_proof": null,
+      "w04": null,
+      "final_task": {
+        "assignee_id": "oguri",
+        "assignment_id": "2cd9802d-5aed-4309-8fe4-33c3dccd91c9",
+        "holder": {
+          "kind": "worker",
+          "worker_id": "oguri"
+        },
+        "instructions": "Wait for the original assignment control",
+        "revision": 4,
+        "state": "working",
+        "task_id": "e385ccb4-9154-4c48-8a4b-4509b36b9242",
+        "title": "Scoped native cleanup"
+      },
+      "final_cleanup": [
+        {
+          "assignment_id": "2cd9802d-5aed-4309-8fe4-33c3dccd91c9",
+          "kind": "task.cancel",
+          "new_assignee_id": null,
+          "reason": "Stop the original isolated assignment",
+          "task_id": "e385ccb4-9154-4c48-8a4b-4509b36b9242",
+          "worker_id": "oguri"
+        }
+      ],
+      "shell_present_in_native_tool_table": true
+    },
+    {
+      "action": "control_workspace_tool",
+      "cli_version": "0.171.0-alpha.13.2",
+      "task_id": "7e416411-b8e0-473d-83d0-446bcc9754ef",
+      "assignment_id": "036d3f24-f888-4bd6-acb7-dfb42ffabce8",
+      "original": {
+        "session": "01a21926-f0ea-76c3-b8a3-5f1d4bd9d085",
+        "delivery_id": "269281fa-1e5a-4f91-b000-126376bc8706",
+        "digest": "9282ee0194cc9314069172bbfadddf16b457c0f8ed023c0c8cedea68166dc271",
+        "native_id": "01a21926-f167-7b20-9d52-ee0e74df0b95",
+        "turn_id": "01a21926-f15d-77e3-8dea-a6660d8c6e73"
+      },
+      "control_turn_id": "01a21926-f181-76d2-a2c4-aa0d2efb1225",
+      "native_input_ids": [
+        "01a21926-f167-7b20-9d52-ee0e74df0b95",
+        "01a21926-f187-7823-bb69-53fd55702de0"
+      ],
+      "first_reply": "native_cleanup_waiting",
+      "sqlite_wait_reopened": false,
+      "lost_original_receipt_recovered": false,
+      "control_retried_after_stop_unconfirmed": false,
+      "native_turn_policies": {
+        "01a21926-f15d-77e3-8dea-a6660d8c6e73": {
+          "sandbox": "read-only",
+          "approvals": "never"
+        },
+        "01a21926-f181-76d2-a2c4-aa0d2efb1225": {
+          "sandbox": "read-only",
+          "approvals": "never"
+        }
+      },
+      "worker_proof": null,
+      "w04": null,
+      "final_task": {
+        "assignee_id": "oguri",
+        "assignment_id": "036d3f24-f888-4bd6-acb7-dfb42ffabce8",
+        "holder": {
+          "kind": "worker",
+          "worker_id": "oguri"
+        },
+        "instructions": "Wait for the original assignment control",
+        "revision": 4,
+        "state": "working",
+        "task_id": "7e416411-b8e0-473d-83d0-446bcc9754ef",
+        "title": "Scoped native cleanup"
+      },
+      "final_cleanup": [
+        {
+          "assignment_id": "036d3f24-f888-4bd6-acb7-dfb42ffabce8",
+          "kind": "task.cancel",
+          "new_assignee_id": null,
+          "reason": "Stop the original isolated assignment",
+          "task_id": "7e416411-b8e0-473d-83d0-446bcc9754ef",
+          "worker_id": "oguri"
+        }
+      ],
+      "shell_present_in_native_tool_table": true
+    }
+  ]
+}

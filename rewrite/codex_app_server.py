@@ -13,6 +13,7 @@ import unicodedata
 
 from .agent_tools import TOOLSET
 from .codex_approvals import CodexApprovals
+from .codex_cleanup import CONTROLS, WORK_INPUTS, TURN_POLICY, CodexCleanup
 from .codex_compactions import CodexCompactions
 from .codex_images import CodexImages
 from .codex_questions import CodexQuestions
@@ -34,13 +35,14 @@ CREATE TABLE IF NOT EXISTS codex_fork_history (
 
 class AppServerHost:
     next_turn = True
+    control_input_kinds = sorted(WORK_INPUTS)
     rejects_busy_before_task_write = True
     rejects_busy_before_control_write = True
     rejects_busy_before_queue_write = True
     rejects_busy_before_answer_write = True
 
     def __init__(self, rpc, thread_id, adapter_db=None, public_image_root=None, *,
-                 relay_command_approvals=False,relay_file_approvals=False):
+                 relay_command_approvals=False,relay_file_approvals=False,read_only_assignments=False):
         self.rpc, self.thread_id = rpc,thread_id
         self.write_lock = RLock()
         self.usage = None
@@ -52,6 +54,12 @@ class AppServerHost:
                           if relay_command_approvals or relay_file_approvals else None)
         require(public_image_root is None or adapter_db is not None,422,"native_image_state_required")
         self.images = CodexImages(public_image_root,adapter_db) if public_image_root is not None else None
+        self.assignment_cleanup = None
+        if read_only_assignments:
+            require(adapter_db is not None and not self.approvals,422,"invalid_codex_read_only_assignments")
+            self.assignment_cleanup = CodexCleanup(adapter_db,self)
+            self.scoped_cleanup_evidence = self.assignment_cleanup.prove
+            self.cleanup_assignment_inputs = sorted(WORK_INPUTS|CONTROLS)
 
     def bind_fork_history(self,adapter_db,resumed):
         parent = resumed.get("forkedFromId")
@@ -351,8 +359,11 @@ class AppServerHost:
             elif payload["kind"]=="trainer_answer":
                 require(payload["session"]==session,409,"wrong_native_session")
                 require(not self.busy(session),409,"native_answer_not_admitted_busy")
-            turn = self.request("turn/start",{"threadId":session,"input":blocks,
-                                              "clientUserMessageId":"mowulink-"+did})["turn"]
+            args = {"threadId":session,"input":blocks,"clientUserMessageId":"mowulink-"+did}
+            if self.assignment_cleanup and payload["kind"] in WORK_INPUTS|CONTROLS:
+                self.assignment_cleanup.admit(session,did,payload,digest)
+                args.update(TURN_POLICY)
+            turn = self.request("turn/start",args)["turn"]
             proof = self.lookup_inputs(session,did,payload,digest,blocks)
             require(not proof or proof["turn_id"]==turn["id"],409,"host_receipt_mismatch")
         return proof
@@ -367,10 +378,8 @@ class AppServerHost:
                 known = next((item for item in bindings if len(users)==1
                               and item["turn_id"]==current["id"] and item["native_id"]==users[0]["id"]),None)
                 require(known,409,"native_control_not_admitted_busy")
-                if not self.stop_turn(session,{"session":session,**known},start=True):
-                    return None
-                if self.busy(session):
-                    return None
+                stop = self.stop_turn(session,{"session":session,**known},start=True)
+                require(stop and not self.busy(session),409,"native_control_not_admitted_busy")
             else:
                 require(thread["status"]["type"]=="idle",503,"native_agent_unavailable")
             return self.deliver(session,did,payload,digest)

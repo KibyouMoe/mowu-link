@@ -1,0 +1,37 @@
+{
+  "thread_id": "01a21927-722c-7e53-8279-c66583a91847",
+  "task_id": "a054ae5d-03ab-417f-82db-a87de55c1501",
+  "assignment_id": "9073be71-b6bc-4477-977a-513ca3d0042f",
+  "tls": true,
+  "shell_listed": false,
+  "first_reply": "native_cleanup_waiting",
+  "recovered_dispatch_receipt": {
+    "delivery_id": "86e09f12-5cd6-4653-87e6-feef07bf8926",
+    "digest": "2685fa2812796e087ba6fc2a4419df3f8661c1f8ee98982c2c7f549cd08af256",
+    "native_id": "01a21927-734a-79a1-bdd2-50281c9d8b09",
+    "session": "01a21927-722c-7e53-8279-c66583a91847",
+    "turn_id": "01a21927-7345-7490-8599-2265b19df812"
+  },
+  "proof": {
+    "assignment_id": "9073be71-b6bc-4477-977a-513ca3d0042f",
+    "cleaned": true,
+    "control_turn_id": "01a21927-7364-7681-9915-0058ff24ac45",
+    "kind": "task.cancel",
+    "receipt_id": "b65bc47edfd3673bbb9dde567838681796e67974985d6bd754e7d2d48716d8e6",
+    "scope": "codex_read_only",
+    "session": "01a21927-722c-7e53-8279-c66583a91847",
+    "stopped": true,
+    "stopped_turns": [
+      {
+        "status": "interrupted",
+        "turn_id": "01a21927-7345-7490-8599-2265b19df812"
+      }
+    ],
+    "withdrawn_inputs": []
+  },
+  "w04": {
+    "recorded": true,
+    "release_assignment_id": "9073be71-b6bc-4477-977a-513ca3d0042f",
+    "task_state": "cancelled"
+  }
+}

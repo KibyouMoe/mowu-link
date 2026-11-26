@@ -104,12 +104,16 @@ def serve(args,stack):
     elif args.component == "codex-adapter":
         from .codex_activation import CodexActivation, pinned_thread
         from .codex_app_server import AppServerHost, worker_callbacks
+        from .codex_cleanup import SETTINGS as CLEANUP_SETTINGS
         from .codex_display import CodexDisplay
         from .codex_rpc import require_test_account, start_app_server
         from .codex_thread_preparation import CodexThreadPreparation
         from .native_files import NativeFiles
         client = connection(args.worker_connection)
-        rpc = stack.enter_context(start_app_server(args.codex_binary,args.codex_profile,args.cwd))
+        if args.read_only_assignments:
+            require(not (args.relay_command_approvals or args.relay_file_approvals),422,"invalid_codex_read_only_assignments")
+        rpc = stack.enter_context(start_app_server(args.codex_binary,args.codex_profile,args.cwd,
+                                                  CLEANUP_SETTINGS if args.read_only_assignments else ()))
         require_test_account(rpc)
         if args.managed_sessions_dir:
             from .codex_session_family import CodexSessionFamily
@@ -122,7 +126,8 @@ def serve(args,stack):
         else:
             native = AppServerHost(rpc,args.session,args.db,args.public_image_root,
                                    relay_command_approvals=args.relay_command_approvals,
-                                   relay_file_approvals=args.relay_file_approvals)
+                                   relay_file_approvals=args.relay_file_approvals,
+                                   read_only_assignments=args.read_only_assignments)
             pinned_thread(native,args.cwd.resolve())
             if not args.resume_on_handoff:
                 resumed = rpc.request("thread/resume",{"threadId":args.session,"cwd":str(args.cwd)})["thread"]
@@ -224,6 +229,8 @@ def main():
                                    help="relay exact native file changes to the configured Router operator")
             component.add_argument("--prepare-sessions",action="store_true",
                                    help="allow authenticated preparation of independent read-only Codex sessions")
+            component.add_argument("--read-only-assignments",action="store_true",
+                                   help="verify cleanup for restricted Codex assignments without workspace tools")
         if name == "worker":
             component.add_argument("--router-connection",required=True,type=Path)
             component.add_argument("--adapter-connection",required=True,type=Path)

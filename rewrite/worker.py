@@ -49,6 +49,10 @@ CREATE TABLE IF NOT EXISTS cleanup_reports (
     assignment_id TEXT NOT NULL, kind TEXT NOT NULL, task_id TEXT NOT NULL, body TEXT NOT NULL,
     proof TEXT NOT NULL, receipt TEXT, PRIMARY KEY(assignment_id,kind)
 );
+CREATE TABLE IF NOT EXISTS cleanup_waits (
+    assignment_id TEXT NOT NULL, kind TEXT NOT NULL, task_id TEXT NOT NULL, outcome TEXT NOT NULL,
+    PRIMARY KEY(assignment_id,kind)
+);
 """
 
 
@@ -619,7 +623,11 @@ class Worker:
                 try:
                     receipt = self.confirm_cleanup(task_id, assignment_id, kind, outcome)
                 except Fault as error:
-                    if error.code=="native_cleanup_unconfirmed":
+                    if error.code=="native_cleanup_waiting":
+                        with self.db.transaction() as db:
+                            db.execute("INSERT OR IGNORE INTO cleanup_waits VALUES (?,?,?,?)",
+                                       (assignment_id,kind,task_id,outcome))
+                    if error.code in ("native_cleanup_unconfirmed","native_cleanup_waiting"):
                         self.display_cleanup(task_id,assignment_id,kind,"pending","原派发停止与清理仍待确认。")
                     raise
                 self.display_cleanup(task_id,assignment_id,kind,"recorded","Router 已收到原派发的清理确认。")
@@ -784,3 +792,20 @@ class Worker:
             except Fault as error:
                 if error.code != "stale_assignment":
                     raise
+        self.flush_cleanup_waits()
+
+    def flush_cleanup_waits(self):
+        with self.db.transaction() as db:
+            pending = db.execute("SELECT * FROM cleanup_waits ORDER BY rowid").fetchall()
+        for aid,kind,tid,outcome in pending:
+            try:
+                self.confirm_cleanup(tid,aid,kind,outcome)
+            except Fault as error:
+                if error.retryable:
+                    continue
+                if error.code not in ("stale_assignment","native_cleanup_unconfirmed"):
+                    raise
+            else:
+                self.display_cleanup(tid,aid,kind,"recorded","Router 已收到原派发的清理确认。")
+            with self.db.transaction() as db:
+                db.execute("DELETE FROM cleanup_waits WHERE assignment_id=? AND kind=?",(aid,kind))
