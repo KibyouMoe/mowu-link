@@ -6,6 +6,9 @@
 
 隔离 DSH 工位从经审核的 Git 归档给两张工单分别创建可写项目副本。首次导入的 CLI 成功回包丢失后，原工具报告待核，重试在同一容器内使用已经完整导入的目录。两张单都从原始内容开始，执行快照中的测试脚本，交回改动文件，并按各自的 W04 回执回收容器。源目录未修改，待验收各有一条通知。独立反例核对摘要不匹配、越界路径、符号链接和硬链接均不发布项目目录。重启原容器后，写入和导出都被拒，未发成果，原派发按取消收尾。实际 DSH 宿主、Linux 引擎、Git 及 Router 实跑，模型为本地脚本。[项目快照与故障实测](evidence/dsh-workspace-project-seed.json) · [复跑命令](README.md#dsh-固定会话与飞书卡片)
 
+实现提交 `6f86d4da953408ed1122234de4a7b18247425c54`。macOS 全量 274 项通过。Linux arm64 实跑 183 项，按环境跳过 91 项。导入丢回执与引擎重启分别连续复跑 3 次通过。以该提交构建 242 文件的发行包，SHA-256 为 `873f10222be0f82896112859bbd4d6431c2a7ae48fa5a88bd03a5d0fc240bfac`，安装后 33 项通过，安装树摘要回读一致。用 `python3 -B -m rewrite.release_check --repository . --component worker-pair --previous 0d9f82b675c8d0d4a724733a34ca75d9e26168b8 --new 6f86d4da953408ed1122234de4a7b18247425c54` 跑通隔离升级和回退，夹具宿主各阶段保持一条原生收件。限定项目规模与类型见运行说明。当前引擎挂载工作区实测为 `rw,nosuid,nodev,noexec`，运行项目脚本可走镜像内解释器，依赖直接执行构建产物的项目仍需验证。
+
+
 DSH 容器工位通过原生工具导出 691200 字节的二进制文件。第一块上传回执丢失后按原偏移续传，验收人只在 W04 写入后读到文件，字节和 SHA-256 均匹配。符号链接被拒。Router 的 W04 已记账、Worker 回执在途中丢失时，容器保持运行，原绑定不能切换。重建 Worker 后以原报告和原幂等键取回回执，Router 仍为待验收且只发一次通知，原生输入仍为一条，原容器在回执落库后移除。真实 DSH AgentLoop、Linux Docker、SQLite 和测试 HTTP 服务实跑，模型由本地脚本驱动。[原生证据](evidence/dsh-workspace-artifacts.json) · [复跑入口](README.md#dsh-固定会话与飞书卡片)
 
 实现提交 `f33f68f6ee7ddf5f403f335c426497643aa2388a`。macOS 全量 271 项通过。Linux arm64 实跑 183 项、按环境跳过 88 项。原生附件测试连续复跑 4 次通过。从该提交构建并安装 240 文件的发行包，校验摘要为 `5a420fc9ae9457ac4ce307de9d5d4ea067e256c94a0f16862fa0ad9701cb707d`，安装后专项 31 项通过，回读安装包校验一致。用 `python3 -B -m rewrite.release_check --repository . --component worker-pair --previous c448c2ff36a40e679d9c6968912e56299c158c34 --new f33f68f6ee7ddf5f403f335c426497643aa2388a` 验证 Worker 与适配器的隔离升级和回退，原生收件始终一条。此演练的宿主是夹具。仍需核对普通项目工作目录、实际测试账号、飞书云端和跨机工作区恢复。

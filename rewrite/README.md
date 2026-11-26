@@ -115,7 +115,7 @@ python3 -B -m unittest -v rewrite.test_question_cards \
 
 需要在隔离工位处理项目文件时，可在 `assignment_container` 增加 `"seed":{"archive":"/absolute/private/project.tar","sha256":"<64 位 SHA-256>"}`。由工位操作者审核并固定项目版本，再用 `git archive --format=tar <完整提交SHA>` 生成不超过 24 MiB 的未压缩归档。用仅所有者可读写的文件保存归档；可在生成目录先执行 `umask 077`，用 `shasum -a 256` 核对摘要。归档最多 4096 个普通文件或目录条目，拒绝符号链接、硬链接、路径越界、`.git` 和特殊文件。模型的第一条工作区命令在副本完整导入并核实后运行。每个派发从同一固定版本各复制一份到 `/workspace/project`。源工作树继续由原操作者管理，改动由 `worker_workspace_export` 和 W04 交回。
 
-归档导入回执丢失时，同派发可重试初始化，留在容器中的已发布目录会复用。由工单工具修改过的容器如果重启，原始启动标识不匹配时拒绝写入和导出，不能用快照恢复已丢失的改动。取消仍按原容器和原派发验证清理。一个工位使用一个经审核的项目快照。轮换快照前核对旧派发工作区已回收，并保留原包及摘要以支持未完成初始化查回。现役项目使用、构建依赖与文件回合并由各项目另验。
+归档导入回执丢失时，同派发可重试初始化，留在容器中的已发布目录会复用。由工单工具修改过的容器如果重启，原始启动标识不匹配时拒绝写入和导出，不能用快照恢复已丢失的改动。取消仍按原容器和原派发验证清理。一个工位使用一个经审核的项目快照。轮换快照前核对旧派发工作区已回收，并保留原包及摘要以支持未完成初始化查回。现役项目使用、构建依赖与文件回合并由各项目另验。实测当前 Linux 引擎给工作目录带有 `noexec`，镜像内解释器可运行脚本，直接执行工作目录中的文件被拒。
 
 复跑 `MOWULINK_DSH_CONTAINER_IMAGE=<已有镜像完整ID> python3 -B -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_dsh_workspace_seeds_private_project_and_recovers_seed_ack rewrite.test_dsh_native_loop.NativeLoop.test_dsh_workspace_refuses_unverified_or_escaping_project_seeds rewrite.test_dsh_native_loop.NativeLoop.test_dsh_workspace_restart_cannot_reseed_or_confirm_lost_work`。[项目快照实测](evidence/dsh-workspace-project-seed.json)
 
