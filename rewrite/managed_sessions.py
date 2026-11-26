@@ -17,6 +17,11 @@ CREATE TABLE IF NOT EXISTS codex_managed_session_root(
     slot INTEGER PRIMARY KEY CHECK(slot=1), session TEXT NOT NULL, directory TEXT NOT NULL
 );
 """
+DSH_FAMILY_SCHEMA = FAMILY_SCHEMA.replace("codex_managed_session_root","dsh_managed_session_root")
+
+
+def native_session_id(value):
+    return isinstance(value,str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,199}",value) is not None
 
 
 def private_registry(path):
@@ -47,7 +52,7 @@ def enrollment_fields(document):
     require(isinstance(document,dict) and set(document)=={"source","operation_id","session","callback_token"},
             422,"invalid_native_enrollment")
     source,operation,session,token = (document[k] for k in ("source","operation_id","session","callback_token"))
-    require(all(valid_guid(value) for value in (source,operation,session)) and source!=session
+    require(native_session_id(source) and valid_guid(operation) and valid_guid(session) and source!=session
             and isinstance(token,str) and re.fullmatch(r"[a-f0-9]{64}",token),422,"invalid_native_enrollment")
     return source,operation,session,token
 

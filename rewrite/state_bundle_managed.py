@@ -7,11 +7,14 @@ import re
 import sqlite3
 
 from .cutover import digest, readonly
-from .managed_sessions import derive_callback, enrollment_fields, private_registry, read_enrollment
+from .managed_sessions import derive_callback, enrollment_fields, native_session_id, private_registry, read_enrollment
 from .managed_sessions import session_callback_key, token_digest, write_enrollment
 from .messages import valid_guid
 from .storage import state_writer
 from .worker_resume import CREATION
+
+
+ENGINES = ("codex","dsh")
 
 
 def registry_name(worker_id):
@@ -22,18 +25,27 @@ def has_table(db,name):
     return db.execute("SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?",(name,)).fetchone() is not None
 
 
+def registry_engine(db):
+    present = [name for name in ENGINES if has_table(db,name+"_managed_session_root")]
+    if len(present)>1:
+        raise ValueError("native ledger has conflicting engine markers")
+    return present[0] if present else None
+
+
 def root_bindings(sources):
     result = {}
     for label,path in sources.items():
         if not label.startswith("agent:"):
             continue
         with closing(readonly(Path(path))) as db:
-            if not has_table(db,"codex_managed_session_root"):
+            engine = registry_engine(db)
+            if engine is None:
                 continue
-            marker = db.execute("SELECT session,directory FROM codex_managed_session_root WHERE slot=1").fetchone()
-            if not marker or not valid_guid(marker[0]) or not Path(marker[1]).is_absolute():
+            marker = db.execute(f"SELECT session,directory FROM {engine}_managed_session_root WHERE slot=1").fetchone()
+            is_session = valid_guid if engine=="codex" else native_session_id
+            if not marker or not is_session(marker[0]) or not Path(marker[1]).is_absolute():
                 raise ValueError("invalid managed native root binding: "+label)
-            result[label.partition(":")[2]] = tuple(marker)
+            result[label.partition(":")[2]] = (*marker,engine)
     return result
 
 
@@ -46,7 +58,7 @@ def collect(sources,paths,stack,lock_database):
     if set(paths)!=set(roots):
         raise ValueError("state file has an external native session registry; supply its exact private directory")
     inventory = {}
-    for wid,(anchor,recorded) in sorted(roots.items()):
+    for wid,(anchor,recorded,_engine) in sorted(roots.items()):
         directory = private_registry(Path(paths[wid]))
         if str(directory.resolve())!=recorded:
             raise ValueError("native registry path differs from the adapter pin: "+wid)
@@ -68,7 +80,7 @@ def collect(sources,paths,stack,lock_database):
 def valid_entry(sid,entry):
     return (valid_guid(sid) and isinstance(entry,dict)
             and set(entry)=={"source","operation_id","callback_digest","size","sha256"}
-            and valid_guid(entry["source"]) and valid_guid(entry["operation_id"])
+            and native_session_id(entry["source"]) and valid_guid(entry["operation_id"])
             and type(entry["size"]) is int and entry["size"]>0
             and all(isinstance(entry[n],str) and re.fullmatch(r"[a-f0-9]{64}",entry[n])
                     for n in ("callback_digest","sha256")))
@@ -98,7 +110,7 @@ def validate(sources,inventory,paths,*,health=None):
                 check_active_binding(db,wid,{anchor,*children})
                 ledgers = {anchor:Path(sources["agent:"+wid]),
                            **{sid:Path(paths[wid])/(sid+".sqlite3") for sid in children}}
-                verify_lineage(db,wid,anchor,children,ledgers)
+                verify_lineage(db,wid,anchor,children,ledgers,roots[wid][2])
 
 
 def ensure_worker_rows(db,wid,group):
@@ -121,7 +133,7 @@ def check_active_binding(db,wid,sessions):
         if pending and (pending[0] not in sessions or pending[1] not in sessions | {""}):
             raise ValueError("pending native handoff goes outside the captured managed registry: "+wid)
 
-def verify_lineage(worker,wid,anchor,children,ledgers):
+def verify_lineage(worker,wid,anchor,children,ledgers,engine):
     connected = {anchor}
     waiting = set(children)
     if anchor in waiting:
@@ -133,7 +145,7 @@ def verify_lineage(worker,wid,anchor,children,ledgers):
         if not available:
             raise ValueError("managed session has no enrolled parent: "+wid)
         for sid in available:
-            verify_child(worker,wid,sid,children[sid],ledgers)
+            verify_child(worker,wid,sid,children[sid],ledgers,engine)
         waiting.difference_update(available)
         connected.update(available)
 
@@ -144,7 +156,7 @@ def verify_pin(db,session,wid):
         raise ValueError("native ledger belongs to another session: "+wid)
 
 
-def verify_child(worker,wid,sid,entry,ledgers):
+def verify_child(worker,wid,sid,entry,ledgers,engine):
     source,op = entry["source"],entry["operation_id"]
     # An enrollment may exist before its HTTP receipt reached the Worker. The
     # original command still identifies it, without granting it active binding.
@@ -158,7 +170,7 @@ def verify_child(worker,wid,sid,entry,ledgers):
         raise ValueError("native enrollment is missing its committed Worker record: "+wid)
     kind = CREATION[resume["command"]]
     with closing(readonly(ledgers[source])) as db:
-        row = db.execute("""SELECT receipt FROM codex_thread_preparations WHERE operation_id=? AND source_session=?
+        row = db.execute(f"""SELECT receipt FROM {engine}_thread_preparations WHERE operation_id=? AND source_session=?
                             AND native_session=? AND kind=? AND state='prepared'""",(op,source,sid,kind)).fetchone()
     proof = json.loads(row[0]) if row else None
     if not isinstance(proof,dict) or any(proof.get(k)!=v for k,v in {
@@ -209,5 +221,8 @@ def restore_enrollments(stage,destination,inventory,keys,agent_path):
 
 def relocate_root(path,directory):
     with closing(sqlite3.connect(path,timeout=0)) as db, db:
-        db.execute("UPDATE codex_managed_session_root SET directory=? WHERE slot=1 AND directory<>?",
+        engine = registry_engine(db)
+        if engine is None:
+            raise ValueError("missing managed native root")
+        db.execute(f"UPDATE {engine}_managed_session_root SET directory=? WHERE slot=1 AND directory<>?",
                    (str(directory),str(directory)))

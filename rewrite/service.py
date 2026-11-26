@@ -79,12 +79,21 @@ def serve(args,stack):
         from .dsh_port import DshActivation, DshHost, tool_listener
         from .native_files import NativeFiles
         client = connection(args.worker_connection)
-        native = DshHost(args.runtime_dir)
-        adapter = HostAdapter(args.db,native,args.session,NativeFiles(args.runtime_dir/"media",client))
-        activation = DshActivation(native,args.session) if args.resume_on_handoff else None
-        callbacks = tool_listener(args.runtime_dir,adapter,client)
-        public_output = publishing(adapter,client,args.worker_id,activation=activation)
-        listener = serve_adapter(adapter,args.worker_id,identities,address,ctx,activation=activation)
+        if args.managed_sessions_dir:
+            from .dsh_session_family import DshSessionFamily
+
+            require(not args.resume_on_handoff,422,"invalid_managed_session_configuration")
+            family = stack.enter_context(DshSessionFamily(client,args).run())
+            root = family.port(args.session)
+            listener = serve_adapter(root.adapter,args.worker_id,identities,address,ctx,
+                                     activation=root.activation,preparation=root.preparation,family=family)
+        else:
+            native = DshHost(args.runtime_dir)
+            adapter = HostAdapter(args.db,native,args.session,NativeFiles(args.runtime_dir/"media",client))
+            activation = DshActivation(native,args.session) if args.resume_on_handoff else None
+            callbacks = tool_listener(args.runtime_dir,adapter,client)
+            public_output = publishing(adapter,client,args.worker_id,activation=activation)
+            listener = serve_adapter(adapter,args.worker_id,identities,address,ctx,activation=activation)
     elif args.component == "codex-adapter":
         from .codex_activation import CodexActivation, pinned_thread
         from .codex_app_server import AppServerHost, worker_callbacks
@@ -185,6 +194,8 @@ def main():
         if name in ("codex-adapter","dsh-adapter"):
             component.add_argument("--resume-on-handoff",action="store_true",
                                    help="wait for the Worker to explicitly restore this pinned native session")
+            component.add_argument("--managed-sessions-dir",type=Path,
+                                   help="absolute owner-private directory hosting enrolled native session ledgers")
         if name == "codex-adapter":
             for flag in ("codex-binary","codex-profile","cwd"):
                 component.add_argument("--"+flag,required=True,type=Path)
@@ -194,8 +205,6 @@ def main():
                                    help="relay one-time command decisions through the configured Router operator")
             component.add_argument("--prepare-sessions",action="store_true",
                                    help="allow authenticated preparation of independent read-only Codex sessions")
-            component.add_argument("--managed-sessions-dir",type=Path,
-                                   help="absolute owner-private directory hosting enrolled Codex session ledgers")
         if name == "worker":
             component.add_argument("--router-connection",required=True,type=Path)
             component.add_argument("--adapter-connection",required=True,type=Path)

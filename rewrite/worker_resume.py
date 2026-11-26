@@ -31,6 +31,7 @@ REFUSED = {
 ORIGINAL_SESSION = {
     "cancelling":"已取消切换，继续使用原会话。",
     "goal_active":"目标会话有正在进行的原生目标。原会话绑定保留。",
+    "source_changed":"原会话已变化，继续使用原会话。要分支请重新发送 /fork。",
 }
 CREATION = {"/new":"new","/clear":"new","/fork":"fork"}
 
@@ -174,7 +175,12 @@ def advance(service,row):
             source_info,source_busy = observe(w.adapter,source)
             require(not source_busy,503,"native_switch_waiting_for_idle")
             if not target:
-                target = prepare_target(service,row,source_info)
+                try:
+                    target = prepare_target(service,row,source_info)
+                except Fault as error:
+                    if error.code=="native_preparation_source_changed":
+                        return keep_source(w,row,"source_changed")
+                    raise
             try:
                 _info,target_busy = observe(w.resume_targets[target],target,operation_id=row["handoff_id"])
             except Fault as error:

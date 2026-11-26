@@ -39,7 +39,7 @@
 | 宿主或入口 | 已有证据 | 待核 |
 | --- | --- | --- |
 | 通用 Worker | `/help`、`/start`、`/commands`、`/status`、`/list` 测试平台端已核。原消息号按原回执重投。DSH 与独立 Codex App Server 通过原生 `/queue` 顺序与丢回执查证。 | 实际 Feishu 私聊的所有指令入口与交互。 |
-| DSH | `/context`、`/model`、`/effort`、`/queue`、`/goal`、`/compact`、`/stop` 有 SDK 或真循环证据。`/resume` 可浏览、搜索与按编号切到已运行的独立 DSH。已配置的 DSH 冷会话可在冻结派发后恢复，丢回执按原号查回，原生 Agent 两次报成果只留一条待验通知。 | 真实飞书操作、`/new`、`/fork`、新会话初始模型与思考强度、前台阻塞题、原生清理凭据。 |
+| DSH | `/context`、`/model`、`/effort`、`/queue`、`/goal`、`/compact`、`/stop` 有 SDK 或真循环证据。`/resume` 支持浏览与冷会话恢复。`/new`、`/clear` 和 `/fork` 经隔离 SDK 自动登记换绑，原生验证默认和继承的模型力度。原生写入、登记丢回执均按原号查回，重开只恢复当前绑定。两张正式单各有一条待验通知。 | 真实飞书操作、真实 DSH 模型与客户端验收、前台阻塞题、原生清理凭据及跨机原生历史恢复。 |
 | Codex Desktop 与独立 App Server | Desktop 真实独立会话收到一条正式单，重投仍一条。独立原生 App Server 接到本地脚本模型的动态工具调用，实际完成 W04，重试回同一结果。`/model`、`/effort`、`/context` 与 `/stop` 已核原生回包。独立只读工位从飞书测试消息经 `/new`、`/clear`、`/fork` 自动登记和换绑，原消息重试复用同一会话，丢回执和重开皆已实测。原生分叉的父会话历史没有成为子会话新收件。自动登记目录已纳入离线迁移与回退。 | Desktop 测试项目未列出 `worker_report`，默认 App Server 测试 profile 无登录。两条路径的真实模型 W04 仍需各自的授权测试条件。真实账号的请求强度、跨提供方选择、真实飞书操作、Desktop 冷会话。 |
 | Antigravity | 已核安装版本 2.32.1 及官方会话钩子、转录、MCP 入口。CLI 可克隆 App 对话供独立宿主使用，Remote Control 提供人工访问。 | 指定原桌面会话的后台唤醒、停止、真实 Gemini 回报及读写验收。CLI 或远程托管须先确认允许改用独立宿主。[兼容性核对](antigravity-compatibility.md) |
 | 授权和维护 | 认证的 Router/Worker/适配器隔离已验证；普通题卡不能执行原生授权。 | 旧 `/approvals`、`/commands`、`/ops/services` 中实际仍在使用的入口，与宿主授权逐项验证。 |

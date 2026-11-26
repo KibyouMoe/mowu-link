@@ -140,6 +140,8 @@ python3 -B -m rewrite.state_bundle rollback --snapshot ./snapshot --manifest-sha
 
 回退核对试用库和所有子会话账本。若试用已写入成果、投递或其他状态，先逐笔核对并保留试用数据；旧快照回退会拒绝覆盖这段进展。独立 App Server 已实测从快照恢复丢失登记回执、让前一版适配器接回原持单并交件、拒绝丢弃试用成果。原生 profile 在同一台机器独立保存，模型为脚本驱动。[恢复与回退证据](evidence/codex-managed-bundle-rollback.json)
 
+DSH 自动登记工位使用相同命令。停止隔离宿主插件后再采集。启动恢复目录前，同时把插件的 `managed_sessions_dir` 与适配器的 `--managed-sessions-dir` 指向同一个恢复路径。原生历史目录另行保留。隔离演练已核新开、分支与清空的三个 SQLite 子库在恢复和回退后逐字节一致。[DSH 换绑与快照证据](evidence/dsh-managed-native-sessions.json)
+
 ### Worker 和适配器逐个升级
 
 ```sh

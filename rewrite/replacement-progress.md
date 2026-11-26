@@ -4,6 +4,12 @@
 
 ## 检查点与证据
 
+DSH 的 `/new`、`/clear`、`/fork` 已经走 Worker 的正式交接。原生空会话用工位默认配置，分支保留父会话标识、已落盘的历史边界和当前模型力度。写入与登记分别按原操作留证。隔离 SDK 实测原生已落盘而 IPC 回执丢失，重开查回同一会话。原生未写入且父会话已变化时，拒绝按旧边界建分支。Worker 收到拒绝后保留当前绑定并解除派发暂停。[原生回执证据](evidence/dsh-native-preparation-recovery.json)
+
+登记回执丢失时 Router 仍暂停派发，重开后沿用原登记。旧会话回调被拒。新会话和分支各接一张正式单，每张单两次原生 `worker_report` 调用只留一条待验通知。分支的父历史没有变成新的原生输入。三个子会话的适配器账本从快照恢复和回退均逐字节一致。宿主是本机安装的独立 DSH SDK，TLS、Router 和 Worker 实跑，模型及飞书为夹具。真实 DSH 客户端、飞书与跨机原生历史仍待验。[换绑、W04 和快照证据](evidence/dsh-managed-native-sessions.json)
+
+复跑 `python3 -B -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_managed_dsh_creates_and_forks_through_the_worker_and_recovers_a_lost_reply rewrite.test_dsh_native_loop.NativeLoop.test_dsh_preparation_reopens_the_exact_native_child_after_ipc_ack_loss`。
+
 自动登记工位的离线快照已收录全部子会话账本，核对 Worker 操作号、原生准备记录、子库会话和回调摘要。仅使用原私有密钥在目标目录重建回调身份。漏登记目录、注册表或子库被占用、错父会话、错密钥及试用库已变动均会拒绝。恢复运营前可审计子库的原收件和待核项。[恢复与回退操作](router-rehearsal.md#codex-自动登记工位的恢复与回退)
 
 隔离 Router 与真实 Codex App Server 从落账后丢登记回执的快照恢复，找回同一操作和会话。前一版适配器 `4e7c646e060ceb4a3abf7430e0ac3f4b49a72f09` 从回退目录接回同一持单，重投不产生第二条原生输入。原单更新后，两个原生工具回包只落一条成果和一条待验通知。带新成果的试用库拒绝覆盖回退。前一版适配器实跑 12 轮。原生 profile 保留在同机独立目录，模型为本地夹具，飞书线上未验。[快照、派发、回合与通知证据](evidence/codex-managed-bundle-rollback.json)

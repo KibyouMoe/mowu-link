@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { readFileSync, lstatSync } from 'node:fs';
+import { readFileSync, readdirSync, lstatSync, realpathSync, constants } from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
@@ -11,6 +11,7 @@ import { compaction } from './compaction.mjs';
 import { questionRequest } from './questions.mjs';
 import { browseSessions, catalogSessions } from './catalog.mjs';
 import { approvalProof, installCommandApprovals } from './command-approvals.mjs';
+import { guid, prepareSession, selection } from './session-preparation.mjs';
 
 const tools = JSON.parse(readFileSync(new URL('../../agent-toolset.json', import.meta.url)));
 const sha = value => createHash('sha256').update(value).digest('hex');
@@ -308,56 +309,80 @@ function installBoundTools(ctx,port,directory,relay_command_approvals) {
 }
 
 export async function apply(ctx, {session, directory, catalog_sessions=[], relay_command_approvals=false,
-                                 resume_on_handoff=false}) {
+                                 resume_on_handoff=false, managed_sessions_dir=null, new_session_selection=null}) {
   privateDir(directory);
   check(typeof session==='string' && session.length>0,'missing_native_session');
   check(typeof resume_on_handoff==='boolean','invalid_native_activation');
-  if (resume_on_handoff) {
+  const managed = managed_sessions_dir!==null;
+  check(!managed || (!resume_on_handoff && typeof managed_sessions_dir==='string'),'invalid_managed_session_configuration');
+  if (resume_on_handoff || managed) {
     check(typeof ctx.get('sessionQuery')?.inspectSession==='function','native_cold_inspection_unavailable');
   }
+  if (managed) privateDir(managed_sessions_dir);
+  const defaultSelection = new_session_selection ? selection(new_session_selection) : null;
   const catalog = catalogSessions(catalog_sessions);
-  let port,selected,opening;
-  function verifyPort() {
-    port?.checkBinding();
-  }
-  async function resolveCold() {
-    await inspectColdSession(ctx,session);
-    const agents = ctx.get('agents');
-    selected ??= agents.get(session) ?? (await ctx.get('sessionController').resolveAgent(session)).agent;
-    check(selected?.session?.id===session && agents.get(session)===selected,'native_agent_unavailable');
-    check(selected.status==='idle','native_cold_thread_unconfirmed');
-    const opened = await bindHost(ctx,session,directory,catalog,selected);
-    installBoundTools(ctx,opened,directory,relay_command_approvals);
-    port = opened;
-  }
-  async function activate(request) {
-    check(resume_on_handoff,'native_activation_unavailable');
-    const operation_id = request.operation_id;
-    check(typeof operation_id==='string' && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(operation_id),
-      'invalid_native_activation');
-    if (!port) {
-      opening ??= resolveCold().finally(()=>{ opening=undefined; });
-      await opening;
+  const scopes = new Map([[session,{port:null,selected:null,opening:null}]]);
+  function scopeFor(target) {
+    if (target!==session) {
+      check(managed && guid(target),'wrong_native_session');
+      privateDir(managed_sessions_dir);
+      const filename = path.join(managed_sessions_dir,target+'.json');
+      let info;
+      try { info = lstatSync(filename); } catch { throw new Error('wrong_native_session'); }
+      check(info.isFile() && info.uid===process.getuid() && !(info.mode & 0o077),'private_session_registry_required');
+      const record = JSON.parse(readFileSync(filename,{encoding:'utf8',flag:constants.O_RDONLY|constants.O_NOFOLLOW}));
+      check(record?.session===target && guid(record.operation_id) && typeof record.source==='string'
+        && record.source!==target,'wrong_native_session');
+      if (!scopes.has(target)) scopes.set(target,{port:null,selected:null,opening:null});
     }
-    verifyPort();
-    return {session,operation_id,state:'loaded'};
+    return scopes.get(target);
   }
-  if (!resume_on_handoff) {
-    port = await bindHost(ctx,session,directory,catalog);
+  async function resolveCold(target,scope) {
+    await inspectColdSession(ctx,target);
+    const agents = ctx.get('agents');
+    scope.selected ??= agents.get(target) ?? (await ctx.get('sessionController').resolveAgent(target)).agent;
+    check(scope.selected?.session?.id===target && agents.get(target)===scope.selected,'native_agent_unavailable');
+    check(scope.selected.status==='idle','native_cold_thread_unconfirmed');
+    const opened = await bindHost(ctx,target,directory,catalog,scope.selected);
+    installBoundTools(ctx,opened,directory,relay_command_approvals);
+    scope.port = opened;
+  }
+  async function activate(request,scope) {
+    check(resume_on_handoff || managed,'native_activation_unavailable');
+    const operation_id = request.operation_id;
+    check(guid(operation_id),'invalid_native_activation');
+    if (!scope.port) {
+      scope.opening ??= resolveCold(request.session,scope).finally(()=>{ scope.opening=undefined; });
+      await scope.opening;
+    }
+    scope.port.checkBinding();
+    return {session:request.session,operation_id,state:'loaded'};
+  }
+  if (!resume_on_handoff && (!managed || !readdirSync(managed_sessions_dir).some(name=>name.endsWith('.json')))) {
+    const port = await bindHost(ctx,session,directory,catalog);
     installBoundTools(ctx,port,directory,relay_command_approvals);
+    scopes.get(session).port = port;
   }
   const server = http.createServer(async (req,res) => {
     try {
       check(req.method === 'POST' && req.url === '/host','unknown_route');
       const request = await readJson(req);
-      check(request.session===session,'wrong_native_session');
+      const scope = scopeFor(request.session);
+      const {port} = scope;
       let result;
-      if (request.operation==='activate') result = await activate(request);
-      else if (request.operation==='load-state' && resume_on_handoff) {
-        verifyPort();
-        result = {session,state:port ? 'loaded' : 'cold'};
+      if (request.operation==='managed-state' && managed && request.session===session) {
+        result = {session,directory:realpathSync(managed_sessions_dir)};
+      }
+      else if (request.operation==='activate') result = await activate(request,scope);
+      else if (request.operation==='load-state' && (resume_on_handoff || managed)) {
+        port?.checkBinding();
+        result = {session:request.session,state:port ? 'loaded' : 'cold'};
       }
       else if (!port && request.operation==='capabilities') result = {};
+      else if (managed && ['plan-thread','prepare-thread'].includes(request.operation)) {
+        check(port,'native_session_cold');
+        result = await prepareSession(ctx,port,request,defaultSelection);
+      }
       else {
         check(port,'native_session_cold');
         result = await port.handle(request);
@@ -368,7 +393,8 @@ export async function apply(ctx, {session, directory, catalog_sessions=[], relay
       const transient = ['native_write_unconfirmed','native_agent_unavailable','native_persistence_unavailable',
                          'dsh_host_unconfirmed','model_change_unconfirmed','goal_change_unconfirmed',
                          'compact_unconfirmed','native_stop_unconfirmed','native_session_cold',
-                         'native_cold_thread_unconfirmed','native_cold_goal_unconfirmed'].includes(code);
+                         'native_cold_thread_unconfirmed','native_cold_goal_unconfirmed','native_creation_unconfirmed',
+                         'native_preparation_source_unconfirmed'].includes(code);
       res.writeHead(transient ? 503 : 409,{'Content-Type':'application/json'}).end(JSON.stringify({error:code}));
     }
   });

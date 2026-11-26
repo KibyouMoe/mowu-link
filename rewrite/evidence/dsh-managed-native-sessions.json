@@ -1,0 +1,58 @@
+{
+  "new_binding": {
+    "handoff_id": "e0801b31-64f0-5dcd-b76a-8ddbc6c04df6",
+    "previous_session": "isolated-dsh-managed-root",
+    "session": "80e954dd-4ff9-50de-a893-0363f42d7b73",
+    "state": "bound"
+  },
+  "fork_binding": {
+    "handoff_id": "92669309-ff56-583e-8c48-6bd38af5dc13",
+    "previous_session": "80e954dd-4ff9-50de-a893-0363f42d7b73",
+    "session": "14348a1d-21a6-5167-8b80-b013629b9ef9",
+    "state": "bound"
+  },
+  "clear_binding": {
+    "handoff_id": "5d337456-d296-5faf-bdfa-525ef735c35b",
+    "previous_session": "14348a1d-21a6-5167-8b80-b013629b9ef9",
+    "session": "a1b67065-2c3d-5d4e-8aaa-88dae67aad8d",
+    "state": "bound"
+  },
+  "formal": [
+    {
+      "task_id": "c8421ea0-b822-4acd-bc77-1013fe1e5482",
+      "assignment_id": "4b45536e-3f59-4681-a7a5-9695c9939aad",
+      "receipt": {
+        "delivery_id": "d7735ecb-00b8-4457-abbe-9c9a0117f1cf",
+        "digest": "20d6c43ee0ef19e236e9e2596d64d15210f5a021b75048a164b727bb0a9224d5",
+        "native_id": "mowulink-3ff4a69aa2a30342aeb81ccbe5a04b9d41ab6ff516bd05f908be1a01007bec5e",
+        "session": "80e954dd-4ff9-50de-a893-0363f42d7b73",
+        "turn_id": "3/1"
+      }
+    },
+    {
+      "task_id": "7b3781ae-6aca-4d03-a8c4-f43b6f94e118",
+      "assignment_id": "7195d77c-3fda-4ad4-be52-8e61d6f85bea",
+      "receipt": {
+        "delivery_id": "58e7edeb-a9f6-47cf-b86b-529aea3558bc",
+        "digest": "964965edfe29f3c7dbf3945618f9c8a028341e07db2540388b4158b6ab2bf55c",
+        "native_id": "mowulink-cb2e8471d29fdd8caa3d37ceb61390d1616acc9f2d9c27339f1bfbf27c7481d8",
+        "session": "14348a1d-21a6-5167-8b80-b013629b9ef9",
+        "turn_id": "29/2"
+      }
+    }
+  ],
+  "branch_parent": "80e954dd-4ff9-50de-a893-0363f42d7b73",
+  "native_inherited_count": 25,
+  "native_own_inputs": [
+    "mowulink-cb2e8471d29fdd8caa3d37ceb61390d1616acc9f2d9c27339f1bfbf27c7481d8"
+  ],
+  "branch_native_tool_results": 2,
+  "notice_ids": [
+    "a3318f1d-e5d9-435b-aee3-8a6234f7c06d",
+    "38ef61cd-3f8e-4def-9860-59bf0a799fda"
+  ],
+  "recovered_enrollment_count": 1,
+  "managed_snapshot_sha256": "6952dbd3e8f2b274120b96f1ce6d3e6515c84917526eee6b35f7a6e3715a9f8e",
+  "restored_native_ledgers": 3,
+  "scope": "Isolated installed DSH SDK, real TLS adapter and rewrite Router/Worker, fixture model and platform."
+}

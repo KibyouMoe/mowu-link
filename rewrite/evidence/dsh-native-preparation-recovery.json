@@ -1,0 +1,23 @@
+{
+  "native_preparation": {
+    "operation_id": "2c36e3f7-2926-4949-8df7-49af345621aa",
+    "source_session": "isolated-dsh-preparation-source",
+    "session": "601732d0-76a8-55fa-a7ed-38a171881a3b",
+    "kind": "fork",
+    "parent_session": "isolated-dsh-preparation-source",
+    "state": "prepared",
+    "selection": {
+      "effort": null,
+      "model": "local",
+      "provider": "fixture"
+    }
+  },
+  "replayed_operation": "2c36e3f7-2926-4949-8df7-49af345621aa",
+  "changed_parent_operation": "2cd3974e-0d3e-4f8c-9691-d51f9d61c055",
+  "changed_parent_target": {
+    "session": "429aa305-3f3e-5da0-800f-b9d9c565cac9",
+    "exists": false
+  },
+  "changed_parent_code": "native_preparation_source_changed",
+  "scope": "Installed DSH SDK, IPC response lost before adapter receipt. Local fixture profile."
+}

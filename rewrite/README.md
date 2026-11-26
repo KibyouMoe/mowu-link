@@ -188,6 +188,12 @@ DSH 历史会话在宿主插件中设 `resume_on_handoff: true`，并以 `dsh-ad
 
 复跑 `python3 -B -m unittest -v rewrite.test_codex_app_server.CodexAppServer.test_managed_native_commands_bind_without_manual_enrollment_and_restore`。使用已安装的原生 App Server，以及测试飞书消息和本地脚本模型。未使用现役账号或会话。[原生自动换绑证据](evidence/codex-managed-native-sessions.json) · [原生会话准备与显式接入证据](evidence/codex-native-thread-preparation.json)
 
+DSH 的自动换绑使用同一套 Worker 交接。先在独立 DSH 宿主插件中配置 `managed_sessions_dir`，再用同一绝对路径启动 `dsh-adapter --managed-sessions-dir`。目录在宿主与适配器所在机器上保留，POSIX 权限为 `0700`。起始会话须已保存原生记录。Worker 启用相同的固定会话和私有 `--session-callback-key`。两端复用固定的 SDK 会话控制器。
+
+`/new` 与 `/clear` 使用可选的 `new_session_selection`。该对象包含 `provider`、`model` 和可省略的 `effort`，省略整个对象时沿用当前会话的选择。原生分支保存父会话标识、已核的事件边界与当前模型和力度。创建或登记回执丢失时按原操作读回，只有原生记录可核时才激活。原会话在分支写入前已变化时，保留原会话并解除派发暂停。
+
+复跑 `python3 -B -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_managed_dsh_creates_and_forks_through_the_worker_and_recovers_a_lost_reply rewrite.test_dsh_native_loop.NativeLoop.test_dsh_preparation_reopens_the_exact_native_child_after_ipc_ack_loss`。DSH SDK 和 TLS 链路实跑，模型和飞书使用夹具。[自动换绑证据](evidence/dsh-managed-native-sessions.json) · [原生写入待核证据](evidence/dsh-native-preparation-recovery.json)
+
 ### Hermes 专用会话
 
 将 `integrations/hermes_manager` 安装到专用测试 profile 的插件目录，令该环境能够导入 `rewrite`。插件的 `connection_file` 指向用户私有 JSON，含 Router 地址 `url`、该插件的 `token`、插件数据库路径 `database`、指定会话 `session_id`，私有 CA 可用 `ca_file`。八个管理工具在指定会话生效。

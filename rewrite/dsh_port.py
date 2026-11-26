@@ -163,16 +163,18 @@ class DshHost:
 
 
 @contextmanager
-def tool_listener(directory, adapter, worker):
+def tool_listener(directory, adapter, worker, *, family=None):
     from socketserver import UnixStreamServer
     endpoint = private_directory(directory) / "worker.sock"
-    approvals = DshApprovals(adapter,worker)
+    approvals = DshApprovals(adapter,worker) if family is None else None
     stop = Event()
 
     def recover_approvals():
         while not stop.wait(.5):
             try:
-                approvals.settle(stop)
+                candidates = (port.approvals for port in family.enrolled_ports()) if family else (approvals,)
+                for queue in candidates:
+                    queue.settle(stop)
             except OperationalError:
                 continue
 
@@ -191,17 +193,23 @@ def tool_listener(directory, adapter, worker):
                 if self.path=="/tool":
                     require(set(body)=={"session","turn_id","native_id","tool","call_id","arguments"}
                             and string(body,"tool") in NATIVE_TOOLS,422,"invalid_envelope")
-                    adapter.prove_native_input(string(body,"session"),string(body,"turn_id"),string(body,"native_id"))
+                    session = string(body,"session")
+                    selected = family.port(session) if family else None
+                    bound,callback = (selected.adapter,selected.callback) if selected else (adapter,worker)
+                    bound.prove_native_input(session,string(body,"turn_id"),string(body,"native_id"))
                     del body["native_id"]
-                    result = worker.request("POST","worker/native-tool",body)
+                    result = callback.request("POST","worker/native-tool",body)
                 else:
                     require(set(body)=={"approval_id","data"} and valid_guid(body["approval_id"])
                             and isinstance(body["data"],dict),422,"invalid_approval_envelope")
-                    require(string(body["data"],"session")==adapter.bound_session(),403,"wrong_native_session")
+                    session = string(body["data"],"session")
+                    selected = family.port(session) if family else None
+                    bound,queue = (selected.adapter,selected.approvals) if selected else (adapter,approvals)
+                    require(session==bound.bound_session(),403,"wrong_native_session")
                     if self.path=="/approval":
-                        result = approvals.offer(body["approval_id"],body["data"])
+                        result = queue.offer(body["approval_id"],body["data"])
                     else:
-                        result = approvals.attempt(body["approval_id"],body["data"])
+                        result = queue.attempt(body["approval_id"],body["data"])
                 status = 200
             except Fault as error:
                 status, result = error.status, {"error":error.code}

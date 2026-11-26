@@ -20,6 +20,7 @@ const compactReleased = Promise.withResolvers();
 const foregroundQuestion = Promise.withResolvers();
 const foregroundAnswer = Promise.withResolvers();
 const isCold = mode.startsWith('cold-resume');
+const isManaged = mode.startsWith('managed-sessions');
 const usesGoals = ['goals','goal-driver','formal-goal','cold-resume-goal'].includes(mode);
 const usesMedia = ['media','peer-media','handoff'].includes(mode);
 const usesApprovals = ['command-approvals','command-approvals-reopen'].includes(mode);
@@ -232,7 +233,7 @@ class LocalModel extends LlmAdapter {
           yield {type:'finish',reason:{kind:'tool-calls'}};
           return;
         }
-      } else if (isCold || ['formal','handoff'].includes(mode)) {
+      } else if (isCold || isManaged || ['formal','handoff'].includes(mode)) {
         const attempt = this.submitted.get(payload.assignment_id) ?? 0;
         if (attempt<2) {
           this.submitted.set(payload.assignment_id,attempt+1);
@@ -285,7 +286,7 @@ async function setup() {
   await install((await sdk('dsh-agent')).AgentRegistry);
   if (usesGoals) await install((await sdk('dsh-goal')).GoalService,mode==='goal-driver' ? {defaultMaxGoalRounds:2} : {});
   await install(await sdk('dsh-session-persistence-jsonl'),{root:path.join(directory,'sessions')});
-  if (mode==='catalog' || isCold) {
+  if (mode==='catalog' || isCold || isManaged) {
     await install((await sdk('dsh-session-query')).SessionQueryEngine);
     await install((await sdk('dsh-session-title')).SessionTitleService,
       {fallbackMaxWords:12,fallbackMaxBytes:120,maxTitleBytes:300});
@@ -329,12 +330,18 @@ async function setup() {
   if (mode==='goal-driver' || mode==='formal-goal') await install(await sdk('dsh-goal-round-driver'));
   const agentOptions = {provider:'fixture',model:'local'};
   const registry = ctx.get('agents');
-  if (mode!=='cold-resume-reopen') {
+  if (!['cold-resume-reopen','managed-sessions-reopen'].includes(mode)) {
     originalHandle = mode==='command-approvals-reopen'
       ? await registry.resume({resumeSessionId:session,agentOptions})
-      : await registry.create({sessionId:session,agentOptions});
+      : await registry.create({sessionId:session,agentOptions,...(isManaged ? {meta:{cwd:directory}} : {})});
   }
   const agent = originalHandle?.agent;
+  if (isManaged && agent) {
+    agent.followup({id:'seed-managed-dsh',role:'user',source:{kind:'user'},
+      content:[{type:'text',text:'Original DSH source history'}]});
+    await agent.whenIdle();
+    assert.equal(await ctx.get('sessions').flush(agent.session),true);
+  }
   if (isCold && agent) {
     agent.followup({id:'seed-cold-dsh',role:'user',source:{kind:'user'},
       content:[{type:'text',text:'Seed the isolated historical session'}]});
@@ -359,10 +366,10 @@ async function setup() {
   class Controller extends Service {
     constructor(c) { super(c,'sessionController'); }
     async resolveAgent(target) {
-      if (target!==session) return {error:'unknown'};
+      if (target!==session && !isManaged) return {error:'unknown'};
       controllerResolutions++;
       const live = ctx.get('agents').get(target);
-      if (live || mode!=='binding-close' && !isCold) return {agent:live};
+      if (live || mode!=='binding-close' && !isCold && !isManaged) return {agent:live};
       resumedHandle = await ctx.get('agents').resume({resumeSessionId:target,agentOptions});
       return resumedHandle;
     }
@@ -415,10 +422,45 @@ async function stopScenario(agent) {
 
 async function formalScenario(agent) {
   await install(adapter,{session,directory,catalog_sessions:catalogSessions,
-    relay_command_approvals:usesApprovals,resume_on_handoff:isCold});
+    relay_command_approvals:usesApprovals,resume_on_handoff:isCold,
+    ...(isManaged ? {managed_sessions_dir:path.join(directory,'enrolled'),
+      new_session_selection:{provider:'fixture',model:'local',effort:'low'}} : {})});
   console.log(JSON.stringify({ready:true,session}));
   for await (const line of createInterface({input:process.stdin,terminal:false})) {
     if (line==='exit') break;
+    if (isManaged) {
+      if (line==='status') {
+        console.log(JSON.stringify({controllerResolutions,modelRequests,
+          liveSessions:ctx.get('agents').list().map(agent=>agent.session.id)}));
+      } else {
+        assert.ok(line.startsWith('read '));
+        const target = line.slice(5);
+        const persistence = ctx.get('sessionPersistence');
+        if (!await persistence.stat(target)) {
+          console.log(JSON.stringify({session:target,exists:false}));
+          continue;
+        }
+        const live = ctx.get('agents').get(target);
+        if (live) {
+          await live.whenIdle();
+          assert.equal(await ctx.get('sessions').flush(live.session),true);
+        }
+        const reader = await persistence.open(target,'read');
+        try {
+          const {events} = await reader.read(0);
+          const own = events.slice(reader.inheritedEventCount);
+          const users = rows=>rows.filter(event=>event.type==='user/message' && event.data.source.kind==='user')
+            .map(event=>event.data.id);
+          console.log(JSON.stringify({session:reader.header.id,parent:reader.header.parentSession ?? null,
+            inherited:reader.inheritedEventCount,allInputs:users(events),ownInputs:users(own),
+            results:own.filter(event=>event.type==='tool/result').map(event=>event.data.message),
+            selection:own.findLast(event=>event.type==='model/selection')?.data}));
+        } finally {
+          await reader.close();
+        }
+      }
+      continue;
+    }
     if (isCold) {
       if (line==='close') await resumedHandle?.dispose();
       agent = ctx.get('agents').get(session);
@@ -512,7 +554,7 @@ async function formalScenario(agent) {
 try {
   const agent = await setup();
   if (['formal','formal-artifacts','compact','questions','foreground-question','catalog','private-stop','work-question','admission-race',
-       'binding-close','material','peer-source'].includes(mode) || isCold || usesGoals || usesMedia || usesApprovals) {
+       'binding-close','material','peer-source'].includes(mode) || isCold || isManaged || usesGoals || usesMedia || usesApprovals) {
     await formalScenario(agent);
   }
   else await stopScenario(agent);
