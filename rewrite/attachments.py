@@ -15,6 +15,10 @@ CREATE TABLE IF NOT EXISTS chunks (
 CREATE TABLE IF NOT EXISTS attachment_grants (
  attachment_id TEXT NOT NULL, actor TEXT NOT NULL, PRIMARY KEY(attachment_id,actor)
 );
+CREATE TABLE IF NOT EXISTS business_files (
+ kind TEXT NOT NULL, reference_id TEXT NOT NULL, position INTEGER NOT NULL, attachment_id TEXT NOT NULL,
+ PRIMARY KEY(kind,reference_id,position)
+);
 """
 
 
@@ -81,6 +85,17 @@ def grant(db, owner, recipient, ids):
     for file_id in ids:
         authorize(db, owner, file_id)
         db.execute("INSERT OR IGNORE INTO attachment_grants VALUES (?,?)", (file_id, recipient))
+
+
+def link(db, owner, kind, reference, ids):
+    grant(db, owner, "hermes", ids)
+    db.executemany("INSERT INTO business_files VALUES (?,?,?,?)",
+                   ((kind,reference,pos,file_id) for pos,file_id in enumerate(ids)))
+
+
+def linked(db, kind, reference):
+    return [r[0] for r in db.execute("SELECT attachment_id FROM business_files WHERE kind=? AND reference_id=? ORDER BY position",
+                                    (kind,reference))]
 
 
 class Download:

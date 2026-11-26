@@ -31,13 +31,13 @@ def listen(directory, worker, adapter):
                         422, "invalid_envelope")
                 origin, args = body["origin"], body["arguments"]
                 require(isinstance(origin, dict) and set(origin) == {"thread_id", "turn_id"}
-                        and isinstance(args, dict) and set(args) <= {"task_id", "assignment_id", "outcome", "summary"}
+                        and isinstance(args, dict) and set(args) <= {"task_id", "assignment_id", "outcome", "summary", "artifact_ids"}
                         and args.get("outcome", "completed") in ("completed", "blocked", "continue_requested",
                                                                  "cancel_confirmed", "transfer_confirmed"),
                         422, "invalid_envelope")
                 native = adapter.input_for_turn(string(origin, "thread_id"), string(origin, "turn_id"))
                 receipt = worker.report(native, string(args, "task_id"), string(args, "assignment_id"),
-                                        string(args, "summary"), args.get("outcome", "completed"))
+                                        string(args, "summary"), args.get("outcome", "completed"), args.get("artifact_ids"))
                 result = {"receipt": receipt}
             except Fault as error:
                 result = {"error": error.code, "status": error.status}

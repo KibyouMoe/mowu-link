@@ -272,11 +272,13 @@ class Orders:
             db.execute("UPDATE workers SET idle_since=NULL WHERE worker_id=?", (worker,))
             return {"recorded": True, "task_state": "working"}
         if data.get("outcome") == "blocked":
-            require(not data.get("artifact_ids"), 422, "attachments_not_supported")
-            pool.enter(db, current, "worker", string(data, "summary"), self.clock())
+            ids = data.get("artifact_ids", [])
+            attachments.link(db, worker_actor(worker), "report", aid, ids)
+            pool.enter(db, current, "worker", string(data, "summary"), self.clock(), ids)
             return {"recorded": True, "release_assignment_id": aid, "task_state": "blocked"}
         require(data.get("outcome") == "completed", 422, "unsupported_outcome")
-        require(not data.get("artifact_ids"), 422, "attachments_not_supported")
+        ids = data.get("artifact_ids", [])
+        attachments.link(db, worker_actor(worker), "report", aid, ids)
         summary = string(data, "summary")
         db.execute("DELETE FROM inquiries WHERE assignment_id=?", (aid,))
         db.execute("INSERT INTO reports VALUES (?,?,?,?)", (aid, tid, worker, summary))
@@ -285,7 +287,7 @@ class Orders:
         db.execute("""UPDATE workers SET held_task_id=NULL,held_assignment_id=NULL,idle_since=NULL
                       WHERE worker_id=? AND (held_assignment_id IS NULL OR held_assignment_id=?)""", (worker, aid))
         delivery.enqueue(db, "hermes", "message.deliver", {"message_id": guid(), "level": "Notify",
-                         "source": worker, "text": summary, "task_id": tid, "attachment_ids": []})
+                         "source": worker, "text": summary, "task_id": tid, "attachment_ids": ids})
         return {"recorded": True, "release_assignment_id": aid, "task_state": "completed_reported"}
 
     def details(self, db, tid):
@@ -299,6 +301,8 @@ class Orders:
             dispatches = db.execute("""SELECT json_extract(payload,'$.assignment_id') FROM deliveries
                 WHERE kind='task.dispatch' AND json_extract(payload,'$.task_id')=? ORDER BY rowid DESC""", (tid,))
             report = next((by_id[r[0]] for r in dispatches if r[0] in by_id), None)
+            if report:
+                report["artifact_ids"] = attachments.linked(db,"report",report["assignment_id"])
         entry = db.execute("SELECT * FROM pool_entries WHERE task_id=? AND active=1", (tid,)).fetchone()
         if entry:
             current["blocked_since"] = timestamp(entry["entered"])
@@ -315,7 +319,8 @@ class Orders:
             state = "received"
         materials = db.execute("SELECT * FROM materials WHERE task_id=? ORDER BY rowid", (tid,))
         return {"task": current, "delivery_state": state, "last_report": report or None,
-                "pending_cleanup": cleanup.rows(db, "task_id", tid), "materials": [dict(r) for r in materials]}
+                "pending_cleanup": cleanup.rows(db, "task_id", tid),
+                "materials": [dict(r,artifact_ids=attachments.linked(db,"material",r["material_id"])) for r in materials]}
 
     def act(self, db, tid, data):
         current = self.revision(db, tid, data)

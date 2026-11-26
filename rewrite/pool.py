@@ -1,7 +1,7 @@
 """Router-owned blocked pool, reminders and independent candidate material."""
 import math
 
-from . import delivery
+from . import attachments, delivery
 from .storage import guid, require, string, timestamp
 
 SCHEMA = """
@@ -22,12 +22,12 @@ CREATE INDEX IF NOT EXISTS dispatch_by_task ON deliveries(json_extract(payload,'
 """
 
 
-def notify(db, tid, source, text):
+def notify(db, tid, source, text, ids=()):
     delivery.enqueue(db, "hermes", "message.deliver", {"message_id": guid(), "level": "Notify",
-                     "task_id": tid, "source": source, "text": text, "attachment_ids": []})
+                     "task_id": tid, "source": source, "text": text, "attachment_ids": list(ids)})
 
 
-def enter(db, current, source, reason, now):
+def enter(db, current, source, reason, now, ids=()):
     tid, aid, wid = current["task_id"], current["assignment_id"], current["assignee_id"]
     db.execute("INSERT INTO pool_entries VALUES (?,?,?,?,?,?,?,1)", (aid, tid, wid, reason, source, now, now+3600))
     db.execute("UPDATE tasks SET state='blocked',assignment_id=NULL,revision=revision+1 WHERE task_id=?", (tid,))
@@ -36,7 +36,7 @@ def enter(db, current, source, reason, now):
     db.execute("DELETE FROM inquiries WHERE assignment_id=?", (aid,))
     db.execute("""UPDATE workers SET held_task_id=NULL,held_assignment_id=NULL,idle_since=NULL
                   WHERE worker_id=? AND held_assignment_id=?""", (wid, aid))
-    notify(db, tid, wid if source == "worker" else "router", reason)
+    notify(db, tid, wid if source == "worker" else "router", reason, ids)
 
 
 def on_idle_sample(db, worker, tid, aid, now, interval):
@@ -93,8 +93,9 @@ def leave(db, tid):
 
 
 def candidate(db, current, worker, data, now):
-    aid, text = string(data, "assignment_id"), string(data, "text")
-    require(not data.get("artifact_ids"), 422, "attachments_not_supported")
+    aid, text = string(data, "assignment_id"), data.get("text","")
+    ids = data.get("artifact_ids",[])
+    require(isinstance(text,str) and (text.strip() or ids),422,"empty_material")
     tid = current["task_id"]
     # The durable dispatch stream records ALL offers, even ones never accepted.
     last = db.execute("""SELECT json_extract(payload,'$.assignment_id') FROM deliveries
@@ -106,5 +107,6 @@ def candidate(db, current, worker, data, now):
             and current["holder"]["kind"] == "router" and source and source[0] == worker
             and last and last[0] == aid, 409, "ineligible_material")
     mid = guid()
+    attachments.link(db,"worker/"+worker,"material",mid,ids)
     db.execute("INSERT INTO materials VALUES (?,?,?,?,?,?)", (mid, tid, aid, worker, text, timestamp(now)))
     return {"material_id": mid, "received": True}

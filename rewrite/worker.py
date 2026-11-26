@@ -273,8 +273,11 @@ class Worker:
                 db.execute("UPDATE questions SET receipt=? WHERE question_id=?", (encode(reply), qid))
             return reply
 
-    def report(self, native_id, task_id, assignment_id, summary, outcome="completed"):
+    def report(self, native_id, task_id, assignment_id, summary, outcome="completed", artifact_ids=None):
         with self.lock:
+            if artifact_ids is not None:
+                require(isinstance(artifact_ids,list) and all(isinstance(i,str) and i for i in artifact_ids)
+                        and outcome in ("completed","blocked"),422,"invalid_artifact_ids")
             origin = self.adapter.origin(native_id)
             if outcome in ("cancel_confirmed", "transfer_confirmed"):
                 kind = "task.cancel" if outcome == "cancel_confirmed" else "task.transfer_out"
@@ -286,6 +289,8 @@ class Worker:
             require(outcome in ("completed", "blocked", "continue_requested"), 422, "unsupported_outcome")
             body = {"session_id": self.session, "assignment_id": assignment_id,
                     "outcome": outcome, "summary": summary}
+            if artifact_ids:
+                body["artifact_ids"] = artifact_ids
             string(body, "summary")
             if outcome == "continue_requested":
                 reply = self.router.request("POST", f"tasks/{task_id}/report", body, "continue-" + native_id)
@@ -349,6 +354,9 @@ class Worker:
                 with self.db.transaction() as db:
                     db.execute("UPDATE outbox SET receipt=? WHERE assignment_id=?",
                                (encode({"error": error.code}), aid))
+            elif error.code in ("attachment_not_found","invalid_attachment_ids"):
+                with self.db.transaction() as db:
+                    db.execute("DELETE FROM outbox WHERE assignment_id=? AND body=? AND receipt IS NULL", (aid,encode(body)))
             raise
         require(reply.get("recorded") is True and reply.get("release_assignment_id") == aid
                 and reply.get("task_state") == ("completed_reported" if completed else "blocked"),

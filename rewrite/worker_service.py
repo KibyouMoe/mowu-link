@@ -41,10 +41,10 @@ class WorkerService:
                 require(set(args) == {"text","options"},422,"invalid_arguments")
                 result = w.ask(native, string(body,"call_id"), string(args,"text"), args["options"])
             else:
-                require(body.get("tool") == "worker_report" and set(args) <= {"task_id","assignment_id","summary","outcome"},
+                require(body.get("tool") == "worker_report" and set(args) <= {"task_id","assignment_id","summary","outcome","artifact_ids"},
                         422,"unsupported_native_tool")
                 result = w.report(native,string(args,"task_id"),string(args,"assignment_id"),
-                                  string(args,"summary"),args.get("outcome","completed"))
+                                  string(args,"summary"),args.get("outcome","completed"),args.get("artifact_ids"))
         elif actor == "adapter/" + w.worker_id and method == "POST" and path == "/v1/worker/peer":
             result = w.send_peer(string(body,"message_id"),string(body,"to_worker"),string(body,"text"),body.get("reply_to"))
         elif actor == "adapter/" + w.worker_id and method == "GET" and path == "/v1/worker/peers":

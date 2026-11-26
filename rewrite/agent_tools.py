@@ -13,7 +13,8 @@ REPORT_TOOL = {
                     "properties": {"task_id": {"type": "string"}, "assignment_id": {"type": "string"},
                                    "outcome": {"enum": ["completed", "blocked", "continue_requested",
                                                        "cancel_confirmed", "transfer_confirmed"]},
-                                   "summary": {"type": "string", "minLength": 1}},
+                                   "summary": {"type": "string", "minLength": 1},
+                                   "artifact_ids": {"type":"array","items":{"type":"string","minLength":1}}},
                     "required": ["task_id", "assignment_id", "summary"]},
 }
 
@@ -21,7 +22,7 @@ REPORT_TOOL = {
 def serve(worker, native_id, reader, writer):
     def report(_params, args):
         return worker.report(native_id, args["task_id"], args["assignment_id"], args["summary"],
-                             args.get("outcome", "completed"))
+                             args.get("outcome", "completed"), args.get("artifact_ids"))
 
     serve_report_tool(report, reader, writer)
 
