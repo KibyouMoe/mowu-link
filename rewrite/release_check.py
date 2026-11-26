@@ -22,7 +22,7 @@ from .wire import Client
 def serve(package,component,database,roles,cert,key,env,extra=(),*,shutdown_timeout=6):
     proc = subprocess.Popen([sys.executable,"-B","-S","-m","rewrite.service",component,"--db",database,
                              "--identities",roles,"--cert",cert,"--key",key,*extra],cwd=package,env=env,
-                            stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+                            stdout=subprocess.PIPE,stderr=subprocess.PIPE,encoding="utf-8")
     try:
         q = Queue()
         Thread(target=lambda:q.put(proc.stdout.readline()),daemon=True).start()
@@ -162,7 +162,9 @@ def run(repository,older,newer,component="router",*,dsh_image=None):
         raise ValueError("two different release commits are required")
     with tempfile.TemporaryDirectory(prefix="mowulink-release-") as folder:
         root = Path(folder)
-        env = {"HOME":folder,"TMPDIR":folder,"PATH":os.defpath,"PYTHONNOUSERSITE":"1"}
+        env = {"HOME":folder,"TMPDIR":folder,"PATH":os.defpath,"PYTHONNOUSERSITE":"1","PYTHONUTF8":"1"}
+        if os.name=="nt":
+            env.update(SystemRoot=os.environ["SystemRoot"],USERPROFILE=folder,TEMP=folder,TMP=folder)
         versions = []
         for sha in (older,newer):
             result = build(repository,sha,root/("archive-"+sha))
@@ -174,8 +176,11 @@ def run(repository,older,newer,component="router",*,dsh_image=None):
         if component=="dsh-workspace-rollback":
             observed = dsh_workspace_rollback(root,old,new,env,dsh_image)
         else:
+            openssl = shutil.which("openssl")
+            if not openssl:
+                raise ValueError("an installed OpenSSL certificate generator is required")
             cert,key = root/"cert.pem",root/"key.pem"
-            subprocess.run(["openssl","req","-x509","-newkey","rsa:2048","-nodes","-days","1",
+            subprocess.run([openssl,"req","-x509","-newkey","rsa:2048","-nodes","-days","1",
                             "-subj","/CN=localhost","-addext","subjectAltName=IP:127.0.0.1",
                             "-keyout",key,"-out",cert],cwd=root,env=env,timeout=10,check=True,capture_output=True)
             rehearse = worker_pair if component=="worker-pair" else router_rehearsal

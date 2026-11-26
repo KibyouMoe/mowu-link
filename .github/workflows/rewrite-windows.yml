@@ -1,0 +1,72 @@
+name: Rewrite Windows installation
+
+on:
+  push:
+    branches: [feat/rewrite-formal-mainline]
+    paths: ["rewrite/**", ".github/workflows/rewrite-windows.yml"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rewrite-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 10
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - name: Test pinned packages on Windows
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          if (-not (Get-Command openssl -ErrorAction SilentlyContinue)) {
+            $gitRoot = Split-Path (Split-Path (Get-Command git).Source)
+            $env:PATH = "$(Join-Path $gitRoot 'mingw64\bin');$(Join-Path $gitRoot 'usr\bin');$env:PATH"
+          }
+          openssl version
+          python -c "import platform, sys; assert sys.platform == 'win32'; print(platform.platform(), sys.version)"
+          $dir = New-Item -ItemType Directory (Join-Path $env:RUNNER_TEMP ('mowulink-' + [Guid]::NewGuid().ToString('N')))
+          try {
+            $owner = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+            icacls $dir.FullName /inheritance:r /grant:r "*$($owner):(OI)(CI)F" '*S-1-5-18:(OI)(CI)F'
+            $acl = Get-Acl -LiteralPath $dir.FullName
+            $rules = $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])
+            if (-not $acl.AreAccessRulesProtected -or ($rules | Where-Object {
+              $_.IdentityReference.Value -notin @($owner, 'S-1-5-18')
+            })) {
+              throw 'Expected a private test directory'
+            }
+            $env:TMP = $dir.FullName
+            $env:TEMP = $dir.FullName
+            $archive = Join-Path $dir.FullName 'archive'
+            $installed = Join-Path $dir.FullName 'installed'
+            $release = python -B -m rewrite.release build --repository . --revision $env:GITHUB_SHA --destination $archive | ConvertFrom-Json
+            python -B -m rewrite.release install --archive $release.archive --revision $release.revision --sha256 $release.sha256 --destination $installed
+            Push-Location -LiteralPath $installed
+            try {
+              $tests = @(
+                'rewrite.test_service.Service.test_daemon_rejects_second_writer_and_cold_restart_recovers_same_state'
+                'rewrite.test_service.Service.test_cli_tls_restart_preserves_identity_file_and_receipts'
+                'rewrite.test_service.Service.test_three_process_worker_chat_and_assignment'
+              )
+              python -B -m unittest -v @tests
+            } finally {
+              Pop-Location
+            }
+            python -B -m rewrite.release verify --archive $release.archive --revision $release.revision --sha256 $release.sha256 --destination $installed
+            python -B -m rewrite.release_check --repository . --component worker-pair --previous 307a8a119c6a97ea2cb816280227afb3295e5675 --new $env:GITHUB_SHA
+          } finally {
+            Remove-Item -LiteralPath $dir.FullName -Recurse -Force
+          }
