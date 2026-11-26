@@ -8,6 +8,8 @@
 
 批量卡以输入框收选项序号。现有 DSH SDK 的续答入口只接受已超时的题，尚未接仍在前台等待的原生题。飞书实际显示、真人点击与同时打开的桌面原卡留待独立测试身份验证。
 
+另用 DSH 随附 SDK 起阻塞式原生题，确认 `user-questions/request` 交给原答题者时，`continued(agent)` 仍为空。适配器按同一会话、回合与调用号查询和尝试作答均未得到凭据。原答题者给出测试答案后只生成同一工具调用的结果，没有第二条回合输入或飞书题卡。连续 12 轮通过，以隔离测试答题者代替客户端 UI。复跑 `python3 -B -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_native_foreground_question_remains_with_its_original_answer_provider`。[阻塞题证据](evidence/dsh-native-foreground-question.json)
+
 全量回归在 macOS 通过 202 项，Linux arm64 通过 142 项，另 60 项本机宿主用例跳过。复跑 `python3 -B -m unittest discover -q -s rewrite -t .`。
 
 DSH 命令审批已用实际 SDK 的 AgentLoop、ApprovalService 和 Bash 验证。带绝对工作目录的请求沿用原生审批号，测试审批人允许后只执行一次隔离 `pwd`，拒绝及超时均未执行。原生结果已写盘但关闭回执被扣住时，重开适配器及宿主可从原会话补回，原生输入、决定和工具结果不新增。省略工作目录时仍由宿主原生审批。连续 16 轮通过。模型和审批操作者用测试夹具。[原生审批记录](evidence/dsh-native-command-approval.json) · [操作入口](README.md#独立宿主命令审批)

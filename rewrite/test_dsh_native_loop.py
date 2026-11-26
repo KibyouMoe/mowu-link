@@ -680,6 +680,52 @@ class NativeLoop(unittest.TestCase):
                              "router_tasks":0,
                              "boundary":"Native DSH timed question tool and reply admission; local scripted provider, Feishu fixture"}
 
+    def test_native_foreground_question_remains_with_its_original_answer_provider(self):
+        session = "dsh-real-foreground-question"
+        directory = Path(self.enterContext(tempfile.TemporaryDirectory(dir="/tmp",prefix="mldsh-foreground-")))
+        native = DshHost(directory)
+        native.session = session
+        clock = Clock()
+        loop = self.enterContext(Loop.isolated(clock,host_factory=lambda _path,_name:native))
+        adapter_key,platform_key = guid(),guid()
+        url = self.open_worker(WorkerService(loop.worker,clock),
+                               {adapter_key:"adapter/oguri",platform_key:"platform/oguri"})
+        relay = DshDisplay(loop.adapter,Client(url,adapter_key),"oguri")
+        sink = PlatformFixture()
+        views = Views(loop.root/"foreground-views.db",Client(url,platform_key),sink,"test-chat","小栗帽",clock)
+        with self.start_native(directory,session,"foreground-question") as process:
+            relay.collect()
+            loop.worker.chat(guid(),"Question fixture foreground")
+            waiting = self.read_native(process,"foreground-question")
+            self.assertEqual((waiting["call_id"],waiting["status"],waiting["timed"],waiting["continued"]),
+                             ("native-question-foreground","running",False,0))
+            target = {"turn_id":waiting["turn_id"],"native_question_id":waiting["call_id"]}
+            open_state = native.request("question-open",session,target)
+            self.assertIsNone(open_state["question"])
+            answer = native.request("question-answer",session,{**target,"answer":{"mode":"choice","option_id":"1"}})
+            self.assertIsNone(answer["proof"])
+            relay.collect()
+            relay.flush()
+            views.poll()
+            with views.db.transaction() as db:
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM question_cards").fetchone()[0],0)
+            finished = self.read_native(process,"answer-foreground")
+            result, = finished["results"]
+            observed = json.loads(result["content"][0]["text"])
+            self.assertEqual(observed,{"answers":[{"id":"primary","selected":["B"]}]})
+            self.assertEqual(result["toolCallId"],waiting["call_id"])
+            self.assertFalse(finished["replies"])
+            self.assertIsNone(native.lookup_answer(session,waiting["turn_id"],waiting["call_id"]))
+            relay.collect()
+            relay.flush()
+            views.poll()
+            with views.db.transaction() as db:
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM question_cards").fetchone()[0],0)
+            self.assertFalse(loop.hermes.tasks()["items"])
+            self.evidence = {"foreground":waiting,"adapter_open_result":open_state,
+                "adapter_answer_result":answer,"original_provider_result":observed,"platform_question_cards":0,
+                "boundary":"Installed SDK's blocking tool, in-process model and native answer-provider test fixtures"}
+
     def test_resume_browses_only_configured_native_cold_sessions_without_activating_them(self):
         session = "dsh-native-catalog-bound"
         directory,loop,service,command = self.goal_worker(session)

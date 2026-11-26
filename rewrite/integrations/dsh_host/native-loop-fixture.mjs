@@ -17,6 +17,8 @@ const secondRound = Promise.withResolvers();
 const formalRound = Promise.withResolvers();
 const compactEntered = Promise.withResolvers();
 const compactReleased = Promise.withResolvers();
+const foregroundQuestion = Promise.withResolvers();
+const foregroundAnswer = Promise.withResolvers();
 const usesGoals = ['goals','goal-driver','formal-goal'].includes(mode);
 const usesMedia = mode==='media' || mode==='peer-media';
 const usesApprovals = ['command-approvals','command-approvals-reopen'].includes(mode);
@@ -167,7 +169,8 @@ class LocalModel extends LlmAdapter {
       if (mode==='admission-race') await Promise.race([raceRelease.promise,waitForStop(signal)]);
       else await waitForStop(signal);
     }
-    if (mode==='questions' && /^Question fixture (choice|text|skip|multi|native)$/.test(text)) {
+    if ((mode==='questions' && /^Question fixture (choice|text|skip|multi|native)$/.test(text)) ||
+        (mode==='foreground-question' && text==='Question fixture foreground')) {
       const choice = text.split(' ').at(-1);
       if (!this.submitted.has(text)) {
         this.submitted.set(text,true);
@@ -299,9 +302,16 @@ async function setup() {
     ctx.on('approval/request',(request,next)=>request.toolName==='bash'
       ? Promise.resolve('rejected') : next());
   }
-  if (mode==='questions') {
+  if (['questions','foreground-question'].includes(mode)) {
     await install((await sdk('dsh-user-questions')).UserQuestionService);
-    await install(await sdk('dsh-tool-ask-user'),{mode:'timed',timeout:1});
+    await install(await sdk('dsh-tool-ask-user'),{mode:'timed',timeout:mode==='questions' ? 1 : -1});
+  }
+  if (mode==='foreground-question') {
+    ctx.on('user-questions/request',(request,next)=>{
+      if (request.agent?.session.id!==session) return next();
+      foregroundQuestion.resolve(request);
+      return foregroundAnswer.promise;
+    });
   }
   if (mode==='formal-goal') await install(await sdk('dsh-tool-goal'));
   await install(await sdk('dsh-tool-executor-native'));
@@ -400,6 +410,15 @@ async function formalScenario(agent) {
         .map(({type,data})=>({type,data}))));
       continue;
     }
+    if (line==='foreground-question' && mode==='foreground-question') {
+      const request = await foregroundQuestion.promise;
+      const starts = (await readEvents(agent)).filter(event=>event.type==='turn/start');
+      const turn = starts.at(-1);
+      console.log(JSON.stringify({session,status:agent.status,turn_id:turn.seq+'/'+turn.data.turn,
+        call_id:request.wait?.callId,continued:ctx.get('userQuestions').continued(agent).length,
+        timed:request.wait?.timed===true,question_ids:request.questions.map(item=>item.id)}));
+      continue;
+    }
     if (mode==='binding-close') {
       if (line==='close') await originalHandle.dispose();
       if (line==='reopen') {
@@ -436,6 +455,9 @@ async function formalScenario(agent) {
       assert.equal(ctx.get('userQuestions').answer(agent,'native-question-native',
         {answers:[{id:'primary',selected:['A']}]}),true);
     }
+    else if (line==='answer-foreground' && mode==='foreground-question') {
+      foregroundAnswer.resolve({answers:[{id:'primary',selected:['B']}]});
+    }
     else if (line==='formal-goal-round' && mode==='formal-goal') await formalRound.promise;
     else assert.ok(line==='read' || line==='second-round' && mode==='goal-driver');
     if (line==='second-round') await secondRound.promise;
@@ -465,7 +487,7 @@ async function formalScenario(agent) {
 
 try {
   const agent = await setup();
-  if (['formal','formal-artifacts','compact','questions','catalog','private-stop','work-question','admission-race',
+  if (['formal','formal-artifacts','compact','questions','foreground-question','catalog','private-stop','work-question','admission-race',
        'binding-close','material','peer-source'].includes(mode) || usesGoals || usesMedia || usesApprovals) {
     await formalScenario(agent);
   }

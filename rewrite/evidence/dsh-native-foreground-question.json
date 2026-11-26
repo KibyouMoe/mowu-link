@@ -1,0 +1,34 @@
+{
+  "foreground": {
+    "session": "dsh-real-foreground-question",
+    "status": "running",
+    "turn_id": "1/1",
+    "call_id": "native-question-foreground",
+    "continued": 0,
+    "timed": false,
+    "question_ids": [
+      "primary"
+    ]
+  },
+  "adapter_open_result": {
+    "question": null,
+    "proof": null
+  },
+  "adapter_answer_result": {
+    "question": null,
+    "proof": null
+  },
+  "original_provider_result": {
+    "answers": [
+      {
+        "id": "primary",
+        "selected": [
+          "B"
+        ]
+      }
+    ]
+  },
+  "platform_question_cards": 0,
+  "boundary": "Installed SDK's blocking tool, in-process model and native answer-provider test fixtures",
+  "successful_repeats": 12
+}
