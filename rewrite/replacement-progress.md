@@ -4,6 +4,8 @@
 
 ## 检查点与证据
 
+分叉校验与离线审计进入新发布包 `02dbb460da5cc21cc0627498e01773344c32783e`。从 `2a8f081841310259a48ea9f077297d1440857c56` 出发，用独立原生 Codex 工位实跑混合版本、升级及回退。三阶段都保留原会话的三条输入，仅原成果待验通知 `98014442-52d8-49cf-8da1-3fa821499a78`，快照摘要未变。新包 SHA-256 为 `a6bb3dff99add0aacc2670740ca2801ed5f2c0068d028f4751b3a3cd4e518389`。复跑方法见[发布演练](router-rehearsal.md#保留实际-codex-测试工位的升级与回退)。macOS 197 项全过，Linux arm64 通过 139 项、另 58 项因缺本机宿主跳过。
+
 换原生会话前可用 `state_bundle audit-handoff` 对照未核的原生私聊、下一轮队列、派发、题目、压缩和清理。隔离试验中，原宿主已收到私聊但回包丢失，同时有一条排队消息。正式持单账本一致，原生会话账本仍显示待核；从原会话恢复后查回私聊并交付队列，各只有一次原生输入。审计仅返回计数。复跑 `python3 -m unittest -v rewrite.test_state_bundle`。[停写窗口与恢复](router-rehearsal.md#重做版五组件的离线恢复)
 
 Codex App Server 的原生分叉会复制父会话的输入号、投递号和回合号。新会话首次接入时保存已存在的投递号，旧号既不能证明在子会话新收件，也无法再次写入。临时改接子会话后，原消息有回执时读回父会话的回执，缺回执时仍待核。子会话只收到一条新消息，故意丢收件后冷开可按原号查回。连续 20 轮通过。[原生分叉记录](evidence/codex-app-server-native-fork.json)。复跑 `python3 -m unittest -v rewrite.test_codex_app_server.CodexAppServer.test_native_fork_cannot_confirm_or_resend_the_parent_delivery`。换绑由测试显式选择，飞书 `/fork` 与 `/resume` 换绑仍待接。
@@ -297,4 +299,4 @@ DSH 的 `/queue 正文` 已接入固定会话。飞书命令回执证明 Worker 
 | 旧附件 /attachments、订阅 /subscriptions、运维命令、Codex/DSH 的安装更新、Windows 启动器与 macOS 恢复脚本 | T01–03/C03、注册鉴权、隔离安装与升级回退 | 两平台均须有已登记工具消费者及恢复证据；既有停用巡检保持停用，确认退役另记 |
 | client/desktop、client/mobile、host/apply.sh 等兼容使用方 | 管理和消息接口的客户端 | 尚待逐个核实际调用和版本覆盖，不能凭目录名判定退役 |
 
-源码侧全表仍在补齐，尤其是客户端独有入口、单个来源的使用状态、DSH/Antigravity 的命令差异、安装与权限场景。迁移、回退与生产切换均未验收。
+源码台账仍需实际使用者确认客户端独有入口、各来源使用状态及 DSH、Antigravity 的命令差异。隔离环境的迁移和回退已有实测；生产切换仍待独立复验及授权。

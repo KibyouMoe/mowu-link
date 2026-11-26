@@ -70,3 +70,11 @@
 | `bridge_list_workers` | 原生 `worker_list_peers` | 真 DSH 已查询对端。单独登记、在线和权限筛选已核。 |
 | `bridge_send_worker_message` | 原生 `worker_send_peer` 与三层收件查询 | 两个独立 DSH 实例互发及回原消息通过，模型为本地驱动。需要授权的实际跨宿主工位。 |
 | `bridge_worker_inbox` | 原生 `worker_peer_inbox` 的待办和回复历史 | 真实 DSH 查原信后关联回复，游标和只读性有回归。需 Codex 工具实机复验。 |
+
+## 旧命令、审批与维护的实际边界
+
+| 入口 | 查证结果 | 切换条件 |
+| --- | --- | --- |
+| `POST /commands`、`/commands/responses` | 旧 Codex 与 DSH 的 `desktop-manager.mjs` 通过 Router 转发 `/model` 和 `/effort`，`router-runtime.mjs` 按原请求号回复。重做版由同工位的 `worker/command` 接收已认证的训练员命令，隔离宿主已核设置与回读。 | 实际飞书链路与真实账号的模型设置仍待核。源码查到旧插件消费者，其他调用方需由使用者核对后才可停旧入口。 |
+| `/approvals` | 旧 Router 与 Codex、DSH 的路由客户端都有明确审批接口。独立 Codex App Server 在只读工作区发出了 `item/commandExecution/requestApproval`。测试端取消原请求后，宿主按原请求号回 `serverRequest/resolved`，回合中断，历史没有执行记录。 | 重做 Worker 尚未把此类请求接给 Router，现有题卡无权代答。Desktop 的应用级授权提示是另一个入口，尚未核到对应的转发能力。保留两种审批各自的验收。 |
+| `/ops/services`、`/ops/services/{name}/restart` | 旧 Router 有查询及重启处理器。重做已有隔离安装、版本升级、停写快照及回退，现有 `worker-status` 只读取工位状态。 | 现役远程维护的实际调用者、允许的服务及重启授权需核定；按维护窗口独立验收。 |
