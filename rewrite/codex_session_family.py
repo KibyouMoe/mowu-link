@@ -34,7 +34,8 @@ class CodexSessionFamily(SessionFamily):
     def make_port(self,session,path,client,*,cold,resources):
         events = SessionEvents(self.rpc)
         native = AppServerHost(events,session,path,self.args.public_image_root,
-                               relay_command_approvals=self.args.relay_command_approvals)
+                               relay_command_approvals=self.args.relay_command_approvals,
+                               relay_file_approvals=self.args.relay_file_approvals)
         pinned_thread(native,self.workspace)
         if not cold:
             resumed = self.rpc.request("thread/resume",{"threadId":session,"cwd":str(self.workspace)})["thread"]

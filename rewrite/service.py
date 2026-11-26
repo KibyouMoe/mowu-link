@@ -121,7 +121,8 @@ def serve(args,stack):
                                      activation=root.activation,preparation=root.preparation,family=family)
         else:
             native = AppServerHost(rpc,args.session,args.db,args.public_image_root,
-                                   relay_command_approvals=args.relay_command_approvals)
+                                   relay_command_approvals=args.relay_command_approvals,
+                                   relay_file_approvals=args.relay_file_approvals)
             pinned_thread(native,args.cwd.resolve())
             if not args.resume_on_handoff:
                 resumed = rpc.request("thread/resume",{"threadId":args.session,"cwd":str(args.cwd)})["thread"]
@@ -219,6 +220,8 @@ def main():
                                    help="owner-private directory of approved, shareable native images")
             component.add_argument("--relay-command-approvals",action="store_true",
                                    help="relay one-time command decisions through the configured Router operator")
+            component.add_argument("--relay-file-approvals",action="store_true",
+                                   help="relay exact native file changes to the configured Router operator")
             component.add_argument("--prepare-sessions",action="store_true",
                                    help="allow authenticated preparation of independent read-only Codex sessions")
         if name == "worker":
@@ -257,7 +260,7 @@ def main():
         provision_parser.add_argument("--"+flag,required=True,type=Path)
     provision_parser.add_argument("--tool",action="append",choices=TOOL_NAMES,
                                   help="native tool to register; repeat to select multiple (default: worker_report)")
-    approvals = apps.add_parser("approvals",help="view native command requests or record an operator decision")
+    approvals = apps.add_parser("approvals",help="view native approval requests or record an operator decision")
     approvals.add_argument("--connection",required=True,type=Path)
     approvals.add_argument("--worker-id",required=True)
     actions = approvals.add_subparsers(dest="approval_action",required=True)

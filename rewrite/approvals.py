@@ -1,8 +1,8 @@
-"""Restricted operator decisions for individual native command requests."""
+"""Restricted operator decisions for individual native requests."""
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from . import delivery
 from .messages import valid_guid
@@ -21,21 +21,57 @@ CREATE TABLE IF NOT EXISTS native_approvals (
 """
 
 
+def validate_file_changes(changes):
+    def absolute_path(value):
+        return (isinstance(value,str) and 0<len(value)<=4096
+                and not any(c in value for c in "\0\r\n")
+                and (PurePosixPath(value).is_absolute() or PureWindowsPath(value).is_absolute()))
+
+    require(isinstance(changes,list) and 0<len(changes)<=64,422,"invalid_approval_file_changes")
+    for change in changes:
+        require(isinstance(change,dict) and set(change)=={"path","kind","diff"}
+                and absolute_path(change["path"]) and isinstance(change["diff"],str)
+                and "\0" not in change["diff"],422,"invalid_approval_file_change")
+        kind = change["kind"]
+        require(isinstance(kind,dict),422,"invalid_approval_file_change")
+        if kind.get("type")=="update":
+            require(set(kind)<={"type","move_path"} and (kind.get("move_path") is None
+                    or absolute_path(kind["move_path"])),422,"invalid_approval_file_change")
+        else:
+            require(set(kind)=={"type"} and kind["type"] in ("add","delete"),422,"invalid_approval_file_change")
+    require(len({change["path"] for change in changes})==len(changes) and len(encode(changes))<=65536,
+            422,"invalid_approval_file_changes")
+
+
 def validate_request(request):
+    require(isinstance(request,dict),422,"invalid_approval_request")
+    common = {"session","turn_id","item_id","decisions"}
+    if request.get("kind")=="file_change":
+        require(common|{"kind","changes"}<=set(request)<=common|{"kind","changes","reason"},
+                422,"invalid_approval_request")
+        for field in common-{"decisions"}:
+            require(len(string(request,field))<=200 and "\0" not in request[field],422,"invalid_approval_request")
+        validate_file_changes(request["changes"])
+        validate_choices(request)
+        return
     fields = {"session","turn_id","item_id","command","cwd","environment_id","decisions"}
-    require(isinstance(request,dict) and fields<=set(request)<=fields|{"arguments","reason"},422,"invalid_approval_request")
+    require(fields<=set(request)<=fields|{"arguments","reason"},422,"invalid_approval_request")
     for field in fields-{"decisions","environment_id"}:
         limit = 8192 if field in ("command","cwd") else 200
         require(len(string(request,field))<=limit and "\0" not in request[field],422,"invalid_approval_request")
     environment = request["environment_id"]
     require(environment is None or isinstance(environment,str) and 0<len(environment)<=200
             and "\0" not in environment,422,"invalid_approval_environment")
-    decisions = request["decisions"]
-    require(isinstance(decisions,list) and decisions and all(value in DECISIONS for value in decisions)
-            and len(decisions)==len(set(decisions)),422,"invalid_approval_choices")
     if "arguments" in request:
         require(isinstance(request["arguments"],dict) and len(encode(request["arguments"]))<=32768,
                 422,"invalid_approval_arguments")
+    validate_choices(request)
+
+
+def validate_choices(request):
+    decisions = request["decisions"]
+    require(isinstance(decisions,list) and decisions and all(value in DECISIONS for value in decisions)
+            and len(decisions)==len(set(decisions)),422,"invalid_approval_choices")
     if "reason" in request:
         require(isinstance(request["reason"],str) and len(request["reason"])<=2000,422,"invalid_approval_reason")
 
@@ -45,7 +81,7 @@ def require_private_store(path):
         file = Path(path)
         location = file.resolve().parent.stat()
         if file.is_symlink() or location.st_uid!=os.getuid() or location.st_mode&0o077:
-            raise ValueError("command approvals require an owner-private Router state directory")
+            raise ValueError("native approvals require an owner-private Router state directory")
 
 
 def record(row,worker_session,now):

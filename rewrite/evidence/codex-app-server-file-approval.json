@@ -1,0 +1,445 @@
+{
+  "native_binary_sha256": "e1c3d034b7fd295d160d6ab412357f9c54241c8ed7a2a861f4730b8a4dd88ddb",
+  "native_version": "0.171.0-alpha.13.2",
+  "runs": [
+    {
+      "boundary": "Actual bundled App Server, HTTP Router and Worker. Local model and operator fixtures. Missing diff and directory scope injected.",
+      "decisions_sent_once": [
+        [
+          0,
+          "accept"
+        ],
+        [
+          1,
+          "cancel"
+        ],
+        [
+          2,
+          "cancel"
+        ],
+        [
+          3,
+          "cancel"
+        ]
+      ],
+      "diff_excluded_from_display": true,
+      "missing_diff_and_directory_grant_refused": true,
+      "native_requests": [
+        {
+          "item": "trial-file-accept",
+          "request_id": 0,
+          "turn": "01a21886-54ec-7fc1-9022-ebfe7584388c"
+        },
+        {
+          "item": "trial-file-cancel",
+          "request_id": 1,
+          "turn": "01a21886-57fc-78f0-83eb-1f9b8c40466d"
+        },
+        {
+          "item": "trial-file-missing",
+          "request_id": 2,
+          "turn": "01a21886-5b01-7693-9108-66fff408d0b2"
+        },
+        {
+          "item": "trial-file-broad",
+          "request_id": 3,
+          "turn": "01a21886-5b0e-7dd1-ba91-ddcf84dcd205"
+        }
+      ],
+      "native_session": "01a21886-547a-7f12-8d85-0a71adf1b4fc",
+      "only_approved_bytes_changed": true,
+      "only_completed_item": "trial-file-accept",
+      "operator_cli_verified": true,
+      "operator_notice_count": 2,
+      "other_notice_count": 0,
+      "receipts": {
+        "accept": {
+          "approval_id": "f20c43a0-3ed9-4611-854f-6039fb8c3db9",
+          "closure": {
+            "decision": "accept",
+            "source": "operator"
+          },
+          "files": 2,
+          "request_digest": "341377515ea557614b293b9ba4d29cfd8cf771d9f6c8c4641376f77c439b4582",
+          "turn": "01a21886-54ec-7fc1-9022-ebfe7584388c"
+        },
+        "cancel": {
+          "approval_id": "ad0f9d90-18bf-426d-ba1f-201be543ead0",
+          "closure": {
+            "decision": "cancel",
+            "source": "operator"
+          },
+          "files": 1,
+          "request_digest": "2099b4dba50173954fae2e24d5f37eb2c11710b8d7494fada2c69d644b1f53a8",
+          "turn": "01a21886-57fc-78f0-83eb-1f9b8c40466d"
+        }
+      }
+    },
+    {
+      "boundary": "Actual bundled App Server, HTTP Router and Worker. Local model and operator fixtures. Missing diff and directory scope injected.",
+      "decisions_sent_once": [
+        [
+          0,
+          "accept"
+        ],
+        [
+          1,
+          "cancel"
+        ],
+        [
+          2,
+          "cancel"
+        ],
+        [
+          3,
+          "cancel"
+        ]
+      ],
+      "diff_excluded_from_display": true,
+      "missing_diff_and_directory_grant_refused": true,
+      "native_requests": [
+        {
+          "item": "trial-file-accept",
+          "request_id": 0,
+          "turn": "01a21886-54ec-7f30-b02b-c949cac24e7e"
+        },
+        {
+          "item": "trial-file-cancel",
+          "request_id": 1,
+          "turn": "01a21886-58fc-7c90-9c73-24afa54935ea"
+        },
+        {
+          "item": "trial-file-missing",
+          "request_id": 2,
+          "turn": "01a21886-5c0d-7e33-95ee-e073be8af4d2"
+        },
+        {
+          "item": "trial-file-broad",
+          "request_id": 3,
+          "turn": "01a21886-5c20-7aa1-ab38-3f577c281807"
+        }
+      ],
+      "native_session": "01a21886-547a-78e3-ac11-6e00207ef15a",
+      "only_approved_bytes_changed": true,
+      "only_completed_item": "trial-file-accept",
+      "operator_cli_verified": true,
+      "operator_notice_count": 2,
+      "other_notice_count": 0,
+      "receipts": {
+        "accept": {
+          "approval_id": "adb7db4d-f9f3-42e8-ac5a-7e2ac3ae9fc5",
+          "closure": {
+            "decision": "accept",
+            "source": "operator"
+          },
+          "files": 2,
+          "request_digest": "8f1fc931096dc610e135d321a5acba963a789d966f6d9d620b93c37f1215167c",
+          "turn": "01a21886-54ec-7f30-b02b-c949cac24e7e"
+        },
+        "cancel": {
+          "approval_id": "812b5acf-cee6-4e77-98f4-c2cb244c5a2b",
+          "closure": {
+            "decision": "cancel",
+            "source": "operator"
+          },
+          "files": 1,
+          "request_digest": "19661b10d5ac51e1c9524249e86c2a974969268709cc6cb79eb536169621e665",
+          "turn": "01a21886-58fc-7c90-9c73-24afa54935ea"
+        }
+      }
+    },
+    {
+      "boundary": "Actual bundled App Server, HTTP Router and Worker. Local model and operator fixtures. Missing diff and directory scope injected.",
+      "decisions_sent_once": [
+        [
+          0,
+          "accept"
+        ],
+        [
+          1,
+          "cancel"
+        ],
+        [
+          2,
+          "cancel"
+        ],
+        [
+          3,
+          "cancel"
+        ]
+      ],
+      "diff_excluded_from_display": true,
+      "missing_diff_and_directory_grant_refused": true,
+      "native_requests": [
+        {
+          "item": "trial-file-accept",
+          "request_id": 0,
+          "turn": "01a21886-54ef-7f91-aa64-453e91f28738"
+        },
+        {
+          "item": "trial-file-cancel",
+          "request_id": 1,
+          "turn": "01a21886-5807-7281-8079-ba27a5376ab4"
+        },
+        {
+          "item": "trial-file-missing",
+          "request_id": 2,
+          "turn": "01a21886-5b0e-77a2-a865-014101c0088b"
+        },
+        {
+          "item": "trial-file-broad",
+          "request_id": 3,
+          "turn": "01a21886-5b1f-7f92-858d-bf097af420c1"
+        }
+      ],
+      "native_session": "01a21886-547b-7510-8a05-0b1bb9b808f7",
+      "only_approved_bytes_changed": true,
+      "only_completed_item": "trial-file-accept",
+      "operator_cli_verified": true,
+      "operator_notice_count": 2,
+      "other_notice_count": 0,
+      "receipts": {
+        "accept": {
+          "approval_id": "5b2c9580-6898-42ce-956d-f1b040c53dfb",
+          "closure": {
+            "decision": "accept",
+            "source": "operator"
+          },
+          "files": 2,
+          "request_digest": "d5b1493261a2b9e105d8ec0138093b97974c45c67b66444ae89d16cadcb4a9fd",
+          "turn": "01a21886-54ef-7f91-aa64-453e91f28738"
+        },
+        "cancel": {
+          "approval_id": "2239b863-5d61-408c-8c88-800578b78c33",
+          "closure": {
+            "decision": "cancel",
+            "source": "operator"
+          },
+          "files": 1,
+          "request_digest": "6d4296d542e2345a1e46ffd2d10f6ef04963eb845651bcd4782270a3de932fad",
+          "turn": "01a21886-5807-7281-8079-ba27a5376ab4"
+        }
+      }
+    },
+    {
+      "boundary": "Actual bundled App Server, HTTP Router and Worker. Local model and operator fixtures. Missing diff and directory scope injected.",
+      "decisions_sent_once": [
+        [
+          0,
+          "accept"
+        ],
+        [
+          1,
+          "cancel"
+        ],
+        [
+          2,
+          "cancel"
+        ],
+        [
+          3,
+          "cancel"
+        ]
+      ],
+      "diff_excluded_from_display": true,
+      "missing_diff_and_directory_grant_refused": true,
+      "native_requests": [
+        {
+          "item": "trial-file-accept",
+          "request_id": 0,
+          "turn": "01a21886-5c98-73f3-85bf-e15d18f0a964"
+        },
+        {
+          "item": "trial-file-cancel",
+          "request_id": 1,
+          "turn": "01a21886-5fbb-7510-8ebb-b16923dc268b"
+        },
+        {
+          "item": "trial-file-missing",
+          "request_id": 2,
+          "turn": "01a21886-62bd-7bb1-9501-c582ea491b33"
+        },
+        {
+          "item": "trial-file-broad",
+          "request_id": 3,
+          "turn": "01a21886-62ce-74d2-9e2c-a31eeab6bf20"
+        }
+      ],
+      "native_session": "01a21886-5c4f-7170-a6b2-9f14bc986932",
+      "only_approved_bytes_changed": true,
+      "only_completed_item": "trial-file-accept",
+      "operator_cli_verified": true,
+      "operator_notice_count": 2,
+      "other_notice_count": 0,
+      "receipts": {
+        "accept": {
+          "approval_id": "ea6bc333-a57a-4cf9-ab47-a7d7e31089e3",
+          "closure": {
+            "decision": "accept",
+            "source": "operator"
+          },
+          "files": 2,
+          "request_digest": "b22e05c8554512d3fb897918baa69a191e51239430e52c76a7a05b4c1e6aa6b5",
+          "turn": "01a21886-5c98-73f3-85bf-e15d18f0a964"
+        },
+        "cancel": {
+          "approval_id": "898febdf-f5cf-4783-93f6-403a644ea64c",
+          "closure": {
+            "decision": "cancel",
+            "source": "operator"
+          },
+          "files": 1,
+          "request_digest": "f0e54417ad00cb958b9fa951a59dd5c8bd545f94bae0b493f492501b26d74e28",
+          "turn": "01a21886-5fbb-7510-8ebb-b16923dc268b"
+        }
+      }
+    },
+    {
+      "boundary": "Actual bundled App Server, HTTP Router and Worker. Local model and operator fixtures. Missing diff and directory scope injected.",
+      "decisions_sent_once": [
+        [
+          0,
+          "accept"
+        ],
+        [
+          1,
+          "cancel"
+        ],
+        [
+          2,
+          "cancel"
+        ],
+        [
+          3,
+          "cancel"
+        ]
+      ],
+      "diff_excluded_from_display": true,
+      "missing_diff_and_directory_grant_refused": true,
+      "native_requests": [
+        {
+          "item": "trial-file-accept",
+          "request_id": 0,
+          "turn": "01a21886-5cc0-7301-a5b3-088587a993f8"
+        },
+        {
+          "item": "trial-file-cancel",
+          "request_id": 1,
+          "turn": "01a21886-5fcd-7242-a981-3384be0d27c0"
+        },
+        {
+          "item": "trial-file-missing",
+          "request_id": 2,
+          "turn": "01a21886-62ef-7d40-a4ca-83b470eea486"
+        },
+        {
+          "item": "trial-file-broad",
+          "request_id": 3,
+          "turn": "01a21886-62fb-79b0-97e7-e48ac388af25"
+        }
+      ],
+      "native_session": "01a21886-5c7d-7133-9449-0504069f52be",
+      "only_approved_bytes_changed": true,
+      "only_completed_item": "trial-file-accept",
+      "operator_cli_verified": true,
+      "operator_notice_count": 2,
+      "other_notice_count": 0,
+      "receipts": {
+        "accept": {
+          "approval_id": "c814daad-ece0-47e1-ace1-a04550e86b57",
+          "closure": {
+            "decision": "accept",
+            "source": "operator"
+          },
+          "files": 2,
+          "request_digest": "56db707cd5e327e145db83dadde08cfde67d26b3726cc3a6af3ca6b4280c6d3a",
+          "turn": "01a21886-5cc0-7301-a5b3-088587a993f8"
+        },
+        "cancel": {
+          "approval_id": "93cd918b-e084-4dbf-973e-6a299a69ff05",
+          "closure": {
+            "decision": "cancel",
+            "source": "operator"
+          },
+          "files": 1,
+          "request_digest": "f2f9a5efec48bf02e48f35d6b71f7fea16943e7f0257b8283b8e90c60fde1efd",
+          "turn": "01a21886-5fcd-7242-a981-3384be0d27c0"
+        }
+      }
+    },
+    {
+      "boundary": "Actual bundled App Server, HTTP Router and Worker. Local model and operator fixtures. Missing diff and directory scope injected.",
+      "decisions_sent_once": [
+        [
+          0,
+          "accept"
+        ],
+        [
+          1,
+          "cancel"
+        ],
+        [
+          2,
+          "cancel"
+        ],
+        [
+          3,
+          "cancel"
+        ]
+      ],
+      "diff_excluded_from_display": true,
+      "missing_diff_and_directory_grant_refused": true,
+      "native_requests": [
+        {
+          "item": "trial-file-accept",
+          "request_id": 0,
+          "turn": "01a21886-5dcd-7cc2-b1b5-30569811302f"
+        },
+        {
+          "item": "trial-file-cancel",
+          "request_id": 1,
+          "turn": "01a21886-60e7-73c2-a71e-15e77d2d1782"
+        },
+        {
+          "item": "trial-file-missing",
+          "request_id": 2,
+          "turn": "01a21886-63f2-7422-bf3f-c277395e99a3"
+        },
+        {
+          "item": "trial-file-broad",
+          "request_id": 3,
+          "turn": "01a21886-6406-7cd2-b259-cdd8e96af0f9"
+        }
+      ],
+      "native_session": "01a21886-5d84-7ea2-9dd0-043d4d7fe8eb",
+      "only_approved_bytes_changed": true,
+      "only_completed_item": "trial-file-accept",
+      "operator_cli_verified": true,
+      "operator_notice_count": 2,
+      "other_notice_count": 0,
+      "receipts": {
+        "accept": {
+          "approval_id": "a45a8ce5-1194-4130-9edb-00933934d7fd",
+          "closure": {
+            "decision": "accept",
+            "source": "operator"
+          },
+          "files": 2,
+          "request_digest": "0b7cfa97cdcc67a0317bce4c07a92c999d6721a07a6a7c8a7b1427ba3fa2a6ea",
+          "turn": "01a21886-5dcd-7cc2-b1b5-30569811302f"
+        },
+        "cancel": {
+          "approval_id": "8adca72a-f436-4b75-beff-fa81f17541af",
+          "closure": {
+            "decision": "cancel",
+            "source": "operator"
+          },
+          "files": 1,
+          "request_digest": "247ce60115a3ba577d54d476c6ee11e712a48603b3dce6b616d20b0b8398492f",
+          "turn": "01a21886-60e7-73c2-a71e-15e77d2d1782"
+        }
+      }
+    }
+  ],
+  "verified_runs": 6
+}

@@ -95,7 +95,8 @@ class Provider(BaseHTTPRequestHandler):
             self.server.media.append({"caption":captions,"image_sha256":images})
         markers = [block["text"] for block in latest if block.get("text","").startswith("魔物链接投递\n")]
         payload = json.loads(markers[-1].split("\n",1)[1])["payload"] if markers else None
-        calls = sum(item.get("type")=="function_call_output" for item in items[user_index+1:])
+        calls = sum(item.get("type") in ("function_call_output","custom_tool_call_output")
+                    for item in items[user_index+1:])
         names = [tool.get("name") for tool in body.get("tools",[])]
         self.server.observed.append(("worker_report" in names,calls))
         if hasattr(self.server,"private_admissions"):
@@ -112,6 +113,9 @@ class Provider(BaseHTTPRequestHandler):
         approval_prompt = next((block["text"].removeprefix("Approval fixture ")
                                 for block in latest if hasattr(self.server,"approval_commands")
                                 and block.get("text","").startswith("Approval fixture ")),None)
+        file_approval = next((block["text"].removeprefix("File approval fixture ")
+                              for block in latest if hasattr(self.server,"approval_patches")
+                              and block.get("text","").startswith("File approval fixture ")),None)
         trainer_prompt = next((block["text"].split(": ",1)[1] for block in latest
                               if hasattr(self.server,"trainer_responses")
                               and block.get("text","").startswith("Native trainer question: ")),None)
@@ -143,6 +147,10 @@ class Provider(BaseHTTPRequestHandler):
                     "arguments":encode({"cmd":self.server.approval_commands[approval_prompt],
                                         "sandbox_permissions":"require_escalated",
                                         "justification":"Read the isolated test directory."})}
+        elif file_approval and not calls:
+            item = {"type":"custom_tool_call","id":"ct_fixture_"+file_approval,
+                    "call_id":"trial-file-"+file_approval,"name":"apply_patch",
+                    "input":self.server.approval_patches[file_approval]}
         elif public_preview and not calls:
             commentary = {"id":"msg_preview_comment","type":"message","role":"assistant","status":"completed",
                           "phase":"commentary","content":[{"type":"output_text","text":"Checking the isolated workspace."}]}
@@ -1042,6 +1050,150 @@ class CodexAppServer(unittest.TestCase):
                             "item_id":command["id"],"native_status":command["status"],"exit_code":command["exitCode"],
                             "output_matches_isolated_directory":True,"router_state":native_accepted["state"],
                             "attempted_response":native_accepted["attempted_response"],"same_decision_replay":True}}
+
+    def test_native_file_approval_binds_to_exact_changes_and_rejects_missing_or_broad_requests(self):
+        root = Path(self.root).resolve()
+        modes = ("accept","cancel","missing","broad")
+        paths = {mode:[root/(mode+".txt")] for mode in modes}
+        paths["accept"].append(root/"another.txt")
+        self.provider.approval_patches = {}
+        for mode,targets in paths.items():
+            for target in targets:
+                target.write_text("before\n")
+            updates = "".join(f"*** Update File: {target}\n@@\n-before\n+after\n" for target in targets)
+            self.provider.approval_patches[mode] = "*** Begin Patch\n"+updates+"*** End Patch"
+        rpc = self.enterContext(isolated_app_server(self.root,self.origin,
+            ['model="gpt-5.5"','approval_policy="on-request"','sandbox_mode="read-only"']))
+        session = rpc.request("thread/start",{"cwd":self.root,"ephemeral":False})["thread"]["id"]
+        host = AppServerHost(rpc,session,relay_file_approvals=True)
+        terminals = Queue()
+        worker_token,manager_token,operator_token,other_token,adapter_token,platform_token = (guid() for _ in range(6))
+        router = self.enterContext(running(serve_loopback(Orders(root/"router.db"),{
+            worker_token:"worker/dev",manager_token:"hermes",operator_token:"approver/dev",other_token:"approver/other"})))
+        worker = Worker(root/"worker.db","dev",Client(router,worker_token),HostAdapter(root/"adapter.db",host,session))
+        worker.connect()
+        service = WorkerService(worker)
+        worker_url = self.enterContext(running(service.listen({adapter_token:"adapter/dev",platform_token:"platform/dev"},
+                                                              ("127.0.0.1",0),None)))
+        operator,outsider,manager = (Client(router,token) for token in (operator_token,other_token,manager_token))
+        platform = Client(worker_url,platform_token)
+        callback = Client(worker_url,adapter_token)
+        operator_file = config(root,"operator.json",{"url":router,"token":operator_token})
+        cli = [sys.executable,"-m","rewrite.service","approvals","--connection",str(operator_file),"--worker-id","dev"]
+        native_items,native_requests,native_decisions = {},{},[]
+        event,send = rpc.event,rpc.send
+
+        def record_event(deadline):
+            while True:
+                packet = event(deadline)
+                method,params = packet.get("method"),packet.get("params",{})
+                if method=="item/started" and params.get("item",{}).get("type")=="fileChange":
+                    item = params["item"]
+                    native_items[item["id"]] = params
+                    if item["id"]=="trial-file-missing":
+                        continue
+                if method=="item/fileChange/requestApproval":
+                    native_requests[params["itemId"]] = packet
+                    if params["itemId"]=="trial-file-broad":
+                        return dict(packet,params=dict(params,grantRoot=str(root)))
+                return packet
+
+        def record_decision(packet):
+            if "decision" in packet.get("result",{}):
+                native_decisions.append((packet["id"],packet["result"]["decision"]))
+            send(packet)
+
+        rpc.event,rpc.send = record_event,record_decision
+        self.enterContext(worker_callbacks(host,callback,lambda:None,
+                          notify_item=lambda item:host.publish_public_item(callback,item),
+                          notify_terminal=lambda tid,status:terminals.put((tid,status))))
+
+        def until(predicate):
+            deadline = time.monotonic()+10
+            while time.monotonic()<deadline:
+                value = predicate()
+                if value:
+                    return value
+                time.sleep(.05)
+            self.fail("native file approval fixture did not settle")
+
+        def records():
+            return {row["request"]["item_id"]:row for row in operator.request("GET","approvals/dev")["items"]}
+
+        receipts = {}
+        for mode in modes:
+            item_id = "trial-file-"+mode
+            worker.chat(guid(),"File approval fixture "+mode)
+            if mode in ("accept","cancel"):
+                offered = until(lambda:records().get(item_id))
+                approval_id = offered["approval_id"]
+                route = "approvals/dev/"+approval_id
+                native = native_requests[item_id]
+                changes = native_items[item_id]["item"]["changes"]
+                self.assertEqual({change["path"] for change in changes},{str(path) for path in paths[mode]})
+                self.assertTrue(all(change["diff"]=="@@ -1 +1 @@\n-before\n+after\n" for change in changes))
+                self.assertEqual(offered["request"],{"kind":"file_change","session":session,
+                    "turn_id":native["params"]["turnId"],"item_id":item_id,"changes":changes,
+                    "decisions":["accept","cancel"]})
+                self.assertEqual(offered["request_digest"],hashlib.sha256(encode(offered["request"]).encode()).hexdigest())
+                self.assertEqual(offered["state"],"pending")
+                self.assertTrue(all(path.read_text()=="before\n" for path in paths[mode]))
+                with self.assertRaisesRegex(Fault,"forbidden"):
+                    outsider.request("GET",route)
+                with self.assertRaisesRegex(Fault,"forbidden"):
+                    platform.request("GET","worker/"+route)
+                decision = {"request_digest":offered["request_digest"],"decision":mode}
+                with self.assertRaisesRegex(Fault,"approval_view_changed"):
+                    operator.request("PUT",route+"/decision",dict(decision,request_digest="wrong-diff-digest"))
+                with self.assertRaisesRegex(Fault,"unsupported_approval_decision"):
+                    operator.request("PUT",route+"/decision",dict(decision,decision="acceptForSession"))
+                if mode=="accept":
+                    shown = subprocess.check_output([*cli,"show",approval_id],text=True,timeout=10)
+                    self.assertEqual(json.loads(shown),offered)
+                    accepted = subprocess.check_output([*cli,"decide",approval_id,"--request-digest",
+                        decision["request_digest"],"--decision","accept"],text=True,timeout=10)
+                    self.assertEqual(json.loads(accepted)["decision"],"accept")
+                else:
+                    operator.request("PUT",route+"/decision",decision)
+            turn,status = terminals.get(timeout=10)
+            expected = "completed" if mode=="accept" else "interrupted"
+            self.assertEqual((turn,status),(native_requests[item_id]["params"]["turnId"],expected))
+            self.assertTrue(all(path.read_text()==("after\n" if mode=="accept" else "before\n") for path in paths[mode]))
+            if mode in ("accept","cancel"):
+                def closed():
+                    row = records().get(item_id)
+                    return row if row and row["state"]=="native_closed" else None
+                receipt = until(closed)
+                self.assertEqual(receipt["attempted_response"],{"decision":mode,"source":"operator"})
+                self.assertEqual(operator.request("PUT",route+"/decision",decision),receipt)
+                receipts[mode] = {"approval_id":approval_id,"request_digest":offered["request_digest"],"turn":turn,
+                                  "closure":receipt["attempted_response"],"files":len(paths[mode])}
+
+        self.assertEqual(native_decisions,[(native_requests["trial-file-"+mode]["id"],
+                         "accept" if mode=="accept" else "cancel") for mode in modes])
+        self.assertEqual(set(records()),{"trial-file-accept","trial-file-cancel"})
+        notices = operator.frames(0)
+        self.assertCountEqual([n["payload"] for n in notices],
+                              [{"approval_id":r["approval_id"],"worker_id":"dev"} for r in receipts.values()])
+        self.assertEqual(manager.frames(0),[])
+        native_turns = host.thread(session,include_turns=True)["turns"]
+        for turn in native_turns:
+            host.publish_public_turn(session,turn["id"],callback,turn)
+        display_rows = platform.request("GET","worker/display")["items"]
+        self.assertTrue(display_rows)  # The approved turn has an ordinary public model reply.
+        display_text = encode(display_rows)
+        self.assertFalse(any(str(path) in display_text for targets in paths.values() for path in targets))
+        self.assertNotIn("@@ -1 +1 @@",display_text)
+        completed = [item for turn in native_turns for item in turn["items"] if item["type"]=="fileChange"]
+        self.assertEqual([(item["id"],item["status"]) for item in completed],[("trial-file-accept","completed")])
+        self.evidence = {"native_session":session,"receipts":receipts,
+                         "native_requests":[{"item":item,"request_id":packet["id"],"turn":packet["params"]["turnId"]}
+                                            for item,packet in native_requests.items()],
+                         "only_completed_item":completed[0]["id"],"decisions_sent_once":native_decisions,
+                         "only_approved_bytes_changed":True,"missing_diff_and_directory_grant_refused":True,
+                         "operator_notice_count":len(notices),"other_notice_count":0,"operator_cli_verified":True,
+                         "diff_excluded_from_display":True,
+                         "boundary":"Actual bundled App Server, HTTP Router and Worker. Local model and operator fixtures. Missing diff and directory scope injected."}
 
     def test_resume_catalog_uses_only_current_app_server_workspace_without_loading_history(self):
         root = Path(self.root)

@@ -39,14 +39,16 @@ class AppServerHost:
     rejects_busy_before_queue_write = True
     rejects_busy_before_answer_write = True
 
-    def __init__(self, rpc, thread_id, adapter_db=None, public_image_root=None, *, relay_command_approvals=False):
+    def __init__(self, rpc, thread_id, adapter_db=None, public_image_root=None, *,
+                 relay_command_approvals=False,relay_file_approvals=False):
         self.rpc, self.thread_id = rpc,thread_id
         self.write_lock = RLock()
         self.usage = None
         self.inherited_delivery_ids = frozenset()
         self.compactions = CodexCompactions(adapter_db,self) if adapter_db is not None else None
         self.questions = CodexQuestions(adapter_db,self) if adapter_db is not None else None
-        self.approvals = CodexApprovals(rpc,thread_id) if relay_command_approvals else None
+        self.approvals = (CodexApprovals(rpc,thread_id,commands=relay_command_approvals,files=relay_file_approvals)
+                          if relay_command_approvals or relay_file_approvals else None)
         require(public_image_root is None or adapter_db is not None,422,"native_image_state_required")
         self.images = CodexImages(public_image_root,adapter_db) if public_image_root is not None else None
 
@@ -597,11 +599,21 @@ def worker_callbacks(host,worker,notify_turn_end,notify_item=None,notify_termina
                         except Fault:
                             break
                 continue
-            if host.approvals and packet.get("method")=="item/commandExecution/requestApproval":
+            if host.approvals and host.approvals.commands and packet.get("method")=="item/commandExecution/requestApproval":
                 try:
                     host.approvals.offer(packet)
                 except Fault:
                     pass
+                continue
+            if host.approvals and host.approvals.files and packet.get("method")=="item/fileChange/requestApproval":
+                try:
+                    host.approvals.offer_file(packet)
+                except Fault as exc:
+                    if exc.code!="wrong_native_approval_source":
+                        try:
+                            host.rpc.send({"id":packet["id"],"result":{"decision":"cancel"}})
+                        except Fault:
+                            break
                 continue
             if packet.get("method")=="serverRequest/resolved":
                 if host.questions:
@@ -625,13 +637,16 @@ def worker_callbacks(host,worker,notify_turn_end,notify_item=None,notify_termina
             if packet.get("method")=="thread/tokenUsage/updated":
                 host.observe_usage(packet.get("params"))
                 continue
-            if notify_item is not None and packet.get("method") in ("item/started","item/completed"):
-                try:
-                    event = host.live_public_item(packet["method"],packet.get("params"))
-                except (Fault,TypeError,KeyError,AttributeError):
-                    continue
-                if event:
-                    notify_item(event)
+            if packet.get("method") in ("item/started","item/completed"):
+                if host.approvals and host.approvals.files:
+                    host.approvals.observe_item(packet["method"],packet.get("params"))
+                if notify_item is not None:
+                    try:
+                        event = host.live_public_item(packet["method"],packet.get("params"))
+                    except (Fault,TypeError,KeyError,AttributeError):
+                        continue
+                    if event:
+                        notify_item(event)
                 continue
             if packet.get("method")!="item/tool/call" or type(packet.get("id")) not in (str,int):
                 continue

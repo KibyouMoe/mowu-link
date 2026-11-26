@@ -262,7 +262,9 @@ python3 -m rewrite.service approvals --connection "$APPROVER_CONNECTION" --worke
 python3 -m rewrite.service approvals --connection "$APPROVER_CONNECTION" --worker-id "$WORKER_ID" decide "$APPROVAL_ID" --request-digest "$REQUEST_DIGEST" --decision cancel
 ```
 
-决定包括宿主实际给出的单次 `accept` 或 `cancel`。已登记决定显示 `decided`，只有同一原生请求关闭后才显示 `native_closed`。关闭回执证明原审批请求结束，命令是否执行仍看原生回合。决定超时或 Worker 会话已变时拒绝提交新决定。超过旧系统的十分钟期限，原生请求支持取消且仍在等待时，转发一次取消并注明来源为超时。独立 Codex App Server 已实测单次允许和取消。重复允许沿用原回执，原生回合只有一次测试目录内的 `pwd`。App Server 的文件、额外权限、网络审批及 Desktop 的应用级授权分别待核。[原生测试证据](evidence/codex-app-server-approval-accept.json)
+决定包括宿主实际给出的单次 `accept` 或 `cancel`。已登记决定显示 `decided`，只有同一原生请求关闭后才显示 `native_closed`。关闭回执证明原审批请求结束，命令是否执行仍看原生回合。决定超时或 Worker 会话已变时拒绝提交新决定。超过旧系统的十分钟期限，原生请求支持取消且仍在等待时，转发一次取消并注明来源为超时。独立 Codex App Server 已实测单次允许和取消。重复允许沿用原回执，原生回合只有一次测试目录内的 `pwd`。[原生测试证据](evidence/codex-app-server-approval-accept.json)
+
+独立 Codex 文件变更另用 `--relay-file-approvals` 启用。审批 CLI 的 `show` 返回 `kind=file_change`、绝对路径、操作和完整原生差异，包含本次变更的请求摘要。差异只保存在 Router 的私有审批库，由该工位的审批身份读取。C01 仍只通知工位与审批号。适配器匹配同一会话、回合和原生条目后才提交，缺少完整原生差异或请求包含目录授权时，按原请求号取消。只允许批准本次或取消。审批仍由原生宿主执行。原生应用授权、网络和额外权限请求待核。复跑 `python3 -B -m unittest -v rewrite.test_codex_app_server.CodexAppServer.test_native_file_approval_binds_to_exact_changes_and_rejects_missing_or_broad_requests`。[实测](evidence/codex-app-server-file-approval.json)
 
 DSH 在独立宿主插件的参数中显式配置 `relay_command_approvals: true`，沿用同一个审批 CLI。适配器只转接绑定 Agent 的原生 `bash` 请求，按同一原生回合找到完整工具参数。原调用明确提供绝对 `workdir` 时，审批人可以核对该目录与原参数。相对目录或未指定目录的调用仍由宿主的原生审批处理。
 
