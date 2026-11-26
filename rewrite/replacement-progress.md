@@ -6,6 +6,8 @@
 
 离线换绑现在核对 Worker 展示队列和飞书游标。旧审计在 Worker 已写旧会话回复、飞书尚未轮询时误报账本已清。隔离复验把同一条尾项按原绑定补投一次，积压从 1 变 0，然后才生成换绑副本。配对库同序号正文不一致或飞书游标领先时均报错。实际 Worker HTTP 与 SQLite，飞书和宿主用夹具。[实测](evidence/feishu-handoff-display-tail.json) · [恢复与复跑](router-rehearsal.md#飞书输出回执与换绑)
 
+换绑与错配场景连续通过 10 轮。macOS 全量通过 251 项，Linux arm64 通过 171 项、跳过 80 项。以 `02de55e3798e74964a02e433c3672ed67643fdc2` 构建 226 文件独立包，SHA-256 为 `25c1de0dbf6cdf47496c19cda89ea02f496b83d086ab3fc5a904c3f76461c1f6`。安装目录运行 `python3 -B -m unittest -q rewrite.test_release rewrite.test_cutover rewrite.test_state_bundle rewrite.test_feishu_output`，通过 38 项，文件摘要一致。旧版本回退夹具来自 `30f61e671465db0b5bba221ba8c9fc2194a6e43d`，用 `MOWULINK_TEST_LEGACY_ROOT` 指定。
+
 有限重连次数用完时，飞书收件进程记一条不可用日志，等待至少 30 秒且不短于平台下发的间隔，再经原 SDK 重新连。隔离端点两轮均回 HTTP 503，随后同一进程成功连上。断线前的消息已经送进宿主，平台后来重发只查回原 Worker 收件凭据，新消息也只投了一次。明确下发零次重连时仅有首次取址，日志标明停止收件。官方 SDK 1.7.5、实际本地 HTTP/WebSocket 与 Worker 路径，平台和宿主使用夹具。[实测](evidence/feishu-sdk-retry-exhausted.json) · [复跑](README.md#飞书入口)
 
 该场景在 macOS 连续通过 10 轮，在 Linux arm64 复验通过。另验原 SDK 对照、平台主动停止、单纯 TCP 断链与取址无响应。macOS 全量通过 249 项，Linux arm64 通过 169 项、跳过 80 项。以 `239e5d59391f6bdb849104fec2f17c49dcdd4ab3` 构建 225 文件独立包，SHA-256 为 `8e7368f3b4b49c7e9473a72c4e2785677c6fb517df211c5e38ff2e6d424a3703`。独立安装目录内通过 SDK 收件、重连专项与 31 项回归，复核文件摘要一致。飞书云端消息号与真实 Codex W04 仍待验收。
