@@ -1,0 +1,81 @@
+{
+  "session": "dsh-isolated-seeded-project",
+  "fixture_git_revision": "eed166dfba8d99c5be98bd5460fec3cd906603c2",
+  "seed_sha256": "e9bf59cbf8babf942e790b627342675f8b5041a7b6e3004a470514c2463b0151",
+  "source_sha256": "31db0b5790ac95d16e0864874502e38fe24f48573b17b6604b640b56dcf8cbf8",
+  "first_seed_reply_lost": true,
+  "cases": [
+    {
+      "task_id": "ae93fd52-62a7-4044-aeeb-52be2c23d6e9",
+      "assignment_id": "55303223-0fc1-4dca-af27-40b99525fa98",
+      "container_id": "86ca47e617669822e53c106fa9f6349b0b0ddbd8d5bb3df75b800cd559e0012d",
+      "native_input": "mowulink-b1ac1e73831003b1bbf9beae0435d8194ae92504cd17071feb85fdcbca568c08",
+      "tool_ids": [
+        "workspace-seed-55303223-0fc1-4dca-af27-40b99525fa98-0",
+        "workspace-seed-55303223-0fc1-4dca-af27-40b99525fa98-1",
+        "workspace-seed-55303223-0fc1-4dca-af27-40b99525fa98-2",
+        "workspace-seed-55303223-0fc1-4dca-af27-40b99525fa98-3"
+      ],
+      "artifact_id": "60f564c1-bbaf-48ea-95ae-495256fc15a4",
+      "artifact_sha256": "238ba5203f5b4f34db2ada5a83835487db62cbdf18ad43ea43e1790540a31895",
+      "phase": "sealed",
+      "state": "completed_reported"
+    },
+    {
+      "task_id": "8fe44e3f-3a05-4bd2-80f7-302f5fcd8c77",
+      "assignment_id": "25a14dfe-3b35-473c-aa16-9a7055f139c3",
+      "container_id": "b858c14c44c48f8b4fbd4921f4295392e731f8f5ada0a40610d3613d3d259a63",
+      "native_input": "mowulink-815d1734d940426544cd4818eebb4b3e9afee549da768818c9b6c34f7aa56326",
+      "tool_ids": [
+        "workspace-seed-25a14dfe-3b35-473c-aa16-9a7055f139c3-0",
+        "workspace-seed-25a14dfe-3b35-473c-aa16-9a7055f139c3-1",
+        "workspace-seed-25a14dfe-3b35-473c-aa16-9a7055f139c3-2"
+      ],
+      "artifact_id": "b7000b2f-a410-45b5-868f-a45f700ff8a4",
+      "artifact_sha256": "238ba5203f5b4f34db2ada5a83835487db62cbdf18ad43ea43e1790540a31895",
+      "phase": "sealed",
+      "state": "completed_reported"
+    }
+  ],
+  "manager_notifications": [
+    "bab51b57-a3ba-4ea1-851f-89ebf095f59d",
+    "8a1ea24d-e5ae-42a1-bb40-f3e7cf64caf4"
+  ],
+  "boundary": "Installed DSH AgentLoop, isolated Linux Docker, source Git fixture, Worker and Router. Local scripted model.",
+  "refusals": [
+    {
+      "case": "wrong_digest",
+      "task_id": "019742af-ebad-46f1-ad7c-38cd2e56cf99",
+      "phase": "unused",
+      "published": false
+    },
+    {
+      "case": "path_outside",
+      "task_id": "acf3789d-5a70-4fc1-9b3b-2a55d007cd5d",
+      "phase": "seeding",
+      "published": false
+    },
+    {
+      "case": "symbolic_link",
+      "task_id": "894e6cf7-1ac8-4c95-a6f4-81ce05922135",
+      "phase": "seeding",
+      "published": false
+    },
+    {
+      "case": "hard_link",
+      "task_id": "87e9be0d-7851-40af-bfba-55c4ebc6ca10",
+      "phase": "seeding",
+      "published": false
+    }
+  ],
+  "container_restart": {
+    "session": "dsh-restarted-seeded-container",
+    "task_id": "e6817e64-44c1-4451-8293-0166e33a2897",
+    "assignment_id": "b4792fca-c9e6-47b4-bcd6-f4bc3950fd6a",
+    "container_id": "4ac368fbe1b0efb36270d52f6b19840260ed789a2ad3ce044dfac357525dd2e6",
+    "started_at_before": "2026-11-26T17:15:43.766689966Z",
+    "started_at_after": "2026-11-26T17:15:45.115459841Z",
+    "shell_and_export_error": "assignment_workspace_restarted",
+    "released_by": "cancel_confirmed"
+  }
+}

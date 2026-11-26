@@ -383,7 +383,8 @@ function installBoundTools(ctx,port,directory,relay_command_approvals) {
   }
   const available = port.workspace ? [...tools,{
     name:'worker_workspace_shell',
-    description:'Run a shell command inside the private workspace of the current work order.',
+    description:'Run a shell command inside the private workspace of the current work order.'
+      +(port.workspace.seeded ? ' The approved project snapshot is copied to /workspace/project before the first command.' : ''),
     inputSchema:{type:'object',required:['command'],additionalProperties:false,properties:{command:{type:'string'}}},
   },{
     name:'worker_workspace_export',

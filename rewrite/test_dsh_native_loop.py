@@ -1,5 +1,6 @@
 """Run the installed DSH AgentLoop with a local deterministic provider and a fresh profile."""
 import hashlib
+from io import BytesIO
 import json
 from contextlib import contextmanager
 from http.server import ThreadingHTTPServer
@@ -7,7 +8,9 @@ import os
 import shutil
 from pathlib import Path
 import select
+import shlex
 import subprocess
+import tarfile
 import tempfile
 from threading import Event, Thread
 import time
@@ -1316,6 +1319,210 @@ class NativeLoop(unittest.TestCase):
                 "w04_attempts":report_attempts,"container_absent_after_replay":True,
                 "manager_notification":notify["delivery_id"],"router_state":details["task"]["state"],
                 "boundary":"Installed DSH AgentLoop, real isolated Linux Docker, Worker and Router. Local scripted model. No Feishu."}
+            Path(output).write_text(json.dumps(evidence,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
+
+    def seed_runtime(self, session, runtime, cli, image, archive, digest, *, docker=None):
+        executable,_,socket = cli
+        self.assertEqual(archive.stat().st_mode & 0o077,0)
+        (runtime/"assignment-container.json").write_text(encode({
+            "docker":docker or executable,"socket":socket.removeprefix("unix://"),"image":image,
+            "seed":{"archive":str(archive),"sha256":digest},
+        }),encoding="utf-8")
+        self.addCleanup(self.clean_fixture_containers,runtime,session,cli)
+
+    def dispatch_seed_work(self, loop, clock, subject, instructions):
+        task = loop.hermes.create(guid(),subject,instructions,"oguri")["task_id"]
+        clock.advance(1)
+        loop.worker.poll()
+        clock.advance(10)
+        loop.worker.poll()
+        loop.worker.poll()
+        return task
+
+    def create_project_seed(self, runtime):
+        repo = runtime/"test-project"
+        git = ["/usr/bin/git","-C",str(repo)]
+        env = {"PATH":os.defpath,"HOME":str(runtime),"GIT_CONFIG_NOSYSTEM":"1"}
+        repo.mkdir()
+        subprocess.run([*git,"init","--quiet"],env=env,check=True,capture_output=True,timeout=5)
+        source = repo/"hello.txt"
+        source.write_bytes(b"original project\n")
+        script = repo/"checks"/"fixture.sh"
+        script.parent.mkdir()
+        script.write_text("#!/bin/sh\nexit 0\n",encoding="utf-8")
+        script.chmod(0o700)
+        subprocess.run([*git,"add","hello.txt","checks/fixture.sh"],env=env,check=True,timeout=5)
+        subprocess.run([*git,"-c","user.name=Fixture Author","-c","user.email=fixture@example.invalid",
+            "-c","commit.gpgsign=false","commit","--quiet","-m","Isolated source"],env=env,check=True,capture_output=True,timeout=5)
+        archive = runtime/"approved-project.tar"
+        with open(archive,"wb",opener=lambda name,flags:os.open(name,flags,0o600)) as out:
+            subprocess.run([*git,"archive","--format=tar","HEAD"],env=env,stdout=out,check=True,timeout=5)
+        revision = subprocess.check_output([*git,"rev-parse","HEAD"],env=env,text=True,timeout=5).strip()
+        return archive,hashlib.sha256(archive.read_bytes()).hexdigest(),source,revision
+
+    def test_dsh_workspace_seeds_private_project_and_recovers_seed_ack(self):
+        image,cli = self.container_engine()
+        session = "dsh-isolated-seeded-project"
+        directory,loop,service,_ = self.goal_worker(session)
+        runtime = Path(directory)
+        seed,digest,source,revision = self.create_project_seed(runtime)
+        dropped = runtime/"lost-seed-ack"
+        docker = shlex.quote(cli[0])
+        wrapper = runtime/"fixture-docker"
+        wrapper.write_text(f"""#!/bin/sh
+if [ "$5" = container ] && [ "$6" = exec ] && [ "$7" = '-i' ] && [ ! -e {shlex.quote(str(dropped))} ]; then
+    {docker} "$@" || exit $?
+    : > {shlex.quote(str(dropped))}
+    exit 77
+fi
+exec {docker} "$@"
+""",encoding="utf-8")
+        wrapper.chmod(0o700)
+        self.seed_runtime(session,runtime,cli,image,seed,digest,docker=str(wrapper))
+        token = guid()
+        client = Client(self.open_worker(service,{token:"adapter/oguri"}),token)
+        own = runtime/"assignment-containers"
+        seen = []
+        with tool_listener(runtime,loop.adapter,client), self.start_native(directory,session,"cleanup-container-seed") as native:
+            loop.worker.connect()
+            for label in ("lose seed acknowledgement","normal second assignment"):
+                task = self.dispatch_seed_work(loop,service.clock,"Seeded project",label)
+                observed = self.read_native(native,"read")
+                details = loop.hermes.inspect(task)
+                self.assertEqual(details["task"]["state"],"completed_reported",(label,details,observed["results"]))
+                status = details["last_report"]
+                aid = status["assignment_id"]
+                calls = [row for row in observed["results"] if row["toolCallId"].startswith("workspace-seed-"+aid+"-")]
+                if not seen:
+                    self.assertTrue(dropped.is_file())
+                    self.assertEqual([row["isError"] for row in calls],[True,False,False,False],calls)
+                    self.assertIn("workspace_seed_unconfirmed",encode(calls[0]))
+                else:
+                    self.assertEqual([row["isError"] for row in calls],[False,False,False],calls)
+                self.assertEqual(json.loads(calls[-3]["content"][0]["text"])["exit_code"],0,calls[-3])
+                artifact, = status["artifact_ids"]
+                exported = loop.manager_wire.request("GET","attachments/"+artifact)
+                self.assertEqual(exported["bytes"],b"modified result\n")
+                self.assertEqual(source.read_bytes(),b"original project\n")
+                self.assertEqual(len(observed["inputs"]),len(seen)+1)
+                records = [path for path in own.glob("*.json") if json.loads(path.read_bytes())["assignment_id"]==aid]
+                journal, = records
+                until = time.monotonic()+8
+                while (lease:=json.loads(journal.read_bytes()))["phase"]!="sealed" and time.monotonic()<until:
+                    time.sleep(.05)
+                self.assertEqual((lease["phase"],lease["seed_sha256"]),("sealed",digest))
+                self.assertFalse(subprocess.check_output([*cli,"container","ls","--all","--filter",
+                    "id="+lease["container_id"],"--format","{{.ID}}"],timeout=5).strip())
+                seen.append({"task_id":task,"assignment_id":aid,"container_id":lease["container_id"],
+                    "native_input":observed["inputs"][-1],"tool_ids":[row["toolCallId"] for row in calls],
+                    "artifact_id":artifact,"artifact_sha256":exported["headers"]["X-Content-SHA256"],
+                    "phase":lease["phase"],"state":details["task"]["state"]})
+            self.assertNotEqual(seen[0]["container_id"],seen[1]["container_id"])
+            notices = loop.manager_wire.frames(0)
+            self.assertEqual([f["payload"]["attachment_ids"] for f in notices],[[item["artifact_id"]] for item in seen])
+        if output := os.environ.get("MOWULINK_DSH_SEED_EVIDENCE"):
+            evidence = {"session":session,"fixture_git_revision":revision,"seed_sha256":digest,
+                "source_sha256":hashlib.sha256(source.read_bytes()).hexdigest(),"first_seed_reply_lost":True,
+                "cases":seen,"manager_notifications":[item["delivery_id"] for item in notices],
+                "boundary":"Installed DSH AgentLoop, isolated Linux Docker, source Git fixture, Worker and Router. Local scripted model."}
+            Path(output).write_text(json.dumps(evidence,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
+
+    def test_dsh_workspace_refuses_unverified_or_escaping_project_seeds(self):
+        image,cli = self.container_engine()
+        failures = []
+        for case in ("wrong_digest","path_outside","symbolic_link","hard_link"):
+            with self.subTest(case=case):
+                session = "dsh-ineligible-seed-"+case
+                directory,loop,service,_ = self.goal_worker(session)
+                runtime = Path(directory)
+                archive = runtime/"untrusted-project.tar"
+                with open(archive,"wb",opener=lambda name,flags:os.open(name,flags,0o600)) as output:
+                    with tarfile.open(fileobj=output,mode="w") as tar:
+                        raw = b"original project\n"
+                        entry = tarfile.TarInfo("hello.txt")
+                        entry.size = len(raw)
+                        tar.addfile(entry,BytesIO(raw))
+                        if case=="path_outside":
+                            tar.addfile(tarfile.TarInfo("../escaped.txt"))
+                        if case in ("symbolic_link","hard_link"):
+                            trap = tarfile.TarInfo("escape")
+                            trap.type = tarfile.LNKTYPE if case=="hard_link" else tarfile.SYMTYPE
+                            trap.linkname = "/etc/passwd"
+                            tar.addfile(trap)
+                digest = "0"*64 if case=="wrong_digest" else hashlib.sha256(archive.read_bytes()).hexdigest()
+                self.seed_runtime(session,runtime,cli,image,archive,digest)
+                token = guid()
+                client = Client(self.open_worker(service,{token:"adapter/oguri"}),token)
+                with tool_listener(runtime,loop.adapter,client), self.start_native(directory,session,"cleanup-container-seed-invalid") as native:
+                    loop.worker.connect()
+                    task = self.dispatch_seed_work(loop,service.clock,"Reject seed",case)
+                    observed = self.read_native(native,"read")
+                    row, = observed["results"]
+                    self.assertTrue(row["isError"],row)
+                    self.assertIn("workspace_seed_unconfirmed",encode(row))
+                    self.assertEqual(loop.hermes.inspect(task)["task"]["state"],"working")
+                    journal, = (runtime/"assignment-containers").glob("*.json")
+                    lease = json.loads(journal.read_bytes())
+                    self.assertEqual(lease["phase"],"unused" if case=="wrong_digest" else "seeding")
+                    if lease["container_id"]:
+                        subprocess.run([*cli,"exec",lease["container_id"],"sh","-c",
+                            "test ! -e /workspace/project && test ! -e /workspace/escaped.txt"],
+                            check=True,timeout=5,capture_output=True)
+                    else:
+                        self.assertEqual(case,"wrong_digest")
+                    failures.append({"case":case,"task_id":task,"phase":lease["phase"],"published":False})
+        if output := os.environ.get("MOWULINK_DSH_SEED_REFUSAL_EVIDENCE"):
+            Path(output).write_text(json.dumps(failures,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
+
+    def test_dsh_workspace_restart_cannot_reseed_or_confirm_lost_work(self):
+        image,cli = self.container_engine()
+        session = "dsh-restarted-seeded-container"
+        directory,loop,service,_ = self.goal_worker(session)
+        runtime = Path(directory)
+        archive,digest,source,_ = self.create_project_seed(runtime)
+        self.seed_runtime(session,runtime,cli,image,archive,digest)
+        token = guid()
+        client = Client(self.open_worker(service,{token:"adapter/oguri"}),token)
+        with tool_listener(runtime,loop.adapter,client), self.start_native(directory,session,"cleanup-container-seed-restart") as native:
+            loop.worker.connect()
+            task = self.dispatch_seed_work(loop,service.clock,"Restart test","Test lost tmpfs")
+            self.assertTrue(self.read_native(native,"workspace-ready")["running"])
+            journal, = (runtime/"assignment-containers").glob("*.json")
+            lease = json.loads(journal.read_bytes())
+            container = lease["container_id"]
+            self.assertEqual(lease["phase"],"active")
+            self.assertEqual(subprocess.check_output([*cli,"exec",container,"cat","/workspace/project/hello.txt"],timeout=5),
+                             b"modified result\n")
+            subprocess.run([*cli,"container","restart","--timeout","1",container],check=True,timeout=10,capture_output=True)
+            started = subprocess.check_output([*cli,"container","inspect","--format","{{.State.StartedAt}}",container],
+                                              text=True,timeout=5).strip()
+            self.assertNotEqual(started,lease["started_at"])
+            subprocess.run([*cli,"exec",container,"sh","-c","test ! -e /workspace/project"],
+                           check=True,timeout=5,capture_output=True)
+            observed = self.read_native(native,"resume-workspace")
+            self.assertEqual([row["isError"] for row in observed["results"]],[False,True,True])
+            for refused in observed["results"][1:]:
+                self.assertIn("assignment_workspace_restarted",encode(refused))
+            self.assertEqual(source.read_bytes(),b"original project\n")
+            self.assertFalse(loop.manager_wire.frames(0))
+            state = loop.hermes.inspect(task)["task"]
+            self.assertEqual(state["state"],"working")
+            self.assertEqual(loop.worker.hold()["held_assignment_id"],lease["assignment_id"])
+            loop.hermes.act(guid(),task,state["revision"],"cancel",reason="Close isolated restart test")
+            self.assertEqual(loop.hermes.inspect(task)["pending_cleanup"][0]["assignment_id"],lease["assignment_id"])
+            loop.worker.poll()
+            after = self.read_native(native,"read")
+            closed = next(row for row in after["results"] if row["toolCallId"]=="cleanup-report-"+lease["assignment_id"])
+            self.assertFalse(closed["isError"],closed)
+            self.assertEqual(json.loads(journal.read_bytes())["phase"],"sealed")
+            self.assertIsNone(loop.worker.hold()["held_assignment_id"])
+            state = loop.hermes.inspect(task)
+            self.assertEqual(state["pending_cleanup"],[])
+            self.assertEqual(state["task"]["state"],"cancelled")
+        if output := os.environ.get("MOWULINK_DSH_SEED_RESTART_EVIDENCE"):
+            evidence = {"session":session,"task_id":task,"assignment_id":lease["assignment_id"],
+                "container_id":container,"started_at_before":lease["started_at"],"started_at_after":started,
+                "shell_and_export_error":"assignment_workspace_restarted","released_by":"cancel_confirmed"}
             Path(output).write_text(json.dumps(evidence,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
 
     def test_native_dsh_stop_alone_or_unverified_tool_keeps_cleanup_pending(self):

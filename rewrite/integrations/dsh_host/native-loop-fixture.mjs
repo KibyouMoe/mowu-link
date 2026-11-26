@@ -24,6 +24,7 @@ const isCold = mode.startsWith('cold-resume');
 const isManaged = mode.startsWith('managed-sessions');
 const usesCleanup = mode.startsWith('cleanup-');
 const usesContainer = mode.startsWith('cleanup-container');
+const usesSeed = mode.startsWith('cleanup-container-seed');
 const standalone = mode==='standalone-trainer-question';
 const foregroundRelay = mode.startsWith('foreground-relay');
 const usesForeground = foregroundRelay || mode==='foreground-question';
@@ -108,6 +109,38 @@ class LocalModel extends LlmAdapter {
           summary:'DSH isolated container result',artifact_ids:JSON.parse(staged.content[0].text).artifact_ids};
         yield {type:'block-start',index:0,blockType:'tool-call'};
         yield {type:'block-end',index:0,block:{type:'tool-call',id,name,arguments:JSON.stringify(args)}};
+        yield {type:'finish',reason:{kind:'tool-calls'}};
+        return;
+      }
+    }
+    if (usesSeed && command==='task') {
+      const attempt = this.submitted.get(message.id) ?? 0;
+      const prefix = 'workspace-seed-'+payload.assignment_id+'-';
+      const command = 'set -eu; test "$(cat project/hello.txt)" = "original project"; '+
+        'test ! -e project/.git; test "$(stat -c %a project/checks/fixture.sh)" = 700; '+
+        'sh project/checks/fixture.sh; printf "modified result\n" > project/hello.txt';
+      const shell = ['worker_workspace_shell',{command}];
+      const invalid = mode==='cleanup-container-seed-invalid';
+      const loss = payload.instructions==='lose seed acknowledgement';
+      const restart = mode==='cleanup-container-seed-restart';
+      const exportFile = ['worker_workspace_export',{path:'project/hello.txt'}];
+      const plan = restart ? [shell,shell,exportFile] : invalid ? [shell] :
+        [...(loss ? [shell] : []),shell,exportFile,['worker_report',null]];
+      if (restart && attempt===1) {
+        formalRound.resolve();
+        await raceRelease.promise;
+        signal.throwIfAborted();
+      }
+      if (attempt<plan.length) {
+        this.submitted.set(message.id,attempt+1);
+        const [name,parameters] = plan[attempt];
+        const offered = tools.find(tool=>tool.name===name);
+        assert.ok(offered);
+        const exported = messages.findLast(entry=>entry.toolCallId===prefix+(plan.length-2));
+        const args = parameters ?? {task_id:payload.task_id,assignment_id:payload.assignment_id,
+          summary:'DSH isolated project result',artifact_ids:JSON.parse(exported.content[0].text).artifact_ids};
+        yield {type:'block-start',index:0,blockType:'tool-call'};
+        yield {type:'block-end',index:0,block:{type:'tool-call',id:prefix+attempt,name,arguments:JSON.stringify(args)}};
         yield {type:'finish',reason:{kind:'tool-calls'}};
         return;
       }
@@ -322,7 +355,7 @@ class LocalModel extends LlmAdapter {
           yield {type:'finish',reason:{kind:'tool-calls'}};
           return;
         }
-      } else if (!['work-question','formal-goal','admission-race','material','cleanup-container-export'].includes(mode)) {
+      } else if (!usesSeed && !['work-question','formal-goal','admission-race','material','cleanup-container-export'].includes(mode)) {
         await waitForStop(signal);
       }
     }
@@ -538,13 +571,24 @@ async function formalScenario(agent) {
     return next();
   });
   for await (const line of createInterface({input:process.stdin,terminal:false})) {
-    if (line==='exit') break;
+    if (line==='exit') {
+      if (mode==='cleanup-container-seed-restart') raceRelease.resolve();
+      break;
+    }
     if (standalone && line==='hold-question-reply') {
       agent.followup({id:'hold-unrelated-native-turn',role:'user',source:{kind:'user'},
         content:[{type:'text',text:'Hold another isolated turn'}]});
       await entered.promise;
       console.log(JSON.stringify({busy:agent.status==='running'}));
       continue;
+    }
+    if (mode==='cleanup-container-seed-restart' && line==='workspace-ready') {
+      await formalRound.promise;
+      console.log(JSON.stringify({running:agent.status==='running'}));
+      continue;
+    }
+    if (mode==='cleanup-container-seed-restart' && line==='resume-workspace') {
+      raceRelease.resolve();
     }
     if (usesCleanup && line==='work-started') {
       await entered.promise;
@@ -662,7 +706,8 @@ async function formalScenario(agent) {
         content:[{type:'text',text:'Standalone trainer fixture\n'+line.slice('direct-trainer '.length)}]});
     }
     else if (line==='formal-goal-round' && mode==='formal-goal') await formalRound.promise;
-    else assert.ok(line==='read' || line==='second-round' && mode==='goal-driver');
+    else assert.ok(line==='read' || line==='second-round' && mode==='goal-driver' ||
+      line==='resume-workspace' && mode==='cleanup-container-seed-restart');
     if (line==='second-round') await secondRound.promise;
     await agent.whenIdle();
     const events = await readEvents(agent);

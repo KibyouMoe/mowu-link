@@ -5,6 +5,7 @@ import {closeSync, constants, fstatSync, fsyncSync, lstatSync, mkdirSync, openSy
 import path from 'node:path';
 import {promisify} from 'node:util';
 import {guid} from './session-preparation.mjs';
+import {maximumSeedBytes, seedProject, workspaceSeed} from './workspace-seed.mjs';
 
 const exec = promisify(execFile);
 const LABEL = 'io.mowulink.assignment';
@@ -87,6 +88,7 @@ export function assignmentContainers(runtime,session,config) {
   check(typeof docker==='string' && path.isAbsolute(docker)
     && typeof socket==='string' && path.isAbsolute(socket) && lstatSync(socket).isSocket()
     && typeof image==='string' && /^sha256:[a-f0-9]{64}$/.test(image),'invalid_assignment_container');
+  const seed = workspaceSeed(config.seed);
   const directory = path.join(runtime,'assignment-containers');
   const cliConfig = path.join(directory,'docker-config');
   privateDirectory(directory);
@@ -95,10 +97,18 @@ export function assignmentContainers(runtime,session,config) {
   const locks = new Map();
   const filename = aid=>path.join(directory,hash([session,aid])+'.json');
   const save = entry=>writeRecord(filename(entry.assignment_id),entry);
-  const invoke = (args,options={})=>exec(docker,['--config',cliConfig,'--host','unix://'+socket,...args],{
-    cwd:directory,env:{PATH:'/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin'},timeout:7000,
-    maxBuffer:131072,...options,
-  });
+  function invoke(args,{stdin,...options}={}) {
+    const result = exec(docker,['--config',cliConfig,'--host','unix://'+socket,...args],{
+      cwd:directory,env:{PATH:'/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin'},timeout:7000,
+      maxBuffer:131072,...options,
+    });
+    if (stdin!==undefined) {
+      // A closed CLI confirms nothing. The container initializer checks all stdin before publishing.
+      result.child.stdin.on('error',()=>{});
+      result.child.stdin.end(stdin);
+    }
+    return result;
+  }
 
   async function daemon() {
     const {stdout} = await invoke(['info','--format','{{.OSType}} {{.ID}}']);
@@ -113,14 +123,17 @@ export function assignmentContainers(runtime,session,config) {
     let record = readRecord(filename(aid));
     if (!record) {
       record = {session,task_id:tid,assignment_id:aid,daemon:owner,image,
-        token:randomUUID(),phase:'unused',container_id:null};
+        token:randomUUID(),phase:'unused',container_id:null,...(seed ? {seed_sha256:seed.sha256} : {})};
       save(record);
     }
     check(record.session===session && record.task_id===tid && record.assignment_id===aid &&
       record.daemon===owner && record.image===image && guid(record.token) &&
-      ['unused','issuing','active','sealing','sealed'].includes(record.phase) &&
+      ['unused','issuing','seeding','active','sealing','sealed'].includes(record.phase)
+      && (record.seed_sha256===undefined || /^[a-f0-9]{64}$/.test(record.seed_sha256)) &&
       (record.container_id===null || containerID(record.container_id)) &&
-      (record.phase!=='active' || record.container_id!==null));
+      (!['seeding','active'].includes(record.phase) || record.container_id!==null) &&
+      (record.started_at===undefined || typeof record.started_at==='string') &&
+      (record.phase!=='active' || !record.seed_sha256 || record.started_at));
     return record;
   }
 
@@ -149,9 +162,37 @@ export function assignmentContainers(runtime,session,config) {
     return container;
   }
 
-  async function prepare(record) {
-    check(['unused','issuing','active'].includes(record.phase));
+  function running(container) {
+    const state = container?.State;
+    check(state?.Running===true && !state.Paused && !state.Restarting &&
+      typeof state.StartedAt==='string' && state.StartedAt,'assignment_workspace_unavailable');
+    return state.StartedAt;
+  }
+
+  function ready(record,container) {
+    const startedAt = running(container);
+    check(record.started_at===undefined || record.started_at===startedAt,'assignment_workspace_restarted');
+    if (record.started_at===undefined) {
+      record.started_at = startedAt;
+      save(record);
+    }
+  }
+
+  async function prepare(record,signal) {
+    check(['unused','issuing','seeding','active'].includes(record.phase));
+    check(record.seed_sha256===seed?.sha256,'workspace_seed_changed');
     let container = await owned(record);
+    if (record.phase==='active') {
+      // Prior releases recorded active before the first start and had no start timestamp.
+      if (record.started_at===undefined && container?.State?.Status==='created') {
+        await invoke(['container','start',record.container_id]);
+        container = await owned(record);
+      }
+      ready(record,container);
+      return record.container_id;
+    }
+    const seedBytes = await seed?.bytes();
+    signal?.throwIfAborted();
     if (!container) {
       check(record.phase==='unused');
       const imageInfo = await invoke(['image','inspect',image]);
@@ -170,23 +211,34 @@ export function assignmentContainers(runtime,session,config) {
       check(container);
     }
     record.container_id = container.Id;
-    record.phase = 'active';
     save(record);
     if (container.State.Status==='created') {
       await invoke(['container','start',container.Id]);
       container = await owned(record);
     }
-    check(container?.State?.Running===true && !container.State.Paused && !container.State.Restarting);
+    const startedAt = running(container);
+    if (seed) {
+      record.phase = 'seeding';
+      save(record);
+      await invoke(['container','exec','-i',container.Id,'python3','-I','-c',seedProject,
+        String(maximumSeedBytes),seed.sha256],{stdin:seedBytes,timeout:20000,signal})
+        .catch(()=>{ throw new Error('workspace_seed_unconfirmed'); });
+      check(running(await owned(record))===startedAt,'assignment_workspace_restarted');
+    }
+    record.started_at = startedAt;
+    record.phase = 'active';
+    save(record);
     return container.Id;
   }
 
   return {
+    seeded:seed!==null,
     async run(tid,aid,command,signal) {
       check(typeof command==='string' && command.trim() && command.length<=8192 && !command.includes('\0'),
         'invalid_assignment_command');
       const {result} = await serial(aid,async()=>{
         signal?.throwIfAborted();
-        const id = await prepare(await scope(tid,aid));
+        const id = await prepare(await scope(tid,aid),signal);
         signal?.throwIfAborted();
         const result = invoke(['container','exec',id,'/bin/sh','-c',command],{timeout:30000,signal})
           .then(({stdout,stderr})=>({exit_code:0,stdout,stderr}),error=>{
@@ -209,7 +261,7 @@ export function assignmentContainers(runtime,session,config) {
         const record = await scope(tid,aid);
         check(record.phase==='active' && record.container_id,'assignment_workspace_unavailable');
         const container = await owned(record);
-        check(container?.State?.Running && !container.State.Paused,'assignment_workspace_unavailable');
+        ready(record,container);
         const {stdout:bytes} = await invoke(['container','exec',container.Id,'python3','-I','-c',readArtifact,
           String(MAX_ARTIFACT_BYTES),relative],{encoding:'buffer',maxBuffer:MAX_ARTIFACT_BYTES,signal})
           .catch(()=>{ throw new Error('workspace_artifact_unreadable'); });

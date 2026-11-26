@@ -107,11 +107,17 @@ python3 -B -m unittest -v rewrite.test_question_cards \
 
 独立 DSH 测试工位可配置 `assignment_container`，提供本机 Docker CLI 的绝对路径 `docker`、已授权的本地 Linux 引擎 Unix 套接字绝对路径 `socket` 和已经存在的 Linux 镜像 ID `image`。该模式与 `read_only_assignments`、`relay_command_approvals` 互斥。镜像需要 `/bin/sh`、`/bin/sleep` 和 `python3`，且无默认持久卷。工具 `worker_workspace_shell` 只能由原生回合中与原派发匹配的调用执行。每个派发拥有自己的容器和内存工作目录，使用普通用户、只读根文件系统、有限资源和独立网络命名空间。没有项目目录、凭据或 Docker 套接字挂载，也不会自动拉镜像。
 
-取消或转派时，DSH 仍核对原生回合结束和原收件箱撤销，宿主同时收尾该派发的容器。以原引擎、容器 ID、标签及派发账本核对移除，确认后才交 W04。引擎身份不符或无法确认时保留原派发待核。同一派发重复查回执沿用原记录。测试时用 `MOWULINK_DSH_CONTAINER_IMAGE=<已有镜像完整ID> python3 -B -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_dsh_workspace_container_cancel_and_transfer_remove_owned_processes`。实验范围为无网络的私有临时工作目录。升级或回退前先用支持该配置的版本收尾原派发并核对容器。旧版插件无法识别这个配置。普通 DSH 项目绑定和跨机恢复仍待验。[原生实测](evidence/dsh-assignment-container.json) · [Docker 容器移除](https://docs.docker.com/reference/cli/docker/container/rm/) · [临时存储](https://docs.docker.com/engine/storage/tmpfs/)
+取消或转派时，DSH 仍核对原生回合结束和原收件箱撤销，宿主同时收尾该派发的容器。以原引擎、容器 ID、标签及派发账本核对移除，确认后才交 W04。引擎身份不符或无法确认时保留原派发待核。同一派发重复查回执沿用原记录。测试时用 `MOWULINK_DSH_CONTAINER_IMAGE=<已有镜像完整ID> python3 -B -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_dsh_workspace_container_cancel_and_transfer_remove_owned_processes`。实验范围为无网络的私有临时工作目录。升级或回退前先用支持该配置的版本收尾原派发并核对容器。旧版插件无法识别这个配置。现役 DSH 工作树接入与活工作目录跨机恢复仍待验。[原生实测](evidence/dsh-assignment-container.json) · [Docker 容器移除](https://docs.docker.com/reference/cli/docker/container/rm/) · [临时存储](https://docs.docker.com/engine/storage/tmpfs/)
 
 模型可调用 `worker_workspace_export`，提交 `/workspace` 下的相对路径。单文件限 16 MiB，拒绝符号链接和非普通文件。Worker 校验内容摘要，经原有附件通道暂存，续传按原偏移和附件 ID。成果工具 `worker_report` 接收暂存工具返回的 `artifact_ids`，由 Router 在 W04 正式记录后给验收人读取权限。成功或阻塞报告要等 Worker 持久化 Router 的释放回执，宿主才回收工作区。回执未确认时保留容器和原会话绑定，重开 Worker 后沿原 W04 重取回执。单纯结束原生回合不会触发回收。启用容器工位时成对升级 Worker 和 DSH 适配器。新版宿主需要 Worker 的工作区状态回执，旧 Worker 缺少该接口时工作区工具会拒绝执行。
 
 复跑 `MOWULINK_DSH_CONTAINER_IMAGE=<已有镜像完整ID> python3 -B -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_dsh_workspace_exports_artifact_and_seals_after_durable_w04_replay`。真实 DSH AgentLoop、Linux Docker、Worker 和 Router 完成导出和回收。测试输入和模型工具调用由本地脚本驱动。[附件和回收证据](evidence/dsh-workspace-artifacts.json)
+
+需要在隔离工位处理项目文件时，可在 `assignment_container` 增加 `"seed":{"archive":"/absolute/private/project.tar","sha256":"<64 位 SHA-256>"}`。由工位操作者审核并固定项目版本，再用 `git archive --format=tar <完整提交SHA>` 生成不超过 24 MiB 的未压缩归档。用仅所有者可读写的文件保存归档；可在生成目录先执行 `umask 077`，用 `shasum -a 256` 核对摘要。归档最多 4096 个普通文件或目录条目，拒绝符号链接、硬链接、路径越界、`.git` 和特殊文件。模型的第一条工作区命令在副本完整导入并核实后运行。每个派发从同一固定版本各复制一份到 `/workspace/project`。源工作树继续由原操作者管理，改动由 `worker_workspace_export` 和 W04 交回。
+
+归档导入回执丢失时，同派发可重试初始化，留在容器中的已发布目录会复用。由工单工具修改过的容器如果重启，原始启动标识不匹配时拒绝写入和导出，不能用快照恢复已丢失的改动。取消仍按原容器和原派发验证清理。一个工位使用一个经审核的项目快照。轮换快照前核对旧派发工作区已回收，并保留原包及摘要以支持未完成初始化查回。现役项目使用、构建依赖与文件回合并由各项目另验。
+
+复跑 `MOWULINK_DSH_CONTAINER_IMAGE=<已有镜像完整ID> python3 -B -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_dsh_workspace_seeds_private_project_and_recovers_seed_ack rewrite.test_dsh_native_loop.NativeLoop.test_dsh_workspace_refuses_unverified_or_escaping_project_seeds rewrite.test_dsh_native_loop.NativeLoop.test_dsh_workspace_restart_cannot_reseed_or_confirm_lost_work`。[项目快照实测](evidence/dsh-workspace-project-seed.json)
 
 启用原生目标服务的 DSH 会话可用 `/goal` 查询、`/goal 目标正文` 新建、`/goal pause` 暂停、`/goal resume` 恢复。原生服务使用自己的默认轮次，已有未完成目标时拒绝替换。状态卡显示原生阶段、轮次和续跑授权。未确认的变更保留待核，重送同号不会再次修改。续跑由 DSH 宿主负责。
 
