@@ -4,6 +4,8 @@
 
 ## 检查点与证据
 
+`/queue` 实测在本地 HTTP 发出前已将投递标为待核。原宿主收件后丢回执，换到同会话号的空账本后两次复核均无写入，接回原账本查到原输入号。仅各有一条待核与恢复提示。真实 DSH SDK 的排队测试同时验证两条消息依原次序进入独立回合。复跑 `python3 -m unittest -v rewrite.test_worker_commands rewrite.test_dsh_sdk`。平台及模型使用夹具。
+
 Worker 后台遇到临时 SQLite 写入错误会继续轮询。隔离测试注入一次锁错误，原线程恢复后接管待派工单，宿主只有一条输入。另用实际 HTTP 返回非 JSON、缺会话、数组和损坏的 SSE，核对宿主状态标为待核，Router 连接保持，恢复后可继续接单。Router 暂断时同伴状态保留本地 Router 收件时间，对端两层留空。复跑 `python3 -m unittest -v rewrite.test_link_health rewrite.test_peers`。Router 与 Worker 运行于本机隔离环境，故障与宿主用夹具。
 
 飞书入站及出站循环遇到暂时数据库锁、无效上游响应仍会继续运行。隔离回归先注入入箱读取锁和显示响应错误，再让实际 Worker 写入但返回缺回执的数据。平台保留待核，退避后查回原凭据，宿主只有一次输入，题卡队列仍继续。复跑 `python3 -m unittest -v rewrite.test_feishu_inbound.PlatformInput.test_platform_queue_recovers_after_locked_inbox_and_a_malformed_worker_receipt`。故障为注入，Worker 传输实际运行，未连飞书云端。

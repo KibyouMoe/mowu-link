@@ -327,8 +327,8 @@ class DshSdk(unittest.TestCase):
         reopened = Worker(self.w.db.path,"oguri",self.w.router,self.loop.adapter)
         service = WorkerService(reopened,self.clock)
         send = reopened.adapter.deliver
-        def lost(did,body):
-            send(did,body)
+        def lost(did,body,**kwargs):
+            send(did,body,**kwargs)
             raise OSError("worker missed native proof")
         reopened.adapter.deliver = lost
         service.step()

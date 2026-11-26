@@ -1,9 +1,15 @@
+from threading import Thread
+
+from .adapter import HostAdapter
+from .devloop import FixtureHost
 from .feishu_output import Views
 from . import worker_commands
+from .host_wire import RemoteAdapter, serve_adapter
 from .storage import Fault, guid
 from .test_feishu_inbound import PlatformCase
 from .test_feishu_output import PlatformFixture
 from .test_mainline import Clock
+from .wire import Client
 
 
 class WorkerCommands(PlatformCase):
@@ -86,6 +92,58 @@ class WorkerCommands(PlatformCase):
         self.assertEqual(self.inbound.deliver(mid),previous)
         self.assertEqual(len(self.loop.native.entries()),1)
         self.assertEqual(self.outputs(),[])
+
+    def test_uncertain_next_turn_only_checks_original_ledger_after_adapter_swap(self):
+        def remote(adapter):
+            token = guid()
+            server = self.enterContext(serve_adapter(adapter,"oguri",{token:"worker/oguri"},("127.0.0.1",0),None))
+            thread = Thread(target=server.serve_forever,kwargs={"poll_interval":0.01},daemon=True)
+            thread.start()
+            self.addCleanup(thread.join)
+            self.addCleanup(server.shutdown)
+            return RemoteAdapter(Client("http://127.0.0.1:"+str(server.server_port),token),adapter.bound_session())
+        w,host = self.loop.worker,self.loop.native
+        host.next_turn = True
+        original = remote(self.loop.adapter)
+        fresh = FixtureHost(self.loop.root/"fresh-queue-inputs.db",host.session)
+        fresh.next_turn = True
+        same_session = remote(HostAdapter(self.loop.root/"fresh-queue-adapter.db",fresh,fresh.session))
+        w.adapter = original
+        clock = Clock()
+        self.service.clock = clock
+        self.service.step()
+        mid = "om_queue_uncertain"
+        self.command(mid,"/queue original queue input")
+        send = original.deliver
+        observed = []
+        def lost(did,payload,*,session):
+            with w.db.transaction() as db:
+                observed.append(db.execute("SELECT uncertain FROM queued_chats WHERE message_id=?",(mid,)).fetchone()[0])
+            send(did,payload,session=session)
+            raise ConnectionError("isolated missing response")
+        original.deliver = lost
+        clock.advance(5)
+        self.service.step()
+        self.assertEqual(observed,[1])
+        self.assertEqual(len(host.entries()),1)
+        w.adapter = same_session
+        for _ in range(2):
+            clock.advance(5)
+            self.service.step()
+        self.assertEqual(fresh.entries(),[])
+        with w.db.transaction() as db:
+            self.assertIsNone(db.execute("SELECT receipt FROM queued_chats WHERE message_id=?",(mid,)).fetchone()[0])
+        w.adapter = original
+        clock.advance(5)
+        self.service.step()
+        with w.db.transaction() as db:
+            receipt = db.execute("""SELECT json_extract(receipt,'$.native_id') FROM queued_chats
+                                  WHERE message_id=?""",(mid,)).fetchone()[0]
+        self.assertEqual(receipt,host.entries()[0][1]["native_id"])
+        self.assertEqual(len(host.entries()),1)
+        events = [e["event_id"] for e in self.outputs()]
+        self.assertEqual(events.count("queue-unknown-"+mid),1)
+        self.assertEqual(events.count("queue-recovered-"+mid),1)
 
     def test_compaction_with_no_native_receipt_times_out_without_a_second_start(self):
         self.service.step()

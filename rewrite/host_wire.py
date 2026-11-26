@@ -156,9 +156,12 @@ def serve_adapter(adapter, worker_id, identities, address, context):
             case "POST","/v1/host/find-chat":
                 payload = body.get("payload")
                 did = string(body,"delivery_id")
-                require(isinstance(payload,dict) and payload.get("kind")=="chat"
-                        and did=="chat-"+string(payload,"message_id"),422,"invalid_host_input")
-                result = {"receipt":adapter.lookup_delivery(did,payload,session=adapter.bound_session())}
+                require(isinstance(payload,dict) and payload.get("kind") in ("chat","queued_chat"),422,"invalid_host_input")
+                session = adapter.bound_session()
+                queued = payload["kind"]=="queued_chat"
+                require(did==("queued-chat-" if queued else "chat-")+string(payload,"message_id")
+                        and (not queued or payload.get("session")==session),422,"invalid_host_input")
+                result = {"receipt":adapter.lookup_delivery(did,payload,session=session)}
             case "POST","/v1/host/find-peer":
                 payload = body.get("payload")
                 did = string(body,"delivery_id")

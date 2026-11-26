@@ -33,15 +33,22 @@ def advance(service):
     with worker.db.transaction() as db:
         row = db.execute("""SELECT * FROM queued_chats WHERE session=? AND receipt IS NULL
                             ORDER BY rowid LIMIT 1""",(service.host_session,)).fetchone()
-    if not row or (service.host_busy and not row["uncertain"]):
-        return
+        if not row or (service.host_busy and not row["uncertain"]):
+            return
+        first_attempt = not row["uncertain"]
+        if first_attempt:
+            # Record before writing. A new host ledger may have lost the original intent.
+            db.execute("UPDATE queued_chats SET uncertain=1 WHERE message_id=?",(row["message_id"],))
     mid, session = row["message_id"], row["session"]
     did = "queued-chat-"+mid
     payload = {"kind":"queued_chat","session":session,"message_id":mid,"text":row["text"]}
     try:
-        proof = worker.adapter.deliver(did,payload)
+        if first_attempt:
+            proof = worker.adapter.deliver(did,payload,session=session)
+        else:
+            proof = worker.adapter.lookup_delivery(did,payload,session=session)
         if proof:
-            require(proof.get("session")==session and proof.get("delivery_id")==did
+            require(isinstance(proof,dict) and proof.get("session")==session and proof.get("delivery_id")==did
                     and proof.get("digest")==hashlib.sha256(encode(payload).encode()).hexdigest()
                     and proof.get("turn_id")
                     and isinstance(proof.get("native_id"),str) and proof["native_id"],
@@ -50,15 +57,14 @@ def advance(service):
         # The adapter owns native write intent and may already have submitted this ID.
         proof = None
     with worker.db.transaction() as db:
+        pending = db.execute("SELECT receipt FROM queued_chats WHERE message_id=?",(mid,)).fetchone()
+        if pending["receipt"] is not None:
+            return
         if proof:
-            saved = db.execute("UPDATE queued_chats SET receipt=? WHERE message_id=? AND receipt IS NULL",
-                               (encode(proof),mid)).rowcount
-            if saved and row["uncertain"]:
+            db.execute("UPDATE queued_chats SET receipt=? WHERE message_id=?",(encode(proof),mid))
+            if db.execute("SELECT 1 FROM display_events WHERE event_id=?",("queue-unknown-"+mid,)).fetchone():
                 display.append(db,{"event_id":"queue-recovered-"+mid,"kind":"command","session":session,"turn_id":"",
                                    "text":"已在原会话查到排队消息的收件记录。"})
             return
-        first = db.execute("UPDATE queued_chats SET uncertain=1 WHERE message_id=? AND uncertain=0 AND receipt IS NULL",
-                           (mid,)).rowcount
-        if first:
-            display.append(db,{"event_id":"queue-unknown-"+mid,"kind":"command","session":session,"turn_id":"",
-                               "text":"排队消息的原生收件号待确认，正在核对原投递。"})
+        display.append(db,{"event_id":"queue-unknown-"+mid,"kind":"command","session":session,"turn_id":"",
+                           "text":"排队消息的原生收件号待确认，正在核对原投递。"})
