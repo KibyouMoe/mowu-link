@@ -445,6 +445,215 @@ store.close()
                          "boundary":"Actual isolated rewrite and legacy Router HTTP and SQLite. Worker model is scripted."}
         self.mixed_evidence = self.exercise_mixed_reviewed_queue(clock,old_ids,tid,aid,artifact,sha)
 
+    def test_reviewed_transfers_keep_formal_result_and_candidate_files_separate_on_rollback(self):
+        self.exercise_reviewed_transfers(migrated=True)
+
+    def test_reviewed_trial_born_transfer_uses_original_legacy_owner_and_request(self):
+        self.exercise_reviewed_transfers(migrated=False)
+
+    def exercise_reviewed_transfers(self, *, migrated):
+        legacy_id = self.old("""
+store = RouterStore(sys.argv[1])
+for name in ("oguri","tama","rice"):
+    store.upsert_worker(name)
+if sys.argv[2]=="yes":
+    print(store.orders.create("Original order","An isolated request","oguri",{},"fixture",None,None))
+store.close()
+""",self.legacy,"yes" if migrated else "no")
+        baseline_source = digest(self.legacy)
+        backup(self.legacy,self.attachments,self.snapshot)
+        baseline = prepare(self.snapshot,self.trial,self.source_id)
+        clock = Clock()
+        loop = Loop(self.trial,clock,FixtureHost,extra_workers=["tama","rice"])
+        manager = loop.hermes
+        original_key = guid()
+        review = self.root/"transfer-review.json"
+
+        def register(worker):
+            worker.connect()
+            worker.poll()
+            clock.advance(10)
+            worker.poll()
+            worker.poll()
+            return worker.hold()["held_assignment_id"]
+
+        def station(name):
+            host = FixtureHost(self.trial/f"{name}-native.db",f"review-{name}")
+            worker = Worker(self.trial/f"{name}-worker.db",name,loop.extra_clients[name],
+                            HostAdapter(self.trial/f"{name}-adapter.db",host,host.session))
+            return worker,host
+
+        def upload(client,name,body):
+            checksum = hashlib.sha256(body).hexdigest()
+            ticket = client.request("POST","uploads",{"name":name,"size_bytes":len(body),"sha256":checksum},guid())
+            item = client.request("PATCH","uploads/"+ticket["upload_id"],body,headers={"Upload-Offset":"0"})
+            return item["attachment_id"],checksum
+
+        def transfer(worker):
+            return manager.act(guid(),tid,manager.inspect(tid)["task"]["revision"],"transfer",
+                               worker_id=worker,reason="移交给下一工位")
+
+        def finish_cleanup(worker,host,assignment):
+            self.assertEqual(worker.connect()["reconcile"],"confirm_transfer")
+            worker.poll()
+            control,receipt = next((p,r) for p,r in host.entries() if p["kind"]=="task.transfer_out")
+            self.assertEqual(control["assignment_id"],assignment)
+            host.cleanup_evidence = lambda session,aid,kind: {
+                "session":session,"assignment_id":aid,"kind":kind,"stopped":True,"cleaned":True,
+                "receipt_id":"fixture-verified-transfer"}
+            late = worker.report(receipt["native_id"],tid,assignment,"cleaned","transfer_confirmed")
+            self.assertEqual(late,{"recorded":True,"release_assignment_id":assignment,"task_state":"closed"})
+            self.assertEqual(worker.report(receipt["native_id"],tid,assignment,"cleaned","transfer_confirmed"),late)
+            return late
+
+        private_files = []
+        with loop.server:
+            loop.thread.start()
+            try:
+                tid = (baseline["queued_id_map"][legacy_id] if migrated else
+                       manager.create(original_key,"Original order","An isolated request","oguri")["task_id"])
+                former = register(loop.worker)
+                self.assertTrue(former)
+                clock.advance(630)
+                self.assertEqual(manager.inspect(tid)["task"]["state"],"blocked")
+                original = b"old material bytes"
+                first,first_sha = upload(loop.wire,"material.bin",original)
+                private_files.append((first,first_sha,original))
+                material_key = guid()
+                material = {"session_id":loop.worker.session,"assignment_id":former,"text":"旧派发的候选",
+                            "artifact_ids":[first]}
+                record = loop.wire.request("POST",f"tasks/{tid}/materials",material,material_key)
+                transfer("tama")
+                tama,host2 = station("tama")
+                second = register(tama)
+                if migrated:
+                    original = b"second worker blockage"
+                    blocked_file,blocked_sha = upload(tama.router,"blocking.bin",original)
+                    private_files.append((blocked_file,blocked_sha,original))
+                    blocked = tama.report(host2.entries()[0][1]["native_id"],tid,second,"工位受阻","blocked",[blocked_file])
+                    self.assertEqual(blocked["task_state"],"blocked")
+                rice,host3 = station("rice")
+                if migrated:
+                    transfer("rice")
+                    final = register(rice)
+                else:
+                    self.assertIsNone(register(rice))
+                    offered = transfer("rice")["task"]
+                    self.assertTrue(offered["assignment_id"])
+                    rice.poll()
+                    final = rice.hold()["held_assignment_id"]
+                    self.assertEqual(final,offered["assignment_id"])
+                original = b"final result bytes"
+                result_file,result_sha = upload(rice.router,"final.bin",original)
+                private_files.append((result_file,result_sha,original))
+                result = agent_report(rice,host3.entries()[0][1]["native_id"],
+                        {"task_id":tid,"assignment_id":final,"summary":"第三工位交回的正式成果","artifact_ids":[result_file]})
+                self.assertFalse(result["isError"],result)
+                detail = manager.inspect(tid)
+                self.assertEqual(detail["last_report"]["assignment_id"],final)
+                close_key = guid()
+                closed = manager.approve(close_key,tid,detail["task"]["revision"])
+                self.assertEqual(closed["task"]["state"],"closed")
+                manager.poll()
+                review.write_text(json.dumps({"trial_sha256":digest(self.trial/"router.db"),"closed_assignments":{tid:final}}))
+                with self.assertRaisesRegex(ValueError,"cleanup is pending"):
+                    stage_reviewed_rollback(self.snapshot,self.trial,review,self.restore)
+                self.assertFalse(self.restore.exists())
+
+                late = finish_cleanup(loop.worker,loop.native,former)
+                if not migrated:
+                    later = finish_cleanup(tama,host2,second)
+                self.assertEqual(loop.wire.request("POST",f"tasks/{tid}/materials",material,material_key),record)
+                for worker in (loop.worker,tama,rice):
+                    worker.poll()
+                self.assertEqual(manager.inspect(tid)["task"],closed["task"])
+            finally:
+                loop.server.shutdown()
+                loop.thread.join()
+        trial_digest = digest(self.trial/"router.db")
+        review.write_text(json.dumps({"trial_sha256":trial_digest,"closed_assignments":{tid:final}}))
+        staged = stage_reviewed_rollback(self.snapshot,self.trial,review,self.restore)
+        self.assertEqual((staged["reviewed_orders"],staged["private_artifacts"]),(1,len(private_files)))
+        private = self.restore/"private-review"
+        manifest = json.loads((private/"manifest.json").read_text())
+        archived = manifest["orders"][tid]
+        self.assertEqual((archived["original_worker"],archived["worker_id"],archived["review_key"]),("oguri","rice",close_key))
+        orig,intermediate,completed = archived["assignment_history"]
+        self.assertEqual([step["assignment_id"] for step in (orig,intermediate,completed)],[former,second,final])
+        self.assertEqual(orig["cleanup"]["receipt"],late)
+        self.assertEqual(orig["materials"][0]["material_id"],record["material_id"])
+        self.assertEqual(orig["materials"][0]["receipt_key"],material_key)
+        if migrated:
+            self.assertEqual(intermediate["pool"]["artifact_ids"],[blocked_file])
+        else:
+            self.assertEqual(intermediate["cleanup"]["receipt"],later)
+        self.assertEqual(archived["artifact_ids"],[result_file])
+        for file,_,body in private_files:
+            self.assertEqual((private/"files"/file).read_bytes(),body)
+        restored_id = archived["legacy_task_id"]
+        if migrated:
+            self.assertEqual(restored_id,legacy_id)
+        else:
+            self.assertEqual(archived["legacy_creation_request"]["message_id"],original_key)
+        observed = json.loads(self.old("""
+from server import RouterServer
+from selftest_router import http
+from threading import Thread
+from unittest.mock import Mock
+store = RouterStore(sys.argv[1])
+token = "isolated-legacy-readback"
+with RouterServer(("127.0.0.1",0),store,token,Mock(),Mock()) as server:
+    runner = Thread(target=server.serve_forever,kwargs={"poll_interval":.02})
+    runner.start()
+    try:
+        url = f"http://127.0.0.1:{server.server_port}"
+        status, item = http("GET",url+"/tasks/"+sys.argv[2],token=token)
+        request = json.loads(sys.argv[3])
+        files = [http("GET",url+"/attachments/"+sha,token=token)[0] for sha in sys.argv[4:]]
+        replay = http("POST",url+"/tasks",request,token) if request else None
+        print(json.dumps({"status":status,"archive":item["task"]["archive"],
+                          "owner":item["task"]["worker"],"deliverable":item["task"]["deliverable"],
+                          "queues":[store.orders.next_dispatch(name) for name in ("oguri","tama","rice","two")],
+                          "attachment_statuses":files,"replay":replay}))
+    finally:
+        server.shutdown()
+        runner.join()
+store.close()
+""",self.restore/"legacy.db",restored_id,json.dumps(archived.get("legacy_creation_request")),
+           *(checksum for _,checksum,_ in private_files)))
+        self.assertEqual((observed["status"],observed["owner"],observed["deliverable"]),(200,"oguri",None))
+        self.assertEqual(observed["archive"]["recovery_reference"],tid)
+        self.assertEqual(observed["queues"],[None,None,None,self.queued])
+        self.assertEqual(observed["attachment_statuses"],[404]*len(private_files))
+        if not migrated:
+            self.assertEqual((observed["replay"][0],observed["replay"][1]["task_id"]),(200,restored_id))
+        self.assertEqual((digest(self.legacy),digest(self.trial/"router.db")),(baseline_source,trial_digest))
+        inconsistent = self.root/"inconsistent-transfer"
+        inconsistent.mkdir()
+        shutil.copyfile(self.trial/"baseline.json",inconsistent/"baseline.json")
+        shutil.copyfile(self.trial/"router.db",inconsistent/"router.db")
+        with closing(sqlite3.connect(inconsistent/"router.db")) as db,db:
+            changed = db.execute("UPDATE operations SET response=? WHERE actor='worker/oguri' AND key=?",
+                                 (json.dumps(dict(late,task_state="working")),orig["cleanup"]["report_key"]))
+            self.assertEqual(changed.rowcount,1)
+        review.write_text(json.dumps({"trial_sha256":digest(inconsistent/"router.db"),"closed_assignments":{tid:final}}))
+        refused = self.root/"unverified-transfer"
+        with self.assertRaisesRegex(ValueError,"changes the state of a different assignment"):
+            stage_reviewed_rollback(self.snapshot,inconsistent,review,refused)
+        self.assertFalse(refused.exists())
+        if output := os.environ.get("MOWULINK_TRANSFER_ROLLBACK_EVIDENCE"):
+            path = Path(output)
+            proofs = json.loads(path.read_text()) if path.exists() else {}
+            proofs["migrated" if migrated else "trial_born"] = {
+                "task_id":tid,"assignment_ids":[former,second,final],"material_id":record["material_id"],
+                "late_cleanups":[late] if migrated else [late,later],
+                "retained_files_sha256":[checksum for _,checksum,_ in private_files],
+                "legacy":observed,"trial_sha256":trial_digest,"snapshot_sha256":baseline_source,
+                "pending_cleanup_refused":True,"inconsistent_late_cleanup_refused":True,
+                "boundary":"Actual old and new HTTP Routers, SQLite, Worker W03/W04 and "
+                "candidate upload. Scripted host and agent, controlled clock."}
+            path.write_text(json.dumps(proofs,ensure_ascii=False,indent=2)+"\n")
+
     def test_trial_born_closed_orders_return_as_private_archives_without_a_new_dispatch(self):
         self.old("""
 store = RouterStore(sys.argv[1])

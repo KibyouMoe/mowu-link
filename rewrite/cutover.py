@@ -328,18 +328,24 @@ def closed_new_candidates(db, changes, legacy_workers):
     for change in changes:
         after, reports = change["trial"], change["completed_reports"]
         if (change["before"] is not None or change["legacy_task_id"] is not None or not after
-                or after["state"]!="closed" or after["revision"]!=5 or after["assignment_id"] is not None
-                or after["assignee_id"] not in legacy_workers or change["candidate_materials"]
+                or after["state"]!="closed" or after["assignment_id"] is not None
                 or len(reports)!=1 or reports[0]["worker_id"]!=after["assignee_id"]):
             continue
         row = task(db,change["task_id"])
-        operation = creation_receipt(db,row)
-        if not operation or not portable_creation(row,operation) or not legacy_description_fits(row):
+        first = db.execute("""SELECT consumer,payload FROM main.deliveries WHERE kind='task.dispatch'
+            AND json_extract(payload,'$.task_id')=? ORDER BY rowid LIMIT 1""",(row["task_id"],)).fetchone()
+        if not first or not first["consumer"].startswith("worker/"):
             continue
-        expected = dict(row,state="ready",revision=1)
-        offered = dict(expected,revision=2,assignment_id=reports[0]["assignment_id"])
-        if operation["response"] in (encode(expected),encode(offered)):
-            candidates.append({"task_id":row["task_id"],"assignee_id":row["assignee_id"],
+        original_worker = first["consumer"].removeprefix("worker/")
+        if original_worker not in legacy_workers:
+            continue
+        operation = creation_receipt(db,row)
+        original = dict(row,state="ready",revision=1,assignee_id=original_worker)
+        if not operation or not portable_creation(original,operation) or not legacy_description_fits(row):
+            continue
+        offered = dict(original,revision=2,assignment_id=json.loads(first["payload"])["assignment_id"])
+        if operation["response"] in (encode(original),encode(offered)):
+            candidates.append({"task_id":row["task_id"],"assignee_id":original_worker,
                                "request_id":operation["key"]})
     return candidates
 

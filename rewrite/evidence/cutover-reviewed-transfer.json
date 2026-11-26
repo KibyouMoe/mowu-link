@@ -1,0 +1,111 @@
+{
+  "migrated": {
+    "task_id": "a73951da-6d5d-510a-9879-5e940a2b6d1a",
+    "assignment_ids": [
+      "25d2d4e0-56f6-4144-a06f-6df8bc3c9c9e",
+      "7a0055ae-493f-4502-9542-06ba32a2b490",
+      "6f79e5f9-cd86-4f5e-baf0-1e81e44a1b02"
+    ],
+    "material_id": "36cff492-fe5e-4c19-9938-bc0166da343d",
+    "late_cleanups": [
+      {
+        "recorded": true,
+        "release_assignment_id": "25d2d4e0-56f6-4144-a06f-6df8bc3c9c9e",
+        "task_state": "closed"
+      }
+    ],
+    "retained_files_sha256": [
+      "90904ba2df68c78ca15a31de1fa402742184fd8a24ea236abd9e5b4f41f896e6",
+      "b11226ad56a1c9e86b0a82ccda2be4f0e5d06870b4e9d95b2a4935562df0aa35",
+      "1a6e05cd816884739f8751ef585a9c304df00ddd82c449be2433cbcc614a5483"
+    ],
+    "legacy": {
+      "status": 200,
+      "archive": {
+        "reason": "reviewed_on_rewrite",
+        "recovery_reference": "a73951da-6d5d-510a-9879-5e940a2b6d1a",
+        "kind": "archive",
+        "at": 1795730356.8744268
+      },
+      "owner": "oguri",
+      "deliverable": null,
+      "queues": [
+        null,
+        null,
+        null,
+        "t-674699cff2"
+      ],
+      "attachment_statuses": [
+        404,
+        404,
+        404
+      ],
+      "replay": null
+    },
+    "trial_sha256": "2e7f80f974a4c3cb5d8b426c083a5943d15f375725e705ff7800b0a17c1d3db7",
+    "snapshot_sha256": "1382a850ac3ccebcd8ee11531f8c5a88ae3ebe89b5cf582fd0ab588d1cd26bbf",
+    "pending_cleanup_refused": true,
+    "inconsistent_late_cleanup_refused": true,
+    "boundary": "Actual old and new HTTP Routers, SQLite, Worker W03/W04 and candidate upload. Scripted host and agent, controlled clock."
+  },
+  "trial_born": {
+    "task_id": "36191837-bc85-4154-ad29-e5b9b4fa8374",
+    "assignment_ids": [
+      "a37dbc55-97c4-4308-8c3e-2ca3e291693a",
+      "d7d93468-c560-46ca-a364-fe083a6fab0a",
+      "80a4e4e5-df4d-4114-8d6b-f3dd5c5a37dc"
+    ],
+    "material_id": "3c207713-1934-418b-8dd5-f7b6a5ab172f",
+    "late_cleanups": [
+      {
+        "recorded": true,
+        "release_assignment_id": "a37dbc55-97c4-4308-8c3e-2ca3e291693a",
+        "task_state": "closed"
+      },
+      {
+        "recorded": true,
+        "release_assignment_id": "d7d93468-c560-46ca-a364-fe083a6fab0a",
+        "task_state": "closed"
+      }
+    ],
+    "retained_files_sha256": [
+      "90904ba2df68c78ca15a31de1fa402742184fd8a24ea236abd9e5b4f41f896e6",
+      "1a6e05cd816884739f8751ef585a9c304df00ddd82c449be2433cbcc614a5483"
+    ],
+    "legacy": {
+      "status": 200,
+      "archive": {
+        "reason": "reviewed_on_rewrite",
+        "recovery_reference": "36191837-bc85-4154-ad29-e5b9b4fa8374",
+        "kind": "archive",
+        "at": 1795730357.736599
+      },
+      "owner": "oguri",
+      "deliverable": null,
+      "queues": [
+        null,
+        null,
+        null,
+        "t-4df07da694"
+      ],
+      "attachment_statuses": [
+        404,
+        404
+      ],
+      "replay": [
+        200,
+        {
+          "ok": true,
+          "duplicate": true,
+          "worker": "oguri",
+          "task_id": "t-c9eed56673"
+        }
+      ]
+    },
+    "trial_sha256": "2481e95fc136e160d7fcd11ae46bfa6ce88cab6e2e3cd283a5b9941b53776e53",
+    "snapshot_sha256": "7262f1c948573ed7151e0692221f81a94671900eda9f3d755ed30062c9ba5658",
+    "pending_cleanup_refused": true,
+    "inconsistent_late_cleanup_refused": true,
+    "boundary": "Actual old and new HTTP Routers, SQLite, Worker W03/W04 and candidate upload. Scripted host and agent, controlled clock."
+  }
+}
