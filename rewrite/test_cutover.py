@@ -1,4 +1,4 @@
-from contextlib import closing
+from contextlib import closing, contextmanager
 import json
 import os
 from pathlib import Path
@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from threading import Thread
 
-from .cutover import backup, digest, prepare, rollback, verified
+from .cutover import backup, digest, prepare, reconcile, rollback, verified
 from .devloop import FixtureHost, Loop
 from .test_mainline import Clock
 from .orders import Orders
@@ -181,6 +181,67 @@ store.close()
         with self.assertRaisesRegex(ValueError,"incomplete legacy peer text"):
             prepare(second,self.trial,self.source_id)
         self.assertFalse(self.trial.exists())
+
+    def test_reconcile_distinguishes_unoffered_tasks_and_new_delivery_facts_without_writing(self):
+        self.old("""
+store = RouterStore(sys.argv[1])
+store.upsert_worker("oguri")
+store.close()
+""",self.legacy)
+        backup(self.legacy,self.attachments,self.snapshot)
+        prepare(self.snapshot,self.trial,self.source_id)
+        self.assertTrue(reconcile(self.snapshot,self.trial)["exact_rollback_allowed"])
+        clock = Clock()
+        @contextmanager
+        def running():
+            loop = Loop(self.trial,clock,FixtureHost)
+            with loop.server:
+                loop.thread.start()
+                try:
+                    yield loop
+                finally:
+                    loop.server.shutdown()
+                    loop.thread.join()
+        key = guid()
+        with running() as loop:
+            tid = loop.hermes.create(key,"Queued during trial","Preserve this instruction","oguri")["task_id"]
+        before = digest(self.trial/"router.db")
+        queued = reconcile(self.snapshot,self.trial)
+        self.assertEqual(digest(self.trial/"router.db"),before)
+        self.assertFalse(queued["exact_rollback_allowed"])
+        self.assertTrue(queued["only_new_queued_tasks"])
+        self.assertEqual(queued["queue_candidates"],[{"task_id":tid,"assignee_id":"oguri","request_id":key}])
+        self.assertEqual(queued["changed_tables"],{
+            "tasks":{"baseline_only":0,"trial_only":1},"operations":{"baseline_only":0,"trial_only":1}})
+        with running() as loop:
+            unknown = loop.hermes.create(guid(),"New identity","Pending","not-in-old")["task_id"]
+            unassigned = loop.hermes.create(guid(),"Unassigned","Pending")["task_id"]
+            loop.worker.connect()
+            loop.worker.poll()
+            clock.advance(10)
+            loop.worker.poll()
+            loop.worker.poll()
+            self.assertEqual(loop.worker.hold()["held_task_id"],tid)
+            self.assertEqual(len(loop.native.entries()),1)
+        before = digest(self.trial/"router.db")
+        observed = reconcile(self.snapshot,self.trial)
+        self.assertEqual(digest(self.trial/"router.db"),before)
+        self.assertFalse(observed["only_new_queued_tasks"])
+        self.assertEqual(observed["queue_candidates"],[])
+        self.assertEqual(observed["blocked_new_tasks"],[
+            {"task_id":tid,"reason":"assignment_or_lifecycle_recorded"},
+            {"task_id":unknown,"reason":"assignee_not_registered_in_legacy_snapshot"},
+            {"task_id":unassigned,"reason":"legacy_requires_assignee"}])
+        self.assertIn("deliveries",observed["changed_tables"])
+        self.assertIn("workers",observed["changed_tables"])
+        with self.assertRaisesRegex(ValueError,"reconcile"):
+            rollback(self.snapshot,self.trial,self.restore)
+        self.assertFalse(self.restore.exists())
+        baseline_path = self.trial/"baseline.json"
+        wrong = json.loads(baseline_path.read_text())
+        baseline_path.write_text(json.dumps({**wrong,"router_db_sha256":before}))
+        with self.assertRaisesRegex(ValueError,"baseline could not be reproduced"):
+            reconcile(self.snapshot,self.trial)
 
     def test_archived_peer_threads_files_and_permissions_survive_without_replay(self):
         first,reply,root_msg = guid(),guid(),guid()

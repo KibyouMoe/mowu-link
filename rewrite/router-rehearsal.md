@@ -18,6 +18,7 @@
 python3 -m rewrite.cutover backup --database ./old/router.db --attachments ./old/attachments --destination ./snapshot
 python3 -m rewrite.cutover verify --snapshot ./snapshot
 python3 -m rewrite.cutover prepare --snapshot ./snapshot --destination ./trial --source-id "$SOURCE_UUID"
+python3 -m rewrite.cutover reconcile --snapshot ./snapshot --trial ./trial
 python3 -m rewrite.cutover rollback --snapshot ./snapshot --trial ./trial --destination ./restored
 ```
 
@@ -29,6 +30,8 @@ python3 -m rewrite.cutover rollback --snapshot ./snapshot --trial ./trial --dest
 - 附件不完整、校验失败、有未结束日志或目标已存在时，命令报错。每个结果目录完整生成后才发布。
 - 新库尚未变化时可恢复到全新目录。回退后用实际旧 RouterStore 查归档理由与下一张待派单，逐字节对比附件并核源库摘要。
 - 新库已写入时，直接回退会丢掉新进展，命令会拒绝。保留新旧两边及新增事实，完成逐笔核对后再制定回放顺序。这种有新业务写入的回迁仍待演练。
+
+`reconcile` 可用准备试运行时的同一源码和 SQLite 运行环境，在临时目录从旧快照重建基线，再按实际表对账。输出包含三份库摘要、每张表两侧的差异行数、候选工单号及原建单请求号。已派过的单、未指定处理人、旧库未登记的工位及旧端会修改或拒收的正文分别列出原因。输出不包含正文或附件。即使差异仅含发给旧工位的未派工单，也要先核定旧端的处理模式、编号对照和副作用后再回放。命令本身只读，新业务回迁和覆盖恢复另验。
 
 ## 重做版五组件的离线恢复
 

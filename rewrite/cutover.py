@@ -13,6 +13,7 @@ from uuid import UUID, uuid5
 
 from .orders import Orders, task
 from . import legacy_history, legacy_peers
+from .messages import valid_guid
 from .storage import encode
 
 
@@ -196,11 +197,102 @@ def rollback(snapshot, trial, destination):
     return {"restored_db_sha256":manifest["legacy_db_sha256"],"attachments":len(manifest["attachments"])}
 
 
+def schema(db, database):
+    return db.execute(f"""SELECT type,name,tbl_name,sql FROM {database}.sqlite_master
+                          WHERE name NOT GLOB 'sqlite_*' ORDER BY type,name""").fetchall()
+
+
+def row_delta(db, table, first, second):
+    name = '"' + table.replace('"','""') + '"'
+    return db.execute(f"""SELECT count(*) FROM (
+        SELECT rowid,* FROM {first}.{name} EXCEPT SELECT rowid,* FROM {second}.{name})""").fetchone()[0]
+
+
+def queued_candidates(db, delta, legacy_workers):
+    candidates, blocked = [], []
+    sql = """SELECT current.* FROM main.tasks current LEFT JOIN baseline.tasks old USING(task_id)
+             WHERE old.task_id IS NULL ORDER BY current.rowid"""
+    for row in db.execute(sql):
+        tid = row["task_id"]
+        if row["state"]!="ready" or row["assignment_id"] is not None or row["revision"]!=1:
+            blocked.append({"task_id":tid,"reason":"assignment_or_lifecycle_recorded"})
+            continue
+        if not row["assignee_id"]:
+            blocked.append({"task_id":tid,"reason":"legacy_requires_assignee"})
+            continue
+        if row["assignee_id"]!=row["assignee_id"].strip() or row["assignee_id"] not in legacy_workers:
+            blocked.append({"task_id":tid,"reason":"assignee_not_registered_in_legacy_snapshot"})
+            continue
+        recorded = db.execute("""SELECT key,request,response FROM main.operations WHERE actor='hermes'
+                                 AND json_extract(response,'$.task_id')=?
+                                 AND key NOT IN (SELECT key FROM baseline.operations WHERE actor='hermes')""",(tid,)).fetchall()
+        if len(recorded)!=1:
+            blocked.append({"task_id":tid,"reason":"missing_unique_manager_creation_receipt"})
+            continue
+        operation = recorded[0]
+        original = {"title":row["title"],"instructions":row["instructions"],"assignee_id":row["assignee_id"]}
+        response = dict(row,holder={"kind":"router"})
+        if (not valid_guid(operation["key"]) or operation["request"]!=encode([["POST","/v1/tasks"],original])
+                or operation["response"]!=encode(response)):
+            blocked.append({"task_id":tid,"reason":"creation_receipt_incompatible"})
+            continue
+        # Old /tasks trims the description and accepts at most 2,000 characters.
+        if row["instructions"]!=row["instructions"].strip() or len(row["instructions"])>2000:
+            blocked.append({"task_id":tid,"reason":"legacy_description_would_change_or_be_rejected"})
+            continue
+        candidates.append({"task_id":tid,"assignee_id":row["assignee_id"],"request_id":operation["key"]})
+    only_queue = (bool(candidates) and not blocked and set(delta)=={"tasks","operations"}
+                  and all(values=={"baseline_only":0,"trial_only":len(candidates)} for values in delta.values()))
+    return candidates,blocked,only_queue
+
+
+def reconcile(snapshot, trial):
+    """Read the exact post-cutover difference. Original snapshots and trial databases stay intact."""
+    saved = json.loads((trial/"baseline.json").read_text())
+    source = trial/"router.db"
+    result = {}
+    with tempfile.TemporaryDirectory(prefix="mowulink-reconcile-") as directory:
+        reference = Path(directory)/"reference"
+        regenerated = prepare(snapshot,reference,saved["source_id"])
+        if regenerated!=saved:
+            raise ValueError("rehearsal baseline could not be reproduced by this release")
+        with closing(readonly(snapshot/"legacy.db")) as old:
+            legacy_workers = {row[0] for row in old.execute("SELECT name FROM workers")}
+        with closing(readonly(source)) as db:
+            before = digest(source)
+            result.update(snapshot_sha256=saved["snapshot_sha256"],baseline_sha256=saved["router_db_sha256"],
+                          trial_sha256=before)
+            if [row[0] for row in db.execute("PRAGMA integrity_check")]!=["ok"]:
+                raise ValueError("trial database integrity check failed")
+            db.execute("ATTACH DATABASE ? AS baseline",
+                       ((reference/"router.db").resolve().as_uri()+"?mode=ro&immutable=1",))
+            baseline_schema = schema(db,"baseline")
+            if baseline_schema!=schema(db,"main"):
+                raise ValueError("trial schema does not match this release")
+            delta = {}
+            for obj in baseline_schema:
+                if obj["type"]!="table":
+                    continue
+                table = obj["name"]
+                baseline_only = row_delta(db,table,"baseline","main")
+                trial_only = row_delta(db,table,"main","baseline")
+                if baseline_only or trial_only:
+                    delta[table] = {"baseline_only":baseline_only,"trial_only":trial_only}
+            candidates,blocked,only_queue = queued_candidates(db,delta,legacy_workers)
+            result.update(changed_tables=delta,queue_candidates=candidates,blocked_new_tasks=blocked,
+                          exact_rollback_allowed=before==saved["router_db_sha256"],only_new_queued_tasks=only_queue)
+        with closing(readonly(source)):
+            if digest(source)!=before:
+                raise ValueError("trial database changed during reconciliation")
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="op", required=True)
     for op, names in (("backup",("database","attachments","destination")),
                       ("verify",("snapshot",)),("prepare",("snapshot","destination")),
+                      ("reconcile",("snapshot","trial")),
                       ("rollback",("snapshot","trial","destination"))):
         command = commands.add_parser(op)
         for name in names:
@@ -208,7 +300,8 @@ def main():
         if op == "prepare":
             command.add_argument("--source-id",required=True)
     args = vars(parser.parse_args())
-    command = {"backup":backup,"verify":verified,"prepare":prepare,"rollback":rollback}[args.pop("op")]
+    command = {"backup":backup,"verify":verified,"prepare":prepare,
+               "reconcile":reconcile,"rollback":rollback}[args.pop("op")]
     print(encode(command(**args)))
 
 
