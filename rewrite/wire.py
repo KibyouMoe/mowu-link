@@ -8,7 +8,7 @@ from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlsplit
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Request, build_opener
 
-from . import attachments, delivery, messages, peers, pool, questions
+from . import attachments, delivery, links, messages, peers, pool, questions
 from .orders import task, worker_actor
 from .storage import Fault, encode, require
 
@@ -82,6 +82,11 @@ def route(orders, actor, method, path, body, headers):
             require(actor == worker_actor(wid), 403, "forbidden")
             handler = orders.session if op == "session" else orders.presence
             execute = lambda db: handler(db, wid, body)
+        case "PUT", ["workers", wid, "links", "adapter"]:
+            require(actor == worker_actor(wid),403,"forbidden")
+            def execute(db):
+                orders.active_session(db,wid,body)
+                return links.report(db,wid,body,orders.clock())
         case "POST", ["tasks", tid, "materials"]:
             require(actor.startswith("worker/"), 403, "forbidden")
             def execute(db):

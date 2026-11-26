@@ -1,35 +1,73 @@
 """Long-lived Worker state and narrow authenticated callbacks from its bound services."""
 from threading import Event, Thread
+import time
 from urllib.error import URLError
 
-from . import display, worker_media
+from . import display, links, worker_media
 from .storage import Fault, require, string
 from .wire import serve_authenticated
 
 
 class WorkerService:
-    def __init__(self, worker):
+    def __init__(self, worker, clock=time.monotonic, probe_interval=5):
         self.worker = worker
         self.stop = Event()
         self.thread = Thread(target=self.poll, daemon=True)
         self.router_connected = False
+        self.adapter_connected = None
+        self.host_session = ""
+        self.clock, self.probe_interval = clock, probe_interval
+        self.next_probe = 0
+        self.next_router_attempt = 0
+        self.started = False
         self.last_error = None
+
+    def step(self):
+        w = self.worker
+        if not self.started:
+            # A new process must establish both legs before reporting a fresh online session.
+            with w.db.transaction() as db:
+                db.execute("DELETE FROM link_state WHERE up=1")
+            self.started = True
+        probe = self.clock() >= self.next_probe
+        if probe:
+            try:
+                session = w.adapter.bound_session()
+                require(isinstance(session,str) and session and type(w.adapter.busy()) is bool,
+                        502,"invalid_host_observation")
+                self.host_session, self.adapter_connected = session,True
+            except (Fault,URLError,OSError):
+                self.adapter_connected = False
+            links.observe(w,"adapter",self.adapter_connected,self.host_session)
+            self.next_probe = self.clock()+self.probe_interval
+        try:
+            if not self.router_connected:
+                if self.clock() < self.next_router_attempt:
+                    return
+                w.connect()
+                self.router_connected = True
+                links.observe(w,"router",True,self.host_session)
+            links.publish(w,heartbeat=probe and not self.adapter_connected)
+            w.poll()
+            self.last_error = None if self.adapter_connected else "adapter_connection_unconfirmed"
+        except (URLError,OSError):
+            self.router_connected = False
+            self.next_router_attempt = self.clock() + 20*60
+            self.last_error = "router_connection_unconfirmed"
+            links.observe(w,"router",False,self.host_session)
+        except Fault as err:
+            if err.code in ("stale_session","missing_session","unauthenticated"):
+                self.router_connected = False
+                self.next_router_attempt = self.clock() + 20*60
+                links.observe(w,"router",False,self.host_session)
+            if err.code == "adapter_connection_unconfirmed":
+                self.adapter_connected = False
+                links.observe(w,"adapter",False,self.host_session)
+            self.last_error = err.code
 
     def poll(self):
         while not self.stop.is_set():
-            try:
-                if not self.router_connected:
-                    self.worker.connect()
-                    self.router_connected = True
-                self.worker.poll()
-                self.last_error = None
-            except (URLError,OSError):
-                self.router_connected = False
-                self.last_error = "router_connection_unconfirmed"
-            except Fault as err:
-                if err.code in ("stale_session","missing_session"):
-                    self.router_connected = False
-                self.last_error = err.code
+            self.step()
             self.stop.wait(0.2)
 
     def handle(self, actor, method, path, body, _headers):
@@ -63,7 +101,7 @@ class WorkerService:
             result = {"receipt":w.chat(string(body,"message_id"),body["text"],body.get("attachment_ids"))}
         elif actor == "ops/" + w.worker_id and method == "GET" and path == "/v1/worker/status":
             result = {"worker_id":w.worker_id,"router_connected":self.router_connected,
-                      "last_error":self.last_error,**w.hold()}
+                      "adapter_connected":self.adapter_connected,"last_error":self.last_error,**w.hold()}
         else:
             raise Fault(403,"forbidden")
         return 200,"application/json",result

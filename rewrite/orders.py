@@ -3,7 +3,7 @@ import json
 import re
 import time
 
-from . import attachments, cleanup, delivery, messages, peers, pool, questions
+from . import attachments, cleanup, delivery, links, messages, peers, pool, questions
 from .storage import Database, encode, guid, require, string, timestamp
 
 SCHEMA = """
@@ -50,7 +50,7 @@ def held_pair(data):
 class Orders:
     def __init__(self, path, clock=time.time, poll_seconds=5, lease_seconds=30):
         self.db = Database(path, SCHEMA + delivery.SCHEMA + pool.SCHEMA + cleanup.SCHEMA + questions.SCHEMA
-                           + attachments.SCHEMA + messages.SCHEMA + peers.SCHEMA)
+                           + attachments.SCHEMA + messages.SCHEMA + peers.SCHEMA + links.ROUTER_SCHEMA)
         self.clock = clock
         self.poll_seconds = poll_seconds
         self.lease_seconds = lease_seconds
@@ -161,6 +161,12 @@ class Orders:
                       "busy": bool(r["busy"]), "held_task_id": r["held_task_id"],
                       "held_assignment_id": r["held_assignment_id"], "last_seen_at": timestamp(r["last_seen"])}
                      for r in page]
+            for item in items:
+                link = db.execute("""SELECT l.up FROM worker_adapter_links l JOIN workers w ON w.worker_id=l.worker_id
+                                  AND w.session_id=l.session WHERE l.worker_id=?""",(item["worker_id"],)).fetchone()
+                item["adapter_connected"] = bool(link["up"]) if link else None
+                if link and not link["up"]:
+                    item["busy"] = None
         return {"items": items, "next_cursor": str(page[-1]["cursor_id"]) if len(rows) > len(page) else None}
 
     def update(self, db, tid, data):
@@ -224,6 +230,9 @@ class Orders:
 
     def presence(self, db, worker, data):
         row = self.active_session(db, worker, data)
+        link = db.execute("SELECT up FROM worker_adapter_links WHERE worker_id=? AND session=?",
+                          (worker,row["session_id"])).fetchone()
+        require(not link or link[0],409,"adapter_unavailable")
         require(string(data, "query_id") == row["query_id"], 409, "stale_query")
         seq, busy = data.get("seq"), data.get("busy")
         require(type(seq) is int and type(busy) is bool, 422, "invalid_presence")

@@ -12,6 +12,10 @@ class RemoteAdapter:
     def request(self, *args):
         try:
             return self.client.request(*args)
+        except Fault as err:
+            if err.status in (401,403) and err.code in ("unauthenticated","wrong_adapter_owner"):
+                raise Fault(err.status,"adapter_identity_unconfirmed") from err
+            raise
         except (URLError,OSError):
             raise Fault(503,"adapter_connection_unconfirmed",True) from None
 

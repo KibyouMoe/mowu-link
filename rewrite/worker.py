@@ -3,7 +3,7 @@ import json
 from threading import RLock
 from typing import Protocol
 
-from . import display, worker_media
+from . import display, links, worker_media
 from .storage import Database, Fault, encode, guid, require, string
 
 SCHEMA = """
@@ -46,7 +46,7 @@ class AgentAdapter(Protocol):
 
 class Worker:
     def __init__(self, path, worker_id, router, adapter: AgentAdapter):
-        self.db = Database(path, SCHEMA + worker_media.SCHEMA + display.SCHEMA)
+        self.db = Database(path, SCHEMA + worker_media.SCHEMA + display.SCHEMA + links.WORKER_SCHEMA)
         self.worker_id, self.router, self.adapter = worker_id, router, adapter
         self.lock = RLock()
         with self.db.transaction() as db:
@@ -58,6 +58,24 @@ class Worker:
             row = db.execute("SELECT * FROM jobs WHERE stage='accepted'").fetchone()
             return {"held_task_id": row["task_id"] if row else None,
                     "held_assignment_id": row["assignment_id"] if row else None}
+
+    def send_task_input(self, delivery_id, payload):
+        receipt = self.adapter.deliver(delivery_id,payload)
+        kind = payload["kind"]
+        if receipt and kind in ("task","task_update","task.cancel","task.transfer_out","task.shelved"):
+            tid = payload["task_id"]
+            if kind == "task":
+                text = "溪流派单 · "+payload["title"]+"\n"+payload["instructions"]
+            elif kind == "task_update":
+                labels = {"title":"标题","instructions":"要求"}
+                text = "工单已更新\n"+"\n".join(labels[k]+"："+v for k,v in payload["changes"].items())
+            else:
+                label = {"task.cancel":"取消指令","task.transfer_out":"转接指令","task.shelved":"工单已搁置"}[kind]
+                text = label+"\n"+payload["reason"]
+            with self.db.transaction() as db:
+                display.append(db,{"event_id":"task-"+delivery_id,"kind":"task","session":receipt.get("session",""),
+                                  "turn_id":receipt.get("turn_id",""),"text":text+"\n"+tid})
+        return receipt
 
     def connect(self):
         with self.lock:
@@ -127,14 +145,14 @@ class Worker:
                 with self.db.transaction() as db:
                     db.execute("UPDATE jobs SET stage='released' WHERE assignment_id=? AND stage='accepted'",
                                (payload["assignment_id"],))
-                return self.adapter.deliver(frame["delivery_id"], {"kind": "task.shelved", **payload}) is not None
+                return self.send_task_input(frame["delivery_id"], {"kind": "task.shelved", **payload}) is not None
             if frame["kind"] in ("task.cancel", "task.transfer_out"):
                 with self.db.transaction() as db:
                     record = db.execute("SELECT kind FROM controls WHERE assignment_id=?",
                                         (payload["assignment_id"],)).fetchone()
                 if not record or record["kind"] != frame["kind"]:
                     return True
-                return self.adapter.deliver(frame["delivery_id"], {"kind": frame["kind"], **payload}) is not None
+                return self.send_task_input(frame["delivery_id"], {"kind": frame["kind"], **payload}) is not None
             if frame["kind"] == "worker.status_query":
                 self.observe(payload["query_id"])
                 return True
@@ -146,7 +164,7 @@ class Worker:
                     if db.execute("SELECT 1 FROM controls WHERE assignment_id=?", (payload["assignment_id"],)).fetchone():
                         return True
                 kind = "task_update" if frame["kind"] == "task.updated" else "task_probe"
-                return self.adapter.deliver(frame["delivery_id"], {"kind": kind, **payload}) is not None
+                return self.send_task_input(frame["delivery_id"], {"kind": kind, **payload}) is not None
             require(frame["kind"] == "task.dispatch", 422, "unsupported_delivery")
             return self.take(frame)
 
@@ -203,7 +221,7 @@ class Worker:
                     409, "accept_receipt_mismatch")
             with self.db.transaction() as db:
                 db.execute("UPDATE jobs SET stage='accepted' WHERE assignment_id=?", (aid,))
-        receipt = self.adapter.deliver(job["delivery_id"], {"kind": "task", **p})
+        receipt = self.send_task_input(job["delivery_id"], {"kind": "task", **p})
         with self.db.transaction() as db:
             db.execute("UPDATE jobs SET host_state=? WHERE assignment_id=?",
                        ("received" if receipt else "unknown", aid))

@@ -88,6 +88,8 @@ class Views:
                     require(kind in labels,422,"unsupported_card_kind")
                     if kind=="tool":
                         text = event["tool_name"]+"\n"+text
+                    if kind=="online":
+                        text = self.name+"已上线\n"+text
                     mid = self.platform.create(self.chat,card(self.name+labels[kind],text,session),key)
             require(isinstance(mid,str) and mid.startswith("om_"),502,"unconfirmed_platform_message")
             if kind=="progress":
