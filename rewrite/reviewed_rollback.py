@@ -1,4 +1,4 @@
-"""Return reviewed migrated work to an offline legacy copy, keeping trial results private."""
+"""Return reviewed work to an offline legacy copy, keeping trial results private."""
 from contextlib import closing
 import hashlib
 import json
@@ -6,8 +6,9 @@ import os
 import shutil
 import sqlite3
 import time
+from uuid import UUID, uuid5
 
-from .cutover import (digest, output_directory, queue_execution_modes, queue_replay_plan,
+from .cutover import (digest, legacy_creation_request, output_directory, queue_execution_modes, queue_replay_plan,
                       readonly, reconcile, restore_snapshot, verified)
 from .messages import valid_guid
 from .orders import task
@@ -20,6 +21,7 @@ TABLES = {"tasks","reports","messages","deliveries","operations","workers","work
 
 def reviewed_orders(facts):
     queued = queue_execution_modes(facts["queue_candidates"])
+    new = {item["task_id"]:item for item in facts["closed_new_tasks"]}
     changes = []
     for row in facts["work_orders"]:
         if row["task_id"] in queued:
@@ -31,18 +33,22 @@ def reviewed_orders(facts):
     if (not changes or facts["blocked_new_tasks"] or set(deltas)-TABLES
             or any(value["baseline_only"] for name,value in deltas.items() if name!="tasks")):
         raise ValueError("trial has changes outside the supported reviewed orders")
-    if deltas.get("tasks")!={"baseline_only":len(changes),"trial_only":len(changes)+len(queued)}:
+    if deltas.get("tasks")!={"baseline_only":len(changes)-len(new),"trial_only":len(changes)+len(queued)}:
         raise ValueError("trial contains other task changes")
     entries = {}
     for row in changes:
+        tid = row["task_id"]
         before,after,reports = row["before"],row["trial"],row["completed_reports"]
+        if tid in new:
+            entries[tid] = {**reports[0],"creation_key":new[tid]["request_id"]}
+            continue
         if (not row["legacy_task_id"] or row["same_content"] is not True or not before or not after or before["state"]!="ready"
                 or after["state"]!="closed" or before["assignment_id"] is not None or after["assignment_id"] is not None
                 or before["revision"]!=1 or after["revision"]!=5
                 or before["assignee_id"]!=after["assignee_id"] or row["candidate_materials"] or len(reports)!=1
                 or reports[0]["worker_id"]!=after["assignee_id"]):
             raise ValueError("reviewed rollback needs unchanged migrated orders closed after one W04")
-        entries[row["task_id"]] = {**reports[0],"legacy_task_id":row["legacy_task_id"]}
+        entries[tid] = {**reports[0],"legacy_task_id":row["legacy_task_id"]}
     return entries
 
 
@@ -103,15 +109,16 @@ def check_transport(db,entries):
 def check_operations(db,entries,workers,frames,uploads,expected_count,queue_candidates):
     mapped,applicable,acked = {},0,set()
     report_sessions = {}
-    queued_keys = {item["request_id"] for item in queue_candidates}
+    creation_keys = {item["request_id"] for item in queue_candidates}
+    creation_keys.update(entry["creation_key"] for entry in entries.values() if "creation_key" in entry)
     for row in db.execute("SELECT * FROM operations"):
         (method,path),body = json.loads(row["request"])
         parts = path.split("/")
         actor,reply = row["actor"],json.loads(row["response"])
         if method=="POST" and path=="/v1/tasks":
-            # The delta count excludes unchanged baseline rows and includes reviewed queue additions.
-            if actor=="hermes" and row["key"] in queued_keys:
-                queued_keys.remove(row["key"])
+            # Reconciliation validated the receipts for each newly created order.
+            if actor=="hermes" and row["key"] in creation_keys:
+                creation_keys.remove(row["key"])
                 applicable += 1
             continue
         applicable += 1
@@ -153,7 +160,7 @@ def check_operations(db,entries,workers,frames,uploads,expected_count,queue_cand
                 raise ValueError("trial upload registration does not match the reviewed attachment")
         else:
             raise ValueError("trial has an operation outside the reviewed orders")
-    if queued_keys or applicable!=expected_count or acked!=frames.keys() or set(mapped)!={(tid,op)
+    if creation_keys or applicable!=expected_count or acked!=frames.keys() or set(mapped)!={(tid,op)
             for tid in entries for op in ("accept","report","actions")}:
         raise ValueError("trial operation ledger is incomplete or has unrelated writes")
     if any(report_sessions[tid,"accept"]!=report_sessions[tid,"report"] for tid in entries):
@@ -207,13 +214,27 @@ def private_open(name,flags):
     return os.open(name,flags,0o600)
 
 
-def remove_from_legacy_queue(path,entries,at):
+def archive_in_legacy(path, entries, source_id, at):
     with closing(sqlite3.connect(path)) as db, db:
         for tid,entry in entries.items():
-            legacy = entry["legacy_task_id"]
-            removed = db.execute("DELETE FROM dispatch_queue WHERE task_id=? AND worker=?",(legacy,entry["worker_id"]))
-            if removed.rowcount!=1:
-                raise ValueError("legacy queue no longer contains the reviewed original")
+            if "creation_key" in entry:
+                legacy = "t-" + uuid5(UUID(source_id),"archive-rollback/"+tid).hex[:10]
+                payload = dict(entry["legacy_creation_request"])
+                request_id = payload.pop("message_id")
+                if db.execute("SELECT 1 FROM task_info WHERE task_id=? OR request_id=?",(legacy,request_id)).fetchone():
+                    raise ValueError("archived order collides with a legacy task or request identifier")
+                fingerprint = hashlib.sha256(json.dumps(payload,sort_keys=True,ensure_ascii=True,
+                                                         separators=(",",":")).encode("ascii")).hexdigest()
+                db.execute("""INSERT INTO task_info(task_id,name,description,owner,actor,at,metadata,request_id,fingerprint)
+                              VALUES (?,?,?,?,?,?,?,?,?)""",
+                           (legacy,"重做版已验收工单","完整记录见私有回退档案。",entry["worker_id"],"hermes",
+                            at,"{}",request_id,fingerprint))
+                entry["legacy_task_id"] = legacy
+            else:
+                legacy = entry["legacy_task_id"]
+                removed = db.execute("DELETE FROM dispatch_queue WHERE task_id=? AND worker=?",(legacy,entry["worker_id"]))
+                if removed.rowcount!=1:
+                    raise ValueError("legacy queue no longer contains the reviewed original")
             # Keep only the routing outcome and private reference in the shared legacy database.
             metadata = {"reason":"reviewed_on_rewrite","recovery_reference":tid}
             db.execute("INSERT INTO task_facts(task_id,kind,event_key,at,data) VALUES (?,'archive','archive',?,?)",
@@ -223,7 +244,7 @@ def remove_from_legacy_queue(path,entries,at):
 
 
 def stage_reviewed_rollback(snapshot,trial,review,destination):
-    """Prepare an offline fallback without re-enqueueing completed migrated work."""
+    """Prepare an offline fallback without re-enqueueing completed work."""
     facts = reconcile(snapshot,trial)
     entries = reviewed_orders(facts)
     decision = {"trial_sha256":facts["trial_sha256"],
@@ -262,9 +283,12 @@ def stage_reviewed_rollback(snapshot,trial,review,destination):
                                           facts["queue_candidates"])
             for tid,entry in entries.items():
                 entry.update(notice=notices[tid],w04_key=operations[tid,"report"],review_key=operations[tid,"actions"])
+                if "creation_key" in entry:
+                    entry["legacy_creation_request"] = legacy_creation_request(facts["source_id"],
+                                                                               entry["creation_key"],task(db,tid))
+            at = time.time()
+            archive_in_legacy(stage/"legacy.db",entries,facts["source_id"],at)
             plan = queue_replay_plan(db,stage/"legacy.db",facts) if facts["queue_candidates"] else None
-        at = time.time()
-        remove_from_legacy_queue(stage/"legacy.db",entries,at)
         restored_sha = digest(stage/"legacy.db")
         queue_manifest_sha = None
         if plan:

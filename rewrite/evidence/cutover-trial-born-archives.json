@@ -1,0 +1,40 @@
+{
+  "trial_sha256": "e8fd9b9a1dd5ed488ed5b71dfa5df111211d5df1bd468385959c29af15e30f15",
+  "legacy_snapshot_sha256": "554d4a2824accc11f1ee31ceb7ba3bcea1aec3e076c5a5e7e8dcf636b0fda77e",
+  "closed_assignments": {
+    "25543605-3b86-404c-90cd-509f408c171d": "d301249e-bc8b-493c-8ff7-f7b3831463e8",
+    "6aa359e4-177b-4730-963c-ee6871536d07": "1c616efb-665e-4bf4-92d2-f17af5d9ebce"
+  },
+  "public_legacy_readback": {
+    "archives": {
+      "25543605-3b86-404c-90cd-509f408c171d": {
+        "legacy_task_id": "t-468f241f1d",
+        "replay": 200,
+        "conflict": 409,
+        "reason": "reviewed_on_rewrite"
+      },
+      "6aa359e4-177b-4730-963c-ee6871536d07": {
+        "legacy_task_id": "t-682a8f58c3",
+        "replay": 200,
+        "conflict": 409,
+        "reason": "reviewed_on_rewrite"
+      }
+    },
+    "head": "t-c0cad496c1",
+    "artifact_status": 404,
+    "queued_status": 200,
+    "held": null,
+    "new_queue_for_oguri": null,
+    "queue_order": [
+      "t-c0cad496c1",
+      "t-d6b945dc87"
+    ],
+    "replayed_queue_id": "t-d6b945dc87"
+  },
+  "initial_queue_status": 202,
+  "private_artifact_sha256": "22096147c94fe983a8714f76aaac9f702543e6e13736218061aad535475eb069",
+  "incomplete_review_rejected": true,
+  "mapped_legacy_request_collision_rejected": true,
+  "both_inputs_unchanged": true,
+  "boundary": "Actual old and new Router over local HTTP, SQLite and attachment bytes. Scripted Worker Agent."
+}

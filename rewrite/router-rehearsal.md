@@ -55,9 +55,9 @@ python3 -m rewrite.cutover stage-queue-rollback --snapshot ./snapshot --trial ./
 
 ### 回退已验收的迁入工单
 
-此入口覆盖从旧队列迁入、原文与处理人未改、经过一次 W03 和 W04、已由溪流验收结单的原工单。所有试用投递须有原接收方确认。可以同时带回试用中新建且从未派过的工单。Worker 仍忙、有未收清的状态查询、出现无关消息、转派、候选材料、待验收成果或损坏附件时，命令会停止并保留输入。
+此入口覆盖从旧队列迁入、原文与处理人未改、经过一次 W03 和 W04、已由溪流验收结单的原工单。它也覆盖试用期间新建、由旧库中已登记的工位完成同一路径并已验收的工单。所有试用投递须有原接收方确认。可以同时带回试用中新建且从未派过的工单。Worker 仍忙、有未收清的状态查询、出现无关消息、转派、候选材料、待验收成果或损坏附件时，命令会停止并保留输入。
 
-停止试运行写者后运行 `reconcile`，把 `trial_sha256` 和逐单核对过的 `closed_assignments` 写入审核文件。`closed_assignments` 的键是新工单号，值是正式 W04 对应的派发号。审核文件必须覆盖这批已结单的全部变更。
+停止试运行写者后运行 `reconcile`，把 `trial_sha256` 和逐单核对过的 `closed_assignments` 写入审核文件。`closed_assignments` 的键是新工单号，值是正式 W04 对应的派发号。审核文件必须覆盖这批已结单的全部变更，包括 `closed_new_tasks` 列出的试用新单。新单须有唯一的原建单回执，建单时的原文和处理人与已验收版本一致，旧端支持原描述和请求号。
 
 如果同时有 `queue_candidates`，把它们全部加入同一审核文件的 `execution_modes`，逐张确认值为 `"goal"`。`blocked_new_tasks` 必须为空。审核有遗漏时不生成任何回退目录。
 
@@ -66,6 +66,8 @@ python3 -m rewrite.cutover stage-reviewed-rollback --snapshot ./snapshot --trial
 ```
 
 目标目录中的 `legacy.db` 用旧 Router 正常打开，旧附件在 `legacy.db.attachments/`。已验收的原单在恢复库标记为 `reviewed_on_rewrite`，留有指向私有档案的 `recovery_reference`。原单号、原建单幂等键以及尚未执行的旧队列顺序保留。旧 Router 再查原单能看到归档状态，重试原建单只回原单号。
+
+试用新建且已验收的工单直接写入旧库归档。旧端可查到新旧编号映射及 `reviewed_on_rewrite` 标记；标题、原指令、成果及附件从私有档案查询。该单的旧兼容请求保存在 `private-review/manifest.json` 对应工单的 `legacy_creation_request` 字段，与其旧编号一起保存。重放该请求会回同一旧单号，改动正文再用同一个请求号会得到 409。无需发送这个请求来创建或归档工单。映射若与已有旧单或待回放工单的请求号冲突，准备会停止。[试用新单验证](evidence/cutover-trial-born-archives.json)
 
 `private-review/manifest.json` 保存正文、原 W04 和验收请求键、通知凭据、旧新编号及附件摘要，`private-review/files/` 保存逐块校验过的新成果附件。`private-review/trial-router.db` 是带校验摘要的完整试运行库副本。旧 Router 的通用凭据只能查看归档标记和原已授权附件。试用的新成果从私有回退包查阅，原通知无需重发。
 

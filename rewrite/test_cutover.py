@@ -445,6 +445,185 @@ store.close()
                          "boundary":"Actual isolated rewrite and legacy Router HTTP and SQLite. Worker model is scripted."}
         self.mixed_evidence = self.exercise_mixed_reviewed_queue(clock,old_ids,tid,aid,artifact,sha)
 
+    def test_trial_born_closed_orders_return_as_private_archives_without_a_new_dispatch(self):
+        self.old("""
+store = RouterStore(sys.argv[1])
+store.upsert_worker("oguri")
+store.upsert_worker("two")
+store.close()
+""",self.legacy)
+        original = digest(self.legacy)
+        backup(self.legacy,self.attachments,self.snapshot)
+        prepare(self.snapshot,self.trial,self.source_id)
+        clock = Clock()
+        loop = Loop(self.trial,clock,FixtureHost)
+        direct_key = guid()
+        blob = b"an isolated trial-born result\0"
+        checksum = hashlib.sha256(blob).hexdigest()
+        evidence = {}
+        with loop.server:
+            loop.thread.start()
+            try:
+                before_online = loop.hermes.create(direct_key,"新单私有标题","正文不得进入旧的共享库。","oguri")
+                self.assertEqual(before_online["revision"],1)
+                loop.worker.connect()
+                loop.worker.poll()
+                clock.advance(10)
+                loop.worker.poll()
+                loop.worker.poll()
+
+                def finish(order, artifacts):
+                    tid = order["task_id"]
+                    hold = loop.worker.hold()
+                    self.assertEqual(hold["held_task_id"],tid)
+                    aid = hold["held_assignment_id"]
+                    native = loop.native.entries()[-1][1]["native_id"]
+                    report = agent_report(loop.worker,native,{"task_id":tid,"assignment_id":aid,
+                        "summary":"新端私有成果","artifact_ids":artifacts})
+                    self.assertFalse(report["isError"],report)
+                    received = loop.hermes.inspect(tid)["task"]
+                    self.assertEqual(received["state"],"completed_reported")
+                    close = loop.hermes.approve(guid(),tid,received["revision"])
+                    self.assertEqual(close["task"]["state"],"closed")
+                    loop.hermes.poll()
+                    loop.worker.poll()
+                    evidence[tid] = aid
+
+                upload = loop.wire.request("POST","uploads",{"name":"trial-private.bin","size_bytes":len(blob),
+                                           "sha256":checksum},guid())["upload_id"]
+                file_id = loop.wire.request("PATCH","uploads/"+upload,blob,headers={"Upload-Offset":"0"})["attachment_id"]
+                finish(before_online,[file_id])
+                clock.advance(1)
+                loop.worker.poll()
+                clock.advance(10)
+                loop.worker.poll()
+                tools = ManagerTools(loop.hermes,"isolated-trial-manager")
+                while_online = json.loads(tools.around_call("router_create_task",
+                    lambda args:tools.invoke("router_create_task",args),
+                    {"title":"第二条私有标题","instructions":"第二条私有任务。\n保留全角符号。","assignee_id":"oguri"},
+                    session_id="isolated-trial-manager",turn_id="isolated-create-turn",tool_call_id="create"))
+                self.assertEqual(while_online["revision"],2)
+                loop.worker.poll()
+                finish(while_online,[])
+                queued = loop.hermes.create(guid(),"复原后可调度","等旧队首处理后再派","two")
+                self.assertIsNone(queued["assignment_id"])
+            finally:
+                loop.server.shutdown()
+                loop.thread.join()
+        trial_digest = digest(self.trial/"router.db")
+        facts = reconcile(self.snapshot,self.trial)
+        self.assertEqual(facts["blocked_new_tasks"],[])
+        self.assertEqual({row["task_id"] for row in facts["closed_new_tasks"]},evidence.keys())
+        self.assertEqual([row["task_id"] for row in facts["queue_candidates"]],[queued["task_id"]])
+        review = self.root/"return-created-review.json"
+        decision = {"trial_sha256":trial_digest,"closed_assignments":evidence,
+                    "execution_modes":{queued["task_id"]:"goal"}}
+        review.write_text(json.dumps({**decision,"closed_assignments":{before_online["task_id"]:evidence[before_online["task_id"]]}}))
+        with self.assertRaisesRegex(ValueError,"all closed assignments"):
+            stage_reviewed_rollback(self.snapshot,self.trial,review,self.restore)
+        self.assertFalse(self.restore.exists())
+        review.write_text(json.dumps(decision))
+        exported = stage_reviewed_rollback(self.snapshot,self.trial,review,self.restore)
+        self.assertEqual((exported["reviewed_orders"],exported["private_artifacts"],exported["queued_requests"]),(2,1,1))
+        private = self.restore/"private-review"
+        manifest = json.loads((private/"manifest.json").read_text())
+        archived = manifest["orders"]
+        self.assertEqual((private/"files"/file_id).read_bytes(),blob)
+        self.assertEqual(digest(private/"trial-router.db"),trial_digest)
+        self.assertEqual(archived[before_online["task_id"]]["legacy_creation_request"]["message_id"],direct_key)
+        second = archived[while_online["task_id"]]
+        self.assertRegex(second["creation_key"],r"^hermes-[0-9a-f]{64}$")
+        self.assertNotEqual(second["legacy_creation_request"]["message_id"],second["creation_key"])
+
+        old_observation = """
+from server import RouterServer
+from selftest_router import http
+from threading import Thread
+from unittest.mock import Mock
+operator = "isolated-legacy-operator"
+root = Path(sys.argv[1])
+orders = json.loads((root/"private-review/manifest.json").read_text())["orders"]
+queue = json.loads((root/"queue-replay.json").read_text())["requests"][0]
+store = RouterStore(root/"legacy.db")
+result = {"archives":{}, "head":store.orders.next_dispatch("two")}
+with RouterServer(("127.0.0.1",0),store,operator,Mock(),Mock()) as srv:
+    thread = Thread(target=srv.serve_forever,kwargs={"poll_interval":.02})
+    thread.start()
+    try:
+        url = f"http://127.0.0.1:{srv.server_port}"
+        for trial, row in orders.items():
+            old, body = row["legacy_task_id"],row["legacy_creation_request"]
+            assert old.startswith("t-") and len(old)==12
+            status, item = http("GET",url+"/tasks/"+old,token=operator)
+            replay, duplicate = http("POST",url+"/tasks",body,operator)
+            clash, error = http("POST",url+"/tasks",dict(body,goal="other body"),operator)
+            assert (status,replay,clash)==(200,200,409)
+            assert error["error"]=="message_id_conflict"
+            assert duplicate["duplicate"] and duplicate["task_id"]==old
+            assert item["task"]["archive"]["recovery_reference"]==trial
+            assert item["task"]["task_info"]["TaskName"]=="重做版已验收工单"
+            assert item["task"]["goal"]=="完整记录见私有回退档案。"
+            assert not item["task"]["in_running_tasks"] and item["task"]["deliverable"] is None
+            result["archives"][trial]={"legacy_task_id":old,"replay":replay,"conflict":clash,
+                                       "reason":item["task"]["archive"]["reason"]}
+        result["artifact_status"],_ = http("GET",url+"/attachments/"+sys.argv[2],token=operator)
+        result["queued_status"], revived = http("POST",url+"/tasks",queue["request"],operator)
+        assert not revived.get("dispatched")
+        result["held"] = store.orders.held("oguri")
+        result["new_queue_for_oguri"] = store.orders.next_dispatch("oguri")
+        result["queue_order"] = [row[0] for row in store._conn.execute(
+            "SELECT task_id FROM dispatch_queue WHERE worker='two' ORDER BY seq")]
+        result["replayed_queue_id"] = revived["task_id"]
+    finally:
+        srv.shutdown()
+        thread.join()
+store.close()
+print(json.dumps(result))
+"""
+        before_restart = json.loads(self.old(old_observation,self.restore,checksum))
+        after_restart = json.loads(self.old(old_observation,self.restore,checksum))
+        self.assertEqual(before_restart["archives"],after_restart["archives"])
+        self.assertEqual((before_restart["queued_status"],after_restart["queued_status"]),(202,200))
+        self.assertEqual(before_restart["head"],self.queued)
+        self.assertEqual(after_restart["queue_order"],[self.queued,before_restart["replayed_queue_id"]])
+        self.assertEqual((after_restart["held"],after_restart["new_queue_for_oguri"]),(None,None))
+        self.assertEqual(after_restart["artifact_status"],404)
+        self.assertTrue(all(row["reason"]=="reviewed_on_rewrite" for row in after_restart["archives"].values()))
+        self.assertEqual((digest(self.legacy),digest(self.trial/"router.db")),(original,trial_digest))
+
+        # The old endpoint has one UUID namespace even when two Rewrite keys differ.
+        collision_trial = self.root/"collision-trial"
+        shutil.copytree(self.trial,collision_trial)
+        collision_key = second["legacy_creation_request"]["message_id"]
+        token = guid()
+        with serve_loopback(Orders(collision_trial/"router.db",clock),{token:"hermes"}) as srv:
+            thread = Thread(target=srv.serve_forever,kwargs={"poll_interval":.02})
+            thread.start()
+            try:
+                client = Client(f"http://127.0.0.1:{srv.server_port}",token)
+                collision = client.request("POST","tasks",
+                    {"title":"Colliding trial request","instructions":"Keep both source records","assignee_id":"two"},
+                    collision_key)
+            finally:
+                srv.shutdown()
+                thread.join()
+        collision_digest = digest(collision_trial/"router.db")
+        collision_target = self.root/"collision-cannot-publish"
+        review.write_text(json.dumps({**decision,"trial_sha256":collision_digest,
+            "execution_modes":{**decision["execution_modes"],collision["task_id"]:"goal"}}))
+        with self.assertRaisesRegex(ValueError,"creation request already exists"):
+            stage_reviewed_rollback(self.snapshot,collision_trial,review,collision_target)
+        self.assertFalse(collision_target.exists())
+        self.assertEqual(digest(collision_trial/"router.db"),collision_digest)
+        if output := os.environ.get("MOWULINK_TRIAL_BORN_ROLLBACK_EVIDENCE"):
+            Path(output).write_text(json.dumps({"trial_sha256":trial_digest,"legacy_snapshot_sha256":original,
+                "closed_assignments":evidence,"public_legacy_readback":after_restart,
+                "initial_queue_status":before_restart["queued_status"],"private_artifact_sha256":checksum,
+                "incomplete_review_rejected":True,"mapped_legacy_request_collision_rejected":True,
+                "both_inputs_unchanged":True,
+                "boundary":"Actual old and new Router over local HTTP, SQLite and attachment bytes. Scripted Worker Agent."},
+                ensure_ascii=False,indent=2)+"\n")
+
     def exercise_mixed_reviewed_queue(self,clock,old_ids,tid,aid,artifact,sha):
         mixed = self.root/"trial-with-new-queue"
         mixed.mkdir()

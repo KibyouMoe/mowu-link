@@ -238,6 +238,27 @@ def row_delta(db, table, first, second):
     return db.execute(f"SELECT count(*) FROM ({row_difference(table,first,second)})").fetchone()[0]
 
 
+def creation_receipt(db, row):
+    recorded = db.execute("""SELECT key,request,response FROM main.operations WHERE actor='hermes'
+                             AND json_extract(response,'$.task_id')=?
+                             AND key NOT IN (SELECT key FROM baseline.operations WHERE actor='hermes')""",
+                          (row["task_id"],)).fetchall()
+    if len(recorded)!=1:
+        return None
+    return recorded[0]
+
+
+def portable_creation(row, operation):
+    key = operation["key"]
+    request = {field:row[field] for field in ("title","instructions","assignee_id")}
+    return (isinstance(key,str) and (valid_guid(key) or re.fullmatch(r"hermes-[0-9a-f]{64}",key))
+            and operation["request"]==encode([["POST","/v1/tasks"],request]))
+
+
+def legacy_description_fits(row):
+    return row["instructions"]==row["instructions"].strip() and len(row["instructions"])<=2000
+
+
 def queued_candidates(db, delta, legacy_workers):
     candidates, blocked = [], []
     sql = """SELECT current.* FROM main.tasks current LEFT JOIN baseline.tasks old USING(task_id)
@@ -253,26 +274,19 @@ def queued_candidates(db, delta, legacy_workers):
         if row["assignee_id"]!=row["assignee_id"].strip() or row["assignee_id"] not in legacy_workers:
             blocked.append({"task_id":tid,"reason":"assignee_not_registered_in_legacy_snapshot"})
             continue
-        recorded = db.execute("""SELECT key,request,response FROM main.operations WHERE actor='hermes'
-                                 AND json_extract(response,'$.task_id')=?
-                                 AND key NOT IN (SELECT key FROM baseline.operations WHERE actor='hermes')""",(tid,)).fetchall()
-        if len(recorded)!=1:
+        operation = creation_receipt(db,row)
+        if operation is None:
             blocked.append({"task_id":tid,"reason":"missing_unique_manager_creation_receipt"})
             continue
-        operation = recorded[0]
-        original = {"title":row["title"],"instructions":row["instructions"],"assignee_id":row["assignee_id"]}
         response = dict(row,holder={"kind":"router"})
-        key = operation["key"]
-        portable_key = valid_guid(key) or isinstance(key,str) and re.fullmatch(r"hermes-[0-9a-f]{64}",key)
-        if (not portable_key or operation["request"]!=encode([["POST","/v1/tasks"],original])
-                or operation["response"]!=encode(response)):
+        if not portable_creation(row,operation) or operation["response"]!=encode(response):
             blocked.append({"task_id":tid,"reason":"creation_receipt_incompatible"})
             continue
         # Old /tasks trims the description and accepts at most 2,000 characters.
-        if row["instructions"]!=row["instructions"].strip() or len(row["instructions"])>2000:
+        if not legacy_description_fits(row):
             blocked.append({"task_id":tid,"reason":"legacy_description_would_change_or_be_rejected"})
             continue
-        candidates.append({"task_id":tid,"assignee_id":row["assignee_id"],"request_id":key})
+        candidates.append({"task_id":tid,"assignee_id":row["assignee_id"],"request_id":operation["key"]})
     only_queue = (bool(candidates) and not blocked and set(delta)=={"tasks","operations"}
                   and all(values=={"baseline_only":0,"trial_only":len(candidates)} for values in delta.values()))
     return candidates,blocked,only_queue
@@ -307,6 +321,27 @@ def work_order_changes(db, delta, old_ids):
                         "trial":dict(after) if after else None,"same_content":same_content,
                         "completed_reports":reports,"candidate_materials":materials})
     return records
+
+
+def closed_new_candidates(db, changes, legacy_workers):
+    candidates = []
+    for change in changes:
+        after, reports = change["trial"], change["completed_reports"]
+        if (change["before"] is not None or change["legacy_task_id"] is not None or not after
+                or after["state"]!="closed" or after["revision"]!=5 or after["assignment_id"] is not None
+                or after["assignee_id"] not in legacy_workers or change["candidate_materials"]
+                or len(reports)!=1 or reports[0]["worker_id"]!=after["assignee_id"]):
+            continue
+        row = task(db,change["task_id"])
+        operation = creation_receipt(db,row)
+        if not operation or not portable_creation(row,operation) or not legacy_description_fits(row):
+            continue
+        expected = dict(row,state="ready",revision=1)
+        offered = dict(expected,revision=2,assignment_id=reports[0]["assignment_id"])
+        if operation["response"] in (encode(expected),encode(offered)):
+            candidates.append({"task_id":row["task_id"],"assignee_id":row["assignee_id"],
+                               "request_id":operation["key"]})
+    return candidates
 
 
 def reconcile(snapshot, trial):
@@ -344,8 +379,12 @@ def reconcile(snapshot, trial):
                     delta[table] = {"baseline_only":baseline_only,"trial_only":trial_only}
             candidates,blocked,only_queue = queued_candidates(db,delta,legacy_workers)
             old_ids = {new:old for old,new in saved["queued_id_map"].items()}
-            result.update(changed_tables=delta,queue_candidates=candidates,blocked_new_tasks=blocked,
-                          work_orders=work_order_changes(db,delta,old_ids),
+            changes = work_order_changes(db,delta,old_ids)
+            closed = closed_new_candidates(db,changes,legacy_workers)
+            closed_ids = {item["task_id"] for item in closed}
+            result.update(changed_tables=delta,queue_candidates=candidates,closed_new_tasks=closed,
+                          blocked_new_tasks=[item for item in blocked if item["task_id"] not in closed_ids],
+                          work_orders=changes,
                           exact_rollback_allowed=before==saved["router_db_sha256"],only_new_queued_tasks=only_queue)
         with closing(readonly(source)):
             if digest(source)!=before:
@@ -357,22 +396,26 @@ def queue_execution_modes(candidates):
     return {item["task_id"]:"goal" for item in candidates}
 
 
+def legacy_creation_request(source_id, key, row):
+    legacy_key = key if valid_guid(key) else str(uuid5(UUID(source_id),"queue-rollback/"+key))
+    return {"message_id":legacy_key,"worker":row["assignee_id"],"TaskName":row["title"],
+            "goal":row["instructions"],"execution_mode":"goal","queue_if_offline":True}
+
+
 def queue_replay_plan(db, legacy, facts):
     requests = []
     legacy_keys = set()
-    namespace = UUID(facts["source_id"])
     with closing(readonly(legacy)) as old:
         for item in facts["queue_candidates"]:
             tid,key = item["task_id"],item["request_id"]
-            legacy_key = key if valid_guid(key) else str(uuid5(namespace,"queue-rollback/"+key))
+            row = db.execute("SELECT title,instructions,assignee_id FROM tasks WHERE task_id=?",(tid,)).fetchone()
+            if row is None:
+                raise ValueError("trial order disappeared after reconciliation")
+            body = legacy_creation_request(facts["source_id"],key,row)
+            legacy_key = body["message_id"]
             if legacy_key in legacy_keys or old.execute("SELECT 1 FROM task_info WHERE request_id=?",(legacy_key,)).fetchone():
                 raise ValueError("creation request already exists in the rollback queue")
             legacy_keys.add(legacy_key)
-            row = db.execute("SELECT title,instructions FROM tasks WHERE task_id=?",(tid,)).fetchone()
-            if row is None:
-                raise ValueError("trial order disappeared after reconciliation")
-            body = {"message_id":legacy_key,"worker":item["assignee_id"],"TaskName":row["title"],
-                    "goal":row["instructions"],"execution_mode":"goal","queue_if_offline":True}
             requests.append({"trial_task_id":tid,"trial_request_id":key,"request":body})
     return {"source_id":facts["source_id"],"trial_sha256":facts["trial_sha256"],
             "legacy_sha256":facts["snapshot_sha256"],"requests":requests}
