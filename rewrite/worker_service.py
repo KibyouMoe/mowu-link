@@ -64,6 +64,7 @@ class WorkerService:
                 require(isinstance(session,str) and session,502,"invalid_host_observation")
                 busy = w.adapter.busy(session=session)
                 require(type(busy) is bool,502,"invalid_host_observation")
+                w.observe_native_binding(session)
                 capabilities = {key:info.get(key) is True for key in HOST_CAPABILITY_FLAGS}
                 for key,flag in HOST_CAPABILITY_FLAGS.items():
                     setattr(self,flag,capabilities[key])

@@ -4,6 +4,10 @@
 
 ## 检查点与证据
 
+已确认的会话绑定写入 Worker 与适配器状态。直接改掉 Worker 的固定会话或复用另一会话的适配器库会拒绝。停写换绑检查 Router 已预约派发、待收业务帧、未了原生收件、答题与平台入站，只有账本核对通过才在新目录生成换绑副本。原宿主是否确实空闲仍需由宿主侧确认。[换绑命令与回退流程](router-rehearsal.md#隔离工位冷换原生会话)
+
+实际隔离 Codex App Server 从原会话冷换到原生分叉。重放父会话私聊只返回原收据。子会话收到一条新私聊、一张正式工单，原生工具两次 W04 返回同一原派发回执，Router 留一条待验通知。继续从试用后状态切回，保留新成果和两端收据，模型请求数不增加。共 12 轮，模型和飞书用夹具。macOS 通过 206 项，Linux arm64 通过 144 项，另 62 项本机宿主用例跳过。飞书 `/resume` 仍为目录查询。[原生交接证据](evidence/codex-native-session-handoff.json)
+
 来源留档和 Router 投递分别有只读状态入口。临时 TLS 实测首次 T04 回执丢失时来源仍有三条待核，Router 已有一帧。按原号重试后来源剩零条，Router 共两帧，Info 仅留档。测试接收者先确认第二帧，连续游标仍为 0；Router 重开后补第一帧，游标到 2。来源不能查询接收者，另一工位只能查看自己的零积压，查询不返回正文或推进游标。复跑 `python3 -B -m unittest -v rewrite.test_service.Service.test_source_receipts_and_consumer_cursor_are_observed_independently`。[计数证据](evidence/trigger-delivery-status.json) · [操作入口](README.md#来源留档与通知积压)
 
 积压与续接场景连续 10 轮通过。使用隔离 TLS Router 和测试接收者确认，未调用真实 Hermes 或飞书。本版 macOS 全过 204 项，Linux arm64 通过 143 项，另 61 项本机宿主用例跳过。

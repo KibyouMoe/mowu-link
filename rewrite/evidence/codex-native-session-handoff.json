@@ -1,0 +1,59 @@
+{
+  "source_session": "01a2176d-2530-7c01-9f8b-cd88b61d977f",
+  "target_session": "01a2176d-2689-7e92-bce0-a94407fb340c",
+  "original_inputs": [
+    [
+      "01a2176d-2584-7ee1-8183-e9b88269c022",
+      "01a2176d-258d-7542-82a4-20e62cdecd6b",
+      "mowulink-chat-27f38db5-27f2-4d78-81e2-21ada5546f60"
+    ]
+  ],
+  "target_inputs_including_fork_history": [
+    [
+      "01a2176d-2584-7ee1-8183-e9b88269c022",
+      "01a2176d-258d-7542-82a4-20e62cdecd6b",
+      "mowulink-chat-27f38db5-27f2-4d78-81e2-21ada5546f60"
+    ],
+    [
+      "01a2176d-272e-7052-9fb1-783ae11aed3b",
+      "01a2176d-2733-78b1-9377-d5ca7733f096",
+      "mowulink-chat-13bea27b-8a76-4768-9b56-758a8ef4d8d4"
+    ],
+    [
+      "01a2176d-277a-7901-81f6-3061ecfce49a",
+      "01a2176d-277f-73e0-9512-cd5fd9b6e182",
+      "mowulink-20a8d0e5-ae3b-4b35-a639-35ad40466107"
+    ]
+  ],
+  "original_receipt": {
+    "delivery_id": "chat-27f38db5-27f2-4d78-81e2-21ada5546f60",
+    "digest": "404ceb8692073b7b8135f7d6299277b930f1872722a2e2b4dc611f323eb9c6b9",
+    "native_id": "01a2176d-258d-7542-82a4-20e62cdecd6b",
+    "session": "01a2176d-2530-7c01-9f8b-cd88b61d977f",
+    "turn_id": "01a2176d-2584-7ee1-8183-e9b88269c022"
+  },
+  "target_receipt": {
+    "delivery_id": "chat-13bea27b-8a76-4768-9b56-758a8ef4d8d4",
+    "digest": "7918a574c182005b4ec5cd896cc6f517690779196ba77f51b0f93c0b25a0d56d",
+    "native_id": "01a2176d-2733-78b1-9377-d5ca7733f096",
+    "session": "01a2176d-2689-7e92-bce0-a94407fb340c",
+    "turn_id": "01a2176d-272e-7052-9fb1-783ae11aed3b"
+  },
+  "task_id": "3c93899c-faf1-4a0d-93e4-567eb801469b",
+  "assignment_id": "27489216-4e83-4e2d-9aaa-7e58243a03ed",
+  "native_tool_calls": [
+    "native_fixture_0",
+    "native_fixture_1"
+  ],
+  "native_tool_receipt": {
+    "recorded": true,
+    "task_state": "completed_reported",
+    "release_assignment_id": "27489216-4e83-4e2d-9aaa-7e58243a03ed"
+  },
+  "notification_id": "aee519af-5ab4-4fb3-99e9-0e3c7e514bdb",
+  "report_state": "completed_reported",
+  "return_preserved_both_receipts": true,
+  "model_requests_added_on_return": 0,
+  "boundary": "Independent real App Server threads, isolated Router and Worker, local scripted model and platform",
+  "successful_repeats": 12
+}

@@ -304,10 +304,10 @@ class Service(unittest.TestCase):
                                "fixture-adapter",["--worker-id","dev","--fixture-db",native_db,"--session",session])
         def target(name,url,token):
             return self.write_config(name,{"url":url,"token":token,"ca_file":str(cert)})
-        _, gateway = self.start(self.write_config("worker.json",{callback:"adapter/dev",platform:"platform/dev",ops:"ops/dev"}),
-                                cert,key,"worker",["--worker-id","dev","--router-connection",
-                                target("to-router",router,router_token),"--adapter-connection",target("to-host",adapter,adapter_token),
-                                "--adapter-session",session])
+        worker_roles = self.write_config("worker.json",{callback:"adapter/dev",platform:"platform/dev",ops:"ops/dev"})
+        worker_flags = ["--worker-id","dev","--router-connection",target("to-router",router,router_token),
+                        "--adapter-connection",target("to-host",adapter,adapter_token)]
+        worker_process,gateway = self.start(worker_roles,cert,key,"worker",[*worker_flags,"--adapter-session",session])
         chat = Client(gateway,platform,cert)
         msg = {"message_id":guid(),"text":"fixture incoming text"}
         first = chat.request("POST","worker/chat",msg)
@@ -346,6 +346,15 @@ class Service(unittest.TestCase):
         self.assertIs(status["router_connected"],True)
         self.assertIsNone(status["held_task_id"])
         self.assertEqual(len(manager_client.frames(0)),1)
+        self.stop(worker_process)
+        for flags in ([],["--adapter-session","unplanned-session"]):
+            refusal = subprocess.run([*CLI,"worker","--db",self.root/"worker.db","--identities",worker_roles,
+                "--cert",cert,"--key",key,*worker_flags,*flags],cwd=ROOT,capture_output=True,text=True,timeout=10)
+            self.assertEqual((refusal.returncode,refusal.stdout,json.loads(refusal.stderr)),
+                             (1,"",{"error":"native_binding_change_requires_handoff"}))
+        _,reopened = self.start(worker_roles,cert,key,"worker",[*worker_flags,"--adapter-session",session])
+        self.assertEqual(Client(reopened,platform,cert).request("POST","worker/chat",msg),first)
+        self.assertEqual(len(native.entries()),2)
 
     @unittest.skipUnless(shutil.which("openssl"), "TLS fixture certificate generator unavailable")
     def test_pinned_worker_rejects_same_authenticated_adapter_when_session_differs(self):

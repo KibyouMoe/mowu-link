@@ -15,6 +15,9 @@ class Host(Protocol):
 class HostAdapter:
     def __init__(self, path, host: Host, session, media_store=None):
         self.db = Database(path, """
+            CREATE TABLE IF NOT EXISTS adapter_native_binding (
+                slot INTEGER PRIMARY KEY CHECK(slot=1), session TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS intents (
                 delivery_id TEXT PRIMARY KEY, session TEXT NOT NULL, payload TEXT NOT NULL, digest TEXT NOT NULL,
                 receipt TEXT, native_id TEXT, UNIQUE(session,native_id)
@@ -24,6 +27,13 @@ class HostAdapter:
                 PRIMARY KEY(session,turn,qid)
             );
         """)
+        with self.db.transaction() as db:
+            stored = db.execute("SELECT session FROM adapter_native_binding WHERE slot=1").fetchone()
+            require(not stored or stored[0]==session,409,"adapter_ledger_bound_to_another_session")
+            if not stored:
+                require(not db.execute("SELECT 1 FROM intents WHERE session<>? LIMIT 1",(session,)).fetchone(),
+                        409,"adapter_ledger_bound_to_another_session")
+                db.execute("INSERT INTO adapter_native_binding VALUES (1,?)",(session,))
         self.host, self.session = host, session
         self.media_store = media_store
 

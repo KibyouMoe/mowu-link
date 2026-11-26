@@ -32,10 +32,26 @@ WORKER_NATIVE_PENDING = {
     "trainer_questions": ({"trainer_questions"},"SELECT COUNT(*) FROM trainer_questions WHERE proof IS NULL"),
     "compactions": ({"platform_compactions"},"SELECT COUNT(*) FROM platform_compactions WHERE native_receipt IS NULL"),
     "cleanup_reports": ({"cleanup_reports"},"SELECT COUNT(*) FROM cleanup_reports WHERE receipt IS NULL"),
+    "manager_questions": ({"questions"},"SELECT COUNT(*) FROM questions WHERE answer IS NULL"),
+    "native_command_writes": ({"platform_model_intents","platform_commands"},"""SELECT COUNT(*)
+        FROM platform_model_intents i LEFT JOIN platform_commands c USING(message_id) WHERE c.message_id IS NULL"""),
+    "outbound_peers": ({"peers","peer_retry"},"""SELECT COUNT(*) FROM peers p LEFT JOIN peer_retry r
+        ON r.operation_id=p.message_id AND r.phase='send_rejected'
+        WHERE p.direction='out' AND p.receipt IS NULL AND r.operation_id IS NULL"""),
 }
 AGENT_NATIVE_PENDING = {
     "adapter_deliveries": ({"intents"},"SELECT COUNT(*) FROM intents WHERE receipt IS NULL"),
     "adapter_questions": ({"question_resolutions"},"SELECT COUNT(*) FROM question_resolutions WHERE proof IS NULL"),
+}
+OPTIONAL_AGENT_PENDING = {
+    "dsh_public_events": ({"dsh_public_outbox"},"SELECT COUNT(*) FROM dsh_public_outbox WHERE ack IS NULL"),
+    "dsh_approval_closures": ({"dsh_approvals"},"SELECT COUNT(*) FROM dsh_approvals WHERE closure IS NULL"),
+    "codex_public_events": ({"codex_display_live"},"SELECT COUNT(*) FROM codex_display_live WHERE sent=0"),
+    "codex_public_turns": ({"codex_display_turns"},"SELECT COUNT(*) FROM codex_display_turns WHERE sent=0"),
+}
+FEISHU_NATIVE_PENDING = {
+    "platform_inputs": ({"platform_events"},"SELECT COUNT(*) FROM platform_events WHERE state='pending'"),
+    "platform_answers": ({"card_answers"},"SELECT COUNT(*) FROM card_answers WHERE state='pending'"),
 }
 
 
@@ -149,16 +165,20 @@ def verify(snapshot,expected):
     return manifest
 
 
+def restore_files(snapshot,expected,manifest,stage):
+    for label,entry in manifest["files"].items():
+        name = filename(label)
+        copy_private(snapshot/name,stage/name)
+        if digest(stage/name) != entry["sha256"]:
+            raise ValueError("restored bytes do not match: "+label)
+    if verify(snapshot,expected) != manifest:
+        raise ValueError("snapshot changed during restore")
+
+
 def restore(snapshot,expected,destination):
     manifest = verify(snapshot,expected)
     with output_directory(destination) as stage:
-        for label,entry in manifest["files"].items():
-            name = filename(label)
-            copy_private(snapshot/name,stage/name)
-            if digest(stage/name) != entry["sha256"]:
-                raise ValueError("restored bytes do not match: "+label)
-        if verify(snapshot,expected) != manifest:
-            raise ValueError("snapshot changed during restore")
+        restore_files(snapshot,expected,manifest,stage)
     return {label:str(destination/filename(label)) for label in manifest["files"]}
 
 
@@ -180,6 +200,11 @@ def audit_handoff(snapshot,expected):
                                     AND assignment_id IS NOT NULL GROUP BY assignee_id"""))
         cleanup = [dict(row) for row in db.execute("""SELECT worker_id,task_id,assignment_id,kind FROM cleanups
                                                     WHERE done=0 ORDER BY worker_id,assignment_id""")]
+        frames = dict(db.execute("""SELECT consumer,COUNT(*) FROM deliveries
+            WHERE ack=0 AND kind<>'worker.status_query' GROUP BY consumer"""))
+        has_questions = db.execute("SELECT 1 FROM sqlite_schema WHERE name='questions' AND type='table'").fetchone()
+        questions = dict(db.execute("""SELECT asked_by,COUNT(*) FROM questions
+            WHERE answer IS NULL GROUP BY asked_by""")) if has_questions else None
         has_approvals = db.execute("SELECT 1 FROM sqlite_schema WHERE name='native_approvals' AND type='table'").fetchone()
         open_approvals = dict(db.execute("""SELECT worker_id,COUNT(*) FROM native_approvals WHERE closed_at IS NULL
                                          GROUP BY worker_id""")) if has_approvals else None
@@ -212,14 +237,18 @@ def audit_handoff(snapshot,expected):
             problems.append("adapter_receipt_unconfirmed")
         with closing(readonly(snapshot/filename("agent:"+wid))) as db:
             session_pending.update(pending_counts(db,AGENT_NATIVE_PENDING))
-            if db.execute("SELECT 1 FROM sqlite_schema WHERE name='dsh_approvals' AND type='table'").fetchone():
-                session_pending["dsh_approval_closures"] = db.execute(
-                    "SELECT COUNT(*) FROM dsh_approvals WHERE closure IS NULL").fetchone()[0]
+            session_pending.update({k:v for k,v in pending_counts(db,OPTIONAL_AGENT_PENDING).items() if v is not None})
+        if "feishu:"+wid in labels:
+            with closing(readonly(snapshot/filename("feishu:"+wid))) as db:
+                session_pending.update(pending_counts(db,FEISHU_NATIVE_PENDING))
         session_pending["report_receipts"] = pending
         session_pending["held_assignments"] = int(bool(local or remote))
         session_pending["router_reserved_assignments"] = reserved.get(wid,0)
         session_pending["router_cleanup"] = sum(row["worker_id"]==wid for row in cleanup)
         session_pending["router_approvals"] = open_approvals.get(wid,0) if open_approvals is not None else None
+        session_pending["router_waiting_deliveries"] = frames.get("worker/"+wid,0)
+        session_pending["router_waiting_questions"] = questions.get(wid,0) if questions is not None else None
+        session_pending["router_registration_unconfirmed"] = int(wid not in sessions)
         workers.append({"worker_id":wid,"worker_assignment":local_ids,"router_assignment":remote_ids,
                         "unconfirmed_reports":pending,"issues":problems,"native_session_pending":session_pending,
                         "native_session_ledger_clear":not problems and all(count==0 for count in session_pending.values())})
@@ -252,6 +281,42 @@ def adapter_has_input(snapshot,wid,job,session):
             and payload.get("assignment_id")==job["assignment_id"])
 
 
+def stage_native_handoff(snapshot,expected,worker_id,source_session,target_session,destination):
+    worker_label,adapter_label = "worker:"+worker_id,"agent:"+worker_id
+    component(worker_label)
+    if source_session==target_session or not all(
+            re.fullmatch(r"[A-Za-z0-9_.:-]{1,200}",session) for session in (source_session,target_session)):
+        raise ValueError("expected two distinct native session identifiers")
+    manifest = verify(snapshot,expected)
+    if worker_label not in manifest["files"]:
+        raise ValueError("worker absent from snapshot")
+    audit = audit_handoff(snapshot,expected)
+    worker, = (row for row in audit["workers"] if row["worker_id"]==worker_id)
+    if not worker["native_session_ledger_clear"]:
+        pending = [key for key,count in worker["native_session_pending"].items() if count!=0]
+        raise ValueError("native handoff still pending: "+", ".join(pending+worker["issues"]))
+    for label,table in ((worker_label,"native_binding"),(adapter_label,"adapter_native_binding")):
+        with closing(readonly(snapshot/filename(label))) as db:
+            exists = db.execute("SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?",(table,)).fetchone()
+            pin = db.execute(f"SELECT session FROM {table} WHERE slot=1").fetchone() if exists else None
+            if not pin or pin[0]!=source_session:
+                raise ValueError("original native binding unconfirmed: "+label)
+    with output_directory(destination) as stage:
+        restore_files(snapshot,expected,manifest,stage)
+        worker_db = stage/filename(worker_label)
+        with closing(sqlite3.connect(worker_db,timeout=0)) as db, db:
+            updated = db.execute("UPDATE native_binding SET session=? WHERE slot=1 AND session=?",
+                                 (target_session,source_session)).rowcount
+            if updated!=1:
+                raise ValueError("original native binding changed")
+        result = {"snapshot_id":manifest["snapshot_id"],"worker_id":worker_id,"previous_session":source_session,
+                  "expected_session":target_session,"worker_db":str(destination/worker_db.name),
+                  "previous_adapter_db":str(destination/filename(adapter_label)),
+                  "target_adapter_db":str(destination/("target-"+filename(adapter_label)))}
+        (stage/"native-handoff.json").write_text(encode(result),encoding="utf-8")
+    return result
+
+
 def rollback(snapshot,expected,trial,destination):
     manifest = verify(snapshot,expected)
     if set(trial) != set(manifest["files"]):
@@ -270,13 +335,16 @@ def main():
     backup.add_argument("--sources",type=Path,required=True,help="role:instance to absolute database path, JSON")
     backup.add_argument("--revision",required=True)
     backup.add_argument("--destination",type=Path,required=True)
-    for op in ("verify","restore","rollback","audit-handoff"):
+    for op in ("verify","restore","rollback","audit-handoff","stage-native-handoff"):
         p = ops.add_parser(op)
         p.add_argument("--snapshot",type=Path,required=True)
         p.add_argument("--manifest-sha256",required=True)
         if op=="rollback":
             p.add_argument("--trial-sources",type=Path,required=True)
-        if op in ("restore","rollback"):
+        if op=="stage-native-handoff":
+            for field in ("worker-id","source-session","target-session"):
+                p.add_argument("--"+field,required=True)
+        if op in ("restore","rollback","stage-native-handoff"):
             p.add_argument("--destination",type=Path,required=True)
     args = parser.parse_args()
     if args.op=="capture":
@@ -286,6 +354,9 @@ def main():
         result = {"snapshot_id":manifest["snapshot_id"],"components":len(manifest["files"])}
     elif args.op=="audit-handoff":
         result = audit_handoff(args.snapshot,args.manifest_sha256)
+    elif args.op=="stage-native-handoff":
+        result = stage_native_handoff(args.snapshot,args.manifest_sha256,args.worker_id,
+                                      args.source_session,args.target_session,args.destination)
     elif args.op=="rollback":
         result = rollback(args.snapshot,args.manifest_sha256,json.loads(args.trial_sources.read_text()),args.destination)
     else:

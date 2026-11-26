@@ -1,6 +1,6 @@
 """Run Desktop's bundled native App Server against a scripted loopback model."""
 import base64
-from contextlib import closing, contextmanager
+from contextlib import ExitStack, closing, contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import hashlib
 import json
@@ -21,17 +21,20 @@ from .codex_app_server import AppServerHost, worker_callbacks
 from .codex_display import CodexDisplay
 from .codex_provision import SEED
 from .codex_rpc import NativeRpcRejected, start_app_server
-from .devloop import Loop
+from .devloop import FixtureHost, Loop
 from .feishu_inbound import Inbound
 from .feishu_output import Views
-from .host_wire import RemoteAdapter
+from .hermes import HermesAdapter
+from .host_wire import RemoteAdapter, serve_adapter
 from .native_files import NativeFiles
 from .orders import Orders
 from .question_cards import Actions
+from .state_bundle import capture, filename, verify
 from .storage import Fault, encode, guid
 from .test_feishu_output import PlatformFixture
 from .test_feishu_inbound import PNG
 from .test_mainline import Clock
+from .trigger import Trigger
 from . import test_service
 from .wire import Client, serve_loopback
 from .worker import Worker
@@ -710,6 +713,153 @@ class CodexAppServer(unittest.TestCase):
                          "parent_input_count":1,"child_input_count_including_parent_history":2,
                          "new_model_requests":1,
                          "boundary":"Actual Codex App Server fork, manual isolated adapter selection, scripted local model"}
+
+    def test_cold_switch_and_return_preserve_receipts_and_use_the_target_native_session(self):
+        root = Path(self.root)
+        state = root/"source-state"
+        state.mkdir()
+        labels = ("router:main","worker:oguri","agent:oguri","hermes:main","trigger:source")
+        original_paths = {label:state/filename(label) for label in labels}
+        revision = "a"*40
+        clock = Clock()
+        manager_host = FixtureHost(root/"manager-inputs.db","manager-test-session")
+        old_message = {"message_id":guid(),"text":"Original isolated session"}
+        new_message = {"message_id":guid(),"text":"New isolated session"}
+
+        @contextmanager
+        def station(paths,rpc,thread):
+            sid = thread["id"]
+            orders = Orders(paths["router:main"],clock,1)
+            Trigger(paths["trigger:source"],"fixture")
+            host = AppServerHost(rpc,sid)
+            host.bind_fork_history(paths["agent:oguri"],thread)
+            adapter = HostAdapter(paths["agent:oguri"],host,sid)
+            adapter_token,worker_token,manager_token,platform_token,callback = (guid() for _ in range(5))
+            with ExitStack() as resources:
+                router_url = resources.enter_context(running(serve_loopback(orders,
+                    {worker_token:"worker/oguri",manager_token:"hermes"})))
+                adapter_url = resources.enter_context(running(serve_adapter(adapter,"oguri",
+                    {adapter_token:"worker/oguri"},("127.0.0.1",0),None)))
+                owner = Client(router_url,worker_token)
+                port = RemoteAdapter(Client(adapter_url,adapter_token),sid)
+                worker = Worker(paths["worker:oguri"],"oguri",owner,port,clock=clock)
+                service = WorkerService(worker,clock)
+                service.step()
+                self.assertEqual(service.status()["host_session"],sid)
+                worker_url = resources.enter_context(running(service.listen(
+                    {platform_token:"platform/oguri",callback:"adapter/oguri"},("127.0.0.1",0),None)))
+                manager = HermesAdapter(paths["hermes:main"],Client(router_url,manager_token),
+                                        HostAdapter(root/"manager-host.db",manager_host,manager_host.session),clock)
+                completed = Event()
+                resources.enter_context(worker_callbacks(host,Client(worker_url,callback),completed.set))
+                yield worker,manager,host,Client(worker_url,platform_token),completed
+
+        def inputs(host):
+            return [(turn["id"],item["id"],item["clientId"]) for turn in host.thread(host.thread_id,include_turns=True)["turns"]
+                    for item in turn["items"] if item["type"]=="userMessage"]
+
+        def chat(platform,msg):
+            return platform.request("POST","worker/chat",msg)["receipt"]
+
+        def handoff(snapshot,fingerprint,source,target,destination):
+            result = subprocess.run([sys.executable,"-B","-m","rewrite.state_bundle","stage-native-handoff",
+                "--snapshot",snapshot,"--manifest-sha256",fingerprint,"--worker-id","oguri",
+                "--source-session",source,"--target-session",target,"--destination",destination],
+                cwd=Path(__file__).resolve().parent.parent,capture_output=True,text=True,check=True,timeout=12)
+            return json.loads(result.stdout)
+
+        with isolated_app_server(root,self.origin) as rpc:
+            parent = rpc.request("thread/start",{"cwd":str(root),"ephemeral":False,"dynamicTools":[REPORT_TOOL]})["thread"]
+            with station(original_paths,rpc,parent) as (worker,_manager,host,platform,finished):
+                chat(platform,old_message)
+                self.assertTrue(finished.wait(12))
+                old = chat(platform,old_message)
+                original_inputs = inputs(host)
+                connection_id = worker.session
+                self.assertEqual(original_inputs,
+                                 [(old["turn_id"],old["native_id"],"mowulink-chat-"+old_message["message_id"])])
+            child = rpc.request("thread/fork",{"threadId":parent["id"],"cwd":str(root),"ephemeral":False})["thread"]
+        source,target = parent["id"],child["id"]
+        snapshot = root/"source-snapshot"
+        fingerprint = capture(original_paths,revision,snapshot)["manifest_sha256"]
+        staged = root/"trial"
+        plan = handoff(snapshot,fingerprint,source,target,staged)
+        self.assertEqual(json.loads((staged/"native-handoff.json").read_text()),plan)
+        self.assertEqual(plan["expected_session"],target)
+        trial_paths = {label:staged/filename(label) for label in labels}
+        trial_paths["agent:oguri"] = Path(plan["target_adapter_db"])
+        incorrect = RemoteAdapter(Client("http://127.0.0.1:1","unused"),source)
+        with self.assertRaisesRegex(Fault,"native_binding_change_requires_handoff"):
+            Worker(trial_paths["worker:oguri"],"oguri",None,incorrect)
+        self.assertFalse(trial_paths["agent:oguri"].exists())
+
+        with isolated_app_server(root,self.origin) as rpc:
+            resumed = rpc.request("thread/resume",{"threadId":target,"cwd":str(root)})["thread"]
+            self.assertEqual(resumed["forkedFromId"],source)
+            with station(trial_paths,rpc,resumed) as (worker,manager,host,platform,finished):
+                with self.assertRaisesRegex(Fault,"adapter_ledger_bound_to_another_session"):
+                    HostAdapter(Path(plan["previous_adapter_db"]),host,target)
+                self.assertEqual(worker.session,connection_id)
+                self.assertEqual(chat(platform,old_message),old)
+                self.assertEqual(inputs(host),original_inputs)
+                chat(platform,new_message)
+                self.assertTrue(finished.wait(12))
+                new = chat(platform,new_message)
+                self.assertEqual(new["session"],target)
+                finished.clear()
+                task_id = manager.create(guid(),"Clean handoff","Report from the child test session","oguri")["task_id"]
+                worker.poll()
+                clock.advance(10)
+                worker.poll()
+                deadline = time.monotonic()+12
+                while not finished.wait(.02) and time.monotonic()<deadline:
+                    worker.poll()
+                self.assertTrue(finished.is_set())
+                worker.poll()
+                order = manager.inspect(task_id)
+                task_turn = host.thread(target,include_turns=True)["turns"][-1]
+                self.assertEqual(order["task"]["state"],"completed_reported",task_turn["items"])
+                self.assertIsNone(worker.hold()["held_assignment_id"])
+                records, = manager.router.frames(0)
+                self.assertEqual(records["payload"]["task_id"],task_id)
+                child_inputs = inputs(host)
+                self.assertEqual(len(child_inputs),3)
+                native_calls = [item for item in task_turn["items"] if item["type"]=="dynamicToolCall"]
+                self.assertEqual(len(native_calls),2)
+                self.assertTrue(all(call["success"] for call in native_calls),native_calls)
+                expected = {"recorded":True,"task_state":"completed_reported",
+                            "release_assignment_id":order["last_report"]["assignment_id"]}
+                self.assertEqual([json.loads(call["contentItems"][0]["text"]) for call in native_calls],[expected]*2)
+                self.assertEqual(order["last_report"]["summary"],"Isolated App Server result")
+                self.assertEqual(child_inputs[1],(new["turn_id"],new["native_id"],"mowulink-chat-"+new_message["message_id"]))
+        trial_snapshot = root/"trial-snapshot"
+        trial_fingerprint = capture(trial_paths,revision,trial_snapshot)["manifest_sha256"]
+        back = root/"return"
+        handoff(trial_snapshot,trial_fingerprint,target,source,back)
+        return_paths = {label:back/filename(label) for label in labels}
+        return_paths["agent:oguri"] = Path(plan["previous_adapter_db"])
+        before_return = len(self.provider.observed)
+        with isolated_app_server(root,self.origin) as rpc:
+            resumed = rpc.request("thread/resume",{"threadId":source,"cwd":str(root)})["thread"]
+            with station(return_paths,rpc,resumed) as (worker,manager,host,platform,_):
+                self.assertEqual(worker.session,connection_id)
+                self.assertEqual(chat(platform,old_message),old)
+                self.assertEqual(chat(platform,new_message),new)
+                self.assertEqual(inputs(host),original_inputs)
+                result = manager.inspect(task_id)
+                self.assertEqual(result["last_report"],order["last_report"])
+                self.assertEqual(manager.router.frames(0),[records])
+        extra_model_requests = len(self.provider.observed)-before_return
+        self.assertEqual(extra_model_requests,0)
+        verify(snapshot,fingerprint)
+        verify(trial_snapshot,trial_fingerprint)
+        self.evidence = {"source_session":source,"target_session":target,"original_inputs":original_inputs,
+            "target_inputs_including_fork_history":child_inputs,"original_receipt":old,"target_receipt":new,
+            "task_id":task_id,"assignment_id":order["last_report"]["assignment_id"],
+            "native_tool_calls":[call["id"] for call in native_calls],"native_tool_receipt":expected,
+            "notification_id":records["delivery_id"],"report_state":result["task"]["state"],
+            "return_preserved_both_receipts":True,"model_requests_added_on_return":extra_model_requests,
+            "boundary":"Independent real App Server threads, isolated Router and Worker, local scripted model and platform"}
 
     def test_native_command_approval_cancels_exact_request_and_does_not_infer_missing_proof(self):
         self.provider.approval_commands = {"one":"pwd","two":"pwd","expire":"pwd"}

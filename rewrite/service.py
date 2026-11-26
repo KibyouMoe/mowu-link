@@ -248,6 +248,8 @@ def main():
             server(args)
         except StateWriterBusy as exc:
             parser.exit(1,str(exc)+"\n")
+        except Fault as exc:
+            parser.exit(1,encode({"error":exc.code})+"\n")
 
 
 if __name__ == "__main__":

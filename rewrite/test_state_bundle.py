@@ -11,7 +11,7 @@ from .feishu_inbound import Inbound
 from .feishu_output import Views
 from .hermes import HermesAdapter
 from .orders import Orders
-from .state_bundle import audit_handoff, capture, filename, restore, rollback, validate_set, verify
+from .state_bundle import audit_handoff, capture, filename, restore, rollback, stage_native_handoff, validate_set, verify
 from .storage import StateWriterBusy, encode, guid, state_writer
 from .test_feishu_output import PlatformFixture
 from .test_mainline import Clock
@@ -226,6 +226,32 @@ class Bundle(unittest.TestCase):
         self.assertEqual(seen["issues"],[{"worker_id":"oguri","issue":"adapter_receipt_unconfirmed"}])
         self.assertEqual(seen["workers"][0]["worker_assignment"],seen["workers"][0]["router_assignment"])
 
+    def test_handoff_checks_the_router_and_platform_before_writing_a_copy(self):
+        with self.stack(self.sources) as (manager,worker,_source,_mail,platform,_views):
+            worker.adapter.expected_session = self.native.session
+            pinned = Worker(worker.db.path,worker.worker_id,worker.router,worker.adapter)
+            service = WorkerService(pinned,self.clock)
+            service.step()
+            self.assertEqual(service.host_session,self.native.session)
+            receiver_id = "om_pending_for_old_session"
+            platform.record("app","user","trainer",{"chat_type":"p2p","chat_id":"chat","message_id":receiver_id,
+                "message_type":"text","content":encode({"text":"Awaiting original delivery"})})
+            pinned.poll()
+            self.clock.advance(10)
+            manager.create(guid(),"Await original Worker","Stay on the original side","oguri")
+            manager.tasks()
+        checksum = capture(self.sources,self.revision,self.snapshot)["manifest_sha256"]
+        before = audit_handoff(self.snapshot,checksum)
+        worker, = before["workers"]
+        self.assertEqual(worker["native_session_pending"]["platform_inputs"],1)
+        self.assertEqual(worker["native_session_pending"]["router_reserved_assignments"],1)
+        self.assertEqual(worker["native_session_pending"]["router_waiting_deliveries"],1)
+        with self.assertRaisesRegex(ValueError,"native handoff still pending"):
+            stage_native_handoff(self.snapshot,checksum,"oguri",self.native.session,"next",self.dest)
+        self.assertFalse(self.dest.exists())
+        self.assertEqual(audit_handoff(self.snapshot,checksum),before)
+        self.assertEqual(self.native.entries(),[])
+
     def test_native_session_audit_keeps_unknown_private_and_queued_inputs_for_the_original_host(self):
         self.native.next_turn = True
         self.native.is_busy = True
@@ -256,6 +282,9 @@ class Bundle(unittest.TestCase):
         self.assertNotIn(private_text,encode(seen))
         self.assertNotIn(queue_text,encode(seen))
         self.assertEqual(audit_handoff(self.snapshot,checksum),seen)
+        with self.assertRaisesRegex(ValueError,"private_chat"):
+            stage_native_handoff(self.snapshot,checksum,"oguri",self.native.session,"next",self.dest)
+        self.assertFalse(self.dest.exists())
 
         restored = restore(self.snapshot,checksum,self.dest)
         self.native.is_busy = False

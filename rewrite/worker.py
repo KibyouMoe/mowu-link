@@ -11,6 +11,9 @@ from .storage import Database, Fault, encode, guid, require, string
 FOLLOWUP_FRAMES = {"task.updated","task.probe","task.shelved","task.cancel","task.transfer_out","question.resolved"}
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS native_binding(
+    slot INTEGER PRIMARY KEY CHECK(slot=1), session TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS connection (slot INTEGER PRIMARY KEY CHECK(slot=1), session TEXT, seq INTEGER, cursor INTEGER);
 CREATE TABLE IF NOT EXISTS inbox (delivery_id TEXT PRIMARY KEY, frame TEXT NOT NULL, done INTEGER DEFAULT 0);
 CREATE TABLE IF NOT EXISTS jobs (
@@ -64,9 +67,21 @@ class Worker:
         self.clock = clock
         self.worker_id, self.router, self.adapter = worker_id, router, adapter
         self.lock = RLock()
+        self.native_session_pin = getattr(adapter,"expected_session",None)
         with self.db.transaction() as db:
+            current = db.execute("SELECT session FROM native_binding WHERE slot=1").fetchone()
+            require(not current or current[0]==self.native_session_pin,409,"native_binding_change_requires_handoff")
             db.execute("INSERT OR IGNORE INTO connection VALUES (1,?,0,0)", (guid(),))
             self.session = db.execute("SELECT session FROM connection").fetchone()[0]
+
+    def observe_native_binding(self,session):
+        if self.native_session_pin is None:
+            return
+        require(session==self.native_session_pin,409,"wrong_native_session")
+        with self.db.transaction() as db:
+            db.execute("INSERT OR IGNORE INTO native_binding VALUES (1,?)",(session,))
+            stored = db.execute("SELECT session FROM native_binding WHERE slot=1").fetchone()[0]
+            require(stored==session,409,"native_binding_change_requires_handoff")
 
     def hold(self):
         with self.db.transaction() as db:

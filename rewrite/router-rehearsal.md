@@ -138,3 +138,22 @@ python3 -m rewrite.codex_release_check --repository . --codex-binary "$CODEX_BIN
 命令从两个指定提交分别构建和校验发布包，使用同一个临时 Codex profile、独立会话、测试模型与回环 TLS。旧包先完成私聊和一次正式派发，Agent 经原生工具提交 W04，Router 持成果待验，Worker 释放派发。试运行副本模拟 Worker 丢失私聊回执。先用新适配器配旧 Worker，再用新版两端，最后回退到旧包及原状态副本。每次按原号重投并用独立 App Server 读回同一会话。
 
 连续三轮的初始、混合、新版和回退都保留初始化、私聊、派发三条输入。首次 W04 产生两个原生工具调用和一条 Router 通知，后续没有新增原生回合、模型请求或成果通知。新 Worker 可以补记同一原收件，旧快照摘要保留，两个包重新校验通过。[升级与回退记录](evidence/codex-native-release-cycle.json)。实际使用 App Server 与完整发布包，模型为本地脚本，试运行有新增业务时仍走前述对账。
+
+### 隔离工位冷换原生会话
+
+确认原宿主无待处理原生回合，目标会话属于已授权的独立工位。按上一节在隔离环境停写并关闭进程、保存原生历史，采集完整快照。工位有飞书接入时，把同名的 `feishu:<Worker ID>` 库放入快照。原 Worker 必须已用 `--adapter-session` 收到原宿主的有效忙闲回包，原适配器库须登记同一会话。
+
+```sh
+python3 -B -m rewrite.state_bundle stage-native-handoff \
+  --snapshot "$SNAPSHOT" --manifest-sha256 "$MANIFEST_SHA256" \
+  --worker-id "$WORKER_ID" --source-session "$ORIGINAL_SESSION" \
+  --target-session "$TARGET_SESSION" --destination "$TRIAL_DIRECTORY"
+```
+
+有持单、预约派发、待收业务帧、待答题、待确认的原生收件或审批时，工具返回对应待办类型，交接目录不会生成。活动宿主为空闲须从宿主侧核实。快照、原工位历史与关联附件按原备份流程保留。
+
+通过后从新目录启动隔离 Router 和 Worker。Worker 使用 `worker_db` 和 `expected_session`，目标适配器使用 `target_adapter_db` 和同一个会话。先回读 `worker-status`，确认工位和目标会话后再放开测试输入。`previous_adapter_db` 是原会话账本，可供切回使用。首次绑定的新目标有独立账本，复制到分叉会话的旧输入仍算父会话历史。
+
+已有试用消息或成果时，先停止试用端并用**试用后的当前库**重新采集快照，再以上次目标为来源、原会话为目标重复换绑。源组件清单里的 `agent:<Worker ID>` 使用试用适配器库；切回启动适配器使用之前保留的原会话账本。这样保留试用期间的新工单、成果和两端收据。旧版恢复到试验前数据仍受快照摘要检查。
+
+复跑 `python3 -B -m unittest -v rewrite.test_state_bundle rewrite.test_codex_app_server.CodexAppServer.test_cold_switch_and_return_preserve_receipts_and_use_the_target_native_session`。原生用例运行独立 Codex App Server，实际工作单经 W04 待验，模型与平台采用夹具。飞书 `/resume` 保持目录查询；日用会话的运行中换绑另验。
