@@ -1,0 +1,103 @@
+{
+  "cases": [
+    {
+      "execute_workspace_files": false,
+      "session": "dsh-compiled-project-default",
+      "task_id": "dfa50a18-8a32-4676-95eb-629b26d278f3",
+      "assignment_id": "1f4918ff-585c-4192-b263-21cce67444e5",
+      "container_id": "026e93bd3c46584aebf225157efe0a88852fcae57e422dd05d315468be872387",
+      "source_revision": "354320fadbb87a368e8563bc7c5f06a92c6d5821",
+      "source_digest": "bd49405557721cba024c590584cb0df1f84d2d6b06b6ac48519eff2edf4d31cf",
+      "configured_tmpfs": {
+        "/tmp": "rw,nosuid,nodev,size=16m,mode=1777",
+        "/workspace": "rw,nosuid,nodev,size=64m,mode=1777"
+      },
+      "actual_mount_options": {
+        "/workspace": "rw,nosuid,nodev,noexec,relatime",
+        "/tmp": "rw,nosuid,nodev,noexec,relatime"
+      },
+      "build": {
+        "exit_code": 126,
+        "stdout": "/workspace rw,nosuid,nodev,noexec,relatime\n/tmp rw,nosuid,nodev,noexec,relatime\n",
+        "stderr": "/bin/sh: 7: /workspace/build/hello: Permission denied\n"
+      },
+      "w04": {
+        "recorded": true,
+        "release_assignment_id": "1f4918ff-585c-4192-b263-21cce67444e5",
+        "task_state": "blocked"
+      },
+      "artifact_ids": [],
+      "binary_sha256": "f5ceb23cfb282d30e6a8979ff6a57e66f7e62f9e3a84830b0c0fcd597fa95f08",
+      "notify": "7f37fe58-3914-4a72-a3ec-dfe5ff8bf96a",
+      "container_removed": true
+    },
+    {
+      "execute_workspace_files": true,
+      "session": "dsh-compiled-project-enabled",
+      "task_id": "0aeb4e41-ea33-4d1f-9c86-a5a35b3f835f",
+      "assignment_id": "f9f2b410-7351-45b6-bf0e-808758f91180",
+      "container_id": "523f925080df1f0599a85ee2389f563dce7ae7322e34b409cd04ba11b01bafef",
+      "source_revision": "ea46087e6443b3633849dbbbd8c7989d7e6a5abd",
+      "source_digest": "9c0421521494628aee6c7af2256dacff39c7bbc75f7d209cc3258606655a89cf",
+      "configured_tmpfs": {
+        "/tmp": "rw,nosuid,nodev,size=16m,mode=1777",
+        "/workspace": "rw,nosuid,nodev,exec,size=64m,mode=1777"
+      },
+      "actual_mount_options": {
+        "/tmp": "rw,nosuid,nodev,noexec,relatime",
+        "/workspace": "rw,nosuid,nodev,relatime"
+      },
+      "build": {
+        "exit_code": 0,
+        "stdout": "/tmp rw,nosuid,nodev,noexec,relatime\n/workspace rw,nosuid,nodev,relatime\nverified assignment build\n",
+        "stderr": ""
+      },
+      "w04": {
+        "recorded": true,
+        "release_assignment_id": "f9f2b410-7351-45b6-bf0e-808758f91180",
+        "task_state": "completed_reported"
+      },
+      "artifact_ids": [
+        "8a60e32d-7291-40d3-a43c-a3126fdf108b"
+      ],
+      "binary_sha256": "f5ceb23cfb282d30e6a8979ff6a57e66f7e62f9e3a84830b0c0fcd597fa95f08",
+      "notify": "dcb10297-e734-48d4-ab74-0547e9aa603f",
+      "container_removed": true
+    }
+  ],
+  "scope": "Actual DSH AgentLoop, Linux Docker compiler, Worker and isolated Router with scripted model.",
+  "policy_changes": [
+    {
+      "session": "dsh-execution-policy-enable",
+      "task_id": "8214f313-4951-401c-afdf-bf87c6c837db",
+      "assignment_id": "722284cc-949d-4d22-b15c-36d1bd8fc71b",
+      "container_id": "9fabff3cd9c455d4e336aab81a36f1c15b9ac70be24568a6f87cf9e7cc71cb63",
+      "recorded_execution": false,
+      "proposed_execution": true,
+      "refusal": "workspace_execution_policy_changed",
+      "stage_only_artifact": "1d38514c-53b2-4fcc-b223-a29084ef5222",
+      "cleanup_outcome": "cancel_confirmed",
+      "native_inputs": [
+        "mowulink-6ea355736dabf7a14aeabd083c25a97d1f2d337d82e56b9042d467f75774dfc2",
+        "mowulink-7c92b236e09b9ed2db72b9fcda99e2cb19de86fc5cd1d6a49ea0856d2f4e2109",
+        "mowulink-1cbd5bcacfec31e6f6649092d9af863032944c64f9761c3f5b3bfb5f18fb7fc2"
+      ]
+    },
+    {
+      "session": "dsh-execution-policy-disable",
+      "task_id": "194b1c41-82c1-41d0-882a-c4c326338738",
+      "assignment_id": "81e2e745-80ef-4dc5-8941-5782e55f63fb",
+      "container_id": "52bad9d8fbc5af5c542376fb8d10e67d38a80acbbccf639a23f83c98b190ccc8",
+      "recorded_execution": true,
+      "proposed_execution": false,
+      "refusal": "workspace_execution_policy_changed",
+      "stage_only_artifact": "56f6c984-09d9-4238-84a8-f4cfef3111ff",
+      "cleanup_outcome": "cancel_confirmed",
+      "native_inputs": [
+        "mowulink-f2a62a54cbc1d6719bbba575d0e3751942309f0a52f30d716452495dd44a558b",
+        "mowulink-662bbaa167ef0d422311e9e7e02d54df826ae56783a82cbfad9e8e3973d9a54e",
+        "mowulink-43aa6537a26ef0a177c08e0a3561b48a6c3d434f08f9a36467dfb88261925103"
+      ]
+    }
+  ]
+}

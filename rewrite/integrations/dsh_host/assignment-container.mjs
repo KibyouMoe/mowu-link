@@ -9,7 +9,15 @@ import {maximumSeedBytes, seedProject, workspaceSeed} from './workspace-seed.mjs
 
 const exec = promisify(execFile);
 const LABEL = 'io.mowulink.assignment';
+const PROCESS_LIMIT = 64;
+const MEMORY_LIMIT = 256 * 1024 * 1024;
+const NANO_CPU_LIMIT = 1_000_000_000;
 const TMPFS = {'/workspace':'rw,nosuid,nodev,size=64m,mode=1777','/tmp':'rw,nosuid,nodev,size=16m,mode=1777'};
+const EXECUTABLE_TMPFS = {...TMPFS,'/workspace':'rw,nosuid,nodev,exec,size=64m,mode=1777'};
+
+function mountOptions(record) {
+  return record.workspace_exec===true ? EXECUTABLE_TMPFS : TMPFS;
+}
 const containerID = value => /^[a-f0-9]{64}$/.test(value);
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 
@@ -84,10 +92,11 @@ function writeRecord(filename,value) {
 }
 
 export function assignmentContainers(runtime,session,config) {
-  const {docker,socket,image} = config;
+  const {docker,socket,image,execute_workspace_files=false} = config;
   check(typeof docker==='string' && path.isAbsolute(docker)
     && typeof socket==='string' && path.isAbsolute(socket) && lstatSync(socket).isSocket()
-    && typeof image==='string' && /^sha256:[a-f0-9]{64}$/.test(image),'invalid_assignment_container');
+    && typeof image==='string' && /^sha256:[a-f0-9]{64}$/.test(image)
+    && typeof execute_workspace_files==='boolean','invalid_assignment_container');
   const seed = workspaceSeed(config.seed);
   const directory = path.join(runtime,'assignment-containers');
   const cliConfig = path.join(directory,'docker-config');
@@ -123,13 +132,15 @@ export function assignmentContainers(runtime,session,config) {
     let record = readRecord(filename(aid));
     if (!record) {
       record = {session,task_id:tid,assignment_id:aid,daemon:owner,image,
-        token:randomUUID(),phase:'unused',container_id:null,...(seed ? {seed_sha256:seed.sha256} : {})};
+        token:randomUUID(),phase:'unused',container_id:null,
+        ...(seed ? {seed_sha256:seed.sha256} : {}),...(execute_workspace_files ? {workspace_exec:true} : {})};
       save(record);
     }
     check(record.session===session && record.task_id===tid && record.assignment_id===aid &&
       record.daemon===owner && record.image===image && guid(record.token) &&
       ['unused','issuing','seeding','active','sealing','sealed'].includes(record.phase)
       && (record.seed_sha256===undefined || /^[a-f0-9]{64}$/.test(record.seed_sha256)) &&
+      (record.workspace_exec===undefined || record.workspace_exec===true) &&
       (record.container_id===null || containerID(record.container_id)) &&
       (!['seeding','active'].includes(record.phase) || record.container_id!==null) &&
       (record.started_at===undefined || typeof record.started_at==='string') &&
@@ -152,13 +163,16 @@ export function assignmentContainers(runtime,session,config) {
     const listing = await invoke(['container','inspect',ids[0]]);
     const [container] = JSON.parse(listing.stdout);
     const host = container?.HostConfig;
+    const tmpfs = mountOptions(record);
     check(container?.Id===ids[0] && container.Image===image &&
       container.Config?.Labels?.[LABEL]===record.token && container.Config.User==='65534:65534' &&
       host?.NetworkMode==='none' && host.PidMode==='' && host.IpcMode==='private' &&
       host.ReadonlyRootfs===true && host.Privileged===false && !host.Binds?.length &&
-      host.CapDrop?.includes('ALL') && host.SecurityOpt?.includes('no-new-privileges') &&
-      Object.keys(host.Tmpfs ?? {}).length===2 && Object.entries(TMPFS).every(([key,value])=>host.Tmpfs[key]===value) &&
-      container.Mounts?.every(mount=>mount.Type==='tmpfs' && Object.hasOwn(TMPFS,mount.Destination)));
+      host.CapDrop?.includes('ALL') && !host.CapAdd?.length && host.SecurityOpt?.includes('no-new-privileges') &&
+      !host.Devices?.length && !host.DeviceRequests?.length && host.RestartPolicy?.Name==='no' &&
+      host.PidsLimit===PROCESS_LIMIT && host.Memory===MEMORY_LIMIT && host.NanoCpus===NANO_CPU_LIMIT &&
+      Object.keys(host.Tmpfs ?? {}).length===2 && Object.entries(tmpfs).every(([key,value])=>host.Tmpfs[key]===value) &&
+      container.Mounts?.every(mount=>mount.Type==='tmpfs' && Object.hasOwn(tmpfs,mount.Destination)));
     return container;
   }
 
@@ -181,6 +195,7 @@ export function assignmentContainers(runtime,session,config) {
   async function prepare(record,signal) {
     check(['unused','issuing','seeding','active'].includes(record.phase));
     check(record.seed_sha256===seed?.sha256,'workspace_seed_changed');
+    check((record.workspace_exec===true)===execute_workspace_files,'workspace_execution_policy_changed');
     let container = await owned(record);
     if (record.phase==='active') {
       // Prior releases recorded active before the first start and had no start timestamp.
@@ -201,11 +216,13 @@ export function assignmentContainers(runtime,session,config) {
         'invalid_assignment_image');
       record.phase = 'issuing';
       save(record);
+      const tmpfs = mountOptions(record);
       await invoke(['container','create','--pull','never','--name','mowulink-'+record.token,
         '--label',LABEL+'='+record.token,'--network','none','--ipc','private','--user','65534:65534',
         '--cap-drop','ALL','--security-opt','no-new-privileges','--read-only','--restart','no',
-        '--tmpfs','/workspace:'+TMPFS['/workspace'],'--tmpfs','/tmp:'+TMPFS['/tmp'],
-        '--pids-limit','64','--memory','256m','--cpus','1','--no-healthcheck','--workdir','/workspace',
+        '--tmpfs','/workspace:'+tmpfs['/workspace'],'--tmpfs','/tmp:'+tmpfs['/tmp'],
+        '--pids-limit',String(PROCESS_LIMIT),'--memory',String(MEMORY_LIMIT),
+        '--cpus',String(NANO_CPU_LIMIT/1_000_000_000),'--no-healthcheck','--workdir','/workspace',
         '--entrypoint','/bin/sleep',image,'infinity']);
       container = await owned(record);
       check(container);
@@ -233,6 +250,7 @@ export function assignmentContainers(runtime,session,config) {
 
   return {
     seeded:seed!==null,
+    executeWorkspaceFiles:execute_workspace_files,
     async run(tid,aid,command,signal) {
       check(typeof command==='string' && command.trim() && command.length<=8192 && !command.includes('\0'),
         'invalid_assignment_command');

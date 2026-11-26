@@ -26,6 +26,15 @@ const usesCleanup = mode.startsWith('cleanup-');
 const usesContainer = mode.startsWith('cleanup-container');
 const usesSeed = mode.startsWith('cleanup-container-seed');
 const workspaceRecovery = mode.startsWith('cleanup-container-recovery');
+const workspaceBuild = mode.startsWith('cleanup-container-build');
+const buildReports = mode==='cleanup-container-build';
+const buildFixture = `set -eu
+test "$(id -u)" = 65534
+test ! -S /var/run/docker.sock
+mkdir -p /workspace/build
+cc -Wall -Werror /workspace/project/main.c -o /workspace/build/hello
+awk '$5 == "/workspace" || $5 == "/tmp" {print $5, $6}' /proc/self/mountinfo
+/workspace/build/hello`;
 const projectFixtureEdit = 'set -eu; test "$(cat project/hello.txt)" = "original project"; '+
   'test ! -e project/.git; test "$(stat -c %a project/checks/fixture.sh)" = 700; '+
   'sh project/checks/fixture.sh; printf "modified result\n" > project/hello.txt';
@@ -163,6 +172,47 @@ class LocalModel extends LlmAdapter {
         }[name]();
         yield {type:'block-start',index:0,blockType:'tool-call'};
         yield {type:'block-end',index:0,block:{type:'tool-call',id,name,arguments:JSON.stringify(args)}};
+        yield {type:'finish',reason:{kind:'tool-calls'}};
+        return;
+      }
+    }
+    if (workspaceBuild && ['task','task_update'].includes(command)) {
+      const attempt = this.submitted.get(message.id) ?? 0;
+      const shellId = 'workspace-build-'+command+'-0';
+      const shell = messages.findLast(entry=>entry.toolCallId===shellId);
+      const built = buildReports && shell && JSON.parse(shell.content[0].text);
+      let name, args;
+      if (attempt===0) {
+        name = 'worker_workspace_shell';
+        args = {command:buildFixture};
+      } else if (mode==='cleanup-container-build-reopen' && command==='task_update' && attempt===1) {
+        name = 'worker_workspace_export';
+        args = {path:'build/hello'};
+      } else if (buildReports && attempt===1) {
+        formalRound.resolve();
+        await raceRelease.promise;
+        signal.throwIfAborted();
+        if (built.exit_code===126) {
+          name = 'worker_report';
+          args = {task_id:payload.task_id,assignment_id:payload.assignment_id,outcome:'blocked',
+            summary:'Container work directory rejected direct binary execution'};
+        } else {
+          assert.equal(built.exit_code,0);
+          name = 'worker_workspace_export';
+          args = {path:'build/hello'};
+        }
+      } else if (buildReports && attempt===2 && built.exit_code===0) {
+        const exported = messages.findLast(entry=>entry.toolCallId==='workspace-build-task-1');
+        name = 'worker_report';
+        args = {task_id:payload.task_id,assignment_id:payload.assignment_id,summary:'Isolated compilation and execution passed',
+          artifact_ids:JSON.parse(exported.content[0].text).artifact_ids};
+      }
+      if (name) {
+        assert.ok(tools.some(tool=>tool.name===name));
+        this.submitted.set(message.id,attempt+1);
+        yield {type:'block-start',index:0,blockType:'tool-call'};
+        yield {type:'block-end',index:0,block:{type:'tool-call',id:'workspace-build-'+command+'-'+attempt,
+          name,arguments:JSON.stringify(args)}};
         yield {type:'finish',reason:{kind:'tool-calls'}};
         return;
       }
@@ -377,7 +427,7 @@ class LocalModel extends LlmAdapter {
           yield {type:'finish',reason:{kind:'tool-calls'}};
           return;
         }
-      } else if (!usesSeed && !workspaceRecovery && !['work-question','formal-goal','admission-race','material','cleanup-container-export'].includes(mode)) {
+      } else if (!usesSeed && !workspaceRecovery && !workspaceBuild && !['work-question','formal-goal','admission-race','material','cleanup-container-export'].includes(mode)) {
         await waitForStop(signal);
       }
     }
@@ -480,7 +530,7 @@ async function setup() {
   const agentOptions = {provider:'fixture',model:'local'};
   const registry = ctx.get('agents');
   if (!['cold-resume-reopen','managed-sessions-reopen'].includes(mode)) {
-    originalHandle = ['command-approvals-reopen','foreground-relay-reopen','cleanup-container-recovery-reopen'].includes(mode)
+    originalHandle = ['command-approvals-reopen','foreground-relay-reopen','cleanup-container-recovery-reopen','cleanup-container-build-reopen'].includes(mode)
       ? await registry.resume({resumeSessionId:session,agentOptions})
       : await registry.create({sessionId:session,agentOptions,...(isManaged ? {meta:{cwd:directory}} : {})});
   }
@@ -594,7 +644,7 @@ async function formalScenario(agent) {
   });
   for await (const line of createInterface({input:process.stdin,terminal:false})) {
     if (line==='exit') {
-      if (mode==='cleanup-container-seed-restart') raceRelease.resolve();
+      if (mode==='cleanup-container-seed-restart' || buildReports) raceRelease.resolve();
       break;
     }
     if (standalone && line==='hold-question-reply') {
@@ -604,12 +654,12 @@ async function formalScenario(agent) {
       console.log(JSON.stringify({busy:agent.status==='running'}));
       continue;
     }
-    if (mode==='cleanup-container-seed-restart' && line==='workspace-ready') {
+    if (mode==='cleanup-container-seed-restart' && line==='workspace-ready' || buildReports && line==='build-finished') {
       await formalRound.promise;
       console.log(JSON.stringify({running:agent.status==='running'}));
       continue;
     }
-    if (mode==='cleanup-container-seed-restart' && line==='resume-workspace') {
+    if (mode==='cleanup-container-seed-restart' && line==='resume-workspace' || buildReports && line==='finish-build') {
       raceRelease.resolve();
     }
     if (usesCleanup && line==='work-started') {
@@ -729,7 +779,7 @@ async function formalScenario(agent) {
     }
     else if (line==='formal-goal-round' && mode==='formal-goal') await formalRound.promise;
     else assert.ok(line==='read' || line==='second-round' && mode==='goal-driver' ||
-      line==='resume-workspace' && mode==='cleanup-container-seed-restart');
+      line==='resume-workspace' && mode==='cleanup-container-seed-restart' || line==='finish-build' && buildReports);
     if (line==='second-round') await secondRound.promise;
     await agent.whenIdle();
     const events = await readEvents(agent);

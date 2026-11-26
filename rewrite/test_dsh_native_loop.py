@@ -1324,13 +1324,14 @@ class NativeLoop(unittest.TestCase):
                 "boundary":"Installed DSH AgentLoop, real isolated Linux Docker, Worker and Router. Local scripted model. No Feishu."}
             Path(output).write_text(json.dumps(evidence,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
 
-    def seed_runtime(self, session, runtime, cli, image, archive, digest, *, docker=None):
+    def seed_runtime(self, session, runtime, cli, image, archive, digest, *, docker=None, execute_workspace_files=None):
         executable,_,socket = cli
         self.assertEqual(archive.stat().st_mode & 0o077,0)
-        (runtime/"assignment-container.json").write_text(encode({
-            "docker":docker or executable,"socket":socket.removeprefix("unix://"),"image":image,
-            "seed":{"archive":str(archive),"sha256":digest},
-        }),encoding="utf-8")
+        options = {"docker":docker or executable,"socket":socket.removeprefix("unix://"),"image":image,
+                   "seed":{"archive":str(archive),"sha256":digest}}
+        if execute_workspace_files is not None:
+            options["execute_workspace_files"] = execute_workspace_files
+        (runtime/"assignment-container.json").write_text(encode(options),encoding="utf-8")
         self.addCleanup(self.clean_fixture_containers,runtime,session,cli)
 
     def dispatch_seed_work(self, loop, clock, subject, instructions):
@@ -1342,7 +1343,7 @@ class NativeLoop(unittest.TestCase):
         loop.worker.poll()
         return task
 
-    def create_project_seed(self, runtime):
+    def create_project_seed(self, runtime, *, compiled=False):
         repo = runtime/"test-project"
         git = ["/usr/bin/git","-C",str(repo)]
         env = {"PATH":os.defpath,"HOME":str(runtime),"GIT_CONFIG_NOSYSTEM":"1"}
@@ -1354,7 +1355,12 @@ class NativeLoop(unittest.TestCase):
         script.parent.mkdir()
         script.write_text("#!/bin/sh\nexit 0\n",encoding="utf-8")
         script.chmod(0o700)
-        subprocess.run([*git,"add","hello.txt","checks/fixture.sh"],env=env,check=True,timeout=5)
+        files = ["hello.txt","checks/fixture.sh"]
+        if compiled:
+            (repo/"main.c").write_text('#include <stdio.h>\nint main(void) { puts("verified assignment build"); return 0; }\n',
+                                      encoding="utf-8")
+            files.append("main.c")
+        subprocess.run([*git,"add",*files],env=env,check=True,timeout=5)
         subprocess.run([*git,"-c","user.name=Fixture Author","-c","user.email=fixture@example.invalid",
             "-c","commit.gpgsign=false","commit","--quiet","-m","Isolated source"],env=env,check=True,capture_output=True,timeout=5)
         archive = runtime/"approved-project.tar"
@@ -1527,6 +1533,155 @@ exec {docker} "$@"
                 "container_id":container,"started_at_before":lease["started_at"],"started_at_after":started,
                 "shell_and_export_error":"assignment_workspace_restarted","released_by":"cancel_confirmed"}
             Path(output).write_text(json.dumps(evidence,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
+
+    def test_dsh_workspace_optional_execution_builds_runs_and_reports(self):
+        image,cli = self.container_engine()
+        tested = []
+        for execute in (None,True):
+            with self.subTest(execute_workspace_files=execute):
+                session = "dsh-compiled-project-"+("enabled" if execute else "default")
+                directory,loop,service,_ = self.goal_worker(session)
+                runtime = Path(directory)
+                archive,seed,source,revision = self.create_project_seed(runtime,compiled=True)
+                self.seed_runtime(session,runtime,cli,image,archive,seed,execute_workspace_files=execute)
+                token = guid()
+                callback = Client(self.open_worker(service,{token:"adapter/oguri"}),token)
+                with tool_listener(runtime,loop.adapter,callback), self.start_native(runtime,session,"cleanup-container-build") as native:
+                    loop.worker.connect()
+                    task = self.dispatch_seed_work(loop,service.clock,"Compile test project","Compile the approved working copy")
+                    self.assertTrue(self.read_native(native,"build-finished")["running"])
+                    order = loop.hermes.inspect(task)["task"]
+                    aid = order["assignment_id"]
+                    self.assertEqual(loop.worker.hold()["held_assignment_id"],aid)
+                    journal, = (runtime/"assignment-containers").glob("*.json")
+                    lease = json.loads(journal.read_bytes())
+                    self.assertEqual((lease["assignment_id"],lease["phase"]),(aid,"active"))
+                    self.assertEqual(lease.get("workspace_exec"),execute)
+                    container, = json.loads(subprocess.check_output([*cli,"container","inspect",lease["container_id"]],timeout=5))
+                    limits = container["HostConfig"]
+                    self.assertEqual((limits["NetworkMode"],limits["IpcMode"],limits["Privileged"],limits["ReadonlyRootfs"]),
+                                     ("none","private",False,True))
+                    self.assertEqual((limits["PidsLimit"],limits["Memory"],limits["NanoCpus"]),(64,256*1024*1024,10**9))
+                    self.assertFalse(limits["Binds"])
+                    self.assertFalse(limits.get("CapAdd"))
+                    self.assertEqual(limits["CapDrop"],["ALL"])
+                    self.assertIn("no-new-privileges",limits["SecurityOpt"])
+                    self.assertEqual(container["Config"]["User"],"65534:65534")
+                    self.assertTrue(all(mount["Type"]=="tmpfs" for mount in container["Mounts"]))
+                    program = subprocess.check_output([*cli,"container","exec",lease["container_id"],
+                                                       "cat","/workspace/build/hello"],timeout=5)
+                    self.assertEqual(program[:4],b"\x7fELF")
+                    observed = self.read_native(native,"finish-build")
+                    self.assertEqual(len(observed["inputs"]),1)
+                    self.assertEqual([c["name"] for c in observed["calls"]],
+                        ["worker_workspace_shell",*(["worker_workspace_export"] if execute else []),"worker_report"])
+                    self.assertTrue(all(not item["isError"] for item in observed["results"]))
+                    build = json.loads(observed["results"][0]["content"][0]["text"])
+                    mount = dict(line.split(" ",1) for line in build["stdout"].splitlines() if line.startswith("/"))
+                    self.assertIn("noexec",mount["/tmp"].split(","))
+                    self.assertEqual("noexec" in mount["/workspace"].split(","),not execute)
+                    receipt = json.loads(observed["results"][-1]["content"][0]["text"])
+                    state = "completed_reported" if execute else "blocked"
+                    self.assertEqual(receipt,{"recorded":True,"release_assignment_id":aid,"task_state":state})
+                    details = loop.hermes.inspect(task)
+                    self.assertEqual(details["task"]["state"],state)
+                    files = details["last_report"]["artifact_ids"]
+                    notice, = loop.manager_wire.frames(0)
+                    self.assertEqual(notice["payload"]["attachment_ids"],files)
+                    if execute:
+                        self.assertEqual(build["exit_code"],0)
+                        self.assertIn("verified assignment build",build["stdout"])
+                        artifact, = files
+                        received = loop.manager_wire.request("GET","attachments/"+artifact)
+                        self.assertEqual(received["bytes"],program)
+                        self.assertEqual(received["headers"]["X-Content-SHA256"],hashlib.sha256(program).hexdigest())
+                    else:
+                        self.assertEqual(build["exit_code"],126)
+                        self.assertIn("Permission denied",build["stderr"])
+                        self.assertEqual(files,[])
+                    deadline = time.monotonic()+8
+                    while json.loads(journal.read_bytes())["phase"]!="sealed" and time.monotonic()<deadline:
+                        time.sleep(.05)
+                    self.assertEqual(json.loads(journal.read_bytes())["phase"],"sealed")
+                    self.assertIsNone(loop.worker.hold()["held_assignment_id"])
+                    self.assertFalse(subprocess.check_output([*cli,"container","ls","--all","--filter",
+                        "id="+lease["container_id"],"--format","{{.ID}}"],timeout=5).strip())
+                    self.assertFalse((source.parent/"build").exists())
+                    tested.append({"execute_workspace_files":bool(execute),"session":session,"task_id":task,"assignment_id":aid,
+                        "container_id":lease["container_id"],"source_revision":revision,"source_digest":seed,
+                        "configured_tmpfs":limits["Tmpfs"],"actual_mount_options":mount,"build":build,"w04":receipt,
+                        "artifact_ids":files,"binary_sha256":hashlib.sha256(program).hexdigest(),
+                        "notify":notice["delivery_id"],"container_removed":True})
+        if output := os.environ.get("MOWULINK_DSH_BUILD_EVIDENCE"):
+            evidence = {"cases":tested,"scope":"Actual DSH AgentLoop, Linux Docker compiler, Worker and isolated Router with scripted model."}
+            Path(output).write_text(json.dumps(evidence,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
+
+    def test_dsh_workspace_execution_policy_is_pinned_until_cancel(self):
+        image,cli = self.container_engine()
+        tested = []
+        for execute in (False,True):
+            with self.subTest(previous_enable=execute):
+                session = "dsh-execution-policy-"+("disable" if execute else "enable")
+                directory,loop,service,_ = self.goal_worker(session)
+                runtime = Path(directory)
+                archive,seed,_,_ = self.create_project_seed(runtime,compiled=True)
+                self.seed_runtime(session,runtime,cli,image,archive,seed,execute_workspace_files=execute)
+                token = guid()
+                client = Client(self.open_worker(service,{token:"adapter/oguri"}),token)
+                with tool_listener(runtime,loop.adapter,client), self.start_native(runtime,session,"cleanup-container-build-hold") as native:
+                    loop.worker.connect()
+                    task = self.dispatch_seed_work(loop,service.clock,"Keep compiled workspace","Leave the current assignment open")
+                    first = self.read_native(native,"read")
+                    build = json.loads(first["results"][0]["content"][0]["text"])
+                    self.assertEqual(build["exit_code"],0 if execute else 126)
+                    previous = loop.hermes.inspect(task)["task"]
+                    aid = previous["assignment_id"]
+                    self.assertEqual(previous["state"],"working")
+                    journal, = (runtime/"assignment-containers").glob("*.json")
+                    lease = json.loads(journal.read_bytes())
+                    container = lease["container_id"]
+                options = runtime/"assignment-container.json"
+                options.write_text(encode({**json.loads(options.read_bytes()),"execute_workspace_files":not execute}),
+                                   encoding="utf-8")
+                with tool_listener(runtime,loop.adapter,client), self.start_native(runtime,session,"cleanup-container-build-reopen") as native:
+                    cold = self.read_native(native,"read")
+                    self.assertEqual(cold["inputs"],first["inputs"])
+                    self.assertEqual(cold["modelRequests"],[])
+                    update = loop.hermes.update(guid(),task,previous["revision"],{"instructions":"Try this existing workspace"})
+                    loop.worker.poll()
+                    observed = self.read_native(native,"read")
+                    refused,exported = observed["results"][-2:]
+                    self.assertEqual(refused["toolCallId"],"workspace-build-task_update-0")
+                    self.assertTrue(refused["isError"])
+                    self.assertIn("workspace_execution_policy_changed",encode(refused))
+                    self.assertFalse(exported["isError"],exported)
+                    artifact, = json.loads(exported["content"][0]["text"])["artifact_ids"]
+                    with self.assertRaisesRegex(Fault,"attachment_not_found"):
+                        loop.manager_wire.request("GET","attachments/"+artifact)
+                    binary = subprocess.check_output([*cli,"exec",container,"cat","/workspace/build/hello"],timeout=5)
+                    self.assertEqual(loop.wire.request("GET","attachments/"+artifact)["bytes"],binary)
+                    self.assertEqual(loop.worker.hold()["held_assignment_id"],aid)
+                    self.assertEqual(json.loads(journal.read_bytes()),lease)
+                    self.assertEqual(loop.manager_wire.frames(0),[])
+                    self.assertTrue(subprocess.check_output([*cli,"container","ls","--filter","id="+container,
+                        "--format","{{.ID}}"],timeout=5).strip())
+                    loop.hermes.act(guid(),task,update["revision"],"cancel",reason="End the fixture assignment")
+                    loop.worker.poll()
+                    completed = self.read_native(native,"read")
+                    last, = [row for row in completed["results"] if row["toolCallId"]=="cleanup-report-"+aid]
+                    self.assertFalse(last["isError"],last)
+                    self.assertEqual(json.loads(journal.read_bytes())["phase"],"sealed")
+                    self.assertFalse(subprocess.check_output([*cli,"container","ls","--all","--filter","id="+container,
+                        "--format","{{.ID}}"],timeout=5).strip())
+                    self.assertIsNone(loop.worker.hold()["held_assignment_id"])
+                    state = loop.hermes.inspect(task)
+                    self.assertEqual(state["task"]["state"],"cancelled")
+                    self.assertEqual(state["pending_cleanup"],[])
+                tested.append({"session":session,"task_id":task,"assignment_id":aid,"container_id":container,
+                    "recorded_execution":execute,"proposed_execution":not execute,"refusal":"workspace_execution_policy_changed",
+                    "stage_only_artifact":artifact,"cleanup_outcome":"cancel_confirmed","native_inputs":completed["inputs"]})
+        if output := os.environ.get("MOWULINK_DSH_BUILD_POLICY_EVIDENCE"):
+            Path(output).write_text(json.dumps(tested,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
 
     @unittest.skipUnless(shutil.which("openssl"),"isolated TLS certificate generator required")
     def test_dsh_workspaces_cold_restart_recovers_unreported_work_and_committed_w04(self):
