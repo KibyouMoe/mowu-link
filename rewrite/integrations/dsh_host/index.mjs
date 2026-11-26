@@ -99,6 +99,18 @@ function receipt(request, expected, history) {
   return result;
 }
 
+function stopBoundTurn(agent, request, history, before) {
+  check(Array.isArray(request.bindings) && request.bindings.length<=256, 'invalid_control_bindings');
+  const payload = JSON.parse(request.payload_json);
+  check(['task.cancel','task.transfer_out'].includes(payload.kind), 'invalid_control_delivery');
+  const turn = history.at(-1);
+  // A session-wide abort is safe only while the single admitted input and its turn both match the old assignment.
+  if (!turn?.open || turn.users.length!==1 || agent.status!=='running' ||
+      !Number.isSafeInteger(before) || agent.session.seq!==before ||
+      !request.bindings.some(ref=>ref?.native_id===turn.users[0].id && ref.turn_id===turn.id)) return;
+  if (typeof agent.cancel==='function') agent.cancel({kind:'user'}, {keepInbox:true});
+}
+
 export async function bindHost(ctx, session, directory) {
   check(typeof session === 'string' && session.length > 0, 'missing_native_session');
   const controller = ctx.get('sessionController');
@@ -136,13 +148,16 @@ export async function bindHost(ctx, session, directory) {
         }
         return changeModel(ctx,agent,request,bound,()=>ownEvents(ctx,agent));
       }
-      check(['deliver','lookup'].includes(request.operation), 'unsupported_operation');
+      check(['deliver','lookup','deliver-control'].includes(request.operation), 'unsupported_operation');
       const expected = await input(request,ctx,agent,directory);
-      const seen = receipt(request,expected,await persisted(ctx,agent));
+      const before = agent.session.seq;
+      const history = await persisted(ctx,agent);
+      const seen = receipt(request,expected,history);
       if (seen || request.operation === 'lookup') return {receipt:seen};
       // Only the adapter which first persisted its write intent can request delivery.
       await bound();
       try {
+        if (request.operation==='deliver-control') stopBoundTurn(agent,request,history,before);
         agent.followup(expected);
         return {receipt:receipt(request,expected,await persisted(ctx,agent))};
       } catch (cause) {

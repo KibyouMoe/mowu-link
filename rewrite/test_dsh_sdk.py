@@ -509,6 +509,33 @@ class DshSdk(unittest.TestCase):
         self.assertEqual(sum("原派发停止与清理仍待确认" in text for text in texts),1)
         self.assertFalse(any("Router 已收到原派发的清理确认" in text for text in texts))
 
+    def test_native_stop_request_targets_only_the_admitted_assignment_turn(self):
+        tid,aid,row = self.assign()
+        original_turn = json.loads(row["receipt"])["turn_id"]
+        self.m.act(guid(),tid,self.m.inspect(tid)["task"]["revision"],"cancel",reason="隔离取消")
+        self.w.poll()
+        self.w.poll()
+        self.assertEqual(self.drive("stop-attempts")["stops"],[
+            {"turn":1,"cause":{"kind":"user"},"options":{"keepInbox":True}}])
+        with self.loop.adapter.db.transaction() as db:
+            control = db.execute("SELECT * FROM intents WHERE json_extract(payload,'$.kind')='task.cancel'").fetchone()
+        proof = json.loads(control["receipt"])
+        self.assertNotEqual(proof["turn_id"],original_turn)
+        with self.loop.adapter.db.transaction() as db:
+            db.execute("UPDATE intents SET receipt=NULL,native_id=NULL WHERE delivery_id=?",(control["delivery_id"],))
+        self.assertEqual(self.loop.adapter.deliver(control["delivery_id"],json.loads(control["payload"])),proof)
+        self.assertEqual(len(self.drive("stop-attempts")["stops"]),1)
+        self.assertEqual(self.w.hold()["held_assignment_id"],aid)
+
+    def test_native_stop_does_not_interrupt_private_chat_after_assignment_turn(self):
+        tid,aid,_ = self.assign()
+        self.drive("end")
+        self.w.chat("ordinary-side-chat","保留普通聊天")
+        self.m.act(guid(),tid,self.m.inspect(tid)["task"]["revision"],"cancel",reason="隔离取消")
+        self.w.poll()
+        self.assertEqual(self.drive("stop-attempts")["stops"],[])
+        self.assertEqual(self.w.hold()["held_assignment_id"],aid)
+
     def test_private_chat_and_mixed_input_cannot_report(self):
         tid,aid,_ = self.assign()
         self.drive("end")

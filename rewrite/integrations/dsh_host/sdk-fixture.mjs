@@ -31,12 +31,21 @@ const session = ctx.get('sessions').create(id,{meta:header});
 let number = 0;
 let step = 1;
 let received = 0;
+const stops = [];
 let loseAdmission = false;
 let lastMessage;
 const model = new AgentModel(
   ()=>session.snapshotEvents().reduce(selectionProjection.apply,selectionProjection.init()),
   session,{provider:'fixture',model:'fixture'});
-const agent = {session,status:'idle',model,followup(message) {
+function endTurn(reason) {
+  session.append('step/end',{turn:number,step});
+  session.append('turn/end',{turn:number,reason});
+  agent.status = 'idle';
+}
+const agent = {session,status:'idle',model,cancel(cause,options) {
+  stops.push({turn:number,cause,options});
+  endTurn({kind:'aborted',reason:cause});
+},followup(message) {
   lastMessage = message;
   received++;
   if (agent.status === 'idle') {
@@ -97,9 +106,10 @@ try {
       if (cmd.action === 'lose-admission') {
         loseAdmission = true;
       } else if (cmd.action === 'end') {
-        session.append('step/end',{turn:number,step});
-        session.append('turn/end',{turn:number,reason:cmd.aborted ? {kind:'aborted',reason:{kind:'user'}} : {kind:'completed'}});
-        agent.status = 'idle';
+        endTurn(cmd.aborted ? {kind:'aborted',reason:{kind:'user'}} : {kind:'completed'});
+      } else if (cmd.action === 'stop-attempts') {
+        console.log(JSON.stringify({stops}));
+        continue;
       } else if (cmd.action === 'tool') {
         const block = {type:'tool-call',id:cmd.call_id,name:cmd.name,arguments:JSON.stringify(cmd.args)};
         if (cmd.append !== false) {

@@ -3,7 +3,7 @@ import hashlib
 import json
 from typing import Protocol
 
-from .storage import Database, encode, require
+from .storage import Database, encode, require, string
 
 
 class Host(Protocol):
@@ -94,6 +94,16 @@ class HostAdapter:
         if inserted:
             if media:
                 receipt = self.host.deliver_media(self.session,did,payload,digest,files)
+            elif (payload.get("kind") in ("task.cancel","task.transfer_out")
+                  and callable(getattr(self.host,"deliver_control",None))):
+                with self.db.transaction() as db:
+                    bindings = db.execute("""SELECT native_id,json_extract(receipt,'$.turn_id') AS turn_id
+                        FROM intents WHERE session=? AND receipt IS NOT NULL
+                        AND json_extract(payload,'$.task_id')=? AND json_extract(payload,'$.assignment_id')=?
+                        AND json_extract(payload,'$.kind') IN ('task','task_update','task_probe','question_answer')
+                        ORDER BY rowid DESC LIMIT 256""",
+                        (self.session,string(payload,"task_id"),string(payload,"assignment_id"))).fetchall()
+                receipt = self.host.deliver_control(self.session,did,payload,digest,[dict(row) for row in bindings])
             else:
                 receipt = self.host.deliver(self.session, did, payload, digest)
         elif media and hasattr(self.host,"lookup_media"):
@@ -144,7 +154,6 @@ class HostAdapter:
 
     def resolve_question(self, original, answer):
         from .user_questions import confirm
-        from .storage import string
         require(string(original,"session")==self.session,403,"wrong_native_session")
         identity = (self.session,string(original,"turn_id"),string(original,"native_question_id"))
         resolve = getattr(self.host,"resolve_question",None)

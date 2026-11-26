@@ -72,13 +72,16 @@ class DshHost:
             return self.request("model-change",session,fields)
         return self.request("model-change-if-route",session,{**fields,"expected_route":expected_route})
 
-    def delivery(self, operation, session, did, payload, digest):
-        result = self.request(operation,session,{"delivery_id":did,"payload_json":encode(payload),"digest":digest})
+    def delivery(self, operation, session, did, payload, digest, **fields):
+        result = self.request(operation,session,{"delivery_id":did,"payload_json":encode(payload),"digest":digest,**fields})
         require("receipt" in result,502,"invalid_host_observation")
         return result["receipt"]
 
     def deliver(self, session, did, payload, digest):
         return self.delivery("deliver",session,did,payload,digest)
+
+    def deliver_control(self, session, did, payload, digest, bindings):
+        return self.delivery("deliver-control",session,did,payload,digest,bindings=bindings)
 
     def lookup_expected(self, session, did, payload, digest):
         return self.delivery("lookup",session,did,payload,digest)
