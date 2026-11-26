@@ -360,6 +360,13 @@ python3 -m rewrite.linux_check --repository . \
 ```
 
 脚本从指定提交制作发行包，两端各自安装。Worker 在开发机运行，Router 和宿主适配器在全新 Linux 容器里运行，各用独立的身份和 HTTPS 端口。两个端口只映射到开发机回环地址。容器以普通用户运行，根目录只读，临时盘保存测试数据库。结束时清理测试容器、专用网络及一次性身份。测试重投后独立读回宿主输入数，核对签发者校验、未登记身份、W03 持单、回合结束与 W04 待验收。Agent 与宿主为夹具。两种系统运行在一台物理机上。原始记录见[Linux 跨系统验收记录](evidence/linux-cross-os.json)。
+
+#### Windows 安装与回退
+
+在 Windows 上将身份 JSON、TLS 私钥和状态库放入同一服务身份已保护的独立目录。使用 Windows ACL，只给该运行身份、SYSTEM 和受信任的本机管理员所需访问。服务用已打开的文件句柄检查身份、连接和其他私有配置的所有者及 ACL。配置向其他普通用户授予读取或写入时，服务拒绝启动。权限检查只读。TLS 私钥和状态库的保护由目录 ACL 承担。[Win32 文件权限读取接口](https://learn.microsoft.com/windows/win32/api/aclapi/nf-aclapi-getsecurityinfo)
+
+安装包按 `rewrite.release build/install/verify` 校验提交、归档摘要和逐文件字节。Windows 原生验收从已校验的安装包执行，临时库放进带中文与空格的目录，进程只在本机回环监听。复跑用受保护的测试目录、Python 3.13、Git 和 OpenSSL，命令见 [Windows 测试入口](../.github/workflows/rewrite-windows.yml)。旧版与验证版各自启动，核对 Router 的原队首和 Worker 的原收件，回退后无重复。宿主和模型用夹具，实际 Windows Desktop 启动与真实平台仍待验。[Windows 实测](evidence/windows-release-rollback.json)
+
 ### DSH 会话用量
 
 训练员在飞书私聊发送 `/context` 可查询绑定 DSH 会话最近一次模型回包的路由、回合、步骤、输入与总用量。窗口取自该回包之前同一路由的原生请求记录。原生端缺某一数值时按缺项显示，指令本身不向模型发起推理。宿主适配器的 `GET /v1/host/context` 只允许本工位读取。

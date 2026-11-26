@@ -1,0 +1,71 @@
+{
+  "recorded_utc": "2026-11-26T19:20:28Z",
+  "workflow_run": 45882824292,
+  "job_id": 140126119098,
+  "verification_url": "https://github.com/KibyouMoe/mowu-link/actions/runs/45882824292/job/140126119098",
+  "platform": "Windows Server 2025 build 26100 AMD64, CPython 3.13.17",
+  "boundary": "Actual Windows hosted runner, installed packages, Windows file ACLs, SQLite and three HTTPS loopback processes. Host and formal model input are fixtures.",
+  "isolated_state_path": "Included Chinese characters and a space",
+  "protected_test_directory": true,
+  "installed_release": {
+    "revision": "ab5cb6561c259251a67989ddaba5beea01433ded",
+    "files": 260,
+    "sha256": "88fb2a28a5717f1314d3d18f283ba9d9ee4ef5887bcbc8769eddeeb0de81d733",
+    "verified_after_tests": true
+  },
+  "tests": [
+    "test_daemon_rejects_second_writer_and_cold_restart_recovers_same_state (rewrite.test_service.Service.test_daemon_rejects_second_writer_and_cold_restart_recovers_same_state) ... ok",
+    "test_cli_tls_restart_preserves_identity_file_and_receipts (rewrite.test_service.Service.test_cli_tls_restart_preserves_identity_file_and_receipts) ... ok",
+    "test_three_process_worker_chat_and_assignment (rewrite.test_service.Service.test_three_process_worker_chat_and_assignment) ... ok",
+    "test_windows_public_config_rejected (rewrite.test_service.Service.test_windows_public_config_rejected) ... ok"
+  ],
+  "worker_pair_rollback": {
+    "host": "isolated fixture",
+    "message_id": "134e9f6b-8505-4815-b16c-a1d4bf2e07c4",
+    "native_inputs": {
+      "before": 1,
+      "rollback": 1,
+      "trial": 1
+    },
+    "native_receipt": {
+      "delivery_id": "chat-134e9f6b-8505-4815-b16c-a1d4bf2e07c4",
+      "digest": "25de07303bf8a03980f097428e63123b0af2ee21548c8ef36162cdd22b2ad126",
+      "native_id": "16722795-ea02-4f29-9077-6af838941548",
+      "session": "test-upgrade-session",
+      "turn_id": "af109fb2-e144-4cce-8a8e-6e47f7850a04"
+    },
+    "network": "isolated HTTPS loopback",
+    "new_revision": "ab5cb6561c259251a67989ddaba5beea01433ded",
+    "original_snapshot_unchanged": true,
+    "package_sha256": [
+      "313505734940b770afc0bd2659e50cdecdbe36457f0edc1ac766671072af89ab",
+      "88fb2a28a5717f1314d3d18f283ba9d9ee4ef5887bcbc8769eddeeb0de81d733"
+    ],
+    "previous_revision": "307a8a119c6a97ea2cb816280227afb3295e5675",
+    "starts": [
+      "previous pair",
+      "new adapter with previous Worker",
+      "new pair",
+      "previous pair restored"
+    ],
+    "upgraded_worker_persisted_receipt": true
+  },
+  "router_rollback": {
+    "after_rollback_count": 1,
+    "after_upgrade": "ready",
+    "network": "isolated HTTPS loopback",
+    "new_revision": "ab5cb6561c259251a67989ddaba5beea01433ded",
+    "package_sha256": [
+      "313505734940b770afc0bd2659e50cdecdbe36457f0edc1ac766671072af89ab",
+      "88fb2a28a5717f1314d3d18f283ba9d9ee4ef5887bcbc8769eddeeb0de81d733"
+    ],
+    "previous_revision": "307a8a119c6a97ea2cb816280227afb3295e5675",
+    "starts": [
+      "previous",
+      "new",
+      "previous"
+    ],
+    "task_id": "2e91788b-01b8-492c-aeef-0ca59ada3f20",
+    "unchanged_trial": true
+  }
+}
