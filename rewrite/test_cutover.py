@@ -783,6 +783,9 @@ store.close()
             loop.thread.start()
             try:
                 tid = baseline["queued_id_map"][old_id]
+                before = loop.hermes.inspect(tid)["task"]
+                unoffered_edit = guid()
+                loop.hermes.update(unoffered_edit,tid,before["revision"],{"title":"Edited before withdrawal"})
                 self.assertEqual(cancel(tid,None,"unoffered")["task"]["state"],"cancelled")
                 loop.worker.connect()
                 tid = create("offered")
@@ -803,6 +806,11 @@ store.close()
 
                 tid = create("active")
                 aid,_ = accept(tid)
+                before = loop.hermes.inspect(tid)["task"]
+                active_edit = guid()
+                revised = loop.hermes.update(active_edit,tid,before["revision"],{"instructions":"Edited on original assignment"})
+                self.assertEqual(revised["assignment_id"],aid)
+                loop.worker.poll()
                 self.assertEqual(cancel(tid,aid,"active")["delivery_state"],"pending")
                 self.assertEqual(loop.hermes.inspect(tid)["task"]["state"],"working")
                 write_review()
@@ -891,6 +899,13 @@ store.close()
                 record["w04_key"] = entry["cancel_w04_key"]
                 self.assertEqual(cleanup["receipt"],record["worker_reply"])
         self.assertEqual(records["unoffered"]["legacy_id"],old_id)
+        initial, = saved[records["unoffered"]["task_id"]]["initial_edits"]
+        self.assertEqual(initial["action_key"],unoffered_edit)
+        active, = saved[records["active"]["task_id"]]["assignment_history"][-1]["working_edits"]
+        self.assertEqual(active["action_key"],active_edit)
+        records["unoffered"]["edit_key"] = initial["action_key"]
+        records["active"]["edit_key"] = active["action_key"]
+        records["active"]["update_delivery_id"] = active["delivery_id"]
         self.assertGreater(len(records["active"]["cancel_deliveries"]),1)
         blocked = saved[records["worker_pool"]["task_id"]]["assignment_history"][-1]
         self.assertEqual(blocked["materials"][0]["material_id"],records["worker_pool"]["material_id"])
@@ -1355,6 +1370,223 @@ store.close()
                         "legacy_snapshot_sha256":source_sha,"offline_resume_refused":former["assignment_id"],
                         "mismatched_dispatch_refused":True,
                         "boundary":"Actual isolated legacy and rewrite Router HTTP; scripted Worker host and clock."}
+            Path(output).write_text(json.dumps(evidence,ensure_ascii=False,indent=2)+"\n")
+
+    def test_reviewed_edits_preserve_original_requests_and_fence_old_offers(self):
+        original = self.old("""
+store = RouterStore(sys.argv[1])
+store.upsert_worker("oguri")
+print(store.orders.create("Original migrated title","Original migrated instructions","oguri",{},"fixture",None,None))
+store.close()
+""",self.legacy)
+        source_sha = digest(self.legacy)
+        backup(self.legacy,self.attachments,self.snapshot)
+        baseline = prepare(self.snapshot,self.trial,self.source_id)
+        clock = Clock()
+        loop = Loop(self.trial,clock,FixtureHost)
+        manager,worker = loop.hermes,loop.worker
+        review = self.root/"edits-review.json"
+        approvals,cancelled,proof = {},{},{}
+
+        def edit(tid, **changes):
+            revision = manager.inspect(tid)["task"]["revision"]
+            key = guid()
+            reply = manager.update(key,tid,revision,changes)
+            self.assertEqual(manager.update(key,tid,revision,changes),reply)
+            return key,reply
+
+        def accept(tid):
+            for _ in range(5):
+                worker.poll()
+                if worker.hold()["held_task_id"]==tid:
+                    aid = worker.hold()["held_assignment_id"]
+                    return next((item,native) for item,native in loop.native.entries()
+                                if item.get("assignment_id")==aid and item["kind"]=="task")
+                clock.advance(10)
+            self.fail("worker did not accept the edited order")
+
+        def wait_until_idle():
+            for seconds in (1,10):
+                clock.advance(seconds)
+                worker.poll()
+
+        def finish(tid, aid, native, *, update=False):
+            report = worker.report(native["native_id"],tid,aid,"Verified isolated result")
+            self.assertEqual(report["task_state"],"completed_reported")
+            if update:
+                key,current = edit(tid,title="Title noted at review")
+                self.assertEqual(current["state"],"completed_reported")
+                proof["before_and_working"]["review_edit"] = key
+            current = manager.inspect(tid)["task"]
+            self.assertEqual(manager.approve(guid(),tid,current["revision"])["task"]["state"],"closed")
+            approvals[tid] = aid
+            manager.poll()
+            worker.poll()
+
+        def stage(trial,destination):
+            review.write_text(json.dumps({"trial_sha256":digest(trial/"router.db"),"closed_assignments":approvals,
+                                         "cancelled_assignments":cancelled}))
+            return stage_reviewed_rollback(self.snapshot,trial,review,destination)
+
+        with loop.server:
+            loop.thread.start()
+            try:
+                migrated = baseline["queued_id_map"][original]
+                pre1,_ = edit(migrated,title="Title before first offer")
+                pre2,not_offered = edit(migrated,instructions="Instructions before first offer")
+                self.assertIsNone(not_offered["assignment_id"])
+                worker.connect()
+                payload,native = accept(migrated)
+                aid = payload["assignment_id"]
+                self.assertEqual(payload["instructions"],not_offered["instructions"])
+                work1,_ = edit(migrated,title="Title while working")
+                work2,current = edit(migrated,instructions="Instructions while working")
+                self.assertEqual(current["assignment_id"],aid)
+                worker.poll()
+                received = [(packet,r) for packet,r in loop.native.entries() if packet["kind"]=="task_update"]
+                self.assertEqual([p["changes"] for p,_ in received],
+                                 [{"title":"Title while working"},{"instructions":"Instructions while working"}])
+                self.assertTrue(all(p["assignment_id"]==aid for p,_ in received))
+                proof["before_and_working"] = {"task_id":migrated,"assignment_id":aid,"initial_edits":[pre1,pre2],
+                                               "working_edits":[work1,work2]}
+                finish(migrated,aid,received[-1][1],update=True)
+
+                for mode in ("immediate","deferred","cancelled"):
+                    wait_until_idle()
+                    create = guid()
+                    order = manager.create(create,mode,"Original trial-born instructions","oguri")
+                    tid,original_aid = order["task_id"],order["assignment_id"]
+                    self.assertTrue(original_aid)
+                    if mode!="immediate":
+                        clock.advance(31)
+                    replaced,new = edit(tid,instructions="Replacement instructions")
+                    stale = {"session_id":worker.session,"assignment_id":original_aid,"revision":order["revision"]}
+                    with self.assertRaises(Fault) as rejected:
+                        loop.wire.request("POST",f"tasks/{tid}/accept",stale,guid())
+                    self.assertEqual(rejected.exception.code,"stale_assignment")
+                    waiting = None
+                    if mode=="immediate":
+                        self.assertTrue(new["assignment_id"])
+                    else:
+                        self.assertIsNone(new["assignment_id"])
+                        waiting,_ = edit(tid,title="Edit while waiting")
+                    if mode=="cancelled":
+                        current = manager.inspect(tid)["task"]
+                        stopped = manager.act(guid(),tid,current["revision"],"cancel",reason="Withdraw after edit")
+                        self.assertEqual(stopped["task"]["state"],"cancelled")
+                        cancelled[tid] = original_aid
+                        # The last offer refers to the superseded revision.
+                        worker.connect()
+                        worker.poll()
+                        proof[mode] = {"task_id":tid,"obsolete_assignment_id":original_aid}
+                        continue
+                    if mode=="deferred":
+                        worker.connect()
+                    payload,native = accept(tid)
+                    new_aid = payload["assignment_id"]
+                    self.assertNotEqual(new_aid,original_aid)
+                    self.assertEqual([p["assignment_id"] for p,_ in loop.native.entries()
+                                      if p.get("task_id")==tid and p["kind"]=="task"],[new_aid])
+                    finish(tid,new_aid,native)
+                    proof[mode] = {"task_id":tid,"obsolete_assignment_id":original_aid,"assignment_id":new_aid,
+                                   "edit_key":replaced,"waiting_edit":waiting,"creation_key":create}
+
+                wait_until_idle()
+                pool = manager.create(guid(),"Pool edits","Initial pool instructions","oguri")["task_id"]
+                payload,native = accept(pool)
+                aid = payload["assignment_id"]
+                worker.report(native["native_id"],pool,aid,"Await reviewed inputs","blocked")
+                blocked_key,blocked = edit(pool,instructions="Revised while blocked")
+                snoozed = manager.act(guid(),pool,blocked["revision"],"snooze",remind_after_hours=1)["task"]
+                asleep_key,asleep = edit(pool,title="Revised while snoozed")
+                self.assertEqual(asleep["revision"],snoozed["revision"]+1)
+                resumed = manager.act(guid(),pool,asleep["revision"],"resume",resolution="Inputs verified")["task"]
+                self.assertEqual(resumed["state"],"resuming")
+                waiting_key,pending = edit(pool,title="Final title while awaiting a new offer")
+                self.assertEqual(pending["state"],"resuming")
+                payload,native = accept(pool)
+                self.assertEqual(payload["title"],pending["title"])
+                self.assertEqual(payload["instructions"],"Revised while blocked\n\n继续推进：Inputs verified")
+                finish(pool,payload["assignment_id"],native)
+                proof["pool"] = {"task_id":pool,"edits":[blocked_key,asleep_key,waiting_key]}
+            finally:
+                loop.server.shutdown()
+                loop.thread.join()
+
+        settled = stage(self.trial,self.restore)
+        private = self.restore/"private-review"
+        manifest = json.loads((private/"manifest.json").read_text())
+        edited = manifest["orders"][migrated]
+        self.assertEqual([e["action_key"] for e in edited["initial_edits"]],[pre1,pre2])
+        working = edited["assignment_history"][0]["working_edits"]
+        self.assertEqual([e["action_key"] for e in working],[work1,work2])
+        self.assertTrue(all(e["delivery_id"] for e in working))
+        self.assertEqual(edited["completed_edits"][0]["action_key"],proof["before_and_working"]["review_edit"])
+        self.assertEqual(edited["original_content"]["title"],"Original migrated title")
+        pool_history = manifest["orders"][pool]["assignment_history"][0]
+        self.assertEqual([e["action_key"] for e in pool_history["pool"]["edits"]],[blocked_key,asleep_key])
+        self.assertEqual(pool_history["transition"]["waiting_edits"][0]["action_key"],waiting_key)
+        for label in ("immediate","deferred"):
+            row = manifest["orders"][proof[label]["task_id"]]
+            fenced = row["assignment_history"][0]
+            self.assertNotIn("accept_key",fenced)
+            self.assertEqual(fenced["fenced_edits"][0]["action_key"],proof[label]["edit_key"])
+            self.assertEqual(row["legacy_creation_request"]["goal"],"Original trial-born instructions")
+        withdrawn = manifest["orders"][proof["cancelled"]["task_id"]]
+        self.assertEqual(withdrawn["terminal_state"],"cancelled")
+        self.assertNotIn("accept_key",withdrawn["assignment_history"][0])
+        self.assertEqual(digest(private/"trial-router.db"),settled["trial_sha256"])
+        self.assertEqual(digest(self.legacy),source_sha)
+
+        restored = manifest["orders"][proof["immediate"]["task_id"]]
+        observed = json.loads(self.old("""
+from server import RouterServer
+from selftest_router import http
+from threading import Thread
+from unittest.mock import Mock
+store = RouterStore(sys.argv[1])
+token = "isolated-legacy-edits"
+with RouterServer(("127.0.0.1",0),store,token,Mock(),Mock()) as server:
+    runner = Thread(target=server.serve_forever,kwargs={"poll_interval":.02})
+    runner.start()
+    try:
+        url = f"http://127.0.0.1:{server.server_port}"
+        original = json.loads(sys.argv[3])
+        replay,ret = http("POST",url+"/tasks",original,token)
+        changed,_ = http("POST",url+"/tasks",dict(original,goal="Replacement instructions"),token)
+        status,archived = http("GET",url+"/tasks/"+sys.argv[2],token=token)
+        assert ret["duplicate"] and ret["task_id"]==sys.argv[2],ret
+        print(json.dumps({"replay":replay,"changed":changed,"archive_status":status,
+                          "reason":archived["task"]["archive"]["reason"],"next":store.orders.next_dispatch("oguri")}))
+    finally:
+        server.shutdown()
+        runner.join()
+store.close()
+""",self.restore/"legacy.db",restored["legacy_task_id"],json.dumps(restored["legacy_creation_request"])))
+        self.assertEqual(observed,{"replay":200,"changed":409,"archive_status":200,
+                                   "reason":"reviewed_on_rewrite","next":None})
+
+        def reject_edit(label, sql, value, reason):
+            changed = self.root/label
+            changed.mkdir()
+            shutil.copyfile(self.trial/"baseline.json",changed/"baseline.json")
+            shutil.copyfile(private/"trial-router.db",changed/"router.db")
+            with closing(sqlite3.connect(changed/"router.db")) as db,db:
+                updated = db.execute(sql,(value,working[-1]["delivery_id"]))
+                self.assertEqual(updated.rowcount,1)
+            destination = self.root/("rejected-"+label)
+            with self.assertRaisesRegex(ValueError,reason):
+                stage(changed,destination)
+            self.assertFalse(destination.exists())
+
+        reject_edit("wrong-assignment","UPDATE deliveries SET payload=json_set(payload,'$.assignment_id',?) WHERE delivery_id=?",
+                    guid(),"unexpected task update delivery")
+        reject_edit("unconfirmed-edit","UPDATE deliveries SET ack=? WHERE delivery_id=?",0,"no consumer acknowledgement")
+        if output := os.environ.get("MOWULINK_EDITED_ROLLBACK_EVIDENCE"):
+            proof["before_and_working"]["update_deliveries"] = [e["delivery_id"] for e in working]
+            evidence = {"cases":proof,"legacy":observed,"trial_sha256":settled["trial_sha256"],
+                        "original_sha256":source_sha,"wrong_assignment_refused":True,"unconfirmed_update_refused":True,
+                        "boundary":"Actual isolated legacy and rewrite HTTP Router and SQLite; scripted Worker host and controlled clock."}
             Path(output).write_text(json.dumps(evidence,ensure_ascii=False,indent=2)+"\n")
 
     def test_trial_born_closed_orders_return_as_private_archives_without_a_new_dispatch(self):

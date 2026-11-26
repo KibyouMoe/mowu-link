@@ -21,6 +21,38 @@ def order_state(order, step, state, revision, assignment_id=None):
                 assignee_id=step["worker_id"],holder=holder)
 
 
+def edit_requests(db):
+    edits = {}
+    for request, in db.execute("""SELECT request FROM operations
+        WHERE json_extract(request,'$[0][0]')='PATCH'
+        AND json_extract(request,'$[0][1]') GLOB '/v1/tasks/*'"""):
+        (_,path),body = json.loads(request)
+        index = path.split("/")[3],body.get("expected_revision")
+        if index in edits:
+            raise ValueError("duplicate task edit revision")
+        edits[index] = body.get("changes")
+    return edits
+
+
+def retain_edit(edits, order, worker, content, state, revision, assignment_id=None):
+    changes = edits.pop((order["task_id"],revision))
+    if (not isinstance(changes,dict) or not changes or set(changes)-{"title","instructions"}
+            or any(not isinstance(value,str) or not value.strip() for value in changes.values())):
+        raise ValueError("invalid changes in the reviewed task edit")
+    content = dict(content,**changes)
+    receipt = order_state(order,{"worker_id":worker,"content":content},state,revision+1,assignment_id)
+    return content,{"expected_revision":revision,"changes":changes,"expected":[receipt]}
+
+
+def retain_edits(edits, order, worker, content, state, revision, assignment_id=None):
+    history = []
+    while (order["task_id"],revision) in edits:
+        content,edit = retain_edit(edits,order,worker,content,state,revision,assignment_id)
+        history.append(edit)
+        revision += 1
+    return revision,content,history
+
+
 def inquiry_frames(db, tid):
     by_assignment = {}
     for row in db.execute("""SELECT rowid AS seq,kind,payload,delivery_id FROM deliveries
@@ -83,13 +115,20 @@ def pool_actions(db):
     return actions
 
 
-def retain_snoozes(pool, tid, revision, actions):
+def retain_pool_changes(pool, order, worker, content, revision, edits, snoozes):
     # The rolled back copy contains ISO microsecond receipts, rather than the
     # execution timestamp. Recover the schedule with the same duration.
     started = utc_time(timestamp(pool["entered"]))
     earliest = started-clock_precision(started)
-    while (tid,revision) in actions:
-        body,reply = actions.pop((tid,revision))
+    state = "blocked"
+    tid = order["task_id"]
+    while (tid,revision) in snoozes or (tid,revision) in edits:
+        if (tid,revision) in edits:
+            content,edit = retain_edit(edits,order,worker,content,state,revision)
+            pool.setdefault("edits",[]).append(edit)
+            revision += 1
+            continue
+        body,reply = snoozes.pop((tid,revision))
         hours,value = body.get("remind_after_hours"),reply.get("task",{}).get("remind_at")
         if type(hours) not in (int,float) or not 0<hours<1e100 or not math.isfinite(hours):
             raise ValueError("invalid duration in a reviewed pool snooze")
@@ -103,9 +142,11 @@ def retain_snoozes(pool, tid, revision, actions):
             raise ValueError("pool snooze is outside its assignment history")
         pool.setdefault("snoozes",[]).append({
             "expected_revision":revision,"remind_after_hours":hours,"remind_at":value,
-            "scheduled_at":since.isoformat()})
+            "scheduled_at":since.isoformat(),"content":content})
+        state = "snoozed"
         revision += 1
         earliest = max(earliest,since-precision)
+    return revision,content
 
 
 def histories(db, entries, deltas):
@@ -113,12 +154,16 @@ def histories(db, entries, deltas):
     dispatches = set()
     actions = pool_actions(db)
     snoozes,resumes = actions["snooze"],actions["resume"]
+    edits = edit_requests(db)
     for tid, entry in entries.items():
         order = task(db,tid)
         content = entry["original_content"]
         cancelled = entry["terminal_state"]=="cancelled"
         steps = []
-        revision = 2
+        revision,content,initial_edits = retain_edits(edits,order,entry["original_worker"],content,"ready",1)
+        if initial_edits:
+            entry["initial_edits"] = initial_edits
+        revision += 1  # First offer, or cancellation of a task that was never offered.
         pools = {row["assignment_id"]:dict(row) for row in db.execute("SELECT * FROM pool_entries WHERE task_id=?",(tid,))}
         cleanups = {row["assignment_id"]:dict(row) for row in db.execute("SELECT * FROM cleanups WHERE task_id=?",(tid,))}
         materials = {}
@@ -137,6 +182,29 @@ def histories(db, entries, deltas):
             dispatches.add(aid)
             step = {"assignment_id":aid,"worker_id":worker,"revision":revision,"delivery_id":frame["delivery_id"],
                     "dispatch_seq":frame["seq"],"content":content}
+            steps.append(step)
+            if (tid,revision) in edits:
+                # A05 replaces an unaccepted offer. The old offer may still have
+                # a transport acknowledgement, but is never a W03 obligation.
+                if (next_frame and next_frame["consumer"]!=frame["consumer"]) or (not next_frame and not cancelled):
+                    raise ValueError("edited offer has no verifiable replacement or cancellation")
+                revised,edit = retain_edit(edits,order,worker,content,"ready",revision)
+                revision,content,waiting = retain_edits(edits,order,worker,revised,"ready",revision+1)
+                revision += 1  # Replacement offer, or cancellation.
+                if next_frame and not waiting:
+                    replacement = json.loads(next_frame["payload"]).get("assignment_id")
+                    edit["expected"].append(order_state(order,{"worker_id":worker,"content":revised},
+                                                        "ready",revision,replacement))
+                step["fenced_edits"] = [edit,*waiting]
+                continue
+            if next_frame is None and cancelled and aid not in pools and aid not in cleanups:
+                step["unaccepted"] = True
+                revision += 1
+                continue
+
+            revision,content,working = retain_edits(edits,order,worker,content,"working",revision+1,aid)
+            if working:
+                step["working_edits"] = working
             if pool := pools.pop(aid,None):
                 if (pool["worker_id"]!=worker or pool["active"]!=0 or pool["remind_at"] is not None
                         or pool["source"] not in ("worker","offline","unanswered") or not pool["reason"].strip()):
@@ -146,8 +214,7 @@ def histories(db, entries, deltas):
                     raise ValueError("Router pool notification has unexpected files")
                 if pool["source"]=="unanswered" and pool["reason"]!="进度询问三次重试仍无答复。":
                     raise ValueError("trial has an unsupported exhausted inquiry")
-                # W03 and entry into the pool each advance the dispatch revision.
-                retain_snoozes(pool,tid,revision+2,snoozes)
+                revision,content = retain_pool_changes(pool,order,worker,content,revision+1,edits,snoozes)
                 step["pool"] = pool
                 used["pool_entries"] += 1
             if cleanup := cleanups.pop(aid,None):
@@ -165,21 +232,37 @@ def histories(db, entries, deltas):
                 step["materials"] = candidates
                 used["materials"] += len(candidates)
             retain_inquiries(step,inquiries.pop(aid,[]),frame["seq"],next_frame["seq"] if next_frame else None)
-            steps.append(step)
-            revision += 3 + ("pool" in step) + len(step.get("pool",{}).get("snoozes",[]))
-            if next_frame and (resume := resumes.pop((tid,revision-2),None)):
-                resolution = resume[0].get("resolution")
-                if (step.get("pool",{}).get("source")!="worker" or "cleanup" in step
-                        or not isinstance(resolution,str) or not resolution.strip()):
-                    raise ValueError("resume needs evidence that the original worker released its assignment")
-                step["resume"] = {"resolution":resolution}
-                content = dict(content,instructions=content["instructions"]+RESUME_INSTRUCTION_PREFIX+resolution)
+            if next_frame:
+                wait_state = "ready"
+                if resume := resumes.pop((tid,revision),None):
+                    resolution = resume[0].get("resolution")
+                    if (step.get("pool",{}).get("source")!="worker" or "cleanup" in step
+                            or not isinstance(resolution,str) or not resolution.strip()):
+                        raise ValueError("resume needs evidence that the original worker released its assignment")
+                    step["resume"] = {"resolution":resolution}
+                    content = dict(content,instructions=content["instructions"]+RESUME_INSTRUCTION_PREFIX+resolution)
+                    wait_state = "resuming"
+                step["transition"] = {"expected_revision":revision,"content":content,"wait_state":wait_state}
+                next_worker = next_frame["consumer"].removeprefix("worker/")
+                revision,content,waiting = retain_edits(edits,order,next_worker,content,wait_state,revision+1)
+                if waiting:
+                    step["transition"]["waiting_edits"] = waiting
+                revision += 1  # Next offer after the transition.
+            elif is_reviewed_completion(entry):
+                if set(step) & {"pool","cleanup","materials"}:
+                    raise ValueError("trial is missing a complete assignment chain for the reviewed result")
+                revision,content,completed = retain_edits(edits,order,worker,content,"completed_reported",revision+1)
+                if completed:
+                    entry["completed_edits"] = completed
+                revision += 1  # Manager close.
+            else:
+                revision += 1 + ("cleanup" in step)  # Terminal action, plus cancellation W04 if needed.
         if pools or cleanups or materials or inquiries:
             raise ValueError("trial is missing a complete assignment chain for the reviewed result")
         if any(order[field]!=value for field,value in content.items()):
             raise ValueError("trial contents differ from the verified history")
         if not steps:
-            if (not cancelled or entry["assignment_id"] is not None or order["revision"]!=2
+            if (not cancelled or entry["assignment_id"] is not None or order["revision"]!=revision
                     or entry["worker_id"]!=entry["original_worker"]):
                 raise ValueError("trial order has no verifiable dispatch")
             entry["assignment_history"] = []
@@ -192,19 +275,14 @@ def histories(db, entries, deltas):
             pool,cleanup = final.get("pool"),final.get("cleanup")
             if pool and bool(cleanup)==(pool["source"]=="worker"):
                 raise ValueError("original assignment cleanup is pending or cannot be verified")
-            if not cleanup:
-                revision = revision-1 if pool else final["revision"]+1
-                if not pool and final.get("probe_delivery_ids"):
-                    raise ValueError("unaccepted offer has a progress inquiry")
         elif entry.get("pool_archive"):
             if final.get("pool",{}).get("source")!="worker" or "cleanup" in final:
                 raise ValueError("pool archive needs evidence that the final worker released its assignment")
-            revision -= 1
-        elif set(final) & {"pool","cleanup","materials"}:
-            raise ValueError("trial is missing a complete assignment chain for the reviewed result")
         if order["revision"]!=revision:
             raise ValueError("terminal action does not match the assignment revision")
         for step,target in zip(steps,steps[1:]):
+            if "fenced_edits" in step:
+                continue
             if "resume" in step:
                 if step["worker_id"]!=target["worker_id"]:
                     raise ValueError("resume changed the original assignee")
@@ -215,8 +293,8 @@ def histories(db, entries, deltas):
                     or cleanup and cleanup["new_assignee_id"]!=target["worker_id"]):
                 raise ValueError("transfer does not match the former assignment and its cleanup")
         entry["assignment_history"] = steps
-    if snoozes or resumes:
-        raise ValueError("trial contains a snooze or resume outside the reviewed pool history")
+    if snoozes or resumes or edits:
+        raise ValueError("trial contains a snooze, resume, or edit outside the reviewed assignment history")
     if any(deltas.get(table,{}).get("trial_only",0)!=count for table,count in used.items()):
         raise ValueError("trial contains unrelated pool, cleanup, or material rows")
 
@@ -240,6 +318,7 @@ def check_transport(db, entries):
     expected_notices = {}
     notices = {tid:[] for tid in entries}
     cleanup_frames = {}
+    update_frames = {}
     terminal_notices = set()
     pool_bounds = {}
     pool_messages = {}
@@ -255,6 +334,10 @@ def check_transport(db, entries):
             workers.add(worker)
             expected_frames["task.dispatch",tid,aid] = ("worker/"+worker,step["delivery_id"],
                 {"task_id":tid,"assignment_id":aid,"revision":step["revision"],**step["content"]})
+            for edit in step.get("working_edits",[]):
+                revision = edit["expected_revision"]+1
+                update_frames[tid,aid,revision] = (edit,"worker/"+worker,step["dispatch_seq"],
+                                                  target["dispatch_seq"] if target else None)
             for did in step.get("probe_delivery_ids",[]):
                 expected_inquiries[did] = ("task.probe","worker/"+worker,{"task_id":tid,"assignment_id":aid})
             if shelved := step.get("shelved_delivery_id"):
@@ -323,6 +406,7 @@ def check_transport(db, entries):
 
     frames = {}
     pool_start_frames = {}
+    latest_update = {}
     for row in db.execute("SELECT rowid AS seq,* FROM deliveries ORDER BY rowid"):
         data = json.loads(row["payload"])
         kind,consumer,did = row["kind"],row["consumer"],row["delivery_id"]
@@ -350,6 +434,18 @@ def check_transport(db, entries):
         elif kind in ("task.probe","task.shelved","task.cancel"):
             if expected_inquiries.pop(did,None)!=(kind,consumer,data):
                 raise ValueError("trial inquiry delivery does not match the reviewed assignment")
+        elif kind=="task.updated":
+            revision = data.get("revision")
+            match = update_frames.pop((tid,aid,revision),None)
+            if not match:
+                raise ValueError("unexpected task update delivery")
+            edit,owner,start,end = match
+            if (consumer!=owner or not start<row["seq"] or end is not None and row["seq"]>=end
+                    or aid in pool_start_frames or revision<=latest_update.get(aid,0)
+                    or data!={"task_id":tid,"assignment_id":aid,"revision":revision,"changes":edit["changes"]}):
+                raise ValueError("task update delivery does not match its active assignment")
+            edit["delivery_id"] = did
+            latest_update[aid] = revision
         else:
             key = (kind,tid,aid)
             expected = expected_frames.pop(key,None)
@@ -358,7 +454,7 @@ def check_transport(db, entries):
             if key in cleanup_frames:
                 cleanup_frames[key]["delivery_id"] = did
         frames[did] = (consumer,row["cursor"])
-    if (messages or expected_frames or expected_inquiries
+    if (messages or expected_frames or expected_inquiries or update_frames
             or any(consumed[tid]!=len(items) for tid,items in expected_notices.items())):
         raise ValueError("trial is missing a dispatch, cleanup delivery, or W04 notification")
     for tid, items in notices.items():
@@ -383,6 +479,18 @@ def take(operations, key, actor, body, replies=None, *, session=False, files=Fal
     raise ValueError("missing or conflicting receipt for the reviewed assignment: "+key[1])
 
 
+def verify_edits(tid, edits, operations, after):
+    for edit in edits:
+        revision = edit["expected_revision"]
+        receipt = take(operations,(tid,"edit",revision),"hermes",
+                       {"expected_revision":revision,"changes":edit["changes"]},edit.pop("expected"))
+        if receipt["seq"]<=after:
+            raise ValueError("task edit is out of order")
+        edit.update(action_key=receipt["key"],receipt=receipt["reply"])
+        after = receipt["seq"]
+    return after
+
+
 def optional_close_note(actual, request):
     if "note" in actual:
         note = actual["note"]
@@ -404,7 +512,8 @@ def verify_cancelled(tid, entry, order, step, operations, after, states):
         pool = step.get("pool")
         snoozes = pool.get("snoozes",[]) if pool else []
         state = "snoozed" if snoozes else "blocked" if pool else "working"
-        pending = order_state(order,step,state,order["revision"]-1,
+        final = dict(step,content={field:order[field] for field in ("title","instructions")})
+        pending = order_state(order,final,state,order["revision"]-1,
                               None if pool else step["assignment_id"])
         if pool:
             initial = {"remind_at":timestamp(pool["entered"]+INITIAL_REMINDER_SECONDS),**pool.get("initial_reminder",{})}
@@ -463,20 +572,28 @@ def verify_pool_archive(tid, entry, order, operations, after, states):
 def verify_pool_activity(tid, step, order, operations, after, states):
     pool = step["pool"]
     activity = []
-    last_snooze = after
-    for snooze in pool.get("snoozes",[]):
+    position = after
+    first_snooze = None
+    revisions = [(item["expected_revision"],"edit",item) for item in pool.get("edits",[])]
+    revisions.extend((item["expected_revision"],"snooze",item) for item in pool.get("snoozes",[]))
+    for _,kind,snooze in sorted(revisions):
+        if kind=="edit":
+            position = verify_edits(tid,[snooze],operations,position)
+            activity.append((position,{snooze["receipt"]["state"]}))
+            continue
         revision = snooze["expected_revision"]
-        expected = order_state(order,step,"snoozed",revision+1)
+        expected = order_state(order,dict(step,content=snooze["content"]),"snoozed",revision+1)
         expected.update(blocked_since=timestamp(pool["entered"]),remind_at=snooze["remind_at"])
         action = take(operations,(tid,"action","snooze",revision),"hermes",
                       {"action":"snooze","expected_revision":revision,"remind_after_hours":snooze["remind_after_hours"]},
                       [{"task":expected,"delivery_state":"received"}])
-        if action["seq"]<=last_snooze:
-            raise ValueError("snooze predates pool entry or a previous snooze")
+        if action["seq"]<=position:
+            raise ValueError("snooze predates pool entry or a previous action")
         snooze["action_key"] = action["key"]
-        last_snooze = action["seq"]
-        activity.append((last_snooze,{"snoozed"}))
-    first_snooze = activity[0][0] if activity else None
+        position = action["seq"]
+        if first_snooze is None:
+            first_snooze = position
+        activity.append((position,{"snoozed"}))
     for material in step.get("materials",[]):
         mid = material["material_id"]
         receipt = take(operations,(tid,"material",mid),"worker/"+step["worker_id"],
@@ -488,22 +605,35 @@ def verify_pool_activity(tid, step, order, operations, after, states):
         after = receipt["seq"]
         activity.append((after,{"snoozed" if first_snooze is not None and after>first_snooze else "blocked"}))
     states.extend(sorted(activity))
-    return max(after,last_snooze)
+    return max(after,position)
+
+
+def transition_replies(order, step, target):
+    transition = step["transition"]
+    waiting = dict(target,content=transition["content"])
+    early = order_state(order,waiting,transition["wait_state"],transition["expected_revision"]+1)
+    replies = [{"task":early,"delivery_state":"pending"}]
+    if not transition.get("waiting_edits"):
+        offered = order_state(order,target,"ready",target["revision"],target["assignment_id"])
+        replies.append({"task":offered,"delivery_state":"pending"})
+    return replies
 
 
 def verify_order(db, tid, entry, operations):
     order = task(db,tid)
     history = entry["assignment_history"]
     adjacent_states, cleanup_receipts = [],[]
-    after = 0
+    after = verify_edits(tid,entry.get("initial_edits",[]),operations,0)
     cancelled = entry["terminal_state"]=="cancelled"
     if not history:
         verify_cancelled(tid,entry,order,{},operations,after,adjacent_states)
     for step,target in zip(history,history[1:]+[None]):
         aid, worker, revision = (step[key] for key in ("assignment_id","worker_id","revision"))
         actor = "worker/"+worker
-        if target is None and cancelled and not (step.get("cleanup") or step.get("pool")):
-            verify_cancelled(tid,entry,order,step,operations,after,adjacent_states)
+        if "fenced_edits" in step or step.get("unaccepted"):
+            after = verify_edits(tid,step.get("fenced_edits",[]),operations,after)
+            if target is None:
+                verify_cancelled(tid,entry,order,step,operations,after,adjacent_states)
             continue
         accept = take(operations,(tid,"accept",aid),actor,{"assignment_id":aid,"revision":revision},
                       [{"accepted":True,"holder":{"kind":"worker","worker_id":worker},"assignment_id":aid}],session=True)
@@ -516,6 +646,7 @@ def verify_order(db, tid, entry, operations):
         source = step.get("pool",{}).get("source")
         possible = {"working","blocked"} if source in ("offline","unanswered") else {"working"}
         adjacent_states.append((after,possible))
+        after = verify_edits(tid,step.get("working_edits",[]),operations,after)
         if target is None and is_reviewed_completion(entry):
             report = take(operations,(tid,"report",aid,"completed"),actor,{
                 "assignment_id":aid,"outcome":"completed","summary":entry["summary"],"artifact_ids":entry["artifact_ids"]},
@@ -524,7 +655,10 @@ def verify_order(db, tid, entry, operations):
             request = {"action":"close","expected_revision":order["revision"]-1}
             optional_close_note(operations.get(key,{}).get("body",{}),request)
             close = take(operations,key,"hermes",request,[{"task":order,"delivery_state":"received"}])
-            if not after<report["seq"]<close["seq"]:
+            if report["seq"]<=after:
+                raise ValueError("completion predates acceptance or edits")
+            after = verify_edits(tid,entry.get("completed_edits",[]),operations,report["seq"])
+            if close["seq"]<=after:
                 raise ValueError("acceptance, report, and manager review are out of order")
             adjacent_states.extend([(report["seq"],{"completed_reported"}),(close["seq"],{"closed"})])
             entry.update(w04_key=report["key"],review_key=close["key"])
@@ -549,19 +683,18 @@ def verify_order(db, tid, entry, operations):
             else:
                 verify_pool_archive(tid,entry,order,operations,after,adjacent_states)
             continue
-        expected_revision = target["revision"]-2
+        transition = step["transition"]
+        expected_revision = transition["expected_revision"]
+        replies = transition_replies(order,step,target)
         if resume := step.get("resume"):
-            replies = [{"task":order_state(order,target,"resuming",target["revision"]-1),"delivery_state":"pending"},
-                       {"task":order_state(order,target,"ready",target["revision"],target["assignment_id"]),
-                        "delivery_state":"pending"}]
             action = take(operations,(tid,"action","resume",expected_revision),"hermes",
                           {"action":"resume","expected_revision":expected_revision,"resolution":resume["resolution"]},replies)
             if action["seq"]<=after:
                 raise ValueError("resume predates the original assignment release")
             resume.update(action_key=action["key"],receipt=action["reply"])
-            after = action["seq"]
-            possible = {"ready"} if action["reply"]["task"]["state"]=="ready" else {"resuming","ready"}
-            adjacent_states.append((after,possible))
+            state = action["reply"]["task"]["state"]
+            adjacent_states.append((action["seq"],{state,"ready"}))
+            after = verify_edits(tid,transition.get("waiting_edits",[]),operations,action["seq"])
             continue
         key = (tid,"action","transfer",expected_revision)
         transfer = operations.get(key)
@@ -571,16 +704,13 @@ def verify_order(db, tid, entry, operations):
         cleanup = step.get("cleanup")
         if cleanup and cleanup["reason"]!=reason:
             raise ValueError("cleanup reason differs from the transfer")
-        replies = [{"task":order_state(order,target,"ready",target["revision"]-1),"delivery_state":"pending"},
-                   {"task":order_state(order,target,"ready",target["revision"],target["assignment_id"]),
-                    "delivery_state":"pending"}]
         transfer = take(operations,key,"hermes",{"action":"transfer","expected_revision":expected_revision,
                                                 "worker_id":target["worker_id"],"reason":reason},replies)
         if transfer["seq"]<=after:
             raise ValueError("transfer predates the original assignment records")
         step.update(transfer_key=transfer["key"],transfer_reason=reason)
-        after = transfer["seq"]
-        adjacent_states.append((after,{"ready"}))
+        adjacent_states.append((transfer["seq"],{"ready"}))
+        after = verify_edits(tid,transition.get("waiting_edits",[]),operations,transfer["seq"])
         if cleanup:
             receipt = take(operations,(tid,"report",aid,"transfer_confirmed"),actor,
                            {"assignment_id":aid,"outcome":"transfer_confirmed"},[
@@ -588,7 +718,7 @@ def verify_order(db, tid, entry, operations):
                                for state in ("ready","resuming","working","blocked","snoozed","completed_reported",
                                              "closed","cancelled","failed_archived")],
                            session=True)
-            if receipt["seq"]<=after:
+            if receipt["seq"]<=transfer["seq"]:
                 raise ValueError("cleanup receipt predates the transfer")
             cleanup_receipts.append((cleanup,receipt))
     for cleanup,receipt in cleanup_receipts:
@@ -612,7 +742,12 @@ def check_operations(db,entries,workers,frames,uploads,expected_count,queue_cand
                 applicable += 1
             continue
         applicable += 1
-        if method=="POST" and len(parts)==5 and parts[:3]==["","v1","tasks"] and parts[3] in entries:
+        if method=="PATCH" and len(parts)==4 and parts[:3]==["","v1","tasks"] and parts[3] in entries:
+            key = (parts[3],"edit",body.get("expected_revision"))
+            if key in operations:
+                raise ValueError("duplicate task edit receipt")
+            operations[key] = {"seq":row["seq"],"actor":actor,"key":row["key"],"body":body,"reply":reply}
+        elif method=="POST" and len(parts)==5 and parts[:3]==["","v1","tasks"] and parts[3] in entries:
             tid,op = parts[3:]
             if op=="accept":
                 key = (tid,op,body.get("assignment_id"))
