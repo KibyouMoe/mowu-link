@@ -6,7 +6,7 @@
 
 真实隔离 Hermes 网关从原生控制接口创建 LOCAL 会话并加载管理插件。真实 Trigger 经 Router 发送 Event、Notify、Info，网关原生输入台账只有前两条，均为 `completed`。Event 在本地脚本模型指示下，经真实 `tool_describe`、`tool_call` 调用 `router_info`，附件与原件 SHA-256 相同。同一会话再用 `router_create_task` 建单，原生工具记录与 Router 的工单号相符。阻塞 Event 超过 10 秒期间 Notify 未启动，Event 释放后 11.01 秒送达。Info 可从 Router 按消息号读回。清掉适配器和插件的 Event 回执后冷开网关，同一原生收件号补回，网关 PID 变化，收件仍两条、模型 HTTP 请求仍五次、Router 只有原未派单。Hermes 固定在 `464bd0dd659f336bd0bf468bf02cad8aac211136`。云端模型和真实飞书留待独立试验。 [实测记录](evidence/hermes-gateway-trigger.json) · [复跑方法](README.md#hermes-专用会话)
 
-只读收件检查点 `2d134fe78bde61ad245aba85f8950446475026d4` 的 289 文件包从安装目录通过 7 项专项，并逐文件复核。macOS 全量通过 305 项、5 项按环境跳过，Linux arm64 全量通过 189 项、121 项按环境跳过。Windows Codex、安装和维护共 14 项，DSH 13 项，两次回退通过。Windows 默认 Docker 仍为 Windows 引擎，本轮未运行可写工位的 Linux 容器。随后增加同一 Hermes 原生会话建单，并单独复跑原生全链路。 [Windows 回归](https://github.com/KibyouMoe/mowu-link/actions/runs/45897991172)
+只读收件检查点 `2d134fe78bde61ad245aba85f8950446475026d4` 的 289 文件包从安装目录通过 7 项专项，并逐文件复核。macOS 全量通过 305 项、5 项按环境跳过，Linux arm64 全量通过 189 项、121 项按环境跳过。Windows Codex、安装和维护共 14 项，DSH 13 项，两次回退通过。Windows 默认 Docker 仍为 Windows 引擎，本轮未运行可写工位的 Linux 容器。原生建单检查点 `c0438d594b3b27bdfa1ad1bf811ed2f997b53d5c` 另制 289 文件包，安装目录的原生全链路与管理工具共 3 项通过，逐文件复核一致。Windows 同提交的 14 项、13 项及两套回退再次通过。 [收件版 Windows 回归](https://github.com/KibyouMoe/mowu-link/actions/runs/45897991172) · [建单版 Windows 回归](https://github.com/KibyouMoe/mowu-link/actions/runs/45898466798)
 
 正式维护入口新增独立 HTTPS 客户端。请求显式带原 UUID 与已查询的代际。写入回包丢失时保留请求号，可按原号查询。外部观察者试图重启被拒。实际隔离 Hermes GatewayRunner 运行在临时 LaunchAgent，认证健康接口及原生 PID 文件与新维护回执一致，原 PID 已退出。维护服务冷重开后查回原回执，重投原请求时网关 PID 不变。网关本机 API adapter 已连通，整体就绪仍为 `degraded`，没有使用模型或飞书凭据。[网关维护实测](evidence/hermes-gateway-maintenance.json) · [复跑与用法](README.md#独立维护客户端)
 

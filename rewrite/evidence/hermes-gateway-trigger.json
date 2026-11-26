@@ -61,5 +61,21 @@
       ],
       "default_docker_engine": "windows"
     }
+  },
+  "write_checkpoint_package_validation": {
+    "revision": "c0438d594b3b27bdfa1ad1bf811ed2f997b53d5c",
+    "installed_archive_sha256": "3ac21e30df407b0ec1053af5d5fb04404972c15b0945b5b90cb01d96fed10986",
+    "archive_files": 289,
+    "installed_specialized_tests_passed": 3,
+    "windows_ci": {
+      "run": "https://github.com/KibyouMoe/mowu-link/actions/runs/45898466798",
+      "codex_install_and_ops_tests_passed": 14,
+      "dsh_native_tests_passed": 13,
+      "rollback_rehearsals_passed": [
+        "Router",
+        "Worker and adapter"
+      ],
+      "default_docker_engine": "windows"
+    }
   }
 }
