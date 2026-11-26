@@ -4,6 +4,10 @@
 
 ## 检查点与证据
 
+已配置的 Codex App Server 适配器可通过 `--resume-on-handoff` 保持原生会话冷态。隔离 TLS 进程在 Router 确认冻结后才恢复指定会话。实测丢弃 Adapter 回执后，Worker 沿用原交接号，查回这同一个会话，释放窗口后才发正式单。原生回合收到一个正式输入，模型夹具触发两次 `worker_report`，Router 仅一条待验通知。适配器冷重开后恢复已提交的绑定，没有额外模型请求或卡片回放。另在真实 App Server 丢弃原生恢复响应，第二次只核历史和状态。活动原生目标会保留在原宿主，Worker 回到原绑定。飞书与模型均为测试夹具。[冷会话与两层丢回执](evidence/codex-cold-resume.json)
+
+复跑 `python3 -B -m unittest -v rewrite.test_codex_app_server.CodexAppServer.test_cold_codex_activates_only_after_router_pauses_and_recovers_lost_reply rewrite.test_codex_app_server.CodexAppServer.test_native_cold_activation_checks_goal_and_recovers_a_missing_app_server_reply rewrite.test_worker_resume.WorkerResume.test_cold_target_with_active_goal_keeps_source_even_when_release_reply_is_lost`。三个场景连续通过 12 轮。源码目录 macOS 通过 221 项，Linux arm64 通过 155 项，另 66 项本机宿主用例跳过。DSH、Desktop 的冷启动和真实飞书验收仍待接。
+
 `/resume` 的目录按旧版从 0 编号。翻页复用当次目录，刷新和搜索生成新目录，选编号需已确认的卡片。隔离实测卡片送达回执丢失、重复发送、目录重排、翻页后回复错页与回复刷新前的旧卡，均未误切。完整标题重复时需用 ID，目录内未配置的冷会话只可浏览。原生联调从真实 Codex App Server 生成的目录卡按编号切到 DSH，完成私聊和正式工单，再按 ID 切回。对应两组场景连续通过 12 轮，模型与飞书为夹具。[目录与原生回执](evidence/native-resume-catalog.json)
 
 复跑 `python3 -B -m unittest -v rewrite.test_worker_resume.WorkerResume.test_number_uses_the_confirmed_catalog_and_old_card_cannot_redirect_it rewrite.test_dsh_native_loop.NativeLoop.test_platform_resume_switches_live_codex_and_dsh_sessions`。macOS 218 项通过，Linux arm64 154 项通过，另 64 项本机宿主用例跳过。冷目录中自动打开宿主仍待接。

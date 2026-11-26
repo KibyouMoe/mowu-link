@@ -172,7 +172,9 @@ Worker 为每个候选会话和原会话登记各自的 `adapter/<Worker ID>/<�
 
 Worker 先确认没有持单和待处理的原生业务，暂停派发，核对两个会话均空闲后保存新绑定。Router 确认解除才返回切换卡。新消息使用新会话，已投递消息重试只读原回执。Worker 重开时以已提交的绑定为准，旧会话身份发来的新回调会被拒。
 
-切换尚在 `starting` 时，目标断开会保留原会话及交接窗口。可从 `worker-status` 读取 `native_switch.handoff_id`，用原号执行 `handoff-admission ... end`。确认解除后继续使用原会话。到达 `bound` 时，恢复沿用已经提交的目标，目标重新可读后才解除交接。冷会话目前可浏览，切入仍需原生适配器先恢复该会话。验收覆盖隔离 Codex App Server、DSH、真实 TLS 进程和飞书夹具。[目录与原生回执](evidence/native-resume-catalog.json)
+切换尚在 `starting` 时，目标断开会保留原会话及交接窗口。可从 `worker-status` 读取 `native_switch.handoff_id`，用原号执行 `handoff-admission ... end`。确认解除后继续使用原会话。到达 `bound` 时，恢复沿用已经提交的目标，目标重新可读后才解除交接。验收覆盖隔离 Codex App Server、DSH、真实 TLS 进程和飞书夹具。[目录与原生回执](evidence/native-resume-catalog.json)
+
+已准备好的独立 Codex App Server 历史会话可用 `codex-adapter --resume-on-handoff`。将适配器的固定 `--session`、`--cwd` 和独立 profile 对齐，再将其连接配置加入 Worker 的 `--resume-targets`。适配器可以先上线并保持会话冷态。浏览目录不会打开会话。Worker 在 Router 确认暂停派发后，才用原交接号请求恢复这一指定会话。恢复完成后先核对会话和忙闲，再提交绑定。已有活动原生目标时，Worker 保留原会话并解除交接。适配器重开后只按已提交的绑定和交接回执恢复当前会话。DSH 冷会话和 Codex Desktop 日常会话仍待接。[Codex 冷会话证据](evidence/codex-cold-resume.json)
 
 ### Hermes 专用会话
 

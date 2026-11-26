@@ -48,11 +48,17 @@ class RemoteAdapter:
                 502,"invalid_host_observation")
         session = info["session"]
         require(self.expected_session is None or session==self.expected_session,409,"wrong_native_session")
-        return {"session":session,"next_turn":info.get("next_turn") is True,
+        state = info.get("native_load_state")
+        require(state in (None,"cold","loaded"),502,"invalid_host_observation")
+        return {**({"native_load_state":state} if state is not None else {}),
+                "session":session,"next_turn":info.get("next_turn") is True,
                 "context_usage":info.get("context_usage") is True,"model_view":info.get("model_view") is True,
                 "model_change":info.get("model_change") is True,"goal_control":info.get("goal_control") is True,
                 "compaction":info.get("compaction") is True,"session_catalog":info.get("session_catalog") is True,
                 "stop_private":info.get("stop_private") is True}
+
+    def activate(self,session,operation_id):
+        return self.request("POST","host/activate",{"operation_id":operation_id},native_session=session)
 
     def context_usage(self):
         return self.request("GET","host/context")
@@ -111,16 +117,26 @@ class RemoteAdapter:
         return self.request("POST","host/answer-question",{"original":original,"answer":answer})["proof"]
 
 
-def serve_adapter(adapter, worker_id, identities, address, context):
+def serve_adapter(adapter, worker_id, identities, address, context, *, activation=None):
     def handle(actor, method, path, body, headers):
         require(actor == "worker/" + worker_id, 403, "wrong_adapter_owner")
-        if path.startswith("/v1/host/bound/"):
+        pinned = path.startswith("/v1/host/bound/")
+        if pinned:
             require(headers.get(SESSION_HEADER)==adapter.bound_session(),409,"wrong_native_session")
             path = "/v1/host/"+path.removeprefix("/v1/host/bound/")
+        if activation is not None and path not in ("/v1/host/session","/v1/host/activate"):
+            if activation.state!="loaded":
+                raise Fault(503,"native_session_cold",True)
         match method,path:
             case "GET","/v1/host/session":
                 info = getattr(adapter,"session_info",None)
                 result = info() if info else {"session":adapter.bound_session(),"next_turn":False}
+                if activation is not None:
+                    result["native_load_state"] = activation.state
+            case "POST","/v1/host/activate":
+                require(pinned and activation is not None,403,"native_activation_unavailable")
+                require(set(body)=={"operation_id"} and valid_guid(body.get("operation_id")),422,"invalid_native_activation")
+                result = activation.activate(adapter.bound_session(),body["operation_id"])
             case "GET","/v1/host/activity":
                 result = {"busy":adapter.busy()}
             case "GET","/v1/host/context":

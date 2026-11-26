@@ -4,6 +4,7 @@ from contextlib import ExitStack, closing, contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import hashlib
 import json
+import os
 from pathlib import Path
 from queue import Empty, Queue
 import shutil
@@ -17,6 +18,7 @@ import unittest
 
 from .agent_tools import REPORT_TOOL, TOOLSET
 from .adapter import HostAdapter
+from .codex_activation import CodexActivation
 from .codex_app_server import AppServerHost, worker_callbacks
 from .codex_display import CodexDisplay
 from .codex_provision import SEED
@@ -29,6 +31,7 @@ from .host_wire import RemoteAdapter, serve_adapter
 from .native_files import NativeFiles
 from .orders import Orders
 from .question_cards import Actions
+from .release_check import config, serve
 from .state_bundle import capture, filename, verify
 from .storage import Fault, encode, guid
 from .test_feishu_output import PlatformFixture
@@ -1071,6 +1074,208 @@ class CodexAppServer(unittest.TestCase):
                          "out_of_scope_ids":[archived,other],"additional_model_requests":0,
                          "replayed_catalog_receipt":found,
                          "boundary":"Actual App Server, fresh profile and native history. Fixture model seeds catalog and platform is isolated."}
+
+    @unittest.skipUnless(shutil.which("openssl"),"isolated TLS certificate generator required")
+    def test_cold_codex_activates_only_after_router_pauses_and_recovers_lost_reply(self):
+        root = Path(self.root).resolve()
+        profile,project = root/"cold-profile",root/"cold-project"
+        profile.mkdir(mode=0o700)
+        project.mkdir(mode=0o700)
+        self.local_profile(profile)
+        provisioned = subprocess.run(self.provision_command(profile,project),cwd=Path(__file__).resolve().parents[1],
+                                     capture_output=True,text=True,timeout=30,check=True)
+        seed = json.loads(provisioned.stdout)
+        sid = seed["thread_id"]
+        self.assertEqual(self.provider.observed,[(True,0)])
+        with start_app_server(CODEX,profile,project) as review:
+            native = review.request("thread/read",{"threadId":sid,"includeTurns":False})["thread"]
+            self.assertEqual((native["id"],native["status"]["type"]),(sid,"notLoaded"))
+
+        clock = Clock()
+        loop = self.enterContext(Loop.isolated(clock))
+        source = loop.native.session
+        source_token,cold_token,platform_token,source_callback,cold_callback = (guid() for _ in range(5))
+        source_url = self.enterContext(running(serve_adapter(loop.adapter,"oguri",{source_token:"worker/oguri"},
+                                                            ("127.0.0.1",0),None)))
+        source_port = RemoteAdapter(Client(source_url,source_token),source)
+        target = RemoteAdapter(None,sid)
+        worker_db = root/"cold-worker.db"
+        worker = Worker(worker_db,"oguri",loop.wire,source_port,clock=clock,resume_targets={sid:target})
+        service = WorkerService(worker,clock)
+        identities = {platform_token:"platform/oguri",source_callback:"adapter/oguri/"+source,
+                      cold_callback:"adapter/oguri/"+sid}
+        worker_url = self.enterContext(running(service.listen(identities,("127.0.0.1",0),None)))
+        platform = Client(worker_url,platform_token)
+        inbox = Inbound(root/"cold-platform.db",platform,None,"app","trainer","chat",clock=clock)
+        cards = Views(root/"cold-platform.db",platform,PlatformFixture(),"chat","小栗帽",clock)
+        foreign = guid()
+        roles = config(root,"cold-adapter-roles",{cold_token:"worker/oguri",foreign:"worker/foreign"})
+        to_worker = config(root,"cold-to-worker",{"url":worker_url,"token":cold_callback})
+        cert,key = root/"tls.crt",root/"tls.key"
+        subprocess.run(["openssl","req","-x509","-newkey","rsa:2048","-nodes","-days","1","-subj","/CN=localhost",
+                        "-addext","subjectAltName=IP:127.0.0.1","-out",cert,"-keyout",key],
+                       capture_output=True,timeout=10,check=True)
+        adapter_db = root/"cold-adapter.db"
+        extra = ("--worker-id","oguri","--session",sid,"--worker-connection",to_worker,"--codex-binary",CODEX,
+                 "--codex-profile",profile,"--cwd",project,"--resume-on-handoff")
+        package = Path(__file__).resolve().parents[1]
+
+        def event(mid,text):
+            return inbox.record("app","user","trainer",{"chat_type":"p2p","chat_id":"chat","message_id":mid,
+                "message_type":"text","content":encode({"text":text})})
+
+        calls = []
+        def install_transport(url,*,lose):
+            transport = target.client = Client(url,cold_token,cert)
+            request = transport.request
+
+            def observe(method,path,*args,**kwargs):
+                if path=="host/bound/activate":
+                    calls.append(args[0]["operation_id"])
+                    if lose:
+                        self.assertTrue(loop.hermes.workers()["items"][0]["admission_paused"])
+                        self.assertEqual(worker.native_session_pin,source)
+                    reply = request(method,path,*args,**kwargs)
+                    if lose:
+                        raise ConnectionError("isolated adapter activation reply lost after native load")
+                    return reply
+                return request(method,path,*args,**kwargs)
+
+            transport.request = observe
+
+        with serve(package,"codex-adapter",adapter_db,roles,cert,key,dict(os.environ),extra) as url:
+            install_transport(url,lose=True)
+            service.step()
+            with self.assertRaisesRegex(Fault,"native_activation_unavailable"):
+                Client(url,cold_token,cert).request("POST","host/activate",{"operation_id":guid()})
+            other_session = guid()
+            with self.assertRaisesRegex(Fault,"wrong_native_session"):
+                RemoteAdapter(Client(url,cold_token,cert),other_session).activate(other_session,guid())
+            with self.assertRaisesRegex(Fault,"adapter_identity_unconfirmed"):
+                RemoteAdapter(Client(url,foreign,cert),sid).activate(sid,guid())
+            with self.assertRaisesRegex(Fault,"native_session_cold"):
+                target.deliver("before-cutover",{"kind":"chat","text":"Must not reach the native session"})
+            menu = inbox.deliver(event("om_cold_catalog","/resume"))
+            cards.poll()
+            self.assertGreater(menu["output"]["seq"],0)
+            self.assertEqual(target.session_info()["native_load_state"],"cold")
+            self.assertFalse(calls)
+            cmd = event("om_load_exact_thread","/resume "+sid)
+            with self.assertRaisesRegex(Fault,"native_switch_host_unconfirmed"):
+                inbox.deliver(cmd)
+            self.assertEqual(len(calls),1)
+            self.assertEqual(target.session_info()["native_load_state"],"loaded")
+            self.assertEqual(worker.native_session_pin,source)
+            self.assertTrue(loop.hermes.workers()["items"][0]["admission_paused"])
+            self.assertEqual(self.provider.observed,[(True,0)])
+            task_id = loop.hermes.create(guid(),"Cold session rollout","Return a real worker_report callback","oguri")["task_id"]
+            self.assertIsNone(loop.hermes.inspect(task_id)["task"]["assignment_id"])
+            service.step()
+            cutover = inbox.deliver(cmd)
+            self.assertEqual((cutover["binding_receipt"]["session"],worker.native_session_pin),(sid,sid))
+            self.assertEqual(calls,[cutover["binding_receipt"]["handoff_id"]])
+            self.assertFalse(loop.hermes.workers()["items"][0].get("admission_paused",False))
+            service.step()
+            clock.advance(10)
+            until = time.monotonic()+10
+            while time.monotonic()<until:
+                service.step()
+                state = loop.hermes.inspect(task_id)
+                with closing(sqlite3.connect(adapter_db)) as db:
+                    projected = db.execute("SELECT COUNT(*) FROM codex_display_turns WHERE sent=1").fetchone()[0]
+                if state["task"]["state"]=="completed_reported" and projected==2 and not target.busy():
+                    break
+                time.sleep(.035)
+            self.assertEqual(state["task"]["state"],"completed_reported")
+            self.assertEqual(projected,2)
+            self.assertEqual(loop.native.entries(),[])
+            self.assertIsNone(worker.hold()["held_assignment_id"])
+            public = [entry["event"] for entry in platform.request("GET","worker/display")["items"]]
+            self.assertFalse(any(event["turn_id"]==seed["turn_id"] for event in public))
+            self.assertEqual(sum(event["kind"]=="final" and event["session"]==sid for event in public),1)
+            outcome, = loop.manager_wire.frames(0)
+            self.assertEqual(outcome["payload"]["task_id"],task_id)
+            report = state["last_report"]
+            self.assertEqual(worker.assignment_session(report["assignment_id"]),sid)
+            before_restart = self.provider.observed[:]
+
+        with serve(package,"codex-adapter",adapter_db,roles,cert,key,dict(os.environ),extra) as url:
+            install_transport(url,lose=False)
+            self.assertEqual(target.session_info()["native_load_state"],"cold")
+            clock.advance(5)
+            service.step()
+            self.assertEqual(service.status()["host_session"],sid)
+            self.assertEqual(calls,[cutover["binding_receipt"]["handoff_id"]]*2)
+            self.assertEqual(inbox.deliver(cmd),cutover)
+            self.assertEqual(loop.hermes.inspect(task_id)["last_report"],report)
+        self.assertEqual(self.provider.observed,before_restart)
+        self.assertEqual(before_restart,[(True,0),(True,0),(True,1),(True,2)])
+        with start_app_server(CODEX,profile,project) as review:
+            review.request("thread/resume",{"threadId":sid,"cwd":str(project)})
+            turns = AppServerHost(review,sid).thread(sid,include_turns=True)["turns"]
+            self.assertEqual(len(turns),2)
+            self.assertEqual(turns[0]["id"],seed["turn_id"])
+            native_inputs = [item["clientId"] for item in turns[1]["items"] if item["type"]=="userMessage"]
+            formal_delivery, = [frame["delivery_id"] for frame in loop.wire.frames(0) if frame["kind"]=="task.dispatch"]
+            self.assertEqual(native_inputs,["mowulink-"+formal_delivery])
+            tool_calls = [item for item in turns[1]["items"] if item["type"]=="dynamicToolCall"]
+            self.assertEqual([item["tool"] for item in tool_calls],["worker_report"]*2)
+        self.evidence = {"cold_native_session":sid,"existing_turn":seed["turn_id"],"handoff":cutover["binding_receipt"],
+            "activation_requests":calls,"replayed_without_second_activation_before_process_restart":True,
+            "new_native_turn":turns[1]["id"],"native_client_input":native_inputs[0],
+            "native_tool_calls":[item["id"] for item in tool_calls],"seed_republished":False,"new_model_calls_on_restore":0,
+            "task_id":task_id,"assignment_id":report["assignment_id"],"notification_id":outcome["delivery_id"],
+            "scope":"Actual independent Codex App Server process and temporary TLS adapter; scripted model and Feishu fixture"}
+
+    def test_native_cold_activation_checks_goal_and_recovers_a_missing_app_server_reply(self):
+        root = Path(self.root).resolve()
+        with isolated_app_server(root,self.origin) as seed:
+            sid = seed.request("thread/start",{"cwd":str(root),"ephemeral":False})["thread"]["id"]
+            original = seed.request("turn/start",{"threadId":sid,
+                "input":[{"type":"text","text":"Seed the independent cold target","text_elements":[]}]})["turn"]["id"]
+            until = time.monotonic()+12
+            while seed.event(until)["method"]!="turn/completed":
+                pass
+        with isolated_app_server(root,self.origin) as rpc:
+            host = AppServerHost(rpc,sid)
+            objective = "Keep the isolated target goal active"
+            self.assertEqual(host.thread(sid,include_turns=False)["status"]["type"],"notLoaded")
+            rpc.request("thread/goal/set",{"threadId":sid,"origin":"user","status":"active","objective":objective})
+            initialized,loads = [],[]
+            activation = CodexActivation(host,root,root/"cold-proof.db",
+                                         lambda:initialized.append(host.thread(sid,include_turns=True)["turns"]))
+            operation_id = guid()
+            with self.assertRaisesRegex(Fault,"native_cold_goal_active"):
+                activation.activate(sid,operation_id)
+            self.assertEqual(activation.state,"cold")
+            self.assertEqual(host.thread(sid,include_turns=False)["status"]["type"],"notLoaded")
+            self.assertEqual(host.goal_view(sid)["goal"]["objective"],objective)
+            rpc.request("thread/goal/set",{"threadId":sid,"origin":"user","status":"paused","objective":objective})
+            request = host.request
+
+            def drop(method,params):
+                result = request(method,params)
+                if method=="thread/resume":
+                    loads.append(params["threadId"])
+                    raise Fault(503,"isolated_native_resume_reply_lost",True)
+                return result
+
+            host.request = drop
+            with self.assertRaisesRegex(Fault,"isolated_native_resume_reply_lost"):
+                activation.activate(sid,operation_id)
+            self.assertEqual(activation.state,"cold")
+            self.assertEqual(host.thread(sid,include_turns=False)["status"]["type"],"idle")
+            self.assertEqual(initialized,[])
+            expected = {"session":sid,"operation_id":operation_id,"state":"loaded"}
+            self.assertEqual(activation.activate(sid,operation_id),expected)
+            self.assertEqual(activation.activate(sid,operation_id),expected)
+            self.assertEqual(loads,[sid])
+            self.assertEqual([[turn["id"] for turn in history] for history in initialized],[[original]])
+            self.assertEqual(host.goal_view(sid)["goal"]["phase"],"paused")
+        self.assertEqual(len(self.provider.observed),1)
+        self.evidence = {"session":sid,"operation_id":operation_id,"existing_turn":original,
+                         "goal_refused_while_cold":True,"goal_after_restore":"paused",
+                         "native_resume_calls":len(loads),"additional_model_calls":0}
 
     def test_native_app_server_reconnect_recovers_input_before_w04_without_new_model_call(self):
         with isolated_app_server(self.root,self.origin) as rpc:

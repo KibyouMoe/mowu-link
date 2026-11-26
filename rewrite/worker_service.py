@@ -67,6 +67,9 @@ class WorkerService:
             require(isinstance(info,dict),502,"invalid_host_observation")
             session = info.get("session")
             require(isinstance(session,str) and session,502,"invalid_host_observation")
+            if info.get("native_load_state")=="cold":
+                require(not worker_resume.pending(w) and not worker_handoff.active(w),503,"native_handoff_in_progress")
+                info = worker_resume.restore_committed_binding(w,info)
             busy = w.adapter.busy(session=session)
             require(type(busy) is bool,502,"invalid_host_observation")
             w.observe_native_binding(session)

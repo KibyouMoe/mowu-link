@@ -35,6 +35,7 @@ class CodexDisplay:
         self.buffered = []
         self.recovered = None
         self.waiting_for_history = False
+        self.ready = Event()
 
     def observe(self,event):
         self.events.put(event)
@@ -118,6 +119,8 @@ class CodexDisplay:
 
     def pump(self):
         while not self.stop.is_set():
+            if not self.ready.wait(.2):
+                continue
             if not self.wake.wait(.2):
                 continue
             self.wake.clear()
@@ -135,15 +138,21 @@ class CodexDisplay:
                 if retryable and not self.stop.wait(1):
                     self.wake.set()
 
-    @contextmanager
-    def run(self):
+    def initialize(self):
         self.recovered = set(self.collect())
+        self.ready.set()
         self.wake.set()
+
+    @contextmanager
+    def run(self, *, deferred=False):
+        if not deferred:
+            self.initialize()
         thread = Thread(target=self.pump,daemon=True)
         thread.start()
         try:
             yield
         finally:
             self.stop.set()
+            self.ready.set()
             self.wake.set()
             thread.join(timeout=3)

@@ -1,0 +1,45 @@
+{
+  "at_utc": "2026-11-26T11:33:09.498533+00:00",
+  "repetitions": 12,
+  "cases": [
+    "test_cold_codex_activates_only_after_router_pauses_and_recovers_lost_reply",
+    "test_native_cold_activation_checks_goal_and_recovers_a_missing_app_server_reply",
+    "test_cold_target_with_active_goal_keeps_source_even_when_release_reply_is_lost"
+  ],
+  "codex_service": {
+    "cold_native_session": "01a217a1-7756-7b70-a613-73706fe960aa",
+    "existing_turn": "01a217a1-775e-7012-b060-b7fe252bc4bd",
+    "handoff": {
+      "handoff_id": "d53da6fc-651c-5b92-9dfe-dcec543e8904",
+      "previous_session": "test-agent-session",
+      "session": "01a217a1-7756-7b70-a613-73706fe960aa",
+      "state": "bound"
+    },
+    "activation_requests": [
+      "d53da6fc-651c-5b92-9dfe-dcec543e8904",
+      "d53da6fc-651c-5b92-9dfe-dcec543e8904"
+    ],
+    "replayed_without_second_activation_before_process_restart": true,
+    "new_native_turn": "01a217a1-791f-7131-8c2f-1032ef28fdbb",
+    "native_client_input": "mowulink-02b426ae-ceb2-421e-8fda-57b1b64f468b",
+    "native_tool_calls": [
+      "native_fixture_0",
+      "native_fixture_1"
+    ],
+    "seed_republished": false,
+    "new_model_calls_on_restore": 0,
+    "task_id": "ba3e7aea-e048-49d7-a27c-f27dfdb38b65",
+    "assignment_id": "257f8f71-67bc-478f-b695-2e1dac0a8f49",
+    "notification_id": "c164d2d1-ce88-4efb-951e-d0f28e106d4b",
+    "scope": "Actual independent Codex App Server process and temporary TLS adapter; scripted model and Feishu fixture"
+  },
+  "native_missing_rpc_reply": {
+    "session": "01a217a1-7df4-7fe0-9ace-b1f53a59d42e",
+    "operation_id": "a2131e5c-5b5f-4cec-ab8c-b6b4b70c7b39",
+    "existing_turn": "01a217a1-7dfc-7c11-9a36-ed3ca30bd1fd",
+    "goal_refused_while_cold": true,
+    "goal_after_restore": "paused",
+    "native_resume_calls": 1,
+    "additional_model_calls": 0
+  }
+}

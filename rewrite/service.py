@@ -83,6 +83,7 @@ def serve(args,stack):
         public_output = publishing(adapter,client,args.worker_id)
         listener = serve_adapter(adapter,args.worker_id,identities,address,ctx)
     elif args.component == "codex-adapter":
+        from .codex_activation import CodexActivation, pinned_thread
         from .codex_app_server import AppServerHost, worker_callbacks
         from .codex_display import CodexDisplay
         from .codex_rpc import require_test_account, start_app_server
@@ -92,17 +93,18 @@ def serve(args,stack):
         require_test_account(rpc)
         native = AppServerHost(rpc,args.session,args.db,args.public_image_root,
                                relay_command_approvals=args.relay_command_approvals)
-        saved = native.thread(args.session,include_turns=False)
-        require(Path(saved["cwd"]).resolve()==args.cwd.resolve(),409,"wrong_native_workspace")
-        resumed = rpc.request("thread/resume",{"threadId":args.session,"cwd":str(args.cwd)})["thread"]
-        require(resumed.get("id")==args.session,409,"wrong_native_session")
-        native.bind_fork_history(args.db,resumed)
+        pinned_thread(native,args.cwd.resolve())
+        if not args.resume_on_handoff:
+            resumed = rpc.request("thread/resume",{"threadId":args.session,"cwd":str(args.cwd)})["thread"]
+            require(resumed.get("id")==args.session,409,"wrong_native_session")
+            native.bind_fork_history(args.db,resumed)
         media = NativeFiles(args.media_cache,client) if args.media_cache else None
         adapter = HostAdapter(args.db,native,args.session,media)
         display = CodexDisplay(adapter,client)
+        activation = CodexActivation(native,args.cwd,args.db,display.initialize) if args.resume_on_handoff else None
         callbacks = worker_callbacks(native,client,display.wake.set,display.observe,display.observe_terminal)
-        public_output = display.run()
-        listener = serve_adapter(adapter,args.worker_id,identities,address,ctx)
+        public_output = display.run(deferred=activation is not None)
+        listener = serve_adapter(adapter,args.worker_id,identities,address,ctx,activation=activation)
     else:
         targets = {}
         if args.resume_targets:
@@ -171,6 +173,8 @@ def main():
                                    help="owner-private directory of approved, shareable native images")
             component.add_argument("--relay-command-approvals",action="store_true",
                                    help="relay one-time command decisions through the configured Router operator")
+            component.add_argument("--resume-on-handoff",action="store_true",
+                                   help="wait for the Worker to explicitly restore this pinned native thread")
         if name == "worker":
             component.add_argument("--router-connection",required=True,type=Path)
             component.add_argument("--adapter-connection",required=True,type=Path)

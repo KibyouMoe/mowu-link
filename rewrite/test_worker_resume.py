@@ -337,3 +337,44 @@ class WorkerResume(unittest.TestCase):
         self.evidence = {"first_page":first_id,"second_page":second_id,"refreshed_page":new_id,
                          "first_card_send_attempts":2,"unique_first_card":1,"old_card_selection_refused":True,
                          "number_receipt":result["binding_receipt"],"title_receipt":title["binding_receipt"]}
+
+    def test_cold_target_with_active_goal_keeps_source_even_when_release_reply_is_lost(self):
+        target = self.ports[self.target]
+        describe = target.session_info
+        target.session_info = lambda: dict(describe(),native_load_state="cold")
+        activations = []
+
+        def reject(session,operation_id):
+            self.assertEqual(session,self.target)
+            self.assertTrue(self.loop.hermes.workers()["items"][0]["admission_paused"])
+            activations.append(operation_id)
+            raise Fault(409,"native_cold_goal_active")
+
+        target.activate = reject
+        router = self.loop.wire.request
+        lose = True
+
+        def lose_release(method,path,*args,**kwargs):
+            nonlocal lose
+            result = router(method,path,*args,**kwargs)
+            if lose and "/admission-handoffs/" in path and args[0]["action"]=="end":
+                lose = False
+                raise ConnectionError("release accepted but its reply was lost")
+            return result
+
+        self.loop.wire.request = lose_release
+        with self.assertRaisesRegex(Fault,"native_switch_unconfirmed"):
+            self.switch(self.clients,"om_refused_cold_goal",self.target)
+        self.assertEqual(self.status(self.clients)["native_switch"]["phase"],"goal_active")
+        self.assertEqual(self.worker.native_session_pin,self.source)
+        self.assertFalse(self.loop.hermes.workers()["items"][0].get("admission_paused",False))
+        self.service.step()
+        receipt = self.switch(self.clients,"om_refused_cold_goal",self.target)
+        self.assertNotIn("binding_receipt",receipt)
+        events = self.clients["platform/oguri"].request("GET","worker/display")["items"]
+        refusal, = [item["event"]["text"] for item in events if item["seq"]==receipt["output"]["seq"]]
+        self.assertIn("正在进行的原生目标",refusal)
+        self.assertEqual(len(activations),1)
+        self.assertEqual(self.status(self.clients)["host_session"],self.source)
+        self.assertEqual(self.message(self.clients,guid())["session"],self.source)
+        self.assertEqual(self.hosts[self.target].entries(),[])

@@ -21,6 +21,10 @@ REFUSED = {
     "another_handoff_active":"工位正在进行另一次交接。",
     "resume_target_busy":"目标会话正在运行，请等它空闲。",
 }
+ORIGINAL_SESSION = {
+    "cancelling":"已取消切换，继续使用原会话。",
+    "goal_active":"目标会话有正在进行的原生目标。原会话绑定保留。",
+}
 
 
 def pending(worker):
@@ -39,12 +43,31 @@ def selection(text):
     return None
 
 
-def observe(port,session):
+def activate(port,session,operation_id):
+    proof = port.activate(session,operation_id)
+    require(proof=={"session":session,"operation_id":operation_id,"state":"loaded"},502,"invalid_native_activation")
+    info = port.session_info()
+    require(info.get("session")==session and info.get("native_load_state")=="loaded",503,"native_activation_unconfirmed")
+    return info
+
+
+def observe(port,session,*,allow_cold=False,operation_id=None):
     try:
         info = port.session_info()
         require(isinstance(info,dict) and info.get("session")==session,409,"wrong_native_session")
+        if info.get("native_load_state")=="cold":
+            if operation_id:
+                info = activate(port,session,operation_id)
+            elif allow_cold:
+                return info,None
+            else:
+                raise Fault(503,"native_session_cold",True)
         busy = port.busy(session=session)
-    except (Fault,URLError,OSError):
+    except Fault as error:
+        if error.code=="native_cold_goal_active":
+            raise
+        raise Fault(503,"native_switch_host_unconfirmed",True) from None
+    except (URLError,OSError):
         raise Fault(503,"native_switch_host_unconfirmed",True) from None
     require(type(busy) is bool,502,"invalid_host_observation")
     return info,busy
@@ -60,16 +83,24 @@ def finish(worker,row,session,text,receipt=None):
         return result
 
 
+def keep_source(worker,row,phase):
+    source = row["old_session"]
+    require(worker.native_session_pin==source,409,"native_binding_changed")
+    with worker.db.transaction() as db:
+        worker_handoff.prepare_cancel(db,row["handoff_id"])
+        db.execute("UPDATE native_resume SET phase=? WHERE message_id=?",(phase,row["message_id"]))
+    worker_handoff.request(worker,{"handoff_id":row["handoff_id"],"action":"end"})
+    return finish(worker,row,source,ORIGINAL_SESSION[phase])
+
+
 def advance(service,row):
     w = service.worker
     operation = {"handoff_id":row["handoff_id"],"action":"begin"}
     source,target = row["old_session"],row["target"]
     next_port = w.resume_targets[target]
     with w.lock:
-        if row["phase"]=="cancelling":
-            require(w.native_session_pin==source,409,"native_binding_changed")
-            worker_handoff.request(w,dict(operation,action="end"))
-            return finish(w,row,source,"已取消切换，继续使用原会话。")
+        if row["phase"] in ORIGINAL_SESSION:
+            return keep_source(w,row,row["phase"])
         if row["phase"]=="starting":
             require(w.native_session_pin==source,409,"native_binding_changed")
             try:
@@ -82,8 +113,14 @@ def advance(service,row):
                 return finish(w,row,source,"这次交接已解除，仍在原会话。")
             require(result["state"]=="frozen",503,"native_switch_unconfirmed")
             _info,source_busy = observe(w.adapter,source)
-            _info,target_busy = observe(next_port,target)
-            require(not source_busy and not target_busy,503,"native_switch_waiting_for_idle")
+            require(not source_busy,503,"native_switch_waiting_for_idle")
+            try:
+                _info,target_busy = observe(next_port,target,operation_id=row["handoff_id"])
+            except Fault as error:
+                if error.code=="native_cold_goal_active":
+                    return keep_source(w,row,"goal_active")
+                raise
+            require(not target_busy,503,"native_switch_waiting_for_idle")
             with w.db.transaction() as db:
                 changed = db.execute("UPDATE native_binding SET session=? WHERE slot=1 AND session=?",(target,source)).rowcount
                 require(changed==1,409,"native_binding_changed")
@@ -93,7 +130,7 @@ def advance(service,row):
             service.adapter_connected = False
             service.next_probe = 0
         require(w.native_session_pin==target,409,"native_binding_changed")
-        info,busy = observe(next_port,target)
+        info,busy = observe(next_port,target,operation_id=row["handoff_id"])
         require(not busy,503,"native_switch_waiting_for_idle")
         service.record_host_observation(info,busy)
         result = worker_handoff.request(w,dict(operation,action="end"))
@@ -104,12 +141,11 @@ def advance(service,row):
 
 def cancel(service,row,body):
     require(body=={"action":"end","handoff_id":row["handoff_id"]} and
-            row["phase"] in ("starting","cancelling"),409,"native_switch_manages_handoff")
+            row["phase"] in ("starting",*ORIGINAL_SESSION),409,"native_switch_manages_handoff")
     w = service.worker
-    with w.lock, w.db.transaction() as db:
-        worker_handoff.prepare_cancel(db,row["handoff_id"])
-        db.execute("UPDATE native_resume SET phase='cancelling' WHERE message_id=?",(row["message_id"],))
-    advance(service,dict(row,phase="cancelling"))
+    with w.lock:
+        phase = row["phase"] if row["phase"] in ORIGINAL_SESSION else "cancelling"
+        keep_source(w,row,phase)
     return {"handoff_id":row["handoff_id"],"state":"released"}
 
 
@@ -149,7 +185,7 @@ def handle(service,mid,text,name,target,*,reply_to=None):
         with w.db.transaction() as db:
             return record(db,mid,request,name,w.native_session_pin,answer)
     require(service.adapter_connected and service.host_session==w.native_session_pin,503,"native_switch_unconfirmed")
-    _info,busy = observe(w.resume_targets[target],target)
+    _info,busy = observe(w.resume_targets[target],target,allow_cold=True)
     if busy:
         with w.db.transaction() as db:
             return record(db,mid,request,name,w.native_session_pin,REFUSED["resume_target_busy"])
@@ -161,6 +197,22 @@ def handle(service,mid,text,name,target,*,reply_to=None):
             db.execute("INSERT INTO native_resume VALUES (?,?,?,?,?,?,'starting')",
                        (mid,request,name,handoff,w.native_session_pin,target))
     return advance(service,pending(w))
+
+
+def restore_committed_binding(worker,info):
+    if info.get("native_load_state")!="cold":
+        return info
+    session = info["session"]
+    with worker.lock:
+        with worker.db.transaction() as db:
+            binding = db.execute("SELECT session FROM native_binding WHERE slot=1").fetchone()
+            require(worker.native_session_pin==session and binding and binding[0]==session,409,"native_session_not_authorized")
+            row = db.execute("""SELECT n.handoff_id FROM native_resume n JOIN platform_commands p USING(message_id)
+                WHERE n.target=? AND n.phase='done'
+                AND json_extract(p.receipt,'$.binding_receipt.handoff_id')=n.handoff_id
+                ORDER BY n.rowid DESC LIMIT 1""",(session,)).fetchone()
+        require(row,503,"native_activation_waiting_for_handoff")
+        return activate(worker.adapter,session,row[0])
 
 
 def recover(service):
