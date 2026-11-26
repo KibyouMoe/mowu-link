@@ -68,7 +68,7 @@ def server(args):
         listener = serve_adapter(adapter,args.worker_id,identities,address,ctx)
     else:
         worker = Worker(args.db,args.worker_id,connection(args.router_connection),
-                        RemoteAdapter(connection(args.adapter_connection)))
+                        RemoteAdapter(connection(args.adapter_connection),args.adapter_session))
         worker_service = WorkerService(worker)
         listener = worker_service.listen(identities,address,ctx)
     with listener, callbacks, public_output:
@@ -119,6 +119,7 @@ def main():
         if name == "worker":
             component.add_argument("--router-connection",required=True,type=Path)
             component.add_argument("--adapter-connection",required=True,type=Path)
+            component.add_argument("--adapter-session",help="pin all adapter requests to this native session")
     t = apps.add_parser("trigger")
     t.add_argument("--db",required=True,type=Path)
     t.add_argument("--name",required=True)

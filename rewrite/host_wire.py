@@ -1,17 +1,28 @@
 """Authenticated Worker-to-adapter port. One server is bound to one worker and native session."""
+import re
 from urllib.error import URLError
 
 from .storage import Fault, require, string
 from .wire import serve_authenticated
 
 
-class RemoteAdapter:
-    def __init__(self, client):
-        self.client = client
+SESSION_HEADER = "X-Mowu-Host-Session"
 
-    def request(self, *args):
+
+class RemoteAdapter:
+    def __init__(self, client, expected_session=None):
+        self.client = client
+        if expected_session is not None and (not isinstance(expected_session,str)
+                or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,200}",expected_session)):
+            raise ValueError("expected a native session identifier")
+        self.expected_session = expected_session
+
+    def request(self, method, path, *args):
         try:
-            return self.client.request(*args)
+            if self.expected_session:
+                route = "host/bound/"+path.removeprefix("host/")
+                return self.client.request(method,route,*args,headers={SESSION_HEADER:self.expected_session})
+            return self.client.request(method,path,*args)
         except Fault as err:
             if err.status in (401,403) and err.code in ("unauthenticated","wrong_adapter_owner"):
                 raise Fault(err.status,"adapter_identity_unconfirmed") from err
@@ -29,7 +40,9 @@ class RemoteAdapter:
 
     def session_info(self):
         info = self.request("GET","host/session")
-        return {"session":string(info,"session"),"next_turn":info.get("next_turn") is True,
+        session = string(info,"session")
+        require(self.expected_session is None or session==self.expected_session,409,"wrong_native_session")
+        return {"session":session,"next_turn":info.get("next_turn") is True,
                 "context_usage":info.get("context_usage") is True,"model_view":info.get("model_view") is True,
                 "model_change":info.get("model_change") is True,"goal_control":info.get("goal_control") is True,
                 "compaction":info.get("compaction") is True,"session_catalog":info.get("session_catalog") is True,
@@ -82,8 +95,11 @@ class RemoteAdapter:
 
 
 def serve_adapter(adapter, worker_id, identities, address, context):
-    def handle(actor, method, path, body, _headers):
+    def handle(actor, method, path, body, headers):
         require(actor == "worker/" + worker_id, 403, "wrong_adapter_owner")
+        if path.startswith("/v1/host/bound/"):
+            require(headers.get(SESSION_HEADER)==adapter.bound_session(),409,"wrong_native_session")
+            path = "/v1/host/"+path.removeprefix("/v1/host/bound/")
         match method,path:
             case "GET","/v1/host/session":
                 info = getattr(adapter,"session_info",None)

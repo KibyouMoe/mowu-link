@@ -4,6 +4,8 @@
 
 ## 检查点与证据
 
+Worker 支持用 `--adapter-session` 固定 HTTPS 目标会话。专用请求路径会在服务端逐次核会话；适配器地址及认证相同但原生会话换了，忙闲和发送均回 409，错误会话零输入。指定正确测试会话才取得本机收件。复跑 `python3 -m unittest -v rewrite.test_service`。这里验证的是进程、TLS 与绑定拒绝，宿主为夹具。
+
 DSH 在 W03 的回包之后、原生收件之前突然变忙时，会在入原生队列前明确拒收。适配器只对明确没发起写入的状态允许后续重试。真宿主复跑两支：自然空闲后原派发只收一次；此间先收到 Router 取消，宿主只收取消指令，普通对话照常完成，原派发执行从未开始。复跑 `python3 -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_native_race_after_w03_never_prequeues_a_formal_task`。[原生事实](evidence/dsh-native-admission-race.json)。实际 DSH 与隔离 Router，本地模型。
 
 [验收对照](acceptance-matrix.md) 汇总旧入口、Worker 篇 A01–A11、原生宿主证据与切换前剩余条件。

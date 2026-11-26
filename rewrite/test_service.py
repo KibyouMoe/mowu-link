@@ -14,6 +14,7 @@ from urllib.error import URLError
 from .service import private_config
 from .storage import Fault, guid
 from .wire import Client
+from .host_wire import RemoteAdapter
 
 
 CLI = [sys.executable,"-m","rewrite.service"]
@@ -115,7 +116,8 @@ class Service(unittest.TestCase):
             return self.write_config(name,{"url":url,"token":token,"ca_file":str(cert)})
         _, gateway = self.start(self.write_config("worker.json",{callback:"adapter/dev",platform:"platform/dev",ops:"ops/dev"}),
                                 cert,key,"worker",["--worker-id","dev","--router-connection",
-                                target("to-router",router,router_token),"--adapter-connection",target("to-host",adapter,adapter_token)])
+                                target("to-router",router,router_token),"--adapter-connection",target("to-host",adapter,adapter_token),
+                                "--adapter-session",session])
         chat = Client(gateway,platform,cert)
         msg = {"message_id":guid(),"text":"fixture incoming text"}
         first = chat.request("POST","worker/chat",msg)
@@ -144,3 +146,21 @@ class Service(unittest.TestCase):
         self.assertEqual(result["task_state"],"completed_reported")
         self.assertIsNone(Client(gateway,ops,cert).request("GET","worker/status")["held_assignment_id"])
         self.assertEqual(len(manager_client.frames(0)),1)
+
+    @unittest.skipUnless(shutil.which("openssl"), "TLS fixture certificate generator unavailable")
+    def test_pinned_worker_rejects_same_authenticated_adapter_when_session_differs(self):
+        from .devloop import FixtureHost
+        cert,key = self.certificate()
+        adapter_token = guid()
+        native_db = self.root/"native.db"
+        _, url = self.start(self.write_config("host.json",{adapter_token:"worker/dev"}),cert,key,"fixture-adapter",
+                            ["--worker-id","dev","--fixture-db",native_db,"--session","new-unintended-session"])
+        old = RemoteAdapter(Client(url,adapter_token,cert),"old-pinned-session")
+        with self.assertRaisesRegex(Fault,"wrong_native_session"):
+            old.busy()
+        with self.assertRaisesRegex(Fault,"wrong_native_session"):
+            old.deliver(guid(),{"kind":"chat","text":"Must remain outside the wrong session"})
+        self.assertEqual(FixtureHost(native_db,"new-unintended-session").entries(),[])
+        current = RemoteAdapter(Client(url,adapter_token,cert),"new-unintended-session")
+        proof = current.deliver(guid(),{"kind":"chat","text":"Dedicated test input"})
+        self.assertEqual(proof["session"],"new-unintended-session")
