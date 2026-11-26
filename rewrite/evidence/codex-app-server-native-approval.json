@@ -1,0 +1,45 @@
+{
+  "native_thread": "01a21742-6886-7f33-a1b2-2398ce5f5ade",
+  "requests": [
+    "8b446658-2cea-4d32-a92f-b081ba45b1e6",
+    "757fd23e-660c-4a5d-b50b-9e6628ec5211",
+    "028a941d-e37c-4de6-8bb7-2af0570203f0"
+  ],
+  "native_turn_ids": [
+    "01a21742-68cb-7740-a564-3e95761740d1",
+    "01a21742-6cd8-79d2-a655-5bc49eb9e2e7",
+    "01a21742-713a-7453-a871-80511606f483"
+  ],
+  "native_request_ids": [
+    0,
+    1,
+    2
+  ],
+  "native_decisions_sent_once": [
+    "cancel",
+    "cancel",
+    "cancel"
+  ],
+  "first_router_state": "native_closed",
+  "first_closure_router_attempts": 2,
+  "second_router_state": "decided",
+  "native_closure_deliberately_dropped": true,
+  "expired_approval_native_response": {
+    "decision": "cancel",
+    "source": "expiry"
+  },
+  "native_commands_executed": 0,
+  "ordinary_chat_and_tasks_unchanged": true,
+  "boundary": "Bundled Codex App Server, local scripted model, injected transport loss, isolated Router and Worker",
+  "consecutive_runs": 12,
+  "service_tls_run": {
+    "approval_id": "de39f540-e4ad-4c87-95a0-32b4aa591566",
+    "native_state": "interrupted",
+    "notice_id": "8cff8e12-ed3f-4c0f-97c1-a8138329c2a0",
+    "profile": "isolated-local-scripted-provider",
+    "router_state": "native_closed",
+    "session": "01a21741-bd76-7ea1-b9d9-171f2c010316",
+    "tls_legs": 3,
+    "turn": "01a21741-bfba-7e52-83e2-a28c15ece930"
+  }
+}

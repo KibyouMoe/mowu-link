@@ -4,6 +4,7 @@ from contextlib import ExitStack, nullcontext
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import ssl
 import stat
@@ -12,6 +13,7 @@ from threading import Thread
 from .orders import Orders
 from .adapter import HostAdapter
 from .host_wire import RemoteAdapter, serve_adapter
+from .messages import valid_guid
 from .storage import Fault, StateWriterBusy, encode, require, state_writer
 from .trigger import Trigger
 from .wire import Client, serve_router
@@ -50,7 +52,8 @@ def serve(args,stack):
     identities = private_config(args.identities)
     if not isinstance(identities, dict) or not identities or any(
             not isinstance(k, str) or not k or not isinstance(v,str)
-            or not (v == "hermes" or (v.startswith(("worker/","trigger/","adapter/","ops/","platform/")) and v.split("/",1)[1]))
+            or not (v == "hermes" or (v.startswith(("worker/","trigger/","adapter/","ops/","platform/","approver/"))
+                                     and v.split("/",1)[1]))
             for k,v in identities.items()):
         raise ValueError("invalid identity registration")
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -87,7 +90,8 @@ def serve(args,stack):
         client = connection(args.worker_connection)
         rpc = stack.enter_context(start_app_server(args.codex_binary,args.codex_profile,args.cwd))
         require_test_account(rpc)
-        native = AppServerHost(rpc,args.session,args.db,args.public_image_root)
+        native = AppServerHost(rpc,args.session,args.db,args.public_image_root,
+                               relay_command_approvals=args.relay_command_approvals)
         saved = native.thread(args.session,include_turns=False)
         require(Path(saved["cwd"]).resolve()==args.cwd.resolve(),409,"wrong_native_workspace")
         resumed = rpc.request("thread/resume",{"threadId":args.session,"cwd":str(args.cwd)})["thread"]
@@ -157,6 +161,8 @@ def main():
                 component.add_argument("--"+flag,required=True,type=Path)
             component.add_argument("--public-image-root",type=Path,
                                    help="owner-private directory of approved, shareable native images")
+            component.add_argument("--relay-command-approvals",action="store_true",
+                                   help="relay one-time command decisions through the configured Router operator")
         if name == "worker":
             component.add_argument("--router-connection",required=True,type=Path)
             component.add_argument("--adapter-connection",required=True,type=Path)
@@ -181,6 +187,17 @@ def main():
         provision_parser.add_argument("--"+flag,required=True,type=Path)
     provision_parser.add_argument("--tool",action="append",choices=TOOL_NAMES,
                                   help="native tool to register; repeat to select multiple (default: worker_report)")
+    approvals = apps.add_parser("approvals",help="view native command requests or record an operator decision")
+    approvals.add_argument("--connection",required=True,type=Path)
+    approvals.add_argument("--worker-id",required=True)
+    actions = approvals.add_subparsers(dest="approval_action",required=True)
+    actions.add_parser("list")
+    show = actions.add_parser("show")
+    show.add_argument("approval_id")
+    decision = actions.add_parser("decide")
+    decision.add_argument("approval_id")
+    decision.add_argument("--request-digest",required=True)
+    decision.add_argument("--decision",required=True,choices=("accept","cancel"))
     args = parser.parse_args()
     if args.component == "trigger":
         print(encode(source(args)))
@@ -196,6 +213,25 @@ def main():
             parser.exit(1,encode({"error":error.code,**error.details})+"\n")
         except StateWriterBusy as error:
             parser.exit(1,str(error)+"\n")
+    elif args.component=="approvals":
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}",args.worker_id):
+            parser.error("expected a Worker ID")
+        action = args.approval_action
+        route = "approvals/"+args.worker_id
+        if action!="list":
+            if not valid_guid(args.approval_id):
+                parser.error("expected an approval ID")
+            route += "/"+args.approval_id
+        client = connection(args.connection)
+        try:
+            if action=="decide":
+                reply = client.request("PUT",route+"/decision",
+                                       {"request_digest":args.request_digest,"decision":args.decision})
+            else:
+                reply = client.request("GET",route)
+        except Fault as error:
+            parser.exit(1,encode({"error":error.code})+"\n")
+        print(encode(reply))
     else:
         try:
             server(args)

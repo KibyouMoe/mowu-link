@@ -11,6 +11,8 @@ from threading import Thread
 import unittest
 from urllib.error import URLError
 
+from .approvals import TTL_SECONDS, route as approval_route
+from .orders import Orders
 from .service import private_config
 from .storage import Fault, guid
 from .wire import Client
@@ -121,6 +123,97 @@ class Service(unittest.TestCase):
             private_config(path)
         with self.assertRaises(ValueError):
             Client("http://example.test","unused")
+
+    @unittest.skipUnless(shutil.which("openssl"), "TLS fixture certificate generator unavailable")
+    def test_command_approval_requires_a_separate_operator_and_keeps_the_original_decision(self):
+        cert,key = self.certificate()
+        worker,operator,other,manager = (guid() for _ in range(4))
+        ids = self.write_config("approval-roles.json",
+                                {worker:"worker/dev",operator:"approver/dev",other:"approver/other",manager:"hermes"})
+        process,url = self.start(ids,cert,key)
+        w,approver,outsider,hermes = (Client(url,token,cert) for token in (worker,operator,other,manager))
+        route = "approvals/dev/"+guid()
+        session = guid()
+        w.request("PUT","workers/dev/session",{"session_id":session},guid())
+        body = {"session_id":session,"request":{"session":"dedicated","turn_id":"approval-turn",
+                "item_id":"read-only-command","cwd":"/isolated","command":"pwd",
+                "environment_id":None,"decisions":["accept","cancel"]}}
+        first = w.request("POST",route,body)
+        self.assertEqual(first,w.request("POST",route,body))
+        notice, = approver.frames(0)
+        self.assertEqual((notice["kind"],notice["payload"]),
+                         ("approval.requested",{"approval_id":first["approval_id"],"worker_id":"dev"}))
+        self.assertEqual(hermes.frames(0),[])
+        with self.assertRaisesRegex(Fault,"delivery_not_found"):
+            hermes.ack(notice)
+        self.assertEqual(approver.ack(notice)["confirmed_cursor"],1)
+        operator_cfg = self.write_config("operator.json",{"url":url,"token":operator,"ca_file":str(cert)})
+        cli = ("approvals","--connection",operator_cfg,"--worker-id","dev")
+        self.assertEqual(self.command(*cli,"list"),{"items":[first]})
+        self.assertEqual(self.command(*cli,"show",first["approval_id"]),first)
+        wrong = {**body,"request":dict(body["request"],command="ls")}
+        with self.assertRaisesRegex(Fault,"approval_request_conflict"):
+            w.request("POST",route,wrong)
+        view, = approver.request("GET","approvals/dev")["items"]
+        self.assertEqual(first,view)
+        self.assertEqual(view["state"],"pending")
+        decision = {"request_digest":view["request_digest"],"decision":"cancel"}
+        for client in (w,outsider,hermes):
+            with self.assertRaisesRegex(Fault,"forbidden"):
+                client.request("PUT",route+"/decision",decision)
+            with self.assertRaisesRegex(Fault,"forbidden"):
+                client.request("GET",route)
+        with self.assertRaisesRegex(Fault,"approval_view_changed"):
+            approver.request("PUT",route+"/decision",dict(decision,request_digest="stale"))
+        with self.assertRaisesRegex(Fault,"unsupported_approval_decision"):
+            approver.request("PUT",route+"/decision",dict(decision,decision="acceptForSession"))
+        chosen = self.command(*cli,"decide",first["approval_id"],"--request-digest",view["request_digest"],
+                              "--decision","cancel")
+        self.assertEqual((chosen["state"],chosen["attempted_response"]),("decided",None))
+        self.assertEqual(w.request("POST",route,body),chosen)
+        with self.assertRaisesRegex(Fault,"approval_decision_conflict"):
+            approver.request("PUT",route+"/decision",dict(decision,decision="accept"))
+        self.stop(process)
+        _,url = self.start(ids,cert,key)
+        w,approver = Client(url,worker,cert),Client(url,operator,cert)
+        self.assertEqual(approver.request("PUT",route+"/decision",decision),chosen)
+        proof = {"session_id":session,"request_digest":decision["request_digest"],
+                 "attempted_response":{"source":"operator","decision":"cancel"}}
+        closed = w.request("PUT",route+"/closed",proof)
+        self.assertEqual(closed["state"],"native_closed")
+        self.assertEqual(w.request("PUT",route+"/closed",proof),closed)
+        another = "approvals/dev/"+guid()
+        w.request("POST",another,body)
+        w.request("PUT","workers/dev/session",{"session_id":guid()},guid())
+        self.assertEqual(approver.request("GET",another)["state"],"disconnected")
+        with self.assertRaisesRegex(Fault,"approval_not_pending"):
+            approver.request("PUT",another+"/decision",decision)
+        with self.assertRaisesRegex(Fault,"stale_session"):
+            w.request("POST",another,body)
+        with self.assertRaisesRegex(Fault,"approval_relay_unavailable"):
+            w.request("POST","approvals/no-operator/"+guid(),body)
+
+    def test_command_approval_expiry_retains_unconfirmed_native_state(self):
+        now = 1000
+        orders = Orders(self.root/"expiring.db",clock=lambda:now)
+        binding = {"session_id":guid()}
+        with orders.db.transaction() as db:
+            orders.session(db,"dev",binding)
+        route = ["approvals","dev",guid()]
+        request = {"session":"isolated","turn_id":"original-turn","item_id":"original-command","cwd":"/isolated",
+                   "command":"pwd","environment_id":None,"decisions":["accept","cancel"]}
+        offer = approval_route(orders,"worker/dev","POST",route,dict(binding,request=request))
+        self.assertEqual(offer["expires_at"],now+TTL_SECONDS)
+        now += TTL_SECONDS
+        decision = {"request_digest":offer["request_digest"],"decision":"accept"}
+        with self.assertRaisesRegex(Fault,"approval_not_pending"):
+            approval_route(orders,"approver/dev","PUT",[*route,"decision"],decision)
+        row = approval_route(orders,"approver/dev","GET",route,{})
+        self.assertEqual((row["state"],row["decision"],row["closed_at"]),("expired",None,None))
+        proof = dict(binding,request_digest=offer["request_digest"],attempted_response={"source":"expiry","decision":"cancel"})
+        row = approval_route(orders,"worker/dev","PUT",[*route,"closed"],proof)
+        self.assertEqual((row["state"],row["decision"],row["attempted_response"]),
+                         ("native_closed",None,{"source":"expiry","decision":"cancel"}))
 
     @unittest.skipUnless(shutil.which("openssl"), "TLS fixture certificate generator unavailable")
     def test_three_process_worker_chat_and_assignment(self):

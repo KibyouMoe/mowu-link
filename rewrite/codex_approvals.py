@@ -1,0 +1,119 @@
+"""Pass a decision to its live, bound App Server request only once."""
+from contextlib import contextmanager
+from dataclasses import dataclass
+import hashlib
+from threading import Event, Lock, Thread
+import time
+
+from .approvals import DECISIONS, validate_request
+from .storage import Fault, encode, guid, require
+
+
+@dataclass
+class NativeApproval:
+    id: str
+    request_id: int | str
+    request: dict
+    digest: str
+    attempted_response: dict | None = None
+    closed: bool = False
+    retired: bool = False
+    expired: bool = False
+
+
+class CodexApprovals:
+    def __init__(self,rpc,session):
+        self.rpc,self.session = rpc,session
+        self.lock = Lock()
+        self.live = {}
+
+    def offer(self,packet):
+        params,rid = packet.get("params"),packet.get("id")
+        require(type(rid) in (int,str) and isinstance(params,dict) and params.get("threadId")==self.session,
+                403,"wrong_native_approval_source")
+        choices = params.get("availableDecisions")
+        require(isinstance(choices,list) and not params.get("additionalPermissions")
+                and not params.get("networkApprovalContext"),422,"unsupported_native_approval")
+        data = {"session":self.session,"turn_id":params.get("turnId"),"item_id":params.get("itemId"),
+                "command":params.get("command"),"cwd":params.get("cwd"),
+                "environment_id":params.get("environmentId"),
+                "decisions":[choice for choice in DECISIONS if choice in choices]}
+        validate_request(data)
+        with self.lock:
+            current = self.live.get(rid)
+            if current:
+                require(current.request==data,409,"native_approval_conflict")
+                return
+            digest = hashlib.sha256(encode(data).encode()).hexdigest()
+            self.live[rid] = NativeApproval(guid(),rid,data,digest)
+
+    def closed(self,params):
+        if not isinstance(params,dict) or params.get("threadId")!=self.session:
+            return
+        rid = params.get("requestId")
+        if type(rid) not in (int,str):
+            return
+        with self.lock:
+            if rid in self.live:
+                self.live[rid].closed = True
+
+    def retire_turn(self,turn):
+        with self.lock:
+            for item in self.live.values():
+                if item.request["turn_id"]==turn:
+                    item.retired = True
+
+    def advance(self,worker,item):
+        route = "worker/approvals/"+item.id
+        reply = worker.request("POST",route,item.request)
+        require(isinstance(reply,dict) and reply.get("approval_id")==item.id and reply.get("request")==item.request
+                and reply.get("request_digest")==item.digest,502,"wrong_approval_receipt")
+        with self.lock:
+            closed,attempted = item.closed,item.attempted_response
+            state = reply.get("state")
+            if state=="expired":
+                item.expired = True
+            if not closed and attempted is None and not item.retired:
+                response = None
+                if state=="decided":
+                    decision = reply.get("decision")
+                    expiry = reply.get("expires_at")
+                    require(decision in item.request["decisions"] and type(expiry) in (float,int),502,"invalid_approval_receipt")
+                    if time.time()<expiry:
+                        response = {"source":"operator","decision":decision}
+                elif state=="expired" and "cancel" in item.request["decisions"]:
+                    response = {"source":"expiry","decision":"cancel"}
+                if response:
+                    item.attempted_response = response
+                    self.rpc.send({"id":item.request_id,"result":{"decision":response["decision"]}})
+        if closed:
+            proof = {"session":self.session,"request_digest":item.digest,"attempted_response":attempted}
+            receipt = worker.request("PUT",route+"/closed",proof)
+            require(isinstance(receipt,dict) and receipt.get("approval_id")==item.id and receipt.get("state")=="native_closed"
+                    and receipt.get("attempted_response")==attempted,502,"wrong_approval_closure")
+            with self.lock:
+                if self.live.get(item.request_id) is item:
+                    del self.live[item.request_id]
+
+    @contextmanager
+    def run(self,worker):
+        stop = Event()
+        def pump():
+            while not stop.wait(.25):
+                with self.lock:
+                    live = [item for item in self.live.values() if item.closed or not (item.retired or item.expired)]
+                for item in live:
+                    if stop.is_set():
+                        return
+                    try:
+                        self.advance(worker,item)
+                    except (Fault,OSError):
+                        # Keep the original request available for lookup; the native response is never resent.
+                        continue
+        thread = Thread(target=pump,daemon=True)
+        thread.start()
+        try:
+            yield
+        finally:
+            stop.set()
+            thread.join(timeout=11)

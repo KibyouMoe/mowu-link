@@ -4,6 +4,12 @@
 
 ## 检查点与证据
 
+独立 Codex App Server 的命令审批通过 Worker 按原请求号到 Router。请求与单次决定分别持久记录，C01 通知仅给该工位获准的审批身份。同号重投没有第二条通知。一次故意丢掉 Router 闭合回执，适配器取回同一记录；另一次丢原生关闭回执，Router 保留决定已登记，未误记关闭，也未重发原生决定。第三次推进隔离 Router 时钟，超时后原生请求只收到一次取消，没有操作人决定。连过 12 轮。模型和人机操作使用夹具，实际授权流程仍待验。[原生审批记录](evidence/codex-app-server-native-approval.json) · [审批入口](README.md#独立-codex-命令审批)
+
+另用正式服务入口启动三个隔离 TLS 进程。获准 CLI 取消 `de39f540-e4ad-4c87-95a0-32b4aa591566` 后，独立宿主冷开回读同一回合已中断，且无命令执行项。复跑 `python3 -m unittest -v rewrite.test_service rewrite.test_codex_app_server.CodexAppServer.test_native_command_approval_cancels_exact_request_and_does_not_infer_missing_proof`。
+
+同版 macOS 200 项全过，Linux arm64 通过 141 项，另 59 项因缺本机宿主跳过。
+
 分叉校验与离线审计进入新发布包 `02dbb460da5cc21cc0627498e01773344c32783e`。从 `2a8f081841310259a48ea9f077297d1440857c56` 出发，用独立原生 Codex 工位实跑混合版本、升级及回退。三阶段都保留原会话的三条输入，仅原成果待验通知 `98014442-52d8-49cf-8da1-3fa821499a78`，快照摘要未变。新包 SHA-256 为 `a6bb3dff99add0aacc2670740ca2801ed5f2c0068d028f4751b3a3cd4e518389`。复跑方法见[发布演练](router-rehearsal.md#保留实际-codex-测试工位的升级与回退)。macOS 197 项全过，Linux arm64 通过 139 项、另 58 项因缺本机宿主跳过。
 
 换原生会话前可用 `state_bundle audit-handoff` 对照未核的原生私聊、下一轮队列、派发、题目、压缩和清理。隔离试验中，原宿主已收到私聊但回包丢失，同时有一条排队消息。正式持单账本一致，原生会话账本仍显示待核；从原会话恢复后查回私聊并交付队列，各只有一次原生输入。审计仅返回计数。复跑 `python3 -m unittest -v rewrite.test_state_bundle`。[停写窗口与恢复](router-rehearsal.md#重做版五组件的离线恢复)

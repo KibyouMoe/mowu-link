@@ -157,6 +157,20 @@ python3 -m rewrite.release verify --archive ./build/mowulink.tar --revision "$RE
 
 飞书平台进程的本地队列遇到暂时数据库锁或无法核对的上游响应，会保留入箱和卡片游标并继续处理。Worker 回执缺字段时先保留待核，沿用同一消息号查回。
 
+### 独立 Codex 命令审批
+
+在隔离 Router 的身份配置中，为指定测试工位单独登记 `approver/<工位ID>`。状态目录由 Router 运行账号独占。Adapter 显式启用 `--relay-command-approvals` 后，可以转交宿主本来就会发出的普通命令审批。宿主的沙箱和提审策略由工位所有者按原方式配置。工单管理人、Worker、飞书身份与其他工位的审批人无权替这条请求作决定。
+
+下列命令使用获准的审批人连接文件。先核对 `show` 的会话、工作目录、环境和完整命令，再使用同条记录的审批号与请求摘要。命令原文只可在审批入口查看。C01 中的 `approval.requested` 只给该审批身份，正文仅含工位与审批号，按 C02 确认收件。
+
+```sh
+python3 -m rewrite.service approvals --connection "$APPROVER_CONNECTION" --worker-id "$WORKER_ID" list
+python3 -m rewrite.service approvals --connection "$APPROVER_CONNECTION" --worker-id "$WORKER_ID" show "$APPROVAL_ID"
+python3 -m rewrite.service approvals --connection "$APPROVER_CONNECTION" --worker-id "$WORKER_ID" decide "$APPROVAL_ID" --request-digest "$REQUEST_DIGEST" --decision cancel
+```
+
+决定包括宿主实际给出的单次 `accept` 或 `cancel`。已登记决定显示 `decided`，只有同一原生请求关闭后才显示 `native_closed`。关闭回执证明原审批请求结束，命令是否执行仍看原生回合。决定超时或 Worker 会话已变时拒绝提交新决定。超过旧系统的十分钟期限，原生请求支持取消且仍在等待时，转发一次取消并注明来源为超时。App Server 的文件、额外权限、网络审批及 Desktop 的应用级授权分别待核。隔离原生测试仅取消命令。
+
 ### 跨系统验收
 
 开发机需 Python 3.12 或更新版本、Git、OpenSSL 和已运行的本地 Linux Docker 引擎。先准备含 Python 3.12+、Git、tar、OpenSSL 的 Linux 测试镜像。此次实测使用官方 `python:3.13-bookworm` 的 Linux arm64 manifest `sha256:0a1254df0519003d33fd4ab8ad26aff1154e50b3c93aa5ec978e83bf83ba084c`。各引擎对已安装镜像的 ID 表示可能不同，`--image` 使用本机 `docker image inspect --format '{{.Id}}' <镜像>` 的完整结果。

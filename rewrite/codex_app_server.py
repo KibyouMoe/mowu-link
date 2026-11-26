@@ -1,5 +1,5 @@
 """Text delivery and formal tool callbacks for one dedicated Codex App Server thread."""
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import hashlib
 import json
 from pathlib import Path
@@ -12,6 +12,7 @@ import time
 import unicodedata
 
 from .agent_tools import TOOLSET
+from .codex_approvals import CodexApprovals
 from .codex_compactions import CodexCompactions
 from .codex_images import CodexImages
 from .codex_questions import CodexQuestions
@@ -37,13 +38,14 @@ class AppServerHost:
     rejects_busy_before_control_write = True
     rejects_busy_before_queue_write = True
 
-    def __init__(self, rpc, thread_id, adapter_db=None, public_image_root=None):
+    def __init__(self, rpc, thread_id, adapter_db=None, public_image_root=None, *, relay_command_approvals=False):
         self.rpc, self.thread_id = rpc,thread_id
         self.write_lock = RLock()
         self.usage = None
         self.inherited_delivery_ids = frozenset()
         self.compactions = CodexCompactions(adapter_db,self) if adapter_db is not None else None
         self.questions = CodexQuestions(adapter_db,self) if adapter_db is not None else None
+        self.approvals = CodexApprovals(rpc,thread_id) if relay_command_approvals else None
         require(public_image_root is None or adapter_db is not None,422,"native_image_state_required")
         self.images = CodexImages(public_image_root,adapter_db) if public_image_root is not None else None
 
@@ -585,8 +587,17 @@ def worker_callbacks(host,worker,notify_turn_end,notify_item=None,notify_termina
                         except Fault:
                             break
                 continue
-            if host.questions and packet.get("method")=="serverRequest/resolved":
-                host.questions.closed(packet.get("params"))
+            if host.approvals and packet.get("method")=="item/commandExecution/requestApproval":
+                try:
+                    host.approvals.offer(packet)
+                except Fault:
+                    pass
+                continue
+            if packet.get("method")=="serverRequest/resolved":
+                if host.questions:
+                    host.questions.closed(packet.get("params"))
+                if host.approvals:
+                    host.approvals.closed(packet.get("params"))
                 continue
             if packet.get("method")=="turn/completed":
                 params = packet.get("params")
@@ -595,6 +606,8 @@ def worker_callbacks(host,worker,notify_turn_end,notify_item=None,notify_termina
                     if isinstance(turn,dict):
                         if host.questions:
                             host.questions.retire_turn(turn.get("id"))
+                        if host.approvals:
+                            host.approvals.retire_turn(turn.get("id"))
                         if notify_terminal is not None:
                             notify_terminal(turn.get("id"),turn.get("status"))
                     notify_turn_end()
@@ -618,9 +631,10 @@ def worker_callbacks(host,worker,notify_turn_end,notify_item=None,notify_termina
                 break
 
     thread = Thread(target=read_events,daemon=True)
-    thread.start()
-    try:
-        yield
-    finally:
-        stop.set()
-        thread.join(timeout=6)
+    with host.approvals.run(worker) if host.approvals else nullcontext():
+        thread.start()
+        try:
+            yield
+        finally:
+            stop.set()
+            thread.join(timeout=6)

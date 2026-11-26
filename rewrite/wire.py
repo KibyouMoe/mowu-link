@@ -9,15 +9,19 @@ from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlsplit
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Request, build_opener
 
-from . import attachments, delivery, legacy_history, legacy_peers, links, messages, peers, pool, questions
+from . import approvals, attachments, delivery, legacy_history, legacy_peers, links, messages, peers, pool, questions
 from .orders import task, worker_actor
 from .storage import Fault, encode, require
 
 
-def route(orders, actor, method, path, body, headers):
+def route(orders, actor, method, path, body, headers, approval_workers=frozenset()):
     url = urlsplit(path)
     parts = url.path.removeprefix("/v1/").split("/")
     require(path.startswith("/v1/"), 404, "unknown_route")
+    if parts[0]=="approvals":
+        require(not url.query,422,"unknown_approval_filter")
+        require(len(parts)>1 and parts[1] in approval_workers,404,"approval_relay_unavailable")
+        return 200,"application/json",approvals.route(orders,actor,method,parts,body)
     if len(parts) in (3,4) and parts[0]=="history" and parts[2]=="peers":
         require(method=="GET",405,"read_only_history")
         filters = parse_qs(url.query,keep_blank_values=True)
@@ -156,8 +160,13 @@ def route(orders, actor, method, path, body, headers):
 
 
 def serve_router(orders, identities, address, tls_context=None):
+    approval_workers = frozenset(actor.removeprefix("approver/") for actor in identities.values()
+                                if actor.startswith("approver/"))
+    if approval_workers:
+        approvals.require_private_store(orders.db.path)
+
     def handle(actor, method, path, body, headers):
-        return route(orders, actor, method, path, body, headers)
+        return route(orders, actor, method, path, body, headers, approval_workers)
 
     return serve_authenticated(identities, address, tls_context, handle, orders.tick)
 

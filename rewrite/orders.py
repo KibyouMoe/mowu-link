@@ -3,7 +3,7 @@ import json
 import re
 import time
 
-from . import attachments, cleanup, delivery, legacy_history, legacy_peers, links, messages, peers, pool, questions
+from . import approvals, attachments, cleanup, delivery, legacy_history, legacy_peers, links, messages, peers, pool, questions
 from .storage import Database, Fault, encode, guid, require, string, timestamp
 
 SCHEMA = """
@@ -51,7 +51,7 @@ class Orders:
     def __init__(self, path, clock=time.time, poll_seconds=5, lease_seconds=30):
         self.db = Database(path, SCHEMA + delivery.SCHEMA + pool.SCHEMA + cleanup.SCHEMA + questions.SCHEMA
                            + attachments.SCHEMA + messages.SCHEMA + peers.SCHEMA + links.ROUTER_SCHEMA
-                           + legacy_history.SCHEMA + legacy_peers.SCHEMA)
+                           + legacy_history.SCHEMA + legacy_peers.SCHEMA + approvals.SCHEMA)
         self.clock = clock
         self.poll_seconds = poll_seconds
         self.lease_seconds = lease_seconds

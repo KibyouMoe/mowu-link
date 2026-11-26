@@ -180,6 +180,9 @@ def audit_handoff(snapshot,expected):
                                     AND assignment_id IS NOT NULL GROUP BY assignee_id"""))
         cleanup = [dict(row) for row in db.execute("""SELECT worker_id,task_id,assignment_id,kind FROM cleanups
                                                     WHERE done=0 ORDER BY worker_id,assignment_id""")]
+        has_approvals = db.execute("SELECT 1 FROM sqlite_schema WHERE name='native_approvals' AND type='table'").fetchone()
+        open_approvals = dict(db.execute("""SELECT worker_id,COUNT(*) FROM native_approvals WHERE closed_at IS NULL
+                                         GROUP BY worker_id""")) if has_approvals else None
     workers,issues = [],[]
     for label in sorted(labels):
         role,wid = component(label)
@@ -213,6 +216,7 @@ def audit_handoff(snapshot,expected):
         session_pending["held_assignments"] = int(bool(local or remote))
         session_pending["router_reserved_assignments"] = reserved.get(wid,0)
         session_pending["router_cleanup"] = sum(row["worker_id"]==wid for row in cleanup)
+        session_pending["router_approvals"] = open_approvals.get(wid,0) if open_approvals is not None else None
         workers.append({"worker_id":wid,"worker_assignment":local_ids,"router_assignment":remote_ids,
                         "unconfirmed_reports":pending,"issues":problems,"native_session_pending":session_pending,
                         "native_session_ledger_clear":not problems and all(count==0 for count in session_pending.values())})

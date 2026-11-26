@@ -135,6 +135,22 @@ class WorkerService:
         w = self.worker
         if path.startswith("/v1/worker/media/"):
             return worker_media.route(w,actor,method,path,body,_headers)
+        if path.startswith("/v1/worker/approvals/"):
+            require(actor=="adapter/"+w.worker_id,403,"forbidden")
+            parts = path.removeprefix("/v1/worker/approvals/").split("/")
+            require(parts and valid_guid(parts[0]),422,"invalid_approval_id")
+            session = string(body,"session")
+            require(w.adapter.bound_session()==session,403,"wrong_native_session")
+            target = "approvals/"+w.worker_id+"/"+parts[0]
+            if method=="POST" and len(parts)==1:
+                result = w.router.request(method,target,{"session_id":w.session,"request":body})
+            elif method=="PUT" and len(parts)==2 and parts[1]=="closed":
+                require(set(body)=={"session","request_digest","attempted_response"},422,"invalid_approval_closure")
+                result = w.router.request(method,target+"/closed",
+                    {"session_id":w.session,"request_digest":body["request_digest"],"attempted_response":body["attempted_response"]})
+            else:
+                raise Fault(404,"unknown_approval_route")
+            return 200,"application/json",result
         if path.partition("?")[0] == "/v1/worker/display":
             if method == "POST" and actor == "adapter/"+w.worker_id:
                 return 200,"application/json",display.native(w,body)

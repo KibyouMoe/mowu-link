@@ -26,13 +26,14 @@ from .feishu_inbound import Inbound
 from .feishu_output import Views
 from .host_wire import RemoteAdapter
 from .native_files import NativeFiles
+from .orders import Orders
 from .question_cards import Actions
 from .storage import Fault, encode, guid
 from .test_feishu_output import PlatformFixture
 from .test_feishu_inbound import PNG
 from .test_mainline import Clock
 from . import test_service
-from .wire import Client
+from .wire import Client, serve_loopback
 from .worker import Worker
 from .worker_service import WorkerService
 
@@ -97,6 +98,9 @@ class Provider(BaseHTTPRequestHandler):
         peer = next((block["text"] for block in latest if block.get("text","").startswith("Send peer fixture\n")),None)
         public_preview = getattr(self.server,"public_preview",False) and any(
             block.get("text")=="Native tool preview fixture" for block in latest)
+        approval_prompt = next((block["text"].removeprefix("Approval fixture ")
+                                for block in latest if hasattr(self.server,"approval_commands")
+                                and block.get("text","").startswith("Approval fixture ")),None)
         trainer_prompt = next((block["text"].split(": ",1)[1] for block in latest
                               if hasattr(self.server,"trainer_responses")
                               and block.get("text","").startswith("Native trainer question: ")),None)
@@ -119,6 +123,12 @@ class Provider(BaseHTTPRequestHandler):
                     "arguments":"{}"}
         elif formal_goal is not None and (goal_continuation or payload and payload.get("kind")=="task"):
             item = self.formal_goal_item(formal_goal,payload,items[user_index+1:],names,goal_continuation)
+        elif approval_prompt and not calls:
+            item = {"type":"function_call","id":"fc_approval_"+approval_prompt,"name":"exec_command",
+                    "call_id":"trial-approval-"+approval_prompt,
+                    "arguments":encode({"cmd":self.server.approval_commands[approval_prompt],
+                                        "sandbox_permissions":"require_escalated",
+                                        "justification":"Isolated cancellation fixture."})}
         elif public_preview and not calls:
             commentary = {"id":"msg_preview_comment","type":"message","role":"assistant","status":"completed",
                           "phase":"commentary","content":[{"type":"output_text","text":"Checking the isolated workspace."}]}
@@ -692,6 +702,133 @@ class CodexAppServer(unittest.TestCase):
                          "parent_input_count":1,"child_input_count_including_parent_history":2,
                          "new_model_requests":1,
                          "boundary":"Actual Codex App Server fork, manual isolated adapter selection, scripted local model"}
+
+    def test_native_command_approval_cancels_exact_request_and_does_not_infer_missing_proof(self):
+        self.provider.approval_commands = {"one":"pwd","two":"pwd","expire":"pwd"}
+        root = Path(self.root)
+        rpc = self.enterContext(isolated_app_server(self.root,self.origin,
+                                ['approval_policy="on-request"','sandbox_mode="read-only"']))
+        session = rpc.request("thread/start",{"cwd":self.root,"ephemeral":False})["thread"]["id"]
+        host = AppServerHost(rpc,session,relay_command_approvals=True)
+        terminals = Queue()
+        worker_token,manager,operator,other,gateway,trainer = (guid() for _ in range(6))
+        clock_offset = 0
+        router = self.enterContext(running(serve_loopback(Orders(root/"approval-router.db",clock=lambda:time.time()+clock_offset),
+                  {worker_token:"worker/dev",manager:"hermes",operator:"approver/dev",other:"approver/other"})))
+        adapter = HostAdapter(root/"approval-adapter.db",host,session)
+        worker = Worker(root/"approval-worker.db","dev",Client(router,worker_token),adapter)
+        worker.connect()
+        service = WorkerService(worker)
+        url = self.enterContext(running(service.listen({gateway:"adapter/dev",trainer:"platform/dev"},("127.0.0.1",0),None)))
+        approver, outsider, manager_wire = (Client(router,token) for token in (operator,other,manager))
+        callback,platform = Client(url,gateway),Client(url,trainer)
+
+        lost_router_reply,seen_closures,native_responses,native_offers,ignore_closure = Event(),[],[],[],Event()
+        send,event,call = rpc.send,rpc.event,callback.request
+        def record_response(packet):
+            if "decision" in packet.get("result",{}):
+                native_responses.append(packet)
+            send(packet)
+        def read_event(deadline):
+            while True:
+                packet = event(deadline)
+                if packet.get("method")=="item/commandExecution/requestApproval":
+                    native_offers.append(packet)
+                if not (ignore_closure.is_set() and packet.get("method")=="serverRequest/resolved"):
+                    return packet
+        def drop_one_response(method,path,*args,**kwargs):
+            receipt = call(method,path,*args,**kwargs)
+            if method=="PUT" and path.endswith("/closed"):
+                seen_closures.append(receipt)
+                if not lost_router_reply.is_set():
+                    lost_router_reply.set()
+                    raise ConnectionError("lost isolated closure response")
+            return receipt
+        rpc.send,rpc.event,callback.request = record_response,read_event,drop_one_response
+        self.enterContext(worker_callbacks(host,callback,lambda:None,
+                          notify_terminal=lambda tid,status:terminals.put((tid,status))))
+
+        def until(predicate):
+            deadline = time.monotonic()+10
+            while time.monotonic()<deadline:
+                result = predicate()
+                if result:
+                    return result
+                time.sleep(.05)
+            self.fail("approval fixture did not settle")
+
+        def open_one(variant):
+            received = worker.chat(guid(),"Approval fixture "+variant)
+            def matching():
+                return next((row for row in approver.request("GET","approvals/dev")["items"]
+                             if row["request"]["item_id"]=="trial-approval-"+variant),None)
+            offered = until(matching)
+            turn = offered["request"]["turn_id"]
+            if received:
+                self.assertEqual(received["turn_id"],turn)
+            self.assertEqual(offered["state"],"pending")
+            self.assertEqual(offered["request"]["session"],session)
+            self.assertEqual(offered["request"]["decisions"],["accept","cancel"])
+            native, = [offer["params"] for offer in native_offers if offer["params"]["turnId"]==turn]
+            self.assertEqual(offered["request"]["command"],native["command"])
+            self.assertTrue(native["command"].endswith(" pwd"),native["command"])
+            self.assertEqual(offered["request"]["environment_id"],native.get("environmentId"))
+            return offered,"approvals/dev/"+offered["approval_id"]
+
+        first,route = open_one("one")
+        decision = {"request_digest":first["request_digest"],"decision":"cancel"}
+        with self.assertRaisesRegex(Fault,"forbidden"):
+            outsider.request("PUT",route+"/decision",decision)
+        with self.assertRaisesRegex(Fault,"forbidden"):
+            platform.request("PUT","worker/"+route+"/decision",decision)
+        self.assertEqual(native_responses,[])
+        decided = approver.request("PUT",route+"/decision",decision)
+        self.assertEqual(decided["state"],"decided")
+        turn,status = terminals.get(timeout=10)
+        self.assertEqual((turn,status),(first["request"]["turn_id"],"interrupted"))
+        until(lambda:len(seen_closures)==2)
+        closed = approver.request("GET",route)
+        self.assertEqual(seen_closures,[closed,closed])
+        self.assertEqual(closed["state"],"native_closed")
+        self.assertEqual(closed["attempted_response"],{"source":"operator","decision":"cancel"})
+
+        ignore_closure.set()
+        second,route = open_one("two")
+        decision = {"request_digest":second["request_digest"],"decision":"cancel"}
+        decided = approver.request("PUT",route+"/decision",decision)
+        turn,status = terminals.get(timeout=10)
+        self.assertEqual((turn,status),(second["request"]["turn_id"],"interrupted"))
+        self.assertEqual(approver.request("PUT",route+"/decision",decision),decided)
+        until(lambda:len(native_responses)==2)
+        time.sleep(.6)  # Allow additional pump cycles to expose any incorrect native resend.
+        self.assertEqual(approver.request("GET",route),decided)
+        self.assertIsNone(decided["attempted_response"])
+        ignore_closure.clear()
+        expired,expired_route = open_one("expire")
+        clock_offset = 601  # Advance only the isolated Router clock.
+        turn,status = terminals.get(timeout=10)
+        self.assertEqual((turn,status),(expired["request"]["turn_id"],"interrupted"))
+        def expired_receipt():
+            result = approver.request("GET",expired_route)
+            return result if result["state"]=="native_closed" else None
+        confirmed_expiry = until(expired_receipt)
+        self.assertEqual(confirmed_expiry["attempted_response"],{"source":"expiry","decision":"cancel"})
+        self.assertIsNone(confirmed_expiry["decision"])
+        self.assertEqual(native_responses,[{"id":offer["id"],"result":{"decision":"cancel"}} for offer in native_offers])
+        turns = host.thread(session,include_turns=True)["turns"]
+        self.assertFalse(any(item["type"]=="commandExecution" for turn in turns for item in turn["items"]))
+        self.assertEqual(manager_wire.request("GET","tasks")["items"],[])
+        self.assertEqual(platform.request("GET","worker/display")["items"],[])
+        self.evidence = {"native_thread":session,"requests":[first["approval_id"],second["approval_id"],expired["approval_id"]],
+                         "native_turn_ids":[offer["params"]["turnId"] for offer in native_offers],
+                         "native_request_ids":[offer["id"] for offer in native_offers],
+                         "native_decisions_sent_once":[packet["result"]["decision"] for packet in native_responses],
+                         "first_router_state":closed["state"],
+                         "first_closure_router_attempts":sum(receipt["approval_id"]==first["approval_id"] for receipt in seen_closures),
+                         "second_router_state":decided["state"],"native_closure_deliberately_dropped":True,
+                         "expired_approval_native_response":confirmed_expiry["attempted_response"],
+                         "native_commands_executed":0,"ordinary_chat_and_tasks_unchanged":True,
+                         "boundary":"Bundled Codex App Server, local scripted model, injected transport loss, isolated Router and Worker"}
 
     def test_resume_catalog_uses_only_current_app_server_workspace_without_loading_history(self):
         root = Path(self.root)
