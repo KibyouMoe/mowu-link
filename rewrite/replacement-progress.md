@@ -4,6 +4,8 @@
 
 ## 检查点与证据
 
+飞书官方 Python SDK 1.7.5 通过实际回环 WebSocket 验证 TCP 中断后自愈。测试直接断开连接，无 WebSocket 关闭帧。SDK 第二次取地址并重连，三次事件回包为 200，其中一条是断线前事件重发。共享入箱只有两条，重建平台进程后交到实际 Worker 也只有两条宿主输入。连续 6 次通过。复跑带 SDK 的 `python3 -m rewrite.feishu_reconnect_check`。[传输记录](evidence/feishu-sdk-reconnect.json)。未连真实飞书，原生宿主用夹具。
+
 两套独立原生 DSH 进程已在同机跑通同伴图文及关联回信。双方 AgentLoop 都通过宿主工具执行器调用 `worker_send_peer`，Router 两条原消息分别有接收方原生凭据。输入原图摘要一致，回复带原消息号，两端重读都无重复输入，Router 无工单。连续 10 次通过。复跑 `python3 -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_two_real_dsh_sessions_roundtrip_a_linked_peer_message`。[双宿主原生记录](evidence/dsh-native-peer-two-hosts.json)。两端模型由本地脚本驱动；不涉及真实飞书或跨物理机器。
 
 Linux arm64 回归使用提交 `318e905a241229c2de276bd5917293fc969507bc`，通过 125 项，33 项因依赖 macOS DSH 跳过，核对 125 个发行文件。macOS Worker 经独立 TLS 接入 Linux Router 和测试宿主，只见原输入和通知各一条。该跨系统试验在一台物理机上运行，模型和两宿主用夹具。

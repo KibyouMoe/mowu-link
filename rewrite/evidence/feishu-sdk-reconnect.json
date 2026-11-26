@@ -1,0 +1,29 @@
+{
+  "sdk_version": "1.7.5",
+  "websocket_connections": 2,
+  "endpoint_requests": 2,
+  "event_acknowledgements": [
+    [
+      "before",
+      200
+    ],
+    [
+      "before",
+      200
+    ],
+    [
+      "after",
+      200
+    ]
+  ],
+  "durable_messages": [
+    "om_before",
+    "om_after"
+  ],
+  "worker_native_inputs": 2,
+  "host": "fixture",
+  "cloud_platform": false,
+  "disconnect": "TCP closed without a WebSocket close frame",
+  "network": "actual loopback HTTP and WebSocket",
+  "consecutive_runs": 6
+}
