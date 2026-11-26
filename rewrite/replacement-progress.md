@@ -8,6 +8,8 @@
 
 普通回退继续拒绝覆盖有新写入的试用库。已结单但通知未确认、待验收、审核摘要过期、附件损坏以及出现无关的试用消息均未生成旧端副本。正在执行的工单和混合新写入仍需单独对账，保留新旧两侧。
 
+待验收与已归档两个场景各连过 10 轮。macOS 源码回归全过 241 项，Linux arm64 通过 161 项、跳过 80 项。以 `c30c272d13ceb09e897c65ec3bcdc889bf8081af` 构建 213 文件安装包，SHA-256 为 `4e5a3d97157079545f2d9e3b4642447e17a33a2280bd5eced63483a112fb6288`。安装目录复跑 `python3 -B -m unittest -q rewrite.test_cutover rewrite.test_state_bundle`，23 项通过，安装文件摘要一致。旧 Router 测试源码由 `30f61e671465db0b5bba221ba8c9fc2194a6e43d` 的 `server/router` 提取到临时目录，通过 `MOWULINK_TEST_LEGACY_ROOT` 指定。
+
 旧远程维护入口由 Router 共用凭据控制固定 launchd 白名单。现有溪流的 `gateway-restart` 说明明确引用该接口，Codex 运维说明也用它验证 `codexworker` 的标签与桌面进程是否同一来源。重做版改为独立、显式启用的 `host-ops` HTTPS 服务。只读身份能查清单，单服务维护身份才能对明确代际发起操作。目标表仅登记当前用户的已加载 LaunchAgent。运行期间 plist 改动与加载参数不符都使服务代际待核，拒绝操作。[维护入口](README.md#macos-独立维护入口)
 
 实际 macOS 临时 Router 收到一次维护请求，客户端主动断开后按原 UUID 查回。旧 PID 退出，新 PID 启动，另一测试服务的 PID 不变。新 Router 从原库查回同一待派工单，原建单幂等键仍只返回一张单。维护服务重开后原回执可读。同场跑了已加载停机项恢复。另用测试队列复验维护进程中途中断留下 `unconfirmed`，旧请求不会重跑。复跑 `python3 -B -m unittest -v rewrite.test_host_ops`。三个临时 LaunchAgent 已卸载，未接现役服务。[隔离运维证据](evidence/host-ops-launchd.json)
