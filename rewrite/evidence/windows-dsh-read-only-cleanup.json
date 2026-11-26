@@ -1,0 +1,116 @@
+{
+  "recorded_utc": "2026-11-26T19:59:19.9398372Z",
+  "verification_url": "https://github.com/KibyouMoe/mowu-link/actions/runs/45887598066/job/140142094284",
+  "tested_revision": "c70cc3c9d89957067b86b67e7e6bfa76a9a20620",
+  "runner": "Windows Server 2025 x64",
+  "dsh_release": "0.2.2-rc.5",
+  "passed": 4,
+  "scope": "Installed DSH SDK with opt-in read-only assignments, local model, real isolated Router.",
+  "non_private_ledger_rejected": true,
+  "verified": [
+    {
+      "action": "cancel",
+      "task_id": "1a0666c7-8584-4faa-9f01-9b2045b11f40",
+      "old_assignment_id": "90bb5d48-5110-430a-8e45-75ded3384d09",
+      "native_inputs": [
+        "mowulink-bdd7160b64829f812c008ca8b9b19b6866be95a4e3697e8ace54c15589b26511",
+        "mowulink-971db9fda7bed10bd03211f0ba8675d1204c94671920b3fce1d7cffdb108b962",
+        "mowulink-bb76389f4784b2c77754d949c1d53b08f7085b49c0675ab7055d1414eec806d2"
+      ],
+      "proof": {
+        "assignment_id": "90bb5d48-5110-430a-8e45-75ded3384d09",
+        "cleaned": true,
+        "control_turn_id": "22/3",
+        "kind": "task.cancel",
+        "receipt_id": "ebe05f37bed405cce962111bd192c98a981b56bbc7819d270757981bca10a9be",
+        "scope": "read_only",
+        "session": "dsh-read-only-cancel",
+        "stopped": true,
+        "stopped_turns": [
+          {
+            "end_seq": 14,
+            "reason": "aborted",
+            "turn_id": "1/1"
+          }
+        ],
+        "withdrawn_inputs": [
+          {
+            "delivery_id": "d70be87b-3232-4e7b-bde3-d35aebee76c6",
+            "discard_seq": 10,
+            "native_id": "mowulink-5109876cabc2dfbe74f5d33a2444467679cd7155a58b3c41a04b7b1306f968b8"
+          }
+        ]
+      },
+      "final_state": "cancelled",
+      "retained_private_input": "mowulink-971db9fda7bed10bd03211f0ba8675d1204c94671920b3fce1d7cffdb108b962",
+      "new_assignment_id": null,
+      "dropped_router_w04_receipts": 1,
+      "recorded_w04_replays": 2,
+      "durable_admissions": 3,
+      "proof_recovered_after_cold_restart": true,
+      "new_model_requests_after_reopen": 0,
+      "copied_native_state_proof_matches": true
+    },
+    {
+      "action": "transfer",
+      "task_id": "ec12a8ce-0372-446c-aa10-e82219e555b9",
+      "old_assignment_id": "a6385342-e6e2-4c03-8a29-40f585870a48",
+      "native_inputs": [
+        "mowulink-3a0cd9ce829b8744df8f81a23486da1d28f682254cdf4887e1531b889d8d883a",
+        "mowulink-3b1b2e8204860adfa340237dadac27e09c8101877c8131db92bdd412e00f3264",
+        "mowulink-0fd230370a462b4e37d23d0b02cffe24af0d63e630005d8913de65264898e962"
+      ],
+      "proof": {
+        "assignment_id": "a6385342-e6e2-4c03-8a29-40f585870a48",
+        "cleaned": true,
+        "control_turn_id": "22/3",
+        "kind": "task.transfer_out",
+        "receipt_id": "839ce07436c6545d2ab0703b90ff999de35369b965dc5dc539f582ce8c939ee4",
+        "scope": "read_only",
+        "session": "dsh-read-only-transfer",
+        "stopped": true,
+        "stopped_turns": [
+          {
+            "end_seq": 14,
+            "reason": "aborted",
+            "turn_id": "1/1"
+          }
+        ],
+        "withdrawn_inputs": [
+          {
+            "delivery_id": "38734cb8-301f-4d14-a756-b1b9061a9496",
+            "discard_seq": 10,
+            "native_id": "mowulink-1ac9ed02ca208fc3cd8fb205c3ec08aba5719badb359e4c0287e128cc4125c03"
+          }
+        ]
+      },
+      "final_state": "working",
+      "retained_private_input": "mowulink-3b1b2e8204860adfa340237dadac27e09c8101877c8131db92bdd412e00f3264",
+      "new_assignment_id": "9ea9d37c-e098-4aad-8478-ccfa0e6188db",
+      "dropped_router_w04_receipts": 0,
+      "recorded_w04_replays": 0,
+      "durable_admissions": 3,
+      "proof_recovered_after_cold_restart": true,
+      "new_model_requests_after_reopen": 0,
+      "copied_native_state_proof_matches": true
+    }
+  ],
+  "refused": [
+    {
+      "mode": "cleanup-unscoped",
+      "task_id": "7e5df787-d66b-452e-b3f7-6fd094c7ce22",
+      "assignment_id": "7369b8f1-c85e-4d7f-8613-bbab7976b193",
+      "native_stop": "aborted",
+      "native_report": "native_cleanup_unconfirmed",
+      "workspace_write_observed": false
+    },
+    {
+      "mode": "cleanup-forbidden-tool",
+      "task_id": "bc4f8747-b534-485d-bbb0-a23136d7db3b",
+      "assignment_id": "62930494-3d8a-4826-86bb-51a74c5d76fb",
+      "native_stop": "aborted",
+      "native_report": "native_cleanup_unconfirmed",
+      "workspace_write_observed": false
+    }
+  ]
+}

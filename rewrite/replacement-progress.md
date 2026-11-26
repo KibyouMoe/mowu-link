@@ -4,6 +4,10 @@
 
 ## 检查点与证据
 
+Windows DSH 双向 TLS 工位已验只读取消和转派。原派发收到控制请求，宿主确认原生回合中止并撤下该派发的排队更新，普通私聊只进入一次。Tool W04 以原派发交回，丢取消回执后 Worker 重建按原号查回。转派前后新工位持单完全一致。缺少原生清理凭据或出现未获准工具时，旧派发仍待清理。宿主拒绝其他普通用户可读的限制账本。Windows 和 macOS 冷重开后查回同一清理凭据。把已关闭的原生会话和 SQLite 限制账本连同适配器库复制到有独立端口及证书的新目录，清理凭据逐字段相同，原生模型请求仍为零。官方 DSH AgentLoop、Router 和 Worker 实跑，模型和接替工位为夹具。[Windows 实测](evidence/windows-dsh-read-only-cleanup.json) · [macOS 实测](evidence/dsh-local-tls-readonly-macos.json) · [迁移说明](router-rehearsal.md#重做版五组件的离线恢复)
+
+实现与隔离恢复验收提交 `c70cc3c9d89957067b86b67e7e6bfa76a9a20620`。Windows DSH 专项 4 项、Codex 与安装专项 10 项、Router 和 Worker 两套回退通过。macOS 同提交构建 269 文件归档，逐文件读回后复跑 DSH 专项 4 项通过，归档 SHA-256 为 `33133789f5f43cdf78e2bde48d6c59906c7728d701798e35e8947fec731e039b`。初始实现 `9ff6651dc9ba544a09a316a3f1716e971985f898` 的 macOS 全量 291 项通过、4 项按环境跳过，Linux arm64 全量 187 项通过、108 项按环境跳过。Windows 测试目录为当前账号配置继承权限，宿主保留拒绝共享账本的校验。Windows Desktop 界面、真实模型及飞书、原生可写工作区和图文仍待验。
+
 Windows Server 2025 已用官方 DSH Desktop 0.2.2-rc.5 包内的 AgentLoop 验证固定会话。实现提交 `7e06c1bca614197f14b76d314597832265b28f33`。共享 Unix 套接字方案在 Windows 不适用，新增显式启用的本机双向 TLS。双方拒绝无客户端证书，宿主另拒绝错会话。原生回合 `1/1` 在丢收件后查回同一个输入，两次调用 `worker_report` 得到原回执，只发一条成果通知。Worker 确认后清持单，工单保留待验收。前两次 Windows 运行停在插件内同步 ACL 检查超时，改用异步校验并保留 Windows 所需系统环境后通过。原生宿主、Router 和 Worker 实跑，模型为本地脚本。Windows Desktop 界面、审批、清理、图片及真实飞书待验。[Windows 证据](evidence/windows-dsh-native.json) · [复跑](README.md#windows-独立-dsh-固定会话)
 
 补测提交 `7f7c47ab79d6c50c84669ffdb74f54cbeed60899` 从原端口关闭和重开 DSH 宿主，复用原会话与 TLS 配置。当适配器本地收件缺失且宿主离线时返回待核。重开后重投同一派发得到原收件，原生历史保留一条输入且没有新模型请求。Windows、macOS 分别通过。macOS 从 268 文件的安装包复跑通过，归档 SHA-256 为 `b782f4091ef12713d0340ef752b08821d6899c11f3c57c304bd250b69cf469f5`。[Windows 冷重开证据](evidence/windows-dsh-native.json) · [macOS 冷重开证据](evidence/dsh-local-tls-macos.json)

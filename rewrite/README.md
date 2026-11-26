@@ -120,7 +120,7 @@ MOWULINK_CODEX_CROSS_GUEST_IMAGE=<已有-linux-arm64-镜像完整ID> \
 
 独立只读 DSH 工位可在宿主插件打开 `read_only_assignments`。该配置只适合会话内仅需查询和工单回报的工位。宿主会限制该会话的原生工具执行，并保存派发输入是在这条限制下交付的本地记录。收到取消或转派时，只撤下该旧派发已登记的排队输入，之后读回实际回合结束和原生收件箱撤销事件。工位随后才能经模型的 `worker_report` 确认旧派发清理。回执按原派发保存和重试。普通读写工位仍需实际工作区清理凭据。
 
-停写迁移时，随原生宿主记录保留运行目录里的 `read-only-admissions`。适配器 SQLite 单独保存已核实的原生撤销事件。已提交给 Router 的回执由 Worker 的发件账本负责查回。
+停写迁移时，Unix 套接字工位随原生会话保留运行目录里的 `read-only-admissions`，本机双向 TLS 工位保留 `dsh-admissions.sqlite3`。适配器 SQLite 单独保存已核实的原生撤销事件。已提交给 Router 的回执由 Worker 的发件账本负责查回。
 
 复跑 `python3 -B -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_read_only_dsh_acknowledges_original_cancel_or_transfer_and_recovers_w04_reply rewrite.test_dsh_native_loop.NativeLoop.test_native_dsh_stop_alone_or_unverified_tool_keeps_cleanup_pending`。[只读工位证据](evidence/dsh-read-only-cleanup.json) · [待核反例](evidence/dsh-native-cleanup-refusal.json)
 
@@ -375,9 +375,10 @@ Windows 另从官方发布包运行 [独立 Codex App Server](desktop-check.md#w
 
 - `dsh-link.json` 填两个不同且未占用的端口，字段为 `host_port` 和 `worker_port`，范围为 1024–65535。两个监听都绑定 `127.0.0.1`。
 - `dsh-link.crt` 与 `dsh-link.key` 是该工位专用的自签证书及私钥。证书须含 IP SAN `127.0.0.1` 及服务端和客户端用途。两边都校验对端证书。不要复用 Router、飞书或登录凭据。证书、私钥、端口变更时按同一工位的双端配置重新启动测试实例。
-- 此入口覆盖固定会话的文本收件和原生工具。托管会话、命令审批、前台题转接、只读派发清理、工单容器与图片入站仍使用各自已有 Unix 套接字接入。显式启用未支持的插件选项会被拒绝。
+- 固定会话可启用 `read_only_assignments`。工位使用 SQLite 保存每次原生输入前的限制凭据，原生回合结束和排队撤销仍需各自的宿主证据。目录的运行身份权限须可继承到文件，插件会核对已有数据库和回滚日志。冷重开使用原数据库及原生会话日志。
+- 托管会话、命令审批、前台题转接、工单容器与图片入站使用原有 Unix 套接字接入。
 
-复跑时先为官方 Windows DSH 包校验 SHA-512，再解包到临时目录。用已检查权限的独立临时目录运行协定用例，环境变量 `MOWULINK_TEST_DSH_BINARY` 指向解包所得的原始应用可执行文件。运行 `python -B -m unittest -v rewrite.test_dsh_native_loop.LocalTlsLoop`。CI 的下载校验和完整步骤见 [Windows 验收入口](../.github/workflows/rewrite-windows.yml)。用例实际运行包内 DSH AgentLoop、原生持久化及工具执行，通过真实 Router 和 Worker 发回独立工单。模型与操作人使用本地测试驱动。已在 [Windows Server 2025](evidence/windows-dsh-native.json) 的官方包和 [macOS](evidence/dsh-local-tls-macos.json) 的已装包验证。已核宿主停机时保留原收件待核。用同一目录和端口重开原生宿主后，可查回同一收件，保留一条输入且无新模型请求。实际 Desktop 窗口、真实模型和飞书另验。
+复跑时先为官方 Windows DSH 包校验 SHA-512，再解包到临时目录。用已检查权限的独立临时目录运行协定用例，环境变量 `MOWULINK_TEST_DSH_BINARY` 指向解包所得的原始应用可执行文件。运行 `python -B -m unittest -v rewrite.test_dsh_native_loop.LocalTlsLoop`。CI 的下载校验和完整步骤见 [Windows 验收入口](../.github/workflows/rewrite-windows.yml)。用例实际运行包内 DSH AgentLoop、原生持久化及工具执行，通过真实 Router 和 Worker 发回独立工单。模型与操作人使用本地测试驱动。已在 [Windows Server 2025](evidence/windows-dsh-native.json) 的官方包和 [macOS](evidence/dsh-local-tls-macos.json) 的已装包验证。已核宿主停机时保留原收件待核。用同一目录和端口重开原生宿主后，可查回同一收件，保留一条输入且无新模型请求。只读取消与转派的原生证据见 [Windows](evidence/windows-dsh-read-only-cleanup.json) 和 [macOS](evidence/dsh-local-tls-readonly-macos.json)。实际 Desktop 窗口、真实模型和飞书另验。
 
 ### DSH 会话用量
 
