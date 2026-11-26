@@ -4,6 +4,10 @@
 
 ## 检查点与证据
 
+Windows Server 2025 已用官方 DSH Desktop 0.2.2-rc.5 包内的 AgentLoop 验证固定会话。实现提交 `7e06c1bca614197f14b76d314597832265b28f33`。共享 Unix 套接字方案在 Windows 不适用，新增显式启用的本机双向 TLS。双方拒绝无客户端证书，宿主另拒绝错会话。原生回合 `1/1` 在丢收件后查回同一个输入，两次调用 `worker_report` 得到原回执，只发一条成果通知。Worker 确认后清持单，工单保留待验收。前两次 Windows 运行停在插件内同步 ACL 检查超时，改用异步校验并保留 Windows 所需系统环境后通过。原生宿主、Router 和 Worker 实跑，模型为本地脚本。Windows Desktop 界面、冷重开、审批、清理、图片及真实飞书待验。[Windows 证据](evidence/windows-dsh-native.json) · [复跑](README.md#windows-独立-dsh-固定会话)
+
+同一 Windows 运行内另验 Codex 和安装专项 10 项及 Router、Worker 两套回退。macOS 在初始实现 `caa652987fdf81c79cfe06475b35223790c04d84` 全量 288 项通过、4 项按环境跳过。Linux arm64 同提交 187 项通过、105 项按环境跳过。Windows ACL 调整后 macOS 专项再次验证双向 TLS 和原 Unix 线，另外 DSH SDK 与服务组 31 项通过、1 项按环境跳过。[macOS 收件证据](evidence/dsh-local-tls-macos.json)
+
 Windows Server 2025 已跑真实 Codex App Server。以 `6e517f865ab987bb7b710de0b8e21b7750ce27ce` 构建的 262 文件安装包，测试前后摘要均为 `470183fbd3fe6fa4901e43e7dd7a832a85688ce3c24ff36628f1ede651c7a180`。Windows 专项 10 项及 Router、Worker 两套回退通过。独立适配器从指定会话收到原生工具调用并交 W04，两次调用只记一条成果通知，工单保持待验收。原生收件丢失后从同一 profile 查回，一条输入、一次本地模型请求。只读工位取消和转派先停原回合，等控制回合终止再交回原派发，转派继续由新工位持有。另核无证明时保留待清理并拒绝代交。Windows profile ACL、重复写者和适配器退出后的进程清理均实测。模型、飞书和接替工位使用夹具，Windows Desktop、线上 W04 和真实飞书待验。[实测](evidence/windows-codex-native.json) · [复跑](desktop-check.md#windows-独立-app-server)
 
 macOS 在运行时实现提交 `2a1f515e495f4f213ddf984129f1d6649614ee69` 全量 287 项通过、3 项按环境跳过。增加 Windows 只读验收用例后，macOS 再跑原生成果和只读清理两项通过。Linux arm64 在 `6e517f865ab987bb7b710de0b8e21b7750ce27ce` 全量 187 项通过、104 项按环境跳过。

@@ -1,0 +1,53 @@
+{
+  "tested_revision": "0c149f7385ec62f8f46513f09652ee3c9afd0dd0",
+  "os": "macOS",
+  "dsh": "0.2.2-rc.5",
+  "scope": "Native DSH AgentLoop, tool execution and real isolated Router/Worker; scripted local model",
+  "local_link": "IPv4 loopback with mutual TLS",
+  "host_receipt": {
+    "delivery_id": "c386d94a-cbd8-4b1f-bd0d-30c2d352d29e",
+    "digest": "dc9d59622669c68d688e28e12e6bae1b98320938771ca35fb01d71d13ba99733",
+    "native_id": "mowulink-2b1c9f2ead95c9cb6aa868d52758e620d0eebfd860f0f8076812ed886c22819e",
+    "session": "dsh-real-loop-formal",
+    "turn_id": "1/1"
+  },
+  "native_turns": [
+    {
+      "reason": {
+        "kind": "completed"
+      },
+      "turn": 1
+    }
+  ],
+  "native_calls": [
+    [
+      "worker_report",
+      "native-w04-fixture-0"
+    ],
+    [
+      "worker_report",
+      "native-w04-fixture-1"
+    ]
+  ],
+  "task_id": "be3e54b0-d70c-4d27-b7bf-0bbb71f02715",
+  "assignment_id": "12a132a9-d117-42a3-bebe-bddb1b998600",
+  "router_w04": {
+    "recorded": true,
+    "release_assignment_id": "12a132a9-d117-42a3-bebe-bddb1b998600",
+    "task_state": "completed_reported"
+  },
+  "worker_before_w04": {
+    "held_assignment_id": "12a132a9-d117-42a3-bebe-bddb1b998600",
+    "held_task_id": "be3e54b0-d70c-4d27-b7bf-0bbb71f02715"
+  },
+  "worker_after_w04": {
+    "held_assignment_id": null,
+    "held_task_id": null
+  },
+  "notification_ids": [
+    "7332615a-0968-4c56-9816-9c6badd369f9"
+  ],
+  "input_count_after_replay": 1,
+  "unauthenticated_rejected_both_ways": true,
+  "foreign_session_rejected": true
+}

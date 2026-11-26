@@ -1,0 +1,59 @@
+{
+  "recorded_utc": "2026-11-26T19:46:29.1550310Z",
+  "verification_url": "https://github.com/KibyouMoe/mowu-link/actions/runs/45886027589/job/140136816257",
+  "tested_revision": "7e06c1bca614197f14b76d314597832265b28f33",
+  "runner": "Windows Server 2025 x64",
+  "vendor_release": {
+    "version": "0.2.2-rc.5",
+    "source": "https://download.deepseek.com/dsh-desk/bin/win-x64/deepseek-harness-0.2.2-rc.5-win-x64.exe",
+    "sha512_base64": "wWySRp7Hk5gcH324jBxAc7KV0mniHzQDofyQexOJMIAWXBkgHTsRCr3IrdwX1XO8OIhDZsLYmve4mLxskikYIg=="
+  },
+  "scope": "Native DSH AgentLoop, tool execution and real isolated Router/Worker; scripted local model",
+  "local_link": "IPv4 loopback with mutual TLS",
+  "host_receipt": {
+    "delivery_id": "edbb45b5-38d6-4422-96b3-c895f87611ee",
+    "digest": "544aace46368ba7f3d2d19f9b4b007fdecce9d3ead130a7ecbaf91da94d352eb",
+    "native_id": "mowulink-be5453b68bee9cf534f346161dd25be82c88341f94e3c6df7eabb1e1947c4d53",
+    "session": "dsh-real-loop-formal",
+    "turn_id": "1/1"
+  },
+  "native_turns": [
+    {
+      "reason": {
+        "kind": "completed"
+      },
+      "turn": 1
+    }
+  ],
+  "native_calls": [
+    [
+      "worker_report",
+      "native-w04-fixture-0"
+    ],
+    [
+      "worker_report",
+      "native-w04-fixture-1"
+    ]
+  ],
+  "task_id": "9aab3789-8e57-41a5-8bec-a382da46a9b4",
+  "assignment_id": "4e93ea8c-ef51-4417-8e50-08651644d38f",
+  "router_w04": {
+    "recorded": true,
+    "release_assignment_id": "4e93ea8c-ef51-4417-8e50-08651644d38f",
+    "task_state": "completed_reported"
+  },
+  "worker_before_w04": {
+    "held_assignment_id": "4e93ea8c-ef51-4417-8e50-08651644d38f",
+    "held_task_id": "9aab3789-8e57-41a5-8bec-a382da46a9b4"
+  },
+  "worker_after_w04": {
+    "held_assignment_id": null,
+    "held_task_id": null
+  },
+  "notification_ids": [
+    "6c3086c9-267b-477d-a381-a78b418f1cf8"
+  ],
+  "input_count_after_replay": 1,
+  "unauthenticated_rejected_both_ways": true,
+  "foreign_session_rejected": true
+}

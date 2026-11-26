@@ -369,6 +369,16 @@ python3 -m rewrite.linux_check --repository . \
 
 Windows 另从官方发布包运行 [独立 Codex App Server](desktop-check.md#windows-独立-app-server)，实测原生工具经 W04 交成果、原收件查回、只读派发取消及转派，并核对 Windows profile ACL 和进程回收。模型、飞书和接替工位用夹具。旧新版 Router 和 Worker 回退继续每轮验证。
 
+#### Windows 独立 DSH 固定会话
+
+只在独立工位启用。宿主插件设置 `local_tls: true`，适配器启动参数加 `--local-tls`。两端配置同一个固定会话及绝对运行目录。该目录须位于本机受保护的路径下，目录及下列三个文件仅允许运行身份、SYSTEM 和受信任的本机管理员访问。插件用本机 Windows PowerShell 只读检查权限，按设备既有脚本执行策略运行。
+
+- `dsh-link.json` 填两个不同且未占用的端口，字段为 `host_port` 和 `worker_port`，范围为 1024–65535。两个监听都绑定 `127.0.0.1`。
+- `dsh-link.crt` 与 `dsh-link.key` 是该工位专用的自签证书及私钥。证书须含 IP SAN `127.0.0.1` 及服务端和客户端用途。两边都校验对端证书。不要复用 Router、飞书或登录凭据。证书、私钥、端口变更时按同一工位的双端配置重新启动测试实例。
+- 此入口覆盖固定会话的文本收件和原生工具。托管会话、命令审批、前台题转接、只读派发清理、工单容器与图片入站仍使用各自已有 Unix 套接字接入。显式启用未支持的插件选项会被拒绝。
+
+复跑时先为官方 Windows DSH 包校验 SHA-512，再解包到临时目录。用已检查权限的独立临时目录运行协定用例，环境变量 `MOWULINK_TEST_DSH_BINARY` 指向解包所得的原始应用可执行文件。运行 `python -B -m unittest -v rewrite.test_dsh_native_loop.LocalTlsLoop`。CI 的下载校验和完整步骤见 [Windows 验收入口](../.github/workflows/rewrite-windows.yml)。用例实际运行包内 DSH AgentLoop、原生持久化及工具执行，通过真实 Router 和 Worker 发回独立工单。模型与操作人使用本地测试驱动。已在 [Windows Server 2025](evidence/windows-dsh-native.json) 的官方包和 [macOS](evidence/dsh-local-tls-macos.json) 的已装包验证。实际 Desktop 窗口、真实模型、飞书和 Windows 冷重开另验。
+
 ### DSH 会话用量
 
 训练员在飞书私聊发送 `/context` 可查询绑定 DSH 会话最近一次模型回包的路由、回合、步骤、输入与总用量。窗口取自该回包之前同一路由的原生请求记录。原生端缺某一数值时按缺项显示，指令本身不向模型发起推理。宿主适配器的 `GET /v1/host/context` 只允许本工位读取。
