@@ -8,6 +8,8 @@ Worker 可经独立交接授权建立 Router 交接窗口。冻结和预约在 R
 
 复跑 `python3 -B -m unittest -v rewrite.test_handoff_admission rewrite.test_service.Service.test_three_process_worker_chat_and_assignment`。三个竞态与续接场景连过 18 轮，另用三个 TLS 进程验证隔离交接命令和解除后正式派单。macOS 全过 210 项。Linux arm64 通过 147 项，另 63 项本机宿主用例跳过。
 
+从 `ec22dad2b1e14c33f6aad0c5543b56c38d22954e` 构建 182 文件发布包，SHA-256 为 `8189f3ee84f4841315faa39aabf8ba9b4f93877da3d295276303ca6e7017c027`。安装目录复跑四项通过。以 `52a79e0c674f089b66d5cddc7dd122239df28920` 为旧版，未开启交接窗口时演练分步升级、混合版本与原快照回退，原生账本各阶段均为一条。复跑 `python3 -B -m rewrite.release_check --repository . --component worker-pair`，指定上述新旧 SHA。
+
 同一 Worker 从 Codex 冷切到 DSH 再切回。两端分别收到同样的图文并返回各自的原生收据，图片摘要一致，每次私聊只生成一张对应回复卡。两端原生 `worker_report` 各调用两次，均回同一派发凭据，各留一条待验通知。切回后按原消息号重放，卡片、原生输入和成果均未增加。Router 和 Worker 使用相同接口。真实原生运行时均为同机隔离测试，模型和飞书用夹具。[跨引擎证据](evidence/cross-native-handoff.json) · [复验命令](router-rehearsal.md#隔离工位冷换原生会话)
 
 跨引擎验收连过 12 轮。macOS 全量复跑 207 项通过，Linux arm64 通过 144 项，另 63 项本机宿主用例跳过。首轮 macOS 回归发现压缩夹具把「原生已受理」断言成即时可读历史；调整后分别核对持久受理标记和冷开后的同一压缩凭据，原生发送仍只一次。
