@@ -16,15 +16,20 @@ from .storage import Fault, encode
 def run():
     import lark_oapi as lark
     from lark_oapi.core.model import RawRequest
-    from lark_oapi.api.im.v1 import CreateMessageResponse, ReplyMessageResponse, GetMessageResourceResponse
+    from lark_oapi.api.im.v1 import CreateMessageResponse, GetMessageResourceResponse, PatchMessageResponse, ReplyMessageResponse
     from lark_oapi.core.model import RawResponse
     with TemporaryDirectory() as temp:
         inbox = Inbound(Path(temp)/"events.db",None,None,"test-app","test-trainer","test-chat")
-        views = Views(Path(temp)/"views.db",None,None,"test-chat","测试工位")
+        api = Mock()
+        platform = SDKMessages(api)
+        api.im.v1.message.create.return_value = CreateMessageResponse({"code":0,"data":{"message_id":"om_fixture_card"}})
+        api.im.v1.message.patch.return_value = PatchMessageResponse({"code":0})
+        views = Views(Path(temp)/"views.db",None,platform,"test-chat","测试工位")
         actions = Actions(views,inbox)
-        with views.db.transaction() as db:
-            db.execute("INSERT INTO question_cards VALUES ('trainer','fixture-q','om_fixture_card',?)",
-                       (encode({"options":[]}),))
+        question = {"kind":"question_open","recipient":"trainer","question_id":"fixture-q","event_id":"fixture-open",
+                    "session":"fixture-session","turn_id":"fixture-turn","text":"提供一条测试答复","options":[]}
+        if views.deliver(1,question)!="om_fixture_card":
+            raise RuntimeError("test question card was not recorded")
         token = secrets.token_urlsafe()
         handler = (lark.EventDispatcherHandler.builder("",token)
                    .register_p2_im_message_receive_v1(lambda event:receive(inbox,event))
@@ -52,12 +57,16 @@ def run():
             reply = handler.do(req)
             if reply.status_code != 200 or json.loads(reply.content).get("toast",{}).get("type") != "info":
                 raise RuntimeError("SDK rejected fixture card action")
+        if views.deliver(2,dict(question,kind="question_closed",event_id="fixture-close"))!="om_fixture_card":
+            raise RuntimeError("test question did not close its original card")
+        late = handler.do(req)
+        if late.status_code != 200 or json.loads(late.content).get("toast",{}).get("type") != "error":
+            raise RuntimeError("SDK accepted an answer to a closed question")
         with views.db.transaction() as db:
             rows = list(db.execute("SELECT state,answer FROM card_answers"))
         if len(rows)!=1 or tuple(rows[0]) != ("pending",encode({"mode":"text","text":"独立测试"})):
             raise RuntimeError("missing fixture card action")
-        api = Mock()
-        reply = SDKMessages(api)
+        reply = platform
         create = api.im.v1.message.create
         create.return_value = CreateMessageResponse({"code":0,"data":{"message_id":"om_fixture_notice"}})
         line = {"text":"已收到测试来源的 Notify 消息。"}
@@ -99,7 +108,8 @@ def run():
                 raise RuntimeError("missing resource was accepted")
         return {"sdk_version":version("lark-oapi"),"fixture_events":2,"pending_inputs":len(items),
                 "fixture_topic_replies":1,"manager_text_notices":1,"wrong_topic_rejected":True,"resource_http_cases":[404,503],
-                "fixture_card_callbacks":2,"pending_card_answers":len(rows),"network":"unused","platform_account":"none"}
+                "fixture_card_callbacks":3,"pending_card_answers":len(rows),"closed_card_action_rejected":True,
+                "network":"unused","platform_account":"none"}
 
 
 if __name__ == "__main__":
