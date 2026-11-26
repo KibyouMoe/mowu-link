@@ -71,6 +71,14 @@ class Routes extends Service {
     return {inputModalities:id==='text-only' ? ['text'] : ['text','image'],
       reasoning:id==='fixture' ? {efforts:[{id:'low',name:'低'},{id:'high',name:'高'}],defaultEffort:'low'} : undefined};
   }
+  async resolveCallConfig(choice) {
+    if (!this.listModels(choice.provider).some(model=>model.id===choice.model)) throw new Error('unavailable_model');
+    const info = this.resolveModelInfo(choice.provider,choice.model);
+    if (choice.reasoningEffort && !info.reasoning?.efforts.some(item=>item.id===choice.reasoningEffort)) {
+      throw new Error('unsupported_effort');
+    }
+    return {...choice,reasoningEffort:choice.reasoningEffort ?? info.reasoning?.defaultEffort};
+  }
 }
 await install(Routes);
 await install(adapter,{session:id,directory});

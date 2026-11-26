@@ -30,13 +30,17 @@ class RemoteAdapter:
     def session_info(self):
         info = self.request("GET","host/session")
         return {"session":string(info,"session"),"next_turn":info.get("next_turn") is True,
-                "context_usage":info.get("context_usage") is True,"model_view":info.get("model_view") is True}
+                "context_usage":info.get("context_usage") is True,"model_view":info.get("model_view") is True,
+                "model_change":info.get("model_change") is True}
 
     def context_usage(self):
         return self.request("GET","host/context")
 
     def model_view(self, kind):
         return self.request("GET","host/"+kind)
+
+    def model_change(self, session, kind, value):
+        return self.request("POST","host/model-selection",{"session":session,"kind":kind,"value":value})
 
     def deliver(self, did, payload):
         return self.request("POST", "host/deliver", {"delivery_id":did, "payload":payload})["receipt"]
@@ -67,6 +71,10 @@ def serve_adapter(adapter, worker_id, identities, address, context):
                 result = adapter.context_usage()
             case "GET",("/v1/host/models"|"/v1/host/efforts"):
                 result = adapter.model_view(path.rsplit("/",1)[1])
+            case "POST","/v1/host/model-selection":
+                require(set(body)=={"session","kind","value"} and body.get("kind") in ("models","efforts"),
+                        422,"invalid_model_change")
+                result = adapter.model_change(string(body,"session"),body["kind"],string(body,"value"))
             case "POST","/v1/host/deliver":
                 payload = body.get("payload")
                 require(isinstance(payload,dict) and payload.get("kind") in (

@@ -40,7 +40,8 @@ class HostAdapter:
     def session_info(self):
         return {"session":self.session,"next_turn":getattr(self.host,"next_turn",False) is True,
                 "context_usage":callable(getattr(self.host,"context_usage",None)),
-                "model_view":callable(getattr(self.host,"model_view",None))}
+                "model_view":callable(getattr(self.host,"model_view",None)),
+                "model_change":callable(getattr(self.host,"model_change",None))}
 
     def context_usage(self):
         reader = getattr(self.host,"context_usage",None)
@@ -54,6 +55,12 @@ class HostAdapter:
         reader = getattr(self.host,"model_view",None)
         require(callable(reader),422,"native_model_view_unavailable")
         return reader(self.session,kind)
+
+    def model_change(self, session, kind, value):
+        require(session==self.session,409,"wrong_native_session")
+        writer = getattr(self.host,"model_change",None)
+        require(callable(writer),422,"native_model_change_unavailable")
+        return writer(self.session,kind,value)
 
     def deliver(self, did, payload):
         if payload.get("kind") == "queued_chat":

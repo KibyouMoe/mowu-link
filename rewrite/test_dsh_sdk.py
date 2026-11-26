@@ -8,7 +8,9 @@ import subprocess
 import tempfile
 from threading import Thread
 import unittest
+from unittest.mock import patch
 
+from . import worker_commands
 from .devloop import Loop
 from .dsh_port import DshHost, tool_listener
 from .dsh_display import DshDisplay
@@ -196,7 +198,6 @@ class DshSdk(unittest.TestCase):
         cards = [row[2] for row in sink.messages.values()]
         self.assertTrue(any(card["header"]["title"]["content"]=="玉藻-输出"
                             and card["elements"][0]["text"]["content"]==effort for card in cards))
-        self.assertIn("切换敬请期待",self.platform_command("om_change","/model fixture/route-1"))
         self.assertEqual(original,self.drive("model-records"))
         self.drive("select-text-only")
         self.assertEqual(effort,self.platform_command("om_efforts","/effort"))
@@ -204,6 +205,61 @@ class DshSdk(unittest.TestCase):
         self.assertIn("会话当前选择 fixture/text-only",current)
         self.assertIn("宿主未列出可选项",current)
         self.assertEqual(self.drive("count")["received"],1)
+
+    def test_bound_model_change_persists_selection_and_does_not_replay_after_lost_reply(self):
+        self.remote_adapter("models")
+        self.drive("manual")
+        self.drive("request-header",model="fixture",effort="low")
+        self.assertIn("会话正在工作",self.platform_command("om_busy","/effort high"))
+        self.drive("end")
+        self.assertIn("该选项暂不可用",self.platform_command("om_invalid","/effort invalid"))
+        self.assertEqual(self.drive("model-records")["records"],["request/header"])
+        self.assertIn("本会话已切换为 fixture/fixture · high",
+                      self.platform_command("om_high","/effort high"))
+        proof = self.inbound.deliver("om_high")["model_receipt"]
+        self.assertEqual(proof["session"],self.session)
+        self.assertEqual(proof["selected"],{"provider":"fixture","model":"fixture","effort":"high"})
+        self.assertIsInstance(proof["event_seq"],int)
+        self.assertIn("本会话当前已选择 fixture/fixture · high",
+                      self.platform_command("om_high_again","/effort high"))
+        self.assertEqual(self.drive("model-records")["records"],["request/header","model/selection"])
+        remote = self.w.adapter.model_change
+        def lose_reply(*args):
+            remote(*args)
+            raise OSError("lost model selection receipt")
+        self.w.adapter.model_change = lose_reply
+        self.assertIn("切换结果待核",self.platform_command("om_lost","/model fixture/route-1"))
+        self.w.adapter.model_change = remote
+        self.assertEqual(self.drive("model-records")["selected"]["model"],"route-1")
+        self.drive("select-model",model="fixture",effort="low")
+        self.assertIn("切换结果待核",self.platform_command("om_lost","/model fixture/route-1"))
+        final = self.drive("model-records")
+        self.assertEqual(final["selected"],{"provider":"fixture","model":"fixture","reasoningEffort":"low"})
+        self.assertEqual(final["records"].count("model/selection"),3)
+        self.assertEqual(self.drive("count")["received"],1)
+        self.assertIsNone(self.w.hold()["held_task_id"])
+
+    def test_model_change_intent_survives_interruption_before_worker_records_receipt(self):
+        self.remote_adapter("models")
+        command = {"message_id":"om_restart_model","text":"/model fixture/route-3"}
+        with patch.object(worker_commands,"record",side_effect=RuntimeError("worker interrupted")):
+            with self.assertRaisesRegex(RuntimeError,"worker interrupted"):
+                worker_commands.handle(self.service,command)
+        self.assertEqual(self.drive("model-records")["selected"]["model"],"route-3")
+        with self.assertRaisesRegex(Fault,"message_previously_command"):
+            self.w.chat(command["message_id"],"same message, different path")
+        with self.assertRaisesRegex(Fault,"platform_command_conflict"):
+            worker_commands.handle(self.service,{**command,"text":"/status"})
+        recovered = WorkerService(self.w,self.clock)
+        self.drive("select-model",model="fixture",effort="high")
+        pending = worker_commands.handle(recovered,command)
+        self.assertEqual(worker_commands.handle(recovered,command),pending)
+        self.assertNotIn("model_receipt",pending)
+        self.assertEqual(self.drive("model-records")["selected"]["model"],"fixture")
+        with self.w.db.transaction() as db:
+            text = json.loads(db.execute(
+                "SELECT payload FROM display_events WHERE event_id='command-om_restart_model'").fetchone()[0])["text"]
+        self.assertIn("切换结果待核",text)
 
     def test_next_turn_queue_recovers_receipt_without_steering_or_replaying(self):
         self.drive("manual")

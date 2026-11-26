@@ -1,14 +1,18 @@
 """Trainer commands belonging to one platform binding, independent of formal work."""
 import json
 import re
+from urllib.error import URLError
 
 from . import display, queued_chat
-from .storage import encode, require, string
+from .storage import Fault, encode, require, string
 
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS platform_commands (
  message_id TEXT PRIMARY KEY, request TEXT NOT NULL, receipt TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS platform_model_intents (
+ message_id TEXT PRIMARY KEY, request TEXT NOT NULL, session TEXT NOT NULL
 );
 """
 HELP = ("/status 查看最近一次连接、宿主忙闲和本地持单记录。\n"
@@ -32,6 +36,8 @@ def reply(service, name, args, hold):
             lines.append("/context 查看最近一次模型回包的用量。")
         if service.adapter_connected and service.host_model_view:
             lines.append("/model 查看模型，/effort 查看当前模型支持的思考强度。")
+        if service.adapter_connected and service.host_model_change:
+            lines.append("/model 提供方/模型 或 /effort 强度：切换当前绑定会话。")
         lines.append("/queue 内容：排入下一回合。" if service.adapter_connected and service.host_queue else "/queue 当前未确认可用。")
         return "\n".join(lines)
     if name == "/status":
@@ -84,7 +90,10 @@ def model_answer(service,name,args):
         if len(args)==2 and args[0]=="page" and re.fullmatch(r"[1-9][0-9]?",args[1]):
             page = int(args[1])
         else:
-            return f"{name} 当前支持查看。切换敬请期待。可用 {name} page 页码翻页。"
+            if not service.host_model_change:
+                return f"{name} 当前支持查看。切换敬请期待。可用 {name} page 页码翻页。"
+            choice = "提供方/模型" if name=="/model" else "思考强度"
+            return f"用法：{name} {choice}。可用 {name} page 页码翻页。"
     kind = MODEL_VIEWS[name]
     data = service.worker.adapter.model_view(kind)
     require(isinstance(data,dict) and data.get("session")==service.host_session,409,"wrong_native_model_view")
@@ -137,6 +146,77 @@ def previous(db,mid,text):
         return json.loads(old["receipt"])
     require(not db.execute("SELECT 1 FROM chats WHERE message_id=?",(mid,)).fetchone(),
             409,"command_previously_chat")
+    intent = db.execute("SELECT request FROM platform_model_intents WHERE message_id=?",(mid,)).fetchone()
+    require(not intent or intent["request"]==text,409,"platform_command_conflict")
+
+
+def record(db,mid,text,name,session,answer,model_receipt=None):
+    event = display.append(db,{"event_id":"command-"+mid,"kind":"command","session":session,
+                               "turn_id":"","text":answer})
+    receipt = {"message_id":mid,"command":name,"output":event}
+    if model_receipt is not None:
+        receipt["model_receipt"] = model_receipt
+    db.execute("INSERT INTO platform_commands VALUES (?,?,?)",(mid,text,encode(receipt)))
+    return receipt
+
+
+UNKNOWN_MODEL_CHANGE = "切换结果待核。请用 /model 或 /effort 查看会话当前状态。"
+CHANGE_ERRORS = {
+    "model_change_busy":"会话正在工作。空闲后可重新发送切换命令。",
+    "model_change_conflict":"查询期间会话状态已变化。请刷新选择后重试。",
+    "model_choice_unavailable":"该选项暂不可用。请查看当前模型和思考强度列表。",
+    "model_choice_needs_route":"用法：/model 提供方/模型。",
+    "wrong_native_session":"会话绑定发生变化。请查当前绑定。",
+}
+
+
+def confirmed_selection(receipt,session,kind,value):
+    require(isinstance(receipt,dict) and receipt.get("session")==session,502,"invalid_model_change_receipt")
+    changed,sequence = receipt.get("changed"),receipt.get("event_seq")
+    require(type(changed) is bool and (not changed or type(sequence) is int and sequence>=0),
+            502,"invalid_model_change_receipt")
+    selected = receipt.get("selected")
+    require(isinstance(selected,dict) and set(selected)=={"provider","model","effort"},
+            502,"invalid_model_change_receipt")
+    provider,model,effort = (selected[key] for key in ("provider","model","effort"))
+    labels = (provider,model) if effort is None else (provider,model,effort)
+    require(all(isinstance(label,str) and 0<len(label)<=200 and label.isprintable() for label in labels),
+            502,"invalid_model_change_receipt")
+    route = provider+"/"+model
+    require(value==(route if kind=="models" else effort or "default"),502,"invalid_model_change_receipt")
+    action = "已切换为" if changed else "当前已选择"
+    answer = f"本会话{action} {route} · {effort or '随模型默认'}。"
+    return answer,{"session":session,"selected":selected,"changed":changed,"event_seq":sequence if changed else None}
+
+
+def switch_model(service,mid,text,name,value):
+    worker = service.worker
+    kind = MODEL_VIEWS[name]
+    with service.model_command_lock:
+        with worker.db.transaction() as db:
+            old = previous(db,mid,text)
+            if old:
+                return old
+            intent = db.execute("SELECT session FROM platform_model_intents WHERE message_id=?",(mid,)).fetchone()
+            if intent:
+                # A prior Worker may have died after the native write. Do not write again from the same command.
+                return record(db,mid,text,name,intent["session"],UNKNOWN_MODEL_CHANGE)
+            if not (service.adapter_connected and service.host_model_change):
+                return None
+            session = service.host_session
+            db.execute("INSERT INTO platform_model_intents VALUES (?,?,?)",(mid,text,session))
+        answer = UNKNOWN_MODEL_CHANGE
+        native = None
+        try:
+            receipt = worker.adapter.model_change(session,kind,value)
+            answer,native = confirmed_selection(receipt,session,kind,value)
+        except Fault as error:
+            answer = CHANGE_ERRORS.get(error.code,UNKNOWN_MODEL_CHANGE)
+        except (URLError,OSError):
+            pass
+        with worker.db.transaction() as db:
+            old = previous(db,mid,text)
+            return old or record(db,mid,text,name,session,answer,native)
 
 
 def handle(service, body):
@@ -144,6 +224,10 @@ def handle(service, body):
     mid, text = string(body,"message_id"), string(body,"text")
     require(is_command(text),422,"invalid_platform_command")
     name,*args = text.strip().split()
+    if name in MODEL_VIEWS and len(args)==1 and not args[0].isdecimal() and args[0] not in ("next","prev"):
+        receipt = switch_model(service,mid,text,name,args[0])
+        if receipt is not None:
+            return receipt
     answer = None
     if service.adapter_connected and (
         name=="/context" and service.host_context or name in MODEL_VIEWS and service.host_model_view
@@ -168,9 +252,5 @@ def handle(service, body):
         elif answer is None:
             answer = reply(service,name,args,{"held_task_id":job[0] if job else None,
                                              "held_assignment_id":job[1] if job else None})
-        event = display.append(db,{"event_id":"command-"+mid,"kind":"command",
-                                 "session":service.host_session if service.adapter_connected else "",
-                                 "turn_id":"","text":answer})
-        receipt = {"message_id":mid,"command":name,"output":event}
-        db.execute("INSERT INTO platform_commands VALUES (?,?,?)",(mid,text,encode(receipt)))
-        return receipt
+        session = service.host_session if service.adapter_connected else ""
+        return record(db,mid,text,name,session,answer)

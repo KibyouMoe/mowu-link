@@ -1,5 +1,5 @@
 """Long-lived Worker state and narrow authenticated callbacks from its bound services."""
-from threading import Event, Thread
+from threading import Event, Lock, Thread
 import time
 from urllib.parse import urlsplit
 from urllib.error import URLError
@@ -22,6 +22,8 @@ class WorkerService:
         self.host_queue = False
         self.host_context = False
         self.host_model_view = False
+        self.host_model_change = False
+        self.model_command_lock = Lock()
         self.host_session = ""
         self.clock, self.probe_interval = clock, probe_interval
         self.next_probe = 0
@@ -49,6 +51,7 @@ class WorkerService:
                 self.host_queue = info.get("next_turn") is True
                 self.host_context = info.get("context_usage") is True
                 self.host_model_view = info.get("model_view") is True
+                self.host_model_change = info.get("model_change") is True
             except (Fault,URLError,OSError):
                 self.host_busy = None
                 self.adapter_connected = False

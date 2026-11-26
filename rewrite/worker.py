@@ -258,7 +258,9 @@ class Worker:
         require(isinstance(text,str) and (text.strip() or ids),422,"empty_chat")
         with self.lock:
             with self.db.transaction() as db:
-                require(not db.execute("SELECT 1 FROM platform_commands WHERE message_id=?",(message_id,)).fetchone(),
+                require(not db.execute("""SELECT 1 FROM platform_commands WHERE message_id=?
+                                          UNION ALL SELECT 1 FROM platform_model_intents WHERE message_id=?""",
+                                       (message_id,message_id)).fetchone(),
                         409,"message_previously_command")
                 inserted = db.execute("INSERT OR IGNORE INTO chats(message_id,text) VALUES (?,?)", (message_id,text)).rowcount
                 require(db.execute("SELECT text FROM chats WHERE message_id=?", (message_id,)).fetchone()[0] == text,

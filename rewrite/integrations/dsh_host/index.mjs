@@ -5,7 +5,7 @@ import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { admitMedia } from './media.mjs';
 import { baseline, displayImage, nextDisplay } from './display.mjs';
-import { modelView } from './model-view.mjs';
+import { changeModel, modelView } from './model-view.mjs';
 
 const tools = JSON.parse(readFileSync(new URL('../../agent-toolset.json', import.meta.url)));
 const sha = value => createHash('sha256').update(value).digest('hex');
@@ -125,6 +125,11 @@ export async function bindHost(ctx, session, directory) {
         check(['models','efforts'].includes(request.kind), 'invalid_model_view');
         return modelView(ctx,agent,request.kind,await ownEvents(ctx,agent));
       }
+      if (request.operation === 'model-change') {
+        check(['models','efforts'].includes(request.kind) && typeof request.value === 'string'
+          && request.value.length>0 && request.value.length<=401, 'invalid_model_change');
+        return changeModel(ctx,agent,request.kind,request.value,bound,()=>ownEvents(ctx,agent));
+      }
       check(['deliver','lookup'].includes(request.operation), 'unsupported_operation');
       const expected = await input(request,ctx,agent,directory);
       const seen = receipt(request,expected,await persisted(ctx,agent));
@@ -209,7 +214,7 @@ export async function apply(ctx, {session, directory}) {
     } catch (error) {
       const code = /^[a-z_]{1,80}$/.test(error.message) ? error.message : 'dsh_host_unconfirmed';
       const transient = ['native_write_unconfirmed','native_agent_unavailable','native_persistence_unavailable',
-                         'dsh_host_unconfirmed'].includes(code);
+                         'dsh_host_unconfirmed','model_change_unconfirmed'].includes(code);
       res.writeHead(transient ? 503 : 409,{'Content-Type':'application/json'}).end(JSON.stringify({error:code}));
     }
   });

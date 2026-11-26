@@ -4,6 +4,8 @@
 
 ## 检查点与证据
 
+DSH 已在独立会话验证 `/model 提供方/模型` 与 `/effort 强度`。原生 SDK 写入并读回 `model/selection`，指令回执带会话、选择和原生序号。忙碌或不支持的选项被拒。模拟原生写入后丢回包、Worker 落回执前中断，原消息均留待核。手动选了新值以后重送同号，新选择未被覆盖。复跑 `python3 -m unittest -v rewrite.test_dsh_sdk`。SDK、原生日志与两段 HTTP 实跑，模型目录及飞书为夹具，Worker 默认值同步、数字选项、真实模型新请求仍待验。
+
 DSH 飞书 `/model` 和 `/effort` 已核对绑定会话当前选择、最近持久化的模型请求配置及目录。真实 SDK 中会话已选 high、最近请求仍为 medium 时，卡片显示两份状态。目录最多展示 200 项，每页十项，单个提供方失败时保留其余条目。回放原事件保持原卡，观察过程没有新增回合或模型选择记录。复跑 `python3 -m unittest -v rewrite.test_dsh_sdk.DshSdk.test_model_and_effort_distinguish_live_selection_from_recorded_request`，macOS 全套 118 项通过。目录、模型请求和飞书由测试驱动提供，切换和默认配置同步待接。
 
 历史私聊提交 `c99fa4353eaa7102c5e7c24604d36673590343a0` 已在 Linux arm64 再验。发行包 97 个文件复核通过，回归 106 项通过，11 项 macOS DSH 测试跳过。macOS Worker 跨 TLS 交接后的宿主夹具输入仍为一条，W04 只生成一条通知。
