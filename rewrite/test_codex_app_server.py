@@ -78,6 +78,14 @@ class Provider(BaseHTTPRequestHandler):
         trainer_prompt = next((block["text"].split(": ",1)[1] for block in latest
                               if hasattr(self.server,"trainer_responses")
                               and block.get("text","").startswith("Native trainer question: ")),None)
+        image_prompt = next((block["text"].split(": ",1)[1] for block in latest
+                            if hasattr(self.server,"public_image_paths")
+                            and block.get("text","").startswith("Native output image: ")),None)
+
+        def visible_part(name,text):
+            return {"type":"message","id":name,"role":"assistant","status":"completed","phase":"commentary",
+                    "content":[{"type":"output_text","text":text}]}
+
         prefix = []
         provision_action = getattr(self.server,"provision_calls_tool",False) and any(
             block.get("text")==SEED for block in latest)
@@ -91,6 +99,11 @@ class Provider(BaseHTTPRequestHandler):
             item = {"type":"function_call","id":"fc_preview","name":"exec_command","call_id":"codex_preview_fixture",
                     "arguments":encode({"cmd":"pwd && while [ ! -f .release-preview ]; do sleep .05; done # PREVIEW_PRIVATE_MARKER",
                                         "yield_time_ms":9000})}
+        elif image_prompt and not calls:
+            prefix = [visible_part("native_pre_one_"+image_prompt,"Before image "),
+                      visible_part("native_pre_two_"+image_prompt,"continued.")]
+            item = {"type":"function_call","id":"fc_image_view","name":"view_image","call_id":"public_native_"+image_prompt,
+                    "arguments":encode({"path":self.server.public_image_paths[image_prompt]})}
         elif trainer_prompt and not calls:
             native_q = {"id":"route","header":"路线","question":"选择路线 · "+trainer_prompt,
                         "isSecret":trainer_prompt=="private","isOther":True,
@@ -112,6 +125,10 @@ class Provider(BaseHTTPRequestHandler):
         else:
             item = {"id":"msg_fixture","type":"message","role":"assistant","status":"completed",
                     "content":[{"type":"output_text","text":"Local model fixture accepted the receipt."}]}
+            if image_prompt and calls:
+                prefix = [visible_part("native_post_one_"+image_prompt,"After image "),
+                          visible_part("native_post_two_"+image_prompt,"continued.")]
+                item.update(id="native_image_final_"+image_prompt,phase="final_answer")
             if trainer_prompt and calls:
                 answer = next(entry["output"] for entry in reversed(items[user_index+1:])
                               if entry.get("type")=="function_call_output")
@@ -837,7 +854,7 @@ class CodexAppServer(unittest.TestCase):
         views = Views(loop.root/"live-codex-cards.db",platform,sink,"fixture-chat","小栗帽")
         output = CodexDisplay(loop.adapter,adapter)
         self.enterContext(output.run())
-        self.enterContext(worker_callbacks(host,adapter,output.wake.set,output.observe))
+        self.enterContext(worker_callbacks(host,adapter,output.wake.set,output.observe,output.observe_terminal))
 
         def display_events():
             return [item["event"] for item in platform.request("GET","worker/display")["items"]]
@@ -906,7 +923,7 @@ class CodexAppServer(unittest.TestCase):
         actions = Actions(views,inbound)
         output = CodexDisplay(loop.adapter,adapter)
         self.enterContext(output.run())
-        self.enterContext(worker_callbacks(host,adapter,output.wake.set,output.observe))
+        self.enterContext(worker_callbacks(host,adapter,output.wake.set,output.observe,output.observe_terminal))
 
         def events():
             return [item["event"] for item in platform.request("GET","worker/display")["items"]]
@@ -991,6 +1008,119 @@ class CodexAppServer(unittest.TestCase):
         self.evidence = {"thread_id":sid,"answered":delivered,"unconfirmed_card_id":mid,"unconfirmed_untouched":True,
                          "secret_question_projected":False,
                          "boundary":"Actual App Server requestUserInput and fixture card actions, no Feishu identity or cloud model"}
+
+    def test_native_approved_image_splits_the_platform_card_and_replays_the_original_upload(self):
+        root = Path(self.root)
+        public = root/"approved-images"
+        public.mkdir(mode=0o700)
+        visible,private,link = public/"share.png",root/"private.png",public/"linked.png"
+        visible.write_bytes(PNG)
+        private.write_bytes(PNG)
+        link.symlink_to(private)
+        self.provider.public_image_paths = {"approved":str(visible),"outside":str(private),"symlink":str(link)}
+        rpc = self.enterContext(isolated_app_server(self.root,self.origin))
+        sid = rpc.request("thread/start",{"cwd":self.root,"ephemeral":False,"sandbox":"read-only",
+                                         "approvalPolicy":"never"})["thread"]["id"]
+        rpc.request("turn/start",{"threadId":sid,"input":[{"type":"text","text":"Seed native media fixture",
+                                                          "text_elements":[]}]})
+        until = time.monotonic()+12
+        while rpc.event(until)["method"]!="turn/completed":
+            pass
+        ledger = root/"image-publication.db"
+        host = AppServerHost(rpc,sid,ledger,public)
+        host.session = sid
+        read_turn = host.read_turn
+        temporary_interrupt = []
+        def early_history(session,turn):
+            native = read_turn(session,turn)
+            if (not temporary_interrupt and native["status"]=="completed"
+                    and any(item["id"]=="native_image_final_symlink" for item in native["items"])):
+                temporary_interrupt.append(turn)
+                return dict(native,status="interrupted")
+            return native
+        host.read_turn = early_history
+        with self.assertRaisesRegex(Fault,"native_image_root_changed"):
+            AppServerHost(rpc,sid,ledger,root)
+        loop = self.enterContext(Loop.isolated(host_factory=lambda _path,_name:host))
+        upload_receipts = []
+
+        class LoseImageReceipt(WorkerService):
+            def handle(self,actor,method,path,body,headers):
+                result = super().handle(actor,method,path,body,headers)
+                if method=="PATCH" and path.startswith("/v1/worker/media/uploads/") and result[2]["complete"]:
+                    upload_receipts.append(result[2])
+                    if len(upload_receipts)==1:
+                        visible.unlink()
+                        raise Fault(503,"isolated_image_ack_lost",True)
+                return result
+
+        token,trainer_token = guid(),guid()
+        url = self.enterContext(running(LoseImageReceipt(loop.worker).listen(
+            {token:"adapter/oguri",trainer_token:"platform/oguri"},("127.0.0.1",0),None)))
+        adapter,platform = Client(url,token),Client(url,trainer_token)
+        sink = PlatformFixture()
+        views = Views(loop.root/"native-output-image-views.db",platform,sink,"fixture-chat","小栗帽")
+        display = CodexDisplay(loop.adapter,adapter)
+        self.enterContext(display.run())
+        self.enterContext(worker_callbacks(host,adapter,display.wake.set,display.observe,display.observe_terminal))
+
+        def converse(mode):
+            tid = rpc.request("turn/start",{"threadId":sid,"input":[{"type":"text",
+                              "text":"Native output image: "+mode,"text_elements":[]}]})["turn"]["id"]
+            until = time.monotonic()+10
+            while time.monotonic()<until:
+                events = [row["event"] for row in platform.request("GET","worker/display")["items"]
+                          if row["event"]["turn_id"]==tid]
+                with display.db.transaction() as db:
+                    saved = db.execute("SELECT sent FROM codex_display_turns WHERE turn_id=?",(tid,)).fetchone()
+                if saved and saved[0]:
+                    events = [row["event"] for row in platform.request("GET","worker/display")["items"]
+                              if row["event"]["turn_id"]==tid]
+                    break
+                time.sleep(.04)
+            turns = host.thread(sid,include_turns=True)["turns"]
+            native = next(turn for turn in turns if turn["id"]==tid)
+            self.assertEqual(native["status"],"completed")
+            source, = [item for item in native["items"] if item["type"]=="imageView"]
+            self.assertEqual(source["path"],self.provider.public_image_paths[mode])
+            self.assertEqual([row["kind"] for row in events].count("final"),1,
+                             (mode,[(item.get("id"),item.get("type"),item.get("phase"),item.get("text"))
+                                    for item in native["items"]],
+                              [(item["kind"],item.get("text")) for item in events]))
+            return events
+
+        approved = converse("approved")
+        self.assertEqual([item["kind"] for item in approved],
+                         ["native_input","progress","progress","image","progress","progress","final"])
+        self.assertEqual(approved[3]["attachment_id"],upload_receipts[0]["attachment_id"])
+        self.assertNotIn("native_path",encode(approved))
+        self.assertEqual(views.poll(),7)
+        cards = list(sink.messages.values())
+        self.assertEqual([card[1] for card in cards],["interactive","interactive","image","interactive","interactive"])
+        left,right = (cards[n][2]["elements"][0]["text"]["content"] for n in (1,3))
+        self.assertEqual((left,right),("Before image continued.","After image continued."))
+        self.assertEqual(sink.images,[PNG])
+        self.assertFalse(visible.exists())
+        self.assertEqual(sink.calls,[("send","om_1"),("send","om_2"),("patch","om_2"),("send","om_3"),
+                                     ("send","om_4"),("patch","om_4"),("send","om_5")])
+        for mode in ("outside","symlink"):
+            denied = converse(mode)
+            self.assertEqual([item["kind"] for item in denied],
+                             ["native_input","progress","progress","progress","progress","final"])
+            views.poll()
+        self.assertEqual(len(upload_receipts),1)
+        self.assertEqual(sink.images,[PNG])
+        self.assertEqual(len(temporary_interrupt),1)
+        self.assertFalse(loop.hermes.tasks()["items"])
+        with loop.worker.db.transaction() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM media_requests").fetchone()[0],1)
+        self.evidence = {"thread_id":sid,"turn_id":approved[3]["turn_id"],"image_attachment_id":approved[3]["attachment_id"],
+                         "sha256":hashlib.sha256(sink.images[0]).hexdigest(),"platform_card_sections":[left,right],
+                         "first_platform_order":[card[1] for card in cards],"fixture_image_message_id":cards[2][0],
+                         "file_uploads":len(upload_receipts),"source_gone_before_replay":True,
+                         "outside_and_symlink_not_projected":True,
+                         "provisional_interruption_did_not_downgrade_final":True,
+                         "boundary":"Actual App Server view_image on approved fixture file; model and Feishu are fixtures"}
 
     def test_native_app_server_conversation_uses_standard_feishu_cards(self):
         rpc = self.enterContext(isolated_app_server(self.root,self.origin))

@@ -4,6 +4,8 @@
 
 ## 检查点与证据
 
+独立 Codex A06 已通过原生 `view_image` 验批准目录的原图。测试飞书在第一张过程卡完成后单发原图，再开后续过程卡并更新。Worker 已写原图但返回回执丢失，原文件删去以后同号查回，仍只上传一次。目录外及符号链接拒绝发布。实际原生历史曾暂报中断，已以同回合完成通知和历史一致为发最终答复的条件，回归另注入同样的暂态。连续 20 轮通过。[图片证据](evidence/codex-app-server-native-image-split.json)。复跑 `python3 -m unittest -v rewrite.test_codex_app_server.CodexAppServer.test_native_approved_image_splits_the_platform_card_and_replays_the_original_upload`。本地原图、模型及平台均为独立测试用。
+
 独立 Codex A07 已接单个公开原生题。测试平台选择、自填和跳过实际进入同一个 App Server 原题，关题回执按原请求号匹配，测试平台仅更新原卡一次。错人、错卡、密题、同原生题再次注册均拒绝。故意丢原生关题回执，模型只收到一次原答案，卡保持待核。连续 10 轮通过。[题卡证据](evidence/codex-app-server-native-trainer-question.json)。复跑 `python3 -m unittest -v rewrite.test_codex_app_server.CodexAppServer.test_native_trainer_question_closes_original_card_only_after_app_server_receipt`，模型与飞书用独立夹具。
 
 完整回归曾见隔离 App Server 的原生辅助进程晚于主进程退出，暂存目录仍有写入。已用单独进程组停止该试验服务及其辅助进程，单测记录辅助进程收到终止信号。macOS 全套 192 项通过。真实宿主服务由各自的发布窗口验收。

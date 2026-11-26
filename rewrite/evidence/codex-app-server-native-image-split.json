@@ -1,0 +1,24 @@
+{
+  "thread_id": "01a21718-fb65-7e61-bfdf-69a2ffd927c1",
+  "turn_id": "01a21718-fbaa-7b83-a8bf-4c333e7a9135",
+  "image_attachment_id": "4caa5e8a-96ee-42c3-b434-5265fc541d5e",
+  "sha256": "e77617115ffe6399c0f4714c72aa32eefeb22fbdf45b1167a4ddb64e213b4007",
+  "platform_card_sections": [
+    "Before image continued.",
+    "After image continued."
+  ],
+  "first_platform_order": [
+    "interactive",
+    "interactive",
+    "image",
+    "interactive",
+    "interactive"
+  ],
+  "fixture_image_message_id": "om_3",
+  "file_uploads": 1,
+  "source_gone_before_replay": true,
+  "outside_and_symlink_not_projected": true,
+  "provisional_interruption_did_not_downgrade_final": true,
+  "boundary": "Actual App Server view_image on approved fixture file; model and Feishu are fixtures",
+  "consecutive_runs": 20
+}

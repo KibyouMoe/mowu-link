@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS codex_display_live (
  sent INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS codex_display_live_turn ON codex_display_live(turn_id,seq);
+CREATE TABLE IF NOT EXISTS codex_display_outcomes (turn_id TEXT PRIMARY KEY, status TEXT NOT NULL);
 """
 
 
@@ -32,10 +33,16 @@ class CodexDisplay:
         self.wake,self.stop = Event(),Event()
         self.events = SimpleQueue()
         self.buffered = []
+        self.recovered = None
+        self.waiting_for_history = False
 
     def observe(self,event):
         self.events.put(event)
         self.wake.set()
+
+    def observe_terminal(self,turn_id,status):
+        if isinstance(turn_id,str) and turn_id and isinstance(status,str) and status in TERMINAL:
+            self.observe({"kind":"native_terminal","turn_id":turn_id,"status":status})
 
     def collect(self):
         while True:
@@ -61,18 +68,26 @@ class CodexDisplay:
             state = {row["turn_id"]:row["sent"] for row in db.execute("SELECT turn_id,sent FROM codex_display_turns")}
             waiting = []
             for event in self.buffered:
-                tid,key = event["turn_id"],event["event_id"]
+                tid = event["turn_id"]
                 if tid not in state:
                     waiting.append(event)
                 elif not state[tid]:
+                    if event["kind"]=="native_terminal":
+                        db.execute("INSERT OR IGNORE INTO codex_display_outcomes VALUES (?,?)",(tid,event["status"]))
+                        row = db.execute("SELECT status FROM codex_display_outcomes WHERE turn_id=?",(tid,)).fetchone()
+                        require(row[0]==event["status"],409,"native_turn_outcome_changed")
+                        continue
+                    key = event["event_id"]
                     raw = encode(event)
                     db.execute("INSERT OR IGNORE INTO codex_display_live(turn_id,event_id,event) VALUES (?,?,?)",
                                (tid,key,raw))
                     known = db.execute("SELECT event FROM codex_display_live WHERE event_id=?",(key,)).fetchone()
                     require(known[0]==raw,409,"display_event_conflict")
         self.buffered = waiting
+        return native_ids
 
     def flush(self):
+        self.waiting_for_history = False
         with self.db.transaction() as db:
             pending = [row[0] for row in db.execute("SELECT turn_id FROM codex_display_turns WHERE sent=0 ORDER BY seq")]
         for tid in pending:
@@ -82,10 +97,16 @@ class CodexDisplay:
             with self.db.transaction() as db:
                 ready = db.execute("SELECT * FROM codex_display_live WHERE turn_id=? AND sent=0 ORDER BY seq",
                                    (tid,)).fetchall()
+                outcome = db.execute("SELECT status FROM codex_display_outcomes WHERE turn_id=?",(tid,)).fetchone()
             for row in ready:
                 self.host.publish_public_item(self.worker,json.loads(row["event"]))
                 with self.db.transaction() as db:
                     db.execute("UPDATE codex_display_live SET sent=1 WHERE seq=?",(row["seq"],))
+            if outcome and turn["status"]!=outcome[0]:
+                self.waiting_for_history = True
+                break
+            if not outcome and self.recovered is not None and tid not in self.recovered:
+                break
             if turn["status"] not in TERMINAL:
                 break
             self.host.publish_public_turn(self.session,tid,self.worker,turn=turn)
@@ -105,7 +126,7 @@ class CodexDisplay:
             try:
                 self.collect()
                 self.flush()
-                if self.buffered and not self.stop.wait(.2):
+                if (self.buffered or self.waiting_for_history) and not self.stop.wait(.2):
                     self.wake.set()
             except (Fault,OSError,OperationalError) as error:
                 cause = error.code if isinstance(error,Fault) else type(error).__name__
@@ -116,7 +137,7 @@ class CodexDisplay:
 
     @contextmanager
     def run(self):
-        self.collect()
+        self.recovered = set(self.collect())
         self.wake.set()
         thread = Thread(target=self.pump,daemon=True)
         thread.start()

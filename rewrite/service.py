@@ -87,7 +87,7 @@ def serve(args,stack):
         client = connection(args.worker_connection)
         rpc = stack.enter_context(start_app_server(args.codex_binary,args.codex_profile,args.cwd))
         require_test_account(rpc)
-        native = AppServerHost(rpc,args.session,args.db)
+        native = AppServerHost(rpc,args.session,args.db,args.public_image_root)
         saved = native.thread(args.session,include_turns=False)
         require(Path(saved["cwd"]).resolve()==args.cwd.resolve(),409,"wrong_native_workspace")
         resumed = rpc.request("thread/resume",{"threadId":args.session,"cwd":str(args.cwd)})["thread"]
@@ -95,7 +95,7 @@ def serve(args,stack):
         media = NativeFiles(args.media_cache,client) if args.media_cache else None
         adapter = HostAdapter(args.db,native,args.session,media)
         display = CodexDisplay(adapter,client)
-        callbacks = worker_callbacks(native,client,display.wake.set,display.observe)
+        callbacks = worker_callbacks(native,client,display.wake.set,display.observe,display.observe_terminal)
         public_output = display.run()
         listener = serve_adapter(adapter,args.worker_id,identities,address,ctx)
     else:
@@ -154,6 +154,8 @@ def main():
         if name == "codex-adapter":
             for flag in ("codex-binary","codex-profile","cwd"):
                 component.add_argument("--"+flag,required=True,type=Path)
+            component.add_argument("--public-image-root",type=Path,
+                                   help="owner-private directory of approved, shareable native images")
         if name == "worker":
             component.add_argument("--router-connection",required=True,type=Path)
             component.add_argument("--adapter-connection",required=True,type=Path)

@@ -12,6 +12,7 @@ import unicodedata
 
 from .agent_tools import TOOLSET
 from .codex_compactions import CodexCompactions
+from .codex_images import CodexImages
 from .codex_questions import CodexQuestions
 from .codex_rpc import NativeRpcRejected
 from .storage import Fault, encode, require, string
@@ -29,12 +30,14 @@ class AppServerHost:
     rejects_busy_before_control_write = True
     rejects_busy_before_queue_write = True
 
-    def __init__(self, rpc, thread_id, adapter_db=None):
+    def __init__(self, rpc, thread_id, adapter_db=None, public_image_root=None):
         self.rpc, self.thread_id = rpc,thread_id
         self.write_lock = RLock()
         self.usage = None
         self.compactions = CodexCompactions(adapter_db,self) if adapter_db is not None else None
         self.questions = CodexQuestions(adapter_db,self) if adapter_db is not None else None
+        require(public_image_root is None or adapter_db is not None,422,"native_image_state_required")
+        self.images = CodexImages(public_image_root,adapter_db) if public_image_root is not None else None
 
     def resolve_question(self,original,answer):
         require(self.questions,422,"native_question_answer_unavailable")
@@ -420,11 +423,19 @@ class AppServerHost:
             text = self.tool_preview(item.get("command"))
             display = "tool"
             fields["tool_name"] = "exec_command"
+        elif kind=="imageView" and self.images:
+            path = self.images.reference(item.get("path"))
+            if not path:
+                return None
+            display,text = "image",None
+            fields["native_path"] = path
         else:
             return None
-        if text.strip():
+        if display=="image" or isinstance(text,str) and text.strip():
             key = hashlib.sha256(encode([session,turn_id,string(item,"id"),display]).encode()).hexdigest()
-            return {"event_id":"codex-"+key,"session":session,"turn_id":turn_id,"kind":display,"text":text,**fields}
+            if text is not None:
+                fields["text"] = text
+            return {"event_id":"codex-"+key,"session":session,"turn_id":turn_id,"kind":display,**fields}
         return None
 
     def live_public_item(self,method,params):
@@ -436,7 +447,7 @@ class AppServerHost:
         kind = item.get("type")
         if method=="item/started" and kind=="commandExecution":
             return self.public_item(self.thread_id,string(params,"turnId"),item)
-        if method=="item/completed" and (kind=="userMessage"
+        if method=="item/completed" and (kind in ("userMessage","imageView")
                 or kind=="agentMessage" and item.get("phase")=="commentary"):
             return self.public_item(self.thread_id,string(params,"turnId"),item)
         return None
@@ -457,15 +468,26 @@ class AppServerHost:
                 results.append(event)
         return results
 
-    @staticmethod
-    def publish_public_item(worker,event):
+    def publish_public_item(self,worker,event):
+        if event["kind"]=="image":
+            require(self.images,422,"native_public_image_unavailable")
+            attachment = self.images.stage(event["event_id"],event["native_path"],worker)
+            if not attachment:
+                return None
+            event = {key:value for key,value in event.items() if key!="native_path"}
+            event["attachment_id"] = attachment
         ack = worker.request("POST","worker/display",event)
         require(isinstance(ack,dict) and ack.get("event_id")=="host-"+event["event_id"]
                 and type(ack.get("seq")) is int,502,"wrong_display_ack")
         return ack
 
     def publish_public_turn(self,session,turn_id,worker,turn=None):
-        return [self.publish_public_item(worker,event) for event in self.public_turn(session,turn_id,turn)]
+        receipts = []
+        for event in self.public_turn(session,turn_id,turn):
+            receipt = self.publish_public_item(worker,event)
+            if receipt:
+                receipts.append(receipt)
+        return receipts
 
     def worker_call(self, packet, worker):
         """Accept only App Server requests received on this process's dedicated transport."""
@@ -492,7 +514,7 @@ class AppServerHost:
 
 
 @contextmanager
-def worker_callbacks(host,worker,notify_turn_end,notify_item=None):
+def worker_callbacks(host,worker,notify_turn_end,notify_item=None,notify_terminal=None):
     stop = Event()
 
     def to_worker(packet):
@@ -535,8 +557,12 @@ def worker_callbacks(host,worker,notify_turn_end,notify_item=None):
             if packet.get("method")=="turn/completed":
                 params = packet.get("params")
                 if isinstance(params,dict) and params.get("threadId")==host.thread_id:
-                    if host.questions and isinstance(params.get("turn"),dict):
-                        host.questions.retire_turn(params["turn"].get("id"))
+                    turn = params.get("turn")
+                    if isinstance(turn,dict):
+                        if host.questions:
+                            host.questions.retire_turn(turn.get("id"))
+                        if notify_terminal is not None:
+                            notify_terminal(turn.get("id"),turn.get("status"))
                     notify_turn_end()
                 continue
             if packet.get("method")=="thread/tokenUsage/updated":
