@@ -9,6 +9,7 @@ from socketserver import ThreadingMixIn
 import ssl
 import stat
 from tempfile import NamedTemporaryFile
+from time import monotonic, sleep
 
 from .storage import require, state_writer
 
@@ -102,7 +103,17 @@ class LocalLink:
                 json.dump({"port":port},stream)
                 stream.flush()
                 os.fsync(stream.fileno())
-            os.replace(pending,locator)
+            deadline = monotonic() + 2
+            while True:
+                try:
+                    os.replace(pending,locator)
+                    break
+                except PermissionError as error:
+                    # Windows readers can temporarily block atomic replacement of this locator.
+                    if (os.name != "nt" or getattr(error,"winerror",None) not in (5,32,33)
+                            or monotonic() >= deadline):
+                        raise
+                    sleep(.05)
         finally:
             pending.unlink(missing_ok=True)
 

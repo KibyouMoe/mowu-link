@@ -20,6 +20,7 @@ import tempfile
 from threading import Event, Thread
 import time
 import unittest
+from unittest.mock import patch
 
 from . import test_codex_app_server as codex_driver, worker_commands, worker_resume
 from .adapter import HostAdapter
@@ -1002,6 +1003,31 @@ class LocalTlsLoop(NativeProcess):
             for name in ("dsh-link.crt","dsh-link.key"):
                 (directory/name).chmod(0o600)
         return directory
+
+    @unittest.skipUnless(os.name=="nt","Windows file share flags required")
+    def test_dynamic_callback_port_survives_a_temporary_reader(self):
+        runtime = self.local_tls_directory(dynamic_callback=True)
+        link = LocalLink(runtime,use_tls=True)
+        locator = runtime/"dsh-worker-port.json"
+        first,second = [p for p in (32000,32001,32002) if p!=link.ports["host_port"]][:2]
+        link.publish_callback_port(first)
+        replace = os.replace
+        conflicts = []
+        with locator.open("rb") as reader:
+            def release_reader(pending,target):
+                try:
+                    replace(pending,target)
+                except PermissionError as error:
+                    self.assertEqual(json.load(reader),{"port":first})
+                    conflicts.append(error.winerror)
+                    reader.close()
+                    raise
+            with patch("rewrite.dsh_local_link.os.replace",side_effect=release_reader):
+                link.publish_callback_port(second)
+        self.assertEqual(len(conflicts),1)
+        self.assertIn(conflicts[0],(5,32,33))
+        self.assertEqual(json.loads(locator.read_text()),{"port":second})
+        self.assertEqual(list(runtime.glob(".dsh-port-*")),[])
 
     def test_fixed_session_w04_over_mutual_tls(self):
         directory = self.local_tls_directory()
