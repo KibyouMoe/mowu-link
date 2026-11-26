@@ -3,10 +3,11 @@ from threading import Event, Lock, Thread
 import time
 from urllib.parse import urlsplit
 from urllib.error import URLError
+from uuid import NAMESPACE_URL, uuid5
 
 from . import display, links, peer_files, peer_retry, queued_chat, user_questions, worker_commands, worker_media
 from .messages import valid_guid
-from .storage import Fault, require, string
+from .storage import Fault, encode, require, string
 from .wire import serve_authenticated
 
 
@@ -131,12 +132,15 @@ class WorkerService:
                 return 200,"application/json",display.read(w,path)
             raise Fault(403,"forbidden")
         if actor == "adapter/" + w.worker_id and method == "POST" and path == "/v1/worker/native-tool":
-            native = w.adapter.input_for_turn(string(body,"session"),string(body,"turn_id"))
+            session,turn = string(body,"session"),string(body,"turn_id")
+            native = w.adapter.input_for_turn(session,turn)
             args = body.get("arguments")
             require(isinstance(args,dict),422,"invalid_arguments")
             if body.get("tool") == "worker_ask":
                 require(set(args) == {"text","options"},422,"invalid_arguments")
                 result = w.ask(native, string(body,"call_id"), string(args,"text"), args["options"])
+            elif body.get("tool") == "worker_send_peer":
+                result = self.send_native_peer(session,turn,native,string(body,"call_id"),args)
             else:
                 require(body.get("tool") == "worker_report" and set(args) <= {"task_id","assignment_id","summary","outcome","artifact_ids"},
                         422,"unsupported_native_tool")
@@ -189,6 +193,19 @@ class WorkerService:
         else:
             raise Fault(403,"forbidden")
         return 200,"application/json",result
+
+    def send_native_peer(self,session,turn,native,call,args):
+        require({"to_worker"}<=set(args)<={"to_worker","text","reply_to","attachment_ids","attachment_kinds"},
+                422,"invalid_arguments")
+        w = self.worker
+        origin = w.adapter.origin(native,session=session)
+        require(origin["kind"] in ("chat","queued_chat","peer","task","task_update","task_probe","question_answer"),
+                403,"wrong_peer_origin")
+        assignment = origin.get("assignment_id")
+        require(not assignment or w.assignment_session(assignment) in (None,session),403,"wrong_assignment_session")
+        mid = str(uuid5(NAMESPACE_URL,encode(["native-peer-message",w.worker_id,session,turn,call])))
+        return w.send_peer(mid,string(args,"to_worker"),args.get("text",""),args.get("reply_to"),
+                           args.get("attachment_ids"),args.get("attachment_kinds"))
 
     def listen(self, identities, address, ctx):
         return serve_authenticated(identities,address,ctx,self.handle)

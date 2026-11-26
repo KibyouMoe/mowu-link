@@ -11,7 +11,8 @@ from threading import Thread
 import unittest
 
 from . import worker_commands
-from .devloop import Loop
+from .adapter import HostAdapter
+from .devloop import FixtureHost, Loop
 from .dsh_display import DshDisplay
 from .dsh_port import DshHost, tool_listener
 from .feishu_inbound import Inbound
@@ -25,6 +26,7 @@ from .test_mainline import Clock
 from .test_dsh_sdk import APP, EXE
 from .test_feishu_inbound import PNG
 from .wire import Client
+from .worker import Worker
 from .worker_service import WorkerService
 
 
@@ -762,6 +764,87 @@ class NativeLoop(unittest.TestCase):
                 "provider_messages":observed["mediaRequests"],"download_count":len(downloads),
                 "original_input_count":len(observed["inputs"]),"reply_cards":len(finals),
                 "boundary":"Actual DSH run loop and attachment storage; Feishu and model provider are fixtures"}
+
+    def test_dsh_peer_image_and_native_reply_travel_on_the_same_private_chain(self):
+        session = "dsh-native-peer"
+        directory = self.enterContext(tempfile.TemporaryDirectory(dir="/tmp",prefix="mldsh-peer-"))
+        def host(_path,_name):
+            port = DshHost(Path(directory))
+            port.session = session
+            return port
+        clock = Clock()
+        loop = self.enterContext(Loop.isolated(clock,host_factory=host,extra_workers=["tama","foreign"]))
+        loop.worker.clock = clock
+        sender_host = FixtureHost(loop.root/"sender-host.db","test-sending-host")
+        sender = Worker(loop.root/"sender.db","tama",loop.extra_clients["tama"],
+                        HostAdapter(loop.root/"sender-adapter.db",sender_host,sender_host.session))
+        sender_key,recipient_key = guid(),guid()
+        sender_api = Client(self.open_worker(WorkerService(sender,clock),{sender_key:"adapter/tama"}),sender_key)
+        receiver = Client(self.open_worker(WorkerService(loop.worker,clock),{recipient_key:"adapter/oguri"}),recipient_key)
+        loop.adapter.media_store = NativeFiles(Path(directory)/"media",receiver)
+        self.enterContext(tool_listener(Path(directory),loop.adapter,receiver))
+        sha = hashlib.sha256(PNG).hexdigest()
+        upload = sender_api.request("POST","worker/media/uploads",{"name":"peer.png","sha256":sha,"size_bytes":len(PNG)},guid())
+        path = "worker/media/uploads/"+upload["upload_id"]
+        uploaded = sender_api.request("PATCH",path,PNG,headers={"Upload-Offset":"0"})
+        mid,caption = guid(),"请回这条原消息。原图随信。"
+        body = {"message_id":mid,"to_worker":"oguri","text":caption,"attachment_ids":[uploaded["attachment_id"]],
+                "attachment_kinds":["image"]}
+        with self.start_native(directory,session,"peer-media") as native:
+            sender.connect()
+            loop.worker.connect()
+            accepted = sender_api.request("POST","worker/peer",body)
+            self.assertEqual(sender_api.request("POST","worker/peer",body),accepted)
+            status = "peers/messages/"+mid
+            self.assertFalse(sender.router.request("GET",status)["worker_received"])
+            original_delivery = loop.native.deliver_media
+            def drop_host_reply(*args):
+                original_delivery(*args)
+                return None
+            loop.native.deliver_media = drop_host_reply
+            loop.worker.poll()
+            first = self.read_native(native,"read")
+            pending = sender.router.request("GET",status)
+            self.assertTrue(pending["worker_received"])
+            self.assertIsNone(pending["host_receipt_id"])
+            loop.native.deliver_media = original_delivery
+            clock.advance(5)
+            loop.worker.poll()
+            observed = self.read_native(native,"read")
+            self.assertEqual(len(first["inputs"]),1)
+            self.assertEqual(observed["inputs"],first["inputs"])
+            routed = sender.router.request("GET",status)
+            self.assertTrue(routed["host_receipt_id"])
+            image = observed["mediaRequests"][0]
+            original = json.loads(image["caption"].split("\n")[1])
+            self.assertEqual((original["message_id"],original["text"]),(mid,caption))
+            self.assertEqual(image["images"],[{"sha256":sha,"size":len(PNG)}])
+            (call,) = observed["calls"]
+            self.assertEqual(call["name"],"worker_send_peer")
+            args = json.loads(call["arguments"])
+            self.assertEqual((args["to_worker"],args["reply_to"]),("tama",mid))
+            result = json.loads(observed["results"][0]["content"][0]["text"])
+            self.assertEqual(result["status"],"accepted")
+            with loop.adapter.db.transaction() as db:
+                proof = json.loads(db.execute("SELECT receipt FROM intents WHERE delivery_id=?",
+                                              (routed["delivery_id"],)).fetchone()[0])
+            replay = {"session":session,"turn_id":proof["turn_id"],"call_id":call["callId"],
+                      "tool":"worker_send_peer","arguments":args}
+            self.assertEqual(receiver.request("POST","worker/native-tool",replay),result)
+            with self.assertRaisesRegex(Fault,"peer_message_conflict"):
+                receiver.request("POST","worker/native-tool",dict(replay,arguments=dict(args,text="changed body")))
+            sender.poll()
+            (reply,receipt), = sender_host.entries()
+            self.assertEqual((reply["message_id"],reply["reply_to"],reply["text"]),(result["message_id"],mid,args["text"]))
+            with self.assertRaisesRegex(Fault,"peer_message_not_found"):
+                loop.extra_clients["foreign"].request("GET",status)
+            self.assertEqual(loop.hermes.tasks()["items"],[])
+            self.assertIsNone(loop.worker.hold()["held_task_id"])
+            self.evidence = {"letter":mid,"host_input":proof,"peer_reception":routed,"actual_tool_call":call["callId"],
+                "reply":result,"reply_to":reply["reply_to"],"reply_recipient_receipt":receipt,
+                "image":image["images"][0],"native_inputs":len(observed["inputs"]),"reply_inputs":len(sender_host.entries()),
+                "clock":"controlled test clock",
+                "boundary":"Actual DSH native tool executor and independent Router; scripted local model and sending host fixture"}
 
     def test_native_race_after_w03_never_prequeues_a_formal_task(self):
         facts = []

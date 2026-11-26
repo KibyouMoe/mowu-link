@@ -10,7 +10,10 @@ from socketserver import ThreadingMixIn
 from threading import Thread
 from urllib.error import URLError
 
+from .agent_tools import TOOLSET
 from .storage import Fault, encode, require, string
+
+NATIVE_TOOLS = frozenset(tool["name"] for tool in TOOLSET)
 
 
 def private_directory(path):
@@ -155,7 +158,7 @@ def tool_listener(directory, adapter, worker):
                 require(0 < size <= 1048576,422,"invalid_envelope")
                 body = json.loads(self.rfile.read(size))
                 require(isinstance(body,dict) and set(body) == {"session","turn_id","native_id","tool","call_id","arguments"}
-                        and body.get("tool") in ("worker_report","worker_ask"),422,"invalid_envelope")
+                        and string(body,"tool") in NATIVE_TOOLS,422,"invalid_envelope")
                 adapter.prove_native_input(string(body,"session"),string(body,"turn_id"),string(body,"native_id"))
                 del body["native_id"]
                 result = worker.request("POST","worker/native-tool",body)

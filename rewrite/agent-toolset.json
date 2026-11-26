@@ -76,5 +76,21 @@
         "options"
       ]
     }
+  },
+  {
+    "name": "worker_send_peer",
+    "description": "Send a private message to a named Worker or reply to their original message. The receipt confirms Router intake only. This does not create or complete a formal assignment.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "to_worker": {"type": "string", "minLength": 1},
+        "text": {"type": "string"},
+        "reply_to": {"type": "string", "minLength": 1},
+        "attachment_ids": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "attachment_kinds": {"type": "array", "items": {"enum": ["image", "file"]}}
+      },
+      "required": ["to_worker"]
+    }
   }
 ]

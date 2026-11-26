@@ -46,6 +46,8 @@ python3 -m unittest -v rewrite.test_mainline
 
 同伴附件由发送宿主先交给本工位的媒体入口，再向 `POST /v1/worker/peer` 提交 `to_worker`、`message_id`、可选的 `text`、`reply_to` 和本地 `attachment_ids`。需要区分图文时按位置给 `attachment_kinds`，默认按普通文件。Router 核对发送工位持有附件，收件工位以自己的身份分块取得并校验，再从本地媒体入口交给自己的宿主。该接口返回 Router 收件凭据，原生收件凭据记录在接收 Worker 的同伴历史中。
 
+DSH 的 `worker_send_peer` 可在已核对的原生回合中直接联系指定工位。回复带原消息号作为 `reply_to`。Worker 从原会话、原回合和工具调用号生成稳定消息号，同一调用重试取原 Router 回执。附件只接受本工位已有授权的媒体引用。此工具没有建工单、答题或报成果权限。
+
 ### 飞书私聊的异常回执
 
 绑定的训练员私聊发生格式、附件或收件问题时，平台进程在原消息下回复状态卡。平台已尝试而回执丢失时，沿用原 UUID 和卡片正文，首次尝试满 55 分钟后标记 `receipt_unknown`，继续处理其他消息。等待中已查实且尚未发送的提示自动撤销。若已提示待核，查到宿主凭据后再发一条恢复确认。消息的受理状态在 `platform_events`，平台回复的状态和消息号在 `input_notices`。[飞书回复消息接口](https://open.feishu.cn/document/server-docs/im-v1/message/reply.md)

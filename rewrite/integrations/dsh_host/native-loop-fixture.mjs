@@ -18,6 +18,7 @@ const formalRound = Promise.withResolvers();
 const compactEntered = Promise.withResolvers();
 const compactReleased = Promise.withResolvers();
 const usesGoals = ['goals','goal-driver','formal-goal'].includes(mode);
+const usesMedia = mode==='media' || mode==='peer-media';
 const modelRequests = [];
 const catalogSessions = [];
 const privateStops = new Map(['one','two','three'].map(tag=>[tag,Promise.withResolvers()]));
@@ -32,7 +33,7 @@ class LocalModel extends LlmAdapter {
   async resolveModel(provider, model) {
     return {provider,id:model,name:'Local test model',reasoning:{
       efforts:[{id:'low',name:'Low'},{id:'high',name:'High'}],defaultEffort:'low'},
-      inputModalities:mode==='media' ? ['text','image'] : ['text']};
+      inputModalities:usesMedia ? ['text','image'] : ['text']};
   }
   async *stream({provider,model,reasoningEffort,messages,signal,tools,purpose}) {
     if (purpose==='compaction') {
@@ -51,7 +52,7 @@ class LocalModel extends LlmAdapter {
     const goal = message.source.kind==='goal' ? message.source : null;
     const command = goal ? 'goal' : payload?.kind ?? 'private';
     modelRequests.push({command,provider,model,reasoningEffort});
-    if (mode==='media') {
+    if (usesMedia) {
       const store = ctx.get('attachments');
       const images = [];
       for (const part of message.content.filter(block=>block.type==='image')) {
@@ -59,6 +60,16 @@ class LocalModel extends LlmAdapter {
         images.push({sha256:createHash('sha256').update(image.data).digest('hex'),size:image.data.length});
       }
       mediaRequests.push({caption:text,images,partTypes:message.content.map(part=>part.type)});
+      if (mode==='peer-media' && command==='peer' && !this.submitted.has(payload.message_id)) {
+        this.submitted.set(payload.message_id,true);
+        assert.ok(tools?.some(tool=>tool.name==='worker_send_peer'));
+        const args = {to_worker:payload.from_worker,reply_to:payload.message_id,text:'Native reply to the original message'};
+        yield {type:'block-start',index:0,blockType:'tool-call'};
+        yield {type:'block-end',index:0,block:{type:'tool-call',id:'peer-native-reply',name:'worker_send_peer',
+          arguments:JSON.stringify(args)}};
+        yield {type:'finish',reason:{kind:'tool-calls'}};
+        return;
+      }
       yield {type:'block-start',index:0,blockType:'text'};
       yield {type:'text-delta',index:0,text:`Local fixture received ${images.length} image(s).`};
       yield {type:'finish',reason:{kind:'stop'}};
@@ -184,7 +195,7 @@ async function setup() {
       {fallbackMaxWords:12,fallbackMaxBytes:120,maxTitleBytes:300});
   }
   await install((await sdk('dsh-system-prompt')).SystemPrompt);
-  if (mode==='media') await install((await sdk('dsh-attachment-local')).default,{dshHome:directory});
+  if (usesMedia) await install((await sdk('dsh-attachment-local')).default,{dshHome:directory});
   await install((await sdk('dsh-tools')).ToolsService);
   if (mode==='questions') {
     await install((await sdk('dsh-user-questions')).UserQuestionService);
@@ -340,8 +351,8 @@ async function formalScenario(agent) {
 
 try {
   const agent = await setup();
-  if (['formal','compact','questions','catalog','private-stop','work-question','media','admission-race',
-       'binding-close'].includes(mode) || usesGoals) {
+  if (['formal','compact','questions','catalog','private-stop','work-question','admission-race',
+       'binding-close'].includes(mode) || usesGoals || usesMedia) {
     await formalScenario(agent);
   }
   else await stopScenario(agent);
