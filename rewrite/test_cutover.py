@@ -675,7 +675,7 @@ store.close()
                            (json.dumps(late),orig["cleanup"]["report_key"]))
                 db.execute("DELETE FROM deliveries WHERE delivery_id=?",(orig["probe_delivery_ids"][0],))
             review.write_text(json.dumps({"trial_sha256":digest(inconsistent/"router.db"),"closed_assignments":{tid:final}}))
-            with self.assertRaisesRegex(ValueError,"inquiry deliveries do not match"):
+            with self.assertRaisesRegex(ValueError,"unrecognized delivery acknowledgement"):
                 stage_reviewed_rollback(self.snapshot,inconsistent,review,refused)
             self.assertFalse(refused.exists())
         if output := os.environ.get("MOWULINK_TRANSFER_ROLLBACK_EVIDENCE"):
@@ -1735,6 +1735,133 @@ store.close()
                      "pending_unacknowledged_and_misrouted_refused":True,
                      "boundary":"Actual legacy and rewrite Router and Worker over isolated HTTP. Scripted native hosts."}
             Path(output).write_text(json.dumps(proof,ensure_ascii=False,indent=2)+"\n")
+
+    def test_reviewed_inquiries_preserve_continue_rounds_and_release_only_the_original_assignment(self):
+        original = self.old("""
+store = RouterStore(sys.argv[1])
+for name in ("oguri","tama"):
+    store.upsert_worker(name)
+print(store.orders.create("Retry rounds","Isolated progress inquiries","oguri",{},"fixture",None,None))
+store.close()
+""",self.legacy)
+        before = digest(self.legacy)
+        backup(self.legacy,self.attachments,self.snapshot)
+        tid = prepare(self.snapshot,self.trial,self.source_id)["queued_id_map"][original]
+        clock = Clock()
+        loop = Loop(self.trial,clock,FixtureHost,extra_workers=["tama"])
+        manager,worker = loop.hermes,loop.worker
+        other_host = FixtureHost(self.trial/"inquiry-other-host.db","inquiry-other")
+        other = Worker(self.trial/"inquiry-other.db","tama",loop.extra_clients["tama"],
+                       HostAdapter(self.trial/"inquiry-other-adapter.db",other_host,other_host.session))
+        review = self.root/"inquiry-review.json"
+
+        def advance(seconds):
+            clock.advance(seconds)
+            worker.poll()
+            worker.poll()
+
+        def probes():
+            return [r for p,r in loop.native.entries() if p["kind"]=="task_probe"]
+
+        def stage(trial,destination):
+            review.write_text(json.dumps({"trial_sha256":digest(trial/"router.db"),"closed_assignments":{tid:new_aid}}))
+            return stage_reviewed_rollback(self.snapshot,trial,review,destination)
+
+        with loop.server:
+            loop.thread.start()
+            try:
+                worker.connect()
+                worker.poll()
+                advance(10)
+                aid = worker.hold()["held_assignment_id"]
+                initial = loop.native.entries()[0][1]
+                continuing = {"recorded":True,"task_state":"working"}
+                self.assertEqual(worker.report(initial["native_id"],tid,aid,"Proactive update","continue_requested"),continuing)
+                for seconds in (1,10,1,1):
+                    advance(seconds)
+                self.assertEqual(len(probes()),3)
+                prompted = probes()[-1]
+                self.assertEqual(worker.report(prompted["native_id"],tid,aid,"Still on the same assignment","continue_requested"),
+                                 continuing)
+                self.assertEqual(worker.report(prompted["native_id"],tid,aid,"Still on the same assignment","continue_requested"),
+                                 continuing)
+                self.assertEqual(worker.hold()["held_assignment_id"],aid)
+                for seconds in (1,10,1,1,1,1):
+                    advance(seconds)
+                self.assertEqual(len(probes()),7)
+                current = manager.inspect(tid)["task"]
+                self.assertEqual(current["state"],"blocked")
+                self.assertIsNone(worker.hold()["held_assignment_id"])
+                self.assertIsNone(manager.inspect(tid)["last_report"])
+                other.connect()
+                other.poll()
+                advance(10)
+                other.poll()
+                manager.act(guid(),tid,current["revision"],"transfer",worker_id="tama",reason="Continue elsewhere")
+                other.poll()
+                new_aid = other.hold()["held_assignment_id"]
+                self.assertNotEqual(new_aid,aid)
+                result = other.report(other_host.entries()[0][1]["native_id"],tid,new_aid,"Continuation finished")
+                self.assertEqual(result["task_state"],"completed_reported")
+                current = manager.inspect(tid)["task"]
+                self.assertEqual(manager.approve(guid(),tid,current["revision"])["task"]["state"],"closed")
+                worker.poll()
+                native, = [r for p,r in loop.native.entries() if p["kind"]=="task.transfer_out"]
+                loop.native.cleanup_evidence = lambda session,assignment,kind: {
+                    "session":session,"assignment_id":assignment,"kind":kind,"stopped":True,
+                    "cleaned":True,"receipt_id":"isolated-inquiry-cleanup"}
+                self.assertEqual(worker.report(native["native_id"],tid,aid,"Original cleared","transfer_confirmed"),
+                                 {"recorded":True,"release_assignment_id":aid,"task_state":"closed"})
+                manager.poll()
+                worker.poll()
+                other.poll()
+                settled = stage(self.trial,self.restore)
+            finally:
+                loop.server.shutdown()
+                loop.thread.join()
+
+        private = self.restore/"private-review"
+        task = json.loads((private/"manifest.json").read_text())["orders"][tid]
+        first,second = task["assignment_history"]
+        rounds = first["inquiry_rounds"]
+        self.assertEqual([len(r["probes"]) for r in rounds],[0,3,4])
+        self.assertEqual([r["continue"]["key"] for r in rounds[:-1]],
+                         ["continue-"+initial["native_id"],"continue-"+prompted["native_id"]])
+        self.assertTrue(first["shelved_presence_key"])
+        self.assertNotIn("inquiry_rounds",second)
+        self.assertEqual(digest(self.legacy),before)
+        self.assertEqual(digest(self.trial/"router.db"),settled["trial_sha256"])
+        legacy = json.loads(self.old("""
+store = RouterStore(sys.argv[1])
+print(json.dumps({"reason":store.orders.get(sys.argv[2])["archive"]["reason"],
+                  "queues":[store.orders.next_dispatch(name) for name in ("oguri","tama")]}))
+store.close()
+""",self.restore/"legacy.db",original))
+        self.assertEqual(legacy,{"reason":"reviewed_on_rewrite","queues":[None,None]})
+
+        def reject(label,statement,key,reason):
+            changed = self.root/label
+            changed.mkdir()
+            shutil.copyfile(self.trial/"baseline.json",changed/"baseline.json")
+            shutil.copyfile(private/"trial-router.db",changed/"router.db")
+            with closing(sqlite3.connect(changed/"router.db")) as db,db:
+                delta = db.execute(statement,(key,))
+                self.assertEqual(delta.rowcount,1)
+            forbidden = self.root/("refused-"+label)
+            with self.assertRaisesRegex(ValueError,reason):
+                stage(changed,forbidden)
+            self.assertFalse(forbidden.exists())
+
+        reject("without-continue","DELETE FROM operations WHERE actor='worker/oguri' AND key=?",
+               rounds[1]["continue"]["key"],"round exceeds its original retry limit")
+        reject("wrong-observation","UPDATE operations SET request=json_set(request,'$[1].busy',json('true')) "
+               "WHERE actor='worker/oguri' AND key=?",rounds[2]["probes"][0]["presence_key"],"original idle worker observation")
+        if output := os.environ.get("MOWULINK_INQUIRY_ROLLBACK_EVIDENCE"):
+            evidence = {"task_id":tid,"original":aid,"subsequent":new_aid,"rounds":rounds,
+                        "shelved_delivery_id":first["shelved_delivery_id"],"shelved_presence_key":first["shelved_presence_key"],
+                        "legacy":legacy,"trial_sha256":settled["trial_sha256"],"inconsistent_ledger_refused":True,
+                        "boundary":"Actual isolated rewrite HTTP Router and Workers, legacy RouterStore and SQLite; scripted hosts and clock."}
+            Path(output).write_text(json.dumps(evidence,ensure_ascii=False,indent=2)+"\n")
 
     def test_trial_born_closed_orders_return_as_private_archives_without_a_new_dispatch(self):
         self.old("""

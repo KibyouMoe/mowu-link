@@ -214,11 +214,11 @@ def stage_reviewed_rollback(snapshot,trial,review,destination):
                 entry["summary"] = result["summary"]
             rollback_lifecycle.histories(db,entries,facts["changed_tables"])
             questions = rollback_questions.retain(db,entries,facts["changed_tables"].get("questions",{}).get("trial_only",0))
-            workers,frames = rollback_lifecycle.check_transport(db,entries,questions)
+            workers,frames,inquiries = rollback_lifecycle.check_transport(db,entries,questions)
             uploads,files = copy_reviewed_files(db,entries,facts["changed_tables"],private/"files")
             rollback_lifecycle.check_operations(db,entries,workers,frames,uploads,
                                                 facts["changed_tables"].get("operations",{}).get("trial_only",0),
-                                                facts["queue_candidates"],questions)
+                                                facts["queue_candidates"],questions,inquiries)
             for tid,entry in entries.items():
                 if "creation_key" in entry:
                     original = dict(entry["original_content"],assignee_id=entry["original_worker"])

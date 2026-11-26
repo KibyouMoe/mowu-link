@@ -91,6 +91,8 @@ Worker 已以受阻 W04 释放原派发时，`resume` 可从受阻或挂起起�
 
 工单内已答复的问题随原派发写入私有档案。逐题核对 W05、管理端答复、原问题通知和原工位答复帧的传输确认。原问题的选择、文本和跳过都保留。转派后或结单后的答复仍归原提问人。旧 Router 只恢复正式归档，原两工位没有待答题或重新派发。未答、未确认传输或与原派发不符的问答会停止回退。演练另用宿主夹具核对了实际投递。复跑 `python3 -B -m unittest -v rewrite.test_cutover.Cutover.test_reviewed_questions_keep_the_original_worker_after_transfer_and_rollback`。[问答回退实测](evidence/cutover-reviewed-questions.json)
 
+Worker 请求继续时，回退以同一派发内的续做回执和原空闲观测划分询问轮次。每轮独立核首次询问和最多三次重试。最后一轮无答才允许对应入池和搁置通知。每条发出记录、观测和回执留在私有包，重开旧端无需再派。缺轮次回执或观测与原工位、忙闲和派发不符时停止。复跑 `python3 -B -m unittest -v rewrite.test_cutover.Cutover.test_reviewed_inquiries_preserve_continue_rounds_and_release_only_the_original_assignment`。[询问轮次实测](evidence/cutover-reviewed-inquiries.json)
+
 ### 在途工单先排空再回退
 
 旧 Router 保持停写。先停试用写者并采集[五组件快照](#重做版五组件的离线恢复)，保留迁入时的旧快照和 `baseline.json`。从新的目录恢复这套重做组件，使用原 Worker 身份、原适配器账本及原生会话。启动重做 Router 时，在现有启动参数上加 `--drain-dispatch`，核对启动回执中 `dispatch_draining` 为 `true`。每次重开都须保留这个参数。此模式停止分配新派发号，已有派发、重连对账、业务回执和定时规则继续按原契约处理。冻结外部试用入口，避免排空时又发生无关写入。

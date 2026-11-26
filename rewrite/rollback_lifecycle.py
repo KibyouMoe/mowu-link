@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 import json
 import math
 
-from . import attachments, rollback_questions
+from . import attachments, rollback_inquiries, rollback_questions
 from .cleanup import CANCEL_CONFIRMED_NOTICE
 from .messages import valid_guid
 from .orders import task
@@ -72,7 +72,7 @@ def retain_inquiries(step, frames, dispatch_seq, next_dispatch_seq):
     cancel_cleanup = cleanup and cleanup["kind"]=="task.cancel"
     expected = ["task.probe"]*count + (["task.shelved"] if unanswered else [])
     expected += ["task.cancel"]*cancellations
-    if (kinds!=expected or count>4 or unanswered and count!=4 or cancellations>4
+    if (kinds!=expected or cancellations>4
             or bool(cancellations)!=bool(cancel_cleanup)
             or any(frame["seq"]<=dispatch_seq or next_dispatch_seq is not None and frame["seq"]>=next_dispatch_seq
                    for frame in frames)):
@@ -414,6 +414,7 @@ def check_transport(db, entries, reviewed_questions):
     pool_start_frames = {}
     latest_update = {}
     work_stopped = set()
+    latest_query,inquiry_sources = {},{}
     for row in db.execute("SELECT rowid AS seq,* FROM deliveries ORDER BY rowid"):
         data = json.loads(row["payload"])
         kind,consumer,did = row["kind"],row["consumer"],row["delivery_id"]
@@ -423,6 +424,7 @@ def check_transport(db, entries, reviewed_questions):
         if kind=="worker.status_query":
             if set(data)!={"worker_id","query_id"} or data["worker_id"] not in workers or consumer!="worker/"+data["worker_id"]:
                 raise ValueError("unexpected worker status query")
+            latest_query[consumer] = data["query_id"]
         elif kind=="message.deliver":
             mid = data.get("message_id")
             saved = messages.pop(mid,None)
@@ -447,6 +449,8 @@ def check_transport(db, entries, reviewed_questions):
                 raise ValueError("trial inquiry delivery does not match the reviewed assignment")
             if kind=="task.cancel":
                 work_stopped.add(aid)
+            else:
+                inquiry_sources[did] = rollback_inquiries.source(latest_query,consumer,tid,aid)
         elif kind=="question.resolved":
             rollback_questions.record_answer_delivery(reviewed_questions,data,consumer,did,row["seq"])
         elif kind=="task.updated":
@@ -479,7 +483,7 @@ def check_transport(db, entries, reviewed_questions):
             items = items[:-1]
         if items:
             entries[tid]["pool_notices"] = items
-    return workers,frames
+    return workers,frames,inquiry_sources
 
 
 def take(operations, key, actor, body, replies=None, *, session=False, files=False):
@@ -749,9 +753,10 @@ def verify_order(db, tid, entry, operations, windows):
         cleanup.update(report_key=receipt["key"],receipt=receipt["reply"])
 
 
-def check_operations(db,entries,workers,frames,uploads,expected_count,queue_candidates,reviewed_questions):
+def check_operations(db,entries,workers,frames,uploads,expected_count,queue_candidates,reviewed_questions,inquiry_sources):
     operations, applicable, acked, sessions = {},0,{},{}
     asks,answers = {},{}
+    samples,continued = {},{}
     creation_keys = {item["request_id"] for item in queue_candidates}
     creation_keys.update(entry["creation_key"] for entry in entries.values() if "creation_key" in entry)
     for row in db.execute("SELECT rowid AS seq,* FROM operations ORDER BY rowid"):
@@ -778,6 +783,12 @@ def check_operations(db,entries,workers,frames,uploads,expected_count,queue_cand
             operations[key] = {"seq":row["seq"],"actor":actor,"key":row["key"],"body":body,"reply":reply}
         elif method=="POST" and len(parts)==5 and parts[:3]==["","v1","tasks"] and parts[3] in entries:
             tid,op = parts[3:]
+            if op=="report" and body.get("outcome")=="continue_requested":
+                if actor not in sessions or body.get("session_id")!=sessions[actor]:
+                    raise ValueError("continue receipt uses an unregistered worker session")
+                continued.setdefault(body.get("assignment_id"),[]).append(
+                    {"seq":row["seq"],"actor":actor,"key":row["key"],"body":body,"reply":reply,"task_id":tid})
+                continue
             if op=="accept":
                 key = (tid,op,body.get("assignment_id"))
             elif op=="report":
@@ -806,6 +817,11 @@ def check_operations(db,entries,workers,frames,uploads,expected_count,queue_cand
                 if not isinstance(session,str) or not session.strip():
                     raise ValueError("trial worker registration is missing its session")
                 sessions[actor] = session
+            elif parts[4:]==["presence"]:
+                query = body.get("query_id")
+                if not valid_guid(query) or query in samples or actor not in sessions or body.get("session_id")!=sessions[actor]:
+                    raise ValueError("worker presence receipt does not match its observation")
+                samples[query] = {"seq":row["seq"],"actor":actor,"key":row["key"],"body":body,"reply":reply}
         elif method=="POST" and path=="/v1/uploads" and reply.get("upload_id") in uploads:
             upload = uploads[reply["upload_id"]]
             if actor!=upload["owner"] or body!={key:upload[key] for key in ("name","size_bytes","sha256")}:
@@ -816,5 +832,6 @@ def check_operations(db,entries,workers,frames,uploads,expected_count,queue_cand
     for tid,entry in entries.items():
         verify_order(db,tid,entry,operations,windows)
     rollback_questions.verify_receipts(reviewed_questions,asks,answers,windows,acked)
+    rollback_inquiries.verify_rounds(entries,inquiry_sources,samples,continued,windows,acked)
     if creation_keys or applicable!=expected_count or acked.keys()!=frames.keys() or operations:
         raise ValueError("trial operation ledger is incomplete or has unrelated writes")

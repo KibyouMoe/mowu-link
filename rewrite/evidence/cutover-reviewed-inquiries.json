@@ -1,0 +1,74 @@
+{
+  "task_id": "74dc54c4-d0c0-576e-8d8e-b7248b042264",
+  "original": "1fc53632-4812-4d17-9fa0-f179088e5a82",
+  "subsequent": "e1b08fef-5049-494a-b053-31b65fe0c577",
+  "rounds": [
+    {
+      "continue": {
+        "key": "continue-95915c26-5978-4fdb-b2aa-37ee3330ba97",
+        "receipt": {
+          "recorded": true,
+          "task_state": "working"
+        },
+        "summary": "Proactive update"
+      },
+      "probes": []
+    },
+    {
+      "continue": {
+        "key": "continue-190101ec-9b97-4ce5-83bb-df0f370974ca",
+        "receipt": {
+          "recorded": true,
+          "task_state": "working"
+        },
+        "summary": "Still on the same assignment"
+      },
+      "probes": [
+        {
+          "delivery_id": "a53cfb2c-5543-427c-9653-81a2d066ecbd",
+          "presence_key": "presence-b6ebac4c-b956-439c-8cff-6ac5a0f21f13"
+        },
+        {
+          "delivery_id": "e492351d-f3ca-46a9-addc-d548f466333a",
+          "presence_key": "presence-39401f76-bb3c-4a08-8527-e4c7e23ab52e"
+        },
+        {
+          "delivery_id": "3eec30df-9065-4955-9c6e-ff081d8c8ece",
+          "presence_key": "presence-c4caec8a-e350-48fb-a92e-ca637c9f8cc7"
+        }
+      ]
+    },
+    {
+      "probes": [
+        {
+          "delivery_id": "cbc94f53-3a3f-494a-99e4-ceb426fddcae",
+          "presence_key": "presence-50552f21-cd1b-44e4-907e-39ecbdcc644e"
+        },
+        {
+          "delivery_id": "838fc733-c5da-40d3-80b7-89dfc50391bf",
+          "presence_key": "presence-3afd4e55-789b-4d05-820c-96c85a588041"
+        },
+        {
+          "delivery_id": "5962baea-8a95-4527-ba4d-72bf50771f27",
+          "presence_key": "presence-fc41f34c-67c2-4060-941e-867cdd73bad6"
+        },
+        {
+          "delivery_id": "c8a6a7e8-9c5e-4507-b022-638f373879ad",
+          "presence_key": "presence-176291d8-8a41-41c0-bad8-f22454bfade5"
+        }
+      ]
+    }
+  ],
+  "shelved_delivery_id": "e392ca07-39f8-4fbd-a0c3-04079478077b",
+  "shelved_presence_key": "presence-eddf4b58-b016-47d7-a1d2-9eba2de25c9d",
+  "legacy": {
+    "reason": "reviewed_on_rewrite",
+    "queues": [
+      null,
+      null
+    ]
+  },
+  "trial_sha256": "ea544c499525b74abf201d47d9b9c5fd9b63a5aea38888114d33874f6f90ac9e",
+  "inconsistent_ledger_refused": true,
+  "boundary": "Actual isolated rewrite HTTP Router and Workers, legacy RouterStore and SQLite; scripted hosts and clock."
+}
