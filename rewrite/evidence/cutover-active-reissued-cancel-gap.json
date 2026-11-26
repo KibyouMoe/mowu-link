@@ -1,0 +1,41 @@
+{
+  "cases": {
+    "repeated_while_working_then_confirmed": {
+      "task_id": "25cda0a4-b299-5c8f-b690-1ad43bf17640",
+      "assignment_id": "3a9605c8-3211-4bcc-b327-db8a39c8a730",
+      "cancel_keys": [
+        "77b2ecff-aa7b-40d5-b2a2-e3d6c428efc3",
+        "82905d6a-69b3-4181-9ba6-c5fd6162af7e"
+      ],
+      "final_cleanup_id": "32eb9f1f-0895-42ac-9cf6-4187586372c3",
+      "w04": {
+        "recorded": true,
+        "release_assignment_id": "3a9605c8-3211-4bcc-b327-db8a39c8a730",
+        "task_state": "cancelled"
+      },
+      "rollback_error": "terminal action does not match the assignment revision",
+      "no_output": true,
+      "trial_unchanged": true
+    },
+    "repeated_while_working_then_expired": {
+      "task_id": "3368d5d0-786f-551f-924f-2d6ed48e6d9d",
+      "assignment_id": "cf3a8092-046b-4014-8ac9-09fa66456b31",
+      "cancel_keys": [
+        "3c5b1aae-72c6-474a-a004-a1615cde653b",
+        "2c2a6336-1c8a-4b37-a0f9-4342a7859988",
+        "c3922e38-3c16-4211-a601-1132fa0026e6"
+      ],
+      "final_cleanup_id": "fd5075bc-3580-4ed8-a59c-e093bb5d07ec",
+      "w04": {
+        "recorded": true,
+        "release_assignment_id": "cf3a8092-046b-4014-8ac9-09fa66456b31",
+        "task_state": "cancelled"
+      },
+      "rollback_error": "trial inquiry deliveries do not match their original assignment",
+      "no_output": true,
+      "trial_unchanged": true
+    }
+  },
+  "boundary": "Actual isolated HTTP Router and Worker and old RouterStore. Scripted host and clock.",
+  "observed_revision": "73979aed2bbd8ddc0cf037dc04fdbd6c76150010"
+}
