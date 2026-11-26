@@ -8,7 +8,9 @@ Codex 独立只读工位已能经授权固定会话接口准备新会话或分�
 
 用准备端返回的原生 ID 显式登记独立适配器，再经现有交接将空会话从冷态启用。正式单仅产生一个原生回合，模型夹具两次调用 `worker_report`，Router 只留一条待验通知。飞书 `/new`、`/fork` 的自动适配器接入和换绑尚待实现，本轮未向真实用户会话投递。
 
-复跑 `python3 -B -m unittest -v rewrite.test_codex_app_server.CodexAppServer.test_thread_preparation_retains_native_identity_and_never_retries_an_uncertain_creation rewrite.test_codex_app_server.CodexAppServer.test_prepare_sessions_cli_uses_authenticated_pinned_adapter_and_replays_after_restart rewrite.test_state_bundle.Bundle.test_handoff_refuses_to_copy_an_unconfirmed_native_thread_preparation`。
+复跑 `python3 -B -m unittest -v rewrite.test_codex_app_server.CodexAppServer.test_thread_preparation_retains_native_identity_and_never_retries_an_uncertain_creation rewrite.test_codex_app_server.CodexAppServer.test_prepare_sessions_cli_uses_authenticated_pinned_adapter_and_replays_after_restart rewrite.test_state_bundle.Bundle.test_handoff_refuses_to_copy_an_unconfirmed_native_thread_preparation`。两项原生用例与停写审计连续通过 12 轮。macOS 全量 226 项通过，Linux arm64 156 项通过，另 70 项本机宿主用例跳过。
+
+从 `040dad32906b187514f9599f0eef4eb15b2d0595` 构建 193 文件独立包，SHA-256 为 `895e3adf85fd4ab108ab13d0a3a407639b6fda745810495a840233782559160d`。安装目录专项复验通过 4 项，重读文件摘要一致。关闭准备功能的旧版、混合版、新版和回退保留同一条原生私聊回执 `756c061f-e82c-445e-870e-ca6a96d42d45`。复跑 `python3 -B -m rewrite.release_check --repository . --component worker-pair --previous cee3a234fa832afea0c417d50940b6ef05541619 --new 040dad32906b187514f9599f0eef4eb15b2d0595`。
 
 DSH 已接入运行中 Worker 的冷会话恢复。真实 DSH SDK、TLS 适配器进程和隔离 Router 实测，目录浏览时原生代理保持关闭，Router 冻结后恢复原会话。首次恢复回执丢失时按原号查回，测试控制器仍只调用一次原生 AgentRegistry 恢复。原生执行一次正式派发，两次 `worker_report` 回同一结果，仅一条待验通知和一份最终显示。旧历史未重播。关闭原 Agent 后，原插件拒绝换成新对象。宿主和适配器一起冷重开后，Worker 以同一交接号恢复同一会话和历史，新增模型调用为 0。保有活动原生目标的冷会话在唤醒前被拒。控制器装配、飞书与模型为夹具。[DSH 冷恢复实测](evidence/dsh-cold-resume.json)
 
