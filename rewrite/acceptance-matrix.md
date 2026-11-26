@@ -76,5 +76,5 @@
 | 入口 | 查证结果 | 切换条件 |
 | --- | --- | --- |
 | `POST /commands`、`/commands/responses` | 旧 Codex 与 DSH 的 `desktop-manager.mjs` 通过 Router 转发 `/model` 和 `/effort`，`router-runtime.mjs` 按原请求号回复。重做版由同工位的 `worker/command` 接收已认证的训练员命令，隔离宿主已核设置与回读。 | 实际飞书链路与真实账号的模型设置仍待核。源码查到旧插件消费者，其他调用方需由使用者核对后才可停旧入口。 |
-| `/approvals` | 隔离 Codex 已核命令取消及丢回执待核。DSH 已核绑定会话的原生 Bash 单次允许、拒绝和超时，回执断掉后冷开可查回原生决定。C01 仅通知指定审批人。 | 真实审批人和飞书提示、Codex 实际单次允许、DSH 未明确绝对目录的转接，以及文件、网络、Desktop 应用授权待核。普通题卡不承载审批。[操作入口](README.md#独立宿主命令审批) |
+| `/approvals` | 隔离 Codex App Server 已核命令取消、丢回执待核和单次允许。原审批摘要不符时拒绝。允许重投后，原生台账只有一条隔离目录的 `pwd` 执行记录。DSH 已核绑定会话的 Bash 单次允许、拒绝和超时，回执断掉后冷开可查回原生决定。C01 仅通知指定审批人。[Codex 原生记录](evidence/codex-app-server-approval-accept.json) | 真实审批人和飞书提示、DSH 未明确绝对目录的转接，以及文件、网络、Desktop 应用授权待核。普通题卡不承载审批。[操作入口](README.md#独立宿主命令审批) |
 | `/ops/services`、`/ops/services/{name}/restart` | 本机溪流的 `gateway-restart` 运维说明明确引用旧接口；Codex 运维说明也用它查询 LaunchAgent。重做版独立 HTTPS 维护服务按目标授权。真实 macOS 临时 Router 已测丢回包、原号查回不重复重启、原待派单和原建单幂等键保留。另核已登记停机项恢复，以及不相符 plist 及已加载参数时保持待核。[回执](evidence/host-ops-launchd.json) | 现役调用迁移、实际授权、Desktop 自有子进程、Hermes 网关实际运行形态和其他系统的管理入口仍待独立核对。 |

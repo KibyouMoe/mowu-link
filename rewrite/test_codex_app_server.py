@@ -142,7 +142,7 @@ class Provider(BaseHTTPRequestHandler):
                     "call_id":"trial-approval-"+approval_prompt,
                     "arguments":encode({"cmd":self.server.approval_commands[approval_prompt],
                                         "sandbox_permissions":"require_escalated",
-                                        "justification":"Isolated cancellation fixture."})}
+                                        "justification":"Read the isolated test directory."})}
         elif public_preview and not calls:
             commentary = {"id":"msg_preview_comment","type":"message","role":"assistant","status":"completed",
                           "phase":"commentary","content":[{"type":"output_text","text":"Checking the isolated workspace."}]}
@@ -888,7 +888,7 @@ class CodexAppServer(unittest.TestCase):
             "boundary":"Independent real App Server threads, isolated Router and Worker, local scripted model and platform"}
 
     def test_native_command_approval_cancels_exact_request_and_does_not_infer_missing_proof(self):
-        self.provider.approval_commands = {"one":"pwd","two":"pwd","expire":"pwd"}
+        self.provider.approval_commands = dict.fromkeys(("one","two","allow","expire"),"pwd")
         root = Path(self.root)
         rpc = self.enterContext(isolated_app_server(self.root,self.origin,
                                 ['approval_policy="on-request"','sandbox_mode="read-only"']))
@@ -988,6 +988,24 @@ class CodexAppServer(unittest.TestCase):
         self.assertEqual(approver.request("GET",route),decided)
         self.assertIsNone(decided["attempted_response"])
         ignore_closure.clear()
+
+        accepted,accept_route = open_one("allow")
+        accepted_turn = accepted["request"]["turn_id"]
+        accept = {"request_digest":accepted["request_digest"],"decision":"accept"}
+        with self.assertRaisesRegex(Fault,"approval_view_changed"):
+            approver.request("PUT",accept_route+"/decision",dict(accept,request_digest=first["request_digest"]))
+        self.assertEqual(len(native_responses),2)
+        approver.request("PUT",accept_route+"/decision",accept)
+        self.assertEqual(terminals.get(timeout=10),(accepted_turn,"completed"))
+
+        def accepted_receipt():
+            result = approver.request("GET",accept_route)
+            return result if result["state"]=="native_closed" else None
+
+        native_accepted = until(accepted_receipt)
+        self.assertEqual(native_accepted["attempted_response"],{"source":"operator","decision":"accept"})
+        self.assertEqual(approver.request("PUT",accept_route+"/decision",accept),native_accepted)
+
         expired,expired_route = open_one("expire")
         clock_offset = 601  # Advance only the isolated Router clock.
         turn,status = terminals.get(timeout=10)
@@ -998,9 +1016,16 @@ class CodexAppServer(unittest.TestCase):
         confirmed_expiry = until(expired_receipt)
         self.assertEqual(confirmed_expiry["attempted_response"],{"source":"expiry","decision":"cancel"})
         self.assertIsNone(confirmed_expiry["decision"])
-        self.assertEqual(native_responses,[{"id":offer["id"],"result":{"decision":"cancel"}} for offer in native_offers])
+        self.assertEqual(native_responses,[{"id":offer["id"],"result":{"decision":decision}}
+                         for offer,decision in zip(native_offers,("cancel","cancel","accept","cancel"),strict=True)])
         turns = host.thread(session,include_turns=True)["turns"]
-        self.assertFalse(any(item["type"]=="commandExecution" for turn in turns for item in turn["items"]))
+        (executed_turn,command), = [(turn["id"],item) for turn in turns for item in turn["items"]
+                                  if item["type"]=="commandExecution"]
+        self.assertEqual(executed_turn,accepted_turn)
+        self.assertEqual(command["command"],accepted["request"]["command"])
+        self.assertEqual(command["status"],"completed")
+        self.assertEqual(command["exitCode"],0)
+        self.assertEqual(Path(command["aggregatedOutput"].strip()).resolve(),root.resolve())
         self.assertEqual(manager_wire.request("GET","tasks")["items"],[])
         self.assertEqual(platform.request("GET","worker/display")["items"],[])
         self.evidence = {"native_thread":session,"requests":[first["approval_id"],second["approval_id"],expired["approval_id"]],
@@ -1011,8 +1036,12 @@ class CodexAppServer(unittest.TestCase):
                          "first_closure_router_attempts":sum(receipt["approval_id"]==first["approval_id"] for receipt in seen_closures),
                          "second_router_state":decided["state"],"native_closure_deliberately_dropped":True,
                          "expired_approval_native_response":confirmed_expiry["attempted_response"],
-                         "native_commands_executed":0,"ordinary_chat_and_tasks_unchanged":True,
-                         "boundary":"Bundled Codex App Server, local scripted model, injected transport loss, isolated Router and Worker"}
+                         "native_commands_executed":1,"ordinary_chat_and_tasks_unchanged":True,
+                         "boundary":"Bundled Codex App Server, local scripted model, injected transport loss, isolated Router and Worker",
+                         "one_time_acceptance":{"approval_id":accepted["approval_id"],"turn_id":accepted_turn,
+                            "item_id":command["id"],"native_status":command["status"],"exit_code":command["exitCode"],
+                            "output_matches_isolated_directory":True,"router_state":native_accepted["state"],
+                            "attempted_response":native_accepted["attempted_response"],"same_decision_replay":True}}
 
     def test_resume_catalog_uses_only_current_app_server_workspace_without_loading_history(self):
         root = Path(self.root)

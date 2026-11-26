@@ -262,7 +262,7 @@ python3 -m rewrite.service approvals --connection "$APPROVER_CONNECTION" --worke
 python3 -m rewrite.service approvals --connection "$APPROVER_CONNECTION" --worker-id "$WORKER_ID" decide "$APPROVAL_ID" --request-digest "$REQUEST_DIGEST" --decision cancel
 ```
 
-决定包括宿主实际给出的单次 `accept` 或 `cancel`。已登记决定显示 `decided`，只有同一原生请求关闭后才显示 `native_closed`。关闭回执证明原审批请求结束，命令是否执行仍看原生回合。决定超时或 Worker 会话已变时拒绝提交新决定。超过旧系统的十分钟期限，原生请求支持取消且仍在等待时，转发一次取消并注明来源为超时。App Server 的文件、额外权限、网络审批及 Desktop 的应用级授权分别待核。Codex 原生隔离测试实测的是命令取消。
+决定包括宿主实际给出的单次 `accept` 或 `cancel`。已登记决定显示 `decided`，只有同一原生请求关闭后才显示 `native_closed`。关闭回执证明原审批请求结束，命令是否执行仍看原生回合。决定超时或 Worker 会话已变时拒绝提交新决定。超过旧系统的十分钟期限，原生请求支持取消且仍在等待时，转发一次取消并注明来源为超时。独立 Codex App Server 已实测单次允许和取消。重复允许沿用原回执，原生回合只有一次测试目录内的 `pwd`。App Server 的文件、额外权限、网络审批及 Desktop 的应用级授权分别待核。[原生测试证据](evidence/codex-app-server-approval-accept.json)
 
 DSH 在独立宿主插件的参数中显式配置 `relay_command_approvals: true`，沿用同一个审批 CLI。适配器只转接绑定 Agent 的原生 `bash` 请求，按同一原生回合找到完整工具参数。原调用明确提供绝对 `workdir` 时，审批人可以核对该目录与原参数。相对目录或未指定目录的调用仍由宿主的原生审批处理。
 
