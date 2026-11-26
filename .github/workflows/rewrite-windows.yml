@@ -51,8 +51,9 @@ jobs:
               throw "Expected a private test directory (protected=$($acl.AreAccessRulesProtected), rules=$($rules.Count))"
             }
             Write-Output 'Temporary test ACL verified'
-            $env:TMP = $dir.FullName
-            $env:TEMP = $dir.FullName
+            $state = New-Item -ItemType Directory (Join-Path $dir.FullName '状态 试用')
+            $env:TMP = $state.FullName
+            $env:TEMP = $state.FullName
             $archive = Join-Path $dir.FullName 'archive'
             $installed = Join-Path $dir.FullName 'installed'
             $release = python -B -m rewrite.release build --repository . --revision $env:GITHUB_SHA --destination $archive | ConvertFrom-Json
@@ -71,6 +72,7 @@ jobs:
             }
             python -B -m rewrite.release verify --archive $release.archive --revision $release.revision --sha256 $release.sha256 --destination $installed
             python -B -m rewrite.release_check --repository . --component worker-pair --previous 307a8a119c6a97ea2cb816280227afb3295e5675 --new $env:GITHUB_SHA
+            python -B -m rewrite.release_check --repository . --component router --previous 307a8a119c6a97ea2cb816280227afb3295e5675 --new $env:GITHUB_SHA
           } finally {
             Remove-Item -LiteralPath $dir.FullName -Recurse -Force
           }
