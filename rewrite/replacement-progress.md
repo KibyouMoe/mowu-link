@@ -27,6 +27,8 @@
 
 ## 宿主与来源复验
 
+DSH 图文输入已用随附 SDK 的 `LocalAttachmentStore` 实测。飞书入站夹具提供一张可解码的 1×1 PNG 和原留言，原生用户消息保留两块内容；SDK 独立读回图像对象，归一化后的 SHA-256 与宿主引用相符。另发的 368,000 字节 Markdown 文件由 SDK 按文件读取，摘要与上传原件一致。清空适配器凭据和原图缓存后，重取原图查回同一原生收件号，未再生成输入。损坏图或只接收文字的测试模型均无收件。复跑 `python3 -m unittest -v rewrite.test_dsh_sdk rewrite.test_feishu_inbound`。DSH SDK 及本机附件库、进程和 HTTP 实跑；飞书事件、Agent 和模型路由是夹具，视觉理解尚未验收。全量回归 101 项。
+
 迁移后已实测溪流按来源 UUID 和旧工单号查询历史。真实旧 RouterStore 生成的成果、归档原因及时间通过新 Router 与 Hermes 管理工具查回，排队单能查到新单号。历史归档单未重派，查询前后试运行库摘要完全相同。复跑 `python3 -m unittest -v rewrite.test_cutover` 共 5 项，全量回归 93 项。人工整理旧格式记录以及试运行后的新增业务回迁另验。
 
 Hermes 本地专用会话 H01/H02 已取得两条独立原生收件号。Event 进入指定会话后，将插件两份收件记录清空，仍由 Hermes 台账找回同号，宿主只执行了一次。测试回合释放后 10.94 秒收到 Notify，Info 没有新增输入。来源附件通过引用和原消息授权取回并验 SHA-256。执行记录在 [Hermes 原生台账](evidence/hermes-local-input.json)，源码版本 464bd0dd659f336bd0bf468bf02cad8aac211136。模型处理函数由夹具代替。普通回归另测待核 Event 与 Notify 队首，以及两次观察之间出现新回合时重新计时。此项覆盖独立 LOCAL 会话，飞书云端和日用网关未验。

@@ -3,6 +3,7 @@ import { readFileSync, lstatSync } from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
+import { admitMedia } from './media.mjs';
 
 const tools = JSON.parse(readFileSync(new URL('../../agent-toolset.json', import.meta.url)));
 const sha = value => createHash('sha256').update(value).digest('hex');
@@ -12,17 +13,19 @@ function check(condition, code) {
   if (!condition) throw new Error(code);
 }
 
-function input(request) {
+async function input(request, ctx, agent, directory) {
   const {session, delivery_id, payload_json, digest} = request;
   check(typeof payload_json === 'string' && sha(payload_json) === digest, 'delivery_digest_mismatch');
   check(typeof delivery_id === 'string' && delivery_id.length > 0, 'invalid_delivery_id');
   const payload = JSON.parse(payload_json);
-  check(!payload.attachments?.length, 'native_media_input_unavailable');
   const id = 'mowulink-' + sha(JSON.stringify([session,delivery_id,digest]));
   if (payload.kind === 'queued_chat') check(payload.session === session, 'queued_session_mismatch');
   const text = ['chat','queued_chat'].includes(payload.kind) ? payload.text : '魔物链接投递\n' + payload_json;
-  check(typeof text === 'string' && text.trim(), 'empty_input');
-  return {id, role:'user', content:[{type:'text',text}], source:{kind:'user'}};
+  const media = payload.attachments;
+  check(typeof text === 'string' && (text.trim() || media?.length), 'empty_input');
+  const parts = text ? [{type:'text',text}] : [];
+  const content = media?.length ? await admitMedia(ctx,agent,directory,media,parts,request.operation==='deliver') : parts;
+  return {id, role:'user', content, source:{kind:'user'}};
 }
 
 function turns(events) {
@@ -67,11 +70,14 @@ function receipt(request, expected, history) {
   const {turn,message} = found[0];
   check(message.role === 'user' && message.source?.kind === 'user'
     && isDeepStrictEqual(message.content,expected.content), 'native_input_mismatch');
-  return {session:request.session, delivery_id:request.delivery_id, digest:request.digest,
+  const result = {session:request.session, delivery_id:request.delivery_id, digest:request.digest,
     native_id:message.id, turn_id:turn.id};
+  const media = JSON.parse(request.payload_json).attachments;
+  if (media?.length) result.media_sha256 = media.map(item => item.sha256);
+  return result;
 }
 
-export async function bindHost(ctx, session) {
+export async function bindHost(ctx, session, directory) {
   check(typeof session === 'string' && session.length > 0, 'missing_native_session');
   const controller = ctx.get('sessionController');
   const {agent} = await controller.resolveAgent(session);
@@ -88,10 +94,11 @@ export async function bindHost(ctx, session) {
       await bound();
       if (request.operation === 'activity') return {busy:agent.status !== 'idle'};
       check(['deliver','lookup'].includes(request.operation), 'unsupported_operation');
-      const expected = input(request);
+      const expected = await input(request,ctx,agent,directory);
       const seen = receipt(request,expected,await persisted(ctx,agent));
       if (seen || request.operation === 'lookup') return {receipt:seen};
       // Only the adapter which first persisted its write intent can request delivery.
+      await bound();
       agent.followup(expected);
       return {receipt:receipt(request,expected,await persisted(ctx,agent))};
     },
@@ -151,7 +158,7 @@ export const inject = ['sessionController','sessions','sessionPersistence','tool
 
 export async function apply(ctx, {session, directory}) {
   privateDir(directory);
-  const port = await bindHost(ctx,session);
+  const port = await bindHost(ctx,session,directory);
   for (const tool of tools) {
     const unregister = port.agent.ctx.get('tools').register({name:tool.name,description:tool.description,
       parameters:tool.inputSchema,output:{schema:{type:'object'},render:(_args,value)=>[{type:'text',text:JSON.stringify(value)}]},

@@ -1,5 +1,6 @@
 // Isolated SDK driver. The scripted agent supplies messages; no provider or account is loaded.
 import {createRequire} from 'node:module';
+import {createHash} from 'node:crypto';
 import {pathToFileURL} from 'node:url';
 import {createInterface} from 'node:readline';
 import path from 'node:path';
@@ -22,12 +23,15 @@ await install((await sdk('dsh-session')).SessionStore);
 await install(await sdk('dsh-session-persistence-jsonl'),{root:path.join(directory,'sessions')});
 await install((await sdk('dsh-system-prompt')).SystemPrompt);
 await install((await sdk('dsh-tools')).ToolsService);
+await install((await sdk('dsh-attachment-local')).default,{dshHome:directory});
 const header = {version:4,id,createdAt:Date.now(),isSeeded:false,delegationDepth:0};
 const writer = await ctx.get('sessionPersistence').create(header);
 const session = ctx.get('sessions').create(id,{meta:header});
 let number = 0;
 let received = 0;
-const agent = {session,status:'idle',followup(message) {
+let lastMessage, selectedModel;
+const agent = {session,status:'idle',model:{current:()=>selectedModel},followup(message) {
+  lastMessage = message;
   received++;
   if (agent.status === 'idle') {
     agent.status = 'running';
@@ -43,6 +47,11 @@ class Controller extends Service {
   resolveAgent(target) { return target === id ? {agent} : {error:'unknown'}; }
 }
 await install(Controller);
+class Routes extends Service {
+  constructor(c) { super(c,'llm'); }
+  resolveModelInfo() { return {inputModalities:['text']}; }
+}
+await install(Routes);
 await install(adapter,{session:id,directory});
 const registry = ctx.get('tools');
 const names = [...registry.view(agent).visible.keys()];
@@ -68,6 +77,26 @@ try {
         }
         const result = await executeToolBatch({agent,calls:[block],signal:new AbortController().signal},pipeline,()=>1);
         console.log(JSON.stringify({received,result:result.results[0].result}));
+        continue;
+      } else if (cmd.action === 'select-text-only') {
+        selectedModel = {provider:'fixture',model:'text-only'};
+      } else if (cmd.action === 'inspect-media') {
+        const content = [];
+        const attachments = ctx.get('attachments');
+        for (const block of lastMessage.content) {
+          if (block.type === 'text') {
+            content.push(block);
+            continue;
+          }
+          const hash = createHash('sha256');
+          if (block.type === 'image') {
+            hash.update((await attachments.readImage(block.attachment)).data);
+          } else {
+            for await (const chunk of attachments.readFileStream(block.attachment)) hash.update(chunk);
+          }
+          content.push({type:block.type,ref:block.attachment,sha256:hash.digest('hex')});
+        }
+        console.log(JSON.stringify({id:lastMessage.id,content}));
         continue;
       } else if (cmd.action === 'manual') {
         agent.followup({role:'user',id:'manual',content:[{type:'text',text:'manual follow-up'}],source:{kind:'user'}});

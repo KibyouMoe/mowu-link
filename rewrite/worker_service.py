@@ -115,8 +115,10 @@ class WorkerService:
         elif actor == "platform/" + w.worker_id and method == "POST" and path == "/v1/worker/command":
             result = {"receipt":worker_commands.handle(self,body)}
         elif actor == "platform/" + w.worker_id and method == "POST" and path == "/v1/worker/chat":
-            require({"message_id","text"} <= body.keys() <= {"message_id","text","attachment_ids"},422,"invalid_chat")
-            result = {"receipt":w.chat(string(body,"message_id"),body["text"],body.get("attachment_ids"))}
+            require({"message_id","text"} <= body.keys() <= {"message_id","text","attachment_ids","attachment_kinds"},
+                    422,"invalid_chat")
+            result = {"receipt":w.chat(string(body,"message_id"),body["text"],body.get("attachment_ids"),
+                                       body.get("attachment_kinds"))}
         elif actor == "ops/" + w.worker_id and method == "GET" and path == "/v1/worker/status":
             result = {"worker_id":w.worker_id,"router_connected":self.router_connected,
                       "adapter_connected":self.adapter_connected,"last_error":self.last_error,**w.hold()}

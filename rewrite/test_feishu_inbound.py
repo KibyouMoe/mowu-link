@@ -12,7 +12,7 @@ from .wire import Client
 from .worker_service import WorkerService
 
 
-PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6yX8AAAAASUVORK5CYII=")
+PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNQSFjwHwAD5AIge4YO3AAAAABJRU5ErkJggg==")
 
 
 class PlatformCase(unittest.TestCase):
@@ -79,6 +79,10 @@ class PlatformInput(PlatformCase):
         self.assertEqual(text[0]["text"],"  原话  ")
         self.assertEqual(pic[0]["text"],"")
         meta, = doc[0]["attachments"]
+        self.assertEqual((meta["kind"],pic[0]["attachments"][0]["kind"]),("file","image"))
+        with self.assertRaisesRegex(Fault,"chat_conflict"):
+            self.platform.request("POST","worker/chat",{"message_id":"om_doc","text":"",
+                "attachment_ids":[meta["attachment_id"]],"attachment_kinds":["image"]})
         self.assertEqual(meta["name"],"交接.md.txt")
         self.assertEqual((self.loop.root/"cache"/meta["sha256"]).read_bytes(),self.data["om_doc","file_doc","file"])
         with self.assertRaises(Fault) as denied:

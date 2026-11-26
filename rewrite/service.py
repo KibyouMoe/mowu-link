@@ -58,8 +58,10 @@ def server(args):
         listener = serve_adapter(HostAdapter(args.db,native,native.session,media),args.worker_id,identities,address,ctx)
     elif args.component == "dsh-adapter":
         from .dsh_port import DshHost, tool_listener
-        adapter = HostAdapter(args.db,DshHost(args.runtime_dir),args.session)
-        callbacks = tool_listener(args.runtime_dir,adapter,connection(args.worker_connection))
+        from .native_files import NativeFiles
+        client = connection(args.worker_connection)
+        adapter = HostAdapter(args.db,DshHost(args.runtime_dir),args.session,NativeFiles(args.runtime_dir/"media",client))
+        callbacks = tool_listener(args.runtime_dir,adapter,client)
         listener = serve_adapter(adapter,args.worker_id,identities,address,ctx)
     else:
         worker = Worker(args.db,args.worker_id,connection(args.router_connection),

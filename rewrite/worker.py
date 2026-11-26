@@ -229,7 +229,7 @@ class Worker:
                        ("received" if receipt else "unknown", aid))
         return receipt is not None
 
-    def chat(self, message_id, text, attachment_ids=None):
+    def chat(self, message_id, text, attachment_ids=None, attachment_kinds=None):
         ids = [] if attachment_ids is None else attachment_ids
         require(isinstance(text,str) and (text.strip() or ids),422,"empty_chat")
         with self.lock:
@@ -239,7 +239,7 @@ class Worker:
                 inserted = db.execute("INSERT OR IGNORE INTO chats(message_id,text) VALUES (?,?)", (message_id,text)).rowcount
                 require(db.execute("SELECT text FROM chats WHERE message_id=?", (message_id,)).fetchone()[0] == text,
                         409, "chat_conflict")
-                media = worker_media.associate(db,self.worker_id,message_id,ids,inserted)
+                media = worker_media.associate(db,self.worker_id,message_id,ids,inserted,attachment_kinds)
             payload = {"kind":"chat","message_id":message_id,"text":text}
             if media:
                 payload["attachments"] = media

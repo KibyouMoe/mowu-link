@@ -9,6 +9,9 @@ CREATE TABLE IF NOT EXISTS media_requests (
 CREATE TABLE IF NOT EXISTS chat_media (
  message_id TEXT NOT NULL, position INTEGER NOT NULL, attachment_id TEXT NOT NULL, PRIMARY KEY(message_id,position)
 );
+CREATE TABLE IF NOT EXISTS chat_media_types (
+ message_id TEXT NOT NULL, position INTEGER NOT NULL, kind TEXT NOT NULL, PRIMARY KEY(message_id,position)
+);
 """
 
 
@@ -42,12 +45,19 @@ def route(worker, actor, method, path, body, headers):
     return 200,"application/json",result
 
 
-def associate(db, worker_id, mid, ids, new):
+def associate(db, worker_id, mid, ids, new, kinds=None):
     require(isinstance(ids,list) and all(isinstance(i,str) and i for i in ids),422,"invalid_chat_media")
+    if kinds is not None:
+        require(isinstance(kinds,list) and len(kinds)==len(ids) and
+                all(k in ("image","file") for k in kinds),422,"invalid_chat_media_types")
     if new:
         attachments.grant(db,"platform/"+worker_id,"adapter/"+worker_id,ids)
         db.executemany("INSERT INTO chat_media VALUES (?,?,?)",((mid,n,i) for n,i in enumerate(ids)))
+        if kinds:
+            db.executemany("INSERT INTO chat_media_types VALUES (?,?,?)",((mid,n,k) for n,k in enumerate(kinds)))
     existing = db.execute("""SELECT media.attachment_id,u.name,u.sha256,u.size_bytes FROM chat_media media
         JOIN uploads u USING(attachment_id) WHERE message_id=? ORDER BY position""",(mid,)).fetchall()
     require([f["attachment_id"] for f in existing] == ids,409,"chat_conflict")
-    return [dict(f) for f in existing]
+    saved = [r[0] for r in db.execute("SELECT kind FROM chat_media_types WHERE message_id=? ORDER BY position",(mid,))]
+    require(not saved or (len(saved)==len(ids) and (kinds is None or saved==kinds)),409,"chat_conflict")
+    return [{**dict(item),**({"kind":saved[n]} if saved else {})} for n,item in enumerate(existing)]

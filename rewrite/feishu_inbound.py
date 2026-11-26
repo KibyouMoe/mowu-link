@@ -153,7 +153,10 @@ class Inbound:
                         raise
             if receipt is None:
                 ids = [self.upload(mid,ref) for ref in refs]
-                receipt = self.worker.request("POST","worker/chat",{"message_id":mid,"text":text,"attachment_ids":ids})["receipt"]
+                chat = {"message_id":mid,"text":text,"attachment_ids":ids}
+                if refs:
+                    chat["attachment_kinds"] = [kind for kind,_key,_name in refs]
+                receipt = self.worker.request("POST","worker/chat",chat)["receipt"]
                 require(receipt and receipt.get("delivery_id") == "chat-"+mid and receipt.get("native_id"),
                         503,"host_receipt_unconfirmed")
         except (Fault,URLError,OSError) as err:

@@ -71,6 +71,17 @@ class DshHost:
     def lookup_expected(self, session, did, payload, digest):
         return self.delivery("lookup",session,did,payload,digest)
 
+    def media_operation(self, operation, session, did, payload, digest, files):
+        expected = [self.directory/"media"/item["sha256"] for item in payload["attachments"]]
+        require(files==expected,409,"dsh_media_cache_mismatch")
+        return self.delivery(operation,session,did,payload,digest)
+
+    def deliver_media(self, session, did, payload, digest, files):
+        return self.media_operation("deliver",session,did,payload,digest,files)
+
+    def lookup_media(self, session, did, payload, digest, files):
+        return self.media_operation("lookup",session,did,payload,digest,files)
+
 
 @contextmanager
 def tool_listener(directory, adapter, worker):

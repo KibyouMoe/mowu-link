@@ -72,6 +72,9 @@ class HostAdapter:
                 receipt = self.host.deliver_media(self.session,did,payload,digest,files)
             else:
                 receipt = self.host.deliver(self.session, did, payload, digest)
+        elif media and hasattr(self.host,"lookup_media"):
+            require(self.media_store is not None,422,"native_media_input_unavailable")
+            receipt = self.host.lookup_media(self.session,did,payload,digest,self.media_store.prepare(media))
         else:
             lookup_expected = getattr(self.host,"lookup_expected",None)
             receipt = lookup_expected(self.session,did,payload,digest) if lookup_expected else self.host.lookup(self.session,did)

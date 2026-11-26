@@ -1,4 +1,5 @@
 """Optional real DSH SDK in an empty home. Only the agent and model events are scripted."""
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -11,8 +12,10 @@ import unittest
 from .devloop import Loop
 from .dsh_port import DshHost, tool_listener
 from .feishu_inbound import Inbound
+from .native_files import NativeFiles
 from .storage import Fault, encode, guid
 from .test_mainline import Clock
+from .test_feishu_inbound import PNG
 from .wire import Client
 from .worker import Worker
 from .worker_service import WorkerService
@@ -54,7 +57,9 @@ class DshSdk(unittest.TestCase):
         self.addCleanup(runner.join)
         self.addCleanup(server.shutdown)
         url = "http://127.0.0.1:"+str(server.server_port)
-        self.enterContext(tool_listener(self.directory,self.loop.adapter,Client(url,token)))
+        worker_client = Client(url,token)
+        self.loop.adapter.media_store = NativeFiles(self.directory/"media",worker_client)
+        self.enterContext(tool_listener(self.directory,self.loop.adapter,worker_client))
         self.inbound = Inbound(self.directory/"feishu.db",Client(url,platform),None,"app","trainer","chat")
 
     def stop_driver(self):
@@ -147,6 +152,47 @@ class DshSdk(unittest.TestCase):
     def test_queued_delivery_rejects_another_session_before_writing(self):
         with self.assertRaisesRegex(Fault,"queued_session_mismatch"):
             self.loop.adapter.deliver("queued-chat-1",{"kind":"queued_chat","session":"other","text":"no"})
+        self.assertEqual(self.drive("count")["received"],0)
+
+    def test_sdk_keeps_caption_image_and_generic_file_in_native_content(self):
+        raw = b"# Independent DSH file\n"*16000
+        self.inbound.resources = lambda mid,key,kind,limit: PNG if kind=="image" else raw
+        def receive(mid,kind,content):
+            self.inbound.record("app","user","trainer",{"chat_type":"p2p","chat_id":"chat","message_id":mid,
+                                "message_type":kind,"content":encode(content)})
+            return self.inbound.deliver(mid)
+        caption = "保留这一行和原图。"
+        proof = receive("om_pic","post",{"content":[[{"tag":"text","text":caption},{"tag":"img","image_key":"img_x"}]]})
+        self.assertEqual(proof["media_sha256"],[hashlib.sha256(PNG).hexdigest()])
+        view = self.drive("inspect-media")
+        self.assertEqual(view["id"],proof["native_id"])
+        text,image = view["content"]
+        self.assertEqual(text,{"type":"text","text":caption})
+        self.assertEqual((image["type"],image["ref"]["width"],image["ref"]["height"]),("image",1,1))
+        self.assertEqual(image["ref"]["attachmentId"],"sha256:"+image["sha256"])
+        with self.loop.adapter.db.transaction() as db:
+            db.execute("UPDATE intents SET receipt=NULL,native_id=NULL")
+            payload = json.loads(db.execute("SELECT payload FROM intents").fetchone()[0])
+        (self.directory/"media"/proof["media_sha256"][0]).unlink()
+        self.assertEqual(self.loop.adapter.deliver("chat-om_pic",payload),proof)
+        self.assertEqual(self.drive("count")["received"],1)
+        second = receive("om_doc","file",{"file_name":"交接.md","file_key":"file_x"})
+        file, = self.drive("inspect-media")["content"]
+        self.assertEqual((file["ref"]["name"],file["type"],file["sha256"]),("交接.md","file",hashlib.sha256(raw).hexdigest()))
+        self.assertEqual(second["media_sha256"],[file["sha256"]])
+
+    def test_invalid_raster_and_text_only_model_do_not_receive_an_input(self):
+        bad = PNG[:32]
+        def receive(mid,raw):
+            self.inbound.resources = lambda *args:raw
+            self.inbound.record("app","user","trainer",{"chat_type":"p2p","chat_id":"chat","message_id":mid,
+                "message_type":"image","content":encode({"image_key":"img_"+mid})})
+            return self.inbound.deliver(mid)
+        with self.assertRaises(Fault):
+            receive("om_broken",bad)
+        self.drive("select-text-only")
+        with self.assertRaisesRegex(Fault,"model_does_not_support_images"):
+            receive("om_textmodel",PNG)
         self.assertEqual(self.drive("count")["received"],0)
 
     def test_formal_receipt_recovered_from_sdk_log_and_registered_reports(self):
