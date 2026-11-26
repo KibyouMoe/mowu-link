@@ -6,6 +6,11 @@
 
 DSH 独立项目工位可显式授权新派发的 `/workspace` 运行本地构建产物。实际 DSH、Linux 容器、C 编译器和隔离 Router 跑两张对照单。默认工位生成 ELF 后直接执行返回 126，W04 进入受阻。显式启用的工位运行返回 0，验收人读回逐字节相同的 ELF，W04 待验收。两单交权后各回收原容器。既有派发在启用和停用两种方向的配置变更下均拒绝继续写入，可暂存原产物并按原挂载记录完成取消清理。容器以普通用户运行，使用只读根、无网络和原资源上限。模型由本地脚本驱动。[编译与挂载实测](evidence/dsh-workspace-compiled-project.json) · [复跑入口](README.md#dsh-固定会话与飞书卡片)
 
+实际从 `256db0bf87aa46322df70e837f91c1d041e594b4` 和 `132311abb9b5c56b96b28c08f9b2d58b9ddacfc8` 打包安装两版 DSH 容器管理模块。旧版拒绝确认仍在运行的新挂载容器，路线恢复为新版导出 ELF 后按原容器移除。恢复旧版配置后新派发可编译，直接执行返回 126，清理返回 `removed`。此项用两版真实模块和同一隔离引擎直测。正式工单的宿主调用另见上述 DSH 原生回环。
+
+实现提交 `132311abb9b5c56b96b28c08f9b2d58b9ddacfc8`。macOS 全量 277 项通过，Linux arm64 实跑 183 项，按环境跳过 94 项。从此提交打包 244 文件，SHA-256 为 `170ec0b814ee85c474ceaab3ed9f77c38ca20559fa7cc1daf88ea7508d2f22eb`，安装目录专项 36 项通过，摘要回读一致。另复跑 `python3 -B -m rewrite.release_check --repository . --component worker-pair --previous 256db0bf87aa46322df70e837f91c1d041e594b4 --new 132311abb9b5c56b96b28c08f9b2d58b9ddacfc8`，两版 Worker 与适配器在夹具宿主上可按原收件回退。
+
+
 同机冷恢复演练使用真实 DSH 会话持久化、Linux 引擎、HTTPS Worker 与适配器进程和独立 Router。一张正式单写入项目文件后保留原持单，关停三个进程并复制两份停写账本。重开后同一派发只收到一条工单更新，模型导出原容器中的改动并交 W04。Router 落成果，Worker 此时回执待核。三个进程再重开，Worker 以原报告和原幂等键确认，DSH 回收原容器。原始写入工具只跑一次，最后重开后的模型请求为零。验收端只收到一次通知。宿主、引擎和网络实跑，模型为本地脚本，飞书云端未使用。[冷恢复证据](evidence/dsh-workspace-cold-recovery.json) · [复跑入口](README.md#dsh-固定会话与飞书卡片)
 
 演练提交 `ca032a7854771a6614d90ecaac468de6fc27ed6d`。macOS 全量 275 项通过，Linux arm64 实跑 183 项，按环境跳过 92 项。冷恢复场景连续复跑 3 次通过。243 文件的发行包摘要为 `7001d16bf9ced99a406d43c59dfb79312da7ac73d01da00fdbc17ea513cc6588`，安装目录专项 34 项通过，文件摘要回读一致。用 `python3 -B -m rewrite.release_check --repository . --component worker-pair --previous e16429e1ae3b2e60448ae27b225753bd810c58e0 --new ca032a7854771a6614d90ecaac468de6fc27ed6d` 补验两版安装和回退。该命令的宿主使用独立夹具，原生 DSH 参加上面的同机冷恢复。
