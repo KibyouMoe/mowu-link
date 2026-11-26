@@ -134,7 +134,7 @@ def router_rehearsal(root,old,new,cert,key,env):
             "unchanged_trial":True,"starts":["previous","new","previous"]}
 
 
-def dsh_workspace_rollback(root,old,new,env,image):
+def dsh_workspace_rollback(root,old,new,env,image,*,local_tls=False):
     docker = shutil.which("docker")
     if not docker or not isinstance(image,str) or not re.fullmatch(r"sha256:[0-9a-f]{64}",image):
         raise ValueError("DSH workspace rollback requires a local Docker CLI and a pinned --dsh-image")
@@ -143,10 +143,13 @@ def dsh_workspace_rollback(root,old,new,env,image):
     if not endpoint.startswith("unix:///"):
         raise ValueError("DSH workspace rollback requires a local Unix Docker engine")
     output = root/"dsh-workspace-rollback.json"
+    release_key = "MOWULINK_DSH_TEST_PREVIOUS_TLS_RELEASE" if local_tls else "MOWULINK_DSH_TEST_PREVIOUS_RELEASE"
+    evidence_key = "MOWULINK_DSH_TLS_OFFLINE_AUDIT_EVIDENCE" if local_tls else "MOWULINK_DSH_OFFLINE_AUDIT_EVIDENCE"
     isolated = {**env,"MOWULINK_DSH_CONTAINER_IMAGE":image,"MOWULINK_DSH_TEST_DOCKER":docker,
-                "MOWULINK_DSH_TEST_DOCKER_ENDPOINT":endpoint,"MOWULINK_DSH_TEST_PREVIOUS_RELEASE":str(old),
-                "MOWULINK_DSH_OFFLINE_AUDIT_EVIDENCE":str(output)}
-    test = "rewrite.test_dsh_native_loop.NativeLoop.test_offline_handoff_waits_for_dsh_workspace_after_w04_release"
+                "MOWULINK_DSH_TEST_DOCKER_ENDPOINT":endpoint,release_key:str(old),evidence_key:str(output)}
+    case = ("test_offline_handoff_refuses_a_live_dsh_tls_workspace_host" if local_tls
+            else "test_offline_handoff_waits_for_dsh_workspace_after_w04_release")
+    test = "rewrite.test_dsh_native_loop.NativeLoop."+case
     process = subprocess.run([sys.executable,"-B","-m","unittest","-v",test],cwd=new,env=isolated,
                              check=False,timeout=55,capture_output=True,text=True)
     if process.returncode!=0 or not output.is_file():
@@ -157,7 +160,7 @@ def dsh_workspace_rollback(root,old,new,env,image):
     return {"dsh_workspace_rollback":observed}
 
 
-def run(repository,older,newer,component="router",*,dsh_image=None):
+def run(repository,older,newer,component="router",*,dsh_image=None,dsh_local_tls=False):
     if older==newer:
         raise ValueError("two different release commits are required")
     with tempfile.TemporaryDirectory(prefix="mowulink-release-") as folder:
@@ -174,7 +177,7 @@ def run(repository,older,newer,component="router",*,dsh_image=None):
             versions.append((archive,sha,result["sha256"],directory))
         old,new = versions[0][3],versions[1][3]
         if component=="dsh-workspace-rollback":
-            observed = dsh_workspace_rollback(root,old,new,env,dsh_image)
+            observed = dsh_workspace_rollback(root,old,new,env,dsh_image,local_tls=dsh_local_tls)
         else:
             openssl = shutil.which("openssl")
             if not openssl:
@@ -198,8 +201,12 @@ def main():
     p.add_argument("--new",required=True)
     p.add_argument("--component",choices=("router","worker-pair","dsh-workspace-rollback"),default="router")
     p.add_argument("--dsh-image",help="pinned existing Linux image ID for the DSH workspace rollback rehearsal")
+    p.add_argument("--dsh-local-tls",action="store_true",help="rehearse DSH rollback with the authenticated local TLS link")
     args = p.parse_args()
-    print(encode(run(args.repository,args.previous,args.new,args.component,dsh_image=args.dsh_image)))
+    if args.dsh_local_tls and args.component!="dsh-workspace-rollback":
+        p.error("--dsh-local-tls requires --component dsh-workspace-rollback")
+    print(encode(run(args.repository,args.previous,args.new,args.component,dsh_image=args.dsh_image,
+                     dsh_local_tls=args.dsh_local_tls)))
 
 
 if __name__=="__main__":

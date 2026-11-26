@@ -2923,7 +2923,7 @@ exec {docker} "$@"
                 "run_scope":"Same isolated Linux engine, actual DSH native persistence and independent TLS adapter/Worker processes; scripted test model, no production credentials."}
             Path(output).write_text(json.dumps(result,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
 
-    def previous_dsh_after_rollback(self,package,root,runtime,session,paths,before,job):
+    def previous_dsh_after_rollback(self,package,root,runtime,session,paths,before,job,*,use_tls):
         old_fixture = package/"rewrite/integrations/dsh_host/native-loop-fixture.mjs"
         cert,key = root/"previous-tls.crt",root/"previous-tls.key"
         subprocess.run(["openssl","req","-x509","-newkey","rsa:2048","-nodes","-days","1","-subj","/CN=localhost",
@@ -2935,7 +2935,7 @@ exec {docker} "$@"
         env = {"HOME":str(root),"PATH":os.defpath,"PYTHONDONTWRITEBYTECODE":"1"}
         mode = "cleanup-container-recovery-reopen"
         with serve(package,"router",paths["router:main"],router_roles,cert,key,env) as routing, \
-             self.start_native(runtime,session,mode,fixture=old_fixture) as native, socket.socket() as reserved:
+             self.start_native(runtime,session,mode,fixture=old_fixture,use_tls=use_tls) as native, socket.socket() as reserved:
             restored = self.read_native(native,"read")
             self.assertEqual((restored["inputs"],restored["calls"],restored["modelRequests"]),
                              (before["inputs"],before["calls"],[]))
@@ -2945,6 +2945,8 @@ exec {docker} "$@"
             to_worker = config(root,"previous-worker",{"url":f"https://127.0.0.1:{port}","token":callback,"ca_file":str(cert)})
             host_options = ("--worker-id","oguri","--session",session,"--runtime-dir",runtime,
                             "--worker-connection",to_worker)
+            if use_tls:
+                host_options += ("--local-tls",)
             with serve(package,"dsh-adapter",paths["agent:oguri"],adapter_roles,cert,key,env,host_options) as host:
                 to_adapter = config(root,"previous-adapter",{"url":host,"token":adapter,"ca_file":str(cert)})
                 worker_options = ("--worker-id","oguri","--port",str(port),"--adapter-session",session,
@@ -3166,8 +3168,10 @@ exec {docker} "$@"
             self.assertEqual(db.execute("SELECT session FROM native_binding WHERE slot=1").fetchone()[0],"other-session")
         self.assertEqual(client.request("POST","worker/workspace-state",scope),{**scope,"state":"released"})
         previous = None
-        if not use_tls and (previous_release := os.environ.get("MOWULINK_DSH_TEST_PREVIOUS_RELEASE")):
-            previous = self.previous_dsh_after_rollback(Path(previous_release),loop.root,runtime,session,rolled_back,replay,job)
+        release_name = "MOWULINK_DSH_TEST_PREVIOUS_TLS_RELEASE" if use_tls else "MOWULINK_DSH_TEST_PREVIOUS_RELEASE"
+        if previous_release := os.environ.get(release_name):
+            previous = self.previous_dsh_after_rollback(Path(previous_release),loop.root,runtime,session,
+                                                         rolled_back,replay,job,use_tls=use_tls)
         evidence_name = "MOWULINK_DSH_TLS_OFFLINE_AUDIT_EVIDENCE" if use_tls else "MOWULINK_DSH_OFFLINE_AUDIT_EVIDENCE"
         if output := os.environ.get(evidence_name):
             observations = {"session":session,"task_id":task,"assignment_id":aid,"container_id":lease["container_id"],
