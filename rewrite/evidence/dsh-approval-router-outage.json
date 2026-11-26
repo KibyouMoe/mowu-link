@@ -1,0 +1,209 @@
+{
+  "baseline": {
+    "closed_native_approval": "ccf9fe3b-c6b4-48ae-8750-392013f7558c",
+    "revision": "d73e9585bbb224f397dbca2b0a53e94aa64abe2e",
+    "unexpected_notification": "44380a98-ef8e-4249-9bf1-62ab2e212711"
+  },
+  "native_binary_sha256": "a44e0ef9293c1bbcb1adc5cb4d71804784cde18533e6e96063050cd2e9e17352",
+  "runs": [
+    {
+      "boundary": "Installed DSH AgentLoop and native event log, local model and operator fixture; approval receipt failure injected.",
+      "new_notices_after_recovery": 0,
+      "recovered": {
+        "committed": {
+          "forwarded_decision": null,
+          "original_router_notices": 1,
+          "proof": {
+            "approval_id": "b2bee32a-7030-4dc8-ae3f-b75b748cfbfb",
+            "asked_seq": 26,
+            "decided_seq": 27,
+            "outcome": "cancelled",
+            "turn_id": "19/2"
+          },
+          "router_decision": "accept",
+          "same_closure_after_lost_reply": true
+        },
+        "missing": {
+          "forwarded_decision": null,
+          "original_router_notices": 0,
+          "proof": {
+            "approval_id": "8d928da1-1a04-4913-b7e3-6b2d0a03d4f5",
+            "asked_seq": 12,
+            "decided_seq": 13,
+            "outcome": "cancelled",
+            "turn_id": "1/1"
+          },
+          "router_decision": null,
+          "same_closure_after_lost_reply": true
+        }
+      },
+      "session": "isolated-dsh-unacknowledged-approval"
+    },
+    {
+      "boundary": "Installed DSH AgentLoop and native event log, local model and operator fixture; approval receipt failure injected.",
+      "new_notices_after_recovery": 0,
+      "recovered": {
+        "committed": {
+          "forwarded_decision": null,
+          "original_router_notices": 1,
+          "proof": {
+            "approval_id": "48ae287a-abfc-4df1-9653-aa784833d234",
+            "asked_seq": 26,
+            "decided_seq": 27,
+            "outcome": "cancelled",
+            "turn_id": "19/2"
+          },
+          "router_decision": "accept",
+          "same_closure_after_lost_reply": true
+        },
+        "missing": {
+          "forwarded_decision": null,
+          "original_router_notices": 0,
+          "proof": {
+            "approval_id": "7ccd1800-77ba-4598-9865-0c777abf03c6",
+            "asked_seq": 12,
+            "decided_seq": 13,
+            "outcome": "cancelled",
+            "turn_id": "1/1"
+          },
+          "router_decision": null,
+          "same_closure_after_lost_reply": true
+        }
+      },
+      "session": "isolated-dsh-unacknowledged-approval"
+    },
+    {
+      "boundary": "Installed DSH AgentLoop and native event log, local model and operator fixture; approval receipt failure injected.",
+      "new_notices_after_recovery": 0,
+      "recovered": {
+        "committed": {
+          "forwarded_decision": null,
+          "original_router_notices": 1,
+          "proof": {
+            "approval_id": "b3dd9b87-4b88-4696-a798-306b57709eb9",
+            "asked_seq": 26,
+            "decided_seq": 27,
+            "outcome": "cancelled",
+            "turn_id": "19/2"
+          },
+          "router_decision": "accept",
+          "same_closure_after_lost_reply": true
+        },
+        "missing": {
+          "forwarded_decision": null,
+          "original_router_notices": 0,
+          "proof": {
+            "approval_id": "1f831fd0-5da4-4caf-bb8c-e9e64f2f913e",
+            "asked_seq": 12,
+            "decided_seq": 13,
+            "outcome": "cancelled",
+            "turn_id": "1/1"
+          },
+          "router_decision": null,
+          "same_closure_after_lost_reply": true
+        }
+      },
+      "session": "isolated-dsh-unacknowledged-approval"
+    },
+    {
+      "boundary": "Installed DSH AgentLoop and native event log, local model and operator fixture; approval receipt failure injected.",
+      "new_notices_after_recovery": 0,
+      "recovered": {
+        "committed": {
+          "forwarded_decision": null,
+          "original_router_notices": 1,
+          "proof": {
+            "approval_id": "ec0cc771-f0c8-44ba-b6af-2205fa58489d",
+            "asked_seq": 26,
+            "decided_seq": 27,
+            "outcome": "cancelled",
+            "turn_id": "19/2"
+          },
+          "router_decision": "accept",
+          "same_closure_after_lost_reply": true
+        },
+        "missing": {
+          "forwarded_decision": null,
+          "original_router_notices": 0,
+          "proof": {
+            "approval_id": "40eb27e8-8a2c-475e-bc90-f16ad15c26b8",
+            "asked_seq": 12,
+            "decided_seq": 13,
+            "outcome": "cancelled",
+            "turn_id": "1/1"
+          },
+          "router_decision": null,
+          "same_closure_after_lost_reply": true
+        }
+      },
+      "session": "isolated-dsh-unacknowledged-approval"
+    },
+    {
+      "boundary": "Installed DSH AgentLoop and native event log, local model and operator fixture; approval receipt failure injected.",
+      "new_notices_after_recovery": 0,
+      "recovered": {
+        "committed": {
+          "forwarded_decision": null,
+          "original_router_notices": 1,
+          "proof": {
+            "approval_id": "101cb71c-9c5e-4c5a-800f-b91a555386f2",
+            "asked_seq": 26,
+            "decided_seq": 27,
+            "outcome": "cancelled",
+            "turn_id": "19/2"
+          },
+          "router_decision": "accept",
+          "same_closure_after_lost_reply": true
+        },
+        "missing": {
+          "forwarded_decision": null,
+          "original_router_notices": 0,
+          "proof": {
+            "approval_id": "fd43b682-b83a-4c5b-b4a1-458936a95798",
+            "asked_seq": 12,
+            "decided_seq": 13,
+            "outcome": "cancelled",
+            "turn_id": "1/1"
+          },
+          "router_decision": null,
+          "same_closure_after_lost_reply": true
+        }
+      },
+      "session": "isolated-dsh-unacknowledged-approval"
+    },
+    {
+      "boundary": "Installed DSH AgentLoop and native event log, local model and operator fixture; approval receipt failure injected.",
+      "new_notices_after_recovery": 0,
+      "recovered": {
+        "committed": {
+          "forwarded_decision": null,
+          "original_router_notices": 1,
+          "proof": {
+            "approval_id": "04619cf3-1bc9-45e4-97d2-b6fd25eadd18",
+            "asked_seq": 26,
+            "decided_seq": 27,
+            "outcome": "cancelled",
+            "turn_id": "19/2"
+          },
+          "router_decision": "accept",
+          "same_closure_after_lost_reply": true
+        },
+        "missing": {
+          "forwarded_decision": null,
+          "original_router_notices": 0,
+          "proof": {
+            "approval_id": "61d3831a-f6c3-4583-b190-d54c32de7277",
+            "asked_seq": 12,
+            "decided_seq": 13,
+            "outcome": "cancelled",
+            "turn_id": "1/1"
+          },
+          "router_decision": null,
+          "same_closure_after_lost_reply": true
+        }
+      },
+      "session": "isolated-dsh-unacknowledged-approval"
+    }
+  ],
+  "verified_runs": 6
+}

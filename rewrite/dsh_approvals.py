@@ -4,7 +4,7 @@ import json
 import time
 from urllib.error import URLError
 
-from .approvals import validate_request
+from .approvals import DSH_NON_GRANT_OUTCOMES, validate_dsh_proof, validate_request
 from .storage import Fault, encode, require
 
 
@@ -23,8 +23,10 @@ class DshApprovals:
         raw = encode(request)
         with self.adapter.db.transaction() as db:
             db.execute("INSERT OR IGNORE INTO dsh_approvals(approval_id,request) VALUES (?,?)",(aid,raw))
-            row = db.execute("SELECT request FROM dsh_approvals WHERE approval_id=?",(aid,)).fetchone()
+            row = db.execute("SELECT request,closure FROM dsh_approvals WHERE approval_id=?",(aid,)).fetchone()
             require(row["request"]==raw,409,"native_approval_request_mismatch")
+            if row["closure"]:
+                return json.loads(row["closure"])["router"]
         try:
             return self.publish(aid,request)
         except Fault as error:
@@ -86,25 +88,23 @@ class DshApprovals:
         proof = self.adapter.host.request("approval-proof",session,{"approval_id":aid,"turn_id":turn}).get("proof")
         if proof is None:
             return
-        require(isinstance(proof,dict) and proof.get("approval_id")==aid and proof.get("turn_id")==turn
-                and type(proof.get("asked_seq")) is int and type(proof.get("decided_seq")) is int
-                and proof["asked_seq"]<proof["decided_seq"]
-                and proof.get("outcome") in ("allowed-once","rejected","cancelled","unavailable"),
-                409,"native_approval_proof_unconfirmed")
+        validate_dsh_proof(proof,aid,turn,(*DSH_NON_GRANT_OUTCOMES,"allowed-once"))
         with self.adapter.db.transaction() as db:
             row = db.execute("SELECT * FROM dsh_approvals WHERE approval_id=?",(aid,)).fetchone()
-        if not row:
+        if not row or row["closure"] is not None:
             return
-        if not row["published"]:
-            reply = self.publish(aid,request)
-            digest = reply["request_digest"]
-        else:
-            digest = hashlib.sha256(row["request"].encode()).hexdigest()
+        digest = hashlib.sha256(row["request"].encode()).hexdigest()
         response = json.loads(row["attempted_response"]) if row["attempted_response"] else None
-        receipt = self.worker.request("PUT","worker/approvals/"+aid+"/closed",
-                                     {"session":session,"request_digest":digest,"attempted_response":response})
+        body = {"session":session,"request_digest":digest,"attempted_response":response}
+        if not row["published"]:
+            require(response is None and proof["outcome"] in DSH_NON_GRANT_OUTCOMES,
+                    409,"native_approval_proof_unconfirmed")
+            # An already settled native request has nothing for an operator to decide.
+            body.update(request=request,native_proof=proof)
+        receipt = self.worker.request("PUT","worker/approvals/"+aid+"/closed",body)
         require(isinstance(receipt,dict) and receipt.get("approval_id")==aid and receipt.get("state")=="native_closed"
-                and receipt.get("attempted_response")==response,502,"wrong_approval_closure")
+                and receipt.get("attempted_response")==response
+                and ("native_proof" not in body or receipt.get("native_proof")==proof),502,"wrong_approval_closure")
         with self.adapter.db.transaction() as db:
             db.execute("UPDATE dsh_approvals SET closure=? WHERE approval_id=?",
                        (encode({"native":proof,"router":receipt}),aid))

@@ -52,6 +52,8 @@ class Orders:
         self.db = Database(path, SCHEMA + delivery.SCHEMA + pool.SCHEMA + cleanup.SCHEMA + questions.SCHEMA
                            + attachments.SCHEMA + messages.SCHEMA + peers.SCHEMA + links.ROUTER_SCHEMA
                            + legacy_history.SCHEMA + legacy_peers.SCHEMA + approvals.SCHEMA + admission.SCHEMA)
+        with self.db.transaction() as db:
+            approvals.upgrade(db)
         self.clock = clock
         self.poll_seconds = poll_seconds
         self.lease_seconds = lease_seconds

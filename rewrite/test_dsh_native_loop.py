@@ -238,6 +238,113 @@ class NativeLoop(unittest.TestCase):
                          "successful_bash_calls":1,
                          "boundary":"Installed DSH AgentLoop, ApprovalService and Bash provider; test model and operator identity"}
 
+    def test_dsh_unacknowledged_approval_recovers_without_a_late_notification(self):
+        session = "isolated-dsh-unacknowledged-approval"
+        root = Path(self.enterContext(tempfile.TemporaryDirectory(dir="/tmp",prefix="mldsh-approval-outage-")))
+        worker_token,operator_token,adapter_token = (guid() for _ in range(3))
+        router = self.enterContext(codex_driver.running(serve_loopback(Orders(root/"router.db"),
+                                         {worker_token:"worker/dev",operator_token:"approver/dev"})))
+        host = DshHost(root)
+        adapter_path = root/"adapter.db"
+        worker = Worker(root/"worker.db","dev",Client(router,worker_token),HostAdapter(adapter_path,host,session))
+        endpoint = self.open_worker(WorkerService(worker),{adapter_token:"adapter/dev"})
+        worker.connect()
+        operator = Client(router,operator_token)
+        callback = Client(endpoint,adapter_token)
+        send = callback.request
+        cut = Event()
+        blocked = Event()
+        mode = "missing"
+        offers,closure_replies = {},{}
+
+        def fault(method,path,body=None,*args,**kwargs):
+            if cut.is_set() and path.startswith("worker/approvals/"):
+                if method=="POST":
+                    aid = path.split("/")[-1]
+                    if mode=="committed":
+                        offers[aid] = send(method,path,body,*args,**kwargs)
+                    blocked.set()
+                raise ConnectionError("isolated approval transport interrupted")
+            result = send(method,path,body,*args,**kwargs)
+            if method=="PUT" and path.endswith("/closed"):
+                receipts = closure_replies.setdefault(result["approval_id"],[])
+                receipts.append(result)
+                if len(receipts)==1:
+                    raise ConnectionError("isolated close response lost after commit")
+            return result
+
+        callback.request = fault
+
+        def until(check):
+            deadline = time.monotonic()+8
+            while time.monotonic()<deadline:
+                value = check()
+                if value:
+                    return value
+                time.sleep(.05)
+            self.fail("DSH closure was not recovered")
+
+        def lookup(aid):
+            return next((r for r in operator.request("GET","approvals/dev")["items"] if r["approval_id"]==aid),None)
+
+        evidence = {}
+        notices = []
+        for mode in ("missing","committed"):
+            blocked.clear()
+            cut.set()
+            adapter = HostAdapter(adapter_path,host,session)
+            fixture = "command-approvals" if mode=="missing" else "command-approvals-reopen"
+            with tool_listener(root,adapter,callback), self.start_native(root,session,fixture) as native:
+                worker.chat(guid(),"DSH approval fixture "+mode)
+                self.assertTrue(blocked.wait(5))
+                state = self.read_native(native,"approval-state")
+                asked, = (event["data"] for event in state if event["type"]=="approval/asked"
+                          and event["data"]["callId"]=="fixture-bash-"+mode)
+                aid = asked["id"]
+                self.assertFalse(any(event["type"]=="approval/decided" and event["data"]["id"]==aid for event in state))
+                with adapter.db.transaction() as db:
+                    original = db.execute("SELECT * FROM dsh_approvals WHERE approval_id=?",(aid,)).fetchone()
+                self.assertEqual((original["published"],original["attempted_response"],original["closure"]),(0,None,None))
+                if mode=="missing":
+                    self.assertIsNone(lookup(aid))
+                    self.assertEqual(operator.frames(0),[])
+                else:
+                    row = offers[aid]
+                    decision = {"request_digest":row["request_digest"],"decision":"accept"}
+                    self.assertEqual(operator.request("PUT","approvals/dev/"+aid+"/decision",decision)["state"],"decided")
+                    notices = operator.frames(0)
+                    self.assertEqual([notice["payload"]["approval_id"] for notice in notices],[aid])
+                before = self.read_native(native,"cancel-approval")
+                source,decision_event = [event for event in before["approvals"] if event["data"]["id"]==aid]
+                outcome = decision_event["data"]["outcome"]
+                self.assertEqual(source["type"],"approval/asked")
+                self.assertEqual(decision_event["type"],"approval/decided")
+                self.assertNotEqual(outcome,"allowed-once")
+                self.assertTrue(all(result.get("isError") is not False for result in before["results"]))
+                self.assertEqual(before["turns"][-1]["reason"]["kind"],"aborted")
+            cut.clear()
+            reopened = HostAdapter(adapter_path,host,session)
+            with tool_listener(root,reopened,callback), self.start_native(root,session,"command-approvals-reopen") as native:
+                after = self.read_native(native,"read")
+                until(lambda:len(closure_replies.get(aid,[]))>=2)
+                receipt = lookup(aid)
+                self.assertEqual(closure_replies[aid],[receipt,receipt])
+                self.assertEqual(operator.frames(0),notices,"a closed DSH request emitted a fresh approval notice")
+                self.assertEqual((after["inputs"],after["approvals"],after["results"]),
+                                 (before["inputs"],before["approvals"],before["results"]))
+                proof = {"approval_id":aid,"turn_id":receipt["request"]["turn_id"],"asked_seq":source["seq"],
+                         "decided_seq":decision_event["seq"],"outcome":outcome}
+                self.assertEqual(receipt["native_proof"],proof)
+                self.assertEqual((receipt["state"],receipt["decision"],receipt["attempted_response"]),
+                                 ("native_closed","accept" if mode=="committed" else None,None))
+                rolled_in = send("POST","worker/approvals/"+aid,receipt["request"])
+                self.assertEqual(rolled_in,receipt)
+                self.assertEqual(operator.frames(0),notices)
+                evidence[mode] = {"proof":proof,"router_decision":receipt["decision"],"forwarded_decision":None,
+                                  "same_closure_after_lost_reply":True,"original_router_notices":len(notices)}
+        self.evidence = {"session":session,"recovered":evidence,"new_notices_after_recovery":0,
+                         "boundary":"Installed DSH AgentLoop and native event log, local model and operator fixture; approval receipt failure injected."}
+
     def test_closed_native_binding_never_resumes_or_sends_to_a_new_agent(self):
         session = "dsh-binding-close"
         with tempfile.TemporaryDirectory(dir="/tmp",prefix="mldsh-binding-") as directory:

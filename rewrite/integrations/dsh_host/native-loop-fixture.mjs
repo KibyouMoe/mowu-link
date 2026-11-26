@@ -597,6 +597,7 @@ async function formalScenario(agent) {
       foregroundAnswer.resolve({answers:[{id:'primary',selected:['B']}]});
     }
     else if (line==='cancel-foreground' && foregroundRelay) agent.cancel({kind:'user'},{keepInbox:true});
+    else if (line==='cancel-approval' && usesApprovals) agent.cancel({kind:'user'},{keepInbox:true});
     else if (line==='stop-unrelated-turn' && standalone) agent.cancel({kind:'user'},{keepInbox:true});
     else if (line.startsWith('direct-trainer ') && standalone) {
       agent.followup({id:'standalone-direct-origin',role:'user',source:{kind:'user'},

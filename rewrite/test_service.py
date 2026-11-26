@@ -328,6 +328,42 @@ class Service(unittest.TestCase):
         with orders.db.transaction() as db:
             self.assertEqual(delivery_read(db,"approver/dev",0),[])
 
+    def test_dsh_no_notice_closure_requires_original_non_grant_proof(self):
+        orders = Orders(self.root/"dsh-deadline.db",clock=lambda:1000)
+        binding = {"session_id":guid()}
+        with orders.db.transaction() as db:
+            orders.session(db,"dev",binding)
+        aid = guid()
+        entry = ["approvals","dev",aid]
+        closed = [*entry,"closed"]
+        request = {"session":"isolated","turn_id":"7/2","item_id":aid,"cwd":"/isolated","command":"pwd",
+                   "environment_id":None,"decisions":["accept","cancel"]}
+        proof = {"approval_id":aid,"turn_id":"7/2","asked_seq":9,"decided_seq":12,"outcome":"cancelled"}
+        digest = hashlib.sha256(encode(request).encode()).hexdigest()
+        body = dict(binding,request_digest=digest,attempted_response=None,request=request,native_proof=proof)
+        rejected = [
+            (dict(proof,approval_id=guid()),"native_approval_proof_unconfirmed"),
+            (dict(proof,turn_id="7/3"),"native_approval_proof_unconfirmed"),
+            (dict(proof,decided_seq=9),"native_approval_proof_unconfirmed"),
+            (dict(proof,outcome="allowed-once"),"native_approval_proof_unconfirmed"),
+        ]
+        for bad_proof,error in rejected:
+            with self.assertRaisesRegex(Fault,error):
+                approval_route(orders,"worker/dev","PUT",closed,dict(body,native_proof=bad_proof))
+        self.assertEqual(approval_route(orders,"approver/dev","GET",entry[:2],{}),{"items":[]})
+        receipt = approval_route(orders,"worker/dev","PUT",closed,body)
+        self.assertEqual(receipt["native_proof"],proof)
+        self.assertIsNone(receipt["attempted_response"])
+        self.assertIsNone(receipt["decision"])
+        self.assertEqual(receipt["state"],"native_closed")
+        with self.assertRaisesRegex(Fault,"approval_closure_conflict"):
+            approval_route(orders,"worker/dev","PUT",closed,dict(body,native_proof=dict(proof,decided_seq=13)))
+        restarted = Orders(self.root/"dsh-deadline.db",clock=lambda:1001)
+        self.assertEqual(approval_route(restarted,"worker/dev","PUT",closed,body),receipt)
+        self.assertEqual(approval_route(restarted,"worker/dev","POST",entry,dict(binding,request=request)),receipt)
+        with restarted.db.transaction() as db:
+            self.assertEqual(delivery_read(db,"approver/dev",0),[])
+
     @unittest.skipUnless(shutil.which("openssl"), "TLS fixture certificate generator unavailable")
     def test_three_process_worker_chat_and_assignment(self):
         from .devloop import FixtureHost

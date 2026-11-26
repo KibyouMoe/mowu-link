@@ -227,7 +227,7 @@ class WorkerService:
                 result = w.router.request(method,target,{"session_id":w.session,"request":body})
             elif method=="PUT" and len(parts)==2 and parts[1]=="closed":
                 fields = {"session","request_digest","attempted_response"}
-                require(fields<=set(body)<=fields|{"request"},422,"invalid_approval_closure")
+                require(fields<=set(body)<=fields|{"request","native_proof"},422,"invalid_approval_closure")
                 if "request" in body:
                     require(isinstance(body["request"],dict) and body["request"].get("session")==session,
                             403,"wrong_native_session")

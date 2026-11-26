@@ -272,6 +272,8 @@ DSH 在独立宿主插件的参数中显式配置 `relay_command_approvals: true
 
 DSH 适配器先保留原请求和单次决定的发送意图。只有在原会话的持久历史读到同号 `approval/asked` 与 `approval/decided`，才确认请求关闭。重开时使用原适配器库、原 DSH 会话和原工位，待核关闭可按该记录补回。测试执行的允许命令只有隔离工作目录内的 `pwd`。
 
+DSH 未收到 Router 的登记回执而宿主已经取消、拒绝或确认不可用时，恢复直接按原号补闭合。审批 CLI 可在 `native_proof` 看到同一回合的两个原生序号和实际结局。Router 从未收件时补闭合不会发审批通知。Router 若先登记了操作人决定，则保留该决定和原生结局。原生证明缺失、对不上，或未确认登记却出现允许时，保留待核。分步升级先更新 Router 和 Worker，再更新 DSH 适配器。复跑 `python3 -B -m unittest -v rewrite.test_service.Service.test_dsh_no_notice_closure_requires_original_non_grant_proof rewrite.test_dsh_native_loop.NativeLoop.test_dsh_unacknowledged_approval_recovers_without_a_late_notification`。[断联恢复](evidence/dsh-approval-router-outage.json)
+
 ### macOS 独立维护入口
 
 `python3 -m rewrite.service host-ops --manifest <登记表> --db <独立维护库> --identities <维护身份表> --cert <证书> --key <证书私钥>` 启动独立 HTTPS 服务。默认绑定本机。将登记表、身份文件和维护库放在各自适用的私有目录中。登记表只列已授权托管的当前用户 LaunchAgent，格式为 `{"router":{"label":"<准确标签>","plist":"<绝对路径>"}}`，分别核对已加载的 plist 路径、程序及参数。同一个标签只可登记一次。此服务独立于 Router，无默认目标、无定时巡检。
