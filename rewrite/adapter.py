@@ -58,3 +58,11 @@ class HostAdapter:
                              (self.session, native_id)).fetchone()
         require(row, 409, "unconfirmed_host_input")
         return json.loads(row[0])
+
+    def input_for_turn(self, session, turn):
+        require(session == self.session, 403, "wrong_native_session")
+        with self.db.transaction() as db:
+            rows = db.execute("""SELECT native_id FROM intents WHERE session=?
+                AND json_extract(receipt,'$.turn_id')=? LIMIT 2""", (session, turn)).fetchall()
+        require(len(rows) == 1, 409, "native_turn_unconfirmed")
+        return rows[0]["native_id"]

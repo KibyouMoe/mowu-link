@@ -1,0 +1,27 @@
+{
+  "result": "worker_report not visible in scope",
+  "desktop_thread": "01a2156d-7a7f-79d1-a35b-70ba3193a345",
+  "turn_id": "01a2156d-92d3-7bf1-9cfe-469571eb3173",
+  "items": [
+    {
+      "id": "fco_01a2156d-92d3-7bf1-9cfe-46ad7f4cf03c",
+      "type": "functionCallOutput",
+      "name": "send_message_to_thread",
+      "namespace": "codex_app"
+    },
+    {
+      "id": "msg_09a4665aacfee368016b07889bdf2487d0bed9c9a66a023cce",
+      "type": "agentMessage",
+      "text": "[]"
+    }
+  ],
+  "probe": "ALL_TOOLS.filter(x => x.name.endsWith('__worker_report')).map(x => x.name)",
+  "project_config_present_before_fork": true,
+  "private_endpoint_methods": [],
+  "cli_get": {
+    "exit": 1,
+    "stderr": "Error: No MCP server named 'mowulink_w04_test' found."
+  },
+  "cleaned_project_config": true,
+  "limits": "read_thread exposed the probe input and final reply. No native worker_report tool-call item or Router receipt was observed."
+}

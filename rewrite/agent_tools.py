@@ -18,12 +18,24 @@ REPORT_TOOL = {
 
 
 def serve(worker, native_id, reader, writer):
+    def report(_params, args):
+        return worker.report(native_id, args["task_id"], args["assignment_id"], args["summary"])
+
+    serve_report_tool(report, reader, writer)
+
+
+def serve_report_tool(report, reader, writer, observe=None):
+    """The host supplies invocation context separately from the model's arguments."""
     initialized = False
     for line in reader:
         rid = None
         try:
             request = json.loads(line)
+            if not isinstance(request, dict):
+                raise ValueError("expected a JSON-RPC object")
             rid, method = request.get("id"), request["method"]
+            if observe is not None:
+                observe(method)
             if rid is None:
                 continue
             if method == "initialize":
@@ -39,10 +51,11 @@ def serve(worker, native_id, reader, writer):
                 args = params["arguments"]
                 schema = REPORT_TOOL["inputSchema"]
                 if (not isinstance(args, dict) or not set(schema["required"]) <= set(args) <= set(schema["properties"])
-                        or args.get("outcome", "completed") != "completed"):
+                        or args.get("outcome", "completed") != "completed"
+                        or any(not isinstance(args[k], str) or not args[k].strip() for k in schema["required"])):
                     raise ValueError("invalid tool arguments")
                 try:
-                    reply = worker.report(native_id, args["task_id"], args["assignment_id"], args["summary"])
+                    reply = report(params, args)
                     result = {"content": [{"type": "text", "text": encode(reply)}], "isError": False}
                 except Fault as error:
                     result = {"content": [{"type": "text", "text": error.code}], "isError": True}
