@@ -87,6 +87,16 @@ class LocalModel extends LlmAdapter {
     }
     if (goal?.round===1 && mode!=='formal-goal') await waitForStop(signal);
     if (goal?.round===2) secondRound.resolve();
+    if (mode==='material' && command==='task.shelved' && !this.submitted.has('material')) {
+      this.submitted.set('material',true);
+      assert.ok(tools?.some(tool=>tool.name==='worker_submit_material'));
+      const args = {task_id:payload.task_id,assignment_id:payload.assignment_id,text:'Keep this candidate without closing the task'};
+      yield {type:'block-start',index:0,blockType:'tool-call'};
+      yield {type:'block-end',index:0,block:{type:'tool-call',id:'native-candidate',name:'worker_submit_material',
+        arguments:JSON.stringify(args)}};
+      yield {type:'finish',reason:{kind:'tool-calls'}};
+      return;
+    }
     if (mode==='formal-goal') {
       let action;
       if (command==='task') action = ['create_goal',{objective:'Complete the isolated formal objective',max_goal_rounds:1}];
@@ -159,7 +169,7 @@ class LocalModel extends LlmAdapter {
           yield {type:'finish',reason:{kind:'tool-calls'}};
           return;
         }
-      } else if (!['work-question','formal-goal','admission-race'].includes(mode)) {
+      } else if (!['work-question','formal-goal','admission-race','material'].includes(mode)) {
         await waitForStop(signal);
       }
     }
@@ -362,7 +372,7 @@ async function formalScenario(agent) {
 try {
   const agent = await setup();
   if (['formal','compact','questions','catalog','private-stop','work-question','admission-race',
-       'binding-close'].includes(mode) || usesGoals || usesMedia) {
+       'binding-close','material'].includes(mode) || usesGoals || usesMedia) {
     await formalScenario(agent);
   }
   else await stopScenario(agent);

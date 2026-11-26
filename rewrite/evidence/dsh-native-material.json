@@ -1,0 +1,32 @@
+{
+  "session": "dsh-native-material",
+  "task_id": "86994fbd-71d7-4937-9935-e090b7c41f3e",
+  "old_assignment_id": "f3604966-4b3f-4672-ad9e-f5c6477a48df",
+  "shelved_receipt": {
+    "delivery_id": "889168aa-9c52-4f63-b6e5-b8321a2590e8",
+    "digest": "47012a70c140afdaae3d933c629980bd806afbc8693bb6f16941e709d2ffc7a5",
+    "native_id": "mowulink-a166f609bbf132b6ba5d2870563ad502705eb081561255ddc936e6c5900ff444",
+    "session": "dsh-native-material",
+    "turn_id": "44/6"
+  },
+  "native_tool": "worker_submit_material",
+  "native_call_id": "native-candidate",
+  "first_receipt": {
+    "material_id": "bef01034-b8db-484e-80ed-5673469f63b2",
+    "received": true
+  },
+  "first_w04": 409,
+  "before_new_assignment": {
+    "kind": "router"
+  },
+  "new_assignment_id": "884744ff-0b78-4ac8-a453-62589c5a99e9",
+  "new_holder": {
+    "kind": "worker",
+    "worker_id": "tama"
+  },
+  "pending_cleanup": "f3604966-4b3f-4672-ad9e-f5c6477a48df",
+  "final_material_count": 1,
+  "final_report": null,
+  "boundary": "Actual DSH native tool and Router, scripted local model and test clock",
+  "consecutive_runs": 12
+}

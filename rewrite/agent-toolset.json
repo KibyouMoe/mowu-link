@@ -104,5 +104,20 @@
       },
       "required": ["message_id"]
     }
+  },
+  {
+    "name": "worker_submit_material",
+    "description": "Submit separate candidate material for this earlier assignment while the task is still in the blocked pool. Receipt only records the material. It does not complete the task or change its holder.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "task_id": {"type": "string", "minLength": 1},
+        "assignment_id": {"type": "string", "minLength": 1},
+        "text": {"type": "string"},
+        "artifact_ids": {"type": "array", "items": {"type": "string", "minLength": 1}}
+      },
+      "required": ["task_id", "assignment_id"]
+    }
   }
 ]

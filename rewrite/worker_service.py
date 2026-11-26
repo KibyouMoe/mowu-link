@@ -139,6 +139,12 @@ class WorkerService:
             if body.get("tool") == "worker_ask":
                 require(set(args) == {"text","options"},422,"invalid_arguments")
                 result = w.ask(native, string(body,"call_id"), string(args,"text"), args["options"])
+            elif body.get("tool") == "worker_submit_material":
+                require({"task_id","assignment_id"}<=set(args)<={"task_id","assignment_id","text","artifact_ids"},
+                        422,"invalid_arguments")
+                call = string(body,"call_id")
+                key = "candidate-"+str(uuid5(NAMESPACE_URL,encode([w.worker_id,session,turn,call])))
+                result = w.submit_material(session,native,key,args)
             elif body.get("tool") in ("worker_send_peer","worker_peer_status"):
                 self.require_peer_origin(session,native)
                 if body["tool"] == "worker_send_peer":

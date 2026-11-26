@@ -182,14 +182,14 @@ class NativeLoop(unittest.TestCase):
                          "router_w04":request,"notification_delivery_ids":notified,"worker_after":loop.worker.hold(),
                          "boundary":"Native DSH AgentLoop, tool execution and real isolated Router/Worker; scripted local model"}
 
-    def goal_worker(self,session):
+    def goal_worker(self,session,extra_workers=()):
         directory = self.enterContext(tempfile.TemporaryDirectory(dir="/tmp",prefix="mldsh-goals-"))
         def host(_path,_name):
             port = DshHost(Path(directory))
             port.session = session
             return port
         clock = Clock()
-        loop = self.enterContext(Loop.isolated(clock,host_factory=host))
+        loop = self.enterContext(Loop.isolated(clock,host_factory=host,extra_workers=extra_workers))
         service = WorkerService(loop.worker,clock)
         key = guid()
         platform = Client(self.open_worker(service,{key:"platform/oguri"}),key)
@@ -851,6 +851,78 @@ class NativeLoop(unittest.TestCase):
                 "image":image["images"][0],"native_inputs":len(observed["inputs"]),"reply_inputs":len(sender_host.entries()),
                 "clock":"controlled test clock",
                 "boundary":"Actual DSH native tool executor and independent Router; scripted local model and sending host fixture"}
+
+    def test_shelved_dsh_assignment_submits_candidate_without_changing_ownership(self):
+        directory,loop,service,_ = self.goal_worker("dsh-native-material",extra_workers=["tama"])
+        session,clock = loop.adapter.bound_session(),service.clock
+        token = guid()
+        client = Client(self.open_worker(service,{token:"adapter/oguri"}),token)
+        self.enterContext(tool_listener(Path(directory),loop.adapter,client))
+        next_host = FixtureHost(loop.root/"new-holder-native.db","new-holder-session")
+        next_worker = Worker(loop.root/"new-holder.db","tama",loop.extra_clients["tama"],
+                             HostAdapter(loop.root/"new-holder-adapter.db",next_host,next_host.session))
+        next_worker.connect()
+        next_worker.poll()
+        with self.start_native(directory,session,"material") as native:
+            tid = loop.hermes.create(guid(),"Candidate","Wait for independent candidate","oguri")["task_id"]
+            loop.worker.connect()
+            loop.worker.poll()
+            clock.advance(10)
+            loop.worker.poll()
+            loop.worker.poll()
+            initial = self.read_native(native,"read")
+            aid = loop.worker.hold()["held_assignment_id"]
+            self.assertEqual(len(initial["inputs"]),1)
+            for seconds in (1,10,1,1,1,1):
+                clock.advance(seconds)
+                loop.worker.poll()
+                loop.worker.poll()
+                result = self.read_native(native,"read")
+            (call,) = result["calls"]
+            self.assertEqual(call["name"],"worker_submit_material")
+            args = json.loads(call["arguments"])
+            self.assertEqual((args["task_id"],args["assignment_id"]),(tid,aid))
+            material = json.loads(result["results"][0]["content"][0]["text"])
+            self.assertEqual(set(material),{"received","material_id"})
+            self.assertTrue(material["received"])
+            details = loop.hermes.inspect(tid)
+            self.assertEqual((details["task"]["state"],details["task"]["holder"]),("blocked",{"kind":"router"}))
+            self.assertIsNone(details["last_report"])
+            self.assertEqual([item["material_id"] for item in details["materials"]],[material["material_id"]])
+            self.assertIsNone(loop.worker.hold()["held_assignment_id"])
+            with self.assertRaisesRegex(Fault,"stale_assignment") as stale:
+                loop.wire.request("POST",f"tasks/{tid}/report",{"session_id":loop.worker.session,
+                                  "assignment_id":aid,"outcome":"completed","summary":"Late W04"},guid())
+            self.assertEqual(stale.exception.status,409)
+            with loop.adapter.db.transaction() as db:
+                proof = json.loads(db.execute("""SELECT receipt FROM intents
+                    WHERE json_extract(payload,'$.kind')='task.shelved'""").fetchone()[0])
+            request = {"session":session,"turn_id":proof["turn_id"],"call_id":call["callId"],
+                       "tool":"worker_submit_material","arguments":args}
+            self.assertEqual(client.request("POST","worker/native-tool",request),material)
+            with self.assertRaisesRegex(Fault,"idempotency_conflict"):
+                client.request("POST","worker/native-tool",dict(request,arguments=dict(args,text="changed")))
+            loop.hermes.act(guid(),tid,details["task"]["revision"],"transfer",worker_id="tama",reason="Assign again")
+            next_worker.poll()
+            next_worker.poll()
+            new_aid = next_worker.hold()["held_assignment_id"]
+            self.assertTrue(new_aid and new_aid!=aid)
+            self.assertEqual(len(next_host.entries()),1)
+            self.assertEqual(client.request("POST","worker/native-tool",request),material)
+            with self.assertRaisesRegex(Fault,"ineligible_material"):
+                client.request("POST","worker/native-tool",dict(request,call_id="new-candidate-attempt"))
+            final = loop.hermes.inspect(tid)
+            self.assertEqual(final["task"]["assignment_id"],new_aid)
+            self.assertEqual(final["task"]["holder"],{"kind":"worker","worker_id":"tama"})
+            self.assertEqual([row["assignment_id"] for row in final["pending_cleanup"]],[aid])
+            self.assertEqual(len(final["materials"]),1)
+            self.assertIsNone(final["last_report"])
+            self.evidence = {"session":session,"task_id":tid,"old_assignment_id":aid,"shelved_receipt":proof,
+                "native_tool":call["name"],"native_call_id":call["callId"],"first_receipt":material,
+                "first_w04":stale.exception.status,"before_new_assignment":details["task"]["holder"],"new_assignment_id":new_aid,
+                "new_holder":final["task"]["holder"],"pending_cleanup":aid,
+                "final_material_count":len(final["materials"]),"final_report":final["last_report"],
+                "boundary":"Actual DSH native tool and Router, scripted local model and test clock"}
 
     def test_native_race_after_w03_never_prequeues_a_formal_task(self):
         facts = []

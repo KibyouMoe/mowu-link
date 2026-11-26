@@ -511,6 +511,20 @@ class Worker:
                     db.execute("INSERT INTO outbox VALUES (?,?,NULL)", (assignment_id, encode(body)))
             return self.submit(task_id, assignment_id, body)
 
+    def submit_material(self,session,native_id,key,args):
+        tid,aid = string(args,"task_id"),string(args,"assignment_id")
+        origin = self.adapter.origin(native_id,session=session)
+        require(origin["kind"] in ("task","task_update","task_probe","question_answer","task.shelved")
+                and (origin["task_id"],origin["assignment_id"])==(tid,aid),403,"wrong_material_origin")
+        require(self.assignment_session(aid) in (None,session),403,"wrong_assignment_session")
+        body = {"session_id":self.session,"assignment_id":aid,"text":args.get("text","")}
+        if "artifact_ids" in args:
+            body["artifact_ids"] = args["artifact_ids"]
+        result = self.router.request("POST",f"tasks/{tid}/materials",body,key)
+        require(isinstance(result,dict) and result.get("received") is True and set(result)=={"received","material_id"}
+                and isinstance(result["material_id"],str) and result["material_id"],409,"material_receipt_mismatch")
+        return result
+
     def display_cleanup(self, tid, aid, kind, status, text):
         with self.db.transaction() as db:
             display.append(db,{"event_id":f"cleanup-{kind}-{aid}-{status}","kind":"task","session":"",
