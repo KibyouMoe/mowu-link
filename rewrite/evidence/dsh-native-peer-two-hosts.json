@@ -1,0 +1,36 @@
+{
+  "source_session": "dsh-peer-source",
+  "destination_session": "dsh-peer-destination",
+  "source_tool_call": "peer-native-send",
+  "destination_tool_call": "peer-native-reply",
+  "destination_input": "mowulink-678cc88cd9c761ad75e3fa6b5bd1ea6da524ecc3e3e2389f988bf9eaf176226c",
+  "source_reply_input": "mowulink-009aad3d97940144866fd83672f55465c06949a2d8c05c61c663599b54d6edaf",
+  "reply_to": "6eb137d4-28c1-56e5-bced-d52bfa94d8c1",
+  "router_receipts": [
+    {
+      "accepted_at": "2027-01-15T08:00:00+00:00",
+      "delivery_id": "54eec27c-5adc-492e-83d9-9aa55e49c1e3",
+      "host_receipt_id": "0f9c0014-ab9b-5d40-8529-36c1df0029bb",
+      "host_receipt_recorded_at": "2027-01-15T08:00:00+00:00",
+      "message_id": "6eb137d4-28c1-56e5-bced-d52bfa94d8c1",
+      "recipient": "oguri",
+      "sender": "tama",
+      "worker_received": true
+    },
+    {
+      "accepted_at": "2027-01-15T08:00:00+00:00",
+      "delivery_id": "5445bc58-b1d5-47f3-9247-bc5b34c44a8d",
+      "host_receipt_id": "701229eb-e805-5bd9-9096-bc39f1d4df34",
+      "host_receipt_recorded_at": "2027-01-15T08:00:00+00:00",
+      "message_id": "df876540-f297-5478-aecc-ff269c26227f",
+      "recipient": "tama",
+      "sender": "oguri",
+      "worker_received": true
+    }
+  ],
+  "image_sha256": "e77617115ffe6399c0f4714c72aa32eefeb22fbdf45b1167a4ddb64e213b4007",
+  "formal_task_count": 0,
+  "clock": "controlled test clock",
+  "boundary": "Two actual DSH AgentLoop processes with scripted local providers",
+  "consecutive_runs": 10
+}

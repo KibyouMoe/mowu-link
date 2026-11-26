@@ -855,6 +855,71 @@ class NativeLoop(unittest.TestCase):
                 "clock":"controlled test clock",
                 "boundary":"Actual DSH native tool executor and independent Router; scripted local model and sending host fixture"}
 
+    def test_two_real_dsh_sessions_roundtrip_a_linked_peer_message(self):
+        recipient_dir,loop,service,_ = self.goal_worker("dsh-peer-destination",extra_workers=["tama"])
+        sender_dir = self.enterContext(tempfile.TemporaryDirectory(dir="/tmp",prefix="mldsh-peer-src-"))
+        source_session = "dsh-peer-source"
+        target_session = loop.adapter.bound_session()
+        sender_port = DshHost(Path(sender_dir))
+        sender_adapter = HostAdapter(loop.root/"ds-source-adapter.db",sender_port,source_session)
+        sender = Worker(loop.root/"dsh-peer-source.db","tama",loop.extra_clients["tama"],sender_adapter)
+        a,b = guid(),guid()
+        source = Client(self.open_worker(WorkerService(sender,service.clock),{a:"adapter/tama"}),a)
+        target = Client(self.open_worker(service,{b:"adapter/oguri"}),b)
+        loop.adapter.media_store = NativeFiles(Path(recipient_dir)/"media",target)
+        self.enterContext(tool_listener(Path(sender_dir),sender_adapter,source))
+        self.enterContext(tool_listener(Path(recipient_dir),loop.adapter,target))
+        sha = hashlib.sha256(PNG).hexdigest()
+        upload = source.request("POST","worker/media/uploads",{"name":"native-peer.png","sha256":sha,
+                                "size_bytes":len(PNG)},guid())
+        file = source.request("PATCH","worker/media/uploads/"+upload["upload_id"],PNG,headers={"Upload-Offset":"0"})
+        args = {"to_worker":"oguri","text":"One isolated Agent to another","attachment_ids":[file["attachment_id"]],
+                "attachment_kinds":["image"]}
+        with (self.start_native(sender_dir,source_session,"peer-source") as sender_host,
+              self.start_native(recipient_dir,target_session,"peer-media") as recipient_host):
+            sender.connect()
+            loop.worker.connect()
+            prompt = sender.chat(guid(),"Send peer fixture\n"+encode(args))
+            original = self.read_native(sender_host,"read")
+            sent_call, = original["calls"]
+            self.assertEqual((sent_call["name"],json.loads(sent_call["arguments"])),("worker_send_peer",args))
+            sent = json.loads(original["results"][0]["content"][0]["text"])
+            self.assertEqual(sent["status"],"accepted")
+            loop.worker.poll()
+            delivered = self.read_native(recipient_host,"read")
+            loop.worker.poll()
+            loop.worker.poll()
+            self.assertEqual(self.read_native(recipient_host,"read")["inputs"],delivered["inputs"])
+            self.assertEqual(len(delivered["inputs"]),1)
+            self.assertEqual(delivered["mediaRequests"][0]["images"],[{"sha256":sha,"size":len(PNG)}])
+            _,reply_call,_ = delivered["calls"]
+            reply_args = json.loads(reply_call["arguments"])
+            self.assertEqual((reply_call["name"],reply_args["reply_to"]),("worker_send_peer",sent["message_id"]))
+            reply = json.loads(delivered["results"][1]["content"][0]["text"])
+            sender.poll()
+            answered = self.read_native(sender_host,"read")
+            sender.poll()
+            self.assertEqual(self.read_native(sender_host,"read")["inputs"],answered["inputs"])
+            self.assertEqual(len(answered["inputs"]),2)
+            self.assertEqual(answered["inputs"][0],prompt["native_id"])
+            self.assertEqual([call["name"] for call in answered["calls"]],["worker_send_peer"])
+            self.assertEqual([request["command"] for request in answered["modelRequests"]],["private","private","peer"])
+            receipts = [sender.router.request("GET","peers/messages/"+mid) for mid in
+                        (sent["message_id"],reply["message_id"])]
+            self.assertTrue(all(receipt["host_receipt_id"] for receipt in receipts))
+            with sender_adapter.db.transaction() as db:
+                native_reply = json.loads(db.execute("SELECT payload FROM intents WHERE native_id=?",
+                                                     (answered["inputs"][-1],)).fetchone()[0])
+            self.assertEqual((native_reply["text"],native_reply["reply_to"]),(reply_args["text"],sent["message_id"]))
+            self.assertFalse(loop.hermes.tasks()["items"])
+            self.assertEqual((sender.hold()["held_task_id"],loop.worker.hold()["held_task_id"]),(None,None))
+            self.evidence = {"source_session":source_session,"destination_session":target_session,
+                "source_tool_call":sent_call["callId"],"destination_tool_call":reply_call["callId"],
+                "destination_input":delivered["inputs"][0],"source_reply_input":answered["inputs"][-1],
+                "reply_to":native_reply["reply_to"],"router_receipts":receipts,"image_sha256":sha,
+                "formal_task_count":0,"clock":"controlled test clock",
+                "boundary":"Two actual DSH AgentLoop processes with scripted local providers"}
+
     def test_shelved_dsh_assignment_submits_candidate_without_changing_ownership(self):
         directory,loop,service,_ = self.goal_worker("dsh-native-material",extra_workers=["tama"])
         session,clock = loop.adapter.bound_session(),service.clock

@@ -52,6 +52,16 @@ class LocalModel extends LlmAdapter {
     const goal = message.source.kind==='goal' ? message.source : null;
     const command = goal ? 'goal' : payload?.kind ?? 'private';
     modelRequests.push({command,provider,model,reasoningEffort});
+    if (mode==='peer-source' && text.startsWith('Send peer fixture\n') && !this.submitted.has('outbound')) {
+      this.submitted.set('outbound',true);
+      const args = JSON.parse(text.split('\n')[1]);
+      assert.ok(tools?.some(tool=>tool.name==='worker_send_peer'));
+      yield {type:'block-start',index:0,blockType:'tool-call'};
+      yield {type:'block-end',index:0,block:{type:'tool-call',id:'peer-native-send',name:'worker_send_peer',
+        arguments:JSON.stringify(args)}};
+      yield {type:'finish',reason:{kind:'tool-calls'}};
+      return;
+    }
     if (usesMedia) {
       const store = ctx.get('attachments');
       const images = [];
@@ -381,7 +391,7 @@ async function formalScenario(agent) {
 try {
   const agent = await setup();
   if (['formal','compact','questions','catalog','private-stop','work-question','admission-race',
-       'binding-close','material'].includes(mode) || usesGoals || usesMedia) {
+       'binding-close','material','peer-source'].includes(mode) || usesGoals || usesMedia) {
     await formalScenario(agent);
   }
   else await stopScenario(agent);
