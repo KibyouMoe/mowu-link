@@ -1,5 +1,7 @@
 """Check the committed assignment chain before publishing an offline rollback."""
+from collections import deque
 from datetime import datetime, timedelta, timezone
+from itertools import groupby
 import json
 import math
 
@@ -63,36 +65,46 @@ def inquiry_frames(db, tid):
     return by_assignment
 
 
+def inquiry_key(frame):
+    kind = frame["kind"]
+    return kind,json.loads(frame["payload"]).get("cleanup_id") if kind=="task.cancel" else None
+
+
+def retain_cancel_deliveries(record, groups, scopes, *, minimum=1, maximum=4, final=False):
+    (kind,scope),frames = groups.popleft() if groups else ((None,None),[])
+    if (kind!="task.cancel" or not minimum<=len(frames)<=maximum
+            or (not valid_guid(scope) if scopes else scope is not None) or scope in scopes
+            or final and scope!=record.get("cleanup_id")):
+        raise ValueError("trial cancellation deliveries do not match their original control scope")
+    scopes.add(scope)
+    if scope is not None:
+        record["cleanup_id"] = scope
+    record["delivery_ids"] = [frame["delivery_id"] for frame in frames]
+
+
 def retain_inquiries(step, frames, dispatch_seq, next_dispatch_seq):
-    source = step.get("pool",{}).get("source")
-    unanswered = source=="unanswered"
-    kinds = [frame["kind"] for frame in frames]
-    count = kinds.count("task.probe")
-    expired = step.get("expired_cancel")
-    cleanup = step.get("cleanup")
-    cancel_cleanup = cleanup and cleanup["kind"]=="task.cancel"
-    total_cancellations = kinds.count("task.cancel")
-    expired_count = 0
-    if expired:
-        expired_count = 4 if unanswered else total_cancellations-int(bool(cancel_cleanup))
-        if not 1<=expired_count<=4 or source not in ("unanswered","offline"):
-            raise ValueError("invalid number of cancellation deliveries before pooling")
-    cancellations = total_cancellations-expired_count
-    expected = ["task.probe"]*count + ["task.cancel"]*expired_count + (["task.shelved"] if unanswered else [])
-    expected += ["task.cancel"]*cancellations
-    if (kinds!=expected or not 0<=cancellations<=(1 if step.get("pool") else 4)
-            or bool(cancellations)!=bool(cancel_cleanup)
-            or any(frame["seq"]<=dispatch_seq or next_dispatch_seq is not None and frame["seq"]>=next_dispatch_seq
-                   for frame in frames)):
+    if any(frame["seq"]<=dispatch_seq or next_dispatch_seq is not None and frame["seq"]>=next_dispatch_seq
+           for frame in frames):
         raise ValueError("trial inquiry deliveries do not match their original assignment")
-    if count:
-        step["probe_delivery_ids"] = [frame["delivery_id"] for frame in frames[:count]]
-    if unanswered:
-        step["shelved_delivery_id"] = frames[count+expired_count]["delivery_id"]
-    if expired:
-        expired["delivery_ids"] = [frame["delivery_id"] for frame in frames[count:count+expired_count]]
-    if cancel_cleanup:
-        cleanup["delivery_ids"] = [frame["delivery_id"] for frame in frames[-cancellations:]]
+    source = step.get("pool",{}).get("source")
+    groups = deque((key,list(group)) for key,group in groupby(frames,inquiry_key))
+    if groups and groups[0][0]==("task.probe",None):
+        step["probe_delivery_ids"] = [frame["delivery_id"] for frame in groups.popleft()[1]]
+    scopes = set()
+    for attempt in step.get("superseded_cancels",[]):
+        retain_cancel_deliveries(attempt,groups,scopes)
+    if expired := step.get("expired_cancel"):
+        retain_cancel_deliveries(expired,groups,scopes,minimum=4 if source=="unanswered" else 1)
+    if source=="unanswered":
+        key,notices = groups.popleft() if groups else (None,[])
+        if key!=("task.shelved",None) or len(notices)!=1:
+            raise ValueError("trial inquiry deliveries do not match their original assignment")
+        step["shelved_delivery_id"] = notices[0]["delivery_id"]
+    cleanup = step.get("cleanup")
+    if cleanup and cleanup["kind"]=="task.cancel":
+        retain_cancel_deliveries(cleanup,groups,scopes,maximum=1 if step.get("pool") else 4,final=True)
+    if groups:
+        raise ValueError("trial inquiry deliveries do not match their original assignment")
 
 
 def utc_time(value):
@@ -159,6 +171,26 @@ def retain_pool_changes(pool, order, worker, content, revision, edits, snoozes):
     return revision,content
 
 
+def retain_working_cancellations(actions, edits, order, step, revision, content):
+    tid, aid, worker = order["task_id"],step["assignment_id"],step["worker_id"]
+    attempts = []
+    while original := actions.get((tid,revision)):
+        body, receipt = original
+        pending = receipt.get("task",{})
+        if (receipt.get("delivery_state")!="pending" or pending.get("state")!="working"
+                or pending.get("assignment_id")!=aid):
+            break
+        reason = body.get("reason")
+        if not isinstance(reason,str) or not reason.strip():
+            raise ValueError("invalid reason in the reviewed cancellation history")
+        attempt = {"expected_revision":revision,"reason":reason,"content":content}
+        revision,content,working = retain_edits(edits,order,worker,content,"working",revision+1,aid)
+        if working:
+            attempt["working_edits"] = working
+        attempts.append(attempt)
+    return revision,content,attempts
+
+
 def histories(db, entries, deltas):
     used = dict.fromkeys(("pool_entries","cleanups","materials"),0)
     dispatches = set()
@@ -215,6 +247,7 @@ def histories(db, entries, deltas):
             revision,content,working = retain_edits(edits,order,worker,content,"working",revision+1,aid)
             if working:
                 step["working_edits"] = working
+            revision,content,attempts = retain_working_cancellations(actions["cancel"],edits,order,step,revision,content)
             if pool := pools.pop(aid,None):
                 if (pool["worker_id"]!=worker or pool["active"]!=0 or pool["remind_at"] is not None
                         or pool["source"] not in ("worker","offline","unanswered") or not pool["reason"].strip()):
@@ -225,19 +258,19 @@ def histories(db, entries, deltas):
                 exhausted = pool["source"]=="unanswered" and pool["reason"]==CANCELLATION_EXHAUSTED
                 if pool["source"]=="unanswered" and not exhausted and pool["reason"]!=PROGRESS_EXHAUSTED:
                     raise ValueError("trial has an unsupported exhausted inquiry")
-                original = actions["cancel"].get((tid,revision))
-                if exhausted or pool["source"]=="offline" and original:
-                    reason = original[0].get("reason") if original else None
-                    if not isinstance(reason,str) or not reason.strip():
+                if exhausted or pool["source"]=="offline" and attempts:
+                    if not attempts:
                         raise ValueError("exhausted cancellation is missing its original action")
-                    expired = {"expected_revision":revision,"reason":reason,"content":content}
-                    revision,content,working = retain_edits(edits,order,worker,content,"working",revision+1,aid)
-                    if working:
-                        expired["working_edits"] = working
-                    step["expired_cancel"] = expired
+                    step["expired_cancel"] = attempts.pop()
+                elif attempts:
+                    raise ValueError("a pending cancellation cannot enter this reviewed pool")
                 revision,content = retain_pool_changes(pool,order,worker,content,revision+1,edits,snoozes)
                 step["pool"] = pool
                 used["pool_entries"] += 1
+            elif attempts and cancelled and next_frame is None:
+                step["final_working_cancel"] = attempts.pop()
+            if attempts:
+                step["superseded_cancels"] = attempts
             if cleanup := cleanups.pop(aid,None):
                 expected_kind = "task.cancel" if cancelled and next_frame is None else "task.transfer_out"
                 if (cleanup["worker_id"]!=worker or cleanup["kind"]!=expected_kind
@@ -246,12 +279,12 @@ def histories(db, entries, deltas):
                     raise ValueError("original assignment cleanup is pending or cannot be verified")
                 cleanup_id = cleanup.get("cleanup_id")
                 if (cleanup_id is not None and not valid_guid(cleanup_id)
-                        or step.get("expired_cancel") and expected_kind=="task.cancel" and not cleanup_id):
+                        or (step.get("expired_cancel") or attempts) and expected_kind=="task.cancel" and not cleanup_id):
                     raise ValueError("reissued cancellation has no verifiable cleanup scope")
                 step["cleanup"] = cleanup
                 used["cleanups"] += 1
-            elif step.get("expired_cancel"):
-                raise ValueError("exhausted cancellation needs the original assignment's final cleanup")
+            elif attempts or "expired_cancel" in step or "final_working_cancel" in step:
+                raise ValueError("a cancellation history needs the original assignment's final cleanup")
             if candidates := materials.pop(aid,None):
                 if not pool or any(m["submitted_by"]!=worker or not m["received_at"]
                                    or not (m["text"].strip() or m["artifact_ids"]) for m in candidates):
@@ -283,7 +316,8 @@ def histories(db, entries, deltas):
                     entry["completed_edits"] = completed
                 revision += 1  # Manager close.
             else:
-                revision += 1 + ("cleanup" in step)  # Terminal action, plus cancellation W04 if needed.
+                # A working cancel already counted its pending A06 above.
+                revision += 1 + ("cleanup" in step and "final_working_cancel" not in step)
         if pools or cleanups or materials or inquiries:
             raise ValueError("trial is missing a complete assignment chain for the reviewed result")
         if any(order[field]!=value for field,value in content.items()):
@@ -345,7 +379,8 @@ def check_transport(db, entries, reviewed_questions):
     expected_notices = {}
     notices = {tid:[] for tid in entries}
     cleanup_frames = {}
-    expired_assignments,expired_retry_ids = set(),set()
+    last_cancel_controls = {}
+    expired_assignments,cancel_retry_ids = set(),set()
     update_frames = {}
     terminal_notices = set()
     pool_bounds = {}
@@ -363,8 +398,14 @@ def check_transport(db, entries, reviewed_questions):
             workers.add(worker)
             expected_frames["task.dispatch",tid,aid] = ("worker/"+worker,step["delivery_id"],
                 {"task_id":tid,"assignment_id":aid,"revision":step["revision"],**step["content"]})
-            expired = step.get("expired_cancel",{})
-            for edit in (*step.get("working_edits",[]),*expired.get("working_edits",[])):
+            expired = step.get("expired_cancel")
+            previous_cancels = list(step.get("superseded_cancels",[]))
+            if expired:
+                previous_cancels.append(expired)
+            edits = list(step.get("working_edits",[]))
+            for attempt in (*previous_cancels,step.get("final_working_cancel",{})):
+                edits.extend(attempt.get("working_edits",[]))
+            for edit in edits:
                 revision = edit["expected_revision"]+1
                 update_frames[tid,aid,revision] = (edit,"worker/"+worker,step["dispatch_seq"],
                                                   target["dispatch_seq"] if target else None)
@@ -373,10 +414,15 @@ def check_transport(db, entries, reviewed_questions):
             if shelved := step.get("shelved_delivery_id"):
                 expected_inquiries[shelved] = ("task.shelved","worker/"+worker,{"task_id":tid,
                     "assignment_id":aid,"reason":step["pool"]["reason"]})
-            for did in expired.get("delivery_ids",[]):
-                expected_inquiries[did] = ("task.cancel","worker/"+worker,
-                    {"task_id":tid,"assignment_id":aid,"reason":expired["reason"]})
-            expired_retry_ids.update(expired.get("delivery_ids",[])[1:])
+            for attempt in previous_cancels:
+                control = {"task_id":tid,"assignment_id":aid,"reason":attempt["reason"]}
+                if scope := attempt.get("cleanup_id"):
+                    control["cleanup_id"] = scope
+                for did in attempt["delivery_ids"]:
+                    expected_inquiries[did] = ("task.cancel","worker/"+worker,control)
+                cancel_retry_ids.update(attempt["delivery_ids"][1:])
+            if previous_cancels:
+                last_cancel_controls[aid] = previous_cancels[-1]["delivery_ids"][-1]
             if expired and step.get("shelved_delivery_id"):
                 expired_assignments.add(aid)
             if cleanup := step.get("cleanup"):
@@ -386,6 +432,8 @@ def check_transport(db, entries, reviewed_questions):
                 if cleanup["kind"]=="task.cancel":
                     for did in cleanup["delivery_ids"]:
                         expected_inquiries[did] = ("task.cancel","worker/"+worker,payload)
+                    if previous_cancels:
+                        cancel_retry_ids.update(cleanup["delivery_ids"][1:])
                 else:
                     key = ("task.transfer_out",tid,aid)
                     cleanup_frames[key] = cleanup
@@ -489,7 +537,7 @@ def check_transport(db, entries, reviewed_questions):
                 work_stopped.add(aid)
             elif kind=="task.shelved":
                 shelved_assignments.add(aid)
-            if kind!="task.cancel" or did in expired_retry_ids:
+            if kind!="task.cancel" or did in cancel_retry_ids:
                 inquiry_sources[did] = rollback_inquiries.source(latest_query,consumer,tid,aid)
         elif kind=="question.resolved":
             rollback_questions.record_answer_delivery(reviewed_questions,data,consumer,did,row["seq"])
@@ -513,6 +561,8 @@ def check_transport(db, entries, reviewed_questions):
             if key in cleanup_frames:
                 if aid in expired_assignments and aid not in shelved_assignments:
                     raise ValueError("transfer cleanup predates the exhausted cancellation")
+                if aid in last_cancel_controls and last_cancel_controls[aid] not in frames:
+                    raise ValueError("transfer cleanup predates the original cancellation delivery")
                 cleanup_frames[key]["delivery_id"] = did
                 work_stopped.add(aid)
         frames[did] = (consumer,row["cursor"])
@@ -563,7 +613,8 @@ def optional_close_note(actual, request):
 
 def verify_cancelled(tid, entry, order, step, operations, after, states):
     cleanup = step.get("cleanup")
-    expected_revision = order["revision"]-(2 if cleanup else 1)
+    working_cancel = step.get("final_working_cancel")
+    expected_revision = working_cancel["expected_revision"] if working_cancel else order["revision"]-(2 if cleanup else 1)
     key = (tid,"action","cancel",expected_revision)
     action = operations.get(key)
     reason = action["body"].get("reason") if action else None
@@ -574,8 +625,9 @@ def verify_cancelled(tid, entry, order, step, operations, after, states):
         pool = step.get("pool")
         snoozes = pool.get("snoozes",[]) if pool else []
         state = "snoozed" if snoozes else "blocked" if pool else "working"
-        final = dict(step,content={field:order[field] for field in ("title","instructions")})
-        pending = order_state(order,final,state,order["revision"]-1,
+        content = working_cancel["content"] if working_cancel else {field:order[field] for field in ("title","instructions")}
+        final = dict(step,content=content)
+        pending = order_state(order,final,state,expected_revision+1,
                               None if pool else step["assignment_id"])
         if pool:
             initial = {"remind_at":timestamp(pool["entered"]+INITIAL_REMINDER_SECONDS),**pool.get("initial_reminder",{})}
@@ -596,13 +648,15 @@ def verify_cancelled(tid, entry, order, step, operations, after, states):
             request["cleanup_id"] = cleanup["cleanup_id"]
         receipt = take(operations,(tid,"report",aid,"cancel_confirmed"),"worker/"+step["worker_id"],
                        request,[{"recorded":True,"release_assignment_id":aid,"task_state":"cancelled"}],session=True)
+        if working_cancel:
+            terminal_seq = verify_edits(tid,working_cancel.get("working_edits",[]),operations,terminal_seq)
         if receipt["seq"]<=terminal_seq:
             raise ValueError("cleanup receipt predates the cancellation")
-        states.append((terminal_seq,{pending["state"]}))
+        states.append((action["seq"],{pending["state"]}))
         terminal_seq = receipt["seq"]
         cleanup.update(report_key=receipt["key"],receipt=receipt["reply"])
-        if step.get("expired_cancel"):
-            cleanup.update(action_seq=action["seq"],report_seq=receipt["seq"])
+        if step.get("expired_cancel") or step.get("superseded_cancels"):
+            cleanup.update(action_key=action["key"],action_seq=action["seq"],report_seq=receipt["seq"])
         entry["cancel_w04_key"] = receipt["key"]
     states.append((terminal_seq,{"cancelled"}))
     return action["seq"]
@@ -689,19 +743,18 @@ def transition_replies(order, step, target):
     return replies
 
 
-def verify_expired_cancel(tid, step, order, operations, after, states):
-    expired = step["expired_cancel"]
-    revision = expired["expected_revision"]
-    pending = order_state(order,dict(step,content=expired["content"]),"working",revision+1,step["assignment_id"])
+def verify_working_cancel(tid, step, attempt, order, operations, after, states, *, expired=False):
+    revision = attempt["expected_revision"]
+    pending = order_state(order,dict(step,content=attempt["content"]),"working",revision+1,step["assignment_id"])
     action = take(operations,(tid,"action","cancel",revision),"hermes",
-                  {"action":"cancel","expected_revision":revision,"reason":expired["reason"]},
+                  {"action":"cancel","expected_revision":revision,"reason":attempt["reason"]},
                   [{"task":pending,"delivery_state":"pending"}])
     if action["seq"]<=after:
-        raise ValueError("exhausted cancellation predates its original assignment")
-    expired.update(action_key=action["key"],receipt=action["reply"],action_seq=action["seq"])
-    after = verify_edits(tid,expired.get("working_edits",[]),operations,action["seq"])
-    expired["working_end_seq"] = after
-    states.append((action["seq"],{"working","blocked"}))
+        raise ValueError("cancellation predates its original assignment")
+    attempt.update(action_key=action["key"],receipt=action["reply"],action_seq=action["seq"])
+    after = verify_edits(tid,attempt.get("working_edits",[]),operations,action["seq"])
+    attempt["working_end_seq"] = after
+    states.append((action["seq"],{"working","blocked"} if expired else {"working"}))
     return after
 
 
@@ -733,9 +786,12 @@ def verify_order(db, tid, entry, operations, windows):
         possible = {"working","blocked"} if source in ("offline","unanswered") else {"working"}
         adjacent_states.append((after,possible))
         after = verify_edits(tid,step.get("working_edits",[]),operations,after)
+        for attempt in step.get("superseded_cancels",[]):
+            after = verify_working_cancel(tid,step,attempt,order,operations,after,adjacent_states)
+            windows.setdefault(aid,(accept["seq"],attempt["action_seq"]))
         if expired := step.get("expired_cancel"):
-            after = verify_expired_cancel(tid,step,order,operations,after,adjacent_states)
-            windows[aid] = (accept["seq"],expired["action_seq"])
+            after = verify_working_cancel(tid,step,expired,order,operations,after,adjacent_states,expired=True)
+            windows.setdefault(aid,(accept["seq"],expired["action_seq"]))
         if target is None and is_reviewed_completion(entry):
             report = take(operations,(tid,"report",aid,"completed"),actor,{
                 "assignment_id":aid,"outcome":"completed","summary":entry["summary"],"artifact_ids":entry["artifact_ids"]},
@@ -820,8 +876,8 @@ def verify_order(db, tid, entry, operations, windows):
                            session=True)
             if receipt["seq"]<=transfer["seq"]:
                 raise ValueError("cleanup receipt predates the transfer")
-            if expired:
-                cleanup.update(action_seq=transfer["seq"],report_seq=receipt["seq"])
+            if expired or step.get("superseded_cancels"):
+                cleanup.update(action_key=transfer["key"],action_seq=transfer["seq"],report_seq=receipt["seq"])
             cleanup_receipts.append((cleanup,receipt))
     for cleanup,receipt in cleanup_receipts:
         _, states = next((item for item in reversed(adjacent_states) if item[0]<receipt["seq"]))

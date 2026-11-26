@@ -1,0 +1,19 @@
+{
+  "task_id": "5b86125e-f506-5f7f-98ef-8039143de39a",
+  "assignment_id": "600dab65-45ad-48d1-90ba-d5f1238f99b1",
+  "pool_source": "offline",
+  "manager_cancel_keys": [
+    "4d8b0790-0c35-4696-ae26-ea7368f18fdc",
+    "0c8e54f7-5456-4e0f-89d6-857ccd15f24c"
+  ],
+  "final_cleanup_id": "e51a085d-fd96-46c7-9b38-0ce252ebe1f9",
+  "w04": {
+    "recorded": true,
+    "release_assignment_id": "600dab65-45ad-48d1-90ba-d5f1238f99b1",
+    "task_state": "cancelled"
+  },
+  "rollback_error": "trial cancellation deliveries do not match their original control scope",
+  "no_restore_directory": true,
+  "trial_checksum_unchanged": true,
+  "boundary": "Actual isolated rewrite HTTP Router and Worker, old RouterStore; scripted host and time."
+}

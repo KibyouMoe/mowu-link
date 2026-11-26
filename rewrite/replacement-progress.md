@@ -16,7 +16,9 @@
 
 运行时实现提交 `facdc037a1f5aebc069e4af773fb1342886631c9` 的 Windows 原生取消已通过，但第一轮逐字节回退发现只启动新版就会改旧库结构。修正版 `73979aed2bbd8ddc0cf037dc04fdbd6c76150010` 延后扩展清理表。分别从 `307a8a119c6a97ea2cb816280227afb3295e5675` 和 `2490059e42d379183c19b0e82c208f545a3c78ee` 启动新版读取待派单后，试用库摘要均保持不变，旧包恢复后各查到一张原单。Windows 常规与 DSH 原生两组通过。Linux arm64 全量通过 204 项、依环境跳过 124 项。311 文件安装包通过 79 项专项，逐文件校验一致。包 SHA-256 为 `816fed444adc6d6bf6cffcdb32ed43804ca13e40bc4b352288000722183ad026`。macOS 在运行时实现提交全量通过 323 项、依环境跳过 5 项。修正版复跑安装目录专项与 macOS 到 Linux 虚拟机的 Worker 重启回环。[修正版 Windows CI](https://github.com/KibyouMoe/mowu-link/actions/runs/45912638903)
 
-另复现两种仍需人工对账的停写回退记录。工单仍在执行时连续两次显式取消，新 W04 可正常确认；若第二次又耗尽后再次取消，新 W04 也可确认。两种记录都包含多条在途管理动作，现有回退核验拒绝生成旧库，试用库摘要未变。后续需按每次在途取消的操作和控制号核对完整历史。[多次在途取消](evidence/cutover-active-reissued-cancel-gap.json)
+在执行状态发起多次取消的回退已补。四条隔离链路分别是直接确认、后一次重试耗尽后重新取消、直接转派、离线入池后转派。验证器按管理操作和清理号保留每次取消与空闲重试。工单在两次取消之间或最后一次在途取消后修改，仍核原修订与收件。只有最后一次有效控制及其 W04 能归档。两代 HTTP Router 实跑，旧端按原单号读回已取消或已验收，两个工位无持单、无重派。移除中间清理号、把最终收件延后到 W04 之后或替换 W04 里的清理号时，拒绝生成旧库。宿主和时钟为夹具。复跑 `python3 -B -m unittest -v rewrite.test_cutover -k working_cancel`。[本次实测](evidence/cutover-working-cancel-rounds.json) · [修复前复现](evidence/cutover-active-reissued-cancel-gap.json)
+
+另一条尚待对账。Worker 离线入池后，管理端在同一次入池中连续发起两次取消，新号 W04 已确认，回退仍拒绝生成旧库，试用库摘要未变。[同池多次取消](evidence/cutover-repeated-pool-cancel-gap.json)
 
 取消重试耗尽后的两种处置已纳入隔离回退。四条取消指令无清理确认才入池，首次迟到的取消 W04 返回 409。挂起后重新取消，由原工位确认并归档。另一张单转派后由新工位提交成果、溪流验收，原工位只清理旧派发。两代 HTTP Router 实测，旧端分别读回已取消和已验收，两个工位都无持单、无重派。首次取消、三次空闲重试、搁置和后续清理分别保留凭据。清理未确认或篡改重试的空闲观测时，回退不生成目录。宿主和时钟为夹具。复跑 `python3 -B -m unittest -v rewrite.test_cutover -k exhausted_cancel`。[取消重试回退实测](evidence/cutover-reviewed-cancel-retry.json)
 

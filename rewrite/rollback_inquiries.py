@@ -1,4 +1,4 @@
-"""Rebuild progress inquiry rounds using the original worker presence ledger."""
+"""Verify progress and cancellation retries against the original Worker observations."""
 from .storage import timestamp
 
 
@@ -22,20 +22,41 @@ def bind(delivery_id, sources, samples, acknowledged):
     raise ValueError("inquiry is missing its original idle worker observation")
 
 
-def verify_expired_cancel(step, sources, samples, acknowledged):
-    expired = step["expired_cancel"]
-    initial,*retries = expired["delivery_ids"]
-    position = expired["action_seq"]
+def verify_cancel_attempt(attempt, sources, samples, acknowledged, *, before=None):
+    initial,*retries = attempt["delivery_ids"]
+    position = attempt["action_seq"]
     if acknowledged.get(initial,0)<=position:
-        raise ValueError("exhausted cancellation has no original delivery receipt")
+        raise ValueError("cancellation has no original delivery receipt")
     retry_proofs = []
     for did in retries:
         sample = bind(did,sources,samples,acknowledged)
-        if sample["seq"]<=position:
-            raise ValueError("exhausted cancellation retries are out of order")
+        if sample["seq"]<=position or before is not None and sample["seq"]>=before:
+            raise ValueError("cancellation retry is outside its control attempt")
         position = sample["seq"]
         retry_proofs.append({"delivery_id":did,"presence_key":sample["key"]})
-    prior = max(position,expired["working_end_seq"])
+    attempt["retries"] = retry_proofs
+    return max(position,attempt.get("working_end_seq",0))
+
+
+def verify_cleanup_receipt(cleanup, acknowledged, *, after=0):
+    successor = cleanup["delivery_ids"][0] if cleanup["kind"]=="task.cancel" else cleanup["delivery_id"]
+    if not after<cleanup["action_seq"]<acknowledged.get(successor,0)<cleanup["report_seq"]:
+        raise ValueError("the last cleanup lacks its own receipt")
+
+
+def verify_cancellations(step, sources, samples, acknowledged):
+    earlier = step.get("superseded_cancels",[])
+    expired = step.get("expired_cancel")
+    cleanup = step["cleanup"]
+    for attempt, successor in zip(earlier,[*earlier[1:],expired or cleanup]):
+        verify_cancel_attempt(attempt,sources,samples,acknowledged,before=successor["action_seq"])
+        attempt["superseded_by"] = successor["action_key"]
+    if cleanup["kind"]=="task.cancel":
+        verify_cancel_attempt(cleanup,sources,samples,acknowledged,before=cleanup["report_seq"])
+    if not expired:
+        verify_cleanup_receipt(cleanup,acknowledged)
+        return
+    prior = verify_cancel_attempt(expired,sources,samples,acknowledged,before=expired["pool_action_seq"])
     if shelved := step.get("shelved_delivery_id"):
         shelve = bind(shelved,sources,samples,acknowledged)
         if (not prior<shelve["seq"]<expired["pool_action_seq"]
@@ -50,11 +71,7 @@ def verify_expired_cancel(step, sources, samples, acknowledged):
         prior = max(prior,last_receipt)
         if prior>=expired["pool_action_seq"]:
             raise ValueError("offline cancellation receipt is ambiguous after pooling")
-    cleanup = step["cleanup"]
-    successor = cleanup["delivery_ids"][0] if cleanup["kind"]=="task.cancel" else cleanup["delivery_id"]
-    if not prior<cleanup["action_seq"]<acknowledged.get(successor,0)<cleanup["report_seq"]:
-        raise ValueError("cleanup after an exhausted cancellation lacks its own receipt")
-    expired["retries"] = retry_proofs
+    verify_cleanup_receipt(cleanup,acknowledged,after=prior)
 
 
 def verify_rounds(entries, sources, samples, continued, windows, acknowledged):
@@ -63,8 +80,9 @@ def verify_rounds(entries, sources, samples, continued, windows, acknowledged):
             aid = step["assignment_id"]
             probes = step.get("probe_delivery_ids",[])
             shelved = step.get("shelved_delivery_id")
+            if step.get("expired_cancel") or step.get("superseded_cancels"):
+                verify_cancellations(step,sources,samples,acknowledged)
             if step.get("expired_cancel"):
-                verify_expired_cancel(step,sources,samples,acknowledged)
                 shelved = None  # The cancellation timer is independent of progress inquiries.
             reports = continued.pop(aid,[])
             if not (probes or shelved or reports):

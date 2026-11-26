@@ -1863,6 +1863,30 @@ store.close()
                         "boundary":"Actual isolated rewrite HTTP Router and Workers, legacy RouterStore and SQLite; scripted hosts and clock."}
             Path(output).write_text(json.dumps(evidence,ensure_ascii=False,indent=2)+"\n")
 
+    def read_legacy_cancel_archive(self,original):
+        return json.loads(self.old("""
+from server import RouterServer
+from selftest_router import http
+from threading import Thread
+from unittest.mock import Mock
+store = RouterStore(sys.argv[1])
+token = "isolated-legacy-cancel-retry"
+with RouterServer(("127.0.0.1",0),store,token,Mock(),Mock()) as server:
+    runner = Thread(target=server.serve_forever,kwargs={"poll_interval":.02})
+    runner.start()
+    try:
+        url = f"http://127.0.0.1:{server.server_port}"
+        status,item = http("GET",url+"/tasks/"+sys.argv[2],token=token)
+        task = item["task"]
+        print(json.dumps({"status":status,"reason":task["archive"]["reason"],"deliverable":task["deliverable"],
+                          "queues":[store.orders.next_dispatch(name) for name in ("oguri","tama")],
+                          "held":[store.orders.held(name) for name in ("oguri","tama")]}))
+    finally:
+        server.shutdown()
+        runner.join()
+store.close()
+""",self.restore/"legacy.db",original))
+
     def test_exhausted_cancel_requires_a_new_confirmed_cancellation_for_rollback(self):
         self.exercise_exhausted_cancel_rollback(reissue=True)
 
@@ -1872,7 +1896,183 @@ store.close()
     def test_cancel_interrupted_by_offline_timeout_requires_original_and_new_receipts(self):
         self.exercise_exhausted_cancel_rollback(reissue=True,offline=True)
 
-    def exercise_exhausted_cancel_rollback(self, *, reissue, offline=False):
+    def test_superseded_working_cancel_then_exhaustion_preserves_each_attempt(self):
+        self.exercise_exhausted_cancel_rollback(reissue=True,superseded=True)
+
+    def test_superseded_working_cancel_then_offline_and_transfer_preserves_each_attempt(self):
+        self.exercise_exhausted_cancel_rollback(reissue=False,offline=True,superseded=True)
+
+    @staticmethod
+    def cancel_attempt_evidence(attempt):
+        fields = ("action_key","cleanup_id","delivery_id","delivery_ids","retries","superseded_by","report_key","action_seq",
+                  "report_seq")
+        result = {key:attempt[key] for key in fields if key in attempt}
+        if edits := attempt.get("working_edits"):
+            result["edits"] = [{key:edit[key] for key in ("action_key","delivery_id","expected_revision")} for edit in edits]
+        return result
+
+    def test_repeated_working_cancel_rolls_back_only_the_confirmed_scope(self):
+        self.exercise_repeated_working_cancel(transfer=False)
+
+    def test_transfer_supersedes_working_cancellations_without_releasing_the_new_holder(self):
+        self.exercise_repeated_working_cancel(transfer=True)
+
+    def exercise_repeated_working_cancel(self, *, transfer):
+        original = self.old("""
+store = RouterStore(sys.argv[1])
+for worker in ("oguri","tama"):
+    store.upsert_worker(worker)
+print(store.orders.create("Repeated working cancellation","Isolated trial","oguri",{},"fixture",None,None))
+store.close()
+""",self.legacy)
+        legacy_digest = digest(self.legacy)
+        backup(self.legacy,self.attachments,self.snapshot)
+        tid = prepare(self.snapshot,self.trial,self.source_id)["queued_id_map"][original]
+        clock = Clock()
+        loop = Loop(self.trial,clock,FixtureHost,extra_workers=["tama"])
+        manager,worker = loop.hermes,loop.worker
+        keys,control_inputs,scopes = [],[],[]
+        review = self.root/"working-cancel-review.json"
+
+        def details():
+            return manager.inspect(tid)
+
+        def advance(seconds):
+            clock.advance(seconds)
+            worker.poll()
+            worker.poll()
+
+        def stage(trial,destination):
+            approval = {"trial_sha256":digest(trial/"router.db"),"closed_assignments":{tid:new_aid} if transfer else {}}
+            if not transfer:
+                approval["cancelled_assignments"] = {tid:aid}
+            review.write_text(json.dumps(approval))
+            return stage_reviewed_rollback(self.snapshot,trial,review,destination)
+
+        with loop.server:
+            loop.thread.start()
+            try:
+                worker.connect()
+                worker.poll()
+                advance(10)
+                aid = worker.hold()["held_assignment_id"]
+                for index in range(3):
+                    revision = details()["task"]["revision"]
+                    key = guid()
+                    pending = manager.act(key,tid,revision,"cancel",reason="Same reason for every attempt")
+                    self.assertEqual(manager.act(key,tid,revision,"cancel",reason="Same reason for every attempt"),pending)
+                    self.assertEqual((pending["task"]["state"],pending["delivery_state"]),("working","pending"))
+                    advance(1)
+                    payload,native = loop.native.entries()[-1]
+                    self.assertEqual(payload["kind"],"task.cancel")
+                    keys.append(key)
+                    control_inputs.append(native["native_id"])
+                    scopes.append(payload.get("cleanup_id"))
+                    if index==0:
+                        advance(10)
+                    edited = manager.update(guid(),tid,details()["task"]["revision"],{"title":f"Revised after stop {index+1}"})
+                    self.assertEqual(edited["assignment_id"],aid)
+                    worker.poll()
+                self.assertEqual(len(set(scopes)),3)
+                self.assertIsNone(scopes[0])
+                loop.native.cleanup_evidence = lambda session,assignment,kind: {
+                    "session":session,"assignment_id":assignment,"kind":kind,"stopped":True,
+                    "cleaned":True,"receipt_id":"isolated-working-cancel-cleanup"}
+                for native in control_inputs[:2]:
+                    with self.assertRaises(Fault) as stale:
+                        worker.report(native,tid,aid,"Superseded","cancel_confirmed")
+                    self.assertEqual((stale.exception.status,stale.exception.code),(409,"stale_assignment"))
+                self.assertEqual(details()["task"]["state"],"working")
+
+                if transfer:
+                    other_host = FixtureHost(self.trial/"working-cancel-other-host.db","working-cancel-other")
+                    other = Worker(self.trial/"working-cancel-other.db","tama",loop.extra_clients["tama"],
+                                   HostAdapter(self.trial/"working-cancel-other-adapter.db",other_host,other_host.session))
+                    other.connect()
+                    other.poll()
+                    advance(10)
+                    other.poll()
+                    transfer_key = guid()
+                    manager.act(transfer_key,tid,details()["task"]["revision"],"transfer",worker_id="tama",
+                                reason="Transfer the original assignment")
+                    other.poll()
+                    new_aid = other.hold()["held_assignment_id"]
+                    self.assertTrue(new_aid and new_aid!=aid)
+                    worker.poll()
+                    payload,native = loop.native.entries()[-1]
+                    self.assertEqual(payload["kind"],"task.transfer_out")
+                    final = worker.report(native["native_id"],tid,aid,"Old assignment cleared","transfer_confirmed")
+                    self.assertEqual(final,{"recorded":True,"release_assignment_id":aid,"task_state":"working"})
+                    self.assertEqual(other.hold()["held_assignment_id"],new_aid)
+                    latest, = other_host.entries()
+                    self.assertEqual(other.report(latest[1]["native_id"],tid,new_aid,"Fresh final result")["task_state"],
+                                     "completed_reported")
+                    self.assertEqual(manager.approve(guid(),tid,details()["task"]["revision"])["task"]["state"],"closed")
+                    other.poll()
+                else:
+                    new_aid = None
+                    final = worker.report(control_inputs[-1],tid,aid,"Only the latest cleanup","cancel_confirmed")
+                    self.assertEqual(final,{"recorded":True,"release_assignment_id":aid,"task_state":"cancelled"})
+                    self.assertIsNone(details()["last_report"])
+                manager.poll()
+                worker.poll()
+                settled = stage(self.trial,self.restore)
+            finally:
+                loop.server.shutdown()
+                loop.thread.join()
+
+        private = self.restore/"private-review"
+        entry = json.loads((private/"manifest.json").read_text())["orders"][tid]
+        first = entry["assignment_history"][0]
+        predecessors,cleanup = first["superseded_cancels"],first["cleanup"]
+        action_keys = keys+[transfer_key] if transfer else keys
+        self.assertEqual([p["action_key"] for p in predecessors],action_keys[:-1])
+        self.assertEqual([p["superseded_by"] for p in predecessors],action_keys[1:])
+        self.assertEqual([p.get("cleanup_id") for p in predecessors],scopes if transfer else scopes[:-1])
+        self.assertTrue(predecessors[0]["retries"])
+        self.assertEqual(cleanup["receipt"],final)
+        if not transfer:
+            self.assertEqual(cleanup["report_key"],"cancel_confirmed-"+scopes[-1])
+            self.assertEqual(first["final_working_cancel"]["working_edits"][0]["changes"]["title"],"Revised after stop 3")
+        legacy = self.read_legacy_cancel_archive(original)
+        self.assertEqual(legacy,{"status":200,"reason":"reviewed_on_rewrite" if transfer else "cancelled_on_rewrite",
+                                 "deliverable":None,"queues":[None,None],"held":[None,None]})
+        self.assertEqual(digest(self.legacy),legacy_digest)
+        self.assertEqual(digest(self.trial/"router.db"),settled["trial_sha256"])
+
+        damaged = self.root/"damaged-working-cancel"
+        damaged.mkdir()
+        shutil.copyfile(self.trial/"baseline.json",damaged/"baseline.json")
+        denied = self.root/"denied-working-cancel"
+        checks = [
+            ("UPDATE deliveries SET payload=json_remove(payload,'$.cleanup_id') WHERE delivery_id=?",
+             (predecessors[1]["delivery_ids"][0],),"original control scope|outside its control attempt"),
+            ("UPDATE operations SET rowid=(SELECT MAX(rowid)+1 FROM operations) WHERE json_extract(request,'$[0][1]')=?",
+             (f"/v1/deliveries/{cleanup['delivery_id'] if transfer else cleanup['delivery_ids'][0]}/ack",),"own receipt"),
+        ]
+        if not transfer:
+            checks.append(("UPDATE operations SET request=json_set(request,'$[1].cleanup_id',?) WHERE key=?",
+                           (scopes[1],cleanup["report_key"]),"conflicting receipt.+report"))
+        for sql,params,reason in checks:
+            shutil.copyfile(private/"trial-router.db",damaged/"router.db")
+            with closing(sqlite3.connect(damaged/"router.db")) as db,db:
+                self.assertEqual(db.execute(sql,params).rowcount,1)
+            with self.assertRaisesRegex(ValueError,reason):
+                stage(damaged,denied)
+            self.assertFalse(denied.exists())
+        if output := os.environ.get("MOWULINK_ACTIVE_CANCEL_EVIDENCE"):
+            path = Path(output)
+            evidence = json.loads(path.read_text()) if path.exists() else {}
+            phase = "working_replaced_then_transferred" if transfer else "working_replaced_then_confirmed"
+            evidence[phase] = {"task_id":tid,"original_assignment":aid,"new_assignment":new_aid,
+                "attempt_keys":action_keys,"cleanup_scopes":scopes,
+                "superseded_attempts":[self.cancel_attempt_evidence(p) for p in predecessors],
+                "final_cleanup":dict(self.cancel_attempt_evidence(cleanup),reply=final),
+                "legacy":legacy,"trial_sha256":settled["trial_sha256"],"tampered_receipts_refused":len(checks),
+                "boundary":"Actual isolated rewrite and legacy HTTP Routers and rewrite Workers; scripted hosts and clock."}
+            path.write_text(json.dumps(evidence,ensure_ascii=False,indent=2,sort_keys=True)+"\n")
+
+    def exercise_exhausted_cancel_rollback(self, *, reissue, offline=False, superseded=False):
         original = self.old("""
 store = RouterStore(sys.argv[1])
 for name in ("oguri","tama"):
@@ -1891,6 +2091,7 @@ store.close()
                        HostAdapter(self.trial/"cancel-other-adapter.db",other_host,other_host.session))
         review = self.root/"cancel-retry-review.json"
         first_action,last_action = guid(),guid()
+        prior_key,prior_controls = None,0
         closed,cancelled = {},{}
 
         def task():
@@ -1919,6 +2120,13 @@ store.close()
                 advance(1)
                 advance(10)
                 self.assertEqual([p["kind"] for p,_ in loop.native.entries()],["task","task_probe"])
+                if superseded:
+                    prior_key = guid()
+                    manager.act(prior_key,tid,task()["revision"],"cancel",reason="Original stop request")
+                    advance(1)
+                    prior_controls = sum(p["kind"]=="task.cancel" for p,_ in loop.native.entries())
+                    self.assertGreater(prior_controls,0)
+                    manager.update(guid(),tid,task()["revision"],{"title":"Edited between explicit cancellations"})
                 revision = task()["revision"]
                 receipt = manager.act(first_action,tid,revision,"cancel",reason="Original stop request")
                 self.assertEqual(receipt["task"]["state"],"working")
@@ -1944,7 +2152,7 @@ store.close()
                 self.assertIsNone(manager.inspect(tid)["last_report"])
                 frames = [p["kind"] for p,_ in loop.native.entries()]
                 original_controls = 3 if offline else 4
-                self.assertEqual(frames.count("task.cancel"),original_controls)
+                self.assertEqual(frames.count("task.cancel"),prior_controls+original_controls)
                 self.assertEqual(frames.count("task.shelved"),0 if offline else 1)
                 with self.assertRaisesRegex(ValueError,"reviewed rollback needs unchanged migrated orders"):
                     stage(self.trial,self.restore)
@@ -1978,7 +2186,7 @@ store.close()
                     control,outcome,terminal = "task.transfer_out","transfer_confirmed","closed"
                 worker.poll()
                 frames = [r for p,r in loop.native.entries() if p["kind"]==control]
-                self.assertEqual(len(frames),original_controls+1 if reissue else 1)
+                self.assertEqual(len(frames),prior_controls+original_controls+1 if reissue else 1)
 
                 def report():
                     return worker.report(frames[-1]["native_id"],tid,aid,"Original work cleared",outcome)
@@ -2009,6 +2217,13 @@ store.close()
         order = json.loads((private/"manifest.json").read_text())["orders"][tid]
         first = order["assignment_history"][0]
         expired,cleanup = first["expired_cancel"],first["cleanup"]
+        if superseded:
+            prior, = first["superseded_cancels"]
+            self.assertEqual((prior["action_key"],prior["superseded_by"]),(prior_key,first_action))
+            self.assertNotIn("cleanup_id",prior)
+            self.assertTrue(expired["cleanup_id"])
+            self.assertEqual(len(prior["delivery_ids"]),prior_controls)
+            self.assertEqual(prior["working_edits"][0]["changes"],{"title":"Edited between explicit cancellations"})
         self.assertEqual(expired["action_key"],first_action)
         self.assertEqual(expired["receipt"]["task"]["state"],"working")
         self.assertEqual(len(expired["delivery_ids"]),original_controls)
@@ -2023,28 +2238,7 @@ store.close()
         self.assertEqual(len(first["inquiry_rounds"][0]["probes"]),1)
         self.assertEqual(digest(self.legacy),before)
         self.assertEqual(digest(self.trial/"router.db"),settled["trial_sha256"])
-        observed = json.loads(self.old("""
-from server import RouterServer
-from selftest_router import http
-from threading import Thread
-from unittest.mock import Mock
-store = RouterStore(sys.argv[1])
-token = "isolated-legacy-cancel-retry"
-with RouterServer(("127.0.0.1",0),store,token,Mock(),Mock()) as server:
-    runner = Thread(target=server.serve_forever,kwargs={"poll_interval":.02})
-    runner.start()
-    try:
-        url = f"http://127.0.0.1:{server.server_port}"
-        status,item = http("GET",url+"/tasks/"+sys.argv[2],token=token)
-        task = item["task"]
-        print(json.dumps({"status":status,"reason":task["archive"]["reason"],"deliverable":task["deliverable"],
-                          "queues":[store.orders.next_dispatch(name) for name in ("oguri","tama")],
-                          "held":[store.orders.held(name) for name in ("oguri","tama")]}))
-    finally:
-        server.shutdown()
-        runner.join()
-store.close()
-""",self.restore/"legacy.db",original))
+        observed = self.read_legacy_cancel_archive(original)
         self.assertEqual(observed,{"status":200,"reason":"cancelled_on_rewrite" if reissue else "reviewed_on_rewrite",
                                    "deliverable":None,"queues":[None,None],"held":[None,None]})
         changed = self.root/"changed-retry"
@@ -2076,11 +2270,16 @@ store.close()
             with self.assertRaisesRegex(ValueError,"offline cancellation receipt is ambiguous after pooling"):
                 stage(changed,denied)
             self.assertFalse(denied.exists())
-        evidence_variable = "MOWULINK_OFFLINE_CANCEL_EVIDENCE" if offline else "MOWULINK_CANCEL_RETRY_EVIDENCE"
+        if superseded:
+            evidence_variable = "MOWULINK_ACTIVE_CANCEL_EVIDENCE"
+        else:
+            evidence_variable = "MOWULINK_OFFLINE_CANCEL_EVIDENCE" if offline else "MOWULINK_CANCEL_RETRY_EVIDENCE"
         if output := os.environ.get(evidence_variable):
             path = Path(output)
             evidence = json.loads(path.read_text()) if path.exists() else {}
             phase = "offline_reissue" if offline else "reissued_cancel" if reissue else "transferred"
+            if superseded:
+                phase = "working_replaced_then_offline_transfer" if offline else "working_replaced_then_exhausted"
             evidence[phase] = {
                 "task_id":tid,"original_assignment":aid,"new_assignment":closed.get(tid),
                 "first_cancel_key":first_action,"first_cancel_deliveries":expired["delivery_ids"],
@@ -2095,6 +2294,10 @@ store.close()
                 "boundary":"Actual isolated rewrite and legacy HTTP Routers and rewrite Workers; scripted hosts and clock."}
             if offline:
                 evidence[phase]["late_original_delivery_receipt_refused"] = True
+            if superseded:
+                evidence[phase].update(
+                    superseded_attempts=[self.cancel_attempt_evidence(p) for p in first["superseded_cancels"]],
+                    expired_cleanup_id=expired["cleanup_id"])
             path.write_text(json.dumps(evidence,ensure_ascii=False,indent=2,sort_keys=True)+"\n")
 
     def test_trial_born_closed_orders_return_as_private_archives_without_a_new_dispatch(self):
