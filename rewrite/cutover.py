@@ -190,11 +190,16 @@ def rollback(snapshot, trial, destination):
         if digest(trial/"router.db") != baseline["router_db_sha256"]:
             raise ValueError("new Router changed; reconcile new writes before rollback")
     with output_directory(destination) as stage:
-        shutil.copyfile(snapshot/"legacy.db",stage/"legacy.db")
-        shutil.copytree(snapshot/"attachments",stage/"attachments")
-        if digest(stage/"legacy.db") != manifest["legacy_db_sha256"] or attachment_index(stage/"attachments") != manifest["attachments"]:
-            raise ValueError("restored bytes failed verification")
+        restore_snapshot(snapshot,stage,manifest)
     return {"restored_db_sha256":manifest["legacy_db_sha256"],"attachments":len(manifest["attachments"])}
+
+
+def restore_snapshot(snapshot, stage, manifest):
+    shutil.copyfile(snapshot/"legacy.db",stage/"legacy.db")
+    shutil.copytree(snapshot/"attachments",stage/"attachments")
+    if (digest(stage/"legacy.db")!=manifest["legacy_db_sha256"]
+            or attachment_index(stage/"attachments")!=manifest["attachments"]):
+        raise ValueError("restored bytes failed verification")
 
 
 def schema(db, database):
@@ -287,12 +292,51 @@ def reconcile(snapshot, trial):
     return result
 
 
+def stage_queue_rollback(snapshot, trial, review, destination):
+    """Prepare a legacy sandbox and reviewed requests. No live API is called."""
+    facts = reconcile(snapshot,trial)
+    if not facts["only_new_queued_tasks"]:
+        raise ValueError("queue replay requires only new unoffered orders")
+    source = trial/"router.db"
+    candidates = facts["queue_candidates"]
+    approval = json.loads(review.read_text())
+    expected = {item["task_id"]:"goal" for item in candidates}
+    if approval!={"trial_sha256":facts["trial_sha256"],"execution_modes":expected}:
+        raise ValueError("review must match the trial digest and confirm goal mode for every order")
+    manifest = verified(snapshot)
+    if manifest["legacy_db_sha256"]!=facts["snapshot_sha256"]:
+        raise ValueError("legacy snapshot changed after reconciliation")
+    with output_directory(destination) as stage:
+        restore_snapshot(snapshot,stage,manifest)
+        requests = []
+        with closing(readonly(stage/"legacy.db")) as old, closing(readonly(source)) as db:
+            for item in candidates:
+                tid,key = item["task_id"],item["request_id"]
+                if old.execute("SELECT 1 FROM task_info WHERE request_id=?",(key,)).fetchone():
+                    raise ValueError("creation request already exists in the legacy snapshot")
+                row = db.execute("SELECT title,instructions FROM tasks WHERE task_id=?",(tid,)).fetchone()
+                if row is None:
+                    raise ValueError("trial order disappeared after reconciliation")
+                body = {"message_id":key,"worker":item["assignee_id"],"TaskName":row["title"],
+                        "goal":row["instructions"],"execution_mode":"goal","queue_if_offline":True}
+                requests.append({"trial_task_id":tid,"request":body})
+        with closing(readonly(source)):
+            if digest(source)!=facts["trial_sha256"]:
+                raise ValueError("trial database changed after reconciliation")
+        plan = {"trial_sha256":facts["trial_sha256"],"legacy_sha256":manifest["legacy_db_sha256"],
+                "requests":requests}
+        (stage/"queue-replay.json").write_text(encode(plan))
+    return {"trial_sha256":facts["trial_sha256"],"legacy_sha256":manifest["legacy_db_sha256"],
+            "queued_requests":len(requests)}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="op", required=True)
     for op, names in (("backup",("database","attachments","destination")),
                       ("verify",("snapshot",)),("prepare",("snapshot","destination")),
                       ("reconcile",("snapshot","trial")),
+                      ("stage-queue-rollback",("snapshot","trial","review","destination")),
                       ("rollback",("snapshot","trial","destination"))):
         command = commands.add_parser(op)
         for name in names:
@@ -301,7 +345,7 @@ def main():
             command.add_argument("--source-id",required=True)
     args = vars(parser.parse_args())
     command = {"backup":backup,"verify":verified,"prepare":prepare,
-               "reconcile":reconcile,"rollback":rollback}[args.pop("op")]
+               "reconcile":reconcile,"rollback":rollback,"stage-queue-rollback":stage_queue_rollback}[args.pop("op")]
     print(encode(command(**args)))
 
 

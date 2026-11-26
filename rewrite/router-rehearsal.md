@@ -31,7 +31,17 @@ python3 -m rewrite.cutover rollback --snapshot ./snapshot --trial ./trial --dest
 - 新库尚未变化时可恢复到全新目录。回退后用实际旧 RouterStore 查归档理由与下一张待派单，逐字节对比附件并核源库摘要。
 - 新库已写入时，直接回退会丢掉新进展，命令会拒绝。保留新旧两边及新增事实，完成逐笔核对后再制定回放顺序。这种有新业务写入的回迁仍待演练。
 
-`reconcile` 可用准备试运行时的同一源码和 SQLite 运行环境，在临时目录从旧快照重建基线，再按实际表对账。输出包含三份库摘要、每张表两侧的差异行数、候选工单号及原建单请求号。已派过的单、未指定处理人、旧库未登记的工位及旧端会修改或拒收的正文分别列出原因。输出不包含正文或附件。即使差异仅含发给旧工位的未派工单，也要先核定旧端的处理模式、编号对照和副作用后再回放。命令本身只读，新业务回迁和覆盖恢复另验。
+`reconcile` 可用准备试运行时的同一源码和 SQLite 运行环境，在临时目录从旧快照重建基线，再按实际表对账。输出包含三份库摘要、每张表两侧的差异行数、候选工单号及原建单请求号。已派过的单、未指定处理人、旧库未登记的工位及旧端会修改或拒收的正文分别列出原因。输出只列标识和记录数。
+
+### 试运行只增加未派工单时的回退演练
+
+只有 `only_new_queued_tasks` 为真时，才可为每一张候选单审核旧端目标模式。将回读的 `trial_sha256` 与 `execution_modes` 写入审核文件。后者必须逐一列出候选工单 UUID，值为明确审核过的 `"goal"`。
+
+```sh
+python3 -m rewrite.cutover stage-queue-rollback --snapshot ./snapshot --trial ./trial --review ./review.json --destination ./queue-recovery
+```
+
+命令在新目录生成旧库、旧附件和 `queue-replay.json`。该文件含原指令，应和离线库一起保管。仅在隔离环境打开该旧库，让旧 Router 不接 Worker，再按文件顺序将每个 `request` 发给旧端 `POST /tasks`。记录新试运行工单号、原请求号与旧端返回的工单号。新请求返回 202 并保持排队。同号重送须返回同一旧工单号，改正文重送须返回 409。核对旧队首、完整正文和回放后的队列顺序。复跑整个演练使用 `python3 -m unittest -v rewrite.test_cutover.Cutover.test_reviewed_new_orders_reenter_the_old_http_queue_once_and_preserve_its_head`。已派发的单、成果及其他新写入仍需逐笔处理。
 
 ## 重做版五组件的离线恢复
 

@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from threading import Thread
 
-from .cutover import backup, digest, prepare, reconcile, rollback, verified
+from .cutover import backup, digest, prepare, reconcile, rollback, stage_queue_rollback, verified
 from .devloop import FixtureHost, Loop
 from .test_mainline import Clock
 from .orders import Orders
@@ -242,6 +242,75 @@ store.close()
         baseline_path.write_text(json.dumps({**wrong,"router_db_sha256":before}))
         with self.assertRaisesRegex(ValueError,"baseline could not be reproduced"):
             reconcile(self.snapshot,self.trial)
+
+    def test_reviewed_new_orders_reenter_the_old_http_queue_once_and_preserve_its_head(self):
+        self.old("""
+store = RouterStore(sys.argv[1])
+store.upsert_worker("two")
+store.close()
+""",self.legacy)
+        backup(self.legacy,self.attachments,self.snapshot)
+        prepare(self.snapshot,self.trial,self.source_id)
+        loop = Loop(self.trial,Clock(),FixtureHost)
+        keys = [guid(),guid()]
+        with loop.server:
+            loop.thread.start()
+            try:
+                new_ids = [loop.hermes.create(key,title,"逐字保留\n第二行","two")["task_id"]
+                           for key,title in zip(keys,("先入队","后入队"))]
+            finally:
+                loop.server.shutdown()
+                loop.thread.join()
+        trial_sha = digest(self.trial/"router.db")
+        review = self.root/"review.json"
+        approval = {"trial_sha256":trial_sha,"execution_modes":dict.fromkeys(new_ids,"goal")}
+        review.write_text(json.dumps({**approval,"trial_sha256":"0"*64}))
+        with self.assertRaisesRegex(ValueError,"review must match"):
+            stage_queue_rollback(self.snapshot,self.trial,review,self.restore)
+        self.assertFalse(self.restore.exists())
+        review.write_text(json.dumps(approval))
+        staged = stage_queue_rollback(self.snapshot,self.trial,review,self.restore)
+        self.assertEqual(staged["queued_requests"],2)
+        self.assertEqual(staged["legacy_sha256"],digest(self.snapshot/"legacy.db"))
+        self.assertEqual((self.restore/"attachments"/self.sha).read_bytes(),(self.attachments/self.sha).read_bytes())
+        observed = json.loads(self.old("""
+from server import RouterServer
+from selftest_router import http
+from threading import Thread
+from unittest.mock import Mock
+store = RouterStore(sys.argv[1])
+plan = json.loads(Path(sys.argv[2]).read_text())
+mapping = {}
+with RouterServer(("127.0.0.1",0),store,"offline-test",Mock(),Mock()) as srv:
+    thread = Thread(target=srv.serve_forever,kwargs={"poll_interval":.02})
+    thread.start()
+    try:
+        url = f"http://127.0.0.1:{srv.server_port}/tasks"
+        for item in plan["requests"]:
+            body = item["request"]
+            status,reply = http("POST",url,body,"offline-test")
+            assert status==202 and reply["queued"] and not reply["dispatched"], (status,reply)
+            again,duplicate = http("POST",url,body,"offline-test")
+            assert again==200 and duplicate["duplicate"] and duplicate["task_id"]==reply["task_id"]
+            clash,_ = http("POST",url,dict(body,goal="unexpected change"),"offline-test")
+            assert clash==409
+            mapping[item["trial_task_id"]] = reply["task_id"]
+    finally:
+        srv.shutdown()
+        thread.join()
+rows = store._conn.execute('''SELECT i.task_id,i.name,i.description,i.request_id,i.metadata FROM task_info i
+                              JOIN dispatch_queue q USING(task_id) WHERE i.owner='two' ORDER BY q.seq''').fetchall()
+print(json.dumps({"head":store.orders.next_dispatch("two"),"queue":[dict(r) for r in rows],"mapping":mapping}))
+store.close()
+""",self.restore/"legacy.db",self.restore/"queue-replay.json"))
+        self.assertEqual(observed["head"],self.queued)
+        inserted = observed["queue"][1:]
+        self.assertEqual([row["task_id"] for row in inserted],[observed["mapping"][tid] for tid in new_ids])
+        self.assertEqual([row["request_id"] for row in inserted],keys)
+        self.assertEqual([row["name"] for row in inserted],["先入队","后入队"])
+        self.assertTrue(all(row["description"]=="逐字保留\n第二行" and
+                            json.loads(row["metadata"])["execution_mode"]=="goal" for row in inserted))
+        self.assertEqual(digest(self.trial/"router.db"),trial_sha)
 
     def test_archived_peer_threads_files_and_permissions_survive_without_replay(self):
         first,reply,root_msg = guid(),guid(),guid()
