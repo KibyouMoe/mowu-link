@@ -1,0 +1,238 @@
+{
+  "baseline": {
+    "revision": "b8d986558dffbf89cab8c80f90266aee85ec576b",
+    "observation": "No native terminal event during the 3-second observation after the simulated adapter deadline while Router intake remained blocked."
+  },
+  "native_binary_sha256": "e1c3d034b7fd295d160d6ab412357f9c54241c8ed7a2a861f4730b8a4dd88ddb",
+  "runs": [
+    {
+      "boundary": "Actual App Server, HTTP Router and Worker, local model. Router transport blocked with gates and native ten-minute clock advanced.",
+      "file_intake_not_registered_and_no_late_notice": true,
+      "file_sha256_after": "9160d4be34c8695bd172a76c7c7966587ea5a4d991ad22c87b2b91af54aa9ebb",
+      "first_closure_attempts": 2,
+      "late_accept_recorded_but_not_sent": true,
+      "on_time_native_replies": [
+        [
+          0,
+          "cancel"
+        ],
+        [
+          1,
+          "cancel"
+        ]
+      ],
+      "requests": {
+        "command": {
+          "approval_id": "e57d01d8-7c52-4af6-ac3f-b6d244f31d30",
+          "decision": "accept",
+          "interrupted_in_seconds_after_deadline": 0.206,
+          "native_id": 1,
+          "native_outcome": "interrupted",
+          "source": "native_deadline",
+          "turn_id": "01a2188f-5527-73d1-aad6-57faf5b7686e"
+        },
+        "file": {
+          "approval_id": "06676127-7d87-4550-8de8-2653ab798974",
+          "decision": null,
+          "interrupted_in_seconds_after_deadline": 0.159,
+          "native_id": 0,
+          "native_outcome": "interrupted",
+          "source": "native_deadline",
+          "turn_id": "01a2188f-515c-7ad3-9216-207d9a3cca7f"
+        }
+      },
+      "session_id": "01a2188f-50f1-7c71-b885-9d86e01d529e"
+    },
+    {
+      "boundary": "Actual App Server, HTTP Router and Worker, local model. Router transport blocked with gates and native ten-minute clock advanced.",
+      "file_intake_not_registered_and_no_late_notice": true,
+      "file_sha256_after": "9160d4be34c8695bd172a76c7c7966587ea5a4d991ad22c87b2b91af54aa9ebb",
+      "first_closure_attempts": 2,
+      "late_accept_recorded_but_not_sent": true,
+      "on_time_native_replies": [
+        [
+          0,
+          "cancel"
+        ],
+        [
+          1,
+          "cancel"
+        ]
+      ],
+      "requests": {
+        "command": {
+          "approval_id": "c75f02ae-fb14-4cd8-99a2-0e410bdc9701",
+          "decision": "accept",
+          "interrupted_in_seconds_after_deadline": 0.193,
+          "native_id": 1,
+          "native_outcome": "interrupted",
+          "source": "native_deadline",
+          "turn_id": "01a2188f-5525-7851-8b7f-8eb030b945e4"
+        },
+        "file": {
+          "approval_id": "37b090c7-bacc-4680-b30f-abbecb5959b5",
+          "decision": null,
+          "interrupted_in_seconds_after_deadline": 0.154,
+          "native_id": 0,
+          "native_outcome": "interrupted",
+          "source": "native_deadline",
+          "turn_id": "01a2188f-515e-7e81-8469-18f7c72ac496"
+        }
+      },
+      "session_id": "01a2188f-50f1-74d0-8dd9-db1d82f0f94f"
+    },
+    {
+      "boundary": "Actual App Server, HTTP Router and Worker, local model. Router transport blocked with gates and native ten-minute clock advanced.",
+      "file_intake_not_registered_and_no_late_notice": true,
+      "file_sha256_after": "9160d4be34c8695bd172a76c7c7966587ea5a4d991ad22c87b2b91af54aa9ebb",
+      "first_closure_attempts": 2,
+      "late_accept_recorded_but_not_sent": true,
+      "on_time_native_replies": [
+        [
+          0,
+          "cancel"
+        ],
+        [
+          1,
+          "cancel"
+        ]
+      ],
+      "requests": {
+        "command": {
+          "approval_id": "50197ab4-609e-4cc4-bd29-0bc2ac85913b",
+          "decision": "accept",
+          "interrupted_in_seconds_after_deadline": 0.189,
+          "native_id": 1,
+          "native_outcome": "interrupted",
+          "source": "native_deadline",
+          "turn_id": "01a2188f-5503-7bd0-b080-97d84c0fea9a"
+        },
+        "file": {
+          "approval_id": "74c1adf8-46f4-4b3a-8345-840129531aeb",
+          "decision": null,
+          "interrupted_in_seconds_after_deadline": 0.152,
+          "native_id": 0,
+          "native_outcome": "interrupted",
+          "source": "native_deadline",
+          "turn_id": "01a2188f-515e-7742-9f86-55adc60ff276"
+        }
+      },
+      "session_id": "01a2188f-50f1-7d63-a46d-9c1d00d64209"
+    },
+    {
+      "boundary": "Actual App Server, HTTP Router and Worker, local model. Router transport blocked with gates and native ten-minute clock advanced.",
+      "file_intake_not_registered_and_no_late_notice": true,
+      "file_sha256_after": "9160d4be34c8695bd172a76c7c7966587ea5a4d991ad22c87b2b91af54aa9ebb",
+      "first_closure_attempts": 2,
+      "late_accept_recorded_but_not_sent": true,
+      "on_time_native_replies": [
+        [
+          0,
+          "cancel"
+        ],
+        [
+          1,
+          "cancel"
+        ]
+      ],
+      "requests": {
+        "command": {
+          "approval_id": "0d0a7805-2bd8-423f-8d6e-2e55c028409f",
+          "decision": "accept",
+          "interrupted_in_seconds_after_deadline": 0.014,
+          "native_id": 1,
+          "native_outcome": "interrupted",
+          "source": "native_deadline",
+          "turn_id": "01a2188f-5d1b-7672-8aae-c67e51292bc8"
+        },
+        "file": {
+          "approval_id": "d08afd7a-1d5f-4946-b63e-6dbd634e467d",
+          "decision": null,
+          "interrupted_in_seconds_after_deadline": 0.154,
+          "native_id": 0,
+          "native_outcome": "interrupted",
+          "source": "native_deadline",
+          "turn_id": "01a2188f-597a-72d2-9a0b-ac86ccc40dc0"
+        }
+      },
+      "session_id": "01a2188f-5926-7391-af84-c655c724c4c1"
+    },
+    {
+      "boundary": "Actual App Server, HTTP Router and Worker, local model. Router transport blocked with gates and native ten-minute clock advanced.",
+      "file_intake_not_registered_and_no_late_notice": true,
+      "file_sha256_after": "9160d4be34c8695bd172a76c7c7966587ea5a4d991ad22c87b2b91af54aa9ebb",
+      "first_closure_attempts": 2,
+      "late_accept_recorded_but_not_sent": true,
+      "on_time_native_replies": [
+        [
+          0,
+          "cancel"
+        ],
+        [
+          1,
+          "cancel"
+        ]
+      ],
+      "requests": {
+        "command": {
+          "approval_id": "684771c2-49f5-48b3-b755-12021d1f2873",
+          "decision": "accept",
+          "interrupted_in_seconds_after_deadline": 0.207,
+          "native_id": 1,
+          "native_outcome": "interrupted",
+          "source": "native_deadline",
+          "turn_id": "01a2188f-5d60-73f2-8fc7-10fdc585d2f3"
+        },
+        "file": {
+          "approval_id": "31455548-cd7b-4dab-be39-8a52da5a2663",
+          "decision": null,
+          "interrupted_in_seconds_after_deadline": 0.15,
+          "native_id": 0,
+          "native_outcome": "interrupted",
+          "source": "native_deadline",
+          "turn_id": "01a2188f-5995-7f33-ab64-132eb6ef7f5b"
+        }
+      },
+      "session_id": "01a2188f-5942-7102-b579-e00242d281d3"
+    },
+    {
+      "boundary": "Actual App Server, HTTP Router and Worker, local model. Router transport blocked with gates and native ten-minute clock advanced.",
+      "file_intake_not_registered_and_no_late_notice": true,
+      "file_sha256_after": "9160d4be34c8695bd172a76c7c7966587ea5a4d991ad22c87b2b91af54aa9ebb",
+      "first_closure_attempts": 2,
+      "late_accept_recorded_but_not_sent": true,
+      "on_time_native_replies": [
+        [
+          0,
+          "cancel"
+        ],
+        [
+          1,
+          "cancel"
+        ]
+      ],
+      "requests": {
+        "command": {
+          "approval_id": "eb4b4dc8-c5a8-4371-942f-04fa1e7b9fbe",
+          "decision": "accept",
+          "interrupted_in_seconds_after_deadline": 0.204,
+          "native_id": 1,
+          "native_outcome": "interrupted",
+          "source": "native_deadline",
+          "turn_id": "01a2188f-5d60-7eb2-8359-772c37fbbc1c"
+        },
+        "file": {
+          "approval_id": "d3f160fb-8bef-4d68-a531-9d198c0e299b",
+          "decision": null,
+          "interrupted_in_seconds_after_deadline": 0.168,
+          "native_id": 0,
+          "native_outcome": "interrupted",
+          "source": "native_deadline",
+          "turn_id": "01a2188f-59a1-78e0-9fd0-b32f139a6a4f"
+        }
+      },
+      "session_id": "01a2188f-5962-7591-9e12-c753bc0f74f4"
+    }
+  ],
+  "verified_runs": 6
+}

@@ -5,7 +5,7 @@ import hashlib
 from threading import Event, Lock, Thread
 import time
 
-from .approvals import DECISIONS, validate_file_changes, validate_request
+from .approvals import DECISIONS, TTL_SECONDS, validate_file_changes, validate_request
 from .storage import Fault, encode, guid, require
 
 
@@ -15,6 +15,7 @@ class NativeApproval:
     request_id: int | str
     request: dict
     digest: str
+    deadline: float
     attempted_response: dict | None = None
     closed: bool = False
     retired: bool = False
@@ -25,6 +26,7 @@ class CodexApprovals:
     def __init__(self,rpc,session,*,commands=True,files=False):
         self.rpc,self.session = rpc,session
         self.commands,self.files = commands,files
+        self.clock = time.monotonic
         self.lock = Lock()
         self.live = {}
         self.file_changes = {}
@@ -87,7 +89,7 @@ class CodexApprovals:
                 require(current.request==data,409,"native_approval_conflict")
                 return
             digest = hashlib.sha256(encode(data).encode()).hexdigest()
-            self.live[rid] = NativeApproval(guid(),rid,data,digest)
+            self.live[rid] = NativeApproval(guid(),rid,data,digest,self.clock()+TTL_SECONDS)
 
     def closed(self,params):
         if not isinstance(params,dict) or params.get("threadId")!=self.session:
@@ -107,12 +109,44 @@ class CodexApprovals:
                 if item.request["turn_id"]==turn:
                     item.retired = True
 
+    def answer(self,item,response):
+        item.attempted_response = response
+        self.rpc.send({"id":item.request_id,"result":{"decision":response["decision"]}})
+
+    def expire(self,item):
+        # Both the native timer and a newly arrived Router response consult the same deadline under the lock.
+        if (item.attempted_response is None and not (item.closed or item.retired)
+                and self.clock()>=item.deadline and "cancel" in item.request["decisions"]):
+            item.expired = True
+            self.answer(item,{"source":"native_deadline","decision":"cancel"})
+
+    def confirm(self,worker,route,item,attempted):
+        proof = {"session":self.session,"request_digest":item.digest,"attempted_response":attempted}
+        if attempted and attempted["source"]=="native_deadline":
+            proof["request"] = item.request
+        receipt = worker.request("PUT",route+"/closed",proof)
+        require(isinstance(receipt,dict) and receipt.get("approval_id")==item.id and receipt.get("state")=="native_closed"
+                and receipt.get("attempted_response")==attempted,502,"wrong_approval_closure")
+        with self.lock:
+            if self.live.get(item.request_id) is item:
+                del self.live[item.request_id]
+
     def advance(self,worker,item):
         route = "worker/approvals/"+item.id
+        with self.lock:
+            self.expire(item)
+            closed,attempted = item.closed,item.attempted_response
+            native_timeout = attempted and attempted["source"]=="native_deadline"
+        if native_timeout:
+            if closed:
+                self.confirm(worker,route,item,attempted)
+            return
+
         reply = worker.request("POST",route,item.request)
         require(isinstance(reply,dict) and reply.get("approval_id")==item.id and reply.get("request")==item.request
                 and reply.get("request_digest")==item.digest,502,"wrong_approval_receipt")
         with self.lock:
+            self.expire(item)
             closed,attempted = item.closed,item.attempted_response
             state = reply.get("state")
             if state=="expired":
@@ -123,25 +157,28 @@ class CodexApprovals:
                     decision = reply.get("decision")
                     expiry = reply.get("expires_at")
                     require(decision in item.request["decisions"] and type(expiry) in (float,int),502,"invalid_approval_receipt")
-                    if time.time()<expiry:
+                    if time.time()<expiry and self.clock()<item.deadline:
                         response = {"source":"operator","decision":decision}
                 elif state=="expired" and "cancel" in item.request["decisions"]:
                     response = {"source":"expiry","decision":"cancel"}
                 if response:
-                    item.attempted_response = response
-                    self.rpc.send({"id":item.request_id,"result":{"decision":response["decision"]}})
+                    self.answer(item,response)
         if closed:
-            proof = {"session":self.session,"request_digest":item.digest,"attempted_response":attempted}
-            receipt = worker.request("PUT",route+"/closed",proof)
-            require(isinstance(receipt,dict) and receipt.get("approval_id")==item.id and receipt.get("state")=="native_closed"
-                    and receipt.get("attempted_response")==attempted,502,"wrong_approval_closure")
-            with self.lock:
-                if self.live.get(item.request_id) is item:
-                    del self.live[item.request_id]
+            self.confirm(worker,route,item,attempted)
 
     @contextmanager
     def run(self,worker):
         stop = Event()
+        def enforce_deadlines():
+            while not stop.wait(.2):
+                with self.lock:
+                    for item in self.live.values():
+                        try:
+                            self.expire(item)
+                        except Fault:
+                            # An attempted native response is never resent, even if the transport fails.
+                            continue
+
         def pump():
             while not stop.wait(.25):
                 with self.lock:
@@ -154,10 +191,12 @@ class CodexApprovals:
                     except (Fault,OSError):
                         # Keep the original request available for lookup; the native response is never resent.
                         continue
-        thread = Thread(target=pump,daemon=True)
-        thread.start()
+        relay,deadlines = Thread(target=pump,daemon=True),Thread(target=enforce_deadlines,daemon=True)
+        relay.start()
+        deadlines.start()
         try:
             yield
         finally:
             stop.set()
-            thread.join(timeout=11)
+            deadlines.join(timeout=3)
+            relay.join(timeout=11)

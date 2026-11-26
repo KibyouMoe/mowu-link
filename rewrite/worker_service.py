@@ -226,9 +226,13 @@ class WorkerService:
             if method=="POST" and len(parts)==1:
                 result = w.router.request(method,target,{"session_id":w.session,"request":body})
             elif method=="PUT" and len(parts)==2 and parts[1]=="closed":
-                require(set(body)=={"session","request_digest","attempted_response"},422,"invalid_approval_closure")
-                result = w.router.request(method,target+"/closed",
-                    {"session_id":w.session,"request_digest":body["request_digest"],"attempted_response":body["attempted_response"]})
+                fields = {"session","request_digest","attempted_response"}
+                require(fields<=set(body)<=fields|{"request"},422,"invalid_approval_closure")
+                if "request" in body:
+                    require(isinstance(body["request"],dict) and body["request"].get("session")==session,
+                            403,"wrong_native_session")
+                proof = {key:value for key,value in body.items() if key!="session"}
+                result = w.router.request(method,target+"/closed",dict(proof,session_id=w.session))
             else:
                 raise Fault(404,"unknown_approval_route")
             return 200,"application/json",result

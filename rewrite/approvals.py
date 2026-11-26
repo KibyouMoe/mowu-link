@@ -100,6 +100,44 @@ def record(row,worker_session,now):
             "attempted_response":attempted}
 
 
+def close_native(db,orders,wid,aid,row,session,now,body):
+    fields = {"session_id","request_digest","attempted_response"}
+    require(fields<=set(body)<=fields|{"request"},422,"invalid_approval_closure")
+    orders.active_session(db,wid,body)
+    attempted = body["attempted_response"]
+    if attempted is not None:
+        require(isinstance(attempted,dict) and set(attempted)=={"source","decision"},422,"invalid_approval_closure")
+    stored = encode(attempted)
+    native_deadline = attempted=={"source":"native_deadline","decision":"cancel"}
+    require(("request" in body)==native_deadline,422,"invalid_approval_closure")
+    if native_deadline:
+        request = body["request"]
+        validate_request(request)
+        raw = encode(request)
+        require("cancel" in request["decisions"] and hashlib.sha256(raw.encode()).hexdigest()==body["request_digest"],
+                409,"approval_request_conflict")
+        if not row:
+            # A spent native request can arrive before any acknowledged registration. Never notify an approver here.
+            db.execute("""INSERT INTO native_approvals(worker_id,approval_id,worker_session,request,request_digest,
+                          expires_at,closed_at,attempted_response) VALUES (?,?,?,?,?,?,?,?)""",
+                       (wid,aid,session,raw,body["request_digest"],now,now,stored))
+            return
+        require(row["request"]==raw,409,"approval_request_conflict")
+    require(row,404,"approval_not_found")
+    require(session==row["worker_session"] and body["request_digest"]==row["request_digest"],
+            409,"approval_request_conflict")
+    if row["closed_at"] is not None:
+        require(row["attempted_response"]==stored,409,"approval_closure_conflict")
+        return
+    if attempted is not None and not native_deadline:
+        decision,source = attempted["decision"],attempted["source"]
+        require((source=="operator" and decision in DECISIONS and decision==row["decision"])
+                or (source=="expiry" and decision=="cancel" and now>=row["expires_at"]
+                    and "cancel" in json.loads(row["request"])["decisions"]),409,"approval_response_conflict")
+    db.execute("""UPDATE native_approvals SET closed_at=?,attempted_response=? WHERE worker_id=? AND approval_id=?""",
+               (now,stored,wid,aid))
+
+
 def route(orders,actor,method,parts,body):
     require(len(parts) in (2,3,4),404,"unknown_approval_route")
     wid = parts[1]
@@ -148,26 +186,7 @@ def route(orders,actor,method,parts,body):
             db.execute("UPDATE native_approvals SET decision=? WHERE worker_id=? AND approval_id=?",(decision,wid,aid))
         elif method=="PUT" and len(parts)==4 and parts[3]=="closed":
             require(actor==worker,403,"forbidden")
-            require(row,404,"approval_not_found")
-            require(set(body)=={"session_id","request_digest","attempted_response"},422,"invalid_approval_closure")
-            orders.active_session(db,wid,body)
-            require(session==row["worker_session"] and body["request_digest"]==row["request_digest"],
-                    409,"approval_request_conflict")
-            attempted = body["attempted_response"]
-            stored = encode(attempted)
-            if row["closed_at"] is not None:
-                require(row["attempted_response"]==stored,409,"approval_closure_conflict")
-                return record(row,session,now)
-            if attempted is not None:
-                require(isinstance(attempted,dict) and set(attempted)=={"source","decision"},
-                        422,"invalid_approval_closure")
-                decision = attempted["decision"]
-                source = attempted["source"]
-                require((source=="operator" and decision in DECISIONS and decision==row["decision"])
-                        or (source=="expiry" and decision=="cancel" and now>=row["expires_at"]
-                            and "cancel" in json.loads(row["request"])["decisions"]),409,"approval_response_conflict")
-            db.execute("""UPDATE native_approvals SET closed_at=?,attempted_response=? WHERE worker_id=? AND approval_id=?""",
-                       (now,stored,wid,aid))
+            close_native(db,orders,wid,aid,row,session,now,body)
         else:
             raise Fault(404,"unknown_approval_route")
         updated = db.execute("SELECT * FROM native_approvals WHERE worker_id=? AND approval_id=?",(wid,aid)).fetchone()

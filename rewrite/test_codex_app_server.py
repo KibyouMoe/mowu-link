@@ -18,6 +18,7 @@ import unittest
 
 from .agent_tools import REPORT_TOOL, TOOLSET
 from .adapter import HostAdapter
+from .approvals import TTL_SECONDS
 from .codex_activation import CodexActivation
 from .codex_app_server import AppServerHost, worker_callbacks
 from .codex_display import CodexDisplay
@@ -1194,6 +1195,141 @@ class CodexAppServer(unittest.TestCase):
                          "operator_notice_count":len(notices),"other_notice_count":0,"operator_cli_verified":True,
                          "diff_excluded_from_display":True,
                          "boundary":"Actual bundled App Server, HTTP Router and Worker. Local model and operator fixtures. Missing diff and directory scope injected."}
+
+    def test_native_approval_deadline_survives_lost_intake_and_late_router_accept(self):
+        root = Path(self.root).resolve()
+        target = root/"deadline.txt"
+        target.write_bytes(b"before\n")
+        self.provider.approval_patches = {"deadline":f"*** Begin Patch\n*** Update File: {target}\n"
+                                                    "@@\n-before\n+after\n*** End Patch"}
+        self.provider.approval_commands = {"deadline":"pwd"}
+        rpc = self.enterContext(isolated_app_server(self.root,self.origin,
+            ['model="gpt-5.5"','approval_policy="on-request"','sandbox_mode="read-only"']))
+        session = rpc.request("thread/start",{"cwd":self.root,"ephemeral":False})["thread"]["id"]
+        host = AppServerHost(rpc,session,relay_command_approvals=True,relay_file_approvals=True)
+        clock = Clock()
+        host.approvals.clock = clock
+        worker_token,operator_token,adapter_token = (guid() for _ in range(3))
+        router = self.enterContext(running(serve_loopback(Orders(root/"router.db"),
+                                         {worker_token:"worker/dev",operator_token:"approver/dev"})))
+        worker_wire,operator = Client(router,worker_token),Client(router,operator_token)
+        worker = Worker(root/"worker.db","dev",worker_wire,HostAdapter(root/"adapter.db",host,session))
+        worker.connect()
+        endpoint = self.enterContext(running(WorkerService(worker).listen({adapter_token:"adapter/dev"},
+                                                                  ("127.0.0.1",0),None)))
+        callback = Client(endpoint,adapter_token)
+        holding = {name:Event() for name in ("file","command")}
+        release = {name:Event() for name in holding}
+        releases = []
+        registrations,closures = [],[]
+        request = worker_wire.request
+
+        def obstruct(method,path,body=None,*args,**kwargs):
+            if method=="POST" and path.startswith("approvals/dev/"):
+                item = body["request"]["item_id"]
+                registrations.append(item)
+                if item=="trial-file-deadline" and not holding["file"].is_set():
+                    holding["file"].set()
+                    release["file"].wait(8)
+                    raise Fault(503,"isolated_router_intake_unavailable",True)
+                result = request(method,path,body,*args,**kwargs)
+                if item=="trial-approval-deadline" and result["state"]=="decided" and not holding["command"].is_set():
+                    holding["command"].set()
+                    release["command"].wait(8)
+                    releases.append(result)
+                return result
+            result = request(method,path,body,*args,**kwargs)
+            if method=="PUT" and path.endswith("/closed"):
+                closures.append(result)
+                if len(closures)==1:
+                    raise Fault(503,"isolated_deadline_closure_receipt_lost",True)
+            return result
+
+        worker_wire.request = obstruct
+        packets,decisions,native_closed = {},[],[]
+        outgoing,incoming = rpc.send,rpc.event
+        terminals = Queue()
+
+        def take(deadline):
+            packet = incoming(deadline)
+            if packet["method"] in ("item/fileChange/requestApproval","item/commandExecution/requestApproval"):
+                packets[packet["params"]["itemId"]] = packet
+            if packet["method"]=="serverRequest/resolved":
+                native_closed.append(packet["params"]["requestId"])
+            return packet
+
+        def send(packet):
+            if "decision" in packet.get("result",{}):
+                decisions.append((packet["id"],packet["result"]["decision"]))
+            outgoing(packet)
+
+        rpc.event,rpc.send = take,send
+        self.enterContext(worker_callbacks(host,callback,lambda:None,
+                          notify_terminal=lambda tid,state:terminals.put((tid,state))))
+        self.addCleanup(lambda:[gate.set() for gate in release.values()])
+
+        def wait(condition):
+            deadline = time.monotonic()+6
+            while time.monotonic()<deadline:
+                result = condition()
+                if result:
+                    return result
+                time.sleep(.05)
+            self.fail("original approval did not settle")
+
+        def find(item,state):
+            return next((row for row in operator.request("GET","approvals/dev")["items"]
+                         if row["request"]["item_id"]==item and row["state"]==state),None)
+
+        reports = {}
+        for mode,item,prompt in [("file","trial-file-deadline","File approval fixture deadline"),
+                                 ("command","trial-approval-deadline","Approval fixture deadline")]:
+            worker.chat(guid(),prompt)
+            if mode=="command":
+                pending = wait(lambda:find(item,"pending"))
+                path = "approvals/dev/"+pending["approval_id"]
+                decision = {"request_digest":pending["request_digest"],"decision":"accept"}
+                self.assertEqual(operator.request("PUT",path+"/decision",decision)["state"],"decided")
+            self.assertTrue(holding[mode].wait(4))
+            native = packets[item]
+            self.assertNotIn((native["id"],"cancel"),decisions)
+            if mode=="file":
+                self.assertFalse(operator.request("GET","approvals/dev")["items"])
+                self.assertEqual(operator.frames(0),[])
+            start = time.monotonic()
+            clock.advance(TTL_SECONDS)
+            self.assertEqual(terminals.get(timeout=3),(native["params"]["turnId"],"interrupted"))
+            self.assertIn(native["id"],native_closed)
+            self.assertFalse(release[mode].is_set())
+            self.assertEqual(target.read_bytes(),b"before\n")
+            interrupted_in = round(time.monotonic()-start,3)
+            release[mode].set()
+            closed = wait(lambda:find(item,"native_closed"))
+            self.assertEqual(closed["attempted_response"],{"source":"native_deadline","decision":"cancel"})
+            self.assertEqual(closed["decision"],None if mode=="file" else "accept")
+            reports[mode] = {"approval_id":closed["approval_id"],"native_id":native["id"],
+                             "turn_id":native["params"]["turnId"],"decision":closed["decision"],
+                             "source":closed["attempted_response"]["source"],"native_outcome":"interrupted",
+                             "interrupted_in_seconds_after_deadline":interrupted_in}
+            if mode=="file":
+                wait(lambda:len(closures)>=2)
+                self.assertEqual(closures[:2],[closed,closed])
+                self.assertEqual(registrations.count(item),1)
+                self.assertEqual(callback.request("POST","worker/approvals/"+closed["approval_id"],closed["request"]),closed)
+                self.assertEqual(operator.frames(0),[])
+
+        self.assertEqual(len(releases),1)
+        self.assertEqual(releases[0]["decision"],"accept")
+        self.assertEqual(decisions,[(reports[mode]["native_id"],"cancel") for mode in ("file","command")])
+        notice, = operator.frames(0)
+        self.assertEqual(notice["payload"],{"worker_id":"dev","approval_id":reports["command"]["approval_id"]})
+        turns = host.thread(session,include_turns=True)["turns"]
+        self.assertEqual(len(turns),2)
+        self.assertFalse(any(item["type"] in ("commandExecution","fileChange") for turn in turns for item in turn["items"]))
+        self.evidence = {"session_id":session,"requests":reports,"late_accept_recorded_but_not_sent":True,
+                         "file_intake_not_registered_and_no_late_notice":True,"first_closure_attempts":2,
+                         "on_time_native_replies":decisions,"file_sha256_after":hashlib.sha256(target.read_bytes()).hexdigest(),
+                         "boundary":"Actual App Server, HTTP Router and Worker, local model. Router transport blocked with gates and native ten-minute clock advanced."}
 
     def test_resume_catalog_uses_only_current_app_server_workspace_without_loading_history(self):
         root = Path(self.root)

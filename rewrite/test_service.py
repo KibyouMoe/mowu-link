@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -12,9 +13,10 @@ import unittest
 from urllib.error import URLError
 
 from .approvals import TTL_SECONDS, route as approval_route
+from .delivery import read as delivery_read
 from .orders import Orders
 from .service import private_config
-from .storage import Fault, guid
+from .storage import Fault, encode, guid
 from .trigger import Trigger
 from .wire import Client
 from .host_wire import RemoteAdapter
@@ -292,6 +294,39 @@ class Service(unittest.TestCase):
         row = approval_route(orders,"worker/dev","PUT",[*route,"closed"],proof)
         self.assertEqual((row["state"],row["decision"],row["attempted_response"]),
                          ("native_closed",None,{"source":"expiry","decision":"cancel"}))
+
+    def test_native_deadline_closes_unregistered_request_without_opening_approval(self):
+        orders = Orders(self.root/"deadline.db",clock=lambda:1000)
+        binding = {"session_id":guid()}
+        with orders.db.transaction() as db:
+            orders.session(db,"dev",binding)
+        entry = ["approvals","dev",guid()]
+        closed = [*entry,"closed"]
+        request = {"session":"isolated","turn_id":"original-turn","item_id":"original-command","cwd":"/isolated",
+                   "command":"pwd","environment_id":None,"decisions":["accept","cancel"]}
+        digest = hashlib.sha256(encode(request).encode()).hexdigest()
+        attempted = {"source":"native_deadline","decision":"cancel"}
+        proof = dict(binding,request_digest=digest,attempted_response=attempted,request=request)
+        malformed = [
+            ("approver/dev",proof,"forbidden"),
+            ("worker/dev",dict(proof,session_id=guid()),"stale_session"),
+            ("worker/dev",dict(proof,request=dict(request,command="ls")),"approval_request_conflict"),
+            ("worker/dev",dict(proof,attempted_response={"source":"native_deadline","decision":"accept"}),
+             "invalid_approval_closure"),
+        ]
+        for actor,body,error in malformed:
+            with self.subTest(error=error), self.assertRaisesRegex(Fault,error):
+                approval_route(orders,actor,"PUT",closed,body)
+        self.assertEqual(approval_route(orders,"approver/dev","GET",entry[:2],{}),{"items":[]})
+        receipt = approval_route(orders,"worker/dev","PUT",closed,proof)
+        self.assertEqual((receipt["state"],receipt["decision"],receipt["attempted_response"]),
+                         ("native_closed",None,attempted))
+        self.assertEqual(approval_route(orders,"worker/dev","PUT",closed,proof),receipt)
+        self.assertEqual(approval_route(orders,"worker/dev","POST",entry,dict(binding,request=request)),receipt)
+        with self.assertRaisesRegex(Fault,"approval_not_pending"):
+            approval_route(orders,"approver/dev","PUT",[*entry,"decision"],{"request_digest":digest,"decision":"accept"})
+        with orders.db.transaction() as db:
+            self.assertEqual(delivery_read(db,"approver/dev",0),[])
 
     @unittest.skipUnless(shutil.which("openssl"), "TLS fixture certificate generator unavailable")
     def test_three_process_worker_chat_and_assignment(self):
