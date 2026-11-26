@@ -133,5 +133,18 @@
       },
       "required": []
     }
+  },
+  {
+    "name": "worker_peer_inbox",
+    "description": "Read this Worker's pending peer messages or the latest twenty reply-correlation records. Reading does not dispatch or acknowledge a message.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "view": {"enum": ["pending", "history"]},
+        "after": {"type": "integer", "minimum": 0}
+      },
+      "required": []
+    }
   }
 ]

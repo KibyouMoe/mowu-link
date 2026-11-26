@@ -819,14 +819,18 @@ class NativeLoop(unittest.TestCase):
             original = json.loads(image["caption"].split("\n")[1])
             self.assertEqual((original["message_id"],original["text"]),(mid,caption))
             self.assertEqual(image["images"],[{"sha256":sha,"size":len(PNG)}])
-            listed,call,lookup = observed["calls"]
+            history_call,listed,call,lookup = observed["calls"]
+            self.assertEqual(history_call["name"],"worker_peer_inbox")
             self.assertEqual(listed["name"],"worker_list_peers")
             self.assertEqual(call["name"],"worker_send_peer")
             self.assertEqual(lookup["name"],"worker_peer_status")
             args = json.loads(call["arguments"])
             self.assertEqual((args["to_worker"],args["reply_to"]),("tama",mid))
-            directory_result,result,native_status = (
+            history,directory_result,result,native_status = (
                 json.loads(entry["content"][0]["text"]) for entry in observed["results"])
+            received, = history["items"]
+            self.assertEqual((received["message_id"],received["peer_id"],received["direction"]),(mid,"tama","in"))
+            self.assertEqual(set(received),{"message_id","direction","peer_id","reply_to"})
             self.assertEqual(directory_result,{"items":[{"worker_id":"tama","online":True}],"next_cursor":None})
             self.assertEqual(result["status"],"accepted")
             self.assertEqual((native_status["message_id"],native_status["status"]),(mid,"accepted"))
@@ -848,6 +852,7 @@ class NativeLoop(unittest.TestCase):
             self.assertEqual(loop.hermes.tasks()["items"],[])
             self.assertIsNone(loop.worker.hold()["held_task_id"])
             self.evidence = {"letter":mid,"host_input":proof,"peer_reception":routed,"actual_tool_call":call["callId"],
+                "inbox_call":history_call["callId"],"native_inbox":history,
                 "directory_call":listed["callId"],"native_directory":directory_result,
                 "native_status_call":lookup["callId"],"native_status_before_host_receipt":native_status,
                 "reply":result,"reply_to":reply["reply_to"],"reply_recipient_receipt":receipt,
@@ -892,10 +897,10 @@ class NativeLoop(unittest.TestCase):
             self.assertEqual(self.read_native(recipient_host,"read")["inputs"],delivered["inputs"])
             self.assertEqual(len(delivered["inputs"]),1)
             self.assertEqual(delivered["mediaRequests"][0]["images"],[{"sha256":sha,"size":len(PNG)}])
-            _,reply_call,_ = delivered["calls"]
+            _,_,reply_call,_ = delivered["calls"]
             reply_args = json.loads(reply_call["arguments"])
             self.assertEqual((reply_call["name"],reply_args["reply_to"]),("worker_send_peer",sent["message_id"]))
-            reply = json.loads(delivered["results"][1]["content"][0]["text"])
+            reply = json.loads(delivered["results"][2]["content"][0]["text"])
             sender.poll()
             answered = self.read_native(sender_host,"read")
             sender.poll()

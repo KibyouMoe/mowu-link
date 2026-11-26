@@ -58,6 +58,8 @@ DSH 的 `worker_send_peer` 可在已核对的原生回合中直接联系指定�
 
 DSH 可用 `worker_list_peers` 浏览已登记的其他工位。它只返回工位 ID 与 Router 连接状态，可按在线筛选和分页。工单与持单明细仍由管理端查看。
 
+`worker_peer_inbox` 可只读查看当前工位收到、尚待宿主确认的同伴消息。带 `view: "history"` 时返回最近二十条的消息号、方向、对端和原回复关联。读收件箱无需重新投递或确认。
+
 ### 飞书私聊的异常回执
 
 绑定的训练员私聊发生格式、附件或收件问题时，平台进程在原消息下回复状态卡。平台已尝试而回执丢失时，沿用原 UUID 和卡片正文，首次尝试满 55 分钟后标记 `receipt_unknown`，继续处理其他消息。等待中已查实且尚未发送的提示自动撤销。若已提示待核，查到宿主凭据后再发一条恢复确认。消息的受理状态在 `platform_events`，平台回复的状态和消息号在 `input_notices`。[飞书回复消息接口](https://open.feishu.cn/document/server-docs/im-v1/message/reply.md)

@@ -70,6 +70,15 @@ class LocalModel extends LlmAdapter {
         images.push({sha256:createHash('sha256').update(image.data).digest('hex'),size:image.data.length});
       }
       mediaRequests.push({caption:text,images,partTypes:message.content.map(part=>part.type)});
+      if (mode==='peer-media' && command==='peer' && !this.submitted.has('peer-history')) {
+        this.submitted.set('peer-history',true);
+        assert.ok(tools?.some(tool=>tool.name==='worker_peer_inbox'));
+        yield {type:'block-start',index:0,blockType:'tool-call'};
+        yield {type:'block-end',index:0,block:{type:'tool-call',id:'peer-native-history',name:'worker_peer_inbox',
+          arguments:JSON.stringify({view:'history'})}};
+        yield {type:'finish',reason:{kind:'tool-calls'}};
+        return;
+      }
       if (mode==='peer-media' && command==='peer' && !this.submitted.has('peer-directory')) {
         this.submitted.set('peer-directory',true);
         assert.ok(tools?.some(tool=>tool.name==='worker_list_peers'));

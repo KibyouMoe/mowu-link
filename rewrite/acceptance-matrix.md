@@ -45,3 +45,28 @@
 | 授权和维护 | 认证的 Router/Worker/适配器隔离已验证；普通题卡不能执行原生授权。 | 旧 `/approvals`、`/commands`、`/ops/services` 中实际仍在使用的入口，与宿主授权逐项验证。 |
 
 当前可以复跑隔离联调。离「可切换」还差真实宿主、实际 Feishu 测试身份、原生清理和活跃消费端的迁移对账。
+
+## Codex 现役桥工具逐项对照
+
+工具名取自维修主会话的现役注册表。表中写明哪一段已验。迁移时仍需在可加载测试工具的独立 Codex 会话确认原生能力。
+
+| 现役工具 | 重做版入口或归属 | 可核的迁移条件 |
+| --- | --- | --- |
+| `bridge_probe` | Worker `worker-status`，加适配器连接观测 | 独立 TLS 实测断链、恢复、持单和忙闲未知。现役 Codex 启动链路切换须单验。 |
+| `bridge_binding_status` | Worker 状态与固定原生会话校验 | 隔离 TLS 可区分预期会话与已确认会话，同身份错绑零输入。 |
+| `bridge_bind_manager` | 独立运行参数与首次显式选定的宿主会话 | 临时 Worker 和 DSH 接入已跑，Codex 的用户界面批准与既有绑定交接待验。 |
+| `bridge_verify_manager_binding` | 按工位授权的 `worker-status` | 平台身份被拒，运维身份可核同一会话。 |
+| `bridge_inspect_native_contract` | 适配器声明能力与实际独立回执 | 目录、压缩、目标、停止能力在真实 DSH 有证据。Codex 各能力需从实际测试宿主逐项读回。 |
+| `bridge_verify_native_write_path` | 原派发或消息号、正文摘要、原生输入及回合 | 真实独立 Desktop 已核文字收件及重投去重。无人值守入口、图文与实际授权待验。 |
+| `bridge_start_local_manager` | Router、Worker、宿主适配器独立入口 | 临时进程与分步升级已跑。现役 Desktop 启动权、同时仅一名写入者仍待实机验证。 |
+| `bridge_reload_business_modules` | 锁定提交的发布包、分步升级与原快照回退 | 已演练冷切，原收件无重复。原位热加载及现役启停授权尚未核。 |
+| `bridge_message` | 平台私聊入口与宿主斜杠命令 | DSH 文图、已接命令与原队列有实测。Codex 支持过的选择会话、图文、原生插话需逐项回归。 |
+| `bridge_send_image` | 已授权的宿主图片事件，经 Worker 转送 | 真实 DSH 图像摘要及隔离平台顺序已核。需要独立飞书云端与 Codex 输出记录。 |
+| `bridge_publish_question` | 原生问题适配、Worker 题卡、平台回调 | DSH 计时题恢复有实测。Codex 原生题窗同步、主动独立题卡须分别核。 |
+| `bridge_register_current_task` | W03 接管及独立原生收件 | 原派发会话已固定，错绑零投递。实际 DSH 原生目标试跑通过，Codex 工单目标链待验。 |
+| `bridge_create_work_order` | 溪流侧的正式建单与授权 | 已有隔离 Hermes 管理入口。现役 Worker 直接建单的调用边界及是否保留需要定案。 |
+| `bridge_work_order_status` | 溪流侧正式工单查询、工位本地持单状态 | 已核管理查询和本地状态，Worker 直接按旧单查他端成果的兼容范围待定。 |
+| `submit_deliverable` | Agent `worker_report` 经 W04，待溪流验收 | 真 DSH 原生工具及本地脚本模型通过。Codex Desktop 缺工具，独立 App Server 缺测试登录。 |
+| `bridge_list_workers` | 原生 `worker_list_peers` | 真 DSH 已查询对端。单独登记、在线和权限筛选已核。 |
+| `bridge_send_worker_message` | 原生 `worker_send_peer` 与三层收件查询 | 两个独立 DSH 实例互发及回原消息通过，模型为本地驱动。需要授权的实际跨宿主工位。 |
+| `bridge_worker_inbox` | 原生 `worker_peer_inbox` 的待办和回复历史 | 真实 DSH 查原信后关联回复，游标和只读性有回归。需 Codex 工具实机复验。 |

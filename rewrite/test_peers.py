@@ -379,6 +379,38 @@ class Peers(unittest.TestCase):
         self.assertEqual(len(self.host.entries()),1)
         self.assertEqual(other_host.entries(),[])
 
+    def test_inbox_cursor_and_history_are_read_only_and_keep_reply_correlation(self):
+        mid = guid()
+        self.a.send_peer(mid,"tama","First line")
+        turn = self.b.chat(guid(),"Inspect my test inbox")
+        adapter = self.adapter_client(self.b)
+        caller = {"session":turn["session"],"turn_id":turn["turn_id"],"call_id":"inbox-read","tool":"worker_peer_inbox"}
+        def inspect(args):
+            return adapter.request("POST","worker/native-tool",dict(caller,arguments=args))
+        write = self.b.adapter.deliver
+        def lose(*args,**kwargs):
+            write(*args,**kwargs)
+            return None
+        self.b.adapter.deliver = lose
+        self.b.poll()
+        event, = inspect({})["items"]
+        self.assertEqual((event["message_id"],event["text"]),(mid,"First line"))
+        self.assertEqual(inspect({"view":"pending","after":event["cursor"]})["items"],[])
+        self.assertEqual(inspect({})["items"],[event])
+        self.assertEqual(len(self.host.entries()),2)
+        self.b.adapter.deliver = write
+        self.clock.advance(5)
+        self.b.poll()
+        self.assertEqual(inspect({})["items"],[])
+        reply = guid()
+        self.b.send_peer(reply,"oguri","Response",mid)
+        found,original = inspect({"view":"history"})["items"]
+        self.assertEqual(found,{"message_id":reply,"direction":"out","peer_id":"oguri","reply_to":mid})
+        self.assertEqual(original["message_id"],mid)
+        self.assertNotIn("text",original)
+        self.assertEqual(len(self.host.entries()),2)
+        self.assertFalse(self.loop.hermes.tasks()["items"])
+
     def test_lost_receipt_does_not_starve_another_confirmation(self):
         first,second = guid(),guid()
         self.a.send_peer(first,"tama","one")

@@ -418,6 +418,21 @@ class Worker:
             rows = db.execute("SELECT * FROM peers ORDER BY rowid DESC LIMIT 20").fetchall()
         return [dict(r,body=json.loads(r["body"]),receipt=json.loads(r["receipt"]) if r["receipt"] else None) for r in rows]
 
+    def peer_inbox(self,view,after):
+        require(view in ("pending","history") and type(after) is int and 0<=after<2**63
+                and (view=="pending" or after==0),422,"invalid_peer_inbox_query")
+        with self.db.transaction() as db:
+            if view=="history":
+                rows = db.execute("""SELECT message_id,direction,peer_id,
+                    json_extract(body,'$.reply_to') AS reply_to FROM peers ORDER BY rowid DESC LIMIT 20""").fetchall()
+                return {"items":[dict(row) for row in rows]}
+            rows = db.execute("""SELECT json_extract(frame,'$.cursor') AS cursor,
+                    json_extract(frame,'$.payload') AS body FROM inbox WHERE done=0
+                    AND json_extract(frame,'$.kind')='peer.message' AND json_extract(frame,'$.cursor')>?
+                    ORDER BY cursor LIMIT 101""",(after,)).fetchall()
+        items = [dict(json.loads(row["body"]),cursor=row["cursor"]) for row in rows[:100]]
+        return {"items":items,"next_after":items[-1]["cursor"] if len(rows)>100 else None}
+
     def flush_peer_receipts(self):
         with self.db.transaction() as db:
             rows = db.execute("""SELECT p.message_id,p.receipt FROM peers p LEFT JOIN peer_receipt_acks a USING(message_id)

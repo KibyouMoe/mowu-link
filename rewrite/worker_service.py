@@ -145,7 +145,7 @@ class WorkerService:
                 call = string(body,"call_id")
                 key = "candidate-"+str(uuid5(NAMESPACE_URL,encode([w.worker_id,session,turn,call])))
                 result = w.submit_material(session,native,key,args)
-            elif body.get("tool") in ("worker_send_peer","worker_peer_status","worker_list_peers"):
+            elif body.get("tool") in ("worker_send_peer","worker_peer_status","worker_list_peers","worker_peer_inbox"):
                 self.require_peer_origin(session,native)
                 if body["tool"] == "worker_send_peer":
                     result = self.send_native_peer(session,turn,string(body,"call_id"),args)
@@ -153,8 +153,11 @@ class WorkerService:
                     require(set(args)=={"message_id"},422,"invalid_arguments")
                     result = self.peer_status(string(args,"message_id"))
                     result.setdefault("status","accepted")
-                else:
+                elif body["tool"] == "worker_list_peers":
                     result = self.peer_directory(args)
+                else:
+                    require(set(args)<={"view","after"},422,"invalid_arguments")
+                    result = w.peer_inbox(args.get("view","pending"),args.get("after",0))
             else:
                 require(body.get("tool") == "worker_report" and set(args) <= {"task_id","assignment_id","summary","outcome","artifact_ids"},
                         422,"unsupported_native_tool")

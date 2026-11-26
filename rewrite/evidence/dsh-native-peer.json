@@ -1,26 +1,37 @@
 {
-  "letter": "f2cabeca-9b68-41a7-9b97-e032624cdd08",
+  "letter": "fc873134-a3d5-4ecb-9943-82544860672b",
   "host_input": {
-    "delivery_id": "b4196469-6252-484a-a188-6100d1469da8",
-    "digest": "ae656656791cfce76ab2cbe231cd51200bb46baf11deb98d047767bca84717a2",
+    "delivery_id": "220b9a02-1777-4492-8ca3-24a50efa0577",
+    "digest": "15d6fdc6f7a390bb88d04f99a3a0110b2fa9327a6e434342958302a730ca2c90",
     "media_sha256": [
       "e77617115ffe6399c0f4714c72aa32eefeb22fbdf45b1167a4ddb64e213b4007"
     ],
-    "native_id": "mowulink-12fbb019e4e1d8c9d70ad4b635bc6d9f3fdc13914474420533859de7d41b0be7",
+    "native_id": "mowulink-9557d2e6267af1d276c64a506a85b1fc7b4cfb1657e5ff40e579f6762ac0b18c",
     "session": "dsh-native-peer",
     "turn_id": "1/1"
   },
   "peer_reception": {
     "accepted_at": "2027-01-15T08:00:00+00:00",
-    "delivery_id": "b4196469-6252-484a-a188-6100d1469da8",
-    "host_receipt_id": "023fa5b2-14c8-58f5-b07c-d154f01ff507",
+    "delivery_id": "220b9a02-1777-4492-8ca3-24a50efa0577",
+    "host_receipt_id": "bfcd27ea-6121-55a8-ba25-1835186464af",
     "host_receipt_recorded_at": "2027-01-15T08:00:05+00:00",
-    "message_id": "f2cabeca-9b68-41a7-9b97-e032624cdd08",
+    "message_id": "fc873134-a3d5-4ecb-9943-82544860672b",
     "recipient": "oguri",
     "sender": "tama",
     "worker_received": true
   },
   "actual_tool_call": "peer-native-reply",
+  "inbox_call": "peer-native-history",
+  "native_inbox": {
+    "items": [
+      {
+        "direction": "in",
+        "message_id": "fc873134-a3d5-4ecb-9943-82544860672b",
+        "peer_id": "tama",
+        "reply_to": null
+      }
+    ]
+  },
   "directory_call": "peer-native-directory",
   "native_directory": {
     "items": [
@@ -34,7 +45,7 @@
   "native_status_call": "peer-native-status",
   "native_status_before_host_receipt": {
     "accepted_at": "2027-01-15T08:00:00+00:00",
-    "delivery_id": "b4196469-6252-484a-a188-6100d1469da8",
+    "delivery_id": "220b9a02-1777-4492-8ca3-24a50efa0577",
     "host_receipt_id": null,
     "host_receipt_recorded_at": null,
     "local_pending": [
@@ -45,7 +56,7 @@
         "retry_at": 1800000005
       }
     ],
-    "message_id": "f2cabeca-9b68-41a7-9b97-e032624cdd08",
+    "message_id": "fc873134-a3d5-4ecb-9943-82544860672b",
     "recipient": "oguri",
     "sender": "tama",
     "status": "accepted",
@@ -56,13 +67,13 @@
     "message_id": "c646e34d-00ac-5ee9-96a5-e1a680e82512",
     "status": "accepted"
   },
-  "reply_to": "f2cabeca-9b68-41a7-9b97-e032624cdd08",
+  "reply_to": "fc873134-a3d5-4ecb-9943-82544860672b",
   "reply_recipient_receipt": {
-    "delivery_id": "27c0b60e-c3a7-4f27-bc47-ae68c2a98938",
-    "digest": "d6a02ad0c8d3a78cd23e6b5ba0c1467189e2392910875b36ccfbf16c9dc14dbe",
-    "native_id": "61934d29-ad55-4df1-9e13-a751e3cbb42d",
+    "delivery_id": "a9764184-e675-4cf4-bf38-70ddad4fc565",
+    "digest": "d5ed5383e6f9686609c5c97569de19768bb98c4ba9d1b272c29c25d61a1b593e",
+    "native_id": "6579b5f1-5910-4290-953e-1eaa895b6315",
     "session": "test-sending-host",
-    "turn_id": "77340388-a97f-4a0e-b54b-6137b3917965"
+    "turn_id": "3a533768-6f73-4e9e-b2f3-a1fffe56c5e1"
   },
   "image": {
     "sha256": "e77617115ffe6399c0f4714c72aa32eefeb22fbdf45b1167a4ddb64e213b4007",
