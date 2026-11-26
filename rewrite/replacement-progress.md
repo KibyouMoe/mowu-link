@@ -4,6 +4,8 @@
 
 ## 检查点与证据
 
+独立 Codex A05 工具卡已核。实际 App Server 在只读试验目录运行命令期间，Worker 测试平台依次收到原生输入、公开过程发言、工具预览三张标准卡。原生命令仍在等待。故意丢工具写入回执，重复提交仍是同一事件。释放命令后只追加独立回复卡，完整参数、终端内容和内部工具未进入卡片。连续 12 轮通过。[卡片与回执](evidence/codex-app-server-live-tool-card.json)。复跑 `python3 -m unittest -v rewrite.test_codex_app_server.CodexAppServer.test_codex_tool_card_arrives_during_native_execution_and_final_stays_distinct`。模型与飞书是夹具。
+
 独立 Codex `/model`、`/effort` 已通过指定提供方目录和原生线程设置接通。实际下一次模型请求由 Sol 改至 Astra，`max` 透传。丢回执重投保持待核，后续 `low` 冷开读回且进入下一次请求。原生选择 `ultra` 时本地 Responses 请求为 `xhigh`，真实账号的请求值仍需实测，卡片只确认客户端设置。旧模型的力度菜单、未送达菜单、其他提供方均拒绝写入。连续 12 轮通过。复跑 `python3 -m unittest -v rewrite.test_codex_app_server.CodexAppServer.test_native_model_and_effort_commands_change_next_request_and_persist_cold`。[设置与请求记录](evidence/codex-app-server-native-selection.json)。测试模型、平台使用夹具。
 
 独立 Codex `/goal` 通过原生查看、建立、暂停和继续。带授权平台身份的显式指令才走原生用户写入，适配器角色发起同一路由被拒。已有目标无法覆盖，实际无自设 token 预算。丢继续回执后按原消息号重投，最后的原生暂停仍生效。连续 15 轮通过。[原生目标记录](evidence/codex-app-server-native-goal.json)。复跑 `python3 -m unittest -v rewrite.test_codex_app_server.CodexAppServer.test_platform_goal_uses_native_user_origin_and_does_not_replay_after_lost_ack`，模型、平台使用夹具。

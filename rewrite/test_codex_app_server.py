@@ -72,11 +72,21 @@ class Provider(BaseHTTPRequestHandler):
         response_id = "resp_fixture_"+str(len(self.server.observed))
         question = payload and payload.get("instructions")=="Ask the scripted manager before proceeding"
         peer = next((block["text"] for block in latest if block.get("text","").startswith("Send peer fixture\n")),None)
+        public_preview = getattr(self.server,"public_preview",False) and any(
+            block.get("text")=="Native tool preview fixture" for block in latest)
+        prefix = []
         provision_action = getattr(self.server,"provision_calls_tool",False) and any(
             block.get("text")==SEED for block in latest)
         if provision_action and not calls:
             item = {"type":"function_call","id":"fc_seed","name":"worker_report","call_id":"native_seed_fixture",
                     "arguments":"{}"}
+        elif public_preview and not calls:
+            commentary = {"id":"msg_preview_comment","type":"message","role":"assistant","status":"completed",
+                          "phase":"commentary","content":[{"type":"output_text","text":"Checking the isolated workspace."}]}
+            prefix = [commentary]
+            item = {"type":"function_call","id":"fc_preview","name":"exec_command","call_id":"codex_preview_fixture",
+                    "arguments":encode({"cmd":"pwd && while [ ! -f .release-preview ]; do sleep .05; done # PREVIEW_PRIVATE_MARKER",
+                                        "yield_time_ms":9000})}
         elif peer and not calls:
             item = {"type":"function_call","id":"fc_peer","name":"worker_send_peer","call_id":"native_peer_fixture",
                     "arguments":peer.split("\n",1)[1]}
@@ -92,13 +102,12 @@ class Provider(BaseHTTPRequestHandler):
         else:
             item = {"id":"msg_fixture","type":"message","role":"assistant","status":"completed",
                     "content":[{"type":"output_text","text":"Local model fixture accepted the receipt."}]}
-        stream = [
-            {"type":"response.created","response":{"id":response_id}},
-            {"type":"response.output_item.added","output_index":0,"item":item},
-            {"type":"response.output_item.done","output_index":0,"item":item},
-            {"type":"response.completed","response":{"id":response_id,
-             "usage":{"input_tokens":11,"output_tokens":5,"total_tokens":16}}},
-        ]
+        stream = [{"type":"response.created","response":{"id":response_id}}]
+        for index,entry in enumerate([*prefix,item]):
+            stream.extend({"type":"response.output_item."+kind,"output_index":index,"item":entry}
+                          for kind in ("added","done"))
+        stream.append({"type":"response.completed","response":{"id":response_id,
+                       "usage":{"input_tokens":11,"output_tokens":5,"total_tokens":16}}})
         raw = "".join("event: "+event["type"]+"\ndata: "+encode(event)+"\n\n" for event in stream).encode()
         self.send_response(200)
         self.send_header("Content-Type","text/event-stream")
@@ -779,6 +788,83 @@ class CodexAppServer(unittest.TestCase):
                          "first_attempt_refused_before_native_write":True,"first_ack_found_by_lookup":True,
                          "write_attempts_for_first":len(attempts),
                          "boundary":"Actual App Server with a local model fixture, platform and transport fault driven in isolation"}
+
+    def test_codex_tool_card_arrives_during_native_execution_and_final_stays_distinct(self):
+        self.provider.public_preview = True
+        release = Path(self.root)/".release-preview"
+        rpc = self.enterContext(isolated_app_server(self.root,self.origin))
+        sid = rpc.request("thread/start",{"cwd":self.root,"ephemeral":False,"sandbox":"read-only",
+                                         "approvalPolicy":"never"})["thread"]["id"]
+        rpc.request("turn/start",{"threadId":sid,"input":[{"type":"text","text":"Seed preview fixture",
+                                                          "text_elements":[]}]})
+        until = time.monotonic()+12
+        while rpc.event(until)["method"]!="turn/completed":
+            pass
+        host = AppServerHost(rpc,sid)
+        host.session = sid
+        loop = self.enterContext(Loop.isolated(host_factory=lambda _path,_name:host))
+        tool_acks = []
+
+        class LoseFirstToolReceipt(WorkerService):
+            def handle(self,actor,method,path,body,headers):
+                result = super().handle(actor,method,path,body,headers)
+                if method=="POST" and path=="/v1/worker/display" and body["kind"]=="tool":
+                    tool_acks.append(result[2])
+                    if len(tool_acks)==1:
+                        raise Fault(503,"isolated_tool_ack_lost",True)
+                return result
+
+        token,platform_token = guid(),guid()
+        server = LoseFirstToolReceipt(loop.worker).listen({token:"adapter/oguri",platform_token:"platform/oguri"},
+                                                         ("127.0.0.1",0),None)
+        url = self.enterContext(running(server))
+        adapter,platform = Client(url,token),Client(url,platform_token)
+        sink = PlatformFixture()
+        views = Views(loop.root/"live-codex-cards.db",platform,sink,"fixture-chat","小栗帽")
+        output = CodexDisplay(loop.adapter,adapter)
+        self.enterContext(output.run())
+        self.enterContext(worker_callbacks(host,adapter,output.wake.set,output.observe))
+
+        def display_events():
+            return [item["event"] for item in platform.request("GET","worker/display")["items"]]
+
+        def card_titles():
+            return [item[2]["header"]["title"]["content"] for item in sink.messages.values()]
+
+        try:
+            query = "Native tool preview fixture"
+            turn = rpc.request("turn/start",{"threadId":sid,"input":[{"type":"text","text":query,
+                                                                      "text_elements":[]}]})["turn"]["id"]
+            until = time.monotonic()+10
+            while len(tool_acks)<2 and time.monotonic()<until:
+                time.sleep(.03)
+            self.assertGreaterEqual(len(tool_acks),2)
+            self.assertEqual(tool_acks[0],tool_acks[1])
+            self.assertTrue(host.busy(sid))
+            before = display_events()
+            self.assertEqual([(item["kind"],item["text"]) for item in before],
+                             [("native_input",query),("progress","Checking the isolated workspace."),("tool","pwd")])
+            self.assertTrue(all(item["turn_id"]==turn for item in before))
+            self.assertEqual(views.poll(),3)
+            self.assertEqual(card_titles(),["小栗帽·原生输入","小栗帽-输出","小栗帽-工具"])
+        finally:
+            release.touch()
+        until = time.monotonic()+12
+        while time.monotonic()<until:
+            events = display_events()
+            if any(item["kind"]=="final" for item in events):
+                break
+            time.sleep(.04)
+        self.assertEqual([item["kind"] for item in events],["native_input","progress","tool","final"])
+        self.assertEqual(events[-1]["text"],"Local model fixture accepted the receipt.")
+        self.assertNotIn("PREVIEW_PRIVATE_MARKER",encode(events))
+        self.assertNotIn("sleep",encode(events))
+        self.assertEqual(views.poll(),1)
+        self.assertEqual(card_titles()[-1],"小栗帽-回复")
+        self.assertFalse(loop.hermes.tasks()["items"])
+        self.evidence = {"thread_id":sid,"turn_id":turn,"events":events,"tool_receipt_replayed":tool_acks[1],
+                         "private_arguments_omitted":True,"early_cards":3,"card_titles":card_titles(),
+                         "boundary":"Actual App Server command execution in an isolated test directory; model and Feishu fixtures"}
 
     def test_native_app_server_conversation_uses_standard_feishu_cards(self):
         rpc = self.enterContext(isolated_app_server(self.root,self.origin))

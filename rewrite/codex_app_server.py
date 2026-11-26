@@ -3,6 +3,8 @@ from contextlib import contextmanager
 import hashlib
 from pathlib import Path
 from queue import Empty
+import re
+import shlex
 from threading import Event, RLock, Thread
 import time
 import unicodedata
@@ -15,6 +17,8 @@ from .storage import Fault, encode, require, string
 TERMINAL = {"completed","interrupted","failed"}
 WORKER_TOOLS = {item["name"] for item in TOOLSET}
 GOAL_STATES = {"active","paused","blocked","complete","usageLimited","budgetLimited"}
+PUBLIC_COMMANDS = re.compile(r"^(git (?:status|diff|log)|npm (?:test|run)|python3? -m unittest|ls|pwd)(?:\s|$)")
+AGENT_COMMAND_SOURCES = {"agent","unifiedExecStartup","unifiedExecInteraction"}
 
 
 class AppServerHost:
@@ -369,45 +373,89 @@ class AppServerHost:
         self.request("turn/interrupt",{"threadId":session,"turnId":turn_id})
         return self.stop_turn(session,receipt,start=False)
 
-    def public_turn(self,session,turn_id):
-        """Project a selected finished turn. The caller chooses the new turns to publish."""
+    def read_turn(self,session,turn_id):
         thread = self.thread(session,include_turns=True)
         turn = next((item for item in thread["turns"] if item.get("id")==turn_id),None)
         require(turn,409,"native_turn_unconfirmed")
+        return turn
+
+    @staticmethod
+    def tool_preview(command):
+        safe = "宿主已调用工具"
+        if not isinstance(command,str) or len(command)>8192:
+            return safe
+        try:
+            shell = shlex.split(command)
+        except ValueError:
+            return safe
+        if len(shell)==3 and Path(shell[0]).name in ("sh","bash","zsh") and shell[1] in ("-c","-lc"):
+            command = shell[2]
+        match = PUBLIC_COMMANDS.match(command)
+        return match.group(1) if match else safe
+
+    def public_item(self,session,turn_id,item,*,final=False):
+        kind = item.get("type")
+        fields = {}
+        if kind=="userMessage":
+            if (item.get("clientId") or "").startswith("mowulink-"):
+                return None
+            text = "\n".join(part["text"] for part in item["content"] if part.get("type")=="text")
+            if text.startswith("魔物链接投递\n"):
+                return None
+            display = "native_input"
+        elif kind=="agentMessage":
+            text = item["text"]
+            display = "final" if final else "progress"
+        elif kind=="commandExecution" and item.get("source") in AGENT_COMMAND_SOURCES:
+            text = self.tool_preview(item.get("command"))
+            display = "tool"
+            fields["tool_name"] = "exec_command"
+        else:
+            return None
+        if text.strip():
+            key = hashlib.sha256(encode([session,turn_id,string(item,"id"),display]).encode()).hexdigest()
+            return {"event_id":"codex-"+key,"session":session,"turn_id":turn_id,"kind":display,"text":text,**fields}
+        return None
+
+    def live_public_item(self,method,params):
+        if not isinstance(params,dict) or params.get("threadId")!=self.thread_id:
+            return None
+        item = params.get("item")
+        if not isinstance(item,dict):
+            return None
+        kind = item.get("type")
+        if method=="item/started" and kind=="commandExecution":
+            return self.public_item(self.thread_id,string(params,"turnId"),item)
+        if method=="item/completed" and (kind=="userMessage"
+                or kind=="agentMessage" and item.get("phase")=="commentary"):
+            return self.public_item(self.thread_id,string(params,"turnId"),item)
+        return None
+
+    def public_turn(self,session,turn_id,turn=None):
+        """Project a selected finished turn. The caller chooses the new turns to publish."""
+        if turn is None:
+            turn = self.read_turn(session,turn_id)
         if turn["status"] not in TERMINAL:
             return []
         results = []
         items = turn["items"]
         for index,item in enumerate(items):
-            kind = item.get("type")
-            if kind=="userMessage":
-                if (item.get("clientId") or "").startswith("mowulink-"):
-                    continue
-                blocks = [part["text"] for part in item["content"] if part.get("type")=="text"]
-                text = "\n".join(blocks)
-                if text.startswith("魔物链接投递\n"):
-                    continue
-                display = "native_input"
-            elif kind=="agentMessage":
-                text = item["text"]
-                phase = item.get("phase")
-                final = turn["status"]=="completed" and (phase=="final_answer" or (phase is None and index==len(items)-1))
-                display = "final" if final else "progress"
-            else:
-                continue
-            if text.strip():
-                key = hashlib.sha256(encode([session,turn_id,string(item,"id"),display]).encode()).hexdigest()
-                results.append({"event_id":"codex-"+key,"session":session,"turn_id":turn_id,"kind":display,"text":text})
+            phase = item.get("phase")
+            final = turn["status"]=="completed" and (phase=="final_answer" or (phase is None and index==len(items)-1))
+            event = self.public_item(session,turn_id,item,final=final)
+            if event:
+                results.append(event)
         return results
 
-    def publish_public_turn(self,session,turn_id,worker):
-        receipts = []
-        for event in self.public_turn(session,turn_id):
-            ack = worker.request("POST","worker/display",event)
-            require(isinstance(ack,dict) and ack.get("event_id")=="host-"+event["event_id"]
-                    and type(ack.get("seq")) is int,502,"wrong_display_ack")
-            receipts.append(ack)
-        return receipts
+    @staticmethod
+    def publish_public_item(worker,event):
+        ack = worker.request("POST","worker/display",event)
+        require(isinstance(ack,dict) and ack.get("event_id")=="host-"+event["event_id"]
+                and type(ack.get("seq")) is int,502,"wrong_display_ack")
+        return ack
+
+    def publish_public_turn(self,session,turn_id,worker,turn=None):
+        return [self.publish_public_item(worker,event) for event in self.public_turn(session,turn_id,turn)]
 
     def worker_call(self, packet, worker):
         """Accept only App Server requests received on this process's dedicated transport."""
@@ -434,7 +482,7 @@ class AppServerHost:
 
 
 @contextmanager
-def worker_callbacks(host,worker,notify_turn_end):
+def worker_callbacks(host,worker,notify_turn_end,notify_item=None):
     stop = Event()
 
     def to_worker(packet):
@@ -467,6 +515,14 @@ def worker_callbacks(host,worker,notify_turn_end):
                 continue
             if packet.get("method")=="thread/tokenUsage/updated":
                 host.observe_usage(packet.get("params"))
+                continue
+            if notify_item is not None and packet.get("method") in ("item/started","item/completed"):
+                try:
+                    event = host.live_public_item(packet["method"],packet.get("params"))
+                except (Fault,TypeError,KeyError,AttributeError):
+                    continue
+                if event:
+                    notify_item(event)
                 continue
             if packet.get("method")!="item/tool/call" or type(packet.get("id")) not in (str,int):
                 continue

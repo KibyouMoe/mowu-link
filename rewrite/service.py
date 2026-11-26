@@ -95,7 +95,7 @@ def serve(args,stack):
         media = NativeFiles(args.media_cache,client) if args.media_cache else None
         adapter = HostAdapter(args.db,native,args.session,media)
         display = CodexDisplay(adapter,client)
-        callbacks = worker_callbacks(native,client,display.wake.set)
+        callbacks = worker_callbacks(native,client,display.wake.set,display.observe)
         public_output = display.run()
         listener = serve_adapter(adapter,args.worker_id,identities,address,ctx)
     else:

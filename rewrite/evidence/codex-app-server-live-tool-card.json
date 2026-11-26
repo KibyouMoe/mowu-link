@@ -1,0 +1,49 @@
+{
+  "thread_id": "01a21705-d19a-7e81-9bd3-9d169e7d8f56",
+  "turn_id": "01a21705-d1dc-7ed0-bc01-0121ca47ddc2",
+  "events": [
+    {
+      "event_id": "host-codex-056b3dae1676d591ef4400376b46d31d7c85d14eac9e10432006aefc073cd71d",
+      "kind": "native_input",
+      "session": "01a21705-d19a-7e81-9bd3-9d169e7d8f56",
+      "text": "Native tool preview fixture",
+      "turn_id": "01a21705-d1dc-7ed0-bc01-0121ca47ddc2"
+    },
+    {
+      "event_id": "host-codex-0061943c258d4f8a13e5284ee0c8f863093aa3331157cfecb90a2f93c4f66175",
+      "kind": "progress",
+      "session": "01a21705-d19a-7e81-9bd3-9d169e7d8f56",
+      "text": "Checking the isolated workspace.",
+      "turn_id": "01a21705-d1dc-7ed0-bc01-0121ca47ddc2"
+    },
+    {
+      "event_id": "host-codex-0beec26a979f1036a46c82d27738055fe13f87ac30d7a226dd4f4ff9f8cad076",
+      "kind": "tool",
+      "session": "01a21705-d19a-7e81-9bd3-9d169e7d8f56",
+      "text": "pwd",
+      "tool_name": "exec_command",
+      "turn_id": "01a21705-d1dc-7ed0-bc01-0121ca47ddc2"
+    },
+    {
+      "event_id": "host-codex-2245d53d7a5a5390976bd443a1d3a34dbd0968607d166e27e308de76590c1b83",
+      "kind": "final",
+      "session": "01a21705-d19a-7e81-9bd3-9d169e7d8f56",
+      "text": "Local model fixture accepted the receipt.",
+      "turn_id": "01a21705-d1dc-7ed0-bc01-0121ca47ddc2"
+    }
+  ],
+  "tool_receipt_replayed": {
+    "event_id": "host-codex-0beec26a979f1036a46c82d27738055fe13f87ac30d7a226dd4f4ff9f8cad076",
+    "seq": 3
+  },
+  "private_arguments_omitted": true,
+  "early_cards": 3,
+  "card_titles": [
+    "小栗帽·原生输入",
+    "小栗帽-输出",
+    "小栗帽-工具",
+    "小栗帽-回复"
+  ],
+  "boundary": "Actual App Server command execution in an isolated test directory; model and Feishu fixtures",
+  "consecutive_runs": 12
+}

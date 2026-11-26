@@ -1,11 +1,13 @@
-"""Publish only new terminal turns from a dedicated Codex App Server session."""
+"""Relay public native events and reconcile terminal turns from one Codex session."""
 from contextlib import contextmanager
+import json
 import logging
+from queue import Empty, SimpleQueue
 from sqlite3 import OperationalError
 from threading import Event, Thread
 
 from .codex_app_server import TERMINAL
-from .storage import Database, Fault, require, string
+from .storage import Database, Fault, encode, require, string
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS codex_display_binding (
@@ -14,6 +16,11 @@ CREATE TABLE IF NOT EXISTS codex_display_binding (
 CREATE TABLE IF NOT EXISTS codex_display_turns (
  seq INTEGER PRIMARY KEY, turn_id TEXT NOT NULL UNIQUE, sent INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS codex_display_live (
+ seq INTEGER PRIMARY KEY, turn_id TEXT NOT NULL, event_id TEXT NOT NULL UNIQUE, event TEXT NOT NULL,
+ sent INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS codex_display_live_turn ON codex_display_live(turn_id,seq);
 """
 
 
@@ -23,8 +30,19 @@ class CodexDisplay:
         self.host,self.worker = adapter.host,worker
         self.session = adapter.bound_session()
         self.wake,self.stop = Event(),Event()
+        self.events = SimpleQueue()
+        self.buffered = []
+
+    def observe(self,event):
+        self.events.put(event)
+        self.wake.set()
 
     def collect(self):
+        while True:
+            try:
+                self.buffered.append(self.events.get_nowait())
+            except Empty:
+                break
         turns = self.host.thread(self.session,include_turns=True)["turns"]
         native_ids = [string(turn,"id") for turn in turns]
         require(len(set(native_ids))==len(native_ids),409,"native_display_history_changed")
@@ -34,14 +52,25 @@ class CodexDisplay:
                 # Initial attachment never republishes existing native history.
                 db.execute("INSERT INTO codex_display_binding VALUES (1,?)",(self.session,))
                 db.executemany("INSERT INTO codex_display_turns(turn_id,sent) VALUES (?,1)",((tid,) for tid in native_ids))
-                return
-            require(binding[0]==self.session,409,"display_binding_changed")
-            known = [row[0] for row in db.execute("SELECT turn_id FROM codex_display_turns ORDER BY seq")]
-            require(known==native_ids[:len(known)],409,"native_display_history_changed")
-            for turn in turns[len(known):]:
-                if turn["status"] not in TERMINAL:
-                    break
-                db.execute("INSERT INTO codex_display_turns(turn_id) VALUES (?)",(turn["id"],))
+            else:
+                require(binding[0]==self.session,409,"display_binding_changed")
+                known = [row[0] for row in db.execute("SELECT turn_id FROM codex_display_turns ORDER BY seq")]
+                require(known==native_ids[:len(known)],409,"native_display_history_changed")
+                db.executemany("INSERT INTO codex_display_turns(turn_id) VALUES (?)",
+                               ((tid,) for tid in native_ids[len(known):]))
+            state = {row["turn_id"]:row["sent"] for row in db.execute("SELECT turn_id,sent FROM codex_display_turns")}
+            waiting = []
+            for event in self.buffered:
+                tid,key = event["turn_id"],event["event_id"]
+                if tid not in state:
+                    waiting.append(event)
+                elif not state[tid]:
+                    raw = encode(event)
+                    db.execute("INSERT OR IGNORE INTO codex_display_live(turn_id,event_id,event) VALUES (?,?,?)",
+                               (tid,key,raw))
+                    known = db.execute("SELECT event FROM codex_display_live WHERE event_id=?",(key,)).fetchone()
+                    require(known[0]==raw,409,"display_event_conflict")
+        self.buffered = waiting
 
     def flush(self):
         with self.db.transaction() as db:
@@ -49,8 +78,19 @@ class CodexDisplay:
         for tid in pending:
             if self.stop.is_set():
                 return
-            self.host.publish_public_turn(self.session,tid,self.worker)
+            turn = self.host.read_turn(self.session,tid)
             with self.db.transaction() as db:
+                ready = db.execute("SELECT * FROM codex_display_live WHERE turn_id=? AND sent=0 ORDER BY seq",
+                                   (tid,)).fetchall()
+            for row in ready:
+                self.host.publish_public_item(self.worker,json.loads(row["event"]))
+                with self.db.transaction() as db:
+                    db.execute("UPDATE codex_display_live SET sent=1 WHERE seq=?",(row["seq"],))
+            if turn["status"] not in TERMINAL:
+                return
+            self.host.publish_public_turn(self.session,tid,self.worker,turn=turn)
+            with self.db.transaction() as db:
+                db.execute("DELETE FROM codex_display_live WHERE turn_id=?",(tid,))
                 db.execute("UPDATE codex_display_turns SET sent=1 WHERE turn_id=?",(tid,))
 
     def pump(self):
@@ -63,6 +103,8 @@ class CodexDisplay:
             try:
                 self.collect()
                 self.flush()
+                if self.buffered and not self.stop.wait(.2):
+                    self.wake.set()
             except (Fault,OSError,OperationalError) as error:
                 cause = error.code if isinstance(error,Fault) else type(error).__name__
                 logging.warning("Codex display pending: %s",cause)
