@@ -5,7 +5,8 @@ import unittest
 from unittest.mock import patch
 
 from . import display
-from .devloop import Loop
+from .adapter import HostAdapter
+from .devloop import FixtureHost, Loop
 from .host_wire import RemoteAdapter
 from .storage import Fault, guid
 from .test_mainline import Clock
@@ -213,5 +214,42 @@ class LinkHealth(unittest.TestCase):
         self.service.step()
         self.service.step()
         self.assertEqual(self.events("task"),events)
+        self.assertEqual([p["kind"] for p,_ in self.loop.native.entries()],["task","task_update"])
+        self.clock.advance(10)
+        self.service.step()
+        self.service.step()
+        controls = [frame["delivery_id"] for frame in self.loop.wire.frames(0) if frame["kind"]=="task.cancel"]
+        self.assertEqual(len(controls),2)
+        self.assertEqual(self.loop.native.entries()[-1][1]["delivery_id"],controls[-1])
         self.assertEqual([p["kind"] for p,_ in self.loop.native.entries()],["task","task_update","task.cancel"])
         self.assertEqual(self.worker.hold()["held_task_id"],tid)
+
+    def test_written_control_with_missing_receipt_is_never_sent_to_fresh_ledger(self):
+        task = self.dispatched()
+        tid = task["task_id"]
+        original = self.worker.adapter
+        original_send = original.deliver
+        fresh_host = FixtureHost(self.loop.root/"fresh-controls-host.db",original.bound_session())
+        fresh = HostAdapter(self.loop.root/"fresh-controls-adapter.db",fresh_host,fresh_host.session)
+        def lost(did,body,**kwargs):
+            original_send(did,body,**kwargs)
+            return None
+        original.deliver = lost
+        working = self.manager.inspect(tid)["task"]
+        updated = self.manager.update(guid(),tid,working["revision"],{"instructions":"Original update"})
+        for kind in ("task_update","task.cancel"):
+            if kind=="task.cancel":
+                self.manager.act(guid(),tid,updated["revision"],"cancel",reason="Original cancel")
+            self.worker.poll()
+            entries = self.loop.native.entries()
+            self.assertEqual(entries[-1][0]["kind"],kind)
+            self.worker.adapter = fresh
+            self.worker.poll()
+            self.worker.poll()
+            self.assertEqual(fresh_host.entries(),[])
+            self.worker.adapter = original
+            self.worker.poll()
+            self.assertEqual(self.loop.native.entries(),entries)
+        self.assertEqual([payload["kind"] for payload,_ in self.loop.native.entries()],["task","task_update","task.cancel"])
+        self.assertEqual(self.worker.hold()["held_task_id"],tid)
+        self.assertEqual(self.manager.inspect(tid)["task"]["state"],"working")

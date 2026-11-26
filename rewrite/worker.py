@@ -8,6 +8,8 @@ from typing import Protocol
 from . import display, links, peer_files, peer_retry, queued_chat, user_questions, worker_commands, worker_media
 from .storage import Database, Fault, encode, guid, require, string
 
+FOLLOWUP_FRAMES = {"task.updated","task.probe","task.shelved","task.cancel","task.transfer_out","question.resolved"}
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS connection (slot INTEGER PRIMARY KEY CHECK(slot=1), session TEXT, seq INTEGER, cursor INTEGER);
 CREATE TABLE IF NOT EXISTS inbox (delivery_id TEXT PRIMARY KEY, frame TEXT NOT NULL, done INTEGER DEFAULT 0);
@@ -16,6 +18,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     host_state TEXT NOT NULL DEFAULT 'pending'
 );
 CREATE TABLE IF NOT EXISTS assignment_sessions (assignment_id TEXT PRIMARY KEY, session TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS assignment_followups (delivery_id TEXT PRIMARY KEY, started INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS samples (query_id TEXT PRIMARY KEY, body TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS registration (slot INTEGER PRIMARY KEY CHECK(slot=1), key TEXT NOT NULL, body TEXT NOT NULL);
 CREATE UNIQUE INDEX IF NOT EXISTS single_hold ON jobs(stage) WHERE stage='accepted';
@@ -91,12 +94,25 @@ class Worker:
                 # Past releases may already have projected the same delivery with host metadata.
                 if not db.execute("SELECT 1 FROM display_events WHERE event_id=?",(notice,)).fetchone():
                     display.append(db,{"event_id":notice,"kind":"task","session":"","turn_id":"","text":text+"\n"+tid})
-        session = self.assignment_session(payload["assignment_id"])
-        if not session:
-            return self.adapter.deliver(delivery_id,payload)
-        if self.adapter.bound_session()!=session:
+        target = self.assignment_session(payload["assignment_id"])
+        session = self.adapter.bound_session()
+        require(isinstance(session,str) and session.strip(),502,"invalid_host_observation")
+        if target is not None and target!=session:
             return None
-        return self.adapter.deliver(delivery_id,payload,session=session)
+        first = False
+        if target:
+            with self.db.transaction() as db:
+                first = db.execute("""UPDATE assignment_followups SET started=1
+                                      WHERE delivery_id=? AND started=0""",(delivery_id,)).rowcount
+        if first:
+            proof = self.adapter.deliver(delivery_id,payload,session=session)
+        else:
+            # An upgraded inbox entry without an attempt record may already have entered the host.
+            proof = self.adapter.lookup_delivery(delivery_id,payload,session=session)
+        if proof:
+            self.require_task_receipt(proof,delivery_id,payload,session)
+            return proof
+        return None
 
     def connect(self):
         with self.lock:
@@ -124,8 +140,10 @@ class Worker:
                 cursor = db.execute("SELECT cursor FROM connection").fetchone()[0]
             for frame in self.router.frames(cursor):
                 with self.db.transaction() as db:
-                    db.execute("INSERT OR IGNORE INTO inbox(delivery_id,frame) VALUES (?,?)",
-                               (frame["delivery_id"], encode(frame)))
+                    inserted = db.execute("INSERT OR IGNORE INTO inbox(delivery_id,frame) VALUES (?,?)",
+                                          (frame["delivery_id"], encode(frame))).rowcount
+                    if inserted and frame["kind"] in FOLLOWUP_FRAMES:
+                        db.execute("INSERT INTO assignment_followups(delivery_id) VALUES (?)",(frame["delivery_id"],))
                     if frame["kind"] in ("task.cancel", "task.transfer_out", "task.shelved"):
                         self.save_control(db, frame["kind"], frame["payload"])
                 ack = self.router.ack(frame)
@@ -276,13 +294,17 @@ class Worker:
             proof = self.adapter.lookup_delivery(did,payload,session=session)
         if not proof:
             return False
+        self.require_task_receipt(proof,did,payload,session)
+        with self.db.transaction() as db:
+            db.execute("UPDATE jobs SET host_state='received' WHERE assignment_id=?",(aid,))
+        return True
+
+    @staticmethod
+    def require_task_receipt(proof,did,payload,session):
         digest = hashlib.sha256(encode(payload).encode()).hexdigest()
         require(isinstance(proof,dict) and proof.get("session")==session and proof.get("delivery_id")==did
                 and proof.get("digest")==digest and isinstance(proof.get("native_id"),str) and proof["native_id"]
                 and isinstance(proof.get("turn_id"),str) and proof["turn_id"],409,"host_receipt_mismatch")
-        with self.db.transaction() as db:
-            db.execute("UPDATE jobs SET host_state='received' WHERE assignment_id=?",(aid,))
-        return True
 
     def take(self, frame):
         p = frame["payload"]

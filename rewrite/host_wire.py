@@ -8,6 +8,7 @@ from .wire import serve_authenticated
 
 
 SESSION_HEADER = "X-Mowu-Host-Session"
+TASK_INPUTS = {"task","task_update","task_probe","task.shelved","task.cancel","task.transfer_out","question_answer"}
 
 
 class RemoteAdapter:
@@ -84,11 +85,18 @@ class RemoteAdapter:
         return self.request("POST","host/model-selection",body)
 
     def deliver(self, did, payload, *, session=None):
-        return self.request("POST","host/deliver",{"delivery_id":did,"payload":payload},native_session=session)["receipt"]
+        result = self.request("POST","host/deliver",{"delivery_id":did,"payload":payload},native_session=session)
+        require(isinstance(result,dict) and "receipt" in result,502,"host_receipt_unconfirmed")
+        return result["receipt"]
 
     def lookup_delivery(self,did,payload,*,session):
-        route = {"peer":"host/find-peer","task":"host/find-task"}.get(payload["kind"],"host/find-chat")
-        return self.request("POST",route,{"delivery_id":did,"payload":payload},native_session=session)["receipt"]
+        kind = payload["kind"]
+        route = "host/find-peer" if kind=="peer" else "host/find-chat"
+        if kind in TASK_INPUTS:
+            route = "host/find-task"
+        result = self.request("POST",route,{"delivery_id":did,"payload":payload},native_session=session)
+        require(isinstance(result,dict) and "receipt" in result,502,"host_receipt_unconfirmed")
+        return result["receipt"]
 
     def origin(self, native_id, *, session=None):
         return self.request("POST","host/origin",{"native_id":native_id},native_session=session)["origin"]
@@ -149,9 +157,8 @@ def serve_adapter(adapter, worker_id, identities, address, context):
                     result = adapter.model_change(*args)
             case "POST","/v1/host/deliver":
                 payload = body.get("payload")
-                require(isinstance(payload,dict) and payload.get("kind") in (
-                    "task","task_update","task_probe","task.shelved","task.cancel","task.transfer_out",
-                    "question_answer","chat","queued_chat","peer"), 422, "invalid_host_input")
+                require(isinstance(payload,dict) and isinstance(payload.get("kind"),str)
+                        and payload["kind"] in TASK_INPUTS | {"chat","queued_chat","peer"},422,"invalid_host_input")
                 result = {"receipt": adapter.deliver(string(body,"delivery_id"),payload)}
             case "POST","/v1/host/find-chat":
                 payload = body.get("payload")
@@ -172,7 +179,8 @@ def serve_adapter(adapter, worker_id, identities, address, context):
             case "POST","/v1/host/find-task":
                 payload = body.get("payload")
                 did = string(body,"delivery_id")
-                require(isinstance(payload,dict) and payload.get("kind")=="task" and valid_guid(did)
+                require(isinstance(payload,dict) and isinstance(payload.get("kind"),str)
+                        and payload["kind"] in TASK_INPUTS and valid_guid(did)
                         and valid_guid(payload.get("task_id")) and valid_guid(payload.get("assignment_id")),
                         422,"invalid_host_input")
                 result = {"receipt":adapter.lookup_delivery(did,payload,session=adapter.bound_session())}

@@ -4,6 +4,10 @@
 
 ## 检查点与证据
 
+工单更新与取消实测续用各自的投递号查回。同会话空账本均收零条，接回原账本后原输入数分别保持一条。取消回执未知时仍保留持单；另一个场景模拟原投递途中断线，收到 Router 随后发出的新取消指令才进入宿主。复跑 `python3 -m unittest -v rewrite.test_link_health rewrite.test_management rewrite.test_question_cards`。临时 Router 和 Worker 实际运行，宿主采用夹具。
+
+版本 `d9ebc890f5605feb7511fea787e00a5d48f2db64` 再跑 Worker 与适配器分步安装。旧包先运行，先升适配器、再升 Worker、最后回退，四阶段查询同一原收件号。三个原生账本各只有一条输入，原快照摘要一致。Linux 通过 131 项，34 项因 macOS DSH 跳过。复跑 `python3 -m rewrite.release_check --repository . --previous 3e0eba5426f8c0f1344f195929ecae84b1c546b5 --new d9ebc890f5605feb7511fea787e00a5d48f2db64 --component worker-pair`。旧版写者已停止，宿主为夹具。
+
 隔离启动增加按组件状态库生效的进程锁。实际 TLS Router 留一张待派单，另一个进程试用同一数据库，退出码 1，首实例仍可查原单。终止首个试验进程后保留原锁文件，新进程成功打开同一数据库。备份遇仍持锁的组件立即拒绝，未生成目标目录。复跑 `python3 -m unittest -v rewrite.test_service rewrite.test_state_bundle`。锁覆盖新版独立启动入口，老程序仍须按迁移手册停写。
 
 Linux arm64 以 `3e0eba5426f8c0f1344f195929ecae84b1c546b5` 复验通过 130 项，34 项因缺少 macOS DSH 跳过，校验 128 个发行文件。macOS Worker 与 Linux 隔离 Router、宿主夹具用不同 TLS 端口，核对原生输入与正式完工通知各一条，拒绝未知身份和不受信证书。物理机相同，无真实模型或真人飞书参与。
