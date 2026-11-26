@@ -59,6 +59,7 @@ OPTIONAL_AGENT_PENDING = {
 }
 WORKER_ADMISSION_PENDING = {
     "cleanup_waits": ({"cleanup_waits"},"SELECT COUNT(*) FROM cleanup_waits"),
+    "scoped_cleanup_reports": ({"scoped_cleanup_reports"},"SELECT COUNT(*) FROM scoped_cleanup_reports WHERE receipt IS NULL"),
     "local_admission_handoffs": ({"native_handoff_admission"},"""SELECT COUNT(*) FROM native_handoff_admission
         WHERE state IN ('beginning','frozen','ending')"""),
     "native_resume_operations": ({"native_resume"},"SELECT COUNT(*) FROM native_resume WHERE phase<>'done'"),

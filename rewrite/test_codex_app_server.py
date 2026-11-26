@@ -3697,9 +3697,12 @@ class CodexAppServer(unittest.TestCase):
     def test_native_readonly_assignment_cleanup_waits_for_control_end_and_preserves_new_holder(self):
         self.check_readonly_assignment_cleanup(("cancel","transfer","workspace_tool","control_workspace_tool"))
 
+    def test_native_readonly_reissued_cancel_uses_the_new_control_turn(self):
+        self.check_readonly_assignment_cleanup(("reissued_cancel",))
+
     @unittest.skipUnless(os.name=="nt","native Windows App Server required")
     def test_windows_native_readonly_assignment_cleanup_cancel_and_transfer(self):
-        self.check_readonly_assignment_cleanup(("cancel","transfer"))
+        self.check_readonly_assignment_cleanup(("cancel","transfer","reissued_cancel"))
 
     def check_readonly_assignment_cleanup(self,actions):
         cases = []
@@ -3709,6 +3712,7 @@ class CodexAppServer(unittest.TestCase):
                 root.mkdir(mode=0o700)
                 unsafe = action=="workspace_tool"
                 late_tool = action=="control_workspace_tool"
+                reissued = action=="reissued_cancel"
                 mode = "transfer" if action=="transfer" else "cancel"
                 restricted = not (unsafe or late_tool)
                 fixture = self.provider.cleanup_fixture = {
@@ -3806,6 +3810,31 @@ class CodexAppServer(unittest.TestCase):
                     with worker.db.transaction() as db:
                         recovered_wait = db.execute("SELECT assignment_id FROM cleanup_waits").fetchone()[0]==aid
                     self.assertTrue(recovered_wait)
+                cleanup_id,old_control_turn = None,None
+                if reissued:
+                    latest = manager.inspect(tid)["task"]
+                    response = manager.act(guid(),tid,latest["revision"],"cancel",
+                                           reason="Stop the original isolated assignment")
+                    self.assertEqual(response["delivery_state"],"pending")
+                    cleanup_id = manager.inspect(tid)["pending_cleanup"][0]["cleanup_id"]
+                    fixture["release_control"].set()
+                    old_control_turn, old_status = ended.get(timeout=8)
+                    self.assertEqual(old_status,"completed")
+                    worker.connect()
+                    fixture["release_control"] = Event()
+                    resources.callback(fixture["release_control"].set)
+                    until = time.monotonic()+8
+                    while fixture["response"].empty() and time.monotonic()<until:
+                        service.step()
+                        time.sleep(.03)
+                    self.assertEqual(fixture["response"].get_nowait(),"native_cleanup_waiting")
+                    self.assertEqual(manager.inspect(tid)["task"]["state"],"working")
+                    with worker.db.transaction() as db:
+                        rejected = db.execute("SELECT receipt FROM cleanup_reports WHERE assignment_id=?",(aid,)).fetchone()
+                        self.assertEqual(json.loads(rejected["receipt"]),{"error":"stale_assignment"})
+                        pending = db.execute("SELECT proof,receipt FROM scoped_cleanup_reports WHERE cleanup_id=?",
+                                             (cleanup_id,)).fetchone()
+                        self.assertEqual(tuple(pending),(None,None))
                 fixture["release_control"].set()
                 control_turn,status = ended.get(timeout=8)
                 self.assertEqual(status,"completed")
@@ -3813,11 +3842,16 @@ class CodexAppServer(unittest.TestCase):
                 service.step()
                 details = manager.inspect(tid)
                 with worker.db.transaction() as db:
-                    stored = db.execute("SELECT proof,receipt FROM cleanup_reports WHERE assignment_id=?",(aid,)).fetchone()
+                    if reissued:
+                        stored = db.execute("SELECT proof,receipt FROM scoped_cleanup_reports WHERE cleanup_id=?",
+                                            (cleanup_id,)).fetchone()
+                    else:
+                        stored = db.execute("SELECT proof,receipt FROM cleanup_reports WHERE assignment_id=?",(aid,)).fetchone()
                     self.assertFalse(db.execute("SELECT 1 FROM cleanup_waits").fetchone())
                 history = host.thread(sid,include_turns=True)
                 turns = history["turns"]
-                self.assertEqual([turn["id"] for turn in turns],[original["turn_id"],control_turn])
+                expected_turns = [original["turn_id"],old_control_turn,control_turn] if reissued else [original["turn_id"],control_turn]
+                self.assertEqual([turn["id"] for turn in turns],expected_turns)
                 journal = Path(history["path"]).resolve()
                 self.assertTrue(journal.is_relative_to(root.resolve()))
                 policies = {}
@@ -3829,7 +3863,7 @@ class CodexAppServer(unittest.TestCase):
                                                         "approvals":context["approval_policy"]}
                 self.assertEqual(policies,{turn["id"]:{"sandbox":"read-only","approvals":"never"} for turn in turns})
                 source_ids = [item["id"] for turn in turns for item in turn["items"] if item.get("type")=="userMessage"]
-                self.assertEqual(len(source_ids),2)
+                self.assertEqual(len(source_ids),len(expected_turns))
                 self.assertEqual(source_ids[0],original["native_id"])
                 self.assertIsNone(details["last_report"])
                 if not restricted:
@@ -3857,7 +3891,8 @@ class CodexAppServer(unittest.TestCase):
                     "native_turn_policies":policies,
                     "worker_proof":json.loads(stored["proof"]) if stored else None,
                     "w04":json.loads(stored["receipt"]) if stored else None,"final_task":details["task"],
-                    "final_cleanup":details["pending_cleanup"],"shell_present_in_native_tool_table":"exec_command" in fixture["task_tools"]})
+                    "final_cleanup":details["pending_cleanup"],"shell_present_in_native_tool_table":"exec_command" in fixture["task_tools"],
+                    **({"old_control_turn_id":old_control_turn,"cleanup_id":cleanup_id,"old_cleanup_result":"stale_assignment"} if reissued else {})})
         self.evidence = {"recorded_utc":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
                          "boundary":"Installed App Server, native cancellation and tool callback on a private test profile;"
                          " model and replacement worker host are fixtures.","cases":cases}

@@ -82,7 +82,7 @@ class LocalModel extends LlmAdapter {
     const command = goal ? 'goal' : payload?.kind ?? 'private';
     modelRequests.push({command,provider,model,reasoningEffort});
     if (usesCleanup && (command==='task.cancel' || command==='task.transfer_out')) {
-      const tag = 'cleanup-report-'+payload.assignment_id;
+      const tag = 'cleanup-report-'+(payload.cleanup_id ?? payload.assignment_id);
       if (!this.submitted.has(tag)) {
         this.submitted.set(tag,true);
         const args = {task_id:payload.task_id,assignment_id:payload.assignment_id,summary:'Old assignment stopped',

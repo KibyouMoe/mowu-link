@@ -29,6 +29,7 @@ def check_local(db):
         "SELECT 1 FROM trainer_questions WHERE proof IS NULL",
         "SELECT 1 FROM platform_compactions WHERE native_receipt IS NULL",
         "SELECT 1 FROM cleanup_reports WHERE receipt IS NULL",
+        "SELECT 1 FROM scoped_cleanup_reports WHERE receipt IS NULL",
         "SELECT 1 FROM cleanup_waits",
     )
     require(not any(db.execute(sql+" LIMIT 1").fetchone() for sql in checks),409,"handoff_local_work_pending")

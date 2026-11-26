@@ -244,6 +244,10 @@ def histories(db, entries, deltas):
                         or expected_kind=="task.cancel" and cleanup["new_assignee_id"] is not None
                         or cleanup["done"]!=1 or not cleanup["reason"].strip()):
                     raise ValueError("original assignment cleanup is pending or cannot be verified")
+                cleanup_id = cleanup.get("cleanup_id")
+                if (cleanup_id is not None and not valid_guid(cleanup_id)
+                        or step.get("expired_cancel") and expected_kind=="task.cancel" and not cleanup_id):
+                    raise ValueError("reissued cancellation has no verifiable cleanup scope")
                 step["cleanup"] = cleanup
                 used["cleanups"] += 1
             elif step.get("expired_cancel"):
@@ -377,6 +381,8 @@ def check_transport(db, entries, reviewed_questions):
                 expired_assignments.add(aid)
             if cleanup := step.get("cleanup"):
                 payload = {name:cleanup[name] for name in ("task_id","assignment_id","reason")}
+                if cleanup.get("cleanup_id"):
+                    payload["cleanup_id"] = cleanup["cleanup_id"]
                 if cleanup["kind"]=="task.cancel":
                     for did in cleanup["delivery_ids"]:
                         expected_inquiries[did] = ("task.cancel","worker/"+worker,payload)
@@ -585,9 +591,11 @@ def verify_cancelled(tid, entry, order, step, operations, after, states):
     terminal_seq = action["seq"]
     if cleanup:
         aid = step["assignment_id"]
+        request = {"assignment_id":aid,"outcome":"cancel_confirmed"}
+        if cleanup.get("cleanup_id"):
+            request["cleanup_id"] = cleanup["cleanup_id"]
         receipt = take(operations,(tid,"report",aid,"cancel_confirmed"),"worker/"+step["worker_id"],
-                       {"assignment_id":aid,"outcome":"cancel_confirmed"},
-                       [{"recorded":True,"release_assignment_id":aid,"task_state":"cancelled"}],session=True)
+                       request,[{"recorded":True,"release_assignment_id":aid,"task_state":"cancelled"}],session=True)
         if receipt["seq"]<=terminal_seq:
             raise ValueError("cleanup receipt predates the cancellation")
         states.append((terminal_seq,{pending["state"]}))
@@ -801,8 +809,11 @@ def verify_order(db, tid, entry, operations, windows):
         adjacent_states.append((transfer["seq"],{"ready"}))
         after = verify_edits(tid,transition.get("waiting_edits",[]),operations,transfer["seq"])
         if cleanup:
+            request = {"assignment_id":aid,"outcome":"transfer_confirmed"}
+            if cleanup.get("cleanup_id"):
+                request["cleanup_id"] = cleanup["cleanup_id"]
             receipt = take(operations,(tid,"report",aid,"transfer_confirmed"),actor,
-                           {"assignment_id":aid,"outcome":"transfer_confirmed"},[
+                           request,[
                                {"recorded":True,"release_assignment_id":aid,"task_state":state}
                                for state in ("ready","resuming","working","blocked","snoozed","completed_reported",
                                              "closed","cancelled","failed_archived")],

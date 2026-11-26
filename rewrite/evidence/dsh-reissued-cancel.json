@@ -1,0 +1,43 @@
+{
+  "local": {
+    "session": "isolated-dsh-reissued-cancel",
+    "task_id": "d3e3e4fc-2535-4ccf-9a80-9cffabdd72c6",
+    "assignment_id": "132c848a-8799-4cec-ac6b-cc34f05c4624",
+    "cleanup_id": "c881c1c4-7c5b-4801-bc38-cbc9f27d4899",
+    "native_inputs": [
+      "mowulink-632f4e00f6bb9c36db43ee4f2f7fefb31dd566f42550a1f78374ca1fb0c94fb6",
+      "mowulink-d37400737ffa3e115f285244db0e8b04cfd0bddf33696ba7b7059893704a796f",
+      "mowulink-ee388c92443fd4d76fedf7df356a03d4ff054b54d7c755053d960e90021d3e75"
+    ],
+    "first_control_turn": "12/2",
+    "new_control_turn": "25/3",
+    "old_result": "stale_assignment",
+    "new_w04": {
+      "recorded": true,
+      "release_assignment_id": "132c848a-8799-4cec-ac6b-cc34f05c4624",
+      "task_state": "cancelled"
+    },
+    "boundary": "Installed DSH SDK, actual isolated Router/Worker and on-disk host; scripted model."
+  },
+  "mutual_tls": {
+    "session": "isolated-dsh-reissued-cancel",
+    "task_id": "bd5f5198-bc1a-474c-9647-ecc6e9c6f935",
+    "assignment_id": "b10f4ab8-ca24-457f-b610-36087a1839ef",
+    "cleanup_id": "924e30fa-32e9-4be9-82a1-65cd9b2778b8",
+    "native_inputs": [
+      "mowulink-6de993138100df2ebb48febb12ba0d5673b701afc5900bd2479f7127c8b304cb",
+      "mowulink-d7c928d4bf654c3d0f66cdbc1a87c77a6e903c341c4dec172e61eb05ea75e063",
+      "mowulink-09d243000bd4b37ed3727673cdfa99245980c7d409fa3118428b7a3ab922507f"
+    ],
+    "first_control_turn": "12/2",
+    "new_control_turn": "25/3",
+    "old_result": "stale_assignment",
+    "new_w04": {
+      "recorded": true,
+      "release_assignment_id": "b10f4ab8-ca24-457f-b610-36087a1839ef",
+      "task_state": "cancelled"
+    },
+    "mutual_tls": true,
+    "boundary": "Installed DSH SDK, actual isolated Router/Worker and on-disk host; scripted model."
+  }
+}

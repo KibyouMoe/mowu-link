@@ -5,7 +5,8 @@ import time
 from threading import RLock
 from typing import Protocol
 
-from . import display, links, peer_files, peer_retry, queued_chat, user_questions, worker_catalog, worker_commands, worker_handoff, worker_media, worker_resume
+from . import display, links, peer_files, peer_retry, queued_chat, user_questions, worker_catalog, worker_cleanup, worker_commands, worker_handoff, worker_media, worker_resume
+from .messages import valid_guid
 from .storage import Database, Fault, encode, guid, require, string
 
 FOLLOWUP_FRAMES = {"task.updated","task.probe","task.shelved","task.cancel","task.transfer_out","question.resolved"}
@@ -69,7 +70,7 @@ class Worker:
                  session_callback_key=None):
         self.db = Database(path, SCHEMA + worker_media.SCHEMA + peer_files.SCHEMA + display.SCHEMA + links.WORKER_SCHEMA
                            + user_questions.SCHEMA + worker_commands.SCHEMA + queued_chat.SCHEMA + peer_retry.SCHEMA
-                           + worker_handoff.SCHEMA + worker_resume.SCHEMA + worker_catalog.SCHEMA)
+                           + worker_handoff.SCHEMA + worker_resume.SCHEMA + worker_catalog.SCHEMA + worker_cleanup.SCHEMA)
         self.clock = clock
         self.worker_id, self.router, self.adapter = worker_id, router, adapter
         self.lock = RLock()
@@ -620,17 +621,22 @@ class Worker:
                 kind = "task.cancel" if outcome == "cancel_confirmed" else "task.transfer_out"
                 require(origin["kind"] == kind and origin["task_id"] == task_id
                         and origin["assignment_id"] == assignment_id, 403, "wrong_report_origin")
+                cleanup_id = origin.get("cleanup_id")
+                require(cleanup_id is None or valid_guid(cleanup_id),409,"invalid_cleanup_scope")
                 try:
-                    receipt = self.confirm_cleanup(task_id, assignment_id, kind, outcome)
+                    if cleanup_id:
+                        receipt = worker_cleanup.confirm(self,task_id,assignment_id,kind,outcome,cleanup_id)
+                    else:
+                        receipt = self.confirm_cleanup(task_id,assignment_id,kind,outcome)
                 except Fault as error:
-                    if error.code=="native_cleanup_waiting":
+                    if error.code=="native_cleanup_waiting" and cleanup_id is None:
                         with self.db.transaction() as db:
                             db.execute("INSERT OR IGNORE INTO cleanup_waits VALUES (?,?,?,?)",
                                        (assignment_id,kind,task_id,outcome))
                     if error.code in ("native_cleanup_unconfirmed","native_cleanup_waiting"):
-                        self.display_cleanup(task_id,assignment_id,kind,"pending","原派发停止与清理仍待确认。")
+                        self.display_cleanup(task_id,assignment_id,kind,"pending","原派发停止与清理仍待确认。",cleanup_id)
                     raise
-                self.display_cleanup(task_id,assignment_id,kind,"recorded","Router 已收到原派发的清理确认。")
+                self.display_cleanup(task_id,assignment_id,kind,"recorded","Router 已收到原派发的清理确认。",cleanup_id)
                 return receipt
             require(origin["kind"] in ("task", "task_update", "task_probe", "question_answer") and origin["task_id"] == task_id
                     and origin["assignment_id"] == assignment_id, 403, "wrong_report_origin")
@@ -715,9 +721,10 @@ class Worker:
         except OSError as error:
             raise Fault(503,"artifact_stage_unconfirmed",True) from error
 
-    def display_cleanup(self, tid, aid, kind, status, text):
+    def display_cleanup(self, tid, aid, kind, status, text, cleanup_id=None):
+        scope = f"-{cleanup_id}" if cleanup_id else ""
         with self.db.transaction() as db:
-            display.append(db,{"event_id":f"cleanup-{kind}-{aid}-{status}","kind":"task","session":"",
+            display.append(db,{"event_id":f"cleanup-{kind}-{aid}{scope}-{status}","kind":"task","session":"",
                                "turn_id":"","text":text+"\n"+tid})
 
     def confirm_cleanup(self, tid, aid, kind, outcome):
@@ -793,6 +800,7 @@ class Worker:
                 if error.code != "stale_assignment":
                     raise
         self.flush_cleanup_waits()
+        worker_cleanup.flush(self)
 
     def flush_cleanup_waits(self):
         with self.db.transaction() as db:

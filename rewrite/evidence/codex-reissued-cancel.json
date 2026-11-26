@@ -1,0 +1,82 @@
+{
+  "recorded_utc": "2026-11-26T23:34:47Z",
+  "boundary": "Installed App Server, native cancellation and tool callback on a private test profile; model and replacement worker host are fixtures.",
+  "cases": [
+    {
+      "action": "reissued_cancel",
+      "cli_version": "0.171.0-alpha.13.2",
+      "task_id": "6d12551f-55d5-46fd-b862-4a39986394ed",
+      "assignment_id": "b809919c-58ab-4fae-9d6f-2806cd1c97ad",
+      "original": {
+        "session": "01a21a36-289d-7562-8c30-cd36c98d8d0a",
+        "delivery_id": "4bf0d993-040d-4187-ba07-0a741f32fda5",
+        "digest": "dfc736921545f6837909535d979b404bf3222dd7045c4ade82194f41e2258b40",
+        "native_id": "01a21a36-2a85-7403-a06a-f13b355a823a",
+        "turn_id": "01a21a36-2a7c-7c12-95d1-54a2ceb70ced"
+      },
+      "control_turn_id": "01a21a36-2b1a-7402-acce-ec1cc3c6a578",
+      "native_input_ids": [
+        "01a21a36-2a85-7403-a06a-f13b355a823a",
+        "01a21a36-2aa1-7122-bd6d-4b342ad6b696",
+        "01a21a36-2b1e-7a61-acc3-037e48c6ea03"
+      ],
+      "first_reply": "native_cleanup_waiting",
+      "sqlite_wait_reopened": true,
+      "lost_original_receipt_recovered": false,
+      "control_retried_after_stop_unconfirmed": false,
+      "native_turn_policies": {
+        "01a21a36-2a7c-7c12-95d1-54a2ceb70ced": {
+          "sandbox": "read-only",
+          "approvals": "never"
+        },
+        "01a21a36-2a9c-7ed0-8310-ab1ea6111241": {
+          "sandbox": "read-only",
+          "approvals": "never"
+        },
+        "01a21a36-2b1a-7402-acce-ec1cc3c6a578": {
+          "sandbox": "read-only",
+          "approvals": "never"
+        }
+      },
+      "worker_proof": {
+        "assignment_id": "b809919c-58ab-4fae-9d6f-2806cd1c97ad",
+        "cleaned": true,
+        "control_turn_id": "01a21a36-2b1a-7402-acce-ec1cc3c6a578",
+        "kind": "task.cancel",
+        "receipt_id": "2742557323d0a5e80eeade9754967da6ca1296b3a4f8abb21935a6542645cc6c",
+        "scope": "codex_read_only",
+        "session": "01a21a36-289d-7562-8c30-cd36c98d8d0a",
+        "stopped": true,
+        "stopped_turns": [
+          {
+            "status": "interrupted",
+            "turn_id": "01a21a36-2a7c-7c12-95d1-54a2ceb70ced"
+          }
+        ],
+        "withdrawn_inputs": []
+      },
+      "w04": {
+        "recorded": true,
+        "release_assignment_id": "b809919c-58ab-4fae-9d6f-2806cd1c97ad",
+        "task_state": "cancelled"
+      },
+      "final_task": {
+        "assignee_id": "oguri",
+        "assignment_id": null,
+        "holder": {
+          "kind": "router"
+        },
+        "instructions": "Wait for the original assignment control",
+        "revision": 6,
+        "state": "cancelled",
+        "task_id": "6d12551f-55d5-46fd-b862-4a39986394ed",
+        "title": "Scoped native cleanup"
+      },
+      "final_cleanup": [],
+      "shell_present_in_native_tool_table": false,
+      "old_control_turn_id": "01a21a36-2a9c-7ed0-8310-ab1ea6111241",
+      "cleanup_id": "037d8169-6b8f-4fde-9b4e-da2accd466f4",
+      "old_cleanup_result": "stale_assignment"
+    }
+  ]
+}

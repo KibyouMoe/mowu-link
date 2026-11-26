@@ -1,0 +1,21 @@
+{
+  "task_id": "11d62490-8891-4b92-976e-123dbd06b3d8",
+  "assignment_id": "cf3fc424-db34-4104-99ef-12e7101a35ab",
+  "cleanup_id": "47a633b3-f0de-438a-bbd7-2da3184ab861",
+  "original_native_input": "5d3f2163-97a3-42b5-a061-7e56c58494ef",
+  "new_native_input": "3347723f-b2e6-4e2a-a5e3-e4694fdc7d53",
+  "old_w04_key": "cancel_confirmed-cf3fc424-db34-4104-99ef-12e7101a35ab",
+  "new_w04_key": "cancel_confirmed-47a633b3-f0de-438a-bbd7-2da3184ab861",
+  "old_replay_status": 409,
+  "new_reply_lost_then_recovered": {
+    "recorded": true,
+    "release_assignment_id": "cf3fc424-db34-4104-99ef-12e7101a35ab",
+    "task_state": "cancelled"
+  },
+  "terminal_notice_count": 1,
+  "original_worker_held_after_reconnect": {
+    "held_task_id": null,
+    "held_assignment_id": null
+  },
+  "boundary": "Actual isolated HTTP Router, Worker and persisted Adapter. Scripted host, clock and response loss."
+}

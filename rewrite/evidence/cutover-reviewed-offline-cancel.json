@@ -3,27 +3,28 @@
     "boundary": "Actual isolated rewrite and legacy HTTP Routers and rewrite Workers; scripted hosts and clock.",
     "cancel_retries": [
       {
-        "delivery_id": "ddbf792a-032d-4b92-a111-863b5cd53456",
-        "presence_key": "presence-04fd29ed-8836-4c52-adaf-acd568cd2f7a"
+        "delivery_id": "048f2c10-e107-40d8-baec-7cc440b19857",
+        "presence_key": "presence-16f78918-25e0-4c42-90b8-61b9009be682"
       },
       {
-        "delivery_id": "59b36357-9204-45c5-9abe-34b3a9497918",
-        "presence_key": "presence-904284ff-4a23-4212-a481-4d325f96d695"
+        "delivery_id": "fbf3d35a-6aae-4ce0-ac65-7dc7882a7496",
+        "presence_key": "presence-644b78b4-811f-4a91-be0e-be1f8edce68f"
       }
     ],
-    "cleanup_delivery_id": "4481644f-6188-4591-9320-74417e73b93b",
+    "cleanup_delivery_id": "8061e41b-0208-4497-968f-456b286d164a",
+    "cleanup_id": "a04a3e07-4a63-48e1-96c7-59cbe0919677",
     "cleanup_reply": {
       "recorded": true,
-      "release_assignment_id": "9d272d06-953c-4fa9-b68d-a30324806911",
+      "release_assignment_id": "85f83f7d-350a-4a37-8219-d6d8f5bff3f9",
       "task_state": "cancelled"
     },
-    "cleanup_report_key": "cancel_confirmed-9d272d06-953c-4fa9-b68d-a30324806911",
+    "cleanup_report_key": "cancel_confirmed-a04a3e07-4a63-48e1-96c7-59cbe0919677",
     "first_cancel_deliveries": [
-      "1d1aac24-b189-40d6-8fac-8ee0f908a3c2",
-      "ddbf792a-032d-4b92-a111-863b5cd53456",
-      "59b36357-9204-45c5-9abe-34b3a9497918"
+      "761dc0a3-5b93-4696-9f77-34ff2469bd8e",
+      "048f2c10-e107-40d8-baec-7cc440b19857",
+      "fbf3d35a-6aae-4ce0-ac65-7dc7882a7496"
     ],
-    "first_cancel_key": "724ddec0-40fd-40f6-a61a-018765cc93d4",
+    "first_cancel_key": "798bc610-2636-4059-bccc-03bc124ab3c2",
     "late_original_delivery_receipt_refused": true,
     "late_original_report": "stale_assignment",
     "legacy": {
@@ -39,15 +40,15 @@
       "reason": "cancelled_on_rewrite",
       "status": 200
     },
-    "new_action_key": "2a582b55-da60-451b-9be4-49965d19d8ed",
+    "new_action_key": "78b3192b-bfa0-4b88-b8b1-0dc7a0f94bef",
     "new_assignment": null,
-    "original_assignment": "9d272d06-953c-4fa9-b68d-a30324806911",
+    "original_assignment": "85f83f7d-350a-4a37-8219-d6d8f5bff3f9",
     "pool_entered": 1800000662.0,
     "pool_source": "offline",
     "shelved_delivery_id": null,
     "shelved_presence_key": null,
-    "task_id": "8c2f637b-7664-5ba5-b852-1f078d099a35",
-    "trial_sha256": "3cfd20829622d0fcc35f91fd5bbfd44011d2d57d5eefc519635f98baabe94e7a",
+    "task_id": "4a593e96-5897-5c74-9ef4-e58497ad6fa0",
+    "trial_sha256": "e67eb69f0d5b54143615ac2f67d360a9f956d91e6a4952557d789ef61457733b",
     "wrong_idle_observation_refused": true
   }
 }

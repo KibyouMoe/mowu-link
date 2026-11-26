@@ -411,6 +411,75 @@ class NativeProcess(unittest.TestCase):
                 "boundary":"Installed DSH SDK with opt-in read-only assignments, local model, real isolated Router."},
                 ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
 
+    def reissued_cleanup(self,*,use_tls=False):
+        session = "isolated-dsh-reissued-cancel"
+        directory,loop,service,_command = self.goal_worker(session,use_tls=use_tls)
+        worker,manager = loop.worker,loop.hermes
+        token = guid()
+        callback = Client(self.open_worker(service,{token:"adapter/oguri"}),token)
+        tid = manager.create(guid(),"Isolated reissued cancellation","Keep the original scope","oguri")["task_id"]
+        reason = "Stop this assignment"
+        superseded = []
+        request = worker.router.request
+
+        def reissue_before_old_report(method,path,body=None,key=None,**options):
+            if (method=="POST" and path==f"tasks/{tid}/report"
+                    and body.get("outcome")=="cancel_confirmed" and not body.get("cleanup_id") and not superseded):
+                current = manager.inspect(tid)["task"]
+                response = manager.act(guid(),tid,current["revision"],"cancel",reason=reason)
+                self.assertEqual(response["delivery_state"],"pending")
+                superseded.append(manager.inspect(tid)["pending_cleanup"][0]["cleanup_id"])
+            return request(method,path,body,key,**options)
+
+        worker.router.request = reissue_before_old_report
+        with tool_listener(Path(directory),loop.adapter,callback,link=loop.native.link), \
+             self.start_native(directory,session,"cleanup-read-only",use_tls=use_tls) as native:
+            worker.connect()
+            worker.poll()
+            service.clock.advance(10)
+            worker.poll()
+            worker.poll()
+            self.assertTrue(self.read_native(native,"work-started")["running"])
+            aid = worker.hold()["held_assignment_id"]
+            manager.act(guid(),tid,manager.inspect(tid)["task"]["revision"],"cancel",reason=reason)
+            worker.poll()
+            before = self.read_native(native,"read")
+            old, = before["results"]
+            self.assertTrue(old["isError"])
+            self.assertEqual(old["toolCallId"],"cleanup-report-"+aid)
+            cleanup_id, = superseded
+            self.assertEqual(manager.inspect(tid)["task"]["state"],"working")
+            worker.poll()
+            after = self.read_native(native,"read")
+            self.assertEqual(after["inputs"][:-1],before["inputs"])
+            self.assertEqual(len(after["inputs"]),3)
+            self.assertEqual(after["results"][0],old)
+            result = after["results"][1]
+            self.assertFalse(result["isError"])
+            self.assertEqual(result["toolCallId"],"cleanup-report-"+cleanup_id)
+            reply = json.loads(result["content"][0]["text"])
+            self.assertEqual(reply,{"recorded":True,"release_assignment_id":aid,"task_state":"cancelled"})
+            self.assertEqual(manager.inspect(tid)["pending_cleanup"],[])
+            self.assertIsNone(worker.hold()["held_assignment_id"])
+            with worker.db.transaction() as db:
+                proof,receipt = db.execute("SELECT proof,receipt FROM scoped_cleanup_reports WHERE cleanup_id=?",
+                                           (cleanup_id,)).fetchone()
+                stale, = db.execute("SELECT receipt FROM cleanup_reports WHERE assignment_id=?",(aid,)).fetchone()
+            self.assertEqual(json.loads(stale),{"error":"stale_assignment"})
+            self.assertEqual(json.loads(receipt),reply)
+            with loop.adapter.db.transaction() as db:
+                original_turn,new_turn = [json.loads(db.execute("SELECT receipt FROM intents WHERE native_id=?",
+                                          (native_id,)).fetchone()[0])["turn_id"]
+                                          for native_id in after["inputs"][1:]]
+            self.assertNotEqual(original_turn,new_turn)
+            self.assertEqual(json.loads(proof)["control_turn_id"],new_turn)
+        if output := os.environ.get("MOWULINK_DSH_REISSUED_CANCEL_EVIDENCE"):
+            evidence = {"session":session,"task_id":tid,"assignment_id":aid,"cleanup_id":cleanup_id,
+                        "native_inputs":after["inputs"],"first_control_turn":original_turn,
+                        "new_control_turn":new_turn,"old_result":"stale_assignment","new_w04":reply,"mutual_tls":use_tls,
+                        "boundary":"Installed DSH SDK, actual isolated Router/Worker and on-disk host; scripted model."}
+            Path(output).write_text(json.dumps(evidence,ensure_ascii=False,indent=2)+"\n")
+
     def restore_read_only_proof(self,runtime,original,aid,proof):
         restored = self.local_tls_directory()
         self.assertFalse((runtime/"dsh-admissions.sqlite3-journal").exists())
@@ -1397,6 +1466,9 @@ class LocalTlsLoop(NativeProcess):
     def test_read_only_cancel_and_transfer_over_mutual_tls(self):
         self.read_only_cleanup(use_tls=True)
 
+    def test_reissued_cancel_uses_the_new_control_over_mutual_tls(self):
+        self.reissued_cleanup(use_tls=True)
+
     def test_read_only_cleanup_over_mutual_tls_requires_proof(self):
         self.read_only_cleanup_refusals(use_tls=True)
 
@@ -1931,6 +2003,9 @@ class NativeLoop(NativeProcess):
 
     def test_read_only_dsh_acknowledges_original_cancel_or_transfer_and_recovers_w04_reply(self):
         self.read_only_cleanup()
+
+    def test_native_dsh_reissued_cancel_uses_the_new_control(self):
+        self.reissued_cleanup()
 
     def container_engine(self):
         image = os.environ.get("MOWULINK_DSH_CONTAINER_IMAGE")

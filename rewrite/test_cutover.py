@@ -2016,6 +2016,8 @@ store.close()
         self.assertEqual(first["pool"]["source"],"offline" if offline else "unanswered")
         self.assertIs(bool(first.get("shelved_presence_key")),not offline)
         self.assertEqual(cleanup["receipt"],final)
+        if reissue:
+            self.assertEqual(cleanup["report_key"],"cancel_confirmed-"+cleanup["cleanup_id"])
         self.assertLess(expired["action_seq"],cleanup["action_seq"])
         self.assertLess(cleanup["action_seq"],cleanup["report_seq"])
         self.assertEqual(len(first["inquiry_rounds"][0]["probes"]),1)
@@ -2057,6 +2059,13 @@ store.close()
         with self.assertRaisesRegex(ValueError,"original idle worker observation"):
             stage(changed,denied)
         self.assertFalse(denied.exists())
+        if reissue:
+            shutil.copyfile(private/"trial-router.db",changed/"router.db")
+            with closing(sqlite3.connect(changed/"router.db")) as db,db:
+                db.execute("UPDATE cleanups SET cleanup_id=NULL WHERE assignment_id=?",(aid,))
+            with self.assertRaisesRegex(ValueError,"no verifiable cleanup scope"):
+                stage(changed,denied)
+            self.assertFalse(denied.exists())
         if offline:
             shutil.copyfile(private/"trial-router.db",changed/"router.db")
             with closing(sqlite3.connect(changed/"router.db")) as db,db:
@@ -2079,6 +2088,7 @@ store.close()
                 "shelved_presence_key":first.get("shelved_presence_key"),"new_action_key":last_action,
                 "pool_source":first["pool"]["source"],"pool_entered":first["pool"]["entered"],
                 "cleanup_delivery_id":cleanup["delivery_ids"][0] if reissue else cleanup["delivery_id"],
+                "cleanup_id":cleanup.get("cleanup_id"),
                 "cleanup_report_key":cleanup["report_key"],"cleanup_reply":final,
                 "late_original_report":late.exception.code,"legacy":observed,
                 "trial_sha256":settled["trial_sha256"],"wrong_idle_observation_refused":True,

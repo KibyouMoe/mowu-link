@@ -3,32 +3,33 @@
     "boundary": "Actual isolated rewrite and legacy HTTP Routers and rewrite Workers; scripted hosts and clock.",
     "cancel_retries": [
       {
-        "delivery_id": "4e2cf626-ccdb-4bb8-85e8-0a37bf2f06b6",
-        "presence_key": "presence-68c39405-25a7-4bce-b970-4d2d9743b168"
+        "delivery_id": "fe5d6f97-6815-4163-81f8-d0818df5b7ac",
+        "presence_key": "presence-55603651-a1fd-4332-a51b-c73206da91b2"
       },
       {
-        "delivery_id": "61c1c0f1-763c-4ab7-afb1-adde82fd5aaa",
-        "presence_key": "presence-795bf8df-e544-4cd3-83fd-1ec6001427b6"
+        "delivery_id": "2fb63db1-28fc-4592-a2ba-19d354957602",
+        "presence_key": "presence-7fce4ebf-88d2-4349-9e3a-4be358b5549d"
       },
       {
-        "delivery_id": "50f93c59-1a13-4b7f-8d73-3d88807bd5c1",
-        "presence_key": "presence-75a7c1f3-e565-489e-86c2-871f85840f70"
+        "delivery_id": "b8f89d0c-e701-4628-bc60-83f7493559c8",
+        "presence_key": "presence-ebb8ad85-106b-4a5f-83ec-607a04da8dcf"
       }
     ],
-    "cleanup_delivery_id": "81544ab5-8014-4a5f-b898-6037b05fc523",
+    "cleanup_delivery_id": "a810ccb4-5d03-48d7-a066-dc5030e00356",
+    "cleanup_id": "247c702f-bfe6-4c59-b839-90ff30f1e508",
     "cleanup_reply": {
       "recorded": true,
-      "release_assignment_id": "b9cf10f4-3e4c-405e-9383-9a53f29b031b",
+      "release_assignment_id": "0bebd456-f0b9-4ee9-b66e-03f15e3511e1",
       "task_state": "cancelled"
     },
-    "cleanup_report_key": "cancel_confirmed-b9cf10f4-3e4c-405e-9383-9a53f29b031b",
+    "cleanup_report_key": "cancel_confirmed-247c702f-bfe6-4c59-b839-90ff30f1e508",
     "first_cancel_deliveries": [
-      "8777d14a-b8c8-40b7-9014-fcc1538f3a32",
-      "4e2cf626-ccdb-4bb8-85e8-0a37bf2f06b6",
-      "61c1c0f1-763c-4ab7-afb1-adde82fd5aaa",
-      "50f93c59-1a13-4b7f-8d73-3d88807bd5c1"
+      "ecf09ecb-c7e5-4710-80c0-85f4d7e3cf01",
+      "fe5d6f97-6815-4163-81f8-d0818df5b7ac",
+      "2fb63db1-28fc-4592-a2ba-19d354957602",
+      "b8f89d0c-e701-4628-bc60-83f7493559c8"
     ],
-    "first_cancel_key": "6294b42a-517b-4e95-84ab-ea44464469ad",
+    "first_cancel_key": "2235ceb0-7ff9-4a84-9fed-35289b4742b5",
     "late_original_report": "stale_assignment",
     "legacy": {
       "deliverable": null,
@@ -43,45 +44,48 @@
       "reason": "cancelled_on_rewrite",
       "status": 200
     },
-    "new_action_key": "7398aaf0-e174-49b8-a740-7fbfb6b7cf17",
+    "new_action_key": "bcfc9774-66b9-409c-8284-ddf7511bceb5",
     "new_assignment": null,
-    "original_assignment": "b9cf10f4-3e4c-405e-9383-9a53f29b031b",
-    "shelved_delivery_id": "f70a4ee0-6b74-41f6-9fe4-8af514dc85ab",
-    "shelved_presence_key": "presence-72351fb4-84d4-4fb4-b3b8-7b9e3d594e75",
-    "task_id": "aa5fd2e8-4e10-5217-8348-9c7a55edc116",
-    "trial_sha256": "d15597f7b7e98c3103734943c8c710804e9f3660418bd5ec45e4e9a1116ae1a6",
+    "original_assignment": "0bebd456-f0b9-4ee9-b66e-03f15e3511e1",
+    "pool_entered": 1800000034.0,
+    "pool_source": "unanswered",
+    "shelved_delivery_id": "4363a7c6-811d-45ab-87ba-054dc579226c",
+    "shelved_presence_key": "presence-376f3080-c65c-4b3e-b6ee-3f73cbe6092c",
+    "task_id": "3681b586-e559-5a3c-be60-88c0ba9d529c",
+    "trial_sha256": "db216d8957c7acf96c755de09ebf8c73219fcedebc38a0c32fffed66e230d16e",
     "wrong_idle_observation_refused": true
   },
   "transferred": {
     "boundary": "Actual isolated rewrite and legacy HTTP Routers and rewrite Workers; scripted hosts and clock.",
     "cancel_retries": [
       {
-        "delivery_id": "2c775a83-bba1-4b83-8453-9b35bb370d90",
-        "presence_key": "presence-beb0278f-4e3a-4347-8711-bc56c64c4f02"
+        "delivery_id": "0d155a80-3ea0-4690-bd81-0786fb46e80e",
+        "presence_key": "presence-0e3fd0e0-b7ef-4e76-aa0e-7f2a3cd52beb"
       },
       {
-        "delivery_id": "74cd75b2-2cd4-4129-b66f-86b0907cd8f9",
-        "presence_key": "presence-2fd47488-9914-4787-9e53-a57dac0a8071"
+        "delivery_id": "310a241f-3413-43a3-be28-f04fe715eaaa",
+        "presence_key": "presence-8cf9c58c-60be-45bc-af91-1d4b6643b33e"
       },
       {
-        "delivery_id": "03736e7b-d61d-41ad-b8ee-309de85a5ed5",
-        "presence_key": "presence-88034275-bd09-4dd5-8650-2337f6243443"
+        "delivery_id": "e3c2f7ae-b10a-46a1-995e-cab8f542f1c5",
+        "presence_key": "presence-63899992-40f2-4543-8eed-94ef2441f396"
       }
     ],
-    "cleanup_delivery_id": "8409483f-e1ca-4e67-8769-0712659b8120",
+    "cleanup_delivery_id": "5d5c801c-9ef1-4603-a5f3-838d871eb2e0",
+    "cleanup_id": null,
     "cleanup_reply": {
       "recorded": true,
-      "release_assignment_id": "9b21234e-8351-456d-b12c-d7af503d0aa1",
+      "release_assignment_id": "46112a82-66af-4106-9f80-dfa2f6237d85",
       "task_state": "closed"
     },
-    "cleanup_report_key": "transfer_confirmed-9b21234e-8351-456d-b12c-d7af503d0aa1",
+    "cleanup_report_key": "transfer_confirmed-46112a82-66af-4106-9f80-dfa2f6237d85",
     "first_cancel_deliveries": [
-      "b94b33ba-b4f8-423d-b8dd-945471dd8787",
-      "2c775a83-bba1-4b83-8453-9b35bb370d90",
-      "74cd75b2-2cd4-4129-b66f-86b0907cd8f9",
-      "03736e7b-d61d-41ad-b8ee-309de85a5ed5"
+      "683a8d98-8314-4dbe-a45c-5869b2d376c9",
+      "0d155a80-3ea0-4690-bd81-0786fb46e80e",
+      "310a241f-3413-43a3-be28-f04fe715eaaa",
+      "e3c2f7ae-b10a-46a1-995e-cab8f542f1c5"
     ],
-    "first_cancel_key": "84f0b613-8f0e-4d16-99f4-caeb4d7ac487",
+    "first_cancel_key": "198d7465-f779-4142-b46d-136e0e51f8c7",
     "late_original_report": "stale_assignment",
     "legacy": {
       "deliverable": null,
@@ -96,13 +100,15 @@
       "reason": "reviewed_on_rewrite",
       "status": 200
     },
-    "new_action_key": "0af8463d-95ec-43ca-ba00-190567e8ad04",
-    "new_assignment": "fcff46ee-a5bb-4a2f-aa18-b0c2b17e3dbc",
-    "original_assignment": "9b21234e-8351-456d-b12c-d7af503d0aa1",
-    "shelved_delivery_id": "292e4951-e397-4aa0-9a1c-106d0677a85d",
-    "shelved_presence_key": "presence-988d3c7c-df6e-4d55-ba7f-a7c3b0935d20",
-    "task_id": "211e56b8-ee72-5041-bdc5-d5d5cd8ac25c",
-    "trial_sha256": "ac48714667b989909951de5fd501e390e62fd37f678cb495fafd10c9575e8ee6",
+    "new_action_key": "43c9f3db-f518-4999-83e9-ed1014774aec",
+    "new_assignment": "3f7ba2b9-ffc6-4648-88da-d8d29f61c1c6",
+    "original_assignment": "46112a82-66af-4106-9f80-dfa2f6237d85",
+    "pool_entered": 1800000034.0,
+    "pool_source": "unanswered",
+    "shelved_delivery_id": "05c645ef-36de-4d91-9952-15a8d50d0ab5",
+    "shelved_presence_key": "presence-afe6070f-d90c-4c5e-94cc-baace47d1247",
+    "task_id": "1746a570-c29c-5aea-82fd-117802b653e0",
+    "trial_sha256": "651a355db51dfe216cb064f897a1b96e62092ce51f7623f63d03d69a912f94b6",
     "wrong_idle_observation_refused": true
   }
 }

@@ -54,6 +54,7 @@ class Orders:
                            + legacy_history.SCHEMA + legacy_peers.SCHEMA + approvals.SCHEMA + admission.SCHEMA)
         with self.db.transaction() as db:
             approvals.upgrade(db)
+            cleanup.upgrade(db)
         self.clock = clock
         self.poll_seconds = poll_seconds
         self.lease_seconds = lease_seconds
@@ -295,7 +296,7 @@ class Orders:
         current = task(db, tid)
         aid = string(data, "assignment_id")
         if data.get("outcome") in ("cancel_confirmed", "transfer_confirmed"):
-            return cleanup.confirm(db, current, worker, aid, data["outcome"], self.clock())
+            return cleanup.confirm(db, current, worker, aid, data["outcome"], self.clock(), data.get("cleanup_id"))
         require(current["state"] == "working" and current["assignee_id"] == worker
                 and current["assignment_id"] == aid, 409, "stale_assignment")
         require(not db.execute("SELECT 1 FROM cleanups WHERE assignment_id=? AND done=0", (aid,)).fetchone(),

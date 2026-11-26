@@ -4,6 +4,12 @@
 
 ## 检查点与证据
 
+重新取消的 W04 已按具体指令核验。相同 A06 操作键重送保留原回执，自动重试沿用同一清理号。同一派发的下一条显式取消携带新的 `cleanup_id`。Worker 从原生收件识别该号，分别保存等待、清理及 Router 回执。隔离实测第一次迟报、重用旧键、换新键重播旧正文和错号都返回 409。新 W04 落库后故意丢回包，冷启沿原键查回，取消通知一条。复跑 `python3 -B -m unittest -v rewrite.test_cleanup rewrite.test_cutover -k cancel`。[HTTP 与回退实测](evidence/reissued-cancel-w04.json)
+
+用前版 `2490059e42d379183c19b0e82c208f545a3c78ee` 生成的隔离 Router、Worker 和适配器库做了升级。仅一次待确认的旧取消可以正常完成，已经成功的旧回执可沿原键回读。旧版已重复取消而未记录清理号时，拒绝无号回执，须由管理端发新指令。回退核对新指令及 W04 的同一清理号，缺号拒绝发布。[旧库升级](evidence/reissued-cancel-upgrade.json) · [回退演练](evidence/cutover-reviewed-cancel-retry.json)
+
+独立 Codex App Server 与 DSH SDK 实测旧原生控制 W04 被拒、新原生控制获准。DSH 验本地套接字和双向 TLS。各自的工作回合和两次控制输入均有独立标识。两端使用本地脚本模型，真实登录态下的模型调用仍待验。复跑 `python3 -B -m unittest -v rewrite.test_codex_app_server rewrite.test_dsh_native_loop -k reissued_cancel`。[Codex](evidence/codex-reissued-cancel.json) · [DSH](evidence/dsh-reissued-cancel.json)
+
 进度询问按原续做回执重建轮次。真实隔离 Router 与 Worker 实跑两次保留原持单，轮次询问数为 0、3、4。最后一轮无人答复才入池，原工位未提交成果。转派后新工位提交并验收，原工位随后交清理回执。旧 Router 的恢复库仍只读回已验收归档，原两工位无待派。删除续做回执或把关联的空闲观测改成忙，均拒绝准备。宿主和时钟为夹具。[询问轮次实测](evidence/cutover-reviewed-inquiries.json)
 
 询问轮次提交 `cfa78b3dbd1f11f1928b2366782113833fbca7da` 的 Linux arm64 全量通过 199 项、按环境跳过 121 项。302 文件安装包的 71 项专项全部通过，逐文件校验一致。归档 SHA-256 为 `34a81a432a4b9351058235368da892ce228218c22fb501cca365490a2c67c97a`。Windows 常规与 DSH 原生两组通过。[Windows CI](https://github.com/KibyouMoe/mowu-link/actions/runs/45908802146)
@@ -12,7 +18,7 @@
 
 取消重试回退实现 `42ad8dc34f5d985768fea13326158d27a92a85b8` 的 Linux arm64 全量通过 201 项、依环境跳过 121 项。303 文件安装包通过 73 项专项，逐文件校验一致。归档 SHA-256 为 `abac5a9649dd8415254780e2cc892ce722b0322c423f422aec1603eb7cfc4174`。Windows 常规与 DSH 原生两组通过。[Windows CI](https://github.com/KibyouMoe/mowu-link/actions/runs/45909766891)
 
-后续发现一条仍未通过的 Worker 路径。第一次取消耗尽后，若原工位真正向 Router 提交过迟到的取消 W04，Worker 会把 409 按派发号和控制类型缓存。重新取消有新的宿主输入，但 Worker 直接复用旧错误，没有发出第二次 HTTP 请求。把原请求及原幂等键直接重放给隔离 Router，Router 又会接受，因为请求缺少可区分两次取消的标识。直接重放只用于诊断。前述回退实测覆盖最终清理已由正确流程确认的工单。后续需要把新清理回执与具体取消请求关联，同时保留已成功回执的幂等查回。宿主和时钟为夹具。[Worker 重新取消阻点](evidence/worker-stale-cancel-reissue.json)
+修复前复现过一条 Worker 失败路径。第一次取消耗尽后，若原工位真正向 Router 提交过迟到的取消 W04，Worker 会把 409 按派发号和控制类型缓存。重新取消有新的宿主输入，但 Worker 直接复用旧错误，没有发出第二次 HTTP 请求。把原请求及原幂等键直接重放给隔离 Router，Router 又会接受，因为请求缺少可区分两次取消的标识。直接重放只用于诊断。回退演练随后将新清理回执与具体取消请求对应，并保留已成功的幂等查回。宿主和时钟为夹具。[Worker 重新取消阻点](evidence/worker-stale-cancel-reissue.json)
 
 首次取消期间离线入池的路径也已补上。原工位收到首次取消与两次重试后断开，十分钟后由 Router 入池。实测没有搁置帧。原工位重新连上，收到新取消并交清理 W04。隔离旧 Router 读回已取消，无成果、无持单、无重派。首次取消的收件顺序晚于池中操作，或其重试关联的空闲观测不符时，均拒绝发布。宿主和时钟为夹具。复跑 `python3 -B -m unittest -v rewrite.test_cutover -k cancel_interrupted`。[本次实测](evidence/cutover-reviewed-offline-cancel.json) · [旧失败证据](evidence/cutover-offline-cancel-reissue-gap.json)
 

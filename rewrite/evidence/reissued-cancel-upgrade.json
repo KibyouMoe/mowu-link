@@ -1,0 +1,36 @@
+{
+  "old_revision": "2490059e42d379183c19b0e82c208f545a3c78ee",
+  "cases": {
+    "unique": {
+      "task_id": "9f31450b-38d6-4037-bd02-69edf011d7a4",
+      "old_native_id": "767878b2-769b-45a3-9fa7-804fc8bfba4d",
+      "result": {
+        "recorded": true,
+        "release_assignment_id": "36039e25-69fa-4189-84ef-cedf25d2161b",
+        "task_state": "cancelled"
+      }
+    },
+    "repeated": {
+      "task_id": "5e87c332-bf30-4a00-b23a-2d0ad558868d",
+      "old_result_code": 409,
+      "new_cleanup_id": "160cea3e-982f-4d62-8b46-459b7c80b2f0",
+      "old_native_id": "94dc872e-3d1d-4aae-b1ea-5cef903a4afe",
+      "new_native_id": "5d8428e2-e3a3-473f-b528-62a04faa6efe",
+      "result": {
+        "recorded": true,
+        "release_assignment_id": "80facf80-bc8b-42c9-9686-ae9b67a202fc",
+        "task_state": "cancelled"
+      }
+    },
+    "already_confirmed": {
+      "task_id": "eedb66a1-d125-4549-892c-ee1fe5053cb5",
+      "old_native_id": "973f20c4-7382-485c-a0c6-33a7095e4043",
+      "result": {
+        "recorded": true,
+        "release_assignment_id": "47e7eb52-e7a6-4b9e-95a5-e15037280e4b",
+        "task_state": "cancelled"
+      }
+    }
+  },
+  "boundary": "Pinned old and current rewrite HTTP Router, Worker and on-disk Adapter; scripted host and time; no live services."
+}

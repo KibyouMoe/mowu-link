@@ -58,9 +58,11 @@ def on_idle_sample(db, worker, tid, aid, now, interval):
     kind = request["kind"] if request else "task.probe"
     body = {"task_id": tid, "assignment_id": aid}
     if kind == "task.cancel":
-        control = db.execute("SELECT reason FROM cleanups WHERE assignment_id=? AND done=0", (aid,)).fetchone()
+        control = db.execute("SELECT reason,cleanup_id FROM cleanups WHERE assignment_id=? AND done=0", (aid,)).fetchone()
         require(control, 409, "cancel_not_pending")
         body["reason"] = control["reason"]
+        if control["cleanup_id"] is not None:
+            body["cleanup_id"] = control["cleanup_id"]
     delivery.enqueue(db, "worker/" + worker, kind, body)
     db.execute("""INSERT INTO inquiries VALUES (?,?,0,?) ON CONFLICT(assignment_id) DO UPDATE
         SET retries=retries+1,last_sent=excluded.last_sent""", (aid, kind, now))
