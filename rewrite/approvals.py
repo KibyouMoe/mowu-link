@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS native_approvals (
 
 def validate_request(request):
     fields = {"session","turn_id","item_id","command","cwd","environment_id","decisions"}
-    require(isinstance(request,dict) and set(request)==fields,422,"invalid_approval_request")
+    require(isinstance(request,dict) and fields<=set(request)<=fields|{"arguments","reason"},422,"invalid_approval_request")
     for field in fields-{"decisions","environment_id"}:
         limit = 8192 if field in ("command","cwd") else 200
         require(len(string(request,field))<=limit and "\0" not in request[field],422,"invalid_approval_request")
@@ -33,6 +33,11 @@ def validate_request(request):
     decisions = request["decisions"]
     require(isinstance(decisions,list) and decisions and all(value in DECISIONS for value in decisions)
             and len(decisions)==len(set(decisions)),422,"invalid_approval_choices")
+    if "arguments" in request:
+        require(isinstance(request["arguments"],dict) and len(encode(request["arguments"]))<=32768,
+                422,"invalid_approval_arguments")
+    if "reason" in request:
+        require(isinstance(request["reason"],str) and len(request["reason"])<=2000,422,"invalid_approval_reason")
 
 
 def require_private_store(path):

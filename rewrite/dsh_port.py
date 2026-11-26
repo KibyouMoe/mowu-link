@@ -7,10 +7,13 @@ import json
 import os
 import socket
 from socketserver import ThreadingMixIn
-from threading import Thread
+from sqlite3 import OperationalError
+from threading import Event, Thread
 from urllib.error import URLError
 
 from .agent_tools import TOOLSET
+from .dsh_approvals import DshApprovals
+from .messages import valid_guid
 from .storage import Fault, encode, require, string
 
 NATIVE_TOOLS = frozenset(tool["name"] for tool in TOOLSET)
@@ -145,6 +148,15 @@ class DshHost:
 def tool_listener(directory, adapter, worker):
     from socketserver import UnixStreamServer
     endpoint = private_directory(directory) / "worker.sock"
+    approvals = DshApprovals(adapter,worker)
+    stop = Event()
+
+    def recover_approvals():
+        while not stop.wait(.5):
+            try:
+                approvals.settle(stop)
+            except OperationalError:
+                continue
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self,*args):
@@ -153,15 +165,25 @@ def tool_listener(directory, adapter, worker):
         def do_POST(self):
             self.connection.settimeout(8)
             try:
-                require(self.path == "/tool",404,"unknown_route")
+                require(self.path in ("/tool","/approval","/approval/attempt"),404,"unknown_route")
                 size = int(self.headers.get("Content-Length","0"))
                 require(0 < size <= 1048576,422,"invalid_envelope")
                 body = json.loads(self.rfile.read(size))
-                require(isinstance(body,dict) and set(body) == {"session","turn_id","native_id","tool","call_id","arguments"}
-                        and string(body,"tool") in NATIVE_TOOLS,422,"invalid_envelope")
-                adapter.prove_native_input(string(body,"session"),string(body,"turn_id"),string(body,"native_id"))
-                del body["native_id"]
-                result = worker.request("POST","worker/native-tool",body)
+                require(isinstance(body,dict),422,"invalid_envelope")
+                if self.path=="/tool":
+                    require(set(body)=={"session","turn_id","native_id","tool","call_id","arguments"}
+                            and string(body,"tool") in NATIVE_TOOLS,422,"invalid_envelope")
+                    adapter.prove_native_input(string(body,"session"),string(body,"turn_id"),string(body,"native_id"))
+                    del body["native_id"]
+                    result = worker.request("POST","worker/native-tool",body)
+                else:
+                    require(set(body)=={"approval_id","data"} and valid_guid(body["approval_id"])
+                            and isinstance(body["data"],dict),422,"invalid_approval_envelope")
+                    require(string(body["data"],"session")==adapter.bound_session(),403,"wrong_native_session")
+                    if self.path=="/approval":
+                        result = approvals.offer(body["approval_id"],body["data"])
+                    else:
+                        result = approvals.attempt(body["approval_id"],body["data"])
                 status = 200
             except Fault as error:
                 status, result = error.status, {"error":error.code}
@@ -181,11 +203,15 @@ def tool_listener(directory, adapter, worker):
     with Server(str(endpoint),Handler) as server:
         info = endpoint.stat()
         runner = Thread(target=server.serve_forever,kwargs={"poll_interval":0.05},daemon=True)
+        recovery = Thread(target=recover_approvals,daemon=True)
         runner.start()
+        recovery.start()
         try:
             yield
         finally:
+            stop.set()
             server.shutdown()
             runner.join()
+            recovery.join(timeout=16)
             if endpoint.exists() and os.path.samestat(info,endpoint.lstat()):
                 endpoint.unlink()

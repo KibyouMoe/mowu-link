@@ -1,0 +1,58 @@
+{
+  "session": "isolated-dsh-bash-approvals",
+  "native_records": [
+    {
+      "native_id": "eee4ade6-6f45-4176-9b19-47e60681662e",
+      "turn": "21/2",
+      "asked_seq": 27,
+      "decided_seq": 28,
+      "outcome": "rejected"
+    },
+    {
+      "native_id": "d6afbe87-9b2e-41ec-96de-b430835f6833",
+      "turn": "36/3",
+      "asked_seq": 42,
+      "decided_seq": 43,
+      "outcome": "allowed-once"
+    },
+    {
+      "native_id": "3eb78561-56a7-4387-8de8-57e2021400f3",
+      "turn": "51/4",
+      "asked_seq": 57,
+      "decided_seq": 58,
+      "outcome": "rejected"
+    },
+    {
+      "native_id": "a0cb9dd7-05bc-4384-a9c7-fe07eabaa4ef",
+      "turn": "66/5",
+      "asked_seq": 72,
+      "decided_seq": 73,
+      "outcome": "rejected"
+    }
+  ],
+  "router_notifications": [
+    "b5442978-8555-4058-b2cf-3bbfe29cf2b1",
+    "8fa70093-014b-4b54-8c49-90f7cb603936",
+    "c7d03dc2-334b-4b30-b754-92d1b47d3d46",
+    "5756056f-8168-4a60-a3b2-97e0f0a80980"
+  ],
+  "closure_retry_same_receipt": true,
+  "cold_reopen_recovered_original_closure": true,
+  "implicit_directory_used_native_answerer": true,
+  "successful_bash_calls": 1,
+  "boundary": "Installed DSH AgentLoop, ApprovalService and Bash provider; test model and operator identity",
+  "consecutive_runs": 16,
+  "service_tls": {
+    "approval_id": "adb32960-a5f8-4ef2-9153-f831352283e9",
+    "boundary": "Installed DSH SDK and Bash with scripted model and isolated operator CLI",
+    "native_decided_seq": 13,
+    "native_outcome": "allowed-once",
+    "notice_id": "753f7cbe-a294-4a6a-b9f2-7cbd0ef8ff96",
+    "router_state": "native_closed",
+    "session": "dsh-isolated-tls-approval",
+    "successful_bash_calls": 1,
+    "tls_legs": 3,
+    "turn": "1/1",
+    "unix_callback": true
+  }
+}

@@ -4,7 +4,13 @@
 
 ## 检查点与证据
 
-独立 Codex App Server 的命令审批通过 Worker 按原请求号到 Router。请求与单次决定分别持久记录，C01 通知仅给该工位获准的审批身份。同号重投没有第二条通知。一次故意丢掉 Router 闭合回执，适配器取回同一记录；另一次丢原生关闭回执，Router 保留决定已登记，未误记关闭，也未重发原生决定。第三次推进隔离 Router 时钟，超时后原生请求只收到一次取消，没有操作人决定。连过 12 轮。模型和人机操作使用夹具，实际授权流程仍待验。[原生审批记录](evidence/codex-app-server-native-approval.json) · [审批入口](README.md#独立-codex-命令审批)
+DSH 命令审批已用实际 SDK 的 AgentLoop、ApprovalService 和 Bash 验证。带绝对工作目录的请求沿用原生审批号，测试审批人允许后只执行一次隔离 `pwd`，拒绝及超时均未执行。原生结果已写盘但关闭回执被扣住时，重开适配器及宿主可从原会话补回，原生输入、决定和工具结果不新增。省略工作目录时仍由宿主原生审批。连续 16 轮通过。模型和审批操作者用测试夹具。[原生审批记录](evidence/dsh-native-command-approval.json) · [操作入口](README.md#独立宿主命令审批)
+
+三段 TLS 和 DSH 私有 Unix 回调接口另用独立进程实跑。审批 CLI 允许 `adb32960-a5f8-4ef2-9153-f831352283e9`，原生回合回读同号、`allowed-once`，仅一次 Bash 结果。复跑 `python3 -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_dsh_native_command_decisions_match_persisted_approval_ids`。
+
+同版 macOS 201 项全过。Linux arm64 通过 141 项，60 项因本机宿主依赖跳过。
+
+独立 Codex App Server 的命令审批通过 Worker 按原请求号到 Router。请求与单次决定分别持久记录，C01 通知仅给该工位获准的审批身份。同号重投没有第二条通知。一次故意丢掉 Router 闭合回执，适配器取回同一记录；另一次丢原生关闭回执，Router 保留决定已登记，未误记关闭，也未重发原生决定。第三次推进隔离 Router 时钟，超时后原生请求只收到一次取消，没有操作人决定。连过 12 轮。模型和人机操作使用夹具，实际授权流程仍待验。[原生审批记录](evidence/codex-app-server-native-approval.json) · [审批入口](README.md#独立宿主命令审批)
 
 另用正式服务入口启动三个隔离 TLS 进程。获准 CLI 取消 `de39f540-e4ad-4c87-95a0-32b4aa591566` 后，独立宿主冷开回读同一回合已中断，且无命令执行项。复跑 `python3 -m unittest -v rewrite.test_service rewrite.test_codex_app_server.CodexAppServer.test_native_command_approval_cancels_exact_request_and_does_not_infer_missing_proof`。
 

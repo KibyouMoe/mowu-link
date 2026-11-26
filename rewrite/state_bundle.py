@@ -212,6 +212,9 @@ def audit_handoff(snapshot,expected):
             problems.append("adapter_receipt_unconfirmed")
         with closing(readonly(snapshot/filename("agent:"+wid))) as db:
             session_pending.update(pending_counts(db,AGENT_NATIVE_PENDING))
+            if db.execute("SELECT 1 FROM sqlite_schema WHERE name='dsh_approvals' AND type='table'").fetchone():
+                session_pending["dsh_approval_closures"] = db.execute(
+                    "SELECT COUNT(*) FROM dsh_approvals WHERE closure IS NULL").fetchone()[0]
         session_pending["report_receipts"] = pending
         session_pending["held_assignments"] = int(bool(local or remote))
         session_pending["router_reserved_assignments"] = reserved.get(wid,0)

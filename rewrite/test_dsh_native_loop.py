@@ -14,6 +14,7 @@ import unittest
 
 from . import test_codex_app_server as codex_driver, worker_commands
 from .adapter import HostAdapter
+from .approvals import TTL_SECONDS
 from .codex_app_server import AppServerHost, worker_callbacks
 from .devloop import FixtureHost, Loop
 from .dsh_display import DshDisplay
@@ -22,13 +23,14 @@ from .feishu_inbound import Inbound
 from .feishu_output import Views
 from .host_wire import RemoteAdapter, serve_adapter
 from .native_files import NativeFiles
+from .orders import Orders
 from .question_cards import Actions
 from .storage import Fault, encode, guid
 from .test_feishu_output import PlatformFixture
 from .test_mainline import Clock
 from .test_dsh_sdk import APP, EXE
 from .test_feishu_inbound import PNG
-from .wire import Client
+from .wire import Client, serve_loopback
 from .worker import Worker
 from .worker_service import WorkerService
 
@@ -93,6 +95,142 @@ class NativeLoop(unittest.TestCase):
         self.assertEqual(observed["admitted"],[original["native_id"],"keep-private",control["native_id"]])
         self.assertEqual([(r["command"],r["reasoningEffort"]) for r in observed["modelRequests"]],
                          [("task","high"),("private","high"),("task.cancel","high")])
+
+    def test_dsh_native_command_decisions_match_persisted_approval_ids(self):
+        session = "isolated-dsh-bash-approvals"
+        directory = Path(self.enterContext(tempfile.TemporaryDirectory(dir="/tmp",prefix="mldsh-permission-")))
+        worker_token,operator,manager,callback,platform = (guid() for _ in range(5))
+        advance = 0
+        orders = Orders(directory/"router.db",clock=lambda:time.time()+advance)
+        router = self.enterContext(codex_driver.running(serve_loopback(orders,{
+            worker_token:"worker/dev",operator:"approver/dev",manager:"hermes"})))
+        host = DshHost(directory)
+        adapter = HostAdapter(directory/"adapter.db",host,session)
+        worker = Worker(directory/"worker.db","dev",Client(router,worker_token),adapter)
+        service = WorkerService(worker)
+        callback_url = self.open_worker(service,{callback:"adapter/dev",platform:"platform/dev"})
+        callback_wire = Client(callback_url,callback)
+        platform_wire = Client(callback_url,platform)
+        observer = Client(router,operator)
+        worker.connect()
+        confirmations = []
+        block_closure = Event()
+        request = callback_wire.request
+        def drop_once(method,path,*args,**kwargs):
+            if method=="PUT" and path.endswith("/closed") and block_closure.is_set():
+                raise ConnectionError("cannot forward closure during the isolated restart")
+            receipt = request(method,path,*args,**kwargs)
+            if method=="PUT" and path.endswith("/closed"):
+                confirmations.append(receipt)
+                if len(confirmations)==1:
+                    raise ConnectionError("lost the isolated closure response")
+            return receipt
+        callback_wire.request = drop_once
+
+        def wait_for(check):
+            until = time.monotonic()+8
+            while time.monotonic()<until:
+                value = check()
+                if value:
+                    return value
+                time.sleep(.05)
+            self.fail("the isolated DSH approval did not settle: "+encode(self.read_native(native,"approval-state")))
+
+        def open_offer(variant):
+            received = worker.chat(guid(),"DSH approval fixture "+variant)
+            seen = wait_for(lambda:next((row for row in observer.request("GET","approvals/dev")["items"]
+                                         if row["state"]=="pending"),None))
+            self.assertEqual((seen["request"]["session"],seen["request"]["command"]),(session,"pwd"))
+            if received:
+                self.assertEqual(received["turn_id"],seen["request"]["turn_id"])
+            return seen,"approvals/dev/"+seen["approval_id"]
+
+        def wait_closed(route):
+            def closed():
+                seen = observer.request("GET",route)
+                return seen if seen["state"]=="native_closed" else None
+            return wait_for(closed)
+
+        def verify_native(events,offered,variant,outcome):
+            aid = offered["approval_id"]
+            asked,decided = [event for event in events if event["data"]["id"]==aid]
+            self.assertEqual((asked["type"],asked["data"]["callId"]),("approval/asked","fixture-bash-"+variant))
+            self.assertEqual((decided["type"],decided["data"]["outcome"]),("approval/decided",outcome))
+            self.assertLess(asked["seq"],decided["seq"])
+            return {"native_id":aid,"turn":offered["request"]["turn_id"],"asked_seq":asked["seq"],
+                    "decided_seq":decided["seq"],"outcome":outcome}
+
+        with tool_listener(directory,adapter,callback_wire), self.start_native(directory,session,"command-approvals") as native:
+            worker.chat(guid(),"DSH approval fixture implicit")
+            local = self.read_native(native,"read")
+            first_local,last_local = local["approvals"]
+            self.assertEqual(first_local["data"]["callId"],"fixture-bash-implicit")
+            self.assertEqual(last_local["data"],{"id":first_local["data"]["id"],"outcome":"rejected"})
+            self.assertEqual(observer.request("GET","approvals/dev")["items"],[])
+            denied,denied_route = open_offer("reject")
+            self.assertEqual(denied["request"]["decisions"],["accept","cancel"])
+            self.assertEqual(denied["request"]["cwd"],str(directory))
+            decision = {"request_digest":denied["request_digest"],"decision":"cancel"}
+            with self.assertRaisesRegex(Fault,"unsupported_approval_decision"):
+                observer.request("PUT",denied_route+"/decision",dict(decision,decision="acceptForSession"))
+            with self.assertRaisesRegex(Fault,"forbidden"):
+                platform_wire.request("POST","worker/approvals/"+denied["approval_id"],denied["request"])
+            observer.request("PUT",denied_route+"/decision",decision)
+            actual = self.read_native(native,"read")
+            rejected_native = verify_native(actual["approvals"],denied,"reject","rejected")
+            rejected = wait_closed(denied_route)
+            wait_for(lambda:len(confirmations)>=2)
+            self.assertEqual(confirmations[:2],[rejected,rejected])
+            self.assertEqual(rejected["attempted_response"],{"source":"operator","decision":"cancel"})
+            self.assertEqual(sum(item.get("isError") is False for item in actual["results"]),0)
+
+            granted,granted_route = open_offer("allow")
+            self.assertEqual(granted["request"]["decisions"],["accept","cancel"])
+            self.assertEqual(granted["request"]["arguments"]["workdir"],str(directory))
+            decision = {"request_digest":granted["request_digest"],"decision":"accept"}
+            observer.request("PUT",granted_route+"/decision",decision)
+            actual = self.read_native(native,"read")
+            allowed_native = verify_native(actual["approvals"],granted,"allow","allowed-once")
+            allowed = wait_closed(granted_route)
+            self.assertEqual(observer.request("PUT",granted_route+"/decision",decision),allowed)
+            self.assertEqual(allowed["attempted_response"],{"source":"operator","decision":"accept"})
+            result, = [item for item in actual["results"] if item.get("isError") is False]
+            self.assertIn(str(directory.resolve()),encode(result))
+
+            expired,expired_route = open_offer("expire")
+            advance = TTL_SECONDS+1
+            actual = self.read_native(native,"read")
+            expired_native = verify_native(actual["approvals"],expired,"expire","rejected")
+            timed_out = wait_closed(expired_route)
+            self.assertEqual((timed_out["decision"],timed_out["attempted_response"]),
+                             (None,{"source":"expiry","decision":"cancel"}))
+            self.assertEqual(sum(item.get("isError") is False for item in actual["results"]),1)
+            cold,cold_route = open_offer("cold")
+            block_closure.set()
+            decision = {"request_digest":cold["request_digest"],"decision":"cancel"}
+            observer.request("PUT",cold_route+"/decision",decision)
+            before = self.read_native(native,"read")
+            cold_native = verify_native(before["approvals"],cold,"cold","rejected")
+            self.assertEqual(observer.request("GET",cold_route)["state"],"decided")
+        reopened = HostAdapter(directory/"adapter.db",DshHost(directory),session)
+        block_closure.clear()
+        with tool_listener(directory,reopened,callback_wire), self.start_native(directory,session,"command-approvals-reopen") as native:
+            after = self.read_native(native,"read")
+            recovered = wait_closed(cold_route)
+            self.assertEqual(recovered["attempted_response"],{"source":"operator","decision":"cancel"})
+            self.assertEqual((after["inputs"],after["approvals"],after["results"]),
+                             (before["inputs"],before["approvals"],before["results"]))
+        self.assertEqual(Client(router,manager).request("GET","tasks")["items"],[])
+        notices = observer.frames(0)
+        self.assertEqual([notice["payload"]["approval_id"] for notice in notices],
+                         [denied["approval_id"],granted["approval_id"],expired["approval_id"],cold["approval_id"]])
+        self.evidence = {"session":session,"native_records":[rejected_native,allowed_native,expired_native,cold_native],
+                         "router_notifications":[notice["delivery_id"] for notice in notices],
+                         "closure_retry_same_receipt":confirmations[0]==confirmations[1],
+                         "cold_reopen_recovered_original_closure":True,
+                         "implicit_directory_used_native_answerer":True,
+                         "successful_bash_calls":1,
+                         "boundary":"Installed DSH AgentLoop, ApprovalService and Bash provider; test model and operator identity"}
 
     def test_closed_native_binding_never_resumes_or_sends_to_a_new_agent(self):
         session = "dsh-binding-close"

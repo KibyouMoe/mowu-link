@@ -10,6 +10,7 @@ import { changeGoal, goalView } from './goal-view.mjs';
 import { compaction } from './compaction.mjs';
 import { questionRequest } from './questions.mjs';
 import { browseSessions, catalogSessions } from './catalog.mjs';
+import { approvalProof, installCommandApprovals } from './command-approvals.mjs';
 
 const tools = JSON.parse(readFileSync(new URL('../../agent-toolset.json', import.meta.url)));
 const sha = value => createHash('sha256').update(value).digest('hex');
@@ -170,6 +171,9 @@ export async function bindHost(ctx, session, directory, catalog=[]) {
         stop_private:typeof agent.cancel==='function'};
       if (request.operation === 'stop-private') return stopPrivateTurn(ctx,agent,()=>compact.inProgress,bound);
       if (request.operation === 'session-catalog') return browseSessions(ctx,session,catalog);
+      if (request.operation === 'approval-proof') {
+        return {proof:approvalProof(await ownEvents(ctx,agent),request.approval_id,request.turn_id)};
+      }
       if (['question-open','question-answer','question-proof'].includes(request.operation)) {
         return questionRequest(ctx,agent,request,()=>ownEvents(ctx,agent));
       }
@@ -254,10 +258,10 @@ async function readJson(stream) {
   return JSON.parse(Buffer.concat(chunks).toString('utf8'));
 }
 
-function callback(dir, envelope) {
+function callback(dir, envelope, route='/tool') {
   privateDir(dir);
   return new Promise((resolve,reject) => {
-    const req = http.request({socketPath:path.join(dir,'worker.sock'),path:'/tool',method:'POST',
+    const req = http.request({socketPath:path.join(dir,'worker.sock'),path:route,method:'POST',
       headers:{'Content-Type':'application/json'}, timeout:8000}, async res => {
       try {
         const body = await readJson(res);
@@ -273,9 +277,12 @@ function callback(dir, envelope) {
 export const name = 'mowulink-dsh-host';
 export const inject = ['sessionController','agents','sessions','sessionPersistence','tools'];
 
-export async function apply(ctx, {session, directory, catalog_sessions=[]}) {
+export async function apply(ctx, {session, directory, catalog_sessions=[], relay_command_approvals=false}) {
   privateDir(directory);
   const port = await bindHost(ctx,session,directory,catalogSessions(catalog_sessions));
+  if (relay_command_approvals) {
+    installCommandApprovals(ctx,port.agent,()=>ownEvents(ctx,port.agent),(route,body)=>callback(directory,body,route));
+  }
   for (const tool of tools) {
     const unregister = port.agent.ctx.get('tools').register({name:tool.name,description:tool.description,
       parameters:tool.inputSchema,output:{schema:{type:'object'},render:(_args,value)=>[{type:'text',text:JSON.stringify(value)}]},

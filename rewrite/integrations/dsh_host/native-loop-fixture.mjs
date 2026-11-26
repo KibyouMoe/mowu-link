@@ -19,6 +19,7 @@ const compactEntered = Promise.withResolvers();
 const compactReleased = Promise.withResolvers();
 const usesGoals = ['goals','goal-driver','formal-goal'].includes(mode);
 const usesMedia = mode==='media' || mode==='peer-media';
+const usesApprovals = ['command-approvals','command-approvals-reopen'].includes(mode);
 const modelRequests = [];
 const catalogSessions = [];
 const privateStops = new Map(['one','two','three'].map(tag=>[tag,Promise.withResolvers()]));
@@ -46,12 +47,25 @@ class LocalModel extends LlmAdapter {
       yield {type:'finish',reason:{kind:'stop'}};
       return;
     }
-    const message = messages.findLast(entry=>entry.role==='user');
+    const message = messages.findLast(entry=>entry.role==='user'
+      && (!usesApprovals || entry.source.kind!=='runtime-context'));
     const text = message.content.find(block=>block.type==='text')?.text ?? '';
     const payload = text.startsWith('魔物链接投递\n') ? JSON.parse(text.split('\n')[1]) : null;
     const goal = message.source.kind==='goal' ? message.source : null;
     const command = goal ? 'goal' : payload?.kind ?? 'private';
     modelRequests.push({command,provider,model,reasoningEffort});
+    if (usesApprovals && text.startsWith('DSH approval fixture ') && !this.submitted.has(message.id)) {
+      this.submitted.set(message.id,true);
+      const variant = text.substring('DSH approval fixture '.length);
+      const args = {description:'Read the isolated working directory',command:'pwd'};
+      if (variant!=='implicit') args.workdir = directory;
+      assert.ok(tools?.some(tool=>tool.name==='bash'));
+      yield {type:'block-start',index:0,blockType:'tool-call'};
+      yield {type:'block-end',index:0,block:{type:'tool-call',id:'fixture-bash-'+variant,name:'bash',
+        arguments:JSON.stringify(args)}};
+      yield {type:'finish',reason:{kind:'tool-calls'}};
+      return;
+    }
     if (mode==='peer-source' && text.startsWith('Send peer fixture\n') && !this.submitted.has('outbound')) {
       this.submitted.set('outbound',true);
       const args = JSON.parse(text.split('\n')[1]);
@@ -267,6 +281,19 @@ async function setup() {
   await install((await sdk('dsh-system-prompt')).SystemPrompt);
   if (usesMedia) await install((await sdk('dsh-attachment-local')).default,{dshHome:directory});
   await install((await sdk('dsh-tools')).ToolsService);
+  if (usesApprovals) {
+    await install((await sdk('dsh-user-approval')).ApprovalService,{policy:'ask'});
+    await install((await sdk('dsh-fs-local')).LocalFileSystem,{cwd:directory});
+    await install((await sdk('dsh-working-directory')).WorkingDirectoryService,{defaultDirectory:directory});
+    await install((await sdk('dsh-shell-env')).ShellEnvRegistry,{dshHome:directory});
+    await install((await sdk('dsh-subprocess-local')).LocalSubprocessRuntime);
+    await install((await sdk('dsh-bash-local')).LocalBashExecutor,{cwd:directory});
+    await install(await sdk('dsh-tool-bash'),{enableRunInBackground:false,promoteOnTimeout:false});
+    ctx.on('tools/pre-execute',(exec,next)=>exec.name==='bash'
+      ? Promise.resolve({kind:'ask',reason:'Isolated Bash approval test'}) : next(),{prepend:true});
+    ctx.on('approval/request',(request,next)=>request.toolName==='bash'
+      ? Promise.resolve('rejected') : next());
+  }
   if (mode==='questions') {
     await install((await sdk('dsh-user-questions')).UserQuestionService);
     await install(await sdk('dsh-tool-ask-user'),{mode:'timed',timeout:1});
@@ -281,8 +308,11 @@ async function setup() {
   }
   await install((await sdk('dsh-agent-loop')).AgentLoop,{});
   if (mode==='goal-driver' || mode==='formal-goal') await install(await sdk('dsh-goal-round-driver'));
-  originalHandle = await ctx.get('agents').create({
-    sessionId:session,agentOptions:{provider:'fixture',model:'local'}});
+  const agentOptions = {provider:'fixture',model:'local'};
+  const registry = ctx.get('agents');
+  originalHandle = mode==='command-approvals-reopen'
+    ? await registry.resume({resumeSessionId:session,agentOptions})
+    : await registry.create({sessionId:session,agentOptions});
   const {agent} = originalHandle;
   if (mode==='catalog') {
     const titles = ctx.get('sessionTitle');
@@ -354,10 +384,17 @@ async function stopScenario(agent) {
 }
 
 async function formalScenario(agent) {
-  await install(adapter,{session,directory,catalog_sessions:catalogSessions});
+  await install(adapter,{session,directory,catalog_sessions:catalogSessions,
+    relay_command_approvals:usesApprovals});
   console.log(JSON.stringify({ready:true,session}));
   for await (const line of createInterface({input:process.stdin,terminal:false})) {
     if (line==='exit') break;
+    if (line==='approval-state' && usesApprovals) {
+      console.log(JSON.stringify(agent.session.snapshotEvents()
+        .filter(event=>['user/message','assistant/message','tool/call','tool/result','approval/asked','approval/decided','turn/end'].includes(event.type))
+        .map(({type,data})=>({type,data}))));
+      continue;
+    }
     if (mode==='binding-close') {
       if (line==='close') await originalHandle.dispose();
       if (line==='reopen') {
@@ -412,8 +449,10 @@ async function formalScenario(agent) {
     const replies = events.filter(e=>e.type==='user/message' && e.data.source.kind==='user-question-reply')
       .map(e=>({id:e.data.id,call:e.data.source.callId,seq:e.seq,body:JSON.parse(e.data.content[0].text)}));
     const continued = mode==='questions' ? ctx.get('userQuestions').continued(agent).map(q=>q.callId) : [];
+    const approvals = usesApprovals ? events.filter(event=>['approval/asked','approval/decided'].includes(event.type))
+      .map(({type,seq,data})=>({type,seq,data})) : [];
     console.log(JSON.stringify({session,inputs,calls,results,turns,modelRequests,rounds,compactEvents,replies,continued,
-      mediaRequests,
+      mediaRequests,approvals,
       inbox:mode==='private-stop' ? agent.inbox.nextTurn.map(message=>message.id) : [],
       liveSessions:mode==='catalog' ? ctx.get('agents').list().map(agent=>agent.session.id) : []}));
   }
@@ -422,7 +461,7 @@ async function formalScenario(agent) {
 try {
   const agent = await setup();
   if (['formal','formal-artifacts','compact','questions','catalog','private-stop','work-question','admission-race',
-       'binding-close','material','peer-source'].includes(mode) || usesGoals || usesMedia) {
+       'binding-close','material','peer-source'].includes(mode) || usesGoals || usesMedia || usesApprovals) {
     await formalScenario(agent);
   }
   else await stopScenario(agent);

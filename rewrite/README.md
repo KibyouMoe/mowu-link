@@ -157,7 +157,7 @@ python3 -m rewrite.release verify --archive ./build/mowulink.tar --revision "$RE
 
 飞书平台进程的本地队列遇到暂时数据库锁或无法核对的上游响应，会保留入箱和卡片游标并继续处理。Worker 回执缺字段时先保留待核，沿用同一消息号查回。
 
-### 独立 Codex 命令审批
+### 独立宿主命令审批
 
 在隔离 Router 的身份配置中，为指定测试工位单独登记 `approver/<工位ID>`。状态目录由 Router 运行账号独占。Adapter 显式启用 `--relay-command-approvals` 后，可以转交宿主本来就会发出的普通命令审批。宿主的沙箱和提审策略由工位所有者按原方式配置。工单管理人、Worker、飞书身份与其他工位的审批人无权替这条请求作决定。
 
@@ -169,7 +169,11 @@ python3 -m rewrite.service approvals --connection "$APPROVER_CONNECTION" --worke
 python3 -m rewrite.service approvals --connection "$APPROVER_CONNECTION" --worker-id "$WORKER_ID" decide "$APPROVAL_ID" --request-digest "$REQUEST_DIGEST" --decision cancel
 ```
 
-决定包括宿主实际给出的单次 `accept` 或 `cancel`。已登记决定显示 `decided`，只有同一原生请求关闭后才显示 `native_closed`。关闭回执证明原审批请求结束，命令是否执行仍看原生回合。决定超时或 Worker 会话已变时拒绝提交新决定。超过旧系统的十分钟期限，原生请求支持取消且仍在等待时，转发一次取消并注明来源为超时。App Server 的文件、额外权限、网络审批及 Desktop 的应用级授权分别待核。隔离原生测试仅取消命令。
+决定包括宿主实际给出的单次 `accept` 或 `cancel`。已登记决定显示 `decided`，只有同一原生请求关闭后才显示 `native_closed`。关闭回执证明原审批请求结束，命令是否执行仍看原生回合。决定超时或 Worker 会话已变时拒绝提交新决定。超过旧系统的十分钟期限，原生请求支持取消且仍在等待时，转发一次取消并注明来源为超时。App Server 的文件、额外权限、网络审批及 Desktop 的应用级授权分别待核。Codex 原生隔离测试实测的是命令取消。
+
+DSH 在独立宿主插件的参数中显式配置 `relay_command_approvals: true`，沿用同一个审批 CLI。适配器只转接绑定 Agent 的原生 `bash` 请求，按同一原生回合找到完整工具参数。原调用明确提供绝对 `workdir` 时，审批人可以核对该目录与原参数。相对目录或未指定目录的调用仍由宿主的原生审批处理。
+
+DSH 适配器先保留原请求和单次决定的发送意图。只有在原会话的持久历史读到同号 `approval/asked` 与 `approval/decided`，才确认请求关闭。重开时使用原适配器库、原 DSH 会话和原工位，待核关闭可按该记录补回。测试执行的允许命令只有隔离工作目录内的 `pwd`。
 
 ### 跨系统验收
 

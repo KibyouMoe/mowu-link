@@ -76,5 +76,5 @@
 | 入口 | 查证结果 | 切换条件 |
 | --- | --- | --- |
 | `POST /commands`、`/commands/responses` | 旧 Codex 与 DSH 的 `desktop-manager.mjs` 通过 Router 转发 `/model` 和 `/effort`，`router-runtime.mjs` 按原请求号回复。重做版由同工位的 `worker/command` 接收已认证的训练员命令，隔离宿主已核设置与回读。 | 实际飞书链路与真实账号的模型设置仍待核。源码查到旧插件消费者，其他调用方需由使用者核对后才可停旧入口。 |
-| `/approvals` | 旧 Router 与 Codex、DSH 的路由客户端都有明确审批接口。重做版已核隔离 Codex 的命令审批、按工位限定的 C01 通知和审批人 CLI。取消原请求后，宿主回原请求号，回合中断，历史没有执行记录。丢 native 关闭回执时保持决定已登记，未确认关闭。 | 真人测试身份与实际单次允许、真实飞书提示、DSH 及文件、网络、Desktop 应用授权仍待验。现有普通题卡不承载审批。[操作入口](README.md#独立-codex-命令审批) |
+| `/approvals` | 隔离 Codex 已核命令取消及丢回执待核。DSH 已核绑定会话的原生 Bash 单次允许、拒绝和超时，回执断掉后冷开可查回原生决定。C01 仅通知指定审批人。 | 真实审批人和飞书提示、Codex 实际单次允许、DSH 未明确绝对目录的转接，以及文件、网络、Desktop 应用授权待核。普通题卡不承载审批。[操作入口](README.md#独立宿主命令审批) |
 | `/ops/services`、`/ops/services/{name}/restart` | 旧 Router 有查询及重启处理器。重做已有隔离安装、版本升级、停写快照及回退，现有 `worker-status` 只读取工位状态。 | 现役远程维护的实际调用者、允许的服务及重启授权需核定；按维护窗口独立验收。 |
