@@ -274,6 +274,13 @@ Router 拉取与原生输入分别运行。Router 断开时，已在插件入箱
 
 隔离复跑使用 `python3 -m rewrite.hermes_check --host-input --hermes-source <源码仓> --hermes-python <带依赖的测试Python>`。探针准备全新的 profile、测试授权和临时 Router，实际运行插件及会话输入台账，模型响应由本地测试函数生成。客户端只开放 TUI/CLI、缺少插件输入授权或会话不匹配时，宿主收件保持未确认。
 
+还可复跑实际网关进程。用固定版本的 Hermes 源码与带依赖的独立 Python，才能通过原生控制端点创建测试会话。网关加载同一插件，Event 进入真实会话并经默认的 `tool_describe` 和 `tool_call` 调用 `router_info`。Notify 等原生回合完成后空闲满 10 秒，Info 留在 Router。停掉试验网关并清空插件和适配器的两份 Event 回执，重开后查回同一原生收件号。测试只连本机回环，OpenAI 兼容模型响应由脚本提供。 [实测记录](evidence/hermes-gateway-trigger.json)
+
+```sh
+MOWULINK_HERMES_TEST_PYTHON="$ISOLATED_PYTHON" MOWULINK_HERMES_TEST_SOURCE="$HERMES_REPOSITORY" \
+  python3 -B -m unittest -v rewrite.test_hermes_gateway
+```
+
 该测试 profile 可另配 `notice_chat_id` 和 `notice_feishu_file`，前者是明确授权的飞书会话，后者指向用户私有的 SDK 凭据配置路径，包含 `app_id` 和 `app_secret`。需要同一环境安装飞书 SDK。Router 消息持久入箱时，插件只排一条来源和等级的飞书提示，正文仍走 Hermes 原生输入。飞书失败不改变原生输入状态。提示使用同一标识重试，超出回执可安全重试的窗口后保留待核。绑定变化不会转发旧提示。复跑用 `python3 -m unittest -v rewrite.test_manager_notices`。
 
 ### 邮件和游戏聊天来源

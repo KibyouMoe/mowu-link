@@ -15,6 +15,40 @@ from .trigger import Trigger
 from .storage import encode
 
 
+# The gateway gets a fresh profile, local credentials and no inherited process environment.
+GATEWAY_GUARD = """import asyncio
+import json
+import os
+from pathlib import Path
+import sys
+
+root = Path.cwd().resolve()
+home = Path(os.environ["HERMES_HOME"])
+if not root.name.startswith("mlhgw-") or home != root/"profile" or Path.home() != root:
+    raise SystemExit("expected an isolated Hermes lifecycle profile")
+
+def isolate(event,args):
+    if event in ("socket.connect","socket.bind"):
+        address = args[1]
+        if isinstance(address,tuple) and address[0] in ("127.0.0.1","::1"):
+            return
+        if isinstance(address,(str,bytes)) and Path(os.fsdecode(address)).resolve().is_relative_to(root):
+            return
+        raise PermissionError("only isolated loopback and private local sockets")
+    if event in ("subprocess.Popen","os.system","os.posix_spawn"):
+        raise PermissionError("the gateway cannot start external processes in this rehearsal")
+    if event=="os.kill" and args[1]!=0 and args[0]!=os.getpid():
+        raise PermissionError("the gateway cannot signal other processes in this rehearsal")
+
+sys.addaudithook(isolate)
+"""
+
+GATEWAY_ENTRY = GATEWAY_GUARD + """os.environ["API_SERVER_KEY"] = json.loads((root/"gateway-auth.json").read_text())["token"]
+from gateway.run import start_gateway
+raise SystemExit(0 if asyncio.run(start_gateway()) else 1)
+"""
+
+
 def child(host_input=False):
     # This check exercises local runtime code only. No keychain, child services or external network.
     def local_only(event, args):

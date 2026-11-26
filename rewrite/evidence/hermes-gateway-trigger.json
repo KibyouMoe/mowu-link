@@ -1,0 +1,27 @@
+{
+  "hermes_source_revision": "464bd0dd659f336bd0bf468bf02cad8aac211136",
+  "session_id": "local-4a140093bbaa48444f16a983b271e7cc2836e95a3bcea4d19bd684037bbf41c0",
+  "route": "agent:main:local:dm:local-4a140093bbaa48444f16a983b271e7cc2836e95a3bcea4d19bd684037bbf41c0",
+  "native_pids": [
+    29803,
+    43786
+  ],
+  "message_ids": {
+    "Info": "3e7594d8-12db-4031-969f-db05cd1bd0fd",
+    "Event": "1ba2baa1-bd76-4133-92da-0e8bbf89ce7f",
+    "Notify": "af38496a-4aa9-41e2-8108-1fca8a73df6a"
+  },
+  "event_native_admission": "848e6d15cc7042b4a2e2e598f3218fc6",
+  "notify_native_admission": "d20b8741ac49494cbaaedbcb601b4dfd",
+  "notify_after_event_release_seconds": 10.81,
+  "info_native_inputs": 0,
+  "native_admission_count": 2,
+  "model_http_calls": 4,
+  "tool_discovery": "native tool_describe and tool_call",
+  "tool_name": "router_info",
+  "tool_call_id": "call_read_trigger_original",
+  "tool_transcript_row": 5,
+  "original_attachment_sha256": "06219adabc9facac06e434bafb1a82e1f38309c77c6b945ed1eb0d2c213071b7",
+  "cold_recovery_reused_admission": true,
+  "boundary": "Real Router, Trigger, Hermes gateway, private LOCAL session, tool execution and ledger. Scripted OpenAI-compatible localhost model. No cloud credentials or Feishu."
+}

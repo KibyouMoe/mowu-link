@@ -20,7 +20,7 @@ from urllib.error import URLError
 from urllib.parse import urlsplit
 
 from . import host_ops_cli
-from .hermes_check import tracked_runtime
+from .hermes_check import GATEWAY_ENTRY, tracked_runtime
 from .host_ops import HostOps, Job, Launchd, roles_allowed
 from .release_check import config, serve
 from .storage import Fault, encode, guid
@@ -28,38 +28,6 @@ from .wire import Client
 
 
 PACKAGE = Path(__file__).resolve().parent.parent
-
-# The gateway gets a fresh profile, local credentials and no inherited process environment.
-GATEWAY_ENTRY = """import asyncio
-import json
-import os
-from pathlib import Path
-import sys
-
-root = Path.cwd().resolve()
-home = Path(os.environ["HERMES_HOME"])
-if not root.name.startswith("mlhgw-") or home != root/"profile" or Path.home() != root:
-    raise SystemExit("expected an isolated Hermes lifecycle profile")
-
-def isolate(event,args):
-    if event in ("socket.connect","socket.bind"):
-        address = args[1]
-        if isinstance(address,tuple) and address[0] in ("127.0.0.1","::1"):
-            return
-        if isinstance(address,(str,bytes)) and Path(os.fsdecode(address)).resolve().is_relative_to(root):
-            return
-        raise PermissionError("only isolated loopback and private local sockets")
-    if event in ("subprocess.Popen","os.system","os.posix_spawn"):
-        raise PermissionError("the gateway cannot start external processes in this rehearsal")
-    if event=="os.kill" and args[1]!=0 and args[0]!=os.getpid():
-        raise PermissionError("the gateway cannot signal other processes in this rehearsal")
-
-sys.addaudithook(isolate)
-os.environ["API_SERVER_KEY"] = json.loads((root/"gateway-auth.json").read_text())["token"]
-from gateway.run import start_gateway
-raise SystemExit(0 if asyncio.run(start_gateway()) else 1)
-"""
-
 
 class NoWriteBackend:
     def observe(self,_job):
