@@ -8,6 +8,10 @@
 
 复跑 `python3 -B -m unittest -v rewrite.test_worker_resume rewrite.test_codex_app_server.CodexAppServer.test_runtime_switch_waits_for_unregistered_native_approval_to_close rewrite.test_dsh_native_loop.NativeLoop.test_dsh_unacknowledged_approval_recovers_without_a_late_notification`。原生应用授权等未接入的审批仍需另验。
 
+五个场景连续通过 5 轮。macOS 全量通过 266 项，Linux arm64 通过 181 项、跳过 85 项。以 `6cc50b6cf5a29346e8b7f4a1b65df6f3cf83ca8e` 构建的独立包包含 235 份文件，SHA-256 为 `e186cda8b4b1834ac7992c94ed1c03a23bb69524183d375db9a1c25decee73ba`。安装目录复跑切换、暂停派发、快照与两种原生审批共 33 项，逐文件摘要一致。以 `a3d421ad737b6179789b3138c64f4444b47e6b18` 为旧版，真实隔离 Codex App Server 执行混合版本、升级与回退。各阶段仍为三条原生输入，待验通知保持 `93b45c7c-e9cd-46e8-a189-17debb40e33e`，快照摘要一致。发布演练使用脚本模型，复跑 `python3 -B -m rewrite.codex_release_check` 并指定这两版和本机 App Server 二进制。
+
+从当前本机 App Server 实际导出的协议模式（含实验项）核到 `serverRequest/resolved` 为通知，未列出按审批请求号查询关闭结果的客户端方法。Codex 宿主与适配器同时重开后，若此前无可确认的关闭回执，仍保留待核。Router 已保存关闭、但适配器重开前未收到回执的对账需单独验证。
+
 离线换绑会核对 Codex 适配器已收到的原生审批。隔离实测，原生文件审批已到、Router 尚未收到登记时，适配器持久保存待核记录。重开账本仍拒绝生成换绑副本。Router 已关闭但回执丢失时记录继续待核，按原号查回才消除。独立 App Server、Worker 和 Router 实跑，模型与断联由本地测试驱动。快照换绑的夹具复验另查了输出中无命令目录。复跑 `python3 -B -m unittest -v rewrite.test_state_bundle.Bundle.test_handoff_refuses_codex_approval_never_registered_with_router rewrite.test_codex_app_server.CodexAppServer.test_native_approval_deadline_survives_lost_intake_and_late_router_accept`。[断联证据](evidence/codex-approval-router-outage.json)
 
 两项连续通过 5 轮。macOS 全量通过 262 项，Linux arm64 通过 178 项、跳过 84 项。以 `79623b2bb412ffa5f9dc80901707e39a201ef68d` 构建的独立包包含 234 份文件，SHA-256 为 `1eaf80916d55246b3be409c4c1d69a83a5ad1698aeab5348f8e91ec175b2a245`。安装目录复跑快照、发布包和 Codex 断联审批共 17 项，文件摘要一致。以 `a2cc41fbfe65e0cdf1a98c13bbbcdbbdc826987c` 为旧版，在真实独立 Codex App Server 演练混合版本、升级与回退，各保留三条输入，新增为零，待验通知 `e794961d-f566-47fe-a710-854fc6b94211` 原号不变，旧快照摘要一致。使用本地脚本模型，审批转接专项另测。复跑 `python3 -B -m rewrite.codex_release_check`，指定上述新旧提交与本机 App Server 二进制路径。
