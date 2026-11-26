@@ -1,5 +1,6 @@
 """Independent Router and Trigger processes. Addresses and identities are explicit."""
 import argparse
+from contextlib import nullcontext
 import json
 import os
 from pathlib import Path
@@ -44,6 +45,7 @@ def server(args):
     ctx.load_cert_chain(args.cert,args.key)
     address = (args.bind,args.port)
     worker_service = None
+    callbacks = nullcontext()
     if args.component == "router":
         listener = serve_router(Orders(args.db), identities, address, ctx)
     elif args.component == "fixture-adapter":
@@ -54,12 +56,17 @@ def server(args):
             raise ValueError("media cache and worker connection must be configured together")
         media = NativeFiles(args.media_cache,connection(args.worker_connection)) if args.media_cache else None
         listener = serve_adapter(HostAdapter(args.db,native,native.session,media),args.worker_id,identities,address,ctx)
+    elif args.component == "dsh-adapter":
+        from .dsh_port import DshHost, tool_listener
+        adapter = HostAdapter(args.db,DshHost(args.runtime_dir),args.session)
+        callbacks = tool_listener(args.runtime_dir,adapter,connection(args.worker_connection))
+        listener = serve_adapter(adapter,args.worker_id,identities,address,ctx)
     else:
         worker = Worker(args.db,args.worker_id,connection(args.router_connection),
                         RemoteAdapter(connection(args.adapter_connection)))
         worker_service = WorkerService(worker)
         listener = worker_service.listen(identities,address,ctx)
-    with listener:
+    with listener, callbacks:
         def stop(_number,_frame):
             Thread(target=listener.shutdown, daemon=True).start()
         signal.signal(signal.SIGTERM,stop)
@@ -88,7 +95,7 @@ def source(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     apps = parser.add_subparsers(dest="component",required=True)
-    for name in ("router","fixture-adapter","worker"):
+    for name in ("router","fixture-adapter","dsh-adapter","worker"):
         component = apps.add_parser(name)
         for flag in ("identities","cert","key","db"):
             component.add_argument("--"+flag,required=True,type=Path)
@@ -98,9 +105,12 @@ def main():
             component.add_argument("--worker-id",required=True)
         if name == "fixture-adapter":
             component.add_argument("--fixture-db",required=True,type=Path)
-            component.add_argument("--session",required=True)
             component.add_argument("--media-cache",type=Path)
-            component.add_argument("--worker-connection",type=Path)
+        if name in ("fixture-adapter","dsh-adapter"):
+            component.add_argument("--session",required=True)
+            component.add_argument("--worker-connection",required=name=="dsh-adapter",type=Path)
+        if name == "dsh-adapter":
+            component.add_argument("--runtime-dir",required=True,type=Path)
         if name == "worker":
             component.add_argument("--router-connection",required=True,type=Path)
             component.add_argument("--adapter-connection",required=True,type=Path)

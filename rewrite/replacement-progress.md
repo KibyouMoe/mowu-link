@@ -25,7 +25,11 @@
 | 旧 Router 离线迁移演练 | 实际旧 RouterStore 在临时目录产生归档、排队和附件。备份校验、稳定队列映射和零新写入回退均实跑。旧程序重开恢复库，原下一张单、归档理由与附件均吻合。有在途、摘要损坏或新库已写拒绝覆盖。 | [复跑与回退界线](router-rehearsal.md)，`python3 -m unittest -v rewrite.test_cutover`（4 项） | 整体多组件、带新增业务回迁及新端历史查询另验 |
 | A07 业务消息留档 | 完工、提问、入池、提醒和取消确认与各自的通知同时入账，按原 ID 可查。历史投递缺接收时间时返回空。查询不生成新帧，不确认宿主收到。 | `python3 -m unittest -v rewrite.test_archive`（2 项），成果附件基线 488b996 | 平台与宿主可见性另验 |
 
-## Desktop W04 的复验边界
+## 宿主与来源复验
+
+DSH 的适配器可在独立宿主进程加载 `integrations/dsh_host/index.mjs`，只对显式指定的会话注册 `worker_ask` 和 `worker_report`。宿主插件与同机适配器经用户私有目录里的 Unix 套接字通信；适配器通过 HTTPS 与 Worker 通信。接入参数是会话 ID 和绝对目录，启动器说明见 `python3 -m rewrite.service dsh-adapter --help`。宿主侧不持有 Router 凭据。
+
+复跑 `python3 -m unittest -v rewrite.test_dsh_sdk`。本机 DSH 随附 SDK 0.2.2-rc.5 在全新临时用户目录里加载插件，由 SDK 自己提供工具表、调用分发、会话存储和 V4 日志查回。清掉适配器收件凭据后，SDK 日志恢复了原凭据，输入仍为一条。问答和完工分别到达隔离 Router，同一模型调用号的重放只形成一次成果通知；私聊、同回合有手动插话均拒报。Agent 输入、模型输出及工具调用是受控测试驱动生成，未使用测试账号或真人会话。DSH 真实模型、附图、原生清理和平台展示仍未验。Desktop 的两项阻点独立保留。
 
 来源采集复验入口为 `python3 -m unittest -v rewrite.test_feeds`。Python 自带的 IMAP 客户端实际通过 TLS 连接临时邮箱服务器，使用 EXAMINE 和 BODY.PEEK 只读取件。真实 SSE 连接从测试游戏桥取回聊天；本人消息过滤，紧急聊天交 Event，普通聊天、邮件入 Info。每条消息留档与推进读取位置同事务，写入中断重开时保留旧位置，重见同序号按内容核对。两项通信运行于本机回环，邮箱、游戏数据和服务端均为测试替身。旧订阅、来源限流及游戏桥无启动标识时的同序号重启识别另验。
 

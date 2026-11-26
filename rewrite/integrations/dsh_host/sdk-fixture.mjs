@@ -1,0 +1,87 @@
+// Isolated SDK driver. The scripted agent supplies messages; no provider or account is loaded.
+import {createRequire} from 'node:module';
+import {pathToFileURL} from 'node:url';
+import {createInterface} from 'node:readline';
+import path from 'node:path';
+import * as adapter from './index.mjs';
+
+const [root, directory, id] = process.argv.slice(2);
+const req = createRequire(path.join(root,'probe.cjs'));
+const sdk = name => import(pathToFileURL(req.resolve('@deepseek-ai/'+name)));
+const {Context, Service} = await sdk('cordis');
+const {createScope} = await sdk('dsh-scope');
+const {executeToolBatch, ToolExecutionPipeline} = await sdk('dsh-tools/pipeline');
+const ctx = new Context();
+const fibers = [];
+async function install(plugin,options) {
+  const fiber = ctx.plugin(plugin,options);
+  fibers.push(fiber);
+  await fiber.await();
+}
+await install((await sdk('dsh-session')).SessionStore);
+await install(await sdk('dsh-session-persistence-jsonl'),{root:path.join(directory,'sessions')});
+await install((await sdk('dsh-system-prompt')).SystemPrompt);
+await install((await sdk('dsh-tools')).ToolsService);
+const header = {version:4,id,createdAt:Date.now(),isSeeded:false,delegationDepth:0};
+const writer = await ctx.get('sessionPersistence').create(header);
+const session = ctx.get('sessions').create(id,{meta:header});
+let number = 0;
+let received = 0;
+const agent = {session,status:'idle',followup(message) {
+  received++;
+  if (agent.status === 'idle') {
+    agent.status = 'running';
+    session.append('turn/start',{turn:++number});
+    session.append('step/start',{turn:number,step:1});
+  }
+  session.append('user/message',message,{surfaceOp:'append'});
+}};
+const scope = createScope(ctx,agent);
+agent.ctx = scope.ctx;
+class Controller extends Service {
+  constructor(c) { super(c,'sessionController'); }
+  resolveAgent(target) { return target === id ? {agent} : {error:'unknown'}; }
+}
+await install(Controller);
+await install(adapter,{session:id,directory});
+const registry = ctx.get('tools');
+const names = [...registry.view(agent).visible.keys()];
+const versions = Object.fromEntries(['dsh-session','dsh-tools','dsh-session-persistence-jsonl']
+  .map(name=>[name,req('@deepseek-ai/'+name+'/package.json').version]));
+console.log(JSON.stringify({ready:true,versions,names,globalNames:[...registry.view().visible.keys()]}));
+const pipeline = new ToolExecutionPipeline(ctx);
+try {
+  for await (const line of createInterface({input:process.stdin,terminal:false})) {
+    try {
+      const cmd = JSON.parse(line);
+      if (cmd.action === 'exit') break;
+      if (cmd.action === 'end') {
+        session.append('step/end',{turn:number,step:1});
+        session.append('turn/end',{turn:number,reason:{kind:'completed'}});
+        agent.status = 'idle';
+      } else if (cmd.action === 'tool') {
+        const block = {type:'tool-call',id:cmd.call_id,name:cmd.name,arguments:JSON.stringify(cmd.args)};
+        if (cmd.append !== false) {
+          const message = {id:'assistant-'+cmd.call_id,role:'assistant',
+            source:{kind:'model',provider:'fixture',model:'fixture'},content:[block]};
+          session.append('assistant/message',{turn:number,step:1,message},{surfaceOp:'append'});
+        }
+        const result = await executeToolBatch({agent,calls:[block],signal:new AbortController().signal},pipeline,()=>1);
+        console.log(JSON.stringify({received,result:result.results[0].result}));
+        continue;
+      } else if (cmd.action === 'manual') {
+        agent.followup({role:'user',id:'manual',content:[{type:'text',text:'manual follow-up'}],source:{kind:'user'}});
+      } else if (cmd.action !== 'count') {
+        throw new Error('unknown test action');
+      }
+      console.log(JSON.stringify({received}));
+    } catch (e) {
+      console.log(JSON.stringify({error:String(e)}));
+    }
+  }
+} finally {
+  await fibers.pop().dispose();
+  await writer.close();
+  await scope.dispose();
+  for (const fiber of fibers.reverse()) await fiber.dispose();
+}

@@ -1,0 +1,80 @@
+[
+  {
+    "name": "worker_report",
+    "description": "Report completion, a blocker, or a request to continue the formal assignment on this input.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "task_id": {
+          "type": "string"
+        },
+        "assignment_id": {
+          "type": "string"
+        },
+        "outcome": {
+          "enum": [
+            "completed",
+            "blocked",
+            "continue_requested",
+            "cancel_confirmed",
+            "transfer_confirmed"
+          ]
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1
+        },
+        "artifact_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "required": [
+        "task_id",
+        "assignment_id",
+        "summary"
+      ]
+    }
+  },
+  {
+    "name": "worker_ask",
+    "description": "Ask the manager a question about this formal assignment.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "text": {
+          "type": "string",
+          "minLength": 1
+        },
+        "options": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "label"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "text",
+        "options"
+      ]
+    }
+  }
+]

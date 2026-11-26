@@ -59,7 +59,8 @@ class HostAdapter:
             else:
                 receipt = self.host.deliver(self.session, did, payload, digest)
         else:
-            receipt = self.host.lookup(self.session, did)
+            lookup_expected = getattr(self.host,"lookup_expected",None)
+            receipt = lookup_expected(self.session,did,payload,digest) if lookup_expected else self.host.lookup(self.session,did)
         if receipt is None:
             return None
         if media:

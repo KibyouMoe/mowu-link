@@ -3,20 +3,12 @@
 The launching host supplies native_id out-of-band. It is never a tool argument.
 """
 import json
+from pathlib import Path
 
 from .storage import Fault, encode
 
-REPORT_TOOL = {
-    "name": "worker_report",
-    "description": "Report completion, a blocker, or a request to continue the formal assignment on this input.",
-    "inputSchema": {"type": "object", "additionalProperties": False,
-                    "properties": {"task_id": {"type": "string"}, "assignment_id": {"type": "string"},
-                                   "outcome": {"enum": ["completed", "blocked", "continue_requested",
-                                                       "cancel_confirmed", "transfer_confirmed"]},
-                                   "summary": {"type": "string", "minLength": 1},
-                                   "artifact_ids": {"type":"array","items":{"type":"string","minLength":1}}},
-                    "required": ["task_id", "assignment_id", "summary"]},
-}
+TOOLSET = json.loads(Path(__file__).with_name("agent-toolset.json").read_text(encoding="utf-8"))
+REPORT_TOOL = next(tool for tool in TOOLSET if tool["name"]=="worker_report")
 
 
 def serve(worker, native_id, reader, writer):
