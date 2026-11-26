@@ -428,6 +428,94 @@ class CodexAppServer(unittest.TestCase):
                          "interrupted_private_turns":[turn["id"] for turn in private_turns],
                          "boundary":"Actual bundled App Server, scripted local model and isolated platform calls"}
 
+    def test_app_server_next_turn_queue_never_steers_busy_turn_or_replays_lost_ack(self):
+        self.provider.private_admissions = Queue()
+        self.provider.release_private = Event()
+        rpc = self.enterContext(isolated_app_server(self.root,self.origin))
+        self.addCleanup(self.provider.release_private.set)
+        sid = rpc.request("thread/start",{"cwd":self.root,"ephemeral":False})["thread"]["id"]
+        host = AppServerHost(rpc,sid)
+        host.session = sid
+        clock = Clock()
+        loop = self.enterContext(Loop.isolated(clock,host_factory=lambda _path,_name:host))
+        service = WorkerService(loop.worker,clock)
+        token = guid()
+        url = self.enterContext(running(service.listen({token:"platform/oguri"},("127.0.0.1",0),None)))
+        platform = Client(url,token)
+        service.step()
+
+        def command(mid,text):
+            return platform.request("POST","worker/command",{"message_id":mid,"text":text})["receipt"]
+
+        def step():
+            clock.advance(5)
+            service.step()
+
+        def queued():
+            with loop.worker.db.transaction() as db:
+                return [(row["message_id"],row["uncertain"],json.loads(row["receipt"]) if row["receipt"] else None)
+                        for row in db.execute("SELECT * FROM queued_chats ORDER BY rowid")]
+
+        first_text,second_text = "Hold bound private queued first","Queued second"
+        first = command("queue_first","/queue "+first_text)
+        command("queue_second","/queue "+second_text)
+        self.assertEqual(command("queue_first","/queue "+first_text),first)
+        original = loop.adapter.deliver
+        before = []
+        attempts = []
+        def race_then_lose(did,payload,**kw):
+            if did!="queued-chat-queue_first":
+                return original(did,payload,**kw)
+            attempts.append(did)
+            if len(attempts)==1:
+                msg = "Hold bound private race"
+                mid = guid()
+                loop.worker.chat(mid,msg)
+                self.assertEqual(self.provider.private_admissions.get(timeout=8),msg)
+                before.append(loop.worker.chat(mid,msg))
+                return original(did,payload,**kw)
+            original(did,payload,**kw)
+            self.assertEqual(self.provider.private_admissions.get(timeout=8),first_text)
+            proof = loop.adapter.lookup_delivery(did,payload,session=sid)
+            self.assertIsNotNone(proof)
+            self.assertEqual(proof["session"],sid)
+            raise Fault(503,"isolated_queue_receipt_lost",True)
+        loop.adapter.deliver = race_then_lose
+        step()
+        self.assertEqual(queued(),[("queue_first",0,None),("queue_second",0,None)])
+        with loop.adapter.db.transaction() as db:
+            self.assertFalse(db.execute("SELECT 1 FROM intents WHERE delivery_id LIKE 'queued-chat-%'").fetchone())
+        active, = host.thread(sid,include_turns=True)["turns"]
+        self.assertEqual(active["id"],before[0]["turn_id"])
+        self.assertEqual(sum(item["type"]=="userMessage" for item in active["items"]),1)
+        self.assertEqual(command("stop_race","/stop")["stop_receipt"]["turn_id"],active["id"])
+
+        step()
+        self.assertEqual(queued(),[("queue_first",1,None),("queue_second",0,None)])
+        step()
+        first_row,second_row = queued()
+        self.assertIsNotNone(first_row[2])
+        self.assertEqual(second_row,("queue_second",0,None))
+        step()
+        self.assertEqual(queued()[1],second_row)
+        self.assertEqual(command("stop_queue","/stop")["stop_receipt"]["turn_id"],first_row[2]["turn_id"])
+        step()
+        until = time.monotonic()+8
+        while (host.busy(sid) or queued()[1][2] is None) and time.monotonic()<until:
+            step()
+            time.sleep(.03)
+        self.assertEqual(len(attempts),2)
+        turns = host.thread(sid,include_turns=True)["turns"]
+        texts = [[item["content"][0]["text"] for item in turn["items"] if item["type"]=="userMessage"] for turn in turns]
+        self.assertEqual(texts,[["Hold bound private race"],[first_text],[second_text]])
+        self.assertEqual([row[2]["turn_id"] for row in queued()],[turn["id"] for turn in turns[1:]])
+        self.assertFalse(loop.hermes.tasks()["items"])
+        self.evidence = {"thread_id":sid,"original_turn":before[0]["turn_id"],
+                         "native_turns_ordered":[turn["id"] for turn in turns],"inputs_per_turn":[len(x) for x in texts],
+                         "first_attempt_refused_before_native_write":True,"first_ack_found_by_lookup":True,
+                         "write_attempts_for_first":len(attempts),
+                         "boundary":"Actual App Server with a local model fixture, platform and transport fault driven in isolation"}
+
     def test_native_app_server_conversation_uses_standard_feishu_cards(self):
         rpc = self.enterContext(isolated_app_server(self.root,self.origin))
         sid = rpc.request("thread/start",{"cwd":self.root,"ephemeral":False})["thread"]["id"]

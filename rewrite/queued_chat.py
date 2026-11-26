@@ -53,7 +53,14 @@ def advance(service):
                     and proof.get("turn_id")
                     and isinstance(proof.get("native_id"),str) and proof["native_id"],
                     502,"invalid_queued_receipt")
-    except (Fault,URLError,OSError):
+    except Fault as error:
+        if first_attempt and error.status==409 and error.code=="queued_chat_delivery_deferred":
+            # The adapter refused the first write before calling the native input endpoint.
+            with worker.db.transaction() as db:
+                db.execute("UPDATE queued_chats SET uncertain=0 WHERE message_id=? AND receipt IS NULL",(mid,))
+            return
+        proof = None
+    except (URLError,OSError):
         # The adapter owns native write intent and may already have submitted this ID.
         proof = None
     with worker.db.transaction() as db:

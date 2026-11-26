@@ -1,0 +1,19 @@
+{
+  "thread_id": "01a216e9-abc6-79e2-914e-c881bc009639",
+  "original_turn": "01a216e9-abfc-7fc3-afae-78724896c6f4",
+  "native_turns_ordered": [
+    "01a216e9-abfc-7fc3-afae-78724896c6f4",
+    "01a216e9-ac1c-74f2-9a9e-6f86716c4659",
+    "01a216e9-ac42-7782-a996-49114911c7f1"
+  ],
+  "inputs_per_turn": [
+    1,
+    1,
+    1
+  ],
+  "first_attempt_refused_before_native_write": true,
+  "first_ack_found_by_lookup": true,
+  "write_attempts_for_first": 2,
+  "boundary": "Actual App Server with a local model fixture, platform and transport fault driven in isolation",
+  "consecutive_runs": 16
+}

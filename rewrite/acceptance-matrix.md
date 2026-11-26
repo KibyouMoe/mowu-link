@@ -38,7 +38,7 @@
 
 | 宿主或入口 | 已有证据 | 待核 |
 | --- | --- | --- |
-| 通用 Worker | `/help`、`/start`、`/commands`、`/status`、`/list` 测试平台端已核。原消息号按原回执重投。 | 实际 Feishu 私聊的所有指令入口与交互。 |
+| 通用 Worker | `/help`、`/start`、`/commands`、`/status`、`/list` 测试平台端已核。原消息号按原回执重投。DSH 与独立 Codex App Server 通过原生 `/queue` 顺序与丢回执查证。 | 实际 Feishu 私聊的所有指令入口与交互。 |
 | DSH | `/context`、`/model`、`/effort`、`/queue`、`/goal`、`/compact`、`/stop` 有 SDK 或真循环证据。`/resume` 可浏览获准的目录和搜索，历史会话保持冷态。 | `/resume` 换绑、`/new`、`/fork`、新会话初始模型与思考强度；前台阻塞题和原生清理凭据。 |
 | Codex Desktop 与独立 App Server | Desktop 真实独立会话收到一条正式单，重投仍一条。独立原生 App Server 接到本地脚本模型的动态工具调用，实际完成 W04，重试回同一结果。独立会话的 `/model`、`/effort`、`/context` 已核原生只读。`/stop` 已核账本确认的普通回合及丢回执重投。 | Desktop 测试项目未列出 `worker_report`。默认 App Server 测试 profile 无登录。两条路径的真实模型 W04 仍需各自的授权测试条件，模型目录和切换另验。 |
 | Antigravity | 已核安装版本 2.32.1 及官方会话钩子、转录、MCP 入口。 | 指定空闲会话的后台唤醒、真实 Gemini 回报及完整的读写验收。详见[兼容性核对](antigravity-compatibility.md)。 |

@@ -14,8 +14,10 @@ WORKER_TOOLS = {item["name"] for item in TOOLSET}
 
 
 class AppServerHost:
+    next_turn = True
     rejects_busy_before_task_write = True
     rejects_busy_before_control_write = True
+    rejects_busy_before_queue_write = True
 
     def __init__(self, rpc, thread_id):
         self.rpc, self.thread_id = rpc,thread_id
@@ -130,6 +132,8 @@ class AppServerHost:
         with self.write_lock:
             if payload["kind"]=="task":
                 require(not self.busy(session),409,"native_task_not_admitted_busy")
+            elif payload["kind"]=="queued_chat":
+                require(not self.busy(session),409,"native_queue_not_admitted_busy")
             turn = self.request("turn/start",{"threadId":session,"input":blocks,
                                               "clientUserMessageId":"mowulink-"+did})["turn"]
             proof = self.lookup_inputs(session,did,payload,digest,blocks)

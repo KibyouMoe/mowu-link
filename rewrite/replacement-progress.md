@@ -4,6 +4,10 @@
 
 ## 检查点与证据
 
+隔离 App Server 的 `/queue` 已接通。Worker 观察为空闲后宿主突然开始普通对话，原生写前明确拒绝队首投递，另两个消息仍排队。空闲后成功写入，故意丢回执则查原输入。两个排队消息按顺序各进一次新回合，原普通回合也只有一条输入。连续 16 次通过。复跑 `python3 -m unittest -v rewrite.test_codex_app_server.CodexAppServer.test_app_server_next_turn_queue_never_steers_busy_turn_or_replays_lost_ack`。[原生队列记录](evidence/codex-app-server-native-queue.json)。平台与模型为夹具。
+
+Linux arm64 已复验 `827eedcc65273a0897b7e697e9a4a9582a498135`，通过 135 项，47 项依赖本机 Codex 或 DSH 跳过，校验 147 个发行文件。独立系统上的隔离 TLS 只留一条正式成果通知，身份和证书反例通过，宿主为夹具。
+
 隔离 Codex App Server 已接平台 `/stop`。Worker 持单时拒绝，适配器也独立核对原生单输入与私聊收件账本。普通聊天停后回读原回合和输入号。故意丢停止回执，同号重投仍是待核，第三个真实回合继续运行直至接到自己的停止命令。连续 20 轮通过。复跑 `python3 -m unittest -v rewrite.test_codex_app_server.CodexAppServer.test_platform_stop_interrupts_only_the_proven_private_app_server_turn`。[试验记录](evidence/codex-app-server-private-stop.json)。本地平台和模型夹具。
 
 `codex-provision` 已实测新建独立原生测试工位。一次初始化输入后退出并冷开 App Server，线程、回合和输入号全部读回。独立 TLS 适配器使用该线程接工单，原生工具调用回同一 W04 凭据且仅一条成果通知。连续 10 轮通过。默认无授权登录时在建线程前拒绝，脚本模型尝试在初始化时调用工具也被拒绝，无成功凭据。复跑 `python3 -m unittest -v rewrite.test_codex_app_server`。[初始化试验](evidence/codex-native-provision.json)。模型为本地脚本。

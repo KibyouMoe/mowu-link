@@ -162,7 +162,9 @@ class HostAdapter:
                 control_deferred = (payload["kind"] in ("task.cancel","task.transfer_out")
                                     and error.code=="native_control_not_admitted_busy"
                                     and getattr(self.host,"rejects_busy_before_control_write",False))
-                if error.status!=409 or not (task_deferred or control_deferred):
+                queue_deferred = (payload["kind"]=="queued_chat" and error.code=="native_queue_not_admitted_busy"
+                                  and getattr(self.host,"rejects_busy_before_queue_write",False))
+                if error.status!=409 or not (task_deferred or control_deferred or queue_deferred):
                     raise
                 # This host explicitly refused before entering the native write.
                 # All uncertain writes retain their original intent for lookup only.
@@ -170,7 +172,8 @@ class HostAdapter:
                     removed = db.execute("""DELETE FROM intents WHERE delivery_id=?
                                           AND digest=? AND receipt IS NULL""",(did,digest)).rowcount
                 require(removed,409,"host_delivery_unconfirmed")
-                reason = "control_delivery_deferred" if control_deferred else "task_delivery_deferred"
+                reason = ("queued_chat_delivery_deferred" if queue_deferred
+                          else "control_delivery_deferred" if control_deferred else "task_delivery_deferred")
                 raise Fault(409,reason,True) from error
         else:
             receipt = self.lookup_receipt(did,payload,digest)
