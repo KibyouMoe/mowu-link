@@ -1483,7 +1483,7 @@ class CodexAppServer(unittest.TestCase):
 
     def test_cold_adapter_reads_committed_approval_closure_without_native_replay(self):
         root = Path(self.root).resolve()
-        self.provider.approval_commands = dict.fromkeys(("cold-closed","cold-unknown"),"pwd")
+        self.provider.approval_commands = dict.fromkeys(("cold-closed","cold-local","cold-unknown"),"pwd")
         worker_token,approver_token,adapter_token = (guid() for _ in range(3))
         orders = Orders(root/"router.db")
         router = self.enterContext(running(serve_loopback(orders,{worker_token:"worker/dev",approver_token:"approver/dev"})))
@@ -1520,10 +1520,20 @@ class CodexAppServer(unittest.TestCase):
 
         committed,undelivered = set(),set()
         terminals = Queue()
+        hide_resolution = Event()
+        discarded_resolutions = []
         with isolated_app_server(self.root,self.origin,settings) as rpc:
             session = rpc.request("thread/start",{"cwd":self.root,"ephemeral":False})["thread"]["id"]
             with station(rpc,session) as (host,callback,worker_session):
-                send = callback.request
+                send,native_event = callback.request,rpc.event
+
+                def drop_native_resolution(deadline):
+                    while True:
+                        event = native_event(deadline)
+                        if hide_resolution.is_set() and event.get("method")=="serverRequest/resolved":
+                            discarded_resolutions.append(event["params"]["requestId"])
+                        else:
+                            return event
 
                 def lose_closure(method,path,body=None,*args,**kw):
                     if method=="PUT" and path.endswith("/closed"):
@@ -1536,24 +1546,37 @@ class CodexAppServer(unittest.TestCase):
                         raise ConnectionError("isolated approval closure transport lost")
                     return send(method,path,body,*args,**kw)
 
-                callback.request = lose_closure
+                callback.request,rpc.event = lose_closure,drop_native_resolution
                 with worker_callbacks(host,callback,lambda:None,notify_terminal=lambda tid,state:terminals.put((tid,state))):
-                    for suffix,seen in (("cold-closed",committed),("cold-unknown",undelivered)):
+                    for suffix,seen in (("cold-closed",committed),("cold-local",undelivered),("cold-unknown",None)):
+                        if seen is None:
+                            hide_resolution.set()
                         turn = rpc.request("turn/start",{"threadId":session,"input":[
                             {"type":"text","text":"Approval fixture "+suffix,"text_elements":[]}]})["turn"]["id"]
                         row = until(lambda:approvals().get("trial-approval-"+suffix))
                         clock.advance(TTL_SECONDS)
                         self.assertEqual(terminals.get(timeout=4),(turn,"interrupted"))
-                        until(lambda:row["approval_id"] in seen)
+                        if seen is not None:
+                            until(lambda:row["approval_id"] in seen)
+                        else:
+                            until(lambda:discarded_resolutions)
                 old_turns = host.thread(session,include_turns=True)["turns"]
         before = approvals()
-        known,unknown = (before["trial-approval-cold-"+key] for key in ("closed","unknown"))
-        known_id,unknown_id = known["approval_id"],unknown["approval_id"]
+        known,local,unknown = (before["trial-approval-cold-"+key] for key in ("closed","local","unknown"))
+        known_id,local_id,unknown_id = known["approval_id"],local["approval_id"],unknown["approval_id"]
         self.assertEqual(known["state"],"native_closed")
-        self.assertIsNone(unknown["closed_at"])
-        self.assertEqual(journal(),{known_id:None,unknown_id:None})
+        for row in (local,unknown):
+            self.assertIsNone(row["closed_at"])
+        self.assertEqual(journal(),{known_id:None,local_id:None,unknown_id:None})
         notices = approver.frames(0)
+        with closing(sqlite3.connect(adapter_path)) as db:
+            resolution_journal = dict(db.execute("SELECT approval_id,resolution FROM codex_approval_resolutions"))
+        self.assertEqual(set(resolution_journal),{known_id,local_id})
+        self.assertEqual(json.loads(resolution_journal[local_id])["attempted_response"],
+                         {"source":"native_deadline","decision":"cancel"})
+        self.assertNotIn(str(root).encode(),adapter_path.read_bytes())
         seen_after_restart,native_decisions_after_restart = [],[]
+        lost_recovery_receipt = Event()
         unconfirmed_after_restart = Event()
         expected_digest = hashlib.sha256(encode(known).encode()).hexdigest()
 
@@ -1567,7 +1590,11 @@ class CodexAppServer(unittest.TestCase):
                     if path.startswith("worker/approvals/"):
                         seen_after_restart.append((method,path))
                     try:
-                        return send(method,path,*args,**kwargs)
+                        reply = send(method,path,*args,**kwargs)
+                        if path.endswith("/recover-codex-closure") and not lost_recovery_receipt.is_set():
+                            lost_recovery_receipt.set()
+                            raise ConnectionError("isolated recovered closure reply lost")
+                        return reply
                     except Fault as error:
                         if unknown_id in path and error.code=="native_approval_closure_pending":
                             unconfirmed_after_restart.set()
@@ -1581,17 +1608,27 @@ class CodexAppServer(unittest.TestCase):
                 callback.request,rpc.send = trace,trace_native
                 with worker_callbacks(host,callback,lambda:None):
                     until(lambda:journal().get(known_id)==expected_digest)
+                    local_digest = until(lambda:journal().get(local_id))
                     self.assertTrue(unconfirmed_after_restart.wait(7))
-                    self.assertEqual(journal(),{known_id:expected_digest,unknown_id:None})
-                    self.assertEqual(approvals(),before)
+                    self.assertEqual(journal(),{known_id:expected_digest,local_id:local_digest,unknown_id:None})
+                    after = approvals()
+                    recovered = after["trial-approval-cold-local"]
+                    self.assertEqual(recovered["state"],"native_closed")
+                    self.assertEqual(recovered["attempted_response"],{"source":"native_deadline","decision":"cancel"})
+                    self.assertEqual(local_digest,hashlib.sha256(encode(recovered).encode()).hexdigest())
+                    self.assertEqual(after,dict(before,**{"trial-approval-cold-local":recovered}))
                     self.assertEqual(host.thread(session,include_turns=True)["turns"],old_turns)
         self.assertEqual(approver.frames(0),notices)
         self.assertEqual(native_decisions_after_restart,[])
-        self.assertTrue(all(method=="POST" and path.endswith("/receipt") for method,path in seen_after_restart))
+        self.assertTrue(lost_recovery_receipt.is_set())
+        writes = [(method,path) for method,path in seen_after_restart if method!="POST"]
+        self.assertEqual(writes,[("PUT","worker/approvals/"+local_id+"/recover-codex-closure")])
         self.evidence = {"native_session":session,"worker_session_reused":True,"closed_approval_id":known_id,
-            "open_approval_id":unknown_id,"committed_router_receipt_digest":expected_digest,
+            "open_approval_id":unknown_id,"locally_confirmed_approval_id":local_id,"recovered_locally_confirmed_receipt_digest":local_digest,
+            "committed_router_receipt_digest":expected_digest,
             "adapter_receipt_digest_after_reopen":journal()[known_id],"open_record_kept_pending":True,
             "native_turn_ids":[turn["id"] for turn in old_turns],"new_native_turns":0,"new_approval_notices":0,
+            "one_recovery_write_and_lost_reply":True,"durable_native_resolution_ids":sorted(resolution_journal),
             "queries_after_reopen":seen_after_restart,"native_decisions_after_reopen":0,
             "boundary":"Actual App Server, Worker, Router and their databases. Local model, clock and dropped HTTP replies are fixtures."}
         if output := os.environ.get("MOWULINK_CODEX_COLD_APPROVAL_EVIDENCE"):

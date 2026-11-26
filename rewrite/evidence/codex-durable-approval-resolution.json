@@ -1,0 +1,51 @@
+{
+  "native_session": "01a218bb-61b9-7860-a5d3-f58bd944b6e4",
+  "worker_session_reused": true,
+  "closed_approval_id": "eb2864db-2871-4605-989e-d4180e7dd5e3",
+  "open_approval_id": "0b43b372-307d-4ba5-ba5e-de2733c6a6e0",
+  "locally_confirmed_approval_id": "2aafaad4-1baa-475a-b720-e6601319b18c",
+  "recovered_locally_confirmed_receipt_digest": "f3dcb832e5253eda1d5cd071fadbea9d4dd9d71a874306dbbc8b53b2490379a8",
+  "committed_router_receipt_digest": "e34f40ffc7415f75aa4a9bbaf38db17d6ff1f6690fb151b8f27b9b2a2c827cf3",
+  "adapter_receipt_digest_after_reopen": "e34f40ffc7415f75aa4a9bbaf38db17d6ff1f6690fb151b8f27b9b2a2c827cf3",
+  "open_record_kept_pending": true,
+  "native_turn_ids": [
+    "01a218bb-61de-73c2-bb8f-501725921ce5",
+    "01a218bb-63f1-73a2-8489-8ae4164690ab",
+    "01a218bb-65fa-74a2-bb44-a8d833edc510"
+  ],
+  "new_native_turns": 0,
+  "new_approval_notices": 0,
+  "one_recovery_write_and_lost_reply": true,
+  "durable_native_resolution_ids": [
+    "2aafaad4-1baa-475a-b720-e6601319b18c",
+    "eb2864db-2871-4605-989e-d4180e7dd5e3"
+  ],
+  "queries_after_reopen": [
+    [
+      "POST",
+      "worker/approvals/eb2864db-2871-4605-989e-d4180e7dd5e3/receipt"
+    ],
+    [
+      "POST",
+      "worker/approvals/2aafaad4-1baa-475a-b720-e6601319b18c/receipt"
+    ],
+    [
+      "PUT",
+      "worker/approvals/2aafaad4-1baa-475a-b720-e6601319b18c/recover-codex-closure"
+    ],
+    [
+      "POST",
+      "worker/approvals/0b43b372-307d-4ba5-ba5e-de2733c6a6e0/receipt"
+    ],
+    [
+      "POST",
+      "worker/approvals/2aafaad4-1baa-475a-b720-e6601319b18c/receipt"
+    ],
+    [
+      "POST",
+      "worker/approvals/0b43b372-307d-4ba5-ba5e-de2733c6a6e0/receipt"
+    ]
+  ],
+  "native_decisions_after_reopen": 0,
+  "boundary": "Actual App Server, Worker, Router and their databases. Local model, clock and dropped HTTP replies are fixtures."
+}

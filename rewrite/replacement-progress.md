@@ -4,9 +4,13 @@
 
 ## 检查点与证据
 
+Codex 已把收到的原生审批关闭通知保存到适配器账本。基线 `b4f8c521da38620cadd5260ad662c9ff2d9dc8b1` 的原生测试回合已经中止，Router 仍只有登记，重开八秒后仍未补交。新版用原 Worker、原会话和登记摘要补原关闭，第一次补交回执丢失后按原号查回，实际只有一次补交、零新增通知、零原生决定重放。已落库的另一条只读原回执。丢失原生关闭通知的一条继续待核，三个回合的原生历史一致。隔离 App Server、Worker、Router 与数据库实跑，模型、时钟、网络和事件丢失使用夹具。[原生关闭实测](evidence/codex-durable-approval-resolution.json)
+
+复跑 `python3 -B -m unittest -v rewrite.test_service.Service.test_recovered_codex_resolution_requires_the_original_registered_request rewrite.test_codex_app_server.CodexAppServer.test_cold_adapter_reads_committed_approval_closure_without_native_replay`。同时验证错会话、错回合、错条目或无原登记均拒绝补交。Router 从未登记、适配器也已退出时仍缺可核原请求，继续待核。
+
 Codex 适配器冷重开可从原 Worker 查回 Router 已保存的审批关闭回执。基线 `18238d2bd40892d4f74ac06cb8053383971ee0fd` 的真实 App Server 测试在 8 秒内仍未补回已落库的关闭。新版用原 Worker 注册、原生会话、审批号和请求摘要取回相同摘要。另一条丢在 Router 落库前的关闭仍待核。两条原生回合均未重跑，重开后新增原生决定和审批通知均为零。实跑独立 App Server、Worker 与 Router，模型、时钟和丢包由测试驱动。另验错绑、错误摘要、已更换的 Worker 注册和其他身份均不能读到回执。[冷重开证据](evidence/codex-cold-approval-reconcile.json)
 
-复跑 `python3 -B -m unittest -v rewrite.test_service.Service.test_lookup_returns_only_original_closed_approval_receipt_digest rewrite.test_codex_app_server.CodexAppServer.test_cold_adapter_reads_committed_approval_closure_without_native_replay`。Router 从未保存关闭时的原生证明恢复尚待实现。
+复跑 `python3 -B -m unittest -v rewrite.test_service.Service.test_lookup_returns_only_original_closed_approval_receipt_digest rewrite.test_codex_app_server.CodexAppServer.test_cold_adapter_reads_committed_approval_closure_without_native_replay`。对关闭尚未写入 Router 的扩展，见本页最新检查点。
 
 两项连续通过 5 轮。macOS 全量通过 268 项，Linux arm64 通过 182 项、跳过 86 项。以 `3eab3960c393cfab0d839f91a37f47d79c986b76` 构建 236 份文件的独立包，SHA-256 为 `b39dab9971ecd361f7f83aadeb2f172437bdbbe8d8ce63051ff2224e5c1fc892`。安装目录复跑审批、切换、快照与服务 42 项通过，文件摘要一致。另在临时 TLS 端口演练旧 Router 写入并关闭审批 `5a4014ae-fe00-40f3-9437-cf92aa3e596e`。将停写库复制给新版，按原审批号核到关闭摘要 `473bb1c31a48f91768ce0678f432eb9c98ce6cca1b8f715c0f3c56b710f6b6a1`。在原试用库上起旧包后仍读回同一关闭。三阶段各一条原通知，原库和回退试用库的摘要均未变。现场使用两版锁定安装包与合成审批，无原生动作。
 

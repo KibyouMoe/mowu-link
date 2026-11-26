@@ -3,6 +3,7 @@ from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass
 import hashlib
+import json
 import re
 from sqlite3 import Error as SQLiteError
 from threading import Event, Lock, Thread
@@ -16,6 +17,10 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS codex_approval_intents (
     approval_id TEXT PRIMARY KEY, session TEXT NOT NULL, turn_id TEXT NOT NULL,
     item_id TEXT NOT NULL, request_digest TEXT NOT NULL, router_receipt_digest TEXT
+);
+CREATE TABLE IF NOT EXISTS codex_approval_resolutions (
+    approval_id TEXT PRIMARY KEY REFERENCES codex_approval_intents(approval_id),
+    resolution TEXT NOT NULL
 );
 """
 
@@ -31,6 +36,7 @@ class NativeApproval:
     closed: bool = False
     retired: bool = False
     expired: bool = False
+    resolution_saved: bool = False
 
 
 class CodexApprovals:
@@ -45,9 +51,10 @@ class CodexApprovals:
         self.cold_receipts = deque()
         if self.ledger is not None:
             with self.ledger.transaction() as db:
-                self.cold_receipts.extend(tuple(row) for row in db.execute("""SELECT approval_id,request_digest
-                    FROM codex_approval_intents WHERE session=? AND router_receipt_digest IS NULL ORDER BY rowid""",
-                    (session,)))
+                self.cold_receipts.extend(tuple(row) for row in db.execute("""SELECT approval_id,request_digest,
+                    turn_id,item_id,resolution FROM codex_approval_intents i
+                    LEFT JOIN codex_approval_resolutions USING(approval_id)
+                    WHERE session=? AND router_receipt_digest IS NULL ORDER BY i.rowid""",(session,)))
 
     def observe_item(self,method,params):
         if not isinstance(params,dict) or params.get("threadId")!=self.session:
@@ -125,8 +132,22 @@ class CodexApprovals:
         if type(rid) not in (int,str):
             return
         with self.lock:
-            if rid in self.live:
-                self.live[rid].closed = True
+            item = self.live.get(rid)
+            if item:
+                item.closed = True
+                try:
+                    self.journal_resolution(item)
+                except SQLiteError:
+                    # The live relay will retry the same write before forwarding the closure.
+                    pass
+
+    def journal_resolution(self,item):
+        if self.ledger is not None and not item.resolution_saved:
+            resolution = {"request_id":item.request_id,"attempted_response":item.attempted_response}
+            with self.ledger.transaction() as db:
+                db.execute("INSERT INTO codex_approval_resolutions VALUES (?,?) ON CONFLICT(approval_id) DO NOTHING",
+                           (item.id,encode(resolution)))
+            item.resolution_saved = True
 
     def retire_turn(self,turn):
         if self.files:
@@ -155,10 +176,25 @@ class CodexApprovals:
                 (receipt_digest,approval_id,self.session,request_digest,receipt_digest)).rowcount
             require(changed==1,503,"native_approval_journal_unconfirmed")
 
-    def recover_receipt(self,worker,approval_id,request_digest):
+    def recover_receipt(self,worker,approval_id,request_digest,turn_id,item_id,resolution):
         original = {"session":self.session,"request_digest":request_digest}
-        path = "worker/approvals/"+approval_id+"/receipt"
-        reply = worker.request("POST",path,original)
+        path = "worker/approvals/"+approval_id
+        saved = None
+        if resolution is not None:
+            try:
+                saved = json.loads(resolution)
+            except (ValueError,TypeError):
+                raise Fault(503,"native_approval_journal_unconfirmed") from None
+            require(isinstance(saved,dict) and set(saved)=={"request_id","attempted_response"},
+                    503,"native_approval_journal_unconfirmed")
+        lookup = original if saved is None else dict(original,attempted_response=saved["attempted_response"])
+        try:
+            reply = worker.request("POST",path+"/receipt",lookup)
+        except Fault as error:
+            if error.code!="native_approval_closure_pending" or saved is None:
+                raise
+            proof = dict(original,turn_id=turn_id,item_id=item_id,**saved)
+            reply = worker.request("PUT",path+"/recover-codex-closure",proof)
         require(isinstance(reply,dict),502,"wrong_approval_closure")
         digest = reply.get("receipt_digest")
         require(isinstance(digest,str) and re.fullmatch("[0-9a-f]{64}",digest) and
@@ -167,6 +203,8 @@ class CodexApprovals:
         self.save_receipt(approval_id,request_digest,digest)
 
     def confirm(self,worker,route,item,attempted):
+        with self.lock:
+            self.journal_resolution(item)
         proof = {"session":self.session,"request_digest":item.digest,"attempted_response":attempted}
         if attempted and attempted["source"]=="native_deadline":
             proof["request"] = item.request
@@ -241,14 +279,16 @@ class CodexApprovals:
                         # Keep the original request available for lookup; the native response is never resent.
                         continue
         def reconcile_cold_receipts():
-            # Previous-instance entries can only look up a stored closure, never answer or submit one.
             while self.cold_receipts and not stop.is_set():
-                try:
-                    self.recover_receipt(worker,*self.cold_receipts[0])
-                except (Fault,OSError,SQLiteError):
-                    self.cold_receipts.rotate(-1)
-                else:
-                    self.cold_receipts.popleft()
+                for _ in range(len(self.cold_receipts)):
+                    if stop.is_set():
+                        return
+                    try:
+                        self.recover_receipt(worker,*self.cold_receipts[0])
+                    except (Fault,OSError,SQLiteError):
+                        self.cold_receipts.rotate(-1)
+                    else:
+                        self.cold_receipts.popleft()
                 if self.cold_receipts:
                     stop.wait(5)
 

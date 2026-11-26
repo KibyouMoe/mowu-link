@@ -163,6 +163,33 @@ def close_native(db,orders,wid,aid,row,session,now,body):
                   WHERE worker_id=? AND approval_id=?""",(now,stored,stored_proof,wid,aid))
 
 
+def closure_receipt(row,session,now):
+    receipt = record(row,session,now)
+    return {"approval_id":receipt["approval_id"],"session":receipt["request"]["session"],
+            "request_digest":receipt["request_digest"],"state":"native_closed",
+            "receipt_digest":hashlib.sha256(encode(receipt).encode()).hexdigest()}
+
+
+def recover_codex_closure(db,orders,wid,aid,row,session,now,body):
+    fields = {"session_id","session","turn_id","item_id","request_digest","request_id","attempted_response"}
+    require(set(body)==fields,422,"invalid_codex_resolution")
+    orders.active_session(db,wid,body)
+    require(row,404,"approval_not_found")
+    rid = body["request_id"]
+    require(type(rid) is int or (isinstance(rid,str) and 0<len(rid)<=200 and "\0" not in rid),
+            422,"invalid_codex_resolution")
+    request = json.loads(row["request"])
+    require(all(request[key]==string(body,key) for key in ("session","turn_id","item_id"))
+            and body["request_digest"]==row["request_digest"],409,"approval_request_conflict")
+    proof = {key:body[key] for key in ("session_id","request_digest","attempted_response")}
+    if proof["attempted_response"]=={"source":"native_deadline","decision":"cancel"}:
+        # Closure of an existing request can reuse Router's original body, including private fields.
+        proof["request"] = request
+    close_native(db,orders,wid,aid,row,session,now,proof)
+    current = db.execute("SELECT * FROM native_approvals WHERE worker_id=? AND approval_id=?",(wid,aid)).fetchone()
+    return closure_receipt(current,session,now)
+
+
 def route(orders,actor,method,parts,body):
     require(len(parts) in (2,3,4),404,"unknown_approval_route")
     wid = parts[1]
@@ -211,7 +238,8 @@ def route(orders,actor,method,parts,body):
             db.execute("UPDATE native_approvals SET decision=? WHERE worker_id=? AND approval_id=?",(decision,wid,aid))
         elif method=="POST" and len(parts)==4 and parts[3]=="receipt":
             require(actor==worker,403,"forbidden")
-            require(set(body)=={"session_id","session","request_digest"},422,"invalid_approval_receipt_lookup")
+            fields = {"session_id","session","request_digest"}
+            require(fields<=set(body)<=fields|{"attempted_response"},422,"invalid_approval_receipt_lookup")
             orders.active_session(db,wid,body)
             native_session = string(body,"session")
             request_digest = string(body,"request_digest")
@@ -219,9 +247,12 @@ def route(orders,actor,method,parts,body):
             require(row["worker_session"]==session and row["request_digest"]==request_digest
                     and json.loads(row["request"])["session"]==native_session,409,"approval_request_conflict")
             require(row["closed_at"] is not None,409,"native_approval_closure_pending")
-            # Return correlation and a digest only, without a command, diff or decision to forward.
-            return {"approval_id":aid,"session":native_session,"request_digest":request_digest,"state":"native_closed",
-                    "receipt_digest":hashlib.sha256(encode(record(row,session,now)).encode()).hexdigest()}
+            if "attempted_response" in body:
+                require(encode(body["attempted_response"])==row["attempted_response"],409,"approval_closure_conflict")
+            return closure_receipt(row,session,now)
+        elif method=="PUT" and len(parts)==4 and parts[3]=="recover-codex-closure":
+            require(actor==worker,403,"forbidden")
+            return recover_codex_closure(db,orders,wid,aid,row,session,now,body)
         elif method=="PUT" and len(parts)==4 and parts[3]=="closed":
             require(actor==worker,403,"forbidden")
             close_native(db,orders,wid,aid,row,session,now,body)

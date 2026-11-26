@@ -368,6 +368,52 @@ class Service(unittest.TestCase):
         with self.assertRaisesRegex(Fault,"approval_request_conflict"):
             approval_route(restarted,"worker/dev","POST",route,dict(lookup,**registered))
 
+    def test_recovered_codex_resolution_requires_the_original_registered_request(self):
+        orders = Orders(self.root/"codex-recovered-closure.db")
+        binding = {"session_id":guid()}
+        worker = "worker/dev"
+        with orders.db.transaction() as db:
+            orders.session(db,"dev",binding)
+        entry = ["approvals","dev",guid()]
+        request = {"session":"original-native-session","turn_id":"native-turn","item_id":"native-file",
+                   "kind":"file_change","changes":[{"path":"/isolated/private.txt","kind":{"type":"add"},
+                   "diff":"+private fixture"}],"decisions":["accept","cancel"]}
+        digest = hashlib.sha256(encode(request).encode()).hexdigest()
+        resolution = dict(binding,session=request["session"],turn_id=request["turn_id"],item_id=request["item_id"],
+                          request_digest=digest,request_id=0,attempted_response={"source":"native_deadline","decision":"cancel"})
+        route = [*entry,"recover-codex-closure"]
+        with self.assertRaisesRegex(Fault,"approval_not_found"):
+            approval_route(orders,worker,"PUT",route,resolution)
+        original = approval_route(orders,worker,"POST",entry,dict(binding,request=request))
+        rejected = [("approver/dev",resolution,"forbidden"),
+                    (worker,dict(resolution,session_id=guid()),"stale_session"),
+                    (worker,dict(resolution,session="foreign-session"),"approval_request_conflict"),
+                    (worker,dict(resolution,turn_id="foreign-turn"),"approval_request_conflict"),
+                    (worker,dict(resolution,item_id="different-item"),"approval_request_conflict"),
+                    (worker,dict(resolution,request_digest="0"*64),"approval_request_conflict"),
+                    (worker,dict(resolution,request_id=True),"invalid_codex_resolution"),
+                    (worker,dict(resolution,request=request),"invalid_codex_resolution"),
+                    (worker,dict(resolution,attempted_response={"source":"operator","decision":"accept"}),
+                     "approval_response_conflict")]
+        for actor,body,error in rejected:
+            with self.subTest(error=error), self.assertRaisesRegex(Fault,error):
+                approval_route(orders,actor,"PUT",route,body)
+        self.assertEqual(approval_route(orders,"approver/dev","GET",entry,{}),original)
+        receipt = approval_route(orders,worker,"PUT",route,resolution)
+        closed = approval_route(orders,"approver/dev","GET",entry,{})
+        self.assertEqual(closed["state"],"native_closed")
+        self.assertEqual(closed["request"],request)
+        self.assertEqual(closed["attempted_response"],resolution["attempted_response"])
+        self.assertEqual(receipt,{"approval_id":entry[-1],"session":request["session"],"request_digest":digest,
+                                  "state":"native_closed","receipt_digest":hashlib.sha256(encode(closed).encode()).hexdigest()})
+        self.assertEqual(approval_route(orders,worker,"PUT",route,resolution),receipt)
+        with self.assertRaisesRegex(Fault,"approval_closure_conflict"):
+            approval_route(orders,worker,"POST",[*entry,"receipt"],
+                           dict(binding,session=request["session"],request_digest=digest,attempted_response=None))
+        with orders.db.transaction() as db:
+            notices = delivery_read(db,"approver/dev",0)
+        self.assertEqual([notice["payload"] for notice in notices],[{"approval_id":entry[-1],"worker_id":"dev"}])
+
     def test_dsh_no_notice_closure_requires_original_non_grant_proof(self):
         orders = Orders(self.root/"dsh-deadline.db",clock=lambda:1000)
         binding = {"session_id":guid()}
