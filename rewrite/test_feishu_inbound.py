@@ -15,7 +15,7 @@ from .worker_service import WorkerService
 PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6yX8AAAAASUVORK5CYII=")
 
 
-class PlatformInput(unittest.TestCase):
+class PlatformCase(unittest.TestCase):
     def setUp(self):
         self.loop = self.enterContext(Loop.isolated())
         w = self.loop.worker
@@ -42,6 +42,8 @@ class PlatformInput(unittest.TestCase):
                    "message_id":mid,"content":json.dumps(content)}
         return self.inbound.record("app",sender_type,sender,message)
 
+
+class PlatformInput(PlatformCase):
     def test_single_captioned_input_with_image_bytes_and_replay_after_lost_receipt(self):
         caption = "这张图是什么颜色？"
         post = {"zh_cn":{"content":[[{"tag":"text","text":caption},{"tag":"img","image_key":"img_one"}]]}}

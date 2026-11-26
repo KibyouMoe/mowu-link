@@ -20,6 +20,7 @@
 | 同伴私聊 | 两个 Worker 通过 Router 互发与关联回复；回执丢失重试后目标只收一次。同伴输入不能代报正式成果，查询不建单。真实 HTTP，宿主输入为夹具。 | `python3 -m unittest -v rewrite.test_peers`（2 项）；三进程基线 0111cc1 | 真实工位对端、飞书镜像 |
 | W04 成果附件和候选附件 | Worker 上传的文件可随正式报告授权给溪流。一份跨身份文件使整笔事务回滚；改正后成果、通知各一次。仅附文件的晚到候选只记材料。 | `python3 -m unittest -v rewrite.test_work_files`（2 项），同伴基线 c962875 | 用户界面下载和生产身份待验 |
 | 全量功能 | 下列旧入口已确认存在；迁移和各平台回退尚待实测 | 入口表对应源文件及注册表 | 双端题卡、运维验收 |
+| 飞书展示 A05/A06 | 专用适配器身份将指定会话的公开事件交给 Worker。隔离平台记录显示工具卡、增量更新原卡、独立图片、图后新卡和最终回复顺序正确。图片发送回执丢失后沿用原图片与消息键；超过平台去重时限保留待核。4 项测试使用平台替身。 | `python3 -m unittest -v rewrite.test_feishu_output`；[飞书发送消息与 UUID 有效期](https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/create?lang=en-US) | 实际平台消息 ID、各原生宿主事件接入另验 |
 | 飞书私聊入站 A02–A04 与普通文件 | 实际飞书 Python SDK 1.7.5 在空白环境解析两次同一模拟回调，队列仅存一条。隔离 Worker 通过 HTTP 分块收文件；模拟宿主收到同一输入中的原文和原始图片字节。丢回执重试不重复输入。测试还覆盖纯图、Markdown 文件、非训练员和机器人消息。文本专用宿主明确报无法交图。累计 67 项全量回归通过。 | `python3 -m unittest -v rewrite.test_feishu_inbound`；带 SDK 的测试 Python 运行 `-m rewrite.feishu_sdk_check` | 飞书云端收发、原生识图及界面待验 |
 | 旧 Router 离线迁移演练 | 实际旧 RouterStore 在临时目录产生归档、排队和附件。备份校验、稳定队列映射和零新写入回退均实跑。旧程序重开恢复库，原下一张单、归档理由与附件均吻合。有在途、摘要损坏或新库已写拒绝覆盖。 | [复跑与回退界线](router-rehearsal.md)，`python3 -m unittest -v rewrite.test_cutover`（4 项） | 整体多组件、带新增业务回迁及新端历史查询另验 |
 | A07 业务消息留档 | 完工、提问、入池、提醒和取消确认与各自的通知同时入账，按原 ID 可查。历史投递缺接收时间时返回空。查询不生成新帧，不确认宿主收到。 | `python3 -m unittest -v rewrite.test_archive`（2 项），成果附件基线 488b996 | 平台与宿主可见性另验 |

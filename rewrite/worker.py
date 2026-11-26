@@ -3,7 +3,7 @@ import json
 from threading import RLock
 from typing import Protocol
 
-from . import worker_media
+from . import display, worker_media
 from .storage import Database, Fault, encode, guid, require, string
 
 SCHEMA = """
@@ -46,7 +46,7 @@ class AgentAdapter(Protocol):
 
 class Worker:
     def __init__(self, path, worker_id, router, adapter: AgentAdapter):
-        self.db = Database(path, SCHEMA + worker_media.SCHEMA)
+        self.db = Database(path, SCHEMA + worker_media.SCHEMA + display.SCHEMA)
         self.worker_id, self.router, self.adapter = worker_id, router, adapter
         self.lock = RLock()
         with self.db.transaction() as db:

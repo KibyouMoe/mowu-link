@@ -26,6 +26,9 @@ class HostAdapter:
     def busy(self):
         return self.host.busy(self.session)
 
+    def bound_session(self):
+        return self.session
+
     def deliver(self, did, payload):
         serialized = encode(payload)
         digest = hashlib.sha256(serialized.encode()).hexdigest()

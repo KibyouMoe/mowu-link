@@ -6,6 +6,7 @@ from threading import Event, Thread
 from urllib.error import URLError
 
 from .feishu_inbound import Inbound
+from .feishu_output import SDKMessages, Views
 from .service import connection, private_config
 from .storage import Fault
 
@@ -37,8 +38,10 @@ def main():
     import lark_oapi as lark
     cfg = private_config(args.config)
     api = lark.Client.builder().app_id(cfg["app_id"]).app_secret(cfg["app_secret"]).build()
-    inbound = Inbound(cfg["database"],connection(Path(cfg["worker_connection"])),SDKResources(api),
+    worker = connection(Path(cfg["worker_connection"]))
+    inbound = Inbound(cfg["database"],worker,SDKResources(api),
                       cfg["app_id"],cfg["trainer_open_id"],cfg["chat_id"])
+    views = Views(cfg["database"],worker,SDKMessages(api),cfg["chat_id"],cfg["worker_name"])
     dispatcher = (lark.EventDispatcherHandler.builder("","")
                   .register_p2_im_message_receive_v1(lambda event: receive(inbound,event)).build())
     stopped = Event()
@@ -49,6 +52,10 @@ def main():
                     inbound.deliver(mid)
                 except (Fault,URLError,OSError) as error:
                     logging.warning("Feishu event %s: %s",mid,error.code if isinstance(error,Fault) else "connection_unconfirmed")
+            try:
+                views.poll()
+            except (Fault,URLError,OSError) as error:
+                logging.warning("Feishu output: %s",error.code if isinstance(error,Fault) else "connection_unconfirmed")
             stopped.wait(0.5)
     thread = Thread(target=process,daemon=True)
     thread.start()

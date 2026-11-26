@@ -2,7 +2,7 @@
 from threading import Event, Thread
 from urllib.error import URLError
 
-from . import worker_media
+from . import display, worker_media
 from .storage import Fault, require, string
 from .wire import serve_authenticated
 
@@ -36,6 +36,12 @@ class WorkerService:
         w = self.worker
         if path.startswith("/v1/worker/media/"):
             return worker_media.route(w,actor,method,path,body,_headers)
+        if path.partition("?")[0] == "/v1/worker/display":
+            if method == "POST" and actor == "adapter/"+w.worker_id:
+                return 200,"application/json",display.native(w,body)
+            if method == "GET" and actor == "platform/"+w.worker_id:
+                return 200,"application/json",display.read(w,path)
+            raise Fault(403,"forbidden")
         if actor == "adapter/" + w.worker_id and method == "POST" and path == "/v1/worker/native-tool":
             native = w.adapter.input_for_turn(string(body,"session"),string(body,"turn_id"))
             args = body.get("arguments")

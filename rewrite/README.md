@@ -36,4 +36,6 @@ python3 -m unittest -v rewrite.test_mainline
 
 后续已扩展 Router 生命周期、消息附件、问答、同伴私聊及插件。以[全量替换进度](replacement-progress.md)核对各项版本和实测边界。
 
+平台配置中的 `worker_name` 用于飞书卡片标题。宿主适配器以自身身份向 Worker 的 `POST /v1/worker/display` 交已观测的公开事件，携带稳定事件号、目标会话和回合。每段增量文字仅发新增部分；独立的最终答复事件才显示为「回复」。工具事件仅接受工具名和用于展示的预览文本。查询或抄送都不会写正式完工报告。
+
 独立平台入口 `python3 -m rewrite.feishu_client --config <专用测试配置>` 使用飞书官方 Python SDK。配置是仅属当前用户的 JSON，显式提供 `app_id`、`app_secret`、`trainer_open_id`、`chat_id`、平台队列的 `database` 和指向 Worker 的 `worker_connection`。普通私聊及其文件保存在 Worker 端，断开 Router 仍能投递。使用配置前需要单独的测试应用和会话。无需账号即可运行 `rewrite.test_feishu_inbound` 或官方事件解析复验 `rewrite.feishu_sdk_check`。[平台消息资源说明](https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/guide/faq) [飞书 Python SDK](https://github.com/larksuite/oapi-sdk-python)

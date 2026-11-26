@@ -20,6 +20,9 @@ class RemoteAdapter:
         require(type(reply.get("busy")) is bool, 502, "invalid_host_observation")
         return reply["busy"]
 
+    def bound_session(self):
+        return string(self.request("GET","host/session"),"session")
+
     def deliver(self, did, payload):
         return self.request("POST", "host/deliver", {"delivery_id":did, "payload":payload})["receipt"]
 
@@ -37,6 +40,8 @@ def serve_adapter(adapter, worker_id, identities, address, context):
     def handle(actor, method, path, body, _headers):
         require(actor == "worker/" + worker_id, 403, "wrong_adapter_owner")
         match method,path:
+            case "GET","/v1/host/session":
+                result = {"session":adapter.bound_session()}
             case "GET","/v1/host/activity":
                 result = {"busy":adapter.busy()}
             case "POST","/v1/host/deliver":

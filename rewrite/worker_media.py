@@ -17,7 +17,7 @@ def route(worker, actor, method, path, body, headers):
     parts = path.removeprefix("/v1/worker/media/").split("/")
     with worker.db.transaction() as db:
         if method == "POST" and parts == ["uploads"]:
-            require(actor == platform,403,"forbidden")
+            require(actor in (platform,adapter),403,"forbidden")
             key = string(headers,"Idempotency-Key")
             prior = db.execute("SELECT body,upload_id FROM media_requests WHERE actor=? AND key=?",(actor,key)).fetchone()
             if prior:
@@ -27,13 +27,13 @@ def route(worker, actor, method, path, body, headers):
                 result = attachments.begin(db,actor,body)
                 db.execute("INSERT INTO media_requests VALUES (?,?,?,?)",(actor,key,encode(body),result["upload_id"]))
         elif len(parts) == 2 and parts[0] == "uploads" and method in ("PATCH","GET"):
-            require(actor == platform,403,"forbidden")
+            require(actor in (platform,adapter),403,"forbidden")
             if method == "PATCH":
                 result = attachments.append(db,actor,parts[1],headers.get("Upload-Offset"),body)
             else:
                 result = attachments.progress(attachments.owned(db,actor,parts[1]))
         elif len(parts) == 2 and parts[0] == "files" and method == "GET":
-            require(actor == adapter,403,"forbidden")
+            require(actor in (platform,adapter),403,"forbidden")
             row = attachments.authorize(db,actor,parts[1])
             response = attachments.Download(worker.db,row,headers.get("Range"))
             return (206 if "Content-Range" in response.headers else 200),"application/octet-stream",response
