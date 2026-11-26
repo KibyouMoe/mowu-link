@@ -1,0 +1,13 @@
+name: mowulink_manager
+version: 0.1.0
+description: Manage MowuLink tasks and read messages from a designated Hermes session.
+kind: standalone
+provides_tools:
+  - router_workers
+  - router_tasks
+  - router_create_task
+  - router_update_task
+  - router_act_on_task
+  - router_info
+  - router_questions
+  - router_answer

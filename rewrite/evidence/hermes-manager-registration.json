@@ -1,0 +1,18 @@
+{
+  "caller": "fixture, no model turn",
+  "foreign_session_status": 403,
+  "hermes_source_revision": "a2de7418a3405307f8b3abce01a66d5d71351edc",
+  "registered_tools": [
+    "router_workers",
+    "router_tasks",
+    "router_create_task",
+    "router_update_task",
+    "router_act_on_task",
+    "router_info",
+    "router_questions",
+    "router_answer"
+  ],
+  "router_count": 1,
+  "same_call_same_task": true,
+  "task_id": "794547f1-a4cb-402d-9422-63fa8c3affc2"
+}
