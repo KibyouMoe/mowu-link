@@ -275,6 +275,75 @@ class CodexAppServer(unittest.TestCase):
                          "native_start_requests":len(compact_calls),"replay_created_no_extra_turns":True,
                          "boundary":"Actual App Server compaction and cold history with local model and isolated platform"}
 
+    def test_platform_goal_uses_native_user_origin_and_does_not_replay_after_lost_ack(self):
+        rpc = self.enterContext(isolated_app_server(self.root,self.origin))
+        sid = rpc.request("thread/start",{"cwd":self.root,"ephemeral":False})["thread"]["id"]
+        rpc.request("turn/start",{"threadId":sid,"input":[{"type":"text","text":"Seed the independent goal test thread",
+                                                          "text_elements":[]}]})
+        until = time.monotonic()+12
+        while rpc.event(until)["method"]!="turn/completed":
+            pass
+        host = AppServerHost(rpc,sid,Path(self.root)/"goal-and-compact.db")
+        host.session = sid
+        loop = self.enterContext(Loop.isolated(host_factory=lambda _path,_name:host))
+        service = WorkerService(loop.worker)
+        token,adapter_token = guid(),guid()
+        url = self.enterContext(running(service.listen({token:"platform/oguri",adapter_token:"adapter/oguri"},
+                                                       ("127.0.0.1",0),None)))
+        platform = Client(url,token)
+        service.step()
+        mutations = []
+        request = rpc.request
+        def record(method,params):
+            result = request(method,params)
+            if method=="thread/goal/set":
+                mutations.append(params)
+            return result
+        rpc.request = record
+
+        def command(mid,text):
+            receipt = platform.request("POST","worker/command",{"message_id":mid,"text":text})["receipt"]
+            card = next(row["event"]["text"] for row in platform.request("GET","worker/display")["items"]
+                        if row["seq"]==receipt["output"]["seq"])
+            return receipt,card
+        self.assertIn("没有目标",command("no_goal","/goal")[1])
+        with self.assertRaisesRegex(Fault,"forbidden"):
+            Client(url,adapter_token).request("POST","worker/command",{"message_id":"not_trainer","text":"/goal forbidden"})
+        objective = "Keep the isolated provider fixture available"
+        created,card = command("goal_start","/goal "+objective)
+        self.assertIn("进行中",card)
+        self.assertIn("tokens",card)
+        initial = rpc.request("thread/goal/get",{"threadId":sid})["goal"]
+        self.assertEqual((initial["threadId"],initial["objective"],initial["status"],initial["tokenBudget"]),
+                         (sid,objective,"active",None))
+        self.assertEqual(created["goal_receipt"]["created_at"],initial["createdAt"])
+        self.assertIn("已有未完成的目标",command("goal_replace","/goal Try replacing it")[1])
+        self.assertEqual(loop.adapter.compact(sid,"goal-blocks-compaction",start=True)["state"],"busy")
+        self.assertIn("已暂停",command("goal_pause","/goal pause")[1])
+
+        original = loop.adapter.goal_change
+        def drop(session,action,**kw):
+            self.assertEqual(original(session,action,**kw)["goal"]["phase"],"active")
+            raise Fault(503,"isolated_goal_ack_lost",True)
+        loop.adapter.goal_change = drop
+        pending,card = command("goal_resume","/goal resume")
+        self.assertIn("目标操作待核",card)
+        self.assertNotIn("goal_receipt",pending)
+        loop.adapter.goal_change = original
+        self.assertIn("进行中",command("goal_native_active","/goal")[1])
+        self.assertIn("已暂停",command("goal_pause_again","/goal pause")[1])
+        self.assertEqual(command("goal_resume","/goal resume")[0],pending)
+        last = rpc.request("thread/goal/get",{"threadId":sid})["goal"]
+        self.assertEqual((last["status"],last["objective"],last["createdAt"]),("paused",objective,initial["createdAt"]))
+        self.assertEqual([item["status"] for item in mutations],["active","paused","active","paused"])
+        self.assertTrue(all(event.get("origin")=="user" and event["threadId"]==sid and "tokenBudget" not in event
+                            for event in mutations))
+        self.assertFalse(loop.hermes.tasks()["items"])
+        self.evidence = {"thread_id":sid,"native_goal_creation":created["goal_receipt"],"native_goal_last":last,
+                         "mutation_phases":[item["status"] for item in mutations],"origin":"user",
+                         "resume_receipt_lost":True,"replay_did_not_resume_paused_goal":True,
+                         "boundary":"Actual App Server goal protocol, separately authorized test platform identity and local model fixture"}
+
     def test_native_app_server_dynamic_tool_keeps_ids_and_fires_one_w04(self):
         root,provider = self.root,self.provider
         rpc = self.enterContext(isolated_app_server(root,self.origin))

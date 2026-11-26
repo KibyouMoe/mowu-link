@@ -56,7 +56,7 @@
 | `bridge_binding_status` | Worker 状态与固定原生会话校验 | 隔离 TLS 可区分预期会话与已确认会话，同身份错绑零输入。 |
 | `bridge_bind_manager` | 独立运行参数与首次显式选定的宿主会话 | 临时 Worker 和 DSH 接入已跑，Codex 的用户界面批准与既有绑定交接待验。 |
 | `bridge_verify_manager_binding` | 按工位授权的 `worker-status` | 平台身份被拒，运维身份可核同一会话。 |
-| `bridge_inspect_native_contract` | 适配器声明能力与实际独立回执 | 目录、压缩、目标、停止能力在真实 DSH 有证据。独立 Codex App Server 已核目录、停止、历史压缩及丢回执冷开查证。 |
+| `bridge_inspect_native_contract` | 适配器声明能力与实际独立回执 | 目录、压缩、目标、停止能力在真实 DSH 有证据。独立 Codex App Server 已核目录、停止、历史压缩、原生私人目标及丢回执查证。 |
 | `bridge_verify_native_write_path` | 原派发或消息号、正文摘要、原生输入及回合 | 真实独立 Desktop 已核文字收件及重投去重。无人值守入口、图文与实际授权待验。 |
 | `bridge_start_local_manager` | Router、Worker、宿主适配器独立入口 | 临时进程与分步升级已跑。独立 App Server 工位初始化能冷开查回唯一输入，适配器已用 TLS 与专用 profile 启动，拒绝第二个写者。现役 Desktop 受信启动链仍待单验。 |
 | `bridge_reload_business_modules` | 锁定提交的发布包、分步升级与原快照回退 | 已演练冷切，原收件无重复。原位热加载及现役启停授权尚未核。 |

@@ -4,6 +4,8 @@
 
 ## 检查点与证据
 
+独立 Codex `/goal` 通过原生查看、建立、暂停和继续。带授权平台身份的显式指令才走原生用户写入，适配器角色发起同一路由被拒。已有目标无法覆盖，实际无自设 token 预算。丢继续回执后按原消息号重投，最后的原生暂停仍生效。连续 15 轮通过。[原生目标记录](evidence/codex-app-server-native-goal.json)。复跑 `python3 -m unittest -v rewrite.test_codex_app_server.CodexAppServer.test_platform_goal_uses_native_user_origin_and_does_not_replay_after_lost_ack`，模型、平台使用夹具。
+
 独立 Codex `/compact` 已走原生 `thread/compact/start`。收到 App Server 确认、返回 Worker 的回执丢失时，冷开后凭原压缩回合和记录查回，只发一条成功提示。若 App Server 原确认丢失，指令保持待核，即使历史后来出现压缩，其关联也不确认。两次实际原生调用各产生一个压缩回合，同消息号重投无第三次。连续 15 轮通过。[原生回执](evidence/codex-app-server-native-compaction.json)。复跑 `python3 -m unittest -v rewrite.test_codex_app_server.CodexAppServer.test_app_server_compact_recovers_native_turn_without_restarting_uncertain_request`。平台与模型使用夹具。
 
 macOS 全套复测曾遇到第一次原生历史读取被 App Server 拒绝。已将可重试的历史错误保留为待核，按原标识复查。隔离回归实际写一次原生输入、在首次读回注入拒绝，随后读回原号，仍由同一工位持单。最终 macOS 187 项全过。Linux arm64 锁定 `c52c30c9a17892cfdf6924996ac020931c990e16`，136 项通过、49 项因缺本机宿主跳过，校验 151 个文件，跨系统 TLS 回环使用夹具。

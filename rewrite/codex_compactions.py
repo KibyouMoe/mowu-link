@@ -26,10 +26,8 @@ class CodexCompactions:
                 return self.readback(scope,prior)
             if not start:
                 return {**scope,"state":"missing"}
-            goal = host.request("thread/goal/get",{"threadId":session})["goal"]
-            require(goal is None or isinstance(goal,dict) and goal.get("threadId")==session,
-                    502,"wrong_native_goal_view")
-            if host.busy(session) or goal and goal.get("status")=="active":
+            goal = host.goal_view(session)["goal"]
+            if host.busy(session) or goal and goal["phase"]=="active":
                 return {**scope,"state":"busy"}
             history = host.thread(session,include_turns=True)
             if history["status"]["type"]!="idle":

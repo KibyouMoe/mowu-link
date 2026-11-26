@@ -193,10 +193,20 @@ def browse_catalog(service,mid,text,args):
 
 
 GOAL_PHASES = {"active":"进行中","paused":"已暂停","blocked":"受阻","complete":"已完成"}
+APP_SERVER_PHASES = GOAL_PHASES | {"usageLimited":"用量受限","budgetLimited":"预算已达"}
 GOAL_ACTIONS = {"pause":"pause","暂停":"pause","resume":"resume","继续":"resume"}
 
 
 def describe_goal(goal):
+    if isinstance(goal,dict) and goal.get("backend")=="app-server":
+        phase,budget = goal.get("phase"),goal.get("token_budget")
+        tokens,seconds = goal.get("tokens_used"),goal.get("time_used_seconds")
+        require(phase in APP_SERVER_PHASES and all(type(n) is int and 0<=n<2**53 for n in (tokens,seconds))
+                and (budget is None or type(budget) is int and 0<budget<2**53),502,"invalid_native_goal")
+        objective = string(goal,"objective")
+        summary = objective[:3000]+("…" if len(objective)>3000 else "")
+        usage = f"{tokens} / {budget}" if budget is not None else str(tokens)
+        return f"{APP_SERVER_PHASES[phase]}\n已用 {usage} tokens · {seconds} 秒\n{summary}"
     require(isinstance(goal,dict) and goal.get("phase") in GOAL_PHASES
             and goal.get("activation") in ("armed","disarmed"),502,"invalid_native_goal")
     started,limit = goal.get("started"),goal.get("limit")
@@ -491,12 +501,18 @@ def confirmed_selection(receipt,session,kind,value,expected_route):
 
 
 def confirmed_goal(receipt,session,action,objective):
-    require(isinstance(receipt,dict) and receipt.get("session")==session and receipt.get("operation")==action
-            and type(receipt.get("event_seq")) is int and receipt["event_seq"]>=0,502,"invalid_goal_change_receipt")
+    require(isinstance(receipt,dict) and receipt.get("session")==session and receipt.get("operation")==action,
+            502,"invalid_goal_change_receipt")
     goal = receipt.get("goal")
     rendered = describe_goal(goal)
-    ref = string(goal,"id")
     phase,activation = ("paused","disarmed") if action=="pause" else ("active","armed")
+    if goal.get("backend")=="app-server":
+        created,updated = goal.get("created_at"),goal.get("updated_at")
+        require(goal["phase"]==phase and type(created) is int and type(updated) is int and 0<=created<=updated<2**53
+                and (action!="create" or goal["objective"]==objective),502,"invalid_goal_change_receipt")
+        return rendered,{"session":session,"created_at":created,"updated_at":updated,"phase":phase,"backend":"app-server"}
+    require(type(receipt.get("event_seq")) is int and receipt["event_seq"]>=0,502,"invalid_goal_change_receipt")
+    ref = string(goal,"id")
     require((goal["phase"],goal["activation"])==(phase,activation)
             and type(goal.get("revision")) is int and goal["revision"]>=1,502,"invalid_goal_change_receipt")
     if action=="create":

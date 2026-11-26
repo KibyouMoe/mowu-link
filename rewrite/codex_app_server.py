@@ -14,6 +14,7 @@ from .storage import Fault, encode, require, string
 
 TERMINAL = {"completed","interrupted","failed"}
 WORKER_TOOLS = {item["name"] for item in TOOLSET}
+GOAL_STATES = {"active","paused","blocked","complete","usageLimited","budgetLimited"}
 
 
 class AppServerHost:
@@ -57,6 +58,47 @@ class AppServerHost:
     def compact(self,session,command_id,*,start):
         require(self.compactions,422,"native_compaction_unavailable")
         return self.compactions.run(session,command_id,start=start)
+
+    def native_goal(self,session,native):
+        require(isinstance(native,dict) and native.get("threadId")==session,502,"wrong_native_goal_view")
+        phase = string(native,"status")
+        budget = native.get("tokenBudget")
+        counts = {key:native.get(key) for key in ("createdAt","updatedAt","tokensUsed","timeUsedSeconds")}
+        require(phase in GOAL_STATES and all(type(n) is int and 0<=n<2**53 for n in counts.values())
+                and counts["updatedAt"]>=counts["createdAt"]
+                and (budget is None or type(budget) is int and 0<budget<2**53),502,"invalid_native_goal")
+        return {"backend":"app-server","phase":phase,"objective":string(native,"objective"),"token_budget":budget,
+                "created_at":counts["createdAt"],"updated_at":counts["updatedAt"],"tokens_used":counts["tokensUsed"],
+                "time_used_seconds":counts["timeUsedSeconds"]}
+
+    def goal_view(self,session):
+        require(session==self.thread_id,409,"wrong_native_session")
+        raw = self.request("thread/goal/get",{"threadId":session})["goal"]
+        return {"session":session,"supported":True,"goal":None if raw is None else self.native_goal(session,raw)}
+
+    def goal_change(self,session,action,*,objective=None):
+        require(action in ("create","pause","resume"),422,"invalid_goal_action")
+        with self.write_lock:
+            current = self.goal_view(session)["goal"]
+            phase = "paused" if action=="pause" else "active"
+            args = {"threadId":session,"origin":"user","status":phase}
+            # The authenticated Worker issues this endpoint only for an explicit platform command.
+            if action=="create":
+                require(current is None,409,"native_goal_exists")
+                require(isinstance(objective,str) and objective.strip() and len(objective)<=3000,422,"invalid_goal_objective")
+                args["objective"] = objective
+            else:
+                require(current,409,"native_goal_missing")
+                require(current["phase"]==("active" if action=="pause" else "paused"),
+                        409,"native_goal_transition_refused")
+                objective = current["objective"]
+            changed = self.native_goal(session,self.request("thread/goal/set",args)["goal"])
+            observed = self.goal_view(session)["goal"]
+            require(observed and all(observed[key]==changed[key] for key in ("phase","objective","created_at","token_budget"))
+                    and observed["phase"]==phase and observed["objective"]==objective
+                    and (current is None or observed["created_at"]==current["created_at"]
+                         and observed["token_budget"]==current["token_budget"]),409,"native_goal_changed")
+            return {"session":session,"operation":action,"goal":observed}
 
     def session_catalog(self,session):
         thread = self.thread(session,include_turns=False)

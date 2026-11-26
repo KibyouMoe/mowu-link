@@ -1,0 +1,31 @@
+{
+  "thread_id": "01a216fa-8cf3-7f40-a31c-7e7a01a4b812",
+  "native_goal_creation": {
+    "backend": "app-server",
+    "created_at": 1795681848,
+    "phase": "active",
+    "session": "01a216fa-8cf3-7f40-a31c-7e7a01a4b812",
+    "updated_at": 1795681848
+  },
+  "native_goal_last": {
+    "threadId": "01a216fa-8cf3-7f40-a31c-7e7a01a4b812",
+    "objective": "Keep the isolated provider fixture available",
+    "status": "paused",
+    "tokenBudget": null,
+    "tokensUsed": 0,
+    "timeUsedSeconds": 0,
+    "createdAt": 1795681848,
+    "updatedAt": 1795681848
+  },
+  "mutation_phases": [
+    "active",
+    "paused",
+    "active",
+    "paused"
+  ],
+  "origin": "user",
+  "resume_receipt_lost": true,
+  "replay_did_not_resume_paused_goal": true,
+  "boundary": "Actual App Server goal protocol, separately authorized test platform identity and local model fixture",
+  "consecutive_runs": 15
+}
