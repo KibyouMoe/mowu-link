@@ -9,10 +9,12 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 
 from .devloop import Loop
 from .trigger import Trigger
-from .storage import encode
+from .storage import encode, guid
+from .test_mainline import Clock
 
 
 # The gateway gets a fresh profile, local credentials and no inherited process environment.
@@ -80,7 +82,20 @@ def child(host_input=False):
     tasks = call("router_tasks",{"unassigned":True},"read")
     if denied.get("status") != 403 or "task_id" not in first or again != first or tasks.get("items") != [first]:
         raise RuntimeError(encode({"denied":denied,"first":first,"replay":again,"list":tasks}))
-    return {"registered_tools":registered,"task_id":first["task_id"],"router_count":1,
+    close = json.loads(Path("candidate-review.json").read_text())
+    assignment = close.pop("fixture_assignment")
+    tool = "router_act_on_task"
+    description = registry.get_schema(tool)["parameters"]["properties"]["material_id"]
+    reply = call(tool,close,"candidate-close")
+    detail = call("router_tasks",{"task_id":close["task_id"]},"read-candidate-close")
+    if (reply.get("task",{}).get("state")!="closed" or call(tool,close,"candidate-close")!=reply
+            or detail.get("task")!=reply["task"] or detail["last_report"]["outcome"]!="blocked"
+            or [item["material_id"] for item in detail["materials"]]!=[close["material_id"]]):
+        raise RuntimeError("Hermes failed to adopt the selected material as a manager action")
+    return {"registered_tools":registered,"task_id":first["task_id"],"router_count":len(tasks["items"]),
+            "candidate_review":{"registered":description,"task_id":close["task_id"],"assignment_id":assignment,
+                                "material_id":close["material_id"],"state":reply["task"]["state"],
+                                "last_worker_report":detail["last_report"]["outcome"],"stable_receipt":True},
             "same_call_same_task":True,"foreign_session_status":403,"caller":"fixture, no model turn"}
 
 
@@ -89,7 +104,7 @@ def run(python, source, host_input=False):
     with tempfile.TemporaryDirectory(prefix="mowulink-hermes-") as folder:
         temp = Path(folder).resolve()
         trigger = Trigger(temp/"trigger.db","mail")
-        with Loop.isolated(trigger_ids=[trigger.instance_id]) as loop:
+        with Loop.isolated(time.time if host_input else Clock(),trigger_ids=[trigger.instance_id]) as loop:
             return isolated(python,source,host_input,root,temp,trigger,loop)
 
 
@@ -103,6 +118,23 @@ def tracked_runtime(source,checkout):
         files.extractall(checkout,filter="data")
     archive.unlink()
     return revision
+
+
+def seed_candidate(loop):
+    order = loop.hermes.create(guid(),"Candidate review","Check the isolated Hermes tool","oguri")
+    tid,worker = order["task_id"],loop.worker
+    worker.connect()
+    worker.poll()
+    loop.hermes.clock.advance(10)
+    worker.poll()
+    worker.poll()
+    aid = worker.hold()["held_assignment_id"]
+    native = loop.native.entries()[0][1]["native_id"]
+    worker.report(native,tid,aid,"The Worker reported a blocker","blocked")
+    candidate = loop.wire.request("POST",f"tasks/{tid}/materials",
+        {"session_id":worker.session,"assignment_id":aid,"text":"Review this isolated candidate"},guid())
+    return {"task_id":tid,"expected_revision":loop.hermes.inspect(tid)["task"]["revision"],
+            "action":"close","material_id":candidate["material_id"],"fixture_assignment":aid}
 
 
 def isolated(python,source,host_input,root,temp,trigger,loop):
@@ -123,6 +155,8 @@ def isolated(python,source,host_input,root,temp,trigger,loop):
         for level in ("Notify","Info","Event"):
             mid = trigger.record(level,"Test "+level,[file] if level=="Event" else [])
             trigger.send(client,mid)
+    else:
+        (temp/"candidate-review.json").write_text(encode(seed_candidate(loop)))
     (profile / "config.yaml").write_text(encode({"plugins":{"enabled":["mowulink_manager"],
         "entries":{"mowulink_manager":entry}}}))
     checkout = temp / "runtime"

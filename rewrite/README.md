@@ -274,6 +274,8 @@ Router 拉取与原生输入分别运行。Router 断开时，已在插件入箱
 
 隔离复跑使用 `python3 -m rewrite.hermes_check --host-input --hermes-source <源码仓> --hermes-python <带依赖的测试Python>`。探针准备全新的 profile、测试授权和临时 Router，实际运行插件及会话输入台账，模型响应由本地测试函数生成。客户端只开放 TUI/CLI、缺少插件输入授权或会话不匹配时，宿主收件保持未确认。
 
+去掉 `--host-input` 可单测实际 Hermes 工具注册和分发。候选材料经独立入口收件，工单仍在池中。溪流核验后可在 `router_act_on_task` 以当前工单版本、`action="close"` 和原 `material_id` 结单。Router 只接受属于该工单的材料号，保存原操作，同号重试回同一处置。原 Worker 的报告仍为受阻，正式成果记录为空。[候选材料实测](evidence/hermes-manager-candidate-review.json)
+
 还可复跑实际网关进程。用固定版本的 Hermes 源码与带依赖的独立 Python，才能通过原生控制端点创建测试会话。网关加载同一插件，Event 进入真实会话并经默认的 `tool_describe` 和 `tool_call` 调用 `router_info` 验原附件，并用 `router_create_task` 创建一张未分派的隔离测试单。Notify 等原生回合完成后空闲满 10 秒，Info 留在 Router。停掉试验网关并清空插件和适配器的两份 Event 回执，重开后查回同一原生收件号。测试只连本机回环，OpenAI 兼容模型响应由脚本提供。 [实测记录](evidence/hermes-gateway-trigger.json)
 
 ```sh

@@ -33,9 +33,10 @@ TOOLS = {
         "assignee_id":TEXT}, ("title","instructions"))),
     "router_update_task": ("按当前版本修改工单标题或要求", fields({"task_id":GUID,"expected_revision":NUMBER,
         "changes":fields({"title":TEXT,"instructions":TEXT})}, ("task_id","expected_revision","changes"))),
-    "router_act_on_task": ("按当前版本处置工单", fields({"task_id":GUID,"expected_revision":NUMBER,
+    "router_act_on_task": ("按当前版本处置工单，采用候选材料结单时指定 material_id", fields({"task_id":GUID,"expected_revision":NUMBER,
         "action":{"type":"string","enum":["assign","resume","transfer","snooze","cancel","close","archive_failed"]},
-        "worker_id":TEXT,"reason":TEXT,"resolution":TEXT,"note":TEXT,"remind_after_hours":{"type":"number"}},
+        "worker_id":TEXT,"reason":TEXT,"resolution":TEXT,"note":TEXT,"material_id":GUID,
+        "remind_after_hours":{"type":"number"}},
         ("task_id","expected_revision","action"))),
     "router_info": ("查询消息；同时给出 message_id 和 attachment_id 时，校验并取得该附件在宿主侧的文件", fields({**PAGE,"message_id":GUID,"attachment_id":GUID,"source":TEXT,
         "level":{"type":"string","enum":["Event","Notify","Info"]},"since":TEXT})),
@@ -69,7 +70,7 @@ class ManagerTools:
             schema = TOOLS[name][1]
             require(isinstance(args,dict) and set(schema["required"]) <= args.keys() <= schema["properties"].keys(),
                     422, "invalid_tool_arguments")
-            for field in ("task_id", "question_id", "message_id", "attachment_id", "legacy_source_id"):
+            for field in ("task_id", "question_id", "message_id", "attachment_id", "legacy_source_id", "material_id"):
                 if field in args:
                     require(valid_guid(args[field]), 422, "invalid_" + field)
             result = self.dispatch(name, dict(args), origin)

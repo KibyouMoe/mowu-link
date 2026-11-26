@@ -358,6 +358,12 @@ class Orders:
         current = self.revision(db, tid, data)
         action = data.get("action")
         pooled = current["state"] in ("blocked", "snoozed")
+        material = data.get("material_id")
+        if material is not None:
+            require(action=="close" and pooled,422,"material_requires_pool_close")
+            require(messages.valid_guid(material),422,"invalid_material_id")
+            require(db.execute("SELECT 1 FROM materials WHERE material_id=? AND task_id=?",(material,tid)).fetchone(),
+                    422,"unknown_material")
         if action in ("transfer", "cancel"):
             require(current["state"] in ("ready", "resuming", "blocked", "snoozed", "working"),
                     409, "task_not_active")
@@ -406,11 +412,6 @@ class Orders:
                     if action == "archive_failed":
                         string(data, "reason")
                     state = "failed_archived" if action == "archive_failed" else "closed"
-                    mid = data.get("material_id")
-                    if mid is not None:
-                        require(action == "close" and db.execute(
-                            "SELECT 1 FROM materials WHERE material_id=? AND task_id=?", (mid, tid)).fetchone(),
-                            422, "unknown_material")
                     db.execute("UPDATE tasks SET state=?,revision=revision+1 WHERE task_id=?", (state, tid))
             details = self.details(db, tid)
             return {"task": details["task"], "delivery_state": details["delivery_state"]}

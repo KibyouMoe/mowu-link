@@ -1,0 +1,31 @@
+{
+  "caller": "fixture, no model turn",
+  "candidate_review": {
+    "assignment_id": "d9a3af50-1101-4660-8d58-1e8fa3f46896",
+    "last_worker_report": "blocked",
+    "material_id": "a4ddec80-032a-46a8-b97a-09cc1bc72fbb",
+    "registered": {
+      "format": "uuid",
+      "minLength": 1,
+      "type": "string"
+    },
+    "stable_receipt": true,
+    "state": "closed",
+    "task_id": "87a7abb7-6e36-4bde-94d8-74ca909b3cb8"
+  },
+  "foreign_session_status": 403,
+  "hermes_source_revision": "464bd0dd659f336bd0bf468bf02cad8aac211136",
+  "registered_tools": [
+    "router_workers",
+    "router_tasks",
+    "router_create_task",
+    "router_update_task",
+    "router_act_on_task",
+    "router_info",
+    "router_questions",
+    "router_answer"
+  ],
+  "router_count": 1,
+  "same_call_same_task": true,
+  "task_id": "b2d83dc3-1aa6-4382-a995-a3ed2ced70f1"
+}

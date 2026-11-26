@@ -4,6 +4,8 @@
 
 ## 检查点与证据
 
+Hermes 原生工具登记已提供 `router_act_on_task` 的 `material_id`。实际隔离 Hermes 用原生分发调用该工具，按指定材料号结单，重复调用回同一回执，原 Worker 报告仍为受阻。隔离 Router 拒绝其他会话、未知材料，以及对正式完工单使用材料号，原单状态未变。调用方、Worker 宿主和时钟为夹具。复跑 `python3 -B -m unittest -v rewrite.test_hermes_tools rewrite.test_pool`，实际 Hermes 用 `python3 -B -m rewrite.hermes_check` 指定独立测试 Python 与固定源码。[实测](evidence/hermes-manager-candidate-review.json)
+
 取消单已用两代隔离 HTTP Router 做回退。六张单由旧版逐条读回 `cancelled_on_rewrite`，旧端工单成果均为空，原工位无持单且没有重派。未派、已派未接、在途取消重试后确认、主动受阻、掉线入池及转派后未接这六种路径均有原操作。缺派发收件、缺取消 W04 或原单仍待清理时拒绝发布。转派后的原工位迟到清理仍只释放旧派发。旧端和再次迁入都按原建单请求去重。宿主与时钟为夹具。 [取消实测](evidence/cutover-reviewed-cancellation.json) · [回退步骤](router-rehearsal.md#回退已验收或已取消的工单)
 
 实际旧 Router 与重做 Router 实跑两种两次转派的回退。迁入单先离线入池并收候选材料，第二工位交带附件的受阻 W04，第三工位交正式成果并验收。试用新单经首次进度询问及三次重试后入池，Worker 用原搁置通知交候选。第二次转派发生在原工位仍持单时，目标工位已空闲并立即接到新派发。缺任一进度询问收件时也拒绝发布。旧派发清理可以晚于最终验收，但未确认或状态与原账本不符时拒绝发布回退目录。旧 HTTP 读回归档、原处理人和未变的待派队首。旧兼容请求重试只返回原归档编号。候选、受阻和正式成果的附件逐字节校验，只从私有包读取。复跑 `python3 -B -m unittest -v rewrite.test_cutover`，Worker 原生宿主、Agent 和时间为测试替身。 [转派实测](evidence/cutover-reviewed-transfer.json) · [回退步骤](router-rehearsal.md#回退已验收或已取消的工单)
