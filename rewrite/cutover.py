@@ -12,7 +12,7 @@ import tempfile
 from uuid import UUID, uuid5
 
 from .orders import Orders, task
-from . import attachments, legacy_history, legacy_peers
+from . import attachments, cleanup, legacy_history, legacy_peers
 from .messages import valid_guid
 from .storage import encode
 
@@ -398,6 +398,9 @@ def reconcile(snapshot, trial, *, original_tasks=None):
                           trial_sha256=before)
             if [row[0] for row in db.execute("PRAGMA integrity_check")]!=["ok"]:
                 raise ValueError("trial database integrity check failed")
+            if cleanup.has_scope_column(db):
+                with closing(sqlite3.connect(reference/"router.db")) as copy,copy:
+                    cleanup.enable_scopes(copy)
             db.execute("ATTACH DATABASE ? AS baseline",
                        ((reference/"router.db").resolve().as_uri()+"?mode=ro&immutable=1",))
             baseline_schema = schema(db,"baseline")

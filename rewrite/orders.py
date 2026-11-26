@@ -54,7 +54,6 @@ class Orders:
                            + legacy_history.SCHEMA + legacy_peers.SCHEMA + approvals.SCHEMA + admission.SCHEMA)
         with self.db.transaction() as db:
             approvals.upgrade(db)
-            cleanup.upgrade(db)
         self.clock = clock
         self.poll_seconds = poll_seconds
         self.lease_seconds = lease_seconds

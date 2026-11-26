@@ -83,6 +83,8 @@ class Cleanup(unittest.TestCase):
 
     def test_reissued_cancel_rejects_old_receipt_and_recovers_lost_new_w04(self):
         original = self.act("cancel",reason="Same reason across both requests")
+        with self.loop.orders.db.transaction() as db:
+            self.assertNotIn("cleanup_id",[row["name"] for row in db.execute("PRAGMA table_info(cleanups)")])
         for seconds in (1,10,1,1,1):
             self.clock.advance(seconds)
             self.old.poll()
@@ -117,6 +119,9 @@ class Cleanup(unittest.TestCase):
         second = self.act("cancel",reason="Same reason across both requests")
         self.assertEqual((original["delivery_state"],second["delivery_state"]),("pending","pending"))
         cleanup_id = self.manager.inspect(self.tid)["pending_cleanup"][0]["cleanup_id"]
+        with self.loop.orders.db.transaction() as db:
+            self.assertEqual(db.execute("SELECT cleanup_id FROM cleanups WHERE assignment_id=?",
+                                       (self.aid,)).fetchone()[0],cleanup_id)
         path = f"tasks/{self.tid}/report"
         for once,key in [(old_body,old_key),(old_body,guid()),(dict(old_body,cleanup_id=guid()),guid())]:
             with self.assertRaises(Fault) as rejected:

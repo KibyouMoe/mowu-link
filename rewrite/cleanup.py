@@ -6,26 +6,29 @@ from .storage import guid, require, timestamp
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS cleanups (
  assignment_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, worker_id TEXT NOT NULL,
- kind TEXT NOT NULL, reason TEXT NOT NULL, new_assignee_id TEXT, done INTEGER NOT NULL DEFAULT 0,
- cleanup_id TEXT
+ kind TEXT NOT NULL, reason TEXT NOT NULL, new_assignee_id TEXT, done INTEGER NOT NULL DEFAULT 0
 );
 """
 
 CANCEL_CONFIRMED_NOTICE = "原处理人已确认取消并清理工单。"
 
 
-def upgrade(db):
-    if "cleanup_id" not in {row["name"] for row in db.execute("PRAGMA table_info(cleanups)")}:
+def has_scope_column(db):
+    return any(row[1]=="cleanup_id" for row in db.execute("PRAGMA table_info(cleanups)"))
+
+
+def enable_scopes(db):
+    if not has_scope_column(db):
         db.execute("ALTER TABLE cleanups ADD COLUMN cleanup_id TEXT")
 
 
 def rows(db, field, value):
     assert field in ("task_id", "worker_id")
-    result = [dict(r) for r in db.execute(f"""SELECT assignment_id,task_id,worker_id,kind,reason,new_assignee_id,cleanup_id
-        FROM cleanups WHERE {field}=? AND done=0 ORDER BY rowid""", (value,))]
+    result = [dict(r) for r in db.execute(f"SELECT * FROM cleanups WHERE {field}=? AND done=0 ORDER BY rowid",(value,))]
     for row in result:
-        if row["cleanup_id"] is None:
-            del row["cleanup_id"]
+        del row["done"]
+        if row.get("cleanup_id") is None:
+            row.pop("cleanup_id",None)
     return result
 
 
@@ -33,16 +36,21 @@ def start(db, tid, aid, wid, kind, reason, target=None):
     data = {"task_id": tid, "assignment_id": aid, "reason": reason}
     if target is not None:
         data["new_assignee_id"] = target
-    previous = db.execute("SELECT kind FROM cleanups WHERE assignment_id=?", (aid,)).fetchone()
+    previous = db.execute("SELECT * FROM cleanups WHERE assignment_id=?", (aid,)).fetchone()
     # A first control remains compatible with unscoped W04. A new command of
     # the same kind must be distinguishable even if its reason is identical.
     cleanup_id = guid() if previous and previous["kind"] == kind else None
     if cleanup_id:
+        # Starting a new binary on an existing database must preserve the exact
+        # cold rollback snapshot until it actually performs a scoped write.
+        enable_scopes(db)
         data["cleanup_id"] = cleanup_id
-    db.execute("""INSERT INTO cleanups(assignment_id,task_id,worker_id,kind,reason,new_assignee_id,cleanup_id)
-               VALUES (?,?,?,?,?,?,?) ON CONFLICT(assignment_id) DO UPDATE SET kind=excluded.kind,
-               reason=excluded.reason,new_assignee_id=excluded.new_assignee_id,done=0,cleanup_id=excluded.cleanup_id""",
-               (aid, tid, wid, kind, reason, target, cleanup_id))
+    db.execute("""INSERT INTO cleanups(assignment_id,task_id,worker_id,kind,reason,new_assignee_id)
+               VALUES (?,?,?,?,?,?) ON CONFLICT(assignment_id) DO UPDATE SET kind=excluded.kind,
+               reason=excluded.reason,new_assignee_id=excluded.new_assignee_id,done=0""",
+               (aid, tid, wid, kind, reason, target))
+    if cleanup_id or previous and dict(previous).get("cleanup_id"):
+        db.execute("UPDATE cleanups SET cleanup_id=? WHERE assignment_id=?",(cleanup_id,aid))
     delivery.enqueue(db, "worker/" + wid, kind, data)
 
 
@@ -65,7 +73,7 @@ def confirm(db, current, worker, aid, outcome, now, cleanup_id=None):
     kind = "task.cancel" if outcome == "cancel_confirmed" else "task.transfer_out"
     row = db.execute("""SELECT * FROM cleanups WHERE task_id=? AND assignment_id=? AND worker_id=?
                      AND kind=? AND done=0""", (current["task_id"], aid, worker, kind)).fetchone()
-    require(row and row["cleanup_id"] == cleanup_id, 409, "stale_assignment")
+    require(row and dict(row).get("cleanup_id") == cleanup_id, 409, "stale_assignment")
     if kind == "task.cancel" and cleanup_id is None:
         require(not legacy_cancel_reissued(db,current["task_id"],aid),409,"stale_assignment")
     state = current["state"]
