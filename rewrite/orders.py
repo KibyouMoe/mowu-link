@@ -373,9 +373,12 @@ class Orders:
                 cleanup.start(db, tid, current["assignment_id"], current["assignee_id"], kind, reason, target)
             if pooled:
                 prior = db.execute("SELECT * FROM pool_entries WHERE task_id=? AND active=1", (tid,)).fetchone()
-                if target and prior["source"] != "worker":
-                    cleanup.start(db, tid, prior["assignment_id"], prior["worker_id"], "task.transfer_out",
-                                  reason, target)
+                if prior["source"] != "worker":
+                    kind = "task.transfer_out" if target else "task.cancel"
+                    cleanup.start(db, tid, prior["assignment_id"], prior["worker_id"], kind, reason, target)
+                    if not target:
+                        db.execute("UPDATE tasks SET revision=revision+1 WHERE task_id=?", (tid,))
+                        return {"task": self.details(db, tid)["task"], "delivery_state": "pending"}
                 pool.leave(db, tid)
             if target:
                 db.execute("UPDATE tasks SET assignee_id=?,state='ready',assignment_id=NULL,revision=revision+1 WHERE task_id=?",

@@ -1220,9 +1220,9 @@ class NativeLoop(unittest.TestCase):
     def test_native_dsh_work_survives_one_broken_link(self):
         image,cli = self.container_engine()
         cases = []
-        for broken in ("router","adapter"):
-            with self.subTest(link=broken):
-                session = "dsh-native-link-"+broken
+        for broken,action in (("router","transfer"),("adapter","cancel"),("router","cancel")):
+            with self.subTest(link=broken,action=action):
+                session = "dsh-native-link-"+broken+"-"+action
                 directory,loop,service,_ = self.goal_worker(session,extra_workers=("tama",))
                 runtime = Path(directory)
                 clock,worker = service.clock,loop.worker
@@ -1311,6 +1311,12 @@ class NativeLoop(unittest.TestCase):
                         service.step()
                         self.assertEqual(service.status()["router_retry_in_seconds"],1)
                         self.assertEqual(len(drops),first_drops)
+                        if action=="cancel":
+                            manager.act(guid(),tid,pooled["revision"],"cancel",reason="Cancel while the owner is offline")
+                            pending = manager.inspect(tid)
+                            self.assertEqual(pending["task"]["state"],"blocked")
+                            self.assertEqual([(r["assignment_id"],r["kind"]) for r in pending["pending_cleanup"]],
+                                             [(aid,"task.cancel")])
                     else:
                         self.assertTrue(outage["router_connected"])
                         self.assertFalse(outage["adapter_connected"])
@@ -1336,7 +1342,7 @@ class NativeLoop(unittest.TestCase):
                     self.assertTrue(recovered["router_connected"] and recovered["adapter_connected"])
                     self.assertEqual(recovered["host_session"],session)
                     self.assertTrue(recovered["host_busy"])
-                    if broken=="router":
+                    if action=="transfer":
                         self.assertIsNone(recovered["held_assignment_id"])
                         self.assertEqual(manager.inspect(tid)["task"],pooled)
                         self.assertEqual(container("exec",cid,"cat","/workspace/after-link-failure"),"continued")
@@ -1352,7 +1358,7 @@ class NativeLoop(unittest.TestCase):
                         new_holder = manager.inspect(tid)["task"]
                         self.assertNotEqual(new_holder["assignment_id"],aid)
                         self.assertEqual(next_worker.hold()["held_assignment_id"],new_holder["assignment_id"])
-                    else:
+                    elif broken=="adapter":
                         self.assertEqual(recovered["held_assignment_id"],aid)
                         self.assertTrue(self.read_native(native,"continue-work")["running"])
                         self.assertEqual(container("exec",cid,"cat","/workspace/after-link-failure"),"continued")
@@ -1371,13 +1377,14 @@ class NativeLoop(unittest.TestCase):
                     final = manager.inspect(tid)
                     self.assertIsNone(worker.hold()["held_assignment_id"])
                     self.assertEqual(final["pending_cleanup"],[])
-                    if broken=="router":
+                    if action=="transfer":
                         self.assertEqual(final["task"],new_holder)
                     else:
                         self.assertEqual(final["task"]["state"],"cancelled")
-                    cases.append({"broken_link":broken,"task_id":tid,"assignment_id":aid,"container_id":cid,
+                    cases.append({"broken_link":broken,"explicit_action":action,"task_id":tid,"assignment_id":aid,"container_id":cid,
                         "dropped_tcp_connections":len(drops),"outage":outage,"recovered":recovered,
                         "router_during_outage":pooled if broken=="router" else observed_worker,
+                        **({"pending_cancel_while_offline":pending} if broken=="router" and action=="cancel" else {}),
                         "test_platform_disconnect_id":notices[0][0],"w04_cleanup":report,"final_task":final["task"],
                         "host_receipt":receipt,"native_inputs":end["inputs"],"native_calls":end["calls"],
                         "native_turns":end["turns"],"container_removed_after_explicit_control":True})

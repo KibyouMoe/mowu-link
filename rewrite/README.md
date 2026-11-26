@@ -111,6 +111,8 @@ python3 -B -m unittest -v rewrite.test_question_cards \
 
 A10/A11 各切断一个独立回环监听器，使用本机安装的 DSH、现有 Docker 镜像、独立 Router 和临时库。复跑 `MOWULINK_DSH_CONTAINER_IMAGE=<已有镜像完整ID> python3 -B -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_native_dsh_work_survives_one_broken_link rewrite.test_link_health`。设 `MOWULINK_DSH_LINK_OUTAGE_EVIDENCE` 为临时文件路径可保存派发、原生输入和清理回执。两项各核原生输入仅一条。时间由测试时钟推进，模型与飞书由本地夹具驱动。[断联实测](evidence/dsh-worker-link-outage.json)
 
+原工单因失联入池后，若溪流明确要求取消，详情的 `pending_cleanup` 仍列原派发。原工位重连后收到停止指令，清理并交 W04 才标为 `cancelled`。若工单后来已续派，迟到的清理确认仅结束旧派发的清理。Worker 主动交回的受阻单已有 W04，可以取消池中待办。复跑上面的原生断联测试及 `python3 -B -m unittest -v rewrite.test_pool`。[掉线入池后取消](evidence/dsh-offline-pooled-cancel.json)
+
 模型可调用 `worker_workspace_export`，提交 `/workspace` 下的相对路径。单文件限 16 MiB，拒绝符号链接和非普通文件。Worker 校验内容摘要，经原有附件通道暂存，续传按原偏移和附件 ID。成果工具 `worker_report` 接收暂存工具返回的 `artifact_ids`，由 Router 在 W04 正式记录后给验收人读取权限。成功或阻塞报告要等 Worker 持久化 Router 的释放回执，宿主才回收工作区。回执未确认时保留容器和原会话绑定，重开 Worker 后沿原 W04 重取回执。单纯结束原生回合不会触发回收。启用容器工位时成对升级 Worker 和 DSH 适配器。新版宿主需要 Worker 的工作区状态回执，旧 Worker 缺少该接口时工作区工具会拒绝执行。
 
 复跑 `MOWULINK_DSH_CONTAINER_IMAGE=<已有镜像完整ID> python3 -B -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_dsh_workspace_exports_artifact_and_seals_after_durable_w04_replay`。真实 DSH AgentLoop、Linux Docker、Worker 和 Router 完成导出和回收。测试输入和模型工具调用由本地脚本驱动。[附件和回收证据](evidence/dsh-workspace-artifacts.json)

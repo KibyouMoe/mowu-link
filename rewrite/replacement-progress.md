@@ -4,6 +4,8 @@
 
 ## 检查点与证据
 
+修复失联入池后取消漏发。修复前隔离 Router 立即变成 `cancelled`，原工位 W01 回 `no_task` 且没有停止指令。修复后真实 DSH 原容器继续运行，Router 只记录旧派发待清理。到重连时，原生回合因取消中止、容器移除，Agent 调用 W04 后 Router 才从 `blocked` 变为 `cancelled`。保留原工单输入一条。另用隔离协议测试核原回执同号重放只发一次通知，迟到清理只能影响旧派发并保留新持单。原生 DSH、Linux 引擎和 Router 实跑，模型、时间和飞书为夹具。[取消记录](evidence/dsh-offline-pooled-cancel.json) · [复跑入口](README.md#dsh-固定会话与飞书卡片)
+
 Worker 篇 A10/A11 用安装版 DSH 原生回合、Linux 容器和隔离 HTTP 实测。仅断 Router 时，原回合继续调用工作区工具并写入文件。Router 离线满 10 分钟入池，Worker 从确认断联起满 20 分钟重连，原容器及进程保持工作。之后明确转派，旧回合才中止并交原派发清理回执，新持单保持原样。仅断适配器时发现 W03 已接单、Router 目录仍为空的问题。W03 现与工单接管原子记录持单，实测断联期间本体持续在线、忙闲未知且原持单可见。恢复后同一回合可继续写入，明确取消才停止和清理。两项各只有一次原生工单输入和一张测试飞书断联卡。模型、时钟、飞书及接替工位为夹具。[实测](evidence/dsh-worker-link-outage.json) · [复跑入口](README.md#dsh-固定会话与飞书卡片)
 
 实现提交 `4af754a6547f90aa0efd64fc88e64d264cbe9896`。macOS 全量 280 项通过，Linux arm64 184 项通过、96 项依环境跳过。247 文件的包摘要为 `3557f3a8b7a6de78e6e7f750cad493e9654cb42d9427cf0463d83f35013b4147`。安装目录专项 34 项通过，逐文件摘要回读一致。用前版 `2a96a3dc717394b95c72852d24a4e9a1497ad67b` 复跑 `rewrite.release_check --component dsh-workspace-rollback`，原工作区回收后前版接回原会话、成果附件和一次私聊成功。

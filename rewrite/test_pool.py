@@ -67,6 +67,58 @@ class Pool(unittest.TestCase):
         self.assertEqual(self.w.connect()["release_assignment_ids"], [self.aid])
         self.assertIsNone(self.w.hold()["held_assignment_id"])
 
+    def cancel_pooled(self):
+        before = self.details()["task"]
+        result = self.m.act(guid(),self.tid,before["revision"],"cancel",reason="Stop the original work")
+        self.assertEqual((result["delivery_state"],result["task"]["state"]),("pending","blocked"))
+        pending, = self.details()["pending_cleanup"]
+        self.assertEqual((pending["assignment_id"],pending["kind"]),(self.aid,"task.cancel"))
+
+    def test_pooled_cancel_waits_for_the_original_w04(self):
+        self.fall_offline()
+        self.cancel_pooled()
+        registration = self.w.connect()
+        self.assertEqual(registration["reconcile"],"confirm_cancel")
+        self.assertEqual(registration["pending_cleanup"],self.details()["pending_cleanup"])
+        self.w.poll()
+        controls = [body for body,_ in self.loop.native.entries() if body["kind"]=="task.cancel"]
+        self.assertEqual([body["assignment_id"] for body in controls],[self.aid])
+        self.assertEqual(self.details()["task"]["state"],"blocked")
+        key = guid()
+        body = {"session_id":self.w.session,"assignment_id":self.aid,"outcome":"cancel_confirmed"}
+        wrong = dict(body,assignment_id=guid())
+        route = f"tasks/{self.tid}/report"
+        with self.assertRaisesRegex(Fault,"stale_assignment"):
+            self.loop.wire.request("POST",route,wrong,guid())
+        receipt = self.loop.wire.request("POST",route,body,key)
+        self.assertEqual(receipt,{"recorded":True,"release_assignment_id":self.aid,"task_state":"cancelled"})
+        self.assertEqual(self.loop.wire.request("POST",route,body,key),receipt)
+        self.assertEqual(self.details()["task"]["state"],"cancelled")
+        self.assertEqual(self.details()["pending_cleanup"],[])
+        self.assertEqual(self.m.tasks(pool="blocked")["items"],[])
+        self.assertEqual(len(self.m.messages(source="oguri")["items"]),1)
+
+    def test_late_pooled_cancel_receipt_cannot_cancel_a_new_assignment(self):
+        self.fall_offline()
+        self.cancel_pooled()
+        self.w.connect()
+        self.m.act(guid(),self.tid,self.details()["task"]["revision"],"resume",resolution="Try again")
+        self.w.poll()
+        self.clock.advance(10)
+        self.w.poll()
+        self.w.poll()
+        current = self.details()["task"]
+        self.assertEqual(current["state"],"working")
+        self.assertNotEqual(current["assignment_id"],self.aid)
+        receipt = self.loop.wire.request("POST",f"tasks/{self.tid}/report",
+            {"session_id":self.w.session,"assignment_id":self.aid,"outcome":"cancel_confirmed"},guid())
+        self.assertEqual(receipt,{"recorded":True,"release_assignment_id":self.aid,"task_state":"working"})
+        self.assertEqual(self.details()["task"],current)
+        self.assertEqual(self.m.workers()["items"][0]["held_assignment_id"],current["assignment_id"])
+        self.assertEqual(self.details()["pending_cleanup"],[])
+        notice, = self.m.messages(source="oguri")["items"]
+        self.assertEqual(notice["text"],"原处理人已确认停止并清理旧派发。")
+
     def test_stale_completed_is_not_material(self):
         self.fall_offline()
         with self.assertRaises(Fault) as failure:

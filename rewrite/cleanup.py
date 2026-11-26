@@ -1,5 +1,5 @@
 """Router bookkeeping for a former holder's cleanup. Keys always include the assignment."""
-from . import delivery, messages
+from . import delivery, messages, pool
 from .storage import require
 
 
@@ -35,11 +35,16 @@ def confirm(db, current, worker, aid, outcome, now):
     require(row, 409, "stale_assignment")
     state = current["state"]
     if kind == "task.cancel":
-        require(state == "working" and current["assignment_id"] == aid, 409, "stale_assignment")
-        state = "cancelled"
-        db.execute("UPDATE tasks SET state=?,assignment_id=NULL,revision=revision+1 WHERE task_id=?",
-                   (state, current["task_id"]))
-        messages.notify(db, now, current["task_id"], worker, "原处理人已确认取消并清理工单。")
+        still_pooled = db.execute("SELECT 1 FROM pool_entries WHERE task_id=? AND assignment_id=? AND active=1",
+                                  (current["task_id"], aid)).fetchone()
+        still_held = state == "working" and current["assignment_id"] == aid
+        if still_held or still_pooled:
+            state = "cancelled"
+            pool.leave(db, current["task_id"])
+            db.execute("UPDATE tasks SET state=?,assignment_id=NULL,revision=revision+1 WHERE task_id=?",
+                       (state, current["task_id"]))
+        notice = "原处理人已确认取消并清理工单。" if still_held or still_pooled else "原处理人已确认停止并清理旧派发。"
+        messages.notify(db, now, current["task_id"], worker, notice)
     db.execute("UPDATE cleanups SET done=1 WHERE assignment_id=?", (aid,))
     db.execute("DELETE FROM inquiries WHERE assignment_id=?", (aid,))
     db.execute("""UPDATE workers SET held_task_id=NULL,held_assignment_id=NULL,idle_since=NULL
