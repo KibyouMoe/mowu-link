@@ -30,10 +30,13 @@ class RemoteAdapter:
     def session_info(self):
         info = self.request("GET","host/session")
         return {"session":string(info,"session"),"next_turn":info.get("next_turn") is True,
-                "context_usage":info.get("context_usage") is True}
+                "context_usage":info.get("context_usage") is True,"model_view":info.get("model_view") is True}
 
     def context_usage(self):
         return self.request("GET","host/context")
+
+    def model_view(self, kind):
+        return self.request("GET","host/"+kind)
 
     def deliver(self, did, payload):
         return self.request("POST", "host/deliver", {"delivery_id":did, "payload":payload})["receipt"]
@@ -62,6 +65,8 @@ def serve_adapter(adapter, worker_id, identities, address, context):
                 result = {"busy":adapter.busy()}
             case "GET","/v1/host/context":
                 result = adapter.context_usage()
+            case "GET",("/v1/host/models"|"/v1/host/efforts"):
+                result = adapter.model_view(path.rsplit("/",1)[1])
             case "POST","/v1/host/deliver":
                 payload = body.get("payload")
                 require(isinstance(payload,dict) and payload.get("kind") in (

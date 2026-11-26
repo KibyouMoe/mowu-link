@@ -11,6 +11,7 @@ const req = createRequire(path.join(root,'probe.cjs'));
 const sdk = name => import(pathToFileURL(req.resolve('@deepseek-ai/'+name)));
 const {Context, Service} = await sdk('cordis');
 const {createScope} = await sdk('dsh-scope');
+const {AgentModel,modelSelectionProjectionDefinition:selectionProjection} = await sdk('dsh-agent');
 const {executeToolBatch, ToolExecutionPipeline} = await sdk('dsh-tools/pipeline');
 const ctx = new Context();
 const fibers = [];
@@ -31,8 +32,11 @@ let number = 0;
 let step = 1;
 let received = 0;
 let loseAdmission = false;
-let lastMessage, selectedModel;
-const agent = {session,status:'idle',model:{current:()=>selectedModel},followup(message) {
+let lastMessage;
+const model = new AgentModel(
+  ()=>session.snapshotEvents().reduce(selectionProjection.apply,selectionProjection.init()),
+  session,{provider:'fixture',model:'fixture'});
+const agent = {session,status:'idle',model,followup(message) {
   lastMessage = message;
   received++;
   if (agent.status === 'idle') {
@@ -56,7 +60,17 @@ class Controller extends Service {
 await install(Controller);
 class Routes extends Service {
   constructor(c) { super(c,'llm'); }
-  resolveModelInfo() { return {inputModalities:['text']}; }
+  listProviders() { return [{id:'fixture'},{id:'unavailable'}]; }
+  listModels(provider) {
+    if (provider==='unavailable') throw new Error('private provider details');
+    return ['fixture','text-only',...Array.from({length:10},(_,i)=>'route-'+(i+1))]
+      .map(id=>({id,name:id}));
+  }
+  resolveModelInfo(provider, id) {
+    if (provider!=='fixture') throw new Error('unknown_provider');
+    return {inputModalities:id==='text-only' ? ['text'] : ['text','image'],
+      reasoning:id==='fixture' ? {efforts:[{id:'low',name:'低'},{id:'high',name:'高'}],defaultEffort:'low'} : undefined};
+  }
 }
 await install(Routes);
 await install(adapter,{session:id,directory});
@@ -101,7 +115,20 @@ try {
         session.append('step/end',{turn:number,step});
         session.append('step/start',{turn:number,step:++step});
       } else if (cmd.action === 'select-text-only') {
-        selectedModel = {provider:'fixture',model:'text-only'};
+        model.select({provider:'fixture',model:'text-only'});
+      } else if (cmd.action === 'select-model') {
+        model.select({provider:'fixture',model:cmd.model,...(cmd.effort ? {reasoningEffort:cmd.effort} : {})});
+      } else if (cmd.action === 'request-header') {
+        session.append('request/header',{header:{config:{provider:'fixture',model:cmd.model,reasoningEffort:cmd.effort}},
+          reason:'initial'});
+      } else if (cmd.action === 'model-records') {
+        await ctx.get('sessions').flush(session);
+        const handle = await ctx.get('sessionPersistence').open(id,'read');
+        const {events} = await handle.read(0);
+        await handle.close();
+        const records = events.filter(event=>['model/selection','request/header'].includes(event.type));
+        console.log(JSON.stringify({selected:model.current(),records:records.map(event=>event.type)}));
+        continue;
       } else if (cmd.action === 'inspect-media') {
         const content = [];
         const attachments = ctx.get('attachments');

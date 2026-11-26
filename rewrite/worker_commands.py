@@ -17,6 +17,7 @@ HELP = ("/status 查看最近一次连接、宿主忙闲和本地持单记录。
 PLANNED = {"/context","/compact","/model","/effort","/goal",
            "/new","/clear","/fork"}
 COMMAND = re.compile(r"^/[A-Za-z][A-Za-z0-9_-]*(?:\s|$)")
+MODEL_VIEWS = {"/model":"models","/effort":"efforts"}
 
 
 def is_command(text):
@@ -29,6 +30,8 @@ def reply(service, name, args, hold):
         lines = [HELP]
         if service.adapter_connected and service.host_context:
             lines.append("/context 查看最近一次模型回包的用量。")
+        if service.adapter_connected and service.host_model_view:
+            lines.append("/model 查看模型，/effort 查看当前模型支持的思考强度。")
         lines.append("/queue 内容：排入下一回合。" if service.adapter_connected and service.host_queue else "/queue 当前未确认可用。")
         return "\n".join(lines)
     if name == "/status":
@@ -75,6 +78,58 @@ def context_answer(service):
             f"本次总用量 {count('total_tokens')} tokens\n模型窗口 {count('window_tokens')} tokens")
 
 
+def model_answer(service,name,args):
+    page = 1
+    if args:
+        if len(args)==2 and args[0]=="page" and re.fullmatch(r"[1-9][0-9]?",args[1]):
+            page = int(args[1])
+        else:
+            return f"{name} 当前支持查看。切换敬请期待。可用 {name} page 页码翻页。"
+    kind = MODEL_VIEWS[name]
+    data = service.worker.adapter.model_view(kind)
+    require(isinstance(data,dict) and data.get("session")==service.host_session,409,"wrong_native_model_view")
+
+    def label(value):
+        require(isinstance(value,str) and 0<len(value)<=200 and value.isprintable(),502,"invalid_native_model_view")
+        return value
+
+    def describe(value, effort_fallback):
+        if value is None:
+            return "未记录"
+        require(isinstance(value,dict),502,"invalid_native_model_view")
+        effort = value.get("effort")
+        return label(value.get("provider"))+"/"+label(value.get("model"))+" · "+(
+            label(effort) if effort is not None else effort_fallback)
+
+    items,lost = data.get("items"),data.get("unavailable")
+    require(isinstance(items,list) and len(items)<=200 and type(lost) is int and 0<=lost<=10000
+            and type(data.get("more")) is bool,502,"invalid_native_model_view")
+    default = data.get("default_effort")
+    lines = ["会话当前选择 "+describe(data.get("current"),"随模型默认"),
+             "最近记录的请求配置 "+describe(data.get("observed"),"未记录思考强度")]
+    if kind=="efforts" and default is not None:
+        lines.append("模型默认思考强度 "+label(default))
+    if not items:
+        lines.append("目录查询暂不可用。" if lost else "宿主未列出可选项。")
+    else:
+        pages = (len(items)+9)//10
+        if page>pages:
+            return f"当前列表共 {pages} 页。"
+        lines.append(f"可选项 · 第 {page}/{pages} 页")
+        start = (page-1)*10
+        for index,item in enumerate(items[start:start+10],start+1):
+            require(isinstance(item,dict),502,"invalid_native_model_view")
+            choice = label(item.get("id"))
+            if kind=="models":
+                choice = label(item.get("provider"))+"/"+choice
+            lines.append(f"{index}. {choice} · {label(item.get('name'))}")
+    if lost and items:
+        lines.append("部分目录暂时无法读取。")
+    if data["more"]:
+        lines.append("最多显示前 200 项。")
+    return "\n".join(lines)
+
+
 def previous(db,mid,text):
     old = db.execute("SELECT * FROM platform_commands WHERE message_id=?",(mid,)).fetchone()
     if old:
@@ -90,13 +145,18 @@ def handle(service, body):
     require(is_command(text),422,"invalid_platform_command")
     name,*args = text.strip().split()
     answer = None
-    if name=="/context" and service.adapter_connected and service.host_context:
+    if service.adapter_connected and (
+        name=="/context" and service.host_context or name in MODEL_VIEWS and service.host_model_view
+    ):
         with service.worker.db.transaction() as db:
             old = previous(db,mid,text)
         if old:
             return old
         # Keep native I/O outside the transaction; a retry returns the first committed answer.
-        answer = "用法：/context" if args else context_answer(service)
+        if name=="/context":
+            answer = "用法：/context" if args else context_answer(service)
+        else:
+            answer = model_answer(service,name,args)
     with service.worker.db.transaction() as db:
         old = previous(db,mid,text)
         if old:

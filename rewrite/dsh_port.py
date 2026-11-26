@@ -63,6 +63,9 @@ class DshHost:
     def context_usage(self, session):
         return self.request("context-usage",session)
 
+    def model_view(self, session, kind):
+        return self.request("model-view",session,{"kind":kind})
+
     def delivery(self, operation, session, did, payload, digest):
         result = self.request(operation,session,{"delivery_id":did,"payload_json":encode(payload),"digest":digest})
         require("receipt" in result,502,"invalid_host_observation")

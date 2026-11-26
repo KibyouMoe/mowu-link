@@ -5,6 +5,7 @@ import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { admitMedia } from './media.mjs';
 import { baseline, displayImage, nextDisplay } from './display.mjs';
+import { modelView } from './model-view.mjs';
 
 const tools = JSON.parse(readFileSync(new URL('../../agent-toolset.json', import.meta.url)));
 const sha = value => createHash('sha256').update(value).digest('hex');
@@ -120,6 +121,10 @@ export async function bindHost(ctx, session, directory) {
       if (request.operation === 'display-image') return displayImage(ctx,agent,request,imageCache);
       if (request.operation === 'activity') return {busy:agent.status !== 'idle'};
       if (request.operation === 'context-usage') return contextUsage(session,await ownEvents(ctx,agent));
+      if (request.operation === 'model-view') {
+        check(['models','efforts'].includes(request.kind), 'invalid_model_view');
+        return modelView(ctx,agent,request.kind,await ownEvents(ctx,agent));
+      }
       check(['deliver','lookup'].includes(request.operation), 'unsupported_operation');
       const expected = await input(request,ctx,agent,directory);
       const seen = receipt(request,expected,await persisted(ctx,agent));

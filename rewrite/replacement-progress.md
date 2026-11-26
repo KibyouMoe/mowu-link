@@ -4,6 +4,10 @@
 
 ## 检查点与证据
 
+DSH 飞书 `/model` 和 `/effort` 已核对绑定会话当前选择、最近持久化的模型请求配置及目录。真实 SDK 中会话已选 high、最近请求仍为 medium 时，卡片显示两份状态。目录最多展示 200 项，每页十项，单个提供方失败时保留其余条目。回放原事件保持原卡，观察过程没有新增回合或模型选择记录。复跑 `python3 -m unittest -v rewrite.test_dsh_sdk.DshSdk.test_model_and_effort_distinguish_live_selection_from_recorded_request`，macOS 全套 118 项通过。目录、模型请求和飞书由测试驱动提供，切换和默认配置同步待接。
+
+历史私聊提交 `c99fa4353eaa7102c5e7c24604d36673590343a0` 已在 Linux arm64 再验。发行包 97 个文件复核通过，回归 106 项通过，11 项 macOS DSH 测试跳过。macOS Worker 跨 TLS 交接后的宿主夹具输入仍为一条，W04 只生成一条通知。
+
 旧 Router 私聊迁移保留原消息号、回复关联、工单号、确认或放弃时间、分段正文和附件。测试由实际旧 RouterStore 写入数据，两个新端 HTTP 入口查回，原图逐字节一致。第三方和平台入口无法读取，收件人直接用历史附件引用提交 W04 时被拒，持单仍在。原号重送未唤醒宿主，未确认消息或正文中间缺段会阻止生成试运行库。复跑 `python3 -m unittest -v rewrite.test_cutover`，macOS 全套 117 项通过。飞书私聊记录与订阅另验。
 
 DSH 的飞书 `/context` 已接入绑定会话的版本 4 原生日志。隔离测试的第一条模型回包为输入 46、总计 51、窗口 32768；下一条改用另一路由且缺用量，三个数均显示「未记录」，同号重送仍读回第一张卡。错误 Worker 身份被适配器拒绝。真实 DSH SDK、SQLite、Unix 套接字和两段 HTTP 已运行，模型事件与飞书为测试输入；真实账户消费另验。复跑 `python3 -m unittest -v rewrite.test_dsh_sdk.DshSdk.test_context_command_reads_only_committed_usage_for_the_same_route`。macOS 全套 115 项通过。

@@ -126,7 +126,7 @@ class DshSdk(unittest.TestCase):
         self.assertEqual(self.drive("count")["received"],1)
         self.assertFalse(self.loop.worker.hold()["held_task_id"])
 
-    def test_context_command_reads_only_committed_usage_for_the_same_route(self):
+    def remote_adapter(self, protected_read):
         credential, other = guid(),guid()
         listener = self.enterContext(serve_adapter(self.loop.adapter,"oguri",{credential:"worker/oguri",other:"worker/other"},
                                                    ("127.0.0.1",0),None))
@@ -136,16 +136,22 @@ class DshSdk(unittest.TestCase):
         self.addCleanup(listener.shutdown)
         url = "http://127.0.0.1:"+str(listener.server_port)
         with self.assertRaises(Fault) as denied:
-            Client(url,other).request("GET","host/context")
+            Client(url,other).request("GET","host/"+protected_read)
         self.assertEqual(denied.exception.status,403)
         self.w.adapter = RemoteAdapter(Client(url,credential))
         self.service.step()
+
+    def platform_command(self,mid,command):
+        self.inbound.record("app","user","trainer",{"chat_type":"p2p","chat_id":"chat","message_id":mid,
+            "message_type":"text","content":encode({"text":command})})
+        self.inbound.deliver(mid)
+        events = self.inbound.worker.request("GET","worker/display")["items"]
+        return next(x["event"]["text"] for x in events if x["event"]["event_id"]=="command-"+mid)
+
+    def test_context_command_reads_only_committed_usage_for_the_same_route(self):
+        self.remote_adapter("context")
         def command(mid):
-            self.inbound.record("app","user","trainer",{"chat_type":"p2p","chat_id":"chat","message_id":mid,
-                "message_type":"text","content":encode({"text":"/context"})})
-            self.inbound.deliver(mid)
-            events = self.inbound.worker.request("GET","worker/display")["items"]
-            return next(x["event"]["text"] for x in events if x["event"]["event_id"]=="command-"+mid)
+            return self.platform_command(mid,"/context")
         self.assertIn("还没有模型回包",command("om_empty"))
         self.drive("manual")
         self.drive("context",model="fixture",window=32768)
@@ -162,6 +168,42 @@ class DshSdk(unittest.TestCase):
         self.assertEqual(command("om_original"),first)
         self.assertEqual(self.drive("count")["received"],1)
         self.assertIsNone(self.w.hold()["held_task_id"])
+
+    def test_model_and_effort_distinguish_live_selection_from_recorded_request(self):
+        self.remote_adapter("models")
+        with self.assertRaisesRegex(Fault,"wrong_native_session"):
+            DshHost(self.directory).model_view("different-session","models")
+        self.drive("manual")
+        self.drive("request-header",model="route-1",effort="medium")
+        self.drive("end")
+        self.drive("select-model",model="fixture",effort="high")
+        original = self.drive("model-records")
+        self.assertEqual(original["records"],["request/header","model/selection"])
+        model = self.platform_command("om_models","/model")
+        effort = self.platform_command("om_efforts","/effort")
+        for card in (model,effort):
+            self.assertIn("会话当前选择 fixture/fixture · high",card)
+            self.assertIn("最近记录的请求配置 fixture/route-1 · medium",card)
+            self.assertNotIn("private provider details",card)
+        self.assertIn("部分目录暂时无法读取",model)
+        self.assertIn("第 1/2 页",model)
+        self.assertIn("12. fixture/route-10",self.platform_command("om_more","/model page 2"))
+        self.assertIn("模型默认思考强度 low",effort)
+        self.assertIn("2. high",effort)
+        sink = PlatformFixture()
+        views = Views(self.directory/"selector-views.db",self.inbound.worker,sink,"chat","玉藻")
+        views.poll()
+        cards = [row[2] for row in sink.messages.values()]
+        self.assertTrue(any(card["header"]["title"]["content"]=="玉藻-输出"
+                            and card["elements"][0]["text"]["content"]==effort for card in cards))
+        self.assertIn("切换敬请期待",self.platform_command("om_change","/model fixture/route-1"))
+        self.assertEqual(original,self.drive("model-records"))
+        self.drive("select-text-only")
+        self.assertEqual(effort,self.platform_command("om_efforts","/effort"))
+        current = self.platform_command("om_efforts_next","/effort")
+        self.assertIn("会话当前选择 fixture/text-only",current)
+        self.assertIn("宿主未列出可选项",current)
+        self.assertEqual(self.drive("count")["received"],1)
 
     def test_next_turn_queue_recovers_receipt_without_steering_or_replaying(self):
         self.drive("manual")
