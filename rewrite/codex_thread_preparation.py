@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 
 from .agent_tools import TOOLSET
+from .codex_workspace import TOOLS as WORKSPACE_TOOLS
 from .codex_activation import pinned_thread
 from .messages import valid_guid
 from .storage import Database, Fault, encode, require
@@ -67,7 +68,7 @@ class CodexThreadPreparation:
             params.update(threadId=source,excludeTurns=True,deferGoalContinuation=True)
         else:
             method = "thread/start"
-            params["dynamicTools"] = TOOLSET
+            params["dynamicTools"] = [*TOOLSET,*WORKSPACE_TOOLS] if self.host.workspace else TOOLSET
         try:
             native = self.host.request(method,params)
         except (Fault,OSError):

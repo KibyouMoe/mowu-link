@@ -1,4 +1,5 @@
 """Text delivery and formal tool callbacks for one dedicated Codex App Server thread."""
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
 import hashlib
 import json
@@ -18,6 +19,7 @@ from .codex_compactions import CodexCompactions
 from .codex_images import CodexImages
 from .codex_questions import CodexQuestions
 from .codex_rpc import NativeRpcRejected
+from .codex_workspace import TOOL_NAMES as WORKSPACE_TOOLS
 from .storage import Database, Fault, encode, require, string
 
 TERMINAL = {"completed","interrupted","failed"}
@@ -42,7 +44,7 @@ class AppServerHost:
     rejects_busy_before_answer_write = True
 
     def __init__(self, rpc, thread_id, adapter_db=None, public_image_root=None, *,
-                 relay_command_approvals=False,relay_file_approvals=False,read_only_assignments=False):
+                 relay_command_approvals=False,relay_file_approvals=False,read_only_assignments=False,workspace=None):
         self.rpc, self.thread_id = rpc,thread_id
         self.write_lock = RLock()
         self.usage = None
@@ -55,9 +57,10 @@ class AppServerHost:
         require(public_image_root is None or adapter_db is not None,422,"native_image_state_required")
         self.images = CodexImages(public_image_root,adapter_db) if public_image_root is not None else None
         self.assignment_cleanup = None
-        if read_only_assignments:
+        self.workspace = workspace
+        if read_only_assignments or workspace:
             require(adapter_db is not None and not self.approvals,422,"invalid_codex_read_only_assignments")
-            self.assignment_cleanup = CodexCleanup(adapter_db,self)
+            self.assignment_cleanup = CodexCleanup(adapter_db,self,workspace)
             self.scoped_cleanup_evidence = self.assignment_cleanup.prove
             self.cleanup_assignment_inputs = sorted(WORK_INPUTS|CONTROLS)
 
@@ -112,6 +115,12 @@ class AppServerHost:
         status = self.thread(session,include_turns=False)["status"]["type"]
         require(status in ("idle","active"),503,"native_agent_unavailable")
         return status=="active"
+
+    def handoff_activity(self,session):
+        result = {"busy":self.busy(session)}
+        if self.workspace:
+            result.update(workspace_pending=bool(self.workspace.pending(session)),workspace_ledger_identity=self.workspace.identity)
+        return result
 
     def capabilities(self,session):
         require(session==self.thread_id,409,"wrong_native_session")
@@ -541,13 +550,13 @@ class AppServerHost:
                 receipts.append(receipt)
         return receipts
 
-    def worker_call(self, packet, worker):
+    def worker_call(self, packet, worker, *, adapter=None):
         """Accept only App Server requests received on this process's dedicated transport."""
         call = packet.get("params")
         require(packet.get("method")=="item/tool/call" and type(packet.get("id")) in (str,int) and isinstance(call,dict)
                 and call.get("threadId")==self.thread_id and call.get("namespace") is None,403,"wrong_native_caller")
         tool = string(call,"tool")
-        require(tool in WORKER_TOOLS,403,"unsupported_native_tool")
+        require(tool in WORKER_TOOLS or self.workspace and tool in WORKSPACE_TOOLS,403,"unsupported_native_tool")
         args = call.get("arguments")
         require(isinstance(args,dict),422,"invalid_arguments")
         turn_id = string(call,"turnId")
@@ -555,6 +564,14 @@ class AppServerHost:
         turn = next((item for item in thread["turns"] if item.get("id")==turn_id),None)
         users = [item for item in turn["items"] if item.get("type")=="userMessage"] if turn else []
         require(len(users)==1,409,"native_turn_unconfirmed")
+        if tool in WORKSPACE_TOOLS:
+            require(adapter is not None,409,"native_turn_unconfirmed")
+            scope,origin = self.assignment_cleanup.workspace_scope(self.thread_id,turn,users[0])
+            # A tool can arrive before the original deliver call commits its native receipt.
+            proof = adapter.lookup_delivery(origin["delivery_id"],origin["payload"],session=self.thread_id)
+            require(proof and (proof["turn_id"],proof["native_id"])==(turn_id,users[0]["id"]),
+                    409,"native_turn_unconfirmed")
+            return self.workspace.operate(self.assignment_cleanup.db,worker,scope,turn_id,string(call,"callId"),tool,args)
         envelope = {
             "session":self.thread_id,"turn_id":turn_id,"tool":tool,
             "call_id":string(call,"callId"),"arguments":args,
@@ -572,14 +589,15 @@ class AppServerHost:
 
 
 @contextmanager
-def worker_callbacks(host,worker,notify_turn_end,notify_item=None,notify_terminal=None):
+def worker_callbacks(host,worker,notify_turn_end,notify_item=None,notify_terminal=None,*,adapter=None):
     stop = Event()
+    workspace_tasks = ThreadPoolExecutor(max_workers=2) if host.workspace else None
 
     def to_worker(packet):
         until = time.monotonic()+3
         while True:
             try:
-                receipt = host.worker_call(packet,worker)
+                receipt = host.worker_call(packet,worker,adapter=adapter)
                 return {"success":True,"contentItems":[{"type":"inputText","text":encode(receipt)}]}
             except Fault as error:
                 # A native tool request can precede persistence of its original user input.
@@ -589,6 +607,13 @@ def worker_callbacks(host,worker,notify_turn_end,notify_item=None,notify_termina
                 return {"success":False,"contentItems":[{"type":"inputText","text":error.code}]}
             except OSError:
                 return {"success":False,"contentItems":[{"type":"inputText","text":"worker_tool_unconfirmed"}]}
+
+    def reply(packet):
+        try:
+            host.rpc.send({"id":packet["id"],"result":to_worker(packet)})
+        except Fault:
+            return False
+        return True
 
     def read_events():
         while not stop.is_set():
@@ -660,16 +685,20 @@ def worker_callbacks(host,worker,notify_turn_end,notify_item=None,notify_termina
                 continue
             if packet.get("method")!="item/tool/call" or type(packet.get("id")) not in (str,int):
                 continue
-            try:
-                host.rpc.send({"id":packet["id"],"result":to_worker(packet)})
-            except Fault:
+            params = packet.get("params")
+            if workspace_tasks is not None and isinstance(params,dict) and params.get("tool") in WORKSPACE_TOOLS:
+                workspace_tasks.submit(reply,packet)
+            elif not reply(packet):
                 break
 
     thread = Thread(target=read_events,daemon=True)
-    with host.approvals.run(worker) if host.approvals else nullcontext():
+    with (host.approvals.run(worker) if host.approvals else nullcontext(),
+          host.workspace.reap(host.thread_id,worker) if host.workspace else nullcontext()):
         thread.start()
         try:
             yield
         finally:
             stop.set()
             thread.join(timeout=6)
+            if workspace_tasks is not None:
+                workspace_tasks.shutdown(wait=False,cancel_futures=True)

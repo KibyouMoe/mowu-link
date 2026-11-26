@@ -7,6 +7,7 @@ import hashlib
 import json
 
 from .messages import valid_guid
+from .codex_workspace import CALLS_SCHEMA, TOOL_NAMES as WORKSPACE_TOOLS
 from .storage import Database, Fault, encode, require
 
 
@@ -45,12 +46,13 @@ def envelope(item):
 
 
 class CodexCleanup:
-    def __init__(self,path,host):
+    def __init__(self,path,host,workspace=None):
         self.host = host
+        self.workspace = workspace
         self.db = Database(path,"""CREATE TABLE IF NOT EXISTS codex_cleanup_admissions(
             delivery_id TEXT PRIMARY KEY, session TEXT NOT NULL, task_id TEXT NOT NULL,
             assignment_id TEXT NOT NULL, kind TEXT NOT NULL, digest TEXT NOT NULL
-        );""")
+        );"""+(CALLS_SCHEMA if workspace else ""))
 
     def admit(self,session,did,payload,digest):
         status = self.host.request("mcpServerStatus/list",{"limit":50})
@@ -61,6 +63,19 @@ class CodexCleanup:
             db.execute("INSERT OR IGNORE INTO codex_cleanup_admissions VALUES (?,?,?,?,?,?)",identity)
             stored = db.execute("SELECT * FROM codex_cleanup_admissions WHERE delivery_id=?",(did,)).fetchone()
             require_proof(tuple(stored)==identity)
+
+    def workspace_scope(self,session,turn,user):
+        origin = envelope(user)
+        require(self.workspace and origin and turn.get("status")=="inProgress",403,"wrong_workspace_origin")
+        payload = origin["payload"]
+        did,aid,tid = origin.get("delivery_id"),payload.get("assignment_id"),payload.get("task_id")
+        kind = payload.get("kind")
+        require(kind in WORK_INPUTS-{"task.shelved"} and valid_guid(tid) and valid_guid(aid),403,"wrong_workspace_origin")
+        with self.db.transaction() as db:
+            saved = db.execute("SELECT * FROM codex_cleanup_admissions WHERE delivery_id=?",(did,)).fetchone()
+        self.verify_input(session,aid,user,origin,{"delivery_id":did,"task_id":tid,"kind":kind,
+                                                 "digest":origin.get("digest")},saved)
+        return {"session":session,"task_id":tid,"assignment_id":aid},origin
 
     def prove(self,session,assignment,kind,bindings):
         require_proof(kind in CONTROLS and valid_guid(assignment))
@@ -100,9 +115,19 @@ class CodexCleanup:
         require_proof(seen==by_id.keys() and stopped and control)
         if waiting:
             raise Fault(409,"native_cleanup_waiting",True)
-        proof_id = hashlib.sha256(encode([session,assignment,kind,control,stopped]).encode()).hexdigest()
+        workspace = None
+        if self.workspace:
+            try:
+                workspace = self.workspace.seal({"session":session,"task_id":originals[0]["task_id"],"assignment_id":assignment})
+            except (Fault,OSError):
+                raise Fault(409,"native_cleanup_unconfirmed",True) from None
+        evidence = [session,assignment,kind,control,stopped]
+        if workspace:
+            evidence.append(workspace)
+        proof_id = hashlib.sha256(encode(evidence).encode()).hexdigest()
         return {"session":session,"assignment_id":assignment,"kind":kind,"stopped":True,"cleaned":True,
-                "scope":"codex_read_only","receipt_id":proof_id,"control_turn_id":control,
+                "scope":"assignment_container" if workspace else "codex_read_only",
+                **({"workspace":workspace} if workspace else {}),"receipt_id":proof_id,"control_turn_id":control,
                 "stopped_turns":stopped,"withdrawn_inputs":[]}
 
     @staticmethod
@@ -114,7 +139,7 @@ class CodexCleanup:
                       and origin.get("digest")==digest and payload.get("task_id")==ref["task_id"]
                       and payload.get("kind")==ref["kind"] and hashlib.sha256(encode(payload).encode()).hexdigest()==digest)
 
-    @staticmethod
-    def passive(item):
+    def passive(self,item):
         return item.get("type") in PASSIVE_ITEMS or (item.get("type")=="dynamicToolCall"
-              and item.get("namespace") is None and item.get("tool") in SAFE_TOOLS)
+              and item.get("namespace") is None and (item.get("tool") in SAFE_TOOLS
+                or self.workspace is not None and item.get("tool") in WORKSPACE_TOOLS))

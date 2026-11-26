@@ -31,7 +31,7 @@
 | A06 中间有图 | DSH SDK 图片与独立 Codex App Server 的公开目录原图均实测前卡、单图、后卡，文本在各自卡里继续更新。Codex 原文件删去、丢 Worker 上传回执仍只形成一份原图。隔离快照恢复后，飞书图片资源上传可退避重试，会话只显示一张原图。 | 真 Feishu 消息号、Codex Desktop 的原生输出与生成图。 |
 | A07 问训练员 | DSH 计时题与独立 Codex App Server 已核同组多题、原卡更新和逐题跳过。DSH 计时题续答支持多选。Codex 关题回执丢失时保持待核，含密题的整组留在宿主。DSH 显式启用前台题转接后，两端先答、超时续答和取消都已核同一张测试卡。模型、答题客户端和飞书用夹具。 | 真人点卡，同时核对实际飞书与 Desktop 原题窗。 |
 | A08 问溪流 | Router 送原题，训练员视图为只读；答复回到原派发，DSH 走原生工具。 | 真人核对只读控件与原卡更新。 |
-| A09 工单双端 | 工位先存收到、更新、取消提示。丢失宿主回执时仍能看见。独立 Codex App Server 已核原派发精确中止和其他回合保留。专用只读工位的原生控制回合终止后才确认取消或转派，有工作区工具记录时保留待核。[只读清理实测](evidence/codex-readonly-cleanup.json) | 真飞书和目标 Desktop 会话的派单、更新与取消，及 Codex 可写工作区清理。 |
+| A09 工单双端 | 工位先存收到、更新、取消提示。丢失宿主回执时仍能看见。独立 Codex App Server 已核原派发精确中止和其他回合保留。只读工位等控制回合终止才确认取消或转派。独立可写工位实测容器内文件导出、原 W04 确认后自动回收，以及取消和转派清除原容器内脱离进程组的子进程。模型为本地脚本。[只读清理](evidence/codex-readonly-cleanup.json) · [可写工位](evidence/codex-assignment-workspace.json) | 真飞书、可加载测试工具的目标 Desktop 会话及线上模型的两端验收。 |
 | A10 断 Router | DSH 和独立 Codex App Server 均在 TCP 断开后完成原生写入。受控时钟核对离线入池及重连。DSH 明确转派后只清旧派发。Codex 的在途成果返回可重试的 503，原 W04 重放后如实记录 `stale_assignment`。各有一次原生输入和一张测试飞书断联卡。[DSH](evidence/dsh-worker-link-outage.json) · [Codex](evidence/codex-worker-link-outage.json) | 独立在线模型、实际跨机断链及飞书云端消息。 |
 | A11 断适配器 | 分别断 Worker 到 DSH 和 Codex 适配器的 TCP 链路。Router 保持本体在线、宿主忙闲未知及 W03 原持单，收到一次报警。DSH 恢复后按显式取消清理。Codex 恢复后用同一原生回合交 W04，只有一次成果和一次通知，两项的原输入各一条。[DSH](evidence/dsh-worker-link-outage.json) · [Codex](evidence/codex-worker-link-outage.json) | 实际跨机断链、在线模型、飞书客户端卡片及云端回执。 |
 

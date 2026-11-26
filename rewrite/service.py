@@ -108,18 +108,22 @@ def serve(args,stack):
         from .codex_display import CodexDisplay
         from .codex_rpc import require_test_account, start_app_server
         from .codex_thread_preparation import CodexThreadPreparation
+        from .codex_workspace import open_workspace
         from .native_files import NativeFiles
         client = connection(args.worker_connection)
-        if args.read_only_assignments:
+        restricted = args.read_only_assignments or args.assignment_workspace is not None
+        require(not (args.read_only_assignments and args.assignment_workspace),422,"invalid_codex_workspace_config")
+        if restricted:
             require(not (args.relay_command_approvals or args.relay_file_approvals),422,"invalid_codex_read_only_assignments")
         rpc = stack.enter_context(start_app_server(args.codex_binary,args.codex_profile,args.cwd,
-                                                  CLEANUP_SETTINGS if args.read_only_assignments else ()))
+                                                  CLEANUP_SETTINGS if restricted else ()))
         require_test_account(rpc)
+        workspace = stack.enter_context(open_workspace(private_config(args.assignment_workspace),args.session)) if args.assignment_workspace else None
         if args.managed_sessions_dir:
             from .codex_session_family import CodexSessionFamily
 
             require(args.prepare_sessions and not args.resume_on_handoff,422,"invalid_managed_session_configuration")
-            family = stack.enter_context(CodexSessionFamily(rpc,client,args).run())
+            family = stack.enter_context(CodexSessionFamily(rpc,client,args,workspace=workspace).run())
             root = family.port(args.session)
             listener = serve_adapter(root.adapter,args.worker_id,identities,address,ctx,
                                      activation=root.activation,preparation=root.preparation,family=family)
@@ -127,7 +131,7 @@ def serve(args,stack):
             native = AppServerHost(rpc,args.session,args.db,args.public_image_root,
                                    relay_command_approvals=args.relay_command_approvals,
                                    relay_file_approvals=args.relay_file_approvals,
-                                   read_only_assignments=args.read_only_assignments)
+                                   read_only_assignments=args.read_only_assignments,workspace=workspace)
             pinned_thread(native,args.cwd.resolve())
             if not args.resume_on_handoff:
                 resumed = rpc.request("thread/resume",{"threadId":args.session,"cwd":str(args.cwd)})["thread"]
@@ -138,7 +142,8 @@ def serve(args,stack):
             display = CodexDisplay(adapter,client)
             activation = CodexActivation(native,args.cwd,args.db,display.initialize) if args.resume_on_handoff else None
             preparation = CodexThreadPreparation(native,args.cwd,args.db) if args.prepare_sessions else None
-            callbacks = worker_callbacks(native,client,display.wake.set,display.observe,display.observe_terminal)
+            callbacks = worker_callbacks(native,client,display.wake.set,display.observe,display.observe_terminal,
+                                         adapter=adapter)
             public_output = display.run(deferred=activation is not None)
             listener = serve_adapter(adapter,args.worker_id,identities,address,ctx,activation=activation,preparation=preparation)
     else:
@@ -231,6 +236,8 @@ def main():
                                    help="allow authenticated preparation of independent read-only Codex sessions")
             component.add_argument("--read-only-assignments",action="store_true",
                                    help="verify cleanup for restricted Codex assignments without workspace tools")
+            component.add_argument("--assignment-workspace",type=Path,
+                                   help="owner-private configuration for disposable Linux workspaces in restricted Codex assignments")
         if name == "worker":
             component.add_argument("--router-connection",required=True,type=Path)
             component.add_argument("--adapter-connection",required=True,type=Path)

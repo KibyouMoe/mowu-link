@@ -57,7 +57,7 @@ App Server 原生中止会核对指定线程、活跃回合和唯一原生输入
 
 已另用真正的 Router 取消验证适配器控制入口。原派发仍在执行时，Worker 收到取消会中止精确原生回合并交取消消息。会话忙于其他回合时，宿主拒绝将取消写入该回合，空闲后才能接收。同一时期的新正式输入也在写入前被拒。资源清理待核时 W04 取消确认仍被拒，工位保留原持单。两个场景各连续 12 次通过。[Router 取消记录](evidence/codex-app-server-router-cancel.json)。
 
-专用只读工位可在 `codex-adapter` 加 `--read-only-assignments`。该模式使用只读沙箱，关闭审批、命令执行与原生目标续跑，并要求没有额外 MCP 服务。适配器在写入前记录原派发的读写边界。收到 Agent 的 `cancel_confirmed` 或 `transfer_confirmed` 时，控制回合仍在运行会返回 `native_cleanup_waiting`。Worker 保存原请求，等 App Server 提供完整的终止回合记录再交 W04。旧的无登记回合、受控回合历史不全，以及工单或控制回合有工作区工具记录时，清理保持待核。可写工位仍需独立工作区及清理凭据。
+专用只读工位可在 `codex-adapter` 加 `--read-only-assignments`。该模式使用只读沙箱，关闭审批、命令执行与原生目标续跑，并要求没有额外 MCP 服务。适配器在写入前记录原派发的读写边界。收到 Agent 的 `cancel_confirmed` 或 `transfer_confirmed` 时，控制回合仍在运行会返回 `native_cleanup_waiting`。Worker 保存原请求，等 App Server 提供完整的终止回合记录再交 W04。旧的无登记回合、受控回合历史不全，以及只读工位的工单或控制回合有工作区工具记录时，清理保持待核。
 
 ```sh
 python3 -B -m unittest -v \
@@ -71,6 +71,19 @@ python3 -B -m unittest -v \
 App Server 指定回合的文字投影复用原 Worker 的飞书卡片。独立原生输入保留原空格和换行，最终答复单独成卡。只读取已结束回合，桥接投递、内部工具调用及参数不出卡。稳定事件号令重投返回同一回执。连续 12 次通过。[卡片试验记录](evidence/codex-app-server-native-display.json)。输入为隔离驱动，模型和飞书为夹具；常驻监听、原生图文和飞书云端另验。
 
 独立 App Server 的图文与纯图使用原生 `localImage`。飞书夹具按原消息上传，适配器先核私有缓存的长度与摘要，再递交到固定会话。同条原文和图实际出现在模型请求，原生 App Server 添加的图片元数据单独核对。丢回执后按原客户端标识查回原生输入，两次试验输入分别只出现一条。重复 12 轮通过。[图片试验记录](evidence/codex-app-server-native-media.json)。目前只接已登记图像，模型、飞书为夹具。
+
+## 隔离可写工位
+
+单独准备获准的测试 profile、工作目录和属主独占的短路径运行目录。用 `codex-provision --tool worker_report --tool worker_workspace_shell --tool worker_workspace_export` 登记工具，将返回的固定会话交给 `codex-adapter --assignment-workspace /绝对路径/workspace.json`。JSON 文件权限为 600，填写 `runtime`、`node`、`docker`、`socket` 的绝对路径和已审核的本地 `image` 完整镜像 ID。可选的 `seed` 与 `execute_workspace_files` 沿用 [DSH 工位的容器配置](README.md#dsh-固定会话与飞书卡片)。此模式与 `--read-only-assignments`、审批转接互斥。App Server 本身保持只读，工作区位于原派发专用的无网络 Linux 容器。
+
+`worker_workspace_shell` 仅接受原生会话中正在运行的正式工单回合。适配器核对原派发接管、原生输入和收件凭据。回执未知的命令留待核，同一原生调用号不会执行第二次。`worker_workspace_export` 按工作区相对路径读取文件，核长度与摘要后暂存；将其返回的附件号填进 `worker_report` 才会交给验收方。Router 已写成果但 Worker 尚未核到回执时，保留原容器。取消和转派等控制回合结束，再核对原派发容器已移除，随后交清理回执。换绑或版本回退前按[原工作区账本](router-rehearsal.md#重做版五组件的离线恢复)对账。
+
+```sh
+MOWULINK_DSH_CONTAINER_IMAGE=<已安装的固定镜像ID> python3 -B -m unittest -v \
+  rewrite.test_codex_workspace.CodexWorkspaceTest.test_native_workspace_artifact_release_cancel_and_transfer
+```
+
+需要本机安装的 Codex App Server、Node、OpenSSL 和本地 Docker Unix socket。用 `MOWULINK_CODEX_WORKSPACE_EVIDENCE` 保存回执和标识。试验用真实 App Server、Docker 和隔离 Router，模型与接替工位由本地脚本驱动。[成果、取消和转派凭据](evidence/codex-assignment-workspace.json)
 
 ## 独立适配器启动
 

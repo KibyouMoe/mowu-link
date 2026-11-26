@@ -1,0 +1,232 @@
+"""Run an installed Codex App Server against disposable Linux assignment workspaces."""
+from contextlib import ExitStack, closing
+import hashlib
+from http.server import ThreadingHTTPServer
+import json
+import os
+from pathlib import Path
+from queue import Queue
+import shutil
+import sqlite3
+import subprocess
+import sys
+from tempfile import TemporaryDirectory
+from threading import Event
+import time
+import unittest
+
+from . import test_dsh_native_loop as dsh_checks
+from .adapter import HostAdapter
+from .devloop import FixtureHost, Loop
+from .dsh_workspace_audit import inspect, journal
+from .host_wire import RemoteAdapter
+from .release_check import config, serve
+from .storage import Fault, encode, guid
+from .test_codex_app_server import CODEX, LINK_OUTAGE_FIXTURE, Provider, running
+from .test_mainline import Clock
+from .wire import Client
+from .worker import Worker
+from .worker_service import WorkerService
+
+
+DATA = bytes(range(256))*2700
+
+
+class WorkspaceProvider(Provider):
+    def link_outage_item(self,payload,after):
+        outputs = {entry.get("call_id"):entry["output"] for entry in after if entry.get("type")=="function_call_output"}
+        if "workspace-shell" not in outputs:
+            command = "python3 -c 'from pathlib import Path; Path(\"output.bin\").write_bytes(bytes(range(256))*2700)'"
+            if self.server.action!="complete":
+                command = "set -e; "+command+"; setsid /bin/sleep 120 </dev/null >/dev/null 2>&1 & echo $! > /workspace/pid; sleep 20"
+            call,tool,args = "workspace-shell","worker_workspace_shell",{"command":command}
+        elif "workspace-export" not in outputs:
+            call,tool,args = "workspace-export","worker_workspace_export",{"path":"output.bin"}
+        elif "workspace-export-again" not in outputs:
+            call,tool,args = "workspace-export-again","worker_workspace_export",{"path":"output.bin"}
+        elif "workspace-report" not in outputs:
+            try:
+                staged = json.loads(outputs["workspace-export"])
+                self.server.exports = [staged,json.loads(outputs["workspace-export-again"])]
+            except ValueError:
+                self.server.workspace_error = outputs
+                self.server.report_returned.set()
+                return {"type":"message","id":"workspace-error","role":"assistant","status":"completed",
+                        "content":[{"type":"output_text","text":"Workspace export failed."}]}
+            call,tool,args = "workspace-report","worker_report",{"task_id":payload["task_id"],
+                "assignment_id":payload["assignment_id"],"summary":"Isolated Codex artifact",
+                "artifact_ids":staged["artifact_ids"]}
+        else:
+            self.server.report_returned.set()
+            return {"type":"message","id":"workspace-final","role":"assistant","status":"completed",
+                    "content":[{"type":"output_text","text":"Workspace tool calls finished."}]}
+        return {"type":"function_call","id":"fc_"+call,"name":tool,"call_id":call,"arguments":encode(args)}
+
+
+def eventually(check):
+    until = time.monotonic()+10
+    while time.monotonic()<until:
+        result = check()
+        if result:
+            return result
+        time.sleep(.04)
+    raise AssertionError("the isolated Codex workspace did not reach its expected state")
+
+
+@unittest.skipUnless(CODEX.is_file() and shutil.which("node") and shutil.which("openssl"),
+                     "bundled Codex, Node and openssl required")
+class CodexWorkspaceTest(unittest.TestCase):
+    def test_native_workspace_artifact_release_cancel_and_transfer(self):
+        image,cli = dsh_checks.NativeLoop.container_engine(self)
+        docker,_,socket = cli
+        cases = []
+        for action in ("complete","cancel","transfer"):
+            with self.subTest(action=action), ExitStack() as resources:
+                root = Path(resources.enter_context(TemporaryDirectory(dir="/tmp",prefix="ml-codex-ws-")))
+                profile,project,runtime = (root/name for name in ("profile","project","workspace"))
+                for private in (profile,project,runtime):
+                    private.mkdir(mode=0o700)
+                provider = ThreadingHTTPServer(("127.0.0.1",0),WorkspaceProvider)
+                provider.observed,provider.media,provider.action = [],[],action
+                provider.report_returned = Event()
+                control = provider.cleanup_fixture = {"late_tool":False,"response":Queue(),"release_control":Event()}
+                origin = resources.enter_context(running(provider))
+                resources.callback(control["release_control"].set)
+                (profile/"config.toml").write_text('model="gpt-5.4"\nmodel_provider="test_wire"\nweb_search="disabled"\n'
+                    '[model_providers.test_wire]\nname="Local test wire"\nbase_url='+encode(origin+'/v1')+'\nwire_api="responses"\n'
+                    'request_max_retries=0\nstream_max_retries=0\n',encoding="utf-8")
+                env = {"HOME":str(root),"TMPDIR":str(root),"PATH":os.defpath,"PYTHONNOUSERSITE":"1"}
+                tools = ("worker_report","worker_workspace_shell","worker_workspace_export")
+                result = subprocess.run([sys.executable,"-B","-m","rewrite.service","codex-provision",
+                    "--codex-binary",CODEX,"--codex-profile",profile,"--cwd",project,
+                    *(arg for tool in tools for arg in ("--tool",tool))],capture_output=True,text=True,timeout=20,env=env)
+                self.assertEqual(result.returncode,0,result.stderr)
+                sid = json.loads(result.stdout)["thread_id"]
+                resources.callback(dsh_checks.NativeLoop.clean_fixture_containers,self,runtime,sid,cli)
+                clock = Clock()
+                loop = resources.enter_context(Loop.isolated(clock,extra_workers=("tama",)))
+                worker,manager = loop.worker,loop.hermes
+                service = WorkerService(worker,clock)
+                callback_key,adapter_key = guid(),guid()
+                callback_url = resources.enter_context(running(service.listen({callback_key:"adapter/oguri"},("127.0.0.1",0),None)))
+                callback = config(root,"callback.json",{"url":callback_url,"token":callback_key})
+                roles = config(root,"adapter-roles.json",{adapter_key:"worker/oguri"})
+                configuration = config(root,"assignment-workspace.json",{"runtime":str(runtime),"node":shutil.which("node"),
+                    "image":image,"docker":docker,"socket":socket.removeprefix("unix://")})
+                cert,key = root/"test.crt",root/"test.key"
+                subprocess.run(["openssl","req","-x509","-newkey","rsa:2048","-nodes","-days","1","-subj","/CN=localhost",
+                    "-addext","subjectAltName=IP:127.0.0.1","-keyout",key,"-out",cert],check=True,capture_output=True,timeout=10)
+                adapter_db = root/"adapter.db"
+                args = ("--worker-id","oguri","--session",sid,"--worker-connection",callback,"--codex-binary",CODEX,
+                        "--codex-profile",profile,"--cwd",project,"--assignment-workspace",configuration)
+                normal_router = worker.router.request
+                lost,allow = [],Event()
+                def router_wire(method,path,*args,**kwargs):
+                    response = normal_router(method,path,*args,**kwargs)
+                    if method=="POST" and path.endswith("/report") and action=="complete" and not allow.is_set():
+                        lost.append(response)
+                        raise Fault(503,"isolated_workspace_report_unconfirmed",True)
+                    return response
+
+                with serve(Path(__file__).resolve().parent.parent,"codex-adapter",adapter_db,roles,cert,key,env,args) as target:
+                    remote = worker.adapter = RemoteAdapter(Client(target,adapter_key,cert),sid)
+                    worker.router.request = router_wire
+                    other_host = FixtureHost(root/"other-native.db","fixture-next-owner")
+                    other = Worker(root/"other-worker.db","tama",loop.extra_clients["tama"],
+                                   HostAdapter(root/"other-adapter.db",other_host,other_host.session),clock=clock)
+                    other.connect()
+                    other.poll()
+                    service.step()
+                    clock.advance(10)
+                    other.poll()
+                    service.step()
+                    task = manager.create(guid(),"Native Codex workspace",LINK_OUTAGE_FIXTURE,"oguri")["task_id"]
+                    service.step()
+                    assignment = worker.hold()["held_assignment_id"]
+                    self.assertIsNotNone(assignment)
+
+                    def active_workspace():
+                        for path in (runtime/"assignment-containers").glob("*.json"):
+                            value = json.loads(path.read_text())
+                            if value["assignment_id"]==assignment and value["phase"]=="active":
+                                return path,value
+                    lease,record = eventually(active_workspace)
+                    cid = record["container_id"]
+                    identity = journal(runtime)[1]
+                    self.assertEqual(inspect(runtime,{identity}),(None,"dsh_workspace_host_still_running"))
+                    stopped_pid = None
+                    if action=="complete":
+                        self.assertTrue(provider.report_returned.wait(10))
+                        self.assertIsNone(getattr(provider,"workspace_error",None))
+                        self.assertEqual(len(lost),1)
+                        self.assertEqual(manager.inspect(task)["task"]["state"],"completed_reported")
+                        self.assertEqual(worker.hold()["held_assignment_id"],assignment)
+                        self.assertTrue(remote.handoff_activity(session=sid)["workspace_pending"])
+                        exported, again = provider.exports
+                        self.assertEqual(exported,again)
+                        artifact, = exported["artifact_ids"]
+                        self.assertEqual(loop.manager_wire.request("GET","attachments/"+artifact)["bytes"],DATA)
+                        allow.set()
+                        service.step()
+                        notice, = manager.messages(source="oguri")["items"]
+                        proof = {"w04":lost[0],"artifact_id":artifact,"bytes":len(DATA),"sha256":hashlib.sha256(DATA).hexdigest(),
+                                 "notify_id":notice["message_id"],"workspace_alive_before_w04_receipt":True}
+                    else:
+                        def detached_pid():
+                            result = subprocess.run([*cli,"exec",cid,"/bin/sh","-c",
+                                'p=$(cat /workspace/pid) && kill -0 "$p" && printf "%s" "$p"'],
+                                text=True,capture_output=True,timeout=5)
+                            return result.stdout if result.returncode==0 else None
+                        stopped_pid = eventually(detached_pid)
+                        self.assertIn("held_assignment_id",service.status())
+                        before = manager.inspect(task)["task"]
+                        manager.act(guid(),task,before["revision"],action,reason="Stop the isolated Codex task",
+                                    **({"worker_id":"tama"} if action=="transfer" else {}))
+                        if action=="transfer":
+                            other.poll()
+                            next_task = manager.inspect(task)["task"]
+                            self.assertNotEqual(assignment,next_task["assignment_id"])
+                            self.assertEqual(other.hold()["held_assignment_id"],next_task["assignment_id"])
+                        def wait_for_control():
+                            service.step()
+                            return None if control["response"].empty() else control["response"].get_nowait()
+                        self.assertEqual(eventually(wait_for_control),"native_cleanup_waiting")
+                        self.assertTrue(manager.inspect(task)["pending_cleanup"])
+                        control["release_control"].set()
+                        def wait_for_w04():
+                            service.step()
+                            return not manager.inspect(task)["pending_cleanup"]
+                        eventually(wait_for_w04)
+                        if action=="transfer":
+                            self.assertEqual(manager.inspect(task)["task"],next_task)
+                        else:
+                            self.assertEqual(manager.inspect(task)["task"]["state"],"cancelled")
+                        with worker.db.transaction() as db:
+                            row = db.execute("SELECT proof,receipt FROM cleanup_reports WHERE assignment_id=?",(assignment,)).fetchone()
+                        receipt = json.loads(row["receipt"])
+                        native_proof = json.loads(row["proof"])
+                        self.assertEqual(native_proof["scope"],"assignment_container")
+                        self.assertEqual(native_proof["workspace"]["container_id"],cid)
+                        self.assertEqual(receipt["release_assignment_id"],assignment)
+                        proof = {"w04":receipt,"native_cleanup":native_proof}
+                    self.assertIsNone(worker.hold()["held_assignment_id"])
+                    self.assertFalse((project/"output.bin").exists())
+                    eventually(lambda:json.loads(lease.read_text())["phase"]=="sealed")
+                    remaining = subprocess.check_output([*cli,"container","ls","-aq","--filter","id="+cid],text=True,timeout=5)
+                    self.assertEqual(remaining.strip(),"")
+                    with closing(sqlite3.connect(adapter_db)) as db:
+                        commands = db.execute("SELECT turn_id,call_id FROM codex_workspace_commands").fetchall()
+                        self.assertEqual(len(commands),1)
+                        inputs = db.execute("SELECT receipt FROM intents WHERE json_extract(payload,'$.kind')='task'").fetchall()
+                        dispatch, = [json.loads(row[0]) for row in inputs]
+                        self.assertEqual(commands[0],(dispatch["turn_id"],"workspace-shell"))
+                audit,error = inspect(runtime,{identity})
+                self.assertIsNone(error)
+                self.assertEqual(audit["pending"],[])
+                cases.append({"action":action,"task_id":task,"assignment_id":assignment,"original_input":dispatch,
+                    "container_id":cid,"detached_child_pid_before_control":stopped_pid,"offline_workspace_audit":audit,
+                    "final_task":manager.inspect(task)["task"],**proof})
+        if output := os.environ.get("MOWULINK_CODEX_WORKSPACE_EVIDENCE"):
+            Path(output).write_text(json.dumps({"recorded_utc":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+                "boundary":"Bundled Codex App Server, independent TLS adapter and Linux Docker. Local scripted model and replacement host.",
+                "cases":cases},ensure_ascii=False,indent=2)+"\n",encoding="utf-8")

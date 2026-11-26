@@ -77,7 +77,7 @@ class AppServerRpc:
             except OSError as error:
                 raise Fault(503,"native_app_server_unconfirmed",True) from error
 
-    def request(self,method,params):
+    def request(self,method,params,*,timeout=12):
         inbox = Queue()
         with self.lock:
             require(not self.closed,503,"native_app_server_closed")
@@ -86,7 +86,7 @@ class AppServerRpc:
             self.pending[rid] = inbox
         try:
             self.send({"method":method,"params":params,"id":rid})
-            item = inbox.get(timeout=12)
+            item = inbox.get(timeout=timeout)
         except Empty as error:
             raise Fault(503,"native_app_server_unconfirmed",True) from error
         finally:

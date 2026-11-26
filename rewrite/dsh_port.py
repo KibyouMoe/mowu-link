@@ -12,7 +12,7 @@ from sqlite3 import OperationalError
 from threading import Event, Thread
 from urllib.error import URLError
 
-from . import peer_files
+from . import workspace_artifacts
 from .agent_tools import TOOLSET
 from .dsh_approvals import DshApprovals
 from .dsh_workspace_audit import journal as workspace_journal
@@ -194,23 +194,8 @@ def stage_workspace_artifact(bound, callback, body, source, size):
     origin = bound.origin(native,session=session)
     require(origin["kind"] in ("task","task_update","task_probe","question_answer"),403,"wrong_artifact_origin")
     scope = {"session":session,"task_id":origin["task_id"],"assignment_id":origin["assignment_id"]}
-    require(callback.request("POST","worker/workspace-state",scope)=={**scope,"state":"active"},
-            409,"assignment_workspace_inactive")
     data = source.read(size)
-    meta = peer_files.metadata(body)
-    require(len(data)==size and hashlib.sha256(data).hexdigest()==meta["sha256"],422,"digest_mismatch")
-    key = "dsh-artifact-"+hashlib.sha256(encode([scope,meta]).encode()).hexdigest()
-    result = callback.request("POST","worker/media/uploads",meta,key)
-    route = "worker/media/uploads/"+result["upload_id"]
-    while not result["complete"]:
-        offset = result["next_offset"]
-        require(type(offset) is int and 0<=offset<size,409,"invalid_upload_offset")
-        chunk = data[offset:offset+peer_files.CHUNK]
-        result = callback.request("PATCH",route,chunk,headers={"Upload-Offset":str(offset)})
-        require(result["next_offset"]==offset+len(chunk),409,"invalid_upload_ack")
-    require(result["next_offset"]==size and valid_guid(result.get("attachment_id")),409,"unconfirmed_workspace_upload")
-    return callback.request("POST","worker/native-tool",{"session":session,"turn_id":turn,"call_id":call,
-        "tool":"worker_stage_artifacts","arguments":{"attachment_ids":[result["attachment_id"]]}})
+    return workspace_artifacts.stage(callback,scope,turn,call,data,body,key_prefix="dsh-artifact-")
 
 
 @contextmanager

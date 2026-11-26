@@ -1,0 +1,161 @@
+{
+  "recorded_utc": "2026-11-26T18:57:41Z",
+  "boundary": "Bundled Codex App Server, independent TLS adapter and Linux Docker. Local scripted model and replacement host.",
+  "cases": [
+    {
+      "action": "complete",
+      "task_id": "29bce91a-eb22-43b6-b3f7-29dc9105aa39",
+      "assignment_id": "5cb03f0a-bd32-4a6f-af40-26b40bd7cf86",
+      "original_input": {
+        "delivery_id": "54491e72-2770-4a75-8ffc-2a9f30e9af0f",
+        "digest": "4a0bd29e0460a93009b4bbb3c28f17a08c0923e7ee3406e10ad333fabd6400b6",
+        "native_id": "01a21938-5c8c-7a43-92da-71bd81d8a208",
+        "session": "01a21938-5afc-7a92-a91a-919000fc5368",
+        "turn_id": "01a21938-5c86-7df0-a3db-34e10a35fc9b"
+      },
+      "container_id": "12db3e257b8e801007fae84873381a4fc89a66533350749eb2067e9854cfa476",
+      "detached_child_pid_before_control": null,
+      "offline_workspace_audit": {
+        "fingerprint": "40981cd280004fbcbdfd193c8f18269481a53a8a4292dbd1e4760f6967001e89",
+        "pending": []
+      },
+      "final_task": {
+        "assignee_id": "oguri",
+        "assignment_id": null,
+        "holder": {
+          "kind": "router"
+        },
+        "instructions": "Continue this isolated assignment through a link outage",
+        "revision": 4,
+        "state": "completed_reported",
+        "task_id": "29bce91a-eb22-43b6-b3f7-29dc9105aa39",
+        "title": "Native Codex workspace"
+      },
+      "w04": {
+        "recorded": true,
+        "release_assignment_id": "5cb03f0a-bd32-4a6f-af40-26b40bd7cf86",
+        "task_state": "completed_reported"
+      },
+      "artifact_id": "b1e5217f-8af9-4ce5-9a7b-5fd5bea91cdb",
+      "bytes": 691200,
+      "sha256": "80320ac86029606b61d5b57728512a639950cca654e5683f89d160df3ca0a953",
+      "notify_id": "2efefcf2-d809-40e6-b794-65d5a6dea315",
+      "workspace_alive_before_w04_receipt": true
+    },
+    {
+      "action": "cancel",
+      "task_id": "986ae0bf-f0a3-47be-89ea-13cad31b8438",
+      "assignment_id": "441f9769-eb2f-4f2c-a018-4656af86440c",
+      "original_input": {
+        "delivery_id": "e208b46d-ed3a-48cc-b3ad-82d0d926e341",
+        "digest": "be5b6b6f5ad8fb271b06ed931363d26ccd834e61c58d92bfe643b97b6969a651",
+        "native_id": "01a21938-65ba-75e1-af68-6d22ab761a5a",
+        "session": "01a21938-6436-7962-8d9a-6a60665e97df",
+        "turn_id": "01a21938-65b5-7772-9b2f-42c4d980e425"
+      },
+      "container_id": "2b60a659ad31bd575aa92cc1a62739b69ea000d5eb4e97a399a79178eeb69981",
+      "detached_child_pid_before_control": "21",
+      "offline_workspace_audit": {
+        "fingerprint": "9c64af17cc5ccb4728716d95d9a55d7dd99ab7b0ea750d54a268a9b0635aeba3",
+        "pending": []
+      },
+      "final_task": {
+        "assignee_id": "oguri",
+        "assignment_id": null,
+        "holder": {
+          "kind": "router"
+        },
+        "instructions": "Continue this isolated assignment through a link outage",
+        "revision": 5,
+        "state": "cancelled",
+        "task_id": "986ae0bf-f0a3-47be-89ea-13cad31b8438",
+        "title": "Native Codex workspace"
+      },
+      "w04": {
+        "recorded": true,
+        "release_assignment_id": "441f9769-eb2f-4f2c-a018-4656af86440c",
+        "task_state": "cancelled"
+      },
+      "native_cleanup": {
+        "assignment_id": "441f9769-eb2f-4f2c-a018-4656af86440c",
+        "cleaned": true,
+        "control_turn_id": "01a21938-739f-7303-b33d-0b20556e7034",
+        "kind": "task.cancel",
+        "receipt_id": "3ab8a8ece14ee80afe0ef820fd7f3e020a6a393ad42229108929221cf8ee7956",
+        "scope": "assignment_container",
+        "session": "01a21938-6436-7962-8d9a-6a60665e97df",
+        "stopped": true,
+        "stopped_turns": [
+          {
+            "status": "interrupted",
+            "turn_id": "01a21938-65b5-7772-9b2f-42c4d980e425"
+          }
+        ],
+        "withdrawn_inputs": [],
+        "workspace": {
+          "container_id": "2b60a659ad31bd575aa92cc1a62739b69ea000d5eb4e97a399a79178eeb69981",
+          "receipt_id": "892f387ba9f5ff80e24d8d63bac2ab4665c956eb4f6964424ef4011ceed4590d",
+          "state": "removed"
+        }
+      }
+    },
+    {
+      "action": "transfer",
+      "task_id": "c48ba583-6293-45fd-b8ab-3cc3c87a367e",
+      "assignment_id": "6e251e7a-7609-4d90-a264-843ef54f9fed",
+      "original_input": {
+        "delivery_id": "2e039726-e9e4-4043-a6dc-0e50a7ef571e",
+        "digest": "ec2f9a0e3eff5e0397a81c62465d1ff69185ea88ecf87d078ead030e095395ff",
+        "native_id": "01a21938-7816-7180-9298-d95ff550dbb6",
+        "session": "01a21938-7682-7811-9367-2e460bc80849",
+        "turn_id": "01a21938-780e-79a2-95d8-0d9a8fa53548"
+      },
+      "container_id": "bf7437f16e2f5125238dac88233f80102f93efd3bc07c8279e381c48696568a8",
+      "detached_child_pid_before_control": "20",
+      "offline_workspace_audit": {
+        "fingerprint": "eaca68a4d521242d9f99057967e832a1aa74e88c705bc718b9582451175baedc",
+        "pending": []
+      },
+      "final_task": {
+        "assignee_id": "tama",
+        "assignment_id": "f334e60f-07f9-4cd9-af8b-b7fbd9772aaf",
+        "holder": {
+          "kind": "worker",
+          "worker_id": "tama"
+        },
+        "instructions": "Continue this isolated assignment through a link outage",
+        "revision": 6,
+        "state": "working",
+        "task_id": "c48ba583-6293-45fd-b8ab-3cc3c87a367e",
+        "title": "Native Codex workspace"
+      },
+      "w04": {
+        "recorded": true,
+        "release_assignment_id": "6e251e7a-7609-4d90-a264-843ef54f9fed",
+        "task_state": "working"
+      },
+      "native_cleanup": {
+        "assignment_id": "6e251e7a-7609-4d90-a264-843ef54f9fed",
+        "cleaned": true,
+        "control_turn_id": "01a21938-79a7-7c51-822e-b5145d0dac7c",
+        "kind": "task.transfer_out",
+        "receipt_id": "3a3aa66a0bace15acaa5349ee68937332fa02863d2f23dec2537d2fb61407fdc",
+        "scope": "assignment_container",
+        "session": "01a21938-7682-7811-9367-2e460bc80849",
+        "stopped": true,
+        "stopped_turns": [
+          {
+            "status": "interrupted",
+            "turn_id": "01a21938-780e-79a2-95d8-0d9a8fa53548"
+          }
+        ],
+        "withdrawn_inputs": [],
+        "workspace": {
+          "container_id": "bf7437f16e2f5125238dac88233f80102f93efd3bc07c8279e381c48696568a8",
+          "receipt_id": "dd276a67ad6479de9d8ddc23df01e08a0b94b90269a5e98067317291b8e55d09",
+          "state": "removed"
+        }
+      }
+    }
+  ]
+}

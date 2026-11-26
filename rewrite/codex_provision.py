@@ -5,10 +5,11 @@ import time
 
 from .agent_tools import TOOLSET
 from .codex_rpc import NativeRpcRejected, require_test_account, start_app_server
+from .codex_workspace import TOOLS as WORKSPACE_TOOLS
 from .storage import Fault, guid, require, string
 
 
-TOOL_NAMES = tuple(item["name"] for item in TOOLSET)
+TOOL_NAMES = tuple(item["name"] for item in [*TOOLSET,*WORKSPACE_TOOLS])
 SEED = "Initialize this isolated MowuLink test thread. Reply ready. Do not use any tools."
 
 
@@ -16,7 +17,7 @@ def provision(binary,profile,cwd,tool_names):
     require(cwd.is_absolute() and cwd.is_dir(),422,"dedicated_codex_workspace_required")
     require(tool_names and set(tool_names)<=set(TOOL_NAMES),422,"invalid_codex_tools")
     workspace = str(cwd.resolve())
-    specs = [item for item in TOOLSET if item["name"] in tool_names]
+    specs = [item for item in [*TOOLSET,*WORKSPACE_TOOLS] if item["name"] in tool_names]
     client_id = "mowulink-provision-"+guid()
     content = [{"type":"text","text":SEED,"text_elements":[]}]
     ids = {}
