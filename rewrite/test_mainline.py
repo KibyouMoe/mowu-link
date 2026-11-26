@@ -141,6 +141,30 @@ class Mainline(unittest.TestCase):
             self.assertTrue(self.w.process(duplicate))
         self.assertEqual(len(self.loop.native.entries()), 1)
 
+    def test_dispatch_notice_is_durable_at_w03_while_native_receipt_is_unknown(self):
+        tid = self.create("Visible order")
+        self.idle()
+        original = self.loop.native.deliver
+        def lose_receipt(*args):
+            original(*args)
+            return None
+        self.loop.native.deliver = lose_receipt
+        self.w.poll()
+        self.assertEqual(self.m.inspect(tid)["task"]["state"],"working")
+        self.assertEqual(self.w.hold()["held_task_id"],tid)
+        with self.w.db.transaction() as db:
+            queued, = db.execute("SELECT payload FROM display_events").fetchall()
+            self.assertEqual(db.execute("SELECT host_state FROM jobs").fetchone()[0],"unknown")
+        notice = json.loads(queued["payload"])
+        self.assertIn("溪流派单 · Visible order",notice["text"])
+        self.assertIn("已接单",notice["text"])
+        self.assertIn(tid,notice["text"])
+        self.w.poll()
+        self.assertEqual(len(self.loop.native.entries()),1)
+        with self.w.db.transaction() as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM display_events").fetchone()[0],1)
+            self.assertEqual(db.execute("SELECT host_state FROM jobs").fetchone()[0],"received")
+
     def test_worker_rechecks_busy_between_offer_and_accept(self):
         tid = self.create()
         self.idle()

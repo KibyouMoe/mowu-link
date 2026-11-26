@@ -130,6 +130,10 @@ class NativeLoop(unittest.TestCase):
         self.assertEqual([r["isError"] for r in observed["results"]],[False,False],observed["results"])
         self.assertEqual([json.loads(r["content"][0]["text"]) for r in observed["results"]],[expected,expected])
         self.assertEqual(loop.worker.hold(),{"held_task_id":None,"held_assignment_id":None})
+        with loop.worker.db.transaction() as db:
+            notice, = db.execute("SELECT payload FROM display_events WHERE event_id=?",
+                                 ("task-"+receipt["delivery_id"],)).fetchall()
+        self.assertIn(tid,json.loads(notice["payload"])["text"])
         notified = [f["delivery_id"] for f in loop.manager_wire.frames(0) if f["payload"].get("text")==report["summary"]]
         self.assertEqual(len(notified),1)
         self.evidence = {"native":observed,"input_receipt":receipt,"router":details,

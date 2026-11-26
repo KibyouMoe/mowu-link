@@ -67,11 +67,9 @@ class Worker:
     def send_task_input(self, delivery_id, payload):
         receipt = self.adapter.deliver(delivery_id,payload)
         kind = payload["kind"]
-        if receipt and kind in ("task","task_update","task.cancel","task.transfer_out","task.shelved"):
+        if receipt and kind in ("task_update","task.cancel","task.transfer_out","task.shelved"):
             tid = payload["task_id"]
-            if kind == "task":
-                text = "溪流派单 · "+payload["title"]+"\n"+payload["instructions"]
-            elif kind == "task_update":
+            if kind == "task_update":
                 labels = {"title":"标题","instructions":"要求"}
                 text = "工单已更新\n"+"\n".join(labels[k]+"："+v for k,v in payload["changes"].items())
             else:
@@ -245,8 +243,13 @@ class Worker:
             require(reply.get("accepted") is True and reply.get("assignment_id") == aid
                     and reply.get("holder") == {"kind": "worker", "worker_id": self.worker_id},
                     409, "accept_receipt_mismatch")
-            with self.db.transaction() as db:
-                db.execute("UPDATE jobs SET stage='accepted' WHERE assignment_id=?", (aid,))
+        with self.db.transaction() as db:
+            db.execute("UPDATE jobs SET stage='accepted' WHERE assignment_id=? AND stage='offered'",(aid,))
+            notice_id = "task-"+job["delivery_id"]
+            if not db.execute("SELECT 1 FROM display_events WHERE event_id=?",(notice_id,)).fetchone():
+                # W03 confirms this Worker has the order. The host receipt is recorded independently below.
+                text = f"溪流派单 · {p['title']}\n已接单，正在交给宿主。\n{p['instructions']}\n{tid}"
+                display.append(db,{"event_id":notice_id,"kind":"task","session":"","turn_id":"","text":text})
         receipt = self.send_task_input(job["delivery_id"], {"kind": "task", **p})
         with self.db.transaction() as db:
             db.execute("UPDATE jobs SET host_state=? WHERE assignment_id=?",

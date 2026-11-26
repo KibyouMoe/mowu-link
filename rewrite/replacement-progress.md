@@ -4,6 +4,8 @@
 
 ## 检查点与证据
 
+派单飞书卡现在与本体 W03 接管一起入库，卡片明确写「已接单，正在交给宿主」。此前宿主回执丢失会留下持单、漏掉派单卡。隔离回归主动抛弃原生回执，本体仍产生一张工单卡。查回原回执后只有一次宿主输入和一张派单卡。复跑 `python3 -m unittest -v rewrite.test_mainline rewrite.test_link_health rewrite.test_dsh_native_loop`，macOS 全套 129 项通过。原生控制指令仍各自按实际宿主回执显示。
+
 DSH 的真实原生工具执行器已通过隔离 Worker 向 Router 报完工。复跑时发现首调用可能早于适配器写宿主收件凭据。修正后，Worker 只查询已存在的投递意图和指定原生输入，并核对原回合再放行。隔离测试主动丢弃原生投递回执，两个原生 `worker_report` 调用仍取同一业务回执。发出 W04 时 Worker 持原单，收到回执后清持单，Router 只发一条通知并停在待验收。回读宿主只存在一条工单输入。复跑 `python3 -m unittest -v rewrite.test_dsh_native_loop`，同场景连续 30 次通过，macOS 全套 128 项通过。实测使用实际 DSH 运行循环和工具执行器、临时 Router/Worker 及本地测试模型。真实账户和 Codex 原生 W04 另验。[原生与业务回执](evidence/dsh-native-w04.json)。
 
 DSH 隔离环境已使用安装包中的真实 AgentLoop、原生工具执行器和 V4 会话存储。回合 1 在模型流中止，已排队的普通聊天和取消指令分别进入回合 2、3。控制投递重试仍返回回合 3 的原凭据。原生模型请求及后续两条请求均带已选 `high`。复跑 `python3 -m unittest -v rewrite.test_dsh_native_loop`，macOS 全套 127 项通过。本项采用进程内测试模型及直接适配器调用。工作环境清理仍需独立凭据。[原生回合记录](evidence/dsh-native-loop.json)。

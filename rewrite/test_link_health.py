@@ -90,7 +90,7 @@ class LinkHealth(unittest.TestCase):
         self.service.step()
         self.assertTrue(self.manager.workers()["items"][0]["adapter_connected"])
 
-    def test_task_visibility_waits_for_host_receipt_and_replays_once(self):
+    def test_task_cards_use_worker_acceptance_then_host_control_receipts(self):
         unknown = self.manager.create(guid(),"Offline","Do not display as delivered","other")
         self.assertFalse(self.events("task"))
         task = self.dispatched()
