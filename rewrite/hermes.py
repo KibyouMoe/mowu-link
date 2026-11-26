@@ -41,6 +41,9 @@ class HermesAdapter:
     def tasks(self, **filters):
         return self.router.request("GET", "tasks?" + urlencode(filters))
 
+    def history(self, source, **filters):
+        return self.router.request("GET",f"history/{source}/tasks?" + urlencode(filters))
+
     def questions(self, **filters):
         return self.router.request("GET", "questions?" + urlencode(filters))
 

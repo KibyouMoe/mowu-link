@@ -4,7 +4,9 @@
 
 ## 复跑
 
-仓库根目录运行 `python3 -m unittest -v rewrite.test_cutover`。用实际旧 RouterStore 创建一张有历史成果的归档单、一张从未派出的排队单和一份附件，关闭写者后启动演练。待派单按旧队列顺序进入新库，同一来源 UUID 与旧单号稳定映射到同一新工单号，初始持权归 Router。旧附件及归档事实保存在经过核验的旧格式副本中。新端对历史数据的界面另验。
+仓库根目录运行 `python3 -m unittest -v rewrite.test_cutover`。用实际旧 RouterStore 创建一张有历史成果的归档单、一张从未派出的排队单和一份附件，关闭写者后启动演练。待派单按旧队列顺序进入新库，同一来源 UUID 与旧单号稳定映射到同一新工单号，初始持权归 Router。完整旧记录及附件保存在校验过的离线副本中。
+
+溪流在新端调用 `router_tasks(legacy_source_id=来源UUID, legacy_task_id=旧单号)`，可取原成果、归档理由、归档时间及来源库摘要。只给来源 UUID 时可用 `limit` 与上一页的 `next_cursor` 分页。历史查询为只读，归档单没有新派发号；旧排队单可查对应的新工单号。隔离演练用同一旧号查到 `Prior result` 和 `summary_received`，Worker 身份查历史返回 403，查询前后新库摘要相同。
 
 以下命令的路径均指向演练副本。选择一个固定的来源 UUID，并与此次版本、源库摘要和队列映射一起保存。
 

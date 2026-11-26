@@ -26,7 +26,8 @@ def fields(properties, required=()):
 
 TOOLS = {
     "router_workers": ("查工位及其忙闲和持单状态", fields({**PAGE,"online":BOOL,"worker_id":TEXT})),
-    "router_tasks": ("给工单号查原单详情，或按条件列工单", fields({**PAGE,"task_id":GUID,
+    "router_tasks": ("给工单号查详情，或列工单；指定 legacy_source_id 可查迁移时的旧工单", fields({
+        **PAGE,"task_id":GUID,"legacy_source_id":GUID,"legacy_task_id":TEXT,
         "assignee_id":TEXT,"state":TEXT,"pool":{"type":"string","enum":["blocked"]},"unassigned":BOOL})),
     "router_create_task": ("建立正式工单，可指定处理人", fields({"title":TEXT,"instructions":TEXT,
         "assignee_id":TEXT}, ("title","instructions"))),
@@ -68,7 +69,7 @@ class ManagerTools:
             schema = TOOLS[name][1]
             require(isinstance(args,dict) and set(schema["required"]) <= args.keys() <= schema["properties"].keys(),
                     422, "invalid_tool_arguments")
-            for field in ("task_id", "question_id", "message_id", "attachment_id"):
+            for field in ("task_id", "question_id", "message_id", "attachment_id", "legacy_source_id"):
                 if field in args:
                     require(valid_guid(args[field]), 422, "invalid_" + field)
             result = self.dispatch(name, dict(args), origin)
@@ -82,6 +83,10 @@ class ManagerTools:
         readers = {"router_workers": self.adapter.workers, "router_tasks": self.adapter.tasks,
                    "router_questions": self.adapter.questions, "router_info": self.adapter.messages}
         if name in readers:
+            if name == "router_tasks" and ("legacy_source_id" in args or "legacy_task_id" in args):
+                require("legacy_source_id" in args and set(args)<={"legacy_source_id","legacy_task_id","cursor","limit"},
+                        422,"invalid_history_filters")
+                return self.adapter.history(args.pop("legacy_source_id"),**args)
             if name == "router_info" and "attachment_id" in args:
                 require(set(args)=={"message_id","attachment_id"},422,"attachment_needs_exact_message")
                 return self.adapter.read_file(args["message_id"], args["attachment_id"])

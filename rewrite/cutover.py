@@ -12,6 +12,7 @@ import tempfile
 from uuid import UUID, uuid5
 
 from .orders import Orders
+from . import legacy_history
 from .storage import encode
 
 
@@ -144,6 +145,7 @@ def prepare(snapshot, destination, source_id):
                 db.execute("INSERT INTO tasks(task_id,title,instructions,assignee_id) VALUES (?,?,?,?)",
                            (tid,row["name"],row["description"],row["worker"]))
                 mapping[row["task_id"]] = tid
+            legacy_history.populate(db,old,str(namespace),manifest["legacy_db_sha256"],mapping)
         baseline = {"snapshot_sha256":manifest["legacy_db_sha256"],"source_id":str(namespace),
                     "router_db_sha256":digest(stage/"router.db"),"queued_id_map":mapping}
         (stage/"baseline.json").write_text(encode(baseline))

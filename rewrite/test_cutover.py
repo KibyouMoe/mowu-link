@@ -7,10 +7,14 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from threading import Thread
 
 from .cutover import backup, digest, prepare, rollback, verified
 from .orders import Orders
-from .storage import guid
+from .storage import Fault, guid
+from .hermes import HermesAdapter
+from .hermes_tools import ManagerTools
+from .wire import Client, serve_loopback
 
 
 @unittest.skipUnless(os.name == "posix","this version of the old Router imports fcntl")
@@ -88,6 +92,49 @@ store._conn.close()
         with self.assertRaisesRegex(ValueError,"reconcile"):
             rollback(self.snapshot,self.trial,self.restore)
         self.assertFalse(self.restore.exists())
+
+    def test_original_id_and_source_read_back_via_manager_without_reviving_archived_order(self):
+        backup(self.legacy,self.attachments,self.snapshot)
+        baseline = prepare(self.snapshot,self.trial,self.source_id)
+        srv = serve_loopback(Orders(self.trial/"router.db"),{"manager":"hermes","worker":"worker/test"})
+        self.addCleanup(srv.server_close)
+        thread = Thread(target=srv.serve_forever,kwargs={"poll_interval":.02})
+        thread.start()
+        self.addCleanup(thread.join)
+        self.addCleanup(srv.shutdown)
+        url = "http://127.0.0.1:"+str(srv.server_port)
+        manager = HermesAdapter(self.root/"reader.db",Client(url,"manager"),None)
+        tools = ManagerTools(manager,"review")
+        def query(**filters):
+            return json.loads(tools.around_call("router_tasks",lambda a:tools.invoke("router_tasks",a),
+                              filters,session_id="review"))
+        source = {"legacy_source_id":self.source_id}
+        first = query(**source,limit=1)
+        second = query(**source,limit=1,cursor=int(first["next_cursor"]))
+        self.assertEqual([first["items"][0]["legacy_task_id"],second["items"][0]["legacy_task_id"]],
+                         [self.archived,self.queued])
+        self.assertIsNone(second["next_cursor"])
+        original = query(**source,legacy_task_id=self.archived)
+        archived = original["historical_task"]
+        self.assertEqual(original["legacy_db_sha256"],baseline["snapshot_sha256"])
+        self.assertEqual(archived["archive"]["reason"],"summary_received")
+        self.assertIsInstance(archived["archive"]["at"],float)
+        self.assertEqual(archived["deliverable"],{"summary":"Prior result"})
+        self.assertIsNone(archived["mapped_task_id"])
+        self.assertEqual(second["items"][0]["mapped_task_id"],baseline["queued_id_map"][self.queued])
+        self.assertEqual(query(legacy_source_id=guid(),legacy_task_id=self.archived)["status"],404)
+        self.assertEqual(query(legacy_task_id=self.archived)["status"],422)
+        self.assertEqual(query(**source,task_id=guid())["status"],422)
+        route = f"history/{self.source_id}/tasks"
+        with self.assertRaises(Fault) as denied:
+            Client(url,"worker").request("GET",route)
+        self.assertEqual(denied.exception.status,403)
+        with self.assertRaises(Fault) as denied:
+            manager.router.request("POST",route,{"action":"resume"},guid())
+        self.assertEqual(denied.exception.status,405)
+        self.assertEqual(len(manager.tasks()["items"]),1)
+        self.assertEqual(manager.router.frames(0),[])
+        self.assertEqual(digest(self.trial/"router.db"),baseline["router_db_sha256"])
 
     def test_corrupt_files_and_existing_destinations_are_rejected(self):
         backup(self.legacy,self.attachments,self.snapshot)
