@@ -8,6 +8,10 @@
 
 积压与续接场景连续 10 轮通过。使用隔离 TLS Router 和测试接收者确认，未调用真实 Hermes 或飞书。本版 macOS 全过 204 项，Linux arm64 通过 143 项，另 61 项本机宿主用例跳过。
 
+从 `367ef4a8acb89253e31ccafd8689fcc5d43d0f54` 构建并核验了 176 文件的独立发布包，归档 SHA-256 为 `b579021ace26f58005598b55842a6b2db03654870278a38cdbaba03e8aae0024`。在安装目录内复跑积压、Codex 批量题、DSH 续答和 DSH 阻塞题边界，4 项通过。
+
+从 `a61b77fe5f37bdf5d39a8fc9ad2e311044caef97` 演练 Router 冷升级和回退。旧包、新包、旧包依次在临时 HTTPS 回环启动，均查回工单 `9c8ace6e-31e9-4f40-aa77-530b459b8ceb`。回退后一张原单，试用库摘要一致。复跑 `python3 -B -m rewrite.release_check --repository . --previous a61b77fe5f37bdf5d39a8fc9ad2e311044caef97 --new 367ef4a8acb89253e31ccafd8689fcc5d43d0f54`。
+
 训练员题卡可一次提交同一原生请求里的多道公开题。Codex App Server 按原题 ID 回填单选、自填和跳过。任一题标为密题时整组留在宿主。DSH 已进入续答状态的计时题支持多选、自填与逐题跳过。选项顺序取原题，同样的选择换顺序重提仍只留一次答案。飞书测试卡收到原生关闭凭据后才更新同一张卡。两端各连过 8 轮，模型与飞书均用夹具，未启动日用会话。[Codex 原生记录](evidence/codex-app-server-native-question-batch.json) · [DSH 原生记录](evidence/dsh-native-question-batch.json)
 
 批量卡以输入框收选项序号。现有 DSH SDK 的续答入口只接受已超时的题，尚未接仍在前台等待的原生题。飞书实际显示、真人点击与同时打开的桌面原卡留待独立测试身份验证。
