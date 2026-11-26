@@ -124,3 +124,15 @@ python3 -m rewrite.release_check --repository . --component worker-pair \
 两版各按提交制作和校验发布包。在 macOS 临时目录先让旧 Worker 和旧适配器收到一条私聊，然后停止两端并保存 Worker、适配器、宿主夹具三份库。新适配器先用检验副本启动，旧 Worker 重送原消息。再用新版 Worker 核原回执已写入新表。最后将原备份复制到回退目录，用旧版两端重跑。四次回执完全相同，三个阶段的原生账本均只有一条输入，原始快照摘要未变。
 
 Router、Worker、适配器的独立进程和回环 TLS 实际运行，平台输入与宿主是隔离夹具。本例只用已确认私聊验证兼容顺序与零新增业务的回退。实际试用期收到新的生产消息、打开新的原生回合或提交工单成果时，需要先对账。
+
+### 保留实际 Codex 测试工位的升级与回退
+
+```sh
+python3 -m rewrite.codex_release_check --repository . --codex-binary "$CODEX_BINARY" \
+  --previous f7104c3250986467df0c871eb7461505338fcc8f \
+  --new 2a8f081841310259a48ea9f077297d1440857c56
+```
+
+命令从两个指定提交分别构建和校验发布包，使用同一个临时 Codex profile、独立会话、测试模型与回环 TLS。旧包先完成私聊和一次正式派发，Agent 经原生工具提交 W04，Router 持成果待验，Worker 释放派发。试运行副本模拟 Worker 丢失私聊回执。先用新适配器配旧 Worker，再用新版两端，最后回退到旧包及原状态副本。每次按原号重投并用独立 App Server 读回同一会话。
+
+连续三轮的初始、混合、新版和回退都保留初始化、私聊、派发三条输入。首次 W04 产生两个原生工具调用和一条 Router 通知，后续没有新增原生回合、模型请求或成果通知。新 Worker 可以补记同一原收件，旧快照摘要保留，两个包重新校验通过。[升级与回退记录](evidence/codex-native-release-cycle.json)。实际使用 App Server 与完整发布包，模型为本地脚本，试运行有新增业务时仍走前述对账。

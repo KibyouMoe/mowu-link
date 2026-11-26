@@ -4,6 +4,10 @@
 
 ## 检查点与证据
 
+完整发布包完成实际隔离 Codex 工位升级和回退。旧包内真实 App Server 用脚本模型自主调用 W04，只有一条待验通知。在复制的 Worker 库模拟丢私聊回执，依次切新适配器、升级 Worker、用原状态回退。三轮独立演练中始终保留同一原生线程和三个输入，无新增模型请求或通知，快照及包摘要核对一致。复跑见[版本演练](router-rehearsal.md#保留实际-codex-测试工位的升级与回退)及[原生收件与版本证据](evidence/codex-native-release-cycle.json)。
+
+Linux arm64 在提交 `38d4ee4a3693dd030631a7597f2eb74c583b8ae5` 上通过 137 项、56 项宿主依赖跳过，校验 161 个发布文件。首轮发现隔离子进程单测把临时脚本当可执行文件启动，Linux 临时卷拒绝；改由系统 Python 读取脚本后通过。隔离跨系统 TLS 复核只见原生夹具输入和待验通知各一条，错误身份与证书被拒。
+
 独立 Codex A06 已通过原生 `view_image` 验批准目录的原图。测试飞书在第一张过程卡完成后单发原图，再开后续过程卡并更新。Worker 已写原图但返回回执丢失，原文件删去以后同号查回，仍只上传一次。目录外及符号链接拒绝发布。实际原生历史曾暂报中断，已以同回合完成通知和历史一致为发最终答复的条件，回归另注入同样的暂态。连续 20 轮通过。[图片证据](evidence/codex-app-server-native-image-split.json)。复跑 `python3 -m unittest -v rewrite.test_codex_app_server.CodexAppServer.test_native_approved_image_splits_the_platform_card_and_replays_the_original_upload`。本地原图、模型及平台均为独立测试用。
 
 独立 Codex A07 已接单个公开原生题。测试平台选择、自填和跳过实际进入同一个 App Server 原题，关题回执按原请求号匹配，测试平台仅更新原卡一次。错人、错卡、密题、同原生题再次注册均拒绝。故意丢原生关题回执，模型只收到一次原答案，卡保持待核。连续 10 轮通过。[题卡证据](evidence/codex-app-server-native-trainer-question.json)。复跑 `python3 -m unittest -v rewrite.test_codex_app_server.CodexAppServer.test_native_trainer_question_closes_original_card_only_after_app_server_receipt`，模型与飞书用独立夹具。

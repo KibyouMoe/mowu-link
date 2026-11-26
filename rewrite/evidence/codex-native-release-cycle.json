@@ -1,0 +1,54 @@
+{
+  "previous_revision": "f7104c3250986467df0c871eb7461505338fcc8f",
+  "new_revision": "2a8f081841310259a48ea9f077297d1440857c56",
+  "package_sha256": [
+    "7cdcb897a3cc9e26975ab402a497736391d44877e4b73b791088fc98e9d2f0d5",
+    "6f32c9f3b961dec8322b38bf38b362549439206cde9484576ed4f52064039e27"
+  ],
+  "thread_id": "01a2171d-0985-7530-9147-42e185b72c1d",
+  "chat_receipt": {
+    "delivery_id": "chat-edce0824-baa1-4dea-95b9-bf7f80938272",
+    "digest": "3633d317aa395d9ec8fd79a76902601e8390206663cd0a3baad6dd5c50e64abe",
+    "native_id": "01a2171d-0b87-72c1-8945-fab550011ee6",
+    "session": "01a2171d-0985-7530-9147-42e185b72c1d",
+    "turn_id": "01a2171d-0b82-7201-a03c-93c0bfadf8b0"
+  },
+  "native_history": {
+    "turn_ids": [
+      "01a2171d-098b-7af0-b02e-b6459ea6785a",
+      "01a2171d-0b82-7201-a03c-93c0bfadf8b0",
+      "01a2171d-3342-73a1-83d8-9d2ce796144a"
+    ],
+    "native_inputs": [
+      "01a2171d-0995-7b73-ba72-f04fafed745f",
+      "01a2171d-0b87-72c1-8945-fab550011ee6",
+      "01a2171d-3345-7450-b60a-6c39fb2334ad"
+    ],
+    "reports": [
+      "native_fixture_0",
+      "native_fixture_1"
+    ]
+  },
+  "phases": [
+    {
+      "phase": "mixed",
+      "inputs": 3
+    },
+    {
+      "phase": "new",
+      "inputs": 3
+    },
+    {
+      "phase": "rollback",
+      "inputs": 3
+    }
+  ],
+  "task_id": "d401e7c4-5381-4659-9f25-6998ad10b96e",
+  "report_assignment_id": "ebfdc9f8-64f3-48fa-9621-bb84cb1a4c5a",
+  "router_state": "completed_reported",
+  "notification_id": "c0f82664-46ca-49d8-ab01-a95980d070c5",
+  "original_snapshot_unchanged": true,
+  "native_inputs_added_during_switch": 0,
+  "boundary": "Actual bundled Codex App Server with local scripted model. Packaged Router and Worker use isolated TLS.",
+  "consecutive_runs": 3
+}
