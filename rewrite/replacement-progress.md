@@ -8,6 +8,8 @@
 
 复跑 `python3 -B -m unittest -v rewrite.test_codex_app_server.CodexAppServer.test_native_tool_publishes_standalone_question_and_accepts_answer_once rewrite.test_dsh_native_loop.NativeLoop.test_dsh_standalone_question_defers_answer_while_native_session_is_busy`。同一原生调用或同轮的原请求号重试只留原卡。修改题文、在新回合重用显式请求号、错绑会话及非训练员点卡均有拒绝证据。故意提交原生题窗关闭凭据也不能关闭独立题。
 
+两项连过 10 轮。macOS 全量通过 237 项，Linux arm64 通过 158 项、跳过 79 项。另跑 `python3 -B -m rewrite.devloop`，回合结束后隔离工单仍在工作中，W04 后等验收，显式验收后结单。从 `ea4624e33fdac14b12e363160aa208a57bb6a016` 构建 208 文件安装包，SHA-256 为 `41bd4f325842abc26607fbf94edbfa8d5f5f6fe7f0d173bb4264eaa3065be64e`。安装目录复跑独立题、原生题与卡片 16 项通过，文件摘要一致。新旧 Worker/适配器在隔离 HTTPS 的分步升级及回退各保留同一个私聊收件 `fdf840d1-0136-4eb0-b946-0aae3bde522c`，此迁移测试使用宿主夹具。复跑 `python3 -B -m rewrite.release_check --repository . --component worker-pair --previous a5ffe7751f71c9777b3bad9be3651c646ab06681 --new ea4624e33fdac14b12e363160aa208a57bb6a016`。
+
 独立 DSH 工位可启用前台题转接。真实 AgentLoop 的同一个原生请求由原客户端与飞书共用。两端先答各测一次，迟到的不同答案不会覆盖已入场的答案。Worker 回执丢失后用原生工具结果查回，原生会话重新打开仍能找到同一凭据。前台超时后同一卡可续答。原回合被取消时，原卡标已关闭且无答案，拒绝后来点卡。四个场景均只创建一张测试卡、更新一次。模型、原客户端答题者和飞书均为本地测试替身。[前台题回执](evidence/dsh-foreground-question-relay.json)
 
 复跑 `python3 -B -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_foreground_question_uses_one_native_answer_and_one_original_card`。初版试跑中原生持久化拒读未经声明的扩展事件。最终版的转接标记写入宿主私有目录，原生会话日志保持 SDK 原格式。原生的原题、工具结果、续答消息及回合结束构成关闭凭据。
