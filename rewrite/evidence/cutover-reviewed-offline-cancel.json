@@ -1,0 +1,53 @@
+{
+  "offline_reissue": {
+    "boundary": "Actual isolated rewrite and legacy HTTP Routers and rewrite Workers; scripted hosts and clock.",
+    "cancel_retries": [
+      {
+        "delivery_id": "ddbf792a-032d-4b92-a111-863b5cd53456",
+        "presence_key": "presence-04fd29ed-8836-4c52-adaf-acd568cd2f7a"
+      },
+      {
+        "delivery_id": "59b36357-9204-45c5-9abe-34b3a9497918",
+        "presence_key": "presence-904284ff-4a23-4212-a481-4d325f96d695"
+      }
+    ],
+    "cleanup_delivery_id": "4481644f-6188-4591-9320-74417e73b93b",
+    "cleanup_reply": {
+      "recorded": true,
+      "release_assignment_id": "9d272d06-953c-4fa9-b68d-a30324806911",
+      "task_state": "cancelled"
+    },
+    "cleanup_report_key": "cancel_confirmed-9d272d06-953c-4fa9-b68d-a30324806911",
+    "first_cancel_deliveries": [
+      "1d1aac24-b189-40d6-8fac-8ee0f908a3c2",
+      "ddbf792a-032d-4b92-a111-863b5cd53456",
+      "59b36357-9204-45c5-9abe-34b3a9497918"
+    ],
+    "first_cancel_key": "724ddec0-40fd-40f6-a61a-018765cc93d4",
+    "late_original_delivery_receipt_refused": true,
+    "late_original_report": "stale_assignment",
+    "legacy": {
+      "deliverable": null,
+      "held": [
+        null,
+        null
+      ],
+      "queues": [
+        null,
+        null
+      ],
+      "reason": "cancelled_on_rewrite",
+      "status": 200
+    },
+    "new_action_key": "2a582b55-da60-451b-9be4-49965d19d8ed",
+    "new_assignment": null,
+    "original_assignment": "9d272d06-953c-4fa9-b68d-a30324806911",
+    "pool_entered": 1800000662.0,
+    "pool_source": "offline",
+    "shelved_delivery_id": null,
+    "shelved_presence_key": null,
+    "task_id": "8c2f637b-7664-5ba5-b852-1f078d099a35",
+    "trial_sha256": "3cfd20829622d0fcc35f91fd5bbfd44011d2d57d5eefc519635f98baabe94e7a",
+    "wrong_idle_observation_refused": true
+  }
+}

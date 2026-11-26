@@ -35,16 +35,26 @@ def verify_expired_cancel(step, sources, samples, acknowledged):
             raise ValueError("exhausted cancellation retries are out of order")
         position = sample["seq"]
         retry_proofs.append({"delivery_id":did,"presence_key":sample["key"]})
-    shelve = bind(step["shelved_delivery_id"],sources,samples,acknowledged)
-    if (not max(position,expired["working_end_seq"])<shelve["seq"]<expired["pool_action_seq"]
-            or shelve["reply"]!={"observed_at":timestamp(step["pool"]["entered"])}):
-        raise ValueError("exhausted cancellation was not shelved by its original observation")
+    prior = max(position,expired["working_end_seq"])
+    if shelved := step.get("shelved_delivery_id"):
+        shelve = bind(shelved,sources,samples,acknowledged)
+        if (not prior<shelve["seq"]<expired["pool_action_seq"]
+                or shelve["reply"]!={"observed_at":timestamp(step["pool"]["entered"])}):
+            raise ValueError("exhausted cancellation was not shelved by its original observation")
+        prior = shelve["seq"]
+        step["shelved_presence_key"] = shelve["key"]
+    else:
+        # An offline timeout has no shelving delivery. Require the first cycle's
+        # receipts before any pooled action can be used to explain the next cycle.
+        last_receipt = max(acknowledged[did] for did in expired["delivery_ids"])
+        prior = max(prior,last_receipt)
+        if prior>=expired["pool_action_seq"]:
+            raise ValueError("offline cancellation receipt is ambiguous after pooling")
     cleanup = step["cleanup"]
     successor = cleanup["delivery_ids"][0] if cleanup["kind"]=="task.cancel" else cleanup["delivery_id"]
-    if not shelve["seq"]<cleanup["action_seq"]<acknowledged.get(successor,0)<cleanup["report_seq"]:
+    if not prior<cleanup["action_seq"]<acknowledged.get(successor,0)<cleanup["report_seq"]:
         raise ValueError("cleanup after an exhausted cancellation lacks its own receipt")
     expired["retries"] = retry_proofs
-    step["shelved_presence_key"] = shelve["key"]
 
 
 def verify_rounds(entries, sources, samples, continued, windows, acknowledged):

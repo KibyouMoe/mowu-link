@@ -64,18 +64,23 @@ def inquiry_frames(db, tid):
 
 
 def retain_inquiries(step, frames, dispatch_seq, next_dispatch_seq):
-    unanswered = step.get("pool",{}).get("source")=="unanswered"
+    source = step.get("pool",{}).get("source")
+    unanswered = source=="unanswered"
     kinds = [frame["kind"] for frame in frames]
     count = kinds.count("task.probe")
     expired = step.get("expired_cancel")
-    expired_count = 4 if expired else 0
-    cancellations = kinds.count("task.cancel")-expired_count
     cleanup = step.get("cleanup")
     cancel_cleanup = cleanup and cleanup["kind"]=="task.cancel"
+    total_cancellations = kinds.count("task.cancel")
+    expired_count = 0
+    if expired:
+        expired_count = 4 if unanswered else total_cancellations-int(bool(cancel_cleanup))
+        if not 1<=expired_count<=4 or source not in ("unanswered","offline"):
+            raise ValueError("invalid number of cancellation deliveries before pooling")
+    cancellations = total_cancellations-expired_count
     expected = ["task.probe"]*count + ["task.cancel"]*expired_count + (["task.shelved"] if unanswered else [])
     expected += ["task.cancel"]*cancellations
     if (kinds!=expected or not 0<=cancellations<=(1 if step.get("pool") else 4)
-            or expired and not unanswered
             or bool(cancellations)!=bool(cancel_cleanup)
             or any(frame["seq"]<=dispatch_seq or next_dispatch_seq is not None and frame["seq"]>=next_dispatch_seq
                    for frame in frames)):
@@ -217,10 +222,11 @@ def histories(db, entries, deltas):
                 pool["artifact_ids"] = attachments.linked(db,"report",aid)
                 if pool["source"]!="worker" and pool["artifact_ids"]:
                     raise ValueError("Router pool notification has unexpected files")
-                if pool["source"]=="unanswered" and pool["reason"]!=PROGRESS_EXHAUSTED:
-                    if pool["reason"]!=CANCELLATION_EXHAUSTED:
-                        raise ValueError("trial has an unsupported exhausted inquiry")
-                    original = actions["cancel"].get((tid,revision))
+                exhausted = pool["source"]=="unanswered" and pool["reason"]==CANCELLATION_EXHAUSTED
+                if pool["source"]=="unanswered" and not exhausted and pool["reason"]!=PROGRESS_EXHAUSTED:
+                    raise ValueError("trial has an unsupported exhausted inquiry")
+                original = actions["cancel"].get((tid,revision))
+                if exhausted or pool["source"]=="offline" and original:
                     reason = original[0].get("reason") if original else None
                     if not isinstance(reason,str) or not reason.strip():
                         raise ValueError("exhausted cancellation is missing its original action")
@@ -367,7 +373,7 @@ def check_transport(db, entries, reviewed_questions):
                 expected_inquiries[did] = ("task.cancel","worker/"+worker,
                     {"task_id":tid,"assignment_id":aid,"reason":expired["reason"]})
             expired_retry_ids.update(expired.get("delivery_ids",[])[1:])
-            if expired:
+            if expired and step.get("shelved_delivery_id"):
                 expired_assignments.add(aid)
             if cleanup := step.get("cleanup"):
                 payload = {name:cleanup[name] for name in ("task_id","assignment_id","reason")}

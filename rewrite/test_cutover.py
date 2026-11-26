@@ -1869,7 +1869,10 @@ store.close()
     def test_exhausted_cancel_preserves_new_holder_and_requires_original_cleanup_for_rollback(self):
         self.exercise_exhausted_cancel_rollback(reissue=False)
 
-    def exercise_exhausted_cancel_rollback(self, *, reissue):
+    def test_cancel_interrupted_by_offline_timeout_requires_original_and_new_receipts(self):
+        self.exercise_exhausted_cancel_rollback(reissue=True,offline=True)
+
+    def exercise_exhausted_cancel_rollback(self, *, reissue, offline=False):
         original = self.old("""
 store = RouterStore(sys.argv[1])
 for name in ("oguri","tama"):
@@ -1924,15 +1927,25 @@ store.close()
                 if not reissue:
                     edit = manager.update(guid(),tid,task()["revision"],{"instructions":"Edited before shelving"})
                     self.assertEqual(edit["assignment_id"],aid)
-                for seconds in (1,10,1,1,1):
-                    advance(seconds)
+                if offline:
+                    for seconds in (1,10):
+                        advance(seconds)
+                    self.assertEqual(task()["state"],"working")
+                    clock.advance(630)
+                else:
+                    for seconds in (1,10,1,1,1):
+                        advance(seconds)
                 current = task()
                 self.assertEqual(current["state"],"blocked")
+                if offline:
+                    worker.connect()
+                    worker.poll()
                 self.assertIsNone(worker.hold()["held_assignment_id"])
                 self.assertIsNone(manager.inspect(tid)["last_report"])
                 frames = [p["kind"] for p,_ in loop.native.entries()]
-                self.assertEqual(frames.count("task.cancel"),4)
-                self.assertEqual(frames[-1],"task.shelved")
+                original_controls = 3 if offline else 4
+                self.assertEqual(frames.count("task.cancel"),original_controls)
+                self.assertEqual(frames.count("task.shelved"),0 if offline else 1)
                 with self.assertRaisesRegex(ValueError,"reviewed rollback needs unchanged migrated orders"):
                     stage(self.trial,self.restore)
                 self.assertFalse(self.restore.exists())
@@ -1965,7 +1978,7 @@ store.close()
                     control,outcome,terminal = "task.transfer_out","transfer_confirmed","closed"
                 worker.poll()
                 frames = [r for p,r in loop.native.entries() if p["kind"]==control]
-                self.assertEqual(len(frames),5 if reissue else 1)
+                self.assertEqual(len(frames),original_controls+1 if reissue else 1)
 
                 def report():
                     return worker.report(frames[-1]["native_id"],tid,aid,"Original work cleared",outcome)
@@ -1998,9 +2011,10 @@ store.close()
         expired,cleanup = first["expired_cancel"],first["cleanup"]
         self.assertEqual(expired["action_key"],first_action)
         self.assertEqual(expired["receipt"]["task"]["state"],"working")
-        self.assertEqual(len(expired["delivery_ids"]),4)
-        self.assertEqual(len(expired["retries"]),3)
-        self.assertTrue(first["shelved_presence_key"])
+        self.assertEqual(len(expired["delivery_ids"]),original_controls)
+        self.assertEqual(len(expired["retries"]),original_controls-1)
+        self.assertEqual(first["pool"]["source"],"offline" if offline else "unanswered")
+        self.assertIs(bool(first.get("shelved_presence_key")),not offline)
         self.assertEqual(cleanup["receipt"],final)
         self.assertLess(expired["action_seq"],cleanup["action_seq"])
         self.assertLess(cleanup["action_seq"],cleanup["report_seq"])
@@ -2043,19 +2057,34 @@ store.close()
         with self.assertRaisesRegex(ValueError,"original idle worker observation"):
             stage(changed,denied)
         self.assertFalse(denied.exists())
-        if output := os.environ.get("MOWULINK_CANCEL_RETRY_EVIDENCE"):
+        if offline:
+            shutil.copyfile(private/"trial-router.db",changed/"router.db")
+            with closing(sqlite3.connect(changed/"router.db")) as db,db:
+                delta = db.execute("""UPDATE operations SET rowid=(SELECT MAX(rowid)+1 FROM operations)
+                    WHERE actor='worker/oguri' AND json_extract(request,'$[0][1]')=?""",
+                    (f"/v1/deliveries/{expired['delivery_ids'][0]}/ack",))
+                self.assertEqual(delta.rowcount,1)
+            with self.assertRaisesRegex(ValueError,"offline cancellation receipt is ambiguous after pooling"):
+                stage(changed,denied)
+            self.assertFalse(denied.exists())
+        evidence_variable = "MOWULINK_OFFLINE_CANCEL_EVIDENCE" if offline else "MOWULINK_CANCEL_RETRY_EVIDENCE"
+        if output := os.environ.get(evidence_variable):
             path = Path(output)
             evidence = json.loads(path.read_text()) if path.exists() else {}
-            evidence["reissued_cancel" if reissue else "transferred"] = {
+            phase = "offline_reissue" if offline else "reissued_cancel" if reissue else "transferred"
+            evidence[phase] = {
                 "task_id":tid,"original_assignment":aid,"new_assignment":closed.get(tid),
                 "first_cancel_key":first_action,"first_cancel_deliveries":expired["delivery_ids"],
-                "cancel_retries":expired["retries"],"shelved_delivery_id":first["shelved_delivery_id"],
-                "shelved_presence_key":first["shelved_presence_key"],"new_action_key":last_action,
+                "cancel_retries":expired["retries"],"shelved_delivery_id":first.get("shelved_delivery_id"),
+                "shelved_presence_key":first.get("shelved_presence_key"),"new_action_key":last_action,
+                "pool_source":first["pool"]["source"],"pool_entered":first["pool"]["entered"],
                 "cleanup_delivery_id":cleanup["delivery_ids"][0] if reissue else cleanup["delivery_id"],
                 "cleanup_report_key":cleanup["report_key"],"cleanup_reply":final,
                 "late_original_report":late.exception.code,"legacy":observed,
                 "trial_sha256":settled["trial_sha256"],"wrong_idle_observation_refused":True,
                 "boundary":"Actual isolated rewrite and legacy HTTP Routers and rewrite Workers; scripted hosts and clock."}
+            if offline:
+                evidence[phase]["late_original_delivery_receipt_refused"] = True
             path.write_text(json.dumps(evidence,ensure_ascii=False,indent=2,sort_keys=True)+"\n")
 
     def test_trial_born_closed_orders_return_as_private_archives_without_a_new_dispatch(self):

@@ -14,7 +14,7 @@
 
 后续发现一条仍未通过的 Worker 路径。第一次取消耗尽后，若原工位真正向 Router 提交过迟到的取消 W04，Worker 会把 409 按派发号和控制类型缓存。重新取消有新的宿主输入，但 Worker 直接复用旧错误，没有发出第二次 HTTP 请求。把原请求及原幂等键直接重放给隔离 Router，Router 又会接受，因为请求缺少可区分两次取消的标识。直接重放只用于诊断。前述回退实测覆盖最终清理已由正确流程确认的工单。后续需要把新清理回执与具体取消请求关联，同时保留已成功回执的幂等查回。宿主和时钟为夹具。[Worker 重新取消阻点](evidence/worker-stale-cancel-reissue.json)
 
-另一条回退待补。原工位收到了首次取消，但在回复前离线十分钟。实际 Router 入池，没有发送重试耗尽的搁置通知。原工位上线后收到第二条取消并交 W04，Router 记已取消。隔离回退拒绝合并这两次取消，原库摘要不变，也未生成旧库。该路径要按离线入池对账。[离线后重新取消](evidence/cutover-offline-cancel-reissue-gap.json)
+首次取消期间离线入池的路径也已补上。原工位收到首次取消与两次重试后断开，十分钟后由 Router 入池。实测没有搁置帧。原工位重新连上，收到新取消并交清理 W04。隔离旧 Router 读回已取消，无成果、无持单、无重派。首次取消的收件顺序晚于池中操作，或其重试关联的空闲观测不符时，均拒绝发布。宿主和时钟为夹具。复跑 `python3 -B -m unittest -v rewrite.test_cutover -k cancel_interrupted`。[本次实测](evidence/cutover-reviewed-offline-cancel.json) · [旧失败证据](evidence/cutover-offline-cancel-reissue-gap.json)
 
 工单内已答复的问题纳入回退。真实隔离 Router 和两个 Worker 验证选择、文本和跳过三种答复。一条答复到达前已转派并验收，仍送入原工位的宿主，当前工位无答复输入。重送同一问题和同一答案，保留原号和操作回执，通知与答复帧各一次。未答、答复帧缺接收确认或流向下一派发均拒绝准备。恢复后的旧 Router 读回归档，两个工位无待答题及重新派发。原 W05、题文、答复及接收记录只留私有档案，宿主使用夹具。[问答回退实测](evidence/cutover-reviewed-questions.json)
 
