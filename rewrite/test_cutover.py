@@ -10,6 +10,8 @@ import unittest
 from threading import Thread
 
 from .cutover import backup, digest, prepare, rollback, verified
+from .devloop import FixtureHost, Loop
+from .test_mainline import Clock
 from .orders import Orders
 from .storage import Fault, guid
 from .hermes import HermesAdapter
@@ -68,6 +70,70 @@ store._conn.close()
         self.assertEqual(json.loads(history),{"next":self.queued,"report":"summary_received"})
         self.assertEqual((self.restore/"attachments"/self.sha).read_bytes(),(self.attachments/self.sha).read_bytes())
         self.assertEqual(digest(self.legacy),original)
+
+    def test_old_http_default_order_migrates_with_goal_and_idempotency(self):
+        queued_key,archived_key = guid(),guid()
+        old_ids = json.loads(self.old("""
+from server import RouterServer
+from selftest_router import http
+from threading import Thread
+from unittest.mock import Mock
+store = RouterStore(sys.argv[1])
+store.upsert_worker("oguri")
+with RouterServer(("127.0.0.1",0),store,"offline-test",Mock(),Mock()) as srv:
+    thread = Thread(target=srv.serve_forever,kwargs={"poll_interval":.02})
+    thread.start()
+    try:
+        url = f"http://127.0.0.1:{srv.server_port}/tasks"
+        ids = []
+        for key in sys.argv[2:]:
+            payload = {"message_id":key,"worker":"oguri","TaskName":"From HTTP","goal":"Keep this order",
+                       "context":"关联材料"}
+            status,reply = http("POST",url,payload,"offline-test")
+            assert status==202 and reply["queued"] and reply["execution_mode"]=="goal", (status,reply)
+            again,duplicate = http("POST",url,payload,"offline-test")
+            assert again==200 and duplicate["duplicate"] and duplicate["task_id"]==reply["task_id"]
+            ids.append(reply["task_id"])
+        store.orders.record_dispatch(ids[1],"oguri","fixture")
+        store.orders.archive(ids[1],"worker_cancel")
+    finally:
+        srv.shutdown()
+        thread.join()
+store.close()
+print(json.dumps(ids))
+""",self.legacy,queued_key,archived_key))
+        manifest = backup(self.legacy,self.attachments,self.snapshot)
+        # An old snapshot counted ordinary HTTP metadata as a blocker. Its original count stays verifiable.
+        manifest["format"] = 1
+        manifest["blockers"]["ambiguous_queue_rows"] = 1
+        (self.snapshot/"manifest.json").write_text(json.dumps(manifest))
+        self.assertEqual(verified(self.snapshot),manifest)
+        baseline = prepare(self.snapshot,self.trial,self.source_id)
+        mapped = baseline["queued_id_map"][old_ids[0]]
+        clock = Clock()
+        loop = Loop(self.trial,clock,FixtureHost)
+        self.addCleanup(loop.server.server_close)
+        loop.thread.start()
+        self.addCleanup(loop.thread.join)
+        self.addCleanup(loop.server.shutdown)
+        manager = loop.hermes
+        expected_body = "Keep this order\n\n[router context]\n关联材料"
+        self.assertEqual(manager.create(queued_key,"From HTTP",expected_body,"oguri")["task_id"],mapped)
+        with self.assertRaisesRegex(Fault,"idempotency_conflict"):
+            manager.create(queued_key,"From HTTP","Changed","oguri")
+        with self.assertRaisesRegex(Fault,"legacy_request_recorded") as archived:
+            manager.create(archived_key,"From HTTP","Keep this order","oguri")
+        self.assertEqual(archived.exception.details["legacy_task_id"],old_ids[1])
+        loop.worker.connect()
+        loop.worker.poll()
+        clock.advance(10)
+        loop.worker.poll()
+        loop.worker.poll()
+        (payload,_receipt), = loop.native.entries()
+        self.assertEqual((payload["task_id"],loop.worker.hold()["held_task_id"]),(mapped,mapped))
+        self.assertIn("原生目标",payload["instructions"])
+        self.assertTrue(payload["instructions"].endswith("\n\n"+expected_body))
+        self.assertEqual(len(manager.tasks()["items"]),2)
 
     def test_inflight_or_unhandled_metadata_keeps_original_and_blocks_new_writer(self):
         self.old("""

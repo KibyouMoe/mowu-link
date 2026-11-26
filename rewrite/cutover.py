@@ -11,7 +11,7 @@ import sqlite3
 import tempfile
 from uuid import UUID, uuid5
 
-from .orders import Orders
+from .orders import Orders, task
 from . import legacy_history
 from .storage import encode
 
@@ -45,7 +45,22 @@ def output_directory(destination):
         staging.rename(destination)
 
 
-def inventory(db):
+DEFAULT_QUEUE_META = {"context":None,"workspace":None,"urgency":"normal","deadline_s":None,"execution_mode":"goal"}
+LEGACY_GOAL = ("[正式工单 · 目标模式]\n先核对宿主原生目标。支持目标工具且没有未完成目标时，为本单建立目标，"
+               "不自设 token 预算。已有目标时关联同单补充或子项；遇到独立冲突目标，保留原目标并说明冲突。"
+               "以原生工具返回、执行及验证结果为准。")
+
+
+def queue_metadata_supported(raw,version):
+    meta = json.loads(raw)
+    if meta=={}:
+        return True
+    if version==1 or not isinstance(meta,dict) or not isinstance(meta.get("context"),(type(None),str)):
+        return False
+    return dict(meta,context=None)==DEFAULT_QUEUE_META and "context" in meta
+
+
+def inventory(db, version=2):
     if [row[0] for row in db.execute("PRAGMA integrity_check")] != ["ok"]:
         raise ValueError("database integrity check failed")
     required = {"workers","active_tasks","dispatch_queue","task_info","task_facts","peer_messages",
@@ -53,6 +68,7 @@ def inventory(db):
     tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     if not required <= tables:
         raise ValueError("unsupported legacy Router schema")
+    db.create_function("simple_queue_metadata",1,lambda raw:queue_metadata_supported(raw,version))
     queries = {
         "held_tasks":"SELECT count(*) FROM active_tasks",
         "worker_holds":"SELECT count(*) FROM workers WHERE task_id IS NOT NULL AND task_id NOT IN ('','0')",
@@ -63,7 +79,7 @@ def inventory(db):
         "ownership_corrections":"SELECT count(*) FROM worker_task_corrections WHERE cleared_at IS NULL",
         "ambiguous_queue_rows":"""SELECT count(*) FROM dispatch_queue q LEFT JOIN task_info i USING(task_id)
               WHERE i.task_id IS NULL OR i.owner<>q.worker OR trim(i.name)='' OR trim(i.description)=''
-              OR trim(i.owner)='' OR json(i.metadata)<>'{}' OR EXISTS
+              OR trim(i.owner)='' OR NOT simple_queue_metadata(i.metadata) OR EXISTS
               (SELECT 1 FROM task_facts f WHERE f.task_id=q.task_id)""",
         "unclassified_tasks":"""SELECT count(*) FROM task_info i WHERE NOT EXISTS
               (SELECT 1 FROM dispatch_queue q WHERE q.task_id=i.task_id) AND NOT EXISTS
@@ -112,19 +128,19 @@ def backup(database, attachments, destination):
             raise ValueError("offline source changed during backup")
         with closing(readonly(database)):
             pass
-        manifest = {"format":1,"legacy_db_sha256":before,"attachments":files,"blockers":blockers}
+        manifest = {"format":2,"legacy_db_sha256":before,"attachments":files,"blockers":blockers}
         (stage/"manifest.json").write_text(encode(manifest))
     return manifest
 
 
 def verified(snapshot):
     manifest = json.loads((snapshot/"manifest.json").read_text())
-    if (manifest.get("format") != 1 or digest(snapshot/"legacy.db") != manifest["legacy_db_sha256"]
+    if (manifest.get("format") not in (1,2) or digest(snapshot/"legacy.db") != manifest["legacy_db_sha256"]
             or attachment_index(snapshot/"attachments") != manifest["attachments"]):
         raise ValueError("snapshot verification failed")
     with closing(readonly(snapshot/"legacy.db")) as db:
         verify_references(db,manifest["attachments"])
-        if inventory(db) != manifest["blockers"]:
+        if inventory(db,manifest["format"]) != manifest["blockers"]:
             raise ValueError("snapshot inventory changed")
     return manifest
 
@@ -132,18 +148,29 @@ def verified(snapshot):
 def prepare(snapshot, destination, source_id):
     namespace = UUID(source_id)
     manifest = verified(snapshot)
-    blockers = {key:n for key,n in manifest["blockers"].items() if n}
+    with closing(readonly(snapshot/"legacy.db")) as old:
+        blockers = {key:n for key,n in inventory(old).items() if n}
     if blockers:
         raise ValueError("legacy work requires reconciliation: " + encode(blockers))
     with output_directory(destination) as stage, closing(readonly(snapshot/"legacy.db")) as old:
         router = Orders(stage/"router.db")
         mapping = {}
         with router.db.transaction() as db:
-            for row in old.execute("""SELECT q.task_id,i.name,i.description,q.worker FROM dispatch_queue q
+            for row in old.execute("""SELECT q.task_id,i.name,i.description,i.metadata,i.request_id,i.actor,q.worker FROM dispatch_queue q
                                       JOIN task_info i USING(task_id) ORDER BY q.seq"""):
                 tid = str(uuid5(namespace,row["task_id"]))
+                body = row["description"]
+                meta = json.loads(row["metadata"])
+                context = (meta.get("context") or "").strip()
+                if context:
+                    body += "\n\n[router context]\n"+context
+                instructions = LEGACY_GOAL+"\n\n"+body if meta else body
                 db.execute("INSERT INTO tasks(task_id,title,instructions,assignee_id) VALUES (?,?,?,?)",
-                           (tid,row["name"],row["description"],row["worker"]))
+                           (tid,row["name"],instructions,row["worker"]))
+                if row["actor"]=="hermes" and row["request_id"]:
+                    original = {"title":row["name"],"instructions":body,"assignee_id":row["worker"]}
+                    db.execute("INSERT INTO operations VALUES ('hermes',?,?,?)",
+                               (row["request_id"],encode([["POST","/v1/tasks"],original]),encode(task(db,tid))))
                 mapping[row["task_id"]] = tid
             legacy_history.populate(db,old,str(namespace),manifest["legacy_db_sha256"],mapping)
         baseline = {"snapshot_sha256":manifest["legacy_db_sha256"],"source_id":str(namespace),

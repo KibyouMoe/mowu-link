@@ -4,7 +4,7 @@ import re
 import time
 
 from . import attachments, cleanup, delivery, legacy_history, links, messages, peers, pool, questions
-from .storage import Database, encode, guid, require, string, timestamp
+from .storage import Database, Fault, encode, guid, require, string, timestamp
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS tasks (
@@ -69,6 +69,11 @@ class Orders:
             if previous:
                 require(previous["request"] == request, 409, "idempotency_conflict")
                 return json.loads(previous["response"])
+            if actor=="hermes":
+                prior = db.execute("SELECT source_id,legacy_task_id FROM history_request_keys WHERE actor=? AND request_key=?",
+                                   (actor,key)).fetchone()
+                if prior:
+                    raise Fault(409,"legacy_request_recorded",details=dict(prior))
             response = perform(db)
             db.execute("INSERT INTO operations VALUES (?,?,?,?)", (actor, key, request, encode(response)))
             return response

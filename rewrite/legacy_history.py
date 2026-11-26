@@ -16,6 +16,10 @@ CREATE TABLE IF NOT EXISTS history_tasks (
     created_at REAL NOT NULL, archive TEXT, deliverable TEXT,
     PRIMARY KEY(source_id,legacy_task_id)
 );
+CREATE TABLE IF NOT EXISTS history_request_keys (
+ actor TEXT, request_key TEXT, source_id TEXT NOT NULL, legacy_task_id TEXT NOT NULL,
+ PRIMARY KEY(actor,request_key)
+);
 """
 
 
@@ -29,6 +33,8 @@ def populate(db, old, source, sha, mapping):
             data = json.loads(fact["data"])
             facts[fact["kind"]] = dict(data,at=fact["at"]) if fact["kind"]=="archive" else data.get("report")
         archive,report = facts.get("archive"),facts.get("summary")
+        if row["request_id"] and row["actor"]=="hermes":
+            db.execute("INSERT INTO history_request_keys VALUES ('hermes',?,?,?)",(row["request_id"],source,tid))
         db.execute("INSERT INTO history_tasks VALUES (?,?,?,?,?,?,?,?,?,?)",
                    (source,tid,mapping.get(tid),row["name"],row["description"],row["owner"],row["actor"],row["at"],
                     encode(archive) if archive is not None else None,encode(report) if report is not None else None))
