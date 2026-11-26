@@ -3,7 +3,7 @@ import json
 from threading import RLock
 from typing import Protocol
 
-from . import display, links, user_questions, worker_media
+from . import display, links, user_questions, worker_commands, worker_media
 from .storage import Database, Fault, encode, guid, require, string
 
 SCHEMA = """
@@ -46,7 +46,8 @@ class AgentAdapter(Protocol):
 
 class Worker:
     def __init__(self, path, worker_id, router, adapter: AgentAdapter):
-        self.db = Database(path, SCHEMA + worker_media.SCHEMA + display.SCHEMA + links.WORKER_SCHEMA + user_questions.SCHEMA)
+        self.db = Database(path, SCHEMA + worker_media.SCHEMA + display.SCHEMA + links.WORKER_SCHEMA
+                           + user_questions.SCHEMA + worker_commands.SCHEMA)
         self.worker_id, self.router, self.adapter = worker_id, router, adapter
         self.lock = RLock()
         with self.db.transaction() as db:
@@ -233,6 +234,8 @@ class Worker:
         require(isinstance(text,str) and (text.strip() or ids),422,"empty_chat")
         with self.lock:
             with self.db.transaction() as db:
+                require(not db.execute("SELECT 1 FROM platform_commands WHERE message_id=?",(message_id,)).fetchone(),
+                        409,"message_previously_command")
                 inserted = db.execute("INSERT OR IGNORE INTO chats(message_id,text) VALUES (?,?)", (message_id,text)).rowcount
                 require(db.execute("SELECT text FROM chats WHERE message_id=?", (message_id,)).fetchone()[0] == text,
                         409, "chat_conflict")

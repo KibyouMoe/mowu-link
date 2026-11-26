@@ -65,6 +65,10 @@ Hermes 源码版本 `a2de7418a3405307f8b3abce01a66d5d71351edc`。从 Git 跟踪�
 
 ## 旧入口与替代条件
 
+旧 Codex 的实际命令入口是 `Plugins/Codex/desktop-manager.mjs` 的 `message` 和指令分发器。除帮助列出的主要命令，还处理 `/start /commands /clear /switch /list /stop`。Antigravity 的 `interface/feishu-commands.mjs` 明确限定固定会话，历史切换另列。仓内 `client/desktop/README.md` 和 `client/mobile/README.md` 仅记未来客户端，本仓这两个目录没有可执行消费者。
+
+重做版的纯文本指令现由绑定的飞书训练员交给 Worker。隔离 HTTP 实测 `/help`、`/status`、固定会话查询和同会话选择。状态卡分别显示两条连接、宿主最近忙闲、本地工单号与派发号。帮助别名为 `/start` 和 `/commands`。此时 `/resume` 仅能查看当前会话，同会话编号及 ID 可确认；历史翻页、检索、换绑仍待接。未知指令给出「暂不开放」。尚无执行回读的命令不会送入普通对话。重试丢失的 Worker 回执只出现一张指令卡；旧版已交给宿主的同号消息可查回旧收据。四项新增回归 `python3 -m unittest -v rewrite.test_worker_commands`，全量 97 项。飞书卡片使用平台替身，真实云端另验。
+
 旧 Router、Trigger 以此分支的 `server/` 和 `sources/` 为依据；宿主插件以独立 MowuLinkWorkerSkill 的 `f399148df99ed58568f4931aed414e3a83fa7a25` 为依据。已安装的 Hermes `trigger-bus` 与当前维修会话的 MCP 工具表亦已核过。源码声明只证明存在。每行的迁移条件在对应使用端实测通过之前，保留旧入口。
 
 | 旧入口与使用者 | 新入口／归属 | 已有证据；迁移条件 |

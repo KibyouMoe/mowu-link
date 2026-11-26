@@ -7,6 +7,7 @@ import time
 from urllib.error import URLError
 
 from .storage import Database, Fault, encode, require, string
+from .worker_commands import is_command
 
 MAX_IMAGE = 10 * 1024 * 1024
 MAX_FILE = 100_000_000
@@ -139,10 +140,22 @@ class Inbound:
             except (ValueError,TypeError):
                 raise Fault(422,"bad_feishu_content") from None
             text, refs = parts(body["kind"],content)
-            ids = [self.upload(mid,ref) for ref in refs]
-            receipt = self.worker.request("POST","worker/chat",{"message_id":mid,"text":text,"attachment_ids":ids})["receipt"]
-            require(receipt and receipt.get("delivery_id") == "chat-"+mid and receipt.get("native_id"),
-                    503,"host_receipt_unconfirmed")
+            receipt = None
+            if body["kind"] == "text" and is_command(text):
+                try:
+                    receipt = self.worker.request("POST","worker/command",{"message_id":mid,"text":text})["receipt"]
+                    require(isinstance(receipt,dict) and receipt.get("message_id")==mid
+                            and isinstance(receipt.get("output"),dict)
+                            and receipt["output"].get("event_id")=="command-"+mid,503,"command_receipt_unconfirmed")
+                except Fault as err:
+                    # Recover an input submitted by the previous release under its original delivery ID.
+                    if err.code != "command_previously_chat" or err.status != 409:
+                        raise
+            if receipt is None:
+                ids = [self.upload(mid,ref) for ref in refs]
+                receipt = self.worker.request("POST","worker/chat",{"message_id":mid,"text":text,"attachment_ids":ids})["receipt"]
+                require(receipt and receipt.get("delivery_id") == "chat-"+mid and receipt.get("native_id"),
+                        503,"host_receipt_unconfirmed")
         except (Fault,URLError,OSError) as err:
             terminal = isinstance(err,Fault) and 400 <= err.status < 500 and err.status != 429
             with self.db.transaction() as db:

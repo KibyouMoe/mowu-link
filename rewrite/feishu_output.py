@@ -89,7 +89,7 @@ class Views:
                     mid = self.platform.send(self.chat,"image",{"image_key":image_key},key)
                 else:
                     labels = {"progress":"-输出","tool":"-工具","native_input":"·原生输入","final":"-回复",
-                              "online":"-在线","disconnect":"-连接提醒","task":"·工单"}
+                              "online":"-在线","disconnect":"-连接提醒","task":"·工单","command":"-输出"}
                     require(kind in labels,422,"unsupported_card_kind")
                     if kind=="tool":
                         text = event["tool_name"]+"\n"+text

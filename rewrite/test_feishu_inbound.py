@@ -19,7 +19,8 @@ class PlatformCase(unittest.TestCase):
     def setUp(self):
         self.loop = self.enterContext(Loop.isolated())
         w = self.loop.worker
-        self.server = WorkerService(w).listen({"test-platform":"platform/oguri","test-adapter":"adapter/oguri",
+        self.service = WorkerService(w)
+        self.server = self.service.listen({"test-platform":"platform/oguri","test-adapter":"adapter/oguri",
                   "other":"adapter/other"},("127.0.0.1",0),None)
         thread = Thread(target=self.server.serve_forever,kwargs={"poll_interval":0.01},daemon=True)
         thread.start()
