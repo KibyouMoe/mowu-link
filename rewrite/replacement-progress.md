@@ -6,6 +6,12 @@
 
 离线换绑补查 DSH 原工作区账本。用真实 DSH 和 Linux 容器复现 Router 成果已落库、Worker 已放回持单、容器仍运行。新审计识别缺原目录、错误目录、符号链接记录、未回收容器及原宿主仍运行。原会话重开后查到旧 W04 并移除原容器，无新增模型调用。宿主再停机后，原 SQLite 快照无需重拍即可经当前账本核验准备新绑定。另用账本夹具证明准备途中出现新记录会撤销输出。启用工位的适配器账本登记后，快照用格式 3 以免旧版换绑工具误放行。真实引擎、宿主和 HTTP 实跑，模型为本地脚本。[实测证据](evidence/dsh-offline-workspace-handoff.json) · [复跑与操作](router-rehearsal.md#重做版五组件的离线恢复)
 
+从 `a469849b7815aaaf9eb6e9be504afac3c2ae4e4b` 安装的旧审计工具读取格式 3 实测返回 1，原因为 `unsupported snapshot`。新版命令行在缺原目录映射时报告 `dsh_workspace_journal_required`，传入停机原目录后读回零待回收项并生成目标绑定。复制 SQLite 库本身仍由恢复命令处理，活工作目录继续由原引擎持有。
+
+实现提交 `588f81193df8a7ba5bb7a6b81cd99c29a897f720`。macOS 全量 279 项通过，Linux arm64 184 项通过、95 项按环境跳过。离线换绑和准备期变化两个测例各连续复跑 3 次通过。以实现提交打包 246 文件，SHA-256 为 `a220c60625c7ab6c40ffa8bd4b8e7154fa23e3e777b671adbadb4147bb6ca722`，安装目录专项 38 项通过，逐文件回读一致。另复跑 `python3 -B -m rewrite.release_check --repository . --component worker-pair --previous a469849b7815aaaf9eb6e9be504afac3c2ae4e4b --new 588f81193df8a7ba5bb7a6b81cd99c29a897f720`，夹具宿主的两版安装回退通过。
+
+
+
 DSH 独立项目工位可显式授权新派发的 `/workspace` 运行本地构建产物。实际 DSH、Linux 容器、C 编译器和隔离 Router 跑两张对照单。默认工位生成 ELF 后直接执行返回 126，W04 进入受阻。显式启用的工位运行返回 0，验收人读回逐字节相同的 ELF，W04 待验收。两单交权后各回收原容器。既有派发在启用和停用两种方向的配置变更下均拒绝继续写入，可暂存原产物并按原挂载记录完成取消清理。容器以普通用户运行，使用只读根、无网络和原资源上限。模型由本地脚本驱动。[编译与挂载实测](evidence/dsh-workspace-compiled-project.json) · [复跑入口](README.md#dsh-固定会话与飞书卡片)
 
 实际从 `256db0bf87aa46322df70e837f91c1d041e594b4` 和 `132311abb9b5c56b96b28c08f9b2d58b9ddacfc8` 打包安装两版 DSH 容器管理模块。旧版拒绝确认仍在运行的新挂载容器，路线恢复为新版导出 ELF 后按原容器移除。恢复旧版配置后新派发可编译，直接执行返回 126，清理返回 `removed`。此项用两版真实模块和同一隔离引擎直测。正式工单的宿主调用另见上述 DSH 原生回环。
