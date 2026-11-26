@@ -225,6 +225,9 @@ class WorkerService:
             target = "approvals/"+w.worker_id+"/"+parts[0]
             if method=="POST" and len(parts)==1:
                 result = w.router.request(method,target,{"session_id":w.session,"request":body})
+            elif method=="POST" and len(parts)==2 and parts[1]=="receipt":
+                require(set(body)=={"session","request_digest"},422,"invalid_approval_receipt_lookup")
+                result = w.router.request(method,target+"/receipt",dict(body,session_id=w.session))
             elif method=="PUT" and len(parts)==2 and parts[1]=="closed":
                 fields = {"session","request_digest","attempted_response"}
                 require(fields<=set(body)<=fields|{"request","native_proof"},422,"invalid_approval_closure")

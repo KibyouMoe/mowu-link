@@ -328,6 +328,46 @@ class Service(unittest.TestCase):
         with orders.db.transaction() as db:
             self.assertEqual(delivery_read(db,"approver/dev",0),[])
 
+    def test_lookup_returns_only_original_closed_approval_receipt_digest(self):
+        orders = Orders(self.root/"closed-receipt.db")
+        binding = {"session_id":guid()}
+        with orders.db.transaction() as db:
+            orders.session(db,"dev",binding)
+        aid = guid()
+        entry = ["approvals","dev",aid]
+        route = [*entry,"receipt"]
+        request = {"session":"original-native-session","turn_id":"original-turn","item_id":"original-command",
+                   "cwd":"/isolated-private","command":"pwd","environment_id":None,"decisions":["accept","cancel"]}
+        registration = approval_route(orders,"worker/dev","POST",entry,dict(binding,request=request))
+        lookup = dict(binding,session=request["session"],request_digest=registration["request_digest"])
+        rejected = [("approver/dev",route,lookup,"forbidden"),
+                    ("worker/other",route,lookup,"forbidden"),
+                    ("worker/dev",route,dict(lookup,session_id=guid()),"stale_session"),
+                    ("worker/dev",route,dict(lookup,session="wrong-native-session"),"approval_request_conflict"),
+                    ("worker/dev",route,dict(lookup,request_digest="0"*64),"approval_request_conflict"),
+                    ("worker/dev",route,dict(lookup,command="pwd"),"invalid_approval_receipt_lookup"),
+                    ("worker/dev",["approvals","dev",guid(),"receipt"],lookup,"approval_not_found"),
+                    ("worker/dev",route,lookup,"native_approval_closure_pending")]
+        for actor,path,body,error in rejected:
+            with self.subTest(error=error), self.assertRaisesRegex(Fault,error):
+                approval_route(orders,actor,"POST",path,body)
+        closed = approval_route(orders,"worker/dev","PUT",[*entry,"closed"],
+                                dict(binding,request_digest=registration["request_digest"],attempted_response=None))
+        restarted = Orders(self.root/"closed-receipt.db")
+        digest = hashlib.sha256(encode(closed).encode()).hexdigest()
+        expected = {"approval_id":aid,"session":request["session"],"request_digest":registration["request_digest"],
+                    "state":"native_closed","receipt_digest":digest}
+        self.assertEqual(approval_route(restarted,"worker/dev","POST",route,lookup),expected)
+        self.assertEqual(approval_route(restarted,"worker/dev","POST",route,lookup),expected)
+        self.assertEqual(approval_route(restarted,"approver/dev","GET",entry,{}),closed)
+        with restarted.db.transaction() as db:
+            events = delivery_read(db,"approver/dev",0)
+            self.assertEqual([event["payload"] for event in events],[{"approval_id":aid,"worker_id":"dev"}])
+            registered = dict(binding,session_id=guid())
+            restarted.session(db,"dev",registered)
+        with self.assertRaisesRegex(Fault,"approval_request_conflict"):
+            approval_route(restarted,"worker/dev","POST",route,dict(lookup,**registered))
+
     def test_dsh_no_notice_closure_requires_original_non_grant_proof(self):
         orders = Orders(self.root/"dsh-deadline.db",clock=lambda:1000)
         binding = {"session_id":guid()}

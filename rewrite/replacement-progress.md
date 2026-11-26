@@ -4,13 +4,17 @@
 
 ## 检查点与证据
 
+Codex 适配器冷重开可从原 Worker 查回 Router 已保存的审批关闭回执。基线 `18238d2bd40892d4f74ac06cb8053383971ee0fd` 的真实 App Server 测试在 8 秒内仍未补回已落库的关闭。新版用原 Worker 注册、原生会话、审批号和请求摘要取回相同摘要。另一条丢在 Router 落库前的关闭仍待核。两条原生回合均未重跑，重开后新增原生决定和审批通知均为零。实跑独立 App Server、Worker 与 Router，模型、时钟和丢包由测试驱动。另验错绑、错误摘要、已更换的 Worker 注册和其他身份均不能读到回执。[冷重开证据](evidence/codex-cold-approval-reconcile.json)
+
+复跑 `python3 -B -m unittest -v rewrite.test_service.Service.test_lookup_returns_only_original_closed_approval_receipt_digest rewrite.test_codex_app_server.CodexAppServer.test_cold_adapter_reads_committed_approval_closure_without_native_replay`。Router 从未保存关闭时的原生证明恢复尚待实现。
+
 运行中换绑核对 Codex 和 DSH 适配器的原生审批账本。基线 `a3d421ad737b6179789b3138c64f4444b47e6b18` 在两个隔离反例中都写入了新绑定。一类是原生已空闲但 Router 尚未收到登记，另一类是派发暂停后才收到原审批。改版在第一类从未请求暂停，第二类以原交接号解除，丢解除回执后重开仍保留原绑定。旧适配器不支持审批观测时保留普通聊天并提示先升级。真实 Codex App Server 两会话实测，审批补记关闭后，新切换后的目标只新增一次输入。真实 DSH SDK 同样验证未登记和已登记但回执丢失的原审批，源宿主恢复并核到关闭后，允许新切换。DSH 目标宿主、模型、飞书、审批人和故障均为隔离测试夹具。[原生证据](evidence/native-handoff-approval.json)
 
 复跑 `python3 -B -m unittest -v rewrite.test_worker_resume rewrite.test_codex_app_server.CodexAppServer.test_runtime_switch_waits_for_unregistered_native_approval_to_close rewrite.test_dsh_native_loop.NativeLoop.test_dsh_unacknowledged_approval_recovers_without_a_late_notification`。原生应用授权等未接入的审批仍需另验。
 
 五个场景连续通过 5 轮。macOS 全量通过 266 项，Linux arm64 通过 181 项、跳过 85 项。以 `6cc50b6cf5a29346e8b7f4a1b65df6f3cf83ca8e` 构建的独立包包含 235 份文件，SHA-256 为 `e186cda8b4b1834ac7992c94ed1c03a23bb69524183d375db9a1c25decee73ba`。安装目录复跑切换、暂停派发、快照与两种原生审批共 33 项，逐文件摘要一致。以 `a3d421ad737b6179789b3138c64f4444b47e6b18` 为旧版，真实隔离 Codex App Server 执行混合版本、升级与回退。各阶段仍为三条原生输入，待验通知保持 `93b45c7c-e9cd-46e8-a189-17debb40e33e`，快照摘要一致。发布演练使用脚本模型，复跑 `python3 -B -m rewrite.codex_release_check` 并指定这两版和本机 App Server 二进制。
 
-从当前本机 App Server 实际导出的协议模式（含实验项）核到 `serverRequest/resolved` 为通知，未列出按审批请求号查询关闭结果的客户端方法。Codex 宿主与适配器同时重开后，若此前无可确认的关闭回执，仍保留待核。Router 已保存关闭、但适配器重开前未收到回执的对账需单独验证。
+从当前本机 App Server 实际导出的协议模式（含实验项）核到 `serverRequest/resolved` 为通知，未列出按审批请求号查询关闭结果的客户端方法。Codex 宿主与适配器同时重开后，若此前无可确认的关闭回执，仍保留待核。此处的 Router 已保存关闭场景见本页最新检查点。
 
 离线换绑会核对 Codex 适配器已收到的原生审批。隔离实测，原生文件审批已到、Router 尚未收到登记时，适配器持久保存待核记录。重开账本仍拒绝生成换绑副本。Router 已关闭但回执丢失时记录继续待核，按原号查回才消除。独立 App Server、Worker 和 Router 实跑，模型与断联由本地测试驱动。快照换绑的夹具复验另查了输出中无命令目录。复跑 `python3 -B -m unittest -v rewrite.test_state_bundle.Bundle.test_handoff_refuses_codex_approval_never_registered_with_router rewrite.test_codex_app_server.CodexAppServer.test_native_approval_deadline_survives_lost_intake_and_late_router_accept`。[断联证据](evidence/codex-approval-router-outage.json)
 

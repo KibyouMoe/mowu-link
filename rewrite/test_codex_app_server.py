@@ -1481,6 +1481,122 @@ class CodexAppServer(unittest.TestCase):
         if output := os.environ.get("MOWULINK_APPROVAL_HANDOFF_EVIDENCE"):
             Path(output).write_text(json.dumps(self.evidence,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
 
+    def test_cold_adapter_reads_committed_approval_closure_without_native_replay(self):
+        root = Path(self.root).resolve()
+        self.provider.approval_commands = dict.fromkeys(("cold-closed","cold-unknown"),"pwd")
+        worker_token,approver_token,adapter_token = (guid() for _ in range(3))
+        orders = Orders(root/"router.db")
+        router = self.enterContext(running(serve_loopback(orders,{worker_token:"worker/dev",approver_token:"approver/dev"})))
+        wire,approver = Client(router,worker_token),Client(router,approver_token)
+        adapter_path = root/"adapter.db"
+        settings = ('approval_policy="on-request"','sandbox_mode="read-only"')
+        clock = Clock()
+
+        @contextmanager
+        def station(rpc,session):
+            host = AppServerHost(rpc,session,adapter_path,relay_command_approvals=True)
+            host.approvals.clock = clock
+            worker = Worker(root/"worker.db","dev",wire,HostAdapter(adapter_path,host,session))
+            worker.connect()
+            service = WorkerService(worker)
+            with running(service.listen({adapter_token:"adapter/dev"},("127.0.0.1",0),None)) as url:
+                yield host,Client(url,adapter_token),worker.session
+
+        def until(probe):
+            deadline = time.monotonic()+8
+            while time.monotonic()<deadline:
+                result = probe()
+                if result:
+                    return result
+                time.sleep(.05)
+            self.fail("approval closure was not reconciled")
+
+        def approvals():
+            return {row["request"]["item_id"]:row for row in approver.request("GET","approvals/dev")["items"]}
+
+        def journal():
+            with closing(sqlite3.connect(adapter_path)) as db:
+                return dict(db.execute("SELECT approval_id,router_receipt_digest FROM codex_approval_intents"))
+
+        committed,undelivered = set(),set()
+        terminals = Queue()
+        with isolated_app_server(self.root,self.origin,settings) as rpc:
+            session = rpc.request("thread/start",{"cwd":self.root,"ephemeral":False})["thread"]["id"]
+            with station(rpc,session) as (host,callback,worker_session):
+                send = callback.request
+
+                def lose_closure(method,path,body=None,*args,**kw):
+                    if method=="PUT" and path.endswith("/closed"):
+                        aid = path.split("/")[-2]
+                        if body["request"]["item_id"]=="trial-approval-cold-closed":
+                            send(method,path,body,*args,**kw)
+                            committed.add(aid)
+                        else:
+                            undelivered.add(aid)
+                        raise ConnectionError("isolated approval closure transport lost")
+                    return send(method,path,body,*args,**kw)
+
+                callback.request = lose_closure
+                with worker_callbacks(host,callback,lambda:None,notify_terminal=lambda tid,state:terminals.put((tid,state))):
+                    for suffix,seen in (("cold-closed",committed),("cold-unknown",undelivered)):
+                        turn = rpc.request("turn/start",{"threadId":session,"input":[
+                            {"type":"text","text":"Approval fixture "+suffix,"text_elements":[]}]})["turn"]["id"]
+                        row = until(lambda:approvals().get("trial-approval-"+suffix))
+                        clock.advance(TTL_SECONDS)
+                        self.assertEqual(terminals.get(timeout=4),(turn,"interrupted"))
+                        until(lambda:row["approval_id"] in seen)
+                old_turns = host.thread(session,include_turns=True)["turns"]
+        before = approvals()
+        known,unknown = (before["trial-approval-cold-"+key] for key in ("closed","unknown"))
+        known_id,unknown_id = known["approval_id"],unknown["approval_id"]
+        self.assertEqual(known["state"],"native_closed")
+        self.assertIsNone(unknown["closed_at"])
+        self.assertEqual(journal(),{known_id:None,unknown_id:None})
+        notices = approver.frames(0)
+        seen_after_restart,native_decisions_after_restart = [],[]
+        unconfirmed_after_restart = Event()
+        expected_digest = hashlib.sha256(encode(known).encode()).hexdigest()
+
+        with isolated_app_server(self.root,self.origin,settings) as rpc:
+            self.assertEqual(rpc.request("thread/resume",{"threadId":session,"cwd":self.root})["thread"]["id"],session)
+            with station(rpc,session) as (host,callback,resumed_worker):
+                self.assertEqual(resumed_worker,worker_session)
+                send,native_send = callback.request,rpc.send
+
+                def trace(method,path,*args,**kwargs):
+                    if path.startswith("worker/approvals/"):
+                        seen_after_restart.append((method,path))
+                    try:
+                        return send(method,path,*args,**kwargs)
+                    except Fault as error:
+                        if unknown_id in path and error.code=="native_approval_closure_pending":
+                            unconfirmed_after_restart.set()
+                        raise
+
+                def trace_native(packet):
+                    if "decision" in packet.get("result",{}):
+                        native_decisions_after_restart.append(packet)
+                    return native_send(packet)
+
+                callback.request,rpc.send = trace,trace_native
+                with worker_callbacks(host,callback,lambda:None):
+                    until(lambda:journal().get(known_id)==expected_digest)
+                    self.assertTrue(unconfirmed_after_restart.wait(7))
+                    self.assertEqual(journal(),{known_id:expected_digest,unknown_id:None})
+                    self.assertEqual(approvals(),before)
+                    self.assertEqual(host.thread(session,include_turns=True)["turns"],old_turns)
+        self.assertEqual(approver.frames(0),notices)
+        self.assertEqual(native_decisions_after_restart,[])
+        self.assertTrue(all(method=="POST" and path.endswith("/receipt") for method,path in seen_after_restart))
+        self.evidence = {"native_session":session,"worker_session_reused":True,"closed_approval_id":known_id,
+            "open_approval_id":unknown_id,"committed_router_receipt_digest":expected_digest,
+            "adapter_receipt_digest_after_reopen":journal()[known_id],"open_record_kept_pending":True,
+            "native_turn_ids":[turn["id"] for turn in old_turns],"new_native_turns":0,"new_approval_notices":0,
+            "queries_after_reopen":seen_after_restart,"native_decisions_after_reopen":0,
+            "boundary":"Actual App Server, Worker, Router and their databases. Local model, clock and dropped HTTP replies are fixtures."}
+        if output := os.environ.get("MOWULINK_CODEX_COLD_APPROVAL_EVIDENCE"):
+            Path(output).write_text(json.dumps(self.evidence,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
+
     def test_resume_catalog_uses_only_current_app_server_workspace_without_loading_history(self):
         root = Path(self.root)
         work,elsewhere = root/"approved",root/"other"

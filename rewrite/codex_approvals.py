@@ -1,7 +1,9 @@
 """Pass a decision to its live, bound App Server request only once."""
+from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass
 import hashlib
+import re
 from sqlite3 import Error as SQLiteError
 from threading import Event, Lock, Thread
 import time
@@ -40,6 +42,12 @@ class CodexApprovals:
         self.live = {}
         self.file_changes = {}
         self.ledger = Database(adapter_db,SCHEMA) if adapter_db is not None else None
+        self.cold_receipts = deque()
+        if self.ledger is not None:
+            with self.ledger.transaction() as db:
+                self.cold_receipts.extend(tuple(row) for row in db.execute("""SELECT approval_id,request_digest
+                    FROM codex_approval_intents WHERE session=? AND router_receipt_digest IS NULL ORDER BY rowid""",
+                    (session,)))
 
     def observe_item(self,method,params):
         if not isinstance(params,dict) or params.get("threadId")!=self.session:
@@ -139,6 +147,25 @@ class CodexApprovals:
             item.expired = True
             self.answer(item,{"source":"native_deadline","decision":"cancel"})
 
+    def save_receipt(self,approval_id,request_digest,receipt_digest):
+        with self.ledger.transaction() as db:
+            changed = db.execute("""UPDATE codex_approval_intents SET router_receipt_digest=?
+                WHERE approval_id=? AND session=? AND request_digest=?
+                AND (router_receipt_digest IS NULL OR router_receipt_digest=?)""",
+                (receipt_digest,approval_id,self.session,request_digest,receipt_digest)).rowcount
+            require(changed==1,503,"native_approval_journal_unconfirmed")
+
+    def recover_receipt(self,worker,approval_id,request_digest):
+        original = {"session":self.session,"request_digest":request_digest}
+        path = "worker/approvals/"+approval_id+"/receipt"
+        reply = worker.request("POST",path,original)
+        require(isinstance(reply,dict),502,"wrong_approval_closure")
+        digest = reply.get("receipt_digest")
+        require(isinstance(digest,str) and re.fullmatch("[0-9a-f]{64}",digest) and
+                reply==dict(original,approval_id=approval_id,state="native_closed",receipt_digest=digest),
+                502,"wrong_approval_closure")
+        self.save_receipt(approval_id,request_digest,digest)
+
     def confirm(self,worker,route,item,attempted):
         proof = {"session":self.session,"request_digest":item.digest,"attempted_response":attempted}
         if attempted and attempted["source"]=="native_deadline":
@@ -150,12 +177,7 @@ class CodexApprovals:
         with self.lock:
             if self.live.get(item.request_id) is item:
                 if self.ledger is not None:
-                    digest = hashlib.sha256(encode(receipt).encode()).hexdigest()
-                    with self.ledger.transaction() as db:
-                        changed = db.execute("""UPDATE codex_approval_intents SET router_receipt_digest=?
-                            WHERE approval_id=? AND session=? AND request_digest=?""",
-                            (digest,item.id,self.session,item.digest)).rowcount
-                        require(changed==1,503,"native_approval_journal_unconfirmed")
+                    self.save_receipt(item.id,item.digest,hashlib.sha256(encode(receipt).encode()).hexdigest())
                 del self.live[item.request_id]
 
     def advance(self,worker,item):
@@ -218,12 +240,27 @@ class CodexApprovals:
                     except (Fault,OSError,SQLiteError):
                         # Keep the original request available for lookup; the native response is never resent.
                         continue
+        def reconcile_cold_receipts():
+            # Previous-instance entries can only look up a stored closure, never answer or submit one.
+            while self.cold_receipts and not stop.is_set():
+                try:
+                    self.recover_receipt(worker,*self.cold_receipts[0])
+                except (Fault,OSError,SQLiteError):
+                    self.cold_receipts.rotate(-1)
+                else:
+                    self.cold_receipts.popleft()
+                if self.cold_receipts:
+                    stop.wait(5)
+
         relay,deadlines = Thread(target=pump,daemon=True),Thread(target=enforce_deadlines,daemon=True)
+        recovery = Thread(target=reconcile_cold_receipts,daemon=True)
         relay.start()
         deadlines.start()
+        recovery.start()
         try:
             yield
         finally:
             stop.set()
             deadlines.join(timeout=3)
             relay.join(timeout=11)
+            recovery.join(timeout=6)

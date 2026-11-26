@@ -1,0 +1,27 @@
+{
+  "native_session": "01a218b5-0dec-75a2-bdfe-8642073a6b9a",
+  "worker_session_reused": true,
+  "closed_approval_id": "6a005606-d747-44fa-b8b9-8c2965bb9f0d",
+  "open_approval_id": "4a43b25a-abf8-4cf8-90c6-d66d9d7a14db",
+  "committed_router_receipt_digest": "43a2d3c01c3c0fa02cb3f6871e868b6b99a8a9eb61af370a9e80992a738bf38e",
+  "adapter_receipt_digest_after_reopen": "43a2d3c01c3c0fa02cb3f6871e868b6b99a8a9eb61af370a9e80992a738bf38e",
+  "open_record_kept_pending": true,
+  "native_turn_ids": [
+    "01a218b5-0e0e-7e83-af02-a13687bd3aa2",
+    "01a218b5-1015-7161-9da3-95618875b2dc"
+  ],
+  "new_native_turns": 0,
+  "new_approval_notices": 0,
+  "queries_after_reopen": [
+    [
+      "POST",
+      "worker/approvals/6a005606-d747-44fa-b8b9-8c2965bb9f0d/receipt"
+    ],
+    [
+      "POST",
+      "worker/approvals/4a43b25a-abf8-4cf8-90c6-d66d9d7a14db/receipt"
+    ]
+  ],
+  "native_decisions_after_reopen": 0,
+  "boundary": "Actual App Server, Worker, Router and their databases. Local model, clock and dropped HTTP replies are fixtures."
+}

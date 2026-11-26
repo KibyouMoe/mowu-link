@@ -209,6 +209,19 @@ def route(orders,actor,method,parts,body):
                 return record(row,session,now)
             require(record(row,session,now)["state"]=="pending",409,"approval_not_pending")
             db.execute("UPDATE native_approvals SET decision=? WHERE worker_id=? AND approval_id=?",(decision,wid,aid))
+        elif method=="POST" and len(parts)==4 and parts[3]=="receipt":
+            require(actor==worker,403,"forbidden")
+            require(set(body)=={"session_id","session","request_digest"},422,"invalid_approval_receipt_lookup")
+            orders.active_session(db,wid,body)
+            native_session = string(body,"session")
+            request_digest = string(body,"request_digest")
+            require(row,404,"approval_not_found")
+            require(row["worker_session"]==session and row["request_digest"]==request_digest
+                    and json.loads(row["request"])["session"]==native_session,409,"approval_request_conflict")
+            require(row["closed_at"] is not None,409,"native_approval_closure_pending")
+            # Return correlation and a digest only, without a command, diff or decision to forward.
+            return {"approval_id":aid,"session":native_session,"request_digest":request_digest,"state":"native_closed",
+                    "receipt_digest":hashlib.sha256(encode(record(row,session,now)).encode()).hexdigest()}
         elif method=="PUT" and len(parts)==4 and parts[3]=="closed":
             require(actor==worker,403,"forbidden")
             close_native(db,orders,wid,aid,row,session,now,body)
