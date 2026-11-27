@@ -2,6 +2,7 @@ from email.message import EmailMessage
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 import json
 from pathlib import Path
+from queue import Queue
 import shutil
 import socketserver
 import ssl
@@ -10,7 +11,8 @@ import imaplib
 import os
 import sys
 from tempfile import TemporaryDirectory
-from threading import Thread
+from threading import Event, Thread
+import time
 import unittest
 from unittest.mock import patch
 from urllib.request import ProxyHandler,build_opener
@@ -20,8 +22,12 @@ from .cutover import digest
 from .feed_return import audit, stage
 from .feeds import Feed, poll_game, poll_mail
 from .legacy_test_fixture import archival_compatibility, source_for
+from .release_check import config
 from .state_bundle import capture
-from .storage import Fault,encode
+from .storage import Fault,StateWriterBusy,encode,state_writer
+from .test_state_bundle import running
+from .trigger import archive_status
+from .wire import route,serve_authenticated
 
 
 class Mailbox:
@@ -83,7 +89,7 @@ class Sources(unittest.TestCase):
         self.assertEqual(self.mail.cursor()["position"],1)
         self.assertFalse(self.mail.trigger.pending())
 
-    def game_server(self):
+    def game_server(self,hold=None):
         self.head,self.records,self.requests = 14,[],[]
         fixture = self
         class Bridge(BaseHTTPRequestHandler):
@@ -99,9 +105,13 @@ class Sources(unittest.TestCase):
                     media = "text/event-stream"
                 self.send_response(200)
                 self.send_header("Content-Type",media)
-                self.send_header("Content-Length",str(len(body)))
+                if hold is None or self.path=="/state":
+                    self.send_header("Content-Length",str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
+                if hold is not None and self.path!="/state":
+                    self.wfile.flush()
+                    hold.wait(30)
         server = self.enterContext(ThreadingHTTPServer(("127.0.0.1",0),Bridge))
         thread = Thread(target=server.serve_forever,kwargs={"poll_interval":0.01},daemon=True)
         thread.start()
@@ -109,14 +119,135 @@ class Sources(unittest.TestCase):
         self.addCleanup(server.shutdown)
         return "http://127.0.0.1:"+str(server.server_port)
 
-    @unittest.skipUnless(shutil.which("openssl"),"temporary TLS certificate generator required")
-    def test_standard_imap_client_requires_valid_tls_and_uses_read_only_peek(self):
-        cert,key = self.root/"mail.pem",self.root/"key.pem"
+    def watch_command(self,kind,settings,router):
+        return [sys.executable,"-B","-m","rewrite.feeds",kind,"--config",str(settings),
+                "--watch","--router-connection",str(router),"--interval","1"]
+
+    @staticmethod
+    def stop_watch(process):
+        if process.poll() is None:
+            process.terminate()
+        try:
+            return process.communicate(timeout=8)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate(timeout=8)
+            raise
+
+    def start_watch(self,command,instance,name):
+        process = subprocess.Popen(command,cwd=Path(__file__).resolve().parents[1],text=True,
+                                   stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+        self.addCleanup(lambda:self.stop_watch(process) if process.poll() is None else None)
+        ready = Queue()
+        Thread(target=lambda:ready.put(process.stdout.readline()),daemon=True).start()
+        line = ready.get(timeout=10)
+        if not line:
+            self.fail(self.stop_watch(process)[1])
+        self.assertEqual(json.loads(line),{"component":"trigger","instance_id":instance,"trigger_name":name,"watch":True})
+        return process
+
+    def wait_for(self,check):
+        until = time.monotonic()+12
+        while time.monotonic()<until:
+            result = check()
+            if result:
+                return result
+            time.sleep(.05)
+        self.fail("timed out waiting for the isolated source or Router")
+
+    def certificate(self):
+        cert,key = self.root/"feed.pem",self.root/"key.pem"
         subprocess.run(["openssl","req","-x509","-newkey","rsa:2048","-nodes","-days","1","-subj","/CN=localhost",
                         "-addext","subjectAltName=IP:127.0.0.1","-keyout",str(key),"-out",str(cert)],
-                       capture_output=True,check=True)
-        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        ctx.load_cert_chain(cert,key)
+                       capture_output=True,check=True,timeout=10)
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(cert,key)
+        return cert,context
+
+    @unittest.skipUnless(shutil.which("openssl"),"temporary TLS certificate generator required")
+    def test_game_watch_collects_with_router_down_and_replays_t04_after_restart(self):
+        hold = Event()
+        origin = self.game_server(hold)
+        self.addCleanup(hold.set)
+        event_text = "SuperCreek "+("A"*240)
+        self.records = [(15,{"text":event_text}),(16,{"text":"Other chat"})]
+        source = self.game.trigger
+        instance = source.instance_id
+        token = self.loop.trigger_clients[instance].token
+        cert,tls = self.certificate()
+        ready_for_source,lost = Event(),Event()
+        attempts = []
+
+        def apply(actor,method,path,body,headers):
+            result = route(self.loop.orders,actor,method,path,body,headers)
+            if path=="/v1/messages" and method=="POST":
+                attempts.append((body["message_id"],headers["Idempotency-Key"],body["attachment_ids"]))
+                if not lost.is_set():
+                    ready_for_source.clear()
+                    lost.set()
+                    raise ConnectionResetError("fixture lost T04 after commit")
+            return result
+
+        router = serve_authenticated({token:"trigger/"+instance},("127.0.0.1",0),tls,apply)
+        router.verify_request = lambda *_args: ready_for_source.is_set()
+        self.enterContext(running(router))
+        settings = config(self.root,"watch-source.json",{"origin":origin,"database":str(source.db.path)})
+        connect = config(self.root,"watch-router.json",{"url":f"https://127.0.0.1:{router.server_port}",
+                                                         "token":token,"ca_file":str(cert)})
+        command = self.watch_command("game",settings,connect)
+        process = self.start_watch(command,instance,"mc_chat")
+        self.wait_for(lambda:archive_status(source.db.path)["awaiting_router_receipt"]==2)
+        self.assertIsNone(process.poll())
+        self.assertFalse(hold.is_set())
+        self.assertEqual(self.loop.hermes.messages()["items"],[])
+        original = source.pending()
+        with self.assertRaises(StateWriterBusy),state_writer(source.db.path):
+            self.fail("stopped-state lock was acquired with the watcher running")
+        manual = [sys.executable,"-B","-m","rewrite.service","trigger","--db",str(source.db.path),"--name","mc_chat",
+                  "send","--connection",str(connect)]
+        for conflict_command in (command,manual):
+            rejected = subprocess.run(conflict_command,capture_output=True,text=True,timeout=10)
+            self.assertEqual((rejected.returncode,rejected.stdout,rejected.stderr),(1,"","state_writer_already_running\n"))
+        ready_for_source.set()
+        self.assertTrue(lost.wait(10))
+        first, = self.loop.hermes.messages()["items"]
+        self.assertEqual(first["message_id"],original[0])
+        self.assertEqual(source.pending(),original)
+
+        self.stop_watch(process)
+        if os.name=="posix":
+            self.assertEqual(process.returncode,0)
+        with state_writer(source.db.path):
+            self.assertEqual(source.pending(),original)
+        self.head = 16
+        ready_for_source.set()
+        recovered = self.start_watch(command,instance,"mc_chat")
+        self.wait_for(lambda:archive_status(source.db.path)["awaiting_router_receipt"]==0)
+        self.wait_for(lambda:len(self.requests)==2)
+        self.assertIsNone(recovered.poll())
+        self.assertFalse(hold.is_set())
+        self.assertEqual(self.requests,[("/stream?since=14","14"),("/stream?since=15","15")])
+        self.assertEqual([entry[0] for entry in attempts],[original[0],*original])
+        self.assertEqual(attempts[0],attempts[1])
+        self.assertEqual(self.loop.hermes.messages(message_id=original[0])["items"],[first])
+        self.assertEqual(len(self.loop.hermes.messages()["items"]),2)
+        self.assertEqual(len(self.loop.manager_wire.frames(0)),1)
+        file, = first["attachment_ids"]
+        body = self.loop.manager_wire.request("GET","attachments/"+file)["bytes"]
+        self.assertEqual(body,event_text.encode())
+        self.stop_watch(recovered)
+        if os.name=="posix":
+            self.assertEqual(recovered.returncode,0)
+        if output := os.environ.get("MOWULINK_GAME_WATCH_EVIDENCE"):
+            Path(output).write_text(encode({"instance_id":instance,"local_message_ids":original,
+                "first_received_at":first["received_at"],"replayed_attachment_id":file,"attachment_bytes":len(body),
+                "post_attempts":attempts,"notifications":1,"router_tls":True,
+                "retained_work_when_router_down":2,"read_while_stream_open":True,
+                "writer_conflicts_refused":2,"source_reconnect":self.requests,
+                "boundary":"Independent Trigger process, SQLite and HTTPS Router; game bridge fixture."})+"\n",encoding="utf-8")
+
+    def imap_server(self,mailbox):
+        cert,ctx = self.certificate()
         seen = []
         class IMAP(socketserver.StreamRequestHandler):
             def handle(self):
@@ -132,12 +263,14 @@ class Sources(unittest.TestCase):
                     elif command==b"EXAMINE":
                         self.wfile.write(b"* 1 EXISTS\r\n")
                     elif command==b"STATUS":
-                        self.wfile.write(b"* STATUS INBOX (UIDVALIDITY 31 UIDNEXT 13)\r\n")
+                        self.wfile.write(f"* STATUS INBOX (UIDVALIDITY {mailbox.epoch} UIDNEXT {mailbox.next})\r\n".encode())
                     elif command==b"UID" and args[0]==b"SEARCH":
-                        self.wfile.write(b"* SEARCH 12\r\n")
+                        values = " ".join(map(str,mailbox.raw))
+                        self.wfile.write(f"* SEARCH {values}\r\n".encode())
                     elif command==b"UID" and args[0]==b"FETCH" and b"BODY.PEEK[]" in line:
-                        body = b"From: fixture@example.test\r\nSubject: New mail\r\n\r\nHello"
-                        self.wfile.write(b"* 1 FETCH (UID 12 BODY[] {"+str(len(body)).encode()+b"}\r\n"+body+b")\r\n")
+                        uid = int(args[1])
+                        body = mailbox.raw[uid]
+                        self.wfile.write(f"* 1 FETCH (UID {uid} BODY[] {{{len(body)}}}\r\n".encode()+body+b")\r\n")
                     elif command!=b"LOGIN":
                         self.wfile.write(tag+b" BAD unexpected command\r\n")
                         continue
@@ -148,6 +281,14 @@ class Sources(unittest.TestCase):
         th.start()
         self.addCleanup(th.join)
         self.addCleanup(server.shutdown)
+        return server,cert,seen
+
+    @unittest.skipUnless(shutil.which("openssl"),"temporary TLS certificate generator required")
+    def test_standard_imap_client_requires_valid_tls_and_uses_read_only_peek(self):
+        box = Mailbox()
+        box.next = 13
+        box.raw[12] = b"From: fixture@example.test\r\nSubject: New mail\r\n\r\nHello"
+        server,cert,seen = self.imap_server(box)
         self.mail.start(None,"31",11)
         with imaplib.IMAP4_SSL(*server.server_address,ssl_context=ssl.create_default_context(cafile=str(cert)),timeout=3) as box:
             box.login("fixture","test-only")
@@ -157,6 +298,47 @@ class Sources(unittest.TestCase):
         self.assertIn("New mail\nHello",item["text"])
         self.assertIn(b"CAPABILITY",seen)
         self.assertEqual([c for c in seen if c!=b"CAPABILITY"],[b"LOGIN",b"EXAMINE",b"STATUS",b"UID",b"UID",b"LOGOUT"])
+
+    @unittest.skipUnless(shutil.which("openssl"),"temporary TLS certificate generator required")
+    def test_mail_watch_polls_read_only_and_delivers_new_uids_without_restarting(self):
+        mailbox = Mailbox()
+        mailbox.raw[11] = b"Subject: Before first launch\r\n\r\nExisting mail"
+        server,cert,seen = self.imap_server(mailbox)
+        instance = self.mail.trigger.instance_id
+        router = self.loop.trigger_clients[instance]
+        args = {"host":server.server_address[0],"port":server.server_address[1],"user":"fixture","password":"test-only",
+                "ca_file":str(cert),"database":str(self.mail.db.path)}
+        settings = config(self.root,"watch-mail.json",args)
+        connect = config(self.root,"watch-router.json",{"url":router.url,"token":router.token})
+        process = self.start_watch(self.watch_command("mail",settings,connect),instance,"email")
+
+        def cursor():
+            with self.mail.db.transaction() as db:
+                row = db.execute("SELECT position FROM feed_cursor").fetchone()
+                return row[0] if row else None
+
+        self.wait_for(lambda:cursor()==11)
+        self.assertEqual(self.loop.hermes.messages()["items"],[])
+        mailbox.raw[12] = b"Subject: After launch\r\n\r\nNew mail"
+        mailbox.next = 13
+        messages = self.wait_for(lambda:self.loop.hermes.messages()["items"])
+        item, = messages
+        self.assertEqual((item["level"],item["text"],item["instance_id"]),("Info","After launch\nNew mail",instance))
+        self.wait_for(lambda:archive_status(self.mail.db.path)["awaiting_router_receipt"]==0)
+        self.assertEqual(cursor(),12)
+        self.assertIsNone(process.poll())
+        self.assertGreaterEqual(seen.count(b"EXAMINE"),2)
+        self.assertNotIn(b"SELECT",seen)
+        self.assertNotIn(b"STORE",seen)
+        self.assertEqual(self.loop.manager_wire.frames(0),[])
+        self.stop_watch(process)
+        if os.name=="posix":
+            self.assertEqual(process.returncode,0)
+        if output := os.environ.get("MOWULINK_MAIL_WATCH_EVIDENCE"):
+            Path(output).write_text(encode({"instance_id":instance,"mail_uid":12,"previous_position":11,
+                "message_id":item["message_id"],"received_at":item["received_at"],"notifications":0,
+                "same_watcher_process":True,"mailbox_read_only":True,"mailbox_tls":True,
+                "boundary":"Independent Trigger process, local TLS IMAP fixture and isolated Router."})+"\n",encoding="utf-8")
 
     def test_game_real_stream_reconnect_source_replay_and_new_epoch(self):
         origin = self.game_server()

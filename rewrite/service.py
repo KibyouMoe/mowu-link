@@ -205,14 +205,15 @@ def serve(args,stack):
 
 
 def source(args):
-    item = Trigger(args.db, args.name)
-    if args.operation == "identity":
-        return {"instance_id":item.instance_id}
-    if args.operation == "record":
-        return {"message_id":item.record(args.level,args.text,args.file)}
-    client = connection(args.connection)
-    ids = [args.message_id] if args.message_id else item.pending()
-    return {"receipts":[item.send(client,mid) for mid in ids]}
+    with state_writer(args.db):
+        item = Trigger(args.db, args.name)
+        if args.operation == "identity":
+            return {"instance_id":item.instance_id}
+        if args.operation == "record":
+            return {"message_id":item.record(args.level,args.text,args.file)}
+        client = connection(args.connection)
+        ids = [args.message_id] if args.message_id else item.pending()
+        return {"receipts":[item.send(client,mid) for mid in ids]}
 
 
 def main():
@@ -317,7 +318,10 @@ def main():
     decision.add_argument("--decision",required=True,choices=("accept","cancel"))
     args = parser.parse_args()
     if args.component == "trigger":
-        print(encode(source(args)))
+        try:
+            print(encode(source(args)))
+        except StateWriterBusy as error:
+            parser.exit(1,str(error)+"\n")
     elif args.component=="handoff-admission":
         if not valid_guid(args.handoff_id):
             parser.error("expected a handoff ID")

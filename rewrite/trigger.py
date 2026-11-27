@@ -71,7 +71,9 @@ class Trigger:
                        (fid,mid,position,name,offset,digest.hexdigest()))
         return mid
 
-    def upload(self, router, file):
+    def upload(self, router, file, *, stop=None):
+        if stop is not None and stop.is_set():
+            raise InterruptedError
         fid = file["id"]
         if file["file_id"]:
             return file["file_id"]
@@ -85,6 +87,8 @@ class Trigger:
             with self.db.transaction() as db:
                 db.execute("UPDATE files SET upload_id=? WHERE id=?", (uid, fid))
         while not status["complete"]:
+            if stop is not None and stop.is_set():
+                raise InterruptedError
             pos = status["next_offset"]
             with self.db.transaction() as db:
                 chunk = db.execute("SELECT bytes FROM pieces WHERE id=? AND start=?", (fid, pos)).fetchone()
@@ -96,7 +100,7 @@ class Trigger:
             db.execute("UPDATE files SET file_id=? WHERE id=?", (status["attachment_id"], fid))
         return status["attachment_id"]
 
-    def send(self, router, mid):
+    def send(self, router, mid, *, stop=None):
         with self.db.transaction() as db:
             row = db.execute("SELECT * FROM archive WHERE id=?", (mid,)).fetchone()
             require(row, 404, "local_message_not_found")
@@ -104,13 +108,16 @@ class Trigger:
                 return json.loads(row["receipt"])
             files = db.execute("SELECT * FROM files WHERE message_id=? ORDER BY position", (mid,)).fetchall()
         body = json.loads(row["body"])
-        body["attachment_ids"] = [self.upload(router, file) for file in files]
+        body["attachment_ids"] = [self.upload(router,file,stop=stop) for file in files]
+        if stop is not None and stop.is_set():
+            raise InterruptedError
         receipt = router.request("POST", "messages", body, "message-" + mid)
         require(receipt.get("message_id") == mid and receipt.get("received_at"), 409, "missing_message_receipt")
         with self.db.transaction() as db:
             db.execute("UPDATE archive SET body=?,receipt=? WHERE id=?", (encode(body), encode(receipt), mid))
         return receipt
 
-    def pending(self):
+    def pending(self, *, limit=-1):
         with self.db.transaction() as db:
-            return [row[0] for row in db.execute("SELECT id FROM archive WHERE receipt IS NULL ORDER BY rowid")]
+            return [row[0] for row in db.execute("SELECT id FROM archive WHERE receipt IS NULL ORDER BY rowid LIMIT ?",
+                                                 (limit,))]

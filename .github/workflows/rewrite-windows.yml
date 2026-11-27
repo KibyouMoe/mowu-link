@@ -91,6 +91,8 @@ jobs:
                 'rewrite.test_workspace_engine.WindowsWorkspaceEngine'
                 'rewrite.test_peers.Peers.test_original_reply_link_and_formal_isolation'
                 'rewrite.test_feeds.Sources.test_game_real_stream_reconnect_source_replay_and_new_epoch'
+                'rewrite.test_feeds.Sources.test_game_watch_collects_with_router_down_and_replays_t04_after_restart'
+                'rewrite.test_feeds.Sources.test_mail_watch_polls_read_only_and_delivers_new_uids_without_restarting'
                 'rewrite.test_feeds.Sources.test_archive_failure_cannot_advance_cursor_and_stale_reader_cannot_skip_event'
                 'rewrite.test_codex_rpc.WindowsCodexRpc'
                 'rewrite.test_codex_app_server.CodexAppServer.test_codex_adapter_process_handles_native_report_without_controller_dispatch'

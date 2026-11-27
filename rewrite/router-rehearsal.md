@@ -484,6 +484,8 @@ python3 -m rewrite.state_bundle rollback --snapshot ./snapshot --manifest-sha256
 
 在同一停写点采集 Router 与所有在用 Trigger 实例的数据库，再校验独立记录的快照摘要。
 
+用 `rewrite.feeds --watch` 的工位，先停止该常驻采集器，等发送线程退出。进程在线时，来源库的写锁会拒绝拍快照。采集与转发恢复前先用 `trigger-status` 读待 T04 的条目数，再从原实例和原连接文件继续。游戏桥保持 SSE 长连接时，发送与退出路径均在隔离环境实测。
+
 ```sh
 python3 -B -m rewrite.state_bundle audit-trigger --snapshot "$SNAPSHOT" --manifest-sha256 "$MANIFEST_SHA256"
 ```

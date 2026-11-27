@@ -1,4 +1,4 @@
-"""One-shot collectors for an explicitly configured IMAP mailbox or Minecraft SSE bridge."""
+"""Collect an explicit mailbox or Minecraft bridge and optionally deliver continuously."""
 import argparse
 from email import policy
 from email.parser import BytesParser
@@ -8,12 +8,15 @@ from io import BytesIO
 import json
 from pathlib import Path
 import re
+import signal
 import ssl
+import sys
+from threading import Event, Thread
 from urllib.parse import urlsplit
 from urllib.request import build_opener, HTTPSHandler, ProxyHandler, Request
 
-from .service import private_config
-from .storage import Database, encode, guid, require
+from .service import connection, private_config
+from .storage import Database, Fault, StateWriterBusy, encode, guid, require, state_writer
 from .trigger import Trigger
 from .wire import NoRedirect
 
@@ -222,9 +225,9 @@ def poll_mail(feed, mailbox, folder):
         pos = uid
 
 
-def mc_frames(stream):
+def mc_frames(stream,stop=None):
     seq,data = None,[]
-    while line := stream.readline():
+    while (stop is None or not stop.is_set()) and (line := stream.readline()):
         field,_,value = line.decode("utf-8").rstrip("\r\n").partition(":")
         value = value.removeprefix(" ")
         if line in (b"\r\n",b"\n"):
@@ -252,7 +255,7 @@ def mc_text(payload,own_name):
     return ("Event" if urgent else "Info"),(f"<{actor}> "+text if actor and not match else text)
 
 
-def poll_game(feed,origin,opener,configured_player=None):
+def poll_game(feed,origin,opener,configured_player=None,*,stop=None):
     before = feed.cursor()
     with opener.open(origin+"/state",timeout=10) as response:
         state = json.load(response)
@@ -264,7 +267,7 @@ def poll_game(feed,origin,opener,configured_player=None):
     req = Request(origin+f"/stream?since={since}",headers={"Accept":"text/event-stream","Last-Event-ID":str(since)})
     with opener.open(req,timeout=65) as stream:
         require(stream.headers.get_content_type()=="text/event-stream",503,"expected_game_stream")
-        for raw_id,raw in mc_frames(stream):
+        for raw_id,raw in mc_frames(stream,stop):
             try:
                 payload = json.loads(raw)
             except ValueError:
@@ -284,38 +287,130 @@ def poll_game(feed,origin,opener,configured_player=None):
             level,text = mc_text(payload,own_name)
             feed.capture(gen,pos,seq,level,text,game_checksum=checksum)
             pos = max(pos,seq)
-    require(not overlap,409,"game_source_overlap_unavailable")
+    if stop is None or not stop.is_set():
+        require(not overlap,409,"game_source_overlap_unavailable")
+
+
+def retry_log(phase,error):
+    outcome = {"event":"trigger_retry","phase":phase}
+    if isinstance(error,Fault):
+        outcome["http_status"] = error.status
+    print(encode(outcome),file=sys.stderr,flush=True)
+
+
+def watch(feed,poll,router,interval):
+    stop = Event()
+    failures = []
+
+    def send_pending():
+        delay = 1
+        try:
+            while not stop.is_set():
+                pending = feed.trigger.pending(limit=1)
+                if not pending:
+                    stop.wait(1)
+                    continue
+                try:
+                    feed.trigger.send(router,pending[0],stop=stop)
+                except (OSError,Fault) as error:
+                    if not stop.is_set():
+                        retry_log("router",error)
+                        stop.wait(delay)
+                        delay = min(delay*2,30)
+                else:
+                    delay = 1
+        except Exception as error:
+            failures.append(error)
+            stop.set()
+
+    def interrupt(_number,_frame):
+        if not stop.is_set():
+            stop.set()
+            raise KeyboardInterrupt
+
+    # The process owns the writer lock until the sender has exited, even if collection stops first.
+    sender = Thread(target=send_pending)
+    sender.start()
+    previous = {}
+    try:
+        for number in (signal.SIGTERM,signal.SIGINT):
+            previous[number] = signal.signal(number,interrupt)
+        print(encode({"component":"trigger","instance_id":feed.trigger.instance_id,
+                      "trigger_name":feed.trigger.name,"watch":True}),flush=True)
+        while not stop.is_set():
+            try:
+                poll(stop)
+            except (OSError,Fault,imaplib.IMAP4.error,ValueError) as error:
+                if not stop.is_set():
+                    retry_log("source",error)
+            stop.wait(interval)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        stop.set()
+        sender.join()
+        for number,handler in previous.items():
+            signal.signal(number,handler)
+    if failures:
+        raise RuntimeError("trigger_sender_failed") from failures[0]
+
+
+def game_origin(cfg):
+    origin = cfg["origin"].rstrip("/")
+    url = urlsplit(origin)
+    require(url.hostname and not (url.username or url.password or url.query or url.fragment or url.path) and
+            (url.scheme=="https" or url.scheme=="http" and url.hostname=="127.0.0.1"),422,"invalid_game_origin")
+    return origin
+
+
+def run_feed(args,cfg,router):
+    if args.kind=="mail":
+        host,port,user,folder = cfg["host"],cfg.get("port",993),cfg["user"],cfg.get("folder","INBOX")
+        feed = Feed(cfg["database"],"email",[host,port,user,folder])
+    else:
+        origin = game_origin(cfg)
+        feed = Feed(cfg["database"],"mc_chat",[origin])
+    if args.import_legacy_cursor:
+        print(encode(feed.import_cursor(args.import_legacy_cursor,mailbox_confirmed=args.confirm_legacy_mailbox)))
+        return
+    context = ssl.create_default_context(cafile=cfg.get("ca_file"))
+    if args.kind=="mail":
+        password = cfg["password"]
+        def poll(_stop):
+            with imaplib.IMAP4_SSL(host,port,ssl_context=context,timeout=30) as box:
+                box.login(user,password)
+                poll_mail(feed,box,folder)
+    else:
+        opener = build_opener(ProxyHandler({}),NoRedirect(),HTTPSHandler(context=context))
+        def poll(stop):
+            poll_game(feed,origin,opener,cfg.get("player"),stop=stop)
+    if args.watch:
+        watch(feed,poll,router,args.interval if args.interval is not None else (30 if args.kind=="mail" else 2))
+    else:
+        poll(None)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("kind",choices=["mail","game"])
     parser.add_argument("--config",required=True,type=Path)
+    parser.add_argument("--watch",action="store_true",help="collect and deliver until the process is stopped")
+    parser.add_argument("--router-connection",type=Path,help="owner-private Router connection for --watch")
+    parser.add_argument("--interval",type=int,help="seconds between source connections in --watch mode")
     parser.add_argument("--import-legacy-cursor",type=Path,help="stage a reviewed offline cursor; do not poll")
     parser.add_argument("--confirm-legacy-mailbox",action="store_true",help="the legacy cursor belongs to this exact mailbox")
     args = parser.parse_args()
+    if args.watch != bool(args.router_connection) or args.watch and args.import_legacy_cursor:
+        parser.error("--watch requires --router-connection and cannot import a cursor")
+    if args.interval is not None and (not args.watch or not 1<=args.interval<=3600):
+        parser.error("--interval requires --watch and a value from 1 to 3600")
     cfg = private_config(args.config)
-    if args.kind=="mail":
-        host,port,user,folder = cfg["host"],cfg.get("port",993),cfg["user"],cfg.get("folder","INBOX")
-        feed = Feed(cfg["database"],"email",[host,port,user,folder])
-        if args.import_legacy_cursor:
-            print(encode(feed.import_cursor(args.import_legacy_cursor,mailbox_confirmed=args.confirm_legacy_mailbox)))
-            return
-        context = ssl.create_default_context(cafile=cfg.get("ca_file"))
-        with imaplib.IMAP4_SSL(host,port,ssl_context=context,timeout=30) as box:
-            box.login(user,cfg["password"])
-            poll_mail(feed,box,folder)
-    else:
-        origin = cfg["origin"].rstrip("/")
-        url = urlsplit(origin)
-        require(url.hostname and not (url.username or url.password or url.query or url.fragment or url.path) and
-                (url.scheme=="https" or url.scheme=="http" and url.hostname=="127.0.0.1"),422,"invalid_game_origin")
-        feed = Feed(cfg["database"],"mc_chat",[origin])
-        if args.import_legacy_cursor:
-            print(encode(feed.import_cursor(args.import_legacy_cursor)))
-            return
-        context = ssl.create_default_context(cafile=cfg.get("ca_file"))
-        poll_game(feed,origin,build_opener(ProxyHandler({}),NoRedirect(),HTTPSHandler(context=context)),cfg.get("player"))
+    router = connection(args.router_connection) if args.router_connection else None
+    try:
+        with state_writer(Path(cfg["database"])):
+            run_feed(args,cfg,router)
+    except StateWriterBusy as error:
+        parser.exit(1,str(error)+"\n")
 
 
 if __name__=="__main__":

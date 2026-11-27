@@ -321,7 +321,18 @@ macOS 有本机 DSH SDK 时，单独运行同组的 `HermesGateway.test_rewrite_
 
 游戏来源用 `python3 -m rewrite.feeds game --config <游戏桥测试配置>`，读取显式设置的 origin 和 database，可指定 player。客户端读取 /state，再带原序号订阅 /stream，连接结束即退出。每次重开均从上次持久位置继续。旧游戏桥缺少启动标识，只能以序号下降识别重开。读不到稳定序号时停止采集，保留已确认的位置。
 
-两个采集器可在 Router 离线时工作。另用 `python3 -m rewrite.service trigger --db <来源库> --name email send --connection <Router测试连接>` 发送已留档的信息；游戏使用同一命令并将名称换为 mc_chat。拿到 Router 业务回执后移出待发送列表。这里只提供显式启动入口。
+单次采集后，可用 `python3 -m rewrite.service trigger --db <来源库> --name email send --connection <Router测试连接>` 发送已留档的信息。游戏来源名称为 `mc_chat`。拿到 Router 业务回执后移出待发送列表。
+
+也可让每个实例独立常驻。先用 `rewrite.service trigger ... identity` 建立实例并登记 Router 专属身份。使用该实例对应的私有连接文件启动。
+
+```sh
+python3 -B -m rewrite.feeds mail --config "$MAIL_CONFIG" --watch --router-connection "$MAIL_ROUTER"
+python3 -B -m rewrite.feeds game --config "$GAME_CONFIG" --watch --router-connection "$GAME_ROUTER"
+```
+
+常驻进程独立采集与按留档顺序发送。Router 离线时继续保存来源数据，连接恢复后沿原消息号和附件续传。游戏 SSE 长期开着时同样能发送。邮件默认每 30 秒重新轮询，游戏连接结束后默认等 2 秒再重连，可用 `--interval` 调整。Router 失败按 1 至 30 秒退避，仍未确认的最早一条保留在发件箱。就绪输出给出实例号，连接与积压分别看重试日志和 `trigger-status`。
+
+常驻进程独占来源库的写锁。其他采集、手动写入或发送同一实例时会被拒。停写备份前通过进程管理器停止采集器，等进程退出后再拍快照。Unix 下 `SIGTERM` 会停止采集并等待当前发送操作收尾。结果未明的请求在恢复时沿用原标识。各实例使用独立数据库与权限受限的配置文件。
 
 切换前用 `rewrite.state_bundle audit-trigger` 核对同一停写快照内的新版 Trigger 留档、Router 收件、T04 和附件。未得两侧确认时返回待对账的原消息号。复跑方式和处置见[新版 Trigger 对账](router-rehearsal.md#新版-trigger-对账)。
 
