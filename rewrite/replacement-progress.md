@@ -32,6 +32,8 @@
 
 再次迁入实现 `4958d9310f95923ce36775969a2c685e5a2477c3` 的 macOS 全量通过 339 项、按环境跳过 5 项。Linux arm64 核 336 个安装文件，全量通过 218 项、按环境跳过 126 项。macOS 安装目录专项 56 项全过，再次核对包内文件。包 SHA-256 为 `9dd358488d8817f1886852eed211c856244112846b570a92560d990d3caad3b3`。实际隔离 HTTPS 验证 Router 先旧后新再退回旧版，原待派单只有一张，试用库逐字节不变。Windows 安装和 DSH 原生两组均通过。[Windows CI](https://github.com/KibyouMoe/mowu-link/actions/runs/45926168638)
 
+旧 Worker 实时订阅已提供离线收件审计。实际旧 HTTP 在 ACK 失败时仍返回 4 条匹配事件，游标都停在 2。审计区分了累计确认后缺宿主记录的 1 条、缺总线确认但原生输入已观测的 2 条、只见受理的 1 条、正文冲突的 1 条。旧 Codex 与 DSH 管理器从隔离宿主的读回落盘，各自从待核转为确认一次入件。订阅候选仍需核实原工位快照和消费者归属。演练未用现役 Worker，也未向未决记录重发。[步骤](router-rehearsal.md#旧-worker-的实时订阅) · [审计证据](evidence/legacy-worker-subscription-audit.json)
+
 重新取消的 W04 已按具体指令核验。相同 A06 操作键重送保留原回执，自动重试沿用同一清理号。同一派发的下一条显式取消携带新的 `cleanup_id`。Worker 从原生收件识别该号，分别保存等待、清理及 Router 回执。隔离实测第一次迟报、重用旧键、换新键重播旧正文和错号都返回 409。新 W04 落库后故意丢回包，冷启沿原键查回，取消通知一条。复跑 `python3 -B -m unittest -v rewrite.test_cleanup rewrite.test_cutover -k cancel`。[HTTP 与回退实测](evidence/reissued-cancel-w04.json)
 
 用前版 `2490059e42d379183c19b0e82c208f545a3c78ee` 生成的隔离 Router、Worker 和适配器库做了升级。仅一次待确认的旧取消可以正常完成，已经成功的旧回执可沿原键回读。旧版已重复取消而未记录清理号时，拒绝无号回执，须由管理端发新指令。回退核对新指令及 W04 的同一清理号，缺号拒绝发布。[旧库升级](evidence/reissued-cancel-upgrade.json) · [回退演练](evidence/cutover-reviewed-cancel-retry.json)

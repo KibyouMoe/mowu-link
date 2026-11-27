@@ -267,6 +267,18 @@ python3 -B -m rewrite.cutover stage-reviewed-rollback \
 
 核对旧 Codex 或 DSH 时，在停写副本中先用旧插件的 `subscriptionMessageId` 从来源名及旧事件序号取回消息号，再查原工位的常驻收件账本或 `receipt-archive/<消息号>.json`。可将原 `origin=subscription`、事件头及正文、目标会话、原生回合号和宿主实际输入逐一对上。只有拉取、飞书提示或收件状态待核时，不能推断宿主已收到。旧插件提交 `f399148df99ed58568f4931aed414e3a83fa7a25` 的两套订阅用例各实跑一遍，同号两次到达只形成一条输入及一张测试提示，均无工单成果。该复验使用旧运行模块、HTTP 与宿主替身，未读取生产工位收件档。复跑该仓的 `node --test --test-name-pattern='subscriptions declare, poll, serialize' Plugins/Codex/tests/router-runtime.test.mjs Plugins/DSH/tests/router-runtime.test.mjs`。
 
+用三个冻结副本运行订阅审计。保留断开旧 Worker 连接之前的 Router 副本，旧 Router 会在断开连接后删除活跃订阅，重开后查不到记录无法证明旧能力已退役。Trigger 用原事件库副本，Worker 用已经确认归属的 `desktop-manager-state.json`。分别记录原件摘要。若有已压入档案的旧回执，可另传 `--receipt-index` 和 `--receipt-index-sha256`。索引为消息 UUID 到回执文件 SHA-256 的 JSON 对象，使用原文件名存于索引旁的 `receipt-archive/`。
+
+```sh
+python3 -B -m rewrite.legacy_subscription \
+  --router-snapshot ./old-router --router-sha256 "${ROUTER_DB_SHA256}" \
+  --trigger-snapshot ./old-trigger --trigger-sha256 "${TRIGGER_MANIFEST_SHA256}" \
+  --worker "${OLD_WORKER}" --subscription-id "${OLD_SUBSCRIPTION_ID}" \
+  --worker-state ./old-worker/desktop-manager-state.json --worker-state-sha256 "${WORKER_STATE_SHA256}"
+```
+
+报告给出两端游标、原 Trigger 确认和每条消息的宿主证据。只有请求正文、固定会话、原生回合、已观察输入及其摘要一致才记 `input_observed`。该状态只证明原生会话有过这条输入。表内缺回执、仅 RPC 接受、回执冲突分别列出，无法据此认定从未发送。报告省略正文。审计只读，且仍由原切换门槛拦截活跃订阅。隔离真实旧 HTTP 覆盖了确认后丢弃响应和 ACK 失败仍返回事件两种情况。用旧 Codex、DSH 管理器及宿主替身实测，同一受理回执在原生读回前为待核，读回后能核到同一个输入。复跑 `MOWULINK_TEST_LEGACY_WORKER_ROOT="${PINNED_LEGACY_WORKER_SOURCE}" python3 -B -m unittest -v rewrite.test_source_rollback`。旧 Worker 源码取上面核对过的版本。[订阅审计实测](evidence/legacy-worker-subscription-audit.json)
+
 发现活跃的旧 Worker 订阅时，离线准备仍会停在 `active_subscriptions`。先核对原订阅配置、两端游标、过滤项和原宿主收件，再决定沿独立来源把消息交给溪流，或继续保留旧路径。复跑 `python3 -B -m unittest -v rewrite.test_source_rollback -k legacy_worker_subscription`。[旧端读回证据](evidence/legacy-worker-subscription-ack.json)
 
 ## 旧采集来源交接

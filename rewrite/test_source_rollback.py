@@ -6,10 +6,11 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+from tempfile import TemporaryDirectory
 import unittest
 from urllib.request import ProxyHandler, build_opener
 
-from . import test_cutover, test_feeds, test_trigger_archive
+from . import legacy_subscription, test_cutover, test_feeds, test_trigger_archive
 from .cutover import backup, digest, prepare, reconcile, rollback, stage_queue_rollback
 from .devloop import FixtureHost, Loop, agent_report
 from .feeds import Feed, poll_game, poll_mail
@@ -33,7 +34,7 @@ class SourceRollback(unittest.TestCase):
         case = test_cutover.Cutover()
         self.addCleanup(case.doCleanups)
         case.setUp()
-        observed = json.loads(case.old("""
+        observed = json.loads(case.old(r"""
 from contextlib import contextmanager
 import importlib.util
 from threading import Thread
@@ -90,12 +91,28 @@ with run(bus.TriggerServer(("127.0.0.1",0),trigger_store,token="isolated-trigger
         receipts=[r[0] for r in trigger_store._conn.execute(
             "SELECT event_id FROM receipts WHERE subscriber=? ORDER BY event_id",(subscriber,))]
         repeat,again=http("GET",route,token="isolated-router")
+        for event_id,text in (
+            ("seen","observed \u8ba2\u9605 \U0001f343 \nline two"),("rpc","only the dispatch RPC answered"),
+            ("wrong","request body was different"),("current","present in current state"),
+        ):
+            trigger_store.add_event("mc_chat",text,kind="chat",level="event",event_id=event_id)
+        trigger_store.add_event("mc_chat","different kind",kind="system",level="event",event_id="other-kind")
+        trigger_store.add_event("mc_chat","archive only",kind="chat",level="log",event_id="log")
+        # The real old handler returns matching events even when the Trigger ACK fails.
+        router.trigger_bridge.ack=lambda *_:False
+        lost,offered=http("GET",route,token="isolated-router")
         print(json.dumps({"listing":[listing,page["count"]],"before":before,"pending":pending,"after":after,
                           "receipts":receipts,"repeat":[repeat,again["count"],again["acked"]],
-                          "worker_connections":len(router.conns)}))
+                          "worker_connections":len(router.conns),"subscription":subscription["id"],
+                          "unacked":[lost,offered["acked"],cursors()], "offered":offered["events"]}))
 router_store.close()
 trigger_store.close()
 """,case.legacy,source_for("trigger")/"server.py",case.root/"legacy-bus.db"))
+        sub_id = observed.pop("subscription")
+        unacked = observed.pop("unacked")
+        offered = observed.pop("offered")
+        self.assertEqual([item["event_id"] for item in offered],["seen","rpc","wrong","current"])
+        self.assertEqual(unacked,[200,0,[2,2]])
         self.assertEqual(observed,{"listing":[200,1],"before":[0,0],"pending":200,"after":[2,2],
                                    "receipts":["filtered","match"],"repeat":[200,0,0],"worker_connections":0})
         snapshot = backup(case.legacy,case.attachments,case.snapshot)
@@ -103,11 +120,124 @@ trigger_store.close()
         with self.assertRaisesRegex(ValueError,"active_subscriptions"):
             prepare(case.snapshot,case.trial,case.source_id)
         self.assertFalse(case.trial.exists())
+        audit = self.verify_legacy_subscription_audit(case,snapshot,sub_id,offered)
+        if evidence := os.environ.get("MOWULINK_LEGACY_SUBSCRIPTION_AUDIT_EVIDENCE"):
+            Path(evidence).write_text(json.dumps({**audit,"legacy_ack_failure_http":unacked[0],
+                "scope":"Actual legacy Router and Trigger HTTP and SQLite snapshots. "
+                        "Lost ACK injected. Worker and native readback ledger are test fixtures."},indent=2)+"\n")
         if evidence := os.environ.get("MOWULINK_LEGACY_SUBSCRIPTION_EVIDENCE"):
             Path(evidence).write_text(json.dumps({
                 **observed,"prepare_blocked":True,
                 "scope":"Actual isolated legacy Router and Trigger HTTP, original subscription database and discarded response body."
             },indent=2)+"\n")
+
+    def verify_legacy_subscription_audit(self,case,snapshot,sub_id,offered):
+        root = case.root
+        trigger_snapshot = root/"bus-snapshot"
+        manifest = capture_trigger(root/"legacy-bus.db",trigger_snapshot)
+        archived = root/"receipt-archive"
+        archived.mkdir()
+        state_file = root/"desktop-manager-state.json"
+        index_file = root/"receipt-index.json"
+        state = {"version":1,"receipts":{},"sessions":{"fixture-session":{
+            "threadId":"fixture-session","inputMessages":{},"seen":{},"turnMessages":{},
+        }}}
+        index = {}
+        for event in offered:
+            seq = event["id"]
+            label = event["event_id"]
+            mid = legacy_subscription.message_id(event["source"],seq)
+            thread,turn = "fixture-session","fixture-turn-"+str(seq)
+            text = f"[订阅事件 source={event['source']} kind={event['kind']} id={seq}]\n{event['text']}"
+            if label=="seen":
+                self.assertEqual(legacy_subscription.json_text_hash(text),
+                                 "14d02b8c8642abd2b21d8547c1254317fa07d7a95444f11ee0035b28033ed65f")
+            request = {"messageId":mid,"source":"hermes","origin":"subscription","delivery":"steer",
+                       "text":text,"targetThreadId":thread}
+            receipt = {"request":request,"nativeTargetThreadId":thread,"nativeInputHash":legacy_subscription.json_text_hash(text),
+                       "nativeDispatch":{"status":"accepted","threadId":thread},"nativeTurnId":turn,"pending":False}
+            if label in ("seen","current"):
+                key = turn+"/fixture-input"
+                session = state["sessions"][thread]
+                session["inputMessages"][key] = mid
+                session["seen"][key] = {"hash":receipt["nativeInputHash"]}
+                session["turnMessages"][turn] = [mid]
+                receipt["transcriptNativeKey"] = key
+            if label=="wrong":
+                request["text"] += "changed"
+            if label=="seen":
+                file = archived/(mid+".json")
+                file.write_text(json.dumps(receipt))
+                index[mid] = digest(file)
+            else:
+                state["receipts"][mid] = receipt
+        state_file.write_text(json.dumps(state))
+        index_file.write_text(json.dumps(index))
+        router_sha = snapshot["legacy_db_sha256"]
+        trigger_sha = manifest["manifest_sha256"]
+        parameters = [case.snapshot,router_sha,trigger_snapshot,trigger_sha,"oguri",sub_id,state_file,digest(state_file)]
+        args = {"receipt_index":index_file,"receipt_index_sha256":digest(index_file)}
+        result = legacy_subscription.audit(*parameters,**args)
+        self.assertEqual((result["router_cursor"],result["trigger_cursor"],result["source_head"]),(2,2,8))
+        rows = result["events"]
+        self.assertEqual([(item["event_id"],item["trigger_ack"],item["router_cursor_passed"],item["native"]["state"])
+                          for item in rows],[
+            ("match",True,True,"receipt_missing"),
+            ("seen",False,False,"input_observed"),
+            ("rpc",False,False,"readback_unknown"),
+            ("wrong",False,False,"receipt_mismatch"),
+            ("current",False,False,"input_observed"),
+        ])
+        self.assertEqual(rows[1]["native"]["item_key"],"fixture-turn-3/fixture-input")
+        self.assertEqual(rows[1]["message_id"],"86e2927e-6956-40c4-803b-7f83bb7ded5a")
+        self.assertNotIn("line two",json.dumps(result))
+        invocation = [sys.executable,"-B","-m","rewrite.legacy_subscription","--router-snapshot",case.snapshot,
+                      "--router-sha256",router_sha,"--trigger-snapshot",trigger_snapshot,"--trigger-sha256",trigger_sha,
+                      "--worker","oguri","--subscription-id",str(sub_id),"--worker-state",state_file,
+                      "--worker-state-sha256",parameters[-1],"--receipt-index",index_file,
+                      "--receipt-index-sha256",args["receipt_index_sha256"]]
+        self.assertEqual(json.loads(subprocess.run(invocation,check=True,capture_output=True,text=True,timeout=10).stdout),result)
+        self.assertEqual(digest(case.snapshot/"legacy.db"),router_sha)
+        self.assertEqual(digest(trigger_snapshot/DATABASE),digest(root/"legacy-bus.db"))
+        with self.assertRaisesRegex(ValueError,"approved digest"):
+            legacy_subscription.audit(parameters[0],"0"*64,*parameters[2:],**args)
+        mid = rows[1]["message_id"]
+        path = archived/(mid+".json")
+        backup = path.read_text()
+        path.write_text("{}")
+        with self.assertRaisesRegex(ValueError,"JSON digest mismatch"):
+            legacy_subscription.audit(*parameters,**args)
+        path.write_text(backup)
+        state["receipts"][mid] = dict(json.loads(backup),nativeTurnId="different")
+        state_file.write_text(json.dumps(state))
+        parameters[-1] = digest(state_file)
+        conflict = legacy_subscription.audit(*parameters,**args)
+        self.assertEqual(conflict["events"][1]["native"]["state"],"receipt_archive_conflict")
+        return result
+
+    @unittest.skipUnless(os.environ.get("MOWULINK_TEST_LEGACY_WORKER_ROOT") and shutil.which("node"),
+                         "requires the old Worker source checkout and Node")
+    def test_legacy_worker_subscription_reads_saved_manager_observations(self):
+        source = Path(os.environ["MOWULINK_TEST_LEGACY_WORKER_ROOT"]).resolve()
+        fixture = Path(__file__).with_name("testdata")/"legacy_subscription_native.mjs"
+        for engine in ("Codex","DSH"):
+            with self.subTest(engine=engine), TemporaryDirectory(prefix="legacy-sub-worker-") as home:
+                plugin = source/"Plugins"/engine
+                process = subprocess.run([shutil.which("node"),str(fixture),(plugin/"desktop-manager.mjs").as_uri(),
+                                          (plugin/"router-tasks.mjs").as_uri(),home],cwd=home,
+                                         env={"HOME":home,"PATH":os.defpath},capture_output=True,text=True,timeout=20)
+                self.assertEqual(process.returncode,0,process.stderr)
+                proof = []
+                for line in process.stdout.splitlines():
+                    if not line.startswith('{"state"'):
+                        continue
+                    saved = json.loads(line)
+                    state,mid,event = saved["state"],saved["mid"],saved["event"]
+                    self.assertEqual(mid,legacy_subscription.message_id(event["source"],event["id"]))
+                    proof.append(legacy_subscription.observation(state,state["receipts"].get(mid),mid,event))
+                self.assertEqual(proof,[{"state":"readback_unknown"},
+                    {"state":"input_observed","session_id":"fixture-host","turn_id":"fixture-turn",
+                     "item_key":"fixture-turn/fixture-input"}])
 
     def test_mixed_source_returns_and_closed_order_share_one_frozen_router(self):
         case = test_cutover.Cutover()

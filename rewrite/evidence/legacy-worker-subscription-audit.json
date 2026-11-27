@@ -1,0 +1,88 @@
+{
+  "worker": "oguri",
+  "subscription_id": 1,
+  "subscriber": "router:oguri",
+  "source": "mc_chat",
+  "kinds": [
+    "chat"
+  ],
+  "trigger_status": "active",
+  "since": 0,
+  "router_cursor": 2,
+  "trigger_cursor": 2,
+  "source_head": 8,
+  "router_sha256": "61b71cdea577992b2fddc9a40ecba3dbb26880de856b5ccb52cfc83a4a4b8920",
+  "trigger_sha256": "4fad81212b8fb35bb928c513528832a61fb1e71a47ae8968d5f9a3feab796964",
+  "worker_state_sha256": "f06c62147c3445574cf20f888bd7e339e98794e0e417cc5597e20f2af10787fd",
+  "receipt_index_sha256": "a4b30e71b6ec201f1a2f908063e2a0773dee3e606475ce7fb03b42e65f8a216d",
+  "events": [
+    {
+      "sequence": 1,
+      "event_id": "match",
+      "message_id": "ddacdb6d-9efa-4115-87ca-b38aaf03dc60",
+      "kind": "chat",
+      "level": "event",
+      "router_cursor_passed": true,
+      "trigger_ack": true,
+      "native": {
+        "state": "receipt_missing"
+      }
+    },
+    {
+      "sequence": 3,
+      "event_id": "seen",
+      "message_id": "86e2927e-6956-40c4-803b-7f83bb7ded5a",
+      "kind": "chat",
+      "level": "event",
+      "router_cursor_passed": false,
+      "trigger_ack": false,
+      "native": {
+        "state": "input_observed",
+        "session_id": "fixture-session",
+        "turn_id": "fixture-turn-3",
+        "item_key": "fixture-turn-3/fixture-input"
+      }
+    },
+    {
+      "sequence": 4,
+      "event_id": "rpc",
+      "message_id": "3ac21c92-1269-4f6d-8d9a-15842a1b7a9a",
+      "kind": "chat",
+      "level": "event",
+      "router_cursor_passed": false,
+      "trigger_ack": false,
+      "native": {
+        "state": "readback_unknown"
+      }
+    },
+    {
+      "sequence": 5,
+      "event_id": "wrong",
+      "message_id": "baf71e59-04c1-44ec-87b9-7e6bdaf5ef2c",
+      "kind": "chat",
+      "level": "event",
+      "router_cursor_passed": false,
+      "trigger_ack": false,
+      "native": {
+        "state": "receipt_mismatch"
+      }
+    },
+    {
+      "sequence": 6,
+      "event_id": "current",
+      "message_id": "1b1b7b91-93f4-4440-8698-7773dc9370a2",
+      "kind": "chat",
+      "level": "event",
+      "router_cursor_passed": false,
+      "trigger_ack": false,
+      "native": {
+        "state": "input_observed",
+        "session_id": "fixture-session",
+        "turn_id": "fixture-turn-6",
+        "item_key": "fixture-turn-6/fixture-input"
+      }
+    }
+  ],
+  "legacy_ack_failure_http": 200,
+  "scope": "Actual legacy Router and Trigger HTTP and SQLite snapshots. Lost ACK injected. Worker and native readback ledger are test fixtures."
+}
