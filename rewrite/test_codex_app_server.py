@@ -1190,7 +1190,7 @@ class CodexAppServer(unittest.TestCase):
         platform = Client(worker_url,platform_token)
         callback = Client(worker_url,adapter_token)
         operator_file = config(root,"operator.json",{"url":router,"token":operator_token})
-        cli = [sys.executable,"-m","rewrite.service","approvals","--connection",str(operator_file),"--worker-id","dev"]
+        cli = [sys.executable,"-B","-m","rewrite.service","approvals","--connection",str(operator_file),"--worker-id","dev"]
         native_items,native_requests,native_decisions = {},{},[]
         event,send = rpc.event,rpc.send
 
