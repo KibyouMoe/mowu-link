@@ -107,14 +107,23 @@ with running(module.TriggerServer(("127.0.0.1",0),trigger_store,token="isolated-
 
         conn=router.attach(worker)
         last=subscribe()
-        retired=unsubscribe(last)
+        close=router.trigger_bridge.close
+        router.trigger_bridge.close=lambda name:False
+        retired,reply=api("DELETE","/subscriptions/"+str(last["id"]))
+        router.trigger_bridge.close=close
+        assert retired==200 and not reply["trigger_closed"]
         clear=active()
         assert router.online(worker)
         copy_store(router_store,"clear-before.db")
         router.detach(conn,"isolated_worker_disconnect")
         copy_store(router_store,"clear-after.db")
+        assert trigger_store.get_subscription(last["trigger_id"])["status"]=="active"
+        trigger_store.ensure_subscription("independent-consumer",0,3600)
+        copy_store(trigger_store,"orphan-trigger.db")
+        assert close(last["trigger_id"])
+        copy_store(trigger_store,"clear-trigger.db")
         print(json.dumps({"active_before_disconnect":before,"active_after_disconnect":after,
-                          "closed_trigger_on_detach":True,"explicit_delete_http":retired,
+                          "closed_trigger_on_detach":True,"explicit_delete_http":retired,"close_failure_returned_200":True,
                           "active_before_clean_disconnect":clear,"allocated_ids":[first["id"],second["id"],last["id"]]}))
 trigger_store.close()
 router_store.close()
@@ -141,11 +150,22 @@ router_store.close()
 
         stopped = snapshots["clear-after"]
         before = snapshots["clear-before"]
+        approval = seals["clear-before"]["legacy_db_sha256"]
         with self.assertRaisesRegex(ValueError,"approved digest"):
             prepare(stopped,output,case.source_id,pre_stop_snapshot=before,pre_stop_sha256="0"*64)
+        with self.assertRaisesRegex(ValueError,"verified stopped Trigger snapshot"):
+            prepare(stopped,output,case.source_id,pre_stop_snapshot=before,pre_stop_sha256=approval)
+        orphan = root/"orphan-trigger"
+        orphan_sha = capture_trigger(root/"orphan-trigger.db",orphan)["manifest_sha256"]
+        with self.assertRaisesRegex(ValueError,"Trigger still has active subscriptions"):
+            prepare(stopped,output,case.source_id,pre_stop_snapshot=before,pre_stop_sha256=approval,
+                    legacy_trigger_snapshot=orphan,legacy_trigger_sha256=orphan_sha)
+        self.assertFalse(output.exists())
+        trigger = root/"clear-trigger"
+        trigger_sha = capture_trigger(root/"clear-trigger.db",trigger)["manifest_sha256"]
         cmd = [sys.executable,"-B","-m","rewrite.cutover","prepare","--snapshot",stopped,"--destination",output,
-               "--source-id",case.source_id,"--pre-stop-snapshot",before,
-               "--pre-stop-sha256",seals["clear-before"]["legacy_db_sha256"]]
+               "--source-id",case.source_id,"--pre-stop-snapshot",before,"--pre-stop-sha256",approval,
+               "--legacy-trigger-snapshot",trigger,"--legacy-trigger-sha256",trigger_sha]
         result = subprocess.run(cmd,check=True,capture_output=True,text=True,timeout=12)
         baseline = json.loads(result.stdout)
         proof = output/legacy_subscription.BOUNDARY
@@ -153,6 +173,8 @@ router_store.close()
         body = json.loads(proof.read_text())
         self.assertEqual((body["active"],body["sequence"]),(0,3))
         self.assertEqual(body["stopped_sha256"],seals["clear-after"]["legacy_db_sha256"])
+        self.assertEqual(body["trigger"],{"sha256":trigger_sha,"active_worker_subscriptions":0,
+                                          "other_active_subscriptions":1})
         readback = reconcile(stopped,output)
         self.assertFalse(readback["changed_tables"])
         self.assertEqual(readback["subscription_boundary_sha256"],digest(proof))
@@ -164,6 +186,7 @@ router_store.close()
         if evidence := os.environ.get("MOWULINK_SUBSCRIPTION_BOUNDARY_EVIDENCE"):
             Path(evidence).write_text(json.dumps({**observed,
                 "missing_pre_stop_rejected":True,"active_pre_stop_rejected":True,"older_snapshot_rejected":True,
+                "missing_trigger_rejected":True,"orphan_trigger_rejected":True,
                 "approved_explicit_end":{"proof":body,"proof_sha256":baseline["subscription_boundary_sha256"],
                                          "unchanged_rollback":True},
                 "scope":"Legacy Router and Trigger over isolated HTTP; actual old server disconnect cleanup."

@@ -28,17 +28,18 @@ python3 -m rewrite.cutover rollback --snapshot ./snapshot --trial ./trial --dest
 
 旧 Router 在 Worker 断开时会删除实时订阅并清游标。停写库里的活跃订阅为零时，仍须识别这类清理留下的缺口。此规则适用于旧 Router 曾分配过订阅编号的库。
 
-在断开旧工位前，把旧 Router 的一致性只读副本作为独立快照保留。SQLite 正在运行时用一致性备份接口取得副本，再对副本执行上面的 `backup`。记录这份快照的捕获时间、归属及 `legacy_db_sha256`。停旧写者后再取得正式停写快照。确认二者属于同一 Router 及同一切换窗口。按下列方式准备试用：
+在断开旧工位前，把旧 Router 的一致性只读副本作为独立快照保留。SQLite 正在运行时用一致性备份接口取得副本，再对副本执行上面的 `backup`。记录这份快照的捕获时间、归属及 `legacy_db_sha256`。停旧写者后再取得 Router 与对应旧 Trigger 的正式停写快照。用 `rewrite.trigger_archive capture` 保存 Trigger 副本的 `manifest_sha256`。确认三份快照来自同一部署和同一切换窗口。按下列方式准备试用：
 
 ```sh
 python3 -B -m rewrite.cutover prepare --snapshot ./stopped --destination ./trial \
   --source-id "${SOURCE_UUID}" --pre-stop-snapshot ./before-disconnect \
-  --pre-stop-sha256 "${BEFORE_DISCONNECT_SHA256}"
+  --pre-stop-sha256 "${BEFORE_DISCONNECT_SHA256}" \
+  --legacy-trigger-snapshot ./stopped-trigger --legacy-trigger-sha256 "${TRIGGER_MANIFEST_SHA256}"
 ```
 
-断开前的快照仍有活跃订阅，或该快照之后又分配了订阅编号时，准备会阻止发布。保留原路径，先按[旧 Worker 的实时订阅](#旧-worker-的实时订阅)核收件和退役范围。已有授权明确结束的订阅，可以用结束后、断开前的新快照对证。摘要验证能校验两份输入的内容，捕获时间和工位归属仍靠原始记录核实。
+断开前的快照仍有活跃订阅、期间分配了新编号，或 Trigger 仍保留对应工位的活跃订阅时，准备会阻止发布。旧 Router 的删除接口可能先返回 200 但 `trigger_closed=false`。须从对应 Trigger 取得关闭证据。独立消费者在摘要中单列，仍按各自业务对账。保留原路径，先按[旧 Worker 的实时订阅](#旧-worker-的实时订阅)核收件和退役范围。已有授权明确结束的订阅，可以用结束后、断开前的新快照对证。摘要验证覆盖三份输入的内容，捕获时间和工位归属仍靠原始记录核实。
 
-准备成功后，`legacy-subscription-boundary.json` 记录两份摘要与订阅边界，`baseline.json` 保存该文件的 SHA-256。对账、恢复试用和准备回退时随原基线保留该私有文件。复跑 `python3 -B -m unittest -v rewrite.test_source_rollback -k worker_disconnect_erases_a_subscription`。[隔离实测](evidence/legacy-subscription-stop-boundary.json)
+准备成功后，`legacy-subscription-boundary.json` 记录 Router 前后两份摘要、Trigger 摘要与订阅边界，`baseline.json` 保存该文件的 SHA-256。对账、恢复试用和准备回退时随原基线保留该私有文件。复跑 `python3 -B -m unittest -v rewrite.test_source_rollback -k worker_disconnect_erases_a_subscription`。[隔离实测](evidence/legacy-subscription-stop-boundary.json)
 
 ### 导出旧飞书私聊
 

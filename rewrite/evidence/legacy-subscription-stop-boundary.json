@@ -3,6 +3,7 @@
   "active_after_disconnect": 0,
   "closed_trigger_on_detach": true,
   "explicit_delete_http": 200,
+  "close_failure_returned_200": true,
   "active_before_clean_disconnect": 0,
   "allocated_ids": [
     1,
@@ -12,14 +13,21 @@
   "missing_pre_stop_rejected": true,
   "active_pre_stop_rejected": true,
   "older_snapshot_rejected": true,
+  "missing_trigger_rejected": true,
+  "orphan_trigger_rejected": true,
   "approved_explicit_end": {
     "proof": {
       "active": 0,
-      "pre_stop_sha256": "62581f12ab823b69c8cabbc1272d9a10e74bb002f02ea8d7bf32ec60bb62b873",
+      "pre_stop_sha256": "1b255b4a6ddc7d85e2a118ac8075361fbde21d11233b423616969f46eef820b0",
       "sequence": 3,
-      "stopped_sha256": "44ebf6ec52b585adc07ff3c791e1407f5bdbf0232fcbcd1112c9531767c8287a"
+      "stopped_sha256": "493b96d983b087a59d06506a1c2748afe04f92e4b96780a024f1a23dfcb7086e",
+      "trigger": {
+        "active_worker_subscriptions": 0,
+        "other_active_subscriptions": 1,
+        "sha256": "03749335cc64a3c4b7dc74a0310b9ec0f9afd07f7d5867e60a7c210bc9d102d3"
+      }
     },
-    "proof_sha256": "39831333660c8b0c00759f4c83c256c97f7e35814a530c0e9f512e7a8bc26071",
+    "proof_sha256": "34d55d6fdcec4224f967cebc019554578065f8b62aeb680466d63565f0270819",
     "unchanged_rollback": true
   },
   "scope": "Legacy Router and Trigger over isolated HTTP; actual old server disconnect cleanup."

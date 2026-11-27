@@ -41,9 +41,27 @@ def before_stop(snapshot, expected):
     with closing(cutover.readonly(snapshot/"legacy.db")) as old:
         proof = {"pre_stop_sha256":expected,"sequence":sequence(old),
                  "active":manifest["blockers"]["active_subscriptions"]}
+        workers = {row["name"] for row in old.execute("SELECT name FROM workers")}
     if cutover.digest(snapshot/"legacy.db")!=expected:
         raise ValueError("pre-stop Router snapshot changed during subscription audit")
-    return proof
+    return proof, workers
+
+
+def trigger_boundary(snapshot, expected, workers):
+    manifest = trigger_archive.verify(snapshot,expected)
+    database = snapshot/trigger_archive.DATABASE
+    owned = 0
+    with closing(cutover.readonly(database)) as db:
+        live = db.execute("SELECT name FROM subscriptions WHERE status='active' AND substr(name,1,7)='router:'")
+        for row in live:
+            name = row["name"].removeprefix("router:")
+            worker, separator, suffix = name.rpartition(":")
+            if name in workers or (worker in workers and separator and re.fullmatch(r"[0-9]+",suffix)):
+                owned += 1
+    if cutover.digest(database)!=manifest["members"][trigger_archive.DATABASE]["sha256"]:
+        raise ValueError("stopped Trigger snapshot changed during subscription audit")
+    active = manifest["inventory"]["subscriptions"].get("active",0)
+    return {"sha256":expected,"active_worker_subscriptions":owned,"other_active_subscriptions":active-owned}
 
 
 def require_boundary(db, stopped_sha, proof):
@@ -52,7 +70,8 @@ def require_boundary(db, stopped_sha, proof):
         if current:
             raise ValueError("legacy subscription history requires a verified pre-stop Router snapshot")
         return
-    if (set(proof)!={"pre_stop_sha256","stopped_sha256","sequence","active"}
+    fields = {"pre_stop_sha256","stopped_sha256","sequence","active"}
+    if (set(proof) not in (fields,fields|{"trigger"})
             or not isinstance(proof["pre_stop_sha256"],str)
             or not re.fullmatch(r"[0-9a-f]{64}",proof["pre_stop_sha256"])
             or proof["stopped_sha256"]!=stopped_sha
@@ -62,6 +81,21 @@ def require_boundary(db, stopped_sha, proof):
         raise ValueError("active_subscriptions in the pre-stop Router require reconciliation")
     if proof["sequence"]!=current:
         raise ValueError("legacy subscription allocation changed after the pre-stop snapshot")
+    # Existing trial baselines may preserve the original Router-only proof.
+    # New preparations always include the Trigger field and enforce its boundary.
+    if "trigger" in proof:
+        trigger = proof["trigger"]
+        if trigger is None:
+            if current:
+                raise ValueError("legacy Worker subscriptions require a verified stopped Trigger snapshot")
+            return
+        if (not isinstance(trigger,dict) or set(trigger)!={"sha256","active_worker_subscriptions","other_active_subscriptions"}
+                or any(type(trigger[k]) is not int or trigger[k]<0 for k in
+                       ("active_worker_subscriptions","other_active_subscriptions"))
+                or not isinstance(trigger["sha256"],str) or not re.fullmatch(r"[0-9a-f]{64}",trigger["sha256"])):
+            raise ValueError("invalid stopped Trigger subscription boundary")
+        if trigger["active_worker_subscriptions"]:
+            raise ValueError("old Trigger still has active subscriptions for the legacy Router workers")
 
 
 def message_id(source, sequence):

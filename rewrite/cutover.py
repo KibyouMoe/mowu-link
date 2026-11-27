@@ -176,18 +176,28 @@ def export_chat(snapshot, destination, worker, after=0, limit=500, direction=Non
 
 
 def prepare(snapshot, destination, source_id, peer_archive=None, peer_archive_sha256=None,
-            *, source_archive=None, source_archive_sha256=None, pre_stop_snapshot=None, pre_stop_sha256=None):
+            *, source_archive=None, source_archive_sha256=None, pre_stop_snapshot=None, pre_stop_sha256=None,
+            legacy_trigger_snapshot=None, legacy_trigger_sha256=None):
     from . import legacy_subscription
 
     if (pre_stop_snapshot is None)!=(pre_stop_sha256 is None):
         raise ValueError("pre-stop Router snapshot and trusted SHA-256 must be supplied together")
+    if (legacy_trigger_snapshot is None)!=(legacy_trigger_sha256 is None):
+        raise ValueError("stopped Trigger snapshot and trusted SHA-256 must be supplied together")
+    if legacy_trigger_snapshot is not None and pre_stop_snapshot is None:
+        raise ValueError("stopped Trigger verification requires a pre-stop Router snapshot")
     manifest = verified(snapshot)
     boundary = None
     if pre_stop_snapshot is not None:
         if pre_stop_snapshot.resolve()==snapshot.resolve():
             raise ValueError("pre-stop and stopped Router snapshots must be separate captures")
-        boundary = {**legacy_subscription.before_stop(pre_stop_snapshot,pre_stop_sha256),
-                    "stopped_sha256":manifest["legacy_db_sha256"]}
+        proof,workers = legacy_subscription.before_stop(pre_stop_snapshot,pre_stop_sha256)
+        trigger = None
+        if legacy_trigger_snapshot is not None:
+            with closing(readonly(snapshot/"legacy.db")) as stopped:
+                workers.update(row["name"] for row in stopped.execute("SELECT name FROM workers"))
+            trigger = legacy_subscription.trigger_boundary(legacy_trigger_snapshot,legacy_trigger_sha256,workers)
+        boundary = {**proof,"stopped_sha256":manifest["legacy_db_sha256"],"trigger":trigger}
     return _prepare_baseline(snapshot, destination, source_id, manifest, peer_archive, peer_archive_sha256,
                              source_archive, source_archive_sha256, boundary)
 
@@ -640,6 +650,8 @@ def main():
             command.add_argument("--source-id",required=True)
             command.add_argument("--pre-stop-snapshot",type=Path)
             command.add_argument("--pre-stop-sha256")
+            command.add_argument("--legacy-trigger-snapshot",type=Path)
+            command.add_argument("--legacy-trigger-sha256")
             command.add_argument("--peer-archive",type=Path)
             command.add_argument("--peer-archive-sha256")
             command.add_argument("--source-archive",type=Path)
