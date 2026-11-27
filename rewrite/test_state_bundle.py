@@ -17,6 +17,7 @@ from .devloop import FixtureHost
 from .feishu_inbound import Inbound
 from .feishu_output import Views
 from .hermes import HermesAdapter
+from .manager_notices import ManagerNotices
 from .codex_approvals import CodexApprovals
 from .codex_thread_preparation import SCHEMA as CODEX_PREPARATION_SCHEMA
 from .managed_sessions import FAMILY_SCHEMA, derive_callback, read_enrollment, token_digest, write_enrollment
@@ -449,6 +450,74 @@ class Bundle(unittest.TestCase):
         missing = audit_handoff(omitted,digest)
         self.assertTrue(missing["needs_review"])
         self.assertEqual(missing["hermes"][0]["native_receipt_issues"],[{"code":"hermes_host_ledger_missing","count":1}])
+
+    def test_hermes_snapshot_separately_reconciles_manager_platform_receipts(self):
+        notices = ManagerNotices(self.platform,"oc_test_manager","test-app",self.clock)
+
+        def audit(name, paths):
+            snapshot = self.root/name
+            seal = capture(paths,self.revision,snapshot)["manifest_sha256"]
+            result = audit_handoff(snapshot,seal)
+            self.assertNotIn("source-only text",encode(result))
+            return snapshot,seal,result
+
+        with self.stack(self.sources) as (manager,_worker,source,client,_platform,_views):
+            manager.notices = notices
+            first = source.record("Event","source-only text")
+            source.send(client,first)
+            self.assertEqual(manager.poll()["delivery_id"],first)
+            self.platform.lose_next = True
+            self.assertIsNone(notices.flush(manager.db))
+            sent, = self.platform.messages.values()
+        snapshot,seal,pending = audit("notice-pending",self.sources)
+        item, = pending["hermes"]
+        self.assertEqual(item["native_receipts"]["confirmed"],1)
+        self.assertTrue(pending["needs_review"])
+        self.assertEqual(item["platform_notices"]["awaiting_receipt"],1)
+        self.assertEqual(item["platform_notices"]["issues"],
+                         [{"code":"hermes_platform_notice_unconfirmed","message_id":first}])
+        restored = restore(snapshot,seal,self.dest)
+        self.clock.advance(5)
+        with self.stack(restored) as (manager,*_):
+            self.assertEqual(notices.flush(manager.db),sent[0])
+            self.assertEqual(self.platform.calls,[("send",sent[0])]*2)
+            self.assertIsNone(manager.poll())
+            self.assertEqual(len(self.hermes_host.entries()),1)
+        _,_,confirmed = audit("notice-confirmed",restored)
+        self.assertFalse(confirmed["needs_review"])
+        self.assertEqual(confirmed["hermes"][0]["platform_notices"]["confirmed"],1)
+
+        with self.stack(restored) as (manager,_worker,source,client,_platform,_views):
+            manager.notices = notices
+            later = source.record("Event","A different event")
+            source.send(client,later)
+            self.assertEqual(manager.poll()["delivery_id"],later)
+            self.platform.lose_next = True
+            self.assertIsNone(notices.flush(manager.db))
+            self.clock.advance(3600)
+            self.assertIsNone(notices.flush(manager.db))
+
+        _,_,settled = audit("notice-expired",restored)
+        proof = settled["hermes"][0]["platform_notices"]
+        self.assertEqual((proof["confirmed"],proof["receipt_unknown"]),(1,1))
+        self.assertEqual(proof["issues"],[{"code":"hermes_platform_notice_receipt_unknown","message_id":later}])
+        self.assertTrue(settled["needs_review"])
+        self.assertEqual(len(self.platform.calls),3)
+        self.assertEqual(audit_handoff(snapshot,seal),pending)
+
+        with closing(sqlite3.connect(restored["hermes:main"])) as db,db:
+            db.execute("UPDATE manager_notices SET text='mismatched notice' WHERE message_id=?",(first,))
+        _,_,mismatch = audit("notice-mismatch",restored)
+        self.assertIn({"code":"hermes_platform_notice_mismatch","message_id":first},
+                      mismatch["hermes"][0]["platform_notices"]["issues"])
+
+        with closing(sqlite3.connect(restored["hermes:main"])) as db,db:
+            db.execute("UPDATE manager_notices SET text=?,platform_id=?,error=NULL WHERE message_id=?",
+                       (sent[2]["text"],sent[0],first))
+            db.execute("UPDATE manager_notices SET platform_id=?,error=NULL WHERE message_id=?",(sent[0],later))
+        _,_,duplicate = audit("notice-duplicate",restored)
+        self.assertEqual(duplicate["hermes"][0]["platform_notices"]["issues"],
+                         [{"code":"hermes_platform_notice_mismatch","message_id":mid} for mid in (first,later)])
 
     def test_worker_snapshot_compares_original_confirmed_frame_in_both_ledgers(self):
         with self.stack(self.sources) as (_manager,w,*_):

@@ -15,6 +15,7 @@ from rewrite.devloop import FixtureHost, agent_report
 from rewrite.feishu_inbound import Inbound
 from rewrite.feishu_output import Views
 from rewrite.hermes import HermesAdapter
+from rewrite.manager_notices import ManagerNotices
 from rewrite.orders import Orders
 from rewrite.storage import encode, guid, state_writer
 from rewrite.test_feishu_output import PlatformFixture
@@ -107,6 +108,7 @@ def isolated_stack(state, fixtures, cert, key):
         provider_ledger = fixtures/"feishu.json"
         if provider_ledger.is_file():
             platform.messages = json.loads(provider_ledger.read_text(encoding="utf-8"))
+        manager.notices = ManagerNotices(platform,"oc_trial_manager","trial-app",clock)
         views = Views(paths["feishu:trial"],platform_client,platform,"test-chat","Trial Worker",clock=clock)
         yield clock, source, Client(router,source_key,cert), manager, worker, inbox, views, agent, operator, platform
 
@@ -148,6 +150,13 @@ def create_trial_writes(system, baseline, fixtures):
     check(notice["task_id"]==task_id and notice["level"]=="Notify"
           and manager_receipt.get("media_sha256")==[formal_file["sha256"]],
           "manager did not receive the formal report notice and its original file")
+    platform.lose_next = True
+    check(manager.notices.flush(manager.db) is None,"fixture did not lose the manager platform receipt")
+    first_attempt, = platform.calls
+    clock.advance(5)
+    manager_platform_id = manager.notices.flush(manager.db)
+    check(platform.calls==[first_attempt,first_attempt] and first_attempt==("send",manager_platform_id),
+          "manager did not recover the original Feishu notice")
 
     attachment = fixtures/"source.bin"
     attachment.write_bytes(PAYLOAD)
@@ -159,6 +168,7 @@ def create_trial_writes(system, baseline, fixtures):
     reply_id = publish_reply(worker,views,platform,CHAT["message_id"],chat,REPLY)
     (fixtures/"feishu.json").write_text(encode(platform.messages),encoding="utf-8")
     return {"task_id":task_id,"assignment_id":assignment,"manager_notice":manager_receipt,"native_input":delivery,
+            "manager_platform_id":manager_platform_id,"manager_platform_attempts":2,
             "chat_receipt":chat,"feishu_reply_id":reply_id,"w04":report_receipt,"task_readback":pending,
             "source_instance_id":source.instance_id,"source_receipt":source_receipt,"attachment_id":file_id,
             "formal_file":formal_file}
@@ -196,6 +206,11 @@ def verify_trial_writes(system, trial):
     manager.poll()
     clock.advance(10)
     manager.poll()
+    check(manager.notices.flush(manager.db) is None,"restored manager re-sent its Feishu notice")
+    with manager.db.transaction() as db:
+        platform_rows = db.execute("SELECT message_id,platform_id FROM manager_notices").fetchall()
+    check([tuple(row) for row in platform_rows]==[(trial["manager_notice"]["delivery_id"],trial["manager_platform_id"])],
+          "restored manager lost or changed the original Feishu notice receipt")
     worker.poll()
     check(views.poll()==0 and not platform.calls,"restored Feishu repeated an already confirmed send")
     check([receipt for _,receipt in agent.entries()]==[trial["native_input"],trial["chat_receipt"]],
@@ -216,7 +231,7 @@ def verify_trial_writes(system, trial):
     return {"task_state_before_acceptance":trial["task_readback"]["task"]["state"],
             "task_state_after_acceptance":approved["task"]["state"],
             "followup_chat_receipt":receipt,"followup_reply_id":new_reply,"extra_native_inputs":0,
-            "extra_manager_notifications":0,"extra_platform_sends":0,
+            "extra_manager_notifications":0,"extra_platform_sends":0,"manager_platform_id":trial["manager_platform_id"],
             "attachment_sha256":hashlib.sha256(data).hexdigest(),"formal_file":formal_file}
 
 
@@ -274,6 +289,8 @@ def rehearse_bundle(root,old,new,older,newer,cert,key,env):
     (hermes_receipts,) = audit["hermes"]
     check(hermes_receipts["native_receipts"]["confirmed"]==1,
           "the stopped trial did not prove its original Hermes native receipt")
+    check(hermes_receipts["platform_notices"]["confirmed"]==1 and not hermes_receipts["platform_notices"]["issues"],
+          "the stopped trial did not prove its separate manager Feishu receipt")
     source_audit = state_bundle.audit_trigger(latest,saved["manifest_sha256"])
     check(source_audit["ready"] and source_audit["sources"][0]["settled"]==1,
           "the stopped trial does not have exactly its original Trigger receipt and attachment")

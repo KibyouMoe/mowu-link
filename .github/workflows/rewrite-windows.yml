@@ -90,6 +90,7 @@ jobs:
                 'rewrite.test_question_cards.QuestionCards.test_expired_question_card_keeps_its_updates_for_review_and_other_cards_continue'
                 'rewrite.test_state_bundle.Bundle.test_feishu_audit_keeps_a_held_receipt_in_scope_while_other_output_recovers'
                 'rewrite.test_state_bundle.Bundle.test_hermes_snapshot_checks_the_native_receipt_attachment_and_cached_payload'
+                'rewrite.test_state_bundle.Bundle.test_hermes_snapshot_separately_reconciles_manager_platform_receipts'
                 'rewrite.test_state_bundle.Bundle.test_hermes_snapshot_checks_the_router_receipt_prefix_without_treating_lag_as_loss'
                 'rewrite.test_state_bundle.Bundle.test_host_assembly_requires_its_pinned_roster_and_rejects_changed_bytes'
                 'rewrite.test_state_bundle.Bundle.test_handoff_audit_detects_an_omitted_idle_peers_recipient_before_and_after_c02'

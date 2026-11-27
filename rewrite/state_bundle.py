@@ -11,7 +11,7 @@ import sqlite3
 from tempfile import TemporaryDirectory
 
 from . import admission, delivery, dsh_workspace_audit, feishu_audit, hermes_audit, trigger_audit
-from . import feishu_receipt_review, question_outbox, report_audit
+from . import feishu_receipt_review, manager_notices, question_outbox, report_audit
 from . import state_bundle_managed as managed
 from .cutover import digest, output_directory, readonly
 from .messages import valid_guid
@@ -421,9 +421,13 @@ def hermes_delivery_audit(snapshot,labels,router_path,confirmed):
                 issues.append("hermes_receiver_ambiguous")
             native,native_issues = hermes_audit.reconcile(db,router_path,snapshot/filename(host) if host in labels else None)
             issues.extend(sorted({item["code"] for item in native_issues}))
+            platform = manager_notices.audit(db)
+            if platform is not None:
+                issues.extend(sorted({item["code"] for item in platform["issues"]}))
         results.append({"instance":instance,"router_confirmed_cursor":confirmed,"local_cursor":cursor,
                         "queued_without_native_receipt":pending,"native_receipts":native,
-                        "native_receipt_issues":native_issues,"issues":issues})
+                        "native_receipt_issues":native_issues,"issues":issues,
+                        **({"platform_notices":platform} if platform is not None else {})})
     for label in sorted(labels):
         role,instance = component(label)
         if role=="hermes-host" and "hermes:"+instance not in labels:
