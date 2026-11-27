@@ -6,6 +6,12 @@
 
 ## 检查点与证据
 
+修复丢失飞书新消息回执后队首长期挡住出向的问题。发卡或发图没有可核对的消息号且超过程序的 55 分钟重试窗口后，保留冻结请求和原始尝试。同一回合或同一收件人问题的后续更新随原条目待核，独立消息继续投递。待核计数与已送达分开，停写快照审计仍会阻止换绑。飞书官方文档给同一 `uuid` 一小时的新建去重窗口。[飞书新建消息接口](https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/create?lang=en-US)
+
+官方飞书 SDK 1.7.5 对回环服务实测。首个新建请求断开且无回执，时钟推进一小时后，原号零重发、同回合两条待核、独立消息确认一条。macOS 相关回归通过 46 项。候选 `f136eb1072151f4729f851f216009964869b3ea1` 的 403 文件安装包在 Linux arm64 通过 206 项，另有 140 项按环境跳过、58 项旧版历史用例退出验收。Windows 安装回归通过 47 项，包含回合、题卡和快照三项新回归。实际飞书账号及云端回执待验。[实测记录](evidence/feishu-expired-receipt-recovery.json) · [Windows 流水线](https://github.com/KibyouMoe/mowu-link/actions/runs/45986369348/job/140462929293)
+
+复跑 `python3 -B -m unittest -v rewrite.test_feishu_output rewrite.test_question_cards rewrite.test_state_bundle`。在安装 `lark-oapi` 的测试环境运行 `python3 -B -m rewrite.feishu_sdk_check` 可重现 SDK 回环。验收矩阵按每行唯一计数，49 项中 4 项已满足，11 项仍需实现或隔离验证，34 项已有隔离证据、待实际环境验收。旧版兼容和旧数据处置另列。[逐项状态](acceptance-matrix.md)
+
 修复 A11 中宿主不可达会挡住 Router 待发箱的问题。Worker 保留出错的原生收件并记录适配器断联，同时提交已落盘的 W04、W05 和同伴回执。没有清理凭据的操作继续待核。真实 DSH 两次原生 W04 尝试均未到 Router，待发箱保留同一键。在适配器 TCP 接入端拒绝连接并恢复 Router 成果入口后，Worker 自动交出原 W04，只产生一条成果通知。宿主仍断联，未新增输入或工具调用。W05 夹具复验保留原题和持单，恢复宿主后只进入一次答案。原生 DSH 及 Codex App Server 原有的断链回归均通过，模型为本地脚本。[实测记录](evidence/adapter-outage-router-outbox.json)
 
 复跑 `python3 -B -m unittest -v rewrite.test_link_health rewrite.test_dsh_native_loop.NativeLoop.test_dsh_saved_w04_reaches_router_with_the_adapter_still_offline rewrite.test_codex_app_server.CodexAppServer.test_native_codex_work_and_w04_across_router_and_adapter_outages`。现役身份、云端飞书和正式换机仍按矩阵验收。

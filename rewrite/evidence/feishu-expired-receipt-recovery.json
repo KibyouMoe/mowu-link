@@ -1,0 +1,63 @@
+{
+  "candidate_revision": "f136eb1072151f4729f851f216009964869b3ea1",
+  "bug": "An expired unconfirmed Feishu message create blocked the display cursor and withheld independent output.",
+  "before_fix": {
+    "case": "test_after_platform_dedup_window_unknown_is_not_resent",
+    "reproduced": true
+  },
+  "macos_targeted": {
+    "passed": 46,
+    "skipped": 0,
+    "command": "python3 -B -m unittest -v rewrite.test_feishu_output rewrite.test_question_cards rewrite.test_state_bundle"
+  },
+  "feishu_sdk_loopback": {
+    "sdk_version": "1.7.5",
+    "command": "python3 -B -m rewrite.feishu_sdk_check",
+    "confirmed_independent_messages": 1,
+    "cursor": 3,
+    "held_seqs": [
+      [
+        1,
+        1
+      ],
+      [
+        2,
+        1
+      ]
+    ],
+    "http_create_calls": 2,
+    "past_window_replays": 0,
+    "network": "loopback only",
+    "platform_account": "none"
+  },
+  "linux_arm64_install": {
+    "system": "Linux",
+    "architecture": "aarch64",
+    "passed": 206,
+    "skipped": 140,
+    "historical_excluded": 58,
+    "verified_files": 403,
+    "sha256": "26782985cd36aae548591562fb405bc9db62020839182b69ff3cbde9dd63e090"
+  },
+  "windows_install": {
+    "system": "Windows Server 2025",
+    "run": 45986369348,
+    "job": 140462929293,
+    "passed": 47,
+    "verified_files": 403,
+    "sha256": "1bcc54c9819ceb877db4cdb481dfb1405a704de02c7484348a7501fe7585da7c",
+    "cases": [
+      "test_after_platform_dedup_window_unknown_is_not_resent",
+      "test_expired_question_card_keeps_its_updates_for_review_and_other_cards_continue",
+      "test_feishu_audit_keeps_a_held_receipt_in_scope_while_other_output_recovers"
+    ]
+  },
+  "review_checks": {
+    "same_turn_updates_held": true,
+    "same_question_updates_held": true,
+    "independent_messages_delivered": true,
+    "review_ledger_preserved_in_snapshot": true,
+    "mismatched_dependent_scope_rejected": true
+  },
+  "boundary": "The macOS SDK used a loopback provider with fabricated data. No real Feishu identity, cloud receipt, live process, or production cutover was exercised."
+}
