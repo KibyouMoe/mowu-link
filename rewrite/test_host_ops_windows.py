@@ -213,6 +213,7 @@ class WindowsMaintenance(unittest.TestCase):
 
     def test_packaged_router_service_installs_upgrades_and_rolls_back(self):
         from .release import build, materialize
+        from .storage import state_writer
 
         repository = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
         target = os.environ["GITHUB_SHA"]
@@ -265,20 +266,31 @@ class WindowsMaintenance(unittest.TestCase):
             counts,runs = [],[]
             original_key = guid()
             message = {"title":"Original Windows service queue head","instructions":"Read this after the version switch"}
+
+            def start_and_observe(job):
+                def ready():
+                    service = native.observe(job)
+                    if service["state"]!="running" or not ready_path.exists():
+                        return None
+                    return service,json.loads(ready_path.read_text(encoding="utf-8"))
+
+                self.sc("start",tag)
+                return self.wait(ready)
+
+            def wait_stopped(job,service,router):
+                return self.wait(lambda:native.observe(job)["state"]=="stopped" and native.birth(service["pid"])==""
+                                 and native.birth(router["pid"])=="" and not ready_path.exists())
+
+            with state_writer(db):
+                self.sc("start",tag,check=False)
+                self.wait(lambda:"STOPPED" in self.sc("query",tag).stdout)
+                self.assertFalse(ready_path.exists())
             for name,release in (("previous",old),("trial",new),("rollback",old)):
                 _,revision,_,_,plan,job = release
                 if name!="previous":
                     self.sc("config",*plan["scm_create_args"][:3])
                 self.assertEqual(native.observe(job)["state"],"stopped")
-
-                def ready():
-                    current = native.observe(job)
-                    if current["state"]!="running" or not ready_path.exists():
-                        return None
-                    return current,json.loads(ready_path.read_text(encoding="utf-8"))
-
-                self.sc("start",tag)
-                service,router = self.wait(ready)
+                service,router = start_and_observe(job)
                 client = Client("https://127.0.0.1:"+str(router["port"]),manager,cert)
                 task = client.request("POST","tasks",message,original_key)
                 if name=="previous":
@@ -290,14 +302,19 @@ class WindowsMaintenance(unittest.TestCase):
                 counts.append(count)
                 self.assertTrue(native.birth(router["pid"]))
                 self.sc("stop",tag)
-
-                def stopped():
-                    return (native.observe(job)["state"]=="stopped" and native.birth(service["pid"])==""
-                            and native.birth(router["pid"])=="" and not ready_path.exists())
-
-                self.wait(stopped)
+                wait_stopped(job,service,router)
                 runs.append({"phase":name,"revision":revision,"service_pid":service["pid"],
                              "router_pid":router["pid"],"launcher_sha256":job.digest,"process_exits_observed":True})
+            service,router = start_and_observe(job)
+            kill = Path(os.environ["SystemRoot"])/"System32/taskkill.exe"
+            subprocess.run([kill,"/F","/PID",str(router["pid"])],check=True,capture_output=True,timeout=12)
+            wait_stopped(job,service,router)
+            recovered_service,recovered_router = start_and_observe(job)
+            recovered = Client("https://127.0.0.1:"+str(recovered_router["port"]),manager,cert)
+            self.assertEqual(recovered.request("POST","tasks",message,original_key),original_task)
+            self.assertEqual(len(recovered.request("GET","tasks")["items"]),1)
+            self.sc("stop",tag)
+            wait_stopped(job,recovered_service,recovered_router)
         finally:
             self.sc("stop",tag,check=False)
             self.wait(lambda:"STOPPED" in self.sc("query",tag,check=False).stdout)
@@ -308,6 +325,8 @@ class WindowsMaintenance(unittest.TestCase):
         if output := os.environ.get("MOWULINK_WINDOWS_ROUTER_RELEASE_EVIDENCE"):
             Path(output).write_text(json.dumps({"windows_build":sys.getwindowsversion().build,"service":tag,
                 "runs":runs,"archive_sha256":[old[2],new[2]],"task_id":original_task["task_id"],
-                "task_counts":counts,"refused_bad_checksum":True,"service_removed":True,
+                "task_counts":counts,"refused_bad_checksum":True,"refused_second_writer":True,"service_removed":True,
+                "unexpected_exit":{"service_pid":service["pid"],"router_pid":router["pid"],
+                    "reported_stopped":True,"recovered_pid":recovered_router["pid"],"original_task_preserved":True},
                 "scope":"Actual disposable Windows SCM, installed releases, HTTPS Router and SQLite."},
                 indent=2)+"\n",encoding="utf-8")
