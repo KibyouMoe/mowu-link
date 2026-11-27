@@ -1,0 +1,46 @@
+{
+  "revision": "dfbe2aa737a51c233ab8c044307245a67aa89d7a",
+  "release_sha256": "e2eab0aa170a161f0339701a707b13e9855e79554cbedcb981ec1853fd71ffc6",
+  "verified_files": 361,
+  "before_restore": {
+    "rows": 4,
+    "inbound": 3,
+    "outbound": 1
+  },
+  "after_restore": {
+    "archive_sha256": "de0ca1accfbfb7eab7d07887713ecbee26118e7fae903585b4036ca08896dc39",
+    "bundle_manifest_sha256": "c87f860ceee6aef279a8ed2c6fe4804429e71b05315a7f9d7c4e6aa1de5fc048",
+    "count": 5,
+    "finals_without_chat_proof": 2,
+    "format": 1,
+    "inbound": 3,
+    "inbound_without_index": 1,
+    "outbound": 2,
+    "snapshot_sha256": "edb9d08c797f901d15aee162279373c332a5dc02f51ba432cdfca241d62025bb",
+    "source": "feishu",
+    "worker": "oguri"
+  },
+  "copied_history_cursor": 5,
+  "ids": [
+    1,
+    2,
+    3,
+    5,
+    6
+  ],
+  "last_feishu_message_id": "om_5",
+  "native_retry_extra_inputs": 0,
+  "platform_retry_extra_messages": 0,
+  "foreign_worker_http": 404,
+  "scope": "Local Worker HTTP, isolated HTTPS chat archive and component snapshots. Native input and Feishu use fixtures.",
+  "install_platform": "macOS",
+  "install_tests_passed": 3,
+  "windows_install": {
+    "revision": "52a14816ead956d15401f22d7ec6465f95ef1bde",
+    "release_sha256": "7d6f02784cf0544f2d65563ad6db86301b167b87cdafb1ed3a7740c9900583c6",
+    "verified_files": 361,
+    "passed": 23,
+    "archive_test": "test_prepare_worker_chat_archive_after_both_receipts_recover (rewrite.test_state_bundle.Bundle.test_prepare_worker_chat_archive_after_both_receipts_recover) ... ok",
+    "workflow": "https://github.com/KibyouMoe/mowu-link/actions/runs/45942946323/job/140321131911"
+  }
+}

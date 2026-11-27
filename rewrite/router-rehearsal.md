@@ -68,6 +68,20 @@ python3 -B -m rewrite.service chat-archive --worker-id "$WORKER_ID" \
 
 本机已安装的溪流技能仍记有派单前读最近聊天及在线摘要。曾经发起过哪些查询、现役写入方和授权保留期限仍待实际消费者核验。冻结档到备份边界为止。实时聊天仍由 Worker 持有，旧实时入口留到消费者迁移获准后再处置。
 
+
+#### 从重做版 Feishu 账本查询
+
+从已停写、已校验的组件快照导出指定工位，再用上面的独立 TLS 查询服务读取。
+
+```sh
+python3 -B -m rewrite.cutover prepare-worker-chat-archive --snapshot ./component-snapshot \
+  --manifest-sha256 "$BUNDLE_MANIFEST_SHA256" --worker "$WORKER_ID" --destination ./private-worker-chat
+```
+
+导出沿用飞书原消息号和本地观测时间。入站等到指定原生会话的收件落盘，再记历史位置。出站需要飞书回执、保存的原卡正文，以及对应会话和回合的已核私聊来源。工具卡、过程卡、无对应飞书输入的回复和有多个已登记来源的回合回复不进入查询档。档案只导出消息文本字段，原图和附件仍保留在组件快照。旧记录缺首次观测时间或原生证据时，在导出回执计数，等待原始记录另行核对。
+
+历史位置随同一个 Feishu 账本备份和恢复。源于旧 Router 的档案保留自己的原行号，两代档案分别读取。备份边界以后发生的消息等下次导出。实时读取授权和保留期限仍待实际消费者确认。复跑 `python3 -B -m unittest -v rewrite.test_state_bundle -k prepare_worker_chat`。[恢复实测](evidence/worker-feishu-chat-history.json)
+
 ## 停止切换和回退
 
 - 有持单、待确认的同伴消息、待答问题、审批、订阅或处理权纠正时，备份照常保留，准备新写者会列出待处理数。指定工作区、特殊时限、紧急优先级、未知元数据或已有投递事实的排队单需要显式对照。历史旧格式任务表有内容时同样需要单独迁移。早期格式 1 快照仍按原标准校验，准备阶段再核本版支持范围。
