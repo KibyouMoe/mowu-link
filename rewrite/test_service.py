@@ -201,7 +201,8 @@ class Service(unittest.TestCase):
         self.assertNotIn("fixture body",json.dumps(status))
         self.assertEqual(counts(),(2,0,2))
         self.assertEqual(unrelated.request("GET","deliveries/status"),
-                         {"consumer":"worker/unrelated","latest_cursor":0,"confirmed_cursor":0,"awaiting_consumer_ack":0})
+                         {"consumer":"worker/unrelated","latest_cursor":0,"confirmed_cursor":0,
+                          "awaiting_consumer_ack":0,"assignment_status":True})
         with self.assertRaisesRegex(Fault,"forbidden"):
             writer.request("GET","deliveries/status")
         with self.assertRaisesRegex(Fault,"unknown_status_filter"):

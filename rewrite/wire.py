@@ -46,7 +46,10 @@ def route(orders, actor, method, path, body, headers, approval_workers=frozenset
         require(actor=="hermes" or actor.startswith(("worker/","approver/")),403,"forbidden")
         require(not url.query,422,"unknown_status_filter")
         with orders.db.transaction() as db:
-            return 200,"application/json",delivery.status(db,actor)
+            status = delivery.status(db,actor)
+        if actor.startswith("worker/"):
+            status["assignment_status"] = True
+        return 200,"application/json",status
     if len(parts)==4 and parts[0]=="workers" and parts[2]=="admission-handoffs":
         require(actor==worker_actor(parts[1]),403,"forbidden")
         require(method=="PUT" and not url.query,422,"invalid_handoff")

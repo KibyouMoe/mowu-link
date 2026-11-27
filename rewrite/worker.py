@@ -11,6 +11,7 @@ from .messages import valid_guid
 from .storage import Database, Fault, encode, guid, require, string
 
 FOLLOWUP_FRAMES = {"task.updated","task.probe","task.shelved","task.cancel","task.transfer_out","question.resolved"}
+ASSIGNMENT_STATUS_REQUIRED = "router_assignment_status_required"
 TRANSPORT_RECONCILIATION_ERRORS = {"worker_cursor_ahead_of_router","worker_confirmed_prefix_missing",
                                    "worker_inbox_frame_conflict","worker_delivery_gap"}
 
@@ -186,6 +187,7 @@ class Worker:
             status = self.router.request("GET","deliveries/status")
             require(isinstance(status,dict) and status.get("consumer")=="worker/"+self.worker_id,
                     502,"worker_transport_cursor_unconfirmed")
+            require(status.get("assignment_status") is True,503,ASSIGNMENT_STATUS_REQUIRED)
             confirmed = status.get("confirmed_cursor")
             body = {"session_id": self.session, **self.hold()}
             with self.db.transaction() as db:
@@ -435,7 +437,12 @@ class Worker:
         if job["stage"]=="offered" or job["host_state"]=="ready":
             # W03 is a historical receipt. Check current authority for every first write.
             query = urlencode({"session_id": self.session, "assignment_id": aid})
-            status = self.router.request("GET", f"tasks/{tid}/assignment-status?{query}")
+            try:
+                status = self.router.request("GET", f"tasks/{tid}/assignment-status?{query}")
+            except Fault as error:
+                if error.status==404 and error.code=="unknown_route":
+                    raise Fault(503,ASSIGNMENT_STATUS_REQUIRED,retryable=True) from error
+                raise
             state = status.get("state") if isinstance(status,dict) else None
             require(state in ("active","inactive","cleanup_pending"),502,"assignment_status_unconfirmed")
             if state!="active":

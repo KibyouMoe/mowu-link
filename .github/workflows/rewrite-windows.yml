@@ -108,6 +108,7 @@ jobs:
             python -B -m rewrite.release_check --repository . --component worker-pair --previous 307a8a119c6a97ea2cb816280227afb3295e5675 --new $env:GITHUB_SHA
             python -B -m rewrite.release_check --repository . --component router --previous 307a8a119c6a97ea2cb816280227afb3295e5675 --new $env:GITHUB_SHA
             python -B -m rewrite.release_check --repository . --component state-bundle --previous 35ba22f66e3017a1756b8645f3b88d091b3ff6f8 --new $env:GITHUB_SHA
+            python -B -m rewrite.release_check --repository . --component assignment-rollout --previous 6e96d976207b7c5f96ba309e199ac4486834e78b --new $env:GITHUB_SHA
           } finally {
             Remove-Item -LiteralPath $dir.FullName -Recurse -Force
           }

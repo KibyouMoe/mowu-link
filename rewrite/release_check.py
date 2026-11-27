@@ -7,10 +7,12 @@ import re
 from pathlib import Path
 from queue import Queue
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
 from threading import Thread
+import time
 
 from .release import build,materialize
 from .cutover import digest, readonly
@@ -134,6 +136,89 @@ def router_rehearsal(root,old,new,cert,key,env):
             "unchanged_trial":True,"starts":["previous","new","previous"]}
 
 
+def assignment_rollout(root,old,new,cert,key,env):
+    worker,session = "trial","assignment-rollout-session"
+    manager_key,worker_key,adapter_key,ops_key,callback_key = (guid() for _ in range(5))
+    router_roles = config(root,"router.json",{manager_key:"hermes",worker_key:"worker/"+worker})
+    adapter_roles = config(root,"adapter.json",{adapter_key:"worker/"+worker})
+    worker_roles = config(root,"worker.json",{ops_key:"ops/"+worker,callback_key:"adapter/"+worker})
+    native_db,router_db,worker_db = (root/name for name in ("native.db","router.db","worker.db"))
+
+    def connection(name,url,token):
+        return config(root,name,{"url":url,"token":token,"ca_file":str(cert)})
+
+    def native_inputs():
+        with closing(sqlite3.connect(native_db.as_uri()+"?mode=ro",uri=True)) as db:
+            return [(json.loads(p),json.loads(r)) for p,r in db.execute("SELECT input,receipt FROM inputs")]
+
+    def observed(client, predicate):
+        deadline = time.monotonic()+24
+        while True:
+            status = client.request("GET","worker/status")
+            if predicate(status):
+                return status
+            if time.monotonic()>=deadline:
+                raise RuntimeError("worker did not reach the expected rollout state: "+encode(status))
+            time.sleep(0.1)
+
+    def run_worker(package,router_config):
+        flags = ("--worker-id",worker,"--router-connection",router_config,"--adapter-connection",host,
+                 "--adapter-session",session)
+        return serve(package,"worker",worker_db,worker_roles,cert,key,env,flags)
+
+    adapter_flags = ("--worker-id",worker,"--session",session,"--fixture-db",native_db)
+    with serve(new,"fixture-adapter",root/"adapter.db",adapter_roles,cert,key,env,adapter_flags) as adapter:
+        host = connection("host-link.json",adapter,adapter_key)
+        with serve(old,"router",router_db,router_roles,cert,key,env) as router:
+            manager = Client(router,manager_key,cert)
+            order = manager.request("POST","tasks",
+                {"title":"Rollout test","instructions":"Recover the original assignment","assignee_id":worker},guid())
+            tid = order["task_id"]
+            with run_worker(new,connection("old-router-link.json",router,worker_key)) as gateway:
+                refused = observed(Client(gateway,ops_key,cert),
+                                   lambda s:s["router_observed"] and bool(s["router_connected"] or s["last_error"]))
+                if refused["router_connected"] or refused["last_error"]!="router_assignment_status_required":
+                    raise RuntimeError("candidate Worker did not refuse the previous Router before W01")
+                if native_inputs() or manager.request("GET","workers")["items"] or (
+                    manager.request("GET","tasks/"+tid)["task"]!=order
+                ):
+                    raise RuntimeError("out-of-order rollout changed Router or native state")
+
+        with serve(new,"router",router_db,router_roles,cert,key,env) as router:
+            manager = Client(router,manager_key,cert)
+            router_config = connection("new-router-link.json",router,worker_key)
+            with run_worker(old,router_config) as gateway:
+                ops = Client(gateway,ops_key,cert)
+                held = observed(ops,lambda s:s["held_task_id"]==tid and bool(native_inputs()))
+                baseline, = native_inputs()
+                aid = held["held_assignment_id"]
+                if baseline[0]["assignment_id"]!=aid or manager.request("GET","tasks/"+tid)["task"]["assignment_id"]!=aid:
+                    raise RuntimeError("mixed rollout did not preserve the original assignment")
+
+            with run_worker(new,router_config) as gateway:
+                ops = Client(gateway,ops_key,cert)
+                observed(ops,lambda s:s["router_connected"] and s["held_assignment_id"]==aid)
+                sender = Client(gateway,callback_key,cert)
+                receipt = baseline[1]
+                body = {"session":session,"turn_id":receipt["turn_id"],"tool":"worker_report",
+                        "arguments":{"task_id":tid,"assignment_id":aid,"summary":"Original assignment recovered."}}
+                report = sender.request("POST","worker/native-tool",body)
+                if report!=sender.request("POST","worker/native-tool",body) or report["release_assignment_id"]!=aid:
+                    raise RuntimeError("the original W04 could not be replayed")
+                observed(ops,lambda s:s["held_assignment_id"] is None)
+                details = manager.request("GET","tasks/"+tid)
+                notifications = manager.frames(0)
+                if (details["task"]["state"]!="completed_reported" or len(notifications)!=1
+                    or notifications[0]["payload"]["task_id"]!=tid
+                    or details["last_report"]["assignment_id"]!=aid or native_inputs()!=[baseline]):
+                    raise RuntimeError("the rollout emitted duplicate work or changed the wrong assignment")
+    return {"assignment_rollout":{"out_of_order_error":refused["last_error"],"out_of_order_registrations":0,
+            "out_of_order_native_inputs":0,"task_id":tid,"assignment_id":aid,"native_input":receipt,
+            "w04":report,"manager_delivery_id":notifications[0]["delivery_id"],"manager_notifications":1,
+            "native_inputs":1,"hold_after_w04":None,
+            "scope":"Independent installed releases, loopback TLS, fixture native session and callback."}}
+
+
 def dsh_workspace_rollback(root,old,new,env,image,*,local_tls=False):
     docker = shutil.which("docker")
     if not docker or not isinstance(image,str) or not re.fullmatch(r"sha256:[0-9a-f]{64}",image):
@@ -191,8 +276,8 @@ def run(repository,older,newer,component="router",*,dsh_image=None,dsh_local_tls
 
                 observed = rehearse_bundle(root,old,new,older,newer,cert,key,env)
             else:
-                rehearse = worker_pair if component=="worker-pair" else router_rehearsal
-                observed = rehearse(root,old,new,cert,key,env)
+                rehearse = {"worker-pair":worker_pair,"router":router_rehearsal,"assignment-rollout":assignment_rollout}
+                observed = rehearse[component](root,old,new,cert,key,env)
         for archive,sha,checksum,directory in versions:
             materialize(archive,sha,checksum,directory,install=False)
         return {"previous_revision":older,"new_revision":newer,"package_sha256":[v[2] for v in versions],
@@ -204,7 +289,7 @@ def main():
     p.add_argument("--repository",type=Path,required=True)
     p.add_argument("--previous",required=True)
     p.add_argument("--new",required=True)
-    p.add_argument("--component",choices=("router","worker-pair","state-bundle","dsh-workspace-rollback"),default="router")
+    p.add_argument("--component",choices=("router","worker-pair","state-bundle","assignment-rollout","dsh-workspace-rollback"),default="router")
     p.add_argument("--dsh-image",help="pinned existing Linux image ID for the DSH workspace rollback rehearsal")
     p.add_argument("--dsh-local-tls",action="store_true",help="rehearse DSH rollback with the authenticated local TLS link")
     args = p.parse_args()

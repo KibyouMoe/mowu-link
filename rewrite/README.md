@@ -87,6 +87,8 @@ Worker 重连前核对 Router 已确认的 C02 前缀是否完整保存在本地
 
 W03 同号重试保留原接管回执。首次写入宿主及明确拒收后的再试，需要 Worker 以自己的 W01 会话查询 `GET /v1/tasks/{task_id}/assignment-status?session_id=…&assignment_id=…`。Router 只回 `active`、`inactive` 或 `cleanup_pending`，不返回其他工位的任务或持有人。失效派发结束本地待投递项。原单尚待取消时，按原派发继续清理与 W04 确认。查询失败时保留待处理项，恢复后复查。已经尝试过且接收未知的宿主写入只按原号查回。分步更新这套新版时先更新 Router，再更新 Worker。
 
+新版 Worker 在 W01 前从自己的 `deliveries/status` 确认 Router 支持派发状态查询。顺序装反时，`worker-status` 显示 Router 未连接与 `router_assignment_status_required`，旧 Router 不会收到该 Worker 的登记。Worker 按宿主探测间隔复查。已连接的 Worker 发现派发状态接口消失时也会回到该状态。退版先停新版 Worker，按[版本回退演练](router-rehearsal.md#保留试用写入的新版版本回退)核对状态，再用上一发行包配对恢复。
+
 ### 训练员原生题卡
 
 训练员可以在原卡一次提交同一公开请求里的多道题。按题目下方的序号选择，支持多选的题用逗号隔开，留空跳过。公开原题允许自填时才提供输入框。Worker 等同一会话和原请求的宿主关闭凭据再更新原卡。Codex App Server 每题单选，DSH 计时题进入原生续答后可多选。测试使用飞书 JSON 2.0 表单的批量回调结构，实际飞书交互待验。[飞书卡片组件](https://open.feishu.cn/document/feishu-cards/card-json-v2-components/component-json-v2-overview?lang=en-US)
