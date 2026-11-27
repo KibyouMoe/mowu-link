@@ -55,7 +55,7 @@
 | Antigravity | 已核安装版本 2.32.1 及官方会话钩子、转录、MCP 入口。CLI 可克隆 App 对话供独立宿主使用，Remote Control 提供人工访问。 | 指定原桌面会话的后台唤醒、停止、真实 Gemini 回报及读写验收。CLI 或远程托管须先确认允许改用独立宿主。[兼容性核对](antigravity-compatibility.md) |
 | 授权和维护 | 认证的 Router、Worker 与适配器隔离已验证。普通题卡与原生授权分别处理。 | 按新版的训练员命令、原生审批、独立运维入口逐项核对真实授权，包含 Desktop 应用授权、用户身份及真实平台回执。 |
 
-Codex 与 DSH 的 Windows 可写入口共用私有运行账本与 Linux 引擎核对。Windows Server 2025 的 Codex 安装包使用 CLI 夹具验证过冷重开、原附件、错误引擎拒绝及移除回执。DSH 的 Windows 可写入口使用原生 DSH 包与 CLI 夹具验收。写账本进程在整个服务期持有独占锁，宿主退出后仍可拦住离线发布。真实 Windows Docker 上的端到端工单、成果、取消及回收仍待验。[Codex 可写工位验证](evidence/windows-codex-assignment-workspace.json) · [Windows 账本审计](evidence/windows-workspace-journal-audit.json) · [工作区回退实测](evidence/codex-workspace-writer-rollback.json)
+Codex 与 DSH 的 Windows 可写入口共用私有运行账本与 Linux 引擎核对。Windows Server 2025 的 Codex 安装包使用 CLI 夹具验证过冷重开、原附件、错误引擎拒绝及移除回执。Windows DSH 原生包经双向 TLS 向 Worker 暂存附件并提交 W04，按原号补回丢失的回执后只通知一次、释放原派发并回收工作区。重开原会话仍仅一条输入，模型未重新执行。离线审计实测宿主写锁释放后，写账本子进程仍可拦住发布。Windows 使用 Docker CLI 夹具和本地脚本模型，Docker Desktop 的 Linux 引擎上仍待验端到端工单、成果、取消和回收。[DSH 回环](evidence/windows-dsh-assignment-workspace.json) · [Codex 可写工位](evidence/windows-codex-assignment-workspace.json) · [Windows 账本审计](evidence/windows-workspace-journal-audit.json) · [工作区回退实测](evidence/codex-workspace-writer-rollback.json)
 
 当前可复跑隔离联调。A10 的 Worker 恢复及新版备份回退另核了 70 帧断点续接、前缀缺件与同号异文，以及 C02 位置正确但留有失效 W03 的混搭快照。[复跑及边界](replacement-progress.md#检查点与证据) 离「可切换」仍需真实宿主、实际 Feishu 测试身份、原生工单清理，以及新版实际来源和平台回执对账。
 

@@ -1,0 +1,104 @@
+{
+  "revision": "1bcee2ba1a47f7f0dd3dd0b65335390af02d49a0",
+  "workflow": "https://github.com/KibyouMoe/mowu-link/actions/runs/45963237263",
+  "dsh_job_id": 140385738421,
+  "installation_job_id": 140385738027,
+  "windows_release_files": 383,
+  "windows_release_sha256": "91806856d2c2de27440d3065cc926c8cc4a536d5065a56e36f3ecdb88b2f52c8",
+  "windows_installation_tests_passed": 26,
+  "windows_dsh_tests_passed": 15,
+  "windows_default_docker_engine": "windows",
+  "offline_audit_blocked_until_file_broker_exit": true,
+  "session": "dsh-isolated-workspace-artifacts",
+  "task_id": "b5c6eaeb-c93e-4b90-8b38-d379185eb37c",
+  "assignment_id": "8106c051-ab1e-4ed3-bc97-9b90c182b920",
+  "artifact_id": "e42fc02e-8455-45d3-8570-136068984e88",
+  "local_artifact_id": "0206e54e-0a0e-4682-8ed1-e316e229f023",
+  "bytes": 691200,
+  "sha256": "80320ac86029606b61d5b57728512a639950cca654e5683f89d160df3ca0a953",
+  "native_input": "mowulink-a41bd9aeac0c60eab9ba2502f5a256b0ad9fd286ac307122364a1b32386ca477",
+  "native_calls": [
+    {
+      "turn": 1,
+      "step": 1,
+      "callId": "workspace-artifact-0",
+      "name": "worker_workspace_shell",
+      "arguments": "{\"command\":\"mkdir -p results; python3 -c 'from pathlib import Path; Path(\\\"results/sample.bin\\\").write_bytes(bytes(range(256))*2700)'; ln -s /etc/passwd results/unsafe\"}"
+    },
+    {
+      "turn": 1,
+      "step": 2,
+      "callId": "workspace-artifact-1",
+      "name": "worker_workspace_export",
+      "arguments": "{\"path\":\"results/unsafe\"}"
+    },
+    {
+      "turn": 1,
+      "step": 3,
+      "callId": "workspace-artifact-2",
+      "name": "worker_workspace_export",
+      "arguments": "{\"path\":\"results/sample.bin\"}"
+    },
+    {
+      "turn": 1,
+      "step": 4,
+      "callId": "workspace-artifact-3",
+      "name": "worker_workspace_export",
+      "arguments": "{\"path\":\"results/sample.bin\"}"
+    },
+    {
+      "turn": 1,
+      "step": 5,
+      "callId": "workspace-artifact-4",
+      "name": "worker_report",
+      "arguments": "{\"task_id\":\"b5c6eaeb-c93e-4b90-8b38-d379185eb37c\",\"assignment_id\":\"8106c051-ab1e-4ed3-bc97-9b90c182b920\",\"summary\":\"DSH isolated container result\",\"artifact_ids\":[\"e42fc02e-8455-45d3-8570-136068984e88\"]}"
+    }
+  ],
+  "upload_offsets": [
+    262144,
+    524288,
+    691200
+  ],
+  "symlink_rejected": true,
+  "container_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "container_present_without_w04_receipt": true,
+  "handoff_waited_for_cleanup": true,
+  "w04": {
+    "recorded": true,
+    "release_assignment_id": "8106c051-ab1e-4ed3-bc97-9b90c182b920",
+    "task_state": "completed_reported"
+  },
+  "w04_attempts": [
+    {
+      "idempotency_key": "complete-8106c051-ab1e-4ed3-bc97-9b90c182b920",
+      "body": {
+        "session_id": "bf1f9d69-d560-43e9-822c-062c9ab60edb",
+        "assignment_id": "8106c051-ab1e-4ed3-bc97-9b90c182b920",
+        "outcome": "completed",
+        "summary": "DSH isolated container result",
+        "artifact_ids": [
+          "e42fc02e-8455-45d3-8570-136068984e88"
+        ]
+      }
+    },
+    {
+      "idempotency_key": "complete-8106c051-ab1e-4ed3-bc97-9b90c182b920",
+      "body": {
+        "artifact_ids": [
+          "e42fc02e-8455-45d3-8570-136068984e88"
+        ],
+        "assignment_id": "8106c051-ab1e-4ed3-bc97-9b90c182b920",
+        "outcome": "completed",
+        "session_id": "bf1f9d69-d560-43e9-822c-062c9ab60edb",
+        "summary": "DSH isolated container result"
+      }
+    }
+  ],
+  "container_absent_after_replay": true,
+  "native_inputs_after_reopen": 1,
+  "native_model_requests_after_reopen": 0,
+  "manager_notification": "e39de7cf-11d4-4ec3-83e5-3ed78ce1e797",
+  "router_state": "completed_reported",
+  "native_link": "IPv4 loopback with mutual TLS",
+  "boundary": "Installed Windows DSH AgentLoop and native file ledger, Docker CLI fixture, real Worker and Router. Local scripted model. No Feishu."
+}
