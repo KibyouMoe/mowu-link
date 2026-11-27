@@ -27,17 +27,22 @@ PACKAGE = Path(__file__).resolve().parent.parent
 @unittest.skipUnless(sys.platform=="linux" and os.environ.get("MOWULINK_TEST_USER_SYSTEMD")=="1",
                      "isolated Linux systemd user manager required")
 class LinuxMaintenance(unittest.TestCase):
-    def reload_test_manager(self):
+    def require_idle_test_manager(self):
         for options in (("list-units","--type=service","--state=active,activating,deactivating","--plain"),
                         ("list-jobs",)):
             owned = subprocess.check_output(["/usr/bin/systemctl","--user",*options,"--no-legend"],timeout=6)
             self.assertFalse(owned.strip(),"the test requires a dedicated user manager without active services or jobs")
+
+    def reload_test_manager(self):
+        self.require_idle_test_manager()
         subprocess.run(["/usr/bin/systemctl","--user","daemon-reload"],check=True,capture_output=True,timeout=12)
 
     @contextmanager
     def inactive_unit(self):
+        self.require_idle_test_manager()
         label = "mowulink-maintenance-stopped-"+guid()+".service"
         units = Path("/run/user")/str(os.getuid())/"systemd/user"
+        created = not units.is_dir()
         units.mkdir(mode=0o700,exist_ok=True)
         path = units/label
         argv = ["/usr/bin/sleep","180"]
@@ -48,9 +53,13 @@ class LinuxMaintenance(unittest.TestCase):
             self.reload_test_manager()
             yield {"unit":label,"file":str(path),"argv":argv,"sha256":unit_digest(path)}
         finally:
-            subprocess.run(["/usr/bin/systemctl","--user","stop",label],check=True,capture_output=True,timeout=12)
-            path.unlink()
-            self.reload_test_manager()
+            try:
+                subprocess.run(["/usr/bin/systemctl","--user","stop",label],check=True,capture_output=True,timeout=12)
+            finally:
+                path.unlink()
+                if created and not any(units.iterdir()):
+                    units.rmdir()
+                self.reload_test_manager()
 
     def wait(self, read, seconds=15):
         deadline = time.monotonic()+seconds
