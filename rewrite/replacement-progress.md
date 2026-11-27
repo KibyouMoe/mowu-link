@@ -70,6 +70,10 @@ Linux 用户级 systemd 已接入独立 HTTPS 维护。登记核对单位文件�
 
 Linux 停机维护的运行时代码提交为 `0f30cf630276878d2eb65931dbaa3acee2396857`。Linux arm64 普通安装包回归通过 226 项、按环境跳过 129 项。macOS 相关回归通过 20 项、按环境跳过 3 项。Windows 安装与 DSH 原生组通过。装包专项用强化测试隔离检查的提交 `6df7073c199a07af11af5e7ce88edd0b489c4a9b`，在 Ubuntu systemd 255 来宾连续实跑 3 轮，351 个安装文件逐一验回。已有其它服务运行时，测试在写文件前退出，该服务 PID 和配置目录均保持原样。原生包 SHA-256 为 `159f7b584304bd0295f8e82d0697c03ce4ba210a600e578679b7c56520fd96fe`。[Windows CI](https://github.com/KibyouMoe/mowu-link/actions/runs/45937640227) · [Linux 回执](evidence/linux-systemd-host-ops.json)
 
+Windows SCM 已接入独立 HTTPS 维护。登记需要完整的原生命令、运行账号、程序摘要和受保护的本地目录。测试拒绝未授权重启、不符代际、不同程序摘要及服务依赖。Windows Server 2025 的 SCM 实际替换包装进程 4024 → 1244，隔离 Router 进程 8508 → 9912，两个旧进程均已退出。客户端未读取首个 POST 回执，按原号查回 `6512f5dd-2688-4afa-91b0-786840f1654c`，同号重试未重启。Router 按原建单键读回唯一原单，邻近服务 PID 7264 保持不变。已登记的停机服务可启动。待核恢复保留原失败回执与新的进程代际观测，维护进程冷重开后同号仍可读。中断前的待核账本以夹具构造，SCM、TLS 和 Router 实跑。[原生回执](evidence/windows-scm-host-ops.json)
+
+Windows 运行时代码 `f360800f799437a8b9ae0022823052dd88a921ba` 未随测试修复变更，该提交 Linux arm64 安装包全量通过 226 项、按环境跳过 130 项。Windows 最终验收提交 `4ce8b1b924ed67843e892101f303a96adb0108fa` 的安装组 21 项、DSH 原生组 14 项和两套版本回退通过，354 个安装文件验回一致。DSH 运行器报告默认 Docker 为 Windows 引擎，可写工位所需的 Linux 容器仍待单验。包 SHA-256 为 `8614d9b9e18afb743f5891fd24c6e27e698bb20da326140c197cd77757208b33`。复跑 `MOWULINK_TEST_WINDOWS_SCM=1` 对应的 Windows PowerShell 用法见安装说明。测试服务只注册于一次性运行器，Desktop 自有进程与现役迁移仍待验。[Windows 日志](https://github.com/KibyouMoe/mowu-link/actions/runs/45939893260/job/140311554196) · [复跑入口](README.md#windows-服务控制管理器维护入口)
+
 重新取消的 W04 已按具体指令核验。相同 A06 操作键重送保留原回执，自动重试沿用同一清理号。同一派发的下一条显式取消携带新的 `cleanup_id`。Worker 从原生收件识别该号，分别保存等待、清理及 Router 回执。隔离实测第一次迟报、重用旧键、换新键重播旧正文和错号都返回 409。新 W04 落库后故意丢回包，冷启沿原键查回，取消通知一条。复跑 `python3 -B -m unittest -v rewrite.test_cleanup rewrite.test_cutover -k cancel`。[HTTP 与回退实测](evidence/reissued-cancel-w04.json)
 
 用前版 `2490059e42d379183c19b0e82c208f545a3c78ee` 生成的隔离 Router、Worker 和适配器库做了升级。仅一次待确认的旧取消可以正常完成，已经成功的旧回执可沿原键回读。旧版已重复取消而未记录清理号时，拒绝无号回执，须由管理端发新指令。回退核对新指令及 W04 的同一清理号，缺号拒绝发布。[旧库升级](evidence/reissued-cancel-upgrade.json) · [回退演练](evidence/cutover-reviewed-cancel-retry.json)

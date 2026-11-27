@@ -414,6 +414,32 @@ MOWULINK_TEST_USER_SYSTEMD=1 python3 -B -m unittest -v rewrite.test_host_ops_sys
 
 测试使用真实 systemd 用户管理器、独立 HTTPS、临时数据库及各自的 TLS 身份。按原请求号重放后仍能查到唯一一张隔离待派单。样例只使用自己的临时单位，完成后清理。[Linux 实测](evidence/linux-systemd-host-ops.json) · [systemd 原生接口](https://freedesktop.org/software/systemd/man/devel/org.freedesktop.systemd1.html)
 
+### Windows 服务控制管理器维护入口
+
+Windows 的 `rewrite.service host-ops` 可连接本机服务控制管理器，沿用外部 HTTPS 客户端、服务级维护身份、原请求号及待核对账。登记的是已安装且由 SCM 直接管理的独占进程服务。维护进程的账号须已有该服务的查询、启动与停止权。
+
+```json
+{
+  "router": {
+    "scm_service": "MowuLinkRouter",
+    "argv": ["C:\\MowuLink\\Private\\RouterService.exe", "router"],
+    "account": "LocalSystem",
+    "sha256": "<审批过的服务程序 SHA-256>"
+  }
+}
+```
+
+把样例里的账号、程序和参数换成已登记值。程序放在权限受保护的本地目录。维护时以 SCM 注册的完整命令、账号和进程身份对证。遇到依赖、触发器、自动失败动作、保护服务或不可核的进程，维护结果保留待核。执行重启时先等原进程结束，再启动同一登记服务。已停服务的代际在维护服务冷开后还需重新读取。进程回执之后用业务端点核 Router 已就绪、原任务仍可查。[Windows 原生服务接口](https://learn.microsoft.com/en-us/windows/win32/services/starting-a-service)
+
+在已校验的安装目录复跑。使用一次性 Windows 测试机、权限受保护的临时目录，以及已有创建、查询、启停和删除本次临时 SCM 服务权限的测试账号。运行命令如下。
+
+```powershell
+$env:MOWULINK_TEST_WINDOWS_SCM = '1'
+python -B -m unittest -v rewrite.test_host_ops_windows
+```
+
+验收夹具注册和清理按本次运行生成的测试服务。SCM 以测试机的 LocalSystem 账号运行包装进程，由它启动隔离 Router。Windows Server 2025 已核验原生启停、同号查回及原工单保留。Desktop 自有进程和现役接管仍需另行验收。[Windows 实测回执](evidence/windows-scm-host-ops.json)
+
 ### 跨系统验收
 
 开发机需 Python 3.12 或更新版本、Git、OpenSSL 和已运行的本地 Linux Docker 引擎。先准备含 Python 3.12+、Git、tar、OpenSSL 的 Linux 测试镜像。此次实测使用官方 `python:3.13-bookworm` 的 Linux arm64 manifest `sha256:0a1254df0519003d33fd4ab8ad26aff1154e50b3c93aa5ec978e83bf83ba084c`。各引擎对已安装镜像的 ID 表示可能不同，`--image` 使用本机 `docker image inspect --format '{{.Id}}' <镜像>` 的完整结果。

@@ -1,0 +1,97 @@
+{
+  "revision": "4ce8b1b924ed67843e892101f303a96adb0108fa",
+  "workflow_run": "https://github.com/KibyouMoe/mowu-link/actions/runs/45939893260/job/140311554196",
+  "installed_files": 354,
+  "package_sha256": "8614d9b9e18afb743f5891fd24c6e27e698bb20da326140c197cd77757208b33",
+  "windows_tests_passed": 21,
+  "runtime": 26100,
+  "task_id": "f64c587d-0fef-4ac5-bff7-a2e3e2da1ec1",
+  "router_task_count": 1,
+  "old_router_pid": 8508,
+  "new_router_pid": 9912,
+  "scm_restart": {
+    "actor": "host-maintainer/router",
+    "after": {
+      "generation": "355223a55d47516178cc10130076e8ccc7442ea2d965a7b502bd750a6aade6e7",
+      "label": "mowulink-ci-8d33f05d-d211-4f5e-ac1e-200c157d7cb2",
+      "pid": 1244,
+      "service": "router",
+      "started": "134402272006189621",
+      "state": "running"
+    },
+    "before": {
+      "generation": "3c0c95488f4ad8e3dda0b2d01045841c495051c2981a03c26c911ef51c740612",
+      "label": "mowulink-ci-8d33f05d-d211-4f5e-ac1e-200c157d7cb2",
+      "pid": 4024,
+      "service": "router",
+      "started": "134402272001152625",
+      "state": "running"
+    },
+    "reason": "test native Windows restart",
+    "request_id": "6512f5dd-2688-4afa-91b0-786840f1654c",
+    "requested_at": "2026-11-27T04:26:40.511866+00:00",
+    "service": "router",
+    "settled_at": "2026-11-27T04:26:40.740288+00:00",
+    "state": "process_replaced"
+  },
+  "stopped_service": {
+    "actor": "host-maintainer/stopped",
+    "after": {
+      "generation": "5b40dce66fd2629c6fdb7e9ff321c8c4829368e8b476f3b042114444e6636faa",
+      "label": "mowulink-ci-1f121c20-6ae8-4633-afd9-cde1f436232f",
+      "pid": 3824,
+      "service": "stopped",
+      "started": "134402272009887286",
+      "state": "running"
+    },
+    "before": {
+      "generation": "f9fe84c8a0d23014b2db3f77fda505f7fafc2929b8ea5a2d4329a8231dcb560c",
+      "label": "mowulink-ci-1f121c20-6ae8-4633-afd9-cde1f436232f",
+      "pid": null,
+      "service": "stopped",
+      "started": null,
+      "state": "stopped"
+    },
+    "reason": "test native Windows restart",
+    "request_id": "8dc6e802-3947-4559-b263-b67359a44142",
+    "requested_at": "2026-11-27T04:26:40.984198+00:00",
+    "service": "stopped",
+    "settled_at": "2026-11-27T04:26:41.110854+00:00",
+    "state": "process_started"
+  },
+  "uncertain_reconciliation": {
+    "actor": "host-maintainer/router",
+    "before": {
+      "generation": "355223a55d47516178cc10130076e8ccc7442ea2d965a7b502bd750a6aade6e7",
+      "label": "mowulink-ci-8d33f05d-d211-4f5e-ac1e-200c157d7cb2",
+      "pid": 1244,
+      "service": "router",
+      "started": "134402272006189621",
+      "state": "running"
+    },
+    "failure": "maintenance_process_interrupted",
+    "reason": "test native Windows restart",
+    "reconciliation": {
+      "after": {
+        "generation": "5bd9190973efec96861a4270f42f88af6e2c3dbb243936fcb2940f8f43c2c6f5",
+        "label": "mowulink-ci-8d33f05d-d211-4f5e-ac1e-200c157d7cb2",
+        "pid": 5568,
+        "service": "router",
+        "started": "134402272014974220",
+        "state": "running"
+      },
+      "observed_at": "2026-11-27T04:26:41.643989+00:00",
+      "state": "replacement_observed"
+    },
+    "request_id": "481f04a2-fed9-4563-ab7a-d3df0f32cde1",
+    "requested_at": "2026-11-27T04:26:41.121008+00:00",
+    "service": "router",
+    "settled_at": "2026-11-27T04:26:41.360652+00:00",
+    "state": "unconfirmed"
+  },
+  "neighbor_pid_unchanged": 7264,
+  "router_runs": 3,
+  "persisted_receipt": true,
+  "original_post_response_read": false,
+  "scope": "Actual Windows SCM and HTTPS, temporary SCM wrapper and real isolated Router."
+}
