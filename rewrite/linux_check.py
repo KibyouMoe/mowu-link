@@ -134,7 +134,7 @@ def run(repository, revision, image, socket):
         cid = communicate([*docker,"run","-d","--rm","--pull=never","--network",net,
                            "-p","127.0.0.1::8443/tcp","-p","127.0.0.1::8444/tcp","--read-only",
                            "--tmpfs","/tmp:rw,nosuid,nodev,size=256m,mode=1777","--user","65534:65534",
-                           "--cap-drop=ALL","--security-opt=no-new-privileges","--pids-limit=128","--memory=512m",
+                           "--cap-drop=ALL","--security-opt=no-new-privileges","--pids-limit=128","--memory=768m",
                            "-e","HOME=/tmp","-e","PYTHONDONTWRITEBYTECODE=1",image,"sleep","600"]).decode().strip()
         cleanup.callback(communicate,[*docker,"rm","-f",cid])
         def guest(*args, directory=GUEST, data=None, timeout=120):
