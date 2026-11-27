@@ -1,6 +1,8 @@
 # 现役工具替换进度
 
-外层单 t-124f6357c5。程序契约版本 9db82a32。此表逐项记录可替换条件。「实测」限定到表中指定的宿主、平台和接口。只有全表核验、迁移回退演练和溪流独立复验齐全，才能提请生产切换。
+外层单 t-124f6357c5。程序契约版本 9db82a32。2026-11-27 起按[验收矩阵](acceptance-matrix.md)与 Wiki 05 的全量替换范围推进。新版须逐项验证，并完成新版切换、停写备份及版本回退演练，再由溪流独立复验。实际生产切换另行授权。
+
+以下按原检查点保留实测边界与复跑记录。其中涉及旧协议、旧格式、旧版回写或新旧联跑的记录属于范围更正前的历史证据。旧历史与在途数据的一次性处置等待确认。
 
 ## 检查点与证据
 
@@ -33,6 +35,10 @@
 实现 `46e2da4ced6cb66de657b627590de0fca5b7dc4f` 的 329 文件发行包 SHA-256 为 `a4de93778bee37d6c827e8852f03f75bea17f0c8afef9c722df80b09704a25d9`。macOS 全量通过 337 项、按环境跳过 5 项。Linux arm64 安装包通过 216 项、按环境跳过 126 项。Windows 安装及 DSH 原生两组通过。另从 macOS 将已审核档案复制到临时 Linux，启动该提交的 HTTPS 档案服务。两个原参与人均读回宿主回执 `d2a67b8c-49a0-5a18-b86f-7ac14b589056` 和同一份 648,000 字节附件，第三工位与非参与的管理身份均返回 404，未信任证书连线被拒。两系统位于同一物理机，内容和宿主为夹具。[Windows CI](https://github.com/KibyouMoe/mowu-link/actions/runs/45922445419)
 
 已实测 Router 与来源同批回退。此前收到原 T04 的 Info 会挡住整个回退。现在来源计划绑定同一份停写 Router，逐条核 T04、传输、适用的原宿主和平台回执以及附件摘要。本次同批恢复一张已验收工单、旧订阅的已收 Event 和 Info，以及邮件和游戏的原采集游标。旧订阅两条尚未进宿主的尾项原样待取，其中一条已确认传输。旧 Trigger 累计确认重送新增为零。漏列来源、错快照、缺 T04、缺宿主或平台回执均未生成输出。宿主与来源使用夹具。[复跑](router-rehearsal.md#router-与来源同批回退) · [证据](evidence/source-router-rollback.json)
+
+联合回退从同一批停写组件快照核对 Router、Worker、适配器、Hermes、来源和 Feishu。来源和组件分用两份清单时，即使 Router 摘要相同也拒绝。使用同一份清单但仍有飞书输入待处理也拒绝。通过后，旧 Router 实际 HTTP 读回 `reviewed_on_rewrite` 且原工位没有持单，旧聊天查询没有本次试用内容。问答两条从私有回退包逐条读回。旧 Trigger 按原号重试确认时新增为零，原两条尾项保持待取。邮件和游戏游标分别回到 11 和 16。试用消息再次入档时零重投，附件按原摘要读回。这次宿主、飞书和邮件及游戏来源使用夹具。组件快照的源码字段是测试标记，执行的发行包另以完整提交和摘要核对。[联合证据](evidence/joint-component-rollback.json) · [停写、审核和复跑](router-rehearsal.md#用同一批组件快照审核联合回退)
+
+联合回退实现 `a54401dc1c6ee1bd5745d4e122fb67029ab36adb`。macOS 相关回归通过 59 项、依环境跳过 1 项，从 363 文件安装包跑过联合用例并逐文件验回。包 SHA-256 为 `e23835ad9dc9baedb90cbb94c8d504cabc8eb047a766c875c714c95a143d1e4f`。Linux arm64 安装包全量通过 228 项、依环境跳过 131 项。Windows 安装组通过 23 项，包含重做版飞书档案恢复。旧版联合回退环境使用 POSIX 的旧 Router。[Windows 安装日志](https://github.com/KibyouMoe/mowu-link/actions/runs/45943875474/job/140324027510)
 
 旧 Worker 实时订阅另有读回差异。实际旧 Router 调用旧 Trigger 时，即使客户端丢弃响应且没有 Worker 连接，轮询也会把两端游标推过匹配和被过滤的记录。重试返回零条。该类旧订阅在迁移前仍须找原宿主收件凭据，本机 Codex 的私有配置没有发现订阅项，其他工位尚未核验。[旧订阅隔离证据](evidence/legacy-worker-subscription-ack.json)
 
@@ -813,7 +819,7 @@ Hermes 源码版本 `a2de7418a3405307f8b3abce01a66d5d71351edc`。从 Git 跟踪�
 
 上面两次探测分别记录于 `evidence/desktop-w04-probe.json` 和 `evidence/app-server-empty-profile.json`。溪流已核实当前没有可用的已授权测试工位。真实 W04 继续列为未验；其他项目继续推进。
 
-## 旧入口与替代条件
+## 现役入口盘点记录
 
 DSH 的 `/queue 正文` 已接入固定会话。飞书命令回执证明 Worker 已持久排队；宿主收件由独立输入号和回合号证明。忙时两条消息都留在 Worker，重建 Worker 后按原顺序进入两个独立回合。首条原生回执在传回途中丢失，复查原号后输入总数仍为三条（原回合一条和排队两条）。适配器拒绝将原消息交给另一会话。DSH SDK 在临时目录实际加载插件并落 V4 日志，Agent 驱动和飞书输入由夹具提供。旧宿主未声明下一回合投递能力时提示未接入。复跑 `python3 -m unittest -v rewrite.test_dsh_sdk rewrite.test_worker_commands`。
 
@@ -821,7 +827,7 @@ DSH 的 `/queue 正文` 已接入固定会话。飞书命令回执证明 Worker 
 
 重做版的纯文本指令现由绑定的飞书训练员交给 Worker。隔离 HTTP 实测 `/help`、`/status`、固定会话查询和同会话选择。状态卡分别显示两条连接、宿主最近忙闲、本地工单号与派发号。帮助别名为 `/start` 和 `/commands`。此时 `/resume` 仅能查看当前会话，同会话编号及 ID 可确认；历史翻页、检索、换绑仍待接。未知指令给出「暂不开放」。尚无执行回读的命令不会送入普通对话。重试丢失的 Worker 回执只出现一张指令卡；旧版已交给宿主的同号消息可查回旧收据。四项新增回归 `python3 -m unittest -v rewrite.test_worker_commands`，全量 97 项。飞书卡片使用平台替身，真实云端另验。
 
-旧 Router、Trigger 以此分支的 `server/` 和 `sources/` 为依据；宿主插件以独立 MowuLinkWorkerSkill 的 `f399148df99ed58568f4931aed414e3a83fa7a25` 为依据。已安装的 Hermes `trigger-bus` 与当前维修会话的 MCP 工具表亦已核过。源码声明只证明存在。每行的迁移条件在对应使用端实测通过之前，保留旧入口。
+旧 Router、Trigger 以此分支的 `server/` 和 `sources/` 为依据，宿主插件以独立 MowuLinkWorkerSkill 的 `f399148df99ed58568f4931aed414e3a83fa7a25` 为依据。已核安装的 Hermes `trigger-bus` 与当时维修会话的 MCP 工具表。下表保留盘点时的入口和证据，新版验收及切换清理按现行矩阵执行。
 
 | 旧入口与使用者 | 新入口／归属 | 已有证据；迁移条件 |
 | --- | --- | --- |

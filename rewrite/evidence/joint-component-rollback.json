@@ -1,0 +1,69 @@
+{
+  "revision": "a54401dc1c6ee1bd5745d4e122fb67029ab36adb",
+  "sha256": "e23835ad9dc9baedb90cbb94c8d504cabc8eb047a766c875c714c95a143d1e4f",
+  "files": 363,
+  "router_sha256": "f4d44bf89191f37242535c836808109e9f5cc843fd85a5cb79a33d9dbe45eb47",
+  "formal_order": "a7e6e023-38c0-40ec-8e59-43c86ea19f16",
+  "assignment": "ee169aea-a283-4690-bd15-bb734de21766",
+  "legacy_task": "t-88bd88bd8c",
+  "component_proof": {
+    "component_manifest_sha256": "0f77aed1d21e85e7dcca3f748f62be9830223f03e5186e961b050e6415718665",
+    "feishu_history": {
+      "oguri": {
+        "archive_sha256": "7ff6048ea7138417089f5fa5fc07c4707f59ea61017aad5b7bb80017d538d184",
+        "bundle_manifest_sha256": "0f77aed1d21e85e7dcca3f748f62be9830223f03e5186e961b050e6415718665",
+        "count": 2,
+        "finals_without_chat_proof": 0,
+        "format": 1,
+        "inbound": 1,
+        "inbound_without_index": 0,
+        "outbound": 1,
+        "snapshot_sha256": "03656b5089838b222ab837b8c0b4e27db0c27f5a3b2aa9d27f88fbf8814585cc",
+        "source": "feishu",
+        "worker": "oguri"
+      }
+    },
+    "snapshot_id": "5ea53333-282d-475a-966b-bfefb2c9eb9d",
+    "source_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "workers": 1
+  },
+  "separate_bundle_rejected": true,
+  "pending_feishu_rejected": true,
+  "legacy_router_readback": [
+    200,
+    "reviewed_on_rewrite",
+    null,
+    200,
+    0
+  ],
+  "legacy_subscriber_readback": [
+    3,
+    0,
+    [
+      "return-acknowledged",
+      "return-tail"
+    ]
+  ],
+  "scope": "Real isolated Router and old Trigger HTTP, byte-checked archives, host/model/platform/mailbox fixtures.",
+  "source_return_counts": {
+    "game": 1,
+    "mail": 1,
+    "subscription": 4
+  },
+  "install_platform": "macOS",
+  "component_snapshot_revision_kind": "fixture label",
+  "reentry": {
+    "archive_sha256": "01a17f59af16a47e0d662d9efafe4b56165d84a70fa20c18e97d2d802720caca",
+    "archived_dispositions": {
+      "57ff9093-ac72-5732-956b-120bc8a239fd": "native_received",
+      "9f13f74a-902e-5ea8-a52a-a6d430d9a455": "reviewed_info_read",
+      "929cd806-af93-4ae0-bd1d-5468986d1d9a": "router_archived",
+      "ecd9644f-c7bf-4515-9537-7274584317b7": "native_received",
+      "c27912dc-d639-5d13-b1be-6c73d84e2f1a": "not_sent_to_host",
+      "9a79d77d-9c52-54ad-9187-a3a4a6856c87": "not_sent_to_host"
+    },
+    "routed_again": [],
+    "deferred_replay_http": 409,
+    "retained_attachment_bytes": 222
+  }
+}

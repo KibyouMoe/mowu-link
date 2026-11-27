@@ -4,6 +4,8 @@
 
 隔离协议测试使用独立 SQLite 和网络端口。真实宿主一栏只计实际运行的宿主组件。用本地模型驱动或测试平台的项目，仍需要按 03 的实际界面判据验收。
 
+2026-11-27 起按 Wiki 05 的全量替换范围验收，共 49 项。原表 50 项中，14 项保留新版业务并移出旧版相关判据，1 项纯旧版验收移出。移出项不计通过。旧客户端、旧接口、旧运行格式和新旧并跑均退出验收。新版的停写备份、状态恢复、版本回退及写入对账继续验收。
+
 ## Router、Trigger 与溪流
 
 | 能力及原使用者 | 重做版入口 | 目前的验收范围 | 切换前补证 |
@@ -12,12 +14,11 @@
 | Worker 在线、接管、继续、受阻、交成果 | W01–W04，适配器已登记成果文件的暂存 | HTTP/SQLite 回环已核丢回包、同键回读、旧派发 409、持单释放后停在待验收。DSH 原生工具已走通带附件的 W04，上传回执丢失无重复分块，正式报告前仅发送工位能读取。模型为本地驱动。 | 真实 Codex 工具调用与结果；DSH 真模型及其生成文件的登记；原生工作环境清理。 |
 | 旧处理人迟答、另交材料 | W04 与独立候选材料入口 | 隔离 Router 已核转派竞态、候选幂等、记材料后保持原状态、旧清理只作用于原派发。实际 DSH 原生工具从搁置通知暂存原件并另交纯附件候选。提交后管理端读回相同字节，转给另一工位后只回读原材料号。隔离 Hermes 原生分发可在 `router_act_on_task` 以明确的材料号结单，同号重试回原处置，Worker 原受阻回执保留。[管理工具](evidence/hermes-manager-candidate-review.json) | Codex 真会话、DSH 真模型及溪流从独立管理工位实际下载。 |
 | 工单提问与原题回送 | W05、A08–A09 | DSH 与独立 Codex App Server 原生工具跑通原题、同派发回送及最终 W04。管理端原答复重投不重复回送。DSH 另验答复回包丢失的查回和继续持单。 | 真人在限定的测试应用和会话看见、作答，原卡更新。 |
-| Trigger 输入、文件与 Info 查询 | T01–T04、A07、H02 | 真实隔离 HTTPS 上报、断传续传、缺附件和错误权限已核。邮件用标准 IMAP 客户端连本地测试服务器，游戏走临时 HTTP SSE。试用采集按 T04 和宿主收件核清后，旧客户端各从已核位置取下一条。桥回退或待核回执阻止准备。[源端续接](evidence/feed-source-return.json) | 授权的实际测试源、生产消费位置和游戏桥原生启动标识。 |
+| Trigger 输入、文件与 Info 查询 | T01–T04、A07、H02 | 真实隔离 HTTPS 上报、断传续传、缺附件和错误权限已核。邮件用标准 IMAP 客户端连本地测试服务器，游戏走临时 HTTP SSE。新版来源可按实例查看留档和缺 T04 回执数，Router 可查投递连续确认位置。 | 授权的实际测试源、原生游戏桥启动凭据，以及新版实例游标和实际收件的对账。 |
 | Hermes Event、Notify、Info 与 Feishu 提示 | C01–C03、H01–H02 | 真实隔离 Hermes 网关以原生控制接口创建 LOCAL 会话。Event 和 Notify 都有原生完成记录，Info 留在 Router。Notify 在 Event 释放后 11.01 秒起跑。Event 经原生工具发现调用 `router_info` 验原件，再用 `router_create_task` 建立测试单。网关冷重开后，插件双侧回执丢失仍查回原号，Router 只保留原单。模型走本地脚本 HTTP，平台使用飞书 SDK 或服务器替身。另核过 Router 断开时已入箱的 Notify 继续交付。[网关实测](evidence/hermes-gateway-trigger.json) · [离线收件](evidence/hermes-router-outage.json) | 独立线上测试身份、真实 Feishu 消息号与客户端侧时间对证。 |
-| 旧 Trigger 订阅、历史、策略 | 来源实例游标、离线归档、受审核的迁入和累计确认回退 | 现役 0.7.0 只读盘点查到一个活跃订阅。隔离实测迁入未读批次，T04 丢回执后重开和重建均幂等，附件逐字节一致。已用真实旧 Trigger HTTP 验证按连续收件回退，前序未知时拒绝准备，重试旧确认不再新增，原未投递尾项保留。旧 Router 曾分配 Worker 订阅时，已核对断开前快照与旧 Trigger，防止清理动作或单侧删除被误当作退役。[停写边界](evidence/legacy-subscription-stop-boundary.json) · 两个订阅共用旧库时，旧 HTTP 可按各自游标中断和恢复，重送均零新增。[共享库回退](evidence/shared-trigger-subscriber-return.json) · [迁入回执](evidence/trigger-unread-handoff.json) · [回退证据](evidence/trigger-return-prefix.json) | 现役消费者和旧待发送队列的切换窗口，新来源及平台回执对账，其他部署规则与在用的旧订阅调用。 |
-| 同伴通信、附件、旧聊天 | Worker 私聊、Router 授权附档和历史、单工位旧飞书档案 | 隔离 Router 验接收方、重复回执、长文、附件摘要。实际 DSH 与 Codex App Server 已通过原生工具互发图文和关联回信，模型为本地脚本。旧同伴记录仅原参与人查询，试用新增的私聊随回退档保留。单工位旧飞书冻结档可按原列表、游标、时间和摘要查询。实际旧 HTTP 与隔离 HTTPS 已对证原字段、五种窗口和方向计数。跨工位查询、未登记身份及写入分别被拒。[旧档案记录](evidence/legacy-feishu-chat-archive.json) 已从重做版组件快照对账普通私聊。入站与飞书出站回执分别丢失后，恢复只补原记录，原游标仍可续查。混合回合的回复及缺首次观测时间的旧记录列出缺证计数。[重做版档案](evidence/worker-feishu-chat-history.json) | 真实授权的两个测试工位互发，真实飞书及授权的实时查阅、消费者和保留期限待核。[旧飞书导出](router-rehearsal.md#导出旧飞书私聊) |
+| 同伴通信、附件与新版聊天记录 | Worker 同伴私聊、Router 授权附档、Worker 新版平台账本 | 隔离 Router 验接收方、重复回执、长文、附件摘要。实际 DSH 与 Codex App Server 已通过原生工具互发图文和关联回信，模型为本地脚本。新版普通私聊入站和飞书出站回执分别丢失后，从新版组件快照只补原记录，原游标可续查。混合回合的回复与缺首次观测时间的记录有缺证计数。[新版飞书记录](evidence/worker-feishu-chat-history.json) | 真实授权的两个测试工位互发图文并回信，真实飞书收发、鉴权和新版记录续查。 |
 | Worker 与宿主跨机部署 | 独立 `worker` 服务、适配器固定会话及双向 TLS | macOS Codex 适配器和 Linux 虚拟机 Worker 跨虚拟网实跑。Worker 冷重启后保留原持单，原生输入一条，同一回合重报后 Router 待验收，成果通知一条。无信任证书及身份不符被拒。[跨虚拟机](evidence/codex-linux-worker-restart.json) | 实际分开机器的部署与网络规则、已登录的独立试验工位及真人通知。 |
-| 进程启动、版本回退与历史保全 | `rewrite.service`、`release_check`、`codex_release_check`、`state_bundle`、`cutover` | 两版 Router 与 Worker 分步安装和回退。独立 Codex App Server 已核原会话、单次待验成果和多会话快照复原，前一版适配器接回原持单。Windows Server 2025 的安装包、ACL 拒绝、冷重启、正式单及两版回退已实跑，宿主为夹具。隔离演练涵盖七库恢复、原旧工单与附件、已验收迁入单原号归档和结果私有保留。已验收的迁入单、试用新建且已验收的单、未派新单均可按各自回执回退。实际旧 Router 重开后原号重送不再派，再次迁入仍能拦下原 Hermes 请求号和旧 UUID，映射不符拒绝发布。试用新成果和附件只在私有回退包。回放中断后按原号重送无重复。[试用新单](evidence/cutover-trial-born-archives.json)。先建后指定的待派单已按首次 A06 和修订回执回放，已验收的单只恢复旧归档。再次迁入核对原请求、旧回放 UUID 和已使用的管理操作键。[首次指定回退](evidence/cutover-assigned-trial-order.json) 首次派发前修订及换工位也已实测。旧队首保留，转派单只进入最终工位的队列，已验收单按首次实际接管工位归档。[首派前回退](evidence/cutover-preoffer-rollback.json) 旧队列迁入后改过的未派单可逐单审核，原单保留为历史并关联替代单，替代单继承队列位置。已验旧端单次派发及再次迁入。[原队列替代](evidence/cutover-migrated-queue-replacement.json) 已演练连转两次再验收，原派发清理回执晚于结单仍可核对，候选、受阻、正式成果逐份存入私有包。旧端从原工位读回归档且未重派。[转派回退](evidence/cutover-reviewed-transfer.json) 六种已取消单按原号归档，原成果字段为空。仅在原派发 W04 到账时记录 Worker 确认，缺回执时停止发布。旧端及再次迁入均拦下原建单请求。[取消回退](evidence/cutover-reviewed-cancellation.json) 已释放的受阻单可按原材料号结单或失败归档后回退，候选附件仍从私有目录读取。Router 离线入池且原宿主仍忙时拒绝回退。[池中归档](evidence/cutover-pool-archives.json) 已挂起再转派、取消或归档保留实际提醒和接收确认。替换或撤销的期限不补发。[提醒回退](evidence/cutover-pool-reminders.json) 已释放后续办能在回退包对证两次派发和两版指令，旧端仍按最初请求去重。[续办回退](evidence/cutover-pool-resumed.json) 已处置的修订单按原建单请求回旧版。缺工作中修订的传输确认或派发不符时拒绝。[修订回退](evidence/cutover-reviewed-edits.json) 已答复的正式工单问题随原派发私有归档，转派后的晚答仍核原工位，未答或未确认时停止。[问答回退](evidence/cutover-reviewed-questions.json) 原派发续做后可逐轮核对询问和搁置。缺重置回执或空闲观测不符时停止。[询问轮次回退](evidence/cutover-reviewed-inquiries.json) 取消三次重试耗尽后，重新取消或转派均单独核对原工位最终清理及新旧控制指令。缺清理或空闲观测不符时停止。[取消重试回退](evidence/cutover-reviewed-cancel-retry.json) 取消期间离线而入池时，原控制收件必须早于池中管理动作。回线后以新控制收件及清理回执确认回退。[离线取消回退](evidence/cutover-reviewed-offline-cancel.json) 执行中的多次取消按原控制号回退，只有最终清理能确认原派发。已验证直接确认、耗尽后重新取消及在线和离线转派。[多次取消回退](evidence/cutover-working-cancel-rounds.json) 同一次入池中的多次取消按每次管理动作、提醒期限和清理号核对，覆盖最终取消和随后转派。[同池取消回退](evidence/cutover-pooled-cancel-rounds.json)在途迁入单可冻结新派发，恢复原派发并查回丢失的 W04，验收后再回旧版。[Windows](evidence/windows-release-rollback.json) · [混合回退](evidence/cutover-mixed-rollback.json) · [在途排空](evidence/cutover-inflight-drain.json) | 宿主无法核回、派发已变化及其他试用写入的回迁，真实 profile 跨机、Windows 的 Desktop/DSH 原生启动和生产切换窗口。 |
+| 新版启动、停写备份与版本回退 | `rewrite.service`、`release_check`、`codex_release_check`、`state_bundle` | 已演练两个新版锁定发行包分步安装和回退。独立 Codex App Server 从新版快照恢复原会话、持单和多会话账本，前一版适配器接回原持单并交件。已有试用写入时，回退拒绝覆盖。[托管工位](evidence/codex-managed-bundle-rollback.json) Windows Server 2025 已实跑安装包、ACL 拒绝、冷重启、正式工单及两个新版之间回退，宿主使用夹具。[Windows](evidence/windows-release-rollback.json) 新版五组件停写、校验和恢复有独立入口。[恢复说明](router-rehearsal.md#重做版五组件的离线恢复) | 从锁定的新版包独立启动各宿主，核实际跨机 profile、真实平台回执和五组件状态恢复。演练对账试用期间的新版写入后再回退。 |
 
 ## Worker 篇 A01–A11
 
@@ -46,39 +47,47 @@
 | Windows 独立 DSH 固定会话 | 官方 Windows 包内 AgentLoop、会话持久化和工具执行实跑。双向校验证书并拒绝错会话。丢收件后查回同一输入。冷重开前宿主离线，收件保留待核，重开后查回且模型请求为零。两次原生 W04 得到同一业务回执、只发一条通知。Worker 释放原持单，Router 待验收。独立只读工位实测终止旧回合，撤下原派发的排队输入，保留普通私聊及新持有人。W04 回执丢失可按原号恢复，停写后复制原生记录到新目录可查回等同清理凭据。缺证据保持待清理，拒绝其他普通账户可读的账本。固定会话已接纯图、同条图文及普通文件，回传图片按顺序发卡，拒绝共享缓存。模型为本地脚本。[接单与报送](evidence/windows-dsh-native.json) · [取消与转派](evidence/windows-dsh-read-only-cleanup.json) · [图文](evidence/windows-dsh-media.json) | 独立 Windows Desktop 界面、真实飞书、真实模型读文件及产图，以及可写工作区清理。Windows CI 的默认 Docker 连接两次分别报告 `windows` 和不可用，均未连到当前可写工作区用例所需的 Linux 引擎。[首次](https://github.com/KibyouMoe/mowu-link/actions/runs/45894320633/job/140164337047) · [复跑](https://github.com/KibyouMoe/mowu-link/actions/runs/45894741098/job/140165827775) |
 | Windows 独立 DSH 托管会话 | 测试飞书入口覆盖 `/resume`、`/new`、`/clear` 和 `/fork`。丢登记回执后重开仍查回一个新会话。分支继承父会话及原力度，新回合只进分支。恢复原会话未请求模型。两份正式成果各留一条通知。拒绝未登记会话、宽权限名册与第二个回调写者。隔离回退核对三份子会话库。独立固定会话另验 `/goal` 和 `/compact`。原生目标暂停、续跑期间无 Router 单，丢压缩启动回执后原生压缩与结果通知各一次。[目标与压缩](evidence/windows-dsh-goal-compaction.json) · [Windows 实测](evidence/windows-dsh-managed-sessions.json) | 真实飞书输入、Desktop 独立会话中的同名命令及迁移后的实际身份。 |
 | Antigravity | 已核安装版本 2.32.1 及官方会话钩子、转录、MCP 入口。CLI 可克隆 App 对话供独立宿主使用，Remote Control 提供人工访问。 | 指定原桌面会话的后台唤醒、停止、真实 Gemini 回报及读写验收。CLI 或远程托管须先确认允许改用独立宿主。[兼容性核对](antigravity-compatibility.md) |
-| 授权和维护 | 认证的 Router/Worker/适配器隔离已验证；普通题卡不能执行原生授权。 | 旧 `/approvals`、`/commands`、`/ops/services` 中实际仍在使用的入口，与宿主授权逐项验证。 |
+| 授权和维护 | 认证的 Router、Worker 与适配器隔离已验证。普通题卡与原生授权分别处理。 | 按新版的训练员命令、原生审批、独立运维入口逐项核对真实授权，包含 Desktop 应用授权、用户身份及真实平台回执。 |
 
-当前可以复跑隔离联调。离「可切换」还差真实宿主、实际 Feishu 测试身份、原生清理和活跃消费端的迁移对账。
+当前可复跑隔离联调。离「可切换」仍需真实宿主、实际 Feishu 测试身份、原生工单清理，以及新版实际来源和平台回执对账。
 
-## Codex 现役桥工具逐项对照
+## Codex 现役能力与新版入口
 
-工具名取自维修主会话的现役注册表。表中写明哪一段已验。迁移时仍需在可加载测试工具的独立 Codex 会话确认原生能力。
+首列沿用现役注册表的工具名供能力追溯。按第二列的新版入口验收。仍需在可加载测试工具的独立 Codex 会话确认原生能力。
 
-| 现役工具 | 重做版入口或归属 | 可核的迁移条件 |
+| 现役能力来源 | 重做版入口或归属 | 验收证据或待核项 |
 | --- | --- | --- |
-| `bridge_probe` | Worker `worker-status`，加适配器连接观测 | 独立 TLS 实测断链、恢复、持单和忙闲未知。现役 Codex 启动链路切换须单验。 |
+| `bridge_probe` | Worker `worker-status`，加适配器连接观测 | 独立 TLS 已实测断链、恢复、持单和忙闲未知。以新版 Codex 启动入口核对真实 Desktop 的就绪与断链状态。 |
 | `bridge_binding_status` | Worker 状态与固定原生会话校验 | 隔离 TLS 可区分预期会话与已确认会话，同身份错绑零输入。 |
 | `bridge_bind_manager` | 独立运行参数、停写换绑及运行中交接窗口 | 隔离冷切保留两端图文、收据、原卡和正式成果。运行中切换已在 Codex App Server 和 DSH 间往返，旧适配器的回调被拒，回执丢失和目标掉线可按原号恢复或撤回。等待首次目标确认期间仍可接工单，撤回后待处理私聊各按原号回原会话。可恢复预先登记的冷会话。运行中切换核对原适配器未关闭的审批。实测 Codex 和 DSH 原生审批未对账时保留原会话，审批关闭后才接受新切换请求。另用夹具核交接途中到达的原审批及丢解除回执。[审批实测](evidence/native-handoff-approval.json) Codex Desktop 的界面批准和真实飞书 `/resume` 待验。[入箱顺序](evidence/feishu-resume-inbox-order.json) · [预检撤回](evidence/feishu-resume-preflight-cancel.json) |
 | `bridge_verify_manager_binding` | 按工位授权的 `worker-status` | 平台身份被拒，运维身份可核同一会话。 |
 | `bridge_inspect_native_contract` | 运维 `worker-status` 读取当前绑定会话的 `native_capabilities` | 权限或会话对不上时不采信外部观测，断开时能力未知。DSH 与独立 Codex App Server 分别保留目录、停止、历史压缩、原生目标等实际操作的回执。 |
 | `bridge_verify_native_write_path` | 原派发或消息号、正文摘要、原生输入及回合 | 真实独立 Desktop 已核文字收件及重投去重。无人值守入口、图文与实际授权待验。 |
-| `bridge_start_local_manager` | Router、Worker、宿主适配器独立入口 | 临时进程与分步升级已跑。独立 App Server 工位初始化能冷开查回唯一输入，适配器已用 TLS 与专用 profile 启动，拒绝第二个写者。现役 Desktop 受信启动链仍待单验。 |
-| `bridge_reload_business_modules` | 锁定提交的发布包、分步升级与原快照回退 | 已演练冷切，原收件无重复。原位热加载及现役启停授权尚未核。 |
+| `bridge_start_local_manager` | Router、Worker、宿主适配器独立入口 | 临时进程与分步升级已跑。独立 App Server 工位冷开后可查回唯一输入，适配器用 TLS 与专用 profile 启动，拒绝第二个写者。仍须验证新版经受支持的 Desktop 入口独立启动。 |
+| `bridge_reload_business_modules` | 锁定提交的发布包、分步升级与新版状态快照回退 | 已演练停写后切到新版发行包，原收件无重复。真实宿主的维护授权、启停及回退读回待验。 |
 | `bridge_message` | 平台私聊入口与宿主斜杠命令 | DSH 文图、已接命令与原队列有实测。独立 Codex App Server 的目录查询、图文、排队和普通回合中止已核，可从已确认目录切到已配置的运行中或冷会话，也可自动接入原生新会话和分支。Desktop 冷会话、原生插话和真实 Feishu 仍待验。 |
 | `bridge_send_image` | 已授权的宿主图片事件，经 Worker 转送 | 真实 DSH 图像摘要及隔离平台顺序已核。需要独立飞书云端与 Codex 输出记录。 |
 | `bridge_publish_question` | 原生问题适配；无原生题窗时用 `worker_ask_trainer` | 独立 Codex App Server 和 DSH 计时题已核批量回答及原卡更新。DSH 续答可多选，前台题通过两个测试答题入口验证。Codex 组内任一密题整组留宿主。两套宿主已实测独立题卡和原会话单次答复，模型及飞书为本地替身。待验实际飞书点击、日用宿主的独立测试身份和 Desktop 原题窗。 |
 | `bridge_register_current_task` | W03 接管及独立原生收件 | 原派发会话已固定，错绑零投递。DSH 与独立 Codex App Server 均已核原生目标完成仍持原派发，收到正式询问后经 W04 报告。模型为本地脚本，日用环境另验。 |
-| `bridge_create_work_order` | 溪流侧的正式建单与授权 | 已有隔离 Hermes 管理入口。现役 Worker 直接建单的调用边界及是否保留需要定案。 |
-| `bridge_work_order_status` | 溪流侧正式工单查询、工位本地持单状态 | 已核管理查询和本地状态，Worker 直接按旧单查他端成果的兼容范围待定。 |
+| `bridge_create_work_order` | 溪流经 Hermes 管理工具 `router_create_task` 正式建单 | 隔离 Hermes 网关内已通过原生工具建单并查回，模型为本地脚本。真实管理测试身份待验。 |
+| `bridge_work_order_status` | 溪流侧正式工单查询、工位本地持单状态 | 隔离管理查询与本地持单读回已核，仍须对照真实管理测试身份和指定宿主工位。 |
 | `submit_deliverable` | Agent `worker_report` 经 W04，待溪流验收 | 真实 DSH 与隔离 Codex App Server 的原生工具协议通过，模型为本地脚本。Desktop 工具注册和真实模型验收仍缺独立工位。 |
 | `bridge_list_workers` | 原生 `worker_list_peers` | 真 DSH 已查询对端。单独登记、在线和权限筛选已核。 |
-| `bridge_send_worker_message` | 原生 `worker_send_peer` 与三层收件查询 | 两个独立 DSH 实例互发及回原消息通过，迁入归档也能沿原号向原发件人回信。试用新私聊回退后原参与人可读，回迁零重投。模型为本地驱动，回退使用宿主夹具。授权的实际跨宿主工位待验。[回退实测](evidence/trial-peer-fallback.json) |
-| `bridge_worker_inbox` | 原生 `worker_peer_inbox` 的待办、回复历史和迁入归档 | 实际 DSH 和独立 Codex App Server 已通过原生工具发现归档、读原信并沿原号回信。第三工位不可读，历史不重投。两端模型用脚本，真实登录模型及 Desktop 仍待核。[DSH](evidence/native-archived-peer-reply.json) · [Codex App Server](evidence/codex-archived-peer-reply.json) |
+| `bridge_send_worker_message` | 原生 `worker_send_peer` 与三层收件查询 | 两个独立 DSH 实例互发及关联回信通过。Router 收件、对端 Worker 入箱及对端原生收件各有记录。模型为本地驱动，授权的实际跨宿主工位待验。 |
+| `bridge_worker_inbox` | 原生 `worker_peer_inbox` 的待收件与新版回复历史 | 隔离同伴私聊已核当前工位的待收件、最近消息和回复关联。真实登录的独立工位与 Desktop 仍待核。 |
 
-## 旧命令、审批与维护的实际边界
+## 新版命令、审批与维护
 
 | 入口 | 查证结果 | 切换条件 |
 | --- | --- | --- |
-| `POST /commands`、`/commands/responses` | 旧 Codex 与 DSH 的 `desktop-manager.mjs` 通过 Router 转发 `/model` 和 `/effort`，`router-runtime.mjs` 按原请求号回复。重做版由同工位的 `worker/command` 接收已认证的训练员命令，隔离宿主已核设置与回读。 | 实际飞书链路与真实账号的模型设置仍待核。源码查到旧插件消费者，其他调用方需由使用者核对后才可停旧入口。 |
-| `/approvals` | 隔离 Codex App Server 已核命令、文件差异、单次允许与取消。Router 未收到登记或允许回执卡住时，原生已中断，恢复按原号补记关闭。离线换绑审计还覆盖未送到 Router 的 Codex 原生审批，只有适配器核到关闭回执才清除待核。原绑定冷重开可查回 Router 已保存的关闭，原生决定零重放。原生关闭已落盘且 Router 保有原登记时，重开后可按原号补交，丢回执后按原号查回。缺原登记或原生关闭证据继续待核。[冷重开实测](evidence/codex-durable-approval-resolution.json) DSH 已核 Bash 单次允许、拒绝和超时，默认与相对工作目录可由原生宿主核实。批准前变更目录时不执行，执行已绑定后仍在批准的目录运行。冷开能查回未确认登记的原生取消，保留已有 Router 决定且零补发通知。C01 仅通知指定审批人。[Codex 命令](evidence/codex-app-server-approval-accept.json) · [文件变更](evidence/codex-app-server-file-approval.json) · [Codex 断联](evidence/codex-approval-router-outage.json) · [DSH 断联](evidence/dsh-approval-router-outage.json) · [DSH 工作目录](evidence/dsh-approval-native-working-directory.json)。Windows 与 macOS 的本机双向 TLS 已验拒绝、单次允许、超时与原号冷恢复。Windows 用实际 Git Bash 运行一次获准的 `pwd -W`，无确认目录的请求留在宿主。管理员、真实飞书和 Windows 界面未参与。[Windows 原生审批](evidence/windows-dsh-command-approval.json) | 真实审批人和飞书提示，Desktop 原生 Hook、应用授权、网络以及额外权限仍待核。普通题卡不承载审批。[操作入口](README.md#独立宿主命令审批) |
-| `/ops/services`、`/ops/services/{name}/restart` | 本机溪流的 `gateway-restart` 运维说明明确引用旧接口；Codex 运维说明也用它查询 LaunchAgent。重做版独立 HTTPS 维护服务按目标授权。真实 macOS 临时 Router 已测丢回包、原号查回不重复重启、原待派单和原建单幂等键保留。另核已登记停机项恢复，以及不相符 plist 及已加载参数时保持待核。[Router 回执](evidence/host-ops-launchd.json)。新增独立维护 CLI。Linux 用户级 systemd 已接入同一维护协议，并在独立 Linux 来宾核验原进程退场、原单恢复、同号查回、登记停机项恢复及拒绝依赖联动。[Linux 实测](evidence/linux-systemd-host-ops.json)。待核重启会阻止换新请求号。维护人用原号核实旧进程退出和新代际，随后才能另发重启。[待核处理](evidence/host-ops-restart-reconciliation.json)。隔离 Hermes 由真实 LaunchAgent 启动，维护回执的新 PID 与 Hermes 原生文件及认证健康接口一致。维护服务冷重开后按原号查回，网关未再次重启。真实网关使用本地 API adapter，整体就绪报告为 `degraded`。[网关回执](evidence/hermes-gateway-maintenance.json) Windows Server 2025 SCM 从安装包验证旧进程退场、已登记停机服务恢复、HTTPS 回执丢失后按原号查回、待核时拒绝换号，以及邻近服务和原工单保全。[Windows 实测](evidence/windows-scm-host-ops.json) 独立启动器已从两套锁定发布包实际注册同一 SCM 服务、升级和退回，唯一原工单得以保留。占用状态库时拒绝启动，结束 Router 子进程后 SCM 停止，重开仍能读回原单。[Windows 发行包](evidence/windows-router-service-release.json) | 现役调用迁移与授权、Desktop 自有子进程、真实模型及平台就绪。 |
+| 训练员指令（`worker/command`） | 同工位 Worker 接收已认证的训练员命令，隔离宿主已核 `/model` 和 `/effort` 的设置与回读。 | 实际飞书链路、真实账号的设置与下一原生回合的模型和力度。 |
+| 原生审批登记与决议回执 | 隔离 Codex App Server 已核命令、文件差异、单次允许与取消。Router 未收到登记或允许回执卡住时，原生已中断，恢复按原号补记关闭。离线换绑审计还覆盖未送到 Router 的 Codex 原生审批，只有适配器核到关闭回执才清除待核。原绑定冷重开可查回 Router 已保存的关闭，原生决定零重放。原生关闭已落盘且 Router 保有原登记时，重开后可按原号补交，丢回执后按原号查回。缺原登记或原生关闭证据继续待核。[冷重开实测](evidence/codex-durable-approval-resolution.json) DSH 已核 Bash 单次允许、拒绝和超时，默认与相对工作目录可由原生宿主核实。批准前变更目录时不执行，执行已绑定后仍在批准的目录运行。冷开能查回未确认登记的原生取消，保留已有 Router 决定且零补发通知。C01 仅通知指定审批人。[Codex 命令](evidence/codex-app-server-approval-accept.json) · [文件变更](evidence/codex-app-server-file-approval.json) · [Codex 断联](evidence/codex-approval-router-outage.json) · [DSH 断联](evidence/dsh-approval-router-outage.json) · [DSH 工作目录](evidence/dsh-approval-native-working-directory.json)。Windows 与 macOS 的本机双向 TLS 已验拒绝、单次允许、超时与原号冷恢复。Windows 用实际 Git Bash 运行一次获准的 `pwd -W`，无确认目录的请求留在宿主。管理员、真实飞书和 Windows 界面未参与。[Windows 原生审批](evidence/windows-dsh-command-approval.json) | 真实审批人和飞书提示，Desktop 原生 Hook、应用授权、网络以及额外权限仍待核。普通题卡不承载审批。[操作入口](README.md#独立宿主命令审批) |
+| 独立 HTTPS 维护服务与维护 CLI | 独立 HTTPS 维护服务按目标授权。真实 macOS 临时 Router 已测丢回包、原号查回不重复重启、原待派单和原建单幂等键保留。另核已登记停机项恢复，以及不相符 plist 及已加载参数时保持待核。[Router 回执](evidence/host-ops-launchd.json)。新增独立维护 CLI。Linux 用户级 systemd 已接入同一维护协议，并在独立 Linux 来宾核验原进程退场、原单恢复、同号查回、登记停机项恢复及拒绝依赖联动。[Linux 实测](evidence/linux-systemd-host-ops.json)。待核重启会阻止换新请求号。维护人用原号核实旧进程退出和新代际，随后才能另发重启。[待核处理](evidence/host-ops-restart-reconciliation.json)。隔离 Hermes 由真实 LaunchAgent 启动，维护回执的新 PID 与 Hermes 原生文件及认证健康接口一致。维护服务冷重开后按原号查回，网关未再次重启。真实网关使用本地 API adapter，整体就绪报告为 `degraded`。[网关回执](evidence/hermes-gateway-maintenance.json) Windows Server 2025 SCM 从安装包验证旧进程退场、已登记停机服务恢复、HTTPS 回执丢失后按原号查回、待核时拒绝换号，以及邻近服务和原工单保全。[Windows 实测](evidence/windows-scm-host-ops.json) 独立启动器已从两套锁定发布包实际注册同一 SCM 服务、升级和退回，唯一原工单得以保留。占用状态库时拒绝启动，结束 Router 子进程后 SCM 停止，重开仍能读回原单。[Windows 发行包](evidence/windows-router-service-release.json) | 新版维护人在授权范围验证服务状态与启停。Desktop 自有子进程、实际模型及平台就绪待核。 |
+
+## 正式切换清理与待确认数据
+
+下列内容单列，未纳入 49 项。
+
+- 待正式切换清理的纯旧版适配包括旧 Router 和 Trigger 订阅、游标及累计确认对接，旧工单与私聊的运行格式转换与旧版回写，以及兼容旧 `/chat` 列表及摘要的查询服务。清理底稿见 `legacy_subscription.py`、`legacy_chat.py`、`legacy_history.py`、`legacy_peers.py`，以及 `cutover.py` 的旧版迁入与回写入口、`reviewed_rollback.py` 的旧版回写流程。清理时复核调用者与共用函数，保留新版 `state_bundle` 和新版平台账本的快照、核验及恢复能力。
+- 旧客户端的 Router 命令、审批及运维地址列入停用清单。相应业务按表中的新版授权入口验收。已有旧版兼容代码在生产切换获得明确授权后清理。
+- 旧历史、附件、在途工单、未决提问和来源待发记录的一次性导出、迁移或留存等待单独确认。保留已有历史及演练证据。[范围更正前的旧版演练](router-rehearsal.md)

@@ -1,5 +1,7 @@
 # 旧 Router 离线迁移与回退演练
 
+2026-11-27 起，涉及旧版格式转换、旧端回写和新旧联跑的章节保留作历史演练记录。新版的现行备份与回退见[重做版五组件的离线恢复](#重做版五组件的离线恢复)。旧数据的一次性处置与生产切换另行授权。
+
 适用范围为旧 Router 的 SQLite 工单台账和内容寻址附件目录。演练输入是专用测试副本。源端已关闭写者，SQLite 已完成 checkpoint，附件上传已结束。所有操作生成在新目录中。原实例的绑定、启动参数、平台凭据以及外部 Trigger/Worker 数据需要另行交接。
 
 ## 复跑
@@ -296,6 +298,24 @@ python3 -B -m rewrite.cutover stage-reviewed-rollback \
 多个订阅共用同一个旧 Trigger 时，计划中每个订阅仍各列一项，全部引用同一个冻结旧归档，每项保留自己的审核及试用账本。输出只复制一份旧库，私有总清单的 `legacy_restore_directory` 与 `legacy_replay_batch` 指向这份库及批次文件。核总清单中的批次摘要，再逐项核其中的 `plan_sha256`。在该同一份恢复库上按每个订阅的 `request` 走旧 ACK 接口，空请求跳过。执行中断时保留已恢复的库并沿原请求查回。重复订阅或任一订阅前缀待核会阻止整包。旧 Router 的 Worker 实时订阅仍使用[专门审计流程](#旧-worker-的实时订阅)。[两订阅实测](evidence/shared-trigger-subscriber-return.json)
 
 复跑 `python3 -B -m unittest -v rewrite.test_source_rollback`。实跑隔离 Router、旧 Trigger HTTP 和恢复副本。验证一张已验收工单归档、旧订阅 Event 与 Info 的确认、邮件与游戏采集游标推进，以及两条仍待原订阅处理的尾项。实际旧端重放确认返回零新增。宿主、模型、飞书、邮件源和游戏 SSE 源使用夹具。[证据](evidence/source-router-rollback.json)
+
+
+#### 用同一批组件快照审核联合回退
+
+本节记录范围更正前的隔离复跑。记录停写时的组件清单摘要。若同时带回来源游标，来源计划与组件核对使用同一份快照。将 `component_manifest_sha256` 加入原审核文件，同时保留原 Router 摘要、已验收派发以及本次来源计划摘要。
+
+```sh
+python3 -B -m rewrite.cutover stage-reviewed-rollback \
+  --snapshot ./old-snapshot --trial ./trial --review ./approved-rollback.json \
+  --source-plan ./source-return.json --component-bundle ./stopped-all-components \
+  --component-manifest-sha256 "$COMPONENT_MANIFEST_SHA256" --destination ./reviewed-recovery
+```
+
+联合审核核对试用 Router 和组件快照的同一库摘要，逐个核对登记工位的本地持单、原生收件、待答题与审批、平台收件及发卡游标。任一相关账本待核，或来源计划指向不同组件快照，停止生成回退目录。有可写工位时，另加 `--dsh-runtimes` 指向原工作区账本映射。原工作区活动或写者仍占锁时先在隔离环境收尾。
+
+回退目录与私有清单一同发布。旧 Router 使用原格式工单和附件目录，来源分别使用审核后的游标和订阅回执。通过审核的 Feishu 历史位于 `private-review/feishu-history/<工位 ID>/chat-history.db`，该档摘要及缺证计数记录于 `component_proof.feishu_history`。完整组件快照按原清单摘要留存，供后续核对外部收件和再次迁入。生产工位仍要各自确认停写时刻及外部宿主状态。
+
+复跑 `python3 -B -m unittest -v rewrite.test_source_rollback -k mixed_source_returns`。已在同一次隔离回退中核对已验收工单、邮件和游戏游标、旧 Trigger 订阅与单工位飞书档案。旧 Router 和旧 Trigger 经实际 HTTP 读回。Agent、飞书、邮件和游戏来源使用夹具。[联合回退证据](evidence/joint-component-rollback.json)
 
 ### 来源回退后再次迁入
 
