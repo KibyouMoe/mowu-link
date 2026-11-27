@@ -11,6 +11,7 @@ from . import display, links, peer_files, peer_retry, queued_chat, user_question
 from .messages import valid_guid
 from .storage import Fault, encode, require, string
 from .wire import serve_authenticated
+from .worker import TRANSPORT_RECONCILIATION_ERRORS
 
 
 HOST_CAPABILITY_FLAGS = {
@@ -127,7 +128,7 @@ class WorkerService:
             self.last_error = "router_connection_unconfirmed"
             links.observe(w,"router",False,self.host_session)
         except Fault as err:
-            if err.code in ("stale_session","missing_session","unauthenticated"):
+            if err.code in TRANSPORT_RECONCILIATION_ERRORS or err.code in ("stale_session","missing_session","unauthenticated"):
                 self.router_observed = True
                 self.router_connected = False
                 self.next_router_attempt = self.clock() + 20*60

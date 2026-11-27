@@ -83,6 +83,8 @@ python3 -B -m rewrite.service delivery-status --connection /path/to/consumer.jso
 
 `trigger-status` 读取现有来源库的实例、已留档数和仍缺 T04 回执的条数。文件不存在就返回错误。已生成时间来自来源本机时钟。第二条查询已认证接收者在 Router 的最新投递游标、连续确认位置及仍未确认条数。后发帧先确认时，连续游标停在缺口前。Info 没有推送帧。C02 只证明接收端入箱，宿主收件仍由各适配器核对。两条命令均只输出汇总。
 
+Worker 重连前核对 Router 已确认的 C02 前缀是否完整保存在本地入箱。回包丢失时按原投递号续收，每次只推进到本地已保存并收到确认的那一帧。游标领先、已确认前缀缺件或同号正文不一致时，按[离线恢复说明](router-rehearsal.md#重做版五组件的离线恢复)对账。
+
 ### 训练员原生题卡
 
 训练员可以在原卡一次提交同一公开请求里的多道题。按题目下方的序号选择，支持多选的题用逗号隔开，留空跳过。公开原题允许自填时才提供输入框。Worker 等同一会话和原请求的宿主关闭凭据再更新原卡。Codex App Server 每题单选，DSH 计时题进入原生续答后可多选。测试使用飞书 JSON 2.0 表单的批量回调结构，实际飞书交互待验。[飞书卡片组件](https://open.feishu.cn/document/feishu-cards/card-json-v2-components/component-json-v2-overview?lang=en-US)

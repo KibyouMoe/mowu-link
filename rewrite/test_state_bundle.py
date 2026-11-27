@@ -287,6 +287,76 @@ class Bundle(unittest.TestCase):
                 self.assertTrue(detail["needs_review"])
                 self.assertIn({"hermes_instance":"main","issue":reason},detail["issues"])
 
+    def test_worker_snapshot_compares_original_confirmed_frame_in_both_ledgers(self):
+        with self.stack(self.sources) as (_manager,w,*_):
+            w.connect()
+            w.poll()
+        checksum = capture(self.sources,self.revision,self.snapshot)["manifest_sha256"]
+        good = audit_handoff(self.snapshot,checksum)
+        self.assertFalse(good["needs_review"])
+        self.assertEqual(good["workers"][0]["inbox_transport"],
+                         {"router_confirmed_cursor":1,"local_cursor":1,"matched_frames":1})
+
+        worker_db = self.sources["worker:oguri"]
+        for name,sql in (("missing","DELETE FROM inbox"),
+                         ("changed","UPDATE inbox SET frame=json_set(frame,'$.payload.query_id','different')")):
+            with self.subTest(name=name):
+                wrong_worker = self.root/(name+".db")
+                wrong_worker.write_bytes(worker_db.read_bytes())
+                with closing(sqlite3.connect(wrong_worker)) as db,db:
+                    db.execute(sql)
+                other = self.root/name
+                seal = capture({**self.sources,"worker:oguri":wrong_worker},self.revision,other)["manifest_sha256"]
+                result = audit_handoff(other,seal)
+                self.assertTrue(result["needs_review"])
+                self.assertIn("worker_confirmed_prefix_missing",result["workers"][0]["issues"])
+                self.assertEqual(result["workers"][0]["inbox_transport"]["matched_frames"],0)
+                if name=="changed":
+                    self.assertIn("worker_inbox_router_mismatch",result["workers"][0]["issues"])
+
+    def test_worker_snapshot_flags_old_w03_receipt_even_when_transport_prefix_matches(self):
+        stale = self.root/"worker-after-c02-before-w03.db"
+        with self.stack(self.sources) as (manager,w,*_):
+            task_id = manager.create(guid(),"One execution only","Report before taking the old copy forward.","oguri")["task_id"]
+            w.connect()
+            w.poll()
+            self.clock.advance(10)
+            w.poll()
+            process = w.process
+
+            def stop_before_w03(frame):
+                if frame["kind"]=="task.dispatch":
+                    raise ConnectionError("stopped after C02 and before W03")
+                return process(frame)
+
+            with patch.object(w,"process",side_effect=stop_before_w03), self.assertRaises(ConnectionError):
+                w.poll()
+            with closing(sqlite3.connect(w.db.path)) as original, closing(sqlite3.connect(stale)) as copied:
+                original.backup(copied)
+            w.poll()
+            (payload,receipt), = self.native.entries()
+            result = w.report(receipt["native_id"],task_id,payload["assignment_id"],"Only one formal result")
+            self.assertEqual(result["task_state"],"completed_reported")
+            assignment = payload["assignment_id"]
+            historical = w.router.request("POST",f"tasks/{task_id}/accept",
+                {"session_id":w.session,"assignment_id":assignment,"revision":payload["revision"]},
+                "accept-"+assignment)
+            self.assertTrue(historical["accepted"])
+            self.assertEqual(len(self.native.entries()),1)
+
+        checksum = capture({**self.sources,"worker:oguri":stale},self.revision,self.snapshot)["manifest_sha256"]
+        check = audit_handoff(self.snapshot,checksum)
+        worker, = check["workers"]
+        transport = worker["inbox_transport"]
+        self.assertEqual(transport["local_cursor"],transport["router_confirmed_cursor"])
+        self.assertGreater(transport["matched_frames"],0)
+        self.assertTrue(check["needs_review"])
+        self.assertIn("worker_stale_dispatch_receipt",worker["issues"])
+        destination = self.root/"stale-handoff"
+        with self.assertRaisesRegex(ValueError,"worker_stale_dispatch_receipt"):
+            stage_native_handoff(self.snapshot,checksum,"oguri",self.native.session,"new-session",destination)
+        self.assertFalse(destination.exists())
+
     def test_feishu_restore_reuses_original_card_and_keeps_known_provider_receipt_after_deadline(self):
         message = {"chat_type":"p2p","chat_id":"chat","message_id":"om_trial_input","message_type":"text",
                    "content":encode({"text":"隔离收件"})}

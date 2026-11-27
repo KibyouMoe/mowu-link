@@ -332,14 +332,59 @@ def hermes_delivery_audit(snapshot,labels,router_path,confirmed):
     return results
 
 
+def worker_delivery_audit(db,router_path,worker_id,confirmed):
+    db.execute("ATTACH DATABASE ? AS router",(router_path.resolve().as_uri()+"?mode=ro&immutable=1",))
+    position = db.execute("SELECT cursor FROM connection WHERE slot=1").fetchone()
+    cursor = position[0] if position else None
+    actor = "worker/"+worker_id
+    prefix,matched = db.execute("""SELECT
+        COUNT(*) FILTER (WHERE d.cursor BETWEEN 1 AND ? AND d.ack=1),
+        COUNT(*)
+        FROM router.deliveries d JOIN main.inbox i USING(delivery_id)
+        WHERE d.consumer=? AND json_extract(i.frame,'$.delivery_id')=d.delivery_id
+          AND json_extract(i.frame,'$.cursor')=d.cursor AND json_extract(i.frame,'$.kind')=d.kind
+          AND json_extract(i.frame,'$.payload')=d.payload""",(confirmed,actor)).fetchone()
+    inbox_count = db.execute("SELECT COUNT(*) FROM inbox").fetchone()[0]
+    issues = []
+    if type(cursor) is not int or cursor<0 or cursor>confirmed:
+        issues.append("worker_cursor_ahead_of_router")
+    if prefix!=confirmed:
+        issues.append("worker_confirmed_prefix_missing")
+    if matched!=inbox_count:
+        issues.append("worker_inbox_router_mismatch")
+    # An accepted W03 can still be replayed after its assignment has ended.
+    stale_dispatch = db.execute("""WITH pending_dispatches AS (
+        SELECT json_extract(frame,'$.payload.task_id') AS task_id,
+               json_extract(frame,'$.payload.assignment_id') AS assignment_id
+        FROM main.inbox WHERE done=0 AND json_extract(frame,'$.kind')='task.dispatch'
+    )
+    SELECT 1 FROM pending_dispatches p
+      JOIN router.operations o ON o.actor=? AND o.key='accept-'||p.assignment_id
+      LEFT JOIN main.jobs j ON j.assignment_id=p.assignment_id
+      LEFT JOIN main.controls c ON c.assignment_id=p.assignment_id
+    WHERE json_extract(o.response,'$.accepted')=1
+      AND json_extract(o.response,'$.assignment_id')=p.assignment_id
+      AND COALESCE(j.stage,'offered')='offered' AND c.assignment_id IS NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM router.tasks t WHERE t.task_id=p.task_id AND t.assignment_id=p.assignment_id
+          AND t.assignee_id=? AND t.state='working'
+      )
+    LIMIT 1""",(actor,worker_id)).fetchone()
+    if stale_dispatch:
+        issues.append("worker_stale_dispatch_receipt")
+    return {"router_confirmed_cursor":confirmed,"local_cursor":cursor,"matched_frames":matched},issues
+
+
 def audit_handoff(snapshot,expected,*,dsh_runtimes=None):
     manifest = verify(snapshot,expected)
     labels = manifest["files"]
     workspaces = workspace_audits(snapshot,manifest,dsh_runtimes)
     router_label, = (label for label in labels if component(label)[0]=="router")
     router_path = snapshot/filename(router_label)
+    worker_ids = sorted(component(label)[1] for label in labels if component(label)[0]=="worker")
     with closing(readonly(router_path)) as db:
         hermes_confirmed = delivery.confirmed(db,"hermes")
+        worker_confirmed = {wid:delivery.confirmed(db,"worker/"+wid) for wid in worker_ids}
         current = {row["assignee_id"]:dict(row) for row in db.execute("""SELECT assignee_id,task_id,assignment_id
                                                                     FROM tasks WHERE state='working' ORDER BY assignee_id""")}
         sessions = dict(db.execute("SELECT worker_id,session_id FROM workers"))
@@ -359,20 +404,18 @@ def audit_handoff(snapshot,expected,*,dsh_runtimes=None):
         handoffs = dict(db.execute("""SELECT worker_id,COUNT(*) FROM admission_handoffs
             WHERE released_at IS NULL GROUP BY worker_id""")) if has_handoffs else {}
     workers,issues = [],[]
-    for label in sorted(labels):
-        role,wid = component(label)
-        if role!="worker":
-            continue
+    for wid in worker_ids:
         remote = current.pop(wid,None)
         platform_label = "feishu:"+wid
         platform_issue = None
-        with closing(readonly(snapshot/filename(label))) as db:
+        with closing(readonly(snapshot/filename("worker:"+wid))) as db:
             local = db.execute("""SELECT task_id,assignment_id,delivery_id,host_state FROM jobs
                                   WHERE stage='accepted'""").fetchone()
             sid = db.execute("SELECT session FROM connection WHERE slot=1").fetchone()
             pending = db.execute("SELECT COUNT(*) FROM outbox WHERE receipt IS NULL").fetchone()[0]
             session_pending = pending_counts(db,WORKER_NATIVE_PENDING)
             session_pending.update({k:v for k,v in pending_counts(db,WORKER_ADMISSION_PENDING).items() if v is not None})
+            transport,problems = worker_delivery_audit(db,router_path,wid,worker_confirmed[wid])
             if platform_label in labels:
                 unseen,platform_issue = feishu_display_backlog(db,snapshot/filename(platform_label))
                 session_pending["platform_display_unseen"] = unseen
@@ -382,7 +425,8 @@ def audit_handoff(snapshot,expected,*,dsh_runtimes=None):
                                    (local["assignment_id"],)).fetchone()
         local_ids = {key:local[key] for key in ("task_id","assignment_id")} if local else None
         remote_ids = {key:remote[key] for key in ("task_id","assignment_id")} if remote else None
-        problems = [platform_issue] if platform_issue else []
+        if platform_issue:
+            problems.append(platform_issue)
         if local_ids!=remote_ids:
             problems.append("assignment_mismatch")
         if (wid in sessions and (not sid or sid[0]!=sessions[wid])) or (local and wid not in sessions):
@@ -418,6 +462,7 @@ def audit_handoff(snapshot,expected,*,dsh_runtimes=None):
         session_pending["router_admission_handoffs"] = handoffs.get(wid,0)
         workers.append({"worker_id":wid,"worker_assignment":local_ids,"router_assignment":remote_ids,
                         "unconfirmed_reports":pending,"issues":problems,"native_session_pending":session_pending,
+                        "inbox_transport":transport,
                         "native_session_ledger_clear":not problems and all(count==0 for count in session_pending.values()),
                         **({"dsh_workspace_audit":workspace} if workspace is not None else {})})
         issues.extend({"worker_id":wid,"issue":problem} for problem in problems)

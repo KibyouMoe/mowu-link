@@ -10,6 +10,8 @@ from .messages import valid_guid
 from .storage import Database, Fault, encode, guid, require, string
 
 FOLLOWUP_FRAMES = {"task.updated","task.probe","task.shelved","task.cancel","task.transfer_out","question.resolved"}
+TRANSPORT_RECONCILIATION_ERRORS = {"worker_cursor_ahead_of_router","worker_confirmed_prefix_missing",
+                                   "worker_inbox_frame_conflict","worker_delivery_gap"}
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS native_binding(
@@ -63,6 +65,17 @@ class AgentAdapter(Protocol):
     def deliver(self, did: str, payload: dict, *, session: str | None = None) -> dict | None: ...
     def lookup_delivery(self, did: str, payload: dict, *, session: str) -> dict | None: ...
     def origin(self, native_id: str, *, session: str | None = None) -> dict: ...
+
+
+def verify_confirmed_inbox(db, confirmed):
+    require(type(confirmed) is int and confirmed>=0,502,"worker_transport_cursor_unconfirmed")
+    cursor = db.execute("SELECT cursor FROM connection WHERE slot=1").fetchone()[0]
+    require(type(cursor) is int and 0<=cursor<=confirmed,409,"worker_cursor_ahead_of_router")
+    if confirmed:
+        known = db.execute("""SELECT COUNT(DISTINCT json_extract(frame,'$.cursor')) FROM inbox
+            WHERE json_type(frame,'$.cursor')='integer' AND json_extract(frame,'$.delivery_id')=delivery_id
+              AND json_extract(frame,'$.cursor') BETWEEN 1 AND ?""",(confirmed,)).fetchone()[0]
+        require(known==confirmed,409,"worker_confirmed_prefix_missing")
 
 
 class Worker:
@@ -169,20 +182,26 @@ class Worker:
 
     def connect(self):
         with self.lock:
+            status = self.router.request("GET","deliveries/status")
+            require(isinstance(status,dict) and status.get("consumer")=="worker/"+self.worker_id,
+                    502,"worker_transport_cursor_unconfirmed")
+            confirmed = status.get("confirmed_cursor")
             body = {"session_id": self.session, **self.hold()}
             with self.db.transaction() as db:
+                verify_confirmed_inbox(db,confirmed)
                 db.execute("INSERT OR IGNORE INTO registration VALUES (1,?,?)", (guid(), encode(body)))
                 attempt = db.execute("SELECT key,body FROM registration").fetchone()
             reply = self.router.request("PUT", f"workers/{self.worker_id}/session",
                                         json.loads(attempt["body"]), attempt["key"])
             with self.db.transaction() as db:
+                if reply.get("cursor")!=confirmed:
+                    verify_confirmed_inbox(db,reply.get("cursor"))
                 # The Router may already have recorded an outbox entry. Replay it
                 # to retrieve its original W04 receipt even after W01 releases it.
                 for aid in reply["release_assignment_ids"]:
                     db.execute("UPDATE jobs SET stage='released' WHERE stage='accepted' AND assignment_id=?", (aid,))
                 for control in reply["pending_cleanup"]:
                     self.save_control(db, control["kind"], control)
-                db.execute("UPDATE connection SET cursor=?", (reply["cursor"],))
                 db.execute("DELETE FROM registration WHERE key=?", (attempt["key"],))
             self.flush_reports()
             return reply
@@ -194,16 +213,25 @@ class Worker:
             with self.db.transaction() as db:
                 cursor = db.execute("SELECT cursor FROM connection").fetchone()[0]
             for frame in self.router.frames(cursor):
+                require(frame["cursor"]==cursor+1,409,"worker_delivery_gap")
+                serialized = encode(frame)
+                delivery_id = frame["delivery_id"]
                 with self.db.transaction() as db:
                     inserted = db.execute("INSERT OR IGNORE INTO inbox(delivery_id,frame) VALUES (?,?)",
-                                          (frame["delivery_id"], encode(frame))).rowcount
-                    if inserted and frame["kind"] in FOLLOWUP_FRAMES:
-                        db.execute("INSERT INTO assignment_followups(delivery_id) VALUES (?)",(frame["delivery_id"],))
-                    if frame["kind"] in ("task.cancel", "task.transfer_out", "task.shelved"):
-                        self.save_control(db, frame["kind"], frame["payload"])
+                                          (delivery_id,serialized)).rowcount
+                    if inserted:
+                        if frame["kind"] in FOLLOWUP_FRAMES:
+                            db.execute("INSERT INTO assignment_followups(delivery_id) VALUES (?)",(delivery_id,))
+                        if frame["kind"] in ("task.cancel","task.transfer_out","task.shelved"):
+                            self.save_control(db,frame["kind"],frame["payload"])
+                    else:
+                        saved = db.execute("SELECT frame FROM inbox WHERE delivery_id=?",(delivery_id,)).fetchone()[0]
+                        require(saved==serialized,409,"worker_inbox_frame_conflict")
                 ack = self.router.ack(frame)
+                require(isinstance(ack,dict) and ack.get("recorded") is True,502,"worker_delivery_ack_unconfirmed")
+                cursor = frame["cursor"]
                 with self.db.transaction() as db:
-                    db.execute("UPDATE connection SET cursor=MAX(cursor,?)", (ack["confirmed_cursor"],))
+                    db.execute("UPDATE connection SET cursor=MAX(cursor,?)", (cursor,))
             with self.db.transaction() as db:
                 pending = [json.loads(r[0]) for r in db.execute("""SELECT i.frame FROM inbox i
                     LEFT JOIN peer_retry p ON p.operation_id=i.delivery_id AND p.phase='delivery'

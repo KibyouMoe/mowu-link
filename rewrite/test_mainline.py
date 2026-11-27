@@ -3,7 +3,9 @@ import json
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
+from unittest.mock import patch
 
+from . import delivery
 from .adapter import HostAdapter
 from .devloop import FixtureHost, Loop, agent_report
 from .storage import Fault, encode, guid
@@ -455,6 +457,86 @@ class Mainline(unittest.TestCase):
         self.assertLess(self.loop.wire.ack(second)["confirmed_cursor"], first["cursor"])
         self.fault("unconfirmed_cursor", lambda: self.loop.wire.frames(second["cursor"]))
         self.assertEqual(self.loop.wire.ack(first)["confirmed_cursor"], second["cursor"])
+
+    def test_reconnect_refuses_an_older_inbox_before_registering_or_replaying_work(self):
+        stale = self.loop.root/"older-worker.db"
+        stale.write_bytes(self.w.db.path.read_bytes())
+        tid, aid, receipt = self.dispatch()
+        report = self.w.report(receipt["native_id"],**self.args(tid,aid))
+        before = self.m.inspect(tid)
+        recovered = Worker(stale,"oguri",self.loop.wire,self.loop.adapter)
+        with patch.object(self.loop.wire,"request",wraps=self.loop.wire.request) as requests:
+            self.fault("worker_confirmed_prefix_missing",recovered.connect)
+        self.assertFalse(any(call.args[:2]==("PUT","workers/oguri/session") for call in requests.call_args_list))
+        self.assertEqual(self.m.inspect(tid),before)
+        self.assertEqual(len(self.loop.native.entries()),1)
+        self.assertTrue(report["recorded"])
+
+    def test_reconnect_replays_an_ack_when_the_original_inbox_frame_is_durable(self):
+        self.w.connect()
+        acknowledge = self.loop.wire.ack
+
+        def lose_return(frame):
+            acknowledge(frame)
+            raise ConnectionError("lost the C02 return")
+
+        with patch.object(self.loop.wire,"ack",side_effect=lose_return), self.assertRaises(ConnectionError):
+            self.w.poll()
+        progress = self.loop.wire.request("GET","deliveries/status")
+        self.assertEqual(progress["confirmed_cursor"],1)
+        recovered = Worker(self.w.db.path,"oguri",self.loop.wire,self.loop.adapter)
+        self.assertEqual(recovered.connect()["cursor"],1)
+        with recovered.db.transaction() as db:
+            self.assertEqual(db.execute("SELECT cursor FROM connection").fetchone()[0],0)
+        recovered.poll()
+        with recovered.db.transaction() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM inbox WHERE done=1").fetchone()[0],2)
+            self.assertEqual(db.execute("SELECT cursor FROM connection").fetchone()[0],2)
+        self.assertEqual(self.loop.native.entries(),[])
+
+    def test_replay_of_router_cumulative_ack_only_advances_over_saved_inbox(self):
+        self.w.connect()
+        with self.loop.orders.db.transaction() as db:
+            for _ in range(69):
+                delivery.enqueue(db,"worker/oguri","worker.status_query",{"query_id":guid()})
+        first_page = self.loop.wire.frames(0)
+        acknowledge = self.loop.wire.ack
+        for frame in first_page[1:]:
+            acknowledge(frame)
+        self.assertEqual(acknowledge(first_page[0])["confirmed_cursor"],64)
+        rest = self.loop.wire.frames(64)
+        for frame in rest:
+            acknowledge(frame)
+        self.assertEqual(len(first_page+rest),70)
+
+        def stop_after_one(frame):
+            if frame["cursor"]>1:
+                raise ConnectionError("receiver stopped during inbox replay")
+            return acknowledge(frame)
+
+        with patch.object(self.loop.wire,"ack",side_effect=stop_after_one), self.assertRaises(ConnectionError):
+            self.w.poll()
+        with self.w.db.transaction() as db:
+            self.assertEqual(db.execute("SELECT cursor FROM connection").fetchone()[0],1)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM inbox").fetchone()[0],2)
+        self.w.poll()
+        self.w.poll()
+        with self.w.db.transaction() as db:
+            self.assertEqual(db.execute("SELECT cursor FROM connection").fetchone()[0],70)
+            self.assertEqual([row[0] for row in db.execute("SELECT delivery_id FROM inbox WHERE done=1 ORDER BY rowid")],
+                             [frame["delivery_id"] for frame in first_page+rest])
+
+    def test_same_delivery_id_with_different_payload_does_not_acknowledge_inbox(self):
+        self.w.connect()
+        frame, = self.loop.wire.frames(0)
+        conflict = {**frame,"payload":{"query_id":guid()}}
+        with self.w.db.transaction() as db:
+            db.execute("INSERT INTO inbox(delivery_id,frame) VALUES (?,?)",(frame["delivery_id"],encode(conflict)))
+
+        self.fault("worker_inbox_frame_conflict",self.w.poll)
+        self.assertEqual(self.loop.wire.request("GET","deliveries/status")["confirmed_cursor"],0)
+        with self.w.db.transaction() as db:
+            self.assertEqual(db.execute("SELECT frame,done FROM inbox").fetchone()[:],(encode(conflict),0))
 
     def test_presence_retry_replays_same_sample(self):
         self.w.connect()
