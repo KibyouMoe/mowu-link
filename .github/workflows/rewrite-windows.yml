@@ -70,6 +70,7 @@ jobs:
             & $env:MOWULINK_TEST_CODEX_BINARY --version
             $env:MOWULINK_TEST_CODEX_EVIDENCE = Join-Path $dir.FullName 'native-codex.jsonl'
             $env:MOWULINK_GAME_FRAME_EVIDENCE = Join-Path $dir.FullName 'game-source-overlap.json'
+            $env:MOWULINK_PORTABLE_RECOVERY_EVIDENCE = Join-Path $dir.FullName 'source-recovery.json'
             Push-Location -LiteralPath $installed
             try {
               $tests = @(
@@ -82,6 +83,7 @@ jobs:
                 'rewrite.test_feeds.Sources.test_game_real_stream_reconnect_source_replay_and_new_epoch'
                 'rewrite.test_feeds.Sources.test_imported_game_position_rejects_wrong_bridge_and_does_not_reset_on_first_probe'
                 'rewrite.test_feeds.Sources.test_imported_game_refuses_overlapping_sequence_from_another_login'
+                'rewrite.test_feed_recovery.PortableRecovery.test_game_capture_review_stages_one_record_in_an_installation'
                 'rewrite.test_codex_rpc.WindowsCodexRpc'
                 'rewrite.test_codex_app_server.CodexAppServer.test_codex_adapter_process_handles_native_report_without_controller_dispatch'
                 'rewrite.test_codex_app_server.CodexAppServer.test_native_app_server_reconnect_recovers_input_before_w04_without_new_model_call'
@@ -93,6 +95,7 @@ jobs:
               if ($nativeEvidence.Count -ne 4) { throw 'Windows App Server evidence is incomplete' }
               $nativeEvidence
               Get-Content -Raw -LiteralPath $env:MOWULINK_GAME_FRAME_EVIDENCE
+              Get-Content -Raw -LiteralPath $env:MOWULINK_PORTABLE_RECOVERY_EVIDENCE
             } finally {
               Pop-Location
             }

@@ -4,6 +4,7 @@ from contextlib import ExitStack, closing
 import hashlib
 import json
 from pathlib import Path
+import re
 
 from . import source_history, state_bundle
 from .cutover import digest, output_directory, readonly
@@ -88,13 +89,33 @@ def captured_text(db, file):
     return content.decode("utf-8")
 
 
-def inspect_capture(ledgers, kind, instance_id, read, host_session):
+def recovered_records(db,previous):
+    if not db.execute("SELECT 1 FROM sqlite_master WHERE name='feed_recovered'").fetchone():
+        return [],None
+    records = db.execute("SELECT * FROM feed_recovered ORDER BY position").fetchall()
+    if not records:
+        return [],None
+    plans = {row["plan_sha256"] for row in records}
+    if (len(plans)!=1 or not isinstance(records[0]["plan_sha256"],str)
+            or not re.fullmatch(r"[a-f0-9]{64}",records[0]["plan_sha256"])
+            or any(type(row["position"]) is not int or not 0<row["position"]<=previous
+                   or not valid_guid(row["mid"]) for row in records)):
+        raise ValueError("invalid recovered source records below the legacy cursor")
+    return records,records[0]["plan_sha256"]
+
+
+def inspect_capture(ledgers, kind, instance_id, read, host_session, *, recovered=False):
     db = ledgers[3]
     mid = read["mid"]
     local = db.execute("SELECT * FROM archive WHERE id=?",(mid,)).fetchone()
+    if not local:
+        raise ValueError("source capture is missing from the local archive")
     body = json.loads(local["body"])
+    levels = {"Info"} if kind=="email" else {"Event","Info"}
+    if recovered and kind=="mc_chat":
+        levels.add("Notify")
     if (body["message_id"]!=mid or body["trigger_name"]!=kind or body["instance_id"]!=instance_id
-            or body["level"] not in (("Info",) if kind=="email" else ("Event","Info"))):
+            or body["level"] not in levels):
         raise ValueError("source capture and its Trigger archive disagree")
     files = db.execute("SELECT * FROM files WHERE message_id=? ORDER BY position",(mid,)).fetchall()
     if files:
@@ -127,21 +148,26 @@ def inspect_return(bundle, expected, legacy_cursor, review, feed_instance, manag
                             (host_session,)).fetchone():
             raise ValueError("the configured native consumer does not match the snapshot")
         instance, = feed.execute("SELECT id FROM instance WHERE slot=1").fetchone()
-        captured = [row["mid"] for row in reads if row["mid"]]
+        recovered, recovery_plan = recovered_records(feed,anchor["position"])
+        captured = [row["mid"] for row in [*recovered,*reads] if row["mid"]]
         stored = {row[0] for row in feed.execute("SELECT id FROM archive")}
         published = {row["message_id"] for row in source_history.live_messages(r,actor="trigger/"+instance)}
         if (not valid_guid(instance) or len(captured)!=len(set(captured)) or set(captured)!=stored
                 or not published<=stored):
             raise ValueError("trial archive does not match the exact source interval")
-        states = [{"position":row["position"],"message_id":row["mid"],
-                   "state":inspect_capture(ledgers,kind,instance,row,host_session) if row["mid"] else "reviewed_filter"}
-                  for row in reads]
+        states = [{"position":row["position"],"message_id":row["mid"],"recovered":True,
+                   "state":inspect_capture(ledgers,kind,instance,row,host_session,recovered=True)} for row in recovered]
+        states.extend({"position":row["position"],"message_id":row["mid"],
+                       "state":inspect_capture(ledgers,kind,instance,row,host_session) if row["mid"] else "reviewed_filter"}
+                      for row in reads)
     if state_bundle.verify(bundle,expected)!=manifest:
         raise ValueError("snapshot changed during source audit")
     complete = all(row["state"] in {"router_archived","native_received","reviewed_filter"} for row in states)
     report = {"source":kind,"instance_id":instance,"source_epoch":anchor["epoch"],"initial_position":anchor["position"],
               "trial_position":current["position"],"observed_head":head,"safe_to_stage":complete,"events":states,
               "snapshot_sha256":expected,"legacy_cursor_sha256":old_hash,"review_sha256":approval_hash}
+    if recovery_plan:
+        report["recovery_plan_sha256"] = recovery_plan
     if overlap:
         report["game_overlap"] = {"position":overlap["position"],"sha256":overlap["checksum"]}
     return report,original,source_file,manifest["files"][labels[3]]["sha256"]

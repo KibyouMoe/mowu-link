@@ -300,6 +300,31 @@ python3 -m rewrite.feeds game --config ./game-trial.json --import-legacy-cursor 
 
 相同旧游标重导入只返回原摘要与验证状态。目标库已开始工作或保存过不同游标时拒绝覆盖。隔离复跑 `python3 -m unittest -v rewrite.test_feeds`。邮件用协议夹具，游戏走临时 HTTP 流。生产来源与订阅继续待验。
 
+### 补录旧游标越过的记录
+
+旧来源游标表示读取位置。切换时若该段可能遇过上报失败，先在停写窗口保存旧游标、旧 Trigger 归档和仍可取得的原始来源记录。邮件按原账号和文件夹以读取方式枚举 UID；游戏同时核桥连续运行、玩家及数字 SSE 帧号。源端缺失的资料和无法解释的账号或会话变更需保留为待核。
+
+在私有的 `source.json` 保存以下字段：
+
+| 字段 | 填写 |
+| --- | --- |
+| `kind`、`scope`、`epoch` | 邮件填 `email`、`[服务器,端口,账号,文件夹]` 和 UIDVALIDITY 字符串。游戏填 `mc_chat`、`[桥地址]` 和 `"game"`，另提供原 `player`。 |
+| `after`、`through`、`legacy_cursor_sha256` | 审核区间为左开右闭。下界用已有对账位置，上界必须等于旧游标文件的当前位置。保留旧游标原件及摘要。 |
+| `source_id`、`observed_at`、`continuity_evidence` | 同一来源同一连续代际用同一 UUID。记录原资料冻结的带时区时间和账号或桥连续性的核对依据。 |
+| `records` | 原位置到文件 SHA-256 的对象，例如 `{"15":"…"}`。记录放在邻接的 `records/`，邮件以 `<UID>.eml` 保存原邮件，游戏以 `<序号>.sse` 保存含数字 `id:` 和结束空行的原帧。邮件只对实际枚举到的 UID 出结论。游戏中间缺帧会拒绝准备整段。 |
+
+```sh
+python3 -B -m rewrite.feed_recovery audit --snapshot ./old-trigger \
+  --trigger-sha256 "${LEGACY_TRIGGER_SHA256}" --legacy-cursor ./old-cursor.json \
+  --source-manifest ./original-input/source.json --source-sha256 "${SOURCE_MANIFEST_SHA256}"
+```
+
+审计只输出标识和处理结论。已入旧库、旧库记录为丢弃、原客户端的自发消息过滤均留在原裁定。同号但旧内容无法核对时保持待核。对每一条 `missing` 附上原来源核对依据，在审核文件中保存 `plan_sha256` 及 `events`。例如位置 15 选存档可写 `{"15":{"level":"Info","evidence":"原始输入与旧 Trigger 对账记录"}}`。邮件仅可选 Info。原游戏 Event 可审核为 Info、Notify 或 Event。已从另一个旧消费者独立核实收件的，可填 `{"already_received":"该消费者原回执"}`，保留审核结论，跳过补录。
+
+将 `audit` 换成 `stage` 并加 `--review ./recovery-review.json --destination ./feed-staged`。输出 `feed.sqlite3` 和 `recovery.json`。采集库保留原游标，只有审核补录的记录进入待交队列。首次接管时用这个新库做正常来源验证，按恢复清单登记该 Trigger 实例的隔离连接。通过已有的 `python3 -B -m rewrite.service trigger --db ./feed-staged/feed.sqlite3 --name email send --connection <测试连接文件> --message-id <原补录消息号>` 交付。游戏把名称换成 `mc_chat`。重试沿用同一份计划和已登记实例。已在运行的试用库另保留和对账。
+
+回退按下面的来源收件步骤审核。补录的记录会单列 `recovered` 和原审核计划摘要，所需的 T04、附件与宿主收件规则沿用普通来源。旧游标保持已核位置，补录内容保留在回退档。再次迁入可按原消息号读回，发送重试沿用原回执。旧路径不能读到的邮件 UID、丢失的游戏原帧和现役消费者需独立核查。[补录实测](evidence/legacy-source-recovery.json)
+
 ### 把试用采集位置交回旧客户端
 
 保留导入时的原游标文件。停两边采集器和发送端，从同一停写窗口保存试用 Router、采集 Trigger、Hermes 和原宿主适配器账本。先核试用期间的全部捕获。邮件 Info 必须有匹配的 Router 收件并保留完整私有档，游戏 Event 还须有原宿主的收件号。旧归档副本不会自动取得这些新数据，回退时一起保管试用档案与 Router 快照。仍有待确认回执时，先在试用侧查回或完成原投递。

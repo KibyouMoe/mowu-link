@@ -19,8 +19,8 @@ from .wire import NoRedirect
 
 
 class Feed:
-    def __init__(self,path,kind,scope):
-        self.trigger = Trigger(path,kind)
+    def __init__(self,path,kind,scope,*,instance_id=None):
+        self.trigger = Trigger(path,kind,instance_id=instance_id)
         self.scope = encode([kind,*scope])
         self.db = Database(path,"""
             CREATE TABLE IF NOT EXISTS feed_cursor(slot INTEGER PRIMARY KEY,scope TEXT NOT NULL,epoch TEXT NOT NULL,
@@ -139,7 +139,7 @@ class Feed:
 
     def capture(self,generation,position,seq,level,text,*,game_checksum=None):
         require(type(seq) is int and 0<seq<2**63,422,"invalid_source_sequence")
-        digest = hashlib.sha256(encode([level,text]).encode()).hexdigest()
+        digest = source_text_digest(level,text)
         with self.db.transaction() as db:
             cursor = db.execute("SELECT * FROM feed_cursor WHERE slot=1").fetchone()
             require(cursor and cursor["generation"]==generation,409,"source_generation_changed")
@@ -153,13 +153,7 @@ class Feed:
             require(cursor["position"]==position,409,"concurrent_source_poll")
             if self.trigger.name=="mc_chat" and handoff:
                 require(seq==position+1,409,"legacy_game_sequence_gap")
-            mid = None
-            if level is not None:
-                summary,files = text,[]
-                if len(text)>200:
-                    summary = self.trigger.name+" 来源长文，全文见附件。"
-                    files = [("message.txt",BytesIO(text.encode("utf-8")))]
-                mid = self.trigger.archive(db,level,summary,files)
+            mid = self.archive_source(db,level,text)
             db.execute("INSERT INTO feed_reads VALUES (?,?,?,?)",(generation,seq,digest,mid))
             if game_checksum is not None:
                 db.execute("""CREATE TABLE IF NOT EXISTS feed_game_overlap (
@@ -170,9 +164,22 @@ class Feed:
             db.execute("UPDATE feed_cursor SET position=? WHERE slot=1",(seq,))
             return mid
 
+    def archive_source(self,db,level,text,*,origin=None):
+        if level is None:
+            return None
+        summary,files = text,[]
+        if len(text)>200:
+            summary = self.trigger.name+" 来源长文，全文见附件。"
+            files = [("message.txt",BytesIO(text.encode("utf-8")))]
+        return self.trigger.archive(db,level,summary,files,origin=origin)
 
-def mail_text(raw):
-    msg = BytesParser(policy=policy.default).parsebytes(raw)
+
+def source_text_digest(level,text):
+    return hashlib.sha256(encode([level,text]).encode()).hexdigest()
+
+
+def mail_text(raw,*,message=None):
+    msg = message if message is not None else BytesParser(policy=policy.default).parsebytes(raw)
     part = msg.get_body(preferencelist=("plain","html"))
     try:
         body = part.get_content() if part else ""

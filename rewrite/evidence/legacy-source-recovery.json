@@ -1,0 +1,116 @@
+{
+  "old_http_503": {
+    "attempted": [
+      "email:31:11",
+      "email:31:13",
+      "email:31:14",
+      "mc_chat:sse:15",
+      "mc_chat:sse:16",
+      "mc_chat:sse:18"
+    ],
+    "stored": [
+      "email:31:13",
+      "email:31:14",
+      "mc_chat:sse:16"
+    ],
+    "mail_reported_failed": 3,
+    "game_reported_sent": 0,
+    "mail_cursor": 14,
+    "game_cursor": 18
+  },
+  "recovery_ids": {
+    "email": "8467fa75-3efe-58a0-90bf-8640c5f898bf",
+    "mc_chat": "245ed6c2-6b87-52a5-8de3-cf40acb95df7"
+  },
+  "plans": {
+    "email": {
+      "source": "email",
+      "epoch": "31",
+      "after": 10,
+      "through": 14,
+      "source_id": "792568eb-0c52-471e-8462-3b7bfb45dd4b",
+      "instance_id": "bd4b1065-255e-584a-b22d-76697c07b56f",
+      "legacy_trigger_sha256": "bf75d9548f9d0d8054a423bbf17efc4c990fa2efcf2c933931b9cd02f0371c63",
+      "legacy_cursor_sha256": "3aab3880ec7a258a249df24a73657db57bb55388e94e0757ba1d35ce38a308b2",
+      "source_sha256": "fde49c0e5afaa2fe4f1b31b681e5bfc5bfd78a1f51416fba61348c7b11865341",
+      "events": [
+        {
+          "position": 11,
+          "legacy_event_id": "email:31:11",
+          "state": "missing",
+          "legacy_row_id": null,
+          "message_id": "8467fa75-3efe-58a0-90bf-8640c5f898bf",
+          "allowed_levels": [
+            "Info"
+          ]
+        },
+        {
+          "position": 13,
+          "legacy_event_id": "email:31:13",
+          "state": "legacy_stored",
+          "legacy_row_id": 1
+        },
+        {
+          "position": 14,
+          "legacy_event_id": "email:31:14",
+          "state": "legacy_dropped",
+          "legacy_row_id": 2
+        }
+      ]
+    },
+    "mc_chat": {
+      "source": "mc_chat",
+      "epoch": "game",
+      "after": 14,
+      "through": 18,
+      "source_id": "fb663baa-0ede-4623-895c-f0c4db1a72d8",
+      "instance_id": "2bb85f64-4be3-54d2-973a-79ee5d891b3a",
+      "legacy_trigger_sha256": "bf75d9548f9d0d8054a423bbf17efc4c990fa2efcf2c933931b9cd02f0371c63",
+      "legacy_cursor_sha256": "a0ff7841e212edc27bd313064d22995896bcacc2946da111dfdcfb6db6c71118",
+      "source_sha256": "df8cd1ed28809328b320fcd6db7cacd22a97d11bd8458c5a93117a097493c0cc",
+      "events": [
+        {
+          "position": 15,
+          "legacy_event_id": "mc_chat:sse:15",
+          "state": "missing",
+          "legacy_row_id": null,
+          "message_id": "245ed6c2-6b87-52a5-8de3-cf40acb95df7",
+          "allowed_levels": [
+            "Event",
+            "Notify",
+            "Info"
+          ]
+        },
+        {
+          "position": 16,
+          "legacy_event_id": "mc_chat:sse:16",
+          "state": "legacy_stored",
+          "legacy_row_id": 3
+        },
+        {
+          "position": 17,
+          "legacy_event_id": "mc_chat:sse:17",
+          "state": "filtered",
+          "legacy_row_id": null
+        },
+        {
+          "position": 18,
+          "legacy_event_id": "mc_chat:sse:18",
+          "state": "missing",
+          "legacy_row_id": null,
+          "message_id": "4356f3ad-165f-5067-9452-ce9b5a7abd9a",
+          "allowed_levels": [
+            "Info"
+          ]
+        }
+      ]
+    }
+  },
+  "test_mail_attachment_bytes": 244,
+  "test_host_inputs": [
+    "245ed6c2-6b87-52a5-8de3-cf40acb95df7"
+  ],
+  "source_archive_sha256": "f8b54f806fe3ffef98c2fe8064c61f8df43ac75e8946224406d8e13f64984572",
+  "reentry_notifications": 0,
+  "scope": "Old and rewrite Router/Trigger HTTP and files are real in isolation. IMAP, game bridge and Hermes host are fixtures."
+}

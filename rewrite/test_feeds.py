@@ -287,8 +287,8 @@ class Sources(unittest.TestCase):
     def test_archive_failure_cannot_advance_cursor_and_stale_reader_cannot_skip_event(self):
         gen,base = self.game.start(None,"source",20)
         original = self.game.trigger.archive
-        def failed(*args):
-            original(*args)
+        def failed(*args,**kwargs):
+            original(*args,**kwargs)
             raise OSError("fixture interrupted before commit")
         with patch.object(self.game.trigger,"archive",failed), self.assertRaises(OSError):
             self.game.capture(gen,base,21,"Info","x")
