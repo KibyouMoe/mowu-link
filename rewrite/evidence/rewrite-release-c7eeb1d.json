@@ -1,0 +1,91 @@
+{
+  "revision": "c7eeb1dc36cf0665709c0e12cc70c801d8cace80",
+  "release_sha256": "1cc085bac1738396bf411583cebc24fc01422fa0a19eebbf15da519de7f42a95",
+  "verified_release_files": 373,
+  "installed_top_level": [
+    "rewrite"
+  ],
+  "archival_compatibility_excluded": 58,
+  "macos": {
+    "discovered": 376,
+    "run_with_skips": 318,
+    "passed": 296,
+    "skipped": 22,
+    "failures": 0,
+    "errors": 0,
+    "unexpected_successes": 0,
+    "duration_seconds": 328.035,
+    "skip_count_by_module": {
+      "test_codex_app_server": 1,
+      "test_codex_rpc": 2,
+      "test_codex_workspace": 1,
+      "test_cross_guest": 1,
+      "test_dsh_native_loop": 13,
+      "test_host_ops_systemd": 1,
+      "test_host_ops_windows": 2,
+      "test_service": 1
+    }
+  },
+  "linux_arm64": {
+    "discovered": 376,
+    "run_with_skips": 318,
+    "passed": 187,
+    "skipped": 131,
+    "failures": 0,
+    "errors": 0,
+    "unexpected_successes": 0,
+    "duration_seconds": 40.776,
+    "skip_count_by_module": {
+      "test_codex_app_server": 39,
+      "test_codex_rpc": 2,
+      "test_codex_workspace": 1,
+      "test_cross_guest": 1,
+      "test_dsh_native_loop": 59,
+      "test_dsh_sdk": 18,
+      "test_hermes_gateway": 4,
+      "test_host_ops": 3,
+      "test_host_ops_systemd": 1,
+      "test_host_ops_windows": 2,
+      "test_service": 1
+    }
+  },
+  "hermes_dependency_python": "3.14.9",
+  "hermes_revision": "464bd0dd659f336bd0bf468bf02cad8aac211136",
+  "linux_image": "sha256:0a1254df0519003d33fd4ab8ad26aff1154e50b3c93aa5ec978e83bf83ba084c",
+  "linux_host_inputs": 1,
+  "cross_os": {
+    "controller": "Darwin",
+    "worker_release": "c7eeb1dc36cf0665709c0e12cc70c801d8cace80",
+    "task_id": "87046881-e4c3-437a-a029-05541c61e467",
+    "assignment_id": "d8b6fce7-11ff-4984-a9b8-7c02e516adf9",
+    "delivery_id": "286e354e-6544-461d-8a35-38251f07dd9b",
+    "fixture_native_id": "db5cc43a-30e3-4a73-80cc-ebb3ea3c699b",
+    "fixture_turn_id": "0da90a8b-2673-46cc-ac0c-56b10dbbcab6",
+    "after_turn": "working",
+    "after_report": "completed_reported",
+    "worker_holds_after_receipt": {
+      "held_task_id": null,
+      "held_assignment_id": null
+    },
+    "router_notifications": 1,
+    "unknown_identity_http": 401,
+    "untrusted_certificate_rejected": true
+  },
+  "cross_os_boundary": "One physical host, separate OS kernels over TLS. Host, Agent and manager invocation are fixtures.",
+  "local_feishu_sdk": {
+    "version": "1.7.5",
+    "network": "unused",
+    "platform_account": "none",
+    "duplicate_event_pending_inputs": 1,
+    "pending_card_answers": 1,
+    "closed_card_action_rejected": true,
+    "wrong_topic_rejected": true,
+    "fixture_topic_replies": 1,
+    "manager_text_notices": 1,
+    "resource_http_cases": [
+      404,
+      503
+    ]
+  },
+  "acceptance_boundary": "Bundled native host runtimes and loopback scripted models on macOS. Real online models, cloud Feishu, supported independent Desktop deployment and physically separate host workstations remain outside this run."
+}

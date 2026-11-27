@@ -103,7 +103,7 @@ MOWULINK_DSH_CONTAINER_IMAGE=<已安装的固定镜像ID> python3 -B -m unittest
 
 `/queue` 在工位保存输入，到原会话空闲后顺序递交。原生 `turn/start` 前复核忙闲，明确未写可等到下一次空闲，结果未知则只查原输入。实测原回合和两条排队消息各占一个回合，丢回包查回原收件，连续 16 次通过。[队列记录](evidence/codex-app-server-native-queue.json)。平台和模型用夹具。
 
-`/resume` 从独立 profile 的原生索引浏览当前账号、同一工作目录的会话。标题缺失时显示未命名，归档和其他工作目录不显示。连续 12 轮核对目录、搜索和同号重投，历史会话始终未加载，无额外模型请求。选择编号仍提示切换敬请期待。[目录记录](evidence/codex-app-server-native-catalog.json)。
+`/resume` 从独立 profile 的原生索引浏览当前账号、同一工作目录的会话。标题缺失时显示未命名，归档和其他工作目录不显示。目录查询连续 12 轮未加载历史会话、未请求模型。选择已配置的冷会话时，在 Router 确认交接窗口后才恢复原生会话。丢回执时能查回同一交接，原生工单只收一次。飞书为夹具，Desktop 的实际切换待验。[目录记录](evidence/codex-app-server-native-catalog.json) · [冷会话记录](evidence/codex-cold-resume.json)
 
 `/compact` 在空闲且无活动目标的绑定会话发起原生历史压缩。Worker 侧回执丢失时，新 App Server 可在冷启动后查回同一压缩回合和原生压缩项，重复请求回同一凭据。App Server 自己的原始确认丢失时，指令保持待核，原消息号不会再发起压缩。原生接口未返回历史条数或压缩后用量，因此完成提示只写已确认。同一套测试连续 15 轮通过，平台与模型为夹具。[压缩记录](evidence/codex-app-server-native-compaction.json)。
 
@@ -121,9 +121,9 @@ python3 -m rewrite.service codex-provision \
 
 原生目标模式另有 12 轮隔离实测。原生工具创建并完成目标，宿主自动续办回合没有来自 Router 的独立输入，其报告请求被拒，工位继续持原派发。Router 正式询问后，带原派发收件凭据的新回合发出两次相同 W04，Router 只留一次报告和一次待验通知。[原生长目标回执](evidence/codex-app-server-native-formal-goal.json)
 
-隔离环境以原生 `thread/fork` 准备测试子会话，再给它一个单独的适配器库。首次连接时库保存此刻已有的投递号，冷开不再扫描到后来真正收到的新输入。历史输入留在原生界面，复制来的投递号没有子会话收件凭据。未确认的父会话投递应回原会话核查。飞书指令发起与切换尚未接。[原生分叉回执](evidence/codex-app-server-native-fork.json)
+隔离环境已从飞书测试消息发起 `/new`、`/clear` 与 `/fork`，在原生 App Server 创建并自动登记会话。分支保留父会话历史和原生设置。父会话继承来的投递号没有子会话的收件凭据，未确认的父会话投递仍回原会话核查。新会话和分支各核对一张正式单、一次新原生输入及一条待验通知。冷重开读回原登记。真实飞书和 Desktop 界面的同名操作待验。[原生分叉回执](evidence/codex-app-server-native-fork.json) · [自动登记实测](evidence/codex-managed-native-sessions.json)
 
-文件审批仍待实测。只读隔离 App Server 的本地脚本模型工具表包含 `exec_command` 等八项，未列出 `apply_patch`。该次只读回合正常结束，试验文件没有创建，也没有原生文件审批事件。App Server 能生成文件审批的协议定义；实际工具、差异清单和宿主关闭回执仍要在支持该工具的独立工位一起核对。
+文件审批已在启用 `--relay-file-approvals` 的独立 App Server 工位实测。获授权的测试 CLI 读回同一原生回合的完整差异，按原摘要只允许这一次，两个临时文件各改一次。错摘要、其他工位及会话级允许被拒。缺差异或要求目录授权时按原生请求号取消。模型与审批人使用夹具，真实 Desktop 的应用授权、网络及额外权限待验。[实测记录](evidence/codex-app-server-file-approval.json) · [复跑与授权范围](README.md#独立宿主命令审批)
 
 适配器启动命令如下。
 

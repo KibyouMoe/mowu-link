@@ -486,7 +486,7 @@ python3 -m rewrite.linux_check --repository . \
   --socket "$HOME/.colima/default/docker.sock"
 ```
 
-脚本从指定提交制作发行包，两端各自安装。Worker 在开发机运行，Router 和宿主适配器在全新 Linux 容器里运行，各用独立的身份和 HTTPS 端口。两个端口只映射到开发机回环地址。容器以普通用户运行，根目录只读，临时盘保存测试数据库。结束时清理测试容器、专用网络及一次性身份。测试重投后独立读回宿主输入数，核对签发者校验、未登记身份、W03 持单、回合结束与 W04 待验收。Linux 安装目录全量回归另取同一提交的旧 Router、旧 Trigger 及邮件和游戏采集代码。Agent 与宿主为夹具。两种系统运行在一台物理机上。[本次跨系统验收](evidence/queue-rollback-release-rehearsal.json) · [首次验收](evidence/linux-cross-os.json)
+脚本从指定提交制作发行包，两端各自安装。Linux 来宾先从只含 `rewrite/` 的安装目录运行 `rewrite.release_suite`，输出新版回归、按环境跳过和归档用例的计数。然后 Worker 在开发机运行，Router 和宿主适配器在来宾运行，各用独立身份和 HTTPS 端口。端口只映射到开发机回环地址。容器以普通用户运行，根目录只读，临时盘保存测试数据库。重投后独立读回宿主输入数，核对证书校验、未登记身份、W03 持单、回合结束与 W04 待验收。测试结束清理本次创建的容器、专用网络和一次性身份。Agent 与宿主为夹具。两种系统运行在一台物理机上。[新版独立安装验收](evidence/clean-install-release-acceptance.json)
 
 #### Windows 安装与回退
 

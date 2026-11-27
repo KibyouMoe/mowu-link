@@ -6,6 +6,8 @@
 
 ## 检查点与证据
 
+同一版本线的独立包 `c7eeb1dc36cf0665709c0e12cc70c801d8cace80` 已完成新版全量回归。macOS 296 项通过、22 项按环境跳过，Linux arm64 187 项通过、131 项按环境跳过。两端均零失败，另各排除 58 项归档兼容用例。安装包 373 个文件均校验一致。macOS 使用隔离 Hermes、Codex App Server、DSH SDK 和本地模型，Linux 的跨系统 HTTPS 回环使用宿主夹具，独立读回一条收件和一条待验通知。飞书 SDK 1.7.5 的本地回调验过收件去重、原题关卡、错话题拒收和资源下载错误。真实平台及测试身份仍待验。[两端计数和回执](evidence/rewrite-release-c7eeb1d.json) · [新版回归](README.md#本地复跑) · [跨系统复跑](README.md#跨系统验收)
+
 空状态演练在 `33b2f90242f73b8ae0ab5383da90d4a42771506b` 复用真实 Hermes 网关，并接入客户端随附的 Codex App Server `0.171.0-alpha.13.2`。用全新未登录的 profile 及只读会话登记 `worker_report`，先以本地测试模型验证会话初始化。Trigger 上报带附件 Event，Hermes 读回原件并建单。App Server 在同一派发回合两次调用原生工具，返回相同 W04。Router 只产生一条管理通知并留待验收。Hermes 读回同一成果后结单。App Server 正式单与私聊各一个新回合，飞书夹具确认私聊的原回合最终回复。macOS 独立安装目录 19 项通过，372 份文件前后校验一致。Windows 安装组 21 项、DSH SDK 14 项通过。真实模型、日常 Desktop 工具及飞书云端仍待独立测试身份。[回执证据](evidence/hermes-codex-clean-cutover.json) · [复跑](README.md#hermes-专用会话) · [Windows 日志](https://github.com/KibyouMoe/mowu-link/actions/runs/45955146079)
 
 空状态演练在 `ee6bcc74e152ea3fbaae518e52635b9c57f2ce0c` 改用安装的 DSH SDK `0.2.2-rc.5`。真实 Hermes 网关先读 Trigger 附件并建单；独立 DSH AgentLoop 在原生回合 `1/1` 经双向 TLS 调用两次 `worker_report`，回执相同。Router 只产生一条通知并保留待验收，Hermes 通过原生查询和验收工具读取已提交的正文并结单。飞书夹具从 DSH 实际展示账本取得一条对应私聊回合的最终回复。测试逐页读取展示账本，分别核得一条正式输入与一条私聊输入。macOS 从纯新版安装目录跑 19 项全过并逐文件复核 371 份文件，Windows 安装组与 DSH SDK 分别通过 21、14 项。两端模型为本地脚本，双宿主闭环实测在 macOS。[回执证据](evidence/hermes-dsh-clean-cutover.json) · [复跑](README.md#hermes-专用会话) · [Windows 日志](https://github.com/KibyouMoe/mowu-link/actions/runs/45954240956)
