@@ -61,10 +61,11 @@ class Bundle(unittest.TestCase):
         self.revision = "a"*40
 
     @contextmanager
-    def stack(self,paths,*,pin_session=False):
+    def stack(self,paths,*,pin_session=False,extra_workers=()):
         source = Trigger(paths["trigger:mail"],"mail",self.clock)
         router = Orders(paths["router:main"],self.clock,1)
-        ids = {"mgr":"hermes","w":"worker/oguri","mail":"trigger/"+source.instance_id}
+        ids = {"mgr":"hermes","w":"worker/oguri","mail":"trigger/"+source.instance_id,
+               **{wid:"worker/"+wid for wid in extra_workers}}
         with running(serve_loopback(router,ids)) as url:
             manager = HermesAdapter(paths["hermes:main"],Client(url,"mgr"),
                       HostAdapter(paths["hermes-host:main"],self.hermes_host,self.hermes_host.session),self.clock)
@@ -564,6 +565,108 @@ class Bundle(unittest.TestCase):
         self.assertEqual(set(manifest["files"]),set(self.sources))
         self.assertEqual((self.dest/filename(label)).read_bytes(),original)
         self.assertEqual(path.read_bytes(),original)
+
+    def test_handoff_audit_detects_an_omitted_idle_peers_recipient_before_and_after_c02(self):
+        other_labels = ("worker:tama","agent:tama")
+        sources = {**self.sources,**{label:self.root/filename(label) for label in other_labels}}
+        host = FixtureHost(self.root/"receiver-native.db","receiver-session")
+        message_id = guid()
+        text = "The recipient was omitted from the backup"
+        reports = {}
+
+        def receiver(paths, router_url):
+            adapter = HostAdapter(paths["agent:tama"],host,host.session)
+            return Worker(paths["worker:tama"],"tama",Client(router_url,"tama"),adapter,clock=self.clock)
+
+        def report(name, inputs):
+            path = self.root/name
+            saved = capture(inputs,self.revision,path)
+            result = audit_handoff(path,saved["manifest_sha256"])
+            self.assertNotIn(text,encode(result))
+            reports[name] = result
+            return saved["manifest_sha256"]
+
+        with self.stack(sources,extra_workers=("tama",)) as (_manager,sender,_source,router,*_):
+            other = receiver(sources,router.url)
+            sender.connect()
+            other.connect()
+        report("only_status_queries",self.sources)
+        self.assertFalse(reports["only_status_queries"]["needs_review"])
+
+        with self.stack(sources,extra_workers=("tama",)) as (_manager,sender,_source,router,*_):
+            sender.send_peer(message_id,"tama",text)
+        report("before_c02",self.sources)
+        self.assertTrue(reports["before_c02"]["needs_review"])
+        self.assertEqual(reports["before_c02"]["missing_worker_ledgers"],[{
+            "worker_id":"tama","router_waiting_deliveries":1,"router_waiting_peer_receipts":1,
+        }])
+
+        with self.stack(sources,extra_workers=("tama",)) as (manager,sender,_source,router,*_):
+            other = receiver(sources,router.url)
+            original = other.adapter.deliver
+
+            def lose_native_receipt(*args,**kwargs):
+                original(*args,**kwargs)
+                return None
+
+            with patch.object(other.adapter,"deliver",side_effect=lose_native_receipt):
+                other.poll()
+            status = sender.router.request("GET","peers/messages/"+message_id)
+            self.assertTrue(status["worker_received"])
+            self.assertIsNone(status["host_receipt_id"])
+            self.assertEqual(manager.tasks()["items"],[])
+            self.assertEqual(len(host.entries()),1)
+        report("after_c02",self.sources)
+        self.assertTrue(reports["after_c02"]["needs_review"])
+        self.assertEqual(reports["after_c02"]["missing_worker_ledgers"],[{
+            "worker_id":"tama","router_waiting_peer_receipts":1,
+        }])
+
+        seal = report("all_components",sources)
+        restored = restore(self.root/"all_components",seal,self.dest)
+        with self.stack(restored,extra_workers=("tama",)) as (_manager,sender,_source,router,*_):
+            other = receiver(restored,router.url)
+            self.clock.advance(5)
+            other.poll()
+            other.poll()
+            receipts = sender.router.request("GET","peers/messages/"+message_id)
+            self.assertTrue(receipts["host_receipt_id"])
+            (payload, _), = host.entries()
+            self.assertEqual(payload["message_id"],message_id)
+        report("reconciled",restored)
+        self.assertFalse(reports["reconciled"]["needs_review"])
+        self.assertEqual(reports["reconciled"]["missing_worker_ledgers"],[])
+
+    def test_handoff_audit_checks_independent_roster_even_for_empty_ledgers(self):
+        with self.stack(self.sources):
+            pass
+        self.sources["trigger:spare"] = self.root/"spare.db"
+        Trigger(self.sources["trigger:spare"],"quiet-source",self.clock)
+        roster = {"source_revision":self.revision,"components":sorted(self.sources)}
+        full = capture(self.sources,self.revision,self.snapshot)["manifest_sha256"]
+        missing = ["feishu:oguri","hermes-host:main","trigger:spare"]
+        omit = {label:path for label,path in self.sources.items() if label not in missing}
+        partial = self.root/"incomplete-snapshot"
+        omitted = capture(omit,self.revision,partial)["manifest_sha256"]
+        for snapshot, digest_, expected_roster, returncode, wanted in (
+                (self.snapshot,full,roster,0,[]),
+                (partial,omitted,roster,1,["snapshot_components_missing"]),
+                (self.snapshot,full,{**roster,"source_revision":"b"*40},1,["snapshot_revision_mismatch"]),
+                (self.snapshot,full,{**roster,"components":sorted(omit)},1,["snapshot_components_unexpected"])):
+            with self.subTest(snapshot=snapshot.name,issues=wanted):
+                roster_file = self.root/"roster.json"
+                roster_file.write_text(encode(expected_roster),encoding="utf-8")
+                cli = [sys.executable,"-B","-m","rewrite.state_bundle","audit-handoff","--snapshot",str(snapshot),
+                       "--manifest-sha256",digest_,"--roster",str(roster_file)]
+                output = subprocess.run(cli,capture_output=True,text=True,timeout=15)
+                self.assertEqual(output.returncode,returncode,output.stderr)
+                result = json.loads(output.stdout)
+                self.assertEqual([issue["issue"] for issue in result["issues"]],wanted)
+                if wanted==["snapshot_components_missing"]:
+                    self.assertEqual(result["issues"][0]["components"],missing)
+                self.assertEqual(verify(snapshot,digest_)["source_revision"],self.revision)
+        with self.assertRaisesRegex(ValueError,"duplicate"):
+            audit_handoff(self.snapshot,full,roster={**roster,"components":roster["components"]+["worker:oguri"]})
 
     def test_feishu_restore_reuses_original_card_and_keeps_known_provider_receipt_after_deadline(self):
         message = {"chat_type":"p2p","chat_id":"chat","message_id":"om_trial_input","message_type":"text",

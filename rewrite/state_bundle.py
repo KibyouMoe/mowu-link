@@ -482,8 +482,32 @@ def audit_trigger(snapshot,expected):
     return {"snapshot_id":manifest["snapshot_id"],"source_revision":manifest["source_revision"],**result}
 
 
-def audit_handoff(snapshot,expected,*,dsh_runtimes=None):
+def roster_issues(manifest,roster):
+    if (not isinstance(roster,dict) or set(roster)!={"source_revision","components"}
+            or not isinstance(roster["components"],list)
+            or not all(isinstance(label,str) for label in roster["components"])):
+        raise ValueError("expected a source revision and component roster")
+    check_revision(roster["source_revision"])
+    labels = roster["components"]
+    if len(labels)!=len(set(labels)):
+        raise ValueError("duplicate component in the cutover roster")
+    validate_set(labels)
+    expected = set(labels)
+    captured = set(manifest["files"])
+    issues = []
+    if roster["source_revision"]!=manifest["source_revision"]:
+        issues.append({"issue":"snapshot_revision_mismatch","expected":roster["source_revision"],
+                       "captured":manifest["source_revision"]})
+    if missing := sorted(expected-captured):
+        issues.append({"issue":"snapshot_components_missing","components":missing})
+    if unexpected := sorted(captured-expected):
+        issues.append({"issue":"snapshot_components_unexpected","components":unexpected})
+    return issues
+
+
+def audit_handoff(snapshot,expected,*,dsh_runtimes=None,roster=None):
     manifest = verify(snapshot,expected)
+    issues = roster_issues(manifest,roster) if roster is not None else []
     labels = manifest["files"]
     workspaces = workspace_audits(snapshot,manifest,dsh_runtimes)
     router_label, = (label for label in labels if component(label)[0]=="router")
@@ -502,6 +526,9 @@ def audit_handoff(snapshot,expected,*,dsh_runtimes=None):
                                                     WHERE done=0 ORDER BY worker_id,assignment_id""")]
         frames = dict(db.execute("""SELECT consumer,COUNT(*) FROM deliveries
             WHERE ack=0 AND kind<>'worker.status_query' GROUP BY consumer"""))
+        has_peers = db.execute("SELECT 1 FROM sqlite_schema WHERE name='peer_host_receipts' AND type='table'").fetchone()
+        unsettled_peers = dict(db.execute("""SELECT p.recipient,COUNT(*) FROM peer_messages p
+            LEFT JOIN peer_host_receipts r USING(message_id) WHERE r.message_id IS NULL GROUP BY p.recipient""")) if has_peers else {}
         has_questions = db.execute("SELECT 1 FROM sqlite_schema WHERE name='questions' AND type='table'").fetchone()
         questions = dict(db.execute("""SELECT asked_by,COUNT(*) FROM questions
             WHERE answer IS NULL GROUP BY asked_by""")) if has_questions else None
@@ -511,7 +538,22 @@ def audit_handoff(snapshot,expected,*,dsh_runtimes=None):
         has_handoffs = db.execute("SELECT 1 FROM sqlite_schema WHERE name='admission_handoffs' AND type='table'").fetchone()
         handoffs = dict(db.execute("""SELECT worker_id,COUNT(*) FROM admission_handoffs
             WHERE released_at IS NULL GROUP BY worker_id""")) if has_handoffs else {}
-    workers,issues = [],[]
+    missing = {}
+    for kind,counts in {
+        "router_reserved_assignments":reserved,
+        "router_waiting_deliveries":{actor.removeprefix("worker/"):count for actor,count in frames.items()
+                                     if actor.startswith("worker/")},
+        "router_waiting_peer_receipts":unsettled_peers,
+        "router_waiting_questions":questions or {},
+        "router_approvals":open_approvals or {},
+        "router_admission_handoffs":handoffs,
+    }.items():
+        for wid,count in counts.items():
+            if wid not in worker_confirmed:
+                missing.setdefault(wid,{"worker_id":wid})[kind] = count
+    missing_workers = [missing[wid] for wid in sorted(missing)]
+    issues.extend({"worker_id":row["worker_id"],"issue":"worker_ledger_missing"} for row in missing_workers)
+    workers = []
     for wid in worker_ids:
         remote = current.pop(wid,None)
         platform_label = "feishu:"+wid
@@ -587,7 +629,7 @@ def audit_handoff(snapshot,expected,*,dsh_runtimes=None):
     if verify(snapshot,expected)!=manifest:
         raise ValueError("snapshot changed during handoff audit")
     return {"snapshot_id":manifest["snapshot_id"],"workers":workers,"hermes":hermes,"pending_cleanup":cleanup,
-            "issues":issues,"needs_review":bool(issues or cleanup),
+            "missing_worker_ledgers":missing_workers,"issues":issues,"needs_review":bool(issues or cleanup),
             **({"router_dispatch_drain":admission.drain_receipt(drain)} if drain is not None else {})}
 
 
@@ -702,6 +744,8 @@ def main():
         p = ops.add_parser(op)
         p.add_argument("--snapshot",type=Path,required=True)
         p.add_argument("--manifest-sha256",required=True)
+        if op=="audit-handoff":
+            p.add_argument("--roster",type=Path,help="independent JSON roster with source_revision and components")
         if op=="rollback":
             p.add_argument("--trial-sources",type=Path,required=True)
             p.add_argument("--managed-registries",type=Path,help="Worker ID to the trial's native registry directory, JSON")
@@ -734,7 +778,10 @@ def main():
     elif args.op=="audit-trigger":
         result = audit_trigger(args.snapshot,args.manifest_sha256)
     elif args.op=="audit-handoff":
-        result = audit_handoff(args.snapshot,args.manifest_sha256,dsh_runtimes=optional_map("dsh_runtimes"))
+        roster = json.loads(args.roster.read_text(encoding="utf-8")) if args.roster is not None else None
+        if args.roster is not None and roster is None:
+            parser.error("expected a source revision and component roster")
+        result = audit_handoff(args.snapshot,args.manifest_sha256,dsh_runtimes=optional_map("dsh_runtimes"),roster=roster)
     elif args.op=="stage-native-handoff":
         result = stage_native_handoff(args.snapshot,args.manifest_sha256,args.worker_id,
                                       args.source_session,args.target_session,args.destination,
@@ -747,6 +794,8 @@ def main():
         result = restore(args.snapshot,args.manifest_sha256,args.destination,managed_keys=optional_map("managed_keys"))
     print(encode(result))
     if args.op=="audit-trigger" and not result["ready"]:
+        raise SystemExit(1)
+    if args.op=="audit-handoff" and args.roster is not None and result["needs_review"]:
         raise SystemExit(1)
 
 

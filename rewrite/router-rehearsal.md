@@ -535,6 +535,15 @@ python3 -B -m rewrite.state_bundle audit-trigger --snapshot ./sealed-combined \
 
 合并核对批次、主机、版本、组件名单和实际文件摘要。托管会话分机保存时，合并重核 Worker 的登记与适配器的会话账本。发生冲突或缺项时不发布合并目录。批次号用于对照文件，全部写者的停写窗口由维护人核实。以 `assemble` 返回的 `manifest_sha256` 运行两项对账，再读 `audit-handoff` 的 `needs_review` 和 `audit-trigger` 的 `ready`。待回执时先保留原快照，从副本恢复原绑定并按原派发或消息号查回，复核后再换绑。
 
+正式切换演练前，从实际部署登记准备独立的 `roster.json`。填写待验发行包的完整 `source_revision` 及 `components` 数组，覆盖全部在用 Worker 与 Adapter、已启用的飞书和 Hermes 宿主账本、尚无事件的新来源，以及 Router 和 Trigger。可单机封存或按主机合并后使用。清单在封存前独立记录，供审计发现整个组件漏采的情况。
+
+```sh
+python3 -B -m rewrite.state_bundle audit-handoff --snapshot "$SNAPSHOT" \
+  --manifest-sha256 "$MANIFEST_SHA256" --roster ./roster.json
+```
+
+审计会逐项报告缺少或多出的组件以及发行版本不符。带清单时，`needs_review: true` 的退出码为 1。即使未提供清单，`missing_worker_ledgers` 仍列出在 Router 有未确认投递、私聊宿主回执、派发预约、未答题、未关闭原生审批或交接记录的缺失工位。已有持单和待清理仍按原字段核对。仅留下状态查询不会让工位进入这份列表。恢复时补齐原组件，沿原消息号查回回执，再核原生收件次数。另行按停写记录、原停派号、Trigger 和实际平台回执完成切换判定。
+
 复跑需已启动的隔离 Colima 虚拟机、已登记的 ARM64 测试镜像及可供来宾读取的安装目录。仅生成临时测试进程、身份、数据库和端口。
 
 ```sh
