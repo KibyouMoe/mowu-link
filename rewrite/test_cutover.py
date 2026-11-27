@@ -3105,6 +3105,187 @@ store.close()
                             json.loads(row["metadata"])["execution_mode"]=="goal" for row in inserted))
         self.assertEqual(digest(self.trial/"router.db"),trial_sha)
 
+    def test_initial_assignment_replays_waiting_order_and_preserves_reviewed_history(self):
+        self.old("""
+store = RouterStore(sys.argv[1])
+for worker in ("two","oguri"):
+    store.upsert_worker(worker)
+store.close()
+""",self.legacy)
+        original = digest(self.legacy)
+        backup(self.legacy,self.attachments,self.snapshot)
+        prepare(self.snapshot,self.trial,self.source_id)
+        clock = Clock()
+        loop = Loop(self.trial,clock,FixtureHost)
+        key,edit_key,assign_key,later_edit,repeat_key = (guid() for _ in range(5))
+        initial = {"title":"未指定时的标题","instructions":"原始指令","assignee_id":None}
+        review = self.root/"assigned-review.json"
+        manifest_name = "queue-replay.json"
+        with loop.server:
+            loop.thread.start()
+            try:
+                queued = loop.manager_wire.request("POST","tasks",initial,key)
+                tid = queued["task_id"]
+                facts = reconcile(self.snapshot,self.trial)
+                self.assertEqual(facts["blocked_new_tasks"],[{"task_id":tid,"reason":"legacy_requires_assignee"}])
+                edited = loop.hermes.update(edit_key,tid,queued["revision"],{"title":"指定前更新"})
+                assigned = loop.hermes.act(assign_key,tid,edited["revision"],"assign",worker_id="two")["task"]
+                self.assertIsNone(assigned["assignment_id"])
+                updated = loop.hermes.update(later_edit,tid,assigned["revision"],{"instructions":"指定后更新"})
+                self.assertEqual(loop.hermes.act(repeat_key,tid,updated["revision"],"assign",worker_id="two")["task"],updated)
+                pending = reconcile(self.snapshot,self.trial)
+                modes = {tid:"goal"}
+                self.assertTrue(pending["only_new_queued_tasks"])
+                self.assertEqual(pending["queue_candidates"],[{"task_id":tid,"assignee_id":"two",
+                                                                "request_id":key,"assignment_request_id":assign_key}])
+                self.assertNotIn(initial["instructions"],json.dumps(pending,ensure_ascii=False))
+                review.write_text(json.dumps({"trial_sha256":pending["trial_sha256"],"execution_modes":modes}))
+                staged = self.root/"queue-only"
+                self.assertEqual(stage_queue_rollback(self.snapshot,self.trial,review,staged)["queued_requests"],1)
+                queue_plan, = json.loads((staged/manifest_name).read_text())["requests"]
+                self.assertEqual((staged/manifest_name).stat().st_mode&0o777,0o600)
+                projected = queue_plan["request"]
+                self.assertNotEqual(projected["message_id"],key)
+                self.assertEqual((projected["worker"],projected["TaskName"],projected["goal"]),
+                                 ("two","指定前更新","指定后更新"))
+                self.assertEqual([event["key"] for event in queue_plan["initial_assignment"]["events"]],
+                                 [edit_key,assign_key,later_edit,repeat_key])
+
+                loop.worker.connect()
+                loop.worker.poll()
+                clock.advance(10)
+                loop.worker.poll()
+                clock.advance(1)
+                loop.worker.poll()
+                done_key,done_assign = guid(),guid()
+                # Exercise clients that omit the optional assignee field.
+                draft = loop.manager_wire.request("POST","tasks",{"title":"验收归档","instructions":"试用私有正文"},done_key)
+                done = draft["task_id"]
+                receipt = loop.hermes.act(done_assign,done,draft["revision"],"assign",worker_id="oguri")["task"]
+                self.assertIsNotNone(receipt["assignment_id"])
+                loop.worker.poll()
+                aid = loop.worker.hold()["held_assignment_id"]
+                self.assertEqual(aid,receipt["assignment_id"])
+                native = loop.native.entries()[0][1]["native_id"]
+                report = agent_report(loop.worker,native,{"task_id":done,"assignment_id":aid,"summary":"私有验收成果",
+                                                         "artifact_ids":[]})
+                self.assertFalse(report["isError"],report)
+                received = loop.hermes.inspect(done)["task"]
+                self.assertEqual(received["state"],"completed_reported")
+                self.assertEqual(loop.hermes.approve(guid(),done,received["revision"])["task"]["state"],"closed")
+                loop.hermes.poll()
+            finally:
+                loop.server.shutdown()
+                loop.thread.join()
+        trial_sha = digest(self.trial/"router.db")
+        review.write_text(json.dumps({"trial_sha256":trial_sha,"closed_assignments":{done:aid},"execution_modes":modes}))
+        result = stage_reviewed_rollback(self.snapshot,self.trial,review,self.restore)
+        self.assertEqual((result["reviewed_orders"],result["queued_requests"]),(1,1))
+        archive = json.loads((self.restore/"private-review/manifest.json").read_text())["orders"][done]
+        self.assertEqual((archive["original_worker"],archive["initial_assignment"]["assignment_request_id"]),
+                         ("oguri",done_assign))
+        self.assertEqual(archive["summary"],"私有验收成果")
+        self.assertEqual(json.loads((self.restore/manifest_name).read_text())["requests"],[queue_plan])
+        missing_replay = self.root/"missing-legacy-replay"
+        backup(self.restore/"legacy.db",self.restore/"legacy.db.attachments",missing_replay)
+        with self.assertRaisesRegex(ValueError,"assigned rollback request receipt is missing"):
+            prepare(missing_replay,self.root/"cannot-reenter-before-replay",guid())
+
+        old = json.loads(self.old("""
+from server import RouterServer
+from selftest_router import http
+from threading import Thread
+from unittest.mock import Mock
+store = RouterStore(sys.argv[1])
+queue,archive,archive_id = json.loads(sys.argv[2])
+token = "isolated-legacy-operator"
+with RouterServer(("127.0.0.1",0),store,token,Mock(),Mock()) as server:
+    thread = Thread(target=server.serve_forever,kwargs={"poll_interval":.02})
+    thread.start()
+    try:
+        url = f"http://127.0.0.1:{server.server_port}/tasks"
+        queued,created = http("POST",url,queue,token)
+        retry,repeated = http("POST",url,queue,token)
+        queue_conflict,_ = http("POST",url,dict(queue,goal="changed"),token)
+        archived,duplicate = http("POST",url,archive,token)
+        archive_conflict,_ = http("POST",url,dict(archive,goal="changed"),token)
+        fetched,saved = http("GET",url+"/"+archive_id,token=token)
+        assert (queued,retry,queue_conflict,archived,archive_conflict,fetched)==(202,200,409,200,409,200)
+        assert repeated["duplicate"] and repeated["task_id"]==created["task_id"] and not created["dispatched"]
+        assert duplicate["duplicate"] and duplicate["task_id"]==archive_id
+        result = saved["task"]
+        assert result["deliverable"] is None and not result["in_running_tasks"]
+        assert result["archive"]["reason"]=="reviewed_on_rewrite"
+        assert store.orders.next_dispatch("oguri") is None and store.orders.held("oguri") is None
+        print(json.dumps({"queue_replay":[queued,retry,queue_conflict],"archived_replay":[archived,archive_conflict,fetched],
+                          "legacy_queued_task_id":created["task_id"],"legacy_archive_task_id":archive_id,
+                          "archive_reason":result["archive"]["reason"],"old_queue_head":store.orders.next_dispatch("two")}))
+    finally:
+        server.shutdown()
+        thread.join()
+store.close()
+""",self.restore/"legacy.db",json.dumps([projected,archive["legacy_creation_request"],archive["legacy_task_id"]])))
+        self.assertEqual(old["old_queue_head"],self.queued)
+        backup(self.restore/"legacy.db",self.restore/"legacy.db.attachments",self.root/"reentry-snapshot")
+        reentry = self.root/"reentry"
+        imported = prepare(self.root/"reentry-snapshot",reentry,guid())
+        token = guid()
+        with serve_loopback(Orders(reentry/"router.db",clock),{token:"hermes"}) as server:
+            thread = Thread(target=server.serve_forever,kwargs={"poll_interval":.02})
+            thread.start()
+            try:
+                client = Client(f"http://127.0.0.1:{server.server_port}",token)
+                actual = client.request("POST","tasks",initial,key)
+                translated = {"title":projected["TaskName"],"instructions":projected["goal"],"assignee_id":"two"}
+                self.assertEqual(client.request("POST","tasks",translated,projected["message_id"]),actual)
+                self.assertEqual(actual["task_id"],imported["queued_id_map"][old["legacy_queued_task_id"]])
+                self.assertEqual(actual["assignee_id"],"two")
+                with self.assertRaisesRegex(Fault,"idempotency_conflict"):
+                    client.request("POST","tasks",translated,key)
+                for retired in (edit_key,assign_key,later_edit,repeat_key,done_key,done_assign,
+                                archive["legacy_creation_request"]["message_id"]):
+                    with self.assertRaises(Fault) as prior:
+                        client.request("POST","tasks",translated,retired)
+                    self.assertEqual((prior.exception.status,prior.exception.code),(409,"legacy_request_recorded"))
+                self.assertEqual(len(client.request("GET","tasks")["items"]),2)
+            finally:
+                server.shutdown()
+                thread.join()
+        self.assertEqual((digest(self.legacy),digest(self.trial/"router.db")),(original,trial_sha))
+
+        damaged = self.root/"without-assignment-receipt"
+        shutil.copytree(self.trial,damaged)
+        with closing(sqlite3.connect(damaged/"router.db")) as db, db:
+            db.execute("DELETE FROM operations WHERE actor='hermes' AND key=?",(done_assign,))
+        missing = reconcile(self.snapshot,damaged)
+        self.assertEqual(missing["closed_new_tasks"],[])
+        self.assertIn({"task_id":done,"reason":"assignment_or_lifecycle_recorded"},missing["blocked_new_tasks"])
+        review.write_text(json.dumps({"trial_sha256":missing["trial_sha256"],"closed_assignments":{done:aid},
+                                      "execution_modes":modes}))
+        refused = self.root/"refused-assigned-archive"
+        with self.assertRaises(ValueError):
+            stage_reviewed_rollback(self.snapshot,damaged,review,refused)
+        self.assertFalse(refused.exists())
+        overlapping = self.root/"legacy-with-overlapping-key.db"
+        shutil.copyfile(self.restore/"legacy.db",overlapping)
+        with closing(sqlite3.connect(overlapping)) as db, db:
+            db.execute("UPDATE rewrite_assigned_replay_keys SET retired_keys=? WHERE request_key=?",
+                       (json.dumps([assign_key]),done_key))
+        overlapping_snapshot = self.root/"overlapping-snapshot"
+        backup(overlapping,self.restore/"legacy.db.attachments",overlapping_snapshot)
+        with self.assertRaisesRegex(ValueError,"assigned rollback request keys overlap"):
+            prepare(overlapping_snapshot,self.root/"cannot-reenter-with-overlap",guid())
+        if output := os.environ.get("MOWULINK_ASSIGNED_ROLLBACK_EVIDENCE"):
+            Path(output).write_text(json.dumps({"trial_sha256":trial_sha,"legacy_snapshot_sha256":original,
+                "queue":{"trial_task_id":tid,"original_request_id":key,"assignment_request_id":assign_key,
+                         "projected_request_id":projected["message_id"],"remigrated_task_id":actual["task_id"]},
+                "reviewed":{"trial_task_id":done,"original_request_id":done_key,"assignment_request_id":done_assign,
+                            "assignment_id":aid,"native_fixture_id":native,"w04_key":archive["w04_key"]},
+                "legacy":old,"missing_assignment_receipt_rejected":True,"unassigned_still_blocked":True,
+                "reentry_refuses_unreplayed_queue":True,"reentry_refuses_overlapping_action_keys":True,
+                "boundary":"Actual legacy and rewrite HTTP and SQLite. Scripted Worker Agent and clock."},
+                ensure_ascii=False,indent=2)+"\n")
+
     def test_archived_peer_threads_files_and_permissions_survive_without_replay(self):
         first,reply,root_msg = guid(),guid(),guid()
         sample = "原样保留🟣"*13000

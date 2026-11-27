@@ -76,6 +76,9 @@ class Orders:
                 prior = db.execute("SELECT source_id,legacy_task_id FROM history_request_keys WHERE actor=? AND request_key=?",
                                    (actor,key)).fetchone()
                 if prior:
+                    replay = legacy_history.replay_assigned_creation(db,key,request)
+                    if replay is not None:
+                        return replay
                     raise Fault(409,"legacy_request_recorded",details=dict(prior))
             response = perform(db)
             db.execute("INSERT INTO operations VALUES (?,?,?,?)", (actor, key, request, encode(response)))

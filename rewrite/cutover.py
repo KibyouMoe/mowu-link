@@ -12,7 +12,7 @@ import tempfile
 from uuid import UUID, uuid5
 
 from .orders import Orders, task
-from . import attachments, cleanup, legacy_history, legacy_peers
+from . import attachments, cleanup, legacy_history, legacy_peers, rollback_assignment
 from .messages import valid_guid
 from .storage import encode
 
@@ -239,7 +239,7 @@ def row_delta(db, table, first, second):
 
 
 def creation_receipt(db, row):
-    recorded = db.execute("""SELECT key,request,response FROM main.operations WHERE actor='hermes'
+    recorded = db.execute("""SELECT rowid AS seq,actor,key,request,response FROM main.operations WHERE actor='hermes'
                              AND json_extract(request,'$[0][0]')='POST' AND json_extract(request,'$[0][1]')='/v1/tasks'
                              AND json_extract(response,'$.task_id')=?
                              AND key NOT IN (SELECT key FROM baseline.operations WHERE actor='hermes')""",
@@ -249,10 +249,13 @@ def creation_receipt(db, row):
     return recorded[0]
 
 
+def portable_request_key(key):
+    return isinstance(key,str) and (valid_guid(key) or re.fullmatch(r"hermes-[0-9a-f]{64}",key))
+
+
 def portable_creation(row, operation):
-    key = operation["key"]
     request = {field:row[field] for field in ("title","instructions","assignee_id")}
-    return (isinstance(key,str) and (valid_guid(key) or re.fullmatch(r"hermes-[0-9a-f]{64}",key))
+    return (portable_request_key(operation["key"])
             and operation["request"]==encode([["POST","/v1/tasks"],request]))
 
 
@@ -260,13 +263,13 @@ def legacy_description_fits(row):
     return row["instructions"]==row["instructions"].strip() and len(row["instructions"])<=2000
 
 
-def queued_candidates(db, delta, legacy_workers):
+def queued_candidates(db, delta, legacy_workers, initial_assignments):
     candidates, blocked = [], []
     sql = """SELECT current.* FROM main.tasks current LEFT JOIN baseline.tasks old USING(task_id)
              WHERE old.task_id IS NULL ORDER BY current.rowid"""
     for row in db.execute(sql):
         tid = row["task_id"]
-        if row["state"]!="ready" or row["assignment_id"] is not None or row["revision"]!=1:
+        if row["state"]!="ready" or row["assignment_id"] is not None:
             blocked.append({"task_id":tid,"reason":"assignment_or_lifecycle_recorded"})
             continue
         if not row["assignee_id"]:
@@ -279,17 +282,29 @@ def queued_candidates(db, delta, legacy_workers):
         if operation is None:
             blocked.append({"task_id":tid,"reason":"missing_unique_manager_creation_receipt"})
             continue
-        response = dict(row,holder={"kind":"router"})
-        if not portable_creation(row,operation) or operation["response"]!=encode(response):
-            blocked.append({"task_id":tid,"reason":"creation_receipt_incompatible"})
-            continue
         # Old /tasks trims the description and accepts at most 2,000 characters.
         if not legacy_description_fits(row):
             blocked.append({"task_id":tid,"reason":"legacy_description_would_change_or_be_rejected"})
             continue
-        candidates.append({"task_id":tid,"assignee_id":row["assignee_id"],"request_id":operation["key"]})
+        item = {"task_id":tid,"assignee_id":row["assignee_id"],"request_id":operation["key"]}
+        if row["revision"]==1:
+            if not portable_creation(row,operation) or operation["response"]!=encode(dict(row,holder={"kind":"router"})):
+                blocked.append({"task_id":tid,"reason":"creation_receipt_incompatible"})
+                continue
+        else:
+            proof = None
+            if portable_request_key(operation["key"]) and first_dispatch(db,tid) is None:
+                proof = rollback_assignment.verify(db,row,operation,None)
+            if not proof:
+                blocked.append({"task_id":tid,"reason":"assignment_or_lifecycle_recorded"})
+                continue
+            item["assignment_request_id"] = proof["assignment_request_id"]
+            initial_assignments[tid] = proof
+        candidates.append(item)
+    queued_operations = len(candidates)+sum(len(proof["events"]) for proof in initial_assignments.values())
     only_queue = (bool(candidates) and not blocked and set(delta)=={"tasks","operations"}
-                  and all(values=={"baseline_only":0,"trial_only":len(candidates)} for values in delta.values()))
+                  and delta["tasks"]=={"baseline_only":0,"trial_only":len(candidates)}
+                  and delta["operations"]=={"baseline_only":0,"trial_only":queued_operations})
     return candidates,blocked,only_queue
 
 
@@ -333,7 +348,12 @@ def work_order_changes(db, delta, old_ids, original_tasks):
     return records
 
 
-def archived_new_candidates(db, changes, legacy_workers, original_tasks):
+def first_dispatch(db, tid):
+    return db.execute("""SELECT consumer,payload FROM main.deliveries WHERE kind='task.dispatch'
+        AND json_extract(payload,'$.task_id')=? ORDER BY rowid LIMIT 1""",(tid,)).fetchone()
+
+
+def archived_new_candidates(db, changes, legacy_workers, original_tasks, initial_assignments):
     candidates = {"closed":[],"cancelled":[],"pool":[]}
     for change in changes:
         after, reports = change["trial"], change["completed_reports"]
@@ -350,8 +370,7 @@ def archived_new_candidates(db, changes, legacy_workers, original_tasks):
         else:
             continue
         row = task(db,change["task_id"])
-        first = db.execute("""SELECT consumer,payload FROM main.deliveries WHERE kind='task.dispatch'
-            AND json_extract(payload,'$.task_id')=? ORDER BY rowid LIMIT 1""",(row["task_id"],)).fetchone()
+        first = first_dispatch(db,row["task_id"])
         if ((first and not first["consumer"].startswith("worker/"))
                 or (not first and category!="cancelled")):
             continue
@@ -366,24 +385,30 @@ def archived_new_candidates(db, changes, legacy_workers, original_tasks):
             continue
         original = dict(row,state="ready",revision=1,assignee_id=original_worker,
                         title=creation["title"],instructions=creation["instructions"])
-        if not portable_creation(original,operation) or not legacy_description_fits(original):
+        if not legacy_description_fits(original):
             continue
         accepted = [encode(original)]
         if first:
             accepted.append(encode(dict(original,revision=2,assignment_id=json.loads(first["payload"])["assignment_id"])))
-        if operation["response"] in accepted:
-            candidates[category].append({"task_id":row["task_id"],"assignee_id":original_worker,
-                                         "request_id":operation["key"]})
-            if original_tasks is not None:
-                original_tasks[row["task_id"]] = {field:original[field] for field in ("title","instructions")}
+        item = {"task_id":row["task_id"],"assignee_id":original_worker,"request_id":operation["key"]}
+        if not (portable_creation(original,operation) and operation["response"] in accepted):
+            proof = rollback_assignment.verify(db,row,operation,first) if portable_request_key(operation["key"]) else None
+            if not proof or proof["worker_id"]!=original_worker:
+                continue
+            initial_assignments[row["task_id"]] = proof
+            item["assignment_request_id"] = proof["assignment_request_id"]
+        candidates[category].append(item)
+        if original_tasks is not None:
+            original_tasks[row["task_id"]] = {field:original[field] for field in ("title","instructions")}
     return candidates
 
 
-def reconcile(snapshot, trial, *, original_tasks=None):
+def reconcile(snapshot, trial, *, original_tasks=None, initial_assignments=None):
     """Read the exact post-cutover difference. Original snapshots and trial databases stay intact."""
     saved = json.loads((trial/"baseline.json").read_text())
     source = trial/"router.db"
     result = {}
+    assignments = {} if initial_assignments is None else initial_assignments
     with tempfile.TemporaryDirectory(prefix="mowulink-reconcile-") as directory:
         reference = Path(directory)/"reference"
         regenerated = prepare(snapshot,reference,saved["source_id"])
@@ -415,10 +440,10 @@ def reconcile(snapshot, trial, *, original_tasks=None):
                 trial_only = row_delta(db,table,"main","baseline")
                 if baseline_only or trial_only:
                     delta[table] = {"baseline_only":baseline_only,"trial_only":trial_only}
-            candidates,blocked,only_queue = queued_candidates(db,delta,legacy_workers)
+            candidates,blocked,only_queue = queued_candidates(db,delta,legacy_workers,assignments)
             old_ids = {new:old for old,new in saved["queued_id_map"].items()}
             changes = work_order_changes(db,delta,old_ids,original_tasks)
-            archived = archived_new_candidates(db,changes,legacy_workers,original_tasks)
+            archived = archived_new_candidates(db,changes,legacy_workers,original_tasks,assignments)
             archived_ids = {item["task_id"] for group in archived.values() for item in group}
             result.update(changed_tables=delta,queue_candidates=candidates,closed_new_tasks=archived["closed"],
                           cancelled_new_tasks=archived["cancelled"],
@@ -436,13 +461,14 @@ def queue_execution_modes(candidates):
     return {item["task_id"]:"goal" for item in candidates}
 
 
-def legacy_creation_request(source_id, key, row):
-    legacy_key = legacy_history.rollback_request_id(source_id,key)
+def legacy_creation_request(source_id, key, row, *, assigned=False):
+    request_id = legacy_history.assigned_request_id if assigned else legacy_history.rollback_request_id
+    legacy_key = request_id(source_id,key)
     return {"message_id":legacy_key,"worker":row["assignee_id"],"TaskName":row["title"],
             "goal":row["instructions"],"execution_mode":"goal","queue_if_offline":True}
 
 
-def stage_queue_requests(db, legacy, facts):
+def stage_queue_requests(db, legacy, facts, initial_assignments):
     requests = []
     legacy_keys = set()
     with closing(readonly(legacy)) as old:
@@ -451,24 +477,34 @@ def stage_queue_requests(db, legacy, facts):
             row = db.execute("SELECT title,instructions,assignee_id FROM tasks WHERE task_id=?",(tid,)).fetchone()
             if row is None:
                 raise ValueError("trial order disappeared after reconciliation")
-            body = legacy_creation_request(facts["source_id"],key,row)
+            proof = initial_assignments.get(tid)
+            body = legacy_creation_request(facts["source_id"],key,row,assigned=proof is not None)
             legacy_key = body["message_id"]
             if legacy_key in legacy_keys or old.execute("SELECT 1 FROM task_info WHERE request_id=?",(legacy_key,)).fetchone():
                 raise ValueError("creation request already exists in the rollback queue")
             legacy_keys.add(legacy_key)
-            requests.append({"trial_task_id":tid,"trial_request_id":key,"request":body})
+            request = {"trial_task_id":tid,"trial_request_id":key,"request":body}
+            if proof:
+                request["initial_assignment"] = proof
+            requests.append(request)
     with closing(sqlite3.connect(legacy)) as old, old:
-        old.execute(legacy_history.QUEUE_REPLAY_SCHEMA)
-        old.executemany("INSERT INTO rewrite_queue_replay_keys VALUES (?,?,?,?)", [
-            (row["request"]["message_id"],row["trial_request_id"],facts["source_id"],
-             legacy_history.legacy_request_fingerprint(row["request"])) for row in requests])
+        for row in requests:
+            if proof := row.get("initial_assignment"):
+                legacy_history.remember_assigned_replay(old,facts["source_id"],row["trial_task_id"],row["request"],proof)
+            else:
+                old.execute(legacy_history.QUEUE_REPLAY_SCHEMA)
+                old.execute("INSERT INTO rewrite_queue_replay_keys VALUES (?,?,?,?)",
+                            (row["request"]["message_id"],row["trial_request_id"],facts["source_id"],
+                             legacy_history.legacy_request_fingerprint(row["request"])))
+        legacy_history.check_assigned_key_overlap(old)
     return {"source_id":facts["source_id"],"trial_sha256":facts["trial_sha256"],
             "legacy_sha256":facts["snapshot_sha256"],"requests":requests}
 
 
 def stage_queue_rollback(snapshot, trial, review, destination):
     """Prepare a legacy sandbox and reviewed requests. No live API is called."""
-    facts = reconcile(snapshot,trial)
+    initial_assignments = {}
+    facts = reconcile(snapshot,trial,initial_assignments=initial_assignments)
     if not facts["only_new_queued_tasks"]:
         raise ValueError("queue replay requires only new unoffered orders")
     source = trial/"router.db"
@@ -482,7 +518,7 @@ def stage_queue_rollback(snapshot, trial, review, destination):
     with output_directory(destination) as stage:
         restore_snapshot(snapshot,stage,manifest)
         with closing(readonly(source)) as db:
-            plan = stage_queue_requests(db,stage/"legacy.db",facts)
+            plan = stage_queue_requests(db,stage/"legacy.db",facts,initial_assignments)
         with closing(readonly(source)):
             if digest(source)!=facts["trial_sha256"]:
                 raise ValueError("trial database changed after reconciliation")

@@ -1,0 +1,40 @@
+{
+  "trial_sha256": "fb78f43d19cae42cd898a2beb71f36334ea3160a9c7e9c06e624852ee7dacac5",
+  "legacy_snapshot_sha256": "ff2bf736dab0ed35f263edaf51cb91ee8851ff248d7868e6165b43e89cb2b83a",
+  "queue": {
+    "trial_task_id": "28da65e4-30cd-4ae1-9d10-655d8f5e7f52",
+    "original_request_id": "f6267a38-7e7e-4648-af22-ae071f932eeb",
+    "assignment_request_id": "da327740-1708-4171-b548-5ea34d564a98",
+    "projected_request_id": "945c7f85-5599-5d54-ae07-76444d35ac7c",
+    "remigrated_task_id": "9893cd6a-876c-5096-8546-929f9c6b0101"
+  },
+  "reviewed": {
+    "trial_task_id": "64b2a39a-308b-467d-ae70-2e1a0cd3e01e",
+    "original_request_id": "710330bf-efc4-4d27-a221-a29b0e3af86f",
+    "assignment_request_id": "5b10b190-8e1a-492d-a963-7297e88e3c06",
+    "assignment_id": "e8dbd822-416a-4fcf-9955-b9a8ba1eacb3",
+    "native_fixture_id": "16fda7f9-7924-4fb2-9382-972c59c6e2d4",
+    "w04_key": "complete-e8dbd822-416a-4fcf-9955-b9a8ba1eacb3"
+  },
+  "legacy": {
+    "queue_replay": [
+      202,
+      200,
+      409
+    ],
+    "archived_replay": [
+      200,
+      409,
+      200
+    ],
+    "legacy_queued_task_id": "t-245a3e287a",
+    "legacy_archive_task_id": "t-19a8010e6d",
+    "archive_reason": "reviewed_on_rewrite",
+    "old_queue_head": "t-1bf95d4473"
+  },
+  "missing_assignment_receipt_rejected": true,
+  "unassigned_still_blocked": true,
+  "reentry_refuses_unreplayed_queue": true,
+  "reentry_refuses_overlapping_action_keys": true,
+  "boundary": "Actual legacy and rewrite HTTP and SQLite. Scripted Worker Agent and clock."
+}

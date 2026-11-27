@@ -207,20 +207,28 @@ def retain_working_cancellations(actions, edits, order, step, revision, content)
     return revision,content,attempts
 
 
-def histories(db, entries, deltas):
+def histories(db, entries, deltas, initial_assignments):
     used = dict.fromkeys(("pool_entries","cleanups","materials"),0)
     dispatches = set()
     actions = pool_actions(db)
     snoozes,resumes = actions["snooze"],actions["resume"]
     edits = edit_requests(db)
+    for tid,initial in initial_assignments.items():
+        for event in initial["events"]:
+            (method,_),body = json.loads(event["request"])
+            if method=="PATCH":
+                edits.pop((tid,body["expected_revision"]))
     for tid, entry in entries.items():
         order = task(db,tid)
         content = entry["original_content"]
         cancelled = entry["terminal_state"]=="cancelled"
         steps = []
-        revision,content,initial_edits = retain_edits(edits,order,entry["original_worker"],content,"ready",1)
-        if initial_edits:
-            entry["initial_edits"] = initial_edits
+        if initial := entry.get("initial_assignment"):
+            revision,content = initial["ready_revision"],initial["content"]
+        else:
+            revision,content,initial_edits = retain_edits(edits,order,entry["original_worker"],content,"ready",1)
+            if initial_edits:
+                entry["initial_edits"] = initial_edits
         revision += 1  # First offer, or cancellation of a task that was never offered.
         pools = {row["assignment_id"]:dict(row) for row in db.execute("SELECT * FROM pool_entries WHERE task_id=?",(tid,))}
         cleanups = {row["assignment_id"]:dict(row) for row in db.execute("SELECT * FROM cleanups WHERE task_id=?",(tid,))}
@@ -807,7 +815,9 @@ def verify_order(db, tid, entry, operations, windows):
     order = task(db,tid)
     history = entry["assignment_history"]
     adjacent_states, cleanup_receipts = [],[]
-    after = verify_edits(tid,entry.get("initial_edits",[]),operations,0)
+    initial = entry.get("initial_assignment")
+    after = initial["events"][-1]["seq"] if initial else 0
+    after = verify_edits(tid,entry.get("initial_edits",[]),operations,after)
     cancelled = entry["terminal_state"]=="cancelled"
     if not history:
         verify_cancelled(tid,entry,order,{},operations,after,adjacent_states)
@@ -931,13 +941,22 @@ def verify_order(db, tid, entry, operations, windows):
         cleanup.update(report_key=receipt["key"],receipt=receipt["reply"])
 
 
-def check_operations(db,entries,workers,frames,uploads,expected_count,queue_candidates,reviewed_questions,inquiry_sources):
+def check_operations(db,entries,workers,frames,uploads,expected_count,queue_candidates,reviewed_questions,
+                     inquiry_sources,initial_assignments):
     operations, applicable, acked, sessions = {},0,{},{}
     asks,answers = {},{}
     samples,continued = {},{}
     creation_keys = {item["request_id"] for item in queue_candidates}
     creation_keys.update(entry["creation_key"] for entry in entries.values() if "creation_key" in entry)
+    preparation = {event["key"]:event for proof in initial_assignments.values()
+                   for event in [proof["original_creation"],*proof["events"]]}
     for row in db.execute("SELECT rowid AS seq,* FROM operations ORDER BY rowid"):
+        if row["actor"]=="hermes" and row["key"] in preparation:
+            if dict(row)!=preparation.pop(row["key"]):
+                raise ValueError("initial assignment receipt changed during rollback")
+            creation_keys.discard(row["key"])
+            applicable += 1
+            continue
         (method,path),body = json.loads(row["request"])
         parts = path.split("/")
         actor,reply = row["actor"],json.loads(row["response"])
@@ -1008,8 +1027,12 @@ def check_operations(db,entries,workers,frames,uploads,expected_count,queue_cand
             raise ValueError("trial has an operation outside the reviewed orders")
     windows = {}
     for tid,entry in entries.items():
+        proof = entry.get("initial_assignment")
+        history = entry["assignment_history"]
+        if proof and history and acked.get(history[0]["delivery_id"],0)<=proof["events"][-1]["seq"]:
+            raise ValueError("first dispatch acknowledgement predates its assignment")
         verify_order(db,tid,entry,operations,windows)
     rollback_questions.verify_receipts(reviewed_questions,asks,answers,windows,acked)
     rollback_inquiries.verify_rounds(entries,inquiry_sources,samples,continued,windows,acked)
-    if creation_keys or applicable!=expected_count or acked.keys()!=frames.keys() or operations:
+    if creation_keys or preparation or applicable!=expected_count or acked.keys()!=frames.keys() or operations:
         raise ValueError("trial operation ledger is incomplete or has unrelated writes")

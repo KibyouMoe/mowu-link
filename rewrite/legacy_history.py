@@ -41,11 +41,23 @@ QUEUE_REPLAY_SCHEMA = """CREATE TABLE IF NOT EXISTS rewrite_queue_replay_keys (
     trial_source_id TEXT NOT NULL,
     fingerprint TEXT NOT NULL
 )"""
+ASSIGNED_REPLAY_SCHEMA = """CREATE TABLE IF NOT EXISTS rewrite_assigned_replay_keys (
+    legacy_request_id TEXT PRIMARY KEY, request_key TEXT NOT NULL UNIQUE,
+    trial_source_id TEXT NOT NULL, trial_task_id TEXT NOT NULL, fingerprint TEXT NOT NULL,
+    request_sha256 TEXT NOT NULL, retired_keys TEXT NOT NULL, archived INTEGER NOT NULL
+)"""
+ASSIGNED_HISTORY_SCHEMA = """CREATE TABLE IF NOT EXISTS history_assigned_creations (
+    request_key TEXT PRIMARY KEY, request_sha256 TEXT NOT NULL, response TEXT NOT NULL
+)"""
 
 
 def rollback_request_id(source_id, key):
     # Preserve the request UUID mapping used by existing queue replay plans.
     return key if valid_guid(key) else str(uuid5(UUID(source_id),"queue-rollback/"+key))
+
+
+def assigned_request_id(source_id, key):
+    return str(uuid5(UUID(source_id),"assigned-rollback/"+key))
 
 
 def rollback_archive_id(source_id, trial_task_id):
@@ -60,6 +72,7 @@ def legacy_request_fingerprint(request):
 
 
 def populate(db, old, source, sha, mapping):
+    check_assigned_key_overlap(old)
     db.execute("INSERT INTO history_sources VALUES (?,?)",(source,sha))
     for row in old.execute("SELECT * FROM task_info ORDER BY rowid"):
         tid = row["task_id"]
@@ -76,13 +89,14 @@ def populate(db, old, source, sha, mapping):
                     encode(archive) if archive is not None else None,encode(report) if report is not None else None))
     preserve_rollback_keys(db,old,source,mapping)
     preserve_queue_keys(db,old,source,mapping)
+    preserve_assigned_keys(db,old,source,mapping)
 
 
 def has_rollback_table(old, name):
     table = old.execute("SELECT type FROM sqlite_master WHERE name=?",(name,)).fetchone()
     if table is None:
         return False
-    if table["type"]!="table":
+    if table[0]!="table":
         raise ValueError("invalid rewrite rollback request-key table")
     return True
 
@@ -127,6 +141,90 @@ def preserve_queue_keys(db, old, source, mapping):
             if inserted!=1:
                 raise ValueError("legacy queued order is missing its migrated creation receipt")
         db.execute("INSERT INTO history_request_keys VALUES ('hermes',?,?,?)",(key,source,tid))
+
+
+def remember_assigned_replay(db, source, trial_id, request, proof, *, archived=False):
+    key = proof["original_creation"]["key"]
+    legacy_key = request["message_id"]
+    retired = [event["key"] for event in proof["events"]]
+    if legacy_key!=assigned_request_id(source,key) or len(set([key,legacy_key,*retired]))!=len(retired)+2:
+        raise ValueError("assigned rollback request keys overlap")
+    db.execute(ASSIGNED_REPLAY_SCHEMA)
+    db.execute("INSERT INTO rewrite_assigned_replay_keys VALUES (?,?,?,?,?,?,?,?)",
+               (legacy_key,key,source,trial_id,legacy_request_fingerprint(request),
+                proof["original_request_sha256"],encode(retired),int(archived)))
+
+
+def check_assigned_key_overlap(db):
+    if not has_rollback_table(db,"rewrite_assigned_replay_keys"):
+        return
+    rows = list(db.execute("SELECT legacy_request_id,request_key,retired_keys FROM rewrite_assigned_replay_keys"))
+    projections = {row[0] for row in rows}
+    aliases = set()
+    for _,key,raw in rows:
+        retired = json.loads(raw)
+        if not isinstance(retired,list) or not retired or any(not isinstance(alias,str) or not alias.strip() for alias in retired):
+            raise ValueError("invalid assigned rollback action keys")
+        keys = [key,*retired]
+        if len(set(keys))!=len(keys) or aliases.intersection(keys) or projections.intersection(keys):
+            raise ValueError("assigned rollback request keys overlap")
+        aliases.update(keys)
+    keys_json = encode(sorted(aliases))
+    if db.execute("SELECT 1 FROM task_info WHERE request_id IN (SELECT value FROM json_each(?))",(keys_json,)).fetchone():
+        raise ValueError("assigned rollback key overlaps a legacy request")
+    archive_keys = "rewrite_archive_request_keys"
+    if has_rollback_table(db,archive_keys) and db.execute(
+            "SELECT 1 FROM rewrite_archive_request_keys WHERE request_key IN (SELECT value FROM json_each(?))",
+            (keys_json,)).fetchone():
+        raise ValueError("assigned rollback key overlaps an archived request")
+    if has_rollback_table(db,"rewrite_queue_replay_keys") and db.execute("""
+            SELECT 1 FROM rewrite_queue_replay_keys
+            WHERE request_key IN (SELECT value FROM json_each(?))
+            OR legacy_request_id IN (SELECT value FROM json_each(?))""",
+            (keys_json,encode(sorted(aliases|projections)))).fetchone():
+        raise ValueError("assigned rollback key overlaps a queued request")
+
+
+def preserve_assigned_keys(db, old, source, mapping):
+    if not has_rollback_table(old,"rewrite_assigned_replay_keys"):
+        return
+    for row in old.execute("""SELECT r.*,t.task_id,t.actor,t.fingerprint AS recorded_fingerprint,f.data AS archive
+        FROM rewrite_assigned_replay_keys r LEFT JOIN task_info t ON t.request_id=r.legacy_request_id
+        LEFT JOIN task_facts f ON f.task_id=t.task_id AND f.kind='archive' AND f.event_key='archive'"""):
+        key, namespace, legacy_key = row["request_key"],row["trial_source_id"],row["legacy_request_id"]
+        tid,trial_id = row["task_id"],row["trial_task_id"]
+        retired = json.loads(row["retired_keys"])
+        if (not isinstance(key,str) or not (valid_guid(key) or re.fullmatch(r"hermes-[0-9a-f]{64}",key))
+                or not valid_guid(namespace) or not valid_guid(trial_id) or assigned_request_id(namespace,key)!=legacy_key
+                or row["archived"] not in (0,1)
+                or not isinstance(row["fingerprint"],str) or not re.fullmatch(r"[0-9a-f]{64}",row["fingerprint"])
+                or not isinstance(row["request_sha256"],str) or not re.fullmatch(r"[0-9a-f]{64}",row["request_sha256"])
+                or not tid or row["actor"]!="hermes" or row["recorded_fingerprint"]!=row["fingerprint"]):
+            raise ValueError("assigned rollback request receipt is missing or mismatched")
+        if row["archived"]:
+            archive = json.loads(row["archive"] or "null")
+            if (tid in mapping or not isinstance(archive,dict) or archive.get("recovery_reference")!=trial_id
+                    or archive.get("reason") not in (REVIEWED_ARCHIVE,CANCELLED_ARCHIVE,POOL_CLOSED_ARCHIVE,FAILED_ARCHIVE)
+                    or rollback_archive_id(namespace,trial_id)!=tid):
+                raise ValueError("assigned rollback request does not match its legacy archive")
+        if tid in mapping:
+            receipt = db.execute("SELECT response FROM operations WHERE actor='hermes' AND key=?",(legacy_key,)).fetchone()
+            if not receipt:
+                raise ValueError("assigned rollback is missing the queue replay receipt")
+            db.execute(ASSIGNED_HISTORY_SCHEMA)
+            db.execute("INSERT INTO history_assigned_creations VALUES (?,?,?)",(key,row["request_sha256"],receipt[0]))
+        db.executemany("INSERT INTO history_request_keys VALUES ('hermes',?,?,?)",
+                       [(alias,source,tid) for alias in [key,*retired]])
+
+
+def replay_assigned_creation(db, key, request):
+    if not has_rollback_table(db,"history_assigned_creations"):
+        return None
+    row = db.execute("SELECT * FROM history_assigned_creations WHERE request_key=?",(key,)).fetchone()
+    if row:
+        require(row["request_sha256"]==hashlib.sha256(request.encode()).hexdigest(),409,"idempotency_conflict")
+        return json.loads(row["response"])
+    return None
 
 
 def query(db, source, filters):

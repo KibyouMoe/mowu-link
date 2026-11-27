@@ -148,7 +148,9 @@ def archive_in_legacy(path, entries, source_id, at):
                               VALUES (?,?,?,?,?,?,?,?,?)""",
                            (legacy,title,"完整记录见私有回退档案。",entry["original_worker"],"hermes",
                             at,"{}",request_id,fingerprint))
-                if request_id!=entry["creation_key"]:
+                if proof := entry.get("initial_assignment"):
+                    legacy_history.remember_assigned_replay(db,source_id,tid,request,proof,archived=True)
+                elif request_id!=entry["creation_key"]:
                     db.execute(legacy_history.ROLLBACK_KEYS_SCHEMA)
                     db.execute("INSERT INTO rewrite_archive_request_keys VALUES (?,?,?)",
                                (legacy,entry["creation_key"],source_id))
@@ -171,8 +173,12 @@ def archive_in_legacy(path, entries, source_id, at):
 def stage_reviewed_rollback(snapshot,trial,review,destination):
     """Prepare an offline fallback without re-enqueueing terminal work."""
     original_tasks = {}
-    facts = reconcile(snapshot,trial,original_tasks=original_tasks)
+    initial_assignments = {}
+    facts = reconcile(snapshot,trial,original_tasks=original_tasks,initial_assignments=initial_assignments)
     entries = reviewed_orders(facts,original_tasks)
+    for tid,entry in entries.items():
+        if tid in initial_assignments:
+            entry["initial_assignment"] = initial_assignments[tid]
     decision = {"trial_sha256":facts["trial_sha256"],
                 "closed_assignments":{tid:row["assignment_id"] for tid,row in entries.items()
                                       if is_reviewed_completion(row)}}
@@ -212,21 +218,23 @@ def stage_reviewed_rollback(snapshot,trial,review,destination):
                 if not result or not result["summary"].strip():
                     raise ValueError("missing reviewed report")
                 entry["summary"] = result["summary"]
-            rollback_lifecycle.histories(db,entries,facts["changed_tables"])
+            rollback_lifecycle.histories(db,entries,facts["changed_tables"],initial_assignments)
             questions = rollback_questions.retain(db,entries,facts["changed_tables"].get("questions",{}).get("trial_only",0))
             workers,frames,inquiries = rollback_lifecycle.check_transport(db,entries,questions)
             uploads,files = copy_reviewed_files(db,entries,facts["changed_tables"],private/"files")
             rollback_lifecycle.check_operations(db,entries,workers,frames,uploads,
                                                 facts["changed_tables"].get("operations",{}).get("trial_only",0),
-                                                facts["queue_candidates"],questions,inquiries)
+                                                facts["queue_candidates"],questions,inquiries,initial_assignments)
             for tid,entry in entries.items():
                 if "creation_key" in entry:
                     original = dict(entry["original_content"],assignee_id=entry["original_worker"])
                     entry["legacy_creation_request"] = legacy_creation_request(facts["source_id"],
-                                                                               entry["creation_key"],original)
+                        entry["creation_key"],original,assigned="initial_assignment" in entry)
             at = time.time()
             archive_in_legacy(stage/"legacy.db",entries,facts["source_id"],at)
-            plan = stage_queue_requests(db,stage/"legacy.db",facts) if facts["queue_candidates"] else None
+            plan = stage_queue_requests(db,stage/"legacy.db",facts,initial_assignments)
+            if not plan["requests"]:
+                plan = None
         restored_sha = digest(stage/"legacy.db")
         queue_manifest_sha = None
         if plan:
