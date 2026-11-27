@@ -21,7 +21,7 @@ from .codex_thread_preparation import SCHEMA as CODEX_PREPARATION_SCHEMA
 from .managed_sessions import FAMILY_SCHEMA, derive_callback, read_enrollment, token_digest, write_enrollment
 from .orders import Orders
 from .release_check import config
-from .state_bundle import audit_handoff, capture, filename, restore, rollback, stage_native_handoff, validate_set, verify
+from .state_bundle import audit_handoff, audit_trigger, capture, filename, restore, rollback, stage_native_handoff, validate_set, verify
 from .storage import Database, Fault, StateWriterBusy, encode, guid, state_writer
 from .test_feishu_inbound import PNG
 from .test_feishu_output import PlatformFixture
@@ -77,6 +77,106 @@ class Bundle(unittest.TestCase):
                 views = Views(paths["feishu:oguri"],client,self.platform,"chat","工位",clock=self.clock)
                 yield manager,worker,source,Client(url,"mail"),platform,views
 
+    def test_trigger_audit_distinguishes_outbox_from_lost_receipt_and_reads_recovered_t04(self):
+        attachment = self.root/"fixture.bin"
+        content = bytes(range(256))*1300
+        attachment.write_bytes(content)
+        with self.stack(self.sources) as (manager,_,source,wire,_,_):
+            event = source.record("Event","Unacknowledged source event",[attachment])
+            info = source.record("Info","Still only in the source outbox")
+            request = wire.request
+
+            def lose_t04(method,path,*args,**kwargs):
+                result = request(method,path,*args,**kwargs)
+                if method=="POST" and path=="messages":
+                    raise ConnectionError("lost T04 after commit")
+                return result
+
+            wire.request = lose_t04
+            with self.assertRaisesRegex(ConnectionError,"lost T04 after commit"):
+                source.send(wire,event)
+            archived, = manager.messages(message_id=event)["items"]
+            saved_time = archived["received_at"]
+            self.assertEqual(len(manager.router.frames(0)),1)
+        first = capture(self.sources,self.revision,self.snapshot)
+        waiting = audit_trigger(self.snapshot,first["manifest_sha256"])
+        self.assertFalse(waiting["ready"])
+        self.assertEqual({row["message_id"]:row["code"] for row in waiting["issues"]},
+                         {event:"awaiting_local_receipt",info:"awaiting_router_message"})
+        self.assertEqual(waiting["sources"],[{"component":"trigger:mail","instance_id":source.instance_id,
+                                             "archived":2,"settled":0}])
+
+        recovered = restore(self.snapshot,first["manifest_sha256"],self.dest)
+        with self.stack({key:Path(path) for key,path in recovered.items()}) as (manager,_,source,wire,_,_):
+            self.assertEqual(source.send(wire,event)["received_at"],saved_time)
+            source.send(wire,info)
+            same, = manager.messages(message_id=event)["items"]
+            self.assertEqual(same,archived)
+            file, = same["attachment_ids"]
+            self.assertEqual(manager.router.request("GET","attachments/"+file)["bytes"],content)
+            self.assertEqual(len(manager.router.frames(0)),1)
+        final = self.root/"settled"
+        second = capture(recovered,self.revision,final)
+        clean = audit_trigger(final,second["manifest_sha256"])
+        self.assertTrue(clean["ready"])
+        self.assertEqual(clean["issues"],[])
+        self.assertEqual(clean["sources"][0]["settled"],2)
+        for folder,snapshot,expected_exit,expected in ((self.snapshot,first,1,waiting),(final,second,0,clean)):
+            cli = [sys.executable,"-B","-m","rewrite.state_bundle","audit-trigger","--snapshot",str(folder),
+                   "--manifest-sha256",snapshot["manifest_sha256"]]
+            result = subprocess.run(cli,capture_output=True,text=True,timeout=15)
+            self.assertEqual(result.returncode,expected_exit,result.stderr)
+            self.assertEqual(json.loads(result.stdout),expected)
+            self.assertEqual(verify(folder,snapshot["manifest_sha256"])["snapshot_id"],expected["snapshot_id"])
+        if evidence := os.environ.get("MOWULINK_TRIGGER_AUDIT_EVIDENCE"):
+            Path(evidence).write_text(json.dumps({"before":waiting,"after":clean,"original_router_received_at":saved_time,
+                "attachment_id":file,"attachment_sha256":hashlib.sha256(content).hexdigest(),
+                "attachment_bytes":len(content),"router_notifications":1,
+                "boundary":"Real isolated Router HTTP and SQLite snapshots. Synthetic Trigger inputs."},
+                ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
+
+    def test_trigger_audit_rejects_individually_valid_but_inconsistent_ledgers(self):
+        attachment = self.root/"fixture.bin"
+        attachment.write_bytes(b"verified payload")
+        with self.stack(self.sources) as (_,_,source,wire,_,_):
+            broken_file = source.record("Info","Archive file",[attachment])
+            no_router = source.record("Info","Router is behind")
+            no_source = source.record("Info","Trigger is behind")
+            false_receipt = source.record("Info","T04 timestamp differs")
+            false_body = source.record("Info","Source text differs")
+            no_grant = source.record("Info","Lost attachment permission",[attachment])
+            for mid in (broken_file,no_router,no_source,false_receipt,false_body,no_grant):
+                source.send(wire,mid)
+
+        with closing(sqlite3.connect(self.sources["router:main"])) as router, router:
+            router.execute("UPDATE chunks SET bytes=zeroblob(length(bytes)) WHERE upload_id=(SELECT u.upload_id FROM uploads u "
+                           "JOIN messages m ON u.attachment_id=json_extract(m.payload,'$.attachment_ids[0]') WHERE m.message_id=?)",
+                           (broken_file,))
+            router.execute("DELETE FROM messages WHERE message_id=?",(no_router,))
+            router.execute("UPDATE messages SET payload=json_set(payload,'$.text','different') WHERE message_id=?",(false_body,))
+            router.execute("""DELETE FROM attachment_grants WHERE attachment_id=(SELECT json_extract(payload,'$.attachment_ids[0]')
+                              FROM messages WHERE message_id=?) AND actor='hermes'""",(no_grant,))
+        with source.db.transaction() as db:
+            db.execute("DELETE FROM archive WHERE id=?",(no_source,))
+            db.execute("UPDATE archive SET receipt=json_set(receipt,'$.received_at','2025-01-01T00:00:00+00:00') WHERE id=?",
+                       (false_receipt,))
+        seal = capture(self.sources,self.revision,self.snapshot)["manifest_sha256"]
+        audit = audit_trigger(self.snapshot,seal)
+        self.assertFalse(audit["ready"])
+        self.assertEqual({row["message_id"]:row["code"] for row in audit["issues"]},
+                         {broken_file:"attachment_mismatch", no_router:"receipt_without_router_message",
+                          no_source:"router_message_without_source_archive", false_receipt:"router_receipt_mismatch",
+                          false_body:"router_payload_mismatch", no_grant:"attachment_mismatch"})
+
+        other = self.root/"other-trigger.sqlite3"
+        Trigger(other,"another-source",self.clock)
+        inputs = {label:path for label,path in self.sources.items() if label!="trigger:mail"}
+        unlisted = self.root/"source-omitted"
+        seal = capture({**inputs,"trigger:other":other},self.revision,unlisted)["manifest_sha256"]
+        audit = audit_trigger(unlisted,seal)
+        self.assertFalse(audit["ready"])
+        self.assertEqual({row["message_id"]:row["code"] for row in audit["issues"]},
+                         {mid:"router_source_missing" for mid in (broken_file,no_source,false_receipt,false_body,no_grant)})
 
     def test_prepare_worker_chat_archive_after_both_receipts_recover(self):
         from .feishu_history import prepare as prepare_history

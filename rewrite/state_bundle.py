@@ -10,7 +10,7 @@ import shutil
 import sqlite3
 from tempfile import TemporaryDirectory
 
-from . import delivery, dsh_workspace_audit
+from . import delivery, dsh_workspace_audit, trigger_audit
 from . import state_bundle_managed as managed
 from .cutover import digest, output_directory, readonly
 from .storage import encode, guid, state_writer
@@ -375,6 +375,16 @@ def worker_delivery_audit(db,router_path,worker_id,confirmed):
     return {"router_confirmed_cursor":confirmed,"local_cursor":cursor,"matched_frames":matched},issues
 
 
+def audit_trigger(snapshot,expected):
+    manifest = verify(snapshot,expected)
+    router, = (label for label in manifest["files"] if component(label)[0]=="router")
+    triggers = {label:snapshot/filename(label) for label in manifest["files"] if component(label)[0]=="trigger"}
+    result = trigger_audit.reconcile(snapshot/filename(router),triggers)
+    if verify(snapshot,expected)!=manifest:
+        raise ValueError("snapshot changed during Trigger audit")
+    return {"snapshot_id":manifest["snapshot_id"],"source_revision":manifest["source_revision"],**result}
+
+
 def audit_handoff(snapshot,expected,*,dsh_runtimes=None):
     manifest = verify(snapshot,expected)
     labels = manifest["files"]
@@ -576,7 +586,7 @@ def main():
     backup.add_argument("--managed-registries",type=Path,help="Worker ID to private native registry directory, JSON")
     backup.add_argument("--revision",required=True)
     backup.add_argument("--destination",type=Path,required=True)
-    for op in ("verify","restore","rollback","audit-handoff","stage-native-handoff"):
+    for op in ("verify","restore","rollback","audit-trigger","audit-handoff","stage-native-handoff"):
         p = ops.add_parser(op)
         p.add_argument("--snapshot",type=Path,required=True)
         p.add_argument("--manifest-sha256",required=True)
@@ -606,6 +616,8 @@ def main():
     elif args.op=="verify":
         manifest = verify(args.snapshot,args.manifest_sha256)
         result = {"snapshot_id":manifest["snapshot_id"],"components":len(manifest["files"])}
+    elif args.op=="audit-trigger":
+        result = audit_trigger(args.snapshot,args.manifest_sha256)
     elif args.op=="audit-handoff":
         result = audit_handoff(args.snapshot,args.manifest_sha256,dsh_runtimes=optional_map("dsh_runtimes"))
     elif args.op=="stage-native-handoff":
@@ -619,6 +631,8 @@ def main():
     else:
         result = restore(args.snapshot,args.manifest_sha256,args.destination,managed_keys=optional_map("managed_keys"))
     print(encode(result))
+    if args.op=="audit-trigger" and not result["ready"]:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

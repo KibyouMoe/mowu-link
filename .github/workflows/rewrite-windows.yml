@@ -82,6 +82,8 @@ jobs:
                 'rewrite.test_service.Service.test_windows_public_config_rejected'
                 'rewrite.test_host_ops.HostOpsState'
                 'rewrite.test_host_ops_windows.WindowsMaintenance'
+                'rewrite.test_state_bundle.Bundle.test_trigger_audit_distinguishes_outbox_from_lost_receipt_and_reads_recovered_t04'
+                'rewrite.test_state_bundle.Bundle.test_trigger_audit_rejects_individually_valid_but_inconsistent_ledgers'
                 'rewrite.test_state_bundle.Bundle.test_prepare_worker_chat_archive_after_both_receipts_recover'
                 'rewrite.test_state_bundle.Bundle.test_offline_handoff_and_rollback_reserve_the_codex_workspace_writer'
                 'rewrite.test_state_bundle.Bundle.test_workspace_audit_checks_private_file_and_original_journal_identity'

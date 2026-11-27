@@ -480,6 +480,24 @@ python3 -m rewrite.state_bundle rollback --snapshot ./snapshot --manifest-sha256
 
 版本级复跑为 `python3 -m rewrite.release_check --repository . --previous b31cee5da7c8dc74a76accdd78d8a6c5cb49484c --new 5de36ad66df26dc34fe3832ed14e77b1d9f19551`。两个已提交版本在各自新目录启动真实 Router，以专用临时 TLS 和身份验同一张待派单。旧包→新包→旧包后只查到原单一张，新试用库字节未变。该演练在 macOS 跑过；Windows 与跨机宿主尚待验收。
 
+### 新版 Trigger 对账
+
+在同一停写点采集 Router 与所有在用 Trigger 实例的数据库，再校验独立记录的快照摘要。
+
+```sh
+python3 -B -m rewrite.state_bundle audit-trigger --snapshot "$SNAPSHOT" --manifest-sha256 "$MANIFEST_SHA256"
+```
+
+按实例和原消息号比对双方记录。工具核对来源身份、消息正文、T04 接收时间、附件顺序、验收方读取授权，以及两侧附件实际字节的摘要。输出只有实例号、原消息号、分类和计数。命令读取快照，退出码 0 表示本批已纳入的 Trigger 消息已对账。退出码 1 时按报告处理，完成后在下一个停写点重新采集。
+
+| 分类 | 核实方式 |
+| --- | --- |
+| `awaiting_router_message` | 只有 Trigger 留档，待 Router 恢复后沿用原消息号发送。 |
+| `awaiting_local_receipt` | Router 已接原文及附件。恢复在隔离副本按原号取回原 T04，核无重复投递。 |
+| 其余差异 | 按原消息号核对两端停写点、实例清单、正文、附件和回执。选择同一批备份后重新审计。 |
+
+来源库尚未纳入且 Router 从未收到该实例时，离线数据库无从发现遗漏。执行人须从已确认的来源部署清单核齐实例。原采集端的位置、Hermes 的原生收件和外部平台回执各自验收。旧版历史处置依[切换清单](acceptance-matrix.md#正式切换清理与旧数据处置)。
+
 ### 新版 Router 与 Worker 分步更新
 
 安装含首次投递核验的版本时，先更新 Router，再更新 Worker。Worker 从自己的投递状态查询确认 Router 已启用该核验，然后才登记。若次序装反，工位状态显示 `router_assignment_status_required`。未登记的新进程不会接管 Router 的队首。Router 升级后，上一版 Worker 可继续处理原队首。切换到新版 Worker 时，沿用对应的原工位状态库及原宿主账本。

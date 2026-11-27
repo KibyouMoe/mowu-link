@@ -313,6 +313,8 @@ macOS 有本机 DSH SDK 时，单独运行同组的 `HermesGateway.test_rewrite_
 
 两个采集器可在 Router 离线时工作。另用 `python3 -m rewrite.service trigger --db <来源库> --name email send --connection <Router测试连接>` 发送已留档的信息；游戏使用同一命令并将名称换为 mc_chat。拿到 Router 业务回执后移出待发送列表。这里只提供显式启动入口。
 
+切换前用 `rewrite.state_bundle audit-trigger` 核对同一停写快照内的新版 Trigger 留档、Router 收件、T04 和附件。未得两侧确认时返回待对账的原消息号。复跑方式和处置见[新版 Trigger 对账](router-rehearsal.md#新版-trigger-对账)。
+
 迁移旧采集器时，用 `rewrite.feeds` 的 `--import-legacy-cursor` 把经核对的游标导入新来源库。这一步离线完成。邮件核对原账号与文件夹，首次采集再验证 UIDVALIDITY；游戏核对同一桥接地址与连续运行的实例。遇到旧位置无法确认时保留待核。见[旧采集来源交接](router-rehearsal.md#旧采集来源交接)。
 
 已绑定的适配器在观察到原生题窗后，将原会话、回合、原生题号、题面和选项提交至 `POST /v1/worker/native-question`。平台通过已配置的应用、训练员、私聊和原卡 ID 核对真人回调后将答案持久排队。只有原宿主返回与原题、原回合及答案一致的关闭凭据，Worker 才发布已回答事件。DSH 计时题在超时后可从原卡续答，支持选择、自定义、跳过、批量题和多选。授权和计划审批使用各自的原生入口。溪流的工单问题和答复走 W05/A09，飞书上可读。
