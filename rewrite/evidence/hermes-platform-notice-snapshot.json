@@ -1,0 +1,89 @@
+{
+  "candidate_revision": "e75d48afb028335452c886756b943c79612bebd1",
+  "previous_revision": "35ba22f66e3017a1756b8645f3b88d091b3ff6f8",
+  "new_audit_case": {
+    "name": "test_hermes_snapshot_separately_reconciles_manager_platform_receipts",
+    "failed_before_change": "needs_review was false after the platform fixture accepted the send and dropped its response.",
+    "confirmed_native_while_feishu_missing": 1,
+    "restored_with_window_same_platform_id": true,
+    "expired_not_resent": true,
+    "rejects_mismatched_text_and_duplicate_ids": true
+  },
+  "macos": {
+    "targeted_passed": 49,
+    "command": "python3 -B -m unittest -v rewrite.test_state_bundle rewrite.test_manager_notices rewrite.test_feishu_output rewrite.test_question_cards",
+    "package_rollback": {
+      "network": "isolated HTTPS loopback",
+      "new_revision": "e75d48afb028335452c886756b943c79612bebd1",
+      "previous_revision": "35ba22f66e3017a1756b8645f3b88d091b3ff6f8",
+      "package_sha256": [
+        "85da9a10b997e2fb770f738f6829f08c03596651fd4a304a234e92d1661057de",
+        "27fe2d3608eeedd60fe5f5025349733c3afd61d1eb06151ed5e8ce773017b080"
+      ],
+      "hermes_native": {
+        "confirmed": 1,
+        "intent_unconfirmed": 0,
+        "manager_commit_pending": 0,
+        "not_attempted": 0,
+        "unverified": 0
+      },
+      "hermes_feishu": {
+        "awaiting_receipt": 0,
+        "confirmed": 1,
+        "issues": [],
+        "queued": 0,
+        "receipt_unknown": 0,
+        "unverified": 0
+      },
+      "manager_platform_attempts": 2,
+      "restored_notice": "om_1",
+      "extra_restored_sends": 0,
+      "extra_restored_manager_notifications": 0,
+      "scope": "Installed rewrite releases, loopback TLS and SQLite. Agent, native sessions and Feishu are fixtures.",
+      "rejected": true,
+      "old_manifest": "c1a150a506ea3523ed6b34e88475c5dd2c63064b633dc3776838a768a3082ca3",
+      "trial_manifest": "9efea16aaf766a71332390341919ab77f01898fb5e094b5efdd5515f01a41973"
+    }
+  },
+  "linux_arm64_install": {
+    "passed": 207,
+    "skipped": 140,
+    "archival_excluded": 58,
+    "verified_release_files": 404,
+    "sha256": "27fe2d3608eeedd60fe5f5025349733c3afd61d1eb06151ed5e8ce773017b080"
+  },
+  "windows": {
+    "run": 45988296428,
+    "job": 140469396630,
+    "installation_tests_passed": 48,
+    "dsh_job": 140469396121,
+    "dsh_tests_passed": 15,
+    "default_docker_engine": "windows",
+    "package_rollback": {
+      "package_sha256": [
+        "564beda76fcd6a8f25a223e121d91e0aa270175a1fc3940162676fbebc47ed1c",
+        "c08c5f2845ba54fef7a3ce5b577c14adc87e48767084b347a753ed1aba0330ff"
+      ],
+      "hermes_native": {
+        "confirmed": 1,
+        "intent_unconfirmed": 0,
+        "manager_commit_pending": 0,
+        "not_attempted": 0,
+        "unverified": 0
+      },
+      "hermes_platform": {
+        "awaiting_receipt": 0,
+        "confirmed": 1,
+        "issues": [],
+        "queued": 0,
+        "receipt_unknown": 0,
+        "unverified": 0
+      },
+      "manager_platform_attempts": 2,
+      "restored_notice": "om_1",
+      "extra_restored_sends": 0,
+      "extra_restored_manager_notifications": 0
+    }
+  },
+  "boundary": "Snapshot, SQLite, installation and TLS performed locally or on isolated CI runners. Hermes native session, model and Feishu provider in this receipt rehearsal are fixtures. No real cloud receipt or production cutover."
+}

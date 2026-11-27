@@ -6,6 +6,12 @@
 
 ## 检查点与证据
 
+补齐 Hermes 管理飞书通知的停写对账。修复前，原生会话确认收件后，平台已接收却丢回执的通知未出现在审计里。新版按原队列核通知内容，分别统计原生收件、待发送、已尝试缺回执、过期未知和已确认的平台通知。重复消息号、内容错配及缺原队列的记录要求复核。窗口内恢复沿原请求号，不新增 Hermes 原生收件。窗口外保留待核。
+
+用 `35ba22f66e3017a1756b8645f3b88d091b3ff6f8` 和 `e75d48afb028335452c886756b943c79612bebd1` 两版安装包，在 macOS 与 Windows 均读回同一条管理飞书通知。候选版两次同号尝试只留下一个平台消息号，退回前一版的新增平台发送及原生通知各为零。macOS 相关回归通过 49 项，Linux arm64 安装版 207 项，另有 140 项按环境跳过、58 项旧版历史用例退出验收。Windows 安装回归 48 项，DSH 原生组 15 项。Windows 默认引擎为 Windows，本轮没有取得 Linux 容器的 Windows 真机验收。回退所用宿主和飞书为夹具。[实测记录](evidence/hermes-platform-notice-snapshot.json) · [Windows 流水线](https://github.com/KibyouMoe/mowu-link/actions/runs/45988296428)
+
+复跑 `python3 -B -m unittest -v rewrite.test_state_bundle rewrite.test_manager_notices rewrite.test_feishu_output rewrite.test_question_cards`。两版安装包用 `python3 -B -m rewrite.release_check --repository . --component state-bundle --previous 35ba22f66e3017a1756b8645f3b88d091b3ff6f8 --new e75d48afb028335452c886756b943c79612bebd1`。执行时从当前实现分支启动验收脚本。
+
 修复丢失飞书新消息回执后队首长期挡住出向的问题。发卡或发图没有可核对的消息号且超过程序的 55 分钟重试窗口后，保留冻结请求和原始尝试。同一回合或同一收件人问题的后续更新随原条目待核，独立消息继续投递。待核计数与已送达分开，停写快照审计仍会阻止换绑。飞书官方文档给同一 `uuid` 一小时的新建去重窗口。[飞书新建消息接口](https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/create?lang=en-US)
 
 官方飞书 SDK 1.7.5 对回环服务实测。首个新建请求断开且无回执，时钟推进一小时后，原号零重发、同回合两条待核、独立消息确认一条。macOS 相关回归通过 46 项。候选 `f136eb1072151f4729f851f216009964869b3ea1` 的 403 文件安装包在 Linux arm64 通过 206 项，另有 140 项按环境跳过、58 项旧版历史用例退出验收。Windows 安装回归通过 47 项，包含回合、题卡和快照三项新回归。实际飞书账号及云端回执待验。[实测记录](evidence/feishu-expired-receipt-recovery.json) · [Windows 流水线](https://github.com/KibyouMoe/mowu-link/actions/runs/45986369348/job/140462929293)
