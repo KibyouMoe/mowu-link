@@ -1,0 +1,117 @@
+{
+  "revision": "0a45f228233ecd3640195967f509682e23aa7720",
+  "macos_install": {
+    "sha256": "676d1db2d72b86f0cce4e9eb0faf8a3a97eb8c1da904d57c06edcad2dcf9ad5e",
+    "files": 387,
+    "passed": 50
+  },
+  "windows_install": {
+    "run_id": 45965854070,
+    "workflow": "https://github.com/KibyouMoe/mowu-link/actions/runs/45965854070",
+    "job_id": 140394231874,
+    "package": {
+      "sha256": "fe72ab73bce3258bbbc4f2d659bb644459cd22c092de1055272e0bd72f4d3b97",
+      "files": 387,
+      "revision": "0a45f228233ecd3640195967f509682e23aa7720"
+    },
+    "passed": 29,
+    "receipt_audit_cases": 1
+  },
+  "linux_regression": {
+    "revision": "0a45f228233ecd3640195967f509682e23aa7720",
+    "files": 387,
+    "passed": 192,
+    "skipped": 135,
+    "excluded": 58,
+    "failed": 0,
+    "errors": 0
+  },
+  "reconciliation": {
+    "first_reply_lost": {
+      "confirmed_inputs": 1,
+      "worker_inputs_awaiting_platform": 1,
+      "confirmed_outputs": 6,
+      "provider_outputs_awaiting_commit": 0,
+      "issues": []
+    },
+    "valid": {
+      "confirmed_inputs": 2,
+      "worker_inputs_awaiting_platform": 0,
+      "confirmed_outputs": 6,
+      "provider_outputs_awaiting_commit": 0,
+      "issues": []
+    },
+    "rejected": {
+      "inbound": [
+        {
+          "code": "platform_input_receipt_mismatch",
+          "message_id": "om_private_audit"
+        }
+      ],
+      "provider": [
+        {
+          "code": "platform_output_receipt_mismatch",
+          "display_seq": 6
+        }
+      ],
+      "menu": [
+        {
+          "code": "platform_worker_menu_receipt_mismatch",
+          "display_seq": 3
+        }
+      ],
+      "patch": [
+        {
+          "code": "platform_output_receipt_mismatch",
+          "display_seq": 5
+        }
+      ],
+      "binding": [
+        {
+          "code": "platform_receipt_binding_mismatch"
+        }
+      ]
+    },
+    "native_input_count": 1,
+    "additional_platform_calls": 0,
+    "handoff_refused_for_every_mismatch": true,
+    "boundary": "Actual SQLite and Worker HTTP. Feishu and native host are fixtures."
+  },
+  "release_cycle": {
+    "previous": "6d5daf7c0cd3bcfc38c44adfa1b9eed1c8f2912e",
+    "candidate": "0a45f228233ecd3640195967f509682e23aa7720",
+    "network": "isolated HTTPS loopback",
+    "feishu_receipts": {
+      "confirmed_inputs": 1,
+      "confirmed_outputs": 2,
+      "issues": [],
+      "provider_outputs_awaiting_commit": 0,
+      "worker_inputs_awaiting_platform": 0
+    },
+    "candidate_feishu_reply_id": "om_2",
+    "candidate_w04": {
+      "recorded": true,
+      "release_assignment_id": "7d09a40a-0eff-4d62-8f65-195b4ac6b48f",
+      "task_state": "completed_reported"
+    },
+    "rollback_to_before_trial_refused": true,
+    "previous_release_readback": {
+      "attachment_sha256": "847c7120ed0e8c287ed0273b596882a9e3390b9608c79ec313c009032d5ac97e",
+      "extra_manager_notifications": 0,
+      "extra_native_inputs": 0,
+      "extra_platform_sends": 0,
+      "followup_chat_receipt": {
+        "delivery_id": "chat-om_bundle_after_return",
+        "digest": "5a89487e25f2c447138efcc68b2375211480a697ee93b7ec31cf1aff76d15338",
+        "native_id": "a1aa784a-3f0c-409a-896b-ef0878f29904",
+        "session": "release-trial-agent",
+        "turn_id": "b8a7aa84-52a1-48d8-9267-7101b616d2d6"
+      },
+      "followup_reply_id": "om_3",
+      "reports": 1,
+      "task_state_after_acceptance": "closed",
+      "task_state_before_acceptance": "completed_reported"
+    },
+    "scope": "Installed rewrite releases, loopback TLS and SQLite. Agent, native sessions and Feishu are fixtures."
+  }
+}

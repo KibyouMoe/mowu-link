@@ -6,6 +6,10 @@
 
 ## 检查点与证据
 
+`0a45f228233ecd3640195967f509682e23aa7720` 补齐新版飞书停写对账。用独立 HTTP Worker 复现私聊入站完成、平台侧丢失回执。换绑继续等待，恢复副本沿原号找回回执，宿主仅一次收件，六条展示的原平台发送记录没有变化。另核飞书消息号已知、菜单确认回包丢失时的待提交分类。五个错配副本分别修改入站回执、出站消息号、菜单消息号、卡片更新目标和会话绑定。每份数据库均可通过快照校验，逐项对账都拦住了换绑目录发布。两个新版安装包的 HTTPS 回退演练读回原回复和原 W04，重复请求未新增输入、验收通知或平台发送。
+
+同提交的 387 文件安装包在 macOS 通过 50 项目标回归，Windows 安装组通过 29 项，Linux arm64 通过 192 项、按环境跳过 135 项。新对账只读停写快照。模型、飞书和原生宿主均为测试替身，实际飞书云端收件继续验收。[原始证据](evidence/rewrite-feishu-receipt-audit.json) · [复跑](router-rehearsal.md#飞书输出回执与换绑) · [Windows 流水线](https://github.com/KibyouMoe/mowu-link/actions/runs/45965854070)
+
 新增 `state_bundle audit-trigger` 在 `91182ae16faf0be3260949671ea090b72a3618c5` 核对同一停写快照的来源留档与 Router 记录。实测两条待对账消息分别为未到 Router 和 Router 已收但 T04 丢失。从副本沿原号恢复后两条均核对成功，原附件 332,800 字节，通知总数一条。反例覆盖缺来源库、单侧缺记录、异文、接收时间错配、附件字节和读取授权不符。两个新版发行包间跑实际 HTTPS 回退，候选停写快照中的原 T04 与附件对账成功，前一发行包读回相同附件，正式成果可继续验收。
 
 同提交的 385 文件安装包在 macOS 通过 34 项目标回归，归档范围的 4 项单独排除。Windows 安装组 28 项通过，含两个 Trigger 审计用例。Linux arm64 通过 191 项，按环境跳过 135 项，归档用例 58 项移出本轮。跨系统 HTTPS 实测一条夹具宿主输入及一条验收通知。来源数据为夹具，实际来源部署清单及在线回执另验。[对账证据](evidence/rewrite-trigger-snapshot-audit.json) · [复跑](router-rehearsal.md#新版-trigger-对账) · [Windows 流水线](https://github.com/KibyouMoe/mowu-link/actions/runs/45964591983)
