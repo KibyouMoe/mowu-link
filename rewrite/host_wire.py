@@ -146,7 +146,8 @@ class RemoteAdapter:
         return self.request("POST","host/answer-question",{"original":original,"answer":answer})["proof"]
 
 
-def serve_adapter(adapter, worker_id, identities, address, context, *, activation=None, preparation=None, family=None):
+def serve_adapter(adapter, worker_id, identities, address, context, *, activation=None, preparation=None, family=None,
+                  runtime=None):
     def handle(actor, method, path, body, headers):
         require(actor == "worker/" + worker_id, 403, "wrong_adapter_owner")
         pinned = path.startswith("/v1/host/bound/")
@@ -273,7 +274,7 @@ def serve_adapter(adapter, worker_id, identities, address, context, *, activatio
             case _:
                 raise Fault(404, "unknown_host_route")
         return 200, "application/json", result
-    return serve_authenticated(identities,address,context,handle)
+    return serve_authenticated(identities,address,context,handle,runtime=runtime,runtime_actor="worker/"+worker_id)
 
 
 def trainer_answer(did,payload,session,pinned):

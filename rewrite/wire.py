@@ -176,7 +176,7 @@ def route(orders, actor, method, path, body, headers, approval_workers=frozenset
     return status, "application/json", result
 
 
-def serve_router(orders, identities, address, tls_context=None):
+def serve_router(orders, identities, address, tls_context=None, *, runtime=None):
     approval_workers = frozenset(actor.removeprefix("approver/") for actor in identities.values()
                                 if actor.startswith("approver/"))
     if approval_workers:
@@ -185,10 +185,11 @@ def serve_router(orders, identities, address, tls_context=None):
     def handle(actor, method, path, body, headers):
         return route(orders, actor, method, path, body, headers, approval_workers)
 
-    return serve_authenticated(identities, address, tls_context, handle, orders.tick)
+    return serve_authenticated(identities, address, tls_context, handle, orders.tick,
+                               runtime=runtime,runtime_actor="hermes")
 
 
-def serve_authenticated(identities, address, tls_context, handle, tick=None):
+def serve_authenticated(identities, address, tls_context, handle, tick=None, *, runtime=None,runtime_actor=None):
     if address[0] != "127.0.0.1" and tls_context is None:
         raise ValueError("a network listener requires TLS")
     class Handler(BaseHTTPRequestHandler):
@@ -211,7 +212,12 @@ def serve_authenticated(identities, address, tls_context, handle, tick=None):
                     else:
                         body = json.loads(data)
                         require(isinstance(body, dict), 422, "invalid_body")
-                status, content_type, response = handle(actor, self.command, self.path, body, self.headers)
+                if runtime is not None and self.path=="/v1/runtime":
+                    require(actor==runtime_actor,403,"forbidden")
+                    require(self.command=="GET",405,"read_only_status")
+                    status, content_type, response = 200,"application/json",runtime
+                else:
+                    status, content_type, response = handle(actor, self.command, self.path, body, self.headers)
             except (ValueError, UnicodeError):
                 error = Fault(422, "invalid_json")
             except Fault as exc:

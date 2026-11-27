@@ -21,7 +21,8 @@ from .wire import Client
 
 
 @contextmanager
-def serve(package,component,database,roles,cert,key,env,extra=(),*,shutdown_timeout=6,expected_ready=None):
+def serve(package,component,database,roles,cert,key,env,extra=(),*,shutdown_timeout=6,expected_ready=None,
+          ready_observation=None):
     proc = subprocess.Popen([sys.executable,"-B","-S","-m","rewrite.service",component,"--db",database,
                              "--identities",roles,"--cert",cert,"--key",key,*extra],cwd=package,env=env,
                             stdout=subprocess.PIPE,stderr=subprocess.PIPE,encoding="utf-8")
@@ -36,6 +37,8 @@ def serve(package,component,database,roles,cert,key,env,extra=(),*,shutdown_time
             raise RuntimeError("wrong service started")
         if expected_ready and any(info.get(key)!=value for key,value in expected_ready.items()):
             raise RuntimeError("unexpected initial state for "+component+": "+encode(info))
+        if ready_observation is not None:
+            ready_observation.update(info)
         yield "https://127.0.0.1:"+str(info["port"])
     finally:
         proc.terminate()

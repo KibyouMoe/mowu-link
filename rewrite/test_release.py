@@ -3,7 +3,7 @@ import subprocess
 import tempfile
 import unittest
 
-from .release import build, materialize
+from .release import build, materialize, verify_startup_release
 
 
 class Release(unittest.TestCase):
@@ -34,6 +34,9 @@ class Release(unittest.TestCase):
         self.assertFalse(dest.exists())
         materialize(archive,sha,checksum,dest,install=True)
         materialize(archive,sha,checksum,dest,install=False)
+        self.assertEqual(verify_startup_release(release,dest),{"revision":sha,"sha256":checksum,"files":3})
+        with self.assertRaisesRegex(ValueError,"absolute archive path"):
+            verify_startup_release(dict(release,archive="mowulink.tar"),dest)
         self.assertEqual((dest/"rewrite/service.py").read_text(),"# test release\n")
         self.assertFalse((dest/"rewrite/other.py").exists())
         (dest/"extra").touch()
@@ -42,6 +45,6 @@ class Release(unittest.TestCase):
         (dest/"extra").unlink()
         (dest/"rewrite/service.py").write_text("changed")
         with self.assertRaisesRegex(ValueError,"differs"):
-            materialize(archive,sha,checksum,dest,install=False)
+            verify_startup_release(release,dest)
         with self.assertRaises(FileExistsError):
             materialize(archive,sha,checksum,dest,install=True)

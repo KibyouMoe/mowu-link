@@ -83,6 +83,15 @@ def materialize(archive,revision,expected,destination,*,install):
     return {"revision":revision,"sha256":expected,"files":len(entries),"directory":str(destination)}
 
 
+def verify_startup_release(manifest,installed):
+    if (not isinstance(manifest,dict) or set(manifest)!={"archive","revision","sha256"}
+            or not all(isinstance(value,str) for value in manifest.values())
+            or not Path(manifest["archive"]).is_absolute()):
+        raise ValueError("expected a pinned release manifest with an absolute archive path")
+    package = materialize(Path(manifest["archive"]),manifest["revision"],manifest["sha256"],installed,install=False)
+    return {key:package[key] for key in ("revision","sha256","files")}
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     ops = p.add_subparsers(required=True,dest="action")

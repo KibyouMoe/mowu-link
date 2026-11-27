@@ -620,6 +620,17 @@ python3 -B -m rewrite.service router-drain --db "$ROUTER_DB" status
 
 复跑 `python3 -B -m unittest -v rewrite.test_service.Service.test_router_drain_keeps_accepted_work_and_requeues_an_unaccepted_offer`。隔离 HTTPS Router 实跑三次启动，宿主与故障注入为测试夹具。[实测记录](evidence/router-dispatch-drain.json)
 
+### 核对已运行的发行包
+
+准备本机的私有发行清单。字段为 `archive`、`revision`、`sha256`，可从 `rewrite.release build` 的输出取得。将 `archive` 填成该机归档的绝对路径，保留独立核对得到的完整提交和归档摘要。清单、状态库和持久运行数据放在安装目录之外。用 `python3 -B` 启动 Router、Worker、Codex 或 DSH 适配器，加 `--release-manifest <本机清单>`。程序按实际加载的安装目录核归档版本、文件清单及字节，匹配后才打开状态库和监听。启动凭据含此次进程的 `boot_id`。
+
+```sh
+python3 -B -m rewrite.service runtime-status --connection "$ROUTER_MANAGER_CONNECTION" \
+  --expected-component router --expected-revision "$RELEASE_SHA" --expected-sha256 "$ARCHIVE_SHA256"
+```
+
+值班人使用 Router 的管理身份读 Router，用对应工位的 `ops/<工位>` 读 Worker，用 `worker/<工位>` 读该工位适配器。后两项填写对应组件和 `--expected-worker-id`。命令走已配置的 HTTPS，核对组件、工位、版本和归档摘要。重启后应看到新的 `boot_id`。未带清单启动的进程可继续开发试用，版本核对会返回未验证。凭据证明的是进程启动时核过的安装包。会话、业务和平台的就绪状态仍从各自入口查验。
+
 ### 新版 Router 与 Worker 分步更新
 
 安装含首次投递核验的版本时，先更新 Router，再更新 Worker。Worker 从自己的投递状态查询确认 Router 已启用该核验，然后才登记。若次序装反，工位状态显示 `router_assignment_status_required`。未登记的新进程不会接管 Router 的队首。Router 升级后，上一版 Worker 可继续处理原队首。切换到新版 Worker 时，沿用对应的原工位状态库及原宿主账本。

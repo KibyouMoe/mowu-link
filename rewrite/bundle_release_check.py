@@ -21,7 +21,7 @@ from rewrite.hermes import HermesAdapter
 from rewrite.manager_notices import ManagerNotices
 from rewrite.orders import Orders
 from rewrite.release_check import config, serve
-from rewrite.storage import encode, guid, state_writer
+from rewrite.storage import Fault, encode, guid, state_writer
 from rewrite.test_feishu_output import PlatformFixture
 from rewrite.test_mainline import Clock
 from rewrite.test_state_bundle import running
@@ -331,7 +331,7 @@ def rehearse_cutover_audit(root,candidate,latest,saved,env,fixtures,cert,key,wri
               "pending native closure was not visible")
         extra_evidence = {"pending_native_approval_rejected":pending_report["issues"],
                           "restore_and_release":rehearse_restored_dispatch(root,installed,matched,matched_sha,operation,
-                              queued_tasks,fixtures,cert,key,env,written)}
+                              queued_tasks,fixtures,cert,key,env,written,archive,good["release"])}
     state_bundle.verify(matched,matched_sha)
     return {"reconciled":good["offline_reconciled"],"manifest_sha256":matched_sha,"snapshot_id":good["snapshot_id"],
             "release":good["release"],"drain_id":operation,"rejected":{"open":open_report["issues"],
@@ -340,7 +340,7 @@ def rehearse_cutover_audit(root,candidate,latest,saved,env,fixtures,cert,key,wri
             "wrong_release_digest":"release checksum mismatch"},**extra_evidence}
 
 
-def rehearse_restored_dispatch(root,installed,snapshot,sha,operation,queue,fixtures,cert,key,env,written):
+def rehearse_restored_dispatch(root,installed,snapshot,sha,operation,queue,fixtures,cert,key,env,written,archive,release):
     restored = state_bundle.restore(snapshot,sha,root/"restart-from-audit")
     folder = root/"cutover-run"
     folder.mkdir()
@@ -349,10 +349,19 @@ def rehearse_restored_dispatch(root,installed,snapshot,sha,operation,queue,fixtu
     native = FixtureHost(native_db,"release-trial-agent")
     original_inputs = native.entries()
     original_tasks = [item["task_id"] for item in queue]
-    manager_token,worker_token,host_token,ops_token = (guid() for _ in range(4))
+    manager_token,worker_token,host_token,ops_token,wrong_token = (guid() for _ in range(5))
     router_roles = config(folder,"router.json",{manager_token:"hermes",worker_token:"worker/trial"})
-    adapter_roles = config(folder,"adapter.json",{host_token:"worker/trial"})
-    worker_roles = config(folder,"worker.json",{ops_token:"ops/trial"})
+    adapter_roles = config(folder,"adapter.json",{host_token:"worker/trial",wrong_token:"worker/other"})
+    worker_roles = config(folder,"worker.json",{ops_token:"ops/trial",wrong_token:"platform/trial"})
+    router_help = subprocess.check_output([sys.executable,"-B","-S","-m","rewrite.service","router","--help"],
+                                          cwd=installed,env=env,encoding="utf-8",timeout=12)
+    supports_runtime_verification = "--release-manifest" in router_help
+    verified_flags = ()
+    runtime_receipts = {}
+    if supports_runtime_verification:
+        proof = {"archive":str(archive.absolute()),"revision":release["revision"],"sha256":release["sha256"]}
+        verified_flags = ("--release-manifest",config(folder,"release-manifest.json",proof))
+        verify_startup_failures(folder,installed,router_roles,manager_token,cert,key,env,proof)
 
     def drain(action,drain_id):
         return subprocess.run([sys.executable,"-B","-S","-m","rewrite.service","router-drain",
@@ -365,19 +374,52 @@ def rehearse_restored_dispatch(root,installed,snapshot,sha,operation,queue,fixtu
     def details(client,task_id):
         return client.request("GET","tasks/"+task_id)
 
+    def verify_runtime(role,url,token,local,foreign,phase):
+        if not supports_runtime_verification:
+            return
+        target = connect(role+"-"+phase+".json",url,token)
+        args = [sys.executable,"-B","-S","-m","rewrite.service","runtime-status",
+                "--connection",target,"--expected-component",role,"--expected-revision",release["revision"]]
+        if role!="router":
+            args.extend(("--expected-worker-id","trial"))
+        received = json.loads(subprocess.check_output([*args,"--expected-sha256",release["sha256"]],cwd=installed,
+                                                      env=env,encoding="utf-8",timeout=12))
+        check(received==local["runtime"] and received["release"]==release,"remote runtime differs from live startup receipt")
+        try:
+            Client(url,foreign,cert).request("GET","runtime")
+        except Fault as error:
+            check(error.status==403 and error.code=="forbidden","wrong response for foreign runtime identity")
+        else:
+            raise RuntimeError("foreign role read verified runtime")
+        if role=="router" and phase=="drained":
+            wrong = subprocess.run([*args,"--expected-sha256","0"*64],cwd=installed,env=env,encoding="utf-8",
+                                   capture_output=True,timeout=12)
+            check(wrong.returncode==1 and json.loads(wrong.stderr)["error"]=="runtime_release_mismatch",
+                  "runtime probe accepted another release SHA-256")
+        runtime_receipts[role+"_"+phase] = received
+
     adapter_flags = ("--worker-id","trial","--session",native.session,"--fixture-db",native_db)
-    with serve(installed,"fixture-adapter",restored["agent:trial"],adapter_roles,cert,key,env,adapter_flags) as adapter:
+    adapter_ready = {}
+    with serve(installed,"fixture-adapter",restored["agent:trial"],adapter_roles,cert,key,env,
+               (*adapter_flags,*verified_flags),ready_observation=adapter_ready) as adapter:
+        verify_runtime("fixture-adapter",adapter,host_token,adapter_ready,wrong_token,"started")
         host = connect("host.json",adapter,host_token)
         for blocked in (True,False):
+            phase = "drained" if blocked else "open"
             expected = {"dispatch_draining":blocked}
             if blocked:
                 expected["dispatch_drain_id"] = operation
-            with serve(installed,"router",restored["router:main"],router_roles,cert,key,env,expected_ready=expected) as url:
+            router_ready,worker_ready = {},{}
+            with serve(installed,"router",restored["router:main"],router_roles,cert,key,env,verified_flags,
+                       expected_ready=expected,ready_observation=router_ready) as url:
+                verify_runtime("router",url,manager_token,router_ready,worker_token,phase)
                 manager = Client(url,manager_token,cert)
                 router = connect(("drained" if blocked else "ready")+".json",url,worker_token)
                 flags = ("--worker-id","trial","--adapter-session",native.session,
-                         "--router-connection",router,"--adapter-connection",host)
-                with serve(installed,"worker",restored["worker:trial"],worker_roles,cert,key,env,flags) as worker:
+                         "--router-connection",router,"--adapter-connection",host,*verified_flags)
+                with serve(installed,"worker",restored["worker:trial"],worker_roles,cert,key,env,flags,
+                           ready_observation=worker_ready) as worker:
+                    verify_runtime("worker",worker,ops_token,worker_ready,wrong_token,phase)
                     ops = Client(worker,ops_token,cert)
                     deadline = time.monotonic()+32
                     idle_since = None
@@ -427,10 +469,43 @@ def rehearse_restored_dispatch(root,installed,snapshot,sha,operation,queue,fixtu
                 release_receipt = json.loads(right.stdout)
                 check(right.returncode==0 and (release_receipt["operation_id"],release_receipt["state"])==
                       (operation,"released"),"correct drain operation did not release the restored Router")
+    runtime = {}
+    if supports_runtime_verification:
+        check(len({row["boot_id"] for row in runtime_receipts.values()})==5,"restart reused a startup ID")
+        runtime = {"verified_startups":runtime_receipts,"foreign_roles_denied":True,
+                   "different_expected_digest_rejected":True,"mismatched_package_cannot_create_state":True,
+                   "startup_without_manifest_unverified":True}
     return {"original_task_ids":original_tasks,"hold_read_back":True,"running_release_refused":True,
             "idle_seconds_while_drained":round(idle_seconds,3),"wrong_drain_rejected":True,
             "release":release_receipt,"first_assignment_id":first["assignment_id"],
-            "native_inputs_added_after_release":1,"second_task_state":second["state"],"original_w04_unchanged":True}
+            "native_inputs_added_after_release":1,"second_task_state":second["state"],"original_w04_unchanged":True,
+            **({"runtime_verification":runtime} if runtime else {})}
+
+
+def verify_startup_failures(folder,installed,roles,manager_token,cert,key,env,manifest):
+    changed = folder/"changed-installation"
+    shutil.copytree(installed,changed)
+    md = changed/"rewrite"/"README.md"
+    md.write_bytes(md.read_bytes()+b"\n")
+    for name,package,proof in (("different-digest",installed,dict(manifest,sha256="0"*64)),
+                               ("changed",changed,manifest)):
+        database = folder/(name+".db")
+        path = config(folder,name+".json",proof)
+        output = subprocess.run([sys.executable,"-B","-S","-m","rewrite.service","router","--db",database,
+                                 "--identities",roles,"--cert",cert,"--key",key,"--release-manifest",path],
+                                cwd=package,env=env,capture_output=True,encoding="utf-8",timeout=12)
+        check(output.returncode==1 and not output.stdout and
+              json.loads(output.stderr)["error"]=="release_startup_unverified" and not database.exists()
+              and not database.with_name(database.name+".writer").exists(),
+              "inconsistent release reached startup or opened state")
+    with serve(installed,"router",folder/"unverified.db",roles,cert,key,env) as url:
+        connection = config(folder,"unverified.json",{"url":url,"token":manager_token,"ca_file":str(cert)})
+        output = subprocess.run([sys.executable,"-B","-S","-m","rewrite.service","runtime-status",
+                                "--connection",connection,"--expected-component","router",
+                                "--expected-revision",manifest["revision"],"--expected-sha256",manifest["sha256"]],
+                                cwd=installed,env=env,capture_output=True,encoding="utf-8",timeout=12)
+        check(output.returncode==1 and json.loads(output.stderr)["error"]=="runtime_release_unverified",
+              "probe passed a service that started without a manifest")
 
 
 def rehearse_bundle(root,old,candidate,older,cert,key,env):

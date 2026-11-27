@@ -444,7 +444,7 @@ class WorkerService:
                 422,"invalid_peer_filters")
         return self.worker.router.request("GET","peers/workers?"+urlencode(query))
 
-    def listen(self, identities, address, ctx):
+    def listen(self, identities, address, ctx, *, runtime=None):
         w = self.worker
         self.identities = dict(identities)
         if w.resume_targets:
@@ -457,7 +457,7 @@ class WorkerService:
                 token = worker_resume.callback_token(w,session,op)
                 self.check_managed_callback(session,token)
                 self.add_managed_callback(session,token)
-        return serve_authenticated(self.identities,address,ctx,self.handle)
+        return serve_authenticated(self.identities,address,ctx,self.handle,runtime=runtime,runtime_actor="ops/"+w.worker_id)
 
     def check_managed_callback(self,session,token):
         role = "adapter/"+self.worker.worker_id+"/"+session

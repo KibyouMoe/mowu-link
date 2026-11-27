@@ -9,6 +9,7 @@ import signal
 import ssl
 import stat
 import sys
+import tarfile
 from threading import Thread
 from time import time
 
@@ -18,11 +19,14 @@ from .adapter import HostAdapter
 from .host_wire import RemoteAdapter, serve_adapter
 from .managed_sessions import session_callback_key
 from .messages import valid_guid
-from .storage import Database, Fault, StateWriterBusy, encode, require, state_writer
+from .storage import Database, Fault, StateWriterBusy, encode, guid, require, state_writer
 from .trigger import Trigger, archive_status
 from .wire import Client, serve_router
 from .worker import Worker
 from .worker_service import WorkerService
+
+
+RELEASE_SERVERS = ("router","worker","fixture-adapter","dsh-adapter","codex-adapter")
 
 
 def private_config(path):
@@ -48,6 +52,18 @@ def server(args):
         with ExitStack() as stack:
             serve(args,stack)
         return
+    runtime = None
+    if args.component in RELEASE_SERVERS:
+        package = None
+        if args.release_manifest is not None:
+            from .release import verify_startup_release
+
+            try:
+                package = verify_startup_release(private_config(args.release_manifest),Path(__file__).resolve().parents[1])
+            except (OSError,ValueError,tarfile.TarError):
+                raise Fault(422,"release_startup_unverified") from None
+        runtime = {"component":args.component,"worker_id":getattr(args,"worker_id",None),
+                   "boot_id":guid(),"release":package}
     databases = [args.db]
     if args.component=="fixture-adapter":
         databases.append(args.fixture_db)
@@ -60,10 +76,10 @@ def server(args):
     with ExitStack() as stack:
         for path in sorted(paths):
             stack.enter_context(state_writer(path))
-        serve(args,stack)
+        serve(args,stack,runtime=runtime)
 
 
-def serve(args,stack):
+def serve(args,stack,*,runtime=None):
     identities = private_config(args.identities)
     if not isinstance(identities, dict) or not identities or any(
             not isinstance(k, str) or not k or not isinstance(v,str)
@@ -83,7 +99,7 @@ def serve(args,stack):
         orders = Orders(args.db,drain_dispatch=args.drain_dispatch)
         with orders.db.transaction() as db:
             drain = admission.active_drain(db)
-        listener = serve_router(orders, identities, address, ctx)
+        listener = serve_router(orders, identities, address, ctx,runtime=runtime)
     elif args.component=="peer-archive":
         from . import rollback_peers
         if any(actor!="hermes" and not actor.startswith("worker/") for actor in identities.values()):
@@ -102,7 +118,8 @@ def serve(args,stack):
         if bool(args.media_cache) != bool(args.worker_connection):
             raise ValueError("media cache and worker connection must be configured together")
         media = NativeFiles(args.media_cache,connection(args.worker_connection)) if args.media_cache else None
-        listener = serve_adapter(HostAdapter(args.db,native,native.session,media),args.worker_id,identities,address,ctx)
+        listener = serve_adapter(HostAdapter(args.db,native,native.session,media),args.worker_id,identities,address,ctx,
+                                 runtime=runtime)
     elif args.component == "dsh-adapter":
         from .dsh_display import publishing
         from .dsh_local_link import LocalLink
@@ -117,7 +134,7 @@ def serve(args,stack):
             family = stack.enter_context(DshSessionFamily(client,args,link).run())
             root = family.port(args.session)
             listener = serve_adapter(root.adapter,args.worker_id,identities,address,ctx,
-                                     activation=root.activation,preparation=root.preparation,family=family)
+                                     activation=root.activation,preparation=root.preparation,family=family,runtime=runtime)
         else:
             native = DshHost(args.runtime_dir,link=link)
             media = NativeFiles(args.runtime_dir/"media",client)
@@ -125,7 +142,7 @@ def serve(args,stack):
             activation = DshActivation(native,args.session) if args.resume_on_handoff else None
             callbacks = tool_listener(args.runtime_dir,adapter,client,link=link)
             public_output = publishing(adapter,client,args.worker_id,activation=activation)
-            listener = serve_adapter(adapter,args.worker_id,identities,address,ctx,activation=activation)
+            listener = serve_adapter(adapter,args.worker_id,identities,address,ctx,activation=activation,runtime=runtime)
     elif args.component == "codex-adapter":
         from .codex_activation import CodexActivation, pinned_thread
         from .codex_app_server import AppServerHost, worker_callbacks
@@ -152,7 +169,7 @@ def serve(args,stack):
             family = stack.enter_context(CodexSessionFamily(rpc,client,args,workspace=workspace).run())
             root = family.port(args.session)
             listener = serve_adapter(root.adapter,args.worker_id,identities,address,ctx,
-                                     activation=root.activation,preparation=root.preparation,family=family)
+                                     activation=root.activation,preparation=root.preparation,family=family,runtime=runtime)
         else:
             native = AppServerHost(rpc,args.session,args.db,args.public_image_root,
                                    relay_command_approvals=args.relay_command_approvals,
@@ -172,7 +189,8 @@ def serve(args,stack):
             callbacks = worker_callbacks(native,client,display.wake.set,display.observe,display.observe_terminal,
                                          adapter=adapter)
             public_output = display.run(deferred=activation is not None)
-            listener = serve_adapter(adapter,args.worker_id,identities,address,ctx,activation=activation,preparation=preparation)
+            listener = serve_adapter(adapter,args.worker_id,identities,address,ctx,
+                                     activation=activation,preparation=preparation,runtime=runtime)
     else:
         targets = {}
         if args.resume_targets:
@@ -187,7 +205,7 @@ def serve(args,stack):
                         RemoteAdapter(connection(args.adapter_connection),args.adapter_session),
                         resume_targets=targets,session_callback_key=session_key)
         worker_service = WorkerService(worker)
-        listener = worker_service.listen(identities,address,ctx)
+        listener = worker_service.listen(identities,address,ctx,runtime=runtime)
     with listener, callbacks, public_output:
         def stop(_number,_frame):
             Thread(target=listener.shutdown, daemon=True).start()
@@ -195,6 +213,8 @@ def serve(args,stack):
         if worker_service:
             worker_service.thread.start()
         ready = {"component":args.component,"port":listener.server_port,"tls":True}
+        if runtime is not None:
+            ready["runtime"] = runtime
         if args.component=="router":
             ready["dispatch_draining"] = args.drain_dispatch or drain is not None
             if drain is not None:
@@ -229,6 +249,27 @@ def router_drain(args):
             return admission.change_drain(db,args.action,args.operation_id,time())
 
 
+def runtime_status(args):
+    require(re.fullmatch("[0-9a-f]{40}",args.expected_revision) and re.fullmatch("[0-9a-f]{64}",args.expected_sha256),
+            422,"invalid_expected_release")
+    require((args.expected_component=="router" and args.expected_worker_id is None)
+            or (args.expected_component!="router" and bool(args.expected_worker_id)),
+            422,"invalid_expected_worker")
+    client = connection(args.connection)
+    require(client.url.startswith("https://"),422,"runtime_status_requires_tls")
+    result = client.request("GET","runtime")
+    require(isinstance(result,dict) and set(result)=={"component","worker_id","boot_id","release"}
+            and result["component"]==args.expected_component and result["worker_id"]==args.expected_worker_id
+            and valid_guid(result["boot_id"]),
+            409,"runtime_identity_mismatch")
+    package = result["release"]
+    require(isinstance(package,dict) and set(package)=={"revision","sha256","files"}
+            and type(package["files"]) is int and package["files"]>0,409,"runtime_release_unverified")
+    require((package["revision"],package["sha256"])==(args.expected_revision,args.expected_sha256),
+            409,"runtime_release_mismatch")
+    return result
+
+
 def source(args):
     with state_writer(args.db):
         item = Trigger(args.db, args.name)
@@ -252,6 +293,9 @@ def main():
             component.add_argument("--"+flag,required=True,type=Path)
         component.add_argument("--bind",default="127.0.0.1")
         component.add_argument("--port",type=int,default=0)
+        if name in RELEASE_SERVERS:
+            component.add_argument("--release-manifest",type=Path,
+                                   help="owner-private release build output; verify this installation before starting")
         if name not in ("router","host-ops","peer-archive"):
             component.add_argument("--worker-id",required=True)
         if name in ("peer-archive","chat-archive"):
@@ -331,6 +375,12 @@ def main():
     status = apps.add_parser("worker-status",help="read an isolated Worker's last connection observations")
     status.add_argument("--connection",required=True,type=Path)
     status.add_argument("--worker-id",required=True)
+    runtime = apps.add_parser("runtime-status",help="verify the package reported by a running installed service over HTTPS")
+    runtime.add_argument("--connection",required=True,type=Path)
+    runtime.add_argument("--expected-component",choices=RELEASE_SERVERS,required=True)
+    runtime.add_argument("--expected-worker-id",help="required for a Worker or host adapter")
+    runtime.add_argument("--expected-revision",required=True)
+    runtime.add_argument("--expected-sha256",required=True)
     provision_parser = apps.add_parser("codex-provision",help="create and read back one isolated native test thread")
     for flag in ("codex-binary","codex-profile","cwd"):
         provision_parser.add_argument("--"+flag,required=True,type=Path)
@@ -380,6 +430,13 @@ def main():
         if observation.get("worker_id")!=args.worker_id:
             raise ValueError("status receipt belongs to a different Worker")
         print(encode(observation))
+    elif args.component=="runtime-status":
+        try:
+            print(encode(runtime_status(args)))
+        except Fault as error:
+            parser.exit(1,encode({"error":error.code})+"\n")
+        except (OSError,ValueError):
+            parser.exit(1,encode({"error":"runtime_probe_unavailable"})+"\n")
     elif args.component=="codex-provision":
         try:
             print(encode(provision(args.codex_binary,args.codex_profile,args.cwd,args.tool or ["worker_report"])))

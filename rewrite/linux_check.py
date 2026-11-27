@@ -74,6 +74,16 @@ def exercise(root, options):
         check(err.status==401, "unexpected identity failure")
     else:
         raise RuntimeError("guest authenticated an unregistered identity")
+    runtimes = {}
+    if package := options.get("runtime_release"):
+        for component,url,token,wid in (("router",router_url,options["manager"],None),
+                                       ("fixture-adapter",adapter_url,options["adapter"],"trial")):
+            result = Client(url,token,cert).request("GET","runtime")
+            check(result["component"]==component and result["worker_id"]==wid and result["release"]==package,
+                  "wrong running guest release")
+            check(str(uuid.UUID(result["boot_id"]))==result["boot_id"],"missing guest boot identity")
+            runtimes[component] = result
+        check(runtimes["router"]["boot_id"]!=runtimes["fixture-adapter"]["boot_id"],"unexpected shared guest boot identity")
     tid = manager.request("POST", "tasks", {"title":"Linux release check","instructions":"Return the fixture result",
                                              "assignee_id":"trial"}, guid())["task_id"]
     worker.connect()
@@ -104,7 +114,8 @@ def exercise(root, options):
             "delivery_id":frame["delivery_id"],"fixture_native_id":receipt["native_id"],
             "fixture_turn_id":receipt["turn_id"],"after_turn":detail["task"]["state"],"after_report":final["task"]["state"],
             "worker_holds_after_receipt":worker.hold(),"router_notifications":1,
-            "unknown_identity_http":401,"untrusted_certificate_rejected":True}
+            "unknown_identity_http":401,"untrusted_certificate_rejected":True,
+            **({"running_guest_releases":runtimes} if runtimes else {})}
 
 
 def run(repository, revision, image, socket):
@@ -143,15 +154,20 @@ def run(repository, revision, image, socket):
         guest("tar","-xf","-",data=packet({
             "guest.py":Path(__file__).with_name("linux_guest_check.py").read_bytes(),
             "release.tar":archive.read_bytes(),"ca.pem":cert.read_bytes(),"key.pem":key.read_bytes(),
+            "release-manifest.json":json.dumps({"archive":GUEST+"/release.tar","revision":revision,
+                                                "sha256":release["sha256"]}).encode(),
             "router.json":identities({"manager":"hermes","worker":"worker/trial"}),
             "adapter.json":identities({"adapter":"worker/trial"})}))
         installed = json.loads(guest("python","-I","-B","guest.py","install",revision,release["sha256"]))
         installed_dir = GUEST+"/installed"
         suite = json.loads(guest("python","-I","-B","guest.py","suite",timeout=180))
+        check_runtime = b"--release-manifest" in guest("python","-B","-S","-m","rewrite.service","router","--help",
+                                                       directory=installed_dir)
+        release_flags = ("--release-manifest",GUEST+"/release-manifest.json") if check_runtime else ()
         def start(role, port, register, *extra):
             communicate([*docker,"exec","-d","-w",installed_dir,cid,"python","-B","-m","rewrite.service",role,
                          "--bind","0.0.0.0","--port",str(port),"--db",GUEST+"/"+role+".db","--identities",GUEST+"/"+register,
-                         "--cert",GUEST+"/ca.pem","--key",GUEST+"/key.pem",*extra])
+                         "--cert",GUEST+"/ca.pem","--key",GUEST+"/key.pem",*release_flags,*extra])
             binding = communicate([*docker,"port",cid,str(port)+"/tcp"]).decode().strip()
             check(bool(re.fullmatch(r"127\.0\.0\.1:[0-9]+",binding)), "expected a single loopback binding")
             return "https://"+binding
@@ -159,6 +175,8 @@ def run(repository, revision, image, socket):
                 start("fixture-adapter",8444,"adapter.json","--worker-id","trial","--fixture-db",GUEST+"/native.db",
                       "--session","linux-fixture")]
         opts = {**tokens,"urls":urls,"revision":revision}
+        if check_runtime:
+            opts["runtime_release"] = {key:installed[key] for key in ("revision","sha256","files")}
         contract = json.loads(communicate([sys.executable,"-I","-B",str(Path(__file__).resolve()),"--controller",str(root)],
                                            data=json.dumps(opts).encode(),timeout=75))
         rows = json.loads(guest("python","-I","-B","guest.py","inputs"))
