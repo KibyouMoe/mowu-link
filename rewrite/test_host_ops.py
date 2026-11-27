@@ -90,6 +90,9 @@ class HostOpsState(unittest.TestCase):
         status,_,receipt = operations.route(observer,"GET",f"/v1/ops/services/router/restarts/{rid}",{}, {})
         self.assertEqual((status,receipt["state"],receipt["failure"]),(200,"unconfirmed","maintenance_process_interrupted"))
         self.assertEqual(operations.route(writer,"POST",path,request,{})[2],receipt)
+        with self.assertRaisesRegex(Fault,"service_restart_unconfirmed") as rejected:
+            operations.route(writer,"POST",path,dict(request,request_id=guid()),{})
+        self.assertEqual(rejected.exception.details,{"blocking_request_id":rid})
         with self.assertRaisesRegex(Fault,"restart_request_conflict"):
             operations.route(writer,"POST",path,dict(request,reason="different"),{})
         self.assertEqual(queue.calls,[])
@@ -111,6 +114,63 @@ class HostOpsState(unittest.TestCase):
         receipt = ops.result(writer,"router",request["request_id"])
         self.assertEqual((receipt["state"],receipt["before"]["pid"],receipt["after"]["pid"]),
                          ("not_attempted",123,567))
+
+    def test_unconfirmed_reconciliation_requires_the_observed_new_process(self):
+        root = Path(self.enterContext(TemporaryDirectory()))
+        state = root/"ops.db"
+        job = Job("test.router",root/"unused.plist","/bin/true","")
+        backend = NoWriteBackend()
+        backend.birth = Mock(return_value="fixture-old-process-still-present")
+        jobs = {"router":job,"companion":Job("test.neighbor",root/"neighbor.plist","/bin/true","")}
+        operation = HostOps(state,jobs,backend,HeldQueue())
+        request = {"request_id":guid(),"expected_generation":"a"*64,"reason":"native receipt lost"}
+        writer,observer = "host-maintainer/router","host-observer"
+        original = operation.begin(writer,"router",request)
+        rid = original["request_id"]
+        path = f"/v1/ops/services/router/restarts/{rid}/reconcile"
+        before = {"expected_generation":"a"*64}
+        with self.assertRaisesRegex(Fault,"restart_is_not_unconfirmed"):
+            operation.route(writer,"POST",path,before,{})
+        queue = HeldQueue()
+        operation = HostOps(state,jobs,backend,queue)
+        with self.assertRaisesRegex(Fault,"forbidden"):
+            operation.route(observer,"POST",path,before,{})
+        with self.assertRaisesRegex(Fault,"forbidden"):
+            operation.route("host-maintainer/companion","POST",path,before,{})
+        with self.assertRaisesRegex(Fault,"replacement_not_observed"):
+            operation.route(writer,"POST",path,before,{})
+        backend.observe = lambda _job: {"state":"running","pid":567,"generation":"b"*64}
+        after = {"expected_generation":"b"*64}
+        with self.assertRaisesRegex(Fault,"stale_service_generation"):
+            operation.route(writer,"POST",path,before,{})
+        with self.assertRaisesRegex(Fault,"prior_process_exit_unconfirmed"):
+            operation.route(writer,"POST",path,after,{})
+        with self.assertRaisesRegex(Fault,"service_restart_unconfirmed"):
+            operation.begin(writer,"router",dict(request,request_id=guid(),expected_generation="b"*64))
+        self.assertEqual(queue.calls,[])
+        # Renaming a registration cannot bypass the lock on its original native label.
+        renamed = HostOps(state,{"renamed":job},backend,queue)
+        with self.assertRaisesRegex(Fault,"service_restart_unconfirmed") as denial:
+            renamed.begin("host-maintainer/renamed","renamed",
+                          dict(request,request_id=guid(),expected_generation="b"*64))
+        self.assertEqual(denial.exception.details,{})
+
+        backend.birth.return_value = ""
+        settled = operation.route(writer,"POST",path,after,{})[2]
+        self.assertEqual(settled["state"],"unconfirmed")
+        self.assertEqual(settled["failure"],"maintenance_process_interrupted")
+        self.assertEqual((settled["reconciliation"]["state"],settled["reconciliation"]["after"]["pid"]),
+                         ("replacement_observed",567))
+        self.assertEqual(operation.route(writer,"POST",path,after,{})[2],settled)
+        with self.assertRaisesRegex(Fault,"restart_reconciliation_conflict"):
+            operation.route(writer,"POST",path,before,{})
+        self.assertEqual(queue.calls,[])
+        reopened = HostOps(state,jobs,backend,queue)
+        self.assertEqual(reopened.result(observer,"router",rid),settled)
+        self.assertEqual(reopened.begin(writer,"router",request),settled)
+        next_request = dict(request,request_id=guid(),expected_generation="b"*64)
+        self.assertEqual(reopened.begin(writer,"router",next_request)["state"],"accepted")
+        self.assertEqual(len(queue.calls),1)
 
 
 @unittest.skipUnless(sys.platform=="darwin" and os.getuid()!=0 and shutil.which("openssl"), "macOS GUI launchd and OpenSSL required")
@@ -146,6 +206,73 @@ class LaunchdMaintenance(unittest.TestCase):
             subprocess.run(["/bin/launchctl","bootout",target],check=True,capture_output=True,timeout=10)
             self.wait(lambda:subprocess.run(["/bin/launchctl","print",target],capture_output=True,
                                             timeout=5).returncode!=0,seconds=12)
+
+    def test_interrupted_maintenance_blocks_new_requests_until_native_reconciliation(self):
+        root = Path(self.enterContext(TemporaryDirectory(prefix="mowulink-restart-reconcile-"))).resolve()
+        owner,observer = guid(),guid()
+        identities = config(root,"identities.json",{owner:"host-maintainer/router",observer:"host-observer"})
+        job,_ = self.enterContext(self.job(root,["/bin/sleep","120"],"reconcile"))
+        raw = config(root,"manifest.json",{"router":job})
+        state = root/"ops.db"
+        cert,key = root/"certificate.pem",root/"key.pem"
+        subprocess.run(["openssl","req","-x509","-newkey","rsa:2048","-nodes","-days","1","-subj","/CN=localhost",
+            "-addext","subjectAltName=IP:127.0.0.1","-keyout",key,"-out",cert],check=True,capture_output=True,timeout=10)
+        native,job = Launchd(),Job.read(job)
+        before = self.wait(lambda:current if (current:=native.observe(job))["state"]=="running" else None)
+        request = {"request_id":guid(),"expected_generation":before["generation"],"reason":"interrupted isolated operation"}
+        queue = HeldQueue()
+        fixture = HostOps(state,{"router":job},native,queue)
+        fixture.begin("host-maintainer/router","router",request)
+        self.assertEqual(len(queue.calls),1)
+        env = {**os.environ,"PYTHONDONTWRITEBYTECODE":"1"}
+        setup = ("--manifest",raw)
+        base = "ops/services/router"
+        lookup = base+"/restarts/"+request["request_id"]
+        with serve(PACKAGE,"host-ops",state,identities,cert,key,env,setup) as url:
+            maintainer,reader = Client(url,owner,cert),Client(url,observer,cert)
+            original = reader.request("GET",lookup)
+            self.assertEqual((original["state"],original["failure"]),("unconfirmed","maintenance_process_interrupted"))
+            with self.assertRaisesRegex(Fault,"service_restart_unconfirmed") as conflict:
+                maintainer.request("POST",base+"/restart",dict(request,request_id=guid()))
+            self.assertEqual(conflict.exception.details["blocking_request_id"],request["request_id"])
+            self.assertEqual(native.observe(job),before)
+            with self.assertRaisesRegex(Fault,"replacement_not_observed"):
+                maintainer.request("POST",lookup+"/reconcile",{"expected_generation":before["generation"]})
+            # The test operator changes only the isolated job using the native supervisor.
+            manual = native.restart(job,before)
+            self.assertIsNotNone(manual)
+            with self.assertRaisesRegex(Fault,"forbidden"):
+                reader.request("POST",lookup+"/reconcile",{"expected_generation":manual["generation"]})
+            connection = config(root,"connection.json",{"url":url,"token":owner,"ca_file":str(cert)})
+            invoked = subprocess.run([sys.executable,"-B","-m","rewrite.host_ops_cli","--connection",connection,
+                "reconcile","router",request["request_id"],"--expected-generation",manual["generation"]],
+                cwd=PACKAGE,env=env,check=True,capture_output=True,text=True,timeout=10)
+            report = json.loads(invoked.stdout)
+            self.assertEqual({k:v for k,v in report.items() if k!="reconciliation"},original)
+            self.assertEqual(report["reconciliation"]["after"]["pid"],manual["pid"])
+            self.assertEqual(native.observe(job),manual)
+        with serve(PACKAGE,"host-ops",state,identities,cert,key,env,setup) as url:
+            maintainer = Client(url,owner,cert)
+            self.assertEqual(maintainer.request("GET",lookup),report)
+            self.assertEqual(maintainer.request("POST",base+"/restart",request),report)
+            self.assertEqual(native.observe(job),manual)
+            next_request = dict(request,request_id=guid(),expected_generation=manual["generation"])
+            self.assertEqual(maintainer.request("POST",base+"/restart",next_request)["state"],"accepted")
+            def applied():
+                row = maintainer.request("GET",base+"/restarts/"+next_request["request_id"])
+                return row if row["state"]!="accepted" else None
+            replacement = self.wait(applied)
+            self.assertEqual(replacement["state"],"process_replaced")
+            self.assertEqual(replacement["before"]["pid"],manual["pid"])
+            self.assertNotIn(replacement["after"]["pid"],(before["pid"],manual["pid"]))
+            self.assertEqual(maintainer.request("POST",base+"/restart",next_request),replacement)
+        if evidence := os.environ.get("MOWULINK_RESTART_RECONCILIATION_EVIDENCE"):
+            Path(evidence).write_text(json.dumps({
+                "blocked_fresh_uuid":True,"receipt_after_cold_restart":report,
+                "independent_native_replacement":manual,"new_explicit_restart":replacement,
+                "reconciliation_preserved_observed_pid":True,
+                "scope":"Actual isolated macOS LaunchAgent and HTTPS; pending request seeded before the backend could run."
+            },indent=2)+"\n")
 
     def test_isolated_router_restart_preserves_task_and_receipt_over_https(self):
         root = Path(self.enterContext(TemporaryDirectory(prefix="mowulink-ops-test-"))).resolve()

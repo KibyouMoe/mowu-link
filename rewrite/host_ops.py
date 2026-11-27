@@ -15,12 +15,13 @@ import time
 from urllib.parse import urlsplit
 
 from .messages import valid_guid
-from .storage import Database, encode, require, string, timestamp
+from .storage import Database, Fault, encode, require, string, timestamp
 from .wire import serve_authenticated
 
 
 SERVICE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,191}")
+GENERATION = re.compile(r"[a-f0-9]{64}")
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS restarts (
  request_id TEXT PRIMARY KEY, service TEXT NOT NULL, actor TEXT NOT NULL,
@@ -28,6 +29,9 @@ CREATE TABLE IF NOT EXISTS restarts (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS one_restart_per_service ON restarts(service)
  WHERE json_extract(receipt,'$.state')='accepted';
+CREATE TABLE IF NOT EXISTS restart_observations (
+ request_id TEXT PRIMARY KEY REFERENCES restarts(request_id), observation TEXT NOT NULL
+);
 """
 
 
@@ -170,27 +174,48 @@ class HostOps:
         job = self.jobs[name]
         return {"service":name,"label":job.label,**self.native.observe(job)}
 
+    @staticmethod
+    def record(db,rid):
+        return db.execute("""SELECT r.*,o.observation FROM restarts r
+                          LEFT JOIN restart_observations o USING(request_id) WHERE r.request_id=?""",(rid,)).fetchone()
+
+    @staticmethod
+    def response(row):
+        receipt = json.loads(row["receipt"])
+        if row["observation"]:
+            receipt["reconciliation"] = json.loads(row["observation"])
+        return receipt
+
     def result(self,actor,name,rid):
         with self.db.transaction() as db:
-            row = db.execute("SELECT * FROM restarts WHERE request_id=? AND service=?",(rid,name)).fetchone()
-        require(row and (actor=="host-observer" or row["actor"]==actor),404,"unknown_restart")
-        return json.loads(row["receipt"])
+            row = self.record(db,rid)
+        require(row and row["service"]==name and (actor=="host-observer" or row["actor"]==actor),404,"unknown_restart")
+        return self.response(row)
 
     def begin(self,actor,name,request):
         require(set(request)=={"request_id","expected_generation","reason"} and valid_guid(request["request_id"])
-                and re.fullmatch(r"[a-f0-9]{64}",string(request,"expected_generation"))
+                and GENERATION.fullmatch(string(request,"expected_generation"))
                 and len(string(request,"reason"))<=500,422,"invalid_restart_request")
         rid = request["request_id"]
         with self.lock:
             with self.db.transaction() as db:
-                previous = db.execute("SELECT * FROM restarts WHERE request_id=?",(rid,)).fetchone()
+                previous = self.record(db,rid)
                 if previous:
                     require((previous["service"],previous["actor"],previous["request"])==(name,actor,encode(request)),
                             409,"restart_request_conflict")
-                    return json.loads(previous["receipt"])
-                active = db.execute("SELECT 1 FROM restarts WHERE service=? AND json_extract(receipt,'$.state')='accepted'",
-                                    (name,)).fetchone()
-            require(not active,409,"service_restart_in_progress")
+                    return self.response(previous)
+                blocking = db.execute("""SELECT r.request_id,r.actor,
+                   json_extract(r.receipt,'$.state') AS state FROM restarts r
+                   LEFT JOIN restart_observations o USING(request_id)
+                   WHERE (r.service=? OR json_extract(r.receipt,'$.before.label')=?)
+                     AND json_extract(r.receipt,'$.state') IN ('accepted','unconfirmed')
+                     AND o.request_id IS NULL
+                   ORDER BY state,r.rowid LIMIT 1""",(name,self.jobs[name].label)).fetchone()
+            if blocking:
+                code = ("service_restart_in_progress" if blocking["state"]=="accepted"
+                        else "service_restart_unconfirmed")
+                details = {"blocking_request_id":blocking["request_id"]} if blocking["actor"]==actor else None
+                raise Fault(409,code,details=details)
             before = self.view(name)
             require(before["generation"],409,"service_generation_unconfirmed")
             require(before["generation"]==request["expected_generation"],409,"stale_service_generation")
@@ -201,6 +226,35 @@ class HostOps:
                 db.execute("INSERT INTO restarts VALUES (?,?,?,?,?)",(rid,name,actor,encode(request),encode(receipt)))
             self.pool.submit(self.apply,name,receipt)
         return receipt
+
+    def reconcile(self,actor,name,rid,request):
+        require(set(request)=={"expected_generation"}
+                and GENERATION.fullmatch(string(request,"expected_generation")),422,"invalid_restart_reconciliation")
+        expected = request["expected_generation"]
+        with self.lock, self.db.transaction() as db:
+            row = self.record(db,rid)
+            require(row and (row["actor"],row["service"])==(actor,name),404,"unknown_restart")
+            receipt = self.response(row)
+            require(receipt["state"]=="unconfirmed",409,"restart_is_not_unconfirmed")
+            if observed := receipt.get("reconciliation"):
+                require(observed["after"]["generation"]==expected,409,"restart_reconciliation_conflict")
+                return receipt
+            before = receipt["before"]
+            current = self.view(name)
+            require(current["label"]==before["label"],409,"restart_service_binding_changed")
+            require(current["state"]=="running" and type(current["pid"]) is int
+                    and current["pid"]>0 and current["generation"],409,"service_generation_unconfirmed")
+            require(current["generation"]==expected,409,"stale_service_generation")
+            old_pid = before["pid"]
+            require(expected!=before["generation"],409,"replacement_not_observed")
+            if old_pid is not None:
+                birth = self.native.birth(old_pid)
+                require(birth=="" or (birth and before.get("started") and birth!=before["started"]),
+                        409,"prior_process_exit_unconfirmed")
+            require(self.view(name)==current,409,"service_changed_during_reconciliation")
+            observed = {"state":"replacement_observed","after":current,"observed_at":timestamp(time.time())}
+            db.execute("INSERT INTO restart_observations VALUES (?,?)",(rid,encode(observed)))
+            return {**receipt,"reconciliation":observed}
 
     def apply(self,name,receipt):
         before = receipt["before"]
@@ -240,6 +294,10 @@ class HostOps:
         if len(parts)==7 and parts[5]=="restarts" and method=="GET":
             require(valid_guid(parts[6]),422,"invalid_restart_id")
             return 200,"application/json",self.result(actor,name,parts[6])
+        if len(parts)==8 and parts[5]=="restarts" and parts[7]=="reconcile" and method=="POST":
+            require(owner==name,403,"forbidden")
+            require(valid_guid(parts[6]),422,"invalid_restart_id")
+            return 200,"application/json",self.reconcile(actor,name,parts[6],body)
         require(False,404,"unknown_route")
 
 

@@ -1,0 +1,66 @@
+{
+  "blocked_fresh_uuid": true,
+  "receipt_after_cold_restart": {
+    "actor": "host-maintainer/router",
+    "before": {
+      "generation": "6bdb69cb6dee9fbb9994298471a30856ee3800d056edfabed91ec456261caf06",
+      "label": "org.mowulink.test.reconcile-9885af77-0d97-432d-99a9-effbefa1bb34",
+      "pid": 1529,
+      "service": "router",
+      "started": "Fri Nov 27 11:30:56 2026",
+      "state": "running"
+    },
+    "failure": "maintenance_process_interrupted",
+    "reason": "interrupted isolated operation",
+    "reconciliation": {
+      "after": {
+        "generation": "5f8f38f0ebc7f935f8d825a4af3259e22ac662672df3c2a3f6c8d0278659f1e0",
+        "label": "org.mowulink.test.reconcile-9885af77-0d97-432d-99a9-effbefa1bb34",
+        "pid": 1542,
+        "service": "router",
+        "started": "Fri Nov 27 11:30:58 2026",
+        "state": "running"
+      },
+      "observed_at": "2026-11-27T03:30:58.337191+00:00",
+      "state": "replacement_observed"
+    },
+    "request_id": "e74a6b1a-b827-4614-bc36-fd082c4d986c",
+    "requested_at": "2026-11-27T03:30:57.051696+00:00",
+    "service": "router",
+    "settled_at": "2026-11-27T03:30:57.106609+00:00",
+    "state": "unconfirmed"
+  },
+  "independent_native_replacement": {
+    "state": "running",
+    "pid": 1542,
+    "started": "Fri Nov 27 11:30:58 2026",
+    "generation": "5f8f38f0ebc7f935f8d825a4af3259e22ac662672df3c2a3f6c8d0278659f1e0"
+  },
+  "new_explicit_restart": {
+    "actor": "host-maintainer/router",
+    "after": {
+      "generation": "401a43702071f8dbab07ae5b63429742bf27ba07c27eb75c78b629af2367c363",
+      "label": "org.mowulink.test.reconcile-9885af77-0d97-432d-99a9-effbefa1bb34",
+      "pid": 1574,
+      "service": "router",
+      "started": "Fri Nov 27 11:30:59 2026",
+      "state": "running"
+    },
+    "before": {
+      "generation": "5f8f38f0ebc7f935f8d825a4af3259e22ac662672df3c2a3f6c8d0278659f1e0",
+      "label": "org.mowulink.test.reconcile-9885af77-0d97-432d-99a9-effbefa1bb34",
+      "pid": 1542,
+      "service": "router",
+      "started": "Fri Nov 27 11:30:58 2026",
+      "state": "running"
+    },
+    "reason": "interrupted isolated operation",
+    "request_id": "93854a14-88d4-4e7b-bfb3-575fcec7b29e",
+    "requested_at": "2026-11-27T03:30:58.602085+00:00",
+    "service": "router",
+    "settled_at": "2026-11-27T03:30:59.735385+00:00",
+    "state": "process_replaced"
+  },
+  "reconciliation_preserved_observed_pid": true,
+  "scope": "Actual isolated macOS LaunchAgent and HTTPS; pending request seeded before the backend could run."
+}

@@ -360,6 +360,9 @@ DSH 未收到 Router 的登记回执而宿主已经取消、拒绝或确认不�
 | `GET /v1/ops/services` 或 `GET /v1/ops/services/{name}` | 返回已核对的服务、PID、启动时间和 `generation`。正在换代、已有任务的加载参数不匹配或读不到状态时返回待核。 |
 | `POST /v1/ops/services/{name}/restart` | 传 `request_id`（UUID）、`expected_generation` 和 `reason`。`202` 只表示已登记。重复使用原请求号可查原回执。 |
 | `GET /v1/ops/services/{name}/restarts/{request_id}` | `process_replaced` 表示原 PID 已退出且查到当前新进程。`process_started` 表示已加载的停机项恢复。`not_attempted` 表示操作前状态已变。`unconfirmed` 要按原号核查，重开维护服务不会补做。 |
+| `POST /v1/ops/services/{name}/restarts/{request_id}/reconcile` | 使用原请求号及已观察的新 `expected_generation`。维护身份可记录新进程和旧进程退出的证据。原 `unconfirmed` 结论保留，证据另存于 `reconciliation`。 |
+
+原重启待核时，新请求会返回 `409 service_restart_unconfirmed`，原维护身份可读 `blocking_request_id`。若核实原生维护操作已经收口，并实际观察到同一登记任务的新进程，再用原请求号对账。旧进程仍在或当前代际不匹配时，继续保持待核。对账只记录观察结果，全程沿原请求读取。
 
 进程回执后再查服务自己的接口和状态数据。已加载的 LaunchAgent 重启沿用 launchd 当前配置。维护服务不能为 Desktop 子进程、未登记的网关或其他系统代做启停。生产接管需另核安装归属、明确维护授权及回退路径。复跑 `python3 -B -m unittest -v rewrite.test_host_ops`，测试使用三个临时用户 LaunchAgent，完成后卸载。[隔离回执](evidence/host-ops-launchd.json)
 
@@ -373,6 +376,8 @@ python3 -B -m rewrite.host_ops_cli --connection ./ops-connection.json show gatew
 python3 -B -m rewrite.host_ops_cli --connection ./ops-connection.json restart gateway \
   --request-id "$REQUEST_ID" --expected-generation "$GENERATION" --reason "$MAINTENANCE_REASON"
 python3 -B -m rewrite.host_ops_cli --connection ./ops-connection.json receipt gateway "$REQUEST_ID" --wait-seconds 30
+python3 -B -m rewrite.host_ops_cli --connection ./ops-connection.json reconcile gateway "$REQUEST_ID" \
+  --expected-generation "$OBSERVED_GENERATION"
 ```
 
 若读取仍返回 `accepted`，操作尚待确认。网关的 `process_replaced` 回执确认进程换代。独立检查仍要核原 PID 退出、新进程与原生 `gateway.pid` 以及认证健康接口的 PID 一致，并读实际服务状态。测试 profile 的本机 API adapter 已连接，Hermes 总就绪状态为 `degraded`，线上模型与飞书未参与。

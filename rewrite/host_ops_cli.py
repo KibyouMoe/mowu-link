@@ -31,6 +31,8 @@ def invoke(client,args):
         return client.request("POST",target+"/restart",{"request_id":args.request_id,
             "expected_generation":args.expected_generation,"reason":args.reason})
     route = target+"/restarts/"+args.request_id
+    if args.action=="reconcile":
+        return client.request("POST",route+"/reconcile",{"expected_generation":args.expected_generation})
     deadline = time.monotonic()+args.wait_seconds
     while True:
         receipt = client.request("GET",route)
@@ -55,6 +57,10 @@ def main(argv=None):
     receipt.add_argument("service")
     receipt.add_argument("request_id")
     receipt.add_argument("--wait-seconds",type=int,choices=range(61),metavar="0..60",default=0)
+    reconcile = commands.add_parser("reconcile")
+    reconcile.add_argument("service")
+    reconcile.add_argument("request_id")
+    reconcile.add_argument("--expected-generation",required=True)
     args = parser.parse_args(argv)
     if hasattr(args,"service") and not SERVICE.fullmatch(args.service):
         parser.error("expected a registered maintenance service name")
@@ -68,11 +74,13 @@ def main(argv=None):
     try:
         reply = invoke(client,args)
     except Fault as error:
+        blocking = error.details.get("blocking_request_id")
         print(encode({"error":error.code,"status":error.status,"retryable":error.retryable,
-                      **({"request_id":args.request_id} if hasattr(args,"request_id") else {})}))
+                      **({"request_id":args.request_id} if hasattr(args,"request_id") else {}),
+                      **({"blocking_request_id":blocking} if blocking else {})}))
         return 1
     except OSError:
-        if args.action=="restart":
+        if args.action in ("restart","reconcile"):
             print(encode({"error":"restart_receipt_unconfirmed","request_id":args.request_id}))
         else:
             print(encode({"error":"host_ops_unreachable"}))
