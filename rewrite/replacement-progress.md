@@ -4,6 +4,8 @@
 
 ## 检查点与证据
 
+补齐旧同伴私聊的原生查询与回信。此前实际旧 Router 已确认的私聊能在新库查到，回信却返回 `409 unknown_peer_parent`。隔离复验用实际旧 Router HTTP 建同伴消息并确认，再载入重做 Router。两套实际 DSH AgentLoop 完成从发现归档、读取原文到对端回信的全过程。独立 Codex App Server 也从归档读取并原生调用回信工具。原消息零重投，两次演练均只投递一条新回信、零工单。模型使用本地脚本。第三工位已核拒绝来源和正文查询及冒用原号回信，重复归档号也拒绝用于回信。复跑 `python3 -B -m unittest -v rewrite.test_peers -k original_participants`、`python3 -B -m unittest -v rewrite.test_dsh_native_loop -k archived_peer_conversation`、`python3 -B -m unittest -v rewrite.test_codex_app_server -k reads_migrated_peer`。[DSH 证据](evidence/native-archived-peer-reply.json) · [Codex App Server 证据](evidence/codex-archived-peer-reply.json)
+
 重新取消的 W04 已按具体指令核验。相同 A06 操作键重送保留原回执，自动重试沿用同一清理号。同一派发的下一条显式取消携带新的 `cleanup_id`。Worker 从原生收件识别该号，分别保存等待、清理及 Router 回执。隔离实测第一次迟报、重用旧键、换新键重播旧正文和错号都返回 409。新 W04 落库后故意丢回包，冷启沿原键查回，取消通知一条。复跑 `python3 -B -m unittest -v rewrite.test_cleanup rewrite.test_cutover -k cancel`。[HTTP 与回退实测](evidence/reissued-cancel-w04.json)
 
 用前版 `2490059e42d379183c19b0e82c208f545a3c78ee` 生成的隔离 Router、Worker 和适配器库做了升级。仅一次待确认的旧取消可以正常完成，已经成功的旧回执可沿原键回读。旧版已重复取消而未记录清理号时，拒绝无号回执，须由管理端发新指令。回退核对新指令及 W04 的同一清理号，缺号拒绝发布。[旧库升级](evidence/reissued-cancel-upgrade.json) · [回退演练](evidence/cutover-reviewed-cancel-retry.json)

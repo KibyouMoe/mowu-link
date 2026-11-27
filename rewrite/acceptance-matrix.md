@@ -73,7 +73,7 @@
 | `submit_deliverable` | Agent `worker_report` 经 W04，待溪流验收 | 真实 DSH 与隔离 Codex App Server 的原生工具协议通过，模型为本地脚本。Desktop 工具注册和真实模型验收仍缺独立工位。 |
 | `bridge_list_workers` | 原生 `worker_list_peers` | 真 DSH 已查询对端。单独登记、在线和权限筛选已核。 |
 | `bridge_send_worker_message` | 原生 `worker_send_peer` 与三层收件查询 | 两个独立 DSH 实例互发及回原消息通过，模型为本地驱动。需要授权的实际跨宿主工位。 |
-| `bridge_worker_inbox` | 原生 `worker_peer_inbox` 的待办和回复历史 | 真实 DSH 查原信后关联回复，游标和只读性有回归。需 Codex 工具实机复验。 |
+| `bridge_worker_inbox` | 原生 `worker_peer_inbox` 的待办、回复历史和迁入归档 | 实际 DSH 和独立 Codex App Server 已通过原生工具发现归档、读原信并沿原号回信。第三工位不可读，历史不重投。两端模型用脚本，真实登录模型及 Desktop 仍待核。[DSH](evidence/native-archived-peer-reply.json) · [Codex App Server](evidence/codex-archived-peer-reply.json) |
 
 ## 旧命令、审批与维护的实际边界
 

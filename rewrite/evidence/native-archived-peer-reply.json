@@ -1,0 +1,32 @@
+{
+  "old_router_create": 202,
+  "old_router_ack": 200,
+  "archive_id": "46d1de76-6837-4e83-b199-a10356616896",
+  "old_message_id": "9dcf9263-655e-47a4-9605-42903359098c",
+  "old_database_sha256": "8dc8573450ec45a4d56b73a985b5726f2b6175b19302c96a25d39f6338824e7d",
+  "worker_native_calls": [
+    "worker_peer_inbox",
+    "worker_peer_inbox",
+    "worker_peer_inbox",
+    "worker_send_peer"
+  ],
+  "reply_to": "9dcf9263-655e-47a4-9605-42903359098c",
+  "reply_router": {
+    "accepted_at": "2027-01-15T08:00:00+00:00",
+    "delivery_id": "b07330ec-8bd5-4ac5-9105-bf0075a0b7d8",
+    "host_receipt_id": "b9954fb5-3a51-50f9-b7ab-07af834ece87",
+    "host_receipt_recorded_at": "2027-01-15T08:00:00+00:00",
+    "message_id": "9b0a454b-5844-57a9-a4e2-193bbe9796d5",
+    "recipient": "tama",
+    "sender": "oguri",
+    "worker_received": true
+  },
+  "reply_native_input": "mowulink-2e24fac9f5e35328d6bf3da409c1d55bbe6047cf038b634ff1ad0895659c4875",
+  "reply_tool_call": "peer-archive-3",
+  "recipient_session": "dsh-peer-archive-recipient",
+  "sender_session": "dsh-peer-archive-original-sender",
+  "repeated_tool_returns_same_receipt": true,
+  "old_native_redeliveries": 0,
+  "formal_tasks": 0,
+  "boundary": "Actual old and new Router HTTP, archived import and two installed DSH AgentLoops. Scripted local model."
+}

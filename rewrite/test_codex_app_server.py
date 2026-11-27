@@ -26,11 +26,13 @@ from .codex_display import CodexDisplay
 from .codex_provision import SEED
 from .codex_rpc import NativeRpcRejected, start_app_server
 from .codex_thread_preparation import CodexThreadPreparation
+from .cutover import digest
 from .devloop import FixtureHost, Loop
 from .feishu_inbound import Inbound
 from .feishu_output import Views
 from .hermes import HermesAdapter
 from .host_wire import RemoteAdapter, serve_adapter
+from .legacy_test_fixture import import_acked_peer
 from .native_files import NativeFiles
 from .orders import Orders
 from .question_cards import Actions
@@ -53,6 +55,7 @@ KEEP_FORMAL_HELD = "Keep the isolated order held until an update"
 LINK_OUTAGE_FIXTURE = "Continue this isolated assignment through a link outage"
 CLEANUP_FIXTURE = "Wait for the original assignment control"
 TRAINER_CARD_FIXTURE = "Publish a standalone trainer test question"
+PEER_ARCHIVE_FIXTURE = "Read and answer the migrated peer fixture"
 TRAINER_CARD_QUESTIONS = [{"title":"Which isolated route?","options":["North","South"]},
                           {"title":"Leave a note"},{"title":"Optional note"}]
 
@@ -60,6 +63,32 @@ TRAINER_CARD_QUESTIONS = [{"title":"Which isolated route?","options":["North","S
 class Provider(BaseHTTPRequestHandler):
     def log_message(self,*args):
         pass
+
+    def archived_peer_item(self, after):
+        def read(index):
+            value = returned[f"fixture_archive_{index}"]
+            if isinstance(value,list):
+                value = "".join(section["text"] for section in value)
+            return json.loads(value)
+        returned = {item["call_id"]:item["output"] for item in after if item.get("type")=="function_call_output"}
+        step = len(returned)
+        tool = "worker_peer_inbox"
+        if step==0:
+            args = {"view":"legacy"}
+        elif step==1:
+            args = {"view":"legacy","source_id":read(0)["items"][0]["source_id"]}
+        elif step==2:
+            page = read(1)
+            args = {"view":"legacy","source_id":page["source_id"],"message_id":page["items"][0]["message_id"]}
+        elif step==3:
+            message = read(2)["message"]
+            tool = "worker_send_peer"
+            args = {"to_worker":message["sender"],"reply_to":message["message_id"],"text":"A Codex reply after migration"}
+        else:
+            return {"id":"msg_archived_peer_done","type":"message","role":"assistant","status":"completed",
+                    "content":[{"type":"output_text","text":"The isolated reply was accepted."}]}
+        return {"type":"function_call","id":f"fc_archive_{step}","name":tool,
+                "call_id":f"fixture_archive_{step}","arguments":encode(args)}
 
     def formal_goal_item(self,run,payload,after,names,continuation):
         def call(tool,cid,args):
@@ -237,6 +266,8 @@ class Provider(BaseHTTPRequestHandler):
                 ])
             item = {"type":"function_call","id":"fc_trainer_"+trainer_prompt,"name":"request_user_input",
                     "call_id":"native_trainer_"+trainer_prompt,"arguments":encode({"questions":native_questions})}
+        elif any(block.get("text")==PEER_ARCHIVE_FIXTURE for block in latest):
+            item = self.archived_peer_item(items[user_index+1:])
         elif peer and not calls:
             item = {"type":"function_call","id":"fc_peer","name":"worker_send_peer","call_id":"native_peer_fixture",
                     "arguments":peer.split("\n",1)[1]}
@@ -3016,6 +3047,63 @@ class CodexAppServer(unittest.TestCase):
         self.evidence = {"thread_id":sid,"turn_id":turn,"events":events,"tool_receipt_replayed":tool_acks[1],
                          "private_arguments_omitted":True,"early_cards":3,"card_titles":card_titles(),
                          "boundary":"Actual App Server command execution in an isolated test directory; model and Feishu fixtures"}
+
+    @unittest.skipUnless(os.name=="posix","the legacy Router test fixture requires fcntl")
+    def test_codex_native_tool_reads_migrated_peer_and_replies_on_the_original_link(self):
+        rpc = self.enterContext(isolated_app_server(self.root,self.origin))
+        names = {"worker_peer_inbox","worker_send_peer"}
+        tools = [item for item in TOOLSET if item["name"] in names]
+        sid = rpc.request("thread/start",{"cwd":self.root,"ephemeral":False,"dynamicTools":tools})["thread"]["id"]
+        host = AppServerHost(rpc,sid)
+        host.session = sid
+        clock = Clock()
+        loop = self.enterContext(Loop.isolated(clock,host_factory=lambda _path,_name:host,extra_workers=["tama"]))
+        sender_host = FixtureHost(loop.root/"original-sender.db","original-sender-session")
+        sender = Worker(loop.root/"original-sender-worker.db","tama",loop.extra_clients["tama"],
+                        HostAdapter(loop.root/"original-sender-adapter.db",sender_host,sender_host.session),clock=clock)
+        archive,mid = guid(),guid()
+        legacy_db,legacy_sha = import_acked_peer(loop,archive,mid)
+        adapter_key = guid()
+        server = WorkerService(loop.worker,clock).listen({adapter_key:"adapter/oguri"},("127.0.0.1",0),None)
+        adapter = Client(self.enterContext(running(server)),adapter_key)
+        finished = Event()
+        self.enterContext(worker_callbacks(host,adapter,finished.set))
+        sender.connect()
+        loop.worker.connect()
+        self.assertFalse([frame for frame in loop.wire.frames(0) if frame["kind"]=="peer.message"])
+        chat = guid()
+        receipt = loop.worker.chat(chat,PEER_ARCHIVE_FIXTURE)
+        deadline = time.monotonic()+6
+        while receipt is None and time.monotonic()<deadline:
+            time.sleep(.02)
+            receipt = loop.worker.chat(chat,PEER_ARCHIVE_FIXTURE)
+        self.assertIsNotNone(receipt)
+        self.assertTrue(finished.wait(12))
+        turn, = host.thread(sid,include_turns=True)["turns"]
+        calls = [entry for entry in turn["items"] if entry["type"]=="dynamicToolCall"]
+        self.assertEqual([entry["tool"] for entry in calls],["worker_peer_inbox"]*3+["worker_send_peer"])
+        self.assertTrue(all(call["success"] for call in calls),calls)
+        scopes,page,original,reply = [json.loads(call["contentItems"][0]["text"]) for call in calls]
+        self.assertEqual(scopes["items"],[{"source_id":archive}])
+        self.assertEqual(page["items"][0]["message_id"],mid)
+        self.assertEqual(original["text"],"Old Router original text")
+        self.assertTrue(original["message"]["acked_at"])
+        self.assertEqual((calls[-1]["arguments"]["reply_to"],calls[-1]["arguments"]["to_worker"]),(mid,"tama"))
+        sender.poll()
+        sender.poll()
+        (payload,native), = sender_host.entries()
+        self.assertEqual((payload["reply_to"],payload["message_id"]),(mid,reply["message_id"]))
+        status = sender.router.request("GET","peers/messages/"+reply["message_id"])
+        self.assertTrue(status["host_receipt_id"])
+        self.assertFalse(loop.hermes.tasks()["items"])
+        self.assertEqual(digest(legacy_db),legacy_sha)
+        if output := os.environ.get("MOWULINK_CODEX_ARCHIVED_PEER_EVIDENCE"):
+            Path(output).write_text(json.dumps({"old_router_create":202,"old_router_ack":200,"archive_id":archive,
+                "old_message_id":mid,"native_thread":sid,"native_turn":turn["id"],
+                "native_input":receipt["native_id"],"native_tool_calls":[{"name":call["tool"],"id":call["id"]} for call in calls],
+                "reply_router":status,"reply_native_input":native["native_id"],"old_native_redeliveries":0,"formal_tasks":0,
+                "boundary":"Actual old and new Router HTTP and bundled isolated Codex App Server. Scripted loopback model and reply-target host fixture."},
+                ensure_ascii=False,indent=2)+"\n")
 
     def test_native_tool_publishes_standalone_question_and_accepts_answer_once(self):
         self.provider.standalone_received = []

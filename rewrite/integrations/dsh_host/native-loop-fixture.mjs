@@ -264,6 +264,38 @@ class LocalModel extends LlmAdapter {
       yield {type:'finish',reason:{kind:'tool-calls'}};
       return;
     }
+    if (mode==='peer-archive' && text==='Read and answer the migrated peer fixture') {
+      const previous = id => {
+        const entry = messages.findLast(message=>message.toolCallId===id);
+        return JSON.parse(entry.content[0].text);
+      };
+      const step = this.submitted.get(message.id) ?? 0;
+      let name = 'worker_peer_inbox';
+      let args;
+      if (step===0) {
+        args = {view:'legacy'};
+      } else if (step===1) {
+        const [source] = previous('peer-archive-0').items;
+        args = {view:'legacy',source_id:source.source_id};
+      } else if (step===2) {
+        const page = previous('peer-archive-1');
+        const [item] = page.items;
+        args = {view:'legacy',source_id:page.source_id,message_id:item.message_id};
+      } else if (step===3) {
+        const original = previous('peer-archive-2').message;
+        name = 'worker_send_peer';
+        args = {to_worker:original.sender,reply_to:original.message_id,text:'A native reply after migration'};
+      }
+      if (args) {
+        this.submitted.set(message.id,step+1);
+        assert.ok(tools?.some(tool=>tool.name===name));
+        yield {type:'block-start',index:0,blockType:'tool-call'};
+        yield {type:'block-end',index:0,block:{type:'tool-call',id:'peer-archive-'+step,
+          name,arguments:JSON.stringify(args)}};
+        yield {type:'finish',reason:{kind:'tool-calls'}};
+        return;
+      }
+    }
     if (standalone && text.startsWith('Standalone trainer fixture\n') && !this.submitted.has(message.id)) {
       this.submitted.set(message.id,true);
       assert.ok(tools.some(tool=>tool.name==='worker_ask_trainer'));
@@ -853,7 +885,7 @@ async function formalScenario(agent) {
 try {
   const agent = await setup();
   if (['formal','formal-reopen','formal-artifacts','compact','questions','foreground-question','catalog','private-stop','work-question','admission-race',
-       'binding-close','material','peer-source'].includes(mode) || isCold || isManaged || usesGoals || usesMedia
+       'binding-close','material','peer-source','peer-archive'].includes(mode) || isCold || isManaged || usesGoals || usesMedia
        || usesApprovals || usesCleanup || foregroundRelay || standalone) {
     await formalScenario(agent);
   }

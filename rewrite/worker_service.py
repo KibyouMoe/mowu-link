@@ -293,8 +293,7 @@ class WorkerService:
                 elif body["tool"] == "worker_list_peers":
                     result = self.peer_directory(args)
                 else:
-                    require(set(args)<={"view","after"},422,"invalid_arguments")
-                    result = w.peer_inbox(args.get("view","pending"),args.get("after",0))
+                    result = self.peer_inbox(args)
             else:
                 require(body.get("tool") == "worker_report" and set(args) <= {"task_id","assignment_id","summary","outcome","artifact_ids"},
                         422,"unsupported_native_tool")
@@ -386,6 +385,27 @@ class WorkerService:
                 "status":"accepted" if ack else states.get(row["phase"],"unknown"),
                 "accepted_at":ack["accepted_at"] if ack else None,"worker_received":None,
                 "host_receipt_id":None,"local_failure":row["failure"]}
+
+    def peer_inbox(self,args):
+        view = args.get("view","pending")
+        if view!="legacy":
+            require(set(args)<={"view","after"},422,"invalid_arguments")
+            return self.worker.peer_inbox(view,args.get("after",0))
+        source,mid = args.get("source_id"),args.get("message_id")
+        if "source_id" in args:
+            require(valid_guid(source),422,"invalid_legacy_source")
+        if "message_id" in args:
+            require(source and valid_guid(mid) and set(args)<={"view","source_id","message_id","part"},
+                    422,"invalid_arguments")
+            part = args.get("part",0)
+            require(type(part) is int and 0<=part<10**18,422,"invalid_history_part")
+            return self.worker.router.request("GET",f"history/{source}/peers/{mid}?part={part}")
+        require(set(args)<={"view","source_id","after","limit"},422,"invalid_arguments")
+        after,limit = args.get("after",0),args.get("limit",50)
+        require(type(after) is int and 0<=after<10**18 and type(limit) is int and 1<=limit<=100,
+                422,"invalid_history_filter")
+        route = f"history/{source}/peers" if source else "history/peers"
+        return self.worker.router.request("GET",route+"?"+urlencode({"cursor":after,"limit":limit}))
 
     def peer_status(self,mid):
         require(valid_guid(mid),422,"invalid_peer_message")

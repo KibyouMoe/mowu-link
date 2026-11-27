@@ -55,6 +55,71 @@ class Peers(unittest.TestCase):
         self.addCleanup(srv.shutdown)
         return Client("http://127.0.0.1:"+str(srv.server_port),token)
 
+    def test_original_participants_can_read_and_answer_one_unambiguous_archived_peer(self):
+        source,duplicate,parent,unrelated = (guid() for _ in range(4))
+        with self.loop.orders.db.transaction() as db:
+            db.executemany("INSERT INTO history_sources VALUES (?,?)",[(source,"a"*64),(duplicate,"b"*64)])
+            db.execute("INSERT INTO history_peers VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                       (source,parent,1,"tama","oguri","worker/tama","worker/oguri",None,None,1,2,None,2))
+            db.execute("INSERT INTO history_peers VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                       (duplicate,unrelated,1,"tama","other","worker/tama","worker/other",None,None,1,2,None,1))
+            db.executemany("INSERT INTO history_peer_text VALUES (?,?,?,?)",
+                           [(source,parent,0,"Archived part 1"),(source,parent,1,"Archived part 2")])
+        foreign = self.loop.extra_clients["other"]
+        foreign.request("PUT","workers/other/session",{"session_id":"third-session"},guid())
+        self.assertEqual(foreign.request("GET","history/peers")["items"],[{"source_id":duplicate}])
+        with self.assertRaisesRegex(Fault,"legacy_source_not_found"):
+            foreign.request("GET",f"history/{source}/peers")
+        with self.assertRaisesRegex(Fault,"legacy_peer_not_found"):
+            foreign.request("GET",f"history/{source}/peers/{parent}")
+        body = {"session_id":"third-session","message_id":guid(),"text":"Wrong participant","reply_to":parent}
+        with self.assertRaisesRegex(Fault,"unknown_peer_parent"):
+            foreign.request("POST","peers/tama/messages",body,guid())
+        self.assertEqual(self.loop.manager_wire.request("GET","history/peers")["items"],[])
+        with self.assertRaisesRegex(Fault,"unknown_peer_parent"):
+            self.b.send_peer(guid(),"oguri","Wrong direction for a reply",parent)
+
+        turn = self.a.chat(guid(),"Inspect my old conversation")
+        adapter = self.adapter_client(self.a)
+        caller = {"session":turn["session"],"turn_id":turn["turn_id"],"call_id":"archive-read","tool":"worker_peer_inbox"}
+        def inquire(**args):
+            return adapter.request("POST","worker/native-tool",dict(caller,arguments={"view":"legacy",**args}))
+        self.assertEqual(inquire()["items"],[{"source_id":source}])
+        first_page = self.b.router.request("GET","history/peers?limit=1")
+        self.assertEqual(first_page["items"],[{"source_id":source}])
+        self.assertEqual(self.b.router.request("GET",f"history/peers?cursor={first_page['next_cursor']}")["items"],
+                         [{"source_id":duplicate}])
+        item, = inquire(source_id=source,limit=1)["items"]
+        self.assertEqual((item["message_id"],item["acked_at"]),(parent,2))
+        read = inquire(source_id=source,message_id=parent)
+        self.assertEqual((read["text"],read["next_part"]),("Archived part 1",1))
+        read = inquire(source_id=source,message_id=parent,part=1)
+        self.assertEqual((read["text"],read["next_part"]),("Archived part 2",None))
+        with self.assertRaisesRegex(Fault,"invalid_arguments"):
+            inquire(message_id=parent)
+        with self.assertRaisesRegex(Fault,"invalid_history_filter"):
+            inquire(limit=True)
+        self.assertFalse([frame for frame in self.b.router.frames(0) if frame["kind"]=="peer.message"])
+
+        send = {"to_worker":"tama","reply_to":parent,"text":"Only the new reply"}
+        callback = dict(caller,call_id="archive-reply",tool="worker_send_peer",arguments=send)
+        receipt = adapter.request("POST","worker/native-tool",callback)
+        self.assertEqual(adapter.request("POST","worker/native-tool",callback),receipt)
+        self.b.poll()
+        self.b.poll()
+        self.assertEqual(len(self.host.entries()),1)
+        latest = self.host.entries()[0][0]
+        self.assertEqual((latest["message_id"],latest["reply_to"]),(receipt["message_id"],parent))
+        self.assertTrue(self.a.router.request("GET","peers/messages/"+receipt["message_id"])["host_receipt_id"])
+        self.assertFalse(self.loop.hermes.tasks()["items"])
+
+        with self.loop.orders.db.transaction() as db:
+            db.execute("""INSERT INTO history_peers SELECT ?,message_id,2,sender,recipient,sender_actor,recipient_actor,
+                          reply_to,task_id,created_at,acked_at,abandoned_at,text_parts FROM history_peers
+                          WHERE source_id=? AND message_id=?""",(duplicate,source,parent))
+        with self.assertRaisesRegex(Fault,"unknown_peer_parent"):
+            self.a.send_peer(guid(),"tama","Ambiguous parent",parent)
+
     def test_sender_distinguishes_router_worker_and_host_even_after_receipt_loss(self):
         mid = guid()
         self.a.send_peer(mid,"tama","请确认收件")

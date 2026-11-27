@@ -20,6 +20,15 @@ CREATE INDEX IF NOT EXISTS peer_delivery_lookup ON deliveries(consumer,json_extr
 """
 
 
+def reply_parent(db, mid, sender, target):
+    live = db.execute("SELECT sender,recipient FROM peer_messages WHERE message_id=?",(mid,)).fetchone()
+    if live:
+        return tuple(live)==(target,sender)
+    archived = db.execute("""SELECT sender_actor,recipient_actor FROM history_peers
+                             WHERE message_id=? LIMIT 2""",(mid,)).fetchall()
+    return len(archived)==1 and tuple(archived[0])==("worker/"+target,"worker/"+sender)
+
+
 def submit(db, sender, target, body, now):
     require(set(body) <= {"message_id","text","reply_to","session_id","attachment_ids","attachment_kinds"},422,"invalid_peer_message")
     mid,text = string(body,"message_id"),body.get("text")
@@ -33,9 +42,7 @@ def submit(db, sender, target, body, now):
     require(db.execute("SELECT 1 FROM workers WHERE worker_id=?", (target,)).fetchone(),404,"peer_not_registered")
     parent = body.get("reply_to")
     if parent is not None:
-        require(valid_guid(parent) and db.execute(
-            "SELECT 1 FROM peer_messages WHERE message_id=? AND sender=? AND recipient=?",
-            (parent,target,sender)).fetchone(),409,"unknown_peer_parent")
+        require(valid_guid(parent) and reply_parent(db,parent,sender,target),409,"unknown_peer_parent")
     previous = db.execute("SELECT * FROM peer_messages WHERE message_id=?", (mid,)).fetchone()
     if previous:
         stored = db.execute("SELECT attachment_id,kind FROM peer_files WHERE message_id=? ORDER BY position",(mid,)).fetchall()

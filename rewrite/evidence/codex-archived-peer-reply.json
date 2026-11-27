@@ -1,0 +1,41 @@
+{
+  "old_router_create": 202,
+  "old_router_ack": 200,
+  "archive_id": "530025cc-c7fd-471b-b674-8ae85de24e41",
+  "old_message_id": "73721c0a-45e1-4254-85c7-3ecd5814780c",
+  "native_thread": "01a21a7c-96fb-7951-9952-1699a958174a",
+  "native_turn": "01a21a7c-97cd-7b83-bc15-7c7f37fec910",
+  "native_input": "01a21a7c-97d6-7220-a225-691599dd50f0",
+  "native_tool_calls": [
+    {
+      "name": "worker_peer_inbox",
+      "id": "fixture_archive_0"
+    },
+    {
+      "name": "worker_peer_inbox",
+      "id": "fixture_archive_1"
+    },
+    {
+      "name": "worker_peer_inbox",
+      "id": "fixture_archive_2"
+    },
+    {
+      "name": "worker_send_peer",
+      "id": "fixture_archive_3"
+    }
+  ],
+  "reply_router": {
+    "accepted_at": "2027-01-15T08:00:00+00:00",
+    "delivery_id": "8d2ecb30-eddd-44a8-8fb0-8b1c3b42c497",
+    "host_receipt_id": "b9a61434-b389-56f0-ae11-a32eb95043fe",
+    "host_receipt_recorded_at": "2027-01-15T08:00:00+00:00",
+    "message_id": "5551810e-2adb-5bee-a729-a22f72cab265",
+    "recipient": "tama",
+    "sender": "oguri",
+    "worker_received": true
+  },
+  "reply_native_input": "0d01a5d5-0266-483a-a9e7-0d7d75679bdf",
+  "old_native_redeliveries": 0,
+  "formal_tasks": 0,
+  "boundary": "Actual old and new Router HTTP and bundled isolated Codex App Server. Scripted loopback model and reply-target host fixture."
+}

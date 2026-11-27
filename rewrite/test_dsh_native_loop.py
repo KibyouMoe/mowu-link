@@ -27,6 +27,7 @@ from .adapter import HostAdapter
 from .approvals import TTL_SECONDS
 from .codex_app_server import AppServerHost, worker_callbacks
 from .codex_display import CodexDisplay
+from .cutover import digest
 from .devloop import FixtureHost, Loop
 from .dsh_display import DshDisplay
 from .dsh_local_link import LocalLink
@@ -35,6 +36,7 @@ from .dsh_session_family import DshPreparation
 from .feishu_inbound import Inbound
 from .feishu_output import Views
 from .host_wire import RemoteAdapter, serve_adapter
+from .legacy_test_fixture import import_acked_peer
 from .native_files import NativeFiles
 from .orders import Orders
 from .release_check import config, serve
@@ -4028,6 +4030,61 @@ exec {docker} "$@"
                 "reply_to":native_reply["reply_to"],"router_receipts":receipts,"image_sha256":sha,
                 "formal_task_count":0,"clock":"controlled test clock",
                 "boundary":"Two actual DSH AgentLoop processes with scripted local providers"}
+
+    def test_archived_peer_conversation_resumes_via_two_dsh_native_sessions(self):
+        directory,loop,service,_ = self.goal_worker("dsh-peer-archive-recipient",extra_workers=["tama"])
+        peer_dir = self.enterContext(tempfile.TemporaryDirectory(dir="/tmp",prefix="mldsh-archive-peer-"))
+        source_session = "dsh-peer-archive-original-sender"
+        recipient_session = loop.adapter.bound_session()
+        sender_adapter = HostAdapter(loop.root/"legacy-peer-sender-adapter.db",DshHost(Path(peer_dir)),source_session)
+        sender = Worker(loop.root/"legacy-peer-sender.db","tama",loop.extra_clients["tama"],sender_adapter)
+        a,b = guid(),guid()
+        source = Client(self.open_worker(WorkerService(sender,service.clock),{a:"adapter/tama"}),a)
+        target = Client(self.open_worker(service,{b:"adapter/oguri"}),b)
+        self.enterContext(tool_listener(Path(peer_dir),sender_adapter,source))
+        self.enterContext(tool_listener(Path(directory),loop.adapter,target))
+        mid,archive = guid(),guid()
+        legacy_db,legacy_sha = import_acked_peer(loop,archive,mid)
+        with (self.start_native(peer_dir,source_session,"peer-source") as sender_host,
+              self.start_native(directory,recipient_session,"peer-archive") as recipient_host):
+            sender.connect()
+            loop.worker.connect()
+            self.assertEqual(self.read_native(recipient_host,"read")["inputs"],[])
+            self.assertEqual(self.read_native(sender_host,"read")["inputs"],[])
+            prompted = loop.worker.chat(guid(),"Read and answer the migrated peer fixture")
+            received = self.read_native(recipient_host,"read")
+            self.assertEqual(received["inputs"],[prompted["native_id"]])
+            self.assertEqual([c["name"] for c in received["calls"]],["worker_peer_inbox"]*3+["worker_send_peer"])
+            scopes,page,original,reply = [json.loads(result["content"][0]["text"]) for result in received["results"]]
+            self.assertEqual(scopes["items"],[{"source_id":archive}])
+            self.assertEqual(page["items"][0]["message_id"],mid)
+            self.assertEqual(original["text"],"Old Router original text")
+            self.assertTrue(original["message"]["acked_at"])
+            call = received["calls"][-1]
+            args = json.loads(call["arguments"])
+            callback = {"session":recipient_session,"turn_id":prompted["turn_id"],"call_id":call["callId"],
+                        "tool":"worker_send_peer","arguments":args}
+            self.assertEqual(target.request("POST","worker/native-tool",callback),reply)
+            sender.poll()
+            answered = self.read_native(sender_host,"read")
+            sender.poll()
+            self.assertEqual(self.read_native(sender_host,"read")["inputs"],answered["inputs"])
+            native, = answered["inputs"]
+            with sender_adapter.db.transaction() as db:
+                payload = json.loads(db.execute("SELECT payload FROM intents WHERE native_id=?",(native,)).fetchone()[0])
+            self.assertEqual((payload["message_id"],payload["reply_to"]),(reply["message_id"],mid))
+            receipt = sender.router.request("GET","peers/messages/"+reply["message_id"])
+            self.assertTrue(receipt["host_receipt_id"])
+            self.assertFalse(loop.hermes.tasks()["items"])
+            self.assertEqual(digest(legacy_db),legacy_sha)
+            if output := os.environ.get("MOWULINK_NATIVE_ARCHIVED_PEER_EVIDENCE"):
+                Path(output).write_text(json.dumps({"old_router_create":202,"old_router_ack":200,"archive_id":archive,
+                    "old_message_id":mid,"old_database_sha256":legacy_sha,"worker_native_calls":[c["name"] for c in received["calls"]],
+                    "reply_to":payload["reply_to"],"reply_router":receipt,"reply_native_input":native,
+                    "reply_tool_call":call["callId"],"recipient_session":recipient_session,"sender_session":source_session,
+                    "repeated_tool_returns_same_receipt":True,"old_native_redeliveries":0,"formal_tasks":0,
+                    "boundary":"Actual old and new Router HTTP, archived import and two installed DSH AgentLoops. Scripted local model."},
+                    ensure_ascii=False,indent=2)+"\n")
 
     @unittest.skipUnless(codex_driver.CODEX.is_file(),"bundled Codex App Server required")
     def test_codex_and_dsh_roundtrip_native_peer_image_and_linked_reply(self):

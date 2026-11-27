@@ -106,19 +106,37 @@ def number(filters,key,default,maximum):
     return int(value)
 
 
+def page_args(filters):
+    require(filters.keys()<={"cursor","limit"},422,"invalid_history_filter")
+    cursor,limit = number(filters,"cursor",0,10**18-1),number(filters,"limit",50,100)
+    require(limit>0,422,"invalid_history_filter")
+    return cursor,limit
+
+
+def sources(db, who, filters):
+    require(who=="hermes" or who.startswith("worker/"),403,"forbidden")
+    cursor,limit = page_args(filters)
+    rows = db.execute("""SELECT s.rowid AS cursor,s.source_id FROM history_sources s
+        WHERE s.rowid>? AND EXISTS (SELECT 1 FROM history_peers p WHERE p.source_id=s.source_id
+          AND (p.sender_actor=? OR p.recipient_actor=?))
+        ORDER BY s.rowid LIMIT ?""",(cursor,who,who,limit+1)).fetchall()
+    return {"items":[{"source_id":r["source_id"]} for r in rows[:limit]],
+            "next_cursor":rows[limit-1]["cursor"] if len(rows)>limit else None}
+
+
 def query(db,who,src,mid,filters):
     require(who=="hermes" or who.startswith("worker/"),403,"forbidden")
     require(valid_guid(src),422,"invalid_legacy_source")
-    origin = db.execute("SELECT legacy_db_sha256 FROM history_sources WHERE source_id=?",(src,)).fetchone()
-    require(origin,404,"legacy_source_not_found")
+    origin = db.execute("""SELECT s.legacy_db_sha256 FROM history_sources s WHERE s.source_id=?
+        AND EXISTS (SELECT 1 FROM history_peers p WHERE p.source_id=s.source_id
+          AND (p.sender_actor=? OR p.recipient_actor=?))""",(src,who,who)).fetchone()
+    require(origin,404,"legacy_source_not_found" if mid is None else "legacy_peer_not_found")
     result = {"source_id":src,"legacy_db_sha256":origin[0]}
     select = """SELECT seq,message_id,sender,recipient,reply_to,task_id,created_at,acked_at,abandoned_at,text_parts
                 FROM history_peers WHERE source_id=? AND (sender_actor=? OR recipient_actor=?)"""
     binding = (src,who,who)
     if mid is None:
-        require(filters.keys()<={"cursor","limit"},422,"invalid_history_filter")
-        cursor,limit = number(filters,"cursor",0,10**18-1),number(filters,"limit",50,100)
-        require(limit>0,422,"invalid_history_filter")
+        cursor,limit = page_args(filters)
         rows = db.execute(select+" AND seq>? ORDER BY seq LIMIT ?",(*binding,cursor,limit+1)).fetchall()
         return {**result,"items":[dict(r) for r in rows[:limit]],"next_cursor":rows[limit-1]["seq"] if len(rows)>limit else None}
     require(valid_guid(mid) and filters.keys()<={"part"},422,"invalid_history_filter")
