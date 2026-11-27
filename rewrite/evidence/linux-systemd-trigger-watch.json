@@ -1,0 +1,112 @@
+{
+  "release": {
+    "files": 390,
+    "revision": "f67a57735ee6a970f6b123d435312d5e466532e7",
+    "sha256": "2434c476e977901555dced85368bbf09380652d49a224d2437e056ed43993835"
+  },
+  "regressions": {
+    "linux_arm64": {
+      "passed": 8,
+      "skipped": 0,
+      "historical_excluded": 4
+    },
+    "macos": {
+      "passed": 31,
+      "skipped": 1,
+      "historical_excluded": 4
+    }
+  },
+  "temporary_units_unloaded": true,
+  "after": {
+    "issues": [],
+    "ready": true,
+    "snapshot_id": "0934094e-56c0-4257-ba58-9f1c3ecbaa06",
+    "source_revision": "f67a57735ee6a970f6b123d435312d5e466532e7",
+    "sources": [
+      {
+        "archived": 2,
+        "component": "trigger:game",
+        "instance_id": "f96eaf07-5121-4b6a-ab34-1bcee43b5629",
+        "settled": 2
+      }
+    ]
+  },
+  "attachment_bytes": 251,
+  "before": {
+    "issues": [
+      {
+        "code": "awaiting_router_message",
+        "instance_id": "f96eaf07-5121-4b6a-ab34-1bcee43b5629",
+        "message_id": "7d738a94-416f-4b6a-bed8-a487c954b211"
+      },
+      {
+        "code": "awaiting_local_receipt",
+        "instance_id": "f96eaf07-5121-4b6a-ab34-1bcee43b5629",
+        "message_id": "afaeb820-2ee9-4156-8191-ba84d4c7c2ba"
+      }
+    ],
+    "ready": false,
+    "snapshot_id": "608e19de-f5e3-4fa0-9a19-7440c828271b",
+    "source_revision": "f67a57735ee6a970f6b123d435312d5e466532e7",
+    "sources": [
+      {
+        "archived": 2,
+        "component": "trigger:game",
+        "instance_id": "f96eaf07-5121-4b6a-ab34-1bcee43b5629",
+        "settled": 0
+      }
+    ]
+  },
+  "boundary": "Independent Trigger process, SQLite and HTTPS Router; game bridge fixture.",
+  "first_received_at": "2026-11-27T08:59:14.323124+00:00",
+  "instance_id": "f96eaf07-5121-4b6a-ab34-1bcee43b5629",
+  "local_message_ids": [
+    "afaeb820-2ee9-4156-8191-ba84d4c7c2ba",
+    "7d738a94-416f-4b6a-bed8-a487c954b211"
+  ],
+  "main_pids": [
+    961668,
+    961685
+  ],
+  "normal_systemd_stops": 2,
+  "notifications": 1,
+  "online_snapshot_refused": true,
+  "post_attempts": [
+    [
+      "afaeb820-2ee9-4156-8191-ba84d4c7c2ba",
+      "message-afaeb820-2ee9-4156-8191-ba84d4c7c2ba",
+      [
+        "f7e6c91e-8a01-4895-b84b-1effafe04782"
+      ]
+    ],
+    [
+      "afaeb820-2ee9-4156-8191-ba84d4c7c2ba",
+      "message-afaeb820-2ee9-4156-8191-ba84d4c7c2ba",
+      [
+        "f7e6c91e-8a01-4895-b84b-1effafe04782"
+      ]
+    ],
+    [
+      "7d738a94-416f-4b6a-bed8-a487c954b211",
+      "message-7d738a94-416f-4b6a-bed8-a487c954b211",
+      []
+    ]
+  ],
+  "read_while_stream_open": true,
+  "replayed_attachment_id": "f7e6c91e-8a01-4895-b84b-1effafe04782",
+  "retained_work_when_router_down": 2,
+  "router_tls": true,
+  "source_reconnect": [
+    [
+      "/stream?since=14",
+      "14"
+    ],
+    [
+      "/stream?since=15",
+      "15"
+    ]
+  ],
+  "systemd": "systemd 255 (255.4-1ubuntu8.15)",
+  "unit": "mowulink-trigger-watch-7dfb1c93-1be6-4d8b-b75c-89a8b075fe4c.service",
+  "writer_conflicts_refused": 2
+}

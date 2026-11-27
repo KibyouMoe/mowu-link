@@ -336,6 +336,15 @@ python3 -B -m rewrite.feeds game --config "$GAME_CONFIG" --watch --router-connec
 
 切换前用 `rewrite.state_bundle audit-trigger` 核对同一停写快照内的新版 Trigger 留档、Router 收件、T04 和附件。未得两侧确认时返回待对账的原消息号。复跑方式和处置见[新版 Trigger 对账](router-rehearsal.md#新版-trigger-对账)。
 
+在有独立用户级 systemd 管理器的 Linux 测试机上，从重做版安装目录复跑游戏来源的停写演练。
+
+```sh
+MOWULINK_TEST_USER_SYSTEMD=1 python3 -B -m unittest -v \
+  rewrite.test_feeds.Sources.test_systemd_game_watch_stop_snapshot_and_restart
+```
+
+测试为该采集器创建唯一的临时服务。运行中尝试拍快照会被写锁拒绝。用 `systemctl --user stop` 停止后，对账能区分待送达与待补回执。重启同名服务并沿原库恢复，确认消息号、附件号与幂等键一致。再次停写后对账无缺口。游戏桥使用本地测试替身。[Linux 实测](evidence/linux-systemd-trigger-watch.json)
+
 迁移旧采集器时，用 `rewrite.feeds` 的 `--import-legacy-cursor` 把经核对的游标导入新来源库。这一步离线完成。邮件核对原账号与文件夹，首次采集再验证 UIDVALIDITY；游戏核对同一桥接地址与连续运行的实例。遇到旧位置无法确认时保留待核。见[旧采集来源交接](router-rehearsal.md#旧采集来源交接)。
 
 已绑定的适配器在观察到原生题窗后，将原会话、回合、原生题号、题面和选项提交至 `POST /v1/worker/native-question`。平台通过已配置的应用、训练员、私聊和原卡 ID 核对真人回调后将答案持久排队。只有原宿主返回与原题、原回合及答案一致的关闭凭据，Worker 才发布已回答事件。DSH 计时题在超时后可从原卡续答，支持选择、自定义、跳过、批量题和多选。授权和计划审批使用各自的原生入口。溪流的工单问题和答复走 W05/A09，飞书上可读。

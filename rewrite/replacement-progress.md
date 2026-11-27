@@ -6,6 +6,10 @@
 
 ## 检查点与证据
 
+新版游戏来源用实际 Linux 用户级 systemd 临时服务演练停写和恢复。活跃时写锁拒绝快照。两次 `systemctl --user stop` 都得到正常退出，原生 PID 从 961668 换为 961685，临时单位已卸载。第一份停写快照列出一条已到 Router 的待确认消息与一条未到 Router 的消息。重开同名单位沿原库续传，第二份快照两条均已对账，251 字节原附件一致，Router Event 推送仍为一条。隔离 HTTPS Router 和快照工具使用安装版，游戏桥使用测试替身。
+
+安装包锁定 `f67a57735ee6a970f6b123d435312d5e466532e7`，390 个文件测试前后验回一致。实际 Linux 来宾通过 8 项，macOS 通过 31 项、按环境跳过 1 项。真实来源与生产系统服务验收仍待授权。[复跑](README.md#邮件和游戏聊天来源) · [原始证据](evidence/linux-systemd-trigger-watch.json)
+
 邮件与游戏来源的常驻入口随 `6c8c0a76b8fcf03976ff27b38aac2a341e70f35f` 的 389 文件安装包验证。真实进程在游戏 SSE 长连接未关闭时留下两条消息，即使 Router 尚不可达。恢复连接后首次 T04 回包在 Router 已落库时丢弃。重启同一来源后，使用相同实例、消息号、附件号和幂等键补回，251 字节原附件一致，Router 只有一条 Event 推送。在线时第二个采集器及手动发送均被锁拒绝。另一常驻进程经真实 TLS IMAP 以只读方式在下一次轮询捕获新 UID，Router 收到一条 Info。游戏桥和邮箱服务器为本地夹具。
 
 macOS 安装版通过 49 项、按环境跳过 1 项。Windows 安装版 31 项全过，包含邮件和游戏两项。首轮 OpenSSL 夹具的中文绝对路径失败，改用临时工作目录内的相对文件名后复跑通过。Linux arm64 安装版通过 194 项、按环境跳过 136 项。Unix 实测用 SIGTERM 停止仍开着的游戏流。Windows 通过进程终止验证原发件箱恢复。真实来源及实际系统服务编排另验。[安装与复跑](README.md#邮件和游戏聊天来源) · [实测证据](evidence/rewrite-trigger-source-watch.json) · [Windows 日志](https://github.com/KibyouMoe/mowu-link/actions/runs/45968644393)
