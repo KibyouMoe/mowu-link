@@ -24,6 +24,8 @@
 
 已实测 Router 与来源同批回退。此前收到原 T04 的 Info 会挡住整个回退。现在来源计划绑定同一份停写 Router，逐条核 T04、传输、适用的原宿主和平台回执以及附件摘要。本次同批恢复一张已验收工单、旧订阅的已收 Event 和 Info，以及邮件和游戏的原采集游标。旧订阅两条尚未进宿主的尾项原样待取，其中一条已确认传输。旧 Trigger 累计确认重送新增为零。漏列来源、错快照、缺 T04、缺宿主或平台回执均未生成输出。宿主与来源使用夹具。[复跑](router-rehearsal.md#router-与来源同批回退) · [证据](evidence/source-router-rollback.json)
 
+旧 Worker 实时订阅另有读回差异。实际旧 Router 调用旧 Trigger 时，即使客户端丢弃响应且没有 Worker 连接，轮询也会把两端游标推过匹配和被过滤的记录。重试返回零条。该类旧订阅在迁移前仍须找原宿主收件凭据，本机 Codex 的私有配置没有发现订阅项，其他工位尚未核验。[旧订阅隔离证据](evidence/legacy-worker-subscription-ack.json)
+
 重新取消的 W04 已按具体指令核验。相同 A06 操作键重送保留原回执，自动重试沿用同一清理号。同一派发的下一条显式取消携带新的 `cleanup_id`。Worker 从原生收件识别该号，分别保存等待、清理及 Router 回执。隔离实测第一次迟报、重用旧键、换新键重播旧正文和错号都返回 409。新 W04 落库后故意丢回包，冷启沿原键查回，取消通知一条。复跑 `python3 -B -m unittest -v rewrite.test_cleanup rewrite.test_cutover -k cancel`。[HTTP 与回退实测](evidence/reissued-cancel-w04.json)
 
 用前版 `2490059e42d379183c19b0e82c208f545a3c78ee` 生成的隔离 Router、Worker 和适配器库做了升级。仅一次待确认的旧取消可以正常完成，已经成功的旧回执可沿原键回读。旧版已重复取消而未记录清理号时，拒绝无号回执，须由管理端发新指令。回退核对新指令及 W04 的同一清理号，缺号拒绝发布。[旧库升级](evidence/reissued-cancel-upgrade.json) · [回退演练](evidence/cutover-reviewed-cancel-retry.json)

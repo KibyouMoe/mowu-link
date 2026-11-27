@@ -13,6 +13,7 @@ from . import test_cutover, test_feeds, test_trigger_archive
 from .cutover import backup, digest, prepare, reconcile
 from .devloop import FixtureHost, Loop, agent_report
 from .feeds import Feed, poll_game, poll_mail
+from .legacy_test_fixture import source_for
 from .manager_notices import ManagerNotices
 from .reviewed_rollback import stage_reviewed_rollback
 from .state_bundle import capture
@@ -26,6 +27,86 @@ from .trigger_handoff import HANDOFF_DB, plan, stage
 
 @unittest.skipUnless(os.name=="posix","the legacy Router uses fcntl")
 class SourceRollback(unittest.TestCase):
+    def test_legacy_worker_subscription_poll_can_ack_without_native_delivery(self):
+        case = test_cutover.Cutover()
+        self.addCleanup(case.doCleanups)
+        case.setUp()
+        observed = json.loads(case.old("""
+from contextlib import contextmanager
+import importlib.util
+from threading import Thread
+from urllib.request import Request,urlopen
+from server import RouterServer,TriggerClient,TriggerNotifier,TriggerSubscriptionBridge
+from selftest_router import http
+
+sys.path.insert(0,str(Path(sys.argv[2]).parent))
+spec=importlib.util.spec_from_file_location("isolated_legacy_trigger",sys.argv[2])
+bus=importlib.util.module_from_spec(spec)
+sys.modules[spec.name]=bus
+spec.loader.exec_module(bus)
+
+@contextmanager
+def run(server):
+    with server:
+        thread=Thread(target=server.serve_forever,kwargs={"poll_interval":.02})
+        thread.start()
+        try:
+            yield f"http://127.0.0.1:{server.server_port}"
+        finally:
+            server.shutdown()
+            thread.join()
+
+router_store=RouterStore(sys.argv[1])
+trigger_store=bus.TriggerStore(sys.argv[3])
+token=Path("test-trigger-token")
+token.write_text("isolated-trigger")
+token.chmod(0o600)
+subscriber="router:oguri"
+router_store.upsert_worker("oguri")
+subscription=router_store.add_subscription("oguri","mc_chat",["chat"])
+router_store.set_subscription_trigger(subscription["id"],subscriber,0)
+router_store.set_cursor(subscriber,0)
+trigger_store.ensure_subscription(subscriber,0,3600)
+trigger_store.add_event("mc_chat","matching fixture",kind="chat",level="event",event_id="match")
+trigger_store.add_event("email","filtered fixture",kind="mail",level="info",event_id="filtered")
+def cursors():
+    row=trigger_store._conn.execute("SELECT last_id FROM cursors WHERE subscriber=?",(subscriber,)).fetchone()
+    return [router_store.get_cursor(subscriber),row[0] if row else 0]
+
+with run(bus.TriggerServer(("127.0.0.1",0),trigger_store,token="isolated-trigger")) as origin:
+    client=TriggerClient(origin,str(token))
+    router=RouterServer(("127.0.0.1",0),router_store,"isolated-router",TriggerNotifier(client,router_store),
+                        TriggerSubscriptionBridge(client))
+    with run(router) as address:
+        listing,page=http("GET",address+"/subscriptions?worker=oguri&active=1",token="isolated-router")
+        before=cursors()
+        route=address+"/subscriptions/pending?worker=oguri"
+        # Observe only the status line, then discard the response without consuming a Worker event.
+        with urlopen(Request(route,headers={"X-Router-Token":"isolated-router"}),timeout=5) as response:
+            pending=response.status
+        after=cursors()
+        receipts=[r[0] for r in trigger_store._conn.execute(
+            "SELECT event_id FROM receipts WHERE subscriber=? ORDER BY event_id",(subscriber,))]
+        repeat,again=http("GET",route,token="isolated-router")
+        print(json.dumps({"listing":[listing,page["count"]],"before":before,"pending":pending,"after":after,
+                          "receipts":receipts,"repeat":[repeat,again["count"],again["acked"]],
+                          "worker_connections":len(router.conns)}))
+router_store.close()
+trigger_store.close()
+""",case.legacy,source_for("trigger")/"server.py",case.root/"legacy-bus.db"))
+        self.assertEqual(observed,{"listing":[200,1],"before":[0,0],"pending":200,"after":[2,2],
+                                   "receipts":["filtered","match"],"repeat":[200,0,0],"worker_connections":0})
+        snapshot = backup(case.legacy,case.attachments,case.snapshot)
+        self.assertEqual(snapshot["blockers"]["active_subscriptions"],1)
+        with self.assertRaisesRegex(ValueError,"active_subscriptions"):
+            prepare(case.snapshot,case.trial,case.source_id)
+        self.assertFalse(case.trial.exists())
+        if evidence := os.environ.get("MOWULINK_LEGACY_SUBSCRIPTION_EVIDENCE"):
+            Path(evidence).write_text(json.dumps({
+                **observed,"prepare_blocked":True,
+                "scope":"Actual isolated legacy Router and Trigger HTTP, original subscription database and discarded response body."
+            },indent=2)+"\n")
+
     def test_mixed_source_returns_and_closed_order_share_one_frozen_router(self):
         case = test_cutover.Cutover()
         self.addCleanup(case.doCleanups)

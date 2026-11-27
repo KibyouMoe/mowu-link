@@ -247,6 +247,12 @@ python3 -B -m rewrite.cutover stage-reviewed-rollback \
 
 复跑 `python3 -B -m unittest -v rewrite.test_source_rollback`。实跑隔离 Router、旧 Trigger HTTP 和恢复副本。验证一张已验收工单归档、旧订阅 Event 与 Info 的确认、邮件与游戏采集游标推进，以及两条仍待原订阅处理的尾项。实际旧端重放确认返回零新增。宿主、模型、飞书、邮件源和游戏 SSE 源使用夹具。[证据](evidence/source-router-rollback.json)
 
+### 旧 Worker 的实时订阅
+
+旧 Router 的 `GET /subscriptions?active=1` 用于只读盘点配置。旧 `GET /subscriptions/pending` 会确认已取记录，并推进两边游标。隔离测试只取 HTTP 状态后丢弃响应正文，旧 Router 和实际旧 Trigger 的游标均从 0 到 2，过滤掉的事件也有确认，随后旧队列返回零条。全过程 Worker 连接为零。旧侧确认只能证明上游游标已经走过，宿主是否收到须另查原工位记录。
+
+发现活跃的旧 Worker 订阅时，离线准备仍会停在 `active_subscriptions`。先核对原订阅配置、两端游标、过滤项和原宿主收件，再决定沿独立来源把消息交给溪流，或继续保留旧路径。复跑 `python3 -B -m unittest -v rewrite.test_source_rollback -k legacy_worker_subscription`。[旧端读回证据](evidence/legacy-worker-subscription-ack.json)
+
 ## 旧采集来源交接
 
 在演练窗口准备好来源游标副本和专用配置。交接检查旧采集端已处理到的最后一条、待上行队列和新实例标识。游标导入只保存位置与摘要。仍在旧采集端等待发送的事件需要在接管前另外对账。

@@ -1,0 +1,27 @@
+{
+  "listing": [
+    200,
+    1
+  ],
+  "before": [
+    0,
+    0
+  ],
+  "pending": 200,
+  "after": [
+    2,
+    2
+  ],
+  "receipts": [
+    "filtered",
+    "match"
+  ],
+  "repeat": [
+    200,
+    0,
+    0
+  ],
+  "worker_connections": 0,
+  "prepare_blocked": true,
+  "scope": "Actual isolated legacy Router and Trigger HTTP, original subscription database and discarded response body."
+}
