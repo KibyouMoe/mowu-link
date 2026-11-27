@@ -10,7 +10,7 @@ import shutil
 import sqlite3
 from tempfile import TemporaryDirectory
 
-from . import admission, delivery, dsh_workspace_audit, feishu_audit, trigger_audit
+from . import admission, delivery, dsh_workspace_audit, feishu_audit, hermes_audit, trigger_audit
 from . import state_bundle_managed as managed
 from .cutover import digest, output_directory, readonly
 from .messages import valid_guid
@@ -392,6 +392,8 @@ def hermes_delivery_audit(snapshot,labels,router_path,confirmed):
     managers = sorted(label for label in labels if component(label)[0]=="hermes")
     results = []
     for label in managers:
+        instance = component(label)[1]
+        host = "hermes-host:"+instance
         with closing(readonly(snapshot/filename(label))) as db:
             rows = db.execute("SELECT cursor FROM progress LIMIT 2").fetchall()
             cursor = rows[0]["cursor"] if len(rows)==1 else None
@@ -415,8 +417,15 @@ def hermes_delivery_audit(snapshot,labels,router_path,confirmed):
                 issues.append("hermes_queue_router_mismatch")
             if len(managers)>1:
                 issues.append("hermes_receiver_ambiguous")
-        results.append({"instance":component(label)[1],"router_confirmed_cursor":confirmed,"local_cursor":cursor,
-                        "queued_without_native_receipt":pending,"issues":issues})
+            native,native_issues = hermes_audit.reconcile(db,router_path,snapshot/filename(host) if host in labels else None)
+            issues.extend(sorted({item["code"] for item in native_issues}))
+        results.append({"instance":instance,"router_confirmed_cursor":confirmed,"local_cursor":cursor,
+                        "queued_without_native_receipt":pending,"native_receipts":native,
+                        "native_receipt_issues":native_issues,"issues":issues})
+    for label in sorted(labels):
+        role,instance = component(label)
+        if role=="hermes-host" and "hermes:"+instance not in labels:
+            results.append({"instance":instance,"issues":["hermes_manager_ledger_missing"]})
     return results
 
 

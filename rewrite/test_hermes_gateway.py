@@ -33,8 +33,11 @@ from .feishu_inbound import Inbound
 from .feishu_output import Views
 from .hermes_check import GATEWAY_ENTRY, GATEWAY_GUARD, tracked_runtime
 from .hermes_host import HermesLocalHost, input_text
+from .hermes_audit import reconcile as reconcile_hermes_receipts
 from .orders import Orders
 from .release_check import config
+from .state_bundle import audit_handoff, audit_trigger, capture as capture_state
+from .cutover import readonly
 from .storage import Fault, encode, guid
 from .test_codex_app_server import CODEX, Provider, isolated_app_server
 from .test_dsh_native_loop import NativeProcess
@@ -615,6 +618,12 @@ class HermesGateway(NativeProcess):
             conn.execute("UPDATE queue SET receipt=NULL WHERE message_id=?",(message_ids["Event"],))
         with closing(sqlite3.connect(str(manager_db)+".host")) as conn, conn:
             conn.execute("UPDATE intents SET receipt=NULL,native_id=NULL WHERE delivery_id=?",(message_ids["Event"],))
+        with closing(readonly(manager_db)) as quiet_manager:
+            pending_count,pending_issues = reconcile_hermes_receipts(
+                quiet_manager,loop.orders.db.path,Path(str(manager_db)+".host"))
+        self.assertEqual(pending_count["confirmed"],1)
+        self.assertEqual(pending_count["intent_unconfirmed"],1)
+        self.assertEqual(pending_issues,[{"message_id":message_ids["Event"],"code":"hermes_native_receipt_unknown"}])
         with gateway("recovered") as new_pid:
             self.assertNotEqual(pid,new_pid)
             again = self.wait(lambda:receipt(message_ids["Event"]))
@@ -643,6 +652,19 @@ class HermesGateway(NativeProcess):
             self.assertEqual(len(model.requests),5)
             self.assertEqual(loop.hermes.tasks(unassigned="true")["items"],[created_task])
 
+        loop.server.shutdown()
+        loop.thread.join(timeout=5)
+        self.assertFalse(loop.thread.is_alive())
+        sealed = root/"sealed"
+        manifest = capture_state({"router:main":loop.orders.db.path,"worker:oguri":loop.worker.db.path,
+                   "agent:oguri":loop.adapter.db.path,"hermes:main":manager_db,
+                   "hermes-host:main":Path(str(manager_db)+".host"),"trigger:source":source.db.path},
+                   os.environ.get("MOWULINK_TEST_RELEASE_REVISION","a"*40),sealed)
+        audit, = audit_handoff(sealed,manifest["manifest_sha256"])["hermes"]
+        self.assertEqual((audit["native_receipts"]["confirmed"],audit["issues"]),(2,[]))
+        self.assertEqual(audit["native_receipt_issues"],[])
+        self.assertTrue(audit_trigger(sealed,manifest["manifest_sha256"])["ready"])
+
         if output := os.environ.get("MOWULINK_HERMES_GATEWAY_EVIDENCE"):
             evidence = {"hermes_source_revision":revision,"session_id":session,"route":route,
                 "native_pids":[pid,new_pid,restored_pid],"message_ids":message_ids,"event_native_admission":first["native_id"],
@@ -654,6 +676,8 @@ class HermesGateway(NativeProcess):
                 "original_attachment_sha256":sha256(original).hexdigest(),"cold_recovery_reused_admission":True,
                 "missing_queue_and_intent_recovered":{"same_admission":recovered[0]["native_id"],
                                                       "native_admission_count":recovered[1],"extra_model_calls":0},
+                "before_native_receipt_recovery":pending_count,"before_native_receipt_issues":pending_issues,
+                "sealed_snapshot":manifest,"sealed_hermes_audit":audit,
                 "boundary":"Real Router, Trigger, Hermes gateway, private LOCAL session, tool execution and ledger. "
                            "Scripted OpenAI-compatible localhost model. No cloud credentials or Feishu."}
             Path(output).write_text(json.dumps(evidence,ensure_ascii=False,indent=2)+"\n")

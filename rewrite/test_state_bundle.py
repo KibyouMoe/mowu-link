@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -367,7 +368,9 @@ class Bundle(unittest.TestCase):
         lagging = audit_handoff(self.snapshot,prefix)
         self.assertFalse(lagging["needs_review"])
         self.assertEqual(lagging["hermes"][0],{"instance":"main","router_confirmed_cursor":1,
-            "local_cursor":0,"queued_without_native_receipt":1,"issues":[]})
+            "local_cursor":0,"queued_without_native_receipt":1,"issues":[],"native_receipt_issues":[],
+            "native_receipts":{"not_attempted":1,"intent_unconfirmed":0,"manager_commit_pending":0,
+                               "confirmed":0,"unverified":0}})
         with self.stack(self.sources) as (manager,*_):
             manager.receive()
             self.assertEqual(manager.router.request("GET","deliveries/status")["confirmed_cursor"],1)
@@ -387,6 +390,64 @@ class Bundle(unittest.TestCase):
                 detail = audit_handoff(target,expected)
                 self.assertTrue(detail["needs_review"])
                 self.assertIn({"hermes_instance":"main","issue":reason},detail["issues"])
+
+    def test_hermes_snapshot_checks_the_native_receipt_attachment_and_cached_payload(self):
+        file = self.root/"attachment.txt"
+        file.write_text("Isolated source attachment",encoding="utf-8")
+        with self.stack(self.sources) as (manager,_worker,source,client,_platform,_views):
+            mid = source.record("Event","Private manager notification text",[file])
+            source.send(client,mid)
+            manager.receive()
+            with manager.db.transaction() as db:
+                queued = db.execute("SELECT * FROM queue WHERE message_id=?",(mid,)).fetchone()
+            payload = manager.delivery_payload(queued)
+            native = manager.host.deliver(mid,payload)
+            # Stop after the adapter committed the receipt and before Hermes saved it.
+            self.assertEqual(len(self.hermes_host.entries()),1)
+        check = capture(self.sources,self.revision,self.snapshot)["manifest_sha256"]
+        pending = audit_handoff(self.snapshot,check)
+        item, = pending["hermes"]
+        self.assertTrue(pending["needs_review"])
+        self.assertEqual(item["native_receipts"]["manager_commit_pending"],1)
+        self.assertEqual(item["native_receipt_issues"],[{"message_id":mid,"code":"hermes_native_receipt_pending"}])
+        self.assertNotIn(payload["text"],encode(pending))
+        paths = restore(self.snapshot,check,self.dest)
+        with self.stack(paths) as (manager,*_):
+            self.assertEqual(manager.poll(),native)
+            self.assertEqual(len(self.hermes_host.entries()),1)
+
+        ready = self.root/"ready"
+        seal = capture(paths,self.revision,ready)["manifest_sha256"]
+        reconciled = audit_handoff(ready,seal)
+        self.assertFalse(reconciled["needs_review"])
+        self.assertEqual(reconciled["hermes"][0]["native_receipts"]["confirmed"],1)
+        self.assertEqual(audit_handoff(self.snapshot,check),pending)
+
+        plan = (
+            ("corrupt-receipt","hermes:main","UPDATE queue SET receipt='{}'","hermes_native_receipt_mismatch"),
+            ("wrong-host","hermes-host:main","UPDATE adapter_native_binding SET session='swapped'","hermes_native_intent_mismatch"),
+            ("orphan","hermes:main","DELETE FROM queue","hermes_orphan_host_intent"),
+            ("wrong-payload","hermes:main","UPDATE queue SET host_payload='{}'","hermes_cached_host_payload_mismatch"),
+            ("corrupt-artifact","router:main","UPDATE chunks SET bytes=X'00'","hermes_attachment_unverified"),
+            ("loss-of-authorization","router:main","DELETE FROM attachment_grants WHERE actor='hermes'","hermes_attachment_unverified"),
+        )
+        for variant,label,sql,error in plan:
+            with self.subTest(variant=variant):
+                copy = self.root/(variant+".db")
+                shutil.copyfile(paths[label],copy)
+                with closing(sqlite3.connect(copy)) as db,db:
+                    db.execute(sql)
+                dest = self.root/variant
+                bad = capture(dict(paths,**{label:copy}),self.revision,dest)["manifest_sha256"]
+                result = audit_handoff(dest,bad)
+                self.assertTrue(result["needs_review"])
+                self.assertIn({"message_id":mid,"code":error},result["hermes"][0]["native_receipt_issues"])
+                self.assertEqual(result["hermes"][0]["native_receipts"]["confirmed"],0)
+        omitted = self.root/"omitted"
+        digest = capture({k:v for k,v in paths.items() if k!="hermes-host:main"},self.revision,omitted)["manifest_sha256"]
+        missing = audit_handoff(omitted,digest)
+        self.assertTrue(missing["needs_review"])
+        self.assertEqual(missing["hermes"][0]["native_receipt_issues"],[{"code":"hermes_host_ledger_missing","count":1}])
 
     def test_worker_snapshot_compares_original_confirmed_frame_in_both_ledgers(self):
         with self.stack(self.sources) as (_manager,w,*_):

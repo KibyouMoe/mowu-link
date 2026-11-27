@@ -244,6 +244,9 @@ def rehearse_bundle(root,old,new,older,newer,cert,key,env):
     saved = state_bundle.capture(trial_paths,newer,latest)
     audit = state_bundle.audit_handoff(latest,saved["manifest_sha256"])
     check(not audit["needs_review"],"the stopped trial requires ledger reconciliation")
+    (hermes_receipts,) = audit["hermes"]
+    check(hermes_receipts["native_receipts"]["confirmed"]==1,
+          "the stopped trial did not prove its original Hermes native receipt")
     source_audit = state_bundle.audit_trigger(latest,saved["manifest_sha256"])
     check(source_audit["ready"] and source_audit["sources"][0]["settled"]==1,
           "the stopped trial does not have exactly its original Trigger receipt and attachment")
