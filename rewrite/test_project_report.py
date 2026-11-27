@@ -42,7 +42,7 @@ class ProjectReport(unittest.TestCase):
             ("tools/call", {"name": "worker_report", "_meta": meta, "arguments": args}) for meta, args in calls]
         lines = [encode({"jsonrpc": "2.0", "id": idx, "method": method, "params": params})
                  for idx, (method, params) in enumerate(reqs)]
-        result = subprocess.run([sys.executable, "-m", "rewrite.project_report", str(self.state)],
+        result = subprocess.run([sys.executable, "-B", "-m", "rewrite.project_report", str(self.state)],
                                 input="\n".join(lines) + "\n", capture_output=True, text=True, check=True,
                                 timeout=12, cwd=Path(__file__).resolve().parent.parent)
         replies = [json.loads(line) for line in result.stdout.splitlines()]
