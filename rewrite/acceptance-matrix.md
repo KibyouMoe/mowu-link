@@ -107,6 +107,7 @@ Codex 与 DSH 的 Windows 可写入口共用私有运行账本与 Linux 引擎�
 | 旧 Trigger 来源进程 | 各实例的旧版专用游标或待发目录；仓内游戏来源默认游标为 `server/trigger/clients/state/mc_chat_cursor.json`，安装覆盖值逐工位确认 | 各实例采集游标、待向旧 Trigger 补发的事件。原邮箱、游戏服聊天与日志继续归来源系统。 |
 | 旧 Codex Worker 插件与桥接进程 | 默认 `~/.codex/state/codexworker/`，逐工位核实状态目录及专用文件，例如 `desktop-manager-state.json`、`feishu-inbox.json`、`message-journal/`、`receipt-archive/` 和旧原生收件凭据 | 旧派单待接、挂接的工单状态、飞书待入站或出站、同伴待投递、待题答复、成果与取消回执。 |
 | 旧 DSH Worker 插件与桥接进程 | 默认 `~/.hermes/state/dshworker/`，逐工位核实 `dsh-plugin-state.json`、`feishu-inbox.json`、`message-journal/` 与 `receipt-archive/` | 旧派单、工位内等待队列、飞书收发、同伴待投递、题目与旧成果回执。 |
+| 旧 Antigravity Worker `interface/sidecar.mjs`（如仍安装） | 以原插件的 `ANTIGRAVITY_EXECUTABLE_DATA_DIR` 实值为准，仅核对其 `worker/` 内的旧 Worker 账本、`public-journal/` 和 `submit.sock` | 旧派单待接、飞书待收、同伴待投递、旧成果和取消回执。Antigravity 原生会话、运行目录其余内容和宿主密钥均由原归属方保留。 |
 | Hermes 内的旧 Router 管理入口、旧 `trigger-bus` 插件 | `~/.hermes/trigger-cursor.json` 或实例设置的 `TRIGGER_BUS_CURSOR`，以及核实归属的旧插件专用账本 | 等待插件交接的 Event/Notify/Info、旧任务通知、旧同伴回执。只退出可辨认为旧魔物链接来源的待交付项，Hermes 网关共用队列继续由网关持有。 |
 
 Router 与 Trigger 在 Mac mini 的路径已从各自的 LaunchAgent 参数核对。其余为旧版安装默认路径或源码归属，Windows 及独立工位以切换窗口中核实的实际路径为准。切换前逐项登记主机、服务、解析后的文件路径和队列身份，确认旧写者已停且旧文件与新版和宿主资料分离，再按获批范围处置。不确定归属的项目留待核验。宿主原生会话、账号和配置、共享网关、来源本身、其他项目及新版数据都保留。新版停写备份、恢复、版本回退及写入对账仍按表验收。
