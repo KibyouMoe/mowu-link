@@ -68,6 +68,8 @@
 
 Linux 用户级 systemd 已接入独立 HTTPS 维护。登记核对单位文件摘要、实际加载的参数和原生进程，拒绝错摘要、错参数、业务单位依赖联动及非维护身份。实际隔离用户管理器实跑重启时丢 HTTPS 响应、按原号查回、已登记停机项启动及待核对账。Router 保留一张原任务，原建单键重试仍只一张单。另一独立单位 PID 未变。维护服务再次重开后仍可查回原回执。只使用测试用户的单位和临时数据。复跑 `MOWULINK_TEST_USER_SYSTEMD=1 python3 -B -m unittest -v rewrite.test_host_ops_systemd`。[Linux 原生实测](evidence/linux-systemd-host-ops.json)
 
+Linux 停机维护的运行时代码提交为 `0f30cf630276878d2eb65931dbaa3acee2396857`。Linux arm64 普通安装包回归通过 226 项、按环境跳过 129 项。macOS 相关回归通过 20 项、按环境跳过 3 项。Windows 安装与 DSH 原生组通过。装包专项用强化测试隔离检查的提交 `6df7073c199a07af11af5e7ce88edd0b489c4a9b`，在 Ubuntu systemd 255 来宾连续实跑 3 轮，351 个安装文件逐一验回。已有其它服务运行时，测试在写文件前退出，该服务 PID 和配置目录均保持原样。原生包 SHA-256 为 `159f7b584304bd0295f8e82d0697c03ce4ba210a600e578679b7c56520fd96fe`。[Windows CI](https://github.com/KibyouMoe/mowu-link/actions/runs/45937640227) · [Linux 回执](evidence/linux-systemd-host-ops.json)
+
 重新取消的 W04 已按具体指令核验。相同 A06 操作键重送保留原回执，自动重试沿用同一清理号。同一派发的下一条显式取消携带新的 `cleanup_id`。Worker 从原生收件识别该号，分别保存等待、清理及 Router 回执。隔离实测第一次迟报、重用旧键、换新键重播旧正文和错号都返回 409。新 W04 落库后故意丢回包，冷启沿原键查回，取消通知一条。复跑 `python3 -B -m unittest -v rewrite.test_cleanup rewrite.test_cutover -k cancel`。[HTTP 与回退实测](evidence/reissued-cancel-w04.json)
 
 用前版 `2490059e42d379183c19b0e82c208f545a3c78ee` 生成的隔离 Router、Worker 和适配器库做了升级。仅一次待确认的旧取消可以正常完成，已经成功的旧回执可沿原键回读。旧版已重复取消而未记录清理号时，拒绝无号回执，须由管理端发新指令。回退核对新指令及 W04 的同一清理号，缺号拒绝发布。[旧库升级](evidence/reissued-cancel-upgrade.json) · [回退演练](evidence/cutover-reviewed-cancel-retry.json)

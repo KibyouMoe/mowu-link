@@ -1,88 +1,88 @@
 {
   "systemd": "systemd 255 (255.4-1ubuntu8.15)",
-  "original_task": "b58f56da-3e83-48fa-8e0e-fd98967fba4b",
+  "original_task": "edc3e3c1-473c-4687-b8cb-38f6b3f34b50",
   "reported_restart": {
     "actor": "host-maintainer/router",
     "after": {
-      "generation": "83640e54db51cc54189695d61b6c1aa64a95a53dee3a201899e00c121fa72b1b",
-      "label": "mowulink-maintenance-router-7ccdae83-b8cc-4a30-a23b-ccfaead97fe9.service",
-      "pid": 819313,
+      "generation": "ce76183e27e926f1f0219f4dbe06cad5a6e7fa4e9f210dce2bf02e2626c2538f",
+      "label": "mowulink-maintenance-router-d9c7becb-feb8-48ad-8900-17948429efd3.service",
+      "pid": 825914,
       "service": "router",
-      "started": "a4d8707f-d019-4732-b967-513928d1edb8:12799663",
+      "started": "a4d8707f-d019-4732-b967-513928d1edb8:12812379",
       "state": "running"
     },
     "before": {
-      "generation": "dc559dc46c6f00e9ce270790a6f81dd3e45841c85bde550214e43e56fdb8c90d",
-      "label": "mowulink-maintenance-router-7ccdae83-b8cc-4a30-a23b-ccfaead97fe9.service",
-      "pid": 819269,
+      "generation": "d0bd0853b5b7b079e7f109a7d16d982fc53515ce6e2d85a487742d93f6f93967",
+      "label": "mowulink-maintenance-router-d9c7becb-feb8-48ad-8900-17948429efd3.service",
+      "pid": 825873,
       "service": "router",
-      "started": "a4d8707f-d019-4732-b967-513928d1edb8:12799622",
+      "started": "a4d8707f-d019-4732-b967-513928d1edb8:12812256",
       "state": "running"
     },
     "reason": "test Linux restart",
-    "request_id": "753185bb-dd1d-45bd-9fbb-d923e5e7a776",
-    "requested_at": "2026-11-27T04:03:02.715167+00:00",
+    "request_id": "7cf2b44e-b4d5-4715-b220-29c7140b6d47",
+    "requested_at": "2026-11-27T04:05:09.879037+00:00",
     "service": "router",
-    "settled_at": "2026-11-27T04:03:02.955109+00:00",
+    "settled_at": "2026-11-27T04:05:10.112036+00:00",
     "state": "process_replaced"
   },
   "recovered_uncertain_restart": {
     "actor": "host-maintainer/router",
     "before": {
-      "generation": "83640e54db51cc54189695d61b6c1aa64a95a53dee3a201899e00c121fa72b1b",
-      "label": "mowulink-maintenance-router-7ccdae83-b8cc-4a30-a23b-ccfaead97fe9.service",
-      "pid": 819313,
+      "generation": "ce76183e27e926f1f0219f4dbe06cad5a6e7fa4e9f210dce2bf02e2626c2538f",
+      "label": "mowulink-maintenance-router-d9c7becb-feb8-48ad-8900-17948429efd3.service",
+      "pid": 825914,
       "service": "router",
-      "started": "a4d8707f-d019-4732-b967-513928d1edb8:12799663",
+      "started": "a4d8707f-d019-4732-b967-513928d1edb8:12812379",
       "state": "running"
     },
     "failure": "maintenance_process_interrupted",
     "reason": "test Linux restart",
     "reconciliation": {
       "after": {
-        "generation": "7e12897db86957825eb085b9c2e911c643ae38203348f59e58d2132e865d1b18",
-        "label": "mowulink-maintenance-router-7ccdae83-b8cc-4a30-a23b-ccfaead97fe9.service",
-        "pid": 819360,
+        "generation": "80133aad5922359376ec098ce9de9ba2465a463ff85d0657aff2895a171fade6",
+        "label": "mowulink-maintenance-router-d9c7becb-feb8-48ad-8900-17948429efd3.service",
+        "pid": 825953,
         "service": "router",
-        "started": "a4d8707f-d019-4732-b967-513928d1edb8:12799742",
+        "started": "a4d8707f-d019-4732-b967-513928d1edb8:12812452",
         "state": "running"
       },
-      "observed_at": "2026-11-27T04:03:03.754915+00:00",
+      "observed_at": "2026-11-27T04:05:10.861442+00:00",
       "state": "replacement_observed"
     },
-    "request_id": "0db8181d-2169-45d1-bcff-3ab360ff1edf",
-    "requested_at": "2026-11-27T04:03:03.561072+00:00",
+    "request_id": "f869476c-0735-4486-9c4d-209f14faace5",
+    "requested_at": "2026-11-27T04:05:10.575813+00:00",
     "service": "router",
-    "settled_at": "2026-11-27T04:03:03.647809+00:00",
+    "settled_at": "2026-11-27T04:05:10.649978+00:00",
     "state": "unconfirmed"
   },
   "stopped_unit_receipt": {
     "actor": "host-maintainer/stopped",
     "after": {
-      "generation": "7d97efe93241f3e7e95ac65033dd77e6a046377e0db9412417e914955ecceef7",
-      "label": "mowulink-maintenance-stopped-aa4cacb9-ee58-4a4a-bbe2-f561cbfce938.service",
-      "pid": 819336,
+      "generation": "47068e7a99b56e1ffb3d0fc9b57e4f89ce558969c1dbdfe89ea9d44f2d44ef41",
+      "label": "mowulink-maintenance-stopped-bbe0e865-a27a-4982-a3e0-ca481ff7c8c1.service",
+      "pid": 825936,
       "service": "stopped",
-      "started": "a4d8707f-d019-4732-b967-513928d1edb8:12799687",
+      "started": "a4d8707f-d019-4732-b967-513928d1edb8:12812394",
       "state": "running"
     },
     "before": {
-      "generation": "ad2cb4127f32adffb18946f79e3a0b9236a567bfdb94b35ca9f8605296bec0ef",
-      "label": "mowulink-maintenance-stopped-aa4cacb9-ee58-4a4a-bbe2-f561cbfce938.service",
+      "generation": "f4721b88646de5c49e2d473fef45f95a579a5609e7a95a2f022becf83fcdf6b3",
+      "label": "mowulink-maintenance-stopped-bbe0e865-a27a-4982-a3e0-ca481ff7c8c1.service",
       "pid": null,
       "service": "stopped",
       "started": null,
       "state": "stopped"
     },
     "reason": "test Linux restart",
-    "request_id": "880a65d6-c2ed-47da-bd73-098fc003f274",
-    "requested_at": "2026-11-27T04:03:03.145166+00:00",
+    "request_id": "e4ea6f1a-892a-48d7-a479-882bcf62c9c5",
+    "requested_at": "2026-11-27T04:05:10.221535+00:00",
     "service": "stopped",
-    "settled_at": "2026-11-27T04:03:03.175595+00:00",
+    "settled_at": "2026-11-27T04:05:10.254416+00:00",
     "state": "process_started"
   },
   "same_receipt_after_daemon_restart": true,
-  "other_unit_pid_unchanged": 819273,
+  "other_unit_pid_unchanged": 825876,
   "policy": [
     "wrong file digest and argv rejected",
     "unit dependencies rejected",
@@ -93,8 +93,9 @@
   "router_runs": 3,
   "router_task_count": 1,
   "scope": "Actual user systemd and loopback HTTPS on an isolated Linux guest.",
-  "revision": "0f30cf630276878d2eb65931dbaa3acee2396857",
-  "release_sha256": "4c3edafe0d132541dc6809c7e0060c417c11fe90c85a21f424c937f5fdefd0ae",
+  "revision": "6df7073c199a07af11af5e7ce88edd0b489c4a9b",
+  "release_sha256": "159f7b584304bd0295f8e82d0697c03ce4ba210a600e578679b7c56520fd96fe",
   "installed_files": 351,
-  "native_repetitions": 3
+  "native_repetitions": 3,
+  "guard_left_running_unit_and_files_unchanged": true
 }
