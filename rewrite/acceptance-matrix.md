@@ -24,6 +24,8 @@
 
 同一流程已用独立 DSH 原生会话复验。DSH 的两次 `worker_report` 通过本机双向 TLS 返回相同 W04，同一 Hermes 会话读成果并验收。飞书夹具收到与 DSH 原生私聊回合对应的一条最终回复。两端模型仍由本地脚本驱动。[双宿主实测](evidence/hermes-dsh-clean-cutover.json)
 
+独立 Codex App Server 也完成同一冷启动流程。只读测试线程的两次原生动态工具调用得到同一 W04，Hermes 从待验收读回原成果并结单。正式派单与普通私聊各有一个原生回合，私聊最终文本已在飞书夹具对账。模型仍从本地脚本取响应，Desktop 工具注册与实际云端会话继续验收。[Codex 双宿主实测](evidence/hermes-codex-clean-cutover.json)
+
 ## Worker 篇 A01–A11
 
 | 用例 | 已有隔离证据 | 仍须在实际两端看到 |

@@ -1,0 +1,98 @@
+{
+  "hermes_revision": "464bd0dd659f336bd0bf468bf02cad8aac211136",
+  "gateway_pid": 1172,
+  "manager_session": "local-4efdd9fb7761464b0e95ffbf9f3e8b02aae37307ae1dede2bd883186c28f9d48",
+  "source_instance": "f02725f1-5fd5-4c1e-989d-b69fd4d2d7ae",
+  "t04": {
+    "duplicate": false,
+    "message_id": "16ef907e-c30e-4917-aa55-ae9445d2b743",
+    "received_at": "2027-01-15T08:00:00+00:00"
+  },
+  "task_id": "91b735ab-34bb-48f7-816f-77b91ea4d354",
+  "assignment_id": "d6ed490f-00ec-4508-9f54-5f0cfe5ed138",
+  "source_attachment_sha256": "85b7b630dff3781536512f591706953753ea344dea24985346504ea42465ea20",
+  "native_worker_receipt": {
+    "delivery_id": "167c8308-ce01-406d-b151-d3c8d61e08bd",
+    "digest": "d4d41d8870a6b3fbc5e3111eb1db8051936d011657a1771102ca13289365b026",
+    "native_id": "01a21bcb-1e25-73a0-953f-b30977ef89eb",
+    "session": "01a21bca-e512-7243-8669-a6645380091e",
+    "turn_id": "01a21bcb-1e22-7fe2-a285-2e5c919924c3"
+  },
+  "w04": {
+    "recorded": true,
+    "release_assignment_id": "d6ed490f-00ec-4508-9f54-5f0cfe5ed138",
+    "task_state": "completed_reported"
+  },
+  "manager_notify_id": "c30fe840-1c5e-40ca-b917-e7478f9b8b40",
+  "manager_tools": [
+    {
+      "tool_name": "router_info",
+      "tool_call_id": "call_read_trigger_original"
+    },
+    {
+      "tool_name": "router_create_task",
+      "tool_call_id": "call_create_manager_task"
+    },
+    {
+      "tool_name": "router_tasks",
+      "tool_call_id": "read_reported_task"
+    },
+    {
+      "tool_name": "router_act_on_task",
+      "tool_call_id": "accept_reported_task"
+    }
+  ],
+  "final_state": "closed",
+  "platform_reply_id": "om_3",
+  "private_input_id": "01a21bcb-1ea8-7663-b0af-33e553cba4d4",
+  "formal_worker_inputs": 1,
+  "private_worker_inputs": 1,
+  "boundary": "Real local Hermes and independent Codex App Server with scripted providers; real Router/Worker TLS and native dynamic tools; Feishu provider is a fixture.",
+  "codex_cli_version": "0.171.0-alpha.13.2",
+  "worker_host": "Bundled native Codex App Server",
+  "codex_thread_id": "01a21bca-e512-7243-8669-a6645380091e",
+  "account_present": false,
+  "setup_turn_id": "01a21bca-e518-74a0-b86c-65bb8616f101",
+  "codex_tool_calls": [
+    {
+      "call_id": "native_fixture_0",
+      "name": "worker_report"
+    },
+    {
+      "call_id": "native_fixture_1",
+      "name": "worker_report"
+    }
+  ],
+  "codex_w04_receipts": [
+    {
+      "recorded": true,
+      "release_assignment_id": "d6ed490f-00ec-4508-9f54-5f0cfe5ed138",
+      "task_state": "completed_reported"
+    },
+    {
+      "recorded": true,
+      "release_assignment_id": "d6ed490f-00ec-4508-9f54-5f0cfe5ed138",
+      "task_state": "completed_reported"
+    }
+  ],
+  "codex_private_reply": "Local model fixture accepted the receipt.",
+  "release": {
+    "revision": "33b2f90242f73b8ae0ab5383da90d4a42771506b",
+    "sha256": "d6698ae4f2180e2cef3339ac908bb144e570f493d8a2f1c2e07d50f1cfb97492",
+    "files": 372
+  },
+  "isolated_install_top_level": [
+    "rewrite"
+  ],
+  "router_clock": "controlled fixture clock",
+  "macos_installed_tests": {
+    "fresh_dual_host": 1,
+    "regression": 18,
+    "failed": 0
+  },
+  "windows_regression": {
+    "run": "https://github.com/KibyouMoe/mowu-link/actions/runs/45955146079",
+    "installation_passed": 21,
+    "dsh_sdk_passed": 14
+  }
+}
