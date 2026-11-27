@@ -1,0 +1,68 @@
+{
+  "candidate_revision": "4e7ac241977a998f027b223521b84c6b03300a5a",
+  "macos": {
+    "target_regression": {
+      "passed": 35,
+      "skipped": 0,
+      "includes_new_native_dsh": true
+    },
+    "codex_and_state_bundle": {
+      "passed": 31,
+      "skipped": 0
+    },
+    "native_dsh_with_linux_container": {
+      "passed": 1,
+      "boundary": "Native DSH and an isolated Linux work container; model and Feishu are fixtures."
+    }
+  },
+  "linux_arm64_install": {
+    "passed": 204,
+    "skipped": 140,
+    "historical_excluded": 58,
+    "verified_files": 401,
+    "sha256": "f195244e3ccfa3d68d5c8e1001a4c36b867fe7425500cd2c57e5e696e0e9b2f1"
+  },
+  "saved_w04_with_real_dsh": {
+    "task_id": "e849ed3f-4d1e-49fe-b6a3-8e3b57224ec8",
+    "assignment_id": "d1320641-1f05-48e1-82f0-6db3703eaae4",
+    "native_input": "mowulink-28ed747f6a37b6ee34e81ac750f6dcd6dbbd83148c2d8b2d8751fa72bfc230a5",
+    "tool_call_ids": [
+      "native-w04-fixture-0",
+      "native-w04-fixture-1"
+    ],
+    "report_key": "complete-d1320641-1f05-48e1-82f0-6db3703eaae4",
+    "report_notice": "a12c11ba-3da6-49dd-8326-de72e3b7c070",
+    "router_state": "completed_reported",
+    "status": {
+      "worker_id": "oguri",
+      "router_connected": true,
+      "router_observed": true,
+      "adapter_connected": false,
+      "last_error": "adapter_connection_unconfirmed",
+      "host_error": "adapter_connection_unconfirmed",
+      "host_session": null,
+      "expected_host_session": "dsh-w04-adapter-offline",
+      "host_busy": null,
+      "native_capabilities": null,
+      "host_observation_age_seconds": 0,
+      "router_retry_in_seconds": null,
+      "held_task_id": null,
+      "held_assignment_id": null
+    },
+    "new_host_inputs": 0,
+    "new_tool_calls": 0,
+    "adapter_tcp_rejections": 3,
+    "boundary": "Native DSH with scripted model, real Router and adapter HTTP, isolated SQLite."
+  },
+  "w05_with_host_fixture": {
+    "router_questions": 1,
+    "answers_during_adapter_outage": 0,
+    "answers_after_host_returns": 1,
+    "assignment_during_outage": "original retained"
+  },
+  "windows_install": {
+    "passed": 44,
+    "run": 45984842525,
+    "job": 140457681952
+  }
+}

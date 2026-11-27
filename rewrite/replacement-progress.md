@@ -6,6 +6,12 @@
 
 ## 检查点与证据
 
+修复 A11 中宿主不可达会挡住 Router 待发箱的问题。Worker 保留出错的原生收件并记录适配器断联，同时提交已落盘的 W04、W05 和同伴回执。没有清理凭据的操作继续待核。真实 DSH 两次原生 W04 尝试均未到 Router，待发箱保留同一键。在适配器 TCP 接入端拒绝连接并恢复 Router 成果入口后，Worker 自动交出原 W04，只产生一条成果通知。宿主仍断联，未新增输入或工具调用。W05 夹具复验保留原题和持单，恢复宿主后只进入一次答案。原生 DSH 及 Codex App Server 原有的断链回归均通过，模型为本地脚本。[实测记录](evidence/adapter-outage-router-outbox.json)
+
+复跑 `python3 -B -m unittest -v rewrite.test_link_health rewrite.test_dsh_native_loop.NativeLoop.test_dsh_saved_w04_reaches_router_with_the_adapter_still_offline rewrite.test_codex_app_server.CodexAppServer.test_native_codex_work_and_w04_across_router_and_adapter_outages`。现役身份、云端飞书和正式换机仍按矩阵验收。
+
+候选提交 `4e7ac241977a998f027b223521b84c6b03300a5a` 构建 401 文件安装包。macOS 相关回归通过 35 项，另通过 Codex 断链和快照的 31 项、带 Linux 容器的原生 DSH 断链测试。Linux arm64 安装版通过 204 项、按环境跳过 140 项，58 项旧版历史用例未纳入验收。Windows 安装版通过 44 项，两条新断链回归均通过。[Windows 流水线](https://github.com/KibyouMoe/mowu-link/actions/runs/45984842525)
+
 Worker 重连会自动处理已落盘、缺回执的 W05。提交沿用原问题号、派发和幂等键。请求没到可补交，Router 已接收时只取原回执。原派发已转派时保留明确拒绝，提问和题卡各零条。先前这三种情况都必须等模型再调用一次。macOS 快照、提问、题卡、交接与真实 DSH 测试共 45 项通过。真实 DSH 原生工具只调用一次 `worker_ask`，故意丢掉 W05 回执后由 Worker 自动补回。原回答只进入宿主一次，后续 W04 释放原派发。模型和管理输入使用测试驱动。
 
 另用两个锁定发行包实测：丢失 W05 后先停写封存，新版冷恢复自动发回同一题。Router 收到答复后再次停写，这时答复尚未到宿主。前一版从试用结束快照恢复，向原派发转送一次答复，并经 W04 进入待验收。原快照摘要未变。用了真实 SQLite 和隔离 HTTPS，宿主使用夹具。复跑 W05 的断链及回执用例用 `python3 -B -m unittest -v rewrite.test_questions rewrite.test_dsh_native_loop.NativeLoop.test_native_formal_question_returns_to_its_assignment_and_keeps_ownership_until_completion`。[操作步骤](router-rehearsal.md#保留试用写入的新版版本回退) · [实测记录](evidence/w05-recovery-release.json)
