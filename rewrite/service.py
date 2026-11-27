@@ -1,6 +1,6 @@
 """Independent Router and Trigger processes. Addresses and identities are explicit."""
 import argparse
-from contextlib import ExitStack, nullcontext
+from contextlib import closing, ExitStack, nullcontext
 import json
 import os
 from pathlib import Path
@@ -10,13 +10,15 @@ import ssl
 import stat
 import sys
 from threading import Thread
+from time import time
 
+from . import admission
 from .orders import Orders
 from .adapter import HostAdapter
 from .host_wire import RemoteAdapter, serve_adapter
 from .managed_sessions import session_callback_key
 from .messages import valid_guid
-from .storage import Fault, StateWriterBusy, encode, require, state_writer
+from .storage import Database, Fault, StateWriterBusy, encode, require, state_writer
 from .trigger import Trigger, archive_status
 from .wire import Client, serve_router
 from .worker import Worker
@@ -78,7 +80,10 @@ def serve(args,stack):
     callbacks = nullcontext()
     public_output = nullcontext()
     if args.component == "router":
-        listener = serve_router(Orders(args.db,drain_dispatch=args.drain_dispatch), identities, address, ctx)
+        orders = Orders(args.db,drain_dispatch=args.drain_dispatch)
+        with orders.db.transaction() as db:
+            drain = admission.active_drain(db)
+        listener = serve_router(orders, identities, address, ctx)
     elif args.component=="peer-archive":
         from . import rollback_peers
         if any(actor!="hermes" and not actor.startswith("worker/") for actor in identities.values()):
@@ -189,7 +194,9 @@ def serve(args,stack):
             worker_service.thread.start()
         ready = {"component":args.component,"port":listener.server_port,"tls":True}
         if args.component=="router":
-            ready["dispatch_draining"] = args.drain_dispatch
+            ready["dispatch_draining"] = args.drain_dispatch or drain is not None
+            if drain is not None:
+                ready["dispatch_drain_id"] = drain["operation_id"]
         print(encode(ready),flush=True)
         if args.component=="router" and args.stop_with_stdin:
             def wait_for_supervisor():
@@ -202,6 +209,25 @@ def serve(args,stack):
             if worker_service:
                 worker_service.stop.set()
                 worker_service.thread.join(timeout=15)
+
+
+def router_drain(args):
+    from .cutover import readonly
+    from .state_bundle import health
+
+    require(args.db.is_file() and not args.db.is_symlink(),422,"invalid_router_database")
+    if args.operation_id is not None or args.action!="status":
+        require(valid_guid(args.operation_id),422,"invalid_dispatch_drain_id")
+    with state_writer(args.db):
+        with closing(readonly(args.db)) as db:
+            health(db,"router")
+            if args.action=="status":
+                if not db.execute("SELECT 1 FROM sqlite_schema WHERE name='dispatch_drains' AND type='table'").fetchone():
+                    require(args.operation_id is None,404,"dispatch_drain_not_found")
+                    return {"operation_id":None,"state":"open"}
+                return admission.change_drain(db,"status",args.operation_id,None)
+        with Database(args.db,admission.DISPATCH_DRAIN_SCHEMA).transaction() as db:
+            return admission.change_drain(db,args.action,args.operation_id,time())
 
 
 def source(args):
@@ -297,6 +323,10 @@ def main():
     handoff.add_argument("--connection",required=True,type=Path)
     handoff.add_argument("--handoff-id",required=True)
     handoff.add_argument("action",choices=("begin","end"))
+    drain_parser = apps.add_parser("router-drain",help="persist or release admission hold on a stopped Router")
+    drain_parser.add_argument("--db",required=True,type=Path)
+    drain_parser.add_argument("--operation-id")
+    drain_parser.add_argument("action",choices=("begin","end","status"))
     status = apps.add_parser("worker-status",help="read an isolated Worker's last connection observations")
     status.add_argument("--connection",required=True,type=Path)
     status.add_argument("--worker-id",required=True)
@@ -322,6 +352,12 @@ def main():
             print(encode(source(args)))
         except StateWriterBusy as error:
             parser.exit(1,str(error)+"\n")
+    elif args.component=="router-drain":
+        try:
+            print(encode(router_drain(args)))
+        except (Fault,StateWriterBusy,ValueError) as error:
+            code = error.code if isinstance(error,Fault) else str(error)
+            parser.exit(1,encode({"error":code})+"\n")
     elif args.component=="handoff-admission":
         if not valid_guid(args.handoff_id):
             parser.error("expected a handoff ID")

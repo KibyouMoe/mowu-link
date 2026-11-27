@@ -52,7 +52,8 @@ class Orders:
     def __init__(self, path, clock=time.time, poll_seconds=5, lease_seconds=30, *, drain_dispatch=False):
         self.db = Database(path, SCHEMA + delivery.SCHEMA + pool.SCHEMA + cleanup.SCHEMA + questions.SCHEMA
                            + attachments.SCHEMA + messages.SCHEMA + peers.SCHEMA + links.ROUTER_SCHEMA
-                           + legacy_history.SCHEMA + legacy_peers.SCHEMA + approvals.SCHEMA + admission.SCHEMA)
+                           + legacy_history.SCHEMA + legacy_peers.SCHEMA + approvals.SCHEMA
+                           + admission.SCHEMA + admission.DISPATCH_DRAIN_SCHEMA)
         with self.db.transaction() as db:
             approvals.upgrade(db)
         self.clock = clock
@@ -107,8 +108,11 @@ class Orders:
                 and not row["held_task_id"] and row["idle_since"] is not None
                 and now - row["idle_since"] >= 10 and not admission.active(db,row["worker_id"]))
 
+    def dispatch_paused(self, db):
+        return self.drain_dispatch or admission.active_drain(db) is not None
+
     def dispatch(self, db, worker_id):
-        if self.drain_dispatch:
+        if self.dispatch_paused(db):
             return
         row = db.execute("SELECT * FROM workers WHERE worker_id=?", (worker_id,)).fetchone()
         if not self.available(db,row):
@@ -186,8 +190,9 @@ class Orders:
                       "busy": bool(r["busy"]), "held_task_id": r["held_task_id"],
                       "held_assignment_id": r["held_assignment_id"], "last_seen_at": timestamp(r["last_seen"])}
                      for r in page]
+            dispatch_paused = self.dispatch_paused(db)
             for item in items:
-                if admission.active(db,item["worker_id"]):
+                if dispatch_paused or admission.active(db,item["worker_id"]):
                     item["admission_paused"] = True
                 link = db.execute("""SELECT l.up FROM worker_adapter_links l JOIN workers w ON w.worker_id=l.worker_id
                                   AND w.session_id=l.session WHERE l.worker_id=?""",(item["worker_id"],)).fetchone()
@@ -289,6 +294,7 @@ class Orders:
         current = task(db, tid)
         aid = string(data, "assignment_id")
         require(current["assignee_id"] == worker and current["assignment_id"] == aid, 409, "stale_assignment")
+        require(not admission.active_drain(db),409,"stale_assignment")
         require(current["revision"] == data.get("revision"), 409, "revision_conflict")
         require(current["state"] == "ready" and self.available(db,row), 409, "worker_not_available")
         db.execute("UPDATE tasks SET state='working',revision=revision+1 WHERE task_id=?", (tid,))

@@ -10,7 +10,7 @@ import shutil
 import sqlite3
 from tempfile import TemporaryDirectory
 
-from . import delivery, dsh_workspace_audit, feishu_audit, trigger_audit
+from . import admission, delivery, dsh_workspace_audit, feishu_audit, trigger_audit
 from . import state_bundle_managed as managed
 from .cutover import digest, output_directory, readonly
 from .messages import valid_guid
@@ -481,6 +481,9 @@ def audit_handoff(snapshot,expected,*,dsh_runtimes=None):
     router_path = snapshot/filename(router_label)
     worker_ids = sorted(component(label)[1] for label in labels if component(label)[0]=="worker")
     with closing(readonly(router_path)) as db:
+        drain = None
+        if db.execute("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='dispatch_drains'").fetchone():
+            drain = admission.active_drain(db)
         hermes_confirmed = delivery.confirmed(db,"hermes")
         worker_confirmed = {wid:delivery.confirmed(db,"worker/"+wid) for wid in worker_ids}
         current = {row["assignee_id"]:dict(row) for row in db.execute("""SELECT assignee_id,task_id,assignment_id
@@ -577,7 +580,8 @@ def audit_handoff(snapshot,expected,*,dsh_runtimes=None):
     if verify(snapshot,expected)!=manifest:
         raise ValueError("snapshot changed during handoff audit")
     return {"snapshot_id":manifest["snapshot_id"],"workers":workers,"hermes":hermes,"pending_cleanup":cleanup,
-            "issues":issues,"needs_review":bool(issues or cleanup)}
+            "issues":issues,"needs_review":bool(issues or cleanup),
+            **({"router_dispatch_drain":admission.drain_receipt(drain)} if drain is not None else {})}
 
 
 def adapter_has_input(path,job,session):

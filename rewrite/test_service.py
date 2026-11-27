@@ -10,6 +10,7 @@ import time
 from tempfile import TemporaryDirectory
 from threading import Thread
 import unittest
+from unittest.mock import patch
 from urllib.error import URLError
 
 from .approvals import TTL_SECONDS, route as approval_route
@@ -40,7 +41,7 @@ class Service(unittest.TestCase):
             json.dump(value,stream)
         return path
 
-    def start(self, identities, cert, key, role="router", extra=(), *, database=None):
+    def start(self, identities, cert, key, role="router", extra=(), *, database=None, expected_drain=None):
         database = database if database is not None else self.root/(role+".db")
         process = subprocess.Popen([*CLI,role,"--db",database,"--identities",identities,
                                    "--cert",cert,"--key",key,*extra],stdout=subprocess.PIPE,stderr=subprocess.PIPE,
@@ -55,7 +56,8 @@ class Service(unittest.TestCase):
         info = json.loads(line)
         self.assertTrue(info["tls"])
         if role=="router":
-            self.assertEqual(info["dispatch_draining"],"--drain-dispatch" in extra)
+            self.assertEqual(info["dispatch_draining"],"--drain-dispatch" in extra or expected_drain is not None)
+            self.assertEqual(info.get("dispatch_drain_id"),expected_drain)
         return process,"https://127.0.0.1:"+str(info["port"])
 
     def certificate(self):
@@ -97,6 +99,167 @@ class Service(unittest.TestCase):
         _,reopened = self.start(identities,cert,key,extra=("--drain-dispatch",))
         task = Client(reopened,token,cert).request("GET","tasks/"+created["task_id"])["task"]
         self.assertEqual(task["title"],"Keep this state")
+
+    @unittest.skipUnless(shutil.which("openssl"), "TLS fixture certificate generator unavailable")
+    def test_router_drain_keeps_accepted_work_and_requeues_an_unaccepted_offer(self):
+        from .adapter import HostAdapter
+        from .devloop import FixtureHost
+        from .hermes import HermesAdapter
+        from .state_bundle import audit_handoff, capture, restore
+        from .worker import Worker
+
+        a_key,b_key,manager_key = (guid() for _ in range(3))
+        cert,key = self.certificate()
+        roles = self.write_config("router-roles.json",{a_key:"worker/a",b_key:"worker/b",manager_key:"hermes"})
+        database = self.root/"router.db"
+        prefix = ["router-drain","--db",str(database)]
+        operation_id = guid()
+        operation = [*prefix,"--operation-id",operation_id]
+        primary,url = self.start(roles,cert,key)
+        manager = Client(url,manager_key,cert)
+
+        def worker(name,token):
+            host = FixtureHost(self.root/(name+"-native.db"),"fixture-"+name)
+            adapter = HostAdapter(self.root/(name+"-adapter.db"),host,host.session)
+            return Worker(self.root/(name+"-worker.db"),name,Client(url,token,cert),adapter),host
+
+        def create(client,name,title):
+            return client.request("POST","tasks",{"assignee_id":name,"title":title,"instructions":"isolated drain"},guid())
+
+        def current(client,task):
+            return client.request("GET","tasks/"+task["task_id"])["task"]
+
+        def denied(*arguments,code):
+            result = subprocess.run([*CLI,*arguments],cwd=ROOT,capture_output=True,text=True,timeout=12)
+            self.assertEqual(result.returncode,1,result.stderr)
+            self.assertEqual(json.loads(result.stderr),{"error":code})
+
+        a,host_a = worker("a",a_key)
+        b,host_b = worker("b",b_key)
+        for w in (a,b):
+            w.connect()
+            w.poll()
+        time.sleep(10.05)
+        a_offer = create(manager,"a","Accepted at the boundary")
+        b_offer = create(manager,"b","Only reserved at the boundary")
+        for offer in (a_offer,b_offer):
+            self.assertTrue(offer["assignment_id"])
+        path_a,path_b = ("tasks/"+o["task_id"]+"/accept" for o in (a_offer,b_offer))
+        accept_requests = []
+        original_a,original_b = a.router.request,b.router.request
+
+        def lost_a(method,path,*args,**kwargs):
+            result = original_a(method,path,*args,**kwargs)
+            if method=="POST" and path==path_a:
+                accept_requests.append((args[1],result))
+                raise ConnectionResetError("fixture dropped committed W03")
+            return result
+
+        def stopped_before_b(method,path,*args,**kwargs):
+            if method=="POST" and path==path_b:
+                raise ConnectionResetError("fixture paused before W03")
+            return original_b(method,path,*args,**kwargs)
+
+        for w,inject in ((a,lost_a),(b,stopped_before_b)):
+            with patch.object(w.router,"request",side_effect=inject),self.assertRaises(ConnectionResetError):
+                w.poll()
+        self.assertEqual(current(manager,a_offer)["state"],"working")
+        self.assertEqual(manager.request("GET","tasks/"+b_offer["task_id"])["delivery_state"],"received")
+        self.assertIsNone(a.hold()["held_assignment_id"])
+        self.assertEqual(host_a.entries()+host_b.entries(),[])
+        denied(*operation,"begin",code="state_writer_already_running")
+        self.stop(primary)
+        self.assertEqual(self.command(*prefix,"status"),{"operation_id":None,"state":"open"})
+        started = self.command(*operation,"begin")
+        self.assertEqual(started["state"],"draining")
+        self.assertEqual(started["requeued"],[{"task_id":b_offer["task_id"],"assignment_id":b_offer["assignment_id"],
+                                              "assignee_id":"b","revision":b_offer["revision"]+1}])
+        self.assertEqual(self.command(*operation,"begin"),started)
+        self.assertEqual(self.command(*prefix,"status"),started)
+        denied(*prefix,"--operation-id",guid(),"begin",code="dispatch_drain_already_active")
+
+        paths = {"router:main":database,"agent:a":a.adapter.db.path,"worker:a":a.db.path,
+                 "agent:b":b.adapter.db.path,"worker:b":b.db.path,
+                 "trigger:main":Trigger(self.root/"trigger.db","fixture").db.path,
+                 "hermes:main":HermesAdapter(self.root/"hermes.db",None,None).db.path}
+        snapshot = self.root/"snapshot"
+        staged = capture(paths,os.environ.get("MOWULINK_TEST_RELEASE_REVISION","a"*40),snapshot)
+        fingerprint = staged["manifest_sha256"]
+        audit = audit_handoff(snapshot,fingerprint)
+        self.assertEqual(audit["router_dispatch_drain"],started)
+        self.assertTrue(audit["needs_review"])
+        recovered = restore(snapshot,fingerprint,self.root/"restored")
+        reopened_database = Path(recovered["router:main"])
+        original_prefix = prefix
+        prefix = ["router-drain","--db",str(reopened_database)]
+        operation = [*prefix,"--operation-id",operation_id]
+        self.assertEqual(self.command(*prefix,"status"),started)
+
+        draining,drain_url = self.start(roles,cert,key,database=reopened_database,expected_drain=operation_id)
+        manager = Client(drain_url,manager_key,cert)
+        paused = manager.request("GET","workers")["items"]
+        self.assertEqual({row["worker_id"]:row.get("admission_paused") for row in paused},{"a":True,"b":True})
+        a = Worker(Path(recovered["worker:a"]),"a",Client(drain_url,a_key,cert),
+                   HostAdapter(Path(recovered["agent:a"]),host_a,host_a.session))
+        b = Worker(Path(recovered["worker:b"]),"b",Client(drain_url,b_key,cert),
+                   HostAdapter(Path(recovered["agent:b"]),host_b,host_b.session))
+        with self.assertRaisesRegex(Fault,"stale_assignment") as stale:
+            b.router.request("POST",path_b,{"session_id":b.session,"assignment_id":b_offer["assignment_id"],
+                "revision":b_offer["revision"]},"accept-"+b_offer["assignment_id"])
+        self.assertEqual(stale.exception.status,409)
+        b.poll()
+        self.assertEqual(host_b.entries(),[])
+        self.assertIsNone(current(manager,b_offer)["assignment_id"])
+        accept_body = {"session_id":a.session,"assignment_id":a_offer["assignment_id"],"revision":a_offer["revision"]}
+        original_accept_key,original_accept = accept_requests[0]
+        self.assertEqual(a.router.request("POST",path_a,accept_body,original_accept_key),original_accept)
+        a.poll()
+        (_payload,receipt_a), = host_a.entries()
+        summary = "Original accepted assignment finished during drain"
+        result = a.report(receipt_a["native_id"],a_offer["task_id"],a_offer["assignment_id"],summary)
+        self.assertEqual(result["task_state"],"completed_reported")
+        self.assertEqual(a.report(receipt_a["native_id"],a_offer["task_id"],a_offer["assignment_id"],summary),result)
+        notice, = manager.request("GET","messages?source=a")["items"]
+        second_b = create(manager,"b","Created while draining")
+        self.assertIsNone(second_b["assignment_id"])
+        self.assertEqual(notice["task_id"],a_offer["task_id"])
+
+        self.stop(draining)
+        denied(*prefix,"--operation-id",guid(),"end",code="dispatch_drain_not_found")
+        self.assertEqual(self.command(*prefix,"status"),started)
+        ended = self.command(*operation,"end")
+        self.assertEqual(ended["state"],"released")
+        self.assertEqual(self.command(*operation,"end"),ended)
+        self.assertEqual(self.command(*operation,"begin"),ended)
+        self.assertEqual(self.command(*prefix,"status"),{"operation_id":None,"state":"open"})
+        _,active_url = self.start(roles,cert,key,database=reopened_database)
+        manager = Client(active_url,manager_key,cert)
+        self.assertFalse(any(row.get("admission_paused") for row in manager.request("GET","workers")["items"]))
+        b.router = Client(active_url,b_key,cert)
+        tail = create(manager,"b","After drain")
+        b.poll()
+        for task in (b_offer,second_b,tail):
+            self.assertIsNone(current(manager,task)["assignment_id"])
+        time.sleep(10.05)
+        b.poll()
+        b.poll()
+        (payload_b,receipt_b), = host_b.entries()
+        self.assertEqual(payload_b["task_id"],b_offer["task_id"])
+        self.assertNotEqual(payload_b["assignment_id"],b_offer["assignment_id"])
+        self.assertEqual(b.hold()["held_assignment_id"],payload_b["assignment_id"])
+        self.assertIsNone(current(manager,second_b)["assignment_id"])
+        self.assertEqual(len(host_a.entries()),1)
+        self.assertEqual(self.command(*original_prefix,"status"),started)
+        self.assertEqual(audit_handoff(snapshot,fingerprint),audit)
+        if output := os.environ.get("MOWULINK_ROUTER_DRAIN_EVIDENCE"):
+            Path(output).write_text(encode({"begin":started,"end":ended,"accepted_task":a_offer["task_id"],
+                "w03_key":original_accept_key,"w03":original_accept,"w04":result,"report_notice":notice["message_id"],
+                "unaccepted_task":b_offer["task_id"],"old_w03_http":409,"old_w03_error":"stale_assignment",
+                "new_assignment_id":payload_b["assignment_id"],"reopened_host_receipt":receipt_b,
+                "kept_idle_window":False,"new_worker_inputs":{"a":1,"b":1},"active_writer_refused":True,
+                "snapshot_id":staged["snapshot_id"],"snapshot_unchanged":True,"drain_restored_from_snapshot":True,
+                "boundary":"Real Router CLI processes and isolated HTTPS. Worker core, native host fixtures and simulated packet loss."})
+                +"\n",encoding="utf-8")
 
     @unittest.skipUnless(shutil.which("openssl"), "TLS fixture certificate generator unavailable")
     def test_cli_tls_restart_preserves_identity_file_and_receipts(self):
