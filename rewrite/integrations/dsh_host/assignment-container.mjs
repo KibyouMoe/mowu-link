@@ -4,7 +4,7 @@ import {closeSync, constants, fstatSync, fsyncSync, lstatSync, mkdirSync, openSy
 import path from 'node:path';
 import {guid} from './session-preparation.mjs';
 import {workspaceEngine} from './workspace-engine.mjs';
-import {maximumSeedBytes, seedProject, workspaceSeed} from './workspace-seed.mjs';
+import {maximumSeedBytes, packProject, seedProject, workspaceSeed} from './workspace-seed.mjs';
 
 const LABEL = 'io.mowulink.assignment';
 const PROCESS_LIMIT = 64;
@@ -106,11 +106,12 @@ export function assignmentContainers(runtime,session,config,files=null) {
   const filename = aid=>path.join(directory,hash([session,aid])+'.json');
   const save = entry=>files ? files.write(filename(entry.assignment_id),entry)
                             : writeRecord(filename(entry.assignment_id),entry);
-  async function scope(tid,aid) {
+  async function scope(tid,aid,{existing=false}={}) {
     check(guid(tid) && guid(aid));
     const owner = await daemon();
     let record = files ? await files.read(filename(aid)) : readRecord(filename(aid));
     if (!record) {
+      check(!existing,'assignment_workspace_unavailable');
       record = {session,task_id:tid,assignment_id:aid,daemon:owner,image,
         token:randomUUID(),phase:'unused',container_id:null,
         ...(seed ? {seed_sha256:seed.sha256} : {}),...(execute_workspace_files ? {workspace_exec:true} : {})};
@@ -267,6 +268,24 @@ export function assignmentContainers(runtime,session,config,files=null) {
         check(bytes.length<=MAX_ARTIFACT_BYTES,'workspace_artifact_too_large');
         return {name:parts.at(-1),size_bytes:bytes.length,
           sha256:createHash('sha256').update(bytes).digest('hex'),bytes};
+      });
+    },
+    async checkpoint(tid,aid) {
+      return serial(aid,async()=>{
+        const record = await scope(tid,aid,{existing:true});
+        check(record.phase==='active' && record.started_at,'assignment_workspace_unavailable');
+        const container = await owned(record);
+        check(running(container)===record.started_at,'assignment_workspace_restarted');
+        const {stdout:archive} = await invoke(['container','exec',container.Id,'python3','-I','-c',
+          packProject,String(maximumSeedBytes)],{encoding:'buffer',maxBuffer:maximumSeedBytes,timeout:30000})
+          .catch(error=>{
+            if (error.code===73) throw new Error('assignment_workspace_has_live_processes');
+            throw new Error('workspace_project_checkpoint_failed');
+          });
+        check(running(await owned(record))===record.started_at,'assignment_workspace_restarted');
+        check(await daemon()===record.daemon && archive.length>0);
+        return {archive,sha256:createHash('sha256').update(archive).digest('hex'),
+          container_id:record.container_id,started_at:record.started_at,image:record.image};
       });
     },
     pending() {

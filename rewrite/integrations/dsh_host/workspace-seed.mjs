@@ -61,6 +61,69 @@ with (root / ".mowulink-seed-lock").open("a") as lock:
     os.rename(partial, target)
 `;
 
+// Only after the host writer is stopped. Do not read while a detached command can still modify the project.
+export const packProject = String.raw`
+import io
+import os
+import stat
+import sys
+import tarfile
+
+limit = int(sys.argv[1])
+
+def require_idle():
+    if {int(name) for name in os.listdir("/proc") if name.isdecimal()} - {1, os.getpid()}:
+        sys.exit(73)
+
+require_idle()
+root = os.open("/workspace/project", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+packed = io.BytesIO()
+entries = total = 0
+try:
+    with tarfile.open(fileobj=packed, mode="w") as archive:
+        for rel, folders, files, parent in os.fwalk(".", dir_fd=root, follow_symlinks=False):
+            for name in sorted(folders + files):
+                relative = (rel + "/" + name).removeprefix("./")
+                parts = relative.split("/")
+                entries += 1
+                if (entries > 4096 or not 0 < len(relative.encode("utf-8")) <= 1024
+                    or any(part in {"", ".", "..", ".git"} for part in parts)
+                    or any(ord(c) < 32 or ord(c) == 127 or c == chr(92) for c in relative)):
+                    raise ValueError("unsupported project path")
+                file = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                record = tarfile.TarInfo(relative)
+                if stat.S_ISDIR(file.st_mode):
+                    record.type = tarfile.DIRTYPE
+                    record.mode = 0o700
+                    archive.addfile(record)
+                    continue
+                if not stat.S_ISREG(file.st_mode) or file.st_nlink != 1:
+                    raise ValueError("unsupported project entry")
+                total += file.st_size
+                if total > limit:
+                    raise ValueError("project checkpoint is too large")
+                flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+                fd = os.open(name, flags, dir_fd=parent)
+                with os.fdopen(fd, "rb") as source:
+                    bound = os.fstat(source.fileno())
+                    if bound != file:
+                        raise ValueError("project entry changed")
+                    record.mode = 0o700 if file.st_mode & 0o111 else 0o600
+                    record.size = file.st_size
+                    archive.addfile(record, source)
+                    after = os.fstat(source.fileno())
+                    if (after.st_size, after.st_mtime_ns, after.st_ctime_ns) != (
+                        bound.st_size, bound.st_mtime_ns, bound.st_ctime_ns
+                    ):
+                        raise ValueError("project entry changed")
+finally:
+    os.close(root)
+require_idle()
+if not entries or packed.tell() > limit:
+    raise ValueError("invalid project checkpoint size")
+sys.stdout.buffer.write(packed.getvalue())
+`;
+
 export function workspaceSeed(config,files=null) {
   if (config===undefined) return null;
   if (!config || typeof config.archive!=='string' || !path.isAbsolute(config.archive)

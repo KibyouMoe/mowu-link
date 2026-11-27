@@ -2975,6 +2975,12 @@ exec {docker} "$@"
 
     @unittest.skipUnless(shutil.which("openssl"),"isolated TLS certificate generator required")
     def test_dsh_workspaces_cold_restart_recovers_unreported_work_and_committed_w04(self):
+        self.exercise_dsh_cold_workspace()
+
+    def test_stopped_dsh_workspace_produces_a_private_seed_for_a_fresh_assignment(self):
+        self.exercise_dsh_cold_workspace(checkpoint_project=True)
+
+    def exercise_dsh_cold_workspace(self,*,checkpoint_project=False):
         image,cli = self.container_engine()
         session = "dsh-cold-project-recovery"
         root = Path(self.enterContext(tempfile.TemporaryDirectory(dir="/tmp",prefix="ml-dsh-workspace-")))
@@ -3069,6 +3075,19 @@ exec {docker} "$@"
 
         before,trial,recovered = (root/name for name in ("before","trial","recovered"))
         before.mkdir(mode=0o700)
+        if checkpoint_project:
+            node = shutil.which("node")
+            self.assertIsNotNone(node)
+            engine = {"node":node,"docker":cli[0],"socket":cli[-1].removeprefix("unix://"),"image":image}
+            engine_file = config(root,"checkpoint-engine",engine)
+            published = root/"sealed-project"
+
+            def checkpoint(destination,*,aid=None,selected_engine=engine_file):
+                command = [sys.executable,"-B","-m","rewrite.workspace_checkpoint","--worker",str(before/"worker.db"),
+                           "--adapter",str(before/"adapter.db"),"--runtime",str(runtime),"--config",str(selected_engine),
+                           "--destination",str(destination),"--task-id",task_id,"--assignment-id",aid or assignment]
+                return subprocess.run(command,cwd=package,env=env,text=True,capture_output=True,timeout=55)
+
         first_task = manage.request("POST","tasks",{"title":"Cold-restart project",
             "instructions":"Write locally and leave the formal order open","assignee_id":"oguri"},guid())
         task_id = first_task["task_id"]
@@ -3104,6 +3123,105 @@ exec {docker} "$@"
             self.assertIsNone(read_outbox(before))
             check_workspace(callback,"active")
             self.assertFalse(manage.frames(0))
+            if checkpoint_project:
+                rejected = checkpoint(root/"online-project")
+                self.assertEqual((rejected.returncode,json.loads(rejected.stderr)),
+                                 (1,{"error":"state_writer_already_running"}))
+                self.assertFalse((root/"online-project").exists())
+
+        if checkpoint_project:
+            unknown = checkpoint(root/"unknown-assignment",aid=guid())
+            self.assertEqual((unknown.returncode,json.loads(unknown.stderr)),
+                             (1,{"error":"workspace_checkpoint_requires_original_hold"}))
+            self.assertFalse((root/"unknown-assignment").exists())
+            lease_bytes = journal.read_bytes()
+            subprocess.run([*cli,"exec","-d",lease["container_id"],"/bin/sleep","5"],check=True,capture_output=True,timeout=7)
+            working = checkpoint(root/"working-project")
+            self.assertEqual((working.returncode,json.loads(working.stderr)),
+                             (1,{"error":"assignment_workspace_has_live_processes"}))
+            self.assertFalse((root/"working-project").exists())
+            subprocess.run([*cli,"exec",lease["container_id"],"/bin/sh","-c",
+                            "ln -s /etc/passwd /workspace/project/deceptive"],check=True,capture_output=True,timeout=7)
+            until = time.monotonic()+9
+            while True:
+                refused = checkpoint(root/"unsafe-project")
+                reason = json.loads(refused.stderr)["error"]
+                if reason != "assignment_workspace_has_live_processes":
+                    break
+                self.assertLess(time.monotonic(),until)
+                time.sleep(.4)
+            self.assertEqual((refused.returncode,reason),(1,"workspace_project_checkpoint_failed"))
+            self.assertFalse((root/"unsafe-project").exists())
+            subprocess.run([*cli,"exec",lease["container_id"],"unlink","/workspace/project/deceptive"],
+                           check=True,capture_output=True,timeout=7)
+            captured = checkpoint(published)
+            self.assertEqual(captured.returncode,0,captured.stderr)
+            backup = json.loads(captured.stdout)
+            self.assertEqual(backup,json.loads((published/"checkpoint.json").read_text()))
+            self.assertEqual((backup["session"],backup["task_id"],backup["assignment_id"]),(session,task_id,assignment))
+            self.assertEqual((backup["container_id"],backup["started_at"]),(lease["container_id"],lease["started_at"]))
+            seed_path = published/backup["archive"]
+            self.assertEqual(seed_path.stat().st_mode & 0o077,0)
+            self.assertEqual(backup["sha256"],hashlib.sha256(seed_path.read_bytes()).hexdigest())
+            self.assertEqual(journal.read_bytes(),lease_bytes)
+            self.assertEqual(inspect(),job)
+            self.assertFalse(manage.frames(0))
+
+            target_endpoint = os.environ.get("MOWULINK_DSH_CHECKPOINT_TARGET")
+            target_cli = [cli[0],"--host",target_endpoint] if target_endpoint else cli
+
+            def daemon(command):
+                reply = subprocess.check_output([*command,"info","--format","{{.OSType}} {{.ID}}"],text=True,timeout=8)
+                self.assertTrue(reply.startswith("linux "))
+                return reply.strip()
+
+            source_id,dest_id = daemon(cli),daemon(target_cli)
+            if target_endpoint:
+                self.assertNotEqual(source_id,dest_id)
+                wrong_engine = config(root,"wrong-checkpoint-engine",dict(engine,socket=target_endpoint.removeprefix("unix://")))
+                wrong = checkpoint(root/"wrong-engine-project",selected_engine=wrong_engine)
+                self.assertEqual((wrong.returncode,json.loads(wrong.stderr)),(1,{"error":"native_cleanup_unconfirmed"}))
+                self.assertFalse((root/"wrong-engine-project").exists())
+
+            dest_session = "dsh-checkpoint-fresh-destination"
+            directory,dest_loop,dest_service,_ = self.goal_worker(dest_session)
+            dest = Path(directory)
+            self.seed_runtime(dest_session,dest,target_cli,image,seed_path,backup["sha256"])
+            token = guid()
+            client = Client(self.open_worker(dest_service,{token:"adapter/oguri"}),token)
+            with tool_listener(dest,dest_loop.adapter,client), \
+                 self.start_native(dest,dest_session,"cleanup-container-seed-checkpoint") as destination_native:
+                dest_loop.worker.connect()
+                new_task = self.dispatch_seed_work(dest_loop,dest_service.clock,"Reviewed project files","Read the transferred project")
+                output = self.read_native(destination_native,"read")
+                detail = dest_loop.hermes.inspect(new_task)
+                self.assertEqual(detail["task"]["state"],"completed_reported",output["results"])
+                imported_assignment = detail["last_report"]["assignment_id"]
+                self.assertNotEqual(imported_assignment,assignment)
+                self.assertEqual(len(output["inputs"]),1)
+                self.assertEqual([call["name"] for call in output["calls"]],
+                                 ["worker_workspace_shell","worker_workspace_export","worker_report"])
+                self.assertEqual(json.loads(output["results"][0]["content"][0]["text"]),
+                                 {"exit_code":0,"stdout":"modified result\n","stderr":""})
+                dest_artifact, = detail["last_report"]["artifact_ids"]
+                imported = dest_loop.manager_wire.request("GET","attachments/"+dest_artifact)["bytes"]
+                self.assertEqual(imported,b"modified result\n")
+                notices = dest_loop.manager_wire.frames(0)
+                self.assertEqual(len(notices),1)
+                self.assertIsNone(dest_loop.worker.hold()["held_assignment_id"])
+                copied, = (dest/"assignment-containers").glob("*.json")
+                finished = wait_for(lambda:json.loads(copied.read_bytes()),lambda row:row["phase"]=="sealed")
+                self.assertNotEqual(finished["container_id"],lease["container_id"])
+            self.assertEqual(inspect(),job)
+            source_checkpoint = {"source":backup,"destination_task_id":new_task,
+                "destination_assignment_id":imported_assignment,"destination_container_id":finished["container_id"],
+                "destination_artifact_id":dest_artifact,"destination_artifact_sha256":hashlib.sha256(imported).hexdigest(),
+                "destination_native_inputs":output["inputs"],"destination_notices":len(notices),
+                "destination_state":detail["task"]["state"],"docker_engines":[source_id,dest_id],
+                "refused_live_worker":True,"refused_detached_process":True,"refused_symlink":True,
+                "refused_wrong_assignment":True,"refused_different_source_engine":bool(target_endpoint),
+                "archive_and_import_preserved_original_router_state":True,
+                "scope":"Independent DSH native sessions and containers. The destination has a new isolated Router task."}
 
         original_bytes = {name:hashlib.sha256((before/name).read_bytes()).hexdigest() for name in ("worker.db","adapter.db")}
         copy_pair(before,trial)
@@ -3175,6 +3293,8 @@ exec {docker} "$@"
                 "w04_key":w04_attempts[0]["key"],"w04_receipt":receipt,"manager_notice":event["delivery_id"],
                 "container_after_w04":"removed","processes":process_observations,
                 "run_scope":"Same isolated Linux engine, actual DSH native persistence and independent TLS adapter/Worker processes; scripted test model, no production credentials."}
+            if checkpoint_project:
+                result["checkpoint"]=source_checkpoint
             Path(output).write_text(json.dumps(result,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
 
     def previous_dsh_after_rollback(self,package,root,runtime,session,paths,before,job,*,use_tls):

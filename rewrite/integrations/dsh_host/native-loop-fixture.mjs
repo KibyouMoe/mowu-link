@@ -142,7 +142,10 @@ class LocalModel extends LlmAdapter {
     if (usesSeed && command==='task') {
       const attempt = this.submitted.get(message.id) ?? 0;
       const prefix = 'workspace-seed-'+payload.assignment_id+'-';
-      const shell = ['worker_workspace_shell',{command:projectFixtureEdit}];
+      const checkpoint = mode==='cleanup-container-seed-checkpoint';
+      const shell = ['worker_workspace_shell',{command:checkpoint
+        ? 'cat /workspace/project/hello.txt && test "$(stat -c %a /workspace/project/checks/fixture.sh)" = 700'
+        : projectFixtureEdit}];
       const invalid = mode==='cleanup-container-seed-invalid';
       const loss = payload.instructions==='lose seed acknowledgement';
       const restart = mode==='cleanup-container-seed-restart';
