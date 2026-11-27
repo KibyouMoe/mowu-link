@@ -1,0 +1,37 @@
+{
+  "linux_release": {
+    "revision": "b5cdc5ef367b2ad750f2287688367ba51888ac29",
+    "package_sha256": "003df9b79ea3faaee317f22469a5f7396280a5f4e1300563cc63812f34beb87c",
+    "verified_files": 322,
+    "linux_arm64": {"passed": 213, "skipped": 124, "failed": 0},
+    "macos_worker_to_linux_router": {
+      "task_id": "e94f4349-56e7-4dbf-8feb-ae404fd1cec2",
+      "assignment_id": "100667c2-d832-492a-bcd2-f052c418ff56",
+      "delivery_id": "c738a977-5fe2-44a8-b65e-4a01f4021060",
+      "host_fixture_inputs": 1,
+      "after_turn": "working",
+      "after_report": "completed_reported",
+      "task_id_after_receipt": null,
+      "router_notifications": 1,
+      "unknown_identity_http": 401,
+      "untrusted_certificate_rejected": true
+    }
+  },
+  "legacy_queue_probes": {
+    "revision": "f48cd9427213bf3f1d3bbad582946700d93d6dbb",
+    "round_trips": 3,
+    "queued_position": 1,
+    "ordered_history_chain": ["t-2077a020b5", "t-53ec3526ca", "t-c5a33fe7ce", "t-765e049355"],
+    "duplicates_of_retired_edit_requests_refused": 3,
+    "separate_cancel_probe": {
+      "archived_id": "t-24e97e85ce",
+      "successor_id": "t-c6be550f94",
+      "stale_cancel_http": 200,
+      "stale_cancel_duplicate": true,
+      "successor_remained_queued": true,
+      "successor_cancel_http": 200,
+      "successor_cancel_reason": "withdrawn_before_dispatch"
+    }
+  },
+  "boundary": "Actual isolated legacy and rewrite Router HTTP and SQLite. Different OS kernels on one physical host. Host, model and manager invocation use fixtures."
+}

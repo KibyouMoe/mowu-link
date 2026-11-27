@@ -34,6 +34,10 @@
 
 旧队列迁入后改过、仍未派发的单可以随回退批次逐单审核。旧库禁止原位修改。已实测在恢复副本追加原单历史和替代单，替代单占原队列位置，旧端两次派发检查只发出一次。原单和替代单各自按原请求号去重，两号在旧归档中关联。再迁入只出现替代单，重试试用 A05/A06 不能开新单。同批可恢复已验收归档和试用新建待派单。缺审阅摘要、缺修订回执或无法保留原目标模式及上下文时拒绝发布。旧与重做 Router、HTTP 与 SQLite 实跑，宿主和 Worker 连接为夹具。复跑 `python3 -B -m unittest -v rewrite.test_cutover -k approved_replacement`。[替换与再迁入实测](evidence/cutover-migrated-queue-replacement.json) · [原位修改拒绝实测](evidence/cutover-migrated-queued-edit-gap.json)
 
+实现修正版 `f48cd9427213bf3f1d3bbad582946700d93d6dbb` 恢复了无审核文件时的在途诊断。macOS 全量通过 332 项、依环境跳过 5 项，322 文件安装包内通过 85 项专项并逐文件验包。包 SHA-256 为 `4f4560a5d16e4094f6e2c7c8fabbae719ead044ed352c3b0d7c661361ffb10b2`。Linux arm64 源码全量通过 213 项、依环境跳过 124 项。Windows 安装和 DSH 原生两组通过。[Windows CI](https://github.com/KibyouMoe/mowu-link/actions/runs/45917584672)
+
+跨系统发行包第一轮漏带旧邮件、游戏客户端，安装目录回归在调用旧采集器时失败。补齐测试夹具后的 `b5cdc5ef367b2ad750f2287688367ba51888ac29` 在 Linux 安装目录通过 213 项、依环境跳过 124 项，并逐文件验包。Windows 安装和 DSH 原生两组通过。macOS Worker 与 Linux Router 和适配器通过回环映射的 HTTPS 跑正式单，宿主一次收件，普通回合结束仍为执行中，W04 后待验收且只有一条通知。模型和宿主为夹具。另验三轮旧队列回退与再次迁入，原队列位置保留，迟到的原单取消不影响替代单。[跨系统发行包、连续回退和取消证据](evidence/queue-rollback-release-rehearsal.json) · [Windows CI](https://github.com/KibyouMoe/mowu-link/actions/runs/45918062917)
+
 取消重试耗尽后的两种处置已纳入隔离回退。四条取消指令无清理确认才入池，首次迟到的取消 W04 返回 409。挂起后重新取消，由原工位确认并归档。另一张单转派后由新工位提交成果、溪流验收，原工位只清理旧派发。两代 HTTP Router 实测，旧端分别读回已取消和已验收，两个工位都无持单、无重派。首次取消、三次空闲重试、搁置和后续清理分别保留凭据。清理未确认或篡改重试的空闲观测时，回退不生成目录。宿主和时钟为夹具。复跑 `python3 -B -m unittest -v rewrite.test_cutover -k exhausted_cancel`。[取消重试回退实测](evidence/cutover-reviewed-cancel-retry.json)
 
 取消重试回退实现 `42ad8dc34f5d985768fea13326158d27a92a85b8` 的 Linux arm64 全量通过 201 项、依环境跳过 121 项。303 文件安装包通过 73 项专项，逐文件校验一致。归档 SHA-256 为 `abac5a9649dd8415254780e2cc892ce722b0322c423f422aec1603eb7cfc4174`。Windows 常规与 DSH 原生两组通过。[Windows CI](https://github.com/KibyouMoe/mowu-link/actions/runs/45909766891)

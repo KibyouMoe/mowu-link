@@ -386,12 +386,12 @@ MOWULINK_HERMES_TEST_PYTHON="$ISOLATED_PYTHON" MOWULINK_HERMES_TEST_SOURCE="$HER
 
 ```sh
 python3 -m rewrite.linux_check --repository . \
-  --revision 2025c3001d1019016b832ff7d578eb1aa56c7899 \
+  --revision b5cdc5ef367b2ad750f2287688367ba51888ac29 \
   --image sha256:0a1254df0519003d33fd4ab8ad26aff1154e50b3c93aa5ec978e83bf83ba084c \
   --socket "$HOME/.colima/default/docker.sock"
 ```
 
-脚本从指定提交制作发行包，两端各自安装。Worker 在开发机运行，Router 和宿主适配器在全新 Linux 容器里运行，各用独立的身份和 HTTPS 端口。两个端口只映射到开发机回环地址。容器以普通用户运行，根目录只读，临时盘保存测试数据库。结束时清理测试容器、专用网络及一次性身份。测试重投后独立读回宿主输入数，核对签发者校验、未登记身份、W03 持单、回合结束与 W04 待验收。Agent 与宿主为夹具。两种系统运行在一台物理机上。原始记录见[Linux 跨系统验收记录](evidence/linux-cross-os.json)。
+脚本从指定提交制作发行包，两端各自安装。Worker 在开发机运行，Router 和宿主适配器在全新 Linux 容器里运行，各用独立的身份和 HTTPS 端口。两个端口只映射到开发机回环地址。容器以普通用户运行，根目录只读，临时盘保存测试数据库。结束时清理测试容器、专用网络及一次性身份。测试重投后独立读回宿主输入数，核对签发者校验、未登记身份、W03 持单、回合结束与 W04 待验收。Linux 安装目录全量回归另取同一提交的旧 Router、旧 Trigger 及邮件和游戏采集代码。Agent 与宿主为夹具。两种系统运行在一台物理机上。[本次跨系统验收](evidence/queue-rollback-release-rehearsal.json) · [首次验收](evidence/linux-cross-os.json)
 
 #### Windows 安装与回退
 

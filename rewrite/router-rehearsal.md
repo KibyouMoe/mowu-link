@@ -106,7 +106,7 @@ Worker 请求继续时，回退以同一派发内的续做回执和原空闲观�
 
 旧端工单记录是追加式的。恢复副本在原旧单上追加 `queue_replaced_on_rewrite` 归档和替代单号，替代单有自己的旧端 ID 与请求 UUID，占原队列序号。无需向旧 Router 重放这个建单请求。原单保留原正文，无成果、无派发。按原旧请求重试读回原历史单，按替代请求重试读回替代单。开启旧端写者之前，依私有清单里的 `migrated_queue_replacements` 核对两单链接、接手工位、原队列位置和恢复后数据库摘要。替代单保留原执行模式与原路由上下文。编辑若去掉迁入时的目标段落或上下文，或旧端无法逐字表示新正文，回退会拒绝。原、新两端快照都须保留。
 
-演练覆盖旧 HTTP 读回、两个原请求重试、正文冲突返回 409、实际旧 Router 仅派一次、回退后再次迁入，以及与正式 W04 归档和新待派单同批准备。再次迁入只将替代单放回队列，已经使用的 A05/A06 请求键仍受历史记录保护。复跑 `python3 -B -m unittest -v rewrite.test_cutover -k approved_replacement`。使用测试 Worker 连接和宿主。[实测记录](evidence/cutover-migrated-queue-replacement.json)
+演练覆盖旧 HTTP 读回、两个原请求重试、正文冲突返回 409、实际旧 Router 仅派一次、回退后再次迁入，以及与正式 W04 归档和新待派单同批准备。旧单号收到取消时返回原归档回执，替代单继续排队。对替代单的管理操作须用其自己的旧端工单号。再次迁入只将替代单放回队列，已经使用的 A05/A06 请求键仍受历史记录保护。复跑 `python3 -B -m unittest -v rewrite.test_cutover -k approved_replacement`。使用测试 Worker 连接和宿主。[实测记录](evidence/cutover-migrated-queue-replacement.json) · [取消及三轮回退](evidence/queue-rollback-release-rehearsal.json)
 
 ### 在途工单先排空再回退
 
