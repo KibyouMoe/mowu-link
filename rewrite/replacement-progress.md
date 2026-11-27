@@ -4,6 +4,18 @@
 
 以下按原检查点保留实测边界与复跑记录。其中涉及旧协议、旧格式、旧版回写或新旧联跑的记录属于范围更正前的历史证据。旧历史及在途数据已获准在正式停写切换窗口内舍弃。服务、数据路径和队列见[正式切换清单](acceptance-matrix.md#正式切换清理与旧数据处置)，本阶段仍使用隔离环境。
 
+## 2026-11-27 停工交接
+
+分支 `feat/rewrite-formal-mainline`。已发布的代码基线从 `dd5c4543c5a1f4ef92a875bec455e6524b66ab79` 接续。当前工作树保留六个未提交源码或测试文件，涉及 `workspace_checkpoint.py`、`integrations/workspace-checkpoint.mjs`、DSH 容器/归档/原生夹具及 `test_dsh_native_loop.py`。本次提交范围为交接和既有验证记录。
+
+同一 Linux 引擎上，原 DSH 进程停写后封存了修改过的 `/workspace/project`，新容器导入相同文件并从独立正式测试单送回 W04。源单随后走自己的原回执恢复。运行中的 Worker、脱离进程组的容器进程、符号链接和错派发均被拒绝。代码未提交，双引擎演练未启动，原派发跨宿主继续仍无验收证据。[现场证据](evidence/dsh-project-checkpoint-in-progress.json)
+
+按 `dd5c454` 的[验收矩阵](acceptance-matrix.md)，49 项中已满足 4，余 45。10 项仍需实现或补隔离证据，另有 1 项 Antigravity 缺受支持的原桌面接入。34 项已有隔离证据，待实际宿主、测试身份、真实来源、飞书或部署授权。主要阻点包括独立 Codex Desktop 尚不能加载 `worker_report`，独立 App Server 缺获批测试账号，Windows 宿主尚缺可用的本机 Linux Docker 引擎进行原生工作区验收。新版备份、回退及生产切换授权仍按 05 执行。
+
+恢复后的第一步是核对上述未提交 diff。启用独立目标引擎后，用 `MOWULINK_DSH_CHECKPOINT_TARGET` 指向其本地套接字，复跑 `rewrite.test_dsh_native_loop.NativeLoop.test_stopped_dsh_workspace_produces_a_private_seed_for_a_fresh_assignment`。判据是两端 Docker ID 不同，目标读回同一文件摘要且只生成一份 W04，原账本接错引擎明确拒绝。真实身份的验收项仍依授权推进。
+
+本轮测试进程已退出。第二个 Linux 测试来宾已关机，私有目录 `/private/tmp/mlw-34pqu5gl` 及已加载镜像留存。当前无本轮临时作业继续执行。
+
 ## 检查点与证据
 
 候选 `e8d6b18256b50d28c283d817d44195cf969c49a7` 的 417 文件安装包在 macOS 分别启动五组件。Router、Worker 和夹具适配器的 5 份启动记录从 HTTPS 读回。邮件、游戏两种 Trigger 的 4 份启动记录与 launchd 实际 PID 相同。错摘要在开库前拒绝，恢复后 4 条原件与新件均完成 T04，其中事件只派发一次。Hermes 的 4 份插件启动记录与认证健康接口的 PID 相同。修改 profile 内插件副本后，网关仍可运行，插件拒绝登记且没有打开中转库。[证据](evidence/five-component-runtime-release.json) · [复跑](router-rehearsal.md#核对已运行的发行包)

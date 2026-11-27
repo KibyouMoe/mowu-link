@@ -1,0 +1,95 @@
+{
+  "base_revision": "dd5c4543c5a1f4ef92a875bec455e6524b66ab79",
+  "code_state": "Uncommitted working tree. Same Linux daemon, two separate DSH sessions, containers and isolated Router tasks.",
+  "test": "rewrite.test_dsh_native_loop.NativeLoop.test_stopped_dsh_workspace_produces_a_private_seed_for_a_fresh_assignment",
+  "result": {
+    "passed": 1,
+    "elapsed_seconds": 17.438
+  },
+  "second_engine_rehearsal": "The second temporary Linux guest accepted the pinned image. No cross-engine project test ran.",
+  "observations": {
+    "session": "dsh-cold-project-recovery",
+    "task_id": "664b0847-d11e-44ec-be8f-ceabc19a0dab",
+    "assignment_id": "7b2876c7-45d6-4ea4-b69e-c890f4d3a373",
+    "container_id": "6f7b1547e06336653c01f451b6bcde8d615c5112132705abdb5eeac77eeccf0e",
+    "container_start": "2026-11-27T13:40:33.044550997Z",
+    "project_seed_sha256": "d36f401d6aa284d223cc806381f496ba09fe76177900ab9b9790487fbafd61f1",
+    "artifact_id": "c412f63a-00b4-4cec-9fd2-6d8d61c9b024",
+    "native_inputs": [
+      "mowulink-724a8b56e661022673a262152dc7869e69e589607dfeee39dcadbad9a6cdb71a",
+      "mowulink-6f84f1cd2aa66954da2ed99a2fccdcc8a64496ca04a5f3e1ad00df7ea7097063"
+    ],
+    "tools": [
+      "worker_workspace_shell",
+      "worker_workspace_export",
+      "worker_report"
+    ],
+    "new_model_requests_after_release_replay": 0,
+    "w04_acknowledgements_lost": 2,
+    "w04_replays": 1,
+    "w04_key": "complete-7b2876c7-45d6-4ea4-b69e-c890f4d3a373",
+    "w04_receipt": {
+      "recorded": true,
+      "release_assignment_id": "7b2876c7-45d6-4ea4-b69e-c890f4d3a373",
+      "task_state": "completed_reported"
+    },
+    "manager_notice": "21103423-d2fb-4c73-b4ac-afff0247f47f",
+    "container_after_w04": "removed",
+    "processes": [
+      {
+        "stage": "write",
+        "dsh_pid": 40121,
+        "worker_tls_port": 62299,
+        "adapter_tls_port": 62306
+      },
+      {
+        "stage": "continue",
+        "dsh_pid": 40330,
+        "worker_tls_port": 62480,
+        "adapter_tls_port": 62509
+      },
+      {
+        "stage": "recover",
+        "dsh_pid": 40390,
+        "worker_tls_port": 62565,
+        "adapter_tls_port": 62577
+      }
+    ],
+    "run_scope": "Same isolated Linux engine, actual DSH native persistence and independent TLS adapter/Worker processes; scripted test model, no production credentials.",
+    "checkpoint": {
+      "source": {
+        "archive": "project.tar",
+        "assignment_id": "7b2876c7-45d6-4ea4-b69e-c890f4d3a373",
+        "bytes": 10240,
+        "container_id": "6f7b1547e06336653c01f451b6bcde8d615c5112132705abdb5eeac77eeccf0e",
+        "image": "sha256:0a1254df0519003d33fd4ab8ad26aff1154e50b3c93aa5ec978e83bf83ba084c",
+        "journal_sha256": "834d812ad0ba0696799d3b483547ef3a41e4f62bd39fe74bb7661f09318557b3",
+        "session": "dsh-cold-project-recovery",
+        "sha256": "be6a38b3c7e459ab1c48d17807784c268dffc8e9931307f90c7c0e26922ced41",
+        "started_at": "2026-11-27T13:40:33.044550997Z",
+        "task_id": "664b0847-d11e-44ec-be8f-ceabc19a0dab"
+      },
+      "destination_task_id": "570f967e-7101-44a8-909c-8feb40bfcf51",
+      "destination_assignment_id": "a5ef0ea8-a8db-4f98-8cf2-ec3dd57115fd",
+      "destination_container_id": "7c2a91da11138004f57e738a5ec857da8bd286060f2a7990a743ac884b0eee4a",
+      "destination_artifact_id": "40ff6800-26a2-4ac1-8b24-39e78bb65728",
+      "destination_artifact_sha256": "238ba5203f5b4f34db2ada5a83835487db62cbdf18ad43ea43e1790540a31895",
+      "destination_native_inputs": [
+        "mowulink-707b3965606a7e73da974eff42d64e594e9b410f22633c5be60520fed8137eb0"
+      ],
+      "destination_notices": 1,
+      "destination_state": "completed_reported",
+      "docker_engines": [
+        "linux 3643aa57-d6b7-4c52-af68-04b9c419866d",
+        "linux 3643aa57-d6b7-4c52-af68-04b9c419866d"
+      ],
+      "refused_live_worker": true,
+      "refused_detached_process": true,
+      "refused_symlink": true,
+      "refused_wrong_assignment": true,
+      "refused_different_source_engine": false,
+      "archive_and_import_preserved_original_router_state": true,
+      "scope": "Independent DSH native sessions and containers. The destination has a new isolated Router task."
+    }
+  }
+}
