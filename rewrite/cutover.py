@@ -643,7 +643,8 @@ def main():
                       ("stage-reviewed-rollback",("snapshot","trial","review","destination")),
                       ("rollback",("snapshot","trial","destination")),
                       ("export-chat",("snapshot","destination")),
-                      ("prepare-chat-archive",("snapshot","destination"))):
+                      ("prepare-chat-archive",("snapshot","destination")),
+                      ("prepare-worker-chat-archive",("snapshot","destination"))):
         command = commands.add_parser(op)
         for name in names:
             command.add_argument("--"+name,type=Path,required=True)
@@ -659,8 +660,10 @@ def main():
             command.add_argument("--source-archive-sha256")
         elif op == "stage-reviewed-rollback":
             command.add_argument("--source-plan",type=Path)
-        elif op in ("export-chat","prepare-chat-archive"):
+        elif op in ("export-chat","prepare-chat-archive","prepare-worker-chat-archive"):
             command.add_argument("--worker",required=True)
+        if op=="prepare-worker-chat-archive":
+            command.add_argument("--manifest-sha256",required=True)
         if op == "export-chat":
             command.add_argument("--after",type=int,default=0)
             command.add_argument("--limit",type=int,default=500)
@@ -670,6 +673,11 @@ def main():
         from .legacy_chat import prepare as prepare_chat_archive
         del args["op"]
         print(encode(prepare_chat_archive(**args)))
+        return
+    if args["op"]=="prepare-worker-chat-archive":
+        from .feishu_history import prepare as prepare_worker_chat_archive
+        del args["op"]
+        print(encode(prepare_worker_chat_archive(**args)))
         return
     command = {"backup":backup,"verify":verified,"prepare":prepare,
                "reconcile":reconcile,"rollback":rollback,"stage-queue-rollback":stage_queue_rollback,

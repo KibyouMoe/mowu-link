@@ -7,6 +7,7 @@ import time
 from urllib.error import URLError
 
 from .storage import Database, Fault, encode, require, string
+from . import feishu_history
 from .worker_commands import is_command
 from .worker_catalog import numbered_selection
 from .worker_resume import creation, selection
@@ -98,7 +99,7 @@ class Inbound:
             CREATE TABLE IF NOT EXISTS input_notices(seq INTEGER PRIMARY KEY, mid TEXT NOT NULL,
                 stage TEXT NOT NULL,text TEXT NOT NULL,first_try REAL,card TEXT,retry REAL NOT NULL DEFAULT 0,
                 outcome TEXT NOT NULL DEFAULT 'pending',platform_mid TEXT,UNIQUE(mid,stage));
-        """)
+        """ + feishu_history.SCHEMA)
         with self.db.transaction() as db:
             db.execute("INSERT OR IGNORE INTO binding VALUES (1,?)",(encode(self.binding),))
             require(db.execute("SELECT value FROM binding").fetchone()[0] == encode(self.binding),409,"platform_binding_conflict")
@@ -121,8 +122,10 @@ class Inbound:
                 422,"invalid_message_parent")
         body = {"kind":message.get("message_type"),"content":message.get("content")}
         with self.db.transaction() as db:
-            db.execute("INSERT OR IGNORE INTO platform_events(mid,body,state,session_change) VALUES (?,?,'pending',?)",
-                       (mid,encode(dict(body,parent_id=parent)),changes_session(body)))
+            inserted = db.execute("INSERT OR IGNORE INTO platform_events(mid,body,state,session_change) VALUES (?,?,'pending',?)",
+                                  (mid,encode(dict(body,parent_id=parent)),changes_session(body))).rowcount
+            if inserted:
+                feishu_history.arrived(db,mid,self.clock())
             saved = json.loads(db.execute("SELECT body FROM platform_events WHERE mid=?",(mid,)).fetchone()[0])
             require(saved==body or saved==dict(body,parent_id=parent),
                     409,"platform_message_conflict")
@@ -223,6 +226,7 @@ class Inbound:
             raise
         with self.db.transaction() as db:
             db.execute("UPDATE platform_events SET state='received',receipt=?,error=NULL WHERE mid=?",(encode(receipt),mid))
+            feishu_history.received(db,mid,receipt)
             db.execute("DELETE FROM input_notices WHERE mid=? AND first_try IS NULL",(mid,))
             if db.execute("SELECT 1 FROM input_notices WHERE mid=?",(mid,)).fetchone():
                 text = "已查到这条指令的处理回执。" if "output" in receipt else "已确认原会话收到这条消息。"

@@ -7,7 +7,7 @@ import time
 from uuid import NAMESPACE_URL, uuid5
 
 from .feishu_inbound import image_format
-from . import question_cards
+from . import feishu_history, question_cards
 from .storage import Database, Fault, encode, require
 
 
@@ -32,7 +32,7 @@ class Views:
                 attempts INTEGER NOT NULL,retry_at REAL NOT NULL);
             CREATE TABLE IF NOT EXISTS segments(session TEXT,turn TEXT,mid TEXT NOT NULL,text TEXT NOT NULL,
                 PRIMARY KEY(session,turn));
-        """ + question_cards.SCHEMA)
+        """ + question_cards.SCHEMA + feishu_history.SCHEMA)
         with self.db.transaction() as db:
             db.execute("INSERT OR IGNORE INTO view_cursor VALUES (1,?,0)",(chat,))
             require(db.execute("SELECT chat FROM view_cursor").fetchone()[0]==chat,409,"view_chat_mismatch")
@@ -110,6 +110,7 @@ class Views:
             if not write["platform_mid"]:
                 mid = self.send_write(json.loads(write["request"]),write["prepared_at"])
                 db.execute("UPDATE view_writes SET platform_mid=? WHERE seq=?",(mid,seq))
+                feishu_history.final_confirmed(db,seq,event,mid,self.clock())
 
         with self.db.transaction() as db:
             attempt = db.execute("SELECT mid FROM view_attempt WHERE seq=?",(seq,)).fetchone()

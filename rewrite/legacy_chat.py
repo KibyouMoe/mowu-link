@@ -43,30 +43,38 @@ def private_archive(path):
         return info.st_uid==os.getuid() and not info.st_mode&0o077
 
 
-def prepare(snapshot,destination,worker):
+def check_destination(destination,worker):
     if not worker_name(worker) or not private_directory(destination.parent):
         raise ValueError("expected one exact Worker ID and a private archive location")
+
+
+def write_archive(stage,worker,source_sha256,rows):
+    archive = stage/NAME
+    archive.touch(mode=0o600,exist_ok=False)
+    if not private_archive(archive):
+        raise ValueError("expected a private archive file")
+    with closing(sqlite3.connect(archive)) as target, target:
+        target.executescript("""
+            CREATE TABLE scope (worker TEXT PRIMARY KEY, source_sha256 TEXT NOT NULL);
+            CREATE TABLE messages (id INTEGER PRIMARY KEY, worker TEXT NOT NULL, direction TEXT NOT NULL,
+                                   text TEXT NOT NULL, session_id TEXT, ts REAL NOT NULL, message_id TEXT);
+            CREATE INDEX messages_time ON messages (ts);
+        """)
+        target.execute("INSERT INTO scope VALUES (?,?)",(worker,source_sha256))
+        count = target.executemany("INSERT INTO messages VALUES (?,?,?,?,?,?,?)",rows).rowcount
+    return {"format":1,"worker":worker,"count":count,"archive_sha256":digest(archive),
+            "snapshot_sha256":source_sha256}
+
+
+def prepare(snapshot,destination,worker):
+    check_destination(destination,worker)
     manifest = verified(snapshot)
     database = snapshot/"legacy.db"
     with output_directory(destination) as stage, closing(readonly(database)) as source:
-        archive = stage/NAME
-        archive.touch(mode=0o600,exist_ok=False)
-        if not private_archive(archive):
-            raise ValueError("expected a private archive file")
-        with closing(sqlite3.connect(archive)) as target, target:
-            target.executescript("""
-                CREATE TABLE scope (worker TEXT PRIMARY KEY, source_sha256 TEXT NOT NULL);
-                CREATE TABLE messages (id INTEGER PRIMARY KEY, worker TEXT NOT NULL, direction TEXT NOT NULL,
-                                       text TEXT NOT NULL, session_id TEXT, ts REAL NOT NULL, message_id TEXT);
-                CREATE INDEX messages_time ON messages (ts);
-            """)
-            target.execute("INSERT INTO scope VALUES (?,?)",(worker,manifest["legacy_db_sha256"]))
-            rows = source.execute("SELECT "+FIELDS+" FROM chat_messages WHERE worker=? ORDER BY id",(worker,))
-            count = target.executemany("INSERT INTO messages VALUES (?,?,?,?,?,?,?)",rows).rowcount
+        rows = source.execute("SELECT "+FIELDS+" FROM chat_messages WHERE worker=? ORDER BY id",(worker,))
+        result = write_archive(stage,worker,manifest["legacy_db_sha256"],rows)
         if digest(database)!=manifest["legacy_db_sha256"]:
             raise ValueError("snapshot changed during chat archive preparation")
-        result = {"format":1,"worker":worker,"count":count,"archive_sha256":digest(archive),
-                  "snapshot_sha256":manifest["legacy_db_sha256"]}
         (stage/"manifest.json").write_text(encode(result),encoding="utf-8")
     return result
 

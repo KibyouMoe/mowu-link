@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -76,6 +77,119 @@ class Bundle(unittest.TestCase):
                 platform = Inbound(paths["feishu:oguri"],client,None,"app","trainer","chat",clock=self.clock)
                 views = Views(paths["feishu:oguri"],client,self.platform,"chat","工位",clock=self.clock)
                 yield manager,worker,source,Client(url,"mail"),platform,views
+
+
+    @unittest.skipUnless(shutil.which("openssl"),"TLS fixture certificate generator unavailable")
+    def test_prepare_worker_chat_archive_after_both_receipts_recover(self):
+        from .feishu_history import prepare as prepare_history
+        from .release_check import serve
+
+        def record(platform,mid,text):
+            return platform.record("app","user","trainer",{"chat_type":"p2p","chat_id":"chat",
+                                   "message_id":mid,"message_type":"text","content":encode({"text":text})})
+
+        def card_event(worker,kind,event_id,turn_id,text):
+            display.native(worker,{"event_id":event_id,"session":self.native.session,"turn_id":turn_id,
+                                   "kind":kind,"text":text,**({"tool_name":"fixture"} if kind=="tool" else {})})
+
+        def report(snapshot,proof,destination):
+            return prepare_history(snapshot,proof["manifest_sha256"],destination,"oguri")
+
+        with self.stack(self.sources) as (_,worker,_,_,platform,views):
+            mid = record(platform,"om_first_chat","first trainer message")
+            request = platform.worker.request
+
+            def lose_reply(method,path,*args,**kwargs):
+                request(method,path,*args,**kwargs)
+                raise ConnectionError("native write succeeded but its reply was not received")
+
+            platform.worker.request = lose_reply
+            try:
+                with self.assertRaises(ConnectionError):
+                    platform.deliver(mid)
+            finally:
+                platform.worker.request = request
+            native = self.native.entries()[0][1]
+            card_event(worker,"tool","tool-preview",native["turn_id"],"tool preview")
+            card_event(worker,"final","chat-reply",native["turn_id"],"first public reply")
+            card_event(worker,"final","other-final",guid(),"not a Feishu chat reply")
+            self.assertEqual(views.poll(),3)
+            with platform.db.transaction() as db:
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM chat_history_index").fetchone()[0],0)
+            self.clock.advance(6)
+            self.assertEqual(platform.deliver(record(platform,mid,"first trainer message")),native)
+            self.assertEqual(len(self.native.entries()),1)
+
+            legacy_mid = record(platform,"om_old_chat","old input with no time")
+            with platform.db.transaction() as db:
+                db.execute("DELETE FROM chat_arrivals WHERE mid=?",(legacy_mid,))
+            platform.deliver(legacy_mid)
+
+            mixed = platform.deliver(record(platform,"om_mixed_chat","input to a mixed turn"))
+            # The private reply exporter refuses a turn with more than one recorded origin.
+            with worker.adapter.db.transaction() as db:
+                db.execute("INSERT INTO intents(delivery_id,session,payload,digest,receipt,native_id) VALUES (?,?,?,?,?,?)",
+                           ("fixture-mixed",mixed["session"],encode({"kind":"task"}),mixed["digest"],
+                            encode(mixed),guid()))
+            card_event(worker,"final","mixed-final",mixed["turn_id"],"mixed native output")
+            self.assertEqual(views.poll(),1)
+            second_mid = record(platform,"om_second_chat","second trainer message")
+            second = platform.deliver(second_mid)
+            card_event(worker,"final","second-reply",second["turn_id"],"second public reply")
+            self.platform.lose_next = True
+            with self.assertRaises(ConnectionError):
+                views.poll()
+
+        original = capture(self.sources,self.revision,self.snapshot)
+        partial = report(self.snapshot,original,self.root/"partial-chat")
+        self.assertEqual((partial["inbound"],partial["outbound"],partial["inbound_without_index"],
+                          partial["finals_without_chat_proof"]),(3,1,1,2))
+        paths = restore(self.snapshot,original["manifest_sha256"],self.dest)
+        posted = len(self.platform.messages)
+        with self.stack(paths) as (_,_,_,_,platform,views):
+            self.assertEqual(views.poll(),1)
+            self.assertEqual(platform.deliver(second_mid),second)
+            self.assertEqual(len(self.platform.messages),posted)
+            self.assertEqual(views.poll(),0)
+        snapshot = self.root/"second-backup"
+        proof = capture(paths,self.revision,snapshot)
+        archive_dir = self.root/"chat-result"
+        tool = subprocess.run([sys.executable,"-B","-S","-m","rewrite.cutover","prepare-worker-chat-archive",
+                               "--snapshot",snapshot,"--manifest-sha256",proof["manifest_sha256"],
+                               "--destination",archive_dir,"--worker","oguri"],
+                              cwd=Path(__file__).resolve().parents[1],capture_output=True,text=True,timeout=15)
+        self.assertEqual(tool.returncode,0,tool.stderr)
+        final = json.loads(tool.stdout)
+        self.assertEqual((final["inbound"],final["outbound"],final["inbound_without_index"],
+                          final["finals_without_chat_proof"]),(3,2,1,2))
+        with self.assertRaisesRegex(ValueError,"no Feishu state belongs"):
+            prepare_history(snapshot,proof["manifest_sha256"],self.root/"wrong-chat","tamamo")
+        with closing(sqlite3.connect(self.root/"partial-chat"/"chat-history.db")) as state:
+            partial_ids = [row[0] for row in state.execute("SELECT id FROM messages ORDER BY id")]
+        token = guid()
+        roles = config(self.root,"history-roles.json",{token:"chat-reader/oguri"})
+        cert,key = self.root/"history.pem",self.root/"history.key"
+        subprocess.run(["openssl","req","-x509","-newkey","rsa:2048","-nodes","-days","1","-subj","/CN=localhost",
+                        "-addext","subjectAltName=IP:127.0.0.1","-keyout",key.name,"-out",cert.name],
+                       cwd=self.root,capture_output=True,check=True,timeout=15)
+        archive = archive_dir/"chat-history.db"
+        with serve(Path(__file__).resolve().parents[1],"chat-archive",archive,roles,cert,key,os.environ,
+                   ("--worker-id","oguri","--sha256",final["archive_sha256"])) as url:
+            reader = Client(url,token,cert)
+            records = reader.request("GET","chat/oguri/messages")["messages"]
+            self.assertEqual([row["text"] for row in records],["first trainer message","first public reply",
+                "input to a mixed turn","second trainer message","second public reply"])
+            self.assertEqual([row["id"] for row in records[:-1]],partial_ids)
+            self.assertEqual(reader.request("GET",f"chat/oguri/messages?since={partial_ids[-1]}")["messages"],records[-1:])
+            with self.assertRaisesRegex(Fault,"unknown_chat_history"):
+                reader.request("GET","chat/tamamo/messages")
+        if path := os.environ.get("MOWULINK_WORKER_CHAT_EVIDENCE"):
+            Path(path).write_text(json.dumps({"before_restore":{"rows":partial["count"],"inbound":partial["inbound"],
+                "outbound":partial["outbound"]},"after_restore":final,"copied_history_cursor":partial_ids[-1],
+                "ids":[row["id"] for row in records],"last_feishu_message_id":records[-1]["message_id"],
+                "native_retry_extra_inputs":0,"platform_retry_extra_messages":0,"foreign_worker_http":404,
+                "scope":"Local Worker HTTP, isolated HTTPS chat archive and component snapshots. Native input and Feishu use fixtures."},
+                indent=2)+"\n",encoding="utf-8")
 
     def test_five_component_restore_resumes_hold_attachment_notifications_and_platform_input(self):
         with self.stack(self.sources) as (m,w,source,mail,platform,views):
