@@ -7,7 +7,7 @@ import shutil
 import sqlite3
 import time
 
-from . import legacy_history, rollback_lifecycle, rollback_questions
+from . import legacy_history, rollback_lifecycle, rollback_migrated_queue, rollback_questions
 from .cutover import (digest, legacy_creation_request, output_directory, queue_execution_modes,
                       readonly, reconcile, restore_snapshot, stage_queue_requests, verified)
 from .messages import valid_guid
@@ -19,22 +19,25 @@ TABLES = {"tasks","reports","messages","deliveries","operations","workers","work
           "uploads","chunks","attachment_grants","business_files","pool_entries","cleanups","materials","questions"}
 
 
-def reviewed_orders(facts, original_tasks):
+def reviewed_orders(facts, original_tasks, replacements):
     queued = queue_execution_modes(facts["queue_candidates"])
     new = {item["task_id"]:item for field in ("closed_new_tasks","cancelled_new_tasks","archived_pool_new_tasks")
            for item in facts[field]}
     changes = []
     for row in facts["work_orders"]:
+        if row["task_id"] in replacements:
+            continue
         if row["task_id"] in queued:
             if row["before"] or row["completed_reports"] or row["candidate_materials"]:
                 raise ValueError("new queued order already has a report or candidate material")
         else:
             changes.append(row)
     deltas = facts["changed_tables"]
-    if (not changes or facts["blocked_new_tasks"] or set(deltas)-TABLES
+    if (not (changes or replacements) or facts["blocked_new_tasks"] or set(deltas)-TABLES
             or any(value["baseline_only"] for name,value in deltas.items() if name!="tasks")):
         raise ValueError("trial has changes outside the supported reviewed orders")
-    if deltas.get("tasks")!={"baseline_only":len(changes)-len(new),"trial_only":len(changes)+len(queued)}:
+    if deltas.get("tasks")!={"baseline_only":len(changes)-len(new)+len(replacements),
+                            "trial_only":len(changes)+len(queued)+len(replacements)}:
         raise ValueError("trial contains other task changes")
     entries = {}
     for row in changes:
@@ -175,7 +178,16 @@ def stage_reviewed_rollback(snapshot,trial,review,destination):
     original_tasks = {}
     initial_assignments = {}
     facts = reconcile(snapshot,trial,original_tasks=original_tasks,initial_assignments=initial_assignments)
-    entries = reviewed_orders(facts,original_tasks)
+    source = trial/"router.db"
+    approval = json.loads(review.read_text())
+    if not isinstance(approval,dict):
+        raise ValueError("review must be an object with the trial digest")
+    selected = approval.get("replace_migrated_queue",{})
+    if not isinstance(selected,dict):
+        raise ValueError("replace_migrated_queue must list reviewed orders")
+    with closing(readonly(source)) as db:
+        replacements = rollback_migrated_queue.reviewed_proofs(db,facts["work_orders"],original_tasks,selected)
+    entries = reviewed_orders(facts,original_tasks,replacements)
     for tid,entry in entries.items():
         if tid in initial_assignments:
             entry["initial_assignment"] = initial_assignments[tid]
@@ -191,10 +203,13 @@ def stage_reviewed_rollback(snapshot,trial,review,destination):
         decision["pool_archives"] = pool_archives
     if facts["queue_candidates"]:
         decision["execution_modes"] = queue_execution_modes(facts["queue_candidates"])
-    if json.loads(review.read_text())!=decision:
+    if replacements:
+        decision["replace_migrated_queue"] = {tid:{"legacy_task_id":proof["legacy_task_id"],
+                                                  "revision":proof["ready_revision"],"execution_mode":"goal"}
+                                              for tid,proof in replacements.items()}
+    if approval!=decision:
         raise ValueError("review must match the trial digest, all closed assignments and any new queue modes, cancellations or pool archives")
     manifest = verified(snapshot)
-    source = trial/"router.db"
     if manifest["legacy_db_sha256"]!=facts["snapshot_sha256"]:
         raise ValueError("legacy snapshot changed during review")
     with output_directory(destination) as stage:
@@ -218,13 +233,16 @@ def stage_reviewed_rollback(snapshot,trial,review,destination):
                 if not result or not result["summary"].strip():
                     raise ValueError("missing reviewed report")
                 entry["summary"] = result["summary"]
-            rollback_lifecycle.histories(db,entries,facts["changed_tables"],initial_assignments)
+            preparation = {**initial_assignments,**replacements}
+            rollback_lifecycle.histories(db,entries,facts["changed_tables"],preparation)
             questions = rollback_questions.retain(db,entries,facts["changed_tables"].get("questions",{}).get("trial_only",0))
-            workers,frames,inquiries = rollback_lifecycle.check_transport(db,entries,questions)
+            optional_workers = {worker for proof in replacements.values()
+                                for worker in (proof["initial"]["assignee_id"],proof["worker_id"])}
+            workers,frames,inquiries = rollback_lifecycle.check_transport(db,entries,questions,optional_workers)
             uploads,files = copy_reviewed_files(db,entries,facts["changed_tables"],private/"files")
             rollback_lifecycle.check_operations(db,entries,workers,frames,uploads,
                                                 facts["changed_tables"].get("operations",{}).get("trial_only",0),
-                                                facts["queue_candidates"],questions,inquiries,initial_assignments)
+                                                facts["queue_candidates"],questions,inquiries,preparation)
             for tid,entry in entries.items():
                 if "creation_key" in entry:
                     original = dict(entry["original_content"],assignee_id=entry["original_worker"])
@@ -232,6 +250,7 @@ def stage_reviewed_rollback(snapshot,trial,review,destination):
                         entry["creation_key"],original,assigned="initial_assignment" in entry)
             at = time.time()
             archive_in_legacy(stage/"legacy.db",entries,facts["source_id"],at)
+            applied = rollback_migrated_queue.replace_orders(stage/"legacy.db",facts["source_id"],replacements,at) if replacements else {}
             plan = stage_queue_requests(db,stage/"legacy.db",facts,initial_assignments)
             if not plan["requests"]:
                 plan = None
@@ -247,11 +266,17 @@ def stage_reviewed_rollback(snapshot,trial,review,destination):
                         "restored_sha256":restored_sha,"staged_at":at,"orders":entries,"files":files}
             if queue_manifest_sha:
                 recovery["queue_replay_sha256"] = queue_manifest_sha
+            if applied:
+                recovery["migrated_queue_replacements"] = applied
             output.write(encode(recovery))
         with closing(readonly(source)):
             if digest(source)!=digest(frozen):
                 raise ValueError("trial database changed while staging rollback")
-    return {"reviewed_orders":len(entries),"cancelled_orders":len(cancelled),"pool_archived_orders":len(pool_archives),
-            "private_artifacts":len(files),"trial_sha256":facts["trial_sha256"],
-            "restored_legacy_sha256":restored_sha,"queued_requests":len(facts["queue_candidates"]),
-            "queue_replay_sha256":queue_manifest_sha}
+    result = {"reviewed_orders":len(entries),"cancelled_orders":len(cancelled),"pool_archived_orders":len(pool_archives),
+              "private_artifacts":len(files),"trial_sha256":facts["trial_sha256"],
+              "restored_legacy_sha256":restored_sha,"queued_requests":len(facts["queue_candidates"]),
+              "queue_replay_sha256":queue_manifest_sha}
+    if applied:
+        fields = ("legacy_task_id","replacement_task_id","queue_position","worker_id")
+        result["migrated_queue_replacements"] = {tid:{key:row[key] for key in fields} for tid,row in applied.items()}
+    return result

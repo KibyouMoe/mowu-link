@@ -46,10 +46,18 @@ def revise_assignment(current, body):
 
 
 def verify(db, row, creation, first_offer, *, allow_edit_only=False):
-    tid = row["task_id"]
-    current = initial_creation(tid,creation)
-    if current is None:
+    initial = initial_creation(row["task_id"],creation)
+    if initial is None:
         return None
+    proof = verify_prefix(db,row,initial,creation["seq"],first_offer,allow_edit_only=allow_edit_only)
+    if proof is not None:
+        return dict(proof,original_creation=dict(creation),
+                    original_request_sha256=hashlib.sha256(creation["request"].encode()).hexdigest())
+    return None
+
+
+def verify_prefix(db, row, current, after_seq, first_offer=None, *, allow_edit_only=False):
+    tid = row["task_id"]
     offered = json.loads(first_offer["payload"]) if first_offer else None
     if first_offer and (not isinstance(offered,dict) or type(offered.get("revision")) is not int
                         or not valid_guid(offered.get("assignment_id"))):
@@ -61,7 +69,7 @@ def verify(db, row, creation, first_offer, *, allow_edit_only=False):
     for event in db.execute("""SELECT rowid AS seq,actor,key,request,response FROM main.operations
         WHERE rowid>?
         AND (json_extract(request,'$[0][1]')=? OR json_extract(request,'$[0][1]') GLOB ?)
-        ORDER BY rowid""",(creation["seq"],base,base+"/*")):
+        ORDER BY rowid""",(after_seq,base,base+"/*")):
         (method,path),body = json.loads(event["request"])
         if not isinstance(body,dict):
             return None
@@ -109,6 +117,5 @@ def verify(db, row, creation, first_offer, *, allow_edit_only=False):
             return None
     elif any(current[key]!=row[key] for key in ("title","instructions","assignee_id")):
         return None
-    return {"original_creation":dict(creation),"original_request_sha256":hashlib.sha256(creation["request"].encode()).hexdigest(),
-            "worker_id":current["assignee_id"],"content":content,"ready_revision":final_revision,
+    return {"worker_id":current["assignee_id"],"content":content,"ready_revision":final_revision,
             "assignment_request_id":assignment_request,"events":events}

@@ -61,6 +61,13 @@ def queue_metadata_supported(raw,version):
     return dict(meta,context=None)==DEFAULT_QUEUE_META and "context" in meta
 
 
+def queue_instructions(description, meta):
+    context = (meta.get("context") or "").strip()
+    body = description + ("\n\n[router context]\n"+context if context else "")
+    instructions = LEGACY_GOAL+"\n\n"+body if meta else body
+    return body,instructions
+
+
 def inventory(db, version=2):
     if [row[0] for row in db.execute("PRAGMA integrity_check")] != ["ok"]:
         raise ValueError("database integrity check failed")
@@ -182,12 +189,7 @@ def prepare(snapshot, destination, source_id):
             for row in old.execute("""SELECT q.task_id,i.name,i.description,i.metadata,i.request_id,i.actor,q.worker FROM dispatch_queue q
                                       JOIN task_info i USING(task_id) ORDER BY q.seq"""):
                 tid = str(uuid5(namespace,row["task_id"]))
-                body = row["description"]
-                meta = json.loads(row["metadata"])
-                context = (meta.get("context") or "").strip()
-                if context:
-                    body += "\n\n[router context]\n"+context
-                instructions = LEGACY_GOAL+"\n\n"+body if meta else body
+                body,instructions = queue_instructions(row["description"],json.loads(row["metadata"]))
                 db.execute("INSERT INTO tasks(task_id,title,instructions,assignee_id) VALUES (?,?,?,?)",
                            (tid,row["name"],instructions,row["worker"]))
                 if row["actor"]=="hermes" and row["request_id"]:

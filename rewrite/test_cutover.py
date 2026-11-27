@@ -3402,6 +3402,217 @@ store.close()
                 "boundary":"Isolated rewrite and legacy HTTP and SQLite; host and clock use fixtures."},
                 ensure_ascii=False,indent=2)+"\n")
 
+    def test_approved_replacement_preserves_the_original_legacy_queue_position(self):
+        request = {"worker":"two","TaskName":"旧标题","goal":"旧正文","context":"原路由背景",
+                   "message_id":guid(),"execution_mode":"goal","queue_if_offline":True}
+        legacy_id,next_id,position = json.loads(self.old("""
+from server import RouterServer
+from selftest_router import http
+from threading import Thread
+from unittest.mock import Mock
+store = RouterStore(sys.argv[1])
+store.upsert_worker("two")
+store.upsert_worker("oguri")
+store.upsert_worker("tama")
+with RouterServer(("127.0.0.1",0),store,"fixture-token",Mock(),Mock()) as srv:
+    thread = Thread(target=srv.serve_forever,kwargs={"poll_interval":.02})
+    thread.start()
+    try:
+        url = f"http://127.0.0.1:{srv.server_port}/tasks"
+        status,created = http("POST",url,json.loads(sys.argv[2]),"fixture-token")
+        assert status==202
+    finally:
+        srv.shutdown()
+        thread.join()
+tid = created["task_id"]
+next_id = store.orders.create("Next","Leave in place","two",{},"fixture",None,None)
+position = store._conn.execute("SELECT seq FROM dispatch_queue WHERE task_id=?",(tid,)).fetchone()[0]
+print(json.dumps([tid,next_id,position]))
+store.close()
+""",self.legacy,json.dumps(request)))
+        original = digest(self.legacy)
+        backup(self.legacy,self.attachments,self.snapshot)
+        baseline = prepare(self.snapshot,self.trial,self.source_id)
+        tid = baseline["queued_id_map"][legacy_id]
+        edit_key,transfer_key = guid(),guid()
+        loop = Loop(self.trial,Clock(),FixtureHost)
+        with loop.server:
+            loop.thread.start()
+            try:
+                before = loop.hermes.inspect(tid)["task"]
+                instructions = before["instructions"].replace("旧正文","新正文")
+                revised = loop.hermes.update(edit_key,tid,before["revision"],
+                                             {"title":"新标题","instructions":instructions})
+                pending = loop.hermes.act(transfer_key,tid,revised["revision"],"transfer",
+                                          reason="换到最终工位",worker_id="oguri")["task"]
+                self.assertEqual((pending["state"],pending["assignment_id"]),("ready",None))
+            finally:
+                loop.server.shutdown()
+                loop.thread.join()
+        trial_sha = digest(self.trial/"router.db")
+        review = self.root/"review-migrated-queue.json"
+        decision = {"trial_sha256":trial_sha,"closed_assignments":{},"replace_migrated_queue":{
+            tid:{"legacy_task_id":legacy_id,"revision":pending["revision"],"execution_mode":"goal"}}}
+        review.write_text(json.dumps(dict(decision,trial_sha256="0"*64)))
+        with self.assertRaisesRegex(ValueError,"review must match the trial digest"):
+            stage_reviewed_rollback(self.snapshot,self.trial,review,self.restore)
+        self.assertFalse(self.restore.exists())
+        review.write_text(json.dumps(decision))
+        result = stage_reviewed_rollback(self.snapshot,self.trial,review,self.restore)
+        saved = result["migrated_queue_replacements"][tid]
+        replacement = saved["replacement_task_id"]
+        self.assertNotEqual(replacement,legacy_id)
+        self.assertEqual((saved["queue_position"],saved["worker_id"]),(position,"oguri"))
+        private = self.restore/"private-review/manifest.json"
+        projected = json.loads(private.read_text())["migrated_queue_replacements"][tid]
+        self.assertEqual(private.stat().st_mode&0o777,0o600)
+        self.assertEqual([event["key"] for event in projected["proof"]["events"]],[edit_key,transfer_key])
+        self.assertEqual(projected["legacy_request"]["goal"],"新正文")
+        self.assertEqual(projected["legacy_request"]["context"],request["context"])
+        self.assertEqual((digest(self.legacy),digest(self.trial/"router.db")),(original,trial_sha))
+        case_db = self.root/"legacy-dispatch-copy.db"
+        shutil.copyfile(self.restore/"legacy.db",case_db)
+        old = json.loads(self.old("""
+from server import RouterServer
+from selftest_router import http
+from threading import Thread
+from unittest.mock import Mock
+from types import SimpleNamespace
+import sqlite3
+store = RouterStore(sys.argv[1])
+original,replacement = json.loads(sys.argv[2])
+old_id,new_id,next_id = sys.argv[3:6]
+old_seq = int(sys.argv[6])
+queued = [tuple(r) for r in store._conn.execute("SELECT seq,task_id,worker FROM dispatch_queue ORDER BY seq")]
+assert len(queued)==3 and queued[1]==(old_seq,new_id,"oguri") and queued[2][1]==next_id
+with RouterServer(("127.0.0.1",0),store,"fixture-token",Mock(),Mock()) as srv:
+    thread = Thread(target=srv.serve_forever,kwargs={"poll_interval":.02})
+    thread.start()
+    try:
+        url = f"http://127.0.0.1:{srv.server_port}/tasks"
+        archived,prior = http("GET",url+"/"+old_id,token="fixture-token")
+        new,successor = http("GET",url+"/"+new_id,token="fixture-token")
+        old_retry,old_ack = http("POST",url,original,"fixture-token")
+        new_retry,new_ack = http("POST",url,replacement,"fixture-token")
+        clash,_ = http("POST",url,dict(replacement,goal="unreviewed"),"fixture-token")
+        assert (archived,new,old_retry,new_retry,clash)==(200,200,200,200,409)
+        assert old_ack["duplicate"] and old_ack["task_id"]==old_id
+        assert new_ack["duplicate"] and new_ack["task_id"]==new_id
+        original_order=prior["task"]
+        archive=original_order["archive"]
+        assert original_order["goal"]==original["goal"] and original_order["deliverable"] is None
+        assert archive["reason"]=="queue_replaced_on_rewrite" and archive["replacement_task_id"]==new_id
+        assert successor["task"]["worker"]=="oguri" and successor["task"]["goal"]==replacement["goal"]
+        assert successor["task"]["context"]==original["context"]
+        # Exercise the real legacy dispatch on a storage copy, with a Worker connection fixture.
+        offers=[]
+        writer=SimpleNamespace(closed=False,awaiting_clear=False,queued_task_offer=None,
+            offered_task=None,generation="fixture-stream",send_task=lambda task:offers.append(task) or True)
+        srv.current_conn=lambda worker:writer if worker=="oguri" else None
+        assert srv.dispatch_one("oguri")==new_id and srv.dispatch_one("oguri") is None
+        assert len(offers)==1 and offers[0]["task_info"]["TaskName"]==replacement["TaskName"]
+        assert offers[0]["goal"]==replacement["goal"] and offers[0]["task_id"]==new_id
+        assert store.orders.held("oguri")==new_id
+        print(json.dumps({"queue":queued,"archive":archive["reason"],"old_retry":old_retry,"new_retry":new_retry,
+                          "changed_retry":clash,"dispatched":new_id,"offers":len(offers)}))
+    finally:
+        srv.shutdown()
+        thread.join()
+store.close()
+""",case_db,json.dumps([request,projected["legacy_request"]]),
+              legacy_id,replacement,next_id,position))
+        self.assertEqual(old["queue"][0][1],self.queued)
+        backup(self.restore/"legacy.db",self.restore/"legacy.db.attachments",self.root/"reentry-snapshot")
+        reentry = self.root/"reentry"
+        namespace = guid()
+        mapped = prepare(self.root/"reentry-snapshot",reentry,namespace)["queued_id_map"]
+        second = Loop(reentry,Clock(),FixtureHost)
+        with second.server:
+            second.thread.start()
+            try:
+                self.assertNotIn(legacy_id,mapped)
+                self.assertEqual(second.hermes.inspect(mapped[replacement])["task"]["instructions"],instructions)
+                old_record = second.hermes.history(namespace,legacy_task_id=legacy_id)["historical_task"]
+                self.assertEqual(old_record["archive"]["replacement_task_id"],replacement)
+                for key in (request["message_id"],edit_key,transfer_key):
+                    with self.assertRaisesRegex(Fault,"legacy_request_recorded"):
+                        second.hermes.create(key,"Unexpected task","Replay must stop","oguri")
+            finally:
+                second.server.shutdown()
+                second.thread.join()
+        incomplete = self.root/"incomplete-trial"
+        shutil.copytree(self.trial,incomplete)
+        with closing(sqlite3.connect(incomplete/"router.db")) as db, db:
+            db.execute("DELETE FROM operations WHERE actor='hermes' AND key=?",(edit_key,))
+        review.write_text(json.dumps(dict(decision,trial_sha256=digest(incomplete/"router.db"))))
+        refused = self.root/"refused-migrated-queue"
+        with self.assertRaisesRegex(ValueError,"lacks its original management receipts"):
+            stage_reviewed_rollback(self.snapshot,incomplete,review,refused)
+        self.assertFalse(refused.exists())
+
+        incompatible = self.root/"trial-without-legacy-context"
+        shutil.copytree(self.trial,incompatible)
+        plain = Loop(incompatible,Clock(),FixtureHost)
+        with plain.server:
+            plain.thread.start()
+            try:
+                stripped = plain.hermes.update(guid(),tid,pending["revision"],{"instructions":"替换了原目标和背景"})
+            finally:
+                plain.server.shutdown()
+                plain.thread.join()
+        review.write_text(json.dumps(dict(decision,trial_sha256=digest(incompatible/"router.db"),
+            replace_migrated_queue={tid:{**decision["replace_migrated_queue"][tid],"revision":stripped["revision"]}})))
+        refused_context = self.root/"refused-context"
+        with self.assertRaisesRegex(ValueError,"do not preserve the legacy execution mode and context"):
+            stage_reviewed_rollback(self.snapshot,incompatible,review,refused_context)
+        self.assertFalse(refused_context.exists())
+
+        mixed = self.root/"trial-with-a-reviewed-result"
+        shutil.copytree(self.trial,mixed)
+        clock = Clock()
+        with_result = Loop(mixed,clock,FixtureHost,extra_workers=("tama",))
+        host = FixtureHost(mixed/"tama-host.db","tama-review")
+        worker = Worker(mixed/"tama-worker.db","tama",with_result.extra_clients["tama"],
+                        HostAdapter(mixed/"tama-adapter.db",host,host.session))
+        with with_result.server:
+            with_result.thread.start()
+            try:
+                done = with_result.hermes.create(guid(),"An independent order","Close before rollback","tama")["task_id"]
+                waiting = with_result.hermes.create(guid(),"Independent backlog","Keep queued","oguri")["task_id"]
+                worker.connect()
+                worker.poll()
+                clock.advance(10)
+                worker.poll()
+                worker.poll()
+                aid = worker.hold()["held_assignment_id"]
+                native = host.entries()[0][1]["native_id"]
+                reported = agent_report(worker,native,{"task_id":done,"assignment_id":aid,"summary":"Reviewed result",
+                                                       "artifact_ids":[]})
+                self.assertFalse(reported["isError"],reported)
+                complete = with_result.hermes.inspect(done)["task"]
+                with_result.hermes.approve(guid(),done,complete["revision"])
+                with_result.hermes.poll()
+            finally:
+                with_result.server.shutdown()
+                with_result.thread.join()
+        review.write_text(json.dumps(dict(decision,trial_sha256=digest(mixed/"router.db"),
+                                          closed_assignments={done:aid},execution_modes={waiting:"goal"})))
+        mixed_restore = self.root/"mixed-migrated-queue"
+        staged = stage_reviewed_rollback(self.snapshot,mixed,review,mixed_restore)
+        self.assertEqual((staged["reviewed_orders"],staged["queued_requests"]),(1,1))
+        self.assertEqual(staged["migrated_queue_replacements"],result["migrated_queue_replacements"])
+        queue, = json.loads((mixed_restore/"queue-replay.json").read_text())["requests"]
+        self.assertEqual(queue["trial_task_id"],waiting)
+        if output := os.environ.get("MOWULINK_MIGRATED_QUEUE_EVIDENCE"):
+            Path(output).write_text(json.dumps({"trial_sha256":trial_sha,"snapshot_sha256":original,"trial_task_id":tid,
+                "legacy_task_id":legacy_id,"replacement_task_id":replacement,"edit_receipt":edit_key,
+                "transfer_receipt":transfer_key,"old_router":old,"remigrated_task_id":mapped[replacement],
+                "explicit_review_required":True,"missing_edit_refused":True,"incompatible_context_refused":True,
+                "mixed_review":{"closed_work":done,"closed_assignment":aid,"new_queued_work":waiting,
+                                "same_queue_replacement":True},
+                "boundary":"Actual legacy and rewrite HTTP and SQLite. Legacy Worker connection is a fixture."},
+                ensure_ascii=False,indent=2)+"\n")
+
     def test_archived_peer_threads_files_and_permissions_survive_without_replay(self):
         first,reply,root_msg = guid(),guid(),guid()
         sample = "原样保留🟣"*13000

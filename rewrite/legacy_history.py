@@ -11,6 +11,7 @@ REVIEWED_ARCHIVE = "reviewed_on_rewrite"
 CANCELLED_ARCHIVE = "cancelled_on_rewrite"
 POOL_CLOSED_ARCHIVE = "pool_closed_on_rewrite"
 FAILED_ARCHIVE = "failed_on_rewrite"
+QUEUE_SUPERSEDED = "queue_replaced_on_rewrite"
 
 
 SCHEMA = """
@@ -64,6 +65,20 @@ def rollback_archive_id(source_id, trial_task_id):
     return "t-" + uuid5(UUID(source_id),"archive-rollback/"+trial_task_id).hex[:10]
 
 
+def queue_successor_ids(source_id, trial_task_id):
+    namespace = UUID(source_id)
+    identifier = uuid5(namespace,"legacy-queue-replacement/"+trial_task_id)
+    return "t-"+identifier.hex[:10],str(uuid5(namespace,"legacy-queue-request/"+trial_task_id))
+
+
+def queue_successor_request(request_id, title, description, worker, metadata):
+    body = {"message_id":request_id,"worker":worker,"TaskName":title,"goal":description,
+            "execution_mode":"goal","queue_if_offline":True}
+    if metadata.get("context") is not None:
+        body["context"] = metadata["context"]
+    return body
+
+
 def legacy_request_fingerprint(request):
     # Match the legacy HTTP server's exact request fingerprint, omitting its UUID.
     payload = {name:value for name,value in request.items() if name!="message_id"}
@@ -90,6 +105,39 @@ def populate(db, old, source, sha, mapping):
     preserve_rollback_keys(db,old,source,mapping)
     preserve_queue_keys(db,old,source,mapping)
     preserve_assigned_keys(db,old,source,mapping)
+    preserve_queue_successors(db,old,source)
+
+
+def preserve_queue_successors(db, old, source):
+    rows = old.execute("""SELECT a.task_id,a.data,t.data AS key_data,i.metadata
+        FROM task_facts a LEFT JOIN task_facts t ON t.task_id=a.task_id
+          AND t.kind='rewrite_queue_revisions' AND t.event_key='rewrite_queue_revisions'
+        LEFT JOIN task_info i ON i.task_id=a.task_id
+        WHERE a.kind='archive' AND json_extract(a.data,'$.reason')=?""",(QUEUE_SUPERSEDED,))
+    for row in rows:
+        archive = json.loads(row["data"])
+        namespace,trial_id,replacement = (archive.get(field) for field in
+            ("rollback_source_id","recovery_reference","replacement_task_id"))
+        recorded = json.loads(row["key_data"] or "{}")
+        keys = recorded.get("keys") if isinstance(recorded,dict) else None
+        if (not valid_guid(namespace) or not valid_guid(trial_id) or not isinstance(keys,list) or not keys
+                or any(not isinstance(key,str) or not key.strip() for key in keys) or len(set(keys))!=len(keys)
+                or replacement==row["task_id"] or row["metadata"] is None):
+            raise ValueError("invalid legacy queue replacement history")
+        expected_id,expected_request = queue_successor_ids(namespace,trial_id)
+        successor = old.execute("SELECT * FROM task_info WHERE task_id=?",(expected_id,)).fetchone()
+        if (replacement!=expected_id or not successor or successor["actor"]!="hermes"
+                or successor["request_id"]!=expected_request or successor["metadata"]!=row["metadata"]):
+            raise ValueError("legacy queue replacement does not match its successor")
+        request = queue_successor_request(expected_request,successor["name"],successor["description"],
+                                          successor["owner"],json.loads(successor["metadata"]))
+        if successor["fingerprint"]!=legacy_request_fingerprint(request):
+            raise ValueError("legacy queue replacement fingerprint changed")
+        for key in keys:
+            inserted = db.execute("""INSERT INTO history_request_keys VALUES ('hermes',?,?,?)
+                                    ON CONFLICT(actor,request_key) DO NOTHING""",(key,source,row["task_id"])).rowcount
+            if inserted!=1:
+                raise ValueError("legacy queue revision key conflicts with another recorded request")
 
 
 def has_rollback_table(old, name):

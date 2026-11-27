@@ -1,0 +1,45 @@
+{
+  "trial_sha256": "028b19a507044374e9b66f28a598c6f665785cce030c4b0015f451109b412a1b",
+  "snapshot_sha256": "f18cf04c3258c62f68fd132d594d6aed6f87c148cc182b3175bf7f4a617a6793",
+  "trial_task_id": "afcd9881-d130-5b5b-adb6-1c2ae6dc0896",
+  "legacy_task_id": "t-90c954bf7f",
+  "replacement_task_id": "t-07406456da",
+  "edit_receipt": "6b2615ea-28ee-4612-9e3c-0363fec342c1",
+  "transfer_receipt": "4bca9d52-bff1-47b4-abc1-51ca0b725303",
+  "old_router": {
+    "queue": [
+      [
+        1,
+        "t-c00d47ab35",
+        "two"
+      ],
+      [
+        2,
+        "t-07406456da",
+        "oguri"
+      ],
+      [
+        3,
+        "t-6ace905500",
+        "two"
+      ]
+    ],
+    "archive": "queue_replaced_on_rewrite",
+    "old_retry": 200,
+    "new_retry": 200,
+    "changed_retry": 409,
+    "dispatched": "t-07406456da",
+    "offers": 1
+  },
+  "remigrated_task_id": "d3beec8a-0aee-579d-bca7-dddf6d08cc3a",
+  "explicit_review_required": true,
+  "missing_edit_refused": true,
+  "incompatible_context_refused": true,
+  "mixed_review": {
+    "closed_work": "37dcfec4-3f99-4a8d-bbef-3cd8b4142647",
+    "closed_assignment": "08b1f56a-2848-4bb8-b01a-1faf9b4cde86",
+    "new_queued_work": "24a542c5-f3e4-4bee-9770-d46e17109393",
+    "same_queue_replacement": true
+  },
+  "boundary": "Actual legacy and rewrite HTTP and SQLite. Legacy Worker connection is a fixture."
+}

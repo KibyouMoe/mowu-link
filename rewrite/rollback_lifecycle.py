@@ -402,8 +402,8 @@ def retain_reminder(pool, message_id, observed):
     raise ValueError("pool reminder does not match an outstanding deadline")
 
 
-def check_transport(db, entries, reviewed_questions):
-    workers, optional_workers = set(), set()
+def check_transport(db, entries, reviewed_questions, optional_workers=()):
+    workers, optional_workers = set(), set(optional_workers)
     expected_frames = {}
     expected_inquiries = {}
     expected_notices = {}
@@ -948,8 +948,9 @@ def check_operations(db,entries,workers,frames,uploads,expected_count,queue_cand
     samples,continued = {},{}
     creation_keys = {item["request_id"] for item in queue_candidates}
     creation_keys.update(entry["creation_key"] for entry in entries.values() if "creation_key" in entry)
-    preparation = {event["key"]:event for proof in initial_assignments.values()
-                   for event in [proof["original_creation"],*proof["events"]]}
+    preparation = {event["key"]:event for proof in initial_assignments.values() for event in proof["events"]}
+    preparation.update((event["key"],event) for proof in initial_assignments.values()
+                       if (event := proof.get("original_creation")))
     for row in db.execute("SELECT rowid AS seq,* FROM operations ORDER BY rowid"):
         if row["actor"]=="hermes" and row["key"] in preparation:
             if dict(row)!=preparation.pop(row["key"]):

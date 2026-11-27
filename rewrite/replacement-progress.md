@@ -32,7 +32,7 @@
 
 实现提交 `71f75d7377199369bf8f3e0510ec2d83e7f58513` 的 Linux arm64 全量通过 212 项、依环境跳过 124 项。319 文件安装包的 84 项专项通过，逐文件校验一致。包 SHA-256 为 `ddbb6a518f83dec8a0d1a1b09c916e3f9704ea9487d0f1408d522265daab815c`。Windows 安装与 DSH 原生两组通过。[Windows CI](https://github.com/KibyouMoe/mowu-link/actions/runs/45916105203)
 
-原本从旧队列迁入的待派单还有一条回退边界。重做版可用 A05 更新正文，但隔离旧库的追加式约束拒绝原位修改，同一旧单号的正文和队列位置都保持原样。已核验回退命令拒绝发布恢复目录。需保留原旧单与试用修订及回执待对账，或在试用端继续完成并验收，再按已验证的原号归档流程回退。[迁入待派单修订实测](evidence/cutover-migrated-queued-edit-gap.json)
+旧队列迁入后改过、仍未派发的单可以随回退批次逐单审核。旧库禁止原位修改。已实测在恢复副本追加原单历史和替代单，替代单占原队列位置，旧端两次派发检查只发出一次。原单和替代单各自按原请求号去重，两号在旧归档中关联。再迁入只出现替代单，重试试用 A05/A06 不能开新单。同批可恢复已验收归档和试用新建待派单。缺审阅摘要、缺修订回执或无法保留原目标模式及上下文时拒绝发布。旧与重做 Router、HTTP 与 SQLite 实跑，宿主和 Worker 连接为夹具。复跑 `python3 -B -m unittest -v rewrite.test_cutover -k approved_replacement`。[替换与再迁入实测](evidence/cutover-migrated-queue-replacement.json) · [原位修改拒绝实测](evidence/cutover-migrated-queued-edit-gap.json)
 
 取消重试耗尽后的两种处置已纳入隔离回退。四条取消指令无清理确认才入池，首次迟到的取消 W04 返回 409。挂起后重新取消，由原工位确认并归档。另一张单转派后由新工位提交成果、溪流验收，原工位只清理旧派发。两代 HTTP Router 实测，旧端分别读回已取消和已验收，两个工位都无持单、无重派。首次取消、三次空闲重试、搁置和后续清理分别保留凭据。清理未确认或篡改重试的空闲观测时，回退不生成目录。宿主和时钟为夹具。复跑 `python3 -B -m unittest -v rewrite.test_cutover -k exhausted_cancel`。[取消重试回退实测](evidence/cutover-reviewed-cancel-retry.json)
 

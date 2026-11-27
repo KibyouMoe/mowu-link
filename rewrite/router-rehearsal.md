@@ -100,6 +100,14 @@ Worker 已以受阻 W04 释放原派发时，`resume` 可从受阻或挂起起�
 
 Worker 请求继续时，回退以同一派发内的续做回执和原空闲观测划分询问轮次。每轮独立核首次询问和最多三次重试。最后一轮无答才允许对应入池和搁置通知。每条发出记录、观测和回执留在私有包，重开旧端无需再派。缺轮次回执或观测与原工位、忙闲和派发不符时停止。复跑 `python3 -B -m unittest -v rewrite.test_cutover.Cutover.test_reviewed_inquiries_preserve_continue_rounds_and_release_only_the_original_assignment`。[询问轮次实测](evidence/cutover-reviewed-inquiries.json)
 
+### 旧队列迁入后改过、仍未派发的单
+
+用 `reconcile` 的 `work_orders` 核对原旧单号、最终工位和试用修订。只有两次迁移之间始终未派发、没有 W03、报告或候选材料的原待派单可按本节处理。审核过的 `review.json` 在已有字段外加入 `replace_migrated_queue`。每项以试用单号为键，值为 `{"legacy_task_id":"原旧单号","revision":最终修订号,"execution_mode":"goal"}`。只有这类替代时写 `closed_assignments: {}`。审核绑定当前 `trial_sha256`，使用同一个 `stage-reviewed-rollback` 命令。可与已验收、已取消及试用新建待派单同批核对。
+
+旧端工单记录是追加式的。恢复副本在原旧单上追加 `queue_replaced_on_rewrite` 归档和替代单号，替代单有自己的旧端 ID 与请求 UUID，占原队列序号。无需向旧 Router 重放这个建单请求。原单保留原正文，无成果、无派发。按原旧请求重试读回原历史单，按替代请求重试读回替代单。开启旧端写者之前，依私有清单里的 `migrated_queue_replacements` 核对两单链接、接手工位、原队列位置和恢复后数据库摘要。替代单保留原执行模式与原路由上下文。编辑若去掉迁入时的目标段落或上下文，或旧端无法逐字表示新正文，回退会拒绝。原、新两端快照都须保留。
+
+演练覆盖旧 HTTP 读回、两个原请求重试、正文冲突返回 409、实际旧 Router 仅派一次、回退后再次迁入，以及与正式 W04 归档和新待派单同批准备。再次迁入只将替代单放回队列，已经使用的 A05/A06 请求键仍受历史记录保护。复跑 `python3 -B -m unittest -v rewrite.test_cutover -k approved_replacement`。使用测试 Worker 连接和宿主。[实测记录](evidence/cutover-migrated-queue-replacement.json)
+
 ### 在途工单先排空再回退
 
 旧 Router 保持停写。先停试用写者并采集[五组件快照](#重做版五组件的离线恢复)，保留迁入时的旧快照和 `baseline.json`。从新的目录恢复这套重做组件，使用原 Worker 身份、原适配器账本及原生会话。启动重做 Router 时，在现有启动参数上加 `--drain-dispatch`，核对启动回执中 `dispatch_draining` 为 `true`。每次重开都须保留这个参数。此模式停止分配新派发号，已有派发、重连对账、业务回执和定时规则继续按原契约处理。冻结外部试用入口，避免排空时又发生无关写入。
