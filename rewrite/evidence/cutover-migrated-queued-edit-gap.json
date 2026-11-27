@@ -1,0 +1,48 @@
+{
+  "revision": "71f75d7377199369bf8f3e0510ec2d83e7f58513",
+  "legacy_task_id": "t-6cc97969d4",
+  "trial_task_id": "8934cbab-f05f-521a-8c07-53d871e985ba",
+  "edit_key": "2c853d37-a3d1-4678-b820-6167983e402a",
+  "trial_sha256": "3a1b313ea237eb1243e561719d7e0749d145a0b065713de333ebd632103f734d",
+  "changes": {
+    "operations": {
+      "baseline_only": 0,
+      "trial_only": 1
+    },
+    "tasks": {
+      "baseline_only": 1,
+      "trial_only": 1
+    }
+  },
+  "work_orders": [
+    {
+      "task_id": "8934cbab-f05f-521a-8c07-53d871e985ba",
+      "legacy_task_id": "t-6cc97969d4",
+      "before": {
+        "assignee_id": "two",
+        "assignment_id": null,
+        "revision": 1,
+        "state": "ready"
+      },
+      "trial": {
+        "assignee_id": "two",
+        "assignment_id": null,
+        "revision": 2,
+        "state": "ready"
+      },
+      "same_content": false,
+      "completed_reports": [],
+      "candidate_materials": []
+    }
+  ],
+  "old_database_guard": {
+    "error": "task history is append-only",
+    "old_description_preserved": true,
+    "queue_unchanged": true
+  },
+  "exact_rollback_allowed": false,
+  "queue_candidates": [],
+  "reviewed_rollback_refusal": "reviewed rollback needs unchanged migrated orders closed after one W04",
+  "destination_created": false,
+  "boundary": "Isolated legacy Router SQLite and rewrite HTTP. No original task or runtime was modified."
+}
