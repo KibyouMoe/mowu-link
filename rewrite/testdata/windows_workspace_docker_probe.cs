@@ -39,11 +39,47 @@ internal static class WorkspaceDockerProbe
             Console.WriteLine(response);
             return 0;
         }
-        if (args.Length < 6 || args[4] != "container") return 81;
         string directory = AppDomain.CurrentDomain.BaseDirectory;
+        string template = Path.Combine(directory, "fixture-container-template.json");
+        bool simulateCreation = File.Exists(template);
+        string image = "sha256:" + new string('b', 64);
+        if (simulateCreation && args.Length == 7 && args[4] == "image" && args[5] == "inspect" && args[6] == image)
+        {
+            Console.WriteLine("[{\"Id\":\"" + image + "\",\"Os\":\"linux\",\"Config\":{}}]");
+            return 0;
+        }
+        if (args.Length < 6 || args[4] != "container") return 81;
         string container = Path.Combine(directory, "fixture-container.json");
         string label = Path.Combine(directory, "fixture-container-label.txt");
         string id = new string('a', 64);
+        if (simulateCreation && args[5] == "create" && !File.Exists(container))
+        {
+            string tag = Option(args, "--label");
+            const string prefix = "io.mowulink.assignment=";
+            Guid token;
+            if (!tag.StartsWith(prefix, StringComparison.Ordinal) ||
+                !Guid.TryParseExact(tag.Substring(prefix.Length), "D", out token) ||
+                Option(args, "--name") != "mowulink-" + token.ToString("D") ||
+                Option(args, "--pull") != "never" || Option(args, "--network") != "none" ||
+                Option(args, "--user") != "65534:65534" || Option(args, "--cap-drop") != "ALL" ||
+                Option(args, "--security-opt") != "no-new-privileges" || !Array.Exists(args, arg => arg == "--read-only") ||
+                args[args.Length - 2] != image || args[args.Length - 1] != "infinity") return 81;
+            string created = File.ReadAllText(template).Replace("fixture-token", token.ToString("D"))
+                .Replace("\"Status\":\"running\"", "\"Status\":\"created\"")
+                .Replace("\"Running\":true", "\"Running\":false");
+            File.WriteAllText(label, "label=" + tag);
+            File.WriteAllText(container, created);
+            Console.WriteLine(id);
+            return 0;
+        }
+        if (simulateCreation && args[5] == "start" && args.Length == 7 && args[6] == id && File.Exists(container))
+        {
+            string running = File.ReadAllText(container).Replace("\"Status\":\"created\"", "\"Status\":\"running\"")
+                .Replace("\"Running\":false", "\"Running\":true");
+            File.WriteAllText(container, running);
+            Console.WriteLine(id);
+            return 0;
+        }
         if (args[5] == "ls" && args.Length == 12 &&
             args[6] == "--all" && args[7] == "--no-trunc" && args[8] == "--filter" &&
             args[10] == "--format" && args[11] == "{{.ID}}")
@@ -56,8 +92,13 @@ internal static class WorkspaceDockerProbe
             Console.WriteLine(File.ReadAllText(container));
             return 0;
         }
+        if (simulateCreation && args[5] == "exec" && args.Length == 10 && args[6] == id &&
+            args[7] == "/bin/sh" && args[8] == "-c" && args[9].StartsWith("mkdir -p results;") &&
+            File.Exists(container)) return 0;
         if (args[5] == "exec" && args.Length == 13 && args[6] == id && args[7] == "python3" &&
-            args[8] == "-I" && args[9] == "-c" && args[12] == "artifact.bin" && File.Exists(container))
+            args[8] == "-I" && args[9] == "-c" &&
+            (args[12] == "artifact.bin" || simulateCreation && args[12] == "results/sample.bin") &&
+            File.Exists(container))
         {
             using (Stream output = Console.OpenStandardOutput())
             using (Stream source = File.OpenRead(Path.Combine(directory, "artifact.bin")))
@@ -71,5 +112,11 @@ internal static class WorkspaceDockerProbe
             return 0;
         }
         return 81;
+    }
+
+    private static string Option(string[] args, string name)
+    {
+        int index = Array.IndexOf(args, name, 6);
+        return index >= 0 && index + 1 < args.Length ? args[index + 1] : "";
     }
 }

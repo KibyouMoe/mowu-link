@@ -437,7 +437,7 @@ python3 -B -m rewrite.state_bundle stage-native-handoff --snapshot "$SNAPSHOT" -
 
 `native_session_pending.dsh_assignment_workspaces` 计入原账本尚未回收的派发。未提供原目录、目录身份不符、账本无法读取或原宿主仍运行时，该项记为未知并且换绑不发布。换绑生成目录前再次读账本，确认在准备期间没有变化。W04 和持单均清零后，尚有容器也会阻止换绑。重开原宿主及适配器，凭原回执收尾，再停机检查。早于账本登记的快照需先在原工位补采一次活动观测后重新备份。五组件数据恢复仍可接回原工位。[DSH 换绑与回退](evidence/dsh-offline-workspace-handoff.json) · [Codex 工作区停机对账](evidence/codex-assignment-workspace.json)
 
-DSH 可写工位在私有目录使用 `dsh-workspace.writer`，Codex 可写工位使用 `codex-workspace.writer`。离线程序检查该目录已有的两种锁，并复核 Unix 或 TLS 本机监听。读取 `dsh-link.json` 时仍检查文件权限。已持锁的宿主即使还没有开始监听，也会阻止离线换绑和回退。离线操作在发布目录前持有已有的锁，发布完成后才释放。保留原私有运行目录及启动配置，停写期间不移除端口配置或锁文件。[DSH 双向 TLS 锁与回退](evidence/dsh-tls-workspace-handoff.json)
+DSH 可写工位在私有目录使用 `dsh-workspace.writer`，Codex 可写工位使用 `codex-workspace.writer`。Windows 的写账本子进程另持 `workspace-files.writer`，直到关闭输入并完成当前写入。离线程序检查已有的写锁并复核 Unix 或 TLS 本机监听。读取 `dsh-link.json` 时仍检查文件权限。宿主尚未开始监听，或已退出但写账本子进程仍持锁，都会阻止离线换绑和回退。离线操作在发布目录前持有已有的锁，发布完成后才释放。保留原私有运行目录及启动配置，停写期间不移除端口配置或锁文件。[DSH 双向 TLS 锁与回退](evidence/dsh-tls-workspace-handoff.json)
 
 在独立安装目录运行 `python3 -B -m unittest -v rewrite.test_state_bundle.Bundle.test_offline_handoff_and_rollback_reserve_the_codex_workspace_writer`，复验持锁未监听和发布前拒绝重开的边界。该用例使用端口未打开的测试账本，无需 Docker。[Codex 可写工位复验](evidence/codex-workspace-writer-rollback.json)
 

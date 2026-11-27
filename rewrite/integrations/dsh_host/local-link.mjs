@@ -17,7 +17,7 @@ export function privateDir(directory) {
   }
 }
 
-export async function privateWindowsRuntime(directory,{admissions=false,questions=false,mediaDigests=[]}={}) {
+export async function privateWindowsRuntime(directory,{admissions=false,questions=false,workspace=false,mediaDigests=[]}={}) {
   if (!/^[A-Za-z]:[\\/]/.test(directory)) throw new Error('private_runtime_required');
   const system = process.env.SystemRoot;
   if (!system || !path.isAbsolute(system)) throw new Error('private_runtime_required');
@@ -27,12 +27,14 @@ export async function privateWindowsRuntime(directory,{admissions=false,question
     const args = ['-NoProfile','-NonInteractive','-File',check,directory];
     if (admissions) args.push('-CheckAdmissions');
     if (questions) args.push('-CheckQuestions');
+    if (workspace) args.push('-CheckWorkspaceWriter');
     if (mediaDigests.length) args.push('-MediaDigests',mediaDigests.join(','));
     await run(powershell,args,{windowsHide:true,timeout:mediaDigests.length ? 5000 : 15000,maxBuffer:65536});
   } catch (error) {
     if (error.code===5) throw new Error('invalid_media_object');
     if (error.killed) throw new Error('dsh_link_acl_check_timeout');
-    if (error.code===4) throw new Error(admissions ? 'dsh_admissions_file_inheritance_required' :
+    if (error.code===4) throw new Error(workspace ? 'dsh_workspace_file_inheritance_required' :
+      admissions ? 'dsh_admissions_file_inheritance_required' :
       'dsh_questions_file_inheritance_required');
     throw new Error(error.code===3 ? 'private_dsh_link_required' : 'dsh_link_acl_check_unavailable');
   }

@@ -6,12 +6,13 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 from tempfile import TemporaryDirectory
 import unittest
 
 from .codex_workspace import open_workspace
 from .dsh_workspace_audit import inspect, journal
-from .storage import Fault, StateWriterBusy, encode, guid
+from .storage import Fault, StateWriterBusy, encode, guid, state_writer
 
 
 NODE = shutil.which("node")
@@ -19,16 +20,29 @@ IMPLEMENTATION = Path(__file__).parent/"integrations/dsh_host/workspace-engine.m
 DOCKER_PROBE = Path(__file__).parent/"testdata/windows_workspace_docker_probe.cs"
 
 
+def compile_windows_docker_fixture(root):
+    docker = root/"docker fixture.exe"
+    compiler = Path(os.environ["SystemRoot"])/"Microsoft.NET/Framework64/v4.0.30319/csc.exe"
+    subprocess.run([compiler,"/nologo","/target:exe","/out:"+str(docker),DOCKER_PROBE],
+                   capture_output=True,text=True,errors="replace",timeout=30,check=True)
+    return docker
+
+
+def container_inspection(image,token,started):
+    return [{"Id":"a"*64,"Image":image,"Config":{"Labels":{"io.mowulink.assignment":token},"User":"65534:65534"},
+             "State":{"Running":True,"StartedAt":started,"Status":"running"},
+             "HostConfig":{"NetworkMode":"none","PidMode":"","IpcMode":"private","ReadonlyRootfs":True,
+                 "Privileged":False,"CapDrop":["ALL"],"SecurityOpt":["no-new-privileges"],"RestartPolicy":{"Name":"no"},
+                 "PidsLimit":64,"Memory":256*1024*1024,"NanoCpus":1_000_000_000,
+                 "Tmpfs":{"/workspace":"rw,nosuid,nodev,size=64m,mode=1777","/tmp":"rw,nosuid,nodev,size=16m,mode=1777"}},
+             "Mounts":[]}]
+
+
 @unittest.skipUnless(os.name=="nt" and NODE,"Windows and Node are required")
 class WindowsWorkspaceEngine(unittest.TestCase):
     def compile_docker_fixture(self):
         root = Path(self.enterContext(TemporaryDirectory(prefix="workspace-容器-"))).resolve()
-        docker = root/"docker fixture.exe"
-        compiler = Path(os.environ["SystemRoot"])/"Microsoft.NET/Framework64/v4.0.30319/csc.exe"
-        compiled = subprocess.run([compiler,"/nologo","/target:exe","/out:"+str(docker),DOCKER_PROBE],
-                                  capture_output=True,text=True,errors="replace",timeout=30)
-        self.assertEqual(compiled.returncode,0,compiled.stdout+compiled.stderr)
-        return root,docker
+        return root,compile_windows_docker_fixture(root)
 
     def test_local_docker_pipe_is_explicit_and_requires_a_linux_daemon(self):
         root,docker = self.compile_docker_fixture()
@@ -74,6 +88,29 @@ console.log(JSON.stringify({local_pipe:socket,linux_identity_recovered:true,
                          "linux_identity_recovered":True,"remote_or_raw_endpoint_rejected":True,
                          "unavailable_refused":True})
 
+    def test_windows_file_broker_blocks_offline_audit_after_host_lock_releases(self):
+        runtime = Path(self.enterContext(TemporaryDirectory(prefix="workspace-writer-"))).resolve()
+        (runtime/"assignment-containers").mkdir()
+        _,identity = journal(runtime)
+        helper = Path(__file__).parent/"windows_workspace_files.py"
+        with subprocess.Popen([sys.executable,"-I","-B","-S",helper,runtime],
+                              stdin=subprocess.PIPE,stdout=subprocess.PIPE,encoding="utf-8") as broker:
+            try:
+                with state_writer(runtime/"dsh-workspace"):
+                    self.assertEqual(json.loads(broker.stdout.readline()),{"ready":True})
+                self.assertEqual(inspect(runtime,{identity}),(None,"dsh_workspace_host_still_running"))
+            finally:
+                broker.stdin.close()
+                try:
+                    self.assertEqual(broker.wait(timeout=5),0)
+                except subprocess.TimeoutExpired:
+                    broker.kill()
+                    broker.wait(timeout=5)
+                    raise
+        audited,issue = inspect(runtime,{identity})
+        self.assertIsNone(issue)
+        self.assertEqual(audited["pending"],[])
+
     def test_codex_windows_workspace_recovers_original_artifact_and_removal(self):
         from .windows_workspace_files import record_write
 
@@ -106,15 +143,7 @@ console.log(JSON.stringify({local_pipe:socket,linux_identity_recovered:true,
                                       "phase":"active","container_id":container,"started_at":started}).encode())
             (root/"fixture-container-label.txt").write_text("label=io.mowulink.assignment="+token,encoding="utf-8")
             (root/"artifact.bin").write_bytes(raw)
-            fixture.write_text(encode([{"Id":container,"Image":image,
-                "Config":{"Labels":{"io.mowulink.assignment":token},"User":"65534:65534"},
-                "State":{"Running":True,"StartedAt":started},
-                "HostConfig":{"NetworkMode":"none","PidMode":"","IpcMode":"private","ReadonlyRootfs":True,
-                    "Privileged":False,"CapDrop":["ALL"],"SecurityOpt":["no-new-privileges"],"RestartPolicy":{"Name":"no"},
-                    "PidsLimit":64,"Memory":256*1024*1024,"NanoCpus":1_000_000_000,
-                    "Tmpfs":{"/workspace":"rw,nosuid,nodev,size=64m,mode=1777",
-                             "/tmp":"rw,nosuid,nodev,size=16m,mode=1777"}},
-                "Mounts":[]}]),encoding="utf-8")
+            fixture.write_text(encode(container_inspection(image,token,started)),encoding="utf-8")
         pending,issue = inspect(runtime,{identity})
         self.assertIsNone(issue)
         self.assertEqual(pending["pending"],[{**scope,"phase":"active"}])

@@ -1,4 +1,5 @@
 """The workspace child uses this private file helper on Windows."""
+import base64
 import ctypes
 from ctypes import wintypes
 import hashlib
@@ -17,7 +18,7 @@ if __name__=="__main__":
 from rewrite.dsh_local_link import check_private_stream, private_directory, private_file
 from rewrite.dsh_workspace_audit import read_record, scan
 from rewrite.messages import valid_guid
-from rewrite.storage import encode
+from rewrite.storage import encode, state_writer
 
 
 def replace(source,destination):
@@ -67,7 +68,7 @@ def seed_bytes(filename):
     return raw
 
 
-def run(runtime,operation,parameter=None):
+def run(runtime,operation,parameter,data):
     private_directory(runtime)
     ledger = runtime/"assignment-containers"
     if operation=="prepare":
@@ -76,30 +77,54 @@ def run(runtime,operation,parameter=None):
         cli = ledger/"docker-config"
         cli.mkdir(exist_ok=True)
         private_directory(cli)
-        return b"true"
+        return True
     private_directory(ledger)
     if operation=="pending":
-        return encode(scan(ledger)[1]).encode()
+        return scan(ledger)[1]
     if operation=="seed":
-        return seed_bytes(parameter)
+        return base64.b64encode(seed_bytes(parameter)).decode("ascii")
     if not isinstance(parameter,str) or not re.fullmatch(r"[a-f0-9]{64}\.json",parameter):
         raise ValueError("invalid workspace record path")
     destination = ledger/parameter
     if operation=="read":
         try:
-            return read_record(destination)
+            return json.loads(read_record(destination))
         except FileNotFoundError:
-            return b"null"
+            return None
     if operation=="write":
-        record_write(destination,sys.stdin.buffer.read(4097))
-        return b"true"
+        record_write(destination,data.encode("utf-8"))
+        return True
     raise ValueError("invalid workspace operation")
+
+
+def serve(runtime):
+    if os.name!="nt":
+        raise ValueError("Windows workspace required")
+    private_directory(runtime)
+    writer = runtime/"workspace-files"
+    lock = writer.with_suffix(".writer")
+    try:
+        private_file(lock)
+    except FileNotFoundError:
+        pass
+    with state_writer(writer):
+        private_file(lock)
+        print('{"ready":true}',flush=True)
+        while raw := sys.stdin.buffer.readline(65537):
+            if len(raw)>65536:
+                raise ValueError("invalid workspace file request")
+            try:
+                request = json.loads(raw)
+                operation = request["operation"]
+                result = {"value":run(runtime,operation,request.get("parameter"),request.get("data"))}
+            except Exception:
+                result = {"error":"assignment_workspace_unconfirmed"}
+            sys.stdout.buffer.write(encode(result).encode("utf-8")+b"\n")
+            sys.stdout.buffer.flush()
 
 
 if __name__=="__main__":
     try:
-        if os.name!="nt":
-            raise ValueError("Windows workspace required")
-        sys.stdout.buffer.write(run(Path(sys.argv[1]),*sys.argv[2:]))
+        serve(Path(sys.argv[1]))
     except Exception:
         sys.exit(1)

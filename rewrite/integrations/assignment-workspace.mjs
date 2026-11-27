@@ -56,4 +56,5 @@ for await (const line of readline.createInterface({input:process.stdin,terminal:
   operation.finally(()=>operations.delete(operation));
 }
 await Promise.allSettled(operations);
+await files?.close();
 guard?.close();

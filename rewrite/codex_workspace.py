@@ -63,6 +63,7 @@ def open_workspace(config,session):
                 and len(node.drive)==2 and node.drive.endswith(":")
                 and node.suffix.lower()==".exe" and not node.is_symlink()
                 and engine["socket"]=="npipe:////./pipe/docker_engine",422,"invalid_codex_workspace_config")
+        require(not os.path.lexists(runtime/"dsh-workspace.writer"),409,"workspace_runtime_already_bound")
         try:
             private_file(lock)
         except FileNotFoundError:
@@ -75,6 +76,7 @@ def open_workspace(config,session):
     with state_writer(state):
         if windows:
             private_file(lock)
+            require(not os.path.lexists(runtime/"dsh-workspace.writer"),409,"workspace_runtime_already_bound")
         require(host_stopped(runtime),409,"workspace_runtime_already_running")
         if not windows:
             guard_path.unlink(missing_ok=True)

@@ -6,6 +6,17 @@ import {promisify} from 'node:util';
 const exec = promisify(execFile);
 const windowsHost = 'npipe:////./pipe/docker_engine';
 
+export function privateWindowsEnvironment(directory) {
+  const system = process.env.SystemRoot;
+  if (!system || !/^[A-Za-z]:[\\/]/.test(system) || !/^[A-Za-z]:[\\/]/.test(directory)) {
+    throw new Error('invalid_assignment_container');
+  }
+  // libuv restores a missing USERPROFILE and home drive/path from the parent on Windows.
+  return {SystemRoot:system,PATH:path.join(system,'System32'),USERPROFILE:directory,
+    HOMEDRIVE:directory.slice(0,2),HOMEPATH:directory.slice(2),HOME:directory,
+    APPDATA:directory,LOCALAPPDATA:directory,TEMP:directory,TMP:directory};
+}
+
 function localHost(socket) {
   if (process.platform === 'win32') {
     // The documented Docker Desktop pipe preserves the engine's normal isolation policy.
@@ -24,15 +35,10 @@ export function workspaceEngine(docker,socket,cliConfig) {
   const windows = process.platform === 'win32';
   let env = {PATH:'/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin'};
   if (windows) {
-    const system = process.env.SystemRoot;
-    if (!/^[A-Za-z]:[\\/].+\.exe$/i.test(docker) || !lstatSync(docker,{throwIfNoEntry:false})?.isFile() ||
-        !system || !/^[A-Za-z]:[\\/]/.test(system) || !/^[A-Za-z]:[\\/]/.test(cliConfig)) {
+    if (!/^[A-Za-z]:[\\/].+\.exe$/i.test(docker) || !lstatSync(docker,{throwIfNoEntry:false})?.isFile()) {
       throw new Error('invalid_assignment_container');
     }
-    // libuv restores a missing USERPROFILE and home drive/path from the parent on Windows.
-    env = {SystemRoot:system,PATH:path.join(system,'System32'),USERPROFILE:cliConfig,
-           HOMEDRIVE:cliConfig.slice(0,2),HOMEPATH:cliConfig.slice(2),HOME:cliConfig,
-           APPDATA:cliConfig,LOCALAPPDATA:cliConfig,TEMP:cliConfig,TMP:cliConfig};
+    env = privateWindowsEnvironment(cliConfig);
   }
 
   function invoke(args,{stdin,...options}={}) {

@@ -1362,6 +1362,19 @@ class NativeProcess(unittest.TestCase):
                      "installed DSH SDK or verified packaged Windows executable required")
 @unittest.skipUnless(shutil.which("openssl"),"test TLS certificate generator required")
 class LocalTlsLoop(NativeProcess):
+    @unittest.skipUnless(os.name=="nt","native Windows workspace runtime required")
+    def test_windows_dsh_workspace_exports_and_releases_after_w04_replay(self):
+        from .test_workspace_engine import compile_windows_docker_fixture, container_inspection
+
+        scratch = Path(self.enterContext(tempfile.TemporaryDirectory(prefix="mldsh-docker-"))).resolve()
+        docker = compile_windows_docker_fixture(scratch)
+        image = "sha256:"+"b"*64
+        fixture = container_inspection(image,"fixture-token","2026-11-27T00:00:00.123456789Z")
+        (scratch/"daemon-reply.txt").write_text("linux isolated-engine",encoding="utf-8")
+        (scratch/"fixture-container-template.json").write_text(encode(fixture),encoding="utf-8")
+        (scratch/"artifact.bin").write_bytes(bytes(range(256))*2700)
+        NativeLoop.workspace_artifacts(self,use_tls=True,docker_fixture=(image,docker,scratch))
+
     @unittest.skipUnless(os.name=="nt","Windows file share flags required")
     def test_dynamic_callback_port_survives_a_temporary_reader(self):
         runtime = self.local_tls_directory(dynamic_callback=True)
@@ -2321,15 +2334,20 @@ class NativeLoop(NativeProcess):
     def test_dsh_workspace_exports_and_releases_over_mutual_tls(self):
         self.workspace_artifacts(use_tls=True)
 
-    def workspace_artifacts(self,*,use_tls):
-        image,cli = self.container_engine()
-        docker,_,socket = cli
+    def workspace_artifacts(self,*,use_tls,docker_fixture=None):
+        if docker_fixture:
+            image,docker,scratch = docker_fixture
+            options = {"docker":str(docker),"socket":"npipe:////./pipe/docker_engine",
+                       "image":image,"python":sys.executable}
+        else:
+            image,cli = self.container_engine()
+            docker,_,socket = cli
+            options = {"docker":docker,"socket":socket.removeprefix("unix://"),"image":image}
         session = "dsh-isolated-workspace-artifacts"
         directory,loop,service,_ = self.goal_worker(session,use_tls=use_tls)
         runtime = Path(directory)
         link = LocalLink(runtime,use_tls=use_tls)
-        (runtime/"assignment-container.json").write_text(encode(
-            {"docker":docker,"socket":socket.removeprefix("unix://"),"image":image}),encoding="utf-8")
+        (runtime/"assignment-container.json").write_text(encode(options),encoding="utf-8")
         token = guid()
         client = Client(self.open_worker(service,{token:"adapter/oguri"}),token)
         worker = loop.worker
@@ -2338,7 +2356,8 @@ class NativeLoop(NativeProcess):
         digest = hashlib.sha256(data).hexdigest()
         report_attempts,offsets = [],[]
         loss = True
-        self.addCleanup(self.clean_fixture_containers,runtime,session,cli)
+        if not docker_fixture:
+            self.addCleanup(self.clean_fixture_containers,runtime,session,cli)
         with tool_listener(runtime,loop.adapter,client,link=link), \
              self.start_native(directory,session,"cleanup-container-export",use_tls=use_tls) as native:
             if use_tls:
@@ -2389,6 +2408,8 @@ class NativeLoop(NativeProcess):
                 with w.db.transaction() as db:
                     return db.execute("SELECT receipt FROM outbox WHERE assignment_id=?",(assignment,)).fetchone()[0]
             def container_exists():
+                if docker_fixture:
+                    return (scratch/"fixture-container.json").is_file()
                 return bool(subprocess.check_output([*cli,"container","ls","--all","--no-trunc","--filter",
                     "id="+lease["container_id"],"--format","{{.ID}}"],timeout=8).strip())
             self.assertIsNone(persisted_receipt(worker))
@@ -2425,7 +2446,13 @@ class NativeLoop(NativeProcess):
             with recovered.db.transaction() as db:
                 local, = db.execute("SELECT attachment_id,sha256 FROM uploads").fetchall()
             self.assertEqual(local["sha256"],digest)
-        name = ("MOWULINK_DSH_WORKSPACE_TLS_EVIDENCE" if use_tls else "MOWULINK_DSH_WORKSPACE_ARTIFACT_EVIDENCE")
+        if docker_fixture:
+            with self.start_native(directory,session,"cleanup-container-export",use_tls=True) as reopened:
+                self.assertEqual(self.read_native(reopened,"read")["inputs"],observed["inputs"])
+                self.assertFalse(DshHost(runtime,link=link).request("activity",session)["workspace_pending"])
+            name = "MOWULINK_DSH_WINDOWS_WORKSPACE_EVIDENCE"
+        else:
+            name = ("MOWULINK_DSH_WORKSPACE_TLS_EVIDENCE" if use_tls else "MOWULINK_DSH_WORKSPACE_ARTIFACT_EVIDENCE")
         if output := os.environ.get(name):
             evidence = {**scope,"artifact_id":artifact,"local_artifact_id":local["attachment_id"],"bytes":len(data),
                 "sha256":digest,"native_input":observed["inputs"][0],"native_calls":observed["calls"],
@@ -2433,8 +2460,10 @@ class NativeLoop(NativeProcess):
                 "container_present_without_w04_receipt":True,"handoff_waited_for_cleanup":True,"w04":receipt,
                 "w04_attempts":report_attempts,"container_absent_after_replay":True,
                 "manager_notification":notify["delivery_id"],"router_state":details["task"]["state"],
-                 "native_link":"IPv4 loopback with mutual TLS" if use_tls else "Unix socket",
-                "boundary":"Installed DSH AgentLoop, real isolated Linux Docker, Worker and Router. Local scripted model. No Feishu."}
+                "native_link":"IPv4 loopback with mutual TLS" if use_tls else "Unix socket",
+                "boundary":("Installed Windows DSH AgentLoop and native file ledger, Docker CLI fixture, real Worker and Router. "
+                            "Local scripted model. No Feishu." if docker_fixture else
+                            "Installed DSH AgentLoop, real isolated Linux Docker, Worker and Router. Local scripted model. No Feishu.")}
             Path(output).write_text(json.dumps(evidence,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
 
     def seed_runtime(self, session, runtime, cli, image, archive, digest, *, docker=None, execute_workspace_files=None):

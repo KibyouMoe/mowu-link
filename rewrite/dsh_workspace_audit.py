@@ -16,7 +16,8 @@ from .storage import Fault, StateWriterBusy, encode, require, state_writer
 
 IDENTITY_TABLE = "dsh_workspace_ledger"
 PHASES = {"unused","issuing","seeding","active","sealing","sealed"}
-WORKSPACE_WRITERS = ("dsh-workspace","codex-workspace")
+HOST_WORKSPACE_WRITERS = ("dsh-workspace","codex-workspace")
+WORKSPACE_WRITERS = (*HOST_WORKSPACE_WRITERS,"workspace-files")
 
 
 def journal(directory):
@@ -157,7 +158,8 @@ def inspect(directory,expected,*,reservations=None):
                     stack.enter_context(state_writer(writer,existing=True))
                 except FileNotFoundError:
                     absent_locks.append(lock)
-            if os.name=="nt" and len(absent_locks)==len(WORKSPACE_WRITERS):
+            if os.name=="nt" and all(Path(directory)/(name+".writer") in absent_locks
+                                     for name in HOST_WORKSPACE_WRITERS):
                 return None,"dsh_workspace_journal_unconfirmed"
             if not host_stopped(directory):
                 return None,"dsh_workspace_host_still_running"

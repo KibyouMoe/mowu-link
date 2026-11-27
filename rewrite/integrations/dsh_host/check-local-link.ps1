@@ -1,4 +1,4 @@
-param([Parameter(Mandatory=$true)][string]$Directory, [switch]$CheckAdmissions, [switch]$CheckQuestions, [string]$MediaDigests)
+param([Parameter(Mandatory=$true)][string]$Directory, [switch]$CheckAdmissions, [switch]$CheckQuestions, [switch]$CheckWorkspaceWriter, [string]$MediaDigests)
 $ErrorActionPreference = 'Stop'
 $trusted = @([Security.Principal.WindowsIdentity]::GetCurrent().User.Value, 'S-1-5-18', 'S-1-5-32-544')
 
@@ -26,13 +26,14 @@ function Assert-Private([string]$Path, [bool]$IsDirectory, [bool]$RequireFileInh
     if ($RequireFileInheritance -and -not $fileInheritance) { exit 4 }
 }
 
-Assert-Private $Directory $true ($CheckAdmissions.IsPresent -or $CheckQuestions.IsPresent)
+Assert-Private $Directory $true ($CheckAdmissions.IsPresent -or $CheckQuestions.IsPresent -or $CheckWorkspaceWriter.IsPresent)
 foreach ($name in @('dsh-link.json','dsh-link.crt','dsh-link.key')) {
     Assert-Private (Join-Path $Directory $name) $false
 }
 $ledgers = @()
 if ($CheckAdmissions) { $ledgers += 'dsh-admissions.sqlite3' }
 if ($CheckQuestions) { $ledgers += 'dsh-questions.sqlite3' }
+if ($CheckWorkspaceWriter) { $ledgers += 'dsh-workspace.writer' }
 $directoryInfo = [IO.DirectoryInfo]::new($Directory)
 foreach ($ledger in $ledgers) {
     foreach ($entry in $directoryInfo.EnumerateFileSystemInfos($ledger + '*')) {

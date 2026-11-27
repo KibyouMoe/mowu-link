@@ -198,10 +198,21 @@ jobs:
             $env:MOWULINK_DSH_APPROVAL_TLS_EVIDENCE = Join-Path $dir.FullName 'native-dsh-approval.json'
             $env:MOWULINK_DSH_GOAL_TLS_EVIDENCE = Join-Path $dir.FullName 'native-dsh-goal.json'
             $env:MOWULINK_DSH_COMPACT_TLS_EVIDENCE = Join-Path $dir.FullName 'native-dsh-compact.json'
+            $env:MOWULINK_DSH_WINDOWS_WORKSPACE_EVIDENCE = Join-Path $dir.FullName 'native-dsh-workspace.json'
             $state = New-Item -ItemType Directory (Join-Path $dir.FullName '状态 试用')
             $env:TMP = $state.FullName
             $env:TEMP = $state.FullName
-            python -B -m unittest -v rewrite.test_dsh_native_loop.LocalTlsLoop
+            $archive = Join-Path $dir.FullName 'archive'
+            $installed = Join-Path $dir.FullName 'installed'
+            $release = python -B -m rewrite.release build --repository . --revision $env:GITHUB_SHA --destination $archive | ConvertFrom-Json
+            python -B -m rewrite.release install --archive $release.archive --revision $release.revision --sha256 $release.sha256 --destination $installed
+            Push-Location -LiteralPath $installed
+            try {
+              python -B -m unittest -v rewrite.test_dsh_native_loop.LocalTlsLoop
+            } finally {
+              Pop-Location
+            }
+            python -B -m rewrite.release verify --archive $release.archive --revision $release.revision --sha256 $release.sha256 --destination $installed
             Get-Content -Raw -LiteralPath $env:MOWULINK_TEST_DSH_EVIDENCE
             Get-Content -Raw -LiteralPath $env:MOWULINK_TEST_DSH_MEDIA_EVIDENCE
             Get-Content -Raw -LiteralPath $env:MOWULINK_TEST_DSH_MEDIA_PROCESS_EVIDENCE
@@ -212,6 +223,9 @@ jobs:
             Get-Content -Raw -LiteralPath $env:MOWULINK_DSH_APPROVAL_TLS_EVIDENCE
             Get-Content -Raw -LiteralPath $env:MOWULINK_DSH_GOAL_TLS_EVIDENCE
             Get-Content -Raw -LiteralPath $env:MOWULINK_DSH_COMPACT_TLS_EVIDENCE
+            Write-Output 'MOWULINK_DSH_WORKSPACE_EVIDENCE_BEGIN'
+            Get-Content -Raw -LiteralPath $env:MOWULINK_DSH_WINDOWS_WORKSPACE_EVIDENCE
+            Write-Output 'MOWULINK_DSH_WORKSPACE_EVIDENCE_END'
           } finally {
             Remove-Item -LiteralPath $dir.FullName -Recurse -Force
           }

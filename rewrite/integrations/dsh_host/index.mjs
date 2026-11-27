@@ -16,6 +16,7 @@ import { guid, prepareSession, selection } from './session-preparation.mjs';
 import { assignmentCleanup } from './assignment-cleanup.mjs';
 import { sqliteAdmissions } from './assignment-admissions.mjs';
 import { assignmentContainers } from './assignment-container.mjs';
+import { windowsWorkspaceFiles } from '../windows-workspace-files.mjs';
 import { privateDir, tlsLink, unixLink } from './local-link.mjs';
 
 const tools = JSON.parse(readFileSync(new URL('../../agent-toolset.json', import.meta.url)));
@@ -154,7 +155,7 @@ async function stopPrivateTurn(ctx,agent,compacting,bound) {
   throw new Error('native_stop_unconfirmed');
 }
 
-export async function bindHost(ctx, session, directory, catalog=[], selected=null, readOnly=false, foreground=false, workspaceConfig=null, {admissions,questionMarks}={}) {
+export async function bindHost(ctx, session, directory, catalog=[], selected=null, readOnly=false, foreground=false, workspaceConfig=null, {admissions,questionMarks,workspaceFiles}={}) {
   check(typeof session === 'string' && session.length > 0, 'missing_native_session');
   const controller = ctx.get('sessionController');
   const agent = selected ?? (await controller.resolveAgent(session)).agent;
@@ -162,7 +163,7 @@ export async function bindHost(ctx, session, directory, catalog=[], selected=nul
   check(agent?.session?.id === session && agents?.get(session) === agent, 'wrong_native_session');
   const displayStart = await baseline(ctx,agent);
   const compact = compaction(ctx,agent,()=>ownEvents(ctx,agent));
-  const workspace = workspaceConfig ? assignmentContainers(directory,session,workspaceConfig) : null;
+  const workspace = workspaceConfig ? assignmentContainers(directory,session,workspaceConfig,workspaceFiles) : null;
   const cleanup = readOnly || workspace ? assignmentCleanup(ctx,agent,directory,workspace,admissions) : null;
   const imageCache = {};
   function bound() {
@@ -182,7 +183,7 @@ export async function bindHost(ctx, session, directory, catalog=[], selected=nul
       if (request.operation === 'display-next') return nextDisplay(ctx,agent,request,questionRecords,foreground);
       if (request.operation === 'display-image') return displayImage(ctx,agent,request,imageCache);
       if (request.operation === 'activity') return {busy:agent.status !== 'idle' || compact.inProgress,
-        ...(workspace ? {workspace_pending:workspace.pending().length>0} : {})};
+        ...(workspace ? {workspace_pending:(await workspace.pending()).length>0} : {})};
       if (request.operation === 'cleanup-evidence') {
         check(cleanup,'native_cleanup_unconfirmed');
         const {events,inherited} = await sessionEvents(ctx,agent);
@@ -333,7 +334,7 @@ function watchWorkspaceReleases(ctx,port,notify,workspaceWriter) {
     let timer;
     async function sweep() {
       try {
-        for (const assignment of port.workspace.pending()) {
+        for (const assignment of await workspaceWriter.run(()=>port.workspace.pending())) {
           if (stopped) break;
           try {
             await workspaceWriter.run(async ()=>{
@@ -408,7 +409,8 @@ export async function apply(ctx, {session, directory, catalog_sessions=[], relay
                                  read_only_assignments=false, relay_foreground_questions=false, assignment_container=null,
                                  local_tls=false}) {
   check(typeof local_tls==='boolean','invalid_dsh_local_link');
-  check(!assignment_container || process.platform!=='win32','unsupported_dsh_local_tls_feature');
+  const windowsWorkspace = process.platform==='win32' && Boolean(assignment_container);
+  check(!windowsWorkspace || local_tls,'dsh_local_tls_required');
   check(typeof session==='string' && session.length>0,'missing_native_session');
   check(typeof resume_on_handoff==='boolean','invalid_native_activation');
   check(typeof read_only_assignments==='boolean' &&
@@ -420,10 +422,11 @@ export async function apply(ctx, {session, directory, catalog_sessions=[], relay
   if (resume_on_handoff || managed) {
     check(typeof ctx.get('sessionQuery')?.inspectSession==='function','native_cold_inspection_unavailable');
   }
-  const portableAdmissions = local_tls && read_only_assignments;
+  const portableAdmissions = local_tls && (read_only_assignments || windowsWorkspace);
   const portableQuestions = local_tls && (relay_foreground_questions ||
     lstatSync(path.join(directory,questionStateFile),{throwIfNoEntry:false})!==undefined);
-  const link = local_tls ? await tlsLink(directory,{admissions:portableAdmissions,questions:portableQuestions}) : unixLink(directory);
+  const link = local_tls ? await tlsLink(directory,{admissions:portableAdmissions,questions:portableQuestions,
+    workspace:windowsWorkspace}) : unixLink(directory);
   if (managed) {
     if (local_tls) {
       check(path.isAbsolute(managed_sessions_dir) && lstatSync(managed_sessions_dir).isDirectory(),
@@ -432,13 +435,30 @@ export async function apply(ctx, {session, directory, catalog_sessions=[], relay
       privateDir(managed_sessions_dir);
     }
   }
+  const workspaceFiles = windowsWorkspace ? windowsWorkspaceFiles(directory,assignment_container.python) : null;
+  const codexWriter = path.join(directory,'codex-workspace.writer');
+  if (workspaceFiles) check(!lstatSync(codexWriter,{throwIfNoEntry:false}),'workspace_runtime_already_bound');
   const workspaceWriter = assignment_container ? await holdWorkspaceWriter(directory) : null;
-  if (workspaceWriter) ctx.effect(() => workspaceWriter.close);
+  if (workspaceFiles) {
+    try {
+      check(!lstatSync(codexWriter,{throwIfNoEntry:false}),'workspace_runtime_already_bound');
+      await workspaceFiles.prepare();
+      await assignmentContainers(directory,session,assignment_container,workspaceFiles).confirmEngine();
+    } catch (error) {
+      await workspaceFiles.close();
+      await workspaceWriter.close();
+      throw error;
+    }
+  }
+  if (workspaceWriter) ctx.effect(() => async () => {
+    await workspaceWriter.close();
+    await workspaceFiles?.close();
+  });
   const admissions = portableAdmissions ? await sqliteAdmissions(directory) : undefined;
   if (admissions) ctx.effect(() => admissions.close);
   const questionMarks = portableQuestions ? await sqliteQuestionMarks(directory) : local_tls ? null : undefined;
   if (questionMarks) ctx.effect(() => questionMarks.close);
-  const localState = {admissions,questionMarks};
+  const localState = {admissions,questionMarks,workspaceFiles};
   const defaultSelection = new_session_selection ? selection(new_session_selection) : null;
   const catalog = catalogSessions(catalog_sessions);
   const scopes = new Map([[session,{port:null,selected:null,opening:null}]]);
