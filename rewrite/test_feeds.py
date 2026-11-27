@@ -158,8 +158,8 @@ class Sources(unittest.TestCase):
     def certificate(self):
         cert,key = self.root/"feed.pem",self.root/"key.pem"
         subprocess.run(["openssl","req","-x509","-newkey","rsa:2048","-nodes","-days","1","-subj","/CN=localhost",
-                        "-addext","subjectAltName=IP:127.0.0.1","-keyout",str(key),"-out",str(cert)],
-                       capture_output=True,check=True,timeout=10)
+                        "-addext","subjectAltName=IP:127.0.0.1","-keyout",key.name,"-out",cert.name],
+                       cwd=self.root,capture_output=True,check=True,timeout=10)
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(cert,key)
         return cert,context
