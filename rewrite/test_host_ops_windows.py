@@ -79,8 +79,8 @@ class WindowsMaintenance(unittest.TestCase):
         self.assertEqual(tool.returncode,0,tool.stdout+tool.stderr)
         cert,key = root/"tls.pem",root/"tls.key"
         subprocess.run(["openssl","req","-x509","-newkey","rsa:2048","-nodes","-days","1","-subj","/CN=localhost",
-                        "-addext","subjectAltName=IP:127.0.0.1","-keyout",key,"-out",cert],
-                       check=True,capture_output=True,timeout=18)
+                        "-addext","subjectAltName=IP:127.0.0.1","-keyout",key.name,"-out",cert.name],
+                       cwd=root,check=True,capture_output=True,timeout=18)
         tokens = {name:guid() for name in ("router","neighbor","stopped","dependent","reader")}
 
         manager = guid()
