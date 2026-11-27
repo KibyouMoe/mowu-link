@@ -4,7 +4,7 @@ import json
 import time
 from urllib.error import URLError
 
-from .approvals import DSH_NON_GRANT_OUTCOMES, validate_dsh_proof, validate_request
+from .approvals import dsh_outcomes, validate_dsh_proof, validate_request
 from .storage import Fault, encode, require
 
 
@@ -88,23 +88,25 @@ class DshApprovals:
         proof = self.adapter.host.request("approval-proof",session,{"approval_id":aid,"turn_id":turn}).get("proof")
         if proof is None:
             return
-        validate_dsh_proof(proof,aid,turn,(*DSH_NON_GRANT_OUTCOMES,"allowed-once"))
         with self.adapter.db.transaction() as db:
             row = db.execute("SELECT * FROM dsh_approvals WHERE approval_id=?",(aid,)).fetchone()
         if not row or row["closure"] is not None:
             return
         digest = hashlib.sha256(row["request"].encode()).hexdigest()
         response = json.loads(row["attempted_response"]) if row["attempted_response"] else None
-        body = {"session":session,"request_digest":digest,"attempted_response":response}
+        validate_dsh_proof(proof,aid,turn,dsh_outcomes(response))
+        body = {"session":session,"request_digest":digest,"attempted_response":response,"native_proof":proof}
         if not row["published"]:
-            require(response is None and proof["outcome"] in DSH_NON_GRANT_OUTCOMES,
-                    409,"native_approval_proof_unconfirmed")
+            require(response is None,409,"native_approval_proof_unconfirmed")
             # An already settled native request has nothing for an operator to decide.
-            body.update(request=request,native_proof=proof)
+            body["request"] = request
         receipt = self.worker.request("PUT","worker/approvals/"+aid+"/closed",body)
         require(isinstance(receipt,dict) and receipt.get("approval_id")==aid and receipt.get("state")=="native_closed"
-                and receipt.get("attempted_response")==response
-                and ("native_proof" not in body or receipt.get("native_proof")==proof),502,"wrong_approval_closure")
+                and receipt.get("request")==request and receipt.get("request_digest")==digest
+                and receipt.get("attempted_response")==response,502,"wrong_approval_closure")
+        # The previous rewrite may already have closed a published approval before a lost reply.
+        if not row["published"] or "native_proof" in receipt:
+            require(receipt.get("native_proof")==proof,502,"wrong_approval_closure")
         with self.adapter.db.transaction() as db:
             db.execute("UPDATE dsh_approvals SET closure=? WHERE approval_id=?",
                        (encode({"native":proof,"router":receipt}),aid))

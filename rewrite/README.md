@@ -408,7 +408,7 @@ python3 -m rewrite.service approvals --connection "$APPROVER_CONNECTION" --worke
 
 DSH 在独立宿主插件的参数中显式配置 `relay_command_approvals: true`，沿用同一个审批 CLI。适配器只转接绑定 Agent 的原生 `bash` 请求，按同一原生回合找到完整工具参数。普通请求省略 `workdir` 或传相对路径时，适配器用宿主的当前工作目录和文件系统解析出实际绝对路径。审批记录保存该目录及原工具参数。转回允许前与执行前都重查目录。在原生执行管线中，只把获准的绝对路径传给这一次 Bash。目录变更使重查失败时该命令不执行。目录无法核实，或未取得同一次原生执行上下文时，交给宿主原生审批。原生沙箱策略独立执行。复跑 `python3 -B -m unittest -v rewrite.test_dsh_native_loop.NativeLoop.test_dsh_approval_pins_implicit_and_relative_native_working_directory`。[原生目录实测](evidence/dsh-approval-native-working-directory.json)
 
-DSH 适配器先保留原请求和单次决定的发送意图。只有在原会话的持久历史读到同号 `approval/asked` 与 `approval/decided`，才确认请求关闭。重开时使用原适配器库、原 DSH 会话和原工位，待核关闭可按该记录补回。测试执行的允许命令只有隔离工作目录内的 `pwd`。
+DSH 适配器先保留原请求和单次决定的发送意图。只有在原会话的持久历史读到同号 `approval/asked` 与 `approval/decided`，才确认请求关闭。新的关闭回执在 Router 和适配器两边保存原生序号和结局。登记了允许但执行前已取消的场景，仍按原生结局记录。重开时使用原适配器库、原 DSH 会话和原工位，按原号补回待核关闭。之前的新版 Router 已经关闭的记录按原样查回，在离线审计中单列本来只有适配器保有原生序号的条目。分步升级先更新 Router，再更新 Worker 和 DSH 适配器。测试只在隔离工作目录执行 `pwd`。
 
 DSH 未收到 Router 的登记回执而宿主已经取消、拒绝或确认不可用时，恢复直接按原号补闭合。审批 CLI 可在 `native_proof` 看到同一回合的两个原生序号和实际结局。Router 从未收件时补闭合不会发审批通知。Router 若先登记了操作人决定，则保留该决定和原生结局。原生证明缺失、对不上，或未确认登记却出现允许时，保留待核。分步升级先更新 Router 和 Worker，再更新 DSH 适配器。复跑 `python3 -B -m unittest -v rewrite.test_service.Service.test_dsh_no_notice_closure_requires_original_non_grant_proof rewrite.test_dsh_native_loop.NativeLoop.test_dsh_unacknowledged_approval_recovers_without_a_late_notification`。[断联恢复](evidence/dsh-approval-router-outage.json)
 

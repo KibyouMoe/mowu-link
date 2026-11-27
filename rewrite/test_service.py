@@ -636,6 +636,47 @@ class Service(unittest.TestCase):
         with restarted.db.transaction() as db:
             self.assertEqual(delivery_read(db,"approver/dev",0),[])
 
+    def test_dsh_published_closure_binds_native_proof_without_rewriting_earlier_receipts(self):
+        orders = Orders(self.root/"dsh-published.db",clock=lambda:1000)
+        binding = {"session_id":guid()}
+        with orders.db.transaction() as db:
+            orders.session(db,"dev",binding)
+
+        def register():
+            aid = guid()
+            entry = ["approvals","dev",aid]
+            request = {"session":"isolated","turn_id":"7/2","item_id":aid,"cwd":"/isolated","command":"pwd",
+                       "environment_id":None,"decisions":["accept","cancel"]}
+            result = approval_route(orders,"worker/dev","POST",entry,dict(binding,request=request))
+            decision = {"request_digest":result["request_digest"],"decision":"accept"}
+            proof = {"approval_id":aid,"turn_id":"7/2","asked_seq":9,"decided_seq":12,"outcome":"allowed-once"}
+            body = dict(binding,request_digest=result["request_digest"],
+                        attempted_response={"source":"operator","decision":"accept"})
+            return entry,decision,body,proof
+
+        entry, decision, body, proof = register()
+        close = [*entry,"closed"]
+        with self.assertRaisesRegex(Fault,"approval_response_conflict"):
+            approval_route(orders,"worker/dev","PUT",close,dict(body,native_proof=proof))
+        approval_route(orders,"approver/dev","PUT",[*entry,"decision"],decision)
+        for args in (dict(body,attempted_response=None,native_proof=proof),
+                     dict(body,native_proof=dict(proof,turn_id="7/3"))):
+            with self.assertRaisesRegex(Fault,"native_approval_proof_unconfirmed"):
+                approval_route(orders,"worker/dev","PUT",close,args)
+        accepted = approval_route(orders,"worker/dev","PUT",close,dict(body,native_proof=proof))
+        self.assertEqual(accepted["native_proof"],proof)
+        self.assertEqual(approval_route(orders,"worker/dev","PUT",close,dict(body,native_proof=proof)),accepted)
+        with self.assertRaisesRegex(Fault,"approval_closure_conflict"):
+            approval_route(orders,"worker/dev","PUT",close,dict(body,native_proof=dict(proof,decided_seq=13)))
+
+        entry, decision, body, proof = register()
+        approval_route(orders,"approver/dev","PUT",[*entry,"decision"],decision)
+        close = [*entry,"closed"]
+        earlier = approval_route(orders,"worker/dev","PUT",close,body)
+        self.assertNotIn("native_proof",earlier)
+        self.assertEqual(approval_route(orders,"worker/dev","PUT",close,dict(body,native_proof=proof)),earlier)
+        self.assertEqual(approval_route(orders,"approver/dev","GET",entry,{}),earlier)
+
     @unittest.skipUnless(shutil.which("openssl"), "TLS fixture certificate generator unavailable")
     def test_three_process_worker_chat_and_assignment(self):
         from .devloop import FixtureHost

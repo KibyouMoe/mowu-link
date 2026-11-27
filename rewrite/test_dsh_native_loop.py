@@ -23,7 +23,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from . import feishu_audit, state_bundle, test_codex_app_server as codex_driver, worker_commands, worker_resume
+from . import approval_audit, feishu_audit, state_bundle, test_codex_app_server as codex_driver, worker_commands, worker_resume
 from .adapter import HostAdapter
 from .approvals import TTL_SECONDS
 from .codex_app_server import AppServerHost, worker_callbacks
@@ -1212,15 +1212,29 @@ class NativeProcess(unittest.TestCase):
             self.assertEqual(recovered["attempted_response"],{"source":"operator","decision":"cancel"})
             self.assertEqual((after["inputs"],after["approvals"],after["results"]),
                              (before["inputs"],before["approvals"],before["results"]))
+            def all_closures_saved():
+                with reopened.db.transaction() as db:
+                    return db.execute("SELECT COUNT(*) FROM dsh_approvals WHERE closure IS NOT NULL").fetchone()[0]==4
+            wait_for(all_closures_saved)
         self.assertEqual(Client(router,manager).request("GET","tasks")["items"],[])
         notices = observer.frames(0)
         self.assertEqual([notice["payload"]["approval_id"] for notice in notices],
                          [denied["approval_id"],granted["approval_id"],expired["approval_id"],cold["approval_id"]])
+        closed_rows = (rejected,allowed,timed_out,recovered)
+        native_rows = (rejected_native,allowed_native,expired_native,cold_native)
+        for closure,native in zip(closed_rows,native_rows,strict=True):
+            self.assertEqual(closure["native_proof"],{"approval_id":native["native_id"],"turn_id":native["turn"],
+                **{key:native[key] for key in ("asked_seq","decided_seq","outcome")}})
+        joined = approval_audit.reconcile(directory/"router.db","dev",[directory/"adapter.db"])
+        self.assertEqual(joined["issues"],[])
+        self.assertEqual(joined["dsh"],{"confirmed":4,"router_native_proofs_matched":4,
+                                       "earlier_receipts_without_router_native_proof":0})
         self.evidence = {"session":session,"native_records":[rejected_native,allowed_native,expired_native,cold_native],
                          "router_notifications":[notice["delivery_id"] for notice in notices],
                          "closure_retry_same_receipt":confirmations[0]==confirmations[1],
                          "cold_reopen_recovered_original_closure":True,
                          "unverifiable_directory_used_native_answerer":True,
+                         "closure_audit":joined["dsh"],
                          "successful_bash_calls":1,
                          "boundary":"Installed DSH AgentLoop, ApprovalService and Bash provider; test model and operator identity"}
         if use_tls and (output := os.environ.get("MOWULINK_DSH_APPROVAL_TLS_EVIDENCE")):

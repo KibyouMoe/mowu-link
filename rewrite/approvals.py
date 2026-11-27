@@ -146,6 +146,12 @@ def validate_dsh_proof(proof,aid,turn,outcomes):
             409,"native_approval_proof_unconfirmed")
 
 
+def dsh_outcomes(attempted):
+    if attempted=={"source":"operator","decision":"accept"}:
+        return (*DSH_NON_GRANT_OUTCOMES,"allowed-once")
+    return DSH_NON_GRANT_OUTCOMES
+
+
 def close_native(db,orders,wid,aid,row,session,now,body):
     fields = {"session_id","request_digest","attempted_response"}
     require(fields<=set(body)<=fields|{"request","native_proof"},422,"invalid_approval_closure")
@@ -156,13 +162,15 @@ def close_native(db,orders,wid,aid,row,session,now,body):
     stored = encode(attempted)
     native_deadline = attempted=={"source":"native_deadline","decision":"cancel"}
     dsh_proof = "native_proof" in body
-    require(("request" in body)==(native_deadline or dsh_proof) and (not dsh_proof or attempted is None),
+    dsh_bootstrap = dsh_proof and "request" in body
+    require(("request" in body)==(native_deadline or dsh_bootstrap) and (not dsh_bootstrap or attempted is None)
+            and not (native_deadline and dsh_proof),
             422,"invalid_approval_closure")
     stored_proof = None
-    if native_deadline or dsh_proof:
+    if native_deadline or dsh_bootstrap:
         request = body["request"]
         validate_request(request)
-        if dsh_proof:
+        if dsh_bootstrap:
             require(request["item_id"]==aid and "command" in request,409,"approval_request_conflict")
             validate_dsh_proof(body["native_proof"],aid,request["turn_id"],DSH_NON_GRANT_OUTCOMES)
             stored_proof = encode(body["native_proof"])
@@ -179,8 +187,15 @@ def close_native(db,orders,wid,aid,row,session,now,body):
     require(row,404,"approval_not_found")
     require(session==row["worker_session"] and body["request_digest"]==row["request_digest"],
             409,"approval_request_conflict")
+    if dsh_proof and not dsh_bootstrap:
+        request = json.loads(row["request"])
+        require(request["item_id"]==aid and "command" in request,409,"approval_request_conflict")
+        validate_dsh_proof(body["native_proof"],aid,request["turn_id"],dsh_outcomes(attempted))
+        stored_proof = encode(body["native_proof"])
     if row["closed_at"] is not None:
-        require(row["attempted_response"]==stored and (stored_proof is None or row["native_proof"]==stored_proof),
+        prior_published_closure = dsh_proof and not dsh_bootstrap and row["native_proof"] is None
+        require(row["attempted_response"]==stored and
+                (stored_proof is None or row["native_proof"]==stored_proof or prior_published_closure),
                 409,"approval_closure_conflict")
         return
     if attempted is not None and not native_deadline:

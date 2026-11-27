@@ -21,6 +21,7 @@ from .manager_notices import ManagerNotices
 from .question_cards import Actions
 from .codex_approvals import CodexApprovals
 from .codex_thread_preparation import SCHEMA as CODEX_PREPARATION_SCHEMA
+from .dsh_approvals import DshApprovals
 from .managed_sessions import FAMILY_SCHEMA, derive_callback, read_enrollment, token_digest, write_enrollment
 from .orders import Orders
 from .release_check import config
@@ -1567,6 +1568,50 @@ class Bundle(unittest.TestCase):
         self.assertTrue(missing["needs_review"])
         self.assertEqual(missing["workers"][0]["approval_receipts"],{"confirmed":0,"issues":[
             {"approval_id":original.id,"code":"codex_report_approval_intent_missing"}]})
+
+    def test_audit_matches_dsh_native_proof_and_detects_missing_or_diverging_receipts(self):
+        session = self.native.session
+        with self.stack(self.sources,pin_session=True,approval_operator=True) as (_manager,worker,*_):
+            worker.connect()
+            DshApprovals(worker.adapter,None)
+            with worker.adapter.db.transaction() as db:
+                for with_proof in (False,True):
+                    aid = guid()
+                    request = {"session":session,"turn_id":guid(),"item_id":aid,"cwd":"/isolated","command":"pwd",
+                               "environment_id":None,"decisions":["accept","cancel"]}
+                    proof = {"approval_id":aid,"turn_id":request["turn_id"],"asked_seq":5,"decided_seq":9,
+                             "outcome":"cancelled"}
+                    route = "approvals/oguri/"+aid
+                    intake = worker.router.request("POST",route,{"session_id":worker.session,"request":request})
+                    body = {"session_id":worker.session,"request_digest":intake["request_digest"],"attempted_response":None}
+                    if with_proof:
+                        body["native_proof"] = proof
+                    receipt = worker.router.request("PUT",route+"/closed",body)
+                    closure = {"native":proof,"router":receipt}
+                    db.execute("INSERT INTO dsh_approvals(approval_id,request,published,closure) VALUES (?,?,1,?)",
+                               (aid,encode(request),encode(closure)))
+
+        def audit(label):
+            snapshot = self.root/label
+            sha = capture(self.sources,self.revision,snapshot)["manifest_sha256"]
+            summary = audit_handoff(snapshot,sha)
+            return summary["needs_review"],summary["workers"][0]["approval_receipts"]
+
+        needs_review,joined = audit("matching-dsh-approvals")
+        self.assertFalse(needs_review,joined)
+        self.assertEqual(joined["dsh"],{"confirmed":2,"router_native_proofs_matched":1,
+                                        "earlier_receipts_without_router_native_proof":1})
+        closure["native"]["decided_seq"] += 1
+        with worker.adapter.db.transaction() as db:
+            db.execute("UPDATE dsh_approvals SET closure=? WHERE approval_id=?",(encode(closure),aid))
+        needs_review,joined = audit("wrong-dsh-native-sequence")
+        self.assertTrue(needs_review)
+        self.assertEqual(joined["issues"],[{"approval_id":aid,"code":"dsh_approval_closure_mismatch"}])
+        with worker.adapter.db.transaction() as db:
+            db.execute("DELETE FROM dsh_approvals WHERE approval_id=?",(aid,))
+        needs_review,joined = audit("missing-dsh-source-approval")
+        self.assertTrue(needs_review)
+        self.assertEqual(joined["issues"],[{"approval_id":aid,"code":"dsh_approval_intent_missing"}])
 
     def test_handoff_refuses_to_copy_an_unconfirmed_native_thread_preparation(self):
         with self.stack(self.sources) as (_manager,worker,_source,_mail,_platform,_views):
