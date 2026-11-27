@@ -18,6 +18,8 @@
 
 混合回退原先会被已存在的无持单工位卡住。隔离实测确认该工位的上线、适配器连通与空闲回报后，一张已验收工单和两条同伴私聊同批回退。未知工位虽已空闲，仍拒绝发布。将既有工位的样本改为忙碌或移除原回报，也会拒绝发布。[回退证据](evidence/trial-peer-fallback.json)
 
+空闲观察也能单独审核回退。仅有上线和空闲观测时，旧库摘要与原快照一致。有一张新待派单时，从回退计划实际调用旧 Router，首次 202，重试 200 且同单号，原工位队列只进一次。[复验命令](router-rehearsal.md#试用新增私聊的回退)
+
 重新取消的 W04 已按具体指令核验。相同 A06 操作键重送保留原回执，自动重试沿用同一清理号。同一派发的下一条显式取消携带新的 `cleanup_id`。Worker 从原生收件识别该号，分别保存等待、清理及 Router 回执。隔离实测第一次迟报、重用旧键、换新键重播旧正文和错号都返回 409。新 W04 落库后故意丢回包，冷启沿原键查回，取消通知一条。复跑 `python3 -B -m unittest -v rewrite.test_cleanup rewrite.test_cutover -k cancel`。[HTTP 与回退实测](evidence/reissued-cancel-w04.json)
 
 用前版 `2490059e42d379183c19b0e82c208f545a3c78ee` 生成的隔离 Router、Worker 和适配器库做了升级。仅一次待确认的旧取消可以正常完成，已经成功的旧回执可沿原键回读。旧版已重复取消而未记录清理号时，拒绝无号回执，须由管理端发新指令。回退核对新指令及 W04 的同一清理号，缺号拒绝发布。[旧库升级](evidence/reissued-cancel-upgrade.json) · [回退演练](evidence/cutover-reviewed-cancel-retry.json)

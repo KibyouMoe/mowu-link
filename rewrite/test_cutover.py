@@ -4017,6 +4017,73 @@ store.close()
                 "scope":"Actual isolated legacy and rewrite HTTP, SQLite and archive HTTPS. Receiving hosts and W04 model are fixtures."
             },indent=2)+"\n",encoding="utf-8")
 
+    def test_reviewed_rollback_after_only_quiet_presence_and_unoffered_work(self):
+        self.old("""
+store = RouterStore(sys.argv[1])
+store.upsert_worker("oguri")
+store.close()
+""",self.legacy)
+        backup(self.legacy,self.attachments,self.snapshot)
+        baseline = prepare(self.snapshot,self.trial,self.source_id)
+        clock = Clock()
+        review = self.root/"idle-reviewed.json"
+        decisions = {"closed_assignments":{}}
+        for queued in (False,True):
+            loop = Loop(self.trial,clock,FixtureHost)
+            with loop.server:
+                loop.thread.start()
+                try:
+                    if queued:
+                        entry = loop.hermes.create(guid(),"Unsent after connection","Preserve its instruction","oguri")
+                        decisions["execution_modes"] = {entry["task_id"]:"goal"}
+                    else:
+                        loop.worker.connect()
+                        loop.worker.poll()
+                        self.assertEqual(loop.native.entries(),[])
+                finally:
+                    loop.server.shutdown()
+                    loop.thread.join()
+            digest_now = digest(self.trial/"router.db")
+            facts = reconcile(self.snapshot,self.trial)
+            self.assertEqual(facts["exact_rollback_allowed"],False)
+            self.assertEqual(facts["only_new_queued_tasks"],False)
+            review.write_text(json.dumps({**decisions,"trial_sha256":digest_now}))
+            destination = self.root/("review-ready-only" if queued else "review-idle-only")
+            staged = stage_reviewed_rollback(self.snapshot,self.trial,review,destination)
+            self.assertEqual((staged["reviewed_orders"],staged["idle_observers"],staged["queued_requests"]),
+                             (0,1,int(queued)))
+            self.assertEqual(digest(self.trial/"router.db"),digest_now)
+            if queued:
+                plan = json.loads((destination/"queue-replay.json").read_text())
+                self.assertEqual([row["trial_task_id"] for row in plan["requests"]],[entry["task_id"]])
+                reread = json.loads(self.old("""
+from server import RouterServer
+from selftest_router import http
+from threading import Thread
+from unittest.mock import Mock
+root = Path(sys.argv[1])
+body = json.loads((root/"queue-replay.json").read_text())["requests"][0]["request"]
+store = RouterStore(root/"legacy.db")
+token = "isolated-old-queue"
+with RouterServer(("127.0.0.1",0),store,token,Mock(),Mock()) as server:
+    thread = Thread(target=server.serve_forever,kwargs={"poll_interval":.02})
+    thread.start()
+    try:
+        route = f"http://127.0.0.1:{server.server_port}/tasks"
+        sent,first = http("POST",route,body,token)
+        retried,again = http("POST",route,body,token)
+        print(json.dumps([sent,retried,first["task_id"]==again["task_id"],again["duplicate"],
+                          store.orders.next_dispatch("oguri")==first["task_id"]]))
+    finally:
+        server.shutdown()
+        thread.join()
+store.close()
+""",destination))
+                self.assertEqual(reread,[202,200,True,True,True])
+            else:
+                self.assertEqual(staged["restored_legacy_sha256"],baseline["snapshot_sha256"])
+                self.assertFalse((destination/"queue-replay.json").exists())
+
     def test_original_id_and_source_read_back_via_manager_without_reviving_archived_order(self):
         backup(self.legacy,self.attachments,self.snapshot)
         baseline = prepare(self.snapshot,self.trial,self.source_id)

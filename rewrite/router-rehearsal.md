@@ -120,7 +120,9 @@ python3 -B -m rewrite.service peer-archive \
 
 复跑 `python3 -B -m unittest -v rewrite.test_cutover -k reviewed_private_peers`。实际旧 Router HTTP 以原共享身份查询新私聊和附件均返回 404，已验收工单仍归档。独立 HTTPS 服务实际核对原双方可读全文及跨块附件，第三工位和非参与的溪流身份返回 404。回到重做版后，原两条各有原回执，重送原号返回 409，新增回信只产生一次宿主收件。第二次回退保留原两条和新增回复。宿主与 W04 模型使用夹具。[回退与回迁实测](evidence/trial-peer-fallback.json)
 
-同批可以保留旧台账上其他工位的空闲观察证据。审核核对试用时该工位的无持单登记、每次传输入站确认、原会话的空闲回报和最后的心跳或适配器连通回执。核准的工位列在私有清单的 `idle_observers`，恢复的旧库仍按原状态启动。未在旧台账登记的旁观工位、没有查询回报、曾见忙碌或仍持单时，需要继续对账。该项适用于已有已审核工单或同伴私聊的回退。
+同批可以保留旧台账上其他工位的空闲观察证据。审核核对试用时该工位的无持单登记、每次传输入站确认、原会话的空闲回报和最后的心跳或适配器连通回执。核准的工位列在私有清单的 `idle_observers`，恢复的旧库仍按原状态启动。未在旧台账登记的旁观工位、没有查询回报、曾见忙碌或仍持单时，需要继续对账。
+
+试用只有已核空闲观察时，也可用 `stage-reviewed-rollback`。审核文件保留 `trial_sha256` 和空的 `closed_assignments`。另有未经派发的新单时，加入 `reconcile` 核出的 `execution_modes`，并依正式回放步骤操作。实测只有空闲观察时逐字节恢复旧库。有一张新待派单时，旧 HTTP 首次接收返回 202，按原键重试返回 200 和同一单号。复跑 `python3 -B -m unittest -v rewrite.test_cutover -k quiet_presence`。
 
 ### 旧队列迁入后改过、仍未派发的单
 

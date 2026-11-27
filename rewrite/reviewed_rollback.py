@@ -33,7 +33,8 @@ def reviewed_orders(facts, original_tasks, replacements):
         else:
             changes.append(row)
     deltas = facts["changed_tables"]
-    if (not (changes or replacements or facts["trial_peers"]) or facts["blocked_new_tasks"] or set(deltas)-TABLES
+    if (not (changes or replacements or facts["trial_peers"] or "workers" in deltas)
+            or facts["blocked_new_tasks"] or set(deltas)-TABLES
             or any(value["baseline_only"] for name,value in deltas.items() if name!="tasks")):
         raise ValueError("trial has changes outside the supported reviewed orders")
     if deltas.get("tasks",{"baseline_only":0,"trial_only":0})!={
