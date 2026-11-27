@@ -23,7 +23,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from . import state_bundle, test_codex_app_server as codex_driver, worker_commands, worker_resume
+from . import feishu_audit, state_bundle, test_codex_app_server as codex_driver, worker_commands, worker_resume
 from .adapter import HostAdapter
 from .approvals import TTL_SECONDS
 from .codex_app_server import AppServerHost, worker_callbacks
@@ -957,8 +957,9 @@ class NativeProcess(unittest.TestCase):
         platform = Client(url,platform_key)
         relay = DshDisplay(loop.adapter,Client(url,adapter_key),"oguri")
         sink = PlatformFixture()
-        views = Views(loop.root/"foreground-views.db",platform,sink,"test-chat","小栗帽",clock)
-        actions = Actions(views,Inbound(loop.root/"feishu.db",platform,None,"app","trainer","test-chat"))
+        platform_db = loop.root/"foreground-views.db"
+        views = Views(platform_db,platform,sink,"test-chat","小栗帽",clock)
+        actions = Actions(views,Inbound(platform_db,platform,None,"app","trainer","test-chat"))
 
         def project():
             for _ in range(4):
@@ -1017,6 +1018,11 @@ class NativeProcess(unittest.TestCase):
             with loop.worker.db.transaction() as db:
                 proof = json.loads(db.execute("SELECT proof FROM trainer_questions WHERE question_id=?",(qid,)).fetchone()[0])
                 self.assertEqual(db.execute("SELECT count(*) FROM trainer_questions").fetchone()[0],1)
+                db.execute("ATTACH DATABASE ? AS feishu",(str(platform_db),))
+                ledger = feishu_audit.reconcile(db)
+            disposition = "rejected" if outcome in ("native-first","canceled") else "confirmed"
+            self.assertEqual(ledger["trainer_answers"][disposition],1)
+            self.assertEqual(ledger["issues"],[])
             self.assertEqual(native.lookup_answer(session,waiting["turn_id"],waiting["call_id"]),proof)
             self.assertIsNone(native.lookup_answer(session,"0/0",waiting["call_id"]))
             self.assertEqual([call["callId"] for call in observed["calls"]],[waiting["call_id"]])
@@ -1044,7 +1050,8 @@ class NativeProcess(unittest.TestCase):
                     self.assertEqual(observed["replies"],[])
             result = {"case":outcome,"opening":waiting,"question_id":qid,"fixture_message_id":mid,
                       "proof":proof,"native_calls":len(observed["calls"]),
-                      "native_continued_replies":len(observed["replies"]),"original_card_updates":1}
+                      "native_continued_replies":len(observed["replies"]),"original_card_updates":1,
+                      "trainer_answer_audit":ledger["trainer_answers"]}
         if use_tls:
             ledger = directory/"dsh-questions.sqlite3"
             with closing(sqlite3.connect(ledger)) as db:

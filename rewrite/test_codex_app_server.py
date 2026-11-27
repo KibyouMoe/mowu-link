@@ -43,7 +43,7 @@ from .test_feishu_output import PlatformFixture
 from .test_feishu_inbound import PNG
 from .test_mainline import Clock
 from .trigger import Trigger
-from . import test_service
+from . import feishu_audit, test_service
 from .wire import Client, serve_loopback
 from .worker import Worker
 from .worker_service import WorkerService
@@ -3322,8 +3322,15 @@ class CodexAppServer(unittest.TestCase):
                 "questions":[{"id":"route","question":"选择路线 · unconfirmed","isOther":True,"isSecret":False,
                               "options":[{"label":"第一项"},{"label":"第二项"}]}]}})
         self.assertFalse(loop.hermes.tasks()["items"])
+        with loop.worker.db.transaction() as db:
+            db.execute("ATTACH DATABASE ? AS feishu",(str(platform_db),))
+            ledger = feishu_audit.reconcile(db)
+        self.assertEqual(ledger["trainer_answers"]["confirmed"],4)
+        self.assertEqual(ledger["trainer_answers"]["awaiting_worker_outcome"],1)
+        self.assertEqual(ledger["issues"],[{"code":"platform_trainer_answer_outcome_unconfirmed","question_id":qid}])
         self.evidence = {"thread_id":sid,"answered":delivered,"unconfirmed_card_id":mid,"unconfirmed_untouched":True,
                          "secret_question_projected":False,"mixed_secret_group_projected":False,
+                         "trainer_answer_audit":ledger["trainer_answers"],
                          "boundary":"Actual App Server requestUserInput and fixture card actions, no Feishu identity or cloud model"}
 
     def test_native_approved_image_splits_the_platform_card_and_replays_the_original_upload(self):

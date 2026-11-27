@@ -15,14 +15,18 @@ CREATE TABLE IF NOT EXISTS trainer_reply_deliveries(question_id TEXT PRIMARY KEY
 """
 
 
-def show(db, recipient, qid, question, answer=None, *, ended=False):
+def public_event(recipient, qid, question, answer=None, *, ended=False):
     kind = "question_closed" if ended else "question_open" if answer is None else "question_answered"
     event = {"event_id":f"{kind}-{recipient}-{qid}", "kind":kind, "recipient":recipient, "question_id":qid,
              "session":question["session"], "turn_id":question.get("turn_id",""),
              **content(question)}
     if answer is not None:
         event["answer"] = answer
-    display.append(db,event)
+    return event
+
+
+def show(db, recipient, qid, question, answer=None, *, ended=False):
+    display.append(db,public_event(recipient,qid,question,answer,ended=ended))
 
 
 def mirror_manager(db, qid, answer=None):

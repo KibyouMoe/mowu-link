@@ -642,6 +642,8 @@ python3 -B -m rewrite.release_check --repository . --component state-bundle \
 
 `audit-handoff` 的 `feishu_receipts` 核对入站私聊和指令的 Worker 回执，以及出站请求的原会话、幂等键、卡片更新目标、飞书消息号和 Worker 菜单关联。Worker 已记入站、飞书侧还缺回执时计入 `worker_inputs_awaiting_platform`。飞书消息号已落盘、展示游标尚未推进时计入 `provider_outputs_awaiting_commit`。从原绑定的隔离副本恢复，两种情况都沿用原标识补齐本地记录。两边已保存不同回执、卡片目标错位或会话绑定不符时会列出待核项并阻止发布换绑目录。审计输出只含标识和计数。实际飞书云端仍以授权会话的回执查验为准。
 
+`feishu_receipts.trainer_answers` 核对飞书操作原卡、Worker 原题、原会话与回合、Worker 保存的宿主关闭凭据及最终展示事件。Worker 已确认原答案、飞书侧还缺回执时计入 `awaiting_platform_commit`，并要求复核。若已尝试但仍无 Worker 处理结论，计入 `awaiting_worker_outcome`。保留原绑定，用隔离副本按原题号查回并更新原卡。题已结束而点击被拒时记录 `rejected`。审计输出题号、状态和计数。
+
 准备发送时保存完整的目标、正文和幂等号。显示名或渲染参数变化后，恢复仍使用这份请求。取得飞书消息号后先落盘，再确认 Worker 的菜单关联。只缺 Worker 回执时，恢复会沿用原消息号补录。若平台新消息回执仍未知，超过程序的 55 分钟重试窗口即保留待核。已知目标卡的内容更新可向原卡重试同一正文。
 
 待核台账保留原尝试和冻结请求。超过重试窗口后，同一原生回合的后续展示或同一问题的关卡、答复更新一起待核，后续独立消息继续发送。审计输出 `platform_receipt_held`、展示序号及原待核序号。该项没有飞书消息号，也不计入已确认输出，仍会拦住换绑。恢复副本后按原绑定核对飞书回执，保留待核记录及原始请求。

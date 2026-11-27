@@ -2,8 +2,10 @@
 import json
 import re
 
-from . import feishu_receipt_review
+from . import feishu_receipt_review, user_questions
 from .feishu_output import write_key
+from .question_forms import validate_reply
+from .storage import Fault
 
 
 def document(raw):
@@ -168,11 +170,86 @@ def menu_proof(db,cursor):
     return issues
 
 
+def trainer_answer_state(row,cursor):
+    mismatch = "unverified","platform_trainer_answer_receipt_mismatch"
+    original,answer,proof = (document(row[key]) for key in ("original","answer","proof"))
+    qid,mid = row["qid"],row["mid"]
+    if not (isinstance(original,dict) and message_id(mid) and mid==row["card_mid"]==row["display_mid"]
+            and type(row["open_seq"]) is int and row["open_seq"]<=cursor):
+        return mismatch
+    try:
+        validate_reply(answer,original)
+        opened = user_questions.public_event("trainer",qid,original)
+        if (document(row["open_event"])!=opened or document(row["open_attempt"])!=opened):
+            return mismatch
+        expected_card = opened
+        if row["proof"] is not None:
+            ended = isinstance(proof,dict) and proof.get("state")=="ended_unanswered"
+            result = proof.get("answer") if isinstance(proof,dict) else None
+            if ended:
+                if result is not None:
+                    return mismatch
+            else:
+                validate_reply(result,original)
+            user_questions.confirm(proof,original,result)
+            terminal = user_questions.public_event("trainer",qid,original,result,ended=ended)
+            terminal_event = row["closed_event"] if ended else row["answered_event"]
+            other_event = row["answered_event"] if ended else row["closed_event"]
+            if document(terminal_event)!=terminal or other_event is not None:
+                return mismatch
+            if ended and row["closed_seq"]<=cursor:
+                expected_card = terminal
+        elif row["closed_event"] is not None or row["answered_event"] is not None:
+            return mismatch
+        if document(row["card_event"])!=expected_card:
+            return mismatch
+    except (Fault,KeyError,TypeError,ValueError):
+        return mismatch
+
+    state,error = row["state"],row["error"]
+    accepted = isinstance(proof,dict) and proof.get("answer")==answer and proof.get("state")!="ended_unanswered"
+    if state=="confirmed" and accepted and error is None:
+        return "confirmed",None
+    if state=="rejected" and isinstance(error,str) and error:
+        return "rejected",None
+    if state=="pending":
+        if accepted:
+            return "awaiting_platform_commit","platform_trainer_answer_receipt_pending"
+        if error is not None or row["prepared_answer"] is not None or row["proof"] is not None:
+            return "awaiting_worker_outcome","platform_trainer_answer_outcome_unconfirmed"
+        return "queued",None
+    return mismatch
+
+
+def trainer_answers(db,cursor):
+    counts = dict.fromkeys(("queued","awaiting_worker_outcome","awaiting_platform_commit","confirmed","rejected","unverified"),0)
+    issues = []
+    rows = db.execute("""SELECT n.*,c.mid AS card_mid,c.question AS card_event,
+                                q.original,q.answer AS prepared_answer,q.proof,
+                                p.seq AS open_seq,p.payload AS open_event,v.event AS open_attempt,v.mid AS display_mid,
+                                a.payload AS answered_event,e.seq AS closed_seq,e.payload AS closed_event
+                         FROM feishu.card_answers n
+                         LEFT JOIN feishu.question_cards c ON c.recipient='trainer' AND c.qid=n.qid
+                         LEFT JOIN main.trainer_questions q ON q.question_id=n.qid
+                         LEFT JOIN main.display_events p ON p.event_id='question_open-trainer-'||n.qid
+                         LEFT JOIN feishu.view_attempt v ON v.seq=p.seq
+                         LEFT JOIN main.display_events a ON a.event_id='question_answered-trainer-'||n.qid
+                         LEFT JOIN main.display_events e ON e.event_id='question_closed-trainer-'||n.qid
+                         ORDER BY n.rowid""")
+    for row in rows:
+        state,code = trainer_answer_state(row,cursor)
+        counts[state] += 1
+        if code:
+            issues.append({"code":code,"question_id":row["qid"]})
+    return counts,issues
+
+
 def reconcile(db):
     tables = {row[0] for row in db.execute("SELECT name FROM feishu.sqlite_schema WHERE type='table'")}
     worker_tables = {row[0] for row in db.execute("SELECT name FROM main.sqlite_schema WHERE type='table'")}
-    if (not {"view_writes","view_images"}<=tables
-            or not {"chat_deliveries","platform_commands","platform_model_menu","resume_catalog_cards"}<=worker_tables):
+    if (not {"view_writes","view_images","card_answers","question_cards"}<=tables
+            or not {"chat_deliveries","platform_commands","platform_model_menu","resume_catalog_cards",
+                    "trainer_questions"}<=worker_tables):
         return {"issues":[{"code":"platform_receipt_ledger_unconfirmed"}]}
     views = db.execute("SELECT chat,cursor FROM feishu.view_cursor WHERE slot=1").fetchone()
     bindings = db.execute("SELECT slot,value FROM feishu.binding LIMIT 2").fetchall()
@@ -182,6 +259,8 @@ def reconcile(db):
         return {"issues":[{"code":"platform_receipt_binding_mismatch"}]}
     inputs,input_waiting,input_issues = input_proof(db)
     outputs,output_waiting,output_issues = output_proof(db,chat,cursor)
+    answers,answer_issues = trainer_answers(db,cursor)
     return {"confirmed_inputs":inputs,"worker_inputs_awaiting_platform":input_waiting,
             "confirmed_outputs":outputs,"provider_outputs_awaiting_commit":output_waiting,
-            "issues":input_issues+output_issues+menu_proof(db,cursor)}
+            "issues":input_issues+output_issues+menu_proof(db,cursor)+answer_issues,
+            **({"trainer_answers":answers} if any(answers.values()) else {})}

@@ -18,6 +18,7 @@ from .feishu_inbound import Inbound
 from .feishu_output import Views
 from .hermes import HermesAdapter
 from .manager_notices import ManagerNotices
+from .question_cards import Actions
 from .codex_approvals import CodexApprovals
 from .codex_thread_preparation import SCHEMA as CODEX_PREPARATION_SCHEMA
 from .managed_sessions import FAMILY_SCHEMA, derive_callback, read_enrollment, token_digest, write_enrollment
@@ -32,7 +33,7 @@ from .test_mainline import Clock
 from .trigger import Trigger
 from .wire import Client, serve_loopback
 from .worker import Worker
-from . import display, dsh_workspace_audit, state_bundle, worker_commands
+from . import display, dsh_workspace_audit, state_bundle, user_questions, worker_commands
 from .worker_service import WorkerService
 
 
@@ -1403,6 +1404,105 @@ class Bundle(unittest.TestCase):
                 "native_input_count":len(self.native.entries()),"additional_platform_calls":0,
                 "handoff_refused_for_every_mismatch":True,"boundary":"Actual SQLite and Worker HTTP. Feishu and native host are fixtures."},
                 ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
+
+    def test_handoff_reconciles_the_original_feishu_trainer_answer(self):
+        closes = []
+        submitted = "Do not expose this trainer answer"
+        original = {"session":self.native.session,"turn_id":"question-turn","native_question_id":"fixture-question",
+                    "text":"Choose a test answer","options":[]}
+
+        def close(question,answer):
+            self.assertEqual(question,original)
+            self.assertEqual(answer,{"mode":"text","text":submitted})
+            scope = {key:question[key] for key in ("session","turn_id","native_question_id")}
+            proof = {**scope,"answer":answer,"closed":True,"receipt_id":guid()}
+            closes.append(proof)
+            return proof
+
+        def audit(paths,name):
+            path = self.root/name
+            seal = capture(paths,self.revision,path)["manifest_sha256"]
+            result = audit_handoff(path,seal)
+            self.assertNotIn(submitted,encode(result))
+            return path,seal,result
+
+        self.native.resolve_question = close
+        with self.stack(self.sources,pin_session=True) as (_m,worker,_source,_mail,inbound,views):
+            WorkerService(worker,self.clock).step()
+            qid = user_questions.open_native(worker,original)["question_id"]
+            views.poll()
+            with views.db.transaction() as db:
+                mid, = db.execute("SELECT mid FROM question_cards WHERE qid=?",(qid,)).fetchone()
+            sends = list(self.platform.calls)
+            actions = Actions(views,inbound)
+            self.assertEqual(actions.record("app","trainer","chat",mid,{"question_id":qid,"mode":"text"},
+                                            {"reply":submitted}),"pending")
+            request = views.worker.request
+
+            def lose_answer_ack(method,path,*args,**kwargs):
+                result = request(method,path,*args,**kwargs)
+                if path=="worker/trainer-answer":
+                    raise ConnectionError("The Worker saved the native proof but the platform lost the reply")
+                return result
+
+            with patch.object(views.worker,"request",side_effect=lose_answer_ack):
+                actions.flush()
+            self.assertEqual(len(closes),1)
+        pending,seal,missing = audit(self.sources,"lost-trainer-answer-receipt")
+        self.assertTrue(missing["needs_review"])
+        received = missing["workers"][0]["feishu_receipts"]
+        self.assertEqual(received["trainer_answers"]["awaiting_platform_commit"],1)
+        self.assertIn({"code":"platform_trainer_answer_receipt_pending","question_id":qid},received["issues"])
+
+        restored = restore(pending,seal,self.dest)
+        self.clock.advance(16)
+        with self.stack(restored,pin_session=True) as (_m,_worker,_source,_mail,inbound,views):
+            Actions(views,inbound).flush()
+            self.assertEqual(views.poll(),1)
+            self.assertEqual(views.poll(),0)
+        self.assertEqual(len(closes),1)
+        self.assertEqual(self.platform.calls,[*sends,("patch",mid)])
+        ready,digest,settled = audit(restored,"confirmed-trainer-answer")
+        self.assertFalse(settled["needs_review"],settled)
+        self.assertEqual(settled["workers"][0]["feishu_receipts"]["trainer_answers"]["confirmed"],1)
+
+        for role,change in (
+            ("feishu","UPDATE card_answers SET mid='om_different_card'"),
+            ("feishu","UPDATE card_answers SET answer=json_set(answer,'$.text','other')"),
+            ("feishu","UPDATE question_cards SET question=json_set(question,'$.turn_id','different-turn')"),
+            ("worker","UPDATE trainer_questions SET proof=NULL"),
+            ("worker","UPDATE trainer_questions SET proof=json_set(proof,'$.turn_id','different-turn')"),
+        ):
+            with self.subTest(change=change):
+                use = self.root/("tampered-state-"+guid())
+                bad = restore(ready,digest,use)
+                with closing(sqlite3.connect(bad[role+":oguri"])) as db,db:
+                    db.execute(change)
+                snapshot,bad_seal,result = audit(bad,"tampered-snapshot-"+guid())
+                self.assertTrue(result["needs_review"])
+                self.assertIn({"code":"platform_trainer_answer_receipt_mismatch","question_id":qid},
+                              result["workers"][0]["feishu_receipts"]["issues"])
+                with self.assertRaisesRegex(ValueError,"platform_trainer_answer_receipt_mismatch"):
+                    stage_native_handoff(snapshot,bad_seal,"oguri",self.native.session,"next-session",use/"published")
+
+        with self.stack(restored,pin_session=True) as (_m,worker,_source,_mail,inbound,views):
+            other = dict(original,turn_id="ended-question-turn")
+            ended = user_questions.open_native(worker,other)["question_id"]
+            views.poll()
+            with views.db.transaction() as db:
+                other_mid, = db.execute("SELECT mid FROM question_cards WHERE qid=?",(ended,)).fetchone()
+            actions = Actions(views,inbound)
+            self.assertEqual(actions.record("app","trainer","chat",other_mid,{"question_id":ended,"mode":"skip"},None),
+                             "pending")
+            scope = {k:other[k] for k in ("session","turn_id","native_question_id")}
+            user_questions.observe_proof(worker,{"question_id":ended,"proof":{
+                **scope,"receipt_id":guid(),"answer":None,"closed":True,"state":"ended_unanswered"}})
+            actions.flush()
+            views.poll()
+        self.assertEqual(len(closes),1)
+        _,_,ended_snapshot = audit(restored,"closed-without-trainer-answer")
+        self.assertFalse(ended_snapshot["needs_review"],ended_snapshot)
+        self.assertEqual(ended_snapshot["workers"][0]["feishu_receipts"]["trainer_answers"]["rejected"],1)
 
     def test_handoff_refuses_codex_approval_never_registered_with_router(self):
         session = self.native.session
