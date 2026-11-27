@@ -618,6 +618,8 @@ python3 -B -m rewrite.release_check --repository . --component assignment-rollou
 
 先核同一工单和派发的 W04、Worker 持单、副本中通知和平台游标、来源实例及附件摘要，再重放同号请求。确认这些记录保持一致后，补跑一条新私聊和原正式成果的人工验收入口。前一发行包要能继续写入新版所需记录，已有数据可读只满足一部分条件。
 
+`audit-handoff` 的 `report_receipts` 会对账完成或受阻的 W04。核对 Worker 待发箱、Router 原幂等请求及回执、对应的成果或受阻条目、附件关联、分块字节和读取授权。工单后来已验收或离开无法完成池时，仍查原派发的留档。已确认 W04 只缺 Worker 回执时计为 `awaiting_worker_commit`，从原绑定副本按原请求号查回。Router 与 Worker 任一侧缺记录或两侧不符时保留待核。无正文和文件名写入对账输出。继续请求与取消清理分别沿用原有审核。
+
 ```sh
 python3 -B -m rewrite.release_check --repository . --component state-bundle \
   --previous 35ba22f66e3017a1756b8645f3b88d091b3ff6f8 \

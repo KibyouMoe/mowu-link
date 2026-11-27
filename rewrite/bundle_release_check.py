@@ -33,11 +33,29 @@ CHAT = {"chat_type":"p2p","chat_id":"test-chat","message_id":"om_bundle_trial","
 SUMMARY = "Result written during the release trial."
 REPLY = "Private reply during the release trial."
 PAYLOAD = bytes(range(256))*1300
+REPORT_FILE = b"Formal result fixture\n"*20_000
 
 
 def check(condition, message):
     if not condition:
         raise RuntimeError(message)
+
+
+def stage_report_file(worker):
+    upload = worker.router.request("POST","uploads",{"name":"report-result.txt","size_bytes":len(REPORT_FILE),
+        "sha256":hashlib.sha256(REPORT_FILE).hexdigest()},guid())
+    path = "uploads/"+upload["upload_id"]
+    for offset in range(0,len(REPORT_FILE),256*1024):
+        result = worker.router.request("PATCH",path,REPORT_FILE[offset:offset+256*1024],
+                                       headers={"Upload-Offset":str(offset)})
+    return result["attachment_id"]
+
+
+def report_file_proof(manager,details,artifact_id):
+    check(details["last_report"]["artifact_ids"]==[artifact_id],"report attachment identity changed")
+    content = manager.router.request("GET","attachments/"+artifact_id)["bytes"]
+    check(content==REPORT_FILE,"former release could not read the formal report attachment")
+    return {"attachment_id":artifact_id,"size_bytes":len(content),"sha256":hashlib.sha256(content).hexdigest()}
 
 
 def private_reply_id(views, message_id, chat):
@@ -107,7 +125,8 @@ def create_trial_writes(system, baseline, fixtures):
     assignment = job["assignment_id"]
     check(job["task_id"]==task_id and worker.hold()["held_assignment_id"]==assignment,
           "assigned input or Worker hold does not match the original task")
-    args = {"task_id":task_id,"assignment_id":assignment,"summary":SUMMARY}
+    artifact_id = stage_report_file(worker)
+    args = {"task_id":task_id,"assignment_id":assignment,"summary":SUMMARY,"artifact_ids":[artifact_id]}
     chat = inbox.deliver(inbox.record("app","user","trainer",CHAT))
     denied = agent_report(worker,chat["native_id"],args)
     check(denied["isError"] and denied["content"][0]["text"]=="wrong_report_origin",
@@ -121,11 +140,14 @@ def create_trial_writes(system, baseline, fixtures):
           "formal report did not release the original assignment")
     pending = manager.inspect(task_id)
     check(pending["task"]["state"]=="completed_reported","report did not stop at acceptance")
+    formal_file = report_file_proof(manager,pending,artifact_id)
     manager.poll()
     clock.advance(10)
     manager.poll()
     (notice, manager_receipt), = operator.entries()
-    check(notice["task_id"]==task_id and notice["level"]=="Notify","manager did not receive the formal report notice")
+    check(notice["task_id"]==task_id and notice["level"]=="Notify"
+          and manager_receipt.get("media_sha256")==[formal_file["sha256"]],
+          "manager did not receive the formal report notice and its original file")
 
     attachment = fixtures/"source.bin"
     attachment.write_bytes(PAYLOAD)
@@ -138,13 +160,18 @@ def create_trial_writes(system, baseline, fixtures):
     (fixtures/"feishu.json").write_text(encode(platform.messages),encoding="utf-8")
     return {"task_id":task_id,"assignment_id":assignment,"manager_notice":manager_receipt,"native_input":delivery,
             "chat_receipt":chat,"feishu_reply_id":reply_id,"w04":report_receipt,"task_readback":pending,
-            "source_instance_id":source.instance_id,"source_receipt":source_receipt,"attachment_id":file_id}
+            "source_instance_id":source.instance_id,"source_receipt":source_receipt,"attachment_id":file_id,
+            "formal_file":formal_file}
 
 
 def verify_trial_writes(system, trial):
     clock, source, source_client, manager, worker, inbox, views, agent, operator, platform = system
     task_id = trial["task_id"]
-    check(manager.inspect(task_id)==trial["task_readback"],"previous release changed the report or task state")
+    details = manager.inspect(task_id)
+    check(details==trial["task_readback"],"previous release changed the report or task state")
+    artifact_id = trial["formal_file"]["attachment_id"]
+    formal_file = report_file_proof(manager,details,artifact_id)
+    check(formal_file==trial["formal_file"],"formal report file proof changed")
     check(source.instance_id==trial["source_instance_id"],"previous release changed the Trigger identity")
     expected = trial["source_receipt"]
     check(source.send(source_client,expected["message_id"])==expected,"previous release changed the T04 receipt")
@@ -159,7 +186,7 @@ def verify_trial_writes(system, trial):
     worker.connect()
     worker.poll()
     retried = agent_report(worker,trial["native_input"]["native_id"],{
-        "task_id":task_id,"assignment_id":trial["assignment_id"],"summary":SUMMARY})
+        "task_id":task_id,"assignment_id":trial["assignment_id"],"summary":SUMMARY,"artifact_ids":[artifact_id]})
     check(not retried["isError"] and json.loads(retried["content"][0]["text"])==trial["w04"],
           "previous release did not return the original W04 receipt")
     check(worker.hold()["held_task_id"] is None and manager.inspect(task_id)==trial["task_readback"],
@@ -190,7 +217,7 @@ def verify_trial_writes(system, trial):
             "task_state_after_acceptance":approved["task"]["state"],
             "followup_chat_receipt":receipt,"followup_reply_id":new_reply,"extra_native_inputs":0,
             "extra_manager_notifications":0,"extra_platform_sends":0,
-            "attachment_sha256":hashlib.sha256(data).hexdigest()}
+            "attachment_sha256":hashlib.sha256(data).hexdigest(),"formal_file":formal_file}
 
 
 def run_stage(phase, directory, fixtures, cert, key, input_json):
@@ -251,6 +278,9 @@ def rehearse_bundle(root,old,new,older,newer,cert,key,env):
     check(source_audit["ready"] and source_audit["sources"][0]["settled"]==1,
           "the stopped trial does not have exactly its original Trigger receipt and attachment")
     (worker,) = audit["workers"]
+    report_audit = worker["report_receipts"]
+    check(report_audit["confirmed"]==1 and report_audit["verified_artifacts"]==1 and not report_audit["issues"],
+          "the stopped trial is missing its original W04 or its formal attachment")
     platform_audit = worker["feishu_receipts"]
     check(platform_audit["confirmed_inputs"]==1 and platform_audit["confirmed_outputs"]>=1,
           "the stopped trial is missing its platform receipts")
@@ -267,7 +297,7 @@ def rehearse_bundle(root,old,new,older,newer,cert,key,env):
     return {"state_bundle_release_cycle":{"starts":[older,newer,older],"components":list(COMPONENTS),
             "executed_at_utc":datetime.now(timezone.utc).isoformat(),"business_clock":"controlled fixture clock",
             "before_upgrade":original,"after_trial":saved,"hermes_transport":audit["hermes"],"trigger_audit":source_audit,
-            "feishu_receipts":platform_audit,
+            "feishu_receipts":platform_audit,"report_receipts":report_audit,
             "original_rollback_rejected":True,
             "candidate_writes":written,"previous_release_readback":observed,
             "scope":"Installed rewrite releases, loopback TLS and SQLite. Agent, native sessions and Feishu are fixtures."}}

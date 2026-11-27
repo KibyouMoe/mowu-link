@@ -11,6 +11,7 @@ import sqlite3
 from tempfile import TemporaryDirectory
 
 from . import admission, delivery, dsh_workspace_audit, feishu_audit, hermes_audit, trigger_audit
+from . import report_audit
 from . import state_bundle_managed as managed
 from .cutover import digest, output_directory, readonly
 from .messages import valid_guid
@@ -567,6 +568,8 @@ def audit_handoff(snapshot,expected,*,dsh_runtimes=None,roster=None):
             session_pending = pending_counts(db,WORKER_NATIVE_PENDING)
             session_pending.update({k:v for k,v in pending_counts(db,WORKER_ADMISSION_PENDING).items() if v is not None})
             transport,problems = worker_delivery_audit(db,router_path,wid,worker_confirmed[wid])
+            reports = report_audit.reconcile(db,router_path,wid)
+            problems.extend(sorted({item["code"] for item in reports["issues"]}))
             if platform_label in labels:
                 unseen,platform_issue = feishu_display_backlog(db,snapshot/filename(platform_label))
                 session_pending["platform_display_unseen"] = unseen
@@ -617,7 +620,7 @@ def audit_handoff(snapshot,expected,*,dsh_runtimes=None,roster=None):
         session_pending["router_admission_handoffs"] = handoffs.get(wid,0)
         workers.append({"worker_id":wid,"worker_assignment":local_ids,"router_assignment":remote_ids,
                         "unconfirmed_reports":pending,"issues":problems,"native_session_pending":session_pending,
-                        "inbox_transport":transport,
+                        "inbox_transport":transport,"report_receipts":reports,
                         "native_session_ledger_clear":not problems and all(count==0 for count in session_pending.values()),
                         **({"feishu_receipts":platform_proof} if platform_proof is not None else {}),
                         **({"dsh_workspace_audit":workspace} if workspace is not None else {})})

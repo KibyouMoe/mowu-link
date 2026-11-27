@@ -668,6 +668,78 @@ class Bundle(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,"duplicate"):
             audit_handoff(self.snapshot,full,roster={**roster,"components":roster["components"]+["worker:oguri"]})
 
+    def test_handoff_reconciles_both_w04_ledgers_and_formal_attachment_bytes(self):
+        content = bytes(range(256))*1300
+        secret_summary = "Private work report for the two-ledger test"
+        with self.stack(self.sources) as (manager,worker,*_):
+            tid = manager.create(guid(),"Formal file","Finish the isolated task","oguri")["task_id"]
+            worker.connect()
+            worker.poll()
+            self.clock.advance(10)
+            worker.poll()
+            worker.poll()
+            aid = worker.hold()["held_assignment_id"]
+            native = self.native.entries()[0][1]["native_id"]
+            upload = worker.router.request("POST","uploads",{"name":"result.bin","size_bytes":len(content),
+                                                  "sha256":hashlib.sha256(content).hexdigest()},guid())
+            for offset in range(0,len(content),256*1024):
+                result = worker.router.request("PATCH","uploads/"+upload["upload_id"],content[offset:offset+256*1024],
+                                               headers={"Upload-Offset":str(offset)})
+            fid = result["attachment_id"]
+            expected = worker.report(native,tid,aid,secret_summary,artifact_ids=[fid])
+            self.assertEqual(manager.router.request("GET","attachments/"+fid)["bytes"],content)
+            pending = manager.inspect(tid)["task"]
+            manager.approve(guid(),tid,pending["revision"])
+            self.assertEqual(manager.inspect(tid)["task"]["state"],"closed")
+
+            blocked = manager.create(guid(),"Blocked task","Explain why","oguri")["task_id"]
+            worker.connect()
+            worker.poll()
+            self.clock.advance(10)
+            worker.poll()
+            worker.poll()
+            blocked_aid = worker.hold()["held_assignment_id"]
+            native_blocked = self.native.entries()[-1][1]["native_id"]
+            self.assertEqual(worker.report(native_blocked,blocked,blocked_aid,"No test input",outcome="blocked")["task_state"],"blocked")
+            self.assertEqual(expected["release_assignment_id"],aid)
+
+        proof = capture(self.sources,self.revision,self.snapshot)["manifest_sha256"]
+        clean = audit_handoff(self.snapshot,proof)
+        self.assertFalse(clean["needs_review"])
+        cases = (
+            ("receipt","worker:oguri","UPDATE outbox SET receipt=json_set(receipt,'$.task_state','closed') WHERE assignment_id=?",
+             (aid,),"report_receipt_mismatch"),
+            ("missing","worker:oguri","DELETE FROM outbox WHERE assignment_id=?",(aid,),"report_worker_outbox_missing"),
+            ("operation","router:main","DELETE FROM operations WHERE key=?",("complete-"+aid,),"report_router_receipt_missing"),
+            ("summary","router:main","UPDATE reports SET summary='different' WHERE assignment_id=?",(aid,),"report_router_result_mismatch"),
+            ("blocked","router:main","UPDATE pool_entries SET reason='different' WHERE assignment_id=?",
+             (blocked_aid,),"report_router_result_mismatch"),
+            ("link","router:main","DELETE FROM business_files WHERE kind='report' AND reference_id=?",
+             (aid,),"report_artifact_links_mismatch"),
+            ("chunks","router:main","UPDATE chunks SET bytes=zeroblob(length(bytes)) WHERE upload_id=? AND start>0",
+             (upload["upload_id"],),"report_artifact_unverified"),
+            ("grant","router:main","DELETE FROM attachment_grants WHERE actor='hermes' AND attachment_id=?",
+             (fid,),"report_artifact_unverified"),
+        )
+        for name,label,sql,parameters,code in cases:
+            with self.subTest(name=name):
+                db_path = self.root/(name+".db")
+                shutil.copyfile(self.sources[label],db_path)
+                with closing(sqlite3.connect(db_path)) as db,db:
+                    self.assertEqual(db.execute(sql,parameters).rowcount,1)
+                snapshot = self.root/name
+                seal = capture({**self.sources,label:db_path},self.revision,snapshot)["manifest_sha256"]
+                audit = audit_handoff(snapshot,seal)
+                self.assertTrue(audit["needs_review"])
+                self.assertIn(code,[issue["issue"] for issue in audit["issues"]])
+                worker_issues = audit["workers"][0]["report_receipts"]["issues"]
+                self.assertIn(code,[issue["code"] for issue in worker_issues])
+                self.assertNotIn(secret_summary,encode(audit))
+        evidence = clean["workers"][0]["report_receipts"]
+        self.assertEqual(evidence["confirmed"],2)
+        self.assertEqual(evidence["verified_artifacts"],1)
+        self.assertEqual(evidence["issues"],[])
+
     def test_feishu_restore_reuses_original_card_and_keeps_known_provider_receipt_after_deadline(self):
         message = {"chat_type":"p2p","chat_id":"chat","message_id":"om_trial_input","message_type":"text",
                    "content":encode({"text":"隔离收件"})}
@@ -887,6 +959,7 @@ class Bundle(unittest.TestCase):
         seen = audit_handoff(self.snapshot,checksum)
         self.assertTrue(seen["needs_review"])
         self.assertEqual([row["issue"] for row in seen["issues"]],["assignment_mismatch","report_receipt_pending"])
+        self.assertEqual(seen["workers"][0]["report_receipts"]["awaiting_worker_commit"],1)
         self.assertNotIn("Private test result",encode(seen))
         self.assertEqual(seen["workers"][0]["worker_assignment"],{"task_id":tid,"assignment_id":aid})
         self.assertIsNone(seen["workers"][0]["router_assignment"])
