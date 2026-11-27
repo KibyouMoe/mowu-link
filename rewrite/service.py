@@ -42,7 +42,7 @@ def connection(path):
 
 
 def server(args):
-    if args.component=="peer-archive":
+    if args.component in ("peer-archive","chat-archive"):
         with ExitStack() as stack:
             serve(args,stack)
         return
@@ -65,7 +65,7 @@ def serve(args,stack):
     identities = private_config(args.identities)
     if not isinstance(identities, dict) or not identities or any(
             not isinstance(k, str) or not k or not isinstance(v,str)
-            or not (args.component=="host-ops" or v == "hermes" or
+            or not (args.component in ("host-ops","chat-archive") or v == "hermes" or
                     (v.startswith(("worker/","trigger/","adapter/","ops/","platform/","approver/","handoff/"))
                      and v.split("/",1)[1]))
             for k,v in identities.items()):
@@ -84,6 +84,9 @@ def serve(args,stack):
         if any(actor!="hermes" and not actor.startswith("worker/") for actor in identities.values()):
             raise ValueError("peer archive identities must match the original participants")
         listener = stack.enter_context(rollback_peers.listen(args.db,args.sha256,identities,address,ctx))
+    elif args.component=="chat-archive":
+        from .legacy_chat import listen
+        listener = stack.enter_context(listen(args.db,args.sha256,args.worker_id,identities,address,ctx))
     elif args.component=="host-ops":
         from .host_ops import listen, manifest
         listener = listen(args.db,manifest(private_config(args.manifest)),identities,address,ctx,stack)
@@ -217,7 +220,7 @@ def main():
 
     parser = argparse.ArgumentParser(description=__doc__)
     apps = parser.add_subparsers(dest="component",required=True)
-    for name in ("router","fixture-adapter","dsh-adapter","codex-adapter","worker","host-ops","peer-archive"):
+    for name in ("router","fixture-adapter","dsh-adapter","codex-adapter","worker","host-ops","peer-archive","chat-archive"):
         component = apps.add_parser(name)
         for flag in ("identities","cert","key","db"):
             component.add_argument("--"+flag,required=True,type=Path)
@@ -225,8 +228,8 @@ def main():
         component.add_argument("--port",type=int,default=0)
         if name not in ("router","host-ops","peer-archive"):
             component.add_argument("--worker-id",required=True)
-        if name=="peer-archive":
-            component.add_argument("--sha256",required=True,help="reviewed digest of the frozen peer archive")
+        if name in ("peer-archive","chat-archive"):
+            component.add_argument("--sha256",required=True,help="reviewed digest of the frozen archive")
         if name=="router":
             component.add_argument("--drain-dispatch",action="store_true",
                                    help="pause new assignment reservations while existing work drains")

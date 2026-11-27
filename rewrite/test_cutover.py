@@ -83,12 +83,14 @@ store._conn.close()
         self.assertEqual((self.restore/"attachments"/self.sha).read_bytes(),(self.attachments/self.sha).read_bytes())
         self.assertEqual(digest(self.legacy),original)
 
-    def test_export_legacy_chat_keeps_original_fields_and_private_scope(self):
-        observed = json.loads(self.old("""
+    def old_chat_sample(self):
+        return json.loads(self.old("""
 from server import RouterServer
 from selftest_router import http
 from threading import Thread
 from time import time
+from datetime import datetime, timezone
+from urllib.parse import urlencode
 from unittest.mock import Mock
 store = RouterStore(sys.argv[1])
 token = "isolated-old-chat"
@@ -111,12 +113,20 @@ with RouterServer(("127.0.0.1",0),store,token,Mock(),Mock()) as server:
         oguri = http("GET",url+"/chat/oguri/messages",token=token)
         other = http("GET",url+"/chat/tamamo/messages",token=token)
         summary = http("GET",url+"/chat/oguri/summary?minutes=60",token=token)
-        print(json.dumps({"written":written,"duplicate":duplicate,"oguri":oguri,"other":other,"summary":summary}))
+        cursor = duplicate[1]["id"]
+        since_iso = datetime.fromtimestamp(now-119.5,timezone.utc).isoformat()
+        queries = ["limit=2",f"since={cursor}&limit=1","direction=out&limit=1",
+                   f"since={now-119.5}",urlencode({"since":since_iso})]
+        pages = {q:http("GET",url+"/chat/oguri/messages?"+q,token=token) for q in queries}
+        print(json.dumps({"written":written,"duplicate":duplicate,"oguri":oguri,"other":other,"summary":summary,"pages":pages}))
     finally:
         server.shutdown()
         thread.join()
 store.close()
 """,self.legacy))
+
+    def test_export_legacy_chat_keeps_original_fields_and_private_scope(self):
+        observed = self.old_chat_sample()
         self.assertTrue(all(status==200 and not row["duplicate"] for status,row in observed["written"]))
         first_id = observed["written"][0][1]["id"]
         self.assertEqual((observed["duplicate"][0],observed["duplicate"][1]["id"],
@@ -153,6 +163,80 @@ store.close()
         with self.assertRaisesRegex(ValueError,"snapshot verification failed"):
             export_chat(self.snapshot,self.root/"rejected","oguri")
         self.assertFalse((self.root/"rejected").exists())
+
+    @unittest.skipUnless(shutil.which("openssl"),"TLS fixture certificate generator unavailable")
+    def test_legacy_chat_archive_preserves_old_queries_without_sharing_the_other_worker(self):
+        from urllib.request import Request, urlopen
+        import ssl
+
+        from .release_check import config, serve
+
+        observed = self.old_chat_sample()
+        source = backup(self.legacy,self.attachments,self.snapshot)
+        package = Path(__file__).resolve().parent.parent
+        archive_dir = self.root/"private-chat"
+        prepared = subprocess.run([sys.executable,"-B","-S","-m","rewrite.cutover","prepare-chat-archive",
+                                   "--snapshot",self.snapshot,"--destination",archive_dir,"--worker","oguri"],
+                                  cwd=package,check=True,capture_output=True,text=True,timeout=15)
+        report = json.loads(prepared.stdout)
+        archive = archive_dir/"chat-history.db"
+        self.assertEqual((report["count"],report["archive_sha256"],report["snapshot_sha256"]),
+                         (3,digest(archive),source["legacy_db_sha256"]))
+        with closing(sqlite3.connect(archive)) as schema:
+            self.assertEqual(schema.execute("SELECT DISTINCT worker FROM messages").fetchall(),[("oguri",)])
+            self.assertNotIn("meta",[col[1] for col in schema.execute("PRAGMA table_info(messages)")])
+        cert,key = self.root/"tls.pem",self.root/"tls.key"
+        subprocess.run(["openssl","req","-x509","-newkey","rsa:2048","-nodes","-days","1","-subj","/CN=localhost",
+                        "-addext","subjectAltName=IP:127.0.0.1","-keyout",key.name,"-out",cert.name],
+                       cwd=self.root,check=True,capture_output=True,timeout=18)
+        token,foreign = guid(),guid()
+        roles = config(self.root,"roles.json",{token:"chat-reader/oguri"})
+        bad_role = config(self.root,"bad-role.json",{foreign:"hermes"})
+        options = ("--worker-id","oguri","--sha256",report["archive_sha256"])
+        for identities,flags,reason in (
+                (bad_role,options,"invalid_chat_archive_scope"),
+                (roles,("--worker-id","oguri","--sha256","0"*64),"SHA-256 mismatch"),
+                (roles,("--worker-id","tamamo","--sha256",report["archive_sha256"]),"invalid_chat_archive_scope")):
+            with self.assertRaisesRegex(RuntimeError,reason):
+                with serve(package,"chat-archive",archive,identities,cert,key,os.environ,flags):
+                    self.fail("invalid archive unexpectedly served")
+        with serve(package,"chat-archive",archive,roles,cert,key,os.environ,options) as url:
+            client = Client(url,token,cert)
+            route = "chat/oguri/messages"
+            self.assertEqual(client.request("GET",route),observed["oguri"][1])
+            for query,(code,old) in observed["pages"].items():
+                self.assertEqual(code,200)
+                self.assertEqual(client.request("GET",route+"?"+query),old)
+            direct = Request(url+"/"+route,headers={"Authorization":"Bearer "+token})
+            with urlopen(direct,timeout=5,context=ssl.create_default_context(cafile=cert)) as response:
+                self.assertEqual(json.load(response),observed["oguri"][1])
+            actual = client.request("GET","chat/oguri/summary?minutes=60")
+            expected = observed["summary"][1].copy()
+            self.assertLess(abs(actual.pop("since")-expected.pop("since")),60)
+            self.assertEqual(actual,expected)
+            empty = client.request("GET","chat/oguri/summary?minutes=1")
+            self.assertEqual((empty["count"],empty["in"],empty["out"],empty["last"]),(0,0,0,None))
+            for other,expected_code in (("chat/tamamo/messages",404),("chat/tamamo/summary",404),
+                                        (route+"?since=nan",422),(route+"?limit=1&limit=2",422)):
+                with self.assertRaises(Fault) as refusal:
+                    client.request("GET",other)
+                self.assertEqual(refusal.exception.status,expected_code)
+            with self.assertRaises(Fault) as refusal:
+                client.with_token(foreign).request("GET",route)
+            self.assertEqual(refusal.exception.status,401)
+            with self.assertRaises(Fault) as refusal:
+                client.request("POST",route,{"text":"should not be written"})
+            self.assertEqual(refusal.exception.status,405)
+        self.assertEqual(digest(archive),report["archive_sha256"])
+        self.assertEqual(digest(self.legacy),source["legacy_db_sha256"])
+        self.assertEqual(digest(self.snapshot/"legacy.db"),source["legacy_db_sha256"])
+        self.assertEqual(sorted(path.name for path in archive_dir.iterdir()),["chat-history.db","manifest.json"])
+        if output := os.environ.get("MOWULINK_LEGACY_CHAT_EVIDENCE"):
+            Path(output).write_text(json.dumps({"archive":report,"original_row_ids":
+                [row["id"] for row in observed["oguri"][1]["messages"]],"matched_query_windows":len(observed["pages"]),
+                "summary_counts":[actual["count"],actual["in"],actual["out"]],"summary_last_id":actual["last"]["id"],
+                "other_worker_http":404,"unregistered_reader_http":401,"write_http":405,"source_unchanged":True,
+                "scope":"Actual legacy Router HTTP, private frozen snapshot, isolated HTTPS archive."},indent=2)+"\n")
 
     def test_old_http_default_order_migrates_with_goal_and_idempotency(self):
         queued_key,archived_key = guid(),guid()
