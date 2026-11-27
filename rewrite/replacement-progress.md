@@ -62,6 +62,10 @@
 
 独立维护服务的重启待核已加回执核对。旧版维护进程冷重开后，待核请求下换一个 UUID 仍会入队。修正后实际隔离 HTTPS 返回 409 并指回原请求。测试以 launchd 真实替换临时进程，再由维护客户端登记已核新代际。记录时进程代际保持一致。再次冷开同号仍可查回，原失败状态保留，随后明确的新请求才另有一次真实重启。观察身份、其他服务身份、旧代际及原进程未退出的反例分别被拒。中断请求用夹具停在原生调用前，维护服务与临时 LaunchAgent 实跑。复跑 `python3 -B -m unittest -v rewrite.test_host_ops`。[实测](evidence/host-ops-restart-reconciliation.json)
 
+重启待核实现 `67761292f889b105bac8c023d40d99d9393e73a8` 的 macOS 安装目录相关 28 项通过，按环境跳过 2 项。Linux arm64 安装包全量通过 226 项、按环境跳过 128 项。Windows 安装组 20 项与 DSH 原生组通过，安装日志确认待核账本两项均通过。347 个发布文件验回一致，包 SHA-256 为 `61d30aa11a929320d4fce728f76cce138ee6b87b435f18bdef5277fd7cf2641a`。另以旧安装包 `9f44d00502b4cdd824fb36c1e8c7b9ec27ffa2f1` 建立已受理账本，新版保留原请求号和待核状态，换号返回 409，夹具原生队列新增为零。[Windows CI](https://github.com/KibyouMoe/mowu-link/actions/runs/45934748021)
+
+同一安装包的 Hermes 原生专项另复验 `a2de7418a3405307f8b3abce01a66d5d71351edc`。Python 3.12 测试环境启动缺 `ruamel.yaml` 和 `python-dotenv`，新旧 MowuLink 都在维护动作前遇到此阻点。使用 Python 3.14 和 Hermes 冻结依赖重跑后，通过网关健康、实际 PID 换代、原回执查回与权限反例。原生 PID 从 28160 变为 28751，原 PID 退出。单独临时 profile 只启用本机 API，两次总体就绪状态均为 `degraded`。[现版网关证据](evidence/hermes-gateway-maintenance-a2de7418.json)
+
 重新取消的 W04 已按具体指令核验。相同 A06 操作键重送保留原回执，自动重试沿用同一清理号。同一派发的下一条显式取消携带新的 `cleanup_id`。Worker 从原生收件识别该号，分别保存等待、清理及 Router 回执。隔离实测第一次迟报、重用旧键、换新键重播旧正文和错号都返回 409。新 W04 落库后故意丢回包，冷启沿原键查回，取消通知一条。复跑 `python3 -B -m unittest -v rewrite.test_cleanup rewrite.test_cutover -k cancel`。[HTTP 与回退实测](evidence/reissued-cancel-w04.json)
 
 用前版 `2490059e42d379183c19b0e82c208f545a3c78ee` 生成的隔离 Router、Worker 和适配器库做了升级。仅一次待确认的旧取消可以正常完成，已经成功的旧回执可沿原键回读。旧版已重复取消而未记录清理号时，拒绝无号回执，须由管理端发新指令。回退核对新指令及 W04 的同一清理号，缺号拒绝发布。[旧库升级](evidence/reissued-cancel-upgrade.json) · [回退演练](evidence/cutover-reviewed-cancel-retry.json)

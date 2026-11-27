@@ -382,7 +382,7 @@ python3 -B -m rewrite.host_ops_cli --connection ./ops-connection.json reconcile 
 
 若读取仍返回 `accepted`，操作尚待确认。网关的 `process_replaced` 回执确认进程换代。独立检查仍要核原 PID 退出、新进程与原生 `gateway.pid` 以及认证健康接口的 PID 一致，并读实际服务状态。测试 profile 的本机 API adapter 已连接，Hermes 总就绪状态为 `degraded`，线上模型与飞书未参与。
 
-用带运行依赖的独立 Python 环境和已固定版本的 Hermes 源码复跑。测试会归档该提交，在临时 profile 启动真实 Hermes 和维护服务，并卸载临时 LaunchAgent。 [网关维护实测](evidence/hermes-gateway-maintenance.json)
+用带运行依赖的独立 Python 环境和已固定版本的 Hermes 源码复跑。 已复验的 Hermes `a2de7418` 使用 Python 3.14 和同提交的冻结依赖。测试会归档该提交，在临时 profile 启动真实 Hermes 和维护服务，并卸载临时 LaunchAgent。 [网关维护实测](evidence/hermes-gateway-maintenance.json)
 
 ```sh
 MOWULINK_HERMES_TEST_PYTHON="$ISOLATED_PYTHON" MOWULINK_HERMES_TEST_SOURCE="$HERMES_REPOSITORY" \
