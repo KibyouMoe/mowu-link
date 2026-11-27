@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 from email.message import EmailMessage
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 import json
@@ -23,8 +24,8 @@ from .feed_return import audit, stage
 from .feeds import Feed, poll_game, poll_mail
 from .legacy_test_fixture import archival_compatibility, source_for
 from .release_check import config
-from .state_bundle import capture
-from .storage import Fault,StateWriterBusy,encode,state_writer
+from .state_bundle import audit_trigger, capture
+from .storage import Fault,StateWriterBusy,encode,guid,state_writer
 from .test_state_bundle import running
 from .trigger import archive_status
 from .wire import route,serve_authenticated
@@ -164,8 +165,69 @@ class Sources(unittest.TestCase):
         context.load_cert_chain(cert,key)
         return cert,context
 
+    @contextmanager
+    def game_watch(self,command,instance,unit=None):
+        if unit is None:
+            process = self.start_watch(command,instance,"mc_chat")
+            try:
+                yield process.pid
+                self.assertIsNone(process.poll())
+            finally:
+                self.stop_watch(process)
+            if os.name=="posix":
+                self.assertEqual(process.returncode,0)
+            return
+
+        log = self.root/"game.stdout"
+        log.write_text("",encoding="utf-8")
+        control = ["/usr/bin/systemctl","--user"]
+        package = Path(__file__).resolve().parents[1]
+        arguments = ["/usr/bin/systemd-run","--user","--quiet","--unit="+unit,
+                     "--property=Type=exec","--property=WorkingDirectory="+str(package),
+                     "--property=TimeoutStopSec=15s","--property=StandardOutput=append:"+str(log),
+                     "--property=StandardError=append:"+str(log),
+                     "--property=ExecStopPost=/usr/bin/printenv SERVICE_RESULT EXIT_CODE EXIT_STATUS","--",*command]
+        started = subprocess.run(arguments,capture_output=True,text=True,timeout=12)
+        self.assertEqual(started.returncode,0,started.stderr)
+        try:
+            def pid():
+                status = subprocess.check_output([*control,"show","--value","--property=MainPID",unit],
+                                                 text=True,timeout=6)
+                return int(status.strip())
+
+            def ready():
+                lines = log.read_text().splitlines()
+                if not lines:
+                    return None
+                self.assertEqual(json.loads(lines[0]),{"component":"trigger","instance_id":instance,
+                                                      "trigger_name":"mc_chat","watch":True})
+                return pid()
+
+            main = self.wait_for(ready)
+            yield main
+            self.assertEqual(pid(),main)
+        finally:
+            subprocess.run([*control,"stop",unit],check=True,capture_output=True,timeout=20)
+        report = log.read_text().splitlines()
+        self.assertEqual(report[-3:],["success","exited","0"],report)
+
+        def unloaded():
+            status = subprocess.run([*control,"show","--value","--property=LoadState",unit],
+                                    capture_output=True,text=True,timeout=6)
+            return status.stdout.strip()=="not-found"
+
+        self.wait_for(unloaded)
+
     @unittest.skipUnless(shutil.which("openssl"),"temporary TLS certificate generator required")
     def test_game_watch_collects_with_router_down_and_replays_t04_after_restart(self):
+        self.game_watch_replay()
+
+    @unittest.skipUnless(sys.platform=="linux" and os.environ.get("MOWULINK_TEST_USER_SYSTEMD")=="1"
+                         and shutil.which("openssl"),"isolated Linux systemd user manager required")
+    def test_systemd_game_watch_stop_snapshot_and_restart(self):
+        self.game_watch_replay("mowulink-trigger-watch-"+guid()+".service")
+
+    def game_watch_replay(self,unit=None):
         hold = Event()
         origin = self.game_server(hold)
         self.addCleanup(hold.set)
@@ -195,36 +257,58 @@ class Sources(unittest.TestCase):
         connect = config(self.root,"watch-router.json",{"url":f"https://127.0.0.1:{router.server_port}",
                                                          "token":token,"ca_file":str(cert)})
         command = self.watch_command("game",settings,connect)
-        process = self.start_watch(command,instance,"mc_chat")
-        self.wait_for(lambda:archive_status(source.db.path)["awaiting_router_receipt"]==2)
-        self.assertIsNone(process.poll())
-        self.assertFalse(hold.is_set())
-        self.assertEqual(self.loop.hermes.messages()["items"],[])
-        original = source.pending()
-        with self.assertRaises(StateWriterBusy),state_writer(source.db.path):
-            self.fail("stopped-state lock was acquired with the watcher running")
         manual = [sys.executable,"-B","-m","rewrite.service","trigger","--db",str(source.db.path),"--name","mc_chat",
                   "send","--connection",str(connect)]
-        for conflict_command in (command,manual):
-            rejected = subprocess.run(conflict_command,capture_output=True,text=True,timeout=10)
-            self.assertEqual((rejected.returncode,rejected.stdout,rejected.stderr),(1,"","state_writer_already_running\n"))
-        ready_for_source.set()
-        self.assertTrue(lost.wait(10))
-        first, = self.loop.hermes.messages()["items"]
-        self.assertEqual(first["message_id"],original[0])
-        self.assertEqual(source.pending(),original)
+        root = self.loop.root
+        ledgers = {"router:main":root/"router.db","worker:oguri":root/"worker.db",
+                   "agent:oguri":root/"agent-adapter.db","hermes:main":root/"hermes-adapter.db",
+                   "trigger:game":source.db.path}
+        revision = os.environ.get("MOWULINK_TEST_RELEASE_REVISION","a"*40)
 
-        self.stop_watch(process)
-        if os.name=="posix":
-            self.assertEqual(process.returncode,0)
+        def snapshot(label):
+            directory = self.root/label
+            seal = capture(ledgers,revision,directory)["manifest_sha256"]
+            return audit_trigger(directory,seal)
+
+        with self.game_watch(command,instance,unit) as original_pid:
+            self.wait_for(lambda:archive_status(source.db.path)["awaiting_router_receipt"]==2)
+            self.assertFalse(hold.is_set())
+            self.assertEqual(self.loop.hermes.messages()["items"],[])
+            original = source.pending()
+            with self.assertRaises(StateWriterBusy),state_writer(source.db.path):
+                self.fail("stopped-state lock was acquired with the watcher running")
+            for conflict_command in (command,manual):
+                rejected = subprocess.run(conflict_command,capture_output=True,text=True,timeout=10)
+                self.assertEqual((rejected.returncode,rejected.stdout,rejected.stderr),
+                                 (1,"","state_writer_already_running\n"))
+            ready_for_source.set()
+            self.assertTrue(lost.wait(10))
+            first, = self.loop.hermes.messages()["items"]
+            self.assertEqual(first["message_id"],original[0])
+            self.assertEqual(source.pending(),original)
+            if unit:
+                with self.assertRaises(StateWriterBusy):
+                    capture(ledgers,revision,self.root/"online")
+                self.assertFalse((self.root/"online").exists())
+
         with state_writer(source.db.path):
             self.assertEqual(source.pending(),original)
+        if unit:
+            before = snapshot("before")
+            self.assertFalse(before["ready"])
+            self.assertEqual({i["message_id"]:i["code"] for i in before["issues"]},
+                             {original[0]:"awaiting_local_receipt",original[1]:"awaiting_router_message"})
         self.head = 16
         ready_for_source.set()
-        recovered = self.start_watch(command,instance,"mc_chat")
-        self.wait_for(lambda:archive_status(source.db.path)["awaiting_router_receipt"]==0)
-        self.wait_for(lambda:len(self.requests)==2)
-        self.assertIsNone(recovered.poll())
+        with self.game_watch(command,instance,unit) as recovered_pid:
+            self.wait_for(lambda:archive_status(source.db.path)["awaiting_router_receipt"]==0)
+            self.wait_for(lambda:len(self.requests)==2)
+        if unit:
+            self.assertNotEqual(original_pid,recovered_pid)
+            after = snapshot("after")
+            self.assertTrue(after["ready"])
+            self.assertEqual(after["sources"],[{"component":"trigger:game","instance_id":instance,
+                                               "archived":2,"settled":2}])
         self.assertFalse(hold.is_set())
         self.assertEqual(self.requests,[("/stream?since=14","14"),("/stream?since=15","15")])
         self.assertEqual([entry[0] for entry in attempts],[original[0],*original])
@@ -235,16 +319,19 @@ class Sources(unittest.TestCase):
         file, = first["attachment_ids"]
         body = self.loop.manager_wire.request("GET","attachments/"+file)["bytes"]
         self.assertEqual(body,event_text.encode())
-        self.stop_watch(recovered)
-        if os.name=="posix":
-            self.assertEqual(recovered.returncode,0)
-        if output := os.environ.get("MOWULINK_GAME_WATCH_EVIDENCE"):
-            Path(output).write_text(encode({"instance_id":instance,"local_message_ids":original,
+        evidence_env = "MOWULINK_SYSTEMD_GAME_WATCH_EVIDENCE" if unit else "MOWULINK_GAME_WATCH_EVIDENCE"
+        if output := os.environ.get(evidence_env):
+            evidence = {"instance_id":instance,"local_message_ids":original,
                 "first_received_at":first["received_at"],"replayed_attachment_id":file,"attachment_bytes":len(body),
                 "post_attempts":attempts,"notifications":1,"router_tls":True,
                 "retained_work_when_router_down":2,"read_while_stream_open":True,
                 "writer_conflicts_refused":2,"source_reconnect":self.requests,
-                "boundary":"Independent Trigger process, SQLite and HTTPS Router; game bridge fixture."})+"\n",encoding="utf-8")
+                "boundary":"Independent Trigger process, SQLite and HTTPS Router; game bridge fixture."}
+            if unit:
+                evidence.update(unit=unit,systemd=subprocess.check_output(["/usr/bin/systemctl","--version"],text=True).splitlines()[0],
+                                main_pids=[original_pid,recovered_pid],normal_systemd_stops=2,online_snapshot_refused=True,
+                                before=before,after=after)
+            Path(output).write_text(encode(evidence)+"\n",encoding="utf-8")
 
     def imap_server(self,mailbox):
         cert,ctx = self.certificate()
