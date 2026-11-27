@@ -247,7 +247,6 @@ python3 -B -m rewrite.cutover stage-reviewed-rollback \
 
 复跑 `python3 -B -m unittest -v rewrite.test_source_rollback`。实跑隔离 Router、旧 Trigger HTTP 和恢复副本。验证一张已验收工单归档、旧订阅 Event 与 Info 的确认、邮件与游戏采集游标推进，以及两条仍待原订阅处理的尾项。实际旧端重放确认返回零新增。宿主、模型、飞书、邮件源和游戏 SSE 源使用夹具。[证据](evidence/source-router-rollback.json)
 
-
 ### 来源回退后再次迁入
 
 同批回退保存 `private-review/source-history.db`。其摘要在私有清单和旧恢复库中各有记录。沿用同一批的旧库与档案，打包之前核对摘要。旧 Router 和旧 Trigger 按原入口运行，档案单独保管。对回退后的旧库重新 `backup`，在隔离端运行原 `prepare` 命令时加上这两个参数：
@@ -265,6 +264,8 @@ python3 -B -m rewrite.cutover stage-reviewed-rollback \
 ### 旧 Worker 的实时订阅
 
 旧 Router 的 `GET /subscriptions?active=1` 用于只读盘点配置。旧 `GET /subscriptions/pending` 会确认已取记录，并推进两边游标。隔离测试只取 HTTP 状态后丢弃响应正文，旧 Router 和实际旧 Trigger 的游标均从 0 到 2，过滤掉的事件也有确认，随后旧队列返回零条。全过程 Worker 连接为零。旧侧确认只能证明上游游标已经走过，宿主是否收到须另查原工位记录。
+
+核对旧 Codex 或 DSH 时，在停写副本中先用旧插件的 `subscriptionMessageId` 从来源名及旧事件序号取回消息号，再查原工位的常驻收件账本或 `receipt-archive/<消息号>.json`。可将原 `origin=subscription`、事件头及正文、目标会话、原生回合号和宿主实际输入逐一对上。只有拉取、飞书提示或收件状态待核时，不能推断宿主已收到。旧插件提交 `f399148df99ed58568f4931aed414e3a83fa7a25` 的两套订阅用例各实跑一遍，同号两次到达只形成一条输入及一张测试提示，均无工单成果。该复验使用旧运行模块、HTTP 与宿主替身，未读取生产工位收件档。复跑该仓的 `node --test --test-name-pattern='subscriptions declare, poll, serialize' Plugins/Codex/tests/router-runtime.test.mjs Plugins/DSH/tests/router-runtime.test.mjs`。
 
 发现活跃的旧 Worker 订阅时，离线准备仍会停在 `active_subscriptions`。先核对原订阅配置、两端游标、过滤项和原宿主收件，再决定沿独立来源把消息交给溪流，或继续保留旧路径。复跑 `python3 -B -m unittest -v rewrite.test_source_rollback -k legacy_worker_subscription`。[旧端读回证据](evidence/legacy-worker-subscription-ack.json)
 
