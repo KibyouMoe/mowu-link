@@ -287,19 +287,20 @@ def queued_candidates(db, delta, legacy_workers, initial_assignments):
             blocked.append({"task_id":tid,"reason":"legacy_description_would_change_or_be_rejected"})
             continue
         item = {"task_id":tid,"assignee_id":row["assignee_id"],"request_id":operation["key"]}
-        if row["revision"]==1:
+        proof = None
+        if portable_request_key(operation["key"]) and first_dispatch(db,tid) is None:
+            proof = rollback_assignment.verify(db,row,operation,None,allow_edit_only=True)
+        if proof:
+            if proof["assignment_request_id"] is not None:
+                item["assignment_request_id"] = proof["assignment_request_id"]
+            initial_assignments[tid] = proof
+        elif row["revision"]==1:
             if not portable_creation(row,operation) or operation["response"]!=encode(dict(row,holder={"kind":"router"})):
                 blocked.append({"task_id":tid,"reason":"creation_receipt_incompatible"})
                 continue
         else:
-            proof = None
-            if portable_request_key(operation["key"]) and first_dispatch(db,tid) is None:
-                proof = rollback_assignment.verify(db,row,operation,None)
-            if not proof:
-                blocked.append({"task_id":tid,"reason":"assignment_or_lifecycle_recorded"})
-                continue
-            item["assignment_request_id"] = proof["assignment_request_id"]
-            initial_assignments[tid] = proof
+            blocked.append({"task_id":tid,"reason":"assignment_or_lifecycle_recorded"})
+            continue
         candidates.append(item)
     queued_operations = len(candidates)+sum(len(proof["events"]) for proof in initial_assignments.values())
     only_queue = (bool(candidates) and not blocked and set(delta)=={"tasks","operations"}
@@ -391,12 +392,14 @@ def archived_new_candidates(db, changes, legacy_workers, original_tasks, initial
         if first:
             accepted.append(encode(dict(original,revision=2,assignment_id=json.loads(first["payload"])["assignment_id"])))
         item = {"task_id":row["task_id"],"assignee_id":original_worker,"request_id":operation["key"]}
-        if not (portable_creation(original,operation) and operation["response"] in accepted):
-            proof = rollback_assignment.verify(db,row,operation,first) if portable_request_key(operation["key"]) else None
-            if not proof or proof["worker_id"]!=original_worker:
+        proof = rollback_assignment.verify(db,row,operation,first) if portable_request_key(operation["key"]) else None
+        if proof:
+            if proof["worker_id"]!=original_worker:
                 continue
             initial_assignments[row["task_id"]] = proof
             item["assignment_request_id"] = proof["assignment_request_id"]
+        elif not (portable_creation(original,operation) and operation["response"] in accepted):
+            continue
         candidates[category].append(item)
         if original_tasks is not None:
             original_tasks[row["task_id"]] = {field:original[field] for field in ("title","instructions")}

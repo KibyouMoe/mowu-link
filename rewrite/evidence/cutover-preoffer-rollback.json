@@ -1,0 +1,43 @@
+{
+  "trial_sha256": "1261516e0187ec3b885034b961e26b5453810c87733693870e65c56f48308d07",
+  "legacy": {
+    "replays": [
+      {
+        "legacy_task_id": "t-c0584c2596",
+        "worker": "two",
+        "status": [
+          202,
+          200
+        ]
+      },
+      {
+        "legacy_task_id": "t-24dd6587e0",
+        "worker": "tama",
+        "status": [
+          202,
+          200
+        ]
+      }
+    ],
+    "head_two": "t-f9919b4dbe",
+    "head_tama": "t-24dd6587e0",
+    "head_oguri": null
+  },
+  "queued_edits": {
+    "task_id": "ba9cf8d5-f79e-4296-8c2c-417a2e273630",
+    "a05_request_id": "28369cf8-e613-4e25-bfdb-762df7161846"
+  },
+  "queued_transfer": {
+    "task_id": "29bcccf3-8401-42bb-a0b3-93efa607ca8a",
+    "a06_request_id": "f503338c-034b-46cf-9b08-a2361c296ba1"
+  },
+  "closed": {
+    "task_id": "6c776c3a-2434-4532-9e77-94ce70fdd295",
+    "assignment_id": "584db025-c116-44d5-b58a-1641285fcf8a",
+    "legacy_task_id": "t-8277781df1",
+    "a06_request_id": "9cc48c9e-85ec-4231-a26d-fc6a7bd14200",
+    "w04_key": "complete-584db025-c116-44d5-b58a-1641285fcf8a"
+  },
+  "mismatched_transfer_receipt_rejected": true,
+  "boundary": "Isolated rewrite and legacy HTTP and SQLite; host and clock use fixtures."
+}

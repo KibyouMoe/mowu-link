@@ -3286,6 +3286,122 @@ store.close()
                 "boundary":"Actual legacy and rewrite HTTP and SQLite. Scripted Worker Agent and clock."},
                 ensure_ascii=False,indent=2)+"\n")
 
+    def test_preoffer_edits_and_transfers_keep_only_the_final_queued_owner(self):
+        self.old("""
+store = RouterStore(sys.argv[1])
+for worker in ("two","oguri","tama"):
+    store.upsert_worker(worker)
+store.close()
+""",self.legacy)
+        backup(self.legacy,self.attachments,self.snapshot)
+        prepare(self.snapshot,self.trial,self.source_id)
+        clock = Clock()
+        loop = Loop(self.trial,clock,FixtureHost)
+        original_keys = [guid() for _ in range(3)]
+        with loop.server:
+            loop.thread.start()
+            try:
+                edited,moved,completed = [loop.hermes.create(key,title,"原始指令","two")
+                    for key,title in zip(original_keys,("排队修订","排队转派","首次派发前转派"))]
+                edit_id,move_id,done_id = [item["task_id"] for item in (edited,moved,completed)]
+                edit_key,move_key,done_key = guid(),guid(),guid()
+                loop.hermes.update(edit_key,edit_id,edited["revision"],{"instructions":"最新指令"})
+                decision = loop.hermes.act(move_key,move_id,moved["revision"],"transfer",
+                                           worker_id="tama",reason="首个工位还未收件")["task"]
+                self.assertIsNone(decision["assignment_id"])
+                loop.worker.connect()
+                loop.worker.poll()
+                clock.advance(10)
+                loop.worker.poll()
+                clock.advance(1)
+                loop.worker.poll()
+                ref = loop.hermes.act(done_key,done_id,completed["revision"],"transfer",
+                                      worker_id="oguri",reason="只发给最终工位")["task"]
+                self.assertIsNotNone(ref["assignment_id"])
+                loop.worker.poll()
+                aid = loop.worker.hold()["held_assignment_id"]
+                self.assertEqual(aid,ref["assignment_id"])
+                payload,receipt = loop.native.entries()[0]
+                self.assertEqual(payload["task_id"],done_id)
+                report = agent_report(loop.worker,receipt["native_id"],{"task_id":done_id,"assignment_id":aid,
+                                      "summary":"替换后归档","artifact_ids":[]})
+                self.assertFalse(report["isError"],report)
+                state = loop.hermes.inspect(done_id)["task"]
+                self.assertEqual(loop.hermes.approve(guid(),done_id,state["revision"])["task"]["state"],"closed")
+                loop.hermes.poll()
+            finally:
+                loop.server.shutdown()
+                loop.thread.join()
+        facts = reconcile(self.snapshot,self.trial)
+        self.assertEqual(facts["blocked_new_tasks"],[])
+        self.assertEqual([(r["task_id"],r["assignee_id"],r.get("assignment_request_id")) for r in facts["queue_candidates"]],
+                         [(edit_id,"two",None),(move_id,"tama",move_key)])
+        self.assertEqual([(r["task_id"],r["assignee_id"],r["assignment_request_id"]) for r in facts["closed_new_tasks"]],
+                         [(done_id,"oguri",done_key)])
+        review = self.root/"preoffer-review.json"
+        approval = {"trial_sha256":facts["trial_sha256"],"closed_assignments":{done_id:aid},
+                    "execution_modes":{edit_id:"goal",move_id:"goal"}}
+        review.write_text(json.dumps(approval))
+        staged = stage_reviewed_rollback(self.snapshot,self.trial,review,self.restore)
+        self.assertEqual((staged["reviewed_orders"],staged["queued_requests"]),(1,2))
+        plan = json.loads((self.restore/"queue-replay.json").read_text())["requests"]
+        self.assertEqual([(p["request"]["worker"],p["request"]["goal"]) for p in plan],
+                         [("two","最新指令"),("tama","原始指令")])
+        archive = json.loads((self.restore/"private-review/manifest.json").read_text())["orders"][done_id]
+        self.assertEqual((archive["original_worker"],archive["initial_assignment"]["assignment_request_id"]),
+                         ("oguri",done_key))
+        self.assertNotEqual(archive["legacy_creation_request"]["message_id"],original_keys[2])
+        observed = json.loads(self.old("""
+from server import RouterServer
+from selftest_router import http
+from threading import Thread
+from unittest.mock import Mock
+store = RouterStore(sys.argv[1])
+queue = json.loads(sys.argv[2])
+assert store.orders.next_dispatch("tama") is None
+rows = []
+with RouterServer(("127.0.0.1",0),store,"fixture-token",Mock(),Mock()) as srv:
+    thread = Thread(target=srv.serve_forever,kwargs={"poll_interval":.02})
+    thread.start()
+    try:
+        url = f"http://127.0.0.1:{srv.server_port}/tasks"
+        for request in queue:
+            first,created = http("POST",url,request,"fixture-token")
+            retry,duplicate = http("POST",url,request,"fixture-token")
+            assert (first,retry)==(202,200) and duplicate["task_id"]==created["task_id"]
+            rows.append({"legacy_task_id":created["task_id"],"worker":request["worker"],"status":[first,retry]})
+        status,read = http("GET",url+"/"+sys.argv[3],token="fixture-token")
+        assert status==200 and read["task"]["archive"]["reason"]=="reviewed_on_rewrite"
+        assert read["task"]["task_info"]["TaskOwner"]=="oguri" and not read["task"]["in_running_tasks"]
+        print(json.dumps({"replays":rows,"head_two":store.orders.next_dispatch("two"),
+                          "head_tama":store.orders.next_dispatch("tama"),"head_oguri":store.orders.next_dispatch("oguri")}))
+    finally:
+        srv.shutdown()
+        thread.join()
+store.close()
+""",self.restore/"legacy.db",json.dumps([item["request"] for item in plan]),archive["legacy_task_id"]))
+        self.assertEqual((observed["head_two"],observed["head_tama"],observed["head_oguri"]),
+                         (self.queued,observed["replays"][1]["legacy_task_id"],None))
+        corrupt = self.root/"corrupt-transfer"
+        shutil.copytree(self.trial,corrupt)
+        with closing(sqlite3.connect(corrupt/"router.db")) as db, db:
+            db.execute("UPDATE operations SET response=json_set(response,'$.task.assignee_id','two') WHERE key=?",
+                       (move_key,))
+        approval["trial_sha256"] = digest(corrupt/"router.db")
+        review.write_text(json.dumps(approval))
+        with self.assertRaises(ValueError):
+            stage_reviewed_rollback(self.snapshot,corrupt,review,self.root/"refused-transfer")
+        self.assertFalse((self.root/"refused-transfer").exists())
+        if output := os.environ.get("MOWULINK_PREOFFER_ROLLBACK_EVIDENCE"):
+            Path(output).write_text(json.dumps({"trial_sha256":facts["trial_sha256"],"legacy":observed,
+                "queued_edits":{"task_id":edit_id,"a05_request_id":edit_key},
+                "queued_transfer":{"task_id":move_id,"a06_request_id":move_key},
+                "closed":{"task_id":done_id,"assignment_id":aid,"legacy_task_id":archive["legacy_task_id"],
+                          "a06_request_id":done_key,"w04_key":archive["w04_key"]},
+                "mismatched_transfer_receipt_rejected":True,
+                "boundary":"Isolated rewrite and legacy HTTP and SQLite; host and clock use fixtures."},
+                ensure_ascii=False,indent=2)+"\n")
+
     def test_archived_peer_threads_files_and_permissions_survive_without_replay(self):
         first,reply,root_msg = guid(),guid(),guid()
         sample = "原样保留🟣"*13000

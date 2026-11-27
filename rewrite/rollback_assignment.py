@@ -1,4 +1,4 @@
-"""Verify the manager's first assignment of a trial order created without a worker."""
+"""Verify the manager's revisions and assignment decisions before the first offer."""
 import hashlib
 import json
 
@@ -10,24 +10,44 @@ def nonblank(value):
     return isinstance(value,str) and bool(value.strip())
 
 
-def unassigned_creation(tid, operation):
+def initial_creation(tid, operation):
     request = json.loads(operation["request"])
-    (_,path),body = request
+    (method,path),body = request
     if not isinstance(body,dict):
         return None
     content = {key:body.get(key) for key in ("title","instructions")}
-    initial = dict(content,task_id=tid,state="ready",revision=1,assignee_id=None,assignment_id=None,
+    owner = body.get("assignee_id")
+    initial = dict(content,task_id=tid,state="ready",revision=1,assignee_id=owner,assignment_id=None,
                    holder={"kind":"router"})
-    if (path!="/v1/tasks" or not all(map(nonblank,content.values()))
-            or body not in (content,dict(content,assignee_id=None))
+    expected = dict(content,assignee_id=owner) if "assignee_id" in body else content
+    if (method!="POST" or path!="/v1/tasks" or not all(map(nonblank,content.values()))
+            or (owner is not None and not nonblank(owner)) or body!=expected
             or encode(request)!=operation["request"] or encode(initial)!=operation["response"]):
         return None
     return initial
 
 
-def verify(db, row, creation, first_offer):
+def revise_assignment(current, body):
+    action,worker = body.get("action"),body.get("worker_id")
+    former = current["assignee_id"]
+    revision = current["revision"]
+    if not nonblank(worker) or type(body.get("expected_revision")) is not int:
+        return None
+    expected = {"action":action,"expected_revision":revision,"worker_id":worker}
+    if action=="transfer":
+        if worker==former or not nonblank(body.get("reason")):
+            return None
+        expected["reason"] = body["reason"]
+    elif former not in (None,worker):
+        return None
+    if body!=expected:
+        return None
+    return dict(current,assignee_id=worker,revision=revision+(worker!=former))
+
+
+def verify(db, row, creation, first_offer, *, allow_edit_only=False):
     tid = row["task_id"]
-    current = unassigned_creation(tid,creation)
+    current = initial_creation(tid,creation)
     if current is None:
         return None
     offered = json.loads(first_offer["payload"]) if first_offer else None
@@ -37,7 +57,7 @@ def verify(db, row, creation, first_offer):
     final_revision = offered["revision"]-1 if offered else row["revision"]-(row["state"]=="cancelled")
     base = f"/v1/tasks/{tid}"
     events = []
-    first_assignment = None
+    assignment_request = None
     for event in db.execute("""SELECT rowid AS seq,actor,key,request,response FROM main.operations
         WHERE rowid>?
         AND (json_extract(request,'$[0][1]')=? OR json_extract(request,'$[0][1]') GLOB ?)
@@ -46,14 +66,11 @@ def verify(db, row, creation, first_offer):
         if not isinstance(body,dict):
             return None
         revision = current["revision"]
-        if (path.endswith("/actions") and body.get("action")=="assign"
+        if (path==base+"/actions" and body.get("action") in ("assign","transfer")
                 and type(body.get("expected_revision")) is int and body["expected_revision"]==revision):
-            worker = body.get("worker_id")
-            if (method!="POST" or event["actor"]!="hermes" or not nonblank(worker)
-                    or current["assignee_id"] not in (None,worker)
-                    or body!={"action":"assign","expected_revision":revision,"worker_id":worker}):
+            revised = revise_assignment(current,body)
+            if method!="POST" or event["actor"]!="hermes" or revised is None:
                 return None
-            revised = dict(current,assignee_id=worker,revision=revision+(current["assignee_id"] is None))
             replies = [{"task":revised,"delivery_state":"pending"}]
             immediate = offered and revised["revision"]==final_revision
             if immediate:
@@ -61,8 +78,8 @@ def verify(db, row, creation, first_offer):
                                             assignment_id=offered["assignment_id"]),"delivery_state":"pending"})
             if event["response"] not in map(encode,replies):
                 return None
-            if first_assignment is None:
-                first_assignment = event["key"]
+            if assignment_request is None or revised["assignee_id"]!=current["assignee_id"]:
+                assignment_request = event["key"]
         elif path==base and method=="PATCH" and revision<final_revision:
             changes = body.get("changes")
             if (event["actor"]!="hermes" or not isinstance(changes,dict) or not changes
@@ -81,7 +98,8 @@ def verify(db, row, creation, first_offer):
         current = revised
         if json.loads(event["response"]).get("task",{}).get("assignment_id"):
             break
-    if not current["assignee_id"] or current["revision"]!=final_revision:
+    if (not current["assignee_id"] or current["revision"]!=final_revision or not events
+            or (assignment_request is None and not allow_edit_only)):
         return None
     content = {key:current[key] for key in ("title","instructions")}
     if offered:
@@ -93,4 +111,4 @@ def verify(db, row, creation, first_offer):
         return None
     return {"original_creation":dict(creation),"original_request_sha256":hashlib.sha256(creation["request"].encode()).hexdigest(),
             "worker_id":current["assignee_id"],"content":content,"ready_revision":final_revision,
-            "assignment_request_id":first_assignment,"events":events}
+            "assignment_request_id":assignment_request,"events":events}
