@@ -74,6 +74,7 @@ jobs:
             $env:MOWULINK_WINDOWS_ROUTER_RELEASE_EVIDENCE = Join-Path $dir.FullName 'windows-scm-release.json'
             Push-Location -LiteralPath $installed
             try {
+              if (-not (Get-Command node -ErrorAction SilentlyContinue)) { throw 'Node required for workspace engine regression' }
               $tests = @(
                 'rewrite.test_service.Service.test_daemon_rejects_second_writer_and_cold_restart_recovers_same_state'
                 'rewrite.test_service.Service.test_cli_tls_restart_preserves_identity_file_and_receipts'
@@ -84,6 +85,7 @@ jobs:
                 'rewrite.test_state_bundle.Bundle.test_prepare_worker_chat_archive_after_both_receipts_recover'
                 'rewrite.test_state_bundle.Bundle.test_offline_handoff_and_rollback_reserve_the_codex_workspace_writer'
                 'rewrite.test_state_bundle.Bundle.test_workspace_audit_checks_private_file_and_original_journal_identity'
+                'rewrite.test_workspace_engine.WindowsWorkspaceEngine'
                 'rewrite.test_peers.Peers.test_original_reply_link_and_formal_isolation'
                 'rewrite.test_feeds.Sources.test_game_real_stream_reconnect_source_replay_and_new_epoch'
                 'rewrite.test_feeds.Sources.test_archive_failure_cannot_advance_cursor_and_stale_reader_cannot_skip_event'

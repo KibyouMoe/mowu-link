@@ -1,13 +1,11 @@
-import {execFile} from 'node:child_process';
 import {createHash, randomUUID} from 'node:crypto';
 import {closeSync, constants, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync,
   readFileSync, readdirSync, renameSync, writeFileSync} from 'node:fs';
 import path from 'node:path';
-import {promisify} from 'node:util';
 import {guid} from './session-preparation.mjs';
+import {workspaceEngine} from './workspace-engine.mjs';
 import {maximumSeedBytes, seedProject, workspaceSeed} from './workspace-seed.mjs';
 
-const exec = promisify(execFile);
 const LABEL = 'io.mowulink.assignment';
 const PROCESS_LIMIT = 64;
 const MEMORY_LIMIT = 256 * 1024 * 1024;
@@ -93,39 +91,18 @@ function writeRecord(filename,value) {
 
 export function assignmentContainers(runtime,session,config) {
   const {docker,socket,image,execute_workspace_files=false} = config;
-  check(typeof docker==='string' && path.isAbsolute(docker)
-    && typeof socket==='string' && path.isAbsolute(socket) && lstatSync(socket).isSocket()
-    && typeof image==='string' && /^sha256:[a-f0-9]{64}$/.test(image)
+  check(typeof image==='string' && /^sha256:[a-f0-9]{64}$/.test(image)
     && typeof execute_workspace_files==='boolean','invalid_assignment_container');
   const seed = workspaceSeed(config.seed);
   const directory = path.join(runtime,'assignment-containers');
   const cliConfig = path.join(directory,'docker-config');
+  const {invoke,daemon} = workspaceEngine(docker,socket,cliConfig);
   privateDirectory(directory);
   privateDirectory(cliConfig);
 
   const locks = new Map();
   const filename = aid=>path.join(directory,hash([session,aid])+'.json');
   const save = entry=>writeRecord(filename(entry.assignment_id),entry);
-  function invoke(args,{stdin,...options}={}) {
-    const result = exec(docker,['--config',cliConfig,'--host','unix://'+socket,...args],{
-      cwd:directory,env:{PATH:'/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin'},timeout:7000,
-      maxBuffer:131072,...options,
-    });
-    if (stdin!==undefined) {
-      // A closed CLI confirms nothing. The container initializer checks all stdin before publishing.
-      result.child.stdin.on('error',()=>{});
-      result.child.stdin.end(stdin);
-    }
-    return result;
-  }
-
-  async function daemon() {
-    const {stdout} = await invoke(['info','--format','{{.OSType}} {{.ID}}']);
-    const id = /^linux ([a-zA-Z0-9:-]+)$/.exec(stdout.trim())?.[1];
-    check(id);
-    return id;
-  }
-
   async function scope(tid,aid) {
     check(guid(tid) && guid(aid));
     const owner = await daemon();
@@ -157,7 +134,7 @@ export function assignmentContainers(runtime,session,config) {
   async function owned(record) {
     const {stdout} = await invoke(['container','ls','--all','--no-trunc','--filter',
       'label='+LABEL+'='+record.token,'--format','{{.ID}}']);
-    const ids = stdout.trim().split('\n').filter(Boolean);
+    const ids = stdout.trim().split(/\r?\n/).filter(Boolean);
     if (!ids.length) return null;
     check(ids.length===1 && containerID(ids[0]) && (!record.container_id || record.container_id===ids[0]));
     const listing = await invoke(['container','inspect',ids[0]]);
