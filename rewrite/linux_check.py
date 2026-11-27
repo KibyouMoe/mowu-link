@@ -132,7 +132,9 @@ def run(repository, revision, image, socket):
                               "server/router/server.py","server/router/attachments.py","server/router/task_lifecycle.py",
                               "server/router/summary_requests.py","server/router/selftest_router.py",
                               "server/router/stream_fixture.py","server/router/config/router-lifecycle.json",
-                              "server/trigger/server.py","server/trigger/buscore.py"])
+                              "server/trigger/server.py","server/trigger/buscore.py",
+                              "server/trigger/clients/mc_chat_client.py","server/trigger/clients/filterwall.py",
+                              "server/trigger/clients/localbus.py","sources/email/client.py"])
         net = communicate([*docker,"network","create","--opt","com.docker.network.bridge.enable_ip_masquerade=false",
                            "mowulink-test-"+uuid.uuid4().hex]).decode().strip()
         cleanup.callback(communicate,[*docker,"network","rm",net])
