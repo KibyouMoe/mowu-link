@@ -1,0 +1,97 @@
+{
+  "installed_release": {
+    "files": 411,
+    "revision": "7cd6c9a9ef28687af48229cc7a1d8110f6d18c8b",
+    "sha256": "cafee68a800cb1ad6c87c2fd1effd6bee1e349ec780e616a367327147dedb8a7",
+    "platform": "Darwin arm64",
+    "passed": 42,
+    "skipped": [
+      "Windows ACL"
+    ],
+    "native_trials": 20
+  },
+  "sample": {
+    "assignment_id": "908b49ee-8ec4-443f-9136-5fbcc37c508b",
+    "boundary": "Native isolated App Server and its stdio MCP subprocess. Scripted local model; no Desktop GUI or live account.",
+    "disconnected_approval": {
+      "additional_notices": 0,
+      "assignment_id": "e31fd724-df8d-45da-9ba3-307694b3af3a",
+      "mcp_calls_after_reopen": 0,
+      "native_turn_status_after_reopen": "interrupted",
+      "original_input": {
+        "delivery_id": "488597c6-adce-4df5-8ef3-bf87ec12c352",
+        "digest": "423ba1685a26a7f2b48b442c2fec26524d951d57ba7717b4a464aba2eacad9e7",
+        "native_id": "01a21cec-ccdd-7db0-9dbe-44f8893fc171",
+        "session": "01a21cec-cc0f-7ae1-a762-ec2f12fad24a",
+        "turn_id": "01a21cec-ccd9-7bc1-81ba-b8a4ea93f9f1"
+      },
+      "request_id": 4,
+      "state": "working",
+      "task_id": "92bf23ee-cd93-4e19-9d8d-e1d421ce3a99"
+    },
+    "formal_calls": [
+      "mcp-formal-report-1",
+      "mcp-formal-report-2"
+    ],
+    "host_version": "0.171.0-alpha.13.2",
+    "native_approvals": [
+      {
+        "action": "decline",
+        "mcp_calls_before": 0,
+        "request_id": 0,
+        "turn_id": "01a21cec-cc50-7fb1-b949-9aaf4e05700c"
+      },
+      {
+        "action": "accept",
+        "mcp_calls_before": 0,
+        "request_id": 1,
+        "turn_id": "01a21cec-cc50-7fb1-b949-9aaf4e05700c"
+      },
+      {
+        "action": "accept",
+        "mcp_calls_before": 1,
+        "request_id": 2,
+        "turn_id": "01a21cec-cc50-7fb1-b949-9aaf4e05700c"
+      },
+      {
+        "action": "accept",
+        "mcp_calls_before": 2,
+        "request_id": 3,
+        "turn_id": "01a21cec-cc84-7b32-b05a-1f2591361012"
+      }
+    ],
+    "native_mcp_methods": [
+      "initialize",
+      "tools/list",
+      "initialize",
+      "tools/list",
+      "tools/call",
+      "tools/call",
+      "tools/call"
+    ],
+    "native_resolution_ids": [
+      0,
+      1,
+      2,
+      3
+    ],
+    "notices": 1,
+    "original_input": {
+      "delivery_id": "bffa0f1a-3563-4601-9de0-37f78410b65c",
+      "digest": "65ac8ba965e153f7085b4175c976a90300511245154d2a4aa6a0fc1681027ce3",
+      "native_id": "01a21cec-cc59-7473-9a5c-aeb4868de23b",
+      "session": "01a21cec-cc0f-7ae1-a762-ec2f12fad24a",
+      "turn_id": "01a21cec-cc50-7fb1-b949-9aaf4e05700c"
+    },
+    "private_call_rejected": true,
+    "receipt": {
+      "recorded": true,
+      "release_assignment_id": "908b49ee-8ec4-443f-9136-5fbcc37c508b",
+      "task_state": "completed_reported"
+    },
+    "router_state": "completed_reported",
+    "task_id": "c647ab1a-6f06-4d8c-9467-dd03310a9034",
+    "thread_id": "01a21cec-cc0f-7ae1-a762-ec2f12fad24a"
+  },
+  "boundary": "Isolated native Codex App Server, MCP subprocess, Worker and Router. A local test client sends the decline and single-use grants, and a scripted loopback model emits tool calls. No Router approval relay, real approval operator, GUI, live account, or production services."
+}

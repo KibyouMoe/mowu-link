@@ -6,6 +6,10 @@
 
 ## 检查点与证据
 
+独立 Codex App Server 的 MCP 提审已补拒绝与断线验收。第一次拒绝后没有 MCP 调用，原工单仍持有，通知为空。四次已答复的请求分别收到同号关闭事件。第二张单在等待答复时关停试验进程，冷开按原投递号从宿主历史读回唯一输入。原回合为 `interrupted`，原号重投只返回同一凭据，新增 MCP 调用、正式成果和通知均为零。提审由隔离测试客户端回复，线上模型、Desktop 界面、真实审批人及 Router 转发仍未参与。[复跑](desktop-check.md#独立-app-server-的-stdio-mcp-报送) · [实测记录](evidence/native-mcp-approval-boundary.json)
+
+macOS 安装回归锁定 `7cd6c9a9ef28687af48229cc7a1d8110f6d18c8b`，通过 42 项，其中 20 轮为原生 MCP 专项，另有一项 Windows ACL 用例按平台跳过。首轮发现审批 CLI 夹具在安装目录生成 Python 缓存，给夹具子进程补 `-B` 后用全新安装复验，411 个文件全部与发布包一致。
+
 独立 Codex App Server 已用原生 MCP 工具路径交 W04。`CODEX_HOME` 临时 profile 可见 `worker_report`，同二进制的项目配置单独探测仍查不到。正常提审由隔离测试客户端按原线程、回合和参数逐次确认，确认前没有 MCP 调用。两次工具调用复用原回执，Router 保留一条待验通知，私聊误报被拒。macOS 的 410 文件安装包全量读回二十项专项，其中十轮是真宿主 stdio MCP。真实模型、实际 Desktop 工位及真人确认仍待验。[协议与复跑](desktop-check.md#独立-app-server-的-stdio-mcp-报送) · [回执](evidence/native-app-server-project-mcp-w04.json)
 
 安装包锁定 `a6b1102b60953db943041844c9e42a21ee935cfc`。Linux arm64 安装回归通过 208 项，144 项按环境跳过，58 项旧版历史用例退出。Windows 安装回归通过 51 项，覆盖已有 App Server 验收。新增 stdio 同用户监听用例基于 POSIX。[Windows 流水线](https://github.com/KibyouMoe/mowu-link/actions/runs/45994690444)
