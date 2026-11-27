@@ -1,0 +1,156 @@
+{
+  "candidate_revision": "bc340f9bc64a4583921651eabd44ed8e58a60839",
+  "failing_before_fix": "A Feishu callback with a lost receipt and one native close returned needs_review=false.",
+  "test": "rewrite.test_state_bundle.Bundle.test_handoff_reconciles_the_original_feishu_trainer_answer",
+  "restore": {
+    "native_closes": 1,
+    "patches_to_original_card": 1,
+    "pending_click_after_native_close": "awaiting_platform_commit",
+    "cancelled_click": "rejected",
+    "mismatches_that_block_publication": [
+      "different platform message ID",
+      "different submitted answer",
+      "different card turn",
+      "missing native proof",
+      "different native proof turn"
+    ]
+  },
+  "macos": {
+    "targeted_tests_passed": 50,
+    "installed_native_tests_passed": 2,
+    "installed": {
+      "revision": "bc340f9bc64a4583921651eabd44ed8e58a60839",
+      "package_sha256": "f76805151228200a362aebbc7282862d2f96b66e83ae355f16772b2150833272",
+      "verified_files": 407,
+      "codex": {
+        "awaiting_platform_commit": 0,
+        "awaiting_worker_outcome": 1,
+        "confirmed": 4,
+        "queued": 0,
+        "rejected": 0,
+        "unverified": 0
+      },
+      "dsh": [
+        {
+          "case": "feishu-first",
+          "trainer_answer_audit": {
+            "awaiting_platform_commit": 0,
+            "awaiting_worker_outcome": 0,
+            "confirmed": 1,
+            "queued": 0,
+            "rejected": 0,
+            "unverified": 0
+          },
+          "original_card_updates": 1
+        },
+        {
+          "case": "native-first",
+          "trainer_answer_audit": {
+            "awaiting_platform_commit": 0,
+            "awaiting_worker_outcome": 0,
+            "confirmed": 0,
+            "queued": 0,
+            "rejected": 1,
+            "unverified": 0
+          },
+          "original_card_updates": 1
+        },
+        {
+          "case": "canceled",
+          "trainer_answer_audit": {
+            "awaiting_platform_commit": 0,
+            "awaiting_worker_outcome": 0,
+            "confirmed": 0,
+            "queued": 0,
+            "rejected": 1,
+            "unverified": 0
+          },
+          "original_card_updates": 1
+        },
+        {
+          "case": "timed-out",
+          "trainer_answer_audit": {
+            "awaiting_platform_commit": 0,
+            "awaiting_worker_outcome": 0,
+            "confirmed": 1,
+            "queued": 0,
+            "rejected": 0,
+            "unverified": 0
+          },
+          "original_card_updates": 1
+        }
+      ]
+    }
+  },
+  "linux_arm64_install": {
+    "passed": 208,
+    "environment_skips": 143,
+    "historical_excluded": 58,
+    "files": 407,
+    "sha256": "f76805151228200a362aebbc7282862d2f96b66e83ae355f16772b2150833272"
+  },
+  "windows": {
+    "run": 45991511813,
+    "installed_job": 140480217666,
+    "tests_passed": 51,
+    "sha256": "be2f0562b3b895f4f25b173b728a647cd8e84a68ceba37997f62ffbc0d7d1408",
+    "codex": {
+      "awaiting_platform_commit": 0,
+      "awaiting_worker_outcome": 1,
+      "confirmed": 4,
+      "queued": 0,
+      "rejected": 0,
+      "unverified": 0
+    },
+    "dsh_job": 140480217983,
+    "dsh_passed": 15,
+    "dsh_skipped": 2,
+    "dsh": [
+      {
+        "scenario": "feishu-first",
+        "counts": {
+          "awaiting_platform_commit": 0,
+          "awaiting_worker_outcome": 0,
+          "confirmed": 1,
+          "queued": 0,
+          "rejected": 0,
+          "unverified": 0
+        }
+      },
+      {
+        "scenario": "native-first",
+        "counts": {
+          "awaiting_platform_commit": 0,
+          "awaiting_worker_outcome": 0,
+          "confirmed": 0,
+          "queued": 0,
+          "rejected": 1,
+          "unverified": 0
+        }
+      },
+      {
+        "scenario": "canceled",
+        "counts": {
+          "awaiting_platform_commit": 0,
+          "awaiting_worker_outcome": 0,
+          "confirmed": 0,
+          "queued": 0,
+          "rejected": 1,
+          "unverified": 0
+        }
+      },
+      {
+        "scenario": "timed-out",
+        "counts": {
+          "awaiting_platform_commit": 0,
+          "awaiting_worker_outcome": 0,
+          "confirmed": 1,
+          "queued": 0,
+          "rejected": 0,
+          "unverified": 0
+        }
+      }
+    ]
+  },
+  "boundary": "Codex App Server and DSH SDK ran in isolated native sessions on macOS and Windows. The model and Feishu callback were scripted. This does not use an authorized live Feishu identity or alter the deployed Worker."
+}

@@ -6,6 +6,12 @@
 
 ## 检查点与证据
 
+补齐训练员题卡的停写对账。飞书点击须对应原卡、Worker 原题和原会话关闭记录。原生已关闭而飞书丢回执时列为待核，恢复原绑定后按原题号回读，宿主只处理一次、原卡只更新一次。五种错配阻止换绑。题已结束时被拒绝的点击单独计数，答案正文不会出现在审计输出。
+
+候选 `bc340f9bc64a4583921651eabd44ed8e58a60839` 的安装包包含 407 个文件。macOS 相关回归 50 项，另两项原生专项。Linux arm64 安装回归 208 项通过、143 项按环境跳过、58 项旧版历史用例退出。Windows 安装回归 51 项通过，DSH 原生组 15 项通过。macOS 与 Windows 的 Codex App Server 各查回四份关闭凭据，另有一份关闭未知。DSH 各核两次确认及两次应拒。真实宿主使用本地脚本模型和飞书替身。[实测记录](evidence/feishu-trainer-answer-handoff-audit.json) · [Windows 流水线](https://github.com/KibyouMoe/mowu-link/actions/runs/45991511813)
+
+复跑 `python3 -B -m unittest -v rewrite.test_state_bundle.Bundle.test_handoff_reconciles_the_original_feishu_trainer_answer rewrite.test_codex_app_server.CodexAppServer.test_native_trainer_question_closes_original_card_only_after_app_server_receipt rewrite.test_dsh_native_loop.LocalTlsLoop.test_foreground_question_closes_exact_original_over_mutual_tls`。
+
 Windows 的 Codex 和 DSH 可写工位有了同一条真引擎复跑入口。Windows 进程从本机标准命名管道核 Linux 引擎与预载镜像，原生工位的派发账本须记录相同身份。Codex 验成果、取消与转派，DSH 另核丢 W04 回执后同号补回、成果只记一份，以及错引擎时拒绝清理。两端一起跑须输出三份测试报告。Windows 夹具回归继续单独运行。[复跑入口](README.md#windows-可写工位与真实-linux-引擎)
 
 候选 `a443643a173ea44d871fe05e3d612e4ab50fcc69` 的 406 文件安装包在 macOS 以真实 Linux 容器通过三项专项。DSH 回读 691,200 字节成果，冷开后原生输入一条，原工作区已回收。Linux arm64 安装回归 207 项通过，143 项按环境跳过、58 项旧版历史用例退出。Windows 安装组通过 49 项，新用例验证错误引擎、引擎不可达及缺镜像时失败。DSH 原生组通过 15 项，两项真引擎用例因 Windows 流水线默认引擎为 Windows 未运行。Windows 的真实 Linux 容器端到端待验。[实测记录](evidence/windows-linux-workspace-acceptance-entry.json) · [Windows 流水线](https://github.com/KibyouMoe/mowu-link/actions/runs/45990064375)
