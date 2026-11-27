@@ -43,7 +43,10 @@ class WindowsMaintenance(unittest.TestCase):
 
     def sc(self,*args,check=True):
         sc = Path(os.environ["SystemRoot"])/"System32/sc.exe"
-        return subprocess.run([sc,*args],capture_output=True,text=True,errors="replace",check=check,timeout=35)
+        result = subprocess.run([sc,*args],capture_output=True,text=True,errors="replace",timeout=35)
+        if check:
+            self.assertEqual(result.returncode,0,f"SCM {args[0]}: {result.stdout}{result.stderr}")
+        return result
 
     @contextmanager
     def service(self,exe,root,name,manager,cert,key,dependency=None):

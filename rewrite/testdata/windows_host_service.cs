@@ -80,7 +80,7 @@ internal sealed class FixtureService : ServiceBase
             {
                 child.Kill();
                 if (!child.WaitForExit(6000))
-                    throw new TimeoutException("Isolated router process did not stop");
+                    throw new System.TimeoutException("Isolated router process did not stop");
             }
         }
         catch (InvalidOperationException)
