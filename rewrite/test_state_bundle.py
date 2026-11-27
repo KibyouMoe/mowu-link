@@ -21,7 +21,8 @@ from .codex_thread_preparation import SCHEMA as CODEX_PREPARATION_SCHEMA
 from .managed_sessions import FAMILY_SCHEMA, derive_callback, read_enrollment, token_digest, write_enrollment
 from .orders import Orders
 from .release_check import config
-from .state_bundle import audit_handoff, audit_trigger, capture, filename, restore, rollback, stage_native_handoff, validate_set, verify
+from .state_bundle import (assemble_hosts, audit_handoff, audit_trigger, capture, filename, restore, rollback,
+                           stage_native_handoff, validate_set, verify)
 from .storage import Database, Fault, StateWriterBusy, encode, guid, state_writer
 from .test_feishu_inbound import PNG
 from .test_feishu_output import PlatformFixture
@@ -456,6 +457,52 @@ class Bundle(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,"worker_stale_dispatch_receipt"):
             stage_native_handoff(self.snapshot,checksum,"oguri",self.native.session,"new-session",destination)
         self.assertFalse(destination.exists())
+
+    def test_host_assembly_requires_its_pinned_roster_and_rejects_changed_bytes(self):
+        with self.stack(self.sources):
+            pass
+        batch = guid()
+        label = "worker:oguri"
+        sources = {label:self.sources[label]}
+        worker_part = self.root/"worker-part"
+        with state_writer(self.sources[label]),self.assertRaises(StateWriterBusy):
+            capture(sources,self.revision,worker_part,batch_id=batch,host_id="worker")
+        self.assertFalse(worker_part.exists())
+
+        hosts = {}
+        for host,ledgers in (("worker",sources),("router",{k:v for k,v in self.sources.items() if k!=label})):
+            path = self.root/(host+"-part")
+            fragment = capture(ledgers,self.revision,path,batch_id=batch,host_id=host)
+            hosts[host] = {"snapshot":str(path),"manifest_sha256":fragment["manifest_sha256"],"components":list(ledgers)}
+        plan = {"batch_id":batch,"source_revision":self.revision,"hosts":hosts}
+        with self.assertRaisesRegex(ValueError,"must be assembled"):
+            restore(worker_part,hosts["worker"]["manifest_sha256"],self.dest)
+        for name,invalid in (
+            ("old-batch",dict(plan,batch_id=guid())),
+            ("old-revision",dict(plan,source_revision="b"*40)),
+            ("wrong-host",dict(plan,hosts={"other":hosts["worker"],"router":hosts["router"]})),
+            ("missing-worker",dict(plan,hosts={"router":hosts["router"]})),
+            ("wrong-roster",dict(plan,hosts=dict(hosts,worker=dict(hosts["worker"],components=["worker:other"])))),
+            ("wrong-digest",dict(plan,hosts=dict(hosts,worker=dict(hosts["worker"],manifest_sha256="0"*64)))),
+        ):
+            with self.subTest(name=name),self.assertRaises(ValueError):
+                assemble_hosts(invalid,self.dest)
+            self.assertFalse(self.dest.exists())
+        path = worker_part/filename(label)
+        original = path.read_bytes()
+        with path.open("ab") as stream:
+            stream.write(b"unrecorded bytes")
+        with self.assertRaisesRegex(ValueError,"snapshot bytes do not match"):
+            assemble_hosts(plan,self.dest)
+        self.assertFalse(self.dest.exists())
+        path.write_bytes(original)
+        merged = assemble_hosts(plan,self.dest)
+        manifest = verify(self.dest,merged["manifest_sha256"])
+        self.assertEqual(manifest["assembled_hosts"],{"batch_id":batch,
+                         "manifest_sha256_by_host":{host:part["manifest_sha256"] for host,part in hosts.items()}})
+        self.assertEqual(set(manifest["files"]),set(self.sources))
+        self.assertEqual((self.dest/filename(label)).read_bytes(),original)
+        self.assertEqual(path.read_bytes(),original)
 
     def test_feishu_restore_reuses_original_card_and_keeps_known_provider_receipt_after_deadline(self):
         message = {"chat_type":"p2p","chat_id":"chat","message_id":"om_trial_input","message_type":"text",
@@ -1126,6 +1173,39 @@ class Bundle(unittest.TestCase):
         self.assertEqual([p.name for p in (self.snapshot/"native--oguri").iterdir()],[child_db.name])
         for private in (token,key.hex(),"callback_token"):
             self.assertNotIn(private,(self.snapshot/"manifest.json").read_text())
+        batch = guid()
+        hosts = {}
+        for host,part in (("adapter",{"agent:oguri":root}),
+                          ("router",{k:v for k,v in sources.items() if k!="agent:oguri"})):
+            path = self.root/(host+"-part")
+            fragment = capture(part,self.revision,path,registries=registry if host=="adapter" else {},
+                               batch_id=batch,host_id=host)
+            hosts[host] = {"snapshot":str(path),"manifest_sha256":fragment["manifest_sha256"],"components":list(part)}
+        plan = {"batch_id":batch,"source_revision":self.revision,"hosts":hosts}
+        combined = self.root/"assembled"
+        assembled = assemble_hosts(plan,combined)
+        assembled_manifest = verify(combined,assembled["manifest_sha256"])
+        self.assertEqual((assembled_manifest["format"],assembled_manifest["managed_native"]),
+                         (2,manifest["managed_native"]))
+        self.assertEqual(list((combined/"native--oguri").iterdir()),[combined/"native--oguri"/child_db.name])
+        with Database(sources["worker:oguri"],"").transaction() as db:
+            db.execute("UPDATE managed_native_sessions SET callback_digest=?",("0"*64,))
+        bad_part = self.root/"mismatched-worker"
+        worker_only = {"worker:oguri":sources["worker:oguri"]}
+        mismatch = capture(worker_only,self.revision,bad_part,batch_id=batch,host_id="worker")
+        router_part = {k:v for k,v in sources.items() if k not in ("worker:oguri","agent:oguri")}
+        router_only = self.root/"router-only"
+        router_proof = capture(router_part,self.revision,router_only,batch_id=batch,host_id="router")
+        bad_hosts = {**hosts,
+                     "worker":{"snapshot":str(bad_part),"manifest_sha256":mismatch["manifest_sha256"],
+                               "components":list(worker_only)},
+                     "router":{"snapshot":str(router_only),"manifest_sha256":router_proof["manifest_sha256"],
+                               "components":list(router_part)}}
+        with self.assertRaisesRegex(ValueError,"enrollment has no matching native ledger"):
+            assemble_hosts(dict(plan,hosts=bad_hosts),self.root/"bad-assembly")
+        self.assertFalse((self.root/"bad-assembly").exists())
+        with Database(sources["worker:oguri"],"").transaction() as db:
+            db.execute("UPDATE managed_native_sessions SET callback_digest=?",(token_digest(token),))
         with self.assertRaisesRegex(ValueError,"supply the original callback key"):
             restore(self.snapshot,checksum,self.dest)
         with self.assertRaisesRegex(ValueError,"key does not match"):

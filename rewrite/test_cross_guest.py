@@ -8,6 +8,7 @@ from queue import Queue
 import shutil
 import ssl
 import subprocess
+import sys
 from tempfile import TemporaryDirectory
 from threading import Event, Thread
 import time
@@ -24,12 +25,14 @@ from .hermes import HermesAdapter
 from .host_wire import serve_adapter
 from .orders import Orders
 from .release_check import config
-from .storage import Fault, encode, guid
+from .state_bundle import audit_handoff, audit_trigger, filename, restore, verify
+from .storage import Fault, encode, guid, state_writer
 from .test_codex_app_server import CODEX, LINK_OUTAGE_FIXTURE, Provider, isolated_app_server, running
 from .test_dsh_native_loop import NativeProcess
 from .test_dsh_sdk import EXE as DSH
 from .test_mainline import Clock
-from .wire import Client, serve_router
+from .trigger import Trigger
+from .wire import Client, route, serve_authenticated, serve_router
 
 
 @contextmanager
@@ -90,6 +93,170 @@ def guest_tls(state,host):
     tls.minimum_version = ssl.TLSVersion.TLSv1_2
     tls.load_cert_chain(cert,key)
     return cert,tls
+
+
+@unittest.skipUnless(sys.platform=="darwin" and os.environ.get("MOWULINK_CROSS_HOST_STATE_IMAGE")
+                     and os.environ.get("MOWULINK_CROSS_HOST_STATE_SOCKET")
+                     and all(shutil.which(command) for command in ("colima","docker","openssl")),
+                     "isolated Colima Linux guest and pinned Worker image required")
+class CrossHostState(unittest.TestCase):
+    def test_offline_fragments_restore_original_cross_host_w04(self):
+        image = os.environ["MOWULINK_CROSS_HOST_STATE_IMAGE"]
+        socket = os.environ["MOWULINK_CROSS_HOST_STATE_SOCKET"]
+        engine = [shutil.which("docker"),"--host","unix://"+socket]
+        colima = [shutil.which("colima"),"ssh","--"]
+        shared = Path(os.environ.get("MOWULINK_CODEX_CROSS_GUEST_SHARED",str(Path.home())))
+        package = Path(__file__).resolve().parent.parent
+        test_root = Path(self.enterContext(TemporaryDirectory(dir=shared,prefix=".mowulink-host-backup-"))).resolve()
+        revision = os.environ.get("MOWULINK_TEST_RELEASE_REVISION","a"*40)
+
+        def guest(*arguments,check=True):
+            return subprocess.run([*colima,*map(str,arguments)],check=check,cwd=package,
+                                  text=True,capture_output=True,timeout=20)
+
+        guest_root = Path(guest("mktemp","-d","/tmp/mowulink-host-backup-XXXXXXXX").stdout.strip())
+        self.assertRegex(str(guest_root),r"^/tmp/mowulink-host-backup-[A-Za-z0-9]+$")
+        self.addCleanup(guest,"python3","-c","import shutil,sys; shutil.rmtree(sys.argv[1])",guest_root)
+        fs = guest("findmnt","-n","-T",guest_root,"-o","FSTYPE").stdout.strip()
+        self.assertEqual(fs,"ext4")
+        original, recovered = guest_root/"original",guest_root/"restored"
+        guest("mkdir","-m","700",original,recovered)
+        exchange = test_root/"exchange"
+        exchange.mkdir(mode=0o700)
+        host = "host.lima.internal"
+        cert,tls = guest_tls(test_root,host)
+        clock = Clock()
+        native = FixtureHost(test_root/"native-fixture.db","snapshot-test-session")
+        manager_host = FixtureHost(test_root/"manager-fixture.db","snapshot-manager-session")
+        local = {label:test_root/filename(label) for label in
+                 ("router:main","agent:oguri","hermes:main","hermes-host:main","trigger:source")}
+        Trigger(local["trigger:source"],"fixture",clock)
+        worker_key,manager_key,adapter_key,callback_key,ops_key = (guid() for _ in range(5))
+        first_reply_lost = Event()
+        submissions = []
+        batch = guid()
+
+        @contextmanager
+        def services(paths,*,lose_report=False):
+            with ExitStack() as stack:
+                for label in ("router:main","agent:oguri","hermes:main","hermes-host:main"):
+                    stack.enter_context(state_writer(paths[label]))
+                orders = Orders(paths["router:main"],clock,1)
+
+                def router_request(actor,method,path,body,headers):
+                    result = route(orders,actor,method,path,body,headers)
+                    if method=="POST" and path.endswith("/report"):
+                        submissions.append((body["assignment_id"],headers["Idempotency-Key"],result[2]))
+                        if lose_report:
+                            first_reply_lost.set()
+                            raise ConnectionResetError("fixture dropped the committed W04 response")
+                    return result
+
+                server = serve_authenticated({worker_key:"worker/oguri",manager_key:"hermes"},
+                    ("127.0.0.1",0),tls,router_request,orders.tick)
+                stack.enter_context(running(server))
+                router_client = Client(f"https://127.0.0.1:{server.server_port}",manager_key,cert)
+                manager = HermesAdapter(paths["hermes:main"],router_client,
+                    HostAdapter(paths["hermes-host:main"],manager_host,manager_host.session),clock)
+                adapter = HostAdapter(paths["agent:oguri"],native,native.session)
+                adapter_server = serve_adapter(adapter,"oguri",{adapter_key:"worker/oguri"},("127.0.0.1",0),tls)
+                stack.enter_context(running(adapter_server))
+                yield manager,server.server_port,adapter_server.server_port
+
+        def configure(directory,folder,router_port,adapter_port):
+            folder.mkdir(mode=0o700)
+            config(folder,"to-router.json",{"url":f"https://{host}:{router_port}","token":worker_key,
+                                            "ca_file":"/state/test.crt"})
+            config(folder,"to-adapter.json",{"url":f"https://{host}:{adapter_port}","token":adapter_key,
+                                             "ca_file":"/state/test.crt"})
+            config(folder,"roles.json",{callback_key:"adapter/oguri",ops_key:"ops/oguri"})
+            guest("cp","-p",*sorted(folder.iterdir()),cert,test_root/"test.key",directory)
+
+        worker_ref = config(exchange,"worker-sources.json",{"worker:oguri":str(original/"worker.db")})
+        remote_part = guest_root/"sealed-worker"
+        guest_capture = ("python3","-B","-m","rewrite.state_bundle","capture-part","--sources",worker_ref,
+                         "--revision",revision,"--batch-id",batch,"--host-id","linux-worker","--destination",remote_part)
+
+        with services(local,lose_report=True) as (manager,router_port,adapter_port):
+            configure(original,test_root/"original-settings",router_port,adapter_port)
+            with guest_worker(engine,image,original,native.session,package=package) as (port,old_process):
+                endpoint = f"https://127.0.0.1:{port}"
+                ops,callback = Client(endpoint,ops_key,cert),Client(endpoint,callback_key,cert)
+                eventual(lambda:any(w["online"] and w["busy"] is False for w in manager.workers()["items"]))
+                tid = manager.create(guid(),"Cutover replay","Formal W04 with a dropped receipt","oguri")["task_id"]
+                clock.advance(10)
+                payload,receipt = eventual(native.entries)[0]
+                assignment = payload["assignment_id"]
+                self.assertEqual(ops.request("GET","worker/status")["held_assignment_id"],assignment)
+                arguments = {"task_id":tid,"assignment_id":assignment,"summary":"Original report before capture"}
+                request = {"session":native.session,"turn_id":receipt["turn_id"],
+                           "tool":"worker_report","call_id":"fixture-w04","arguments":arguments}
+                with self.assertRaisesRegex(Fault,"worker_report_unconfirmed"):
+                    callback.request("POST","worker/native-tool",request)
+                self.assertTrue(first_reply_lost.is_set())
+                detail = manager.inspect(tid)
+                self.assertEqual(detail["task"]["state"],"completed_reported")
+                self.assertEqual(ops.request("GET","worker/status")["held_assignment_id"],assignment)
+                blocked = guest(*guest_capture,check=False)
+                self.assertNotEqual(blocked.returncode,0)
+                self.assertIn("state_writer_already_running",blocked.stderr)
+                self.assertNotEqual(guest("test","-e",remote_part,check=False).returncode,0)
+        original_reports = len(submissions)
+        worker_fragment = json.loads(guest(*guest_capture).stdout)
+        imported_worker = exchange/"worker-part"
+        guest("cp","-pR",remote_part,imported_worker)
+        local_config = config(test_root,"local-sources.json",{key:str(path) for key,path in local.items()})
+        local_part = test_root/"mac-part"
+
+        def local_cli(*arguments):
+            result = subprocess.run([sys.executable,"-B","-m","rewrite.state_bundle",*map(str,arguments)],
+                                    cwd=package,check=True,text=True,capture_output=True,timeout=20)
+            return json.loads(result.stdout)
+
+        mac_fragment = local_cli("capture-part","--sources",local_config,"--revision",revision,"--batch-id",batch,
+                                 "--host-id","mac-router","--destination",local_part)
+        records = {host:{"snapshot":str(path),"manifest_sha256":part["manifest_sha256"],"components":labels}
+                   for host,path,part,labels in (("linux-worker",imported_worker,worker_fragment,["worker:oguri"]),
+                                               ("mac-router",local_part,mac_fragment,list(local)))}
+        plan = config(test_root,"combine.json",{"batch_id":batch,"source_revision":revision,"hosts":records})
+        full = test_root/"combined"
+        sealed = local_cli("assemble","--plan",plan,"--destination",full)
+        digest = sealed["manifest_sha256"]
+        before = audit_handoff(full,digest)
+        ledger, = before["workers"]
+        self.assertTrue(before["needs_review"])
+        self.assertIn("report_receipt_pending",ledger["issues"])
+        self.assertTrue(audit_trigger(full,digest)["ready"])
+        paths = restore(full,digest,test_root/"restored")
+        guest("cp","-p",paths["worker:oguri"],recovered/"worker.db")
+
+        with services(paths) as (manager,router_port,adapter_port):
+            configure(recovered,test_root/"restored-settings",router_port,adapter_port)
+            with guest_worker(engine,image,recovered,native.session,package=package) as (port,new_process):
+                endpoint = f"https://127.0.0.1:{port}"
+                ops,callback = Client(endpoint,ops_key,cert),Client(endpoint,callback_key,cert)
+                eventual(lambda:(state:=ops.request("GET","worker/status"))["router_connected"]
+                         and state["held_assignment_id"] is None and len(submissions)>original_reports)
+                ack = callback.request("POST","worker/native-tool",request)
+                self.assertEqual(ack,{"recorded":True,"release_assignment_id":assignment,"task_state":"completed_reported"})
+                self.assertEqual(manager.inspect(tid)["last_report"],detail["last_report"])
+                notice, = [row for row in manager.messages(source="oguri")["items"] if row.get("task_id")==tid]
+                self.assertEqual(native.entries(),[(payload,receipt)])
+
+        self.assertNotEqual(old_process,new_process)
+        self.assertGreater(len(submissions),original_reports)
+        self.assertTrue(all(row==submissions[0] for row in submissions))
+        self.assertEqual(audit_handoff(full,digest),before)
+        for record in records.values():
+            verify(Path(record["snapshot"]),record["manifest_sha256"],partial=True)
+        if output := os.environ.get("MOWULINK_CROSS_HOST_STATE_EVIDENCE"):
+            Path(output).write_text(encode({"capture":sealed,"worker_device_fs":fs,"image":image,
+                "worker_containers":[old_process,new_process],"active_guest_refused_snapshot":True,
+                "full_backup_unchanged":True,"task_id":tid,"assignment_id":assignment,"native_receipt":receipt,
+                "audit_before":ledger,"probe_submissions":submissions,"w04_recovered":ack,
+                "native_inputs":1,"report_notices":1,"notice_id":notice["message_id"],
+                "boundary":"macOS Router and adapter, Linux guest ext4 Worker, actual HTTPS. Agent and manager are fixtures."})
+                +"\n",encoding="utf-8")
 
 
 @unittest.skipUnless(CODEX.is_file() and os.environ.get("MOWULINK_CODEX_CROSS_GUEST_IMAGE") and shutil.which("openssl"),

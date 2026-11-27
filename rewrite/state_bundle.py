@@ -13,6 +13,7 @@ from tempfile import TemporaryDirectory
 from . import delivery, dsh_workspace_audit, feishu_audit, trigger_audit
 from . import state_bundle_managed as managed
 from .cutover import digest, output_directory, readonly
+from .messages import valid_guid
 from .storage import encode, guid, state_writer
 
 TABLES = {
@@ -89,13 +90,17 @@ def filename(label):
     return role+"--"+name+".sqlite3"
 
 
-def validate_set(labels):
+def validate_set(labels,*,partial=False):
     labels = list(labels)
     roles = [component(label)[0] for label in labels]
-    if not REQUIRED <= set(roles) or roles.count("router") != 1:
-        raise ValueError("expected one Router and all five component roles")
     if len({filename(label).casefold() for label in labels})!=len(labels):
         raise ValueError("component filenames must also be distinct on case-insensitive filesystems")
+    if partial:
+        if not roles or roles.count("router")>1:
+            raise ValueError("a host snapshot needs at least one component and at most one Router")
+        return
+    if not REQUIRED <= set(roles) or roles.count("router") != 1:
+        raise ValueError("expected one Router and all five component roles")
     agents = {component(label)[1] for label in labels if component(label)[0]=="agent"}
     workers = {component(label)[1] for label in labels if component(label)[0]=="worker"}
     if agents != workers:
@@ -124,8 +129,8 @@ def copy_private(src,dst):
 
 
 @contextmanager
-def locked(sources,registries=None):
-    validate_set(sources)
+def locked(sources,registries=None,*,partial=False):
+    validate_set(sources,partial=partial)
     with ExitStack() as stack:
         identities = set()
         def lock_database(path,role):
@@ -147,7 +152,7 @@ def locked(sources,registries=None):
             health(db,role)
         for label in sorted(sources):
             lock_database(Path(sources[label]),component(label)[0])
-        yield managed.collect(sources,registries or {},stack,lock_database)
+        yield managed.collect(sources,registries or {},stack,lock_database,partial=partial)
 
 
 def agent_ledger_paths(directory,manifest):
@@ -180,10 +185,21 @@ def workspace_audits(snapshot,manifest,dsh_runtimes,*,reservations=None):
     return audits
 
 
-def capture(sources,revision,destination,*,registries=None):
+def host_metadata(batch_id,host_id):
+    if not valid_guid(batch_id) or not isinstance(host_id,str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}",host_id):
+        raise ValueError("expected a cutover batch UUID and an inventory host ID")
+    return {"batch_id":batch_id,"host_id":host_id}
+
+
+def capture(sources,revision,destination,*,registries=None,batch_id=None,host_id=None):
     check_revision(revision)
+    if not isinstance(sources,dict):
+        raise ValueError("expected a map of component database paths")
+    part = host_metadata(batch_id,host_id) if batch_id is not None or host_id is not None else None
     manifest = {"format":1,"snapshot_id":guid(),"source_revision":revision,"files":{}}
-    with output_directory(destination) as stage, locked(sources,registries) as inventory:
+    if part is not None:
+        manifest["host_part"] = part
+    with output_directory(destination) as stage, locked(sources,registries,partial=part is not None) as inventory:
         for label,source in sorted(sources.items()):
             path = Path(source)
             dest = stage/filename(label)
@@ -200,21 +216,35 @@ def capture(sources,revision,destination,*,registries=None):
         metadata = stage/"manifest.json"
         metadata.write_text(encode(manifest),encoding="utf-8")
         fingerprint = digest(metadata)
-    return {"snapshot_id":manifest["snapshot_id"],"source_revision":revision,"components":len(sources),
-            "manifest_sha256":fingerprint}
+    result = {"snapshot_id":manifest["snapshot_id"],"source_revision":revision,"components":len(sources),
+              "manifest_sha256":fingerprint}
+    if part is not None:
+        result["host_part"] = part
+    return result
 
 
-def verify(snapshot,expected):
+def verify(snapshot,expected,*,partial=False):
     manifest_file = snapshot/"manifest.json"
-    if (snapshot.is_symlink() or manifest_file.is_symlink() or not manifest_file.is_file()
-            or digest(manifest_file) != expected):
+    if snapshot.is_symlink() or manifest_file.is_symlink() or not manifest_file.is_file():
         raise ValueError("snapshot manifest does not match the recorded digest")
-    manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+    raw = manifest_file.read_bytes()
+    if hashlib.sha256(raw).hexdigest()!=expected:
+        raise ValueError("snapshot manifest does not match the recorded digest")
+    manifest = json.loads(raw)
+    if not isinstance(manifest,dict):
+        raise ValueError("unsupported snapshot")
+    if partial != ("host_part" in manifest):
+        raise ValueError("host fragments must be assembled before ordinary verification or restore")
+    if partial:
+        part = manifest["host_part"]
+        if not isinstance(part,dict) or set(part)!={"batch_id","host_id"}:
+            raise ValueError("invalid host fragment metadata")
+        host_metadata(part["batch_id"],part["host_id"])
     version = manifest.get("format")
     if version not in (1,2,3) or not isinstance(manifest.get("files"),dict):
         raise ValueError("unsupported snapshot")
     check_revision(manifest["source_revision"])
-    validate_set(manifest["files"])
+    validate_set(manifest["files"],partial=partial)
     inventory = manifest.get("managed_native",{})
     if (not isinstance(inventory,dict) or version in (1,2) and bool(inventory)!=(version==2)
             or any("agent:"+wid not in manifest["files"] for wid in inventory)):
@@ -231,10 +261,68 @@ def verify(snapshot,expected):
                 raise ValueError("snapshot bytes do not match: "+label)
             health(db,component(label)[0])
     directories = {wid:managed.private_registry((snapshot/name).absolute()) for wid,name in names.items()}
-    managed.validate(sources,inventory,directories,health=health)
+    managed.validate(sources,inventory,directories,health=health,partial=partial)
     if has_workspace_journal(snapshot,manifest)!=(version==3):
         raise ValueError("snapshot version does not match the DSH workspace registry")
     return manifest
+
+
+def assemble_hosts(plan,destination):
+    if (not isinstance(plan,dict) or set(plan)!={"batch_id","source_revision","hosts"}
+            or not isinstance(plan["hosts"],dict) or not plan["hosts"]):
+        raise ValueError("expected a batch, source revision and roster of host fragments")
+    revision = plan["source_revision"]
+    check_revision(revision)
+    batch = plan["batch_id"]
+    manifests,files,host_digests = {},{},{}
+    host_names = set()
+    locations,inventory = {},{}
+
+    for host,settings in sorted(plan["hosts"].items()):
+        identity = host_metadata(batch,host)
+        if (not isinstance(settings,dict) or set(settings)!={"snapshot","manifest_sha256","components"}
+                or not isinstance(settings["snapshot"],str) or not Path(settings["snapshot"]).is_absolute()
+                or not isinstance(settings["components"],list)):
+            raise ValueError("expected an absolute fragment path, verified manifest digest and component roster")
+        validate_set(settings["components"],partial=True)
+        path,digest_expected = Path(settings["snapshot"]),settings["manifest_sha256"]
+        fragment = verify(path,digest_expected,partial=True)
+        if fragment["host_part"]!=identity or fragment["source_revision"]!=revision:
+            raise ValueError("host fragment belongs to a different batch, host or revision")
+        roster = set(settings["components"])
+        if roster!=set(fragment["files"]):
+            raise ValueError("host fragment does not match its component roster: "+host)
+        if roster & files.keys() or host.casefold() in host_names:
+            raise ValueError("duplicate host or component in assembly")
+        host_names.add(host.casefold())
+        host_digests[host] = digest_expected
+        manifests[path] = fragment
+        files.update(fragment["files"])
+        group = fragment.get("managed_native",{})
+        locations.update({wid:path/managed.registry_name(wid) for wid in group})
+        inventory.update(group)
+
+    validate_set(files)
+    manifest = {"format":2 if inventory else 1,"snapshot_id":guid(),"source_revision":revision,"files":files,
+                "assembled_hosts":{"batch_id":batch,"manifest_sha256_by_host":host_digests}}
+    if inventory:
+        manifest["managed_native"] = inventory
+    if any(fragment["format"]==3 for fragment in manifests.values()):
+        manifest["format"] = 3
+    with output_directory(destination) as stage:
+        for path,fragment in manifests.items():
+            for label in fragment["files"]:
+                name = filename(label)
+                copy_private(path/name,stage/name)
+        managed.copy_ledgers(locations,inventory,stage,copy_private)
+        metadata = stage/"manifest.json"
+        metadata.write_text(encode(manifest),encoding="utf-8")
+        fingerprint = digest(metadata)
+        # Recheck bytes in the destination and compare both sides of any
+        # managed enrollment before atomically publishing a complete snapshot.
+        verify(stage,fingerprint)
+    return {"snapshot_id":manifest["snapshot_id"],"source_revision":revision,"components":len(files),
+            "manifest_sha256":fingerprint,"assembled_hosts":manifest["assembled_hosts"]}
 
 
 def restore_files(snapshot,expected,manifest,stage,*,destination=None,managed_keys=None):
@@ -587,11 +675,18 @@ def rollback(snapshot,expected,trial,destination,*,registries=None,managed_keys=
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     ops = parser.add_subparsers(dest="op",required=True)
-    backup = ops.add_parser("capture")
-    backup.add_argument("--sources",type=Path,required=True,help="role:instance to absolute database path, JSON")
-    backup.add_argument("--managed-registries",type=Path,help="Worker ID to private native registry directory, JSON")
-    backup.add_argument("--revision",required=True)
-    backup.add_argument("--destination",type=Path,required=True)
+    for op in ("capture","capture-part"):
+        backup = ops.add_parser(op)
+        backup.add_argument("--sources",type=Path,required=True,help="role:instance to absolute database path, JSON")
+        backup.add_argument("--managed-registries",type=Path,help="Worker ID to private native registry directory, JSON")
+        backup.add_argument("--revision",required=True)
+        backup.add_argument("--destination",type=Path,required=True)
+        if op=="capture-part":
+            backup.add_argument("--batch-id",required=True,help="shared UUID for this stopped cutover window")
+            backup.add_argument("--host-id",required=True)
+    assembly = ops.add_parser("assemble")
+    assembly.add_argument("--plan",type=Path,required=True,help="the expected host and component roster with recorded digests")
+    assembly.add_argument("--destination",type=Path,required=True)
     for op in ("verify","restore","rollback","audit-trigger","audit-handoff","stage-native-handoff"):
         p = ops.add_parser(op)
         p.add_argument("--snapshot",type=Path,required=True)
@@ -616,9 +711,12 @@ def main():
             parser.error("expected a JSON map to absolute paths")
         return data
 
-    if args.op=="capture":
+    if args.op in ("capture","capture-part"):
         result = capture(json.loads(args.sources.read_text()),args.revision,args.destination,
-                         registries=optional_map("managed_registries"))
+                         registries=optional_map("managed_registries"),batch_id=getattr(args,"batch_id",None),
+                         host_id=getattr(args,"host_id",None))
+    elif args.op=="assemble":
+        result = assemble_hosts(json.loads(args.plan.read_text()),args.destination)
     elif args.op=="verify":
         manifest = verify(args.snapshot,args.manifest_sha256)
         result = {"snapshot_id":manifest["snapshot_id"],"components":len(manifest["files"])}

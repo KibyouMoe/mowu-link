@@ -53,7 +53,7 @@ def fingerprint(path):
     return {"sha256":digest(path),"size":path.stat().st_size}
 
 
-def collect(sources,paths,stack,lock_database):
+def collect(sources,paths,stack,lock_database,*,partial=False):
     roots = root_bindings(sources)
     if set(paths)!=set(roots):
         raise ValueError("state file has an external native session registry; supply its exact private directory")
@@ -73,7 +73,7 @@ def collect(sources,paths,stack,lock_database):
         if {path.name for path in directory.glob("*.sqlite3")}!={sid+".sqlite3" for sid in children}:
             raise ValueError("native registry membership differs from its ledgers: "+wid)
         inventory[wid] = {"anchor":anchor,"children":children}
-    validate(sources,inventory,paths)
+    validate(sources,inventory,paths,partial=partial)
     return inventory
 
 
@@ -86,27 +86,38 @@ def valid_entry(sid,entry):
                     for n in ("callback_digest","sha256")))
 
 
-def validate(sources,inventory,paths,*,health=None):
+def validate(sources,inventory,paths,*,health=None,partial=False):
     roots = root_bindings(sources)
     if set(inventory)!=set(roots):
         raise ValueError("managed native registry and adapter roots differ")
+    for wid,group in inventory.items():
+        if (not isinstance(group,dict) or set(group)!={"anchor","children"}
+                or group["anchor"]!=roots[wid][0] or not isinstance(group["children"],dict)):
+            raise ValueError("invalid managed registry inventory: "+wid)
+        children = group["children"]
+        if not all(valid_entry(sid,entry) for sid,entry in children.items()):
+            raise ValueError("invalid managed native ledger metadata: "+wid)
+        if health:
+            verify_files(paths[wid],wid,children,health)
+        if partial and "worker:"+wid not in sources:
+            # A separate host can verify its session pins. Parentage and the
+            # operation that enrolled these sessions are checked at assembly.
+            with closing(readonly(Path(sources["agent:"+wid]))) as db:
+                verify_pin(db,group["anchor"],wid)
+            for sid in children:
+                with closing(readonly(Path(paths[wid])/(sid+".sqlite3"))) as db:
+                    verify_pin(db,sid,wid)
     for label,path in sources.items():
         if not label.startswith("worker:"):
             continue
         wid = label.partition(":")[2]
+        if partial and "agent:"+wid not in sources:
+            continue
         group = inventory.get(wid)
-        if wid in roots and (not isinstance(group,dict) or set(group)!={"anchor","children"}
-                or group["anchor"]!=roots[wid][0] or not isinstance(group["children"],dict)):
-            raise ValueError("invalid managed registry inventory: "+wid)
-        children = group["children"] if group else {}
-        if group and not all(valid_entry(sid,entry) for sid,entry in children.items()):
-            raise ValueError("invalid managed native ledger metadata: "+wid)
-        if group and health:
-            verify_files(paths[wid],wid,children,health)
         with closing(readonly(Path(path))) as db:
             ensure_worker_rows(db,wid,group)
             if group:
-                anchor = group["anchor"]
+                anchor,children = group["anchor"],group["children"]
                 check_active_binding(db,wid,{anchor,*children})
                 ledgers = {anchor:Path(sources["agent:"+wid]),
                            **{sid:Path(paths[wid])/(sid+".sqlite3") for sid in children}}
