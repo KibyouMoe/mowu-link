@@ -1,5 +1,5 @@
-"""Opt-in macOS Codex adapter and Linux VM Worker rehearsal over private TLS."""
-from contextlib import contextmanager
+"""Opt-in native macOS adapter and Linux VM Worker rehearsal over private TLS."""
+from contextlib import ExitStack, contextmanager
 from http.server import ThreadingHTTPServer
 import json
 import os
@@ -18,23 +18,29 @@ from .adapter import HostAdapter
 from .agent_tools import REPORT_TOOL
 from .codex_app_server import AppServerHost, worker_callbacks
 from .devloop import FixtureHost
+from .dsh_local_link import LocalLink
+from .dsh_port import DshHost, tool_listener
 from .hermes import HermesAdapter
 from .host_wire import serve_adapter
 from .orders import Orders
 from .release_check import config
 from .storage import Fault, encode, guid
 from .test_codex_app_server import CODEX, LINK_OUTAGE_FIXTURE, Provider, isolated_app_server, running
+from .test_dsh_native_loop import NativeProcess
+from .test_dsh_sdk import EXE as DSH
 from .test_mainline import Clock
 from .wire import Client, serve_router
 
 
 @contextmanager
-def guest_worker(docker,image,state,session,port=0):
+def guest_worker(docker,image,state,session,port=0,*,package=None):
     name = "mowulink-test-worker-"+guid()
-    repo = Path(__file__).resolve().parent.parent
-    process = subprocess.Popen([docker,"run","--rm","--pull","never","--platform","linux/arm64",
+    command = [docker] if isinstance(docker,str) else docker
+    package = package or Path(__file__).resolve().parent.parent
+    process = subprocess.Popen([*command,"run","--rm","--pull","never","--platform","linux/arm64",
         "--network","host","--cap-drop","ALL","--user",f"{os.getuid()}:{os.getgid()}","--name",name,
-        "-v",f"{repo}:/repo:ro","-v",f"{state}:/state","-w","/repo",image,
+        "--read-only","--security-opt","no-new-privileges","--tmpfs","/tmp",
+        "-v",f"{package}:/repo:ro","-v",f"{state}:/state","-w","/repo",image,
         "python3","-B","-m","rewrite.service","worker","--worker-id","oguri","--adapter-session",session,
         "--router-connection","/state/to-router.json","--adapter-connection","/state/to-adapter.json",
         "--db","/state/worker.db","--identities","/state/roles.json","--cert","/state/test.crt",
@@ -48,15 +54,15 @@ def guest_worker(docker,image,state,session,port=0):
         ready = json.loads(line)
         if ready["component"]!="worker" or ready["tls"] is not True:
             raise RuntimeError("unexpected guest process")
-        container = subprocess.check_output([docker,"inspect","--format","{{.Id}}",name],text=True,timeout=6).strip()
+        container = subprocess.check_output([*command,"inspect","--format","{{.Id}}",name],text=True,timeout=6).strip()
         yield ready["port"],container
     finally:
         if process.poll() is None:
-            subprocess.run([docker,"stop","--time","3",name],check=False,capture_output=True,timeout=8)
+            subprocess.run([*command,"stop","--time","3",name],check=False,capture_output=True,timeout=8)
         try:
             process.communicate(timeout=8)
         except subprocess.TimeoutExpired:
-            subprocess.run([docker,"rm","--force",name],check=False,capture_output=True,timeout=8)
+            subprocess.run([*command,"rm","--force",name],check=False,capture_output=True,timeout=8)
             process.kill()
             process.communicate(timeout=8)
             raise
@@ -75,6 +81,17 @@ def eventual(read,timeout=14):
     raise AssertionError("timed out waiting for the isolated Worker or original native turn")
 
 
+def guest_tls(state,host):
+    cert,key = state/"test.crt",state/"test.key"
+    subprocess.run(["openssl","req","-x509","-newkey","rsa:2048","-nodes","-days","1","-subj","/CN=localhost",
+        "-addext",f"subjectAltName=IP:127.0.0.1,DNS:{host}","-keyout",key,"-out",cert],
+        check=True,capture_output=True,timeout=10)
+    tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    tls.minimum_version = ssl.TLSVersion.TLSv1_2
+    tls.load_cert_chain(cert,key)
+    return cert,tls
+
+
 @unittest.skipUnless(CODEX.is_file() and os.environ.get("MOWULINK_CODEX_CROSS_GUEST_IMAGE") and shutil.which("openssl"),
                      "opt-in Linux VM image and bundled macOS App Server required")
 class CrossGuest(unittest.TestCase):
@@ -87,13 +104,7 @@ class CrossGuest(unittest.TestCase):
         self.assertRegex(host,r"^[a-zA-Z0-9][a-zA-Z0-9.-]+$")
         root = Path(self.enterContext(TemporaryDirectory(prefix="mowulink-cross-guest-")))
         state = Path(self.enterContext(TemporaryDirectory(dir=shared,prefix=".mowulink-guest-worker-")))
-        cert,key = state/"test.crt",state/"test.key"
-        subprocess.run(["openssl","req","-x509","-newkey","rsa:2048","-nodes","-days","1","-subj","/CN=localhost",
-            "-addext",f"subjectAltName=IP:127.0.0.1,DNS:{host}","-keyout",key,"-out",cert],
-            check=True,capture_output=True,timeout=10)
-        tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        tls.minimum_version = ssl.TLSVersion.TLSv1_2
-        tls.load_cert_chain(cert,key)
+        cert,tls = guest_tls(state,host)
         provider = ThreadingHTTPServer(("127.0.0.1",0),Provider)
         provider.observed,provider.media = [],[]
         fixture = provider.link_outage = {"first":Queue(),"retry":Queue(),"resume":Event()}
@@ -194,3 +205,139 @@ class CrossGuest(unittest.TestCase):
                 "initial":initial,"reconnected":reconnected,"after":after,"native_receipt":receipt,
                 "native_input_ids":input_ids,"native_report_call_ids":call_ids,"first_response":first_response,
                 "w04":result,"notify_id":notice["message_id"],"command_result":"continued"})+"\n",encoding="utf-8")
+
+
+@unittest.skipUnless(DSH.is_file() and os.environ.get("MOWULINK_DSH_CROSS_GUEST_IMAGE") and shutil.which("openssl"),
+                     "opt-in Linux VM image and bundled macOS DSH SDK required")
+class DshCrossGuest(NativeProcess):
+    def test_dsh_reports_from_the_original_turn_after_its_linux_worker_restarts(self):
+        package = Path(__file__).resolve().parents[1]
+        self.assertFalse((package/"server").exists(),"run from an installed rewrite-only release")
+        self.assertFalse((package/"sources").exists(),"run from an installed rewrite-only release")
+        image = os.environ["MOWULINK_DSH_CROSS_GUEST_IMAGE"]
+        self.assertRegex(image,r"^sha256:[a-f0-9]{64}$")
+        socket = Path(os.environ["MOWULINK_DSH_CROSS_GUEST_SOCKET"])
+        self.assertTrue(socket.is_absolute() and socket.is_socket())
+        docker = shutil.which("docker")
+        self.assertIsNotNone(docker)
+        engine = [docker,"--host","unix://"+str(socket)]
+        host = os.environ.get("MOWULINK_CROSS_GUEST_HOST","host.lima.internal")
+        self.assertRegex(host,r"^[a-zA-Z0-9][a-zA-Z0-9.-]+$")
+        shared = Path(os.environ.get("MOWULINK_CROSS_GUEST_SHARED",str(Path.home())))
+        state = Path(self.enterContext(TemporaryDirectory(dir=shared,prefix=".mowulink-dsh-guest-")))
+        runtime = self.local_tls_directory()
+        cert,tls = guest_tls(state,host)
+        worker_key,manager_key,adapter_key,callback_key,ops_key,platform_key = (guid() for _ in range(6))
+        clock = Clock()
+        orders = Orders(runtime/"router.db",clock,poll_seconds=1)
+        router = serve_router(orders,{worker_key:"worker/oguri",manager_key:"hermes"},("127.0.0.1",0),tls)
+        self.enterContext(running(router))
+        router_url = f"https://127.0.0.1:{router.server_port}"
+        manager_host = FixtureHost(runtime/"manager-native.db","isolated-manager")
+        manager = HermesAdapter(runtime/"manager.db",Client(router_url,manager_key,cert),
+            HostAdapter(runtime/"manager-host.db",manager_host,manager_host.session),clock)
+        session = "dsh-isolated-linux-worker-"+guid()
+        link = LocalLink(runtime,use_tls=True)
+        adapter = HostAdapter(runtime/"adapter.db",DshHost(runtime,link=link),session)
+        adapter_http = serve_adapter(adapter,"oguri",{adapter_key:"worker/oguri"},("127.0.0.1",0),tls)
+        self.enterContext(running(adapter_http))
+        config(state,"to-router.json",{"url":f"https://{host}:{router.server_port}","token":worker_key,
+                                      "ca_file":"/state/test.crt"})
+        config(state,"to-adapter.json",{"url":f"https://{host}:{adapter_http.server_port}","token":adapter_key,
+                                       "ca_file":"/state/test.crt"})
+        config(state,"roles.json",{callback_key:"adapter/oguri",ops_key:"ops/oguri",platform_key:"platform/oguri"})
+        arrival,observations = Queue(),Queue()
+        release = [Event(),Event()]
+        callback_attempts = 0
+
+        with ExitStack() as first_worker:
+            port,first = first_worker.enter_context(guest_worker(engine,image,state,session,package=package))
+            endpoint = f"https://127.0.0.1:{port}"
+            callback,ops = Client(endpoint,callback_key,cert),Client(endpoint,ops_key,cert)
+            forward = callback.request
+
+            def request(method,path,body=None,*args,**kwargs):
+                nonlocal callback_attempts
+                if path!="worker/native-tool" or body.get("tool")!="worker_report":
+                    return forward(method,path,body,*args,**kwargs)
+                attempt = callback_attempts
+                callback_attempts += 1
+                arrival.put((body["session"],body["turn_id"],body["call_id"]))
+                if attempt>=len(release) or not release[attempt].wait(10):
+                    raise Fault(503,"fixture_report_gate_not_released")
+                try:
+                    proof = forward(method,path,body,*args,**kwargs)
+                except (URLError,OSError):
+                    observations.put("worker_connection_unconfirmed")
+                    raise
+                observations.put(proof)
+                return proof
+
+            callback.request = request
+            self.enterContext(tool_listener(runtime,adapter,callback,link=link))
+            native = self.enterContext(self.start_native(runtime,session,"formal",use_tls=True))
+            self.addCleanup(release[0].set)
+            self.addCleanup(release[1].set)
+
+            def status():
+                return ops.request("GET","worker/status")
+
+            def bound():
+                result = status()
+                return result if result["host_session"]==session and result["router_connected"] and result["adapter_connected"] else None
+
+            initial = eventual(bound)
+            eventual(lambda:any(row["online"] and row["busy"] is False for row in manager.workers(worker_id="oguri")["items"]))
+            with self.assertRaises(URLError):
+                Client(endpoint,ops_key).request("GET","worker/status")
+            with self.assertRaises(Fault) as denied:
+                Client(endpoint,platform_key,cert).request("GET","worker/status")
+            self.assertEqual(denied.exception.status,403)
+
+            tid = manager.create(guid(),"DSH cross-guest recovery","Report from the original isolated turn","oguri")["task_id"]
+            clock.advance(10)
+            first_call = arrival.get(timeout=15)
+            working = manager.inspect(tid)["task"]
+            aid = working["assignment_id"]
+            self.assertEqual(status()["held_assignment_id"],aid)
+            frames = Client(router_url,worker_key,cert).frames(0)
+            dispatch, = [frame for frame in frames if frame["kind"]=="task.dispatch"]
+            receipt = adapter.lookup_delivery(dispatch["delivery_id"],{"kind":"task",**dispatch["payload"]},session=session)
+            self.assertEqual(first_call,(session,receipt["turn_id"],"native-w04-fixture-0"))
+
+        release[0].set()
+        failed = observations.get(timeout=10)
+        self.assertEqual(failed,"worker_connection_unconfirmed")
+        self.assertIsNone(manager.inspect(tid)["last_report"])
+        self.assertEqual(manager.inspect(tid)["task"],working)
+        with guest_worker(engine,image,state,session,port,package=package) as (reused,second):
+            self.assertEqual(reused,port)
+            self.assertNotEqual(second,first)
+            restored = eventual(bound)
+            self.assertEqual(restored["held_assignment_id"],aid)
+            self.assertTrue(restored["host_busy"])
+            second_call = arrival.get(timeout=10)
+            self.assertEqual(second_call,(session,receipt["turn_id"],"native-w04-fixture-1"))
+            release[1].set()
+            returned = observations.get(timeout=10)
+            observed = self.read_native(native,"read")
+            self.assertEqual(observed["inputs"],[receipt["native_id"]])
+            self.assertEqual([result["isError"] for result in observed["results"]],[True,False])
+            self.assertIn("worker_unconfirmed",encode(observed["results"][0]))
+            w04 = json.loads(observed["results"][1]["content"][0]["text"])
+            self.assertEqual(w04,{"recorded":True,"release_assignment_id":aid,"task_state":"completed_reported"})
+            self.assertEqual(returned,w04)
+            self.assertIsNone(status()["held_assignment_id"])
+            detail = manager.inspect(tid)
+            self.assertEqual(detail["last_report"]["assignment_id"],aid)
+            self.assertEqual(detail["task"]["state"],"completed_reported")
+            notice, = manager.messages(source="oguri")["items"]
+            self.assertEqual(notice["task_id"],tid)
+
+        if output := os.environ.get("MOWULINK_DSH_CROSS_GUEST_EVIDENCE"):
+            Path(output).write_text(encode({"evidence_utc":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+                "boundary":"Native macOS DSH SDK, real Linux VM Worker, TLS in both directions. Local model and manager are test fixtures.",
+                "guest_image":image,"worker_containers":[first,second],"initial":initial,"reopened":restored,
+                "task_id":tid,"assignment_id":aid,"native_receipt":receipt,"native_inputs":observed["inputs"],
+                "report_calls":[first_call,second_call],"first_callback":failed,"w04":w04,
+                "notify_id":notice["message_id"]})+"\n",encoding="utf-8")
