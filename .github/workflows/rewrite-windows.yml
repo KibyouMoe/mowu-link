@@ -71,6 +71,8 @@ jobs:
             $env:MOWULINK_TEST_CODEX_EVIDENCE = Join-Path $dir.FullName 'native-codex.jsonl'
             $env:MOWULINK_GAME_FRAME_EVIDENCE = Join-Path $dir.FullName 'game-source-overlap.json'
             $env:MOWULINK_PORTABLE_RECOVERY_EVIDENCE = Join-Path $dir.FullName 'source-recovery.json'
+            $env:MOWULINK_TEST_WINDOWS_SCM = '1'
+            $env:MOWULINK_WINDOWS_MAINTENANCE_EVIDENCE = Join-Path $dir.FullName 'windows-scm.json'
             Push-Location -LiteralPath $installed
             try {
               $tests = @(
@@ -79,6 +81,7 @@ jobs:
                 'rewrite.test_service.Service.test_three_process_worker_chat_and_assignment'
                 'rewrite.test_service.Service.test_windows_public_config_rejected'
                 'rewrite.test_host_ops.HostOpsState'
+                'rewrite.test_host_ops_windows.WindowsMaintenance'
                 'rewrite.test_peers.Peers.test_original_participants_can_read_and_answer_one_unambiguous_archived_peer'
                 'rewrite.test_feeds.Sources.test_game_real_stream_reconnect_source_replay_and_new_epoch'
                 'rewrite.test_feeds.Sources.test_imported_game_position_rejects_wrong_bridge_and_does_not_reset_on_first_probe'
@@ -96,6 +99,9 @@ jobs:
               $nativeEvidence
               Get-Content -Raw -LiteralPath $env:MOWULINK_GAME_FRAME_EVIDENCE
               Get-Content -Raw -LiteralPath $env:MOWULINK_PORTABLE_RECOVERY_EVIDENCE
+              Write-Output 'MOWULINK_SCM_EVIDENCE_BEGIN'
+              Get-Content -Raw -LiteralPath $env:MOWULINK_WINDOWS_MAINTENANCE_EVIDENCE
+              Write-Output 'MOWULINK_SCM_EVIDENCE_END'
             } finally {
               Pop-Location
             }

@@ -80,6 +80,9 @@ def manifest(config):
     if sys.platform=="linux":
         from .host_ops_systemd import SystemdJob
         read = SystemdJob.read
+    elif sys.platform=="win32":
+        from .host_ops_windows import WindowsJob
+        read = WindowsJob.read
     else:
         read = Job.read
     jobs = {name:read(row) for name,row in config.items()}
@@ -93,6 +96,13 @@ def roles_allowed(identities,jobs):
 
 
 def private_state(path):
+    if sys.platform=="win32":
+        from .windows_acl import private_directory, private_file
+        require(private_directory(path.parent) and not path.is_symlink(),422,"private_host_ops_state_required")
+        if path.exists():
+            with path.open("rb") as state:
+                require(private_file(state.fileno()),422,"private_host_ops_state_required")
+        return
     platform_error = "user_systemd_required" if sys.platform=="linux" else "user_launchd_required"
     require(sys.platform in ("darwin","linux") and os.getuid()!=0,422,platform_error)
     info = path.parent.stat()
@@ -312,6 +322,9 @@ def listen(path,jobs,identities,address,tls,stack):
     if sys.platform=="linux":
         from .host_ops_systemd import Systemd
         native = Systemd()
+    elif sys.platform=="win32":
+        from .host_ops_windows import WindowsSCM
+        native = WindowsSCM()
     else:
         native = Launchd()
     pool = stack.enter_context(ThreadPoolExecutor(max_workers=4))
