@@ -186,8 +186,13 @@ def run(repository,older,newer,component="router",*,dsh_image=None,dsh_local_tls
             subprocess.run([openssl,"req","-x509","-newkey","rsa:2048","-nodes","-days","1",
                             "-subj","/CN=localhost","-addext","subjectAltName=IP:127.0.0.1",
                             "-keyout",key.name,"-out",cert.name],cwd=root,env=env,timeout=10,check=True,capture_output=True)
-            rehearse = worker_pair if component=="worker-pair" else router_rehearsal
-            observed = rehearse(root,old,new,cert,key,env)
+            if component=="state-bundle":
+                from .bundle_release_check import rehearse_bundle
+
+                observed = rehearse_bundle(root,old,new,older,newer,cert,key,env)
+            else:
+                rehearse = worker_pair if component=="worker-pair" else router_rehearsal
+                observed = rehearse(root,old,new,cert,key,env)
         for archive,sha,checksum,directory in versions:
             materialize(archive,sha,checksum,directory,install=False)
         return {"previous_revision":older,"new_revision":newer,"package_sha256":[v[2] for v in versions],
@@ -199,7 +204,7 @@ def main():
     p.add_argument("--repository",type=Path,required=True)
     p.add_argument("--previous",required=True)
     p.add_argument("--new",required=True)
-    p.add_argument("--component",choices=("router","worker-pair","dsh-workspace-rollback"),default="router")
+    p.add_argument("--component",choices=("router","worker-pair","state-bundle","dsh-workspace-rollback"),default="router")
     p.add_argument("--dsh-image",help="pinned existing Linux image ID for the DSH workspace rollback rehearsal")
     p.add_argument("--dsh-local-tls",action="store_true",help="rehearse DSH rollback with the authenticated local TLS link")
     args = p.parse_args()

@@ -1,0 +1,132 @@
+{
+  "negative_previous_release": {
+    "accepted_original_readback": true,
+    "failure": "private chat om_bundle_after_return is missing its input or single confirmed reply in the same turn",
+    "phase": "return",
+    "revision": "13934de898ffda491597f4c125679e67286582da"
+  },
+  "network": "isolated HTTPS loopback",
+  "new_revision": "e947acdef98bc62b626371bc7cecb734ca8c7145",
+  "package_sha256": [
+    "85da9a10b997e2fb770f738f6829f08c03596651fd4a304a234e92d1661057de",
+    "8234fd0ad4d54fea058f19cf23212125012cdd2f0761a27b09f5916349d1eea7"
+  ],
+  "platform": {
+    "machine": "arm64",
+    "python": "3.15.2",
+    "system": "Darwin"
+  },
+  "previous_revision": "35ba22f66e3017a1756b8645f3b88d091b3ff6f8",
+  "state_bundle_release_cycle": {
+    "after_trial": {
+      "components": 7,
+      "manifest_sha256": "ce2ca4831df8005cca36823ab72e403d319086e693f390081e2cb138610741e6",
+      "snapshot_id": "d9273c34-7c94-4cb6-9fce-dcb1f9ca1142",
+      "source_revision": "e947acdef98bc62b626371bc7cecb734ca8c7145"
+    },
+    "before_upgrade": {
+      "components": 7,
+      "manifest_sha256": "e6d16a28c02feed1291c19842557aa580c04a2ddb4e5d80d9d1437a2bc2e4d39",
+      "snapshot_id": "2ab1acf8-d857-489a-81bd-716347b011c1",
+      "source_revision": "35ba22f66e3017a1756b8645f3b88d091b3ff6f8"
+    },
+    "business_clock": "controlled fixture clock",
+    "candidate_writes": {
+      "assignment_id": "96cba83b-f63a-439c-bf4d-b26fa2e8e61f",
+      "attachment_id": "99dd94d9-59b6-425e-9dd7-0e872b4f506c",
+      "chat_receipt": {
+        "delivery_id": "chat-om_bundle_trial",
+        "digest": "a482abfd10c6ddb10e59cf1c593b1696cfea2c49332a64c9fe5f446b5acddbba",
+        "native_id": "16443dac-b556-4871-9506-c0fcfe065f22",
+        "session": "release-trial-agent",
+        "turn_id": "ae06d1cd-1809-4a52-854f-ee3e9f605f73"
+      },
+      "feishu_reply_id": "om_2",
+      "manager_notice": {
+        "delivery_id": "521c3fb4-a64d-4ee8-b6dc-b6c7c603e159",
+        "digest": "6aeb566fd9a9d4b991eb7f86e057559d8e68cd3e36c256207b25a2e804dcf700",
+        "native_id": "7899fe6b-0ade-45de-82a3-3749b2217102",
+        "session": "release-trial-manager",
+        "turn_id": "e51c172f-4a78-4fbd-9cba-15e9821718bb"
+      },
+      "native_input": {
+        "delivery_id": "1a4a2ad2-ffcc-43c8-a077-e608cdfa450b",
+        "digest": "efcf094c29ca2ca2b827183d31ed5423e91e8523bef10be9d41eaced4d4e5bd8",
+        "native_id": "ace90997-a345-4527-84cc-4d2fed60739e",
+        "session": "release-trial-agent",
+        "turn_id": "46a65ef5-8829-44cf-89ad-70a36b1a242d"
+      },
+      "source_instance_id": "9c79136c-d330-4ca8-b8c9-b952b01a2293",
+      "source_receipt": {
+        "duplicate": false,
+        "message_id": "67ad84d8-6c63-4698-91f8-e05160bf4ef8",
+        "received_at": "2027-01-15T08:00:20+00:00"
+      },
+      "task_id": "d7e90779-bec9-4073-8a75-c03097eb4604",
+      "task_readback": {
+        "delivery_state": "received",
+        "last_report": {
+          "artifact_ids": [],
+          "assignment_id": "96cba83b-f63a-439c-bf4d-b26fa2e8e61f",
+          "outcome": "completed",
+          "summary": "Result written during the release trial.",
+          "task_id": "d7e90779-bec9-4073-8a75-c03097eb4604",
+          "worker_id": "trial"
+        },
+        "materials": [],
+        "pending_cleanup": [],
+        "task": {
+          "assignee_id": "trial",
+          "assignment_id": null,
+          "holder": {
+            "kind": "router"
+          },
+          "instructions": "Keep this order until the new build runs",
+          "revision": 4,
+          "state": "completed_reported",
+          "task_id": "d7e90779-bec9-4073-8a75-c03097eb4604",
+          "title": "Release trial"
+        }
+      },
+      "w04": {
+        "recorded": true,
+        "release_assignment_id": "96cba83b-f63a-439c-bf4d-b26fa2e8e61f",
+        "task_state": "completed_reported"
+      }
+    },
+    "components": [
+      "router:main",
+      "worker:trial",
+      "agent:trial",
+      "hermes:main",
+      "hermes-host:main",
+      "trigger:source",
+      "feishu:trial"
+    ],
+    "executed_at_utc": "2026-11-27T05:25:20.520569+00:00",
+    "original_rollback_rejected": true,
+    "previous_release_readback": {
+      "attachment_sha256": "847c7120ed0e8c287ed0273b596882a9e3390b9608c79ec313c009032d5ac97e",
+      "extra_manager_notifications": 0,
+      "extra_native_inputs": 0,
+      "extra_platform_sends": 0,
+      "followup_chat_receipt": {
+        "delivery_id": "chat-om_bundle_after_return",
+        "digest": "5a89487e25f2c447138efcc68b2375211480a697ee93b7ec31cf1aff76d15338",
+        "native_id": "459fdc5c-37fa-4bd2-8a56-6c7cf7ab9599",
+        "session": "release-trial-agent",
+        "turn_id": "2637866c-cc85-4717-96fc-aba9a7c8b95e"
+      },
+      "followup_reply_id": "om_3",
+      "reports": 1,
+      "task_state_after_acceptance": "closed",
+      "task_state_before_acceptance": "completed_reported"
+    },
+    "scope": "Installed rewrite releases, loopback TLS and SQLite. Agent, native sessions and Feishu are fixtures.",
+    "starts": [
+      "35ba22f66e3017a1756b8645f3b88d091b3ff6f8",
+      "e947acdef98bc62b626371bc7cecb734ca8c7145",
+      "35ba22f66e3017a1756b8645f3b88d091b3ff6f8"
+    ]
+  }
+}

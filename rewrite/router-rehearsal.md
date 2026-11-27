@@ -472,6 +472,22 @@ python3 -m rewrite.state_bundle rollback --snapshot ./snapshot --manifest-sha256
 
 版本级复跑为 `python3 -m rewrite.release_check --repository . --previous b31cee5da7c8dc74a76accdd78d8a6c5cb49484c --new 5de36ad66df26dc34fe3832ed14e77b1d9f19551`。两个已提交版本在各自新目录启动真实 Router，以专用临时 TLS 和身份验同一张待派单。旧包→新包→旧包后只查到原单一张，新试用库字节未变。该演练在 macOS 跑过；Windows 与跨机宿主尚待验收。
 
+### 保留试用写入的新版版本回退
+
+发现试用库已有写入时，保留升级前快照，再停止试用写者并另取完整快照。普通 `state_bundle rollback` 继续拒绝用升级前快照覆盖试用写入。在隔离目录验证退版时，可用 `state_bundle restore` 从试用结束快照恢复副本，让经核验的前一发行包读取该副本。对应的原生宿主账本也须停写并保留。整个过程应保留试用原库及两份快照。
+
+先核同一工单和派发的 W04、Worker 持单、副本中通知和平台游标、来源实例及附件摘要，再重放同号请求。确认这些记录保持一致后，补跑一条新私聊和原正式成果的人工验收入口。前一发行包要能继续写入新版所需记录，已有数据可读只满足一部分条件。
+
+```sh
+python3 -B -m rewrite.release_check --repository . --component state-bundle \
+  --previous 35ba22f66e3017a1756b8645f3b88d091b3ff6f8 \
+  --new e947acdef98bc62b626371bc7cecb734ca8c7145
+```
+
+命令从两个完整提交构建和校验独立包，依次启动前一发行包、候选包、前一发行包。它只使用临时目录、临时 HTTPS 端口和生成的测试身份。正向实测前一包读回同一份待验收 W04、332,800 字节来源附件及私聊回执。重试没有新增原生输入、管理通知或飞书发送。回退后新私聊继续写入索引，溪流侧用管理入口验收原成果。反例将 `--previous` 换成 `13934de898ffda491597f4c125679e67286582da`，恢复后能读取试用期留下的数据，新私聊的收发索引校验失败。
+
+本次覆盖固定工位、回环 TLS 与 SQLite。模型、两个原生会话和飞书使用夹具。每一对目标发行包和实际部署使用的功能都要重新验证。跨机停写、托管会话、真实宿主与平台回执以及生产切换仍须各自验收。[演练证据](evidence/rewrite-state-bundle-release-cycle.json)
+
 ### 飞书输出回执与换绑
 
 拍快照时同时保留 `feishu:<工位 ID>` 和对应的 Worker、宿主及外部消息记录。使用与原来相同的飞书应用、会话和工位身份恢复。在 `audit-handoff` 的 `native_session_pending` 核对 `platform_display_unseen`、`platform_display_attempts`、`platform_input_notices`、`platform_known_receipts_uncommitted` 和 `platform_image_uploads_unconfirmed`。第一项是 Worker 已存、飞书尚未开始处理的展示。后两项分别计入已取得消息号、待 Worker 确认的展示，以及仍缺图片资源编号的展示。上述待核项清零前，保持原绑定。
