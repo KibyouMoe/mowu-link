@@ -6,7 +6,7 @@ import shutil
 import sqlite3
 import time
 
-from . import legacy_history, rollback_lifecycle, rollback_migrated_queue, rollback_peers, rollback_questions
+from . import legacy_history, rollback_idle, rollback_lifecycle, rollback_migrated_queue, rollback_peers, rollback_questions
 from .cutover import (digest, legacy_creation_request, output_directory, queue_execution_modes,
                       readonly, reconcile, restore_snapshot, stage_queue_requests, verified)
 from .messages import valid_guid
@@ -219,6 +219,8 @@ def stage_reviewed_rollback(snapshot,trial,review,destination):
         raise ValueError("legacy snapshot changed during review")
     with output_directory(destination) as stage:
         restore_snapshot(snapshot,stage,manifest)
+        with closing(readonly(stage/"legacy.db")) as old:
+            idle = rollback_idle.IdleObservers({row[0] for row in old.execute("SELECT name FROM workers")})
         # RouterServer derives its serving directory from the restored database path.
         (stage/"attachments").rename(stage/"legacy.db.attachments")
         private = stage/"private-review"
@@ -246,12 +248,13 @@ def stage_reviewed_rollback(snapshot,trial,review,destination):
                                 for worker in (proof["initial"]["assignee_id"],proof["worker_id"])}
             optional_workers.update(worker for proof in proofs.values()
                                     for worker in (proof["row"]["sender"],proof["row"]["recipient"]))
-            workers,frames,inquiries = rollback_lifecycle.check_transport(db,entries,questions,optional_workers,peer_frames)
+            workers,frames,inquiries = rollback_lifecycle.check_transport(db,entries,questions,optional_workers,peer_frames,idle)
             uploads,files = copy_reviewed_files(db,entries,facts["changed_tables"],private/"files",peer_uploads,peer_grants)
             rollback_lifecycle.check_operations(db,entries,workers,frames,uploads,
                                                 facts["changed_tables"].get("operations",{}).get("trial_only",0),
                                                 facts["queue_candidates"],questions,inquiries,preparation,
-                                                rollback_peers.ReceiptLedger(proofs))
+                                                rollback_peers.ReceiptLedger(proofs),idle)
+            observers = idle.finish(db)
             previous_sha = facts.get("peer_archive_sha256")
             previous = None
             if previous_sha:
@@ -286,6 +289,8 @@ def stage_reviewed_rollback(snapshot,trial,review,destination):
                 recovery["queue_replay_sha256"] = queue_manifest_sha
             if peer_sha:
                 recovery["peer_archive_sha256"] = peer_sha
+            if observers:
+                recovery["idle_observers"] = observers
             if applied:
                 recovery["migrated_queue_replacements"] = applied
             output.write(encode(recovery))
@@ -301,4 +306,6 @@ def stage_reviewed_rollback(snapshot,trial,review,destination):
         result["migrated_queue_replacements"] = {tid:{key:row[key] for key in fields} for tid,row in applied.items()}
     if peer_sha:
         result.update(peer_archive_sha256=peer_sha,reviewed_peers=len(proofs))
+    if observers:
+        result["idle_observers"] = len(observers)
     return result

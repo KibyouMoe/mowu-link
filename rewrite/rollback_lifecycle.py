@@ -402,7 +402,7 @@ def retain_reminder(pool, message_id, observed):
     raise ValueError("pool reminder does not match an outstanding deadline")
 
 
-def check_transport(db, entries, reviewed_questions, optional_workers=(), peer_frames=None):
+def check_transport(db, entries, reviewed_questions, optional_workers=(), peer_frames=None, idle=None):
     workers, optional_workers = set(), set(optional_workers)
     expected_frames = {}
     expected_inquiries = {}
@@ -482,6 +482,9 @@ def check_transport(db, entries, reviewed_questions, optional_workers=(), peer_f
             terminal_notices.add(tid)
     registered = db.execute("SELECT * FROM workers").fetchall()
     registered_workers = {row["worker_id"] for row in registered}
+    if idle is not None:
+        idle.include(registered_workers-workers-optional_workers)
+        optional_workers.update(idle.actors.values())
     if (not workers <= registered_workers <= (workers | optional_workers)
             or any(row["busy"] or row["held_task_id"] is not None
             or row["held_assignment_id"] is not None or row["query_id"] for row in registered)):
@@ -544,6 +547,8 @@ def check_transport(db, entries, reviewed_questions, optional_workers=(), peer_f
         if kind=="worker.status_query":
             if set(data)!={"worker_id","query_id"} or data["worker_id"] not in workers or consumer!="worker/"+data["worker_id"]:
                 raise ValueError("unexpected worker status query")
+            if idle is not None:
+                idle.query(consumer,data["query_id"],did)
             latest_query[consumer] = data["query_id"]
         elif kind=="message.deliver":
             mid = data.get("message_id")
@@ -945,7 +950,7 @@ def verify_order(db, tid, entry, operations, windows):
 
 
 def check_operations(db,entries,workers,frames,uploads,expected_count,queue_candidates,reviewed_questions,
-                     inquiry_sources,initial_assignments,peer_ledger=None):
+                     inquiry_sources,initial_assignments,peer_ledger=None,idle=None):
     operations, applicable, acked, sessions = {},0,{},{}
     asks,answers = {},{}
     samples,continued = {},{}
@@ -1016,6 +1021,8 @@ def check_operations(db,entries,workers,frames,uploads,expected_count,queue_cand
         elif method=="PUT" and parts[:3]==["","v1","workers"] and len(parts)>=5 and parts[3] in workers:
             if actor!="worker/"+parts[3] or parts[4:] not in (["session"],["presence"],["links","adapter"]):
                 raise ValueError("trial has an unrecognized worker operation")
+            if idle is not None:
+                idle.record(actor,parts[4:],body,reply,row["seq"],acked)
             if parts[4:]==["session"]:
                 session = body.get("session_id")
                 if not isinstance(session,str) or not session.strip():

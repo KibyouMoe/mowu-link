@@ -120,6 +120,8 @@ python3 -B -m rewrite.service peer-archive \
 
 复跑 `python3 -B -m unittest -v rewrite.test_cutover -k reviewed_private_peers`。实际旧 Router HTTP 以原共享身份查询新私聊和附件均返回 404，已验收工单仍归档。独立 HTTPS 服务实际核对原双方可读全文及跨块附件，第三工位和非参与的溪流身份返回 404。回到重做版后，原两条各有原回执，重送原号返回 409，新增回信只产生一次宿主收件。第二次回退保留原两条和新增回复。宿主与 W04 模型使用夹具。[回退与回迁实测](evidence/trial-peer-fallback.json)
 
+同批可以保留旧台账上其他工位的空闲观察证据。审核核对试用时该工位的无持单登记、每次传输入站确认、原会话的空闲回报和最后的心跳或适配器连通回执。核准的工位列在私有清单的 `idle_observers`，恢复的旧库仍按原状态启动。未在旧台账登记的旁观工位、没有查询回报、曾见忙碌或仍持单时，需要继续对账。该项适用于已有已审核工单或同伴私聊的回退。
+
 ### 旧队列迁入后改过、仍未派发的单
 
 用 `reconcile` 的 `work_orders` 核对原旧单号、最终工位和试用修订。只有两次迁移之间始终未派发、没有 W03、报告或候选材料的原待派单可按本节处理。审核过的 `review.json` 在已有字段外加入 `replace_migrated_queue`。每项以试用单号为键，值为 `{"legacy_task_id":"原旧单号","revision":最终修订号,"execution_mode":"goal"}`。只有这类替代时写 `closed_assignments: {}`。审核绑定当前 `trial_sha256`，使用同一个 `stage-reviewed-rollback` 命令。可与已验收、已取消及试用新建待派单同批核对。

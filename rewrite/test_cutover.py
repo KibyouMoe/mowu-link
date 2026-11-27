@@ -3754,15 +3754,23 @@ store.close()
                     listener.shutdown()
                     thread.join()
 
-        self.old("store=RouterStore(sys.argv[1]); store.upsert_worker('oguri'); store.close()",self.legacy)
+        self.old("""
+store=RouterStore(sys.argv[1])
+store.upsert_worker("oguri")
+store.upsert_worker("quiet")
+store.close()
+""",self.legacy)
         backup(self.legacy,self.attachments,self.snapshot)
         prepare(self.snapshot,self.trial,self.source_id)
         clock = Clock()
-        loop = Loop(self.trial,clock,FixtureHost,extra_workers=("tama",))
+        loop = Loop(self.trial,clock,FixtureHost,extra_workers=("tama","quiet"))
         host = FixtureHost(self.trial/"tama-host.db","tama-native-session")
         adapter = HostAdapter(self.trial/"tama-adapter.db",host,host.session)
         tama = Worker(self.trial/"tama-worker.db","tama",loop.extra_clients["tama"],adapter,clock=clock)
         media_key = guid()
+        quiet_host = FixtureHost(self.trial/"quiet-host.db","quiet-native-session")
+        quiet = Worker(self.trial/"quiet-worker.db","quiet",loop.extra_clients["quiet"],
+                       HostAdapter(self.trial/"quiet-adapter.db",quiet_host,quiet_host.session),clock=clock)
         with running(WorkerService(tama).listen({media_key:"adapter/tama"},("127.0.0.1",0),None)) as media:
             media_client = Client(f"http://127.0.0.1:{media.server_port}",media_key)
             adapter.media_store = NativeFiles(self.root/"tama-files",media_client)
@@ -3773,6 +3781,11 @@ store.close()
             with running(loop.server):
                 loop.worker.connect()
                 tama.connect()
+                quiet.connect()
+                quiet.router.request("PUT","workers/quiet/links/adapter",
+                                     {"session_id":quiet.session,"seq":1,"connected":True},guid())
+                quiet.poll()
+                self.assertEqual(quiet_host.entries(),[])
                 uploaded = loop.wire.request("POST","uploads",{
                     "name":"交接.md","size_bytes":len(data),"sha256":sha},guid())
                 for offset in range(0,len(data),262144):
@@ -3823,6 +3836,9 @@ store.close()
             ("UPDATE attachment_grants SET actor='worker/stranger' WHERE attachment_id=?",(fid,),"attachment_not_found"),
             ("UPDATE chunks SET bytes=zeroblob(length(bytes)) WHERE start=0",(),"digest mismatch"),
             ("UPDATE operations SET response='{}' WHERE key=?",("peer-receipt-"+mid,),"does not match"),
+            ("UPDATE operations SET request=json_set(request,'$[1].busy',json('true')) "
+             "WHERE actor='worker/quiet' AND key LIKE 'presence-%'",(),"outstanding queries"),
+            ("DELETE FROM operations WHERE actor='worker/quiet' AND key LIKE 'presence-%'",(),"outstanding queries"),
         ):
             with self.subTest(sql=sql):
                 trial = self.root/"damaged-trial"
@@ -3836,14 +3852,32 @@ store.close()
                 with self.assertRaisesRegex((ValueError,Fault),error):
                     stage_reviewed_rollback(self.snapshot,trial,review,self.restore)
                 self.assertFalse(self.restore.exists())
+        unknown_trial = self.root/"unrecognized-worker-trial"
+        unknown_trial.mkdir()
+        for name in ("baseline.json","router.db"):
+            shutil.copyfile(self.trial/name,unknown_trial/name)
+        unknown_loop = Loop(unknown_trial,clock,FixtureHost,extra_workers=("unrecognized",))
+        unknown_host = FixtureHost(unknown_trial/"unrecognized-host.db","unrecognized-session")
+        unknown = Worker(unknown_trial/"unrecognized-worker.db","unrecognized",unknown_loop.extra_clients["unrecognized"],
+                         HostAdapter(unknown_trial/"unrecognized-adapter.db",unknown_host,unknown_host.session),clock=clock)
+        with running(unknown_loop.server):
+            unknown.connect()
+            unknown.poll()
+            self.assertFalse(unknown.hold()["held_task_id"])
+        review.write_text(json.dumps({**decision,"trial_sha256":digest(unknown_trial/"router.db")}))
+        with self.assertRaisesRegex(ValueError,"outstanding queries"):
+            stage_reviewed_rollback(self.snapshot,unknown_trial,review,self.restore)
+        self.assertFalse(self.restore.exists())
         review.write_text(json.dumps(decision))
         result = stage_reviewed_rollback(self.snapshot,self.trial,review,self.restore)
         self.assertEqual((result["reviewed_peers"],result["reviewed_orders"]),(2,1))
+        self.assertEqual(result["idle_observers"],1)
         self.assertEqual(digest(self.trial/"router.db"),before)
         archive = self.restore/"private-review"/PEER_ARCHIVE
         archive_sha = result["peer_archive_sha256"]
         self.assertEqual((digest(archive),archive.stat().st_mode&0o777),(archive_sha,0o600))
         manifest = json.loads((archive.parent/"manifest.json").read_text())
+        self.assertEqual(manifest["idle_observers"],["quiet"])
         old_task = manifest["orders"][tid]["legacy_task_id"]
         old = self.old("""
 from server import RouterServer
@@ -3966,6 +4000,7 @@ store.close()
             Path(evidence).write_text(json.dumps({
                 "trial_sha256":before,"peer_archive_sha256":archive_sha,"origin":src,
                 "formal_order":{"task_id":tid,"assignment_id":aid,"legacy_task_id":old_task},
+                "confirmed_idle_observers":manifest["idle_observers"],
                 "peer_messages":[{"message_id":r["message_id"],"delivery_id":r["delivery_id"],
                                   "host_receipt_id":r["host_receipt_id"],"reply_to":parent}
                                  for r,parent in ((first,None),(second,mid),(third,reply_id))],
@@ -3977,7 +4012,8 @@ store.close()
                 "reentry":{"archived_inputs_replayed":0,"new_reply_inputs":len(resumed.entries()),
                            "second_fallback_total_messages":len(rows),"second_archive_sha256":output["peer_archive_sha256"]},
                 "refused":["omitted review","missing host receipt","wrong attachment grant",
-                           "corrupt attachment bytes","changed native receipt","wrong reentry archive digest"],
+                           "corrupt attachment bytes","changed native receipt","wrong reentry archive digest",
+                           "busy observation","missing idle observation","unrecognized idle worker"],
                 "scope":"Actual isolated legacy and rewrite HTTP, SQLite and archive HTTPS. Receiving hosts and W04 model are fixtures."
             },indent=2)+"\n",encoding="utf-8")
 
