@@ -5,6 +5,7 @@ import unittest
 from . import peer_retry
 from .adapter import HostAdapter
 from .devloop import FixtureHost, Loop
+from .legacy_test_fixture import archival_compatibility
 from .native_files import NativeFiles
 from .storage import Fault, guid
 from .test_mainline import Clock
@@ -55,6 +56,7 @@ class Peers(unittest.TestCase):
         self.addCleanup(srv.shutdown)
         return Client("http://127.0.0.1:"+str(srv.server_port),token)
 
+    @archival_compatibility
     def test_original_participants_can_read_and_answer_one_unambiguous_archived_peer(self):
         source,duplicate,parent,unrelated = (guid() for _ in range(4))
         with self.loop.orders.db.transaction() as db:

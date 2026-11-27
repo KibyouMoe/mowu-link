@@ -15,7 +15,9 @@ python3 -m unittest -v rewrite.test_mainline
 
 **怎样读结果。** `host_receipt` 来自目标宿主夹具自己的输入账本，带会话、输入号、投递号和正文摘要。`after_turn` 应为 `working`。夹具 Agent 在该输入专属的 MCP 管道调用 `worker_report` 后，W04 回应 `completed_reported` 并给出原派发号。Hermes 侧收到一条含成果正文、同一工单号的 `Notify`。最后由模拟溪流显式验收，才出现 `after_review: closed`。
 
-完整回归从仓库根目录运行 `python3 -B -m unittest discover -q -s rewrite -t .`。独立发布包只带 `rewrite/`。从安装目录跑全套时，把固定提交的 `server/router`、`server/trigger` 和 `sources/email` 导出到另一个临时目录，将 `MOWULINK_TEST_LEGACY_ROOT` 指向该目录。旧源码只用于迁移与回退用例。
+从校验后的独立安装目录运行 `python3 -B -m rewrite.release_suite`。安装目录只需发行包内的 `rewrite/`。结果列出实际执行、环境跳过和不计入验收的历史兼容用例。Linux 来宾安装验证使用同一入口，并在执行后再核包摘要。
+
+需要复现范围更正前的兼容证据时，在带原源码的仓库运行 `python3 -B -m unittest discover -q -s rewrite -t .`，或按历史记录使用固定版本的旧端源码。新版验收使用独立安装入口。
 
 ## 边界与证据
 

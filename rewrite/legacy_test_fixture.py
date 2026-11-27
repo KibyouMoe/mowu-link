@@ -9,6 +9,12 @@ from . import legacy_history, legacy_peers
 from .cutover import digest, readonly
 
 
+def archival_compatibility(test):
+    """Keep the test available for historical compatibility runs."""
+    test.archival_compatibility = True
+    return test
+
+
 def source_for(component):
     root = Path(os.environ.get("MOWULINK_TEST_LEGACY_ROOT") or Path(__file__).resolve().parents[1])
     source = (root/"server"/component).resolve()

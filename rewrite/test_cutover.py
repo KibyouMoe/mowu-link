@@ -14,7 +14,7 @@ from threading import Thread
 from .adapter import HostAdapter
 from .cutover import backup, digest, export_chat, prepare, reconcile, rollback, stage_queue_rollback, verified
 from .devloop import FixtureHost, Loop, agent_report
-from .legacy_test_fixture import source_for
+from .legacy_test_fixture import archival_compatibility, source_for
 from .native_files import NativeFiles
 from .rollback_peers import NAME as PEER_ARCHIVE
 from .test_mainline import Clock
@@ -31,6 +31,7 @@ from .worker import Worker
 from .worker_service import WorkerService
 
 
+@archival_compatibility
 @unittest.skipUnless(os.name == "posix","this version of the old Router imports fcntl")
 class Cutover(unittest.TestCase):
     def setUp(self):

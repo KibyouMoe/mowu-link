@@ -16,7 +16,7 @@ from .devloop import FixtureHost, Loop, agent_report
 from .feishu_inbound import Inbound
 from .feishu_output import Views
 from .feeds import Feed, poll_game, poll_mail
-from .legacy_test_fixture import source_for
+from .legacy_test_fixture import archival_compatibility, source_for
 from .manager_notices import ManagerNotices
 from .reviewed_rollback import stage_reviewed_rollback
 from .state_bundle import capture
@@ -32,6 +32,7 @@ from .wire import Client
 from .worker_service import WorkerService
 
 
+@archival_compatibility
 @unittest.skipUnless(os.name=="posix","the legacy Router uses fcntl")
 class SourceRollback(unittest.TestCase):
     def test_cutover_stops_when_worker_disconnect_erases_a_subscription(self):

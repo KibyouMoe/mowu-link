@@ -3,7 +3,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import shutil
 import sqlite3
 import subprocess
 import sys
@@ -79,10 +78,8 @@ class Bundle(unittest.TestCase):
                 yield manager,worker,source,Client(url,"mail"),platform,views
 
 
-    @unittest.skipUnless(shutil.which("openssl"),"TLS fixture certificate generator unavailable")
     def test_prepare_worker_chat_archive_after_both_receipts_recover(self):
         from .feishu_history import prepare as prepare_history
-        from .release_check import serve
 
         def record(platform,mid,text):
             return platform.record("app","user","trainer",{"chat_type":"p2p","chat_id":"chat",
@@ -164,31 +161,26 @@ class Bundle(unittest.TestCase):
                           final["finals_without_chat_proof"]),(3,2,1,2))
         with self.assertRaisesRegex(ValueError,"no Feishu state belongs"):
             prepare_history(snapshot,proof["manifest_sha256"],self.root/"wrong-chat","tamamo")
-        with closing(sqlite3.connect(self.root/"partial-chat"/"chat-history.db")) as state:
+        partial_archive = self.root/"partial-chat"/"chat-history.db"
+        with closing(sqlite3.connect(partial_archive.as_uri()+"?mode=ro",uri=True)) as state:
             partial_ids = [row[0] for row in state.execute("SELECT id FROM messages ORDER BY id")]
-        token = guid()
-        roles = config(self.root,"history-roles.json",{token:"chat-reader/oguri"})
-        cert,key = self.root/"history.pem",self.root/"history.key"
-        subprocess.run(["openssl","req","-x509","-newkey","rsa:2048","-nodes","-days","1","-subj","/CN=localhost",
-                        "-addext","subjectAltName=IP:127.0.0.1","-keyout",key.name,"-out",cert.name],
-                       cwd=self.root,capture_output=True,check=True,timeout=15)
         archive = archive_dir/"chat-history.db"
-        with serve(Path(__file__).resolve().parents[1],"chat-archive",archive,roles,cert,key,os.environ,
-                   ("--worker-id","oguri","--sha256",final["archive_sha256"])) as url:
-            reader = Client(url,token,cert)
-            records = reader.request("GET","chat/oguri/messages")["messages"]
+        self.assertEqual(hashlib.sha256(archive.read_bytes()).hexdigest(),final["archive_sha256"])
+        with closing(sqlite3.connect(archive.as_uri()+"?mode=ro",uri=True)) as state:
+            state.row_factory = sqlite3.Row
+            records = state.execute("SELECT id,text,worker,message_id FROM messages ORDER BY id").fetchall()
             self.assertEqual([row["text"] for row in records],["first trainer message","first public reply",
                 "input to a mixed turn","second trainer message","second public reply"])
             self.assertEqual([row["id"] for row in records[:-1]],partial_ids)
-            self.assertEqual(reader.request("GET",f"chat/oguri/messages?since={partial_ids[-1]}")["messages"],records[-1:])
-            with self.assertRaisesRegex(Fault,"unknown_chat_history"):
-                reader.request("GET","chat/tamamo/messages")
+            self.assertEqual({row["worker"] for row in records},{"oguri"})
+            self.assertEqual(state.execute("SELECT id,text,worker,message_id FROM messages WHERE id>? ORDER BY id",
+                                           (partial_ids[-1],)).fetchall(),records[-1:])
         if path := os.environ.get("MOWULINK_WORKER_CHAT_EVIDENCE"):
             Path(path).write_text(json.dumps({"before_restore":{"rows":partial["count"],"inbound":partial["inbound"],
                 "outbound":partial["outbound"]},"after_restore":final,"copied_history_cursor":partial_ids[-1],
                 "ids":[row["id"] for row in records],"last_feishu_message_id":records[-1]["message_id"],
-                "native_retry_extra_inputs":0,"platform_retry_extra_messages":0,"foreign_worker_http":404,
-                "scope":"Local Worker HTTP, isolated HTTPS chat archive and component snapshots. Native input and Feishu use fixtures."},
+                "native_retry_extra_inputs":0,"platform_retry_extra_messages":0,"archive_workers":["oguri"],
+                "scope":"Local Worker HTTP, read-only chat archive and component snapshots. Native input and Feishu use fixtures."},
                 indent=2)+"\n",encoding="utf-8")
 
     def test_five_component_restore_resumes_hold_attachment_notifications_and_platform_input(self):

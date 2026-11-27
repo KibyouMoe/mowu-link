@@ -32,7 +32,7 @@ from .feishu_inbound import Inbound
 from .feishu_output import Views
 from .hermes import HermesAdapter
 from .host_wire import RemoteAdapter, serve_adapter
-from .legacy_test_fixture import import_acked_peer
+from .legacy_test_fixture import archival_compatibility, import_acked_peer
 from .native_files import NativeFiles
 from .orders import Orders
 from .question_cards import Actions
@@ -3048,6 +3048,7 @@ class CodexAppServer(unittest.TestCase):
                          "private_arguments_omitted":True,"early_cards":3,"card_titles":card_titles(),
                          "boundary":"Actual App Server command execution in an isolated test directory; model and Feishu fixtures"}
 
+    @archival_compatibility
     @unittest.skipUnless(os.name=="posix","the legacy Router test fixture requires fcntl")
     def test_codex_native_tool_reads_migrated_peer_and_replies_on_the_original_link(self):
         rpc = self.enterContext(isolated_app_server(self.root,self.origin))

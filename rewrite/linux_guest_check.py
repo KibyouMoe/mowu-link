@@ -5,11 +5,10 @@ import json
 import os
 from pathlib import Path
 import platform
-import shutil
 import sqlite3
+import subprocess
 import sys
 import tarfile
-import unittest
 
 
 def install(revision, checksum):
@@ -26,19 +25,10 @@ def install(revision, checksum):
 
 
 def suite():
-    # The old Router modules for migration tests belong outside the verified release.
-    shutil.copytree("installed","suite")
-    with tarfile.open("legacy.tar") as archive:
-        archive.extractall("suite",filter="data")
-    os.chdir("suite")
-    sys.path.insert(0,os.getcwd())
-    tests = unittest.defaultTestLoader.discover("rewrite",top_level_dir=".")
-    result = unittest.TextTestRunner().run(tests)
-    if not result.wasSuccessful():
-        raise RuntimeError("Linux regression failed")
+    counts = json.loads(subprocess.check_output([sys.executable,"-B","-m","rewrite.release_suite"],
+                                                cwd="installed",timeout=150))
     return {"system":platform.system(),"kernel":platform.release(),"architecture":platform.machine(),
-            "python":platform.python_version(),"uid":os.getuid(),"tests_run":result.testsRun,
-            "skipped":[test.id() for test,_ in result.skipped],"failed":len(result.failures),"errors":len(result.errors)}
+            "python":platform.python_version(),"uid":os.getuid(),**counts}
 
 
 def inputs():

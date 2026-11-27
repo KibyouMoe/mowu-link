@@ -36,7 +36,7 @@ from .dsh_session_family import DshPreparation
 from .feishu_inbound import Inbound
 from .feishu_output import Views
 from .host_wire import RemoteAdapter, serve_adapter
-from .legacy_test_fixture import import_acked_peer
+from .legacy_test_fixture import archival_compatibility, import_acked_peer
 from .native_files import NativeFiles
 from .orders import Orders
 from .release_check import config, serve
@@ -4031,6 +4031,7 @@ exec {docker} "$@"
                 "formal_task_count":0,"clock":"controlled test clock",
                 "boundary":"Two actual DSH AgentLoop processes with scripted local providers"}
 
+    @archival_compatibility
     def test_archived_peer_conversation_resumes_via_two_dsh_native_sessions(self):
         directory,loop,service,_ = self.goal_worker("dsh-peer-archive-recipient",extra_workers=["tama"])
         peer_dir = self.enterContext(tempfile.TemporaryDirectory(dir="/tmp",prefix="mldsh-archive-peer-"))

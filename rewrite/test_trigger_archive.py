@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from .cutover import digest
 from .devloop import FixtureHost, Loop
-from .legacy_test_fixture import source_for
+from .legacy_test_fixture import archival_compatibility, source_for
 from .state_bundle import capture as capture_components
 from .storage import guid
 from .test_mainline import Clock
@@ -22,6 +22,7 @@ from .trigger_handoff import HANDOFF_DB, plan, stage
 from .trigger_return import audit, stage_return
 
 
+@archival_compatibility
 class TriggerArchive(unittest.TestCase):
     def setUp(self):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))

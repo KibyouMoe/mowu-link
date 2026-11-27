@@ -128,13 +128,6 @@ def run(repository, revision, image, socket):
         tokens = {role:uuid.uuid4().hex for role in ("manager","worker","adapter")}
         def identities(mapping):
             return json.dumps({tokens[k]:v for k,v in mapping.items()}).encode()
-        legacy = communicate(["git","-C",str(repository),"archive",revision,
-                              "server/router/server.py","server/router/attachments.py","server/router/task_lifecycle.py",
-                              "server/router/summary_requests.py","server/router/selftest_router.py",
-                              "server/router/stream_fixture.py","server/router/config/router-lifecycle.json",
-                              "server/trigger/server.py","server/trigger/buscore.py",
-                              "server/trigger/clients/mc_chat_client.py","server/trigger/clients/filterwall.py",
-                              "server/trigger/clients/localbus.py","sources/email/client.py"])
         net = communicate([*docker,"network","create","--opt","com.docker.network.bridge.enable_ip_masquerade=false",
                            "mowulink-test-"+uuid.uuid4().hex]).decode().strip()
         cleanup.callback(communicate,[*docker,"network","rm",net])
@@ -149,7 +142,7 @@ def run(repository, revision, image, socket):
         guest("mkdir","-m","700",GUEST,directory="/tmp")
         guest("tar","-xf","-",data=packet({
             "guest.py":Path(__file__).with_name("linux_guest_check.py").read_bytes(),
-            "release.tar":archive.read_bytes(),"legacy.tar":legacy,"ca.pem":cert.read_bytes(),"key.pem":key.read_bytes(),
+            "release.tar":archive.read_bytes(),"ca.pem":cert.read_bytes(),"key.pem":key.read_bytes(),
             "router.json":identities({"manager":"hermes","worker":"worker/trial"}),
             "adapter.json":identities({"adapter":"worker/trial"})}))
         installed = json.loads(guest("python","-I","-B","guest.py","install",revision,release["sha256"]))

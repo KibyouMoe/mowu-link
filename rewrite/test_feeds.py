@@ -19,7 +19,7 @@ from .devloop import Loop
 from .cutover import digest
 from .feed_return import audit, stage
 from .feeds import Feed, poll_game, poll_mail
-from .legacy_test_fixture import source_for
+from .legacy_test_fixture import archival_compatibility, source_for
 from .state_bundle import capture
 from .storage import Fault,encode
 
@@ -182,6 +182,7 @@ class Sources(unittest.TestCase):
         self.flush(self.game)
         self.assertEqual(len(self.loop.hermes.messages()["items"]),3)
 
+    @archival_compatibility
     def test_imported_mailbox_position_refuses_another_epoch_and_captures_only_new_uids(self):
         root = self.root
         legacy = root/"old-mail.json"
@@ -220,6 +221,7 @@ class Sources(unittest.TestCase):
             feed.import_cursor(legacy)
         self.assertEqual(len(feed.trigger.pending()),2)
 
+    @archival_compatibility
     def test_imported_game_position_rejects_wrong_bridge_and_does_not_reset_on_first_probe(self):
         origin = self.game_server()
         feed = Feed(self.root/"game-trial.db","mc_chat",[origin])
@@ -249,6 +251,7 @@ class Sources(unittest.TestCase):
         self.assertTrue(clean.import_cursor(cursor)["verified"])
         self.assertEqual(len(clean.trigger.pending()),2)
 
+    @archival_compatibility
     def test_imported_game_refuses_overlapping_sequence_from_another_login(self):
         origin = self.game_server()
         opener = build_opener(ProxyHandler({}))
@@ -301,6 +304,7 @@ class Sources(unittest.TestCase):
         with self.assertRaises(Fault):
             Feed(self.root/"mc.db","mc_chat",["another-bridge"]).cursor()
 
+    @archival_compatibility
     @unittest.skipUnless(os.name=="posix","legacy Trigger requires POSIX")
     def test_imported_mail_and_game_return_only_after_trial_receipts_and_resume_old_collectors(self):
         origin = self.game_server()

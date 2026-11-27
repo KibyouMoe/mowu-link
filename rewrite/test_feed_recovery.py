@@ -14,7 +14,7 @@ from . import feed_recovery, feed_return, test_cutover, test_feeds
 from .cutover import backup, digest, prepare, readonly
 from .devloop import FixtureHost, Loop
 from .feeds import Feed, mail_text, poll_game, poll_mail
-from .legacy_test_fixture import source_for
+from .legacy_test_fixture import archival_compatibility, source_for
 from .reviewed_rollback import stage_reviewed_rollback
 from .state_bundle import capture
 from .storage import encode, guid
@@ -23,6 +23,7 @@ from .test_state_bundle import running
 from .trigger_archive import DATABASE as OLD_TRIGGER_DB, capture as capture_trigger
 
 
+@archival_compatibility
 @unittest.skipUnless(os.name=="posix","the legacy Router uses fcntl")
 class Recovery(unittest.TestCase):
     def setUp(self):
@@ -340,6 +341,7 @@ print(json.dumps({"attempted":attempted,"stored":stored,"mail_reported_failed":s
             },indent=2)+"\n")
 
 
+@archival_compatibility
 class PortableRecovery(unittest.TestCase):
     def test_game_capture_review_stages_one_record_in_an_installation(self):
         root = Path(self.enterContext(TemporaryDirectory(prefix="feed-recovery-")))
