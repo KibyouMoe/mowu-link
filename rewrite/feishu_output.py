@@ -20,6 +20,10 @@ def card(title, text, session):
             "header":{"template":"indigo","title":plain(title)},"elements":elements}
 
 
+def write_key(chat,event_id):
+    return str(uuid5(NAMESPACE_URL,encode(["mowulink-feishu",chat,event_id])))
+
+
 class Views:
     def __init__(self, database, worker, platform, chat, name, clock=time.time):
         self.worker,self.platform,self.chat,self.name,self.clock = worker,platform,chat,name,clock
@@ -183,7 +187,7 @@ class Views:
 
     def prepare_write(self,db,seq,event):
         session,turn,kind = event.get("session",""),event.get("turn_id",""),event["kind"]
-        key = str(uuid5(NAMESPACE_URL,encode(["mowulink-feishu",self.chat,event["event_id"]])))
+        key = write_key(self.chat,event["event_id"])
         target,method = self.chat,"create"
         text = event.get("text","")
         if kind in ("question_open","question_answered","question_closed"):

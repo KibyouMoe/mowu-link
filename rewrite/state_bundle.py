@@ -10,7 +10,7 @@ import shutil
 import sqlite3
 from tempfile import TemporaryDirectory
 
-from . import delivery, dsh_workspace_audit, trigger_audit
+from . import delivery, dsh_workspace_audit, feishu_audit, trigger_audit
 from . import state_bundle_managed as managed
 from .cutover import digest, output_directory, readonly
 from .storage import encode, guid, state_writer
@@ -418,6 +418,7 @@ def audit_handoff(snapshot,expected,*,dsh_runtimes=None):
         remote = current.pop(wid,None)
         platform_label = "feishu:"+wid
         platform_issue = None
+        platform_proof = None
         with closing(readonly(snapshot/filename("worker:"+wid))) as db:
             local = db.execute("""SELECT task_id,assignment_id,delivery_id,host_state FROM jobs
                                   WHERE stage='accepted'""").fetchone()
@@ -429,6 +430,8 @@ def audit_handoff(snapshot,expected,*,dsh_runtimes=None):
             if platform_label in labels:
                 unseen,platform_issue = feishu_display_backlog(db,snapshot/filename(platform_label))
                 session_pending["platform_display_unseen"] = unseen
+                if platform_issue is None:
+                    platform_proof = feishu_audit.reconcile(db)
             bound = None
             if local and db.execute("SELECT 1 FROM sqlite_schema WHERE name='assignment_sessions'").fetchone():
                 bound = db.execute("SELECT session FROM assignment_sessions WHERE assignment_id=?",
@@ -437,6 +440,8 @@ def audit_handoff(snapshot,expected,*,dsh_runtimes=None):
         remote_ids = {key:remote[key] for key in ("task_id","assignment_id")} if remote else None
         if platform_issue:
             problems.append(platform_issue)
+        if platform_proof is not None:
+            problems.extend(sorted({row["code"] for row in platform_proof["issues"]}))
         if local_ids!=remote_ids:
             problems.append("assignment_mismatch")
         if (wid in sessions and (not sid or sid[0]!=sessions[wid])) or (local and wid not in sessions):
@@ -474,6 +479,7 @@ def audit_handoff(snapshot,expected,*,dsh_runtimes=None):
                         "unconfirmed_reports":pending,"issues":problems,"native_session_pending":session_pending,
                         "inbox_transport":transport,
                         "native_session_ledger_clear":not problems and all(count==0 for count in session_pending.values()),
+                        **({"feishu_receipts":platform_proof} if platform_proof is not None else {}),
                         **({"dsh_workspace_audit":workspace} if workspace is not None else {})})
         issues.extend({"worker_id":wid,"issue":problem} for problem in problems)
     issues.extend({"worker_id":wid,"issue":"active_worker_state_missing","task_id":row["task_id"],

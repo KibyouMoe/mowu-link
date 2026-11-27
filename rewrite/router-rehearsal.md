@@ -532,6 +532,8 @@ python3 -B -m rewrite.release_check --repository . --component state-bundle \
 
 审计用同一快照里的 Worker 展示队列逐条核对飞书游标之前的事件和消息号。游标领先、缺前序收件或同序号正文不符时会显示 `platform_display_ledger_mismatch`，换绑会中止。先选回同一停写窗口内的两份库。只有尚未尝试的尾项时，按原绑定恢复平台并确认送达，再重新停写、采集和审计。
 
+`audit-handoff` 的 `feishu_receipts` 核对入站私聊和指令的 Worker 回执，以及出站请求的原会话、幂等键、卡片更新目标、飞书消息号和 Worker 菜单关联。Worker 已记入站、飞书侧还缺回执时计入 `worker_inputs_awaiting_platform`。飞书消息号已落盘、展示游标尚未推进时计入 `provider_outputs_awaiting_commit`。从原绑定的隔离副本恢复，两种情况都沿用原标识补齐本地记录。两边已保存不同回执、卡片目标错位或会话绑定不符时会列出待核项并阻止发布换绑目录。审计输出只含标识和计数。实际飞书云端仍以授权会话的回执查验为准。
+
 准备发送时保存完整的目标、正文和幂等号。显示名或渲染参数变化后，恢复仍使用这份请求。取得飞书消息号后先落盘，再确认 Worker 的菜单关联。只缺 Worker 回执时，恢复会沿用原消息号补录。若平台新消息回执仍未知，超过程序的 55 分钟重试窗口即保留待核。已知目标卡的内容更新可向原卡重试同一正文。
 
 图片先上传取得资源编号，再发到会话。上传前记录原图摘要和最早重试时间。回执丢失时在 5 秒、10 秒、20 秒后逐步重试，间隔最多 5 分钟。重开仍按该进度等候，图后的展示一并等待。重试只上传已核对的原始字节，可能多占平台资源。首次取得可用编号即落盘，同一展示只按原消息 UUID 发送。已知编号时恢复直接复用它。飞书公开会话历史未提供发送 UUID 对账字段，无法用相同正文确认超时的原消息。[飞书上传图片](https://open.feishu.cn/document/server-docs/im-v1/image/create.md) · [飞书会话历史](https://open.feishu.cn/document/server-docs/im-v1/message/list.md)

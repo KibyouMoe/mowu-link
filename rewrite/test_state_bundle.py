@@ -518,6 +518,8 @@ class Bundle(unittest.TestCase):
         sha = capture(recovered,self.revision,with_receipt)["manifest_sha256"]
         waiting, = audit_handoff(with_receipt,sha)["workers"]
         self.assertEqual(waiting["native_session_pending"]["platform_known_receipts_uncommitted"],1)
+        self.assertEqual(waiting["feishu_receipts"]["provider_outputs_awaiting_commit"],1)
+        self.assertEqual(waiting["feishu_receipts"]["issues"],[])
         final = restore(with_receipt,sha,self.root/"after-known-receipt")
         self.clock.advance(3601)
         with self.stack(final) as (_m,w,_source,_mail,_inbound,views):
@@ -925,6 +927,94 @@ class Bundle(unittest.TestCase):
                 self.assertIn("platform_display_ledger_mismatch",worker["issues"])
                 self.assertFalse(worker["native_session_ledger_clear"])
                 self.assertNotIn("Different display",encode(audited))
+
+    def test_handoff_reconciles_feishu_receipts_even_when_display_prefix_matches(self):
+        session = self.native.session
+        incoming = "om_private_audit"
+        with self.stack(self.sources,pin_session=True) as (_m,worker,_source,_mail,inbound,views):
+            WorkerService(worker,self.clock).step()
+            for mid,text in ((incoming,"Original private message"),("om_command_audit","/status")):
+                inbound.record("app","user","trainer",{"chat_type":"p2p","chat_id":"chat","message_id":mid,
+                    "message_type":"text","content":encode({"text":text})})
+            inbound.deliver("om_command_audit")
+            request = inbound.worker.request
+
+            def lose_private_ack(method,path,*args,**kwargs):
+                reply = request(method,path,*args,**kwargs)
+                if path=="worker/chat":
+                    raise ConnectionError("lost the Worker reply after native receipt")
+                return reply
+
+            inbound.worker.request = lose_private_ack
+            with self.assertRaisesRegex(ConnectionError,"lost the Worker reply after native receipt"):
+                inbound.deliver(incoming)
+            inbound.worker.request = request
+            with worker.db.transaction() as db:
+                menu = worker_commands.record(db,"om_audit_menu","/model","/model",session,"Choices",
+                    menu=(session,"models",1,encode({"1":"fixture/model"}),None))
+                for idx,text in enumerate(("first","second")):
+                    display.append(db,{"event_id":f"audit-progress-{idx}","kind":"progress","session":session,
+                                       "turn_id":"original-turn","text":text})
+                final = display.append(db,{"event_id":"audit-final","kind":"final","session":session,
+                                           "turn_id":"original-turn","text":"Final private text"})
+            views.poll()
+        waiting = self.root/"receipt-lag"
+        seal = capture(self.sources,self.revision,waiting)["manifest_sha256"]
+        pending, = audit_handoff(waiting,seal)["workers"]
+        self.assertFalse(pending["native_session_ledger_clear"])
+        self.assertEqual(pending["feishu_receipts"]["issues"],[])
+        self.assertEqual(pending["feishu_receipts"]["worker_inputs_awaiting_platform"],1)
+        sends = list(self.platform.calls)
+        resumed = restore(waiting,seal,self.root/"resumed-receipt")
+        with self.stack(resumed,pin_session=True) as (_m,_w,_source,_mail,inbound,views):
+            self.assertEqual(inbound.deliver(incoming),self.native.entries()[0][1])
+            self.assertEqual(views.poll(),0)
+        self.assertEqual(self.platform.calls,sends)
+        seal = capture(resumed,self.revision,self.snapshot)["manifest_sha256"]
+        baseline, = audit_handoff(self.snapshot,seal)["workers"]
+        self.assertTrue(baseline["native_session_ledger_clear"],baseline)
+        self.assertEqual(baseline["feishu_receipts"],{"confirmed_inputs":2,"worker_inputs_awaiting_platform":0,
+            "confirmed_outputs":final["seq"],"provider_outputs_awaiting_commit":0,"issues":[]})
+        sends = list(self.platform.calls)
+        cases = (
+            ("inbound","feishu","UPDATE platform_events SET receipt=json_set(receipt,'$.native_id','other') WHERE mid=?",
+             (incoming,),{"code":"platform_input_receipt_mismatch","message_id":incoming}),
+            ("provider","feishu","UPDATE view_writes SET platform_mid='om_wrong' WHERE seq=?",
+             (final["seq"],),{"code":"platform_output_receipt_mismatch","display_seq":final["seq"]}),
+            ("menu","worker","UPDATE platform_model_menu SET platform_mid='om_wrong' WHERE display_seq=?",
+             (menu["output"]["seq"],),{"code":"platform_worker_menu_receipt_mismatch","display_seq":menu["output"]["seq"]}),
+            ("patch","feishu","UPDATE view_writes SET request=json_set(request,'$.target','om_wrong') WHERE seq=?",
+             (final["seq"]-1,),{"code":"platform_output_receipt_mismatch","display_seq":final["seq"]-1}),
+            ("binding","feishu","UPDATE binding SET value=json_set(value,'$[2]','wrong-chat')",(),
+             {"code":"platform_receipt_binding_mismatch"}),
+        )
+        observed = {}
+        for name,role,query,args,expected in cases:
+            with self.subTest(name=name):
+                restored = restore(self.snapshot,seal,self.root/(name+"-test-state"))
+                with closing(sqlite3.connect(restored[role+":oguri"])) as db,db:
+                    db.execute(query,args)
+                snapshot = self.root/(name+"-test-snapshot")
+                digest = capture(restored,self.revision,snapshot)["manifest_sha256"]
+                result = audit_handoff(snapshot,digest)
+                row, = result["workers"]
+                self.assertTrue(result["needs_review"])
+                self.assertEqual(row["feishu_receipts"]["issues"],[expected])
+                self.assertEqual(row["native_session_pending"]["platform_display_unseen"],0)
+                self.assertNotIn("Final private text",encode(result))
+                destination = self.root/(name+"-would-publish")
+                with self.assertRaisesRegex(ValueError,expected["code"]):
+                    stage_native_handoff(snapshot,digest,"oguri",session,"next",destination)
+                self.assertFalse(destination.exists())
+                observed[name] = row["feishu_receipts"]["issues"]
+        self.assertEqual(self.platform.calls,sends)
+        self.assertEqual(len(self.native.entries()),1)
+        if evidence := os.environ.get("MOWULINK_FEISHU_RECEIPT_AUDIT_EVIDENCE"):
+            Path(evidence).write_text(json.dumps({"first_reply_lost":pending["feishu_receipts"],
+                "valid":baseline["feishu_receipts"],"rejected":observed,
+                "native_input_count":len(self.native.entries()),"additional_platform_calls":0,
+                "handoff_refused_for_every_mismatch":True,"boundary":"Actual SQLite and Worker HTTP. Feishu and native host are fixtures."},
+                ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
 
     def test_handoff_refuses_codex_approval_never_registered_with_router(self):
         session = self.native.session
