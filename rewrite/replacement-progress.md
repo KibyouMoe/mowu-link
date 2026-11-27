@@ -6,6 +6,8 @@
 
 ## 检查点与证据
 
+新版独立安装验收在锁定发行包 `c5d719070e3a02266dffa6d1929d5a92a2643227` 实跑。原全量命令在裸包里报 50 个旧源码缺失错误。新版入口保留全部发现结果，明列 58 个旧格式、旧端联跑与迁回用例，此轮不计入新版验收。macOS 与 Linux arm64 各执行 301 项，分别通过 277、173 项，按环境跳过 24、128 项，零失败。两端运行后复核 367 份文件一致。Linux 先跑独立包回归，再启动跨系统链路，避免两项共用容器内存。跨系统正式单读回一次原生夹具输入及一条 W04 通知。Windows 安装组 21 项、原生 DSH SDK 组 14 项通过，安装组另从两版独立包复验保留试用写入的退版。全部使用隔离身份和状态，真实模型与飞书云端仍另验。[验收证据](evidence/clean-install-release-acceptance.json) · [Windows 日志](https://github.com/KibyouMoe/mowu-link/actions/runs/45946834939)
+
 新版先前包 `35ba22f` 与候选包 `e947acd` 已在 macOS 从两个锁定发行包演练有新写入的退版。普通回退拒绝覆盖试用记录。用试用结束时的七库快照恢复副本后，前一包按原号读回一份待验收 W04、来源附件及新版私聊。重放零新增输入、管理通知或平台发送，新私聊正常记账，原成果由隔离管理端验收。再用 `13934de` 作反例，可读原记录，但退版后新私聊缺索引。相关回归 50 项通过。两个宿主、模型及飞书使用夹具，跨机和真实平台另验。[新版回退复跑](router-rehearsal.md#保留试用写入的新版版本回退) · [证据](evidence/rewrite-state-bundle-release-cycle.json)
 
 补齐旧同伴私聊的原生查询与回信。此前实际旧 Router 已确认的私聊能在新库查到，回信却返回 `409 unknown_peer_parent`。隔离复验用实际旧 Router HTTP 建同伴消息并确认，再载入重做 Router。两套实际 DSH AgentLoop 完成从发现归档、读取原文到对端回信的全过程。独立 Codex App Server 也从归档读取并原生调用回信工具。原消息零重投，两次演练均只投递一条新回信、零工单。模型使用本地脚本。第三工位已核拒绝来源和正文查询及冒用原号回信，重复归档号也拒绝用于回信。复跑 `python3 -B -m unittest -v rewrite.test_peers -k original_participants`、`python3 -B -m unittest -v rewrite.test_dsh_native_loop -k archived_peer_conversation`、`python3 -B -m unittest -v rewrite.test_codex_app_server -k reads_migrated_peer`。[DSH 证据](evidence/native-archived-peer-reply.json) · [Codex App Server 证据](evidence/codex-archived-peer-reply.json)

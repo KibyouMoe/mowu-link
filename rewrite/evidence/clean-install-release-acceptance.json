@@ -1,0 +1,155 @@
+{
+  "revision": "c5d719070e3a02266dffa6d1929d5a92a2643227",
+  "sha256": "aa61aa8aeff49a5e2488d432e1e97552f85bbe339cc5d1e0ada8a12808ffc3c0",
+  "verified_files": 367,
+  "raw_suite_without_old_trees": {
+    "discovered": 359,
+    "legacy_source_setup_errors": 50,
+    "environment_skips": 131
+  },
+  "release_suite": {
+    "discovered": 359,
+    "archival_excluded": [
+      "rewrite.test_codex_app_server.CodexAppServer.test_codex_native_tool_reads_migrated_peer_and_replies_on_the_original_link",
+      "rewrite.test_cutover.Cutover.test_approved_replacement_preserves_the_original_legacy_queue_position",
+      "rewrite.test_cutover.Cutover.test_archived_peer_threads_files_and_permissions_survive_without_replay",
+      "rewrite.test_cutover.Cutover.test_cancel_interrupted_by_offline_timeout_requires_original_and_new_receipts",
+      "rewrite.test_cutover.Cutover.test_cancelled_orders_roll_back_without_replaying_work_or_inventing_results",
+      "rewrite.test_cutover.Cutover.test_changed_new_system_requires_reconciliation_before_restoring_old",
+      "rewrite.test_cutover.Cutover.test_corrupt_files_and_existing_destinations_are_rejected",
+      "rewrite.test_cutover.Cutover.test_exhausted_cancel_preserves_new_holder_and_requires_original_cleanup_for_rollback",
+      "rewrite.test_cutover.Cutover.test_exhausted_cancel_requires_a_new_confirmed_cancellation_for_rollback",
+      "rewrite.test_cutover.Cutover.test_export_legacy_chat_keeps_original_fields_and_private_scope",
+      "rewrite.test_cutover.Cutover.test_inflight_or_unhandled_metadata_keeps_original_and_blocks_new_writer",
+      "rewrite.test_cutover.Cutover.test_inflight_rollback_drains_same_assignment_before_old_router_can_resume",
+      "rewrite.test_cutover.Cutover.test_initial_assignment_replays_waiting_order_and_preserves_reviewed_history",
+      "rewrite.test_cutover.Cutover.test_legacy_chat_archive_preserves_old_queries_without_sharing_the_other_worker",
+      "rewrite.test_cutover.Cutover.test_migrated_formal_result_and_attachment_stop_exact_rollback_with_a_crosswalk",
+      "rewrite.test_cutover.Cutover.test_old_http_default_order_migrates_with_goal_and_idempotency",
+      "rewrite.test_cutover.Cutover.test_original_id_and_source_read_back_via_manager_without_reviving_archived_order",
+      "rewrite.test_cutover.Cutover.test_pending_peer_or_missing_middle_chunk_prevents_publishing_a_partial_migration",
+      "rewrite.test_cutover.Cutover.test_pool_archives_only_return_after_the_worker_released_the_assignment",
+      "rewrite.test_cutover.Cutover.test_pooled_cancellations_follow_working_attempts_before_transfer",
+      "rewrite.test_cutover.Cutover.test_preoffer_edits_and_transfers_keep_only_the_final_queued_owner",
+      "rewrite.test_cutover.Cutover.test_queue_crosswalk_attachment_bytes_and_real_legacy_reopen_after_rollback",
+      "rewrite.test_cutover.Cutover.test_reconcile_distinguishes_unoffered_tasks_and_new_delivery_facts_without_writing",
+      "rewrite.test_cutover.Cutover.test_repeated_pool_cancel_archives_after_latest_confirmation_and_later_edits",
+      "rewrite.test_cutover.Cutover.test_repeated_working_cancel_rolls_back_only_the_confirmed_scope",
+      "rewrite.test_cutover.Cutover.test_resumed_orders_archive_the_original_request_and_all_dispatch_versions",
+      "rewrite.test_cutover.Cutover.test_reviewed_edits_preserve_original_requests_and_fence_old_offers",
+      "rewrite.test_cutover.Cutover.test_reviewed_inquiries_preserve_continue_rounds_and_release_only_the_original_assignment",
+      "rewrite.test_cutover.Cutover.test_reviewed_migrated_report_rolls_back_as_archive_without_redispatch_or_public_attachment",
+      "rewrite.test_cutover.Cutover.test_reviewed_new_orders_reenter_the_old_http_queue_once_and_preserve_its_head",
+      "rewrite.test_cutover.Cutover.test_reviewed_private_peers_survive_mixed_fallback_and_reentry_without_replay",
+      "rewrite.test_cutover.Cutover.test_reviewed_questions_keep_the_original_worker_after_transfer_and_rollback",
+      "rewrite.test_cutover.Cutover.test_reviewed_rollback_after_only_quiet_presence_and_unoffered_work",
+      "rewrite.test_cutover.Cutover.test_reviewed_transfers_keep_formal_result_and_candidate_files_separate_on_rollback",
+      "rewrite.test_cutover.Cutover.test_reviewed_trial_born_transfer_uses_original_legacy_owner_and_request",
+      "rewrite.test_cutover.Cutover.test_superseded_working_cancel_then_exhaustion_preserves_each_attempt",
+      "rewrite.test_cutover.Cutover.test_superseded_working_cancel_then_offline_and_transfer_preserves_each_attempt",
+      "rewrite.test_cutover.Cutover.test_transfer_supersedes_working_cancellations_without_releasing_the_new_holder",
+      "rewrite.test_cutover.Cutover.test_trial_born_closed_orders_return_as_private_archives_without_a_new_dispatch",
+      "rewrite.test_dsh_native_loop.NativeLoop.test_archived_peer_conversation_resumes_via_two_dsh_native_sessions",
+      "rewrite.test_feed_recovery.PortableRecovery.test_game_capture_review_stages_one_record_in_an_installation",
+      "rewrite.test_feed_recovery.Recovery.test_lost_posts_are_recovered_once_without_resending_old_archive_and_return",
+      "rewrite.test_feed_recovery.Recovery.test_mail_conflict_can_change_body_without_changing_the_headers_or_uid",
+      "rewrite.test_feed_recovery.Recovery.test_recovery_requires_frozen_input_and_refuses_a_reused_game_sequence",
+      "rewrite.test_feeds.Sources.test_imported_game_position_rejects_wrong_bridge_and_does_not_reset_on_first_probe",
+      "rewrite.test_feeds.Sources.test_imported_game_refuses_overlapping_sequence_from_another_login",
+      "rewrite.test_feeds.Sources.test_imported_mail_and_game_return_only_after_trial_receipts_and_resume_old_collectors",
+      "rewrite.test_feeds.Sources.test_imported_mailbox_position_refuses_another_epoch_and_captures_only_new_uids",
+      "rewrite.test_peers.Peers.test_original_participants_can_read_and_answer_one_unambiguous_archived_peer",
+      "rewrite.test_source_rollback.SourceRollback.test_cutover_stops_when_worker_disconnect_erases_a_subscription",
+      "rewrite.test_source_rollback.SourceRollback.test_legacy_worker_subscription_poll_can_ack_without_native_delivery",
+      "rewrite.test_source_rollback.SourceRollback.test_legacy_worker_subscription_reads_saved_manager_observations",
+      "rewrite.test_source_rollback.SourceRollback.test_mixed_source_returns_and_closed_order_share_one_frozen_router",
+      "rewrite.test_source_rollback.SourceRollback.test_two_subscriber_returns_replay_independently_in_one_legacy_trigger",
+      "rewrite.test_trigger_archive.TriggerArchive.test_archive_copies_actual_legacy_events_and_receipts_without_replaying_them",
+      "rewrite.test_trigger_archive.TriggerArchive.test_rejects_active_journal_and_tampered_archive_member",
+      "rewrite.test_trigger_archive.TriggerArchive.test_reviewed_unread_handoff_retries_without_replay_and_preserves_attachments",
+      "rewrite.test_trigger_archive.TriggerArchive.test_trigger_return_waits_for_the_original_host_before_advancing_the_legacy_prefix"
+    ],
+    "macos": {
+      "tests_run": 301,
+      "passed": 277,
+      "environment_skips": 24,
+      "failed": 0,
+      "errors": 0
+    },
+    "linux_arm64": {
+      "tests_run": 301,
+      "passed": 173,
+      "environment_skips": 128,
+      "failed": 0,
+      "errors": 0,
+      "python": "3.13.18",
+      "guest_image_id": "sha256:0a1254df0519003d33fd4ab8ad26aff1154e50b3c93aa5ec978e83bf83ba084c"
+    }
+  },
+  "cross_os": {
+    "controller": "Darwin",
+    "worker_release": "c5d719070e3a02266dffa6d1929d5a92a2643227",
+    "task_id": "f5ec4fa2-41ed-4179-9a41-b041c54cd2fe",
+    "assignment_id": "4c9c636b-43c0-4bd3-9b69-69753eb81905",
+    "delivery_id": "da35af55-585c-4276-bf6a-fdfa41a046ff",
+    "fixture_native_id": "bf363b22-dac3-4461-a547-454a7843d456",
+    "fixture_turn_id": "44b59e41-5240-47cc-ad2e-f39c48d32262",
+    "after_turn": "working",
+    "after_report": "completed_reported",
+    "worker_holds_after_receipt": {
+      "held_task_id": null,
+      "held_assignment_id": null
+    },
+    "router_notifications": 1,
+    "unknown_identity_http": 401,
+    "untrusted_certificate_rejected": true
+  },
+  "independent_guest_input_count": 1,
+  "windows": {
+    "run_id": 45946834939,
+    "jobs": [
+      {
+        "id": 140333351582,
+        "name": "windows",
+        "status": "completed",
+        "conclusion": "success"
+      },
+      {
+        "id": 140333351769,
+        "name": "dsh-native",
+        "status": "completed",
+        "conclusion": "success"
+      }
+    ],
+    "installed_package_tests_passed": 21,
+    "dsh_native_tests_passed": 14,
+    "rollback": {
+      "prior_release": "35ba22f66e3017a1756b8645f3b88d091b3ff6f8",
+      "attachment_id": "a9bb7a46-f28c-4a50-b3ca-82f4723c68df",
+      "task_id": "34fc0c02-4eb9-4812-8bf2-40320590ac64",
+      "w04": {
+        "recorded": true,
+        "release_assignment_id": "62d2dcf0-44b1-4d72-963b-031c26d67aef",
+        "task_state": "completed_reported"
+      },
+      "new_trial_rollback_readback": {
+        "attachment_sha256": "847c7120ed0e8c287ed0273b596882a9e3390b9608c79ec313c009032d5ac97e",
+        "extra_manager_notifications": 0,
+        "extra_native_inputs": 0,
+        "extra_platform_sends": 0,
+        "followup_chat_receipt": {
+          "delivery_id": "chat-om_bundle_after_return",
+          "digest": "5a89487e25f2c447138efcc68b2375211480a697ee93b7ec31cf1aff76d15338",
+          "native_id": "0801b17a-2939-4210-b423-814df4b175eb",
+          "session": "release-trial-agent",
+          "turn_id": "99cb98be-a12a-4be9-8524-0bb62a6da953"
+        },
+        "followup_reply_id": "om_3",
+        "reports": 1,
+        "task_state_after_acceptance": "closed",
+        "task_state_before_acceptance": "completed_reported"
+      }
+    }
+  },
+  "scope": "macOS and Linux installation with no legacy checkout. Windows runs the selected release and DSH packages. Tests use isolated identities and scripted models/platform fixtures where documented. No production cutover."
+}
