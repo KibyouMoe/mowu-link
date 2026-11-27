@@ -546,6 +546,18 @@ python3 -B -m rewrite.state_bundle audit-handoff --snapshot "$SNAPSHOT" \
 
 审计会逐项报告缺少或多出的组件以及发行版本不符。带清单时，`needs_review: true` 的退出码为 1。即使未提供清单，`missing_worker_ledgers` 仍列出在 Router 有未确认投递、私聊宿主回执、派发预约、未答题、未关闭原生审批或交接记录的缺失工位。已有持单和待清理仍按原字段核对。仅留下状态查询不会让工位进入这份列表。恢复时补齐原组件，沿原消息号查回回执，再核原生收件次数。另行按停写记录、原停派号、Trigger 和实际平台回执完成切换判定。
 
+### 同批离线切换核验
+
+新版停派后，从已安装的候选版运行联合核验。使用停写前独立登记的组件清单、候选包摘要、停派号和封存后取得的快照摘要。有可写工位时加 `--dsh-runtimes ./dsh-runtimes.json`。
+
+```sh
+python3 -B -m rewrite.cutover_audit --snapshot "$SNAPSHOT" --manifest-sha256 "$MANIFEST_SHA256" \
+  --roster ./roster.json --archive "$RELEASE_TAR" --archive-sha256 "$ARCHIVE_SHA256" \
+  --installed "$RELEASE_DIR" --drain-id "$DRAIN_ID"
+```
+
+输出包含安装包摘要、快照摘要、Router 停派号和两份完整的对账报告。退出码 0 表示这批离线记录已对账，仍须单独完成实机验收与生产授权。退出码 1 保留未通过的报告，2 表示输入或安装包无法校验。命令只读快照和安装目录。若有未撤回的派发预约、缺组件、停派号不符或 Trigger 回执缺失，先按原记录修复并重新封存。
+
 复跑需已启动的隔离 Colima 虚拟机、已登记的 ARM64 测试镜像及可供来宾读取的安装目录。仅生成临时测试进程、身份、数据库和端口。
 
 ```sh

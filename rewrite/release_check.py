@@ -274,7 +274,7 @@ def run(repository,older,newer,component="router",*,dsh_image=None,dsh_local_tls
             if component=="state-bundle":
                 from .bundle_release_check import rehearse_bundle
 
-                observed = rehearse_bundle(root,old,new,older,newer,cert,key,env)
+                observed = rehearse_bundle(root,old,versions[1],older,cert,key,env)
             else:
                 rehearse = {"worker-pair":worker_pair,"router":router_rehearsal,"assignment-rollout":assignment_rollout}
                 observed = rehearse[component](root,old,new,cert,key,env)

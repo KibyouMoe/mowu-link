@@ -252,7 +252,72 @@ def run_stage(phase, directory, fixtures, cert, key, input_json):
     print(encode(result))
 
 
-def rehearse_bundle(root,old,new,older,newer,cert,key,env):
+def rehearse_cutover_audit(root,candidate,latest,saved,env):
+    archive,revision,checksum,installed = candidate
+    roster = root/"independent-roster.json"
+    roster.write_text(encode({"source_revision":revision,"components":list(COMPONENTS)}),encoding="utf-8")
+    operation = guid()
+
+    def inspect(snapshot,sha,wanted,*,operation_id=operation,archive_sha=checksum,exit_code=1):
+        result = subprocess.run([sys.executable,"-B","-S","-m","rewrite.cutover_audit",
+            "--snapshot",snapshot,"--manifest-sha256",sha,"--roster",roster,"--archive",archive,
+            "--archive-sha256",archive_sha,"--installed",installed,"--drain-id",operation_id],
+            cwd=installed,env=env,capture_output=True,encoding="utf-8",timeout=30)
+        check(result.returncode==exit_code,f"cutover audit returned {result.returncode}: {result.stderr}")
+        if exit_code==2:
+            check(wanted in result.stderr,"cutover audit did not reject the bad package")
+            return None
+        report = json.loads(result.stdout)
+        check(report["issues"]==wanted and report["offline_reconciled"]==(exit_code==0),
+              f"unexpected cutover audit verdict: {report['issues']}")
+        check(report["manifest_sha256"]==sha and report["release"]["sha256"]==checksum,
+              "cutover audit did not use the pinned snapshot and release")
+        return report
+
+    stopped = state_bundle.restore(latest,saved["manifest_sha256"],root/"stopped-cutover")
+    open_report = inspect(latest,saved["manifest_sha256"],["router_drain_does_not_match"])
+    command = subprocess.run([sys.executable,"-B","-S","-m","rewrite.service","router-drain",
+                              "--db",stopped["router:main"],"--operation-id",operation,"begin"],
+                             cwd=installed,env=env,capture_output=True,encoding="utf-8",timeout=15,check=True)
+    drain = json.loads(command.stdout)
+    check((drain["operation_id"],drain["state"])==(operation,"draining"),"candidate did not stop dispatch")
+    matched = root/"drained-checked"
+    matched_sha = state_bundle.capture(stopped,revision,matched)["manifest_sha256"]
+    good = inspect(matched,matched_sha,[],exit_code=0)
+    wrong_drain = inspect(matched,matched_sha,["router_drain_does_not_match"],operation_id=guid())
+    inspect(matched,matched_sha,"release checksum mismatch",archive_sha="0"*64,exit_code=2)
+
+    missing = root/"omitted-platform"
+    missing_sha = state_bundle.capture({k:v for k,v in stopped.items() if k!="feishu:trial"},revision,missing)["manifest_sha256"]
+    incomplete = inspect(missing,missing_sha,["component_ledgers_need_review"])
+    check({"issue":"snapshot_components_missing","components":["feishu:trial"]} in incomplete["handoff"]["issues"],
+          "omitted platform was not found against the independent roster")
+
+    reservation_paths = state_bundle.restore(matched,matched_sha,root/"stale-reservation-state")
+    router = Orders(reservation_paths["router:main"],Clock())
+    with router.db.transaction() as db:
+        task = router.create(db,{"title":"Stale offer fixture","instructions":"Keep this stopped","assignee_id":"trial"})
+        check(task["assignment_id"] is None,"the drained Router unexpectedly reserved a new task")
+        db.execute("UPDATE tasks SET assignment_id=? WHERE task_id=?",(guid(),task["task_id"]))
+    reservation = root/"stale-reservation"
+    reservation_sha = state_bundle.capture(reservation_paths,revision,reservation)["manifest_sha256"]
+    still_reserved = inspect(reservation,reservation_sha,["router_has_reserved_assignments"])
+
+    source = Trigger(stopped["trigger:source"],"test-source",Clock())
+    source.record("Info","New source write without Router receipt")
+    queued = root/"outstanding-source"
+    queued_sha = state_bundle.capture(stopped,revision,queued)["manifest_sha256"]
+    waiting = inspect(queued,queued_sha,["trigger_receipts_need_review"])
+    state_bundle.verify(matched,matched_sha)
+    return {"reconciled":good["offline_reconciled"],"manifest_sha256":matched_sha,"snapshot_id":good["snapshot_id"],
+            "release":good["release"],"drain_id":operation,"rejected":{"open":open_report["issues"],
+            "wrong_drain":wrong_drain["issues"],"missing_platform":incomplete["handoff"]["issues"],
+            "reserved_assignment":still_reserved["issues"],"source_without_receipt":waiting["issues"],
+            "wrong_release_digest":"release checksum mismatch"}}
+
+
+def rehearse_bundle(root,old,candidate,older,cert,key,env):
+    _,newer,_,new = candidate
     baseline,trial,returned,fixtures = (root/name for name in ("baseline","trial","returned","native-fixtures"))
     baseline.mkdir()
     fixtures.mkdir()
@@ -301,6 +366,8 @@ def rehearse_bundle(root,old,new,older,newer,cert,key,env):
     platform_audit = worker["feishu_receipts"]
     check(platform_audit["confirmed_inputs"]==1 and platform_audit["confirmed_outputs"]>=1,
           "the stopped trial is missing its platform receipts")
+    checkpoint = (rehearse_cutover_audit(root,candidate,latest,saved,env)
+                  if (new/"rewrite"/"cutover_audit.py").is_file() else None)
     state_bundle.restore(latest,saved["manifest_sha256"],returned)
     observed = run(old,"return",returned,written)
     database = returned/state_bundle.filename("router:main")
@@ -315,6 +382,7 @@ def rehearse_bundle(root,old,new,older,newer,cert,key,env):
             "executed_at_utc":datetime.now(timezone.utc).isoformat(),"business_clock":"controlled fixture clock",
             "before_upgrade":original,"after_trial":saved,"hermes_transport":audit["hermes"],"trigger_audit":source_audit,
             "feishu_receipts":platform_audit,"report_receipts":report_audit,
+            **({"offline_cutover_audit":checkpoint} if checkpoint is not None else {}),
             "original_rollback_rejected":True,
             "candidate_writes":written,"previous_release_readback":observed,
             "scope":"Installed rewrite releases, loopback TLS and SQLite. Agent, native sessions and Feishu are fixtures."}}
