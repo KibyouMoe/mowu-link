@@ -6,6 +6,8 @@
 
 ## 检查点与证据
 
+Windows 的 Docker 调用与 POSIX 共用容器后端的引擎确认。Windows 只接受 Docker Desktop 的本机标准命名管道，沿用 Linux 类型及原引擎身份核对。第一轮 Windows 试跑发现 Node 会补回未指定的用户目录变量。修正版 `f7aaa32c740f2da1a5e4e2c84a2c9cec5fd2dea1` 将 Docker 配置、用户目录和临时目录固定到私有路径。Windows Server 2025 从 379 文件独立安装包通过 24 项，新的进程测试实测正确参数及隔离环境，并拒绝远端或绕过正常入口的管道、Windows 引擎、缺身份及引擎不可达。测试使用 Windows CLI 夹具，实际 Docker 引擎探针仍待确认。Windows DSH SDK 另通过 14 项。macOS 同提交安装包通过 26 项，Codex 与 DSH 使用真实 Linux 容器复跑了成果、取消、转派和项目快照。Linux arm64 通过 189 项，按环境跳过 132 项，跨系统 HTTPS 仍只产生一条夹具宿主收件和一条待验通知。[实测记录](evidence/windows-docker-transport.json) · [Windows 安装日志](https://github.com/KibyouMoe/mowu-link/actions/runs/45959561991)
+
 Windows 工作区的离线账本审计在 `d6e7b328396cb5f0c6a9286a3cf8be08471574c1` 接入 Windows 文件 ACL，继续核对原目录文件系统身份和两种写锁。Windows Server 2025 安装组 23 项通过，日志逐条确认两项新增验收。带原写锁的工位即使没有监听也会被拦住，离线换绑及回退保留锁直到发布，缺原锁、换目录或放宽账本权限均不能通过。Windows DSH SDK 另通过 14 项，Docker 探针显示不可用，Windows 可写容器未验。macOS 从同提交的 375 文件安装包通过 25 项，包含 Codex 与 DSH 的真实隔离宿主。Linux arm64 安装包通过 189 项、跳过 131 项，HTTPS 回环留一条夹具宿主收件和一条待验通知。两端模型及飞书使用夹具。[实测](evidence/windows-workspace-journal-audit.json) · [Windows 日志](https://github.com/KibyouMoe/mowu-link/actions/runs/45958349209)
 
 离线换绑和回退原先只尝试锁住 DSH 工作区写者。如果 Codex 已拿到 `codex-workspace.writer` 而子进程还没监听，旧审计误判为空闲。实现 `5ec1517ea9fcd5dbb536851eff8b0ba47b44c55c` 同时检查两类写锁。回归先复现漏判，再核两项操作均拒绝发布。释放原宿主后，两项操作都持原写锁至目录发布完成。用 374 文件安装包复跑，macOS 24 项全过，包含实际 Codex App Server 与 DSH SDK 的 Linux 容器成果和回收。用前一版独立包重开 Codex，读回原生输入和同一成果字节，普通私聊重试只用一个新回合。Linux arm64 通过 188 项、131 项环境跳过，跨系统回环留一条宿主收件和一条待验通知。模型及飞书为夹具，Windows 可写工位仍缺本地运行账本和受支持的 Linux 容器入口。[实测](evidence/codex-workspace-writer-rollback.json) · [锁与复跑](router-rehearsal.md#重做版五组件的离线恢复)

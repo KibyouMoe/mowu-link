@@ -1,0 +1,52 @@
+{
+  "revision": "f7aaa32c740f2da1a5e4e2c84a2c9cec5fd2dea1",
+  "verified_release_files": 379,
+  "macos": {
+    "passed": 26,
+    "duration_seconds": 20.335,
+    "archive_sha256": "8b3f74b661ce30c3d700669f7d9528bc2de44e36aed65e6bd5037e74b66a5ed3",
+    "native_linux_docker_cases": [
+      "Codex deliverable, cancel and transfer",
+      "DSH cancel, transfer and foreign engine refusal",
+      "DSH project seed and lost acknowledgement"
+    ]
+  },
+  "linux_arm64": {
+    "passed": 189,
+    "skipped": 132,
+    "archival_excluded": 58,
+    "failed": 0,
+    "errors": 0,
+    "cross_os_fixture_inputs": 1,
+    "cross_os_notifications": 1
+  },
+  "windows": {
+    "runner": "Windows Server 2025",
+    "run_id": 45959561991,
+    "run_url": "https://github.com/KibyouMoe/mowu-link/actions/runs/45959561991",
+    "install_job_id": 140373886818,
+    "install_tests_passed": 24,
+    "dsh_sdk_job_id": 140373887066,
+    "dsh_sdk_tests_passed": 14,
+    "docker_probe": "unconfirmed",
+    "installed_archive_sha256": "c8b54499f8549e5e85ddc60194e2f28df52dc23e08c2f02a88ef9a3f0d0f2abf",
+    "transport_case": "test_local_docker_pipe_is_explicit_and_requires_a_linux_daemon",
+    "case_passed_at_utc": "2026-11-27T07:36:49.4940751Z",
+    "docker_executable": "Windows .NET argument and environment fixture",
+    "checked": [
+      "canonical local named pipe argument",
+      "isolated Docker configuration and profile",
+      "no inherited Docker or proxy overrides",
+      "foreign, raw and network endpoints rejected",
+      "Windows engine, missing identity and unavailable engine rejected",
+      "a later valid Linux identity is observed"
+    ]
+  },
+  "original_failure": {
+    "run_id": 45959289446,
+    "install_job_id": 140373009214,
+    "fixture_exit": 82,
+    "cause": "libuv restores omitted Windows profile environment variables from the parent."
+  },
+  "boundary": "Windows named pipe argument, process environment and Engine response handling exercised with a CLI fixture. Actual Linux Docker Engine and writable container lifecycle were exercised on macOS. Windows writable host and real Engine connection remain unverified."
+}
