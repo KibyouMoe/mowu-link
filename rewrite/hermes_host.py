@@ -10,8 +10,11 @@ from .adapter import HostAdapter
 from .storage import Fault, encode, require
 
 
+MESSAGE_PREFIX = "魔物链接消息\n"
+
+
 def input_text(session, did, payload, digest):
-    return "魔物链接消息\n" + encode({"session":session,"message_id":did,"sha256":digest,"message":payload})
+    return MESSAGE_PREFIX + encode({"session":session,"message_id":did,"sha256":digest,"message":payload})
 
 
 class HermesLocalHost:
@@ -62,6 +65,9 @@ class HermesLocalHost:
         self.binding(session)
 
     def deliver(self, session, did, payload, digest):
+        existing = self.lookup_expected(session,did,payload,digest)
+        if existing:
+            return existing
         self.binding(session)
         self.ctx.inject_message(input_text(session,did,payload,digest),session_key=self.route)
         return self.lookup_expected(session,did,payload,digest)
@@ -79,7 +85,8 @@ class HermesLocalHost:
         expected = input_text(session,did,payload,digest)
         found = []
         for row in list_session_admissions(authority.db,session_id=session,pending_only=False):
-            if row["principal_id"]!="automation:"+self.route or row["payload"].get("text")!=expected:
+            body = row["payload"].get("text")
+            if row["principal_id"]!="automation:"+self.route or not isinstance(body,str) or not body.startswith(MESSAGE_PREFIX):
                 continue
             try:
                 producer = json.loads(row["request_id"])
@@ -91,7 +98,14 @@ class HermesLocalHost:
                     or native.get("identity")!=row["request_id"] or native.get("owner")!=session
                     or native.get("route")!=self.route or native.get("target")!=session):
                 continue
-            found.append(row["admission_id"])
+            if body==expected:
+                found.append(row["admission_id"])
+                continue
+            try:
+                recorded = json.loads(body.removeprefix(MESSAGE_PREFIX))
+            except ValueError:
+                continue
+            require(not isinstance(recorded,dict) or recorded.get("message_id")!=did,409,"hermes_input_conflict")
         require(len(found)<=1,409,"duplicate_hermes_input")
         if found:
             receipt = {"native_id":found[0],"session":session,"delivery_id":did,"digest":digest}

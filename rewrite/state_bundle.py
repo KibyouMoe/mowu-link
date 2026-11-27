@@ -10,7 +10,7 @@ import shutil
 import sqlite3
 from tempfile import TemporaryDirectory
 
-from . import dsh_workspace_audit
+from . import delivery, dsh_workspace_audit
 from . import state_bundle_managed as managed
 from .cutover import digest, output_directory, readonly
 from .storage import encode, guid, state_writer
@@ -300,12 +300,46 @@ def feishu_display_backlog(db,platform_path):
     return unseen,"platform_display_ledger_mismatch" if matched!=cursor or diverged else None
 
 
+def hermes_delivery_audit(snapshot,labels,router_path,confirmed):
+    managers = sorted(label for label in labels if component(label)[0]=="hermes")
+    results = []
+    for label in managers:
+        with closing(readonly(snapshot/filename(label))) as db:
+            rows = db.execute("SELECT cursor FROM progress LIMIT 2").fetchall()
+            cursor = rows[0]["cursor"] if len(rows)==1 else None
+            queued,pending = db.execute("SELECT COUNT(*),COUNT(*) FILTER (WHERE receipt IS NULL) FROM queue").fetchone()
+            issues = []
+            if type(cursor) is not int or cursor<0:
+                issues.append("hermes_cursor_unconfirmed")
+            elif cursor>confirmed:
+                issues.append("hermes_cursor_ahead_of_router")
+
+            db.execute("ATTACH DATABASE ? AS router",(router_path.resolve().as_uri()+"?mode=ro&immutable=1",))
+            prefix,matched = db.execute("""SELECT
+                COUNT(*) FILTER (WHERE d.cursor BETWEEN 1 AND ? AND d.ack=1),
+                COUNT(DISTINCT q.message_id)
+                FROM router.deliveries d JOIN main.queue q
+                  ON q.message_id=json_extract(d.payload,'$.message_id') AND q.payload=d.payload
+                WHERE d.consumer='hermes' AND d.kind='message.deliver'""",(cursor,)).fetchone()
+            if not issues and prefix!=cursor:
+                issues.append("hermes_confirmed_prefix_missing")
+            if matched!=queued:
+                issues.append("hermes_queue_router_mismatch")
+            if len(managers)>1:
+                issues.append("hermes_receiver_ambiguous")
+        results.append({"instance":component(label)[1],"router_confirmed_cursor":confirmed,"local_cursor":cursor,
+                        "queued_without_native_receipt":pending,"issues":issues})
+    return results
+
+
 def audit_handoff(snapshot,expected,*,dsh_runtimes=None):
     manifest = verify(snapshot,expected)
     labels = manifest["files"]
     workspaces = workspace_audits(snapshot,manifest,dsh_runtimes)
     router_label, = (label for label in labels if component(label)[0]=="router")
-    with closing(readonly(snapshot/filename(router_label))) as db:
+    router_path = snapshot/filename(router_label)
+    with closing(readonly(router_path)) as db:
+        hermes_confirmed = delivery.confirmed(db,"hermes")
         current = {row["assignee_id"]:dict(row) for row in db.execute("""SELECT assignee_id,task_id,assignment_id
                                                                     FROM tasks WHERE state='working' ORDER BY assignee_id""")}
         sessions = dict(db.execute("SELECT worker_id,session_id FROM workers"))
@@ -389,9 +423,11 @@ def audit_handoff(snapshot,expected,*,dsh_runtimes=None):
         issues.extend({"worker_id":wid,"issue":problem} for problem in problems)
     issues.extend({"worker_id":wid,"issue":"active_worker_state_missing","task_id":row["task_id"],
                    "assignment_id":row["assignment_id"]} for wid,row in current.items())
+    hermes = hermes_delivery_audit(snapshot,labels,router_path,hermes_confirmed)
+    issues.extend({"hermes_instance":row["instance"],"issue":issue} for row in hermes for issue in row["issues"])
     if verify(snapshot,expected)!=manifest:
         raise ValueError("snapshot changed during handoff audit")
-    return {"snapshot_id":manifest["snapshot_id"],"workers":workers,"pending_cleanup":cleanup,
+    return {"snapshot_id":manifest["snapshot_id"],"workers":workers,"hermes":hermes,"pending_cleanup":cleanup,
             "issues":issues,"needs_review":bool(issues or cleanup)}
 
 

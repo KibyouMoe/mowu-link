@@ -242,6 +242,8 @@ def rehearse_bundle(root,old,new,older,newer,cert,key,env):
 
     latest = root/"after-trial"
     saved = state_bundle.capture(trial_paths,newer,latest)
+    audit = state_bundle.audit_handoff(latest,saved["manifest_sha256"])
+    check(not audit["needs_review"],"the stopped trial requires ledger reconciliation")
     state_bundle.restore(latest,saved["manifest_sha256"],returned)
     observed = run(old,"return",returned,written)
     database = returned/state_bundle.filename("router:main")
@@ -254,7 +256,7 @@ def rehearse_bundle(root,old,new,older,newer,cert,key,env):
     state_bundle.verify(backup,original["manifest_sha256"])
     return {"state_bundle_release_cycle":{"starts":[older,newer,older],"components":list(COMPONENTS),
             "executed_at_utc":datetime.now(timezone.utc).isoformat(),"business_clock":"controlled fixture clock",
-            "before_upgrade":original,"after_trial":saved,"original_rollback_rejected":True,
+            "before_upgrade":original,"after_trial":saved,"hermes_transport":audit["hermes"],"original_rollback_rejected":True,
             "candidate_writes":written,"previous_release_readback":observed,
             "scope":"Installed rewrite releases, loopback TLS and SQLite. Agent, native sessions and Feishu are fixtures."}}
 

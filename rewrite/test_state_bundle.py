@@ -245,6 +245,48 @@ class Bundle(unittest.TestCase):
             self.assertIsNone(w.hold()["held_task_id"])
         self.assertEqual(verify(self.snapshot,snapshot["manifest_sha256"])["source_revision"],self.revision)
 
+    def test_hermes_snapshot_checks_the_router_receipt_prefix_without_treating_lag_as_loss(self):
+        router = self.sources["router:main"]
+        before = self.root/"router-before-c02.db"
+        with self.stack(self.sources) as (_manager,_worker,source,client,_platform,_views):
+            mid = source.record("Event","Retain the original Hermes delivery")
+            source.send(client,mid)
+        before.write_bytes(router.read_bytes())
+        with self.stack(self.sources) as (manager,*_):
+            acknowledge = manager.router.ack
+
+            def lose_reply(frame):
+                acknowledge(frame)
+                raise ConnectionError("Router recorded C02 but did not return its reply")
+
+            with patch.object(manager.router,"ack",side_effect=lose_reply), self.assertRaises(ConnectionError):
+                manager.receive()
+
+        prefix = capture(self.sources,self.revision,self.snapshot)["manifest_sha256"]
+        lagging = audit_handoff(self.snapshot,prefix)
+        self.assertFalse(lagging["needs_review"])
+        self.assertEqual(lagging["hermes"][0],{"instance":"main","router_confirmed_cursor":1,
+            "local_cursor":0,"queued_without_native_receipt":1,"issues":[]})
+        with self.stack(self.sources) as (manager,*_):
+            manager.receive()
+            self.assertEqual(manager.router.request("GET","deliveries/status")["confirmed_cursor"],1)
+
+        manager_db = self.sources["hermes:main"]
+        saved = self.root/"manager-missing-queue-item.db"
+        saved.write_bytes(manager_db.read_bytes())
+        with closing(sqlite3.connect(saved)) as db,db:
+            db.execute("DELETE FROM queue WHERE message_id=?",(mid,))
+        for variant,paths,reason in (
+            ("older-router",{**self.sources,"router:main":before},"hermes_cursor_ahead_of_router"),
+            ("lost-prefix",{**self.sources,"hermes:main":saved},"hermes_confirmed_prefix_missing"),
+        ):
+            with self.subTest(variant=variant):
+                target = self.root/variant
+                expected = capture(paths,self.revision,target)["manifest_sha256"]
+                detail = audit_handoff(target,expected)
+                self.assertTrue(detail["needs_review"])
+                self.assertIn({"hermes_instance":"main","issue":reason},detail["issues"])
+
     def test_feishu_restore_reuses_original_card_and_keeps_known_provider_receipt_after_deadline(self):
         message = {"chat_type":"p2p","chat_id":"chat","message_id":"om_trial_input","message_type":"text",
                    "content":encode({"text":"隔离收件"})}

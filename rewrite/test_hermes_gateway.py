@@ -10,15 +10,19 @@ import shutil
 import socket
 import sqlite3
 import subprocess
+import sys
 from tempfile import TemporaryDirectory
 from threading import Event, Thread
 import time
+from types import SimpleNamespace
 import unittest
+from unittest.mock import Mock, patch
 
 from .devloop import Loop
 from .hermes_check import GATEWAY_ENTRY, GATEWAY_GUARD, tracked_runtime
+from .hermes_host import HermesLocalHost, input_text
 from .release_check import config
-from .storage import encode, guid
+from .storage import Fault, encode, guid
 from .trigger import Trigger
 
 
@@ -142,6 +146,23 @@ def rows(database,statement,*args):
     with closing(sqlite3.connect(database.as_uri()+"?mode=ro",uri=True)) as conn:
         conn.row_factory = sqlite3.Row
         return [dict(row) for row in conn.execute(statement,args)]
+
+
+class HermesAdmissionProof(unittest.TestCase):
+    def test_authorized_native_message_with_same_id_and_other_payload_blocks_enqueue(self):
+        context = SimpleNamespace(plugin_id="mowulink_manager",inject_message=Mock())
+        session,route,mid = "session","test-local-route",guid()
+        host = HermesLocalHost(context,session,route)
+        producer = encode(["plugin",context.plugin_id,route,"a"*32])
+        row = {"principal_id":"automation:"+route,"request_id":producer,"admission_id":"previous-admission",
+               "payload":{"text":input_text(session,mid,{"text":"original"},"original-digest"),
+                          "local_automation_v1":{"identity":producer,"owner":session,"route":route,"target":session}}}
+        runtime = SimpleNamespace(list_session_admissions=lambda *_args,**_kwargs:[row])
+        with patch.dict(sys.modules,{"hermes_state_runtime":runtime}), patch.object(host,"binding") as binding:
+            binding.return_value = SimpleNamespace(db=object())
+            with self.assertRaisesRegex(Fault,"hermes_input_conflict"):
+                host.deliver(session,mid,{"text":"changed"},"changed-digest")
+        context.inject_message.assert_not_called()
 
 
 @unittest.skipUnless(os.environ.get("MOWULINK_HERMES_TEST_PYTHON") and
@@ -306,15 +327,37 @@ class HermesGateway(unittest.TestCase):
             self.assertEqual(len(model.requests),5)
             self.assertEqual(loop.hermes.tasks(unassigned="true")["items"],[created_task])
 
+        # Restore the two relay ledgers behind the original native admission.
+        with closing(sqlite3.connect(manager_db)) as conn, conn:
+            conn.execute("DELETE FROM queue WHERE message_id=?",(message_ids["Event"],))
+            conn.execute("UPDATE progress SET cursor=0")
+        with closing(sqlite3.connect(str(manager_db)+".host")) as conn, conn:
+            conn.execute("DELETE FROM intents WHERE delivery_id=?",(message_ids["Event"],))
+        with self.gateway(env,python,entry,"restored-before-event",port,key) as restored_pid:
+            def recovered_or_duplicated():
+                saved = receipt(message_ids["Event"])
+                inputs = rows(native_db,"SELECT admission_id FROM session_admissions WHERE target_session_id=? ORDER BY seq",
+                              session)
+                if saved or len(inputs)>2:
+                    return saved,len(inputs)
+            recovered = self.wait(recovered_or_duplicated)
+            self.assertEqual(recovered,(first,2))
+            self.assertEqual(rows(native_db,"SELECT admission_id,status,outcome,payload_json FROM session_admissions "
+                                  "WHERE target_session_id=? ORDER BY seq",session),[event_input,notify_input])
+            self.assertEqual(len(model.requests),5)
+            self.assertEqual(loop.hermes.tasks(unassigned="true")["items"],[created_task])
+
         if output := os.environ.get("MOWULINK_HERMES_GATEWAY_EVIDENCE"):
             evidence = {"hermes_source_revision":revision,"session_id":session,"route":route["session_key"],
-                "native_pids":[pid,new_pid],"message_ids":message_ids,"event_native_admission":first["native_id"],
+                "native_pids":[pid,new_pid,restored_pid],"message_ids":message_ids,"event_native_admission":first["native_id"],
                 "notify_native_admission":second["native_id"],"notify_after_event_release_seconds":
                 round(notify["time"]-released,2),"info_native_inputs":0,"native_admission_count":2,
                 "model_http_calls":5,"tool_discovery":"native tool_describe and tool_call","native_tool_calls":native_calls,
                 "router_task":{"task_id":created_task["task_id"],"state":created_task["state"],
                                "unassigned_task_count_after_restart":1},
                 "original_attachment_sha256":sha256(original).hexdigest(),"cold_recovery_reused_admission":True,
+                "missing_queue_and_intent_recovered":{"same_admission":recovered[0]["native_id"],
+                                                      "native_admission_count":recovered[1],"extra_model_calls":0},
                 "boundary":"Real Router, Trigger, Hermes gateway, private LOCAL session, tool execution and ledger. "
                            "Scripted OpenAI-compatible localhost model. No cloud credentials or Feishu."}
             Path(output).write_text(json.dumps(evidence,ensure_ascii=False,indent=2)+"\n")

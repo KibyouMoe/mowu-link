@@ -95,9 +95,13 @@ class HermesAdapter:
         for frame in self.router.frames(cursor):
             p = frame["payload"]
             require(frame["kind"] == "message.deliver" and p["level"] in ("Notify", "Event"), 422, "unsupported_delivery")
+            serialized = encode(p)
             with self.db.transaction() as db:
                 inserted = db.execute("INSERT OR IGNORE INTO queue(message_id,payload) VALUES (?,?)",
-                                      (p["message_id"], encode(p))).rowcount
+                                      (p["message_id"], serialized)).rowcount
+                if not inserted:
+                    saved = db.execute("SELECT payload FROM queue WHERE message_id=?",(p["message_id"],)).fetchone()
+                    require(saved and saved["payload"]==serialized,409,"hermes_queue_payload_conflict")
                 if inserted and self.notices is not None:
                     self.notices.queue(db,p)
             ack = self.router.ack(frame)

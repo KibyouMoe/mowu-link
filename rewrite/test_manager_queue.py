@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import patch
 
 from .devloop import Loop
-from .storage import guid
+from .storage import Fault, encode, guid
 from .test_mainline import Clock
 from . import delivery
 
@@ -62,3 +62,17 @@ class ManagerQueue(unittest.TestCase):
         self.assertIsNone(self.manager.poll())
         self.clock.advance(1)
         self.assertEqual(self.manager.poll()["delivery_id"],n)
+
+    def test_conflicting_saved_message_cannot_acknowledge_router_delivery(self):
+        mid = self.enqueue("Event")
+        saved = {"message_id":mid,"level":"Event","source":"fixture","text":"from a different copy","attachment_ids":[]}
+        with self.manager.db.transaction() as db:
+            db.execute("INSERT INTO queue(message_id,payload) VALUES (?,?)",(mid,encode(saved)))
+
+        with self.assertRaisesRegex(Fault,"hermes_queue_payload_conflict"):
+            self.manager.receive()
+        with self.loop.orders.db.transaction() as db:
+            self.assertEqual(delivery.status(db,"hermes")["confirmed_cursor"],0)
+        with self.manager.db.transaction() as db:
+            self.assertEqual(db.execute("SELECT cursor FROM progress").fetchone()[0],0)
+            self.assertEqual(db.execute("SELECT payload FROM queue WHERE message_id=?",(mid,)).fetchone()[0],encode(saved))
