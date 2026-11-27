@@ -477,6 +477,10 @@ def reconcile(snapshot, trial, *, original_tasks=None, initial_assignments=None)
                           blocked_new_tasks=[item for item in blocked if item["task_id"] not in archived_ids],
                           work_orders=changes,trial_peers=rollback_peers.review_rows(db),
                           exact_rollback_allowed=before==saved["router_db_sha256"],only_new_queued_tasks=only_queue)
+            source_messages = [dict(row) for row in db.execute("""SELECT message_id,owner,level FROM messages
+                                                                WHERE owner LIKE 'trigger/%' ORDER BY rowid""")]
+            if source_messages:
+                result["trial_source_messages"] = source_messages
             if peer_sha is not None:
                 result["peer_archive_sha256"] = peer_sha
         with closing(readonly(source)):
@@ -584,6 +588,8 @@ def main():
             command.add_argument("--source-id",required=True)
             command.add_argument("--peer-archive",type=Path)
             command.add_argument("--peer-archive-sha256")
+        elif op == "stage-reviewed-rollback":
+            command.add_argument("--source-plan",type=Path)
         elif op == "export-chat":
             command.add_argument("--worker",required=True)
             command.add_argument("--after",type=int,default=0)

@@ -22,7 +22,7 @@
 
 实现 `46e2da4ced6cb66de657b627590de0fca5b7dc4f` 的 329 文件发行包 SHA-256 为 `a4de93778bee37d6c827e8852f03f75bea17f0c8afef9c722df80b09704a25d9`。macOS 全量通过 337 项、按环境跳过 5 项。Linux arm64 安装包通过 216 项、按环境跳过 126 项。Windows 安装及 DSH 原生两组通过。另从 macOS 将已审核档案复制到临时 Linux，启动该提交的 HTTPS 档案服务。两个原参与人均读回宿主回执 `d2a67b8c-49a0-5a18-b86f-7ac14b589056` 和同一份 648,000 字节附件，第三工位与非参与的管理身份均返回 404，未信任证书连线被拒。两系统位于同一物理机，内容和宿主为夹具。[Windows CI](https://github.com/KibyouMoe/mowu-link/actions/runs/45922445419)
 
-下一处组合回退的阻点已复现。真实隔离 Router 确认 Trigger 的 Info，消息 `1ba67e27-52f6-4a24-8d7e-2586947de5bf` 有原 T04。将同一停写库交给审核回退时，仍返回 `trial has a notice outside the reviewed W04 results`，回退目录未生成。下一步将来源回交证明与同一份 Router 快照对齐，再验证正式单与来源消息同批回退。
+已实测 Router 与来源同批回退。此前收到原 T04 的 Info 会挡住整个回退。现在来源计划绑定同一份停写 Router，逐条核 T04、传输、适用的原宿主和平台回执以及附件摘要。本次同批恢复一张已验收工单、旧订阅的已收 Event 和 Info，以及邮件和游戏的原采集游标。旧订阅两条尚未进宿主的尾项原样待取，其中一条已确认传输。旧 Trigger 累计确认重送新增为零。漏列来源、错快照、缺 T04、缺宿主或平台回执均未生成输出。宿主与来源使用夹具。[复跑](router-rehearsal.md#router-与来源同批回退) · [证据](evidence/source-router-rollback.json)
 
 重新取消的 W04 已按具体指令核验。相同 A06 操作键重送保留原回执，自动重试沿用同一清理号。同一派发的下一条显式取消携带新的 `cleanup_id`。Worker 从原生收件识别该号，分别保存等待、清理及 Router 回执。隔离实测第一次迟报、重用旧键、换新键重播旧正文和错号都返回 409。新 W04 落库后故意丢回包，冷启沿原键查回，取消通知一条。复跑 `python3 -B -m unittest -v rewrite.test_cleanup rewrite.test_cutover -k cancel`。[HTTP 与回退实测](evidence/reissued-cancel-w04.json)
 

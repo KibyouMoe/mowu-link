@@ -199,6 +199,54 @@ python3 -B -m rewrite.trigger_return audit \
 
 实测让后序 Event 先到宿主，前序 Notify 只有 C02 时禁止准备回退。Notify 进入宿主后模拟丢回执，仍禁止回退。沿原投递号查回后，原旧序号从 1 推进到 8。真实旧 Trigger HTTP 重开后重投确认，新增确认数为零，仅保留从未送出的尾项。Info 经实际查询及测试管理审核后才计入连续前缀。测试宿主和时钟使用夹具。[累计确认实测](evidence/trigger-return-prefix.json)
 
+### Router 与来源同批回退
+
+用同一次停写窗口采集 Router、Hermes、Hermes 宿主及所有参加本批回退的 Trigger 库。用于 `stage-reviewed-rollback` 的试用 `router.db` 必须与该组件快照中的 Router 成员逐字节一致。先运行 `reconcile`，从 `trial_source_messages` 核对每个消息号、原来源身份和等级。正式工单仍按派发与 W04 回执审核。
+
+将独立来源审核的参数放进一份来源计划。路径相对于计划所在目录，或使用绝对路径。每个 Trigger 实例只列一次。
+
+```json
+{
+  "bundle": "trial-bundle",
+  "bundle_sha256": "<组件快照清单摘要>",
+  "manager_instance": "main",
+  "host_session": "<原 Hermes 宿主会话>",
+  "sources": [
+    {
+      "kind": "subscription",
+      "trigger_instance": "handoff",
+      "legacy_snapshot": "old-trigger-snapshot",
+      "legacy_snapshot_sha256": "<旧 Trigger 快照清单摘要>",
+      "journal": "trigger-handoff/handoff.json",
+      "journal_sha256": "<原交接日志摘要>",
+      "info_review": "observed-info.json",
+      "info_review_sha256": "<Info 审核文件摘要>"
+    },
+    {
+      "kind": "feed",
+      "trigger_instance": "mail",
+      "legacy_cursor": "old-mail-cursor.json",
+      "review": "mail-source-review.json",
+      "review_sha256": "<采集审核文件摘要>"
+    }
+  ]
+}
+```
+
+旧订阅的该批没有需确认查阅的 Info 时，可省去 `info_review` 及其摘要。采集项也适用于游戏来源，审核输入沿用原游标和来源证据。Router 审核文件加入 `source_plan_sha256`，填写来源计划的文件 SHA-256，并保留 `trial_sha256`、`closed_assignments` 及本批其他审核字段。[旧采集来源交接](#旧采集来源交接)
+
+```sh
+python3 -B -m rewrite.cutover stage-reviewed-rollback \
+  --snapshot ./old-router-snapshot --trial ./stopped-trial --review ./rollback-review.json \
+  --source-plan ./source-plan.json --destination ./combined-return
+```
+
+旧 Router 恢复副本和来源回交计划一起发布。所有来源材料保存在 `private-review/source-returns/`，含来源计划原件、Hermes 两份对账库及各实例的原试用库。私有总清单给出各来源的输出摘要。旧订阅按实例目录中的 `ack-replay.json` 恢复累计确认，旧采集按实例目录中的游标恢复。核对后再分别执行旧接口。单独完成旧端的一个步骤后若中断，从已经落账的同一份旧库或游标查回。
+
+试用已收到 T04 但未送到原生宿主的旧订阅尾项仍由旧订阅处理，无论 Hermes 是否已确认传输。已取得且核对了宿主回执的项目按原连续前缀确认。缺源端 T04、缺宿主回执、已送宿主但应发的来源飞书提示未取得回执、漏列的来源、摘要不符或来源证明与试用 Router 不同批时，整包不发布。同一旧 Trigger 归档的多个订阅如需并回同一库，仍须另做合并演练。
+
+复跑 `python3 -B -m unittest -v rewrite.test_source_rollback`。实跑隔离 Router、旧 Trigger HTTP 和恢复副本。验证一张已验收工单归档、旧订阅 Event 与 Info 的确认、邮件与游戏采集游标推进，以及两条仍待原订阅处理的尾项。实际旧端重放确认返回零新增。宿主、模型、飞书、邮件源和游戏 SSE 源使用夹具。[证据](evidence/source-router-rollback.json)
+
 ## 旧采集来源交接
 
 在演练窗口准备好来源游标副本和专用配置。交接检查旧采集端已处理到的最后一条、待上行队列和新实例标识。游标导入只保存位置与摘要。仍在旧采集端等待发送的事件需要在接管前另外对账。

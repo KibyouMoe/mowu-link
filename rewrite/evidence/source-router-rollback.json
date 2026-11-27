@@ -1,0 +1,59 @@
+{
+  "router_sha256": "f357422e4ac9328733cb9d64cd49cbaf84ad1e2a390b433da611dfe2efbb5ae3",
+  "formal_order": "2c7b57cb-d162-4b9d-8ce2-16273c1df8d3",
+  "assignment": "f18c8a5d-2dfe-4596-8dbf-169d03de7cb9",
+  "legacy_task": "t-33cf9aaf2f",
+  "source_returns": {
+    "game": {
+      "kind": "feed",
+      "manifest": "return.json",
+      "manifest_sha256": "479711b4ecb681d4eb6772c657211e979392247bbf9d0064593acade8ff8c78d",
+      "published_messages": 1,
+      "trial_archive_sha256": "0471224783ad832cdf8dbc8642164967781df372d047989dd0a12d2fa91629dc"
+    },
+    "mail": {
+      "kind": "feed",
+      "manifest": "return.json",
+      "manifest_sha256": "c5a255a33df066c0e27c00d36fdf4066007dc4ceacc15e36e4f0b8835367a957",
+      "published_messages": 1,
+      "trial_archive_sha256": "3583084c0e7ad0672c5cb855b80f86ef27c49c87ac2cb111d5290a8a6a35b227"
+    },
+    "subscription": {
+      "kind": "subscription",
+      "manifest": "ack-replay.json",
+      "manifest_sha256": "3dd649ca1cde7f3396959cc9066f41470ded30fec2f58236943f3d9b095bd940",
+      "published_messages": 4,
+      "trial_archive_sha256": "9f594955a6e7313b2491890d47dec0dc041b54bf8141e2b6beef76f059ea4ce1"
+    }
+  },
+  "event": "64c5c8ef-e4d7-5322-a1bf-c9d26fd359ac",
+  "info": "2b542adf-5cbf-52a5-8dca-94a0f559aace",
+  "tail_acknowledgements": {
+    "01851fd9-dc5f-5228-865d-c8a96c709e5a": 1,
+    "fb4360ca-2ca4-5a85-909a-a0f3b045a643": 0
+  },
+  "tail_t04": {
+    "duplicate": false,
+    "message_id": "fb4360ca-2ca4-5a85-909a-a0f3b045a643",
+    "received_at": "2027-01-15T08:00:10+00:00"
+  },
+  "mail_t04": {
+    "duplicate": false,
+    "message_id": "248cd316-5066-48e1-a14b-f7f357621509",
+    "received_at": "2027-01-15T08:00:00+00:00"
+  },
+  "game_t04": {
+    "duplicate": false,
+    "message_id": "2f85e405-d66e-47e1-b3fc-812f5eed44fc",
+    "received_at": "2027-01-15T08:00:00+00:00"
+  },
+  "legacy_subscriber_readback": [
+    3,
+    0,
+    [
+      "return-acknowledged",
+      "return-tail"
+    ]
+  ],
+  "scope": "Real isolated Router and old Trigger HTTP, byte-checked archives, host/model/platform/mailbox fixtures."
+}

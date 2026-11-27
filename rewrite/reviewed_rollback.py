@@ -7,6 +7,7 @@ import sqlite3
 import time
 
 from . import legacy_history, rollback_idle, rollback_lifecycle, rollback_migrated_queue, rollback_peers, rollback_questions
+from .rollback_sources import SourceReturns
 from .cutover import (digest, legacy_creation_request, output_directory, queue_execution_modes,
                       readonly, reconcile, restore_snapshot, stage_queue_requests, verified)
 from .messages import valid_guid
@@ -19,7 +20,7 @@ TABLES = {"tasks","reports","messages","deliveries","operations","workers","work
           } | rollback_peers.TABLES
 
 
-def reviewed_orders(facts, original_tasks, replacements):
+def reviewed_orders(facts, original_tasks, replacements, *, with_sources=False):
     queued = queue_execution_modes(facts["queue_candidates"])
     new = {item["task_id"]:item for field in ("closed_new_tasks","cancelled_new_tasks","archived_pool_new_tasks")
            for item in facts[field]}
@@ -33,7 +34,7 @@ def reviewed_orders(facts, original_tasks, replacements):
         else:
             changes.append(row)
     deltas = facts["changed_tables"]
-    if (not (changes or replacements or facts["trial_peers"] or "workers" in deltas)
+    if (not (changes or replacements or facts["trial_peers"] or "workers" in deltas or with_sources)
             or facts["blocked_new_tasks"] or set(deltas)-TABLES
             or any(value["baseline_only"] for name,value in deltas.items() if name!="tasks")):
         raise ValueError("trial has changes outside the supported reviewed orders")
@@ -81,10 +82,10 @@ def reviewed_files(entries):
                 yield "material",material["material_id"],step["worker_id"],material["artifact_ids"]
 
 
-def copy_reviewed_files(db,entries,deltas,folder,peer_uploads,peer_grants):
+def copy_reviewed_files(db,entries,deltas,folder,audited_uploads,audited_grants):
     files = {}
-    uploads = dict(peer_uploads)
-    grants = set(peer_grants)
+    uploads = dict(audited_uploads)
+    grants = set(audited_grants)
     links = 0
     for kind,reference,worker,ids in reviewed_files(entries):
         links += len(ids)
@@ -109,7 +110,7 @@ def copy_reviewed_files(db,entries,deltas,folder,peer_uploads,peer_grants):
             grants.add((file_id,"hermes"))
     if grants!={tuple(row) for row in db.execute("SELECT * FROM attachment_grants WHERE attachment_id IN "
                                                  "(SELECT attachment_id FROM uploads WHERE owner NOT LIKE 'history/%')")}:
-        raise ValueError("trial has grants outside the reviewed assignments and peers")
+        raise ValueError("trial has grants outside the reviewed assignments, peers or sources")
     chunks = sum(db.execute("SELECT COUNT(*) FROM chunks WHERE upload_id=?",(uid,)).fetchone()[0] for uid in uploads)
     for table,count in (("uploads",len(uploads)),("chunks",chunks),("attachment_grants",len(grants)),
                         ("business_files",links)):
@@ -169,7 +170,7 @@ def archive_in_legacy(path, entries, source_id, at):
             raise ValueError("staged legacy database integrity check failed")
 
 
-def stage_reviewed_rollback(snapshot,trial,review,destination):
+def stage_reviewed_rollback(snapshot,trial,review,destination,*,source_plan=None):
     """Prepare an offline fallback without re-enqueueing terminal work."""
     original_tasks = {}
     initial_assignments = {}
@@ -179,7 +180,7 @@ def stage_reviewed_rollback(snapshot,trial,review,destination):
         approval = json.loads(review.read_text())
     except FileNotFoundError:
         # Keep the existing readiness diagnostic while the operator has no review yet.
-        reviewed_orders(facts,original_tasks,{})
+        reviewed_orders(facts,original_tasks,{},with_sources=source_plan is not None)
         raise
     if not isinstance(approval,dict):
         raise ValueError("review must be an object with the trial digest")
@@ -188,7 +189,7 @@ def stage_reviewed_rollback(snapshot,trial,review,destination):
         raise ValueError("replace_migrated_queue must list reviewed orders")
     with closing(readonly(source)) as db:
         replacements = rollback_migrated_queue.reviewed_proofs(db,facts["work_orders"],original_tasks,selected)
-    entries = reviewed_orders(facts,original_tasks,replacements)
+    entries = reviewed_orders(facts,original_tasks,replacements,with_sources=source_plan is not None)
     for tid,entry in entries.items():
         if tid in initial_assignments:
             entry["initial_assignment"] = initial_assignments[tid]
@@ -213,8 +214,11 @@ def stage_reviewed_rollback(snapshot,trial,review,destination):
         if any(not valid_guid(receipt) for receipt in peer_receipts.values()):
             raise ValueError("trial peer needs a confirmed recipient and native host receipt")
         decision["peer_receipts"] = peer_receipts
+    sources = SourceReturns(source_plan,facts["trial_sha256"]) if source_plan is not None else None
+    if sources is not None:
+        decision["source_plan_sha256"] = sources.sha256
     if approval!=decision:
-        raise ValueError("review must match the trial digest, all closed assignments and any new queue modes, cancellations, pool archives or peer receipts")
+        raise ValueError("review must match the trial digest, all closed assignments and any new queue modes, cancellations, pool archives, peer receipts or source returns")
     manifest = verified(snapshot)
     if manifest["legacy_db_sha256"]!=facts["snapshot_sha256"]:
         raise ValueError("legacy snapshot changed during review")
@@ -233,6 +237,8 @@ def stage_reviewed_rollback(snapshot,trial,review,destination):
         if digest(frozen)!=facts["trial_sha256"]:
             raise ValueError("trial database changed during review")
         with closing(readonly(frozen)) as db:
+            if sources is not None:
+                sources.stage(db,private/"source-returns")
             for tid,entry in entries.items():
                 if not is_reviewed_completion(entry):
                     continue
@@ -249,12 +255,18 @@ def stage_reviewed_rollback(snapshot,trial,review,destination):
                                 for worker in (proof["initial"]["assignee_id"],proof["worker_id"])}
             optional_workers.update(worker for proof in proofs.values()
                                     for worker in (proof["row"]["sender"],proof["row"]["recipient"]))
-            workers,frames,inquiries = rollback_lifecycle.check_transport(db,entries,questions,optional_workers,peer_frames,idle)
-            uploads,files = copy_reviewed_files(db,entries,facts["changed_tables"],private/"files",peer_uploads,peer_grants)
+            workers,frames,inquiries = rollback_lifecycle.check_transport(
+                db,entries,questions,optional_workers,peer_frames,idle,sources)
+            audited_uploads, audited_grants = peer_uploads,peer_grants
+            if sources is not None:
+                audited_uploads = {**peer_uploads,**sources.uploads}
+                audited_grants = peer_grants | sources.grants
+            uploads,files = copy_reviewed_files(db,entries,facts["changed_tables"],private/"files",
+                                                audited_uploads,audited_grants)
             rollback_lifecycle.check_operations(db,entries,workers,frames,uploads,
                                                 facts["changed_tables"].get("operations",{}).get("trial_only",0),
                                                 facts["queue_candidates"],questions,inquiries,preparation,
-                                                rollback_peers.ReceiptLedger(proofs),idle)
+                                                rollback_peers.ReceiptLedger(proofs),idle,sources)
             observers = idle.finish(db)
             previous_sha = facts.get("peer_archive_sha256")
             previous = None
@@ -292,6 +304,9 @@ def stage_reviewed_rollback(snapshot,trial,review,destination):
                 recovery["peer_archive_sha256"] = peer_sha
             if observers:
                 recovery["idle_observers"] = observers
+            if sources is not None:
+                recovery["source_returns"] = sources.reports
+                recovery["source_consumer_sha256"] = sources.consumer_hashes
             if applied:
                 recovery["migrated_queue_replacements"] = applied
             output.write(encode(recovery))
@@ -309,4 +324,6 @@ def stage_reviewed_rollback(snapshot,trial,review,destination):
         result.update(peer_archive_sha256=peer_sha,reviewed_peers=len(proofs))
     if observers:
         result["idle_observers"] = len(observers)
+    if sources is not None:
+        result["source_returns"] = sources.reports
     return result

@@ -402,7 +402,7 @@ def retain_reminder(pool, message_id, observed):
     raise ValueError("pool reminder does not match an outstanding deadline")
 
 
-def check_transport(db, entries, reviewed_questions, optional_workers=(), peer_frames=None, idle=None):
+def check_transport(db, entries, reviewed_questions, optional_workers=(), peer_frames=None, idle=None, sources=None):
     workers, optional_workers = set(), set(optional_workers)
     expected_frames = {}
     expected_inquiries = {}
@@ -495,6 +495,8 @@ def check_transport(db, entries, reviewed_questions, optional_workers=(), peer_f
 
     messages = {}
     for row in db.execute("SELECT * FROM messages ORDER BY rowid"):
+        if sources is not None and sources.events.get(row["message_id"])==row["owner"]:
+            continue
         body = json.loads(row["payload"])
         tid, mid = body.get("task_id"), row["message_id"]
         if tid not in entries or row["owner"]!="router" or row["level"]!="Notify" or not row["received_at"]:
@@ -539,6 +541,11 @@ def check_transport(db, entries, reviewed_questions, optional_workers=(), peer_f
         data = json.loads(row["payload"])
         kind,consumer,did = row["kind"],row["consumer"],row["delivery_id"]
         tid, aid = data.get("task_id"),data.get("assignment_id")
+        if (sources is not None and kind=="message.deliver"
+                and sources.frames.get(did)==(consumer,row["cursor"],row["ack"])):
+            if row["ack"]:
+                frames[did] = (consumer,row["cursor"])
+            continue
         if not row["ack"]:
             raise ValueError("trial delivery has no consumer acknowledgement")
         if kind=="peer.message" and peer_frames is not None and peer_frames.get(did)==(consumer,row["cursor"]):
@@ -950,7 +957,7 @@ def verify_order(db, tid, entry, operations, windows):
 
 
 def check_operations(db,entries,workers,frames,uploads,expected_count,queue_candidates,reviewed_questions,
-                     inquiry_sources,initial_assignments,peer_ledger=None,idle=None):
+                     inquiry_sources,initial_assignments,peer_ledger=None,idle=None,sources=None):
     operations, applicable, acked, sessions = {},0,{},{}
     asks,answers = {},{}
     samples,continued = {},{}
@@ -977,6 +984,9 @@ def check_operations(db,entries,workers,frames,uploads,expected_count,queue_cand
             continue
         applicable += 1
         if peer_ledger is not None and method=="POST" and peer_ledger.match(row["seq"],actor,parts,body,reply,sessions,acked):
+            continue
+        if sources is not None and method=="POST" and path=="/v1/messages":
+            sources.record(actor,row["key"],body,reply,row["seq"])
             continue
         if method=="POST" and len(parts)==5 and parts[:3]==["","v1","tasks"] and parts[4]=="questions":
             if actor not in sessions or body.get("session_id")!=sessions[actor]:
@@ -1056,6 +1066,8 @@ def check_operations(db,entries,workers,frames,uploads,expected_count,queue_cand
     rollback_inquiries.verify_rounds(entries,inquiry_sources,samples,continued,windows,acked)
     if peer_ledger is not None:
         peer_ledger.verify()
+    if sources is not None:
+        sources.finish(acked)
     if (creation_keys or preparation or applicable!=expected_count or acked.keys()!=frames.keys()
             or uploads.keys()!=registered_uploads or operations):
         raise ValueError("trial operation ledger is incomplete or has unrelated writes")
