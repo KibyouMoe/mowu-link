@@ -480,6 +480,59 @@ python3 -m rewrite.state_bundle rollback --snapshot ./snapshot --manifest-sha256
 
 版本级复跑为 `python3 -m rewrite.release_check --repository . --previous b31cee5da7c8dc74a76accdd78d8a6c5cb49484c --new 5de36ad66df26dc34fe3832ed14e77b1d9f19551`。两个已提交版本在各自新目录启动真实 Router，以专用临时 TLS 和身份验同一张待派单。旧包→新包→旧包后只查到原单一张，新试用库字节未变。该演练在 macOS 跑过；Windows 与跨机宿主尚待验收。
 
+### 跨机停写与合并快照
+
+切换窗口开始前，把每台宿主及其组件名写进台账。为本次停写生成一个批次 UUID，记录备份工具的完整发行版本。暂停进入新版的请求，按台账停下所有写者。任一台尚在写入或已经恢复服务时，该批次不用于切换。原生会话及独立工作区仍按前节备份。
+
+在每台宿主上用该机的数据库绝对路径生成一份快照片段。示例中的 hosts 和组件名由本次台账决定。
+
+```sh
+python3 -B -m rewrite.state_bundle capture-part --sources ./local-sources.json \
+  --revision "$RELEASE_SHA" --batch-id "$BATCH_UUID" --host-id linux-worker \
+  --destination ./sealed-worker
+```
+
+运行中的组件会因写锁被拒。托管会话注册目录随适配器所在机器采集，使用 `--managed-registries`。留存每台返回的 `manifest_sha256`，以私有目录传送已封存的目录。协调端计划填写台账上该批次的每台宿主及组件名单，再加入对应的记录摘要和接收位置。
+
+```json
+{
+  "batch_id": "<本批 UUID>",
+  "source_revision": "<备份工具完整提交>",
+  "hosts": {
+    "linux-worker": {
+      "snapshot": "/private/cutover/sealed-worker",
+      "manifest_sha256": "<独立记录的 Worker 片段摘要>",
+      "components": ["worker:oguri"]
+    },
+    "mac-router": {
+      "snapshot": "/private/cutover/sealed-router",
+      "manifest_sha256": "<独立记录的 Router 片段摘要>",
+      "components": ["router:main", "agent:oguri", "hermes:main", "hermes-host:main", "trigger:source"]
+    }
+  }
+}
+```
+
+```sh
+python3 -B -m rewrite.state_bundle assemble --plan ./host-plan.json --destination ./sealed-combined
+python3 -B -m rewrite.state_bundle audit-handoff --snapshot ./sealed-combined \
+  --manifest-sha256 "$COMBINED_SHA256"
+python3 -B -m rewrite.state_bundle audit-trigger --snapshot ./sealed-combined \
+  --manifest-sha256 "$COMBINED_SHA256"
+```
+
+合并核对批次、主机、版本、组件名单和实际文件摘要。托管会话分机保存时，合并重核 Worker 的登记与适配器的会话账本。发生冲突或缺项时不发布合并目录。批次号用于对照文件，全部写者的停写窗口由维护人核实。以 `assemble` 返回的 `manifest_sha256` 运行两项对账，再读 `audit-handoff` 的 `needs_review` 和 `audit-trigger` 的 `ready`。待回执时先保留原快照，从副本恢复原绑定并按原派发或消息号查回，复核后再换绑。
+
+复跑需已启动的隔离 Colima 虚拟机、已登记的 ARM64 测试镜像及可供来宾读取的安装目录。仅生成临时测试进程、身份、数据库和端口。
+
+```sh
+MOWULINK_CROSS_HOST_STATE_IMAGE="$PINNED_IMAGE" \
+MOWULINK_CROSS_HOST_STATE_SOCKET="$ISOLATED_DOCKER_SOCKET" \
+python3 -B -m unittest -v rewrite.test_cross_guest.CrossHostState
+```
+
+实测 macOS Router 已收 W04 时，Linux 本地盘上的 Worker 丢失回执。两机停写后分别采集，合并识别为待核。从备份恢复后，同一幂等键取回原回执。Router 保留原正式成果待验且仅一条成果通知。宿主与经理会话使用夹具。[实测证据](evidence/cross-host-state-restore.json)
+
 ### 新版 Trigger 对账
 
 在同一停写点采集 Router 与所有在用 Trigger 实例的数据库，再校验独立记录的快照摘要。

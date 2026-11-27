@@ -1,0 +1,133 @@
+{
+  "release": {
+    "files": 392,
+    "revision": "514c76cfa31f19645f4787320926f85ea3b47045",
+    "sha256": "2fa96b5c9e76ee9950f07e2c7afafb36aec761a28bd535f0d42009871c77dcff"
+  },
+  "regressions": {
+    "macos": {
+      "passed": 34,
+      "skipped": 1,
+      "historical_excluded": 4
+    },
+    "linux_arm64": {
+      "passed": 33,
+      "skipped": 1,
+      "historical_excluded": 4
+    }
+  },
+  "active_guest_refused_snapshot": true,
+  "assignment_id": "1e5c4ad3-1ed3-4efa-a815-561cb2df2259",
+  "audit_before": {
+    "inbox_transport": {
+      "local_cursor": 3,
+      "matched_frames": 3,
+      "router_confirmed_cursor": 3
+    },
+    "issues": [
+      "assignment_mismatch",
+      "report_receipt_pending"
+    ],
+    "native_session_ledger_clear": false,
+    "native_session_pending": {
+      "adapter_deliveries": 0,
+      "adapter_questions": 0,
+      "cleanup_reports": 0,
+      "cleanup_waits": 0,
+      "compactions": 0,
+      "held_assignments": 1,
+      "inbox": 0,
+      "local_admission_handoffs": 0,
+      "manager_questions": 0,
+      "native_command_writes": 0,
+      "native_resume_operations": 0,
+      "outbound_peers": 0,
+      "peer_ingress": 0,
+      "private_chat": 0,
+      "queued_chat": 0,
+      "report_receipts": 1,
+      "router_admission_handoffs": 0,
+      "router_approvals": 0,
+      "router_cleanup": 0,
+      "router_registration_unconfirmed": 0,
+      "router_reserved_assignments": 0,
+      "router_waiting_deliveries": 0,
+      "router_waiting_questions": 0,
+      "scoped_cleanup_reports": 0,
+      "trainer_questions": 0
+    },
+    "router_assignment": null,
+    "unconfirmed_reports": 1,
+    "worker_assignment": {
+      "assignment_id": "1e5c4ad3-1ed3-4efa-a815-561cb2df2259",
+      "task_id": "15796473-5077-4cbe-9ef8-3fbf0def45d9"
+    },
+    "worker_id": "oguri"
+  },
+  "boundary": "macOS Router and adapter, Linux guest ext4 Worker, actual HTTPS. Agent and manager are fixtures.",
+  "capture": {
+    "assembled_hosts": {
+      "batch_id": "dc036a67-84c6-4494-8a6e-dea4366b298d",
+      "manifest_sha256_by_host": {
+        "linux-worker": "d60cf291c4e5dfb160f3273d60938432147a84d126f93ebf1c20b454a0a8d3e4",
+        "mac-router": "5dd50157022ea3b4354060229ad83ed688a916d89a7a728f3c29e79d96fab6f2"
+      }
+    },
+    "components": 6,
+    "manifest_sha256": "74007e1e1b5cd5c5fb0da8eb6572974d6147c80ad5f0751661374894c58c1988",
+    "snapshot_id": "d0de1368-682a-420a-9753-c17d4a31a47b",
+    "source_revision": "514c76cfa31f19645f4787320926f85ea3b47045"
+  },
+  "full_backup_unchanged": true,
+  "image": "sha256:0a1254df0519003d33fd4ab8ad26aff1154e50b3c93aa5ec978e83bf83ba084c",
+  "native_inputs": 1,
+  "native_receipt": {
+    "delivery_id": "9f063d8e-4c8f-4ff0-974a-00f524f9d996",
+    "digest": "a9e4d2ea244ff14346c59d799c57125071a32639aa6f33d80f3e20eac67b6b05",
+    "native_id": "0fc6574b-abf9-40d3-8569-b45cc7c28716",
+    "session": "snapshot-test-session",
+    "turn_id": "2e975570-fa58-40b1-826b-40ebf0bf4d3d"
+  },
+  "notice_id": "9705d676-9fd3-4647-b888-e0aea2b666e5",
+  "probe_submissions": [
+    [
+      "1e5c4ad3-1ed3-4efa-a815-561cb2df2259",
+      "complete-1e5c4ad3-1ed3-4efa-a815-561cb2df2259",
+      {
+        "recorded": true,
+        "release_assignment_id": "1e5c4ad3-1ed3-4efa-a815-561cb2df2259",
+        "task_state": "completed_reported"
+      }
+    ],
+    [
+      "1e5c4ad3-1ed3-4efa-a815-561cb2df2259",
+      "complete-1e5c4ad3-1ed3-4efa-a815-561cb2df2259",
+      {
+        "recorded": true,
+        "release_assignment_id": "1e5c4ad3-1ed3-4efa-a815-561cb2df2259",
+        "task_state": "completed_reported"
+      }
+    ],
+    [
+      "1e5c4ad3-1ed3-4efa-a815-561cb2df2259",
+      "complete-1e5c4ad3-1ed3-4efa-a815-561cb2df2259",
+      {
+        "recorded": true,
+        "release_assignment_id": "1e5c4ad3-1ed3-4efa-a815-561cb2df2259",
+        "task_state": "completed_reported"
+      }
+    ]
+  ],
+  "report_notices": 1,
+  "task_id": "15796473-5077-4cbe-9ef8-3fbf0def45d9",
+  "w04_recovered": {
+    "recorded": true,
+    "release_assignment_id": "1e5c4ad3-1ed3-4efa-a815-561cb2df2259",
+    "task_state": "completed_reported"
+  },
+  "worker_containers": [
+    "9028c8802f086cf59bd801211129703ef77d90e00085249070929a58d2bf9e0e",
+    "03621d5b1874ac309959186d061bb4ff1ffb45a8656800e5b58e176ec721ddc7"
+  ],
+  "worker_device_fs": "ext4"
+}
