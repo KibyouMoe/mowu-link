@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -18,6 +19,52 @@ from .storage import Fault, StateWriterBusy, encode, guid, state_writer
 NODE = shutil.which("node")
 IMPLEMENTATION = Path(__file__).parent/"integrations/dsh_host/workspace-engine.mjs"
 DOCKER_PROBE = Path(__file__).parent/"testdata/windows_workspace_docker_probe.cs"
+WINDOWS_DOCKER_PIPE = "npipe:////./pipe/docker_engine"
+
+
+def windows_docker_options(cli):
+    profile = cli[2]
+    drive,home = os.path.splitdrive(profile)
+    system = os.environ["SystemRoot"]
+    return {"cwd":str(Path(profile).parent),"env":{"SystemRoot":system,
+            "PATH":str(Path(system)/"System32"),"USERPROFILE":profile,"HOME":profile,
+            "HOMEDRIVE":drive,"HOMEPATH":home,"APPDATA":profile,"LOCALAPPDATA":profile,
+            "TEMP":profile,"TMP":profile}}
+
+
+def windows_linux_engine(cli,image):
+    def read(*args):
+        try:
+            return subprocess.check_output([*cli,*args],text=True,stderr=subprocess.PIPE,timeout=8,
+                                           **windows_docker_options(cli)).strip()
+        except (OSError,subprocess.SubprocessError) as error:
+            step = "local Docker pipe" if args[0]=="info" else "pinned local Linux image"
+            raise AssertionError(f"Could not verify {step} for Windows workspace acceptance") from error
+
+    daemon = re.fullmatch(r"linux ([A-Za-z0-9:-]+)",read("info","--format","{{.OSType}} {{.ID}}"))
+    if daemon is None:
+        raise AssertionError("Windows workspace acceptance requires a Linux daemon on the local Docker pipe")
+    inspected = json.loads(read("image","inspect",image))
+    if not (isinstance(inspected,list) and len(inspected)==1 and isinstance(inspected[0],dict)
+            and inspected[0].get("Id")==image and inspected[0].get("Os")=="linux"):
+        raise AssertionError("Windows workspace acceptance requires the exact preloaded Linux image")
+    return daemon[1]
+
+
+def windows_real_docker(test):
+    image = os.environ.get("MOWULINK_DSH_CONTAINER_IMAGE","")
+    if not re.fullmatch(r"sha256:[a-f0-9]{64}",image):
+        raise AssertionError("Set MOWULINK_DSH_CONTAINER_IMAGE to a preloaded Linux image ID")
+    docker = os.environ.get("MOWULINK_DSH_TEST_DOCKER") or shutil.which("docker.exe")
+    if not docker or not Path(docker).is_absolute() or Path(docker).name.lower()!="docker.exe" or not Path(docker).is_file():
+        raise AssertionError("Set MOWULINK_DSH_TEST_DOCKER to the absolute Docker Desktop docker.exe path")
+    if os.environ.get("MOWULINK_DSH_TEST_DOCKER_ENDPOINT",WINDOWS_DOCKER_PIPE)!=WINDOWS_DOCKER_PIPE:
+        raise AssertionError("Windows workspace acceptance uses the local Docker Desktop pipe")
+    root = Path(test.enterContext(TemporaryDirectory(prefix="ml-docker-config-"))).resolve()
+    profile = root/"config"
+    profile.mkdir()
+    cli = [docker,"--config",str(profile),"--host",WINDOWS_DOCKER_PIPE]
+    return image,cli,windows_linux_engine(cli,image)
 
 
 def compile_windows_docker_fixture(root):
@@ -43,6 +90,25 @@ class WindowsWorkspaceEngine(unittest.TestCase):
     def compile_docker_fixture(self):
         root = Path(self.enterContext(TemporaryDirectory(prefix="workspace-容器-"))).resolve()
         return root,compile_windows_docker_fixture(root)
+
+    def test_real_workspace_preflight_rejects_the_wrong_daemon_and_image(self):
+        root,docker = self.compile_docker_fixture()
+        profile = root/"config"
+        profile.mkdir()
+        daemon_reply = root/"daemon-reply.txt"
+        (root/"fixture-container-template.json").touch()
+        cli = [str(docker),"--config",str(profile),"--host",WINDOWS_DOCKER_PIPE]
+        image = "sha256:"+"b"*64
+        daemon_reply.write_text("windows different-engine",encoding="utf-8")
+        with self.assertRaisesRegex(AssertionError,"requires a Linux daemon"):
+            windows_linux_engine(cli,image)
+        daemon_reply.write_text("unavailable",encoding="utf-8")
+        with self.assertRaisesRegex(AssertionError,"Could not verify local Docker pipe"):
+            windows_linux_engine(cli,image)
+        daemon_reply.write_text("linux correct-engine",encoding="utf-8")
+        with self.assertRaisesRegex(AssertionError,"Could not verify pinned local Linux image"):
+            windows_linux_engine(cli,"sha256:"+"c"*64)
+        self.assertEqual(windows_linux_engine(cli,image),"correct-engine")
 
     def test_local_docker_pipe_is_explicit_and_requires_a_linux_daemon(self):
         root,docker = self.compile_docker_fixture()

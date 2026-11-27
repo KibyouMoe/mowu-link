@@ -539,6 +539,21 @@ python3 -m rewrite.linux_check --repository . \
 
 Windows 另从官方发布包运行 [独立 Codex App Server](desktop-check.md#windows-独立-app-server)，实测原生工具经 W04 交成果、原收件查回、只读派发取消及转派，并核对 Windows profile ACL 和进程回收。模型、飞书和接替工位用夹具。旧新版 Router 和 Worker 回退继续每轮验证。
 
+#### Windows 可写工位与真实 Linux 引擎
+
+在隔离 Windows 工位，从已经核验的新版安装目录运行。准备私有测试账号下可执行的 Codex App Server 及 DSH 程序、OpenSSL、Node 和本机 Docker Desktop 的 Linux 引擎。镜像须提前加载，包含 Python 3、`/bin/sh`、`/bin/sleep` 和 `setsid`。测试按完整镜像 ID 查验本机缓存，沿用 `docker_engine` 命名管道。默认 Windows Server 流水线使用 CLI 替身覆盖 Windows 启动和文件权限。Docker Desktop 的支持环境见官方说明。[Docker Desktop 支持范围](https://docs.docker.com/desktop/troubleshoot-and-support/faqs/windowsfaqs/#can-i-run-docker-desktop-on-windows-server)
+
+```powershell
+$env:MOWULINK_TEST_CODEX_BINARY = 'C:\isolated\codex.exe'
+$env:MOWULINK_TEST_DSH_BINARY = 'C:\isolated\DSH\DeepSeek Harness.exe'
+$env:MOWULINK_DSH_TEST_DOCKER = (Get-Command docker.exe).Source
+# 将 python:3.13-bookworm 换成已加载的测试镜像名称
+$env:MOWULINK_DSH_CONTAINER_IMAGE = docker.exe --host 'npipe:////./pipe/docker_engine' image inspect --format '{{.Id}}' python:3.13-bookworm
+python -B -m rewrite.windows_workspace_check --host both --evidence-dir .\workspace-evidence
+```
+
+`--host dsh` 单跑成果回执、取消、转派和错误引擎拒绝。`--host codex` 单跑成果回执、取消、转派和离线工作区核验。两端都保存原生回合、派发、成果或清理凭据及实际容器身份。验收脚本使用私有临时目录和测试模型，缺引擎、镜像、用例跳过或证据缺失都返回失败。输出目录须为新目录。真实线上模型、飞书和生产接管按各自用例另验。
+
 #### Windows 独立 DSH 固定会话
 
 只在独立工位启用。宿主插件设置 `local_tls: true`，适配器启动参数加 `--local-tls`。两端配置同一个固定会话及绝对运行目录。该目录须位于本机受保护的路径下，目录及下列三个文件仅允许运行身份、SYSTEM 和受信任的本机管理员访问。插件用本机 Windows PowerShell 只读检查权限，按设备既有脚本执行策略运行。

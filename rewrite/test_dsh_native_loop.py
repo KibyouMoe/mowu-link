@@ -1376,6 +1376,16 @@ class LocalTlsLoop(NativeProcess):
         (scratch/"artifact.bin").write_bytes(bytes(range(256))*2700)
         NativeLoop.workspace_artifacts(self,use_tls=True,docker_fixture=(image,docker,scratch))
 
+    @unittest.skipUnless(os.name=="nt" and os.environ.get("MOWULINK_WINDOWS_WORKSPACE_TEST")=="1",
+                         "opt-in Windows workspace test with Docker Desktop required")
+    def test_windows_dsh_workspace_uses_real_linux_engine(self):
+        NativeLoop.workspace_artifacts(self,use_tls=True)
+
+    @unittest.skipUnless(os.name=="nt" and os.environ.get("MOWULINK_WINDOWS_WORKSPACE_TEST")=="1",
+                         "opt-in Windows workspace test with Docker Desktop required")
+    def test_windows_dsh_workspace_cancel_and_transfer_with_real_linux_engine(self):
+        NativeLoop.workspace_cleanup(self,use_tls=True)
+
     @unittest.skipUnless(os.name=="nt","Windows file share flags required")
     def test_dynamic_callback_port_survives_a_temporary_reader(self):
         runtime = self.local_tls_directory(dynamic_callback=True)
@@ -2035,27 +2045,46 @@ class NativeLoop(NativeProcess):
         self.assertTrue(socket.startswith("unix:///"),socket)
         return image,[docker,"--host",socket]
 
-    def clean_fixture_containers(self, runtime, session, cli):
+    def clean_fixture_containers(self, runtime, session, cli, *, expected_daemon=None, **docker_options):
         for owned in (runtime/"assignment-containers").glob("*.json"):
             entry = json.loads(owned.read_text())
             if entry.get("session")!=session or not entry.get("token"):
                 continue
+            if expected_daemon is not None:
+                daemon = subprocess.check_output([*cli,"info","--format","{{.OSType}} {{.ID}}"],
+                                                 text=True,timeout=8,**docker_options).strip()
+                self.assertEqual(daemon,"linux "+expected_daemon,"Docker engine changed during the test")
             ids = subprocess.check_output([*cli,"container","ls","--all","--no-trunc","--filter",
-                "label=io.mowulink.assignment="+entry["token"],"--format","{{.ID}}"],text=True,timeout=8).split()
+                "label=io.mowulink.assignment="+entry["token"],"--format","{{.ID}}"],
+                text=True,timeout=8,**docker_options).split()
             for identity in ids:
-                subprocess.run([*cli,"container","rm","--force",identity],check=True,timeout=8,capture_output=True)
+                subprocess.run([*cli,"container","rm","--force",identity],check=True,timeout=8,
+                               capture_output=True,**docker_options)
+
+    def workspace_test_runtime(self):
+        if os.name=="nt":
+            from .test_workspace_engine import WINDOWS_DOCKER_PIPE, windows_docker_options, windows_real_docker
+
+            image,cli,engine = windows_real_docker(self)
+            options = {"docker":cli[0],"socket":WINDOWS_DOCKER_PIPE,"image":image,"python":sys.executable}
+            return options,cli,windows_docker_options(cli),engine
+        image,cli = self.container_engine()
+        docker,_,endpoint = cli
+        return {"docker":docker,"socket":endpoint.removeprefix("unix://"),"image":image},cli,{},None
 
     def test_dsh_workspace_container_cancel_and_transfer_remove_owned_processes(self):
-        image,cli = self.container_engine()
-        docker,_,socket = cli
+        self.workspace_cleanup(use_tls=False)
+
+    def workspace_cleanup(self,*,use_tls):
+        options,cli,docker_options,engine = NativeLoop.workspace_test_runtime(self)
         cases = []
         for action in ("cancel","transfer","foreign_engine"):
             with self.subTest(action=action):
                 session = "isolated-dsh-contained-workspace-"+action
-                directory,loop,service,_ = self.goal_worker(session,extra_workers=("tama",))
+                directory,loop,service,_ = self.goal_worker(session,extra_workers=("tama",),use_tls=use_tls)
                 runtime = Path(directory)
-                (runtime/"assignment-container.json").write_text(encode(
-                    {"docker":docker,"socket":socket.removeprefix("unix://"),"image":image}),encoding="utf-8")
+                link = LocalLink(runtime,use_tls=use_tls)
+                (runtime/"assignment-container.json").write_text(encode(options),encoding="utf-8")
                 sentinel = runtime/"outside-marker"
                 sentinel.write_text("never touched",encoding="utf-8")
                 token = guid()
@@ -2065,7 +2094,8 @@ class NativeLoop(NativeProcess):
                 other = Worker(loop.root/"alternate-worker.db","tama",loop.extra_clients["tama"],
                                HostAdapter(loop.root/"alternate-adapter.db",alternate,alternate.session),clock=service.clock)
                 order = loop.hermes.create(guid(),"Read-write containment","End the isolated write","oguri")["task_id"]
-                with tool_listener(runtime,loop.adapter,client), self.start_native(directory,session,"cleanup-container") as native:
+                with tool_listener(runtime,loop.adapter,client,link=link), \
+                     self.start_native(directory,session,"cleanup-container",use_tls=use_tls) as native:
                     try:
                         other.connect()
                         worker.connect()
@@ -2082,9 +2112,11 @@ class NativeLoop(NativeProcess):
                         container_id = lease["container_id"]
                         self.assertEqual(lease["assignment_id"],assignment)
                         self.assertEqual(lease["phase"],"active")
+                        if engine is not None:
+                            self.assertEqual((lease["daemon"],lease["image"]),(engine,options["image"]))
                         self.assertRegex(container_id,r"^[a-f0-9]{64}$")
                         def docker_cmd(*args):
-                            return subprocess.check_output([*cli,*args],text=True,timeout=8).strip()
+                            return subprocess.check_output([*cli,*args],text=True,timeout=8,**docker_options).strip()
                         recorded = docker_cmd("exec",container_id,"/bin/sh","-c",
                             'cat /workspace/marker; echo; n=$(cat /workspace/pid); test -e "/proc/$n/cmdline"; cat "/proc/$n/cmdline"')
                         self.assertEqual(recorded.splitlines()[0],"owned-write")
@@ -2148,9 +2180,15 @@ class NativeLoop(NativeProcess):
                             "original_native_turn_end":observed["turns"][0]["reason"]["kind"],
                             "boundary":"Actual installed DSH SDK, Linux Docker engine, HTTP Router and Worker. Model and inputs are local fixtures."})
                     finally:
-                        self.clean_fixture_containers(runtime,session,cli)
-        if output := os.environ.get("MOWULINK_DSH_CONTAINER_EVIDENCE"):
-            Path(output).write_text(json.dumps({"cases":cases},ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
+                        NativeLoop.clean_fixture_containers(self,runtime,session,cli,
+                                                           expected_daemon=engine,**docker_options)
+        output_var = "MOWULINK_DSH_WINDOWS_REAL_CLEANUP_EVIDENCE" if engine is not None else "MOWULINK_DSH_CONTAINER_EVIDENCE"
+        if output := os.environ.get(output_var):
+            evidence = {"cases":cases}
+            if engine is not None:
+                evidence.update(docker_engine=engine,docker_image=options["image"],docker_pipe=options["socket"],
+                                operating_system="Windows",native_link="IPv4 loopback with mutual TLS")
+            Path(output).write_text(json.dumps(evidence,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
 
     def test_dsh_saved_w04_reaches_router_with_the_adapter_still_offline(self):
         directory = Path(self.enterContext(tempfile.TemporaryDirectory(dir="/tmp",prefix="mldsh-w04-offline-")))
@@ -2412,14 +2450,14 @@ class NativeLoop(NativeProcess):
         self.workspace_artifacts(use_tls=True)
 
     def workspace_artifacts(self,*,use_tls,docker_fixture=None):
+        docker_options = {}
+        engine = None
         if docker_fixture:
             image,docker,scratch = docker_fixture
             options = {"docker":str(docker),"socket":"npipe:////./pipe/docker_engine",
                        "image":image,"python":sys.executable}
         else:
-            image,cli = self.container_engine()
-            docker,_,socket = cli
-            options = {"docker":docker,"socket":socket.removeprefix("unix://"),"image":image}
+            options,cli,docker_options,engine = NativeLoop.workspace_test_runtime(self)
         session = "dsh-isolated-workspace-artifacts"
         directory,loop,service,_ = self.goal_worker(session,use_tls=use_tls)
         runtime = Path(directory)
@@ -2434,7 +2472,8 @@ class NativeLoop(NativeProcess):
         report_attempts,offsets = [],[]
         loss = True
         if not docker_fixture:
-            self.addCleanup(self.clean_fixture_containers,runtime,session,cli)
+            self.addCleanup(NativeLoop.clean_fixture_containers,self,runtime,session,cli,
+                            expected_daemon=engine,**docker_options)
         with tool_listener(runtime,loop.adapter,client,link=link), \
              self.start_native(directory,session,"cleanup-container-export",use_tls=use_tls) as native:
             if use_tls:
@@ -2480,6 +2519,8 @@ class NativeLoop(NativeProcess):
             lease_path, = (runtime/"assignment-containers").glob("*.json")
             lease = json.loads(lease_path.read_text())
             self.assertEqual((lease["assignment_id"],lease["phase"]),(assignment,"active"))
+            if engine is not None:
+                self.assertEqual((lease["daemon"],lease["image"]),(engine,options["image"]))
             scope = {"session":session,"task_id":tid,"assignment_id":assignment}
             def persisted_receipt(w):
                 with w.db.transaction() as db:
@@ -2488,7 +2529,7 @@ class NativeLoop(NativeProcess):
                 if docker_fixture:
                     return (scratch/"fixture-container.json").is_file()
                 return bool(subprocess.check_output([*cli,"container","ls","--all","--no-trunc","--filter",
-                    "id="+lease["container_id"],"--format","{{.ID}}"],timeout=8).strip())
+                    "id="+lease["container_id"],"--format","{{.ID}}"],timeout=8,**docker_options).strip())
             self.assertIsNone(persisted_receipt(worker))
             self.assertEqual(client.request("POST","worker/workspace-state",scope),{**scope,"state":"inactive"})
             self.assertEqual(worker_resume.source_admission(worker,session),("source_workspace_pending",False))
@@ -2529,7 +2570,9 @@ class NativeLoop(NativeProcess):
             self.assertEqual(cold["turns"],observed["turns"])
             self.assertEqual(cold["modelRequests"],[])
             self.assertFalse(DshHost(runtime,link=link).request("activity",session)["workspace_pending"])
-        if docker_fixture:
+        if engine is not None:
+            name = "MOWULINK_DSH_WINDOWS_REAL_WORKSPACE_EVIDENCE"
+        elif docker_fixture:
             name = "MOWULINK_DSH_WINDOWS_WORKSPACE_EVIDENCE"
         else:
             name = ("MOWULINK_DSH_WORKSPACE_TLS_EVIDENCE" if use_tls else "MOWULINK_DSH_WORKSPACE_ARTIFACT_EVIDENCE")
@@ -2545,6 +2588,9 @@ class NativeLoop(NativeProcess):
                 "boundary":("Installed Windows DSH AgentLoop and native file ledger, Docker CLI fixture, real Worker and Router. "
                             "Local scripted model. No Feishu." if docker_fixture else
                             "Installed DSH AgentLoop, real isolated Linux Docker, Worker and Router. Local scripted model. No Feishu.")}
+            if engine is not None:
+                evidence.update(docker_engine=engine,docker_image=options["image"],docker_pipe=options["socket"],
+                                operating_system="Windows")
             Path(output).write_text(json.dumps(evidence,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
 
     def seed_runtime(self, session, runtime, cli, image, archive, digest, *, docker=None, execute_workspace_files=None):

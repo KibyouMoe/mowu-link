@@ -27,6 +27,7 @@ from .state_bundle import capture, restore, rollback, verify
 from .storage import Fault, encode, guid
 from .test_codex_app_server import CODEX, LINK_OUTAGE_FIXTURE, Provider, running
 from .test_mainline import Clock
+from .test_workspace_engine import WINDOWS_DOCKER_PIPE, windows_docker_options, windows_real_docker
 from .trigger import Trigger
 from .wire import Client
 from .worker import Worker
@@ -130,12 +131,23 @@ def boot_previous(root,revision,recovered,sid,profile,project,cert,key,env,dispa
                      "bundled Codex, Node and openssl required")
 class CodexWorkspaceTest(unittest.TestCase):
     def test_native_workspace_artifact_release_cancel_and_transfer(self):
-        image,cli = dsh_checks.NativeLoop.container_engine(self)
-        docker,_,socket = cli
+        docker_options = {}
+        engine = None
+        if os.name=="nt":
+            if os.environ.get("MOWULINK_WINDOWS_WORKSPACE_TEST")!="1":
+                self.skipTest("opt-in Windows workspace test with Docker Desktop required")
+            image,cli,engine = windows_real_docker(self)
+            docker_options = windows_docker_options(cli)
+            docker,workspace_socket = cli[0],WINDOWS_DOCKER_PIPE
+        else:
+            image,cli = dsh_checks.NativeLoop.container_engine(self)
+            docker,_,endpoint = cli
+            workspace_socket = endpoint.removeprefix("unix://")
         cases = []
         for action in ("complete","cancel","transfer"):
             with self.subTest(action=action), ExitStack() as resources:
-                root = Path(resources.enter_context(TemporaryDirectory(dir="/tmp",prefix="ml-codex-ws-")))
+                root = Path(resources.enter_context(TemporaryDirectory(
+                    dir=None if os.name=="nt" else "/tmp",prefix="ml-codex-ws-"))).resolve()
                 profile,project,runtime = (root/name for name in ("profile","project","workspace"))
                 for private in (profile,project,runtime):
                     private.mkdir(mode=0o700)
@@ -149,13 +161,16 @@ class CodexWorkspaceTest(unittest.TestCase):
                     '[model_providers.test_wire]\nname="Local test wire"\nbase_url='+encode(origin+'/v1')+'\nwire_api="responses"\n'
                     'request_max_retries=0\nstream_max_retries=0\n',encoding="utf-8")
                 env = {"HOME":str(root),"TMPDIR":str(root),"PATH":os.defpath,"PYTHONNOUSERSITE":"1"}
+                if os.name=="nt":
+                    env.update(SystemRoot=os.environ["SystemRoot"],USERPROFILE=str(root),TEMP=str(root),TMP=str(root))
                 tools = ("worker_report","worker_workspace_shell","worker_workspace_export")
                 result = subprocess.run([sys.executable,"-B","-m","rewrite.service","codex-provision",
                     "--codex-binary",CODEX,"--codex-profile",profile,"--cwd",project,
                     *(arg for tool in tools for arg in ("--tool",tool))],capture_output=True,text=True,timeout=20,env=env)
                 self.assertEqual(result.returncode,0,result.stderr)
                 sid = json.loads(result.stdout)["thread_id"]
-                resources.callback(dsh_checks.NativeLoop.clean_fixture_containers,self,runtime,sid,cli)
+                resources.callback(dsh_checks.NativeLoop.clean_fixture_containers,self,runtime,sid,cli,
+                                   expected_daemon=engine,**docker_options)
                 clock = Clock()
                 loop = resources.enter_context(Loop.isolated(clock,extra_workers=("tama",)))
                 worker,manager = loop.worker,loop.hermes
@@ -163,7 +178,7 @@ class CodexWorkspaceTest(unittest.TestCase):
                 callback_key,adapter_key = guid(),guid()
                 roles = config(root,"adapter-roles.json",{adapter_key:"worker/oguri"})
                 configuration = config(root,"assignment-workspace.json",{"runtime":str(runtime),"node":shutil.which("node"),
-                    "image":image,"docker":docker,"socket":socket.removeprefix("unix://")})
+                    "image":image,"docker":docker,"socket":workspace_socket})
                 cert,key = root/"test.crt",root/"test.key"
                 subprocess.run(["openssl","req","-x509","-newkey","rsa:2048","-nodes","-days","1","-subj","/CN=localhost",
                     "-addext","subjectAltName=IP:127.0.0.1","-keyout",key,"-out",cert],check=True,capture_output=True,timeout=10)
@@ -213,6 +228,8 @@ class CodexWorkspaceTest(unittest.TestCase):
                             if value["assignment_id"]==assignment and value["phase"]=="active":
                                 return path,value
                     lease,record = eventually(active_workspace)
+                    if engine is not None:
+                        self.assertEqual((record["daemon"],record["image"]),(engine,image))
                     cid = record["container_id"]
                     identity = journal(runtime)[1]
                     self.assertEqual(inspect(runtime,{identity}),(None,"dsh_workspace_host_still_running"))
@@ -266,7 +283,7 @@ class CodexWorkspaceTest(unittest.TestCase):
                         def detached_pid():
                             result = subprocess.run([*cli,"exec",cid,"/bin/sh","-c",
                                 'p=$(cat /workspace/pid) && kill -0 "$p" && printf "%s" "$p"'],
-                                text=True,capture_output=True,timeout=5)
+                                text=True,capture_output=True,timeout=5,**docker_options)
                             return result.stdout if result.returncode==0 else None
                         stopped_pid = eventually(detached_pid)
                         self.assertIn("held_assignment_id",service.status())
@@ -303,7 +320,8 @@ class CodexWorkspaceTest(unittest.TestCase):
                     self.assertIsNone(worker.hold()["held_assignment_id"])
                     self.assertFalse((project/"output.bin").exists())
                     eventually(lambda:json.loads(lease.read_text())["phase"]=="sealed")
-                    remaining = subprocess.check_output([*cli,"container","ls","-aq","--filter","id="+cid],text=True,timeout=5)
+                    remaining = subprocess.check_output([*cli,"container","ls","-aq","--filter","id="+cid],
+                                                        text=True,timeout=5,**docker_options)
                     self.assertEqual(remaining.strip(),"")
                     with closing(sqlite3.connect(adapter_db)) as db:
                         commands = db.execute("SELECT turn_id,call_id FROM codex_workspace_commands").fetchall()
@@ -338,6 +356,9 @@ class CodexWorkspaceTest(unittest.TestCase):
                     "container_id":cid,"detached_child_pid_before_control":stopped_pid,"offline_workspace_audit":audit,
                     "final_task":manager.inspect(task)["task"],**proof})
         if output := os.environ.get("MOWULINK_CODEX_WORKSPACE_EVIDENCE"):
-            Path(output).write_text(json.dumps({"recorded_utc":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+            evidence = {"recorded_utc":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
                 "boundary":"Bundled Codex App Server, independent TLS adapter and Linux Docker. Local scripted model and replacement host.",
-                "cases":cases},ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
+                "cases":cases}
+            if engine is not None:
+                evidence.update(docker_engine=engine,docker_image=image,docker_pipe=workspace_socket,operating_system="Windows")
+            Path(output).write_text(json.dumps(evidence,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
