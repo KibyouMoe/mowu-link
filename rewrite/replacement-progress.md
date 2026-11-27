@@ -8,7 +8,9 @@
 
 新增本机持久停派入口 `rewrite.service router-drain`。运行中执行会被 Router 的写锁拒绝。隔离 HTTPS Router 中，一张单的 W03 已落库但回包丢失，另一张单仅有 C02 收件。停派后前者通过快照恢复取回原 W03，宿主一次收件并交 W04，Router 仍待验收，成果通知一条。后者退回原队列，迟到 W03 回 409。恢复的 Router 启动回执保留原停派号，原快照不变。解除后等第二个工位重新满足空闲条件，退回的工单按原队首先取得新派发号。
 
-安装包锁定 `8d31c8ab9807fbac304a8d25667b1506b877cadc`，393 个文件在 macOS 与 Linux arm64 复验一致。各通过 69 项，跳过 Windows ACL 专项。Router、安装程序、HTTPS、SQLite 快照为实跑，宿主为测试夹具。正式生产窗口与真宿主仍按矩阵验收。[操作步骤](router-rehearsal.md#切换前持久停派) · [实测记录](evidence/router-dispatch-drain.json)
+首次 Windows 测试的 34 个用例全过，随后跨版本回退拦住了启动时提前创建停派表的试用库。改为在显式 `begin` 的事务中初始化，保留原回退校验。修正版安装包锁定 `71bf74f3b27cfed5551aeac0ee0d7618083a8aaa`，394 个文件在 macOS 与 Linux arm64 复验一致。两边各通过 69 项，跳过 Windows ACL 专项。两边的跨版本演练均保留试用库字节和唯一原工单。Router、安装程序、HTTPS、SQLite 快照为实跑，宿主为测试夹具。正式生产窗口与真宿主仍按矩阵验收。[操作步骤](router-rehearsal.md#切换前持久停派) · [实测记录](evidence/router-dispatch-drain.json)
+
+修正版的 Windows 安装回归 34 项全过，版本回退再次读回唯一原单，试用库的字节校验通过。[Windows 流水线](https://github.com/KibyouMoe/mowu-link/actions/runs/45976573208)
 
 增加 `state_bundle capture-part` 与 `assemble`。宿主先按各自写锁封存，协调端按批次、版本、预登记组件及摘要合并。错批、缺组件、错摘要、篡改文件均被拒。Worker 与适配器分机时，合并阶段重验托管会话登记，错回调摘要的片段组合不会发布。
 

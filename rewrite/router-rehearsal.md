@@ -575,6 +575,8 @@ python3 -B -m rewrite.service router-drain --db "$ROUTER_DB" status
 
 原号 `end` 返回 `released`，无未释放操作时 `status` 返回 `open`。新一轮停派用新操作号。以常规参数启动 Router 后，各工位重新上报忙闲并满足连续 10 秒空闲，退回队列的单按原顺序取得新派发号。正在运行的 Router 会使上述本机命令因写锁而拒绝执行。
 
+停派账本在第一次成功的 `begin` 中与撤回预留一起写入。常规启动和查询未开始状态不会创建它。两个锁定版本间实测，未开启停派的试用库在新版本读回待派单后字节保持一致，前一版本仍能读回唯一原单。
+
 复跑 `python3 -B -m unittest -v rewrite.test_service.Service.test_router_drain_keeps_accepted_work_and_requeues_an_unaccepted_offer`。隔离 HTTPS Router 实跑三次启动，宿主与故障注入为测试夹具。[实测记录](evidence/router-dispatch-drain.json)
 
 ### 新版 Router 与 Worker 分步更新
