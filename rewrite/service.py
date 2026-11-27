@@ -8,6 +8,7 @@ import re
 import signal
 import ssl
 import stat
+import sys
 from threading import Thread
 
 from .orders import Orders
@@ -187,6 +188,11 @@ def serve(args,stack):
         if args.component=="router":
             ready["dispatch_draining"] = args.drain_dispatch
         print(encode(ready),flush=True)
+        if args.component=="router" and args.stop_with_stdin:
+            def wait_for_supervisor():
+                sys.stdin.buffer.read(1)
+                listener.shutdown()
+            Thread(target=wait_for_supervisor,daemon=True).start()
         try:
             listener.serve_forever(poll_interval=0.2)
         finally:
@@ -224,6 +230,7 @@ def main():
         if name=="router":
             component.add_argument("--drain-dispatch",action="store_true",
                                    help="pause new assignment reservations while existing work drains")
+            component.add_argument("--stop-with-stdin",action="store_true",help=argparse.SUPPRESS)
         if name=="host-ops":
             component.add_argument("--manifest",required=True,type=Path,
                                    help="owner-private map from service IDs to exact loaded user services")
