@@ -566,6 +566,41 @@ class Bundle(unittest.TestCase):
         self.assertEqual((self.dest/filename(label)).read_bytes(),original)
         self.assertEqual(path.read_bytes(),original)
 
+    def test_feishu_audit_keeps_a_held_receipt_in_scope_while_other_output_recovers(self):
+        with self.stack(self.sources) as (_m,w,_source,_wire,_platform,views):
+            with w.db.transaction() as db:
+                common = {"session":self.native.session,"turn_id":"first","kind":"progress","text":"Wait here"}
+                first = display.append(db,{**common,"event_id":"unknown"})["seq"]
+                second = display.append(db,{**common,"event_id":"related"})["seq"]
+                display.append(db,{**common,"event_id":"independent","turn_id":"other"})
+            self.platform.lose_next = True
+            with self.assertRaises(ConnectionError):
+                views.poll()
+        old = capture(self.sources,self.revision,self.snapshot)["manifest_sha256"]
+        recovered = restore(self.snapshot,old,self.dest)
+        with self.stack(recovered) as (_m,_w,_source,_wire,_platform,views):
+            self.clock.advance(3601)
+            with self.assertLogs(level="WARNING"):
+                self.assertEqual(views.poll(),1)
+            self.assertEqual(views.poll(),0)
+        current = self.root/"after-review"
+        seal = capture(recovered,self.revision,current)["manifest_sha256"]
+        audited = audit_handoff(current,seal)
+        self.assertTrue(audited["needs_review"])
+        worker, = audited["workers"]
+        self.assertFalse(worker["native_session_ledger_clear"])
+        self.assertEqual(worker["feishu_receipts"]["confirmed_outputs"],1)
+        self.assertEqual(worker["feishu_receipts"]["issues"],
+                         [{"code":"platform_receipt_held","display_seq":seq,"root_seq":first} for seq in (first,second)])
+        self.assertEqual(worker["native_session_pending"]["platform_display_unseen"],0)
+        self.assertEqual(self.platform.calls,[("send","om_1"),("send","om_2")])
+        with closing(sqlite3.connect(recovered["feishu:oguri"])) as db,db:
+            db.execute("UPDATE view_receipt_review SET scope='unrelated' WHERE seq=?",(second,))
+        changed = self.root/"bad-review"
+        seal = capture(recovered,self.revision,changed)["manifest_sha256"]
+        self.assertIn({"code":"platform_output_receipt_mismatch","display_seq":second,"root_seq":first},
+                      audit_handoff(changed,seal)["workers"][0]["feishu_receipts"]["issues"])
+
     def test_handoff_audit_detects_an_omitted_idle_peers_recipient_before_and_after_c02(self):
         other_labels = ("worker:tama","agent:tama")
         sources = {**self.sources,**{label:self.root/filename(label) for label in other_labels}}

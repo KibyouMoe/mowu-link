@@ -7,7 +7,7 @@ import time
 from uuid import NAMESPACE_URL, uuid5
 
 from .feishu_inbound import image_format
-from . import feishu_history, question_cards
+from . import feishu_history, feishu_receipt_review, question_cards
 from .storage import Database, Fault, encode, require
 
 
@@ -45,10 +45,13 @@ class Views:
         with self.db.transaction() as db:
             after = db.execute("SELECT cursor FROM view_cursor").fetchone()[0]
         rows = self.worker.request("GET",f"worker/display?after={after}")["items"]
-        for completed,row in enumerate(rows):
-            if self.deliver(row["seq"],row["event"]) is None:
-                return completed
-        return len(rows)
+        confirmed = 0
+        for row in rows:
+            result = self.deliver(row["seq"],row["event"])
+            if result is None:
+                break
+            confirmed += result is not feishu_receipt_review.HELD
+        return confirmed
 
     def input_notices(self, inbound):
         require(inbound.binding[2]==self.chat,409,"view_chat_mismatch")
@@ -88,6 +91,8 @@ class Views:
             old = db.execute("SELECT * FROM view_attempt WHERE seq=?",(seq,)).fetchone()
             require(not old or old["event"] == serialized,409,"view_replay_conflict")
             if seq <= cursor:
+                if old and feishu_receipt_review.original(db,seq):
+                    return feishu_receipt_review.HELD
                 require(old and old["mid"],409,"unknown_prior_view")
                 return old["mid"]
             require(seq == cursor+1,409,"display_gap")
@@ -97,6 +102,10 @@ class Views:
             else:
                 db.execute("INSERT INTO view_attempt VALUES (?,?,?,NULL)",(seq,serialized,self.clock()))
                 db.execute("INSERT INTO view_writes(seq) VALUES (?)",(seq,))
+                origin = feishu_receipt_review.dependency(db,event)
+                if origin:
+                    feishu_receipt_review.record(db,seq,origin["seq"],event,self.clock())
+                    return feishu_receipt_review.HELD
         if event["kind"] == "image" and not self.ensure_image(seq,event["attachment_id"]):
             return None
         # Persist the exact provider call before the first attempt. Reopening with a different renderer
@@ -112,7 +121,15 @@ class Views:
         with self.db.transaction() as db:
             write = db.execute("SELECT * FROM view_writes WHERE seq=?",(seq,)).fetchone()
             if not write["platform_mid"]:
-                mid = self.send_write(json.loads(write["request"]),write["prepared_at"])
+                request = json.loads(write["request"])
+                now = self.clock()
+                if (request["method"] in ("image","create")
+                        and now-write["prepared_at"] >= feishu_receipt_review.RETRY_SECONDS):
+                    require(request["target"]==self.chat,409,"view_chat_mismatch")
+                    feishu_receipt_review.record(db,seq,seq,event,now)
+                    logging.warning("Feishu display seq %s still needs receipt review",seq)
+                    return feishu_receipt_review.HELD
+                mid = self.send_write(request,write["prepared_at"])
                 db.execute("UPDATE view_writes SET platform_mid=? WHERE seq=?",(mid,seq))
                 feishu_history.final_confirmed(db,seq,event,mid,self.clock())
 
@@ -176,7 +193,7 @@ class Views:
             require(mid==request["target"],502,"wrong_card_receipt")
         else:
             require(request["target"]==self.chat,409,"view_chat_mismatch")
-            require(0 <= self.clock()-prepared_at < 55*60,409,"platform_receipt_unknown")
+            require(0 <= self.clock()-prepared_at < feishu_receipt_review.RETRY_SECONDS,409,"platform_receipt_unknown")
             if request["method"]=="image":
                 mid = self.platform.send(self.chat,"image",request["body"],request["key"])
             else:

@@ -98,6 +98,29 @@ class QuestionCards(PlatformCase):
         self.assertEqual(self.executions,1)
         self.assertEqual(self.sink.calls[-1],("patch",card[0]))
 
+    def test_expired_question_card_keeps_its_updates_for_review_and_other_cards_continue(self):
+        self.sink.lose_next = True
+        with self.assertRaises(ConnectionError):
+            self.open()
+        with self.loop.worker.db.transaction() as db:
+            question = json.loads(db.execute("SELECT payload FROM display_events").fetchone()[0])
+        mid = next(iter(self.sink.messages.values()))[0]
+        with self.assertRaisesRegex(Fault,"not_original_trainer_card"):
+            self.click(question["question_id"],mid,"skip")
+        # Native closes the prompt independently, with no platform receipt for the original card.
+        self.adapter.request("POST","worker/native-question-proof",{"question_id":question["question_id"],
+            "proof":{k:self.question[k] for k in ("session","turn_id","native_question_id")}
+                    | {"closed":True,"answer":None,"state":"ended_unanswered","receipt_id":guid()}})
+        self.adapter.request("POST","worker/display",{"event_id":"independent","session":self.native.session,
+                             "turn_id":"other-turn","kind":"final","text":"Independent answer"})
+        self.clock.advance(3601)
+        with self.assertLogs(level="WARNING"):
+            self.assertEqual(self.views.poll(),1)
+        self.assertEqual(self.sink.calls,[("send",mid),("send","om_2")])
+        with self.views.db.transaction() as db:
+            self.assertEqual([tuple(row) for row in db.execute("SELECT seq,root_seq FROM view_receipt_review ORDER BY seq")],
+                             [(1,1),(2,1)])
+
     def test_batch_submit_skips_blanks_and_keeps_original_field_options(self):
         self.question.pop("text")
         self.question.pop("options")

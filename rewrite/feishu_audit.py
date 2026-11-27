@@ -2,6 +2,7 @@
 import json
 import re
 
+from . import feishu_receipt_review
 from .feishu_output import write_key
 
 
@@ -77,9 +78,14 @@ def output_proof(db,chat,cursor):
     settled = waiting = 0
     issues = []
     segments,questions = {},{}
-    rows = db.execute("""SELECT a.seq,a.event,a.mid,w.request,w.platform_mid,w.prepared_at,i.image_key
+    review_table = feishu_receipt_review.present(db,"feishu")
+    review_fields = (",h.root_seq,h.scope,h.held_at" if review_table
+                     else ",NULL AS root_seq,NULL AS scope,NULL AS held_at")
+    review_join = " LEFT JOIN feishu.view_receipt_review h USING(seq)" if review_table else ""
+    roots = {}
+    rows = db.execute(f"""SELECT a.seq,a.event,a.mid,w.request,w.platform_mid,w.prepared_at,i.image_key{review_fields}
         FROM feishu.view_attempt a LEFT JOIN feishu.view_writes w USING(seq)
-        LEFT JOIN feishu.view_images i USING(seq) ORDER BY a.seq""")
+        LEFT JOIN feishu.view_images i USING(seq){review_join} ORDER BY a.seq""")
     for row in rows:
         seq,mid = row["seq"],row["platform_mid"]
         event = document(row["event"])
@@ -96,6 +102,27 @@ def output_proof(db,chat,cursor):
         elif kind in ("question_answered","question_closed"):
             patch_target = questions.get(question)
         prepared,request = row["prepared_at"],row["request"]
+        root = row["root_seq"]
+        if root is not None:
+            key = feishu_receipt_review.scope(event)
+            review_time = row["held_at"]
+            recorded = (seq<=cursor and row["mid"] is None and mid is None and row["scope"]==key
+                        and type(review_time) in (int,float))
+            if root==seq:
+                raw = document(request)
+                recorded = (recorded and isinstance(raw,dict) and raw.get("method") in ("create","image")
+                            and valid_write(raw,event,chat,None,row["image_key"],patch_target)
+                            and type(prepared) in (int,float)
+                            and review_time-prepared>=feishu_receipt_review.RETRY_SECONDS)
+                if recorded:
+                    roots[seq] = key
+            else:
+                original = roots.get(root)
+                recorded = (recorded and key is not None and original==key
+                            and request is None and prepared is None)
+            issues.append({"code":"platform_receipt_held" if recorded else "platform_output_receipt_mismatch",
+                           "display_seq":seq,"root_seq":root})
+            continue
         bad_receipt = mid is not None and not message_id(mid)
         bad_commit = seq<=cursor and (mid is None or mid!=row["mid"])
         if request is None:
@@ -119,6 +146,10 @@ def output_proof(db,chat,cursor):
     for row in db.execute("""SELECT w.seq FROM feishu.view_writes w
         LEFT JOIN feishu.view_attempt a USING(seq) WHERE a.seq IS NULL ORDER BY w.seq"""):
         issues.append({"code":"platform_output_receipt_mismatch","display_seq":row["seq"]})
+    if review_table:
+        for (seq,) in db.execute("""SELECT h.seq FROM feishu.view_receipt_review h
+            LEFT JOIN feishu.view_attempt a USING(seq) WHERE a.seq IS NULL ORDER BY h.seq"""):
+            issues.append({"code":"platform_output_receipt_mismatch","display_seq":seq})
     return settled,waiting,issues
 
 

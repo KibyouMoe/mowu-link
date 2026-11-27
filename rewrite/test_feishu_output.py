@@ -186,15 +186,25 @@ class PlatformOutput(PlatformCase):
         self.assertEqual(len(self.sink.messages),1)
 
     def test_after_platform_dedup_window_unknown_is_not_resent(self):
-        self.event("7","final",text="Done")
+        original = self.event("7","progress",text="Before")
         self.sink.lose_next = True
         with self.assertRaises(ConnectionError):
             self.views.poll()
+        same_turn = self.event("8","final",text="Same turn")
+        independent = self.event("9","final",text="Independent turn",turn_id="next-turn")
         self.clock.advance(3601)
-        with self.assertRaises(Fault) as failure:
-            self.reopen().poll()
-        self.assertEqual(failure.exception.code,"platform_receipt_unknown")
-        self.assertEqual(len(self.sink.calls),1)
+        resumed = self.reopen()
+        with self.assertLogs(level="WARNING"):
+            self.assertEqual(resumed.poll(),1)
+        self.assertEqual(self.reopen().poll(),0)
+        self.assertEqual(self.sink.calls,[("send","om_1"),("send","om_2")])
+        self.assertEqual(self.sink.messages[next(reversed(self.sink.messages))][2]["elements"][0]["text"]["content"],
+                         "Independent turn")
+        with resumed.db.transaction() as db:
+            self.assertEqual([tuple(r) for r in db.execute("SELECT seq,root_seq FROM view_receipt_review ORDER BY seq")],
+                             [(original["seq"],original["seq"]),(same_turn["seq"],original["seq"])])
+            self.assertEqual(db.execute("SELECT cursor FROM view_cursor").fetchone()[0],independent["seq"])
+            self.assertIsNone(db.execute("SELECT mid FROM view_attempt WHERE seq=?",(original["seq"],)).fetchone()[0])
 
     def test_legacy_unconfirmed_card_without_frozen_request_requires_original_sender(self):
         self.event("legacy-card","final",text="Original card")

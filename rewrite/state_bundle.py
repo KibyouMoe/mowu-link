@@ -11,7 +11,7 @@ import sqlite3
 from tempfile import TemporaryDirectory
 
 from . import admission, delivery, dsh_workspace_audit, feishu_audit, hermes_audit, trigger_audit
-from . import question_outbox, report_audit
+from . import feishu_receipt_review, question_outbox, report_audit
 from . import state_bundle_managed as managed
 from .cutover import digest, output_directory, readonly
 from .messages import valid_guid
@@ -378,8 +378,10 @@ def feishu_display_backlog(db,platform_path):
         return None,"platform_display_cursor_unconfirmed"
     cursor = slots[0]["cursor"]
     # A cursor is meaningful only against the identical, contiguous Worker event prefix.
-    matched = db.execute("""SELECT COUNT(*) FROM main.display_events e JOIN feishu.view_attempt v USING(seq)
-        WHERE e.seq BETWEEN 1 AND ? AND v.event=e.payload AND substr(v.mid,1,3)='om_'""",(cursor,)).fetchone()[0]
+    reviewed = (" OR (v.mid IS NULL AND EXISTS(SELECT 1 FROM feishu.view_receipt_review h WHERE h.seq=v.seq))"
+                if feishu_receipt_review.present(db,"feishu") else "")
+    matched = db.execute(f"""SELECT COUNT(*) FROM main.display_events e JOIN feishu.view_attempt v USING(seq)
+        WHERE e.seq BETWEEN 1 AND ? AND v.event=e.payload AND (substr(v.mid,1,3)='om_'{reviewed})""",(cursor,)).fetchone()[0]
     diverged = db.execute("""SELECT 1 FROM feishu.view_attempt v LEFT JOIN main.display_events e USING(seq)
         WHERE v.seq<1 OR (v.seq>? AND (v.seq>?+1 OR v.mid IS NOT NULL OR e.seq IS NULL OR v.event<>e.payload))
         LIMIT 1""",(cursor,cursor)).fetchone()
