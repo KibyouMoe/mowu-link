@@ -1,0 +1,38 @@
+{
+  "revision": "d6e7b328396cb5f0c6a9286a3cf8be08471574c1",
+  "verified_release_files": 375,
+  "macos_installed": {
+    "passed": 25,
+    "duration_seconds": 20.515,
+    "sha256": "486ba4647f2992c9da85f28ea5ec2e9050076c5546c82ca341f3424d32f542d5",
+    "native_cases": [
+      "Codex App Server workspace",
+      "DSH SDK TLS handoff"
+    ]
+  },
+  "linux_arm64_installed": {
+    "passed": 189,
+    "skipped": 131,
+    "archival_excluded": 58,
+    "failed": 0,
+    "errors": 0,
+    "fixture_native_inputs": 1,
+    "once_only_notifications": 1
+  },
+  "windows_native": {
+    "runner": "Windows Server 2025",
+    "run_id": 45958349209,
+    "run_url": "https://github.com/KibyouMoe/mowu-link/actions/runs/45958349209",
+    "install_job_id": 140369984072,
+    "install_cases_passed": 23,
+    "new_journal_cases_passed_utc": {
+      "test_offline_handoff_and_rollback_reserve_the_codex_workspace_writer": "2026-11-27T07:26:09.2372490Z",
+      "test_workspace_audit_checks_private_file_and_original_journal_identity": "2026-11-27T07:26:09.2518059Z"
+    },
+    "install_archive_sha256": "e79bbdc899ff967adbe6385d5c5398ff0806cc3c0cce2a5a8e7164856435a9d1",
+    "dsh_sdk_job_id": 140369983713,
+    "dsh_sdk_cases_passed": 14,
+    "docker_ostype_probe": "unavailable"
+  },
+  "boundary": "Windows used native filesystem DACL checks and SQLite lock assertions with isolated assignment records. A Windows writable host, Linux engine attachment, production identities and actual Feishu were outside this run."
+}

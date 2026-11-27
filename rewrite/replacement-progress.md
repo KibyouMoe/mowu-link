@@ -6,6 +6,8 @@
 
 ## 检查点与证据
 
+Windows 工作区的离线账本审计在 `d6e7b328396cb5f0c6a9286a3cf8be08471574c1` 接入 Windows 文件 ACL，继续核对原目录文件系统身份和两种写锁。Windows Server 2025 安装组 23 项通过，日志逐条确认两项新增验收。带原写锁的工位即使没有监听也会被拦住，离线换绑及回退保留锁直到发布，缺原锁、换目录或放宽账本权限均不能通过。Windows DSH SDK 另通过 14 项，Docker 探针显示不可用，Windows 可写容器未验。macOS 从同提交的 375 文件安装包通过 25 项，包含 Codex 与 DSH 的真实隔离宿主。Linux arm64 安装包通过 189 项、跳过 131 项，HTTPS 回环留一条夹具宿主收件和一条待验通知。两端模型及飞书使用夹具。[实测](evidence/windows-workspace-journal-audit.json) · [Windows 日志](https://github.com/KibyouMoe/mowu-link/actions/runs/45958349209)
+
 离线换绑和回退原先只尝试锁住 DSH 工作区写者。如果 Codex 已拿到 `codex-workspace.writer` 而子进程还没监听，旧审计误判为空闲。实现 `5ec1517ea9fcd5dbb536851eff8b0ba47b44c55c` 同时检查两类写锁。回归先复现漏判，再核两项操作均拒绝发布。释放原宿主后，两项操作都持原写锁至目录发布完成。用 374 文件安装包复跑，macOS 24 项全过，包含实际 Codex App Server 与 DSH SDK 的 Linux 容器成果和回收。用前一版独立包重开 Codex，读回原生输入和同一成果字节，普通私聊重试只用一个新回合。Linux arm64 通过 188 项、131 项环境跳过，跨系统回环留一条宿主收件和一条待验通知。模型及飞书为夹具，Windows 可写工位仍缺本地运行账本和受支持的 Linux 容器入口。[实测](evidence/codex-workspace-writer-rollback.json) · [锁与复跑](router-rehearsal.md#重做版五组件的离线恢复)
 
 同一版本线的独立包 `c7eeb1dc36cf0665709c0e12cc70c801d8cace80` 已完成新版全量回归。macOS 296 项通过、22 项按环境跳过，Linux arm64 187 项通过、131 项按环境跳过。两端均零失败，另各排除 58 项归档兼容用例。安装包 373 个文件均校验一致。macOS 使用隔离 Hermes、Codex App Server、DSH SDK 和本地模型，Linux 的跨系统 HTTPS 回环使用宿主夹具，独立读回一条收件和一条待验通知。飞书 SDK 1.7.5 的本地回调验过收件去重、原题关卡、错话题拒收和资源下载错误。真实平台及测试身份仍待验。[两端计数和回执](evidence/rewrite-release-c7eeb1d.json) · [新版回归](README.md#本地复跑) · [跨系统复跑](README.md#跨系统验收)
