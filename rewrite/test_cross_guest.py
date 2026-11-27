@@ -331,8 +331,9 @@ class DshCrossGuest(NativeProcess):
             detail = manager.inspect(tid)
             self.assertEqual(detail["last_report"]["assignment_id"],aid)
             self.assertEqual(detail["task"]["state"],"completed_reported")
-            notice, = manager.messages(source="oguri")["items"]
-            self.assertEqual(notice["task_id"],tid)
+            notices = manager.messages(source="oguri")["items"]
+            notice, = [item for item in notices if item.get("task_id")==tid]
+            self.assertEqual(notice["text"],detail["last_report"]["summary"])
 
         if output := os.environ.get("MOWULINK_DSH_CROSS_GUEST_EVIDENCE"):
             Path(output).write_text(encode({"evidence_utc":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
@@ -340,4 +341,6 @@ class DshCrossGuest(NativeProcess):
                 "guest_image":image,"worker_containers":[first,second],"initial":initial,"reopened":restored,
                 "task_id":tid,"assignment_id":aid,"native_receipt":receipt,"native_inputs":observed["inputs"],
                 "report_calls":[first_call,second_call],"first_callback":failed,"w04":w04,
-                "notify_id":notice["message_id"]})+"\n",encoding="utf-8")
+                "notify_id":notice["message_id"],
+                "other_notices":[{"message_id":item["message_id"],"task_id":item.get("task_id"),"text":item["text"]}
+                                 for item in notices if item["message_id"]!=notice["message_id"]]})+"\n",encoding="utf-8")
