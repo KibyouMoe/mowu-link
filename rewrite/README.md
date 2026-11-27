@@ -299,6 +299,8 @@ MOWULINK_HERMES_TEST_PYTHON="$ISOLATED_PYTHON" MOWULINK_HERMES_TEST_SOURCE="$HER
 
 全量更换的空状态烟测也在此测试组。解包后从独立安装目录运行 `rewrite.test_hermes_gateway.HermesGateway.test_rewrite_cold_start_trigger_to_native_manager_to_closed_order`。它用空 Trigger、Router、Worker、宿主和平台账本，走 Event 附件、真实 Hermes 原生建单、Worker W04、同一 Hermes 原生验收及一轮独立飞书私聊。可设置 `MOWULINK_HERMES_COLD_CUTOVER_EVIDENCE` 保存原回执。Hermes 使用临时本地会话，Worker 宿主、模型和飞书提供端用夹具。
 
+macOS 有本机 DSH SDK 时，单独运行同组的 `HermesGateway.test_rewrite_cold_start_hermes_and_dsh_native_tools`，可让独立 DSH 原生回合走双向 TLS 执行 `worker_report`，并把实际原生私聊最终回复经 Worker 投给飞书夹具。需同时提供 Hermes 的独立测试 Python 和固定源码。两端模型均由本地脚本驱动。
+
 该测试 profile 可另配 `notice_chat_id` 和 `notice_feishu_file`，前者是明确授权的飞书会话，后者指向用户私有的 SDK 凭据配置路径，包含 `app_id` 和 `app_secret`。需要同一环境安装飞书 SDK。Router 消息持久入箱时，插件只排一条来源和等级的飞书提示，正文仍走 Hermes 原生输入。飞书失败不改变原生输入状态。提示使用同一标识重试，超出回执可安全重试的窗口后保留待核。绑定变化不会转发旧提示。复跑用 `python3 -m unittest -v rewrite.test_manager_notices`。
 
 ### 邮件和游戏聊天来源

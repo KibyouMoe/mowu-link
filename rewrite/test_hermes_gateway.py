@@ -6,6 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
+import plistlib
 import shutil
 import socket
 import sqlite3
@@ -21,7 +22,10 @@ from unittest.mock import Mock, patch
 
 from .devloop import FixtureHost, Loop, agent_report
 from .adapter import HostAdapter
-from .bundle_release_check import publish_reply
+from .bundle_release_check import private_reply_id, publish_reply
+from .dsh_display import DshDisplay
+from .dsh_local_link import LocalLink
+from .dsh_port import DshHost, tool_listener
 from .feishu_inbound import Inbound
 from .feishu_output import Views
 from .hermes_check import GATEWAY_ENTRY, GATEWAY_GUARD, tracked_runtime
@@ -29,6 +33,8 @@ from .hermes_host import HermesLocalHost, input_text
 from .orders import Orders
 from .release_check import config
 from .storage import Fault, encode, guid
+from .test_dsh_native_loop import NativeProcess
+from .test_dsh_sdk import APP as DSH_APP, EXE as DSH_EXE
 from .test_feishu_output import PlatformFixture
 from .test_mainline import Clock
 from .test_state_bundle import running
@@ -193,7 +199,7 @@ class HermesAdmissionProof(unittest.TestCase):
 @unittest.skipUnless(os.environ.get("MOWULINK_HERMES_TEST_PYTHON") and
                      os.environ.get("MOWULINK_HERMES_TEST_SOURCE") and os.name=="posix",
                      "independent Hermes test runtime with a private local socket required")
-class HermesGateway(unittest.TestCase):
+class HermesGateway(NativeProcess):
     def wait(self, predicate, *, timeout=22):
         cutoff = time.monotonic()+timeout
         while time.monotonic()<cutoff:
@@ -276,6 +282,13 @@ class HermesGateway(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("openssl"),"loopback TLS certificate fixture unavailable")
     def test_rewrite_cold_start_trigger_to_native_manager_to_closed_order(self):
+        self.exercise_cold_cutover(native_dsh=False)
+
+    @unittest.skipUnless(DSH_EXE.is_file() and shutil.which("openssl"),"isolated macOS DSH SDK and TLS required")
+    def test_rewrite_cold_start_hermes_and_dsh_native_tools(self):
+        self.exercise_cold_cutover(native_dsh=True)
+
+    def exercise_cold_cutover(self, *, native_dsh):
         root = self.root = Path(self.enterContext(TemporaryDirectory(prefix="mlhgw-",dir="/tmp"))).resolve()
         cert,key = root/"cert.pem",root/"key.pem"
         subprocess.run(["openssl","req","-x509","-newkey","rsa:2048","-nodes","-days","1","-subj","/CN=localhost",
@@ -292,12 +305,29 @@ class HermesGateway(unittest.TestCase):
         router_url = router_url.replace("http://","https://",1)
         manager = Client(router_url,manager_key,cert)
         source_link = Client(router_url,source_key,cert)
-        host = FixtureHost(root/"native-worker.db","clean-worker-session")
-        adapter = HostAdapter(root/"adapter.db",host,host.session)
+        worker_session = "clean-worker-session"
+        if native_dsh:
+            dsh_root = self.local_tls_directory()
+            dsh_link = LocalLink(dsh_root,use_tls=True)
+            host = DshHost(dsh_root,link=dsh_link)
+        else:
+            host = FixtureHost(root/"native-worker.db",worker_session)
+        adapter = HostAdapter(root/"adapter.db",host,worker_session)
         worker = Worker(root/"worker.db","trial",Client(router_url,worker_key,cert),adapter,clock=clock)
-        listener = WorkerService(worker).listen({platform_key:"platform/trial"},("127.0.0.1",0),tls)
+        callback_key = guid()
+        listener = WorkerService(worker).listen({platform_key:"platform/trial",callback_key:"adapter/trial"},
+                                                ("127.0.0.1",0),tls)
         platform_url = self.enterContext(running(listener)).replace("http://","https://",1)
         platform_link = Client(platform_url,platform_key,cert)
+        if native_dsh:
+            callback = Client(platform_url,callback_key,cert)
+            self.enterContext(tool_listener(dsh_root,adapter,callback,link=dsh_link))
+            native = self.enterContext(self.start_native(dsh_root,worker_session,"formal",use_tls=True))
+            relay = DshDisplay(adapter,callback,"trial")
+            relay.collect()
+            self.assertEqual(self.read_native(native,"read")["inputs"],[])
+        else:
+            self.assertEqual(host.entries(),[])
         feishu_db = root/"feishu.db"
         platform = PlatformFixture()
         inbound = Inbound(feishu_db,platform_link,None,"app","trainer","cutover-chat",clock=clock)
@@ -307,7 +337,6 @@ class HermesGateway(unittest.TestCase):
         revision,session,_route,gateway = self.prepare_gateway(model,manager,manager_db)
         self.assertEqual(manager.request("GET","tasks")["items"],[])
         self.assertEqual(source.pending(),[])
-        self.assertEqual(host.entries(),[])
         with gateway("clean-start") as gateway_pid:
             attachment = root/"original.txt"
             attachment.write_bytes(b"Fresh Trigger attachment for the cutover rehearsal.\n")
@@ -325,31 +354,66 @@ class HermesGateway(unittest.TestCase):
             clock.advance(10)
             worker.poll()
             worker.poll()
-            (body,formal), = host.entries()
+            with adapter.db.transaction() as db:
+                [first] = db.execute("SELECT payload,receipt FROM intents WHERE json_extract(payload,'$.kind')='task'")
+                body,formal = json.loads(first["payload"]),json.loads(first["receipt"])
             aid = body["assignment_id"]
-            self.assertEqual((body["task_id"],worker.hold()["held_assignment_id"]),(tid,aid))
+            self.assertEqual((body["task_id"],formal["session"]),(tid,worker_session))
+            if native_dsh:
+                formal_observation = self.read_native(native,"read")
+                self.assertEqual(formal_observation["inputs"],[formal["native_id"]])
+                calls,results = formal_observation["calls"],formal_observation["results"]
+                self.assertEqual([c["name"] for c in calls],["worker_report","worker_report"])
+                self.assertEqual([json.loads(c["arguments"])["assignment_id"] for c in calls],[aid,aid])
+                self.assertEqual([r["toolCallId"] for r in results],[c["callId"] for c in calls])
+                self.assertEqual([r["isError"] for r in results],[False,False],results)
+                receipts = [json.loads(r["content"][0]["text"]) for r in results]
+                self.assertEqual(receipts,[receipts[0]]*2)
+                w04 = receipts[0]
+                args,retry = (json.loads(c["arguments"]) for c in calls)
+                self.assertEqual(retry,args)
+            else:
+                self.assertEqual(worker.hold()["held_assignment_id"],aid)
+                args = {"task_id":tid,"assignment_id":aid,"summary":"Cutover fixture result."}
 
             chat_id = "om_cutover_private"
             mid_chat = inbound.record("app","user","trainer",{"chat_id":"cutover-chat","chat_type":"p2p",
                 "message_id":chat_id,"message_type":"text","content":encode({"text":"Independent private chat."})})
             chat = inbound.deliver(mid_chat)
             self.assertEqual(inbound.deliver(mid_chat),chat)
-            card = publish_reply(worker,views,platform,chat_id,chat,"One private reply.")
-            args = {"task_id":tid,"assignment_id":aid,"summary":"Cutover fixture result."}
             self.assertEqual(agent_report(worker,chat["native_id"],args)["content"][0]["text"],"wrong_report_origin")
-            worker.turn_finished(formal["native_id"],"The ordinary turn ended.")
-            self.assertEqual(manager.request("GET","tasks/"+tid)["task"]["state"],"working")
-            report = agent_report(worker,formal["native_id"],args)
-            self.assertFalse(report["isError"],report)
-            self.assertEqual(agent_report(worker,formal["native_id"],args),report)
-            w04 = json.loads(report["content"][0]["text"])
+            if native_dsh:
+                end = self.read_native(native,"read")
+                self.assertEqual(end["inputs"],[formal["native_id"],chat["native_id"]])
+                self.assertEqual(end["calls"],calls)
+                def private_reply_recorded():
+                    relay.collect()
+                    relay.flush()
+                    views.poll()
+                    with views.db.transaction() as db:
+                        return db.execute("""SELECT 1 FROM chat_history_index WHERE direction='out'
+                            AND session=? AND turn=?""",(chat["session"],chat["turn_id"])).fetchone()
+
+                self.wait(private_reply_recorded)
+                card = private_reply_id(views,chat_id,chat)
+                self.assertEqual(views.poll(),0)
+                [reply] = [item[2] for item in platform.messages.values() if item[0]==card]
+                self.assertEqual(reply["elements"][0]["text"]["content"],"isolated fixture response")
+            else:
+                card = publish_reply(worker,views,platform,chat_id,chat,"One private reply.")
+                worker.turn_finished(formal["native_id"],"The ordinary turn ended.")
+                self.assertEqual(manager.request("GET","tasks/"+tid)["task"]["state"],"working")
+                report = agent_report(worker,formal["native_id"],args)
+                self.assertFalse(report["isError"],report)
+                self.assertEqual(agent_report(worker,formal["native_id"],args),report)
+                w04 = json.loads(report["content"][0]["text"])
+                self.assertEqual([p["kind"] for p,_r in host.entries()],["task","chat"])
             self.assertEqual((w04["release_assignment_id"],w04["task_state"]),(aid,"completed_reported"))
             self.assertIsNone(worker.hold()["held_assignment_id"])
             [finished] = self.wait(lambda:[t for t in manager.request("GET","tasks")["items"]
                                           if t["state"]=="closed"],timeout=35)
             self.assertEqual(finished["task_id"],tid)
             self.assertEqual(manager.request("GET","tasks")["items"],[finished])
-            self.assertEqual([p["kind"] for p,_r in host.entries()],["task","chat"])
             native_db = root/"profile/state.db"
             tools = rows(native_db,"SELECT tool_name,tool_call_id FROM messages WHERE session_id=? AND role='tool' "
                          "AND tool_name IN ('router_info','router_create_task','router_tasks','router_act_on_task') ORDER BY id",
@@ -378,6 +442,14 @@ class HermesGateway(unittest.TestCase):
                 "private_input_id":chat["native_id"],"formal_worker_inputs":1,"private_worker_inputs":1,
                 "boundary":"New stores; real local Hermes with a scripted model; real Router/Worker TLS and Worker MCP; "
                            "Worker host and Feishu provider are fixtures."}
+            if native_dsh:
+                with (DSH_APP/"Info.plist").open("rb") as bundle:
+                    dsh_version = plistlib.load(bundle)["CFBundleShortVersionString"]
+                evidence.update(dsh_version=dsh_version,worker_host="Installed DSH AgentLoop and native tool executor",
+                    dsh_tool_calls=[{"call_id":c["callId"],"name":c["name"]} for c in calls],
+                    dsh_w04_receipts=receipts,dsh_private_reply=reply["elements"][0]["text"]["content"],
+                    boundary="Real local Hermes and native DSH AgentLoop with scripted models; real Router/Worker TLS "
+                             "and DSH mutual TLS; Feishu provider is a fixture.")
             Path(output).write_text(json.dumps(evidence,ensure_ascii=False,indent=2)+"\n")
 
     def test_trigger_to_real_gateway_and_model_tool_with_cold_receipt_recovery(self):
