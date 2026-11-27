@@ -18,16 +18,12 @@ async def exercise(home):
     from gateway.session_contract import SessionActor
     from gateway.session_local import create_local_session
     from hermes_cli.plugins import discover_plugins, get_plugin_manager
-    from hermes_state import SessionDB
-    from hermes_state_runtime import list_session_admissions
     from model_tools import handle_function_call
 
     config = home.parent/"connection.json"
     cfg = json.loads(config.read_text())
-    db = SessionDB(home/"state.db")
     runner = GatewayRunner(GatewayConfig(sessions_dir=home/"sessions"))
-    runner.session_store._db = runner._session_db = db
-    authority = await initialize_session_authority(runner,profile_id="default",instance_id="fixture-owner",db=db)
+    authority = await initialize_session_authority(runner,profile_id="default",instance_id="fixture-owner")
     owner = SessionActor("test-owner","default",frozenset({"session:create","session:read"}),"fixture-viewer")
     session = create_local_session(authority,owner,{"request_id":"local","source":"cli","model":"fixture","toolsets":[]}).session_id
     route = authority.sessions[session].route
@@ -100,8 +96,8 @@ async def exercise(home):
         notice, arrived = turns[1]
         assert notice["message"]["level"]=="Notify" and arrived-idle_after>=10
         notice_receipt = await wait(lambda:receipt(notice["message_id"]))
-        rows = list_session_admissions(db,session_id=session,pending_only=False)
-        assert len(rows)==2 and {r["admission_id"] for r in rows}=={first["native_id"],notice_receipt["native_id"]}
+        rows = authority.persistence.admissions.list(session_id=session,pending_only=False)
+        assert len(rows)==2 and {r.admission_id for r in rows}=={first["native_id"],notice_receipt["native_id"]}
         assert all(path.startswith("deliveries/") for path in blocked_paths)
         return {"profile":"fresh local fixture","session_id":session,"route":route,
                 "native_gateway_inputs":len(rows),"event_message_id":event["message_id"],
@@ -118,4 +114,3 @@ async def exercise(home):
         runner._clear_plugin_message_injector()
         runner._running = False
         Client.request = request
-        db.close()

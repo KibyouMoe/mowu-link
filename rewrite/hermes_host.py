@@ -46,17 +46,17 @@ class HermesLocalHost:
         return authority
 
     def observe(self, session):
-        from hermes_state_runtime import list_session_admissions
         try:
             authority = self.binding(session)
         except Fault:
             return None,None
-        record = authority.db.get_session(session)
+        store = authority.persistence
+        record = store.sessions.get(session)
         if not record:
             return None,None
-        pending = list_session_admissions(authority.db,session_id=session)
+        pending = store.admissions.list(session_id=session)
         busy = bool(pending or authority.sessions[session].settling)
-        return busy,(authority.instance_id,authority.epoch,record["runtime_generation"])
+        return busy,(authority.instance_id,authority.epoch,record.runtime_generation)
 
     def busy(self, session):
         return self.observe(session)[0]
@@ -80,26 +80,25 @@ class HermesLocalHost:
         return self.deliver(session,did,payload,digest)
 
     def lookup_expected(self, session, did, payload, digest):
-        from hermes_state_runtime import list_session_admissions
         authority = self.binding(session)
         expected = input_text(session,did,payload,digest)
         found = []
-        for row in list_session_admissions(authority.db,session_id=session,pending_only=False):
-            body = row["payload"].get("text")
-            if row["principal_id"]!="automation:"+self.route or not isinstance(body,str) or not body.startswith(MESSAGE_PREFIX):
+        for row in authority.persistence.admissions.list(session_id=session,pending_only=False):
+            body = row.payload.get("text")
+            if row.principal_id!="automation:"+self.route or not isinstance(body,str) or not body.startswith(MESSAGE_PREFIX):
                 continue
             try:
-                producer = json.loads(row["request_id"])
+                producer = json.loads(row.request_id)
             except (TypeError,ValueError):
                 continue
-            native = row["payload"].get("local_automation_v1") or {}
+            native = row.payload.get("local_automation_v1") or {}
             if (not isinstance(producer,list) or len(producer)!=4 or producer[:3]!=["plugin",self.ctx.plugin_id,self.route]
                     or not isinstance(producer[3],str) or not re.fullmatch(r"[0-9a-f]{32}",producer[3])
-                    or native.get("identity")!=row["request_id"] or native.get("owner")!=session
+                    or native.get("identity")!=row.request_id or native.get("owner")!=session
                     or native.get("route")!=self.route or native.get("target")!=session):
                 continue
             if body==expected:
-                found.append(row["admission_id"])
+                found.append(row.admission_id)
                 continue
             try:
                 recorded = json.loads(body.removeprefix(MESSAGE_PREFIX))

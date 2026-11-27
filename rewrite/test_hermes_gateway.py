@@ -193,14 +193,15 @@ class HermesAdmissionProof(unittest.TestCase):
         session,route,mid = "session","test-local-route",guid()
         host = HermesLocalHost(context,session,route)
         producer = encode(["plugin",context.plugin_id,route,"a"*32])
-        row = {"principal_id":"automation:"+route,"request_id":producer,"admission_id":"previous-admission",
-               "payload":{"text":input_text(session,mid,{"text":"original"},"original-digest"),
-                          "local_automation_v1":{"identity":producer,"owner":session,"route":route,"target":session}}}
-        runtime = SimpleNamespace(list_session_admissions=lambda *_args,**_kwargs:[row])
-        with patch.dict(sys.modules,{"hermes_state_runtime":runtime}), patch.object(host,"binding") as binding:
-            binding.return_value = SimpleNamespace(db=object())
+        row = SimpleNamespace(principal_id="automation:"+route,request_id=producer,admission_id="previous-admission",
+            payload={"text":input_text(session,mid,{"text":"original"},"original-digest"),
+                     "local_automation_v1":{"identity":producer,"owner":session,"route":route,"target":session}})
+        admissions = SimpleNamespace(list=Mock(return_value=[row]))
+        store = SimpleNamespace(admissions=admissions)
+        with patch.object(host,"binding",return_value=SimpleNamespace(persistence=store)):
             with self.assertRaisesRegex(Fault,"hermes_input_conflict"):
                 host.deliver(session,mid,{"text":"changed"},"changed-digest")
+        admissions.list.assert_called_once_with(session_id=session,pending_only=False)
         context.inject_message.assert_not_called()
 
 
