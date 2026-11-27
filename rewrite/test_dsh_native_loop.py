@@ -15,6 +15,7 @@ import socket
 import sqlite3
 import ssl
 import subprocess
+import sys
 import tarfile
 import tempfile
 from threading import Event, Thread
