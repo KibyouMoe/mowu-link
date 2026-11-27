@@ -26,8 +26,13 @@ export function workspaceEngine(docker,socket,cliConfig) {
   if (windows) {
     const system = process.env.SystemRoot;
     if (!/^[A-Za-z]:[\\/].+\.exe$/i.test(docker) || !lstatSync(docker,{throwIfNoEntry:false})?.isFile() ||
-        !system || !/^[A-Za-z]:[\\/]/.test(system)) throw new Error('invalid_assignment_container');
-    env = {SystemRoot:system,PATH:path.join(system,'System32')};
+        !system || !/^[A-Za-z]:[\\/]/.test(system) || !/^[A-Za-z]:[\\/]/.test(cliConfig)) {
+      throw new Error('invalid_assignment_container');
+    }
+    // libuv restores a missing USERPROFILE and home drive/path from the parent on Windows.
+    env = {SystemRoot:system,PATH:path.join(system,'System32'),USERPROFILE:cliConfig,
+           HOMEDRIVE:cliConfig.slice(0,2),HOMEPATH:cliConfig.slice(2),HOME:cliConfig,
+           APPDATA:cliConfig,LOCALAPPDATA:cliConfig,TEMP:cliConfig,TMP:cliConfig};
   }
 
   function invoke(args,{stdin,...options}={}) {

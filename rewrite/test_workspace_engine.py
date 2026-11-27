@@ -54,7 +54,8 @@ console.log(JSON.stringify({local_pipe:socket,linux_identity_recovered:true,
 """
         inherited = {key:"workspace-test-sentinel" for key in (
             "DOCKER_HOST","DOCKER_CONTEXT","DOCKER_CONFIG","DOCKER_TLS_VERIFY","DOCKER_CERT_PATH",
-            "DOCKER_API_VERSION","HTTP_PROXY","HTTPS_PROXY","USERPROFILE")}
+            "DOCKER_API_VERSION","HTTP_PROXY","HTTPS_PROXY","USERPROFILE","HOME","HOMEDRIVE","HOMEPATH",
+            "APPDATA","LOCALAPPDATA","TEMP","TMP")}
         result = subprocess.run([NODE,"--input-type=module","-e",script,IMPLEMENTATION.resolve().as_uri(),
                                  docker,cli_config],env={**os.environ,**inherited},capture_output=True,text=True,
                                 encoding="utf-8",errors="replace",timeout=30)

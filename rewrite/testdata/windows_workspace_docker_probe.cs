@@ -16,11 +16,21 @@ internal static class WorkspaceDockerProbe
         }
         foreach (string key in new[] {
             "DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG", "DOCKER_TLS_VERIFY",
-            "DOCKER_CERT_PATH", "DOCKER_API_VERSION", "HTTP_PROXY", "HTTPS_PROXY", "USERPROFILE"
+            "DOCKER_CERT_PATH", "DOCKER_API_VERSION", "HTTP_PROXY", "HTTPS_PROXY"
         })
         {
-            if (Environment.GetEnvironmentVariable(key) != null) return 82;
+            if (Environment.GetEnvironmentVariable(key) == null) continue;
+            Console.Error.WriteLine("Unexpected environment variable: " + key);
+            return 82;
         }
+        foreach (string key in new[] {"USERPROFILE", "HOME", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP"})
+        {
+            if (String.Equals(Environment.GetEnvironmentVariable(key), args[1], StringComparison.OrdinalIgnoreCase)) continue;
+            Console.Error.WriteLine("Profile directory not isolated for: " + key);
+            return 84;
+        }
+        string home = Environment.GetEnvironmentVariable("HOMEDRIVE") + Environment.GetEnvironmentVariable("HOMEPATH");
+        if (!String.Equals(home, args[1], StringComparison.OrdinalIgnoreCase)) return 84;
         string response = File.ReadAllText(Path.Combine(args[1], "daemon-reply.txt")).Trim();
         if (response == "unavailable") return 83;
         Console.WriteLine(response);
