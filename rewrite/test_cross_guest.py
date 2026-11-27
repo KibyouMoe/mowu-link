@@ -182,7 +182,12 @@ class CrossHostState(unittest.TestCase):
             with guest_worker(engine,image,original,native.session,package=package) as (port,old_process):
                 endpoint = f"https://127.0.0.1:{port}"
                 ops,callback = Client(endpoint,ops_key,cert),Client(endpoint,callback_key,cert)
-                eventual(lambda:any(w["online"] and w["busy"] is False for w in manager.workers()["items"]))
+                try:
+                    eventual(lambda:any(w["online"] and w["busy"] is False for w in manager.workers()["items"]))
+                except AssertionError as error:
+                    error.add_note("Router: "+encode(manager.workers()["items"]))
+                    error.add_note("Worker: "+encode(ops.request("GET","worker/status")))
+                    raise
                 tid = manager.create(guid(),"Cutover replay","Formal W04 with a dropped receipt","oguri")["task_id"]
                 clock.advance(10)
                 payload,receipt = eventual(native.entries)[0]
