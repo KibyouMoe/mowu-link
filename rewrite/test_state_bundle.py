@@ -711,6 +711,57 @@ class Bundle(unittest.TestCase):
                 self.assertNotIn(record["token"],encode(pending))
             (journal/name).unlink()
 
+    @unittest.skipUnless(os.name=="posix","private Unix workspace runtime required")
+    def test_offline_handoff_and_rollback_reserve_the_codex_workspace_writer(self):
+        runtime = self.root/"codex-runtime"
+        runtime.mkdir(mode=0o700)
+        (runtime/"assignment-containers").mkdir(mode=0o700)
+        _,identity = dsh_workspace_audit.journal(runtime)
+        session = self.native.session
+        with self.stack(self.sources,pin_session=True) as (_m,w,_source,_mail,_platform,views):
+            WorkerService(w,self.clock).step()
+            with w.adapter.db.transaction() as db:
+                dsh_workspace_audit.marker(db,session,identity)
+            views.poll()
+        seal = capture(self.sources,self.revision,self.snapshot)["manifest_sha256"]
+        trial = restore(self.snapshot,seal,self.root/"trial")
+        runtimes = {"oguri":runtime}
+        writer = runtime/"codex-workspace"
+        handoff = self.root/"handoff"
+        operations = (
+            (handoff,lambda:stage_native_handoff(self.snapshot,seal,"oguri",session,"next",handoff,
+                                                 dsh_runtimes=runtimes)),
+            (self.dest,lambda:rollback(self.snapshot,seal,trial,self.dest,dsh_runtimes=runtimes)),
+        )
+        # Codex takes this lock before its Node child publishes the health socket.
+        with state_writer(writer):
+            self.assertFalse((runtime/"dsh.sock").exists())
+            report = audit_handoff(self.snapshot,seal,dsh_runtimes=runtimes)
+            self.assertIn({"worker_id":"oguri","issue":"dsh_workspace_host_still_running"},report["issues"])
+            for destination,operation in operations:
+                with self.assertRaisesRegex(ValueError,"dsh_workspace_host_still_running"):
+                    operation()
+                self.assertFalse(destination.exists())
+
+        original_output = state_bundle.output_directory
+        publications = []
+
+        @contextmanager
+        def check_publication(destination):
+            with original_output(destination) as stage:
+                yield stage
+                with self.assertRaises(StateWriterBusy), state_writer(writer,existing=True):
+                    pass
+                publications.append(destination)
+
+        with patch.object(state_bundle,"output_directory",check_publication):
+            for destination,operation in operations:
+                operation()
+                self.assertTrue(destination.is_dir())
+        self.assertEqual(publications,[handoff,self.dest])
+        with state_writer(writer,existing=True):
+            self.assertFalse((runtime/"dsh.sock").exists())
+
     def test_handoff_detects_different_display_payload_or_cursor_ahead_of_worker(self):
         with self.stack(self.sources) as (_m,w,_source,_mail,_inbound,views):
             w.connect()

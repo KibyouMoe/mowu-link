@@ -1,4 +1,4 @@
-"""Offline observation of the original DSH assignment journal. No Docker calls."""
+"""Offline observation of the original assignment journal for DSH or Codex. No Docker calls."""
 from contextlib import ExitStack, closing
 import hashlib
 import json
@@ -135,19 +135,21 @@ def inspect(directory,expected,*,reservations=None):
         if expected!={identity}:
             return None,"dsh_workspace_journal_mismatch"
         with ExitStack() as stack:
-            writer = Path(directory)/"dsh-workspace"
-            try:
-                stack.enter_context(state_writer(writer,existing=True))
-                guarded = True
-            except FileNotFoundError:
-                guarded = False
+            absent_locks = []
+            # Codex and DSH both take their writer lock before exposing a listener.
+            for name in ("dsh-workspace","codex-workspace"):
+                writer = Path(directory)/name
+                try:
+                    stack.enter_context(state_writer(writer,existing=True))
+                except FileNotFoundError:
+                    absent_locks.append(writer.with_suffix(".writer"))
             if not host_stopped(directory):
                 return None,"dsh_workspace_host_still_running"
             first,pending = scan(ledger)
             second,_ = scan(ledger)
-            if not guarded:
+            for lock in absent_locks:
                 try:
-                    writer.with_suffix(".writer").lstat()
+                    lock.lstat()
                 except FileNotFoundError:
                     pass
                 else:
