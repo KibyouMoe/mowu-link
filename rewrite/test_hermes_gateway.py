@@ -9,6 +9,7 @@ from pathlib import Path
 import shutil
 import socket
 import sqlite3
+import ssl
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
@@ -18,12 +19,23 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from .devloop import Loop
+from .devloop import FixtureHost, Loop, agent_report
+from .adapter import HostAdapter
+from .bundle_release_check import publish_reply
+from .feishu_inbound import Inbound
+from .feishu_output import Views
 from .hermes_check import GATEWAY_ENTRY, GATEWAY_GUARD, tracked_runtime
 from .hermes_host import HermesLocalHost, input_text
+from .orders import Orders
 from .release_check import config
 from .storage import Fault, encode, guid
+from .test_feishu_output import PlatformFixture
+from .test_mainline import Clock
+from .test_state_bundle import running
 from .trigger import Trigger
+from .wire import Client, serve_router
+from .worker import Worker
+from .worker_service import WorkerService
 
 
 PACKAGE = Path(__file__).resolve().parent.parent
@@ -53,7 +65,8 @@ asyncio.run(main())
 
 
 class ScriptedModel:
-    def __init__(self):
+    def __init__(self, assignee=None):
+        self.assignee = assignee
         self.requests = []
         self.release_event = Event()
         self.event_waiting = Event()
@@ -105,8 +118,20 @@ class ScriptedModel:
                     call = ("call_read_trigger_original","tool_call",{"calls":[{"name":"router_info","arguments":{
                         "message_id":body["message_id"],"attachment_id":file["attachment_id"]}}]})
                 elif tool_result and tool_result.get("tool_call_id")=="call_read_trigger_original":
+                    assignment = {"assignee_id":model.assignee} if model.assignee else {}
+                    instructions = "Run the isolated cutover task" if model.assignee else "Fixture-only, remain unassigned"
                     call = ("call_create_manager_task","tool_call",{"calls":[{"name":"router_create_task","arguments":{
-                        "title":"隔离 Hermes 原生建单","instructions":"Fixture-only, remain unassigned"}}]})
+                        "title":"隔离 Hermes 原生建单","instructions":instructions,**assignment}}]})
+                elif model.assignee and body["message"].get("task_id") and not tool_result:
+                    call = ("describe_review_tools","tool_describe",
+                            {"names":["router_tasks","router_act_on_task"]})
+                elif tool_result and tool_result.get("tool_call_id")=="describe_review_tools":
+                    call = ("read_reported_task","tool_call",{"calls":[{"name":"router_tasks","arguments":{
+                        "task_id":body["message"]["task_id"]}}]})
+                elif tool_result and tool_result.get("tool_call_id")=="read_reported_task":
+                    task = json.loads(tool_result["content"])["task"]
+                    call = ("accept_reported_task","tool_call",{"calls":[{"name":"router_act_on_task","arguments":{
+                        "task_id":task["task_id"],"expected_revision":task["revision"],"action":"close"}}]})
                 else:
                     call = None
                 if call:
@@ -205,8 +230,8 @@ class HermesGateway(unittest.TestCase):
                         process.kill()
                         process.wait(timeout=5)
 
-    def test_trigger_to_real_gateway_and_model_tool_with_cold_receipt_recovery(self):
-        root = self.root = Path(self.enterContext(TemporaryDirectory(prefix="mlhgw-",dir="/tmp"))).resolve()
+    def prepare_gateway(self, model, router, manager_db):
+        root = self.root
         python = Path(os.environ["MOWULINK_HERMES_TEST_PYTHON"]).absolute()
         revision = tracked_runtime(Path(os.environ["MOWULINK_HERMES_TEST_SOURCE"]),root/"source")
         profile = root/"profile"
@@ -224,13 +249,11 @@ class HermesGateway(unittest.TestCase):
                "HERMES_GATEWAY_LOCK_DIR":str(root/"locks"),"XDG_CACHE_HOME":str(root/"cache"),
                "XDG_STATE_HOME":str(root/"state"),"PYTHONDONTWRITEBYTECODE":"1","PYTHONNOUSERSITE":"1",
                "PYTHONPATH":os.pathsep.join((str(PACKAGE),str(root/"source"))),"TEST_SESSION_REQUEST":guid()}
-        source = Trigger(root/"trigger.db","mail")
-        loop = self.enterContext(Loop.isolated(trigger_ids=[source.instance_id]))
-        model = ScriptedModel()
         base_url = self.enterContext(model.serve())
-        manager_db = root/"manager.db"
-        options = {"url":loop.manager_wire.url,"token":loop.manager_wire.token,
+        options = {"url":router.url,"token":router.token,
                    "database":str(manager_db),"session_id":"awaiting-test-session"}
+        if router.ca_file:
+            options["ca_file"] = str(router.ca_file)
         private_file = config(root,"connection.json",options)
         config(profile,"config.yaml",{"gateway":{"api_server":{"enabled":True,"host":"127.0.0.1","port":port}},
             "model":{"provider":"custom","default":"mowulink-fixture","base_url":base_url,"api_key":"fixture"},
@@ -249,12 +272,127 @@ class HermesGateway(unittest.TestCase):
         self.assertEqual(route["created_source"],"cli")
         options.update(session_id=session,input_session_key=route["session_key"])
         private_file.write_text(encode(options))
+        return revision,session,route["session_key"],lambda name:self.gateway(env,python,entry,name,port,key)
 
+    @unittest.skipUnless(shutil.which("openssl"),"loopback TLS certificate fixture unavailable")
+    def test_rewrite_cold_start_trigger_to_native_manager_to_closed_order(self):
+        root = self.root = Path(self.enterContext(TemporaryDirectory(prefix="mlhgw-",dir="/tmp"))).resolve()
+        cert,key = root/"cert.pem",root/"key.pem"
+        subprocess.run(["openssl","req","-x509","-newkey","rsa:2048","-nodes","-days","1","-subj","/CN=localhost",
+                        "-addext","subjectAltName=IP:127.0.0.1","-keyout",key,"-out",cert],cwd=root,
+                       check=True,capture_output=True,timeout=15)
+        tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        tls.load_cert_chain(cert,key)
+        clock = Clock()
+        source = Trigger(root/"source.db","clean-source",clock)
+        router = Orders(root/"router.db",clock,poll_seconds=1)
+        manager_key,source_key,worker_key,platform_key = (guid() for _ in range(4))
+        roles = {manager_key:"hermes",source_key:"trigger/"+source.instance_id,worker_key:"worker/trial"}
+        router_url = self.enterContext(running(serve_router(router,roles,("127.0.0.1",0),tls)))
+        router_url = router_url.replace("http://","https://",1)
+        manager = Client(router_url,manager_key,cert)
+        source_link = Client(router_url,source_key,cert)
+        host = FixtureHost(root/"native-worker.db","clean-worker-session")
+        adapter = HostAdapter(root/"adapter.db",host,host.session)
+        worker = Worker(root/"worker.db","trial",Client(router_url,worker_key,cert),adapter,clock=clock)
+        listener = WorkerService(worker).listen({platform_key:"platform/trial"},("127.0.0.1",0),tls)
+        platform_url = self.enterContext(running(listener)).replace("http://","https://",1)
+        platform_link = Client(platform_url,platform_key,cert)
+        feishu_db = root/"feishu.db"
+        platform = PlatformFixture()
+        inbound = Inbound(feishu_db,platform_link,None,"app","trainer","cutover-chat",clock=clock)
+        views = Views(feishu_db,platform_link,platform,"cutover-chat","Trial Worker",clock=clock)
+        manager_db = root/"manager.db"
+        model = ScriptedModel(assignee="trial")
+        revision,session,_route,gateway = self.prepare_gateway(model,manager,manager_db)
+        self.assertEqual(manager.request("GET","tasks")["items"],[])
+        self.assertEqual(source.pending(),[])
+        self.assertEqual(host.entries(),[])
+        with gateway("clean-start") as gateway_pid:
+            attachment = root/"original.txt"
+            attachment.write_bytes(b"Fresh Trigger attachment for the cutover rehearsal.\n")
+            mid = source.record("Event","Create one test order.",[attachment])
+            t04 = source.send(source_link,mid)
+            self.assertEqual(source.send(source_link,mid),t04)
+            self.wait(model.event_waiting.is_set)
+            model.release_event.set()
+            [task] = self.wait(lambda:manager.request("GET","tasks")["items"])
+            tid = task["task_id"]
+            self.assertEqual(task["assignee_id"],"trial")
+            self.assertEqual(task["state"],"ready")
+            worker.connect()
+            worker.poll()
+            clock.advance(10)
+            worker.poll()
+            worker.poll()
+            (body,formal), = host.entries()
+            aid = body["assignment_id"]
+            self.assertEqual((body["task_id"],worker.hold()["held_assignment_id"]),(tid,aid))
+
+            chat_id = "om_cutover_private"
+            mid_chat = inbound.record("app","user","trainer",{"chat_id":"cutover-chat","chat_type":"p2p",
+                "message_id":chat_id,"message_type":"text","content":encode({"text":"Independent private chat."})})
+            chat = inbound.deliver(mid_chat)
+            self.assertEqual(inbound.deliver(mid_chat),chat)
+            card = publish_reply(worker,views,platform,chat_id,chat,"One private reply.")
+            args = {"task_id":tid,"assignment_id":aid,"summary":"Cutover fixture result."}
+            self.assertEqual(agent_report(worker,chat["native_id"],args)["content"][0]["text"],"wrong_report_origin")
+            worker.turn_finished(formal["native_id"],"The ordinary turn ended.")
+            self.assertEqual(manager.request("GET","tasks/"+tid)["task"]["state"],"working")
+            report = agent_report(worker,formal["native_id"],args)
+            self.assertFalse(report["isError"],report)
+            self.assertEqual(agent_report(worker,formal["native_id"],args),report)
+            w04 = json.loads(report["content"][0]["text"])
+            self.assertEqual((w04["release_assignment_id"],w04["task_state"]),(aid,"completed_reported"))
+            self.assertIsNone(worker.hold()["held_assignment_id"])
+            [finished] = self.wait(lambda:[t for t in manager.request("GET","tasks")["items"]
+                                          if t["state"]=="closed"],timeout=35)
+            self.assertEqual(finished["task_id"],tid)
+            self.assertEqual(manager.request("GET","tasks")["items"],[finished])
+            self.assertEqual([p["kind"] for p,_r in host.entries()],["task","chat"])
+            native_db = root/"profile/state.db"
+            tools = rows(native_db,"SELECT tool_name,tool_call_id FROM messages WHERE session_id=? AND role='tool' "
+                         "AND tool_name IN ('router_info','router_create_task','router_tasks','router_act_on_task') ORDER BY id",
+                         session)
+            self.assertEqual([row["tool_call_id"] for row in tools],
+                             ["call_read_trigger_original","call_create_manager_task","read_reported_task","accept_reported_task"])
+            [notice] = manager.request("GET","messages?source=trial")["items"]
+            self.assertEqual(notice["task_id"],tid)
+            [review] = [call["tool_result"] for call in model.requests
+                        if call["tool_result"] and call["tool_result"].get("tool_call_id")=="read_reported_task"]
+            reviewed = json.loads(review["content"])
+            self.assertEqual(reviewed["task"]["state"],"completed_reported")
+            self.assertEqual((reviewed["last_report"]["assignment_id"],reviewed["last_report"]["summary"]),
+                             (aid,args["summary"]))
+            # The real manager created the order only after downloading the original Trigger attachment.
+            [download] = [call["tool_result"] for call in model.requests
+                          if call["tool_result"] and call["tool_result"].get("tool_call_id")=="call_read_trigger_original"]
+            self.assertEqual(Path(json.loads(download["content"])["local_path"]).read_bytes(),attachment.read_bytes())
+
+        if output := os.environ.get("MOWULINK_HERMES_COLD_CUTOVER_EVIDENCE"):
+            evidence = {"hermes_revision":revision,"gateway_pid":gateway_pid,"manager_session":session,
+                "source_instance":source.instance_id,"t04":t04,"task_id":tid,"assignment_id":aid,
+                "source_attachment_sha256":sha256(attachment.read_bytes()).hexdigest(),
+                "native_worker_receipt":formal,"w04":w04,"manager_notify_id":notice["message_id"],
+                "manager_tools":tools,"final_state":finished["state"],"platform_reply_id":card,
+                "private_input_id":chat["native_id"],"formal_worker_inputs":1,"private_worker_inputs":1,
+                "boundary":"New stores; real local Hermes with a scripted model; real Router/Worker TLS and Worker MCP; "
+                           "Worker host and Feishu provider are fixtures."}
+            Path(output).write_text(json.dumps(evidence,ensure_ascii=False,indent=2)+"\n")
+
+    def test_trigger_to_real_gateway_and_model_tool_with_cold_receipt_recovery(self):
+        root = self.root = Path(self.enterContext(TemporaryDirectory(prefix="mlhgw-",dir="/tmp"))).resolve()
+        source = Trigger(root/"trigger.db","mail")
+        loop = self.enterContext(Loop.isolated(trigger_ids=[source.instance_id]))
+        model = ScriptedModel()
+        manager_db = root/"manager.db"
+        revision,session,route,gateway = self.prepare_gateway(model,loop.manager_wire,manager_db)
+        native_db = root/"profile/state.db"
         original = b"An isolated trigger attachment.\n"
         path = root/"trigger.txt"
         path.write_bytes(original)
         message_ids = {}
-        with self.gateway(env,python,entry,"native",port,key) as pid:
+        with gateway("native") as pid:
             # Publish real Trigger records while only the isolated gateway can consume them.
             for level in ("Info","Event","Notify"):
                 mid = message_ids[level] = source.record(level,"Gateway test "+level,[path] if level=="Event" else [])
@@ -319,7 +457,7 @@ class HermesGateway(unittest.TestCase):
             conn.execute("UPDATE queue SET receipt=NULL WHERE message_id=?",(message_ids["Event"],))
         with closing(sqlite3.connect(str(manager_db)+".host")) as conn, conn:
             conn.execute("UPDATE intents SET receipt=NULL,native_id=NULL WHERE delivery_id=?",(message_ids["Event"],))
-        with self.gateway(env,python,entry,"recovered",port,key) as new_pid:
+        with gateway("recovered") as new_pid:
             self.assertNotEqual(pid,new_pid)
             again = self.wait(lambda:receipt(message_ids["Event"]))
             self.assertEqual(again,first)
@@ -333,7 +471,7 @@ class HermesGateway(unittest.TestCase):
             conn.execute("UPDATE progress SET cursor=0")
         with closing(sqlite3.connect(str(manager_db)+".host")) as conn, conn:
             conn.execute("DELETE FROM intents WHERE delivery_id=?",(message_ids["Event"],))
-        with self.gateway(env,python,entry,"restored-before-event",port,key) as restored_pid:
+        with gateway("restored-before-event") as restored_pid:
             def recovered_or_duplicated():
                 saved = receipt(message_ids["Event"])
                 inputs = rows(native_db,"SELECT admission_id FROM session_admissions WHERE target_session_id=? ORDER BY seq",
@@ -348,7 +486,7 @@ class HermesGateway(unittest.TestCase):
             self.assertEqual(loop.hermes.tasks(unassigned="true")["items"],[created_task])
 
         if output := os.environ.get("MOWULINK_HERMES_GATEWAY_EVIDENCE"):
-            evidence = {"hermes_source_revision":revision,"session_id":session,"route":route["session_key"],
+            evidence = {"hermes_source_revision":revision,"session_id":session,"route":route,
                 "native_pids":[pid,new_pid,restored_pid],"message_ids":message_ids,"event_native_admission":first["native_id"],
                 "notify_native_admission":second["native_id"],"notify_after_event_release_seconds":
                 round(notify["time"]-released,2),"info_native_inputs":0,"native_admission_count":2,
