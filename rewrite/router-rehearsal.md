@@ -32,6 +32,8 @@ python3 -m rewrite.cutover export-chat --snapshot ./snapshot --worker "$WORKER_I
 
 将 `WORKER_ID` 设为旧台账中的工位 ID，即可从已核验的离线库导出旧 `/chat/{worker}/messages` 字段。可用 `--direction in` 或 `--direction out` 筛选，按原 ID 升序分页。下一页用回执中的 `next_cursor` 作为 `--after`，并指定新目录。回执只含计数、位置和摘要，正文写入该用户独占目录里的 `messages.jsonl`，文件权限为 600。敏感的附加元数据仍留在完整原备份。导出不会生成新平台消息或新工单。重做版的日常飞书私聊继续由 Worker 持有。
 
+实际旧 Router 的 `/chat/log` 已核重复消息复用原行号，同一平台消息号的双向记录均保留。以旧共享令牌读两工位的历史时均返回 200。离线导出所得页与所选工位的 HTTP 字段逐条一致，文件不含另一工位记录。旧在线摘要保留在旧端。重做版未开放跨工位聊天旁听，现役消费者及所需的查阅范围须在停用旧入口前确认。复跑 `python3 -B -m unittest -v rewrite.test_cutover -k export_legacy_chat`。
+
 ## 停止切换和回退
 
 - 有持单、待确认的同伴消息、待答问题、审批、订阅或处理权纠正时，备份照常保留，准备新写者会列出待处理数。指定工作区、特殊时限、紧急优先级、未知元数据或已有投递事实的排队单需要显式对照。历史旧格式任务表有内容时同样需要单独迁移。早期格式 1 快照仍按原标准校验，准备阶段再核本版支持范围。
@@ -114,7 +116,7 @@ python3 -B -m rewrite.service peer-archive \
 
 用参与人身份访问 `GET /v1/history/peers` 列来源，`GET /v1/history/<source_id>/peers/<message_id>` 取原文、传输号和宿主回执，再按返回的附件号读 `GET /v1/attachments/<attachment_id>`。正文支持分页，附件支持 HTTP Range。旧 Worker 的内置收件箱没有这个独立查询入口。已回退时使用只读 HTTPS 入口，回到重做版后可用原生 `worker_peer_inbox` 查询，也能沿原消息号回复。
 
-再次迁入时，在原 `prepare` 参数上加 `--peer-archive "${RESTORE}/private-review/peer-history.db" --peer-archive-sha256 "${PEER_ARCHIVE_SHA256}"`。试用目录会保存校验后的 `peer-history.db`，后续对账、排空迁移和回退都应携带。所有原消息留在带原参与人权限的归档，零重投。再次回退时，已审核的新私聊会并入原档案。
+再次迁入时，在原 `prepare` 参数上加 `--peer-archive "${RESTORE}/private-review/peer-history.db" --peer-archive-sha256 "${PEER_ARCHIVE_SHA256}"`。试用目录会保存校验后的 `peer-history.db`，后续对账、排空迁移和回退都应携带。所有原消息留在带原参与人权限的归档，零重投。无新写入的回退、只新增待派单的回退均逐字节保留原档案。再次审核后回退时，新私聊会并入原档案。
 
 复跑 `python3 -B -m unittest -v rewrite.test_cutover -k reviewed_private_peers`。实际旧 Router HTTP 以原共享身份查询新私聊和附件均返回 404，已验收工单仍归档。独立 HTTPS 服务实际核对原双方可读全文及跨块附件，第三工位和非参与的溪流身份返回 404。回到重做版后，原两条各有原回执，重送原号返回 409，新增回信只产生一次宿主收件。第二次回退保留原两条和新增回复。宿主与 W04 模型使用夹具。[回退与回迁实测](evidence/trial-peer-fallback.json)
 

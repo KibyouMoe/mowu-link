@@ -84,15 +84,51 @@ store._conn.close()
         self.assertEqual(digest(self.legacy),original)
 
     def test_export_legacy_chat_keeps_original_fields_and_private_scope(self):
-        conversation = json.loads(self.old("""
+        observed = json.loads(self.old("""
+from server import RouterServer
+from selftest_router import http
+from threading import Thread
+from time import time
+from unittest.mock import Mock
 store = RouterStore(sys.argv[1])
-store.add_chat_message("oguri","in","原问题", "old-session", 123, "om_same", meta="raw retained in snapshot")
-store.add_chat_message("tamamo","out","other worker body", "other-session", 124, "om_other")
-store.add_chat_message("oguri","out","原回复", "old-session", 125, "om_same")
-store.add_chat_message("oguri","out","new session", "other-thread", 126, "om_next")
-print(json.dumps(store.list_chat_messages("oguri",since_id=0)))
+token = "isolated-old-chat"
+now = time()
+with RouterServer(("127.0.0.1",0),store,token,Mock(),Mock()) as server:
+    thread = Thread(target=server.serve_forever,kwargs={"poll_interval":.02})
+    thread.start()
+    try:
+        url = f"http://127.0.0.1:{server.server_port}"
+        samples = [
+            ("oguri","in","原问题","old-session",now-120,"om_same"),
+            ("tamamo","out","other worker body","other-session",now-119,"om_other"),
+            ("oguri","out","原回复","old-session",now-118,"om_same"),
+            ("oguri","out","new session","other-thread",now-117,"om_next"),
+        ]
+        fields = ("worker","direction","text","session_id","ts","message_id")
+        bodies = [dict(zip(fields,row),meta={"private_fixture":True}) for row in samples]
+        written = [http("POST",url+"/chat/log",body,token) for body in bodies]
+        duplicate = http("POST",url+"/chat/log",bodies[0],token)
+        oguri = http("GET",url+"/chat/oguri/messages",token=token)
+        other = http("GET",url+"/chat/tamamo/messages",token=token)
+        summary = http("GET",url+"/chat/oguri/summary?minutes=60",token=token)
+        print(json.dumps({"written":written,"duplicate":duplicate,"oguri":oguri,"other":other,"summary":summary}))
+    finally:
+        server.shutdown()
+        thread.join()
 store.close()
 """,self.legacy))
+        self.assertTrue(all(status==200 and not row["duplicate"] for status,row in observed["written"]))
+        first_id = observed["written"][0][1]["id"]
+        self.assertEqual((observed["duplicate"][0],observed["duplicate"][1]["id"],
+                          observed["duplicate"][1]["duplicate"]),(200,first_id,True))
+        self.assertEqual(observed["oguri"][0],200)
+        conversation = observed["oguri"][1]["messages"]
+        self.assertEqual([row["message_id"] for row in conversation],["om_same","om_same","om_next"])
+        self.assertEqual([row["session_id"] for row in conversation],["old-session","old-session","other-thread"])
+        self.assertEqual((observed["other"][0],observed["other"][1]["count"]),(200,1))
+        summary_http, summary = observed["summary"]
+        self.assertEqual((summary_http,summary["count"],summary["in"],summary["out"]),(200,3,1,2))
+        self.assertEqual(summary["last"]["id"],conversation[-1]["id"])
         backup(self.legacy,self.attachments,self.snapshot)
         before = digest(self.snapshot/"legacy.db")
         def data(folder):
@@ -3884,6 +3920,18 @@ store.close()
         self.assertTrue(reconcile(snapshot,trial)["exact_rollback_allowed"])
         self.assertEqual(rollback(snapshot,trial,exact)["peer_archive_sha256"],archive_sha)
         self.assertEqual(digest(exact/"private-review"/PEER_ARCHIVE),archive_sha)
+        queued_trial = self.root/"reentry-queued-trial"
+        prepare(snapshot,queued_trial,source,archive,archive_sha)
+        queued_loop = Loop(queued_trial,clock,FixtureHost)
+        with running(queued_loop.server):
+            new_queued = queued_loop.hermes.create(guid(),"Queue only","No Worker is connected","oguri")["task_id"]
+        queued_review = self.root/"reentry-queued-review.json"
+        queued_review.write_text(json.dumps({"trial_sha256":digest(queued_trial/"router.db"),
+                                             "execution_modes":{new_queued:"goal"}}))
+        queued_restore = self.root/"reentry-queued-fallback"
+        queued_result = stage_queue_rollback(snapshot,queued_trial,queued_review,queued_restore)
+        self.assertEqual((queued_result["queued_requests"],queued_result["peer_archive_sha256"]),(1,archive_sha))
+        self.assertEqual(digest(queued_restore/"private-review"/PEER_ARCHIVE),archive_sha)
         again = Loop(trial,clock,FixtureHost,extra_workers=("tama",))
         resumed = FixtureHost(trial/"new-tama-host.db","new-tama-session")
         tama = Worker(trial/"new-tama-worker.db","tama",again.extra_clients["tama"],

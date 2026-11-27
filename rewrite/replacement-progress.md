@@ -10,6 +10,12 @@
 
 试用新增私聊已能随正式工单或单独审核回退。实际旧 Router 的共享凭据曾可读旧私聊，这次回退库对试用私聊和附件均返回 404。独立只读 HTTPS 档案保留原双方权限、消息号、回复关系、传输号与宿主回执。再次迁入零重投，新回复只投一次，二次回退累计保留原新回复。缺宿主回执、附件失真、越权或审核遗漏均拒绝。宿主与模型使用夹具。[前次阻点](evidence/peer-archive-rollback-boundary.json) · [本轮实测](evidence/trial-peer-fallback.json) · [复跑与查询](router-rehearsal.md#试用新增私聊的回退)
 
+实现 `9d14e8b48aa64ce9e58d072ccd2b64e0ba48e0c4` 的 328 文件发行包 SHA-256 为 `066776df2a198a1c475f70f32cd4c1c8b2e231f9ab09145a848f77f9d47d3e58`。macOS 全量通过 336 项、环境跳过 5 项，安装目录专项通过 79 项、环境跳过 1 项，文件摘要复验一致。Linux arm64 安装包通过 215 项、环境跳过 126 项。macOS 至 Linux 的 TLS 独立回环核到一条夹具宿主收件和一条 W04 通知。Windows 安装及 DSH 原生两组通过。试用私聊实际回退在 macOS 和 Linux 运行。
+
+复跑 `python3 -B -m unittest -v rewrite.test_cutover -k reviewed_private_peers`。Linux 安装包和跨系统测试用 `python3 -B -m rewrite.linux_check --repository . --revision 9d14e8b48aa64ce9e58d072ccd2b64e0ba48e0c4 --image <已核Linux测试镜像> --socket <测试Docker套接字>`。[Windows CI](https://github.com/KibyouMoe/mowu-link/actions/runs/45921277717)
+
+复核旧飞书聊天档。实际旧 HTTP 的 `/chat/log` 重试复用行号，同平台消息号的入站、出站都保留。`/chat/oguri/messages` 与离线导出逐条一致，测试的一入两出可从原摘要核回。相同旧凭据也能查另一工位。重做版当前提供单个工位的离线导出。现役旁听消费者及权限仍须确认，暂保留旧入口。[复跑与保留范围](router-rehearsal.md#导出旧飞书私聊)
+
 重新取消的 W04 已按具体指令核验。相同 A06 操作键重送保留原回执，自动重试沿用同一清理号。同一派发的下一条显式取消携带新的 `cleanup_id`。Worker 从原生收件识别该号，分别保存等待、清理及 Router 回执。隔离实测第一次迟报、重用旧键、换新键重播旧正文和错号都返回 409。新 W04 落库后故意丢回包，冷启沿原键查回，取消通知一条。复跑 `python3 -B -m unittest -v rewrite.test_cleanup rewrite.test_cutover -k cancel`。[HTTP 与回退实测](evidence/reissued-cancel-w04.json)
 
 用前版 `2490059e42d379183c19b0e82c208f545a3c78ee` 生成的隔离 Router、Worker 和适配器库做了升级。仅一次待确认的旧取消可以正常完成，已经成功的旧回执可沿原键回读。旧版已重复取消而未记录清理号时，拒绝无号回执，须由管理端发新指令。回退核对新指令及 W04 的同一清理号，缺号拒绝发布。[旧库升级](evidence/reissued-cancel-upgrade.json) · [回退演练](evidence/cutover-reviewed-cancel-retry.json)
