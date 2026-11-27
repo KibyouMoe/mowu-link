@@ -166,7 +166,7 @@ class Sources(unittest.TestCase):
         poll_game(self.game,origin,opener)
         self.head = 17
         poll_game(self.game,origin,opener)
-        self.assertEqual(self.requests,[("/stream?since=14","14"),("/stream?since=17","17")])
+        self.assertEqual(self.requests,[("/stream?since=14","14"),("/stream?since=16","16")])
         self.flush(self.game)
         records = self.loop.hermes.messages()["items"]
         self.assertEqual({(r["level"],r["text"]) for r in records},
@@ -235,11 +235,54 @@ class Sources(unittest.TestCase):
         self.assertEqual(self.requests,[])
         self.head = 17
         self.records = [(15,{"text":"already received"}),(16,{"text":"one"}),(17,{"text":"two"})]
-        poll_game(feed,origin,opener)
+        with self.assertRaisesRegex(Fault,"legacy_source_continuity_lost"):
+            poll_game(Feed(feed.db.path,"mc_chat",[origin]),origin,opener)
+        self.assertFalse(feed.trigger.pending())
+        self.assertFalse(feed.import_cursor(cursor)["verified"])
+        self.assertEqual(self.requests,[])
+
+        clean = Feed(self.root/"game-continuous.db","mc_chat",[origin])
+        self.assertFalse(clean.import_cursor(cursor)["verified"])
+        poll_game(clean,origin,opener)
         self.assertEqual(self.requests,[("/stream?since=15","15")])
-        self.assertEqual(feed.cursor()["position"],17)
-        self.assertTrue(feed.import_cursor(cursor)["verified"])
-        self.assertEqual(len(feed.trigger.pending()),2)
+        self.assertEqual(clean.cursor()["position"],17)
+        self.assertTrue(clean.import_cursor(cursor)["verified"])
+        self.assertEqual(len(clean.trigger.pending()),2)
+
+    def test_imported_game_refuses_overlapping_sequence_from_another_login(self):
+        origin = self.game_server()
+        opener = build_opener(ProxyHandler({}))
+        game = Feed(self.root/"fast-bridge-reset.db","mc_chat",[origin])
+        cursor = self.root/"old-bridge-cursor.json"
+        cursor.write_text(encode({"source":"mc_chat","bridge":origin,"last_seq":14}))
+        game.import_cursor(cursor)
+        original = {"text":"same game chat","player":"Friend","ts":50.0}
+        self.head,self.records = 15,[(15,original)]
+        poll_game(game,origin,opener)
+        waiting = game.trigger.pending()
+        self.assertEqual(len(waiting),1)
+
+        self.head,self.records = 17,[(15,dict(original,ts=150.0)),(16,{"text":"new generation"}),
+                                    (17,{"text":"new generation tail"})]
+        with self.assertRaisesRegex(Fault,"source_event_changed") as rejected:
+            poll_game(Feed(game.db.path,"mc_chat",[origin]),origin,opener)
+        self.assertEqual(rejected.exception.status,409)
+        self.assertEqual(self.requests,[("/stream?since=14","14"),("/stream?since=14","14")])
+        self.assertEqual(game.cursor()["position"],15)
+        self.assertEqual(game.trigger.pending(),waiting)
+        self.records = [(15,original),(16,{"text":"original continuation"})]
+        with self.assertRaisesRegex(Fault,"legacy_source_continuity_lost"):
+            poll_game(game,origin,opener)
+        self.assertEqual(len(self.requests),2)
+        self.assertFalse(game.import_cursor(cursor)["verified"])
+        if output := os.environ.get("MOWULINK_GAME_FRAME_EVIDENCE"):
+            Path(output).write_text(json.dumps({
+                "original_position":15,"new_head":self.head,"position_after_rejection":game.cursor()["position"],
+                "same_text_different_source_timestamp":True,"native_transport":"isolated HTTP SSE fixture",
+                "error":rejected.exception.code,"collector_error_status":rejected.exception.status,
+                "stream_requests":self.requests,"original_pending":waiting,"pending_after":game.trigger.pending(),
+                "retry_after_reopen":"legacy_source_continuity_lost"
+            },indent=2)+"\n")
 
     def test_archive_failure_cannot_advance_cursor_and_stale_reader_cannot_skip_event(self):
         gen,base = self.game.start(None,"source",20)
@@ -345,6 +388,19 @@ class Sources(unittest.TestCase):
             mail_box_head = 14
             game_return_head = 18
             self.head = game_return_head
+            old_frame = self.records[-1]
+            self.records = [(18,{"text":"bridge omitted last committed frame"})]
+            with self.assertRaisesRegex(Fault,"game_source_overlap_unavailable"):
+                poll_game(game,origin,opener)
+            self.assertEqual(game.cursor()["position"],17)
+            missing = snapshot("bridge-frame-missing")
+            with self.assertRaisesRegex(ValueError,"still needs readback"):
+                stage(refused,**request("game",missing,game_return_head))
+            self.assertFalse(refused.exists())
+
+            self.records = [old_frame]
+            poll_game(Feed(game.db.path,"mc_chat",[origin]),origin,opener)
+            self.assertFalse(game.trigger.pending())
             complete = snapshot("settled-feeds")
             outputs = {kind:self.root/(kind+"-restored") for kind in ("mail","game")}
             returned = {"mail":stage(outputs["mail"],**request("mail",complete,mail_box_head))}
@@ -359,6 +415,8 @@ class Sources(unittest.TestCase):
             self.assertEqual([row["state"] for row in returned["game"]["events"]],
                              ["reviewed_filter","native_received","router_archived"])
             self.assertEqual(host_inputs,[returned["game"]["events"][1]["message_id"]])
+            self.assertEqual(returned["game"]["game_overlap"]["position"],17)
+            self.assertRegex(returned["game"]["game_overlap"]["sha256"],r"^[0-9a-f]{64}$")
             self.assertEqual(len(loop.hermes.messages()["items"]),4)
             self.assertEqual(digest(outputs["mail"]/"trial-archive.sqlite3"),digest(mail.db.path))
 

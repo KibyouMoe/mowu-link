@@ -42,6 +42,12 @@ def source_baseline(db, cursor, old_hash):
         previous = cursor.get("last_seq")
     if not compatible or type(previous) is not int or previous!=anchor["position"]:
         raise ValueError("original cursor differs from the imported source baseline")
+    overlap = None
+    if kind=="mc_chat" and db.execute("SELECT 1 FROM sqlite_master WHERE name='feed_game_overlap'").fetchone():
+        overlap = db.execute("SELECT position,checksum,verified FROM feed_game_overlap WHERE generation=? AND position=?",
+                             (current["generation"],current["position"])).fetchone()
+        if overlap and overlap["verified"]!=1:
+            raise ValueError("previous game source frame still needs readback")
     reads = db.execute("SELECT * FROM feed_reads ORDER BY position").fetchall()
     positions = [row["position"] for row in reads]
     if (any(row["generation"]!=anchor["generation"] for row in reads)
@@ -49,7 +55,7 @@ def source_baseline(db, cursor, old_hash):
             or (positions[-1] if positions else previous)!=current["position"]
             or (kind=="mc_chat" and len(positions)!=current["position"]-previous)):
         raise ValueError("source ledger has a generation change or an unaccounted game sequence")
-    return kind,anchor,current,reads
+    return kind,anchor,current,reads,overlap
 
 
 def review_interval(review, snapshot_sha, old_hash, anchor, current, reads):
@@ -115,7 +121,7 @@ def inspect_return(bundle, expected, legacy_cursor, review, feed_instance, manag
     with ExitStack() as stack:
         ledgers = [stack.enter_context(closing(readonly(bundle/state_bundle.filename(label)))) for label in labels]
         r,_,host,feed = ledgers
-        kind,anchor,current,reads = source_baseline(feed,original,old_hash)
+        kind,anchor,current,reads,overlap = source_baseline(feed,original,old_hash)
         head = review_interval(approval,expected,old_hash,anchor,current,reads)
         if not host.execute("SELECT 1 FROM adapter_native_binding WHERE slot=1 AND session=?",
                             (host_session,)).fetchone():
@@ -136,6 +142,8 @@ def inspect_return(bundle, expected, legacy_cursor, review, feed_instance, manag
     report = {"source":kind,"instance_id":instance,"source_epoch":anchor["epoch"],"initial_position":anchor["position"],
               "trial_position":current["position"],"observed_head":head,"safe_to_stage":complete,"events":states,
               "snapshot_sha256":expected,"legacy_cursor_sha256":old_hash,"review_sha256":approval_hash}
+    if overlap:
+        report["game_overlap"] = {"position":overlap["position"],"sha256":overlap["checksum"]}
     return report,original,source_file,manifest["files"][labels[3]]["sha256"]
 
 

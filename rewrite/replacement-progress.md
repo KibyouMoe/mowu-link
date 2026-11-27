@@ -38,6 +38,8 @@
 
 实测旧 Trigger 另先确认序号 3，Router 仍在 2，离线审计保留这份差异，并单列序号 3 的 Trigger 确认和 Router 游标状态。审计实现 `84430b01d471a873884f77ea8962f6a363b54233` 在 macOS 全量通过 340 项、依环境跳过 5 项。拦截提交 `bf78833ce0f0fbce8dfc344e03ffaf06c5479951` 的 macOS 相关回归通过 51 项，安装目录的审计和回退 3 项复跑通过。Linux arm64 通过 218 项、依环境跳过 127 项，实际跨系统 HTTPS 有一次夹具宿主收件和一次正式待验通知。339 个安装文件均复验一致，包 SHA-256 为 `60b350125c0ff34a08f9fb478d6cf1b113594ed64f64f8168aa3cff313890516`。Windows 安装及 DSH 原生两组通过。[Windows CI](https://github.com/KibyouMoe/mowu-link/actions/runs/45928267635)
 
+游戏源续接已核对上一条原始 SSE 帧。隔离旧版复现显示，先观测到旧游标 15 回退，桥后来超过旧位置时仍接下了新会话数据，最终推进到 19。改版保留首次回退的连续性中断，也用上一帧摘要区分序号和正文相同、原始时间戳不同的两次登录。实测停在序号 15，原待交 ID 不变，重开仍阻断。缓冲缺前帧时保留待核并拒绝交回游标，原帧补回后恢复。真实隔离 HTTP 与 SQLite，桥和宿主为夹具。旧版游标首次接入仍需原桥连续运行的独立凭据。[复跑](router-rehearsal.md#旧采集来源交接) · [证据](evidence/game-source-overlap.json)
+
 重新取消的 W04 已按具体指令核验。相同 A06 操作键重送保留原回执，自动重试沿用同一清理号。同一派发的下一条显式取消携带新的 `cleanup_id`。Worker 从原生收件识别该号，分别保存等待、清理及 Router 回执。隔离实测第一次迟报、重用旧键、换新键重播旧正文和错号都返回 409。新 W04 落库后故意丢回包，冷启沿原键查回，取消通知一条。复跑 `python3 -B -m unittest -v rewrite.test_cleanup rewrite.test_cutover -k cancel`。[HTTP 与回退实测](evidence/reissued-cancel-w04.json)
 
 用前版 `2490059e42d379183c19b0e82c208f545a3c78ee` 生成的隔离 Router、Worker 和适配器库做了升级。仅一次待确认的旧取消可以正常完成，已经成功的旧回执可沿原键回读。旧版已重复取消而未记录清理号时，拒绝无号回执，须由管理端发新指令。回退核对新指令及 W04 的同一清理号，缺号拒绝发布。[旧库升级](evidence/reissued-cancel-upgrade.json) · [回退演练](evidence/cutover-reviewed-cancel-retry.json)

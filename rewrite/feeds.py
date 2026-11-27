@@ -61,10 +61,10 @@ class Feed:
         checksum = hashlib.sha256(raw).hexdigest()
         with self.db.transaction() as db:
             row = db.execute("SELECT * FROM feed_cursor WHERE slot=1").fetchone()
-            old = db.execute("SELECT sha256,verified FROM feed_handoff WHERE slot=1").fetchone()
+            old = db.execute("SELECT sha256,verified,continuity_lost FROM feed_handoff WHERE slot=1").fetchone()
             if old:
                 require(row and row["scope"]==self.scope and old["sha256"]==checksum,409,"legacy_cursor_conflict")
-                verified = bool(old["verified"])
+                verified = bool(old["verified"] and not old["continuity_lost"])
             else:
                 require(not row and not db.execute("SELECT 1 FROM archive LIMIT 1").fetchone(),
                         409,"target_feed_already_started")
@@ -86,13 +86,18 @@ class Feed:
             row = db.execute("SELECT * FROM feed_cursor WHERE slot=1").fetchone()
             require((dict(row) if row else None)==before,409,"concurrent_source_poll")
             handoff = db.execute("SELECT * FROM feed_handoff WHERE slot=1").fetchone()
-            if handoff and not handoff["verified"]:
-                require(row and row["epoch"]==handoff["epoch"]==epoch and row["position"]==handoff["position"]<=head,
+            pending = handoff and not handoff["verified"] and not handoff["continuity_lost"]
+            initial_rewind = False
+            if pending:
+                require(row and row["epoch"]==handoff["epoch"]==epoch and row["position"]==handoff["position"],
                         409,"legacy_source_position_unconfirmed")
-                db.execute("UPDATE feed_handoff SET verified=1,generation=? WHERE slot=1",(row["generation"],))
-            lost = handoff and handoff["verified"] and (handoff["continuity_lost"] or not row
-                   or row["epoch"]!=handoff["epoch"] or epoch!=row["epoch"] or head<row["position"]
-                   or handoff["generation"] not in (None,row["generation"]))
+                initial_rewind = self.trigger.name=="mc_chat" and head<row["position"]
+                if not initial_rewind:
+                    require(head>=row["position"],409,"legacy_source_position_unconfirmed")
+                    db.execute("UPDATE feed_handoff SET verified=1,generation=? WHERE slot=1",(row["generation"],))
+            lost = handoff and (handoff["continuity_lost"] or initial_rewind or
+                handoff["verified"] and (not row or row["epoch"]!=handoff["epoch"] or epoch!=row["epoch"]
+                or head<row["position"] or handoff["generation"] not in (None,row["generation"])))
             if lost:
                 db.execute("UPDATE feed_handoff SET continuity_lost=1 WHERE slot=1")
             elif row and row["epoch"]==epoch and head>=row["position"]:
@@ -101,9 +106,38 @@ class Feed:
                 generation = guid()
                 db.execute("INSERT OR REPLACE INTO feed_cursor VALUES (1,?,?,?,?)",(self.scope,epoch,generation,head))
                 return generation,head
-        require(False,409,"legacy_source_continuity_lost")
+        code = "legacy_source_position_unconfirmed" if initial_rewind else "legacy_source_continuity_lost"
+        require(False,409,code)
 
-    def capture(self,generation,position,seq,level,text):
+    def begin_game_overlap(self,generation,position):
+        with self.db.transaction() as db:
+            self.require_current_game_cursor(db,generation,position)
+            if not db.execute("SELECT 1 FROM sqlite_master WHERE name='feed_game_overlap'").fetchone():
+                return False
+            match = (generation,position)
+            changed = db.execute("UPDATE feed_game_overlap SET verified=0 WHERE generation=? AND position=?",
+                                 match).rowcount
+            return changed==1
+
+    def verify_game_overlap(self,generation,position,checksum):
+        with self.db.transaction() as db:
+            self.require_current_game_cursor(db,generation,position)
+            row = db.execute("SELECT checksum FROM feed_game_overlap WHERE generation=? AND position=?",
+                             (generation,position)).fetchone()
+            require(row,409,"concurrent_source_poll")
+            if checksum==row["checksum"]:
+                db.execute("UPDATE feed_game_overlap SET verified=1 WHERE slot=1")
+                return
+            db.execute("UPDATE feed_handoff SET continuity_lost=1 WHERE slot=1 AND generation=?",(generation,))
+        require(False,409,"source_event_changed")
+
+    @staticmethod
+    def require_current_game_cursor(db,generation,position):
+        cursor = db.execute("SELECT generation,position FROM feed_cursor WHERE slot=1").fetchone()
+        require(cursor and (cursor["generation"],cursor["position"])==(generation,position),
+                409,"concurrent_source_poll")
+
+    def capture(self,generation,position,seq,level,text,*,game_checksum=None):
         require(type(seq) is int and 0<seq<2**63,422,"invalid_source_sequence")
         digest = hashlib.sha256(encode([level,text]).encode()).hexdigest()
         with self.db.transaction() as db:
@@ -127,6 +161,12 @@ class Feed:
                     files = [("message.txt",BytesIO(text.encode("utf-8")))]
                 mid = self.trigger.archive(db,level,summary,files)
             db.execute("INSERT INTO feed_reads VALUES (?,?,?,?)",(generation,seq,digest,mid))
+            if game_checksum is not None:
+                db.execute("""CREATE TABLE IF NOT EXISTS feed_game_overlap (
+                    slot INTEGER PRIMARY KEY CHECK(slot=1), generation TEXT NOT NULL,
+                    position INTEGER NOT NULL, checksum TEXT NOT NULL, verified INTEGER NOT NULL
+                )""")
+                db.execute("INSERT OR REPLACE INTO feed_game_overlap VALUES (1,?,?,?,1)",(generation,seq,game_checksum))
             db.execute("UPDATE feed_cursor SET position=? WHERE slot=1",(seq,))
             return mid
 
@@ -212,7 +252,9 @@ def poll_game(feed,origin,opener,configured_player=None):
     own_name = configured_player or (state.get("player") or {}).get("name")
     require(isinstance(own_name,str) and own_name.strip(),409,"game_player_unknown")
     gen,pos = feed.start(before,"game",state.get("events",{}).get("lastSeq"))
-    req = Request(origin+f"/stream?since={pos}",headers={"Accept":"text/event-stream","Last-Event-ID":str(pos)})
+    overlap = feed.begin_game_overlap(gen,pos)
+    since = pos-1 if overlap else pos
+    req = Request(origin+f"/stream?since={since}",headers={"Accept":"text/event-stream","Last-Event-ID":str(since)})
     with opener.open(req,timeout=65) as stream:
         require(stream.headers.get_content_type()=="text/event-stream",503,"expected_game_stream")
         for raw_id,raw in mc_frames(stream):
@@ -224,9 +266,18 @@ def poll_game(feed,origin,opener,configured_player=None):
             require((type(value) is int or isinstance(value,str) and value.isascii() and value.isdigit())
                     and len(str(value))<=19,422,"game_sequence_missing")
             seq = int(value)
+            checksum = hashlib.sha256(encode(payload).encode()).hexdigest()
+            if overlap:
+                if seq<pos:
+                    continue
+                require(seq==pos,409,"game_source_overlap_unavailable")
+                feed.verify_game_overlap(gen,pos,checksum)
+                overlap = False
+                continue
             level,text = mc_text(payload,own_name)
-            feed.capture(gen,pos,seq,level,text)
+            feed.capture(gen,pos,seq,level,text,game_checksum=checksum)
             pos = max(pos,seq)
+    require(not overlap,409,"game_source_overlap_unavailable")
 
 
 def main():

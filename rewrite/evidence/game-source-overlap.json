@@ -1,0 +1,26 @@
+{
+  "original_position": 15,
+  "new_head": 17,
+  "position_after_rejection": 15,
+  "same_text_different_source_timestamp": true,
+  "native_transport": "isolated HTTP SSE fixture",
+  "error": "source_event_changed",
+  "collector_error_status": 409,
+  "stream_requests": [
+    [
+      "/stream?since=14",
+      "14"
+    ],
+    [
+      "/stream?since=14",
+      "14"
+    ]
+  ],
+  "original_pending": [
+    "414dbaac-9965-499f-8634-7a5c38ef8833"
+  ],
+  "pending_after": [
+    "414dbaac-9965-499f-8634-7a5c38ef8833"
+  ],
+  "retry_after_reopen": "legacy_source_continuity_lost"
+}

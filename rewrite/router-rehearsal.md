@@ -294,13 +294,17 @@ python3 -m rewrite.feeds game --config ./game-trial.json --import-legacy-cursor 
 
 旧邮件游标只记文件夹、UIDVALIDITY 和末尾 UID。使用 `--confirm-legacy-mailbox` 前，核对旧配置的服务器、端口、账号和文件夹确实相同。首次采集读回原 UIDVALIDITY，且服务端最新可读位置不小于旧 UID 时，才验证成功。游戏游标必须和配置的桥地址相同，首次观测到序号比旧游标小时会中止。旧桥缺少启动标识，若切换前桥已重启并重新超过旧游标，仅凭序号无法判定同一实例。核对连续运行状态后再用该游标。
 
+新版游戏采集在同一 SQLite 事务保存源序号、消息和最后一帧的原始载荷摘要。再次连接时从当前序号的上一位请求 SSE，等同一帧读回并比对摘要后才接后续序号。即使新会话的序号和聊天正文相同，只要原始载荷中的时间戳等字段不同，已导入的交接就会记为连续性中断。首次观测到低于已导入序号时也会保留这一状态，重新超过旧序号或重开进程都不能解除。上一帧暂缺时，保留旧位置，归档和待交队列可查，回退游标准备会等该帧重新获得核对。
+
+这项核对覆盖已保存原始帧摘要的续接窗口。旧游标没有原始帧或启动标识，首次迁入仍需独立确认桥持续运行。读回便于识别序号复用，源端两次返回完全相同的载荷仍无法凭此区分。[序号复用实测](evidence/game-source-overlap.json)
+
 相同旧游标重导入只返回原摘要与验证状态。目标库已开始工作或保存过不同游标时拒绝覆盖。隔离复跑 `python3 -m unittest -v rewrite.test_feeds`。邮件用协议夹具，游戏走临时 HTTP 流。生产来源与订阅继续待验。
 
 ### 把试用采集位置交回旧客户端
 
 保留导入时的原游标文件。停两边采集器和发送端，从同一停写窗口保存试用 Router、采集 Trigger、Hermes 和原宿主适配器账本。先核试用期间的全部捕获。邮件 Info 必须有匹配的 Router 收件并保留完整私有档，游戏 Event 还须有原宿主的收件号。旧归档副本不会自动取得这些新数据，回退时一起保管试用档案与 Router 快照。仍有待确认回执时，先在试用侧查回或完成原投递。
 
-审核文件包含 `snapshot_sha256`、`legacy_cursor_sha256`、`source` 和 `filtered_positions`。在 `source` 中保存同一来源的 `epoch`、已观测的 `head` 及独立核对的 `evidence`。邮件的 `epoch` 用 UIDVALIDITY 字符串，`head` 用 UIDNEXT 减一，并核原服务器、账号、文件夹。游戏的 `epoch` 为 `"game"`，`head` 为 `lastSeq`，证据要能证明原游戏桥未重启、玩家和过滤口径一致。游戏桥只报数字序号时，头部数字变大不足以证明连续。已观测的回退会留在新账本，数字后来恢复到较高值也不能解除。游戏试用期缺号时保持原位置，待缺号补齐后才能继续。各条源端过滤在 `filtered_positions` 按原序号写核对依据。
+审核文件包含 `snapshot_sha256`、`legacy_cursor_sha256`、`source` 和 `filtered_positions`。在 `source` 中保存同一来源的 `epoch`、已观测的 `head` 及独立核对的 `evidence`。邮件的 `epoch` 用 UIDVALIDITY 字符串，`head` 用 UIDNEXT 减一，并核原服务器、账号、文件夹。游戏的 `epoch` 为 `"game"`，`head` 为 `lastSeq`，证据要能证明原游戏桥未重启、玩家和过滤口径一致。游戏桥只报数字序号时，头部数字变大不足以证明连续。已观测的回退会留在新账本，数字后来恢复到较高值也不能解除。若最近一次续接缺少前帧读回，先查回同一帧。回退报告的 `game_overlap` 会列出实际核对过的末帧位置及摘要。游戏试用期缺号时保持原位置，待缺号补齐后才能继续。各条源端过滤在 `filtered_positions` 按原序号写核对依据。
 
 ```sh
 python3 -B -m rewrite.feed_return audit --bundle ./trial-state --manifest-sha256 "$TRIAL_STATE_SHA256" \
