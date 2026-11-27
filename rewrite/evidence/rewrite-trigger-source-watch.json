@@ -1,0 +1,90 @@
+{
+  "revision": "6c8c0a76b8fcf03976ff27b38aac2a341e70f35f",
+  "macos_install": {
+    "files": 389,
+    "sha256": "4b3caf8dba509d6ed034792580efaf89befb736a14a58f78852ceb12c80dddd2",
+    "passed": 49,
+    "skipped": 1,
+    "archival_excluded": 4
+  },
+  "windows_install": {
+    "run_id": 45968644393,
+    "workflow": "https://github.com/KibyouMoe/mowu-link/actions/runs/45968644393",
+    "job_id": 140403447370,
+    "package": {
+      "sha256": "592282a48ab7a542693457526b43d8ad6a56dfce62e017e8854f9db078c40261",
+      "files": 389,
+      "revision": "6c8c0a76b8fcf03976ff27b38aac2a341e70f35f"
+    },
+    "passed": 31,
+    "watch_cases": 2
+  },
+  "linux_regression": {
+    "revision": "6c8c0a76b8fcf03976ff27b38aac2a341e70f35f",
+    "files": 389,
+    "passed": 194,
+    "skipped": 136,
+    "excluded": 58,
+    "failed": 0,
+    "errors": 0
+  },
+  "game_watch": {
+    "attachment_bytes": 251,
+    "boundary": "Independent Trigger process, SQLite and HTTPS Router; game bridge fixture.",
+    "first_received_at": "2026-11-27T08:49:42.060613+00:00",
+    "instance_id": "308bd2aa-ec16-4a34-b34f-49fcf24fb8d5",
+    "local_message_ids": [
+      "b167e4fc-1cc2-465f-b450-9c02b8607542",
+      "041bfac0-c334-440e-9f24-9c10cefabb36"
+    ],
+    "notifications": 1,
+    "post_attempts": [
+      [
+        "b167e4fc-1cc2-465f-b450-9c02b8607542",
+        "message-b167e4fc-1cc2-465f-b450-9c02b8607542",
+        [
+          "011f7f4f-97c1-4ecc-af43-a5dce00250ff"
+        ]
+      ],
+      [
+        "b167e4fc-1cc2-465f-b450-9c02b8607542",
+        "message-b167e4fc-1cc2-465f-b450-9c02b8607542",
+        [
+          "011f7f4f-97c1-4ecc-af43-a5dce00250ff"
+        ]
+      ],
+      [
+        "041bfac0-c334-440e-9f24-9c10cefabb36",
+        "message-041bfac0-c334-440e-9f24-9c10cefabb36",
+        []
+      ]
+    ],
+    "read_while_stream_open": true,
+    "replayed_attachment_id": "011f7f4f-97c1-4ecc-af43-a5dce00250ff",
+    "retained_work_when_router_down": 2,
+    "router_tls": true,
+    "source_reconnect": [
+      [
+        "/stream?since=14",
+        "14"
+      ],
+      [
+        "/stream?since=15",
+        "15"
+      ]
+    ],
+    "writer_conflicts_refused": 2
+  },
+  "mail_watch": {
+    "boundary": "Independent Trigger process, local TLS IMAP fixture and isolated Router.",
+    "instance_id": "9c48a8b5-82d8-4759-8de1-ff254811d7ae",
+    "mail_uid": 12,
+    "mailbox_read_only": true,
+    "mailbox_tls": true,
+    "message_id": "84c41237-c64a-40bd-b5b7-e12f8e9d20c1",
+    "notifications": 0,
+    "previous_position": 11,
+    "received_at": "2026-11-27T08:49:44.519059+00:00",
+    "same_watcher_process": true
+  }
+}
