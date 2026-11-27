@@ -1,0 +1,33 @@
+{
+  "old_api_without_worker": {
+    "status": 400,
+    "response": {
+      "ok": false,
+      "error": "worker is required"
+    }
+  },
+  "task_id": "af600bd8-1ddd-4280-ba7f-ee437e68c74a",
+  "creation_key": "3d53e3ae-fd49-4e95-bc58-9355e670f6c8",
+  "assignment_id": "81fae442-b58f-4f4b-8746-71008199960b",
+  "unassigned": [
+    {
+      "task_id": "af600bd8-1ddd-4280-ba7f-ee437e68c74a",
+      "reason": "legacy_requires_assignee"
+    }
+  ],
+  "assigned_but_waiting": [
+    {
+      "task_id": "af600bd8-1ddd-4280-ba7f-ee437e68c74a",
+      "reason": "assignment_or_lifecycle_recorded"
+    }
+  ],
+  "closed_but_blocked": [
+    {
+      "task_id": "af600bd8-1ddd-4280-ba7f-ee437e68c74a",
+      "reason": "assignment_or_lifecycle_recorded"
+    }
+  ],
+  "trial_unchanged": true,
+  "boundary": "Actual isolated old and rewrite HTTP Routers, real rewrite Worker; host and clock are fixtures.",
+  "observed_revision": "13c2970c7c116dd6888cc2a065bf208da3561f4e"
+}

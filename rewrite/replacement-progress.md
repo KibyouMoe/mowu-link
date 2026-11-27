@@ -20,6 +20,12 @@
 
 同一次入池中的多次取消也已核验。离线入池后，管理端连续三次取消，期间修改工单与提醒期限，最后一次取消之后仍有修订。前两个清理回执均返回 409，最终 W04 确认取消。另一条从在途取消重试耗尽入池，池中两次取消后转派，保留全部原控制，后继 Worker 正常报成果并验收。旧 Router 按原单号读回已取消或已验收，旧工位和新工位都无持单、无重派。篡改池中某次取消的提醒期限回执会拒绝生成恢复目录。宿主和时钟为夹具。复跑 `python3 -B -m unittest -v rewrite.test_cutover -k pool`。[同池取消实测](evidence/cutover-pooled-cancel-rounds.json) · [修复前复现](evidence/cutover-repeated-pool-cancel-gap.json)
 
+在途取消回退提交 `11bf985d1978fad490da07ebf0561e2290f21f84` 的 Linux arm64 全量通过 208 项、依环境跳过 124 项。 macOS 全量通过 327 项、依环境跳过 5 项。314 文件安装包通过 83 项，逐文件校验一致。包 SHA-256 为 `7d392b5d4aaf78fc489f513e93e9a6e166bbbe1e9034b7618355ebeba2524c2f`。Windows 常规与 DSH 原生两组通过。[在途取消 Windows CI](https://github.com/KibyouMoe/mowu-link/actions/runs/45913737007)
+
+同池取消回退提交 `13c2970c7c116dd6888cc2a065bf208da3561f4e` 的 Linux arm64 全量通过 210 项、依环境跳过 124 项。315 文件安装包通过 85 项，逐文件校验一致。包 SHA-256 为 `17c2ea9922a964c90ce5901b392881b399336e0a0d4370e46a5ba9cdc523c82f`。macOS 已验安装包的生命周期、回退和原生清理专项。Windows 常规与 DSH 原生两组通过。[同池取消 Windows CI](https://github.com/KibyouMoe/mowu-link/actions/runs/45914178982)
+
+剩余一条旧端兼容边界已复现。试用新单最初未指定处理人，随后由 A06 明确指定。待派时仍需人工对账，实际完成并验收后也未生成旧端归档。旧 HTTP 在创建时缺 `worker` 会返回 400。回退需要保留原建单请求和后续指定动作，并核对如何映射已明确的处理人；仍未指定的单继续保留在待处理清单。[旧端与新端实测](evidence/cutover-assigned-trial-order-gap.json)
+
 取消重试耗尽后的两种处置已纳入隔离回退。四条取消指令无清理确认才入池，首次迟到的取消 W04 返回 409。挂起后重新取消，由原工位确认并归档。另一张单转派后由新工位提交成果、溪流验收，原工位只清理旧派发。两代 HTTP Router 实测，旧端分别读回已取消和已验收，两个工位都无持单、无重派。首次取消、三次空闲重试、搁置和后续清理分别保留凭据。清理未确认或篡改重试的空闲观测时，回退不生成目录。宿主和时钟为夹具。复跑 `python3 -B -m unittest -v rewrite.test_cutover -k exhausted_cancel`。[取消重试回退实测](evidence/cutover-reviewed-cancel-retry.json)
 
 取消重试回退实现 `42ad8dc34f5d985768fea13326158d27a92a85b8` 的 Linux arm64 全量通过 201 项、依环境跳过 121 项。303 文件安装包通过 73 项专项，逐文件校验一致。归档 SHA-256 为 `abac5a9649dd8415254780e2cc892ce722b0322c423f422aec1603eb7cfc4174`。Windows 常规与 DSH 原生两组通过。[Windows CI](https://github.com/KibyouMoe/mowu-link/actions/runs/45909766891)
