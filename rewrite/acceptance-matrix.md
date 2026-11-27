@@ -57,6 +57,8 @@
 
 Codex 与 DSH 的 Windows 可写入口共用私有运行账本与 Linux 引擎核对。Windows Server 2025 的 Codex 安装包使用 CLI 夹具验证过冷重开、原附件、错误引擎拒绝及移除回执。Windows DSH 原生包经双向 TLS 向 Worker 暂存附件并提交 W04，按原号补回丢失的回执后只通知一次、释放原派发并回收工作区。重开原会话仍仅一条输入，模型未重新执行。离线审计实测宿主写锁释放后，写账本子进程仍可拦住发布。Windows 使用 Docker CLI 夹具和本地脚本模型，Docker Desktop 的 Linux 引擎上仍待验端到端工单、成果、取消和回收。[DSH 回环](evidence/windows-dsh-assignment-workspace.json) · [Codex 可写工位](evidence/windows-codex-assignment-workspace.json) · [Windows 账本审计](evidence/windows-workspace-journal-audit.json) · [工作区回退实测](evidence/codex-workspace-writer-rollback.json)
 
+新版来源的停写快照可按实例核对 Trigger 留档、Router 收件、T04 与附件实际字节。已用隔离 HTTP 和两个新版安装包验证丢 T04 补回、附件校验和错批拒绝。生产来源清单、真实上游和平台回执继续验收。[复跑](router-rehearsal.md#新版-trigger-对账) · [隔离证据](evidence/rewrite-trigger-snapshot-audit.json)
+
 当前可复跑隔离联调。A10 的 Worker 恢复及新版备份回退另核了 70 帧断点续接、前缀缺件与同号异文，以及 C02 位置正确但留有失效 W03 的混搭快照。[复跑及边界](replacement-progress.md#检查点与证据) 离「可切换」仍需真实宿主、实际 Feishu 测试身份、原生工单清理，以及新版实际来源和平台回执对账。
 
 ## Codex 现役能力与新版入口

@@ -6,6 +6,10 @@
 
 ## 检查点与证据
 
+新增 `state_bundle audit-trigger` 在 `91182ae16faf0be3260949671ea090b72a3618c5` 核对同一停写快照的来源留档与 Router 记录。实测两条待对账消息分别为未到 Router 和 Router 已收但 T04 丢失。从副本沿原号恢复后两条均核对成功，原附件 332,800 字节，通知总数一条。反例覆盖缺来源库、单侧缺记录、异文、接收时间错配、附件字节和读取授权不符。两个新版发行包间跑实际 HTTPS 回退，候选停写快照中的原 T04 与附件对账成功，前一发行包读回相同附件，正式成果可继续验收。
+
+同提交的 385 文件安装包在 macOS 通过 34 项目标回归，归档范围的 4 项单独排除。Windows 安装组 28 项通过，含两个 Trigger 审计用例。Linux arm64 通过 191 项，按环境跳过 135 项，归档用例 58 项移出本轮。跨系统 HTTPS 实测一条夹具宿主输入及一条验收通知。来源数据为夹具，实际来源部署清单及在线回执另验。[对账证据](evidence/rewrite-trigger-snapshot-audit.json) · [复跑](router-rehearsal.md#新版-trigger-对账) · [Windows 流水线](https://github.com/KibyouMoe/mowu-link/actions/runs/45964591983)
+
 Windows DSH 可写工位在提交 `1bcee2ba1a47f7f0dd3dd0b65335390af02d49a0` 验证。Windows Server 2025 校验 383 文件安装包，安装组 26 项、DSH 原生组 15 项通过。原生 DSH 经双向 TLS 暂存 691,200 字节附件，Worker 在 W04 回执丢失后用相同请求重放。Router 保留原成果与单条验收通知，Worker 凭原回执释放派发，工作区随后回收。原会话冷重开仍有一条输入和原回合，新增模型请求为零。另实际释放宿主写锁而保留文件写入进程，离线审计持续拦截直至后者退出。Windows 的 Docker CLI 与模型为夹具，本轮默认 Docker 探针返回 `windows`，Linux 容器引擎另验。macOS 同提交的 383 文件安装包通过 26 项，使用真实 Linux Docker 复跑 Codex 和 DSH 的成果和回收，DSH 串行复验 Unix socket 与双向 TLS 冷重开。[Windows 证据](evidence/windows-dsh-assignment-workspace.json) · [Windows 流水线](https://github.com/KibyouMoe/mowu-link/actions/runs/45963237263)
 
 Windows 复跑使用锁定官方 DSH 包和测试目录，执行 `python -B -m unittest -v rewrite.test_dsh_native_loop.LocalTlsLoop rewrite.test_workspace_engine.WindowsWorkspaceEngine`，配置见 [Windows 流水线](../.github/workflows/rewrite-windows.yml)。Linux arm64 在前一提交 `da5d2d9241d7b50d229599ba56ac91cbbfc09773` 校验 383 文件安装包，189 项通过、135 项随环境跳过。跨系统 HTTPS 回环留一条夹具宿主输入和一条验收通知；上述后继提交只修改 DSH 原生测试驱动和冷重开断言。

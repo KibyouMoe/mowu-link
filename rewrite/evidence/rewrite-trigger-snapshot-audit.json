@@ -1,0 +1,130 @@
+{
+  "revision": "91182ae16faf0be3260949671ea090b72a3618c5",
+  "macos_installed": {
+    "revision": "91182ae16faf0be3260949671ea090b72a3618c5",
+    "sha256": "4b369c4462d0dda0a0d6f951d70c752152b4f56690347275943a413de4ba4b33",
+    "files": 385
+  },
+  "macos_regression": {
+    "passed": 34,
+    "skipped": 0,
+    "archival_excluded": 4
+  },
+  "windows_installed": {
+    "run_id": 45964591983,
+    "job_id": 140390137607,
+    "release": {
+      "files": 385,
+      "sha256": "9aa75a2f5f63c864684ec1fce28e5c4ee2be7ed8b1a1949817b9c4f76b2d8397",
+      "revision": "91182ae16faf0be3260949671ea090b72a3618c5"
+    },
+    "passed": 28,
+    "trigger_audit_cases": 2
+  },
+  "linux_regression": {
+    "revision": "91182ae16faf0be3260949671ea090b72a3618c5",
+    "files": 385,
+    "passed": 191,
+    "skipped": 135,
+    "excluded": 58,
+    "failed": 0,
+    "errors": 0,
+    "cross_guest_native_inputs": 1,
+    "router_notifications": 1
+  },
+  "lost_receipt_recovery": {
+    "before": {
+      "snapshot_id": "f58034a9-14dc-4b4b-8a8a-866e571d1cc2",
+      "source_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "ready": false,
+      "sources": [
+        {
+          "component": "trigger:mail",
+          "instance_id": "54d26e99-5210-4d26-82dc-94c20101f8c9",
+          "archived": 2,
+          "settled": 0
+        }
+      ],
+      "issues": [
+        {
+          "code": "awaiting_router_message",
+          "instance_id": "54d26e99-5210-4d26-82dc-94c20101f8c9",
+          "message_id": "f686c3cb-f5b4-4670-aac8-71089afcedf6"
+        },
+        {
+          "code": "awaiting_local_receipt",
+          "instance_id": "54d26e99-5210-4d26-82dc-94c20101f8c9",
+          "message_id": "fabff091-6400-42b6-a951-d74af2e5f3b9"
+        }
+      ]
+    },
+    "after": {
+      "snapshot_id": "becd584c-3740-4bf2-be6b-15af506af480",
+      "source_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "ready": true,
+      "sources": [
+        {
+          "component": "trigger:mail",
+          "instance_id": "54d26e99-5210-4d26-82dc-94c20101f8c9",
+          "archived": 2,
+          "settled": 2
+        }
+      ],
+      "issues": []
+    },
+    "original_router_received_at": "2027-01-15T08:00:00+00:00",
+    "attachment_id": "310ad24e-4ff9-449a-bd8e-1e1b073a5495",
+    "attachment_sha256": "847c7120ed0e8c287ed0273b596882a9e3390b9608c79ec313c009032d5ac97e",
+    "attachment_bytes": 332800,
+    "router_notifications": 1,
+    "boundary": "Real isolated Router HTTP and SQLite snapshots. Synthetic Trigger inputs.",
+    "snapshot_revision_is_fixture": true
+  },
+  "release_rollback": {
+    "previous": "70e53e171a1af437b89d2fb709011723f5e6e674",
+    "candidate": "91182ae16faf0be3260949671ea090b72a3618c5",
+    "package_sha256": [
+      "83a3ee59460c1e94485adf2702583e1f7c39318a0aed6dfcb638351bde8d1257",
+      "4b369c4462d0dda0a0d6f951d70c752152b4f56690347275943a413de4ba4b33"
+    ],
+    "network": "isolated HTTPS loopback",
+    "trigger_audit": {
+      "issues": [],
+      "ready": true,
+      "snapshot_id": "08e8a57f-caa2-4898-809c-b73569167280",
+      "source_revision": "91182ae16faf0be3260949671ea090b72a3618c5",
+      "sources": [
+        {
+          "archived": 1,
+          "component": "trigger:source",
+          "instance_id": "a5c794e2-0251-426f-97cf-5e724460a8e0",
+          "settled": 1
+        }
+      ]
+    },
+    "original_rollback_rejected": true,
+    "previous_release_readback": {
+      "attachment_sha256": "847c7120ed0e8c287ed0273b596882a9e3390b9608c79ec313c009032d5ac97e",
+      "extra_manager_notifications": 0,
+      "extra_native_inputs": 0,
+      "extra_platform_sends": 0,
+      "followup_chat_receipt": {
+        "delivery_id": "chat-om_bundle_after_return",
+        "digest": "5a89487e25f2c447138efcc68b2375211480a697ee93b7ec31cf1aff76d15338",
+        "native_id": "3c176725-c485-4753-a341-bf1b3dd4aea9",
+        "session": "release-trial-agent",
+        "turn_id": "fa8acbba-6567-4510-bc92-c3514857d036"
+      },
+      "followup_reply_id": "om_3",
+      "reports": 1,
+      "task_state_after_acceptance": "closed",
+      "task_state_before_acceptance": "completed_reported"
+    },
+    "trigger_receipt": {
+      "duplicate": false,
+      "message_id": "e552f09a-0112-4cb8-86c9-3723ab5bdd92",
+      "received_at": "2027-01-15T08:00:20+00:00"
+    },
+    "scope": "Installed rewrite releases, loopback TLS and SQLite. Agent, native sessions and Feishu are fixtures."
+  }
+}
