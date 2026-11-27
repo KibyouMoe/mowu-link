@@ -47,6 +47,15 @@ def connection(path):
     return Client(cfg["url"],cfg["token"],cfg.get("ca_file"))
 
 
+def startup_package(path, installed):
+    from .release import verify_startup_release
+
+    try:
+        return verify_startup_release(private_config(path), installed)
+    except (OSError, ValueError, tarfile.TarError):
+        raise Fault(422,"release_startup_unverified") from None
+
+
 def server(args):
     if args.component in ("peer-archive","chat-archive"):
         with ExitStack() as stack:
@@ -54,14 +63,8 @@ def server(args):
         return
     runtime = None
     if args.component in RELEASE_SERVERS:
-        package = None
-        if args.release_manifest is not None:
-            from .release import verify_startup_release
-
-            try:
-                package = verify_startup_release(private_config(args.release_manifest),Path(__file__).resolve().parents[1])
-            except (OSError,ValueError,tarfile.TarError):
-                raise Fault(422,"release_startup_unverified") from None
+        package = (startup_package(args.release_manifest,Path(__file__).resolve().parents[1])
+                   if args.release_manifest is not None else None)
         runtime = {"component":args.component,"worker_id":getattr(args,"worker_id",None),
                    "boot_id":guid(),"release":package}
     databases = [args.db]

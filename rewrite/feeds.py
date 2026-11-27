@@ -6,6 +6,7 @@ import hashlib
 import imaplib
 from io import BytesIO
 import json
+import os
 from pathlib import Path
 import re
 import signal
@@ -15,7 +16,7 @@ from threading import Event, Thread
 from urllib.parse import urlsplit
 from urllib.request import build_opener, HTTPSHandler, ProxyHandler, Request
 
-from .service import connection, private_config
+from .service import connection, private_config, startup_package
 from .storage import Database, Fault, StateWriterBusy, encode, guid, require, state_writer
 from .trigger import Trigger
 from .wire import NoRedirect
@@ -298,7 +299,7 @@ def retry_log(phase,error):
     print(encode(outcome),file=sys.stderr,flush=True)
 
 
-def watch(feed,poll,router,interval):
+def watch(feed,poll,router,interval,package):
     stop = Event()
     failures = []
 
@@ -335,8 +336,11 @@ def watch(feed,poll,router,interval):
     try:
         for number in (signal.SIGTERM,signal.SIGINT):
             previous[number] = signal.signal(number,interrupt)
-        print(encode({"component":"trigger","instance_id":feed.trigger.instance_id,
-                      "trigger_name":feed.trigger.name,"watch":True}),flush=True)
+        receipt = {"component":"trigger","instance_id":feed.trigger.instance_id,
+                   "trigger_name":feed.trigger.name,"watch":True}
+        if package is not None:
+            receipt.update(boot_id=guid(),pid=os.getpid(),release=package)
+        print(encode(receipt),flush=True)
         while not stop.is_set():
             try:
                 poll(stop)
@@ -363,7 +367,7 @@ def game_origin(cfg):
     return origin
 
 
-def run_feed(args,cfg,router):
+def run_feed(args,cfg,router,package=None):
     if args.kind=="mail":
         host,port,user,folder = cfg["host"],cfg.get("port",993),cfg["user"],cfg.get("folder","INBOX")
         feed = Feed(cfg["database"],"email",[host,port,user,folder])
@@ -385,7 +389,8 @@ def run_feed(args,cfg,router):
         def poll(stop):
             poll_game(feed,origin,opener,cfg.get("player"),stop=stop)
     if args.watch:
-        watch(feed,poll,router,args.interval if args.interval is not None else (30 if args.kind=="mail" else 2))
+        interval = args.interval if args.interval is not None else (30 if args.kind=="mail" else 2)
+        watch(feed,poll,router,interval,package)
     else:
         poll(None)
 
@@ -397,6 +402,7 @@ def main():
     parser.add_argument("--watch",action="store_true",help="collect and deliver until the process is stopped")
     parser.add_argument("--router-connection",type=Path,help="owner-private Router connection for --watch")
     parser.add_argument("--interval",type=int,help="seconds between source connections in --watch mode")
+    parser.add_argument("--release-manifest",type=Path,help="owner-private installation manifest for --watch")
     parser.add_argument("--import-legacy-cursor",type=Path,help="stage a reviewed offline cursor; do not poll")
     parser.add_argument("--confirm-legacy-mailbox",action="store_true",help="the legacy cursor belongs to this exact mailbox")
     args = parser.parse_args()
@@ -404,11 +410,19 @@ def main():
         parser.error("--watch requires --router-connection and cannot import a cursor")
     if args.interval is not None and (not args.watch or not 1<=args.interval<=3600):
         parser.error("--interval requires --watch and a value from 1 to 3600")
+    if args.release_manifest is not None and not args.watch:
+        parser.error("--release-manifest requires --watch")
     cfg = private_config(args.config)
     router = connection(args.router_connection) if args.router_connection else None
     try:
+        package = (startup_package(args.release_manifest,Path(__file__).resolve().parents[1])
+                   if args.release_manifest is not None else None)
         with state_writer(Path(cfg["database"])):
-            run_feed(args,cfg,router)
+            run_feed(args,cfg,router,package)
+    except Fault as error:
+        if error.code != "release_startup_unverified":
+            raise
+        parser.exit(1,encode({"error":error.code})+"\n")
     except StateWriterBusy as error:
         parser.exit(1,str(error)+"\n")
 

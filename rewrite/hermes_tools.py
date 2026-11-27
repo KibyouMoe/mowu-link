@@ -2,13 +2,14 @@
 from contextvars import ContextVar
 from functools import partial
 from hashlib import sha256
+import os
 from pathlib import Path
 from urllib.error import URLError
 
 from .hermes import HermesAdapter
 from .messages import valid_guid
-from .service import private_config
-from .storage import Fault, encode, require
+from .service import private_config, startup_package
+from .storage import Fault, encode, guid, require
 from .wire import Client
 
 
@@ -118,11 +119,28 @@ class ManagerTools:
                 raise ValueError("manager tool registration declined: " + name)
 
 
-def register(ctx):
+def verified_plugin(manifest,plugin_entry):
+    installed = Path(__file__).resolve().parents[1]
+    package = startup_package(Path(manifest),installed)
+    shipped = installed/"rewrite"/"integrations"/"hermes_manager"
+    require(plugin_entry is not None,422,"release_plugin_copy_unverified")
+    try:
+        paths = (plugin_entry,plugin_entry.with_name("plugin.yaml"))
+        matches = all(path.is_file() and not path.is_symlink() and
+                      path.read_bytes() == (shipped/name).read_bytes()
+                      for path,name in zip(paths,("__init__.py","plugin.yaml")))
+    except OSError:
+        matches = False
+    require(matches,422,"release_plugin_copy_unverified")
+    return package
+
+
+def register(ctx,*,plugin_entry=None):
     path = ctx.get_config("connection_file")
     if not path:
         raise ValueError("configure a private connection_file for the isolated manager")
     cfg = private_config(Path(path))
+    package = verified_plugin(cfg["release_manifest"],plugin_entry) if "release_manifest" in cfg else None
     client = Client(cfg["url"],cfg["token"],cfg.get("ca_file"))
     notices = None
     if "notice_chat_id" in cfg or "notice_feishu_file" in cfg:
@@ -139,3 +157,6 @@ def register(ctx):
     if "input_session_key" in cfg:
         from .hermes_host import start_input
         start_input(ctx,adapter,cfg)
+    if package is not None:
+        print(encode({"component":"hermes-manager","pid":os.getpid(),"boot_id":guid(),
+                      "native_input_configured":"input_session_key" in cfg,"release":package}),flush=True)

@@ -25,6 +25,7 @@ from .feed_return import audit, stage
 from .feeds import Feed, poll_game, poll_mail
 from .host_ops import Job, Launchd
 from .legacy_test_fixture import archival_compatibility, source_for
+from .messages import valid_guid
 from .orders import Orders
 from .release_check import config
 from .state_bundle import audit_trigger, capture, restore
@@ -436,6 +437,9 @@ class Sources(unittest.TestCase):
         settings = config(stage,kind+".json",source)
         router = config(stage,kind+"-router.json",connection)
         command = self.watch_command(kind,settings,router)
+        manifest = os.environ.get("MOWULINK_TEST_RELEASE_MANIFEST")
+        if manifest:
+            command.extend(("--release-manifest",manifest))
         native = Launchd()
         with launchd_job(stage,command,kind,exit_timeout=15) as (registration,log):
             job = Job.read(registration)
@@ -444,14 +448,25 @@ class Sources(unittest.TestCase):
             def ready():
                 if not log.is_file() or not (lines:=log.read_text().splitlines()):
                     return None
-                self.assertEqual(json.loads(lines[0]),{"component":"trigger","instance_id":instance,"watch":True,
-                        "trigger_name":"email" if kind=="mail" else "mc_chat"})
+                receipt = json.loads(lines[0])
+                expected = {"component":"trigger","instance_id":instance,"watch":True,
+                            "trigger_name":"email" if kind=="mail" else "mc_chat"}
                 observed = native.observe(job)
-                return observed if observed["state"]=="running" else None
+                if observed["state"] != "running":
+                    return None
+                if manifest:
+                    expected.update(pid=observed["pid"],boot_id=receipt["boot_id"],
+                                    release=self.expected_release)
+                    self.assertTrue(valid_guid(receipt["boot_id"]))
+                self.assertEqual(receipt,expected)
+                return observed,receipt
 
-            current = self.wait_for(ready)
+            current,receipt = self.wait_for(ready)
             try:
-                yield {"label":job.label,"pid":current["pid"],"generation":current["generation"]}
+                evidence = {"label":job.label,"pid":current["pid"],"generation":current["generation"]}
+                if manifest:
+                    evidence["launch_receipt"] = receipt
+                yield evidence
             except Exception as error:
                 diagnostics = stage/(kind+".stderr")
                 if diagnostics.is_file():
@@ -492,6 +507,24 @@ class Sources(unittest.TestCase):
                    "user":"fixture","password":"test-only","ca_file":str(mail_ca)}}
         attempts = []
         game_lost = Event()
+        if manifest := os.environ.get("MOWULINK_TEST_RELEASE_MANIFEST"):
+            cfg = json.loads(Path(manifest).read_text())
+            count = sum(path.is_file() for path in Path(__file__).parent.rglob("*"))
+            self.expected_release = {"revision":revision,"sha256":cfg["sha256"],"files":count}
+
+            new_db = root/"release-refused.db"
+            source_path = config(root,"release-refused-source.json",{"origin":origin,"database":str(new_db)})
+            router_path = config(root,"release-refused-router.json",{"url":"https://127.0.0.1:1","token":guid(),
+                                                                     "ca_file":str(cert)})
+            bad = config(root,"release-refused-manifest.json",dict(cfg,sha256="0"*64))
+            cmd = self.watch_command("game",source_path,router_path)+["--release-manifest",str(bad)]
+            refused = subprocess.run(cmd,capture_output=True,text=True,timeout=10,
+                                     cwd=Path(__file__).resolve().parents[1])
+            self.assertEqual((refused.returncode,refused.stdout,json.loads(refused.stderr)),
+                             (1,"",{"error":"release_startup_unverified"}))
+            self.assertFalse(new_db.exists())
+            self.assertFalse(Path(str(new_db)+".writer").exists())
+            self.assertEqual(self.requests,[])
 
         def start_router(orders,*,interrupt=False):
             def handle(actor,method,path,body,headers):
@@ -583,6 +616,9 @@ class Sources(unittest.TestCase):
         self.assertEqual(event_attempts,[event_attempts[0]]*2)
         for previous,current in ((old_mail,new_mail),(old_game,new_game)):
             self.assertNotEqual(previous["pid"],current["pid"])
+        if manifest:
+            boot_ids = {entry["launch_receipt"]["boot_id"] for entry in (old_mail,new_mail,old_game,new_game)}
+            self.assertEqual(len(boot_ids),4)
         self.assertEqual(audit_trigger(snapshot,seal),before)
         settled = root/"settled"
         after = audit_trigger(settled,capture(restored,revision,settled)["manifest_sha256"])
@@ -592,6 +628,7 @@ class Sources(unittest.TestCase):
             Path(output).write_text(encode({"services":{"game":[old_game,new_game],"mail":[old_mail,new_mail]},
                 "before":before,"after":after,"partial_stop_blocked_snapshot":True,"backup_unchanged":True,
                 "clean_native_exits":4,"temporary_agents_unloaded":True,"same_event_receipt":old_event["received_at"],
+                **({"bad_release_refused_before_writer_and_source_request":True} if manifest else {}),
                 "attachment_id":attachment,"attachment_bytes":len(data),"event_notifications":1,"post_attempts":attempts,
                 "mail_next_uid":13,"mail_read_only":True,"game_next_sequence":16,"game_reconnect":self.requests,
                 "boundary":"Real macOS launchd, SQLite snapshot and HTTPS Router; loopback IMAP and game bridge fixtures."})+"\n",

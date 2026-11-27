@@ -34,6 +34,7 @@ from .feishu_output import Views
 from .hermes_check import GATEWAY_ENTRY, GATEWAY_GUARD, tracked_runtime
 from .hermes_host import HermesLocalHost, input_text
 from .hermes_audit import reconcile as reconcile_hermes_receipts
+from .messages import valid_guid
 from .orders import Orders
 from .release_check import config
 from .state_bundle import audit_handoff, audit_trigger, capture as capture_state
@@ -213,11 +214,13 @@ class HermesGateway(NativeProcess):
             if result := predicate():
                 return result
             time.sleep(.05)
-        recent_logs = "\n".join(p.read_text(errors="replace")[-3800:] for p in self.root.glob("gateway-*.log"))
+        logs = list(self.root.glob("gateway-*.log"))
+        logs.extend(self.root.glob("profile/logs/errors.log"))
+        recent_logs = "\n".join(p.read_text(errors="replace")[-3800:] for p in logs)
         self.fail(f"Timed out waiting for {predicate.__name__}. Scratch gateway logs:\n{recent_logs}")
 
     @contextmanager
-    def gateway(self, environment, python, entry, name, port, key):
+    def gateway(self, environment, python, entry, name, port, key, *, package=None, native_input=False):
         with (self.root/f"gateway-{name}.log").open("w") as log:
             process = subprocess.Popen([python,"-B",entry],env=environment,cwd=self.root,stdout=log,stderr=log)
             try:
@@ -232,7 +235,15 @@ class HermesGateway(NativeProcess):
                         return None
                     if response.status==200 and health["pid"]==process.pid and health["gateway_state"]=="running":
                         return health
-                self.wait(readiness)
+                health = self.wait(readiness)
+                if package is not None:
+                    log_path = self.root/f"gateway-{name}.log"
+                    ready, = [json.loads(line) for line in log_path.read_text().splitlines()
+                              if line.startswith('{"boot_id":') and '"component":"hermes-manager"' in line]
+                    self.assertTrue(valid_guid(ready["boot_id"]))
+                    self.assertEqual(ready,{"component":"hermes-manager","pid":health["pid"],
+                        "boot_id":ready["boot_id"],"release":package,"native_input_configured":native_input})
+                    self.runtime_receipts[name] = ready
                 yield process.pid
             finally:
                 if process.poll() is None:
@@ -267,6 +278,14 @@ class HermesGateway(NativeProcess):
                    "database":str(manager_db),"session_id":"awaiting-test-session"}
         if router.ca_file:
             options["ca_file"] = str(router.ca_file)
+        manifest = os.environ.get("MOWULINK_TEST_RELEASE_MANIFEST")
+        package = None
+        if manifest:
+            options["release_manifest"] = manifest
+            expected = json.loads(Path(manifest).read_text())
+            count = sum(path.is_file() for path in (PACKAGE/"rewrite").rglob("*"))
+            package = {"revision":os.environ["MOWULINK_TEST_RELEASE_REVISION"],"sha256":expected["sha256"],"files":count}
+            self.runtime_receipts = {}
         private_file = config(root,"connection.json",options)
         config(profile,"config.yaml",{"gateway":{"api_server":{"enabled":True,"host":"127.0.0.1","port":port}},
             "model":{"provider":"custom","default":"mowulink-fixture","base_url":base_url,"api_key":"fixture"},
@@ -274,7 +293,18 @@ class HermesGateway(NativeProcess):
                 "settings":{"connection_file":str(private_file)},"allow_gateway_injection":True}}}})
 
         native_db = profile/"state.db"
-        with self.gateway(env,python,entry,"bootstrap",port,key):
+        if package:
+            plugin_metadata = profile/"plugins/mowulink_manager/plugin.yaml"
+            original = plugin_metadata.read_bytes()
+            plugin_metadata.write_bytes(original+b"\n# simulated installation drift\n")
+            with self.gateway(env,python,entry,"drifted-plugin",port,key):
+                errors = profile/"logs/errors.log"
+                self.wait(lambda:errors.is_file() and "release_plugin_copy_unverified" in errors.read_text())
+                output = (root/"gateway-drifted-plugin.log").read_text()
+                self.assertNotIn('"component":"hermes-manager"',output)
+                self.assertFalse(manager_db.exists())
+            plugin_metadata.write_bytes(original)
+        with self.gateway(env,python,entry,"bootstrap",port,key,package=package):
             result = subprocess.run([python,"-B","-c",CREATE_SESSION],cwd=root,env=env,capture_output=True,
                                     text=True,timeout=23)
             self.assertEqual(result.returncode,0,result.stderr+(root/"gateway-bootstrap.log").read_text()[-4200:])
@@ -285,7 +315,8 @@ class HermesGateway(NativeProcess):
         self.assertEqual(route["created_source"],"cli")
         options.update(session_id=session,input_session_key=route["session_key"])
         private_file.write_text(encode(options))
-        return revision,session,route["session_key"],lambda name:self.gateway(env,python,entry,name,port,key)
+        return revision,session,route["session_key"],lambda name:self.gateway(
+            env,python,entry,name,port,key,package=package,native_input=True)
 
     @unittest.skipUnless(shutil.which("openssl"),"loopback TLS certificate fixture unavailable")
     def test_rewrite_cold_start_trigger_to_native_manager_to_closed_order(self):
@@ -665,6 +696,10 @@ class HermesGateway(NativeProcess):
         self.assertEqual(audit["native_receipt_issues"],[])
         self.assertTrue(audit_trigger(sealed,manifest["manifest_sha256"])["ready"])
 
+        receipts = getattr(self,"runtime_receipts",None)
+        if receipts is not None:
+            self.assertEqual(set(receipts),{"bootstrap","native","recovered","restored-before-event"})
+            self.assertEqual(len({receipt["boot_id"] for receipt in receipts.values()}),4)
         if output := os.environ.get("MOWULINK_HERMES_GATEWAY_EVIDENCE"):
             evidence = {"hermes_source_revision":revision,"session_id":session,"route":route,
                 "native_pids":[pid,new_pid,restored_pid],"message_ids":message_ids,"event_native_admission":first["native_id"],
@@ -677,6 +712,8 @@ class HermesGateway(NativeProcess):
                 "missing_queue_and_intent_recovered":{"same_admission":recovered[0]["native_id"],
                                                       "native_admission_count":recovered[1],"extra_model_calls":0},
                 "before_native_receipt_recovery":pending_count,"before_native_receipt_issues":pending_issues,
+                **({"verified_gateway_processes":receipts,"mutated_plugin_copy_refused_before_manager_db":True}
+                   if receipts is not None else {}),
                 "sealed_snapshot":manifest,"sealed_hermes_audit":audit,
                 "boundary":"Real Router, Trigger, Hermes gateway, private LOCAL session, tool execution and ledger. "
                            "Scripted OpenAI-compatible localhost model. No cloud credentials or Feishu."}
