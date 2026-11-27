@@ -6,6 +6,10 @@
 
 ## 检查点与证据
 
+独立 Codex App Server 的完工提审已接入 Worker 和 Router 的专用审批入口。适配器按原生回合查原派发，用请求摘要限定单次决定。Router 只向指定审批身份发审批号。第一次拒绝后工具调用为零，批准第二次请求后只记一份 W04、一条待验通知。关闭回执丢失后按原号补记。另一次批准已在 Router 登记但尚未送达时收到取消，适配器读回原派发已进入清理，发出原生拒绝，原持单保留且无新增成果。普通私聊、错回合、错请求摘要和其他工位身份均被拒。[复跑](README.md#独立宿主命令审批) · [原生回执](evidence/native-mcp-routed-approval.json)
+
+安装包锁定 `85d66d1b905139de120a134f16bebfd1fa2fdb4a`。macOS 通过 59 项，其中 10 轮为原生 MCP 提审转发，1 项 Windows ACL 测试按平台跳过。Linux arm64 回归通过 208 项，145 项按环境跳过，58 项旧兼容历史用例排除。Windows 安装回归 51 项，DSH 原生组通过 15 项，2 项 Windows Linux 引擎实测按环境跳过。三端运行后均核对 412 个文件。新增原生 MCP 提审用例在 macOS 使用真实 App Server、回环 HTTP 与 stdio MCP，模型和审批操作人为隔离驱动。真人和真实 Desktop、飞书审批待验。[Windows 流水线](https://github.com/KibyouMoe/mowu-link/actions/runs/45998794996)
+
 独立 Codex App Server 的 MCP 提审已补拒绝与断线验收。第一次拒绝后没有 MCP 调用，原工单仍持有，通知为空。四次已答复的请求分别收到同号关闭事件。第二张单在等待答复时关停试验进程，冷开按原投递号从宿主历史读回唯一输入。原回合为 `interrupted`，原号重投只返回同一凭据，新增 MCP 调用、正式成果和通知均为零。提审由隔离测试客户端回复，线上模型、Desktop 界面、真实审批人及 Router 转发仍未参与。[复跑](desktop-check.md#独立-app-server-的-stdio-mcp-报送) · [实测记录](evidence/native-mcp-approval-boundary.json)
 
 macOS 安装回归锁定 `7cd6c9a9ef28687af48229cc7a1d8110f6d18c8b`，通过 42 项，其中 20 轮为原生 MCP 专项，另有一项 Windows ACL 用例按平台跳过。首轮发现审批 CLI 夹具在安装目录生成 Python 缓存，给夹具子进程补 `-B` 后用全新安装复验，411 个文件全部与发布包一致。

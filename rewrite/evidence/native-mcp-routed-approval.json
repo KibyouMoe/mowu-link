@@ -1,0 +1,167 @@
+{
+  "implementation_revision": "85d66d1b905139de120a134f16bebfd1fa2fdb4a",
+  "macos_installed": {
+    "files": 412,
+    "revision": "85d66d1b905139de120a134f16bebfd1fa2fdb4a",
+    "sha256": "f270606af7dbe1cde11874bf685818fce00691f9318534a847adab139441aaed",
+    "tests_passed": 59,
+    "environment_skips": 1,
+    "native_rounds": 10
+  },
+  "linux_arm64_installed": {
+    "architecture": "aarch64",
+    "kernel": "6.8.0-117-generic",
+    "tests_run": 353,
+    "tests_passed": 208,
+    "environment_skips": 145,
+    "historical_excluded": 58,
+    "installed_files_verified": 412
+  },
+  "sample_native_run": {
+    "adapter_closure_digests": [
+      "bdad7be87390d766aa59cd19c8c22aa94eb087832db139ea82234ece1f8bd87a",
+      "2463e214ee59b445fad5545be6bf6a9ef3c837a4bdaf1596852cd39bf9efae52",
+      "fe2e66a2695454ae8501e51869823d37dac97eab20981815511c09666a2ce404"
+    ],
+    "approved": {
+      "approval_id": "83929d5c-1fb9-44b3-a273-bface68a98e8",
+      "attempted_response": {
+        "decision": "accept",
+        "source": "operator"
+      },
+      "closed_at": 1800000011.0,
+      "decision": "accept",
+      "expires_at": 1800000611.0,
+      "request": {
+        "arguments_digest": "b7375ab1e72c54fc20543ec9754bd8afe8fd2891fd44d21d36236262d04c03fc",
+        "assignment_id": "ce3fa11d-6855-40c8-89d5-0da775786fc6",
+        "decisions": [
+          "accept",
+          "cancel"
+        ],
+        "item_id": "mcp:1",
+        "kind": "worker_report",
+        "server": "mowulink_w04_test",
+        "session": "01a21cf8-c4fe-7393-87f0-bdcbc05f2514",
+        "task_id": "3c9245fa-3fe6-4fb7-890d-f077c96bc00e",
+        "turn_id": "01a21cf8-c565-7a51-9858-af7bff0c1474"
+      },
+      "request_digest": "cf8e391742234ba51839cafabcf7b0f4694d7eb6c8bad1096963ec53267c6e3d",
+      "state": "native_closed",
+      "worker_id": "oguri"
+    },
+    "declined": {
+      "approval_id": "ee3de1f4-163d-42c8-a8b8-c69fae661b63",
+      "attempted_response": {
+        "decision": "cancel",
+        "source": "operator"
+      },
+      "closed_at": 1800000011.0,
+      "decision": "cancel",
+      "expires_at": 1800000611.0,
+      "request": {
+        "arguments_digest": "b7375ab1e72c54fc20543ec9754bd8afe8fd2891fd44d21d36236262d04c03fc",
+        "assignment_id": "ce3fa11d-6855-40c8-89d5-0da775786fc6",
+        "decisions": [
+          "accept",
+          "cancel"
+        ],
+        "item_id": "mcp:0",
+        "kind": "worker_report",
+        "server": "mowulink_w04_test",
+        "session": "01a21cf8-c4fe-7393-87f0-bdcbc05f2514",
+        "task_id": "3c9245fa-3fe6-4fb7-890d-f077c96bc00e",
+        "turn_id": "01a21cf8-c565-7a51-9858-af7bff0c1474"
+      },
+      "request_digest": "7cca3571a3e1ad5658968f30a8d23b2e4c3304be9ccbf714e8b9653ecd6063a1",
+      "state": "native_closed",
+      "worker_id": "oguri"
+    },
+    "lost_closure_retried": true,
+    "mcp_invocations": 1,
+    "native_responses": [
+      {
+        "id": 0,
+        "result": {
+          "action": "decline"
+        }
+      },
+      {
+        "id": 1,
+        "result": {
+          "action": "accept",
+          "content": {}
+        }
+      },
+      {
+        "id": 2,
+        "result": {
+          "action": "decline"
+        }
+      },
+      {
+        "id": 3,
+        "result": {
+          "action": "decline"
+        }
+      }
+    ],
+    "native_version": "0.171.0-alpha.13.2",
+    "operator_notices": 3,
+    "private_turn_id": "01a21cf8-d02a-7d71-872e-38dd7000189c",
+    "stale": {
+      "approval_id": "03002886-dc50-45eb-b6ec-7b67b88a01b7",
+      "attempted_response": {
+        "decision": "cancel",
+        "source": "assignment_inactive"
+      },
+      "closed_at": 1800000022.0,
+      "decision": "accept",
+      "expires_at": 1800000622.0,
+      "request": {
+        "arguments_digest": "ba57f78412aa0029099f1c97bb95269bb2d0caa39eac8c3df4cd72f08fe6ef17",
+        "assignment_id": "6db71876-d63d-4fc5-a8c9-5479fb42ec81",
+        "decisions": [
+          "accept",
+          "cancel"
+        ],
+        "item_id": "mcp:3",
+        "kind": "worker_report",
+        "server": "mowulink_w04_test",
+        "session": "01a21cf8-c4fe-7393-87f0-bdcbc05f2514",
+        "task_id": "c6ca7bf5-5e18-40a7-944e-52ba3e55607c",
+        "turn_id": "01a21cf8-d08b-7942-a55e-8dee88366cda"
+      },
+      "request_digest": "2516ee1a20493282e44462f9c2ebc5931f0b1c6d0965062b35e83c6c08b1e54d",
+      "state": "native_closed",
+      "worker_id": "oguri"
+    },
+    "thread_id": "01a21cf8-c4fe-7393-87f0-bdcbc05f2514",
+    "w04_assignment_id": "ce3fa11d-6855-40c8-89d5-0da775786fc6",
+    "w04_notification_id": "20981f07-aef6-4996-8eb7-8f5d53e6d705",
+    "w04_reports": 1,
+    "w04_task_id": "3c9245fa-3fe6-4fb7-890d-f077c96bc00e"
+  },
+  "boundary": "Native macOS Codex App Server, independent loopback Worker/Adapter/Router HTTP endpoints and native stdio MCP. Test operator uses the actual separate Router identity. The model and same-user MCP backing listener are local fixtures. No production credentials, Desktop GUI, Feishu or real user authorization.",
+  "additional_installed_probes": {
+    "inactive_assignment_intake": {
+      "operator_notice_count": 0,
+      "decision_denial": "409 stale_assignment",
+      "native_closure_idempotent": true
+    },
+    "unexpected_report_body": "422 invalid_approval_request",
+    "default_disabled": true,
+    "restricted_station_denial": "422 invalid_codex_read_only_assignments"
+  },
+  "windows_regression": {
+    "workflow_run_id": 45998794996,
+    "windows_job_id": 140504861668,
+    "installed_files_verified": 412,
+    "archive_sha256": "0969490bfab134b2a293c0af2ce4ae1676595f9a4217952cd22c5338a47fc4fe",
+    "windows_install_tests": 51,
+    "dsh_job_id": 140504861230,
+    "dsh_tests_passed": 15,
+    "dsh_environment_skips": 2,
+    "scope": "Existing Windows install, App Server, DSH and rollback coverage. The added native MCP test uses a POSIX socket."
+  }
+}
