@@ -63,6 +63,8 @@ Codex 与 DSH 的 Windows 可写入口共用私有运行账本与 Linux 引擎�
 
 Linux 用户级 systemd 已演练游戏来源停写。活动采集器持锁时拒绝生成快照。首次停写后，两条原记录分别列为 Router 已收、待补 T04 和仍在发件箱。重启同名单位接续原库，再停写时两条均已对账，原附件字节一致，Event 推送一条。实际来源和生产单位接入仍待验。[复跑](README.md#邮件和游戏聊天来源) · [Linux 实测](evidence/linux-systemd-trigger-watch.json)
 
+macOS 已用真实 launchd 验证两路来源联合停写和封存恢复。仅停一路时整批快照被拒。新目录和 Router 端口沿原号补回待发邮件及已收游戏事件，保存原回执和附件，游戏事件推送仍为一条。恢复后各收一条新记录，两路终态对账均通过，原快照未变化。邮箱、游戏桥为本地测试替身。[macOS 实测](evidence/macos-launchd-trigger-restore.json)
+
 飞书停写快照已能核对 Worker 的原入站回执、出站请求和飞书消息号、卡片更新目标及菜单关联。隔离库实测丢回执按原号恢复、五类错配均阻止换绑、两个新版间回退保留试用回卡。飞书云端和原生宿主使用测试替身。[飞书回执对账](evidence/rewrite-feishu-receipt-audit.json)
 
 当前可复跑隔离联调。A10 的 Worker 恢复及新版备份回退另核了 70 帧断点续接、前缀缺件与同号异文，以及 C02 位置正确但留有失效 W03 的混搭快照。[复跑及边界](replacement-progress.md#检查点与证据) 离「可切换」仍需真实宿主、实际 Feishu 测试身份、原生工单清理，以及新版实际来源和平台回执对账。

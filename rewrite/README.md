@@ -345,6 +345,15 @@ MOWULINK_TEST_USER_SYSTEMD=1 python3 -B -m unittest -v \
 
 测试为该采集器创建唯一的临时服务。运行中尝试拍快照会被写锁拒绝。用 `systemctl --user stop` 停止后，对账能区分待送达与待补回执。重启同名服务并沿原库恢复，确认消息号、附件号与幂等键一致。再次停写后对账无缺口。游戏桥使用本地测试替身。[Linux 实测](evidence/linux-systemd-trigger-watch.json)
 
+在已登录的 macOS 测试环境中，从同一安装目录复跑两路来源的联合停写与恢复。
+
+```sh
+MOWULINK_TEST_USER_LAUNCHD=1 python3 -B -m unittest -v \
+  rewrite.test_feeds.Sources.test_launchd_sources_restore_both_writers_from_a_sealed_snapshot
+```
+
+测试用独立的临时 LaunchAgent 登记邮箱和游戏来源。只停一路时整批快照会被拒。两路退出后封存快照，并恢复到新的目录和 Router 端口。游戏按原序号复读上一帧，核对后继续读下一帧。邮件沿原 UID 续读。恢复后复核原 T04、附件与通知，并验证封存快照未变化。邮箱和游戏桥使用本地测试替身。[macOS 实测](evidence/macos-launchd-trigger-restore.json)
+
 迁移旧采集器时，用 `rewrite.feeds` 的 `--import-legacy-cursor` 把经核对的游标导入新来源库。这一步离线完成。邮件核对原账号与文件夹，首次采集再验证 UIDVALIDITY；游戏核对同一桥接地址与连续运行的实例。遇到旧位置无法确认时保留待核。见[旧采集来源交接](router-rehearsal.md#旧采集来源交接)。
 
 已绑定的适配器在观察到原生题窗后，将原会话、回合、原生题号、题面和选项提交至 `POST /v1/worker/native-question`。平台通过已配置的应用、训练员、私聊和原卡 ID 核对真人回调后将答案持久排队。只有原宿主返回与原题、原回合及答案一致的关闭凭据，Worker 才发布已回答事件。DSH 计时题在超时后可从原卡续答，支持选择、自定义、跳过、批量题和多选。授权和计划审批使用各自的原生入口。溪流的工单问题和答复走 W05/A09，飞书上可读。

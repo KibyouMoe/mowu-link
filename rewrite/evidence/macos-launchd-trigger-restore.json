@@ -1,0 +1,150 @@
+{
+  "release": {
+    "files": 391,
+    "revision": "1c8937e31886614303a4646c8e381cfb57963947",
+    "sha256": "df9801f333318ee2b1380afd3fbbd82095ec3af6671f67683b8cec5079120a76"
+  },
+  "regressions": {
+    "macos": {
+      "passed": 39,
+      "skipped": 2,
+      "historical_excluded": 4
+    },
+    "linux_arm64": {
+      "passed": 8,
+      "skipped": 1,
+      "historical_excluded": 4
+    }
+  },
+  "after": {
+    "issues": [],
+    "ready": true,
+    "snapshot_id": "63e070ae-67ef-4ff0-b105-2caecf1a8105",
+    "source_revision": "1c8937e31886614303a4646c8e381cfb57963947",
+    "sources": [
+      {
+        "archived": 2,
+        "component": "trigger:game",
+        "instance_id": "bcc29433-13f9-4e71-85e2-260f9755cfd0",
+        "settled": 2
+      },
+      {
+        "archived": 2,
+        "component": "trigger:mail",
+        "instance_id": "107d3e66-1523-4ec8-a851-1560a52b5395",
+        "settled": 2
+      }
+    ]
+  },
+  "attachment_bytes": 251,
+  "attachment_id": "4fcd12c3-8e8c-46ff-93de-f372014aa278",
+  "backup_unchanged": true,
+  "before": {
+    "issues": [
+      {
+        "code": "awaiting_local_receipt",
+        "instance_id": "bcc29433-13f9-4e71-85e2-260f9755cfd0",
+        "message_id": "51c8f045-86e1-46b8-a6a6-5b9d26ba1efa"
+      },
+      {
+        "code": "awaiting_router_message",
+        "instance_id": "107d3e66-1523-4ec8-a851-1560a52b5395",
+        "message_id": "d83886c5-4638-4ef5-bf94-6aa7718aa6ad"
+      }
+    ],
+    "ready": false,
+    "snapshot_id": "d413f20d-5f8b-4ea1-b3f0-a9d2a6650908",
+    "source_revision": "1c8937e31886614303a4646c8e381cfb57963947",
+    "sources": [
+      {
+        "archived": 1,
+        "component": "trigger:game",
+        "instance_id": "bcc29433-13f9-4e71-85e2-260f9755cfd0",
+        "settled": 0
+      },
+      {
+        "archived": 1,
+        "component": "trigger:mail",
+        "instance_id": "107d3e66-1523-4ec8-a851-1560a52b5395",
+        "settled": 0
+      }
+    ]
+  },
+  "boundary": "Real macOS launchd, SQLite snapshot and HTTPS Router; loopback IMAP and game bridge fixtures.",
+  "clean_native_exits": 4,
+  "event_notifications": 1,
+  "game_next_sequence": 16,
+  "game_reconnect": [
+    [
+      "/stream?since=14",
+      "14"
+    ],
+    [
+      "/stream?since=14",
+      "14"
+    ]
+  ],
+  "macos": "27.2.1",
+  "mail_next_uid": 13,
+  "mail_read_only": true,
+  "partial_stop_blocked_snapshot": true,
+  "post_attempts": [
+    [
+      "51c8f045-86e1-46b8-a6a6-5b9d26ba1efa",
+      "message-51c8f045-86e1-46b8-a6a6-5b9d26ba1efa",
+      [
+        "4fcd12c3-8e8c-46ff-93de-f372014aa278"
+      ]
+    ],
+    [
+      "d83886c5-4638-4ef5-bf94-6aa7718aa6ad",
+      "message-d83886c5-4638-4ef5-bf94-6aa7718aa6ad",
+      []
+    ],
+    [
+      "51c8f045-86e1-46b8-a6a6-5b9d26ba1efa",
+      "message-51c8f045-86e1-46b8-a6a6-5b9d26ba1efa",
+      [
+        "4fcd12c3-8e8c-46ff-93de-f372014aa278"
+      ]
+    ],
+    [
+      "4f95cc61-01f8-4c30-a4ef-d4f5981c967e",
+      "message-4f95cc61-01f8-4c30-a4ef-d4f5981c967e",
+      []
+    ],
+    [
+      "bba37b3c-1f14-4a45-b616-522d167d9002",
+      "message-bba37b3c-1f14-4a45-b616-522d167d9002",
+      []
+    ]
+  ],
+  "same_event_receipt": "2026-11-27T09:11:12.244588+00:00",
+  "services": {
+    "game": [
+      {
+        "generation": "766f8f6017bdc7edddd64897ea116bd87ae91bd21f7f52150c52263316f910c7",
+        "label": "org.mowulink.test.game-81e638ad-5665-4b51-9aaf-0b8d284fe8ab",
+        "pid": 87331
+      },
+      {
+        "generation": "2a531ebf51d4e6d9720dd6268f203780deba3d84c55baa4b560dc29195a10ac4",
+        "label": "org.mowulink.test.game-aa2752fe-7613-4c68-8925-436648212f7e",
+        "pid": 87369
+      }
+    ],
+    "mail": [
+      {
+        "generation": "67a10f1e9e19a0470057fa66a80db9de52c0c6ebb0ecbd619e56ef35c4732046",
+        "label": "org.mowulink.test.mail-91c267aa-119f-4236-9560-2139e8828a46",
+        "pid": 87327
+      },
+      {
+        "generation": "596ddf4b3209c1244361b611157893389917378078149330ca8594d135befcb7",
+        "label": "org.mowulink.test.mail-f01d556a-5b74-47c0-9b20-ed445ef515bf",
+        "pid": 87364
+      }
+    ]
+  },
+  "temporary_agents_unloaded": true
+}
