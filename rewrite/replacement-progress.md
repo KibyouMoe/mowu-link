@@ -6,6 +6,8 @@
 
 ## 检查点与证据
 
+离线换绑和回退原先只尝试锁住 DSH 工作区写者。如果 Codex 已拿到 `codex-workspace.writer` 而子进程还没监听，旧审计误判为空闲。实现 `5ec1517ea9fcd5dbb536851eff8b0ba47b44c55c` 同时检查两类写锁。回归先复现漏判，再核两项操作均拒绝发布。释放原宿主后，两项操作都持原写锁至目录发布完成。用 374 文件安装包复跑，macOS 24 项全过，包含实际 Codex App Server 与 DSH SDK 的 Linux 容器成果和回收。用前一版独立包重开 Codex，读回原生输入和同一成果字节，普通私聊重试只用一个新回合。Linux arm64 通过 188 项、131 项环境跳过，跨系统回环留一条宿主收件和一条待验通知。模型及飞书为夹具，Windows 可写工位仍缺本地运行账本和受支持的 Linux 容器入口。[实测](evidence/codex-workspace-writer-rollback.json) · [锁与复跑](router-rehearsal.md#重做版五组件的离线恢复)
+
 同一版本线的独立包 `c7eeb1dc36cf0665709c0e12cc70c801d8cace80` 已完成新版全量回归。macOS 296 项通过、22 项按环境跳过，Linux arm64 187 项通过、131 项按环境跳过。两端均零失败，另各排除 58 项归档兼容用例。安装包 373 个文件均校验一致。macOS 使用隔离 Hermes、Codex App Server、DSH SDK 和本地模型，Linux 的跨系统 HTTPS 回环使用宿主夹具，独立读回一条收件和一条待验通知。飞书 SDK 1.7.5 的本地回调验过收件去重、原题关卡、错话题拒收和资源下载错误。真实平台及测试身份仍待验。[两端计数和回执](evidence/rewrite-release-c7eeb1d.json) · [新版回归](README.md#本地复跑) · [跨系统复跑](README.md#跨系统验收)
 
 空状态演练在 `33b2f90242f73b8ae0ab5383da90d4a42771506b` 复用真实 Hermes 网关，并接入客户端随附的 Codex App Server `0.171.0-alpha.13.2`。用全新未登录的 profile 及只读会话登记 `worker_report`，先以本地测试模型验证会话初始化。Trigger 上报带附件 Event，Hermes 读回原件并建单。App Server 在同一派发回合两次调用原生工具，返回相同 W04。Router 只产生一条管理通知并留待验收。Hermes 读回同一成果后结单。App Server 正式单与私聊各一个新回合，飞书夹具确认私聊的原回合最终回复。macOS 独立安装目录 19 项通过，372 份文件前后校验一致。Windows 安装组 21 项、DSH SDK 14 项通过。真实模型、日常 Desktop 工具及飞书云端仍待独立测试身份。[回执证据](evidence/hermes-codex-clean-cutover.json) · [复跑](README.md#hermes-专用会话) · [Windows 日志](https://github.com/KibyouMoe/mowu-link/actions/runs/45955146079)

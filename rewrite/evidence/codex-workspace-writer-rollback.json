@@ -1,0 +1,120 @@
+{
+  "revision": "5ec1517ea9fcd5dbb536851eff8b0ba47b44c55c",
+  "prior_rewrite_revision": "1f46663af13ed597a98e95cb43fedf58f5033571",
+  "verified_release_files": 374,
+  "archive_sha256": "ac9c410f2d2c1429aa1a82fffb245c9b73833a6ae990ec13924d370bf3c4c5aa",
+  "regression_test": "rewrite.test_state_bundle.Bundle.test_offline_handoff_and_rollback_reserve_the_codex_workspace_writer",
+  "original_failure": "The live Codex writer was not included in the offline audit issues when the listener did not yet exist.",
+  "mitigation": {
+    "held_lock_without_listener": "dsh_workspace_host_still_running",
+    "no_destination_on_refusal": true,
+    "reserved_through_publication": [
+      "offline handoff",
+      "version rollback"
+    ],
+    "writer_reacquired_after_publication": true
+  },
+  "macos_installed_tests": {
+    "passed": 24,
+    "skipped": 0,
+    "errors": 0
+  },
+  "linux_installed_tests": {
+    "passed": 188,
+    "skipped": 131,
+    "archival_excluded": 58,
+    "errors": 0
+  },
+  "cross_os": {
+    "fixture_inputs": 1,
+    "report_state": "completed_reported",
+    "router_notifications": 1
+  },
+  "codex_installed_native": [
+    {
+      "action": "complete",
+      "task_id": "c5e08337-1610-4243-ba9c-24fa2d175773",
+      "assignment_id": "3a2186c0-9f56-4885-a70f-cf06583a4514",
+      "container_id": "ba435d04fde7af74e226dae55d126ded8450ef6a9c392c6993acb73ff03a2cac",
+      "w04": {
+        "recorded": true,
+        "release_assignment_id": "3a2186c0-9f56-4885-a70f-cf06583a4514",
+        "task_state": "completed_reported"
+      },
+      "offline_workspace_audit": {
+        "fingerprint": "e4709c8d67fe830732095228ad8f1b7408df0187425d2b144884cf15d416de23",
+        "pending": []
+      }
+    },
+    {
+      "action": "cancel",
+      "task_id": "70571e2c-7bd5-4aa5-975c-b396476b3bb2",
+      "assignment_id": "91689991-f661-4665-a357-3988373c13b9",
+      "container_id": "dc656f3c8413237ac791838cd46b6028eb4bef41416d00c7a97806a283050a4e",
+      "w04": {
+        "recorded": true,
+        "release_assignment_id": "91689991-f661-4665-a357-3988373c13b9",
+        "task_state": "cancelled"
+      },
+      "offline_workspace_audit": {
+        "fingerprint": "75beeb462c8db101519634aea7d7aeb35164918515101e85c1e498f0ef44593e",
+        "pending": []
+      }
+    },
+    {
+      "action": "transfer",
+      "task_id": "34443bad-f39a-485e-86ea-b6631bebec68",
+      "assignment_id": "26cd8531-fa1f-45f9-b574-22cb5f38c050",
+      "container_id": "202aff97c9bc1a11bae0aa8b3b61959219b9c44cff06d5eb4e0ce1b3393c512f",
+      "w04": {
+        "recorded": true,
+        "release_assignment_id": "26cd8531-fa1f-45f9-b574-22cb5f38c050",
+        "task_state": "working"
+      },
+      "offline_workspace_audit": {
+        "fingerprint": "468c8c63d7efda037fc937caac32882ab00fcd61029fa6b1f81bf7d5d8854079",
+        "pending": []
+      }
+    }
+  ],
+  "codex_prior_release_resume": {
+    "task_id": "2dfcac5e-b9f9-4e65-859d-e1fcaf7fcd9e",
+    "assignment_id": "b6da80b2-f39b-4e50-a03e-b321d1284dd2",
+    "original_artifact_id": "6046ac6b-f14c-468a-9a6f-3a4dff48144c",
+    "same_artifact_sha256": "80320ac86029606b61d5b57728512a639950cca654e5683f89d160df3ca0a953",
+    "prior_archive_sha256": "7d1d2d34633c5c37952bb57698c48738163ee33ce477340ee58f37d4f6fe1f44",
+    "kept_original_native_input": true,
+    "private_reply_replay_equal": true,
+    "new_model_requests": 1
+  },
+  "dsh_installed_native": {
+    "task_id": "efd64e90-560e-44e0-afde-75f26769165e",
+    "assignment_id": "25ccd3c3-4c9f-4c8c-8efd-8f6f0013a76e",
+    "running_host": "dsh_workspace_host_still_running",
+    "outputs_published_under_writer_lock": [
+      "staged",
+      "version-rollback"
+    ],
+    "live_writer_proof_without_endpoint_config": true,
+    "snapshot_sha256": "6d3b5bab6f824e2470e483edb169507ce60df8f462d4c27a89f8e4db599c9e1c",
+    "version_rollback": {
+      "database_restore_allowed_with_live_workspace": true,
+      "refusals": [
+        "dsh_workspace_journal_required",
+        "dsh_workspace_journal_mismatch",
+        "dsh_assignment_workspace_pending",
+        "dsh_workspace_host_still_running"
+      ],
+      "snapshot_sha256_after_drain": "6d3b5bab6f824e2470e483edb169507ce60df8f462d4c27a89f8e4db599c9e1c",
+      "components": [
+        "agent:oguri",
+        "hermes:main",
+        "router:main",
+        "trigger:offline",
+        "worker:oguri"
+      ],
+      "retained_session": "dsh-offline-workspace-handoff"
+    }
+  },
+  "boundary": "macOS installed native App Server and DSH SDK, private Linux Docker engine, temporary Worker and Router. Models and platform were fixtures. Native Windows workspace was not exercised."
+}

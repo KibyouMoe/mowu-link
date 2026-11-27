@@ -439,6 +439,8 @@ python3 -B -m rewrite.state_bundle stage-native-handoff --snapshot "$SNAPSHOT" -
 
 DSH 可写工位在私有目录使用 `dsh-workspace.writer`，Codex 可写工位使用 `codex-workspace.writer`。离线程序检查该目录已有的两种锁，并复核 Unix 或 TLS 本机监听。读取 `dsh-link.json` 时仍检查文件权限。已持锁的宿主即使还没有开始监听，也会阻止离线换绑和回退。离线操作在发布目录前持有已有的锁，发布完成后才释放。保留原私有运行目录及启动配置，停写期间不移除端口配置或锁文件。[DSH 双向 TLS 锁与回退](evidence/dsh-tls-workspace-handoff.json)
 
+在独立安装目录运行 `python3 -B -m unittest -v rewrite.test_state_bundle.Bundle.test_offline_handoff_and_rollback_reserve_the_codex_workspace_writer`，复验持锁未监听和发布前拒绝重开的边界。该用例使用端口未打开的测试账本，无需 Docker。[Codex 可写工位复验](evidence/codex-workspace-writer-rollback.json)
+
 `native_session_pending` 另列换绑前需要核对的离线账本。包括持单、Router 已保留的派发、未处理收件、私聊与队列、同伴收据、问题、压缩、清理以及没有原生关闭回执的命令审批。缺少的旧库表显示未知。只有这些记录均为零且前述持单检查无误，`native_session_ledger_clear` 才为真。原会话重开可继续未确认的工作，换到别的会话前要把这些记录留在原会话对账。实际忙闲、原生目标和权限须在独立宿主核验。
 
 启用 Codex 审批的新版适配器另报 `codex_approval_closures`。它包含原生审批已到适配器、Router 尚未收到登记，以及 Router 已写关闭但适配器尚未核到回执两种情况。单工位与其纳入快照的托管会话均计数。未出现这项时，较早版本或未开启转接的工位需核对实际配置与原宿主记录。出现待核时保留原会话和账本。重开后原绑定 Worker 可查回 Router 已保存的关闭回执。已经保存原生关闭、且 Router 保有原登记时可补交关闭。宿主空闲无法填补缺失的原生关闭凭据。运行中换绑也会查询已登记的原适配器账本。运行中的待核审批恢复使用原会话，无需重放旧审批或改变权限。[运行中换绑](README.md#飞书切换会话)
