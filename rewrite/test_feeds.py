@@ -4,6 +4,7 @@ from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 import json
 from pathlib import Path
 from queue import Queue
+import re
 import shutil
 import socketserver
 import ssl
@@ -22,13 +23,16 @@ from .devloop import Loop
 from .cutover import digest
 from .feed_return import audit, stage
 from .feeds import Feed, poll_game, poll_mail
+from .host_ops import Job, Launchd
 from .legacy_test_fixture import archival_compatibility, source_for
+from .orders import Orders
 from .release_check import config
-from .state_bundle import audit_trigger, capture
+from .state_bundle import audit_trigger, capture, restore
 from .storage import Fault,StateWriterBusy,encode,guid,state_writer
+from .test_host_ops import launchd_job
 from .test_state_bundle import running
 from .trigger import archive_status
-from .wire import route,serve_authenticated
+from .wire import Client,route,serve_authenticated
 
 
 class Mailbox:
@@ -156,8 +160,8 @@ class Sources(unittest.TestCase):
             time.sleep(.05)
         self.fail("timed out waiting for the isolated source or Router")
 
-    def certificate(self):
-        cert,key = self.root/"feed.pem",self.root/"key.pem"
+    def certificate(self,stem="feed"):
+        cert,key = self.root/(stem+".pem"),self.root/(stem+"-key.pem")
         subprocess.run(["openssl","req","-x509","-newkey","rsa:2048","-nodes","-days","1","-subj","/CN=localhost",
                         "-addext","subjectAltName=IP:127.0.0.1","-keyout",key.name,"-out",cert.name],
                        cwd=self.root,capture_output=True,check=True,timeout=10)
@@ -426,6 +430,172 @@ class Sources(unittest.TestCase):
                 "message_id":item["message_id"],"received_at":item["received_at"],"notifications":0,
                 "same_watcher_process":True,"mailbox_read_only":True,"mailbox_tls":True,
                 "boundary":"Independent Trigger process, local TLS IMAP fixture and isolated Router."})+"\n",encoding="utf-8")
+
+    @contextmanager
+    def launchd_watch(self,stage,kind,source,connection,instance):
+        settings = config(stage,kind+".json",source)
+        router = config(stage,kind+"-router.json",connection)
+        command = self.watch_command(kind,settings,router)
+        native = Launchd()
+        with launchd_job(stage,command,kind,exit_timeout=15) as (registration,log):
+            job = Job.read(registration)
+            target = native.domain+"/"+job.label
+
+            def ready():
+                if not log.is_file() or not (lines:=log.read_text().splitlines()):
+                    return None
+                self.assertEqual(json.loads(lines[0]),{"component":"trigger","instance_id":instance,"watch":True,
+                        "trigger_name":"email" if kind=="mail" else "mc_chat"})
+                observed = native.observe(job)
+                return observed if observed["state"]=="running" else None
+
+            current = self.wait_for(ready)
+            try:
+                yield {"label":job.label,"pid":current["pid"],"generation":current["generation"]}
+            except Exception as error:
+                diagnostics = stage/(kind+".stderr")
+                if diagnostics.is_file():
+                    error.add_note(diagnostics.read_text())
+                raise
+            subprocess.run(["/bin/launchctl","kill","SIGTERM",target],check=True,capture_output=True,timeout=6)
+
+            def exited():
+                result = native.run("/bin/launchctl","print",target)
+                return (result is not None and result.returncode==0 and native.birth(current["pid"])==""
+                        and re.search(r"^\tlast exit code = 0$",result.stdout,re.M))
+
+            self.wait_for(exited)
+
+    @unittest.skipUnless(sys.platform=="darwin" and os.getuid()!=0 and shutil.which("openssl")
+                         and os.environ.get("MOWULINK_TEST_USER_LAUNCHD")=="1",
+                         "isolated macOS GUI launchd and OpenSSL required")
+    def test_launchd_sources_restore_both_writers_from_a_sealed_snapshot(self):
+        mailbox = Mailbox()
+        mailbox.raw[11] = b"Subject: Baseline\r\n\r\nDo not replay"
+        server,mail_ca,seen = self.imap_server(mailbox)
+        hold = Event()
+        origin = self.game_server(hold)
+        self.addCleanup(hold.set)
+        event_text = "SuperCreek "+("A"*240)
+        self.records = [(15,{"text":event_text})]
+        root = self.root.resolve()
+        cert,tls = self.certificate("router")
+        instances = {"game":self.game.trigger.instance_id,"mail":self.mail.trigger.instance_id}
+        tokens = {kind:self.loop.trigger_clients[instance].token for kind,instance in instances.items()}
+        manager_token = guid()
+        identities = {manager_token:"hermes",**{tokens[k]:"trigger/"+i for k,i in instances.items()}}
+        ledgers = {"router:main":self.loop.root/"router.db","worker:oguri":self.loop.root/"worker.db",
+                   "agent:oguri":self.loop.root/"agent-adapter.db","hermes:main":self.loop.root/"hermes-adapter.db",
+                   "trigger:game":self.game.db.path,"trigger:mail":self.mail.db.path}
+        revision = os.environ.get("MOWULINK_TEST_RELEASE_REVISION","a"*40)
+        sources = {"game":{"origin":origin},"mail":{"host":server.server_address[0],"port":server.server_address[1],
+                   "user":"fixture","password":"test-only","ca_file":str(mail_ca)}}
+        attempts = []
+        game_lost = Event()
+
+        def start_router(orders,*,interrupt=False):
+            def handle(actor,method,path,body,headers):
+                is_source = actor.startswith("trigger/")
+                if interrupt and is_source and (actor=="trigger/"+instances["mail"] or game_lost.is_set()):
+                    raise Fault(503,"fixture_router_unavailable",True)
+                result = route(orders,actor,method,path,body,headers)
+                if method=="POST" and path=="/v1/messages":
+                    attempts.append((body["message_id"],headers["Idempotency-Key"],body["attachment_ids"]))
+                    if interrupt:
+                        game_lost.set()
+                        raise ConnectionResetError("fixture lost T04 after commit")
+                return result
+
+            return serve_authenticated(identities,("127.0.0.1",0),tls,handle)
+
+        def collector(stage,kind,paths,router):
+            settings = {**sources[kind],"database":str(paths["trigger:"+kind])}
+            connection = {"url":router.url,"token":tokens[kind],"ca_file":str(cert)}
+            return self.launchd_watch(stage,kind,settings,connection,instances[kind])
+
+        def mailbox_started():
+            with self.mail.db.transaction() as db:
+                row = db.execute("SELECT position FROM feed_cursor").fetchone()
+                return row is not None and row[0]==11
+
+        original_stage = root/"original-jobs"
+        original_stage.mkdir(mode=0o700)
+        first_router = start_router(self.loop.orders,interrupt=True)
+        with running(first_router):
+            manager = Client(f"https://127.0.0.1:{first_router.server_port}",manager_token,cert)
+            with collector(original_stage,"mail",ledgers,manager) as old_mail:
+                self.wait_for(mailbox_started)
+                mailbox.raw[12] = b"Subject: Buffered mail\r\n\r\nRecover once"
+                mailbox.next = 13
+                with collector(original_stage,"game",ledgers,manager) as old_game:
+                    self.assertTrue(game_lost.wait(10))
+                    event_mid, = self.game.trigger.pending()
+                    mail_mid, = self.wait_for(self.mail.trigger.pending)
+                    old_event, = manager.request("GET","messages")["items"]
+                    self.assertEqual(old_event["message_id"],event_mid)
+                with self.assertRaises(StateWriterBusy):
+                    capture(ledgers,revision,root/"partially-stopped")
+                self.assertFalse((root/"partially-stopped").exists())
+
+        snapshot = root/"backup"
+        seal = capture(ledgers,revision,snapshot)["manifest_sha256"]
+        before = audit_trigger(snapshot,seal)
+        self.assertFalse(before["ready"])
+        self.assertEqual({i["message_id"]:i["code"] for i in before["issues"]},
+                         {event_mid:"awaiting_local_receipt",mail_mid:"awaiting_router_message"})
+
+        restored = restore(snapshot,seal,root/"restored")
+        recovery_stage = root/"restored-jobs"
+        recovery_stage.mkdir(mode=0o700)
+        recovered_router = start_router(Orders(restored["router:main"]))
+        self.head = 16
+        self.records.append((16,{"text":"Fresh game chat after restore"}))
+        with running(recovered_router):
+            manager = Client(f"https://127.0.0.1:{recovered_router.server_port}",manager_token,cert)
+            with collector(recovery_stage,"mail",restored,manager) as new_mail, \
+                 collector(recovery_stage,"game",restored,manager) as new_game:
+                self.wait_for(lambda:all(archive_status(Path(restored["trigger:"+kind]))["awaiting_router_receipt"]==0
+                                         for kind in instances))
+                mailbox.raw[13] = b"Subject: After restore\r\n\r\nNew UID"
+                mailbox.next = 14
+                self.wait_for(lambda:archive_status(Path(restored["trigger:mail"]))["archived"]==2)
+                self.wait_for(lambda:archive_status(Path(restored["trigger:game"]))["archived"]==2)
+                self.wait_for(lambda:all(archive_status(Path(restored["trigger:"+kind]))["awaiting_router_receipt"]==0
+                                         for kind in instances))
+                received = {i["message_id"]:i for i in manager.request("GET","messages")["items"]}
+                self.assertEqual(len(received),4)
+                self.assertEqual(received[event_mid],old_event)
+                self.assertEqual(received[mail_mid]["text"],"Buffered mail\nRecover once")
+                new_ids = {received[mid]["instance_id"]:mid for mid in set(received)-{event_mid,mail_mid}}
+                self.assertEqual(received[new_ids[instances["mail"]]]["text"],"After restore\nNew UID")
+                self.assertEqual(received[new_ids[instances["game"]]]["text"],"Fresh game chat after restore")
+                attachment, = old_event["attachment_ids"]
+                data = manager.request("GET","attachments/"+attachment)["bytes"]
+                self.assertEqual(data,event_text.encode())
+                self.assertEqual(len(manager.frames(0)),1)
+
+        self.assertFalse(hold.is_set())
+        self.assertEqual(self.requests,[("/stream?since=14","14"),("/stream?since=14","14")])
+        self.assertGreaterEqual(seen.count(b"EXAMINE"),2)
+        self.assertTrue({b"SELECT",b"STORE"}.isdisjoint(seen))
+        self.assertCountEqual([entry[0] for entry in attempts],[event_mid,event_mid,mail_mid,*new_ids.values()])
+        event_attempts = [entry for entry in attempts if entry[0]==event_mid]
+        self.assertEqual(event_attempts,[event_attempts[0]]*2)
+        for previous,current in ((old_mail,new_mail),(old_game,new_game)):
+            self.assertNotEqual(previous["pid"],current["pid"])
+        self.assertEqual(audit_trigger(snapshot,seal),before)
+        settled = root/"settled"
+        after = audit_trigger(settled,capture(restored,revision,settled)["manifest_sha256"])
+        self.assertTrue(after["ready"])
+        self.assertEqual({s["component"]:s["settled"] for s in after["sources"]},{"trigger:game":2,"trigger:mail":2})
+        if output := os.environ.get("MOWULINK_LAUNCHD_SOURCE_EVIDENCE"):
+            Path(output).write_text(encode({"services":{"game":[old_game,new_game],"mail":[old_mail,new_mail]},
+                "before":before,"after":after,"partial_stop_blocked_snapshot":True,"backup_unchanged":True,
+                "clean_native_exits":4,"temporary_agents_unloaded":True,"same_event_receipt":old_event["received_at"],
+                "attachment_id":attachment,"attachment_bytes":len(data),"event_notifications":1,"post_attempts":attempts,
+                "mail_next_uid":13,"mail_read_only":True,"game_next_sequence":16,"game_reconnect":self.requests,
+                "boundary":"Real macOS launchd, SQLite snapshot and HTTPS Router; loopback IMAP and game bridge fixtures."})+"\n",
+                encoding="utf-8")
 
     def test_game_real_stream_reconnect_source_replay_and_new_epoch(self):
         origin = self.game_server()

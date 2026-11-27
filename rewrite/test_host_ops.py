@@ -29,6 +29,33 @@ from .wire import Client
 
 PACKAGE = Path(__file__).resolve().parent.parent
 
+
+@contextmanager
+def launchd_job(root,program,stem,*,run_at_load=True,working_directory=PACKAGE,exit_timeout=3):
+    domain = f"gui/{os.getuid()}"
+    label = "org.mowulink.test."+stem+"-"+guid()
+    target = domain+"/"+label
+    plist = root/(stem+".plist")
+    output = root/(stem+".stdout")
+    plist.write_bytes(plistlib.dumps({"Label":label,"ProgramArguments":list(map(str,program)),"RunAtLoad":run_at_load,
+        "WorkingDirectory":str(working_directory),"ThrottleInterval":1,"ExitTimeOut":exit_timeout,
+        "StandardOutPath":str(output),"StandardErrorPath":str(root/(stem+".stderr")),
+        "EnvironmentVariables":{"PYTHONDONTWRITEBYTECODE":"1","HOME":str(root)}}))
+    plist.chmod(0o600)
+    subprocess.run(["/bin/launchctl","bootstrap",domain,plist],check=True,capture_output=True,timeout=10)
+    try:
+        yield {"label":label,"plist":str(plist)},output
+    finally:
+        subprocess.run(["/bin/launchctl","bootout",target],check=True,capture_output=True,timeout=exit_timeout+10)
+        deadline = time.monotonic()+12
+        while time.monotonic()<deadline:
+            if subprocess.run(["/bin/launchctl","print",target],capture_output=True,timeout=5).returncode!=0:
+                break
+            time.sleep(.1)
+        else:
+            raise AssertionError("temporary LaunchAgent did not unload")
+
+
 class NoWriteBackend:
     def observe(self,_job):
         return {"state":"running","pid":123,"generation":"a"*64}
@@ -187,31 +214,11 @@ class LaunchdMaintenance(unittest.TestCase):
             time.sleep(.1)
         self.fail("isolated maintenance observation timed out")
 
-    @contextmanager
-    def job(self,root,program,stem,*,run_at_load=True,working_directory=PACKAGE):
-        domain = f"gui/{os.getuid()}"
-        label = "org.mowulink.test."+stem+"-"+guid()
-        target = domain+"/"+label
-        plist = root/(stem+".plist")
-        output = root/(stem+".stdout")
-        plist.write_bytes(plistlib.dumps({"Label":label,"ProgramArguments":list(map(str,program)),"RunAtLoad":run_at_load,
-            "WorkingDirectory":str(working_directory),"ThrottleInterval":1,"ExitTimeOut":3,
-            "StandardOutPath":str(output),"StandardErrorPath":str(root/(stem+".stderr")),
-            "EnvironmentVariables":{"PYTHONDONTWRITEBYTECODE":"1","HOME":str(root)}}))
-        plist.chmod(0o600)
-        subprocess.run(["/bin/launchctl","bootstrap",domain,plist],check=True,capture_output=True,timeout=10)
-        try:
-            yield {"label":label,"plist":str(plist)},output
-        finally:
-            subprocess.run(["/bin/launchctl","bootout",target],check=True,capture_output=True,timeout=10)
-            self.wait(lambda:subprocess.run(["/bin/launchctl","print",target],capture_output=True,
-                                            timeout=5).returncode!=0,seconds=12)
-
     def test_interrupted_maintenance_blocks_new_requests_until_native_reconciliation(self):
         root = Path(self.enterContext(TemporaryDirectory(prefix="mowulink-restart-reconcile-"))).resolve()
         owner,observer = guid(),guid()
         identities = config(root,"identities.json",{owner:"host-maintainer/router",observer:"host-observer"})
-        job,_ = self.enterContext(self.job(root,["/bin/sleep","120"],"reconcile"))
+        job,_ = self.enterContext(launchd_job(root,["/bin/sleep","120"],"reconcile"))
         raw = config(root,"manifest.json",{"router":job})
         state = root/"ops.db"
         cert,key = root/"certificate.pem",root/"key.pem"
@@ -286,9 +293,9 @@ class LaunchdMaintenance(unittest.TestCase):
             "-addext","subjectAltName=IP:127.0.0.1","-keyout",key,"-out",cert],check=True,capture_output=True,timeout=10)
         router_program = [sys.executable,"-B","-S","-m","rewrite.service","router","--db",root/"router.db",
                           "--identities",router_identities,"--cert",cert,"--key",key]
-        job,stdout = self.enterContext(self.job(root,router_program,"router"))
-        companion,_ = self.enterContext(self.job(root,["/bin/sleep","120"],"companion"))
-        stopped,_ = self.enterContext(self.job(root,["/bin/sleep","120"],"stopped",run_at_load=False))
+        job,stdout = self.enterContext(launchd_job(root,router_program,"router"))
+        companion,_ = self.enterContext(launchd_job(root,["/bin/sleep","120"],"companion"))
+        stopped,_ = self.enterContext(launchd_job(root,["/bin/sleep","120"],"stopped",run_at_load=False))
         spec = config(root,"manifest.json",{"router":job,"companion":companion,"stopped":stopped})
         state = root/"host-ops.db"
         env = {**os.environ,"PYTHONDONTWRITEBYTECODE":"1"}
@@ -434,7 +441,7 @@ class LaunchdMaintenance(unittest.TestCase):
                "XDG_CACHE_HOME":str(root/"cache"),"XDG_STATE_HOME":str(root/"state"),"TMPDIR":str(root)}
         program = ["/usr/bin/env","-i",*(name+"="+value for name,value in env.items()),python,"-B",entry]
         # The gateway's bootstrap resolves its own private socket paths relative to this directory.
-        job,_ = self.enterContext(self.job(root,program,"gateway",working_directory=root))
+        job,_ = self.enterContext(launchd_job(root,program,"gateway",working_directory=root))
         maintainer,observer = guid(),guid()
         roles = config(root,"ops-identities.json",{maintainer:"host-maintainer/gateway",observer:"host-observer"})
         manifest = config(root,"ops-manifest.json",{"gateway":job})
