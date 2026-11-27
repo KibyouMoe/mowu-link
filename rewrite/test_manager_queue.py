@@ -76,3 +76,31 @@ class ManagerQueue(unittest.TestCase):
         with self.manager.db.transaction() as db:
             self.assertEqual(db.execute("SELECT cursor FROM progress").fetchone()[0],0)
             self.assertEqual(db.execute("SELECT payload FROM queue WHERE message_id=?",(mid,)).fetchone()[0],encode(saved))
+
+    def test_restored_queue_advances_only_past_frames_stored_locally(self):
+        messages = [self.enqueue("Notify") for _ in range(70)]
+        first_page = self.manager.router.frames(0)
+        acknowledge = self.manager.router.ack
+        # Another copy of this receiver already acknowledged the page, with its first frame last.
+        for frame in first_page[1:]:
+            acknowledge(frame)
+        self.assertEqual(acknowledge(first_page[0])["confirmed_cursor"],64)
+        for frame in self.manager.router.frames(64):
+            acknowledge(frame)
+        self.assertEqual(self.manager.router.request("GET","deliveries/status")["confirmed_cursor"],70)
+
+        def stop_after_one(frame):
+            if frame["cursor"]>1:
+                raise ConnectionError("interrupted during restored inbox replay")
+            return acknowledge(frame)
+
+        with patch.object(self.manager.router,"ack",side_effect=stop_after_one), self.assertRaises(ConnectionError):
+            self.manager.receive()
+        with self.manager.db.transaction() as db:
+            self.assertEqual(db.execute("SELECT cursor FROM progress").fetchone()[0],1)
+            self.assertEqual([row[0] for row in db.execute("SELECT message_id FROM queue ORDER BY rowid")],messages[:2])
+        self.manager.receive()
+        self.manager.receive()
+        with self.manager.db.transaction() as db:
+            self.assertEqual(db.execute("SELECT cursor FROM progress").fetchone()[0],70)
+            self.assertEqual([row[0] for row in db.execute("SELECT message_id FROM queue ORDER BY rowid")],messages)

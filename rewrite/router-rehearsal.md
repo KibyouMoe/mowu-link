@@ -421,6 +421,8 @@ python3 -m rewrite.state_bundle audit-handoff --snapshot "$SNAPSHOT" --manifest-
 
 `worker:<ID>` 和 `agent:<ID>` 的 ID 使用 Router 上的准确拼写。命令只读取离线快照，比较 Router 持权、Worker 持单及会话、原生适配器收件凭据、待核的 W04 和原派发清理记录。输出 `needs_review: true` 时用隔离副本逐项对账。检查结果只覆盖上述账本，不能据此判断生产可切换。
 
+`hermes` 列出 Router 已确认的 C02 连续位置、Hermes 中转账本位置和缺宿主回执的条数。C02 回包丢失时，本地位置可以落后，重启后沿原消息号续收。每次只推进到本地已存、该次已确认的位置，即使 Router 累计确认更靠后。本地位置领先、已推进位置缺原队列条目、同号正文不符或同一 Router 消费身份有多个中转账本时，先核对停写副本。宿主原生会话的收件凭据由 Hermes 宿主查验，仍待原生收件的队列单独保留。
+
 启用 `assignment_container` 的 DSH 工位或启用 `--assignment-workspace` 的 Codex 工位，先用新版适配器核到原绑定的宿主活动状态，再停写拍快照。适配器会登记原工作区账本的文件系统身份。含该登记的快照采用格式 3，用新版工具读回。保持原适配器及宿主停止，准备 `dsh-runtimes.json`，按工位 ID 指向当时的原私有运行目录，例如 `{"oguri":"/isolated/oguri/dsh-runtime"}`。Codex 沿用同一个映射参数，将其值填为原 `workspace.json` 的 `runtime`。在能读取该原目录的机器上，用同一个参数执行审计和换绑。
 
 ```sh

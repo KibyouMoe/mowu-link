@@ -278,6 +278,8 @@ DSH 的自动换绑使用同一套 Worker 交接。先在独立 DSH 宿主插件
 
 Router 拉取与原生输入分别运行。Router 断开时，已在插件入箱的文本和已核实的原收件凭据可继续交付或查回，Notify 仍以原生会话连续空闲满 10 秒为准。附件元数据首次核实后随原投递保留。还缺附件数据的消息等待 Router，原消息号不变；已确认失败的单次连接尝试会短暂退避。同一工位升级时保留插件队列、原生适配器账本及附件缓存，旧库中尚未保存的附件元数据需要等 Router 恢复。[离线收件实测](evidence/hermes-router-outage.json)
 
+恢复时，即使插件队列和适配器意图都缺少原条目，Hermes 仍先在绑定会话里查同一插件、原消息号和正文摘要。核到原生收件就补回原回执。同号正文冲突会保留待核，Router 的 C02 也只有在本地队列正文与原投递一致时才确认。停写快照可用离线审计比对两端的 C02 和保留队列。[离线对账](router-rehearsal.md#重做版五组件的离线恢复)
+
 隔离复跑使用 `python3 -m rewrite.hermes_check --host-input --hermes-source <源码仓> --hermes-python <带依赖的测试Python>`。探针准备全新的 profile、测试授权和临时 Router，实际运行插件及会话输入台账，模型响应由本地测试函数生成。客户端只开放 TUI/CLI、缺少插件输入授权或会话不匹配时，宿主收件保持未确认。
 
 去掉 `--host-input` 可单测实际 Hermes 工具注册和分发。候选材料经独立入口收件，工单仍在池中。溪流核验后可在 `router_act_on_task` 以当前工单版本、`action="close"` 和原 `material_id` 结单。Router 只接受属于该工单的材料号，保存原操作，同号重试回同一处置。原 Worker 的报告仍为受阻，正式成果记录为空。[候选材料实测](evidence/hermes-manager-candidate-review.json)

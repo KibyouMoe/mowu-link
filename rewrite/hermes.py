@@ -93,6 +93,7 @@ class HermesAdapter:
         with self.db.transaction() as db:
             cursor = db.execute("SELECT cursor FROM progress").fetchone()[0]
         for frame in self.router.frames(cursor):
+            require(frame["cursor"]==cursor+1,409,"hermes_delivery_gap")
             p = frame["payload"]
             require(frame["kind"] == "message.deliver" and p["level"] in ("Notify", "Event"), 422, "unsupported_delivery")
             serialized = encode(p)
@@ -105,8 +106,11 @@ class HermesAdapter:
                 if inserted and self.notices is not None:
                     self.notices.queue(db,p)
             ack = self.router.ack(frame)
+            require(isinstance(ack,dict) and ack.get("recorded") is True,502,"hermes_delivery_ack_unconfirmed")
+            # Router's cumulative receipt can describe more than this restored queue has saved.
+            cursor = frame["cursor"]
             with self.db.transaction() as db:
-                db.execute("UPDATE progress SET cursor=MAX(cursor,?)", (ack["confirmed_cursor"],))
+                db.execute("UPDATE progress SET cursor=MAX(cursor,?)", (cursor,))
 
     def delivery_payload(self,row):
         if row["host_payload"] is not None:
