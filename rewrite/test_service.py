@@ -169,7 +169,10 @@ class Service(unittest.TestCase):
         self.assertEqual(host_a.entries()+host_b.entries(),[])
         denied(*operation,"begin",code="state_writer_already_running")
         self.stop(primary)
+        original_bytes = database.read_bytes()
         self.assertEqual(self.command(*prefix,"status"),{"operation_id":None,"state":"open"})
+        denied(*operation,"end",code="dispatch_drain_not_found")
+        self.assertEqual(database.read_bytes(),original_bytes)
         started = self.command(*operation,"begin")
         self.assertEqual(started["state"],"draining")
         self.assertEqual(started["requeued"],[{"task_id":b_offer["task_id"],"assignment_id":b_offer["assignment_id"],

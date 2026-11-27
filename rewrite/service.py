@@ -222,11 +222,8 @@ def router_drain(args):
         with closing(readonly(args.db)) as db:
             health(db,"router")
             if args.action=="status":
-                if not db.execute("SELECT 1 FROM sqlite_schema WHERE name='dispatch_drains' AND type='table'").fetchone():
-                    require(args.operation_id is None,404,"dispatch_drain_not_found")
-                    return {"operation_id":None,"state":"open"}
                 return admission.change_drain(db,"status",args.operation_id,None)
-        with Database(args.db,admission.DISPATCH_DRAIN_SCHEMA).transaction() as db:
+        with Database(args.db,"").transaction() as db:
             return admission.change_drain(db,args.action,args.operation_id,time())
 
 

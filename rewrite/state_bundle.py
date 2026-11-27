@@ -481,9 +481,7 @@ def audit_handoff(snapshot,expected,*,dsh_runtimes=None):
     router_path = snapshot/filename(router_label)
     worker_ids = sorted(component(label)[1] for label in labels if component(label)[0]=="worker")
     with closing(readonly(router_path)) as db:
-        drain = None
-        if db.execute("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='dispatch_drains'").fetchone():
-            drain = admission.active_drain(db)
+        drain = admission.active_drain(db)
         hermes_confirmed = delivery.confirmed(db,"hermes")
         worker_confirmed = {wid:delivery.confirmed(db,"worker/"+wid) for wid in worker_ids}
         current = {row["assignee_id"]:dict(row) for row in db.execute("""SELECT assignee_id,task_id,assignment_id
