@@ -26,6 +26,8 @@
 
 旧 Worker 实时订阅另有读回差异。实际旧 Router 调用旧 Trigger 时，即使客户端丢弃响应且没有 Worker 连接，轮询也会把两端游标推过匹配和被过滤的记录。重试返回零条。该类旧订阅在迁移前仍须找原宿主收件凭据，本机 Codex 的私有配置没有发现订阅项，其他工位尚未核验。[旧订阅隔离证据](evidence/legacy-worker-subscription-ack.json)
 
+同批回退实现 `0877d6dc99d5b4bad7501aa381644540364c15e7` 的 macOS 全量通过 338 项、按环境跳过 5 项。稳定实现上补旧端边界验证的提交 `ce6a685b5197a2afdb2726d2d48a62049723864c` 生成 333 文件安装包，SHA-256 为 `ea27a5ed2a35468936eb3b9dbab6b3bc5d5522c19ab9e4eb8eca86f4e5370252`。从安装目录执行 macOS 专项通过 63 项、跳过 1 项，Linux arm64 全量通过 218 项、按环境跳过 126 项。Windows 安装与 DSH 原生两组通过。两个同批回退及旧端核对用例另连续复跑三轮。[Windows CI](https://github.com/KibyouMoe/mowu-link/actions/runs/45924894483)
+
 重新取消的 W04 已按具体指令核验。相同 A06 操作键重送保留原回执，自动重试沿用同一清理号。同一派发的下一条显式取消携带新的 `cleanup_id`。Worker 从原生收件识别该号，分别保存等待、清理及 Router 回执。隔离实测第一次迟报、重用旧键、换新键重播旧正文和错号都返回 409。新 W04 落库后故意丢回包，冷启沿原键查回，取消通知一条。复跑 `python3 -B -m unittest -v rewrite.test_cleanup rewrite.test_cutover -k cancel`。[HTTP 与回退实测](evidence/reissued-cancel-w04.json)
 
 用前版 `2490059e42d379183c19b0e82c208f545a3c78ee` 生成的隔离 Router、Worker 和适配器库做了升级。仅一次待确认的旧取消可以正常完成，已经成功的旧回执可沿原键回读。旧版已重复取消而未记录清理号时，拒绝无号回执，须由管理端发新指令。回退核对新指令及 W04 的同一清理号，缺号拒绝发布。[旧库升级](evidence/reissued-cancel-upgrade.json) · [回退演练](evidence/cutover-reviewed-cancel-retry.json)
