@@ -425,6 +425,18 @@ python3 -m rewrite.state_bundle audit-handoff --snapshot "$SNAPSHOT" --manifest-
 
 `hermes` 列出 Router 已确认的 C02 连续位置、Hermes 中转账本位置和缺宿主回执的条数。C02 回包丢失时，本地位置可以落后，重启后沿原消息号续收。每次只推进到本地已存、该次已确认的位置，即使 Router 累计确认更靠后。本地位置领先、已推进位置缺原队列条目、同号正文不符或同一 Router 消费身份有多个中转账本时，先核对停写副本。宿主原生会话的收件凭据由 Hermes 宿主查验，仍待原生收件的队列单独保留。
 
+Hermes 启用原生投递时，同时备份 `hermes:<实例>` 和同名的 `hermes-host:<实例>`。审计核对 Router 原消息、附件字节及读取授权、中转缓存、原生意图和两边收件号。输出只列计数、待核消息号和原因。
+
+| 状态 | 处置 |
+| --- | --- |
+| `not_attempted` | 尚无原生投递意图。保留原中转队列及消息号。 |
+| `intent_unconfirmed` | 先在原会话查收件。按原消息号和正文摘要核对。 |
+| `manager_commit_pending` | 原宿主回执已在适配器账本。恢复原中转实例，让它补记同一回执。 |
+| `confirmed` | 原消息、附档、会话和两边回执一致。 |
+| `unverified` | 按 `native_receipt_issues` 复核配对账本、缓存或附件。保留本批快照和原生记录。 |
+
+回执恢复后重新停写、封存、对账，查看 `needs_review`。实际宿主会话的授权与原生运行状态另按验收矩阵核对。附件和错配反例复跑 `python3 -B -m unittest -v rewrite.test_state_bundle -k hermes_snapshot`。原生恢复用例为 `rewrite.test_hermes_gateway.HermesGateway.test_trigger_to_real_gateway_and_model_tool_with_cold_receipt_recovery`。[独立网关环境](README.md#hermes-专用会话) · [实测](evidence/hermes-native-receipt-audit.json)
+
 启用 `assignment_container` 的 DSH 工位或启用 `--assignment-workspace` 的 Codex 工位，先用新版适配器核到原绑定的宿主活动状态，再停写拍快照。适配器会登记原工作区账本的文件系统身份。含该登记的快照采用格式 3，用新版工具读回。保持原适配器及宿主停止，准备 `dsh-runtimes.json`，按工位 ID 指向当时的原私有运行目录，例如 `{"oguri":"/isolated/oguri/dsh-runtime"}`。Codex 沿用同一个映射参数，将其值填为原 `workspace.json` 的 `runtime`。在能读取该原目录的机器上，用同一个参数执行审计和换绑。
 
 ```sh

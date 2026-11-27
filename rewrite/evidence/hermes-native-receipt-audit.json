@@ -1,0 +1,140 @@
+{
+  "release": {
+    "files": 395,
+    "revision": "786ee5afdb1460078deb4a6a37fefbb8a4236117",
+    "sha256": "20bf3496967b10ffa42251c0f42965f3b7393f02cdee5a791bf2427e6ce3dec4"
+  },
+  "regressions": {
+    "macos": {
+      "passed": 31,
+      "skipped": 0,
+      "historical_excluded": 0
+    },
+    "linux_arm64": {
+      "passed": 30,
+      "skipped": 0,
+      "historical_excluded": 0
+    },
+    "windows": {
+      "passed": 36,
+      "workflow_run": 45978594316,
+      "workflow_job": 140436480174
+    }
+  },
+  "gateway": {
+    "revision": "464bd0dd659f336bd0bf468bf02cad8aac211136",
+    "session_id": "local-2296b4b7dad4d4465d02bf1c991687b5559a2c9eead7c27ead5d492fd456c7ef",
+    "message_ids": {
+      "Event": "23dcd6ef-cdfb-481b-afb2-b70deca662cc",
+      "Info": "9b1e0497-4733-49e7-ba66-7584d1e1b0db",
+      "Notify": "60255e73-c16d-4923-a926-61fe8fe07a52"
+    },
+    "original_event_admission": "51c7324c0c8d4a63aafe6cc3e00006d1",
+    "original_notify_admission": "d9f0ae2be24d4563b74e6c82090e5bc4",
+    "native_admissions": 2,
+    "original_attachment_sha256": "06219adabc9facac06e434bafb1a82e1f38309c77c6b945ed1eb0d2c213071b7",
+    "pending_before_restart": {
+      "confirmed": 1,
+      "intent_unconfirmed": 1,
+      "manager_commit_pending": 0,
+      "not_attempted": 0,
+      "unverified": 0
+    },
+    "issues_before_restart": [
+      {
+        "code": "hermes_native_receipt_unknown",
+        "message_id": "23dcd6ef-cdfb-481b-afb2-b70deca662cc"
+      }
+    ],
+    "event_receipt_recovered": true,
+    "queue_recovery": {
+      "extra_model_calls": 0,
+      "native_admission_count": 2,
+      "same_admission": "51c7324c0c8d4a63aafe6cc3e00006d1"
+    },
+    "final_sealed_snapshot": {
+      "components": 6,
+      "manifest_sha256": "d81b169d1d34d028c3a4bef28bc00326df5755660485fbfa81a41ef7ca72e956",
+      "snapshot_id": "accb9ecb-ae1b-4586-87ed-3b3f97e9b83d",
+      "source_revision": "786ee5afdb1460078deb4a6a37fefbb8a4236117"
+    },
+    "final_sealed_audit": {
+      "instance": "main",
+      "issues": [],
+      "local_cursor": 2,
+      "native_receipt_issues": [],
+      "native_receipts": {
+        "confirmed": 2,
+        "intent_unconfirmed": 0,
+        "manager_commit_pending": 0,
+        "not_attempted": 0,
+        "unverified": 0
+      },
+      "queued_without_native_receipt": 0,
+      "router_confirmed_cursor": 2
+    },
+    "boundary": "Real local Hermes gateway, private native session, Trigger and Router. Model driven by localhost script."
+  },
+  "release_rollback": {
+    "macos": {
+      "starts": [
+        "35ba22f66e3017a1756b8645f3b88d091b3ff6f8",
+        "786ee5afdb1460078deb4a6a37fefbb8a4236117",
+        "35ba22f66e3017a1756b8645f3b88d091b3ff6f8"
+      ],
+      "trial_native_receipts": [
+        {
+          "instance": "main",
+          "issues": [],
+          "local_cursor": 1,
+          "native_receipt_issues": [],
+          "native_receipts": {
+            "confirmed": 1,
+            "intent_unconfirmed": 0,
+            "manager_commit_pending": 0,
+            "not_attempted": 0,
+            "unverified": 0
+          },
+          "queued_without_native_receipt": 0,
+          "router_confirmed_cursor": 1
+        }
+      ],
+      "original_rollback_rejected": true,
+      "previous_release_report_count": 1,
+      "previous_release_task_state": "completed_reported",
+      "duplicate_inputs": 0,
+      "duplicate_manager_notices": 0,
+      "duplicate_platform_sends": 0
+    },
+    "linux_arm64": {
+      "starts": [
+        "35ba22f66e3017a1756b8645f3b88d091b3ff6f8",
+        "786ee5afdb1460078deb4a6a37fefbb8a4236117",
+        "35ba22f66e3017a1756b8645f3b88d091b3ff6f8"
+      ],
+      "trial_native_receipts": [
+        {
+          "instance": "main",
+          "issues": [],
+          "local_cursor": 1,
+          "native_receipt_issues": [],
+          "native_receipts": {
+            "confirmed": 1,
+            "intent_unconfirmed": 0,
+            "manager_commit_pending": 0,
+            "not_attempted": 0,
+            "unverified": 0
+          },
+          "queued_without_native_receipt": 0,
+          "router_confirmed_cursor": 1
+        }
+      ],
+      "original_rollback_rejected": true,
+      "previous_release_report_count": 1,
+      "previous_release_task_state": "completed_reported",
+      "duplicate_inputs": 0,
+      "duplicate_manager_notices": 0,
+      "duplicate_platform_sends": 0
+    }
+  }
+}

@@ -6,6 +6,14 @@
 
 ## 检查点与证据
 
+Hermes 停写审计补上宿主回执。Router 的原通知和附件、插件队列与原生意图、会话及两边的收件号逐条核对。六类错配反例以及缺宿主账本均标待核。宿主已收但中转未记时，从原绑定副本补记同一回执，夹具宿主只接收一次。
+
+锁定 `786ee5afdb1460078deb4a6a37fefbb8a4236117` 的 395 文件安装包，macOS 通过 31 项，Linux arm64 通过 30 项。macOS 实跑 Hermes `464bd0dd659f336bd0bf468bf02cad8aac211136` 的独立网关和原生会话。Event 与 Notify 两条已到宿主。故意丢失 Event 回执先标待核，冷重开查回原收件，补回缺失队列和意图后原生收件仍两次，新增模型请求零次。最终封存后两条均确认，附件及读取授权通过。模型为本机脚本。
+
+macOS 与 Linux 的新版版本回退也从新快照读回一条已核的 Hermes 原生回执，前一版本保留正式成果待验和同一原通知。[复跑与证据](evidence/hermes-native-receipt-audit.json)
+
+Windows 安装包回归 36 项全过，覆盖 Hermes 封存审计和版本回退。原生 Hermes 网关在 macOS 上实测。[Windows 流水线](https://github.com/KibyouMoe/mowu-link/actions/runs/45978594316)
+
 新增本机持久停派入口 `rewrite.service router-drain`。运行中执行会被 Router 的写锁拒绝。隔离 HTTPS Router 中，一张单的 W03 已落库但回包丢失，另一张单仅有 C02 收件。停派后前者通过快照恢复取回原 W03，宿主一次收件并交 W04，Router 仍待验收，成果通知一条。后者退回原队列，迟到 W03 回 409。恢复的 Router 启动回执保留原停派号，原快照不变。解除后等第二个工位重新满足空闲条件，退回的工单按原队首先取得新派发号。
 
 首次 Windows 测试的 34 个用例全过，随后跨版本回退拦住了启动时提前创建停派表的试用库。改为在显式 `begin` 的事务中初始化，保留原回退校验。修正版安装包锁定 `71bf74f3b27cfed5551aeac0ee0d7618083a8aaa`，394 个文件在 macOS 与 Linux arm64 复验一致。两边各通过 69 项，跳过 Windows ACL 专项。两边的跨版本演练均保留试用库字节和唯一原工单。Router、安装程序、HTTPS、SQLite 快照为实跑，宿主为测试夹具。正式生产窗口与真宿主仍按矩阵验收。[操作步骤](router-rehearsal.md#切换前持久停派) · [实测记录](evidence/router-dispatch-drain.json)
