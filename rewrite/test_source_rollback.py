@@ -10,22 +10,26 @@ from tempfile import TemporaryDirectory
 import unittest
 from urllib.request import ProxyHandler, build_opener
 
-from . import legacy_subscription, test_cutover, test_feeds, test_trigger_archive
+from . import display, legacy_subscription, test_cutover, test_feeds, test_trigger_archive
 from .cutover import backup, digest, prepare, reconcile, rollback, stage_queue_rollback
 from .devloop import FixtureHost, Loop, agent_report
+from .feishu_inbound import Inbound
+from .feishu_output import Views
 from .feeds import Feed, poll_game, poll_mail
 from .legacy_test_fixture import source_for
 from .manager_notices import ManagerNotices
 from .reviewed_rollback import stage_reviewed_rollback
 from .state_bundle import capture
 from .rollback_source_history import NAME as SOURCE_ARCHIVE
-from .storage import Fault, guid
+from .storage import Fault, encode, guid
 from .test_feishu_output import PlatformFixture
 from .test_mainline import Clock
 from .test_state_bundle import running
 from .trigger import Trigger
 from .trigger_archive import DATABASE, capture as capture_trigger
 from .trigger_handoff import HANDOFF_DB, plan, stage
+from .wire import Client
+from .worker_service import WorkerService
 
 
 @unittest.skipUnless(os.name=="posix","the legacy Router uses fcntl")
@@ -615,7 +619,10 @@ store.close()
         instances = (trigger.instance_id,mail.trigger.instance_id,game.trigger.instance_id)
         loop = Loop(case.trial,clock,FixtureHost,trigger_ids=instances)
         loop.hermes.notices = ManagerNotices(PlatformFixture(),"oc_source_return_fixture","fixture-app",clock)
-        with loop.server:
+        platform = WorkerService(loop.worker).listen({"fixture-platform":"platform/oguri"},("127.0.0.1",0),None)
+        platform_db = root/"platform.db"
+        platform_chat = "fixture-chat"
+        with loop.server, running(platform) as platform_url:
             loop.thread.start()
             try:
                 receipts = {item["message_id"]:trigger.send(loop.trigger_clients[trigger.instance_id],item["message_id"])
@@ -645,6 +652,17 @@ store.close()
                 native = loop.native.entries()[0][1]["native_id"]
                 result = agent_report(loop.worker,native,{"task_id":tid,"assignment_id":aid,"summary":"fixture result"})
                 self.assertFalse(result["isError"])
+                worker_platform = Client(platform_url,"fixture-platform")
+                inbound = Inbound(platform_db,worker_platform,None,"fixture-app","fixture-trainer",platform_chat,clock)
+                view = Views(platform_db,worker_platform,PlatformFixture(),platform_chat,"工位",clock)
+                original_chat = "fixture ordinary chat retained separately"
+                chat_mid = inbound.record("fixture-app","user","fixture-trainer",{
+                    "chat_id":platform_chat,"chat_type":"p2p","message_id":"om_trial_chat","message_type":"text",
+                    "content":encode({"text":original_chat})})
+                chat_receipt = inbound.deliver(chat_mid)
+                display.native(loop.worker,{"kind":"final","event_id":"trial-feishu-final","session":chat_receipt["session"],
+                                            "turn_id":chat_receipt["turn_id"],"text":"fixture reply"})
+                self.assertGreaterEqual(view.poll(),2)
                 current = loop.hermes.inspect(tid)["task"]
                 loop.hermes.approve(guid(),tid,current["revision"])
                 loop.hermes.poll()
@@ -657,6 +675,7 @@ store.close()
                 self.assertEqual(len(native_messages),3)
                 self.assertEqual([p["message_id"] for p in native_messages[:2]],[event["message_id"],game_mid])
                 self.assertEqual(native_messages[2]["task_id"],tid)
+                self.assertEqual(loop.worker.hold()["held_task_id"],None)
             finally:
                 loop.server.shutdown()
                 loop.thread.join()
@@ -667,7 +686,7 @@ store.close()
         components = {"router:main":case.trial/"router.db","worker:oguri":case.trial/"worker.db",
                       "agent:oguri":case.trial/"agent-adapter.db","hermes:main":case.trial/"hermes-adapter.db",
                       "hermes-host:main":case.trial/"manager-receipts.db","trigger:subscription":prepared/HANDOFF_DB,
-                      "trigger:mail":mail.db.path,"trigger:game":game.db.path}
+                      "trigger:mail":mail.db.path,"trigger:game":game.db.path,"feishu:oguri":platform_db}
 
         def recipe(name, source_paths=components, *, subscription=True):
             bundle = root/name
@@ -692,10 +711,12 @@ store.close()
                                         "manager_instance":"main","host_session":"test-manager-session"}))
             return path
 
-        def decision(trial, source_plan=None):
+        def decision(trial, source_plan=None, component_sha=None):
             values = {"trial_sha256":digest(trial/"router.db"),"closed_assignments":{tid:aid}}
             if source_plan is not None:
                 values["source_plan_sha256"] = digest(source_plan)
+            if component_sha is not None:
+                values["component_manifest_sha256"] = component_sha
             path = root/"approved-rollback.json"
             path.write_text(json.dumps(values))
             return path
@@ -742,9 +763,27 @@ store.close()
         with self.assertRaisesRegex(ValueError,"collector review differs"):
             stage_reviewed_rollback(case.snapshot,case.trial,decision(case.trial,altered),target,source_plan=altered)
         self.assertFalse(target.exists())
+        bundle_spec = json.loads(source_plan.read_text())
+        bundle,seal = root/bundle_spec["bundle"],bundle_spec["bundle_sha256"]
+        with self.assertRaisesRegex(ValueError,"component proof must use the same stopped bundle"):
+            stage_reviewed_rollback(case.snapshot,case.trial,decision(case.trial,partial,seal),target,
+                                    source_plan=partial,component_bundle=bundle,component_manifest_sha256=seal)
+        pending_path = root/"platform-awaiting-proof.db"
+        shutil.copyfile(platform_db,pending_path)
+        pending_platform = Inbound(pending_path,None,None,"fixture-app","fixture-trainer",platform_chat,clock)
+        pending_platform.record("fixture-app","user","fixture-trainer",{"chat_id":platform_chat,"chat_type":"p2p",
+            "message_id":"om_unconfirmed_tail","message_type":"text","content":encode({"text":"pending fixture"})})
+        pending_plan = recipe("pending-platform",{**components,"feishu:oguri":pending_path})
+        pending_spec = json.loads(pending_plan.read_text())
+        pending_seal = pending_spec["bundle_sha256"]
+        with self.assertRaisesRegex(ValueError,"component rollback still pending for oguri: .*platform_inputs"):
+            stage_reviewed_rollback(case.snapshot,case.trial,decision(case.trial,pending_plan,pending_seal),target,
+                                    source_plan=pending_plan,component_bundle=root/pending_spec["bundle"],
+                                    component_manifest_sha256=pending_seal)
+        self.assertFalse(target.exists())
         cli = [sys.executable,"-B","-m","rewrite.cutover","stage-reviewed-rollback","--snapshot",case.snapshot,
-               "--trial",case.trial,"--review",decision(case.trial,source_plan),"--destination",target,
-               "--source-plan",source_plan]
+               "--trial",case.trial,"--review",decision(case.trial,source_plan,seal),"--destination",target,
+               "--source-plan",source_plan,"--component-bundle",bundle,"--component-manifest-sha256",seal]
         completed = subprocess.run(cli,capture_output=True,text=True,check=True,timeout=20)
         result = json.loads(completed.stdout)
         self.assertEqual(result["reviewed_orders"],1)
@@ -753,16 +792,39 @@ store.close()
         private = target/"private-review"
         restored = private/"source-returns"
         summary = json.loads((private/"manifest.json").read_text())
+        self.assertEqual(summary["component_proof"],result["component_proof"])
+        chats = private/"feishu-history"/"oguri"/"chat-history.db"
+        self.assertEqual(digest(chats),result["component_proof"]["feishu_history"]["oguri"]["archive_sha256"])
+        with closing(sqlite3.connect(chats)) as db:
+            self.assertEqual(db.execute("SELECT direction,text,message_id FROM messages ORDER BY id").fetchall(),
+                             [("in",original_chat,chat_mid),("out","fixture reply","om_2")])
+        with closing(sqlite3.connect(target/"legacy.db")) as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM chat_messages WHERE message_id=?",(chat_mid,)).fetchone()[0],0)
         self.assertEqual(digest(restored/"plan.json"),summary["source_plan_sha256"])
         self.assertEqual({path:digest(restored/path) for path in summary["source_consumer_sha256"]},
                          summary["source_consumer_sha256"])
         old_router_task_id = summary["orders"][tid]["legacy_task_id"]
-        self.assertEqual(json.loads(case.old("""
+        old_router = json.loads(case.old("""
+from server import RouterServer
+from selftest_router import http
+from threading import Thread
+from unittest.mock import Mock
 store = RouterStore(sys.argv[1])
-item = store.orders.get(sys.argv[2])
-print(json.dumps([item["archive"]["reason"],store.orders.held("oguri")]))
+token = "isolated-rollback-reader"
+with RouterServer(("127.0.0.1",0),store,token,Mock(),Mock()) as server:
+    thread = Thread(target=server.serve_forever,kwargs={"poll_interval":.02})
+    thread.start()
+    try:
+        url = f"http://127.0.0.1:{server.server_port}"
+        status,item = http("GET",url+"/tasks/"+sys.argv[2],token=token)
+        chat_status,chat = http("GET",url+"/chat/oguri/messages",token=token)
+        print(json.dumps([status,item["task"]["archive"]["reason"],store.orders.held("oguri"),chat_status,chat["count"]]))
+    finally:
+        server.shutdown()
+        thread.join()
 store.close()
-""",target/"legacy.db",old_router_task_id)),["reviewed_on_rewrite",None])
+""",target/"legacy.db",old_router_task_id))
+        self.assertEqual(old_router,[200,"reviewed_on_rewrite",None,200,0])
         self.assertEqual(json.loads((restored/"mail"/"email_cursor.json").read_text())["last_uid"],11)
         self.assertEqual(json.loads((restored/"game"/"mc_chat_cursor.json").read_text())["last_seq"],16)
         returned_game = json.loads((restored/"game"/"return.json").read_text())
@@ -824,6 +886,8 @@ store.close()
                 "source_returns":result["source_returns"],"event":event["message_id"],"info":info["message_id"],
                 "tail_acknowledgements":tails,"tail_t04":tail_receipt,"mail_t04":mail_receipt,"game_t04":game_receipt,
                 "legacy_subscriber_readback":old_subscriber,
+                "component_proof":result["component_proof"],"separate_bundle_rejected":True,
+                "pending_feishu_rejected":True,"legacy_router_readback":old_router,
                 "scope":"Real isolated Router and old Trigger HTTP, byte-checked archives, host/model/platform/mailbox fixtures."
             },indent=2)+"\n")
 

@@ -660,6 +660,9 @@ def main():
             command.add_argument("--source-archive-sha256")
         elif op == "stage-reviewed-rollback":
             command.add_argument("--source-plan",type=Path)
+            command.add_argument("--component-bundle",type=Path)
+            command.add_argument("--component-manifest-sha256")
+            command.add_argument("--dsh-runtimes",type=Path)
         elif op in ("export-chat","prepare-chat-archive","prepare-worker-chat-archive"):
             command.add_argument("--worker",required=True)
         if op=="prepare-worker-chat-archive":
@@ -669,6 +672,8 @@ def main():
             command.add_argument("--limit",type=int,default=500)
             command.add_argument("--direction",choices=("in","out"))
     args = vars(parser.parse_args())
+    if runtime_map := args.get("dsh_runtimes"):
+        args["dsh_runtimes"] = json.loads(runtime_map.read_text())
     if args["op"]=="prepare-chat-archive":
         from .legacy_chat import prepare as prepare_chat_archive
         del args["op"]

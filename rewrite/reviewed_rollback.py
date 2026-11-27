@@ -1,5 +1,5 @@
 """Return terminal work to an offline legacy copy, keeping trial records private."""
-from contextlib import closing
+from contextlib import ExitStack, closing
 import json
 import os
 import shutil
@@ -7,6 +7,7 @@ import sqlite3
 import time
 
 from . import legacy_history, rollback_idle, rollback_lifecycle, rollback_migrated_queue, rollback_peers, rollback_questions, rollback_source_history
+from .rollback_components import ComponentReturn
 from .rollback_sources import SourceReturns
 from .cutover import (digest, legacy_creation_request, output_directory, queue_execution_modes,
                       readonly, reconcile, restore_snapshot, stage_queue_requests, verified)
@@ -170,8 +171,14 @@ def archive_in_legacy(path, entries, source_id, at):
             raise ValueError("staged legacy database integrity check failed")
 
 
-def stage_reviewed_rollback(snapshot,trial,review,destination,*,source_plan=None):
+def stage_reviewed_rollback(snapshot,trial,review,destination,*,source_plan=None,component_bundle=None,
+                            component_manifest_sha256=None,dsh_runtimes=None):
     """Prepare an offline fallback without re-enqueueing terminal work."""
+    if (component_bundle is None)!=(component_manifest_sha256 is None) or (component_bundle is None and dsh_runtimes):
+        raise ValueError("component bundle and manifest digest must be supplied together")
+    if dsh_runtimes is not None and (not isinstance(dsh_runtimes,dict)
+            or any(not isinstance(path,str) or not path for path in dsh_runtimes.values())):
+        raise ValueError("expected original workspace paths by Worker ID")
     original_tasks = {}
     initial_assignments = {}
     facts = reconcile(snapshot,trial,original_tasks=original_tasks,initial_assignments=initial_assignments)
@@ -217,12 +224,22 @@ def stage_reviewed_rollback(snapshot,trial,review,destination,*,source_plan=None
     sources = SourceReturns(source_plan,facts["trial_sha256"]) if source_plan is not None else None
     if sources is not None:
         decision["source_plan_sha256"] = sources.sha256
+    if component_bundle is not None:
+        if sources is not None and sources.plan["bundle_sha256"]!=component_manifest_sha256:
+            raise ValueError("source return and component proof must use the same stopped bundle")
+        decision["component_manifest_sha256"] = component_manifest_sha256
     if approval!=decision:
-        raise ValueError("review must match the trial digest, all closed assignments and any new queue modes, cancellations, pool archives, peer receipts or source returns")
+        detail = ("review must match the trial digest, all closed assignments and any new queue modes, "
+                  "cancellations, pool archives, peer receipts or source returns")
+        if component_bundle is not None:
+            detail += ". Match the component manifest digest as well"
+        raise ValueError(detail)
+    components = (ComponentReturn(component_bundle,component_manifest_sha256,facts["trial_sha256"],dsh_runtimes)
+                  if component_bundle is not None else None)
     manifest = verified(snapshot)
     if manifest["legacy_db_sha256"]!=facts["snapshot_sha256"]:
         raise ValueError("legacy snapshot changed during review")
-    with output_directory(destination) as stage:
+    with ExitStack() as reservations, output_directory(destination) as stage:
         restore_snapshot(snapshot,stage,manifest)
         with closing(readonly(stage/"legacy.db")) as old:
             idle = rollback_idle.IdleObservers({row[0] for row in old.execute("SELECT name FROM workers")})
@@ -231,6 +248,7 @@ def stage_reviewed_rollback(snapshot,trial,review,destination,*,source_plan=None
         private = stage/"private-review"
         private.mkdir(mode=0o700)
         (private/"files").mkdir(mode=0o700)
+        component_report = components.stage(private,reservations) if components is not None else None
         frozen = private/"trial-router.db"
         with closing(readonly(source)), source.open("rb") as previous, open(frozen,"xb",opener=private_open) as output:
             shutil.copyfileobj(previous,output)
@@ -322,10 +340,14 @@ def stage_reviewed_rollback(snapshot,trial,review,destination,*,source_plan=None
                 recovery["source_consumer_sha256"] = sources.consumer_hashes
             if applied:
                 recovery["migrated_queue_replacements"] = applied
+            if component_report is not None:
+                recovery["component_proof"] = component_report
             output.write(encode(recovery))
         with closing(readonly(source)):
             if digest(source)!=digest(frozen):
                 raise ValueError("trial database changed while staging rollback")
+        if components is not None:
+            components.verify()
     result = {"reviewed_orders":len(entries),"cancelled_orders":len(cancelled),"pool_archived_orders":len(pool_archives),
               "private_artifacts":len(files),"trial_sha256":facts["trial_sha256"],
               "restored_legacy_sha256":restored_sha,"queued_requests":len(facts["queue_candidates"]),
@@ -341,4 +363,6 @@ def stage_reviewed_rollback(snapshot,trial,review,destination,*,source_plan=None
         result["idle_observers"] = len(observers)
     if sources is not None:
         result["source_returns"] = sources.reports
+    if component_report is not None:
+        result["component_proof"] = component_report
     return result
