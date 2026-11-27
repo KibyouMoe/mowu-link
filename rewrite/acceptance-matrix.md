@@ -59,6 +59,8 @@
 
 Codex 与 DSH 的 Windows 可写入口共用私有运行账本与 Linux 引擎核对。Windows Server 2025 的 Codex 安装包使用 CLI 夹具验证过冷重开、原附件、错误引擎拒绝及移除回执。Windows DSH 原生包经双向 TLS 向 Worker 暂存附件并提交 W04，按原号补回丢失的回执后只通知一次、释放原派发并回收工作区。重开原会话仍仅一条输入，模型未重新执行。离线审计实测宿主写锁释放后，写账本子进程仍可拦住发布。Windows 使用 Docker CLI 夹具和本地脚本模型，Docker Desktop 的 Linux 引擎上仍待验端到端工单、成果、取消和回收。[DSH 回环](evidence/windows-dsh-assignment-workspace.json) · [Codex 可写工位](evidence/windows-codex-assignment-workspace.json) · [Windows 账本审计](evidence/windows-workspace-journal-audit.json) · [工作区回退实测](evidence/codex-workspace-writer-rollback.json)
 
+Windows 可写工位已有独立验收入口，要求本机 Linux 引擎和精确的预载镜像。Codex 与 DSH 各核成果和清理，报告记录实际引擎、容器、输入和原派发。用例跳过或凭据不全会报失败。Windows CI 验过入口的拒绝逻辑，实际默认引擎仍为 Windows，真引擎两行维持原状态。[复跑说明](README.md#windows-可写工位与真实-linux-引擎) · [实测边界](evidence/windows-linux-workspace-acceptance-entry.json)
+
 新版来源的停写快照可按实例核对 Trigger 留档、Router 收件、T04 与附件实际字节。已用隔离 HTTP 和两个新版安装包验证丢 T04 补回、附件校验和错批拒绝。生产来源清单、真实上游和平台回执继续验收。[复跑](router-rehearsal.md#新版-trigger-对账) · [隔离证据](evidence/rewrite-trigger-snapshot-audit.json)
 
 邮件和游戏来源各有常驻入口。隔离环境实测邮件经 TLS 只读采集新 UID，游戏 SSE 长连接期间独立发送，Router 失联仍继续留档。常驻进程拒绝第二个写者；重启后重放丢失的 T04 沿用原消息号和原附件，Event 只留一条推送。[实测](evidence/rewrite-trigger-source-watch.json)

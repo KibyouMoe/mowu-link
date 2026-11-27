@@ -6,6 +6,10 @@
 
 ## 检查点与证据
 
+Windows 的 Codex 和 DSH 可写工位有了同一条真引擎复跑入口。Windows 进程从本机标准命名管道核 Linux 引擎与预载镜像，原生工位的派发账本须记录相同身份。Codex 验成果、取消与转派，DSH 另核丢 W04 回执后同号补回、成果只记一份，以及错引擎时拒绝清理。两端一起跑须输出三份测试报告。Windows 夹具回归继续单独运行。[复跑入口](README.md#windows-可写工位与真实-linux-引擎)
+
+候选 `a443643a173ea44d871fe05e3d612e4ab50fcc69` 的 406 文件安装包在 macOS 以真实 Linux 容器通过三项专项。DSH 回读 691,200 字节成果，冷开后原生输入一条，原工作区已回收。Linux arm64 安装回归 207 项通过，143 项按环境跳过、58 项旧版历史用例退出。Windows 安装组通过 49 项，新用例验证错误引擎、引擎不可达及缺镜像时失败。DSH 原生组通过 15 项，两项真引擎用例因 Windows 流水线默认引擎为 Windows 未运行。Windows 的真实 Linux 容器端到端待验。[实测记录](evidence/windows-linux-workspace-acceptance-entry.json) · [Windows 流水线](https://github.com/KibyouMoe/mowu-link/actions/runs/45990064375)
+
 补齐 Hermes 管理飞书通知的停写对账。修复前，原生会话确认收件后，平台已接收却丢回执的通知未出现在审计里。新版按原队列核通知内容，分别统计原生收件、待发送、已尝试缺回执、过期未知和已确认的平台通知。重复消息号、内容错配及缺原队列的记录要求复核。窗口内恢复沿原请求号，不新增 Hermes 原生收件。窗口外保留待核。
 
 用 `35ba22f66e3017a1756b8645f3b88d091b3ff6f8` 和 `e75d48afb028335452c886756b943c79612bebd1` 两版安装包，在 macOS 与 Windows 均读回同一条管理飞书通知。候选版两次同号尝试只留下一个平台消息号，退回前一版的新增平台发送及原生通知各为零。macOS 相关回归通过 49 项，Linux arm64 安装版 207 项，另有 140 项按环境跳过、58 项旧版历史用例退出验收。Windows 安装回归 48 项，DSH 原生组 15 项。Windows 默认引擎为 Windows，本轮没有取得 Linux 容器的 Windows 真机验收。回退所用宿主和飞书为夹具。[实测记录](evidence/hermes-platform-notice-snapshot.json) · [Windows 流水线](https://github.com/KibyouMoe/mowu-link/actions/runs/45988296428)

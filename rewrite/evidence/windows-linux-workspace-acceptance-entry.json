@@ -1,0 +1,46 @@
+{
+  "candidate_revision": "a443643a173ea44d871fe05e3d612e4ab50fcc69",
+  "strict_entry": "python -B -m rewrite.windows_workspace_check --host both --evidence-dir <new directory>",
+  "required_windows_pipe": "npipe:////./pipe/docker_engine",
+  "actual_windows_linux_engine_acceptance": "not_run",
+  "blocking_observation": "Windows Server 2025 hosted runner's default engine reported windows. No isolated Windows test host with local Linux Docker engine was used.",
+  "macos_install": {
+    "revision": "a443643a173ea44d871fe05e3d612e4ab50fcc69",
+    "package_sha256": "a9dc53e23d1f9a62ed82db59fe5caa842f058aeecfb2c34919bbe63351f6c09e",
+    "macos_targets": 3,
+    "codex_actions": [
+      "complete",
+      "cancel",
+      "transfer"
+    ],
+    "dsh_cleanup_actions": [
+      "cancel",
+      "transfer",
+      "foreign_engine"
+    ],
+    "dsh_exported_bytes": 691200,
+    "dsh_single_input_after_reopen": 1,
+    "dsh_container_removed_after_report": true,
+    "verified_release": 406,
+    "boundary": "Real macOS native DSH and Codex App Server with real local Linux Docker. Model and replacement worker used isolated test drivers."
+  },
+  "linux_arm64_install": {
+    "passed": 207,
+    "skipped": 143,
+    "archival_excluded": 58,
+    "files": 406,
+    "sha256": "a9dc53e23d1f9a62ed82db59fe5caa842f058aeecfb2c34919bbe63351f6c09e"
+  },
+  "windows_ci": {
+    "workflow_run": 45990064375,
+    "job": 140475325998,
+    "passed": 49,
+    "package_sha256": "6b180d89510254318c4f877c6d95ebdd59a5ab650b1ea8df56810b8e48fe056f",
+    "verified_files": 406,
+    "real_preflight_regression_fixture": "Accepted exact image on simulated Linux engine. Rejected simulated Windows/absent engine and missing image. Ran on Windows.",
+    "dsh_native_job": 140475326390,
+    "dsh_passed": 15,
+    "real_engine_dsh_tests_skipped": 2,
+    "default_engine": "windows"
+  }
+}
