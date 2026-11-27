@@ -1,0 +1,132 @@
+{
+  "candidate_revision": "afcd6cde1b700426cf61c9b05bbec79d77a47b3d",
+  "previous_revision": "35ba22f66e3017a1756b8645f3b88d091b3ff6f8",
+  "macos": {
+    "targeted_passed": 34,
+    "checkpoint": {
+      "drain_id": "64815308-2c84-4d50-985b-6493845b760a",
+      "manifest_sha256": "f79128bc0af9f35be1785db8694808ba86302b041ed4ed34b2045d88fdace864",
+      "reconciled": true,
+      "rejected": {
+        "missing_platform": [
+          {
+            "components": [
+              "feishu:trial"
+            ],
+            "issue": "snapshot_components_missing"
+          }
+        ],
+        "open": [
+          "router_drain_does_not_match"
+        ],
+        "reserved_assignment": [
+          "router_has_reserved_assignments"
+        ],
+        "source_without_receipt": [
+          "trigger_receipts_need_review"
+        ],
+        "wrong_drain": [
+          "router_drain_does_not_match"
+        ],
+        "wrong_release_digest": "release checksum mismatch"
+      },
+      "release": {
+        "files": 409,
+        "revision": "afcd6cde1b700426cf61c9b05bbec79d77a47b3d",
+        "sha256": "82e973de6fd53f87d60636eb27f7d127b0fd52bb0e4878efa4acacb87407297a"
+      },
+      "snapshot_id": "47db11e7-b032-4bae-8ee6-321cbca74c11"
+    },
+    "stale_snapshot_rollback_refused": true,
+    "restored_reports": 1
+  },
+  "linux": {
+    "architecture": "aarch64",
+    "checkpoint": {
+      "drain_id": "c5aa5287-c45f-4e66-946d-0844d5d0cc1f",
+      "manifest_sha256": "d0bdf3b53a65908ce05cea7b84207a393f59060fc66cec740d3a7507366ff6b8",
+      "reconciled": true,
+      "rejected": {
+        "missing_platform": [
+          {
+            "components": [
+              "feishu:trial"
+            ],
+            "issue": "snapshot_components_missing"
+          }
+        ],
+        "open": [
+          "router_drain_does_not_match"
+        ],
+        "reserved_assignment": [
+          "router_has_reserved_assignments"
+        ],
+        "source_without_receipt": [
+          "trigger_receipts_need_review"
+        ],
+        "wrong_drain": [
+          "router_drain_does_not_match"
+        ],
+        "wrong_release_digest": "release checksum mismatch"
+      },
+      "release": {
+        "files": 409,
+        "revision": "afcd6cde1b700426cf61c9b05bbec79d77a47b3d",
+        "sha256": "82e973de6fd53f87d60636eb27f7d127b0fd52bb0e4878efa4acacb87407297a"
+      },
+      "snapshot_id": "7d02626c-e38e-431a-9997-408155cdc317"
+    },
+    "restored_reports": 1,
+    "rollback_rejected_stale_snapshot": true,
+    "system": "Linux",
+    "installed_regression": {
+      "passed": 208,
+      "skipped": 143,
+      "archival_excluded": 58,
+      "verified_files": 409
+    }
+  },
+  "windows": {
+    "run": 45992824307,
+    "job": 140484710760,
+    "passed": 51,
+    "checkpoint": {
+      "drain_id": "732a7fc1-5209-4f8a-bfb9-fed5ce4e530a",
+      "manifest_sha256": "508823239f5417299427970f53f9c960a9251b5af2dcad6779a81997eef3f740",
+      "reconciled": true,
+      "rejected": {
+        "missing_platform": [
+          {
+            "components": [
+              "feishu:trial"
+            ],
+            "issue": "snapshot_components_missing"
+          }
+        ],
+        "open": [
+          "router_drain_does_not_match"
+        ],
+        "reserved_assignment": [
+          "router_has_reserved_assignments"
+        ],
+        "source_without_receipt": [
+          "trigger_receipts_need_review"
+        ],
+        "wrong_drain": [
+          "router_drain_does_not_match"
+        ],
+        "wrong_release_digest": "release checksum mismatch"
+      },
+      "release": {
+        "files": 409,
+        "revision": "afcd6cde1b700426cf61c9b05bbec79d77a47b3d",
+        "sha256": "3187b41aa520056e727e8fcb96ccd27e1a8f2f02075d9163c1f79e707177a148"
+      },
+      "snapshot_id": "2e767b97-b659-4810-b57f-97a0ce344a2e"
+    },
+    "stale_snapshot_rollback_refused": true,
+    "restored_reports": 1
+  },
+  "reproduce": "python3 -B -m rewrite.release_check --repository . --component state-bundle --previous 35ba22f66e3017a1756b8645f3b88d091b3ff6f8 --new afcd6cde1b700426cf61c9b05bbec79d77a47b3d",
+  "boundary": "Archives, installed files, Router drain, HTTPS, SQLite, component snapshots and confirmations are real in disposable environments. Native sessions, model and Feishu are fixtures. Production readiness is outside this offline result."
+}

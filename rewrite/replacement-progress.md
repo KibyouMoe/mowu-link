@@ -6,6 +6,10 @@
 
 ## 检查点与证据
 
+新增 `rewrite.cutover_audit`，用同一停写点核候选发行包与已安装文件、独立部署名单、快照摘要、Router 原停派号和 Worker/Hermes/Trigger 回执。正确批次返回 `offline_reconciled=true`。未停派、错停派号、残留派发预约、缺飞书账本、来源缺 T04 或拿错安装包均未通过。原切换回退演练保留，仅以隔离副本测试停派和反例。真人、真平台和线上切换仍按原矩阵验收。[操作步骤](router-rehearsal.md#同批离线切换核验) · [实测记录](evidence/offline-cutover-checkpoint.json)
+
+候选 `afcd6cde1b700426cf61c9b05bbec79d77a47b3d` 的 409 文件包在 macOS、Linux arm64 来宾和 Windows Server 2025 都实跑同一份两版安装包演练。三端各跑通一份有效封存、拦下同样六种反例，再由前一版读回一份 W04。macOS 停派与快照回归通过 34 项。Linux 安装回归通过 208 项，143 项按环境跳过，58 项旧版历史用例退出。Windows 安装回归通过 51 项。复跑 `python3 -B -m rewrite.release_check --repository . --component state-bundle --previous 35ba22f66e3017a1756b8645f3b88d091b3ff6f8 --new afcd6cde1b700426cf61c9b05bbec79d77a47b3d`。[Windows 流水线](https://github.com/KibyouMoe/mowu-link/actions/runs/45992824307)
+
 补齐训练员题卡的停写对账。飞书点击须对应原卡、Worker 原题和原会话关闭记录。原生已关闭而飞书丢回执时列为待核，恢复原绑定后按原题号回读，宿主只处理一次、原卡只更新一次。五种错配阻止换绑。题已结束时被拒绝的点击单独计数，答案正文不会出现在审计输出。
 
 候选 `bc340f9bc64a4583921651eabd44ed8e58a60839` 的安装包包含 407 个文件。macOS 相关回归 50 项，另两项原生专项。Linux arm64 安装回归 208 项通过、143 项按环境跳过、58 项旧版历史用例退出。Windows 安装回归 51 项通过，DSH 原生组 15 项通过。macOS 与 Windows 的 Codex App Server 各查回四份关闭凭据，另有一份关闭未知。DSH 各核两次确认及两次应拒。真实宿主使用本地脚本模型和飞书替身。[实测记录](evidence/feishu-trainer-answer-handoff-audit.json) · [Windows 流水线](https://github.com/KibyouMoe/mowu-link/actions/runs/45991511813)
