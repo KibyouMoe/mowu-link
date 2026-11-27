@@ -3,14 +3,10 @@ from datetime import datetime
 import json
 from uuid import UUID
 
-from . import attachments, delivery
+from . import attachments, delivery, source_history
 from .storage import encode, guid, require, string, timestamp
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS messages (
- message_id TEXT PRIMARY KEY, owner TEXT NOT NULL, source TEXT NOT NULL, level TEXT NOT NULL,
- received_at TEXT NOT NULL, payload TEXT NOT NULL
-);
+SCHEMA = source_history.MESSAGE_TABLE + """
 CREATE TABLE IF NOT EXISTS archive_versions (version INTEGER PRIMARY KEY);
 -- Old delivery frames prove that the Router queued the message, but have no observation time.
 INSERT OR IGNORE INTO messages(message_id,owner,source,level,received_at,payload)
@@ -69,6 +65,8 @@ def notify(db, now, tid, source, text, ids=(), **details):
 
 def public(db, row):
     result = dict(json.loads(row["payload"]), source=row["source"], received_at=row["received_at"] or None)
+    if history := source_history.observation(db,row["message_id"]):
+        result["source_history"] = history
     if result.get("attachment_ids"):
         result["attachments"] = []
         for file_id in result["attachment_ids"]:

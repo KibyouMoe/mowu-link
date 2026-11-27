@@ -6,7 +6,7 @@ import shutil
 import sqlite3
 import time
 
-from . import legacy_history, rollback_idle, rollback_lifecycle, rollback_migrated_queue, rollback_peers, rollback_questions
+from . import legacy_history, rollback_idle, rollback_lifecycle, rollback_migrated_queue, rollback_peers, rollback_questions, rollback_source_history
 from .rollback_sources import SourceReturns
 from .cutover import (digest, legacy_creation_request, output_directory, queue_execution_modes,
                       readonly, reconcile, restore_snapshot, stage_queue_requests, verified)
@@ -277,6 +277,15 @@ def stage_reviewed_rollback(snapshot,trial,review,destination,*,source_plan=None
                                                      facts["trial_sha256"],proofs,peer_uploads)
             if previous is not None:
                 previous.unlink(missing_ok=True)
+            prior_source_sha = facts.get("source_archive_sha256")
+            prior_source = None
+            if prior_source_sha:
+                prior_source = private/"previous-source-history.db"
+                rollback_source_history.freeze(trial/rollback_source_history.NAME,prior_source_sha,prior_source)
+            source_sha = rollback_source_history.write_archive(
+                db,private/rollback_source_history.NAME,prior_source,facts["trial_sha256"],sources)
+            if prior_source is not None:
+                prior_source.unlink(missing_ok=True)
             for tid,entry in entries.items():
                 if "creation_key" in entry:
                     original = dict(entry["original_content"],assignee_id=entry["original_worker"])
@@ -284,6 +293,8 @@ def stage_reviewed_rollback(snapshot,trial,review,destination,*,source_plan=None
                         entry["creation_key"],original,assigned="initial_assignment" in entry)
             at = time.time()
             archive_in_legacy(stage/"legacy.db",entries,facts["source_id"],at)
+            if source_sha:
+                rollback_source_history.bind_to_legacy(stage/"legacy.db",source_sha)
             applied = rollback_migrated_queue.replace_orders(stage/"legacy.db",facts["source_id"],replacements,at) if replacements else {}
             plan = stage_queue_requests(db,stage/"legacy.db",facts,initial_assignments)
             if not plan["requests"]:
@@ -302,6 +313,8 @@ def stage_reviewed_rollback(snapshot,trial,review,destination,*,source_plan=None
                 recovery["queue_replay_sha256"] = queue_manifest_sha
             if peer_sha:
                 recovery["peer_archive_sha256"] = peer_sha
+            if source_sha:
+                recovery["source_archive_sha256"] = source_sha
             if observers:
                 recovery["idle_observers"] = observers
             if sources is not None:
@@ -322,6 +335,8 @@ def stage_reviewed_rollback(snapshot,trial,review,destination,*,source_plan=None
         result["migrated_queue_replacements"] = {tid:{key:row[key] for key in fields} for tid,row in applied.items()}
     if peer_sha:
         result.update(peer_archive_sha256=peer_sha,reviewed_peers=len(proofs))
+    if source_sha:
+        result["source_archive_sha256"] = source_sha
     if observers:
         result["idle_observers"] = len(observers)
     if sources is not None:

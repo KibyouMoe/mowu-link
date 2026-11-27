@@ -4,7 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from . import feed_return, rollback_peers, state_bundle, trigger_return
+from . import feed_return, rollback_peers, source_history, state_bundle, trigger_return
 from .cutover import digest, readonly
 from .messages import valid_guid
 from .storage import encode
@@ -30,6 +30,7 @@ class SourceReturns:
         if router["sha256"]!=router_sha256:
             raise ValueError("source proof and trial Router must use the same stopped database")
         self.events, self.frames, self.uploads = {},{},{}
+        self.dispositions = {}
         self.grants, self.operations = set(),{}
         self.actors, self.frame_sources, self.intake = set(),{},{}
         self.reports, self.consumer_hashes = {},{}
@@ -125,7 +126,7 @@ class SourceReturns:
                 if not valid_guid(mid) or mid in staged or mid in self.events:
                     raise ValueError("invalid or repeated source message identifier")
                 staged[mid] = state
-        rows = db.execute("SELECT * FROM messages WHERE owner=?",(actor,)).fetchall()
+        rows = source_history.live_messages(db,actor=actor).fetchall()
         if {row["message_id"] for row in rows}!=staged.keys():
             raise ValueError("reviewed source return does not cover exactly its published Router messages")
         for row in rows:
@@ -137,6 +138,7 @@ class SourceReturns:
                 raise ValueError("source T04 does not match the frozen Router")
             body = json.loads(row["payload"])
             self.events[mid] = actor
+            self.dispositions[mid] = state
             self.operations[actor,"message-"+mid] = body,receipt
             if state in INFO:
                 if row["level"]!="Info":

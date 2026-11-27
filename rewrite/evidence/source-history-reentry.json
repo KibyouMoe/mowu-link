@@ -1,0 +1,29 @@
+{
+  "archive_sha256": "c9b0ba8183df414197adaa7af1a1b95d9b7057c70f329908d854f0a4e1a1f6d0",
+  "archived_dispositions": {
+    "c394e601-4daf-5377-a7a0-bf406723c704": "native_received",
+    "8e71c8ba-45ee-5c29-920d-a1250d011f63": "reviewed_info_read",
+    "938c6c67-1de4-4ff7-9eb2-e5b9b76f18db": "router_archived",
+    "a187367c-90d8-46a2-849e-5afdce75bc6c": "native_received",
+    "3d0a74d2-7187-57fb-a251-90e38a13a008": "not_sent_to_host",
+    "88b89aa2-7fa2-559b-9204-2c6a7322bf73": "not_sent_to_host"
+  },
+  "routed_again": [],
+  "deferred_replay_http": 409,
+  "retained_attachment": "21c13441-bddc-42ba-8f54-defa8e32c75a",
+  "retained_attachment_bytes": 222,
+  "exact_rollback_sha256": "c9b0ba8183df414197adaa7af1a1b95d9b7057c70f329908d854f0a4e1a1f6d0",
+  "queued_rollback_sha256": "c9b0ba8183df414197adaa7af1a1b95d9b7057c70f329908d854f0a4e1a1f6d0",
+  "new_event": "cab993f3-be75-491d-bdae-4149b2b5f62c",
+  "second_reviewed_archive_sha256": "c21141e95a387a6b60c4fbabafa0a8cc12f39b0cec04f00b483cada7190bf797",
+  "third_entry_historical_origins": {
+    "c394e601-4daf-5377-a7a0-bf406723c704": "9f31a8cb2f76719f0709cdbd0a5fa1f7d1d0fc16a714135963b99a8dd155fc7f",
+    "8e71c8ba-45ee-5c29-920d-a1250d011f63": "9f31a8cb2f76719f0709cdbd0a5fa1f7d1d0fc16a714135963b99a8dd155fc7f",
+    "938c6c67-1de4-4ff7-9eb2-e5b9b76f18db": "9f31a8cb2f76719f0709cdbd0a5fa1f7d1d0fc16a714135963b99a8dd155fc7f",
+    "a187367c-90d8-46a2-849e-5afdce75bc6c": "9f31a8cb2f76719f0709cdbd0a5fa1f7d1d0fc16a714135963b99a8dd155fc7f",
+    "3d0a74d2-7187-57fb-a251-90e38a13a008": "9f31a8cb2f76719f0709cdbd0a5fa1f7d1d0fc16a714135963b99a8dd155fc7f",
+    "88b89aa2-7fa2-559b-9204-2c6a7322bf73": "9f31a8cb2f76719f0709cdbd0a5fa1f7d1d0fc16a714135963b99a8dd155fc7f",
+    "cab993f3-be75-491d-bdae-4149b2b5f62c": "895f093b60fdfb1b0e35af9175d270a88e22da901ee75688dacf4617d45bb4ed"
+  },
+  "scope": "Actual isolated Router and legacy Trigger HTTP with rebuilt offline databases. Native model, host, platform and data sources are fixtures."
+}

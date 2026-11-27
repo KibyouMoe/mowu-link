@@ -5,7 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from . import state_bundle
+from . import source_history, state_bundle
 from .cutover import digest, output_directory, readonly
 from .messages import valid_guid
 from .storage import encode
@@ -123,8 +123,7 @@ def inspect_return(bundle, expected, legacy_cursor, review, feed_instance, manag
         instance, = feed.execute("SELECT id FROM instance WHERE slot=1").fetchone()
         captured = [row["mid"] for row in reads if row["mid"]]
         stored = {row[0] for row in feed.execute("SELECT id FROM archive")}
-        published = {row[0] for row in r.execute("SELECT message_id FROM messages WHERE owner=?",
-                                                 ("trigger/"+instance,))}
+        published = {row["message_id"] for row in source_history.live_messages(r,actor="trigger/"+instance)}
         if (not valid_guid(instance) or len(captured)!=len(set(captured)) or set(captured)!=stored
                 or not published<=stored):
             raise ValueError("trial archive does not match the exact source interval")

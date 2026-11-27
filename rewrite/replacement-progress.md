@@ -28,6 +28,8 @@
 
 同批回退实现 `0877d6dc99d5b4bad7501aa381644540364c15e7` 的 macOS 全量通过 338 项、按环境跳过 5 项。稳定实现上补旧端边界验证的提交 `ce6a685b5197a2afdb2726d2d48a62049723864c` 生成 333 文件安装包，SHA-256 为 `ea27a5ed2a35468936eb3b9dbab6b3bc5d5522c19ab9e4eb8eca86f4e5370252`。从安装目录执行 macOS 专项通过 63 项、跳过 1 项，Linux arm64 全量通过 218 项、按环境跳过 126 项。Windows 安装与 DSH 原生两组通过。两个同批回退及旧端核对用例另连续复跑三轮。[Windows CI](https://github.com/KibyouMoe/mowu-link/actions/runs/45924894483)
 
+来源同批回退后已实测再次迁入。隔离 Router 读回 6 条原消息和同字节邮件附件，原键重试复用旧 T04 回执，换键复核相同正文也没有重送。两条退给旧订阅的尾项各用两种键重试，均返回 409。之后一个新 Event 只投一次。二次回退并档后第三次迁入，7 条历史仍能区分原审核批次。未写入的新试用库可逐字节回退，新增待派单的回退也保留相同档案。漏携档案或摘要不同不生成新库。使用真实隔离 HTTP，宿主、模型、平台及来源为夹具。[复跑](router-rehearsal.md#来源回退后再次迁入) · [证据](evidence/source-history-reentry.json)
+
 重新取消的 W04 已按具体指令核验。相同 A06 操作键重送保留原回执，自动重试沿用同一清理号。同一派发的下一条显式取消携带新的 `cleanup_id`。Worker 从原生收件识别该号，分别保存等待、清理及 Router 回执。隔离实测第一次迟报、重用旧键、换新键重播旧正文和错号都返回 409。新 W04 落库后故意丢回包，冷启沿原键查回，取消通知一条。复跑 `python3 -B -m unittest -v rewrite.test_cleanup rewrite.test_cutover -k cancel`。[HTTP 与回退实测](evidence/reissued-cancel-w04.json)
 
 用前版 `2490059e42d379183c19b0e82c208f545a3c78ee` 生成的隔离 Router、Worker 和适配器库做了升级。仅一次待确认的旧取消可以正常完成，已经成功的旧回执可沿原键回读。旧版已重复取消而未记录清理号时，拒绝无号回执，须由管理端发新指令。回退核对新指令及 W04 的同一清理号，缺号拒绝发布。[旧库升级](evidence/reissued-cancel-upgrade.json) · [回退演练](evidence/cutover-reviewed-cancel-retry.json)

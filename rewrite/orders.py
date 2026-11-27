@@ -4,6 +4,7 @@ import re
 import time
 
 from . import admission, approvals, attachments, cleanup, delivery, legacy_history, legacy_peers, links, messages, peers, pool, questions
+from . import source_history
 from .storage import Database, Fault, encode, guid, require, string, timestamp
 
 SCHEMA = """
@@ -72,6 +73,9 @@ class Orders:
             if previous:
                 require(previous["request"] == request, 409, "idempotency_conflict")
                 return json.loads(previous["response"])
+            replay = source_history.replay(db,actor,key,operation,data)
+            if replay is not None:
+                return replay
             if actor=="hermes":
                 prior = db.execute("SELECT source_id,legacy_task_id FROM history_request_keys WHERE actor=? AND request_key=?",
                                    (actor,key)).fetchone()

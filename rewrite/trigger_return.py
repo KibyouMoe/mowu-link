@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 from . import state_bundle, trigger_archive
+from . import source_history
 from .cutover import output_directory, readonly
 from .storage import encode
 from .trigger_handoff import LONG_TEXT_NAME, LONG_TEXT_SUMMARY, legacy_attachment_refs, read_plan, reviewed_levels
@@ -44,7 +45,7 @@ def router_files(db, files, actor):
 
 def delivery_rows(ledgers, mid):
     router,manager,host,_ = ledgers
-    message = router.execute("SELECT * FROM messages WHERE message_id=?",(mid,)).fetchone()
+    message = source_history.live_messages(router,mid=mid).fetchone()
     frames = router.execute("""SELECT * FROM deliveries WHERE consumer='hermes' AND kind='message.deliver'
                              AND json_extract(payload,'$.message_id')=?""",(mid,)).fetchall()
     queued = manager.execute("SELECT * FROM queue WHERE message_id=?",(mid,)).fetchone()
@@ -174,7 +175,7 @@ def audit(snapshot, expected, journal, journal_sha256, bundle, bundle_sha256,
         require_ledger(host,"SELECT 1 FROM adapter_native_binding WHERE slot=1 AND session=?",(host_session,))
         require_ledger(trigger,"SELECT 1 FROM instance WHERE slot=1 AND id=?",(old["instance_id"],))
         stored = {row[0] for row in trigger.execute("SELECT id FROM archive")}
-        submitted = {row[0] for row in router.execute("SELECT message_id FROM messages WHERE owner=?",(actor,))}
+        submitted = {row["message_id"] for row in source_history.live_messages(router,actor=actor)}
         if stored!=outgoing or not submitted<=outgoing:
             raise ValueError("handoff instance contains missing or additional events")
         states = [receipt_state(ledgers,item,row,level,actor,host_session,str(item["seq"]) in reads)

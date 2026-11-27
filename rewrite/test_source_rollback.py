@@ -10,16 +10,18 @@ import unittest
 from urllib.request import ProxyHandler, build_opener
 
 from . import test_cutover, test_feeds, test_trigger_archive
-from .cutover import backup, digest, prepare, reconcile
+from .cutover import backup, digest, prepare, reconcile, rollback, stage_queue_rollback
 from .devloop import FixtureHost, Loop, agent_report
 from .feeds import Feed, poll_game, poll_mail
 from .legacy_test_fixture import source_for
 from .manager_notices import ManagerNotices
 from .reviewed_rollback import stage_reviewed_rollback
 from .state_bundle import capture
-from .storage import guid
+from .rollback_source_history import NAME as SOURCE_ARCHIVE
+from .storage import Fault, guid
 from .test_feishu_output import PlatformFixture
 from .test_mainline import Clock
+from .test_state_bundle import running
 from .trigger import Trigger
 from .trigger_archive import DATABASE, capture as capture_trigger
 from .trigger_handoff import HANDOFF_DB, plan, stage
@@ -166,8 +168,8 @@ store.close()
         with loop.server:
             loop.thread.start()
             try:
-                for item in (event,info):
-                    trigger.send(loop.trigger_clients[trigger.instance_id],item["message_id"])
+                receipts = {item["message_id"]:trigger.send(loop.trigger_clients[trigger.instance_id],item["message_id"])
+                            for item in (event,info)}
                 mail_receipt = mail.trigger.send(loop.trigger_clients[mail.trigger.instance_id],mail_mid)
                 game_receipt = game.trigger.send(loop.trigger_clients[game.trigger.instance_id],game_mid)
                 with mail.db.transaction() as db:
@@ -359,6 +361,13 @@ store.close()
 """,restored/"subscription"/"legacy"/DATABASE))
         self.assertEqual(old_subscriber,[info["seq"],0,["return-acknowledged","return-tail"]])
         self.assertEqual(digest(case.trial/"router.db"),before)
+        reentry = self.verify_reentry(case,private,result,instances,mail_item,mail_receipt,attachment,receipts,
+                                      event,info,deferred,tail,game_mid)
+        if evidence := os.environ.get("MOWULINK_SOURCE_REENTRY_EVIDENCE"):
+            Path(evidence).write_text(json.dumps({
+                **reentry,"scope":"Actual isolated Router and legacy Trigger HTTP with rebuilt offline databases. "
+                                  "Native model, host, platform and data sources are fixtures."
+            },indent=2)+"\n")
         if evidence := os.environ.get("MOWULINK_SOURCE_ROLLBACK_EVIDENCE"):
             Path(evidence).write_text(json.dumps({
                 "router_sha256":before,"formal_order":tid,"assignment":aid,"legacy_task":old_router_task_id,
@@ -367,3 +376,161 @@ store.close()
                 "legacy_subscriber_readback":old_subscriber,
                 "scope":"Real isolated Router and old Trigger HTTP, byte-checked archives, host/model/platform/mailbox fixtures."
             },indent=2)+"\n")
+
+
+    def verify_reentry(self,case,private,result,instances,mail_item,mail_receipt,attachment,receipts,event,info,
+                       deferred,tail,game_mid):
+        archive = private/SOURCE_ARCHIVE
+        sha = result["source_archive_sha256"]
+        self.assertEqual(digest(archive),sha)
+        self.assertEqual(json.loads((private/"manifest.json").read_text())["source_archive_sha256"],sha)
+        snapshot = case.root/"second-snapshot"
+        backup(case.restore/"legacy.db",case.restore/"legacy.db.attachments",snapshot)
+        trial = case.root/"second-trial"
+        with self.assertRaisesRegex(ValueError,"recorded in the restored legacy database"):
+            prepare(snapshot,trial,case.source_id)
+        with self.assertRaisesRegex(ValueError,"recorded in the restored legacy database"):
+            prepare(snapshot,trial,case.source_id,source_archive=archive,source_archive_sha256="0"*64)
+        with self.assertRaisesRegex(ValueError,"source archive SHA-256 mismatch"):
+            prepare(snapshot,trial,case.source_id,source_archive=private/"trial-router.db",source_archive_sha256=sha)
+        self.assertFalse(trial.exists())
+
+        cmd = [sys.executable,"-B","-m","rewrite.cutover","prepare","--snapshot",snapshot,"--destination",trial,
+               "--source-id",case.source_id,"--source-archive",archive,"--source-archive-sha256",sha]
+        prepared = json.loads(subprocess.run(cmd,capture_output=True,text=True,check=True,timeout=20).stdout)
+        mid = mail_item["message_id"]
+        event_id,info_id = event["message_id"],info["message_id"]
+        tail_ids = (deferred["message_id"],tail["message_id"])
+        states = {event_id:"native_received",info_id:"reviewed_info_read",mid:"router_archived",
+                  game_mid:"native_received",**dict.fromkeys(tail_ids,"not_sent_to_host")}
+        with closing(sqlite3.connect(private/"trial-router.db")) as first:
+            raw = dict(first.execute("SELECT message_id,payload FROM messages WHERE owner LIKE 'trigger/%'"))
+            bodies = {key:json.loads(value) for key,value in raw.items()}
+            fid, = mail_item["attachment_ids"]
+            uid, = first.execute("SELECT upload_id FROM uploads WHERE attachment_id=?",(fid,)).fetchone()
+            upload_key,request,reply = next(
+                row for row in first.execute("SELECT key,request,response FROM operations WHERE actor=?",
+                                             ("trigger/"+instances[1],))
+                if json.loads(row[2]).get("upload_id")==uid)
+            original = dict(first.execute("SELECT delivery_id,ack FROM deliveries WHERE consumer='hermes'"))
+        alien = guid()
+        resumed = Loop(trial,Clock(),FixtureHost,trigger_ids=(*instances,alien))
+        with running(resumed.server):
+            for key,state in states.items():
+                item, = resumed.hermes.messages(message_id=key)["items"]
+                proof = item["source_history"]
+                self.assertEqual(proof["disposition"],state)
+                self.assertEqual(proof["trial_sha256"],result["trial_sha256"])
+                if proof["transport_id"]:
+                    self.assertEqual(proof["transport_received"],bool(original[proof["transport_id"]]))
+                self.assertEqual(bool(proof["native_id"]),state=="native_received")
+                self.assertEqual({k:item[k] for k in bodies[key]},bodies[key])
+            mail = resumed.trigger_clients[instances[1]]
+            event_sender = resumed.trigger_clients[instances[0]]
+            recovered, = resumed.hermes.messages(message_id=mid)["items"]
+            self.assertEqual({k:recovered[k] for k in mail_item},mail_item)
+            for reader in (resumed.manager_wire,mail):
+                self.assertEqual(reader.request("GET","attachments/"+fid)["bytes"],attachment)
+            for reader in (resumed.wire,resumed.trigger_clients[alien],event_sender):
+                with self.assertRaisesRegex(Fault,"attachment_not_found"):
+                    reader.request("GET","attachments/"+fid)
+                with self.assertRaisesRegex(Fault,"upload_not_found"):
+                    reader.request("GET","uploads/"+uid)
+            with self.assertRaisesRegex(Fault,"forbidden"):
+                mail.request("GET","messages?message_id="+mid)
+            upload_reply = mail.request("POST","uploads",json.loads(request)[1],upload_key)
+            self.assertEqual(upload_reply,json.loads(reply))
+            complete = mail.request("GET","uploads/"+uid)
+            self.assertEqual((complete["complete"],complete["attachment_id"]),(True,fid))
+            self.assertEqual(mail.request("PATCH","uploads/"+uid,attachment,headers={"Upload-Offset":"0"}),complete)
+            with self.assertRaisesRegex(Fault,"offset_conflict"):
+                mail.request("PATCH","uploads/"+uid,b"changed bytes",headers={"Upload-Offset":"0"})
+            self.assertEqual(mail.request("POST","messages",bodies[mid],"message-"+mid),mail_receipt)
+            self.assertEqual(event_sender.request("POST","messages",bodies[event_id],"message-"+event_id),
+                             receipts[event_id])
+            self.assertEqual(event_sender.request("POST","messages",bodies[event_id],guid()),
+                             dict(receipts[event_id],duplicate=True))
+            with self.assertRaisesRegex(Fault,"idempotency_conflict"):
+                event_sender.request("POST","messages",dict(bodies[event_id],text="modified"),"message-"+event_id)
+            with self.assertRaisesRegex(Fault,"message_conflict"):
+                resumed.trigger_clients[alien].request("POST","messages",dict(bodies[event_id],instance_id=alien),guid())
+            for key in tail_ids:
+                for retry_key in ("message-"+key,guid()):
+                    with self.assertRaisesRegex(Fault,"source_returned_to_legacy") as rejected:
+                        event_sender.request("POST","messages",bodies[key],retry_key)
+                    self.assertEqual(rejected.exception.status,409)
+            self.assertEqual(resumed.manager_wire.request("GET","deliveries/status")["awaiting_consumer_ack"],0)
+            self.assertEqual(resumed.hermes_native.entries(),[])
+        self.assertEqual(digest(trial/"router.db"),prepared["router_db_sha256"])
+        self.assertTrue(reconcile(snapshot,trial)["exact_rollback_allowed"])
+        exact = case.root/"second-exact-rollback"
+        self.assertEqual(rollback(snapshot,trial,exact)["source_archive_sha256"],sha)
+        self.assertEqual(digest(exact/"private-review"/SOURCE_ARCHIVE),sha)
+
+        queued = case.root/"second-queued"
+        prepare(snapshot,queued,case.source_id,source_archive=archive,source_archive_sha256=sha)
+        queued_loop = Loop(queued,Clock(),FixtureHost)
+        with running(queued_loop.server):
+            tid = queued_loop.hermes.create(guid(),"Queued on second rehearsal","No online worker","oguri")["task_id"]
+        review = case.root/"second-queue-review.json"
+        review.write_text(json.dumps({"trial_sha256":digest(queued/"router.db"),"execution_modes":{tid:"goal"}}))
+        fallback = case.root/"second-queue-rollback"
+        self.assertEqual(stage_queue_rollback(snapshot,queued,review,fallback)["source_archive_sha256"],sha)
+        self.assertEqual(digest(fallback/"private-review"/SOURCE_ARCHIVE),sha)
+
+        again = Loop(trial,Clock(),FixtureHost,trigger_ids=instances)
+        game_cursor = private/"source-returns"/"game"/"mc_chat_cursor.json"
+        game_origin = json.loads(game_cursor.read_text())["bridge"]
+        game_db = case.root/"second-game.db"
+        Trigger(game_db,"mc_chat",instance_id=instances[2])
+        source = Feed(game_db,"mc_chat",[game_origin])
+        source.import_cursor(game_cursor)
+        generation,position = source.start(source.cursor(),"game",17)
+        new_id = source.capture(generation,position,17,"Event","later source capture")
+        with running(again.server):
+            client = again.trigger_clients[instances[1]]
+            with self.assertRaisesRegex(Fault,"historical_attachment_read_only"):
+                client.request("POST","messages",dict(bodies[mid],message_id=guid()),guid())
+            fresh = source.trigger.send(again.trigger_clients[instances[2]],new_id)
+            self.assertFalse(fresh["duplicate"])
+            self.assertEqual(again.hermes.poll()["delivery_id"],new_id)
+            self.assertEqual([body["message_id"] for body,_ in again.hermes_native.entries()],[new_id])
+        active = reconcile(snapshot,trial)["trial_source_messages"]
+        self.assertEqual([item["message_id"] for item in active],[new_id])
+        self.assertEqual(digest(trial/SOURCE_ARCHIVE),sha)
+        second_bundle = case.root/"second-bundle"
+        seal = capture({"router:main":trial/"router.db","hermes:main":trial/"hermes-adapter.db",
+                        "hermes-host:main":trial/"manager-receipts.db","trigger:game":game_db,
+                        "worker:oguri":trial/"worker.db","agent:oguri":trial/"agent-adapter.db"},
+                       "b"*40,second_bundle)["manifest_sha256"]
+        source_review = case.root/"second-source-review.json"
+        source_review.write_text(json.dumps({"snapshot_sha256":seal,"legacy_cursor_sha256":digest(game_cursor),
+            "source":{"epoch":"game","head":17,"evidence":"second isolated source capture"},"filtered_positions":{}}))
+        source_plan = case.root/"second-source-plan.json"
+        source_plan.write_text(json.dumps({"bundle":second_bundle.name,"bundle_sha256":seal,
+            "manager_instance":"main","host_session":"test-manager-session","sources":[{"kind":"feed",
+            "trigger_instance":"game","legacy_cursor":str(game_cursor),"review":source_review.name,
+            "review_sha256":digest(source_review)}]}))
+        review = case.root/"second-combined-review.json"
+        review.write_text(json.dumps({"trial_sha256":digest(trial/"router.db"),"closed_assignments":{},
+                                     "source_plan_sha256":digest(source_plan)}))
+        combined = case.root/"second-combined-rollback"
+        merged = stage_reviewed_rollback(snapshot,trial,review,combined,source_plan=source_plan)
+        merged_sha = merged["source_archive_sha256"]
+        self.assertNotEqual(merged_sha,sha)
+        merged_path = combined/"private-review"/SOURCE_ARCHIVE
+        self.assertEqual(digest(merged_path),merged_sha)
+        self.assertEqual(digest(archive),sha)
+        last_snapshot = case.root/"third-snapshot"
+        backup(combined/"legacy.db",combined/"legacy.db.attachments",last_snapshot)
+        last_trial = case.root/"third-trial"
+        prepare(last_snapshot,last_trial,case.source_id,source_archive=merged_path,source_archive_sha256=merged_sha)
+        with closing(sqlite3.connect(last_trial/"router.db")) as db:
+            origins = dict(db.execute("SELECT message_id,trial_sha256 FROM history_source_messages"))
+            self.assertEqual(origins,{**dict.fromkeys(states,result["trial_sha256"]),new_id:merged["trial_sha256"]})
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM deliveries").fetchone()[0],0)
+        self.assertTrue(reconcile(last_snapshot,last_trial)["exact_rollback_allowed"])
+        return {"archive_sha256":sha,"archived_dispositions":states,"routed_again":[],"deferred_replay_http":409,
+                "retained_attachment":fid,"retained_attachment_bytes":len(attachment),
+                "exact_rollback_sha256":sha,"queued_rollback_sha256":sha,"new_event":new_id,
+                "second_reviewed_archive_sha256":merged_sha,"third_entry_historical_origins":origins}

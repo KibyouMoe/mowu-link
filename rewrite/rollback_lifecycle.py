@@ -5,7 +5,7 @@ from itertools import groupby
 import json
 import math
 
-from . import attachments, rollback_inquiries, rollback_questions
+from . import attachments, rollback_inquiries, rollback_questions, source_history
 from .cleanup import CANCEL_CONFIRMED_NOTICE
 from .messages import valid_guid
 from .orders import task
@@ -494,7 +494,7 @@ def check_transport(db, entries, reviewed_questions, optional_workers=(), peer_f
         raise ValueError("trial contains an unrelated adapter link")
 
     messages = {}
-    for row in db.execute("SELECT * FROM messages ORDER BY rowid"):
+    for row in source_history.live_messages(db):
         if sources is not None and sources.events.get(row["message_id"])==row["owner"]:
             continue
         body = json.loads(row["payload"])

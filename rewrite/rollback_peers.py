@@ -140,14 +140,14 @@ def copy_chunks(db, row, write):
         raise ValueError("reviewed attachment digest mismatch")
 
 
-def freeze(source, expected, destination):
+def freeze(source, expected, destination, *, label="peer archive"):
     if not isinstance(expected,str) or not re.fullmatch(r"[a-f0-9]{64}",expected):
-        raise ValueError("expected a trusted peer archive SHA-256")
+        raise ValueError(f"expected a trusted {label} SHA-256")
     with closing(readonly(source)), source.open("rb") as original, open(
             destination,"xb",opener=lambda name,flags:os.open(name,flags,0o600)) as output:
         shutil.copyfileobj(original,output)
     if digest(destination)!=expected:
-        raise ValueError("peer archive SHA-256 mismatch")
+        raise ValueError(f"{label} SHA-256 mismatch")
 
 
 def archive_from_trial(trial, parent, expected):

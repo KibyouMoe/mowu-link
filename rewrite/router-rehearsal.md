@@ -247,6 +247,21 @@ python3 -B -m rewrite.cutover stage-reviewed-rollback \
 
 复跑 `python3 -B -m unittest -v rewrite.test_source_rollback`。实跑隔离 Router、旧 Trigger HTTP 和恢复副本。验证一张已验收工单归档、旧订阅 Event 与 Info 的确认、邮件与游戏采集游标推进，以及两条仍待原订阅处理的尾项。实际旧端重放确认返回零新增。宿主、模型、飞书、邮件源和游戏 SSE 源使用夹具。[证据](evidence/source-router-rollback.json)
 
+
+### 来源回退后再次迁入
+
+同批回退保存 `private-review/source-history.db`。其摘要在私有清单和旧恢复库中各有记录。沿用同一批的旧库与档案，打包之前核对摘要。旧 Router 和旧 Trigger 按原入口运行，档案单独保管。对回退后的旧库重新 `backup`，在隔离端运行原 `prepare` 命令时加上这两个参数：
+
+```sh
+--source-archive "${RETURN}/private-review/source-history.db" --source-archive-sha256 "${SOURCE_ARCHIVE_SHA256}"
+```
+
+缺档、错批或摘要不一致会阻止生成试用库。对停写试用库做对账或回退时，随 `router.db` 与 `baseline.json` 保留该目录中的 `source-history.db`。无新来源写入的回退逐字节保留原档。再次审核新的来源记录时会两批并档，旧库内的档案绑定随之更新。
+
+溪流可在 C03 或 `router_info` 按原消息号查回正文、来源和原附件。来自旧批次的条目另带 `source_history`，显示原批次摘要、核对结论、传输回执及已有的宿主回执。原 Trigger 也可按原上传号查询其附件，其他身份无该访问权。已入档且处理完的 T04 同键重试返回原回执，换键重试同文只返回重复确认。在新提交中借用旧附件会被拒绝。已交回旧订阅的尾部使用旧接口消费，重做版 T04 对尾部返回 `409 source_returned_to_legacy`。它们如需再次交接，应先停原消费者，核实旧游标和实际收件，再另行审核。当前恢复不会重新派送这些尾项。
+
+复跑 `python3 -B -m unittest -v rewrite.test_source_rollback`。实际隔离 HTTP 查回六条原消息、原上传与附件字节，历史消息零重投，尾部原键和换键都回 409。新采集的 Event 投递一次。二次同批回退后第三次迁入，六条历史和后一条 Event 仍分别按原批次可查。宿主、模型、平台与来源使用夹具。[再次迁入实测](evidence/source-history-reentry.json)
+
 ### 旧 Worker 的实时订阅
 
 旧 Router 的 `GET /subscriptions?active=1` 用于只读盘点配置。旧 `GET /subscriptions/pending` 会确认已取记录，并推进两边游标。隔离测试只取 HTTP 状态后丢弃响应正文，旧 Router 和实际旧 Trigger 的游标均从 0 到 2，过滤掉的事件也有确认，随后旧队列返回零条。全过程 Worker 连接为零。旧侧确认只能证明上游游标已经走过，宿主是否收到须另查原工位记录。

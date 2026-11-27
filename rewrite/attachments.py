@@ -2,6 +2,7 @@
 import hashlib
 import re
 
+from . import source_history
 from .storage import Fault, guid, require, string
 
 SCHEMA = """
@@ -31,6 +32,8 @@ def progress(row):
 
 def owned(db, actor, upload_id):
     row = db.execute("SELECT * FROM uploads WHERE owner=? AND upload_id=?", (actor, upload_id)).fetchone()
+    if row is None:
+        row = source_history.upload(db,actor,upload_id)
     require(row, 404, "upload_not_found")
     return row
 
