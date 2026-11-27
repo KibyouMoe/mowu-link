@@ -83,6 +83,7 @@ jobs:
                 'rewrite.test_service.Service.test_windows_public_config_rejected'
                 'rewrite.test_host_ops.HostOpsState'
                 'rewrite.test_host_ops_windows.WindowsMaintenance'
+                'rewrite.test_state_bundle.Bundle.test_prepare_worker_chat_archive_after_both_receipts_recover'
                 'rewrite.test_peers.Peers.test_original_participants_can_read_and_answer_one_unambiguous_archived_peer'
                 'rewrite.test_feeds.Sources.test_game_real_stream_reconnect_source_replay_and_new_epoch'
                 'rewrite.test_feeds.Sources.test_imported_game_position_rejects_wrong_bridge_and_does_not_reset_on_first_probe'
