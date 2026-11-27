@@ -114,14 +114,14 @@ class WindowsMaintenance(unittest.TestCase):
             client.request("GET","tasks")
             return client
 
-        def receipt(api,action,route=base):
+        def receipt(api,action,route=base,*,settled=True):
             try:
                 result = api.request("GET",route+"/restarts/"+action["request_id"])
             except Fault as error:
                 if error.code=="unknown_restart":
                     return None
                 raise
-            return result if result["state"]!="accepted" else None
+            return result if not settled or result["state"]!="accepted" else None
 
         with serve(PACKAGE,"host-ops",state,roles,cert,key,env,extra) as url:
             reader,owner = Client(url,tokens["reader"],cert),Client(url,tokens["router"],cert)
@@ -147,8 +147,10 @@ class WindowsMaintenance(unittest.TestCase):
             delivery = HTTPSConnection(target.hostname,target.port,timeout=6,
                                        context=ssl.create_default_context(cafile=cert))
             try:
-                delivery.request("POST","/v1/"+base+"/restart",body=encode(request),
+                delivery.request("POST","/v1/"+base+"/restart",body=encode(request).encode(),
                                  headers={"Authorization":"Bearer "+tokens["router"],"Content-Type":"application/json"})
+                # Keep the request alive until an independent reader proves it reached the ledger.
+                self.wait(lambda:receipt(reader,request,settled=False),seconds=12)
             finally:
                 delivery.close()
             completed = self.wait(lambda:receipt(reader,request),seconds=45)
@@ -205,6 +207,6 @@ class WindowsMaintenance(unittest.TestCase):
                 "runtime":sys.getwindowsversion().build,"task_id":order["task_id"],"router_task_count":1,
                 "old_router_pid":child_before,"new_router_pid":child_after,"scm_restart":completed,
                 "stopped_service":started,"uncertain_reconciliation":settled,"neighbor_pid_unchanged":nearby["pid"],
-                "router_runs":3,"persisted_receipt":True,
+                "router_runs":3,"persisted_receipt":True,"original_post_response_read":False,
                 "scope":"Actual Windows SCM and HTTPS, temporary SCM wrapper and real isolated Router.",
             },indent=2)+"\n")
