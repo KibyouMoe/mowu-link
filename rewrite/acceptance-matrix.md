@@ -84,10 +84,21 @@
 | 原生审批登记与决议回执 | 隔离 Codex App Server 已核命令、文件差异、单次允许与取消。Router 未收到登记或允许回执卡住时，原生已中断，恢复按原号补记关闭。离线换绑审计还覆盖未送到 Router 的 Codex 原生审批，只有适配器核到关闭回执才清除待核。原绑定冷重开可查回 Router 已保存的关闭，原生决定零重放。原生关闭已落盘且 Router 保有原登记时，重开后可按原号补交，丢回执后按原号查回。缺原登记或原生关闭证据继续待核。[冷重开实测](evidence/codex-durable-approval-resolution.json) DSH 已核 Bash 单次允许、拒绝和超时，默认与相对工作目录可由原生宿主核实。批准前变更目录时不执行，执行已绑定后仍在批准的目录运行。冷开能查回未确认登记的原生取消，保留已有 Router 决定且零补发通知。C01 仅通知指定审批人。[Codex 命令](evidence/codex-app-server-approval-accept.json) · [文件变更](evidence/codex-app-server-file-approval.json) · [Codex 断联](evidence/codex-approval-router-outage.json) · [DSH 断联](evidence/dsh-approval-router-outage.json) · [DSH 工作目录](evidence/dsh-approval-native-working-directory.json)。Windows 与 macOS 的本机双向 TLS 已验拒绝、单次允许、超时与原号冷恢复。Windows 用实际 Git Bash 运行一次获准的 `pwd -W`，无确认目录的请求留在宿主。管理员、真实飞书和 Windows 界面未参与。[Windows 原生审批](evidence/windows-dsh-command-approval.json) | 真实审批人和飞书提示，Desktop 原生 Hook、应用授权、网络以及额外权限仍待核。普通题卡不承载审批。[操作入口](README.md#独立宿主命令审批) |
 | 独立 HTTPS 维护服务与维护 CLI | 独立 HTTPS 维护服务按目标授权。真实 macOS 临时 Router 已测丢回包、原号查回不重复重启、原待派单和原建单幂等键保留。另核已登记停机项恢复，以及不相符 plist 及已加载参数时保持待核。[Router 回执](evidence/host-ops-launchd.json)。新增独立维护 CLI。Linux 用户级 systemd 已接入同一维护协议，并在独立 Linux 来宾核验原进程退场、原单恢复、同号查回、登记停机项恢复及拒绝依赖联动。[Linux 实测](evidence/linux-systemd-host-ops.json)。待核重启会阻止换新请求号。维护人用原号核实旧进程退出和新代际，随后才能另发重启。[待核处理](evidence/host-ops-restart-reconciliation.json)。隔离 Hermes 由真实 LaunchAgent 启动，维护回执的新 PID 与 Hermes 原生文件及认证健康接口一致。维护服务冷重开后按原号查回，网关未再次重启。真实网关使用本地 API adapter，整体就绪报告为 `degraded`。[网关回执](evidence/hermes-gateway-maintenance.json) Windows Server 2025 SCM 从安装包验证旧进程退场、已登记停机服务恢复、HTTPS 回执丢失后按原号查回、待核时拒绝换号，以及邻近服务和原工单保全。[Windows 实测](evidence/windows-scm-host-ops.json) 独立启动器已从两套锁定发布包实际注册同一 SCM 服务、升级和退回，唯一原工单得以保留。占用状态库时拒绝启动，结束 Router 子进程后 SCM 停止，重开仍能读回原单。[Windows 发行包](evidence/windows-router-service-release.json) | 新版维护人在授权范围验证服务状态与启停。Desktop 自有子进程、实际模型及平台就绪待核。 |
 
-## 正式切换清理与待确认数据
+## 正式切换清理与旧数据处置
 
 下列内容单列，未纳入 49 项。
 
 - 待正式切换清理的纯旧版适配包括旧 Router 和 Trigger 订阅、游标及累计确认对接，旧工单与私聊的运行格式转换与旧版回写，以及兼容旧 `/chat` 列表及摘要的查询服务。清理底稿见 `legacy_subscription.py`、`legacy_chat.py`、`legacy_history.py`、`legacy_peers.py`，以及 `cutover.py` 的旧版迁入与回写入口、`reviewed_rollback.py` 的旧版回写流程。清理时复核调用者与共用函数，保留新版 `state_bundle` 和新版平台账本的快照、核验及恢复能力。
 - 旧客户端的 Router 命令、审批及运维地址列入停用清单。相应业务按表中的新版授权入口验收。已有旧版兼容代码在生产切换获得明确授权后清理。
-- 旧历史、附件、在途工单、未决提问和来源待发记录的一次性导出、迁移或留存等待单独确认。保留已有历史及演练证据。[范围更正前的旧版演练](router-rehearsal.md)
+- 旧数据处置已定。训练员于 2026-11-27 确认可在授权的停写切换窗口内舍弃旧版历史及在途数据。无需导出、迁移、保留或恢复到新版。既有演练文档继续作为历史证据。[范围更正前的演练](router-rehearsal.md)
+
+| 旧服务或进程 | 旧版专用数据路径 | 同步退出的持久或进程内队列 |
+| --- | --- | --- |
+| 旧 Router `ai.hermes.router` | Mac mini 的 `~/.hermes/router.db`、对应 WAL/SHM、`router.db.attachments/`，以及核实同库归属的成果候选目录和副本 | 任务历史、当前持单、待派 FIFO、待成果与取消询问、未决审批、同伴未读/回执、聊天历史和 Trigger 订阅游标。 |
+| 旧 Trigger `ai.hermes.trigger` | Mac mini 的 `~/.hermes/trigger.db` 及对应 WAL/SHM；其他旧 Trigger 实例以登记的实际 `--db` 为准 | 旧事件档、待投递 Event/Notify/Info、订阅、确认回执和游标。 |
+| 旧 Trigger 来源进程 | 各实例的旧版专用游标或待发目录；仓内游戏来源默认游标为 `server/trigger/clients/state/mc_chat_cursor.json`，安装覆盖值逐工位确认 | 各实例采集游标、待向旧 Trigger 补发的事件。原邮箱、游戏服聊天与日志继续归来源系统。 |
+| 旧 Codex Worker 插件与桥接进程 | 默认 `~/.codex/state/codexworker/`，逐工位核实状态目录及专用文件，例如 `desktop-manager-state.json`、`feishu-inbox.json`、`message-journal/`、`receipt-archive/` 和旧原生收件凭据 | 旧派单待接、挂接的工单状态、飞书待入站或出站、同伴待投递、待题答复、成果与取消回执。 |
+| 旧 DSH Worker 插件与桥接进程 | 默认 `~/.hermes/state/dshworker/`，逐工位核实 `dsh-plugin-state.json`、`feishu-inbox.json`、`message-journal/` 与 `receipt-archive/` | 旧派单、工位内等待队列、飞书收发、同伴待投递、题目与旧成果回执。 |
+| Hermes 内的旧 Router 管理入口、旧 `trigger-bus` 插件 | `~/.hermes/trigger-cursor.json` 或实例设置的 `TRIGGER_BUS_CURSOR`，以及核实归属的旧插件专用账本 | 等待插件交接的 Event/Notify/Info、旧任务通知、旧同伴回执。只退出可辨认为旧魔物链接来源的待交付项，Hermes 网关共用队列继续由网关持有。 |
+
+Router 与 Trigger 在 Mac mini 的路径已从各自的 LaunchAgent 参数核对。其余为旧版安装默认路径或源码归属，Windows 及独立工位以切换窗口中核实的实际路径为准。切换前逐项登记主机、服务、解析后的文件路径和队列身份，确认旧写者已停且旧文件与新版和宿主资料分离，再按获批范围处置。不确定归属的项目留待核验。宿主原生会话、账号和配置、共享网关、来源本身、其他项目及新版数据都保留。新版停写备份、恢复、版本回退及写入对账仍按表验收。
