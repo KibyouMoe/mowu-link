@@ -55,7 +55,7 @@
 | Antigravity | 已核安装版本 2.32.1 及官方会话钩子、转录、MCP 入口。CLI 可克隆 App 对话供独立宿主使用，Remote Control 提供人工访问。 | 指定原桌面会话的后台唤醒、停止、真实 Gemini 回报及读写验收。CLI 或远程托管须先确认允许改用独立宿主。[兼容性核对](antigravity-compatibility.md) |
 | 授权和维护 | 认证的 Router、Worker 与适配器隔离已验证。普通题卡与原生授权分别处理。 | 按新版的训练员命令、原生审批、独立运维入口逐项核对真实授权，包含 Desktop 应用授权、用户身份及真实平台回执。 |
 
-Codex 的 Windows 可写入口已接私有运行账本、Linux 引擎核对及桥接进程清理。Windows 独立安装验收可用 CLI 夹具验证冷重开、原附件、错误引擎拒绝及移除回执。真实 Windows Docker 的模型、工单、成果、取消及回收仍待端到端验收。DSH 的 Windows 可写宿主入口仍未接通。工作区账本离线审计的权限、原目录身份和写锁检查已在 Windows Server 2025 安装包通过。[Codex 可写工位](desktop-check.md#隔离可写工位) · [Windows 账本审计](evidence/windows-workspace-journal-audit.json) · [工作区回退实测](evidence/codex-workspace-writer-rollback.json)
+Codex 的 Windows 可写入口已接私有运行账本、Linux 引擎核对及桥接进程清理。Windows Server 2025 安装包使用 CLI 夹具验证了冷重开、原附件、错误引擎拒绝及移除回执。真实 Windows Docker 的模型、工单、成果、取消及回收仍待端到端验收。DSH 的 Windows 可写宿主入口仍未接通。工作区账本离线审计的权限、原目录身份和写锁检查已在 Windows Server 2025 安装包通过。[Codex 可写工位验证](evidence/windows-codex-assignment-workspace.json) · [Windows 账本审计](evidence/windows-workspace-journal-audit.json) · [工作区回退实测](evidence/codex-workspace-writer-rollback.json)
 
 当前可复跑隔离联调。A10 的 Worker 恢复及新版备份回退另核了 70 帧断点续接、前缀缺件与同号异文，以及 C02 位置正确但留有失效 W03 的混搭快照。[复跑及边界](replacement-progress.md#检查点与证据) 离「可切换」仍需真实宿主、实际 Feishu 测试身份、原生工单清理，以及新版实际来源和平台回执对账。
 

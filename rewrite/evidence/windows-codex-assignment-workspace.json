@@ -1,0 +1,47 @@
+{
+  "revision": "3f2035a789a73861ec3851d2df27104d5806a9ef",
+  "verified_release_files": 382,
+  "windows": {
+    "runner": "Windows Server 2025",
+    "run_id": 45960778225,
+    "install_job_id": 140377811266,
+    "passed": 25,
+    "artifact_recovery_test": "test_codex_windows_workspace_recovers_original_artifact_and_removal",
+    "test_passed_at_utc": "2026-11-27T07:47:29.8799033Z",
+    "docker_probe": "windows",
+    "archive_sha256": "0bb2e46f71eb211e0db574b1089c89deb3c62329d299c0895bcaeb40c2d3e6ee",
+    "dsh_sdk_job_id": 140377810900,
+    "dsh_sdk_passed": 14,
+    "fixture_assertions": [
+      "Windows engine rejected before workspace readiness",
+      "second writer refused while no socket exists",
+      "stopped audit returns same active lease",
+      "artifact bytes and SHA-256 recovered after reopen",
+      "changed engine cannot remove recorded container",
+      "original engine returns one stable removal receipt",
+      "after another reopen offline audit finds no pending leases"
+    ],
+    "artifact_size": 1280,
+    "fixture_artifact_sha256": "d414b085826eb06778483ba35564dc849e643359f69ed9747878ba6e54985bed"
+  },
+  "macos": {
+    "passed": 26,
+    "duration_seconds": 20.668,
+    "archive_sha256": "f65d3c6880dd3c396a7c69e73920aee1dcdc3cd3ba8641e9e5c2231737bd2526",
+    "native_linux_docker_cases": [
+      "Codex outcome, cancel and transfer",
+      "DSH cancel, transfer and foreign engine refusal",
+      "DSH project seed and lost acknowledgement"
+    ]
+  },
+  "linux_arm64": {
+    "passed": 189,
+    "skipped": 133,
+    "archival_excluded": 58,
+    "failed": 0,
+    "errors": 0,
+    "cross_os_fixture_inputs": 1,
+    "cross_os_notifications": 1
+  },
+  "boundary": "Native Windows OS, Node bridge, Job Object, file ACLs, filesystem replace and repeatable lease receipt. The Docker CLI used a fixture with a pre-existing isolated lease. Windows model-to-container W04, actual Linux Docker Engine on Windows, Windows DSH writable host and real Feishu remain open."
+}
