@@ -1,0 +1,31 @@
+{
+  "revision": "7e59248a19765c8101a4b9f7d1a1daf08323a6dc",
+  "release_sha256": "7ac0c6601b33a1c1e91292ed1730046bcfdc5cccb20ce889fc52f5010d303dc7",
+  "verified_files": 359,
+  "archive": {
+    "archive_sha256": "3aedde293f5bc2ed483888f28d861479dd7be8e8856bd2e42048b519ce1bf3a8",
+    "count": 3,
+    "format": 1,
+    "snapshot_sha256": "4c44c44b2cecc5dcb658f9ff228b0a148489595553248e89f74ff655aaf7c4cb",
+    "worker": "oguri"
+  },
+  "original_row_ids": [
+    1,
+    3,
+    4
+  ],
+  "matched_query_windows": 5,
+  "summary_counts": [
+    3,
+    1,
+    2
+  ],
+  "summary_last_id": 4,
+  "other_worker_http": 404,
+  "unregistered_reader_http": 401,
+  "write_http": 405,
+  "source_unchanged": true,
+  "scope": "Actual legacy Router HTTP, private frozen snapshot, isolated HTTPS archive.",
+  "install_platform": "macOS",
+  "install_tests_passed": 2
+}

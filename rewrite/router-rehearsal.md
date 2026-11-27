@@ -49,7 +49,24 @@ python3 -m rewrite.cutover export-chat --snapshot ./snapshot --worker "$WORKER_I
 
 将 `WORKER_ID` 设为旧台账中的工位 ID，即可从已核验的离线库导出旧 `/chat/{worker}/messages` 字段。可用 `--direction in` 或 `--direction out` 筛选，按原 ID 升序分页。下一页用回执中的 `next_cursor` 作为 `--after`，并指定新目录。回执只含计数、位置和摘要，正文写入该用户独占目录里的 `messages.jsonl`，文件权限为 600。敏感的附加元数据仍留在完整原备份。导出不会生成新平台消息或新工单。重做版的日常飞书私聊继续由 Worker 持有。
 
-实际旧 Router 的 `/chat/log` 已核重复消息复用原行号，同一平台消息号的双向记录均保留。以旧共享令牌读两工位的历史时均返回 200。离线导出所得页与所选工位的 HTTP 字段逐条一致，文件不含另一工位记录。旧在线摘要保留在旧端。重做版未开放跨工位聊天旁听，现役消费者及所需的查阅范围须在停用旧入口前确认。复跑 `python3 -B -m unittest -v rewrite.test_cutover -k export_legacy_chat`。
+实际旧 Router 的 `/chat/log` 已核重复消息复用原行号，同一平台消息号的双向记录均保留。以旧共享令牌读两工位的历史时均返回 200。离线导出所得页与所选工位的 HTTP 字段逐条一致，文件仅含所选工位的记录。复跑 `python3 -B -m unittest -v rewrite.test_cutover -k export_legacy_chat`。
+
+#### 兼容查询单工位旧档
+
+用已校验的停写备份生成该工位的专用档。输出目录的上级由操作账号独占。用回执里的 `archive_sha256` 核对待提供的 SQLite 文件。身份文件按现行私有配置标准保存，登记的只读角色为 `chat-reader/<工位 ID>`。TLS、身份及端口使用独立配置。
+
+```sh
+python3 -B -m rewrite.cutover prepare-chat-archive --snapshot ./snapshot \
+  --worker "$WORKER_ID" --destination ./private-chat-archive
+
+python3 -B -m rewrite.service chat-archive --worker-id "$WORKER_ID" \
+  --db ./private-chat-archive/chat-history.db --sha256 "$CHAT_ARCHIVE_SHA256" \
+  --identities ./chat-reader-identities.json --cert ./chat.crt --key ./chat.key --port 0
+```
+
+原客户端可针对这条独立 HTTPS 连接使用 `GET /chat/{worker}/messages` 和 `GET /chat/{worker}/summary`。新客户端也可加 `/v1` 前缀。最新页按原 ID 升序，按原 ID、epoch 或 ISO 时间续查仍沿旧语义。摘要按每次请求时刻向前计算，结果取自冻结档。服务核对档案摘要和身份的工位范围，文件内只含该工位的原消息字段。错工位返回 404，写入返回 405。复跑 `python3 -B -m unittest -v rewrite.test_cutover -k legacy_chat`。[实测回执](evidence/legacy-feishu-chat-archive.json)
+
+本机已安装的溪流技能仍记有派单前读最近聊天及在线摘要。曾经发起过哪些查询、现役写入方和授权保留期限仍待实际消费者核验。冻结档到备份边界为止。实时聊天仍由 Worker 持有，旧实时入口留到消费者迁移获准后再处置。
 
 ## 停止切换和回退
 
