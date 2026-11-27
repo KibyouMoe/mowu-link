@@ -139,7 +139,8 @@ def serve(args,stack):
         restricted = args.read_only_assignments or args.assignment_workspace is not None
         require(not (args.read_only_assignments and args.assignment_workspace),422,"invalid_codex_workspace_config")
         if restricted:
-            require(not (args.relay_command_approvals or args.relay_file_approvals),422,"invalid_codex_read_only_assignments")
+            require(not (args.relay_command_approvals or args.relay_file_approvals or args.relay_report_approvals is not None),
+                    422,"invalid_codex_read_only_assignments")
         rpc = stack.enter_context(start_app_server(args.codex_binary,args.codex_profile,args.cwd,
                                                   CLEANUP_SETTINGS if restricted else ()))
         require_test_account(rpc)
@@ -156,6 +157,7 @@ def serve(args,stack):
             native = AppServerHost(rpc,args.session,args.db,args.public_image_root,
                                    relay_command_approvals=args.relay_command_approvals,
                                    relay_file_approvals=args.relay_file_approvals,
+                                   relay_report_approvals=args.relay_report_approvals,
                                    read_only_assignments=args.read_only_assignments,workspace=workspace)
             pinned_thread(native,args.cwd.resolve())
             if not args.resume_on_handoff:
@@ -286,6 +288,8 @@ def main():
                                    help="relay one-time command decisions through the configured Router operator")
             component.add_argument("--relay-file-approvals",action="store_true",
                                    help="relay exact native file changes to the configured Router operator")
+            component.add_argument("--relay-report-approvals",metavar="SERVER",
+                                   help="relay one-time completion approvals for worker_report on this trusted MCP server")
             component.add_argument("--prepare-sessions",action="store_true",
                                    help="allow authenticated preparation of independent read-only Codex sessions")
             component.add_argument("--read-only-assignments",action="store_true",

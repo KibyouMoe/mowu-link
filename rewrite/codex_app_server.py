@@ -44,7 +44,8 @@ class AppServerHost:
     rejects_busy_before_answer_write = True
 
     def __init__(self, rpc, thread_id, adapter_db=None, public_image_root=None, *,
-                 relay_command_approvals=False,relay_file_approvals=False,read_only_assignments=False,workspace=None):
+                 relay_command_approvals=False,relay_file_approvals=False,relay_report_approvals=None,
+                 read_only_assignments=False,workspace=None):
         self.rpc, self.thread_id = rpc,thread_id
         self.write_lock = RLock()
         self.usage = None
@@ -52,8 +53,8 @@ class AppServerHost:
         self.compactions = CodexCompactions(adapter_db,self) if adapter_db is not None else None
         self.questions = CodexQuestions(adapter_db,self) if adapter_db is not None else None
         self.approvals = (CodexApprovals(rpc,thread_id,commands=relay_command_approvals,
-                                        files=relay_file_approvals,adapter_db=adapter_db)
-                          if relay_command_approvals or relay_file_approvals else None)
+                                        files=relay_file_approvals,report_server=relay_report_approvals,adapter_db=adapter_db)
+                          if relay_command_approvals or relay_file_approvals or relay_report_approvals is not None else None)
         require(public_image_root is None or adapter_db is not None,422,"native_image_state_required")
         self.images = CodexImages(public_image_root,adapter_db) if public_image_root is not None else None
         self.assignment_cleanup = None
@@ -615,6 +616,27 @@ def worker_callbacks(host,worker,notify_turn_end,notify_item=None,notify_termina
             return False
         return True
 
+    def relay_report_approval(packet):
+        until = time.monotonic()+3
+        while not stop.is_set():
+            try:
+                host.approvals.offer_report(packet,adapter)
+                return True
+            except Fault as error:
+                if error.code in ("wrong_native_approval_source","native_approval_conflict"):
+                    return True
+                if (error.code in ("native_turn_unconfirmed","native_history_unconfirmed")
+                        and time.monotonic()<until and not stop.wait(.05)):
+                    continue
+            except OperationalError:
+                pass
+            try:
+                host.approvals.send_report_decision(packet["id"],"cancel")
+            except Fault:
+                return False
+            return True
+        return False
+
     def read_events():
         while not stop.is_set():
             try:
@@ -649,6 +671,11 @@ def worker_callbacks(host,worker,notify_turn_end,notify_item=None,notify_termina
                             host.rpc.send({"id":packet["id"],"result":{"decision":"cancel"}})
                         except Fault:
                             break
+                continue
+            if (host.approvals and packet.get("method")=="mcpServer/elicitation/request"
+                    and host.approvals.report_request(packet)):
+                if not relay_report_approval(packet):
+                    break
                 continue
             if packet.get("method")=="serverRequest/resolved":
                 if host.questions:

@@ -9,8 +9,10 @@ from sqlite3 import Error as SQLiteError
 from threading import Event, Lock, Thread
 import time
 
-from .approvals import DECISIONS, TTL_SECONDS, validate_file_changes, validate_request
-from .storage import Database, Fault, encode, guid, require
+from .agent_tools import formal_report_origin
+from .approvals import DECISIONS, REPORT_APPROVAL, REPORT_SERVER, TTL_SECONDS, validate_file_changes, validate_request
+from .messages import valid_guid
+from .storage import Database, Fault, encode, guid, require, string
 
 
 SCHEMA = """
@@ -40,9 +42,12 @@ class NativeApproval:
 
 
 class CodexApprovals:
-    def __init__(self,rpc,session,*,commands=True,files=False,adapter_db=None):
+    def __init__(self,rpc,session,*,commands=True,files=False,report_server=None,adapter_db=None):
         self.rpc,self.session = rpc,session
         self.commands,self.files = commands,files
+        require(report_server is None or (isinstance(report_server,str) and REPORT_SERVER.fullmatch(report_server)
+                                          and adapter_db is not None),422,"invalid_report_approval_server")
+        self.report_server = report_server
         self.clock = time.monotonic
         self.lock = Lock()
         self.live = {}
@@ -106,6 +111,43 @@ class CodexApprovals:
                 "decisions":[choice for choice in DECISIONS if choice in choices]}
         self.remember(rid,data)
 
+    def report_request(self,packet):
+        params = packet.get("params")
+        if self.report_server is None or not isinstance(params,dict) or params.get("serverName")!=self.report_server:
+            return False
+        metadata = params.get("_meta")
+        return (isinstance(metadata,dict) and metadata.get("codex_approval_kind")=="mcp_tool_call"
+                and metadata.get("tool_name")==REPORT_APPROVAL)
+
+    def offer_report(self,packet,adapter):
+        params,rid = self.request_binding(packet)
+        require(adapter is not None and self.report_request(packet) and params.get("environmentId") is None
+                and params.get("mode")=="form" and params.get("requestedSchema")=={"properties":{},"type":"object"},
+                422,"unsupported_native_report_approval")
+        args = params["_meta"].get("tool_params")
+        fields = {"task_id","assignment_id","summary"}
+        require(isinstance(args,dict) and fields<=set(args)<=fields|{"outcome","artifact_ids"}
+                and args.get("outcome","completed")=="completed" and valid_guid(args["task_id"])
+                and valid_guid(args["assignment_id"]) and bool(string(args,"summary")),
+                422,"invalid_report_approval_arguments")
+        artifacts = args.get("artifact_ids",[])
+        require(isinstance(artifacts,list) and all(valid_guid(item) for item in artifacts),
+                422,"invalid_report_approval_arguments")
+        turn = string(params,"turnId")
+        try:
+            native = adapter.input_for_turn(self.session,turn)
+        except Fault as error:
+            if error.code!="native_turn_unconfirmed":
+                raise
+            # The tool request can arrive before the Worker has fetched the host receipt.
+            adapter.control_bindings(args)
+            native = adapter.input_for_turn(self.session,turn)
+        origin = adapter.origin(native,session=self.session)
+        require(formal_report_origin(origin,args["task_id"],args["assignment_id"]),403,"wrong_report_origin")
+        self.remember(rid,{"kind":REPORT_APPROVAL,"session":self.session,"turn_id":turn,"item_id":"mcp:"+encode(rid),
+                           "server":self.report_server,"task_id":args["task_id"],"assignment_id":args["assignment_id"],
+                           "arguments_digest":hashlib.sha256(encode(args).encode()).hexdigest(),"decisions":list(DECISIONS)})
+
     def remember(self,rid,data):
         validate_request(data)
         with self.lock:
@@ -159,7 +201,15 @@ class CodexApprovals:
 
     def answer(self,item,response):
         item.attempted_response = response
-        self.rpc.send({"id":item.request_id,"result":{"decision":response["decision"]}})
+        if item.request.get("kind")==REPORT_APPROVAL:
+            self.send_report_decision(item.request_id,response["decision"])
+        else:
+            self.rpc.send({"id":item.request_id,"result":{"decision":response["decision"]}})
+
+    def send_report_decision(self,rid,decision):
+        # No form input, stored approval, session grant, or tool result is sent here.
+        result = {"action":"accept","content":{}} if decision=="accept" else {"action":"decline"}
+        self.rpc.send({"id":rid,"result":result})
 
     def expire(self,item):
         # Both the native timer and a newly arrived Router response consult the same deadline under the lock.
@@ -248,6 +298,8 @@ class CodexApprovals:
                         response = {"source":"operator","decision":decision}
                 elif state=="expired" and "cancel" in item.request["decisions"]:
                     response = {"source":"expiry","decision":"cancel"}
+                elif state=="assignment_inactive" and item.request.get("kind")==REPORT_APPROVAL:
+                    response = {"source":"assignment_inactive","decision":"cancel"}
                 if response:
                     self.answer(item,response)
         if closed:

@@ -193,7 +193,8 @@ class Provider(BaseHTTPRequestHandler):
         cleanup = getattr(self.server,"cleanup_fixture",None)
         goal_continuation = formal_goal is not None and any(
             part.get("text","").startswith('<codex_internal_context source="goal">') for part in latest)
-        if mcp_fixture and (mcp_private or payload and payload.get("kind")=="task") and calls<(1 if mcp_private else 3):
+        if mcp_fixture and (mcp_private or payload and payload.get("kind")=="task") and calls<(
+                1 if mcp_private else mcp_fixture.get("formal_calls",3)):
             space = "mcp__mowulink_w04_test"
             advertised = any(tool.get("name")==space and any(entry.get("name")=="worker_report"
                 for entry in tool.get("tools",[])) for tool in body.get("tools",[]))
@@ -2013,6 +2014,200 @@ class CodexAppServer(unittest.TestCase):
                              "native_turn_status_after_reopen":pending_turn["status"],"state":"working",
                              "mcp_calls_after_reopen":call_count()-3,"additional_notices":0},
                          "boundary":"Native isolated App Server and its stdio MCP subprocess. Scripted local model; no Desktop GUI or live account."}
+
+    @unittest.skipUnless(os.name=="posix","isolated project MCP uses a private Unix socket")
+    def test_native_mcp_report_approval_relays_once_and_rechecks_original_assignment(self):
+        from .report_listener import listen
+        from .report_scope import config_text
+
+        root = Path(self.root)
+        profile = root/"approval-mcp-profile"
+        profile.mkdir(mode=0o700)
+        state = Path(self.enterContext(TemporaryDirectory(dir="/tmp",prefix="ml-report-approval-")))
+        (profile/"config.toml").write_text(config_text(state),encoding="utf-8")
+        fixture = self.provider.project_mcp_report = {"admitted":Event(),"advertised":[],"formal_calls":2}
+        self.addCleanup(fixture["admitted"].set)
+        rpc = self.enterContext(isolated_app_server(profile,self.origin))
+        revision = rpc.request("thread/start",{"cwd":str(profile),"ephemeral":False})["thread"]
+        sid = revision["id"]
+        adapter_path = root/"adapter.db"
+        host = AppServerHost(rpc,sid,adapter_path,relay_report_approvals="mowulink_w04_test")
+        adapter = HostAdapter(adapter_path,host,sid)
+        worker_token,manager_token,operator_token,outsider_token,adapter_token,platform_token,host_token = (
+            guid() for _ in range(7))
+        clock = Clock()
+        router = self.enterContext(running(serve_loopback(Orders(root/"router.db",clock,1),
+            {worker_token:"worker/oguri",manager_token:"hermes",operator_token:"approver/oguri",
+             outsider_token:"approver/other"})))
+        adapter_url = self.enterContext(running(serve_adapter(adapter,"oguri",{host_token:"worker/oguri"},("127.0.0.1",0),None)))
+        port = RemoteAdapter(Client(adapter_url,host_token),sid)
+        worker = Worker(root/"worker.db","oguri",Client(router,worker_token),port)
+        worker.connect()
+        listener = self.enterContext(running(WorkerService(worker).listen(
+            {adapter_token:"adapter/oguri",platform_token:"platform/oguri"},("127.0.0.1",0),None)))
+        callback,platform = Client(listener,adapter_token),Client(listener,platform_token)
+        operator,outsider = Client(router,operator_token),Client(router,outsider_token)
+        manager_wire = Client(router,manager_token)
+        manager_native = FixtureHost(root/"manager-native.db","manager")
+        manager = HermesAdapter(root/"manager.db",manager_wire,HostAdapter(root/"manager-adapter.db",
+                                                                        manager_native,manager_native.session),clock)
+        self.enterContext(listen(state,worker,adapter))
+
+        saved_accept, hold_decision, lost_close = Event(),Event(),Event()
+        decisions, close_replies, router_errors, terminals = [],[],set(),Queue()
+        offers = set()
+        request,send = callback.request,rpc.send
+        offer_report = host.approvals.offer_report
+
+        def observe_offer(packet,local):
+            try:
+                return offer_report(packet,local)
+            except Fault as error:
+                params = packet["params"]
+                offers.add((error.code,params["mode"],encode(params.get("requestedSchema")),params.get("environmentId")))
+                raise
+
+        def observe_router(method,path,*args,**kwargs):
+            try:
+                result = request(method,path,*args,**kwargs)
+            except Fault as error:
+                router_errors.add(error.code)
+                raise
+            if hold_decision.is_set() and method=="POST" and result.get("decision")=="accept" and result["state"]=="decided":
+                saved_accept.set()
+                raise ConnectionError("isolated approval response lost")
+            if method=="PUT" and path.endswith("/closed"):
+                close_replies.append(result)
+                if not lost_close.is_set():
+                    lost_close.set()
+                    raise ConnectionError("isolated closure response lost")
+            return result
+
+        def observe_native(packet):
+            if "action" in packet.get("result",{}):
+                decisions.append(packet)
+            send(packet)
+
+        callback.request,rpc.send,host.approvals.offer_report = observe_router,observe_native,observe_offer
+        self.enterContext(worker_callbacks(host,callback,lambda:None,adapter=adapter,
+                          notify_terminal=lambda turn,status:terminals.put((turn,status))))
+
+        def until(predicate):
+            deadline = time.monotonic()+10
+            while time.monotonic()<deadline:
+                if result := predicate():
+                    return result
+                time.sleep(.05)
+            self.fail(f"isolated MCP approval did not settle, Router rejections={router_errors}, "
+                      f"native decisions={decisions}, offer rejections={offers}, model saw tool={fixture['advertised']}")
+
+        def dispatch(title):
+            fixture["admitted"].clear()
+            tid = manager.create(guid(),title,"Report only through the matching MCP request","oguri")["task_id"]
+            clock.advance(1)
+            worker.poll()
+            clock.advance(10)
+            worker.poll()
+            worker.poll()
+            held = worker.hold()
+            self.assertEqual(held["held_task_id"],tid)
+            fixture["admitted"].set()
+            return tid,held["held_assignment_id"]
+
+        def approvals():
+            return operator.request("GET","approvals/oguri")["items"]
+
+        def pending(assignment):
+            return until(lambda:next((item for item in approvals()
+                if item["state"]=="pending" and item["request"]["assignment_id"]==assignment),None))
+
+        def route(item):
+            return "approvals/oguri/"+item["approval_id"]
+
+        def operator_decision(item,value):
+            return {"decision":value,"request_digest":item["request_digest"]}
+
+        def closure(item):
+            return until(lambda:next((entry for entry in approvals()
+                if entry["approval_id"]==item["approval_id"] and entry["state"]=="native_closed"),None))
+
+        def calls():
+            return (state/"methods.jsonl").read_text().splitlines().count('"tools/call"')
+
+        tid,aid = dispatch("Isolated routed report approval")
+        denied = pending(aid)
+        self.assertEqual(denied["request"]["arguments_digest"],
+                         hashlib.sha256(encode(fixture["args"]).encode()).hexdigest())
+        self.assertNotIn("summary",denied["request"])
+        reject = operator_decision(denied,"cancel")
+        with self.assertRaisesRegex(Fault,"forbidden"):
+            outsider.request("PUT",route(denied)+"/decision",reject)
+        with self.assertRaisesRegex(Fault,"forbidden"):
+            platform.request("POST","worker/"+route(denied),denied["request"])
+        with self.assertRaisesRegex(Fault,"native_turn_unconfirmed"):
+            callback.request("POST","worker/approvals/"+guid(),dict(denied["request"],turn_id=guid()))
+        self.assertEqual((calls(),decisions,worker.hold()["held_assignment_id"]),(0,[],aid))
+        operator.request("PUT",route(denied)+"/decision",reject)
+        refused = closure(denied)
+        self.assertEqual(refused["attempted_response"],{"source":"operator","decision":"cancel"})
+        until(lambda:len([entry for entry in close_replies if entry["approval_id"]==denied["approval_id"]])==2)
+        allowed = pending(aid)
+        self.assertNotEqual(allowed["approval_id"],denied["approval_id"])
+        self.assertEqual(allowed["request"]["turn_id"],denied["request"]["turn_id"])
+        self.assertEqual((calls(),worker.hold()["held_assignment_id"]),(0,aid))
+        self.assertFalse(manager_wire.frames(0))
+        accept = operator_decision(allowed,"accept")
+        with self.assertRaisesRegex(Fault,"approval_view_changed"):
+            operator.request("PUT",route(allowed)+"/decision",dict(accept,request_digest=denied["request_digest"]))
+        operator.request("PUT",route(allowed)+"/decision",accept)
+        self.assertEqual(terminals.get(timeout=10),(allowed["request"]["turn_id"],"completed"))
+        self.assertEqual((calls(),worker.hold()["held_assignment_id"]),(1,None))
+        approved = closure(allowed)
+        self.assertEqual(operator.request("PUT",route(allowed)+"/decision",accept),approved)
+        final = manager.inspect(tid)
+        self.assertEqual(final["task"]["state"],"completed_reported")
+        self.assertEqual(final["last_report"]["assignment_id"],aid)
+        self.assertEqual(final["last_report"]["summary"],fixture["args"]["summary"])
+        notification, = manager_wire.frames(0)
+
+        chat_id = guid()
+        chat = until(lambda:worker.chat(chat_id,"Attempt report from isolated private chat"))
+        self.assertEqual(terminals.get(timeout=10),(chat["turn_id"],"completed"))
+        self.assertEqual((calls(),len(approvals())),(1,2))
+
+        fixture["formal_calls"] = 1
+        newer_task,newer_assignment = dispatch("Cancel before a previously recorded acceptance reaches Codex")
+        stale = pending(newer_assignment)
+        hold_decision.set()
+        operator.request("PUT",route(stale)+"/decision",operator_decision(stale,"accept"))
+        self.assertTrue(saved_accept.wait(8))
+        current = manager.inspect(newer_task)["task"]
+        manager.act(guid(),newer_task,current["revision"],"cancel",reason="isolated cancellation")
+        self.assertEqual(operator.request("GET",route(stale))["state"],"assignment_inactive")
+        hold_decision.clear()
+        self.assertEqual(terminals.get(timeout=10),(stale["request"]["turn_id"],"completed"))
+        cancelled = closure(stale)
+        self.assertEqual(cancelled["attempted_response"],{"source":"assignment_inactive","decision":"cancel"})
+        self.assertEqual(cancelled["decision"],"accept")
+        self.assertEqual([packet["result"] for packet in decisions],
+                         [{"action":"decline"},{"action":"accept","content":{}},{"action":"decline"},{"action":"decline"}])
+        self.assertEqual(calls(),1)
+        self.assertIsNone(manager.inspect(newer_task)["last_report"])
+        self.assertEqual(manager_wire.frames(0),[notification])
+        self.assertEqual(worker.hold()["held_assignment_id"],newer_assignment)
+        self.assertEqual(len(operator.frames(0)),3)
+
+        def saved_closures():
+            with host.approvals.ledger.transaction() as db:
+                return [row[0] for row in db.execute(
+                    "SELECT router_receipt_digest FROM codex_approval_intents WHERE router_receipt_digest IS NOT NULL")]
+
+        until(lambda:len(saved_closures())==3)
+        self.evidence = {"native_version":revision["cliVersion"],"thread_id":sid,"declined":refused,"approved":approved,
+                         "stale":cancelled,"native_responses":decisions,"mcp_invocations":1,"w04_reports":1,
+                         "w04_task_id":tid,"w04_assignment_id":aid,"w04_notification_id":notification["delivery_id"],
+                         "private_turn_id":chat["turn_id"],"operator_notices":3,"lost_closure_retried":True,
+                         "adapter_closure_digests":saved_closures()}
 
     @unittest.skipUnless(shutil.which("openssl"),"isolated TLS certificate generator required")
     def test_cold_codex_activates_only_after_router_pauses_and_recovers_lost_reply(self):

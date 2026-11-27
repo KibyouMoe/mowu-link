@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath, PureWindowsPath
+import re
 
 from . import delivery
 from .messages import valid_guid
@@ -11,6 +12,8 @@ from .storage import Fault, encode, require, string
 
 TTL_SECONDS = 600
 DECISIONS = ("accept","cancel")
+REPORT_APPROVAL = "worker_report"
+REPORT_SERVER = re.compile(r"[A-Za-z0-9_-]{1,64}")
 DSH_NON_GRANT_OUTCOMES = ("rejected","cancelled","unavailable")
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS native_approvals (
@@ -52,6 +55,16 @@ def validate_file_changes(changes):
 def validate_request(request):
     require(isinstance(request,dict),422,"invalid_approval_request")
     common = {"session","turn_id","item_id","decisions"}
+    if request.get("kind")==REPORT_APPROVAL:
+        require(set(request)==common|{"kind","server","task_id","assignment_id","arguments_digest"},
+                422,"invalid_approval_request")
+        for field in common-{"decisions"}:
+            require(len(string(request,field))<=200 and "\0" not in request[field],422,"invalid_approval_request")
+        require(REPORT_SERVER.fullmatch(string(request,"server")) and valid_guid(request["task_id"])
+                and valid_guid(request["assignment_id"]) and
+                re.fullmatch(r"[0-9a-f]{64}",string(request,"arguments_digest"))
+                and request["decisions"]==list(DECISIONS),422,"invalid_report_approval_request")
+        return
     if request.get("kind")=="file_change":
         require(common|{"kind","changes"}<=set(request)<=common|{"kind","changes","reason"},
                 422,"invalid_approval_request")
@@ -109,6 +122,22 @@ def record(row,worker_session,now):
     return result
 
 
+def report_approval_active(db,orders,wid,session,request):
+    if request.get("kind")!=REPORT_APPROVAL:
+        return True
+    status = orders.assignment_status(db,wid,request["task_id"],
+                                      {"session_id":session,"assignment_id":request["assignment_id"]})
+    return status["state"]=="active"
+
+
+def approval_view(db,orders,row,session,now):
+    result = record(row,session,now)
+    if result["state"] in ("pending","decided") and not report_approval_active(
+            db,orders,row["worker_id"],session,result["request"]):
+        result["state"] = "assignment_inactive"
+    return result
+
+
 def validate_dsh_proof(proof,aid,turn,outcomes):
     require(isinstance(proof,dict) and set(proof)=={"approval_id","turn_id","asked_seq","decided_seq","outcome"}
             and proof["approval_id"]==aid and proof["turn_id"]==turn
@@ -156,9 +185,12 @@ def close_native(db,orders,wid,aid,row,session,now,body):
         return
     if attempted is not None and not native_deadline:
         decision,source = attempted["decision"],attempted["source"]
+        inactive = (source=="assignment_inactive" and decision=="cancel"
+                    and not report_approval_active(db,orders,wid,session,json.loads(row["request"])))
         require((source=="operator" and decision in DECISIONS and decision==row["decision"])
                 or (source=="expiry" and decision=="cancel" and now>=row["expires_at"]
-                    and "cancel" in json.loads(row["request"])["decisions"]),409,"approval_response_conflict")
+                    and "cancel" in json.loads(row["request"])["decisions"])
+                or inactive,409,"approval_response_conflict")
     db.execute("""UPDATE native_approvals SET closed_at=?,attempted_response=?,native_proof=?
                   WHERE worker_id=? AND approval_id=?""",(now,stored,stored_proof,wid,aid))
 
@@ -202,7 +234,7 @@ def route(orders,actor,method,parts,body):
         if len(parts)==2:
             require(method=="GET" and actor==operator,403,"forbidden")
             rows = db.execute("SELECT * FROM native_approvals WHERE worker_id=? ORDER BY rowid DESC LIMIT 100",(wid,))
-            return {"items":[record(row,session,now) for row in rows]}
+            return {"items":[approval_view(db,orders,row,session,now) for row in rows]}
         aid = parts[2]
         require(valid_guid(aid),422,"invalid_approval_id")
         row = db.execute("SELECT * FROM native_approvals WHERE worker_id=? AND approval_id=?",(wid,aid)).fetchone()
@@ -215,15 +247,16 @@ def route(orders,actor,method,parts,body):
             raw = encode(request)
             if row:
                 require(row["worker_session"]==session and row["request"]==raw,409,"approval_request_conflict")
-                return record(row,session,now)
+                return approval_view(db,orders,row,session,now)
             digest = hashlib.sha256(raw.encode()).hexdigest()
             db.execute("""INSERT INTO native_approvals(worker_id,approval_id,worker_session,request,request_digest,expires_at)
                           VALUES (?,?,?,?,?,?)""",(wid,aid,session,raw,digest,now+TTL_SECONDS))
-            delivery.enqueue(db,operator,"approval.requested",{"approval_id":aid,"worker_id":wid})
+            if report_approval_active(db,orders,wid,session,request):
+                delivery.enqueue(db,operator,"approval.requested",{"approval_id":aid,"worker_id":wid})
         elif method=="GET" and len(parts)==3:
             require(actor==operator,403,"forbidden")
             require(row,404,"approval_not_found")
-            return record(row,session,now)
+            return approval_view(db,orders,row,session,now)
         elif method=="PUT" and len(parts)==4 and parts[3]=="decision":
             require(actor==operator,403,"forbidden")
             require(row,404,"approval_not_found")
@@ -233,8 +266,10 @@ def route(orders,actor,method,parts,body):
             require(decision in json.loads(row["request"])["decisions"],422,"unsupported_approval_decision")
             if row["decision"] is not None:
                 require(row["decision"]==decision,409,"approval_decision_conflict")
-                return record(row,session,now)
-            require(record(row,session,now)["state"]=="pending",409,"approval_not_pending")
+                return approval_view(db,orders,row,session,now)
+            state = approval_view(db,orders,row,session,now)["state"]
+            require(state!="assignment_inactive",409,"stale_assignment")
+            require(state=="pending",409,"approval_not_pending")
             db.execute("UPDATE native_approvals SET decision=? WHERE worker_id=? AND approval_id=?",(decision,wid,aid))
         elif method=="POST" and len(parts)==4 and parts[3]=="receipt":
             require(actor==worker,403,"forbidden")
@@ -259,4 +294,4 @@ def route(orders,actor,method,parts,body):
         else:
             raise Fault(404,"unknown_approval_route")
         updated = db.execute("SELECT * FROM native_approvals WHERE worker_id=? AND approval_id=?",(wid,aid)).fetchone()
-        return record(updated,session,now)
+        return approval_view(db,orders,updated,session,now)

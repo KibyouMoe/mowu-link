@@ -11,6 +11,11 @@ TOOLSET = json.loads(Path(__file__).with_name("agent-toolset.json").read_text(en
 REPORT_TOOL = next(tool for tool in TOOLSET if tool["name"]=="worker_report")
 
 
+def formal_report_origin(origin,task_id,assignment_id):
+    return (origin.get("kind") in ("task","task_update","task_probe","question_answer")
+            and (origin.get("task_id"),origin.get("assignment_id"))==(task_id,assignment_id))
+
+
 def serve(worker, native_id, reader, writer):
     def report(_params, args):
         return worker.report(native_id, args["task_id"], args["assignment_id"], args["summary"],

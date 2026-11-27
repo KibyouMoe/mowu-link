@@ -37,6 +37,7 @@ class CodexSessionFamily(SessionFamily):
         native = AppServerHost(events,session,path,self.args.public_image_root,
                                relay_command_approvals=self.args.relay_command_approvals,
                                relay_file_approvals=self.args.relay_file_approvals,
+                               relay_report_approvals=self.args.relay_report_approvals,
                                read_only_assignments=self.args.read_only_assignments,workspace=self.assignment_workspace)
         pinned_thread(native,self.workspace)
         if not cold:

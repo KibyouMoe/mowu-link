@@ -8,6 +8,7 @@ from urllib.parse import urlencode
 
 from . import display, links, peer_files, peer_retry, queued_chat, user_questions, worker_catalog, worker_cleanup, worker_commands, worker_handoff, worker_media, worker_resume
 from . import question_outbox
+from .agent_tools import formal_report_origin
 from .messages import valid_guid
 from .questions import validate_options
 from .storage import Database, Fault, encode, guid, require, string
@@ -725,8 +726,7 @@ class Worker:
                     raise
                 self.display_cleanup(task_id,assignment_id,kind,"recorded","Router 已收到原派发的清理确认。",cleanup_id)
                 return receipt
-            require(origin["kind"] in ("task", "task_update", "task_probe", "question_answer") and origin["task_id"] == task_id
-                    and origin["assignment_id"] == assignment_id, 403, "wrong_report_origin")
+            require(formal_report_origin(origin,task_id,assignment_id),403,"wrong_report_origin")
             require(outcome in ("completed", "blocked", "continue_requested"), 422, "unsupported_outcome")
             body = {"session_id": self.session, "assignment_id": assignment_id,
                     "outcome": outcome, "summary": summary}

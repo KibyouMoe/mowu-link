@@ -8,6 +8,8 @@ from urllib.error import URLError
 from uuid import NAMESPACE_URL, uuid5
 
 from . import display, links, peer_files, peer_retry, queued_chat, user_questions, worker_catalog, worker_commands, worker_handoff, worker_media, worker_resume
+from .agent_tools import formal_report_origin
+from .approvals import REPORT_APPROVAL, validate_request
 from .messages import valid_guid
 from .storage import Fault, encode, require, string
 from .wire import serve_authenticated
@@ -231,6 +233,13 @@ class WorkerService:
             require(w.adapter.bound_session()==session,403,"wrong_native_session")
             target = "approvals/"+w.worker_id+"/"+parts[0]
             if method=="POST" and len(parts)==1:
+                if body.get("kind")==REPORT_APPROVAL:
+                    validate_request(body)
+                    require(w.assignment_session(body["assignment_id"])==session,403,"wrong_assignment_session")
+                    native = w.adapter.input_for_turn(session,body["turn_id"])
+                    origin = w.adapter.origin(native,session=session)
+                    require(formal_report_origin(origin,body["task_id"],body["assignment_id"]),
+                            403,"wrong_report_origin")
                 result = w.router.request(method,target,{"session_id":w.session,"request":body})
             elif method=="POST" and len(parts)==2 and parts[1]=="receipt":
                 fields = {"session","request_digest"}
