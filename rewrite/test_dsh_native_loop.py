@@ -2447,10 +2447,13 @@ class NativeLoop(NativeProcess):
             with recovered.db.transaction() as db:
                 local, = db.execute("SELECT attachment_id,sha256 FROM uploads").fetchall()
             self.assertEqual(local["sha256"],digest)
+        with self.start_native(directory,session,"cleanup-container-export-reopen",use_tls=use_tls) as reopened:
+            cold = self.read_native(reopened,"read")
+            self.assertEqual(cold["inputs"],observed["inputs"])
+            self.assertEqual(cold["turns"],observed["turns"])
+            self.assertEqual(cold["modelRequests"],[])
+            self.assertFalse(DshHost(runtime,link=link).request("activity",session)["workspace_pending"])
         if docker_fixture:
-            with self.start_native(directory,session,"cleanup-container-export",use_tls=True) as reopened:
-                self.assertEqual(self.read_native(reopened,"read")["inputs"],observed["inputs"])
-                self.assertFalse(DshHost(runtime,link=link).request("activity",session)["workspace_pending"])
             name = "MOWULINK_DSH_WINDOWS_WORKSPACE_EVIDENCE"
         else:
             name = ("MOWULINK_DSH_WORKSPACE_TLS_EVIDENCE" if use_tls else "MOWULINK_DSH_WORKSPACE_ARTIFACT_EVIDENCE")
@@ -2460,6 +2463,7 @@ class NativeLoop(NativeProcess):
                 "upload_offsets":offsets,"symlink_rejected":True,"container_id":lease["container_id"],
                 "container_present_without_w04_receipt":True,"handoff_waited_for_cleanup":True,"w04":receipt,
                 "w04_attempts":report_attempts,"container_absent_after_replay":True,
+                "native_inputs_after_reopen":len(cold["inputs"]),"native_model_requests_after_reopen":len(cold["modelRequests"]),
                 "manager_notification":notify["delivery_id"],"router_state":details["task"]["state"],
                 "native_link":"IPv4 loopback with mutual TLS" if use_tls else "Unix socket",
                 "boundary":("Installed Windows DSH AgentLoop and native file ledger, Docker CLI fixture, real Worker and Router. "
