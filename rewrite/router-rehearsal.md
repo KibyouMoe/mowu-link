@@ -476,6 +476,18 @@ python3 -m rewrite.state_bundle rollback --snapshot ./snapshot --manifest-sha256
 
 版本级复跑为 `python3 -m rewrite.release_check --repository . --previous b31cee5da7c8dc74a76accdd78d8a6c5cb49484c --new 5de36ad66df26dc34fe3832ed14e77b1d9f19551`。两个已提交版本在各自新目录启动真实 Router，以专用临时 TLS 和身份验同一张待派单。旧包→新包→旧包后只查到原单一张，新试用库字节未变。该演练在 macOS 跑过；Windows 与跨机宿主尚待验收。
 
+### 新版 Router 与 Worker 分步更新
+
+安装含首次投递核验的版本时，先更新 Router，再更新 Worker。Worker 从自己的投递状态查询确认 Router 已启用该核验，然后才登记。若次序装反，工位状态显示 `router_assignment_status_required`。未登记的新进程不会接管 Router 的队首。Router 升级后，上一版 Worker 可继续处理原队首。切换到新版 Worker 时，沿用对应的原工位状态库及原宿主账本。
+
+```sh
+python3 -B -m rewrite.release_check --repository . --component assignment-rollout \
+  --previous 6e96d976207b7c5f96ba309e199ac4486834e78b \
+  --new 3958626357695e690c9b8c6b5ef2ed0282a9d1d9
+```
+
+演练使用两套实际安装包、三个独立 HTTPS 进程和临时账本。顺序装反时，上一版 Router 保持原待派单，登记与宿主输入均为零。先更新 Router 后，上一版 Worker 领取同一张单并取得原生夹具收件。新版 Worker 再启动，保留原持单、派发和回合。两次原 W04 返回同一个业务回执，Worker 释放原派发，Router 保留待验收，宿主输入及管理通知各一条。宿主及发起 W04 的回调均为夹具。
+
 ### 保留试用写入的新版版本回退
 
 发现试用库已有写入时，保留升级前快照，再停止试用写者并另取完整快照。普通 `state_bundle rollback` 继续拒绝用升级前快照覆盖试用写入。在隔离目录验证退版时，可用 `state_bundle restore` 从试用结束快照恢复副本，让经核验的前一发行包读取该副本。对应的原生宿主账本也须停写并保留。整个过程应保留试用原库及两份快照。

@@ -6,6 +6,8 @@
 
 ## 检查点与证据
 
+新版分步更新用两套锁定安装包复现顺序装反时，新 Worker 曾先向上一版 Router 登记。修复后，Worker 在 W01 前核对 Router 的派发状态能力。装反时 Router 工位登记和宿主输入均为零。Router 先更新时，上一版 Worker 领取原待派单，换新版 Worker 后保留原派发及原生回合，两次交件读回同一 W04，仅一条宿主输入、一条管理通知。macOS 相关回归 72 项通过、跳过 1 项。Windows 安装组 21 项和 DSH SDK 组 14 项通过，Windows 安装包另通过两种更新顺序的实测。Linux arm64 通过 187 项、按环境跳过 128 项，跨系统 HTTPS 回环留一条宿主输入及一条 W04 通知。两版重做发行包的隔离回退保留试用写入。模型和飞书仍使用夹具。[复跑命令](router-rehearsal.md#新版-router-与-worker-分步更新) · [实测回执](evidence/rewrite-assignment-rollout.json)
+
 隔离 Router、真实 HTTP 和 SQLite 复现了过期 W03 触发第二次宿主输入，以及 Router 在 W03 提交后、宿主收件前已收到取消，宿主却仍先启动工单。修复后，Worker 保留原 W03 回执语义，写入宿主前单独查询本会话与派发的当前权限。完工后的旧 Worker 和空白宿主没有新输入，Router 原成果和通知仍只有一份。先到的取消只投原控制消息，宿主清理凭据齐备后才以 W04 标已取消。原 W03 丢回包且仍持权时仍可续接。另核不同身份、旧会话、错派发号，以及宿主已明确拒收后查询暂不可用的路径。查询和宿主写入跨进程。取消若发生在查询通过后的投递过程中，仍由既有控制与清理回执收口。宿主使用夹具。复跑 `python3 -B -m unittest -v rewrite.test_mainline rewrite.test_cleanup`。
 
 实现 `b905a6c9df136a5b0b9ea395ba92dcba25c91815` 在 macOS 相关回归中通过 86 项、按环境跳过 1 项。同一 369 文件安装包在 Linux arm64 通过 187 项、按环境跳过 128 项，另有 58 项旧版历史用例退出新版验收。首次试跑由 Docker 证实容器在 512 MiB 上限触发 OOM，隔离测试上限调至 768 MiB 后完成全套；跨系统 HTTPS 核回一次夹具宿主输入和一条 W04 通知。包 SHA-256 为 `a447e3e348f73af2efb40e01a9a9ee83b0547132887de3ca29eae39451bfcf47`。Windows 安装与 DSH 原生 SDK 各通过 21、14 项，模型由本地脚本驱动。候选包与 `6e96d976207b7c5f96ba309e199ac4486834e78b` 的新版间回退保住试用期 W04、来源附件与私聊回执，原号重试新增输入和通知均为零。[Windows 日志](https://github.com/KibyouMoe/mowu-link/actions/runs/45951496590) · [跨系统复跑](README.md#跨系统验收)

@@ -1,0 +1,90 @@
+{
+  "previous_rewrite_release": "6e96d976207b7c5f96ba309e199ac4486834e78b",
+  "candidate_release": "3958626357695e690c9b8c6b5ef2ed0282a9d1d9",
+  "macos": {
+    "assignment_rollout": {
+      "task_id": "333e7685-9c42-41f1-9e87-47e307910818",
+      "assignment_id": "f5743dcb-f7f2-4c4f-bc6e-f38907025ce8",
+      "native_turn_id": "b0d0e334-5253-4ccb-84bd-495d75391433",
+      "native_delivery_id": "e490874b-c5f5-4313-856f-254e09672407",
+      "manager_delivery_id": "d5ba14ed-5733-4d1b-a673-91c17e147e0a",
+      "w04": {
+        "recorded": true,
+        "release_assignment_id": "f5743dcb-f7f2-4c4f-bc6e-f38907025ce8",
+        "task_state": "completed_reported"
+      },
+      "hold_after_w04": null,
+      "out_of_order_error": "router_assignment_status_required",
+      "out_of_order_registrations": 0,
+      "out_of_order_native_inputs": 0,
+      "native_inputs": 1,
+      "manager_notifications": 1
+    },
+    "tests_run": 73,
+    "skipped": 1,
+    "package_sha256": "2d201db40b545b0e9302ed0860b8ea8ed62cec9f8bea94171d04453a49458840",
+    "rollback": {
+      "original_reports": 1,
+      "extra_native_inputs": 0,
+      "extra_manager_notifications": 0
+    }
+  },
+  "windows": {
+    "assignment_rollout": {
+      "assignment_id": "7b5dace0-4474-41e9-92df-6a950b29fa07",
+      "hold_after_w04": null,
+      "manager_delivery_id": "54155ce7-7759-46f4-ae44-cb68fc09bf43",
+      "manager_notifications": 1,
+      "native_input": {
+        "delivery_id": "140ecad6-807c-4909-aebc-c56fac34339a",
+        "digest": "c781886c9e283f38a8a35c73c94d3517a448894c8ac7b11e6a43caedb35fed0f",
+        "native_id": "6da06cf3-20b1-45a0-aaa3-6abaa4b22950",
+        "session": "assignment-rollout-session",
+        "turn_id": "351ca97e-f321-43ae-9716-f8a7efb1a4a4"
+      },
+      "native_inputs": 1,
+      "out_of_order_error": "router_assignment_status_required",
+      "out_of_order_native_inputs": 0,
+      "out_of_order_registrations": 0,
+      "scope": "Independent installed releases, loopback TLS, fixture native session and callback.",
+      "task_id": "6c63f4cd-48d6-4df8-8f8a-a7e357f20331",
+      "w04": {
+        "recorded": true,
+        "release_assignment_id": "7b5dace0-4474-41e9-92df-6a950b29fa07",
+        "task_state": "completed_reported"
+      }
+    },
+    "package_sha256": "535689ac435f3d23a83de6b90b8d476b642f278e7b2813972b79c3cc1d2dcb39",
+    "installation_tests": 21,
+    "dsh_native_sdk_tests": 14,
+    "actions_run": "https://github.com/KibyouMoe/mowu-link/actions/runs/45952337125"
+  },
+  "linux": {
+    "release": "3958626357695e690c9b8c6b5ef2ed0282a9d1d9",
+    "files": 369,
+    "run": 315,
+    "skip": 128,
+    "archival_excluded": 58,
+    "fail": 0,
+    "native_inputs": 1,
+    "cross_os": {
+      "controller": "Darwin",
+      "worker_release": "3958626357695e690c9b8c6b5ef2ed0282a9d1d9",
+      "task_id": "de68f3fd-1a76-4aff-b48d-0e139e579660",
+      "assignment_id": "607242d2-79dd-4b16-bd46-18d033801b15",
+      "delivery_id": "e1cf9563-c3ac-4407-8e01-da9a221cf29b",
+      "fixture_native_id": "77fa15d2-a46a-4731-9860-4130fd082c04",
+      "fixture_turn_id": "add5f1c2-77c6-4cc0-832d-310922b0b294",
+      "after_turn": "working",
+      "after_report": "completed_reported",
+      "worker_holds_after_receipt": {
+        "held_task_id": null,
+        "held_assignment_id": null
+      },
+      "router_notifications": 1,
+      "unknown_identity_http": 401,
+      "untrusted_certificate_rejected": true
+    }
+  },
+  "boundary": "Isolated packages with independent TLS service processes and disposable SQLite stores. Native model and platform-facing delivery for the rollout use fixtures."
+}
