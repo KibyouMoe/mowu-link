@@ -95,6 +95,8 @@ jobs:
                 'rewrite.test_questions.Questions.test_lost_question_ack_replays_same_generated_guid'
                 'rewrite.test_questions.Questions.test_question_outbox_recovers_before_commit_and_delivers_the_original_answer_once'
                 'rewrite.test_questions.Questions.test_uncommitted_question_from_a_transferred_assignment_stays_rejected'
+                'rewrite.test_link_health.LinkHealth.test_adapter_outage_cannot_strand_a_durable_report_while_router_is_online'
+                'rewrite.test_link_health.LinkHealth.test_adapter_outage_does_not_block_w05_but_keeps_the_answer_for_the_original_host'
                 'rewrite.test_state_bundle.Bundle.test_managed_bundle_preserves_lineage_and_can_only_rollback_unchanged_ledgers'
                 'rewrite.test_state_bundle.Bundle.test_prepare_worker_chat_archive_after_both_receipts_recover'
                 'rewrite.test_state_bundle.Bundle.test_offline_handoff_and_rollback_reserve_the_codex_workspace_writer'

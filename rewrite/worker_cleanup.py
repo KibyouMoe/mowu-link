@@ -57,9 +57,10 @@ def confirm(worker, tid, aid, kind, outcome, cleanup_id):
     return reply
 
 
-def flush(worker):
+def flush(worker,*,check_native=True):
     with worker.db.transaction() as db:
-        rows = db.execute("SELECT * FROM scoped_cleanup_reports WHERE receipt IS NULL ORDER BY rowid").fetchall()
+        rows = db.execute("""SELECT * FROM scoped_cleanup_reports WHERE receipt IS NULL
+            AND (? OR proof IS NOT NULL) ORDER BY rowid""",(check_native,)).fetchall()
     for row in rows:
         body = json.loads(row["body"])
         cleanup_id,tid,kind,aid = row["cleanup_id"],row["task_id"],row["kind"],body["assignment_id"]

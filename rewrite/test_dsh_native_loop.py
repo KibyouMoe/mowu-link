@@ -2152,6 +2152,82 @@ class NativeLoop(NativeProcess):
         if output := os.environ.get("MOWULINK_DSH_CONTAINER_EVIDENCE"):
             Path(output).write_text(json.dumps({"cases":cases},ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
 
+    def test_dsh_saved_w04_reaches_router_with_the_adapter_still_offline(self):
+        directory = Path(self.enterContext(tempfile.TemporaryDirectory(dir="/tmp",prefix="mldsh-w04-offline-")))
+        session = "dsh-w04-adapter-offline"
+        clock = Clock()
+        host = DshHost(directory)
+        host.session = session
+        loop = self.enterContext(Loop.isolated(clock,host_factory=lambda _path,_name:host))
+        worker,manager = loop.worker,loop.hermes
+        service = WorkerService(worker,clock)
+        host_key,native_key = guid(),guid()
+        worker_url = self.open_worker(service,{native_key:"adapter/oguri"})
+        adapter = serve_adapter(loop.adapter,"oguri",{host_key:"worker/oguri"},("127.0.0.1",0),None)
+        drops = []
+        disconnected = Event()
+
+        def allow_connection(_socket,_client):
+            if disconnected.is_set():
+                drops.append(clock())
+                return False
+            return True
+
+        adapter.verify_request = allow_connection
+        request = loop.wire.request
+        interrupted = []
+
+        def lose_report(method,path,*args,**kwargs):
+            if method=="POST" and path==f"tasks/{tid}/report":
+                interrupted.append((args[0],args[1]))
+                raise Fault(503,"fixture_report_not_delivered",True)
+            return request(method,path,*args,**kwargs)
+
+        with (codex_driver.running(adapter) as adapter_url,
+              tool_listener(directory,loop.adapter,Client(worker_url,native_key)),
+              self.start_native(directory,session,"formal") as native):
+            worker.adapter = RemoteAdapter(Client(adapter_url,host_key),session)
+            service.step()
+            clock.advance(10)
+            service.step()
+            tid = manager.create(guid(),"DSH offline adapter","Report once","oguri")["task_id"]
+            with patch.object(loop.wire,"request",side_effect=lose_report):
+                service.step()
+                observed = self.read_native(native,"read")
+            self.assertEqual(len(observed["inputs"]),1)
+            self.assertEqual([call["name"] for call in observed["calls"]],["worker_report","worker_report"])
+            self.assertEqual([result["isError"] for result in observed["results"]],[True,True])
+            self.assertEqual(len(interrupted),2)
+            self.assertEqual(interrupted[0],interrupted[1])
+            aid = worker.hold()["held_assignment_id"]
+            with worker.db.transaction() as db:
+                stored = db.execute("SELECT body,receipt FROM outbox WHERE assignment_id=?",(aid,)).fetchone()
+            self.assertEqual(json.loads(stored["body"]),interrupted[0][0])
+            self.assertIsNone(stored["receipt"])
+
+            disconnected.set()
+            clock.advance(5)
+            service.step()
+            service.step()
+            status = service.status()
+            self.assertTrue(status["router_connected"])
+            self.assertFalse(status["adapter_connected"])
+            self.assertTrue(drops)
+            self.assertIsNone(worker.hold()["held_assignment_id"])
+            detail = manager.inspect(tid)
+            self.assertEqual(detail["task"]["state"],"completed_reported")
+            self.assertEqual(detail["last_report"]["assignment_id"],aid)
+            self.assertEqual(self.read_native(native,"read"),observed)
+            notices = manager.messages(source="oguri")["items"]
+            reports = [item for item in notices if item.get("task_id")==tid]
+            (report,) = reports
+            self.assertEqual(len(notices),2)
+            self.evidence = {"task_id":tid,"assignment_id":aid,"native_input":observed["inputs"][0],
+                "tool_call_ids":[call["callId"] for call in observed["calls"]],"report_key":interrupted[0][1],
+                "report_notice":report["message_id"],"router_state":detail["task"]["state"],"status":status,
+                "new_host_inputs":0,"new_tool_calls":0,"adapter_tcp_rejections":len(drops),
+                "boundary":"Native DSH with scripted model, real Router and adapter HTTP, isolated SQLite."}
+
     def test_native_dsh_work_survives_one_broken_link(self):
         image,cli = self.container_engine()
         cases = []

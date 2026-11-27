@@ -16,6 +16,8 @@ FOLLOWUP_FRAMES = {"task.updated","task.probe","task.shelved","task.cancel","tas
 ASSIGNMENT_STATUS_REQUIRED = "router_assignment_status_required"
 TRANSPORT_RECONCILIATION_ERRORS = {"worker_cursor_ahead_of_router","worker_confirmed_prefix_missing",
                                    "worker_inbox_frame_conflict","worker_delivery_gap"}
+ADAPTER_OBSERVATION_ERRORS = {"adapter_connection_unconfirmed","adapter_identity_unconfirmed",
+                              "wrong_native_session","native_agent_unavailable","invalid_host_observation"}
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS native_binding(
@@ -242,20 +244,29 @@ class Worker:
                 pending = [json.loads(r[0]) for r in db.execute("""SELECT i.frame FROM inbox i
                     LEFT JOIN peer_retry p ON p.operation_id=i.delivery_id AND p.phase='delivery'
                     WHERE i.done=0 AND COALESCE(p.retry_at,0)<=? ORDER BY i.rowid""",(self.clock(),))]
+            adapter_failure = None
             for frame in pending:
-                if frame["kind"]=="peer.message":
-                    done = peer_retry.attempt(self,"delivery",frame["delivery_id"],frame["payload"]["message_id"],
-                                              self.process,frame)
-                else:
-                    done = self.process(frame)
+                try:
+                    if frame["kind"]=="peer.message":
+                        done = peer_retry.attempt(self,"delivery",frame["delivery_id"],frame["payload"]["message_id"],
+                                                  self.process,frame)
+                    else:
+                        done = self.process(frame)
+                except Fault as error:
+                    if error.code not in ADAPTER_OBSERVATION_ERRORS:
+                        raise
+                    adapter_failure = error
+                    break
                 if done:
                     with self.db.transaction() as db:
                         db.execute("UPDATE inbox SET done=1 WHERE delivery_id=?", (frame["delivery_id"],))
                         db.execute("DELETE FROM peer_retry WHERE phase='delivery' AND operation_id=?",(frame["delivery_id"],))
-            self.flush_reports()
+            self.flush_reports(check_native_cleanup=adapter_failure is None)
             self.flush_peer_receipts()
             self.flush_peer_sends()
             self.flush_questions()
+            if adapter_failure is not None:
+                raise adapter_failure
 
     def process(self, frame):
         with self.lock:
@@ -857,7 +868,7 @@ class Worker:
             db.execute("UPDATE jobs SET stage='released' WHERE assignment_id=? AND stage='accepted'", (aid,))
         return reply
 
-    def flush_reports(self):
+    def flush_reports(self,*,check_native_cleanup=True):
         with self.db.transaction() as db:
             pending = db.execute("""SELECT task_id,assignment_id,body FROM outbox
                                     JOIN jobs USING(assignment_id) WHERE receipt IS NULL""").fetchall()
@@ -875,8 +886,9 @@ class Worker:
             except Fault as error:
                 if error.code != "stale_assignment":
                     raise
-        self.flush_cleanup_waits()
-        worker_cleanup.flush(self)
+        if check_native_cleanup:
+            self.flush_cleanup_waits()
+        worker_cleanup.flush(self,check_native=check_native_cleanup)
 
     def flush_cleanup_waits(self):
         with self.db.transaction() as db:

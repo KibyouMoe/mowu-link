@@ -11,7 +11,7 @@ from . import display, links, peer_files, peer_retry, queued_chat, user_question
 from .messages import valid_guid
 from .storage import Fault, encode, require, string
 from .wire import serve_authenticated
-from .worker import ASSIGNMENT_STATUS_REQUIRED, TRANSPORT_RECONCILIATION_ERRORS
+from .worker import ADAPTER_OBSERVATION_ERRORS, ASSIGNMENT_STATUS_REQUIRED, TRANSPORT_RECONCILIATION_ERRORS
 
 
 HOST_CAPABILITY_FLAGS = {
@@ -134,7 +134,7 @@ class WorkerService:
                 self.router_connected = False
                 self.next_router_attempt = self.clock() + (self.probe_interval if err.code==ASSIGNMENT_STATUS_REQUIRED else 20*60)
                 links.observe(w,"router",False,self.host_session)
-            if err.code in ("adapter_connection_unconfirmed","wrong_native_session","native_agent_unavailable"):
+            if err.code in ADAPTER_OBSERVATION_ERRORS:
                 self.adapter_connected = False
                 self.host_error = err.code
                 self.host_observed_at = self.clock()

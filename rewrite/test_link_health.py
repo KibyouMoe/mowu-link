@@ -108,6 +108,71 @@ class LinkHealth(unittest.TestCase):
         self.assertIsNone(self.service.status()["host_error"])
         self.assertIs(self.service.status()["native_capabilities"]["session_catalog"],False)
 
+    def test_adapter_outage_cannot_strand_a_durable_report_while_router_is_online(self):
+        task = self.dispatched()
+        tid = task["task_id"]
+        aid = self.worker.hold()["held_assignment_id"]
+        (_,native), = self.loop.native.entries()
+        request = self.loop.wire.request
+
+        def lose_before_commit(method,path,*args,**kwargs):
+            if path==f"tasks/{tid}/report":
+                raise ConnectionError("lost W04 before Router commit")
+            return request(method,path,*args,**kwargs)
+
+        with patch.object(self.loop.wire,"request",side_effect=lose_before_commit), self.assertRaises(ConnectionError):
+            self.worker.report(native["native_id"],tid,aid,"Original durable W04")
+        self.assertIsNone(self.manager.inspect(tid)["last_report"])
+        self.worker.adapter = RemoteAdapter(self.unavailable)
+        self.clock.advance(5)
+        self.service.step()
+        self.service.step()
+
+        self.assertTrue(self.service.status()["router_connected"])
+        self.assertFalse(self.service.status()["adapter_connected"])
+        self.assertEqual(self.service.status()["host_error"],"adapter_connection_unconfirmed")
+        self.assertEqual(self.manager.inspect(tid)["task"]["state"],"completed_reported")
+        self.assertIsNone(self.worker.hold()["held_assignment_id"])
+        self.assertEqual(len(self.loop.native.entries()),1)
+        notices = self.loop.manager_wire.frames(0)
+        self.assertEqual(sum(frame["payload"].get("task_id")==tid for frame in notices),1)
+        self.assertEqual(len(self.events("disconnect")),1)
+
+    def test_adapter_outage_does_not_block_w05_but_keeps_the_answer_for_the_original_host(self):
+        task = self.dispatched()
+        tid = task["task_id"]
+        aid = self.worker.hold()["held_assignment_id"]
+        (_,native), = self.loop.native.entries()
+        request = self.loop.wire.request
+
+        def lose_before_commit(method,path,*args,**kwargs):
+            if path==f"tasks/{tid}/questions":
+                raise ConnectionError("lost W05 before Router commit")
+            return request(method,path,*args,**kwargs)
+
+        with patch.object(self.loop.wire,"request",side_effect=lose_before_commit), self.assertRaises(ConnectionError):
+            self.worker.ask(native["native_id"],"case","Proceed?",[])
+        with self.worker.db.transaction() as db:
+            qid, = db.execute("SELECT question_id FROM questions").fetchone()
+        self.worker.adapter = RemoteAdapter(self.unavailable)
+        self.clock.advance(5)
+        self.service.step()
+        q, = self.manager.questions(task_id=tid)["items"]
+        self.assertEqual((q["question_id"],q["assignment_id"]),(qid,aid))
+        self.manager.answer(guid(),tid,qid,{"mode":"skip"})
+        self.service.step()
+        self.assertEqual(len(self.loop.native.entries()),1)
+        self.assertEqual(self.manager.inspect(tid)["task"]["state"],"working")
+        self.assertEqual(self.worker.hold()["held_assignment_id"],aid)
+
+        self.worker.adapter = self.loop.adapter
+        self.clock.advance(5)
+        self.service.step()
+        self.service.step()
+        (payload,receipt), = self.loop.native.entries()[1:]
+        self.assertEqual((payload["question_id"],payload["assignment_id"]),(qid,aid))
+        self.assertTrue(receipt["turn_id"])
+
     def test_native_report_returns_retryable_503_and_recovers_the_original_outbox(self):
         task = self.dispatched()
         aid = self.worker.hold()["held_assignment_id"]
