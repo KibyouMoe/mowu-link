@@ -78,6 +78,24 @@ def positions(inventory):
     return result
 
 
+def legacy_mail_preview(message,subject):
+    """Match the old collector's stored projection for the same mailbox UID."""
+    try:
+        part = message.get_body(preferencelist=("plain","html")) if message.is_multipart() else message
+        body = part.get_content() if part is not None else ""
+    except Exception:
+        try:
+            body = (message.get_payload(decode=True) or b"").decode("utf-8","replace")
+        except Exception:
+            body = ""
+    body = str(body)
+    if "<html" in body.lower() or "<body" in body.lower():
+        body = re.sub(r"(?is)<(script|style).*?</\1>"," ",body)
+        body = re.sub(r"(?s)<[^>]+>"," ",body)
+    preview = " ".join(body.split())[:200].strip()
+    return " — ".join(value for value in (subject,preview) if value) or "(empty message)"
+
+
 def record(directory,position,checksum,inventory):
     kind,epoch = inventory["kind"],inventory["epoch"]
     path = directory/(str(position)+(".eml" if kind=="email" else ".sse"))
@@ -90,23 +108,28 @@ def record(directory,position,checksum,inventory):
         msg = BytesParser(policy=policy.default).parsebytes(raw)
         legacy_id = f"email:{epoch}:{position}"
         expected = {"uid":position,"uidvalidity":int(epoch),"folder":inventory["scope"][-1],
-                    "from":str(msg.get("From","") or "").strip(),"subject":str(msg.get("Subject","") or "").strip()}
-        return legacy_id,expected,"Info",mail_text(raw,message=msg)
+                    "from":str(msg.get("From","") or "").strip(),"subject":str(msg.get("Subject","") or "").strip(),
+                    "date":str(msg.get("Date","") or "").strip()}
+        return legacy_id,(expected,legacy_mail_preview(msg,expected["subject"])),"Info",mail_text(raw,message=msg)
     frames = list(mc_frames(BytesIO(raw)))
-    if len(frames)!=1 or frames[0][0]!=str(position):
+    if len(frames)!=1:
+        raise ValueError("expected one original game SSE frame")
+    frame_id,body = frames[0]
+    frame_id = frame_id.strip() if frame_id is not None else ""
+    if not re.fullmatch(r"[0-9]{1,19}",frame_id) or int(frame_id)!=position:
         raise ValueError("original game frame does not have the required numeric SSE id")
     try:
-        payload = json.loads(frames[0][1])
+        payload = json.loads(body)
     except ValueError:
-        payload = frames[0][1]
+        payload = body
     if not isinstance(payload,(str,dict)):
         raise ValueError("unsupported original game frame payload")
     level,text = mc_text(payload,inventory["player"])
-    return f"mc_chat:sse:{position}",payload,level,text
+    return f"mc_chat:sse:{frame_id}",payload,level,text
 
 
 def prior_state(db,legacy_id,expected,level,kind):
-    row = db.execute("SELECT id,source,payload_json,disposition FROM events WHERE event_id=?",(legacy_id,)).fetchone()
+    row = db.execute("SELECT id,source,text,payload_json,disposition FROM events WHERE event_id=?",(legacy_id,)).fetchone()
     if row is None:
         return ("filtered" if level is None else "missing"),None
     try:
@@ -114,7 +137,9 @@ def prior_state(db,legacy_id,expected,level,kind):
     except ValueError:
         return "conflicting_legacy_event",row["id"]
     if kind=="email":
-        matches = isinstance(payload,dict) and all(payload.get(key)==value for key,value in expected.items())
+        metadata,preview = expected
+        matches = (isinstance(payload,dict) and row["text"]==preview
+                   and all(payload.get(key)==value for key,value in metadata.items()))
     else:
         matches = encode(payload)==encode(expected)
     if row["source"]!=kind or not matches:

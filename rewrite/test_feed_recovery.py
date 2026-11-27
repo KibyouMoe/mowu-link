@@ -197,6 +197,23 @@ print(json.dumps({"attempted":attempted,"stored":stored,"mail_reported_failed":s
             feed_recovery.stage(target,review,**arguments)
         self.assertFalse(target.exists())
 
+    def test_mail_conflict_can_change_body_without_changing_the_headers_or_uid(self):
+        arguments,_ = self.options("email")
+        manifest = arguments["source_manifest"]
+        data = json.loads(manifest.read_text())
+        original = manifest.parent/"records"/"13.eml"
+        original.write_bytes(self.mail_bytes[13].replace(b"Already persisted.",b"Different body, same headers."))
+        data["records"]["13"] = digest(original)
+        manifest.write_text(encode(data))
+        arguments["source_sha256"] = digest(manifest)
+        plan = feed_recovery.audit(**arguments)
+        self.assertEqual(plan["plan"]["events"][1]["state"],"conflicting_legacy_event")
+        target = self.root/"wrong-mailbox"
+        review = self.approve("email-conflict",plan,{"11":{"level":"Info","evidence":"fixture"}})
+        with self.assertRaisesRegex(ValueError,"old source identity conflicts"):
+            feed_recovery.stage(target,review,**arguments)
+        self.assertFalse(target.exists())
+
     def test_lost_posts_are_recovered_once_without_resending_old_archive_and_return(self):
         configs = {kind:self.options(kind) for kind in ("email","mc_chat")}
         sources = {kind:feed_recovery.audit(**arguments) for kind,(arguments,_) in configs.items()}
@@ -332,14 +349,14 @@ class PortableRecovery(unittest.TestCase):
         with closing(sqlite3.connect(legacy)) as conn, conn:
             conn.executescript("""
                 CREATE TABLE events(id INTEGER PRIMARY KEY,event_id TEXT,source TEXT,
-                                    payload_json TEXT,level TEXT,disposition TEXT);
+                                    payload_json TEXT,text TEXT,level TEXT,disposition TEXT);
                 CREATE TABLE subscriptions(name TEXT,status TEXT);
                 CREATE TABLE cursors(subscriber TEXT,last_id INTEGER);
                 CREATE TABLE receipts(subscriber TEXT,event_id TEXT);
                 CREATE TABLE rules(id INTEGER);
             """)
-            conn.execute("INSERT INTO events VALUES (1,'mc_chat:sse:2','mc_chat',?,'info','delivered')",
-                         (encode(older),))
+            conn.execute("INSERT INTO events VALUES (1,'mc_chat:sse:0002','mc_chat',?,?,'info','delivered')",
+                         (encode(older),older["text"]))
         archive = root/"archive"
         old_sha = capture_trigger(legacy,archive)["manifest_sha256"]
         cursor = root/"cursor.json"
@@ -349,7 +366,7 @@ class PortableRecovery(unittest.TestCase):
         records.mkdir()
         for position,body in ((2,older),(3,lost)):
             path = records/f"{position}.sse"
-            path.write_text(f"id: {position}\ndata: {encode(body)}\n\n")
+            path.write_text(f"id: {position:04}\ndata: {encode(body)}\n\n")
         source = root/"source.json"
         source.write_text(encode({"kind":"mc_chat","epoch":"game","scope":[endpoint],"player":"Self",
             "after":1,"through":3,"source_id":guid(),"observed_at":"2026-11-27T03:00:00+00:00",
@@ -361,6 +378,8 @@ class PortableRecovery(unittest.TestCase):
         run = subprocess.run([*cli,"audit",*flags],text=True,check=True,capture_output=True,timeout=15)
         report = json.loads(run.stdout)
         self.assertEqual([event["state"] for event in report["plan"]["events"]],["legacy_stored","missing"])
+        self.assertEqual([event["legacy_event_id"] for event in report["plan"]["events"]],
+                         ["mc_chat:sse:0002","mc_chat:sse:0003"])
         review = root/"review.json"
         review.write_text(encode({"plan_sha256":report["plan_sha256"],"events":{
             "3":{"level":"Info","evidence":"fixture"}}}))

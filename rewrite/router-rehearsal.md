@@ -319,7 +319,7 @@ python3 -B -m rewrite.feed_recovery audit --snapshot ./old-trigger \
   --source-manifest ./original-input/source.json --source-sha256 "${SOURCE_MANIFEST_SHA256}"
 ```
 
-审计只输出标识和处理结论。已入旧库、旧库记录为丢弃、原客户端的自发消息过滤均留在原裁定。同号但旧内容无法核对时保持待核。对每一条 `missing` 附上原来源核对依据，在审核文件中保存 `plan_sha256` 及 `events`。例如位置 15 选存档可写 `{"15":{"level":"Info","evidence":"原始输入与旧 Trigger 对账记录"}}`。邮件仅可选 Info。原游戏 Event 可审核为 Info、Notify 或 Event。已从另一个旧消费者独立核实收件的，可填 `{"already_received":"该消费者原回执"}`，保留审核结论，跳过补录。
+审计只输出标识和处理结论。已入旧库、旧库记录为丢弃、原客户端的自发消息过滤均留在原裁定。邮件按邮件头、文件夹、UID 和旧库保留的正文预览对证，超出旧预览的正文仍需原始邮件证明。游戏用帧上原样的编号查旧收件，保留前导零。同号但旧内容无法核对时保持待核。对每一条 `missing` 附上原来源核对依据，在审核文件中保存 `plan_sha256` 及 `events`。例如位置 15 选存档可写 `{"15":{"level":"Info","evidence":"原始输入与旧 Trigger 对账记录"}}`。邮件仅可选 Info。原游戏 Event 可审核为 Info、Notify 或 Event。已从另一个旧消费者独立核实收件的，可填 `{"already_received":"该消费者原回执"}`，保留审核结论，跳过补录。
 
 将 `audit` 换成 `stage` 并加 `--review ./recovery-review.json --destination ./feed-staged`。输出 `feed.sqlite3` 和 `recovery.json`。采集库保留原游标，只有审核补录的记录进入待交队列。首次接管时用这个新库做正常来源验证，按恢复清单登记该 Trigger 实例的隔离连接。通过已有的 `python3 -B -m rewrite.service trigger --db ./feed-staged/feed.sqlite3 --name email send --connection <测试连接文件> --message-id <原补录消息号>` 交付。游戏把名称换成 `mc_chat`。重试沿用同一份计划和已登记实例。已在运行的试用库另保留和对账。
 
