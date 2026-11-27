@@ -172,6 +172,31 @@ class CrossHostState(unittest.TestCase):
             config(folder,"roles.json",{callback_key:"adapter/oguri",ops_key:"ops/oguri"})
             guest("cp","-p",*sorted(folder.iterdir()),cert,test_root/"test.key",directory)
 
+        # Drive the fixture callback and ops probe from the guest loopback.
+        # The Worker itself connects directly to the Mac Router and adapter.
+        # This avoids racing the VM's automatic localhost port forwarding.
+        probe = """import json,sys
+from pathlib import Path
+from rewrite.storage import Fault,encode
+from rewrite.wire import Client
+directory,port,role,method,path,raw = sys.argv[1:]
+root = Path(directory)
+roles = json.loads((root/'roles.json').read_text())
+token, = [token for token,actor in roles.items() if actor==role+'/oguri']
+try:
+    reply = Client('https://127.0.0.1:'+port,token,root/'test.crt').request(method,path,json.loads(raw))
+except Fault as fault:
+    print(encode({'error':fault.code,'status':fault.status}))
+else:
+    print(encode({'result':reply}))
+"""
+
+        def live_request(directory,port,role,method,path,body=None):
+            result = json.loads(guest("python3","-B","-c",probe,directory,port,role,method,path,encode(body)).stdout)
+            if "error" in result:
+                raise Fault(result["status"],result["error"])
+            return result["result"]
+
         worker_ref = config(exchange,"worker-sources.json",{"worker:oguri":str(original/"worker.db")})
         remote_part = guest_root/"sealed-worker"
         guest_capture = ("python3","-B","-m","rewrite.state_bundle","capture-part","--sources",worker_ref,
@@ -180,28 +205,29 @@ class CrossHostState(unittest.TestCase):
         with services(local,lose_report=True) as (manager,router_port,adapter_port):
             configure(original,test_root/"original-settings",router_port,adapter_port)
             with guest_worker(engine,image,original,native.session,package=package) as (port,old_process):
-                endpoint = f"https://127.0.0.1:{port}"
-                ops,callback = Client(endpoint,ops_key,cert),Client(endpoint,callback_key,cert)
+                def status():
+                    return live_request(original,port,"ops","GET","worker/status")
+
                 try:
                     eventual(lambda:any(w["online"] and w["busy"] is False for w in manager.workers()["items"]))
                 except AssertionError as error:
                     error.add_note("Router: "+encode(manager.workers()["items"]))
-                    error.add_note("Worker: "+encode(ops.request("GET","worker/status")))
+                    error.add_note("Worker: "+encode(status()))
                     raise
                 tid = manager.create(guid(),"Cutover replay","Formal W04 with a dropped receipt","oguri")["task_id"]
                 clock.advance(10)
                 payload,receipt = eventual(native.entries)[0]
                 assignment = payload["assignment_id"]
-                self.assertEqual(ops.request("GET","worker/status")["held_assignment_id"],assignment)
+                self.assertEqual(status()["held_assignment_id"],assignment)
                 arguments = {"task_id":tid,"assignment_id":assignment,"summary":"Original report before capture"}
                 request = {"session":native.session,"turn_id":receipt["turn_id"],
                            "tool":"worker_report","call_id":"fixture-w04","arguments":arguments}
                 with self.assertRaisesRegex(Fault,"worker_report_unconfirmed"):
-                    callback.request("POST","worker/native-tool",request)
+                    live_request(original,port,"adapter","POST","worker/native-tool",request)
                 self.assertTrue(first_reply_lost.is_set())
                 detail = manager.inspect(tid)
                 self.assertEqual(detail["task"]["state"],"completed_reported")
-                self.assertEqual(ops.request("GET","worker/status")["held_assignment_id"],assignment)
+                self.assertEqual(status()["held_assignment_id"],assignment)
                 blocked = guest(*guest_capture,check=False)
                 self.assertNotEqual(blocked.returncode,0)
                 self.assertIn("state_writer_already_running",blocked.stderr)
@@ -238,11 +264,9 @@ class CrossHostState(unittest.TestCase):
         with services(paths) as (manager,router_port,adapter_port):
             configure(recovered,test_root/"restored-settings",router_port,adapter_port)
             with guest_worker(engine,image,recovered,native.session,package=package) as (port,new_process):
-                endpoint = f"https://127.0.0.1:{port}"
-                ops,callback = Client(endpoint,ops_key,cert),Client(endpoint,callback_key,cert)
-                eventual(lambda:(state:=ops.request("GET","worker/status"))["router_connected"]
+                eventual(lambda:(state:=live_request(recovered,port,"ops","GET","worker/status"))["router_connected"]
                          and state["held_assignment_id"] is None and len(submissions)>original_reports)
-                ack = callback.request("POST","worker/native-tool",request)
+                ack = live_request(recovered,port,"adapter","POST","worker/native-tool",request)
                 self.assertEqual(ack,{"recorded":True,"release_assignment_id":assignment,"task_state":"completed_reported"})
                 self.assertEqual(manager.inspect(tid)["last_report"],detail["last_report"])
                 notice, = [row for row in manager.messages(source="oguri")["items"] if row.get("task_id")==tid]
