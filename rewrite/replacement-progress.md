@@ -6,6 +6,12 @@
 
 ## 检查点与证据
 
+W04 封存审计核对 Worker 待发箱、Router 原幂等请求与回执、正式成果或受阻条目，以及附件关联、分块字节与下载授权。修正前改过的 Worker 回执会漏报。现在八种错配均报待核。Router 已收、仅 Worker 回执丢失的状态单独列出，原请求复验能补回回执。macOS 针对快照、成果附件和受阻池的 40 项通过。
+
+从两个锁定发行包实跑切换与回退。macOS 和 Linux arm64 均验证旧快照拒绝覆盖试用写入。从试用结束快照恢复后，前一发行包读回同一份待验收 W04 和 440,000 字节正式成果附件。原号重试的新增输入、通知、平台发送各为零，随后由隔离 Hermes 管理端验收结单。Router、HTTPS 和 SQLite 实跑，原生宿主、模型与飞书为夹具。[复跑](router-rehearsal.md#保留试用写入的新版版本回退) · [实测记录](evidence/w04-sealed-rollback.json)
+
+候选包 `1baccf04b841bfa9c50b3bf2727523b6f83f124f` 含 398 个文件。Linux arm64 安装版回归 200 项通过，139 项按环境跳过，58 项旧版历史用例退出新版验收。Windows 安装回归 39 项、原生 DSH 15 项通过。Windows 也从前一包读回原成果附件，摘要与 macOS、Linux 的同一测试文件一致。Windows DSH 使用模型与工作区引擎夹具。[Windows 流水线](https://github.com/KibyouMoe/mowu-link/actions/runs/45982339711)
+
 切换前封存审计锁定独立组件清单及发行提交。修正前，接收方没有持单时，省略它的账本会漏报一条待送同伴私聊。隔离 Router 验证了 C02 前后均报待核。即使 Router 已记 C02，宿主回执仍需对账。恢复完整快照后沿原消息号取回回执，宿主仍只有一次输入。独立清单另验漏采无消息的 Trigger、飞书及 Hermes 宿主账本，部分、额外或错版本快照均退出 1。[操作步骤](router-rehearsal.md#跨机停写与合并快照) · [实测记录](evidence/cutover-roster-audit.json)
 
 锁定 `688b1dd89a0a1d96fe1a8f5ca2d4c8a1f5f85582` 的 396 文件安装包。macOS 新版回归通过 303 项、按环境跳过 35 项，Linux arm64 通过 199 项、跳过 139 项。两边各有 58 项旧版历史用例退出新版验收。macOS 首轮用例通过，测试子进程写入缓存导致包校验拦截。用 `PYTHONDONTWRITEBYTECODE=1` 复跑后，396 个文件逐一复核通过。Windows 安装回归 38 项、原生 DSH 15 项全过，DSH 的模型与工作区引擎使用夹具。[Windows 流水线](https://github.com/KibyouMoe/mowu-link/actions/runs/45979985185)

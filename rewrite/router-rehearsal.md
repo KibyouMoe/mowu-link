@@ -623,12 +623,12 @@ python3 -B -m rewrite.release_check --repository . --component assignment-rollou
 ```sh
 python3 -B -m rewrite.release_check --repository . --component state-bundle \
   --previous 35ba22f66e3017a1756b8645f3b88d091b3ff6f8 \
-  --new e947acdef98bc62b626371bc7cecb734ca8c7145
+  --new 1baccf04b841bfa9c50b3bf2727523b6f83f124f
 ```
 
-命令从两个完整提交构建和校验独立包，依次启动前一发行包、候选包、前一发行包。它只使用临时目录、临时 HTTPS 端口和生成的测试身份。正向实测前一包读回同一份待验收 W04、332,800 字节来源附件及私聊回执。重试没有新增原生输入、管理通知或飞书发送。回退后新私聊继续写入索引，溪流侧用管理入口验收原成果。反例将 `--previous` 换成 `13934de898ffda491597f4c125679e67286582da`，恢复后能读取试用期留下的数据，新私聊的收发索引校验失败。
+命令从两个完整提交构建和校验独立包，依次启动前一发行包、候选包、前一发行包。它只使用临时目录、临时 HTTPS 端口和生成的测试身份。正向实测前一包读回同一份待验收 W04、440,000 字节成果附件、332,800 字节来源附件及私聊回执。重试没有新增原生输入、管理通知或飞书发送。回退后新私聊继续写入索引，溪流侧用管理入口验收原成果。历史反例 `13934de898ffda491597f4c125679e67286582da` 能读取试用期留下的数据，但新私聊的收发索引校验失败。
 
-本次覆盖固定工位、回环 TLS 与 SQLite。模型、两个原生会话和飞书使用夹具。每一对目标发行包和实际部署使用的功能都要重新验证。跨机停写、托管会话、真实宿主与平台回执以及生产切换仍须各自验收。[演练证据](evidence/rewrite-state-bundle-release-cycle.json)
+本次覆盖固定工位、回环 TLS 与 SQLite。模型、两个原生会话和飞书使用夹具。每一对目标发行包和实际部署使用的功能都要重新验证。跨机停写、托管会话、真实宿主与平台回执以及生产切换仍须各自验收。[成果及附件演练证据](evidence/w04-sealed-rollback.json) · [早期版本的演练证据](evidence/rewrite-state-bundle-release-cycle.json)
 
 ### 飞书输出回执与换绑
 

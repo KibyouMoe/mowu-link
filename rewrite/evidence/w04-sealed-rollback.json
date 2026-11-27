@@ -1,0 +1,141 @@
+{
+  "candidate_revision": "1baccf04b841bfa9c50b3bf2727523b6f83f124f",
+  "previous_revision": "35ba22f66e3017a1756b8645f3b88d091b3ff6f8",
+  "package_sha256": [
+    "85da9a10b997e2fb770f738f6829f08c03596651fd4a304a234e92d1661057de",
+    "5269c22acd4493f985113c7673070080ad82c9f117747cce1d50a282980737c5"
+  ],
+  "package_files": [
+    362,
+    398
+  ],
+  "boundary": "Real installed rewrite releases, isolated HTTPS and SQLite. Model, native sessions and Feishu use fixtures.",
+  "snapshot_audit": {
+    "clean_completed_and_blocked": {
+      "confirmed": 2,
+      "verified_artifacts": 1
+    },
+    "router_committed_before_worker_receipt": "awaiting_worker_commit",
+    "rejected_cases": {
+      "worker_changed_receipt": "report_receipt_mismatch",
+      "worker_outbox_missing": "report_worker_outbox_missing",
+      "router_operation_missing": "report_router_receipt_missing",
+      "router_changed_summary": "report_router_result_mismatch",
+      "router_changed_blocked_reason": "report_router_result_mismatch",
+      "router_attachment_link_missing": "report_artifact_links_mismatch",
+      "router_attachment_tail_corrupt": "report_artifact_unverified",
+      "router_manager_grant_missing": "report_artifact_unverified"
+    }
+  },
+  "macos_release_cycle": {
+    "revisions": [
+      "35ba22f66e3017a1756b8645f3b88d091b3ff6f8",
+      "1baccf04b841bfa9c50b3bf2727523b6f83f124f",
+      "35ba22f66e3017a1756b8645f3b88d091b3ff6f8"
+    ],
+    "after_trial": {
+      "components": 7,
+      "manifest_sha256": "297368a7374332763d7fdfb5021c844f2312c94069664a50292f51713033cb1f",
+      "snapshot_id": "fb32aeda-6322-4d29-8b47-6c409a253ca6",
+      "source_revision": "1baccf04b841bfa9c50b3bf2727523b6f83f124f"
+    },
+    "sealed_report_audit": {
+      "awaiting_worker_commit": 0,
+      "confirmed": 1,
+      "issues": [],
+      "pending": 0,
+      "stale": 0,
+      "unverified": 0,
+      "verified_artifacts": 1
+    },
+    "task_id": "d4ce2236-be8b-4c6c-806d-ee88845dfd79",
+    "assignment_id": "4b330665-0d7c-44d1-935a-0a2e2f13aeed",
+    "w04": {
+      "recorded": true,
+      "release_assignment_id": "4b330665-0d7c-44d1-935a-0a2e2f13aeed",
+      "task_state": "completed_reported"
+    },
+    "manager_media_sha256": [
+      "c00eeb4fe73a0d19402858d1352f6a93ff9c489e132682b18f6ebe244e803908"
+    ],
+    "artifact_after_return": {
+      "attachment_id": "09c7848c-27a8-49ff-833c-8bc87b9defb5",
+      "sha256": "c00eeb4fe73a0d19402858d1352f6a93ff9c489e132682b18f6ebe244e803908",
+      "size_bytes": 440000
+    },
+    "new_inputs_on_retry": 0,
+    "new_notifications_on_retry": 0,
+    "new_platform_sends_on_retry": 0,
+    "original_rollback_rejected": true,
+    "state_after_acceptance": "closed"
+  },
+  "linux_arm64_release_cycle": {
+    "revisions": [
+      "35ba22f66e3017a1756b8645f3b88d091b3ff6f8",
+      "1baccf04b841bfa9c50b3bf2727523b6f83f124f",
+      "35ba22f66e3017a1756b8645f3b88d091b3ff6f8"
+    ],
+    "file_counts": [
+      362,
+      398
+    ],
+    "package_sha256": [
+      "85da9a10b997e2fb770f738f6829f08c03596651fd4a304a234e92d1661057de",
+      "5269c22acd4493f985113c7673070080ad82c9f117747cce1d50a282980737c5"
+    ],
+    "sealed_report_audit": {
+      "pending": 0,
+      "awaiting_worker_commit": 0,
+      "confirmed": 1,
+      "stale": 0,
+      "unverified": 0,
+      "verified_artifacts": 1,
+      "issues": []
+    },
+    "artifact_after_return": {
+      "attachment_id": "2e44e3f9-5105-4348-9d79-fcafc88dc0e7",
+      "sha256": "c00eeb4fe73a0d19402858d1352f6a93ff9c489e132682b18f6ebe244e803908",
+      "size_bytes": 440000
+    },
+    "new_inputs_on_retry": 0,
+    "new_notifications_on_retry": 0,
+    "new_platform_sends_on_retry": 0,
+    "original_rollback_rejected": true,
+    "state_after_acceptance": "closed"
+  },
+  "macos_targeted": {
+    "passed": 40,
+    "skipped": 0
+  },
+  "linux_arm64_install": {
+    "passed": 200,
+    "skipped": 139,
+    "archival_excluded": 58,
+    "verified_files": 398
+  },
+  "windows_install": {
+    "run": 45982339711,
+    "job": 140449141340,
+    "passed": 39,
+    "formal_file": {
+      "attachment_id": "94251a16-3c22-4bb4-93cd-63923edd78a7",
+      "sha256": "c00eeb4fe73a0d19402858d1352f6a93ff9c489e132682b18f6ebe244e803908",
+      "size_bytes": 440000
+    },
+    "sealed_report_audit": {
+      "awaiting_worker_commit": 0,
+      "confirmed": 1,
+      "issues": [],
+      "pending": 0,
+      "stale": 0,
+      "unverified": 0,
+      "verified_artifacts": 1
+    }
+  },
+  "windows_dsh": {
+    "run": 45982339711,
+    "job": 140449141067,
+    "passed": 15,
+    "boundary": "Actual DSH host with a fixture model and workspace engine."
+  }
+}
