@@ -11,6 +11,9 @@ from .messages import valid_guid
 from .storage import encode
 
 
+BOUNDARY = "legacy-subscription-boundary.json"
+
+
 def checked_object(path, expected):
     if path.is_symlink() or not path.is_file():
         raise ValueError("expected a regular offline JSON file")
@@ -21,6 +24,44 @@ def checked_object(path, expected):
     if not isinstance(document,dict):
         raise ValueError("expected an offline JSON object")
     return document
+
+
+def sequence(db):
+    row = db.execute("SELECT seq FROM sqlite_sequence WHERE name='subscriptions'").fetchone()
+    last = row[0] if row else 0
+    if type(last) is not int or last<0:
+        raise ValueError("invalid legacy subscription allocation counter")
+    return last
+
+
+def before_stop(snapshot, expected):
+    manifest = cutover.verified(snapshot)
+    if manifest["legacy_db_sha256"]!=expected:
+        raise ValueError("pre-stop Router snapshot differs from the approved digest")
+    with closing(cutover.readonly(snapshot/"legacy.db")) as old:
+        proof = {"pre_stop_sha256":expected,"sequence":sequence(old),
+                 "active":manifest["blockers"]["active_subscriptions"]}
+    if cutover.digest(snapshot/"legacy.db")!=expected:
+        raise ValueError("pre-stop Router snapshot changed during subscription audit")
+    return proof
+
+
+def require_boundary(db, stopped_sha, proof):
+    current = sequence(db)
+    if proof is None:
+        if current:
+            raise ValueError("legacy subscription history requires a verified pre-stop Router snapshot")
+        return
+    if (set(proof)!={"pre_stop_sha256","stopped_sha256","sequence","active"}
+            or not isinstance(proof["pre_stop_sha256"],str)
+            or not re.fullmatch(r"[0-9a-f]{64}",proof["pre_stop_sha256"])
+            or proof["stopped_sha256"]!=stopped_sha
+            or type(proof["sequence"]) is not int or type(proof["active"]) is not int or proof["active"]<0):
+        raise ValueError("pre-stop subscription boundary does not match this stopped Router")
+    if proof["active"]:
+        raise ValueError("active_subscriptions in the pre-stop Router require reconciliation")
+    if proof["sequence"]!=current:
+        raise ValueError("legacy subscription allocation changed after the pre-stop snapshot")
 
 
 def message_id(source, sequence):

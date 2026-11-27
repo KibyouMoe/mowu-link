@@ -24,6 +24,22 @@ python3 -m rewrite.cutover rollback --snapshot ./snapshot --trial ./trial --dest
 
 `manifest.json` 保存数据库摘要、附件大小及内容摘要、尚待交接事项的计数。`baseline.json` 保存新旧库摘要和待派单号对照表。核验使用离线目录中的完整文件。为校验备份来源，应另外保管输出的摘要及对应版本。备份仅提供拥有该目录的用户访问。
 
+### 核对旧 Worker 订阅的停写边界
+
+旧 Router 在 Worker 断开时会删除实时订阅并清游标。停写库里的活跃订阅为零时，仍须识别这类清理留下的缺口。此规则适用于旧 Router 曾分配过订阅编号的库。
+
+在断开旧工位前，把旧 Router 的一致性只读副本作为独立快照保留。SQLite 正在运行时用一致性备份接口取得副本，再对副本执行上面的 `backup`。记录这份快照的捕获时间、归属及 `legacy_db_sha256`。停旧写者后再取得正式停写快照。确认二者属于同一 Router 及同一切换窗口。按下列方式准备试用：
+
+```sh
+python3 -B -m rewrite.cutover prepare --snapshot ./stopped --destination ./trial \
+  --source-id "${SOURCE_UUID}" --pre-stop-snapshot ./before-disconnect \
+  --pre-stop-sha256 "${BEFORE_DISCONNECT_SHA256}"
+```
+
+断开前的快照仍有活跃订阅，或该快照之后又分配了订阅编号时，准备会阻止发布。保留原路径，先按[旧 Worker 的实时订阅](#旧-worker-的实时订阅)核收件和退役范围。已有授权明确结束的订阅，可以用结束后、断开前的新快照对证。摘要验证能校验两份输入的内容，捕获时间和工位归属仍靠原始记录核实。
+
+准备成功后，`legacy-subscription-boundary.json` 记录两份摘要与订阅边界，`baseline.json` 保存该文件的 SHA-256。对账、恢复试用和准备回退时随原基线保留该私有文件。复跑 `python3 -B -m unittest -v rewrite.test_source_rollback -k worker_disconnect_erases_a_subscription`。[隔离实测](evidence/legacy-subscription-stop-boundary.json)
+
 ### 导出旧飞书私聊
 
 ```sh
@@ -136,7 +152,7 @@ python3 -B -m rewrite.service peer-archive \
 
 旧 Router 保持停写。先停试用写者并采集[五组件快照](#重做版五组件的离线恢复)，保留迁入时的旧快照和 `baseline.json`。从新的目录恢复这套重做组件，使用原 Worker 身份、原适配器账本及原生会话。启动重做 Router 时，在现有启动参数上加 `--drain-dispatch`，核对启动回执中 `dispatch_draining` 为 `true`。每次重开都须保留这个参数。此模式停止分配新派发号，已有派发、重连对账、业务回执和定时规则继续按原契约处理。冻结外部试用入口，避免排空时又发生无关写入。
 
-核对原工单号、派发号、Worker 持单和宿主收据。已有可核的宿主收据时只接回原会话。W04 回执未到时保留原 outbox，由 Worker 以原幂等键恢复；Router 只有成果待验时仍由溪流实际验收。关停排空实例后再次采集，核对 `audit-handoff` 中的持单、待确认报告和宿主账本。保留每次采集的摘要。将最后一次 Router 库的离线副本作为 `router.db`，连同原来的 `baseline.json` 放在新的试运行目录，核对该库 SHA-256 与排空快照中 Router 成员一致，再使用上面的 `stage-reviewed-rollback`。切回旧端前核对原单归档、原队首和在途清单。
+核对原工单号、派发号、Worker 持单和宿主收据。已有可核的宿主收据时只接回原会话。W04 回执未到时保留原 outbox，由 Worker 以原幂等键恢复；Router 只有成果待验时仍由溪流实际验收。关停排空实例后再次采集，核对 `audit-handoff` 中的持单、待确认报告和宿主账本。保留每次采集的摘要。将最后一次 Router 库的离线副本作为 `router.db`，连同原来的 `baseline.json` 及其引用的订阅边界文件放在新的试运行目录，核对该库 SHA-256 与排空快照中 Router 成员一致，再使用上面的 `stage-reviewed-rollback`。切回旧端前核对原单归档、原队首和在途清单。
 
 宿主接收未知、原模型仍无法接续、派发已转移或回报与原任务不符时，保留新旧两侧并逐笔对账。排空开关不会暂停离线入池，也不会隐去已在网络上的原派发。回退命令继续拒绝未验收或不符合上述回迁范围的写入。
 
@@ -283,7 +299,7 @@ python3 -B -m rewrite.legacy_subscription \
 
 旧 Router 为 Worker 分配的 `router:<worker>` 和 `router:<worker>:<订阅号>` 拒绝进入通用 Trigger 迁入。隔离复现中，旧订阅只返回 4 条，通用迁入却另列了一条已被旧工位过滤的事件。以前留存的通用计划也会被拦截，原库和原工位继续保留。
 
-发现活跃的旧 Worker 订阅时，离线准备仍会停在 `active_subscriptions`。先核对原订阅配置、两端游标、过滤项和原宿主收件，再决定沿独立来源把消息交给溪流，或继续保留旧路径。复跑 `python3 -B -m unittest -v rewrite.test_source_rollback -k legacy_worker_subscription`。[旧端读回证据](evidence/legacy-worker-subscription-ack.json)
+发现活跃的旧 Worker 订阅时，离线准备仍会停在 `active_subscriptions`。发现曾分配过订阅编号时，还会核验[断开前的旧 Router 快照](#核对旧-worker-订阅的停写边界)。先核对原订阅配置、两端游标、过滤项和原宿主收件，再决定沿独立来源把消息交给溪流，或继续保留旧路径。复跑 `python3 -B -m unittest -v rewrite.test_source_rollback -k legacy_worker_subscription`。[旧端读回证据](evidence/legacy-worker-subscription-ack.json)
 
 ## 旧采集来源交接
 

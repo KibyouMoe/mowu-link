@@ -176,22 +176,39 @@ def export_chat(snapshot, destination, worker, after=0, limit=500, direction=Non
 
 
 def prepare(snapshot, destination, source_id, peer_archive=None, peer_archive_sha256=None,
-            *, source_archive=None, source_archive_sha256=None):
-    from . import rollback_peers, rollback_source_history
+            *, source_archive=None, source_archive_sha256=None, pre_stop_snapshot=None, pre_stop_sha256=None):
+    from . import legacy_subscription
+
+    if (pre_stop_snapshot is None)!=(pre_stop_sha256 is None):
+        raise ValueError("pre-stop Router snapshot and trusted SHA-256 must be supplied together")
+    manifest = verified(snapshot)
+    boundary = None
+    if pre_stop_snapshot is not None:
+        if pre_stop_snapshot.resolve()==snapshot.resolve():
+            raise ValueError("pre-stop and stopped Router snapshots must be separate captures")
+        boundary = {**legacy_subscription.before_stop(pre_stop_snapshot,pre_stop_sha256),
+                    "stopped_sha256":manifest["legacy_db_sha256"]}
+    return _prepare_baseline(snapshot, destination, source_id, manifest, peer_archive, peer_archive_sha256,
+                             source_archive, source_archive_sha256, boundary)
+
+
+def _prepare_baseline(snapshot, destination, source_id, manifest, peer_archive, peer_archive_sha256,
+                      source_archive, source_archive_sha256, boundary):
+    from . import legacy_subscription, rollback_peers, rollback_source_history
 
     if (peer_archive is None)!=(peer_archive_sha256 is None):
         raise ValueError("peer archive path and trusted SHA-256 must be supplied together")
     if (source_archive is None)!=(source_archive_sha256 is None):
         raise ValueError("source archive path and trusted SHA-256 must be supplied together")
     namespace = UUID(source_id)
-    manifest = verified(snapshot)
     with closing(readonly(snapshot/"legacy.db")) as old:
         blockers = {key:n for key,n in inventory(old).items() if n}
         required_source_sha = rollback_source_history.expected_for_legacy(old)
+        if blockers:
+            raise ValueError("legacy work requires reconciliation: " + encode(blockers))
+        legacy_subscription.require_boundary(old,manifest["legacy_db_sha256"],boundary)
     if source_archive_sha256!=required_source_sha:
         raise ValueError("re-entry requires the source archive SHA-256 recorded in the restored legacy database")
-    if blockers:
-        raise ValueError("legacy work requires reconciliation: " + encode(blockers))
     with output_directory(destination) as stage, closing(readonly(snapshot/"legacy.db")) as old:
         if peer_archive is not None:
             rollback_peers.freeze(peer_archive,peer_archive_sha256,stage/rollback_peers.NAME)
@@ -223,6 +240,11 @@ def prepare(snapshot, destination, source_id, peer_archive=None, peer_archive_sh
             baseline["peer_archive_sha256"] = peer_archive_sha256
         if source_archive is not None:
             baseline["source_archive_sha256"] = source_archive_sha256
+        if boundary is not None:
+            proof = stage/legacy_subscription.BOUNDARY
+            with open(proof,"x",encoding="utf-8",opener=lambda name,flags:os.open(name,flags,0o600)) as stream:
+                stream.write(encode(boundary))
+            baseline["subscription_boundary_sha256"] = digest(proof)
         (stage/"baseline.json").write_text(encode(baseline))
     return baseline
 
@@ -443,7 +465,7 @@ def archived_new_candidates(db, changes, legacy_workers, original_tasks, initial
 
 def reconcile(snapshot, trial, *, original_tasks=None, initial_assignments=None):
     """Read the exact post-cutover difference. Original snapshots and trial databases stay intact."""
-    from . import rollback_peers, rollback_source_history
+    from . import legacy_subscription, rollback_peers, rollback_source_history
 
     saved = json.loads((trial/"baseline.json").read_text())
     source = trial/"router.db"
@@ -455,8 +477,11 @@ def reconcile(snapshot, trial, *, original_tasks=None, initial_assignments=None)
         peer_archive = trial/rollback_peers.NAME if peer_sha is not None else None
         source_sha = saved.get("source_archive_sha256")
         source_archive = trial/rollback_source_history.NAME if source_sha is not None else None
-        regenerated = prepare(snapshot,reference,saved["source_id"],peer_archive,peer_sha,
-                              source_archive=source_archive,source_archive_sha256=source_sha)
+        boundary_sha = saved.get("subscription_boundary_sha256")
+        boundary = (legacy_subscription.checked_object(trial/legacy_subscription.BOUNDARY,boundary_sha)
+                    if boundary_sha is not None else None)
+        regenerated = _prepare_baseline(snapshot,reference,saved["source_id"],verified(snapshot),
+                                        peer_archive,peer_sha,source_archive,source_sha,boundary)
         if regenerated!=saved:
             raise ValueError("rehearsal baseline could not be reproduced by this release")
         with closing(readonly(snapshot/"legacy.db")) as old:
@@ -466,6 +491,8 @@ def reconcile(snapshot, trial, *, original_tasks=None, initial_assignments=None)
             result.update(source_id=saved["source_id"],snapshot_sha256=saved["snapshot_sha256"],
                           baseline_sha256=saved["router_db_sha256"],
                           trial_sha256=before)
+            if boundary_sha is not None:
+                result["subscription_boundary_sha256"] = boundary_sha
             if [row[0] for row in db.execute("PRAGMA integrity_check")]!=["ok"]:
                 raise ValueError("trial database integrity check failed")
             if cleanup.has_scope_column(db):
@@ -611,6 +638,8 @@ def main():
             command.add_argument("--"+name,type=Path,required=True)
         if op == "prepare":
             command.add_argument("--source-id",required=True)
+            command.add_argument("--pre-stop-snapshot",type=Path)
+            command.add_argument("--pre-stop-sha256")
             command.add_argument("--peer-archive",type=Path)
             command.add_argument("--peer-archive-sha256")
             command.add_argument("--source-archive",type=Path)
