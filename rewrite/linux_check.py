@@ -147,6 +147,7 @@ def run(repository, revision, image, socket):
             "adapter.json":identities({"adapter":"worker/trial"})}))
         installed = json.loads(guest("python","-I","-B","guest.py","install",revision,release["sha256"]))
         installed_dir = GUEST+"/installed"
+        suite = json.loads(guest("python","-I","-B","guest.py","suite",timeout=180))
         def start(role, port, register, *extra):
             communicate([*docker,"exec","-d","-w",installed_dir,cid,"python","-B","-m","rewrite.service",role,
                          "--bind","0.0.0.0","--port",str(port),"--db",GUEST+"/"+role+".db","--identities",GUEST+"/"+register,
@@ -162,7 +163,6 @@ def run(repository, revision, image, socket):
                                            data=json.dumps(opts).encode(),timeout=75))
         rows = json.loads(guest("python","-I","-B","guest.py","inputs"))
         check(len(rows)==1 and rows[0]["turn_id"]==contract["fixture_turn_id"],"guest input count or turn changed")
-        suite = json.loads(guest("python","-I","-B","guest.py","suite",timeout=180))
         verified = json.loads(guest("python","-B","-m","rewrite.release","verify","--revision",revision,
                                     "--archive",GUEST+"/release.tar","--sha256",release["sha256"],
                                     "--destination",installed_dir,directory=installed_dir))
