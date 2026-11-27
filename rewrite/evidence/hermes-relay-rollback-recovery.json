@@ -1,0 +1,121 @@
+{
+  "revision": "f61c6afef2a91bc1d30a4b3e2f3c088881993e91",
+  "archive_sha256": "3814e3826c54e902d0236d300c26459b10f7ef964bbbdffa6e2bf071c7dc99ae",
+  "verified_files": 368,
+  "baseline": {
+    "revision": "305991571fc5229b0afbd527cf989d0dc8732b25",
+    "original_native_admissions": 2,
+    "native_admissions_after_restoring_relays": 3,
+    "manager_returned_original_admission": true,
+    "duplicate_was_present": true
+  },
+  "native_hermes": {
+    "hermes_source_revision": "464bd0dd659f336bd0bf468bf02cad8aac211136",
+    "session_id": "local-4f8becde6f779dce9af2e87b5b665e5e98cada739c0fd80cad7e06c10dc97ab4",
+    "route": "agent:main:local:dm:local-4f8becde6f779dce9af2e87b5b665e5e98cada739c0fd80cad7e06c10dc97ab4",
+    "native_pids": [
+      86410,
+      87191,
+      87257
+    ],
+    "message_ids": {
+      "Info": "a96b5726-c5eb-4d27-980c-2d788af59566",
+      "Event": "5874da6a-2e04-4f88-b43a-5dc6d75a7829",
+      "Notify": "c26c05bd-e792-4449-a403-a28fff9ff4a5"
+    },
+    "event_native_admission": "a0d05c8b9e774a89a01495303dae42fe",
+    "notify_native_admission": "75bc11d2ba894b1bb67648da45bd86ee",
+    "notify_after_event_release_seconds": 11.1,
+    "info_native_inputs": 0,
+    "native_admission_count": 2,
+    "model_http_calls": 5,
+    "tool_discovery": "native tool_describe and tool_call",
+    "native_tool_calls": {
+      "router_info": {
+        "id": 5,
+        "tool_name": "router_info",
+        "tool_call_id": "call_read_trigger_original"
+      },
+      "router_create_task": {
+        "id": 7,
+        "tool_name": "router_create_task",
+        "tool_call_id": "call_create_manager_task"
+      }
+    },
+    "router_task": {
+      "task_id": "7ee2c87b-1c2c-4264-a389-2b44cf0aa580",
+      "state": "ready",
+      "unassigned_task_count_after_restart": 1
+    },
+    "original_attachment_sha256": "06219adabc9facac06e434bafb1a82e1f38309c77c6b945ed1eb0d2c213071b7",
+    "cold_recovery_reused_admission": true,
+    "missing_queue_and_intent_recovered": {
+      "same_admission": "a0d05c8b9e774a89a01495303dae42fe",
+      "native_admission_count": 2,
+      "extra_model_calls": 0
+    },
+    "boundary": "Real Router, Trigger, Hermes gateway, private LOCAL session, tool execution and ledger. Scripted OpenAI-compatible localhost model. No cloud credentials or Feishu.",
+    "installed_specialized_tests_passed": 24
+  },
+  "transport": {
+    "conflicting_saved_payload": "hermes_queue_payload_conflict; original C02 remained unconfirmed",
+    "native_same_id_conflict": "hermes_input_conflict; no native enqueue",
+    "interrupted_receipt_replay": {
+      "previous_tested_revision": "0bdccae1772e558e01b560bf605e21f1a841e9ee",
+      "router_receipt": 64,
+      "prior_behavior_local_cursor": 64,
+      "fixed_local_cursor": 1,
+      "all_70_messages_recovered": true
+    },
+    "offline_c02_audit": {
+      "lost_ack_recoverable": true,
+      "advanced_local_cursor_needs_review": true,
+      "confirmed_prefix_missing_needs_review": true,
+      "two_release_cycle": [
+        {
+          "instance": "main",
+          "issues": [],
+          "local_cursor": 1,
+          "queued_without_native_receipt": 0,
+          "router_confirmed_cursor": 1
+        }
+      ]
+    }
+  },
+  "linux_arm64": {
+    "tests_run": 305,
+    "passed": 177,
+    "environment_skips": 128,
+    "historical_excluded": 58,
+    "cross_system_native_inputs": 1,
+    "cross_system_w04_notices": 1
+  },
+  "windows": {
+    "workflow_run": 45948525827,
+    "jobs": [
+      {
+        "id": 140338705291,
+        "name": "dsh-native",
+        "status": "completed",
+        "conclusion": "success"
+      },
+      {
+        "id": 140338705301,
+        "name": "windows",
+        "status": "completed",
+        "conclusion": "success"
+      }
+    ],
+    "installed_tests_passed": 21,
+    "two_release_cycle": [
+      {
+        "instance": "main",
+        "issues": [],
+        "local_cursor": 1,
+        "queued_without_native_receipt": 0,
+        "router_confirmed_cursor": 1
+      }
+    ]
+  },
+  "scope": "Native Hermes Gateway in a new isolated LOCAL profile with a scripted loopback model. Feishu cloud, live identities and production cutover were outside this run."
+}
