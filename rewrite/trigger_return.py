@@ -203,17 +203,22 @@ def audit(snapshot, expected, journal, journal_sha256, bundle, bundle_sha256,
 
 def stage_return(snapshot, expected, destination, **kwargs):
     status = audit(snapshot,expected,**kwargs)
+    with output_directory(destination) as folder:
+        write_replay(folder,status)
+        trigger_archive.restore(snapshot,expected,folder/"legacy")
+    return status
+
+
+def write_replay(folder, status):
     if not status["safe_to_stage"]:
         raise ValueError("an unknown receipt or a received item beyond a gap prevents legacy resume")
-    with output_directory(destination) as folder:
-        trigger_archive.restore(snapshot,expected,folder/"legacy")
-        upto = status["verified_cursor"]
-        request = {"subscriber":status["subscriber"],"up_to_id":upto} if upto>status["initial_cursor"] else None
-        pending = [row["legacy_event_id"] for row in status["events"] if row["seq"]>upto]
-        path = folder/"ack-replay.json"
-        path.write_text(encode({**status,"request":request,"remaining_event_ids":pending}),encoding="utf-8")
-        path.chmod(0o600)
-    return status
+    upto = status["verified_cursor"]
+    request = {"subscriber":status["subscriber"],"up_to_id":upto} if upto>status["initial_cursor"] else None
+    pending = [row["legacy_event_id"] for row in status["events"] if row["seq"]>upto]
+    path = folder/"ack-replay.json"
+    path.write_text(encode({**status,"request":request,"remaining_event_ids":pending}),encoding="utf-8")
+    path.chmod(0o600)
+    return request
 
 
 def main():

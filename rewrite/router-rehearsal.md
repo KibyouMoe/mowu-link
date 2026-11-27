@@ -243,7 +243,9 @@ python3 -B -m rewrite.cutover stage-reviewed-rollback \
 
 旧 Router 恢复副本和来源回交计划一起发布。所有来源材料保存在 `private-review/source-returns/`，含来源计划原件、Hermes 两份对账库及各实例的原试用库。私有总清单给出各来源的输出摘要。旧订阅按实例目录中的 `ack-replay.json` 恢复累计确认，旧采集按实例目录中的游标恢复。核对后再分别执行旧接口。单独完成旧端的一个步骤后若中断，从已经落账的同一份旧库或游标查回。
 
-试用已收到 T04 但未送到原生宿主的旧订阅尾项仍由旧订阅处理，无论 Hermes 是否已确认传输。已取得且核对了宿主回执的项目按原连续前缀确认。缺源端 T04、缺宿主回执、已送宿主但应发的来源飞书提示未取得回执、漏列的来源、摘要不符或来源证明与试用 Router 不同批时，整包不发布。同一旧 Trigger 归档的多个订阅如需并回同一库，仍须另做合并演练。
+试用已收到 T04 但未送到原生宿主的旧订阅尾项仍由旧订阅处理，无论 Hermes 是否已确认传输。已取得且核对了宿主回执的项目按原连续前缀确认。缺源端 T04、缺宿主回执、已送宿主但应发的来源飞书提示未取得回执、漏列的来源、摘要不符或来源证明与试用 Router 不同批时，整包不发布。
+
+多个订阅共用同一个旧 Trigger 时，计划中每个订阅仍各列一项，全部引用同一个冻结旧归档，每项保留自己的审核及试用账本。输出只复制一份旧库，私有总清单的 `legacy_restore_directory` 与 `legacy_replay_batch` 指向这份库及批次文件。核总清单中的批次摘要，再逐项核其中的 `plan_sha256`。在该同一份恢复库上按每个订阅的 `request` 走旧 ACK 接口，空请求跳过。执行中断时保留已恢复的库并沿原请求查回。重复订阅或任一订阅前缀待核会阻止整包。旧 Router 的 Worker 实时订阅仍使用[专门审计流程](#旧-worker-的实时订阅)。[两订阅实测](evidence/shared-trigger-subscriber-return.json)
 
 复跑 `python3 -B -m unittest -v rewrite.test_source_rollback`。实跑隔离 Router、旧 Trigger HTTP 和恢复副本。验证一张已验收工单归档、旧订阅 Event 与 Info 的确认、邮件与游戏采集游标推进，以及两条仍待原订阅处理的尾项。实际旧端重放确认返回零新增。宿主、模型、飞书、邮件源和游戏 SSE 源使用夹具。[证据](evidence/source-router-rollback.json)
 

@@ -249,6 +249,154 @@ trigger_store.close()
                     {"state":"input_observed","session_id":"fixture-host","turn_id":"fixture-turn",
                      "item_key":"fixture-turn/fixture-input"}])
 
+    def test_two_subscriber_returns_replay_independently_in_one_legacy_trigger(self):
+        case = test_cutover.Cutover()
+        self.addCleanup(case.doCleanups)
+        case.setUp()
+        legacy = test_trigger_archive.TriggerArchive()
+        self.addCleanup(legacy.doCleanups)
+        legacy.setUp()
+        root = case.root
+        case.old("""
+store = RouterStore(sys.argv[1])
+store.close()
+""",case.legacy)
+        backup(case.legacy,case.attachments,case.snapshot)
+        prepare(case.snapshot,case.trial,case.source_id)
+        legacy.old("""
+store = TriggerStore(sys.argv[1])
+store.ensure_subscription("fixture-secondary",5,3600)
+store.ack("fixture-secondary",5)
+store.add_event("fixture","Shared stream after review",priority=0,level="event",event_id="shared")
+store.add_event("fixture","Still unread on both subscribers",priority=0,level="event",event_id="both-unread")
+store.close()
+""",legacy.source)
+        legacy_sha = capture_trigger(legacy.source,legacy.snapshot,blocked=legacy.blocked)["manifest_sha256"]
+        specs, handoffs, consumed = [],{},{}
+        for instance,subscriber,since,received in (
+            ("secondary","fixture-secondary",5,6),("primary","fixture-live",1,2)
+        ):
+            intent = plan(legacy.snapshot,legacy_sha,subscriber,since,["event"],guid())
+            journal,review = root/(instance+"-plan.json"),root/(instance+"-review.json")
+            journal.write_text(json.dumps(intent))
+            decisions = {str(item["seq"]):{"level":"Event","evidence":"fixture assessment"}
+                         for item in intent["plan"]["candidates"]}
+            review.write_text(json.dumps({"plan_sha256":intent["plan_sha256"],"events":decisions}))
+            planned = stage(legacy.snapshot,legacy_sha,journal,review,root/instance)
+            entries = {item["seq"]:item["message_id"] for item in intent["plan"]["candidates"]}
+            consumed[instance] = entries[received]
+            handoffs[instance] = Trigger(root/instance/HANDOFF_DB,instance)
+            specs.append({"kind":"subscription","trigger_instance":instance,"legacy_snapshot":str(legacy.snapshot),
+                          "legacy_snapshot_sha256":legacy_sha,"journal":str(root/instance/"handoff.json"),
+                          "journal_sha256":planned["journal_sha256"]})
+        loop = Loop(case.trial,Clock(),FixtureHost,trigger_ids=[source.instance_id for source in handoffs.values()])
+        with running(loop.server):
+            for name,trigger in handoffs.items():
+                trigger.send(loop.trigger_clients[trigger.instance_id],consumed[name])
+                self.assertEqual(loop.hermes.poll()["delivery_id"],consumed[name])
+        self.assertEqual([body["message_id"] for body,_ in loop.hermes_native.entries()],list(consumed.values()))
+        components = {"router:main":case.trial/"router.db","worker:oguri":case.trial/"worker.db",
+                      "agent:oguri":case.trial/"agent-adapter.db","hermes:main":case.trial/"hermes-adapter.db",
+                      "hermes-host:main":case.trial/"manager-receipts.db"}
+        components.update({"trigger:"+name:trigger.db.path for name,trigger in handoffs.items()})
+        review = root/"approved.json"
+        final = root/"old-services"
+        before = digest(case.trial/"router.db")
+
+        def prepare_return(name, recipes, sources):
+            bundle = root/(name+"-bundle")
+            sha = capture(sources,"a"*40,bundle)["manifest_sha256"]
+            source_plan = root/(name+".json")
+            source_plan.write_text(json.dumps({"bundle":bundle.name,"bundle_sha256":sha,"sources":recipes,
+                                               "manager_instance":"main","host_session":"test-manager-session"}))
+            review.write_text(json.dumps({"trial_sha256":before,"closed_assignments":{},
+                                          "source_plan_sha256":digest(source_plan)}))
+            return stage_reviewed_rollback(case.snapshot,case.trial,review,final,source_plan=source_plan)
+
+        duplicate = {**specs[0],"trigger_instance":"duplicate"}
+        copied_ledger = root/"duplicate-trial.db"
+        shutil.copyfile(handoffs["secondary"].db.path,copied_ledger)
+        with self.assertRaisesRegex(ValueError,"repeat the same legacy subscriber"):
+            prepare_return("duplicate",[*specs,duplicate],{**components,"trigger:duplicate":copied_ledger})
+        self.assertFalse(final.exists())
+        unknown = root/"unconfirmed-native.db"
+        shutil.copyfile(components["hermes-host:main"],unknown)
+        with closing(sqlite3.connect(unknown)) as db,db:
+            db.execute("UPDATE intents SET receipt=NULL WHERE delivery_id=?",(consumed["secondary"],))
+        with self.assertRaisesRegex(ValueError,"prevents legacy resume"):
+            prepare_return("unconfirmed",specs,{**components,"hermes-host:main":unknown})
+        self.assertFalse(final.exists())
+
+        reports = prepare_return("complete",specs,components)["source_returns"]
+        restored = final/"private-review"/"source-returns"
+        self.assertEqual(sorted(path.relative_to(restored).as_posix() for path in restored.rglob(DATABASE)),
+                         ["primary/legacy/"+DATABASE])
+        replay = restored/"primary"/"ack-batch.json"
+        batch = json.loads(replay.read_text())
+        self.assertEqual(batch["legacy_archive_sha256"],legacy_sha)
+        self.assertEqual(batch["restore_directory"],"primary/legacy")
+        self.assertEqual([entry["request"]["up_to_id"] for entry in batch["subscriptions"]],[2,6])
+        for name,report in reports.items():
+            self.assertEqual(report["legacy_replay_batch"],"primary/ack-batch.json")
+            self.assertEqual(report["legacy_restore_directory"],batch["restore_directory"])
+            self.assertEqual(report["legacy_replay_batch_sha256"],digest(replay))
+            row, = (entry for entry in batch["subscriptions"] if entry["plan"]==name+"/ack-replay.json")
+            self.assertEqual(row["plan_sha256"],digest(restored/row["plan"]))
+        old_db = restored/batch["restore_directory"]/DATABASE
+        self.assertEqual(digest(old_db),digest(legacy.source))
+        self.assertEqual((old_db.parent/"blocked.jsonl").read_bytes(),legacy.blocked.read_bytes())
+        actual = json.loads(legacy.old("""
+from pathlib import Path
+from server import TriggerServer
+from threading import Thread
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
+
+path=Path(sys.argv[1])
+batch=json.loads((path.parent.parent/"ack-batch.json").read_text())
+requests=[entry["request"] for entry in batch["subscriptions"]]
+def probe(actions):
+    store=TriggerStore(str(path))
+    with TriggerServer(("127.0.0.1",0),store,token="source-return-test") as server:
+        thread=Thread(target=server.serve_forever,kwargs={"poll_interval":.02})
+        thread.start()
+        try:
+            def get(endpoint,body=None):
+                url=f"http://127.0.0.1:{server.server_port}"+endpoint
+                data=json.dumps(body).encode() if body is not None else None
+                headers={"X-Trigger-Token":"source-return-test","Content-Type":"application/json"}
+                with urlopen(Request(url,data=data,headers=headers),timeout=5) as response:
+                    return json.load(response)
+            receipts=[get("/ack",action) for action in actions]
+            unread={}
+            for action in requests:
+                name=action["subscriber"]
+                query=urlencode({"subscriber":name,"levels":"event"})
+                unread[name]=[item["event_id"] for item in get("/events?"+query)["events"]]
+            return {"receipts":receipts,"unread":unread}
+        finally:
+            server.shutdown()
+            thread.join()
+            store.close()
+
+first=probe(requests[:1])
+reopened=probe(requests)
+last=probe(requests)
+print(json.dumps([first,reopened,last]))
+""",old_db))
+        left = {"fixture-live":["shared","both-unread"],"fixture-secondary":["shared","both-unread"]}
+        self.assertEqual(actual[0]["unread"],left)
+        left["fixture-secondary"] = ["both-unread"]
+        self.assertEqual(actual[1]["unread"],left)
+        self.assertEqual(actual[2]["unread"],left)
+        self.assertEqual([row["acked"] for row in actual[2]["receipts"]],[0,0])
+        self.assertEqual([row["last_id"] for row in actual[2]["receipts"]],[2,6])
+        self.assertEqual(digest(case.trial/"router.db"),before)
+        if evidence := os.environ.get("MOWULINK_SHARED_SOURCE_RETURN_EVIDENCE"):
+            Path(evidence).write_text(json.dumps({"batch":batch,"readbacks":actual,"restored_databases":1,
+                "test_host_messages":list(consumed.values()),"scope":"Real isolated Router and two old HTTP restarts; test host."},
+                indent=2)+"\n")
+
     def test_mixed_source_returns_and_closed_order_share_one_frozen_router(self):
         case = test_cutover.Cutover()
         self.addCleanup(case.doCleanups)

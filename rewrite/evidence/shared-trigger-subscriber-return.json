@@ -1,0 +1,104 @@
+{
+  "batch": {
+    "legacy_archive_sha256": "6365889a6c139f6d1a6b12e8fb89c1214983e14d3ef8af6ddbb9cbfd042b3e3a",
+    "restore_directory": "primary/legacy",
+    "subscriptions": [
+      {
+        "plan": "primary/ack-replay.json",
+        "plan_sha256": "5bdda51e6e1ed85d4a0b402f4202c30736b9421dad771958190966852e3ba7c2",
+        "request": {
+          "subscriber": "fixture-live",
+          "up_to_id": 2
+        },
+        "subscriber": "fixture-live"
+      },
+      {
+        "plan": "secondary/ack-replay.json",
+        "plan_sha256": "05b7c076d587846660966714a96a102712ad735d36efe22fdbd61149f57a5b7c",
+        "request": {
+          "subscriber": "fixture-secondary",
+          "up_to_id": 6
+        },
+        "subscriber": "fixture-secondary"
+      }
+    ]
+  },
+  "readbacks": [
+    {
+      "receipts": [
+        {
+          "ok": true,
+          "subscriber": "fixture-live",
+          "last_id": 2,
+          "acked": 1
+        }
+      ],
+      "unread": {
+        "fixture-live": [
+          "shared",
+          "both-unread"
+        ],
+        "fixture-secondary": [
+          "shared",
+          "both-unread"
+        ]
+      }
+    },
+    {
+      "receipts": [
+        {
+          "ok": true,
+          "subscriber": "fixture-live",
+          "last_id": 2,
+          "acked": 0
+        },
+        {
+          "ok": true,
+          "subscriber": "fixture-secondary",
+          "last_id": 6,
+          "acked": 1
+        }
+      ],
+      "unread": {
+        "fixture-live": [
+          "shared",
+          "both-unread"
+        ],
+        "fixture-secondary": [
+          "both-unread"
+        ]
+      }
+    },
+    {
+      "receipts": [
+        {
+          "ok": true,
+          "subscriber": "fixture-live",
+          "last_id": 2,
+          "acked": 0
+        },
+        {
+          "ok": true,
+          "subscriber": "fixture-secondary",
+          "last_id": 6,
+          "acked": 0
+        }
+      ],
+      "unread": {
+        "fixture-live": [
+          "shared",
+          "both-unread"
+        ],
+        "fixture-secondary": [
+          "both-unread"
+        ]
+      }
+    }
+  ],
+  "restored_databases": 1,
+  "test_host_messages": [
+    "bcd81c6c-8170-5b30-9232-3184ece7126f",
+    "1ce7d0c9-7663-5dca-927e-849206a56d26"
+  ],
+  "scope": "Real isolated Router and two old HTTP restarts; test host."
+}

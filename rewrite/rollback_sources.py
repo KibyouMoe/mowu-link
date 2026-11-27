@@ -4,7 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from . import feed_return, rollback_peers, source_history, state_bundle, trigger_return
+from . import feed_return, rollback_peers, source_history, state_bundle, trigger_archive, trigger_return
 from .cutover import digest, readonly
 from .messages import valid_guid
 from .storage import encode
@@ -56,6 +56,7 @@ class SourceReturns:
             self.consumer_hashes[path.name] = self.snapshot["files"][label]["sha256"]
         manager = folder/"hermes.sqlite3"
         destinations, resume_targets = set(), set()
+        subscriptions, archive_digests = {},{}
         for spec in self.plan["sources"]:
             if not isinstance(spec,dict) or not isinstance(spec.get("trigger_instance"),str):
                 raise ValueError("invalid source return recipe")
@@ -66,9 +67,22 @@ class SourceReturns:
             destination = folder/name
             destinations.add(name.casefold())
             target, status, manifest = self.prepare(spec,destination)
-            if target in resume_targets:
+            if spec["kind"]=="subscription":
+                snapshot = self.path(spec["legacy_snapshot"])
+                old_sha = spec["legacy_snapshot_sha256"]
+                db_sha = digest(snapshot/trigger_archive.DATABASE)
+                if archive_digests.setdefault(db_sha,old_sha)!=old_sha:
+                    raise ValueError("use one frozen archive for subscriptions sharing a legacy Trigger database")
+                group = subscriptions.setdefault(old_sha,{})
+                subscriber = status["subscriber"]
+                if subscriber in group:
+                    raise ValueError("source return recipes repeat the same legacy subscriber")
+                request = trigger_return.write_replay(destination,status)
+                group[subscriber] = (destination,snapshot,request)
+            elif target in resume_targets:
                 raise ValueError("source return recipes repeat the same legacy restoration target")
-            resume_targets.add(target)
+            else:
+                resume_targets.add(target)
             checksum = self.snapshot["files"][label]["sha256"]
             archive = destination/"trial-archive.sqlite3"
             self.copy_ledger(label,archive)
@@ -76,7 +90,27 @@ class SourceReturns:
                 count = self.bind(db,local,manager_db,status)
             self.reports[name] = {"kind":spec["kind"],"manifest":manifest,"manifest_sha256":digest(destination/manifest),
                                   "trial_archive_sha256":checksum,"published_messages":count}
+        self.restore_subscriptions(subscriptions)
         self.verify_bundle()
+
+    def restore_subscriptions(self, groups):
+        for old_sha, subscribers in groups.items():
+            target,snapshot,_ = min(subscribers.values(),key=lambda entry:entry[0].name.casefold())
+            trigger_archive.restore(snapshot,old_sha,target/"legacy")
+            if len(subscribers)==1:
+                continue
+            replay = target/"ack-batch.json"
+            entries = [{"subscriber":subscriber,"plan":destination.name+"/ack-replay.json",
+                        "plan_sha256":self.reports[destination.name]["manifest_sha256"],"request":request}
+                       for subscriber,(destination,_,request) in sorted(subscribers.items())]
+            restore_directory = target.name+"/legacy"
+            replay.write_text(encode({"legacy_archive_sha256":old_sha,"restore_directory":restore_directory,
+                                      "subscriptions":entries}),encoding="utf-8")
+            replay.chmod(0o600)
+            batch = {"legacy_restore_directory":restore_directory,"legacy_replay_batch":target.name+"/"+replay.name,
+                     "legacy_replay_batch_sha256":digest(replay)}
+            for destination,_,_ in subscribers.values():
+                self.reports[destination.name].update(batch)
 
     def copy_ledger(self, label, path):
         if label not in self.snapshot["files"]:
@@ -101,14 +135,15 @@ class SourceReturns:
         required = {"legacy_snapshot","legacy_snapshot_sha256","journal","journal_sha256"}
         info = {"info_review","info_review_sha256"}
         if spec.get("kind")=="subscription" and keys in (required,required|info):
-            status = trigger_return.stage_return(
-                self.path(spec["legacy_snapshot"]),spec["legacy_snapshot_sha256"],destination,
+            status = trigger_return.audit(
+                self.path(spec["legacy_snapshot"]),spec["legacy_snapshot_sha256"],
                 journal=self.path(spec["journal"]),journal_sha256=spec["journal_sha256"],
                 bundle_sha256=self.plan["bundle_sha256"],trigger_instance=spec["trigger_instance"],
                 info_review=self.path(spec["info_review"]) if "info_review" in spec else None,**common)
             if status["info_review_sha256"]!=spec.get("info_review_sha256"):
                 raise ValueError("Info review differs from the approved recipe")
-            return ("subscription",spec["legacy_snapshot_sha256"]),status,"ack-replay.json"
+            destination.mkdir(mode=0o700)
+            return None,status,"ack-replay.json"
         raise ValueError("invalid source return recipe")
 
     def bind(self, db, local, manager, status):
