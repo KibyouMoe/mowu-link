@@ -82,7 +82,9 @@ Windows 适配器先核专用 profile 目录 ACL，在原生协议初始化前�
 
 ## 隔离可写工位
 
-单独准备获准的测试 profile、工作目录和属主独占的短路径运行目录。用 `codex-provision --tool worker_report --tool worker_workspace_shell --tool worker_workspace_export` 登记工具，将返回的固定会话交给 `codex-adapter --assignment-workspace /绝对路径/workspace.json`。JSON 文件权限为 600，填写 `runtime`、`node`、`docker`、`socket` 的绝对路径和已审核的本地 `image` 完整镜像 ID。可选的 `seed` 与 `execute_workspace_files` 沿用 [DSH 工位的容器配置](README.md#dsh-固定会话与飞书卡片)。此模式与 `--read-only-assignments`、审批转接互斥。App Server 本身保持只读，工作区位于原派发专用的无网络 Linux 容器。
+单独准备获准的测试 profile、工作目录和属主独占的短路径运行目录。用 `codex-provision --tool worker_report --tool worker_workspace_shell --tool worker_workspace_export` 登记工具，将返回的固定会话交给 `codex-adapter --assignment-workspace <绝对路径 workspace.json>`。填写 `runtime`、`node`、`docker` 的绝对路径和已审核的本地 `image` 完整镜像 ID。POSIX 的 JSON 权限为 600，`socket` 为私有本机 Docker Unix 套接字绝对路径。Windows 的 JSON 和运行目录用私有 ACL，`node`、`docker` 指向本机 EXE，`socket` 填 `npipe:////./pipe/docker_engine`。启动时须核到有效的 Linux 引擎身份。可选的 `seed` 与 `execute_workspace_files` 沿用 [DSH 工位的容器配置](README.md#dsh-固定会话与飞书卡片)。此模式与 `--read-only-assignments`、审批转接互斥。App Server 本身保持只读，工作区位于原派发专用的无网络 Linux 容器。
+
+Windows 将工作区桥接进程及其子进程纳入适配器的 Job Object。账本替换前核对原文件、新临时文件和运行目录的权限，将内容写回磁盘，再请求同目录的写穿替换。离线审计从原文件身份和写锁判断工位是否停止。测试入口为 `python -B -m unittest -v rewrite.test_workspace_engine.WindowsWorkspaceEngine.test_codex_windows_workspace_recovers_original_artifact_and_removal`。该用例在 Windows 上使用 Docker CLI 夹具，覆盖重开、原附件、引擎不匹配和移除回执。真正的 Windows Docker 工作区另验。[Win32 文件替换](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-movefileexw) · [Windows 安装流水线](../.github/workflows/rewrite-windows.yml)
 
 `worker_workspace_shell` 仅接受原生会话中正在运行的正式工单回合。适配器核对原派发接管、原生输入和收件凭据。回执未知的命令留待核，同一原生调用号不会执行第二次。`worker_workspace_export` 按工作区相对路径读取文件，核长度与摘要后暂存；将其返回的附件号填进 `worker_report` 才会交给验收方。Router 已写成果但 Worker 尚未核到回执时，保留原容器。取消和转派等控制回合结束，再核对原派发容器已移除，随后交清理回执。换绑或版本回退前按[原工作区账本](router-rehearsal.md#重做版五组件的离线恢复)对账。
 

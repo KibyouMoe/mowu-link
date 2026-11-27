@@ -61,7 +61,7 @@ with (root / ".mowulink-seed-lock").open("a") as lock:
     os.rename(partial, target)
 `;
 
-export function workspaceSeed(config) {
+export function workspaceSeed(config,files=null) {
   if (config===undefined) return null;
   if (!config || typeof config.archive!=='string' || !path.isAbsolute(config.archive)
       || typeof config.sha256!=='string' || !/^[a-f0-9]{64}$/.test(config.sha256)
@@ -69,6 +69,11 @@ export function workspaceSeed(config) {
   return {sha256:config.sha256,async bytes() {
     let file;
     try {
+      if (files) {
+        const data = await files.seed(config.archive);
+        if (createHash('sha256').update(data).digest('hex')!==config.sha256) throw new Error();
+        return data;
+      }
       file = await open(config.archive,constants.O_RDONLY|constants.O_NOFOLLOW|constants.O_NONBLOCK);
       const info = await file.stat();
       if (!info.isFile() || info.uid!==process.getuid() || info.mode&0o077 ||

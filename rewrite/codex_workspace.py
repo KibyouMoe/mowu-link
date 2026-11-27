@@ -1,13 +1,15 @@
 """Scoped native Codex tools backed by the existing disposable Linux workspace."""
 import base64
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 from threading import Event, Thread
 
 from .codex_rpc import AppServerRpc
+from .dsh_local_link import private_directory, private_file
 from .dsh_workspace_audit import host_stopped, journal
 from .storage import Fault, encode, require, state_writer
 from .workspace_artifacts import stage, verify_state
@@ -38,28 +40,56 @@ def open_workspace(config,session):
     runtime,node = Path(config["runtime"]),Path(config["node"])
     require(runtime.is_absolute() and not runtime.is_symlink() and runtime.is_dir()
             and node.is_absolute() and node.is_file(),422,"invalid_codex_workspace_config")
-    owner = runtime.lstat()
-    require(owner.st_uid==os.getuid() and not owner.st_mode&0o077,422,"private_workspace_runtime_required")
+    try:
+        private_directory(runtime)
+    except Fault:
+        raise Fault(422,"private_workspace_runtime_required") from None
     directory = runtime/"assignment-containers"
     state = runtime/"codex-workspace"
+    lock = state.with_suffix(".writer")
     guard_path = runtime/"dsh.sock"
-    require(state.with_suffix(".writer").is_file() or not (directory.exists() or guard_path.exists()),
+    require(lock.is_file() or not (directory.exists() or guard_path.exists()),
             409,"workspace_runtime_already_bound")
     bridge = Path(__file__).with_name("integrations")/"assignment-workspace.mjs"
     engine = {key:value for key,value in config.items() if key not in ("runtime","node")}
-    with state_writer(state):
-        require(host_stopped(runtime),409,"workspace_runtime_already_running")
-        guard_path.unlink(missing_ok=True)
+    windows = os.name=="nt"
+    command = [node,bridge,runtime]
+    env = {"PATH":os.defpath}
+    child_scope = nullcontext
+    if windows:
+        from .windows_job import owned_process_tree
+
+        require(len(runtime.drive)==2 and runtime.drive.endswith(":")
+                and len(node.drive)==2 and node.drive.endswith(":")
+                and node.suffix.lower()==".exe" and not node.is_symlink()
+                and engine["socket"]=="npipe:////./pipe/docker_engine",422,"invalid_codex_workspace_config")
         try:
-            with subprocess.Popen([node,bridge,runtime],stdin=subprocess.PIPE,stdout=subprocess.PIPE,
-                                  stderr=subprocess.DEVNULL,text=True,env={"PATH":os.defpath}) as process:
-                rpc = AppServerRpc(process)
-                workspace = CodexWorkspace(rpc)
+            private_file(lock)
+        except FileNotFoundError:
+            pass
+        command.append(sys.executable)
+        env.update(SystemRoot=os.environ["SystemRoot"],USERPROFILE=str(runtime),HOME=str(runtime),
+                   HOMEDRIVE=runtime.drive,HOMEPATH=str(runtime)[2:],APPDATA=str(runtime),
+                   LOCALAPPDATA=str(runtime),TEMP=str(runtime),TMP=str(runtime))
+        child_scope = owned_process_tree
+    with state_writer(state):
+        if windows:
+            private_file(lock)
+        require(host_stopped(runtime),409,"workspace_runtime_already_running")
+        if not windows:
+            guard_path.unlink(missing_ok=True)
+        try:
+            with subprocess.Popen(command,stdin=subprocess.PIPE,stdout=subprocess.PIPE,
+                                  stderr=subprocess.DEVNULL,encoding="utf-8",env=env) as process:
+                rpc = None
                 try:
-                    require(workspace.request("open",{"session":session,"config":engine})=={"opened":True},
-                            502,"assignment_workspace_unconfirmed")
-                    workspace.identity = journal(runtime)[1]
-                    yield workspace
+                    with child_scope(process.pid):
+                        rpc = AppServerRpc(process)
+                        workspace = CodexWorkspace(rpc)
+                        require(workspace.request("open",{"session":session,"config":engine})=={"opened":True},
+                                502,"assignment_workspace_unconfirmed")
+                        workspace.identity = journal(runtime)[1]
+                        yield workspace
                 finally:
                     if process.poll() is None:
                         process.terminate()
@@ -68,9 +98,11 @@ def open_workspace(config,session):
                         except subprocess.TimeoutExpired:
                             process.kill()
                             process.wait()
-                    rpc.reader.join(timeout=5)
+                    if rpc:
+                        rpc.reader.join(timeout=5)
         finally:
-            guard_path.unlink(missing_ok=True)
+            if not windows:
+                guard_path.unlink(missing_ok=True)
 
 
 class CodexWorkspace:

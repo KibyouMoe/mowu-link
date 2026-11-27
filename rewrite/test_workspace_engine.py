@@ -1,4 +1,6 @@
 """Run the production Docker command builder on the Windows CI host."""
+import base64
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -6,6 +8,10 @@ import shutil
 import subprocess
 from tempfile import TemporaryDirectory
 import unittest
+
+from .codex_workspace import open_workspace
+from .dsh_workspace_audit import inspect, journal
+from .storage import Fault, StateWriterBusy, encode, guid
 
 
 NODE = shutil.which("node")
@@ -15,15 +21,19 @@ DOCKER_PROBE = Path(__file__).parent/"testdata/windows_workspace_docker_probe.cs
 
 @unittest.skipUnless(os.name=="nt" and NODE,"Windows and Node are required")
 class WindowsWorkspaceEngine(unittest.TestCase):
-    def test_local_docker_pipe_is_explicit_and_requires_a_linux_daemon(self):
+    def compile_docker_fixture(self):
         root = Path(self.enterContext(TemporaryDirectory(prefix="workspace-容器-"))).resolve()
         docker = root/"docker fixture.exe"
-        cli_config = root/"private docker config"
-        cli_config.mkdir()
         compiler = Path(os.environ["SystemRoot"])/"Microsoft.NET/Framework64/v4.0.30319/csc.exe"
         compiled = subprocess.run([compiler,"/nologo","/target:exe","/out:"+str(docker),DOCKER_PROBE],
                                   capture_output=True,text=True,errors="replace",timeout=30)
         self.assertEqual(compiled.returncode,0,compiled.stdout+compiled.stderr)
+        return root,docker
+
+    def test_local_docker_pipe_is_explicit_and_requires_a_linux_daemon(self):
+        root,docker = self.compile_docker_fixture()
+        cli_config = root/"private docker config"
+        cli_config.mkdir()
         script = """
 import assert from 'node:assert/strict';
 import {writeFileSync} from 'node:fs';
@@ -63,3 +73,69 @@ console.log(JSON.stringify({local_pipe:socket,linux_identity_recovered:true,
         self.assertEqual(json.loads(result.stdout),{"local_pipe":"npipe:////./pipe/docker_engine",
                          "linux_identity_recovered":True,"remote_or_raw_endpoint_rejected":True,
                          "unavailable_refused":True})
+
+    def test_codex_windows_workspace_recovers_original_artifact_and_removal(self):
+        from .windows_workspace_files import record_write
+
+        root,docker = self.compile_docker_fixture()
+        runtime = root/"private runtime"
+        runtime.mkdir()
+        response = root/"daemon-reply.txt"
+        response.write_text("windows existing-engine",encoding="utf-8")
+        image = "sha256:"+"b"*64
+        container = "a"*64
+        session,task,assignment,token = guid(),guid(),guid(),guid()
+        scope = {"session":session,"task_id":task,"assignment_id":assignment}
+        config = {"runtime":str(runtime),"node":NODE,"docker":str(docker),
+                  "socket":"npipe:////./pipe/docker_engine","image":image}
+        with self.assertRaisesRegex(Fault,"native_cleanup_unconfirmed"), open_workspace(config,session):
+            pass
+        response.write_text("linux isolated-engine",encoding="utf-8")
+        fixture = root/"fixture-container.json"
+        raw = bytes(range(256))*5
+        with open_workspace(config,session) as workspace:
+            self.assertEqual(workspace.pending(session),[])
+            ledger,identity = journal(runtime)
+            with self.assertRaises(StateWriterBusy), open_workspace(config,session):
+                pass
+            self.assertEqual(inspect(runtime,{identity}),(None,"dsh_workspace_host_still_running"))
+            self.assertFalse((runtime/"dsh.sock").exists())
+            lease = ledger/(hashlib.sha256(encode([session,assignment]).encode()).hexdigest()+".json")
+            started = "2026-11-27T00:00:00.123456789Z"
+            record_write(lease,encode({**scope,"daemon":"isolated-engine","image":image,"token":token,
+                                      "phase":"active","container_id":container,"started_at":started}).encode())
+            (root/"fixture-container-label.txt").write_text("label=io.mowulink.assignment="+token,encoding="utf-8")
+            (root/"artifact.bin").write_bytes(raw)
+            fixture.write_text(encode([{"Id":container,"Image":image,
+                "Config":{"Labels":{"io.mowulink.assignment":token},"User":"65534:65534"},
+                "State":{"Running":True,"StartedAt":started},
+                "HostConfig":{"NetworkMode":"none","PidMode":"","IpcMode":"private","ReadonlyRootfs":True,
+                    "Privileged":False,"CapDrop":["ALL"],"SecurityOpt":["no-new-privileges"],"RestartPolicy":{"Name":"no"},
+                    "PidsLimit":64,"Memory":256*1024*1024,"NanoCpus":1_000_000_000,
+                    "Tmpfs":{"/workspace":"rw,nosuid,nodev,size=64m,mode=1777",
+                             "/tmp":"rw,nosuid,nodev,size=16m,mode=1777"}},
+                "Mounts":[]}]),encoding="utf-8")
+        pending,issue = inspect(runtime,{identity})
+        self.assertIsNone(issue)
+        self.assertEqual(pending["pending"],[{**scope,"phase":"active"}])
+
+        with open_workspace(config,session) as reopened:
+            self.assertEqual(reopened.identity,identity)
+            self.assertEqual(reopened.pending(session),[{"task_id":task,"assignment_id":assignment}])
+            artifact = reopened.request("artifact",{**scope,"path":"artifact.bin"})
+            self.assertEqual(base64.b64decode(artifact["data"]),raw)
+            self.assertEqual(artifact["sha256"],hashlib.sha256(raw).hexdigest())
+            response.write_text("linux other-engine",encoding="utf-8")
+            with self.assertRaisesRegex(Fault,"native_cleanup_unconfirmed"):
+                reopened.seal(scope)
+            self.assertTrue(fixture.is_file())
+            response.write_text("linux isolated-engine",encoding="utf-8")
+            proof = reopened.seal(scope)
+            self.assertEqual(proof["container_id"],container)
+        with open_workspace(config,session) as recovered:
+            self.assertEqual(recovered.seal(scope),proof)
+            self.assertEqual(recovered.pending(session),[])
+        self.assertFalse(fixture.exists())
+        audited,issue = inspect(runtime,{identity})
+        self.assertIsNone(issue)
+        self.assertEqual(audited["pending"],[])

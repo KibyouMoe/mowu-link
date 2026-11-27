@@ -5,9 +5,8 @@ internal static class WorkspaceDockerProbe
 {
     public static int Main(string[] args)
     {
-        if (args.Length != 7 || args[0] != "--config" || args[2] != "--host" ||
+        if (args.Length < 5 || args[0] != "--config" || args[2] != "--host" ||
             args[3] != "npipe:////./pipe/docker_engine" ||
-            args[4] != "info" || args[5] != "--format" || args[6] != "{{.OSType}} {{.ID}}" ||
             !Path.IsPathRooted(args[1]) ||
             !String.Equals(Path.GetDirectoryName(args[1]), Directory.GetCurrentDirectory(),
                            StringComparison.OrdinalIgnoreCase))
@@ -31,9 +30,46 @@ internal static class WorkspaceDockerProbe
         }
         string home = Environment.GetEnvironmentVariable("HOMEDRIVE") + Environment.GetEnvironmentVariable("HOMEPATH");
         if (!String.Equals(home, args[1], StringComparison.OrdinalIgnoreCase)) return 84;
-        string response = File.ReadAllText(Path.Combine(args[1], "daemon-reply.txt")).Trim();
-        if (response == "unavailable") return 83;
-        Console.WriteLine(response);
-        return 0;
+        if (args.Length == 7 && args[4] == "info" && args[5] == "--format" && args[6] == "{{.OSType}} {{.ID}}")
+        {
+            string reply = Path.Combine(args[1], "daemon-reply.txt");
+            if (!File.Exists(reply)) reply = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "daemon-reply.txt");
+            string response = File.ReadAllText(reply).Trim();
+            if (response == "unavailable") return 83;
+            Console.WriteLine(response);
+            return 0;
+        }
+        if (args.Length < 6 || args[4] != "container") return 81;
+        string directory = AppDomain.CurrentDomain.BaseDirectory;
+        string container = Path.Combine(directory, "fixture-container.json");
+        string label = Path.Combine(directory, "fixture-container-label.txt");
+        string id = new string('a', 64);
+        if (args[5] == "ls" && args.Length == 12 &&
+            args[6] == "--all" && args[7] == "--no-trunc" && args[8] == "--filter" &&
+            args[10] == "--format" && args[11] == "{{.ID}}")
+        {
+            if (File.Exists(container) && args[9] == File.ReadAllText(label).Trim()) Console.WriteLine(id);
+            return 0;
+        }
+        if (args[5] == "inspect" && args.Length == 7 && args[6] == id && File.Exists(container))
+        {
+            Console.WriteLine(File.ReadAllText(container));
+            return 0;
+        }
+        if (args[5] == "exec" && args.Length == 13 && args[6] == id && args[7] == "python3" &&
+            args[8] == "-I" && args[9] == "-c" && args[12] == "artifact.bin" && File.Exists(container))
+        {
+            using (Stream output = Console.OpenStandardOutput())
+            using (Stream source = File.OpenRead(Path.Combine(directory, "artifact.bin")))
+                source.CopyTo(output);
+            return 0;
+        }
+        if (args[5] == "rm" && args.Length == 8 && args[6] == "--force" && args[7] == id && File.Exists(container))
+        {
+            File.Delete(container);
+            Console.WriteLine(id);
+            return 0;
+        }
+        return 81;
     }
 }

@@ -65,26 +65,33 @@ def identities(paths):
     return result
 
 
+def read_record(path):
+    info = path.lstat()
+    if (not stat.S_ISREG(info.st_mode) or info.st_size>4096
+            or getattr(info,"st_file_attributes",0)&stat.FILE_ATTRIBUTE_REPARSE_POINT):
+        raise ValueError("invalid private workspace record")
+    flags = getattr(os,"O_NOFOLLOW",0)|getattr(os,"O_NONBLOCK",0)
+    with open(path,"rb",opener=lambda name,mode:os.open(name,mode|flags)) as stream:
+        check_private_stream(info,stream)
+        raw = stream.read(4097)
+    if len(raw)>4096:
+        raise ValueError("invalid private workspace record")
+    return raw
+
+
 def scan(ledger):
     fingerprints,pending = [],[]
     for path in sorted(ledger.iterdir()):
         if not path.name.endswith(".json"):
             continue
         try:
-            info = path.lstat()
-            if (not stat.S_ISREG(info.st_mode) or info.st_size>4096
-                    or getattr(info,"st_file_attributes",0)&stat.FILE_ATTRIBUTE_REPARSE_POINT):
-                raise ValueError("invalid private DSH workspace record")
-            open_flags = getattr(os,"O_NOFOLLOW",0)|getattr(os,"O_NONBLOCK",0)
-            with open(path,"rb",opener=lambda name,flags:os.open(name,flags|open_flags)) as stream:
-                check_private_stream(info,stream)
-                raw = stream.read(4097)
+            raw = read_record(path)
             record = json.loads(raw)
             scope = {key:record[key] for key in ("session","task_id","assignment_id","phase")}
             session,aid = scope["session"],scope["assignment_id"]
             filename = hashlib.sha256(encode([session,aid]).encode()).hexdigest()+".json"
             container = record["container_id"]
-            if (len(raw)>4096 or path.name!=filename or not isinstance(session,str) or not session
+            if (path.name!=filename or not isinstance(session,str) or not session
                     or not valid_guid(scope["task_id"]) or not valid_guid(aid) or scope["phase"] not in PHASES
                     or container is not None and (not isinstance(container,str) or not re.fullmatch(r"[0-9a-f]{64}",container))
                     or scope["phase"] in ("active","seeding") and container is None

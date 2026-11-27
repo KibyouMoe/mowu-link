@@ -89,29 +89,32 @@ function writeRecord(filename,value) {
   finally { closeSync(parent); }
 }
 
-export function assignmentContainers(runtime,session,config) {
+export function assignmentContainers(runtime,session,config,files=null) {
   const {docker,socket,image,execute_workspace_files=false} = config;
   check(typeof image==='string' && /^sha256:[a-f0-9]{64}$/.test(image)
     && typeof execute_workspace_files==='boolean','invalid_assignment_container');
-  const seed = workspaceSeed(config.seed);
+  const seed = workspaceSeed(config.seed,files);
   const directory = path.join(runtime,'assignment-containers');
   const cliConfig = path.join(directory,'docker-config');
   const {invoke,daemon} = workspaceEngine(docker,socket,cliConfig);
-  privateDirectory(directory);
-  privateDirectory(cliConfig);
+  if (!files) {
+    privateDirectory(directory);
+    privateDirectory(cliConfig);
+  }
 
   const locks = new Map();
   const filename = aid=>path.join(directory,hash([session,aid])+'.json');
-  const save = entry=>writeRecord(filename(entry.assignment_id),entry);
+  const save = entry=>files ? files.write(filename(entry.assignment_id),entry)
+                            : writeRecord(filename(entry.assignment_id),entry);
   async function scope(tid,aid) {
     check(guid(tid) && guid(aid));
     const owner = await daemon();
-    let record = readRecord(filename(aid));
+    let record = files ? await files.read(filename(aid)) : readRecord(filename(aid));
     if (!record) {
       record = {session,task_id:tid,assignment_id:aid,daemon:owner,image,
         token:randomUUID(),phase:'unused',container_id:null,
         ...(seed ? {seed_sha256:seed.sha256} : {}),...(execute_workspace_files ? {workspace_exec:true} : {})};
-      save(record);
+      await save(record);
     }
     check(record.session===session && record.task_id===tid && record.assignment_id===aid &&
       record.daemon===owner && record.image===image && guid(record.token) &&
@@ -160,12 +163,12 @@ export function assignmentContainers(runtime,session,config) {
     return state.StartedAt;
   }
 
-  function ready(record,container) {
+  async function ready(record,container) {
     const startedAt = running(container);
     check(record.started_at===undefined || record.started_at===startedAt,'assignment_workspace_restarted');
     if (record.started_at===undefined) {
       record.started_at = startedAt;
-      save(record);
+      await save(record);
     }
   }
 
@@ -180,7 +183,7 @@ export function assignmentContainers(runtime,session,config) {
         await invoke(['container','start',record.container_id]);
         container = await owned(record);
       }
-      ready(record,container);
+      await ready(record,container);
       return record.container_id;
     }
     const seedBytes = await seed?.bytes();
@@ -192,7 +195,7 @@ export function assignmentContainers(runtime,session,config) {
       check(base?.Id===image && base.Os==='linux' && !Object.keys(base.Config?.Volumes ?? {}).length,
         'invalid_assignment_image');
       record.phase = 'issuing';
-      save(record);
+      await save(record);
       const tmpfs = mountOptions(record);
       await invoke(['container','create','--pull','never','--name','mowulink-'+record.token,
         '--label',LABEL+'='+record.token,'--network','none','--ipc','private','--user','65534:65534',
@@ -205,7 +208,7 @@ export function assignmentContainers(runtime,session,config) {
       check(container);
     }
     record.container_id = container.Id;
-    save(record);
+    await save(record);
     if (container.State.Status==='created') {
       await invoke(['container','start',container.Id]);
       container = await owned(record);
@@ -213,7 +216,7 @@ export function assignmentContainers(runtime,session,config) {
     const startedAt = running(container);
     if (seed) {
       record.phase = 'seeding';
-      save(record);
+      await save(record);
       await invoke(['container','exec','-i',container.Id,'python3','-I','-c',seedProject,
         String(maximumSeedBytes),seed.sha256],{stdin:seedBytes,timeout:20000,signal})
         .catch(()=>{ throw new Error('workspace_seed_unconfirmed'); });
@@ -221,13 +224,14 @@ export function assignmentContainers(runtime,session,config) {
     }
     record.started_at = startedAt;
     record.phase = 'active';
-    save(record);
+    await save(record);
     return container.Id;
   }
 
   return {
     seeded:seed!==null,
     executeWorkspaceFiles:execute_workspace_files,
+    async confirmEngine() { await daemon(); },
     async run(tid,aid,command,signal) {
       check(typeof command==='string' && command.trim() && command.length<=8192 && !command.includes('\0'),
         'invalid_assignment_command');
@@ -256,7 +260,7 @@ export function assignmentContainers(runtime,session,config) {
         const record = await scope(tid,aid);
         check(record.phase==='active' && record.container_id,'assignment_workspace_unavailable');
         const container = await owned(record);
-        ready(record,container);
+        await ready(record,container);
         const {stdout:bytes} = await invoke(['container','exec',container.Id,'python3','-I','-c',readArtifact,
           String(MAX_ARTIFACT_BYTES),relative],{encoding:'buffer',maxBuffer:MAX_ARTIFACT_BYTES,signal})
           .catch(()=>{ throw new Error('workspace_artifact_unreadable'); });
@@ -266,6 +270,7 @@ export function assignmentContainers(runtime,session,config) {
       });
     },
     pending() {
+      if (files) return files.pending(session);
       const pending = [];
       for (const name of readdirSync(directory)) {
         if (!/^[a-f0-9]{64}\.json$/.test(name)) continue;
@@ -288,11 +293,11 @@ export function assignmentContainers(runtime,session,config) {
         } else {
           if (container) record.container_id = container.Id;
           record.phase = 'sealing';
-          save(record);
+          await save(record);
           if (container) await invoke(['container','rm','--force',record.container_id]);
           check(await daemon()===record.daemon && !await owned(record));
           record.phase = 'sealed';
-          save(record);
+          await save(record);
         }
         return {container_id:record.container_id,receipt_id:hash(record),state:'removed'};
       });
