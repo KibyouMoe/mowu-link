@@ -440,6 +440,25 @@ python -B -m unittest -v rewrite.test_host_ops_windows
 
 验收夹具注册和清理按本次运行生成的测试服务。SCM 以测试机的 LocalSystem 账号运行包装进程，由它启动隔离 Router。Windows Server 2025 已核验原生启停、同号查回及原工单保留。Desktop 自有进程和现役接管仍需另行验收。[Windows 实测回执](evidence/windows-scm-host-ops.json)
 
+#### 从发行包准备 Windows Router 服务
+
+在 Windows 当前已授权的维护账号下完成。准备过程需要已安装的 64 位 .NET Framework C# 编译器和受信的本地 Python。将已下载的归档、完整 Git 提交及受信 SHA-256 交给原安装命令。工作目录切到校验后的包根。运行状态、身份文件和 TLS 私钥放在受保护的独立目录。保持账号和文件权限沿用既有安装授权。
+
+```powershell
+python -B -m rewrite.windows_router_service `
+  --archive $releaseArchive --revision $revision --sha256 $releaseSha `
+  --package $installed --destination $newLauncherDirectory `
+  --service $serviceName --account $serviceAccount --python $trustedPython `
+  --db $routerDb --identities $routerIdentities --cert $tlsCert --key $tlsKey `
+  --bind 127.0.0.1 --port $routerPort
+```
+
+准备命令逐文件核对包，并从该包内的源码编译启动器。输出 `scm_create_args`、对应的独立维护登记 `maintenance`，以及写在状态目录的本机就绪文件路径。保留每个版本的输出。首次安装由本机安装者把 `scm_create_args` 作为参数向量传给 `sc.exe create`。使用 Windows 已登记的服务身份，提供该账号另需的本地设置。测试账号为一次性 Windows Server 的 LocalSystem。[Windows SCM 登记](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/sc-create)
+
+同一服务升级前按停写和备份流程保全旧库、旧包及登记。先 `sc.exe stop`，核 SCM 和 Router 都已退出，再把新计划的 `binPath=` 及其对应值通过 `sc.exe config` 写到同一服务。保留原身份、库和端口。启动后核本机就绪文件的实际 PID 与监听端口，再用 TLS 管理查询读回原队首和幂等键。维护端的登记也需换成该版 `maintenance`。若要回退，停止新进程并恢复经审核的旧库或相容状态，按同样步骤使用保留下来的旧登记和旧包。[原生配置方式](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/sc-config)
+
+启动器只在 Router 确认监听后向 SCM 报启动成功。停止时关闭 Router 私有管道并等待退出，超时后才结束所持有的子进程。运行中子进程退出时，SCM 服务会停止。就绪文件用于本机定位进程和端口，业务核验使用认证后的 Router 查询。 Windows Server 2025 已从两套发布包实测同一服务安装、升级和回退。第二写者被拒，运行中结束子进程后 SCM 确认服务停止，重开可读回原单。[Windows 发行包证据](evidence/windows-router-service-release.json)
+
 ### 跨系统验收
 
 开发机需 Python 3.12 或更新版本、Git、OpenSSL 和已运行的本地 Linux Docker 引擎。先准备含 Python 3.12+、Git、tar、OpenSSL 的 Linux 测试镜像。此次实测使用官方 `python:3.13-bookworm` 的 Linux arm64 manifest `sha256:0a1254df0519003d33fd4ab8ad26aff1154e50b3c93aa5ec978e83bf83ba084c`。各引擎对已安装镜像的 ID 表示可能不同，`--image` 使用本机 `docker image inspect --format '{{.Id}}' <镜像>` 的完整结果。

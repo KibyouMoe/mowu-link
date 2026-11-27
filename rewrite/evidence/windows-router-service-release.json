@@ -1,0 +1,56 @@
+{
+  "run": "https://github.com/KibyouMoe/mowu-link/actions/runs/45941010281/job/140315056860",
+  "revision": "f216fe77b4e68699f0e2454b64d5d497988d6d85",
+  "release_sha256": "061b451171b3b01413070c2515d5e1ee88970da9ff28f213d7182e138e16992c",
+  "verified_files": 357,
+  "windows_install_tests_passed": 22,
+  "windows_build": 26100,
+  "service": "mowulink-ci-dfd969eb-8cfb-4289-9be2-da9fd5feda74",
+  "runs": [
+    {
+      "phase": "previous",
+      "revision": "1dc8ab382ea8d03fe99c97fb8bd3d9da88a17b38",
+      "service_pid": 1244,
+      "router_pid": 6516,
+      "launcher_sha256": "e7aaf787e0b28f5035d4d9db538cb75d6467d3cde0547a552e2509d61ab7b612",
+      "process_exits_observed": true
+    },
+    {
+      "phase": "trial",
+      "revision": "f216fe77b4e68699f0e2454b64d5d497988d6d85",
+      "service_pid": 804,
+      "router_pid": 8548,
+      "launcher_sha256": "f20daf529d5ead41cf143ddcbcea5198bcb981ce35bcf1c1c314dccdc292dbbc",
+      "process_exits_observed": true
+    },
+    {
+      "phase": "rollback",
+      "revision": "1dc8ab382ea8d03fe99c97fb8bd3d9da88a17b38",
+      "service_pid": 1704,
+      "router_pid": 4660,
+      "launcher_sha256": "e7aaf787e0b28f5035d4d9db538cb75d6467d3cde0547a552e2509d61ab7b612",
+      "process_exits_observed": true
+    }
+  ],
+  "archive_sha256": [
+    "a4046259aab272b74c7876b89c8470cb9b186003c80c42bc39c2818c12d771cf",
+    "061b451171b3b01413070c2515d5e1ee88970da9ff28f213d7182e138e16992c"
+  ],
+  "task_id": "74128762-8d0d-4a6b-a845-8f723669e3b0",
+  "task_counts": [
+    1,
+    1,
+    1
+  ],
+  "refused_bad_checksum": true,
+  "refused_second_writer": true,
+  "service_removed": true,
+  "unexpected_exit": {
+    "service_pid": 6920,
+    "router_pid": 7184,
+    "reported_stopped": true,
+    "recovered_pid": 3420,
+    "original_task_preserved": true
+  },
+  "scope": "Actual disposable Windows SCM, installed releases, HTTPS Router and SQLite."
+}
