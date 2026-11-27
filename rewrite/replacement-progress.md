@@ -6,6 +6,10 @@
 
 ## 检查点与证据
 
+新增本机持久停派入口 `rewrite.service router-drain`。运行中执行会被 Router 的写锁拒绝。隔离 HTTPS Router 中，一张单的 W03 已落库但回包丢失，另一张单仅有 C02 收件。停派后前者通过快照恢复取回原 W03，宿主一次收件并交 W04，Router 仍待验收，成果通知一条。后者退回原队列，迟到 W03 回 409。恢复的 Router 启动回执保留原停派号，原快照不变。解除后等第二个工位重新满足空闲条件，退回的工单按原队首先取得新派发号。
+
+安装包锁定 `8d31c8ab9807fbac304a8d25667b1506b877cadc`，393 个文件在 macOS 与 Linux arm64 复验一致。各通过 69 项，跳过 Windows ACL 专项。Router、安装程序、HTTPS、SQLite 快照为实跑，宿主为测试夹具。正式生产窗口与真宿主仍按矩阵验收。[操作步骤](router-rehearsal.md#切换前持久停派) · [实测记录](evidence/router-dispatch-drain.json)
+
 增加 `state_bundle capture-part` 与 `assemble`。宿主先按各自写锁封存，协调端按批次、版本、预登记组件及摘要合并。错批、缺组件、错摘要、篡改文件均被拒。Worker 与适配器分机时，合并阶段重验托管会话登记，错回调摘要的片段组合不会发布。
 
 安装包专项回归在 macOS 通过 34 项、Linux 通过 33 项，各按环境跳过 1 项。

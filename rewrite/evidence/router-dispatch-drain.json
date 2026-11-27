@@ -1,0 +1,151 @@
+{
+  "release": {
+    "files": 393,
+    "revision": "8d31c8ab9807fbac304a8d25667b1506b877cadc",
+    "sha256": "91fbe44b53df9ff75f8bba35f30fa41318a4a18bc404026b6fd0b9897c13e5ad"
+  },
+  "macos": {
+    "regression": {
+      "passed": 69,
+      "skipped": 1,
+      "historical_excluded": 0
+    },
+    "accepted_task": "36909da6-b99d-4c3e-b945-ed0a453042ff",
+    "active_writer_refused": true,
+    "begin": {
+      "operation_id": "cd86bf99-8bd6-4720-bb40-13e1988c0037",
+      "released_at": null,
+      "requeued": [
+        {
+          "assignee_id": "b",
+          "assignment_id": "8b98b241-008e-4ad0-9833-977f4467d9ee",
+          "revision": 3,
+          "task_id": "08f48e00-52a0-43a6-b63a-436dc4a597d8"
+        }
+      ],
+      "started_at": "2026-11-27T09:40:31.021137+00:00",
+      "state": "draining"
+    },
+    "boundary": "Real Router CLI processes and isolated HTTPS. Worker core, native host fixtures and simulated packet loss.",
+    "drain_restored_from_snapshot": true,
+    "end": {
+      "operation_id": "cd86bf99-8bd6-4720-bb40-13e1988c0037",
+      "released_at": "2026-11-27T09:40:32.243857+00:00",
+      "requeued": [
+        {
+          "assignee_id": "b",
+          "assignment_id": "8b98b241-008e-4ad0-9833-977f4467d9ee",
+          "revision": 3,
+          "task_id": "08f48e00-52a0-43a6-b63a-436dc4a597d8"
+        }
+      ],
+      "started_at": "2026-11-27T09:40:31.021137+00:00",
+      "state": "released"
+    },
+    "kept_idle_window": false,
+    "new_assignment_id": "b84bb751-65a3-4d0b-8998-b617c7fdc9a1",
+    "new_worker_inputs": {
+      "a": 1,
+      "b": 1
+    },
+    "old_w03_error": "stale_assignment",
+    "old_w03_http": 409,
+    "reopened_host_receipt": {
+      "delivery_id": "3142b971-ef3a-4dd6-b46d-d87866d4e6a8",
+      "digest": "8e6254f693a54c0482521c8179bc657b0ef540c5f0c1fed5c4722390dd53cd47",
+      "native_id": "545154cf-0562-40d1-92c3-96d033741bd4",
+      "session": "fixture-b",
+      "turn_id": "77218fac-775a-4ad1-8d75-3fe44f16a044"
+    },
+    "report_notice": "a0ef6276-db57-472f-9aaa-f33239b7f751",
+    "snapshot_id": "b1c97054-de9b-4543-8cc2-535c73dc4677",
+    "snapshot_unchanged": true,
+    "unaccepted_task": "08f48e00-52a0-43a6-b63a-436dc4a597d8",
+    "w03": {
+      "accepted": true,
+      "assignment_id": "50680491-de54-40c4-807c-e7d4d1e4fd5c",
+      "holder": {
+        "kind": "worker",
+        "worker_id": "a"
+      }
+    },
+    "w03_key": "accept-50680491-de54-40c4-807c-e7d4d1e4fd5c",
+    "w04": {
+      "recorded": true,
+      "release_assignment_id": "50680491-de54-40c4-807c-e7d4d1e4fd5c",
+      "task_state": "completed_reported"
+    }
+  },
+  "linux_arm64": {
+    "regression": {
+      "passed": 69,
+      "skipped": 1,
+      "historical_excluded": 0
+    },
+    "accepted_task": "20b47c3d-2e63-4825-9ed1-c73be51d6405",
+    "active_writer_refused": true,
+    "begin": {
+      "operation_id": "1b2270a4-ff15-4f81-83bb-0ed11253bcf6",
+      "released_at": null,
+      "requeued": [
+        {
+          "assignee_id": "b",
+          "assignment_id": "e9ad9fb4-4094-4028-a528-1b2e9063977d",
+          "revision": 3,
+          "task_id": "6a2a874c-83cf-4259-972c-b3e50b971d7f"
+        }
+      ],
+      "started_at": "2026-11-27T09:40:31.362550+00:00",
+      "state": "draining"
+    },
+    "boundary": "Real Router CLI processes and isolated HTTPS. Worker core, native host fixtures and simulated packet loss.",
+    "drain_restored_from_snapshot": true,
+    "end": {
+      "operation_id": "1b2270a4-ff15-4f81-83bb-0ed11253bcf6",
+      "released_at": "2026-11-27T09:40:32.302609+00:00",
+      "requeued": [
+        {
+          "assignee_id": "b",
+          "assignment_id": "e9ad9fb4-4094-4028-a528-1b2e9063977d",
+          "revision": 3,
+          "task_id": "6a2a874c-83cf-4259-972c-b3e50b971d7f"
+        }
+      ],
+      "started_at": "2026-11-27T09:40:31.362550+00:00",
+      "state": "released"
+    },
+    "kept_idle_window": false,
+    "new_assignment_id": "45c8ef02-4c5f-4326-9dba-4351f1ccca87",
+    "new_worker_inputs": {
+      "a": 1,
+      "b": 1
+    },
+    "old_w03_error": "stale_assignment",
+    "old_w03_http": 409,
+    "reopened_host_receipt": {
+      "delivery_id": "647b9fb2-3594-4c0a-96db-aa446599ea10",
+      "digest": "4ffc7685a0016c698a1db416fbbf39833489d38c5fc2cf8b67a3a84944e07344",
+      "native_id": "6d030bbf-5eaa-4965-aa7c-0d912a597919",
+      "session": "fixture-b",
+      "turn_id": "bfb1d20a-e191-4f15-acf6-96ee13f7bcf9"
+    },
+    "report_notice": "0138a958-fcad-4f02-98ab-0958c051b26e",
+    "snapshot_id": "cb6fd9e6-c581-4104-8419-1a78c61d9e14",
+    "snapshot_unchanged": true,
+    "unaccepted_task": "6a2a874c-83cf-4259-972c-b3e50b971d7f",
+    "w03": {
+      "accepted": true,
+      "assignment_id": "76d75d45-a15b-4022-beec-1b742d0cd618",
+      "holder": {
+        "kind": "worker",
+        "worker_id": "a"
+      }
+    },
+    "w03_key": "accept-76d75d45-a15b-4022-beec-1b742d0cd618",
+    "w04": {
+      "recorded": true,
+      "release_assignment_id": "76d75d45-a15b-4022-beec-1b742d0cd618",
+      "task_state": "completed_reported"
+    }
+  }
+}

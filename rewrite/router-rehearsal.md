@@ -553,6 +553,30 @@ python3 -B -m rewrite.state_bundle audit-trigger --snapshot "$SNAPSHOT" --manife
 
 来源库尚未纳入且 Router 从未收到该实例时，离线数据库无从发现遗漏。执行人须从已确认的来源部署清单核齐实例。原采集端的位置、Hermes 的原生收件和外部平台回执各自验收。旧版历史处置依[切换清单](acceptance-matrix.md#正式切换清理与旧数据处置)。
 
+### 切换前持久停派
+
+在获准的切换窗口暂停外部新写入，停止新版 Router 后持原数据库的本机写锁执行。先为本次操作分配一个 UUID。
+
+```sh
+python3 -B -m rewrite.service router-drain --db "$ROUTER_DB" --operation-id "$DRAIN_ID" begin
+python3 -B -m rewrite.service router-drain --db "$ROUTER_DB" status
+```
+
+`begin` 返回 `draining`、原操作号和被撤回的预留清单。已预留但尚未完成 W03 的派发退回 Router 原队列，包括 C02 已确认的派发。原工单号与队列顺序保留，修订号递增。迟到的旧 W03 返回 `409 stale_assignment`。C02 的原帧和游标保留。Router 已确认的 W03 可按原键读回，原派发仍可继续投递、回报和验收。
+
+用支持该入口的发行包恢复或重开时，从 Router 就绪回执核对 `dispatch_draining=true` 和原 `dispatch_drain_id`，管理端工位列表会显示 `admission_paused=true`。停写快照的 `audit-handoff` 输出包含 `router_dispatch_drain`。待核持单、宿主收件和业务回执仍按原规则核对。回退目标若早于此入口，排空期间启动时继续使用该版本的 `--drain-dispatch`，并复核恢复库的原预留已撤回。
+
+对账结束并获准重新派发后，再停 Router，向即将使用的数据库提交同一操作号。
+
+```sh
+python3 -B -m rewrite.service router-drain --db "$ROUTER_DB" --operation-id "$DRAIN_ID" end
+python3 -B -m rewrite.service router-drain --db "$ROUTER_DB" status
+```
+
+原号 `end` 返回 `released`，无未释放操作时 `status` 返回 `open`。新一轮停派用新操作号。以常规参数启动 Router 后，各工位重新上报忙闲并满足连续 10 秒空闲，退回队列的单按原顺序取得新派发号。正在运行的 Router 会使上述本机命令因写锁而拒绝执行。
+
+复跑 `python3 -B -m unittest -v rewrite.test_service.Service.test_router_drain_keeps_accepted_work_and_requeues_an_unaccepted_offer`。隔离 HTTPS Router 实跑三次启动，宿主与故障注入为测试夹具。[实测记录](evidence/router-dispatch-drain.json)
+
 ### 新版 Router 与 Worker 分步更新
 
 安装含首次投递核验的版本时，先更新 Router，再更新 Worker。Worker 从自己的投递状态查询确认 Router 已启用该核验，然后才登记。若次序装反，工位状态显示 `router_assignment_status_required`。未登记的新进程不会接管 Router 的队首。Router 升级后，上一版 Worker 可继续处理原队首。切换到新版 Worker 时，沿用对应的原工位状态库及原宿主账本。
