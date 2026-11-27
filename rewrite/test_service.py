@@ -40,8 +40,9 @@ class Service(unittest.TestCase):
             json.dump(value,stream)
         return path
 
-    def start(self, identities, cert, key, role="router", extra=()):
-        process = subprocess.Popen([*CLI,role,"--db",self.root/(role+".db"),"--identities",identities,
+    def start(self, identities, cert, key, role="router", extra=(), *, database=None):
+        database = database if database is not None else self.root/(role+".db")
+        process = subprocess.Popen([*CLI,role,"--db",database,"--identities",identities,
                                    "--cert",cert,"--key",key,*extra],stdout=subprocess.PIPE,stderr=subprocess.PIPE,
                                    text=True,cwd=ROOT)
         self.addCleanup(self.stop,process)

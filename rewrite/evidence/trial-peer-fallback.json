@@ -1,0 +1,69 @@
+{
+  "trial_sha256": "5778464d8b33401823fc779748011f8721c49c0c12f24aa4120ad783c8db99e0",
+  "peer_archive_sha256": "2eb5f2c2c52e3d003a48a0a529d95536322d7477865e71820621a2d470e2b0d9",
+  "origin": "06156c3f-c455-52b6-826d-3a96276d2188",
+  "formal_order": {
+    "task_id": "0cdf483e-200b-4aff-920d-dcbcd6a35244",
+    "assignment_id": "765935bf-8c0b-484f-8a71-379966b201d6",
+    "legacy_task_id": "t-731c97b549"
+  },
+  "peer_messages": [
+    {
+      "message_id": "58d5fcd6-ff87-44a5-856b-eef4161f4505",
+      "delivery_id": "f2ad6b10-e2fc-4d42-b7c4-efb302c6ae7e",
+      "host_receipt_id": "bac20002-9689-513a-a9ef-8766c6c448a6",
+      "reply_to": null
+    },
+    {
+      "message_id": "0ef90011-8360-42e3-a624-5a6739fb2ea8",
+      "delivery_id": "e8145805-ede6-4994-88f9-c3959d347d9a",
+      "host_receipt_id": "18cba86f-1866-5cc4-b286-d68c1603d827",
+      "reply_to": "58d5fcd6-ff87-44a5-856b-eef4161f4505"
+    },
+    {
+      "message_id": "5603ae1d-8d89-4799-bdd7-abe6aed9ed44",
+      "delivery_id": "8b3d864d-c3f2-4d6f-a33d-7bdf9c086ce5",
+      "host_receipt_id": "5c994fe0-8d7f-5088-afb4-55c4a6f0ab5d",
+      "reply_to": "0ef90011-8360-42e3-a624-5a6739fb2ea8"
+    }
+  ],
+  "artifact": {
+    "id": "6dc35a25-b68e-4cd3-a705-02b90085f3aa",
+    "sha256": "9f59d7fa4c9364989651eefa98b30d6b965c05f692ba7398b997c9b3b1b28af1",
+    "bytes": 648000
+  },
+  "legacy_http": {
+    "peer": 404,
+    "attachment": 404,
+    "order": 200,
+    "archive_reason": "reviewed_on_rewrite"
+  },
+  "archive_https": {
+    "original_participants": {
+      "peer": 200,
+      "range": 206,
+      "attachment": 200
+    },
+    "nonparticipants": {
+      "peer": 404,
+      "attachment": 404
+    },
+    "unknown_token": 401,
+    "mutations": 405
+  },
+  "reentry": {
+    "archived_inputs_replayed": 0,
+    "new_reply_inputs": 1,
+    "second_fallback_total_messages": 3,
+    "second_archive_sha256": "daff5cac99977b214b1e70c58a8d57f6a038bbca311d519e120570cdb43a4727"
+  },
+  "refused": [
+    "omitted review",
+    "missing host receipt",
+    "wrong attachment grant",
+    "corrupt attachment bytes",
+    "changed native receipt",
+    "wrong reentry archive digest"
+  ],
+  "scope": "Actual isolated legacy and rewrite HTTP, SQLite and archive HTTPS. Receiving hosts and W04 model are fixtures."
+}

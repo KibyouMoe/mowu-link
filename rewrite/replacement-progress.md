@@ -8,7 +8,7 @@
 
 实现 `7caa81048ea483409dbcfada1ae7ebd830723fb0` 的 325 文件安装包已逐文件复核。macOS 全量通过 335 项、依环境跳过 5 项，装包目录通过 65 项回归和两项原生私聊专项。两套原生工具及协议隔离专项另连续通过六轮。Linux arm64 安装包全量通过 214 项、依环境跳过 126 项。跨系统 HTTPS 正式单通过，独立读回一次宿主收件、一次 W04 通知，重试不增加投递。Windows 安装与 DSH 原生两组通过，安装组含第三工位隔离和历史回信的便携用例。包 SHA-256 为 `f04c3a582720900e0e687e7466af0f256d97a59f5e2e8614d95a8ae8341bd17d`。[Windows CI](https://github.com/KibyouMoe/mowu-link/actions/runs/45919381594)
 
-试用期间新发生的私聊仍有回退边界。重做 Router 已取得对端宿主回执时，旧端回退仍实际拒绝生成目录。隔离旧 HTTP 客户端用普通 Router 凭据即可读旧私聊正文，重做端以第三工位身份访问同类归档返回 404。现行回退保留两边账本待对账。后续须保留新私聊的参与人权限和原收件号，避免把新正文写进旧端共用权限的库。[新私聊回退边界实测](evidence/peer-archive-rollback-boundary.json)
+试用新增私聊已能随正式工单或单独审核回退。实际旧 Router 的共享凭据曾可读旧私聊，这次回退库对试用私聊和附件均返回 404。独立只读 HTTPS 档案保留原双方权限、消息号、回复关系、传输号与宿主回执。再次迁入零重投，新回复只投一次，二次回退累计保留原新回复。缺宿主回执、附件失真、越权或审核遗漏均拒绝。宿主与模型使用夹具。[前次阻点](evidence/peer-archive-rollback-boundary.json) · [本轮实测](evidence/trial-peer-fallback.json) · [复跑与查询](router-rehearsal.md#试用新增私聊的回退)
 
 重新取消的 W04 已按具体指令核验。相同 A06 操作键重送保留原回执，自动重试沿用同一清理号。同一派发的下一条显式取消携带新的 `cleanup_id`。Worker 从原生收件识别该号，分别保存等待、清理及 Router 回执。隔离实测第一次迟报、重用旧键、换新键重播旧正文和错号都返回 409。新 W04 落库后故意丢回包，冷启沿原键查回，取消通知一条。复跑 `python3 -B -m unittest -v rewrite.test_cleanup rewrite.test_cutover -k cancel`。[HTTP 与回退实测](evidence/reissued-cancel-w04.json)
 

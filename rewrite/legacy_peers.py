@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 from uuid import UUID, uuid5
+from urllib.parse import parse_qs
 
 from . import attachments
 from .messages import valid_guid
@@ -29,6 +30,35 @@ CREATE TABLE IF NOT EXISTS history_peer_files (
  attachment_id TEXT NOT NULL,name TEXT NOT NULL,media_type TEXT,PRIMARY KEY(source_id,message_id,position)
 );
 """
+
+# Created only when an archive from a rewrite trial is present.
+TRIAL_SCHEMA = """
+CREATE TABLE IF NOT EXISTS history_peer_proofs (
+ source_id TEXT NOT NULL,message_id TEXT NOT NULL,delivery_id TEXT NOT NULL,receipt_id TEXT NOT NULL,
+ accepted_at TEXT NOT NULL,recorded_at TEXT NOT NULL,file_kinds TEXT NOT NULL,
+ PRIMARY KEY(source_id,message_id)
+);
+"""
+
+
+def trial_source(db, src):
+    exists = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='history_peer_proofs'").fetchone()
+    return exists and db.execute("SELECT 1 FROM history_peer_proofs WHERE source_id=? LIMIT 1",(src,)).fetchone()
+
+
+def history_route(parts):
+    return parts==["history","peers"] or len(parts) in (3,4) and parts[0]=="history" and parts[2]=="peers"
+
+
+def read(store,who,method,parts,query_string):
+    require(method=="GET",405,"read_only_history")
+    filters = parse_qs(query_string,keep_blank_values=True)
+    require(all(len(v)==1 for v in filters.values()),422,"duplicate_filter")
+    filters = {k:v[0] for k,v in filters.items()}
+    with store.transaction() as db:
+        if parts==["history","peers"]:
+            return sources(db,who,filters)
+        return query(db,who,parts[1],parts[3] if len(parts)==4 else None,filters)
 
 
 def actor(name):
@@ -131,7 +161,8 @@ def query(db,who,src,mid,filters):
         AND EXISTS (SELECT 1 FROM history_peers p WHERE p.source_id=s.source_id
           AND (p.sender_actor=? OR p.recipient_actor=?))""",(src,who,who)).fetchone()
     require(origin,404,"legacy_source_not_found" if mid is None else "legacy_peer_not_found")
-    result = {"source_id":src,"legacy_db_sha256":origin[0]}
+    trial = trial_source(db,src)
+    result = {"source_id":src,"trial_db_sha256" if trial else "legacy_db_sha256":origin[0]}
     select = """SELECT seq,message_id,sender,recipient,reply_to,task_id,created_at,acked_at,abandoned_at,text_parts
                 FROM history_peers WHERE source_id=? AND (sender_actor=? OR recipient_actor=?)"""
     binding = (src,who,who)
@@ -149,5 +180,14 @@ def query(db,who,src,mid,filters):
     files = db.execute("""SELECT f.attachment_id,f.name,f.media_type,u.sha256,u.size_bytes,'image' AS kind
                           FROM history_peer_files f JOIN uploads u USING(attachment_id)
                           WHERE f.source_id=? AND f.message_id=? ORDER BY position""",(src,mid))
-    return {**result,"message":dict(row),"part":part,"text":text[0] if text else "",
-            "next_part":part+1 if part+1<row["text_parts"] else None,"attachments":[dict(f) for f in files]}
+    message, media = dict(row), [dict(f) for f in files]
+    if trial:
+        proof = db.execute("""SELECT delivery_id,receipt_id AS host_receipt_id,accepted_at,
+                             recorded_at AS host_receipt_recorded_at,file_kinds FROM history_peer_proofs
+                             WHERE source_id=? AND message_id=?""",(src,mid)).fetchone()
+        proof = dict(proof)
+        for item,kind in zip(media,json.loads(proof.pop("file_kinds")),strict=True):
+            item["kind"] = kind
+        message.update(proof,worker_received=True)
+    return {**result,"message":message,"part":part,"text":text[0] if text else "",
+            "next_part":part+1 if part+1<row["text_parts"] else None,"attachments":media}

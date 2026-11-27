@@ -175,7 +175,11 @@ def export_chat(snapshot, destination, worker, after=0, limit=500, direction=Non
     return result
 
 
-def prepare(snapshot, destination, source_id):
+def prepare(snapshot, destination, source_id, peer_archive=None, peer_archive_sha256=None):
+    from . import rollback_peers
+
+    if (peer_archive is None)!=(peer_archive_sha256 is None):
+        raise ValueError("peer archive path and trusted SHA-256 must be supplied together")
     namespace = UUID(source_id)
     manifest = verified(snapshot)
     with closing(readonly(snapshot/"legacy.db")) as old:
@@ -183,6 +187,8 @@ def prepare(snapshot, destination, source_id):
     if blockers:
         raise ValueError("legacy work requires reconciliation: " + encode(blockers))
     with output_directory(destination) as stage, closing(readonly(snapshot/"legacy.db")) as old:
+        if peer_archive is not None:
+            rollback_peers.freeze(peer_archive,peer_archive_sha256,stage/rollback_peers.NAME)
         router = Orders(stage/"router.db")
         mapping = {}
         with router.db.transaction() as db:
@@ -199,13 +205,19 @@ def prepare(snapshot, destination, source_id):
                 mapping[row["task_id"]] = tid
             legacy_history.populate(db,old,str(namespace),manifest["legacy_db_sha256"],mapping)
             legacy_peers.populate(db,old,str(namespace),snapshot/"attachments")
+            if peer_archive is not None:
+                rollback_peers.import_archive(db,stage/rollback_peers.NAME)
         baseline = {"snapshot_sha256":manifest["legacy_db_sha256"],"source_id":str(namespace),
                     "router_db_sha256":digest(stage/"router.db"),"queued_id_map":mapping}
+        if peer_archive is not None:
+            baseline["peer_archive_sha256"] = peer_archive_sha256
         (stage/"baseline.json").write_text(encode(baseline))
     return baseline
 
 
 def rollback(snapshot, trial, destination):
+    from . import rollback_peers
+
     manifest = verified(snapshot)
     baseline = json.loads((trial/"baseline.json").read_text())
     with closing(readonly(trial/"router.db")):
@@ -215,7 +227,12 @@ def rollback(snapshot, trial, destination):
             raise ValueError("new Router changed; reconcile new writes before rollback")
     with output_directory(destination) as stage:
         restore_snapshot(snapshot,stage,manifest)
-    return {"restored_db_sha256":manifest["legacy_db_sha256"],"attachments":len(manifest["attachments"])}
+        peer_sha = baseline.get("peer_archive_sha256")
+        rollback_peers.archive_from_trial(trial,stage,peer_sha)
+    result = {"restored_db_sha256":manifest["legacy_db_sha256"],"attachments":len(manifest["attachments"])}
+    if peer_sha is not None:
+        result["peer_archive_sha256"] = peer_sha
+    return result
 
 
 def restore_snapshot(snapshot, stage, manifest):
@@ -410,13 +427,17 @@ def archived_new_candidates(db, changes, legacy_workers, original_tasks, initial
 
 def reconcile(snapshot, trial, *, original_tasks=None, initial_assignments=None):
     """Read the exact post-cutover difference. Original snapshots and trial databases stay intact."""
+    from . import rollback_peers
+
     saved = json.loads((trial/"baseline.json").read_text())
     source = trial/"router.db"
     result = {}
     assignments = {} if initial_assignments is None else initial_assignments
     with tempfile.TemporaryDirectory(prefix="mowulink-reconcile-") as directory:
         reference = Path(directory)/"reference"
-        regenerated = prepare(snapshot,reference,saved["source_id"])
+        peer_sha = saved.get("peer_archive_sha256")
+        peer_archive = trial/rollback_peers.NAME if peer_sha is not None else None
+        regenerated = prepare(snapshot,reference,saved["source_id"],peer_archive,peer_sha)
         if regenerated!=saved:
             raise ValueError("rehearsal baseline could not be reproduced by this release")
         with closing(readonly(snapshot/"legacy.db")) as old:
@@ -454,8 +475,10 @@ def reconcile(snapshot, trial, *, original_tasks=None, initial_assignments=None)
                           cancelled_new_tasks=archived["cancelled"],
                           archived_pool_new_tasks=archived["pool"],
                           blocked_new_tasks=[item for item in blocked if item["task_id"] not in archived_ids],
-                          work_orders=changes,
+                          work_orders=changes,trial_peers=rollback_peers.review_rows(db),
                           exact_rollback_allowed=before==saved["router_db_sha256"],only_new_queued_tasks=only_queue)
+            if peer_sha is not None:
+                result["peer_archive_sha256"] = peer_sha
         with closing(readonly(source)):
             if digest(source)!=before:
                 raise ValueError("trial database changed during reconciliation")
@@ -508,6 +531,8 @@ def stage_queue_requests(db, legacy, facts, initial_assignments):
 
 def stage_queue_rollback(snapshot, trial, review, destination):
     """Prepare a legacy sandbox and reviewed requests. No live API is called."""
+    from . import rollback_peers
+
     initial_assignments = {}
     facts = reconcile(snapshot,trial,initial_assignments=initial_assignments)
     if not facts["only_new_queued_tasks"]:
@@ -522,6 +547,8 @@ def stage_queue_rollback(snapshot, trial, review, destination):
         raise ValueError("legacy snapshot changed after reconciliation")
     with output_directory(destination) as stage:
         restore_snapshot(snapshot,stage,manifest)
+        peer_sha = facts.get("peer_archive_sha256")
+        rollback_peers.archive_from_trial(trial,stage,peer_sha)
         with closing(readonly(source)) as db:
             plan = stage_queue_requests(db,stage/"legacy.db",facts,initial_assignments)
         with closing(readonly(source)):
@@ -531,8 +558,11 @@ def stage_queue_rollback(snapshot, trial, review, destination):
         with open(stage/"queue-replay.json","x",encoding="utf-8",
                   opener=lambda name,flags:os.open(name,flags,0o600)) as output:
             output.write(encode({**plan,"restored_legacy_sha256":restored_sha}))
-    return {"trial_sha256":facts["trial_sha256"],"legacy_sha256":manifest["legacy_db_sha256"],
-            "restored_legacy_sha256":restored_sha,"queued_requests":len(plan["requests"])}
+    result = {"trial_sha256":facts["trial_sha256"],"legacy_sha256":manifest["legacy_db_sha256"],
+              "restored_legacy_sha256":restored_sha,"queued_requests":len(plan["requests"])}
+    if peer_sha is not None:
+        result["peer_archive_sha256"] = peer_sha
+    return result
 
 
 def main():
@@ -552,6 +582,8 @@ def main():
             command.add_argument("--"+name,type=Path,required=True)
         if op == "prepare":
             command.add_argument("--source-id",required=True)
+            command.add_argument("--peer-archive",type=Path)
+            command.add_argument("--peer-archive-sha256")
         elif op == "export-chat":
             command.add_argument("--worker",required=True)
             command.add_argument("--after",type=int,default=0)

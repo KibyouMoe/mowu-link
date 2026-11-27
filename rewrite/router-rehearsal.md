@@ -100,6 +100,24 @@ Worker 已以受阻 W04 释放原派发时，`resume` 可从受阻或挂起起�
 
 Worker 请求继续时，回退以同一派发内的续做回执和原空闲观测划分询问轮次。每轮独立核首次询问和最多三次重试。最后一轮无答才允许对应入池和搁置通知。每条发出记录、观测和回执留在私有包，重开旧端无需再派。缺轮次回执或观测与原工位、忙闲和派发不符时停止。复跑 `python3 -B -m unittest -v rewrite.test_cutover.Cutover.test_reviewed_inquiries_preserve_continue_rounds_and_release_only_the_original_assignment`。[询问轮次实测](evidence/cutover-reviewed-inquiries.json)
 
+### 试用新增私聊的回退
+
+同伴私聊可与已验收工单一起回退，也可以单独审核。停写后用 `reconcile` 读取 `trial_peers`，逐条核对原发件人、收件人、消息号、回复关联、传输投递号及收件方登记的宿主回执。对账输出不包含私聊正文与附件。审核文件绑定本次 `trial_sha256`，并增加 `"peer_receipts":{"原消息号":"宿主回执号"}`。没有已验收工单时使用 `"closed_assignments":{}`。用同一个 `stage-reviewed-rollback` 命令生成新回退目录。只有传输已确认、宿主回执已登记、附件及权限均能对账的消息才可归档。任何一条无法核实，整个回退目录都不会发布。
+
+私聊内容及原回执保存在 `private-review/peer-history.db`。旧 Router 仍只用回退目录里的 `legacy.db` 和 `legacy.db.attachments`。需要查阅档案时，从重做版包独立启动只读 TLS 服务，使用审核结果中的 `peer_archive_sha256`。认证文件单独列出各原参与人的 `worker/<id>` 身份及各自的令牌。
+
+```bash
+python3 -B -m rewrite.service peer-archive \
+  --db "${RESTORE}/private-review/peer-history.db" --sha256 "${PEER_ARCHIVE_SHA256}" \
+  --identities "${PEER_ROLES}" --cert "${CERT}" --key "${KEY}"
+```
+
+用参与人身份访问 `GET /v1/history/peers` 列来源，`GET /v1/history/<source_id>/peers/<message_id>` 取原文、传输号和宿主回执，再按返回的附件号读 `GET /v1/attachments/<attachment_id>`。正文支持分页，附件支持 HTTP Range。旧 Worker 的内置收件箱没有这个独立查询入口。已回退时使用只读 HTTPS 入口，回到重做版后可用原生 `worker_peer_inbox` 查询，也能沿原消息号回复。
+
+再次迁入时，在原 `prepare` 参数上加 `--peer-archive "${RESTORE}/private-review/peer-history.db" --peer-archive-sha256 "${PEER_ARCHIVE_SHA256}"`。试用目录会保存校验后的 `peer-history.db`，后续对账、排空迁移和回退都应携带。所有原消息留在带原参与人权限的归档，零重投。再次回退时，已审核的新私聊会并入原档案。
+
+复跑 `python3 -B -m unittest -v rewrite.test_cutover -k reviewed_private_peers`。实际旧 Router HTTP 以原共享身份查询新私聊和附件均返回 404，已验收工单仍归档。独立 HTTPS 服务实际核对原双方可读全文及跨块附件，第三工位和非参与的溪流身份返回 404。回到重做版后，原两条各有原回执，重送原号返回 409，新增回信只产生一次宿主收件。第二次回退保留原两条和新增回复。宿主与 W04 模型使用夹具。[回退与回迁实测](evidence/trial-peer-fallback.json)
+
 ### 旧队列迁入后改过、仍未派发的单
 
 用 `reconcile` 的 `work_orders` 核对原旧单号、最终工位和试用修订。只有两次迁移之间始终未派发、没有 W03、报告或候选材料的原待派单可按本节处理。审核过的 `review.json` 在已有字段外加入 `replace_migrated_queue`。每项以试用单号为键，值为 `{"legacy_task_id":"原旧单号","revision":最终修订号,"execution_mode":"goal"}`。只有这类替代时写 `closed_assignments: {}`。审核绑定当前 `trial_sha256`，使用同一个 `stage-reviewed-rollback` 命令。可与已验收、已取消及试用新建待派单同批核对。

@@ -402,7 +402,7 @@ def retain_reminder(pool, message_id, observed):
     raise ValueError("pool reminder does not match an outstanding deadline")
 
 
-def check_transport(db, entries, reviewed_questions, optional_workers=()):
+def check_transport(db, entries, reviewed_questions, optional_workers=(), peer_frames=None):
     workers, optional_workers = set(), set(optional_workers)
     expected_frames = {}
     expected_inquiries = {}
@@ -538,6 +538,9 @@ def check_transport(db, entries, reviewed_questions, optional_workers=()):
         tid, aid = data.get("task_id"),data.get("assignment_id")
         if not row["ack"]:
             raise ValueError("trial delivery has no consumer acknowledgement")
+        if kind=="peer.message" and peer_frames is not None and peer_frames.get(did)==(consumer,row["cursor"]):
+            frames[did] = (consumer,row["cursor"])
+            continue
         if kind=="worker.status_query":
             if set(data)!={"worker_id","query_id"} or data["worker_id"] not in workers or consumer!="worker/"+data["worker_id"]:
                 raise ValueError("unexpected worker status query")
@@ -942,10 +945,11 @@ def verify_order(db, tid, entry, operations, windows):
 
 
 def check_operations(db,entries,workers,frames,uploads,expected_count,queue_candidates,reviewed_questions,
-                     inquiry_sources,initial_assignments):
+                     inquiry_sources,initial_assignments,peer_ledger=None):
     operations, applicable, acked, sessions = {},0,{},{}
     asks,answers = {},{}
     samples,continued = {},{}
+    registered_uploads = set()
     creation_keys = {item["request_id"] for item in queue_candidates}
     creation_keys.update(entry["creation_key"] for entry in entries.values() if "creation_key" in entry)
     preparation = {event["key"]:event for proof in initial_assignments.values() for event in proof["events"]}
@@ -967,6 +971,8 @@ def check_operations(db,entries,workers,frames,uploads,expected_count,queue_cand
                 applicable += 1
             continue
         applicable += 1
+        if peer_ledger is not None and method=="POST" and peer_ledger.match(row["seq"],actor,parts,body,reply,sessions,acked):
+            continue
         if method=="POST" and len(parts)==5 and parts[:3]==["","v1","tasks"] and parts[4]=="questions":
             if actor not in sessions or body.get("session_id")!=sessions[actor]:
                 raise ValueError("question receipt uses an unregistered worker session")
@@ -1021,9 +1027,15 @@ def check_operations(db,entries,workers,frames,uploads,expected_count,queue_cand
                     raise ValueError("worker presence receipt does not match its observation")
                 samples[query] = {"seq":row["seq"],"actor":actor,"key":row["key"],"body":body,"reply":reply}
         elif method=="POST" and path=="/v1/uploads" and reply.get("upload_id") in uploads:
-            upload = uploads[reply["upload_id"]]
-            if actor!=upload["owner"] or body!={key:upload[key] for key in ("name","size_bytes","sha256")}:
+            uid = reply["upload_id"]
+            upload = uploads[uid]
+            expected = {"upload_id":uid,"next_offset":0,"complete":upload["size_bytes"]==0}
+            if expected["complete"]:
+                expected["attachment_id"] = upload["attachment_id"]
+            if (uid in registered_uploads or reply!=expected or actor!=upload["owner"]
+                    or body!={key:upload[key] for key in ("name","size_bytes","sha256")}):
                 raise ValueError("trial upload registration does not match the reviewed attachment")
+            registered_uploads.add(uid)
         else:
             raise ValueError("trial has an operation outside the reviewed orders")
     windows = {}
@@ -1035,5 +1047,8 @@ def check_operations(db,entries,workers,frames,uploads,expected_count,queue_cand
         verify_order(db,tid,entry,operations,windows)
     rollback_questions.verify_receipts(reviewed_questions,asks,answers,windows,acked)
     rollback_inquiries.verify_rounds(entries,inquiry_sources,samples,continued,windows,acked)
-    if creation_keys or preparation or applicable!=expected_count or acked.keys()!=frames.keys() or operations:
+    if peer_ledger is not None:
+        peer_ledger.verify()
+    if (creation_keys or preparation or applicable!=expected_count or acked.keys()!=frames.keys()
+            or uploads.keys()!=registered_uploads or operations):
         raise ValueError("trial operation ledger is incomplete or has unrelated writes")

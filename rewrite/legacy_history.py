@@ -4,6 +4,7 @@ import json
 import re
 from uuid import UUID, uuid5
 
+from . import legacy_peers
 from .messages import valid_guid
 from .storage import encode, require
 
@@ -277,6 +278,7 @@ def replay_assigned_creation(db, key, request):
 
 def query(db, source, filters):
     require(valid_guid(source),422,"invalid_legacy_source")
+    require(not legacy_peers.trial_source(db,source),404,"legacy_source_not_found")
     row = db.execute("SELECT legacy_db_sha256 FROM history_sources WHERE source_id=?",(source,)).fetchone()
     require(row,404,"legacy_source_not_found")
     result = {"source_id":source,"legacy_db_sha256":row[0]}

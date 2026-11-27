@@ -22,18 +22,8 @@ def route(orders, actor, method, path, body, headers, approval_workers=frozenset
         require(not url.query,422,"unknown_approval_filter")
         require(len(parts)>1 and parts[1] in approval_workers,404,"approval_relay_unavailable")
         return 200,"application/json",approvals.route(orders,actor,method,parts,body)
-    peer_sources = parts==["history","peers"]
-    if peer_sources or len(parts) in (3,4) and parts[0]=="history" and parts[2]=="peers":
-        require(method=="GET",405,"read_only_history")
-        filters = parse_qs(url.query,keep_blank_values=True)
-        require(all(len(v)==1 for v in filters.values()),422,"duplicate_filter")
-        filters = {k:v[0] for k,v in filters.items()}
-        with orders.db.transaction() as db:
-            if peer_sources:
-                history = legacy_peers.sources(db,actor,filters)
-            else:
-                history = legacy_peers.query(db,actor,parts[1],parts[3] if len(parts)==4 else None,filters)
-        return 200,"application/json",history
+    if legacy_peers.history_route(parts):
+        return 200,"application/json",legacy_peers.read(orders.db,actor,method,parts,url.query)
     if len(parts)==3 and parts[0]=="history" and parts[2]=="tasks":
         require(actor=="hermes",403,"forbidden")
         require(method=="GET",405,"read_only_history")

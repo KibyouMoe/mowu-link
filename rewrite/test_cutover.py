@@ -15,6 +15,8 @@ from .adapter import HostAdapter
 from .cutover import backup, digest, export_chat, prepare, reconcile, rollback, stage_queue_rollback, verified
 from .devloop import FixtureHost, Loop, agent_report
 from .legacy_test_fixture import source_for
+from .native_files import NativeFiles
+from .rollback_peers import NAME as PEER_ARCHIVE
 from .test_mainline import Clock
 from .orders import Orders
 from .pool import REMINDER_NOTICE
@@ -3700,6 +3702,236 @@ store.close()
         self.assertEqual(loop.hermes.inspect(tid)["task"]["state"],"working")
         with self.assertRaisesRegex(Fault,"attachment_not_found"):
             loop.manager_wire.request("GET","attachments/"+ref["attachment_id"])
+
+    @unittest.skipUnless(shutil.which("openssl"),"TLS test certificate generator unavailable")
+    def test_reviewed_private_peers_survive_mixed_fallback_and_reentry_without_replay(self):
+        from . import test_service
+
+        @contextmanager
+        def running(listener):
+            with listener:
+                thread = Thread(target=listener.serve_forever,kwargs={"poll_interval":.02})
+                thread.start()
+                try:
+                    yield listener
+                finally:
+                    listener.shutdown()
+                    thread.join()
+
+        self.old("store=RouterStore(sys.argv[1]); store.upsert_worker('oguri'); store.close()",self.legacy)
+        backup(self.legacy,self.attachments,self.snapshot)
+        prepare(self.snapshot,self.trial,self.source_id)
+        clock = Clock()
+        loop = Loop(self.trial,clock,FixtureHost,extra_workers=("tama",))
+        host = FixtureHost(self.trial/"tama-host.db","tama-native-session")
+        adapter = HostAdapter(self.trial/"tama-adapter.db",host,host.session)
+        tama = Worker(self.trial/"tama-worker.db","tama",loop.extra_clients["tama"],adapter,clock=clock)
+        media_key = guid()
+        with running(WorkerService(tama).listen({media_key:"adapter/tama"},("127.0.0.1",0),None)) as media:
+            media_client = Client(f"http://127.0.0.1:{media.server_port}",media_key)
+            adapter.media_store = NativeFiles(self.root/"tama-files",media_client)
+            mid, reply_id = guid(), guid()
+            private_text = "隔离的私信正文 🟣"
+            data = b"private peer fixture bytes\x00"*24000
+            sha = hashlib.sha256(data).hexdigest()
+            with running(loop.server):
+                loop.worker.connect()
+                tama.connect()
+                uploaded = loop.wire.request("POST","uploads",{
+                    "name":"交接.md","size_bytes":len(data),"sha256":sha},guid())
+                for offset in range(0,len(data),262144):
+                    uploaded = loop.wire.request("PATCH","uploads/"+uploaded["upload_id"],data[offset:offset+262144],
+                                                 headers={"Upload-Offset":str(offset)})
+                fid = uploaded["attachment_id"]
+                body = {"session_id":loop.worker.session,"message_id":mid,"text":private_text,
+                        "attachment_ids":[fid],"attachment_kinds":["file"]}
+                endpoint = "peers/tama/messages"
+                accepted = loop.wire.request("POST",endpoint,body,"peer-"+mid)
+                self.assertEqual(loop.wire.request("POST",endpoint,body,"peer-"+mid),accepted)
+                tama.poll()
+                tama.poll()
+                first = loop.wire.request("GET","peers/messages/"+mid)
+                self.assertEqual(len(host.entries()),1)
+                self.assertEqual(host.entries()[0][1]["media_sha256"],[sha])
+                tama.send_peer(reply_id,"oguri","确认收到",mid)
+                loop.worker.poll()
+                second = loop.wire.request("GET","peers/messages/"+reply_id)
+                self.assertTrue(all(r["worker_received"] and r["host_receipt_id"] for r in (first,second)))
+                self.assertEqual(len(loop.native.entries()),1)
+                order = loop.hermes.create(guid(),"Trial-only order","Reviewable result","oguri")
+                tid = order["task_id"]
+                clock.advance(10)
+                loop.worker.poll()
+                loop.worker.poll()
+                aid = loop.worker.hold()["held_assignment_id"]
+                self.assertEqual(loop.worker.hold()["held_task_id"],tid)
+                native = loop.native.entries()[-1][1]["native_id"]
+                self.assertFalse(agent_report(loop.worker,native,{"task_id":tid,"assignment_id":aid,
+                                                                 "summary":"通过夹具完成"})["isError"])
+                completed = loop.hermes.inspect(tid)["task"]
+                loop.hermes.act(guid(),tid,completed["revision"],"close")
+                loop.hermes.poll()
+                self.assertEqual(loop.hermes.inspect(tid)["task"]["state"],"closed")
+        before = digest(self.trial/"router.db")
+        facts = reconcile(self.snapshot,self.trial)
+        selected = {row["message_id"]:row["host_receipt_id"] for row in facts["trial_peers"]}
+        self.assertEqual(selected,{mid:first["host_receipt_id"],reply_id:second["host_receipt_id"]})
+        self.assertNotIn(private_text,json.dumps(facts,ensure_ascii=False))
+        review = self.root/"mixed-review.json"
+        decision = {"trial_sha256":before,"closed_assignments":{tid:aid},"peer_receipts":selected}
+        review.write_text(json.dumps({**decision,"peer_receipts":{mid:selected[mid]}}))
+        with self.assertRaisesRegex(ValueError,"review must match"):
+            stage_reviewed_rollback(self.snapshot,self.trial,review,self.restore)
+        for sql,args,error in (
+            ("DELETE FROM peer_host_receipts WHERE message_id=?",(mid,),"native host receipt"),
+            ("UPDATE attachment_grants SET actor='worker/stranger' WHERE attachment_id=?",(fid,),"attachment_not_found"),
+            ("UPDATE chunks SET bytes=zeroblob(length(bytes)) WHERE start=0",(),"digest mismatch"),
+            ("UPDATE operations SET response='{}' WHERE key=?",("peer-receipt-"+mid,),"does not match"),
+        ):
+            with self.subTest(sql=sql):
+                trial = self.root/"damaged-trial"
+                trial.mkdir(exist_ok=True)
+                shutil.copyfile(self.trial/"baseline.json",trial/"baseline.json")
+                corrupted = trial/"router.db"
+                shutil.copyfile(self.trial/"router.db",corrupted)
+                with closing(sqlite3.connect(corrupted)) as db,db:
+                    db.execute(sql,args)
+                review.write_text(json.dumps({**decision,"trial_sha256":digest(corrupted)}))
+                with self.assertRaisesRegex((ValueError,Fault),error):
+                    stage_reviewed_rollback(self.snapshot,trial,review,self.restore)
+                self.assertFalse(self.restore.exists())
+        review.write_text(json.dumps(decision))
+        result = stage_reviewed_rollback(self.snapshot,self.trial,review,self.restore)
+        self.assertEqual((result["reviewed_peers"],result["reviewed_orders"]),(2,1))
+        self.assertEqual(digest(self.trial/"router.db"),before)
+        archive = self.restore/"private-review"/PEER_ARCHIVE
+        archive_sha = result["peer_archive_sha256"]
+        self.assertEqual((digest(archive),archive.stat().st_mode&0o777),(archive_sha,0o600))
+        manifest = json.loads((archive.parent/"manifest.json").read_text())
+        old_task = manifest["orders"][tid]["legacy_task_id"]
+        old = self.old("""
+from server import RouterServer
+from selftest_router import http
+from threading import Thread
+from unittest.mock import Mock
+store = RouterStore(sys.argv[1])
+with RouterServer(("127.0.0.1",0),store,"old-shared-identity",Mock(),Mock()) as server:
+    thread = Thread(target=server.serve_forever,kwargs={"poll_interval":.02})
+    thread.start()
+    try:
+        url = f"http://127.0.0.1:{server.server_port}"
+        peer,_ = http("GET",url+"/messages/"+sys.argv[2],token="old-shared-identity")
+        file,_ = http("GET",url+"/attachments/"+sys.argv[3],token="old-shared-identity")
+        order,view = http("GET",url+"/tasks/"+sys.argv[4],token="old-shared-identity")
+        print(json.dumps([peer,file,order,view["task"]["archive"]["reason"]]))
+    finally:
+        server.shutdown()
+        thread.join()
+store.close()
+""",self.restore/"legacy.db",mid,sha,old_task)
+        self.assertEqual(json.loads(old),[404,404,200,"reviewed_on_rewrite"])
+
+        service = test_service.Service()
+        service.root = self.root
+        self.addCleanup(service.doCleanups)
+        cert,key = service.certificate()
+        tokens = {role:guid() for role in ("worker/oguri","worker/tama","worker/stranger","hermes")}
+        identities = service.write_config("peer-roles.json",{token:role for role,token in tokens.items()})
+        process, url = service.start(identities,cert,key,"peer-archive",("--sha256",archive_sha),database=archive)
+        participants = [Client(url,tokens["worker/"+who],cert) for who in ("oguri","tama")]
+        participant = participants[0]
+        src, = [item["source_id"] for item in participant.request("GET","history/peers")["items"]]
+        message_route = "history/"+src+"/peers"
+        media_route = "attachments/"+fid
+        for client in participants:
+            page = client.request("GET",message_route)
+            self.assertEqual(page["trial_db_sha256"],before)
+            self.assertEqual([row["message_id"] for row in page["items"]],[mid,reply_id])
+            saved = client.request("GET",message_route+"/"+mid)
+            self.assertEqual((saved["text"],saved["message"]["host_receipt_id"],saved["message"]["delivery_id"]),
+                             (private_text,selected[mid],first["delivery_id"]))
+            ref, = saved["attachments"]
+            self.assertEqual((ref["attachment_id"],ref["kind"],ref["sha256"]),(fid,"file",sha))
+            fetched = client.request("GET",media_route,headers={"Range":"bytes=262142-262152"})
+            self.assertEqual((fetched["status"],fetched["bytes"]),(206,data[262142:262153]))
+            self.assertEqual(client.request("GET",media_route)["bytes"],data)
+            saved_reply = client.request("GET",message_route+"/"+reply_id)
+            self.assertEqual((saved_reply["message"]["reply_to"],saved_reply["message"]["host_receipt_id"]),
+                             (mid,selected[reply_id]))
+        for identity in ("worker/stranger","hermes"):
+            other = Client(url,tokens[identity],cert)
+            self.assertEqual(other.request("GET","history/peers")["items"],[])
+            with self.assertRaisesRegex(Fault,"legacy_peer_not_found"):
+                other.request("GET",message_route+"/"+mid)
+            with self.assertRaisesRegex(Fault,"attachment_not_found"):
+                other.request("GET",media_route)
+        with self.assertRaisesRegex(Fault,"unauthenticated"):
+            Client(url,guid(),cert).request("GET",message_route+"/"+mid)
+        with self.assertRaisesRegex(Fault,"read_only_history"):
+            participant.request("POST",message_route,{"text":"write forbidden"})
+        with self.assertRaisesRegex(Fault,"unknown_route"):
+            participant.request("GET","deliveries/status")
+        service.stop(process)
+        self.assertEqual(digest(archive),archive_sha)
+
+        snapshot, trial, exact = (self.root/name for name in ("reentry-snapshot","reentry-trial","reentry-exact"))
+        backup(self.restore/"legacy.db",self.restore/"legacy.db.attachments",snapshot)
+        source = guid()
+        with self.assertRaisesRegex(ValueError,"SHA-256 mismatch"):
+            prepare(snapshot,trial,source,archive,"0"*64)
+        self.assertFalse(trial.exists())
+        prepare(snapshot,trial,source,archive,archive_sha)
+        self.assertTrue(reconcile(snapshot,trial)["exact_rollback_allowed"])
+        self.assertEqual(rollback(snapshot,trial,exact)["peer_archive_sha256"],archive_sha)
+        self.assertEqual(digest(exact/"private-review"/PEER_ARCHIVE),archive_sha)
+        again = Loop(trial,clock,FixtureHost,extra_workers=("tama",))
+        resumed = FixtureHost(trial/"new-tama-host.db","new-tama-session")
+        tama = Worker(trial/"new-tama-worker.db","tama",again.extra_clients["tama"],
+                      HostAdapter(trial/"new-tama-adapter.db",resumed,resumed.session),clock=clock)
+        next_id = guid()
+        with running(again.server):
+            again.worker.connect()
+            tama.connect()
+            again.worker.poll()
+            tama.poll()
+            self.assertEqual((again.native.entries(),resumed.entries()),([],[]))
+            self.assertEqual(again.wire.request("GET",message_route+"/"+mid),saved)
+            with self.assertRaisesRegex(Fault,"legacy_source_not_found"):
+                again.manager_wire.request("GET","history/"+src+"/tasks")
+            with self.assertRaisesRegex(Fault,"legacy_peer_recorded"):
+                again.worker.send_peer(mid,"tama",private_text)
+            again.worker.send_peer(next_id,"tama","跨回退后只投递这个回复",reply_id)
+            tama.poll()
+            tama.poll()
+            self.assertEqual([(r[0]["message_id"],r[0]["reply_to"]) for r in resumed.entries()],[(next_id,reply_id)])
+            third = tama.router.request("GET","peers/messages/"+next_id)
+        new_review = self.root/"repeat-review.json"
+        new_review.write_text(json.dumps({"trial_sha256":digest(trial/"router.db"),"closed_assignments":{},
+                                         "peer_receipts":{next_id:third["host_receipt_id"]}}))
+        restored = self.root/"repeat-fallback"
+        output = stage_reviewed_rollback(snapshot,trial,new_review,restored)
+        self.assertEqual((output["reviewed_peers"],output["reviewed_orders"]),(1,0))
+        with closing(sqlite3.connect(restored/"private-review"/PEER_ARCHIVE)) as db:
+            rows = db.execute("SELECT message_id,reply_to FROM history_peers ORDER BY rowid").fetchall()
+        self.assertEqual(rows,[(mid,None),(reply_id,mid),(next_id,reply_id)])
+        if evidence := os.environ.get("MOWULINK_PEER_CUTOVER_EVIDENCE"):
+            Path(evidence).write_text(json.dumps({
+                "trial_sha256":before,"peer_archive_sha256":archive_sha,"origin":src,
+                "formal_order":{"task_id":tid,"assignment_id":aid,"legacy_task_id":old_task},
+                "peer_messages":[{"message_id":r["message_id"],"delivery_id":r["delivery_id"],
+                                  "host_receipt_id":r["host_receipt_id"],"reply_to":parent}
+                                 for r,parent in ((first,None),(second,mid),(third,reply_id))],
+                "artifact":{"id":fid,"sha256":sha,"bytes":len(data)},
+                "legacy_http":{"peer":404,"attachment":404,"order":200,"archive_reason":"reviewed_on_rewrite"},
+                "archive_https":{"original_participants":{"peer":200,"range":206,"attachment":200},
+                                 "nonparticipants":{"peer":404,"attachment":404},
+                                 "unknown_token":401,"mutations":405},
+                "reentry":{"archived_inputs_replayed":0,"new_reply_inputs":len(resumed.entries()),
+                           "second_fallback_total_messages":len(rows),"second_archive_sha256":output["peer_archive_sha256"]},
+                "refused":["omitted review","missing host receipt","wrong attachment grant",
+                           "corrupt attachment bytes","changed native receipt","wrong reentry archive digest"],
+                "scope":"Actual isolated legacy and rewrite HTTP, SQLite and archive HTTPS. Receiving hosts and W04 model are fixtures."
+            },indent=2)+"\n",encoding="utf-8")
 
     def test_original_id_and_source_read_back_via_manager_without_reviving_archived_order(self):
         backup(self.legacy,self.attachments,self.snapshot)

@@ -41,6 +41,10 @@ def connection(path):
 
 
 def server(args):
+    if args.component=="peer-archive":
+        with ExitStack() as stack:
+            serve(args,stack)
+        return
     databases = [args.db]
     if args.component=="fixture-adapter":
         databases.append(args.fixture_db)
@@ -74,6 +78,11 @@ def serve(args,stack):
     public_output = nullcontext()
     if args.component == "router":
         listener = serve_router(Orders(args.db,drain_dispatch=args.drain_dispatch), identities, address, ctx)
+    elif args.component=="peer-archive":
+        from . import rollback_peers
+        if any(actor!="hermes" and not actor.startswith("worker/") for actor in identities.values()):
+            raise ValueError("peer archive identities must match the original participants")
+        listener = stack.enter_context(rollback_peers.listen(args.db,args.sha256,identities,address,ctx))
     elif args.component=="host-ops":
         from .host_ops import listen, manifest
         listener = listen(args.db,manifest(private_config(args.manifest)),identities,address,ctx,stack)
@@ -202,14 +211,16 @@ def main():
 
     parser = argparse.ArgumentParser(description=__doc__)
     apps = parser.add_subparsers(dest="component",required=True)
-    for name in ("router","fixture-adapter","dsh-adapter","codex-adapter","worker","host-ops"):
+    for name in ("router","fixture-adapter","dsh-adapter","codex-adapter","worker","host-ops","peer-archive"):
         component = apps.add_parser(name)
         for flag in ("identities","cert","key","db"):
             component.add_argument("--"+flag,required=True,type=Path)
         component.add_argument("--bind",default="127.0.0.1")
         component.add_argument("--port",type=int,default=0)
-        if name not in ("router","host-ops"):
+        if name not in ("router","host-ops","peer-archive"):
             component.add_argument("--worker-id",required=True)
+        if name=="peer-archive":
+            component.add_argument("--sha256",required=True,help="reviewed digest of the frozen peer archive")
         if name=="router":
             component.add_argument("--drain-dispatch",action="store_true",
                                    help="pause new assignment reservations while existing work drains")

@@ -1,13 +1,12 @@
 """Return terminal work to an offline legacy copy, keeping trial records private."""
 from contextlib import closing
-import hashlib
 import json
 import os
 import shutil
 import sqlite3
 import time
 
-from . import legacy_history, rollback_lifecycle, rollback_migrated_queue, rollback_questions
+from . import legacy_history, rollback_lifecycle, rollback_migrated_queue, rollback_peers, rollback_questions
 from .cutover import (digest, legacy_creation_request, output_directory, queue_execution_modes,
                       readonly, reconcile, restore_snapshot, stage_queue_requests, verified)
 from .messages import valid_guid
@@ -16,7 +15,8 @@ from .storage import encode
 
 
 TABLES = {"tasks","reports","messages","deliveries","operations","workers","worker_adapter_links",
-          "uploads","chunks","attachment_grants","business_files","pool_entries","cleanups","materials","questions"}
+          "uploads","chunks","attachment_grants","business_files","pool_entries","cleanups","materials","questions"
+          } | rollback_peers.TABLES
 
 
 def reviewed_orders(facts, original_tasks, replacements):
@@ -33,11 +33,12 @@ def reviewed_orders(facts, original_tasks, replacements):
         else:
             changes.append(row)
     deltas = facts["changed_tables"]
-    if (not (changes or replacements) or facts["blocked_new_tasks"] or set(deltas)-TABLES
+    if (not (changes or replacements or facts["trial_peers"]) or facts["blocked_new_tasks"] or set(deltas)-TABLES
             or any(value["baseline_only"] for name,value in deltas.items() if name!="tasks")):
         raise ValueError("trial has changes outside the supported reviewed orders")
-    if deltas.get("tasks")!={"baseline_only":len(changes)-len(new)+len(replacements),
-                            "trial_only":len(changes)+len(queued)+len(replacements)}:
+    if deltas.get("tasks",{"baseline_only":0,"trial_only":0})!={
+            "baseline_only":len(changes)-len(new)+len(replacements),
+            "trial_only":len(changes)+len(queued)+len(replacements)}:
         raise ValueError("trial contains other task changes")
     entries = {}
     for row in changes:
@@ -79,10 +80,10 @@ def reviewed_files(entries):
                 yield "material",material["material_id"],step["worker_id"],material["artifact_ids"]
 
 
-def copy_reviewed_files(db,entries,deltas,folder):
+def copy_reviewed_files(db,entries,deltas,folder,peer_uploads,peer_grants):
     files = {}
-    uploads = {}
-    chunks = 0
+    uploads = dict(peer_uploads)
+    grants = set(peer_grants)
     links = 0
     for kind,reference,worker,ids in reviewed_files(entries):
         links += len(ids)
@@ -100,22 +101,16 @@ def copy_reviewed_files(db,entries,deltas,folder):
                 raise ValueError("reviewed attachment is incomplete or outside its former access scope")
             if file_id in files:
                 continue
-            target = folder/file_id
-            current = 0
-            checksum = hashlib.sha256()
-            with open(target,"xb",opener=private_open) as output:
-                for part in db.execute("SELECT start,bytes FROM chunks WHERE upload_id=? ORDER BY start",(row["upload_id"],)):
-                    if part["start"]!=current or not part["bytes"]:
-                        raise ValueError("report attachment contains a gap")
-                    output.write(part["bytes"])
-                    current += len(part["bytes"])
-                    checksum.update(part["bytes"])
-                    chunks += 1
-            if current!=row["size_bytes"] or checksum.hexdigest()!=row["sha256"]:
-                raise ValueError("report attachment digest mismatch")
+            with open(folder/file_id,"xb",opener=private_open) as output:
+                rollback_peers.copy_chunks(db,row,lambda _offset,data:output.write(data))
             files[file_id] = {key:row[key] for key in ("attachment_id","name","size_bytes","sha256","owner")}
             uploads[row["upload_id"]] = row
-    for table,count in (("uploads",len(uploads)),("chunks",chunks),("attachment_grants",len(files)),
+            grants.add((file_id,"hermes"))
+    if grants!={tuple(row) for row in db.execute("SELECT * FROM attachment_grants WHERE attachment_id IN "
+                                                 "(SELECT attachment_id FROM uploads WHERE owner NOT LIKE 'history/%')")}:
+        raise ValueError("trial has grants outside the reviewed assignments and peers")
+    chunks = sum(db.execute("SELECT COUNT(*) FROM chunks WHERE upload_id=?",(uid,)).fetchone()[0] for uid in uploads)
+    for table,count in (("uploads",len(uploads)),("chunks",chunks),("attachment_grants",len(grants)),
                         ("business_files",links)):
         if deltas.get(table,{}).get("trial_only",0)!=count:
             raise ValueError("trial has files or grants outside the reviewed assignments")
@@ -212,8 +207,13 @@ def stage_reviewed_rollback(snapshot,trial,review,destination):
         decision["replace_migrated_queue"] = {tid:{"legacy_task_id":proof["legacy_task_id"],
                                                   "revision":proof["ready_revision"],"execution_mode":"goal"}
                                               for tid,proof in replacements.items()}
+    peer_receipts = {r["message_id"]:r["host_receipt_id"] for r in facts["trial_peers"]}
+    if peer_receipts:
+        if any(not valid_guid(receipt) for receipt in peer_receipts.values()):
+            raise ValueError("trial peer needs a confirmed recipient and native host receipt")
+        decision["peer_receipts"] = peer_receipts
     if approval!=decision:
-        raise ValueError("review must match the trial digest, all closed assignments and any new queue modes, cancellations or pool archives")
+        raise ValueError("review must match the trial digest, all closed assignments and any new queue modes, cancellations, pool archives or peer receipts")
     manifest = verified(snapshot)
     if manifest["legacy_db_sha256"]!=facts["snapshot_sha256"]:
         raise ValueError("legacy snapshot changed during review")
@@ -241,13 +241,26 @@ def stage_reviewed_rollback(snapshot,trial,review,destination):
             preparation = {**initial_assignments,**replacements}
             rollback_lifecycle.histories(db,entries,facts["changed_tables"],preparation)
             questions = rollback_questions.retain(db,entries,facts["changed_tables"].get("questions",{}).get("trial_only",0))
+            proofs,peer_frames,peer_uploads,peer_grants = rollback_peers.reviewed_peers(db,facts["changed_tables"])
             optional_workers = {worker for proof in replacements.values()
                                 for worker in (proof["initial"]["assignee_id"],proof["worker_id"])}
-            workers,frames,inquiries = rollback_lifecycle.check_transport(db,entries,questions,optional_workers)
-            uploads,files = copy_reviewed_files(db,entries,facts["changed_tables"],private/"files")
+            optional_workers.update(worker for proof in proofs.values()
+                                    for worker in (proof["row"]["sender"],proof["row"]["recipient"]))
+            workers,frames,inquiries = rollback_lifecycle.check_transport(db,entries,questions,optional_workers,peer_frames)
+            uploads,files = copy_reviewed_files(db,entries,facts["changed_tables"],private/"files",peer_uploads,peer_grants)
             rollback_lifecycle.check_operations(db,entries,workers,frames,uploads,
                                                 facts["changed_tables"].get("operations",{}).get("trial_only",0),
-                                                facts["queue_candidates"],questions,inquiries,preparation)
+                                                facts["queue_candidates"],questions,inquiries,preparation,
+                                                rollback_peers.ReceiptLedger(proofs))
+            previous_sha = facts.get("peer_archive_sha256")
+            previous = None
+            if previous_sha:
+                previous = private/"previous-peer-history.db"
+                rollback_peers.freeze(trial/rollback_peers.NAME,previous_sha,previous)
+            peer_sha = rollback_peers.write_archive(db,private/rollback_peers.NAME,previous,facts["source_id"],
+                                                     facts["trial_sha256"],proofs,peer_uploads)
+            if previous is not None:
+                previous.unlink(missing_ok=True)
             for tid,entry in entries.items():
                 if "creation_key" in entry:
                     original = dict(entry["original_content"],assignee_id=entry["original_worker"])
@@ -271,6 +284,8 @@ def stage_reviewed_rollback(snapshot,trial,review,destination):
                         "restored_sha256":restored_sha,"staged_at":at,"orders":entries,"files":files}
             if queue_manifest_sha:
                 recovery["queue_replay_sha256"] = queue_manifest_sha
+            if peer_sha:
+                recovery["peer_archive_sha256"] = peer_sha
             if applied:
                 recovery["migrated_queue_replacements"] = applied
             output.write(encode(recovery))
@@ -284,4 +299,6 @@ def stage_reviewed_rollback(snapshot,trial,review,destination):
     if applied:
         fields = ("legacy_task_id","replacement_task_id","queue_position","worker_id")
         result["migrated_queue_replacements"] = {tid:{key:row[key] for key in fields} for tid,row in applied.items()}
+    if peer_sha:
+        result.update(peer_archive_sha256=peer_sha,reviewed_peers=len(proofs))
     return result

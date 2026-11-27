@@ -52,6 +52,8 @@ DSH 同一工单来源的回合可用 `worker_submit_material` 单独提交候�
 
 原生 `worker_peer_inbox` 使用 `view: "legacy"` 列出自己参与过的归档。再传 `source_id` 列消息，传 `source_id` 和 `message_id` 读正文与附件信息，按返回的 `next_part` 继续读长正文。列表续页将 `next_cursor` 传给 `after`。Router 的归档发现入口为 `GET /v1/history/peers`。不属于当前身份的归档不会出现在列表里，知道其编号也读不到。以 `worker_send_peer` 引用唯一归档原消息回信时，原收件工位发给原发件工位。原消息保留历史和旧确认，仅新回信进入投递流。若原消息号在多个归档里冲突，回信拒绝。[DSH 原生实测](evidence/native-archived-peer-reply.json) · [Codex App Server 原生实测](evidence/codex-archived-peer-reply.json)
 
+试用回退后的同伴私聊可在独立只读 HTTPS 档案中查询。再次迁入重做 Router 后，原参与人用同一个 `worker_peer_inbox` 入口读回原文、回复关系及宿主回执。[回退、查询和回迁](router-rehearsal.md#试用新增私聊的回退)
+
 同伴消息的发件和收件宿主可通过各自 Worker 的 `GET /v1/worker/peers/{message_id}` 查回交接进度。`accepted_at` 记录 Router 收件，`worker_received` 表示接收 Worker 已确认入箱；`host_receipt_id` 有值表示接收 Worker 已核指定宿主的原生凭据并向 Router 报备。宿主会话及原生收件详情留在接收工位。上述回执都不代表对方已经回复。
 
 同伴附件由发送宿主先交给本工位的媒体入口，再向 `POST /v1/worker/peer` 提交 `to_worker`、`message_id`、可选的 `text`、`reply_to` 和本地 `attachment_ids`。需要区分图文时按位置给 `attachment_kinds`，默认按普通文件。Router 核对发送工位持有附件，收件工位以自己的身份分块取得并校验，再从本地媒体入口交给自己的宿主。该接口返回 Router 收件凭据，原生收件凭据记录在接收 Worker 的同伴历史中。
