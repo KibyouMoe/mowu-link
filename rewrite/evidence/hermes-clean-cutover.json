@@ -1,0 +1,70 @@
+{
+  "hermes_revision": "464bd0dd659f336bd0bf468bf02cad8aac211136",
+  "gateway_pid": 73932,
+  "manager_session": "local-6b63ffe88b80aa2bb01e4a9ff30d8e3b184217bc700271aa7f482e45fd45c91b",
+  "source_instance": "11572afb-5df9-4c15-9b58-d270e8d6ebb2",
+  "t04": {
+    "duplicate": false,
+    "message_id": "e42dd6b1-425c-4aec-8c0f-59e4c035109e",
+    "received_at": "2027-01-15T08:00:00+00:00"
+  },
+  "task_id": "ecd16526-2a7e-492e-a725-766dcd421838",
+  "assignment_id": "50b46903-2fdf-4c65-9ae6-b69d03ea0ea9",
+  "source_attachment_sha256": "85b7b630dff3781536512f591706953753ea344dea24985346504ea42465ea20",
+  "native_worker_receipt": {
+    "delivery_id": "41292239-8174-47ea-b7a6-050fb6bdf158",
+    "digest": "726a36bfa2076b6ef82aa270b838ca2879fb8289c97040df785440d0c455b940",
+    "native_id": "6e3e62d5-d723-4277-91ae-165abb7a8daf",
+    "session": "clean-worker-session",
+    "turn_id": "e658006c-2d61-4335-b6d1-6b4856905867"
+  },
+  "w04": {
+    "recorded": true,
+    "release_assignment_id": "50b46903-2fdf-4c65-9ae6-b69d03ea0ea9",
+    "task_state": "completed_reported"
+  },
+  "manager_notify_id": "14dee5f4-6687-4b70-b483-026622050a7a",
+  "manager_tools": [
+    {
+      "tool_name": "router_info",
+      "tool_call_id": "call_read_trigger_original"
+    },
+    {
+      "tool_name": "router_create_task",
+      "tool_call_id": "call_create_manager_task"
+    },
+    {
+      "tool_name": "router_tasks",
+      "tool_call_id": "read_reported_task"
+    },
+    {
+      "tool_name": "router_act_on_task",
+      "tool_call_id": "accept_reported_task"
+    }
+  ],
+  "final_state": "closed",
+  "platform_reply_id": "om_2",
+  "private_input_id": "62075f7d-88d2-4201-9e2c-8b4e907af247",
+  "formal_worker_inputs": 1,
+  "private_worker_inputs": 1,
+  "boundary": "New stores; real local Hermes with a scripted model; real Router/Worker TLS and Worker MCP; Worker host and Feishu provider are fixtures.",
+  "release": {
+    "revision": "94dadca1b1e67fb4b0f88c432039f52d889c8d9a",
+    "sha256": "3dc7561e25924ca201068f0b05caafd0316931245c347d9535961950bbe3b9e7",
+    "files": 370
+  },
+  "isolated_install_top_level": [
+    "rewrite"
+  ],
+  "router_clock": "controlled fixture clock",
+  "macos_installed_tests": {
+    "passed": 46,
+    "elapsed_seconds": 89.342
+  },
+  "windows_regression": {
+    "run": "https://github.com/KibyouMoe/mowu-link/actions/runs/45953331390",
+    "installation_passed": 21,
+    "dsh_sdk_passed": 14,
+    "scope": "Packaged Windows regression. The real Hermes Gateway cutover ran on macOS."
+  }
+}

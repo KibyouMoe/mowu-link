@@ -20,6 +20,8 @@
 | Worker 与宿主跨机部署 | 独立 `worker` 服务、适配器固定会话及双向 TLS | macOS Codex 适配器和 Linux 虚拟机 Worker 跨虚拟网实跑。Worker 冷重启后保留原持单，原生输入一条，同一回合重报后 Router 待验收，成果通知一条。无信任证书及身份不符被拒。[跨虚拟机](evidence/codex-linux-worker-restart.json) | 实际分开机器的部署与网络规则、已登录的独立试验工位及真人通知。 |
 | 新版启动、停写备份与版本回退 | `rewrite.service`、`release_check`、`codex_release_check`、`state_bundle` | 已演练两个新版锁定发行包分步安装和回退。独立 Codex App Server 从新版快照恢复原会话、持单和多会话账本，前一版适配器接回原持单并交件。已有试用写入时，回退拒绝覆盖。[托管工位](evidence/codex-managed-bundle-rollback.json) Windows Server 2025 已实跑安装包、ACL 拒绝、冷重启、正式工单及两个新版之间回退，宿主使用夹具。[Windows](evidence/windows-release-rollback.json) 新版五组件停写、校验和恢复有独立入口。[恢复说明](router-rehearsal.md#重做版五组件的离线恢复) 已用锁定的两个新版发行包在 macOS 临时 HTTPS 中退版。前一包读回试用写入的一份 W04、来源附件及私聊回执，原号重试零重复，随后正常验收原单并为新私聊记索引。更早发行包只会读已有索引，已被反例拦下。宿主、模型和飞书用夹具。[试用有写入的退版](evidence/rewrite-state-bundle-release-cycle.json) macOS 和 Linux arm64 已从无旧源码的安装目录验过新版回归，Windows 已实跑带试用写入的新版间退版。[独立安装验收](evidence/clean-install-release-acceptance.json) | 从锁定的新版包独立启动各宿主，核实际跨机 profile、真实平台回执和五组件状态恢复。在不同机器验证目标发行包、原生账本和真实平台的一致恢复。 |
 
+新版独立安装包已从空账本跑通 Trigger 附件上报、真实 Hermes 原生建单、Worker W04 和同一 Hermes 原生验收。结果从待验收推进到已结单，私聊与正式单分别保留一条宿主输入。Worker 宿主、模型和飞书提供端使用夹具。[空状态演练](evidence/hermes-clean-cutover.json)
+
 ## Worker 篇 A01–A11
 
 | 用例 | 已有隔离证据 | 仍须在实际两端看到 |
