@@ -1,0 +1,111 @@
+{
+  "source_revision": "f469488d8f0a5128f7fa9a2d461ec4265eaa65d4",
+  "macos_targeted": {
+    "passed": 45,
+    "skipped": 0
+  },
+  "linux_arm64_install": {
+    "passed": 202,
+    "skipped": 139,
+    "historical_excluded": 58,
+    "verified_files": 400,
+    "sha256": "518839dca5f90e327f13c18229a3b05d67297155fc5c576e2332903953fb6670"
+  },
+  "windows_install": {
+    "passed": 42,
+    "run": 45983620634,
+    "job": 140453488720
+  },
+  "lost_request_tests": {
+    "same_question_and_key_after_local_reopen": true,
+    "stale_assignment_did_not_create_question": true,
+    "stale_assignment_did_not_send_card": true
+  },
+  "actual_dsh": {
+    "session": "dsh-native-w05",
+    "task_id": "e1c00afc-e684-4db4-8b08-dcd09c1fc8c5",
+    "assignment_id": "27fcd024-2d24-4ed5-892f-e95f93175077",
+    "question_id": "aa242a22-f2fa-4fff-8acf-ed63ce039bf6",
+    "question_call": {
+      "turn": 1,
+      "step": 1,
+      "callId": "native-w05-task",
+      "name": "worker_ask",
+      "arguments": "{\"text\":\"Use the first route?\",\"options\":[{\"id\":\"go\",\"label\":\"继续\"}]}"
+    },
+    "answer": {
+      "mode": "choice",
+      "option_id": "go"
+    },
+    "answer_receipt": {
+      "delivery_id": "a8002ca9-1ba8-4ab5-bcf7-68f3045ede78",
+      "digest": "47d9087b4b74deca45cbe3fd71d0b0273fda01e1f3548cadfcb88c80b183b67a",
+      "native_id": "mowulink-39c31cc61362fa9dc1f76ec3f96c4c9c0b38d660d85b9c91fa02079d56043144",
+      "session": "dsh-native-w05",
+      "turn_id": "17/2"
+    },
+    "w05_receipt_recovered": {
+      "question_id": "aa242a22-f2fa-4fff-8acf-ed63ce039bf6",
+      "received_at": "2027-01-15T08:00:10+00:00",
+      "task_id": "e1c00afc-e684-4db4-8b08-dcd09c1fc8c5"
+    },
+    "continue_receipt": {
+      "recorded": true,
+      "task_state": "working"
+    },
+    "reports": [
+      {
+        "recorded": true,
+        "task_state": "working"
+      },
+      {
+        "recorded": true,
+        "release_assignment_id": "27fcd024-2d24-4ed5-892f-e95f93175077",
+        "task_state": "completed_reported"
+      }
+    ],
+    "native_inputs": [
+      "mowulink-5f666d13544ce25c9349839ed42e3dd23b74349c6f27bb9952ffd4dd0a700442",
+      "mowulink-39c31cc61362fa9dc1f76ec3f96c4c9c0b38d660d85b9c91fa02079d56043144",
+      "mowulink-30dbf86e4e26bcb9b49ac8335cc279644e628040d3469ba94afb2433bd5e6f5d"
+    ],
+    "manager_notice_count": 2,
+    "router_after": "completed_reported",
+    "boundary": "Real DSH tool executor and Router/Worker HTTP; scripted local model and manager input",
+    "worker_ask_calls": 1,
+    "native_answers": 1
+  },
+  "macos_two_releases": {
+    "previous": "1baccf04b841bfa9c50b3bf2727523b6f83f124f",
+    "candidate": "f469488d8f0a5128f7fa9a2d461ec4265eaa65d4",
+    "candidate_sha256": "518839dca5f90e327f13c18229a3b05d67297155fc5c576e2332903953fb6670",
+    "pending_before": 1,
+    "restored_w05": {
+      "question_id": "6c1d5488-52aa-4063-94c7-53cd00a45009",
+      "received_at": "2027-01-15T08:00:00+00:00",
+      "task_id": "c9ba21f4-f837-4631-a952-fa6d73c3e9bd"
+    },
+    "on_previous_release": {
+      "task_id": "c9ba21f4-f837-4631-a952-fa6d73c3e9bd",
+      "assignment_id": "07529750-6672-4a1e-81b3-99ec185b34f3",
+      "question_id": "6c1d5488-52aa-4063-94c7-53cd00a45009",
+      "answer_native_receipt": {
+        "delivery_id": "0eee6053-ad1e-4936-adf3-beadcde538f8",
+        "digest": "161972d83ab1cc5f9536e54e9f0b38ed94c48e9727c808108c9f979c4305ac55",
+        "native_id": "fe5c08a2-e6c1-4aeb-98e1-99735c997d8a",
+        "session": "release-trial-agent",
+        "turn_id": "fbc4d5a8-4009-411a-8636-2e6c59596e20"
+      },
+      "native_answers": 1,
+      "manager_notices": 2,
+      "w04": {
+        "recorded": true,
+        "release_assignment_id": "07529750-6672-4a1e-81b3-99ec185b34f3",
+        "task_state": "completed_reported"
+      },
+      "router_state": "completed_reported"
+    },
+    "snapshot_unchanged": true,
+    "boundary": "Two pinned rewrite packages, real HTTPS and SQLite, native host and Feishu fixtures."
+  }
+}

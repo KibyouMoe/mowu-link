@@ -6,6 +6,12 @@
 
 ## 检查点与证据
 
+Worker 重连会自动处理已落盘、缺回执的 W05。提交沿用原问题号、派发和幂等键。请求没到可补交，Router 已接收时只取原回执。原派发已转派时保留明确拒绝，提问和题卡各零条。先前这三种情况都必须等模型再调用一次。macOS 快照、提问、题卡、交接与真实 DSH 测试共 45 项通过。真实 DSH 原生工具只调用一次 `worker_ask`，故意丢掉 W05 回执后由 Worker 自动补回。原回答只进入宿主一次，后续 W04 释放原派发。模型和管理输入使用测试驱动。
+
+另用两个锁定发行包实测：丢失 W05 后先停写封存，新版冷恢复自动发回同一题。Router 收到答复后再次停写，这时答复尚未到宿主。前一版从试用结束快照恢复，向原派发转送一次答复，并经 W04 进入待验收。原快照摘要未变。用了真实 SQLite 和隔离 HTTPS，宿主使用夹具。复跑 W05 的断链及回执用例用 `python3 -B -m unittest -v rewrite.test_questions rewrite.test_dsh_native_loop.NativeLoop.test_native_formal_question_returns_to_its_assignment_and_keeps_ownership_until_completion`。[操作步骤](router-rehearsal.md#保留试用写入的新版版本回退) · [实测记录](evidence/w05-recovery-release.json)
+
+候选提交 `f469488d8f0a5128f7fa9a2d461ec4265eaa65d4` 的 400 文件安装包在 Linux arm64 通过 202 项，按环境跳过 139 项。58 项旧版历史用例未纳入新版验收。Windows 安装回归 42 项通过，含 W05 的三项断线及转派恢复。[Windows 流水线](https://github.com/KibyouMoe/mowu-link/actions/runs/45983620634)
+
 W04 封存审计核对 Worker 待发箱、Router 原幂等请求与回执、正式成果或受阻条目，以及附件关联、分块字节与下载授权。修正前改过的 Worker 回执会漏报。现在八种错配均报待核。Router 已收、仅 Worker 回执丢失的状态单独列出，原请求复验能补回回执。macOS 针对快照、成果附件和受阻池的 40 项通过。
 
 从两个锁定发行包实跑切换与回退。macOS 和 Linux arm64 均验证旧快照拒绝覆盖试用写入。从试用结束快照恢复后，前一发行包读回同一份待验收 W04 和 440,000 字节正式成果附件。原号重试的新增输入、通知、平台发送各为零，随后由隔离 Hermes 管理端验收结单。Router、HTTPS 和 SQLite 实跑，原生宿主、模型与飞书为夹具。[复跑](router-rehearsal.md#保留试用写入的新版版本回退) · [实测记录](evidence/w04-sealed-rollback.json)
