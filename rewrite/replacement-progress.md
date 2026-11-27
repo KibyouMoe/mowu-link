@@ -6,6 +6,10 @@
 
 ## 检查点与证据
 
+独立 Codex App Server 已用原生 MCP 工具路径交 W04。`CODEX_HOME` 临时 profile 可见 `worker_report`，同二进制的项目配置单独探测仍查不到。正常提审由隔离测试客户端按原线程、回合和参数逐次确认，确认前没有 MCP 调用。两次工具调用复用原回执，Router 保留一条待验通知，私聊误报被拒。macOS 的 410 文件安装包全量读回二十项专项，其中十轮是真宿主 stdio MCP。真实模型、实际 Desktop 工位及真人确认仍待验。[协议与复跑](desktop-check.md#独立-app-server-的-stdio-mcp-报送) · [回执](evidence/native-app-server-project-mcp-w04.json)
+
+安装包锁定 `a6b1102b60953db943041844c9e42a21ee935cfc`。Linux arm64 安装回归通过 208 项，144 项按环境跳过，58 项旧版历史用例退出。Windows 安装回归通过 51 项，覆盖已有 App Server 验收。新增 stdio 同用户监听用例基于 POSIX。[Windows 流水线](https://github.com/KibyouMoe/mowu-link/actions/runs/45994690444)
+
 新增 `rewrite.cutover_audit`，用同一停写点核候选发行包与已安装文件、独立部署名单、快照摘要、Router 原停派号和 Worker/Hermes/Trigger 回执。正确批次返回 `offline_reconciled=true`。未停派、错停派号、残留派发预约、缺飞书账本、来源缺 T04 或拿错安装包均未通过。原切换回退演练保留，仅以隔离副本测试停派和反例。真人、真平台和线上切换仍按原矩阵验收。[操作步骤](router-rehearsal.md#同批离线切换核验) · [实测记录](evidence/offline-cutover-checkpoint.json)
 
 候选 `afcd6cde1b700426cf61c9b05bbec79d77a47b3d` 的 409 文件包在 macOS、Linux arm64 来宾和 Windows Server 2025 都实跑同一份两版安装包演练。三端各跑通一份有效封存、拦下同样六种反例，再由前一版读回一份 W04。macOS 停派与快照回归通过 34 项。Linux 安装回归通过 208 项，143 项按环境跳过，58 项旧版历史用例退出。Windows 安装回归通过 51 项。复跑 `python3 -B -m rewrite.release_check --repository . --component state-bundle --previous 35ba22f66e3017a1756b8645f3b88d091b3ff6f8 --new afcd6cde1b700426cf61c9b05bbec79d77a47b3d`。[Windows 流水线](https://github.com/KibyouMoe/mowu-link/actions/runs/45992824307)
@@ -950,6 +954,8 @@ Hermes 源码版本 `a2de7418a3405307f8b3abce01a66d5d71351edc`。从 Git 跟踪�
 另以该机 Desktop 随附的 `codex app-server --stdio` 建立一次独立原生协议连接，临时用户目录和配置均为空。初始化成功，协议提供线程级 `dynamicTools`，但 `account/read` 返回无账号、需要认证。该进程未发起模型回合。此路径可用独立测试帐号继续验原生模型，Desktop 项目加载仍需单验。
 
 上面两次探测分别记录于 `evidence/desktop-w04-probe.json` 和 `evidence/app-server-empty-profile.json`。溪流已核实当前没有可用的已授权测试工位。真实 W04 继续列为未验；其他项目继续推进。
+
+用同一个随附二进制和干净临时目录做了配置来源对照。仅项目配置时 `codex mcp get` 返回未找到，清单写入独立 `CODEX_HOME` 后返回已登记。两次均未写信任配置。临时 App Server 又用原生 `mcpServerStatus/list` 读回工具。测试通过正常的逐次 MCP 提审后，从原生 `mcpToolCall` 经项目 stdio 入口提交同派发 W04，私聊反例被拒。此对照只覆盖独立 App Server，原 Desktop 与真实账号的证据继续沿用上面的边界。[实测](evidence/native-app-server-project-mcp-w04.json)
 
 ## 现役入口盘点记录
 

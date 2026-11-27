@@ -120,6 +120,8 @@ Hermes 原生收件和管理飞书通知分别对账。原生确认而平台回�
 | `bridge_send_worker_message` | 原生 `worker_send_peer` 与三层收件查询 | 两个独立 DSH 实例互发及关联回信通过。Router 收件、对端 Worker 入箱及对端原生收件各有记录。模型为本地驱动，授权的实际跨宿主工位待验。 | 部分 · 隔离已验，待实际环境 |
 | `bridge_worker_inbox` | 原生 `worker_peer_inbox` 的待收件与新版回复历史 | 隔离同伴私聊已核当前工位的待收件、最近消息和回复关联。真实登录的独立工位与 Desktop 仍待核。 | 部分 · 隔离已验，待实际环境 |
 
+独立 App Server 还实跑了与 Desktop 预检同一份 stdio MCP 清单。工具目录可读，两次原生调用返回同一 W04，普通私聊调用被拒。审批按原生逐次请求由测试客户端确认。Desktop 共享配置与生产绑定未用于试验，真人审批和真实模型仍待验。[协议与复跑](desktop-check.md#独立-app-server-的-stdio-mcp-报送) · [实测](evidence/native-app-server-project-mcp-w04.json)
+
 ## 新版命令、审批与维护
 
 | 入口 | 查证结果 | 切换条件 | 验收状态 |

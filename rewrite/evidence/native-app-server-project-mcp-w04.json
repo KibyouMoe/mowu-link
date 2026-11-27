@@ -1,0 +1,83 @@
+{
+  "candidate_revision": "a6b1102b60953db943041844c9e42a21ee935cfc",
+  "implementation_revision": "ce9569323ce67175b8a8a7ea62958e4792af4f82",
+  "configuration_scope_probe": {
+    "binary_version": "codex-cli 0.171.0-alpha.13.2",
+    "project_scope_only": {
+      "exit": 1,
+      "server_not_found": true,
+      "server_registered": false,
+      "project_config_trust_warning": false
+    },
+    "dedicated_profile_scope": {
+      "exit": 0,
+      "server_not_found": false,
+      "server_registered": true,
+      "project_config_trust_warning": false
+    },
+    "production_configuration_used": false,
+    "trust_settings_written": false
+  },
+  "installed_macos": {
+    "archive_sha256": "b75f447f04cbbc318d3cc4ec56f26981de26f28b91c89b4ba7dabfa60f9bfece",
+    "verified_files": 410,
+    "passed": 20,
+    "native_runs": 10,
+    "first_native_run": {
+      "assignment_id": "812af606-e175-42ac-a1c4-caa8539b474a",
+      "boundary": "Native isolated App Server and its stdio MCP subprocess. Scripted local model; no Desktop GUI or live account.",
+      "formal_calls": [
+        "mcp-formal-report-0",
+        "mcp-formal-report-1"
+      ],
+      "host_version": "0.171.0-alpha.13.2",
+      "native_mcp_methods": [
+        "initialize",
+        "tools/list",
+        "initialize",
+        "tools/list",
+        "tools/call",
+        "tools/call",
+        "tools/call"
+      ],
+      "notices": 1,
+      "original_input": {
+        "delivery_id": "d04cb7b5-5c2b-4c8c-8ab0-3338e5f2729a",
+        "digest": "ab2e1643d11188fc9fd7360453b30a11eb617fa3f7eb29631295dd4e97d4f172",
+        "native_id": "01a21cde-4aa0-71f3-adf8-b0e77a31f4da",
+        "session": "01a21cde-4a52-77e2-9a16-42c038ebfbc1",
+        "turn_id": "01a21cde-4a97-78d1-9f6c-7b95a9fe11d5"
+      },
+      "private_call_rejected": true,
+      "receipt": {
+        "recorded": true,
+        "release_assignment_id": "812af606-e175-42ac-a1c4-caa8539b474a",
+        "task_state": "completed_reported"
+      },
+      "router_state": "completed_reported",
+      "task_id": "2b72da25-548c-44be-9d1f-ded033d17195",
+      "test_approval_turns": [
+        "01a21cde-4a97-78d1-9f6c-7b95a9fe11d5",
+        "01a21cde-4a97-78d1-9f6c-7b95a9fe11d5",
+        "01a21cde-4ac7-7ad3-a3da-4e6023813423"
+      ],
+      "thread_id": "01a21cde-4a52-77e2-9a16-42c038ebfbc1"
+    }
+  },
+  "linux_arm64_install": {
+    "passed": 208,
+    "environment_skips": 144,
+    "historical_excluded": 58,
+    "sha256": "b75f447f04cbbc318d3cc4ec56f26981de26f28b91c89b4ba7dabfa60f9bfece",
+    "verified_files": 410
+  },
+  "boundary": "Actual isolated Codex App Server, native approval protocol, MCP stdio server, Worker and Router. Model and per-call approval operator were test drivers. No authenticated model, Desktop GUI, live Feishu or production configuration.",
+  "windows": {
+    "run": 45994690444,
+    "job": 140491130655,
+    "verified_files": 410,
+    "sha256": "78f6a395d3e85dfdcf5f5205907807a4940f9109f714bc02f0c388f1adbf8ea5",
+    "passed": 51,
+    "scope": "Existing Windows App Server and installed release regression; the new Unix-socket MCP test is POSIX only."
+  }
+}
