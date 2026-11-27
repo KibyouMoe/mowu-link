@@ -193,7 +193,7 @@ class Provider(BaseHTTPRequestHandler):
         cleanup = getattr(self.server,"cleanup_fixture",None)
         goal_continuation = formal_goal is not None and any(
             part.get("text","").startswith('<codex_internal_context source="goal">') for part in latest)
-        if mcp_fixture and (mcp_private or payload and payload.get("kind")=="task") and calls<(1 if mcp_private else 2):
+        if mcp_fixture and (mcp_private or payload and payload.get("kind")=="task") and calls<(1 if mcp_private else 3):
             space = "mcp__mowulink_w04_test"
             advertised = any(tool.get("name")==space and any(entry.get("name")=="worker_report"
                 for entry in tool.get("tools",[])) for tool in body.get("tools",[]))
@@ -1834,7 +1834,8 @@ class CodexAppServer(unittest.TestCase):
         (profile/"config.toml").write_text(config_text(state),encoding="utf-8")
         fixture = self.provider.project_mcp_report = {"admitted":Event(),"advertised":[]}
         self.addCleanup(fixture["admitted"].set)
-        rpc = self.enterContext(isolated_app_server(profile,self.origin))
+        connection = self.enterContext(ExitStack())
+        rpc = connection.enter_context(isolated_app_server(profile,self.origin))
         status = rpc.request("mcpServerStatus/list",{"limit":50})
         (registered,) = [server for server in status["data"] if server["name"]=="mowulink_w04_test"]
         self.assertEqual(set(registered["tools"]),{"worker_report"})
@@ -1845,13 +1846,21 @@ class CodexAppServer(unittest.TestCase):
         clock = Clock()
         loop = self.enterContext(Loop.isolated(clock,host_factory=lambda _path,_name:host))
         self.enterContext(listen(state,loop.worker,loop.adapter))
-        task_id = loop.hermes.create(guid(),"Isolated native MCP report","Report through the MCP server","oguri")["task_id"]
         loop.worker.connect()
-        loop.worker.poll()
-        clock.advance(10)
-        loop.worker.poll()
-        loop.worker.poll()
-        assignment_id = loop.worker.hold()["held_assignment_id"]
+
+        def dispatch(title,instructions):
+            task_id = loop.hermes.create(guid(),title,instructions,"oguri")["task_id"]
+            fixture["admitted"].clear()
+            clock.advance(1)  # Let the next status query record the now-idle native thread.
+            loop.worker.poll()
+            clock.advance(10)
+            loop.worker.poll()
+            loop.worker.poll()
+            held = loop.worker.hold()
+            self.assertEqual(held["held_task_id"],task_id)
+            return task_id,held["held_assignment_id"]
+
+        task_id,assignment_id = dispatch("Isolated native MCP report","Report through the MCP server")
         work = loop.hermes.inspect(task_id)
         self.assertEqual(work["task"]["state"],"working")
 
@@ -1863,16 +1872,21 @@ class CodexAppServer(unittest.TestCase):
                 time.sleep(.025)
             self.fail("original native input receipt remained unconfirmed")
 
-        def formal_receipt():
+        def formal_receipt(assignment):
             loop.worker.poll()
             with loop.adapter.db.transaction() as db:
-                row = db.execute("SELECT receipt FROM intents WHERE receipt IS NOT NULL").fetchone()
+                row = db.execute("""SELECT receipt FROM intents WHERE receipt IS NOT NULL
+                    AND json_extract(payload,'$.assignment_id')=?""",(assignment,)).fetchone()
                 return json.loads(row[0]) if row else None
 
-        original = wait_for_receipt(formal_receipt)
-        approved = []
+        original = wait_for_receipt(lambda:formal_receipt(assignment_id))
+        approvals = {}
+        resolutions = []
 
-        def finished(turn):
+        def call_count():
+            return (state/"methods.jsonl").read_text().splitlines().count('"tools/call"')
+
+        def finished(turn, decisions):
             until = time.monotonic()+15
             observed = []
             while True:
@@ -1888,23 +1902,38 @@ class CodexAppServer(unittest.TestCase):
                     metadata = request["_meta"]
                     self.assertEqual((metadata["codex_approval_kind"],metadata["tool_name"],metadata["tool_params"]),
                                      ("mcp_tool_call","worker_report",fixture["args"]))
-                    if not approved:
-                        self.assertNotIn('"tools/call"',(state/"methods.jsonl").read_text().splitlines())
+                    before = call_count()
+                    self.assertEqual(before,sum(entry["action"]=="accept" for entry in approvals.values()))
+                    if before==0:
                         self.assertEqual(loop.worker.hold()["held_assignment_id"],assignment_id)
-                    approved.append(turn)
-                    rpc.send({"id":event["id"],"result":{"action":"accept","content":{}}})
+                        self.assertEqual(loop.hermes.inspect(task_id),work)
+                        self.assertEqual(loop.manager_wire.frames(0),[])
+                    request_id = event["id"]
+                    self.assertNotIn(request_id,approvals)
+                    self.assertTrue(decisions,"native tool tried to reuse an earlier approval")
+                    action = decisions.pop(0)
+                    approvals[request_id] = {"request_id":request_id,"turn_id":turn,"action":action,
+                                             "mcp_calls_before":before}
+                    result = {"action":action,"content":{}} if action=="accept" else {"action":action}
+                    rpc.send({"id":request_id,"result":result})
+                elif event.get("method")=="serverRequest/resolved":
+                    self.assertEqual(event["params"]["threadId"],sid)
+                    resolved = event["params"]["requestId"]
+                    self.assertEqual(approvals[resolved]["turn_id"],turn)
+                    resolutions.append(resolved)
                 elif "id" in event:
                     self.fail(f"unexpected native approval or tool request: {event.get('method')}")
                 if (event["method"]=="turn/completed" and event["params"]["turn"]["id"]==turn):
                     self.assertEqual(event["params"]["turn"]["status"],"completed")
                     break
+            self.assertFalse(decisions,"one or more native approval requests did not arrive")
             history = rpc.request("thread/read",{"threadId":sid,"includeTurns":True})["thread"]
             native, = [entry for entry in history["turns"] if entry["id"]==turn]
             return native["items"]
 
         fixture["admitted"].set()
-        formal = finished(original["turn_id"])
-        calls = [item for item in formal if item["type"]=="mcpToolCall"]
+        formal = finished(original["turn_id"],["decline","accept","accept"])
+        calls = [item for item in formal if item["type"]=="mcpToolCall" and item.get("status")=="completed"]
         self.assertEqual(len(calls),2,formal)
         self.assertTrue(all(item["server"]=="mowulink_w04_test" and item["tool"]=="worker_report" for item in calls))
         first,again = [json.loads(item["result"]["content"][0]["text"]) for item in calls]
@@ -1923,19 +1952,66 @@ class CodexAppServer(unittest.TestCase):
         chat_id = guid()
         chat = wait_for_receipt(lambda:loop.worker.chat(chat_id,"Attempt report from isolated private chat"))
         fixture["admitted"].set()
-        (private_call,) = [item for item in finished(chat["turn_id"]) if item["type"]=="mcpToolCall"]
+        (private_call,) = [item for item in finished(chat["turn_id"],["accept"]) if item["type"]=="mcpToolCall"]
         self.assertIn("wrong_report_origin",encode(private_call))
         self.assertEqual(loop.hermes.inspect(task_id),after)
         self.assertEqual(loop.manager_wire.frames(0),[notification])
-        self.assertEqual(fixture["advertised"],[True,True,True])
-        self.assertEqual(approved,[original["turn_id"],original["turn_id"],chat["turn_id"]])
+        self.assertEqual(fixture["advertised"],[True,True,True,True])
+        self.assertEqual(resolutions,list(approvals))
         methods = (state/"methods.jsonl").read_text().splitlines()
         self.assertIn('"tools/list"',methods)
         self.assertEqual(methods.count('"tools/call"'),3)
+
+        task_pending,assignment_pending = dispatch("Pending native approval","Disconnect before approving")
+        self.assertNotEqual(assignment_pending,assignment_id)
+        pending_input = wait_for_receipt(lambda:formal_receipt(assignment_pending))
+        fixture["admitted"].set()
+        until = time.monotonic()+8
+        while True:
+            event = rpc.event(until)
+            if event["method"]=="mcpServer/elicitation/request":
+                self.assertEqual((event["params"]["threadId"],event["params"]["turnId"]),(sid,pending_input["turn_id"]))
+                self.assertEqual(event["params"]["_meta"]["tool_params"]["assignment_id"],assignment_pending)
+                break
+            self.assertNotIn("id",event)
+        request_pending = event["id"]
+        self.assertNotIn(request_pending,approvals)
+        connection.close()
+
+        with isolated_app_server(profile,self.origin) as reopened:
+            reopened.request("thread/resume",{"threadId":sid,"cwd":str(profile)})
+            loop.adapter.host = AppServerHost(reopened,sid,Path(self.root)/"mcp-native.db")
+            with loop.adapter.db.transaction() as db:
+                row = db.execute("SELECT payload FROM intents WHERE delivery_id=?",(pending_input["delivery_id"],)).fetchone()
+            payload = json.loads(row[0])
+            self.assertFalse(loop.adapter.host.busy(sid))
+            recovered = loop.adapter.host.lookup_expected(sid,pending_input["delivery_id"],payload,pending_input["digest"])
+            self.assertEqual(recovered,pending_input)
+            self.assertEqual(loop.adapter.deliver(pending_input["delivery_id"],payload),pending_input)
+            native_history = loop.adapter.host.thread(sid,include_turns=True)["turns"]
+            self.assertEqual([turn["id"] for turn in native_history],
+                             [original["turn_id"],chat["turn_id"],pending_input["turn_id"]])
+            pending_turn = native_history[-1]
+            self.assertEqual(pending_turn["status"],"interrupted")
+            self.assertEqual([item["id"] for item in pending_turn["items"] if item["type"]=="userMessage"],
+                             [pending_input["native_id"]])
+            self.assertFalse(any(item["type"]=="mcpToolCall" and item.get("status")=="completed"
+                                 for item in pending_turn["items"]))
+        self.assertEqual(call_count(),3)
+        self.assertEqual(loop.worker.hold()["held_assignment_id"],assignment_pending)
+        pending = loop.hermes.inspect(task_pending)
+        self.assertEqual(pending["task"]["state"],"working")
+        self.assertIsNone(pending["last_report"])
+        self.assertEqual(loop.manager_wire.frames(0),[notification])
         self.evidence = {"host_version":native_version["cliVersion"],"thread_id":sid,"task_id":task_id,
                          "assignment_id":assignment_id,"original_input":original,"formal_calls":[item["id"] for item in calls],
                          "receipt":first,"notices":1,"private_call_rejected":True,"router_state":after["task"]["state"],
-                         "native_mcp_methods":[json.loads(line) for line in methods],"test_approval_turns":approved,
+                         "native_mcp_methods":[json.loads(line) for line in methods],
+                         "native_approvals":list(approvals.values()),"native_resolution_ids":resolutions,
+                         "disconnected_approval":{"request_id":request_pending,"task_id":task_pending,
+                             "assignment_id":assignment_pending,"original_input":pending_input,
+                             "native_turn_status_after_reopen":pending_turn["status"],"state":"working",
+                             "mcp_calls_after_reopen":call_count()-3,"additional_notices":0},
                          "boundary":"Native isolated App Server and its stdio MCP subprocess. Scripted local model; no Desktop GUI or live account."}
 
     @unittest.skipUnless(shutil.which("openssl"),"isolated TLS certificate generator required")
