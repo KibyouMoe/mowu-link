@@ -1,0 +1,111 @@
+{
+  "release": {
+    "revision": "688b1dd89a0a1d96fe1a8f5ca2d4c8a1f5f85582",
+    "sha256": "2f99c84c9c5d6c59c7c7e3f3320f4029d9edd48fd08fb0ea77963c2de414e5da",
+    "files": 396
+  },
+  "fixtures": {
+    "transport": "Isolated Router HTTP and SQLite; native host and Feishu are fixtures.",
+    "missing_peer_ledger": {
+      "before_fix": "Omitting the idle recipient before C02 returned needs_review=false.",
+      "status_query_only": "clear",
+      "before_c02": {
+        "issue": "worker_ledger_missing",
+        "router_waiting_deliveries": 1,
+        "router_waiting_peer_receipts": 1
+      },
+      "after_c02": {
+        "issue": "worker_ledger_missing",
+        "router_waiting_peer_receipts": 1
+      },
+      "restored": {
+        "needs_review": false,
+        "native_inputs": 1,
+        "host_receipt_read_back": true
+      }
+    },
+    "roster": {
+      "complete_exit": 0,
+      "missing_exit": 1,
+      "extra_exit": 1,
+      "wrong_revision_exit": 1,
+      "omitted_empty_components": [
+        "feishu:oguri",
+        "hermes-host:main",
+        "trigger:spare"
+      ]
+    }
+  },
+  "regressions": {
+    "macos_targeted": {
+      "passed": 46,
+      "skipped": 0
+    },
+    "macos_install": {
+      "discovered": 396,
+      "run": 338,
+      "passed": 303,
+      "skipped": 35,
+      "archival_excluded": 58,
+      "verified_files_after_tests": 396,
+      "extra_files": 0,
+      "missing_files": 0
+    },
+    "linux_arm64_install": {
+      "discovered": 396,
+      "run": 338,
+      "passed": 199,
+      "skipped": 139,
+      "archival_excluded": 58,
+      "guest_inputs": 1,
+      "router_notices": 1
+    },
+    "macos_linux_cross_host_snapshot": {
+      "passed": 1,
+      "test": "rewrite.test_cross_guest.CrossHostState.test_offline_fragments_restore_original_cross_host_w04",
+      "boundary": "Local macOS Router and Linux guest Worker with fixture host; restores the original W04 from paired host fragments."
+    },
+    "windows_install": {
+      "passed": 38,
+      "workflow_run": 45979985185,
+      "workflow_job": 140441136059
+    },
+    "windows_dsh": {
+      "passed": 15,
+      "workflow_run": 45979985185,
+      "workflow_job": 140441136641,
+      "boundary": "Packaged DSH native host; model and workspace engine are fixtures."
+    }
+  },
+  "macos_rollback": {
+    "lifecycle": "isolated HTTPS from two installed rewrite releases",
+    "started_revisions": [
+      "786ee5afdb1460078deb4a6a37fefbb8a4236117",
+      "688b1dd89a0a1d96fe1a8f5ca2d4c8a1f5f85582",
+      "786ee5afdb1460078deb4a6a37fefbb8a4236117"
+    ],
+    "pre_upgrade_snapshot": {
+      "components": 7,
+      "manifest_sha256": "9fd218e686bcc99b7e0c1466416d12e850094d15d47f526d06cb78481d4e65e7",
+      "snapshot_id": "2abe7103-0e36-453b-844c-ba938be154b6",
+      "source_revision": "786ee5afdb1460078deb4a6a37fefbb8a4236117"
+    },
+    "candidate_snapshot": {
+      "components": 7,
+      "manifest_sha256": "084c7e3e0509540c7ac0a4f482d2a22f3f71fc57e82f6276235f546aca90e12a",
+      "snapshot_id": "d25f028a-7b0f-4a24-99e1-409cefd371ac",
+      "source_revision": "688b1dd89a0a1d96fe1a8f5ca2d4c8a1f5f85582"
+    },
+    "previous_image_restore_refused_after_writes": true,
+    "report_count": 1,
+    "task_before_acceptance": "completed_reported",
+    "new_inputs_on_retry": 0,
+    "new_notices_on_retry": 0,
+    "new_platform_sends_on_retry": 0
+  },
+  "macos_cache_control": {
+    "first_full_regressions_passed_before_integrity_check": 303,
+    "initial_integrity_check": "refused an altered file set; running test_project_report alone reproduced four unlisted Python bytecode files",
+    "rerun_control": "PYTHONDONTWRITEBYTECODE=1 inherited by test subprocesses"
+  }
+}

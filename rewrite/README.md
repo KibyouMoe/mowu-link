@@ -15,7 +15,7 @@ python3 -m unittest -v rewrite.test_mainline
 
 **怎样读结果。** `host_receipt` 来自目标宿主夹具自己的输入账本，带会话、输入号、投递号和正文摘要。`after_turn` 应为 `working`。夹具 Agent 在该输入专属的 MCP 管道调用 `worker_report` 后，W04 回应 `completed_reported` 并给出原派发号。Hermes 侧收到一条含成果正文、同一工单号的 `Notify`。最后由模拟溪流显式验收，才出现 `after_review: closed`。
 
-从校验后的独立安装目录运行 `python3 -B -m rewrite.release_suite`。安装目录只需发行包内的 `rewrite/`。结果列出实际执行、环境跳过和不计入验收的历史兼容用例。Linux 来宾安装验证使用同一入口，并在执行后再核包摘要。
+从校验后的独立安装目录运行 `PYTHONDONTWRITEBYTECODE=1 python3 -B -m rewrite.release_suite`。PowerShell 先设 `$env:PYTHONDONTWRITEBYTECODE="1"`，再执行 Python 命令。这个环境变量也禁止测试子进程在安装目录写缓存，以便结束后逐文件复核。安装目录只需发行包内的 `rewrite/`。结果列出实际执行、环境跳过和不计入验收的历史兼容用例。Linux 来宾安装验证使用同一入口，并在执行后再核包摘要。
 
 需要复现范围更正前的兼容证据时，在带原源码的仓库运行 `python3 -B -m unittest discover -q -s rewrite -t .`，或按历史记录使用固定版本的旧端源码。新版验收使用独立安装入口。
 

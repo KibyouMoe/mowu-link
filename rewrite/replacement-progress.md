@@ -6,6 +6,12 @@
 
 ## 检查点与证据
 
+切换前封存审计锁定独立组件清单及发行提交。修正前，接收方没有持单时，省略它的账本会漏报一条待送同伴私聊。隔离 Router 验证了 C02 前后均报待核。即使 Router 已记 C02，宿主回执仍需对账。恢复完整快照后沿原消息号取回回执，宿主仍只有一次输入。独立清单另验漏采无消息的 Trigger、飞书及 Hermes 宿主账本，部分、额外或错版本快照均退出 1。[操作步骤](router-rehearsal.md#跨机停写与合并快照) · [实测记录](evidence/cutover-roster-audit.json)
+
+锁定 `688b1dd89a0a1d96fe1a8f5ca2d4c8a1f5f85582` 的 396 文件安装包。macOS 新版回归通过 303 项、按环境跳过 35 项，Linux arm64 通过 199 项、跳过 139 项。两边各有 58 项旧版历史用例退出新版验收。macOS 首轮用例通过，测试子进程写入缓存导致包校验拦截。用 `PYTHONDONTWRITEBYTECODE=1` 复跑后，396 个文件逐一复核通过。Windows 安装回归 38 项、原生 DSH 15 项全过，DSH 的模型与工作区引擎使用夹具。[Windows 流水线](https://github.com/KibyouMoe/mowu-link/actions/runs/45979985185)
+
+macOS 在两个新版发行包间复跑，前一版保留试用期的同一 W04 和待验收状态，重复输入、通知和平台发送均为零。保留试用库后成功验收原单。另复跑 macOS Router 与 Linux 来宾 Worker 的分机封存及原 W04 恢复。原生宿主和飞书使用夹具。[复跑与证据](evidence/cutover-roster-audit.json)
+
 Hermes 停写审计补上宿主回执。Router 的原通知和附件、插件队列与原生意图、会话及两边的收件号逐条核对。六类错配反例以及缺宿主账本均标待核。宿主已收但中转未记时，从原绑定副本补记同一回执，夹具宿主只接收一次。
 
 锁定 `786ee5afdb1460078deb4a6a37fefbb8a4236117` 的 395 文件安装包，macOS 通过 31 项，Linux arm64 通过 30 项。macOS 实跑 Hermes `464bd0dd659f336bd0bf468bf02cad8aac211136` 的独立网关和原生会话。Event 与 Notify 两条已到宿主。故意丢失 Event 回执先标待核，冷重开查回原收件，补回缺失队列和意图后原生收件仍两次，新增模型请求零次。最终封存后两条均确认，附件及读取授权通过。模型为本机脚本。
