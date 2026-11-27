@@ -199,6 +199,16 @@ trigger_store.close()
         self.assertEqual(json.loads(subprocess.run(invocation,check=True,capture_output=True,text=True,timeout=10).stdout),result)
         self.assertEqual(digest(case.snapshot/"legacy.db"),router_sha)
         self.assertEqual(digest(trigger_snapshot/DATABASE),digest(root/"legacy-bus.db"))
+        initial = {"subscriber":"router:oguri","consumer_cursor":2,
+                   "levels":["event","notify","info"],"source_id":guid()}
+        with self.assertRaisesRegex(ValueError,"original filter and native receipt audit"):
+            plan(trigger_snapshot,trigger_sha,initial["subscriber"],initial["consumer_cursor"],
+                 initial["levels"],initial["source_id"])
+        unsafe_plan = root/"old-unfiltered-plan.json"
+        unsafe_plan.write_text(json.dumps({"plan":initial}))
+        with self.assertRaisesRegex(ValueError,"original filter and native receipt audit"):
+            stage(trigger_snapshot,trigger_sha,unsafe_plan,root/"review.json",case.trial)
+        self.assertFalse(case.trial.exists())
         with self.assertRaisesRegex(ValueError,"approved digest"):
             legacy_subscription.audit(parameters[0],"0"*64,*parameters[2:],**args)
         mid = rows[1]["message_id"]

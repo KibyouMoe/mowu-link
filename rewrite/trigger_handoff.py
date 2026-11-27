@@ -33,6 +33,8 @@ def read_plan(snapshot, expected, subscriber, consumer_cursor, levels, source_id
             or not isinstance(levels,list) or not levels or any(level not in LEVELS for level in levels)
             or len(set(levels))!=len(levels) or not valid_guid(source_id)):
         raise ValueError("supply the exact subscriber, consumer cursor, effective levels and stable source UUID")
+    if subscriber.startswith("router:"):
+        raise ValueError("legacy Worker subscriptions require their original filter and native receipt audit")
     namespace = UUID(source_id)
     levels = sorted(levels)
     with closing(readonly(snapshot/DATABASE)) as db:
