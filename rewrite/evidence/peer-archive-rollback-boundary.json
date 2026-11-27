@@ -1,0 +1,13 @@
+{
+  "revision": "7caa81048ea483409dbcfada1ae7ebd830723fb0",
+  "isolated_legacy_parent": "44b608f8-d9fb-4d88-92f9-c39eac9b8337",
+  "legacy_lookup_with_base_router_identity": 200,
+  "legacy_reviewer_identity_supplied": false,
+  "rewrite_lookup_from_an_unrelated_worker": [404, "legacy_peer_not_found"],
+  "trial_reply": "b917e594-9e76-4521-925d-4971cc1602f1",
+  "trial_reply_host_receipt": "809b6083-8963-50cf-8b20-864bb40e1e01",
+  "trial_sha256": "e0242776fec908e5276051e69c36d82e42477434c906182d6ce2235cb2e2663c",
+  "reviewed_rollback_refused": "trial has changes outside the supported reviewed orders",
+  "destination_created": false,
+  "boundary": "Both Router HTTP services and SQLite databases are isolated and real. The trial receiving host is a fixture. No production credentials or message text are included."
+}
