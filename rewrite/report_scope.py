@@ -11,7 +11,7 @@ from .storage import encode
 def config_text(state):
     quote = json.dumps
     return (f"[mcp_servers.mowulink_w04_test]\ncommand = {quote(sys.executable)}\n"
-            f"args = [{quote('-m')}, {quote('rewrite.project_report')}, {quote(str(state))}]\n"
+            f"args = [{quote('-B')}, {quote('-m')}, {quote('rewrite.project_report')}, {quote(str(state))}]\n"
             f"cwd = {quote(str(Path(__file__).resolve().parent.parent))}\n")
 
 

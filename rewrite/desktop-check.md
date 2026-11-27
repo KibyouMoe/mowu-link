@@ -51,6 +51,12 @@ text(await eval("(" + driver.output + ")")(tools, workdir));
 
 复跑 `python3 -m unittest -v rewrite.test_codex_app_server`，需要本机 ChatGPT Desktop 随附的 Codex 可执行文件。此验收连续通过 30 次。模型为本地脚本，无登录账户，Desktop 界面和真实模型 W04 仍待有授权的测试工位。
 
+### 独立 App Server 的 stdio MCP 报送
+
+同一份项目 MCP 清单放在独立临时 `CODEX_HOME` 的 `config.toml` 后，随附的 Codex App Server 通过 `mcpServerStatus/list` 发现 `worker_report`，模型请求可见对应的 MCP 工具命名空间。临时配置不含账户。测试调用由本地脚本模型生成，客户端对原线程、原回合和精确参数的每个原生 MCP 提审各回一次临时允许。确认前 MCP 未收到调用，Router 仍保留原持单。
+
+试验从 W03 开始走实际原生输入、原生 `mcpToolCall`、stdio 子进程和 Worker W04。两次合法调用复用同一业务回执，Router 只留一条成果通知、停在待验收。普通私聊中的同参数调用被拒。模型工具参数没有线程或回合字段，协议身份由 App Server 的 MCP 调用元数据提供。实际 Desktop 项目中的装载、云端模型、真人授权及无人值守报送仍待验。复跑 `python3 -B -m unittest -v rewrite.test_codex_app_server.CodexAppServer.test_native_mcp_report_uses_app_server_invocation_and_original_assignment rewrite.test_project_report`。此入口使用 POSIX 私有 Unix 套接字。[Codex MCP 配置](https://developers.openai.com/codex/mcp) · [App Server 协议](https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md)
+
 同一套件另在原生工具请求尚未回执时停止试验进程，清空适配器数据库中的宿主凭据，再由另一个 App Server 进程以 `thread/resume` 打开同一测试线程。原输入 ID、客户端投递标识和回合均可从宿主历史查回。重投没有产生第二次输入或模型请求，Router 仍持原派发，成果与待验通知为空。连续 20 次通过。[恢复试验记录](evidence/codex-app-server-native-reconnect.json)。
 
 App Server 原生中止会核对指定线程、活跃回合和唯一原生输入。错误回合在原生 API 被拒绝，正确回合回读为 `interrupted`，随后查询取得原凭据。Router 取消请求仍待清理，Worker 仍持原派发。连续 15 次通过。[中止试验记录](evidence/codex-app-server-native-interrupt.json)。这段验证由隔离驱动请求原生中止，未验证 Router 取消自动触发宿主停止或资源清理。
