@@ -558,6 +558,10 @@ python3 -B -m rewrite.cutover_audit --snapshot "$SNAPSHOT" --manifest-sha256 "$M
 
 输出包含安装包摘要、快照摘要、Router 停派号和两份完整的对账报告。退出码 0 表示这批离线记录已对账，仍须单独完成实机验收与生产授权。退出码 1 保留未通过的报告，2 表示输入或安装包无法校验。命令只读快照和安装目录。若有未撤回的派发预约、缺组件、停派号不符或 Trigger 回执缺失，先按原记录修复并重新封存。
 
+原生审批在 Router 或适配器任何一侧仍待关闭时，离线核验返回 `native_approvals_need_review`。已确认的 Codex 关闭回执须匹配 Router 的原审批号、原生会话、回合、条目、原请求摘要和关闭回执摘要。Router 已关闭的 `worker_report` 提审也应在适配器账本找到原记录。错摘要或缺记录时看 `handoff.workers[].approval_receipts`，按审批号回查原绑定。可从封存副本恢复服务继续补证，再停写并重新封存。已核审批的正文和决定不进入这份对账明细。
+
+离线核验通过后，从同一封存和摘要恢复到独立的新状态目录。启动核验过的候选包时，核对原停派号和 `dispatch_draining=true`，从 Router 核对 Worker 在线且 `admission_paused=true`。试用期间检查原 W04、附件和待派顺序。允许派单后，停 Router 并在这份恢复库执行[原号解封](#切换前持久停派)。候选包与快照演练覆盖宿主空闲满 10 秒仍保持停派、运行时拒绝解封、错停派号拒绝，以及按原号解封后只派原队首。此前已验收的原快照与原 W04 保持可读。[实测记录](evidence/cutover-restored-dispatch.json)
+
 复跑需已启动的隔离 Colima 虚拟机、已登记的 ARM64 测试镜像及可供来宾读取的安装目录。仅生成临时测试进程、身份、数据库和端口。
 
 ```sh

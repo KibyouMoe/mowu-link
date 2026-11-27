@@ -6,6 +6,10 @@
 
 ## 检查点与证据
 
+离线切换核验修正了原生审批待关闭时仍返回通过的问题。Router 有待关闭审批、适配器有待确认关闭，均阻止放行。已关闭的 Codex 审批逐号核对双方摘要，错摘要与缺少 `worker_report` 原记录的快照均拦下。上一轮真实 App Server 的三份提审回执也按相同摘要算法逐份核对。[操作步骤](router-rehearsal.md#同批离线切换核验) · [实测记录](evidence/cutover-restored-dispatch.json)
+
+候选包 `88151083a9d313da72030b6541f09858762e6448` 从核验过的七库快照恢复。macOS、Linux arm64 和 Windows Server 2025 均启动了包内 Router、Worker 与测试适配器，读回同一停派号。工位空闲满 10 秒仍停派。运行中解封和错号解封都被拒。停机按原号解封后，原队首取得一个派发号，宿主夹具收到一条输入，后一单保持待派，原 W04 未变。前一包从独立副本读回同一份成果。macOS 相关 62 项通过，Linux 安装 209 项通过，Windows 安装 51 项通过。三个平台均核过 414 文件安装包。宿主及外部平台使用夹具。[Windows 流水线](https://github.com/KibyouMoe/mowu-link/actions/runs/46000545001)
+
 独立 Codex App Server 的完工提审已接入 Worker 和 Router 的专用审批入口。适配器按原生回合查原派发，用请求摘要限定单次决定。Router 只向指定审批身份发审批号。第一次拒绝后工具调用为零，批准第二次请求后只记一份 W04、一条待验通知。关闭回执丢失后按原号补记。另一次批准已在 Router 登记但尚未送达时收到取消，适配器读回原派发已进入清理，发出原生拒绝，原持单保留且无新增成果。普通私聊、错回合、错请求摘要和其他工位身份均被拒。[复跑](README.md#独立宿主命令审批) · [原生回执](evidence/native-mcp-routed-approval.json)
 
 安装包锁定 `85d66d1b905139de120a134f16bebfd1fa2fdb4a`。macOS 通过 59 项，其中 10 轮为原生 MCP 提审转发，1 项 Windows ACL 测试按平台跳过。Linux arm64 回归通过 208 项，145 项按环境跳过，58 项旧兼容历史用例排除。Windows 安装回归 51 项，DSH 原生组通过 15 项，2 项 Windows Linux 引擎实测按环境跳过。三端运行后均核对 412 个文件。新增原生 MCP 提审用例在 macOS 使用真实 App Server、回环 HTTP 与 stdio MCP，模型和审批操作人为隔离驱动。真人和真实 Desktop、飞书审批待验。[Windows 流水线](https://github.com/KibyouMoe/mowu-link/actions/runs/45998794996)

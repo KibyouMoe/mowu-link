@@ -1,0 +1,217 @@
+{
+  "candidate_revision": "88151083a9d313da72030b6541f09858762e6448",
+  "previous_revision": "35ba22f66e3017a1756b8645f3b88d091b3ff6f8",
+  "windows": {
+    "workflow_run_id": 46000545001,
+    "windows_job_id": 140510770426,
+    "windows_install_regression_passed": 51,
+    "dsh_job_id": 140510770914,
+    "dsh_passed": 15,
+    "dsh_environment_skips": 2,
+    "audit": {
+      "drain_id": "b19b09fb-04fb-42ce-9138-202ee13fa795",
+      "manifest_sha256": "a91e609ea191c5b78f193c7468cdaf87614d60a12112ff4c977967e65df5bc09",
+      "pending_native_approval_rejected": [
+        "native_approvals_need_review"
+      ],
+      "reconciled": true,
+      "rejected": {
+        "missing_platform": [
+          {
+            "components": [
+              "feishu:trial"
+            ],
+            "issue": "snapshot_components_missing"
+          }
+        ],
+        "open": [
+          "router_drain_does_not_match"
+        ],
+        "reserved_assignment": [
+          "router_has_reserved_assignments"
+        ],
+        "source_without_receipt": [
+          "trigger_receipts_need_review"
+        ],
+        "wrong_drain": [
+          "router_drain_does_not_match"
+        ],
+        "wrong_release_digest": "release checksum mismatch"
+      },
+      "release": {
+        "files": 414,
+        "revision": "88151083a9d313da72030b6541f09858762e6448",
+        "sha256": "eb895d67dd96502c668a95c08fc7c96612f21fc69dbd1f0ef2827f1bbc4f928b"
+      },
+      "restore_and_release": {
+        "first_assignment_id": "d3044367-7f57-4e06-af1d-f59b5075ab9d",
+        "hold_read_back": true,
+        "idle_seconds_while_drained": 10.099,
+        "native_inputs_added_after_release": 1,
+        "original_task_ids": [
+          "df01814b-13cc-4c21-99fb-45ceefa4daf8",
+          "757cb1df-1f9e-4cdf-85d6-06c533c2ed2f"
+        ],
+        "original_w04_unchanged": true,
+        "release": {
+          "operation_id": "b19b09fb-04fb-42ce-9138-202ee13fa795",
+          "released_at": "2026-11-27T12:42:20.602992+00:00",
+          "requeued": [],
+          "started_at": "2026-11-27T12:42:06.542748+00:00",
+          "state": "released"
+        },
+        "running_release_refused": true,
+        "second_task_state": "ready",
+        "wrong_drain_rejected": true
+      },
+      "snapshot_id": "57da3898-3667-47fd-900d-245726e12a3f"
+    },
+    "stale_snapshot_rollback_refused": true,
+    "previous_release_reports": 1
+  },
+  "before_fix": {
+    "revision": "d21210a09e6842d915cf3dd394a08db7fd57780e",
+    "offline_reconciled": true,
+    "issues": [],
+    "pending_codex_approvals": 1
+  },
+  "macos": {
+    "audit": {
+      "drain_id": "21516f2e-fdb0-48e0-ba5c-dcd41477a2f2",
+      "manifest_sha256": "c02d8c8f65a89e8fbd6db7111445e85ab97c789993e7e26e26cf78dbea4100a3",
+      "pending_native_approval_rejected": [
+        "native_approvals_need_review"
+      ],
+      "reconciled": true,
+      "rejected": {
+        "missing_platform": [
+          {
+            "components": [
+              "feishu:trial"
+            ],
+            "issue": "snapshot_components_missing"
+          }
+        ],
+        "open": [
+          "router_drain_does_not_match"
+        ],
+        "reserved_assignment": [
+          "router_has_reserved_assignments"
+        ],
+        "source_without_receipt": [
+          "trigger_receipts_need_review"
+        ],
+        "wrong_drain": [
+          "router_drain_does_not_match"
+        ],
+        "wrong_release_digest": "release checksum mismatch"
+      },
+      "release": {
+        "files": 414,
+        "revision": "88151083a9d313da72030b6541f09858762e6448",
+        "sha256": "efd47c9e82bd79c571d2aa12fcdd5b9bb748417bcbeb70c2675d7996c97b8d7a"
+      },
+      "restore_and_release": {
+        "first_assignment_id": "dc55ab23-8ad7-4d5c-8a48-66657c50ce65",
+        "hold_read_back": true,
+        "idle_seconds_while_drained": 10.037,
+        "native_inputs_added_after_release": 1,
+        "original_task_ids": [
+          "133c4ca9-1f3d-460f-8b85-13196aff0c1b",
+          "d44d0716-a0e3-4988-86ff-0fe96f63692d"
+        ],
+        "original_w04_unchanged": true,
+        "release": {
+          "operation_id": "21516f2e-fdb0-48e0-ba5c-dcd41477a2f2",
+          "released_at": "2026-11-27T12:38:50.629055+00:00",
+          "requeued": [],
+          "started_at": "2026-11-27T12:38:38.587577+00:00",
+          "state": "released"
+        },
+        "running_release_refused": true,
+        "second_task_state": "ready",
+        "wrong_drain_rejected": true
+      },
+      "snapshot_id": "d75a1b9d-6f39-4c7b-8929-25e1943fc727"
+    },
+    "stale_snapshot_rollback_refused": true,
+    "previous_release_reports": 1,
+    "targeted_regression_passed": 62
+  },
+  "linux_arm64": {
+    "audit": {
+      "reconciled": true,
+      "manifest_sha256": "40eafb2937312ea64fc1dcb709bdd3dc0095747c724585c5eae896244cc5e9f2",
+      "snapshot_id": "2c52bf8e-dcea-4504-80b4-ab0cc3dfcd2a",
+      "release": {
+        "files": 414,
+        "revision": "88151083a9d313da72030b6541f09858762e6448",
+        "sha256": "efd47c9e82bd79c571d2aa12fcdd5b9bb748417bcbeb70c2675d7996c97b8d7a"
+      },
+      "drain_id": "75ab94ca-18c6-460b-90d6-78ca9fe181ba",
+      "rejected": {
+        "open": [
+          "router_drain_does_not_match"
+        ],
+        "wrong_drain": [
+          "router_drain_does_not_match"
+        ],
+        "missing_platform": [
+          {
+            "components": [
+              "feishu:trial"
+            ],
+            "issue": "snapshot_components_missing"
+          }
+        ],
+        "reserved_assignment": [
+          "router_has_reserved_assignments"
+        ],
+        "source_without_receipt": [
+          "trigger_receipts_need_review"
+        ],
+        "wrong_release_digest": "release checksum mismatch"
+      },
+      "pending_native_approval_rejected": [
+        "native_approvals_need_review"
+      ],
+      "restore_and_release": {
+        "original_task_ids": [
+          "947f35cd-cef0-492b-9c50-05f156b072a6",
+          "19e10304-fb51-4a22-ac18-719af2a2cbd4"
+        ],
+        "hold_read_back": true,
+        "running_release_refused": true,
+        "idle_seconds_while_drained": 10.083,
+        "wrong_drain_rejected": true,
+        "release": {
+          "operation_id": "75ab94ca-18c6-460b-90d6-78ca9fe181ba",
+          "released_at": "2026-11-27T12:40:12.149316+00:00",
+          "requeued": [],
+          "started_at": "2026-11-27T12:39:58.685339+00:00",
+          "state": "released"
+        },
+        "first_assignment_id": "d9c5aa0e-2265-43e0-803a-fad9d16cbe17",
+        "native_inputs_added_after_release": 1,
+        "second_task_state": "ready",
+        "original_w04_unchanged": true
+      }
+    },
+    "stale_snapshot_rollback_refused": true,
+    "previous_release_reports": 1,
+    "installed_regression": {
+      "passed": 209,
+      "environment_skips": 145,
+      "historical_excluded": 58,
+      "architecture": "aarch64"
+    }
+  },
+  "additional_checks": {
+    "pending_router_approval_rejected": true,
+    "wrong_codex_closure_digest_rejected": true,
+    "missing_codex_report_intent_rejected": true,
+    "prior_native_mcp_closure_digests_matched": 3
+  },
+  "reproduce": "python3 -B -m rewrite.release_check --repository . --component state-bundle --previous 35ba22f66e3017a1756b8645f3b88d091b3ff6f8 --new 88151083a9d313da72030b6541f09858762e6448",
+  "boundary": "Pinned releases started real Router and Worker executables over isolated HTTPS and restored SQLite. Native host, Feishu, source inputs and operator are fixtures. No production deployment or actual source identities."
+}
