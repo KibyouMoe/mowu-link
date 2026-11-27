@@ -1,8 +1,10 @@
 import unittest
+from unittest.mock import patch
 
 from .devloop import Loop
 from .storage import Fault, guid
 from .test_mainline import Clock
+from .worker import Worker
 
 
 class Questions(unittest.TestCase):
@@ -82,6 +84,66 @@ class Questions(unittest.TestCase):
         with self.assertRaises(ConnectionError):
             self.w.ask(self.native, "call", "same question", [])
         self.loop.wire.request = original
-        receipt = self.w.ask(self.native, "call", "same question", [])
+        self.w = Worker(self.w.db.path,self.w.worker_id,self.w.router,self.w.adapter,clock=self.clock)
+        self.w.connect()
+        with self.w.db.transaction() as db:
+            receipt, = db.execute("SELECT receipt FROM questions").fetchone()
+        self.assertIsNotNone(receipt)
+        with patch.object(self.loop.wire,"request",side_effect=AssertionError("W05 already recovered")):
+            receipt = self.w.ask(self.native, "call", "same question", [])
         self.assertEqual([q["question_id"] for q in self.m.questions()["items"]], [receipt["question_id"]])
         self.assertEqual(len(self.loop.manager_wire.frames(0)), 1)
+
+    def test_question_outbox_recovers_before_commit_and_delivers_the_original_answer_once(self):
+        request = self.loop.wire.request
+        sent = []
+        def lost(method,path,*args,**kwargs):
+            if method=="POST" and path.endswith("/questions"):
+                sent.append((method,path,args,kwargs))
+                raise ConnectionError("question request never arrived")
+            return request(method,path,*args,**kwargs)
+
+        with patch.object(self.loop.wire,"request",side_effect=lost), self.assertRaises(ConnectionError):
+            self.w.ask(self.native,"original call","Original text",self.options)
+        self.assertEqual(self.m.questions()["items"],[])
+        self.w = Worker(self.w.db.path,self.w.worker_id,self.w.router,self.w.adapter,clock=self.clock)
+        with patch.object(self.loop.wire,"request",wraps=request) as replay:
+            self.w.poll()
+        attempt, = [call for call in replay.call_args_list if call.args[0]=="POST" and call.args[1].endswith("/questions")]
+        method,path,args,kwargs = sent[0]
+        self.assertEqual((attempt.args,attempt.kwargs),((method,path,*args),kwargs))
+        q, = self.m.questions()["items"]
+        self.assertEqual(q["question_id"],args[0]["question_id"])
+        self.assertEqual(q["assignment_id"],self.w.hold()["held_assignment_id"])
+        choice = {"mode":"choice","option_id":"y"}
+        reply_key = guid()
+        original = self.m.answer(reply_key,self.tid,q["question_id"],choice)
+        self.assertEqual(self.m.answer(reply_key,self.tid,q["question_id"],choice),original)
+        self.w.poll()
+        self.w.poll()
+        (payload,reply), = self.loop.native.entries()[1:]
+        self.assertEqual((payload["assignment_id"],payload["question_id"],payload["answer"]),
+                         (q["assignment_id"],q["question_id"],choice))
+        self.assertIsNone(self.m.inspect(self.tid)["last_report"])
+        with self.w.db.transaction() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM display_events WHERE event_id LIKE '%manager-%'").fetchone()[0],2)
+        self.assertEqual(self.w.report(reply["native_id"],self.tid,q["assignment_id"],"After the answer")["task_state"],
+                         "completed_reported")
+
+    def test_uncommitted_question_from_a_transferred_assignment_stays_rejected(self):
+        with patch.object(self.loop.wire,"request",side_effect=ConnectionError("before W05")),self.assertRaises(ConnectionError):
+            self.w.ask(self.native,"original call","Original text",[])
+        task = self.m.inspect(self.tid)["task"]
+        self.m.act(guid(),self.tid,task["revision"],"transfer",worker_id="other",reason="move")
+        self.w.poll()
+        self.w.poll()
+        with self.assertRaisesRegex(Fault,"stale_assignment"):
+            self.w.ask(self.native,"original call","Original text",[])
+        self.assertEqual(self.m.questions()["items"],[])
+        self.assertEqual(self.m.inspect(self.tid)["task"]["assignee_id"],"other")
+        with self.w.db.transaction() as db:
+            question_id,receipt = db.execute("SELECT question_id,receipt FROM questions").fetchone()
+            self.assertIsNone(receipt)
+            self.assertEqual(tuple(db.execute("SELECT status,code FROM question_rejections WHERE question_id=?",
+                                              (question_id,)).fetchone()),(409,"stale_assignment"))
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM display_events WHERE event_id LIKE '%manager-%'").fetchone()[0],0)

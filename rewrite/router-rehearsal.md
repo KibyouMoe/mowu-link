@@ -620,6 +620,8 @@ python3 -B -m rewrite.release_check --repository . --component assignment-rollou
 
 `audit-handoff` 的 `report_receipts` 会对账完成或受阻的 W04。核对 Worker 待发箱、Router 原幂等请求及回执、对应的成果或受阻条目、附件关联、分块字节和读取授权。工单后来已验收或离开无法完成池时，仍查原派发的留档。已确认 W04 只缺 Worker 回执时计为 `awaiting_worker_commit`，从原绑定副本按原请求号查回。Router 与 Worker 任一侧缺记录或两侧不符时保留待核。无正文和文件名写入对账输出。继续请求与取消清理分别沿用原有审核。
 
+若 W05 在 Worker 已落盘但尚未有 Router 回执，快照的 `manager_question_submissions` 会显示待补数量。启动原绑定后，Worker 用原问题号、原派发及原幂等请求自动查回或完成提交。Router 已收的问题只补原回执；尚未收且原派发已失效时，保留拒绝记录，不发新卡。换回前一发行包时，已核实的提问和回执仍可读。需先在具备自动恢复能力的版本收齐待补回执，再换回早于该能力的版本。
+
 ```sh
 python3 -B -m rewrite.release_check --repository . --component state-bundle \
   --previous 35ba22f66e3017a1756b8645f3b88d091b3ff6f8 \

@@ -11,7 +11,7 @@ import sqlite3
 from tempfile import TemporaryDirectory
 
 from . import admission, delivery, dsh_workspace_audit, feishu_audit, hermes_audit, trigger_audit
-from . import report_audit
+from . import question_outbox, report_audit
 from . import state_bundle_managed as managed
 from .cutover import digest, output_directory, readonly
 from .messages import valid_guid
@@ -37,7 +37,6 @@ WORKER_NATIVE_PENDING = {
     "trainer_questions": ({"trainer_questions"},"SELECT COUNT(*) FROM trainer_questions WHERE proof IS NULL"),
     "compactions": ({"platform_compactions"},"SELECT COUNT(*) FROM platform_compactions WHERE native_receipt IS NULL"),
     "cleanup_reports": ({"cleanup_reports"},"SELECT COUNT(*) FROM cleanup_reports WHERE receipt IS NULL"),
-    "manager_questions": ({"questions"},"SELECT COUNT(*) FROM questions WHERE answer IS NULL"),
     "native_command_writes": ({"platform_model_intents","platform_commands"},"""SELECT COUNT(*)
         FROM platform_model_intents i LEFT JOIN platform_commands c USING(message_id) WHERE c.message_id IS NULL"""),
     "outbound_peers": ({"peers","peer_retry"},"""SELECT COUNT(*) FROM peers p LEFT JOIN peer_retry r
@@ -566,6 +565,11 @@ def audit_handoff(snapshot,expected,*,dsh_runtimes=None,roster=None):
             sid = db.execute("SELECT session FROM connection WHERE slot=1").fetchone()
             pending = db.execute("SELECT COUNT(*) FROM outbox WHERE receipt IS NULL").fetchone()[0]
             session_pending = pending_counts(db,WORKER_NATIVE_PENDING)
+            filter_rejected = question_outbox.unsettled_clause(db)
+            session_pending["manager_questions"] = db.execute(
+                "SELECT COUNT(*) FROM questions WHERE answer IS NULL"+filter_rejected).fetchone()[0]
+            session_pending["manager_question_submissions"] = db.execute(
+                "SELECT COUNT(*) FROM questions WHERE receipt IS NULL"+filter_rejected).fetchone()[0]
             session_pending.update({k:v for k,v in pending_counts(db,WORKER_ADMISSION_PENDING).items() if v is not None})
             transport,problems = worker_delivery_audit(db,router_path,wid,worker_confirmed[wid])
             reports = report_audit.reconcile(db,router_path,wid)

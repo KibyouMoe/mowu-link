@@ -7,7 +7,9 @@ from typing import Protocol
 from urllib.parse import urlencode
 
 from . import display, links, peer_files, peer_retry, queued_chat, user_questions, worker_catalog, worker_cleanup, worker_commands, worker_handoff, worker_media, worker_resume
+from . import question_outbox
 from .messages import valid_guid
+from .questions import validate_options
 from .storage import Database, Fault, encode, guid, require, string
 
 FOLLOWUP_FRAMES = {"task.updated","task.probe","task.shelved","task.cancel","task.transfer_out","question.resolved"}
@@ -207,6 +209,7 @@ class Worker:
                     self.save_control(db, control["kind"], control)
                 db.execute("DELETE FROM registration WHERE key=?", (attempt["key"],))
             self.flush_reports()
+            self.flush_questions()
             return reply
 
     def poll(self):
@@ -252,6 +255,7 @@ class Worker:
             self.flush_reports()
             self.flush_peer_receipts()
             self.flush_peer_sends()
+            self.flush_questions()
 
     def process(self, frame):
         with self.lock:
@@ -626,6 +630,8 @@ class Worker:
 
     def ask(self, native_id, call_id, text, options):
         with self.lock:
+            string({"text":text},"text")
+            validate_options(options)
             session = self.adapter.bound_session()
             origin = self.adapter.origin(native_id,session=session)
             require(origin["kind"] in ("task", "task_update", "task_probe", "question_answer"), 403, "wrong_report_origin")
@@ -645,16 +651,39 @@ class Worker:
                     require(encode(body) == lookup["body"], 409, "question_conflict")
                     if lookup["receipt"]:
                         return json.loads(lookup["receipt"])
+                    rejected = question_outbox.rejection(db,qid)
+                    if rejected:
+                        raise Fault(*rejected)
                 else:
                     db.execute("INSERT INTO questions VALUES (?,?,?,?,?,?,NULL,NULL)", (native_id, call_id, qid, tid, aid, encode(body)))
                     db.execute("INSERT INTO question_sessions VALUES (?,?)", (qid, session))
-            reply = self.router.request("POST", f"tasks/{tid}/questions", body, "ask-" + qid)
-            require(reply.get("task_id") == tid and reply.get("question_id") == qid and reply.get("received_at"),
-                    409, "question_receipt_mismatch")
-            with self.db.transaction() as db:
-                db.execute("UPDATE questions SET receipt=? WHERE question_id=?", (encode(reply), qid))
-                user_questions.mirror_manager(db, qid)
-            return reply
+            return self.submit_question(tid,qid,body)
+
+    def submit_question(self,task_id,question_id,body):
+        try:
+            reply = self.router.request("POST",f"tasks/{task_id}/questions",body,"ask-"+question_id)
+        except Fault as error:
+            if not error.retryable and error.code in question_outbox.REJECTIONS:
+                with self.db.transaction() as db:
+                    question_outbox.record(db,question_id,error.status,error.code)
+            raise
+        require(isinstance(reply,dict) and reply.get("task_id")==task_id and reply.get("question_id")==question_id
+                and reply.get("received_at"),409,"question_receipt_mismatch")
+        with self.db.transaction() as db:
+            db.execute("UPDATE questions SET receipt=? WHERE question_id=?",(encode(reply),question_id))
+            user_questions.mirror_manager(db,question_id)
+        return reply
+
+    def flush_questions(self):
+        with self.db.transaction() as db:
+            pending = db.execute("SELECT task_id,question_id,body FROM questions WHERE receipt IS NULL"
+                                 +question_outbox.unsettled_clause(db)+" ORDER BY rowid").fetchall()
+        for task_id,question_id,body in pending:
+            try:
+                self.submit_question(task_id,question_id,json.loads(body))
+            except Fault as error:
+                if error.retryable or error.code not in question_outbox.REJECTIONS:
+                    raise
 
     def report(self, native_id, task_id, assignment_id, summary, outcome="completed", artifact_ids=None):
         with self.lock:

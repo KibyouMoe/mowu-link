@@ -3781,18 +3781,37 @@ exec {docker} "$@"
         self.enterContext(tool_listener(Path(directory),loop.adapter,Client(url,credential)))
         platform = Client(url,platform_key)
         with self.start_native(directory,session,"work-question") as native:
+            request = loop.wire.request
+            lost = []
+
+            def miss_w05_reply(method,path,*args,**kwargs):
+                result = request(method,path,*args,**kwargs)
+                if method=="POST" and path.endswith("/questions") and not lost:
+                    lost.append(result)
+                    raise Fault(502,"w05_fixture_reply_lost",True)
+                return result
+
             tid = loop.hermes.create(guid(),"Formal native Q&A","Ask before continuing","oguri")["task_id"]
             loop.worker.connect()
             loop.worker.poll()
             clock.advance(10)
             loop.worker.poll()
             loop.worker.poll()
-            asked = self.read_native(native,"read")
+            with patch.object(loop.wire,"request",side_effect=miss_w05_reply):
+                asked = self.read_native(native,"read")
             self.assertEqual([call["name"] for call in asked["calls"]],["worker_ask"],asked["results"])
-            self.assertFalse(asked["results"][0]["isError"])
+            self.assertTrue(asked["results"][0]["isError"])
             question, = loop.hermes.questions(task_id=tid)["items"]
             qid,aid = question["question_id"],question["assignment_id"]
-            self.assertEqual(json.loads(asked["results"][0]["content"][0]["text"])["question_id"],qid)
+            receipt, = lost
+            self.assertEqual(receipt["question_id"],qid)
+            with loop.worker.db.transaction() as db:
+                self.assertIsNone(db.execute("SELECT receipt FROM questions WHERE question_id=?",(qid,)).fetchone()[0])
+            loop.worker.poll()
+            with loop.worker.db.transaction() as db:
+                self.assertEqual(json.loads(db.execute("SELECT receipt FROM questions WHERE question_id=?",
+                                                      (qid,)).fetchone()[0]),receipt)
+            self.assertEqual(self.read_native(native,"read")["inputs"],asked["inputs"])
             self.assertEqual(loop.worker.hold(),{"held_task_id":tid,"held_assignment_id":aid})
             self.assertEqual(loop.hermes.inspect(tid)["task"]["state"],"working")
             self.assertIsNone(loop.hermes.inspect(tid)["last_report"])
@@ -3829,7 +3848,7 @@ exec {docker} "$@"
             self.assertEqual(detail["task"]["state"],"completed_reported")
             self.assertEqual(len(finished["inputs"]),3)
             self.assertEqual([call["name"] for call in finished["calls"]],["worker_ask","worker_report","worker_report"])
-            self.assertFalse(any(item["isError"] for item in finished["results"]))
+            self.assertEqual([item["isError"] for item in finished["results"]],[True,False,False])
             self.assertIsNone(loop.worker.hold()["held_assignment_id"])
             with loop.adapter.db.transaction() as db:
                 input_receipt = json.loads(db.execute("SELECT receipt FROM intents WHERE delivery_id=?",(did,)).fetchone()[0])
@@ -3842,7 +3861,8 @@ exec {docker} "$@"
             self.assertEqual([item["text"] for item in notices],["Use the first route?","Finished after the confirmed answer"])
             self.evidence = {"session":session,"task_id":tid,"assignment_id":aid,"question_id":qid,
                 "question_call":asked["calls"][0],"answer":choice,"answer_receipt":input_receipt,
-                "continue_receipt":continuation,"reports":[json.loads(item["content"][0]["text"]) for item in finished["results"]],
+                "w05_receipt_recovered":receipt,"continue_receipt":continuation,
+                "reports":[json.loads(item["content"][0]["text"]) for item in finished["results"][1:]],
                 "native_inputs":finished["inputs"],"manager_notice_count":len(notices),"router_after":detail["task"]["state"],
                 "boundary":"Real DSH tool executor and Router/Worker HTTP; scripted local model and manager input"}
 
