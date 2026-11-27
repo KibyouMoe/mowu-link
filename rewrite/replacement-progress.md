@@ -40,6 +40,10 @@
 
 游戏源续接已核对上一条原始 SSE 帧。隔离旧版复现显示，先观测到旧游标 15 回退，桥后来超过旧位置时仍接下了新会话数据，最终推进到 19。改版保留首次回退的连续性中断，也用上一帧摘要区分序号和正文相同、原始时间戳不同的两次登录。实测停在序号 15，原待交 ID 不变，重开仍阻断。缓冲缺前帧时保留待核并拒绝交回游标，原帧补回后恢复。真实隔离 HTTP 与 SQLite，桥和宿主为夹具。旧版游标首次接入仍需原桥连续运行的独立凭据。[复跑](router-rehearsal.md#旧采集来源交接) · [证据](evidence/game-source-overlap.json)
 
+游戏源实现 `ecd9b4aa828f12977c0c9e0074e19569cb6d40e9` 在 macOS 全量通过 341 项、按环境跳过 5 项。安装目录专项 31 项全过。Linux arm64 通过 219 项、按环境跳过 127 项，核验 340 个安装文件，包 SHA-256 为 `f70e1231c5be3e801a556457118de761b1b708ba923a86e250325a38f15edeaf`。用前版 `96ca294d456f305f2916731cd87e9ef10bf576ea` 和新包在同一隔离库往返，三条原始记录各保存一次。同源期间换回旧包库摘要不变。改版判定异代后，前版也不能再接入。本次 Windows CI 提交为 `7929102674f7a867b496971674b78ac533a729bd`，安装组的 18 项实跑明确包含三个游戏续接用例，日志回读确认游标 15 未动。DSH 原生组通过。[Windows 实测](https://github.com/KibyouMoe/mowu-link/actions/runs/45929939484/job/140279984031)
+
+另已复现旧来源游标可能越过从未入档的记录。旧邮件 UID 11 和旧游戏序号 15 实际上报收到 HTTP 503，旧游标却各自推进。原邮件和原游戏帧仍可读时，照常导入两个旧游标并轮询均新增零条。仍需对照原来源与旧 Trigger 的持久收件完成核查，已入档的记录继续按原号对证。[缺口复现](evidence/legacy-source-cursor-after-503.json)
+
 重新取消的 W04 已按具体指令核验。相同 A06 操作键重送保留原回执，自动重试沿用同一清理号。同一派发的下一条显式取消携带新的 `cleanup_id`。Worker 从原生收件识别该号，分别保存等待、清理及 Router 回执。隔离实测第一次迟报、重用旧键、换新键重播旧正文和错号都返回 409。新 W04 落库后故意丢回包，冷启沿原键查回，取消通知一条。复跑 `python3 -B -m unittest -v rewrite.test_cleanup rewrite.test_cutover -k cancel`。[HTTP 与回退实测](evidence/reissued-cancel-w04.json)
 
 用前版 `2490059e42d379183c19b0e82c208f545a3c78ee` 生成的隔离 Router、Worker 和适配器库做了升级。仅一次待确认的旧取消可以正常完成，已经成功的旧回执可沿原键回读。旧版已重复取消而未记录清理号时，拒绝无号回执，须由管理端发新指令。回退核对新指令及 W04 的同一清理号，缺号拒绝发布。[旧库升级](evidence/reissued-cancel-upgrade.json) · [回退演练](evidence/cutover-reviewed-cancel-retry.json)

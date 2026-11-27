@@ -1,0 +1,22 @@
+{
+  "revision": "ecd9b4aa828f12977c0c9e0074e19569cb6d40e9",
+  "sink_http_status": 503,
+  "fixture_trigger_stored": 0,
+  "mail": {
+    "old_cursor_before": 10,
+    "old_cursor_after": 11,
+    "reported_failures": 1,
+    "uncommitted_event_id": "email:31:11",
+    "raw_source_record_still_available": true,
+    "rewrite_pending_after_import_and_poll": 0
+  },
+  "game": {
+    "old_cursor_before": 14,
+    "old_cursor_after": 15,
+    "successful_posts": 0,
+    "uncommitted_event_id": "mc_chat:sse:15",
+    "raw_source_record_still_available": true,
+    "rewrite_pending_after_import_and_poll": 0
+  },
+  "scope": "Old collectors and rewrite collectors ran with isolated HTTP and disposable files. IMAP and SSE source data are fixtures. Old retry delays were shortened to exercise final failure without waiting."
+}
