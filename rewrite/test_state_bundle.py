@@ -63,11 +63,13 @@ class Bundle(unittest.TestCase):
         self.revision = "a"*40
 
     @contextmanager
-    def stack(self,paths,*,pin_session=False,extra_workers=()):
+    def stack(self,paths,*,pin_session=False,extra_workers=(),approval_operator=False):
         source = Trigger(paths["trigger:mail"],"mail",self.clock)
         router = Orders(paths["router:main"],self.clock,1)
         ids = {"mgr":"hermes","w":"worker/oguri","mail":"trigger/"+source.instance_id,
                **{wid:"worker/"+wid for wid in extra_workers}}
+        if approval_operator:
+            ids["operator"] = "approver/oguri"
         with running(serve_loopback(router,ids)) as url:
             manager = HermesAdapter(paths["hermes:main"],Client(url,"mgr"),
                       HostAdapter(paths["hermes-host:main"],self.hermes_host,self.hermes_host.session),self.clock)
@@ -1526,6 +1528,45 @@ class Bundle(unittest.TestCase):
         self.assertFalse(self.dest.exists())
         db = self.snapshot/filename("agent:oguri")
         self.assertNotIn(b"/private-sandbox",db.read_bytes())
+
+    def test_audit_matches_codex_approval_closure_to_original_router_row(self):
+        session = self.native.session
+        relay = CodexApprovals(None,session,adapter_db=self.sources["agent:oguri"])
+        request = {"kind":"worker_report","server":"test-mcp","session":session,"turn_id":guid(),"item_id":"mcp:0",
+                   "task_id":guid(),"assignment_id":guid(),"arguments_digest":"1"*64,"decisions":["accept","cancel"]}
+        relay.remember(0,request)
+        original = relay.live[0]
+        digest = original.digest
+        route = "approvals/oguri/"+original.id
+        with self.stack(self.sources,pin_session=True,approval_operator=True) as (_manager,worker,*_):
+            worker.connect()
+            reply = worker.router.request("POST",route,{"session_id":worker.session,"request":request})
+            self.assertEqual(reply["state"],"assignment_inactive")
+            closed = worker.router.request("PUT",route+"/closed",{"session_id":worker.session,"request_digest":digest,
+                "attempted_response":{"source":"assignment_inactive","decision":"cancel"}})
+        receipt = hashlib.sha256(encode(closed).encode()).hexdigest()
+        relay.save_receipt(original.id,digest,receipt)
+
+        def audit(name):
+            path = self.root/name
+            seal = capture(self.sources,self.revision,path)["manifest_sha256"]
+            return audit_handoff(path,seal)
+
+        clean = audit("confirmed-approval")
+        self.assertFalse(clean["needs_review"],clean)
+        self.assertEqual(clean["workers"][0]["approval_receipts"],{"confirmed":1,"issues":[]})
+        with relay.ledger.transaction() as db:
+            db.execute("UPDATE codex_approval_intents SET router_receipt_digest=?",("0"*64,))
+        mismatch = audit("incorrect-approval-digest")
+        self.assertTrue(mismatch["needs_review"])
+        self.assertEqual(mismatch["workers"][0]["approval_receipts"],{"confirmed":0,"issues":[
+            {"approval_id":original.id,"code":"codex_approval_closure_mismatch"}]})
+        with relay.ledger.transaction() as db:
+            db.execute("DELETE FROM codex_approval_intents WHERE approval_id=?",(original.id,))
+        missing = audit("missing-approval-intent")
+        self.assertTrue(missing["needs_review"])
+        self.assertEqual(missing["workers"][0]["approval_receipts"],{"confirmed":0,"issues":[
+            {"approval_id":original.id,"code":"codex_report_approval_intent_missing"}]})
 
     def test_handoff_refuses_to_copy_an_unconfirmed_native_thread_preparation(self):
         with self.stack(self.sources) as (_manager,worker,_source,_mail,_platform,_views):

@@ -10,7 +10,7 @@ import shutil
 import sqlite3
 from tempfile import TemporaryDirectory
 
-from . import admission, delivery, dsh_workspace_audit, feishu_audit, hermes_audit, trigger_audit
+from . import admission, approval_audit, delivery, dsh_workspace_audit, feishu_audit, hermes_audit, trigger_audit
 from . import feishu_receipt_review, manager_notices, question_outbox, report_audit
 from . import state_bundle_managed as managed
 from .cutover import digest, output_directory, readonly
@@ -609,6 +609,8 @@ def audit_handoff(snapshot,expected,*,dsh_runtimes=None,roster=None):
             problems.append("adapter_receipt_unconfirmed")
         agent_paths = [root,*child_ledgers.values()]
         session_pending.update(agent_pending(agent_paths))
+        approval_receipts = approval_audit.reconcile(router_path,wid,agent_paths)
+        problems.extend(sorted({item["code"] for item in approval_receipts["issues"]}))
         workspace,workspace_issue = workspaces.get(wid,(None,None))
         if workspace_issue:
             problems.append(workspace_issue)
@@ -630,7 +632,7 @@ def audit_handoff(snapshot,expected,*,dsh_runtimes=None,roster=None):
         session_pending["router_admission_handoffs"] = handoffs.get(wid,0)
         workers.append({"worker_id":wid,"worker_assignment":local_ids,"router_assignment":remote_ids,
                         "unconfirmed_reports":pending,"issues":problems,"native_session_pending":session_pending,
-                        "inbox_transport":transport,"report_receipts":reports,
+                        "inbox_transport":transport,"report_receipts":reports,"approval_receipts":approval_receipts,
                         "native_session_ledger_clear":not problems and all(count==0 for count in session_pending.values()),
                         **({"feishu_receipts":platform_proof} if platform_proof is not None else {}),
                         **({"dsh_workspace_audit":workspace} if workspace is not None else {})})

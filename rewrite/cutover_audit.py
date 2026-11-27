@@ -10,6 +10,9 @@ from .messages import valid_guid
 from .storage import encode
 
 
+APPROVAL_COUNTERS = ("router_approvals","codex_approval_closures","dsh_approval_closures")
+
+
 def inspect(snapshot,manifest_sha256,roster,archive,archive_sha256,installed,drain_id,*,dsh_runtimes=None):
     if not valid_guid(drain_id):
         raise ValueError("expected the recorded Router drain UUID")
@@ -26,6 +29,8 @@ def inspect(snapshot,manifest_sha256,roster,archive,archive_sha256,installed,dra
         issues.append("router_drain_does_not_match")
     if any(row["native_session_pending"]["router_reserved_assignments"] for row in handoff["workers"]):
         issues.append("router_has_reserved_assignments")
+    if any(row["native_session_pending"].get(key) for row in handoff["workers"] for key in APPROVAL_COUNTERS):
+        issues.append("native_approvals_need_review")
     return {"snapshot_id":handoff["snapshot_id"],"manifest_sha256":manifest_sha256,
             "expected_drain_id":drain_id,"release":{k:package[k] for k in ("revision","sha256","files")},
             "offline_reconciled":not issues,"issues":issues,"handoff":handoff,"trigger":trigger}

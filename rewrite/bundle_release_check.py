@@ -6,17 +6,21 @@ import json
 from pathlib import Path
 import sqlite3
 import ssl
+import shutil
 import subprocess
 import sys
+import time
 
 from rewrite import display, state_bundle
 from rewrite.adapter import HostAdapter
+from rewrite.codex_approvals import CodexApprovals
 from rewrite.devloop import FixtureHost, agent_report
 from rewrite.feishu_inbound import Inbound
 from rewrite.feishu_output import Views
 from rewrite.hermes import HermesAdapter
 from rewrite.manager_notices import ManagerNotices
 from rewrite.orders import Orders
+from rewrite.release_check import config, serve
 from rewrite.storage import encode, guid, state_writer
 from rewrite.test_feishu_output import PlatformFixture
 from rewrite.test_mainline import Clock
@@ -252,7 +256,7 @@ def run_stage(phase, directory, fixtures, cert, key, input_json):
     print(encode(result))
 
 
-def rehearse_cutover_audit(root,candidate,latest,saved,env):
+def rehearse_cutover_audit(root,candidate,latest,saved,env,fixtures,cert,key,written):
     archive,revision,checksum,installed = candidate
     roster = root/"independent-roster.json"
     roster.write_text(encode({"source_revision":revision,"components":list(COMPONENTS)}),encoding="utf-8")
@@ -281,6 +285,12 @@ def rehearse_cutover_audit(root,candidate,latest,saved,env):
                              cwd=installed,env=env,capture_output=True,encoding="utf-8",timeout=15,check=True)
     drain = json.loads(command.stdout)
     check((drain["operation_id"],drain["state"])==(operation,"draining"),"candidate did not stop dispatch")
+    verify_release = (installed/"rewrite"/"approval_audit.py").is_file()
+    if verify_release:
+        router = Orders(stopped["router:main"],Clock())
+        with router.db.transaction() as db:
+            queued_tasks = [router.create(db,{"title":"Cutover fixture "+name,"instructions":"Resume after the drain",
+                                             "assignee_id":"trial"}) for name in ("first","second")]
     matched = root/"drained-checked"
     matched_sha = state_bundle.capture(stopped,revision,matched)["manifest_sha256"]
     good = inspect(matched,matched_sha,[],exit_code=0)
@@ -308,12 +318,119 @@ def rehearse_cutover_audit(root,candidate,latest,saved,env):
     queued = root/"outstanding-source"
     queued_sha = state_bundle.capture(stopped,revision,queued)["manifest_sha256"]
     waiting = inspect(queued,queued_sha,["trigger_receipts_need_review"])
+    extra_evidence = {}
+    if verify_release:
+        pending_paths = state_bundle.restore(matched,matched_sha,root/"pending-approval-state")
+        relay = CodexApprovals(None,"release-trial-agent",adapter_db=pending_paths["agent:trial"])
+        relay.remember(0,{"session":"release-trial-agent","turn_id":"approval-fixture-turn","item_id":"fixture-approval",
+                          "command":"pwd","cwd":str(root),"environment_id":None,"decisions":["accept","cancel"]})
+        pending = root/"pending-approval"
+        pending_sha = state_bundle.capture(pending_paths,revision,pending)["manifest_sha256"]
+        pending_report = inspect(pending,pending_sha,["native_approvals_need_review"])
+        check(pending_report["handoff"]["workers"][0]["native_session_pending"]["codex_approval_closures"]==1,
+              "pending native closure was not visible")
+        extra_evidence = {"pending_native_approval_rejected":pending_report["issues"],
+                          "restore_and_release":rehearse_restored_dispatch(root,installed,matched,matched_sha,operation,
+                              queued_tasks,fixtures,cert,key,env,written)}
     state_bundle.verify(matched,matched_sha)
     return {"reconciled":good["offline_reconciled"],"manifest_sha256":matched_sha,"snapshot_id":good["snapshot_id"],
             "release":good["release"],"drain_id":operation,"rejected":{"open":open_report["issues"],
             "wrong_drain":wrong_drain["issues"],"missing_platform":incomplete["handoff"]["issues"],
             "reserved_assignment":still_reserved["issues"],"source_without_receipt":waiting["issues"],
-            "wrong_release_digest":"release checksum mismatch"}}
+            "wrong_release_digest":"release checksum mismatch"},**extra_evidence}
+
+
+def rehearse_restored_dispatch(root,installed,snapshot,sha,operation,queue,fixtures,cert,key,env,written):
+    restored = state_bundle.restore(snapshot,sha,root/"restart-from-audit")
+    folder = root/"cutover-run"
+    folder.mkdir()
+    native_db = folder/"native.db"
+    shutil.copyfile(fixtures/"agent.db",native_db)
+    native = FixtureHost(native_db,"release-trial-agent")
+    original_inputs = native.entries()
+    original_tasks = [item["task_id"] for item in queue]
+    manager_token,worker_token,host_token,ops_token = (guid() for _ in range(4))
+    router_roles = config(folder,"router.json",{manager_token:"hermes",worker_token:"worker/trial"})
+    adapter_roles = config(folder,"adapter.json",{host_token:"worker/trial"})
+    worker_roles = config(folder,"worker.json",{ops_token:"ops/trial"})
+
+    def drain(action,drain_id):
+        return subprocess.run([sys.executable,"-B","-S","-m","rewrite.service","router-drain",
+            "--db",restored["router:main"],"--operation-id",drain_id,action],
+            cwd=installed,env=env,capture_output=True,encoding="utf-8",timeout=12)
+
+    def connect(name,url,token):
+        return config(folder,name,{"url":url,"token":token,"ca_file":str(cert)})
+
+    def details(client,task_id):
+        return client.request("GET","tasks/"+task_id)
+
+    adapter_flags = ("--worker-id","trial","--session",native.session,"--fixture-db",native_db)
+    with serve(installed,"fixture-adapter",restored["agent:trial"],adapter_roles,cert,key,env,adapter_flags) as adapter:
+        host = connect("host.json",adapter,host_token)
+        for blocked in (True,False):
+            expected = {"dispatch_draining":blocked}
+            if blocked:
+                expected["dispatch_drain_id"] = operation
+            with serve(installed,"router",restored["router:main"],router_roles,cert,key,env,expected_ready=expected) as url:
+                manager = Client(url,manager_token,cert)
+                router = connect(("drained" if blocked else "ready")+".json",url,worker_token)
+                flags = ("--worker-id","trial","--adapter-session",native.session,
+                         "--router-connection",router,"--adapter-connection",host)
+                with serve(installed,"worker",restored["worker:trial"],worker_roles,cert,key,env,flags) as worker:
+                    ops = Client(worker,ops_token,cert)
+                    deadline = time.monotonic()+32
+                    idle_since = None
+                    while time.monotonic()<deadline:
+                        status = ops.request("GET","worker/status")
+                        connected = status["router_connected"] and status["adapter_connected"]
+                        if blocked and connected:
+                            station, = manager.request("GET","workers?worker_id=trial")["items"]
+                            if station["online"] and not station["busy"] and station.get("admission_paused"):
+                                now = time.monotonic()
+                                if idle_since is None:
+                                    idle_since = now
+                                elif now-idle_since>=10:
+                                    idle_seconds = now-idle_since
+                                    break
+                            else:
+                                idle_since = None
+                        elif not blocked and connected and status["held_task_id"]==original_tasks[0] and (
+                                len(native.entries())>len(original_inputs)):
+                            break
+                        elif blocked:
+                            idle_since = None
+                        time.sleep(.15)
+                    else:
+                        raise RuntimeError("restored Worker did not reach the expected state: "+encode(status))
+                    check(details(manager,written["task_id"])==written["task_readback"],
+                          "restored candidate changed the original W04")
+                    if blocked:
+                        check(status["held_task_id"] is None and native.entries()==original_inputs
+                              and [details(manager,task)["task"] for task in original_tasks]==queue,
+                              "stopped candidate admitted an assignment")
+                        locked = drain("end",operation)
+                        check(locked.returncode==1 and json.loads(locked.stderr)["error"]=="state_writer_already_running",
+                              "running Router permitted releasing its offline hold")
+                    else:
+                        first,second = (details(manager,task)["task"] for task in original_tasks)
+                        inputs = native.entries()
+                        check(first["state"]=="working" and second==queue[1] and inputs[:-1]==original_inputs
+                              and len(inputs)==len(original_inputs)+1 and inputs[-1][0]["task_id"]==original_tasks[0]
+                              and inputs[-1][0]["assignment_id"]==status["held_assignment_id"]==first["assignment_id"],
+                              "reopened candidate did not deliver just the original head of the queue")
+            if blocked:
+                wrong = drain("end",guid())
+                check(wrong.returncode==1 and json.loads(wrong.stderr)["error"]=="dispatch_drain_not_found",
+                      "another drain number released the restored Router")
+                right = drain("end",operation)
+                release_receipt = json.loads(right.stdout)
+                check(right.returncode==0 and (release_receipt["operation_id"],release_receipt["state"])==
+                      (operation,"released"),"correct drain operation did not release the restored Router")
+    return {"original_task_ids":original_tasks,"hold_read_back":True,"running_release_refused":True,
+            "idle_seconds_while_drained":round(idle_seconds,3),"wrong_drain_rejected":True,
+            "release":release_receipt,"first_assignment_id":first["assignment_id"],
+            "native_inputs_added_after_release":1,"second_task_state":second["state"],"original_w04_unchanged":True}
 
 
 def rehearse_bundle(root,old,candidate,older,cert,key,env):
@@ -366,7 +483,7 @@ def rehearse_bundle(root,old,candidate,older,cert,key,env):
     platform_audit = worker["feishu_receipts"]
     check(platform_audit["confirmed_inputs"]==1 and platform_audit["confirmed_outputs"]>=1,
           "the stopped trial is missing its platform receipts")
-    checkpoint = (rehearse_cutover_audit(root,candidate,latest,saved,env)
+    checkpoint = (rehearse_cutover_audit(root,candidate,latest,saved,env,fixtures,cert,key,written)
                   if (new/"rewrite"/"cutover_audit.py").is_file() else None)
     state_bundle.restore(latest,saved["manifest_sha256"],returned)
     observed = run(old,"return",returned,written)
