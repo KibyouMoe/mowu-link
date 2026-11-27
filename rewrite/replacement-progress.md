@@ -6,6 +6,8 @@
 
 ## 检查点与证据
 
+空状态演练在 `ee6bcc74e152ea3fbaae518e52635b9c57f2ce0c` 改用安装的 DSH SDK `0.2.2-rc.5`。真实 Hermes 网关先读 Trigger 附件并建单；独立 DSH AgentLoop 在原生回合 `1/1` 经双向 TLS 调用两次 `worker_report`，回执相同。Router 只产生一条通知并保留待验收，Hermes 通过原生查询和验收工具读取已提交的正文并结单。飞书夹具从 DSH 实际展示账本取得一条对应私聊回合的最终回复。测试逐页读取展示账本，分别核得一条正式输入与一条私聊输入。macOS 从纯新版安装目录跑 19 项全过并逐文件复核 371 份文件，Windows 安装组与 DSH SDK 分别通过 21、14 项。两端模型为本地脚本，双宿主闭环实测在 macOS。[回执证据](evidence/hermes-dsh-clean-cutover.json) · [复跑](README.md#hermes-专用会话) · [Windows 日志](https://github.com/KibyouMoe/mowu-link/actions/runs/45954240956)
+
 全量更换的空状态演练在 `94dadca1b1e67fb4b0f88c432039f52d889c8d9a` 的独立发行包运行。包内只有重做版目录，前后核对 370 份文件。新 Trigger 只上报一件带附件的 Event，同号重试返回原 T04。实际 Hermes 网关 `464bd0dd659f336bd0bf468bf02cad8aac211136` 下载并读回原附件，通过原生工具建单和分派给测试 Worker。Worker 从指定回合发 W04，原号重试留一条管理通知。网关再通过两个原生管理工具读原成果、验收，Router 仅有这一张已结单。普通私聊尝试交件被拒，仍收到独立回卡。安装目录实跑 46 项相关回归全过，含 Hermes 既有冷重开回执补回。Hermes 使用带匹配依赖的 Python 3.14，本地脚本驱动模型，Worker 宿主和飞书提供端为夹具。[实测回执](evidence/hermes-clean-cutover.json) · [安装后复跑](README.md#hermes-专用会话)
 
 新版分步更新用两套锁定安装包复现顺序装反时，新 Worker 曾先向上一版 Router 登记。修复后，Worker 在 W01 前核对 Router 的派发状态能力。装反时 Router 工位登记和宿主输入均为零。Router 先更新时，上一版 Worker 领取原待派单，换新版 Worker 后保留原派发及原生回合，两次交件读回同一 W04，仅一条宿主输入、一条管理通知。macOS 相关回归 72 项通过、跳过 1 项。Windows 安装组 21 项和 DSH SDK 组 14 项通过，Windows 安装包另通过两种更新顺序的实测。Linux arm64 通过 187 项、按环境跳过 128 项，跨系统 HTTPS 回环留一条宿主输入及一条 W04 通知。两版重做发行包的隔离回退保留试用写入。模型和飞书仍使用夹具。[复跑命令](router-rehearsal.md#新版-router-与-worker-分步更新) · [实测回执](evidence/rewrite-assignment-rollout.json)

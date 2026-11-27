@@ -1,0 +1,95 @@
+{
+  "hermes_revision": "464bd0dd659f336bd0bf468bf02cad8aac211136",
+  "gateway_pid": 87716,
+  "manager_session": "local-adbbb9d80d9193a0960c6075ccf776ff88b96d73f25d7842317bebf6b463baf0",
+  "source_instance": "dbc6e9f5-604f-47da-8305-f9d7718f5c9f",
+  "t04": {
+    "duplicate": false,
+    "message_id": "88a1cc0b-0617-4800-8db2-94f0bde4fb4e",
+    "received_at": "2027-01-15T08:00:00+00:00"
+  },
+  "task_id": "05141a98-87cf-4dc7-bcce-e7a13bdf6fa5",
+  "assignment_id": "e10d8467-e6a9-4c6f-b0ea-fab3ca615c9f",
+  "source_attachment_sha256": "85b7b630dff3781536512f591706953753ea344dea24985346504ea42465ea20",
+  "native_worker_receipt": {
+    "delivery_id": "a05f1ac8-0e17-4198-8ff5-ebabbaa8a63f",
+    "digest": "de4e31ada77557e2907433d388aa4e98c3309e01074a535079cf2ff544ce31fe",
+    "native_id": "mowulink-622dbc1f07283a7df758205637fb4a92773eb2a7cb2f685c1385cb7785864539",
+    "session": "clean-worker-session",
+    "turn_id": "1/1"
+  },
+  "w04": {
+    "recorded": true,
+    "release_assignment_id": "e10d8467-e6a9-4c6f-b0ea-fab3ca615c9f",
+    "task_state": "completed_reported"
+  },
+  "manager_notify_id": "fa098d18-29df-4d1a-913d-f9ddefd96ff1",
+  "manager_tools": [
+    {
+      "tool_name": "router_info",
+      "tool_call_id": "call_read_trigger_original"
+    },
+    {
+      "tool_name": "router_create_task",
+      "tool_call_id": "call_create_manager_task"
+    },
+    {
+      "tool_name": "router_tasks",
+      "tool_call_id": "read_reported_task"
+    },
+    {
+      "tool_name": "router_act_on_task",
+      "tool_call_id": "accept_reported_task"
+    }
+  ],
+  "final_state": "closed",
+  "platform_reply_id": "om_6",
+  "private_input_id": "mowulink-35a721c372173027a1ee72ee4da18ff7a7f5418fc6f47b7251a3e3aaf88968e2",
+  "formal_worker_inputs": 1,
+  "private_worker_inputs": 1,
+  "boundary": "Real local Hermes and native DSH AgentLoop with scripted models; real Router/Worker TLS and DSH mutual TLS; Feishu provider is a fixture.",
+  "dsh_version": "0.2.2-rc.5",
+  "worker_host": "Installed DSH AgentLoop and native tool executor",
+  "dsh_tool_calls": [
+    {
+      "call_id": "native-w04-fixture-0",
+      "name": "worker_report"
+    },
+    {
+      "call_id": "native-w04-fixture-1",
+      "name": "worker_report"
+    }
+  ],
+  "dsh_w04_receipts": [
+    {
+      "recorded": true,
+      "release_assignment_id": "e10d8467-e6a9-4c6f-b0ea-fab3ca615c9f",
+      "task_state": "completed_reported"
+    },
+    {
+      "recorded": true,
+      "release_assignment_id": "e10d8467-e6a9-4c6f-b0ea-fab3ca615c9f",
+      "task_state": "completed_reported"
+    }
+  ],
+  "dsh_private_reply": "isolated fixture response",
+  "release": {
+    "revision": "ee6bcc74e152ea3fbaae518e52635b9c57f2ce0c",
+    "sha256": "008daab4b1337b1a1359438cb7e770bbba9eae30e88d81626b47dd034d86f02c",
+    "files": 371
+  },
+  "isolated_install_top_level": [
+    "rewrite"
+  ],
+  "router_clock": "controlled fixture clock",
+  "macos_installed_tests": {
+    "fresh_dual_host": 1,
+    "regression": 18,
+    "failed": 0
+  },
+  "windows_regression": {
+    "run": "https://github.com/KibyouMoe/mowu-link/actions/runs/45954240956",
+    "installation_passed": 21,
+    "dsh_sdk_passed": 14
+  }
+}

@@ -22,6 +22,8 @@
 
 新版独立安装包已从空账本跑通 Trigger 附件上报、真实 Hermes 原生建单、Worker W04 和同一 Hermes 原生验收。结果从待验收推进到已结单，私聊与正式单分别保留一条宿主输入。Worker 宿主、模型和飞书提供端使用夹具。[空状态演练](evidence/hermes-clean-cutover.json)
 
+同一流程已用独立 DSH 原生会话复验。DSH 的两次 `worker_report` 通过本机双向 TLS 返回相同 W04，同一 Hermes 会话读成果并验收。飞书夹具收到与 DSH 原生私聊回合对应的一条最终回复。两端模型仍由本地脚本驱动。[双宿主实测](evidence/hermes-dsh-clean-cutover.json)
+
 ## Worker 篇 A01–A11
 
 | 用例 | 已有隔离证据 | 仍须在实际两端看到 |
