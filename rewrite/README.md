@@ -122,6 +122,16 @@ MOWULINK_CODEX_CROSS_GUEST_IMAGE=<已有-linux-arm64-镜像完整ID> \
 
 在独立 DSH 测试配置加载 `integrations/dsh_host/index.mjs`，指定测试会话的 `session` 和仅当前用户可读写的绝对目录 `directory`。单独启动 `python3 -m rewrite.service dsh-adapter --help` 所示的适配器，将 `--session`、`--runtime-dir` 分别指向同一会话和目录。收图需宿主提供 `attachments` 服务；`--worker-connection` 指向适配器访问专用 Worker 的连接配置。固定会话插件中仅登记 Agent 业务工具，本体负责发送飞书卡片。
 
+DSH 与 Linux Worker 的分机部署可用一台有 Colima 的 Mac 做跨虚拟机演练。将固定提交的发行包安装到 Linux 虚拟机可挂载的私有目录，从安装目录运行以下测试。测试会启动原生 DSH SDK 的独立会话，使用本机双向 TLS 接适配器，再通过独立 HTTPS 和角色凭据连接 Linux Worker。
+
+```sh
+MOWULINK_DSH_CROSS_GUEST_IMAGE="$PINNED_LINUX_ARM64_IMAGE" \
+MOWULINK_DSH_CROSS_GUEST_SOCKET="$LOCAL_DOCKER_SOCKET" \
+  python3 -B -m unittest -v rewrite.test_cross_guest.DshCrossGuest
+```
+
+镜像需已在指定的本地 Docker 引擎中，使用完整 `sha256:` ID。默认通过 `host.lima.internal` 与宿主通信，并在用户家目录建临时 Worker 库。有独立配置时用 `MOWULINK_CROSS_GUEST_HOST` 与 `MOWULINK_CROSS_GUEST_SHARED` 指定宿主别名和临时共享目录。可用 `MOWULINK_DSH_CROSS_GUEST_EVIDENCE` 保存原派发、原生回合、Worker 重启前后和验收通知的凭据。模型和管理会话由隔离测试驱动。
+
 图文在同一次输入进入 DSH，宿主保留规范化图片和普通文件引用。适配器从 DSH 已持久写入的公开会话事件生成原生输入、过程输出、工具、图片与最终答复。工具预览仅包含可判明的命令动词。首次绑定以插件接入时的位置为起点；续跑通过原会话、位置和上一条记录摘要核对。在中断的回合中，已有回复草稿按过程输出显示。复跑 `python3 -m unittest -v rewrite.test_dsh_sdk`，该套件使用本机 DSH SDK、临时工位及测试驱动，模型和飞书云端另验。
 
 绑定 DSH 会话后，飞书 `/model`、`/effort` 显示会话当前选择、最近已记入原生日志的请求配置和宿主公开目录，十项一页。用 `next`、`prev` 或 `page 2` 等查看后续页。目录缺失会在卡片提示。同号重试沿用已生成的原卡。

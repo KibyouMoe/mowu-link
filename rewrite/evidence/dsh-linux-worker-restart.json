@@ -1,0 +1,113 @@
+{
+  "revision": "ae73b35f19eb65dae9af79274fbfff0f7b09860b",
+  "release_sha256": "ab044c1eca5e65a5e1bf3220a5723f1e5fd042a988705ed77f3d04b1aea93cef",
+  "release_files": 388,
+  "local_cross_guest_tests_passed": 2,
+  "macos_dsh_bundle": "0.2.2-rc.5",
+  "linux_docker": "29.5.2",
+  "linux_regression": {
+    "revision": "ae73b35f19eb65dae9af79274fbfff0f7b09860b",
+    "files": 388,
+    "passed": 192,
+    "skipped": 136,
+    "excluded": 58,
+    "failed": 0,
+    "errors": 0
+  },
+  "worker_containers_removed": true,
+  "assignment_id": "95e59c99-e953-483b-b7db-4a446e650892",
+  "boundary": "Native macOS DSH SDK, real Linux VM Worker, TLS in both directions. Local model and manager are test fixtures.",
+  "evidence_utc": "2026-11-27T08:37:13Z",
+  "first_callback": "worker_connection_unconfirmed",
+  "guest_image": "sha256:0a1254df0519003d33fd4ab8ad26aff1154e50b3c93aa5ec978e83bf83ba084c",
+  "initial": {
+    "adapter_connected": true,
+    "expected_host_session": "dsh-isolated-linux-worker-dae0adfa-4047-4b37-bcc0-c492919a39e2",
+    "held_assignment_id": null,
+    "held_task_id": null,
+    "host_busy": false,
+    "host_error": null,
+    "host_observation_age_seconds": 0.041364000004250556,
+    "host_session": "dsh-isolated-linux-worker-dae0adfa-4047-4b37-bcc0-c492919a39e2",
+    "last_error": null,
+    "native_capabilities": {
+      "compaction": false,
+      "context_usage": true,
+      "goal_control": true,
+      "model_change": true,
+      "model_view": true,
+      "next_turn": true,
+      "session_catalog": false,
+      "stop_private": true
+    },
+    "router_connected": true,
+    "router_observed": true,
+    "router_retry_in_seconds": null,
+    "worker_id": "oguri"
+  },
+  "native_inputs": [
+    "mowulink-ef12b07b7ebd25c5c9f168578352f41a0289a23f535795a173aff15606d91e5a"
+  ],
+  "native_receipt": {
+    "delivery_id": "a8cb8002-e849-49ab-a19d-29061992e79d",
+    "digest": "e293d677caa4c1d4db18460086fae518e9130cec30f671434ed66a58fb08a100",
+    "native_id": "mowulink-ef12b07b7ebd25c5c9f168578352f41a0289a23f535795a173aff15606d91e5a",
+    "session": "dsh-isolated-linux-worker-dae0adfa-4047-4b37-bcc0-c492919a39e2",
+    "turn_id": "1/1"
+  },
+  "notify_id": "25a084aa-2493-4b47-993d-3df2a908b5ae",
+  "other_notices": [
+    {
+      "message_id": "841875df-3cbb-46d7-923d-4282d45168a1",
+      "task_id": null,
+      "text": "Worker 本体在线，与宿主适配器的连接已中断。"
+    }
+  ],
+  "reopened": {
+    "adapter_connected": true,
+    "expected_host_session": "dsh-isolated-linux-worker-dae0adfa-4047-4b37-bcc0-c492919a39e2",
+    "held_assignment_id": "95e59c99-e953-483b-b7db-4a446e650892",
+    "held_task_id": "13aecbb6-f2b1-41a7-9c5f-d96fbd76a2e3",
+    "host_busy": true,
+    "host_error": null,
+    "host_observation_age_seconds": 1.746516334998887,
+    "host_session": "dsh-isolated-linux-worker-dae0adfa-4047-4b37-bcc0-c492919a39e2",
+    "last_error": null,
+    "native_capabilities": {
+      "compaction": false,
+      "context_usage": true,
+      "goal_control": true,
+      "model_change": true,
+      "model_view": true,
+      "next_turn": true,
+      "session_catalog": false,
+      "stop_private": true
+    },
+    "router_connected": true,
+    "router_observed": true,
+    "router_retry_in_seconds": null,
+    "worker_id": "oguri"
+  },
+  "report_calls": [
+    [
+      "dsh-isolated-linux-worker-dae0adfa-4047-4b37-bcc0-c492919a39e2",
+      "1/1",
+      "native-w04-fixture-0"
+    ],
+    [
+      "dsh-isolated-linux-worker-dae0adfa-4047-4b37-bcc0-c492919a39e2",
+      "1/1",
+      "native-w04-fixture-1"
+    ]
+  ],
+  "task_id": "13aecbb6-f2b1-41a7-9c5f-d96fbd76a2e3",
+  "w04": {
+    "recorded": true,
+    "release_assignment_id": "95e59c99-e953-483b-b7db-4a446e650892",
+    "task_state": "completed_reported"
+  },
+  "worker_containers": [
+    "b5c08a7b8b25b02cb72de5e6d70609075567d2b857032d72cf3b25efef947198",
+    "13ab71c053cdfd1586e913fbc9337fc33a30157e0f4869b4e7f31840a244a178"
+  ]
+}
