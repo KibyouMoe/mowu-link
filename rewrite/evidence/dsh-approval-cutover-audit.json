@@ -1,0 +1,219 @@
+{
+  "candidate": "c4a1af5cc8496cfa44048f3b38c04b713800dd4f",
+  "windows_installation": {
+    "run_id": 46002099581,
+    "job_id": 140516070069,
+    "passed": 51,
+    "revision": "c4a1af5cc8496cfa44048f3b38c04b713800dd4f",
+    "sha256": "865604346af84f067357005e34c2f6db27ca47d5cb1c379ee2928544532e8a3f",
+    "files": 415,
+    "restored_queue": {
+      "first_assignment_id": "bc8d0b94-f5e8-4c95-a19a-852c9b994dad",
+      "hold_read_back": true,
+      "idle_seconds_while_drained": 10.151,
+      "native_inputs_added_after_release": 1,
+      "original_task_ids": [
+        "cc19eddd-4880-4c34-8c68-1420d2c46653",
+        "0c459f45-becd-48f3-bb89-06f24ae74800"
+      ],
+      "original_w04_unchanged": true,
+      "release": {
+        "operation_id": "4a0d2f78-0105-4c6a-a87d-e84fbf87dee9",
+        "released_at": "2026-11-27T12:53:41.025038+00:00",
+        "requeued": [],
+        "started_at": "2026-11-27T12:53:26.158067+00:00",
+        "state": "released"
+      },
+      "running_release_refused": true,
+      "second_task_state": "ready",
+      "wrong_drain_rejected": true
+    },
+    "previous_release_reports": 1
+  },
+  "windows_dsh": {
+    "run_id": 46002099581,
+    "job_id": 140516070340,
+    "native_tests_passed": 15,
+    "native_environment_skips": 2,
+    "sample": {
+      "boundary": "Installed DSH AgentLoop, ApprovalService and Bash provider; test model and operator identity",
+      "closure_audit": {
+        "confirmed": 4,
+        "earlier_receipts_without_router_native_proof": 0,
+        "router_native_proofs_matched": 4
+      },
+      "closure_retry_same_receipt": true,
+      "cold_reopen_recovered_original_closure": true,
+      "link": "IPv4 loopback with mutual TLS",
+      "native_records": [
+        {
+          "asked_seq": 27,
+          "decided_seq": 28,
+          "native_id": "2a2365dd-d9d4-440f-9a35-e853f6511268",
+          "outcome": "rejected",
+          "turn": "21/2"
+        },
+        {
+          "asked_seq": 42,
+          "decided_seq": 43,
+          "native_id": "02ebf64a-2975-4205-a85d-f45e4fcd77c4",
+          "outcome": "allowed-once",
+          "turn": "36/3"
+        },
+        {
+          "asked_seq": 57,
+          "decided_seq": 58,
+          "native_id": "9493cc1a-dcbc-438a-a984-6b6a8574246c",
+          "outcome": "rejected",
+          "turn": "51/4"
+        },
+        {
+          "asked_seq": 72,
+          "decided_seq": 73,
+          "native_id": "8ca1b159-d9b7-48f5-bf63-b7c126080e7b",
+          "outcome": "rejected",
+          "turn": "66/5"
+        }
+      ],
+      "router_notifications": [
+        "f328d4f4-a9ea-4265-a9f1-349b8aacee35",
+        "fb47b303-1576-4b24-b8de-c19520c70a9c",
+        "46af924f-8275-4c47-9be0-6811b9caabf2",
+        "94063d94-f5c2-400f-8000-c29efea6dfd6"
+      ],
+      "session": "isolated-dsh-bash-approvals",
+      "successful_bash_calls": 1,
+      "unverifiable_directory_used_native_answerer": true
+    }
+  },
+  "before_fix": {
+    "revision": "096cde9bcb4301835115d444c28d298197060905",
+    "needs_review": false,
+    "router_original_missing": true
+  },
+  "macos": {
+    "installed": {
+      "files": 415,
+      "revision": "c4a1af5cc8496cfa44048f3b38c04b713800dd4f",
+      "sha256": "0af9ac924ea70fcc2510a21a65fa95ea4bab47f4e02b38119f3dfa0cc1d60433"
+    },
+    "targeted_passed": 55,
+    "environment_skips": 1,
+    "dsh_version": "0.2.2-rc.5",
+    "native_mutual_tls": {
+      "boundary": "Installed DSH AgentLoop, ApprovalService and Bash provider; test model and operator identity",
+      "closure_audit": {
+        "confirmed": 4,
+        "earlier_receipts_without_router_native_proof": 0,
+        "router_native_proofs_matched": 4
+      },
+      "closure_retry_same_receipt": true,
+      "cold_reopen_recovered_original_closure": true,
+      "link": "IPv4 loopback with mutual TLS",
+      "native_records": [
+        {
+          "asked_seq": 27,
+          "decided_seq": 28,
+          "native_id": "c9d84ff5-5cff-41fe-b580-f50cc8987b13",
+          "outcome": "rejected",
+          "turn": "21/2"
+        },
+        {
+          "asked_seq": 42,
+          "decided_seq": 43,
+          "native_id": "375b0076-8fb9-4772-9c92-d6c093b8715a",
+          "outcome": "allowed-once",
+          "turn": "36/3"
+        },
+        {
+          "asked_seq": 57,
+          "decided_seq": 58,
+          "native_id": "58624451-40d7-4b41-9e34-f3e7d38933c1",
+          "outcome": "rejected",
+          "turn": "51/4"
+        },
+        {
+          "asked_seq": 72,
+          "decided_seq": 73,
+          "native_id": "66582d53-f045-497d-a00a-90b4b114e05d",
+          "outcome": "rejected",
+          "turn": "66/5"
+        }
+      ],
+      "router_notifications": [
+        "d9e39540-38f7-4d7d-a381-9ac036310f18",
+        "182925ef-8f52-4647-a89b-ec80e364a648",
+        "3545cf76-0ee3-42da-8206-8f904ac023e8",
+        "b725b0c1-34b1-47e4-9f8d-9aeb6c20e32d"
+      ],
+      "session": "isolated-dsh-bash-approvals",
+      "successful_bash_calls": 1,
+      "unverifiable_directory_used_native_answerer": true
+    },
+    "unacknowledged_recovery": {
+      "missing": {
+        "proof": {
+          "approval_id": "9dfe6786-a952-4e57-bc12-d53ab205097d",
+          "turn_id": "1/1",
+          "asked_seq": 12,
+          "decided_seq": 13,
+          "outcome": "cancelled"
+        },
+        "router_decision": null,
+        "forwarded_decision": null,
+        "same_closure_after_lost_reply": true,
+        "original_router_notices": 0
+      },
+      "committed": {
+        "proof": {
+          "approval_id": "d82b0faa-8ed7-4367-b8e7-29b0e5dc3d41",
+          "turn_id": "19/2",
+          "asked_seq": 26,
+          "decided_seq": 27,
+          "outcome": "cancelled"
+        },
+        "router_decision": "accept",
+        "forwarded_decision": null,
+        "same_closure_after_lost_reply": true,
+        "original_router_notices": 1
+      }
+    },
+    "late_approval_notices": 0,
+    "restored_dispatch": {
+      "first_assignment_id": "c5dec534-06a1-49b9-8b32-9a0aa8d3c510",
+      "hold_read_back": true,
+      "idle_seconds_while_drained": 10.039,
+      "native_inputs_added_after_release": 1,
+      "original_task_ids": [
+        "ebd02b7c-1340-4a92-9cd7-c33a7c1cdb7a",
+        "74217723-6df7-406e-abd6-93c9d70bf4a9"
+      ],
+      "original_w04_unchanged": true,
+      "release": {
+        "operation_id": "6e65a5ff-5766-47db-8e10-c3ba0ff6c611",
+        "released_at": "2026-11-27T12:50:06.887228+00:00",
+        "requeued": [],
+        "started_at": "2026-11-27T12:49:54.760896+00:00",
+        "state": "released"
+      },
+      "running_release_refused": true,
+      "second_task_state": "ready",
+      "wrong_drain_rejected": true
+    },
+    "previous_release_report_count": 1
+  },
+  "linux_arm64": {
+    "installed_files_verified": 415,
+    "passed": 211,
+    "environment_skips": 145,
+    "historical_exclusions": 58
+  },
+  "negative_checks": {
+    "router_original_missing": "dsh_approval_router_closure_missing",
+    "wrong_native_sequence": "dsh_approval_closure_mismatch",
+    "adapter_original_missing": "dsh_approval_intent_missing",
+    "previous_rewrite_closure_preserved": true,
+    "previous_rewrite_installation_receipt_replayed_unchanged": "096cde9bcb4301835115d444c28d298197060905"
+  },
+  "boundary": "Real DSH AgentLoop, native approval events and one authorized pwd in a private temporary directory, with isolated Router and local TLS. Model/operator are fixtures. Independent release recovery uses a host fixture. No production roles or services involved."
+}

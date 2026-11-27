@@ -560,6 +560,8 @@ python3 -B -m rewrite.cutover_audit --snapshot "$SNAPSHOT" --manifest-sha256 "$M
 
 原生审批在 Router 或适配器任何一侧仍待关闭时，离线核验返回 `native_approvals_need_review`。已确认的 Codex 关闭回执须匹配 Router 的原审批号、原生会话、回合、条目、原请求摘要和关闭回执摘要。Router 已关闭的 `worker_report` 提审也应在适配器账本找到原记录。错摘要或缺记录时看 `handoff.workers[].approval_receipts`，按审批号回查原绑定。可从封存副本恢复服务继续补证，再停写并重新封存。已核审批的正文和决定不进入这份对账明细。
 
+DSH 同样按原审批号逐项核对。新版 Router 和 DSH 适配器都保存原生请求与结局的序号。从 `approval_receipts.dsh` 可看见双方原生证据匹配数，以及此前新版留下、Router 回执里没有原生序号的记录数。后者按原有 Router 关闭凭据和适配器证据核对。缺任一侧原记录或原生结局对不上时，返回待核，按原绑定恢复确认。[DSH 审批回执实测](evidence/dsh-approval-cutover-audit.json)
+
 离线核验通过后，从同一封存和摘要恢复到独立的新状态目录。启动核验过的候选包时，核对原停派号和 `dispatch_draining=true`，从 Router 核对 Worker 在线且 `admission_paused=true`。试用期间检查原 W04、附件和待派顺序。允许派单后，停 Router 并在这份恢复库执行[原号解封](#切换前持久停派)。候选包与快照演练覆盖宿主空闲满 10 秒仍保持停派、运行时拒绝解封、错停派号拒绝，以及按原号解封后只派原队首。此前已验收的原快照与原 W04 保持可读。[实测记录](evidence/cutover-restored-dispatch.json)
 
 复跑需已启动的隔离 Colima 虚拟机、已登记的 ARM64 测试镜像及可供来宾读取的安装目录。仅生成临时测试进程、身份、数据库和端口。

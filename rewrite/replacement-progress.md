@@ -6,6 +6,10 @@
 
 ## 检查点与证据
 
+DSH 常规审批结束后也将原生结局、原生请求和结束事件的序号交给 Router。隔离环境用真实 DSH 原生进程核对了拒绝、单次允许、超时和冷重开四种关闭，双方各有四份匹配凭据，测试 Bash 只执行一次。登记回执丢失时，原生已取消的请求按原号恢复，保留 Router 曾记下的允许且原生仍为取消。离线审计拦下缺 Router 回执、修改原生序号和缺适配器记录三种反例。旧的新版关闭回执保持原样，只有适配器保有原生序号的历史条目单列。[操作步骤](router-rehearsal.md#同批离线切换核验) · [实测记录](evidence/dsh-approval-cutover-audit.json)
+
+候选 `c4a1af5cc8496cfa44048f3b38c04b713800dd4f` 的 415 文件安装包已核完。macOS 55 项回归通过，其中 DSH 真宿主以双向 TLS 核了四份原生回执及单次 Bash。Windows 安装组通过 51 项，DSH 原生组通过 15 项，同样双向 TLS 核四份原生回执。Linux arm64 安装回归 211 项。用 `096cde9` 的安装包留下无 Router 原生序号的关闭回执，候选按原号读回完全相同的结果。macOS 和 Windows 另复跑快照恢复、原号解封及退版读回。宿主模型、审批人和平台使用隔离夹具。[Windows 流水线](https://github.com/KibyouMoe/mowu-link/actions/runs/46002099581)
+
 离线切换核验修正了原生审批待关闭时仍返回通过的问题。Router 有待关闭审批、适配器有待确认关闭，均阻止放行。已关闭的 Codex 审批逐号核对双方摘要，错摘要与缺少 `worker_report` 原记录的快照均拦下。上一轮真实 App Server 的三份提审回执也按相同摘要算法逐份核对。[操作步骤](router-rehearsal.md#同批离线切换核验) · [实测记录](evidence/cutover-restored-dispatch.json)
 
 候选包 `88151083a9d313da72030b6541f09858762e6448` 从核验过的七库快照恢复。macOS、Linux arm64 和 Windows Server 2025 均启动了包内 Router、Worker 与测试适配器，读回同一停派号。工位空闲满 10 秒仍停派。运行中解封和错号解封都被拒。停机按原号解封后，原队首取得一个派发号，宿主夹具收到一条输入，后一单保持待派，原 W04 未变。前一包从独立副本读回同一份成果。macOS 相关 62 项通过，Linux 安装 209 项通过，Windows 安装 51 项通过。三个平台均核过 414 文件安装包。宿主及外部平台使用夹具。[Windows 流水线](https://github.com/KibyouMoe/mowu-link/actions/runs/46000545001)
