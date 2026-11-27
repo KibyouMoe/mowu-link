@@ -73,6 +73,7 @@ jobs:
             $env:MOWULINK_PORTABLE_RECOVERY_EVIDENCE = Join-Path $dir.FullName 'source-recovery.json'
             $env:MOWULINK_TEST_WINDOWS_SCM = '1'
             $env:MOWULINK_WINDOWS_MAINTENANCE_EVIDENCE = Join-Path $dir.FullName 'windows-scm.json'
+            $env:MOWULINK_WINDOWS_ROUTER_RELEASE_EVIDENCE = Join-Path $dir.FullName 'windows-scm-release.json'
             Push-Location -LiteralPath $installed
             try {
               $tests = @(
@@ -102,6 +103,9 @@ jobs:
               Write-Output 'MOWULINK_SCM_EVIDENCE_BEGIN'
               Get-Content -Raw -LiteralPath $env:MOWULINK_WINDOWS_MAINTENANCE_EVIDENCE
               Write-Output 'MOWULINK_SCM_EVIDENCE_END'
+              Write-Output 'MOWULINK_SCM_RELEASE_EVIDENCE_BEGIN'
+              Get-Content -Raw -LiteralPath $env:MOWULINK_WINDOWS_ROUTER_RELEASE_EVIDENCE
+              Write-Output 'MOWULINK_SCM_RELEASE_EVIDENCE_END'
             } finally {
               Pop-Location
             }

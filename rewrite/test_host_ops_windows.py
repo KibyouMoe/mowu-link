@@ -210,3 +210,104 @@ class WindowsMaintenance(unittest.TestCase):
                 "router_runs":3,"persisted_receipt":True,"original_post_response_read":False,
                 "scope":"Actual Windows SCM and HTTPS, temporary SCM wrapper and real isolated Router.",
             },indent=2)+"\n")
+
+    def test_packaged_router_service_installs_upgrades_and_rolls_back(self):
+        from .release import build, materialize
+
+        repository = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
+        target = os.environ["GITHUB_SHA"]
+        previous = "1dc8ab382ea8d03fe99c97fb8bd3d9da88a17b38"
+        self.assertNotEqual(previous,target)
+        root = Path(self.enterContext(TemporaryDirectory(prefix="mowulink-scm-release-"))).resolve()
+        cert,key = root/"tls.pem",root/"tls.key"
+        subprocess.run(["openssl","req","-x509","-newkey","rsa:2048","-nodes","-days","1","-subj","/CN=localhost",
+                        "-addext","subjectAltName=IP:127.0.0.1","-keyout",key.name,"-out",cert.name],
+                       cwd=root,check=True,capture_output=True,timeout=18)
+        manager = guid()
+        identities = config(root,"router-identities.json",{manager:"hermes"})
+        icacls = Path(os.environ["SystemRoot"])/"System32/icacls.exe"
+        subprocess.run([icacls,identities,"/grant:r","*S-1-5-18:F","*S-1-5-32-544:F","/inheritancelevel:r"],
+                       check=True,capture_output=True,timeout=10)
+        subprocess.run([icacls,identities,"/setowner","*S-1-5-18"],check=True,capture_output=True,timeout=10)
+        db = root/"router.db"
+        tag = "mowulink-ci-"+guid()
+        packages = []
+        for i,revision in enumerate((previous,target)):
+            release = build(repository,revision,root/f"archive-{i}")
+            archive,checksum = Path(release["archive"]),release["sha256"]
+            installed = root/f"package-{i}"
+            materialize(archive,revision,checksum,installed,install=True)
+            launcher = root/f"launcher-{i}"
+            args = ["--archive",archive,"--revision",revision,"--sha256",checksum,"--package",installed,
+                    "--destination",launcher,"--service",tag,"--account","LocalSystem","--python",sys.executable,
+                    "--db",db,"--identities",identities,"--cert",cert,"--key",key]
+            command = [sys.executable,"-B","-S","-m","rewrite.windows_router_service"]
+            if i==0:
+                wrong = args.copy()
+                wrong[wrong.index("--sha256")+1] = "0"*64
+                rejected = subprocess.run([*command,*wrong],cwd=PACKAGE,capture_output=True,text=True,timeout=20)
+                self.assertNotEqual(rejected.returncode,0)
+                self.assertIn("release checksum mismatch",rejected.stderr)
+                self.assertFalse(launcher.exists())
+            staged = subprocess.run([*command,*args],cwd=PACKAGE,capture_output=True,text=True,timeout=65)
+            self.assertEqual(staged.returncode,0,staged.stderr)
+            plan = json.loads(staged.stdout)
+            job = WindowsJob.read(plan["maintenance"])
+            packages.append((archive,revision,checksum,installed,plan,job))
+
+        old,new = packages
+        native = WindowsSCM()
+        ready_path = Path(old[4]["readiness"])
+        self.assertEqual(new[4]["readiness"],str(ready_path))
+        self.assertFalse(db.exists())
+        self.sc("create",*old[4]["scm_create_args"])
+        try:
+            counts,runs = [],[]
+            original_key = guid()
+            message = {"title":"Original Windows service queue head","instructions":"Read this after the version switch"}
+            for name,release in (("previous",old),("trial",new),("rollback",old)):
+                _,revision,_,_,plan,job = release
+                if name!="previous":
+                    self.sc("config",*plan["scm_create_args"][:3])
+                self.assertEqual(native.observe(job)["state"],"stopped")
+
+                def ready():
+                    current = native.observe(job)
+                    if current["state"]!="running" or not ready_path.exists():
+                        return None
+                    return current,json.loads(ready_path.read_text(encoding="utf-8"))
+
+                self.sc("start",tag)
+                service,router = self.wait(ready)
+                client = Client("https://127.0.0.1:"+str(router["port"]),manager,cert)
+                task = client.request("POST","tasks",message,original_key)
+                if name=="previous":
+                    original_task = task
+                self.assertEqual(task,original_task)
+                self.assertEqual(client.request("GET","tasks/"+task["task_id"])["task"],original_task)
+                count = len(client.request("GET","tasks")["items"])
+                self.assertEqual(count,1)
+                counts.append(count)
+                self.assertTrue(native.birth(router["pid"]))
+                self.sc("stop",tag)
+
+                def stopped():
+                    return (native.observe(job)["state"]=="stopped" and native.birth(service["pid"])==""
+                            and native.birth(router["pid"])=="" and not ready_path.exists())
+
+                self.wait(stopped)
+                runs.append({"phase":name,"revision":revision,"service_pid":service["pid"],
+                             "router_pid":router["pid"],"launcher_sha256":job.digest,"process_exits_observed":True})
+        finally:
+            self.sc("stop",tag,check=False)
+            self.wait(lambda:"STOPPED" in self.sc("query",tag,check=False).stdout)
+            self.sc("delete",tag)
+        self.assertNotEqual(self.sc("query",tag,check=False).returncode,0)
+        for archive,revision,checksum,installed,_,_ in packages:
+            materialize(archive,revision,checksum,installed,install=False)
+        if output := os.environ.get("MOWULINK_WINDOWS_ROUTER_RELEASE_EVIDENCE"):
+            Path(output).write_text(json.dumps({"windows_build":sys.getwindowsversion().build,"service":tag,
+                "runs":runs,"archive_sha256":[old[2],new[2]],"task_id":original_task["task_id"],
+                "task_counts":counts,"refused_bad_checksum":True,"service_removed":True,
+                "scope":"Actual disposable Windows SCM, installed releases, HTTPS Router and SQLite."},
+                indent=2)+"\n",encoding="utf-8")
