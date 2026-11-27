@@ -179,7 +179,12 @@ def stage_reviewed_rollback(snapshot,trial,review,destination):
     initial_assignments = {}
     facts = reconcile(snapshot,trial,original_tasks=original_tasks,initial_assignments=initial_assignments)
     source = trial/"router.db"
-    approval = json.loads(review.read_text())
+    try:
+        approval = json.loads(review.read_text())
+    except FileNotFoundError:
+        # Keep the existing readiness diagnostic while the operator has no review yet.
+        reviewed_orders(facts,original_tasks,{})
+        raise
     if not isinstance(approval,dict):
         raise ValueError("review must be an object with the trial digest")
     selected = approval.get("replace_migrated_queue",{})
