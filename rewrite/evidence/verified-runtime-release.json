@@ -1,0 +1,202 @@
+{
+  "revision": "c8eaf73f2d8431da05c9ffd0f1c8f10cfbf54418",
+  "previous_revision": "35ba22f66e3017a1756b8645f3b88d091b3ff6f8",
+  "windows": {
+    "run_id": 46003894093,
+    "job_id": 140522112147,
+    "install_regression_passed": 51,
+    "dsh_native_job": 140522112788,
+    "dsh_native_passed": 15,
+    "dsh_environment_skips": 2,
+    "verified": {
+      "different_expected_digest_rejected": true,
+      "foreign_roles_denied": true,
+      "mismatched_package_cannot_create_state": true,
+      "startup_without_manifest_unverified": true,
+      "verified_startups": {
+        "fixture-adapter_started": {
+          "boot_id": "efe7871e-822f-4a99-b04b-bddde0274a8f",
+          "component": "fixture-adapter",
+          "release": {
+            "files": 416,
+            "revision": "c8eaf73f2d8431da05c9ffd0f1c8f10cfbf54418",
+            "sha256": "220d9f4cc426aa3946db9855ece7307c86a6f60ed8bdd1fa0ed4ce668eae3ac1"
+          },
+          "worker_id": "trial"
+        },
+        "router_drained": {
+          "boot_id": "3b547c37-c374-4e45-bcc4-9981855a2d64",
+          "component": "router",
+          "release": {
+            "files": 416,
+            "revision": "c8eaf73f2d8431da05c9ffd0f1c8f10cfbf54418",
+            "sha256": "220d9f4cc426aa3946db9855ece7307c86a6f60ed8bdd1fa0ed4ce668eae3ac1"
+          },
+          "worker_id": null
+        },
+        "router_open": {
+          "boot_id": "2631992d-ddfd-4505-957a-3a52da108d27",
+          "component": "router",
+          "release": {
+            "files": 416,
+            "revision": "c8eaf73f2d8431da05c9ffd0f1c8f10cfbf54418",
+            "sha256": "220d9f4cc426aa3946db9855ece7307c86a6f60ed8bdd1fa0ed4ce668eae3ac1"
+          },
+          "worker_id": null
+        },
+        "worker_drained": {
+          "boot_id": "046aefea-da90-4f8b-b86e-bf3efac243a4",
+          "component": "worker",
+          "release": {
+            "files": 416,
+            "revision": "c8eaf73f2d8431da05c9ffd0f1c8f10cfbf54418",
+            "sha256": "220d9f4cc426aa3946db9855ece7307c86a6f60ed8bdd1fa0ed4ce668eae3ac1"
+          },
+          "worker_id": "trial"
+        },
+        "worker_open": {
+          "boot_id": "c6c87453-dfeb-4185-961f-15c1203eedeb",
+          "component": "worker",
+          "release": {
+            "files": 416,
+            "revision": "c8eaf73f2d8431da05c9ffd0f1c8f10cfbf54418",
+            "sha256": "220d9f4cc426aa3946db9855ece7307c86a6f60ed8bdd1fa0ed4ce668eae3ac1"
+          },
+          "worker_id": "trial"
+        }
+      }
+    },
+    "inputs": 1,
+    "previous_release_reports": 1
+  },
+  "macos": {
+    "targeted_passed": 77,
+    "env_skips": 1,
+    "restored_dispatch": {
+      "first_assignment_id": "5f6e082d-f1f3-41df-8d83-76bd3bfeafd5",
+      "hold_read_back": true,
+      "idle_seconds_while_drained": 10.01,
+      "native_inputs_added_after_release": 1,
+      "original_task_ids": [
+        "5923c1f1-161c-4951-8860-ba11926d889d",
+        "5fc96719-f9ac-4563-9090-ed5b68a7ca5a"
+      ],
+      "original_w04_unchanged": true,
+      "release": {
+        "operation_id": "8bb6fbc2-837b-4754-a41a-0036f1fafac9",
+        "released_at": "2026-11-27T13:03:08.627908+00:00",
+        "requeued": [],
+        "started_at": "2026-11-27T13:02:55.331458+00:00",
+        "state": "released"
+      },
+      "running_release_refused": true,
+      "runtime_verification": {
+        "different_expected_digest_rejected": true,
+        "foreign_roles_denied": true,
+        "mismatched_package_cannot_create_state": true,
+        "startup_without_manifest_unverified": true,
+        "verified_startups": {
+          "fixture-adapter_started": {
+            "boot_id": "94ce767c-76bf-4d1b-8512-4ed55bfdd868",
+            "component": "fixture-adapter",
+            "release": {
+              "files": 416,
+              "revision": "c8eaf73f2d8431da05c9ffd0f1c8f10cfbf54418",
+              "sha256": "00de3037426f9679d101896da3e6c103b50d3a6fe6b1788dd1810cacde25a9ca"
+            },
+            "worker_id": "trial"
+          },
+          "router_drained": {
+            "boot_id": "bc5c2f9a-f01f-4154-a5a1-32af098f6a71",
+            "component": "router",
+            "release": {
+              "files": 416,
+              "revision": "c8eaf73f2d8431da05c9ffd0f1c8f10cfbf54418",
+              "sha256": "00de3037426f9679d101896da3e6c103b50d3a6fe6b1788dd1810cacde25a9ca"
+            },
+            "worker_id": null
+          },
+          "router_open": {
+            "boot_id": "c475f859-4ddb-4520-a0bd-2108b19af932",
+            "component": "router",
+            "release": {
+              "files": 416,
+              "revision": "c8eaf73f2d8431da05c9ffd0f1c8f10cfbf54418",
+              "sha256": "00de3037426f9679d101896da3e6c103b50d3a6fe6b1788dd1810cacde25a9ca"
+            },
+            "worker_id": null
+          },
+          "worker_drained": {
+            "boot_id": "fa514059-f6ac-43e1-9199-c2b929c84e11",
+            "component": "worker",
+            "release": {
+              "files": 416,
+              "revision": "c8eaf73f2d8431da05c9ffd0f1c8f10cfbf54418",
+              "sha256": "00de3037426f9679d101896da3e6c103b50d3a6fe6b1788dd1810cacde25a9ca"
+            },
+            "worker_id": "trial"
+          },
+          "worker_open": {
+            "boot_id": "ce20d40c-4fc7-4d5e-aed3-604d36b934ae",
+            "component": "worker",
+            "release": {
+              "files": 416,
+              "revision": "c8eaf73f2d8431da05c9ffd0f1c8f10cfbf54418",
+              "sha256": "00de3037426f9679d101896da3e6c103b50d3a6fe6b1788dd1810cacde25a9ca"
+            },
+            "worker_id": "trial"
+          }
+        }
+      },
+      "second_task_state": "ready",
+      "wrong_drain_rejected": true
+    },
+    "previous_release_reports": 1,
+    "native_dsh_startup": {
+      "runtime": {
+        "boot_id": "2f0404ff-df45-4fad-ad9e-6a8d13370259",
+        "component": "dsh-adapter",
+        "release": {
+          "files": 416,
+          "revision": "c8eaf73f2d8431da05c9ffd0f1c8f10cfbf54418",
+          "sha256": "00de3037426f9679d101896da3e6c103b50d3a6fe6b1788dd1810cacde25a9ca"
+        },
+        "worker_id": "trial"
+      },
+      "dsh_session": "isolated-release-runtime-dsh",
+      "native_busy": false
+    }
+  },
+  "linux_arm64": {
+    "verified_files": 416,
+    "passed": 211,
+    "env_skips": 145,
+    "historical_excluded": 58,
+    "controller": "Darwin",
+    "router_and_adapter_startups": {
+      "router": {
+        "boot_id": "f3a11c58-c406-48ac-97bf-18f0e3197e6e",
+        "component": "router",
+        "release": {
+          "files": 416,
+          "revision": "c8eaf73f2d8431da05c9ffd0f1c8f10cfbf54418",
+          "sha256": "00de3037426f9679d101896da3e6c103b50d3a6fe6b1788dd1810cacde25a9ca"
+        },
+        "worker_id": null
+      },
+      "fixture-adapter": {
+        "boot_id": "36ce3069-b96f-471b-bd34-e84cd5922478",
+        "component": "fixture-adapter",
+        "release": {
+          "files": 416,
+          "revision": "c8eaf73f2d8431da05c9ffd0f1c8f10cfbf54418",
+          "sha256": "00de3037426f9679d101896da3e6c103b50d3a6fe6b1788dd1810cacde25a9ca"
+        },
+        "worker_id": "trial"
+      }
+    },
+    "w04_state": "completed_reported"
+  },
+  "reproduce": "python3 -B -m rewrite.release_check --repository . --component state-bundle --previous 35ba22f66e3017a1756b8645f3b88d091b3ff6f8 --new c8eaf73f2d8431da05c9ffd0f1c8f10cfbf54418",
+  "boundary": "Real installed Router, Worker, adapter executables over isolated HTTPS, disposable roles, restored SQLite. Native DSH startup uses the installed DSH AgentLoop and a fixture session. No real accounts, Feishu, production service, or Codex Desktop launch."
+}

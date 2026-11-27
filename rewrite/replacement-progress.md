@@ -6,6 +6,10 @@
 
 ## 检查点与证据
 
+候选安装版支持核对实际启动的 Router、Worker 和适配器。带独立发行清单启动时，进程从自身安装目录逐文件校验，只在校验后打开状态库。用已有身份走 HTTPS 读取组件、工位、发行提交、摘要和本次启动号。恢复演练从本机就绪回执和远端读到一致标识，Router 与 Worker 重开后换新启动号。包被改或摘要错时拒绝启动，未带清单则远端返回未验证，其他角色无法读取凭据。Mac 实际查到 Linux 来宾 Router 与适配器的启动版本，另从候选包启动 DSH 适配器并确认隔离真实 DSH 会话空闲。[复跑与用法](router-rehearsal.md#核对已运行的发行包) · [证据](evidence/verified-runtime-release.json)
+
+候选 `c8eaf73f2d8431da05c9ffd0f1c8f10cfbf54418` 含 416 个文件。macOS 通过 77 项相关回归，Linux arm64 安装组通过 211 项，Windows 安装组通过 51 项。macOS 和 Windows 各回读 5 次启动凭据，核原号解封只新增一份宿主夹具输入，退版读回一份 W04。本轮没有实际 Codex Desktop 或飞书工位参与。[Windows 流水线](https://github.com/KibyouMoe/mowu-link/actions/runs/46003894093)
+
 DSH 常规审批结束后也将原生结局、原生请求和结束事件的序号交给 Router。隔离环境用真实 DSH 原生进程核对了拒绝、单次允许、超时和冷重开四种关闭，双方各有四份匹配凭据，测试 Bash 只执行一次。登记回执丢失时，原生已取消的请求按原号恢复，保留 Router 曾记下的允许且原生仍为取消。离线审计拦下缺 Router 回执、修改原生序号和缺适配器记录三种反例。旧的新版关闭回执保持原样，只有适配器保有原生序号的历史条目单列。[操作步骤](router-rehearsal.md#同批离线切换核验) · [实测记录](evidence/dsh-approval-cutover-audit.json)
 
 候选 `c4a1af5cc8496cfa44048f3b38c04b713800dd4f` 的 415 文件安装包已核完。macOS 55 项回归通过，其中 DSH 真宿主以双向 TLS 核了四份原生回执及单次 Bash。Windows 安装组通过 51 项，DSH 原生组通过 15 项，同样双向 TLS 核四份原生回执。Linux arm64 安装回归 211 项。用 `096cde9` 的安装包留下无 Router 原生序号的关闭回执，候选按原号读回完全相同的结果。macOS 和 Windows 另复跑快照恢复、原号解封及退版读回。宿主模型、审批人和平台使用隔离夹具。[Windows 流水线](https://github.com/KibyouMoe/mowu-link/actions/runs/46002099581)

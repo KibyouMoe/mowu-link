@@ -629,7 +629,7 @@ python3 -B -m rewrite.service runtime-status --connection "$ROUTER_MANAGER_CONNE
   --expected-component router --expected-revision "$RELEASE_SHA" --expected-sha256 "$ARCHIVE_SHA256"
 ```
 
-值班人使用 Router 的管理身份读 Router，用对应工位的 `ops/<工位>` 读 Worker，用 `worker/<工位>` 读该工位适配器。后两项填写对应组件和 `--expected-worker-id`。命令走已配置的 HTTPS，核对组件、工位、版本和归档摘要。重启后应看到新的 `boot_id`。未带清单启动的进程可继续开发试用，版本核对会返回未验证。凭据证明的是进程启动时核过的安装包。会话、业务和平台的就绪状态仍从各自入口查验。
+值班人使用 Router 的管理身份读 Router，用对应工位的 `ops/<工位>` 读 Worker，用 `worker/<工位>` 读该工位适配器。后两项填写对应组件和 `--expected-worker-id`。命令走已配置的 HTTPS，核对组件、工位、版本和归档摘要。重启后应看到新的 `boot_id`。未带清单启动的进程可继续开发试用，版本核对会返回未验证。凭据证明的是进程启动时核过的安装包。会话、业务和平台的就绪状态仍从各自入口查验。[运行版本核验实测](evidence/verified-runtime-release.json)
 
 ### 新版 Router 与 Worker 分步更新
 
