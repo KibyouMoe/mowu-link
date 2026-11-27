@@ -1,8 +1,9 @@
 import hashlib
 import json
+import sqlite3
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import ExitStack
+from contextlib import ExitStack, closing
 from unittest.mock import patch
 
 from . import delivery
@@ -267,6 +268,109 @@ class Mainline(unittest.TestCase):
         restored.poll()
         self.assertEqual(restored.hold()["held_task_id"], tid)
         self.assertEqual(len(self.loop.native.entries()), 1)
+
+    def test_historical_w03_cannot_redeliver_a_completed_assignment_after_reconnect(self):
+        tid = self.create()
+        self.idle()
+        stale_db = self.loop.root/"stale-worker.db"
+        with closing(sqlite3.connect(self.w.db.path)) as original, closing(sqlite3.connect(stale_db)) as copy:
+            process = self.w.process
+
+            def save_before_accept(frame):
+                if frame["kind"]=="task.dispatch":
+                    original.backup(copy)
+                return process(frame)
+
+            with patch.object(self.w,"process",side_effect=save_before_accept):
+                self.w.poll()
+        (payload,receipt), = self.loop.native.entries()
+        aid = payload["assignment_id"]
+        self.w.report(receipt["native_id"], **self.args(tid,aid))
+        native = FixtureHost(self.loop.root/"stale-native.db", self.loop.native.session)
+        adapter = HostAdapter(self.loop.root/"stale-adapter.db",native,native.session)
+        restored = Worker(stale_db,"oguri",self.loop.wire,adapter)
+        restored.connect()
+        self.assertTrue(self.loop.wire.request("POST",f"tasks/{tid}/accept",
+            {"session_id":restored.session,"assignment_id":aid,"revision":payload["revision"]},
+            "accept-"+aid)["accepted"])
+        restored.poll()
+        restored.poll()
+        self.assertEqual(native.entries(),[])
+        self.assertIsNone(restored.hold()["held_assignment_id"])
+        self.assertEqual(self.m.inspect(tid)["task"]["state"],"completed_reported")
+        self.assertEqual(len(self.m.messages(source="oguri")["items"]),1)
+
+    def test_cancel_committed_after_w03_reaches_host_without_starting_work(self):
+        tid = self.create()
+        self.idle()
+        original = self.loop.wire.request
+
+        def cancel_after_accept(method,path,*args,**kwargs):
+            response = original(method,path,*args,**kwargs)
+            if method=="POST" and path==f"tasks/{tid}/accept":
+                current = self.m.inspect(tid)["task"]
+                self.m.act(guid(),tid,current["revision"],"cancel",reason="Cancellation won the race")
+            return response
+
+        with patch.object(self.loop.wire,"request",side_effect=cancel_after_accept):
+            self.w.poll()
+        self.w.poll()
+        (body,receipt), = self.loop.native.entries()
+        self.assertEqual(body["kind"],"task.cancel")
+        self.assertEqual(self.w.hold()["held_assignment_id"],body["assignment_id"])
+        self.fault("native_cleanup_unconfirmed", lambda: self.w.report(
+            receipt["native_id"],tid,body["assignment_id"],None,outcome="cancel_confirmed"))
+        self.loop.native.cleanup_evidence = lambda session,aid,kind: {
+            "session":session,"assignment_id":aid,"kind":kind,"stopped":True,"cleaned":True,"receipt_id":guid()}
+        self.assertTrue(self.w.report(receipt["native_id"],tid,body["assignment_id"],None,
+                                      outcome="cancel_confirmed")["recorded"])
+        self.assertEqual(self.m.inspect(tid)["task"]["state"],"cancelled")
+
+    def test_assignment_status_is_scoped_to_authenticated_worker_and_session(self):
+        with Loop.isolated(self.clock,extra_workers=("other",)) as loop:
+            tid = loop.hermes.create(guid(),"Restricted","Only a holder can check its own assignment","oguri")["task_id"]
+            loop.worker.connect()
+            loop.worker.poll()
+            self.clock.advance(10)
+            loop.worker.poll()
+            loop.worker.poll()
+            aid = loop.worker.hold()["held_assignment_id"]
+            other = loop.extra_clients["other"]
+            session = guid()
+            other.request("PUT","workers/other/session",{"session_id":session},guid())
+
+            def status(client,task_id=tid,assignment_id=aid,session_id=loop.worker.session):
+                return client.request("GET",f"tasks/{task_id}/assignment-status?assignment_id={assignment_id}"
+                    f"&session_id={session_id}")
+
+            self.assertEqual(status(loop.wire),{"state":"active"})
+            self.fault("forbidden",lambda:status(loop.manager_wire))
+            self.fault("stale_session",lambda:status(other))
+            self.assertEqual(status(other,session_id=session),status(other,task_id=guid(),session_id=session))
+            self.assertEqual(status(loop.wire,assignment_id=guid()),{"state":"inactive"})
+
+    def test_deferred_first_host_write_waits_if_current_assignment_cannot_be_checked(self):
+        tid = self.create()
+        self.idle()
+        with patch.object(self.loop.adapter,"deliver",
+                          side_effect=Fault(409,"task_delivery_deferred",retryable=True)):
+            self.w.poll()
+        self.assertEqual(self.w.hold()["held_task_id"],tid)
+        original = self.loop.wire.request
+
+        def lose_status(method,path,*args,**kwargs):
+            if method=="GET" and path.startswith(f"tasks/{tid}/assignment-status?"):
+                raise ConnectionError("status response unavailable")
+            return original(method,path,*args,**kwargs)
+
+        with patch.object(self.loop.wire,"request",side_effect=lose_status), self.assertRaises(ConnectionError):
+            self.w.poll()
+        self.assertEqual(self.loop.native.entries(),[])
+        self.w.connect()
+        self.w.poll()
+        self.w.poll()
+        (body,_receipt), = self.loop.native.entries()
+        self.assertEqual(body["task_id"],tid)
 
     def test_host_commit_lost_receipt_can_recover_or_remain_unknown(self):
         tid = self.create()

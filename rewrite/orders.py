@@ -297,6 +297,17 @@ class Orders:
                    (tid, aid, worker))
         return {"accepted": True, "holder": {"kind": "worker", "worker_id": worker}, "assignment_id": aid}
 
+    def assignment_status(self, db, worker, tid, data):
+        self.active_session(db, worker, data)
+        aid = string(data, "assignment_id")
+        current = db.execute("""SELECT 1 FROM tasks WHERE task_id=? AND assignment_id=?
+                             AND assignee_id=? AND state='working'""", (tid, aid, worker)).fetchone()
+        if not current:
+            return {"state": "inactive"}
+        cleanup_pending = db.execute("SELECT 1 FROM cleanups WHERE assignment_id=? AND done=0",
+                                     (aid,)).fetchone()
+        return {"state": "cleanup_pending" if cleanup_pending else "active"}
+
     def report(self, db, worker, tid, data):
         self.active_session(db, worker, data)
         current = task(db, tid)

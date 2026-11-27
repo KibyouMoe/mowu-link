@@ -52,6 +52,15 @@ def route(orders, actor, method, path, body, headers, approval_workers=frozenset
         require(method=="PUT" and not url.query,422,"invalid_handoff")
         with orders.db.transaction() as db:
             return 200,"application/json",admission.change(db,orders,parts[1],parts[3],body)
+    if method=="GET" and len(parts)==3 and parts[0]=="tasks" and parts[2]=="assignment-status":
+        require(actor.startswith("worker/"),403,"forbidden")
+        filters = parse_qs(url.query,keep_blank_values=True)
+        require(set(filters)=={"session_id","assignment_id"} and all(len(values)==1 for values in filters.values()),
+                422,"invalid_assignment_status_query")
+        with orders.db.transaction() as db:
+            state = orders.assignment_status(db,actor.removeprefix("worker/"),parts[1],
+                                             {key:values[0] for key,values in filters.items()})
+        return 200,"application/json",state
     orders.tick()
     if method=="GET" and len(parts)==3 and parts[:2]==["peers","messages"]:
         require(actor.startswith("worker/"),403,"forbidden")

@@ -4,6 +4,7 @@ import json
 import time
 from threading import RLock
 from typing import Protocol
+from urllib.parse import urlencode
 
 from . import display, links, peer_files, peer_retry, queued_chat, user_questions, worker_catalog, worker_cleanup, worker_commands, worker_handoff, worker_media, worker_resume
 from .messages import valid_guid
@@ -431,6 +432,17 @@ class Worker:
             require(reply.get("accepted") is True and reply.get("assignment_id") == aid
                     and reply.get("holder") == {"kind": "worker", "worker_id": self.worker_id},
                     409, "accept_receipt_mismatch")
+        if job["stage"]=="offered" or job["host_state"]=="ready":
+            # W03 is a historical receipt. Check current authority for every first write.
+            query = urlencode({"session_id": self.session, "assignment_id": aid})
+            status = self.router.request("GET", f"tasks/{tid}/assignment-status?{query}")
+            state = status.get("state") if isinstance(status,dict) else None
+            require(state in ("active","inactive","cleanup_pending"),502,"assignment_status_unconfirmed")
+            if state!="active":
+                stage = "accepted" if state=="cleanup_pending" else "stale"
+                with self.db.transaction() as db:
+                    db.execute("UPDATE jobs SET stage=?,host_state='pending' WHERE assignment_id=?", (stage, aid))
+                return True
         with self.db.transaction() as db:
             db.execute("""UPDATE jobs SET stage='accepted',host_state='ready'
                           WHERE assignment_id=? AND stage='offered'""",(aid,))
