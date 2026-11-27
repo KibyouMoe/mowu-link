@@ -711,7 +711,6 @@ class Bundle(unittest.TestCase):
                 self.assertNotIn(record["token"],encode(pending))
             (journal/name).unlink()
 
-    @unittest.skipUnless(os.name=="posix","private Unix workspace runtime required")
     def test_offline_handoff_and_rollback_reserve_the_codex_workspace_writer(self):
         runtime = self.root/"codex-runtime"
         runtime.mkdir(mode=0o700)
@@ -761,6 +760,44 @@ class Bundle(unittest.TestCase):
         self.assertEqual(publications,[handoff,self.dest])
         with state_writer(writer,existing=True):
             self.assertFalse((runtime/"dsh.sock").exists())
+
+    def test_workspace_audit_checks_private_file_and_original_journal_identity(self):
+        runtime = self.root/"workspace-runtime"
+        runtime.mkdir(mode=0o700)
+        directory = runtime/"assignment-containers"
+        directory.mkdir(mode=0o700)
+        _,identity = dsh_workspace_audit.journal(runtime)
+        if os.name=="nt":
+            self.assertEqual(dsh_workspace_audit.inspect(runtime,{identity}),
+                             (None,"dsh_workspace_journal_unconfirmed"))
+        with state_writer(runtime/"dsh-workspace"):
+            pass
+        session,task,assignment = "isolated-workspace-ledger",guid(),guid()
+        record = {"session":session,"task_id":task,"assignment_id":assignment,"phase":"sealed",
+                  "token":guid(),"container_id":"a"*64}
+        filename = hashlib.sha256(encode([session,assignment]).encode()).hexdigest()+".json"
+        path = directory/filename
+        with open(path,"x",opener=lambda name,flags:os.open(name,flags,0o600)) as stream:
+            stream.write(encode(record))
+        observed,issue = dsh_workspace_audit.inspect(runtime,{identity})
+        self.assertIsNone(issue)
+        self.assertEqual(observed["pending"],[])
+        self.assertRegex(observed["fingerprint"],r"^[0-9a-f]{64}$")
+
+        foreign = self.root/"foreign-workspace-runtime"
+        foreign.mkdir(mode=0o700)
+        (foreign/"assignment-containers").mkdir(mode=0o700)
+        self.assertEqual(dsh_workspace_audit.inspect(foreign,{identity}),
+                         (None,"dsh_workspace_journal_mismatch"))
+
+        if os.name=="nt":
+            icacls = Path(os.environ["SystemRoot"])/"System32/icacls.exe"
+            change = subprocess.run([icacls,path,"/grant","*S-1-1-0:(R)"],capture_output=True,timeout=15)
+            self.assertEqual(change.returncode,0,change.stderr)
+        else:
+            path.chmod(0o644)
+        self.assertEqual(dsh_workspace_audit.inspect(runtime,{identity}),
+                         (None,"dsh_workspace_journal_unconfirmed"))
 
     def test_handoff_detects_different_display_payload_or_cursor_ahead_of_worker(self):
         with self.stack(self.sources) as (_m,w,_source,_mail,_inbound,views):

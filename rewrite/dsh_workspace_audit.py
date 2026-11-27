@@ -9,24 +9,26 @@ import socket
 import sqlite3
 import stat
 
-from .dsh_local_link import link_ports
+from .dsh_local_link import check_private_stream, link_ports, private_directory, private_file
 from .messages import valid_guid
 from .storage import Fault, StateWriterBusy, encode, require, state_writer
 
 
 IDENTITY_TABLE = "dsh_workspace_ledger"
 PHASES = {"unused","issuing","seeding","active","sealing","sealed"}
+WORKSPACE_WRITERS = ("dsh-workspace","codex-workspace")
 
 
 def journal(directory):
     root = Path(directory)
-    ledger = root/"assignment-containers"
-    if not root.is_absolute() or os.name!="posix":
-        raise ValueError("expected an absolute private DSH runtime")
-    for path in (root,ledger):
-        info = path.lstat()
-        if not stat.S_ISDIR(info.st_mode) or info.st_uid!=os.getuid() or info.st_mode&0o077:
-            raise ValueError("expected an owner-private DSH workspace journal")
+    try:
+        private_directory(root)
+        ledger = private_directory(root/"assignment-containers")
+    except Fault:
+        raise ValueError("expected an owner-private workspace journal") from None
+    info = ledger.lstat()
+    if not info.st_ino:
+        raise ValueError("workspace journal file identity unavailable")
     identity = hashlib.sha256(encode([str(ledger.resolve()),info.st_dev,info.st_ino]).encode()).hexdigest()
     return ledger,identity
 
@@ -69,11 +71,13 @@ def scan(ledger):
         if not path.name.endswith(".json"):
             continue
         try:
-            with open(path,"rb",opener=lambda name,flags:os.open(
-                    name,flags|os.O_NOFOLLOW|os.O_NONBLOCK)) as stream:
-                info = os.fstat(stream.fileno())
-                if not stat.S_ISREG(info.st_mode) or info.st_uid!=os.getuid() or info.st_mode&0o077 or info.st_size>4096:
-                    raise ValueError("invalid private DSH workspace record")
+            info = path.lstat()
+            if (not stat.S_ISREG(info.st_mode) or info.st_size>4096
+                    or getattr(info,"st_file_attributes",0)&stat.FILE_ATTRIBUTE_REPARSE_POINT):
+                raise ValueError("invalid private DSH workspace record")
+            open_flags = getattr(os,"O_NOFOLLOW",0)|getattr(os,"O_NONBLOCK",0)
+            with open(path,"rb",opener=lambda name,flags:os.open(name,flags|open_flags)) as stream:
+                check_private_stream(info,stream)
                 raw = stream.read(4097)
             record = json.loads(raw)
             scope = {key:record[key] for key in ("session","task_id","assignment_id","phase")}
@@ -112,7 +116,7 @@ def host_stopped(directory):
     except FileNotFoundError:
         pass
     else:
-        if not stat.S_ISSOCK(info.st_mode) or info.st_uid!=os.getuid():
+        if os.name=="nt" or not stat.S_ISSOCK(info.st_mode) or info.st_uid!=os.getuid():
             raise ValueError("invalid private DSH host endpoint")
         if not listener_stopped(socket.AF_UNIX,str(endpoint)):
             return False
@@ -137,12 +141,17 @@ def inspect(directory,expected,*,reservations=None):
         with ExitStack() as stack:
             absent_locks = []
             # Codex and DSH both take their writer lock before exposing a listener.
-            for name in ("dsh-workspace","codex-workspace"):
+            for name in WORKSPACE_WRITERS:
                 writer = Path(directory)/name
+                lock = writer.with_suffix(".writer")
                 try:
+                    if os.name=="nt":
+                        private_file(lock)
                     stack.enter_context(state_writer(writer,existing=True))
                 except FileNotFoundError:
-                    absent_locks.append(writer.with_suffix(".writer"))
+                    absent_locks.append(lock)
+            if os.name=="nt" and len(absent_locks)==len(WORKSPACE_WRITERS):
+                return None,"dsh_workspace_journal_unconfirmed"
             if not host_stopped(directory):
                 return None,"dsh_workspace_host_still_running"
             first,pending = scan(ledger)
