@@ -22,7 +22,10 @@ from unittest.mock import Mock, patch
 
 from .devloop import FixtureHost, Loop, agent_report
 from .adapter import HostAdapter
+from .agent_tools import REPORT_TOOL
 from .bundle_release_check import private_reply_id, publish_reply
+from .codex_app_server import AppServerHost, worker_callbacks
+from .codex_display import CodexDisplay
 from .dsh_display import DshDisplay
 from .dsh_local_link import LocalLink
 from .dsh_port import DshHost, tool_listener
@@ -33,6 +36,7 @@ from .hermes_host import HermesLocalHost, input_text
 from .orders import Orders
 from .release_check import config
 from .storage import Fault, encode, guid
+from .test_codex_app_server import CODEX, Provider, isolated_app_server
 from .test_dsh_native_loop import NativeProcess
 from .test_dsh_sdk import APP as DSH_APP, EXE as DSH_EXE
 from .test_feishu_output import PlatformFixture
@@ -282,13 +286,17 @@ class HermesGateway(NativeProcess):
 
     @unittest.skipUnless(shutil.which("openssl"),"loopback TLS certificate fixture unavailable")
     def test_rewrite_cold_start_trigger_to_native_manager_to_closed_order(self):
-        self.exercise_cold_cutover(native_dsh=False)
+        self.exercise_cold_cutover(backend="fixture")
 
     @unittest.skipUnless(DSH_EXE.is_file() and shutil.which("openssl"),"isolated macOS DSH SDK and TLS required")
     def test_rewrite_cold_start_hermes_and_dsh_native_tools(self):
-        self.exercise_cold_cutover(native_dsh=True)
+        self.exercise_cold_cutover(backend="dsh")
 
-    def exercise_cold_cutover(self, *, native_dsh):
+    @unittest.skipUnless(CODEX.is_file() and shutil.which("openssl"),"independent Codex App Server and TLS required")
+    def test_rewrite_cold_start_hermes_and_codex_native_tools(self):
+        self.exercise_cold_cutover(backend="codex")
+
+    def exercise_cold_cutover(self, *, backend):
         root = self.root = Path(self.enterContext(TemporaryDirectory(prefix="mlhgw-",dir="/tmp"))).resolve()
         cert,key = root/"cert.pem",root/"key.pem"
         subprocess.run(["openssl","req","-x509","-newkey","rsa:2048","-nodes","-days","1","-subj","/CN=localhost",
@@ -306,10 +314,32 @@ class HermesGateway(NativeProcess):
         manager = Client(router_url,manager_key,cert)
         source_link = Client(router_url,source_key,cert)
         worker_session = "clean-worker-session"
-        if native_dsh:
+        if backend=="dsh":
             dsh_root = self.local_tls_directory()
             dsh_link = LocalLink(dsh_root,use_tls=True)
             host = DshHost(dsh_root,link=dsh_link)
+        elif backend=="codex":
+            provider = ThreadingHTTPServer(("127.0.0.1",0),Provider)
+            provider.observed,provider.media = [],[]
+            origin = self.enterContext(running(provider))
+            profile = root/"codex-test"
+            profile.mkdir(mode=0o700)
+            rpc = self.enterContext(isolated_app_server(str(profile),origin))
+            self.assertIsNone(rpc.request("account/read",{"refreshToken":False})["account"])
+            started = rpc.request("thread/start",{"cwd":str(profile),"ephemeral":False,"sandbox":"read-only",
+                                                 "approvalPolicy":"never","dynamicTools":[REPORT_TOOL]})["thread"]
+            worker_session = started["id"]
+            seed = rpc.request("turn/start",{"threadId":worker_session,"input":[
+                {"type":"text","text":"Initialize this isolated fixture thread.","text_elements":[]}]})["turn"]["id"]
+            deadline = time.monotonic()+12
+            while True:
+                packet = rpc.event(deadline)
+                if packet["method"]=="turn/completed" and packet["params"]["turn"]["id"]==seed:
+                    self.assertEqual(packet["params"]["turn"]["status"],"completed")
+                    break
+            self.assertEqual(provider.observed,[(True,0)])
+            provider.observed.clear()
+            host = AppServerHost(rpc,worker_session)
         else:
             host = FixtureHost(root/"native-worker.db",worker_session)
         adapter = HostAdapter(root/"adapter.db",host,worker_session)
@@ -319,13 +349,26 @@ class HermesGateway(NativeProcess):
                                                 ("127.0.0.1",0),tls)
         platform_url = self.enterContext(running(listener)).replace("http://","https://",1)
         platform_link = Client(platform_url,platform_key,cert)
-        if native_dsh:
-            callback = Client(platform_url,callback_key,cert)
+        callback = Client(platform_url,callback_key,cert)
+        if backend=="dsh":
             self.enterContext(tool_listener(dsh_root,adapter,callback,link=dsh_link))
             native = self.enterContext(self.start_native(dsh_root,worker_session,"formal",use_tls=True))
             relay = DshDisplay(adapter,callback,"trial")
             relay.collect()
             self.assertEqual(self.read_native(native,"read")["inputs"],[])
+        elif backend=="codex":
+            relay = CodexDisplay(adapter,callback)
+            self.enterContext(relay.run())
+            self.enterContext(worker_callbacks(host,callback,relay.wake.set,relay.observe,relay.observe_terminal,
+                                               adapter=adapter))
+
+            def native_turns():
+                return host.thread(worker_session,include_turns=True)["turns"]
+
+            def completed_turn(turn_id):
+                return next((t for t in native_turns() if t["id"]==turn_id and t["status"]=="completed"),None)
+
+            self.assertEqual([t["id"] for t in native_turns()],[seed])
         else:
             self.assertEqual(host.entries(),[])
         feishu_db = root/"feishu.db"
@@ -353,13 +396,18 @@ class HermesGateway(NativeProcess):
             worker.poll()
             clock.advance(10)
             worker.poll()
-            worker.poll()
-            with adapter.db.transaction() as db:
-                [first] = db.execute("SELECT payload,receipt FROM intents WHERE json_extract(payload,'$.kind')='task'")
-                body,formal = json.loads(first["payload"]),json.loads(first["receipt"])
+
+            def formal_receipt():
+                worker.poll()
+                with adapter.db.transaction() as db:
+                    return db.execute("""SELECT payload,receipt FROM intents
+                        WHERE json_extract(payload,'$.kind')='task' AND receipt IS NOT NULL""").fetchone()
+
+            first = self.wait(formal_receipt)
+            body,formal = json.loads(first["payload"]),json.loads(first["receipt"])
             aid = body["assignment_id"]
             self.assertEqual((body["task_id"],formal["session"]),(tid,worker_session))
-            if native_dsh:
+            if backend=="dsh":
                 formal_observation = self.read_native(native,"read")
                 self.assertEqual(formal_observation["inputs"],[formal["native_id"]])
                 calls,results = formal_observation["calls"],formal_observation["results"]
@@ -372,6 +420,19 @@ class HermesGateway(NativeProcess):
                 w04 = receipts[0]
                 args,retry = (json.loads(c["arguments"]) for c in calls)
                 self.assertEqual(retry,args)
+            elif backend=="codex":
+                observed = self.wait(lambda:completed_turn(formal["turn_id"]))
+                self.assertEqual([i["id"] for i in observed["items"] if i["type"]=="userMessage"],
+                                 [formal["native_id"]])
+                codex_calls = [i for i in observed["items"] if i["type"]=="dynamicToolCall"]
+                self.assertEqual([i["tool"] for i in codex_calls],["worker_report","worker_report"])
+                self.assertTrue(all(i["success"] for i in codex_calls),codex_calls)
+                args,retry = (i["arguments"] for i in codex_calls)
+                self.assertEqual(args,{"task_id":tid,"assignment_id":aid,"summary":"Isolated App Server result"})
+                self.assertEqual(retry,args)
+                receipts = [json.loads(i["contentItems"][0]["text"]) for i in codex_calls]
+                self.assertEqual(receipts,[receipts[0]]*2)
+                w04 = receipts[0]
             else:
                 self.assertEqual(worker.hold()["held_assignment_id"],aid)
                 args = {"task_id":tid,"assignment_id":aid,"summary":"Cutover fixture result."}
@@ -379,26 +440,29 @@ class HermesGateway(NativeProcess):
             chat_id = "om_cutover_private"
             mid_chat = inbound.record("app","user","trainer",{"chat_id":"cutover-chat","chat_type":"p2p",
                 "message_id":chat_id,"message_type":"text","content":encode({"text":"Independent private chat."})})
-            chat = inbound.deliver(mid_chat)
+
+            def private_receipt():
+                try:
+                    return inbound.deliver(mid_chat)
+                except Fault as error:
+                    if error.code!="host_receipt_unconfirmed":
+                        raise
+
+            chat = self.wait(private_receipt)
             self.assertEqual(inbound.deliver(mid_chat),chat)
             self.assertEqual(agent_report(worker,chat["native_id"],args)["content"][0]["text"],"wrong_report_origin")
-            if native_dsh:
+            if backend=="dsh":
                 end = self.read_native(native,"read")
                 self.assertEqual(end["inputs"],[formal["native_id"],chat["native_id"]])
                 self.assertEqual(end["calls"],calls)
-                def private_reply_recorded():
-                    relay.collect()
-                    relay.flush()
-                    views.poll()
-                    with views.db.transaction() as db:
-                        return db.execute("""SELECT 1 FROM chat_history_index WHERE direction='out'
-                            AND session=? AND turn=?""",(chat["session"],chat["turn_id"])).fetchone()
-
-                self.wait(private_reply_recorded)
-                card = private_reply_id(views,chat_id,chat)
-                self.assertEqual(views.poll(),0)
-                [reply] = [item[2] for item in platform.messages.values() if item[0]==card]
-                self.assertEqual(reply["elements"][0]["text"]["content"],"isolated fixture response")
+                expected_reply = "isolated fixture response"
+            elif backend=="codex":
+                private = self.wait(lambda:completed_turn(chat["turn_id"]))
+                self.assertEqual([i["id"] for i in private["items"] if i["type"]=="userMessage"],[chat["native_id"]])
+                self.assertFalse([i for i in private["items"] if i["type"]=="dynamicToolCall"])
+                self.assertEqual([t["id"] for t in native_turns()],[seed,formal["turn_id"],chat["turn_id"]])
+                self.assertEqual(provider.observed,[(True,0),(True,1),(True,2),(True,0)])
+                expected_reply = "Local model fixture accepted the receipt."
             else:
                 card = publish_reply(worker,views,platform,chat_id,chat,"One private reply.")
                 worker.turn_finished(formal["native_id"],"The ordinary turn ended.")
@@ -408,6 +472,21 @@ class HermesGateway(NativeProcess):
                 self.assertEqual(agent_report(worker,formal["native_id"],args),report)
                 w04 = json.loads(report["content"][0]["text"])
                 self.assertEqual([p["kind"] for p,_r in host.entries()],["task","chat"])
+            if backend!="fixture":
+                def reply_published():
+                    if backend=="dsh":
+                        relay.collect()
+                        relay.flush()
+                    views.poll()
+                    with views.db.transaction() as db:
+                        return db.execute("""SELECT 1 FROM chat_history_index WHERE direction='out'
+                            AND session=? AND turn=?""",(chat["session"],chat["turn_id"])).fetchone()
+
+                self.wait(reply_published)
+                card = private_reply_id(views,chat_id,chat)
+                [reply] = [item[2] for item in platform.messages.values() if item[0]==card]
+                self.assertEqual(reply["elements"][0]["text"]["content"],expected_reply)
+                self.assertEqual(views.poll(),0)
             self.assertEqual((w04["release_assignment_id"],w04["task_state"]),(aid,"completed_reported"))
             self.assertIsNone(worker.hold()["held_assignment_id"])
             [finished] = self.wait(lambda:[t for t in manager.request("GET","tasks")["items"]
@@ -442,7 +521,7 @@ class HermesGateway(NativeProcess):
                 "private_input_id":chat["native_id"],"formal_worker_inputs":1,"private_worker_inputs":1,
                 "boundary":"New stores; real local Hermes with a scripted model; real Router/Worker TLS and Worker MCP; "
                            "Worker host and Feishu provider are fixtures."}
-            if native_dsh:
+            if backend=="dsh":
                 with (DSH_APP/"Info.plist").open("rb") as bundle:
                     dsh_version = plistlib.load(bundle)["CFBundleShortVersionString"]
                 evidence.update(dsh_version=dsh_version,worker_host="Installed DSH AgentLoop and native tool executor",
@@ -450,6 +529,13 @@ class HermesGateway(NativeProcess):
                     dsh_w04_receipts=receipts,dsh_private_reply=reply["elements"][0]["text"]["content"],
                     boundary="Real local Hermes and native DSH AgentLoop with scripted models; real Router/Worker TLS "
                              "and DSH mutual TLS; Feishu provider is a fixture.")
+            elif backend=="codex":
+                evidence.update(codex_cli_version=started["cliVersion"],worker_host="Bundled native Codex App Server",
+                    codex_thread_id=worker_session,account_present=False,setup_turn_id=seed,
+                    codex_tool_calls=[{"call_id":i["id"],"name":i["tool"]} for i in codex_calls],
+                    codex_w04_receipts=receipts,codex_private_reply=reply["elements"][0]["text"]["content"],
+                    boundary="Real local Hermes and independent Codex App Server with scripted providers; "
+                             "real Router/Worker TLS and native dynamic tools; Feishu provider is a fixture.")
             Path(output).write_text(json.dumps(evidence,ensure_ascii=False,indent=2)+"\n")
 
     def test_trigger_to_real_gateway_and_model_tool_with_cold_receipt_recovery(self):
