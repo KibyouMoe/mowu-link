@@ -1,0 +1,96 @@
+{
+  "systemd": "systemd 255 (255.4-1ubuntu8.15)",
+  "original_task": "0e91c034-4199-4914-8f6d-fc7a02715e48",
+  "reported_restart": {
+    "actor": "host-maintainer/router",
+    "after": {
+      "generation": "99eeda1f9cc12d504905ab09c7796f4a1fa4de97190ed98e836962631a0272f6",
+      "label": "mowulink-maintenance-router-d6eb71ef-8b76-41d7-b194-5ea6e4b4021c.service",
+      "pid": 818679,
+      "service": "router",
+      "started": "a4d8707f-d019-4732-b967-513928d1edb8:12791951",
+      "state": "running"
+    },
+    "before": {
+      "generation": "c20c67d0a5ad628740859aebed257dcfa11113d0bc8a8f7617839fc841fd112c",
+      "label": "mowulink-maintenance-router-d6eb71ef-8b76-41d7-b194-5ea6e4b4021c.service",
+      "pid": 818638,
+      "service": "router",
+      "started": "a4d8707f-d019-4732-b967-513928d1edb8:12791911",
+      "state": "running"
+    },
+    "reason": "test Linux restart",
+    "request_id": "147fb482-f4f7-482b-aef5-9ad4fe78d578",
+    "requested_at": "2026-11-27T04:01:45.605613+00:00",
+    "service": "router",
+    "settled_at": "2026-11-27T04:01:45.822177+00:00",
+    "state": "process_replaced"
+  },
+  "recovered_uncertain_restart": {
+    "actor": "host-maintainer/router",
+    "before": {
+      "generation": "99eeda1f9cc12d504905ab09c7796f4a1fa4de97190ed98e836962631a0272f6",
+      "label": "mowulink-maintenance-router-d6eb71ef-8b76-41d7-b194-5ea6e4b4021c.service",
+      "pid": 818679,
+      "service": "router",
+      "started": "a4d8707f-d019-4732-b967-513928d1edb8:12791951",
+      "state": "running"
+    },
+    "failure": "maintenance_process_interrupted",
+    "reason": "test Linux restart",
+    "reconciliation": {
+      "after": {
+        "generation": "7af1a981dfc8432fca0e9c38ddf9cbcd48aa8371a348828c2f55596fc1820c08",
+        "label": "mowulink-maintenance-router-d6eb71ef-8b76-41d7-b194-5ea6e4b4021c.service",
+        "pid": 818718,
+        "service": "router",
+        "started": "a4d8707f-d019-4732-b967-513928d1edb8:12792025",
+        "state": "running"
+      },
+      "observed_at": "2026-11-27T04:01:46.575673+00:00",
+      "state": "replacement_observed"
+    },
+    "request_id": "fb5fab08-53aa-421a-9603-30b011ea9428",
+    "requested_at": "2026-11-27T04:01:46.302387+00:00",
+    "service": "router",
+    "settled_at": "2026-11-27T04:01:46.370052+00:00",
+    "state": "unconfirmed"
+  },
+  "stopped_unit_receipt": {
+    "actor": "host-maintainer/stopped",
+    "after": {
+      "generation": "b8a8786bf887e6b411faa844e7c34052c8448deaf5a5d89165c51f19fc41e778",
+      "label": "mowulink-maintenance-stopped-c8e9b321-abf4-4b42-9fcd-5544cbf6e4a2.service",
+      "pid": 818701,
+      "service": "stopped",
+      "started": "a4d8707f-d019-4732-b967-513928d1edb8:12791966",
+      "state": "running"
+    },
+    "before": {
+      "generation": "20ca69a0e41c8bd23237562ca208dff6366fa23ab5a8244e413791da450b51a0",
+      "label": "mowulink-maintenance-stopped-c8e9b321-abf4-4b42-9fcd-5544cbf6e4a2.service",
+      "pid": null,
+      "service": "stopped",
+      "started": null,
+      "state": "stopped"
+    },
+    "reason": "test Linux restart",
+    "request_id": "2934124c-fa46-4182-b2a4-62e7a9151017",
+    "requested_at": "2026-11-27T04:01:45.943387+00:00",
+    "service": "stopped",
+    "settled_at": "2026-11-27T04:01:45.964624+00:00",
+    "state": "process_started"
+  },
+  "same_receipt_after_daemon_restart": true,
+  "other_unit_pid_unchanged": 818641,
+  "policy": [
+    "wrong file digest and argv rejected",
+    "unit dependencies rejected",
+    "observer cannot restart",
+    "stale generation rejected",
+    "fresh key refused while outcome unknown"
+  ],
+  "router_runs": 3,
+  "router_task_count": 1,
+  "scope": "Actual user systemd and loopback HTTPS on an isolated Linux guest."
+}

@@ -389,6 +389,31 @@ MOWULINK_HERMES_TEST_PYTHON="$ISOLATED_PYTHON" MOWULINK_HERMES_TEST_SOURCE="$HER
   python3 -B -m unittest -v rewrite.test_host_ops
 ```
 
+### Linux 用户级维护入口
+
+Linux 运行同一个 `rewrite.service host-ops`，维护身份、TLS、重启请求号和待核对账与 macOS 相同。使用本机非 root 用户的 systemd 用户管理器。每个服务用已核验的单位文件绝对路径、文件 SHA-256 及完整启动参数登记：
+
+```json
+{
+  "router": {
+    "unit": "mowulink-router.service",
+    "file": "/home/worker/.config/systemd/user/mowulink-router.service",
+    "argv": ["/usr/bin/python3", "-B", "-m", "rewrite.service", "router", "..."],
+    "sha256": "<审批过的单位文件 SHA-256>"
+  }
+}
+```
+
+`argv` 按 systemd 载入的参数逐项填，示例中的省略号换成实际参数。使用 `Type=exec`、`KillMode=control-group` 和一条直接的 `ExecStart`。登记前已由工位正常的用户级安装流程加载该单位。维护端校验有效文件、摘要及原生启动参数。配置待重载、有 drop-in、控制脚本或会连带操作其他业务单位时，状态保留待核。收到实际换代回执后，按业务接口确认 Router 就绪和原任务状态。生产仍按原授权窗口切换。
+
+在没有其他用户级服务和在途操作的专用 Linux 测试会话复跑：
+
+```sh
+MOWULINK_TEST_USER_SYSTEMD=1 python3 -B -m unittest -v rewrite.test_host_ops_systemd
+```
+
+测试使用真实 systemd 用户管理器、独立 HTTPS、临时数据库及各自的 TLS 身份。按原请求号重放后仍能查到唯一一张隔离待派单。样例只使用自己的临时单位，完成后清理。[Linux 实测](evidence/linux-systemd-host-ops.json) · [systemd 原生接口](https://freedesktop.org/software/systemd/man/devel/org.freedesktop.systemd1.html)
+
 ### 跨系统验收
 
 开发机需 Python 3.12 或更新版本、Git、OpenSSL 和已运行的本地 Linux Docker 引擎。先准备含 Python 3.12+、Git、tar、OpenSSL 的 Linux 测试镜像。此次实测使用官方 `python:3.13-bookworm` 的 Linux arm64 manifest `sha256:0a1254df0519003d33fd4ab8ad26aff1154e50b3c93aa5ec978e83bf83ba084c`。各引擎对已安装镜像的 ID 表示可能不同，`--image` 使用本机 `docker image inspect --format '{{.Id}}' <镜像>` 的完整结果。

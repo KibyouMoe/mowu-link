@@ -66,6 +66,8 @@
 
 同一安装包的 Hermes 原生专项另复验 `a2de7418a3405307f8b3abce01a66d5d71351edc`。Python 3.12 测试环境启动缺 `ruamel.yaml` 和 `python-dotenv`，新旧 MowuLink 都在维护动作前遇到此阻点。使用 Python 3.14 和 Hermes 冻结依赖重跑后，通过网关健康、实际 PID 换代、原回执查回与权限反例。原生 PID 从 28160 变为 28751，原 PID 退出。单独临时 profile 只启用本机 API，两次总体就绪状态均为 `degraded`。[现版网关证据](evidence/hermes-gateway-maintenance-a2de7418.json)
 
+Linux 用户级 systemd 已接入独立 HTTPS 维护。登记核对单位文件摘要、实际加载的参数和原生进程，拒绝错摘要、错参数、业务单位依赖联动及非维护身份。实际隔离用户管理器实跑重启时丢 HTTPS 响应、按原号查回、已登记停机项启动及待核对账。Router 保留一张原任务，原建单键重试仍只一张单。另一独立单位 PID 未变。维护服务再次重开后仍可查回原回执。只使用测试用户的单位和临时数据。复跑 `MOWULINK_TEST_USER_SYSTEMD=1 python3 -B -m unittest -v rewrite.test_host_ops_systemd`。[Linux 原生实测](evidence/linux-systemd-host-ops.json)
+
 重新取消的 W04 已按具体指令核验。相同 A06 操作键重送保留原回执，自动重试沿用同一清理号。同一派发的下一条显式取消携带新的 `cleanup_id`。Worker 从原生收件识别该号，分别保存等待、清理及 Router 回执。隔离实测第一次迟报、重用旧键、换新键重播旧正文和错号都返回 409。新 W04 落库后故意丢回包，冷启沿原键查回，取消通知一条。复跑 `python3 -B -m unittest -v rewrite.test_cleanup rewrite.test_cutover -k cancel`。[HTTP 与回退实测](evidence/reissued-cancel-w04.json)
 
 用前版 `2490059e42d379183c19b0e82c208f545a3c78ee` 生成的隔离 Router、Worker 和适配器库做了升级。仅一次待确认的旧取消可以正常完成，已经成功的旧回执可沿原键回读。旧版已重复取消而未记录清理号时，拒绝无号回执，须由管理端发新指令。回退核对新指令及 W04 的同一清理号，缺号拒绝发布。[旧库升级](evidence/reissued-cancel-upgrade.json) · [回退演练](evidence/cutover-reviewed-cancel-retry.json)

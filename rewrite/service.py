@@ -226,7 +226,7 @@ def main():
                                    help="pause new assignment reservations while existing work drains")
         if name=="host-ops":
             component.add_argument("--manifest",required=True,type=Path,
-                                   help="owner-private map from service IDs to exact loaded user LaunchAgents")
+                                   help="owner-private map from service IDs to exact loaded user services")
         if name == "fixture-adapter":
             component.add_argument("--fixture-db",required=True,type=Path)
         if name in ("fixture-adapter","codex-adapter"):

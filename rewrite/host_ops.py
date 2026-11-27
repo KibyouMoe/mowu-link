@@ -1,4 +1,4 @@
-"""Independent maintenance for explicitly registered macOS user LaunchAgents."""
+"""Independent maintenance for explicitly registered user services."""
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import hashlib
@@ -77,7 +77,12 @@ class Job:
 def manifest(config):
     require(isinstance(config,dict) and 1<=len(config)<=16
             and all(isinstance(name,str) and SERVICE.fullmatch(name) for name in config),422,"invalid_host_services")
-    jobs = {name:Job.read(row) for name,row in config.items()}
+    if sys.platform=="linux":
+        from .host_ops_systemd import SystemdJob
+        read = SystemdJob.read
+    else:
+        read = Job.read
+    jobs = {name:read(row) for name,row in config.items()}
     require(len({job.label for job in jobs.values()})==len(jobs),422,"duplicate_host_service_label")
     return jobs
 
@@ -88,7 +93,8 @@ def roles_allowed(identities,jobs):
 
 
 def private_state(path):
-    require(sys.platform=="darwin" and os.getuid()!=0,422,"user_launchd_required")
+    platform_error = "user_systemd_required" if sys.platform=="linux" else "user_launchd_required"
+    require(sys.platform in ("darwin","linux") and os.getuid()!=0,422,platform_error)
     info = path.parent.stat()
     require(info.st_uid==os.getuid() and not info.st_mode&0o077 and not path.is_symlink(),
             422,"private_host_ops_state_required")
@@ -303,7 +309,11 @@ class HostOps:
 
 def listen(path,jobs,identities,address,tls,stack):
     require(tls is not None and roles_allowed(identities,jobs),422,"invalid_host_ops_identities")
-    native = Launchd()
+    if sys.platform=="linux":
+        from .host_ops_systemd import Systemd
+        native = Systemd()
+    else:
+        native = Launchd()
     pool = stack.enter_context(ThreadPoolExecutor(max_workers=4))
     ops = HostOps(path,jobs,native,pool)
     return serve_authenticated(identities,address,tls,ops.route)
