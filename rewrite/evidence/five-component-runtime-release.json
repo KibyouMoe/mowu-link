@@ -1,0 +1,348 @@
+{
+  "package": {
+    "files": 417,
+    "revision": "e8d6b18256b50d28c283d817d44195cf969c49a7",
+    "sha256": "6c013b3da3e32ebf047195e11e92ec6a8804c333462fdf10c1d31be0d5ffb805"
+  },
+  "macos": {
+    "router_worker_adapter": {
+      "verification": {
+        "different_expected_digest_rejected": true,
+        "foreign_roles_denied": true,
+        "mismatched_package_cannot_create_state": true,
+        "startup_without_manifest_unverified": true,
+        "verified_startups": {
+          "fixture-adapter_started": {
+            "boot_id": "52db90ff-3d78-4fc0-aafd-0ea653db5365",
+            "component": "fixture-adapter",
+            "release": {
+              "files": 417,
+              "revision": "e8d6b18256b50d28c283d817d44195cf969c49a7",
+              "sha256": "6c013b3da3e32ebf047195e11e92ec6a8804c333462fdf10c1d31be0d5ffb805"
+            },
+            "worker_id": "trial"
+          },
+          "router_drained": {
+            "boot_id": "c8f685a1-fa0a-409e-8c74-fefd408d5cb8",
+            "component": "router",
+            "release": {
+              "files": 417,
+              "revision": "e8d6b18256b50d28c283d817d44195cf969c49a7",
+              "sha256": "6c013b3da3e32ebf047195e11e92ec6a8804c333462fdf10c1d31be0d5ffb805"
+            },
+            "worker_id": null
+          },
+          "router_open": {
+            "boot_id": "a5936d35-9e54-4975-ace9-dae72c48fc28",
+            "component": "router",
+            "release": {
+              "files": 417,
+              "revision": "e8d6b18256b50d28c283d817d44195cf969c49a7",
+              "sha256": "6c013b3da3e32ebf047195e11e92ec6a8804c333462fdf10c1d31be0d5ffb805"
+            },
+            "worker_id": null
+          },
+          "worker_drained": {
+            "boot_id": "0863f5cc-d822-484f-b982-b235fe6e3ca6",
+            "component": "worker",
+            "release": {
+              "files": 417,
+              "revision": "e8d6b18256b50d28c283d817d44195cf969c49a7",
+              "sha256": "6c013b3da3e32ebf047195e11e92ec6a8804c333462fdf10c1d31be0d5ffb805"
+            },
+            "worker_id": "trial"
+          },
+          "worker_open": {
+            "boot_id": "56656798-4b90-4f57-9652-39ee20e091d3",
+            "component": "worker",
+            "release": {
+              "files": 417,
+              "revision": "e8d6b18256b50d28c283d817d44195cf969c49a7",
+              "sha256": "6c013b3da3e32ebf047195e11e92ec6a8804c333462fdf10c1d31be0d5ffb805"
+            },
+            "worker_id": "trial"
+          }
+        }
+      },
+      "original_w04_unchanged": true,
+      "new_fixture_input_after_drain_release": 1
+    },
+    "trigger": {
+      "services": {
+        "game": [
+          {
+            "generation": "0fd4db665650828ee39719148635231ea3de79512b85daacf61795bcb6e0e1bd",
+            "label": "org.mowulink.test.game-d4ae0e65-9069-4d18-9302-93a9a9545c91",
+            "launch_receipt": {
+              "boot_id": "fc82c645-ed0f-4bd3-8a32-94003cf6fd72",
+              "component": "trigger",
+              "instance_id": "5b666639-01ab-460f-9b37-00b7a89d1419",
+              "pid": 92026,
+              "release": {
+                "files": 417,
+                "revision": "e8d6b18256b50d28c283d817d44195cf969c49a7",
+                "sha256": "6c013b3da3e32ebf047195e11e92ec6a8804c333462fdf10c1d31be0d5ffb805"
+              },
+              "trigger_name": "mc_chat",
+              "watch": true
+            },
+            "pid": 92026
+          },
+          {
+            "generation": "1fecc8e49c6bbe2bbb2ccd96074079e085d432eec04edabf1c2aafd841647174",
+            "label": "org.mowulink.test.game-c0f89795-76f8-439d-91f2-37a6bb9ef444",
+            "launch_receipt": {
+              "boot_id": "dba8ac5a-b3fa-4ad4-ba49-b097c9847aa7",
+              "component": "trigger",
+              "instance_id": "5b666639-01ab-460f-9b37-00b7a89d1419",
+              "pid": 92583,
+              "release": {
+                "files": 417,
+                "revision": "e8d6b18256b50d28c283d817d44195cf969c49a7",
+                "sha256": "6c013b3da3e32ebf047195e11e92ec6a8804c333462fdf10c1d31be0d5ffb805"
+              },
+              "trigger_name": "mc_chat",
+              "watch": true
+            },
+            "pid": 92583
+          }
+        ],
+        "mail": [
+          {
+            "generation": "8db48525c1eebb8f8e149559b72d1f07992dceab66fc6870fc876b6e660b85ca",
+            "label": "org.mowulink.test.mail-091f80e7-2162-4092-97ab-27ed755c1e7e",
+            "launch_receipt": {
+              "boot_id": "c06e70a8-d1ed-4c1b-b23c-aacbb823952b",
+              "component": "trigger",
+              "instance_id": "5fd3008f-b1b0-4b3b-b5c4-25c14bd61e2c",
+              "pid": 91983,
+              "release": {
+                "files": 417,
+                "revision": "e8d6b18256b50d28c283d817d44195cf969c49a7",
+                "sha256": "6c013b3da3e32ebf047195e11e92ec6a8804c333462fdf10c1d31be0d5ffb805"
+              },
+              "trigger_name": "email",
+              "watch": true
+            },
+            "pid": 91983
+          },
+          {
+            "generation": "78d8cb508a4c8eb15f7aeb5b7405ae566c44710cad88dbfa93fc7174916636a7",
+            "label": "org.mowulink.test.mail-05ed12bd-78c8-4080-a287-23d16fe7d5a0",
+            "launch_receipt": {
+              "boot_id": "98711cfd-ec58-477f-8188-83e385f4e07c",
+              "component": "trigger",
+              "instance_id": "5fd3008f-b1b0-4b3b-b5c4-25c14bd61e2c",
+              "pid": 92323,
+              "release": {
+                "files": 417,
+                "revision": "e8d6b18256b50d28c283d817d44195cf969c49a7",
+                "sha256": "6c013b3da3e32ebf047195e11e92ec6a8804c333462fdf10c1d31be0d5ffb805"
+              },
+              "trigger_name": "email",
+              "watch": true
+            },
+            "pid": 92323
+          }
+        ]
+      },
+      "after": {
+        "issues": [],
+        "ready": true,
+        "snapshot_id": "946b6f98-9eb9-40a2-bb6e-291d790b43e4",
+        "source_revision": "e8d6b18256b50d28c283d817d44195cf969c49a7",
+        "sources": [
+          {
+            "archived": 2,
+            "component": "trigger:game",
+            "instance_id": "5b666639-01ab-460f-9b37-00b7a89d1419",
+            "settled": 2
+          },
+          {
+            "archived": 2,
+            "component": "trigger:mail",
+            "instance_id": "5fd3008f-b1b0-4b3b-b5c4-25c14bd61e2c",
+            "settled": 2
+          }
+        ]
+      },
+      "bad_release_refused_before_writer_and_source_request": true,
+      "clean_native_exits": 4,
+      "event_notifications": 1,
+      "attachment_id": "5aa7d3c1-13c7-452b-bae4-aa10a77906cf",
+      "attachment_bytes": 251,
+      "mail_next_uid": 13,
+      "game_next_sequence": 16,
+      "boundary": "Real macOS launchd, SQLite snapshot and HTTPS Router; loopback IMAP and game bridge fixtures."
+    },
+    "hermes": {
+      "hermes_source_revision": "a2de7418a3405307f8b3abce01a66d5d71351edc",
+      "native_admission_count": 2,
+      "verified_gateway_processes": {
+        "bootstrap": {
+          "boot_id": "3ab4ce72-bf45-4204-bbe0-0259bc9608c9",
+          "component": "hermes-manager",
+          "native_input_configured": false,
+          "pid": 95104,
+          "release": {
+            "files": 417,
+            "revision": "e8d6b18256b50d28c283d817d44195cf969c49a7",
+            "sha256": "6c013b3da3e32ebf047195e11e92ec6a8804c333462fdf10c1d31be0d5ffb805"
+          }
+        },
+        "native": {
+          "boot_id": "b33ff46f-e296-4865-9f7a-da0c82c091fc",
+          "component": "hermes-manager",
+          "native_input_configured": true,
+          "pid": 95243,
+          "release": {
+            "files": 417,
+            "revision": "e8d6b18256b50d28c283d817d44195cf969c49a7",
+            "sha256": "6c013b3da3e32ebf047195e11e92ec6a8804c333462fdf10c1d31be0d5ffb805"
+          }
+        },
+        "recovered": {
+          "boot_id": "9cd4aa73-eafc-4c96-ac33-1ac950a67390",
+          "component": "hermes-manager",
+          "native_input_configured": true,
+          "pid": 8930,
+          "release": {
+            "files": 417,
+            "revision": "e8d6b18256b50d28c283d817d44195cf969c49a7",
+            "sha256": "6c013b3da3e32ebf047195e11e92ec6a8804c333462fdf10c1d31be0d5ffb805"
+          }
+        },
+        "restored-before-event": {
+          "boot_id": "015a62d1-10bd-46b3-8e8e-4d0bb69ba8b9",
+          "component": "hermes-manager",
+          "native_input_configured": true,
+          "pid": 12562,
+          "release": {
+            "files": 417,
+            "revision": "e8d6b18256b50d28c283d817d44195cf969c49a7",
+            "sha256": "6c013b3da3e32ebf047195e11e92ec6a8804c333462fdf10c1d31be0d5ffb805"
+          }
+        }
+      },
+      "mutated_plugin_copy_refused_before_manager_db": true,
+      "message_ids": {
+        "Info": "2a6ac25c-5d74-4652-9e7d-257f881d1792",
+        "Event": "93c8f658-357e-4835-8db2-15ca7b771d90",
+        "Notify": "3e481807-53e6-4a09-877b-28831e273fce"
+      },
+      "event_native_admission": "b872ca9a958441cc81dde9d6ac07ff41",
+      "notify_native_admission": "4fcf4793a1074b39bef62796ea4dce60",
+      "notify_after_event_release_seconds": 11.48,
+      "info_native_inputs": 0,
+      "native_tool_calls": {
+        "router_info": {
+          "id": 5,
+          "tool_name": "router_info",
+          "tool_call_id": "call_read_trigger_original"
+        },
+        "router_create_task": {
+          "id": 7,
+          "tool_name": "router_create_task",
+          "tool_call_id": "call_create_manager_task"
+        }
+      },
+      "router_task": {
+        "task_id": "b1f7c4ed-7dc0-4dbb-8195-680a30625f29",
+        "state": "ready",
+        "unassigned_task_count_after_restart": 1
+      },
+      "cold_recovery_reused_admission": true,
+      "missing_queue_and_intent_recovered": {
+        "same_admission": "b872ca9a958441cc81dde9d6ac07ff41",
+        "native_admission_count": 2,
+        "extra_model_calls": 0
+      },
+      "original_attachment_sha256": "06219adabc9facac06e434bafb1a82e1f38309c77c6b945ed1eb0d2c213071b7",
+      "boundary": "Real Router, Trigger, Hermes gateway, private LOCAL session, tool execution and ledger. Scripted OpenAI-compatible localhost model. No cloud credentials or Feishu."
+    },
+    "hermes_delivery_during_router_outage": {
+      "router_outage_while_recovering": true,
+      "after_plugin_receipt_loss": "same native admission",
+      "native_gateway_inputs": 2,
+      "event_native_admission": "ad8e18a097c94254ae5ca17a16f40a8e",
+      "blocked_router_requests": 34,
+      "info_native_inputs": 0
+    },
+    "combined_native_gateway_tests": [
+      {
+        "worker_host": "macOS DSH SDK",
+        "result": "passed"
+      },
+      {
+        "worker_host": "bundled Codex App Server",
+        "result": "passed"
+      }
+    ],
+    "regression": {
+      "passed": 318,
+      "environment_skips": 38,
+      "archived_v1_excluded": 58,
+      "failed": 0,
+      "errors": 0
+    }
+  },
+  "linux_arm64": {
+    "regression": {
+      "passed": 211,
+      "environment_skips": 145,
+      "archived_v1_excluded": 58,
+      "failed": 0,
+      "errors": 0
+    },
+    "running_guest_releases": {
+      "router": {
+        "boot_id": "efe2a919-74e9-41b6-af3b-0a73b032f66d",
+        "component": "router",
+        "release": {
+          "files": 417,
+          "revision": "e8d6b18256b50d28c283d817d44195cf969c49a7",
+          "sha256": "6c013b3da3e32ebf047195e11e92ec6a8804c333462fdf10c1d31be0d5ffb805"
+        },
+        "worker_id": null
+      },
+      "fixture-adapter": {
+        "boot_id": "a0f642de-4424-4a1d-8865-aca5bb5b2997",
+        "component": "fixture-adapter",
+        "release": {
+          "files": 417,
+          "revision": "e8d6b18256b50d28c283d817d44195cf969c49a7",
+          "sha256": "6c013b3da3e32ebf047195e11e92ec6a8804c333462fdf10c1d31be0d5ffb805"
+        },
+        "worker_id": "trial"
+      }
+    },
+    "formal_task_state": "completed_reported"
+  },
+  "windows_server_2025": {
+    "run": "https://github.com/KibyouMoe/mowu-link/actions/runs/46007185264",
+    "revision": "e8d6b18256b50d28c283d817d44195cf969c49a7",
+    "verified_files": 417,
+    "archive_sha256": "5e6912e7ec1958533bcb6632a9c34ee65ea20287820f1e193295428b0281db9c",
+    "installation": {
+      "job": 140533194910,
+      "passed": 51,
+      "verified_router_worker_adapter_starts": 5,
+      "new_fixture_input_after_drain_release": 1
+    },
+    "dsh": {
+      "job": 140533194560,
+      "passed": 15,
+      "environment_skips": 2
+    }
+  },
+  "reproduce": {
+    "previous_release": "35ba22f66e3017a1756b8645f3b88d091b3ff6f8",
+    "operator_and_test_steps": "rewrite/router-rehearsal.md#核对已运行的发行包",
+    "clean_install_regression": "python3 -B -m rewrite.release_suite",
+    "combined_native_gateway_tests": [
+      "rewrite.test_hermes_gateway.HermesGateway.test_rewrite_cold_start_hermes_and_dsh_native_tools",
+      "rewrite.test_hermes_gateway.HermesGateway.test_rewrite_cold_start_hermes_and_codex_native_tools"
+    ]
+  },
+  "boundary": "Separate isolated launches from one pinned revision. Real macOS launchd, real Hermes LOCAL gateway and persistence, real DSH SDK and Codex App Server in their combined harnesses, and isolated TLS. Mailbox, game bridge, language models and Feishu use fixtures. The Linux and Windows package proofs verify Router/Worker/adapter as exercised by those harnesses. No real Codex Desktop tools, hosted providers or production cutover."
+}

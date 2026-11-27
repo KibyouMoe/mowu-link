@@ -635,7 +635,7 @@ python3 -B -m rewrite.service runtime-status --connection "$ROUTER_MANAGER_CONNE
 
 Hermes 仍用专用测试 profile 启动。从同一发行包复制 `rewrite/integrations/hermes_manager` 到该 profile 的插件目录。让这次 Hermes 进程从对应安装目录导入 `rewrite`，以 `python3 -B` 或等效设置禁用安装目录中的字节码写入。在插件现有的私有连接文件加 `"release_manifest": "<本机清单绝对路径>"`。插件在登记工具或打开中转库前核对安装包，并逐字校验被加载的插件入口和 YAML。成功后从本次进程输出读取 `component=hermes-manager`、`release`、`boot_id` 和 `pid`。用既有认证健康接口核对该 PID。配置了原生转接的工位应显示 `native_input_configured=true`，另查原生收件与工具调用。Hermes 网关可能在插件注册失败时继续运行。缺该次收据或 PID、版本不符时，保留未验证状态并核对插件启动日志。
 
-两种本机收据均读取本次进程记录。复跑时在独立安装目录指定 `MOWULINK_TEST_RELEASE_MANIFEST` 和 `MOWULINK_TEST_RELEASE_REVISION`。macOS 采集器用例为 `rewrite.test_feeds.Sources.test_launchd_sources_restore_both_writers_from_a_sealed_snapshot`，需设置 `MOWULINK_TEST_USER_LAUNCHD=1`。Hermes 用例为 `rewrite.test_hermes_gateway.HermesGateway.test_trigger_to_real_gateway_and_model_tool_with_cold_receipt_recovery`，使用[指定版本的独立运行环境](README.md#hermes-专用会话)。Hermes `a2de7418` 的 API adapter 需要锁文件中对应的 `aiohttp`，原生收件从网关当前会话的持久化接口读取。
+两种本机收据均读取本次进程记录。复跑时在独立安装目录指定 `MOWULINK_TEST_RELEASE_MANIFEST` 和 `MOWULINK_TEST_RELEASE_REVISION`。macOS 采集器用例为 `rewrite.test_feeds.Sources.test_launchd_sources_restore_both_writers_from_a_sealed_snapshot`，需设置 `MOWULINK_TEST_USER_LAUNCHD=1`。Hermes 用例为 `rewrite.test_hermes_gateway.HermesGateway.test_trigger_to_real_gateway_and_model_tool_with_cold_receipt_recovery`，使用[指定版本的独立运行环境](README.md#hermes-专用会话)。Hermes `a2de7418` 的 API adapter 需要锁文件中对应的 `aiohttp`，原生收件从网关当前会话的持久化接口读取。 [五组件同版启动及回执实测](evidence/five-component-runtime-release.json)
 
 ### 新版 Router 与 Worker 分步更新
 

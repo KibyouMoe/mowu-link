@@ -6,6 +6,12 @@
 
 ## 检查点与证据
 
+候选 `e8d6b18256b50d28c283d817d44195cf969c49a7` 的 417 文件安装包在 macOS 分别启动五组件。Router、Worker 和夹具适配器的 5 份启动记录从 HTTPS 读回。邮件、游戏两种 Trigger 的 4 份启动记录与 launchd 实际 PID 相同。错摘要在开库前拒绝，恢复后 4 条原件与新件均完成 T04，其中事件只派发一次。Hermes 的 4 份插件启动记录与认证健康接口的 PID 相同。修改 profile 内插件副本后，网关仍可运行，插件拒绝登记且没有打开中转库。[证据](evidence/five-component-runtime-release.json) · [复跑](router-rehearsal.md#核对已运行的发行包)
+
+Hermes `a2de7418` 已移走旧的原生收件查询模块。改为读取当前网关持有的会话与收件账本，并保留会话绑定、消息正文摘要及原生来源校验。隔离实测 Event 和 Notify 各有一份原生收件，Notify 在前一回合放行后 11.48 秒发出，Info 留在 Router。冷重开后，中转队列和交接意图两份记录都曾缺失，最终查回同一个 Event 收件号，没有多起原生回合。Router 断线期间的补证也通过。实际 DSH SDK 和 Codex App Server 分别与同版 Hermes 完成正式回报、验收和私聊隔离，模型与飞书为测试替身。
+
+干净安装目录回归 macOS 318 项通过、38 项按环境跳过。Linux arm64 211 项通过、145 项按环境跳过。两边均排除 58 项纯旧版历史验证。Windows Server 2025 安装回归 51 项通过，DSH 原生组 15 项通过、2 项按环境跳过。实际邮箱、游戏来源、云端模型及真实 Feishu 仍待获授权的工位验收。[Windows 流水线](https://github.com/KibyouMoe/mowu-link/actions/runs/46007185264)
+
 候选安装版支持核对实际启动的 Router、Worker 和适配器。带独立发行清单启动时，进程从自身安装目录逐文件校验，只在校验后打开状态库。用已有身份走 HTTPS 读取组件、工位、发行提交、摘要和本次启动号。恢复演练从本机就绪回执和远端读到一致标识，Router 与 Worker 重开后换新启动号。包被改或摘要错时拒绝启动，未带清单则远端返回未验证，其他角色无法读取凭据。Mac 实际查到 Linux 来宾 Router 与适配器的启动版本，另从候选包启动 DSH 适配器并确认隔离真实 DSH 会话空闲。[复跑与用法](router-rehearsal.md#核对已运行的发行包) · [证据](evidence/verified-runtime-release.json)
 
 候选 `c8eaf73f2d8431da05c9ffd0f1c8f10cfbf54418` 含 416 个文件。macOS 通过 77 项相关回归，Linux arm64 安装组通过 211 项，Windows 安装组通过 51 项。macOS 和 Windows 各回读 5 次启动凭据，核原号解封只新增一份宿主夹具输入，退版读回一份 W04。本轮没有实际 Codex Desktop 或飞书工位参与。[Windows 流水线](https://github.com/KibyouMoe/mowu-link/actions/runs/46003894093)
